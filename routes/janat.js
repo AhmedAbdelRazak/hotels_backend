@@ -15,6 +15,7 @@ const {
 	createNewReservationClient,
 	getUserAndReservationData,
 	getHotelDetailsById,
+	getHotelDistancesFromElHaram,
 } = require("../controllers/janat");
 
 router.post("/janat-website/:documentId", createUpdateDocument);
@@ -27,6 +28,7 @@ router.get("/room-query-list/:query", gettingRoomListFromQuery);
 router.post("/new-reservation-client", createNewReservationClient);
 router.get("/user/reservations/:userId", getUserAndReservationData);
 router.get("/user/hotel/:hotelId", getHotelDetailsById);
+router.put("/getting-distances", getHotelDistancesFromElHaram);
 
 router.param("userId", userById);
 

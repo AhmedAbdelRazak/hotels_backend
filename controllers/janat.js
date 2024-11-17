@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Reservations = require("../models/reservations"); // Assuming this is your reservations model
 const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
+const axios = require("axios");
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
@@ -182,7 +183,31 @@ exports.getListOfHotels = async (req, res) => {
 			});
 		}
 
-		res.status(200).json(hotels);
+		// Enhanced function to parse time strings and convert them to total minutes
+		const parseTimeToMinutes = (timeStr) => {
+			if (!timeStr || typeof timeStr !== "string") return Infinity;
+
+			let totalMinutes = 0;
+			const dayMatch = timeStr.match(/(\d+)\s*day[s]?/i);
+			const hourMatch = timeStr.match(/(\d+)\s*hour[s]?/i);
+			const minMatch = timeStr.match(/(\d+)\s*min[s]?/i);
+
+			if (dayMatch) totalMinutes += parseInt(dayMatch[1], 10) * 1440; // 1 day = 1440 minutes
+			if (hourMatch) totalMinutes += parseInt(hourMatch[1], 10) * 60; // 1 hour = 60 minutes
+			if (minMatch) totalMinutes += parseInt(minMatch[1], 10); // minutes
+
+			return totalMinutes;
+		};
+
+		// Sort hotels by walkingToElHaram distance (convert to numeric value)
+		const sortedHotels = hotels.sort((a, b) => {
+			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
+			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
+
+			return aWalkingTime - bWalkingTime;
+		});
+
+		res.status(200).json(sortedHotels);
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
@@ -196,7 +221,6 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		const { query } = req.params;
 
 		// Extract parameters from the query string
-		// Assuming the query format is: startDate_endDate_roomType_adults_children_destination
 		const [startDate, endDate, roomType, adults, children, destination] =
 			query.split("_");
 
@@ -207,48 +231,42 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 			});
 		}
 
-		// Standardize certain destination names to handle variations
+		// Standardize destination names to handle variations
 		const standardizedDestination = destination
 			? destination.toLowerCase().replace(/madina[h]?/i, "madina")
 			: null;
 
-		// Define base hotel query to fetch only hotels that:
-		// 1. Have hotelPhotos and is not empty.
-		// 2. Are active (activateHotel is true).
-		// 3. Have valid location coordinates (not [0, 0]).
+		// Define base hotel query
 		let hotelQuery = {
 			activateHotel: true,
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		};
 
-		// If destination is provided, add a case-insensitive, partial match on hotelState
+		// Add destination filter if provided
 		if (standardizedDestination) {
 			hotelQuery.hotelState = {
 				$regex: new RegExp(standardizedDestination, "i"),
 			};
 		}
 
-		// If roomType is "all", don't filter by room type
+		// Add room type filter if not "all"
 		if (roomType !== "all") {
-			// Add roomType filtering to the query
 			hotelQuery["roomCountDetails.roomType"] = roomType;
 		}
 
 		// Fetch hotels matching the base query
 		let hotels = await HotelDetails.find(hotelQuery);
 
-		// Filter out only the relevant room types in roomCountDetails
+		// Filter out relevant room types in roomCountDetails
 		const filteredHotels = hotels.map((hotel) => {
 			let filteredRoomCountDetails;
 
 			if (roomType === "all") {
-				// For "all", return all rooms that have photos and a base price greater than 0
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
 					(room) => room.photos.length > 0 && room.price.basePrice > 0
 				);
 			} else {
-				// Otherwise, filter by the specific room type
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
 					(room) =>
 						room.roomType === roomType &&
@@ -275,8 +293,32 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 			});
 		}
 
-		// Send the filtered hotels as the response
-		res.status(200).json(result);
+		// Enhanced function to parse time strings and convert them to total minutes
+		const parseTimeToMinutes = (timeStr) => {
+			if (!timeStr || typeof timeStr !== "string") return Infinity;
+
+			let totalMinutes = 0;
+			const dayMatch = timeStr.match(/(\d+)\s*day[s]?/i);
+			const hourMatch = timeStr.match(/(\d+)\s*hour[s]?/i);
+			const minMatch = timeStr.match(/(\d+)\s*min[s]?/i);
+
+			if (dayMatch) totalMinutes += parseInt(dayMatch[1], 10) * 1440; // 1 day = 1440 minutes
+			if (hourMatch) totalMinutes += parseInt(hourMatch[1], 10) * 60; // 1 hour = 60 minutes
+			if (minMatch) totalMinutes += parseInt(minMatch[1], 10); // minutes
+
+			return totalMinutes;
+		};
+
+		// Sort hotels by walkingToElHaram distance (convert to numeric value)
+		const sortedHotels = result.sort((a, b) => {
+			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
+			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
+
+			return aWalkingTime - bWalkingTime;
+		});
+
+		// Send the sorted hotels as the response
+		res.status(200).json(sortedHotels);
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
@@ -597,5 +639,71 @@ exports.getHotelDetailsById = async (req, res) => {
 		res.status(500).json({
 			error: "An error occurred while fetching the hotel details",
 		});
+	}
+};
+
+exports.getHotelDistancesFromElHaram = async (req, res) => {
+	try {
+		const elHaramCoordinates = [39.8262, 21.4225]; // Coordinates for Al-Masjid al-Haram (longitude, latitude)
+
+		// Find all hotels with coordinates not set to [0, 0] and distances needing an update
+		const hotels = await HotelDetails.find({
+			"location.coordinates": { $ne: [0, 0] },
+			$or: [
+				{ distances: { $exists: false } }, // Check if distances object does not exist
+				{ "distances.walkingToElHaram": 0 },
+				{ "distances.drivingToElHaram": 0 },
+			],
+		});
+
+		if (hotels.length === 0) {
+			return res
+				.status(200)
+				.json({ message: "No hotels require distance updates" });
+		}
+
+		// Iterate over each hotel and calculate distances
+		for (let hotel of hotels) {
+			const [hotelLongitude, hotelLatitude] = hotel.location.coordinates;
+
+			const apiKey = process.env.GOOGLE_MAPS_API_KEY; // Ensure your API key is set in environment variables
+
+			// Make separate API calls for walking and driving
+			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=walking&key=${apiKey}`;
+			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=driving&key=${apiKey}`;
+
+			const walkingResponse = await axios.get(walkingUrl);
+			const drivingResponse = await axios.get(drivingUrl);
+
+			const walkingData = walkingResponse.data;
+			const drivingData = drivingResponse.data;
+
+			// Check if the responses are structured correctly
+			const walkingElement = walkingData.rows?.[0]?.elements?.[0];
+			const drivingElement = drivingData.rows?.[0]?.elements?.[0];
+
+			if (walkingElement && walkingElement.status === "OK") {
+				hotel.distances.walkingToElHaram = walkingElement.duration.text;
+			} else {
+				hotel.distances.walkingToElHaram = "N/A";
+			}
+
+			if (drivingElement && drivingElement.status === "OK") {
+				hotel.distances.drivingToElHaram = drivingElement.duration.text;
+			} else {
+				hotel.distances.drivingToElHaram = "N/A";
+			}
+
+			await hotel.save();
+		}
+
+		res.status(200).json({
+			message: "Distances updated successfully for applicable hotels",
+		});
+	} catch (error) {
+		console.error("Error updating hotel distances:", error);
+		res
+			.status(500)
+			.json({ error: "An error occurred while updating hotel distances" });
 	}
 };

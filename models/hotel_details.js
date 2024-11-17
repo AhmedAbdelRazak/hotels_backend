@@ -68,6 +68,15 @@ const hotel_detailsSchema = new mongoose.Schema(
 		overallRoomsCount: {
 			type: Number,
 		},
+		distances: {
+			type: Object,
+			trim: true,
+			lowercase: true,
+			default: {
+				walkingToElHaram: 0, //In Minutes
+				drivingToElHaram: 0, //In Minutes
+			},
+		},
 		roomCountDetails: {
 			type: [
 				{
