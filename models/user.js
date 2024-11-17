@@ -104,6 +104,13 @@ const userSchema = new mongoose.Schema(
 			default: "",
 		},
 
+		confirmationNumbersBooked: {
+			type: Array,
+			lowercase: true,
+			trim: true,
+			default: [],
+		},
+
 		subscribed: {
 			type: Boolean,
 			default: false,

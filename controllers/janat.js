@@ -3,6 +3,7 @@ const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
 const Reservations = require("../models/reservations"); // Assuming this is your reservations model
 const crypto = require("crypto"); // For hashing or encrypting card details
+const User = require("../models/user");
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
@@ -309,8 +310,10 @@ function ensureUniqueNumber(model, fieldName, callback) {
 
 exports.createNewReservationClient = async (req, res) => {
 	try {
-		const { hotelId, customerDetails, paymentDetails, belongsTo } = req.body;
+		const { hotelId, customerDetails, paymentDetails, belongsTo, userId } =
+			req.body;
 		console.log(req.body, "req.bodyreq.bodyreq.body");
+
 		// Validate hotelId
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
@@ -319,7 +322,6 @@ exports.createNewReservationClient = async (req, res) => {
 			"location.coordinates": { $ne: [0, 0] },
 		});
 
-		// Check if hotel exists and is active
 		if (!hotel) {
 			return res.status(400).json({
 				message:
@@ -338,21 +340,20 @@ exports.createNewReservationClient = async (req, res) => {
 			!passportExpiry ||
 			!nationality
 		) {
-			return res.status(400).json({
-				message: "Invalid customer details provided.",
-			});
+			return res
+				.status(400)
+				.json({ message: "Invalid customer details provided." });
 		}
 
 		// Validate and hash/encrypt card details
 		const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 			paymentDetails;
 		if (!cardNumber || !cardExpiryDate || !cardCVV || !cardHolderName) {
-			return res.status(400).json({
-				message: "Invalid payment details provided.",
-			});
+			return res
+				.status(400)
+				.json({ message: "Invalid payment details provided." });
 		}
 
-		// Hash the card details (you can choose to encrypt them instead)
 		const hashCardNumber = crypto
 			.createHash("sha256")
 			.update(cardNumber)
@@ -383,35 +384,69 @@ exports.createNewReservationClient = async (req, res) => {
 					}
 					req.body.confirmation_number = uniqueNumber;
 
-					// Call function to save the reservation
-					await saveReservation(
-						req,
-						res,
-						hotelId,
-						customerDetails,
-						paymentDetails,
-						belongsTo
-					);
+					// Call function to handle user creation/update and save the reservation
+					await handleUserAndReservation(req, res, uniqueNumber);
 				}
 			);
 		} else {
-			// If confirmation_number is provided, just save the reservation
-			await saveReservation(
-				req,
-				res,
-				hotelId,
-				customerDetails,
-				paymentDetails,
-				belongsTo
-			);
+			// If confirmation_number is provided, handle user creation/update and save the reservation
+			await handleUserAndReservation(req, res, req.body.confirmation_number);
 		}
 	} catch (error) {
 		console.error("Error creating reservation:", error);
-		res.status(500).json({
-			message: "An error occurred while creating the reservation",
-		});
+		res
+			.status(500)
+			.json({ message: "An error occurred while creating the reservation" });
 	}
 };
+
+// Helper function to handle user creation or updating
+async function handleUserAndReservation(req, res, confirmationNumber) {
+	const { customerDetails } = req.body;
+
+	try {
+		// Check if the user already exists
+		let user = await User.findOne({ email: customerDetails.email });
+		if (!user && req.body.userId) {
+			user = await User.findById(req.body.userId);
+		}
+
+		if (!user) {
+			// Create a new user
+			user = new User({
+				name: customerDetails.name,
+				email: customerDetails.email,
+				phone: customerDetails.phone,
+				password: customerDetails.password, // Ensure this is hashed in the User schema
+			});
+
+			// Save the new user
+			await user.save();
+			console.log("New user created:", user);
+		}
+
+		// Update the user's confirmationNumbersBooked field
+		user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+		user.confirmationNumbersBooked.push(confirmationNumber);
+		await user.save();
+		console.log("User updated with new confirmation number:", user);
+
+		// Save the reservation to the database
+		await saveReservation(
+			req,
+			res,
+			req.body.hotelId,
+			customerDetails,
+			req.body.paymentDetails,
+			req.body.belongsTo
+		);
+	} catch (error) {
+		console.error("Error handling user creation/update:", error);
+		res.status(500).json({
+			message: "An error occurred while handling user creation/update",
+		});
+	}
+}
 
 // Helper function to save the reservation
 async function saveReservation(
@@ -473,3 +508,94 @@ async function saveReservation(
 		});
 	}
 }
+
+exports.getUserAndReservationData = async (req, res) => {
+	try {
+		const userId = req.params.userId;
+
+		// Fetch user data
+		const user = await User.findById(userId);
+
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Fetch reservations using confirmationNumbersBooked in user data
+		const reservations = await Reservations.find({
+			confirmation_number: { $in: user.confirmationNumbersBooked },
+		}).populate("hotelId"); // Ensure hotelId is populated for reference
+
+		// Loop through reservations to add images to pickedRoomsType
+		for (let reservation of reservations) {
+			if (reservation.hotelId) {
+				// Fetch hotel details
+				const hotelDetails = await HotelDetails.findById(reservation.hotelId);
+
+				if (hotelDetails) {
+					// Add images to pickedRoomsType
+					reservation.pickedRoomsType = reservation.pickedRoomsType.map(
+						(room) => {
+							const matchingRoom = hotelDetails.roomCountDetails.find(
+								(detail) =>
+									detail.displayName === room.displayName &&
+									detail.roomType === room.room_type
+							);
+
+							if (matchingRoom && matchingRoom.photos.length > 0) {
+								room.image = matchingRoom.photos[0].url; // Assign the first image URL
+							} else {
+								room.image = "/default-room.jpg"; // Fallback image
+							}
+
+							return room;
+						}
+					);
+				}
+			}
+		}
+
+		res.json({
+			user: {
+				_id: user._id,
+				name: user.name,
+				email: user.email,
+			},
+			reservations,
+		});
+	} catch (error) {
+		console.error("Error fetching user and reservation data:", error);
+		res.status(500).json({ error: "An error occurred while fetching data" });
+	}
+};
+
+exports.getHotelDetailsById = async (req, res) => {
+	try {
+		// Extract hotelId from request parameters
+		const { hotelId } = req.params;
+
+		// Validate the hotelId
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({
+				error: "Invalid hotel ID provided",
+			});
+		}
+
+		// Fetch the hotel details from the database
+		const hotel = await HotelDetails.findById(hotelId);
+
+		// Check if hotel exists
+		if (!hotel) {
+			return res.status(404).json({
+				message: "Hotel not found",
+			});
+		}
+
+		// Return hotel details as the response
+		res.status(200).json(hotel);
+	} catch (error) {
+		console.error("Error fetching hotel details:", error);
+		res.status(500).json({
+			error: "An error occurred while fetching the hotel details",
+		});
+	}
+};

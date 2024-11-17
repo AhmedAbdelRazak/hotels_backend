@@ -7,7 +7,7 @@ exports.userById = (req, res, next, id) => {
 	console.log(id, "id");
 	User.findById(id)
 		.select(
-			"_id name email role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
+			"_id name email phone role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
 		)
 		// .populate(
 		// 	"likesUser",
@@ -28,7 +28,7 @@ exports.userById = (req, res, next, id) => {
 exports.updatedUserId = (req, res, next, id) => {
 	User.findById(id)
 		.select(
-			"_id name email role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
+			"_id name email phone role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
 		)
 
 		.exec((err, userNeedsUpdate) => {
