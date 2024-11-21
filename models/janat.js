@@ -79,6 +79,16 @@ const janatSchema = new mongoose.Schema(
 			trim: true,
 		},
 
+		termsAndConditionEnglish_B2B: {
+			type: String,
+			trim: true,
+		},
+
+		termsAndConditionArabic_B2B: {
+			type: String,
+			trim: true,
+		},
+
 		aboutUsEnglish: {
 			type: String,
 			trim: true,
