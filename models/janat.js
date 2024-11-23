@@ -99,6 +99,16 @@ const janatSchema = new mongoose.Schema(
 			trim: true,
 		},
 
+		privacyPolicy: {
+			type: String,
+			trim: true,
+		},
+
+		privacyPolicyArabic: {
+			type: String,
+			trim: true,
+		},
+
 		middleSectionEnglish: {
 			type: String,
 			trim: true,
