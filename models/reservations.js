@@ -241,6 +241,11 @@ const reservationsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+
+		guestAgreedOnTermsAndConditions: {
+			type: Boolean,
+			default: false,
+		},
 	},
 	{ timestamps: true }
 );
