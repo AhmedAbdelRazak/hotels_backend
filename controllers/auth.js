@@ -135,6 +135,7 @@ exports.propertySignup = async (req, res) => {
 			propertyType,
 			hotelFloors,
 			existingUser,
+			acceptedTermsAndConditions,
 		} = req.body;
 
 		console.log("Received request body:", req.body);
@@ -208,6 +209,7 @@ exports.propertySignup = async (req, res) => {
 				hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
 				phone: cleanedPhone,
 				belongsTo: user._id,
+				acceptedTermsAndConditions,
 			});
 			await hotelDetails.save();
 
@@ -284,6 +286,7 @@ exports.propertySignup = async (req, res) => {
 			hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
 			phone: cleanedPhone,
 			belongsTo: user._id,
+			acceptedTermsAndConditions,
 		});
 		await hotelDetails.save();
 

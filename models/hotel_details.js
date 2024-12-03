@@ -121,6 +121,10 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		acceptedTermsAndConditions: {
+			type: Boolean,
+			default: false,
+		},
 		subscriptionToken: {
 			type: String,
 			default: "unavailable",
