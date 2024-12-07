@@ -534,6 +534,10 @@ async function saveReservation(
 		booking_source: req.body.booking_source,
 		pickedRoomsType: req.body.pickedRoomsType, // Ensure rooms are correctly saved
 		payment: req.body.payment, // Ensure payment status is saved
+		paid_amount: Number(req.body.paid_amount).toFixed(2),
+		commission: Number(req.body.commission).toFixed(2),
+		commissionPaid: req.body.commissionPaid,
+		guestAgreedOnTermsAndConditions: req.body.guestAgreedOnTermsAndConditions,
 	});
 
 	// Save the reservation to the database

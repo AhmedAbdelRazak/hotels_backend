@@ -193,6 +193,11 @@ const reservationsSchema = new mongoose.Schema(
 			default: 0,
 		},
 
+		commissionPaid: {
+			type: Boolean,
+			default: false,
+		},
+
 		payments: {
 			type: Object,
 			trim: true,

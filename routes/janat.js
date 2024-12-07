@@ -17,6 +17,7 @@ const {
 	getHotelDetailsById,
 	getHotelDistancesFromElHaram,
 } = require("../controllers/janat");
+const { createPayment } = require("../controllers/authorizenet");
 
 router.post("/janat-website/:documentId", createUpdateDocument);
 router.get("/janat-website-document", list);
@@ -29,6 +30,7 @@ router.post("/new-reservation-client", createNewReservationClient);
 router.get("/user/reservations/:userId", getUserAndReservationData);
 router.get("/user/hotel/:hotelId", getHotelDetailsById);
 router.put("/getting-distances", getHotelDistancesFromElHaram);
+router.post("/create-payment", createPayment);
 
 router.param("userId", userById);
 

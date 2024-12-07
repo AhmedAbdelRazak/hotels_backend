@@ -17,6 +17,7 @@
 		"@sendgrid/mail": "^7.6.0",
 		"@stripe/stripe-js": "^3.1.0",
 		"api": "^5.0.5",
+		"authorizenet": "^1.0.9",
 		"braintree": "^3.8.0",
 		"cloudinary": "^1.27.1",
 		"compression": "^1.7.4",
