@@ -16,6 +16,7 @@ const {
 	getUserAndReservationData,
 	getHotelDetailsById,
 	getHotelDistancesFromElHaram,
+	gettingCurrencyConversion,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -31,6 +32,7 @@ router.get("/user/reservations/:userId", getUserAndReservationData);
 router.get("/user/hotel/:hotelId", getHotelDetailsById);
 router.put("/getting-distances", getHotelDistancesFromElHaram);
 router.post("/create-payment", createPayment);
+router.get("/currencyapi-amounts/:saudimoney", gettingCurrencyConversion);
 
 router.param("userId", userById);
 

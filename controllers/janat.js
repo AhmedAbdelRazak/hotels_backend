@@ -5,6 +5,7 @@ const Reservations = require("../models/reservations"); // Assuming this is your
 const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
 const axios = require("axios");
+require("dotenv").config();
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
@@ -328,6 +329,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 };
 
 // Helper functions for generating and ensuring unique confirmation_number
+// Helper functions for generating and ensuring unique confirmation_number
 function generateRandomNumber() {
 	let randomNumber = Math.floor(1000000000 + Math.random() * 9000000000); // Generates a 10-digit number
 	return randomNumber.toString();
@@ -352,9 +354,14 @@ function ensureUniqueNumber(model, fieldName, callback) {
 
 exports.createNewReservationClient = async (req, res) => {
 	try {
-		const { hotelId, customerDetails, paymentDetails, belongsTo, userId } =
-			req.body;
-		console.log(req.body, "req.bodyreq.bodyreq.body");
+		const {
+			hotelId,
+			customerDetails,
+			paymentDetails,
+			belongsTo,
+			userId,
+			convertedAmounts,
+		} = req.body;
 
 		// Validate hotelId
 		const hotel = await HotelDetails.findOne({
@@ -396,22 +403,30 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid payment details provided." });
 		}
 
-		const hashCardNumber = crypto
-			.createHash("sha256")
-			.update(cardNumber)
-			.digest("hex");
-		const hashCardExpiryDate = crypto
-			.createHash("sha256")
-			.update(cardExpiryDate)
-			.digest("hex");
-		const hashCardCVV = crypto
-			.createHash("sha256")
-			.update(cardCVV)
-			.digest("hex");
-		const hashCardHolderName = crypto
-			.createHash("sha256")
-			.update(cardHolderName)
-			.digest("hex");
+		// Determine the amount in USD to process based on payment type
+		const amountInUSD =
+			req.body.payment === "Deposit Paid"
+				? convertedAmounts.depositUSD
+				: convertedAmounts.totalUSD;
+
+		// Process payment before creating a reservation
+		const paymentResponse = await processPayment({
+			amount: amountInUSD,
+			cardNumber,
+			expirationDate: cardExpiryDate,
+			cardCode: cardCVV,
+			customerDetails,
+			checkinDate: req.body.checkin_date,
+			checkoutDate: req.body.checkout_date,
+			hotelName: hotel.hotelName,
+		});
+
+		if (!paymentResponse.success) {
+			console.log("Payment failed:", paymentResponse.message);
+			return res.status(400).json({
+				message: paymentResponse.message || "Payment processing failed.",
+			});
+		}
 
 		// Generate a unique confirmation_number if not already provided
 		if (!req.body.confirmation_number) {
@@ -427,12 +442,24 @@ exports.createNewReservationClient = async (req, res) => {
 					req.body.confirmation_number = uniqueNumber;
 
 					// Call function to handle user creation/update and save the reservation
-					await handleUserAndReservation(req, res, uniqueNumber);
+					await handleUserAndReservation(
+						req,
+						res,
+						uniqueNumber,
+						paymentResponse.response,
+						convertedAmounts
+					);
 				}
 			);
 		} else {
 			// If confirmation_number is provided, handle user creation/update and save the reservation
-			await handleUserAndReservation(req, res, req.body.confirmation_number);
+			await handleUserAndReservation(
+				req,
+				res,
+				req.body.confirmation_number,
+				paymentResponse.response,
+				convertedAmounts
+			);
 		}
 	} catch (error) {
 		console.error("Error creating reservation:", error);
@@ -443,7 +470,13 @@ exports.createNewReservationClient = async (req, res) => {
 };
 
 // Helper function to handle user creation or updating
-async function handleUserAndReservation(req, res, confirmationNumber) {
+async function handleUserAndReservation(
+	req,
+	res,
+	confirmationNumber,
+	paymentResponse,
+	convertedAmounts
+) {
 	const { customerDetails } = req.body;
 
 	try {
@@ -480,7 +513,9 @@ async function handleUserAndReservation(req, res, confirmationNumber) {
 			req.body.hotelId,
 			customerDetails,
 			req.body.paymentDetails,
-			req.body.belongsTo
+			req.body.belongsTo,
+			paymentResponse,
+			convertedAmounts
 		);
 	} catch (error) {
 		console.error("Error handling user creation/update:", error);
@@ -497,8 +532,19 @@ async function saveReservation(
 	hotelId,
 	customerDetails,
 	paymentDetails,
-	belongsTo
+	belongsTo,
+	paymentResponse,
+	convertedAmounts
 ) {
+	const enrichedPaymentDetails = {
+		...paymentResponse,
+		amountInSAR: req.body.paid_amount,
+		amountInUSD:
+			req.body.payment === "Deposit Paid"
+				? convertedAmounts.depositUSD
+				: convertedAmounts.totalUSD,
+	};
+
 	// Create the new reservation
 	const newReservation = new Reservations({
 		hotelId,
@@ -522,7 +568,7 @@ async function saveReservation(
 				.digest("hex"),
 		},
 		confirmation_number: req.body.confirmation_number,
-		belongsTo, // Ensure this is correctly populated
+		belongsTo,
 		checkin_date: req.body.checkin_date,
 		checkout_date: req.body.checkout_date,
 		days_of_residence: req.body.days_of_residence,
@@ -532,15 +578,15 @@ async function saveReservation(
 		children: req.body.children,
 		total_amount: req.body.total_amount,
 		booking_source: req.body.booking_source,
-		pickedRoomsType: req.body.pickedRoomsType, // Ensure rooms are correctly saved
-		payment: req.body.payment, // Ensure payment status is saved
+		pickedRoomsType: req.body.pickedRoomsType,
+		payment: req.body.payment,
 		paid_amount: Number(req.body.paid_amount).toFixed(2),
 		commission: Number(req.body.commission).toFixed(2),
 		commissionPaid: req.body.commissionPaid,
 		guestAgreedOnTermsAndConditions: req.body.guestAgreedOnTermsAndConditions,
+		payment_details: enrichedPaymentDetails,
 	});
 
-	// Save the reservation to the database
 	try {
 		const savedReservation = await newReservation.save();
 		res.status(201).json({
@@ -552,6 +598,104 @@ async function saveReservation(
 		res.status(500).json({
 			message: "An error occurred while saving the reservation",
 		});
+	}
+}
+
+// Payment processing function
+async function processPayment({
+	amount,
+	cardNumber,
+	expirationDate,
+	cardCode,
+	customerDetails,
+	checkinDate,
+	checkoutDate,
+	hotelName,
+}) {
+	const axios = require("axios");
+	try {
+		// Remove any spaces from the card number
+		const sanitizedCardNumber = cardNumber.replace(/\s+/g, "");
+
+		const formattedAmount = parseFloat(amount).toFixed(2);
+
+		console.log(formattedAmount, "formattedAmount");
+		// Construct the payload with metadata in `userFields`
+		const payload = {
+			createTransactionRequest: {
+				merchantAuthentication: {
+					name: process.env.API_LOGIN_ID,
+					transactionKey: process.env.TRANSACTION_KEY,
+				},
+				transactionRequest: {
+					transactionType: "authCaptureTransaction",
+					amount: formattedAmount,
+					payment: {
+						creditCard: {
+							cardNumber: sanitizedCardNumber, // Use sanitized card number
+							expirationDate: expirationDate,
+							cardCode: cardCode,
+						},
+					},
+					billTo: {
+						firstName: customerDetails.name.split(" ")[0] || "",
+						lastName: customerDetails.name.split(" ")[1] || "",
+						address: customerDetails.address || "N/A",
+						city: customerDetails.city || "N/A",
+						state: customerDetails.state || "N/A",
+						zip: customerDetails.postalCode || "00000",
+						country: customerDetails.country || "US",
+						email: customerDetails.email || "",
+					},
+					userFields: {
+						userField: [
+							{
+								name: "checkin_date",
+								value: checkinDate,
+							},
+							{
+								name: "checkout_date",
+								value: checkoutDate,
+							},
+							{
+								name: "hotel_name",
+								value: hotelName,
+							},
+						],
+					},
+				},
+			},
+		};
+
+		const response = await axios.post(
+			"https://apitest.authorize.net/xml/v1/request.api",
+			payload,
+			{ headers: { "Content-Type": "application/json" } }
+		);
+
+		const responseData = response.data;
+
+		if (
+			responseData.messages.resultCode === "Ok" &&
+			responseData.transactionResponse &&
+			responseData.transactionResponse.messages
+		) {
+			return {
+				success: true,
+				transactionId: responseData.transactionResponse.transId,
+				message: responseData.transactionResponse.messages[0].description,
+				response: responseData, // Include full response for further use
+			};
+		} else {
+			const errorText =
+				responseData.transactionResponse?.errors?.[0]?.errorText ||
+				responseData.messages.message[0].text ||
+				"Transaction failed.";
+			return { success: false, message: errorText };
+		}
+	} catch (error) {
+		console.error("Payment Processing Error:", error.message || error);
+		return { success: false, message: "Payment processing error." };
 	}
 }
 
@@ -710,4 +854,44 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 			.status(500)
 			.json({ error: "An error occurred while updating hotel distances" });
 	}
+};
+
+exports.gettingCurrencyConversion = (req, res) => {
+	const amountInSAR = req.params.saudimoney; // Expect a comma-separated string, e.g., "59.50,595.00"
+
+	// Split the amounts for conversion
+	const amounts = amountInSAR.split(",").map((amount) => parseFloat(amount));
+
+	// Validate input
+	if (!amounts.length || amounts.some((amount) => isNaN(amount))) {
+		return res.status(400).json({ error: "Invalid amount(s) provided" });
+	}
+
+	// Base API URL
+	const baseUrl = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE}/pair/SAR/USD/`;
+
+	// Fetch conversions for all amounts
+	Promise.all(
+		amounts.map((amount) =>
+			fetch(`${baseUrl}${amount}`)
+				.then((response) => response.json())
+				.then((data) => {
+					if (data.result === "success") {
+						return {
+							amountInSAR: amount,
+							conversionRate: data.conversion_rate,
+							amountInUSD: data.conversion_result,
+						};
+					} else {
+						throw new Error("Currency conversion failed");
+					}
+				})
+		)
+	)
+		.then((results) => {
+			res.json(results); // Respond with the converted results
+		})
+		.catch((error) => {
+			res.status(500).json({ error: error.message });
+		});
 };
