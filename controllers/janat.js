@@ -6,6 +6,7 @@ const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
 const axios = require("axios");
 require("dotenv").config();
+const fetch = require("node-fetch");
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
@@ -225,17 +226,22 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		const [startDate, endDate, roomType, adults, children, destination] =
 			query.split("_");
 
+		// Log extracted parameters
+		console.log("Extracted Parameters:", {
+			startDate,
+			endDate,
+			roomType,
+			adults,
+			children,
+			destination,
+		});
+
 		// Validate the extracted parameters
 		if (!startDate || !endDate || !roomType || !adults) {
 			return res.status(400).json({
 				error: "Invalid query parameters.",
 			});
 		}
-
-		// Standardize destination names to handle variations
-		const standardizedDestination = destination
-			? destination.toLowerCase().replace(/madina[h]?/i, "madina")
-			: null;
 
 		// Define base hotel query
 		let hotelQuery = {
@@ -245,24 +251,41 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		};
 
 		// Add destination filter if provided
-		if (standardizedDestination) {
-			hotelQuery.hotelState = {
-				$regex: new RegExp(standardizedDestination, "i"),
-			};
+		if (destination) {
+			const standardizedDestination = destination.toLowerCase();
+			hotelQuery.$or = [
+				{
+					hotelState: {
+						$regex: new RegExp(standardizedDestination, "i"), // Match destination in hotelState
+					},
+				},
+				{
+					hotelCity: {
+						$regex: new RegExp(standardizedDestination, "i"), // Match destination in hotelCity
+					},
+				},
+			];
+			// Log destination-related query
+			console.log("Destination Query Condition:", hotelQuery.$or);
 		}
 
 		// Add room type filter if not "all"
 		if (roomType !== "all") {
 			hotelQuery["roomCountDetails.roomType"] = roomType;
+			// Log room type filter
+			console.log("Room Type Filter:", hotelQuery["roomCountDetails.roomType"]);
 		}
 
 		// Fetch hotels matching the base query
 		let hotels = await HotelDetails.find(hotelQuery);
+		// Log initial query results
+		console.log("Initial Query Results:", hotels.length, "hotels found");
 
 		// Filter out relevant room types in roomCountDetails
 		const filteredHotels = hotels.map((hotel) => {
 			let filteredRoomCountDetails;
 
+			// Filter room details based on type and availability
 			if (roomType === "all") {
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
 					(room) => room.photos.length > 0 && room.price.basePrice > 0
@@ -276,6 +299,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 				);
 			}
 
+			// Return the hotel with updated roomCountDetails
 			return {
 				...hotel.toObject(),
 				roomCountDetails: filteredRoomCountDetails,
@@ -287,8 +311,12 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 			(hotel) => hotel.roomCountDetails.length > 0
 		);
 
+		// Log filtered results
+		console.log("Filtered Hotels After Room Validation:", result.length);
+
 		// If no hotels match the criteria, return a 404
 		if (!result.length) {
+			console.error("No hotels found matching the criteria.");
 			return res.status(404).json({
 				message: "No hotels found matching the criteria.",
 			});
@@ -317,6 +345,12 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 
 			return aWalkingTime - bWalkingTime;
 		});
+
+		// Log sorted hotels
+		console.log(
+			"Sorted Hotels:",
+			sortedHotels.map((hotel) => hotel.hotelName)
+		);
 
 		// Send the sorted hotels as the response
 		res.status(200).json(sortedHotels);
@@ -894,4 +928,37 @@ exports.gettingCurrencyConversion = (req, res) => {
 		.catch((error) => {
 			res.status(500).json({ error: error.message });
 		});
+};
+
+exports.getCurrencyRates = async (req, res) => {
+	try {
+		const baseUrl = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE}/pair/SAR/`;
+
+		// Fetch conversion rates for USD and EUR
+		const [usdResponse, eurResponse] = await Promise.all([
+			fetch(`${baseUrl}USD`),
+			fetch(`${baseUrl}EUR`),
+		]);
+
+		// Parse JSON responses
+		const usdData = await usdResponse.json();
+		const eurData = await eurResponse.json();
+
+		// Check for successful responses
+		if (usdData.result !== "success" || eurData.result !== "success") {
+			return res.status(500).json({ error: "Failed to fetch currency rates" });
+		}
+
+		// Construct rates object
+		const rates = {
+			SAR_USD: usdData.conversion_rate,
+			SAR_EUR: eurData.conversion_rate,
+		};
+
+		// Respond with rates
+		res.json(rates);
+	} catch (error) {
+		console.error("Error fetching currency rates:", error);
+		res.status(500).json({ error: "An error occurred while fetching rates" });
+	}
 };
