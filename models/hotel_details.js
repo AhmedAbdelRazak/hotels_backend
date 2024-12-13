@@ -101,6 +101,14 @@ const hotel_detailsSchema = new mongoose.Schema(
 						type: Number,
 						default: "",
 					},
+					defaultCost: {
+						type: Number,
+						default: "",
+					},
+					roomCommission: {
+						type: Number,
+						default: 10,
+					},
 				},
 			],
 		},
@@ -184,6 +192,13 @@ const hotel_detailsSchema = new mongoose.Schema(
 			lowercase: true,
 			default: "",
 		},
+		commission: {
+			type: Number,
+			trim: true,
+			lowercase: true,
+			default: 10,
+		},
+
 		belongsTo: { type: ObjectId, ref: "User" },
 	},
 	{ timestamps: true }

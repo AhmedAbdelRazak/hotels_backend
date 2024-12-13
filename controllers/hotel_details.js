@@ -1,6 +1,7 @@
 const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
 const _ = require("lodash");
+const axios = require("axios");
 
 exports.hotelDetailsById = (req, res, next, id) => {
 	if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -49,12 +50,13 @@ const generateUniqueDarkColor = (existingColors) => {
 	return color;
 };
 
-exports.updateHotelDetails = (req, res) => {
+exports.updateHotelDetails = async (req, res) => {
 	const hotelDetailsId = req.params.hotelId;
 	const updateData = req.body;
 
 	console.log(updateData, "updateData");
 
+	// Helper function to ensure unique room colors within the same room type
 	const ensureUniqueRoomColors = (roomCountDetails) => {
 		const colorMap = {};
 
@@ -63,9 +65,8 @@ exports.updateHotelDetails = (req, res) => {
 				colorMap[room.roomType] = new Set();
 			}
 
-			// Check if roomColor already exists in the roomType group
+			// If the color already exists for the room type, generate a unique color
 			if (colorMap[room.roomType].has(room.roomColor)) {
-				// Generate a new unique color
 				room.roomColor = generateUniqueDarkColor([...colorMap[room.roomType]]);
 			}
 
@@ -73,149 +74,132 @@ exports.updateHotelDetails = (req, res) => {
 		});
 	};
 
-	if (req.body.fromPage === "AddNew") {
-		// Existing AddNew logic remains the same
-		HotelDetails.findById(hotelDetailsId, (err, hotelDetails) => {
+	// Helper function to update distances to El Haram using Google Maps API
+	const updateDistances = async (hotel) => {
+		try {
+			const elHaramCoordinates = [39.8262, 21.4225]; // Coordinates for Al-Masjid al-Haram
+			const [hotelLongitude, hotelLatitude] = hotel.location.coordinates;
+
+			const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+
+			// Construct URLs for walking and driving distance calculations
+			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=walking&key=${apiKey}`;
+			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=driving&key=${apiKey}`;
+
+			// Fetch distances in parallel
+			const [walkingResponse, drivingResponse] = await Promise.all([
+				axios.get(walkingUrl),
+				axios.get(drivingUrl),
+			]);
+
+			// Extract distance information
+			const walkingElement = walkingResponse.data.rows?.[0]?.elements?.[0];
+			const drivingElement = drivingResponse.data.rows?.[0]?.elements?.[0];
+
+			hotel.distances = {
+				walkingToElHaram:
+					walkingElement && walkingElement.status === "OK"
+						? walkingElement.duration.text
+						: "N/A",
+				drivingToElHaram:
+					drivingElement && drivingElement.status === "OK"
+						? drivingElement.duration.text
+						: "N/A",
+			};
+		} catch (error) {
+			console.error("Error updating distances:", error);
+		}
+	};
+
+	// Find the hotel details by ID
+	HotelDetails.findById(hotelDetailsId, async (err, hotelDetails) => {
+		if (err) {
+			console.error(err);
+			return res.status(500).send({ error: "Internal server error" });
+		}
+		if (!hotelDetails) {
+			return res.status(404).send({ error: "Hotel details not found" });
+		}
+
+		// Update roomCountDetails if provided
+		if (
+			updateData.roomCountDetails &&
+			Array.isArray(updateData.roomCountDetails)
+		) {
+			const updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
+				(existingRoom) => {
+					const matchingNewRoom = updateData.roomCountDetails.find(
+						(newRoom) =>
+							newRoom._id &&
+							newRoom._id.toString() === existingRoom._id.toString()
+					);
+
+					// Merge existing room details with new data
+					if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
+						return { ...existingRoom, ...matchingNewRoom };
+					}
+					return existingRoom;
+				}
+			);
+
+			// Add new rooms not already in the list
+			updateData.roomCountDetails.forEach((newRoom) => {
+				if (
+					newRoom._id &&
+					!updatedRoomCountDetails.some(
+						(room) => room._id.toString() === newRoom._id.toString()
+					)
+				) {
+					updatedRoomCountDetails.push(newRoom);
+				}
+			});
+
+			// Ensure all room colors are unique within the same room type
+			ensureUniqueRoomColors(updatedRoomCountDetails);
+			hotelDetails.roomCountDetails = updatedRoomCountDetails;
+			hotelDetails.markModified("roomCountDetails");
+		}
+
+		let locationUpdated = false; // Track if location coordinates have changed
+
+		// Update other fields, checking for location changes
+		Object.keys(updateData).forEach((key) => {
+			if (key === "location" && updateData[key]) {
+				const newCoordinates = updateData[key].coordinates;
+				const oldCoordinates = hotelDetails.location.coordinates;
+
+				// Check if coordinates have changed
+				if (
+					!oldCoordinates ||
+					newCoordinates[0] !== oldCoordinates[0] ||
+					newCoordinates[1] !== oldCoordinates[1]
+				) {
+					locationUpdated = true;
+				}
+			}
+
+			// Sanity check: Replace all "-" with spaces in hotelName
+			if (key === "hotelName" && typeof updateData[key] === "string") {
+				hotelDetails[key] = updateData[key].replace(/-/g, " ");
+			} else if (key !== "roomCountDetails") {
+				hotelDetails[key] = updateData[key];
+			}
+		});
+
+		// Trigger distance update only if location coordinates have changed
+		if (locationUpdated) {
+			await updateDistances(hotelDetails);
+		}
+
+		// Save the updated hotel details
+		hotelDetails.save((err, updatedHotelDetails) => {
 			if (err) {
 				console.error(err);
 				return res.status(500).send({ error: "Internal server error" });
 			}
-			if (!hotelDetails) {
-				return res.status(404).send({ error: "Hotel details not found" });
-			}
-
-			if (
-				updateData.roomCountDetails &&
-				Array.isArray(updateData.roomCountDetails)
-			) {
-				const updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
-					(existingRoom) => {
-						const matchingNewRoom = updateData.roomCountDetails.find(
-							(newRoom) =>
-								newRoom.roomType === existingRoom.roomType &&
-								newRoom.displayName === existingRoom.displayName
-						);
-
-						if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
-							return { ...existingRoom, ...matchingNewRoom };
-						}
-						return existingRoom;
-					}
-				);
-
-				// Add new rooms that don't exist in the current list
-				updateData.roomCountDetails.forEach((newRoom) => {
-					if (
-						newRoom.roomType &&
-						newRoom.displayName &&
-						Object.keys(newRoom).length > 0
-					) {
-						const existingRoom = updatedRoomCountDetails.find(
-							(room) =>
-								room.roomType === newRoom.roomType &&
-								room.displayName === newRoom.displayName
-						);
-						if (!existingRoom) {
-							// Ensure that activeRoom is set to true by default for new rooms
-							if (newRoom.activeRoom === undefined) {
-								newRoom.activeRoom = true;
-							}
-							updatedRoomCountDetails.push(newRoom);
-						}
-					}
-				});
-
-				// Ensure all room colors are unique within the same roomType
-				ensureUniqueRoomColors(updatedRoomCountDetails);
-
-				hotelDetails.roomCountDetails = updatedRoomCountDetails;
-				hotelDetails.markModified("roomCountDetails");
-			}
-
-			// Update other fields (excluding roomCountDetails)
-			Object.keys(updateData).forEach((key) => {
-				if (key !== "roomCountDetails") {
-					hotelDetails[key] = updateData[key];
-				}
-			});
-
-			hotelDetails.save((err, updatedHotelDetails) => {
-				if (err) {
-					console.error(err);
-					return res.status(500).send({ error: "Internal server error" });
-				}
-				res.json(updatedHotelDetails);
-			});
+			res.json(updatedHotelDetails);
 		});
-	} else {
-		console.log("Req.Body:", req.body);
-
-		// New logic to handle updates considering the _id
-		HotelDetails.findById(hotelDetailsId, (err, hotelDetails) => {
-			if (err) {
-				console.error("Error finding hotel details:", err);
-				return res.status(500).send({ error: "Internal server error" });
-			}
-			if (!hotelDetails) {
-				return res.status(404).send({ error: "Hotel details not found" });
-			}
-
-			if (
-				updateData.roomCountDetails &&
-				Array.isArray(updateData.roomCountDetails)
-			) {
-				const updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
-					(existingRoom) => {
-						const matchingNewRoom = updateData.roomCountDetails.find(
-							(newRoom) =>
-								newRoom._id.toString() === existingRoom._id.toString()
-						);
-
-						if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
-							console.log(`Updating room: ${existingRoom._id}`);
-							return { ...existingRoom, ...matchingNewRoom };
-						}
-						return existingRoom;
-					}
-				);
-
-				// Add new rooms that don't exist in the current list
-				updateData.roomCountDetails.forEach((newRoom) => {
-					if (
-						newRoom._id &&
-						!updatedRoomCountDetails.some(
-							(room) => room._id.toString() === newRoom._id.toString()
-						)
-					) {
-						updatedRoomCountDetails.push(newRoom);
-					}
-				});
-
-				// Ensure all room colors are unique within the same roomType
-				ensureUniqueRoomColors(updatedRoomCountDetails);
-
-				// Assign the updated room count details
-				hotelDetails.roomCountDetails = updatedRoomCountDetails;
-				hotelDetails.markModified("roomCountDetails");
-			}
-
-			// Update other fields (excluding roomCountDetails)
-			Object.keys(updateData).forEach((key) => {
-				if (key !== "roomCountDetails") {
-					hotelDetails[key] = updateData[key];
-				}
-			});
-
-			hotelDetails.save((err, updatedHotelDetails) => {
-				if (err) {
-					console.error("Error saving hotel details:", err);
-					return res.status(500).send({ error: "Internal server error" });
-				}
-				console.log("Hotel details updated successfully:", updatedHotelDetails);
-				res.json(updatedHotelDetails);
-			});
-		});
-	}
+	});
 };
 
 exports.list = (req, res) => {

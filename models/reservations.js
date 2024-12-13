@@ -251,6 +251,19 @@ const reservationsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		affiliateReservation: {
+			type: Boolean,
+			default: false,
+		},
+		affiliateData: {
+			type: Object,
+			trim: true,
+			lowercase: true,
+			default: {
+				name: "",
+				phone: "",
+			},
+		},
 	},
 	{ timestamps: true }
 );
