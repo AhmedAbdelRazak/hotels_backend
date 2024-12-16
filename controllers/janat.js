@@ -152,13 +152,23 @@ exports.getHotelFromSlug = async (req, res) => {
 			},
 		});
 
+		// If no hotel is found, return a 404 response
 		if (!hotel) {
 			return res.status(404).json({
 				message: "No hotel found for the provided slug.",
 			});
 		}
 
-		res.status(200).json(hotel);
+		// Filter the roomCountDetails array to include only active rooms
+		const filteredHotel = {
+			...hotel.toObject(),
+			roomCountDetails: hotel.roomCountDetails.filter(
+				(room) => room.activeRoom
+			),
+		};
+
+		// Send the filtered hotel data as the response
+		res.status(200).json(filteredHotel);
 	} catch (error) {
 		console.error("Error fetching hotel by slug:", error);
 		res.status(500).json({
@@ -285,15 +295,19 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		const filteredHotels = hotels.map((hotel) => {
 			let filteredRoomCountDetails;
 
-			// Filter room details based on type and availability
+			// Filter room details based on type, availability, and activeRoom
 			if (roomType === "all") {
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
-					(room) => room.photos.length > 0 && room.price.basePrice > 0
+					(room) =>
+						room.activeRoom === true && // Only include active rooms
+						room.photos.length > 0 &&
+						room.price.basePrice > 0
 				);
 			} else {
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
 					(room) =>
 						room.roomType === roomType &&
+						room.activeRoom === true && // Only include active rooms
 						room.photos.length > 0 &&
 						room.price.basePrice > 0
 				);
