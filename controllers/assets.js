@@ -471,6 +471,14 @@ const ClientConfirmationEmail = (reservationData) => {
 		return sum + roomTotal;
 	}, 0);
 
+	const paidAmount = Number(reservationData.paid_amount).toFixed(2);
+	const reservationTotalAmount = Number(reservationData.total_amount).toFixed(
+		2
+	);
+	const amountDue = Number(
+		Number(reservationTotalAmount) - Number(reservationTotalAmount)
+	).toFixed(2);
+
 	const email = `
     <!DOCTYPE html>
     <html lang="en">
@@ -614,6 +622,12 @@ const ClientConfirmationEmail = (reservationData) => {
                         </tr>
                     </tbody>
                 </table>
+
+                 <h3>Payment Details:</h3>
+                <p><strong>Paid Amount:</strong> ${paidAmount}</p>
+                <p><strong>Total Amount:</strong> ${reservationTotalAmount}</p>
+                <p><strong>Amount Due:</strong> ${amountDue} Night(s)</p>
+
             </div>
             <div class="footer">
                 <p>For more details, visit your <a href="https://jannatbooking.com/dashboard">dashboard</a>.</p>
