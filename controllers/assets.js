@@ -476,7 +476,7 @@ const ClientConfirmationEmail = (reservationData) => {
 		2
 	);
 	const amountDue = Number(
-		Number(reservationTotalAmount) - Number(reservationTotalAmount)
+		Number(reservationTotalAmount) - Number(paidAmount)
 	).toFixed(2);
 
 	const email = `
