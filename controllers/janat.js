@@ -7,6 +7,12 @@ const User = require("../models/user");
 const axios = require("axios");
 require("dotenv").config();
 const fetch = require("node-fetch");
+const { ClientConfirmationEmail } = require("./assets");
+const puppeteer = require("puppeteer");
+const sgMail = require("@sendgrid/mail");
+const { encryptWithSecret } = require("./utils");
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
@@ -400,6 +406,62 @@ function ensureUniqueNumber(model, fieldName, callback) {
 	});
 }
 
+const createPdfBuffer = async (html) => {
+	const browser = await puppeteer.launch({
+		headless: true,
+		args: [
+			"--no-sandbox",
+			"--disable-setuid-sandbox",
+			"--disable-dev-shm-usage",
+			"--disable-accelerated-2d-canvas",
+			"--no-first-run",
+			"--no-zygote",
+			"--single-process",
+			"--disable-gpu",
+		],
+	});
+
+	const page = await browser.newPage();
+	await page.setContent(html, { waitUntil: "networkidle0" });
+	const pdfBuffer = await page.pdf({ format: "A4" });
+	await browser.close();
+	return pdfBuffer;
+};
+
+const sendEmailWithInvoice = async (reservationData) => {
+	try {
+		// Generate the email HTML content
+		const emailHtmlContent = ClientConfirmationEmail(reservationData);
+
+		// Generate the PDF from the email content
+		const pdfBuffer = await createPdfBuffer(emailHtmlContent);
+
+		// Email setup
+		const emailOptions = {
+			to:
+				reservationData.customer_details.email ||
+				"ahmed.abdelrazak20@gmail.com",
+			from: "noreply@jannatbooking.com",
+			subject: "Reservation Confirmation - Invoice Attached",
+			html: emailHtmlContent,
+			attachments: [
+				{
+					content: pdfBuffer.toString("base64"),
+					filename: "Reservation_Invoice.pdf",
+					type: "application/pdf",
+					disposition: "attachment",
+				},
+			],
+		};
+
+		// Send the email using SendGrid
+		await sgMail.send(emailOptions);
+		console.log("Invoice email sent successfully.");
+	} catch (error) {
+		console.error("Error sending confirmation email with PDF:", error);
+	}
+};
+
 exports.createNewReservationClient = async (req, res) => {
 	try {
 		const {
@@ -598,22 +660,10 @@ async function saveReservation(
 		hotelId,
 		customer_details: {
 			...customerDetails,
-			cardNumber: crypto
-				.createHash("sha256")
-				.update(paymentDetails.cardNumber)
-				.digest("hex"),
-			cardExpiryDate: crypto
-				.createHash("sha256")
-				.update(paymentDetails.cardExpiryDate)
-				.digest("hex"),
-			cardCVV: crypto
-				.createHash("sha256")
-				.update(paymentDetails.cardCVV)
-				.digest("hex"),
-			cardHolderName: crypto
-				.createHash("sha256")
-				.update(paymentDetails.cardHolderName)
-				.digest("hex"),
+			cardNumber: encryptWithSecret(paymentDetails.cardNumber),
+			cardExpiryDate: encryptWithSecret(paymentDetails.cardExpiryDate),
+			cardCVV: encryptWithSecret(paymentDetails.cardCVV),
+			cardHolderName: encryptWithSecret(paymentDetails.cardHolderName),
 		},
 		confirmation_number: req.body.confirmation_number,
 		belongsTo,
@@ -637,6 +687,7 @@ async function saveReservation(
 
 	try {
 		const savedReservation = await newReservation.save();
+		await sendEmailWithInvoice(savedReservation);
 		res.status(201).json({
 			message: "Reservation created successfully",
 			data: savedReservation,
@@ -660,27 +711,42 @@ async function processPayment({
 	checkoutDate,
 	hotelName,
 }) {
-	const axios = require("axios");
 	try {
-		// Remove any spaces from the card number
-		const sanitizedCardNumber = cardNumber.replace(/\s+/g, "");
+		// Select the correct credentials and endpoint
+		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
 
+		const apiLoginId = isProduction
+			? process.env.API_LOGIN_ID
+			: process.env.API_LOGIN_ID_SANDBOX;
+
+		const transactionKey = isProduction
+			? process.env.TRANSACTION_KEY
+			: process.env.TRANSACTION_KEY_SANDBOX;
+
+		const endpoint = isProduction
+			? "https://api.authorize.net/xml/v1/request.api"
+			: "https://apitest.authorize.net/xml/v1/request.api";
+
+		// Remove spaces from the card number
+		const sanitizedCardNumber = cardNumber.replace(/\s+/g, "");
 		const formattedAmount = parseFloat(amount).toFixed(2);
 
-		console.log(formattedAmount, "formattedAmount");
-		// Construct the payload with metadata in `userFields`
+		console.log("Using API Endpoint:", endpoint);
+		console.log("API Login ID:", apiLoginId);
+
+		// Construct the payload
 		const payload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
-					name: process.env.API_LOGIN_ID,
-					transactionKey: process.env.TRANSACTION_KEY,
+					name: apiLoginId,
+					transactionKey: transactionKey,
 				},
 				transactionRequest: {
 					transactionType: "authCaptureTransaction",
 					amount: formattedAmount,
 					payment: {
 						creditCard: {
-							cardNumber: sanitizedCardNumber, // Use sanitized card number
+							cardNumber: sanitizedCardNumber,
 							expirationDate: expirationDate,
 							cardCode: cardCode,
 						},
@@ -697,32 +763,23 @@ async function processPayment({
 					},
 					userFields: {
 						userField: [
-							{
-								name: "checkin_date",
-								value: checkinDate,
-							},
-							{
-								name: "checkout_date",
-								value: checkoutDate,
-							},
-							{
-								name: "hotel_name",
-								value: hotelName,
-							},
+							{ name: "checkin_date", value: checkinDate },
+							{ name: "checkout_date", value: checkoutDate },
+							{ name: "hotel_name", value: hotelName },
 						],
 					},
 				},
 			},
 		};
 
-		const response = await axios.post(
-			"https://apitest.authorize.net/xml/v1/request.api",
-			payload,
-			{ headers: { "Content-Type": "application/json" } }
-		);
+		// Send the request to Authorize.Net
+		const response = await axios.post(endpoint, payload, {
+			headers: { "Content-Type": "application/json" },
+		});
 
 		const responseData = response.data;
 
+		// Check for a successful transaction
 		if (
 			responseData.messages.resultCode === "Ok" &&
 			responseData.transactionResponse &&
@@ -732,9 +789,10 @@ async function processPayment({
 				success: true,
 				transactionId: responseData.transactionResponse.transId,
 				message: responseData.transactionResponse.messages[0].description,
-				response: responseData, // Include full response for further use
+				response: responseData,
 			};
 		} else {
+			// Handle errors
 			const errorText =
 				responseData.transactionResponse?.errors?.[0]?.errorText ||
 				responseData.messages.message[0].text ||
@@ -742,6 +800,7 @@ async function processPayment({
 			return { success: false, message: errorText };
 		}
 	} catch (error) {
+		// Log and handle general errors
 		console.error("Payment Processing Error:", error.message || error);
 		return { success: false, message: "Payment processing error." };
 	}

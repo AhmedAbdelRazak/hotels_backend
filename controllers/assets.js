@@ -433,9 +433,143 @@ const paymentReceipt = (
 	return email;
 };
 
+const ClientConfirmationEmail = (reservationData) => {
+	// Extract dates without timezone adjustment
+	const checkinDate = moment(reservationData.checkin_date).format("YYYY-MM-DD");
+	const checkoutDate = moment(reservationData.checkout_date).format(
+		"YYYY-MM-DD"
+	);
+	const createdAt = moment(reservationData.createdAt).format("YYYY-MM-DD");
+
+	// Calculate the number of nights
+	const nightsOfResidence = moment(reservationData.checkout_date).diff(
+		moment(reservationData.checkin_date),
+		"days"
+	);
+
+	// Calculate Total Sum (roomPrice * nights)
+	const totalAmount = reservationData.pickedRoomsType.reduce((sum, room) => {
+		const roomTotal = (Number(room.chosenPrice) || 0) * nightsOfResidence;
+		return sum + roomTotal;
+	}, 0);
+
+	const email = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Reservation Confirmation</title>
+        <style>
+            :root {
+                --primaryBlue: #20212c;
+                --primaryBlueDarker: #1e2332;
+                --orangeDark: #501500;
+                --orangeLight: #ffe3d9;
+                --mainGrey: #fafafa;
+                --darkGrey: #5f5e5e;
+                --mainWhite: #fff;
+                --border-color-light: #e0e0e0;
+                --box-shadow-light: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+
+            body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: var(--mainGrey); }
+            .container { background-color: var(--mainWhite); width: 100%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid var(--border-color-light); box-shadow: var(--box-shadow-light); }
+            .header { background: var(--primaryBlue); color: var(--mainWhite); padding: 10px; text-align: center; font-size: 1.5rem; }
+            .content { padding: 20px; color: var(--darkGrey); }
+            .footer { background: var(--orangeLight); color: var(--orangeDark); padding: 10px; text-align: center; font-size: 0.9rem; font-weight: bold; }
+            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+            th, td { border: 1px solid var(--border-color-light); padding: 10px; text-align: left; }
+            th { background-color: var(--primaryBlue); color: var(--mainWhite); }
+            h2, p { margin: 0 0 10px; }
+            a { color: var(--primaryBlueDarker); text-decoration: none; font-weight: bold; }
+            a:hover { text-decoration: underline; }
+            .total-row td { font-weight: bold; background-color: var(--mainGrey); }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                Reservation Confirmation
+            </div>
+            <div class="content">
+                <h2>Hi ${reservationData.customer_details.name},</h2>
+                <p>Thank you for booking with <a href="https://jannatbooking.com">jannatbooking.com</a></p>
+                
+                <p><strong>Hotel Name:</strong> ${reservationData.hotelName}</p>
+                <p><strong>Reservation Confirmation #:</strong> ${
+									reservationData.confirmation_number
+								}</p>
+                <p><strong>Reserved On:</strong> ${createdAt}</p>
+                
+                <h3>User Details:</h3>
+                <p><strong>Name:</strong> ${
+									reservationData.customer_details.name
+								}</p>
+                <p><strong>Email:</strong> ${
+									reservationData.customer_details.email
+								}</p>
+                <p><strong>Phone:</strong> ${
+									reservationData.customer_details.phone
+								}</p>
+
+                <h3>Reservation Details:</h3>
+                <p><strong>Check-in Date:</strong> ${checkinDate}</p>
+                <p><strong>Check-out Date:</strong> ${checkoutDate}</p>
+                <p><strong>Number of Nights:</strong> ${nightsOfResidence} Night(s)</p>
+
+                <table>
+                    <tr>
+                        <th>Room Type</th>
+                        <th>Room Name</th>
+                        <th>Room Price (Per Night)</th>
+                        <th>Total Amount</th>
+                    </tr>
+                    ${reservationData.pickedRoomsType
+											.map((room) => {
+												const roomTotal =
+													(Number(room.chosenPrice) || 0) * nightsOfResidence;
+												return `
+                        <tr>
+                            <td>${room.room_type}</td>
+                            <td>${room.displayName}</td>
+                            <td>${room.chosenPrice} SAR</td>
+                            <td>${roomTotal.toLocaleString()} SAR</td>
+                        </tr>
+                    `;
+											})
+											.join("")}
+                    <tr class="total-row">
+                        <td colspan="3">Total:</td>
+                        <td>${totalAmount.toLocaleString()} SAR</td>
+                    </tr>
+                </table>
+            </div>
+            <div class="footer">
+                <p>
+                    For more details, please click 
+                    <a href="https://jannatbooking.com/dashboard">here</a> to visit your dashboard.
+                </p>
+                <p>
+                    If you have any inquiries, please click 
+                    <a href="https://jannatbooking.com/${reservationData.hotelName
+											.replace(/\s+/g, "-")
+											.toLowerCase()}">
+                        here</a> to chat directly with the hotel.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    `;
+
+	return email;
+};
+
 module.exports = {
 	confirmationEmail,
 	reservationUpdate,
 	emailPaymentLink,
 	paymentReceipt,
+	ClientConfirmationEmail,
 };
