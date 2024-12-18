@@ -624,9 +624,9 @@ const ClientConfirmationEmail = (reservationData) => {
                 </table>
 
                  <h3>Payment Details:</h3>
-                <p><strong>Paid Amount:</strong> ${paidAmount}</p>
-                <p><strong>Total Amount:</strong> ${reservationTotalAmount}</p>
-                <p><strong>Amount Due:</strong> ${amountDue} Night(s)</p>
+                <p><strong>Paid Amount:</strong> ${paidAmount} SAR</p>
+                <p><strong>Total Amount:</strong> ${reservationTotalAmount} SAR</p>
+                <p><strong>Amount Due:</strong> ${amountDue} SAR</p>
 
             </div>
             <div class="footer">
