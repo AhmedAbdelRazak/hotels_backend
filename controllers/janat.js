@@ -781,7 +781,6 @@ async function processPayment({
 						zip: customerDetails.postalCode || "00000",
 						country: customerDetails.nationality || "US",
 						email: customerDetails.email || "",
-						phone: customerDetails.phone || "",
 					},
 					userFields: {
 						userField: [
