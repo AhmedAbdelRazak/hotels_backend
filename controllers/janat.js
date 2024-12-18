@@ -734,6 +734,8 @@ async function processPayment({
 		// Select the correct credentials and endpoint
 		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
 
+		console.log(customerDetails, "customerDetails from process payment");
+
 		const apiLoginId = isProduction
 			? process.env.API_LOGIN_ID
 			: process.env.API_LOGIN_ID_SANDBOX;
@@ -777,8 +779,9 @@ async function processPayment({
 						city: customerDetails.city || "N/A",
 						state: customerDetails.state || "N/A",
 						zip: customerDetails.postalCode || "00000",
-						country: customerDetails.country || "US",
+						country: customerDetails.nationality || "US",
 						email: customerDetails.email || "",
+						phone: customerDetails.phone || "",
 					},
 					userFields: {
 						userField: [
