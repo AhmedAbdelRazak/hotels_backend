@@ -434,22 +434,40 @@ const paymentReceipt = (
 };
 
 const ClientConfirmationEmail = (reservationData) => {
-	// Extract dates without timezone adjustment
-	const checkinDate = moment(reservationData.checkin_date).format("YYYY-MM-DD");
-	const checkoutDate = moment(reservationData.checkout_date).format(
-		"YYYY-MM-DD"
-	);
-	const createdAt = moment(reservationData.createdAt).format("YYYY-MM-DD");
+	const customerDetails = reservationData.customer_details || {};
+	const pickedRoomsType = reservationData.pickedRoomsType || [];
+	const hotelName = reservationData.hotelName || "Unknown Hotel";
+
+	// Capitalize hotelName
+	const formattedHotelName = hotelName
+		.toLowerCase()
+		.replace(/\b\w/g, (char) => char.toUpperCase());
+
+	// Format dates with timezone
+	const checkinDate = moment(reservationData.checkin_date)
+		.tz("Asia/Riyadh")
+		.format("dddd, MMMM Do YYYY");
+	const checkoutDate = moment(reservationData.checkout_date)
+		.tz("Asia/Riyadh")
+		.format("dddd, MMMM Do YYYY");
+	const createdAt = moment(reservationData.createdAt)
+		.tz("Asia/Riyadh")
+		.format("dddd, MMMM Do YYYY");
 
 	// Calculate the number of nights
-	const nightsOfResidence = moment(reservationData.checkout_date).diff(
-		moment(reservationData.checkin_date),
-		"days"
-	);
+	const nightsOfResidence =
+		reservationData.checkin_date && reservationData.checkout_date
+			? moment(reservationData.checkout_date).diff(
+					moment(reservationData.checkin_date),
+					"days"
+			  )
+			: "N/A";
 
 	// Calculate Total Sum (roomPrice * nights)
-	const totalAmount = reservationData.pickedRoomsType.reduce((sum, room) => {
-		const roomTotal = (Number(room.chosenPrice) || 0) * nightsOfResidence;
+	const totalAmount = pickedRoomsType.reduce((sum, room) => {
+		const roomTotal =
+			(Number(room.chosenPrice) || 0) *
+			(nightsOfResidence !== "N/A" ? nightsOfResidence : 1);
 		return sum + roomTotal;
 	}, 0);
 
@@ -461,30 +479,87 @@ const ClientConfirmationEmail = (reservationData) => {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Reservation Confirmation</title>
         <style>
-            :root {
-                --primaryBlue: #20212c;
-                --primaryBlueDarker: #1e2332;
-                --orangeDark: #501500;
-                --orangeLight: #ffe3d9;
-                --mainGrey: #fafafa;
-                --darkGrey: #5f5e5e;
-                --mainWhite: #fff;
-                --border-color-light: #e0e0e0;
-                --box-shadow-light: 0 2px 4px rgba(0, 0, 0, 0.1);
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f2f4f8;
             }
-
-            body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: var(--mainGrey); }
-            .container { background-color: var(--mainWhite); width: 100%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid var(--border-color-light); box-shadow: var(--box-shadow-light); }
-            .header { background: var(--primaryBlue); color: var(--mainWhite); padding: 10px; text-align: center; font-size: 1.5rem; }
-            .content { padding: 20px; color: var(--darkGrey); }
-            .footer { background: var(--orangeLight); color: var(--orangeDark); padding: 10px; text-align: center; font-size: 0.9rem; font-weight: bold; }
-            table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-            th, td { border: 1px solid var(--border-color-light); padding: 10px; text-align: left; }
-            th { background-color: var(--primaryBlue); color: var(--mainWhite); }
-            h2, p { margin: 0 0 10px; }
-            a { color: var(--primaryBlueDarker); text-decoration: none; font-weight: bold; }
-            a:hover { text-decoration: underline; }
-            .total-row td { font-weight: bold; background-color: var(--mainGrey); }
+            .container {
+                background-color: #ffffff;
+                max-width: 700px;
+                margin: 30px auto;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }
+            .header {
+                background: linear-gradient(90deg, #20212c, #1e2332);
+                color: #ffffff;
+                text-align: center;
+                padding: 20px;
+                font-size: 1.8rem;
+                font-weight: bold;
+            }
+            .content {
+                padding: 20px;
+                line-height: 1.6;
+                color: #333333;
+            }
+            .content h2 {
+                color: #20212c;
+                margin-bottom: 10px;
+            }
+            .content p {
+                margin: 10px 0;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 20px 0;
+            }
+            th, td {
+                padding: 10px;
+                border: 1px solid #dddddd;
+                text-align: left;
+            }
+            th {
+                background-color: #20212c;
+                color: #ffffff;
+            }
+            .total-row {
+                background-color: #f2f2f2;
+                font-weight: bold;
+            }
+            .footer {
+                background: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 15px;
+                font-size: 0.9rem;
+                margin-top: 20px;
+            }
+            .footer a {
+                color: #ffc107;
+                text-decoration: none;
+                font-weight: bold;
+            }
+            .footer a:hover {
+                text-decoration: underline;
+            }
+            @media (max-width: 768px) {
+                .content {
+                    padding: 15px;
+                }
+                table, th, td {
+                    font-size: 0.9rem;
+                    text-transform: capitalize;
+                }
+                .header {
+                    font-size: 1.5rem;
+                }
+            }
         </style>
     </head>
     <body>
@@ -493,25 +568,14 @@ const ClientConfirmationEmail = (reservationData) => {
                 Reservation Confirmation
             </div>
             <div class="content">
-                <h2>Hi ${reservationData.customer_details.name},</h2>
-                <p>Thank you for booking with <a href="https://jannatbooking.com">jannatbooking.com</a></p>
-                
-                <p><strong>Hotel Name:</strong> ${reservationData.hotelName}</p>
+                <h2>Hi ${customerDetails.name || "Valued Guest"},</h2>
+                <p>Thank you for booking with <a href="https://jannatbooking.com" style="color: #007bff; text-decoration: none;">JannatBooking.com</a>.</p>
+
+                <p><strong>Hotel Name:</strong> ${formattedHotelName}</p>
                 <p><strong>Reservation Confirmation #:</strong> ${
-									reservationData.confirmation_number
+									reservationData.confirmation_number || "N/A"
 								}</p>
                 <p><strong>Reserved On:</strong> ${createdAt}</p>
-                
-                <h3>User Details:</h3>
-                <p><strong>Name:</strong> ${
-									reservationData.customer_details.name
-								}</p>
-                <p><strong>Email:</strong> ${
-									reservationData.customer_details.email
-								}</p>
-                <p><strong>Phone:</strong> ${
-									reservationData.customer_details.phone
-								}</p>
 
                 <h3>Reservation Details:</h3>
                 <p><strong>Check-in Date:</strong> ${checkinDate}</p>
@@ -519,44 +583,43 @@ const ClientConfirmationEmail = (reservationData) => {
                 <p><strong>Number of Nights:</strong> ${nightsOfResidence} Night(s)</p>
 
                 <table>
-                    <tr>
-                        <th>Room Type</th>
-                        <th>Room Name</th>
-                        <th>Room Price (Per Night)</th>
-                        <th>Total Amount</th>
-                    </tr>
-                    ${reservationData.pickedRoomsType
-											.map((room) => {
-												const roomTotal =
-													(Number(room.chosenPrice) || 0) * nightsOfResidence;
-												return `
+                    <thead>
                         <tr>
-                            <td>${room.room_type}</td>
-                            <td>${room.displayName}</td>
-                            <td>${room.chosenPrice} SAR</td>
-                            <td>${roomTotal.toLocaleString()} SAR</td>
+                            <th>Room Type</th>
+                            <th>Room Name</th>
+                            <th>Room Price (Per Night)</th>
+                            <th>Total Amount</th>
                         </tr>
-                    `;
-											})
-											.join("")}
-                    <tr class="total-row">
-                        <td colspan="3">Total:</td>
-                        <td>${totalAmount.toLocaleString()} SAR</td>
-                    </tr>
+                    </thead>
+                    <tbody>
+                        ${pickedRoomsType
+													.map((room) => {
+														const roomTotal =
+															(Number(room.chosenPrice) || 0) *
+															(nightsOfResidence !== "N/A"
+																? nightsOfResidence
+																: 1);
+														return `
+                                <tr>
+                                    <td>${room.room_type || "N/A"}</td>
+                                    <td>${room.displayName || "N/A"}</td>
+                                    <td>${room.chosenPrice || 0} SAR</td>
+                                    <td>${roomTotal.toLocaleString()} SAR</td>
+                                </tr>`;
+													})
+													.join("")}
+                        <tr class="total-row">
+                            <td colspan="3">Total</td>
+                            <td>${totalAmount.toLocaleString()} SAR</td>
+                        </tr>
+                    </tbody>
                 </table>
             </div>
             <div class="footer">
-                <p>
-                    For more details, please click 
-                    <a href="https://jannatbooking.com/dashboard">here</a> to visit your dashboard.
-                </p>
-                <p>
-                    If you have any inquiries, please click 
-                    <a href="https://jannatbooking.com/${reservationData.hotelName
-											.replace(/\s+/g, "-")
-											.toLowerCase()}">
-                        here</a> to chat directly with the hotel.
-                </p>
+                <p>For more details, visit your <a href="https://jannatbooking.com/dashboard">dashboard</a>.</p>
+                <p>If you have any inquiries, <a href="https://jannatbooking.com/single-hotel/${formattedHotelName
+									.replace(/\s+/g, "-")
+									.toLowerCase()}">chat with the hotel</a>.</p>
             </div>
         </div>
     </body>

@@ -10,7 +10,7 @@ const fetch = require("node-fetch");
 const { ClientConfirmationEmail } = require("./assets");
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
-const { encryptWithSecret } = require("./utils");
+const { encryptWithSecret, decryptWithSecret } = require("./utils");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -428,9 +428,11 @@ const createPdfBuffer = async (html) => {
 	return pdfBuffer;
 };
 
-const sendEmailWithInvoice = async (reservationData) => {
+const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 	try {
-		// Generate the email HTML content
+		console.log("Recipient Email:", guestEmail);
+
+		// Generate the email HTML content inside this function
 		const emailHtmlContent = ClientConfirmationEmail(reservationData);
 
 		// Generate the PDF from the email content
@@ -438,9 +440,7 @@ const sendEmailWithInvoice = async (reservationData) => {
 
 		// Email setup
 		const emailOptions = {
-			to:
-				reservationData.customer_details.email ||
-				"ahmed.abdelrazak20@gmail.com",
+			to: guestEmail || "ahmed.abdelrazak@jannatbooking.com", // Safe fallback
 			from: "noreply@jannatbooking.com",
 			subject: "Reservation Confirmation - Invoice Attached",
 			html: emailHtmlContent,
@@ -454,7 +454,6 @@ const sendEmailWithInvoice = async (reservationData) => {
 			],
 		};
 
-		// Send the email using SendGrid
 		await sgMail.send(emailOptions);
 		console.log("Invoice email sent successfully.");
 	} catch (error) {
@@ -686,8 +685,28 @@ async function saveReservation(
 	});
 
 	try {
+		// Save the reservation
 		const savedReservation = await newReservation.save();
-		await sendEmailWithInvoice(savedReservation);
+
+		// Fetch the hotel details using the `hotelId`
+		const hotel = await HotelDetails.findById(hotelId).exec();
+
+		if (!hotel) {
+			return res.status(404).json({ message: "Hotel not found" });
+		}
+
+		// Generate and send the email with hotel data
+		const reservationData = {
+			...savedReservation.toObject(),
+			hotelName: hotel.hotelName,
+			hotelAddress: hotel.hotelAddress,
+			hotelCity: hotel.hotelCity,
+			hotelPhone: hotel.phone,
+		};
+
+		await sendEmailWithInvoice(reservationData, customerDetails.email);
+
+		// Send success response
 		res.status(201).json({
 			message: "Reservation created successfully",
 			data: savedReservation,
@@ -1033,5 +1052,50 @@ exports.getCurrencyRates = async (req, res) => {
 	} catch (error) {
 		console.error("Error fetching currency rates:", error);
 		res.status(500).json({ error: "An error occurred while fetching rates" });
+	}
+};
+
+exports.gettingByReservationId = async (req, res) => {
+	try {
+		// Extract reservationId from request parameters
+		const { reservationId } = req.params;
+
+		// Find the reservation by confirmation_number
+		const reservation = await Reservations.findOne({
+			confirmation_number: reservationId,
+		});
+
+		// If reservation not found, return a 404 error
+		if (!reservation) {
+			return res
+				.status(404)
+				.json({ message: "Reservation not found. Please check the ID." });
+		}
+
+		// Decrypt card information
+		const decryptedReservation = {
+			...reservation.toObject(),
+			customer_details: {
+				...reservation.customer_details,
+				cardNumber: decryptWithSecret(reservation.customer_details.cardNumber),
+				cardExpiryDate: decryptWithSecret(
+					reservation.customer_details.cardExpiryDate
+				),
+				cardCVV: decryptWithSecret(reservation.customer_details.cardCVV),
+				cardHolderName: decryptWithSecret(
+					reservation.customer_details.cardHolderName
+				),
+			},
+		};
+
+		// Return the reservation with decrypted details
+		return res.status(200).json(decryptedReservation);
+	} catch (error) {
+		// Log the error and send a 500 response
+		console.error("Error fetching reservation:", error.message || error);
+		return res.status(500).json({
+			message:
+				"An internal server error occurred while fetching the reservation.",
+		});
 	}
 };
