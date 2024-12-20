@@ -7,6 +7,7 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const dayjs = require("dayjs");
 
+// Function to calculate days of residence
 const calculateDaysOfResidence = (checkIn, checkOut) => {
 	const checkInDate = new Date(new Date(checkIn).setHours(0, 0, 0, 0));
 	const checkOutDate = new Date(new Date(checkOut).setHours(0, 0, 0, 0));
@@ -17,6 +18,7 @@ const calculateDaysOfResidence = (checkIn, checkOut) => {
 	return diffInTime / (1000 * 3600 * 24); // Difference in days
 };
 
+// Function to generate date range
 const generateDateRange = (startDate, endDate) => {
 	const start = dayjs(startDate);
 	const end = dayjs(endDate);
@@ -29,6 +31,14 @@ const generateDateRange = (startDate, endDate) => {
 	return dateArray;
 };
 
+// Function to normalize date formats
+const parseDate = (dateString) => {
+	const formats = ["MM/DD/YYYY", "DD/MM/YYYY"];
+	const parsedDate = moment(dateString, formats, true);
+	return parsedDate.isValid() ? parsedDate.toDate() : null;
+};
+
+// Function to parse CSV data
 const parseCSV = (filePath) => {
 	return new Promise((resolve, reject) => {
 		const data = [];
@@ -72,7 +82,6 @@ exports.agodaDataDump = async (req, res) => {
 
 		if (fileExtension === ".xlsx" || fileExtension === ".xls") {
 			console.log("Processing Excel file...");
-			// Handle Excel files
 			const workbook = xlsx.readFile(filePath);
 			const sheetName = workbook.SheetNames[0];
 			console.log("Excel Sheet Name:", sheetName);
@@ -80,10 +89,8 @@ exports.agodaDataDump = async (req, res) => {
 			data = xlsx.utils.sheet_to_json(sheet);
 		} else if (fileExtension === ".csv") {
 			console.log("Processing CSV file...");
-			// Handle CSV files
 			data = await parseCSV(filePath);
 		} else {
-			// Unsupported file type
 			console.error("Unsupported file format:", fileExtension);
 			return res.status(400).json({ error: "Unsupported file format" });
 		}
@@ -106,7 +113,6 @@ exports.agodaDataDump = async (req, res) => {
 
 		console.log("Hotel Details Loaded");
 
-		// Normalize keys for easier handling
 		const normalizeKeys = (obj) => {
 			const normalized = {};
 			for (const key of Object.keys(obj)) {
@@ -116,7 +122,7 @@ exports.agodaDataDump = async (req, res) => {
 		};
 
 		for (let item of data) {
-			item = normalizeKeys(item); // Normalize the item keys
+			item = normalizeKeys(item);
 			console.log("Normalized Item:", item);
 
 			const itemNumber = item["bookingidexternal_reference_id"]
@@ -139,16 +145,16 @@ exports.agodaDataDump = async (req, res) => {
 
 			console.log("Total Amount Calculated:", totalAmount);
 
+			const checkInDate = parseDate(item["staydatefrom"]);
+			const checkOutDate = parseDate(item["staydateto"]);
+
 			const daysOfResidence = calculateDaysOfResidence(
-				item["staydatefrom"],
-				item["staydateto"]
+				checkInDate,
+				checkOutDate
 			);
 			console.log("Days of Residence:", daysOfResidence);
 
-			const dateRange = generateDateRange(
-				item["staydatefrom"],
-				item["staydateto"]
-			);
+			const dateRange = generateDateRange(checkInDate, checkOutDate);
 			console.log("Date Range:", dateRange);
 
 			const roomDetails = hotelDetails.roomCountDetails.find(
@@ -168,7 +174,6 @@ exports.agodaDataDump = async (req, res) => {
 
 			const roomCount = parseInt(item["room count"] || 1, 10);
 
-			// Build the pricingByDay array
 			const pricingByDayTemplate = dateRange.map((date) => {
 				const pricingRate = roomDetails.pricingRate.find(
 					(rate) => dayjs(rate.date).format("YYYY-MM-DD") === date
@@ -239,8 +244,8 @@ exports.agodaDataDump = async (req, res) => {
 				total_rooms: roomCount,
 				total_amount: totalAmount.toFixed(2),
 				currency: item["currency"],
-				checkin_date: moment.tz(item["staydatefrom"], "Asia/Riyadh").toDate(),
-				checkout_date: moment.tz(item["staydateto"], "Asia/Riyadh").toDate(),
+				checkin_date: checkInDate,
+				checkout_date: checkOutDate,
 				days_of_residence: daysOfResidence,
 				comment: item["special_request"] || "",
 				commission: Number(
