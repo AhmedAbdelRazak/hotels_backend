@@ -166,8 +166,10 @@ exports.agodaDataDump = async (req, res) => {
 
 			console.log("Room Details Found:", roomDetails.displayName);
 
+			const roomCount = parseInt(item["room count"] || 1, 10);
+
 			// Build the pricingByDay array
-			const pricingByDay = dateRange.map((date) => {
+			const pricingByDayTemplate = dateRange.map((date) => {
 				const pricingRate = roomDetails.pricingRate.find(
 					(rate) => dayjs(rate.date).format("YYYY-MM-DD") === date
 				);
@@ -185,7 +187,7 @@ exports.agodaDataDump = async (req, res) => {
 					);
 				}
 
-				const price = totalAmount / daysOfResidence;
+				const price = totalAmount / (daysOfResidence * roomCount);
 				const commissionRate =
 					1 -
 					Number(item["total_inclusive_rate"] || 0) / Number(totalAmount || 1);
@@ -203,17 +205,13 @@ exports.agodaDataDump = async (req, res) => {
 				};
 			});
 
-			console.log("Pricing By Day:", pricingByDay);
-
-			const pickedRoomsType = [
-				{
-					room_type: roomDetails.roomType,
-					displayName: roomDetails.displayName,
-					chosenPrice: (totalAmount / daysOfResidence).toFixed(2),
-					count: 1,
-					pricingByDay,
-				},
-			];
+			const pickedRoomsType = Array.from({ length: roomCount }, () => ({
+				room_type: roomDetails.roomType,
+				displayName: roomDetails.displayName,
+				chosenPrice: (totalAmount / daysOfResidence / roomCount).toFixed(2),
+				count: 1,
+				pricingByDay: pricingByDayTemplate,
+			}));
 
 			console.log("Picked Rooms Type:", pickedRoomsType);
 
@@ -238,7 +236,7 @@ exports.agodaDataDump = async (req, res) => {
 				cancel_reason: item["cancellationpolicydescription"] || "",
 				booked_at: moment.tz(item["bookeddate"], "Asia/Riyadh").toDate(),
 				sub_total: item["total_inclusive_rate"],
-				total_rooms: 1,
+				total_rooms: roomCount,
 				total_amount: totalAmount.toFixed(2),
 				currency: item["currency"],
 				checkin_date: moment.tz(item["staydatefrom"], "Asia/Riyadh").toDate(),
