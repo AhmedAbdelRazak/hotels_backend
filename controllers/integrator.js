@@ -74,8 +74,6 @@ exports.agodaDataDump = async (req, res) => {
 		const userId = req.params.belongsTo;
 
 		// Log the incoming request parameters
-		console.log("Account ID:", accountId);
-		console.log("User ID:", userId);
 
 		if (!req.file || !req.file.path) {
 			console.error("No file uploaded");
@@ -83,7 +81,6 @@ exports.agodaDataDump = async (req, res) => {
 		}
 
 		const filePath = req.file.path; // Path to uploaded file
-		console.log("File Path:", filePath);
 
 		const fileExtension = path
 			.extname(req.file.originalname || "")
@@ -93,11 +90,9 @@ exports.agodaDataDump = async (req, res) => {
 		let data = [];
 
 		if (fileExtension === ".xlsx" || fileExtension === ".xls") {
-			console.log("Processing Excel file...");
 			// Handle Excel files
 			const workbook = xlsx.readFile(filePath);
 			const sheetName = workbook.SheetNames[0];
-			console.log("Excel Sheet Name:", sheetName);
 			const sheet = workbook.Sheets[sheetName];
 			data = xlsx.utils.sheet_to_json(sheet);
 		} else if (fileExtension === ".csv") {
@@ -112,7 +107,7 @@ exports.agodaDataDump = async (req, res) => {
 
 		console.log("Parsed Data Length:", data.length);
 		if (data.length > 0) {
-			console.log("CSV Headers:", Object.keys(data[0]));
+			// console.log("CSV Headers:", Object.keys(data[0]));
 		}
 
 		if (data.length === 0) {
@@ -139,7 +134,6 @@ exports.agodaDataDump = async (req, res) => {
 
 		for (let item of data) {
 			item = normalizeKeys(item); // Normalize the item keys
-			console.log("Normalized Item:", item);
 
 			const itemNumber = item["bookingidexternal_reference_id"]
 				?.toString()
@@ -265,6 +259,14 @@ exports.agodaDataDump = async (req, res) => {
 
 			console.log("Picked Rooms Type:", pickedRoomsType);
 
+			console.log("Original Date: staydatefrom", item["staydatefrom"]);
+			console.log(
+				"Parsed Date (String) staydateto:",
+				parseAndNormalizeDate(item["staydateto"])
+			);
+			console.log("Final MongoDB Date: checkInDate", checkInDate);
+			console.log("Final MongoDB Date: checkOutDate", checkOutDate);
+
 			const document = {
 				confirmation_number: itemNumber,
 				booking_source: "online jannat booking",
@@ -309,8 +311,6 @@ exports.agodaDataDump = async (req, res) => {
 						: 0,
 			};
 
-			console.log("Document to Save:", document);
-
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: itemNumber,
 				booking_source: "online jannat booking",
@@ -323,8 +323,12 @@ exports.agodaDataDump = async (req, res) => {
 					{ $set: { ...document } }
 				);
 			} else {
-				console.log("Creating new reservation:", itemNumber);
+				// console.log("Creating new reservation:", itemNumber);
 				await Reservations.create(document);
+				console.log("Saving to MongoDB:", {
+					checkin_date: checkInDate,
+					checkout_date: checkOutDate,
+				});
 			}
 		}
 
