@@ -209,31 +209,41 @@ exports.agodaDataDump = async (req, res) => {
 			const roomCount = parseInt(item["room count"] || 1, 10);
 
 			// Build the pricingByDay array
+			// Build the pricingByDay array
 			const pricingByDayTemplate = dateRange.map((date) => {
+				// Standardize the date for comparison
+				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
+
+				// Find the matching pricing rate for the given date
 				const pricingRate = roomDetails.pricingRate.find(
-					(rate) => dayjs(rate.date).format("YYYY-MM-DD") === date
+					(rate) =>
+						dayjs(rate.calendarDate).format("YYYY-MM-DD") === standardizedDate
 				);
 
+				// Fallback logic for rootPrice
 				let rootPrice = 0;
 				if (pricingRate) {
-					rootPrice = pricingRate.basePrice || 0;
+					rootPrice = parseFloat(
+						pricingRate.rootPrice || pricingRate.price || 0
+					);
 				} else if (roomDetails.defaultCost) {
-					rootPrice = roomDetails.defaultCost;
+					rootPrice = parseFloat(roomDetails.defaultCost);
 				} else if (roomDetails.price?.basePrice) {
-					rootPrice = roomDetails.price.basePrice;
+					rootPrice = parseFloat(roomDetails.price.basePrice);
 				} else {
 					console.warn(
-						`No pricing or default cost found for room: ${item["room name"]}`
+						`No pricing or default cost found for room: ${roomDetails.displayName} on date: ${standardizedDate}`
 					);
 				}
 
+				// Calculate price and commission
 				const price = totalAmount / (daysOfResidence * roomCount);
 				const commissionRate =
 					1 -
 					Number(item["total_inclusive_rate"] || 0) / Number(totalAmount || 1);
 
 				return {
-					date,
+					date: standardizedDate,
 					price: price.toFixed(2),
 					rootPrice: rootPrice.toFixed(2),
 					commissionRate: commissionRate.toFixed(2),
