@@ -48,19 +48,19 @@ const parseCSV = (filePath) => {
 
 const parseAndNormalizeDate = (dateStringOrNumber) => {
 	if (!isNaN(dateStringOrNumber)) {
-		// Excel numeric date format: Convert to JavaScript date
+		// Handle Excel numeric date format
 		const excelEpochStart = new Date(1900, 0, 1); // Excel starts on 1900-01-01
 		const parsedDate = new Date(
 			excelEpochStart.getTime() + (dateStringOrNumber - 2) * 86400000
 		); // Subtract 2 to handle Excel bug
-		return moment(parsedDate).format("YYYY-MM-DD");
+		return moment.utc(parsedDate).toDate(); // Return as UTC Date object
 	}
 
 	const possibleFormats = ["MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"];
 	for (const format of possibleFormats) {
-		const parsedDate = moment(dateStringOrNumber, format, true);
+		const parsedDate = moment.utc(dateStringOrNumber, format, true);
 		if (parsedDate.isValid()) {
-			return parsedDate.format("YYYY-MM-DD");
+			return parsedDate.toDate(); // Return as UTC Date object
 		}
 	}
 
