@@ -53,14 +53,14 @@ const parseAndNormalizeDate = (dateStringOrNumber) => {
 		const parsedDate = new Date(
 			excelEpochStart.getTime() + (dateStringOrNumber - 2) * 86400000
 		); // Subtract 2 to handle Excel bug
-		return moment.utc(parsedDate).toDate(); // Return as UTC Date object
+		return dayjs(parsedDate).format("YYYY-MM-DD"); // Format as local date string
 	}
 
 	const possibleFormats = ["MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"];
 	for (const format of possibleFormats) {
-		const parsedDate = moment.utc(dateStringOrNumber, format, true);
+		const parsedDate = dayjs(dateStringOrNumber, format, true);
 		if (parsedDate.isValid()) {
-			return parsedDate.toDate(); // Return as UTC Date object
+			return parsedDate.format("YYYY-MM-DD"); // Format as local date string
 		}
 	}
 
