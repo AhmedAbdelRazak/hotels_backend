@@ -2,6 +2,7 @@
 
 const express = require("express");
 const router = express.Router();
+const { requireSignin, isAuth, isAdmin } = require("../controllers/auth");
 
 const { userById } = require("../controllers/user");
 const {
@@ -19,6 +20,7 @@ const {
 	gettingCurrencyConversion,
 	getCurrencyRates,
 	gettingByReservationId,
+	paginatedReservationList,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -40,6 +42,13 @@ router.get(
 	gettingByReservationId
 );
 router.get("/currency-rates", getCurrencyRates);
+router.get(
+	"/all-reservations-list-admin/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	paginatedReservationList
+);
 
 router.param("userId", userById);
 

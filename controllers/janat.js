@@ -922,42 +922,42 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 	try {
 		const elHaramCoordinates = [39.8262, 21.4225]; // Coordinates for Al-Masjid al-Haram (longitude, latitude)
 
-		// Find all hotels with coordinates not set to [0, 0] and distances needing an update
+		// Find all hotels with valid coordinates (not [0, 0])
 		const hotels = await HotelDetails.find({
 			"location.coordinates": { $ne: [0, 0] },
-			$or: [
-				{ distances: { $exists: false } }, // Check if distances object does not exist
-				{ "distances.walkingToElHaram": 0 },
-				{ "distances.drivingToElHaram": 0 },
-			],
 		});
 
 		if (hotels.length === 0) {
 			return res
 				.status(200)
-				.json({ message: "No hotels require distance updates" });
+				.json({ message: "No hotels with valid coordinates found" });
 		}
+
+		const apiKey = process.env.GOOGLE_MAPS_API_KEY; // Ensure your API key is set in environment variables
 
 		// Iterate over each hotel and calculate distances
 		for (let hotel of hotels) {
+			// Clear existing distances
+			hotel.distances = {};
+
 			const [hotelLongitude, hotelLatitude] = hotel.location.coordinates;
 
-			const apiKey = process.env.GOOGLE_MAPS_API_KEY; // Ensure your API key is set in environment variables
-
-			// Make separate API calls for walking and driving
+			// Construct API URLs for walking and driving
 			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=walking&key=${apiKey}`;
 			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=driving&key=${apiKey}`;
 
+			// Make API calls for walking and driving distances
 			const walkingResponse = await axios.get(walkingUrl);
 			const drivingResponse = await axios.get(drivingUrl);
 
 			const walkingData = walkingResponse.data;
 			const drivingData = drivingResponse.data;
 
-			// Check if the responses are structured correctly
+			// Extract distance information from API responses
 			const walkingElement = walkingData.rows?.[0]?.elements?.[0];
 			const drivingElement = drivingData.rows?.[0]?.elements?.[0];
 
+			// Update hotel distances based on API response
 			if (walkingElement && walkingElement.status === "OK") {
 				hotel.distances.walkingToElHaram = walkingElement.duration.text;
 			} else {
@@ -970,17 +970,19 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 				hotel.distances.drivingToElHaram = "N/A";
 			}
 
+			// Save the updated hotel information
 			await hotel.save();
 		}
 
+		// Respond with success message
 		res.status(200).json({
-			message: "Distances updated successfully for applicable hotels",
+			message: "Distances recalculated and updated successfully for all hotels",
 		});
 	} catch (error) {
 		console.error("Error updating hotel distances:", error);
 		res
 			.status(500)
-			.json({ error: "An error occurred while updating hotel distances" });
+			.json({ error: "An error occurred while recalculating hotel distances" });
 	}
 };
 
@@ -1098,6 +1100,50 @@ exports.gettingByReservationId = async (req, res) => {
 		return res.status(500).json({
 			message:
 				"An internal server error occurred while fetching the reservation.",
+		});
+	}
+};
+
+exports.paginatedReservationList = async (req, res) => {
+	try {
+		// Extract query parameters for pagination
+		const {
+			page = 1,
+			limit = 100,
+			booking_source = "online jannat booking",
+		} = req.query;
+
+		// Convert page and limit to integers
+		const pageNumber = parseInt(page, 10);
+		const pageSize = parseInt(limit, 10);
+
+		// Filter for reservations
+		const filter = { booking_source: booking_source.toLowerCase() };
+
+		// Count total documents for pagination
+		const totalDocuments = await Reservations.countDocuments(filter);
+
+		// Fetch paginated reservations, sorted by createdAt (newest first)
+		const reservations = await Reservations.find(filter)
+			.sort({ createdAt: -1 }) // Sort newest to oldest
+			.skip((pageNumber - 1) * pageSize) // Pagination offset
+			.limit(pageSize) // Limit results to page size
+			.populate("belongsTo") // Populate belongsTo (User model), selecting only name and email
+			.populate("hotelId"); // Populate hotelId (HotelDetails model), selecting only name and address
+
+		// Return response with reservations and total count
+		return res.status(200).json({
+			success: true,
+			data: reservations,
+			totalDocuments, // Total document count for frontend pagination
+			currentPage: pageNumber,
+			totalPages: Math.ceil(totalDocuments / pageSize),
+		});
+	} catch (error) {
+		console.error("Error fetching paginated reservations:", error.message);
+		return res.status(500).json({
+			success: false,
+			message: "An error occurred while fetching reservations",
 		});
 	}
 };

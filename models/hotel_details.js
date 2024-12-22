@@ -109,6 +109,14 @@ const hotel_detailsSchema = new mongoose.Schema(
 						type: Number,
 						default: 10,
 					},
+					bedsCount: {
+						type: Number,
+						default: 1,
+					},
+					roomForGender: {
+						type: String,
+						default: "Unisex",
+					},
 				},
 			],
 		},
