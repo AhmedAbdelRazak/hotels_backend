@@ -1107,18 +1107,19 @@ exports.gettingByReservationId = async (req, res) => {
 exports.paginatedReservationList = async (req, res) => {
 	try {
 		// Extract query parameters for pagination
-		const {
-			page = 1,
-			limit = 100,
-			booking_source = "online jannat booking",
-		} = req.query;
+		const { page = 1, limit = 100 } = req.query;
 
 		// Convert page and limit to integers
 		const pageNumber = parseInt(page, 10);
 		const pageSize = parseInt(limit, 10);
 
-		// Filter for reservations
-		const filter = { booking_source: booking_source.toLowerCase() };
+		// Define case-insensitive filters for booking_source
+		const filter = {
+			$or: [
+				{ booking_source: { $regex: /^online jannat booking$/i } }, // Match "online jannat booking" (case-insensitive)
+				{ booking_source: { $regex: /^generated link$/i } }, // Match "Generated Link" (case-insensitive)
+			],
+		};
 
 		// Count total documents for pagination
 		const totalDocuments = await Reservations.countDocuments(filter);
