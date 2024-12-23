@@ -66,7 +66,10 @@ exports.updateSupportCase = async (req, res) => {
 			closedBy,
 			rating,
 			supporterName,
+			hotelId,
 		} = req.body;
+
+		console.log(req.body, "req.body");
 
 		const updateFields = {};
 		if (supporterId) updateFields.supporterId = supporterId;
@@ -75,6 +78,7 @@ exports.updateSupportCase = async (req, res) => {
 		if (closedBy) updateFields.closedBy = closedBy;
 		if (rating) updateFields.rating = rating;
 		if (supporterName) updateFields.supporterName = supporterName;
+		if (hotelId) updateFields.hotelId = hotelId;
 
 		if (Object.keys(updateFields).length === 0) {
 			return res
@@ -567,5 +571,30 @@ exports.markAllMessagesAsSeenByHotels = async (req, res) => {
 	} catch (error) {
 		console.error("Error:", error);
 		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.markEverythingAsSeen = async (req, res) => {
+	try {
+		// Update all messages across all cases to be marked as seen
+		const result = await SupportCase.updateMany(
+			{}, // No filter, meaning all support cases will be updated
+			{
+				$set: {
+					"conversation.$[].seenByAdmin": true,
+					"conversation.$[].seenByHotel": true,
+					"conversation.$[].seenByCustomer": true,
+				},
+			}
+		);
+
+		// Return a success response
+		res.status(200).json({
+			message: "All messages in all cases marked as seen",
+			updatedCases: result.modifiedCount,
+		});
+	} catch (error) {
+		console.error("Error marking everything as seen:", error);
+		res.status(500).json({ error: error.message });
 	}
 };

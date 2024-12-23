@@ -95,4 +95,9 @@ router.put(
 	supportCaseController.markAllMessagesAsSeenByHotels
 );
 
+router.put(
+	"/mark-all-cases-as-seen",
+	supportCaseController.markEverythingAsSeen
+);
+
 module.exports = router;
