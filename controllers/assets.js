@@ -576,7 +576,9 @@ const ClientConfirmationEmail = (reservationData) => {
                 Reservation Confirmation
             </div>
             <div class="content">
-                <h2>Hi ${customerDetails.name || "Valued Guest"},</h2>
+               <h2>Hi ${
+									customerDetails.name?.split(" ")[0] || "Valued Guest"
+								},</h2>
                 <p>Thank you for booking with <a href="https://jannatbooking.com" style="color: #007bff; text-decoration: none;">JannatBooking.com</a>.</p>
 
                 <p><strong>Hotel Name:</strong> ${formattedHotelName}</p>
@@ -656,8 +658,6 @@ const SendingReservationLinkEmail = ({
 		.toLowerCase()
 		.replace(/\b\w/g, (char) => char.toUpperCase());
 
-	console.log(formattedHotelName, "formattedHotelName formattedHotelName ");
-
 	const email = `
     <!DOCTYPE html>
     <html lang="en">
@@ -665,22 +665,120 @@ const SendingReservationLinkEmail = ({
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Reservation Confirmation Link</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f2f4f8;
+            }
+            .email-container {
+                background-color: #ffffff;
+                max-width: 700px;
+                margin: 30px auto;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 0;
+                padding: 0;
+            }
+            .header {
+                background: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 20px;
+                font-size: 1.8rem;
+                font-weight: bold;
+            }
+            .content {
+                padding: 20px;
+                color: #333333;
+                line-height: 1.6;
+            }
+            .content h2 {
+                color: #20212c;
+                margin-bottom: 10px;
+            }
+            .button-container {
+                text-align: center;
+                margin: 30px 0;
+            }
+            .button {
+                font-size: 2rem;
+                background: #005900; /* Dark green */
+                color: #ffffff; /* White font */
+                text-decoration: none;
+                padding: 20px 40px;
+                border-radius: 8px;
+                font-weight: bold;
+                border: none;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+                display: inline-block;
+                transition: all 0.3s ease-in-out;
+            }
+
+            .button a {
+                color: #f9f9f9;
+                text-decoration: none;
+                font-weight: bold;
+                font-size: 2rem;
+            }
+
+
+            .button:hover {
+                background: #004f00; /* Slightly darker green for hover effect */
+                box-shadow: 0 6px 10px rgba(0, 0, 0, 0.3);
+            }
+            @media only screen and (max-width: 600px) {
+                .button {
+                    font-size: 1.5rem; /* Smaller font size for small screens */
+                    padding: 10px 20px;
+                }
+
+                 .button a {
+                    color: #f9f9f9;
+                    text-decoration: none;
+                    font-weight: bold;
+                    font-size: 1.5rem;
+            }
+            }
+            @media only screen and (min-width: 601px) {
+                .button {
+                    font-size: 1.7rem; /* Larger font size for bigger screens */
+                    padding: 20px 40px; /* Bigger padding for better emphasis */
+                }
+            }
+            .footer {
+                background: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 15px;
+                font-size: 0.9rem;
+            }
+            .footer a {
+                color: #ffc107;
+                text-decoration: none;
+                font-weight: bold;
+            }
+        </style>
     </head>
-    <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f2f4f8;">
-        <div style="background-color: #ffffff; max-width: 700px; margin: 30px auto; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);">
-            <table style="width: 100%; border-collapse: collapse; margin: 0; padding: 0;">
+    <body>
+        <div class="email-container">
+            <table>
                 <!-- Header Section -->
                 <tr>
-                    <td style="background: #1e2332; color: #ffffff; text-align: center; padding: 20px; font-size: 1.8rem; font-weight: bold;">
+                    <td class="header">
                         ${formattedHotelName} | Reservation Confirmation Link
                     </td>
                 </tr>
                 <!-- Content Section -->
                 <tr>
-                    <td style="padding: 20px; color: #333333; line-height: 1.6;">
-                        <h2 style="color: #20212c; margin-bottom: 10px;">Hi ${
-													name || "Valued Guest"
-												},</h2>
+                    <td class="content">
+                        <h2>Hi ${name?.split(" ")[0] || "Valued Guest"},</h2>
                         <p>You recently requested a reservation through ${
 													agentName || "our agent"
 												}. Please review the details and confirm your reservation using the link below:</p>
@@ -695,19 +793,18 @@ const SendingReservationLinkEmail = ({
 		2
 	)} SAR.
                         </p>
-                       <p style="text-align: center; margin: 30px 0; font-size: 1.5rem; background: #1e2332;">
-                        <a href="${confirmationLink}" target="_blank" style="font-size: 1.5rem; background: #003d00; color: #ffffff; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; font-size: 2rem; border: 2px solid #9fff9f; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);">
-                            Confirm Reservation
-                        </a>
-                </p>
-
+                        <div class="button-container">
+                            <a href="${confirmationLink}" target="_blank" class="button" style="color: #f9f9f9; font-size:1.5rem;">
+                                Confirm Reservation
+                            </a>
+                        </div>
                     </td>
                 </tr>
                 <!-- Footer Section -->
                 <tr>
-                    <td style="background: #1e2332; color: #ffffff; text-align: center; padding: 15px; font-size: 0.9rem;">
-                        <p>If you have any inquiries, please <a href="https://jannatbooking.com" style="color: #ffc107; text-decoration: none; font-weight: bold;">contact us</a>.</p>
-                        <p>Best Regards,<br>Jannat Booking Adminstration</p>
+                    <td class="footer">
+                        <p>If you have any inquiries, please <a href="https://jannatbooking.com">contact us</a>.</p>
+                        <p>Best Regards,<br>Jannat Booking Administration</p>
                         <p>Email: support@jannatbooking.com</p>
                         <p>PO Box 322, Crestline</p>
                     </td>
