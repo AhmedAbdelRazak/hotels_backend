@@ -643,10 +643,89 @@ const ClientConfirmationEmail = (reservationData) => {
 	return email;
 };
 
+const SendingReservationLinkEmail = ({
+	hotelName,
+	name,
+	agentName,
+	depositPercentage,
+	wholeAmount,
+	confirmationLink,
+}) => {
+	const hotelNameAdjusted = hotelName || "Jannat Booking";
+	const formattedHotelName = hotelNameAdjusted
+		.toLowerCase()
+		.replace(/\b\w/g, (char) => char.toUpperCase());
+
+	console.log(formattedHotelName, "formattedHotelName formattedHotelName ");
+
+	const email = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Reservation Confirmation Link</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f2f4f8;">
+        <div style="background-color: #ffffff; max-width: 700px; margin: 30px auto; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);">
+            <table style="width: 100%; border-collapse: collapse; margin: 0; padding: 0;">
+                <!-- Header Section -->
+                <tr>
+                    <td style="background: #1e2332; color: #ffffff; text-align: center; padding: 20px; font-size: 1.8rem; font-weight: bold;">
+                        ${formattedHotelName} | Reservation Confirmation Link
+                    </td>
+                </tr>
+                <!-- Content Section -->
+                <tr>
+                    <td style="padding: 20px; color: #333333; line-height: 1.6;">
+                        <h2 style="color: #20212c; margin-bottom: 10px;">Hi ${
+													name || "Valued Guest"
+												},</h2>
+                        <p>You recently requested a reservation through ${
+													agentName || "our agent"
+												}. Please review the details and confirm your reservation using the link below:</p>
+                        <p>
+                            <strong>Note:</strong> You can pay a deposit of ${depositPercentage}% 
+                            (${(
+															(wholeAmount * depositPercentage) /
+															100
+														).toFixed(
+															2
+														)} SAR) or the full amount of ${wholeAmount.toFixed(
+		2
+	)} SAR.
+                        </p>
+                       <p style="text-align: center; margin: 30px 0; font-size: 1.5rem; background: #1e2332;">
+                        <a href="${confirmationLink}" target="_blank" style="font-size: 1.5rem; background: #003d00; color: #ffffff; text-decoration: none; padding: 15px 30px; border-radius: 8px; font-weight: bold; font-size: 2rem; border: 2px solid #9fff9f; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);">
+                            Confirm Reservation
+                        </a>
+                </p>
+
+                    </td>
+                </tr>
+                <!-- Footer Section -->
+                <tr>
+                    <td style="background: #1e2332; color: #ffffff; text-align: center; padding: 15px; font-size: 0.9rem;">
+                        <p>If you have any inquiries, please <a href="https://jannatbooking.com" style="color: #ffc107; text-decoration: none; font-weight: bold;">contact us</a>.</p>
+                        <p>Best Regards,<br>Jannat Booking Adminstration</p>
+                        <p>Email: support@jannatbooking.com</p>
+                        <p>PO Box 322, Crestline</p>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </body>
+    </html>
+  `;
+
+	return email;
+};
+
 module.exports = {
 	confirmationEmail,
 	reservationUpdate,
 	emailPaymentLink,
 	paymentReceipt,
 	ClientConfirmationEmail,
+	SendingReservationLinkEmail,
 };

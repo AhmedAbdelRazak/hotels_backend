@@ -21,6 +21,7 @@ const {
 	getCurrencyRates,
 	gettingByReservationId,
 	paginatedReservationList,
+	sendingEmailForPaymentLink,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -48,6 +49,14 @@ router.get(
 	isAuth,
 	isAdmin,
 	paginatedReservationList
+);
+
+router.post(
+	"/send-payment-link-email/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	sendingEmailForPaymentLink
 );
 
 router.param("userId", userById);

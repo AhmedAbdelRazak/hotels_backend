@@ -83,7 +83,7 @@ const sendEmailWithPdf = async (reservationData) => {
 		to: reservationData.customer_details.email
 			? reservationData.customer_details.email
 			: "ahmedabdelrazak20@gmail.com",
-		from: "noreply@janatbooking.com",
+		from: "noreply@jannatbooking.com",
 		// cc: [
 		// 	{ email: "ayed.hotels@gmail.com" },
 		// 	{ email: "zaerhotel@gmail.com" },
@@ -207,7 +207,7 @@ exports.sendPaymentLinkEmail = async (req, res) => {
 
 	const email = {
 		to: customerEmail, // The customer's email address
-		from: "noreply@janatbooking.com",
+		from: "noreply@jannatbooking.com",
 		// cc: [
 		// 	{ email: "ayed.hotels@gmail.com" },
 		// 	{ email: "zaerhotel@gmail.com" },
@@ -1350,8 +1350,8 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 		to: reservationData.customer_details.email
 			? reservationData.customer_details.email
 			: "ahmedabdelrazak20@gmail.com",
-		from: "noreply@janatbooking.com",
-		from: "noreply@janatbooking.com",
+		from: "noreply@jannatbooking.com",
+		// from: "noreply@jannatbooking.com",
 		// cc: [
 		// 	{ email: "ayed.hotels@gmail.com" },
 		// 	{ email: "zaerhotel@gmail.com" },

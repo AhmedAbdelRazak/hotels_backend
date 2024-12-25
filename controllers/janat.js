@@ -7,7 +7,10 @@ const User = require("../models/user");
 const axios = require("axios");
 require("dotenv").config();
 const fetch = require("node-fetch");
-const { ClientConfirmationEmail } = require("./assets");
+const {
+	ClientConfirmationEmail,
+	SendingReservationLinkEmail,
+} = require("./assets");
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
 const { encryptWithSecret, decryptWithSecret } = require("./utils");
@@ -442,6 +445,11 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 		const emailOptions = {
 			to: guestEmail || "ahmed.abdelrazak@jannatbooking.com", // Safe fallback
 			from: "noreply@jannatbooking.com",
+			bcc: [
+				{ email: "morazzakhamouda@gmail.com" },
+				{ email: "xhoteleg@gmail.com" },
+				{ email: "ahmed.abdelrazak@jannatbooking.com" },
+			],
 			subject: "Reservation Confirmation - Invoice Attached",
 			html: emailHtmlContent,
 			attachments: [
@@ -1146,5 +1154,104 @@ exports.paginatedReservationList = async (req, res) => {
 			success: false,
 			message: "An error occurred while fetching reservations",
 		});
+	}
+};
+
+exports.sendingEmailForPaymentLink = async (req, res) => {
+	try {
+		const {
+			hotelName,
+			name,
+			email,
+			phone,
+			nationality,
+			checkInDate,
+			checkOutDate,
+			numberOfNights,
+			adults,
+			children,
+			totalAmount,
+			totalCommission,
+			generatedLink,
+			selectedRooms,
+			agentName,
+			depositPercentage,
+		} = req.body;
+		console.log(req.body, "req.bodyreq.body");
+		// Validate required fields
+		if (
+			!hotelName ||
+			!name ||
+			!email ||
+			!checkInDate ||
+			!checkOutDate ||
+			!numberOfNights ||
+			!totalAmount ||
+			!generatedLink
+		) {
+			return res
+				.status(400)
+				.json({ error: "Missing required email parameters." });
+		}
+
+		// Parse numeric fields
+		const parsedTotalAmount = parseFloat(totalAmount);
+		const parsedTotalCommission = parseFloat(totalCommission);
+		const parsedDepositAmount = (
+			parsedTotalAmount *
+			(depositPercentage / 100)
+		).toFixed(2);
+
+		// Generate email content
+		const emailHtmlContent = SendingReservationLinkEmail({
+			hotelName,
+			name,
+			agentName,
+			depositPercentage,
+			wholeAmount: parsedTotalAmount,
+			confirmationLink: generatedLink,
+		});
+
+		// Send email using SendGrid
+		const emailOptions = {
+			to: email,
+			from: "noreply@jannatbooking.com",
+			bcc: [
+				{ email: "morazzakhamouda@gmail.com" },
+				{ email: "xhoteleg@gmail.com" },
+				{ email: "ahmed.abdelrazak@jannatbooking.com" },
+			],
+			subject: `${hotelName} | Reservation Confirmation Link`,
+			html: emailHtmlContent,
+		};
+
+		await sgMail.send(emailOptions);
+
+		// Log email payload for debugging
+		console.log("Email sent with the following details:", {
+			hotelName,
+			name,
+			email,
+			phone,
+			nationality,
+			checkInDate,
+			checkOutDate,
+			numberOfNights,
+			adults,
+			children,
+			totalAmount: parsedTotalAmount,
+			totalCommission: parsedTotalCommission,
+			depositAmount: parsedDepositAmount,
+			generatedLink,
+			selectedRooms,
+			agentName,
+		});
+
+		res.status(200).json({ message: "Email sent successfully." });
+	} catch (error) {
+		console.error("Error sending email for payment link:", error);
+		res
+			.status(500)
+			.json({ error: "An error occurred while sending the email." });
 	}
 };
