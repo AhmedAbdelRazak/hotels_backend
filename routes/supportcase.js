@@ -100,4 +100,10 @@ router.put(
 	supportCaseController.markEverythingAsSeen
 );
 
+router.delete(
+	"/support-cases/:caseId/messages/:messageId",
+	attachIo, // Attach the `io` instance
+	supportCaseController.deleteMessageFromConversation
+);
+
 module.exports = router;

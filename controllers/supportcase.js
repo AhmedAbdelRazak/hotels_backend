@@ -598,3 +598,42 @@ exports.markEverythingAsSeen = async (req, res) => {
 		res.status(500).json({ error: error.message });
 	}
 };
+
+exports.deleteMessageFromConversation = async (req, res) => {
+	try {
+		const { caseId, messageId } = req.params;
+
+		// Validate IDs
+		if (
+			!mongoose.Types.ObjectId.isValid(caseId) ||
+			!mongoose.Types.ObjectId.isValid(messageId)
+		) {
+			return res.status(400).json({ error: "Invalid case ID or message ID" });
+		}
+
+		// Find the support case and remove the specific message
+		const updatedCase = await SupportCase.findByIdAndUpdate(
+			caseId,
+			{
+				$pull: { conversation: { _id: messageId } }, // Remove the message with the specific _id
+			},
+			{ new: true } // Return the updated document
+		);
+
+		if (!updatedCase) {
+			return res
+				.status(404)
+				.json({ error: "Support case or message not found" });
+		}
+
+		// Emit `messageDeleted` event to all clients in the room
+		req.io.to(caseId).emit("messageDeleted", { caseId, messageId });
+
+		res
+			.status(200)
+			.json({ message: "Message deleted successfully", updatedCase });
+	} catch (error) {
+		console.error("Error deleting message:", error);
+		res.status(500).json({ error: error.message });
+	}
+};

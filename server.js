@@ -72,7 +72,23 @@ server.listen(port, () => {
 
 // Socket.io event handling
 io.on("connection", (socket) => {
-	console.log("A user connected");
+	console.log("A user connected:", socket.id);
+
+	// Join a specific room
+	socket.on("joinRoom", ({ caseId }) => {
+		if (caseId) {
+			socket.join(caseId); // Join the room with the given caseId
+			console.log(`Socket ${socket.id} joined room: ${caseId}`);
+		}
+	});
+
+	// Leave the room when a user disconnects
+	socket.on("leaveRoom", ({ caseId }) => {
+		if (caseId) {
+			socket.leave(caseId); // Leave the room with the given caseId
+			console.log(`Socket ${socket.id} left room: ${caseId}`);
+		}
+	});
 
 	socket.on("sendMessage", (message) => {
 		console.log("Message received: ", message);
@@ -101,6 +117,13 @@ io.on("connection", (socket) => {
 
 	socket.on("disconnect", (reason) => {
 		console.log(`A user disconnected: ${reason}`);
+	});
+
+	socket.on("deleteMessage", ({ caseId, messageId }) => {
+		console.log(`Message deleted in case ${caseId}: ${messageId}`);
+
+		// Notify all clients in the specific case room
+		io.to(caseId).emit("messageDeleted", { caseId, messageId });
 	});
 
 	socket.on("connect_error", (error) => {
