@@ -220,14 +220,30 @@ exports.getListOfHotels = async (req, res) => {
 			return totalMinutes;
 		};
 
-		// Sort hotels by walkingToElHaram distance (convert to numeric value)
+		// Sort hotels by hotelRating (highest to lowest) and then by walkingToElHaram distance
 		const sortedHotels = hotels.sort((a, b) => {
+			// Parse walking times
 			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
 			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
 
-			return aWalkingTime - bWalkingTime;
+			// Sort by hotelRating first (descending order), then by walking distance (ascending order)
+			if (b.hotelRating !== a.hotelRating) {
+				return b.hotelRating - a.hotelRating; // Descending order for hotelRating
+			}
+			return aWalkingTime - bWalkingTime; // Ascending order for walking distance
 		});
 
+		// Log sorted hotels for debugging
+		// console.log(
+		// 	"Sorted Hotels:",
+		// 	sortedHotels.map((hotel) => ({
+		// 		name: hotel.hotelName,
+		// 		rating: hotel.hotelRating,
+		// 		walkingTime: hotel.distances?.walkingToElHaram,
+		// 	}))
+		// );
+
+		// Send the sorted hotels as the response
 		res.status(200).json(sortedHotels);
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
@@ -361,19 +377,27 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 			return totalMinutes;
 		};
 
-		// Sort hotels by walkingToElHaram distance (convert to numeric value)
+		// Sort hotels by hotelRating (highest to lowest) and then by walkingToElHaram distance
 		const sortedHotels = result.sort((a, b) => {
 			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
 			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
 
-			return aWalkingTime - bWalkingTime;
+			// Sort by hotelRating first (descending), then by walking distance (ascending)
+			if (b.hotelRating !== a.hotelRating) {
+				return b.hotelRating - a.hotelRating; // Descending order for hotelRating
+			}
+			return aWalkingTime - bWalkingTime; // Ascending order for walking distance
 		});
 
 		// Log sorted hotels
-		console.log(
-			"Sorted Hotels:",
-			sortedHotels.map((hotel) => hotel.hotelName)
-		);
+		// console.log(
+		// 	"Sorted Hotels:",
+		// 	sortedHotels.map((hotel) => ({
+		// 		name: hotel.hotelName,
+		// 		rating: hotel.hotelRating,
+		// 		walkingTime: hotel.distances?.walkingToElHaram,
+		// 	}))
+		// );
 
 		// Send the sorted hotels as the response
 		res.status(200).json(sortedHotels);
