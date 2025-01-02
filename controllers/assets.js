@@ -818,6 +818,191 @@ const SendingReservationLinkEmail = ({
 	return email;
 };
 
+const ReservationVerificationEmail = ({
+	name,
+	hotelName,
+	confirmationLink,
+}) => {
+	const formattedHotelName = hotelName || "Jannat Booking";
+
+	const email = `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Reservation Verification</title>
+          <style>
+              body {
+                  font-family: Arial, sans-serif;
+                  margin: 0;
+                  padding: 0;
+                  background-color: #f2f4f8;
+              }
+              .email-container {
+                  background-color: #ffffff;
+                  max-width: 700px;
+                  margin: 30px auto;
+                  padding: 20px;
+                  border-radius: 8px;
+                  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+              }
+              table {
+                  width: 100%;
+                  border-collapse: collapse;
+                  margin: 0;
+                  padding: 0;
+              }
+              .header {
+                  background: #1e2332;
+                  color: #ffffff;
+                  text-align: center;
+                  padding: 20px;
+                  font-size: 1.8rem;
+                  font-weight: bold;
+              }
+              .content {
+                  padding: 20px;
+                  color: #333333;
+                  line-height: 1.6;
+              }
+              .content h2 {
+                  color: #20212c;
+                  margin-bottom: 10px;
+              }
+              .button-container {
+                  text-align: center;
+                  margin: 30px 0;
+              }
+              .button {
+                  font-size: 2rem;
+                  background: #005900; /* Dark green */
+                  color: #ffffff; /* White font */
+                  text-decoration: none;
+                  padding: 20px 40px;
+                  border-radius: 8px;
+                  font-weight: bold;
+                  border: none;
+                  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+                  display: inline-block;
+                  transition: all 0.3s ease-in-out;
+              }
+  
+              .button a {
+                  color: #f9f9f9;
+                  text-decoration: none;
+                  font-weight: bold;
+                  font-size: 2rem;
+              }
+  
+              .button:hover {
+                  background: #004f00; /* Slightly darker green for hover effect */
+                  box-shadow: 0 6px 10px rgba(0, 0, 0, 0.3);
+              }
+
+
+               .button {
+                font-size: 2rem;
+                background: #005900; /* Dark green */
+                color: #ffffff; /* White font */
+                text-decoration: none;
+                padding: 20px 40px;
+                border-radius: 8px;
+                font-weight: bold;
+                border: none;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+                display: inline-block;
+                transition: all 0.3s ease-in-out;
+            }
+
+            .button a {
+                color: #f9f9f9;
+                text-decoration: none;
+                font-weight: bold;
+                font-size: 2rem;
+            }
+
+
+            .button:hover {
+                background: #004f00; /* Slightly darker green for hover effect */
+                box-shadow: 0 6px 10px rgba(0, 0, 0, 0.3);
+            }
+
+
+              @media only screen and (max-width: 600px) {
+                  .button {
+                      font-size: 1.5rem; /* Smaller font size for small screens */
+                      padding: 10px 20px;
+                  }
+  
+                   .button a {
+                      color: #f9f9f9;
+                      text-decoration: none;
+                      font-weight: bold;
+                      font-size: 1.5rem;
+                   }
+              }
+              @media only screen and (min-width: 601px) {
+                  .button {
+                      font-size: 1.7rem; /* Larger font size for bigger screens */
+                      padding: 20px 40px; /* Bigger padding for better emphasis */
+                  }
+              }
+              .footer {
+                  background: #1e2332;
+                  color: #ffffff;
+                  text-align: center;
+                  padding: 15px;
+                  font-size: 0.9rem;
+              }
+              .footer a {
+                  color: #ffc107;
+                  text-decoration: none;
+                  font-weight: bold;
+              }
+          </style>
+      </head>
+      <body>
+          <div class="email-container">
+              <table>
+                  <!-- Header Section -->
+                  <tr>
+                      <td class="header">
+                          ${formattedHotelName} | Reservation Verification
+                      </td>
+                  </tr>
+                  <!-- Content Section -->
+                  <tr>
+                      <td class="content">
+                          <h2>Hi ${name?.split(" ")[0] || "Valued Guest"},</h2>
+                          <p>
+                              Please click the button below to verify and confirm your reservation with the hotel <strong>${formattedHotelName}</strong>.
+                          </p>
+                          <div class="button-container">
+                              <a href="${confirmationLink}" target="_blank" class="button" style="color: #f9f9f9; font-size:1.5rem;">
+                                  Confirm Reservation
+                              </a>
+                          </div>
+                      </td>
+                  </tr>
+                  <!-- Footer Section -->
+                  <tr>
+                      <td class="footer">
+                          <p>If you have any inquiries, please <a href="https://jannatbooking.com">contact us</a>.</p>
+                          <p>Best Regards,<br>Jannat Booking Administration</p>
+                          <p>Email: support@jannatbooking.com</p>
+                          <p>PO Box 322, Crestline</p>
+                      </td>
+                  </tr>
+              </table>
+          </div>
+      </body>
+      </html>
+    `;
+
+	return email;
+};
+
 module.exports = {
 	confirmationEmail,
 	reservationUpdate,
@@ -825,4 +1010,5 @@ module.exports = {
 	paymentReceipt,
 	ClientConfirmationEmail,
 	SendingReservationLinkEmail,
+	ReservationVerificationEmail,
 };

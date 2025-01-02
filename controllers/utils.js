@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
 
 // AES encryption algorithm
 const algorithm = "aes-256-cbc";
@@ -52,4 +53,16 @@ function decryptWithSecret(encryptedValue) {
 	return decrypted;
 }
 
-module.exports = { encryptWithSecret, decryptWithSecret };
+function verifyToken(token) {
+	try {
+		const decoded = jwt.verify(token, process.env.JWT_SECRET2);
+		return { valid: true, expired: false, decoded };
+	} catch (err) {
+		if (err.name === "TokenExpiredError") {
+			return { valid: false, expired: true };
+		}
+		return { valid: false, expired: false };
+	}
+}
+
+module.exports = { encryptWithSecret, decryptWithSecret, verifyToken };

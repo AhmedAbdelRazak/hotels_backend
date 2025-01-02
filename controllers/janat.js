@@ -5,15 +5,22 @@ const Reservations = require("../models/reservations"); // Assuming this is your
 const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
 const axios = require("axios");
+const jwt = require("jsonwebtoken");
+
 require("dotenv").config();
 const fetch = require("node-fetch");
 const {
 	ClientConfirmationEmail,
 	SendingReservationLinkEmail,
+	ReservationVerificationEmail,
 } = require("./assets");
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
-const { encryptWithSecret, decryptWithSecret } = require("./utils");
+const {
+	encryptWithSecret,
+	decryptWithSecret,
+	verifyToken,
+} = require("./utils");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -535,22 +542,80 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// Validate and hash/encrypt card details
+		// Check payment type
+		if (req.body.payment === "Not Paid") {
+			if (!email) {
+				return res.status(201).json({
+					message: "Reservation verified successfully.",
+					data: {
+						...reservationData,
+						hotelName: reservationData.hotelName,
+						usePassword: reservationData.usePassword,
+					},
+				});
+			}
+
+			// Generate a tokenized link containing the reservation data
+			const tokenPayload = {
+				...req.body,
+			};
+
+			// console.log(req.body, "req.body from not paid status");
+
+			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
+				expiresIn: "3m", // Token expires in 3 minutes
+			});
+
+			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
+
+			// Send verification email
+			const emailContent = ReservationVerificationEmail({
+				name,
+				hotelName: hotel.hotelName,
+				confirmationLink,
+			});
+
+			try {
+				await sgMail.send({
+					to: email,
+					from: "noreply@jannatbooking.com",
+					bcc: [
+						{ email: "morazzakhamouda@gmail.com" },
+						{ email: "xhoteleg@gmail.com" },
+						{ email: "ahmed.abdelrazak@jannatbooking.com" },
+					],
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				return res.status(200).json({
+					message:
+						"Verification email sent successfully. Please check your inbox.",
+				});
+			} catch (error) {
+				console.error("Error sending verification email:", error);
+				return res.status(500).json({
+					message: "Failed to send verification email. Please try again later.",
+				});
+			}
+		}
+
+		// Process payment and create reservation for "Deposit Paid" or "Paid Online"
 		const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 			paymentDetails;
+
 		if (!cardNumber || !cardExpiryDate || !cardCVV || !cardHolderName) {
 			return res
 				.status(400)
 				.json({ message: "Invalid payment details provided." });
 		}
 
-		// Determine the amount in USD to process based on payment type
+		// Determine the amount in USD to process
 		const amountInUSD =
 			req.body.payment === "Deposit Paid"
 				? convertedAmounts.depositUSD
 				: convertedAmounts.totalUSD;
 
-		// Process payment before creating a reservation
 		const paymentResponse = await processPayment({
 			amount: amountInUSD,
 			cardNumber,
@@ -569,39 +634,47 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 		}
 
-		// Generate a unique confirmation_number if not already provided
-		if (!req.body.confirmation_number) {
-			ensureUniqueNumber(
-				Reservations,
-				"confirmation_number",
-				async (err, uniqueNumber) => {
-					if (err) {
-						return res
-							.status(500)
-							.json({ message: "Error generating confirmation number." });
-					}
-					req.body.confirmation_number = uniqueNumber;
+		// Generate a unique confirmation number using ensureUniqueNumber
+		let confirmationNumber = req.body.confirmation_number;
 
-					// Call function to handle user creation/update and save the reservation
-					await handleUserAndReservation(
-						req,
-						res,
-						uniqueNumber,
-						paymentResponse.response,
-						convertedAmounts
-					);
-				}
-			);
+		if (!confirmationNumber) {
+			confirmationNumber = await new Promise((resolve, reject) => {
+				ensureUniqueNumber(
+					Reservations, // The Mongoose model for reservations
+					"confirmation_number", // The field in the database
+					(err, uniqueNumber) => {
+						if (err) {
+							reject(new Error("Error generating confirmation number."));
+						} else {
+							resolve(uniqueNumber);
+						}
+					}
+				);
+			});
 		} else {
-			// If confirmation_number is provided, handle user creation/update and save the reservation
-			await handleUserAndReservation(
-				req,
-				res,
-				req.body.confirmation_number,
-				paymentResponse.response,
-				convertedAmounts
-			);
+			// Check if a reservation with the same confirmation number already exists
+			const existingReservation = await Reservations.findOne({
+				confirmation_number: confirmationNumber,
+			});
+
+			if (existingReservation) {
+				console.log("Existing reservation found:", existingReservation);
+				return res.status(400).json({
+					message: "Reservation already exists. No further action required.",
+				});
+			}
 		}
+
+		// Assign the confirmation number to the request body for saving
+		req.body.confirmation_number = confirmationNumber;
+
+		await handleUserAndReservation(
+			req,
+			res,
+			confirmationNumber,
+			paymentResponse.response,
+			convertedAmounts
+		);
 	} catch (error) {
 		console.error("Error creating reservation:", error);
 		res
@@ -695,6 +768,8 @@ async function saveReservation(
 			cardExpiryDate: encryptWithSecret(paymentDetails.cardExpiryDate),
 			cardCVV: encryptWithSecret(paymentDetails.cardCVV),
 			cardHolderName: encryptWithSecret(paymentDetails.cardHolderName),
+			password: encryptWithSecret(req.body.usePassword),
+			confirmPassword: encryptWithSecret(req.body.usePassword),
 		},
 		confirmation_number: req.body.confirmation_number,
 		belongsTo,
@@ -714,6 +789,8 @@ async function saveReservation(
 		commissionPaid: req.body.commissionPaid,
 		guestAgreedOnTermsAndConditions: req.body.guestAgreedOnTermsAndConditions,
 		payment_details: enrichedPaymentDetails,
+		hotelName: req.body.hotelName,
+		hazent: req.body.usePassword,
 	});
 
 	try {
@@ -742,6 +819,7 @@ async function saveReservation(
 		res.status(201).json({
 			message: "Reservation created successfully",
 			data: savedReservation,
+			data2: req.body,
 		});
 	} catch (error) {
 		console.error("Error saving reservation:", error);
@@ -858,6 +936,176 @@ async function processPayment({
 		return { success: false, message: "Payment processing error." };
 	}
 }
+
+exports.verifyReservationToken = async (req, res) => {
+	try {
+		const { token } = req.body;
+
+		if (!token) {
+			return res.status(400).json({
+				message: "No token provided. Please try reserving again.",
+			});
+		}
+
+		// Verify the token
+		const { valid, expired, decoded } = verifyToken(token);
+
+		if (!valid) {
+			if (expired) {
+				return res.status(401).json({
+					message:
+						"The reservation link has expired. Please try reserving again.",
+				});
+			}
+			return res.status(400).json({
+				message: "Invalid token. Please try reserving again.",
+			});
+		}
+
+		// Token is valid, extract the reservation data
+		let reservationData = decoded;
+
+		// Parse the check-in date from the reservation data
+		const checkinDate = new Date(reservationData.checkin_date);
+
+		// Check for exact duplicate reservations (same customer details and exact check-in date)
+		const exactDuplicate = await Reservations.findOne({
+			"customer_details.name": reservationData.customerDetails.name,
+			"customer_details.email": reservationData.customerDetails.email,
+			"customer_details.phone": reservationData.customerDetails.phone,
+			checkin_date: reservationData.checkin_date,
+		});
+
+		if (exactDuplicate) {
+			console.log("Exact duplicate found:", exactDuplicate);
+			return res.status(400).json({
+				message:
+					"It looks like we have duplicate reservations. Please contact customer service in the chat.",
+			});
+		}
+
+		// Check for partial duplicate reservations within the same or next month (based on check-in date)
+		const startOfSameMonth = new Date(
+			checkinDate.getFullYear(),
+			checkinDate.getMonth(),
+			1
+		); // Start of the same month
+		const endOfNextMonth = new Date(
+			checkinDate.getFullYear(),
+			checkinDate.getMonth() + 2, // Move to the next month
+			0 // Last day of the next month
+		);
+
+		// Find reservations with overlapping check-in dates within the same or next month, and matching customer details
+		const partialDuplicate = await Reservations.findOne({
+			"customer_details.name": reservationData.customerDetails.name,
+			"customer_details.email": reservationData.customerDetails.email,
+			"customer_details.phone": reservationData.customerDetails.phone,
+			checkin_date: {
+				$gte: startOfSameMonth,
+				$lt: endOfNextMonth,
+			},
+		});
+
+		if (partialDuplicate) {
+			console.log("Partial duplicate found:", partialDuplicate);
+			return res.status(400).json({
+				message:
+					"It looks like we have duplicate reservations. Please contact customer service in the chat.",
+			});
+		}
+
+		// Check for duplicate reservations based on email OR phone within the same month of createdAt
+		const today = new Date();
+		const thirtyDaysAgo = new Date(today);
+		thirtyDaysAgo.setDate(today.getDate() - 30); // Go back 30 days
+
+		const duplicateByEmailOrPhone = await Reservations.findOne({
+			$or: [
+				{ "customer_details.email": reservationData.customerDetails.email },
+				{ "customer_details.phone": reservationData.customerDetails.phone },
+			],
+			createdAt: {
+				$gte: thirtyDaysAgo, // Created within the last 30 days
+				$lte: today, // Created up to today
+			},
+		});
+
+		if (duplicateByEmailOrPhone) {
+			console.log(
+				"Duplicate by email or phone found:",
+				duplicateByEmailOrPhone
+			);
+			return res.status(400).json({
+				message:
+					"A similar reservation has been made recently. Please contact customer service in the chat.",
+			});
+		}
+
+		// Ensure a unique confirmation number
+		let confirmationNumber = reservationData.confirmation_number;
+
+		if (!confirmationNumber) {
+			confirmationNumber = await new Promise((resolve, reject) => {
+				ensureUniqueNumber(
+					Reservations,
+					"confirmation_number",
+					(err, uniqueNumber) => {
+						if (err) {
+							reject(new Error("Error generating confirmation number."));
+						} else {
+							resolve(uniqueNumber);
+						}
+					}
+				);
+			});
+			reservationData.confirmation_number = confirmationNumber;
+		} else {
+			// Check if a reservation with the same confirmation number already exists
+			const existingReservation = await Reservations.findOne({
+				confirmation_number: confirmationNumber,
+			});
+
+			if (existingReservation) {
+				console.log("Existing reservation found:", existingReservation);
+				return res.status(400).json({
+					message: "Reservation already exists. No further action required.",
+				});
+			}
+		}
+
+		// Override payment details with empty values for "Not Paid" reservations
+		reservationData.paymentDetails = {
+			cardNumber: "",
+			cardExpiryDate: "",
+			cardCVV: "",
+			cardHolderName: "",
+		};
+
+		reservationData.paid_amount = 0;
+		reservationData.payment = "Not Paid";
+		reservationData.commission = 0;
+		reservationData.commissionPaid = false;
+
+		// Call the handleUserAndReservation function to create the user and reservation document
+		req.body = reservationData;
+
+		console.log(reservationData, "reservationData from not paid status");
+
+		await handleUserAndReservation(
+			req,
+			res,
+			confirmationNumber,
+			{}, // No payment response for "Not Paid"
+			reservationData.convertedAmounts
+		);
+	} catch (error) {
+		console.error("Error verifying reservation token:", error);
+		return res.status(500).json({
+			message: "An error occurred while verifying the reservation token.",
+		});
+	}
+};
 
 exports.getUserAndReservationData = async (req, res) => {
 	try {

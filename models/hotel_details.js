@@ -207,6 +207,17 @@ const hotel_detailsSchema = new mongoose.Schema(
 			default: 10,
 		},
 
+		guestPaymentAcceptance: {
+			type: Object,
+			trim: true,
+			lowercase: true,
+			default: {
+				acceptDeposit: true,
+				acceptPayWholeAmount: true,
+				acceptReserveNowPayInHotel: false,
+			},
+		},
+
 		belongsTo: { type: ObjectId, ref: "User" },
 	},
 	{ timestamps: true }
