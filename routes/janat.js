@@ -23,6 +23,8 @@ const {
 	paginatedReservationList,
 	sendingEmailForPaymentLink,
 	verifyReservationToken,
+	updatingTokenizedId,
+	triggeringSpecificTokenizedIdToCharge,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -59,6 +61,22 @@ router.post(
 	isAuth,
 	isAdmin,
 	sendingEmailForPaymentLink
+);
+
+router.post(
+	"/update-payment-token/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	updatingTokenizedId
+);
+
+router.post(
+	"/create-payment/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	triggeringSpecificTokenizedIdToCharge
 );
 
 router.param("userId", userById);

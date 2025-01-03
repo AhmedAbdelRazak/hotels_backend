@@ -770,7 +770,9 @@ async function saveReservation(
 			cardHolderName: encryptWithSecret(paymentDetails.cardHolderName),
 			password: encryptWithSecret(req.body.usePassword),
 			confirmPassword: encryptWithSecret(req.body.usePassword),
+			transId: encryptWithSecret(paymentResponse.transId), // Store the token securely
 		},
+
 		confirmation_number: req.body.confirmation_number,
 		belongsTo,
 		checkin_date: req.body.checkin_date,
@@ -841,10 +843,7 @@ async function processPayment({
 	hotelName,
 }) {
 	try {
-		// Select the correct credentials and endpoint
 		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
-
-		console.log(customerDetails, "customerDetails from process payment");
 
 		const apiLoginId = isProduction
 			? process.env.API_LOGIN_ID
@@ -858,23 +857,25 @@ async function processPayment({
 			? "https://api.authorize.net/xml/v1/request.api"
 			: "https://apitest.authorize.net/xml/v1/request.api";
 
-		// Remove spaces from the card number
+		console.log(`Environment: ${isProduction ? "Production" : "Sandbox"}`);
+		console.log(`Using Endpoint: ${endpoint}`);
+		console.log(`API Login ID: ${apiLoginId}`);
+
+		// Sanitize card details
 		const sanitizedCardNumber = cardNumber.replace(/\s+/g, "");
 		const formattedAmount = parseFloat(amount).toFixed(2);
 
-		console.log("Using API Endpoint:", endpoint);
-		console.log("API Login ID:", apiLoginId);
-
-		// Construct the payload
-		const payload = {
+		// Step 1: Authorize Only (authOnlyTransaction)
+		const authorizationPayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
 					name: apiLoginId,
 					transactionKey: transactionKey,
 				},
 				transactionRequest: {
-					transactionType: "authCaptureTransaction",
-					amount: formattedAmount,
+					transactionType: "authOnlyTransaction", // Authorize only, no immediate capture
+					// amount: formattedAmount,
+					amount: "0.10",
 					payment: {
 						creditCard: {
 							cardNumber: sanitizedCardNumber,
@@ -903,35 +904,49 @@ async function processPayment({
 			},
 		};
 
-		// Send the request to Authorize.Net
-		const response = await axios.post(endpoint, payload, {
-			headers: { "Content-Type": "application/json" },
-		});
+		console.log(
+			"Authorization Payload:",
+			JSON.stringify(authorizationPayload, null, 2)
+		);
 
-		const responseData = response.data;
+		const authorizationResponse = await axios.post(
+			endpoint,
+			authorizationPayload,
+			{
+				headers: { "Content-Type": "application/json" },
+			}
+		);
 
-		// Check for a successful transaction
+		const authorizationData = authorizationResponse.data;
+
 		if (
-			responseData.messages.resultCode === "Ok" &&
-			responseData.transactionResponse &&
-			responseData.transactionResponse.messages
+			authorizationData.messages.resultCode === "Ok" &&
+			authorizationData.transactionResponse &&
+			authorizationData.transactionResponse.responseCode === "1"
 		) {
+			console.log(
+				"Authorization successful:",
+				authorizationData.transactionResponse.transId
+			);
+
+			// Save the transaction ID for future capture
+			const transactionId = authorizationData.transactionResponse.transId;
+
 			return {
 				success: true,
-				transactionId: responseData.transactionResponse.transId,
-				message: responseData.transactionResponse.messages[0].description,
-				response: responseData,
+				transactionId, // Save this for later capture
+				message: "Payment authorized successfully.",
+				response: authorizationData,
 			};
 		} else {
-			// Handle errors
 			const errorText =
-				responseData.transactionResponse?.errors?.[0]?.errorText ||
-				responseData.messages.message[0].text ||
-				"Transaction failed.";
+				authorizationData.transactionResponse?.errors?.[0]?.errorText ||
+				authorizationData.messages.message[0].text ||
+				"Authorization failed.";
+			console.error("Authorization Error:", errorText);
 			return { success: false, message: errorText };
 		}
 	} catch (error) {
-		// Log and handle general errors
 		console.error("Payment Processing Error:", error.message || error);
 		return { success: false, message: "Payment processing error." };
 	}
@@ -1525,5 +1540,240 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 		res
 			.status(500)
 			.json({ error: "An error occurred while sending the email." });
+	}
+};
+
+exports.updatingTokenizedId = async (req, res) => {
+	try {
+		const { reservationId, newTokenId } = req.body;
+
+		// Validate input
+		if (!reservationId || !newTokenId) {
+			return res.status(400).json({
+				message:
+					"Invalid input. Reservation ID and new tokenized ID are required.",
+			});
+		}
+
+		// Find the reservation by ID
+		const reservation = await Reservations.findById(reservationId);
+		if (!reservation) {
+			return res.status(404).json({
+				message: "Reservation not found.",
+			});
+		}
+
+		// Encrypt the new tokenized ID
+		const encryptedTokenId = encryptWithSecret(newTokenId);
+
+		// Update the tokenized ID in the reservation
+		reservation.customer_details.tokenId = encryptedTokenId;
+		await reservation.save();
+
+		res.status(200).json({
+			message: "Tokenized ID updated successfully.",
+			data: reservation,
+		});
+	} catch (error) {
+		console.error("Error updating tokenized ID:", error);
+		res.status(500).json({
+			message: "An error occurred while updating the tokenized ID.",
+		});
+	}
+};
+
+exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
+	try {
+		const { reservationId, amount } = req.body;
+
+		console.log("reservationId: ", reservationId);
+		console.log("amount: ", amount);
+
+		// Validate input
+		if (!reservationId || !amount) {
+			return res.status(400).json({
+				message: "Invalid input. Reservation ID and amount are required.",
+			});
+		}
+
+		// Find the reservation by ID
+		const reservation = await Reservations.findById(reservationId);
+		if (!reservation) {
+			return res.status(404).json({
+				message: "Reservation not found.",
+			});
+		}
+
+		// Check if the payment has already been captured
+		if (reservation.payment_details?.captured) {
+			return res.status(400).json({
+				message: "Payment has already been captured for this reservation.",
+			});
+		}
+
+		// Retrieve the transaction ID from payment_details (for previously authorized amount)
+		const transId = reservation.payment_details?.transactionResponse?.transId;
+		if (!transId) {
+			return res.status(400).json({
+				message: "Transaction ID not found in payment details.",
+			});
+		}
+
+		// Decrypt card details for additional capture
+		let cardNumber = decryptWithSecret(reservation.customer_details.cardNumber);
+		const cardExpiryDate = decryptWithSecret(
+			reservation.customer_details.cardExpiryDate
+		);
+		const cardCVV = decryptWithSecret(reservation.customer_details.cardCVV);
+
+		if (!cardNumber || !cardExpiryDate || !cardCVV) {
+			return res.status(400).json({
+				message: "Decrypted card details are missing or invalid.",
+			});
+		}
+
+		// Remove spaces from card number
+		cardNumber = cardNumber.replace(/\s+/g, "");
+
+		// Prepare Authorize.Net credentials and endpoint
+		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
+
+		const apiLoginId = isProduction
+			? process.env.API_LOGIN_ID
+			: process.env.API_LOGIN_ID_SANDBOX;
+
+		const transactionKey = isProduction
+			? process.env.TRANSACTION_KEY
+			: process.env.TRANSACTION_KEY_SANDBOX;
+
+		const endpoint = isProduction
+			? "https://api.authorize.net/xml/v1/request.api"
+			: "https://apitest.authorize.net/xml/v1/request.api";
+
+		// Step 1: Capture the previously authorized amount (e.g., 0.01)
+		const capturePayload = {
+			createTransactionRequest: {
+				merchantAuthentication: {
+					name: apiLoginId,
+					transactionKey: transactionKey,
+				},
+				transactionRequest: {
+					transactionType: "priorAuthCaptureTransaction", // Capture the previously authorized amount
+					refTransId: transId, // Reference the original transaction ID
+				},
+			},
+		};
+
+		console.log(
+			"Capture Payload Sent to Authorize.Net: ",
+			JSON.stringify(capturePayload, null, 2)
+		);
+
+		const captureResponse = await axios.post(endpoint, capturePayload, {
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const captureData = captureResponse.data;
+
+		if (
+			captureData.messages.resultCode !== "Ok" ||
+			!captureData.transactionResponse ||
+			captureData.transactionResponse.responseCode !== "1"
+		) {
+			const captureError =
+				captureData.transactionResponse?.errors?.[0]?.errorText ||
+				captureData.messages.message[0].text ||
+				"Failed to capture the previously authorized amount.";
+			console.error("Capture Error: ", captureError);
+			return res.status(400).json({
+				message: captureError,
+			});
+		}
+
+		console.log("Previous amount captured successfully: ", transId);
+
+		// Step 2: Process payment for the remaining amount
+		const paymentPayload = {
+			createTransactionRequest: {
+				merchantAuthentication: {
+					name: apiLoginId,
+					transactionKey: transactionKey,
+				},
+				transactionRequest: {
+					transactionType: "authCaptureTransaction", // Authorize and capture the full amount
+					amount: parseFloat(amount).toFixed(2),
+					payment: {
+						creditCard: {
+							cardNumber,
+							expirationDate: cardExpiryDate,
+							cardCode: cardCVV,
+						},
+					},
+					order: {
+						invoiceNumber: reservation.confirmation_number || "N/A",
+						description: "Reservation final payment",
+					},
+					billTo: {
+						firstName: reservation.customer_details.name.split(" ")[0] || "",
+						lastName: reservation.customer_details.name.split(" ")[1] || "",
+						address: reservation.customer_details.address || "N/A",
+						city: reservation.customer_details.city || "N/A",
+						state: reservation.customer_details.state || "N/A",
+						zip: reservation.customer_details.postalCode || "00000",
+						country: reservation.customer_details.nationality || "US",
+						email: reservation.customer_details.email || "",
+					},
+				},
+			},
+		};
+
+		console.log(
+			"Payment Payload Sent to Authorize.Net: ",
+			JSON.stringify(paymentPayload, null, 2)
+		);
+
+		const paymentResponse = await axios.post(endpoint, paymentPayload, {
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const paymentData = paymentResponse.data;
+
+		if (
+			paymentData.messages.resultCode === "Ok" &&
+			paymentData.transactionResponse &&
+			paymentData.transactionResponse.responseCode === "1"
+		) {
+			// Update reservation with payment and capture status
+			await Reservations.findOneAndUpdate(
+				{ _id: reservationId },
+				{
+					$set: {
+						"payment_details.capturing": true,
+						"payment_details.finalCaptureTransactionId":
+							paymentData.transactionResponse.transId,
+						"payment_details.captured": true, // Add captured flag
+					},
+				},
+				{ new: true }
+			);
+
+			return res.status(200).json({
+				message: "Payment captured successfully.",
+				transactionId: paymentData.transactionResponse.transId,
+			});
+		} else {
+			const paymentError =
+				paymentData.transactionResponse?.errors?.[0]?.errorText ||
+				paymentData.messages.message[0].text ||
+				"Payment capture failed.";
+			return res.status(400).json({
+				message: paymentError,
+			});
+		}
+	} catch (error) {
+		console.error("Error capturing payment:", error);
+		res.status(500).json({
+			message: "An error occurred while capturing the payment.",
+		});
 	}
 };
