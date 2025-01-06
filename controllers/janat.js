@@ -1777,3 +1777,51 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		});
 	}
 };
+
+exports.getRoomByIds = async (req, res) => {
+	try {
+		const { roomIds } = req.body; // Array of room IDs passed in the request body
+
+		if (!roomIds || !Array.isArray(roomIds)) {
+			return res.status(400).json({
+				error: "Invalid request. 'roomIds' should be an array.",
+			});
+		}
+
+		// Find hotels that contain the room IDs in their roomCountDetails
+		const hotels = await HotelDetails.find({
+			"roomCountDetails._id": { $in: roomIds }, // Match rooms by their ID
+		});
+
+		if (!hotels || hotels.length === 0) {
+			return res.status(404).json({
+				error: "No rooms found for the provided IDs.",
+			});
+		}
+
+		// Extract the matched rooms and attach hotelName and hotelId
+		const matchedRooms = [];
+		hotels.forEach((hotel) => {
+			const rooms = hotel.roomCountDetails.filter((room) =>
+				roomIds.includes(room._id.toString())
+			);
+			rooms.forEach((room) => {
+				matchedRooms.push({
+					...room.toObject(), // Convert Mongoose document to plain JavaScript object
+					hotelName: hotel.hotelName, // Add hotel name
+					hotelId: hotel._id, // Add hotel ID
+				});
+			});
+		});
+
+		res.status(200).json({
+			success: true,
+			rooms: matchedRooms, // Return the enhanced room details
+		});
+	} catch (error) {
+		console.error("Error fetching rooms by IDs:", error);
+		res.status(500).json({
+			error: "An error occurred while fetching rooms by IDs.",
+		});
+	}
+};

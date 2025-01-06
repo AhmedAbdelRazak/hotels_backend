@@ -25,6 +25,7 @@ const {
 	verifyReservationToken,
 	updatingTokenizedId,
 	triggeringSpecificTokenizedIdToCharge,
+	getRoomByIds,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -78,6 +79,8 @@ router.post(
 	isAdmin,
 	triggeringSpecificTokenizedIdToCharge
 );
+
+router.post("/rooms/get-by-ids", getRoomByIds);
 
 router.param("userId", userById);
 
