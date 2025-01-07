@@ -1413,6 +1413,7 @@ exports.paginatedReservationList = async (req, res) => {
 			$or: [
 				{ booking_source: { $regex: /^online jannat booking$/i } }, // Match "online jannat booking" (case-insensitive)
 				{ booking_source: { $regex: /^generated link$/i } }, // Match "Generated Link" (case-insensitive)
+				{ booking_source: { $regex: /^jannat employee$/i } }, // Match "Generated Link" (case-insensitive)
 			],
 		};
 
@@ -1823,5 +1824,469 @@ exports.getRoomByIds = async (req, res) => {
 		res.status(500).json({
 			error: "An error occurred while fetching rooms by IDs.",
 		});
+	}
+};
+
+exports.createNewReservationClient2 = async (req, res) => {
+	try {
+		const {
+			sentFrom,
+			hotelId,
+			customerDetails,
+			pickedRoomsType,
+			total_amount,
+			commission,
+			total_rooms,
+			total_guests,
+			adults,
+			children,
+			checkin_date,
+			checkout_date,
+			days_of_residence,
+			belongsTo,
+			booking_source,
+			hotel_name,
+			payment,
+			paid_amount,
+			commissionPaid,
+		} = req.body;
+
+		// Directly create the reservation if sentFrom is "employee"
+		if (sentFrom === "employee") {
+			// Generate a unique confirmation number
+			const confirmationNumber = await new Promise((resolve, reject) => {
+				ensureUniqueNumber(
+					Reservations, // Mongoose model for reservations
+					"confirmation_number", // Field in the database
+					(err, uniqueNumber) => {
+						if (err) {
+							reject(new Error("Error generating confirmation number."));
+						} else {
+							resolve(uniqueNumber);
+						}
+					}
+				);
+			});
+
+			// Create the reservation directly
+			const reservation = new Reservations({
+				hotelId,
+				customer_details: customerDetails,
+				confirmation_number: confirmationNumber,
+				belongsTo,
+				checkin_date,
+				checkout_date,
+				days_of_residence,
+				total_rooms,
+				total_guests,
+				adults,
+				children,
+				total_amount,
+				commission,
+				payment,
+				paid_amount,
+				commissionPaid,
+				booking_source,
+				hotelName: hotel_name,
+				pickedRoomsType,
+			});
+
+			// Save the reservation
+			const savedReservation = await reservation.save();
+
+			// Fetch hotel details to include in the email
+			const hotel = await HotelDetails.findById(hotelId).exec();
+
+			if (!hotel) {
+				return res.status(404).json({ message: "Hotel not found" });
+			}
+
+			// Generate and send the email with hotel data
+			const reservationData = {
+				...savedReservation.toObject(),
+				hotelName: hotel.hotelName,
+				hotelAddress: hotel.hotelAddress,
+				hotelCity: hotel.hotelCity,
+				hotelPhone: hotel.phone,
+			};
+
+			await sendEmailWithInvoice(reservationData, customerDetails.email);
+
+			// Respond with the created reservation
+			return res.status(201).json({
+				message: "Reservation created successfully",
+				data: savedReservation,
+			});
+		}
+
+		// Existing logic for reservations not sent from "employee"
+		const { name, phone, email, passport, passportExpiry, nationality } =
+			customerDetails;
+
+		// Validate hotelId
+		const hotel = await HotelDetails.findOne({
+			_id: hotelId,
+			activateHotel: true,
+			hotelPhotos: { $exists: true, $not: { $size: 0 } },
+			"location.coordinates": { $ne: [0, 0] },
+		});
+
+		if (!hotel) {
+			return res.status(400).json({
+				message:
+					"Error occurred, please contact Jannat Booking Customer Support In The Chat",
+			});
+		}
+
+		// Validate customer details
+		if (
+			!name ||
+			!phone ||
+			!email ||
+			!passport ||
+			!passportExpiry ||
+			!nationality
+		) {
+			return res
+				.status(400)
+				.json({ message: "Invalid customer details provided." });
+		}
+
+		// Existing logic for "Not Paid" reservations
+		if (req.body.payment === "Not Paid") {
+			if (!email) {
+				return res.status(201).json({
+					message: "Reservation verified successfully.",
+					data: {
+						...req.body,
+						hotelName: hotel.hotelName,
+					},
+				});
+			}
+
+			// Generate a tokenized link containing the reservation data
+			const tokenPayload = {
+				...req.body,
+			};
+
+			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
+				expiresIn: "3m", // Token expires in 3 minutes
+			});
+
+			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
+
+			// Send verification email
+			const emailContent = ReservationVerificationEmail({
+				name,
+				hotelName: hotel.hotelName,
+				confirmationLink,
+			});
+
+			try {
+				await sgMail.send({
+					to: email,
+					from: "noreply@jannatbooking.com",
+					bcc: [
+						{ email: "morazzakhamouda@gmail.com" },
+						{ email: "xhoteleg@gmail.com" },
+						{ email: "ahmed.abdelrazak@jannatbooking.com" },
+					],
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				return res.status(200).json({
+					message:
+						"Verification email sent successfully. Please check your inbox.",
+				});
+			} catch (error) {
+				console.error("Error sending verification email:", error);
+				return res.status(500).json({
+					message: "Failed to send verification email. Please try again later.",
+				});
+			}
+		}
+
+		// Process payment and create reservation for "Deposit Paid" or "Paid Online"
+		// Existing payment processing and reservation creation logic...
+	} catch (error) {
+		console.error("Error creating reservation:", error);
+		res
+			.status(500)
+			.json({ message: "An error occurred while creating the reservation" });
+	}
+};
+
+// Payment processing function for payments from a link
+async function processPaymentFromLink({
+	amount,
+	cardNumber,
+	expirationDate,
+	cardCode,
+	customerDetails,
+	checkinDate,
+	checkoutDate,
+	hotelName,
+}) {
+	try {
+		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
+
+		const apiLoginId = isProduction
+			? process.env.API_LOGIN_ID
+			: process.env.API_LOGIN_ID_SANDBOX;
+
+		const transactionKey = isProduction
+			? process.env.TRANSACTION_KEY
+			: process.env.TRANSACTION_KEY_SANDBOX;
+
+		const endpoint = isProduction
+			? "https://api.authorize.net/xml/v1/request.api"
+			: "https://apitest.authorize.net/xml/v1/request.api";
+
+		// Sanitize card details
+		const sanitizedCardNumber = cardNumber.replace(/\s+/g, "");
+		const formattedAmount = parseFloat(amount).toFixed(2);
+
+		// Prepare payload for payment authorization
+		const authorizationPayload = {
+			createTransactionRequest: {
+				merchantAuthentication: {
+					name: apiLoginId,
+					transactionKey: transactionKey,
+				},
+				transactionRequest: {
+					transactionType: "authOnlyTransaction", // Authorize only, no immediate capture
+					amount: "0.10",
+					payment: {
+						creditCard: {
+							cardNumber: sanitizedCardNumber,
+							expirationDate: expirationDate,
+							cardCode: cardCode,
+						},
+					},
+					billTo: {
+						firstName: customerDetails.name.split(" ")[0] || "",
+						lastName: customerDetails.name.split(" ")[1] || "",
+						address: customerDetails.address || "N/A",
+						city: customerDetails.city || "N/A",
+						state: customerDetails.state || "N/A",
+						zip: customerDetails.postalCode || "00000",
+						country: customerDetails.nationality || "US",
+						email: customerDetails.email || "",
+					},
+					userFields: {
+						userField: [
+							{ name: "checkin_date", value: checkinDate },
+							{ name: "checkout_date", value: checkoutDate },
+							{ name: "hotel_name", value: hotelName },
+						],
+					},
+				},
+			},
+		};
+
+		// Send request to payment gateway
+		const authorizationResponse = await axios.post(
+			endpoint,
+			authorizationPayload,
+			{
+				headers: { "Content-Type": "application/json" },
+			}
+		);
+
+		const authorizationData = authorizationResponse.data;
+
+		// Check if payment is authorized successfully
+		if (
+			authorizationData.messages.resultCode === "Ok" &&
+			authorizationData.transactionResponse &&
+			authorizationData.transactionResponse.responseCode === "1"
+		) {
+			const transactionId = authorizationData.transactionResponse.transId;
+
+			return {
+				success: true,
+				transactionId,
+				message: "Payment authorized successfully.",
+				response: authorizationData,
+			};
+		} else {
+			const errorText =
+				authorizationData.transactionResponse?.errors?.[0]?.errorText ||
+				authorizationData.messages.message[0].text ||
+				"Authorization failed.";
+			return { success: false, message: errorText };
+		}
+	} catch (error) {
+		return { success: false, message: "Payment processing error." };
+	}
+}
+
+// Function to update reservation details
+exports.updateReservationDetails = async (req, res) => {
+	const reservationId = req.params.reservationId;
+	const updateData = req.body;
+
+	try {
+		// Step 1: Find the reservation
+		const reservation = await Reservations.findById(reservationId).exec();
+		if (!reservation) {
+			return res.status(404).send({ error: "Reservation not found" });
+		}
+
+		// Step 2: Process payment if payment details are provided
+		if (updateData.paymentDetails) {
+			const { amount, cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
+				updateData.paymentDetails;
+
+			if (
+				!amount ||
+				!cardNumber ||
+				!cardExpiryDate ||
+				!cardCVV ||
+				!cardHolderName
+			) {
+				return res
+					.status(400)
+					.send({ error: "Incomplete payment details provided." });
+			}
+
+			// Process the payment
+			const paymentResponse = await processPaymentFromLink({
+				amount,
+				cardNumber,
+				expirationDate: cardExpiryDate,
+				cardCode: cardCVV,
+				customerDetails: reservation.customer_details,
+				checkinDate: reservation.checkin_date,
+				checkoutDate: reservation.checkout_date,
+				hotelName: reservation.hotelName || "Hotel",
+			});
+
+			// If payment fails, return an error and do not proceed
+			if (!paymentResponse.success) {
+				return res.status(400).send({
+					error: paymentResponse.message || "Payment processing failed.",
+				});
+			}
+
+			// Update payment details in the reservation after successful payment
+			reservation.payment_details = {
+				...reservation.payment_details,
+				amountInUSD: amount,
+				...paymentResponse.response,
+			};
+			reservation.payment = "Paid Online";
+			reservation.paid_amount = amount;
+		}
+
+		// Step 3: Update customer details if provided
+		if (updateData.customer_details) {
+			const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
+				updateData.customer_details;
+
+			// Encrypt sensitive data if provided
+			if (cardNumber && cardExpiryDate && cardCVV && cardHolderName) {
+				updateData.customer_details.cardNumber = encryptWithSecret(cardNumber);
+				updateData.customer_details.cardExpiryDate =
+					encryptWithSecret(cardExpiryDate);
+				updateData.customer_details.cardCVV = encryptWithSecret(cardCVV);
+				updateData.customer_details.cardHolderName =
+					encryptWithSecret(cardHolderName);
+			}
+
+			// Merge the updated customer details with the existing ones
+			reservation.customer_details = {
+				...reservation.customer_details,
+				...updateData.customer_details,
+			};
+			reservation.markModified("customer_details");
+		}
+
+		// Step 4: Update pickedRoomsType with unique pricing logic
+		if (
+			updateData.pickedRoomsType &&
+			Array.isArray(updateData.pickedRoomsType)
+		) {
+			const ensureUniqueRoomPricing = (pickedRoomsType) => {
+				const uniquePricing = {};
+				pickedRoomsType.forEach((room) => {
+					if (!uniquePricing[room.room_type]) {
+						uniquePricing[room.room_type] = new Set();
+					}
+					if (uniquePricing[room.room_type].has(room.chosenPrice)) {
+						room.chosenPrice = parseFloat(room.chosenPrice) + 1;
+					}
+					uniquePricing[room.room_type].add(room.chosenPrice);
+				});
+			};
+
+			const updatedPickedRoomsType = reservation.pickedRoomsType.map(
+				(existingRoom) => {
+					const matchingNewRoom = updateData.pickedRoomsType.find(
+						(newRoom) =>
+							newRoom.room_type === existingRoom.room_type &&
+							newRoom.chosenPrice === existingRoom.chosenPrice
+					);
+
+					if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
+						return { ...existingRoom, ...matchingNewRoom };
+					}
+					return existingRoom;
+				}
+			);
+
+			updateData.pickedRoomsType.forEach((newRoom) => {
+				if (
+					newRoom.room_type &&
+					newRoom.chosenPrice &&
+					!updatedPickedRoomsType.some(
+						(room) =>
+							room.room_type === newRoom.room_type &&
+							room.chosenPrice === newRoom.chosenPrice
+					)
+				) {
+					updatedPickedRoomsType.push(newRoom);
+				}
+			});
+
+			ensureUniqueRoomPricing(updatedPickedRoomsType);
+
+			reservation.pickedRoomsType = updatedPickedRoomsType;
+			reservation.markModified("pickedRoomsType");
+		}
+
+		// Step 5: Update other fields in the reservation
+		Object.keys(updateData).forEach((key) => {
+			if (key !== "pickedRoomsType" && key !== "customer_details") {
+				reservation[key] = updateData[key];
+			}
+		});
+
+		// Step 6: Save the updated reservation
+		const updatedReservation = await reservation.save();
+
+		// Step 7: Send confirmation email with updated invoice
+		const hotel = await HotelDetails.findById(reservation.hotelId).exec();
+		const emailData = {
+			...updatedReservation.toObject(),
+			hotelName: hotel?.hotelName || "Hotel",
+			hotelAddress: hotel?.hotelAddress || "",
+			hotelCity: hotel?.hotelCity || "",
+			hotelPhone: hotel?.phone || "",
+		};
+
+		await sendEmailWithInvoice(emailData, reservation.customer_details?.email);
+
+		// Step 8: Respond with the updated reservation
+		res.status(200).json({
+			message: "Reservation updated successfully.",
+			data: updatedReservation,
+		});
+	} catch (error) {
+		console.error("Error updating reservation:", error);
+		res
+			.status(500)
+			.send({ error: "An error occurred while updating reservation." });
 	}
 };

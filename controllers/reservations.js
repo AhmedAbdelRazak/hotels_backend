@@ -91,12 +91,9 @@ const sendEmailWithPdf = async (reservationData) => {
 		// 	{ email: "morazzakhamouda@gmail.com" },
 		// ],
 		bcc: [
-			{ email: "ayed.hotels@gmail.com" },
-			{ email: "zaerhotel@gmail.com" },
-			{ email: "3yedhotel@gmail.com" },
 			{ email: "morazzakhamouda@gmail.com" },
-			{ email: "ahmed.abdelrazak@infinite-apps.com" },
-			{ email: "Marwa.abdelrazzak77@gmail.com" },
+			{ email: "xhoteleg@gmail.com" },
+			{ email: "ahmed.abdelrazak@jannatbooking.com" },
 		],
 		subject: `Janat Booking - Reservation Confirmation`,
 		html: htmlContent,
@@ -215,13 +212,10 @@ exports.sendPaymentLinkEmail = async (req, res) => {
 		// 	{ email: "morazzakhamouda@gmail.com" },
 		// ],
 		bcc: [
-			{ email: "ayed.hotels@gmail.com" },
-			{ email: "zaerhotel@gmail.com" },
-			{ email: "3yedhotel@gmail.com" },
 			{ email: "morazzakhamouda@gmail.com" },
-			{ email: "ahmed.abdelrazak@infinite-apps.com" },
-			{ email: "Marwa.abdelrazzak77@gmail.com" },
-		], // Your verified sender
+			{ email: "xhoteleg@gmail.com" },
+			{ email: "ahmed.abdelrazak@jannatbooking.com" },
+		],
 		subject: "Reservation Payment Link",
 		html: emailContent, // Use the generated HTML content
 	};
@@ -1244,8 +1238,11 @@ exports.singleReservationById = (req, res) => {
 
 	// Find a single reservation by its ID
 	Reservations.findById(reservationId)
-		.populate("hotelId")
-		.populate("belongsTo")
+		.populate({
+			path: "hotelId",
+			model: "HotelDetails", // Ensure this matches the name of your HotelDetails model
+		})
+		.populate("belongsTo") // Optionally populate other referenced fields
 		.then((reservation) => {
 			if (!reservation) {
 				return res.status(404).send({
@@ -1359,12 +1356,9 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 		// 	{ email: "morazzakhamouda@gmail.com" },
 		// ],
 		bcc: [
-			{ email: "ayed.hotels@gmail.com" },
-			{ email: "zaerhotel@gmail.com" },
-			{ email: "3yedhotel@gmail.com" },
 			{ email: "morazzakhamouda@gmail.com" },
-			{ email: "ahmed.abdelrazak@infinite-apps.com" },
-			{ email: "Marwa.abdelrazzak77@gmail.com" },
+			{ email: "xhoteleg@gmail.com" },
+			{ email: "ahmed.abdelrazak@jannatbooking.com" },
 		],
 		subject: `Janat Booking - Reservation Update`,
 		html: htmlContent,

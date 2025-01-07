@@ -26,6 +26,8 @@ const {
 	updatingTokenizedId,
 	triggeringSpecificTokenizedIdToCharge,
 	getRoomByIds,
+	updateReservationDetails,
+	createNewReservationClient2,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -37,6 +39,7 @@ router.get("/active-hotel-list", getListOfHotels);
 router.get("/distinct-rooms", distinctRoomTypes);
 router.get("/room-query-list/:query", gettingRoomListFromQuery);
 router.post("/new-reservation-client", createNewReservationClient);
+router.post("/new-reservation-client-employee", createNewReservationClient2);
 router.post("/reservation-verification", verifyReservationToken);
 router.get("/user/reservations/:userId", getUserAndReservationData);
 router.get("/user/hotel/:hotelId", getHotelDetailsById);
@@ -78,6 +81,11 @@ router.post(
 	isAuth,
 	isAdmin,
 	triggeringSpecificTokenizedIdToCharge
+);
+
+router.put(
+	"/update-reservation-client/:reservationId",
+	updateReservationDetails
 );
 
 router.post("/rooms/get-by-ids", getRoomByIds);
