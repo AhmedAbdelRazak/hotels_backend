@@ -7,20 +7,18 @@ exports.userById = (req, res, next, id) => {
 	console.log(id, "id");
 	User.findById(id)
 		.select(
-			"_id name email phone role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
+			"_id name email phone role user points activeUser  hotelsToSupport accessTo"
 		)
-		// .populate(
-		// 	"likesUser",
-		// 	"_id productName description ratings views viewsCount",
-		// )
+		.populate("hotelsToSupport")
+		// .populate("hotelsToSupport", "_id hotelName hotelCountry hotelCity hotelAddress")
 		.exec((err, user) => {
 			if (err || !user) {
 				console.log(err);
 				return res.status(400).json({
-					error: "user not found yad",
+					error: "User not found",
 				});
 			}
-			req.profile = user;
+			req.profile = user; // Attach the user with populated hotelsToSupport to the request
 			next();
 		});
 };

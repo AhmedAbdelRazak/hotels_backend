@@ -104,6 +104,20 @@ const userSchema = new mongoose.Schema(
 			default: "",
 		},
 
+		hotelsToSupport: [
+			{
+				type: ObjectId,
+				ref: "HotelDetails",
+			},
+		],
+
+		accessTo: {
+			type: Array,
+			lowercase: true,
+			trim: true,
+			default: [],
+		},
+
 		confirmationNumbersBooked: {
 			type: Array,
 			lowercase: true,
