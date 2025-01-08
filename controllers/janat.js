@@ -1216,6 +1216,7 @@ exports.getHotelDetailsById = async (req, res) => {
 exports.getHotelDistancesFromElHaram = async (req, res) => {
 	try {
 		const elHaramCoordinates = [39.8262, 21.4225]; // Coordinates for Al-Masjid al-Haram (longitude, latitude)
+		const prophetsMosqueCoordinates = [39.6142, 24.4672]; // Coordinates for Al-Masjid an-Nabawi (longitude, latitude)
 
 		// Find all hotels with valid coordinates (not [0, 0])
 		const hotels = await HotelDetails.find({
@@ -1237,9 +1238,15 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 
 			const [hotelLongitude, hotelLatitude] = hotel.location.coordinates;
 
+			// Determine which coordinates to use based on the hotelState
+			const destinationCoordinates =
+				hotel.hotelState && hotel.hotelState.toLowerCase().includes("madinah")
+					? prophetsMosqueCoordinates
+					: elHaramCoordinates;
+
 			// Construct API URLs for walking and driving
-			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=walking&key=${apiKey}`;
-			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${elHaramCoordinates[1]},${elHaramCoordinates[0]}&mode=driving&key=${apiKey}`;
+			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${destinationCoordinates[1]},${destinationCoordinates[0]}&mode=walking&key=${apiKey}`;
+			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${destinationCoordinates[1]},${destinationCoordinates[0]}&mode=driving&key=${apiKey}`;
 
 			// Make API calls for walking and driving distances
 			const walkingResponse = await axios.get(walkingUrl);
