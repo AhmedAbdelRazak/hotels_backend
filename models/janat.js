@@ -33,6 +33,15 @@ const janatSchema = new mongoose.Schema(
 			},
 		},
 
+		homeThirdBanner: {
+			type: Object,
+			trim: true,
+			default: {
+				public_id: "",
+				url: "",
+			},
+		},
+
 		contactUsBanner: {
 			type: Object,
 			trim: true,
