@@ -1,10 +1,15 @@
 const SupportCase = require("../models/supportcase");
 const mongoose = require("mongoose");
 const ObjectId = mongoose.Types.ObjectId;
+const sgMail = require("@sendgrid/mail");
+const { newSupportCaseEmail } = require("./assets");
+const HotelDetails = require("../models/hotel_details");
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const twilio = require("twilio");
 
-const orderStatusSMS = twilio(
+const supportCaseEmail = twilio(
 	process.env.TWILIO_ACCOUNT_SID,
 	process.env.TWILIO_AUTH_TOKEN
 );
@@ -131,6 +136,7 @@ exports.createNewSupportCase = async (req, res) => {
 		console.log(req.body.displayName1, "displayName1");
 		console.log("Received Payload:", req.body);
 
+		// Basic validation
 		if (
 			!customerName ||
 			!inquiryAbout ||
@@ -143,6 +149,7 @@ exports.createNewSupportCase = async (req, res) => {
 			return res.status(400).json({ error: "All fields are required" });
 		}
 
+		// Determine who opened the case (super admin, hotel owner, or client)
 		const openedBy =
 			role === 1000
 				? "super admin"
@@ -150,6 +157,7 @@ exports.createNewSupportCase = async (req, res) => {
 				? "hotel owner"
 				: "client";
 
+		// First conversation entry
 		const conversation = [
 			{
 				messageBy: {
@@ -167,7 +175,7 @@ exports.createNewSupportCase = async (req, res) => {
 						? "A representative will be with you in 3 to 5 minutes"
 						: `New support case created by ${
 								openedBy === "super admin"
-									? "Xhotelpro Adminstration"
+									? "Xhotelpro Administration"
 									: openedBy
 						  }`,
 				inquiryAbout,
@@ -178,6 +186,7 @@ exports.createNewSupportCase = async (req, res) => {
 			},
 		];
 
+		// Build the support case doc
 		const newCase = new SupportCase({
 			supporterId,
 			ownerId,
@@ -190,14 +199,41 @@ exports.createNewSupportCase = async (req, res) => {
 			supporterName,
 		});
 
+		// Save to DB
 		await newCase.save();
 
+		// Emit Socket.IO event for new chat
 		req.io.emit("newChat", newCase);
 
-		res.status(201).json(newCase);
+		// 1) Fetch the hotel's name from the hotelId field, if valid
+		let hotelName = "Unknown Hotel";
+		if (hotelId && mongoose.Types.ObjectId.isValid(hotelId)) {
+			const hotelDoc = await HotelDetails.findById(hotelId).select("hotelName");
+			if (hotelDoc && hotelDoc.hotelName) {
+				hotelName = hotelDoc.hotelName;
+			}
+		}
+
+		// 2) Generate the HTML from your email template
+		const emailHtml = newSupportCaseEmail(newCase, hotelName);
+
+		// 3) Send the email notification to the three addresses
+		await sgMail.send({
+			from: "noreply@jannatbooking.com",
+			to: [
+				"morazzakhamouda@gmail.com",
+				"xhoteleg@gmail.com",
+				"ahmed.abdelrazak@jannatbooking.com",
+			],
+			subject: `New Support Case | ${hotelName}`,
+			html: emailHtml,
+		});
+
+		// Finally, respond with the new case
+		return res.status(201).json(newCase);
 	} catch (error) {
 		console.error("Error creating support case:", error);
-		res.status(400).json({ error: error.message });
+		return res.status(400).json({ error: error.message });
 	}
 };
 

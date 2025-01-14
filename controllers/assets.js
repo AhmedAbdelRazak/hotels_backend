@@ -1003,6 +1003,198 @@ const ReservationVerificationEmail = ({
 	return email;
 };
 
+function newSupportCaseEmail(supportCase, hotelName) {
+	// Convert creation date to Saudi time (if relevant):
+	// (If you prefer local times or want to show exactly when it was opened.)
+	const createdAtSaudi = supportCase.createdAt
+		? moment(supportCase.createdAt)
+				.tz("Asia/Riyadh")
+				.format("dddd, MMMM Do YYYY, h:mm A")
+		: moment().tz("Asia/Riyadh").format("dddd, MMMM Do YYYY, h:mm A");
+
+	// Extract first conversation entry to show top-level inquiry details
+	const firstMessage = supportCase?.conversation?.[0] || {};
+
+	// Safe fallback if no inquiry details found
+	const inquiryAbout = firstMessage.inquiryAbout || "N/A";
+	const inquiryDetails = firstMessage.inquiryDetails || "N/A";
+
+	// The openedBy field (e.g., "client", "hotel owner", "super admin")
+	const openedBy = supportCase.openedBy || "Unknown";
+
+	// Display names from the schema (the person opening the case, the “receiver,” etc.)
+	const displayName1 = supportCase.displayName1 || "N/A";
+	const displayName2 = supportCase.displayName2 || "N/A";
+
+	return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+        <title>New Support Case</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            margin: 0; 
+            padding: 0; 
+            background-color: #f2f4f8;
+          }
+          .container {
+            background-color: #ffffff;
+            width: 100%;
+            max-width: 700px;
+            margin: 30px auto;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+          }
+          .header {
+            background: linear-gradient(90deg, #20212c, #1e2332);
+            color: #ffffff;
+            text-align: center;
+            padding: 20px;
+          }
+          .header h1 {
+            margin: 0;
+            font-size: 1.8rem;
+          }
+          .content {
+            padding: 20px;
+            color: #333333;
+            line-height: 1.6;
+          }
+          .footer {
+            background: #1e2332;
+            color: #ffffff;
+            text-align: center;
+            padding: 15px;
+            font-size: 0.9rem;
+            margin-top: 20px;
+          }
+          .footer a {
+            color: #ffc107;
+            text-decoration: none;
+            font-weight: bold;
+          }
+          .footer a:hover {
+            text-decoration: underline;
+          }
+          .button-container {
+            text-align: center;
+            margin: 25px 0;
+          }
+          .button {
+            font-size: 1.1rem;
+            background: #005900;
+            color: #ffffff;
+            text-decoration: none;
+            padding: 10px 25px;
+            border-radius: 6px;
+            font-weight: bold;
+            border: none;
+            transition: background 0.3s ease-in-out;
+            display: inline-block;
+          }
+          .button:hover {
+            background: #004f00;
+          }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+          }
+          th, td {
+            border: 1px solid #dddddd;
+            padding: 10px;
+            text-align: left;
+          }
+          th {
+            background-color: #20212c;
+            color: #ffffff;
+          }
+          @media (max-width: 768px) {
+            .header h1 {
+              font-size: 1.5rem;
+            }
+            .button {
+              font-size: 1rem;
+            }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <!-- Header -->
+          <div class="header">
+            <h1>New Support Case</h1>
+          </div>
+  
+          <!-- Content -->
+          <div class="content">
+            <p>Hi Jannat Booking Admins,</p>
+            <p>There's a new support case opened for <strong>${hotelName}</strong>.</p>
+            <p>
+              Below are some details regarding this case:
+            </p>
+  
+            <table>
+              <tr>
+                <th>Case ID</th>
+                <td>${supportCase._id}</td>
+              </tr>
+              <tr>
+                <th>Created At (Saudi Time)</th>
+                <td>${createdAtSaudi}</td>
+              </tr>
+              <tr>
+                <th>Opened By</th>
+                <td>${openedBy}</td>
+              </tr>
+              <tr>
+                <th>Display Name 1</th>
+                <td>${displayName1}</td>
+              </tr>
+             
+              <tr>
+                <th>Inquiry About</th>
+                <td>${inquiryAbout}</td>
+              </tr>
+              <tr>
+                <th>Inquiry Details</th>
+                <td>${inquiryDetails}</td>
+              </tr>
+            </table>
+  
+            <div class="button-container">
+              <a 
+                href="https://xhotelpro.com/admin/customer-service?tab=active-client-cases" 
+                class="button"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                View Support Cases
+              </a>
+            </div>
+  
+            <p>
+              Please log in to your admin panel to review and respond to this new case.
+            </p>
+          </div>
+  
+          <!-- Footer -->
+          <div class="footer">
+            <p>
+              &copy; ${new Date().getFullYear()} Jannat Booking. 
+              Need help? <a href="https://jannatbooking.com">Contact us</a>
+            </p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+}
+
 module.exports = {
 	confirmationEmail,
 	reservationUpdate,
@@ -1011,4 +1203,5 @@ module.exports = {
 	ClientConfirmationEmail,
 	SendingReservationLinkEmail,
 	ReservationVerificationEmail,
+	newSupportCaseEmail,
 };
