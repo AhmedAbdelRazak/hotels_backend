@@ -156,6 +156,7 @@ const reservationsSchema = new mongoose.Schema(
 			type: Number, //It should be calculated the difference between checkout and checkin
 			default: 0,
 		},
+
 		comment: {
 			type: String, //If there is a comment, then add it
 			trim: true,

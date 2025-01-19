@@ -474,7 +474,7 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 
 		// Email setup
 		const emailOptions = {
-			to: guestEmail || "ahmed.abdelrazak@jannatbooking.com", // Safe fallback
+			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // Safe fallback
 			from: "noreply@jannatbooking.com",
 			bcc: [
 				{ email: "morazzakhamouda@gmail.com" },

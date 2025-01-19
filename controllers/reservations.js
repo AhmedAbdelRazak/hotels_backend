@@ -1381,92 +1381,174 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 };
 
 exports.updateReservation = async (req, res) => {
-	const reservationId = req.params.reservationId;
-	const updateData = req.body;
+	try {
+		const reservationId = req.params.reservationId;
+		const updateData = req.body;
 
-	console.log(updateData.total_amount, "total_amount");
-	console.log(
-		updateData.calculateTotalAmountWithRooms,
-		"calculateTotalAmountWithRooms"
-	);
-	console.log(updateData.days_of_residence, "days_of_residence");
+		console.log(
+			`[UPDATE RESERVATION] Received update for ID: ${reservationId}`
+		);
+		console.log("Update Data:", updateData);
 
-	// Assuming validation of reservationId and updateData is done beforehand
+		// 1️⃣ Validate reservationId
+		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
 
-	Reservations.findByIdAndUpdate(reservationId, updateData, { new: true })
-		.then(async (updatedReservation) => {
-			if (!updatedReservation) {
-				return res.status(404).json({ error: "Reservation not found" });
-			}
+		// 2️⃣ Validate total_amount if provided
+		if (
+			updateData.total_amount &&
+			typeof updateData.total_amount !== "number"
+		) {
+			return res.status(400).json({ error: "Invalid total amount format" });
+		}
 
-			// Check if the reservation status is "inhouse" or "InHouse" and roomId array is present and not empty
-			if (
-				updateData.reservation_status &&
-				(updateData.reservation_status.toLowerCase() === "inhouse" ||
-					updateData.reservation_status === "InHouse") &&
-				updateData.roomId &&
-				updateData.roomId.length > 0
-			) {
-				try {
-					// Update cleanRoom field for all rooms in the roomId array
-					await Rooms.updateMany(
-						{ _id: { $in: updateData.roomId } },
-						{ $set: { cleanRoom: false } }
+		// 3️⃣ Validate belongsTo (convert empty string to undefined)
+		if (
+			!updateData.belongsTo ||
+			!mongoose.Types.ObjectId.isValid(updateData.belongsTo)
+		) {
+			updateData.belongsTo = undefined;
+		}
+
+		// 4️⃣ Fetch existing reservation for comparison
+		const existingReservation = await Reservations.findById(reservationId);
+		if (!existingReservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+
+		// 5️⃣ Intelligent '_relocate' Increment if hotelId has changed
+		if (
+			updateData.hotelId &&
+			existingReservation.hotelId.toString() !== updateData.hotelId.toString()
+		) {
+			const relocatePattern = /_relocate(\d*)$/;
+			const match =
+				existingReservation.confirmation_number.match(relocatePattern);
+
+			if (match) {
+				const count = match[1] ? parseInt(match[1], 10) + 1 : 2;
+				updateData.confirmation_number =
+					existingReservation.confirmation_number.replace(
+						relocatePattern,
+						`_relocate${count}`
 					);
-				} catch (err) {
-					console.error("Error updating Rooms cleanRoom status", err);
-					// Optionally, handle the error, for example, by returning a response
-					// return res.status(500).json({ error: "Error updating room status" });
-				}
+			} else {
+				updateData.confirmation_number = `${existingReservation.confirmation_number}_relocate`;
 			}
 
-			// Check if the reservation status includes "checkedout"
-			if (
-				updatedReservation &&
-				updatedReservation.reservation_status &&
-				updatedReservation.reservation_status
-					.toLowerCase()
-					.includes("checked_out")
-			) {
-				// Check if a HouseKeeping document with the same confirmation_number does not already exist
-				const existingTask = await HouseKeeping.findOne({
-					confirmation_number: updatedReservation.confirmation_number,
-				});
-				if (!existingTask) {
-					// Create a new HouseKeeping document
+			console.log(
+				`[RELOCATION] Confirmation number updated to: ${updateData.confirmation_number}`
+			);
+		} else {
+			updateData.confirmation_number = existingReservation.confirmation_number;
+		}
+
+		// 6️⃣ Prepare nested fields for update using dot notation
+		const updatePayload = {
+			...updateData,
+			"customer_details.name": updateData.customerDetails?.name,
+			"customer_details.email": updateData.customerDetails?.email,
+			"customer_details.phone": updateData.customerDetails?.phone,
+			"customer_details.passport": updateData.customerDetails?.passport,
+			"customer_details.passportExpiry":
+				updateData.customerDetails?.passportExpiry,
+			"customer_details.nationality": updateData.customerDetails?.nationality,
+			"customer_details.postalCode": updateData.customerDetails?.postalCode,
+			"customer_details.reservedBy": updateData.customerDetails?.reservedBy,
+		};
+
+		// 7️⃣ Update reservation
+		const updatedReservation = await Reservations.findByIdAndUpdate(
+			reservationId,
+			{ $set: updatePayload },
+			{ new: true }
+		);
+
+		if (!updatedReservation) {
+			return res.status(404).json({ error: "Failed to update reservation." });
+		}
+
+		// 8️⃣ Handle "InHouse" status updates
+		if (
+			updateData.reservation_status &&
+			["inhouse", "InHouse"].includes(
+				updateData.reservation_status.toLowerCase()
+			) &&
+			Array.isArray(updateData.roomId) &&
+			updateData.roomId.length > 0
+		) {
+			try {
+				await Rooms.updateMany(
+					{ _id: { $in: updateData.roomId } },
+					{ $set: { cleanRoom: false } }
+				);
+				console.log("[ROOM STATUS] Rooms marked as not clean.");
+			} catch (err) {
+				console.error("[ERROR] Failed to update room clean status:", err);
+				return res
+					.status(500)
+					.json({ error: "Failed to update room clean status" });
+			}
+		}
+
+		// 9️⃣ Handle "Checked Out" status updates
+		if (
+			updatedReservation.reservation_status &&
+			updatedReservation.reservation_status
+				.toLowerCase()
+				.includes("checked_out")
+		) {
+			const existingTask = await HouseKeeping.findOne({
+				confirmation_number: updatedReservation.confirmation_number,
+			});
+
+			if (!existingTask) {
+				try {
 					const newHouseKeepingTask = new HouseKeeping({
-						taskDate: new Date(saudiDateTime),
+						taskDate: new Date(),
 						confirmation_number: updatedReservation.confirmation_number,
-						rooms: updatedReservation.roomId, // Assuming updateData.roomId contains the ID of the room to clean
-						hotelId: updatedReservation.hotelId, // Assuming you have hotelId in updateData
+						rooms: updatedReservation.roomId,
+						hotelId: updatedReservation.hotelId,
 						task_comment: "Guest Checked Out",
-						// Add any other fields you need to initialize
 					});
 					await newHouseKeepingTask.save();
+					console.log("[HOUSEKEEPING] New task created for checked-out rooms.");
+				} catch (err) {
+					console.error("[ERROR] Failed to create housekeeping task:", err);
+					return res
+						.status(500)
+						.json({ error: "Failed to create housekeeping task" });
 				}
 			}
+		}
 
-			// Prepare and send the update email
+		// 🔟 Send update email if requested
+		if (req.body.sendEmail) {
 			try {
-				if (req.body.sendEmail) {
-					await sendEmailUpdate(updatedReservation, updateData.hotelName); // Make sure updatedReservation has the expected structure for your email template
-				}
-				res.json({
-					message: "Reservation updated and email sent successfully",
-					reservation: updatedReservation,
-				});
+				await sendEmailUpdate(
+					updatedReservation,
+					updateData.hotel_name || updateData.hotelName
+				);
+				console.log("[EMAIL] Update email sent successfully.");
 			} catch (error) {
-				console.error("Error sending update email:", error);
-				res.status(500).json({
+				console.error("[ERROR] Failed to send update email:", error);
+				return res.status(500).json({
 					message: "Reservation updated, but failed to send email",
 					error: error.toString(),
 				});
 			}
-		})
-		.catch((err) => {
-			console.error("Error updating reservation:", err);
-			res.status(500).json({ error: "Internal server error" });
+		}
+
+		// ✅ Successful update response
+		return res.json({
+			message: "Reservation updated successfully",
+			reservation: updatedReservation,
 		});
+	} catch (err) {
+		console.error("[ERROR] General error updating reservation:", err);
+		return res.status(500).json({ error: "Internal server error" });
+	}
 };
 
 exports.deleteDataSource = async (req, res) => {

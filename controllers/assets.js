@@ -111,7 +111,7 @@ const confirmationEmail = (reservationData) => {
                     <td>${Number(
 											Number(reservationData.total_amount) -
 												Number(reservationData.paid_amount)
-										).toLocaleString()}</td>
+										).toLocaleString()} SAR</td>
                     </tr>
                 </table>
                 <p><strong>Booking Date:</strong> ${bookedAtSaudi}</p>
@@ -239,7 +239,7 @@ const reservationUpdate = (reservationData, hotelName) => {
                <td>${Number(
 									Number(reservationData.total_amount) -
 										Number(reservationData.paid_amount)
-								).toLocaleString()}</td>
+								).toLocaleString()} SAR</td>
                </tr>
             </table>
             <p><strong>Booking Date:</strong> ${bookedAtSaudi}</p>
@@ -503,12 +503,13 @@ const ClientConfirmationEmail = (reservationData) => {
                 overflow: hidden;
             }
             .header {
-                background: linear-gradient(90deg, #20212c, #1e2332);
+                background-color: #ff6f61;
                 color: #ffffff;
                 text-align: center;
                 padding: 20px;
                 font-size: 1.8rem;
                 font-weight: bold;
+                text-transform: uppercase;
             }
             .content {
                 padding: 20px;
@@ -516,7 +517,7 @@ const ClientConfirmationEmail = (reservationData) => {
                 color: #333333;
             }
             .content h2 {
-                color: #20212c;
+                color: #ff6f61;
                 margin-bottom: 10px;
             }
             .content p {
@@ -529,11 +530,11 @@ const ClientConfirmationEmail = (reservationData) => {
             }
             th, td {
                 padding: 10px;
-                border: 1px solid #dddddd;
+                border: 1px solid #ddd;
                 text-align: left;
             }
             th {
-                background-color: #20212c;
+                background-color: #ff6f61;
                 color: #ffffff;
             }
             .total-row {
@@ -541,7 +542,7 @@ const ClientConfirmationEmail = (reservationData) => {
                 font-weight: bold;
             }
             .footer {
-                background: #1e2332;
+                background-color: #20212c;
                 color: #ffffff;
                 text-align: center;
                 padding: 15px;
@@ -562,7 +563,6 @@ const ClientConfirmationEmail = (reservationData) => {
                 }
                 table, th, td {
                     font-size: 0.9rem;
-                    text-transform: capitalize;
                 }
                 .header {
                     font-size: 1.5rem;
@@ -629,7 +629,6 @@ const ClientConfirmationEmail = (reservationData) => {
                 <p><strong>Paid Amount:</strong> ${paidAmount} SAR</p>
                 <p><strong>Total Amount:</strong> ${reservationTotalAmount} SAR</p>
                 <p><strong>Amount Due:</strong> ${amountDue} SAR</p>
-
             </div>
             <div class="footer">
                 <p>For more details, visit your <a href="https://jannatbooking.com/dashboard">dashboard</a>.</p>

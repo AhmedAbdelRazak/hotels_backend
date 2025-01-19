@@ -218,6 +218,35 @@ const hotel_detailsSchema = new mongoose.Schema(
 			},
 		},
 
+		paymentSettings: {
+			type: [
+				{
+					accountType: {
+						type: String,
+						default: "Business",
+					},
+					accountCountry: String,
+					accountAddress: String,
+					accountCity: String,
+					accountPostalCode: String,
+					accountName: String,
+					accountNumber: String,
+					routingNumber: String,
+					swiftCode: String,
+					bankHeadQuarterCountry: String,
+					bankHeadQuarterAddress: String,
+					bankHeadQuarterCity: String,
+					bankHeadQuarterPostalCode: String,
+					bankName: String,
+					nameOfAccountOwner: String,
+					accountNickName: {
+						type: String,
+						default: "",
+					},
+				},
+			],
+		},
+
 		belongsTo: { type: ObjectId, ref: "User" },
 	},
 	{ timestamps: true }
