@@ -27,13 +27,13 @@ const confirmationEmail = (reservationData) => {
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #c5ddf6; }
             .container { background-color: #fff; width: 100%; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: #ff6f61; color: white; padding: 10px; text-align: center; }
+            .header { background: #1e2332; color: white; padding: 10px; text-align: center; }
             .content { padding-right: 20px; padding-left: 20px; text-align: left; }
             .footer { background: #ddd; padding: 10px; text-align: center; font-size: 14px; font-weight: bold; }
             .roomType { font-weight: bold; text-transform: capitalize; }
             table { width: 100%; border-collapse: collapse; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #ff6f61; color: white; }
+            th { background-color: #1e2332; color: white; }
             h2 { font-weight: bold; font-size: 1.5rem; }
             strong { font-weight: bold; }
             .confirmation {
@@ -154,13 +154,13 @@ const reservationUpdate = (reservationData, hotelName) => {
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #c5ddf6; }
             .container { background-color: #fff; width: 100%; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: #ff6f61; color: white; padding: 10px; text-align: center; }
+            .header { background: #1e2332; color: white; padding: 10px; text-align: center; }
             .content { padding-right: 20px; padding-left: 20px; text-align: left; }
             .footer { background: #ddd; padding: 10px; text-align: center; font-size: 14px; font-weight: bold; }
             .roomType { font-weight: bold; text-transform: capitalize; }
             table { width: 100%; border-collapse: collapse; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #ff6f61; color: white; }
+            th { background-color: #1e2332; color: white; }
             h2 { font-weight: bold; font-size: 1.5rem; }
             strong { font-weight: bold; }
             .confirmation {
@@ -266,13 +266,13 @@ const emailPaymentLink = (paymentLink) => {
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #c5ddf6; }
             .container { background-color: #fff; width: 100%; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: #ff6f61; color: white; padding: 10px; text-align: center; margin-top:50px; margin-bottom:50px; }
+            .header { background: #1e2332; color: white; padding: 10px; text-align: center; margin-top:50px; margin-bottom:50px; }
             .content { padding-right: 20px; padding-left: 20px; text-align: left; }
             .footer { background: #ddd; padding: 10px; text-align: center; font-size: 14px; font-weight: bold; }
             .roomType { font-weight: bold; text-transform: capitalize; }
             table { width: 100%; border-collapse: collapse; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #ff6f61; color: white; }
+            th { background-color: #1e2332; color: white; }
             h2 { font-weight: bold; font-size: 1.5rem; }
             strong { font-weight: bold; }
             .confirmation {
@@ -336,13 +336,13 @@ const paymentReceipt = (
         <style>
             body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #c5ddf6; }
             .container { background-color: #fff; width: 100%; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: #ff6f61; color: white; padding: 10px; text-align: center; }
+            .header { background: #1e2332; color: white; padding: 10px; text-align: center; }
             .content { padding-right: 20px; padding-left: 20px; text-align: left; }
             .footer { background: #ddd; padding: 10px; text-align: center; font-size: 14px; font-weight: bold; }
             .roomType { font-weight: bold; text-transform: capitalize; }
             table { width: 100%; border-collapse: collapse; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-            th { background-color: #ff6f61; color: white; }
+            th { background-color: #1e2332; color: white; }
             h2 { font-weight: bold; font-size: 1.5rem; }
             strong { font-weight: bold; }
             .confirmation {
@@ -503,7 +503,7 @@ const ClientConfirmationEmail = (reservationData) => {
                 overflow: hidden;
             }
             .header {
-                background-color: #ff6f61;
+                background-color: #1e2332;
                 color: #ffffff;
                 text-align: center;
                 padding: 20px;
@@ -517,7 +517,7 @@ const ClientConfirmationEmail = (reservationData) => {
                 color: #333333;
             }
             .content h2 {
-                color: #ff6f61;
+                color: #1e2332;
                 margin-bottom: 10px;
             }
             .content p {
@@ -534,7 +534,7 @@ const ClientConfirmationEmail = (reservationData) => {
                 text-align: left;
             }
             th {
-                background-color: #ff6f61;
+                background-color: #1e2332;
                 color: #ffffff;
             }
             .total-row {
