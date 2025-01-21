@@ -1592,19 +1592,21 @@ exports.updatingTokenizedId = async (req, res) => {
 
 exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 	try {
-		const { reservationId, amount } = req.body;
+		const { reservationId, amount, paymentOption, customUSD, amountSAR } =
+			req.body;
 
-		console.log("reservationId: ", reservationId);
-		console.log("amount: ", amount);
+		console.log("reservationId:", reservationId);
+		console.log("amount (USD):", amount);
+		console.log("amountSAR:", amountSAR);
+		console.log("paymentOption:", paymentOption);
 
-		// Validate input
-		if (!reservationId || !amount) {
+		if (!reservationId || amount === undefined) {
 			return res.status(400).json({
 				message: "Invalid input. Reservation ID and amount are required.",
 			});
 		}
 
-		// Find the reservation by ID
+		// 1) Find the reservation
 		const reservation = await Reservations.findById(reservationId);
 		if (!reservation) {
 			return res.status(404).json({
@@ -1612,14 +1614,14 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			});
 		}
 
-		// Check if the payment has already been captured
+		// 2) Check if already captured
 		if (reservation.payment_details?.captured) {
 			return res.status(400).json({
 				message: "Payment has already been captured for this reservation.",
 			});
 		}
 
-		// Retrieve the transaction ID from payment_details (for previously authorized amount)
+		// 3) Retrieve the transaction ID for priorAuthCapture
 		const transId = reservation.payment_details?.transactionResponse?.transId;
 		if (!transId) {
 			return res.status(400).json({
@@ -1627,7 +1629,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			});
 		}
 
-		// Decrypt card details for additional capture
+		// 4) Decrypt card details
 		let cardNumber = decryptWithSecret(reservation.customer_details.cardNumber);
 		const cardExpiryDate = decryptWithSecret(
 			reservation.customer_details.cardExpiryDate
@@ -1639,26 +1641,26 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 				message: "Decrypted card details are missing or invalid.",
 			});
 		}
-
-		// Remove spaces from card number
+		// remove spaces
 		cardNumber = cardNumber.replace(/\s+/g, "");
 
-		// Prepare Authorize.Net credentials and endpoint
+		// 5) Authorize.Net credentials
 		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
-
 		const apiLoginId = isProduction
 			? process.env.API_LOGIN_ID
 			: process.env.API_LOGIN_ID_SANDBOX;
-
 		const transactionKey = isProduction
 			? process.env.TRANSACTION_KEY
 			: process.env.TRANSACTION_KEY_SANDBOX;
-
 		const endpoint = isProduction
 			? "https://api.authorize.net/xml/v1/request.api"
 			: "https://apitest.authorize.net/xml/v1/request.api";
 
-		// Step 1: Capture the previously authorized amount (e.g., 0.01)
+		// (Optional) If you still want direct reference to reservation.commission:
+		const commission = Number(reservation.commission) || 0;
+		const totalAmount = Number(reservation.total_amount) || 0;
+
+		// 6) Step 1: priorAuthCapture for the initially authorized transaction
 		const capturePayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
@@ -1666,8 +1668,8 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 					transactionKey: transactionKey,
 				},
 				transactionRequest: {
-					transactionType: "priorAuthCaptureTransaction", // Capture the previously authorized amount
-					refTransId: transId, // Reference the original transaction ID
+					transactionType: "priorAuthCaptureTransaction",
+					refTransId: transId,
 				},
 			},
 		};
@@ -1680,7 +1682,6 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		const captureResponse = await axios.post(endpoint, capturePayload, {
 			headers: { "Content-Type": "application/json" },
 		});
-
 		const captureData = captureResponse.data;
 
 		if (
@@ -1693,14 +1694,12 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 				captureData.messages.message[0].text ||
 				"Failed to capture the previously authorized amount.";
 			console.error("Capture Error: ", captureError);
-			return res.status(400).json({
-				message: captureError,
-			});
+			return res.status(400).json({ message: captureError });
 		}
 
-		console.log("Previous amount captured successfully: ", transId);
+		console.log("Previous amount captured successfully:", transId);
 
-		// Step 2: Process payment for the remaining amount
+		// 7) Step 2: authCaptureTransaction for the final user-chosen amount
 		const paymentPayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
@@ -1708,7 +1707,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 					transactionKey: transactionKey,
 				},
 				transactionRequest: {
-					transactionType: "authCaptureTransaction", // Authorize and capture the full amount
+					transactionType: "authCaptureTransaction",
 					amount: parseFloat(amount).toFixed(2),
 					payment: {
 						creditCard: {
@@ -1743,23 +1742,39 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		const paymentResponse = await axios.post(endpoint, paymentPayload, {
 			headers: { "Content-Type": "application/json" },
 		});
-
 		const paymentData = paymentResponse.data;
 
+		// 8) Check if successful
 		if (
 			paymentData.messages.resultCode === "Ok" &&
 			paymentData.transactionResponse &&
 			paymentData.transactionResponse.responseCode === "1"
 		) {
-			// Update reservation with payment and capture status
-			await Reservations.findOneAndUpdate(
+			// Payment captured in USD with "amount"
+			// We'll store both the USD + SAR in the DB.
+
+			// If you want to ACCUMULATE the existing paid_amount:
+			const alreadyPaid = Number(reservation.paid_amount) || 0;
+			const newlyPaid = Number(amountSAR) || 0; // from request body
+			const totalPaidSoFar = alreadyPaid + newlyPaid;
+
+			// Update reservation
+			const updatedReservation = await Reservations.findOneAndUpdate(
 				{ _id: reservationId },
 				{
 					$set: {
+						// Mark as captured
 						"payment_details.capturing": true,
 						"payment_details.finalCaptureTransactionId":
 							paymentData.transactionResponse.transId,
-						"payment_details.captured": true, // Add captured flag
+						"payment_details.captured": true,
+
+						// Store the triggered amounts in payment_details
+						"payment_details.triggeredAmountUSD": parseFloat(amount).toFixed(2),
+						"payment_details.triggeredAmountSAR": Number(amountSAR).toFixed(2),
+
+						// Update paid_amount in SAR
+						paid_amount: totalPaidSoFar,
 					},
 				},
 				{ new: true }
@@ -1768,15 +1783,14 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			return res.status(200).json({
 				message: "Payment captured successfully.",
 				transactionId: paymentData.transactionResponse.transId,
+				reservation: updatedReservation,
 			});
 		} else {
 			const paymentError =
 				paymentData.transactionResponse?.errors?.[0]?.errorText ||
 				paymentData.messages.message[0].text ||
 				"Payment capture failed.";
-			return res.status(400).json({
-				message: paymentError,
-			});
+			return res.status(400).json({ message: paymentError });
 		}
 	} catch (error) {
 		console.error("Error capturing payment:", error);

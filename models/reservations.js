@@ -265,6 +265,16 @@ const reservationsSchema = new mongoose.Schema(
 				phone: "",
 			},
 		},
+
+		supplierData: {
+			type: Object,
+			trim: true,
+			lowercase: true,
+			default: {
+				supplierName: "",
+				suppliedBookingNo: "",
+			},
+		},
 	},
 	{ timestamps: true }
 );
