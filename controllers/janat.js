@@ -1614,14 +1614,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			});
 		}
 
-		// 2) Check if already captured
-		if (reservation.payment_details?.captured) {
-			return res.status(400).json({
-				message: "Payment has already been captured for this reservation.",
-			});
-		}
-
-		// 3) Retrieve the transaction ID for priorAuthCapture
+		// 2) Retrieve the transaction ID for priorAuthCapture
 		const transId = reservation.payment_details?.transactionResponse?.transId;
 		if (!transId) {
 			return res.status(400).json({
@@ -1629,7 +1622,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			});
 		}
 
-		// 4) Decrypt card details
+		// 3) Decrypt card details
 		let cardNumber = decryptWithSecret(reservation.customer_details.cardNumber);
 		const cardExpiryDate = decryptWithSecret(
 			reservation.customer_details.cardExpiryDate
@@ -1644,7 +1637,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		// remove spaces
 		cardNumber = cardNumber.replace(/\s+/g, "");
 
-		// 5) Authorize.Net credentials
+		// 4) Authorize.Net credentials
 		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
 		const apiLoginId = isProduction
 			? process.env.API_LOGIN_ID
@@ -1660,7 +1653,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		const commission = Number(reservation.commission) || 0;
 		const totalAmount = Number(reservation.total_amount) || 0;
 
-		// 6) Step 1: priorAuthCapture for the initially authorized transaction
+		// 5) Step 1: priorAuthCapture for the initially authorized transaction
 		const capturePayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
@@ -1699,7 +1692,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 
 		console.log("Previous amount captured successfully:", transId);
 
-		// 7) Step 2: authCaptureTransaction for the final user-chosen amount
+		// 6) Step 2: authCaptureTransaction for the final user-chosen amount
 		const paymentPayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
@@ -1744,26 +1737,35 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		});
 		const paymentData = paymentResponse.data;
 
-		// 8) Check if successful
+		// 7) Check if payment is successful
 		if (
 			paymentData.messages.resultCode === "Ok" &&
 			paymentData.transactionResponse &&
 			paymentData.transactionResponse.responseCode === "1"
 		) {
 			// Payment captured in USD with "amount"
-			// We'll store both the USD + SAR in the DB.
+			// We'll store both the USD and SAR amounts in the DB.
+			// Adjust the paid_amount based on whether a capture has been done before:
+			//
+			// - If payment_details.captured is not true (first capture), set the paid_amount to amountSAR.
+			// - Otherwise, add the new amountSAR to the existing paid_amount.
+			let updatedPaidAmount;
+			if (reservation.payment_details && reservation.payment_details.captured) {
+				// Payment was previously captured, accumulate the new payment.
+				const alreadyPaid = Number(reservation.paid_amount) || 0;
+				const newlyPaid = Number(amountSAR) || 0;
+				updatedPaidAmount = alreadyPaid + newlyPaid;
+			} else {
+				// First time capture: set paid_amount to the new amount
+				updatedPaidAmount = Number(amountSAR) || 0;
+			}
 
-			// If you want to ACCUMULATE the existing paid_amount:
-			const alreadyPaid = Number(reservation.paid_amount) || 0;
-			const newlyPaid = Number(amountSAR) || 0; // from request body
-			const totalPaidSoFar = alreadyPaid + newlyPaid;
-
-			// Update reservation
+			// Update the reservation:
 			const updatedReservation = await Reservations.findOneAndUpdate(
 				{ _id: reservationId },
 				{
 					$set: {
-						// Mark as captured
+						// Mark as captured (if not already marked)
 						"payment_details.capturing": true,
 						"payment_details.finalCaptureTransactionId":
 							paymentData.transactionResponse.transId,
@@ -1774,7 +1776,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 						"payment_details.triggeredAmountSAR": Number(amountSAR).toFixed(2),
 
 						// Update paid_amount in SAR
-						paid_amount: totalPaidSoFar,
+						paid_amount: updatedPaidAmount,
 					},
 				},
 				{ new: true }
