@@ -36,201 +36,187 @@ exports.read = (req, res) => {
 	return res.json(req.hotelDetails);
 };
 
-const generateUniqueDarkColor = (existingColors) => {
-	let color;
-	do {
-		// Generate a random dark color
-		color = `#${Math.floor(Math.random() * 16777215)
-			.toString(16)
-			.padStart(6, "0")}`;
-	} while (
-		existingColors.includes(color) ||
-		!/^#([0-9A-F]{2}){3}$/i.test(color)
-	);
-	return color;
+const ensureUniqueRoomColors = (roomCountDetails) => {
+	const colorMap = {};
+
+	roomCountDetails.forEach((room) => {
+		if (!colorMap[room.roomType]) {
+			colorMap[room.roomType] = new Set();
+		}
+
+		// Check if roomColor already exists in the roomType group
+		if (room.roomColor && colorMap[room.roomType].has(room.roomColor)) {
+			// Generate a new unique color
+			room.roomColor = generateUniqueDarkColor([...colorMap[room.roomType]]);
+			console.log(
+				`Duplicate color found for roomType ${room.roomType}. Generated new color: ${room.roomColor}`
+			);
+		}
+
+		if (room.roomColor) {
+			colorMap[room.roomType].add(room.roomColor);
+		}
+	});
 };
 
-exports.updateHotelDetails = (req, res) => {
-	const hotelDetailsId = req.params.hotelId;
-	const updateData = req.body;
+/**
+ * Constructs the fields to be updated in the HotelDetails document.
+ * Merges roomCountDetails and paymentSettings while ensuring unique room colors.
+ * @param {Object} hotelDetails - The existing hotel details from the database.
+ * @param {Object} updateData - The incoming data to update.
+ * @returns {Object} - The fields to be updated.
+ */
+const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
+	const updatedFields = {};
 
-	console.log(updateData, "updateData");
-	console.log(req.body.paymentSettings, "req.body.paymentSettings");
+	// Process roomCountDetails if provided
+	if (
+		updateData.roomCountDetails &&
+		Array.isArray(updateData.roomCountDetails)
+	) {
+		// Clone existing roomCountDetails to avoid mutating the original data
+		let updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
+			(existingRoom) => ({
+				...existingRoom.toObject(), // Convert Mongoose document to plain object
+			})
+		);
 
-	const ensureUniqueRoomColors = (roomCountDetails) => {
-		const colorMap = {};
+		// Iterate over each newRoom in updateData to merge or add
+		updateData.roomCountDetails.forEach((newRoom) => {
+			if (fromPage === "AddNew") {
+				// Check if the room already exists based on roomType and displayName
+				const existingRoomIndex = updatedRoomCountDetails.findIndex(
+					(room) =>
+						room.roomType === newRoom.roomType &&
+						room.displayName === newRoom.displayName
+				);
 
-		roomCountDetails.forEach((room) => {
-			if (!colorMap[room.roomType]) {
-				colorMap[room.roomType] = new Set();
-			}
-
-			// Check if roomColor already exists in the roomType group
-			if (colorMap[room.roomType].has(room.roomColor)) {
-				// Generate a new unique color
-				room.roomColor = generateUniqueDarkColor([...colorMap[room.roomType]]);
-			}
-
-			colorMap[room.roomType].add(room.roomColor);
-		});
-	};
-
-	// Helper function to construct updatedFields object from updateData
-	// including merging roomCountDetails and paymentSettings
-	const constructUpdatedFields = (hotelDetails) => {
-		const updatedFields = {};
-
-		// Process roomCountDetails if provided
-		if (
-			updateData.roomCountDetails &&
-			Array.isArray(updateData.roomCountDetails)
-		) {
-			let updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
-				(existingRoom) => {
-					const matchingNewRoom = updateData.roomCountDetails.find(
-						(newRoom) => {
-							// For AddNew branch compare roomType and displayName; for other branch compare _id
-							if (req.body.fromPage === "AddNew") {
-								return (
-									newRoom.roomType === existingRoom.roomType &&
-									newRoom.displayName === existingRoom.displayName
-								);
-							} else {
-								return (
-									newRoom._id &&
-									newRoom._id.toString() === existingRoom._id.toString()
-								);
-							}
-						}
+				if (existingRoomIndex !== -1) {
+					// Merge existing room with new data
+					updatedRoomCountDetails[existingRoomIndex] = {
+						...updatedRoomCountDetails[existingRoomIndex],
+						...newRoom,
+					};
+				} else {
+					// Ensure activeRoom is set to true by default for new rooms
+					if (newRoom.activeRoom === undefined) {
+						newRoom.activeRoom = true;
+					}
+					updatedRoomCountDetails.push(newRoom);
+					console.log(`Added new room: ${JSON.stringify(newRoom)}`);
+				}
+			} else {
+				// For non-AddNew pages, match based on _id
+				if (newRoom._id) {
+					const existingRoomIndex = updatedRoomCountDetails.findIndex(
+						(room) => room._id.toString() === newRoom._id.toString()
 					);
 
-					if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
-						return { ...existingRoom, ...matchingNewRoom };
-					}
-					return existingRoom;
-				}
-			);
-
-			// Add new rooms that don't exist in the current list
-			updateData.roomCountDetails.forEach((newRoom) => {
-				if (req.body.fromPage === "AddNew") {
-					if (
-						newRoom.roomType &&
-						newRoom.displayName &&
-						Object.keys(newRoom).length > 0
-					) {
-						const existingRoom = updatedRoomCountDetails.find(
-							(room) =>
-								room.roomType === newRoom.roomType &&
-								room.displayName === newRoom.displayName
-						);
-						if (!existingRoom) {
-							// Ensure that activeRoom is set to true by default for new rooms
-							if (newRoom.activeRoom === undefined) {
-								newRoom.activeRoom = true;
-							}
-							updatedRoomCountDetails.push(newRoom);
-						}
+					if (existingRoomIndex !== -1) {
+						// Merge existing room with new data
+						updatedRoomCountDetails[existingRoomIndex] = {
+							...updatedRoomCountDetails[existingRoomIndex],
+							...newRoom,
+						};
+					} else {
+						// If room doesn't exist, add it
+						updatedRoomCountDetails.push(newRoom);
+						console.log(`Added new room with _id: ${newRoom._id}`);
 					}
 				} else {
-					if (
-						newRoom._id &&
-						!updatedRoomCountDetails.some(
-							(room) => room._id.toString() === newRoom._id.toString()
-						)
-					) {
-						updatedRoomCountDetails.push(newRoom);
-					}
-				}
-			});
-
-			// Ensure all room colors are unique within the same roomType
-			ensureUniqueRoomColors(updatedRoomCountDetails);
-
-			updatedFields.roomCountDetails = updatedRoomCountDetails;
-		}
-
-		// If paymentSettings is provided (and is an array), merge it in.
-		if (
-			updateData.paymentSettings &&
-			Array.isArray(updateData.paymentSettings)
-		) {
-			updatedFields.paymentSettings = updateData.paymentSettings;
-		}
-
-		// Process other fields (excluding roomCountDetails and paymentSettings)
-		Object.keys(updateData).forEach((key) => {
-			if (key !== "roomCountDetails" && key !== "paymentSettings") {
-				updatedFields[key] = updateData[key];
-			}
-		});
-
-		return updatedFields;
-	};
-
-	if (req.body.fromPage === "AddNew") {
-		// Existing AddNew logic remains similar; we first fetch the document
-		HotelDetails.findById(hotelDetailsId, (err, hotelDetails) => {
-			if (err) {
-				console.error(err);
-				return res.status(500).send({ error: "Internal server error" });
-			}
-			if (!hotelDetails) {
-				return res.status(404).send({ error: "Hotel details not found" });
-			}
-
-			const updatedFields = constructUpdatedFields(hotelDetails);
-			// Merge in additional field "fromPage"
-			updatedFields.fromPage = req.body.fromPage;
-
-			// Use findByIdAndUpdate with $set to update atomically and avoid version conflicts
-			HotelDetails.findByIdAndUpdate(
-				hotelDetailsId,
-				{ $set: updatedFields },
-				{ new: true, runValidators: true }
-			)
-				.then((updatedHotelDetails) => {
-					res.json(updatedHotelDetails);
-				})
-				.catch((err) => {
-					console.error(err);
-					return res.status(500).send({ error: "Internal server error" });
-				});
-		});
-	} else {
-		console.log("Req.Body:", req.body);
-
-		// For the other branch, we similarly fetch the document, merge changes, and update atomically
-		HotelDetails.findById(hotelDetailsId, (err, hotelDetails) => {
-			if (err) {
-				console.error("Error finding hotel details:", err);
-				return res.status(500).send({ error: "Internal server error" });
-			}
-			if (!hotelDetails) {
-				return res.status(404).send({ error: "Hotel details not found" });
-			}
-
-			const updatedFields = constructUpdatedFields(hotelDetails);
-			updatedFields.fromPage = req.body.fromPage;
-
-			// Use findByIdAndUpdate to avoid version errors
-			HotelDetails.findByIdAndUpdate(
-				hotelDetailsId,
-				{ $set: updatedFields },
-				{ new: true, runValidators: true }
-			)
-				.then((updatedHotelDetails) => {
-					console.log(
-						"Hotel details updated successfully:",
-						updatedHotelDetails
+					console.warn(
+						`Skipping room without _id on non-AddNew page: ${JSON.stringify(
+							newRoom
+						)}`
 					);
-					res.json(updatedHotelDetails);
-				})
-				.catch((err) => {
-					console.error("Error updating hotel details:", err);
-					return res.status(500).send({ error: "Internal server error" });
-				});
+				}
+			}
 		});
+
+		// Ensure all room colors are unique within the same roomType
+		ensureUniqueRoomColors(updatedRoomCountDetails);
+
+		// Assign the updated roomCountDetails
+		updatedFields.roomCountDetails = updatedRoomCountDetails;
+	}
+
+	// Merge paymentSettings if provided
+	if (updateData.paymentSettings && Array.isArray(updateData.paymentSettings)) {
+		updatedFields.paymentSettings = updateData.paymentSettings;
+		console.log(
+			`Merged paymentSettings: ${JSON.stringify(
+				updateData.paymentSettings,
+				null,
+				2
+			)}`
+		);
+	}
+
+	// Process other fields (excluding roomCountDetails and paymentSettings)
+	Object.keys(updateData).forEach((key) => {
+		if (key !== "roomCountDetails" && key !== "paymentSettings") {
+			updatedFields[key] = updateData[key];
+			console.log(`Updated field ${key}: ${updateData[key]}`);
+		}
+	});
+
+	return updatedFields;
+};
+
+/**
+ * Updates the hotel details based on the provided data.
+ * Handles merging of nested roomCountDetails and their pricingRate arrays.
+ */
+exports.updateHotelDetails = async (req, res) => {
+	const hotelDetailsId = req.params.hotelId;
+	const updateData = req.body;
+	const fromPage = req.body.fromPage; // Extract fromPage for conditional logic
+
+	console.log("Received updateData:", JSON.stringify(updateData, null, 2));
+	console.log(
+		"PaymentSettings:",
+		JSON.stringify(req.body.paymentSettings, null, 2)
+	);
+
+	try {
+		// Fetch the hotel details document
+		const hotelDetails = await HotelDetails.findById(hotelDetailsId).exec();
+
+		if (!hotelDetails) {
+			console.warn("Hotel details not found for ID:", hotelDetailsId);
+			return res.status(404).send({ error: "Hotel details not found" });
+		}
+
+		// Construct the fields to update
+		const updatedFields = constructUpdatedFields(
+			hotelDetails,
+			updateData,
+			fromPage
+		);
+		updatedFields.fromPage = fromPage; // Ensure fromPage is included
+
+		console.log(
+			"Constructed updatedFields:",
+			JSON.stringify(updatedFields, null, 2)
+		);
+
+		// Perform the update atomically using findByIdAndUpdate
+		const updatedHotelDetails = await HotelDetails.findByIdAndUpdate(
+			hotelDetailsId,
+			{ $set: updatedFields },
+			{ new: true, runValidators: true }
+		).exec();
+
+		if (!updatedHotelDetails) {
+			console.error("Failed to update hotel details for ID:", hotelDetailsId);
+			return res.status(500).send({ error: "Failed to update hotel details" });
+		}
+
+		console.log("Hotel details updated successfully:", updatedHotelDetails);
+		return res.json(updatedHotelDetails);
+	} catch (err) {
+		console.error("Error updating hotel details:", err);
+		return res.status(500).send({ error: "Internal server error" });
 	}
 };
 
