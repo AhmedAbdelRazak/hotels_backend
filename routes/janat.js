@@ -28,6 +28,7 @@ const {
 	getRoomByIds,
 	updateReservationDetails,
 	createNewReservationClient2,
+	sendEmailForTriggeringPayment,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -68,6 +69,14 @@ router.post(
 );
 
 router.post(
+	"/email-send/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	sendEmailForTriggeringPayment
+);
+
+router.post(
 	"/update-payment-token/:userId",
 	requireSignin,
 	isAuth,
@@ -82,6 +91,8 @@ router.post(
 	isAdmin,
 	triggeringSpecificTokenizedIdToCharge
 );
+
+router.post("/create-payment-client", triggeringSpecificTokenizedIdToCharge);
 
 router.put(
 	"/update-reservation-client/:reservationId",

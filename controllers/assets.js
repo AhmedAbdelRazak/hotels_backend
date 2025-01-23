@@ -817,6 +817,341 @@ const SendingReservationLinkEmail = ({
 	return email;
 };
 
+const SendingReservationLinkEmailTrigger = ({
+	hotelName,
+	name,
+	confirmationLink,
+	amountInSAR,
+	totalAmountSAR, // New parameter
+}) => {
+	const hotelNameAdjusted = hotelName || "Jannat Booking";
+	const formattedHotelName = hotelNameAdjusted
+		.toLowerCase()
+		.replace(/\b\w/g, (char) => char.toUpperCase());
+
+	const email = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Reservation Confirmation and Payment</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f2f4f8;
+            }
+            .email-container {
+                background-color: #ffffff;
+                max-width: 700px;
+                margin: 30px auto;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 0;
+                padding: 0;
+            }
+            .header {
+                background: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 20px;
+                font-size: 1.8rem;
+                font-weight: bold;
+            }
+            .content {
+                padding: 20px;
+                color: #333333;
+                line-height: 1.6;
+            }
+            .content h2 {
+                color: #20212c;
+                margin-bottom: 10px;
+            }
+            .content p {
+                margin-bottom: 15px;
+            }
+            .button-container {
+                text-align: center;
+                margin: 30px 0;
+            }
+            .button {
+                font-size: 2rem;
+                background: #005900; /* Dark green */
+                color: #ffffff; /* White font */
+                text-decoration: none;
+                padding: 20px 40px;
+                border-radius: 8px;
+                font-weight: bold;
+                border: none;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+                display: inline-block;
+                transition: all 0.3s ease-in-out;
+            }
+
+            .button a {
+                color: #f9f9f9;
+                text-decoration: none;
+                font-weight: bold;
+                font-size: 2rem;
+            }
+
+
+            .button:hover {
+                background: #004f00; /* Slightly darker green for hover effect */
+                box-shadow: 0 6px 10px rgba(0, 0, 0, 0.3);
+            }
+            @media only screen and (max-width: 600px) {
+                .button {
+                    font-size: 1.5rem; /* Smaller font size for small screens */
+                    padding: 10px 20px;
+                }
+
+                 .button a {
+                    color: #f9f9f9;
+                    text-decoration: none;
+                    font-weight: bold;
+                    font-size: 1.5rem;
+            }
+            }
+            @media only screen and (min-width: 601px) {
+                .button {
+                    font-size: 1.7rem; /* Larger font size for bigger screens */
+                    padding: 20px 40px; /* Bigger padding for better emphasis */
+                }
+            }
+            .footer {
+                background: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 15px;
+                font-size: 0.9rem;
+            }
+            .footer a {
+                color: #ffc107;
+                text-decoration: none;
+                font-weight: bold;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="email-container">
+            <table>
+                <!-- Header Section -->
+                <tr>
+                    <td class="header">
+                        ${formattedHotelName} | Reservation Confirmation and Payment
+                    </td>
+                </tr>
+                <!-- Content Section -->
+                <tr>
+                    <td class="content">
+                        <h2>Dear ${name?.split(" ")[0] || "Valued Guest"},</h2>
+                        <p>Thank you for choosing ${formattedHotelName} for your stay. We are pleased to confirm your reservation.</p>
+                        <p><strong>Reservation Details:</strong></p>
+                        <ul>
+                            <li><strong>Total Reservation Amount:</strong> ${totalAmountSAR} SAR</li>
+                            <li><strong>Amount Due:</strong> ${amountInSAR} SAR</li>
+                        </ul>
+                        <p>Please proceed to confirm your payment by clicking the button below. This will redirect you to our secure payment page where you can complete the transaction.</p>
+                        <div class="button-container">
+                            <a href="${confirmationLink}" target="_blank" class="button">
+                                Proceed To Confirm Payment
+                            </a>
+                        </div>
+                        <p>If you have any questions or need assistance, feel free to contact our support team.</p>
+                        <p>We look forward to hosting you!</p>
+                    </td>
+                </tr>
+                <!-- Footer Section -->
+                <tr>
+                    <td class="footer">
+                        <p>If you have any inquiries, please <a href="https://jannatbooking.com">contact us</a>.</p>
+                        <p>Best Regards,<br>${formattedHotelName} Administration</p>
+                        <p>Email: support@jannatbooking.com</p>
+                        <p>PO Box 322, Crestline</p>
+                    </td>
+                </tr>
+            </table>
+        </div>
+    </body>
+    </html>
+    `;
+
+	return email;
+};
+
+const paymentTriggered = (reservationData) => {
+	// Extract guest's first name
+	const guestName =
+		reservationData.customer_details.name.split(" ")[0] || "Guest";
+
+	// Extract confirmation number
+	const confirmationNumber = reservationData.confirmation_number || "N/A";
+
+	// Extract the amount captured in this payment (triggeredAmountSAR)
+	const amountCapturedThisPayment = Number(
+		reservationData.payment_details.triggeredAmountSAR || 0
+	).toFixed(2);
+
+	// Extract the total paid amount so far
+	const totalPaidAmount = Number(reservationData.paid_amount || 0).toFixed(2);
+
+	// Extract the reservation total amount
+	const reservationTotalAmount = Number(
+		reservationData.total_amount || 0
+	).toFixed(2);
+
+	// Calculate the amount due
+	const amountDue = (
+		Number(reservationData.total_amount || 0) -
+		Number(reservationData.paid_amount || 0)
+	).toFixed(2);
+
+	// Safely access hotelName
+	const hotelName = (
+		reservationData.hotelName ||
+		(reservationData.hotelId && reservationData.hotelId.hotelName) ||
+		"JANNAT BOOKING"
+	).toUpperCase();
+
+	// Construct the email HTML content
+	const email = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Confirmation</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+                background-color: #f2f4f8;
+            }
+            .container {
+                background-color: #ffffff;
+                max-width: 600px;
+                margin: 30px auto;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            }
+            .header {
+                background-color: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 15px;
+                border-radius: 8px 8px 0 0;
+            }
+            .content {
+                padding: 20px;
+                color: #333333;
+                line-height: 1.6;
+            }
+            .content h2 {
+                color: #1e2332;
+                margin-bottom: 10px;
+            }
+            .content p {
+                margin-bottom: 15px;
+            }
+            .details-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 20px 0;
+            }
+            .details-table th, .details-table td {
+                border: 1px solid #dddddd;
+                padding: 10px;
+                text-align: left;
+            }
+            .details-table th {
+                background-color: #1e2332;
+                color: #ffffff;
+            }
+            .footer {
+                background-color: #1e2332;
+                color: #ffffff;
+                text-align: center;
+                padding: 15px;
+                border-radius: 0 0 8px 8px;
+                font-size: 0.9rem;
+            }
+            .footer a {
+                color: #ffc107;
+                text-decoration: none;
+                font-weight: bold;
+            }
+            @media (max-width: 600px) {
+                .container {
+                    padding: 15px;
+                }
+                .header, .footer {
+                    padding: 10px;
+                }
+                .content {
+                    padding: 15px;
+                }
+                .details-table th, .details-table td {
+                    padding: 8px;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>${hotelName}</h1>
+            </div>
+            <div class="content">
+                <h2>Hi ${guestName},</h2>
+                <p>Thank you for choosing Jannat Booking!</p>
+                <p>Your payment of <strong>${amountCapturedThisPayment} SAR</strong> was successfully captured for your reservation <strong>#${confirmationNumber}</strong>.</p>
+                
+                <h3>Payment Details:</h3>
+                <table class="details-table">
+                    <tr>
+                        <th>Amount Captured This Payment</th>
+                        <td>${amountCapturedThisPayment} SAR</td>
+                    </tr>
+                    <tr>
+                        <th>Total Paid Amount</th>
+                        <td>${totalPaidAmount} SAR</td>
+                    </tr>
+                    <tr>
+                        <th>Reservation Total Amount</th>
+                        <td>${reservationTotalAmount} SAR</td>
+                    </tr>
+                    <tr>
+                        <th>Amount Due</th>
+                        <td>${amountDue} SAR</td>
+                    </tr>
+                </table>
+                
+                <p>We look forward to hosting you. If you have any questions or need further assistance, feel free to reach out to our support team.</p>
+                <p>Enjoy your stay!</p>
+            </div>
+            <div class="footer">
+                <p>Best Regards,<br>Jannat Booking Administration</p>
+                <p>Email: support@jannatbooking.com</p>
+                <p>PO Box 322, Crestline</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    `;
+
+	return email;
+};
+
 const ReservationVerificationEmail = ({
 	name,
 	hotelName,
@@ -1203,4 +1538,6 @@ module.exports = {
 	SendingReservationLinkEmail,
 	ReservationVerificationEmail,
 	newSupportCaseEmail,
+	SendingReservationLinkEmailTrigger,
+	paymentTriggered,
 };

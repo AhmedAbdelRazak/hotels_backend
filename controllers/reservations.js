@@ -16,6 +16,7 @@ const {
 	emailPaymentLink,
 } = require("./assets");
 const { sum } = require("lodash");
+const { decryptWithSecret } = require("./utils");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1233,34 +1234,87 @@ exports.singleReservation = (req, res) => {
 		});
 };
 
-exports.singleReservationById = (req, res) => {
-	const reservationId = req.params.reservationId;
+const maskCardNumber = (cardNumber) => {
+	if (!cardNumber || cardNumber.length < 4) return "Invalid Card Number";
 
-	// Find a single reservation by its ID
-	Reservations.findById(reservationId)
-		.populate({
-			path: "hotelId",
-			model: "HotelDetails", // Ensure this matches the name of your HotelDetails model
-		})
-		.populate("belongsTo") // Optionally populate other referenced fields
-		.then((reservation) => {
-			if (!reservation) {
-				return res.status(404).send({
-					message: "Reservation not found with id " + reservationId,
-				});
-			}
-			res.send(reservation);
-		})
-		.catch((err) => {
-			if (err.kind === "ObjectId") {
-				return res.status(404).send({
-					message: "Reservation not found with id " + reservationId,
-				});
-			}
-			return res.status(500).send({
-				message: "Error retrieving reservation with id " + reservationId,
+	const lastFour = cardNumber.slice(-4);
+	const maskedSection = "*".repeat(cardNumber.length - 4);
+	return `${maskedSection}${lastFour}`;
+};
+
+/**
+ * Retrieves a single reservation by ID, decrypts sensitive customer details,
+ * masks the card number, and excludes other sensitive information from the response.
+ */
+exports.singleReservationById = async (req, res) => {
+	try {
+		// Extract reservationId from request parameters
+		const { reservationId } = req.params;
+
+		// Find the reservation by its ID and populate related fields
+		const reservation = await Reservations.findById(reservationId)
+			.populate({
+				path: "hotelId",
+				model: "HotelDetails", // Ensure this matches the name of your HotelDetails model
+			})
+			.populate("belongsTo") // Optionally populate other referenced fields
+			.exec();
+
+		// If reservation not found, return a 404 error
+		if (!reservation) {
+			return res.status(404).json({
+				message: `Reservation not found with id ${reservationId}`,
 			});
+		}
+
+		// Decrypt sensitive customer details
+		const decryptedCardNumber = decryptWithSecret(
+			reservation.customer_details.cardNumber
+		);
+		const decryptedCardExpiryDate = decryptWithSecret(
+			reservation.customer_details.cardExpiryDate
+		);
+
+		// Mask the card number to show only the last four digits
+		const maskedCardNumber = maskCardNumber(decryptedCardNumber);
+
+		// Construct the decrypted and masked customer details
+		const decryptedCustomerDetails = {
+			...reservation.customer_details, // Spread existing customer details
+			cardNumber: maskedCardNumber, // Masked card number
+			cardExpiryDate: decryptedCardExpiryDate, // Fully decrypted expiry date
+			// Exclude cardCVV and cardHolderName by not including them
+		};
+
+		// Remove sensitive fields if they exist
+		// This ensures that even if they were accidentally included, they're removed
+		delete decryptedCustomerDetails.cardCVV;
+		delete decryptedCustomerDetails.cardHolderName;
+
+		// Construct the final reservation object to send in the response
+		const responseReservation = {
+			...reservation.toObject(), // Convert Mongoose document to plain object
+			customer_details: decryptedCustomerDetails, // Replace with decrypted and masked details
+		};
+
+		res.status(200).json(responseReservation);
+	} catch (error) {
+		// Log the error for debugging purposes
+		console.error("Error fetching reservation:", error.message || error);
+
+		// Handle specific errors related to invalid ObjectId
+		if (error.kind === "ObjectId") {
+			return res.status(404).json({
+				message: `Reservation not found with id ${req.params.reservationId}`,
+			});
+		}
+
+		// Handle generic server errors
+		res.status(500).json({
+			message:
+				"An internal server error occurred while fetching the reservation.",
 		});
+	}
 };
 
 exports.reservationsList = (req, res) => {

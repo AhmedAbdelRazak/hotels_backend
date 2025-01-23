@@ -13,6 +13,8 @@ const {
 	ClientConfirmationEmail,
 	SendingReservationLinkEmail,
 	ReservationVerificationEmail,
+	SendingReservationLinkEmailTrigger,
+	paymentTriggered,
 } = require("./assets");
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
@@ -260,6 +262,109 @@ exports.getListOfHotels = async (req, res) => {
 	}
 };
 
+exports.sendEmailForTriggeringPayment = async (req, res) => {
+	try {
+		console.log("Received Request Body:", req.body); // Debugging log
+
+		// Extract userId from URL params
+		const { userId } = req.params;
+
+		// Extract reservationId and amountInSAR from request body
+		const { reservationId, amountInSAR } = req.body;
+
+		// Validate inputs
+		if (!reservationId || !amountInSAR) {
+			return res
+				.status(400)
+				.json({ message: "Reservation ID and amount in SAR are required." });
+		}
+
+		// Validate amountInSAR is a positive number
+		if (isNaN(amountInSAR) || Number(amountInSAR) <= 0) {
+			return res
+				.status(400)
+				.json({ message: "Amount in SAR must be a positive number." });
+		}
+
+		// Fetch the reservation details, populating hotelId to get hotelName
+		const reservation = await Reservations.findById(reservationId)
+			.populate("hotelId")
+			.exec();
+
+		if (!reservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		// Extract necessary details from the reservation
+		const hotelName = reservation.hotelId?.hotelName || "Jannat Booking";
+		const guestName = reservation.customer_details?.name || "Valued Guest";
+		const confirmationNumber = reservation.confirmation_number;
+		const totalAmountSAR = reservation.total_amount;
+
+		// Ensure confirmationNumber exists
+		if (!confirmationNumber) {
+			return res.status(400).json({
+				message: "Confirmation number is missing in the reservation.",
+			});
+		}
+
+		// Generate the confirmation link with amountInSAR
+		const confirmationLink = `${process.env.CLIENT_URL}/client-payment-triggering/${reservationId}/${confirmationNumber}/${amountInSAR}`;
+
+		// Generate the email HTML content using the template
+		const emailHtmlContent = SendingReservationLinkEmailTrigger({
+			hotelName,
+			name: guestName,
+			confirmationLink,
+			amountInSAR,
+			totalAmountSAR,
+		});
+
+		// Prepare email options
+		const emailOptions = {
+			to: reservation.customer_details.email, // Client's email
+			from: "noreply@jannatbooking.com", // Verified sender in SendGrid
+			subject: "Payment Confirmation Required - Jannat Booking",
+			html: emailHtmlContent,
+		};
+
+		const emailOptions2 = {
+			to: [
+				{ email: "morazzakhamouda@gmail.com" },
+				{ email: "xhoteleg@gmail.com" },
+				{ email: "ahmed.abdelrazak@jannatbooking.com" },
+			],
+			from: "noreply@jannatbooking.com", // Verified sender in SendGrid
+			subject: "Payment Confirmation Required - Jannat Booking",
+			html: emailHtmlContent,
+		};
+
+		// Send the email using SendGrid
+		await sgMail.send(emailOptions);
+		await sgMail.send(emailOptions2);
+
+		// Respond with success
+		return res
+			.status(200)
+			.json({ message: "Confirmation email sent successfully." });
+	} catch (error) {
+		console.error("Error sending confirmation email:", error);
+
+		// Handle SendGrid-specific errors
+		if (error.response && error.response.body && error.response.body.errors) {
+			const sgErrors = error.response.body.errors
+				.map((err) => err.message)
+				.join(" ");
+			return res.status(500).json({ message: `SendGrid Error: ${sgErrors}` });
+		}
+
+		// Generic server error
+		return res
+			.status(500)
+			.json({ message: "Failed to send confirmation email." });
+	}
+};
+
 exports.gettingRoomListFromQuery = async (req, res) => {
 	try {
 		const { query } = req.params;
@@ -476,11 +581,26 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 		const emailOptions = {
 			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // Safe fallback
 			from: "noreply@jannatbooking.com",
-			bcc: [
+			subject: "Reservation Confirmation - Invoice Attached",
+			html: emailHtmlContent,
+			attachments: [
+				{
+					content: pdfBuffer.toString("base64"),
+					filename: "Reservation_Invoice.pdf",
+					type: "application/pdf",
+					disposition: "attachment",
+				},
+			],
+		};
+
+		const emailOptions2 = {
+			to: [
 				{ email: "morazzakhamouda@gmail.com" },
 				{ email: "xhoteleg@gmail.com" },
 				{ email: "ahmed.abdelrazak@jannatbooking.com" },
 			],
+			from: "noreply@jannatbooking.com",
+
 			subject: "Reservation Confirmation - Invoice Attached",
 			html: emailHtmlContent,
 			attachments: [
@@ -579,11 +699,17 @@ exports.createNewReservationClient = async (req, res) => {
 				await sgMail.send({
 					to: email,
 					from: "noreply@jannatbooking.com",
-					bcc: [
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				await sgMail.send({
+					to: [
 						{ email: "morazzakhamouda@gmail.com" },
 						{ email: "xhoteleg@gmail.com" },
 						{ email: "ahmed.abdelrazak@jannatbooking.com" },
 					],
+					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
 				});
@@ -1511,16 +1637,23 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 		const emailOptions = {
 			to: email,
 			from: "noreply@jannatbooking.com",
-			bcc: [
+			subject: `${hotelName} | Reservation Confirmation Link`,
+			html: emailHtmlContent,
+		};
+
+		const emailOptions2 = {
+			to: [
 				{ email: "morazzakhamouda@gmail.com" },
 				{ email: "xhoteleg@gmail.com" },
 				{ email: "ahmed.abdelrazak@jannatbooking.com" },
 			],
+			from: "noreply@jannatbooking.com",
 			subject: `${hotelName} | Reservation Confirmation Link`,
 			html: emailHtmlContent,
 		};
 
 		await sgMail.send(emailOptions);
+		await sgMail.send(emailOptions2);
 
 		// Log email payload for debugging
 		console.log("Email sent with the following details:", {
@@ -1590,6 +1723,39 @@ exports.updatingTokenizedId = async (req, res) => {
 	}
 };
 
+const sendPaymentTriggeredEmail = async (reservationData) => {
+	try {
+		const emailHtmlContent = paymentTriggered(reservationData);
+
+		const msg = {
+			to: reservationData.customer_details.email, // Guest's email
+			from: "noreply@jannatbooking.com", // Your verified sender
+			subject: "Payment Confirmation - Jannat Booking",
+			html: emailHtmlContent,
+		};
+
+		const msg2 = {
+			to: [
+				{ email: "morazzakhamouda@gmail.com" },
+				{ email: "xhoteleg@gmail.com" },
+				{ email: "ahmed.abdelrazak@jannatbooking.com" },
+			],
+			from: "noreply@jannatbooking.com", // Your verified sender
+			subject: "Payment Confirmation - Jannat Booking",
+			html: emailHtmlContent,
+		};
+
+		await sgMail.send(msg);
+		await sgMail.send(msg2);
+		console.log("Payment confirmation email sent successfully.");
+	} catch (error) {
+		console.error("Error sending payment confirmation email:", error);
+		if (error.response) {
+			console.error(error.response.body);
+		}
+	}
+};
+
 exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 	try {
 		const { reservationId, amount, paymentOption, customUSD, amountSAR } =
@@ -1607,7 +1773,9 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		}
 
 		// 1) Find the reservation
-		const reservation = await Reservations.findById(reservationId);
+		const reservation = await Reservations.findById(reservationId).populate(
+			"hotelId"
+		);
 		if (!reservation) {
 			return res.status(404).json({
 				message: "Reservation not found.",
@@ -1760,7 +1928,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 				updatedPaidAmount = Number(amountSAR) || 0;
 			}
 
-			// Update the reservation:
+			// 8) Update the reservation:
 			const updatedReservation = await Reservations.findOneAndUpdate(
 				{ _id: reservationId },
 				{
@@ -1778,9 +1946,16 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 						// Update paid_amount in SAR
 						paid_amount: updatedPaidAmount,
 					},
+					// 9) Increment the charge count
+					$inc: {
+						"payment_details.chargeCount": 1,
+					},
 				},
 				{ new: true }
-			);
+			).populate("hotelId"); // Ensure hotelId is populated
+
+			// 10) Send the paymentTriggered email
+			await sendPaymentTriggeredEmail(updatedReservation);
 
 			return res.status(200).json({
 				message: "Payment captured successfully.",
@@ -2009,11 +2184,22 @@ exports.createNewReservationClient2 = async (req, res) => {
 				await sgMail.send({
 					to: email,
 					from: "noreply@jannatbooking.com",
-					bcc: [
+					// bcc: [
+					// 	{ email: "morazzakhamouda@gmail.com" },
+					// 	{ email: "xhoteleg@gmail.com" },
+					// 	{ email: "ahmed.abdelrazak@jannatbooking.com" },
+					// ],
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				await sgMail.send({
+					to: [
 						{ email: "morazzakhamouda@gmail.com" },
 						{ email: "xhoteleg@gmail.com" },
 						{ email: "ahmed.abdelrazak@jannatbooking.com" },
 					],
+					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
 				});
