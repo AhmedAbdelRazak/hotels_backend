@@ -68,6 +68,27 @@ const parseAndNormalizeDate = (dateStringOrNumber) => {
 	return null; // Return null for unparseable dates
 };
 
+// Define roomTypes array
+const roomTypes = [
+	{ value: "standardRooms", label: "Standard Rooms" },
+	{ value: "singleRooms", label: "Single Rooms" },
+	{ value: "doubleRooms", label: "Double Rooms" },
+	{ value: "twinRooms", label: "Twin Rooms" },
+	{ value: "queenRooms", label: "Queen Rooms" },
+	{ value: "kingRooms", label: "King Rooms" },
+	{ value: "tripleRooms", label: "Triple Rooms" },
+	{ value: "quadRooms", label: "Quad Rooms" },
+	{ value: "studioRooms", label: "Studio Rooms" },
+	{ value: "suite", label: "Suite" },
+	{ value: "masterSuite", label: "Master Suite" },
+	{ value: "familyRooms", label: "Family Rooms" },
+	{
+		value: "individualBed",
+		label: "Rooms With Individual Beds (Shared Rooms)",
+	},
+	// { value: "other", label: "Other" },
+];
+
 exports.agodaDataDump = async (req, res) => {
 	try {
 		const accountId = req.params.accountId;
@@ -337,6 +358,310 @@ exports.agodaDataDump = async (req, res) => {
 			.json({ message: "Data has been updated and uploaded successfully." });
 	} catch (error) {
 		console.error("Error in agodaDataDump:", error);
+		res.status(500).json({ error: "Internal Server Error" });
+	}
+};
+
+exports.expediaDataDump = async (req, res) => {
+	try {
+		const accountId = req.params.accountId;
+		const userId = req.params.belongsTo;
+
+		// Validate file upload
+		if (!req.file || !req.file.path) {
+			console.error("No file uploaded");
+			return res.status(400).json({ error: "No file uploaded" });
+		}
+
+		const filePath = req.file.path;
+		const fileExtension = path
+			.extname(req.file.originalname || "")
+			.toLowerCase();
+		console.log("File Extension:", fileExtension);
+
+		let data = [];
+
+		// Parse the uploaded file based on its extension
+		if (fileExtension === ".xlsx" || fileExtension === ".xls") {
+			const workbook = xlsx.readFile(filePath);
+			const sheetName = workbook.SheetNames[0];
+			const sheet = workbook.Sheets[sheetName];
+			data = xlsx.utils.sheet_to_json(sheet);
+		} else if (fileExtension === ".csv") {
+			console.log("Processing CSV file...");
+			data = await parseCSV(filePath);
+		} else {
+			console.error("Unsupported file format:", fileExtension);
+			return res.status(400).json({ error: "Unsupported file format" });
+		}
+
+		console.log("Parsed Data Length:", data.length);
+
+		if (data.length === 0) {
+			console.error("File contains no data");
+			return res.status(400).json({ error: "File contains no data" });
+		}
+
+		// Fetch hotel details
+		const hotelDetails = await HotelDetails.findById(accountId).lean();
+		if (!hotelDetails) {
+			console.error("Hotel details not found for ID:", accountId);
+			return res.status(404).json({ error: "Hotel details not found" });
+		}
+
+		console.log("Hotel Details Loaded");
+
+		// Normalize keys for easier handling
+		const normalizeKeys = (obj) => {
+			const normalized = {};
+			for (const key of Object.keys(obj)) {
+				normalized[key.trim().toLowerCase()] = obj[key];
+			}
+			return normalized;
+		};
+
+		for (let item of data) {
+			item = normalizeKeys(item);
+
+			const reservationId = item["reservation id"]?.toString().trim();
+			const confirmationNumber =
+				item["confirmation #"]?.toString().trim() || reservationId;
+
+			if (!confirmationNumber) {
+				console.warn(
+					"Skipping record with missing Reservation ID and Confirmation #"
+				);
+				continue;
+			}
+
+			console.log("Processing item:", confirmationNumber);
+
+			const totalAmount = Number(item["booking amount"] || 0);
+
+			console.log("Total Amount:", totalAmount);
+
+			const checkInDate = parseAndNormalizeDate(item["check-in"]);
+			const checkOutDate = parseAndNormalizeDate(item["check-out"]);
+			const bookedDate = parseAndNormalizeDate(item["booked"]);
+
+			if (!checkInDate || !checkOutDate || !bookedDate) {
+				console.error("Invalid date format detected. Skipping record:", {
+					checkInDate: item["check-in"],
+					checkOutDate: item["check-out"],
+					bookedDate: item["booked"],
+				});
+				continue;
+			}
+
+			console.log("Processed Dates:", {
+				checkInDate,
+				checkOutDate,
+				bookedDate,
+			});
+
+			const daysOfResidence = calculateDaysOfResidence(
+				checkInDate,
+				checkOutDate
+			);
+			console.log("Days of Residence:", daysOfResidence);
+
+			if (daysOfResidence <= 0) {
+				console.warn(
+					"Skipping record with non-positive days of residence:",
+					confirmationNumber
+				);
+				continue;
+			}
+
+			const dateRange = generateDateRange(checkInDate, checkOutDate);
+			console.log("Date Range:", dateRange);
+
+			// **Room Type Mapping Logic Starts Here**
+
+			// Extract the 'room' field from the item
+			const roomField = item["room"];
+			if (!roomField) {
+				console.warn(`Missing 'Room' field in record: ${confirmationNumber}`);
+				continue;
+			}
+
+			// Initialize mappedRoomType as null
+			let mappedRoomType = null;
+
+			// Iterate through roomTypes to find a matching room type
+			for (const roomType of roomTypes) {
+				const roomTypeKeyword = roomType.label.split(" ")[0].toLowerCase(); // First word in label
+				if (roomField.toLowerCase().includes(roomTypeKeyword)) {
+					mappedRoomType = roomType.value;
+					break; // Stop at the first match
+				}
+			}
+
+			if (!mappedRoomType) {
+				console.warn(
+					`Room type mapping not found for room: ${roomField} in record: ${confirmationNumber}`
+				);
+				continue; // Skip this record if no mapping is found
+			}
+
+			// Find the corresponding roomDetails from hotelDetails.roomCountDetails
+			const roomDetails = hotelDetails.roomCountDetails.find(
+				(room) => room.roomType === mappedRoomType
+			);
+
+			if (!roomDetails) {
+				console.warn(
+					`Room details not found for roomType: ${mappedRoomType} in record: ${confirmationNumber}`
+				);
+				continue; // Skip if roomDetails are not found
+			}
+
+			console.log("Room Details Found:", roomDetails.displayName);
+
+			// **Room Type Mapping Logic Ends Here**
+
+			// Assuming each room in the Expedia data represents one room count
+			const roomCount = 1;
+
+			// Calculate commission
+			const commissionRate = 0.15;
+			const commissionAmount = totalAmount * commissionRate;
+
+			// Build the pricingByDay array with correct calculations
+			const pricingByDayTemplate = dateRange.map((date) => {
+				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
+
+				const pricingRate = roomDetails.pricingRate.find(
+					(rate) =>
+						dayjs(rate.calendarDate).format("YYYY-MM-DD") === standardizedDate
+				);
+
+				let rootPrice = 0;
+				if (pricingRate && parseFloat(pricingRate.rootPrice) > 0) {
+					rootPrice = parseFloat(pricingRate.rootPrice);
+				} else if (
+					roomDetails.defaultCost &&
+					parseFloat(roomDetails.defaultCost) > 0
+				) {
+					rootPrice = parseFloat(roomDetails.defaultCost);
+				} else if (
+					roomDetails.price &&
+					roomDetails.price.basePrice &&
+					parseFloat(roomDetails.price.basePrice) > 0
+				) {
+					rootPrice = parseFloat(roomDetails.price.basePrice);
+				} else {
+					console.warn(
+						`No pricing or default cost found for room: ${roomDetails.displayName} on date: ${standardizedDate}`
+					);
+				}
+
+				const price = (totalAmount / daysOfResidence / roomCount).toFixed(2);
+				const totalPriceWithCommission = price; // As per requirement
+				const totalPriceWithoutCommission = (
+					(totalAmount - commissionAmount) /
+					daysOfResidence /
+					roomCount
+				).toFixed(2);
+
+				return {
+					date: standardizedDate,
+					price: price,
+					rootPrice: rootPrice.toFixed(2),
+					commissionRate: commissionRate.toFixed(2),
+					totalPriceWithCommission: totalPriceWithCommission,
+					totalPriceWithoutCommission: totalPriceWithoutCommission,
+				};
+			});
+
+			// Construct the pickedRoomsType array with accurate pricing
+			const pickedRoomsType = [
+				{
+					room_type: roomDetails.roomType,
+					displayName: roomDetails.displayName,
+					chosenPrice: (totalAmount / daysOfResidence / roomCount).toFixed(2),
+					count: roomCount,
+					pricingByDay: pricingByDayTemplate,
+				},
+			];
+
+			console.log("Picked Rooms Type:", pickedRoomsType);
+
+			// Map payment type
+			const paymentType = item["payment type"]?.toLowerCase();
+			const payment =
+				paymentType === "expedia collect"
+					? "Paid Online"
+					: paymentType === "hotel collect"
+					? "Not Paid"
+					: "Not Paid";
+
+			// Adjust reservation status
+			let reservationStatus = item["status"]?.toLowerCase();
+			if (reservationStatus === "prestay") {
+				reservationStatus = "confirmed";
+			} else if (reservationStatus.includes("cancelled")) {
+				reservationStatus = "cancelled";
+			} else if (reservationStatus.includes("show")) {
+				reservationStatus = "no_show";
+			}
+
+			const document = {
+				confirmation_number: confirmationNumber,
+				booking_source: "online jannat booking",
+				customer_details: {
+					name: item["guest"],
+					nationality: "", // Assuming nationality is not provided in Expedia data
+					phone: "", // Assuming phone is not provided in Expedia data
+					email: "", // Assuming email is not provided in Expedia data
+				},
+				state: "Expedia",
+				reservation_status: reservationStatus || "confirmed",
+				total_guests: 0, // Assuming guest count is not provided; adjust as needed
+				cancel_reason: "", // Assuming cancel reason is not provided; adjust as needed
+				booked_at: bookedDate,
+				sub_total: totalAmount,
+				total_rooms: roomCount,
+				total_amount: totalAmount.toFixed(2),
+				currency: "USD", // Adjust if currency is provided
+				checkin_date: checkInDate,
+				checkout_date: checkOutDate,
+				days_of_residence: daysOfResidence,
+				comment: "", // Assuming comments are not provided; adjust as needed
+				commission: commissionAmount.toFixed(4), // Fixed 15% commission
+				payment: payment,
+				pickedRoomsType,
+				hotelId: accountId,
+				belongsTo: userId,
+				paid_amount: payment === "Paid Online" ? totalAmount.toFixed(2) : 0,
+			};
+
+			// Check if the reservation already exists
+			const existingReservation = await Reservations.findOne({
+				confirmation_number: confirmationNumber,
+				booking_source: "online expedia booking",
+			});
+
+			if (existingReservation) {
+				console.log("Updating existing reservation:", confirmationNumber);
+				await Reservations.updateOne(
+					{ confirmation_number: confirmationNumber },
+					{ $set: { ...document } }
+				);
+			} else {
+				await Reservations.create(document);
+				console.log("Saving to MongoDB:", {
+					checkin_date: checkInDate,
+					checkout_date: checkOutDate,
+				});
+			}
+		}
+
+		res.status(200).json({
+			message: "Expedia data has been updated and uploaded successfully.",
+		});
+	} catch (error) {
+		console.error("Error in expediaDataDump:", error);
 		res.status(500).json({ error: "Internal Server Error" });
 	}
 };
