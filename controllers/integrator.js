@@ -643,7 +643,7 @@ exports.expediaDataDump = async (req, res) => {
 
 			const document = {
 				confirmation_number: confirmationNumber,
-				booking_source: "online expedia booking", // Consistent Booking Source
+				booking_source: "online jannat booking", // Consistent Booking Source
 				customer_details: {
 					name: item["guest"],
 					nationality: "", // Assuming nationality is not provided in Expedia data
