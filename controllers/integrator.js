@@ -423,6 +423,10 @@ exports.expediaDataDump = async (req, res) => {
 		for (let item of data) {
 			item = normalizeKeys(item);
 
+			// Debugging logs
+			console.log("Processed Item Keys:", Object.keys(item));
+			console.log("Guest Name:", item["guest"]);
+
 			const reservationId = item["reservation id"]?.toString().trim();
 			const confirmationNumber =
 				item["confirmation #"]?.toString().trim() || reservationId;
@@ -608,9 +612,9 @@ exports.expediaDataDump = async (req, res) => {
 
 			const document = {
 				confirmation_number: confirmationNumber,
-				booking_source: "online jannat booking",
+				booking_source: "online jannat booking", // Corrected Booking Source
 				customer_details: {
-					name: item["Guest"],
+					name: item["guest"],
 					nationality: "", // Assuming nationality is not provided in Expedia data
 					phone: "", // Assuming phone is not provided in Expedia data
 					email: "", // Assuming email is not provided in Expedia data
@@ -636,18 +640,32 @@ exports.expediaDataDump = async (req, res) => {
 				paid_amount: payment === "Paid Online" ? totalAmount.toFixed(2) : 0,
 			};
 
+			// Debugging log for the document
+			console.log("Document to be saved:", document);
+
 			// Check if the reservation already exists
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
-				booking_source: "online expedia booking",
+				booking_source: "online jannat booking", // Ensure consistency
 			});
 
 			if (existingReservation) {
-				console.log("Updating existing reservation:", confirmationNumber);
-				await Reservations.updateOne(
-					{ confirmation_number: confirmationNumber },
-					{ $set: { ...document } }
-				);
+				if (reservationStatus === "cancelled") {
+					console.log(
+						"Updating existing reservation as cancelled:",
+						confirmationNumber
+					);
+					await Reservations.updateOne(
+						{ confirmation_number: confirmationNumber },
+						{ $set: { ...document } }
+					);
+				} else {
+					console.log(
+						"Duplicate reservation found and not cancelled. Skipping:",
+						confirmationNumber
+					);
+					continue; // Skip duplicates unless they are cancelled
+				}
 			} else {
 				await Reservations.create(document);
 				console.log("Saving to MongoDB:", {
