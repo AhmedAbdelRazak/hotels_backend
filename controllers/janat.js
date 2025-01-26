@@ -614,6 +614,7 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 		};
 
 		await sgMail.send(emailOptions);
+		await sgMail.send(emailOptions2);
 		console.log("Invoice email sent successfully.");
 	} catch (error) {
 		console.error("Error sending confirmation email with PDF:", error);
@@ -2216,22 +2217,11 @@ exports.createNewReservationClient2 = async (req, res) => {
 				await sgMail.send({
 					to: email,
 					from: "noreply@jannatbooking.com",
-					// bcc: [
-					// 	{ email: "morazzakhamouda@gmail.com" },
-					// 	{ email: "xhoteleg@gmail.com" },
-					// 	{ email: "ahmed.abdelrazak@jannatbooking.com" },
-					// ],
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
-
-				await sgMail.send({
-					to: [
+					bcc: [
 						{ email: "morazzakhamouda@gmail.com" },
 						{ email: "xhoteleg@gmail.com" },
 						{ email: "ahmed.abdelrazak@jannatbooking.com" },
 					],
-					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
 				});
