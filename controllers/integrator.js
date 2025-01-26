@@ -465,10 +465,10 @@ exports.expediaDataDump = async (req, res) => {
 
 			// **Currency Conversion: Only booking amount from USD to SAR**
 			const totalAmountUSD = Number(item["booking amount"] || 0);
-			const totalAmountSAR = totalAmountUSD * usdToSarRate;
+			const totalAmountSAR = Number((totalAmountUSD * usdToSarRate).toFixed(2)); // Ensure it's a number with two decimal places
 
 			console.log("Total Amount (USD):", totalAmountUSD);
-			console.log("Total Amount (SAR):", totalAmountSAR.toFixed(2));
+			console.log("Total Amount (SAR):", totalAmountSAR);
 
 			const checkInDate = parseAndNormalizeDate(item["check-in"]);
 			const checkOutDate = parseAndNormalizeDate(item["check-out"]);
@@ -550,8 +550,9 @@ exports.expediaDataDump = async (req, res) => {
 
 			// **Room Type Mapping Logic Ends Here**
 
-			// Assuming each room in the Expedia data represents one room count
-			const roomCount = 1;
+			// **Room Count Extraction and Validation**
+			const roomCount = Number(item["room count"] || 1); // Ensure it's a number
+			console.log("Room Count:", roomCount);
 
 			// **Build the Initial PricingByDay Array with Root Prices**
 			const initialPricingByDay = dateRange.map((date) => {
@@ -585,63 +586,85 @@ exports.expediaDataDump = async (req, res) => {
 
 				return {
 					date: standardizedDate,
-					price: rootPriceSAR.toFixed(2), // rootPriceSAR is already in SAR
-					rootPrice: rootPriceSAR.toFixed(2),
+					price: parseFloat(rootPriceSAR.toFixed(2)), // Ensure number type
+					rootPrice: parseFloat(rootPriceSAR.toFixed(2)), // Ensure number type
 				};
 			});
 
 			// **Calculate Sum of Root Prices Across All Days**
 			const sumRootPriceSAR = initialPricingByDay.reduce(
-				(acc, day) => acc + parseFloat(day.rootPrice),
+				(acc, day) => acc + day.rootPrice,
 				0
 			);
 			console.log("Sum of Root Prices (SAR):", sumRootPriceSAR.toFixed(2));
 
-			// **Calculate Commission and Commission Rate**
-			const commissionAmountSAR = totalAmountSAR - sumRootPriceSAR;
-			const commissionRate = sumRootPriceSAR / totalAmountSAR;
+			// **Calculate Commission and Commission Rate Correctly**
+			// Desired:
+			// commissionAmountSAR = total_amount_SAR * commissionRate
+			// sumRootPriceSAR = total_amount_SAR - commissionAmountSAR
+			// Therefore, commissionRate = commissionAmountSAR / total_amount_SAR
 
-			// Ensure commissionRate does not exceed 1
-			const adjustedCommissionRate = commissionRate > 1 ? 1 : commissionRate;
-			console.log("Commission Amount (SAR):", commissionAmountSAR.toFixed(2));
-			console.log("Commission Rate:", adjustedCommissionRate.toFixed(4));
+			// However, sumRootPriceSAR is already calculated based on root prices
+			// Thus, commissionAmountSAR = total_amount_SAR - sumRootPriceSAR
+			// commissionRate = commissionAmountSAR / total_amount_SAR
 
-			// **Distribute Commission Across Days**
-			const commissionAmountPerDay =
-				commissionAmountSAR / daysOfResidence / roomCount;
-			console.log(
-				"Commission Amount Per Day (SAR):",
-				commissionAmountPerDay.toFixed(4)
+			const commissionAmountSAR = parseFloat(
+				(totalAmountSAR - sumRootPriceSAR).toFixed(2)
+			);
+			const commissionRate = parseFloat(
+				(commissionAmountSAR / totalAmountSAR).toFixed(4)
 			);
 
-			// **Build the Final PricingByDay Array with Commission Details**
-			const pricingByDayTemplate = initialPricingByDay.map((day) => ({
-				date: day.date,
-				price: day.price, // rootPriceSAR
-				rootPrice: day.rootPrice,
-				commissionRate: adjustedCommissionRate.toFixed(4), // Fixed to 4 decimal places
-				totalPriceWithCommission: (
-					parseFloat(day.price) + commissionAmountPerDay
-				).toFixed(2),
-				totalPriceWithoutCommissionSAR: day.price,
-			}));
+			console.log("Commission Amount (SAR):", commissionAmountSAR.toFixed(2));
+			console.log("Commission Rate:", commissionRate);
+
+			// **Build the Final PricingByDay Array with Correct Commission Details**
+			// Distribute the total_amount_SAR evenly across nights
+			const pricePerDay = parseFloat(
+				(totalAmountSAR / daysOfResidence / roomCount).toFixed(2)
+			);
+
+			const pricingByDayTemplate = dateRange.map((date) => {
+				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
+
+				return {
+					date: standardizedDate,
+					price: pricePerDay, // Same as totalPriceWithCommission
+					rootPrice: initialPricingByDay.find(
+						(day) => day.date === standardizedDate
+					).rootPrice, // As per original logic
+					commissionRate: commissionRate, // As double (e.g., 0.0872)
+					totalPriceWithCommission: pricePerDay, // Same as price
+					totalPriceWithoutCommission: parseFloat(
+						(pricePerDay - pricePerDay * commissionRate).toFixed(2)
+					), // price - (price * commissionRate)
+				};
+			});
+
+			// **Calculate Average chosenPrice based on totalPriceWithCommission**
+			const averageChosenPrice = parseFloat(
+				(
+					pricingByDayTemplate.reduce(
+						(acc, day) => acc + day.totalPriceWithCommission,
+						0
+					) / pricingByDayTemplate.length
+				).toFixed(2)
+			);
 
 			// **Construct the pickedRoomsType Array with Accurate Pricing in SAR**
 			const pickedRoomsType = [
 				{
 					room_type: roomDetails.roomType,
 					displayName: roomDetails.displayName,
-					chosenPrice: (sumRootPriceSAR / daysOfResidence / roomCount).toFixed(
-						2
-					),
-					count: roomCount,
+					chosenPrice: averageChosenPrice, // Average of totalPriceWithCommission
+					count: roomCount, // Already a number
 					pricingByDay: pricingByDayTemplate,
 				},
 			];
 
 			console.log("Picked Rooms Type:", pickedRoomsType);
 
-			// Map payment type
+			// **Map Payment Type**
 			const paymentType = item["payment type"]?.toLowerCase();
 			const payment =
 				paymentType === "expedia collect"
@@ -650,7 +673,7 @@ exports.expediaDataDump = async (req, res) => {
 					? "Not Paid"
 					: "Not Paid";
 
-			// Adjust reservation status
+			// **Adjust Reservation Status**
 			let reservationStatus = item["status"]?.toLowerCase();
 			if (reservationStatus === "prestay") {
 				reservationStatus = "confirmed";
@@ -660,6 +683,7 @@ exports.expediaDataDump = async (req, res) => {
 				reservationStatus = "no_show";
 			}
 
+			// **Construct the Document Object**
 			const document = {
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking", // Consistent Booking Source
@@ -671,29 +695,33 @@ exports.expediaDataDump = async (req, res) => {
 				},
 				state: "Expedia",
 				reservation_status: reservationStatus || "confirmed",
-				total_guests: 0, // Assuming guest count is not provided; adjust as needed
+				total_guests:
+					Number(item["no_of_adult"] || 0) +
+					Number(item["no_of_children"] || 0),
 				cancel_reason: "", // Assuming cancel reason is not provided; adjust as needed
-				booked_at: bookedDate,
-				sub_total: sumRootPriceSAR, // Sum of root prices
-				total_rooms: roomCount,
-				total_amount: totalAmountSAR.toFixed(2),
+				booked_at: bookedDate, // Use normalized date
+				sub_total: parseFloat(sumRootPriceSAR.toFixed(2)), // Ensure number
+				total_rooms: roomCount, // Already a number
+				total_amount: totalAmountSAR, // Already a number
 				currency: "SAR", // Converted to SAR
-				checkin_date: checkInDate,
-				checkout_date: checkOutDate,
-				days_of_residence: daysOfResidence,
+				checkin_date: checkInDate, // Use normalized date
+				checkout_date: checkOutDate, // Use normalized date
+				days_of_residence: daysOfResidence, // Already a number
 				comment: "", // Assuming comments are not provided; adjust as needed
-				commission: commissionAmountSAR.toFixed(2), // Calculated commission in SAR
+				financeStatus: payment, // Adjusted based on payment type
 				payment: payment,
+				paid_amount: payment === "Paid Online" ? totalAmountSAR : 0, // Already numbers
+				commission: commissionAmountSAR, // Correctly calculated commissionAmountSAR
+				commissionRate: commissionRate, // Store commissionRate as double
 				pickedRoomsType,
 				hotelId: accountId,
 				belongsTo: userId,
-				paid_amount: payment === "Paid Online" ? totalAmountSAR.toFixed(2) : 0,
 			};
 
 			// Debugging log for the document
 			console.log("Document to be saved:", document);
 
-			// Check if the reservation already exists
+			// **Check if the reservation already exists**
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking", // Ensure consistency
