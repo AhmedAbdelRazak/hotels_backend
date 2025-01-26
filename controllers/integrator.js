@@ -610,7 +610,7 @@ exports.expediaDataDump = async (req, res) => {
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking",
 				customer_details: {
-					name: item["guest"],
+					name: item["Guest"],
 					nationality: "", // Assuming nationality is not provided in Expedia data
 					phone: "", // Assuming phone is not provided in Expedia data
 					email: "", // Assuming email is not provided in Expedia data
