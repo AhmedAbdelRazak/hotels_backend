@@ -463,6 +463,7 @@ exports.expediaDataDump = async (req, res) => {
 
 			console.log("Processing item:", confirmationNumber);
 
+			// **Currency Conversion: Only booking amount from USD to SAR**
 			const totalAmountUSD = Number(item["booking amount"] || 0);
 			const totalAmountSAR = totalAmountUSD * usdToSarRate;
 
@@ -565,27 +566,28 @@ exports.expediaDataDump = async (req, res) => {
 						dayjs(rate.calendarDate).format("YYYY-MM-DD") === standardizedDate
 				);
 
-				let rootPriceUSD = 0;
+				let rootPriceSAR = 0; // Since roomDetails.pricingRate.rootPrice is already in SAR
+
 				if (pricingRate && parseFloat(pricingRate.rootPrice) > 0) {
-					rootPriceUSD = parseFloat(pricingRate.rootPrice);
+					rootPriceSAR = parseFloat(pricingRate.rootPrice);
 				} else if (
 					roomDetails.defaultCost &&
 					parseFloat(roomDetails.defaultCost) > 0
 				) {
-					rootPriceUSD = parseFloat(roomDetails.defaultCost);
+					rootPriceSAR = parseFloat(roomDetails.defaultCost);
 				} else if (
 					roomDetails.price &&
 					roomDetails.price.basePrice &&
 					parseFloat(roomDetails.price.basePrice) > 0
 				) {
-					rootPriceUSD = parseFloat(roomDetails.price.basePrice);
+					rootPriceSAR = parseFloat(roomDetails.price.basePrice);
 				} else {
 					console.warn(
 						`No pricing or default cost found for room: ${roomDetails.displayName} on date: ${standardizedDate}`
 					);
 				}
 
-				const rootPriceSAR = rootPriceUSD * usdToSarRate;
+				// **No conversion of rootPriceSAR needed as it's already in SAR**
 
 				const priceSAR = (totalAmountSAR / daysOfResidence / roomCount).toFixed(
 					2
@@ -677,7 +679,7 @@ exports.expediaDataDump = async (req, res) => {
 			// Check if the reservation already exists
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
-				booking_source: "online expedia booking", // Ensure consistency
+				booking_source: "online jannat booking", // Ensure consistency
 			});
 
 			if (existingReservation) {
