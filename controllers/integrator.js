@@ -553,12 +553,8 @@ exports.expediaDataDump = async (req, res) => {
 			// Assuming each room in the Expedia data represents one room count
 			const roomCount = 1;
 
-			// Calculate commission in SAR
-			const commissionRate = 0.15;
-			const commissionAmountSAR = totalAmountSAR * commissionRate;
-
-			// Build the pricingByDay array with correct calculations in SAR
-			const pricingByDayTemplate = dateRange.map((date) => {
+			// **Build the Initial PricingByDay Array with Root Prices**
+			const initialPricingByDay = dateRange.map((date) => {
 				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
 
 				const pricingRate = roomDetails.pricingRate.find(
@@ -587,34 +583,55 @@ exports.expediaDataDump = async (req, res) => {
 					);
 				}
 
-				// **No conversion of rootPriceSAR needed as it's already in SAR**
-
-				const priceSAR = (totalAmountSAR / daysOfResidence / roomCount).toFixed(
-					2
-				);
-				const totalPriceWithCommissionSAR = priceSAR; // As per requirement
-				const totalPriceWithoutCommissionSAR = (
-					(totalAmountSAR - commissionAmountSAR) /
-					daysOfResidence /
-					roomCount
-				).toFixed(2);
-
 				return {
 					date: standardizedDate,
-					price: priceSAR,
+					price: rootPriceSAR.toFixed(2), // rootPriceSAR is already in SAR
 					rootPrice: rootPriceSAR.toFixed(2),
-					commissionRate: (commissionRate * 100).toFixed(2) + "%",
-					totalPriceWithCommission: totalPriceWithCommissionSAR,
-					totalPriceWithoutCommission: totalPriceWithoutCommissionSAR,
 				};
 			});
 
-			// Construct the pickedRoomsType array with accurate pricing in SAR
+			// **Calculate Sum of Root Prices Across All Days**
+			const sumRootPriceSAR = initialPricingByDay.reduce(
+				(acc, day) => acc + parseFloat(day.rootPrice),
+				0
+			);
+			console.log("Sum of Root Prices (SAR):", sumRootPriceSAR.toFixed(2));
+
+			// **Calculate Commission and Commission Rate**
+			const commissionAmountSAR = totalAmountSAR - sumRootPriceSAR;
+			const commissionRate = sumRootPriceSAR / totalAmountSAR;
+
+			// Ensure commissionRate does not exceed 1
+			const adjustedCommissionRate = commissionRate > 1 ? 1 : commissionRate;
+			console.log("Commission Amount (SAR):", commissionAmountSAR.toFixed(2));
+			console.log("Commission Rate:", adjustedCommissionRate.toFixed(4));
+
+			// **Distribute Commission Across Days**
+			const commissionAmountPerDay =
+				commissionAmountSAR / daysOfResidence / roomCount;
+			console.log(
+				"Commission Amount Per Day (SAR):",
+				commissionAmountPerDay.toFixed(4)
+			);
+
+			// **Build the Final PricingByDay Array with Commission Details**
+			const pricingByDayTemplate = initialPricingByDay.map((day) => ({
+				date: day.date,
+				price: day.price, // rootPriceSAR
+				rootPrice: day.rootPrice,
+				commissionRate: adjustedCommissionRate.toFixed(4), // Fixed to 4 decimal places
+				totalPriceWithCommission: (
+					parseFloat(day.price) + commissionAmountPerDay
+				).toFixed(2),
+				totalPriceWithoutCommissionSAR: day.price,
+			}));
+
+			// **Construct the pickedRoomsType Array with Accurate Pricing in SAR**
 			const pickedRoomsType = [
 				{
 					room_type: roomDetails.roomType,
 					displayName: roomDetails.displayName,
-					chosenPrice: (totalAmountSAR / daysOfResidence / roomCount).toFixed(
+					chosenPrice: (sumRootPriceSAR / daysOfResidence / roomCount).toFixed(
 						2
 					),
 					count: roomCount,
@@ -657,7 +674,7 @@ exports.expediaDataDump = async (req, res) => {
 				total_guests: 0, // Assuming guest count is not provided; adjust as needed
 				cancel_reason: "", // Assuming cancel reason is not provided; adjust as needed
 				booked_at: bookedDate,
-				sub_total: totalAmountSAR,
+				sub_total: sumRootPriceSAR, // Sum of root prices
 				total_rooms: roomCount,
 				total_amount: totalAmountSAR.toFixed(2),
 				currency: "SAR", // Converted to SAR
@@ -665,7 +682,7 @@ exports.expediaDataDump = async (req, res) => {
 				checkout_date: checkOutDate,
 				days_of_residence: daysOfResidence,
 				comment: "", // Assuming comments are not provided; adjust as needed
-				commission: commissionAmountSAR.toFixed(2), // 15% commission in SAR
+				commission: commissionAmountSAR.toFixed(2), // Calculated commission in SAR
 				payment: payment,
 				pickedRoomsType,
 				hotelId: accountId,
@@ -683,25 +700,22 @@ exports.expediaDataDump = async (req, res) => {
 			});
 
 			if (existingReservation) {
-				if (reservationStatus === "cancelled") {
-					console.log(
-						"Updating existing reservation as cancelled:",
-						confirmationNumber
-					);
-					await Reservations.updateOne(
-						{ confirmation_number: confirmationNumber },
-						{ $set: { ...document } }
-					);
-				} else {
-					console.log(
-						"Duplicate reservation found and not cancelled. Skipping:",
-						confirmationNumber
-					);
-					continue; // Skip duplicates unless they are cancelled
-				}
+				// **Replace the existing document with the new one, regardless of cancellation status**
+				console.log(
+					"Existing reservation found. Replacing with the new document:",
+					confirmationNumber
+				);
+				await Reservations.updateOne(
+					{
+						confirmation_number: confirmationNumber,
+						booking_source: "online jannat booking",
+					},
+					{ $set: { ...document } }
+				);
 			} else {
+				// Create a new reservation
 				await Reservations.create(document);
-				console.log("Saving to MongoDB:", {
+				console.log("Saving new reservation to MongoDB:", {
 					checkin_date: checkInDate,
 					checkout_date: checkOutDate,
 				});
