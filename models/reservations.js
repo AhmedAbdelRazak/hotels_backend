@@ -275,6 +275,15 @@ const reservationsSchema = new mongoose.Schema(
 				suppliedBookingNo: "",
 			},
 		},
+		advancePayment: {
+			type: Object,
+			trim: true,
+			lowercase: true,
+			default: {
+				paymentPercentage: "",
+				finalAdvancePayment: "",
+			},
+		},
 	},
 	{ timestamps: true }
 );
