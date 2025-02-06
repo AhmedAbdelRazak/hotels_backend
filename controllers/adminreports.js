@@ -97,6 +97,7 @@ function computeReservationCommission(reservation) {
       - If `?hotels=all` or not provided => no hotel filter
       - Else parse comma‐separated hotel names, match them (case‐insensitive)
         to actual hotels, then filter reservations by those IDs
+      - If `?excludeCancelled=true`, filter out cancelled reservations
    ------------------------------------------------------------------ */
 async function findFilteredReservations(req) {
 	const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
@@ -110,6 +111,11 @@ async function findFilteredReservations(req) {
 		],
 		createdAt: { $gte: startOfSep2024 },
 	};
+
+	// If ?excludeCancelled=true, exclude reservation_status = 'cancelled'
+	if (req.query.excludeCancelled === "true") {
+		baseFilter.reservation_status = { $ne: "cancelled" };
+	}
 
 	// Check for ?hotels=...
 	const hotelsParam = req?.query?.hotels; // e.g. "Abraj Al Kiswah,Abraj Al Mesk"
@@ -195,7 +201,6 @@ function groupReservations(reservations, groupKeyFn) {
    ------------------------------------------------------------------ */
 exports.reservationsByDay = async (req, res) => {
 	try {
-		// pass req so we can get ?hotels=...
 		const reservations = await findFilteredReservations(req);
 
 		const results = groupReservations(reservations, (r) => {
@@ -372,7 +377,9 @@ exports.topHotelsByReservations = async (req, res) => {
 	}
 };
 
-// Month name -> 0-based numeric month
+// ------------------------------------------------------
+// Helper objects + functions used in specificListOfReservations
+// ------------------------------------------------------
 const MONTH_NAME_MAP = {
 	january: 0,
 	february: 1,
@@ -432,7 +439,7 @@ function monthRangeFromString(monthYearStr) {
 /* ------------------------------------------------------------------
    specificListOfReservations
    Uses its own custom logic to parse query params for date ranges, etc.
-   Here we also incorporate the same "hotels" param if present.
+   Also respects ?excludeCancelled=true to filter out cancelled reservations
 ------------------------------------------------------------------ */
 exports.specificListOfReservations = async (req, res) => {
 	try {
@@ -449,9 +456,14 @@ exports.specificListOfReservations = async (req, res) => {
 
 		// 2) Build customFilter from query
 		const customFilter = {};
-		const query = req.query; // e.g. { createdAtDate_2024-01-01: '1', hotels: 'Abraj Al Kiswah' }
+		const query = req.query;
 
-		// Handle date or month filters (createdAt, checkin_date, checkout_date, reservationstatus, etc.)
+		// If excludeCancelled=true, exclude reservation_status=cancelled
+		if (query.excludeCancelled === "true") {
+			customFilter.reservation_status = { $ne: "cancelled" };
+		}
+
+		// 3) Parse other keys for date or status filters
 		Object.keys(query).forEach((key) => {
 			// (a) createdAt DATE
 			if (key.startsWith("createdAtDate_")) {
@@ -522,7 +534,7 @@ exports.specificListOfReservations = async (req, res) => {
 			}
 		});
 
-		// 3) hotels param => EXACT match(s) for hotelName, ignoring case
+		// 4) hotels param => EXACT match(s) for hotelName, ignoring case
 		const hotelsParam = query.hotels;
 		if (hotelsParam && hotelsParam !== "all") {
 			const hotelsArr = hotelsParam.split(",");
@@ -538,7 +550,6 @@ exports.specificListOfReservations = async (req, res) => {
 			const matchedIds = matchedHotels.map((h) => h._id);
 
 			if (matchedIds.length === 0) {
-				// No matched hotels => no results
 				customFilter.hotelId = { $in: [] };
 			} else {
 				customFilter.hotelId = { $in: matchedIds };
@@ -546,8 +557,7 @@ exports.specificListOfReservations = async (req, res) => {
 		}
 		// Otherwise, if no hotels= or hotels=all => do nothing special
 
-		// 4) "hotelId" param (the old partial approach) -- we keep it “intact.”
-		//    But only apply it if “hotels” param was NOT used.
+		// 5) "hotelId" param (old partial approach) => only if "hotels" param wasn't used
 		if (!hotelsParam && query.hotelId) {
 			const hotelNameRegex = new RegExp(query.hotelId, "i");
 			const matchedHotels = await HotelDetails.find(
@@ -563,10 +573,10 @@ exports.specificListOfReservations = async (req, res) => {
 			}
 		}
 
-		// 5) Combine baseFilter + customFilter with $and
+		// 6) Combine baseFilter + customFilter with $and
 		const finalFilter = { $and: [baseFilter, customFilter] };
 
-		// 6) Query the DB
+		// 7) Query the DB
 		const reservations = await Reservations.find(finalFilter)
 			.populate("hotelId", "_id hotelName")
 			.lean();
