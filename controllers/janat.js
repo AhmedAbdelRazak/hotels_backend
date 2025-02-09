@@ -1535,40 +1535,372 @@ exports.gettingByReservationId = async (req, res) => {
 
 exports.paginatedReservationList = async (req, res) => {
 	try {
-		// Extract query parameters for pagination
-		const { page = 1, limit = 100 } = req.query;
+		// 1) Extract query parameters for pagination & filter
+		const {
+			page = 1,
+			limit = 100,
+			filterType = "", // <-- We'll replicate the same logic as the old front-end
+		} = req.query;
 
-		// Convert page and limit to integers
 		const pageNumber = parseInt(page, 10);
 		const pageSize = parseInt(limit, 10);
 
-		// Define case-insensitive filters for booking_source
-		const filter = {
+		// 2) Base filter: booking_source (case-insensitive)
+		const baseFilter = {
 			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } }, // Match "online jannat booking" (case-insensitive)
-				{ booking_source: { $regex: /^generated link$/i } }, // Match "Generated Link" (case-insensitive)
-				{ booking_source: { $regex: /^jannat employee$/i } }, // Match "Generated Link" (case-insensitive)
+				{ booking_source: { $regex: /^online jannat booking$/i } },
+				{ booking_source: { $regex: /^generated link$/i } },
+				{ booking_source: { $regex: /^jannat employee$/i } },
 			],
 		};
 
-		// Count total documents for pagination
-		const totalDocuments = await Reservations.countDocuments(filter);
+		// 3) First, fetch ALL matching docs (no skip/limit).
+		//    We'll do the same local filter logic as your old front-end.
+		const allDocs = await Reservations.find(baseFilter)
+			.sort({ createdAt: -1 })
+			.populate("belongsTo")
+			.populate("hotelId")
+			.populate("payment_details"); // if needed
 
-		// Fetch paginated reservations, sorted by createdAt (newest first)
-		const reservations = await Reservations.find(filter)
-			.sort({ createdAt: -1 }) // Sort newest to oldest
-			.skip((pageNumber - 1) * pageSize) // Pagination offset
-			.limit(pageSize) // Limit results to page size
-			.populate("belongsTo") // Populate belongsTo (User model), selecting only name and email
-			.populate("hotelId"); // Populate hotelId (HotelDetails model), selecting only name and address
+		// 4) "Format" each doc so we can replicate your front-end logic
+		//    (like "payment_status", "isCheckinToday", etc.).
+		//    (In your front-end, you had "formattedReservations".)
+		const capturedConfirmationNumbers = ["2944008828"];
 
-		// Return response with reservations and total count
+		function formatReservation(doc) {
+			// Because your front-end used these:
+			const { customer_details = {}, hotelId = {}, payment_details = {} } = doc;
+
+			// Is captured? (like front-end)
+			const isCaptured =
+				payment_details.captured ||
+				capturedConfirmationNumbers.includes(doc.confirmation_number);
+
+			// Derive a "payment_status" as you did in the front-end
+			let payment_status = "Not Captured";
+			if (doc.payment === "not paid") {
+				payment_status = "Not Paid";
+			} else if (isCaptured) {
+				payment_status = "Captured";
+			}
+
+			// In the old front-end, "isCheckinToday" means checkin_date is "today"
+			const isCheckinToday =
+				new Date(doc.checkin_date).toDateString() === new Date().toDateString();
+
+			// Similarly for check-out
+			const isCheckoutToday =
+				new Date(doc.checkout_date).toDateString() ===
+				new Date().toDateString();
+
+			// Payment triggered or not:
+			const isPaymentTriggered = !!payment_details.capturing || isCaptured;
+
+			return {
+				// Spread original doc
+				...doc.toObject(),
+				// Add front-end style fields:
+				customer_name: customer_details.name || "N/A",
+				customer_phone: customer_details.phone || "N/A",
+				hotel_name: hotelId.hotelName || "Unknown Hotel",
+				createdAt: doc.createdAt || null,
+				payment_status,
+				isCheckinToday,
+				isCheckoutToday,
+				isPaymentTriggered,
+			};
+		}
+
+		const formattedDocs = allDocs.map(formatReservation);
+
+		// 5) Apply the EXACT same filter logic from your old EnhancedContentTable.
+		//    That code looked like:
+		//
+		//    if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
+		//      if (r.reservation_status?.toLowerCase() === "cancelled") {
+		//        return false;
+		//      }
+		//    }
+		//    switch (filterType) {
+		//      case "checkinToday": return r.isCheckinToday;
+		//      case "checkoutToday": return r.isCheckoutToday;
+		//      ...
+		//    }
+		//
+		// We'll replicate that here:
+
+		function passesFilter(r) {
+			// If the filter type is one of these, exclude cancelled
+			if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
+				if (r.reservation_status?.toLowerCase() === "cancelled") {
+					return false;
+				}
+			}
+
+			switch (filterType) {
+				case "checkinToday":
+					return r.isCheckinToday;
+				case "checkoutToday":
+					return r.isCheckoutToday;
+
+				case "paymentTriggered":
+					return r.isPaymentTriggered;
+				case "paymentNotTriggered":
+					return !r.isPaymentTriggered;
+
+				case "notPaid":
+					return r.payment_status?.toLowerCase() === "not paid";
+				case "notCaptured":
+					return r.payment_status?.toLowerCase() === "not captured";
+				case "captured":
+					return r.payment_status?.toLowerCase() === "captured";
+
+				case "cancelled":
+					return (
+						r.reservation_status &&
+						r.reservation_status.toLowerCase() === "cancelled"
+					);
+				case "notCancelled":
+					return (
+						r.reservation_status &&
+						r.reservation_status.toLowerCase() !== "cancelled"
+					);
+
+				default:
+					// No filter => show all
+					return true;
+			}
+		}
+
+		const filteredDocs = formattedDocs.filter(passesFilter);
+
+		// The total AFTER filter
+		const totalDocuments = filteredDocs.length;
+
+		// 6) Now do skip/limit for the final pagination
+		//    (like your front-end used to do).
+		const startIndex = (pageNumber - 1) * pageSize;
+		const endIndex = startIndex + pageSize;
+		const finalDocs = filteredDocs.slice(startIndex, endIndex);
+
+		// 7) Scorecards calculation on "filteredDocs"
+		//    (matching exactly how your old front-end used "sortedData" for ScoreCards).
+		//    We'll replicate the same "isToday", "isYesterday" logic, etc.
+
+		function isToday(date) {
+			const today = new Date();
+			return (
+				date.getDate() === today.getDate() &&
+				date.getMonth() === today.getMonth() &&
+				date.getFullYear() === today.getFullYear()
+			);
+		}
+
+		function isYesterday(date) {
+			const today = new Date();
+			const yesterday = new Date(today);
+			yesterday.setDate(today.getDate() - 1);
+			return (
+				date.getDate() === yesterday.getDate() &&
+				date.getMonth() === yesterday.getMonth() &&
+				date.getFullYear() === yesterday.getFullYear()
+			);
+		}
+
+		function isThisWeek(date) {
+			const now = new Date();
+			const startOfWeek = new Date(now);
+			startOfWeek.setDate(now.getDate() - now.getDay());
+			startOfWeek.setHours(0, 0, 0, 0);
+
+			const endOfWeek = new Date(startOfWeek);
+			endOfWeek.setDate(startOfWeek.getDate() + 6);
+			endOfWeek.setHours(23, 59, 59, 999);
+
+			return date >= startOfWeek && date <= endOfWeek;
+		}
+
+		function isLastWeek(date) {
+			const now = new Date();
+			const startOfThisWeek = new Date(now);
+			startOfThisWeek.setDate(now.getDate() - now.getDay());
+			startOfThisWeek.setHours(0, 0, 0, 0);
+
+			const endOfLastWeek = new Date(startOfThisWeek.getTime() - 1);
+
+			const startOfLastWeek = new Date(startOfThisWeek);
+			startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
+			startOfLastWeek.setHours(0, 0, 0, 0);
+
+			return date >= startOfLastWeek && date <= endOfLastWeek;
+		}
+
+		function safeNumber(val) {
+			const parsed = Number(val);
+			return isNaN(parsed) ? 0 : parsed;
+		}
+
+		function computeReservationCommission(reservation) {
+			// We'll just reuse the doc. We only need the original fields:
+			if (!reservation || !reservation.pickedRoomsType) return 0;
+
+			const hotelName = reservation.hotelId?.hotelName?.toLowerCase() || "";
+			const totalAmount = safeNumber(reservation.total_amount);
+
+			if (hotelName === "sahet al hegaz") {
+				return 0.1 * totalAmount;
+			}
+
+			let totalCommission = 0;
+			reservation.pickedRoomsType.forEach((room) => {
+				if (!room.pricingByDay) return;
+				room.pricingByDay.forEach((day) => {
+					const rootPrice = safeNumber(day.rootPrice);
+					const rawRate = safeNumber(day.commissionRate);
+					const finalRate = rawRate < 1 ? rawRate : rawRate / 100;
+					const totalPriceWithoutComm = safeNumber(
+						day.totalPriceWithoutCommission
+					);
+
+					const dayCommission =
+						rootPrice * finalRate + (totalPriceWithoutComm - rootPrice);
+
+					totalCommission += dayCommission * safeNumber(room.count);
+				});
+			});
+			return totalCommission;
+		}
+
+		// Scorecards use "filteredDocs"
+		const allReservations = filteredDocs; // rename for clarity
+
+		// For row 1, do NOT exclude cancelled
+		const todayReservations = allReservations.filter((r) =>
+			isToday(new Date(r.createdAt))
+		).length;
+
+		const yesterdayReservations = allReservations.filter((r) =>
+			isYesterday(new Date(r.createdAt))
+		).length;
+
+		const todayRatio =
+			yesterdayReservations > 0
+				? ((todayReservations - yesterdayReservations) /
+						yesterdayReservations) *
+				  100
+				: todayReservations * 100;
+
+		const weeklyReservations = allReservations.filter((r) =>
+			isThisWeek(new Date(r.createdAt))
+		).length;
+
+		const lastWeekReservations = allReservations.filter((r) =>
+			isLastWeek(new Date(r.createdAt))
+		).length;
+
+		const weeklyRatio =
+			lastWeekReservations > 0
+				? ((weeklyReservations - lastWeekReservations) / lastWeekReservations) *
+				  100
+				: weeklyReservations * 100;
+
+		// Top 3 Hotels by reservation count
+		const hotelCounts = allReservations.reduce((acc, r) => {
+			const name = r.hotelId?.hotelName || "Unknown Hotel";
+			acc[name] = (acc[name] || 0) + 1;
+			return acc;
+		}, {});
+		const topHotels = Object.entries(hotelCounts)
+			.map(([name, count]) => ({ name, reservations: count }))
+			.sort((a, b) => b.reservations - a.reservations)
+			.slice(0, 3);
+
+		// Overall reservations = length of filtered docs
+		const totalFilteredReservations = allReservations.length;
+
+		// For row 2 (commission), exclude cancelled
+		const nonCancelled = allReservations.filter(
+			(r) => (r.reservation_status || "").toLowerCase() !== "cancelled"
+		);
+
+		// Today Commission
+		const todayCommission = nonCancelled
+			.filter((r) => isToday(new Date(r.createdAt)))
+			.reduce((sum, r) => sum + computeReservationCommission(r), 0);
+
+		// Yesterday Commission
+		const yesterdayCommission = nonCancelled
+			.filter((r) => isYesterday(new Date(r.createdAt)))
+			.reduce((sum, r) => sum + computeReservationCommission(r), 0);
+
+		const todayCommissionRatio =
+			yesterdayCommission > 0
+				? ((todayCommission - yesterdayCommission) / yesterdayCommission) * 100
+				: todayCommission * 100;
+
+		// Weekly Commission
+		const weeklyCommission = nonCancelled
+			.filter((r) => isThisWeek(new Date(r.createdAt)))
+			.reduce((sum, r) => sum + computeReservationCommission(r), 0);
+
+		const lastWeekCommission = nonCancelled
+			.filter((r) => isLastWeek(new Date(r.createdAt)))
+			.reduce((sum, r) => sum + computeReservationCommission(r), 0);
+
+		const weeklyCommissionRatio =
+			lastWeekCommission > 0
+				? ((weeklyCommission - lastWeekCommission) / lastWeekCommission) * 100
+				: weeklyCommission * 100;
+
+		// Top 3 hotels by commission
+		const hotelCommissions = nonCancelled.reduce((acc, r) => {
+			const name = r.hotelId?.hotelName || "Unknown Hotel";
+			const c = computeReservationCommission(r);
+			acc[name] = (acc[name] || 0) + c;
+			return acc;
+		}, {});
+		const topHotelsByCommission = Object.entries(hotelCommissions)
+			.map(([name, commission]) => ({ name, commission }))
+			.sort((a, b) => b.commission - a.commission)
+			.slice(0, 3);
+
+		// Overall Commission
+		const overallCommission = nonCancelled.reduce(
+			(acc, r) => acc + computeReservationCommission(r),
+			0
+		);
+
+		// Final Scorecards object (same structure)
+		const scorecards = {
+			// Row 1
+			todayReservations,
+			yesterdayReservations,
+			todayRatio,
+			weeklyReservations,
+			lastWeekReservations,
+			weeklyRatio,
+			topHotels,
+			totalReservations: totalFilteredReservations, // from filtered
+
+			// Row 2
+			todayCommission,
+			yesterdayCommission,
+			todayCommissionRatio,
+			weeklyCommission,
+			lastWeekCommission,
+			weeklyCommissionRatio,
+			topHotelsByCommission,
+			overallCommission,
+		};
+
+		// Return the final JSON
 		return res.status(200).json({
 			success: true,
-			data: reservations,
-			totalDocuments, // Total document count for frontend pagination
+			data: finalDocs, // the docs AFTER we do the filter + skip/limit
+			totalDocuments, // length AFTER filter
 			currentPage: pageNumber,
 			totalPages: Math.ceil(totalDocuments / pageSize),
+			scorecards,
 		});
 	} catch (error) {
 		console.error("Error fetching paginated reservations:", error.message);

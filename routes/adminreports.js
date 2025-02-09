@@ -12,6 +12,7 @@ const {
 	reservationsByHotelNames,
 	topHotelsByReservations,
 	specificListOfReservations,
+	exportToExcel,
 	// ... any other exported controllers
 } = require("../controllers/adminreports");
 
@@ -102,6 +103,14 @@ router.get(
 	isAuth,
 	isAdmin,
 	specificListOfReservations
+);
+
+router.get(
+	"/adminreports/export-to-excel/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	exportToExcel
 );
 
 module.exports = router;
