@@ -903,13 +903,16 @@ exports.exportToExcel = async (req, res) => {
 			createdAt: { $gte: startOfSep2024 },
 		};
 
-		// 2) Parse query
+		// 2) Parse query for date range, hotels, + NEW: filterType & searchQuery
 		const dateField = req.query.dateField || "createdAt"; // "createdAt", "checkin_date", "checkout_date"
 		const fromStr = req.query.from; // e.g. "2025-01-01"
 		const toStr = req.query.to; // e.g. "2025-02-01"
 		const hotelsParam = req.query.hotels || "all";
 
-		// Convert from/to to actual Date objects (midnight to end-of-day)
+		const filterType = req.query.filterType || ""; // NEW
+		const searchQuery = (req.query.searchQuery || "").trim().toLowerCase(); // NEW
+
+		// Convert from/to to Date objects
 		let fromDate = null;
 		let toDate = null;
 		if (fromStr) {
@@ -948,47 +951,99 @@ exports.exportToExcel = async (req, res) => {
 			finalFilter.hotelId = { $in: matchedIds };
 		}
 
-		// 5) Fetch reservations (with .populate for hotel & belongsTo)
+		// 5) Fetch reservations
 		const reservations = await Reservations.find(finalFilter)
 			.populate("hotelId", "hotelName")
-			.populate("belongsTo", "name phone email") // or whichever fields you store
+			.populate("belongsTo", "name phone email")
+			.populate("payment_details")
 			.lean();
 
-		// 6) Transform each doc to match your "original component" fields
-		const transformed = reservations.map((r) => {
-			// A) Payment Status logic
-			let paymentStatus = "";
-			if (r.payment === "not paid") {
-				paymentStatus = "Not Paid";
-			} else if (r.payment_details?.captured) {
-				paymentStatus = "Captured";
-			} else {
-				paymentStatus = "Not Captured";
+		// ------------------------- NEW: Payment Status & Filter Helpers -------------------------
+		// A) Payment Status logic with "Paid Offline"
+		//    if captured => "Captured"
+		//    else if onsite_paid_amount>0 => "Paid Offline"
+		//    else if doc.payment === "not paid" => "Not Paid"
+		//    else => "Not Captured"
+		function computePaymentStatus(r) {
+			const isCaptured = r.payment_details?.captured;
+			const onsitePaid = r.payment_details?.onsite_paid_amount || 0;
+
+			if (isCaptured) {
+				return "Captured";
+			} else if (onsitePaid > 0) {
+				return "Paid Offline";
+			} else if (r.payment === "not paid") {
+				return "Not Paid";
 			}
+			return "Not Captured";
+		}
 
-			// B) "Paid Onsite"
-			const paidOnsite = r.payment_details?.onside_paid_amount || 0;
+		// B) filterType logic (no pagination—just filter)
+		function passesFilter(r) {
+			const payStatus = (r.payment_status || "").toLowerCase();
+			const resStatus = (r.reservation_status || "").toLowerCase();
 
-			// C) "Name" and "Phone" from r.customer_details
-			const customerName = r.customer_details?.name || "";
-			const customerPhone = r.customer_details?.phone || "";
+			switch (filterType) {
+				case "notPaid":
+					return payStatus === "not paid";
+				case "notCaptured":
+					return payStatus === "not captured";
+				case "captured":
+					return payStatus === "captured";
+				case "paidOffline":
+					return payStatus === "paid offline";
 
-			// D) "Hotel Name" from r.hotelId.hotelName
-			const hotelName = r.hotelId?.hotelName || "";
+				case "cancelled":
+					return resStatus === "cancelled";
+				case "notCancelled":
+					return resStatus !== "cancelled";
 
-			// E) "Checkin/Checkout"
-			const checkinDate = r.checkin_date || null; // store raw Date
-			const checkoutDate = r.checkout_date || null; // store raw Date
+				default:
+					return true; // no extra filter
+			}
+		}
 
-			// F) Distinct "Room Type" from r.pickedRoomsType
+		// C) Build "enriched" array with new payment status
+		let enrichedReservations = reservations.map((r) => {
+			return {
+				...r,
+				payment_status: computePaymentStatus(r),
+			};
+		});
+
+		// D) Filter by filterType
+		enrichedReservations = enrichedReservations.filter(passesFilter);
+
+		// E) If searchQuery provided, do a case-insensitive check
+		if (searchQuery) {
+			enrichedReservations = enrichedReservations.filter((r) => {
+				const cnum = (r.confirmation_number || "").toLowerCase();
+				const phone = (r.customer_details?.phone || "").toLowerCase();
+				const name = (r.customer_details?.name || "").toLowerCase();
+				const hname = (r.hotelId?.hotelName || "").toLowerCase();
+
+				return (
+					cnum.includes(searchQuery) ||
+					phone.includes(searchQuery) ||
+					name.includes(searchQuery) ||
+					hname.includes(searchQuery)
+				);
+			});
+		}
+		// --------------------------------------------------------------------------
+
+		// 6) Transform each final doc into the shape for export
+		const transformed = enrichedReservations.map((r) => {
+			// "Paid Offline" amount
+			const paidOffline = r.payment_details?.onsite_paid_amount || 0;
+
+			// Distinct room types
 			let roomTypeString = "";
 			let roomCount = 0;
 			if (Array.isArray(r.pickedRoomsType) && r.pickedRoomsType.length > 0) {
-				// unique room_type
 				const distinctTypes = new Set(
 					r.pickedRoomsType.map((x) => x.room_type)
 				);
-				// map to the "nice labels"
 				const mappedLabels = [...distinctTypes].map((typeVal) => {
 					const found = ROOM_TYPES_MAPPING.find((rt) => rt.value === typeVal);
 					return found ? found.label : typeVal;
@@ -997,34 +1052,25 @@ exports.exportToExcel = async (req, res) => {
 				roomCount = r.pickedRoomsType.length;
 			}
 
-			// G) "Paid Amount"
-			const paidAmount = r.paid_amount || 0;
-
-			// H) "Created At"
-			const createdDate = r.createdAt || null;
-
 			return {
-				// Mirror the original export fields
 				confirmation_number: r.confirmation_number || "",
-				customer_name: customerName,
-				customer_phone: customerPhone,
-				hotel_name: hotelName,
+				customer_name: r.customer_details?.name || "",
+				customer_phone: r.customer_details?.phone || "",
+				hotel_name: r.hotelId?.hotelName || "",
 				reservation_status: r.reservation_status || "",
-				checkin_date: checkinDate,
-				checkout_date: checkoutDate,
-				payment_status: paymentStatus,
+				checkin_date: r.checkin_date || null,
+				checkout_date: r.checkout_date || null,
+				payment_status: r.payment_status || "", // from computePaymentStatus
 				total_amount: r.total_amount || 0,
-				paid_amount: paidAmount,
+				paid_amount: r.paid_amount || 0,
+				paid_offline: paidOffline, // NEW field
 				room_type: roomTypeString,
 				room_count: roomCount,
-				paid_onsite: paidOnsite,
-				createdAt: createdDate,
+				createdAt: r.createdAt || null,
 			};
 		});
 
-		// 7) Return the *transformed* docs.
-		//    The front-end's doExportToExcel will see these fields
-		//    and create the correct columns with no blanks.
+		// 7) Return all matching (no pagination)
 		return res.json(transformed);
 	} catch (err) {
 		console.error("Error in exportToExcel:", err);

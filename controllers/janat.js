@@ -1571,11 +1571,18 @@ exports.paginatedReservationList = async (req, res) => {
 				payment_details.captured ||
 				capturedConfirmationNumbers.includes(doc.confirmation_number);
 
+			// --- ADJUSTMENT FOR "Paid Offline" ---
+			// ORDER: if isCaptured -> "Captured"
+			//        else if onsite_paid_amount > 0 -> "Paid Offline"
+			//        else if doc.payment === "not paid" -> "Not Paid"
+			//        else -> "Not Captured"
 			let payment_status = "Not Captured";
-			if (doc.payment === "not paid") {
-				payment_status = "Not Paid";
-			} else if (isCaptured) {
+			if (isCaptured) {
 				payment_status = "Captured";
+			} else if (payment_details?.onsite_paid_amount > 0) {
+				payment_status = "Paid Offline";
+			} else if (doc.payment === "not paid") {
+				payment_status = "Not Paid";
 			}
 
 			const isCheckinToday =
@@ -1600,7 +1607,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const formattedDocs = allDocs.map(formatReservation);
 
-		// 5) filterType logic (unchanged)
+		// 5) filterType logic (unchanged) + NEW CASE for "paidOffline"
 		function passesFilter(r) {
 			if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
 				if (r.reservation_status?.toLowerCase() === "cancelled") {
@@ -1636,6 +1643,10 @@ exports.paginatedReservationList = async (req, res) => {
 						r.reservation_status.toLowerCase() !== "cancelled"
 					);
 
+				// NEW filterType for "paidOffline"
+				case "paidOffline":
+					return r.payment_status?.toLowerCase() === "paid offline";
+
 				default:
 					return true;
 			}
@@ -1644,8 +1655,6 @@ exports.paginatedReservationList = async (req, res) => {
 		let filteredDocs = formattedDocs.filter(passesFilter);
 
 		// -------------------- ADD SEARCH HERE --------------------
-		// If user typed in "searchQuery", then do a case-insensitive check
-		// against: confirmation_number, customer_phone, customer_name, hotel_name
 		const searchQ = searchQuery.trim().toLowerCase();
 		if (searchQ) {
 			filteredDocs = filteredDocs.filter((r) => {
@@ -1750,7 +1759,6 @@ exports.paginatedReservationList = async (req, res) => {
 			return totalCommission;
 		}
 
-		// "filteredDocs" is the array after filter+search
 		const allReservations = filteredDocs;
 
 		// For row1
