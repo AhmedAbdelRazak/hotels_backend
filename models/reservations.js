@@ -284,6 +284,10 @@ const reservationsSchema = new mongoose.Schema(
 				finalAdvancePayment: "",
 			},
 		},
+		wholeSaleReservation: {
+			type: Boolean,
+			default: false,
+		},
 	},
 	{ timestamps: true }
 );

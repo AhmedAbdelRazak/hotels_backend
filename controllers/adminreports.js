@@ -195,6 +195,26 @@ function groupReservations(reservations, groupKeyFn) {
 	return Object.values(groupsMap);
 }
 
+// "roomTypes" array for mapping room_type => label
+const ROOM_TYPES_MAPPING = [
+	{ value: "standardRooms", label: "Standard Rooms" },
+	{ value: "singleRooms", label: "Single Rooms" },
+	{ value: "doubleRooms", label: "Double Room" },
+	{ value: "twinRooms", label: "Twin Rooms" },
+	{ value: "queenRooms", label: "Queen Rooms" },
+	{ value: "kingRooms", label: "King Rooms" },
+	{ value: "tripleRooms", label: "Triple Room" },
+	{ value: "quadRooms", label: "Quad Rooms" },
+	{ value: "studioRooms", label: "Studio Rooms" },
+	{ value: "suite", label: "Suite" },
+	{ value: "masterSuite", label: "Master Suite" },
+	{ value: "familyRooms", label: "Family Rooms" },
+	{
+		value: "individualBed",
+		label: "Rooms With Individual Beds (Shared Rooms)",
+	},
+];
+
 /* ------------------------------------------------------------------
    6) reservationsByDay
       Group by the DAY portion of createdAt
@@ -868,26 +888,6 @@ function monthRangeFromString(monthStr) {
 	return { start, end };
 }
 
-// "roomTypes" array for mapping room_type => label
-const ROOM_TYPES_MAPPING = [
-	{ value: "standardRooms", label: "Standard Rooms" },
-	{ value: "singleRooms", label: "Single Rooms" },
-	{ value: "doubleRooms", label: "Double Room" },
-	{ value: "twinRooms", label: "Twin Rooms" },
-	{ value: "queenRooms", label: "Queen Rooms" },
-	{ value: "kingRooms", label: "King Rooms" },
-	{ value: "tripleRooms", label: "Triple Room" },
-	{ value: "quadRooms", label: "Quad Rooms" },
-	{ value: "studioRooms", label: "Studio Rooms" },
-	{ value: "suite", label: "Suite" },
-	{ value: "masterSuite", label: "Master Suite" },
-	{ value: "familyRooms", label: "Family Rooms" },
-	{
-		value: "individualBed",
-		label: "Rooms With Individual Beds (Shared Rooms)",
-	},
-];
-
 exports.exportToExcel = async (req, res) => {
 	try {
 		const userId = req.params.userId;
@@ -1075,5 +1075,669 @@ exports.exportToExcel = async (req, res) => {
 	} catch (err) {
 		console.error("Error in exportToExcel:", err);
 		return res.status(500).json({ error: "Failed to export to excel" });
+	}
+};
+
+// Create a quick lookup { "doubleRooms": "Double Room", ... }
+const roomTypeLabelMap = {};
+ROOM_TYPES_MAPPING.forEach((rt) => {
+	roomTypeLabelMap[rt.value] = rt.label;
+});
+
+// Parse hotelId if given
+function tryConvertToObjectId(value) {
+	if (!value) return null;
+	if (mongoose.Types.ObjectId.isValid(value)) {
+		return new mongoose.Types.ObjectId(value);
+	}
+	return null;
+}
+
+// Helper to check if two dates are the same day
+function isSameDay(date1, date2) {
+	return (
+		date1.getFullYear() === date2.getFullYear() &&
+		date1.getMonth() === date2.getMonth() &&
+		date1.getDate() === date2.getDate()
+	);
+}
+
+// MAIN CONTROLLER
+exports.adminDashboardReport = async (req, res) => {
+	try {
+		// 1) Base filter (booking_source + createdAt >= 2024-09-01)
+		const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
+		const baseFilter = {
+			$or: [
+				{ booking_source: { $regex: /^online jannat booking$/i } },
+				{ booking_source: { $regex: /^generated link$/i } },
+				{ booking_source: { $regex: /^jannat employee$/i } },
+			],
+			createdAt: { $gte: startOfSep2024 },
+		};
+
+		// 2) Optional hotelId param => /admin-dashboard-reports/:hotelId
+		const { hotelId } = req.params;
+		if (hotelId && hotelId !== "all") {
+			const objId = tryConvertToObjectId(hotelId);
+			if (!objId) {
+				return res.status(400).json({
+					success: false,
+					message: `Invalid hotelId '${hotelId}'`,
+				});
+			}
+			baseFilter.hotelId = objId;
+		}
+
+		// Helper to merge baseFilter + condition
+		const withBaseFilter = (cond) => ({ $and: [baseFilter, cond] });
+
+		// 3) Check if there are ANY documents matching baseFilter
+		const totalMatches = await Reservations.countDocuments(baseFilter);
+		if (totalMatches === 0) {
+			// If no docs, return a simple message
+			return res.json({
+				success: true,
+				message: "No Reservations Found",
+			});
+		}
+
+		// 4) Define “today”
+		const now = new Date();
+		const startOfToday = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate(),
+			0,
+			0,
+			0,
+			0
+		);
+		const endOfToday = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate(),
+			23,
+			59,
+			59,
+			999
+		);
+
+		// We'll do 10 days after "today"
+		const endOf10Days = new Date(startOfToday);
+		endOf10Days.setDate(endOf10Days.getDate() + 9);
+
+		// ============== FIRST ROW ==============
+		// arrivals => checkin_date == today
+		const arrivalsCount = await Reservations.countDocuments(
+			withBaseFilter({
+				checkin_date: { $gte: startOfToday, $lte: endOfToday },
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		// departures => checkout_date == today
+		const departuresCount = await Reservations.countDocuments(
+			withBaseFilter({
+				checkout_date: { $gte: startOfToday, $lte: endOfToday },
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		// inHouse => checkin_date <= endOfToday && checkout_date > startOfToday
+		const inHouseCount = await Reservations.countDocuments(
+			withBaseFilter({
+				checkin_date: { $lte: endOfToday },
+				checkout_date: { $gt: startOfToday },
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		// booking => createdAt == today
+		const bookingsTodayCount = await Reservations.countDocuments(
+			withBaseFilter({
+				createdAt: { $gte: startOfToday, $lte: endOfToday },
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		// overAllBookings => total non-cancelled (matching baseFilter)
+		const overAllBookingsCount = await Reservations.countDocuments(
+			withBaseFilter({
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		// tomorrowArrivals => checkin_date == tomorrow
+		const tomorrowStart = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate() + 1,
+			0,
+			0,
+			0,
+			0
+		);
+		const tomorrowEnd = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate() + 1,
+			23,
+			59,
+			59,
+			999
+		);
+		const tomorrowArrivalsCount = await Reservations.countDocuments(
+			withBaseFilter({
+				checkin_date: { $gte: tomorrowStart, $lte: tomorrowEnd },
+				reservation_status: { $ne: "cancelled" },
+			})
+		);
+
+		const firstRow = {
+			arrivals: arrivalsCount,
+			departures: departuresCount,
+			inHouse: inHouseCount,
+			booking: bookingsTodayCount,
+			overAllBookings: overAllBookingsCount,
+			tomorrowArrivals: tomorrowArrivalsCount,
+		};
+
+		// ============== SECOND ROW ==============
+		// cancellations => canceled “today” (updatedAt in [today..today])
+		const cancellationsCount = await Reservations.countDocuments(
+			withBaseFilter({
+				reservation_status: "cancelled",
+				updatedAt: { $gte: startOfToday, $lte: endOfToday },
+			})
+		);
+
+		// noShow => "no show" updated “today”
+		const noShowCount = await Reservations.countDocuments(
+			withBaseFilter({
+				reservation_status: /no\s?show/i,
+				updatedAt: { $gte: startOfToday, $lte: endOfToday },
+			})
+		);
+
+		// totalRoomsAcrossHotels => sum of all .roomCountDetails[].count
+		const hotelsQuery =
+			hotelId && hotelId !== "all"
+				? { _id: new mongoose.Types.ObjectId(hotelId) }
+				: {};
+		const matchedHotels = await HotelDetails.find(hotelsQuery).lean();
+
+		let totalRoomsAcrossHotels = 0;
+		for (const h of matchedHotels) {
+			for (const detail of h.roomCountDetails || []) {
+				totalRoomsAcrossHotels += detail.count || 0;
+			}
+		}
+
+		// Next 10 days => peak usage
+		const relevantFor10Days = await Reservations.find(
+			withBaseFilter({
+				reservation_status: { $ne: "cancelled" },
+				checkin_date: { $lte: endOf10Days },
+				checkout_date: { $gt: startOfToday },
+			})
+		)
+			.select("checkin_date checkout_date pickedRoomsType")
+			.lean();
+
+		const usageArray10 = new Array(10).fill(0);
+		const dayList10 = [];
+		for (let i = 0; i < 10; i++) {
+			const d = new Date(startOfToday);
+			d.setDate(d.getDate() + i);
+			dayList10.push(d);
+		}
+
+		for (const doc of relevantFor10Days) {
+			if (!Array.isArray(doc.pickedRoomsType)) continue;
+			let totalRoomsUsed = 0;
+			for (const rtObj of doc.pickedRoomsType) {
+				totalRoomsUsed += rtObj.count || 1;
+			}
+			const cIn = doc.checkin_date;
+			const cOut = doc.checkout_date;
+			for (let i = 0; i < 10; i++) {
+				const dayDate = dayList10[i];
+				if (dayDate >= cIn && dayDate < cOut) {
+					usageArray10[i] += totalRoomsUsed;
+				}
+			}
+		}
+
+		const peakUsageIn10Days = Math.max(...usageArray10);
+		const occupancy = {
+			booked: peakUsageIn10Days,
+			available: Math.max(totalRoomsAcrossHotels - peakUsageIn10Days, 0),
+			overallRoomsCount: totalRoomsAcrossHotels,
+		};
+
+		// latestCheckouts => optional
+		const latestCheckoutsRaw = await Reservations.find(
+			withBaseFilter({
+				reservation_status: { $in: ["completed", "checked-out"] },
+			})
+		)
+			.sort({ checkout_date: -1 })
+			.limit(4)
+			.lean();
+
+		const latestCheckouts = latestCheckoutsRaw.map((r) => ({
+			key: String(r._id),
+			guest: r.customer_details?.name || "N/A",
+			guestId: r.customer_details?.passport || "",
+			accommodation: Array.isArray(r.pickedRoomsType)
+				? r.pickedRoomsType.map((rt) => rt.room_type).join(", ")
+				: "",
+			stay:
+				r.checkin_date && r.checkout_date
+					? `${r.checkin_date.toISOString().slice(0, 10)} - ${r.checkout_date
+							.toISOString()
+							.slice(0, 10)}`
+					: "",
+			status: "Check out",
+			amount: r.total_amount ? `$${r.total_amount}` : "",
+		}));
+
+		// upcomingCheckins => next 10 days (including today)
+		const upcomingRaw = await Reservations.find(
+			withBaseFilter({
+				reservation_status: { $ne: "cancelled" },
+				checkin_date: { $gte: startOfToday, $lte: endOf10Days },
+			})
+		)
+			.sort({ checkin_date: 1 })
+			.lean();
+
+		const upcomingCheckins = upcomingRaw.map((doc) => {
+			let nights = doc.days_of_residence || 0;
+			if (!nights && doc.checkin_date && doc.checkout_date) {
+				const diff = doc.checkout_date - doc.checkin_date;
+				nights = Math.ceil(diff / (1000 * 60 * 60 * 24));
+			}
+			let dateRange = "";
+			if (doc.checkin_date && doc.checkout_date) {
+				const ci = doc.checkin_date.toISOString().slice(0, 10);
+				const co = doc.checkout_date.toISOString().slice(0, 10);
+				dateRange = `${ci} - ${co}`;
+			}
+			const guestsCount =
+				doc.total_guests || (doc.adults || 0) + (doc.children || 0);
+			const flag = isSameDay(doc.checkin_date, now) ? 1 : 0;
+
+			return {
+				_id: String(doc._id),
+				name: doc.customer_details?.name || "N/A",
+				confirmation_number: doc.confirmation_number || "N/A",
+				room_type:
+					(doc.pickedRoomsType[0] && doc.pickedRoomsType[0].room_type) || "N/A",
+				nights,
+				dateRange,
+				number_of_guests: guestsCount,
+				flag,
+				reservation_status: doc.reservation_status || "",
+			};
+		});
+
+		const secondRow = {
+			cancellations: cancellationsCount,
+			noShow: noShowCount,
+			occupancy, // { booked, available, overallRoomsCount }
+			latestCheckouts,
+			upcomingCheckins,
+		};
+
+		// ============== THIRD ROW ==============
+		// 7-day usage approach for "roomsTable"
+		const reservationsForRooms = await Reservations.find(baseFilter)
+			.select("pickedRoomsType")
+			.lean();
+
+		// sold => total usage from all time (matching baseFilter)
+		const roomStatsMap = {};
+		for (const r of reservationsForRooms) {
+			if (!Array.isArray(r.pickedRoomsType)) continue;
+			for (const rtObj of r.pickedRoomsType) {
+				const typeVal = rtObj.room_type;
+				if (!roomStatsMap[typeVal]) {
+					roomStatsMap[typeVal] = { sold: 0 };
+				}
+				roomStatsMap[typeVal].sold += rtObj.count || 1;
+			}
+		}
+
+		// combinedInventory => from matchedHotels roomCountDetails
+		const combinedInventory = {};
+		for (const h of matchedHotels) {
+			for (const detail of h.roomCountDetails || []) {
+				const rtVal = detail.roomType;
+				combinedInventory[rtVal] =
+					(combinedInventory[rtVal] || 0) + (detail.count || 0);
+			}
+		}
+
+		// Next 7 days usage => usageByDay7
+		const rangeEnd = new Date(startOfToday);
+		rangeEnd.setDate(rangeEnd.getDate() + 7); // up to 7 days from today
+		const relevantForNext7 = await Reservations.find(
+			withBaseFilter({
+				reservation_status: { $ne: "cancelled" },
+				checkin_date: { $lte: rangeEnd },
+				checkout_date: { $gt: startOfToday },
+			})
+		)
+			.select("checkin_date checkout_date pickedRoomsType")
+			.lean();
+
+		const usageByDay7 = {};
+		const allTypeVals = new Set([
+			...Object.keys(combinedInventory),
+			...Object.keys(roomStatsMap),
+		]);
+
+		// Initialize usageByDay7 for each type
+		for (const typeVal of allTypeVals) {
+			usageByDay7[typeVal] = [0, 0, 0, 0, 0, 0, 0];
+		}
+
+		const dayList7 = [];
+		for (let i = 0; i < 7; i++) {
+			const dd = new Date(startOfToday);
+			dd.setDate(dd.getDate() + i);
+			dayList7.push(dd);
+		}
+
+		// Fill usage
+		for (const doc of relevantForNext7) {
+			if (!Array.isArray(doc.pickedRoomsType)) continue;
+			const cIn = doc.checkin_date;
+			const cOut = doc.checkout_date;
+
+			for (const rtObj of doc.pickedRoomsType) {
+				const typeVal = rtObj.room_type;
+				const countVal = rtObj.count || 1;
+
+				for (let i = 0; i < 7; i++) {
+					const dayDate = dayList7[i];
+					if (dayDate >= cIn && dayDate < cOut) {
+						usageByDay7[typeVal][i] += countVal;
+					}
+				}
+			}
+		}
+
+		// availabilityNext7 => for each type
+		const availabilityNext7 = {};
+		for (const typeVal of allTypeVals) {
+			const inv = combinedInventory[typeVal] || 0;
+			const peak = Math.max(...usageByDay7[typeVal]);
+			availabilityNext7[typeVal] = Math.max(inv - peak, 0);
+		}
+
+		const dynamicRoomsTable = [];
+		let rowKeyCounter = 1;
+		for (const typeVal of allTypeVals) {
+			// If we have a label, use it; else use the raw type
+			const label = roomTypeLabelMap[typeVal] || typeVal;
+
+			const total = combinedInventory[typeVal] || 0;
+			const sold = roomStatsMap[typeVal]?.sold || 0;
+
+			// If you want "available" (all-time) => total - sold
+			const available = Math.max(total - sold, 0);
+
+			// next7 => how many left at peak usage
+			const next7 = availabilityNext7[typeVal] || 0;
+
+			dynamicRoomsTable.push({
+				key: String(rowKeyCounter++),
+				type: label,
+				sold,
+				total,
+				bookingNext7: next7, // or rename as you wish
+				availabilityNext7: next7, // same
+				available, // optional
+			});
+		}
+
+		const housekeeping = { clean: 25, cleaning: 0, dirty: 0 };
+		const thirdRow = {
+			roomsTable: dynamicRoomsTable,
+			housekeeping,
+		};
+
+		// ============== FOURTH ROW ==============
+		// top channels, room nights, room revenue
+		const pipelineTopChannels = [
+			{ $match: baseFilter },
+			{
+				$group: {
+					_id: "$booking_source",
+					count: { $sum: 1 },
+				},
+			},
+			{ $sort: { count: -1 } },
+			{ $limit: 5 },
+		];
+		const topChannelsAgg = await Reservations.aggregate(pipelineTopChannels);
+		const topChannels = topChannelsAgg.map((tc) => ({
+			name: tc._id || "Other",
+			value: tc.count,
+			fillColor: "#4285F4",
+		}));
+
+		const pipelineRoomTypes = [
+			{ $match: baseFilter },
+			{ $unwind: "$pickedRoomsType" },
+			{
+				$group: {
+					_id: "$pickedRoomsType.room_type",
+					nights: { $sum: "$days_of_residence" },
+					revenue: { $sum: "$total_amount" },
+				},
+			},
+			{ $sort: { revenue: -1 } },
+		];
+		const roomTypesAgg = await Reservations.aggregate(pipelineRoomTypes);
+		const roomNightsByType = roomTypesAgg.map((rta) => ({
+			type: roomTypeLabelMap[rta._id] || rta._id,
+			value: rta.nights,
+			fillColor: "#E74C3C",
+		}));
+		const roomRevenueByType = roomTypesAgg.map((rta) => ({
+			type: roomTypeLabelMap[rta._id] || rta._id,
+			value: rta.revenue,
+			fillColor: "#FF7373",
+		}));
+		const fourthRow = {
+			topChannels,
+			roomNightsByType,
+			roomRevenueByType,
+		};
+
+		// ============== FIFTH ROW => line chart last10..today..next10 + visitors ==============
+		// define lineStart => 10 days before today
+		const lineStart = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate(),
+			0,
+			0,
+			0,
+			0
+		);
+		lineStart.setDate(lineStart.getDate() - 10);
+
+		// define lineEnd => 10 days after today
+		const lineEnd = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate(),
+			23,
+			59,
+			59,
+			999
+		);
+		lineEnd.setDate(lineEnd.getDate() + 10);
+
+		// For checkIn => we match checkin_date in [lineStart..lineEnd]
+		const pipelineCheckIn = [
+			{
+				$match: {
+					$and: [
+						baseFilter,
+						{ checkin_date: { $gte: lineStart, $lte: lineEnd } },
+						{ reservation_status: { $ne: "cancelled" } },
+					],
+				},
+			},
+			{
+				$group: {
+					_id: {
+						y: { $year: "$checkin_date" },
+						m: { $month: "$checkin_date" },
+						d: { $dayOfMonth: "$checkin_date" },
+					},
+					count: { $sum: 1 },
+				},
+			},
+			{ $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
+		];
+
+		// For checkOut => we match checkout_date in [lineStart..lineEnd]
+		const pipelineCheckOut = [
+			{
+				$match: {
+					$and: [
+						baseFilter,
+						{ checkout_date: { $gte: lineStart, $lte: lineEnd } },
+						{ reservation_status: { $ne: "cancelled" } },
+					],
+				},
+			},
+			{
+				$group: {
+					_id: {
+						y: { $year: "$checkout_date" },
+						m: { $month: "$checkout_date" },
+						d: { $dayOfMonth: "$checkout_date" },
+					},
+					count: { $sum: 1 },
+				},
+			},
+			{ $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
+		];
+
+		const [checkInAgg, checkOutAgg] = await Promise.all([
+			Reservations.aggregate(pipelineCheckIn),
+			Reservations.aggregate(pipelineCheckOut),
+		]);
+
+		// Now build day by day from lineStart..lineEnd
+		const lineChartCategories = [];
+		const checkInData = [];
+		const checkOutData = [];
+
+		// We'll do a dayCursor from lineStart up to lineEnd inclusive
+		let dayCursor = new Date(lineStart);
+		while (dayCursor <= lineEnd) {
+			const y = dayCursor.getFullYear();
+			const m = dayCursor.getMonth() + 1;
+			const d = dayCursor.getDate();
+
+			// Label => "YYYY-MM-DD"
+			const label = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(
+				2,
+				"0"
+			)}`;
+			lineChartCategories.push(label);
+
+			// find checkIn count for that day
+			const foundIn = checkInAgg.find(
+				(x) => x._id.y === y && x._id.m === m && x._id.d === d
+			);
+			checkInData.push(foundIn ? foundIn.count : 0);
+
+			// find checkOut count for that day
+			const foundOut = checkOutAgg.find(
+				(x) => x._id.y === y && x._id.m === m && x._id.d === d
+			);
+			checkOutData.push(foundOut ? foundOut.count : 0);
+
+			// increment day
+			dayCursor.setDate(dayCursor.getDate() + 1);
+		}
+
+		const visitorsLine = {
+			categories: ["10am", "2pm", "6pm", "11pm"],
+			yesterday: [10, 20, 30, 40],
+			today: [20, 40, 35, 50],
+		};
+
+		const fifthRow = {
+			bookingLine: {
+				categories: lineChartCategories,
+				checkIn: checkInData,
+				checkOut: checkOutData,
+			},
+			visitorsLine,
+		};
+
+		// ============== DonutChartCard => dynamic
+		// We'll keep it as occupancy.available + occupancy.overallRoomsCount
+		const donutChartCard = {
+			availableRooms: occupancy.available,
+			totalRooms: occupancy.overallRoomsCount,
+		};
+
+		// ============== HorizontalBarChartCard => Booked Room Today (pending/done/finish)
+		const [pendingCount, doneCount, finishCount] = await Promise.all([
+			Reservations.countDocuments(
+				withBaseFilter({
+					reservation_status: "pending",
+					checkin_date: { $gte: startOfToday, $lte: endOfToday },
+				})
+			),
+			Reservations.countDocuments(
+				withBaseFilter({
+					reservation_status: "done",
+					checkin_date: { $gte: startOfToday, $lte: endOfToday },
+				})
+			),
+			Reservations.countDocuments(
+				withBaseFilter({
+					reservation_status: "finish",
+					checkin_date: { $gte: startOfToday, $lte: endOfToday },
+				})
+			),
+		]);
+		const horizontalBarChartCard = {
+			pending: pendingCount,
+			done: doneCount,
+			finish: finishCount,
+		};
+
+		// ============== Final response ==============
+		const responseData = {
+			firstRow,
+			secondRow,
+			thirdRow,
+			fourthRow,
+			fifthRow,
+			donutChartCard,
+			horizontalBarChartCard,
+		};
+
+		return res.json({ success: true, data: responseData });
+	} catch (err) {
+		console.error("Error in adminDashboardReport:", err);
+		return res.status(500).json({
+			success: false,
+			message: err.message || "Failed to get admin dashboard report",
+		});
 	}
 };

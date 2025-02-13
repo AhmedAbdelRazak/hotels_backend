@@ -141,6 +141,10 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		wholeSaleHotel: {
+			type: Boolean,
+			default: false,
+		},
 		subscriptionToken: {
 			type: String,
 			default: "unavailable",

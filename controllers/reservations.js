@@ -96,7 +96,7 @@ const sendEmailWithPdf = async (reservationData) => {
 			{ email: "xhoteleg@gmail.com" },
 			{ email: "ahmed.abdelrazak@jannatbooking.com" },
 		],
-		subject: `Janat Booking - Reservation Confirmation`,
+		subject: `Jannat Booking - Reservation Confirmation`,
 		html: htmlContent,
 		attachments: [
 			{
@@ -675,7 +675,10 @@ exports.totalCheckoutRecords = async (req, res) => {
 								{
 									$cond: [
 										{
-											$in: ["$booking_source", ["janat", "affiliate"]],
+											$in: [
+												"$booking_source",
+												["jannat", "affiliate", "janat"],
+											],
 										},
 										{ $multiply: ["$total_amount", 0.1] },
 										{ $subtract: ["$total_amount", "$sub_total"] },
@@ -858,7 +861,10 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 								{
 									$cond: [
 										{
-											$in: ["$booking_source", ["janat", "affiliate"]],
+											$in: [
+												"$booking_source",
+												["janat", "affiliate", "jannat"],
+											],
 										},
 										{ $multiply: ["$total_amount", 0.1] },
 										{ $subtract: ["$total_amount", "$sub_total"] },
@@ -1414,7 +1420,7 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 			{ email: "xhoteleg@gmail.com" },
 			{ email: "ahmed.abdelrazak@jannatbooking.com" },
 		],
-		subject: `Janat Booking - Reservation Update`,
+		subject: `Jannat Booking - Reservation Update`,
 		html: htmlContent,
 		attachments: [
 			{
@@ -2548,7 +2554,7 @@ exports.janatDataDump = async (req, res) => {
 			// Prepare the document based on your mapping, including any necessary calculations
 			const document = {
 				confirmation_number: item["book number"] || "",
-				booking_source: "janat",
+				booking_source: "jannat",
 				customer_details: {
 					name: item["guest name(s)"] || "", // Assuming 'Guest Name(s)' contains the full name
 				},
@@ -2578,7 +2584,7 @@ exports.janatDataDump = async (req, res) => {
 
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: itemNumber,
-				booking_source: "janat",
+				booking_source: "jannat",
 			});
 
 			if (existingReservation) {
@@ -3090,7 +3096,7 @@ exports.pendingPaymentReservations = async (req, res) => {
 
 		let dynamicFilter = {
 			hotelId: ObjectId(hotelId),
-			booking_source: { $in: ["janat", "affiliate", "manual"] },
+			booking_source: { $in: ["janat", "affiliate", "manual", "jannat"] },
 			reservation_status: { $in: ["checked_out"] },
 			financeStatus: { $in: ["not moved", "not paid", "", undefined] },
 		};
@@ -3141,7 +3147,7 @@ exports.commissionPaidReservations = async (req, res) => {
 
 		let dynamicFilter = {
 			hotelId: ObjectId(hotelId),
-			booking_source: { $in: ["janat", "affiliate", "manual"] },
+			booking_source: { $in: ["janat", "affiliate", "manual", "jannat"] },
 			reservation_status: { $in: ["checked_out"] },
 			financeStatus: { $in: ["paid"] },
 		};
