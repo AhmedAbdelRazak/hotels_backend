@@ -7,7 +7,7 @@ exports.userById = (req, res, next, id) => {
 	console.log(id, "id");
 	User.findById(id)
 		.select(
-			"_id name email phone role user points activeUser  hotelsToSupport accessTo"
+			"_id name email phone role user points activeUser hotelsToSupport accessTo"
 		)
 		.populate("hotelsToSupport")
 		// .populate("hotelsToSupport", "_id hotelName hotelCountry hotelCity hotelAddress")
@@ -19,26 +19,36 @@ exports.userById = (req, res, next, id) => {
 				});
 			}
 			req.profile = user; // Attach the user with populated hotelsToSupport to the request
+			console.log("Passed UserById");
 			next();
 		});
 };
 
-exports.updatedUserId = (req, res, next, id) => {
-	User.findById(id)
-		.select(
-			"_id name email phone role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
-		)
+exports.updatedUserId = async (req, res, next, id) => {
+	console.log(id, "idididididididid"); // This shows 675bb6a5fffa21f9bd44feba
 
-		.exec((err, userNeedsUpdate) => {
-			console.log(err, "user not found yad");
-			if (err || !userNeedsUpdate) {
-				return res.status(400).json({
-					error: "user not found yad",
-				});
-			}
-			req.updatedUserByAdmin = userNeedsUpdate;
-			next();
-		});
+	try {
+		// 1) Quick debug findOne
+		const testString = await User.findOne({ _id: id }); // if ID is stored as string
+		console.log("testString =>", testString);
+
+		// 2) The standard findById
+		const userNeedsUpdate = await User.findById(id)
+			.select("_id name email hotelIdsOwner")
+			.exec();
+
+		console.log("userNeedsUpdate =>", userNeedsUpdate);
+		if (!userNeedsUpdate) {
+			return res.status(400).json({ error: "user not found yad" });
+		}
+		req.updatedUserByAdmin = userNeedsUpdate;
+		console.log("Passed updatedUserId");
+
+		next();
+	} catch (err) {
+		console.log("err =>", err);
+		return res.status(400).json({ error: "some error" });
+	}
 };
 
 exports.read = (req, res) => {
@@ -119,108 +129,95 @@ exports.update = (req, res) => {
 };
 
 exports.updateUserByAdmin = (req, res) => {
-	const {
-		name,
-		password,
-		role,
-		activeUser,
-		employeeImage,
-		email,
-		userRole,
-		userStore,
-		userBranch,
-	} = req.body.updatedUserByAdmin;
+	// The admin-supplied data
+	const updateData = req.body || {};
+	// The userId we want to update
+	// e.g. if you store it as `updateData.userId`
+	const userIdToUpdate = updateData.userId;
 
-	User.findOne({ _id: req.body.updatedUserByAdmin.userId }, (err, user) => {
+	// 1) Find the target user
+	User.findOne({ _id: userIdToUpdate }, (err, user) => {
 		if (err || !user) {
-			return res.status(400).json({
-				error: "User not found",
-			});
-		}
-		if (!name) {
-			return res.status(400).json({
-				error: "Name is required",
-			});
-		} else {
-			user.name = name;
+			return res.status(400).json({ error: "User not found" });
 		}
 
-		if (password) {
-			if (password.length < 6) {
+		// 2) For each possible field, update if present in updateData
+
+		// name
+		if ("name" in updateData) {
+			if (!updateData.name) {
+				return res.status(400).json({ error: "Name is required" });
+			}
+			user.name = updateData.name;
+		}
+
+		// password
+		if ("password" in updateData) {
+			if (!updateData.password) {
+				return res.status(400).json({ error: "Password is required" });
+			}
+			if (updateData.password.length < 6) {
 				return res.status(400).json({
 					error: "Password should be min 6 characters long",
 				});
-			} else {
-				user.password = password;
 			}
+			user.password = updateData.password;
 		}
 
-		if (!role) {
-			return res.status(400).json({
-				error: "Role is required",
-			});
-		} else {
-			user.role = role;
+		// role
+		if ("role" in updateData) {
+			if (!updateData.role) {
+				return res.status(400).json({ error: "Role is required" });
+			}
+			user.role = updateData.role;
 		}
 
-		if (!email) {
-			return res.status(400).json({
-				error: "Email is required",
-			});
-		} else {
-			user.email = email;
+		// email
+		if ("email" in updateData) {
+			if (!updateData.email) {
+				return res.status(400).json({ error: "Email is required" });
+			}
+			user.email = updateData.email;
 		}
 
-		if (!activeUser) {
-			return res.status(400).json({
-				error: "activeUser is required",
-			});
-		} else {
-			user.activeUser = activeUser;
+		// activeUser
+		if ("activeUser" in updateData) {
+			// If you want it mandatory if provided:
+			// if (!updateData.activeUser) {
+			//   return res.status(400).json({ error: "activeUser is required" });
+			// }
+			user.activeUser = updateData.activeUser;
 		}
 
-		if (!employeeImage) {
-			return res.status(400).json({
-				error: "employeeImage is required",
-			});
-		} else {
-			user.employeeImage = employeeImage;
+		// employeeImage
+		if ("employeeImage" in updateData) {
+			user.employeeImage = updateData.employeeImage;
 		}
 
-		if (!userRole) {
-			return res.status(400).json({
-				error: "User Role Is Required",
-			});
-		} else {
-			user.userRole = userRole;
+		// userRole
+		if ("userRole" in updateData) {
+			user.userRole = updateData.userRole;
 		}
 
-		if (!userStore) {
-			return res.status(400).json({
-				error: "User Store Is Required",
-			});
-		} else {
-			user.userStore = userStore;
+		// userStore
+		if ("userStore" in updateData) {
+			user.userStore = updateData.userStore;
 		}
 
-		if (!userBranch) {
-			return res.status(400).json({
-				error: "User Store Is Required",
-			});
-		} else {
-			user.userBranch = userBranch;
+		// userBranch
+		if ("userBranch" in updateData) {
+			user.userBranch = updateData.userBranch;
 		}
 
+		// 3) Save the updated user
 		user.save((err, updatedUser) => {
 			if (err) {
 				console.log("USER UPDATE ERROR", err);
-				return res.status(400).json({
-					error: "User update failed",
-				});
+				return res.status(400).json({ error: "User update failed" });
 			}
 			updatedUser.hashed_password = undefined;
 			updatedUser.salt = undefined;
-			res.json(updatedUser);
+			return res.json(updatedUser);
 		});
 	});
 };
