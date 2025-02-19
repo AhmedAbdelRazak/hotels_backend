@@ -681,8 +681,6 @@ exports.createNewReservationClient = async (req, res) => {
 				...req.body,
 			};
 
-			// console.log(req.body, "req.body from not paid status");
-
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
 				expiresIn: "3m", // Token expires in 3 minutes
 			});
@@ -714,6 +712,32 @@ exports.createNewReservationClient = async (req, res) => {
 					subject: "Verify Your Reservation",
 					html: emailContent,
 				});
+
+				//----------------------------------------------------------------------
+				// 3rd Email logic (Not Paid scenario): belongsTo user with role=2000
+				//----------------------------------------------------------------------
+				if (belongsTo) {
+					let belongsToId = null;
+					if (typeof belongsTo === "object" && belongsTo._id) {
+						belongsToId = belongsTo._id;
+					} else {
+						belongsToId = belongsTo;
+					}
+
+					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+						const belongsToUser = await User.findById(belongsToId);
+						if (belongsToUser && belongsToUser.role === 2000) {
+							// Send the same verification email
+							await sgMail.send({
+								to: belongsToUser.email,
+								from: "noreply@jannatbooking.com",
+								subject: "Verify Your Reservation",
+								html: emailContent,
+							});
+						}
+					}
+				}
+				//----------------------------------------------------------------------
 
 				return res.status(200).json({
 					message:
@@ -1900,7 +1924,10 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			selectedRooms,
 			agentName,
 			depositPercentage,
+			// We'll also read belongsTo from the request body
+			belongsTo,
 		} = req.body;
+
 		console.log(req.body, "req.bodyreq.body");
 		// Validate required fields
 		if (
@@ -1957,6 +1984,33 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 
 		await sgMail.send(emailOptions);
 		await sgMail.send(emailOptions2);
+
+		//----------------------------------------------------------------------
+		// 3rd Email logic: if belongsTo user exists, check role === 2000
+		//----------------------------------------------------------------------
+		if (belongsTo) {
+			let belongsToId = null;
+			// If belongsTo is an object with _id, extract it. Otherwise, use as string
+			if (typeof belongsTo === "object" && belongsTo._id) {
+				belongsToId = belongsTo._id;
+			} else {
+				belongsToId = belongsTo;
+			}
+
+			if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+				const belongsToUser = await User.findById(belongsToId);
+				if (belongsToUser && belongsToUser.role === 2000) {
+					const emailOptions3 = {
+						to: belongsToUser.email,
+						from: "noreply@jannatbooking.com",
+						subject: `${hotelName} | Reservation Confirmation Link`,
+						html: emailHtmlContent,
+					};
+					await sgMail.send(emailOptions3);
+				}
+			}
+		}
+		//----------------------------------------------------------------------
 
 		// Log email payload for debugging
 		console.log("Email sent with the following details:", {
@@ -2447,6 +2501,28 @@ exports.createNewReservationClient2 = async (req, res) => {
 
 			await sendEmailWithInvoice(reservationData, customerDetails.email);
 
+			//----------------------------------------------------------------------
+			// 3rd Email logic (employee scenario): if belongsTo user (role=2000),
+			// send them the same invoice content
+			//----------------------------------------------------------------------
+			if (belongsTo) {
+				let belongsToId = null;
+				if (typeof belongsTo === "object" && belongsTo._id) {
+					belongsToId = belongsTo._id;
+				} else {
+					belongsToId = belongsTo;
+				}
+
+				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+					const belongsToUser = await User.findById(belongsToId);
+					if (belongsToUser && belongsToUser.role === 2000) {
+						// Reuse the same invoice email
+						await sendEmailWithInvoice(reservationData, belongsToUser.email);
+					}
+				}
+			}
+			//----------------------------------------------------------------------
+
 			// Respond with the created reservation
 			return res.status(201).json({
 				message: "Reservation created successfully",
@@ -2529,6 +2605,31 @@ exports.createNewReservationClient2 = async (req, res) => {
 					subject: "Verify Your Reservation",
 					html: emailContent,
 				});
+
+				//----------------------------------------------------------------------
+				// 3rd Email logic (Not Paid scenario): belongsTo user with role=2000
+				//----------------------------------------------------------------------
+				if (belongsTo) {
+					let belongsToId = null;
+					if (typeof belongsTo === "object" && belongsTo._id) {
+						belongsToId = belongsTo._id;
+					} else {
+						belongsToId = belongsTo;
+					}
+
+					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+						const belongsToUser = await User.findById(belongsToId);
+						if (belongsToUser && belongsToUser.role === 2000) {
+							await sgMail.send({
+								to: belongsToUser.email,
+								from: "noreply@jannatbooking.com",
+								subject: "Verify Your Reservation",
+								html: emailContent,
+							});
+						}
+					}
+				}
+				//----------------------------------------------------------------------
 
 				return res.status(200).json({
 					message:
