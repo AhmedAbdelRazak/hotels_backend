@@ -6,6 +6,7 @@ const crypto = require("crypto"); // For hashing or encrypting card details
 const User = require("../models/user");
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
+const CustomerList = require("../models/customerlist");
 
 require("dotenv").config();
 const fetch = require("node-fetch");
@@ -665,26 +666,23 @@ exports.createNewReservationClient = async (req, res) => {
 
 		// Check payment type
 		if (req.body.payment === "Not Paid") {
+			// If there's no email, just finalize
 			if (!email) {
 				return res.status(201).json({
 					message: "Reservation verified successfully.",
 					data: {
-						...reservationData,
-						hotelName: reservationData.hotelName,
-						usePassword: reservationData.usePassword,
+						...req.body,
+						hotelName: hotel.hotelName,
+						usePassword: req.body.usePassword,
 					},
 				});
 			}
 
 			// Generate a tokenized link containing the reservation data
-			const tokenPayload = {
-				...req.body,
-			};
-
+			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
 				expiresIn: "3m", // Token expires in 3 minutes
 			});
-
 			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
 
 			// Send verification email
@@ -695,27 +693,13 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 
 			try {
-				await sgMail.send({
-					to: email,
-					from: "noreply@jannatbooking.com",
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
+				// Build a single list of recipients: user + staff + belongsTo (role=2000)
+				const bccList = [
+					"morazzakhamouda@gmail.com",
+					"xhoteleg@gmail.com",
+					"ahmed.abdelrazak@jannatbooking.com",
+				];
 
-				await sgMail.send({
-					to: [
-						{ email: "morazzakhamouda@gmail.com" },
-						{ email: "xhoteleg@gmail.com" },
-						{ email: "ahmed.abdelrazak@jannatbooking.com" },
-					],
-					from: "noreply@jannatbooking.com",
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
-
-				//----------------------------------------------------------------------
-				// 3rd Email logic (Not Paid scenario): belongsTo user with role=2000
-				//----------------------------------------------------------------------
 				if (belongsTo) {
 					let belongsToId = null;
 					if (typeof belongsTo === "object" && belongsTo._id) {
@@ -723,21 +707,21 @@ exports.createNewReservationClient = async (req, res) => {
 					} else {
 						belongsToId = belongsTo;
 					}
-
 					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 						const belongsToUser = await User.findById(belongsToId);
 						if (belongsToUser && belongsToUser.role === 2000) {
-							// Send the same verification email
-							await sgMail.send({
-								to: belongsToUser.email,
-								from: "noreply@jannatbooking.com",
-								subject: "Verify Your Reservation",
-								html: emailContent,
-							});
+							bccList.push(belongsToUser.email);
 						}
 					}
 				}
-				//----------------------------------------------------------------------
+
+				await sgMail.send({
+					to: email, // Client's email
+					from: "noreply@jannatbooking.com",
+					subject: "Verify Your Reservation",
+					html: emailContent,
+					bcc: bccList,
+				});
 
 				return res.status(200).json({
 					message:
@@ -754,7 +738,6 @@ exports.createNewReservationClient = async (req, res) => {
 		// Process payment and create reservation for "Deposit Paid" or "Paid Online"
 		const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 			paymentDetails;
-
 		if (!cardNumber || !cardExpiryDate || !cardCVV || !cardHolderName) {
 			return res
 				.status(400)
@@ -779,26 +762,21 @@ exports.createNewReservationClient = async (req, res) => {
 		});
 
 		if (!paymentResponse.success) {
-			console.log("Payment failed:", paymentResponse.message);
 			return res.status(400).json({
 				message: paymentResponse.message || "Payment processing failed.",
 			});
 		}
 
-		// Generate a unique confirmation number using ensureUniqueNumber
+		// Generate or validate a unique confirmation number
 		let confirmationNumber = req.body.confirmation_number;
-
 		if (!confirmationNumber) {
 			confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(
-					Reservations, // The Mongoose model for reservations
-					"confirmation_number", // The field in the database
-					(err, uniqueNumber) => {
-						if (err) {
-							reject(new Error("Error generating confirmation number."));
-						} else {
-							resolve(uniqueNumber);
-						}
+					Reservations,
+					"confirmation_number",
+					(err, unique) => {
+						if (err) reject(new Error("Error generating confirmation number."));
+						else resolve(unique);
 					}
 				);
 			});
@@ -807,18 +785,17 @@ exports.createNewReservationClient = async (req, res) => {
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
 			});
-
 			if (existingReservation) {
-				console.log("Existing reservation found:", existingReservation);
 				return res.status(400).json({
 					message: "Reservation already exists. No further action required.",
 				});
 			}
 		}
 
-		// Assign the confirmation number to the request body for saving
+		// Assign the confirmation number
 		req.body.confirmation_number = confirmationNumber;
 
+		// Proceed to handle user creation / updating and reservation saving
 		await handleUserAndReservation(
 			req,
 			res,
@@ -2439,24 +2416,22 @@ exports.createNewReservationClient2 = async (req, res) => {
 			advancePayment,
 		} = req.body;
 
-		// Directly create the reservation if sentFrom is "employee"
+		// 1) If sentFrom is "employee", create reservation directly (no payment gateway)
 		if (sentFrom === "employee") {
-			// Generate a unique confirmation number
 			const confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(
-					Reservations, // Mongoose model for reservations
-					"confirmation_number", // Field in the database
-					(err, uniqueNumber) => {
+					Reservations,
+					"confirmation_number",
+					(err, unique) => {
 						if (err) {
 							reject(new Error("Error generating confirmation number."));
 						} else {
-							resolve(uniqueNumber);
+							resolve(unique);
 						}
 					}
 				);
 			});
 
-			// Create the reservation directly
 			const reservation = new Reservations({
 				hotelId,
 				customer_details: customerDetails,
@@ -2480,17 +2455,12 @@ exports.createNewReservationClient2 = async (req, res) => {
 				advancePayment,
 			});
 
-			// Save the reservation
 			const savedReservation = await reservation.save();
-
-			// Fetch hotel details to include in the email
 			const hotel = await HotelDetails.findById(hotelId).exec();
-
 			if (!hotel) {
 				return res.status(404).json({ message: "Hotel not found" });
 			}
 
-			// Generate and send the email with hotel data
 			const reservationData = {
 				...savedReservation.toObject(),
 				hotelName: hotel.hotelName,
@@ -2498,13 +2468,9 @@ exports.createNewReservationClient2 = async (req, res) => {
 				hotelCity: hotel.hotelCity,
 				hotelPhone: hotel.phone,
 			};
-
 			await sendEmailWithInvoice(reservationData, customerDetails.email);
 
-			//----------------------------------------------------------------------
-			// 3rd Email logic (employee scenario): if belongsTo user (role=2000),
-			// send them the same invoice content
-			//----------------------------------------------------------------------
+			// Optional: send to belongsTo if role=2000
 			if (belongsTo) {
 				let belongsToId = null;
 				if (typeof belongsTo === "object" && belongsTo._id) {
@@ -2512,25 +2478,21 @@ exports.createNewReservationClient2 = async (req, res) => {
 				} else {
 					belongsToId = belongsTo;
 				}
-
 				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 					const belongsToUser = await User.findById(belongsToId);
 					if (belongsToUser && belongsToUser.role === 2000) {
-						// Reuse the same invoice email
 						await sendEmailWithInvoice(reservationData, belongsToUser.email);
 					}
 				}
 			}
-			//----------------------------------------------------------------------
 
-			// Respond with the created reservation
 			return res.status(201).json({
 				message: "Reservation created successfully",
 				data: savedReservation,
 			});
 		}
 
-		// Existing logic for reservations not sent from "employee"
+		// 2) If not from an employee, proceed with normal checks
 		const { name, phone, email, passport, passportExpiry, nationality } =
 			customerDetails;
 
@@ -2541,7 +2503,6 @@ exports.createNewReservationClient2 = async (req, res) => {
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		});
-
 		if (!hotel) {
 			return res.status(400).json({
 				message:
@@ -2563,8 +2524,8 @@ exports.createNewReservationClient2 = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// Existing logic for "Not Paid" reservations
-		if (req.body.payment === "Not Paid") {
+		// If payment = "Not Paid", send verification link
+		if (payment === "Not Paid") {
 			if (!email) {
 				return res.status(201).json({
 					message: "Reservation verified successfully.",
@@ -2575,18 +2536,13 @@ exports.createNewReservationClient2 = async (req, res) => {
 				});
 			}
 
-			// Generate a tokenized link containing the reservation data
-			const tokenPayload = {
-				...req.body,
-			};
-
+			// Generate a tokenized link
+			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
-				expiresIn: "3m", // Token expires in 3 minutes
+				expiresIn: "3m",
 			});
-
 			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
 
-			// Send verification email
 			const emailContent = ReservationVerificationEmail({
 				name,
 				hotelName: hotel.hotelName,
@@ -2594,21 +2550,12 @@ exports.createNewReservationClient2 = async (req, res) => {
 			});
 
 			try {
-				await sgMail.send({
-					to: email,
-					from: "noreply@jannatbooking.com",
-					bcc: [
-						{ email: "morazzakhamouda@gmail.com" },
-						{ email: "xhoteleg@gmail.com" },
-						{ email: "ahmed.abdelrazak@jannatbooking.com" },
-					],
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
+				const bccList = [
+					"morazzakhamouda@gmail.com",
+					"xhoteleg@gmail.com",
+					"ahmed.abdelrazak@jannatbooking.com",
+				];
 
-				//----------------------------------------------------------------------
-				// 3rd Email logic (Not Paid scenario): belongsTo user with role=2000
-				//----------------------------------------------------------------------
 				if (belongsTo) {
 					let belongsToId = null;
 					if (typeof belongsTo === "object" && belongsTo._id) {
@@ -2616,20 +2563,21 @@ exports.createNewReservationClient2 = async (req, res) => {
 					} else {
 						belongsToId = belongsTo;
 					}
-
 					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 						const belongsToUser = await User.findById(belongsToId);
 						if (belongsToUser && belongsToUser.role === 2000) {
-							await sgMail.send({
-								to: belongsToUser.email,
-								from: "noreply@jannatbooking.com",
-								subject: "Verify Your Reservation",
-								html: emailContent,
-							});
+							bccList.push(belongsToUser.email);
 						}
 					}
 				}
-				//----------------------------------------------------------------------
+
+				await sgMail.send({
+					to: email,
+					from: "noreply@jannatbooking.com",
+					subject: "Verify Your Reservation",
+					html: emailContent,
+					bcc: bccList,
+				});
 
 				return res.status(200).json({
 					message:
@@ -2643,8 +2591,9 @@ exports.createNewReservationClient2 = async (req, res) => {
 			}
 		}
 
-		// Process payment and create reservation for "Deposit Paid" or "Paid Online"
-		// Existing payment processing and reservation creation logic...
+		// Otherwise, handle "Deposit Paid" or "Paid Online"
+		// (Same logic as in createNewReservationClient if you want to process payment, etc.)
+		// ...
 	} catch (error) {
 		console.error("Error creating reservation:", error);
 		res
@@ -2924,5 +2873,378 @@ exports.updateReservationDetails = async (req, res) => {
 		res
 			.status(500)
 			.send({ error: "An error occurred while updating reservation." });
+	}
+};
+
+// Convert Arabic numerals to English numerals (basic mapping)
+function convertArabicToEnglishNumerals(str) {
+	if (!str) return "";
+	const map = {
+		"٠": "0",
+		"١": "1",
+		"٢": "2",
+		"٣": "3",
+		"٤": "4",
+		"٥": "5",
+		"٦": "6",
+		"٧": "7",
+		"٨": "8",
+		"٩": "9",
+	};
+	return str
+		.split("")
+		.map((char) => (map[char] ? map[char] : char))
+		.join("");
+}
+
+// Minimal check: must contain "@" and ".com"
+function isEmailValid(email) {
+	if (!email) return false;
+	return email.includes("@") && email.includes(".com");
+}
+
+// Phone validation rules:
+//  1) Convert Arabic numerals to English
+//  2) Remove '+', spaces, and all non-digit chars
+//  3) Resulting digit string length >= 5 => valid
+function isPhoneValid(rawPhone) {
+	if (!rawPhone) return false;
+	// Convert Arabic digits to English
+	let converted = convertArabicToEnglishNumerals(rawPhone);
+	// Remove all non-digits
+	// E.g., remove +, spaces, parentheses, hyphens, etc.
+	let digitsOnly = converted.replace(/\D/g, "");
+	return digitsOnly.length >= 5;
+}
+
+// Remove duplicates by email
+function removeDuplicatesByEmail(records) {
+	const seen = new Set();
+	return records.filter((record) => {
+		// If there's no email, treat it as unique every time
+		if (!record.email) return true;
+		if (seen.has(record.email)) {
+			return false;
+		}
+		seen.add(record.email);
+		return true;
+	});
+}
+
+exports.compileCustomerList = async (req, res) => {
+	try {
+		// 1) Clear out the existing CustomerList in hotels DB
+		await CustomerList.deleteMany({});
+
+		let allCustomers = [];
+
+		// =============== gq_b2b / orders ==================
+		{
+			const gqB2BConn = mongoose.createConnection(process.env.GQB2B, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+			const Order = gqB2BConn.model(
+				"Order",
+				new mongoose.Schema({}, { strict: false }),
+				"orders"
+			);
+
+			const gqB2BOrders = await Order.find({});
+			const gqB2BCustomers = gqB2BOrders
+				.map((doc) => {
+					const c = doc.customerDetails || {};
+					const rawPhone = c.phone || "";
+					const rawEmail = c.email || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					// Skip if both false
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: c.fullName || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: "Egypt",
+						database: "gq_b2b",
+						schema: "orders",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...gqB2BCustomers);
+			await gqB2BConn.close();
+		}
+
+		// =============== hairbrush / users (Egypt) ==================
+		{
+			const hairbrushConn = mongoose.createConnection(process.env.HAIRBRUSH, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+			const HairbrushUser = hairbrushConn.model(
+				"User",
+				new mongoose.Schema({}, { strict: false }),
+				"users"
+			);
+
+			const hairbrushUsers = await HairbrushUser.find({});
+			const hairbrushCustomers = hairbrushUsers
+				.map((doc) => {
+					const rawPhone = doc.phone || "";
+					const rawEmail = doc.email || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: doc.name || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: "Egypt",
+						database: "hairbrush",
+						schema: "users",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...hairbrushCustomers);
+			await hairbrushConn.close();
+		}
+
+		// =============== janat_ecommerce / users (US) ===============
+		{
+			const janatConn = mongoose.createConnection(process.env.JANATECOMMERCE, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+			const JanatUser = janatConn.model(
+				"User",
+				new mongoose.Schema({}, { strict: false }),
+				"users"
+			);
+
+			const janatUsers = await JanatUser.find({});
+			const janatCustomers = janatUsers
+				.map((doc) => {
+					const rawPhone = doc.phone || "";
+					const rawEmail = doc.email || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: doc.name || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: "US",
+						database: "janat_ecommerce",
+						schema: "users",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...janatCustomers);
+			await janatConn.close();
+		}
+
+		// =============== khan_khadija / reservations (Egypt) ========
+		{
+			const khanConn = mongoose.createConnection(process.env.KHANKHADIJA, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+			const Reservation = khanConn.model(
+				"Reservation",
+				new mongoose.Schema({}, { strict: false }),
+				"reservations"
+			);
+
+			const khanReservations = await Reservation.find({});
+			const khanCustomers = khanReservations
+				.map((doc) => {
+					const rawPhone = doc.phoneNumber ? String(doc.phoneNumber) : "";
+					const rawEmail = doc.scheduledByUserEmail || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: doc.fullName || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: "Egypt",
+						database: "khan_khadija",
+						schema: "reservations",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...khanCustomers);
+			await khanConn.close();
+		}
+
+		// =============== palacios_towing / callingorders (US) =======
+		{
+			const palaciosConn = mongoose.createConnection(process.env.PALACIOS, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+			const CallingOrder = palaciosConn.model(
+				"CallingOrder",
+				new mongoose.Schema({}, { strict: false }),
+				"callingorders"
+			);
+
+			const palaciosOrders = await CallingOrder.find({});
+			const palaciosCustomers = palaciosOrders
+				.map((doc) => {
+					const rawPhone = doc.phoneNumber ? String(doc.phoneNumber) : "";
+					// No email in this schema => force blank
+					const rawEmail = "";
+
+					const emailCheck = isEmailValid(rawEmail); // will be false
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: doc.fullName || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: "US",
+						database: "palacios_towing",
+						schema: "callingorders",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...palaciosCustomers);
+			await palaciosConn.close();
+		}
+
+		// =============== hotels DB data (reservations + users) ===============
+		{
+			const hotelsConn = mongoose.createConnection(process.env.DATABASE, {
+				useNewUrlParser: true,
+				useUnifiedTopology: true,
+			});
+
+			// 1) "reservations"
+			const Reservation = hotelsConn.model(
+				"Reservation",
+				new mongoose.Schema({}, { strict: false }),
+				"reservations"
+			);
+			const hotelsReservations = await Reservation.find({});
+			const hotelsResCustomers = hotelsReservations
+				.map((doc) => {
+					const c = doc.customer_details || {};
+					const rawPhone = c.phone || "";
+					const rawEmail = c.email || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: c.name || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: c.nationality || "",
+						database: "hotels",
+						schema: "reservations",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			// 2) "users" – where role === 0
+			const User = hotelsConn.model(
+				"User",
+				new mongoose.Schema({}, { strict: false }),
+				"users"
+			);
+			const hotelUsers = await User.find({ role: 0 });
+			const hotelsUserCustomers = hotelUsers
+				.map((doc) => {
+					const rawPhone = doc.phone || "";
+					const rawEmail = doc.email || "";
+
+					const emailCheck = isEmailValid(rawEmail);
+					const phoneCheck = isPhoneValid(rawPhone);
+
+					if (!emailCheck && !phoneCheck) return null;
+
+					return {
+						name: doc.name || "",
+						email: rawEmail,
+						phone: rawPhone,
+						country: doc.country || "",
+						database: "hotels",
+						schema: "users",
+						email_phone: {
+							phoneCheck,
+							emailCheck,
+						},
+					};
+				})
+				.filter(Boolean);
+
+			allCustomers.push(...hotelsResCustomers, ...hotelsUserCustomers);
+			await hotelsConn.close();
+		}
+
+		// 3) Remove duplicates by email
+		//    - If there's no email, treat each as unique
+		const uniqueCustomers = removeDuplicatesByEmail(allCustomers);
+
+		// 4) Insert into CustomerList
+		await CustomerList.insertMany(uniqueCustomers);
+
+		return res.json({
+			success: true,
+			totalCollected: allCustomers.length,
+			totalUnique: uniqueCustomers.length,
+			message: "CustomerList compiled successfully",
+		});
+	} catch (error) {
+		console.error("Error in compileCustomerList:", error);
+		return res.status(400).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };

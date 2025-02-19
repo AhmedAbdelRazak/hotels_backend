@@ -29,6 +29,7 @@ const {
 	updateReservationDetails,
 	createNewReservationClient2,
 	sendEmailForTriggeringPayment,
+	compileCustomerList,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -93,6 +94,7 @@ router.post(
 );
 
 router.post("/create-payment-client", triggeringSpecificTokenizedIdToCharge);
+router.post("/compile-customer-list", compileCustomerList);
 
 router.put(
 	"/update-reservation-client/:reservationId",
