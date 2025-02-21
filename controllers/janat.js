@@ -568,19 +568,19 @@ const createPdfBuffer = async (html) => {
 	return pdfBuffer;
 };
 
-const sendEmailWithInvoice = async (reservationData, guestEmail) => {
+const sendEmailWithInvoice = async (reservationData, guestEmail, belongsTo) => {
 	try {
-		console.log("Recipient Email:", guestEmail);
+		console.log("Recipient Email (Guest):", guestEmail);
 
-		// Generate the email HTML content inside this function
+		// Generate the email HTML content
 		const emailHtmlContent = ClientConfirmationEmail(reservationData);
 
-		// Generate the PDF from the email content
+		// Generate the PDF invoice
 		const pdfBuffer = await createPdfBuffer(emailHtmlContent);
 
-		// Email setup
-		const emailOptions = {
-			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // Safe fallback
+		// 1) Send to the Guest
+		await sgMail.send({
+			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // fallback if no guestEmail
 			from: "noreply@jannatbooking.com",
 			subject: "Reservation Confirmation - Invoice Attached",
 			html: emailHtmlContent,
@@ -592,16 +592,16 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 					disposition: "attachment",
 				},
 			],
-		};
+		});
 
-		const emailOptions2 = {
+		// 2) Send to Internal Staff
+		await sgMail.send({
 			to: [
 				{ email: "morazzakhamouda@gmail.com" },
 				{ email: "xhoteleg@gmail.com" },
 				{ email: "ahmed.abdelrazak@jannatbooking.com" },
 			],
 			from: "noreply@jannatbooking.com",
-
 			subject: "Reservation Confirmation - Invoice Attached",
 			html: emailHtmlContent,
 			attachments: [
@@ -612,11 +612,40 @@ const sendEmailWithInvoice = async (reservationData, guestEmail) => {
 					disposition: "attachment",
 				},
 			],
-		};
+		});
 
-		await sgMail.send(emailOptions);
-		await sgMail.send(emailOptions2);
-		console.log("Invoice email sent successfully.");
+		// 3) Optionally Send to Hotel Owner, if belongsTo is role=2000
+		if (belongsTo) {
+			let belongsToId = null;
+			// If `belongsTo` is an object containing _id, extract it; otherwise use the string as-is
+			if (typeof belongsTo === "object" && belongsTo._id) {
+				belongsToId = belongsTo._id;
+			} else {
+				belongsToId = belongsTo;
+			}
+
+			if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+				const belongsToUser = await User.findById(belongsToId);
+				if (belongsToUser && belongsToUser.role === 2000) {
+					await sgMail.send({
+						to: belongsToUser.email,
+						from: "noreply@jannatbooking.com",
+						subject: "Reservation Confirmation - Invoice Attached",
+						html: emailHtmlContent,
+						attachments: [
+							{
+								content: pdfBuffer.toString("base64"),
+								filename: "Reservation_Invoice.pdf",
+								type: "application/pdf",
+								disposition: "attachment",
+							},
+						],
+					});
+				}
+			}
+		}
+
+		console.log("Invoice email(s) sent successfully.");
 	} catch (error) {
 		console.error("Error sending confirmation email with PDF:", error);
 	}
@@ -943,7 +972,11 @@ async function saveReservation(
 			hotelPhone: hotel.phone,
 		};
 
-		await sendEmailWithInvoice(reservationData, customerDetails.email);
+		await sendEmailWithInvoice(
+			reservationData,
+			customerDetails.email,
+			belongsTo
+		);
 
 		// Send success response
 		res.status(201).json({
@@ -2468,9 +2501,49 @@ exports.createNewReservationClient2 = async (req, res) => {
 				hotelCity: hotel.hotelCity,
 				hotelPhone: hotel.phone,
 			};
-			await sendEmailWithInvoice(reservationData, customerDetails.email);
 
-			// Optional: send to belongsTo if role=2000
+			// Same invoice HTML content for all recipients
+			const emailHtmlContent = ClientConfirmationEmail(reservationData);
+			// Generate PDF once to attach to all emails
+			const pdfBuffer = await createPdfBuffer(emailHtmlContent);
+
+			// 1) Email to the guest
+			await sgMail.send({
+				to: customerDetails.email || "noreply@jannatbooking.com",
+				from: "noreply@jannatbooking.com",
+				subject: "Reservation Confirmation - Invoice Attached",
+				html: emailHtmlContent,
+				attachments: [
+					{
+						content: pdfBuffer.toString("base64"),
+						filename: "Reservation_Invoice.pdf",
+						type: "application/pdf",
+						disposition: "attachment",
+					},
+				],
+			});
+
+			// 2) Email to internal staff
+			await sgMail.send({
+				to: [
+					"morazzakhamouda@gmail.com",
+					"xhoteleg@gmail.com",
+					"ahmed.abdelrazak@jannatbooking.com",
+				],
+				from: "noreply@jannatbooking.com",
+				subject: "Reservation Confirmation - Invoice Attached",
+				html: emailHtmlContent,
+				attachments: [
+					{
+						content: pdfBuffer.toString("base64"),
+						filename: "Reservation_Invoice.pdf",
+						type: "application/pdf",
+						disposition: "attachment",
+					},
+				],
+			});
+
+			// 3) Email to the hotel owner if belongsTo user has role=2000
 			if (belongsTo) {
 				let belongsToId = null;
 				if (typeof belongsTo === "object" && belongsTo._id) {
@@ -2481,7 +2554,20 @@ exports.createNewReservationClient2 = async (req, res) => {
 				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 					const belongsToUser = await User.findById(belongsToId);
 					if (belongsToUser && belongsToUser.role === 2000) {
-						await sendEmailWithInvoice(reservationData, belongsToUser.email);
+						await sgMail.send({
+							to: belongsToUser.email,
+							from: "noreply@jannatbooking.com",
+							subject: "Reservation Confirmation - Invoice Attached",
+							html: emailHtmlContent,
+							attachments: [
+								{
+									content: pdfBuffer.toString("base64"),
+									filename: "Reservation_Invoice.pdf",
+									type: "application/pdf",
+									disposition: "attachment",
+								},
+							],
+						});
 					}
 				}
 			}
@@ -2550,12 +2636,31 @@ exports.createNewReservationClient2 = async (req, res) => {
 			});
 
 			try {
-				const bccList = [
-					"morazzakhamouda@gmail.com",
-					"xhoteleg@gmail.com",
-					"ahmed.abdelrazak@jannatbooking.com",
-				];
+				// We'll do 3 separate sends if you want the same logic here, or just 1 if it's a verification link.
+				// For demonstration, let's send the single verification link only to the guest + staff.
+				// Then if you want a hotel owner to also see the "verification link", you can replicate the same approach.
 
+				// (a) Send to guest
+				await sgMail.send({
+					to: email,
+					from: "noreply@jannatbooking.com",
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				// (b) Send to staff
+				await sgMail.send({
+					to: [
+						"morazzakhamouda@gmail.com",
+						"xhoteleg@gmail.com",
+						"ahmed.abdelrazak@jannatbooking.com",
+					],
+					from: "noreply@jannatbooking.com",
+					subject: "Verify Your Reservation",
+					html: emailContent,
+				});
+
+				// (c) Optionally to hotel owner (if role=2000)
 				if (belongsTo) {
 					let belongsToId = null;
 					if (typeof belongsTo === "object" && belongsTo._id) {
@@ -2566,18 +2671,15 @@ exports.createNewReservationClient2 = async (req, res) => {
 					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 						const belongsToUser = await User.findById(belongsToId);
 						if (belongsToUser && belongsToUser.role === 2000) {
-							bccList.push(belongsToUser.email);
+							await sgMail.send({
+								to: belongsToUser.email,
+								from: "noreply@jannatbooking.com",
+								subject: "Verify Your Reservation",
+								html: emailContent,
+							});
 						}
 					}
 				}
-
-				await sgMail.send({
-					to: email,
-					from: "noreply@jannatbooking.com",
-					subject: "Verify Your Reservation",
-					html: emailContent,
-					bcc: bccList,
-				});
 
 				return res.status(200).json({
 					message:
@@ -2591,9 +2693,8 @@ exports.createNewReservationClient2 = async (req, res) => {
 			}
 		}
 
-		// Otherwise, handle "Deposit Paid" or "Paid Online"
-		// (Same logic as in createNewReservationClient if you want to process payment, etc.)
-		// ...
+		// Otherwise, handle "Deposit Paid" or "Paid Online" ...
+		// (You can replicate your existing payment logic here.)
 	} catch (error) {
 		console.error("Error creating reservation:", error);
 		res
@@ -2861,7 +2962,11 @@ exports.updateReservationDetails = async (req, res) => {
 			hotelPhone: hotel?.phone || "",
 		};
 
-		await sendEmailWithInvoice(emailData, reservation.customer_details?.email);
+		await sendEmailWithInvoice(
+			emailData,
+			reservation.customer_details?.email,
+			reservation.belongsTo
+		);
 
 		// Step 8: Respond with the updated reservation
 		res.status(200).json({
