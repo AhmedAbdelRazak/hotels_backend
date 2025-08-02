@@ -134,8 +134,9 @@ exports.propertySignup = async (req, res) => {
 			hotelCity,
 			propertyType,
 			hotelFloors,
+			hotelRooms,
 			existingUser,
-			acceptedTermsAndConditions,
+			accepted,
 		} = req.body;
 
 		console.log("Received request body:", req.body);
@@ -207,9 +208,10 @@ exports.propertySignup = async (req, res) => {
 				hotelCity,
 				propertyType,
 				hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
+				hotelRooms: hotelRooms ? Number(hotelRooms) : 1, // Ensure hotelFloors is saved as a number
 				phone: cleanedPhone,
 				belongsTo: user._id,
-				acceptedTermsAndConditions,
+				acceptedTermsAndConditions: accepted,
 			});
 			await hotelDetails.save();
 
@@ -273,6 +275,7 @@ exports.propertySignup = async (req, res) => {
 			hotelCountry,
 			propertyType,
 			role: 2000,
+			acceptedTermsAndConditions: accepted,
 		});
 		await user.save();
 
@@ -286,7 +289,8 @@ exports.propertySignup = async (req, res) => {
 			hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
 			phone: cleanedPhone,
 			belongsTo: user._id,
-			acceptedTermsAndConditions,
+			hotelRooms: hotelRooms,
+			acceptedTermsAndConditions: accepted,
 		});
 		await hotelDetails.save();
 

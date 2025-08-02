@@ -137,6 +137,10 @@ const userSchema = new mongoose.Schema(
 			type: String,
 			default: "unavailable",
 		},
+		acceptedTermsAndConditions: {
+			type: Boolean,
+			default: false,
+		},
 
 		hotelIdsOwner: [{ type: ObjectId, ref: "HotelDetails", default: null }],
 	},

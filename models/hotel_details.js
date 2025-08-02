@@ -65,6 +65,9 @@ const hotel_detailsSchema = new mongoose.Schema(
 			// How many floors in the hotel
 			type: Number,
 		},
+		hotelRooms: {
+			type: Number,
+		},
 		overallRoomsCount: {
 			type: Number,
 		},

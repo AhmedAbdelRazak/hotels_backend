@@ -2125,42 +2125,56 @@ const sendPaymentTriggeredEmail = async (reservationData) => {
 
 exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 	try {
+		console.log("==== START: triggeringSpecificTokenizedIdToCharge ====");
+
+		// Print environment to confirm
+		console.log("AUTHORIZE_NET_ENV =", process.env.AUTHORIZE_NET_ENV);
+
+		// Log partial keys (for debugging):
+		console.log(
+			"API_LOGIN_ID starts with = ",
+			(process.env.API_LOGIN_ID || "").slice(0, 6)
+		);
+		console.log(
+			"TRANSACTION_KEY starts with = ",
+			(process.env.TRANSACTION_KEY || "").slice(0, 6)
+		);
+
 		const { reservationId, amount, paymentOption, customUSD, amountSAR } =
 			req.body;
 
 		console.log("Received request to capture payment:");
-		console.log("Reservation ID:", reservationId);
-		console.log("Amount (USD):", amount);
-		console.log("Amount (SAR):", amountSAR);
-		console.log("Payment Option:", paymentOption);
+		console.log("  Reservation ID:", reservationId);
+		console.log("  Amount (USD):", amount);
+		console.log("  Amount (SAR):", amountSAR);
+		console.log("  Payment Option:", paymentOption);
+		console.log("  customUSD:", customUSD);
 
+		// 1) Basic input validation
 		if (!reservationId || amount === undefined) {
+			console.log("Invalid input. Missing reservationId or amount.");
 			return res.status(400).json({
 				message: "Invalid input. Reservation ID and amount are required.",
 			});
 		}
 
-		// 1) Find the reservation
+		// 2) Find the reservation
+		console.log("Looking up reservation in DB by ID =", reservationId);
 		const reservation = await Reservations.findById(reservationId).populate(
 			"hotelId"
 		);
 		if (!reservation) {
-			return res.status(404).json({
-				message: "Reservation not found.",
-			});
+			console.log("Reservation not found in DB.");
+			return res.status(404).json({ message: "Reservation not found." });
 		}
+		console.log("Reservation found:", reservation._id);
 
-		// 2) Retrieve the transaction ID for priorAuthCapture
-		const transId = reservation.payment_details?.transactionResponse?.transId;
-		if (!transId) {
-			return res.status(400).json({
-				message: "Transaction ID not found in payment details.",
-			});
-		}
+		// 3) Retrieve transId from reservation.payment_details
+		let transId = reservation.payment_details?.transactionResponse?.transId;
+		console.log("Extracted transId from reservation =", transId);
 
-		console.log("Transaction ID to capture:", transId);
-
-		// 3) Decrypt card details
+		// 4) Decrypt card details
+		console.log("Decrypting card details now...");
 		let cardNumber = decryptWithSecret(reservation.customer_details.cardNumber);
 		const cardExpiryDate = decryptWithSecret(
 			reservation.customer_details.cardExpiryDate
@@ -2168,15 +2182,18 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		const cardCVV = decryptWithSecret(reservation.customer_details.cardCVV);
 
 		if (!cardNumber || !cardExpiryDate || !cardCVV) {
-			return res.status(400).json({
-				message: "Decrypted card details are missing or invalid.",
-			});
+			console.log(
+				"Decrypted card details are missing or invalid. Returning 400."
+			);
+			return res
+				.status(400)
+				.json({ message: "Decrypted card details are missing or invalid." });
 		}
 
 		// Remove spaces from card number
 		cardNumber = cardNumber.replace(/\s+/g, "");
 
-		// 4) Authorize.Net credentials
+		// 5) Setup Authorize.Net environment
 		const isProduction = process.env.AUTHORIZE_NET_ENV === "production";
 		const apiLoginId = isProduction
 			? process.env.API_LOGIN_ID
@@ -2188,68 +2205,95 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			? "https://api.authorize.net/xml/v1/request.api"
 			: "https://apitest.authorize.net/xml/v1/request.api";
 
-		console.log("Using Authorize.Net endpoint:", endpoint);
+		console.log("Authorize.Net environment => isProduction =", isProduction);
+		console.log("Authorize.Net endpoint =", endpoint);
 
-		// 5) Step 1: priorAuthCapture for the initially authorized transaction
-		const capturePayload = {
-			createTransactionRequest: {
-				merchantAuthentication: {
-					name: apiLoginId,
-					transactionKey: transactionKey,
+		// ===============================================
+		// 6) Attempt priorAuthCapture IF we have transId
+		// ===============================================
+		let skipPriorAuthCapture = false;
+
+		if (!transId) {
+			console.log(
+				"No transId found in payment_details => skipping priorAuthCaptureTransaction."
+			);
+			skipPriorAuthCapture = true;
+		} else {
+			// We have a transId, let's try priorAuthCaptureTransaction
+			const capturePayload = {
+				createTransactionRequest: {
+					merchantAuthentication: {
+						name: apiLoginId,
+						transactionKey: transactionKey,
+					},
+					transactionRequest: {
+						transactionType: "priorAuthCaptureTransaction",
+						refTransId: transId,
+					},
 				},
-				transactionRequest: {
-					transactionType: "priorAuthCaptureTransaction",
-					refTransId: transId,
-				},
-			},
-		};
+			};
 
-		console.log(
-			"Capture Payload Sent to Authorize.Net: ",
-			JSON.stringify(capturePayload, null, 2)
-		);
+			console.log("=== priorAuthCapture Payload ===");
+			console.log(JSON.stringify(capturePayload, null, 2));
 
-		let captureData;
-		try {
-			const captureResponse = await axios.post(endpoint, capturePayload, {
-				headers: { "Content-Type": "application/json" },
-			});
-			captureData = captureResponse.data;
+			let captureData;
+			try {
+				console.log("Sending priorAuthCapture request to Authorize.Net...");
+				const captureResponse = await axios.post(endpoint, capturePayload, {
+					headers: { "Content-Type": "application/json" },
+				});
+				captureData = captureResponse.data;
+				console.log(
+					"priorAuthCapture Response Data =",
+					JSON.stringify(captureData, null, 2)
+				);
 
-			if (
-				captureData.messages.resultCode !== "Ok" ||
-				!captureData.transactionResponse ||
-				captureData.transactionResponse.responseCode !== "1"
-			) {
-				const captureError =
-					captureData.transactionResponse?.errors?.[0]?.errorText ||
-					captureData.messages.message[0].text ||
-					"Failed to capture the previously authorized amount.";
-				console.error("Capture Error: ", captureError);
+				if (
+					captureData.messages.resultCode !== "Ok" ||
+					!captureData.transactionResponse ||
+					captureData.transactionResponse.responseCode !== "1"
+				) {
+					const captureError =
+						captureData.transactionResponse?.errors?.[0]?.errorText ||
+						captureData.messages.message[0].text ||
+						"Failed to capture the previously authorized amount.";
+					console.error("Capture Error: ", captureError);
 
-				// Check if the error is "The transaction cannot be found."
-				if (captureError.includes("The transaction cannot be found")) {
-					console.warn(
-						"Transaction not found. Skipping priorAuthCapture and proceeding to authCaptureTransaction."
-					);
+					// If "The transaction cannot be found" => skip priorAuthCapture
+					if (captureError.includes("The transaction cannot be found")) {
+						console.warn(
+							"Transaction not found in Authorize.Net. Skipping priorAuthCapture and proceeding to authCaptureTransaction."
+						);
+						skipPriorAuthCapture = true;
+					} else {
+						// For other errors, return the error
+						console.log("Returning 400 from priorAuthCapture error...");
+						return res.status(400).json({ message: captureError });
+					}
 				} else {
-					// For other errors, return the error
-					return res.status(400).json({ message: captureError });
+					console.log("priorAuthCapture Succeeded for refTransId =", transId);
 				}
-			} else {
-				console.log("Previous amount captured successfully:", transId);
+			} catch (error) {
+				console.error("Capture Request Error =>", error.message);
+				if (error.response) {
+					console.error("Capture Request Error Response:", error.response.data);
+				}
+				return res.status(500).json({
+					message:
+						"An error occurred while communicating with Authorize.Net during capture.",
+				});
 			}
-		} catch (error) {
-			console.error("Capture Request Error:", error.message);
-
-			// Handle network or unexpected errors
-			return res.status(500).json({
-				message:
-					"An error occurred while communicating with Authorize.Net during capture.",
-			});
 		}
 
-		// 6) Step 2: authCaptureTransaction for the final user-chosen amount
+		// ===============================================
+		// 7) Step 2: authCaptureTransaction for final amount
+		// ===============================================
+		const formattedAmount = parseFloat(amount).toFixed(2);
+		console.log(
+			"Preparing authCaptureTransaction with finalAmount (USD) =",
+			formattedAmount
+		);
+
 		const paymentPayload = {
 			createTransactionRequest: {
 				merchantAuthentication: {
@@ -2258,11 +2302,11 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 				},
 				transactionRequest: {
 					transactionType: "authCaptureTransaction",
-					amount: parseFloat(amount).toFixed(2),
+					amount: formattedAmount,
 					payment: {
 						creditCard: {
 							cardNumber,
-							expirationDate: cardExpiryDate,
+							expirationDate: cardExpiryDate, // "MM/YY" or "MM/YYYY"
 							cardCode: cardCVV,
 						},
 					},
@@ -2284,26 +2328,30 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			},
 		};
 
-		console.log(
-			"Payment Payload Sent to Authorize.Net: ",
-			JSON.stringify(paymentPayload, null, 2)
-		);
+		console.log("=== authCapture Payload ===");
+		console.log(JSON.stringify(paymentPayload, null, 2));
 
 		let paymentData;
 		try {
+			console.log("Sending authCaptureTransaction request to Authorize.Net...");
 			const paymentResponse = await axios.post(endpoint, paymentPayload, {
 				headers: { "Content-Type": "application/json" },
 			});
 			paymentData = paymentResponse.data;
+			console.log(
+				"authCaptureTransaction Response Data =",
+				JSON.stringify(paymentData, null, 2)
+			);
 
-			// 7) Check if payment is successful
+			// 8) Check if payment is successful
 			if (
 				paymentData.messages.resultCode === "Ok" &&
 				paymentData.transactionResponse &&
 				paymentData.transactionResponse.responseCode === "1"
 			) {
+				console.log("Authorize.Net Payment captured successfully!");
+
 				// Payment captured in USD with "amount"
-				// We'll store both the USD and SAR amounts in the DB.
 				let updatedPaidAmount;
 				if (
 					reservation.payment_details &&
@@ -2318,59 +2366,63 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 					updatedPaidAmount = Number(amountSAR) || 0;
 				}
 
-				// 8) Update the reservation:
+				console.log("updatedPaidAmount (SAR) =", updatedPaidAmount);
+
+				// 9) Update the reservation in DB
 				const updatedReservation = await Reservations.findOneAndUpdate(
 					{ _id: reservationId },
 					{
 						$set: {
-							// Mark as captured (if not already marked)
 							"payment_details.capturing": true,
 							"payment_details.finalCaptureTransactionId":
 								paymentData.transactionResponse.transId,
 							"payment_details.captured": true,
-
-							// Store the triggered amounts in payment_details
-							"payment_details.triggeredAmountUSD":
-								parseFloat(amount).toFixed(2),
+							"payment_details.triggeredAmountUSD": formattedAmount,
 							"payment_details.triggeredAmountSAR":
 								Number(amountSAR).toFixed(2),
-
-							// Update paid_amount in SAR
 							paid_amount: updatedPaidAmount,
 						},
-						// 9) Increment the charge count
 						$inc: {
 							"payment_details.chargeCount": 1,
 						},
 					},
 					{ new: true }
-				).populate("hotelId"); // Ensure hotelId is populated
+				).populate("hotelId");
 
-				// 10) Send the paymentTriggered email
+				console.log("Reservation updated in DB =>", updatedReservation._id);
+
+				// 10) Send paymentTriggered email
+				console.log("Sending paymentTriggeredEmail...");
 				await sendPaymentTriggeredEmail(updatedReservation);
 
+				console.log("==== SUCCESS: Payment captured. Returning 200... ====");
 				return res.status(200).json({
 					message: "Payment captured successfully.",
 					transactionId: paymentData.transactionResponse.transId,
 					reservation: updatedReservation,
 				});
 			} else {
+				// Payment capture failed at gateway
 				const paymentError =
 					paymentData.transactionResponse?.errors?.[0]?.errorText ||
 					paymentData.messages.message[0].text ||
 					"Payment capture failed.";
+				console.log("Payment capture failed =>", paymentError);
 				return res.status(400).json({ message: paymentError });
 			}
 		} catch (error) {
-			console.error("Payment Request Error:", error.message);
+			console.error("Payment Request Error =>", error.message);
+			if (error.response) {
+				console.error("Payment Request Error Response:", error.response.data);
+			}
 			return res.status(500).json({
 				message:
 					"An error occurred while communicating with Authorize.Net during payment.",
 			});
 		}
 	} catch (error) {
-		console.error("Error capturing payment:", error);
-		res.status(500).json({
+		console.error("General Error capturing payment:", error);
+		return res.status(500).json({
 			message: "An error occurred while capturing the payment.",
 		});
 	}
