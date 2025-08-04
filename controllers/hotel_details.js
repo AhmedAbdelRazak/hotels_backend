@@ -249,16 +249,43 @@ exports.getHotelDetails = (req, res) => {
 	return res.json(req.hotelDetails);
 };
 
-exports.listForAdmin = (req, res) => {
-	HotelDetails.find()
-		.populate("belongsTo", "_id name email") // Select only necessary fields
-		.exec((err, data) => {
-			if (err) {
-				console.log(err, "err");
-				return res.status(400).json({ error: err });
-			}
-			res.json(data);
+exports.listForAdmin = async (req, res) => {
+	try {
+		/* ─── 1. Parse & sanitise query params ─── */
+		let { page = 1, limit = 15, status } = req.query;
+		page = Math.max(parseInt(page, 10) || 1, 1);
+		limit = Math.min(Math.max(parseInt(limit, 10) || 15, 1), 50);
+
+		/* ─── 2. Build Mongo filter ─── */
+		const filter = {};
+		if (status === "active") filter.activateHotel = true;
+		if (status === "inactive") filter.activateHotel = false;
+
+		/* ─── 3. Run query & count in parallel ─── */
+		const skip = (page - 1) * limit;
+
+		const [hotels, total] = await Promise.all([
+			HotelDetails.find(filter)
+				.sort({ createdAt: -1 }) // newest first
+				.skip(skip)
+				.limit(limit)
+				.populate("belongsTo", "_id name email") // only needed fields
+				.lean(), // plain JS objects
+			HotelDetails.countDocuments(filter),
+		]);
+
+		/* ─── 4. Respond ─── */
+		res.json({
+			total, // total matching docs
+			page,
+			pages: Math.ceil(total / limit),
+			results: hotels.length,
+			hotels,
 		});
+	} catch (err) {
+		console.error(err);
+		res.status(400).json({ error: "Failed to fetch hotel list" });
+	}
 };
 
 exports.listOfHotelUser = async (req, res) => {

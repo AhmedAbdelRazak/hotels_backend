@@ -317,13 +317,18 @@ exports.requireSignin = expressJwt({
 });
 
 exports.isAuth = (req, res, next) => {
-	let user = req.profile && req.auth && req.profile._id == req.auth._id;
-	if (!user) {
-		return res.status(403).json({
-			error: "access denied",
+	const sameUser = req.profile && req.auth && req.profile._id == req.auth._id;
+	if (sameUser) return next();
+
+	// quick DB look‑up – executed only for mismatch
+	User.findById(req.auth._id)
+		.select("role")
+		.exec((err, u) => {
+			if (err || !u || u.role !== 1000) {
+				return res.status(403).json({ error: "access denied" });
+			}
+			next(); // platform admin – let him through
 		});
-	}
-	next();
 };
 
 exports.isAdmin = (req, res, next) => {
