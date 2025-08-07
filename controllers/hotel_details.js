@@ -167,56 +167,108 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
  * Updates the hotel details based on the provided data.
  * Handles merging of nested roomCountDetails and their pricingRate arrays.
  */
+const calcDistances = async (coords, hotelState = "") => {
+	const [lng, lat] = coords; // hotel stores [lng, lat]
+	const elHaram = [39.8262, 21.4225];
+	const prophetsMosque = [39.6142, 24.4672];
+
+	// pick destination
+	const dest = hotelState.toLowerCase().includes("madinah")
+		? prophetsMosque
+		: elHaram;
+
+	const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+	if (!apiKey) {
+		console.warn("GOOGLE_MAPS_API_KEY missing; skipping live distance call.");
+		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+	}
+
+	const makeURL = (mode) =>
+		`https://maps.googleapis.com/maps/api/distancematrix/json?origins=${lat},${lng}&destinations=${dest[1]},${dest[0]}&mode=${mode}&key=${apiKey}`;
+
+	try {
+		const [walkResp, driveResp] = await Promise.all([
+			axios.get(makeURL("walking")),
+			axios.get(makeURL("driving")),
+		]);
+
+		const walkEl = walkResp.data?.rows?.[0]?.elements?.[0];
+		const driveEl = driveResp.data?.rows?.[0]?.elements?.[0];
+
+		return {
+			walkingToElHaram:
+				walkEl && walkEl.status === "OK" ? walkEl.duration.text : "N/A",
+			drivingToElHaram:
+				driveEl && driveEl.status === "OK" ? driveEl.duration.text : "N/A",
+		};
+	} catch (err) {
+		console.error("Distance API error:", err.message || err);
+		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+	}
+};
+
+/* ────────────────── UPDATE HANDLER ────────────────── */
+
 exports.updateHotelDetails = async (req, res) => {
 	const hotelDetailsId = req.params.hotelId;
 	const updateData = req.body;
-	const fromPage = req.body.fromPage; // Extract fromPage for conditional logic
-
-	console.log("Received updateData:", JSON.stringify(updateData, null, 2));
-	console.log(
-		"PaymentSettings:",
-		JSON.stringify(req.body.paymentSettings, null, 2)
-	);
+	const fromPage = req.body.fromPage; // e.g. “AddNew”
 
 	try {
-		// Fetch the hotel details document
+		/* 1. Fetch existing doc */
 		const hotelDetails = await HotelDetails.findById(hotelDetailsId).exec();
+		if (!hotelDetails)
+			return res.status(404).json({ error: "Hotel details not found" });
 
-		if (!hotelDetails) {
-			console.warn("Hotel details not found for ID:", hotelDetailsId);
-			return res.status(404).send({ error: "Hotel details not found" });
-		}
-
-		// Construct the fields to update
+		/* 2. Merge incoming data with helper */
 		const updatedFields = constructUpdatedFields(
 			hotelDetails,
 			updateData,
 			fromPage
 		);
-		updatedFields.fromPage = fromPage; // Ensure fromPage is included
+		updatedFields.fromPage = fromPage;
 
-		console.log(
-			"Constructed updatedFields:",
-			JSON.stringify(updatedFields, null, 2)
-		);
+		/* 3. Detect coordinate change */
+		const newCoords = updateData?.location?.coordinates;
+		const oldCoords = hotelDetails.location?.coordinates;
+		const coordsChanged =
+			Array.isArray(newCoords) &&
+			newCoords.length === 2 &&
+			(!oldCoords ||
+				oldCoords[0] !== newCoords[0] ||
+				oldCoords[1] !== newCoords[1]);
 
-		// Perform the update atomically using findByIdAndUpdate
-		const updatedHotelDetails = await HotelDetails.findByIdAndUpdate(
+		if (coordsChanged) {
+			/* 3a. Compute fresh distances */
+			const distances = await calcDistances(
+				newCoords,
+				updateData.hotelState ||
+					updatedFields.hotelState ||
+					hotelDetails.hotelState
+			);
+
+			/* 3b. Attach to update payload */
+			updatedFields.distances = distances;
+			console.log(
+				`Distances recalculated for hotel ${hotelDetailsId}:`,
+				distances
+			);
+		}
+
+		/* 4. Persist */
+		const newDoc = await HotelDetails.findByIdAndUpdate(
 			hotelDetailsId,
 			{ $set: updatedFields },
 			{ new: true, runValidators: true }
 		).exec();
 
-		if (!updatedHotelDetails) {
-			console.error("Failed to update hotel details for ID:", hotelDetailsId);
-			return res.status(500).send({ error: "Failed to update hotel details" });
-		}
+		if (!newDoc)
+			return res.status(500).json({ error: "Failed to update hotel details" });
 
-		console.log("Hotel details updated successfully:", updatedHotelDetails);
-		return res.json(updatedHotelDetails);
+		return res.json(newDoc);
 	} catch (err) {
-		console.error("Error updating hotel details:", err);
-		return res.status(500).send({ error: "Internal server error" });
+		console.error("updateHotelDetails error:", err);
+		return res.status(500).json({ error: "Internal server error" });
 	}
 };
 
@@ -251,40 +303,97 @@ exports.getHotelDetails = (req, res) => {
 
 exports.listForAdmin = async (req, res) => {
 	try {
-		/* ─── 1. Parse & sanitise query params ─── */
-		let { page = 1, limit = 15, status } = req.query;
+		/* 1️⃣  Parse & sanitise query params */
+		let { page = 1, limit = 15, status, q = "" } = req.query;
+
 		page = Math.max(parseInt(page, 10) || 1, 1);
 		limit = Math.min(Math.max(parseInt(limit, 10) || 15, 1), 50);
-
-		/* ─── 2. Build Mongo filter ─── */
-		const filter = {};
-		if (status === "active") filter.activateHotel = true;
-		if (status === "inactive") filter.activateHotel = false;
-
-		/* ─── 3. Run query & count in parallel ─── */
 		const skip = (page - 1) * limit;
 
-		const [hotels, total] = await Promise.all([
-			HotelDetails.find(filter)
-				.sort({ createdAt: -1 }) // newest first
-				.skip(skip)
-				.limit(limit)
-				.populate("belongsTo", "_id name email") // only needed fields
-				.lean(), // plain JS objects
-			HotelDetails.countDocuments(filter),
-		]);
+		/* 2️⃣  Base filter (status) */
+		const baseMatch = {};
+		if (status === "active") baseMatch.activateHotel = true;
+		if (status === "inactive") baseMatch.activateHotel = false;
 
-		/* ─── 4. Respond ─── */
-		res.json({
-			total, // total matching docs
+		/* 3️⃣  Search filter (if q present) */
+		const search = q.trim();
+		let searchMatch = {};
+		if (search) {
+			/* escape regex special chars then make case‑insensitive regex */
+			const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const regex = new RegExp(escaped, "i");
+
+			searchMatch = {
+				$or: [
+					{ hotelName: regex },
+					{ hotelCountry: regex },
+					{ hotelCity: regex },
+					{ hotelAddress: regex },
+					{ phone: regex },
+					{ "owner.name": regex },
+					{ "owner.email": regex },
+				],
+			};
+		}
+
+		/* 4️⃣  Build aggregation pipeline */
+		const pipeline = [
+			{ $match: baseMatch },
+			/* join User collection to access owner name/email -------------------- */
+			{
+				$lookup: {
+					from: "users", // <== collection name
+					localField: "belongsTo",
+					foreignField: "_id",
+					as: "owner",
+				},
+			},
+			{ $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
+		];
+
+		if (search) pipeline.push({ $match: searchMatch });
+
+		pipeline.push(
+			{ $sort: { createdAt: -1 } }, // newest first
+			{
+				/* facet = run two pipelines in parallel: paginated data + total count */
+				$facet: {
+					data: [{ $skip: skip }, { $limit: limit }],
+					totalCount: [{ $count: "count" }],
+				},
+			}
+		);
+
+		/* 5️⃣  Run the aggregation */
+		const result = await HotelDetails.aggregate(pipeline).exec();
+		const hotels = result[0]?.data || [];
+		const total =
+			result[0]?.totalCount?.length > 0 ? result[0].totalCount[0].count : 0;
+
+		/* 6️⃣  Minimal owner projection (id, name, email) */
+		const cleaned = hotels.map((h) => {
+			if (h.owner) {
+				h.belongsTo = {
+					_id: h.owner._id,
+					name: h.owner.name,
+					email: h.owner.email,
+				};
+			}
+			delete h.owner;
+			return h;
+		});
+
+		/* 7️⃣  Send */
+		return res.json({
+			total,
 			page,
 			pages: Math.ceil(total / limit),
-			results: hotels.length,
-			hotels,
+			results: cleaned.length,
+			hotels: cleaned,
 		});
 	} catch (err) {
-		console.error(err);
-		res.status(400).json({ error: "Failed to fetch hotel list" });
+		console.error("listForAdmin error:", err);
+		return res.status(400).json({ error: "Failed to fetch hotel list" });
 	}
 };
 
