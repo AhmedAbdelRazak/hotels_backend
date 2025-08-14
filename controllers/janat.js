@@ -108,6 +108,106 @@ exports.listOfAllActiveHotels = async (req, res) => {
 	}
 };
 
+exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
+	try {
+		// Optional switches: default off to preserve existing behavior
+		const validOnly =
+			String(req.query.validOnly || "false").toLowerCase() === "true";
+		const requireActiveRoom =
+			String(req.query.activeRoom || "false").toLowerCase() === "true";
+
+		// Base query: same gates as listOfAllActiveHotels + require rooms that have offers or monthly
+		const hotels = await HotelDetails.find({
+			activateHotel: true,
+			hotelPhotos: { $exists: true, $not: { $size: 0 } },
+			"location.coordinates": { $ne: [0, 0] },
+			roomCountDetails: {
+				$elemMatch: {
+					"price.basePrice": { $gt: 0 },
+					// ensure room has photos
+					"photos.0": { $exists: true },
+					// require either offers or monthly to exist
+					$or: [
+						{ "offers.0": { $exists: true } },
+						{ "monthly.0": { $exists: true } },
+					],
+				},
+			},
+		})
+			.lean()
+			.exec();
+
+		const now = new Date();
+
+		const filtered = hotels
+			.map((hotel) => {
+				const onlyRoomsWithDeals = (hotel.roomCountDetails || [])
+					.filter((room) => {
+						// keep same gates as your base list
+						if (requireActiveRoom && room.activeRoom !== true) return false;
+						const hasBasePrice = room?.price?.basePrice > 0;
+						const hasPhotos =
+							Array.isArray(room.photos) && room.photos.length > 0;
+						if (!hasBasePrice || !hasPhotos) return false;
+
+						const offersAll = Array.isArray(room.offers) ? room.offers : [];
+						const monthlyAll = Array.isArray(room.monthly) ? room.monthly : [];
+
+						const offers = validOnly
+							? offersAll.filter((o) => {
+									const from = new Date(o.offerFrom);
+									const to = new Date(o.offerTo);
+									return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
+							  })
+							: offersAll;
+
+						const monthly = validOnly
+							? monthlyAll.filter((m) => {
+									const from = new Date(m.monthFrom);
+									const to = new Date(m.monthTo);
+									return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
+							  })
+							: monthlyAll;
+
+						// must have at least one qualifying offer/monthly
+						return offers.length > 0 || monthly.length > 0;
+					})
+					.map((room) => {
+						if (!validOnly) return room;
+
+						// when validOnly=true, trim the arrays to only valid ranges
+						const offersAll = Array.isArray(room.offers) ? room.offers : [];
+						const monthlyAll = Array.isArray(room.monthly) ? room.monthly : [];
+
+						const offers = offersAll.filter((o) => {
+							const from = new Date(o.offerFrom);
+							const to = new Date(o.offerTo);
+							return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
+						});
+						const monthly = monthlyAll.filter((m) => {
+							const from = new Date(m.monthFrom);
+							const to = new Date(m.monthTo);
+							return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
+						});
+
+						return { ...room, offers, monthly };
+					});
+
+				return { ...hotel, roomCountDetails: onlyRoomsWithDeals };
+			})
+			// only keep hotels that still have at least one qualifying room
+			.filter((h) => (h.roomCountDetails || []).length > 0);
+
+		return res.status(200).json(filtered);
+	} catch (err) {
+		console.error("Error fetching hotels with monthly/offers:", err);
+		return res.status(500).json({
+			error:
+				"An error occurred while fetching active hotels with monthly/offers.",
+		});
+	}
+};
+
 exports.distinctRoomTypes = async (req, res) => {
 	try {
 		const activeHotels = await HotelDetails.find({

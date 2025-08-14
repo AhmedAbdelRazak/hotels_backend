@@ -30,6 +30,7 @@ const {
 	createNewReservationClient2,
 	sendEmailForTriggeringPayment,
 	compileCustomerList,
+	listOfAllActiveHotelsMonthlyAndOffers,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -100,6 +101,8 @@ router.put(
 	"/update-reservation-client/:reservationId",
 	updateReservationDetails
 );
+
+router.get("/hotels/active-with-deals", listOfAllActiveHotelsMonthlyAndOffers);
 
 router.post("/rooms/get-by-ids", getRoomByIds);
 

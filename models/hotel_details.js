@@ -120,6 +120,26 @@ const hotel_detailsSchema = new mongoose.Schema(
 						type: String,
 						default: "Unisex",
 					},
+					offers: [
+						{
+							offerName: String,
+							offerFrom: Date,
+							offerTo: Date,
+							offerPrice: Number,
+							offerRootPrice: Number,
+						},
+					],
+					monthly: [
+						{
+							monthName: String,
+							monthFrom: Date,
+							monthTo: Date,
+							monthFromHijri: String,
+							monthToHijri: String,
+							monthPrice: Number,
+							monthRootPrice: Number,
+						},
+					],
 				},
 			],
 		},

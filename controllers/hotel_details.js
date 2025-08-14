@@ -36,35 +36,68 @@ exports.read = (req, res) => {
 	return res.json(req.hotelDetails);
 };
 
-const ensureUniqueRoomColors = (roomCountDetails) => {
-	const colorMap = {};
+const hasRoomIdentity = (room = {}) => {
+	const rt = typeof room.roomType === "string" ? room.roomType.trim() : "";
+	const dn =
+		typeof room.displayName === "string" ? room.displayName.trim() : "";
+	return rt.length > 0 && dn.length > 0;
+};
 
+const normalizeIdentity = (room = {}) => {
+	const out = { ...room };
+	if (typeof out.roomType === "string") out.roomType = out.roomType.trim();
+	if (typeof out.displayName === "string")
+		out.displayName = out.displayName.trim();
+	return out;
+};
+
+// Keep your existing color uniqueness behavior; only minor safety guards
+const ensureUniqueRoomColors = (roomCountDetails = []) => {
+	const colorMap = {};
 	roomCountDetails.forEach((room) => {
+		if (!room || !room.roomType) return;
+
 		if (!colorMap[room.roomType]) {
 			colorMap[room.roomType] = new Set();
 		}
 
-		// Check if roomColor already exists in the roomType group
-		if (room.roomColor && colorMap[room.roomType].has(room.roomColor)) {
-			// Generate a new unique color
-			room.roomColor = generateUniqueDarkColor([...colorMap[room.roomType]]);
+		const used = colorMap[room.roomType];
+
+		// If duplicate, generate new color (assumes generateUniqueDarkColor exists in your codebase)
+		if (room.roomColor && used.has(room.roomColor)) {
+			const generator =
+				typeof generateUniqueDarkColor === "function"
+					? generateUniqueDarkColor
+					: (existing = []) => {
+							// simple fallback
+							const rnd = () =>
+								Math.floor(Math.random() * 128)
+									.toString(16)
+									.padStart(2, "0");
+							let candidate = `#${rnd()}${rnd()}${rnd()}`;
+							let tries = 0;
+							const set = new Set(existing);
+							while (set.has(candidate) && tries < 20) {
+								candidate = `#${rnd()}${rnd()}${rnd()}`;
+								tries += 1;
+							}
+							return candidate;
+					  };
+			const existing = Array.from(used);
+			room.roomColor = generator(existing);
 			console.log(
 				`Duplicate color found for roomType ${room.roomType}. Generated new color: ${room.roomColor}`
 			);
 		}
 
-		if (room.roomColor) {
-			colorMap[room.roomType].add(room.roomColor);
-		}
+		if (room.roomColor) used.add(room.roomColor);
 	});
 };
 
 /**
  * Constructs the fields to be updated in the HotelDetails document.
  * Merges roomCountDetails and paymentSettings while ensuring unique room colors.
- * @param {Object} hotelDetails - The existing hotel details from the database.
- * @param {Object} updateData - The incoming data to update.
- * @returns {Object} - The fields to be updated.
+ * Critically: prevents creating a new "blank" room (must have roomType + displayName).
  */
 const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 	const updatedFields = {};
@@ -74,59 +107,84 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 		updateData.roomCountDetails &&
 		Array.isArray(updateData.roomCountDetails)
 	) {
-		// Clone existing roomCountDetails to avoid mutating the original data
-		let updatedRoomCountDetails = hotelDetails.roomCountDetails.map(
-			(existingRoom) => ({
-				...existingRoom.toObject(), // Convert Mongoose document to plain object
-			})
+		// Clone existing rooms safely (Mongoose doc or plain object)
+		let updatedRoomCountDetails = (hotelDetails.roomCountDetails || []).map(
+			(existingRoom) =>
+				typeof existingRoom?.toObject === "function"
+					? existingRoom.toObject()
+					: { ...existingRoom }
 		);
 
-		// Iterate over each newRoom in updateData to merge or add
-		updateData.roomCountDetails.forEach((newRoom) => {
+		updateData.roomCountDetails.forEach((incoming) => {
+			const newRoomRaw = incoming || {};
+			const newRoom = normalizeIdentity(newRoomRaw);
+			const identityOK = hasRoomIdentity(newRoom);
+
 			if (fromPage === "AddNew") {
-				// Check if the room already exists based on roomType and displayName
-				const existingRoomIndex = updatedRoomCountDetails.findIndex(
+				// DO NOT create a room unless it has roomType + displayName
+				if (!identityOK) {
+					console.warn(
+						`Skipping room without roomType/displayName during AddNew: ${JSON.stringify(
+							newRoomRaw
+						)}`
+					);
+					return;
+				}
+
+				// Match existing by identity (roomType + displayName)
+				const existingIndex = updatedRoomCountDetails.findIndex(
 					(room) =>
-						room.roomType === newRoom.roomType &&
-						room.displayName === newRoom.displayName
+						(room.roomType || "").toString().trim() === newRoom.roomType &&
+						(room.displayName || "").toString().trim() === newRoom.displayName
 				);
 
-				if (existingRoomIndex !== -1) {
-					// Merge existing room with new data
-					updatedRoomCountDetails[existingRoomIndex] = {
-						...updatedRoomCountDetails[existingRoomIndex],
+				if (existingIndex !== -1) {
+					// Merge
+					updatedRoomCountDetails[existingIndex] = {
+						...updatedRoomCountDetails[existingIndex],
 						...newRoom,
 					};
 				} else {
-					// Ensure activeRoom is set to true by default for new rooms
-					if (newRoom.activeRoom === undefined) {
-						newRoom.activeRoom = true;
-					}
+					if (newRoom.activeRoom === undefined) newRoom.activeRoom = true;
 					updatedRoomCountDetails.push(newRoom);
 					console.log(`Added new room: ${JSON.stringify(newRoom)}`);
 				}
 			} else {
-				// For non-AddNew pages, match based on _id
+				// Non-AddNew: match/update by _id only (your existing behavior)
 				if (newRoom._id) {
-					const existingRoomIndex = updatedRoomCountDetails.findIndex(
-						(room) => room._id.toString() === newRoom._id.toString()
+					const existingIndex = updatedRoomCountDetails.findIndex(
+						(room) => room._id?.toString?.() === newRoom._id.toString()
 					);
 
-					if (existingRoomIndex !== -1) {
-						// Merge existing room with new data
-						updatedRoomCountDetails[existingRoomIndex] = {
-							...updatedRoomCountDetails[existingRoomIndex],
-							...newRoom,
-						};
+					if (existingIndex !== -1) {
+						// Merge but protect identity from being blanked by accidental empty values
+						const existing = updatedRoomCountDetails[existingIndex];
+						const merged = { ...existing, ...newRoom };
+						if (!hasRoomIdentity(newRoom)) {
+							// keep existing identity if incoming lacks it
+							merged.roomType = existing.roomType;
+							merged.displayName = existing.displayName;
+						}
+						updatedRoomCountDetails[existingIndex] = merged;
 					} else {
-						// If room doesn't exist, add it
-						updatedRoomCountDetails.push(newRoom);
-						console.log(`Added new room with _id: ${newRoom._id}`);
+						// Only allow adding a *new* room here if it also has identity
+						if (identityOK) {
+							if (newRoom.activeRoom === undefined) newRoom.activeRoom = true;
+							updatedRoomCountDetails.push(newRoom);
+							console.log(`Added new room with _id: ${newRoom._id}`);
+						} else {
+							console.warn(
+								`Skipping room without identity and no match by _id on non-AddNew: ${JSON.stringify(
+									newRoomRaw
+								)}`
+							);
+						}
 					}
 				} else {
+					// No _id on non-AddNew → skip (your previous code warned too)
 					console.warn(
 						`Skipping room without _id on non-AddNew page: ${JSON.stringify(
-							newRoom
+							newRoomRaw
 						)}`
 					);
 				}
@@ -136,7 +194,7 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 		// Ensure all room colors are unique within the same roomType
 		ensureUniqueRoomColors(updatedRoomCountDetails);
 
-		// Assign the updated roomCountDetails
+		// Assign the updated rooms
 		updatedFields.roomCountDetails = updatedRoomCountDetails;
 	}
 
@@ -164,16 +222,14 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 };
 
 /**
- * Updates the hotel details based on the provided data.
- * Handles merging of nested roomCountDetails and their pricingRate arrays.
+ * Distance calculation helper (unchanged except minor guards)
  */
 const calcDistances = async (coords, hotelState = "") => {
 	const [lng, lat] = coords; // hotel stores [lng, lat]
 	const elHaram = [39.8262, 21.4225];
 	const prophetsMosque = [39.6142, 24.4672];
 
-	// pick destination
-	const dest = hotelState.toLowerCase().includes("madinah")
+	const dest = (hotelState || "").toLowerCase().includes("madinah")
 		? prophetsMosque
 		: elHaram;
 
@@ -212,7 +268,7 @@ const calcDistances = async (coords, hotelState = "") => {
 exports.updateHotelDetails = async (req, res) => {
 	const hotelDetailsId = req.params.hotelId;
 	const updateData = req.body;
-	const fromPage = req.body.fromPage; // e.g. “AddNew”
+	const fromPage = req.body.fromPage; // e.g. "AddNew"
 
 	try {
 		/* 1. Fetch existing doc */

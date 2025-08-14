@@ -1085,6 +1085,11 @@ ROOM_TYPES_MAPPING.forEach((rt) => {
 });
 
 // Parse hotelId if given
+// -------------------------------
+// Helpers (keep at top of file)
+// -------------------------------
+
+// Parse hotelId if given
 function tryConvertToObjectId(value) {
 	if (!value) return null;
 	if (mongoose.Types.ObjectId.isValid(value)) {
@@ -1093,16 +1098,57 @@ function tryConvertToObjectId(value) {
 	return null;
 }
 
-// Helper to check if two dates are the same day
+// Helper to check if two dates are the same day (robust to non-Date input)
 function isSameDay(date1, date2) {
+	if (!date1 || !date2) return false;
+	const d1 = date1 instanceof Date ? date1 : new Date(date1);
+	const d2 = date2 instanceof Date ? date2 : new Date(date2);
 	return (
-		date1.getFullYear() === date2.getFullYear() &&
-		date1.getMonth() === date2.getMonth() &&
-		date1.getDate() === date2.getDate()
+		d1.getFullYear() === d2.getFullYear() &&
+		d1.getMonth() === d2.getMonth() &&
+		d1.getDate() === d2.getDate()
 	);
 }
 
+// Always provide a full empty report so the frontend can render a zero-state
+function makeEmptyReport() {
+	return {
+		firstRow: {
+			arrivals: 0,
+			departures: 0,
+			inHouse: 0,
+			booking: 0,
+			overAllBookings: 0,
+			tomorrowArrivals: 0,
+		},
+		secondRow: {
+			cancellations: 0,
+			noShow: 0,
+			occupancy: { booked: 0, available: 0, overallRoomsCount: 0 },
+			latestCheckouts: [],
+			upcomingCheckins: [],
+		},
+		thirdRow: {
+			roomsTable: [],
+			housekeeping: { clean: 0, cleaning: 0, dirty: 0 },
+		},
+		fourthRow: {
+			topChannels: [],
+			roomNightsByType: [],
+			roomRevenueByType: [],
+		},
+		fifthRow: {
+			bookingLine: { categories: [], checkIn: [], checkOut: [] },
+			visitorsLine: { categories: [], yesterday: [], today: [] },
+		},
+		donutChartCard: { availableRooms: 0, totalRooms: 0 },
+		horizontalBarChartCard: { pending: 0, done: 0, finish: 0 },
+	};
+}
+
+// -------------------------------
 // MAIN CONTROLLER
+// -------------------------------
 exports.adminDashboardReport = async (req, res) => {
 	try {
 		// 1) Base filter (booking_source + createdAt >= 2024-09-01)
@@ -1115,15 +1161,18 @@ exports.adminDashboardReport = async (req, res) => {
 			],
 			createdAt: { $gte: startOfSep2024 },
 		};
+		console.log("Admin Dashboard Report Data:");
 
 		// 2) Optional hotelId param => /admin-dashboard-reports/:hotelId
 		const { hotelId } = req.params;
 		if (hotelId && hotelId !== "all") {
 			const objId = tryConvertToObjectId(hotelId);
 			if (!objId) {
+				// Keep 400, but still send consistent data shape
 				return res.status(400).json({
 					success: false,
 					message: `Invalid hotelId '${hotelId}'`,
+					data: makeEmptyReport(),
 				});
 			}
 			baseFilter.hotelId = objId;
@@ -1132,13 +1181,54 @@ exports.adminDashboardReport = async (req, res) => {
 		// Helper to merge baseFilter + condition
 		const withBaseFilter = (cond) => ({ $and: [baseFilter, cond] });
 
+		// Safe wrappers so one failed query doesn't doom the whole report
+		const safeCount = async (cond) => {
+			try {
+				return await Reservations.countDocuments(withBaseFilter(cond));
+			} catch (e) {
+				console.error("safeCount failed", cond, e);
+				return 0;
+			}
+		};
+		const safeFind = async ({
+			cond = {},
+			select = "",
+			sort = null,
+			limit = null,
+		}) => {
+			try {
+				let q = Reservations.find(withBaseFilter(cond)).select(select).lean();
+				if (sort) q = q.sort(sort);
+				if (limit) q = q.limit(limit);
+				return await q;
+			} catch (e) {
+				console.error("safeFind failed", cond, e);
+				return [];
+			}
+		};
+		const safeAggregate = async (pipeline) => {
+			try {
+				return await Reservations.aggregate(pipeline);
+			} catch (e) {
+				console.error("safeAggregate failed", e);
+				return [];
+			}
+		};
+
 		// 3) Check if there are ANY documents matching baseFilter
-		const totalMatches = await Reservations.countDocuments(baseFilter);
+		const totalMatches = await Reservations.countDocuments(baseFilter).catch(
+			(e) => {
+				console.error("countDocuments(baseFilter) failed", e);
+				return 0;
+			}
+		);
+
 		if (totalMatches === 0) {
-			// If no docs, return a simple message
+			// Always return data so frontend renders zero-state
 			return res.json({
 				success: true,
 				message: "No Reservations Found",
+				data: makeEmptyReport(),
 			});
 		}
 
@@ -1163,52 +1253,36 @@ exports.adminDashboardReport = async (req, res) => {
 			999
 		);
 
-		// We'll do 10 days after "today"
+		// We'll do 10 days after "today" (inclusive of today: 0..9)
 		const endOf10Days = new Date(startOfToday);
 		endOf10Days.setDate(endOf10Days.getDate() + 9);
 
 		// ============== FIRST ROW ==============
-		// arrivals => checkin_date == today
-		const arrivalsCount = await Reservations.countDocuments(
-			withBaseFilter({
-				checkin_date: { $gte: startOfToday, $lte: endOfToday },
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+		const arrivalsCount = await safeCount({
+			checkin_date: { $gte: startOfToday, $lte: endOfToday },
+			reservation_status: { $ne: "cancelled" },
+		});
 
-		// departures => checkout_date == today
-		const departuresCount = await Reservations.countDocuments(
-			withBaseFilter({
-				checkout_date: { $gte: startOfToday, $lte: endOfToday },
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+		const departuresCount = await safeCount({
+			checkout_date: { $gte: startOfToday, $lte: endOfToday },
+			reservation_status: { $ne: "cancelled" },
+		});
 
-		// inHouse => checkin_date <= endOfToday && checkout_date > startOfToday
-		const inHouseCount = await Reservations.countDocuments(
-			withBaseFilter({
-				checkin_date: { $lte: endOfToday },
-				checkout_date: { $gt: startOfToday },
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+		const inHouseCount = await safeCount({
+			checkin_date: { $lte: endOfToday },
+			checkout_date: { $gt: startOfToday },
+			reservation_status: { $ne: "cancelled" },
+		});
 
-		// booking => createdAt == today
-		const bookingsTodayCount = await Reservations.countDocuments(
-			withBaseFilter({
-				createdAt: { $gte: startOfToday, $lte: endOfToday },
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+		const bookingsTodayCount = await safeCount({
+			createdAt: { $gte: startOfToday, $lte: endOfToday },
+			reservation_status: { $ne: "cancelled" },
+		});
 
-		// overAllBookings => total non-cancelled (matching baseFilter)
-		const overAllBookingsCount = await Reservations.countDocuments(
-			withBaseFilter({
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+		const overAllBookingsCount = await safeCount({
+			reservation_status: { $ne: "cancelled" },
+		});
 
-		// tomorrowArrivals => checkin_date == tomorrow
 		const tomorrowStart = new Date(
 			now.getFullYear(),
 			now.getMonth(),
@@ -1227,12 +1301,11 @@ exports.adminDashboardReport = async (req, res) => {
 			59,
 			999
 		);
-		const tomorrowArrivalsCount = await Reservations.countDocuments(
-			withBaseFilter({
-				checkin_date: { $gte: tomorrowStart, $lte: tomorrowEnd },
-				reservation_status: { $ne: "cancelled" },
-			})
-		);
+
+		const tomorrowArrivalsCount = await safeCount({
+			checkin_date: { $gte: tomorrowStart, $lte: tomorrowEnd },
+			reservation_status: { $ne: "cancelled" },
+		});
 
 		const firstRow = {
 			arrivals: arrivalsCount,
@@ -1244,46 +1317,44 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		// ============== SECOND ROW ==============
-		// cancellations => canceled “today” (updatedAt in [today..today])
-		const cancellationsCount = await Reservations.countDocuments(
-			withBaseFilter({
-				reservation_status: "cancelled",
-				updatedAt: { $gte: startOfToday, $lte: endOfToday },
-			})
-		);
+		const cancellationsCount = await safeCount({
+			reservation_status: "cancelled",
+			updatedAt: { $gte: startOfToday, $lte: endOfToday },
+		});
 
-		// noShow => "no show" updated “today”
-		const noShowCount = await Reservations.countDocuments(
-			withBaseFilter({
-				reservation_status: /no\s?show/i,
-				updatedAt: { $gte: startOfToday, $lte: endOfToday },
-			})
-		);
+		const noShowCount = await safeCount({
+			reservation_status: /no\s?show/i,
+			updatedAt: { $gte: startOfToday, $lte: endOfToday },
+		});
 
 		// totalRoomsAcrossHotels => sum of all .roomCountDetails[].count
 		const hotelsQuery =
 			hotelId && hotelId !== "all"
 				? { _id: new mongoose.Types.ObjectId(hotelId) }
 				: {};
-		const matchedHotels = await HotelDetails.find(hotelsQuery).lean();
+		const matchedHotels = await HotelDetails.find(hotelsQuery)
+			.lean()
+			.catch((e) => {
+				console.error("HotelDetails.find failed", e);
+				return [];
+			});
 
 		let totalRoomsAcrossHotels = 0;
 		for (const h of matchedHotels) {
-			for (const detail of h.roomCountDetails || []) {
-				totalRoomsAcrossHotels += detail.count || 0;
+			for (const detail of h?.roomCountDetails || []) {
+				totalRoomsAcrossHotels += detail?.count || 0;
 			}
 		}
 
 		// Next 10 days => peak usage
-		const relevantFor10Days = await Reservations.find(
-			withBaseFilter({
+		const relevantFor10Days = await safeFind({
+			cond: {
 				reservation_status: { $ne: "cancelled" },
 				checkin_date: { $lte: endOf10Days },
 				checkout_date: { $gt: startOfToday },
-			})
-		)
-			.select("checkin_date checkout_date pickedRoomsType")
-			.lean();
+			},
+			select: "checkin_date checkout_date pickedRoomsType",
+		});
 
 		const usageArray10 = new Array(10).fill(0);
 		const dayList10 = [];
@@ -1294,13 +1365,15 @@ exports.adminDashboardReport = async (req, res) => {
 		}
 
 		for (const doc of relevantFor10Days) {
-			if (!Array.isArray(doc.pickedRoomsType)) continue;
-			let totalRoomsUsed = 0;
-			for (const rtObj of doc.pickedRoomsType) {
-				totalRoomsUsed += rtObj.count || 1;
-			}
+			if (!Array.isArray(doc?.pickedRoomsType)) continue;
 			const cIn = doc.checkin_date;
 			const cOut = doc.checkout_date;
+
+			let totalRoomsUsed = 0;
+			for (const rtObj of doc.pickedRoomsType) {
+				totalRoomsUsed += rtObj?.count || 1;
+			}
+
 			for (let i = 0; i < 10; i++) {
 				const dayDate = dayList10[i];
 				if (dayDate >= cIn && dayDate < cOut) {
@@ -1316,70 +1389,70 @@ exports.adminDashboardReport = async (req, res) => {
 			overallRoomsCount: totalRoomsAcrossHotels,
 		};
 
-		// latestCheckouts => optional
-		const latestCheckoutsRaw = await Reservations.find(
-			withBaseFilter({
-				reservation_status: { $in: ["completed", "checked-out"] },
-			})
-		)
-			.sort({ checkout_date: -1 })
-			.limit(4)
-			.lean();
+		// latestCheckouts
+		const latestCheckoutsRaw = await safeFind({
+			cond: { reservation_status: { $in: ["completed", "checked-out"] } },
+			sort: { checkout_date: -1 },
+			limit: 4,
+		});
 
 		const latestCheckouts = latestCheckoutsRaw.map((r) => ({
 			key: String(r._id),
-			guest: r.customer_details?.name || "N/A",
-			guestId: r.customer_details?.passport || "",
-			accommodation: Array.isArray(r.pickedRoomsType)
-				? r.pickedRoomsType.map((rt) => rt.room_type).join(", ")
+			guest: r?.customer_details?.name || "N/A",
+			guestId: r?.customer_details?.passport || "",
+			accommodation: Array.isArray(r?.pickedRoomsType)
+				? r.pickedRoomsType
+						.map((rt) => rt?.room_type)
+						.filter(Boolean)
+						.join(", ")
 				: "",
 			stay:
-				r.checkin_date && r.checkout_date
+				r?.checkin_date && r?.checkout_date
 					? `${r.checkin_date.toISOString().slice(0, 10)} - ${r.checkout_date
 							.toISOString()
 							.slice(0, 10)}`
 					: "",
 			status: "Check out",
-			amount: r.total_amount ? `$${r.total_amount}` : "",
+			amount: typeof r?.total_amount === "number" ? `$${r.total_amount}` : "",
 		}));
 
 		// upcomingCheckins => next 10 days (including today)
-		const upcomingRaw = await Reservations.find(
-			withBaseFilter({
+		const upcomingRaw = await safeFind({
+			cond: {
 				reservation_status: { $ne: "cancelled" },
 				checkin_date: { $gte: startOfToday, $lte: endOf10Days },
-			})
-		)
-			.sort({ checkin_date: 1 })
-			.lean();
+			},
+			sort: { checkin_date: 1 },
+		});
 
 		const upcomingCheckins = upcomingRaw.map((doc) => {
-			let nights = doc.days_of_residence || 0;
-			if (!nights && doc.checkin_date && doc.checkout_date) {
+			let nights = doc?.days_of_residence || 0;
+			if (!nights && doc?.checkin_date && doc?.checkout_date) {
 				const diff = doc.checkout_date - doc.checkin_date;
 				nights = Math.ceil(diff / (1000 * 60 * 60 * 24));
 			}
 			let dateRange = "";
-			if (doc.checkin_date && doc.checkout_date) {
+			if (doc?.checkin_date && doc?.checkout_date) {
 				const ci = doc.checkin_date.toISOString().slice(0, 10);
 				const co = doc.checkout_date.toISOString().slice(0, 10);
 				dateRange = `${ci} - ${co}`;
 			}
 			const guestsCount =
-				doc.total_guests || (doc.adults || 0) + (doc.children || 0);
-			const flag = isSameDay(doc.checkin_date, now) ? 1 : 0;
+				doc?.total_guests || (doc?.adults || 0) + (doc?.children || 0);
+			const flag = isSameDay(doc?.checkin_date, now) ? 1 : 0;
 
 			return {
-				_id: String(doc._id),
-				name: doc.customer_details?.name || "N/A",
-				confirmation_number: doc.confirmation_number || "N/A",
+				_id: String(doc?._id),
+				name: doc?.customer_details?.name || "N/A",
+				confirmation_number: doc?.confirmation_number || "N/A",
 				room_type:
-					(doc.pickedRoomsType[0] && doc.pickedRoomsType[0].room_type) || "N/A",
+					(doc?.pickedRoomsType?.[0] && doc.pickedRoomsType[0].room_type) ||
+					"N/A",
 				nights,
 				dateRange,
 				number_of_guests: guestsCount,
 				flag,
-				reservation_status: doc.reservation_status || "",
+				reservation_status: doc?.reservation_status || "",
 			};
 		});
 
@@ -1392,46 +1465,48 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		// ============== THIRD ROW ==============
-		// 7-day usage approach for "roomsTable"
 		const reservationsForRooms = await Reservations.find(baseFilter)
 			.select("pickedRoomsType")
-			.lean();
+			.lean()
+			.catch((e) => {
+				console.error("Reservations.find(baseFilter) for rooms failed", e);
+				return [];
+			});
 
-		// sold => total usage from all time (matching baseFilter)
 		const roomStatsMap = {};
 		for (const r of reservationsForRooms) {
-			if (!Array.isArray(r.pickedRoomsType)) continue;
+			if (!Array.isArray(r?.pickedRoomsType)) continue;
 			for (const rtObj of r.pickedRoomsType) {
-				const typeVal = rtObj.room_type;
-				if (!roomStatsMap[typeVal]) {
-					roomStatsMap[typeVal] = { sold: 0 };
-				}
-				roomStatsMap[typeVal].sold += rtObj.count || 1;
+				const typeVal = rtObj?.room_type;
+				if (!typeVal) continue;
+				if (!roomStatsMap[typeVal]) roomStatsMap[typeVal] = { sold: 0 };
+				roomStatsMap[typeVal].sold += rtObj?.count || 1;
 			}
 		}
 
 		// combinedInventory => from matchedHotels roomCountDetails
 		const combinedInventory = {};
 		for (const h of matchedHotels) {
-			for (const detail of h.roomCountDetails || []) {
-				const rtVal = detail.roomType;
+			for (const detail of h?.roomCountDetails || []) {
+				const rtVal = detail?.roomType;
+				if (!rtVal) continue;
 				combinedInventory[rtVal] =
-					(combinedInventory[rtVal] || 0) + (detail.count || 0);
+					(combinedInventory[rtVal] || 0) + (detail?.count || 0);
 			}
 		}
 
 		// Next 7 days usage => usageByDay7
 		const rangeEnd = new Date(startOfToday);
 		rangeEnd.setDate(rangeEnd.getDate() + 7); // up to 7 days from today
-		const relevantForNext7 = await Reservations.find(
-			withBaseFilter({
+
+		const relevantForNext7 = await safeFind({
+			cond: {
 				reservation_status: { $ne: "cancelled" },
 				checkin_date: { $lte: rangeEnd },
 				checkout_date: { $gt: startOfToday },
-			})
-		)
-			.select("checkin_date checkout_date pickedRoomsType")
-			.lean();
+			},
+			select: "checkin_date checkout_date pickedRoomsType",
+		});
 
 		const usageByDay7 = {};
 		const allTypeVals = new Set([
@@ -1439,7 +1514,6 @@ exports.adminDashboardReport = async (req, res) => {
 			...Object.keys(roomStatsMap),
 		]);
 
-		// Initialize usageByDay7 for each type
 		for (const typeVal of allTypeVals) {
 			usageByDay7[typeVal] = [0, 0, 0, 0, 0, 0, 0];
 		}
@@ -1451,15 +1525,15 @@ exports.adminDashboardReport = async (req, res) => {
 			dayList7.push(dd);
 		}
 
-		// Fill usage
 		for (const doc of relevantForNext7) {
-			if (!Array.isArray(doc.pickedRoomsType)) continue;
-			const cIn = doc.checkin_date;
-			const cOut = doc.checkout_date;
+			if (!Array.isArray(doc?.pickedRoomsType)) continue;
+			const cIn = doc?.checkin_date;
+			const cOut = doc?.checkout_date;
 
 			for (const rtObj of doc.pickedRoomsType) {
-				const typeVal = rtObj.room_type;
-				const countVal = rtObj.count || 1;
+				const typeVal = rtObj?.room_type;
+				if (!typeVal) continue;
+				const countVal = rtObj?.count || 1;
 
 				for (let i = 0; i < 7; i++) {
 					const dayDate = dayList7[i];
@@ -1470,7 +1544,6 @@ exports.adminDashboardReport = async (req, res) => {
 			}
 		}
 
-		// availabilityNext7 => for each type
 		const availabilityNext7 = {};
 		for (const typeVal of allTypeVals) {
 			const inv = combinedInventory[typeVal] || 0;
@@ -1481,16 +1554,10 @@ exports.adminDashboardReport = async (req, res) => {
 		const dynamicRoomsTable = [];
 		let rowKeyCounter = 1;
 		for (const typeVal of allTypeVals) {
-			// If we have a label, use it; else use the raw type
 			const label = roomTypeLabelMap[typeVal] || typeVal;
-
 			const total = combinedInventory[typeVal] || 0;
 			const sold = roomStatsMap[typeVal]?.sold || 0;
-
-			// If you want "available" (all-time) => total - sold
 			const available = Math.max(total - sold, 0);
-
-			// next7 => how many left at peak usage
 			const next7 = availabilityNext7[typeVal] || 0;
 
 			dynamicRoomsTable.push({
@@ -1498,35 +1565,27 @@ exports.adminDashboardReport = async (req, res) => {
 				type: label,
 				sold,
 				total,
-				bookingNext7: next7, // or rename as you wish
-				availabilityNext7: next7, // same
-				available, // optional
+				bookingNext7: next7,
+				availabilityNext7: next7,
+				available,
 			});
 		}
 
+		// You can wire this to real housekeeping if you have it
 		const housekeeping = { clean: 25, cleaning: 0, dirty: 0 };
-		const thirdRow = {
-			roomsTable: dynamicRoomsTable,
-			housekeeping,
-		};
+		const thirdRow = { roomsTable: dynamicRoomsTable, housekeeping };
 
 		// ============== FOURTH ROW ==============
-		// top channels, room nights, room revenue
 		const pipelineTopChannels = [
 			{ $match: baseFilter },
-			{
-				$group: {
-					_id: "$booking_source",
-					count: { $sum: 1 },
-				},
-			},
+			{ $group: { _id: "$booking_source", count: { $sum: 1 } } },
 			{ $sort: { count: -1 } },
 			{ $limit: 5 },
 		];
-		const topChannelsAgg = await Reservations.aggregate(pipelineTopChannels);
+		const topChannelsAgg = await safeAggregate(pipelineTopChannels);
 		const topChannels = topChannelsAgg.map((tc) => ({
-			name: tc._id || "Other",
-			value: tc.count,
+			name: tc?._id || "Other",
+			value: tc?.count || 0,
 			fillColor: "#4285F4",
 		}));
 
@@ -1536,31 +1595,26 @@ exports.adminDashboardReport = async (req, res) => {
 			{
 				$group: {
 					_id: "$pickedRoomsType.room_type",
-					nights: { $sum: "$days_of_residence" },
-					revenue: { $sum: "$total_amount" },
+					nights: { $sum: { $ifNull: ["$days_of_residence", 0] } },
+					revenue: { $sum: { $ifNull: ["$total_amount", 0] } },
 				},
 			},
 			{ $sort: { revenue: -1 } },
 		];
-		const roomTypesAgg = await Reservations.aggregate(pipelineRoomTypes);
+		const roomTypesAgg = await safeAggregate(pipelineRoomTypes);
 		const roomNightsByType = roomTypesAgg.map((rta) => ({
-			type: roomTypeLabelMap[rta._id] || rta._id,
-			value: rta.nights,
+			type: roomTypeLabelMap[rta?._id] || rta?._id,
+			value: rta?.nights || 0,
 			fillColor: "#E74C3C",
 		}));
 		const roomRevenueByType = roomTypesAgg.map((rta) => ({
-			type: roomTypeLabelMap[rta._id] || rta._id,
-			value: rta.revenue,
+			type: roomTypeLabelMap[rta?._id] || rta?._id,
+			value: rta?.revenue || 0,
 			fillColor: "#FF7373",
 		}));
-		const fourthRow = {
-			topChannels,
-			roomNightsByType,
-			roomRevenueByType,
-		};
+		const fourthRow = { topChannels, roomNightsByType, roomRevenueByType };
 
-		// ============== FIFTH ROW => line chart last10..today..next10 + visitors ==============
-		// define lineStart => 10 days before today
+		// ============== FIFTH ROW ==============
 		const lineStart = new Date(
 			now.getFullYear(),
 			now.getMonth(),
@@ -1572,7 +1626,6 @@ exports.adminDashboardReport = async (req, res) => {
 		);
 		lineStart.setDate(lineStart.getDate() - 10);
 
-		// define lineEnd => 10 days after today
 		const lineEnd = new Date(
 			now.getFullYear(),
 			now.getMonth(),
@@ -1584,7 +1637,6 @@ exports.adminDashboardReport = async (req, res) => {
 		);
 		lineEnd.setDate(lineEnd.getDate() + 10);
 
-		// For checkIn => we match checkin_date in [lineStart..lineEnd]
 		const pipelineCheckIn = [
 			{
 				$match: {
@@ -1608,7 +1660,6 @@ exports.adminDashboardReport = async (req, res) => {
 			{ $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
 		];
 
-		// For checkOut => we match checkout_date in [lineStart..lineEnd]
 		const pipelineCheckOut = [
 			{
 				$match: {
@@ -1633,45 +1684,40 @@ exports.adminDashboardReport = async (req, res) => {
 		];
 
 		const [checkInAgg, checkOutAgg] = await Promise.all([
-			Reservations.aggregate(pipelineCheckIn),
-			Reservations.aggregate(pipelineCheckOut),
+			safeAggregate(pipelineCheckIn),
+			safeAggregate(pipelineCheckOut),
 		]);
 
-		// Now build day by day from lineStart..lineEnd
 		const lineChartCategories = [];
 		const checkInData = [];
 		const checkOutData = [];
 
-		// We'll do a dayCursor from lineStart up to lineEnd inclusive
 		let dayCursor = new Date(lineStart);
 		while (dayCursor <= lineEnd) {
 			const y = dayCursor.getFullYear();
 			const m = dayCursor.getMonth() + 1;
 			const d = dayCursor.getDate();
 
-			// Label => "YYYY-MM-DD"
 			const label = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(
 				2,
 				"0"
 			)}`;
 			lineChartCategories.push(label);
 
-			// find checkIn count for that day
 			const foundIn = checkInAgg.find(
-				(x) => x._id.y === y && x._id.m === m && x._id.d === d
+				(x) => x?._id?.y === y && x?._id?.m === m && x?._id?.d === d
 			);
 			checkInData.push(foundIn ? foundIn.count : 0);
 
-			// find checkOut count for that day
 			const foundOut = checkOutAgg.find(
-				(x) => x._id.y === y && x._id.m === m && x._id.d === d
+				(x) => x?._id?.y === y && x?._id?.m === m && x?._id?.d === d
 			);
 			checkOutData.push(foundOut ? foundOut.count : 0);
 
-			// increment day
 			dayCursor.setDate(dayCursor.getDate() + 1);
 		}
 
+		// Replace visitorsLine with real data when available
 		const visitorsLine = {
 			categories: ["10am", "2pm", "6pm", "11pm"],
 			yesterday: [10, 20, 30, 40],
@@ -1688,7 +1734,6 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		// ============== DonutChartCard => dynamic
-		// We'll keep it as occupancy.available + occupancy.overallRoomsCount
 		const donutChartCard = {
 			availableRooms: occupancy.available,
 			totalRooms: occupancy.overallRoomsCount,
@@ -1696,24 +1741,18 @@ exports.adminDashboardReport = async (req, res) => {
 
 		// ============== HorizontalBarChartCard => Booked Room Today (pending/done/finish)
 		const [pendingCount, doneCount, finishCount] = await Promise.all([
-			Reservations.countDocuments(
-				withBaseFilter({
-					reservation_status: "pending",
-					checkin_date: { $gte: startOfToday, $lte: endOfToday },
-				})
-			),
-			Reservations.countDocuments(
-				withBaseFilter({
-					reservation_status: "done",
-					checkin_date: { $gte: startOfToday, $lte: endOfToday },
-				})
-			),
-			Reservations.countDocuments(
-				withBaseFilter({
-					reservation_status: "finish",
-					checkin_date: { $gte: startOfToday, $lte: endOfToday },
-				})
-			),
+			safeCount({
+				reservation_status: "pending",
+				checkin_date: { $gte: startOfToday, $lte: endOfToday },
+			}),
+			safeCount({
+				reservation_status: "done",
+				checkin_date: { $gte: startOfToday, $lte: endOfToday },
+			}),
+			safeCount({
+				reservation_status: "finish",
+				checkin_date: { $gte: startOfToday, $lte: endOfToday },
+			}),
 		]);
 		const horizontalBarChartCard = {
 			pending: pendingCount,
@@ -1735,9 +1774,11 @@ exports.adminDashboardReport = async (req, res) => {
 		return res.json({ success: true, data: responseData });
 	} catch (err) {
 		console.error("Error in adminDashboardReport:", err);
+		// Return consistent shape so frontend can render zero-state even on 500
 		return res.status(500).json({
 			success: false,
 			message: err.message || "Failed to get admin dashboard report",
+			data: makeEmptyReport(),
 		});
 	}
 };
