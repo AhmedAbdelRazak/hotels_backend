@@ -453,6 +453,85 @@ exports.listForAdmin = async (req, res) => {
 	}
 };
 
+exports.listForAdminAll = async (req, res) => {
+	try {
+		/* 1️⃣  Parse & sanitise query params (optional filters) */
+		let { status, q = "" } = req.query;
+
+		/* 2️⃣  Base filter (status) */
+		const baseMatch = {};
+		if (status === "active") baseMatch.activateHotel = true;
+		if (status === "inactive") baseMatch.activateHotel = false;
+
+		/* 3️⃣  Search filter (if q present) */
+		const search = (typeof q === "string" ? q : "").trim();
+		let searchMatch = {};
+		if (search) {
+			// escape regex special chars then make case‑insensitive regex
+			const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const regex = new RegExp(escaped, "i");
+
+			searchMatch = {
+				$or: [
+					{ hotelName: regex },
+					{ hotelCountry: regex },
+					{ hotelCity: regex },
+					{ hotelAddress: regex },
+					{ phone: regex },
+					{ "owner.name": regex },
+					{ "owner.email": regex },
+				],
+			};
+		}
+
+		/* 4️⃣  Build aggregation pipeline (same join as listForAdmin) */
+		const pipeline = [
+			{ $match: baseMatch },
+			{
+				$lookup: {
+					from: "users", // collection name
+					localField: "belongsTo",
+					foreignField: "_id",
+					as: "owner",
+				},
+			},
+			{ $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
+		];
+
+		if (search) pipeline.push({ $match: searchMatch });
+
+		pipeline.push({ $sort: { createdAt: -1 } }); // newest first
+
+		/* 5️⃣  Run the aggregation (no pagination; return all) */
+		const docs = await HotelDetails.aggregate(pipeline)
+			.allowDiskUse(true) // safer if dataset is large
+			.exec();
+
+		/* 6️⃣  Minimal owner projection (id, name, email) */
+		const hotels = (docs || []).map((h) => {
+			if (h.owner) {
+				h.belongsTo = {
+					_id: h.owner._id,
+					name: h.owner.name,
+					email: h.owner.email,
+				};
+			}
+			delete h.owner;
+			return h;
+		});
+
+		/* 7️⃣  Send (no page/pages since it's "all") */
+		return res.json({
+			total: hotels.length,
+			results: hotels.length,
+			hotels,
+		});
+	} catch (err) {
+		console.error("listForAdminAll error:", err);
+		return res.status(400).json({ error: "Failed to fetch all hotels" });
+	}
+};
+
 exports.listOfHotelUser = async (req, res) => {
 	try {
 		const { accountId } = req.params;
