@@ -27,6 +27,35 @@ const {
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+async function getHotelAndOwner(hotelId) {
+	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
+		return { hotel: null, owner: null };
+	}
+
+	const hotel = await HotelDetails.findById(hotelId)
+		.populate({ path: "belongsTo", select: "_id email role name" })
+		.lean()
+		.exec();
+
+	const owner = hotel && hotel.belongsTo ? hotel.belongsTo : null;
+	return { hotel, owner };
+}
+
+/**
+ * Send a critical email directly to the hotel owner (not BCC).
+ * If sending fails, throws an error so the caller can log/handle if needed.
+ */
+async function sendCriticalOwnerEmail(to, subject, html) {
+	if (!to) return;
+	await sgMail.send({
+		to,
+		cc: "ahmed.abdelrazak@jannatbooking.com",
+		from: "noreply@jannatbooking.com",
+		subject,
+		html,
+	});
+}
+
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
 
@@ -668,22 +697,23 @@ const createPdfBuffer = async (html) => {
 	return pdfBuffer;
 };
 
-const sendEmailWithInvoice = async (reservationData, guestEmail, belongsTo) => {
+const sendEmailWithInvoice = async (
+	reservationData,
+	guestEmail,
+	hotelIdOrNull
+) => {
 	try {
-		console.log("Recipient Email (Guest):", guestEmail);
+		const html = ClientConfirmationEmail(reservationData);
 
-		// Generate the email HTML content
-		const emailHtmlContent = ClientConfirmationEmail(reservationData);
+		// Generate attached PDF invoice
+		const pdfBuffer = await createPdfBuffer(html);
 
-		// Generate the PDF invoice
-		const pdfBuffer = await createPdfBuffer(emailHtmlContent);
-
-		// 1) Send to the Guest
+		// 1) Send to Guest
 		await sgMail.send({
-			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // fallback if no guestEmail
+			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // fallback
 			from: "noreply@jannatbooking.com",
 			subject: "Reservation Confirmation - Invoice Attached",
-			html: emailHtmlContent,
+			html,
 			attachments: [
 				{
 					content: pdfBuffer.toString("base64"),
@@ -703,7 +733,7 @@ const sendEmailWithInvoice = async (reservationData, guestEmail, belongsTo) => {
 			],
 			from: "noreply@jannatbooking.com",
 			subject: "Reservation Confirmation - Invoice Attached",
-			html: emailHtmlContent,
+			html,
 			attachments: [
 				{
 					content: pdfBuffer.toString("base64"),
@@ -714,38 +744,26 @@ const sendEmailWithInvoice = async (reservationData, guestEmail, belongsTo) => {
 			],
 		});
 
-		// 3) Optionally Send to Hotel Owner, if belongsTo is role=2000
-		if (belongsTo) {
-			let belongsToId = null;
-			// If `belongsTo` is an object containing _id, extract it; otherwise use the string as-is
-			if (typeof belongsTo === "object" && belongsTo._id) {
-				belongsToId = belongsTo._id;
-			} else {
-				belongsToId = belongsTo;
-			}
+		// 3) Send **separately** to the Hotel Owner (guaranteed via populate)
+		const resolvedHotelId =
+			reservationData?.hotelId?._id ||
+			reservationData?.hotelId ||
+			hotelIdOrNull;
 
-			if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
-				const belongsToUser = await User.findById(belongsToId);
-				if (belongsToUser && belongsToUser.role === 2000) {
-					await sgMail.send({
-						to: belongsToUser.email,
-						from: "noreply@jannatbooking.com",
-						subject: "Reservation Confirmation - Invoice Attached",
-						html: emailHtmlContent,
-						attachments: [
-							{
-								content: pdfBuffer.toString("base64"),
-								filename: "Reservation_Invoice.pdf",
-								type: "application/pdf",
-								disposition: "attachment",
-							},
-						],
-					});
-				}
+		if (resolvedHotelId && mongoose.Types.ObjectId.isValid(resolvedHotelId)) {
+			const { owner } = await getHotelAndOwner(resolvedHotelId);
+			const ownerEmail = owner?.email || null;
+
+			if (ownerEmail) {
+				await sendCriticalOwnerEmail(
+					ownerEmail,
+					"Reservation Confirmation - Invoice Attached",
+					html
+				);
 			}
 		}
 
-		console.log("Invoice email(s) sent successfully.");
+		console.log("Invoice email(s) sent successfully (guest, staff, owner).");
 	} catch (error) {
 		console.error("Error sending confirmation email with PDF:", error);
 	}
@@ -757,12 +775,12 @@ exports.createNewReservationClient = async (req, res) => {
 			hotelId,
 			customerDetails,
 			paymentDetails,
-			belongsTo,
+			belongsTo, // kept for saving on the reservation; not trusted for emails
 			userId,
 			convertedAmounts,
 		} = req.body;
 
-		// Validate hotelId
+		// Validate hotel exists & active
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
@@ -777,9 +795,13 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 		}
 
+		// Get the hotel owner via populate (100% reliable path for emailing owner)
+		const { owner } = await getHotelAndOwner(hotelId);
+		const ownerEmail = owner?.email || null;
+
 		// Validate customer details
 		const { name, phone, email, passport, passportExpiry, nationality } =
-			customerDetails;
+			customerDetails || {};
 		if (
 			!name ||
 			!phone ||
@@ -793,9 +815,11 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// Check payment type
+		// =========================
+		// Case: "Not Paid" (verification email & 3-day expiry)
+		// =========================
 		if (req.body.payment === "Not Paid") {
-			// If there's no email, just finalize
+			// If there's no guest email, finalize without emails (same behavior as before)
 			if (!email) {
 				return res.status(201).json({
 					message: "Reservation verified successfully.",
@@ -807,73 +831,69 @@ exports.createNewReservationClient = async (req, res) => {
 				});
 			}
 
-			// Generate a tokenized link containing the reservation data
+			// Token now expires in **3 days**
 			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
-				expiresIn: "3m", // Token expires in 3 minutes
+				expiresIn: "3d", // <-- was "3m"; now 3 days
 			});
+
 			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
 
-			// Send verification email
 			const emailContent = ReservationVerificationEmail({
 				name,
 				hotelName: hotel.hotelName,
 				confirmationLink,
 			});
 
+			// Send to Guest
+			const bccList = [
+				"morazzakhamouda@gmail.com",
+				"xhoteleg@gmail.com",
+				"ahmed.abdelrazak@jannatbooking.com",
+			];
+
 			try {
-				// Build a single list of recipients: user + staff + belongsTo (role=2000)
-				const bccList = [
-					"morazzakhamouda@gmail.com",
-					"xhoteleg@gmail.com",
-					"ahmed.abdelrazak@jannatbooking.com",
-				];
-
-				if (belongsTo) {
-					let belongsToId = null;
-					if (typeof belongsTo === "object" && belongsTo._id) {
-						belongsToId = belongsTo._id;
-					} else {
-						belongsToId = belongsTo;
-					}
-					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
-						const belongsToUser = await User.findById(belongsToId);
-						if (belongsToUser && belongsToUser.role === 2000) {
-							bccList.push(belongsToUser.email);
-						}
-					}
-				}
-
 				await sgMail.send({
-					to: email, // Client's email
+					to: email, // Guest email
 					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
-					bcc: bccList,
+					bcc: bccList, // keep your staff BCC
 				});
+
+				// Send a **separate** email to the Hotel Owner (not BCC), using populated belongsTo
+				if (ownerEmail) {
+					await sendCriticalOwnerEmail(
+						ownerEmail,
+						`Reservation Verification Initiated — ${hotel.hotelName}`,
+						emailContent
+					);
+				}
 
 				return res.status(200).json({
 					message:
 						"Verification email sent successfully. Please check your inbox.",
 				});
 			} catch (error) {
-				console.error("Error sending verification email:", error);
+				console.error("Error sending verification emails:", error);
 				return res.status(500).json({
 					message: "Failed to send verification email. Please try again later.",
 				});
 			}
 		}
 
-		// Process payment and create reservation for "Deposit Paid" or "Paid Online"
+		// =========================
+		// Case: "Deposit Paid" or "Paid Online"
+		// =========================
 		const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
-			paymentDetails;
+			paymentDetails || {};
 		if (!cardNumber || !cardExpiryDate || !cardCVV || !cardHolderName) {
 			return res
 				.status(400)
 				.json({ message: "Invalid payment details provided." });
 		}
 
-		// Determine the amount in USD to process
+		// Determine USD amount
 		const amountInUSD =
 			req.body.payment === "Deposit Paid"
 				? convertedAmounts.depositUSD
@@ -896,7 +916,7 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 		}
 
-		// Generate or validate a unique confirmation number
+		// Ensure unique confirmation number
 		let confirmationNumber = req.body.confirmation_number;
 		if (!confirmationNumber) {
 			confirmationNumber = await new Promise((resolve, reject) => {
@@ -910,7 +930,6 @@ exports.createNewReservationClient = async (req, res) => {
 				);
 			});
 		} else {
-			// Check if a reservation with the same confirmation number already exists
 			const existingReservation = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
 			});
@@ -921,10 +940,9 @@ exports.createNewReservationClient = async (req, res) => {
 			}
 		}
 
-		// Assign the confirmation number
 		req.body.confirmation_number = confirmationNumber;
 
-		// Proceed to handle user creation / updating and reservation saving
+		// Continue with user + reservation handling (unchanged API)
 		await handleUserAndReservation(
 			req,
 			res,
@@ -2777,7 +2795,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			// Generate a tokenized link
 			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
-				expiresIn: "3m",
+				expiresIn: "3d",
 			});
 			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
 
