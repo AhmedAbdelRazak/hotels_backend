@@ -17,6 +17,15 @@ const {
 	SendingReservationLinkEmailTrigger,
 	paymentTriggered,
 } = require("./assets");
+const {
+	ensureE164Phone,
+	waSendReservationConfirmation,
+	waSendVerificationLink,
+	waSendPaymentLink,
+	waSendReservationUpdate,
+	waNotifyNewReservation,
+} = require("./whatsappsender");
+
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
 const {
@@ -394,29 +403,21 @@ exports.getListOfHotels = async (req, res) => {
 
 exports.sendEmailForTriggeringPayment = async (req, res) => {
 	try {
-		console.log("Received Request Body:", req.body); // Debugging log
-
-		// Extract userId from URL params
+		console.log("Received Request Body:", req.body);
 		const { userId } = req.params;
-
-		// Extract reservationId and amountInSAR from request body
 		const { reservationId, amountInSAR } = req.body;
 
-		// Validate inputs
 		if (!reservationId || !amountInSAR) {
 			return res
 				.status(400)
 				.json({ message: "Reservation ID and amount in SAR are required." });
 		}
-
-		// Validate amountInSAR is a positive number
 		if (isNaN(amountInSAR) || Number(amountInSAR) <= 0) {
 			return res
 				.status(400)
 				.json({ message: "Amount in SAR must be a positive number." });
 		}
 
-		// Fetch the reservation details, populating hotelId to get hotelName
 		const reservation = await Reservations.findById(reservationId)
 			.populate("hotelId")
 			.exec();
@@ -425,23 +426,19 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 			return res.status(404).json({ message: "Reservation not found." });
 		}
 
-		// Extract necessary details from the reservation
 		const hotelName = reservation.hotelId?.hotelName || "Jannat Booking";
 		const guestName = reservation.customer_details?.name || "Valued Guest";
 		const confirmationNumber = reservation.confirmation_number;
 		const totalAmountSAR = reservation.total_amount;
 
-		// Ensure confirmationNumber exists
 		if (!confirmationNumber) {
 			return res.status(400).json({
 				message: "Confirmation number is missing in the reservation.",
 			});
 		}
 
-		// Generate the confirmation link with amountInSAR
 		const confirmationLink = `${process.env.CLIENT_URL}/client-payment-triggering/${reservationId}/${confirmationNumber}/${amountInSAR}`;
 
-		// Generate the email HTML content using the template
 		const emailHtmlContent = SendingReservationLinkEmailTrigger({
 			hotelName,
 			name: guestName,
@@ -450,10 +447,9 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 			totalAmountSAR,
 		});
 
-		// Prepare email options
 		const emailOptions = {
-			to: reservation.customer_details.email, // Client's email
-			from: "noreply@jannatbooking.com", // Verified sender in SendGrid
+			to: reservation.customer_details.email,
+			from: "noreply@jannatbooking.com",
 			subject: "Payment Confirmation Required - Jannat Booking",
 			html: emailHtmlContent,
 		};
@@ -464,31 +460,35 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 				{ email: "xhoteleg@gmail.com" },
 				{ email: "ahmed.abdelrazak@jannatbooking.com" },
 			],
-			from: "noreply@jannatbooking.com", // Verified sender in SendGrid
+			from: "noreply@jannatbooking.com",
 			subject: "Payment Confirmation Required - Jannat Booking",
 			html: emailHtmlContent,
 		};
 
-		// Send the email using SendGrid
 		await sgMail.send(emailOptions);
 		await sgMail.send(emailOptions2);
 
-		// Respond with success
+		// ---- WhatsApp: payment link to guest ----
+		try {
+			await waSendPaymentLink(reservation, confirmationLink);
+		} catch (waErr) {
+			console.error(
+				"[WA] sendEmailForTriggeringPayment:",
+				waErr?.message || waErr
+			);
+		}
+
 		return res
 			.status(200)
 			.json({ message: "Confirmation email sent successfully." });
 	} catch (error) {
 		console.error("Error sending confirmation email:", error);
-
-		// Handle SendGrid-specific errors
 		if (error.response && error.response.body && error.response.body.errors) {
 			const sgErrors = error.response.body.errors
 				.map((err) => err.message)
 				.join(" ");
 			return res.status(500).json({ message: `SendGrid Error: ${sgErrors}` });
 		}
-
-		// Generic server error
 		return res
 			.status(500)
 			.json({ message: "Failed to send confirmation email." });
@@ -775,12 +775,11 @@ exports.createNewReservationClient = async (req, res) => {
 			hotelId,
 			customerDetails,
 			paymentDetails,
-			belongsTo, // kept for saving on the reservation; not trusted for emails
+			belongsTo,
 			userId,
 			convertedAmounts,
 		} = req.body;
 
-		// Validate hotel exists & active
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
@@ -795,11 +794,9 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 		}
 
-		// Get the hotel owner via populate (100% reliable path for emailing owner)
 		const { owner } = await getHotelAndOwner(hotelId);
 		const ownerEmail = owner?.email || null;
 
-		// Validate customer details
 		const { name, phone, email, passport, passportExpiry, nationality } =
 			customerDetails || {};
 		if (
@@ -815,11 +812,8 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// =========================
-		// Case: "Not Paid" (verification email & 3-day expiry)
-		// =========================
+		// ========== Not Paid => send verification ==========
 		if (req.body.payment === "Not Paid") {
-			// If there's no guest email, finalize without emails (same behavior as before)
 			if (!email) {
 				return res.status(201).json({
 					message: "Reservation verified successfully.",
@@ -831,10 +825,9 @@ exports.createNewReservationClient = async (req, res) => {
 				});
 			}
 
-			// Token now expires in **3 days**
 			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
-				expiresIn: "3d", // <-- was "3m"; now 3 days
+				expiresIn: "3d",
 			});
 
 			const confirmationLink = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
@@ -845,7 +838,6 @@ exports.createNewReservationClient = async (req, res) => {
 				confirmationLink,
 			});
 
-			// Send to Guest
 			const bccList = [
 				"morazzakhamouda@gmail.com",
 				"xhoteleg@gmail.com",
@@ -853,20 +845,34 @@ exports.createNewReservationClient = async (req, res) => {
 			];
 
 			try {
+				// Guest email
 				await sgMail.send({
-					to: email, // Guest email
+					to: email,
 					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
-					bcc: bccList, // keep your staff BCC
+					bcc: bccList,
 				});
 
-				// Send a **separate** email to the Hotel Owner (not BCC), using populated belongsTo
+				// Owner email (separate)
 				if (ownerEmail) {
 					await sendCriticalOwnerEmail(
 						ownerEmail,
 						`Reservation Verification Initiated — ${hotel.hotelName}`,
 						emailContent
+					);
+				}
+
+				// ---- WhatsApp: verification link to guest ----
+				try {
+					await waSendVerificationLink(
+						{ customer_details: { name, phone, nationality } },
+						confirmationLink
+					);
+				} catch (waErr) {
+					console.error(
+						"[WA] createNewReservationClient (Not Paid):",
+						waErr?.message || waErr
 					);
 				}
 
@@ -882,9 +888,7 @@ exports.createNewReservationClient = async (req, res) => {
 			}
 		}
 
-		// =========================
-		// Case: "Deposit Paid" or "Paid Online"
-		// =========================
+		// ========== Deposit Paid / Paid Online ==========
 		const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 			paymentDetails || {};
 		if (!cardNumber || !cardExpiryDate || !cardCVV || !cardHolderName) {
@@ -893,7 +897,6 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid payment details provided." });
 		}
 
-		// Determine USD amount
 		const amountInUSD =
 			req.body.payment === "Deposit Paid"
 				? convertedAmounts.depositUSD
@@ -916,7 +919,6 @@ exports.createNewReservationClient = async (req, res) => {
 			});
 		}
 
-		// Ensure unique confirmation number
 		let confirmationNumber = req.body.confirmation_number;
 		if (!confirmationNumber) {
 			confirmationNumber = await new Promise((resolve, reject) => {
@@ -942,7 +944,6 @@ exports.createNewReservationClient = async (req, res) => {
 
 		req.body.confirmation_number = confirmationNumber;
 
-		// Continue with user + reservation handling (unchanged API)
 		await handleUserAndReservation(
 			req,
 			res,
@@ -1034,7 +1035,6 @@ async function saveReservation(
 				: convertedAmounts.totalUSD,
 	};
 
-	// Create the new reservation
 	const newReservation = new Reservations({
 		hotelId,
 		customer_details: {
@@ -1045,7 +1045,7 @@ async function saveReservation(
 			cardHolderName: encryptWithSecret(paymentDetails.cardHolderName),
 			password: encryptWithSecret(req.body.usePassword),
 			confirmPassword: encryptWithSecret(req.body.usePassword),
-			transId: encryptWithSecret(paymentResponse.transId), // Store the token securely
+			transId: encryptWithSecret(paymentResponse.transId),
 		},
 
 		confirmation_number: req.body.confirmation_number,
@@ -1071,17 +1071,13 @@ async function saveReservation(
 	});
 
 	try {
-		// Save the reservation
 		const savedReservation = await newReservation.save();
 
-		// Fetch the hotel details using the `hotelId`
 		const hotel = await HotelDetails.findById(hotelId).exec();
-
 		if (!hotel) {
 			return res.status(404).json({ message: "Hotel not found" });
 		}
 
-		// Generate and send the email with hotel data
 		const reservationData = {
 			...savedReservation.toObject(),
 			hotelName: hotel.hotelName,
@@ -1096,7 +1092,24 @@ async function saveReservation(
 			belongsTo
 		);
 
-		// Send success response
+		// ---- WhatsApp: Confirmation to guest + admin notifications ----
+		try {
+			await waSendReservationConfirmation(savedReservation);
+		} catch (waErr) {
+			console.error(
+				"[WA] saveReservation guest confirmation:",
+				waErr?.message || waErr
+			);
+		}
+		try {
+			await waNotifyNewReservation(savedReservation);
+		} catch (waErr) {
+			console.error(
+				"[WA] saveReservation owner/platform notify:",
+				waErr?.message || waErr
+			);
+		}
+
 		res.status(201).json({
 			message: "Reservation created successfully",
 			data: savedReservation,
@@ -2052,12 +2065,9 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			selectedRooms,
 			agentName,
 			depositPercentage,
-			// We'll also read belongsTo from the request body
 			belongsTo,
 		} = req.body;
 
-		console.log(req.body, "req.bodyreq.body");
-		// Validate required fields
 		if (
 			!hotelName ||
 			!name ||
@@ -2073,7 +2083,6 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 				.json({ error: "Missing required email parameters." });
 		}
 
-		// Parse numeric fields
 		const parsedTotalAmount = parseFloat(totalAmount);
 		const parsedTotalCommission = parseFloat(totalCommission);
 		const parsedDepositAmount = (
@@ -2081,7 +2090,6 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			(depositPercentage / 100)
 		).toFixed(2);
 
-		// Generate email content
 		const emailHtmlContent = SendingReservationLinkEmail({
 			hotelName,
 			name,
@@ -2091,7 +2099,6 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			confirmationLink: generatedLink,
 		});
 
-		// Send email using SendGrid
 		const emailOptions = {
 			to: email,
 			from: "noreply@jannatbooking.com",
@@ -2113,34 +2120,38 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 		await sgMail.send(emailOptions);
 		await sgMail.send(emailOptions2);
 
-		//----------------------------------------------------------------------
-		// 3rd Email logic: if belongsTo user exists, check role === 2000
-		//----------------------------------------------------------------------
+		// if belongsTo role=2000 then also notify them by email (existing behavior)
 		if (belongsTo) {
-			let belongsToId = null;
-			// If belongsTo is an object with _id, extract it. Otherwise, use as string
-			if (typeof belongsTo === "object" && belongsTo._id) {
-				belongsToId = belongsTo._id;
-			} else {
-				belongsToId = belongsTo;
-			}
-
+			let belongsToId =
+				typeof belongsTo === "object" && belongsTo._id
+					? belongsTo._id
+					: belongsTo;
 			if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 				const belongsToUser = await User.findById(belongsToId);
 				if (belongsToUser && belongsToUser.role === 2000) {
-					const emailOptions3 = {
+					await sgMail.send({
 						to: belongsToUser.email,
 						from: "noreply@jannatbooking.com",
 						subject: `${hotelName} | Reservation Confirmation Link`,
 						html: emailHtmlContent,
-					};
-					await sgMail.send(emailOptions3);
+					});
 				}
 			}
 		}
-		//----------------------------------------------------------------------
 
-		// Log email payload for debugging
+		// ---- WhatsApp: payment link to guest ----
+		try {
+			await waSendPaymentLink(
+				{ customer_details: { name, email, phone, nationality } },
+				generatedLink
+			);
+		} catch (waErr) {
+			console.error(
+				"[WA] sendingEmailForPaymentLink:",
+				waErr?.message || waErr
+			);
+		}
+
 		console.log("Email sent with the following details:", {
 			hotelName,
 			name,
@@ -2619,18 +2630,15 @@ exports.createNewReservationClient2 = async (req, res) => {
 			advancePayment,
 		} = req.body;
 
-		// 1) If sentFrom is "employee", create reservation directly (no payment gateway)
+		// 1) Employee direct creation
 		if (sentFrom === "employee") {
 			const confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(
 					Reservations,
 					"confirmation_number",
 					(err, unique) => {
-						if (err) {
-							reject(new Error("Error generating confirmation number."));
-						} else {
-							resolve(unique);
-						}
+						if (err) reject(new Error("Error generating confirmation number."));
+						else resolve(unique);
 					}
 				);
 			});
@@ -2672,12 +2680,9 @@ exports.createNewReservationClient2 = async (req, res) => {
 				hotelPhone: hotel.phone,
 			};
 
-			// Same invoice HTML content for all recipients
 			const emailHtmlContent = ClientConfirmationEmail(reservationData);
-			// Generate PDF once to attach to all emails
 			const pdfBuffer = await createPdfBuffer(emailHtmlContent);
 
-			// 1) Email to the guest
 			await sgMail.send({
 				to: customerDetails.email || "noreply@jannatbooking.com",
 				from: "noreply@jannatbooking.com",
@@ -2693,7 +2698,6 @@ exports.createNewReservationClient2 = async (req, res) => {
 				],
 			});
 
-			// 2) Email to internal staff
 			await sgMail.send({
 				to: [
 					"morazzakhamouda@gmail.com",
@@ -2713,14 +2717,11 @@ exports.createNewReservationClient2 = async (req, res) => {
 				],
 			});
 
-			// 3) Email to the hotel owner if belongsTo user has role=2000
 			if (belongsTo) {
-				let belongsToId = null;
-				if (typeof belongsTo === "object" && belongsTo._id) {
-					belongsToId = belongsTo._id;
-				} else {
-					belongsToId = belongsTo;
-				}
+				let belongsToId =
+					typeof belongsTo === "object" && belongsTo._id
+						? belongsTo._id
+						: belongsTo;
 				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 					const belongsToUser = await User.findById(belongsToId);
 					if (belongsToUser && belongsToUser.role === 2000) {
@@ -2742,17 +2743,34 @@ exports.createNewReservationClient2 = async (req, res) => {
 				}
 			}
 
+			// ---- WhatsApp: Confirmation to guest + admin notifications ----
+			try {
+				await waSendReservationConfirmation(savedReservation);
+			} catch (waErr) {
+				console.error(
+					"[WA] createNewReservationClient2 (employee) guest:",
+					waErr?.message || waErr
+				);
+			}
+			try {
+				await waNotifyNewReservation(savedReservation);
+			} catch (waErr) {
+				console.error(
+					"[WA] createNewReservationClient2 (employee) notify:",
+					waErr?.message || waErr
+				);
+			}
+
 			return res.status(201).json({
 				message: "Reservation created successfully",
 				data: savedReservation,
 			});
 		}
 
-		// 2) If not from an employee, proceed with normal checks
+		// 2) Non-employee path (Not Paid → verification link)
 		const { name, phone, email, passport, passportExpiry, nationality } =
 			customerDetails;
 
-		// Validate hotelId
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
@@ -2766,7 +2784,6 @@ exports.createNewReservationClient2 = async (req, res) => {
 			});
 		}
 
-		// Validate customer details
 		if (
 			!name ||
 			!phone ||
@@ -2780,19 +2797,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// If payment = "Not Paid", send verification link
 		if (payment === "Not Paid") {
-			if (!email) {
-				return res.status(201).json({
-					message: "Reservation verified successfully.",
-					data: {
-						...req.body,
-						hotelName: hotel.hotelName,
-					},
-				});
-			}
-
-			// Generate a tokenized link
 			const tokenPayload = { ...req.body };
 			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
 				expiresIn: "3d",
@@ -2805,66 +2810,65 @@ exports.createNewReservationClient2 = async (req, res) => {
 				confirmationLink,
 			});
 
-			try {
-				// We'll do 3 separate sends if you want the same logic here, or just 1 if it's a verification link.
-				// For demonstration, let's send the single verification link only to the guest + staff.
-				// Then if you want a hotel owner to also see the "verification link", you can replicate the same approach.
+			await sgMail.send({
+				to: email,
+				from: "noreply@jannatbooking.com",
+				subject: "Verify Your Reservation",
+				html: emailContent,
+			});
 
-				// (a) Send to guest
-				await sgMail.send({
-					to: email,
-					from: "noreply@jannatbooking.com",
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
+			await sgMail.send({
+				to: [
+					"morazzakhamouda@gmail.com",
+					"xhoteleg@gmail.com",
+					"ahmed.abdelrazak@jannatbooking.com",
+				],
+				from: "noreply@jannatbooking.com",
+				subject: "Verify Your Reservation",
+				html: emailContent,
+			});
 
-				// (b) Send to staff
-				await sgMail.send({
-					to: [
-						"morazzakhamouda@gmail.com",
-						"xhoteleg@gmail.com",
-						"ahmed.abdelrazak@jannatbooking.com",
-					],
-					from: "noreply@jannatbooking.com",
-					subject: "Verify Your Reservation",
-					html: emailContent,
-				});
-
-				// (c) Optionally to hotel owner (if role=2000)
-				if (belongsTo) {
-					let belongsToId = null;
-					if (typeof belongsTo === "object" && belongsTo._id) {
-						belongsToId = belongsTo._id;
-					} else {
-						belongsToId = belongsTo;
-					}
-					if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
-						const belongsToUser = await User.findById(belongsToId);
-						if (belongsToUser && belongsToUser.role === 2000) {
-							await sgMail.send({
-								to: belongsToUser.email,
-								from: "noreply@jannatbooking.com",
-								subject: "Verify Your Reservation",
-								html: emailContent,
-							});
-						}
+			if (belongsTo) {
+				let belongsToId =
+					typeof belongsTo === "object" && belongsTo._id
+						? belongsTo._id
+						: belongsTo;
+				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
+					const belongsToUser = await User.findById(belongsToId);
+					if (belongsToUser && belongsToUser.role === 2000) {
+						await sgMail.send({
+							to: belongsToUser.email,
+							from: "noreply@jannatbooking.com",
+							subject: "Verify Your Reservation",
+							html: emailContent,
+						});
 					}
 				}
-
-				return res.status(200).json({
-					message:
-						"Verification email sent successfully. Please check your inbox.",
-				});
-			} catch (error) {
-				console.error("Error sending verification email:", error);
-				return res.status(500).json({
-					message: "Failed to send verification email. Please try again later.",
-				});
 			}
+
+			// ---- WhatsApp: verification link to guest ----
+			try {
+				await waSendVerificationLink(
+					{ customer_details: { name, phone, nationality } },
+					confirmationLink
+				);
+			} catch (waErr) {
+				console.error(
+					"[WA] createNewReservationClient2 (Not Paid):",
+					waErr?.message || waErr
+				);
+			}
+
+			return res.status(200).json({
+				message:
+					"Verification email sent successfully. Please check your inbox.",
+			});
 		}
 
-		// Otherwise, handle "Deposit Paid" or "Paid Online" ...
-		// (You can replicate your existing payment logic here.)
+		// otherwise, mirror payment path from your other controller if needed
+		return res
+			.status(400)
+			.json({ message: "Unsupported flow in this endpoint." });
 	} catch (error) {
 		console.error("Error creating reservation:", error);
 		res
@@ -2984,13 +2988,11 @@ exports.updateReservationDetails = async (req, res) => {
 	const updateData = req.body;
 
 	try {
-		// Step 1: Find the reservation
 		const reservation = await Reservations.findById(reservationId).exec();
 		if (!reservation) {
 			return res.status(404).send({ error: "Reservation not found" });
 		}
 
-		// Step 2: Process payment if payment details are provided
 		if (updateData.paymentDetails) {
 			const { amount, cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 				updateData.paymentDetails;
@@ -3007,7 +3009,6 @@ exports.updateReservationDetails = async (req, res) => {
 					.send({ error: "Incomplete payment details provided." });
 			}
 
-			// Process the payment
 			const paymentResponse = await processPaymentFromLink({
 				amount,
 				cardNumber,
@@ -3019,14 +3020,12 @@ exports.updateReservationDetails = async (req, res) => {
 				hotelName: reservation.hotelName || "Hotel",
 			});
 
-			// If payment fails, return an error and do not proceed
 			if (!paymentResponse.success) {
 				return res.status(400).send({
 					error: paymentResponse.message || "Payment processing failed.",
 				});
 			}
 
-			// Update payment details in the reservation after successful payment
 			reservation.payment_details = {
 				...reservation.payment_details,
 				amountInUSD: amount,
@@ -3036,12 +3035,10 @@ exports.updateReservationDetails = async (req, res) => {
 			reservation.paid_amount = amount;
 		}
 
-		// Step 3: Update customer details if provided
 		if (updateData.customer_details) {
 			const { cardNumber, cardExpiryDate, cardCVV, cardHolderName } =
 				updateData.customer_details;
 
-			// Encrypt sensitive data if provided
 			if (cardNumber && cardExpiryDate && cardCVV && cardHolderName) {
 				updateData.customer_details.cardNumber = encryptWithSecret(cardNumber);
 				updateData.customer_details.cardExpiryDate =
@@ -3051,7 +3048,6 @@ exports.updateReservationDetails = async (req, res) => {
 					encryptWithSecret(cardHolderName);
 			}
 
-			// Merge the updated customer details with the existing ones
 			reservation.customer_details = {
 				...reservation.customer_details,
 				...updateData.customer_details,
@@ -3059,7 +3055,6 @@ exports.updateReservationDetails = async (req, res) => {
 			reservation.markModified("customer_details");
 		}
 
-		// Step 4: Update pickedRoomsType with unique pricing logic
 		if (
 			updateData.pickedRoomsType &&
 			Array.isArray(updateData.pickedRoomsType)
@@ -3112,17 +3107,18 @@ exports.updateReservationDetails = async (req, res) => {
 			reservation.markModified("pickedRoomsType");
 		}
 
-		// Step 5: Update other fields in the reservation
 		Object.keys(updateData).forEach((key) => {
-			if (key !== "pickedRoomsType" && key !== "customer_details") {
+			if (
+				key !== "pickedRoomsType" &&
+				key !== "customer_details" &&
+				key !== "paymentDetails"
+			) {
 				reservation[key] = updateData[key];
 			}
 		});
 
-		// Step 6: Save the updated reservation
 		const updatedReservation = await reservation.save();
 
-		// Step 7: Send confirmation email with updated invoice
 		const hotel = await HotelDetails.findById(reservation.hotelId).exec();
 		const emailData = {
 			...updatedReservation.toObject(),
@@ -3138,7 +3134,15 @@ exports.updateReservationDetails = async (req, res) => {
 			reservation.belongsTo
 		);
 
-		// Step 8: Respond with the updated reservation
+		// ---- WhatsApp: reservation update ----
+		try {
+			const link = `${process.env.CLIENT_URL}/single-reservations/${updatedReservation.confirmation_number}`;
+			const text = `Your reservation was updated. View details: ${link}`;
+			await waSendReservationUpdate(updatedReservation, text);
+		} catch (waErr) {
+			console.error("[WA] updateReservationDetails:", waErr?.message || waErr);
+		}
+
 		res.status(200).json({
 			message: "Reservation updated successfully.",
 			data: updatedReservation,
@@ -3520,6 +3524,221 @@ exports.compileCustomerList = async (req, res) => {
 		return res.status(400).json({
 			success: false,
 			error: error.message,
+		});
+	}
+};
+
+function sanitizeReservationForPublicInvoice(doc) {
+	if (!doc) return null;
+
+	// Clone shallowly so we can delete sensitive keys
+	const r = { ...doc };
+
+	// Never expose card/credential fields on a public invoice endpoint
+	if (r.customer_details) {
+		delete r.customer_details.cardNumber;
+		delete r.customer_details.cardExpiryDate;
+		delete r.customer_details.cardCVV;
+		delete r.customer_details.cardHolderName;
+		delete r.customer_details.password;
+		delete r.customer_details.confirmPassword;
+		delete r.customer_details.transId;
+		delete r.customer_details.tokenId;
+	}
+
+	// Payment gateway payloads can be very noisy; keep only what you actually display
+	if (r.payment_details) {
+		r.payment_details = {
+			onsite_paid_amount: r.payment_details.onsite_paid_amount || 0,
+			captured: !!r.payment_details.captured,
+		};
+	}
+
+	return r;
+}
+
+exports.getSingleReservationInvoice = async (req, res) => {
+	try {
+		const { confirmation } = req.params;
+		if (!confirmation || String(confirmation).trim().length === 0) {
+			return res
+				.status(400)
+				.json({ message: "Missing or invalid confirmation number." });
+		}
+
+		// Find ONE reservation by confirmation_number
+		const reservation = await Reservations.findOne({
+			confirmation_number: String(confirmation).trim(),
+		})
+			.populate({
+				path: "hotelId",
+				select: "hotelName hotelAddress hotelCity phone belongsTo",
+				populate: { path: "belongsTo", select: "name" },
+			})
+			.lean()
+			.exec();
+
+		if (!reservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		// Build a minimal hotel “view model”
+		const hotel = reservation.hotelId
+			? {
+					_id: reservation.hotelId._id,
+					hotelName: reservation.hotelId.hotelName || "Hotel",
+					hotelAddress: reservation.hotelId.hotelAddress || "",
+					hotelCity: reservation.hotelId.hotelCity || "",
+					phone: reservation.hotelId.phone || "",
+					suppliedBy: reservation.hotelId.belongsTo?.name || null, // optional display
+			  }
+			: null;
+
+		// Sanitize reservation for public invoice
+		const safeReservation = sanitizeReservationForPublicInvoice(reservation);
+
+		return res.status(200).json({
+			success: true,
+			reservation: safeReservation,
+			hotel,
+		});
+	} catch (err) {
+		console.error("getSingleReservationInvoice error:", err);
+		return res.status(500).json({ message: "Failed to fetch reservation." });
+	}
+};
+
+/**
+ * GET /api/single-reservation/:confirmation/pdf
+ * Streams a PDF invoice using your existing email HTML template + Puppeteer.
+ */
+exports.getSingleReservationInvoicePdf = async (req, res) => {
+	try {
+		const { confirmation } = req.params;
+		if (!confirmation || String(confirmation).trim().length === 0) {
+			return res
+				.status(400)
+				.json({ message: "Missing or invalid confirmation number." });
+		}
+
+		const reservation = await Reservations.findOne({
+			confirmation_number: String(confirmation).trim(),
+		})
+			.populate({ path: "hotelId" })
+			.lean()
+			.exec();
+
+		if (!reservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		// Build the same shape you used when sending the email invoice
+		const hotel = reservation.hotelId || {};
+		const reservationData = {
+			...reservation,
+			hotelName: hotel.hotelName || "Hotel",
+			hotelAddress: hotel.hotelAddress || "",
+			hotelCity: hotel.hotelCity || "",
+			hotelPhone: hotel.phone || "",
+		};
+
+		const html = ClientConfirmationEmail(reservationData);
+		const pdfBuffer = await createPdfBuffer(html);
+
+		res.setHeader("Content-Type", "application/pdf");
+		res.setHeader(
+			"Content-Disposition",
+			`attachment; filename="Jannat_Invoice_${confirmation}.pdf"`
+		);
+		return res.status(200).send(pdfBuffer);
+	} catch (err) {
+		console.error("getSingleReservationInvoicePdf error:", err);
+		return res.status(500).json({ message: "Failed to generate PDF." });
+	}
+};
+
+exports.sendWhatsAppReservationConfirmation = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+		const notifyAdmins =
+			String(req.query.notifyAdmins || "false").toLowerCase() === "true";
+
+		console.log("[WA] manual confirmation: start", {
+			reservationId,
+			notifyAdmins,
+		});
+
+		let reservation = null;
+
+		// If the caller sends the whole reservation (optional), use it directly
+		if (req.body && req.body.reservation) {
+			reservation = req.body.reservation;
+			console.log("[WA] manual confirmation: using reservation from body");
+		}
+
+		// Otherwise, find by ObjectId or by confirmation_number
+		if (!reservation) {
+			if (mongoose.Types.ObjectId.isValid(reservationId)) {
+				reservation = await Reservations.findById(reservationId).exec();
+			}
+			if (!reservation) {
+				reservation = await Reservations.findOne({
+					confirmation_number: reservationId,
+				}).exec();
+			}
+		}
+
+		if (!reservation) {
+			console.log("[WA] manual confirmation: reservation not found");
+			return res.status(404).json({
+				ok: false,
+				message: "Reservation not found.",
+			});
+		}
+
+		// Send the standard confirmation via WhatsApp (uses template + clickable link)
+		const wa = await waSendReservationConfirmation(reservation);
+
+		if (wa?.skipped) {
+			console.log("[WA] manual confirmation: skipped", wa);
+			return res.status(400).json({
+				ok: false,
+				message: wa?.reason || "Failed to queue WhatsApp message.",
+				wa,
+			});
+		}
+
+		let notify = null;
+		if (notifyAdmins) {
+			try {
+				notify = await waNotifyNewReservation(reservation);
+			} catch (e) {
+				console.error(
+					"[WA] manual confirmation: notifyAdmins failed",
+					e?.message || e
+				);
+			}
+		}
+
+		console.log("[WA] manual confirmation: queued", {
+			to: wa?.to,
+			sid: wa?.sid,
+			status: wa?.status,
+			notifyAdmins: !!notifyAdmins,
+		});
+
+		return res.status(200).json({
+			ok: true,
+			message: "WhatsApp confirmation queued.",
+			wa,
+			notify,
+		});
+	} catch (err) {
+		console.error("[WA] manual confirmation: error", err?.message || err);
+		return res.status(500).json({
+			ok: false,
+			message: "Failed to send WhatsApp confirmation.",
+			error: err?.message || String(err),
 		});
 	}
 };

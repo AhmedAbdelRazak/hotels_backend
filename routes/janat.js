@@ -31,6 +31,9 @@ const {
 	sendEmailForTriggeringPayment,
 	compileCustomerList,
 	listOfAllActiveHotelsMonthlyAndOffers,
+	getSingleReservationInvoice,
+	getSingleReservationInvoicePdf,
+	sendWhatsAppReservationConfirmation,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -105,6 +108,16 @@ router.put(
 router.get("/hotels/active-with-deals", listOfAllActiveHotelsMonthlyAndOffers);
 
 router.post("/rooms/get-by-ids", getRoomByIds);
+router.get("/single-reservations/:confirmation", getSingleReservationInvoice);
+router.get(
+	"/single-reservations/:confirmation/pdf",
+	getSingleReservationInvoicePdf
+);
+
+router.post(
+	"/reservations/:reservationId/wa/confirmation",
+	sendWhatsAppReservationConfirmation
+);
 
 router.param("userId", userById);
 
