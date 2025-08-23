@@ -1374,6 +1374,46 @@ exports.webhook = async (req, res) => {
 };
 
 exports.linkPayReservation = async (req, res) => {
+	const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+
+	// Build a unique invoice id per capture (short, safe, ≤127 chars)
+	function buildUniqueInvoiceId(confNumber, existingCount) {
+		const seq = (existingCount || 0) + 1;
+		const tail = Date.now().toString(36).slice(-6).toUpperCase(); // very short time salt
+		return `RSV-${confNumber}-${seq}-${tail}`.slice(0, 127);
+	}
+
+	// Safely patch only patchable fields on the order
+	async function patchOrderInvoiceAndDescription({
+		orderId,
+		invoice_id,
+		custom_id,
+		description,
+		auth,
+	}) {
+		const ops = [
+			{
+				op: "replace",
+				path: "/purchase_units/@reference_id=='default'/invoice_id",
+				value: invoice_id,
+			},
+			{
+				op: "replace",
+				path: "/purchase_units/@reference_id=='default'/custom_id",
+				value: custom_id,
+			},
+			{
+				op: "replace",
+				path: "/purchase_units/@reference_id=='default'/description",
+				value: description,
+			},
+		];
+		await ax.patch(`${auth.PPM}/v2/checkout/orders/${orderId}`, ops, {
+			auth: { username: auth.clientId, password: auth.secretKey },
+			headers: { "Content-Type": "application/json" },
+		});
+	}
+
 	try {
 		const { reservationKey, option, convertedAmounts, sarAmount, paypal } =
 			req.body || {};
@@ -1386,7 +1426,7 @@ exports.linkPayReservation = async (req, res) => {
 			return res.status(400).json({ message: "Missing required fields." });
 		}
 
-		// 1) Find reservation by _id or by confirmation_number
+		// 1) Find reservation by _id or confirmation_number
 		let reservation = null;
 		if (mongoose.Types.ObjectId.isValid(reservationKey)) {
 			reservation = await Reservations.findById(reservationKey).populate(
@@ -1401,41 +1441,34 @@ exports.linkPayReservation = async (req, res) => {
 		if (!reservation)
 			return res.status(404).json({ message: "Reservation not found." });
 
-		// 2) Decide amount to capture (USD) and ensure cap (ledger)
+		// 2) Decide amount to capture (USD) + enforce cap
 		const usdAmount =
 			String(option).toLowerCase() === "deposit"
 				? convertedAmounts?.depositUSD
 				: convertedAmounts?.totalUSD;
-
-		if (!usdAmount) {
+		if (!usdAmount)
 			return res.status(400).json({ message: "Converted USD amount missing." });
-		}
 
-		// Ensure/initialise ledger cap (bounds)
 		const limit =
 			reservation?.paypal_details?.bounds?.limit_usd ??
-			(convertedAmounts?.totalUSD
-				? Math.round(Number(convertedAmounts.totalUSD) * 100) / 100
-				: null);
-
-		if (!limit || limit <= 0) {
+			(convertedAmounts?.totalUSD ? toNum2(convertedAmounts.totalUSD) : null);
+		if (!limit || limit <= 0)
 			return res
 				.status(400)
 				.json({ message: "Reservation capture limit is not set." });
-		}
 
-		const capturedSoFar = reservation?.paypal_details?.captured_total_usd || 0;
-		const newCapture = Math.round(Number(usdAmount) * 100) / 100;
-		if (capturedSoFar + newCapture > limit) {
-			const remaining = (
-				Math.round((limit - capturedSoFar) * 100) / 100
-			).toFixed(2);
+		const capturedSoFar = toNum2(
+			reservation?.paypal_details?.captured_total_usd || 0
+		);
+		const newCapture = toNum2(usdAmount);
+		if (capturedSoFar + newCapture > limit + 1e-9) {
+			const remaining = toNum2(limit - capturedSoFar).toFixed(2);
 			return res.status(400).json({
 				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
 			});
 		}
 
-		// 3) Verify PayPal order amount matches client intent; patch metadata and capture
+		// 3) Verify order amount
 		const PPM = /prod/i.test(process.env.NODE_ENV)
 			? "https://api-m.paypal.com"
 			: "https://api-m.sandbox.paypal.com";
@@ -1446,7 +1479,6 @@ exports.linkPayReservation = async (req, res) => {
 			? process.env.PAYPAL_SECRET_KEY_LIVE
 			: process.env.PAYPAL_SECRET_KEY_SANDBOX;
 
-		// Fetch order to verify amount
 		const getRes = await ax.get(
 			`${PPM}/v2/checkout/orders/${paypal.order_id}`,
 			{
@@ -1456,7 +1488,6 @@ exports.linkPayReservation = async (req, res) => {
 		const order = getRes.data;
 		const pu = order?.purchase_units?.[0];
 		const orderAmount = pu?.amount?.value;
-
 		if (
 			Number(orderAmount).toFixed(2) !==
 			Number(paypal.expectedUsdAmount).toFixed(2)
@@ -1466,41 +1497,79 @@ exports.linkPayReservation = async (req, res) => {
 			});
 		}
 
-		// Build / patch metadata for PayPal (hotel info, NO_SHIPPING)
+		// 4) Patch invoice_id to a unique value for THIS capture (and update custom_id/description)
 		const hotelName =
 			reservation.hotelName || reservation.hotelId?.hotelName || "Hotel";
 		const guest = reservation.customer_details || {};
-		const meta = {
-			invoice_id: `RSV-${reservation.confirmation_number}`,
-			custom_id: reservation.confirmation_number,
-			description: `Hotel reservation — ${hotelName} — ${
-				reservation.checkin_date
-			} → ${reservation.checkout_date} — Guest ${guest.name} (${
-				guest.phone || ""
-			})`,
-			hotelName,
-			guestName: guest.name || "Guest",
-			guestPhone: guest.phone || "",
-			checkin: reservation.checkin_date,
-			checkout: reservation.checkout_date,
-			usdAmount: Number(usdAmount).toFixed(2),
-		};
+		const existingCount =
+			(reservation?.paypal_details?.initial ? 1 : 0) +
+			(Array.isArray(reservation?.paypal_details?.mit)
+				? reservation.paypal_details.mit.length
+				: 0);
+
+		const uniqueInvoiceId = buildUniqueInvoiceId(
+			reservation.confirmation_number,
+			existingCount
+		);
+
+		const description = `Hotel reservation — ${hotelName} — ${
+			reservation.checkin_date
+		} → ${reservation.checkout_date} — Guest ${guest.name} (${
+			guest.phone || ""
+		})`;
 
 		try {
-			await paypalPatchOrderMetadata(paypal.order_id, meta);
+			await patchOrderInvoiceAndDescription({
+				orderId: paypal.order_id,
+				invoice_id: uniqueInvoiceId,
+				custom_id: reservation.confirmation_number,
+				description,
+				auth: { PPM, clientId, secretKey },
+			});
 		} catch (e) {
-			// non-fatal; continue with capture
+			// Non‑fatal: continue to capture. (If PayPal rejected a field, capture can still succeed.)
 			console.warn(
-				"PATCH metadata failed (continuing):",
+				"PATCH metadata (non-fatal):",
 				e?.response?.data || e?.message || e
 			);
 		}
 
-		// Capture
-		const capResult = await paypalCaptureApprovedOrder({
-			orderId: paypal.order_id,
-			cmid: paypal.cmid,
-		});
+		// 5) Capture (retry once if DUPLICATE_INVOICE_ID still occurs)
+		async function tryCaptureOnce() {
+			return paypalCaptureApprovedOrder({
+				orderId: paypal.order_id,
+				cmid: paypal.cmid,
+			});
+		}
+
+		let capResult;
+		try {
+			capResult = await tryCaptureOnce();
+		} catch (err) {
+			const raw = err?._originalError?.text || err?.message || "";
+			const isDupInv =
+				err?.statusCode === 422 && /DUPLICATE_INVOICE_ID/i.test(raw);
+			if (!isDupInv) throw err;
+
+			// Re‑patch with a fresh unique invoice id, then retry capture once
+			const freshInvoiceId = buildUniqueInvoiceId(
+				reservation.confirmation_number,
+				existingCount + 1
+			);
+			try {
+				await patchOrderInvoiceAndDescription({
+					orderId: paypal.order_id,
+					invoice_id: freshInvoiceId,
+					custom_id: reservation.confirmation_number,
+					description,
+					auth: { PPM, clientId, secretKey },
+				});
+			} catch (_) {
+				// even if patch fails again, attempt capture once more
+			}
+			capResult = await tryCaptureOnce();
+		}
+
 		const cap = capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 		if (cap?.status !== "COMPLETED") {
 			return res
@@ -1508,60 +1577,48 @@ exports.linkPayReservation = async (req, res) => {
 				.json({ message: "Payment was not completed.", details: cap });
 		}
 
-		const capAmount = Number(cap?.amount?.value || usdAmount);
+		const capAmount = toNum2(cap?.amount?.value || usdAmount);
 		const vaultId =
 			capResult?.payment_source?.card?.attributes?.vault?.id || null;
 
-		// 4) Update ledger + reservation payment fields
+		// 6) Update reservation (conflict‑free child updates only)
 		const setOps = {};
 		const pushOps = {};
 		const incOps = {};
 
-		// Initialize paypal_details if missing
-		if (!reservation.paypal_details) {
-			setOps["paypal_details"] = {
-				bounds: { base: "USD", limit_usd: limit },
-				captured_total_usd: 0,
-				pending_total_usd: 0,
-			};
-		} else {
-			// Make sure bounds exist
-			if (!reservation.paypal_details.bounds) {
-				setOps["paypal_details.bounds"] = { base: "USD", limit_usd: limit };
-			}
+		// Ensure bounds & pending field exist
+		if (!reservation.paypal_details?.bounds) {
+			setOps["paypal_details.bounds"] = { base: "USD", limit_usd: limit };
+		}
+		if (typeof reservation?.paypal_details?.pending_total_usd !== "number") {
+			setOps["paypal_details.pending_total_usd"] = 0;
 		}
 
-		// First capture becomes "initial"; otherwise push into "mit"
-		if (!reservation.paypal_details?.initial) {
-			setOps["paypal_details.initial"] = {
-				order_id: capResult.id,
-				capture_id: cap.id,
-				capture_status: cap.status,
-				amount: cap.amount?.value,
-				currency: cap.amount?.currency_code,
-				seller_protection: cap?.seller_protection?.status || "UNKNOWN",
-				network_transaction_reference:
-					cap?.network_transaction_reference || null,
-				cmid: paypal.cmid || null,
-				raw: safeClone(capResult),
-				created_at: new Date(cap?.create_time || Date.now()),
-			};
+		const isFirstCapture =
+			!reservation.paypal_details || !reservation.paypal_details.initial;
+
+		const commonCaptureDoc = {
+			order_id: capResult.id,
+			capture_id: cap.id,
+			capture_status: cap.status,
+			amount: cap.amount?.value,
+			currency: cap.amount?.currency_code,
+			seller_protection: cap?.seller_protection?.status || "UNKNOWN",
+			network_transaction_reference: cap?.network_transaction_reference || null,
+			cmid: paypal.cmid || null,
+			invoice_id: pu?.invoice_id || uniqueInvoiceId, // record which invoice we ended up with
+			raw: JSON.parse(JSON.stringify(capResult)),
+			created_at: new Date(cap?.create_time || Date.now()),
+		};
+
+		if (isFirstCapture) {
+			setOps["paypal_details.initial"] = commonCaptureDoc;
+			setOps["paypal_details.captured_total_usd"] = capAmount; // first capture uses $set
 		} else {
-			pushOps["paypal_details.mit"] = {
-				order_id: capResult.id,
-				capture_id: cap.id,
-				capture_status: cap.status,
-				amount: cap.amount?.value,
-				currency: cap.amount?.currency_code,
-				seller_protection: cap?.seller_protection?.status || "UNKNOWN",
-				network_transaction_reference:
-					cap?.network_transaction_reference || null,
-				created_at: new Date(cap?.create_time || Date.now()),
-				raw: safeClone(capResult),
-			};
+			pushOps["paypal_details.mit"] = commonCaptureDoc; // subsequent captures
+			incOps["paypal_details.captured_total_usd"] = capAmount;
 		}
 
-		// Save vault (if present)
 		if (vaultId) {
 			setOps["paypal_details.vault_id"] = vaultId;
 			setOps["paypal_details.vault_status"] = "ACTIVE";
@@ -1576,39 +1633,34 @@ exports.linkPayReservation = async (req, res) => {
 				capResult?.payment_source?.card?.billing_address || undefined;
 		}
 
-		// Increase captured total
-		incOps["paypal_details.captured_total_usd"] =
-			Math.round(capAmount * 100) / 100;
-
-		// Patch your legacy payment_details for UI
+		// Legacy UI fields
 		incOps["payment_details.chargeCount"] = 1;
 		setOps["payment_details.captured"] = true;
-		setOps["payment_details.triggeredAmountUSD"] = Number(capAmount).toFixed(2);
+		setOps["payment_details.triggeredAmountUSD"] = capAmount.toFixed(2);
 		if (sarAmount)
 			setOps["payment_details.triggeredAmountSAR"] =
-				Number(sarAmount).toFixed(2);
+				toNum2(sarAmount).toFixed(2);
 		setOps["payment_details.finalCaptureTransactionId"] = cap.id;
 
-		// Payment status fields
-		const newCaptured = capturedSoFar + capAmount;
-		const fullyPaid = newCaptured >= limit - 1e-9; // tolerate rounding
+		const newCaptured = toNum2(capturedSoFar + capAmount);
+		const fullyPaid = newCaptured >= limit - 1e-9;
 		setOps["payment"] = fullyPaid ? "Paid Online" : "Deposit Paid";
 		setOps["commissionPaid"] = true;
-		if (sarAmount)
-			incOps["paid_amount"] = Math.round(Number(sarAmount) * 100) / 100;
+		if (sarAmount) incOps["paid_amount"] = toNum2(sarAmount);
 
-		// Commit update
+		const updateDoc = {
+			...(Object.keys(setOps).length ? { $set: setOps } : {}),
+			...(Object.keys(incOps).length ? { $inc: incOps } : {}),
+			...(Object.keys(pushOps).length ? { $push: pushOps } : {}),
+		};
+
 		const updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
-			{
-				...(Object.keys(setOps).length ? { $set: setOps } : {}),
-				...(Object.keys(incOps).length ? { $inc: incOps } : {}),
-				...(Object.keys(pushOps).length ? { $push: pushOps } : {}),
-			},
+			updateDoc,
 			{ new: true }
 		).populate("hotelId");
 
-		// 5) Notify (invoice email + WhatsApp)
+		// 7) Notify
 		const hotel = updated.hotelId || {};
 		const invoiceModel = {
 			...updated.toObject(),
@@ -1639,5 +1691,42 @@ exports.linkPayReservation = async (req, res) => {
 	} catch (error) {
 		console.error("linkPayReservation error:", error?.response?.data || error);
 		return res.status(500).json({ message: "Failed to process link payment." });
+	}
+};
+
+exports.createPayPalOrder = async (req, res) => {
+	try {
+		const body = req.body || {};
+		// Accept either a full purchase_units array or a simple amount
+		let purchase_units = body.purchase_units;
+		if (!Array.isArray(purchase_units)) {
+			const amt = Number(body.usdAmount || 0);
+			if (!amt)
+				return res.status(400).json({ message: "usdAmount is required." });
+			purchase_units = [
+				{
+					reference_id: "default",
+					amount: { currency_code: "USD", value: toCCY(amt) },
+				},
+			];
+		}
+
+		const request = new paypal.orders.OrdersCreateRequest();
+		request.prefer("return=representation");
+		request.requestBody({
+			intent: body.intent || "CAPTURE",
+			purchase_units,
+			application_context: body.application_context || {
+				user_action: "PAY_NOW",
+				shipping_preference: "NO_SHIPPING",
+				brand_name: "Jannat Booking",
+			},
+		});
+
+		const { result } = await ppClient.execute(request);
+		return res.status(200).json({ id: result.id });
+	} catch (e) {
+		console.error("createPayPalOrder error:", e?.response?.data || e);
+		return res.status(500).json({ message: "Failed to create PayPal order" });
 	}
 };

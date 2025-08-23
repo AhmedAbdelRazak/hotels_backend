@@ -599,12 +599,25 @@ async function waNotifyNewReservation(reservation) {
 	// Platform owner (hard-coded)
 	try {
 		const platformTo = await ensureE164Phone({
-			nationality: "US",
-			rawPhone: "+19092223374",
+			nationality: "EG",
+			rawPhone: "+201270305565",
 		});
+
+		const platformTo2 = await ensureE164Phone({
+			nationality: "EG",
+			rawPhone: "+19099914386",
+		});
+
 		if (platformTo) {
 			out.platform = await sendTemplate({
 				toE164: platformTo,
+				contentSid: TPL.ADMIN_NOTIFICATION,
+				variables: { 1: "Jannat Owners", 2: reservation.confirmation_number },
+				tag: "admin_notification_platform",
+			});
+		} else if (platformTo2) {
+			out.platform = await sendTemplate({
+				toE164: platformTo2,
 				contentSid: TPL.ADMIN_NOTIFICATION,
 				variables: { 1: "Jannat Owners", 2: reservation.confirmation_number },
 				tag: "admin_notification_platform",

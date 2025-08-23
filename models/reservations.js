@@ -138,6 +138,9 @@ const reservationsSchema = new mongoose.Schema(
 			lowercase: true,
 			default: 0,
 		},
+		paypal_details: {
+			type: Object, //Could be left blank for now
+		},
 		currency: {
 			type: String, //Blank
 			trim: true,
