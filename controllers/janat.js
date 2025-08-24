@@ -1705,11 +1705,11 @@ exports.paginatedReservationList = async (req, res) => {
 			page = 1,
 			limit = 100,
 			filterType = "",
-			searchQuery = "", // <--- Add searchQuery
+			searchQuery = "",
 		} = req.query;
 
-		const pageNumber = parseInt(page, 10);
-		const pageSize = parseInt(limit, 10);
+		const pageNumber = parseInt(page, 10) || 1;
+		const pageSize = parseInt(limit, 10) || 100;
 
 		// 2) Base filter: booking_source (case-insensitive)
 		const baseFilter = {
@@ -1720,48 +1720,119 @@ exports.paginatedReservationList = async (req, res) => {
 			],
 		};
 
+		// ---- Helpers ----
+		const toNum = (v) => {
+			const n = Number(v);
+			return Number.isFinite(n) ? n : 0;
+		};
+		const isSameDay = (a, b) => {
+			const da = new Date(a);
+			const db = new Date(b);
+			if (!da || isNaN(da.getTime()) || !db || isNaN(db.getTime()))
+				return false;
+			return (
+				da.getFullYear() === db.getFullYear() &&
+				da.getMonth() === db.getMonth() &&
+				da.getDate() === db.getDate()
+			);
+		};
+
 		// 3) First, fetch ALL matching docs (no skip/limit).
+		// Note: payment_details is an embedded object (not a ref), so no populate needed for it.
 		const allDocs = await Reservations.find(baseFilter)
 			.sort({ createdAt: -1 })
 			.populate("belongsTo")
 			.populate("hotelId")
-			.populate("payment_details"); // if needed
+			.lean();
 
-		// 4) Format each doc so we can replicate your front-end logic
-		const capturedConfirmationNumbers = ["2944008828"];
+		// 4) Format each doc to compute payment_status (PayPal-aware)
+		const capturedConfirmationNumbers = ["2944008828"]; // your manual override
 
 		function formatReservation(doc) {
-			const { customer_details = {}, hotelId = {}, payment_details = {} } = doc;
-			const isCaptured =
-				payment_details.captured ||
-				capturedConfirmationNumbers.includes(doc.confirmation_number);
+			const customer_details = doc?.customer_details || {};
+			const hotelObj = doc?.hotelId || {};
+			const payment_details = doc?.payment_details || {};
+			const paypal_details = doc?.paypal_details || {};
 
-			// --- ADJUSTMENT FOR "Paid Offline" ---
-			// ORDER: if isCaptured -> "Captured"
-			//        else if onsite_paid_amount > 0 -> "Paid Offline"
-			//        else if doc.payment === "not paid" -> "Not Paid"
-			//        else -> "Not Captured"
+			const paymentStr = (doc?.payment || "").toLowerCase();
+
+			// Legacy & offline
+			const legacyCaptured = !!payment_details.captured;
+			const paidOffline =
+				toNum(payment_details.onsite_paid_amount) > 0 ||
+				paymentStr === "paid offline";
+
+			// PayPal capture signals
+			const capturedTotals = [
+				paypal_details.captured_total_sar,
+				paypal_details.captured_total_usd,
+				paypal_details.captured_total,
+			]
+				.map(toNum)
+				.filter((n) => n > 0);
+			const hasCapturedTotal = capturedTotals.length > 0;
+
+			const initialCompleted =
+				(paypal_details?.initial?.capture_status || "").toUpperCase() ===
+					"COMPLETED" ||
+				(paypal_details?.initial?.status || "").toUpperCase() === "COMPLETED";
+
+			const anyMitCompleted =
+				Array.isArray(paypal_details?.mit) &&
+				paypal_details.mit.some(
+					(m) =>
+						(m?.capture_status || m?.status || "").toUpperCase() === "COMPLETED"
+				);
+
+			const anyCapturesCompleted =
+				Array.isArray(paypal_details?.captures) &&
+				paypal_details.captures.some(
+					(c) =>
+						(c?.capture_status || c?.status || "").toUpperCase() === "COMPLETED"
+				);
+
+			// Manual override still honored
+			const manualOverrideCaptured = capturedConfirmationNumbers.includes(
+				String(doc.confirmation_number || "")
+			);
+
+			// Final capture decision (settled)
+			const isCaptured =
+				manualOverrideCaptured ||
+				legacyCaptured ||
+				hasCapturedTotal ||
+				initialCompleted ||
+				anyMitCompleted ||
+				anyCapturesCompleted ||
+				paymentStr === "paid online"; // defensive compatibility
+
+			// Payment status with your same labels
 			let payment_status = "Not Captured";
 			if (isCaptured) {
 				payment_status = "Captured";
-			} else if (payment_details?.onsite_paid_amount > 0) {
+			} else if (paidOffline) {
 				payment_status = "Paid Offline";
-			} else if (doc.payment === "not paid") {
+			} else if (paymentStr === "not paid") {
 				payment_status = "Not Paid";
 			}
 
-			const isCheckinToday =
-				new Date(doc.checkin_date).toDateString() === new Date().toDateString();
-			const isCheckoutToday =
-				new Date(doc.checkout_date).toDateString() ===
-				new Date().toDateString();
-			const isPaymentTriggered = !!payment_details.capturing || isCaptured;
+			// "Triggered" = auth attempted, capturing in progress, or captured
+			const isPaymentTriggered =
+				!!payment_details.capturing ||
+				!!paypal_details?.initial?.auth_id ||
+				!!paypal_details?.initial?.authorization_id ||
+				!!paypal_details?.initial?.authorized ||
+				isCaptured;
+
+			const today = new Date();
+			const isCheckinToday = isSameDay(doc.checkin_date, today);
+			const isCheckoutToday = isSameDay(doc.checkout_date, today);
 
 			return {
-				...doc.toObject(),
+				...doc,
 				customer_name: customer_details.name || "N/A",
 				customer_phone: customer_details.phone || "N/A",
-				hotel_name: hotelId.hotelName || "Unknown Hotel",
+				hotel_name: hotelObj?.hotelName || "Unknown Hotel",
 				createdAt: doc.createdAt || null,
 				payment_status,
 				isCheckinToday,
@@ -1772,10 +1843,10 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const formattedDocs = allDocs.map(formatReservation);
 
-		// 5) filterType logic (unchanged) + NEW CASE for "paidOffline"
+		// 5) filterType logic (+ Paid Offline)
 		function passesFilter(r) {
 			if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
-				if (r.reservation_status?.toLowerCase() === "cancelled") {
+				if ((r.reservation_status || "").toLowerCase() === "cancelled") {
 					return false;
 				}
 			}
@@ -1789,29 +1860,18 @@ exports.paginatedReservationList = async (req, res) => {
 					return r.isPaymentTriggered;
 				case "paymentNotTriggered":
 					return !r.isPaymentTriggered;
-
 				case "notPaid":
-					return r.payment_status?.toLowerCase() === "not paid";
+					return (r.payment_status || "").toLowerCase() === "not paid";
 				case "notCaptured":
-					return r.payment_status?.toLowerCase() === "not captured";
+					return (r.payment_status || "").toLowerCase() === "not captured";
 				case "captured":
-					return r.payment_status?.toLowerCase() === "captured";
-
-				case "cancelled":
-					return (
-						r.reservation_status &&
-						r.reservation_status.toLowerCase() === "cancelled"
-					);
-				case "notCancelled":
-					return (
-						r.reservation_status &&
-						r.reservation_status.toLowerCase() !== "cancelled"
-					);
-
-				// NEW filterType for "paidOffline"
+					return (r.payment_status || "").toLowerCase() === "captured";
 				case "paidOffline":
-					return r.payment_status?.toLowerCase() === "paid offline";
-
+					return (r.payment_status || "").toLowerCase() === "paid offline";
+				case "cancelled":
+					return (r.reservation_status || "").toLowerCase() === "cancelled";
+				case "notCancelled":
+					return (r.reservation_status || "").toLowerCase() !== "cancelled";
 				default:
 					return true;
 			}
@@ -1819,14 +1879,14 @@ exports.paginatedReservationList = async (req, res) => {
 
 		let filteredDocs = formattedDocs.filter(passesFilter);
 
-		// -------------------- ADD SEARCH HERE --------------------
-		const searchQ = searchQuery.trim().toLowerCase();
+		// -------------------- Search --------------------
+		const searchQ = (searchQuery || "").trim().toLowerCase();
 		if (searchQ) {
 			filteredDocs = filteredDocs.filter((r) => {
-				const cnum = (r.confirmation_number || "").toLowerCase();
-				const phone = (r.customer_phone || "").toLowerCase();
-				const name = (r.customer_name || "").toLowerCase();
-				const hname = (r.hotel_name || "").toLowerCase();
+				const cnum = String(r.confirmation_number || "").toLowerCase();
+				const phone = String(r.customer_phone || "").toLowerCase();
+				const name = String(r.customer_name || "").toLowerCase();
+				const hname = String(r.hotel_name || "").toLowerCase();
 
 				return (
 					cnum.includes(searchQ) ||
@@ -1836,7 +1896,7 @@ exports.paginatedReservationList = async (req, res) => {
 				);
 			});
 		}
-		// ---------------------------------------------------------
+		// -------------------------------------------------
 
 		// The total AFTER filter + search
 		const totalDocuments = filteredDocs.length;

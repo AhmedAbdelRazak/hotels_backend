@@ -1,13 +1,15 @@
 /*********************************************************************
- *  controllers/paypal_reservation.js  •  Aug‑2025
- *  PayPal for Hotel Reservations — vault + metadata + capture ledger
- *  - NO PAN/CVV storage; uses PayPal vault/payment tokens.
- *  - Adds a capture ledger with hard cap (limit_usd) + atomic guarding.
+ *  controllers/paypal_reservation.js  •  Drop‑in replacement
+ *  Jannat Booking — PayPal reservations: buttons & card fields
+ *  - NO PAN/CVV storage (PayPal vault/payment tokens only)
+ *  - Ledger with hard cap (limit_usd) + atomic pending guarding
+ *  - Idempotent captures to prevent double charges
+ *  - Verification only if the guest neither pays nor adds a card
  *********************************************************************/
 
 "use strict";
 
-/* ───────────────────────── 1) Deps & environment ───────────────────────── */
+/* ─────────────── 1) Deps & environment ─────────────── */
 const paypal = require("@paypal/checkout-server-sdk");
 const axios = require("axios");
 const axiosRetryRaw = require("axios-retry");
@@ -24,13 +26,14 @@ const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
 const User = require("../models/user");
 
-/* Templates + WhatsApp (re‑use from your codebase) */
+/* Templates + WhatsApp */
 const {
 	ClientConfirmationEmail,
 	ReservationVerificationEmail,
 	SendingReservationLinkEmailTrigger,
 	paymentTriggered,
 } = require("./assets");
+
 const {
 	waSendReservationConfirmation,
 	waSendVerificationLink,
@@ -39,13 +42,14 @@ const {
 	waNotifyNewReservation,
 } = require("./whatsappsender");
 
-/* Utils (re‑use from your codebase) */
+/* Utils */
 const {
 	encryptWithSecret,
 	decryptWithSecret,
 	verifyToken,
 } = require("./utils");
 
+/* Email setup */
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 /* PayPal env/client */
@@ -63,18 +67,34 @@ const env = IS_PROD
 	: new paypal.core.SandboxEnvironment(clientId, secretKey);
 const ppClient = new paypal.core.PayPalHttpClient(env);
 
-/* Axios for REST endpoints not covered by SDK (vault, PATCH, void) */
+/* Axios (REST features not in SDK) */
 const ax = axios.create({ timeout: 12_000 });
-axiosRetry(ax, { retries: 3, retryDelay: (c) => 400 * 2 ** c });
+axiosRetry(ax, {
+	retries: 3,
+	retryDelay: (c) => 400 * 2 ** c,
+	// Only retry idempotent methods
+	retryCondition: (err) => {
+		const method = String(err?.config?.method || "").toUpperCase();
+		const idempotent = ["GET", "HEAD", "OPTIONS"].includes(method);
+		return idempotent && axiosRetry.isRetryableError(err);
+	},
+});
+
 const PPM = IS_PROD
 	? "https://api-m.paypal.com"
 	: "https://api-m.sandbox.paypal.com";
 
-/* ───────────────────────── 2) Helpers ──────────────────────────────────── */
+/* ─────────────── 2) Helpers ─────────────── */
 const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
-const nowIso = () => new Date().toISOString();
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
+
+function sanitizeCustomerDetails(cd) {
+	const o = { ...(cd || {}) };
+	delete o.password;
+	delete o.confirmPassword;
+	return o;
+}
 
 async function getHotelAndOwner(hotelId) {
 	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
@@ -193,8 +213,7 @@ async function sendEmailWithInvoice(
 	}
 }
 
-/* ───────────────────────── 3) PayPal helpers ───────────────────────────── */
-/** Exchange a Setup Token → permanent vault payment token */
+/* ─────────────── 3) PayPal helpers ─────────────── */
 async function paypalExchangeSetupToVault(setup_token_id) {
 	const { data } = await ax.post(
 		`${PPM}/v3/vault/payment-tokens`,
@@ -207,7 +226,6 @@ async function paypalExchangeSetupToVault(setup_token_id) {
 	return data; // contains id (vault_id), status, payment_source.card metadata
 }
 
-/** Create an order (AUTHORIZE) using a vault token, then VOID (credit check) */
 async function paypalPrecheckAuthorizeVoid({
 	usdAmount,
 	vault_id,
@@ -254,7 +272,6 @@ async function paypalPrecheckAuthorizeVoid({
 	});
 
 	const { result: order } = await ppClient.execute(creq);
-
 	const areq = new paypal.orders.OrdersAuthorizeRequest(order.id);
 	if (cmid) areq.headers["PayPal-Client-Metadata-Id"] = cmid;
 	areq.requestBody({});
@@ -266,27 +283,28 @@ async function paypalPrecheckAuthorizeVoid({
 		await ax.post(
 			`${PPM}/v2/payments/authorizations/${auth.id}/void`,
 			{},
-			{ auth: { username: clientId, password: secretKey } }
+			{
+				auth: { username: clientId, password: secretKey },
+			}
 		);
 	}
 	return { orderId: order.id, authorization: auth };
 }
 
-/** Patch client‑created order to contain hotel metadata + NO_SHIPPING */
 async function paypalPatchOrderMetadata(orderId, meta) {
 	const ops = [
 		{
-			op: "replace",
+			op: "add",
 			path: "/purchase_units/@reference_id=='default'/invoice_id",
 			value: meta.invoice_id,
 		},
 		{
-			op: "replace",
+			op: "add",
 			path: "/purchase_units/@reference_id=='default'/custom_id",
 			value: meta.custom_id,
 		},
 		{
-			op: "replace",
+			op: "add",
 			path: "/purchase_units/@reference_id=='default'/description",
 			value: meta.description,
 		},
@@ -310,7 +328,7 @@ async function paypalPatchOrderMetadata(orderId, meta) {
 			},
 		},
 		{
-			op: "replace",
+			op: "add",
 			path: "/application_context/shipping_preference",
 			value: "NO_SHIPPING",
 		},
@@ -322,10 +340,10 @@ async function paypalPatchOrderMetadata(orderId, meta) {
 	});
 }
 
-/** Capture an approved order (wallet or card) */
-async function paypalCaptureApprovedOrder({ orderId, cmid }) {
+async function paypalCaptureApprovedOrder({ orderId, cmid, reqId }) {
 	const capReq = new paypal.orders.OrdersCaptureRequest(orderId);
 	if (cmid) capReq.headers["PayPal-Client-Metadata-Id"] = cmid;
+	capReq.headers["PayPal-Request-Id"] = reqId || `cap-${uuid()}`;
 	capReq.requestBody({});
 	try {
 		const { result } = await ppClient.execute(capReq);
@@ -341,7 +359,6 @@ async function paypalCaptureApprovedOrder({ orderId, cmid }) {
 	}
 }
 
-/** MIT (merchant‑initiated) order using a vault token */
 async function paypalMitCharge({
 	usdAmount,
 	vault_id,
@@ -374,6 +391,7 @@ async function paypalMitCharge({
 						description: `Guest: ${meta.guestName}, Phone: ${meta.guestPhone}, ${meta.checkin} → ${meta.checkout}, Conf: ${meta.custom_id}`,
 						quantity: "1",
 						unit_amount: { currency_code: "USD", value: toCCY(usdAmount) },
+						category: "DIGITAL_GOODS",
 					},
 				],
 			},
@@ -389,9 +407,9 @@ async function paypalMitCharge({
 				payment_initiator: "MERCHANT",
 				payment_type: "UNSCHEDULED",
 				usage: "SUBSEQUENT",
-				previous_transaction_reference: previousCaptureId
-					? { id: previousCaptureId }
-					: undefined,
+				...(previousCaptureId
+					? { previous_transaction_reference: { id: previousCaptureId } }
+					: {}),
 			},
 		},
 	});
@@ -400,12 +418,28 @@ async function paypalMitCharge({
 
 	const capReq = new paypal.orders.OrdersCaptureRequest(order.id);
 	if (cmid) capReq.headers["PayPal-Client-Metadata-Id"] = cmid;
+	capReq.headers["PayPal-Request-Id"] = `mit-cap-${uuid()}`;
 	capReq.requestBody({});
-	const { result } = await ppClient.execute(capReq);
-	return result;
+
+	try {
+		const { result } = await ppClient.execute(capReq);
+		return result; // normal success
+	} catch (err) {
+		// If the order was already captured (duplicate click / retry), treat as success:
+		const raw = err?._originalError?.text || err?.message || "";
+		const alreadyCaptured =
+			err?.statusCode === 422 && /ORDER_ALREADY_CAPTURED/i.test(raw);
+		if (alreadyCaptured) {
+			const getReq = new paypal.orders.OrdersGetRequest(order.id);
+			if (cmid) getReq.headers["PayPal-Client-Metadata-Id"] = cmid;
+			const { result } = await ppClient.execute(getReq);
+			return result; // captured result for the same order
+		}
+		throw err; // real failure
+	}
 }
 
-/* ───────────────────────── 4) Data + ledger helpers ────────────────────── */
+/* ─────────────── 4) Data + ledger helpers ─────────────── */
 async function findOrCreateUserByEmail(customerDetails, explicitUserId) {
 	let user = null;
 	if (customerDetails?.email) {
@@ -429,8 +463,8 @@ async function findOrCreateUserByEmail(customerDetails, explicitUserId) {
 async function buildAndSaveReservation({
 	reqBody,
 	confirmationNumber,
-	paypalDetailsToPersist, // object
-	paymentDetailsPatch, // for your existing payment_details UI
+	paypalDetailsToPersist,
+	paymentDetailsPatch,
 }) {
 	const {
 		hotelId,
@@ -452,10 +486,9 @@ async function buildAndSaveReservation({
 		commissionPaid,
 		hotelName,
 		advancePayment,
-		convertedAmounts, // { depositUSD, totalUSD }
+		convertedAmounts,
 	} = reqBody;
 
-	// ensure ledger bounds if totalUSD provided
 	const bounds =
 		(paypalDetailsToPersist && paypalDetailsToPersist.bounds) ||
 		(convertedAmounts?.totalUSD
@@ -464,10 +497,7 @@ async function buildAndSaveReservation({
 
 	const r = new Reservations({
 		hotelId,
-		customer_details: {
-			...customerDetails,
-			// DO NOT store card data
-		},
+		customer_details: sanitizeCustomerDetails(customerDetails),
 		confirmation_number: confirmationNumber,
 		belongsTo,
 		checkin_date,
@@ -481,17 +511,16 @@ async function buildAndSaveReservation({
 		booking_source,
 		pickedRoomsType,
 		payment,
-		paid_amount: Number(paid_amount || 0).toFixed(2),
-		commission: Number(commission || 0).toFixed(2),
+		paid_amount: toNum2(paid_amount || 0),
+		commission: toNum2(commission || 0),
 		commissionPaid: !!commissionPaid,
 		hotelName,
 		advancePayment,
 	});
 
-	// compose paypal_details
 	const pd = { ...(paypalDetailsToPersist || {}) };
 	if (bounds) {
-		pd.bounds = bounds; // base USD, limit_usd
+		pd.bounds = bounds;
 		if (typeof pd.captured_total_usd !== "number") pd.captured_total_usd = 0;
 		if (typeof pd.pending_total_usd !== "number") pd.pending_total_usd = 0;
 	}
@@ -507,11 +536,9 @@ async function buildAndSaveReservation({
 	return r.save();
 }
 
-/** Atomically reserve "pending" capture room to avoid races */
 async function reservePendingCaptureUSD({ reservationId, usdAmount }) {
 	const amount = toNum2(usdAmount);
 
-	// Require a cap limit; and ensure captured + pending + new <= limit
 	const cond = {
 		_id: reservationId,
 		$expr: {
@@ -523,14 +550,11 @@ async function reservePendingCaptureUSD({ reservationId, usdAmount }) {
 						amount,
 					],
 				},
-				{ $ifNull: ["$paypal_details.bounds.limit_usd", -1] }, // -1 => will fail if not set
+				{ $ifNull: ["$paypal_details.bounds.limit_usd", -1] },
 			],
 		},
 	};
-
-	const update = {
-		$inc: { "paypal_details.pending_total_usd": amount },
-	};
+	const update = { $inc: { "paypal_details.pending_total_usd": amount } };
 
 	return Reservations.findOneAndUpdate(cond, update, { new: true });
 }
@@ -554,22 +578,21 @@ async function finalizePendingCaptureUSD({
 				$push: captureDoc ? { "paypal_details.mit": captureDoc } : {},
 				$set: {
 					"payment_details.captured": true,
-					"payment_details.triggeredAmountUSD": toCCY(amount),
+					"payment_details.triggeredAmountUSD": toNum2(amount),
 				},
 			},
 			{ new: true }
 		).populate("hotelId");
-	} else {
-		// revert pending only
-		return Reservations.findByIdAndUpdate(
-			reservationId,
-			{ $inc: { "paypal_details.pending_total_usd": -amount } },
-			{ new: true }
-		).populate("hotelId");
 	}
+	// revert pending only
+	return Reservations.findByIdAndUpdate(
+		reservationId,
+		{ $inc: { "paypal_details.pending_total_usd": -amount } },
+		{ new: true }
+	).populate("hotelId");
 }
 
-/* ───────────────────────── 5) ROUTES: Controllers ──────────────────────── */
+/* ─────────────── 5) Controllers ─────────────── */
 
 /** 1) Client token for JS SDK Card Fields (cache 8h) */
 let cachedClientToken = null;
@@ -582,7 +605,9 @@ exports.generateClientToken = async (_req, res) => {
 		const { data } = await ax.post(
 			`${PPM}/v1/identity/generate-token`,
 			{},
-			{ auth: { username: clientId, password: secretKey } }
+			{
+				auth: { username: clientId, password: secretKey },
+			}
 		);
 		cachedClientToken = data.client_token;
 		cachedClientTokenExp = Date.now() + 1000 * 60 * 60 * 8;
@@ -597,36 +622,16 @@ exports.generateClientToken = async (_req, res) => {
 
 /**
  * 2) Create reservation & process PayPal (single call)
- *  - Supports:
- *    Not Paid  (vault + optional precheck + verification email)
- *    Deposit   (capture now, set cap=full amount, captured=deposit)
- *    Paid Online (capture now, set cap=full amount, captured=full)
- *
- * Body:
- * {
- *   sentFrom: "client" | "employee",
- *   payment: "Not Paid" | "Deposit Paid" | "Paid Online" | "Paid Offline",
- *   hotelId, customerDetails, belongsTo, checkin_date, checkout_date, ...,
- *   total_amount, pickedRoomsType, booking_source, hotelName,
- *   convertedAmounts: { depositUSD, totalUSD },
- *
- *   paypal: For Not Paid:
- *     { setup_token?, precheck?: { do?: true, amountUSD?: "xx.xx" }, cmid? }
- *   paypal: For capture now:
- *     { order_id: "...", expectedUsdAmount: "xx.xx", cmid? }
- * }
+ * Flows:
+ *   - Not Paid + NO card → send verification email (do NOT create reservation)
+ *   - Not Paid + card (setup_token) → save vault + ledger → create reservation NOW (no verification)
+ *   - Deposit Paid / Paid Online (mode: authorize|capture) → create reservation NOW
  */
 exports.createReservationAndProcess = async (req, res) => {
 	try {
 		const body = req.body || {};
-		const {
-			sentFrom,
-			payment,
-			hotelId,
-			customerDetails,
-			convertedAmounts,
-			hotelName,
-		} = body;
+		const { sentFrom, payment, hotelId, customerDetails, convertedAmounts } =
+			body;
 
 		// Validate hotel
 		const hotel = await HotelDetails.findOne({
@@ -675,17 +680,17 @@ exports.createReservationAndProcess = async (req, res) => {
 			);
 			try {
 				await waSendReservationConfirmation(saved);
-			} catch (e) {}
+			} catch (_) {}
 			try {
 				await waNotifyNewReservation(saved);
-			} catch (e) {}
+			} catch (_) {}
 
 			return res
 				.status(201)
 				.json({ message: "Reservation created successfully", data: saved });
 		}
 
-		// Client path
+		// Client path validation
 		const { name, phone, email, passport, passportExpiry, nationality } =
 			customerDetails || {};
 		if (
@@ -701,32 +706,113 @@ exports.createReservationAndProcess = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
-		// Not Paid (vault + precheck + verification email)
-		if (String(payment).toLowerCase() === "not paid") {
-			const pp = body.paypal || {};
-			const persist = {};
+		const pp = body.paypal || {};
+		const pmtLower = String(payment || "").toLowerCase();
+		const wantAuthorize = String(pp.mode || "").toLowerCase() === "authorize";
 
-			if (pp.setup_token) {
-				try {
-					const tokenData = await paypalExchangeSetupToVault(pp.setup_token);
-					persist.vault_id = tokenData.id;
-					persist.vault_status = tokenData.status || "ACTIVE";
-					persist.vaulted_at = new Date(tokenData.create_time || Date.now());
-					persist.card_brand = tokenData.payment_source?.card?.brand || null;
-					persist.card_last4 =
-						tokenData.payment_source?.card?.last_digits || null;
-					persist.card_exp = tokenData.payment_source?.card?.expiry || null;
-					persist.billing_address =
-						tokenData.payment_source?.card?.billing_address || undefined;
-				} catch (e) {
-					console.error("Vault exchange failed:", e?.response?.data || e);
-					return res
-						.status(400)
-						.json({ message: "Unable to save card with PayPal." });
+		/* ── A) NOT PAID ───────────────────────────────────────────────────── */
+		if (pmtLower === "not paid") {
+			const hasCard = !!pp.setup_token; // guest added card in Card Fields (vault on server)
+
+			// A1) Not paid and NO CARD → verification (do NOT create reservation)
+			if (!hasCard) {
+				// Stable confirmation number (carried into JWT)
+				const confirmationNumber = await new Promise((resolve, reject) => {
+					ensureUniqueNumber(
+						Reservations,
+						"confirmation_number",
+						(err, unique) => (err ? reject(err) : resolve(unique))
+					);
+				});
+
+				const tokenPayload = {
+					sentFrom: "client",
+					payment: "Not Paid",
+					hotelId,
+					hotelName: hotel.hotelName,
+					belongsTo: body.belongsTo,
+					customerDetails,
+					checkin_date: body.checkin_date,
+					checkout_date: body.checkout_date,
+					days_of_residence: body.days_of_residence,
+					total_rooms: body.total_rooms,
+					total_guests: body.total_guests,
+					adults: body.adults,
+					children: body.children,
+					total_amount: body.total_amount,
+					booking_source: body.booking_source,
+					pickedRoomsType: body.pickedRoomsType,
+					convertedAmounts,
+					paid_amount: 0,
+					commission: 0,
+					commissionPaid: false,
+					confirmation_number: confirmationNumber,
+				};
+
+				const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
+					expiresIn: "3d",
+				});
+				const verificationLinkEmail = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
+				const verificationLinkWA = `${process.env.CLIENT_URL}/reservation-verification`; // short link for WA
+
+				const emailContent = ReservationVerificationEmail({
+					name,
+					hotelName: hotel.hotelName,
+					confirmationLink: verificationLinkEmail,
+				});
+				await sgMail.send({
+					to: email,
+					from: "noreply@jannatbooking.com",
+					subject: "Verify Your Reservation",
+					html: emailContent,
+					bcc: [
+						"morazzakhamouda@gmail.com",
+						"xhoteleg@gmail.com",
+						"ahmed.abdelrazak@jannatbooking.com",
+					],
+				});
+
+				if (ownerEmail) {
+					await sendCriticalOwnerEmail(
+						ownerEmail,
+						`Reservation Verification Initiated — ${hotel.hotelName}`,
+						emailContent
+					);
 				}
+				try {
+					await waSendVerificationLink(
+						{ customer_details: { name, phone, nationality } },
+						verificationLinkWA
+					);
+				} catch (_) {}
+
+				return res.status(200).json({
+					message:
+						"Verification email sent successfully. Please check your inbox.",
+					confirmation_number: confirmationNumber,
+				});
 			}
 
-			// attach cap limit into token (used later when reservation is created)
+			// A2) Not paid but CARD PRESENT → exchange to vault, set ledger, create reservation NOW
+			let persist = {};
+			try {
+				const tokenData = await paypalExchangeSetupToVault(pp.setup_token);
+				persist.vault_id = tokenData.id;
+				persist.vault_status = tokenData.status || "ACTIVE";
+				persist.vaulted_at = new Date(tokenData.create_time || Date.now());
+				persist.card_brand = tokenData.payment_source?.card?.brand || null;
+				persist.card_last4 =
+					tokenData.payment_source?.card?.last_digits || null;
+				persist.card_exp = tokenData.payment_source?.card?.expiry || null;
+				persist.billing_address =
+					tokenData.payment_source?.card?.billing_address || undefined;
+			} catch (e) {
+				console.error("Vault exchange failed:", e?.response?.data || e);
+				return res
+					.status(400)
+					.json({ message: "Unable to save card with PayPal." });
+			}
+
 			if (convertedAmounts?.totalUSD) {
 				persist.bounds = {
 					base: "USD",
@@ -736,6 +822,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				persist.pending_total_usd = 0;
 			}
 
+			// (Optional) precheck small auth+void
 			if (pp.precheck?.do && pp.precheck?.amountUSD && persist.vault_id) {
 				const confirmationNumber = await new Promise((resolve, reject) => {
 					ensureUniqueNumber(
@@ -770,64 +857,52 @@ exports.createReservationAndProcess = async (req, res) => {
 				}
 			}
 
-			const tokenPayload = {
-				...body,
-				hotelName: hotel.hotelName,
-				payment: "Not Paid",
-				paid_amount: 0,
-				commission: 0,
-				commissionPaid: false,
-				paypal_details: Object.keys(persist).length ? persist : undefined,
-			};
-			const token = jwt.sign(tokenPayload, process.env.JWT_SECRET2, {
-				expiresIn: "3d",
-			});
-			const link = `${process.env.CLIENT_URL}/reservation-verification?token=${token}`;
-
-			const emailContent = ReservationVerificationEmail({
-				name,
-				hotelName: hotel.hotelName,
-				confirmationLink: link,
-			});
-
-			await sgMail.send({
-				to: email,
-				from: "noreply@jannatbooking.com",
-				subject: "Verify Your Reservation",
-				html: emailContent,
-				bcc: [
-					"morazzakhamouda@gmail.com",
-					"xhoteleg@gmail.com",
-					"ahmed.abdelrazak@jannatbooking.com",
-				],
-			});
-
-			if (ownerEmail) {
-				await sendCriticalOwnerEmail(
-					ownerEmail,
-					`Reservation Verification Initiated — ${hotel.hotelName}`,
-					emailContent
+			const confirmationNumber = await new Promise((resolve, reject) => {
+				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
+					err ? reject(err) : resolve(unique)
 				);
+			});
+
+			const user = await findOrCreateUserByEmail(customerDetails, body.userId);
+			if (user) {
+				user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+				user.confirmationNumbersBooked.push(confirmationNumber);
+				await user.save();
 			}
 
-			try {
-				await waSendVerificationLink(
-					{ customer_details: { name, phone, nationality } },
-					link
-				);
-			} catch (e) {}
-
-			return res.status(200).json({
-				message:
-					"Verification email sent successfully. Please check your inbox.",
+			const saved = await buildAndSaveReservation({
+				reqBody: { ...body, hotelName: hotel.hotelName, payment: "Not Paid" },
+				confirmationNumber,
+				paypalDetailsToPersist: persist,
+				paymentDetailsPatch: { captured: false, chargeCount: 0 },
 			});
+
+			const resvData = {
+				...saved.toObject(),
+				hotelName: hotel.hotelName,
+				hotelAddress: hotel.hotelAddress,
+				hotelCity: hotel.hotelCity,
+				hotelPhone: hotel.phone,
+			};
+			await sendEmailWithInvoice(
+				resvData,
+				customerDetails.email,
+				body.belongsTo
+			);
+			try {
+				await waSendReservationConfirmation(saved);
+			} catch (_) {}
+			try {
+				await waNotifyNewReservation(saved);
+			} catch (_) {}
+
+			return res
+				.status(201)
+				.json({ message: "Reservation created successfully", data: saved });
 		}
 
-		// Capture now: Deposit or Full
-		if (
-			["deposit paid", "paid online"].includes(String(payment).toLowerCase())
-		) {
-			const pp = body.paypal || {};
+		/* ── B) DEPOSIT / FULL (authorize or capture) ───────────────────── */
+		if (["deposit paid", "paid online"].includes(pmtLower)) {
 			if (!pp.order_id) {
 				return res.status(400).json({
 					message:
@@ -842,7 +917,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			});
 
 			const expectedUsdAmount =
-				String(payment).toLowerCase() === "deposit paid"
+				pmtLower === "deposit paid"
 					? toCCY(body?.convertedAmounts?.depositUSD || 0)
 					: toCCY(body?.convertedAmounts?.totalUSD || 0);
 
@@ -868,31 +943,158 @@ exports.createReservationAndProcess = async (req, res) => {
 				usdAmount: expectedUsdAmount,
 			};
 
-			// Verify order amount
+			// Verify order amount (GET)
 			const getRes = await ax.get(`${PPM}/v2/checkout/orders/${pp.order_id}`, {
 				auth: { username: clientId, password: secretKey },
 			});
 			const order = getRes.data;
 			const pu = order?.purchase_units?.[0];
 			const orderAmount = pu?.amount?.value;
-
 			if (toCCY(orderAmount) !== expectedUsdAmount) {
 				return res.status(400).json({
 					message: `The PayPal order amount (${orderAmount}) does not match the expected amount (${expectedUsdAmount}).`,
 				});
 			}
 
-			// Patch metadata (NO_SHIPPING, hotel info)
+			// Metadata patch (invoice/custom/description)
 			try {
 				await paypalPatchOrderMetadata(pp.order_id, meta);
 			} catch (e) {
 				console.warn("PATCH metadata:", e?.response?.data || e);
 			}
 
-			// Capture
+			let paypalDetails = null;
+
+			if (wantAuthorize) {
+				// AUTHORIZE now (no funds captured)
+				let authResult;
+				try {
+					const authReq = new paypal.orders.OrdersAuthorizeRequest(pp.order_id);
+					if (pp.cmid) authReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
+					authReq.headers["PayPal-Request-Id"] = `auth-${uuid()}`;
+					authReq.requestBody({});
+					const { result } = await ppClient.execute(authReq);
+					authResult = result;
+				} catch (err) {
+					const raw = err?._originalError?.text || err?.message || "";
+					const alreadyAuth =
+						err?.statusCode === 422 &&
+						(/ORDER_ALREADY_AUTHORIZED/i.test(raw) ||
+							/UNPROCESSABLE_ENTITY/i.test(raw));
+					if (!alreadyAuth) {
+						console.error("Authorize error:", err?.response?.data || err);
+						return res
+							.status(500)
+							.json({ message: "Failed to authorize payment." });
+					}
+					const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
+					if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
+					const { result } = await ppClient.execute(getReq);
+					authResult = result;
+				}
+
+				const auth =
+					authResult?.purchase_units?.[0]?.payments?.authorizations?.[0] || {};
+				if (!auth?.id) {
+					return res.status(402).json({
+						message: "Authorization was not created.",
+						details: authResult,
+					});
+				}
+
+				const srcCard = authResult?.payment_source?.card || {};
+				const vaultId =
+					authResult?.payment_source?.card?.attributes?.vault?.id || null;
+
+				paypalDetails = {
+					bounds: {
+						base: "USD",
+						limit_usd: toNum2(
+							body?.convertedAmounts?.totalUSD || auth?.amount?.value || 0
+						),
+					},
+					captured_total_usd: 0,
+					pending_total_usd: 0,
+					initial: {
+						intent: "AUTHORIZE",
+						order_id: authResult.id,
+						authorization_id: auth.id,
+						authorization_status: auth.status,
+						amount: auth?.amount?.value,
+						currency: auth?.amount?.currency_code,
+						expiration_time: auth?.expiration_time || null,
+						network_transaction_reference:
+							auth?.network_transaction_reference || null,
+						invoice_id: meta.invoice_id,
+						cmid: pp.cmid || null,
+						raw: JSON.parse(JSON.stringify(authResult)),
+					},
+				};
+				if (vaultId) {
+					paypalDetails.vault_id = vaultId;
+					paypalDetails.vault_status = "ACTIVE";
+					paypalDetails.vaulted_at = new Date();
+					paypalDetails.card_brand = srcCard.brand || null;
+					paypalDetails.card_last4 = srcCard.last_digits || null;
+					paypalDetails.card_exp = srcCard.expiry || null;
+					if (srcCard.billing_address)
+						paypalDetails.billing_address = srcCard.billing_address;
+				}
+
+				// Create user + reservation
+				const user = await findOrCreateUserByEmail(
+					customerDetails,
+					body.userId
+				);
+				if (user) {
+					user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+					user.confirmationNumbersBooked.push(confirmationNumber);
+					await user.save();
+				}
+
+				const saved = await buildAndSaveReservation({
+					reqBody: { ...body, hotelName: hotel.hotelName },
+					confirmationNumber,
+					paypalDetailsToPersist: paypalDetails,
+					paymentDetailsPatch: {
+						captured: false,
+						authorizationId: auth.id,
+						authorizationAmountUSD: toNum2(auth?.amount?.value || 0),
+						chargeCount: 0,
+					},
+				});
+
+				const resvData = {
+					...saved.toObject(),
+					hotelName: hotel.hotelName,
+					hotelAddress: hotel.hotelAddress,
+					hotelCity: hotel.hotelCity,
+					hotelPhone: hotel.phone,
+				};
+				await sendEmailWithInvoice(
+					resvData,
+					customerDetails.email,
+					body.belongsTo
+				);
+				try {
+					await waSendReservationConfirmation(saved);
+				} catch (_) {}
+				try {
+					await waNotifyNewReservation(saved);
+				} catch (_) {}
+
+				return res.status(201).json({
+					message:
+						"Reservation created successfully (authorized; no funds captured).",
+					data: saved,
+				});
+			}
+
+			// CAPTURE now (deposit/full)
 			const result = await paypalCaptureApprovedOrder({
 				orderId: pp.order_id,
 				cmid: pp.cmid,
+				reqId: `cap-create-${uuid()}`,
 			});
 			const cap = result?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 			if (cap?.status !== "COMPLETED") {
@@ -905,8 +1107,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				result?.payment_source?.card?.attributes?.vault?.id || null;
 			const capAmount = toNum2(cap?.amount?.value || expectedUsdAmount);
 
-			// paypal_details initial + ledger
-			const paypalDetails = {
+			paypalDetails = {
 				bounds: {
 					base: "USD",
 					limit_usd: toNum2(body?.convertedAmounts?.totalUSD || capAmount),
@@ -939,7 +1140,6 @@ exports.createReservationAndProcess = async (req, res) => {
 					result?.payment_source?.card?.billing_address || undefined;
 			}
 
-			// Create or find user, attach confirmation
 			const user = await findOrCreateUserByEmail(customerDetails, body.userId);
 			if (user) {
 				user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
@@ -947,16 +1147,14 @@ exports.createReservationAndProcess = async (req, res) => {
 				await user.save();
 			}
 
-			// Patch legacy payment_details for UI
 			const paymentDetailsPatch = {
 				captured: true,
-				triggeredAmountUSD: toCCY(capAmount),
-				triggeredAmountSAR: Number(body.paid_amount || 0).toFixed(2),
+				triggeredAmountUSD: toNum2(capAmount),
+				triggeredAmountSAR: toNum2(body.paid_amount || 0),
 				finalCaptureTransactionId: cap.id,
 				chargeCount: 1,
 			};
 
-			// Save reservation (full doc)
 			const saved = await buildAndSaveReservation({
 				reqBody: { ...body, hotelName: hotel.hotelName },
 				confirmationNumber,
@@ -964,7 +1162,6 @@ exports.createReservationAndProcess = async (req, res) => {
 				paymentDetailsPatch,
 			});
 
-			// Emails + WA
 			const resvData = {
 				...saved.toObject(),
 				hotelName: hotel.hotelName,
@@ -979,15 +1176,14 @@ exports.createReservationAndProcess = async (req, res) => {
 			);
 			try {
 				await waSendReservationConfirmation(saved);
-			} catch (e) {}
+			} catch (_) {}
 			try {
 				await waNotifyNewReservation(saved);
-			} catch (e) {}
+			} catch (_) {}
 
-			return res.status(201).json({
-				message: "Reservation created successfully",
-				data: saved,
-			});
+			return res
+				.status(201)
+				.json({ message: "Reservation created successfully", data: saved });
 		}
 
 		return res.status(400).json({
@@ -1009,13 +1205,11 @@ exports.createReservationAndProcess = async (req, res) => {
 /**
  * 3) MIT (post‑stay) charge using saved vault token — with hard cap
  * Body: { reservationId, usdAmount, cmid?, sarAmount? }
- *  - Enforces: captured_total_usd + pending + usdAmount <= bounds.limit_usd
- *  - Atomic reservation of "pending" amount prevents race conditions.
  */
 exports.mitChargeReservation = async (req, res) => {
 	try {
 		const { reservationId, usdAmount, cmid, sarAmount } = req.body || {};
-		const amt = toNum2(usdAmount);
+		const amt = Math.round(Number(usdAmount || 0) * 100) / 100;
 		if (!reservationId || !amt || amt <= 0) {
 			return res.status(400).json({
 				message: "reservationId and a positive usdAmount are required.",
@@ -1028,32 +1222,24 @@ exports.mitChargeReservation = async (req, res) => {
 		if (!reservation)
 			return res.status(404).json({ message: "Reservation not found." });
 
-		const vault_id = reservation?.paypal_details?.vault_id;
 		const limit = reservation?.paypal_details?.bounds?.limit_usd;
 		const capturedSoFar = reservation?.paypal_details?.captured_total_usd || 0;
-
-		if (!vault_id) {
-			return res.status(400).json({
-				message: "No saved PayPal payment token on this reservation.",
-			});
-		}
 		if (typeof limit !== "number" || limit <= 0) {
 			return res
 				.status(400)
 				.json({ message: "Capture limit is missing on this reservation." });
 		}
 
-		// Atomically reserve "pending" amount against limit
+		// Reserve the USD amount atomically against the hard cap
 		const reserved = await reservePendingCaptureUSD({
 			reservationId,
 			usdAmount: amt,
 		});
 		if (!reserved) {
-			const remaining = toCCY(
+			const remaining = (
 				limit -
-					(capturedSoFar +
-						(reservation?.paypal_details?.pending_total_usd || 0))
-			);
+				(capturedSoFar + (reservation?.paypal_details?.pending_total_usd || 0))
+			).toFixed(2);
 			return res.status(400).json({
 				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
 			});
@@ -1077,74 +1263,185 @@ exports.mitChargeReservation = async (req, res) => {
 			usdAmount: amt,
 		};
 
-		const previousCaptureId =
-			reservation?.paypal_details?.initial?.capture_id || null;
+		const PPM2 = IS_PROD
+			? "https://api-m.paypal.com"
+			: "https://api-m.sandbox.paypal.com";
+		const clientId2 = IS_PROD
+			? process.env.PAYPAL_CLIENT_ID_LIVE
+			: process.env.PAYPAL_CLIENT_ID_SANDBOX;
+		const secretKey2 = IS_PROD
+			? process.env.PAYPAL_SECRET_KEY_LIVE
+			: process.env.PAYPAL_SECRET_KEY_SANDBOX;
 
-		// Execute MIT capture
-		let result;
+		// Prefer capturing an existing authorization first
+		const authId =
+			reservation?.paypal_details?.initial?.authorization_id || null;
+		const authAmt = Number(reservation?.paypal_details?.initial?.amount || 0);
+
+		let resultCapture = null;
+		let usedPath = null;
+
 		try {
-			result = await paypalMitCharge({
-				usdAmount: amt,
-				vault_id,
-				meta,
-				cmid,
-				previousCaptureId,
-			});
-		} catch (ppErr) {
-			await finalizePendingCaptureUSD({
-				reservationId,
-				usdAmount: amt,
-				success: false,
-			});
-			return res.status(502).json({
-				message: "PayPal capture failed.",
-				details: String(ppErr?.message || ppErr),
-			});
+			if (authId && authAmt > 0) {
+				const remainingAuth = Math.max(
+					0,
+					authAmt - (reservation?.paypal_details?.captured_total_usd || 0)
+				);
+				if (amt <= remainingAuth + 1e-9) {
+					const final_capture = Math.abs(amt - remainingAuth) < 1e-9;
+					const body = {
+						amount: { currency_code: "USD", value: amt.toFixed(2) },
+						invoice_id: meta.invoice_id,
+						final_capture,
+					};
+					const idemKey = `authcap:${reservationId}:${amt.toFixed(
+						2
+					)}:${confirmation}`;
+					const { data } = await ax.post(
+						`${PPM2}/v2/payments/authorizations/${authId}/capture`,
+						body,
+						{
+							auth: { username: clientId2, password: secretKey2 },
+							headers: { "PayPal-Request-Id": idemKey },
+						}
+					);
+					resultCapture = {
+						purchase_units: [
+							{
+								payments: {
+									captures: [
+										{
+											id: data?.id,
+											status: data?.status,
+											amount: data?.amount,
+											seller_protection: data?.seller_protection,
+											network_transaction_reference:
+												data?.network_transaction_reference,
+											create_time: data?.create_time,
+										},
+									],
+								},
+							},
+						],
+						id: data?.supplementary_data?.related_ids?.order_id || null,
+					};
+					usedPath = "AUTH_CAPTURE";
+				}
+			}
+		} catch (capAuthErr) {
+			// If auth capture fails, fall back to MIT below
+			console.warn(
+				"Authorization capture failed; trying MIT.",
+				capAuthErr?.response?.data || capAuthErr
+			);
+			resultCapture = null;
 		}
 
-		const cap = result?.purchase_units?.[0]?.payments?.captures?.[0] || {};
+		// Fallback: MIT using vault token (with robust ORDER_ALREADY_CAPTURED handling)
+		if (!resultCapture) {
+			const vault_id = reservation?.paypal_details?.vault_id;
+			if (!vault_id) {
+				await finalizePendingCaptureUSD({
+					reservationId,
+					usdAmount: amt,
+					success: false,
+				});
+				return res.status(400).json({
+					message:
+						"No active authorization to capture and no saved PayPal vault token on this reservation.",
+				});
+			}
+
+			const previousCaptureId =
+				reservation?.paypal_details?.initial?.capture_id || null;
+
+			try {
+				const mitRes = await paypalMitCharge({
+					usdAmount: amt,
+					vault_id,
+					meta,
+					cmid,
+					previousCaptureId,
+				});
+				resultCapture = mitRes;
+				usedPath = "MIT";
+			} catch (mitErr) {
+				// Make sure we unwind the pending amount on any MIT failure
+				await finalizePendingCaptureUSD({
+					reservationId,
+					usdAmount: amt,
+					success: false,
+				});
+				throw mitErr;
+			}
+		}
+
+		// Normalize PayPal response → capture object
+		const cap =
+			resultCapture?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 		if (cap?.status !== "COMPLETED") {
 			await finalizePendingCaptureUSD({
 				reservationId,
 				usdAmount: amt,
 				success: false,
 			});
-			return res
-				.status(402)
-				.json({ message: "MIT charge not completed.", details: cap });
+			return res.status(402).json({
+				message: "Charge not completed.",
+				details: cap,
+				path: usedPath,
+			});
 		}
 
-		// Build capture doc for ledger
+		const capturedUsd = toNum2(cap?.amount?.value || amt);
+
 		const mitCaptureDoc = {
-			order_id: result.id,
+			order_id: resultCapture.id || null,
 			capture_id: cap.id,
 			capture_status: cap.status,
-			amount: cap?.amount?.value,
-			currency: cap?.amount?.currency_code,
+			amount: cap?.amount?.value || null,
+			currency: cap?.amount?.currency_code || null,
 			seller_protection: cap?.seller_protection?.status || "UNKNOWN",
 			network_transaction_reference: cap?.network_transaction_reference || null,
 			created_at: new Date(cap?.create_time || Date.now()),
-			raw: safeClone(result),
+			raw: JSON.parse(JSON.stringify(resultCapture)),
+			via: usedPath, // "AUTH_CAPTURE" or "MIT"
 		};
 
-		// Finalize: decrement pending, increment captured, push capture
+		// Finalize ledger with the *actual* captured amount
 		let updated = await finalizePendingCaptureUSD({
 			reservationId,
-			usdAmount: amt,
+			usdAmount: capturedUsd,
 			success: true,
 			captureDoc: mitCaptureDoc,
 		});
 
-		// Optionally maintain your SAR paid_amount for UI if provided
-		if (sarAmount) {
-			updated = await Reservations.findByIdAndUpdate(
-				reservationId,
-				{ $inc: { paid_amount: toNum2(sarAmount) } },
-				{ new: true }
-			).populate("hotelId");
-		}
+		// Persist SAR amount for email/accounting
+		const sarInc = Number.isFinite(Number(sarAmount)) ? toNum2(sarAmount) : 0;
+		const setOps = {
+			"payment_details.finalCaptureTransactionId": cap.id,
+			...(sarInc > 0 ? { "payment_details.triggeredAmountSAR": sarInc } : {}),
+		};
+		updated = await Reservations.findByIdAndUpdate(
+			reservationId,
+			{
+				...(sarInc > 0 ? { $inc: { paid_amount: sarInc } } : {}),
+				$set: setOps,
+			},
+			{ new: true }
+		).populate("hotelId");
 
-		// Optional: send paymentTriggered email
+		// (Optional) mark fully paid when captured >= limit
+		// const newCaptured = toNum2(updated?.paypal_details?.captured_total_usd || 0);
+		// const capLimit = toNum2(updated?.paypal_details?.bounds?.limit_usd || 0);
+		// if (capLimit > 0 && newCaptured >= capLimit - 1e-9) {
+		//   updated = await Reservations.findByIdAndUpdate(
+		//     reservationId,
+		//     { $set: { payment: "Paid Online", commissionPaid: true } },
+		//     { new: true }
+		//   ).populate("hotelId");
+		// }
+
+		// Notifications
 		try {
 			await sgMail.send({
 				to: updated.customer_details.email,
@@ -1165,11 +1462,27 @@ exports.mitChargeReservation = async (req, res) => {
 		} catch (_) {}
 
 		return res.status(200).json({
-			message: "MIT charge completed.",
+			message:
+				usedPath === "AUTH_CAPTURE"
+					? "Authorization captured."
+					: "MIT charge completed.",
 			transactionId: cap.id,
 			reservation: updated,
+			path: usedPath,
 		});
 	} catch (error) {
+		// 🔁 Safety: unwind pending if our earlier reserve succeeded but we errored out
+		try {
+			const { reservationId, usdAmount } = req.body || {};
+			if (reservationId && usdAmount) {
+				await finalizePendingCaptureUSD({
+					reservationId,
+					usdAmount: Math.round(Number(usdAmount || 0) * 100) / 100,
+					success: false,
+				});
+			}
+		} catch {}
+
 		console.error(
 			"mitChargeReservation error:",
 			error?.response?.data || error
@@ -1181,8 +1494,7 @@ exports.mitChargeReservation = async (req, res) => {
 };
 
 /**
- * 4) (Optional) Standalone credit precheck (auth+void)
- * Body: { setup_token? , vault_id?, usdAmount, hotelId, guestName, guestPhone, checkin_date, checkout_date, cmid? }
+ * 4) Standalone credit precheck (auth+void)
  */
 exports.creditPrecheck = async (req, res) => {
 	try {
@@ -1259,8 +1571,7 @@ exports.creditPrecheck = async (req, res) => {
 };
 
 /**
- * 5) (Optional) Exchange setup_token → vault token
- * Body: { setup_token }
+ * 5) Exchange setup_token → vault token
  */
 exports.vaultExchange = async (req, res) => {
 	try {
@@ -1276,9 +1587,7 @@ exports.vaultExchange = async (req, res) => {
 };
 
 /**
- * 6) (Optional) Update capture limit (when stay changes)
- * Body: { reservationId, newLimitUsd }
- *  - Will NOT allow reducing below already captured_total_usd.
+ * 6) Update capture limit (when stay changes)
  */
 exports.updateCaptureLimit = async (req, res) => {
 	try {
@@ -1328,8 +1637,7 @@ exports.updateCaptureLimit = async (req, res) => {
 };
 
 /**
- * 7) (Optional) Inspect PayPal ledger for a reservation
- * GET /.../ledger/:reservationId
+ * 7) Inspect PayPal ledger for a reservation
  */
 exports.getLedger = async (req, res) => {
 	try {
@@ -1358,10 +1666,50 @@ exports.getLedger = async (req, res) => {
 exports.webhook = async (req, res) => {
 	try {
 		const { event_type: type, resource } = req.body || {};
+
+		// Optional signature verification
+		try {
+			const webhookId = IS_PROD
+				? process.env.PAYPAL_WEBHOOK_ID_LIVE
+				: process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
+			if (webhookId) {
+				const headers = req.headers || {};
+				const verifyPayload = {
+					transmission_id: headers["paypal-transmission-id"],
+					transmission_time: headers["paypal-transmission-time"],
+					cert_url: headers["paypal-cert-url"],
+					auth_algo: headers["paypal-auth-algo"],
+					transmission_sig: headers["paypal-transmission-sig"],
+					webhook_id: webhookId,
+					webhook_event: req.body,
+				};
+
+				const { data: verify } = await ax.post(
+					`${PPM}/v1/notifications/verify-webhook-signature`,
+					verifyPayload,
+					{ auth: { username: clientId, password: secretKey } }
+				);
+
+				if (verify?.verification_status !== "SUCCESS") {
+					console.warn("PayPal webhook verification failed:", verify);
+				}
+			} else {
+				console.warn(
+					"[PayPal] WEBHOOK_ID not configured; skipping signature verification."
+				);
+			}
+		} catch (vErr) {
+			console.error(
+				"[PayPal] Webhook verification error:",
+				vErr?.response?.data || vErr
+			);
+		}
+
 		if (type === "PAYMENT.CAPTURE.COMPLETED") {
 			const orderId = resource?.supplementary_data?.related_ids?.order_id;
 			const captureId = resource?.id;
 			console.log("Webhook CAPTURE completed:", { orderId, captureId });
+			// optional: reconcile to ledger here
 		}
 		if (type === "VAULT.PAYMENT-TOKEN.CREATED") {
 			console.log("Webhook vault token created:", resource?.id);
@@ -1373,17 +1721,17 @@ exports.webhook = async (req, res) => {
 	}
 };
 
+/**
+ * 9) Link‑pay (authorize or capture) against existing reservation
+ * Body: { reservationKey, option: "deposit" | "full", convertedAmounts, sarAmount?, paypal: { order_id, expectedUsdAmount, cmid?, mode?: "authorize"|"capture" } }
+ */
 exports.linkPayReservation = async (req, res) => {
-	const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100;
-
-	// Build a unique invoice id per capture (short, safe, ≤127 chars)
-	function buildUniqueInvoiceId(confNumber, existingCount) {
+	const buildUniqueInvoiceId = (confNumber, existingCount) => {
 		const seq = (existingCount || 0) + 1;
-		const tail = Date.now().toString(36).slice(-6).toUpperCase(); // very short time salt
+		const tail = Date.now().toString(36).slice(-6).toUpperCase();
 		return `RSV-${confNumber}-${seq}-${tail}`.slice(0, 127);
-	}
+	};
 
-	// Safely patch only patchable fields on the order
 	async function patchOrderInvoiceAndDescription({
 		orderId,
 		invoice_id,
@@ -1393,17 +1741,17 @@ exports.linkPayReservation = async (req, res) => {
 	}) {
 		const ops = [
 			{
-				op: "replace",
+				op: "add",
 				path: "/purchase_units/@reference_id=='default'/invoice_id",
 				value: invoice_id,
 			},
 			{
-				op: "replace",
+				op: "add",
 				path: "/purchase_units/@reference_id=='default'/custom_id",
 				value: custom_id,
 			},
 			{
-				op: "replace",
+				op: "add",
 				path: "/purchase_units/@reference_id=='default'/description",
 				value: description,
 			},
@@ -1415,18 +1763,18 @@ exports.linkPayReservation = async (req, res) => {
 	}
 
 	try {
-		const { reservationKey, option, convertedAmounts, sarAmount, paypal } =
-			req.body || {};
-		if (
-			!reservationKey ||
-			!option ||
-			!paypal?.order_id ||
-			!paypal?.expectedUsdAmount
-		) {
+		const {
+			reservationKey,
+			option,
+			convertedAmounts,
+			sarAmount,
+			paypal: pp,
+		} = req.body || {};
+
+		if (!reservationKey || !option || !pp?.order_id || !pp?.expectedUsdAmount) {
 			return res.status(400).json({ message: "Missing required fields." });
 		}
 
-		// 1) Find reservation by _id or confirmation_number
 		let reservation = null;
 		if (mongoose.Types.ObjectId.isValid(reservationKey)) {
 			reservation = await Reservations.findById(reservationKey).populate(
@@ -1441,7 +1789,6 @@ exports.linkPayReservation = async (req, res) => {
 		if (!reservation)
 			return res.status(404).json({ message: "Reservation not found." });
 
-		// 2) Decide amount to capture (USD) + enforce cap
 		const usdAmount =
 			String(option).toLowerCase() === "deposit"
 				? convertedAmounts?.depositUSD
@@ -1449,55 +1796,31 @@ exports.linkPayReservation = async (req, res) => {
 		if (!usdAmount)
 			return res.status(400).json({ message: "Converted USD amount missing." });
 
-		const limit =
-			reservation?.paypal_details?.bounds?.limit_usd ??
-			(convertedAmounts?.totalUSD ? toNum2(convertedAmounts.totalUSD) : null);
-		if (!limit || limit <= 0)
-			return res
-				.status(400)
-				.json({ message: "Reservation capture limit is not set." });
-
-		const capturedSoFar = toNum2(
-			reservation?.paypal_details?.captured_total_usd || 0
-		);
-		const newCapture = toNum2(usdAmount);
-		if (capturedSoFar + newCapture > limit + 1e-9) {
-			const remaining = toNum2(limit - capturedSoFar).toFixed(2);
-			return res.status(400).json({
-				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
-			});
-		}
-
-		// 3) Verify order amount
-		const PPM = /prod/i.test(process.env.NODE_ENV)
+		const PPM2 = IS_PROD
 			? "https://api-m.paypal.com"
 			: "https://api-m.sandbox.paypal.com";
-		const clientId = /prod/i.test(process.env.NODE_ENV)
+		const clientId2 = IS_PROD
 			? process.env.PAYPAL_CLIENT_ID_LIVE
 			: process.env.PAYPAL_CLIENT_ID_SANDBOX;
-		const secretKey = /prod/i.test(process.env.NODE_ENV)
+		const secretKey2 = IS_PROD
 			? process.env.PAYPAL_SECRET_KEY_LIVE
 			: process.env.PAYPAL_SECRET_KEY_SANDBOX;
 
-		const getRes = await ax.get(
-			`${PPM}/v2/checkout/orders/${paypal.order_id}`,
-			{
-				auth: { username: clientId, password: secretKey },
-			}
-		);
+		const getRes = await ax.get(`${PPM2}/v2/checkout/orders/${pp.order_id}`, {
+			auth: { username: clientId2, password: secretKey2 },
+		});
 		const order = getRes.data;
 		const pu = order?.purchase_units?.[0];
 		const orderAmount = pu?.amount?.value;
+
 		if (
-			Number(orderAmount).toFixed(2) !==
-			Number(paypal.expectedUsdAmount).toFixed(2)
+			Number(orderAmount).toFixed(2) !== Number(pp.expectedUsdAmount).toFixed(2)
 		) {
 			return res.status(400).json({
-				message: `PayPal order amount (${orderAmount}) does not match expected (${paypal.expectedUsdAmount}).`,
+				message: `PayPal order amount (${orderAmount}) does not match expected (${pp.expectedUsdAmount}).`,
 			});
 		}
 
-		// 4) Patch invoice_id to a unique value for THIS capture (and update custom_id/description)
 		const hotelName =
 			reservation.hotelName || reservation.hotelId?.hotelName || "Hotel";
 		const guest = reservation.customer_details || {};
@@ -1511,7 +1834,6 @@ exports.linkPayReservation = async (req, res) => {
 			reservation.confirmation_number,
 			existingCount
 		);
-
 		const description = `Hotel reservation — ${hotelName} — ${
 			reservation.checkin_date
 		} → ${reservation.checkout_date} — Guest ${guest.name} (${
@@ -1520,25 +1842,165 @@ exports.linkPayReservation = async (req, res) => {
 
 		try {
 			await patchOrderInvoiceAndDescription({
-				orderId: paypal.order_id,
+				orderId: pp.order_id,
 				invoice_id: uniqueInvoiceId,
 				custom_id: reservation.confirmation_number,
 				description,
-				auth: { PPM, clientId, secretKey },
+				auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
 			});
 		} catch (e) {
-			// Non‑fatal: continue to capture. (If PayPal rejected a field, capture can still succeed.)
 			console.warn(
 				"PATCH metadata (non-fatal):",
 				e?.response?.data || e?.message || e
 			);
 		}
 
-		// 5) Capture (retry once if DUPLICATE_INVOICE_ID still occurs)
+		const mode = (pp.mode || "").toLowerCase();
+
+		/* A) AUTHORIZE NOW */
+		if (mode === "authorize") {
+			let authResult;
+
+			try {
+				const authReq = new paypal.orders.OrdersAuthorizeRequest(pp.order_id);
+				if (pp.cmid) authReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
+				authReq.headers["PayPal-Request-Id"] = `auth-${uuid()}`;
+				authReq.requestBody({});
+				const { result } = await ppClient.execute(authReq);
+				authResult = result;
+			} catch (err) {
+				const raw = err?._originalError?.text || err?.message || "";
+				const alreadyAuth =
+					err?.statusCode === 422 &&
+					(/ORDER_ALREADY_AUTHORIZED/i.test(raw) ||
+						/UNPROCESSABLE_ENTITY/i.test(raw));
+				if (!alreadyAuth) {
+					console.error("Authorize error:", err?.response?.data || err);
+					return res
+						.status(500)
+						.json({ message: "Failed to authorize payment." });
+				}
+				const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
+				if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
+				const { result } = await ppClient.execute(getReq);
+				authResult = result;
+			}
+
+			const auth =
+				authResult?.purchase_units?.[0]?.payments?.authorizations?.[0] || {};
+			if (!auth?.id) {
+				return res.status(402).json({
+					message: "Authorization was not created.",
+					details: authResult,
+				});
+			}
+
+			const srcCard = authResult?.payment_source?.card || {};
+			const vaultId =
+				authResult?.payment_source?.card?.attributes?.vault?.id ||
+				reservation?.paypal_details?.vault_id ||
+				null;
+
+			const setOps = {
+				"paypal_details.bounds.base": "USD",
+				"paypal_details.bounds.limit_usd": toNum2(
+					convertedAmounts?.totalUSD || usdAmount
+				),
+				"paypal_details.captured_total_usd":
+					reservation?.paypal_details?.captured_total_usd || 0,
+				"paypal_details.pending_total_usd":
+					reservation?.paypal_details?.pending_total_usd || 0,
+				"paypal_details.initial.intent": "AUTHORIZE",
+				"paypal_details.initial.order_id": authResult.id,
+				"paypal_details.initial.authorization_id": auth.id,
+				"paypal_details.initial.authorization_status": auth.status,
+				"paypal_details.initial.amount": auth?.amount?.value,
+				"paypal_details.initial.currency": auth?.amount?.currency_code,
+				"paypal_details.initial.expiration_time": auth?.expiration_time || null,
+				"paypal_details.initial.network_transaction_reference":
+					auth?.network_transaction_reference || null,
+				"paypal_details.initial.invoice_id": uniqueInvoiceId,
+				"paypal_details.initial.cmid": pp.cmid || null,
+				"paypal_details.initial.raw": JSON.parse(JSON.stringify(authResult)),
+				"payment_details.captured": false,
+				"payment_details.authorizationId": auth.id,
+				"payment_details.authorizationAmountUSD": toNum2(
+					auth?.amount?.value || 0
+				),
+			};
+
+			if (vaultId) {
+				setOps["paypal_details.vault_id"] = vaultId;
+				setOps["paypal_details.vault_status"] = "ACTIVE";
+				setOps["paypal_details.vaulted_at"] = new Date();
+				setOps["paypal_details.card_brand"] =
+					srcCard.brand || reservation?.paypal_details?.card_brand || null;
+				setOps["paypal_details.card_last4"] =
+					srcCard.last_digits ||
+					reservation?.paypal_details?.card_last4 ||
+					null;
+				setOps["paypal_details.card_exp"] =
+					srcCard.expiry || reservation?.paypal_details?.card_exp || null;
+				if (srcCard.billing_address)
+					setOps["paypal_details.billing_address"] = srcCard.billing_address;
+			}
+
+			const updated = await Reservations.findByIdAndUpdate(
+				reservation._id,
+				{ $set: setOps },
+				{ new: true }
+			).populate("hotelId");
+
+			return res.status(200).json({
+				message: "Payment authorized (no funds captured).",
+				reservation: updated,
+				authorizationId: auth.id,
+			});
+		}
+
+		/* B) CAPTURE NOW */
+		const limit =
+			reservation?.paypal_details?.bounds?.limit_usd ??
+			(convertedAmounts?.totalUSD ? toNum2(convertedAmounts.totalUSD) : null);
+
+		if (!limit || limit <= 0) {
+			return res
+				.status(400)
+				.json({ message: "Reservation capture limit is not set." });
+		}
+
+		const capturedSoFar = toNum2(
+			reservation?.paypal_details?.captured_total_usd || 0
+		);
+		const newCapture = toNum2(usdAmount);
+
+		if (capturedSoFar + newCapture > limit + 1e-9) {
+			const remaining = (limit - capturedSoFar).toFixed(2);
+			return res.status(400).json({
+				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
+			});
+		}
+
+		const pendingReserved = await reservePendingCaptureUSD({
+			reservationId: reservation._id,
+			usdAmount: newCapture,
+		});
+		if (!pendingReserved) {
+			const remaining = (
+				limit -
+				(capturedSoFar + (reservation?.paypal_details?.pending_total_usd || 0))
+			).toFixed(2);
+			return res.status(400).json({
+				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
+			});
+		}
+
+		const reqId = `link-cap-${uuid()}`;
 		async function tryCaptureOnce() {
 			return paypalCaptureApprovedOrder({
-				orderId: paypal.order_id,
-				cmid: paypal.cmid,
+				orderId: pp.order_id,
+				cmid: pp.cmid,
+				reqId,
 			});
 		}
 
@@ -1549,53 +2011,43 @@ exports.linkPayReservation = async (req, res) => {
 			const raw = err?._originalError?.text || err?.message || "";
 			const isDupInv =
 				err?.statusCode === 422 && /DUPLICATE_INVOICE_ID/i.test(raw);
-			if (!isDupInv) throw err;
-
-			// Re‑patch with a fresh unique invoice id, then retry capture once
+			if (!isDupInv) {
+				await finalizePendingCaptureUSD({
+					reservationId: reservation._id,
+					usdAmount: newCapture,
+					success: false,
+				});
+				throw err;
+			}
 			const freshInvoiceId = buildUniqueInvoiceId(
 				reservation.confirmation_number,
 				existingCount + 1
 			);
 			try {
 				await patchOrderInvoiceAndDescription({
-					orderId: paypal.order_id,
+					orderId: pp.order_id,
 					invoice_id: freshInvoiceId,
 					custom_id: reservation.confirmation_number,
 					description,
-					auth: { PPM, clientId, secretKey },
+					auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
 				});
-			} catch (_) {
-				// even if patch fails again, attempt capture once more
-			}
+			} catch (_) {}
 			capResult = await tryCaptureOnce();
 		}
 
 		const cap = capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 		if (cap?.status !== "COMPLETED") {
+			await finalizePendingCaptureUSD({
+				reservationId: reservation._id,
+				usdAmount: newCapture,
+				success: false,
+			});
 			return res
 				.status(402)
 				.json({ message: "Payment was not completed.", details: cap });
 		}
 
-		const capAmount = toNum2(cap?.amount?.value || usdAmount);
-		const vaultId =
-			capResult?.payment_source?.card?.attributes?.vault?.id || null;
-
-		// 6) Update reservation (conflict‑free child updates only)
-		const setOps = {};
-		const pushOps = {};
-		const incOps = {};
-
-		// Ensure bounds & pending field exist
-		if (!reservation.paypal_details?.bounds) {
-			setOps["paypal_details.bounds"] = { base: "USD", limit_usd: limit };
-		}
-		if (typeof reservation?.paypal_details?.pending_total_usd !== "number") {
-			setOps["paypal_details.pending_total_usd"] = 0;
-		}
-
-		const isFirstCapture =
-			!reservation.paypal_details || !reservation.paypal_details.initial;
+		const capAmount = toNum2(cap?.amount?.value || newCapture);
 
 		const commonCaptureDoc = {
 			order_id: capResult.id,
@@ -1605,81 +2057,63 @@ exports.linkPayReservation = async (req, res) => {
 			currency: cap.amount?.currency_code,
 			seller_protection: cap?.seller_protection?.status || "UNKNOWN",
 			network_transaction_reference: cap?.network_transaction_reference || null,
-			cmid: paypal.cmid || null,
-			invoice_id: pu?.invoice_id || uniqueInvoiceId, // record which invoice we ended up with
+			cmid: pp.cmid || null,
+			invoice_id: uniqueInvoiceId,
 			raw: JSON.parse(JSON.stringify(capResult)),
 			created_at: new Date(cap?.create_time || Date.now()),
 		};
 
-		if (isFirstCapture) {
-			setOps["paypal_details.initial"] = commonCaptureDoc;
-			setOps["paypal_details.captured_total_usd"] = capAmount; // first capture uses $set
-		} else {
-			pushOps["paypal_details.mit"] = commonCaptureDoc; // subsequent captures
-			incOps["paypal_details.captured_total_usd"] = capAmount;
+		let updated = await finalizePendingCaptureUSD({
+			reservationId: reservation._id,
+			usdAmount: capAmount,
+			success: true,
+			captureDoc: commonCaptureDoc,
+		});
+
+		if (sarAmount) {
+			updated = await Reservations.findByIdAndUpdate(
+				reservation._id,
+				{ $inc: { paid_amount: Math.round(Number(sarAmount) * 100) / 100 } },
+				{ new: true }
+			).populate("hotelId");
 		}
 
-		if (vaultId) {
-			setOps["paypal_details.vault_id"] = vaultId;
-			setOps["paypal_details.vault_status"] = "ACTIVE";
-			setOps["paypal_details.vaulted_at"] = new Date();
-			setOps["paypal_details.card_brand"] =
-				capResult?.payment_source?.card?.brand || null;
-			setOps["paypal_details.card_last4"] =
-				capResult?.payment_source?.card?.last_digits || null;
-			setOps["paypal_details.card_exp"] =
-				capResult?.payment_source?.card?.expiry || null;
-			setOps["paypal_details.billing_address"] =
-				capResult?.payment_source?.card?.billing_address || undefined;
-		}
+		const newCapturedTotal = toNum2(
+			updated?.paypal_details?.captured_total_usd || 0
+		);
+		const fullyPaid = newCapturedTotal >= limit - 1e-9;
 
-		// Legacy UI fields
-		incOps["payment_details.chargeCount"] = 1;
-		setOps["payment_details.captured"] = true;
-		setOps["payment_details.triggeredAmountUSD"] = capAmount.toFixed(2);
-		if (sarAmount)
-			setOps["payment_details.triggeredAmountSAR"] =
-				toNum2(sarAmount).toFixed(2);
-		setOps["payment_details.finalCaptureTransactionId"] = cap.id;
-
-		const newCaptured = toNum2(capturedSoFar + capAmount);
-		const fullyPaid = newCaptured >= limit - 1e-9;
-		setOps["payment"] = fullyPaid ? "Paid Online" : "Deposit Paid";
-		setOps["commissionPaid"] = true;
-		if (sarAmount) incOps["paid_amount"] = toNum2(sarAmount);
-
-		const updateDoc = {
-			...(Object.keys(setOps).length ? { $set: setOps } : {}),
-			...(Object.keys(incOps).length ? { $inc: incOps } : {}),
-			...(Object.keys(pushOps).length ? { $push: pushOps } : {}),
+		const setOps2 = {
+			"payment_details.captured": true,
+			"payment_details.triggeredAmountUSD": toNum2(capAmount),
+			"payment_details.finalCaptureTransactionId": cap.id,
+			payment: fullyPaid ? "Paid Online" : "Deposit Paid",
+			commissionPaid: true,
 		};
+		if (sarAmount)
+			setOps2["payment_details.triggeredAmountSAR"] = toNum2(sarAmount);
 
-		const updated = await Reservations.findByIdAndUpdate(
+		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
-			updateDoc,
+			{ $set: setOps2, $inc: { "payment_details.chargeCount": 1 } },
 			{ new: true }
 		).populate("hotelId");
 
-		// 7) Notify
-		const hotel = updated.hotelId || {};
-		const invoiceModel = {
-			...updated.toObject(),
-			hotelName: updated.hotelName || hotel.hotelName || "Hotel",
-			hotelAddress: hotel.hotelAddress || "",
-			hotelCity: hotel.hotelCity || "",
-			hotelPhone: hotel.phone || "",
-		};
 		try {
+			const hotelDoc = updated.hotelId || {};
+			const invoiceModel = {
+				...updated.toObject(),
+				hotelName: updated.hotelName || hotelDoc.hotelName || "Hotel",
+				hotelAddress: hotelDoc.hotelAddress || "",
+				hotelCity: hotelDoc.hotelCity || "",
+				hotelPhone: hotelDoc.phone || "",
+			};
 			await sendEmailWithInvoice(
 				invoiceModel,
 				updated.customer_details?.email,
 				updated.belongsTo
 			);
-		} catch (_) {}
-		try {
 			await waSendReservationConfirmation(updated);
-		} catch (_) {}
-		try {
 			await waNotifyNewReservation(updated);
 		} catch (_) {}
 
@@ -1694,10 +2128,12 @@ exports.linkPayReservation = async (req, res) => {
 	}
 };
 
+/**
+ * 10) Helper to create PayPal orders (server)
+ */
 exports.createPayPalOrder = async (req, res) => {
 	try {
 		const body = req.body || {};
-		// Accept either a full purchase_units array or a simple amount
 		let purchase_units = body.purchase_units;
 		if (!Array.isArray(purchase_units)) {
 			const amt = Number(body.usdAmount || 0);
@@ -1706,7 +2142,7 @@ exports.createPayPalOrder = async (req, res) => {
 			purchase_units = [
 				{
 					reference_id: "default",
-					amount: { currency_code: "USD", value: toCCY(amt) },
+					amount: { currency_code: "USD", value: Number(amt).toFixed(2) },
 				},
 			];
 		}
@@ -1721,6 +2157,7 @@ exports.createPayPalOrder = async (req, res) => {
 				shipping_preference: "NO_SHIPPING",
 				brand_name: "Jannat Booking",
 			},
+			...(body.payment_source ? { payment_source: body.payment_source } : {}),
 		});
 
 		const { result } = await ppClient.execute(request);
@@ -1728,5 +2165,232 @@ exports.createPayPalOrder = async (req, res) => {
 	} catch (e) {
 		console.error("createPayPalOrder error:", e?.response?.data || e);
 		return res.status(500).json({ message: "Failed to create PayPal order" });
+	}
+};
+
+/**
+ * 11) Verification endpoint (create reservation from email JWT)
+ *  - Mirrors your janat.js duplicate checks
+ */
+exports.verifyReservationAndCreate = async (req, res) => {
+	try {
+		const token = req.body?.token || req.query?.token;
+		if (!token) return res.status(400).json({ message: "Missing token." });
+
+		let decoded;
+		try {
+			decoded = jwt.verify(token, process.env.JWT_SECRET2);
+		} catch (e) {
+			return res.status(400).json({ message: "Invalid or expired token." });
+		}
+
+		// Idempotency: if already created with this confirmation number, return it
+		const existing = await Reservations.findOne({
+			confirmation_number: decoded.confirmation_number,
+		}).populate("hotelId");
+		if (existing) {
+			// Build FE-friendly data2 mirror (as some UIs expect data2)
+			const exObj = existing.toObject();
+			if (exObj.customer_details) delete exObj.customer_details.password;
+			const data2 = { ...exObj, customerDetails: exObj.customer_details };
+			delete data2.customer_details;
+			return res.status(200).json({
+				message: "Reservation already verified.",
+				data: existing,
+				data2,
+			});
+		}
+
+		// ---- Duplicate checks (similar to janat.js) ----
+		const reservationData = decoded;
+		const checkinDate = new Date(reservationData.checkin_date);
+
+		// Exact duplicate (same name/email/phone + same checkin_date)
+		const exactDuplicate = await Reservations.findOne({
+			"customer_details.name": reservationData.customerDetails.name,
+			"customer_details.email": reservationData.customerDetails.email,
+			"customer_details.phone": reservationData.customerDetails.phone,
+			checkin_date: reservationData.checkin_date,
+		});
+		if (exactDuplicate) {
+			return res.status(400).json({
+				message:
+					"It looks like we have duplicate reservations. Please contact customer service in the chat.",
+			});
+		}
+
+		// Partial duplicate: same or next month window of check-in
+		const startOfSameMonth = new Date(
+			checkinDate.getFullYear(),
+			checkinDate.getMonth(),
+			1
+		);
+		const endOfNextMonth = new Date(
+			checkinDate.getFullYear(),
+			checkinDate.getMonth() + 2,
+			0
+		);
+		const partialDuplicate = await Reservations.findOne({
+			"customer_details.name": reservationData.customerDetails.name,
+			"customer_details.email": reservationData.customerDetails.email,
+			"customer_details.phone": reservationData.customerDetails.phone,
+			checkin_date: { $gte: startOfSameMonth, $lt: endOfNextMonth },
+		});
+		if (partialDuplicate) {
+			return res.status(400).json({
+				message:
+					"It looks like we have duplicate reservations. Please contact customer service in the chat.",
+			});
+		}
+
+		// Duplicate by email/phone in last 30 days
+		const today = new Date();
+		const thirtyDaysAgo = new Date(today);
+		thirtyDaysAgo.setDate(today.getDate() - 30);
+		const duplicateByEmailOrPhone = await Reservations.findOne({
+			$or: [
+				{ "customer_details.email": reservationData.customerDetails.email },
+				{ "customer_details.phone": reservationData.customerDetails.phone },
+			],
+			createdAt: { $gte: thirtyDaysAgo, $lte: today },
+		});
+		if (duplicateByEmailOrPhone) {
+			return res.status(400).json({
+				message:
+					"A similar reservation has been made recently. Please contact customer service in the chat.",
+			});
+		}
+
+		// Ensure confirmation number is unique (regenerate if necessary)
+		let confirmationNumber = reservationData.confirmation_number;
+		if (!confirmationNumber) {
+			confirmationNumber = await new Promise((resolve, reject) => {
+				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
+					err ? reject(err) : resolve(unique)
+				);
+			});
+			reservationData.confirmation_number = confirmationNumber;
+		} else {
+			const existingReservation = await Reservations.findOne({
+				confirmation_number: confirmationNumber,
+			});
+			if (existingReservation) {
+				return res.status(400).json({
+					message: "Reservation already exists. No further action required.",
+				});
+			}
+		}
+
+		// “Not Paid” verification path: do not include card data; set zeros
+		reservationData.paymentDetails = {
+			cardNumber: "",
+			cardExpiryDate: "",
+			cardCVV: "",
+			cardHolderName: "",
+		};
+		reservationData.paid_amount = 0;
+		reservationData.payment = "Not Paid";
+		reservationData.commission = 0;
+		reservationData.commissionPaid = false;
+
+		// Persist reservation
+		const saved = await buildAndSaveReservation({
+			reqBody: { ...reservationData, paypal_details: undefined },
+			confirmationNumber,
+			paypalDetailsToPersist: reservationData.paypal_details, // normally undefined in “no card” verification
+		});
+
+		// Email + WA
+		const hotel = await HotelDetails.findById(saved.hotelId).lean();
+		const resvData = {
+			...saved.toObject(),
+			hotelName: saved.hotelName || hotel?.hotelName || "Hotel",
+			hotelAddress: hotel?.hotelAddress || "",
+			hotelCity: hotel?.hotelCity || "",
+			hotelPhone: hotel?.phone || "",
+		};
+		await sendEmailWithInvoice(
+			resvData,
+			saved.customer_details?.email,
+			saved.belongsTo
+		);
+		try {
+			await waSendReservationConfirmation(saved);
+		} catch (_) {}
+		try {
+			await waNotifyNewReservation(saved);
+		} catch (_) {}
+
+		// Build data2 mirror for FE that expects camelCase
+		const savedObj = saved.toObject();
+		if (savedObj.customer_details) delete savedObj.customer_details.password;
+		const data2 = { ...savedObj, customerDetails: savedObj.customer_details };
+		delete data2.customer_details;
+
+		return res.status(201).json({
+			message: "Reservation verified and created.",
+			data: saved,
+			data2,
+		});
+	} catch (err) {
+		console.error(
+			"verifyReservationAndCreate error:",
+			err?.response?.data || err
+		);
+		return res.status(500).json({ message: "Verification failed." });
+	}
+};
+
+/**
+ * 12) OPTIONAL: attach a vault to an existing reservation
+ */
+exports.attachVaultToReservation = async (req, res) => {
+	try {
+		const { reservationId, setup_token } = req.body || {};
+		if (!reservationId || !setup_token) {
+			return res
+				.status(400)
+				.json({ message: "reservationId and setup_token are required." });
+		}
+
+		const r = await Reservations.findById(reservationId);
+		if (!r) return res.status(404).json({ message: "Reservation not found." });
+
+		const tokenData = await paypalExchangeSetupToVault(setup_token);
+
+		const setOps = {
+			"paypal_details.vault_id": tokenData.id,
+			"paypal_details.vault_status": tokenData.status || "ACTIVE",
+			"paypal_details.vaulted_at": new Date(
+				tokenData.create_time || Date.now()
+			),
+			"paypal_details.card_brand":
+				tokenData.payment_source?.card?.brand || null,
+			"paypal_details.card_last4":
+				tokenData.payment_source?.card?.last_digits || null,
+			"paypal_details.card_exp": tokenData.payment_source?.card?.expiry || null,
+		};
+		if (tokenData.payment_source?.card?.billing_address) {
+			setOps["paypal_details.billing_address"] =
+				tokenData.payment_source.card.billing_address;
+		}
+
+		const updated = await Reservations.findByIdAndUpdate(
+			reservationId,
+			{ $set: setOps },
+			{ new: true }
+		);
+
+		return res.status(200).json({
+			ok: true,
+			message: "Vault token attached to reservation.",
+			reservation: updated,
+		});
+	} catch (error) {
+		console.error(
+			"attachVaultToReservation error:",
+			error?.response?.data || error
+		);
+		return res.status(500).json({ message: "Failed to attach vault token." });
 	}
 };
