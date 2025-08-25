@@ -607,156 +607,63 @@ async function finalizePendingCaptureUSD({
 let cachedClientToken = null;
 let cachedClientTokenExp = 0;
 
+// helper to avoid leaking secrets
+function idSig(id) {
+	return crypto
+		.createHash("sha256")
+		.update(String(id))
+		.digest("hex")
+		.slice(0, 8);
+}
+
 exports.generateClientToken = async (req, res) => {
-	console.log(req.query, "req.query");
-	console.log(req.body, "req.body");
-	// Correlate client ↔ server ↔ PayPal
-	const reqId = req.headers["x-request-id"] || uuid();
-	const started = Date.now();
-
-	// Optional diagnostic query params:
-	// - ?dbg=1     → returns a "diag" object for client-side console
-	// - ?bc=EG     → hint buyer country (for JS SDK rendering only; not persisted here)
-	const dbg = req.query.dbg === "1" || req.query.debug === "1";
-	const buyerCountry = String(
-		req.query.bc || req.headers["x-buyer-country"] || ""
-	)
-		.trim()
-		.toUpperCase();
-
-	// Basic client context for logs
-	const hdr = req.headers || {};
-	const ua = hdr["user-agent"];
-	const xff = hdr["x-forwarded-for"];
-	const ip = req.ip;
-	const geo =
-		hdr["x-vercel-ip-country"] ||
-		hdr["cf-ipcountry"] ||
-		hdr["x-appengine-country"] ||
-		hdr["fastly-country-code"] ||
-		null;
-
 	try {
-		// Serve cached when still fresh
+		const dbg = String(req.query?.dbg || "") === "1";
+		const bc = (req.query?.bc || "").toUpperCase() || null;
+
 		if (cachedClientToken && Date.now() < cachedClientTokenExp) {
-			const payload = {
+			return res.json({
 				clientToken: cachedClientToken,
-				cached: true,
 				env: IS_PROD ? "live" : "sandbox",
-			};
-
-			if (dbg) {
-				payload.diag = {
-					reqId,
-					mode: "cache",
-					isProd: !!IS_PROD,
-					ppm: PPM,
-					serverNow: new Date().toISOString(),
-					elapsedMs: Date.now() - started,
-					ip,
-					xff,
-					geo,
-					ua,
-					buyerCountryHint: buyerCountry || "EG",
-					cacheTtlMs: Math.max(0, cachedClientTokenExp - Date.now()),
-				};
-			}
-
-			// Echo correlation headers back
-			res.set("x-request-id", reqId);
-			return res.json(payload);
+				cached: true,
+				diag: dbg
+					? {
+							isProd: IS_PROD,
+							buyerCountryHint: bc,
+							clientIdSig: idSig(clientId), // <<— signature only
+					  }
+					: undefined,
+			});
 		}
 
-		// Generate new client-token
-		const axiosRes = await ax.post(
+		const t0 = Date.now();
+		const { data, headers } = await ax.post(
 			`${PPM}/v1/identity/generate-token`,
 			{},
 			{ auth: { username: clientId, password: secretKey } }
 		);
 
-		const debugId =
-			axiosRes.headers?.["paypal-debug-id"] ||
-			axiosRes.headers?.["paypal-debugid"] ||
-			null;
+		cachedClientToken = data.client_token;
+		cachedClientTokenExp = Date.now() + 1000 * 60 * 60 * 8;
 
-		cachedClientToken = axiosRes?.data?.client_token;
-		cachedClientTokenExp = Date.now() + 1000 * 60 * 60 * 8; // 8h
-
-		// Log a compact server-side line you can grep by reqId
-		console.log(
-			"[PP-TOKEN][fresh]",
-			JSON.stringify({
-				reqId,
-				isProd: !!IS_PROD,
-				ppm: PPM,
-				geo,
-				ip,
-				xff,
-				ua: (ua || "").slice(0, 120),
-				debugId,
-				elapsedMs: Date.now() - started,
-			})
-		);
-
-		const payload = {
+		return res.json({
 			clientToken: cachedClientToken,
 			env: IS_PROD ? "live" : "sandbox",
-		};
-
-		if (dbg) {
-			payload.diag = {
-				reqId,
-				mode: "fresh",
-				isProd: !!IS_PROD,
-				ppm: PPM,
-				serverNow: new Date().toISOString(),
-				elapsedMs: Date.now() - started,
-				ip,
-				xff,
-				geo,
-				ua,
-				buyerCountryHint: buyerCountry || "EG",
-				paypalDebugId: debugId,
-			};
-		}
-
-		// Echo correlation headers back
-		res.set("x-request-id", reqId);
-		if (debugId) res.set("x-paypal-debug-id", debugId);
-
-		return res.json(payload);
-	} catch (e) {
-		const status = e?.response?.status || 503;
-		const body = e?.response?.data || e?.message || "unknown";
-		const debugId =
-			e?.response?.headers?.["paypal-debug-id"] ||
-			e?.response?.headers?.["paypal-debugid"] ||
-			null;
-
-		console.error(
-			"[PP-TOKEN][error]",
-			JSON.stringify({
-				reqId,
-				isProd: !!IS_PROD,
-				ppm: PPM,
-				status,
-				debugId,
-				geo,
-				ip,
-				xff,
-				ua: (ua || "").slice(0, 120),
-				err: body,
-			})
-		);
-
-		res.set("x-request-id", reqId);
-		if (debugId) res.set("x-paypal-debug-id", debugId);
-
-		return res.status(503).json({
-			error: "PayPal temporarily unreachable. Try again.",
-			reqId,
-			debugId,
+			diag: dbg
+				? {
+						isProd: IS_PROD,
+						buyerCountryHint: bc,
+						clientIdSig: idSig(clientId), // <<— signature only
+						debugId: headers?.["paypal-debug-id"] || null,
+						elapsedMs: Date.now() - t0,
+				  }
+				: undefined,
 		});
+	} catch (e) {
+		console.error("PayPal client-token:", e?.response?.data || e);
+		return res
+			.status(503)
+			.json({ error: "PayPal temporarily unreachable. Try again." });
 	}
 };
 
