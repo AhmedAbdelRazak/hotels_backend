@@ -5,7 +5,8 @@ const router = express.Router();
 const Ctrl = require("../controllers/paypal_reservation");
 
 /* Route 1: JS SDK client token for Card Fields (3‑DS) */
-router.get("/paypal/client-token", Ctrl.generateClientToken);
+router.get("/paypal/token-generated", Ctrl.generateClientToken);
+router.post("/paypal/token-generated", Ctrl.generateClientToken);
 router.post("/paypal/order/create", Ctrl.createPayPalOrder);
 
 /* Route 2: One‑call reservation creation + PayPal handling
