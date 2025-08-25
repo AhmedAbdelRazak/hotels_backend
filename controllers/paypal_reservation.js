@@ -607,31 +607,156 @@ async function finalizePendingCaptureUSD({
 let cachedClientToken = null;
 let cachedClientTokenExp = 0;
 
-exports.generateClientToken = async (_req, res) => {
+exports.generateClientToken = async (req, res) => {
+	// Correlate client ↔ server ↔ PayPal
+	const reqId = req.headers["x-request-id"] || uuid();
+	const started = Date.now();
+
+	// Optional diagnostic query params:
+	// - ?dbg=1     → returns a "diag" object for client-side console
+	// - ?bc=EG     → hint buyer country (for JS SDK rendering only; not persisted here)
+	const dbg = req.query.dbg === "1" || req.query.debug === "1";
+	const buyerCountry = String(
+		req.query.bc || req.headers["x-buyer-country"] || ""
+	)
+		.trim()
+		.toUpperCase();
+
+	// Basic client context for logs
+	const hdr = req.headers || {};
+	const ua = hdr["user-agent"];
+	const xff = hdr["x-forwarded-for"];
+	const ip = req.ip;
+	const geo =
+		hdr["x-vercel-ip-country"] ||
+		hdr["cf-ipcountry"] ||
+		hdr["x-appengine-country"] ||
+		hdr["fastly-country-code"] ||
+		null;
+
 	try {
+		// Serve cached when still fresh
 		if (cachedClientToken && Date.now() < cachedClientTokenExp) {
-			return res.json({
+			const payload = {
 				clientToken: cachedClientToken,
 				cached: true,
 				env: IS_PROD ? "live" : "sandbox",
-			});
+			};
+
+			if (dbg) {
+				payload.diag = {
+					reqId,
+					mode: "cache",
+					isProd: !!IS_PROD,
+					ppm: PPM,
+					serverNow: new Date().toISOString(),
+					elapsedMs: Date.now() - started,
+					ip,
+					xff,
+					geo,
+					ua,
+					buyerCountryHint: buyerCountry || null,
+					cacheTtlMs: Math.max(0, cachedClientTokenExp - Date.now()),
+				};
+			}
+
+			// Echo correlation headers back
+			res.set("x-request-id", reqId);
+			return res.json(payload);
 		}
-		const { data } = await ax.post(
+
+		// Generate new client-token
+		const axiosRes = await ax.post(
 			`${PPM}/v1/identity/generate-token`,
 			{},
 			{ auth: { username: clientId, password: secretKey } }
 		);
-		cachedClientToken = data.client_token;
-		cachedClientTokenExp = Date.now() + 1000 * 60 * 60 * 8;
-		res.json({
+
+		const debugId =
+			axiosRes.headers?.["paypal-debug-id"] ||
+			axiosRes.headers?.["paypal-debugid"] ||
+			null;
+
+		cachedClientToken = axiosRes?.data?.client_token;
+		cachedClientTokenExp = Date.now() + 1000 * 60 * 60 * 8; // 8h
+
+		// Log a compact server-side line you can grep by reqId
+		console.log(
+			"[PP-TOKEN][fresh]",
+			JSON.stringify({
+				reqId,
+				isProd: !!IS_PROD,
+				ppm: PPM,
+				geo,
+				ip,
+				xff,
+				ua: (ua || "").slice(0, 120),
+				debugId,
+				elapsedMs: Date.now() - started,
+			})
+		);
+
+		const payload = {
 			clientToken: cachedClientToken,
 			env: IS_PROD ? "live" : "sandbox",
-		});
+		};
+
+		if (dbg) {
+			payload.diag = {
+				reqId,
+				mode: "fresh",
+				isProd: !!IS_PROD,
+				ppm: PPM,
+				serverNow: new Date().toISOString(),
+				elapsedMs: Date.now() - started,
+				ip,
+				xff,
+				geo,
+				ua,
+				buyerCountryHint: buyerCountry || null,
+				paypalDebugId: debugId,
+			};
+		}
+
+		// Echo correlation headers back
+		res.set("x-request-id", reqId);
+		if (debugId) res.set("x-paypal-debug-id", debugId);
+
+		return res.json(payload);
 	} catch (e) {
-		console.error("PayPal client-token:", e?.response?.data || e);
-		res
+		const status = e?.response?.status || 503;
+		const body = e?.response?.data || e?.message || "unknown";
+		const debugId =
+			e?.response?.headers?.["paypal-debug-id"] ||
+			e?.response?.headers?.["paypal-debugid"] ||
+			null;
+
+		console.error(
+			"[PP-TOKEN][error]",
+			JSON.stringify({
+				reqId,
+				isProd: !!IS_PROD,
+				ppm: PPM,
+				status,
+				debugId,
+				geo,
+				ip,
+				xff,
+				ua: (ua || "").slice(0, 120),
+				err: body,
+			})
+		);
+
+		res.set("x-request-id", reqId);
+		if (debugId) res.set("x-paypal-debug-id", debugId);
+
+		return res
 			.status(503)
-			.json({ error: "PayPal temporarily unreachable. Try again." });
+			.json({
+				error: "PayPal temporarily unreachable. Try again.",
+				reqId,
+				debugId,
+			});
 	}
 };
 
@@ -866,11 +991,9 @@ exports.createReservationAndProcess = async (req, res) => {
 					});
 				} catch (e) {
 					console.error("Precheck auth+void failed:", e?.response?.data || e);
-					return res
-						.status(402)
-						.json({
-							message: "Card verification failed for the requested amount.",
-						});
+					return res.status(402).json({
+						message: "Card verification failed for the requested amount.",
+					});
 				}
 			}
 
