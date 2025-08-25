@@ -608,6 +608,8 @@ let cachedClientToken = null;
 let cachedClientTokenExp = 0;
 
 exports.generateClientToken = async (req, res) => {
+	console.log(req.query, "req.query");
+	console.log(req.body, "req.body");
 	// Correlate client ↔ server ↔ PayPal
 	const reqId = req.headers["x-request-id"] || uuid();
 	const started = Date.now();
@@ -655,7 +657,7 @@ exports.generateClientToken = async (req, res) => {
 					xff,
 					geo,
 					ua,
-					buyerCountryHint: buyerCountry || null,
+					buyerCountryHint: buyerCountry || "EG",
 					cacheTtlMs: Math.max(0, cachedClientTokenExp - Date.now()),
 				};
 			}
@@ -713,7 +715,7 @@ exports.generateClientToken = async (req, res) => {
 				xff,
 				geo,
 				ua,
-				buyerCountryHint: buyerCountry || null,
+				buyerCountryHint: buyerCountry || "EG",
 				paypalDebugId: debugId,
 			};
 		}
@@ -750,13 +752,11 @@ exports.generateClientToken = async (req, res) => {
 		res.set("x-request-id", reqId);
 		if (debugId) res.set("x-paypal-debug-id", debugId);
 
-		return res
-			.status(503)
-			.json({
-				error: "PayPal temporarily unreachable. Try again.",
-				reqId,
-				debugId,
-			});
+		return res.status(503).json({
+			error: "PayPal temporarily unreachable. Try again.",
+			reqId,
+			debugId,
+		});
 	}
 };
 
