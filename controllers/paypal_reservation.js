@@ -20,6 +20,7 @@ const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const puppeteer = require("puppeteer");
 const sgMail = require("@sendgrid/mail");
+const crypto = require("crypto");
 
 /* Models */
 const HotelDetails = require("../models/hotel_details");
@@ -1040,7 +1041,7 @@ exports.createReservationAndProcess = async (req, res) => {
 									)));
 						return res.status(deniedLike ? 402 : 500).json({
 							message: deniedLike
-								? "Card authorization was declined by issuer."
+								? "The authorization was declined by the card issuer. No reservation was created. Please try a different card, pay via link (new PayPal order), or add a card (vault) and try again."
 								: "Failed to authorize payment.",
 						});
 					}
@@ -1059,9 +1060,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				// **HARD GUARD**: if auth isn't OK (DENIED/VOIDED/etc), DO NOT create a reservation.
 				if (!auth?.id || !isAuthStatusOk(authStatus)) {
 					return res.status(402).json({
-						message: `Card authorization ${
-							authStatus || "FAILED"
-						}. Reservation was not created. Please try a different card or pay via link.`,
+						message: `The authorization was declined by the card issuer. No reservation was created. Please try a different card, pay via link (new PayPal order), or add a card (vault) and try again.`,
 						details: { status: auth?.status || null, id: auth?.id || null },
 					});
 				}
@@ -1936,10 +1935,19 @@ exports.linkPayReservation = async (req, res) => {
 					(/ORDER_ALREADY_AUTHORIZED/i.test(raw) ||
 						/UNPROCESSABLE_ENTITY/i.test(raw));
 				if (!alreadyAuth) {
-					console.error("Authorize error:", err?.response?.data || err);
-					return res
-						.status(500)
-						.json({ message: "Failed to authorize payment." });
+					// Friendly error for link‑pay authorization failure
+					const deniedLike =
+						err?.statusCode === 422 &&
+						(/AUTHORIZATION_DENIED|INSTRUMENT_DECLINED|DECLINED/i.test(raw) ||
+							(Array.isArray(err?.response?.data?.details) &&
+								err.response.data.details.some((d) =>
+									/DENIED|DECLINED/i.test(String(d?.issue || ""))
+								)));
+					return res.status(deniedLike ? 402 : 500).json({
+						message: deniedLike
+							? "The authorization was declined by the card issuer. Please try a different card or capture a smaller amount."
+							: "Failed to authorize payment.",
+					});
 				}
 				const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
 				if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
