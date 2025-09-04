@@ -274,6 +274,24 @@ const hotel_detailsSchema = new mongoose.Schema(
 			],
 		},
 
+		ownerPaymentMethods: {
+			type: [
+				{
+					label: { type: String, default: "" }, // UI label
+					vault_id: { type: String, required: true }, // PayPal token id
+					vault_status: { type: String, default: "ACTIVE" },
+					vaulted_at: { type: Date, default: Date.now },
+					card_brand: { type: String, default: null }, // e.g. 'VISA'
+					card_last4: { type: String, default: null }, // e.g. '1234'
+					card_exp: { type: String, default: null }, // e.g. '2027-12'
+					billing_address: { type: Object, default: undefined },
+					default: { type: Boolean, default: false }, // default for MIT
+					active: { type: Boolean, default: true }, // soft delete
+				},
+			],
+			default: [],
+		},
+
 		belongsTo: { type: ObjectId, ref: "User" },
 	},
 	{ timestamps: true }

@@ -360,7 +360,7 @@ exports.getHotelDetails = (req, res) => {
 exports.listForAdmin = async (req, res) => {
 	try {
 		/* 1️⃣  Parse & sanitise query params */
-		let { page = 1, limit = 15, status, q = "" } = req.query;
+		let { page = 1, limit = 15, status, q = "", filter = "all" } = req.query;
 
 		page = Math.max(parseInt(page, 10) || 1, 1);
 		limit = Math.min(Math.max(parseInt(limit, 10) || 15, 1), 50);
@@ -375,10 +375,9 @@ exports.listForAdmin = async (req, res) => {
 		const search = q.trim();
 		let searchMatch = {};
 		if (search) {
-			/* escape regex special chars then make case‑insensitive regex */
+			// escape regex special chars then make case‑insensitive regex
 			const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			const regex = new RegExp(escaped, "i");
-
 			searchMatch = {
 				$or: [
 					{ hotelName: regex },
@@ -392,60 +391,248 @@ exports.listForAdmin = async (req, res) => {
 			};
 		}
 
-		/* 4️⃣  Build aggregation pipeline */
-		const pipeline = [
+		/* 4️⃣  Build pipeline core (+ computed flags) */
+		const pipelineCore = [
 			{ $match: baseMatch },
-			/* join User collection to access owner name/email -------------------- */
 			{
 				$lookup: {
-					from: "users", // <== collection name
+					from: "users",
 					localField: "belongsTo",
 					foreignField: "_id",
 					as: "owner",
 				},
 			},
 			{ $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
+			// computed completeness flags
+			{
+				$addFields: {
+					roomsDone: {
+						$gt: [{ $size: { $ifNull: ["$roomCountDetails", []] } }, 0],
+					},
+					photosDone: {
+						$gt: [{ $size: { $ifNull: ["$hotelPhotos", []] } }, 0],
+					},
+					locationDone: {
+						$let: {
+							vars: { coords: { $ifNull: ["$location.coordinates", []] } },
+							in: {
+								$and: [
+									{ $gte: [{ $size: "$$coords" }, 2] },
+									{ $ne: [{ $arrayElemAt: ["$$coords", 0] }, 0] },
+									{ $ne: [{ $arrayElemAt: ["$$coords", 1] }, 0] },
+								],
+							},
+						},
+					},
+					dataDone: {
+						$or: [
+							{ $gt: [{ $strLenCP: { $ifNull: ["$aboutHotel", ""] } }, 0] },
+							{
+								$gt: [{ $strLenCP: { $ifNull: ["$aboutHotelArabic", ""] } }, 0],
+							},
+							{ $gt: [{ $ifNull: ["$overallRoomsCount", 0] }, 0] },
+						],
+					},
+					bankDone: {
+						$gt: [{ $size: { $ifNull: ["$paymentSettings", []] } }, 0],
+					},
+				},
+			},
+			{
+				$addFields: {
+					activationReady: {
+						$and: ["$roomsDone", "$photosDone", "$locationDone", "$dataDone"],
+					},
+					fullyComplete: {
+						$and: [
+							"$roomsDone",
+							"$photosDone",
+							"$locationDone",
+							"$dataDone",
+							"$bankDone",
+						],
+					},
+				},
+			},
 		];
 
-		if (search) pipeline.push({ $match: searchMatch });
+		if (search) pipelineCore.push({ $match: searchMatch });
 
-		pipeline.push(
-			{ $sort: { createdAt: -1 } }, // newest first
-			{
-				/* facet = run two pipelines in parallel: paginated data + total count */
-				$facet: {
-					data: [{ $skip: skip }, { $limit: limit }],
-					totalCount: [{ $count: "count" }],
+		/* 5️⃣  Step-based filter mapping (optional) */
+		const stepFilterMatch =
+			filter === "missing_rooms"
+				? { roomsDone: false }
+				: filter === "missing_photos"
+				? { photosDone: false }
+				: filter === "missing_location"
+				? { locationDone: false }
+				: filter === "missing_data"
+				? { dataDone: false }
+				: filter === "missing_bank"
+				? { bankDone: false }
+				: filter === "activation_ready"
+				? { activationReady: true }
+				: filter === "fully_complete"
+				? { fullyComplete: true }
+				: filter === "missing_any"
+				? {
+						$or: [
+							{ roomsDone: { $ne: true } },
+							{ photosDone: { $ne: true } },
+							{ locationDone: { $ne: true } },
+							{ dataDone: { $ne: true } },
+						],
+				  }
+				: {}; // 'all' or unknown => no extra filter
+
+		/* 6️⃣  Group definition for summaries */
+		const summaryGroup = {
+			_id: null,
+			total: { $sum: 1 },
+			active: {
+				$sum: {
+					$cond: [{ $eq: ["$activateHotel", true] }, 1, 0],
 				},
-			}
-		);
+			},
+			inactive: {
+				$sum: {
+					$cond: [{ $ne: ["$activateHotel", true] }, 1, 0],
+				},
+			},
 
-		/* 5️⃣  Run the aggregation */
+			roomsDone: {
+				$sum: { $cond: [{ $eq: ["$roomsDone", true] }, 1, 0] },
+			},
+			roomsMissing: {
+				$sum: { $cond: [{ $ne: ["$roomsDone", true] }, 1, 0] },
+			},
+
+			photosDone: {
+				$sum: { $cond: [{ $eq: ["$photosDone", true] }, 1, 0] },
+			},
+			photosMissing: {
+				$sum: { $cond: [{ $ne: ["$photosDone", true] }, 1, 0] },
+			},
+
+			locationDone: {
+				$sum: { $cond: [{ $eq: ["$locationDone", true] }, 1, 0] },
+			},
+			locationMissing: {
+				$sum: { $cond: [{ $ne: ["$locationDone", true] }, 1, 0] },
+			},
+
+			dataDone: {
+				$sum: { $cond: [{ $eq: ["$dataDone", true] }, 1, 0] },
+			},
+			dataMissing: {
+				$sum: { $cond: [{ $ne: ["$dataDone", true] }, 1, 0] },
+			},
+
+			bankDone: {
+				$sum: { $cond: [{ $eq: ["$bankDone", true] }, 1, 0] },
+			},
+			bankMissing: {
+				$sum: { $cond: [{ $ne: ["$bankDone", true] }, 1, 0] },
+			},
+
+			activationReady: {
+				$sum: { $cond: [{ $eq: ["$activationReady", true] }, 1, 0] },
+			},
+			activationNotReady: {
+				$sum: { $cond: [{ $ne: ["$activationReady", true] }, 1, 0] },
+			},
+
+			fullyComplete: {
+				$sum: { $cond: [{ $eq: ["$fullyComplete", true] }, 1, 0] },
+			},
+			notFullyComplete: {
+				$sum: { $cond: [{ $ne: ["$fullyComplete", true] }, 1, 0] },
+			},
+		};
+
+		/* 7️⃣  Final aggregation with facet */
+		const pipeline = [
+			...pipelineCore,
+			{ $sort: { createdAt: -1 } },
+			{
+				$facet: {
+					data: [
+						...(Object.keys(stepFilterMatch).length
+							? [{ $match: stepFilterMatch }]
+							: []),
+						{ $skip: skip },
+						{ $limit: limit },
+					],
+					totalCount: [
+						...(Object.keys(stepFilterMatch).length
+							? [{ $match: stepFilterMatch }]
+							: []),
+						{ $count: "count" },
+					],
+					summaryOverall: [{ $group: summaryGroup }],
+					summaryCurrent: [
+						...(Object.keys(stepFilterMatch).length
+							? [{ $match: stepFilterMatch }]
+							: []),
+						{ $group: summaryGroup },
+					],
+				},
+			},
+		];
+
 		const result = await HotelDetails.aggregate(pipeline).exec();
-		const hotels = result[0]?.data || [];
-		const total =
-			result[0]?.totalCount?.length > 0 ? result[0].totalCount[0].count : 0;
 
-		/* 6️⃣  Minimal owner projection (id, name, email) */
+		const facet = result[0] || {};
+		const hotels = Array.isArray(facet.data) ? facet.data : [];
+		const total =
+			facet.totalCount && facet.totalCount[0] ? facet.totalCount[0].count : 0;
+
 		const cleaned = hotels.map((h) => {
+			const out = { ...h };
 			if (h.owner) {
-				h.belongsTo = {
+				out.belongsTo = {
 					_id: h.owner._id,
 					name: h.owner.name,
 					email: h.owner.email,
 				};
 			}
-			delete h.owner;
-			return h;
+			delete out.owner;
+			return out;
 		});
 
-		/* 7️⃣  Send */
+		const safeSummary = (arr) =>
+			arr && arr[0]
+				? arr[0]
+				: {
+						total: 0,
+						active: 0,
+						inactive: 0,
+						roomsDone: 0,
+						roomsMissing: 0,
+						photosDone: 0,
+						photosMissing: 0,
+						locationDone: 0,
+						locationMissing: 0,
+						dataDone: 0,
+						dataMissing: 0,
+						bankDone: 0,
+						bankMissing: 0,
+						activationReady: 0,
+						activationNotReady: 0,
+						fullyComplete: 0,
+						notFullyComplete: 0,
+				  };
+
 		return res.json({
 			total,
 			page,
 			pages: Math.ceil(total / limit),
 			results: cleaned.length,
 			hotels: cleaned,
+			summary: {
+				overall: safeSummary(facet.summaryOverall),
+				currentView: safeSummary(facet.summaryCurrent),
+			},
 		});
 	} catch (err) {
 		console.error("listForAdmin error:", err);
@@ -551,5 +738,252 @@ exports.listOfHotelUser = async (req, res) => {
 		res.status(500).json({
 			error: "An error occurred while fetching the hotels.",
 		});
+	}
+};
+
+/** ─────────────────────────────────────────────────────────────────────
+ *  Owner payment method save/list/default/remove
+ *  - Reuses paypalExchangeSetupToVault(setup_token_id)
+ *  - Persists a sanitized record under HotelDetails.ownerPaymentMethods[]
+ *  - Never stores PAN/CVV
+ *  - Optional: verifies that requester owns the hotel (req.user)
+ *  Endpoints wired below in routes
+ *  ──────────────────────────────────────────────────────────────────── */
+
+exports.saveOwnerPaymentMethod = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		const { setup_token, label, setDefault } = req.body || {};
+
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ message: "Invalid hotelId." });
+		}
+		if (!setup_token) {
+			return res.status(400).json({ message: "setup_token is required." });
+		}
+
+		const hotel = await HotelDetails.findById(hotelId).select(
+			"_id belongsTo ownerPaymentMethods"
+		);
+		if (!hotel) return res.status(404).json({ message: "Hotel not found." });
+
+		// Optional auth guard: only owner/admin can attach a payment method
+		if (
+			req.user &&
+			String(hotel.belongsTo) !== String(req.user._id) &&
+			String(req.user.role || "").toLowerCase() !== "admin"
+		) {
+			return res.status(403).json({ message: "Not allowed." });
+		}
+
+		// 1) Exchange setup_token -> PayPal vault payment token (no PAN/CVV)
+		let tokenData;
+		try {
+			tokenData = await paypalExchangeSetupToVault(setup_token);
+		} catch (e) {
+			console.error("Owner vault exchange failed:", e?.response?.data || e);
+			return res
+				.status(400)
+				.json({ message: "Unable to save card with PayPal." });
+		}
+
+		const vaultId = tokenData.id;
+		const metaCard = tokenData?.payment_source?.card || {};
+		const brand = metaCard.brand || null;
+		const last4 = metaCard.last_digits || null;
+		const exp = metaCard.expiry || null;
+
+		// 2) De-dup: if same vault_id already saved (or same fingerprint), bail out
+		const fingerprint = `${(brand || "").toUpperCase()}-${last4 || ""}-${
+			exp || ""
+		}`;
+		const exists = (hotel.ownerPaymentMethods || []).some(
+			(m) =>
+				m.vault_id === vaultId ||
+				`${(m.card_brand || "").toUpperCase()}-${m.card_last4 || ""}-${
+					m.card_exp || ""
+				}` === fingerprint
+		);
+		if (exists) {
+			return res
+				.status(409)
+				.json({ message: "This payment method is already saved." });
+		}
+
+		// 3) If caller wants this to be default (or it's the first card), flip defaults off first
+		const shouldBeDefault =
+			!!setDefault || (hotel.ownerPaymentMethods || []).length === 0;
+		if (shouldBeDefault && (hotel.ownerPaymentMethods || []).length > 0) {
+			await HotelDetails.updateOne(
+				{ _id: hotelId },
+				{ $set: { "ownerPaymentMethods.$[].default": false } }
+			);
+		}
+
+		// 4) Build sanitized payment-method record
+		const record = {
+			label:
+				label ||
+				`${brand ? brand.toUpperCase() : "CARD"} •••• ${last4 || "••••"}${
+					exp ? ` (${exp})` : ""
+				}`,
+			vault_id: vaultId,
+			vault_status: tokenData.status || "ACTIVE",
+			vaulted_at: new Date(tokenData.create_time || Date.now()),
+			card_brand: brand,
+			card_last4: last4,
+			card_exp: exp,
+			billing_address: metaCard.billing_address || undefined,
+			default: shouldBeDefault,
+			active: true,
+		};
+
+		const updated = await HotelDetails.findByIdAndUpdate(
+			hotelId,
+			{ $push: { ownerPaymentMethods: record } },
+			{ new: true }
+		).lean();
+
+		// return just the safe methods (no secrets anyway)
+		const methods = (updated.ownerPaymentMethods || []).map((m) => ({
+			label: m.label,
+			vault_id: m.vault_id,
+			vault_status: m.vault_status,
+			vaulted_at: m.vaulted_at,
+			card_brand: m.card_brand,
+			card_last4: m.card_last4,
+			card_exp: m.card_exp,
+			billing_address: m.billing_address,
+			default: m.default,
+			active: m.active,
+		}));
+
+		return res.status(201).json({
+			ok: true,
+			message: "Payment method saved.",
+			method: record,
+			methods,
+		});
+	} catch (error) {
+		console.error(
+			"saveOwnerPaymentMethod error:",
+			error?.response?.data || error
+		);
+		return res
+			.status(500)
+			.json({ message: "Failed to save owner payment method." });
+	}
+};
+
+// (nice-to-have) list/manage helpers — optional but handy
+exports.getOwnerPaymentMethods = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ message: "Invalid hotelId." });
+		}
+		const hotel = await HotelDetails.findById(hotelId)
+			.select("ownerPaymentMethods belongsTo")
+			.lean();
+		if (!hotel) return res.status(404).json({ message: "Hotel not found." });
+
+		if (
+			req.user &&
+			String(hotel.belongsTo) !== String(req.user._id) &&
+			String(req.user.role || "").toLowerCase() !== "admin"
+		) {
+			return res.status(403).json({ message: "Not allowed." });
+		}
+
+		return res.json({ methods: hotel.ownerPaymentMethods || [] });
+	} catch (e) {
+		console.error("getOwnerPaymentMethods error:", e);
+		return res.status(500).json({ message: "Failed to fetch methods." });
+	}
+};
+
+exports.setOwnerDefaultPaymentMethod = async (req, res) => {
+	try {
+		const { hotelId, vaultId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId) || !vaultId) {
+			return res.status(400).json({ message: "Invalid params." });
+		}
+		const hotel = await HotelDetails.findById(hotelId)
+			.select("belongsTo")
+			.lean();
+		if (!hotel) return res.status(404).json({ message: "Hotel not found." });
+
+		if (
+			req.user &&
+			String(hotel.belongsTo) !== String(req.user._id) &&
+			String(req.user.role || "").toLowerCase() !== "admin"
+		) {
+			return res.status(403).json({ message: "Not allowed." });
+		}
+
+		await HotelDetails.updateOne(
+			{ _id: hotelId },
+			{ $set: { "ownerPaymentMethods.$[].default": false } }
+		);
+		const updated = await HotelDetails.findOneAndUpdate(
+			{ _id: hotelId, "ownerPaymentMethods.vault_id": vaultId },
+			{ $set: { "ownerPaymentMethods.$.default": true } },
+			{ new: true }
+		).lean();
+
+		if (!updated) return res.status(404).json({ message: "Method not found." });
+		return res.json({
+			ok: true,
+			message: "Default updated.",
+			methods: updated.ownerPaymentMethods,
+		});
+	} catch (e) {
+		console.error("setOwnerDefaultPaymentMethod error:", e);
+		return res.status(500).json({ message: "Failed to set default." });
+	}
+};
+
+exports.removeOwnerPaymentMethod = async (req, res) => {
+	try {
+		const { hotelId, vaultId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId) || !vaultId) {
+			return res.status(400).json({ message: "Invalid params." });
+		}
+		const hotel = await HotelDetails.findById(hotelId)
+			.select("belongsTo")
+			.lean();
+		if (!hotel) return res.status(404).json({ message: "Hotel not found." });
+
+		if (
+			req.user &&
+			String(hotel.belongsTo) !== String(req.user._id) &&
+			String(req.user.role || "").toLowerCase() !== "admin"
+		) {
+			return res.status(403).json({ message: "Not allowed." });
+		}
+
+		// Soft delete: active=false (keeps audit & avoids dangling defaults)
+		const updated = await HotelDetails.findOneAndUpdate(
+			{ _id: hotelId, "ownerPaymentMethods.vault_id": vaultId },
+			{
+				$set: {
+					"ownerPaymentMethods.$.active": false,
+					"ownerPaymentMethods.$.default": false,
+				},
+			},
+			{ new: true }
+		).lean();
+
+		if (!updated) return res.status(404).json({ message: "Method not found." });
+		return res.json({
+			ok: true,
+			message: "Payment method removed.",
+			methods: updated.ownerPaymentMethods,
+		});
+	} catch (e) {
+		console.error("removeOwnerPaymentMethod error:", e);
+		return res
+			.status(500)
+			.json({ message: "Failed to remove payment method." });
 	}
 };

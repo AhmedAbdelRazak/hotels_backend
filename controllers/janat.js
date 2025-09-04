@@ -1507,70 +1507,84 @@ exports.getHotelDetailsById = async (req, res) => {
 
 exports.getHotelDistancesFromElHaram = async (req, res) => {
 	try {
-		const elHaramCoordinates = [39.8262, 21.4225]; // Coordinates for Al-Masjid al-Haram (longitude, latitude)
-		const prophetsMosqueCoordinates = [39.6142, 24.4672]; // Coordinates for Al-Masjid an-Nabawi (longitude, latitude)
+		const HARAM = [39.8262, 21.4225]; // [lng, lat]
+		const PROPHET = [39.6142, 24.4672]; // [lng, lat]
+		const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
-		// Find all hotels with valid coordinates (not [0, 0])
+		// Get hotels with valid GeoJSON points (both coords non-zero)
 		const hotels = await HotelDetails.find({
-			"location.coordinates": { $ne: [0, 0] },
+			"location.type": "Point",
+			"location.coordinates.0": { $ne: 0 },
+			"location.coordinates.1": { $ne: 0 },
 		});
 
-		if (hotels.length === 0) {
+		if (!hotels.length) {
 			return res
 				.status(200)
 				.json({ message: "No hotels with valid coordinates found" });
 		}
 
-		const apiKey = process.env.GOOGLE_MAPS_API_KEY; // Ensure your API key is set in environment variables
+		const ops = [];
 
-		// Iterate over each hotel and calculate distances
-		for (let hotel of hotels) {
-			// Clear existing distances
-			hotel.distances = {};
+		for (const hotel of hotels) {
+			const [lng, lat] = hotel.location.coordinates;
+			const isMadinah = (hotel.hotelState || "")
+				.toLowerCase()
+				.includes("madinah");
 
-			const [hotelLongitude, hotelLatitude] = hotel.location.coordinates;
+			const [destLng, destLat] = isMadinah ? PROPHET : HARAM;
 
-			// Determine which coordinates to use based on the hotelState
-			const destinationCoordinates =
-				hotel.hotelState && hotel.hotelState.toLowerCase().includes("madinah")
-					? prophetsMosqueCoordinates
-					: elHaramCoordinates;
+			const origin = `${lat},${lng}`; // DM API expects lat,lng
+			const dest = `${destLat},${destLng}`;
 
-			// Construct API URLs for walking and driving
-			const walkingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${destinationCoordinates[1]},${destinationCoordinates[0]}&mode=walking&key=${apiKey}`;
-			const drivingUrl = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${hotelLatitude},${hotelLongitude}&destinations=${destinationCoordinates[1]},${destinationCoordinates[0]}&mode=driving&key=${apiKey}`;
+			let walkingText = "N/A";
+			let drivingText = "N/A";
 
-			// Make API calls for walking and driving distances
-			const walkingResponse = await axios.get(walkingUrl);
-			const drivingResponse = await axios.get(drivingUrl);
+			const fetchMode = async (mode) => {
+				const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${dest}&mode=${mode}&units=metric&key=${apiKey}`;
+				const { data } = await axios.get(url);
+				const el = data?.rows?.[0]?.elements?.[0];
+				if (data?.status === "OK" && el?.status === "OK") {
+					return el.duration?.text || "N/A";
+				}
+				return "N/A";
+			};
 
-			const walkingData = walkingResponse.data;
-			const drivingData = drivingResponse.data;
+			// Try live API, degrade gracefully if key is missing/invalid
+			try {
+				walkingText = await fetchMode("walking");
+			} catch (_) {}
+			try {
+				drivingText = await fetchMode("driving");
+			} catch (_) {}
 
-			// Extract distance information from API responses
-			const walkingElement = walkingData.rows?.[0]?.elements?.[0];
-			const drivingElement = drivingData.rows?.[0]?.elements?.[0];
-
-			// Update hotel distances based on API response
-			if (walkingElement && walkingElement.status === "OK") {
-				hotel.distances.walkingToElHaram = walkingElement.duration.text;
-			} else {
-				hotel.distances.walkingToElHaram = "N/A";
+			// Optional: if both N/A, compute a rough fallback from straight-line distance
+			if (walkingText === "N/A" && drivingText === "N/A") {
+				const meters = haversineMeters(lat, lng, destLat, destLng);
+				walkingText = approxDurationText(meters, 4.5); // 4.5 km/h
+				drivingText = approxDurationText(meters, 40); // 40 km/h city avg
 			}
 
-			if (drivingElement && drivingElement.status === "OK") {
-				hotel.distances.drivingToElHaram = drivingElement.duration.text;
-			} else {
-				hotel.distances.drivingToElHaram = "N/A";
-			}
-
-			// Save the updated hotel information
-			await hotel.save();
+			// Use $set with dot notation → no markModified needed
+			ops.push({
+				updateOne: {
+					filter: { _id: hotel._id },
+					update: {
+						$set: {
+							"distances.walkingToElHaram": walkingText,
+							"distances.drivingToElHaram": drivingText,
+						},
+					},
+				},
+			});
 		}
 
-		// Respond with success message
+		if (ops.length) {
+			await HotelDetails.bulkWrite(ops);
+		}
+
 		res.status(200).json({
-			message: "Distances recalculated and updated successfully for all hotels",
+			message: `Distances updated for ${ops.length} hotel(s).`,
 		});
 	} catch (error) {
 		console.error("Error updating hotel distances:", error);
@@ -1579,6 +1593,22 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 			.json({ error: "An error occurred while recalculating hotel distances" });
 	}
 };
+
+// --- helpers ---
+function haversineMeters(lat1, lon1, lat2, lon2) {
+	const toRad = (d) => (d * Math.PI) / 180;
+	const R = 6371000; // meters
+	const dLat = toRad(lat2 - lat1);
+	const dLon = toRad(lon2 - lon1);
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+	return 2 * R * Math.asin(Math.sqrt(a));
+}
+function approxDurationText(meters, kmph) {
+	const minutes = Math.max(1, Math.round((meters / 1000 / kmph) * 60));
+	return `${minutes} min`;
+}
 
 exports.gettingCurrencyConversion = (req, res) => {
 	const amountInSAR = req.params.saudimoney; // Expect a comma-separated string, e.g., "59.50,595.00"
@@ -1717,6 +1747,7 @@ exports.paginatedReservationList = async (req, res) => {
 				{ booking_source: { $regex: /^online jannat booking$/i } },
 				{ booking_source: { $regex: /^generated link$/i } },
 				{ booking_source: { $regex: /^jannat employee$/i } },
+				{ booking_source: { $regex: /^affiliate$/i } },
 			],
 		};
 

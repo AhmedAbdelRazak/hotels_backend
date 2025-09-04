@@ -19,6 +19,10 @@ const {
 	updateHotelDetails,
 	listOfHotelUser,
 	listForAdminAll,
+	saveOwnerPaymentMethod,
+	getOwnerPaymentMethods,
+	setOwnerDefaultPaymentMethod,
+	removeOwnerPaymentMethod,
 } = require("../controllers/hotel_details");
 
 router.get("/hotel-details/:hotelDetailsId", read); // Consolidated into a single route
@@ -53,6 +57,18 @@ router.put(
 	isAuth,
 	isHotelOwner,
 	updateHotelDetails
+);
+
+/* Owner payment methods (save/list/manage) */
+router.post("/hotels/:hotelId/paypal/owner/save-card", saveOwnerPaymentMethod);
+router.get("/hotels/:hotelId/paypal/owner/methods", getOwnerPaymentMethods);
+router.post(
+	"/hotels/:hotelId/paypal/owner/methods/:vaultId/default",
+	setOwnerDefaultPaymentMethod
+);
+router.delete(
+	"/hotels/:hotelId/paypal/owner/methods/:vaultId",
+	removeOwnerPaymentMethod
 );
 
 router.param("userId", userById);
