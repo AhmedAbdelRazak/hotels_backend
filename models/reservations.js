@@ -202,6 +202,10 @@ const reservationsSchema = new mongoose.Schema(
 			default: false,
 		},
 
+		commissionStatus: {
+			type: String,
+		},
+
 		payments: {
 			type: Object,
 			trim: true,

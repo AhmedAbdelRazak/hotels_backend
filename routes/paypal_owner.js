@@ -1,30 +1,31 @@
-/** routes/paypal_owner.js */
+"use strict";
+
 const express = require("express");
 const router = express.Router();
+const Ctrl = require("../controllers/paypal_owner");
 
-const {
-	listOwnerPaymentMethods,
-	saveOwnerCard,
-	setOwnerDefaultCard,
-	removeOwnerCard,
-	generateClientToken,
-} = require("../controllers/paypal_owner");
+/* JS SDK client token (owner) */
+router.get("/paypal-owner/token-generated", Ctrl.generateClientToken);
 
-// If you use param middleware for :hotelId you can keep it; not required here
+/* Setup token → used by Card Fields & Buttons (vault without purchase) */
+router.post("/paypal-owner/setup-token", Ctrl.createSetupToken);
 
-// PayPal JS SDK client token (frontend calls this)
-router.get("/paypal/token-generated", generateClientToken);
+/* Exchange setup_token → vault token and save on hotel */
+router.post("/paypal-owner/vault/exchange", Ctrl.vaultExchangeAndSave);
 
-// Owner/company cards for a hotel
-router.get("/hotels/:hotelId/paypal/owner/methods", listOwnerPaymentMethods);
-router.post("/hotels/:hotelId/paypal/owner/save-card", saveOwnerCard);
-router.post(
-	"/hotels/:hotelId/paypal/owner/methods/:vaultId/default",
-	setOwnerDefaultCard
+/* List / default / activate / deactivate / delete (soft) */
+router.get("/paypal-owner/payment-methods/:hotelId", Ctrl.listPaymentMethods);
+router.post("/paypal-owner/payment-methods/set-default", Ctrl.setDefaultMethod);
+router.post("/paypal-owner/payment-methods/activate", Ctrl.activateMethod);
+router.post("/paypal-owner/payment-methods/deactivate", Ctrl.deactivateMethod);
+router.post("/paypal-owner/payment-methods/delete", Ctrl.deleteMethod);
+/* List checked-out + (Paid Offline | Not Paid) reservations for a hotel */
+router.get(
+	"/paypal-owner/commission/candidates",
+	Ctrl.listCommissionCandidates
 );
-router.delete(
-	"/hotels/:hotelId/paypal/owner/methods/:vaultId",
-	removeOwnerCard
-);
+
+/* Mark commission as paid for a batch of reservations */
+router.post("/paypal-owner/commission/mark-paid", Ctrl.markCommissionPaid);
 
 module.exports = router;

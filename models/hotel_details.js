@@ -287,6 +287,16 @@ const hotel_detailsSchema = new mongoose.Schema(
 					billing_address: { type: Object, default: undefined },
 					default: { type: Boolean, default: false }, // default for MIT
 					active: { type: Boolean, default: true }, // soft delete
+					delete: { type: Boolean, default: false }, // soft delete
+					method_type: {
+						type: String,
+						enum: ["CARD", "PAYPAL", "VENMO"],
+						default: "CARD",
+					},
+					paypal_email: { type: String, default: null },
+					paypal_payer_id: { type: String, default: null },
+					venmo_username: { type: String, default: null },
+					venmo_user_id: { type: String, default: null },
 				},
 			],
 			default: [],
