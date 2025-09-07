@@ -20,6 +20,8 @@ router.get("/signout", signout);
 
 router.put("/forgot-password", forgotPassword);
 router.put("/reset-password", resetPassword);
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password", resetPassword);
 
 router.post("/google-login", googleLogin);
 

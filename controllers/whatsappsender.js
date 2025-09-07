@@ -637,49 +637,40 @@ async function waNotifyNewReservation(reservation) {
 	return out;
 }
 
-// ---------------- Self-test helper (optional) ----------------
-/**
- * runSelfTest(sample?)
- *  - Validates phone normalization & "send" paths (honors DRY_RUN)
- *  - Provide your own reservation-like object or it will use a default.
- */
-async function runSelfTest(sample) {
-	const reservation = sample || {
-		_id: "68a365d0d7de2f8b1a32f5dc",
-		confirmation_number: "8109257883",
-		belongsTo: "68992107e8d36376f71dd371",
-		hotelId: "68992107e8d36376f71dd373",
-		customer_details: {
-			name: "وكالة جلنار للسياحة",
-			email: "bhammaoui79@gmail.com",
-			phone: "213661302303",
-			nationality: "DZ",
-		},
-	};
-
-	log("runSelfTest: BEGIN", { dryRun: DRY_RUN });
-
-	const e164 = await ensureE164Phone({
-		nationality: reservation.customer_details.nationality,
-		rawPhone: reservation.customer_details.phone,
+async function waSendResetPasswordLink(userLike, resetUrl) {
+	log("waSendResetPasswordLink: start", {
+		userId: userLike?._id,
+		name: userLike?.name,
+		hotelCountry: userLike?.hotelCountry,
+		phone: redactPhone(userLike?.phone),
+		resetUrl,
 	});
-	log("runSelfTest: normalized guest phone", { e164: redactPhone(e164) });
 
-	const r1 = await waSendReservationConfirmation(reservation);
-	const r2 = await waSendReservationUpdate(
-		reservation,
-		`Your reservation was updated. View: ${process.env.CLIENT_URL}/single-reservation/${reservation.confirmation_number}`
-	);
-	const r3 = await waNotifyNewReservation(reservation);
+	// Derive a region hint from user fields, fallback "SA"
+	const toE164 = await ensureE164Phone({
+		nationality: userLike?.hotelCountry || userLike?.nationality || null,
+		rawPhone: userLike?.phone,
+		fallbackRegion: "SA",
+	});
 
-	log("runSelfTest: END", { confirmation: r1, update: r2, notify: r3 });
-	return { confirmation: r1, update: r2, notify: r3 };
+	if (!toE164) {
+		warn("waSendResetPasswordLink: skipped (invalid user phone).", {
+			phone: redactPhone(userLike?.phone),
+		});
+		return { skipped: true, reason: "invalid user phone" };
+	}
+
+	return sendTemplate({
+		toE164,
+		contentSid: TPL.VERIFICATION_LINK,
+		variables: { 1: firstWord(userLike?.name), 2: String(resetUrl) },
+		tag: "reset_password_link",
+	});
 }
 
 module.exports = {
 	// utilities
 	ensureE164Phone,
-
 	// high-level senders
 	waSendReservationConfirmation,
 	waSendVerificationLink,
@@ -687,6 +678,5 @@ module.exports = {
 	waSendReservationUpdate,
 	waNotifyNewReservation,
 
-	// optional helper
-	runSelfTest,
+	waSendResetPasswordLink,
 };

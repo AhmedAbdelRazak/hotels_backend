@@ -7,9 +7,63 @@ const _ = require("lodash");
 const expressJwt = require("express-jwt");
 const { OAuth2Client } = require("google-auth-library");
 const sgMail = require("@sendgrid/mail");
+const {
+	waSendResetPasswordLink,
+	ensureE164Phone, // if you want to use/extend later
+} = require("./whatsappsender");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const ahmed2 = "ahmedabdelrazzak1001010@gmail.com";
+
+const FROM_EMAIL = "noreply@jannatbooking.com";
+const ADMIN_EMAIL = "ahmed.abdelrazak@jannatbooking.com";
+const RESET_TOKEN_MINUTES = parseInt(
+	process.env.RESET_TOKEN_MINUTES || "60",
+	10
+);
+
+const toEnglishDigits = (str = "") =>
+	str
+		.replace(/[٠-٩]/g, (d) => "0123456789"["٠١٢٣٤٥٦٧٨٩".indexOf(d)])
+		.replace(/[۰-۹]/g, (d) => "0123456789"["۰۱۲۳۴۵۶۷۸۹".indexOf(d)]);
+
+const isEmail = (v = "") => /@/.test(v);
+const onlyDigits = (v = "") => toEnglishDigits(v).replace(/\D/g, "");
+
+// wa.me fallback link builder
+const buildWaText = ({ name, url }) =>
+	`Hi ${
+		name || "there"
+	} — Please reset your password (at least 6 characters): ${url}\n\n` +
+	`مرحباً ${
+		name || "بك"
+	} — يرجى إعادة تعيين كلمة المرور (٦ أحرف على الأقل): ${url}`;
+
+const waLinkFromE164 = (e164, text) => {
+	const p = String(e164 || "").replace(/^\+/, "");
+	return `https://wa.me/${p}?text=${encodeURIComponent(text)}`;
+};
+
+// reset email html (bilingual)
+const resetEmailHtml = ({ name, resetUrl, minutes }) => `
+  <div style="font-family:Arial,sans-serif;line-height:1.55">
+    <p>Hi ${name || "there"},</p>
+    <p>Please reset your password (at least 6 characters) by clicking this link:</p>
+    <p><a href="${resetUrl}">${resetUrl}</a></p>
+    <p>This link expires in ${minutes} minutes.</p>
+    <hr/>
+    <p dir="rtl" style="font-family:'Droid Arabic Kufi',Tahoma,Arial">مرحباً ${
+			name || ""
+		}،</p>
+    <p dir="rtl" style="font-family:'Droid Arabic Kufi',Tahoma,Arial">
+      يرجى إعادة تعيين كلمة المرور (٦ أحرف على الأقل) عبر هذا الرابط:
+      <br/>
+      <a href="${resetUrl}">${resetUrl}</a>
+      <br/>
+      سينتهي هذا الرابط خلال ${minutes} دقيقة.
+    </p>
+  </div>
+`;
 
 exports.signup = async (req, res) => {
 	const { name, email, password, role, phone } = req.body;
@@ -354,140 +408,198 @@ exports.isHotelOwner = (req, res, next) => {
 	next();
 };
 
-exports.forgotPassword = (req, res) => {
-	const { email } = req.body;
+exports.forgotPassword = async (req, res) => {
+	try {
+		const { emailOrPhone, email, phone } = req.body;
+		const raw = (emailOrPhone || email || phone || "").trim();
+		if (!raw)
+			return res.status(400).json({ error: "Please provide email or phone." });
 
-	User.findOne({ email }, (err, user) => {
-		if (err || !user) {
-			return res.status(400).json({
-				error: "User with that email does not exist",
+		// 1) Locate the user (email exact OR phone in a few common formats)
+		let user = null;
+		if (isEmail(raw)) {
+			user = await User.findOne({ email: raw.toLowerCase() }).exec();
+		} else {
+			const digits = onlyDigits(raw);
+			const candidates = [digits, `+${digits}`];
+			for (const c of candidates) {
+				user = await User.findOne({ phone: c }).exec();
+				if (user) break;
+			}
+			// Final light attempt: if DB stores without + or leading country, try last 10 digits
+			if (!user && digits.length >= 10) {
+				const last10 = digits.slice(-10);
+				user = await User.findOne({ phone: new RegExp(`${last10}$`) }).exec();
+			}
+		}
+
+		// 2) Always return a neutral message to client to avoid enumeration
+		//    But only actually send WA/email if the user exists.
+		if (!user) {
+			return res.json({
+				message:
+					"If an account exists, you will receive a reset link shortly (email + WhatsApp).",
 			});
 		}
 
+		// 3) Build and store a short-lived token
 		const token = jwt.sign(
 			{ _id: user._id, name: user.name },
 			process.env.JWT_RESET_PASSWORD,
-			{
-				expiresIn: "10m",
-			}
+			{ expiresIn: `${RESET_TOKEN_MINUTES}m` }
 		);
+		user.resetPasswordLink = token;
+		await user.save();
 
-		const emailData_Reset = {
-			from: "noreply@tier-one.com",
-			to: email,
-			subject: `Password Reset link`,
-			html: `
-                <h1>Please use the following link to reset your password</h1>
-                <p>${process.env.CLIENT_URL}/auth/password/reset/${token}</p>
-                <hr />
-                <p>This email may contain sensetive information</p>
-                <p>${process.env.CLIENT_URL}</p>
-                <br />
-                 Kind and Best Regards,  <br />
-             Tier One Barber & Beauty support team <br />
-             Contact Email: info@tier-one.com <br />
-             Phone#: (951) 503-6818 <br />
-             Landline#: (951) 497-3555 <br />
-             Address:  4096 N. Sierra Way San Bernardino, 92407  <br />
-             &nbsp;&nbsp;<img src="https://Tier One Barber.com/api/product/photo5/5efff6005275b89938abe066" alt="Tier One Barber" style=width:50px; height:50px />
-             <p>
-             <strong>Tier One Barber & Beauty</strong>  
-              </p>
-            `,
-		};
-		const emailData_Reset2 = {
-			from: "noreply@tier-one.com",
-			to: ahmed2,
-			subject: `Password Reset link`,
-			html: `
-                <h1>user ${email} tried to reset her/his password using the below link</h1>
-                <p>${process.env.CLIENT_URL}/auth/password/reset/${token}</p>
-                <hr />
-                <p>This email may contain sensetive information</p>
-                <p>${process.env.CLIENT_URL}</p>
-                 <br />
-                 Kind and Best Regards,  <br />
-             Tier One Barber & Beauty support team <br />
-             Contact Email: info@tier-one.com <br />
-             Phone#: (951) 503-6818 <br />
-             Landline#: (951) 497-3555 <br />
-             Address:  4096 N. Sierra Way San Bernardino, 92407  <br />
-             &nbsp;&nbsp;<img src="https://Tier One Barber.com/api/product/photo5/5efff6005275b89938abe066" alt="Tier One Barber" style=width:50px; height:50px />
-             <p>
-             <strong>Tier One Barber & Beauty</strong>  
-              </p>
-            `,
+		const resetUrl = `${process.env.CLIENT_URL_XHOTEL}/auth/password/reset/${token}`;
+
+		// 4) Prepare emails (user + admin)
+		const emailToUser = {
+			to: user.email,
+			from: FROM_EMAIL,
+			subject: "Password Reset | إعادة تعيين كلمة المرور",
+			html: resetEmailHtml({
+				name: user.name,
+				resetUrl,
+				minutes: RESET_TOKEN_MINUTES,
+			}),
 		};
 
-		return user.updateOne({ resetPasswordLink: token }, (err, success) => {
-			if (err) {
-				console.log("RESET PASSWORD LINK ERROR", err);
-				return res.status(400).json({
-					error: "Database connection error on user password forgot request",
-				});
-			} else {
-				sgMail.send(emailData_Reset2);
-				sgMail
-					.send(emailData_Reset)
-					.then((sent) => {
-						console.log("SIGNUP EMAIL SENT", sent);
-						return res.json({
-							message: `Email has been sent to ${email}. Follow the instruction to Reset your Password`,
-						});
-					})
-					.catch((err) => {
-						console.log("SIGNUP EMAIL SENT ERROR", err);
-						return res.json({
-							message: err.message,
-						});
+		const emailToAdmin = {
+			to: ADMIN_EMAIL,
+			from: FROM_EMAIL,
+			subject: "Password reset requested",
+			html: `
+        <div style="font-family:Arial,sans-serif">
+          <p>A password reset was requested.</p>
+          <p><strong>User:</strong> ${user.name}</p>
+          <p><strong>Email:</strong> ${user.email || "-"}</p>
+          <p><strong>Phone:</strong> ${user.phone || "-"}</p>
+          <p><strong>Reset URL:</strong> <a href="${resetUrl}">${resetUrl}</a></p>
+        </div>
+      `,
+		};
+
+		// 5) Attempt WhatsApp via Twilio content template
+		let wa = null;
+		let wa_link = null;
+		try {
+			wa = await waSendResetPasswordLink(user, resetUrl);
+			if (wa?.skipped) {
+				// Build a wa.me fallback if number exists but Twilio not available or phone invalid
+				// Try to generate E.164 from user.phone; if fails use raw digits (best effort)
+				let e164 = null;
+				try {
+					e164 = await ensureE164Phone({
+						nationality: user?.hotelCountry || user?.nationality || null,
+						rawPhone: user?.phone,
+						fallbackRegion: "SA",
 					});
+				} catch {}
+				if (e164)
+					wa_link = waLinkFromE164(
+						e164,
+						buildWaText({ name: user.name, url: resetUrl })
+					);
 			}
+		} catch (e) {
+			// On Twilio error, fallback to wa.me if possible; DO NOT fail the whole flow
+			let e164 = null;
+			try {
+				e164 = await ensureE164Phone({
+					nationality: user?.hotelCountry || user?.nationality || null,
+					rawPhone: user?.phone,
+					fallbackRegion: "SA",
+				});
+			} catch {}
+			if (e164)
+				wa_link = waLinkFromE164(
+					e164,
+					buildWaText({ name: user.name, url: resetUrl })
+				);
+		}
+
+		// 6) Send emails (do not fail the whole flow if one email fails)
+		const emailResults = { user: null, admin: null };
+		try {
+			if (user.email) emailResults.user = await sgMail.send(emailToUser);
+		} catch (e) {
+			console.log("SENDGRID user email error:", e?.message || e);
+		}
+		try {
+			emailResults.admin = await sgMail.send(emailToAdmin);
+		} catch (e) {
+			console.log("SENDGRID admin email error:", e?.message || e);
+		}
+
+		// 7) Respond success; include wa_link if we built a fallback
+		return res.json({
+			message:
+				"If an account exists, you will receive a reset link shortly (email + WhatsApp).",
+			via: {
+				whatsapp: wa?.sid
+					? "sent"
+					: wa?.skipped
+					? "skipped"
+					: wa_link
+					? "wa_link"
+					: "unknown",
+				emailUser: user.email ? "attempted" : "no_email_on_file",
+				emailAdmin: "attempted",
+			},
+			wa_link, // optional – frontend may show a button "Open WhatsApp"
 		});
-	});
+	} catch (error) {
+		console.log("forgotPassword error:", error);
+		return res.status(500).json({ error: "Internal Server Error" });
+	}
 };
 
 exports.resetPassword = (req, res) => {
 	const { resetPasswordLink, newPassword } = req.body;
 
-	if (resetPasswordLink) {
-		jwt.verify(
-			resetPasswordLink,
-			process.env.JWT_RESET_PASSWORD,
-			function (err, decoded) {
-				if (err) {
+	if (!resetPasswordLink || !newPassword) {
+		return res.status(400).json({ error: "Missing token or new password." });
+	}
+	if (String(newPassword).length < 6) {
+		return res
+			.status(400)
+			.json({ error: "Password must be at least 6 characters." });
+	}
+
+	jwt.verify(
+		resetPasswordLink,
+		process.env.JWT_RESET_PASSWORD,
+		function (err, decoded) {
+			if (err) {
+				return res.status(400).json({
+					error: "Expired or invalid link. Please request a new one.",
+				});
+			}
+
+			User.findOne({ resetPasswordLink }, async (err, user) => {
+				if (err || !user) {
 					return res.status(400).json({
-						error: "Expired link. Try again",
+						error: "Invalid reset request. Please try again.",
 					});
 				}
 
-				User.findOne({ resetPasswordLink }, (err, user) => {
-					if (err || !user) {
-						return res.status(400).json({
-							error: "Something went wrong. Try later",
-						});
-					}
-
-					const updatedFields = {
-						password: newPassword,
-						resetPasswordLink: "",
-					};
-
-					user = _.extend(user, updatedFields);
-
-					user.save((err, result) => {
-						if (err) {
-							return res.status(400).json({
-								error: "Error resetting user password",
-							});
-						}
-						res.json({
-							message: `Great! Now you can login with your new password`,
-						});
+				try {
+					user.password = newPassword; // virtual setter hashes
+					user.resetPasswordLink = "";
+					await user.save();
+					return res.json({
+						message:
+							"Great! Your password has been updated. You can now sign in.",
 					});
-				});
-			}
-		);
-	}
+				} catch (e) {
+					return res
+						.status(400)
+						.json({ error: "Error resetting user password." });
+				}
+			});
+		}
+	);
 };
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);

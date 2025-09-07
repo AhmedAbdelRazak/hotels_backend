@@ -1767,9 +1767,16 @@ exports.paginatedReservationList = async (req, res) => {
 				da.getDate() === db.getDate()
 			);
 		};
+		const normalizeRef = (ref) => {
+			if (!ref) return null;
+			if (typeof ref === "object" && ref._id) {
+				return { ...ref, _id: String(ref._id) };
+			}
+			// primitive id (ObjectId or string)
+			return { _id: String(ref) };
+		};
 
 		// 3) First, fetch ALL matching docs (no skip/limit).
-		// Note: payment_details is an embedded object (not a ref), so no populate needed for it.
 		const allDocs = await Reservations.find(baseFilter)
 			.sort({ createdAt: -1 })
 			.populate("belongsTo")
@@ -1781,9 +1788,14 @@ exports.paginatedReservationList = async (req, res) => {
 
 		function formatReservation(doc) {
 			const customer_details = doc?.customer_details || {};
-			const hotelObj = doc?.hotelId || {};
+			const hotelObjRaw = doc?.hotelId;
+			const belongsToRaw = doc?.belongsTo;
 			const payment_details = doc?.payment_details || {};
 			const paypal_details = doc?.paypal_details || {};
+
+			// Normalize refs so we always have an object with at least _id
+			const hotelObj = normalizeRef(hotelObjRaw);
+			const belongsToObj = normalizeRef(belongsToRaw);
 
 			const paymentStr = (doc?.payment || "").toLowerCase();
 
@@ -1859,11 +1871,18 @@ exports.paginatedReservationList = async (req, res) => {
 			const isCheckinToday = isSameDay(doc.checkin_date, today);
 			const isCheckoutToday = isSameDay(doc.checkout_date, today);
 
+			const hotelName =
+				(hotelObj && hotelObj.hotelName) ||
+				doc?.hotelId?.hotelName ||
+				"Unknown Hotel";
+
 			return {
 				...doc,
+				hotelId: hotelObj || doc.hotelId, // always object with _id when possible
+				belongsTo: belongsToObj || doc.belongsTo, // always object with _id when possible
 				customer_name: customer_details.name || "N/A",
 				customer_phone: customer_details.phone || "N/A",
-				hotel_name: hotelObj?.hotelName || "Unknown Hotel",
+				hotel_name: hotelName,
 				createdAt: doc.createdAt || null,
 				payment_status,
 				isCheckinToday,
@@ -1874,12 +1893,14 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const formattedDocs = allDocs.map(formatReservation);
 
-		// 5) filterType logic (+ Paid Offline)
+		// 5) filterType logic (+ Paid Offline + NEW status filters)
 		function passesFilter(r) {
+			const status = (r.reservation_status || "").toLowerCase();
+			const pay = (r.payment_status || "").toLowerCase();
+
+			// For these filters, exclude cancelled first (as you already did)
 			if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
-				if ((r.reservation_status || "").toLowerCase() === "cancelled") {
-					return false;
-				}
+				if (status === "cancelled") return false;
 			}
 
 			switch (filterType) {
@@ -1891,18 +1912,35 @@ exports.paginatedReservationList = async (req, res) => {
 					return r.isPaymentTriggered;
 				case "paymentNotTriggered":
 					return !r.isPaymentTriggered;
+
+				// Payment-state filters
 				case "notPaid":
-					return (r.payment_status || "").toLowerCase() === "not paid";
+					return pay === "not paid";
 				case "notCaptured":
-					return (r.payment_status || "").toLowerCase() === "not captured";
+					return pay === "not captured";
 				case "captured":
-					return (r.payment_status || "").toLowerCase() === "captured";
+					return pay === "captured";
 				case "paidOffline":
-					return (r.payment_status || "").toLowerCase() === "paid offline";
+					return pay === "paid offline";
+
+				// NEW: reservation_status filters
+				case "confirmed":
+					return status === "confirmed";
+				case "inhouse":
+					return status === "inhouse";
+				case "checked_out":
+					return status === "checked_out";
+				case "early_checked_out":
+					return status === "early_checked_out";
+				case "no_show":
+					return status === "no_show";
+
+				// Existing
 				case "cancelled":
-					return (r.reservation_status || "").toLowerCase() === "cancelled";
+					return status === "cancelled";
 				case "notCancelled":
-					return (r.reservation_status || "").toLowerCase() !== "cancelled";
+					return status !== "cancelled";
+
 				default:
 					return true;
 			}

@@ -121,8 +121,10 @@ const sendEmailWithPdf = async (reservationData) => {
 };
 
 exports.create = async (req, res) => {
+	console.log(req.body, "req.body");
 	console.log(req.body.sendEmail, "req.body.sendEmail");
 	console.log(req.body.hotelName, "req.body.hotelName");
+	console.log(req.body.belongsTo, "req.body.belongsTo");
 
 	const saveReservation = async (reservationData) => {
 		// Check if roomId array is present and has length more than 0
