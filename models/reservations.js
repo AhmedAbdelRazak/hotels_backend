@@ -206,24 +206,11 @@ const reservationsSchema = new mongoose.Schema(
 			type: String,
 		},
 
-		payments: {
+		commissionData: {
 			type: Object,
-			trim: true,
-			lowercase: true, //Could be left
-			default: {
-				state: "checkout",
-				amount: "0",
-				currency: "SAR",
-				exchanged_amount: "0.0",
-				exchange_currency: "SAR",
-				exchange_rate: "0.0",
-				paid_at: null,
-				payment_method_name: "Cash",
-				payment_method: "cash",
-				installment: null,
-				response_code: null,
-			},
 		},
+		commissionPaidAt: { type: Date },
+
 		pickedRoomsType: {
 			type: Array,
 			default: [
