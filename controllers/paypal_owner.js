@@ -65,6 +65,35 @@ const idSig = (s) => {
 	}
 };
 
+/* ───────── Small helpers ───────── */
+function getOwnerActor(req) {
+	const u = req.user || req.auth || {};
+	const b = req.body || {};
+	const h = req.headers || {};
+	const id = u?._id || b?.ownerId || h["x-owner-id"] || undefined;
+	const name = u?.name || b?.ownerName || h["x-owner-name"] || undefined;
+	const role = u?.role || b?.ownerRole || h["x-owner-role"] || "owner"; // will show in logs
+	return { _id: id, name, role };
+}
+
+// grouped log entry (one log object that contains all related field changes)
+function chg(field, from, to) {
+	return { field, from, to };
+}
+function groupedLog(field, changes, note, by) {
+	return {
+		at: new Date(),
+		by: {
+			_id: by?._id || null,
+			name: by?.name || null,
+			role: by?.role || "owner",
+		},
+		field, // "commission" | "transfer" (we only write "commission" here)
+		changes: Array.isArray(changes) ? changes : [],
+		note: note || null,
+	};
+}
+
 /* ───────── PayPal vault helpers (owner) ───────── */
 async function exchangeSetupToVaultToken(setupTokenId) {
 	try {
@@ -482,12 +511,14 @@ exports.listHotelCommissions = async (req, res) => {
 			paymentChannel = "all",
 			page = "1",
 			pageSize = "50",
+			transferStatus = "all", // NEW: for paymentChannel=online (transferred | not_transferred | all)
 		} = req.query || {};
 
 		if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
 			return res.status(400).json({ message: "Invalid hotelId." });
 		}
 
+		// <<< CHANGED: richer projection so UI can show notes/last updated & USD >>>
 		const raw = await Reservations.find(
 			{ hotelId },
 			{
@@ -507,7 +538,13 @@ exports.listHotelCommissions = async (req, res) => {
 				commissionStatus: 1,
 				commissionPaidAt: 1,
 				moneyTransferredToHotel: 1,
+				moneyTransferredAt: 1, // <<< ADDED
+				commissionData: 1, // <<< ADDED (for USD + manual note)
+				adminChangeLog: { $slice: -12 }, // <<< ADDED (latest log items only)
+				adminLastUpdatedAt: 1, // <<< ADDED
+				adminLastUpdatedBy: 1, // <<< ADDED
 				createdAt: 1,
+				updatedAt: 1, // <<< ADDED
 			}
 		).lean();
 
@@ -515,42 +552,50 @@ exports.listHotelCommissions = async (req, res) => {
 			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const pay = summarizePayment(r);
-				// Prefer stored commission (SAR); fallback to recompute
 				const stored = Number(r?.commission || 0);
 				const comm =
 					Number.isFinite(stored) && stored > 0
 						? stored
 						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-				const eligTransfer =
-					pay.channel === "online" &&
-					Number(r?.paid_amount || 0) >= Number(r?.total_amount || 0);
+				const commissionSAR = Number(Number(comm).toFixed(2));
+				const payoutOnlineSAR = Number(
+					Number(Number(r?.total_amount || 0) - commissionSAR).toFixed(2)
+				);
+
 				return {
 					...r,
-					computed_payment_status: pay.status,
-					computed_payment_channel: pay.channel,
-					computed_commission_sar: Number(Number(comm).toFixed(2)),
+					computed_payment_status: pay.status, // "Captured" | "Paid Offline" | "Not Paid"
+					computed_payment_channel: pay.channel, // "online" | "offline" | "none"
+					computed_commission_sar: commissionSAR,
+					computed_online_payout_sar: payoutOnlineSAR, // total - commission (for online lists)
 					commissionPaid: isCommissionPaid(r),
-					eligibleForHotelTransfer: eligTransfer,
+					eligibleForHotelTransfer: pay.channel === "online", // **no dependency on paid_amount**
 				};
 			});
 
-		const wantPaid = commissionPaid === "1";
+		// ---- Buckets -------------------------------------------------------
+		const offlinePredicate = (r) =>
+			r.computed_payment_channel === "offline" ||
+			r.computed_payment_channel === "none";
 
-		let filtered = derived.filter((r) => r.commissionPaid === wantPaid);
-		if (paymentChannel === "online") {
-			filtered = filtered.filter(
-				(r) => r.computed_payment_channel === "online"
-			);
-		}
-		if (paymentChannel === "offline") {
-			// offline bucket includes "not paid" as offline-like for commissions
-			filtered = filtered.filter(
-				(r) =>
-					r.computed_payment_channel === "offline" ||
-					r.computed_payment_channel === "none" // legacy/edge, just in case
-			);
-		}
+		const pendingOffline = derived.filter(
+			(r) => offlinePredicate(r) && !r.commissionPaid
+		);
+		const paidOffline = derived.filter(
+			(r) => offlinePredicate(r) && r.commissionPaid
+		);
 
+		const onlineAll = derived.filter(
+			(r) => r.computed_payment_channel === "online"
+		);
+		const onlineTransferred = onlineAll.filter(
+			(r) => r.moneyTransferredToHotel === true
+		);
+		const onlineNotTransferred = onlineAll.filter(
+			(r) => r.moneyTransferredToHotel !== true
+		);
+
+		// ---- Summary helpers -----------------------------------------------
 		const collect = (arr) => ({
 			count: arr.length,
 			totalSAR: arr.reduce((a, x) => a + Number(x?.total_amount || 0), 0),
@@ -560,54 +605,41 @@ exports.listHotelCommissions = async (req, res) => {
 			),
 		});
 
-		const pendingAll = derived.filter((r) => !r.commissionPaid);
-		const paidAll = derived.filter((r) => r.commissionPaid);
-
-		const pOnline = pendingAll.filter(
-			(r) => r.computed_payment_channel === "online"
-		);
-		// offline = true offline + "not paid" (offline-like)
-		const pOffline = pendingAll.filter(
-			(r) =>
-				r.computed_payment_channel === "offline" ||
-				r.computed_payment_channel === "none"
-		);
-		const paidOnline = paidAll.filter(
-			(r) => r.computed_payment_channel === "online"
-		);
-		const paidOffline = paidAll.filter(
-			(r) =>
-				r.computed_payment_channel === "offline" ||
-				r.computed_payment_channel === "none"
-		);
-
-		const transfers = {
-			transferred: paidOnline.filter((r) => r.moneyTransferredToHotel === true)
-				.length,
-			notTransferred: paidOnline.filter(
-				(r) => r.moneyTransferredToHotel !== true
-			).length,
-		};
-
 		const summary = {
 			pending: {
-				all: collect(pendingAll),
-				online: collect(pOnline),
-				offline: collect(pOffline),
+				offline: collect(pendingOffline),
+				online: collect(onlineNotTransferred),
+				all: collect(derived.filter((r) => !r.commissionPaid)),
 			},
 			paid: {
-				all: collect(paidAll),
-				online: collect(paidOnline),
 				offline: collect(paidOffline),
-				transfers,
+				online: collect(onlineTransferred),
+				all: collect(derived.filter((r) => r.commissionPaid)),
+				transfers: {
+					transferred: onlineTransferred.length,
+					notTransferred: onlineNotTransferred.length,
+				},
 			},
 		};
 
+		// ---- Output list (supports both OFFLINE and ONLINE modes) ----------
 		const pg = Math.max(1, parseInt(page, 10) || 1);
 		const ps = Math.min(500, Math.max(1, parseInt(pageSize, 10) || 50));
-		const total = filtered.length;
+		let source = [];
+
+		if (paymentChannel === "online") {
+			if (transferStatus === "transferred") source = onlineTransferred;
+			else if (transferStatus === "not_transferred")
+				source = onlineNotTransferred;
+			else source = onlineAll;
+		} else {
+			const wantPaid = commissionPaid === "1";
+			source = wantPaid ? paidOffline : pendingOffline;
+		}
+
+		const total = source.length;
 		const start = (pg - 1) * ps;
-		const items = filtered.slice(start, start + ps);
+		const items = source.slice(start, start + ps);
 
 		res.set("Cache-Control", "no-cache, no-store, must-revalidate");
 		res.set("Pragma", "no-cache");
@@ -615,8 +647,14 @@ exports.listHotelCommissions = async (req, res) => {
 
 		return res.json({
 			hotelId,
-			commissionPaid: wantPaid ? 1 : 0,
+			commissionPaid:
+				paymentChannel === "online"
+					? undefined
+					: commissionPaid === "1"
+					? 1
+					: 0,
 			paymentChannel,
+			transferStatus: paymentChannel === "online" ? transferStatus : undefined,
 			total,
 			page: pg,
 			pageSize: ps,
@@ -641,26 +679,54 @@ exports.markCommissionsPaid = async (req, res) => {
 		if (!ids.length)
 			return res.status(400).json({ message: "No reservations provided." });
 
+		// <<< CHANGED: update *per reservation* so we can append a proper grouped log
+		const by = getOwnerActor(req);
 		const now = new Date();
-		const result = await Reservations.updateMany(
+		const docs = await Reservations.find(
 			{ _id: { $in: ids }, hotelId },
 			{
-				$set: {
-					commissionPaid: true,
-					commissionStatus: "commission paid",
-					commissionPaidAt: now,
-					"commissionData.manual": {
-						by: "manual-mark",
-						note: note || null,
-						at: now,
-					},
-				},
+				commissionPaid: 1,
+				commissionStatus: 1,
+				commissionPaidAt: 1,
 			}
-		);
-		return res.json({
-			ok: true,
-			matched: result.matchedCount || result.nModified || 0,
-		});
+		).lean();
+
+		let updated = 0;
+		for (const r of docs) {
+			const changes = [
+				chg("commissionPaid", !!r.commissionPaid, true),
+				chg("commissionStatus", r.commissionStatus || null, "commission paid"),
+				chg("commissionPaidAt", r.commissionPaidAt || null, now),
+			];
+
+			const logEntry = groupedLog("commission", changes, note || null, by);
+
+			const resu = await Reservations.updateOne(
+				{ _id: r._id, hotelId },
+				{
+					$set: {
+						commissionPaid: true,
+						commissionStatus: "commission paid",
+						commissionPaidAt: now,
+						"commissionData.manual": {
+							by: "manual-mark",
+							note: note || null,
+							at: now,
+						},
+						adminLastUpdatedAt: now, // so UI has a stable fallback date
+						adminLastUpdatedBy: {
+							_id: by?._id || null,
+							name: by?.name || null,
+							role: by?.role || "owner",
+						},
+					},
+					$push: { adminChangeLog: logEntry },
+				}
+			);
+			if (resu?.modifiedCount || resu?.nModified) updated += 1;
+		}
+
+		return res.json({ ok: true, matched: docs.length, modified: updated });
 	} catch (e) {
 		console.error("markCommissionsPaid:", e);
 		return res.status(500).json({ message: "Failed to mark commission paid." });
@@ -714,75 +780,17 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				paypal_details: 1,
 				commissionPaid: 1,
 				commissionStatus: 1,
+				commissionPaidAt: 1, // <<< ADDED (for accurate 'from' in changes)
 				total_amount: 1,
 				paid_amount: 1,
 				createdAt: 1,
 			}
 		).lean();
 
-		// Normalize + filter to "offline & not yet paid & status included"
-		const statusIncluded = (s) => {
-			const t = String(s || "")
-				.toLowerCase()
-				.replace(/[-_\s]+/g, " ")
-				.trim();
-			if (t.includes("early") && t.includes("checked") && t.includes("out"))
-				return "early_checked_out";
-			if (t.includes("checked") && t.includes("out")) return "checked_out";
-			if (t.includes("inhouse") || t === "in house" || t === "in-house")
-				return "inhouse";
-			return t;
-		};
-		const isIncluded = (s) => {
-			const n = statusIncluded(s);
-			return (
-				n === "checked_out" || n === "early_checked_out" || n === "inhouse"
-			);
-		};
-
-		const computeCommissionFromPickedRooms = (pickedRoomsType = []) => {
-			if (!Array.isArray(pickedRoomsType) || pickedRoomsType.length === 0)
-				return 0;
-			return pickedRoomsType.reduce((total, room) => {
-				const count = Number(room?.count || 1) || 0;
-				const days = Array.isArray(room?.pricingByDay) ? room.pricingByDay : [];
-				if (!days.length) return total;
-				const diff = days.reduce(
-					(acc, d) => acc + (Number(d?.price || 0) - Number(d?.rootPrice || 0)),
-					0
-				);
-				return total + diff * count;
-			}, 0);
-		};
-		const summarizePayment = (r) => {
-			const pd = r?.paypal_details || {};
-			const pmt = String(r?.payment || "").toLowerCase();
-			const offline =
-				Number(r?.payment_details?.onsite_paid_amount || 0) > 0 ||
-				pmt === "paid offline";
-			const legacyCaptured = !!r?.payment_details?.captured;
-			const capTotal = Number(pd?.captured_total_usd || 0);
-			const initialCompleted =
-				(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
-			const anyMitCompleted =
-				Array.isArray(pd?.mit) &&
-				pd.mit.some(
-					(c) => (c?.capture_status || "").toUpperCase() === "COMPLETED"
-				);
-			const isCaptured =
-				legacyCaptured ||
-				capTotal > 0 ||
-				initialCompleted ||
-				anyMitCompleted ||
-				pmt === "paid online";
-			return { channel: isCaptured ? "online" : offline ? "offline" : "none" };
-		};
-		const isCommissionPaid = (r) =>
-			r?.commissionPaid === true ||
-			/commission\s*paid/i.test(String(r?.commissionStatus || ""));
+		const rawMap = new Map(raw.map((d) => [String(d._id), d])); // <<< ADDED
 
 		const deriv = raw
-			.filter((r) => isIncluded(r?.reservation_status))
+			.filter((r) => statusIncluded(r?.reservation_status))
 			.map((r) => {
 				const comm = computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
 				const pay = summarizePayment(r);
@@ -976,6 +984,7 @@ exports.chargeOwnerCommissions = async (req, res) => {
 
 		// ---------- DB updates per reservation ----------
 		const now = new Date();
+		const by = getOwnerActor(req); // <<< ADDED
 		const batchKey = `COMMBATCH-${orderId}`;
 		const totalSar = targets.reduce(
 			(a, t) => a + Number(t.commissionSAR || 0),
@@ -986,6 +995,17 @@ exports.chargeOwnerCommissions = async (req, res) => {
 
 		for (let i = 0; i < targets.length; i++) {
 			const t = targets[i];
+			const prev = rawMap.get(String(t._id)) || {};
+			const changes = [
+				chg("commissionPaid", !!prev.commissionPaid, true),
+				chg(
+					"commissionStatus",
+					prev.commissionStatus || null,
+					"commission paid"
+				),
+				chg("commissionPaidAt", prev.commissionPaidAt || null, now),
+			];
+
 			const entry = {
 				batchKey,
 				hotelId,
@@ -1014,6 +1034,11 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				},
 			};
 
+			// Human-friendly default note so UI has something meaningful
+			const autoNote = `Paid via ${payMethod.method_type || "CARD"} • ${
+				payMethod.label || ""
+			} • batch ${batchKey}`.trim();
+
 			await Reservations.updateOne(
 				{ _id: t._id, hotelId },
 				{
@@ -1022,8 +1047,17 @@ exports.chargeOwnerCommissions = async (req, res) => {
 						commissionStatus: "commission paid",
 						commissionPaidAt: now,
 						"commissionData.last": entry,
+						adminLastUpdatedAt: now,
+						adminLastUpdatedBy: {
+							_id: by?._id || null,
+							name: by?.name || null,
+							role: by?.role || "owner",
+						},
 					},
-					$push: { "commissionData.history": entry },
+					$push: {
+						"commissionData.history": entry,
+						adminChangeLog: groupedLog("commission", changes, autoNote, by), // <<< ADDED
+					},
 				}
 			);
 		}
@@ -1084,22 +1118,20 @@ exports.getHotelFinanceOverview = async (req, res) => {
 					Number.isFinite(stored) && stored > 0
 						? stored
 						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
-				const fullOnline =
-					pay.channel === "online" &&
-					Number(r?.paid_amount || 0) >= Number(r?.total_amount || 0);
 				return {
 					...r,
 					computed_payment_status: pay.status,
 					computed_payment_channel: pay.channel,
 					computed_commission_sar: Number(Number(commSar).toFixed(2)),
 					commissionPaid: isCommissionPaid(r),
-					eligibleForHotelTransfer: fullOnline,
+					// **Important change:** "eligible" = any ONLINE capture/keyword
+					eligibleForHotelTransfer: pay.channel === "online",
 				};
 			});
 
 		const sum = (arr, get) => arr.reduce((a, x) => a + Number(get(x) || 0), 0);
 
-		// offline = true offline + not-paid (offline-like)
+		// OFFLINE bucket (same fields; unchanged)
 		const commissionDueFromHotel = derived.filter(
 			(r) =>
 				(r.computed_payment_channel === "offline" ||
@@ -1112,6 +1144,8 @@ exports.getHotelFinanceOverview = async (req, res) => {
 					r.computed_payment_channel === "none") &&
 				r.commissionPaid
 		);
+
+		// ONLINE transfers
 		const transfersDueToHotel = derived.filter(
 			(r) => r.eligibleForHotelTransfer && r.moneyTransferredToHotel !== true
 		);
@@ -1119,8 +1153,7 @@ exports.getHotelFinanceOverview = async (req, res) => {
 			(r) => r.eligibleForHotelTransfer && r.moneyTransferredToHotel === true
 		);
 
-		// keep legacy keys for the current UI, but include not‑paid in offline
-		const legacy = {
+		const summary = {
 			commissionDueFromHotel: {
 				count: commissionDueFromHotel.length,
 				totalSAR: sum(commissionDueFromHotel, (r) => r.total_amount),
@@ -1139,45 +1172,35 @@ exports.getHotelFinanceOverview = async (req, res) => {
 			},
 			transfersDueToHotel: {
 				count: transfersDueToHotel.length,
-				totalSAR: sum(transfersDueToHotel, (r) => r.total_amount),
+				totalSAR: sum(transfersDueToHotel, (r) => r.total_amount), // Gross
+				commissionSAR: sum(
+					transfersDueToHotel,
+					(r) => r.computed_commission_sar
+				),
+				netSAR: transfersDueToHotel.reduce(
+					(a, r) =>
+						a +
+						(Number(r?.total_amount || 0) -
+							Number(r?.computed_commission_sar || 0)),
+					0
+				),
 			},
 			transfersCompletedToHotel: {
 				count: transfersCompletedToHotel.length,
-				totalSAR: sum(transfersCompletedToHotel, (r) => r.total_amount),
+				totalSAR: sum(transfersCompletedToHotel, (r) => r.total_amount), // Gross
+				commissionSAR: sum(
+					transfersCompletedToHotel,
+					(r) => r.computed_commission_sar
+				),
+				netSAR: transfersCompletedToHotel.reduce(
+					(a, r) =>
+						a +
+						(Number(r?.total_amount || 0) -
+							Number(r?.computed_commission_sar || 0)),
+					0
+				),
 			},
 		};
-
-		// plus the nested structure you already use elsewhere
-		const pendingOnline = derived.filter(
-			(r) => r.computed_payment_channel === "online" && !r.commissionPaid
-		);
-		const paidOnline = derived.filter(
-			(r) => r.computed_payment_channel === "online" && r.commissionPaid
-		);
-		const nested = {
-			pending: {
-				offline: legacy.commissionDueFromHotel,
-				online: {
-					count: pendingOnline.length,
-					commissionSAR: sum(pendingOnline, (r) => r.computed_commission_sar),
-					totalSAR: sum(pendingOnline, (r) => r.total_amount),
-				},
-			},
-			paid: {
-				offline: legacy.commissionPaidByHotel,
-				online: {
-					count: paidOnline.length,
-					commissionSAR: sum(paidOnline, (r) => r.computed_commission_sar),
-					totalSAR: sum(paidOnline, (r) => r.total_amount),
-				},
-				transfers: {
-					transferred: transfersCompletedToHotel.length,
-					notTransferred: transfersDueToHotel.length,
-				},
-			},
-		};
-
-		const summary = { ...legacy, ...nested };
 
 		res.set("Cache-Control", "no-cache, no-store, must-revalidate");
 		res.set("Pragma", "no-cache");

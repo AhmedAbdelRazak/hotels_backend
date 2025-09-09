@@ -282,6 +282,20 @@ const reservationsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+
+		moneyTransferredAt: { type: Date, default: null },
+
+		// Who/when last changed any payout/commission toggle
+		adminLastUpdatedAt: { type: Date, default: null },
+		adminLastUpdatedBy: {
+			_id: { type: ObjectId, ref: "User" },
+			name: { type: String },
+			role: { type: String, default: "admin" },
+		},
+
+		// Append-only journal of changes to payout/commission fields
+		// Each entry: { at, by: {_id,name,role}, field, from, to, note }
+		adminChangeLog: { type: Array, default: [] },
 	},
 	{ timestamps: true }
 );

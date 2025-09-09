@@ -1,73 +1,85 @@
 /** @format */
 
-const User = require("../models/user");
+"use strict";
+
 const mongoose = require("mongoose");
+const User = require("../models/user");
+
+const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+const sanitizeUserForResponse = (u) => {
+	if (!u) return u;
+	const obj = u.toObject ? u.toObject() : u;
+	delete obj.hashed_password;
+	delete obj.salt;
+	return obj;
+};
+
+const validateEmailFormat = (e) => {
+	if (typeof e !== "string") return false;
+	// simple robust pattern; rely on unique index in DB for final authority
+	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+};
+
+/* ───────────────────── Param Loaders ───────────────────── */
 
 exports.userById = (req, res, next, id) => {
-	console.log(id, "id");
+	if (!isValidObjectId(id)) {
+		return res.status(400).json({ error: "Invalid user id" });
+	}
+
 	User.findById(id)
 		.select(
 			"_id name email phone role user points activeUser hotelsToSupport accessTo"
 		)
 		.populate("hotelsToSupport")
-		// .populate("hotelsToSupport", "_id hotelName hotelCountry hotelCity hotelAddress")
 		.exec((err, user) => {
 			if (err || !user) {
-				console.log(err);
-				return res.status(400).json({
-					error: "User not found",
-				});
+				return res.status(400).json({ error: "User not found" });
 			}
-			req.profile = user; // Attach the user with populated hotelsToSupport to the request
-			console.log("Passed UserById");
+			req.profile = user; // acting user (admin or self)
 			next();
 		});
 };
 
 exports.updatedUserId = async (req, res, next, id) => {
-	console.log(id, "idididididididid"); // This shows 675bb6a5fffa21f9bd44feba
-
+	if (!isValidObjectId(id)) {
+		return res.status(400).json({ error: "Invalid target user id" });
+	}
 	try {
-		// 1) Quick debug findOne
-		const testString = await User.findOne({ _id: id }); // if ID is stored as string
-		console.log("testString =>", testString);
-
-		// 2) The standard findById
-		const userNeedsUpdate = await User.findById(id)
-			.select("_id name email hotelIdsOwner")
+		const target = await User.findById(id)
+			.select(
+				"_id name email role activeUser employeeImage userRole userStore userBranch"
+			)
 			.exec();
-
-		console.log("userNeedsUpdate =>", userNeedsUpdate);
-		if (!userNeedsUpdate) {
-			return res.status(400).json({ error: "user not found yad" });
+		if (!target) {
+			return res.status(400).json({ error: "Target user not found" });
 		}
-		req.updatedUserByAdmin = userNeedsUpdate;
-		console.log("Passed updatedUserId");
-
+		req.updatedUserByAdmin = target; // target to be updated by admin
 		next();
 	} catch (err) {
-		console.log("err =>", err);
-		return res.status(400).json({ error: "some error" });
+		return res.status(400).json({ error: "Error loading target user" });
 	}
 };
 
+/* ───────────────────── Regular endpoints ───────────────────── */
+
 exports.read = (req, res) => {
-	req.profile.hashed_password = undefined;
-	req.profile.salt = undefined;
-	return res.json(req.profile);
+	const safe = sanitizeUserForResponse(req.profile);
+	return res.json(safe);
 };
 
 exports.remove = (req, res) => {
-	let user = req.user;
+	// NOTE: this uses req.user in your original code, but your param loader sets req.profile.
+	// Keep it as-is if other middleware attaches req.user; otherwise switch to req.profile.
+	const user = req.user || req.profile;
+	if (!user) return res.status(400).json({ error: "User not loaded" });
+
 	user.remove((err, deletedUser) => {
 		if (err) {
-			return res.status(400).json({
-				error: errorHandler(err),
-			});
+			return res.status(400).json({ error: "Failed to delete user" });
 		}
-		res.json({
-			manage: "User was successfully deleted",
-		});
+		res.json({ message: "User was successfully deleted" });
 	});
 };
 
@@ -77,186 +89,198 @@ exports.allUsersList = (req, res) => {
 			"_id name email role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
 		)
 		.exec((err, users) => {
-			if (err) {
-				return res.status(400).json({
-					error: "users not found",
-				});
-			}
-			res.json(users);
+			if (err) return res.status(400).json({ error: "Users not found" });
+			res.json(users.map(sanitizeUserForResponse));
 		});
 };
 
-exports.update = (req, res) => {
-	// console.log('UPDATE USER - req.user', req.user, 'UPDATE DATA', req.body);
-	const { name, password } = req.body;
+exports.update = async (req, res) => {
+	try {
+		const { name, email, password } = req.body;
 
-	User.findOne({ _id: req.profile._id }, (err, user) => {
-		if (err || !user) {
-			return res.status(400).json({
-				error: "User not found",
+		const user = await User.findById(req.profile._id);
+		if (!user) return res.status(400).json({ error: "User not found" });
+
+		// Update name only if provided (allow partial updates)
+		if (typeof name !== "undefined") {
+			if (!String(name).trim()) {
+				return res.status(400).json({ error: "Name cannot be empty" });
+			}
+			user.name = String(name).trim();
+		}
+
+		// Update email only if provided (format + case‑insensitive uniqueness)
+		if (typeof email !== "undefined") {
+			const trimmed = String(email).trim();
+			const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed);
+			if (!valid)
+				return res.status(400).json({ error: "Invalid email format" });
+
+			const duplicate = await User.findOne({
+				_id: { $ne: user._id },
+				email: { $regex: new RegExp("^" + trimmed + "$", "i") },
+			}).select("_id");
+			if (duplicate) {
+				return res
+					.status(400)
+					.json({ error: "Email already in use by another account" });
+			}
+			user.email = trimmed;
+		}
+
+		// Update password only if provided
+		if (typeof password !== "undefined" && password !== "") {
+			if (String(password).length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Password should be min 6 characters long" });
+			}
+			user.password = String(password);
+		}
+
+		// If nothing was provided, just respond with current user
+		if (
+			typeof name === "undefined" &&
+			typeof email === "undefined" &&
+			(typeof password === "undefined" || password === "")
+		) {
+			return res.json({
+				_id: user._id,
+				name: user.name,
+				email: user.email,
+				role: user.role,
+				activeUser: user.activeUser,
 			});
 		}
-		if (!name) {
-			return res.status(400).json({
-				error: "Name is required",
-			});
-		} else {
-			user.name = name;
-		}
 
-		if (password) {
-			if (password.length < 6) {
-				return res.status(400).json({
-					error: "Password should be min 6 characters long",
-				});
-			} else {
-				user.password = password;
-			}
-		}
-
-		user.save((err, updatedUser) => {
-			if (err) {
-				console.log("USER UPDATE ERROR", err);
-				return res.status(400).json({
-					error: "User update failed",
-				});
-			}
-			updatedUser.hashed_password = undefined;
-			updatedUser.salt = undefined;
-			res.json(updatedUser);
-		});
-	});
+		const saved = await user.save();
+		const safe = saved.toObject ? saved.toObject() : saved;
+		delete safe.hashed_password;
+		delete safe.salt;
+		return res.json(safe);
+	} catch (err) {
+		console.error("Self-update error:", err);
+		return res.status(400).json({ error: "User update failed" });
+	}
 };
 
-exports.updateUserByAdmin = (req, res) => {
-	// The admin-supplied data
-	const updateData = req.body || {};
-	// The userId we want to update
-	// e.g. if you store it as `updateData.userId`
-	const userIdToUpdate = updateData.userId;
-
-	// 1) Find the target user
-	User.findOne({ _id: userIdToUpdate }, (err, user) => {
-		if (err || !user) {
-			return res.status(400).json({ error: "User not found" });
+/* ───────────────────── Admin update target user ─────────────────────
+   PUT /user/:updatedUserId/:userId
+   - requireSignin, isAuth, isAdmin
+   - Supports partial updates: name, email, password (+ legacy fields)
+   - Email uniqueness is enforced (case-insensitive)
+   - Password optional; if provided, must be 6+ chars
+--------------------------------------------------------------------- */
+exports.updateUserByAdmin = async (req, res) => {
+	try {
+		const target = req.updatedUserByAdmin;
+		if (!target) {
+			// Back-compat: allow body.userId or params.updatedUserId
+			const targetId =
+				req.params.updatedUserId || req.body.userId || req.params.userId;
+			if (!isValidObjectId(targetId)) {
+				return res.status(400).json({ error: "Invalid target user id" });
+			}
+			const found = await User.findById(targetId).exec();
+			if (!found) return res.status(400).json({ error: "User not found" });
+			req.updatedUserByAdmin = found;
 		}
 
-		// 2) For each possible field, update if present in updateData
+		const userDoc = req.updatedUserByAdmin;
+		const payload = req.body || {};
 
-		// name
-		if ("name" in updateData) {
-			if (!updateData.name) {
+		/* --- name --- */
+		if ("name" in payload) {
+			if (!payload.name) {
 				return res.status(400).json({ error: "Name is required" });
 			}
-			user.name = updateData.name;
+			userDoc.name = payload.name;
 		}
 
-		// password
-		if ("password" in updateData) {
-			if (!updateData.password) {
-				return res.status(400).json({ error: "Password is required" });
-			}
-			if (updateData.password.length < 6) {
-				return res.status(400).json({
-					error: "Password should be min 6 characters long",
-				});
-			}
-			user.password = updateData.password;
-		}
-
-		// role
-		if ("role" in updateData) {
-			if (!updateData.role) {
-				return res.status(400).json({ error: "Role is required" });
-			}
-			user.role = updateData.role;
-		}
-
-		// email
-		if ("email" in updateData) {
-			if (!updateData.email) {
+		/* --- email --- */
+		if ("email" in payload) {
+			if (!payload.email) {
 				return res.status(400).json({ error: "Email is required" });
 			}
-			user.email = updateData.email;
-		}
-
-		// activeUser
-		if ("activeUser" in updateData) {
-			// If you want it mandatory if provided:
-			// if (!updateData.activeUser) {
-			//   return res.status(400).json({ error: "activeUser is required" });
-			// }
-			user.activeUser = updateData.activeUser;
-		}
-
-		// employeeImage
-		if ("employeeImage" in updateData) {
-			user.employeeImage = updateData.employeeImage;
-		}
-
-		// userRole
-		if ("userRole" in updateData) {
-			user.userRole = updateData.userRole;
-		}
-
-		// userStore
-		if ("userStore" in updateData) {
-			user.userStore = updateData.userStore;
-		}
-
-		// userBranch
-		if ("userBranch" in updateData) {
-			user.userBranch = updateData.userBranch;
-		}
-
-		// 3) Save the updated user
-		user.save((err, updatedUser) => {
-			if (err) {
-				console.log("USER UPDATE ERROR", err);
-				return res.status(400).json({ error: "User update failed" });
+			if (!validateEmailFormat(payload.email)) {
+				return res.status(400).json({ error: "Invalid email format" });
 			}
-			updatedUser.hashed_password = undefined;
-			updatedUser.salt = undefined;
-			return res.json(updatedUser);
-		});
-	});
+
+			// case-insensitive uniqueness check
+			const existing = await User.findOne({
+				_id: { $ne: userDoc._id },
+				email: { $regex: new RegExp("^" + payload.email + "$", "i") },
+			}).select("_id email");
+			if (existing) {
+				return res
+					.status(400)
+					.json({ error: "Email already in use by another account" });
+			}
+
+			userDoc.email = payload.email.trim();
+		}
+
+		/* --- password --- */
+		if (payload.password != null && payload.password !== "") {
+			if (payload.password.length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Password should be min 6 characters long" });
+			}
+			userDoc.password = payload.password; // schema will hash
+		}
+
+		/* --- Legacy fields kept for backward compatibility --- */
+		if ("role" in payload && payload.role != null) userDoc.role = payload.role;
+		if ("activeUser" in payload && payload.activeUser != null)
+			userDoc.activeUser = payload.activeUser;
+		if ("employeeImage" in payload)
+			userDoc.employeeImage = payload.employeeImage;
+		if ("userRole" in payload) userDoc.userRole = payload.userRole;
+		if ("userStore" in payload) userDoc.userStore = payload.userStore;
+		if ("userBranch" in payload) userDoc.userBranch = payload.userBranch;
+
+		const saved = await userDoc.save();
+		return res.json(sanitizeUserForResponse(saved));
+	} catch (err) {
+		console.error("updateUserByAdmin error:", err);
+		return res.status(400).json({ error: "User update failed" });
+	}
 };
 
+/* ───────────────────── Extra endpoints you already have ───────────────────── */
+
 exports.getSingleUser = (req, res) => {
-	const { accountId } = req.params; // Get accountId from URL parameters
+	const { accountId } = req.params;
+	if (!isValidObjectId(accountId)) {
+		return res.status(400).json({ error: "Invalid account id" });
+	}
 	const belongsTo = mongoose.Types.ObjectId(accountId);
 
 	User.findOne({ _id: belongsTo })
-		.populate("hotelIdsOwner") // Populate the hotelIdsOwner field
+		.populate("hotelIdsOwner")
 		.exec((err, user) => {
 			if (err || !user) {
-				return res.status(400).json({
-					error: "User not found",
-				});
+				return res.status(400).json({ error: "User not found" });
 			}
-			// Optional: Remove sensitive information from user object
-			user.hashed_password = undefined;
-			user.salt = undefined;
-
-			res.json(user); // Send the user data as a response
+			res.json(sanitizeUserForResponse(user));
 		});
 };
 
 exports.houseKeepingStaff = async (req, res) => {
 	const { hotelId } = req.params;
-
+	if (!isValidObjectId(hotelId)) {
+		return res.status(400).json({ error: "Invalid hotel id" });
+	}
 	try {
 		const staffList = await User.find({
 			hotelIdWork: hotelId,
 			role: 5000,
-		}).select("_id name email role"); // You can adjust the fields you want to select
-
-		res.json(staffList);
+		}).select("_id name email role");
+		res.json(staffList.map(sanitizeUserForResponse));
 	} catch (err) {
 		console.error(err);
-		res.status(500).json({
-			error: "Error retrieving housekeeping staff list",
-		});
+		res.status(500).json({ error: "Error retrieving housekeeping staff list" });
 	}
 };
 
@@ -270,11 +294,7 @@ exports.allHotelAccounts = (req, res) => {
 			"_id hotelName hotelCountry hotelState hotelCity hotelAddress"
 		)
 		.exec((err, users) => {
-			if (err) {
-				return res.status(400).json({
-					error: "Users not found",
-				});
-			}
-			res.json(users);
+			if (err) return res.status(400).json({ error: "Users not found" });
+			res.json(users.map(sanitizeUserForResponse));
 		});
 };
