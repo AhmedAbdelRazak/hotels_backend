@@ -148,92 +148,133 @@ exports.listOfAllActiveHotels = async (req, res) => {
 
 exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 	try {
-		// Optional switches: default off to preserve existing behavior
-		const validOnly =
-			String(req.query.validOnly || "false").toLowerCase() === "true";
+		// ---- Controls (safe defaults) ----
+		const mode = String(req.query.mode || "activeOrUpcoming").toLowerCase();
 		const requireActiveRoom =
-			String(req.query.activeRoom || "false").toLowerCase() === "true";
+			String(req.query.activeRoom || "true").toLowerCase() === "true";
+		const minPhotos = Math.max(1, Number(req.query.minPhotos) || 1);
 
-		// Base query: same gates as listOfAllActiveHotels + require rooms that have offers or monthly
-		const hotels = await HotelDetails.find({
+		const now = new Date();
+
+		const inRangeActiveNow = (from, to) => {
+			const f = from ? new Date(from) : null;
+			const t = to ? new Date(to) : null;
+			if (f && isNaN(f)) return false;
+			if (t && isNaN(t)) return false;
+			if (f && t) return f <= now && now <= t;
+			if (f && !t) return f <= now; // open-ended end -> treat as active if started
+			if (!f && t) return now <= t; // open-ended start -> treat as active if not ended
+			return false;
+		};
+
+		const isActiveOrUpcoming = (from, to) => {
+			const f = from ? new Date(from) : null;
+			const t = to ? new Date(to) : null;
+			if (f && isNaN(f)) return false;
+			if (t && isNaN(t)) return false;
+			if (t && t < now) return false; // expired
+			if (f && f >= now) return true; // upcoming
+			if (t && t >= now) return true; // active (or open-ended start)
+			return false;
+		};
+
+		const keepByMode = (from, to) => {
+			if (mode === "all") return true;
+			if (mode === "activenow") return inRangeActiveNow(from, to);
+			// default
+			return isActiveOrUpcoming(from, to);
+		};
+
+		// ---- Base mongo filter — reduce doc count early ----
+		// Require hotel active, photos exist, coordinates valid, and at least one room with media+basePrice.
+		const baseFilter = {
 			activateHotel: true,
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 			roomCountDetails: {
 				$elemMatch: {
 					"price.basePrice": { $gt: 0 },
-					// ensure room has photos
-					"photos.0": { $exists: true },
-					// require either offers or monthly to exist
+					[`photos.${minPhotos - 1}`]: { $exists: true }, // at least minPhotos
+					...(requireActiveRoom ? { activeRoom: true } : {}),
+					// rooms must have either offers or monthly arrays non-empty (coarse gate)
 					$or: [
 						{ "offers.0": { $exists: true } },
 						{ "monthly.0": { $exists: true } },
 					],
 				},
 			},
-		})
-			.lean()
-			.exec();
+		};
 
-		const now = new Date();
+		const hotels = await HotelDetails.find(baseFilter).lean().exec();
 
+		// ---- Trim arrays + remove rooms/hotels that no longer qualify ----
 		const filtered = hotels
 			.map((hotel) => {
-				const onlyRoomsWithDeals = (hotel.roomCountDetails || [])
+				const trimmedRooms = (hotel.roomCountDetails || [])
 					.filter((room) => {
-						// keep same gates as your base list
-						if (requireActiveRoom && room.activeRoom !== true) return false;
-						const hasBasePrice = room?.price?.basePrice > 0;
-						const hasPhotos =
-							Array.isArray(room.photos) && room.photos.length > 0;
-						if (!hasBasePrice || !hasPhotos) return false;
-
-						const offersAll = Array.isArray(room.offers) ? room.offers : [];
-						const monthlyAll = Array.isArray(room.monthly) ? room.monthly : [];
-
-						const offers = validOnly
-							? offersAll.filter((o) => {
-									const from = new Date(o.offerFrom);
-									const to = new Date(o.offerTo);
-									return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
-							  })
-							: offersAll;
-
-						const monthly = validOnly
-							? monthlyAll.filter((m) => {
-									const from = new Date(m.monthFrom);
-									const to = new Date(m.monthTo);
-									return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
-							  })
-							: monthlyAll;
-
-						// must have at least one qualifying offer/monthly
-						return offers.length > 0 || monthly.length > 0;
+						const okPrice = room?.price?.basePrice > 0;
+						const okPhotos =
+							Array.isArray(room.photos) && room.photos.length >= minPhotos;
+						const okActive = requireActiveRoom
+							? room.activeRoom === true
+							: true;
+						return okPrice && okPhotos && okActive;
 					})
 					.map((room) => {
-						if (!validOnly) return room;
-
-						// when validOnly=true, trim the arrays to only valid ranges
 						const offersAll = Array.isArray(room.offers) ? room.offers : [];
 						const monthlyAll = Array.isArray(room.monthly) ? room.monthly : [];
 
-						const offers = offersAll.filter((o) => {
-							const from = new Date(o.offerFrom);
-							const to = new Date(o.offerTo);
-							return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
-						});
-						const monthly = monthlyAll.filter((m) => {
-							const from = new Date(m.monthFrom);
-							const to = new Date(m.monthTo);
-							return !isNaN(from) && !isNaN(to) && from <= now && now <= to;
-						});
+						const offers = offersAll.filter((o) =>
+							keepByMode(
+								o.offerFrom || o.from || o.validFrom,
+								o.offerTo || o.to || o.validTo
+							)
+						);
+						const monthly = monthlyAll.filter((m) =>
+							keepByMode(
+								m.monthFrom || m.from || m.validFrom,
+								m.monthTo || m.to || m.validTo
+							)
+						);
+
+						// Optional sort for nicer UX in all consumers
+						const byValue = (a, b, getFrom, getPrice) => {
+							const priceDiff =
+								safeNumber(getPrice(a)) - safeNumber(getPrice(b));
+							if (priceDiff !== 0) return priceDiff;
+							const da = getFrom(a) ? new Date(getFrom(a)).getTime() : Infinity;
+							const db = getFrom(b) ? new Date(getFrom(b)).getTime() : Infinity;
+							return da - db;
+						};
+						const safeNumber = (v) =>
+							Number.isFinite(Number(v)) ? Number(v) : Infinity;
+
+						offers.sort((a, b) =>
+							byValue(
+								a,
+								b,
+								(x) => x.offerFrom || x.from || x.validFrom,
+								(x) => x.offerPrice ?? x.price
+							)
+						);
+						monthly.sort((a, b) =>
+							byValue(
+								a,
+								b,
+								(x) => x.monthFrom || x.from || x.validFrom,
+								(x) => x.monthPrice ?? x.price ?? x.rate
+							)
+						);
 
 						return { ...room, offers, monthly };
-					});
+					})
+					.filter(
+						(r) =>
+							(r.offers && r.offers.length) || (r.monthly && r.monthly.length)
+					);
 
-				return { ...hotel, roomCountDetails: onlyRoomsWithDeals };
+				return { ...hotel, roomCountDetails: trimmedRooms };
 			})
-			// only keep hotels that still have at least one qualifying room
 			.filter((h) => (h.roomCountDetails || []).length > 0);
 
 		return res.status(200).json(filtered);
