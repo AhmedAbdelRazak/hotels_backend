@@ -3,6 +3,42 @@
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Schema;
 
+const WalletSchema = new mongoose.Schema(
+	{
+		balance_sar: { type: Number, default: 0 }, // remainder after last reconciliation snapshot
+		lastComputedAt: { type: Date },
+		// Optional future-proof ledger:
+		ledger: {
+			type: [
+				{
+					at: { type: Date, default: Date.now },
+					type: {
+						type: String,
+						enum: [
+							"online_payout",
+							"offline_commission",
+							"reconcile_in",
+							"reconcile_out",
+							"adjustment",
+						],
+					},
+					reservationId: {
+						type: mongoose.Schema.Types.ObjectId,
+						ref: "Reservations",
+					},
+					confirmation_number: String,
+					amount_sar: Number,
+					batchKey: String,
+					note: String,
+				},
+			],
+			default: [],
+			select: false, // keep payloads slim unless explicitly selected
+		},
+	},
+	{ _id: false }
+);
+
 const hotel_detailsSchema = new mongoose.Schema(
 	{
 		hotelName: {
@@ -303,6 +339,9 @@ const hotel_detailsSchema = new mongoose.Schema(
 		},
 
 		belongsTo: { type: ObjectId, ref: "User" },
+
+		platform_wallet: { type: WalletSchema, default: () => ({}) }, // hotel owes platform
+		hotel_wallet: { type: WalletSchema, default: () => ({}) }, // platform owes hotel
 	},
 	{ timestamps: true }
 );

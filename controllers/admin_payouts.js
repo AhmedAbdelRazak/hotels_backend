@@ -119,7 +119,7 @@ function groupedLog(field, changes, note, by) {
 			name: by?.name || null,
 			role: by?.role || "admin",
 		},
-		field, // "commission" | "transfer"
+		field, // "commission" | "transfer" | "reconcile"
 		changes: Array.isArray(changes) ? changes : [],
 		note: note || null,
 	};
@@ -144,7 +144,6 @@ exports.listAdminPayouts = async (req, res) => {
 			findBase.hotelId = hotelId;
 		}
 
-		// <<< CHANGED: richer projection so FE can render last note + dates >>>
 		const raw = await Reservations.find(findBase, {
 			hotelId: 1,
 			confirmation_number: 1,
@@ -163,13 +162,13 @@ exports.listAdminPayouts = async (req, res) => {
 			commissionStatus: 1,
 			commissionPaidAt: 1,
 			moneyTransferredToHotel: 1,
-			moneyTransferredAt: 1, // <<< ADDED
-			commissionData: 1, // <<< ADDED (for MIT auto-note)
-			adminChangeLog: { $slice: -12 }, // <<< ADDED
-			adminLastUpdatedAt: 1, // <<< ADDED
-			adminLastUpdatedBy: 1, // <<< ADDED
+			moneyTransferredAt: 1,
+			commissionData: 1,
+			adminChangeLog: { $slice: -12 },
+			adminLastUpdatedAt: 1,
+			adminLastUpdatedBy: 1,
 			createdAt: 1,
-			updatedAt: 1, // <<< ADDED
+			updatedAt: 1,
 		}).lean();
 
 		const included = raw.filter((r) => statusIncluded(r?.reservation_status));
@@ -658,6 +657,401 @@ exports.updateReservationPayoutFlags = async (req, res) => {
 	} catch (e) {
 		console.error("updateReservationPayoutFlags:", e);
 		return res.status(500).json({ message: "Failed to update reservation." });
+	}
+};
+
+/* ───────── POST /admin-payouts/reconcile ─────────
+   Auto reconcile for a specific hotel.
+   Query: ?hotelId=...
+   Body (optional): { note?, toleranceHalala? }
+*/
+exports.autoReconcileHotel = async (req, res) => {
+	try {
+		const { hotelId } = req.query || {};
+		const { note, toleranceHalala = 5 } = req.body || {}; // default tolerance 0.05 SAR
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res
+				.status(400)
+				.json({ message: "hotelId is required and must be valid." });
+		}
+
+		// Load reservations for this hotel since SINCE_UTC
+		const findBase = { createdAt: { $gte: SINCE_UTC }, hotelId };
+		const fields = {
+			hotelId: 1,
+			confirmation_number: 1,
+			total_amount: 1,
+			pickedRoomsType: 1,
+			commission: 1,
+			reservation_status: 1,
+			payment: 1,
+			payment_details: 1,
+			paypal_details: 1,
+			checkin_date: 1,
+			checkout_date: 1,
+			commissionPaid: 1,
+			commissionStatus: 1,
+			commissionPaidAt: 1,
+			moneyTransferredToHotel: 1,
+			moneyTransferredAt: 1,
+			adminChangeLog: { $slice: -12 },
+			createdAt: 1,
+			updatedAt: 1,
+			customer_details: 1,
+		};
+
+		const rows = await Reservations.find(findBase, fields).lean();
+		const included = rows.filter((r) => statusIncluded(r?.reservation_status));
+
+		// derive channel + amounts
+		const derived = included.map((r) => {
+			const pay = summarizePayment(r);
+			const stored = Number(r?.commission || 0);
+			const comm =
+				stored > 0
+					? stored
+					: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
+			const commissionSAR = n2(comm);
+			const netToHotel = n2(Number(r?.total_amount || 0) - commissionSAR);
+			return {
+				...r,
+				computed_payment_channel: pay.channel,
+				computed_commission_sar: commissionSAR,
+				computed_online_payout_sar: netToHotel,
+				commissionPaid: isCommissionPaid(r),
+			};
+		});
+
+		// Pools
+		const onlineDue = derived.filter(
+			(r) =>
+				r.computed_payment_channel === "online" &&
+				r.moneyTransferredToHotel !== true
+		);
+		const offlineDue = derived.filter(
+			(r) =>
+				(r.computed_payment_channel === "offline" ||
+					r.computed_payment_channel === "none") &&
+				!r.commissionPaid
+		);
+
+		const sum = (arr, get) => arr.reduce((a, x) => a + Number(get(x) || 0), 0);
+		const onlineDueNet = n2(
+			sum(onlineDue, (r) => r.computed_online_payout_sar)
+		);
+		const offlineDueComm = n2(
+			sum(offlineDue, (r) => r.computed_commission_sar)
+		);
+		const target = n2(Math.min(onlineDueNet, offlineDueComm));
+
+		// Nothing to do
+		if (target <= 0) {
+			// recompute and store wallets as a snapshot
+			const hotelBalance = n2(Math.max(0, onlineDueNet - offlineDueComm));
+			const platformBalance = n2(Math.max(0, offlineDueComm - onlineDueNet));
+			await HotelDetails.updateOne(
+				{ _id: hotelId },
+				{
+					$set: {
+						"hotel_wallet.balance_sar": hotelBalance,
+						"hotel_wallet.lastComputedAt": new Date(),
+						"platform_wallet.balance_sar": platformBalance,
+						"platform_wallet.lastComputedAt": new Date(),
+					},
+				}
+			);
+			return res.json({
+				ok: true,
+				reconciled: 0,
+				message: "Nothing to reconcile.",
+				hotel_wallet: hotelBalance,
+				platform_wallet: platformBalance,
+			});
+		}
+
+		// ---- subset helpers ----
+		const toCents = (x) => Math.round(Number(x || 0) * 100);
+		const fromCents = (x) => n2(x / 100);
+
+		// pick best subset <= target using DP when small, greedily otherwise
+		function pickBestSubset(items, amountField, targetCents) {
+			const withAmt = items
+				.map((it, idx) => ({ idx, cents: toCents(it[amountField]) }))
+				.filter((x) => x.cents > 0);
+			if (!withAmt.length || targetCents <= 0) return { idxs: [], sumCents: 0 };
+
+			const N = withAmt.length;
+			const MAX_DP_ITEMS = 26; // DP up to 26 items
+			const MAX_TARGET_DP = 250000; // DP up to 2,500 SAR
+
+			if (N <= MAX_DP_ITEMS && targetCents <= MAX_TARGET_DP) {
+				// classic DP (sum->bitset indices)
+				const map = new Map();
+				map.set(0, []);
+				for (const { idx, cents } of withAmt) {
+					// snapshot current sums to avoid overwrite during loop
+					const entries = Array.from(map.entries());
+					for (const [s, arr] of entries) {
+						const ns = s + cents;
+						if (ns <= targetCents && !map.has(ns)) {
+							map.set(ns, arr.concat(idx));
+						}
+					}
+				}
+				// best is max key
+				let best = 0;
+				for (const k of map.keys()) if (k > best) best = k;
+				return { idxs: map.get(best) ?? [], sumCents: best };
+			}
+
+			// Greedy fallback: sort DESC and accumulate
+			const sorted = [...withAmt].sort((a, b) => b.cents - a.cents);
+			let sumCents = 0;
+			const idxs = [];
+			for (const { idx, cents } of sorted) {
+				if (sumCents + cents <= targetCents) {
+					sumCents += cents;
+					idxs.push(idx);
+				}
+			}
+			return { idxs, sumCents };
+		}
+
+		const targetCents = toCents(target);
+
+		const pickOffline = pickBestSubset(
+			offlineDue,
+			"computed_commission_sar",
+			targetCents
+		);
+		const pickOnline = pickBestSubset(
+			onlineDue,
+			"computed_online_payout_sar",
+			targetCents
+		);
+
+		let offlineSum = pickOffline.sumCents;
+		let onlineSum = pickOnline.sumCents;
+
+		// align amounts (use the smaller of the two)
+		let settledCents = Math.min(offlineSum, onlineSum);
+
+		// if they mismatch beyond tolerance, trim the larger pick by smallest items
+		const tol = Number(toleranceHalala) | 0; // halalas
+		if (Math.abs(offlineSum - onlineSum) > tol) {
+			if (offlineSum > settledCents) {
+				// drop smallest offline items until <= settled
+				const byAmtAsc = pickOffline.idxs
+					.map((i) => ({
+						i,
+						c: toCents(offlineDue[i].computed_commission_sar),
+					}))
+					.sort((a, b) => a.c - b.c);
+				for (const { i, c } of byAmtAsc) {
+					if (offlineSum <= settledCents) break;
+					offlineSum -= c;
+					pickOffline.idxs = pickOffline.idxs.filter((x) => x !== i);
+				}
+			}
+			if (onlineSum > settledCents) {
+				const byAmtAsc = pickOnline.idxs
+					.map((i) => ({
+						i,
+						c: toCents(onlineDue[i].computed_online_payout_sar),
+					}))
+					.sort((a, b) => a.c - b.c);
+				for (const { i, c } of byAmtAsc) {
+					if (onlineSum <= settledCents) break;
+					onlineSum -= c;
+					pickOnline.idxs = pickOnline.idxs.filter((x) => x !== i);
+				}
+			}
+			settledCents = Math.min(offlineSum, onlineSum);
+		}
+
+		const settled = fromCents(settledCents);
+		if (settledCents <= 0) {
+			return res.json({
+				ok: true,
+				reconciled: 0,
+				message:
+					"Could not find a viable subset to reconcile (within tolerance).",
+			});
+		}
+
+		const now = new Date();
+		const by = getAdminActor(req);
+		const batchKey = `RC${now.getFullYear()}${String(
+			now.getMonth() + 1
+		).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${Math.random()
+			.toString(36)
+			.slice(2, 7)
+			.toUpperCase()}`;
+
+		// build lists
+		const chosenOffline = pickOffline.idxs.map((i) => offlineDue[i]);
+		const chosenOnline = pickOnline.idxs.map((i) => onlineDue[i]);
+
+		const offlineConfs = chosenOffline
+			.map((r) => r.confirmation_number)
+			.join(", ");
+		const onlineConfs = chosenOnline
+			.map((r) => r.confirmation_number)
+			.join(", ");
+
+		const baseNote =
+			note && String(note).trim().length ? ` • ${String(note).trim()}` : "";
+
+		// ---- write back: OFFLINE -> commissionPaid ----
+		for (const r of chosenOffline) {
+			const prevPaid = !!r.commissionPaid;
+			if (prevPaid) continue;
+			const nextStatus = "commission paid";
+			const changes = [
+				chg("commissionPaid", prevPaid, true),
+				chg("commissionStatus", r.commissionStatus || null, nextStatus),
+				chg("commissionPaidAt", r.commissionPaidAt || null, now),
+			];
+			const msg = `AutoReconcile ${batchKey} — Netted against ONLINE [${onlineConfs}] • Settled ${settled} SAR${baseNote}`;
+			const logEntry = groupedLog("commission", changes, msg, by);
+
+			await Reservations.updateOne(
+				{ _id: r._id },
+				{
+					$set: {
+						commissionPaid: true,
+						commissionStatus: nextStatus,
+						commissionPaidAt: now,
+						adminLastUpdatedAt: now,
+						adminLastUpdatedBy: {
+							_id: by?._id,
+							name: by?.name,
+							role: by?.role || "admin",
+						},
+					},
+					$push: { adminChangeLog: logEntry },
+				}
+			);
+		}
+
+		// ---- write back: ONLINE -> moneyTransferredToHotel ----
+		for (const r of chosenOnline) {
+			const prev = !!r.moneyTransferredToHotel;
+			if (prev) continue;
+			const changes = [
+				chg("moneyTransferredToHotel", prev, true),
+				chg("moneyTransferredAt", r.moneyTransferredAt || null, now),
+			];
+			const msg = `AutoReconcile ${batchKey} — Paired with OFFLINE [${offlineConfs}] • Settled ${settled} SAR${baseNote}`;
+			const logEntry = groupedLog("transfer", changes, msg, by);
+
+			await Reservations.updateOne(
+				{ _id: r._id },
+				{
+					$set: {
+						moneyTransferredToHotel: true,
+						moneyTransferredAt: now,
+						adminLastUpdatedAt: now,
+						adminLastUpdatedBy: {
+							_id: by?._id,
+							name: by?.name,
+							role: by?.role || "admin",
+						},
+					},
+					$push: { adminChangeLog: logEntry },
+				}
+			);
+		}
+
+		// ---- recompute remainders after updates ----
+		const afterRows = await Reservations.find(findBase, fields).lean();
+		const afterInc = afterRows
+			.filter((r) => statusIncluded(r?.reservation_status))
+			.map((r) => {
+				const pay = summarizePayment(r);
+				const stored = Number(r?.commission || 0);
+				const comm =
+					stored > 0
+						? stored
+						: computeCommissionFromPickedRooms(r?.pickedRoomsType || []);
+				const commissionSAR = n2(comm);
+				const netToHotel = n2(Number(r?.total_amount || 0) - commissionSAR);
+				return {
+					...r,
+					computed_payment_channel: pay.channel,
+					computed_commission_sar: commissionSAR,
+					computed_online_payout_sar: netToHotel,
+					commissionPaid: isCommissionPaid(r),
+				};
+			});
+
+		const afterOnlineDue = afterInc.filter(
+			(r) =>
+				r.computed_payment_channel === "online" &&
+				r.moneyTransferredToHotel !== true
+		);
+		const afterOfflineDue = afterInc.filter(
+			(r) =>
+				(r.computed_payment_channel === "offline" ||
+					r.computed_payment_channel === "none") &&
+				!r.commissionPaid
+		);
+
+		const afterOnlineDueNet = n2(
+			sum(afterOnlineDue, (r) => r.computed_online_payout_sar)
+		);
+		const afterOfflineComm = n2(
+			sum(afterOfflineDue, (r) => r.computed_commission_sar)
+		);
+
+		const hotelBalance = n2(Math.max(0, afterOnlineDueNet - afterOfflineComm));
+		const platformBalance = n2(
+			Math.max(0, afterOfflineComm - afterOnlineDueNet)
+		);
+
+		await HotelDetails.updateOne(
+			{ _id: hotelId },
+			{
+				$set: {
+					"hotel_wallet.balance_sar": hotelBalance,
+					"hotel_wallet.lastComputedAt": new Date(),
+					"platform_wallet.balance_sar": platformBalance,
+					"platform_wallet.lastComputedAt": new Date(),
+				},
+				$push: {
+					adminChangeLog: groupedLog(
+						"reconcile",
+						[],
+						`AutoReconcile ${batchKey} • Settled ${settled} SAR • Online=[${onlineConfs}] • Offline=[${offlineConfs}]${baseNote}`,
+						by
+					),
+				},
+			}
+		);
+
+		return res.json({
+			ok: true,
+			hotelId,
+			batchKey,
+			settledSAR: Number(settled),
+			offline: {
+				count: chosenOffline.length,
+				confirmation_numbers: chosenOffline.map((r) => r.confirmation_number),
+				sumSAR: Number(fromCents(offlineSum)),
+			},
+			online: {
+				count: chosenOnline.length,
+				confirmation_numbers: chosenOnline.map((r) => r.confirmation_number),
+				sumSAR: Number(fromCents(onlineSum)),
+			},
+			remainder: {
+				hotel_wallet_sar: Number(hotelBalance),
+				platform_wallet_sar: Number(platformBalance),
+			},
+		});
+	} catch (e) {
+		console.error("autoReconcileHotel:", e);
+		return res.status(500).json({ message: "Failed to reconcile." });
 	}
 };
 

@@ -17,4 +17,7 @@ router.patch(
 	Ctrl.updateReservationPayoutFlags
 );
 
+/* NEW: Auto reconcile a single hotel */
+router.post("/admin-payouts/reconcile", Ctrl.autoReconcileHotel);
+
 module.exports = router;
