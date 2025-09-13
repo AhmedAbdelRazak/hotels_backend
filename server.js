@@ -46,6 +46,8 @@ const io = socketIo(server, {
 
 // Pass the io instance to the app
 app.set("io", io);
+const { initAIAgent } = require("./ai-agent");
+initAIAgent({ app, io });
 
 // Route middlewares
 readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));

@@ -284,6 +284,11 @@ exports.updateHotelDetails = async (req, res) => {
 		);
 		updatedFields.fromPage = fromPage;
 
+		/* 🔒 Ensure booleans that can be false are not dropped */
+		if (Object.prototype.hasOwnProperty.call(updateData, "aiToRespond")) {
+			updatedFields.aiToRespond = toBoolean(updateData.aiToRespond); // ← NEW
+		}
+
 		/* 3. Detect coordinate change */
 		const newCoords = updateData?.location?.coordinates;
 		const oldCoords = hotelDetails.location?.coordinates;
@@ -327,6 +332,19 @@ exports.updateHotelDetails = async (req, res) => {
 		return res.status(500).json({ error: "Internal server error" });
 	}
 };
+
+/* Helper: robust boolean coercion */
+function toBoolean(v) {
+	if (typeof v === "boolean") return v;
+	if (typeof v === "number") return v !== 0;
+	if (typeof v === "string") {
+		const s = v.trim().toLowerCase();
+		// accept common truthy/falsey forms just in case a gateway sends strings
+		if (["true", "1", "yes", "on"].includes(s)) return true;
+		if (["false", "0", "no", "off", ""].includes(s)) return false;
+	}
+	return !!v; // fallback
+}
 
 exports.list = (req, res) => {
 	const userId = mongoose.Types.ObjectId(req.params.accountId);

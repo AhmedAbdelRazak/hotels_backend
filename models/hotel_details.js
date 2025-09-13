@@ -237,6 +237,10 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		aiToRespond: {
+			type: Boolean,
+			default: false,
+		},
 		currency: {
 			type: String, //Blank
 			trim: true,
