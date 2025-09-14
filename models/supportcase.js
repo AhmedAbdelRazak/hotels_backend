@@ -82,6 +82,19 @@ const supportCaseSchema = new Schema({
 		type: String,
 		required: true, // Ensure the displayName2 is always provided
 	},
+	aiRelated: {
+		type: Boolean,
+		default: false,
+	},
+	managerRatingAI: {
+		type: Number,
+		default: 0,
+	},
+
+	managerComments: {
+		type: String,
+		default: "",
+	},
 });
 
 const SupportCase = mongoose.model("SupportCase", supportCaseSchema);
