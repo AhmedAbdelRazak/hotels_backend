@@ -1,9 +1,9 @@
-/* ai-agent/index.js — v3.5
- * Key updates from v3.4:
- *  - Broader confirmation detection (assistant asks + user affirmatives) to avoid redundant re-asking.
- *  - New booking now proceeds immediately on "yes/proceed/go ahead/confirm/finalize" etc. (multi-language).
- *  - Booking readiness: infer adults from room type; children=0; rooms=1 — nationality remains required.
- *  - Endpoint call always fires post-affirmation; success reply includes confirmation number + link.
+/* ai-agent/index.js — v3.6
+ * Key updates from v3.5:
+ *  - Add a dedicated second message with the public confirmation link (includes downloadable PDF)
+ *    after successful NEW bookings and successful UPDATES (date change / alt window).
+ *  - De‑duplication: remove inline links from success texts; send link only in the second message.
+ *    Guard against repeat auto-sends via lastLinkSentFor; still send on-demand if guest asks.
  *  - Keeps: 5–7s warm-up; greeting + case-aware second message; robust inquiry parsing; cancel/update flows; re-pricing.
  */
 
@@ -1264,6 +1264,8 @@ function getState(caseId) {
 		intentProceed: false,
 		pendingAction: null,
 		missingAskCount: 0,
+		// for link de-duplication in auto flows
+		lastLinkSentFor: null,
 	};
 	caseState.set(caseId, s);
 	return s;
@@ -1634,6 +1636,133 @@ function shortThanksLine(lang) {
 	if (lang === "hi") return "धन्यवाद—मैं जल्द ही अपडेट के साथ लौटता/लौटती हूँ।";
 	return "Thank you—I’ll be right back with an update.";
 }
+
+// === Confirmation link helpers ===
+function confirmationLinkLine(lang, link) {
+	if (lang === "ar")
+		return `🔗 هذا رابط تأكيد الحجز (يتضمن PDF قابل للتنزيل): ${link}`;
+	if (lang === "es")
+		return `🔗 Enlace de confirmación (incluye PDF descargable): ${link}`;
+	if (lang === "fr")
+		return `🔗 Lien de confirmation (PDF téléchargeable inclus) : ${link}`;
+	if (lang === "ur") return `🔗 کنفرمیشن لنک (PDF ڈاؤن لوڈ کے ساتھ): ${link}`;
+	if (lang === "hi")
+		return `🔗 पुष्टि लिंक (डाउनलोड करने योग्य PDF सहित): ${link}`;
+	return `🔗 Confirmation link (includes downloadable PDF): ${link}`;
+}
+
+async function sendPublicLinkMessage(
+	io,
+	{ caseId, persona, lang, confirmation, publicLink }
+) {
+	const link =
+		publicLink ||
+		(confirmation
+			? `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`
+			: null);
+	if (!link) return;
+	const line = confirmationLinkLine(lang, link);
+	startTyping(io, caseId, persona.name);
+	await new Promise((r) => setTimeout(r, computeTypeDelay(line)));
+	await persistAndBroadcast(io, { caseId, text: line, persona, lang });
+}
+
+// Send the link as a separate message if we didn't already include that exact link
+// in the immediately preceding message and we haven't auto-sent it for this confirmation.
+async function postSuccessLinkIfNeeded(
+	io,
+	{ caseId, persona, lang },
+	{ confirmation, publicLink, lastText }
+) {
+	const st = getState(caseId);
+	if (!confirmation) return;
+	const link =
+		publicLink ||
+		(confirmation
+			? `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`
+			: null);
+	if (!link) return;
+
+	// If last outgoing text already had the same link, do not send again.
+	if (lastText && lastText.includes(link)) {
+		st.lastLinkSentFor = confirmation;
+		return;
+	}
+	// Avoid auto-resending the same link twice in a flow.
+	if (st.lastLinkSentFor === confirmation) return;
+
+	await sendPublicLinkMessage(io, {
+		caseId,
+		persona,
+		lang,
+		confirmation,
+		publicLink: link,
+	});
+	st.lastLinkSentFor = confirmation;
+}
+
+// Guests sometimes ask “send me the link / pdf / receipt / email”.
+// If they do, we just send the confirmation link (on-demand always allowed).
+function isLinkOrReceiptRequest(text = "") {
+	const s = lower(text);
+	const hitSingle = [
+		"pdf",
+		"receipt",
+		"invoice",
+		"voucher",
+		"comprobante",
+		"factura",
+		"reçu",
+		"justificatif",
+		"إيصال",
+		"فاتورة",
+		"pdf",
+		"بي دي اف",
+		"رسيد",
+		"رسید",
+		"رَسید",
+	].some((k) => s.includes(k));
+	const hitLinkish =
+		(s.includes("link") ||
+			s.includes("enlace") ||
+			s.includes("lien") ||
+			s.includes("رابط") ||
+			s.includes("لينك")) &&
+		(s.includes("confirm") ||
+			s.includes("booking") ||
+			s.includes("reservation") ||
+			s.includes("confirmación") ||
+			s.includes("reserva") ||
+			s.includes("réservation") ||
+			s.includes("تأكيد") ||
+			s.includes("الحجز") ||
+			s.includes("ارس") ||
+			s.includes("أرسل") ||
+			s.includes("ارسل") ||
+			s.includes("send") ||
+			s.includes("share"));
+	const hitEmailAsk =
+		(s.includes("email") ||
+			s.includes("correo") ||
+			s.includes("courriel") ||
+			s.includes("ايميل") ||
+			s.includes("إيميل")) &&
+		(s.includes("confirmation") ||
+			s.includes("confirmación") ||
+			s.includes("réservation") ||
+			s.includes("receipt") ||
+			s.includes("reçu") ||
+			s.includes("facture") ||
+			s.includes("pdf") ||
+			s.includes("link") ||
+			s.includes("enlace") ||
+			s.includes("lien") ||
+			s.includes("الحجز") ||
+			s.includes("تأكيد") ||
+			s.includes("رابط"));
+	return hitSingle || hitLinkish || hitEmailAsk;
+}
+
 function greetingLineFriendly({ lang, hotelName, personaName, guestFirst }) {
 	const H = hotelName || "our hotel";
 	const G = guestFirst ? ` ${guestFirst}` : "";
@@ -2047,6 +2176,7 @@ function askForMissingFieldsText(lang, missing = [], compact = false) {
 			es: "Correo (opcional)",
 			fr: "Email (facultatif)",
 			ur: "ای میل (اختیاری)",
+			// keep "hi" short to match space
 			hi: "ईमेल (वैकल्पिक)",
 		},
 		phone: {
@@ -2130,7 +2260,7 @@ function askForMissingFieldsText(lang, missing = [], compact = false) {
 			: code === "hi"
 			? `आरक्षण पूरा करने के लिए मुझे ये चाहिए:\n- ${items.join(
 					"\n- "
-			  )}\nआप इन्हें एक‑एक करके भेज सकते हैं।`
+			  )}\nआप इन्हें एक‑एक करके भेज सकते हैं.`
 			: `To finalize your reservation I just need:\n- ${items.join(
 					"\n- "
 			  )}\nYou can share them one by one—I’ll fill them in as we go.`;
@@ -2580,6 +2710,47 @@ async function processCase(io, client, MODEL, caseId) {
 			}
 		}
 
+		// === On-demand confirmation link / PDF / receipt request
+		if (isLinkOrReceiptRequest(payload?.message || "")) {
+			const conf =
+				st.lastConfirmation ||
+				st.reservationCache?.confirmation ||
+				freshConf ||
+				extractConfirmationFromCase(caseDoc);
+			if (conf) {
+				await sendPublicLinkMessage(io, {
+					caseId,
+					persona,
+					lang: persona.lang,
+					confirmation: conf,
+					publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${conf}`,
+				});
+			} else {
+				const ask =
+					persona.lang === "ar"
+						? "من فضلك شاركني رقم تأكيد الحجز لأرسل لك الرابط (يتضمن PDF)."
+						: persona.lang === "es"
+						? "Por favor comparte el número de confirmación para enviarte el enlace (incluye PDF)."
+						: persona.lang === "fr"
+						? "Veuillez partager le numéro de confirmation pour que je vous envoie le lien (PDF inclus)."
+						: persona.lang === "ur"
+						? "براہِ کرم کنفرمیشن نمبر شیئر کریں تاکہ میں لنک (PDF کے ساتھ) بھیج دوں۔"
+						: persona.lang === "hi"
+						? "कृपया कन्फर्मेशन नंबर साझा करें ताकि मैं लिंक (PDF सहित) भेज सकूँ।"
+						: "Please share your confirmation number so I can send the link (includes a PDF).";
+				startTyping(io, caseId, persona.name);
+				await new Promise((r) => setTimeout(r, computeTypeDelay(ask)));
+				await persistAndBroadcast(io, {
+					caseId,
+					text: ask,
+					persona,
+					lang: persona.lang,
+				});
+			}
+			replyLock.delete(caseId);
+			return;
+		}
+
 		/* ---------- Deterministic reservation flows (cancel/change) ---------- */
 
 		// CANCEL — if last assistant asked to cancel and user said "yes"
@@ -2802,16 +2973,16 @@ async function processCase(io, client, MODEL, caseId) {
 				startTyping(io, caseId, persona.name);
 				const done = out.ok
 					? persona.lang === "ar"
-						? `تم تحديث التواريخ. رابط التفاصيل: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nهل أساعدك بشيء آخر؟`
+						? `تم تحديث التواريخ.\nسأرسل رابط التأكيد في الرسالة التالية.\nهل أساعدك بشيء آخر؟`
 						: persona.lang === "es"
-						? `Fechas actualizadas. Detalles: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\n¿Algo más?`
+						? `Fechas actualizadas.\nTe envío el enlace de confirmación enseguida.\n¿Algo más?`
 						: persona.lang === "fr"
-						? `Dates mises à jour. Détails : ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nPuis‑je aider encore ?`
+						? `Dates mises à jour.\nJ’envoie le lien de confirmation juste après.\nPuis‑je aider encore ?`
 						: persona.lang === "ur"
-						? `تاریخیں اپڈیٹ ہو گئیں۔ تفصیل: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nکیا مزید مدد درکار ہے؟`
+						? `تاریخیں اپڈیٹ ہو گئیں۔\nاگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔\nکیا مزید مدد درکار ہے؟`
 						: persona.lang === "hi"
-						? `तिथियाँ अपडेट हो गईं। विवरण: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nऔर कुछ?`
-						: `Dates updated. Details: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nIs there anything else I can help you with?`
+						? `तिथियाँ अपडेट हो गईं।\nअगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।\nऔर कुछ?`
+						: `Dates updated.\nI’ll send your confirmation link next.\nIs there anything else I can help you with?`
 					: persona.lang === "ar"
 					? `تعذّر تحديث التواريخ: ${out.error || "خطأ غير معروف"}.`
 					: persona.lang === "es"
@@ -2832,6 +3003,18 @@ async function processCase(io, client, MODEL, caseId) {
 					persona,
 					lang: persona.lang,
 				});
+
+				if (out.ok) {
+					await postSuccessLinkIfNeeded(
+						io,
+						{ caseId, persona, lang: persona.lang },
+						{
+							confirmation,
+							publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`,
+							lastText: done,
+						}
+					);
+				}
 				replyLock.delete(caseId);
 				return;
 			}
@@ -2871,7 +3054,17 @@ async function processCase(io, client, MODEL, caseId) {
 
 						startTyping(io, caseId, persona.name);
 						const msg = out.ok
-							? `Updated to ${repr2.next.checkin_date} → ${repr2.next.checkout_date}. Details: ${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}\nIs there anything else I can help you with?`
+							? persona.lang === "ar"
+								? `تم التحديث إلى ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nسأرسل رابط التأكيد في الرسالة التالية.\nهل أساعدك بشيء آخر؟`
+								: persona.lang === "es"
+								? `Actualizado a ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nTe envío el enlace de confirmación enseguida.\n¿Algo más?`
+								: persona.lang === "fr"
+								? `Mis à jour vers ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nJ’envoie le lien de confirmation juste après.\nPuis‑je aider encore ?`
+								: persona.lang === "ur"
+								? `اب ${repr2.next.checkin_date} → ${repr2.next.checkout_date} پر اپڈیٹ ہو گیا۔\nاگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔\nکیا مزید مدد درکار ہے؟`
+								: persona.lang === "hi"
+								? `${repr2.next.checkin_date} → ${repr2.next.checkout_date} पर अपडेट हो गया।\nअगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।\nऔर कुछ?`
+								: `Updated to ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nI’ll send your confirmation link next.\nIs there anything else I can help you with?`
 							: `Sorry—couldn’t apply the alternative window: ${
 									out.error || "Unknown error"
 							  }.`;
@@ -2882,6 +3075,18 @@ async function processCase(io, client, MODEL, caseId) {
 							persona,
 							lang: persona.lang,
 						});
+
+						if (out.ok) {
+							await postSuccessLinkIfNeeded(
+								io,
+								{ caseId, persona, lang: persona.lang },
+								{
+									confirmation,
+									publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`,
+									lastText: msg,
+								}
+							);
+						}
 						replyLock.delete(caseId);
 						return;
 					}
@@ -2966,7 +3171,7 @@ async function processCase(io, client, MODEL, caseId) {
 			return;
 		}
 
-		// Create reservation (confirmation + public link in success)
+		// Create reservation (confirmation → success text, then send link as second message)
 		if (
 			st.intentProceed &&
 			plan.ready &&
@@ -3038,42 +3243,43 @@ async function processCase(io, client, MODEL, caseId) {
 					lines.push("تم تأكيد الحجز ✅");
 					if (st.lastConfirmation)
 						lines.push(`رقم التأكيد: ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`رابط الحجز: ${st.publicLink}`);
+					// (link sent in a separate message)
+					lines.push("سأرسل رابط التأكيد في الرسالة التالية.");
 					lines.push("هل أستطيع مساعدتك في شيء آخر؟");
 					confirmText = lines.join("\n");
 				} else if (persona.lang === "es") {
 					lines.push("¡Reserva confirmada! ✅");
 					if (st.lastConfirmation)
 						lines.push(`Número de confirmación: ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`Tu reserva: ${st.publicLink}`);
+					lines.push("Te envío el enlace de confirmación enseguida.");
 					lines.push("¿Puedo ayudarte con algo más?");
 					confirmText = lines.join("\n");
 				} else if (persona.lang === "fr") {
 					lines.push("Réservation confirmée ✅");
 					if (st.lastConfirmation)
 						lines.push(`Numéro de confirmation : ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`Votre réservation : ${st.publicLink}`);
+					lines.push("J’envoie le lien de confirmation juste après.");
 					lines.push("Puis‑je vous aider avec autre chose ?");
 					confirmText = lines.join("\n");
 				} else if (persona.lang === "ur") {
 					lines.push("بکنگ کنفرم ہو گئی ✅");
 					if (st.lastConfirmation)
 						lines.push(`کنفرمیشن نمبر: ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`آپ کی بکنگ: ${st.publicLink}`);
+					lines.push("اگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔");
 					lines.push("کیا کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟");
 					confirmText = lines.join("\n");
 				} else if (persona.lang === "hi") {
 					lines.push("आरक्षण की पुष्टि हो गई ✅");
 					if (st.lastConfirmation)
 						lines.push(`कन्फर्मेशन नंबर: ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`आपका आरक्षण: ${st.publicLink}`);
+					lines.push("अगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।");
 					lines.push("क्या और किसी चीज़ में मदद करूँ?");
 					confirmText = lines.join("\n");
 				} else {
 					lines.push("Reservation confirmed! ✅");
 					if (st.lastConfirmation)
 						lines.push(`Confirmation number: ${st.lastConfirmation}`);
-					if (st.publicLink) lines.push(`Your reservation: ${st.publicLink}`);
+					lines.push("I’ll send your confirmation link next.");
 					lines.push("Is there anything else I can help you with?");
 					confirmText = lines.join("\n");
 				}
@@ -3100,6 +3306,19 @@ async function processCase(io, client, MODEL, caseId) {
 				persona,
 				lang: persona.lang,
 			});
+
+			if (result?.ok) {
+				await postSuccessLinkIfNeeded(
+					io,
+					{ caseId, persona, lang: persona.lang },
+					{
+						confirmation: st.lastConfirmation,
+						publicLink: st.publicLink,
+						lastText: confirmText,
+					}
+				);
+			}
+
 			replyLock.delete(caseId);
 			return;
 		}
@@ -3279,7 +3498,7 @@ function initAIAgent({ app, io }) {
 	});
 
 	console.log(
-		"[AI] Ready (v3.5): warm‑up greeting, case‑aware second line, robust inquiry parsing, single‑confirm booking/cancel/update, re‑pricing, and confirmation+link on success."
+		"[AI] Ready (v3.6): warm‑up greeting, case‑aware second line, robust parsing, single‑confirm booking/cancel/update, re‑pricing, and separate confirmation-link message (PDF) with de‑duplication."
 	);
 }
 
