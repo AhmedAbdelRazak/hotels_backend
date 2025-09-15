@@ -281,8 +281,65 @@ const lowerIncludesAny = (t = "", arr = []) => {
 
 /** Broader affirmative understanding for booking */
 function isAffirmative(text = "") {
-	const s = lower(text || "");
-	if (!s) return false;
+	const s0 = String(text || "").trim();
+	if (!s0) return false;
+
+	// Normalize for robust matching (latin + Arabic)
+	let s = s0.toLowerCase().normalize("NFKC");
+	// Arabic shaping/variants
+	s = s.replace(/[ـ]/g, ""); // tatweel
+	s = s.replace(/[إأآ]/g, "ا").replace(/ة/g, "ه").replace(/ى/g, "ي");
+	// Collapse excessive letter repeats: okkkkk -> okk (keeps emphasis, avoids misses)
+	s = s.replace(/([a-z\u0600-\u06FF])\1{2,}/g, "$1$1");
+
+	// --- Colloquial / romanized / multilingual cues (broad but safe) ---
+	const REGEX_HARD_OK = [
+		/\bok\b|\bokay\b|\bokey\b|\bokie\b|\boki\b|\bokies?\b/,
+		/\bye+s+\b|\byeah+\b|\byep+\b|\byup+\b/,
+		/\bsure\b|\bof course\b|\bthat works\b|\bworks for me\b|\bfine\b|\bdeal\b|\bperfect\b|\bsounds good\b|\ball good\b|\balright( then)?\b/,
+		/\blet'?s (do|go)\b|\bgo for it\b/,
+		/\bproceed\b|\bgo ahead\b|\bconfirm( it| the)?\b|\bfinali[sz]e\b|\bdo it\b/,
+
+		// Spanish
+		/\b(sí|si)\b|\bclaro\b|\bde acuerdo\b|\bvale\b|\bdale\b|\blisto\b|\bva\b|\bvamos\b/,
+
+		// French
+		/\boui\b|\bd['’]?accord\b|\bvas[- ]y\b|\bça marche\b|\bca marche\b|\bc['’]?est bon\b/,
+
+		// Urdu/Hindi (roman + script)
+		/\bhaan( ji)?\b|\bha?an\b|\bthe?ek hai\b|\bthik hai\b/,
+		/ठीक है|जी|हाँ/,
+
+		// Arabic (script) — Egyptian & GCC cues
+		/(^|\b)(ا?يو[هة]|ا?يوا|ماشي|حاضر|خلاص|تمام ?كده|اوكيه?|اوك)(\b|$)/u,
+
+		// Romanized Arabic
+		/\bai?ywa\b|\baiwa\b|\baywa\b|\bmashi\b|\byalla+\b/,
+	];
+
+	// “Soft” interjections that become affirmative when paired with “please”
+	const SOFT_INTERJ = [/\buh-?huh\b/, /\baha+\b/, /\bah+\b/];
+
+	// Please markers in several languages
+	const PLEASE_MARKERS = [
+		/\bplease\b|\bpls\b|\bplz\b/,
+		/لو سمحت|من فضلك|رجاءً|رجاء/u,
+		/\bpor favor\b/,
+		/(s['’]il te plaît|s['’]il vous plaît|\bsvp\b)/i,
+	];
+
+	// If any strong OK pattern hits, it's affirmative.
+	if (REGEX_HARD_OK.some((rx) => rx.test(s))) return true;
+
+	// “ok …” style starts-with (e.g., "ok pls", "okay go ahead")
+	if (/^ok(ay|ey|ie)?\b/.test(s)) return true;
+
+	// Soft interjection + please → affirmative (e.g., "aha please", "uh huh pls")
+	const hasSoft = SOFT_INTERJ.some((rx) => rx.test(s));
+	const hasPlease = PLEASE_MARKERS.some((rx) => rx.test(s));
+	if (hasSoft && hasPlease) return true;
+
+	// Fallback to your existing lists (keeps backward compatibility)
 	if (SHORT_AFFIRM.some((w) => s === w || s.startsWith(w))) return true;
 	if (lowerIncludesAny(s, STRONG_BOOK_INTENT)) return true;
 	if (
@@ -298,6 +355,7 @@ function isAffirmative(text = "") {
 		])
 	)
 		return true;
+
 	return false;
 }
 
@@ -3724,8 +3782,11 @@ async function processCase(io, client, MODEL, caseId) {
 		);
 		st.intentProceed =
 			st.intentProceed ||
-			(askedConfirm && isAffirmative(payload?.message || "")) ||
-			lowerIncludesAny(payload?.message || "", STRONG_BOOK_INTENT);
+			(askedConfirm &&
+				!lowerIncludesAny(payload?.message || "", CANCEL_WORDS) &&
+				isAffirmative(payload?.message || "")) ||
+			(!lowerIncludesAny(payload?.message || "", CANCEL_WORDS) &&
+				lowerIncludesAny(payload?.message || "", STRONG_BOOK_INTENT));
 
 		const plan = evaluateBookingReadiness(caseDoc, st);
 
