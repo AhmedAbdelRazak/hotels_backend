@@ -1461,16 +1461,32 @@ function buildClarificationMessage({ lang, issues = [], missing = [] }) {
 // v3.7 — Aggregate current issues from message + current plan/state
 function collectInputIssues({ latestText = "", plan, state }) {
 	const issues = [];
+
+	// --- HARD STOP once a booking (or update) succeeded ---
+	// If we've already booked (or we hold a confirmation), do not raise any pre-booking clarifications.
+	if (
+		state?.booked ||
+		(state?.lastConfirmation && String(state.lastConfirmation).length >= 6)
+	) {
+		return issues; // []
+	}
+
+	// Ambiguous “days only” fragments (“من ١٢ إلى ١٥”, “12–15”, etc.)
 	const amb = findAmbiguousDateFragments(latestText);
 	if (amb.ambiguous) issues.push("date_ambiguous");
 
-	// Past check‑in?
+	// Past check‑in? (only relevant pre‑booking)
 	if (plan?.stay?.check_in_date && plan?.stay?.check_out_date) {
 		const ok = validateStayDates(plan.stay);
-		if (!ok.ok && ok.reason === "ci_in_past") issues.push("date_in_past");
+		if (!ok.ok && ok.reason === "ci_in_past") {
+			// Be lenient if the check‑in is TODAY (TZ or “just changed” texts)
+			const ci = dayjs(plan.stay.check_in_date).startOf("day");
+			const today = dayjs().startOf("day");
+			if (ci.isBefore(today)) issues.push("date_in_past");
+		}
 	}
 
-	// Nationality validation: if provided but invalid OR in state but invalid
+	// Nationality sanity (only pre‑booking)
 	const natInMsg = parseNationality(latestText);
 	const natState = state?.collected?.nationality || "";
 	if (natInMsg && !validateNationality(natInMsg)) {
@@ -1479,11 +1495,12 @@ function collectInputIssues({ latestText = "", plan, state }) {
 		issues.push("nationality_bad");
 	}
 
-	// Optional: If user mentioned phone but it's not plausible
+	// Phone plausibility (only pre‑booking)
 	const phoneInMsg = parsePhone(latestText);
 	if (phoneInMsg && !isLikelyPhone(phoneInMsg)) {
 		issues.push("phone_needed");
 	}
+
 	return issues;
 }
 
@@ -2201,6 +2218,7 @@ async function postSuccessLinkIfNeeded(
 ) {
 	const st = getState(caseId);
 	if (!confirmation) return;
+
 	const link =
 		publicLink ||
 		(confirmation
@@ -2208,22 +2226,39 @@ async function postSuccessLinkIfNeeded(
 			: null);
 	if (!link) return;
 
-	// If last outgoing text already had the same link, do not send again.
+	// If the last outgoing text already had this link, just record and stop.
 	if (lastText && lastText.includes(link)) {
 		st.lastLinkSentFor = confirmation;
-		return;
+	} else if (st.lastLinkSentFor !== confirmation) {
+		// Send the dedicated link message once per confirmation number.
+		await sendPublicLinkMessage(io, {
+			caseId,
+			persona,
+			lang,
+			confirmation,
+			publicLink: link,
+		});
+		st.lastLinkSentFor = confirmation;
 	}
-	// Avoid auto-resending the same link twice in a flow.
-	if (st.lastLinkSentFor === confirmation) return;
 
-	await sendPublicLinkMessage(io, {
-		caseId,
-		persona,
-		lang,
-		confirmation,
-		publicLink: link,
-	});
-	st.lastLinkSentFor = confirmation;
+	// --- NEW: Post-success cleanup to prevent any redundant “clarification” loops ---
+	// 1) Stop any scheduled wait follow-ups for this case
+	const wf = waitFollowupTimers.get(caseId);
+	if (wf) {
+		clearTimeout(wf.t);
+		waitFollowupTimers.delete(caseId);
+	}
+
+	// 2) Freeze pre-booking flows
+	if (st.booked) st.intentProceed = false;
+	st.intentProceed = false;
+	st.pendingAction = null;
+
+	// 3) Reset clarify/missing prompts memory
+	st.lastClarifyKey = null;
+	st.askedClarifyAt = 0;
+	st.lastMissingKey = null;
+	st.missingAskCount = 0;
 }
 
 // Guests sometimes ask “send me the link / pdf / receipt / email”.
@@ -2604,11 +2639,23 @@ function cancelClose(caseId) {
 }
 async function autoFollowUpAfterWait(io, caseId) {
 	try {
+		// This timer just fired; drop it from the map immediately
 		waitFollowupTimers.delete(caseId);
+
 		const caseDoc = await SupportCase.findById(caseId)
 			.populate("hotelId")
 			.lean();
 		if (!caseDoc || !hotelAllowsAI(caseDoc.hotelId)) return;
+
+		// --- NEW: Bail out if success already happened or the case is closed ---
+		if (caseDoc.caseStatus === "closed") return;
+		const st = getState(caseId);
+		if (
+			st?.booked ||
+			(st?.lastConfirmation && String(st.lastConfirmation).length >= 6)
+		) {
+			return; // do not follow-up after success
+		}
 
 		const langHint =
 			extractPreferredLangCodeFromInquiryDetails(
@@ -2621,10 +2668,12 @@ async function autoFollowUpAfterWait(io, caseId) {
 			caseId,
 			normalizeLang(langHint || caseDoc.preferredLanguageCode || "en")
 		);
+
 		startTyping(io, caseId, persona.name);
 
 		const client = new OpenAI({ apiKey: RAW_KEY });
-		const MODEL = sanitizeModelName(RAW_MODEL) || "gpt-4.1";
+		const MODEL = sanitizeModelName(RAW_MODEL) || "gpt-4o-mini"; // safe tool-capable default
+
 		const { text } = await generateReply(client, {
 			caseDoc,
 			persona,
@@ -2635,6 +2684,7 @@ async function autoFollowUpAfterWait(io, caseId) {
 			systemAppend:
 				"Follow-up after wait: provide checked results succinctly. Avoid prefacing.",
 		});
+
 		await new Promise((r) => setTimeout(r, computeTypeDelay(text)));
 		await persistAndBroadcast(io, {
 			caseId,
