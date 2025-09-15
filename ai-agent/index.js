@@ -22,7 +22,7 @@ const { fetchGuidanceForAgent } = require("./learning");
 /* ---------- ENV ---------- */
 const RAW_KEY =
 	process.env.OPENAI_API_KEY || process.env.CHATGPT_API_TOKEN || "";
-const RAW_MODEL = process.env.AI_MODEL || "gpt-4.1";
+const RAW_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
 const SELF_API_BASE = process.env.SELF_API_BASE || "";
 const PUBLIC_CLIENT_URL =
 	process.env.CLIENT_URL ||
@@ -40,7 +40,7 @@ const TYPING_HEARTBEAT_MS = 1200;
 const MIN_TYPE_MS = 780,
 	PER_CHAR_MS = 34,
 	MAX_TYPE_MS = 9000;
-const AUTO_CLOSE_AFTER_MS = 5000;
+const AUTO_CLOSE_AFTER_MS = 30000;
 const WAIT_FOLLOWUP_MS = 9000;
 const INACTIVITY_CLOSE_MS = 5 * 60 * 1000;
 
@@ -624,7 +624,9 @@ async function findLatestReservationForGuest({
 	check_in_date,
 	check_out_date,
 }) {
-	const phoneRegex = new RegExp(onlyDigits(phone));
+	const digits = onlyDigits(phone);
+	if (!digits || digits.length < 7) return null; // <= guard
+	const phoneRegex = new RegExp(`${digits}$`); // match line-end for stability
 	const doc = await Reservation.findOne({
 		hotelId: hotelId,
 		$or: [
@@ -1010,6 +1012,481 @@ async function repriceReservation({
 }
 
 /* ---------- Conversation parsers (dates/people/etc.) ---------- */
+const ARABIC_DIGIT_MAP = {
+	"٠": "0",
+	"١": "1",
+	"٢": "2",
+	"٣": "3",
+	"٤": "4",
+	"٥": "5",
+	"٦": "6",
+	"٧": "7",
+	"٨": "8",
+	"٩": "9",
+};
+function normalizeArabicDigits(s = "") {
+	return String(s).replace(/[٠-٩]/g, (d) => ARABIC_DIGIT_MAP[d] || d);
+}
+
+// Common month tokens across EN, ES, FR, AR (Gulf + Levant variants)
+const MONTH_TOKEN_MAP = new Map([
+	// 1
+	["january", 1],
+	["ene", 1],
+	["enero", 1],
+	["janvier", 1],
+	["يناير", 1],
+	["كانون الثاني", 1],
+	// 2
+	["february", 2],
+	["febrero", 2],
+	["février", 2],
+	["fevrier", 2],
+	["فبراير", 2],
+	["شباط", 2],
+	// 3
+	["march", 3],
+	["marzo", 3],
+	["mars", 3],
+	["مارس", 3],
+	["آذار", 3],
+	// 4
+	["april", 4],
+	["abril", 4],
+	["avril", 4],
+	["أبريل", 4],
+	["ابريل", 4],
+	["نيسان", 4],
+	// 5
+	["may", 5],
+	["mayo", 5],
+	["mai", 5],
+	["مايو", 5],
+	["أيار", 5],
+	// 6
+	["june", 6],
+	["junio", 6],
+	["juin", 6],
+	["يونيو", 6],
+	["حزيران", 6],
+	// 7
+	["july", 7],
+	["julio", 7],
+	["juillet", 7],
+	["يوليو", 7],
+	["تموز", 7],
+	// 8
+	["august", 8],
+	["agosto", 8],
+	["août", 8],
+	["aout", 8],
+	["أغسطس", 8],
+	["اغسطس", 8],
+	["آب", 8],
+	// 9
+	["september", 9],
+	["septiembre", 9],
+	["setiembre", 9],
+	["septembre", 9],
+	["سبتمبر", 9],
+	["أيلول", 9],
+	// 10
+	["october", 10],
+	["octubre", 10],
+	["octobre", 10],
+	["أكتوبر", 10],
+	["اكتوبر", 10],
+	["تشرين الأول", 10],
+	// 11
+	["november", 11],
+	["noviembre", 11],
+	["novembre", 11],
+	["نوفمبر", 11],
+	["تشرين الثاني", 11],
+	// 12
+	["december", 12],
+	["diciembre", 12],
+	["décembre", 12],
+	["decembre", 12],
+	["ديسمبر", 12],
+	["كانون الأول", 12],
+]);
+
+function monthWordToNumber(word = "") {
+	const w = lower(word.normalize("NFKC"));
+	if (MONTH_TOKEN_MAP.has(w)) return MONTH_TOKEN_MAP.get(w);
+	// try stripping accents
+	const deAcc = w.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+	if (MONTH_TOKEN_MAP.has(deAcc)) return MONTH_TOKEN_MAP.get(deAcc);
+	return null;
+}
+
+// Simple language‑agnostic helpers
+function isLatin(s = "") {
+	return /^[A-Za-z\s'-]+$/.test(s.trim());
+}
+function hasVowel(s = "") {
+	return /[aeiouy]/i.test(s);
+}
+function looksLikeGibberishLatin(s = "") {
+	const t = s.trim();
+	if (!isLatin(t)) return false;
+	if (t.length >= 5 && !hasVowel(t)) return true; // no vowels at all
+	if (/^([A-Za-z]{1,2})\1{2,}$/.test(t)) return true; // e.g., AA AAAAA, ABABABAB
+	return false;
+}
+
+// v3.7 — Nationality validation (common demonyms + heuristics)
+const KNOWN_NATIONALITIES = new Set([
+	// English (selected)
+	"saudi",
+	"saudi arabian",
+	"egyptian",
+	"pakistani",
+	"indian",
+	"bangladeshi",
+	"sudanese",
+	"jordanian",
+	"syrian",
+	"lebanese",
+	"palestinian",
+	"yemeni",
+	"moroccan",
+	"algerian",
+	"tunisian",
+	"libyan",
+	"emirati",
+	"qatari",
+	"bahraini",
+	"omani",
+	"iraqi",
+	"turkish",
+	"indonesian",
+	"malaysian",
+	"nigerian",
+	"somali",
+	"ethiopian",
+	"eritrean",
+	"kenyan",
+	"tanzanian",
+	"american",
+	"british",
+	"canadian",
+	"german",
+	"french",
+	"spanish",
+	"italian",
+	"russian",
+	"chinese",
+	"japanese",
+	"korean",
+	// Arabic common forms
+	"سعودي",
+	"سعودية",
+	"مصري",
+	"مصرية",
+	"باكستاني",
+	"هندي",
+	"بنغالي",
+	"سوداني",
+	"أردني",
+	"سوري",
+	"لبناني",
+	"فلسطيني",
+	"يمني",
+	"مغربي",
+	"جزائري",
+	"تونسي",
+	"ليبي",
+	"إماراتي",
+	"قطري",
+	"بحريني",
+	"عُماني",
+	"عراقي",
+	"تركي",
+	"اندونيسي",
+	"ماليزيا",
+	"نيجيري",
+	"صومالي",
+	"أثيوبي",
+	"إثيوبي",
+	"إرتيري",
+	"كيني",
+	"تنزاني",
+	"أمريكي",
+	"بريطاني",
+	"كندي",
+	"ألماني",
+	"فرنسي",
+	"إسباني",
+	"إيطالي",
+	"روسي",
+	"صيني",
+	"ياباني",
+	"كوري",
+	// Spanish/French a few
+	"saudí",
+	"egipcio",
+	"paquistaní",
+	"indio",
+	"bangladesí",
+	"sudanés",
+	"jordano",
+	"sirio",
+	"libanés",
+	"palestino",
+	"yemení",
+	"marroquí",
+	"argelino",
+	"tunecino",
+	"libio",
+	"emiratí",
+	"qatarí",
+	"bareiní",
+	"omaní",
+	"iraquí",
+	"turco",
+	"indonesio",
+	"malasio",
+	"nigeriano",
+	"somalí",
+	"etíope",
+	"eritreo",
+	"keniano",
+	"tanzano",
+	"estadounidense",
+	"británico",
+	"canadiense",
+	"alemán",
+	"francés",
+	"español",
+	"italiano",
+	"ruso",
+	"chino",
+	"japonés",
+	"coreano",
+	"saoudien",
+	"égyptien",
+	"pakistanais",
+	"indien",
+	"bangladais",
+	"soudanais",
+	"jordanien",
+	"syrien",
+	"libanais",
+	"palestinien",
+	"yéménite",
+	"marocain",
+	"algérien",
+	"tunisien",
+	"libyen",
+	"émirati",
+	"qatari",
+	"bahreïni",
+	"omanais",
+	"irakien",
+	"turc",
+	"indonésien",
+	"malaisien",
+	"nigérian",
+	"somalien",
+	"éthiopien",
+	"érythréen",
+	"kenyan",
+	"tanzanien",
+	"américain",
+	"britannique",
+	"canadien",
+	"allemand",
+	"français",
+	"espagnol",
+	"italien",
+	"russe",
+	"chinois",
+	"japonais",
+	"coréen",
+]);
+
+function validateNationality(raw = "") {
+	if (!raw) return false;
+	const s = raw.trim();
+	if (s.length < 3 || /\d/.test(s)) return false;
+	// known list first (case/diacritics tolerant)
+	const keyA = s.toLowerCase().normalize("NFKC");
+	const keyB = keyA.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+	if (KNOWN_NATIONALITIES.has(keyA) || KNOWN_NATIONALITIES.has(keyB))
+		return true;
+	// heuristics for Latin script
+	if (isLatin(s)) {
+		if (looksLikeGibberishLatin(s)) return false;
+		// allow two-word forms e.g., "Saudi Arabian"
+		if (!hasVowel(s)) return false;
+		return true;
+	}
+	// Arabic (basic sanity): letters only, not random pattern
+	if (/^[\u0600-\u06FF\s]+$/.test(s)) return s.length <= 20;
+	// otherwise accept cautiously
+	return s.length <= 20;
+}
+
+// v3.7 — Detect ambiguous date fragments (days only, Arabic “من … إلى …” etc.)
+function findAmbiguousDateFragments(text = "") {
+	const src = normalizeArabicDigits(String(text));
+	const t = lower(src).replace(/[،,]/g, " ").replace(/\s+/g, " ").trim();
+	// day range without any month words or yyyy-mm-dd
+	const hasMonthWord = [...MONTH_TOKEN_MAP.keys()].some((k) => t.includes(k));
+	const hasISO = /\b\d{4}-\d{2}-\d{2}\b/.test(t);
+	const dayRange = t.match(
+		/\b(?:من\s+)?(\d{1,2})\s*(?:إلى|الى|to|-|–|—)\s*(\d{1,2})\b/u
+	);
+	if (dayRange && !hasMonthWord && !hasISO) {
+		return {
+			ambiguous: true,
+			kind: "days_only_range",
+			d1: Number(dayRange[1]),
+			d2: Number(dayRange[2]),
+		};
+	}
+	return { ambiguous: false };
+}
+
+// v3.7 — Validate stay sanity (past check‑in; checkout after check‑in)
+function validateStayDates(stay) {
+	if (!stay?.check_in_date || !stay?.check_out_date) return { ok: false };
+	const ci = dayjs(stay.check_in_date).startOf("day");
+	const co = dayjs(stay.check_out_date).startOf("day");
+	if (!ci.isValid() || !co.isValid()) return { ok: false };
+	if (!co.isAfter(ci, "day")) return { ok: false, reason: "co_not_after_ci" };
+	const today = dayjs().startOf("day");
+	if (ci.isBefore(today)) return { ok: false, reason: "ci_in_past" };
+	return { ok: true };
+}
+
+// v3.7 — Build a single, polite clarification message (AR/EN/ES/FR/UR/HI)
+function buildClarificationMessage({ lang, issues = [], missing = [] }) {
+	const L = (k) => {
+		const map = {
+			ar: {
+				lead: "وصلتني التفاصيل، لكن أحتاج توضيحًا بسيطًا قبل إكمال الحجز:",
+				dateAmb:
+					"• التواريخ: ذكرت أيامًا بدون شهر/سنة—من فضلك أكد الشهر والسنة (مثال: 2025-09-16 → 2025-09-19).",
+				datePast:
+					"• التواريخ: تاريخ الوصول يقع في الماضي—هل تقصد تواريخ لاحقة؟",
+				natBad:
+					"• الجنسية: القيمة تبدو غير صحيحة—يرجى كتابة جنسية صالحة (مثال: مصري، سعودي، باكستاني…).",
+				phoneAsk: "• رقم التواصل: شاركني رقم هاتف/واتساب لتأكيد الحجز بسرعة.",
+				close:
+					"يمكنك إرسال المطلوب في رسالة واحدة أو متتابعة، وأنا سأكمل لك فورًا.",
+			},
+			en: {
+				lead: "Got it—just need a quick clarification before I proceed:",
+				dateAmb:
+					"• Dates: I see days without month/year—please confirm month & year (e.g., 2025‑09‑16 → 2025‑09‑19).",
+				datePast:
+					"• Dates: Check‑in appears in the past—did you mean future dates?",
+				natBad:
+					"• Nationality: That value doesn’t look valid—please share a valid nationality (e.g., Saudi, Egyptian, Pakistani…).",
+				phoneAsk:
+					"• Contact: Please share a phone/WhatsApp number to finalize the booking.",
+				close:
+					"You can send these in one message or one by one, I’ll fill them in as we go.",
+			},
+			es: {
+				lead: "Perfecto—solo necesito una aclaración antes de continuar:",
+				dateAmb:
+					"• Fechas: veo días sin mes/año—confirma el mes y el año (p.ej., 2025‑09‑16 → 2025‑09‑19).",
+				datePast:
+					"• Fechas: la llegada parece en el pasado—¿te refieres a fechas futuras?",
+				natBad:
+					"• Nacionalidad: parece inválida—comparte una nacionalidad válida (p.ej., saudí, egipcia, pakistaní…).",
+				phoneAsk: "• Contacto: envíame un teléfono/WhatsApp para finalizar.",
+				close:
+					"Puedes enviarlo en un solo mensaje o por partes; lo iré completando.",
+			},
+			fr: {
+				lead: "Très bien—j’ai juste besoin d’une petite précision avant de procéder :",
+				dateAmb:
+					"• Dates : je vois des jours sans mois/année—merci de confirmer le mois et l’année (ex. 2025‑09‑16 → 2025‑09‑19).",
+				datePast:
+					"• Dates : l’arrivée semble passée—vouliez‑vous des dates futures ?",
+				natBad:
+					"• Nationalité : cela ne semble pas valide—merci d’indiquer une nationalité valide (ex. Saoudien, Égyptien, Pakistanais…).",
+				phoneAsk:
+					"• Contact : merci de partager un numéro de téléphone/WhatsApp pour finaliser.",
+				close:
+					"Vous pouvez envoyer ces éléments en un seul message ou séparément ; je complète au fur et à mesure.",
+			},
+			ur: {
+				lead: "ٹھیک ہے—بس ایک مختصر وضاحت درکار ہے:",
+				dateAmb:
+					"• تاریخیں: دن تو ہیں مگر ماہ/سال نہیں—براہِ کرم ماہ اور سال کی تصدیق کریں (مثال: 2025‑09‑16 → 2025‑09‑19).",
+				datePast:
+					"• تاریخیں: چیک‑ان ماضی میں دکھ رہا ہے—کیا آپ مستقبل کی تاریخیں مراد لے رہے تھے؟",
+				natBad:
+					"• قومیت: یہ درست معلوم نہیں ہوتی—براہِ کرم درست قومیت بتائیں (مثال: سعودی، مصری، پاکستانی…).",
+				phoneAsk:
+					"• رابطہ: بکنگ فائنل کرنے کے لیے فون/واٹس ایپ نمبر شیئر کریں۔",
+				close:
+					"آپ ایک ہی پیغام یا الگ الگ بھیج سکتے ہیں؛ میں فوراً مکمل کر دوں گا/گی۔",
+			},
+			hi: {
+				lead: "ठीक है—आगे बढ़ने से पहले एक छोटा‑सा स्पष्टीकरण चाहिए:",
+				dateAmb:
+					"• तिथियाँ: केवल दिन दिख रहे हैं—कृपया महीना और वर्ष बताएं (जैसे 2025‑09‑16 → 2025‑09‑19).",
+				datePast:
+					"• तिथियाँ: चेक‑इन पिछली तारीख लग रही है—क्या आप भविष्य की तिथियाँ मतलब थे?",
+				natBad:
+					"• राष्ट्रीयता: मान्य नहीं लगती—कृपया सही राष्ट्रीयता बताएँ (जैसे Saudi, Egyptian, Pakistani…).",
+				phoneAsk: "• संपर्क: बुकिंग फाइनल करने के लिए फ़ोन/WhatsApp नंबर दें।",
+				close: "आप इन्हें एक साथ या अलग‑अलग भेज सकते हैं; मैं भर दूँगा/दूँगी।",
+			},
+		}[["ar", "es", "fr", "ur", "hi"].includes(lang) ? lang : "en"];
+		return map[k];
+	};
+	const lines = [L("lead")];
+	for (const it of issues) {
+		if (it === "date_ambiguous") lines.push(L("dateAmb"));
+		if (it === "date_in_past") lines.push(L("datePast"));
+		if (it === "nationality_bad") lines.push(L("natBad"));
+		if (it === "phone_needed") lines.push(L("phoneAsk"));
+	}
+	// If no phone issue listed but phone is missing in the "missing" list, gently nudge
+	if (!issues.includes("phone_needed") && (missing || []).includes("phone")) {
+		lines.push(L("phoneAsk"));
+	}
+	lines.push(L("close"));
+	return lines.join("\n");
+}
+
+// v3.7 — Aggregate current issues from message + current plan/state
+function collectInputIssues({ latestText = "", plan, state }) {
+	const issues = [];
+	const amb = findAmbiguousDateFragments(latestText);
+	if (amb.ambiguous) issues.push("date_ambiguous");
+
+	// Past check‑in?
+	if (plan?.stay?.check_in_date && plan?.stay?.check_out_date) {
+		const ok = validateStayDates(plan.stay);
+		if (!ok.ok && ok.reason === "ci_in_past") issues.push("date_in_past");
+	}
+
+	// Nationality validation: if provided but invalid OR in state but invalid
+	const natInMsg = parseNationality(latestText);
+	const natState = state?.collected?.nationality || "";
+	if (natInMsg && !validateNationality(natInMsg)) {
+		issues.push("nationality_bad");
+	} else if (natState && !validateNationality(natState)) {
+		issues.push("nationality_bad");
+	}
+
+	// Optional: If user mentioned phone but it's not plausible
+	const phoneInMsg = parsePhone(latestText);
+	if (phoneInMsg && !isLikelyPhone(phoneInMsg)) {
+		issues.push("phone_needed");
+	}
+	return issues;
+}
+
 const MONTHS = [
 	"january",
 	"february",
@@ -1030,37 +1507,50 @@ function parseDateTokens(
 	fallbackStartISO = null,
 	fallbackEndISO = null
 ) {
-	const t = lower(text).replace(/[,]/g, " ").replace(/\s+/g, " ").trim();
-	const iso = t.match(
-		/(\d{4}-\d{2}-\d{2})\s*(?:to|-|–|—)\s*(\d{4}-\d{2}-\d{2})/
+	const raw = normalizeArabicDigits(String(text || ""));
+	const t0 = lower(raw).replace(/[،,]/g, " ").replace(/\s+/g, " ").trim();
+
+	// ISO range: 2025-09-16 to 2025-09-19
+	const iso = t0.match(
+		/(\d{4}-\d{2}-\d{2})\s*(?:to|الى|إلى|-|–|—)\s*(\d{4}-\d{2}-\d{2})/
 	);
 	if (iso) return { check_in_date: iso[1], check_out_date: iso[2] };
 
-	const monthMatches = MONTHS.map((m, i) => ({ m, i: i + 1 })).filter(({ m }) =>
-		t.includes(m)
-	);
-	if (monthMatches.length) {
-		const m = monthMatches[0].i;
-		const dayNums = (t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\b/g) || []).map((x) =>
-			parseInt(x.replace(/\D/g, ""), 10)
+	// Single ISO + nights
+	const singleIso = t0.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+	if (singleIso) {
+		const ci = dayjs(singleIso[1]);
+		const nights = parseInt(
+			(t0.match(/\b(\d+)\s*nights?\b/) || [])[1] || "1",
+			10
 		);
-		if (dayNums.length >= 1) {
-			const yTokens = t.match(/\b(20\d{2})\b/g);
-			const y =
-				yTokens && yTokens[0]
-					? parseInt(yTokens[0], 10)
-					: new Date().getFullYear();
+		const co = ci.add(Math.max(1, nights), "day");
+		return {
+			check_in_date: ci.format("YYYY-MM-DD"),
+			check_out_date: co.format("YYYY-MM-DD"),
+		};
+	}
+
+	// Intl month range (e.g., 16 سبتمبر إلى 19 سبتمبر 2025) OR mixed months
+	// Pattern: D <month> [YYYY]? (to|الى|إلى|-) D [<month2>]? [YYYY]?
+	const reIntl =
+		/(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?\s*(?:to|الى|إلى|-|–|—)\s*(\d{1,2})\s*([^\s\d]+)?\s*(\d{4})?/u;
+	const mIntl = t0.match(reIntl);
+	if (mIntl) {
+		const d1 = parseInt(mIntl[1], 10);
+		const mo1 = monthWordToNumber(mIntl[2]);
+		const y1 = mIntl[3] ? parseInt(mIntl[3], 10) : new Date().getFullYear();
+		const d2 = parseInt(mIntl[4], 10);
+		const mo2 = mIntl[5] ? monthWordToNumber(mIntl[5]) : mo1;
+		const y2 = mIntl[6] ? parseInt(mIntl[6], 10) : y1;
+		if (mo1 && mo2) {
 			const ci = dayjs(
-				`${y}-${String(m).padStart(2, "0")}-${String(dayNums[0]).padStart(
-					2,
-					"0"
-				)}`
+				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
 			);
-			const coDay = dayNums[1] || dayNums[0] + 1;
 			let co = dayjs(
-				`${y}-${String(m).padStart(2, "0")}-${String(coDay).padStart(2, "0")}`
+				`${y2}-${String(mo2).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
 			);
-			if (!co.isAfter(ci, "day")) co = co.add(1, "day");
+			if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
 			return {
 				check_in_date: ci.format("YYYY-MM-DD"),
 				check_out_date: co.format("YYYY-MM-DD"),
@@ -1068,8 +1558,52 @@ function parseDateTokens(
 		}
 	}
 
-	const pureDays = t.match(
-		/\b(\d{1,2})(?:st|nd|rd|th)?\b\s*(?:to|-|–|—)\s*(\d{1,2})(?:st|nd|rd|th)?\b/
+	// Intl single month + implicit range: "16 سبتمبر الى 19"
+	const reIntl2 =
+		/(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?\s*(?:to|الى|إلى|-|–|—)\s*(\d{1,2})/u;
+	const m2 = t0.match(reIntl2);
+	if (m2) {
+		const d1 = parseInt(m2[1], 10);
+		const mo1 = monthWordToNumber(m2[2]);
+		const y1 = m2[3] ? parseInt(m2[3], 10) : new Date().getFullYear();
+		const d2 = parseInt(m2[4], 10);
+		if (mo1) {
+			const ci = dayjs(
+				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
+			);
+			let co = dayjs(
+				`${y1}-${String(mo1).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
+			);
+			if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
+			return {
+				check_in_date: ci.format("YYYY-MM-DD"),
+				check_out_date: co.format("YYYY-MM-DD"),
+			};
+		}
+	}
+
+	// Plain month with one day => 1 night default
+	const reSingle = /(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?/u;
+	const mSingle = t0.match(reSingle);
+	if (mSingle) {
+		const d1 = parseInt(mSingle[1], 10);
+		const mo1 = monthWordToNumber(mSingle[2]);
+		const y1 = mSingle[3] ? parseInt(mSingle[3], 10) : new Date().getFullYear();
+		if (mo1) {
+			const ci = dayjs(
+				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
+			);
+			const co = ci.add(1, "day");
+			return {
+				check_in_date: ci.format("YYYY-MM-DD"),
+				check_out_date: co.format("YYYY-MM-DD"),
+			};
+		}
+	}
+
+	// Day-only range with fallback month/year
+	const pureDays = t0.match(
+		/\b(\d{1,2})\b\s*(?:to|الى|إلى|-|–|—)\s*\b(\d{1,2})\b/u
 	);
 	if (pureDays && (fallbackStartISO || fallbackEndISO)) {
 		const base = dayjs(fallbackStartISO || fallbackEndISO);
@@ -1083,26 +1617,13 @@ function parseDateTokens(
 		let co = dayjs(
 			`${y}-${String(m).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
 		);
-		if (!co.isAfter(ci, "day")) co = co.add(1, "day");
+		if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
 		return {
 			check_in_date: ci.format("YYYY-MM-DD"),
 			check_out_date: co.format("YYYY-MM-DD"),
 		};
 	}
 
-	const singleIso = t.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-	if (singleIso) {
-		const ci = dayjs(singleIso[1]);
-		const nights = parseInt(
-			(t.match(/\b(\d+)\s*nights?\b/) || [])[1] || "1",
-			10
-		);
-		const co = ci.add(Math.max(1, nights), "day");
-		return {
-			check_in_date: ci.format("YYYY-MM-DD"),
-			check_out_date: co.format("YYYY-MM-DD"),
-		};
-	}
 	return null;
 }
 
@@ -1264,8 +1785,10 @@ function getState(caseId) {
 		intentProceed: false,
 		pendingAction: null,
 		missingAskCount: 0,
-		// for link de-duplication in auto flows
 		lastLinkSentFor: null,
+		// v3.7
+		lastClarifyKey: null,
+		askedClarifyAt: 0,
 	};
 	caseState.set(caseId, s);
 	return s;
@@ -1614,19 +2137,21 @@ async function runWithTools(client, { messages, context, model }) {
 }
 
 /* ---------- Greeting & addressing lines ---------- */
-function identityDeflectionLine(lang) {
+function identityDeflectionLine({ lang, personaName, hotelName }) {
+	const H = hotelName || "our hotel";
 	if (lang === "ar")
-		return "أنا بخدمتك لحجز غرفتك وترتيب كل التفاصيل. دعنا نُنجز طلبك كما تريده 🙂";
+		return `أنا ${personaName} من فريق الحجوزات في ${H}. مساعد ذكي يعمل مباشرة مع الفندق لمساعدتك في الحجز والدعم.`;
 	if (lang === "es")
-		return "Estoy aquí para gestionar tu reserva y detalles. Vamos a dejarlo perfecto 🙂";
+		return `Soy ${personaName}, del equipo de reservas de ${H}. Asistente inteligente que trabaja directamente con el hotel para ayudarte.`;
 	if (lang === "fr")
-		return "Je gère votre réservation et les détails. Finalisons cela comme vous voulez 🙂";
+		return `Je suis ${personaName}, équipe réservations de ${H}. Assistant intelligent travaillant directement avec l’hôtel pour vous aider.`;
 	if (lang === "ur")
-		return "میں آپ کی بکنگ اور تفصیلات سنبھال رہا/رہی ہوں۔ آئیں آپ کی مرضی کے مطابق مکمل کریں 🙂";
+		return `میں ${personaName}، ${H} کی ریزرویشن ٹیم سے ہوں۔ ہوٹل کے ساتھ براہِ راست کام کرنے والا سمارٹ اسسٹنٹ ہوں۔`;
 	if (lang === "hi")
-		return "मैं आपकी बुकिंग और विवरण सँभाल रहा/रही हूँ—चलें इसे आपकी पसंद के मुताबिक़ पूरा करें 🙂";
-	return "I’m here to handle your booking details—let’s get this done exactly how you want 🙂";
+		return `मैं ${personaName}, ${H} की आरक्षण टीम से। होटल के साथ सीधे काम करने वाला स्मार्ट सहायक हूँ।`;
+	return `I’m ${personaName} from ${H}’s reservations team—an intelligent assistant working directly with the hotel to help you.`;
 }
+
 function shortThanksLine(lang) {
 	if (lang === "ar") return "شكرًا لك—سأعود إليك بتحديث قريبًا.";
 	if (lang === "es") return "Gracias—vuelvo enseguida con una actualización.";
@@ -2286,7 +2811,6 @@ function evaluateBookingReadiness(caseDoc, state) {
 	const email = collected.email || ident.email || "";
 	const phone = collected.phone || ident.phone || "";
 
-	// infer room type text for adults default
 	const chosen = pickBookedRoomFromPricing(state);
 	const roomTypeText =
 		chosen?.roomType || chosen?.displayName || collected.roomTypeHint || "";
@@ -2299,12 +2823,14 @@ function evaluateBookingReadiness(caseDoc, state) {
 	const roomsCountVal = collected.roomsCount != null ? collected.roomsCount : 1;
 
 	const nationality = collected.nationality || "";
+	const natValid = nationality ? validateNationality(nationality) : false;
+
 	const stay = state.intendedStay || null;
 
 	const missing = [];
 	if (!isFullName(name)) missing.push("name");
 	if (!isLikelyPhone(phone)) missing.push("phone");
-	if (!nationality) missing.push("nationality");
+	if (!natValid) missing.push("nationality");
 	if (!stay?.check_in_date) missing.push("checkIn");
 	if (!stay?.check_out_date) missing.push("checkOut");
 	if (!chosen && !collected.roomTypeHint) missing.push("roomType");
@@ -2317,7 +2843,7 @@ function evaluateBookingReadiness(caseDoc, state) {
 			name,
 			email,
 			phone,
-			nationality,
+			nationality: natValid ? nationality : "",
 			adults: adultsVal,
 			children: childrenVal,
 		},
@@ -2617,7 +3143,7 @@ async function processCase(io, client, MODEL, caseId) {
 		const freshConf = foundConfInMsg || confFromTicket || null;
 		if (freshConf) await cacheReservationByConfirmation(caseId, freshConf);
 
-		// Rebuild extracted info from the whole conversation (to avoid repeating asks)
+		// Rebuild extracted info to avoid repeating asks
 		const rebuilt = rebuildStateFromConversation(caseDoc);
 		if (rebuilt?.collected)
 			st.collected = { ...(st.collected || {}), ...rebuilt.collected };
@@ -2648,16 +3174,28 @@ async function processCase(io, client, MODEL, caseId) {
 			return;
 		}
 
-		// Identity deflection
+		// v3.7 — Identity / AI questions (expanded triggers)
 		if (
 			lowerIncludesAny(payload?.message || "", [
 				"are you ai",
 				"are you a bot",
 				"is this ai",
-			])
+				"who are you",
+				"who r u",
+				"are you human",
+				"do you work for the hotel",
+				"are you from the hotel",
+			]) ||
+			/(?:من\s+أنت|مين\s+انت|هل\s+أنت\s+روبوت|هل\s+انت\s+آلي|هل\s+أنت\s+إنسان|هل\s+أنت\s+من\s+الفندق|هل\s+تعمل\s+في\s+الفندق)/iu.test(
+				String(payload?.message || "")
+			)
 		) {
 			startTyping(io, caseId, persona.name);
-			const line = identityDeflectionLine(persona.lang);
+			const line = identityDeflectionLine({
+				lang: persona.lang,
+				personaName: persona.name,
+				hotelName: caseDoc.hotelId?.hotelName || "our hotel",
+			});
 			await new Promise((r) => setTimeout(r, computeTypeDelay(line)));
 			await persistAndBroadcast(io, {
 				caseId,
@@ -2710,7 +3248,7 @@ async function processCase(io, client, MODEL, caseId) {
 			}
 		}
 
-		// === On-demand confirmation link / PDF / receipt request
+		// On‑demand confirmation link / PDF / receipt request
 		if (isLinkOrReceiptRequest(payload?.message || "")) {
 			const conf =
 				st.lastConfirmation ||
@@ -2828,7 +3366,7 @@ async function processCase(io, client, MODEL, caseId) {
 			}
 		}
 
-		// CHANGE DATES — detect intent and reprice
+		// CHANGE DATES — detect intent and reprice (unchanged)
 		const hasChangeDatesIntent =
 			lowerIncludesAny(payload?.message || "", CHANGE_WORDS) &&
 			lowerIncludesAny(payload?.message || "", DATE_WORDS);
@@ -3129,7 +3667,7 @@ async function processCase(io, client, MODEL, caseId) {
 			}
 		}
 
-		/* ---------- NEW BOOKING: lock “proceed” after a single affirmative ---------- */
+		/* ---------- NEW BOOKING flow ---------- */
 		const askedConfirm = lastAssistantAskedForConfirmation(
 			caseDoc.conversation || [],
 			persona.name
@@ -3141,7 +3679,46 @@ async function processCase(io, client, MODEL, caseId) {
 
 		const plan = evaluateBookingReadiness(caseDoc, st);
 
-		// Ask for only truly-missing fields (nationality required, others inferred)
+		// v3.7 — Single, bundled clarification if inputs are ambiguous/illogical
+		if (st.intentProceed) {
+			const issues = collectInputIssues({
+				latestText: payload?.message || "",
+				plan,
+				state: st,
+			});
+			if (issues.length) {
+				const key = JSON.stringify(issues);
+				const now = Date.now();
+				const cooldownMs = 60000;
+				const canAskAgain =
+					!st.lastClarifyKey ||
+					st.lastClarifyKey !== key ||
+					now - (st.askedClarifyAt || 0) > cooldownMs;
+
+				if (canAskAgain) {
+					const clarifyMsg = buildClarificationMessage({
+						lang: persona.lang,
+						issues,
+						missing: plan.missing,
+					});
+					startTyping(io, caseId, persona.name);
+					await new Promise((r) => setTimeout(r, computeTypeDelay(clarifyMsg)));
+					await persistAndBroadcast(io, {
+						caseId,
+						text: clarifyMsg,
+						persona,
+						lang: persona.lang,
+					});
+
+					st.lastClarifyKey = key;
+					st.askedClarifyAt = now;
+					replyLock.delete(caseId);
+					return;
+				}
+			}
+		}
+
+		// Ask for only truly‑missing fields (with your existing de‑dup)
 		if (st.intentProceed && !plan.ready) {
 			const key = JSON.stringify([...plan.missing].sort());
 			const now = Date.now();
@@ -3171,7 +3748,7 @@ async function processCase(io, client, MODEL, caseId) {
 			return;
 		}
 
-		// Create reservation (confirmation → success text, then send link as second message)
+		// Create reservation when ready (unchanged behavior + separate link message)
 		if (
 			st.intentProceed &&
 			plan.ready &&
@@ -3243,7 +3820,6 @@ async function processCase(io, client, MODEL, caseId) {
 					lines.push("تم تأكيد الحجز ✅");
 					if (st.lastConfirmation)
 						lines.push(`رقم التأكيد: ${st.lastConfirmation}`);
-					// (link sent in a separate message)
 					lines.push("سأرسل رابط التأكيد في الرسالة التالية.");
 					lines.push("هل أستطيع مساعدتك في شيء آخر؟");
 					confirmText = lines.join("\n");
@@ -3550,7 +4126,7 @@ function rebuildStateFromConversation(caseDoc) {
 		const nm = parseName(text);
 		if (nm) acc.collected.name = nm;
 		const nat = parseNationality(text);
-		if (nat) acc.collected.nationality = nat;
+		if (nat && validateNationality(nat)) acc.collected.nationality = nat;
 	}
 	return acc;
 }

@@ -44,8 +44,6 @@ const io = socketIo(server, {
 	},
 });
 
-//Confirmation link on update is important
-
 // Pass the io instance to the app
 app.set("io", io);
 const { initAIAgent } = require("./ai-agent");
