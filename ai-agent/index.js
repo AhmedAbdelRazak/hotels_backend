@@ -1,11 +1,10 @@
-/* ai-agent/index.js — v3.6
- * Key updates from v3.5:
- *  - Add a dedicated second message with the public confirmation link (includes downloadable PDF)
- *    after successful NEW bookings and successful UPDATES (date change / alt window).
- *  - De‑duplication: remove inline links from success texts; send link only in the second message.
- *    Guard against repeat auto-sends via lastLinkSentFor; still send on-demand if guest asks.
- *  - Keeps: 5–7s warm-up; greeting + case-aware second message; robust inquiry parsing; cancel/update flows; re-pricing.
+/* ai-agent/index.js — v6.0 (≤ 2000 LOC)
+ * OQAT flow (Room → Dates → Quote → Name→ Phone→ Nationality → Final Confirm → Book)
+ * LLM micro-calls for intent/affirm/fields; identity one-liners; strict pricing rules.
+ * Works across languages; stores canonical English values.
  */
+
+"use strict";
 
 const OpenAI = require("openai");
 const axios = require("axios");
@@ -16,691 +15,746 @@ const SupportCase = require("../models/supportcase");
 const HotelDetails = require("../models/hotel_details");
 const Reservation = require("../models/reservations");
 
-const { buildSystemPrompt, pickPersona, normalizeLang } = require("./prompt");
-const { fetchGuidanceForAgent } = require("./learning");
-
 /* ---------- ENV ---------- */
 const RAW_KEY =
 	process.env.OPENAI_API_KEY || process.env.CHATGPT_API_TOKEN || "";
-const RAW_MODEL = process.env.AI_MODEL || "gpt-4o-mini";
+const RAW_MODEL = (process.env.AI_MODEL || "gpt-4o-mini").trim();
 const SELF_API_BASE = process.env.SELF_API_BASE || "";
 const PUBLIC_CLIENT_URL =
 	process.env.CLIENT_URL ||
 	process.env.CLIENT_PUBLIC_URL ||
 	"https://jannatbooking.com";
 
-/* ---------- Timings ---------- */
-const GREETING_WARMUP_MIN_MS = 5000;
-const GREETING_WARMUP_MAX_MS = 7000;
+/* ---------- Persona ---------- */
+const PERSONAS = {
+	en: ["Yusuf", "Mona", "Amal", "Omar", "Sara"],
+	ar: ["يوسف", "منى", "أمل", "عمر", "سارة"],
+	es: ["Yusef", "Mona", "Amal"],
+	fr: ["Youssef", "Mona", "Amal"],
+	ur: ["یوسف", "سارہ"],
+	hi: ["यूसुफ", "सारा"],
+};
+const pickPersona = (lang) => {
+	const arr = PERSONAS[lang] || PERSONAS.en;
+	return arr[Math.floor(Math.random() * arr.length)];
+};
 
-const WAIT_WHILE_TYPING_MS = 1500;
-const DEBOUNCE_MS = 1100;
-const TYPING_START_AFTER = 600;
+/* ---------- UX timings ---------- */
+const TYPING_START_AFTER = 500;
 const TYPING_HEARTBEAT_MS = 1200;
-const MIN_TYPE_MS = 780,
-	PER_CHAR_MS = 34,
-	MAX_TYPE_MS = 9000;
-const AUTO_CLOSE_AFTER_MS = 30000;
-const WAIT_FOLLOWUP_MS = 9000;
-const INACTIVITY_CLOSE_MS = 5 * 60 * 1000;
+const MIN_TYPE_MS = 650,
+	PER_CHAR_MS = 24,
+	MAX_TYPE_MS = 8200;
+const WAIT_WHILE_TYPING_MS = 1300;
+const DEBOUNCE_MS = 1100;
+
+const computeTypeDelay = (t = "") =>
+	Math.max(
+		MIN_TYPE_MS,
+		Math.min(MAX_TYPE_MS, MIN_TYPE_MS + String(t).length * PER_CHAR_MS)
+	);
+
+/* ---------- State ---------- */
+const caseState = new Map();
+/*
+  st = {
+    lang, personaName, greeted, hotelId, hotelDoc,
+    flow: "NEW"|"EXIST"|null,
+    step: "ROOM"|"DATES"|"QUOTE"|"DETAILS_NAME"|"DETAILS_PHONE"|"DETAILS_NAT"|"FINAL_CONFIRM"|null,
+    slots: { room_canon, ci, co, nightly, total, name, phone, nationality_en, confirmation },
+    waitingConfirm: false,  // used at QUOTE and FINAL_CONFIRM
+    lastPromptKey: null, lastPromptAt: 0,
+    lastLinkSentFor: null
+  }
+*/
+const typingTimers = new Map();
+const idleTimers = new Map();
+const userTyping = new Map();
+const debounceMap = new Map();
+const greetedCases = new Set();
 
 /* ---------- Utils ---------- */
 const lower = (s) => String(s || "").toLowerCase();
-const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-const isValidObjectId = (x) => mongoose.Types.ObjectId.isValid(String(x));
-const computeTypeDelay = (t = "") =>
-	clamp(MIN_TYPE_MS + String(t).length * PER_CHAR_MS, MIN_TYPE_MS, MAX_TYPE_MS);
 const looksLikeOpenAIKey = (k) =>
 	typeof k === "string" && /^sk-/.test(k.trim());
-const sanitizeModelName = (m) =>
-	m ? String(m).split("#")[0].trim().split(/\s+/)[0] : null;
-const randInt = (min, max) => Math.floor(min + Math.random() * (max - min + 1));
-
+const isValidObjectId = (x) => mongoose.Types.ObjectId.isValid(String(x));
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const onlyDigits = (s = "") => String(s || "").replace(/\D+/g, "");
 const isLikelyPhone = (s = "") => onlyDigits(s).length >= 7;
-const redactPhone = (s = "") => {
-	const d = onlyDigits(s);
-	return d.length >= 3 ? `•••${d.slice(-3)}` : "•••";
-};
-const safeConfirmValue = (v) =>
-	typeof v === "string" && /^[A-Z0-9\-]{6,}$/.test(v.trim());
-const niceMoney = (n) =>
-	Number.isFinite(+n) ? Number(n).toFixed(2) : String(n);
-
-/* Affirmations & intents */
-const SHORT_AFFIRM = [
-	"yes",
-	"yeah",
-	"yep",
-	"yup",
-	"sure",
-	"okay",
-	"ok",
-	"okey",
-	"oki",
-	"تمام",
-	"نعم",
-	"طيب",
-	"أكيد",
-	"sí",
-	"claro",
-	"de acuerdo",
-	"vale",
-	"oui",
-	"d'accord",
-	"okey",
-	"okey doc", // french friends sometimes :)
-	"जी",
-	"हाँ",
-	"ठीक है",
-	"ہاں",
-	"جی",
-];
-const STRONG_BOOK_INTENT = [
-	"book it",
-	"please book",
-	"go ahead and book",
-	"reserve it",
-	"reserve now",
-	"book now",
-	"proceed",
-	"proceed please",
-	"yes proceed",
-	"go ahead",
-	"go ahead please",
-	"confirm it",
-	"confirm booking",
-	"confirm my booking",
-	"finalize",
-	"finalise",
-	"do it",
-	"make it",
-	"احجز",
-	"خلاص احجز",
-	"نعم احجز",
-	"أكمل الحجز",
-	"تابع",
-	"نفّذ",
-	"sí reserva",
-	"resérvalo",
-	"proceder",
-	"confírmalo",
-	"oui réserve",
-	"procède",
-	"confirme-le",
-];
-const STRONG_GOODBYE = [
-	"bye",
-	"goodbye",
-	"bye bye",
-	"see you",
-	"مع السلامة",
-	"adiós",
-	"au revoir",
-	"الوداع",
-];
-
-const WAIT_ACK_MARKERS = [
-	"okay",
-	"ok",
-	"thanks",
-	"thank you",
-	"take your time",
-	"براحتك",
-	"gracias",
-	"merci",
-	"ठीक है",
-	"شكرًا",
-];
-const WAIT_REQUEST_MARKERS = [
-	"let me check",
-	"give me a moment",
-	"allow me",
-	"checking now",
-	"سأتحقق",
-	"un momento",
-	"je vérifie",
-	"ذرا رُكیں",
-	"एक क्षण",
-];
-const WAITING_SIGNALS = [
-	"waiting",
-	"hold on",
-	"one sec",
-	"لحظة",
-	"espera",
-	"un segundo",
-	"une seconde",
-	"ذرا",
-	"एक सेकंड",
-];
-
-const CANCEL_WORDS = [
-	"cancel",
-	"cancellation",
-	"إلغاء",
-	"الغاء",
-	"cancelar",
-	"annuler",
-	"取消",
-	"annulla",
-];
-const CHANGE_WORDS = [
-	"change",
-	"edit",
-	"update",
-	"modify",
-	"تغيير",
-	"تعديل",
-	"cambiar",
-	"modifier",
-	"aggiorna",
-];
-const DATE_WORDS = [
-	"date",
-	"dates",
-	"checkin",
-	"check-in",
-	"checkout",
-	"check-out",
-	"تاريخ",
-	"fechas",
-	"dates",
-];
-
-/* ---------- Extractors ---------- */
-function extractConfirmationFrom(text = "") {
-	const s = String(text || "");
-	const m1 = s.match(/\b\d{8,14}\b/);
+const isFullName = (s = "") =>
+	String(s).trim().split(/\s+/).filter(Boolean).length >= 2;
+const extractConfirmation = (s = "") => {
+	const m1 = String(s || "").match(/\b[A-Z0-9\-]{6,}\b/);
 	if (m1) return m1[0];
-	const m2 = s.match(/\b[A-Z0-9\-]{6,}\b/i);
+	const m2 = String(s || "").match(/\b\d{8,14}\b/);
 	return m2 ? m2[0] : null;
+};
+
+/* typing orchestration */
+function setGuestTyping(caseId, isTyping) {
+	const prev = userTyping.get(caseId) || { isTyping: false, lastStopAt: 0 };
+	const now = Date.now();
+	userTyping.set(caseId, {
+		isTyping,
+		lastStopAt: isTyping ? prev.lastStopAt : now,
+	});
 }
-function extractPreferredLangCodeFromInquiryDetails(details = "") {
-	const s = String(details || "");
-	const m = s.match(
-		/Preferred\s+Language:\s*([^\(\]\n]+)\s*\((en|ar|es|fr|ur|hi)\)/i
+function shouldWaitForGuest(caseId) {
+	const st = userTyping.get(caseId);
+	if (!st) return false;
+	if (st.isTyping) return true;
+	return Date.now() - (st.lastStopAt || 0) < WAIT_WHILE_TYPING_MS;
+}
+
+/* send */
+function startTyping(io, caseId, name) {
+	const t1 = setTimeout(
+		() => io.to(caseId).emit("typing", { caseId, name, isAi: true }),
+		TYPING_START_AFTER
 	);
-	if (m) return normalizeLang(m[2] || m[1]);
-	const m2 = s.match(/\((en|ar|es|fr|ur|hi)\)/i);
-	if (m2) return normalizeLang(m2[1]);
-	if (/arabic/i.test(s)) return "ar";
-	if (/spanish|espa[ñn]ol/i.test(s)) return "es";
-	if (/french|fran[cç]ais/i.test(s)) return "fr";
-	if (/urdu/i.test(s)) return "ur";
-	if (/hindi/i.test(s)) return "hi";
-	return null;
+	const intv = setInterval(
+		() => io.to(caseId).emit("typing", { caseId, name, isAi: true }),
+		TYPING_HEARTBEAT_MS
+	);
+	typingTimers.set(caseId, { t1, intv });
 }
-
-/** Robust inquiry & confirmation extraction from case + conversation[0] + all items */
-function extractInquiryDataFromCase(caseDoc = {}) {
-	const convo = Array.isArray(caseDoc.conversation) ? caseDoc.conversation : [];
-	const topAbout = String(caseDoc.inquiryAbout || "").trim();
-	const firstAbout = String(convo[0]?.inquiryAbout || "").trim();
-	const about = topAbout || firstAbout || "";
-
-	const candidates = [];
-	if (caseDoc.inquiryDetails) candidates.push(String(caseDoc.inquiryDetails));
-	if (convo[0]?.inquiryDetails)
-		candidates.push(String(convo[0].inquiryDetails));
-	for (const m of convo)
-		if (m?.inquiryDetails) candidates.push(String(m.inquiryDetails));
-	let confirmation = null;
-	for (const s of candidates) {
-		const c = extractConfirmationFrom(s);
-		if (c) {
-			confirmation = c;
-			break;
-		}
+function stopTyping(io, caseId) {
+	const t = typingTimers.get(caseId);
+	if (t) {
+		clearTimeout(t.t1);
+		clearInterval(t.intv);
+		typingTimers.delete(caseId);
 	}
-	return { about, confirmation };
+	io.to(caseId).emit("stopTyping", { caseId, isAi: true });
 }
-function extractConfirmationFromCase(caseDoc = {}) {
-	return extractInquiryDataFromCase(caseDoc).confirmation || null;
-}
-
-/* ---------- Misc helpers ---------- */
-function firstNameOf(s = "") {
-	const parts = String(s || "")
-		.trim()
-		.split(/\s+/)
-		.filter(Boolean);
-	return parts[0] || "";
-}
-function isFullName(s = "") {
-	const parts = String(s || "")
-		.trim()
-		.split(/\s+/)
-		.filter(Boolean);
-	return parts.length >= 2 && parts[0].length >= 2 && parts[1].length >= 2;
-}
-const lowerIncludesAny = (t = "", arr = []) => {
-	const s = lower(t);
-	return arr.some((p) => s.includes(lower(p)));
-};
-
-/** Broader affirmative understanding for booking */
-function isAffirmative(text = "") {
-	const s0 = String(text || "").trim();
-	if (!s0) return false;
-
-	// Normalize for robust matching (latin + Arabic)
-	let s = s0.toLowerCase().normalize("NFKC");
-	// Arabic shaping/variants
-	s = s.replace(/[ـ]/g, ""); // tatweel
-	s = s.replace(/[إأآ]/g, "ا").replace(/ة/g, "ه").replace(/ى/g, "ي");
-	// Collapse excessive letter repeats: okkkkk -> okk (keeps emphasis, avoids misses)
-	s = s.replace(/([a-z\u0600-\u06FF])\1{2,}/g, "$1$1");
-
-	// --- Colloquial / romanized / multilingual cues (broad but safe) ---
-	const REGEX_HARD_OK = [
-		/\bok\b|\bokay\b|\bokey\b|\bokie\b|\boki\b|\bokies?\b/,
-		/\bye+s+\b|\byeah+\b|\byep+\b|\byup+\b/,
-		/\bsure\b|\bof course\b|\bthat works\b|\bworks for me\b|\bfine\b|\bdeal\b|\bperfect\b|\bsounds good\b|\ball good\b|\balright( then)?\b/,
-		/\blet'?s (do|go)\b|\bgo for it\b/,
-		/\bproceed\b|\bgo ahead\b|\bconfirm( it| the)?\b|\bfinali[sz]e\b|\bdo it\b/,
-
-		// Spanish
-		/\b(sí|si)\b|\bclaro\b|\bde acuerdo\b|\bvale\b|\bdale\b|\blisto\b|\bva\b|\bvamos\b/,
-
-		// French
-		/\boui\b|\bd['’]?accord\b|\bvas[- ]y\b|\bça marche\b|\bca marche\b|\bc['’]?est bon\b/,
-
-		// Urdu/Hindi (roman + script)
-		/\bhaan( ji)?\b|\bha?an\b|\bthe?ek hai\b|\bthik hai\b/,
-		/ठीक है|जी|हाँ/,
-
-		// Arabic (script) — Egyptian & GCC cues
-		/(^|\b)(ا?يو[هة]|ا?يوا|ماشي|حاضر|خلاص|تمام ?كده|اوكيه?|اوك)(\b|$)/u,
-
-		// Romanized Arabic
-		/\bai?ywa\b|\baiwa\b|\baywa\b|\bmashi\b|\byalla+\b/,
-	];
-
-	// “Soft” interjections that become affirmative when paired with “please”
-	const SOFT_INTERJ = [/\buh-?huh\b/, /\baha+\b/, /\bah+\b/];
-
-	// Please markers in several languages
-	const PLEASE_MARKERS = [
-		/\bplease\b|\bpls\b|\bplz\b/,
-		/لو سمحت|من فضلك|رجاءً|رجاء/u,
-		/\bpor favor\b/,
-		/(s['’]il te plaît|s['’]il vous plaît|\bsvp\b)/i,
-	];
-
-	// If any strong OK pattern hits, it's affirmative.
-	if (REGEX_HARD_OK.some((rx) => rx.test(s))) return true;
-
-	// “ok …” style starts-with (e.g., "ok pls", "okay go ahead")
-	if (/^ok(ay|ey|ie)?\b/.test(s)) return true;
-
-	// Soft interjection + please → affirmative (e.g., "aha please", "uh huh pls")
-	const hasSoft = SOFT_INTERJ.some((rx) => rx.test(s));
-	const hasPlease = PLEASE_MARKERS.some((rx) => rx.test(s));
-	if (hasSoft && hasPlease) return true;
-
-	// Fallback to your existing lists (keeps backward compatibility)
-	if (SHORT_AFFIRM.some((w) => s === w || s.startsWith(w))) return true;
-	if (lowerIncludesAny(s, STRONG_BOOK_INTENT)) return true;
-	if (
-		lowerIncludesAny(s, [
-			"confirm",
-			"confirm it",
-			"confirm my booking",
-			"finalize",
-			"finalise",
-			"go ahead",
-			"proceed",
-			"do it",
-		])
-	)
-		return true;
-
-	return false;
-}
-
-function formatDateRange(ci, co) {
-	const i = dayjs(ci),
-		o = dayjs(co);
-	if (!i.isValid() || !o.isValid()) return `${ci} → ${co}`;
-	const sameMonth = i.month() === o.month() && i.year() === o.year();
-	const iStr = i.format("MMM D");
-	const oStr = sameMonth ? o.format("D, YYYY") : o.format("MMM D, YYYY");
-	return `${iStr}–${oStr}`;
-}
-
-/* ---------- Human/AI classifier ---------- */
-function isAssistantLike(byName, byEmail, personaName) {
-	const name = lower(byName),
-		email = lower(byEmail);
-	return (
-		email === "management@xhotelpro.com" ||
-		name.includes("admin") ||
-		name.includes("support") ||
-		name.includes("agent") ||
-		(personaName && name === lower(personaName))
-	);
-}
-
-/* ---------- Hotel permission ---------- */
-const hotelAllowsAI = (hotelDoc) => !!hotelDoc && hotelDoc.aiToRespond === true;
-
-/* ---------- Room/pricing helpers ---------- */
-const ROOM_SYNONYMS = [
-	{
-		canon: "singleRooms",
-		keys: [
-			"single",
-			"single room",
-			"1 bed",
-			"فردي",
-			"فردية",
-			"سنجل",
-			"غرفة فردية",
-		],
-	},
-	{
-		canon: "doubleRooms",
-		keys: [
-			"double",
-			"double room",
-			"2 beds",
-			"twin",
-			"مزدوج",
-			"ثنائي",
-			"دبل",
-			"توين",
-			"غرفة مزدوجة",
-		],
-	},
-	{
-		canon: "twinRooms",
-		keys: ["twin", "two beds", "توين", "سريرين", "غرفة توين"],
-	},
-	{
-		canon: "tripleRooms",
-		keys: ["triple", "3 beds", "ثلاثي", "ثلاثية", "غرفة ثلاثية"],
-	},
-	{
-		canon: "quadRooms",
-		keys: ["quad", "4 beds", "رباعي", "رباعية", "غرفة رباعية"],
-	},
-	{
-		canon: "familyRooms",
-		keys: ["family", "family room", "عائلي", "عائلية", "غرفة عائلية"],
-	},
-	{ canon: "suiteRooms", keys: ["suite", "سويت", "جناح", "سويت روم"] },
-	{ canon: "kingRooms", keys: ["king", "سرير كبير", "كينج"] },
-	{ canon: "queenRooms", keys: ["queen", "كوين"] },
-];
-
-function canonicalFromText(text) {
-	const t = lower(text);
-	for (const row of ROOM_SYNONYMS)
-		if (row.keys.some((k) => t.includes(lower(k)))) return row.canon;
-	return null;
-}
-function buildRoomMatcher(hotel) {
-	const all = hotel?.roomCountDetails || [];
-	const byType = new Map(all.map((r) => [lower(r.roomType || ""), r]));
-	return function matchRoom(req) {
-		const wantType = lower(
-			String(req.roomType || req.room_type || req.hint || "")
-		);
-		const wantName = lower(String(req.displayName || ""));
-		if (wantType && wantName) {
-			const hit = all.find(
-				(r) =>
-					lower(r.roomType || "") === wantType &&
-					lower(r.displayName || "") === wantName
-			);
-			if (hit) return hit;
-		}
-		if (wantType) {
-			const exact = byType.get(wantType);
-			if (exact) return exact;
-		}
-		const canon =
-			canonicalFromText(req.roomType) ||
-			canonicalFromText(req.displayName) ||
-			canonicalFromText(req.hint);
-		if (canon) {
-			const byCanon = all.find((r) =>
-				lower(r.roomType || "").includes(lower(canon))
-			);
-			if (byCanon) return byCanon;
-		}
-		// fuzzy
-		const tokens = [
-			"single",
-			"double",
-			"twin",
-			"triple",
-			"quad",
-			"family",
-			"suite",
-			"king",
-			"queen",
-			"فرد",
-			"ثنائي",
-			"دبل",
-			"مزدوج",
-			"ثلاث",
-			"رباع",
-			"عائ",
-			"سويت",
-			"جناح",
-			"توين",
-		];
-		for (const r of all) {
-			const hay = `${lower(r.roomType || "")} ${lower(r.displayName || "")}`;
-			if (tokens.some((k) => wantType.includes(k) || wantName.includes(k))) {
-				if (tokens.find((k) => hay.includes(k))) return r;
-			}
-		}
-		return null;
+async function send(io, { caseId, text, personaName, lang }) {
+	if (!text) return;
+	startTyping(io, caseId, personaName);
+	await delay(computeTypeDelay(text));
+	const msg = {
+		messageBy: {
+			customerName: personaName,
+			customerEmail: "management@xhotelpro.com",
+			userId: null,
+		},
+		message: text,
+		date: new Date(),
+		seenByAdmin: true,
+		seenByHotel: true,
+		seenByCustomer: true,
 	};
+	try {
+		await SupportCase.findByIdAndUpdate(caseId, {
+			$set: { aiRelated: true },
+			$push: { conversation: msg },
+		});
+	} catch {}
+	stopTyping(io, caseId);
+	io.to(caseId).emit("receiveMessage", {
+		...msg,
+		caseId,
+		preferredLanguage: lang,
+		preferredLanguageCode: lang,
+	});
+	armIdleClose(io, caseId, personaName);
+}
+function armIdleClose(io, caseId, personaName) {
+	const prev = idleTimers.get(caseId);
+	if (prev) clearTimeout(prev.t);
+	const t = setTimeout(async () => {
+		try {
+			const doc = await SupportCase.findById(caseId).lean();
+			if (!doc || doc.caseStatus === "closed") return;
+			await SupportCase.findByIdAndUpdate(caseId, { caseStatus: "closed" });
+			io.to(caseId).emit("caseClosed", {
+				caseId,
+				closedBy: personaName || "system",
+			});
+		} catch {}
+		idleTimers.delete(caseId);
+	}, 5 * 60 * 1000);
+	idleTimers.set(caseId, { t, at: Date.now() });
 }
 
-const num = (x, d = 0) => {
-	const n = parseFloat(x);
-	return Number.isFinite(n) ? n : d;
+/* ---------- OpenAI ---------- */
+if (!looksLikeOpenAIKey(RAW_KEY))
+	console.error("[AI] OPENAI_API_KEY missing/invalid.");
+const client = new OpenAI({ apiKey: RAW_KEY });
+const MODEL = RAW_MODEL;
+async function llmJSON({ system, user, temperature = 0.0, max_tokens = 500 }) {
+	try {
+		const r = await client.chat.completions.create({
+			model: MODEL,
+			temperature,
+			max_tokens,
+			response_format: { type: "json_object" },
+			messages: [
+				{ role: "system", content: system },
+				{ role: "user", content: user },
+			],
+		});
+		const c = r.choices?.[0]?.message?.content?.trim();
+		return c ? JSON.parse(c) : null;
+	} catch {
+		return null;
+	}
+}
+
+/* ---------- NLU ---------- */
+const nlu = {
+	async classify(text, roomTypes = []) {
+		const system = `
+Extract hotel chat intents/entities in JSON:
+{
+ "language": "en|ar|es|fr|ur|hi|...",
+ "intents": {
+   "new_booking": bool,
+   "existing_booking": bool,
+   "change_dates": bool,
+   "cancel_reservation": bool,
+   "ask_room_info": bool,
+   "ask_identity_work_for_hotel": bool,
+   "ask_identity_reception": bool,
+   "ask_identity_in_saudi": bool,
+   "ask_human_agent": bool,
+   "ask_link_or_pdf": bool
+ },
+ "signals": {"is_affirmative": bool, "is_negative": bool},
+ "entities": {
+   "room_type_freeform": string|null,
+   "room_type_canonical": ${JSON.stringify(roomTypes)}[i]|null,
+   "dates": {"check_in_date": "YYYY-MM-DD"|null, "check_out_date": "YYYY-MM-DD"|null},
+   "confirmation_number": string|null,
+   "phone": string|null,
+   "nationality_input": string|null,
+   "name": string|null
+ }
+}
+Rules:
+- Be strict for is_affirmative (clear authorization only).
+- Map room type to provided canonical list if possible.
+- Extract dates from any language; if ambiguous, leave null.
+- ask_room_info true when they ask features/amenities/price for a room type.
+`;
+		return (
+			(await llmJSON({
+				system,
+				user: JSON.stringify({ text }),
+				temperature: 0,
+			})) || null
+		);
+	},
+	async validateNationality(input) {
+		const system = `
+Validate a nationality/demonym. JSON:
+{"valid": bool, "canonical_en": string|null, "country_en": string|null}
+Reject gibberish. Be conservative.
+`;
+		return (
+			(await llmJSON({
+				system,
+				user: JSON.stringify({ input: String(input || "").trim() }),
+			})) || { valid: false }
+		);
+	},
+	async answerRoomInfo({ hotel, question, roomTypes }) {
+		const system = `
+You are a hotel assistant. Use ONLY this JSON document to answer about rooms.
+Return JSON: {"answer": "short helpful text", "used_room_type": string|null}
+Document (hotelDetails): ${JSON.stringify({
+			hotelName: hotel?.hotelName,
+			city: hotel?.hotelCity,
+			country: hotel?.hotelCountry,
+			roomCountDetails: (hotel?.roomCountDetails || []).map((r) => ({
+				roomType: r.roomType,
+				displayName: r.displayName,
+				description: r.description,
+				description_OtherLanguage: r.description_OtherLanguage,
+				amenities: r.amenities,
+				extraAmenities: r.extraAmenities,
+				views: r.views,
+				basePrice: r?.price?.basePrice ?? r?.defaultCost ?? null,
+			})),
+		})}
+Guidelines:
+- If the question mentions a specific room type, use its data.
+- If price asked without dates, mention basePrice as starting point (no totals).
+- Keep it concise (≤ 3 sentences).
+`;
+		const out = await llmJSON({
+			system,
+			user: JSON.stringify({ question, roomTypes }),
+		});
+		return out?.answer || null;
+	},
 };
 
-function nightlyArrayFrom(
-	pricingRate,
-	checkIn,
-	checkOut,
-	basePrice,
-	defaultCost,
-	commissionRate
-) {
-	const s = dayjs(checkIn).startOf("day");
-	const e = dayjs(checkOut).subtract(1, "day").startOf("day");
-	const arr = [];
+/* ---------- Language lines ---------- */
+const L = {
+	greet: (lang, hotel, persona, first) => {
+		const G = first ? ` ${first}` : "";
+		if (lang === "ar")
+			return `السلام عليكم${G}! أنا ${persona} من ${hotel}. هل تريد حجزًا جديدًا أم المساعدة في حجز قائم؟`;
+		if (lang === "es")
+			return `¡Assalamu alaikum${G}! Soy ${persona} de ${hotel}. ¿Reserva nueva o ayuda con una existente?`;
+		if (lang === "fr")
+			return `Assalamu alaykoum${G} ! Je suis ${persona} de ${hotel}. Nouvelle réservation ou aide sur une existante ?`;
+		if (lang === "ur")
+			return `السلام علیکم${G}! میں ${persona}، ${hotel} سے۔ نئی بکنگ یا موجودہ میں مدد؟`;
+		if (lang === "hi")
+			return `अस्सलामु अलैकुम${G}! मैं ${persona}, ${hotel} से। नई बुकिंग या मौजूदा में मदद?`;
+		return `Assalamu alaikum${G}! I’m ${persona} from ${hotel}. New booking or help with an existing one?`;
+	},
+	askNewOrExisting: (lang) => {
+		if (lang === "ar") return "هل نبدأ بحجز جديد أم ترغب بتعديل/إلغاء حجز؟";
+		if (lang === "es")
+			return "¿Empezamos una reserva nueva o deseas modificar/cancelar?";
+		if (lang === "fr")
+			return "Souhaitez‑vous une nouvelle réservation ou modifier/annuler ?";
+		if (lang === "ur") return "نئی بکنگ شروع کریں یا موجودہ میں تبدیلی/منسوخی؟";
+		if (lang === "hi") return "नई बुकिंग शुरू करें या मौजूदा में बदलाव/रद्द?";
+		return "Shall we start a new booking, or would you like to change/cancel one?";
+	},
+	askRoom: (lang, opts = []) => {
+		const o = opts.length ? ` (${opts.join(" / ")})` : "";
+		if (lang === "ar") return `ما نوع الغرفة المفضل لديك؟${o}`;
+		if (lang === "es") return `¿Qué tipo de habitación prefieres?${o}`;
+		if (lang === "fr") return `Quel type de chambre préférez‑vous ?${o}`;
+		if (lang === "ur") return `آپ کون سا کمرہ پسند کریں گے؟${o}`;
+		if (lang === "hi") return `आप कौन‑सा कमरे का प्रकार चाहेंगे?${o}`;
+		return `Which room type would you like?${o}`;
+	},
+	askDates: (lang) => {
+		if (lang === "ar")
+			return "ما هي تواريخ الوصول والمغادرة؟ (مثال: 2025‑09‑16 → 2025‑09‑19)";
+		if (lang === "es")
+			return "¿Fechas de entrada y salida? (p.ej., 2025‑09‑16 → 2025‑09‑19)";
+		if (lang === "fr")
+			return "Quelles sont vos dates d’arrivée et de départ ? (ex. 2025‑09‑16 → 2025‑09‑19)";
+		if (lang === "ur")
+			return "چیک‑ان اور چیک‑آؤٹ کی تاریخیں؟ (مثال: 2025‑09‑16 → 2025‑09‑19)";
+		if (lang === "hi")
+			return "चेक‑इन और चेक‑आउट तिथियाँ? (जैसे 2025‑09‑16 → 2025‑09‑19)";
+		return "What are your check‑in & check‑out dates? (e.g., 2025‑09‑16 → 2025‑09‑19)";
+	},
+	badDates: (lang) => {
+		if (lang === "ar")
+			return "التواريخ غير صالحة (الوصول يجب أن يكون مستقبليًا والمغادرة بعده). شاركني مثل: 2025‑09‑16 → 2025‑09‑19";
+		if (lang === "es")
+			return "Fechas inválidas (entrada futura y salida posterior). Formato: 2025‑09‑16 → 2025‑09‑19";
+		if (lang === "fr")
+			return "Dates invalides (arrivée future, départ après). Format : 2025‑09‑16 → 2025‑09‑19";
+		if (lang === "ur")
+			return "تاریخیں درست نہیں (چیک‑ان مستقبل میں اور چیک‑آؤٹ بعد میں). فارمیٹ: 2025‑09‑16 → 2025‑09‑19";
+		if (lang === "hi")
+			return "तिथियाँ मान्य नहीं (चेक‑इन भविष्य में, चेक‑आउट बाद में). फ़ॉर्मैट: 2025‑09‑16 → 2025‑09‑19";
+		return "Dates look invalid (check‑in must be future; check‑out after). Please share like 2025‑09‑16 → 2025‑09‑19";
+	},
+	quote: (lang, room, ci, co, total) => {
+		const dates = `${ci} → ${co}`;
+		if (lang === "ar")
+			return `السعر الكلي لغرفة ${room} للفترة ${dates} هو ${total} SAR. هل يناسبك لنكمل التفاصيل؟`;
+		if (lang === "es")
+			return `El total para ${room} del ${dates} es ${total} SAR. ¿Te parece bien para continuar con los datos?`;
+		if (lang === "fr")
+			return `Le total pour ${room} du ${dates} est de ${total} SAR. Cela vous convient pour finaliser les détails ?`;
+		if (lang === "ur")
+			return `${room} کے لیے ${dates} کا کُل ${total} SAR بنتا ہے۔ کیا یہ ٹھیک ہے تاکہ تفصیلات مکمل کروں؟`;
+		if (lang === "hi")
+			return `${room} के लिए ${dates} का कुल ${total} SAR है। क्या यह ठीक है ताकि आगे विवरण भर दूँ?`;
+		return `The total for ${room} from ${dates} is ${total} SAR. Shall I proceed to finalize details?`;
+	},
+	askNameConfirm: (lang, name) => {
+		if (lang === "ar") return `هل ترغب أن أسجّل الحجز بالاسم: “${name}”؟`;
+		if (lang === "es")
+			return `¿Deseas que la reserva vaya a nombre de “${name}”?`;
+		if (lang === "fr")
+			return `Souhaitez‑vous que la réservation soit au nom de « ${name} » ?`;
+		if (lang === "ur") return `کیا ریزرویشن اسی نام “${name}” پر ہو؟`;
+		if (lang === "hi") return `क्या आरक्षण “${name}” के नाम से कर दूँ?`;
+		return `Shall I put the reservation under “${name}”?`;
+	},
+	askFullName: (lang) => {
+		if (lang === "ar")
+			return "برجاء مشاركة الاسم الكامل (الاسم الأول + العائلة).";
+		if (lang === "es")
+			return "Por favor comparte tu nombre completo (nombre y apellido).";
+		if (lang === "fr")
+			return "Merci d’indiquer votre nom complet (prénom + nom).";
+		if (lang === "ur") return "براہ کرم پورا نام (نام + خاندانی نام) بتائیں۔";
+		if (lang === "hi")
+			return "कृपया अपना पूरा नाम (पहला नाम + उपनाम) साझा करें।";
+		return "Please share your full name (first + last).";
+	},
+	askPhone: (lang) => {
+		if (lang === "ar") return "هل تود مشاركة رقم هاتف/واتساب؟ (اختياري)";
+		if (lang === "es")
+			return "¿Quieres compartir tu teléfono/WhatsApp? (opcional)";
+		if (lang === "fr")
+			return "Souhaitez‑vous partager votre téléphone/WhatsApp ? (optionnel)";
+		if (lang === "ur") return "کیا فون/واٹس ایپ نمبر شیئر کریں گے؟ (اختیاری)";
+		if (lang === "hi")
+			return "क्या आप फ़ोन/व्हाट्सऐप नंबर साझा करना चाहेंगे? (वैकल्पिक)";
+		return "Would you like to share a phone/WhatsApp number? (optional)";
+	},
+	askNationality: (lang) => {
+		if (lang === "ar") return "ما هي جنسيتك؟ (مثال: سعودي، مصري، باكستاني)";
+		if (lang === "es")
+			return "¿Cuál es tu nacionalidad? (ej.: Saudí, Egipcia, Pakistaní)";
+		if (lang === "fr")
+			return "Quelle est votre nationalité ? (ex. Saoudien, Égyptien, Pakistanais)";
+		if (lang === "ur")
+			return "آپ کی قومیت کیا ہے؟ (مثلاً سعودی، مصری، پاکستانی)";
+		if (lang === "hi")
+			return "आपकी राष्ट्रीयता क्या है? (जैसे Saudi, Egyptian, Pakistani)";
+		return "What is your nationality? (e.g., Saudi, Egyptian, Pakistani)";
+	},
+	nationalityBad: (lang) => {
+		if (lang === "ar")
+			return "يبدو أن الجنسية غير صحيحة. شارك جنسية صالحة (مثلاً: سعودي، مصري، باكستاني).";
+		if (lang === "es")
+			return "Esa nacionalidad no parece válida. Comparte una válida (p.ej., Saudí, Egipcia, Pakistaní).";
+		if (lang === "fr")
+			return "Cette nationalité ne semble pas valide. Indiquez une nationalité valide (ex. Saoudien, Égyptien, Pakistanais).";
+		if (lang === "ur")
+			return "قومیت درست معلوم نہیں ہوتی۔ براہِ کرم درست قومیت بتائیں (مثلاً: سعودی، مصری، پاکستانی).";
+		if (lang === "hi")
+			return "वह राष्ट्रीयता मान्य नहीं लगती। कृपया मान्य राष्ट्रीयता बताएं (जैसे Saudi, Egyptian, Pakistani).";
+		return "That doesn’t look like a valid nationality. Please share a valid one (e.g., Saudi, Egyptian, Pakistani).";
+	},
+	finalSummary: (lang, s, hotel) => {
+		const dates = `${s.ci} → ${s.co}`;
+		const phone = s.phone
+			? s.phone
+			: lang === "ar"
+			? "غير مذكور"
+			: lang === "es"
+			? "no indicado"
+			: lang === "fr"
+			? "non indiqué"
+			: lang === "ur"
+			? "مہیا نہیں"
+			: lang === "hi"
+			? "उपलब्ध नहीं"
+			: "not provided";
+		if (lang === "ar")
+			return `الملخص النهائي:\n- الفندق: ${hotel}\n- الغرفة: ${
+				s.room_canon
+			}\n- التواريخ: ${dates}\n- الإجمالي: ${s.total} SAR\n- الاسم: ${
+				s.name
+			}\n- الهاتف: ${phone}\n- الجنسية: ${
+				s.nationality_en || "—"
+			}\nأؤكد الحجز الآن؟`;
+		if (lang === "es")
+			return `Resumen final:\n- Hotel: ${hotel}\n- Habitación: ${
+				s.room_canon
+			}\n- Fechas: ${dates}\n- Total: ${s.total} SAR\n- Nombre: ${
+				s.name
+			}\n- Teléfono: ${phone}\n- Nacionalidad: ${
+				s.nationality_en || "—"
+			}\n¿Confirmo la reserva ahora?`;
+		if (lang === "fr")
+			return `Récapitulatif final :\n- Hôtel : ${hotel}\n- Chambre : ${
+				s.room_canon
+			}\n- Dates : ${dates}\n- Total : ${s.total} SAR\n- Nom : ${
+				s.name
+			}\n- Téléphone : ${phone}\n- Nationalité : ${
+				s.nationality_en || "—"
+			}\nPuis‑je confirmer maintenant ?`;
+		if (lang === "ur")
+			return `حتمی خلاصہ:\n- ہوٹل: ${hotel}\n- کمرہ: ${
+				s.room_canon
+			}\n- تاریخیں: ${dates}\n- کُل: ${s.total} SAR\n- نام: ${
+				s.name
+			}\n- فون: ${phone}\n- قومیت: ${
+				s.nationality_en || "—"
+			}\nکیا میں اب کنفرم کروں؟`;
+		if (lang === "hi")
+			return `अंतिम सारांश:\n- होटल: ${hotel}\n- कमरा: ${
+				s.room_canon
+			}\n- तिथियाँ: ${dates}\n- कुल: ${s.total} SAR\n- नाम: ${
+				s.name
+			}\n- फ़ोन: ${phone}\n- राष्ट्रीयता: ${
+				s.nationality_en || "—"
+			}\nक्या मैं अब पुष्टि कर दूँ?`;
+		return `Final summary:\n- Hotel: ${hotel}\n- Room: ${
+			s.room_canon
+		}\n- Dates: ${dates}\n- Total: ${s.total} SAR\n- Name: ${
+			s.name
+		}\n- Phone: ${phone}\n- Nationality: ${
+			s.nationality_en || "—"
+		}\nShall I confirm the booking now?`;
+	},
+	booked: (lang, conf) => {
+		if (lang === "ar")
+			return `تم تأكيد الحجز ✅\nرقم التأكيد: ${conf}\nسأرسل الرابط التالي.`;
+		if (lang === "es")
+			return `¡Reserva confirmada! ✅\nN.º de confirmación: ${conf}\nEnvío el enlace a continuación.`;
+		if (lang === "fr")
+			return `Réservation confirmée ✅\nN° de confirmation : ${conf}\nJ’envoie le lien juste après.`;
+		if (lang === "ur")
+			return `بکنگ کنفرم ✅\nکنفرمیشن نمبر: ${conf}\nلنک ابھی بھیجتا/بھیجتی ہوں۔`;
+		if (lang === "hi")
+			return `आरक्षण कन्फ़र्म ✅\nकन्फ़र्मेशन नंबर: ${conf}\nअभी लिंक भेजता/भेजती हूँ।`;
+		return `Reservation confirmed! ✅\nConfirmation: ${conf}\nI’ll send the link next.`;
+	},
+	updated: (lang) => {
+		if (lang === "ar") return `تم التحديث. سأرسل رابط التأكيد التالي.`;
+		if (lang === "es") return `Actualizado. Envío el enlace a continuación.`;
+		if (lang === "fr")
+			return `Mise à jour effectuée. J’envoie le lien juste après.`;
+		if (lang === "ur") return `اپڈیٹ مکمل۔ لنک ابھی ارسال کروں گا/گی۔`;
+		if (lang === "hi") return `अपडेट पूरा। अगला पुष्टि लिंक भेजता/भेजती हूँ।`;
+		return `Updated. I’ll send your confirmation link next.`;
+	},
+	link: (lang, link) => {
+		if (lang === "ar") return `🔗 رابط التأكيد (يتضمن PDF): ${link}`;
+		if (lang === "es")
+			return `🔗 Enlace de confirmación (PDF incluido): ${link}`;
+		if (lang === "fr") return `🔗 Lien de confirmation (PDF inclus) : ${link}`;
+		if (lang === "ur") return `🔗 کنفرمیشن لنک (PDF کے ساتھ): ${link}`;
+		if (lang === "hi") return `🔗 पुष्टि लिंक (PDF सहित): ${link}`;
+		return `🔗 Confirmation link (includes PDF): ${link}`;
+	},
+	cannotPrice: (lang) => {
+		if (lang === "ar")
+			return "لا يمكن التسعير لهذه التواريخ/النوع. هل تفضّل نوعًا أو تواريخ أخرى؟";
+		if (lang === "es")
+			return "No puedo calcular para esas fechas/tipo. ¿Quieres otro tipo o fechas?";
+		if (lang === "fr")
+			return "Je ne peux pas tarifer pour ces dates/type. Souhaitez-vous un autre type ou d’autres dates ?";
+		if (lang === "ur")
+			return "ان تاریخوں/قسم کی قیمت نہیں نکل رہی۔ کوئی دوسرا آپشن یا تاریخیں؟";
+		if (lang === "hi")
+			return "उन तिथियों/टाइप का मूल्य नहीं निकाल पा रहा/रही। दूसरा टाइप या तिथियाँ?";
+		return "I can’t price those dates/type. Would you like another room type or dates?";
+	},
+	// Identity — exact lines requested
+	id_workHotel: () => "Yes, I am a customer support in the hotel.",
+	id_reception: () =>
+		"I'm not a receptionist, but I'm in a different department in the hotel.",
+	id_inSaudi: () => "Yes I am sir, how can I help you now",
+	askHuman: (lang) => {
+		if (lang === "ar")
+			return "أستطيع مساعدتك هنا أو تحويلك لزميل. هل تود المتابعة هنا؟";
+		if (lang === "es")
+			return "Puedo ayudarte aquí o pasarte con un compañero. ¿Seguimos aquí?";
+		if (lang === "fr")
+			return "Je peux vous aider ici ou vous passer un collègue. Souhaitez‑vous continuer ici ?";
+		if (lang === "ur")
+			return "میں یہاں مدد کر سکتا/سکتی ہوں یا ساتھی کو شامل کر دوں۔ کیا یہیں جاری رکھیں؟";
+		if (lang === "hi")
+			return "मैं यहीं मदद कर सकता/सकती हूँ या किसी साथी को जोड़ दूँ। क्या यहीं जारी रखें?";
+		return "I can help you here or loop in a teammate. Would you like to continue here?";
+	},
+};
+
+/* ---------- Pricing ---------- */
+const canonicalFromText = (t = "") => {
+	const s = lower(t);
+	if (/triple|ثلاث|tripl/.test(s)) return "tripleRooms";
+	if (/twin|توين/.test(s)) return "twinRooms";
+	if (/double|دبل|مزدوج/.test(s)) return "doubleRooms";
+	if (/quad|رباع/.test(s)) return "quadRooms";
+	if (/family|عائ/.test(s)) return "familyRooms";
+	if (/suite|سويت|جناح/.test(s)) return "suiteRooms";
+	if (/king|كينج/.test(s)) return "kingRooms";
+	if (/queen|كوين/.test(s)) return "queenRooms";
+	return null;
+};
+function roomMap(hotel) {
+	const arr = hotel?.roomCountDetails || [];
+	const byType = new Map(arr.map((r) => [String(r.roomType || "").trim(), r]));
+	return { arr, byType };
+}
+function nightlyArray(room, ci, co) {
+	const s = dayjs(ci).startOf("day");
+	const e = dayjs(co).subtract(1, "day").startOf("day");
+	const rate = room?.pricingRate || [];
+	const base = Number(room?.price?.basePrice ?? room?.defaultCost ?? 0);
+	const addCommission = room?.commisionIncluded ? false : true; // schema uses "commisionIncluded"
+	const commRate = Number(room?.roomCommission || 10);
+	const rows = [];
 	let cur = s;
 	while (cur.isBefore(e) || cur.isSame(e, "day")) {
-		const date = cur.format("YYYY-MM-DD");
-		const row = (pricingRate || []).find((r) => r.calendarDate === date);
-		const price = row ? num(row.price, basePrice) : num(basePrice, defaultCost);
-		const rootPrice = row
-			? num(row.rootPrice, defaultCost)
-			: num(defaultCost, defaultCost);
-		const comm = row
-			? num(row.commissionRate, commissionRate)
-			: num(commissionRate, 10);
-		arr.push({ date, price, rootPrice, commissionRate: comm });
+		const d = cur.format("YYYY-MM-DD");
+		const row = rate.find((r) => r.calendarDate === d);
+		let price = row ? Number(row.price || 0) : base; // missing → base
+		const root = row
+			? Number(row.rootPrice || 0)
+			: Number(room?.defaultCost ?? base);
+		if ((!row && base <= 0) || price === 0) {
+			rows.push({ date: d, blocked: true, price: 0, root: root || 0 });
+		} else {
+			let total = price;
+			if (addCommission)
+				total = Number((price + (root || 0) * (commRate / 100)).toFixed(2));
+			rows.push({
+				date: d,
+				blocked: false,
+				price: total,
+				base: price,
+				root: root || 0,
+			});
+		}
 		cur = cur.add(1, "day");
 	}
-	return arr;
+	return rows;
 }
-const anyBlocked = (nightly) => nightly.some((d) => num(d.price, 0) === 0);
-const withCommission = (nightly) =>
-	nightly.map((d) => ({
-		...d,
-		totalPriceWithCommission:
-			num(d.price) + num(d.rootPrice) * (num(d.commissionRate) / 100),
-		totalPriceWithoutCommission: num(d.price),
-	}));
+const anyBlocked = (arr) => arr.some((x) => x.blocked);
+const totalOf = (arr) =>
+	Number(arr.reduce((a, d) => a + Number(d.price || 0), 0).toFixed(2));
+function nearestAvailableWindow(room, ci, nights, span = 14) {
+	const start = dayjs(ci).startOf("day");
+	let best = null;
+	for (let dir of [1, -1]) {
+		for (let d = 1; d <= span; d++) {
+			const s = start.add(dir * d, "day");
+			const e = s.add(nights, "day");
+			const n = nightlyArray(room, s, e);
+			if (!anyBlocked(n)) {
+				const tot = totalOf(n);
+				const cand = {
+					check_in_date: s.format("YYYY-MM-DD"),
+					check_out_date: e.format("YYYY-MM-DD"),
+					total: tot,
+				};
+				if (!best || Math.abs(d) < best.d) best = { d: Math.abs(d), ...cand };
+				break;
+			}
+		}
+	}
+	return best;
+}
 
-function tryWindow(room, start, nights, commissionFallback) {
-	const startStr = dayjs(start).format("YYYY-MM-DD");
-	const endStr = dayjs(start).add(nights, "day").format("YYYY-MM-DD");
-	const comm =
-		num(room.roomCommission, commissionFallback) || commissionFallback || 10;
-	const nightly0 = nightlyArrayFrom(
-		room.pricingRate || [],
-		startStr,
-		endStr,
-		num(room?.price?.basePrice, 0),
-		num(room.defaultCost, 0),
-		comm
-	);
-	const blocked = anyBlocked(nightly0);
-	const nightly = withCommission(nightly0);
-	const totalWith = Number(
-		nightly.reduce((a, d) => a + num(d.totalPriceWithCommission), 0).toFixed(2)
-	);
-	const totalRoot = Number(
-		nightly.reduce((a, d) => a + num(d.rootPrice), 0).toFixed(2)
-	);
-	const commissionAmt = Number((totalWith - totalRoot).toFixed(2));
+/* ---------- Reservation ops ---------- */
+async function findReservationByConfirmation(confirmation) {
+	const conf = String(confirmation || "").trim();
+	if (!conf) return { ok: false, error: "Confirmation required." };
+	const doc = await Reservation.findOne({
+		$or: [{ confirmation: conf }, { confirmation_number: conf }],
+	})
+		.populate("hotelId")
+		.lean();
+	if (!doc) return { ok: false, not_found: true, error: "Not found" };
 	return {
-		ok: !blocked,
-		nightly,
-		totals: {
-			totalWithCommission: totalWith,
-			totalRoot,
-			commission: commissionAmt,
+		ok: true,
+		reservation: {
+			_id: doc._id,
+			confirmation: doc.confirmation || doc.confirmation_number || conf,
+			status: doc.status || doc.reservation_status || "",
+			checkin_date: doc.checkin_date,
+			checkout_date: doc.checkout_date,
+			hotelId: doc.hotelId?._id || doc.hotelId,
+			hotel_name: doc.hotelId?.hotelName || doc.hotel_name || "",
+			customer_details: doc.customer_details || doc.customerDetails || {},
+			total_amount: doc.total_amount,
+			pickedRoomsType: doc.pickedRoomsType || [],
 		},
 	};
 }
-function nearestAvailableWindow(
-	room,
-	checkIn,
-	nights,
-	hotelCommission,
-	span = 14
-) {
-	const start = dayjs(checkIn).startOf("day");
-	let fwd = null,
-		back = null;
-	for (let d = 1; d <= span; d++) {
-		const f = start.add(d, "day");
-		const w = tryWindow(room, f, nights, hotelCommission);
-		if (w.ok) {
-			fwd = {
-				direction: "forward",
-				offsetDays: d,
-				check_in_date: f.format("YYYY-MM-DD"),
-				check_out_date: f.add(nights, "day").format("YYYY-MM-DD"),
-				nights,
-				...w,
-			};
-			break;
-		}
+async function applyReservationUpdate({
+	reservation_id,
+	confirmation_number,
+	changes,
+}) {
+	let _id = null;
+	if (reservation_id && isValidObjectId(reservation_id))
+		_id = String(reservation_id);
+	else if (confirmation_number) {
+		const found = await findReservationByConfirmation(confirmation_number);
+		if (!found?.ok)
+			return { ok: false, error: found?.error || "Reservation not found." };
+		_id = String(found.reservation._id);
+	} else
+		return {
+			ok: false,
+			error: "reservation_id or confirmation_number required.",
+		};
+
+	const payload = { ...changes };
+	if (payload.check_in_date) payload.checkin_date = payload.check_in_date;
+	if (payload.check_out_date) payload.checkout_date = payload.check_out_date;
+	delete payload.check_in_date;
+	delete payload.check_out_date;
+
+	if (payload.checkin_date && payload.checkout_date) {
+		const ci = dayjs(payload.checkin_date),
+			co = dayjs(payload.checkout_date);
+		if (!ci.isValid() || !co.isValid() || !co.isAfter(ci, "day"))
+			return { ok: false, error: "Invalid dates." };
 	}
-	for (let d = 1; d <= span; d++) {
-		const b = start.subtract(d, "day");
-		const w = tryWindow(room, b, nights, hotelCommission);
-		if (w.ok) {
-			back = {
-				direction: "backward",
-				offsetDays: d,
-				check_in_date: b.format("YYYY-MM-DD"),
-				check_out_date: b.add(nights, "day").format("YYYY-MM-DD"),
-				nights,
-				...w,
-			};
-			break;
-		}
+	const updated = await Reservation.findByIdAndUpdate(_id, payload, {
+		new: true,
+	}).lean();
+	if (!updated) return { ok: false, error: "Reservation not found." };
+	return { ok: true, reservation: updated };
+}
+async function cancelReservationByIdOrConfirmation(idOrConf) {
+	let _id = null;
+	if (isValidObjectId(idOrConf)) _id = String(idOrConf);
+	else {
+		const found = await findReservationByConfirmation(idOrConf);
+		if (!found?.ok)
+			return { ok: false, error: found?.error || "Reservation not found." };
+		_id = String(found.reservation._id);
 	}
-	if (fwd && back) return fwd.offsetDays <= back.offsetDays ? fwd : back;
-	return fwd || back || null;
+	const doc = await Reservation.findByIdAndUpdate(
+		_id,
+		{
+			status: "cancelled",
+			reservation_status: "cancelled",
+			cancelled_by: "aiagent",
+			cancelled_at: new Date(),
+		},
+		{ new: true }
+	).lean();
+	if (!doc) return { ok: false, error: "Reservation not found." };
+	return { ok: true, reservation: doc };
 }
 
-function flattenPickedRoomsForOrderTaker(rooms = []) {
-	const flat = [];
-	for (const r of rooms) {
-		const cnt = num(r.count, 1);
-		const nightly = Array.isArray(r.pricingByDay) ? r.pricingByDay : [];
-		const normalized = nightly.map((d) => ({
+/* ---------- Booking create ---------- */
+function flattenPickedRooms(pickedRooms) {
+	return pickedRooms.map((r) => ({
+		room_type: r.room_type,
+		displayName: r.displayName || r.room_type,
+		count: r.count || 1,
+		pricingByDay: r.nightly.map((d) => ({
 			date: d.date,
-			price: num(d.totalPriceWithCommission, num(d.price)),
-			rootPrice: num(d.rootPrice),
-			commissionRate: num(d.commissionRate),
-			totalPriceWithCommission: num(d.totalPriceWithCommission, num(d.price)),
-			totalPriceWithoutCommission: num(d.totalPriceWithoutCommission, 0),
-		}));
-		const totalWith = normalized.reduce(
-			(a, d) => a + num(d.totalPriceWithCommission),
-			0
-		);
-		const totalRoot = normalized.reduce((a, d) => a + num(d.rootPrice), 0);
-		const nights = normalized.length || 1;
-		const avgNight = nights > 0 ? totalWith / nights : 0;
-		for (let i = 0; i < cnt; i++) {
-			flat.push({
-				room_type: r.room_type || r.roomType,
-				displayName: r.displayName,
-				chosenPrice: Number(avgNight.toFixed(2)).toFixed(2),
-				count: 1,
-				pricingByDay: normalized,
-				totalPriceWithCommission: Number(totalWith.toFixed(2)),
-				hotelShouldGet: Number(totalRoot.toFixed(2)),
-			});
-		}
-	}
-	return flat;
+			price: Number(d.base || d.price || 0),
+			rootPrice: Number(d.root || 0),
+			commissionRate: 0,
+			totalPriceWithCommission: Number(d.price || 0),
+			totalPriceWithoutCommission: Number(d.base || 0),
+		})),
+		totalPriceWithCommission: totalOf(r.nightly),
+		hotelShouldGet: r.nightly.reduce((a, d) => a + Number(d.root || 0), 0),
+	}));
 }
-function computeTotalsFromFlat(flat = []) {
-	const oneNightCost = flat.reduce((a, room) => {
-		const first =
-			room.pricingByDay && room.pricingByDay[0]
-				? num(room.pricingByDay[0].rootPrice)
-				: 0;
-		return a + first;
-	}, 0);
-	const totalAmount = flat.reduce(
-		(a, room) => a + num(room.totalPriceWithCommission),
-		0
+function computeTotals(flat = []) {
+	const total_amount = Number(
+		flat
+			.reduce((a, r) => a + Number(r.totalPriceWithCommission || 0), 0)
+			.toFixed(2)
 	);
-	const totalRoot = flat.reduce((a, room) => a + num(room.hotelShouldGet), 0);
-	const commission = totalAmount - totalRoot;
-	const finalDeposit = commission + oneNightCost;
+	const totalRoot = Number(
+		flat.reduce((a, r) => a + Number(r.hotelShouldGet || 0), 0).toFixed(2)
+	);
+	const commission = Number((total_amount - totalRoot).toFixed(2));
+	const oneNightCost = Number(
+		flat
+			.reduce((a, r) => a + (r.pricingByDay?.[0]?.rootPrice || 0), 0)
+			.toFixed(2)
+	);
+	const final_deposit = Number((commission + oneNightCost).toFixed(2));
 	return {
-		total_amount: Number(totalAmount.toFixed(2)),
-		total_commission: Number(commission.toFixed(2)),
-		one_night_cost: Number(oneNightCost.toFixed(2)),
-		final_deposit: Number(finalDeposit.toFixed(2)),
+		total_amount,
+		total_commission: commission,
+		one_night_cost: oneNightCost,
+		final_deposit,
 	};
 }
-
-async function findLatestReservationForGuest({
-	hotelId,
-	phone,
-	check_in_date,
-	check_out_date,
-}) {
-	const digits = onlyDigits(phone);
-	if (!digits || digits.length < 7) return null; // <= guard
-	const phoneRegex = new RegExp(`${digits}$`); // match line-end for stability
-	const doc = await Reservation.findOne({
-		hotelId: hotelId,
-		$or: [
-			{ "customerDetails.phone": { $regex: phoneRegex } },
-			{ "customer_details.phone": { $regex: phoneRegex } },
-		],
-		checkin_date: check_in_date,
-		checkout_date: check_out_date,
-	})
-		.sort({ createdAt: -1 })
-		.lean();
-	return doc || null;
-}
-
-/* ---------- Create reservation (endpoint + DB fallback) ---------- */
-async function createReservationViaEndpointOrLocal({
+async function createReservation({
 	personaName,
 	hotel,
 	caseId,
@@ -708,11 +762,10 @@ async function createReservationViaEndpointOrLocal({
 	stay,
 	pickedRooms,
 }) {
-	const flat = flattenPickedRoomsForOrderTaker(pickedRooms);
-	const totals = computeTotalsFromFlat(flat);
-
-	let confirmation = "";
-	let payloadResponse = null;
+	const flat = flattenPickedRooms(pickedRooms);
+	const totals = computeTotals(flat);
+	if (!(totals.total_amount > 0))
+		return { ok: false, error: "Pricing total is zero or invalid." };
 
 	if (SELF_API_BASE) {
 		try {
@@ -724,7 +777,7 @@ async function createReservationViaEndpointOrLocal({
 				customerDetails: {
 					name: guest.name,
 					email: guest.email || "",
-					phone: guest.phone,
+					phone: guest.phone || "",
 					nationality: guest.nationality || "",
 					passport: "Not Provided",
 					passportExpiry: "2027-01-01",
@@ -732,9 +785,9 @@ async function createReservationViaEndpointOrLocal({
 					reservedBy: `${personaName} (aiagent)`,
 				},
 				total_rooms: flat.length,
-				total_guests: num(guest.adults, 1) + num(guest.children, 0),
-				adults: num(guest.adults, 1),
-				children: num(guest.children, 0),
+				total_guests: (guest.adults || 2) + (guest.children || 0),
+				adults: guest.adults || 2,
+				children: guest.children || 0,
 				checkin_date: stay.check_in_date,
 				checkout_date: stay.check_out_date,
 				days_of_residence: dayjs(stay.check_out_date).diff(
@@ -760,14 +813,12 @@ async function createReservationViaEndpointOrLocal({
 					finalAdvancePayment: totals.final_deposit.toFixed(2),
 				},
 			};
-
-			const url = `${SELF_API_BASE}/new-reservation-client-employee`;
 			const resp = await axios
-				.post(url, payload, { timeout: 25000 })
+				.post(`${SELF_API_BASE}/new-reservation-client-employee`, payload, {
+					timeout: 25000,
+				})
 				.then((r) => r.data);
-			payloadResponse = resp;
-
-			confirmation =
+			const conf =
 				resp?.confirmation ||
 				resp?.confirmationNumber ||
 				resp?.data?.confirmation ||
@@ -776,38 +827,19 @@ async function createReservationViaEndpointOrLocal({
 				resp?.reservation?.confirmation ||
 				resp?.data?.data?.confirmation ||
 				"";
-
-			if (!confirmation) {
-				const doc = await findLatestReservationForGuest({
-					hotelId: hotel._id,
-					phone: guest.phone,
-					check_in_date: stay.check_in_date,
-					check_out_date: stay.check_out_date,
-				});
-				confirmation = doc?.confirmation || doc?.confirmation_number || "";
+			if (conf) {
+				return {
+					ok: true,
+					confirmation: conf,
+					publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${conf}`,
+					paymentLink: resp?.paymentLink || resp?.data?.paymentLink || null,
+					payloadResponse: resp,
+				};
 			}
-
-			return {
-				ok: !!confirmation,
-				confirmation,
-				publicLink: confirmation
-					? `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`
-					: null,
-				paymentLink:
-					resp?.paymentLink ||
-					resp?.reservationLink ||
-					resp?.data?.paymentLink ||
-					resp?.data?.reservationLink ||
-					null,
-				payloadResponse: resp,
-			};
-		} catch (_) {
-			// fall back to local create
-		}
+		} catch {}
 	}
 
 	try {
-		// local create with generated confirmation
 		let conf = "";
 		for (let i = 0; i < 6; i++) {
 			const tmp = String(Math.floor(1000000000 + Math.random() * 9000000000));
@@ -821,8 +853,7 @@ async function createReservationViaEndpointOrLocal({
 			}
 		}
 		if (!conf) throw new Error("Could not generate confirmation number.");
-
-		const doc = await Reservation.create({
+		await Reservation.create({
 			hotelId: hotel._id,
 			hotel_name: hotel.hotelName || "",
 			confirmation: conf,
@@ -831,12 +862,12 @@ async function createReservationViaEndpointOrLocal({
 			customer_details: {
 				name: guest.name,
 				email: guest.email || "",
-				phone: guest.phone,
+				phone: guest.phone || "",
 				nationality: guest.nationality || "",
 			},
-			adults: num(guest.adults, 1),
-			children: num(guest.children, 0),
-			total_guests: num(guest.adults, 1) + num(guest.children, 0),
+			adults: guest.adults || 2,
+			children: guest.children || 0,
+			total_guests: (guest.adults || 2) + (guest.children || 0),
 			checkin_date: stay.check_in_date,
 			checkout_date: stay.check_out_date,
 			days_of_residence: dayjs(stay.check_out_date).diff(
@@ -851,3252 +882,919 @@ async function createReservationViaEndpointOrLocal({
 			createdBy: `${personaName} (aiagent)`,
 			sentFrom: "aiagent",
 		});
-
 		return {
 			ok: true,
 			confirmation: conf,
 			publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${conf}`,
 			paymentLink: null,
-			payloadResponse: doc,
+			payloadResponse: {},
 		};
 	} catch (e) {
 		return { ok: false, error: e?.message || "Local create failed." };
 	}
 }
 
-/* ---------- Reservation lookups & updates ---------- */
-async function findReservationByConfirmation(confirmation) {
-	const conf = String(confirmation || "").trim();
-	if (!conf) return { ok: false, error: "Confirmation number is required." };
-
-	const doc = await Reservation.findOne({
-		$or: [{ confirmation: conf }, { confirmation_number: conf }],
-	})
-		.populate("hotelId")
-		.lean();
-
-	if (!doc)
-		return { ok: false, not_found: true, error: "Reservation not found." };
-
-	return {
-		ok: true,
-		reservation: {
-			_id: doc._id,
-			confirmation: doc.confirmation || doc.confirmation_number || conf,
-			status: doc.status || doc.reservation_status || "",
-			checkin_date: doc.checkin_date,
-			checkout_date: doc.checkout_date,
-			hotelId: doc.hotelId?._id || doc.hotelId,
-			hotel_name: doc.hotelId?.hotelName || doc.hotel_name || "",
-			customer_details: doc.customer_details || doc.customerDetails || {},
-			total_amount: doc.total_amount,
-			pickedRoomsType: doc.pickedRoomsType || [],
-		},
-	};
-}
-
-async function cancelReservationByIdOrConfirmation(idOrConf) {
-	let _id = null;
-	if (isValidObjectId(idOrConf)) {
-		_id = String(idOrConf);
-	} else {
-		const found = await findReservationByConfirmation(idOrConf);
-		if (!found?.ok)
-			return { ok: false, error: found?.error || "Reservation not found." };
-		_id = String(found.reservation._id);
-	}
-	const updates = {
-		status: "cancelled",
-		reservation_status: "cancelled",
-		cancelled_by: "aiagent",
-		cancelled_at: new Date(),
-	};
-	const doc = await Reservation.findByIdAndUpdate(_id, updates, {
-		new: true,
-	}).lean();
-	if (!doc) return { ok: false, error: "Reservation not found." };
-	return { ok: true, reservation: doc };
-}
-
-async function applyReservationUpdate({
-	reservation_id,
-	confirmation_number,
-	changes,
-}) {
-	let _id = null;
-	if (reservation_id && isValidObjectId(reservation_id)) {
-		_id = String(reservation_id);
-	} else if (
-		confirmation_number ||
-		(reservation_id && !isValidObjectId(reservation_id))
-	) {
-		const conf = confirmation_number || reservation_id;
-		const found = await findReservationByConfirmation(conf);
-		if (!found?.ok)
-			return { ok: false, error: found?.error || "Reservation not found." };
-		_id = String(found.reservation._id);
-	} else {
-		return {
-			ok: false,
-			error: "reservation_id or confirmation_number is required.",
-		};
-	}
-
-	const payload = { ...changes };
-	if (payload.check_in_date) payload.checkin_date = payload.check_in_date;
-	if (payload.check_out_date) payload.checkout_date = payload.check_out_date;
-	delete payload.check_in_date;
-	delete payload.check_out_date;
-
-	if (payload.checkin_date && payload.checkout_date) {
-		const inD = dayjs(payload.checkin_date),
-			outD = dayjs(payload.checkout_date);
-		const nights = outD.diff(inD, "day");
-		if (!inD.isValid() || !outD.isValid() || nights <= 0) {
-			return {
-				ok: false,
-				error: "Invalid dates (checkout must be after check‑in).",
-			};
-		}
-		payload.days_of_residence = nights;
-	}
-
-	const updated = await Reservation.findByIdAndUpdate(_id, payload, {
-		new: true,
-	}).lean();
-	if (!updated) return { ok: false, error: "Reservation not found." };
-	return { ok: true, reservation: updated };
-}
-
-/* ---------- Repricing for changes ---------- */
-async function repriceReservation({
-	reservation,
-	hotel,
-	newStay,
-	newRoomTypeCanon,
-}) {
-	const matchRoom = buildRoomMatcher(hotel);
-	const check_in_date = newStay?.check_in_date || reservation.checkin_date;
-	const check_out_date = newStay?.check_out_date || reservation.checkout_date;
-	const nights = dayjs(check_out_date).diff(dayjs(check_in_date), "day");
-	if (nights <= 0) return { ok: false, error: "Invalid dates for repricing." };
-
-	const fallbackCommission = num(hotel.commission, 10);
-	const originalRooms = reservation.pickedRoomsType || [];
-	if (!originalRooms.length)
-		return { ok: false, error: "No room lines found to reprice." };
-
-	const nextRooms = [];
-
-	for (let idx = 0; idx < originalRooms.length; idx++) {
-		const line = originalRooms[idx];
-		const req = {
-			roomType: newRoomTypeCanon || line.room_type || line.roomType,
-			displayName: line.displayName || "",
-			count: num(line.count, 1),
-			hint: newRoomTypeCanon || line.room_type || "",
-		};
-		const matched = matchRoom(req);
-		if (!matched) {
-			return {
-				ok: false,
-				error: `Requested room type not available for repricing (line ${
-					idx + 1
-				}).`,
-			};
-		}
-
-		const comm =
-			num(matched.roomCommission, fallbackCommission) ||
-			fallbackCommission ||
-			10;
-		const nightly0 = nightlyArrayFrom(
-			matched.pricingRate || [],
-			check_in_date,
-			check_out_date,
-			num(matched?.price?.basePrice, 0),
-			num(matched.defaultCost, 0),
-			comm
-		);
-		const blocked = anyBlocked(nightly0);
-		if (blocked) {
-			const alt = nearestAvailableWindow(
-				matched,
-				check_in_date,
-				nights,
-				fallbackCommission,
-				14
-			);
-			return {
-				ok: false,
-				blocked: true,
-				alternative: alt,
-				message: "Selected dates are not available for this room type.",
-			};
-		}
-		const nightly = withCommission(nightly0);
-		const totalWith = Number(
-			(
-				nightly.reduce((a, d) => a + num(d.totalPriceWithCommission), 0) *
-				req.count
-			).toFixed(2)
-		);
-		const totalRoot = Number(
-			(nightly.reduce((a, d) => a + num(d.rootPrice), 0) * req.count).toFixed(2)
-		);
-
-		nextRooms.push({
-			room_type: matched.roomType,
-			displayName: matched.displayName,
-			count: req.count,
-			pricingByDay: nightly,
-			totalPriceWithCommission: totalWith,
-			hotelShouldGet: totalRoot,
-		});
-	}
-
-	const totals = computeTotalsFromFlat(nextRooms);
-	return {
-		ok: true,
-		next: {
-			checkin_date: check_in_date,
-			checkout_date: check_out_date,
-			days_of_residence: nights,
-			pickedRoomsType: nextRooms,
-			total_amount: totals.total_amount,
-			commission: totals.total_commission,
-		},
-	};
-}
-
-/* ---------- Conversation parsers (dates/people/etc.) ---------- */
-const ARABIC_DIGIT_MAP = {
-	"٠": "0",
-	"١": "1",
-	"٢": "2",
-	"٣": "3",
-	"٤": "4",
-	"٥": "5",
-	"٦": "6",
-	"٧": "7",
-	"٨": "8",
-	"٩": "9",
-};
-function normalizeArabicDigits(s = "") {
-	return String(s).replace(/[٠-٩]/g, (d) => ARABIC_DIGIT_MAP[d] || d);
-}
-
-// Common month tokens across EN, ES, FR, AR (Gulf + Levant variants)
-const MONTH_TOKEN_MAP = new Map([
-	// 1
-	["january", 1],
-	["ene", 1],
-	["enero", 1],
-	["janvier", 1],
-	["يناير", 1],
-	["كانون الثاني", 1],
-	// 2
-	["february", 2],
-	["febrero", 2],
-	["février", 2],
-	["fevrier", 2],
-	["فبراير", 2],
-	["شباط", 2],
-	// 3
-	["march", 3],
-	["marzo", 3],
-	["mars", 3],
-	["مارس", 3],
-	["آذار", 3],
-	// 4
-	["april", 4],
-	["abril", 4],
-	["avril", 4],
-	["أبريل", 4],
-	["ابريل", 4],
-	["نيسان", 4],
-	// 5
-	["may", 5],
-	["mayo", 5],
-	["mai", 5],
-	["مايو", 5],
-	["أيار", 5],
-	// 6
-	["june", 6],
-	["junio", 6],
-	["juin", 6],
-	["يونيو", 6],
-	["حزيران", 6],
-	// 7
-	["july", 7],
-	["julio", 7],
-	["juillet", 7],
-	["يوليو", 7],
-	["تموز", 7],
-	// 8
-	["august", 8],
-	["agosto", 8],
-	["août", 8],
-	["aout", 8],
-	["أغسطس", 8],
-	["اغسطس", 8],
-	["آب", 8],
-	// 9
-	["september", 9],
-	["septiembre", 9],
-	["setiembre", 9],
-	["septembre", 9],
-	["سبتمبر", 9],
-	["أيلول", 9],
-	// 10
-	["october", 10],
-	["octubre", 10],
-	["octobre", 10],
-	["أكتوبر", 10],
-	["اكتوبر", 10],
-	["تشرين الأول", 10],
-	// 11
-	["november", 11],
-	["noviembre", 11],
-	["novembre", 11],
-	["نوفمبر", 11],
-	["تشرين الثاني", 11],
-	// 12
-	["december", 12],
-	["diciembre", 12],
-	["décembre", 12],
-	["decembre", 12],
-	["ديسمبر", 12],
-	["كانون الأول", 12],
-]);
-
-function monthWordToNumber(word = "") {
-	const w = lower(word.normalize("NFKC"));
-	if (MONTH_TOKEN_MAP.has(w)) return MONTH_TOKEN_MAP.get(w);
-	// try stripping accents
-	const deAcc = w.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-	if (MONTH_TOKEN_MAP.has(deAcc)) return MONTH_TOKEN_MAP.get(deAcc);
-	return null;
-}
-
-// Simple language‑agnostic helpers
-function isLatin(s = "") {
-	return /^[A-Za-z\s'-]+$/.test(s.trim());
-}
-function hasVowel(s = "") {
-	return /[aeiouy]/i.test(s);
-}
-function looksLikeGibberishLatin(s = "") {
-	const t = s.trim();
-	if (!isLatin(t)) return false;
-	if (t.length >= 5 && !hasVowel(t)) return true; // no vowels at all
-	if (/^([A-Za-z]{1,2})\1{2,}$/.test(t)) return true; // e.g., AA AAAAA, ABABABAB
-	return false;
-}
-
-// v3.7 — Nationality validation (common demonyms + heuristics)
-const KNOWN_NATIONALITIES = new Set([
-	// English (selected)
-	"saudi",
-	"saudi arabian",
-	"egyptian",
-	"pakistani",
-	"indian",
-	"bangladeshi",
-	"sudanese",
-	"jordanian",
-	"syrian",
-	"lebanese",
-	"palestinian",
-	"yemeni",
-	"moroccan",
-	"algerian",
-	"tunisian",
-	"libyan",
-	"emirati",
-	"qatari",
-	"bahraini",
-	"omani",
-	"iraqi",
-	"turkish",
-	"indonesian",
-	"malaysian",
-	"nigerian",
-	"somali",
-	"ethiopian",
-	"eritrean",
-	"kenyan",
-	"tanzanian",
-	"american",
-	"british",
-	"canadian",
-	"german",
-	"french",
-	"spanish",
-	"italian",
-	"russian",
-	"chinese",
-	"japanese",
-	"korean",
-	// Arabic common forms
-	"سعودي",
-	"سعودية",
-	"مصري",
-	"مصرية",
-	"باكستاني",
-	"هندي",
-	"بنغالي",
-	"سوداني",
-	"أردني",
-	"سوري",
-	"لبناني",
-	"فلسطيني",
-	"يمني",
-	"مغربي",
-	"جزائري",
-	"تونسي",
-	"ليبي",
-	"إماراتي",
-	"قطري",
-	"بحريني",
-	"عُماني",
-	"عراقي",
-	"تركي",
-	"اندونيسي",
-	"ماليزيا",
-	"نيجيري",
-	"صومالي",
-	"أثيوبي",
-	"إثيوبي",
-	"إرتيري",
-	"كيني",
-	"تنزاني",
-	"أمريكي",
-	"بريطاني",
-	"كندي",
-	"ألماني",
-	"فرنسي",
-	"إسباني",
-	"إيطالي",
-	"روسي",
-	"صيني",
-	"ياباني",
-	"كوري",
-	// Spanish/French a few
-	"saudí",
-	"egipcio",
-	"paquistaní",
-	"indio",
-	"bangladesí",
-	"sudanés",
-	"jordano",
-	"sirio",
-	"libanés",
-	"palestino",
-	"yemení",
-	"marroquí",
-	"argelino",
-	"tunecino",
-	"libio",
-	"emiratí",
-	"qatarí",
-	"bareiní",
-	"omaní",
-	"iraquí",
-	"turco",
-	"indonesio",
-	"malasio",
-	"nigeriano",
-	"somalí",
-	"etíope",
-	"eritreo",
-	"keniano",
-	"tanzano",
-	"estadounidense",
-	"británico",
-	"canadiense",
-	"alemán",
-	"francés",
-	"español",
-	"italiano",
-	"ruso",
-	"chino",
-	"japonés",
-	"coreano",
-	"saoudien",
-	"égyptien",
-	"pakistanais",
-	"indien",
-	"bangladais",
-	"soudanais",
-	"jordanien",
-	"syrien",
-	"libanais",
-	"palestinien",
-	"yéménite",
-	"marocain",
-	"algérien",
-	"tunisien",
-	"libyen",
-	"émirati",
-	"qatari",
-	"bahreïni",
-	"omanais",
-	"irakien",
-	"turc",
-	"indonésien",
-	"malaisien",
-	"nigérian",
-	"somalien",
-	"éthiopien",
-	"érythréen",
-	"kenyan",
-	"tanzanien",
-	"américain",
-	"britannique",
-	"canadien",
-	"allemand",
-	"français",
-	"espagnol",
-	"italien",
-	"russe",
-	"chinois",
-	"japonais",
-	"coréen",
-]);
-
-function validateNationality(raw = "") {
-	if (!raw) return false;
-	const s = raw.trim();
-	if (s.length < 3 || /\d/.test(s)) return false;
-	// known list first (case/diacritics tolerant)
-	const keyA = s.toLowerCase().normalize("NFKC");
-	const keyB = keyA.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-	if (KNOWN_NATIONALITIES.has(keyA) || KNOWN_NATIONALITIES.has(keyB))
-		return true;
-	// heuristics for Latin script
-	if (isLatin(s)) {
-		if (looksLikeGibberishLatin(s)) return false;
-		// allow two-word forms e.g., "Saudi Arabian"
-		if (!hasVowel(s)) return false;
-		return true;
-	}
-	// Arabic (basic sanity): letters only, not random pattern
-	if (/^[\u0600-\u06FF\s]+$/.test(s)) return s.length <= 20;
-	// otherwise accept cautiously
-	return s.length <= 20;
-}
-
-// v3.7 — Detect ambiguous date fragments (days only, Arabic “من … إلى …” etc.)
-function findAmbiguousDateFragments(text = "") {
-	const src = normalizeArabicDigits(String(text));
-	const t = lower(src).replace(/[،,]/g, " ").replace(/\s+/g, " ").trim();
-	// day range without any month words or yyyy-mm-dd
-	const hasMonthWord = [...MONTH_TOKEN_MAP.keys()].some((k) => t.includes(k));
-	const hasISO = /\b\d{4}-\d{2}-\d{2}\b/.test(t);
-	const dayRange = t.match(
-		/\b(?:من\s+)?(\d{1,2})\s*(?:إلى|الى|to|-|–|—)\s*(\d{1,2})\b/u
-	);
-	if (dayRange && !hasMonthWord && !hasISO) {
-		return {
-			ambiguous: true,
-			kind: "days_only_range",
-			d1: Number(dayRange[1]),
-			d2: Number(dayRange[2]),
-		};
-	}
-	return { ambiguous: false };
-}
-
-// v3.7 — Validate stay sanity (past check‑in; checkout after check‑in)
-function validateStayDates(stay) {
+/* ---------- Stay validation ---------- */
+function validateStay(stay) {
 	if (!stay?.check_in_date || !stay?.check_out_date) return { ok: false };
 	const ci = dayjs(stay.check_in_date).startOf("day");
 	const co = dayjs(stay.check_out_date).startOf("day");
 	if (!ci.isValid() || !co.isValid()) return { ok: false };
-	if (!co.isAfter(ci, "day")) return { ok: false, reason: "co_not_after_ci" };
+	if (!co.isAfter(ci, "day")) return { ok: false };
 	const today = dayjs().startOf("day");
-	if (ci.isBefore(today)) return { ok: false, reason: "ci_in_past" };
+	if (ci.isBefore(today)) return { ok: false };
 	return { ok: true };
 }
 
-// v3.7 — Build a single, polite clarification message (AR/EN/ES/FR/UR/HI)
-function buildClarificationMessage({ lang, issues = [], missing = [] }) {
-	const L = (k) => {
-		const map = {
-			ar: {
-				lead: "وصلتني التفاصيل، لكن أحتاج توضيحًا بسيطًا قبل إكمال الحجز:",
-				dateAmb:
-					"• التواريخ: ذكرت أيامًا بدون شهر/سنة—من فضلك أكد الشهر والسنة (مثال: 2025-09-16 → 2025-09-19).",
-				datePast:
-					"• التواريخ: تاريخ الوصول يقع في الماضي—هل تقصد تواريخ لاحقة؟",
-				natBad:
-					"• الجنسية: القيمة تبدو غير صحيحة—يرجى كتابة جنسية صالحة (مثال: مصري، سعودي، باكستاني…).",
-				phoneAsk: "• رقم التواصل: شاركني رقم هاتف/واتساب لتأكيد الحجز بسرعة.",
-				close:
-					"يمكنك إرسال المطلوب في رسالة واحدة أو متتابعة، وأنا سأكمل لك فورًا.",
-			},
-			en: {
-				lead: "Got it—just need a quick clarification before I proceed:",
-				dateAmb:
-					"• Dates: I see days without month/year—please confirm month & year (e.g., 2025‑09‑16 → 2025‑09‑19).",
-				datePast:
-					"• Dates: Check‑in appears in the past—did you mean future dates?",
-				natBad:
-					"• Nationality: That value doesn’t look valid—please share a valid nationality (e.g., Saudi, Egyptian, Pakistani…).",
-				phoneAsk:
-					"• Contact: Please share a phone/WhatsApp number to finalize the booking.",
-				close:
-					"You can send these in one message or one by one, I’ll fill them in as we go.",
-			},
-			es: {
-				lead: "Perfecto—solo necesito una aclaración antes de continuar:",
-				dateAmb:
-					"• Fechas: veo días sin mes/año—confirma el mes y el año (p.ej., 2025‑09‑16 → 2025‑09‑19).",
-				datePast:
-					"• Fechas: la llegada parece en el pasado—¿te refieres a fechas futuras?",
-				natBad:
-					"• Nacionalidad: parece inválida—comparte una nacionalidad válida (p.ej., saudí, egipcia, pakistaní…).",
-				phoneAsk: "• Contacto: envíame un teléfono/WhatsApp para finalizar.",
-				close:
-					"Puedes enviarlo en un solo mensaje o por partes; lo iré completando.",
-			},
-			fr: {
-				lead: "Très bien—j’ai juste besoin d’une petite précision avant de procéder :",
-				dateAmb:
-					"• Dates : je vois des jours sans mois/année—merci de confirmer le mois et l’année (ex. 2025‑09‑16 → 2025‑09‑19).",
-				datePast:
-					"• Dates : l’arrivée semble passée—vouliez‑vous des dates futures ?",
-				natBad:
-					"• Nationalité : cela ne semble pas valide—merci d’indiquer une nationalité valide (ex. Saoudien, Égyptien, Pakistanais…).",
-				phoneAsk:
-					"• Contact : merci de partager un numéro de téléphone/WhatsApp pour finaliser.",
-				close:
-					"Vous pouvez envoyer ces éléments en un seul message ou séparément ; je complète au fur et à mesure.",
-			},
-			ur: {
-				lead: "ٹھیک ہے—بس ایک مختصر وضاحت درکار ہے:",
-				dateAmb:
-					"• تاریخیں: دن تو ہیں مگر ماہ/سال نہیں—براہِ کرم ماہ اور سال کی تصدیق کریں (مثال: 2025‑09‑16 → 2025‑09‑19).",
-				datePast:
-					"• تاریخیں: چیک‑ان ماضی میں دکھ رہا ہے—کیا آپ مستقبل کی تاریخیں مراد لے رہے تھے؟",
-				natBad:
-					"• قومیت: یہ درست معلوم نہیں ہوتی—براہِ کرم درست قومیت بتائیں (مثال: سعودی، مصری، پاکستانی…).",
-				phoneAsk:
-					"• رابطہ: بکنگ فائنل کرنے کے لیے فون/واٹس ایپ نمبر شیئر کریں۔",
-				close:
-					"آپ ایک ہی پیغام یا الگ الگ بھیج سکتے ہیں؛ میں فوراً مکمل کر دوں گا/گی۔",
-			},
-			hi: {
-				lead: "ठीक है—आगे बढ़ने से पहले एक छोटा‑सा स्पष्टीकरण चाहिए:",
-				dateAmb:
-					"• तिथियाँ: केवल दिन दिख रहे हैं—कृपया महीना और वर्ष बताएं (जैसे 2025‑09‑16 → 2025‑09‑19).",
-				datePast:
-					"• तिथियाँ: चेक‑इन पिछली तारीख लग रही है—क्या आप भविष्य की तिथियाँ मतलब थे?",
-				natBad:
-					"• राष्ट्रीयता: मान्य नहीं लगती—कृपया सही राष्ट्रीयता बताएँ (जैसे Saudi, Egyptian, Pakistani…).",
-				phoneAsk: "• संपर्क: बुकिंग फाइनल करने के लिए फ़ोन/WhatsApp नंबर दें।",
-				close: "आप इन्हें एक साथ या अलग‑अलग भेज सकते हैं; मैं भर दूँगा/दूँगी।",
-			},
-		}[["ar", "es", "fr", "ur", "hi"].includes(lang) ? lang : "en"];
-		return map[k];
-	};
-	const lines = [L("lead")];
-	for (const it of issues) {
-		if (it === "date_ambiguous") lines.push(L("dateAmb"));
-		if (it === "date_in_past") lines.push(L("datePast"));
-		if (it === "nationality_bad") lines.push(L("natBad"));
-		if (it === "phone_needed") lines.push(L("phoneAsk"));
-	}
-	// If no phone issue listed but phone is missing in the "missing" list, gently nudge
-	if (!issues.includes("phone_needed") && (missing || []).includes("phone")) {
-		lines.push(L("phoneAsk"));
-	}
-	lines.push(L("close"));
-	return lines.join("\n");
-}
-
-// v3.7 — Aggregate current issues from message + current plan/state
-function collectInputIssues({ latestText = "", plan, state }) {
-	const issues = [];
-
-	// --- HARD STOP once a booking (or update) succeeded ---
-	// If we've already booked (or we hold a confirmation), do not raise any pre-booking clarifications.
-	if (
-		state?.booked ||
-		(state?.lastConfirmation && String(state.lastConfirmation).length >= 6)
-	) {
-		return issues; // []
-	}
-
-	// Ambiguous “days only” fragments (“من ١٢ إلى ١٥”, “12–15”, etc.)
-	const amb = findAmbiguousDateFragments(latestText);
-	if (amb.ambiguous) issues.push("date_ambiguous");
-
-	// Past check‑in? (only relevant pre‑booking)
-	if (plan?.stay?.check_in_date && plan?.stay?.check_out_date) {
-		const ok = validateStayDates(plan.stay);
-		if (!ok.ok && ok.reason === "ci_in_past") {
-			// Be lenient if the check‑in is TODAY (TZ or “just changed” texts)
-			const ci = dayjs(plan.stay.check_in_date).startOf("day");
-			const today = dayjs().startOf("day");
-			if (ci.isBefore(today)) issues.push("date_in_past");
-		}
-	}
-
-	// Nationality sanity (only pre‑booking)
-	const natInMsg = parseNationality(latestText);
-	const natState = state?.collected?.nationality || "";
-	if (natInMsg && !validateNationality(natInMsg)) {
-		issues.push("nationality_bad");
-	} else if (natState && !validateNationality(natState)) {
-		issues.push("nationality_bad");
-	}
-
-	// Phone plausibility (only pre‑booking)
-	const phoneInMsg = parsePhone(latestText);
-	if (phoneInMsg && !isLikelyPhone(phoneInMsg)) {
-		issues.push("phone_needed");
-	}
-
-	return issues;
-}
-
-const MONTHS = [
-	"january",
-	"february",
-	"march",
-	"april",
-	"may",
-	"june",
-	"july",
-	"august",
-	"september",
-	"october",
-	"november",
-	"december",
-];
-
-function parseDateTokens(
-	text = "",
-	fallbackStartISO = null,
-	fallbackEndISO = null
-) {
-	const raw = normalizeArabicDigits(String(text || ""));
-	const t0 = lower(raw).replace(/[،,]/g, " ").replace(/\s+/g, " ").trim();
-
-	// ISO range: 2025-09-16 to 2025-09-19
-	const iso = t0.match(
-		/(\d{4}-\d{2}-\d{2})\s*(?:to|الى|إلى|-|–|—)\s*(\d{4}-\d{2}-\d{2})/
+/* ---------- Identity helpers ---------- */
+function isAssistantLike(m) {
+	const n = lower(m?.messageBy?.customerName || "");
+	const e = lower(m?.messageBy?.customerEmail || "");
+	return (
+		e === "management@xhotelpro.com" ||
+		n.includes("support") ||
+		n.includes("agent")
 	);
-	if (iso) return { check_in_date: iso[1], check_out_date: iso[2] };
-
-	// Single ISO + nights
-	const singleIso = t0.match(/\b(\d{4}-\d{2}-\d{2})\b/);
-	if (singleIso) {
-		const ci = dayjs(singleIso[1]);
-		const nights = parseInt(
-			(t0.match(/\b(\d+)\s*nights?\b/) || [])[1] || "1",
-			10
-		);
-		const co = ci.add(Math.max(1, nights), "day");
-		return {
-			check_in_date: ci.format("YYYY-MM-DD"),
-			check_out_date: co.format("YYYY-MM-DD"),
-		};
-	}
-
-	// Intl month range (e.g., 16 سبتمبر إلى 19 سبتمبر 2025) OR mixed months
-	// Pattern: D <month> [YYYY]? (to|الى|إلى|-) D [<month2>]? [YYYY]?
-	const reIntl =
-		/(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?\s*(?:to|الى|إلى|-|–|—)\s*(\d{1,2})\s*([^\s\d]+)?\s*(\d{4})?/u;
-	const mIntl = t0.match(reIntl);
-	if (mIntl) {
-		const d1 = parseInt(mIntl[1], 10);
-		const mo1 = monthWordToNumber(mIntl[2]);
-		const y1 = mIntl[3] ? parseInt(mIntl[3], 10) : new Date().getFullYear();
-		const d2 = parseInt(mIntl[4], 10);
-		const mo2 = mIntl[5] ? monthWordToNumber(mIntl[5]) : mo1;
-		const y2 = mIntl[6] ? parseInt(mIntl[6], 10) : y1;
-		if (mo1 && mo2) {
-			const ci = dayjs(
-				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
-			);
-			let co = dayjs(
-				`${y2}-${String(mo2).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
-			);
-			if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
-			return {
-				check_in_date: ci.format("YYYY-MM-DD"),
-				check_out_date: co.format("YYYY-MM-DD"),
-			};
-		}
-	}
-
-	// Intl single month + implicit range: "16 سبتمبر الى 19"
-	const reIntl2 =
-		/(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?\s*(?:to|الى|إلى|-|–|—)\s*(\d{1,2})/u;
-	const m2 = t0.match(reIntl2);
-	if (m2) {
-		const d1 = parseInt(m2[1], 10);
-		const mo1 = monthWordToNumber(m2[2]);
-		const y1 = m2[3] ? parseInt(m2[3], 10) : new Date().getFullYear();
-		const d2 = parseInt(m2[4], 10);
-		if (mo1) {
-			const ci = dayjs(
-				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
-			);
-			let co = dayjs(
-				`${y1}-${String(mo1).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
-			);
-			if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
-			return {
-				check_in_date: ci.format("YYYY-MM-DD"),
-				check_out_date: co.format("YYYY-MM-DD"),
-			};
-		}
-	}
-
-	// Plain month with one day => 1 night default
-	const reSingle = /(\d{1,2})\s*([^\s\d]+)\s*(\d{4})?/u;
-	const mSingle = t0.match(reSingle);
-	if (mSingle) {
-		const d1 = parseInt(mSingle[1], 10);
-		const mo1 = monthWordToNumber(mSingle[2]);
-		const y1 = mSingle[3] ? parseInt(mSingle[3], 10) : new Date().getFullYear();
-		if (mo1) {
-			const ci = dayjs(
-				`${y1}-${String(mo1).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
-			);
-			const co = ci.add(1, "day");
-			return {
-				check_in_date: ci.format("YYYY-MM-DD"),
-				check_out_date: co.format("YYYY-MM-DD"),
-			};
-		}
-	}
-
-	// Day-only range with fallback month/year
-	const pureDays = t0.match(
-		/\b(\d{1,2})\b\s*(?:to|الى|إلى|-|–|—)\s*\b(\d{1,2})\b/u
-	);
-	if (pureDays && (fallbackStartISO || fallbackEndISO)) {
-		const base = dayjs(fallbackStartISO || fallbackEndISO);
-		const y = base.isValid() ? base.year() : new Date().getFullYear();
-		const m = base.isValid() ? base.month() + 1 : new Date().getMonth() + 1;
-		const d1 = parseInt(pureDays[1], 10);
-		const d2 = parseInt(pureDays[2], 10);
-		const ci = dayjs(
-			`${y}-${String(m).padStart(2, "0")}-${String(d1).padStart(2, "0")}`
-		);
-		let co = dayjs(
-			`${y}-${String(m).padStart(2, "0")}-${String(d2).padStart(2, "0")}`
-		);
-		if (!co.isAfter(ci, "day")) co = ci.add(1, "day");
-		return {
-			check_in_date: ci.format("YYYY-MM-DD"),
-			check_out_date: co.format("YYYY-MM-DD"),
-		};
-	}
-
-	return null;
 }
-
-function parseAdultsChildren(text = "") {
-	const t = String(text || "");
-	const out = {};
-	const mA =
-		t.match(/adult[s]?\s*[:\-]?\s*(\d+)/i) || t.match(/(\d+)\s*adult[s]?/i);
-	if (mA) out.adults = Number(mA[1]);
-	const mC =
-		t.match(/child(?:ren)?\s*[:\-]?\s*(\d+)/i) ||
-		t.match(/(\d+)\s*child(?:ren)?/i) ||
-		t.match(/(\d+)\s*kid[s]?/i);
-	if (mC) out.children = Number(mC[1]);
-	if (
-		/\b(no|without|none|zero|0)\s+(children|child|kids)\b/i.test(t) ||
-		/\b(children|kids)\s*[:\-]?\s*(none|no|zero|0)\b/i.test(t)
-	) {
-		out.children = 0;
-	}
-	return out;
-}
-function parseRoomsCount(text = "") {
-	const t = String(text || "");
-	const m =
-		t.match(/(\d+)\s*room[s]?\b/i) ||
-		t.match(/(\d+)\s*rm\b/i) ||
-		t.match(/(\d+)\s*habitaci(?:o|ó)n(?:es)?\b/iu) ||
-		t.match(/(\d+)\s*chambre[s]?\b/i);
-	return m ? Number(m[1]) : null;
-}
-function parsePhone(text = "") {
-	const t = String(text || "");
-	const m =
-		t.match(
-			/(?:phone|number|call|whatsapp|contact)[:\s\-]*([+()\d\s\-]{7,})/i
-		) || t.match(/\b(\+?\d[\d\s\-()]{6,})\b/);
-	if (!m) return null;
-	const digits = onlyDigits(m[1]);
-	return digits.length >= 7 ? m[1].trim() : null;
-}
-function parseEmail(text = "") {
-	const m = String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-	return m ? m[0] : null;
-}
-function parseName(text = "") {
-	const t = String(text || "");
-	const m = t.match(
-		/(my\s+name\s+is|name\s*[:\-])\s*([a-z][a-z.'\-\s]{2,60})/i
-	);
-	if (m) return m[2].trim().replace(/\s+/g, " ");
-	return null;
-}
-function parseNationality(text = "") {
-	const t = String(text || "").trim();
-	const m = t.match(
-		/nationality\s*(?:is|:)?\s*([A-Za-z\u0600-\u06FF\s]{2,40})/i
-	);
-	if (m) return m[1].trim();
-	if (
-		/^[A-Za-z\u0600-\u06FF]{3,40}$/.test(t) &&
-		!/\s/.test(t) &&
-		t.length <= 20
-	)
-		return t;
-	return null;
-}
-function parseRoomPreference(text = "") {
-	const t = lower(text);
-	if (/(triple|ثلاث)/.test(t)) return "tripleRooms";
-	if (/(twin|توين)/.test(t)) return "twinRooms";
-	if (/(double|دبل|مزدوج)/.test(t)) return "doubleRooms";
-	if (/(single|سنجل|فرد)/.test(t)) return "singleRooms";
-	if (/(suite|سويت|جناح)/.test(t)) return "suiteRooms";
-	if (/(family|عائلي)/.test(t)) return "familyRooms";
-	if (/(king|كينج)/.test(t)) return "kingRooms";
-	if (/(queen|كوين)/.test(t)) return "queenRooms";
-	return null;
-}
-
-/* ---------- Language & identity ---------- */
-function knownIdentityFromCase(caseDoc) {
+function knownIdentity(caseDoc) {
 	const convo = Array.isArray(caseDoc?.conversation)
 		? caseDoc.conversation
 		: [];
-	const guestFirstMsg =
-		convo.find(
-			(m) =>
-				!isAssistantLike(
-					m?.messageBy?.customerName,
-					m?.messageBy?.customerEmail
-				)
-		) || {};
-	const by = guestFirstMsg.messageBy || {};
-	let name =
-		caseDoc.customerName ||
-		caseDoc.displayName1 ||
-		caseDoc.displayName2 ||
-		by.customerName ||
-		"";
-	let email = "",
-		phone = "";
-	const formField = by.customerEmail || "";
-	if (formField && isLikelyPhone(formField)) phone = formField;
-	else if (formField) email = formField;
-	if (!email && caseDoc.customerEmail && !isLikelyPhone(caseDoc.customerEmail))
-		email = caseDoc.customerEmail;
-	if (!phone && caseDoc.customerEmail && isLikelyPhone(caseDoc.customerEmail))
-		phone = caseDoc.customerEmail;
+	const firstUser = convo.find((m) => !isAssistantLike(m)) || {};
+	const by = firstUser.messageBy || {};
+	const name =
+		caseDoc.customerName || caseDoc.displayName1 || by.customerName || "";
+	const email =
+		!by.customerEmail || isLikelyPhone(by.customerEmail)
+			? ""
+			: by.customerEmail || "";
+	const phone = isLikelyPhone(by.customerEmail) ? by.customerEmail : "";
 	return { name, email, phone };
 }
-
-function buildLearningSections(training) {
-	const learn = training?.bullets
-		? `\nLearning Signals:\n- Decisions: ${training.bullets.decisions.join(
-				" | "
-		  )}\n- Recommendations: ${training.bullets.recommendations.join(" | ")}`
-		: "";
-	const behavior = `
-- Use a 5–7s warm‑up to preload context before the first reply; then send two messages (greeting + case‑aware follow‑up).
-- For reservation with confirmation in inquiryDetails: summarize reservation immediately; ask “How can I help with this reservation?”.
-- For reserve_room: ask for dates + preferred room type immediately.
-- Ask only for missing info; accept details one by one (do NOT force single-line).
-- If you ask to confirm a cancel/booking/update and the guest says “yes/ok/تمام/sí/oui/proceed/go ahead/confirm” ⇒ proceed (**single confirmation**).
-- Prefer “pay at hotel”. After create/update/cancel: confirm + link; then “Anything else I can help you with?”`;
-	return learn + behavior;
-}
-function buildInquirySystemHint(caseDoc) {
-	const { about, confirmation } = extractInquiryDataFromCase(caseDoc);
-	let hint = "";
-	if (confirmation)
-		hint += `\n- Inquiry references confirmation: ${confirmation}. Look it up immediately and include a short summary (room • dates • total • status).`;
-	if (about)
-		hint += `\n- Case inquiryAbout: ${about}. Tailor the first turn to this.`;
-	return hint;
-}
-
-/* ---------- State ---------- */
-const typingTimers = new Map();
-const userTyping = new Map();
-const greetedCases = new Set();
-const personaByCase = new Map();
-const replyLock = new Set();
-const debounceMap = new Map();
-const waitFollowupTimers = new Map();
-const idleTimers = new Map();
-const closeTimers = new Map();
-
-const caseState = new Map();
-// { lang, personaName,
-//   collected: { name,email,phone,nationality,adults,children,roomsCount,roomTypeHint },
-//   intendedStay, lastPricing, booked, lastConfirmation, publicLink, paymentLink,
-//   askedMissingAt, lastMissingKey, missingAskCount, intentProceed, pendingAction, reservationCache }
-
-function getState(caseId) {
+function ensureState(caseId) {
 	const s = caseState.get(caseId) || {
-		collected: {},
-		booked: false,
-		intentProceed: false,
-		pendingAction: null,
-		missingAskCount: 0,
+		lang: "en",
+		personaName: pickPersona("en"),
+		greeted: false,
+		hotelId: null,
+		hotelDoc: null,
+		flow: null,
+		step: null,
+		slots: {
+			room_canon: "",
+			ci: "",
+			co: "",
+			nightly: [],
+			total: 0,
+			name: "",
+			phone: "",
+			nationality_en: "",
+			confirmation: "",
+		},
+		waitingConfirm: false,
+		lastPromptKey: null,
+		lastPromptAt: 0,
 		lastLinkSentFor: null,
-		// v3.7
-		lastClarifyKey: null,
-		askedClarifyAt: 0,
 	};
 	caseState.set(caseId, s);
 	return s;
 }
 
-/* ---------- Typing UX ---------- */
-function startTyping(io, caseId, name) {
-	const t1 = setTimeout(
-		() => io.to(caseId).emit("typing", { caseId, name, isAi: true }),
-		TYPING_START_AFTER
-	);
-	const intv = setInterval(
-		() => io.to(caseId).emit("typing", { caseId, name, isAi: true }),
-		TYPING_HEARTBEAT_MS
-	);
-	typingTimers.set(caseId, { t1, intv, name });
-}
-function stopTyping(io, caseId, name) {
-	const t = typingTimers.get(caseId);
-	if (t) {
-		clearTimeout(t.t1);
-		clearInterval(t.intv);
-		typingTimers.delete(caseId);
-	}
-	io.to(caseId).emit("stopTyping", { caseId, name, isAi: true });
-}
-function setGuestTyping(caseId, isTyping) {
-	const prev = userTyping.get(caseId) || {
-		isTyping: false,
-		lastTypingAt: 0,
-		lastStopAt: 0,
-	};
-	const now = Date.now();
-	userTyping.set(caseId, {
-		isTyping: !!isTyping,
-		lastTypingAt: isTyping ? now : prev.lastTypingAt,
-		lastStopAt: isTyping ? prev.lastStopAt : now,
+/* ---------- Greeting ---------- */
+async function greetIfNeeded(io, caseDoc, st) {
+	if (st.greeted) return;
+	st.greeted = true;
+	const hotel = caseDoc.hotelId?.hotelName || "our hotel";
+	const first = (knownIdentity(caseDoc).name || "").split(/\s+/)[0] || "";
+	await send(io, {
+		caseId: caseDoc._id,
+		text: L.greet(st.lang, hotel, st.personaName, first),
+		personaName: st.personaName,
+		lang: st.lang,
 	});
 }
-function shouldWaitForGuest(caseId) {
-	const st = userTyping.get(caseId);
-	if (!st) return false;
-	if (st.isTyping) return true;
-	return Date.now() - (st.lastStopAt || 0) < WAIT_WHILE_TYPING_MS;
-}
-const greeted = (id) => greetedCases.has(String(id));
-const markGreeted = (id) => greetedCases.add(String(id));
 
-/* ---------- Persona ---------- */
-async function ensurePersona(caseId, langCode) {
-	const cached = personaByCase.get(caseId);
-	if (cached) return cached;
-	const lang = normalizeLang(langCode || "en");
-	const name = pickPersona(lang);
-	const persona = { name, lang };
-	personaByCase.set(caseId, persona);
-	try {
-		await SupportCase.findByIdAndUpdate(
-			caseId,
-			{ supporterName: name },
-			{ new: false }
-		);
-	} catch (_) {}
-	return persona;
-}
-
-/* ---------- Tools (unchanged surface) ---------- */
-const TOOLS = [
-	{
-		type: "function",
-		function: {
-			name: "lookup_hotel_pricing",
-			description:
-				"Check availability & compute nightly pricing. Handles synonyms and nearest alternative windows.",
-			parameters: {
-				type: "object",
-				properties: {
-					hotelIdOrName: { type: "string" },
-					check_in_date: { type: "string" },
-					check_out_date: { type: "string" },
-					rooms: {
-						type: "array",
-						items: {
-							type: "object",
-							properties: {
-								roomType: { type: "string" },
-								displayName: { type: "string" },
-								count: { type: "integer", minimum: 1, default: 1 },
-								hint: { type: "string" },
-							},
-							required: ["roomType"],
-						},
-					},
-				},
-				required: ["check_in_date", "check_out_date", "rooms"],
-			},
-		},
-	},
-	{
-		type: "function",
-		function: {
-			name: "create_reservation_and_send_payment_link",
-			description:
-				"Create a reservation. Returns confirmation + public link + optional payment link.",
-			parameters: {
-				type: "object",
-				properties: {
-					hotelId: { type: "string" },
-					caseId: { type: "string" },
-					guest: {
-						type: "object",
-						properties: {
-							name: { type: "string" },
-							email: { type: "string" },
-							phone: { type: "string" },
-							nationality: { type: "string" },
-							adults: { type: "integer" },
-							children: { type: "integer" },
-						},
-						required: ["name", "phone", "adults", "children"],
-					},
-					stay: {
-						type: "object",
-						properties: {
-							check_in_date: { type: "string" },
-							check_out_date: { type: "string" },
-						},
-						required: ["check_in_date", "check_out_date"],
-					},
-					pickedRooms: {
-						type: "array",
-						items: {
-							type: "object",
-							properties: {
-								room_type: { type: "string" },
-								displayName: { type: "string" },
-								count: { type: "integer" },
-								pricingByDay: {
-									type: "array",
-									items: {
-										type: "object",
-										properties: {
-											date: { type: "string" },
-											price: { type: "number" },
-											rootPrice: { type: "number" },
-											commissionRate: { type: "number" },
-											totalPriceWithCommission: { type: "number" },
-											totalPriceWithoutCommission: { type: "number" },
-										},
-									},
-								},
-							},
-							required: ["room_type", "displayName", "count", "pricingByDay"],
-						},
-					},
-				},
-				required: ["guest", "stay", "pickedRooms"],
-			},
-		},
-	},
-	{
-		type: "function",
-		function: {
-			name: "find_reservation_by_confirmation",
-			description: "Find a reservation by confirmation number.",
-			parameters: {
-				type: "object",
-				properties: { confirmation_number: { type: "string" } },
-				required: ["confirmation_number"],
-			},
-		},
-	},
-	{
-		type: "function",
-		function: {
-			name: "update_reservation_fields",
-			description:
-				"Update reservation fields by _id or confirmation number (date change, cancel).",
-			parameters: {
-				type: "object",
-				properties: {
-					reservation_id: { type: "string" },
-					confirmation_number: { type: "string" },
-					check_in_date: { type: "string" },
-					check_out_date: { type: "string" },
-					status: { type: "string" },
-					note: { type: "string" },
-				},
-			},
-		},
-	},
-];
-
-async function execTool(name, args, ctx) {
-	if (name === "lookup_hotel_pricing") {
-		const hotelIdOrName =
-			args.hotelIdOrName ||
-			ctx?.hotel?._id?.toString?.() ||
-			ctx?.hotel?.hotelName ||
-			"";
-		const out = await lookupHotelAndPrice({
-			hotelIdOrName,
-			checkIn: args.check_in_date,
-			checkOut: args.check_out_date,
-			rooms: args.rooms || [],
-		});
-		const st = getState(ctx.caseId);
-		st.lastPricing = out;
-		st.intendedStay = {
-			check_in_date: args.check_in_date,
-			check_out_date: args.check_out_date,
-		};
-		st.intendedRooms = args.rooms || [];
-		return JSON.stringify(out);
-	}
-	if (name === "create_reservation_and_send_payment_link") {
-		if (!ctx?.confirmedProceed) {
-			return JSON.stringify({
-				ok: false,
-				need_confirmation: true,
-				error: "Explicit confirmation to proceed is required.",
-			});
-		}
-		let hotel = ctx?.hotel || null;
-		if (!hotel && args.hotelId && isValidObjectId(String(args.hotelId)))
-			hotel = await HotelDetails.findById(args.hotelId).lean();
-		const personaName = ctx?.persona?.name || "Agent";
-		const result = await createReservationViaEndpointOrLocal({
-			personaName,
-			hotel,
-			caseId: ctx?.caseId,
-			guest: args.guest,
-			stay: args.stay,
-			pickedRooms: args.pickedRooms,
-		});
-		ctx.__didReservation = !!result?.ok;
-		ctx.__reservationResult = result;
-		const st = getState(ctx.caseId);
-		if (result?.ok) {
-			st.booked = true;
-			st.lastConfirmation = result.confirmation || "";
-			st.publicLink = result.publicLink || null;
-			st.paymentLink = result.paymentLink || null;
-		}
-		return JSON.stringify(result);
-	}
-	if (name === "find_reservation_by_confirmation") {
-		const result = await findReservationByConfirmation(
-			args?.confirmation_number
-		);
-		return JSON.stringify(result);
-	}
-	if (name === "update_reservation_fields") {
-		const wantCancel =
-			String(args?.status || "").toLowerCase() === "cancelled" ||
-			String(args?.status || "").toLowerCase() === "canceled";
-		if (wantCancel && !ctx?.confirmedCancel) {
-			return JSON.stringify({
-				ok: false,
-				need_cancel_confirmation: true,
-				error: "Please confirm cancellation first.",
-			});
-		}
-		const result = await applyReservationUpdate({
-			reservation_id: args?.reservation_id,
-			confirmation_number: args?.confirmation_number,
-			changes: {
-				check_in_date: args?.check_in_date,
-				check_out_date: args?.check_out_date,
-				status: args?.status,
-				note: args?.note,
-			},
-		});
-		ctx.__didUpdate = !!result?.ok;
-		ctx.__updateResult = result;
-		return JSON.stringify(result);
-	}
-	return JSON.stringify({ ok: false, error: "Unknown tool" });
-}
-
-async function runWithTools(client, { messages, context, model }) {
-	let didReservation = false,
-		reservationPayload = null,
-		didUpdate = false,
-		updatePayload = null;
-
-	let r = await client.chat.completions.create({
-		model,
-		messages,
-		tools: TOOLS,
-		tool_choice: "auto",
-		temperature: 0.6,
-		max_tokens: 500,
-	});
-	let msg = r.choices?.[0]?.message;
-	const toolCalls = msg?.tool_calls || [];
-	if (!toolCalls.length) return { text: (msg?.content || "").trim(), meta: {} };
-
-	const toolMsgs = [];
-	for (const tc of toolCalls) {
-		const name = tc.function?.name;
-		let args = {};
-		try {
-			args = JSON.parse(tc.function?.arguments || "{}");
-		} catch {}
-		if (name === "lookup_hotel_pricing" && !args.hotelIdOrName)
-			args.hotelIdOrName =
-				context?.hotel?._id?.toString?.() || context?.hotel?.hotelName;
-		const resultStr = await execTool(name, args, context);
-		try {
-			const parsed = JSON.parse(resultStr);
-			if (name === "create_reservation_and_send_payment_link") {
-				didReservation = !!parsed?.ok;
-				reservationPayload = parsed;
-			}
-			if (name === "update_reservation_fields") {
-				didUpdate = !!parsed?.ok;
-				updatePayload = parsed;
-			}
-		} catch {}
-		toolMsgs.push({
-			role: "tool",
-			tool_call_id: tc.id,
-			name,
-			content: resultStr,
-		});
-	}
-	r = await client.chat.completions.create({
-		model,
-		messages: [...messages, msg, ...toolMsgs],
-		tools: TOOLS,
-		tool_choice: "none",
-		temperature: 0.6,
-		max_tokens: 600,
-	});
-	msg = r.choices?.[0]?.message;
-	return {
-		text: (msg?.content || "").trim(),
-		meta: {
-			didReservation,
-			reservation: reservationPayload,
-			didUpdate,
-			update: updatePayload,
-		},
-	};
-}
-
-/* ---------- Greeting & addressing lines ---------- */
-function identityDeflectionLine({ lang, personaName, hotelName }) {
-	const H = hotelName || "our hotel";
-	if (lang === "ar")
-		return `أنا ${personaName} من فريق الحجوزات في ${H}. مساعد ذكي يعمل مباشرة مع الفندق لمساعدتك في الحجز والدعم.`;
-	if (lang === "es")
-		return `Soy ${personaName}, del equipo de reservas de ${H}. Asistente inteligente que trabaja directamente con el hotel para ayudarte.`;
-	if (lang === "fr")
-		return `Je suis ${personaName}, équipe réservations de ${H}. Assistant intelligent travaillant directement avec l’hôtel pour vous aider.`;
-	if (lang === "ur")
-		return `میں ${personaName}، ${H} کی ریزرویشن ٹیم سے ہوں۔ ہوٹل کے ساتھ براہِ راست کام کرنے والا سمارٹ اسسٹنٹ ہوں۔`;
-	if (lang === "hi")
-		return `मैं ${personaName}, ${H} की आरक्षण टीम से। होटल के साथ सीधे काम करने वाला स्मार्ट सहायक हूँ।`;
-	return `I’m ${personaName} from ${H}’s reservations team—an intelligent assistant working directly with the hotel to help you.`;
-}
-
-function shortThanksLine(lang) {
-	if (lang === "ar") return "شكرًا لك—سأعود إليك بتحديث قريبًا.";
-	if (lang === "es") return "Gracias—vuelvo enseguida con una actualización.";
-	if (lang === "fr") return "Merci—je reviens vite avec une mise à jour.";
-	if (lang === "ur")
-		return "شکریہ—میں جلد ہی تازہ معلومات کے ساتھ واپس آتا/آتی ہوں۔";
-	if (lang === "hi") return "धन्यवाद—मैं जल्द ही अपडेट के साथ लौटता/लौटती हूँ।";
-	return "Thank you—I’ll be right back with an update.";
-}
-
-// === Confirmation link helpers ===
-function confirmationLinkLine(lang, link) {
-	if (lang === "ar")
-		return `🔗 هذا رابط تأكيد الحجز (يتضمن PDF قابل للتنزيل): ${link}`;
-	if (lang === "es")
-		return `🔗 Enlace de confirmación (incluye PDF descargable): ${link}`;
-	if (lang === "fr")
-		return `🔗 Lien de confirmation (PDF téléchargeable inclus) : ${link}`;
-	if (lang === "ur") return `🔗 کنفرمیشن لنک (PDF ڈاؤن لوڈ کے ساتھ): ${link}`;
-	if (lang === "hi")
-		return `🔗 पुष्टि लिंक (डाउनलोड करने योग्य PDF सहित): ${link}`;
-	return `🔗 Confirmation link (includes downloadable PDF): ${link}`;
-}
-
-async function sendPublicLinkMessage(
-	io,
-	{ caseId, persona, lang, confirmation, publicLink }
-) {
-	const link =
-		publicLink ||
-		(confirmation
-			? `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`
-			: null);
-	if (!link) return;
-	const line = confirmationLinkLine(lang, link);
-	startTyping(io, caseId, persona.name);
-	await new Promise((r) => setTimeout(r, computeTypeDelay(line)));
-	await persistAndBroadcast(io, { caseId, text: line, persona, lang });
-}
-
-// Send the link as a separate message if we didn't already include that exact link
-// in the immediately preceding message and we haven't auto-sent it for this confirmation.
-async function postSuccessLinkIfNeeded(
-	io,
-	{ caseId, persona, lang },
-	{ confirmation, publicLink, lastText }
-) {
-	const st = getState(caseId);
+/* ---------- Confirmation link sender ---------- */
+async function sendPublicLinkOnce(io, { caseId, st, confirmation }) {
 	if (!confirmation) return;
-
-	const link =
-		publicLink ||
-		(confirmation
-			? `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`
-			: null);
-	if (!link) return;
-
-	// If the last outgoing text already had this link, just record and stop.
-	if (lastText && lastText.includes(link)) {
-		st.lastLinkSentFor = confirmation;
-	} else if (st.lastLinkSentFor !== confirmation) {
-		// Send the dedicated link message once per confirmation number.
-		await sendPublicLinkMessage(io, {
-			caseId,
-			persona,
-			lang,
-			confirmation,
-			publicLink: link,
-		});
-		st.lastLinkSentFor = confirmation;
-	}
-
-	// --- NEW: Post-success cleanup to prevent any redundant “clarification” loops ---
-	// 1) Stop any scheduled wait follow-ups for this case
-	const wf = waitFollowupTimers.get(caseId);
-	if (wf) {
-		clearTimeout(wf.t);
-		waitFollowupTimers.delete(caseId);
-	}
-
-	// 2) Freeze pre-booking flows
-	if (st.booked) st.intentProceed = false;
-	st.intentProceed = false;
-	st.pendingAction = null;
-
-	// 3) Reset clarify/missing prompts memory
-	st.lastClarifyKey = null;
-	st.askedClarifyAt = 0;
-	st.lastMissingKey = null;
-	st.missingAskCount = 0;
-}
-
-// Guests sometimes ask “send me the link / pdf / receipt / email”.
-// If they do, we just send the confirmation link (on-demand always allowed).
-function isLinkOrReceiptRequest(text = "") {
-	const s = lower(text);
-	const hitSingle = [
-		"pdf",
-		"receipt",
-		"invoice",
-		"voucher",
-		"comprobante",
-		"factura",
-		"reçu",
-		"justificatif",
-		"إيصال",
-		"فاتورة",
-		"pdf",
-		"بي دي اف",
-		"رسيد",
-		"رسید",
-		"رَسید",
-	].some((k) => s.includes(k));
-	const hitLinkish =
-		(s.includes("link") ||
-			s.includes("enlace") ||
-			s.includes("lien") ||
-			s.includes("رابط") ||
-			s.includes("لينك")) &&
-		(s.includes("confirm") ||
-			s.includes("booking") ||
-			s.includes("reservation") ||
-			s.includes("confirmación") ||
-			s.includes("reserva") ||
-			s.includes("réservation") ||
-			s.includes("تأكيد") ||
-			s.includes("الحجز") ||
-			s.includes("ارس") ||
-			s.includes("أرسل") ||
-			s.includes("ارسل") ||
-			s.includes("send") ||
-			s.includes("share"));
-	const hitEmailAsk =
-		(s.includes("email") ||
-			s.includes("correo") ||
-			s.includes("courriel") ||
-			s.includes("ايميل") ||
-			s.includes("إيميل")) &&
-		(s.includes("confirmation") ||
-			s.includes("confirmación") ||
-			s.includes("réservation") ||
-			s.includes("receipt") ||
-			s.includes("reçu") ||
-			s.includes("facture") ||
-			s.includes("pdf") ||
-			s.includes("link") ||
-			s.includes("enlace") ||
-			s.includes("lien") ||
-			s.includes("الحجز") ||
-			s.includes("تأكيد") ||
-			s.includes("رابط"));
-	return hitSingle || hitLinkish || hitEmailAsk;
-}
-
-function greetingLineFriendly({ lang, hotelName, personaName, guestFirst }) {
-	const H = hotelName || "our hotel";
-	const G = guestFirst ? ` ${guestFirst}` : "";
-	if (lang === "ar") return `السلام عليكم${G}! أنا ${personaName} من ${H}.`;
-	if (lang === "es")
-		return `¡Assalamu alaikum${G}! Soy ${personaName} de ${H}.`;
-	if (lang === "fr")
-		return `Assalamu alaykoum${G} ! Je suis ${personaName} de ${H}.`;
-	if (lang === "ur") return `السلام علیکم${G}! میں ${personaName}، ${H} سے۔`;
-	if (lang === "hi") return `अस्सलामु अलैकुम${G}! मैं ${personaName}, ${H} से।`;
-	return `Assalamu alaikum${G}! I’m ${personaName} from ${H}.`;
-}
-function addressingLineForReservation({ lang, reservation }) {
-	const rt =
-		(reservation.pickedRoomsType &&
-			reservation.pickedRoomsType[0] &&
-			(reservation.pickedRoomsType[0].displayName ||
-				reservation.pickedRoomsType[0].room_type)) ||
-		"Room";
-	const dates = formatDateRange(
-		reservation.checkin_date,
-		reservation.checkout_date
-	);
-	const total = niceMoney(reservation.total_amount);
-	const conf = reservation.confirmation;
-	const status = reservation.status || "confirmed";
-
-	if (lang === "ar")
-		return `اطلعت على حجزك رقم ${conf}: ${rt} • ${dates} • الإجمالي ${total} SAR • الحالة ${status}. كيف يمكنني مساعدتك في هذا الحجز؟`;
-	if (lang === "es")
-		return `He cargado tu reserva ${conf}: ${rt} • ${dates} • total ${total} SAR • estado ${status}. ¿Cómo te ayudo con esta reserva?`;
-	if (lang === "fr")
-		return `J’ai chargé votre réservation ${conf} : ${rt} • ${dates} • total ${total} SAR • statut ${status}. Comment puis‑je vous aider sur cette réservation ?`;
-	if (lang === "ur")
-		return `میں نے آپ کا ریزرویشن ${conf} کھول لیا ہے: ${rt} • ${dates} • کل ${total} SAR • اسٹیٹس ${status}۔ اس ریزرویشن میں کیسے مدد کروں؟`;
-	if (lang === "hi")
-		return `मैंने आपकी बुकिंग ${conf} खोल ली है: ${rt} • ${dates} • कुल ${total} SAR • स्थिति ${status}। इस आरक्षण में मैं कैसे मदद करूँ?`;
-	return `I’ve loaded your reservation ${conf}: ${rt} • ${dates} • total ${total} SAR • status ${status}. How can I help with this reservation?`;
-}
-function addressingLineForMissingReservation({ lang, confirmation }) {
-	if (lang === "ar")
-		return `أرى رقم تأكيد في تذكرتك (${confirmation}) لكني لم أعثر عليه الآن. هل تتكرم بتأكيد رقم الحجز أو مشاركته مرة أخرى؟`;
-	if (lang === "es")
-		return `Veo un número de confirmación en tu ticket (${confirmation}), pero ahora no aparece. ¿Podrías confirmarlo o compartirlo de nuevo?`;
-	if (lang === "fr")
-		return `Je vois un numéro de confirmation dans votre ticket (${confirmation}), mais je ne le retrouve pas. Pouvez‑vous le confirmer ou le renvoyer ?`;
-	if (lang === "ur")
-		return `ٹکٹ میں کنفرمیشن نمبر (${confirmation}) نظر آ رہا ہے مگر یہ نہیں مل رہا۔ براہِ کرم نمبر تصدیق کر کے دوبارہ شیئر کریں۔`;
-	if (lang === "hi")
-		return `टिकट में कन्फर्मेशन नंबर (${confirmation}) दिख रहा है, पर अभी नहीं मिल रहा। कृपया नंबर की पुष्टि कर के फिर से साझा करें।`;
-	return `I see a confirmation number in your ticket (${confirmation}), but I can’t locate it right now. Could you please confirm it or share it again?`;
-}
-function addressingLineForNewBooking({ lang }) {
-	if (lang === "ar")
-		return "فهمت أنك تريد إجراء حجز—ما نوع الغرفة تفضّله (دبل/توين/ثلاثية)؟ وما هي تواريخ الوصول والمغادرة؟";
-	if (lang === "es")
-		return "Entiendo que deseas reservar—¿qué tipo de habitación prefieres (Doble/Twin/Triple) y cuáles son tus fechas de entrada y salida?";
-	if (lang === "fr")
-		return "Je comprends que vous souhaitez réserver—quel type de chambre préférez‑vous (Double/Twin/Triple) et quelles sont vos dates d’arrivée et de départ ?";
-	if (lang === "ur")
-		return "آپ نئی بکنگ چاہتے ہیں—کمرے کی کون سی قسم پسند کریں گے (ڈبل/ٹوئن/ٹرپل)؟ اور چیک‑ان/چیک‑آؤٹ کی تاریخیں کیا ہوں گی؟";
-	if (lang === "hi")
-		return "आप नई बुकिंग करना चाहते हैं—कौन‑सा कमरे का प्रकार चाहेंगे (डबल/ट्विन/ट्रिपल), और चेक‑इन/चेक‑आउट तिथियाँ क्या होंगी?";
-	return "I see you’d like to make a reservation—what room type do you prefer (Double/Twin/Triple), and what are your check‑in & check‑out dates?";
-}
-
-/* ---------- Greeting scheduler (unchanged logic, with fresh re-extract) ---------- */
-async function scheduleGreetingByCaseId(io, caseId) {
-	try {
-		if (greeted(caseId)) return;
-		const caseDoc0 = await SupportCase.findById(caseId)
-			.populate("hotelId")
-			.lean();
-		if (!caseDoc0 || !hotelAllowsAI(caseDoc0.hotelId)) return;
-
-		const langHint =
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc0.inquiryDetails || "")
-			) ||
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc0.conversation?.[0]?.inquiryDetails || "")
-			);
-		const langCode = normalizeLang(
-			langHint || caseDoc0.preferredLanguageCode || "en"
-		);
-		const persona = await ensurePersona(caseId, langCode);
-
-		const guestName =
-			caseDoc0.customerName ||
-			caseDoc0.displayName1 ||
-			caseDoc0?.conversation?.[0]?.messageBy?.customerName ||
-			"";
-		const guestFirst = firstNameOf(guestName);
-
-		let { about: about0, confirmation: confirmation0 } =
-			extractInquiryDataFromCase(caseDoc0);
-
-		markGreeted(caseId);
-
-		(async () => {
-			const warmupMs = randInt(GREETING_WARMUP_MIN_MS, GREETING_WARMUP_MAX_MS);
-			const t0 = Date.now();
-
-			let reservationCache = null;
-			if (about0 === "reservation" && confirmation0) {
-				const found = await findReservationByConfirmation(confirmation0);
-				if (found?.ok) {
-					reservationCache = found.reservation;
-					const st = getState(caseId);
-					st.reservationCache = found.reservation;
-					st.lastConfirmation = found.reservation.confirmation;
-				}
-			}
-
-			const elapsed = Date.now() - t0;
-			if (elapsed < warmupMs)
-				await new Promise((r) => setTimeout(r, warmupMs - elapsed));
-
-			const fresh = await SupportCase.findById(caseId)
-				.populate("hotelId")
-				.lean();
-			if (!fresh || fresh.caseStatus === "closed") return;
-			if (!hotelAllowsAI(fresh.hotelId)) return;
-
-			const hadAgent = (fresh?.conversation || []).some((m) =>
-				isAssistantLike(
-					m?.messageBy?.customerName,
-					m?.messageBy?.customerEmail,
-					persona.name
-				)
-			);
-			if (hadAgent) return;
-
-			const hotelName = fresh.hotelId?.hotelName || "our hotel";
-			const lang = persona.lang;
-
-			const { about: aboutFresh, confirmation: confFresh } =
-				extractInquiryDataFromCase(fresh);
-			let confirmation = confirmation0 || confFresh || null;
-
-			if (!reservationCache && aboutFresh === "reservation" && confirmation) {
-				const found2 = await findReservationByConfirmation(confirmation);
-				if (found2?.ok) {
-					reservationCache = found2.reservation;
-					const st = getState(caseId);
-					st.reservationCache = found2.reservation;
-					st.lastConfirmation = found2.reservation.confirmation;
-				}
-			}
-
-			const greeting = greetingLineFriendly({
-				lang,
-				hotelName,
-				personaName: persona.name,
-				guestFirst,
-			});
-			startTyping(io, caseId, persona.name);
-			await new Promise((r) => setTimeout(r, computeTypeDelay(greeting)));
-			await persistAndBroadcast(io, { caseId, text: greeting, persona, lang });
-
-			let followUp = "";
-			if (aboutFresh === "reservation") {
-				if (confirmation && reservationCache) {
-					followUp = addressingLineForReservation({
-						lang,
-						reservation: reservationCache,
-					});
-				} else if (confirmation && !reservationCache) {
-					followUp = addressingLineForMissingReservation({
-						lang,
-						confirmation,
-					});
-				} else {
-					if (lang === "ar")
-						followUp =
-							"هل تتكرم بمشاركة رقم تأكيد الحجز لنتمكن من مساعدتك (إلغاء/تغيير التواريخ/إضافة غرفة)؟";
-					else if (lang === "es")
-						followUp =
-							"¿Podrías compartir el número de confirmación para ayudarte (cancelar/cambiar fechas/agregar una habitación)?";
-					else if (lang === "fr")
-						followUp =
-							"Pouvez‑vous partager le numéro de confirmation pour que je vous aide (annuler/modifier les dates/ajouter une chambre) ?";
-					else if (lang === "ur")
-						followUp =
-							"براہِ کرم کنفرمیشن نمبر شیئر کریں تاکہ (منسوخی/تاریخوں میں تبدیلی/کمرہ شامل) میں مدد کر سکوں۔";
-					else if (lang === "hi")
-						followUp =
-							"कृपया कन्फर्मेशन नंबर साझा करें ताकि (रद्द/तिथियाँ बदलना/कमरा जोड़ना) में मदद कर सकूँ।";
-					else
-						followUp =
-							"Please share your confirmation number so I can help (cancel/change dates/add a room).";
-				}
-			} else if (
-				aboutFresh === "reserve_room" ||
-				aboutFresh === "reserve_bed"
-			) {
-				followUp = addressingLineForNewBooking({ lang });
-			} else {
-				if (lang === "ar") followUp = "كيف يمكنني مساعدتك بخصوص الحجز؟";
-				else if (lang === "es")
-					followUp = "¿En qué puedo ayudarte con tu reserva?";
-				else if (lang === "fr")
-					followUp = "Comment puis‑je vous aider pour votre réservation ?";
-				else if (lang === "ur")
-					followUp = "آپ کی بکنگ کے سلسلے میں میں کیسے مدد کر سکتا/سکتی ہوں؟";
-				else if (lang === "hi")
-					followUp = "आपकी बुकिंग के संबंध में मैं कैसे मदद करूँ?";
-				else followUp = "How can I help with your booking today?";
-			}
-
-			startTyping(io, caseId, persona.name);
-			await new Promise((r) => setTimeout(r, computeTypeDelay(followUp)));
-			await persistAndBroadcast(io, { caseId, text: followUp, persona, lang });
-		})().catch((e) =>
-			console.error("[AI] warm-up greeting error:", e?.message || e)
-		);
-	} catch (e) {
-		console.error("[AI] auto-greet schedule error:", e?.message || e);
-	}
-}
-
-/* ---------- Persist & emit, wait follow-ups, idle close ---------- */
-async function persistAndBroadcast(io, { caseId, text, persona, lang }) {
-	if (!text) return;
-
-	const hadTimer = waitFollowupTimers.get(caseId);
-	if (hadTimer && !lowerIncludesAny(text, WAIT_REQUEST_MARKERS)) {
-		clearTimeout(hadTimer.t);
-		waitFollowupTimers.delete(caseId);
-	}
-
-	const msg = {
-		messageBy: {
-			customerName: persona.name,
-			customerEmail: "management@xhotelpro.com",
-			userId: null,
-		},
-		message: text,
-		date: new Date(),
-		seenByAdmin: true,
-		seenByHotel: true,
-		seenByCustomer: true,
-	};
-
-	try {
-		await SupportCase.findByIdAndUpdate(
-			caseId,
-			{ $set: { aiRelated: true }, $push: { conversation: msg } },
-			{ new: true }
-		);
-	} catch (e) {
-		console.error("[AI] Failed to save AI message:", e?.message || e);
-	}
-
-	stopTyping(io, caseId, persona.name);
-	io.to(caseId).emit("receiveMessage", {
-		...msg,
+	if (st.lastLinkSentFor === confirmation) return;
+	const link = `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`;
+	await send(io, {
 		caseId,
-		preferredLanguage: lang,
-		preferredLanguageCode: lang,
+		text: L.link(st.lang, link),
+		personaName: st.personaName,
+		lang: st.lang,
 	});
+	st.lastLinkSentFor = confirmation;
+}
 
-	armIdleClose(io, caseId, persona.name);
+/* ---------- Prompt de-dup ---------- */
+function shouldAsk(st, key, cooldownMs = 60000) {
+	const now = Date.now();
+	if (st.lastPromptKey === key && now - st.lastPromptAt < cooldownMs)
+		return false;
+	st.lastPromptKey = key;
+	st.lastPromptAt = now;
+	return true;
+}
 
-	if (lowerIncludesAny(msg.message, WAIT_REQUEST_MARKERS)) {
-		const t = setTimeout(
-			() => autoFollowUpAfterWait(io, caseId),
-			WAIT_FOLLOWUP_MS
-		);
-		waitFollowupTimers.set(caseId, { t, scheduledAt: Date.now() });
+/* ---------- NEW booking runner (Room → Dates → Quote → Details → Final) ---------- */
+async function runNew(io, caseDoc, st, nluOut) {
+	const hotel = st.hotelDoc;
+	const { arr } = roomMap(hotel);
+	const roomList = arr.map((r) => r.roomType);
+
+	/* absorb entities in correct order */
+	const e = nluOut?.entities || {};
+
+	if (!st.slots.room_canon) {
+		const canon =
+			e.room_type_canonical || canonicalFromText(e.room_type_freeform || "");
+		if (canon && arr.find((r) => r.roomType === canon))
+			st.slots.room_canon = canon;
 	}
-}
 
-function armIdleClose(io, caseId, personaName) {
-	const prev = idleTimers.get(caseId);
-	if (prev) clearTimeout(prev.t);
-	const t = setTimeout(async () => {
-		try {
-			const doc = await SupportCase.findById(caseId).lean();
-			if (!doc || doc.caseStatus === "closed") return;
-			await SupportCase.findByIdAndUpdate(
-				caseId,
-				{ caseStatus: "closed" },
-				{ new: true }
-			);
-			io.to(caseId).emit("caseClosed", {
-				caseId,
-				closedBy: personaName || "system",
-			});
-		} catch (_) {}
-		idleTimers.delete(caseId);
-	}, INACTIVITY_CLOSE_MS);
-	idleTimers.set(caseId, { t, at: Date.now() });
-}
-function scheduleClose(io, caseId, personaName, delay = AUTO_CLOSE_AFTER_MS) {
-	const t = setTimeout(async () => {
-		try {
-			await SupportCase.findByIdAndUpdate(
-				caseId,
-				{ caseStatus: "closed" },
-				{ new: true }
-			);
-			io.to(caseId).emit("caseClosed", { caseId, closedBy: personaName });
-		} catch (_) {}
-	}, delay);
-	return t;
-}
-function cancelClose(caseId) {
-	const prev = closeTimers.get(caseId);
-	if (prev) {
-		clearTimeout(prev);
-		closeTimers.delete(caseId);
-	}
-}
-async function autoFollowUpAfterWait(io, caseId) {
-	try {
-		// This timer just fired; drop it from the map immediately
-		waitFollowupTimers.delete(caseId);
-
-		const caseDoc = await SupportCase.findById(caseId)
-			.populate("hotelId")
-			.lean();
-		if (!caseDoc || !hotelAllowsAI(caseDoc.hotelId)) return;
-
-		// --- NEW: Bail out if success already happened or the case is closed ---
-		if (caseDoc.caseStatus === "closed") return;
-		const st = getState(caseId);
-		if (
-			st?.booked ||
-			(st?.lastConfirmation && String(st.lastConfirmation).length >= 6)
-		) {
-			return; // do not follow-up after success
-		}
-
-		const langHint =
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc.inquiryDetails || "")
-			) ||
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc.conversation?.[0]?.inquiryDetails || "")
-			);
-		const persona = await ensurePersona(
-			caseId,
-			normalizeLang(langHint || caseDoc.preferredLanguageCode || "en")
-		);
-
-		startTyping(io, caseId, persona.name);
-
-		const client = new OpenAI({ apiKey: RAW_KEY });
-		const MODEL = sanitizeModelName(RAW_MODEL) || "gpt-4o-mini"; // safe tool-capable default
-
-		const { text } = await generateReply(client, {
-			caseDoc,
-			persona,
-			currentMessage: { message: "", preferredLanguageCode: persona.lang },
-			model: MODEL,
-			confirmedProceed: false,
-			confirmedCancel: false,
-			systemAppend:
-				"Follow-up after wait: provide checked results succinctly. Avoid prefacing.",
+	// room info questions answered from hotel schema (no step change)
+	if (nluOut?.intents?.ask_room_info) {
+		const ans = await nlu.answerRoomInfo({
+			hotel,
+			question: String(caseDoc?.conversation?.slice(-1)?.[0]?.message || ""),
+			roomTypes: roomList,
 		});
-
-		await new Promise((r) => setTimeout(r, computeTypeDelay(text)));
-		await persistAndBroadcast(io, {
-			caseId,
-			text,
-			persona,
-			lang: persona.lang,
-		});
-	} catch (e) {
-		console.error("[AI] autoFollowUpAfterWait error:", e?.message || e);
-	}
-}
-
-/* ---------- Reservation cache ---------- */
-async function cacheReservationByConfirmation(caseId, confFrom) {
-	const st = getState(caseId);
-	const conf = extractConfirmationFrom(confFrom || "");
-	if (!conf) return null;
-	const res = await findReservationByConfirmation(conf);
-	if (res?.ok) {
-		st.reservationCache = res.reservation;
-		if (safeConfirmValue(res.reservation.confirmation))
-			st.lastConfirmation = res.reservation.confirmation;
-		caseState.set(caseId, st);
-	}
-	return res?.ok ? res.reservation : null;
-}
-
-/* ---------- Booking readiness ---------- */
-function inferAdultsFromRoomTokens(roomTypeText = "") {
-	const s = lower(roomTypeText);
-	if (!s) return 2;
-	if (s.includes("triple") || s.includes("ثلاث")) return 3;
-	if (
-		s.includes("quad") ||
-		s.includes("رباع") ||
-		s.includes("family") ||
-		s.includes("عائ")
-	)
-		return 4;
-	if (
-		s.includes("double") ||
-		s.includes("twin") ||
-		s.includes("دبل") ||
-		s.includes("مزدوج") ||
-		s.includes("توين")
-	)
-		return 2;
-	return 2;
-}
-
-function askForMissingFieldsText(lang, missing = [], compact = false) {
-	const labels = {
-		name: {
-			en: "Full name (first + last)",
-			ar: "الاسم الكامل",
-			es: "Nombre completo",
-			fr: "Nom complet",
-			ur: "پورا نام",
-			hi: "पूरा नाम",
-		},
-		email: {
-			en: "Email (optional)",
-			ar: "البريد الإلكتروني (اختياري)",
-			es: "Correo (opcional)",
-			fr: "Email (facultatif)",
-			ur: "ای میل (اختیاری)",
-			// keep "hi" short to match space
-			hi: "ईमेल (वैकल्पिक)",
-		},
-		phone: {
-			en: "Phone number (WhatsApp preferred)",
-			ar: "رقم الهاتف (الأفضل واتساب)",
-			es: "Teléfono (WhatsApp preferido)",
-			fr: "Téléphone (WhatsApp préféré)",
-			ur: "فون نمبر (واٹس ایپ بہتر)",
-			hi: "फोन नंबर (व्हाट्सऐप बेहतर)",
-		},
-		nationality: {
-			en: "Nationality",
-			ar: "الجنسية",
-			es: "Nacionalidad",
-			fr: "Nationalité",
-			ur: "قومیت",
-			hi: "राष्ट्रीयता",
-		},
-		checkIn: {
-			en: "Check‑in date (YYYY‑MM‑DD)",
-			ar: "تاريخ الوصول (YYYY‑MM‑DD)",
-			es: "Fecha de entrada (YYYY‑MM‑DD)",
-			fr: "Date d’arrivée (YYYY‑MM‑DD)",
-			ur: "چیک‑ان تاریخ (YYYY‑MM‑DD)",
-			hi: "चेक‑इन तिथि (YYYY‑MM‑DD)",
-		},
-		checkOut: {
-			en: "Check‑out date (YYYY‑MM‑DD)",
-			ar: "تاريخ المغادرة (YYYY‑MM‑DD)",
-			es: "Fecha de salida (YYYY‑MM‑DD)",
-			fr: "Date de départ (YYYY‑MM‑DD)",
-			ur: "چیک‑آؤٹ تاریخ (YYYY‑MM‑DD)",
-			hi: "चेक‑आउट तिथि (YYYY‑MM‑DD)",
-		},
-		roomType: {
-			en: "Room type (e.g., Double/Twin/Triple)",
-			ar: "نوع الغرفة (مثلاً دبل/توين/ثلاثية)",
-			es: "Tipo de habitación (Doble/Twin/Triple)",
-			fr: "Type de chambre (Double/Twin/Triple)",
-			ur: "روم ٹائپ (ڈبل/ٹوئن/ٹرپل)",
-			hi: "कमरे का प्रकार (डबल/ट्विन/ट्रिपल)",
-		},
-	};
-	const code = ["ar", "es", "fr", "ur", "hi"].includes(lang) ? lang : "en";
-	const items = missing.map((k) => labels[k]?.[code] || k);
-
-	const compactLine =
-		code === "ar"
-			? `أحتاج فقط: ${items.join("، ")}. يمكنك إرسالها واحدة تلو الأخرى.`
-			: code === "es"
-			? `Solo me falta: ${items.join(", ")}. Puedes enviarlos uno por uno.`
-			: code === "fr"
-			? `Il me manque juste : ${items.join(
-					", "
-			  )}. Vous pouvez les donner un par un.`
-			: code === "ur"
-			? `مجھے صرف یہ درکار ہے: ${items.join("، ")}۔ آپ ایک ایک کر کے بھیج دیں۔`
-			: code === "hi"
-			? `बस ये चाहिए: ${items.join(", ")}. आप इन्हें एक‑एक करके भेज दें.`
-			: `I just need: ${items.join(", ")}. You can share them one by one.`;
-
-	if (compact) return compactLine;
-
-	const bullet =
-		code === "ar"
-			? `لتأكيد الحجز نحتاج فقط:\n- ${items.join(
-					"\n- "
-			  )}\nيمكنك مشاركتها واحدة تلو الأخرى.`
-			: code === "es"
-			? `Para finalizar la reserva solo necesito:\n- ${items.join(
-					"\n- "
-			  )}\nPuedes enviarlos uno por uno.`
-			: code === "fr"
-			? `Pour finaliser la réservation, j’ai juste besoin de :\n- ${items.join(
-					"\n- "
-			  )}\nVous pouvez les donner un par un.`
-			: code === "ur"
-			? `حجز مکمل کرنے کے لیے مجھے یہ درکار ہے:\n- ${items.join(
-					"\n- "
-			  )}\nآپ انہیں ایک ایک کر کے ارسال کر دیں۔`
-			: code === "hi"
-			? `आरक्षण पूरा करने के लिए मुझे ये चाहिए:\n- ${items.join(
-					"\n- "
-			  )}\nआप इन्हें एक‑एक करके भेज सकते हैं.`
-			: `To finalize your reservation I just need:\n- ${items.join(
-					"\n- "
-			  )}\nYou can share them one by one—I’ll fill them in as we go.`;
-	return bullet;
-}
-
-function pickBookedRoomFromPricing(state) {
-	const p = state.lastPricing;
-	if (!p || !Array.isArray(p.results)) return null;
-	return (
-		p.results.find(
-			(r) => r && r.ok && Array.isArray(r.nightly) && r.nightly.length > 0
-		) || null
-	);
-}
-
-function evaluateBookingReadiness(caseDoc, state) {
-	const hotel = caseDoc.hotelId;
-	const collected = state.collected || {};
-	const ident = knownIdentityFromCase(caseDoc);
-
-	const name = collected.name || ident.name || "";
-	const email = collected.email || ident.email || "";
-	const phone = collected.phone || ident.phone || "";
-
-	const chosen = pickBookedRoomFromPricing(state);
-	const roomTypeText =
-		chosen?.roomType || chosen?.displayName || collected.roomTypeHint || "";
-
-	const adultsVal =
-		collected.adults != null
-			? collected.adults
-			: inferAdultsFromRoomTokens(roomTypeText);
-	const childrenVal = collected.children != null ? collected.children : 0;
-	const roomsCountVal = collected.roomsCount != null ? collected.roomsCount : 1;
-
-	const nationality = collected.nationality || "";
-	const natValid = nationality ? validateNationality(nationality) : false;
-
-	const stay = state.intendedStay || null;
-
-	const missing = [];
-	if (!isFullName(name)) missing.push("name");
-	if (!isLikelyPhone(phone)) missing.push("phone");
-	if (!natValid) missing.push("nationality");
-	if (!stay?.check_in_date) missing.push("checkIn");
-	if (!stay?.check_out_date) missing.push("checkOut");
-	if (!chosen && !collected.roomTypeHint) missing.push("roomType");
-
-	const ready = missing.length === 0;
-	return {
-		ready,
-		missing,
-		guest: {
-			name,
-			email,
-			phone,
-			nationality: natValid ? nationality : "",
-			adults: adultsVal,
-			children: childrenVal,
-		},
-		roomsCount: roomsCountVal,
-		stay,
-		chosen,
-		hotel,
-	};
-}
-
-/* ---------- OpenAI reply generation ---------- */
-function toOpenAIHistory(conversation, personaName) {
-	const items = (conversation || []).slice(-18);
-	const mapped = [];
-	for (const c of items) {
-		const text = String(c.message || "").trim();
-		if (!text) continue;
-		const assistantLike = isAssistantLike(
-			c?.messageBy?.customerName,
-			c?.messageBy?.customerEmail,
-			personaName
-		);
-		mapped.push({ role: assistantLike ? "assistant" : "user", content: text });
-	}
-	return mapped;
-}
-async function generateReply(
-	client,
-	{
-		caseDoc,
-		persona,
-		currentMessage,
-		model,
-		confirmedProceed,
-		confirmedCancel,
-		systemAppend,
-	}
-) {
-	const lang = persona.lang || "en";
-	const system = buildSystemPrompt({
-		hotel: caseDoc.hotelId,
-		activeLanguage: lang,
-		preferredLanguage: currentMessage?.preferredLanguageCode || lang,
-		personaName: persona.name,
-		inquiryDetails: caseDoc.inquiryDetails,
-		knownIdentity: knownIdentityFromCase(caseDoc),
-	});
-
-	const training = await fetchGuidanceForAgent({
-		hotelId: caseDoc.hotelId?._id || caseDoc.hotelId,
-	});
-	const history = toOpenAIHistory(caseDoc.conversation, persona.name);
-	const inquiryHint = buildInquirySystemHint(caseDoc);
-	const userTurn = String(currentMessage?.message || "").trim();
-
-	const messages = [
-		{
-			role: "system",
-			content:
-				system +
-				buildLearningSections(training) +
-				(inquiryHint ? `\n\nInquiry Context:${inquiryHint}` : "") +
-				(systemAppend ? `\n\n${systemAppend}` : ""),
-		},
-		...history,
-	];
-	if (userTurn) messages.push({ role: "user", content: userTurn });
-
-	const context = {
-		hotel: caseDoc.hotelId,
-		persona,
-		caseId: caseDoc._id?.toString?.(),
-		confirmedProceed: !!confirmedProceed,
-		confirmedCancel: !!confirmedCancel,
-	};
-	const MODEL = sanitizeModelName(RAW_MODEL) || "gpt-4.1";
-	return await runWithTools(client, {
-		messages,
-		context,
-		model: model || MODEL,
-	});
-}
-
-/* ---------- Conversation heuristics ---------- */
-function stripRedundantOpeners(text = "", conversation = []) {
-	const openerRegex =
-		/^(hi|hello|hey|assalamu|assalam|السلام|مرحبا|hola|bonjour)[,!\s]*/i;
-	if (conversation.length > 4) return text.replace(openerRegex, "");
-	return text;
-}
-function assistantAskedToCancelHeuristic(msg) {
-	const t = lower(msg || "");
-	if (!t.includes("cancel")) return false;
-	const signals = [
-		"confirm",
-		"proceed",
-		"process",
-		"shall",
-		"should",
-		"go ahead",
-		"do you want",
-		"would you like",
-	];
-	const hasSignal = signals.some((s) => t.includes(s));
-	return hasSignal || t.includes("?");
-}
-
-/** Much broader detection for “assistant asked to confirm booking” */
-function lastAssistantAskedForConfirmation(
-	conversation = [],
-	personaName = ""
-) {
-	const PHRASES = [
-		// English
-		"would you like me to confirm",
-		"may i confirm",
-		"should i proceed",
-		"shall i proceed",
-		"shall i book",
-		"do you want me to book",
-		"do you want me to confirm",
-		"proceed with booking",
-		"go ahead and book",
-		"go ahead and reserve",
-		"confirm this reservation",
-		"confirm the booking",
-		"finalize this booking",
-		"shall i finalize",
-		"ready to confirm",
-		"ready to finalize",
-		"shall i go ahead",
-		// Arabic
-		"هل تريد أن أؤكد",
-		"هل ترغب أن أؤكد",
-		"هل تريد تأكيد",
-		"أؤكد الحجز",
-		"أقوم بتأكيد",
-		"هل أمضي قدماً",
-		"أكمل الحجز",
-		"أتم الحجز",
-		// Spanish
-		"¿deseas que confirme",
-		"¿puedo confirmar",
-		"¿confirmo",
-		"¿procedo a reservar",
-		"¿quieres que lo reserve",
-		// French
-		"souhaitez-vous que je confirme",
-		"puis-je confirmer",
-		"dois-je procéder",
-		"je finalise la réservation",
-		"confirmer la réservation",
-	];
-
-	for (let i = conversation.length - 1; i >= 0; i--) {
-		const c = conversation[i];
-		const name = lower(c?.messageBy?.customerName || "");
-		const email = lower(c?.messageBy?.customerEmail || "");
-		const isAssistant =
-			email === "management@xhotelpro.com" ||
-			name.includes("support") ||
-			name.includes("agent") ||
-			(personaName && name === lower(personaName));
-		if (!c?.message || !isAssistant) continue;
-		const t = lower(c.message);
-		if (PHRASES.some((p) => t.includes(lower(p)))) return true;
-		if (/confirm\W+your\W+(booking|reservation)/i.test(t)) return true;
-		if (/shall\W+i\W+(confirm|proceed|finalize)/i.test(t)) return true;
-		if (/¿.*(confirm|reserva|proced).*\?/i.test(t)) return true;
-		if (/(confirme|procède|finalise).*\?/i.test(t)) return true;
-		if (/(أؤكد|أكمل|أتم).*\?/u.test(t)) return true;
-		return false;
-	}
-	return false;
-}
-function lastAssistantAskedAnythingElse(conversation = [], personaName = "") {
-	for (let i = conversation.length - 1; i >= 0; i--) {
-		const c = conversation[i];
-		const name = lower(c?.messageBy?.customerName || "");
-		const email = lower(c?.messageBy?.customerEmail || "");
-		const isAssistant =
-			email === "management@xhotelpro.com" ||
-			name.includes("support") ||
-			name.includes("agent") ||
-			(personaName && name === lower(personaName));
-		if (!c?.message || !isAssistant) continue;
-		if (
-			lowerIncludesAny(c.message, [
-				"anything else",
-				"need anything else",
-				"help with anything else",
-			])
-		)
-			return true;
-		return false;
-	}
-	return false;
-}
-function lastAssistantAskedToWait(conversation = [], personaName = "") {
-	for (let i = conversation.length - 1; i >= 0; i--) {
-		const c = conversation[i];
-		const name = lower(c?.messageBy?.customerName || "");
-		const email = lower(c?.messageBy?.customerEmail || "");
-		const isAssistant =
-			email === "management@xhotelpro.com" ||
-			name.includes("support") ||
-			name.includes("agent") ||
-			(personaName && name === lower(personaName));
-		if (!c?.message || !isAssistant) continue;
-		if (lowerIncludesAny(c.message, WAIT_REQUEST_MARKERS)) return true;
-		return false;
-	}
-	return false;
-}
-function lastAssistantAskedToCancel(conversation = [], personaName = "") {
-	for (let i = conversation.length - 1; i >= 0; i--) {
-		const c = conversation[i];
-		const name = lower(c?.messageBy?.customerName || "");
-		const email = lower(c?.messageBy?.customerEmail || "");
-		const isAssistant =
-			email === "management@xhotelpro.com" ||
-			name.includes("support") ||
-			name.includes("agent") ||
-			(personaName && name === lower(personaName));
-		if (!c?.message || !isAssistant) continue;
-		if (assistantAskedToCancelHeuristic(c.message)) return true;
-		return false;
-	}
-	return false;
-}
-
-/* ---------- Core processing flow ---------- */
-async function processCase(io, client, MODEL, caseId) {
-	const entry = debounceMap.get(caseId);
-	if (!entry) return;
-	const payload = entry.payload;
-	debounceMap.delete(caseId);
-
-	try {
-		const existingPersona = personaByCase.get(caseId);
-		if (isFromHumanStaffOrAgent(payload, existingPersona?.name)) return;
-
-		if (payload?.caseId)
-			armIdleClose(io, payload.caseId, existingPersona?.name || "system");
-
-		if (shouldWaitForGuest(caseId)) {
-			const waitMore = Math.max(WAIT_WHILE_TYPING_MS, 1100);
-			const timer = setTimeout(
-				() => processCase(io, client, MODEL, caseId),
-				waitMore
-			);
-			debounceMap.set(caseId, { timer, payload });
-			return;
-		}
-		if (replyLock.has(caseId)) {
-			const timer = setTimeout(
-				() => processCase(io, client, MODEL, caseId),
-				350
-			);
-			debounceMap.set(caseId, { timer, payload });
-			return;
-		}
-		replyLock.add(caseId);
-
-		const caseDoc = await SupportCase.findById(caseId)
-			.populate("hotelId")
-			.lean();
-		if (!caseDoc?.hotelId || !hotelAllowsAI(caseDoc.hotelId)) {
-			replyLock.delete(caseId);
-			return;
-		}
-
-		const langHint =
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc.inquiryDetails || "")
-			) ||
-			extractPreferredLangCodeFromInquiryDetails(
-				String(caseDoc.conversation?.[0]?.inquiryDetails || "")
-			);
-		const persona = await ensurePersona(
-			caseId,
-			normalizeLang(
-				payload.preferredLanguageCode ||
-					langHint ||
-					existingPersona?.lang ||
-					"en"
-			)
-		);
-		const st = getState(caseId);
-		st.lang = persona.lang;
-		st.personaName = persona.name;
-
-		const { about: inquiryAbout, confirmation: confFromTicket } =
-			extractInquiryDataFromCase(caseDoc);
-
-		const foundConfInMsg = extractConfirmationFrom(payload?.message || "");
-		const freshConf = foundConfInMsg || confFromTicket || null;
-		if (freshConf) await cacheReservationByConfirmation(caseId, freshConf);
-
-		// Rebuild extracted info to avoid repeating asks
-		const rebuilt = rebuildStateFromConversation(caseDoc);
-		if (rebuilt?.collected)
-			st.collected = { ...(st.collected || {}), ...rebuilt.collected };
-		if (rebuilt?.intendedStay) st.intendedStay = rebuilt.intendedStay;
-
-		// QUICK etiquette
-		if (
-			lowerIncludesAny(payload?.message || "", WAIT_ACK_MARKERS) &&
-			lastAssistantAskedToWait(caseDoc.conversation || [], persona.name)
-		) {
-			startTyping(io, caseId, persona.name);
-			const ack = shortThanksLine(persona.lang);
-			await new Promise((r) => setTimeout(r, computeTypeDelay(ack)));
-			await persistAndBroadcast(io, {
-				caseId,
-				text: ack,
-				persona,
-				lang: persona.lang,
+		if (ans)
+			await send(io, {
+				caseId: caseDoc._id,
+				text: ans,
+				personaName: st.personaName,
+				lang: st.lang,
 			});
-			if (!waitFollowupTimers.get(caseId)) {
-				const t = setTimeout(
-					() => autoFollowUpAfterWait(io, caseId),
-					WAIT_FOLLOWUP_MS
-				);
-				waitFollowupTimers.set(caseId, { t, scheduledAt: Date.now() });
+	}
+
+	if (!st.slots.room_canon) {
+		if (shouldAsk(st, "askRoom"))
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.askRoom(st.lang, roomList),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+		st.step = "ROOM";
+		return;
+	}
+
+	if (!(st.slots.ci && st.slots.co)) {
+		const d = e.dates || {};
+		if (d.check_in_date && d.check_out_date) {
+			const v = validateStay({
+				check_in_date: d.check_in_date,
+				check_out_date: d.check_out_date,
+			});
+			if (v.ok) {
+				st.slots.ci = d.check_in_date;
+				st.slots.co = d.check_out_date;
 			}
-			replyLock.delete(caseId);
-			return;
 		}
-
-		// v3.7 — Identity / AI questions (expanded triggers)
-		if (
-			lowerIncludesAny(payload?.message || "", [
-				"are you ai",
-				"are you a bot",
-				"is this ai",
-				"who are you",
-				"who r u",
-				"are you human",
-				"do you work for the hotel",
-				"are you from the hotel",
-			]) ||
-			/(?:من\s+أنت|مين\s+انت|هل\s+أنت\s+روبوت|هل\s+انت\s+آلي|هل\s+أنت\s+إنسان|هل\s+أنت\s+من\s+الفندق|هل\s+تعمل\s+في\s+الفندق)/iu.test(
-				String(payload?.message || "")
-			)
-		) {
-			startTyping(io, caseId, persona.name);
-			const line = identityDeflectionLine({
-				lang: persona.lang,
-				personaName: persona.name,
-				hotelName: caseDoc.hotelId?.hotelName || "our hotel",
-			});
-			await new Promise((r) => setTimeout(r, computeTypeDelay(line)));
-			await persistAndBroadcast(io, {
-				caseId,
-				text: line,
-				persona,
-				lang: persona.lang,
-			});
-			replyLock.delete(caseId);
-			return;
-		}
-
-		// Reactive: “Did you see my confirmation?”
-		if (
-			lowerIncludesAny(payload?.message || "", [
-				"did you see my confirmation",
-				"do you see my confirmation",
-				"confirmation number",
-				"رقم التأكيد",
-				"número de confirmación",
-				"numéro de confirmation",
-			])
-		) {
-			const conf = freshConf || extractConfirmationFromCase(caseDoc);
-			if (inquiryAbout === "reservation" && conf) {
-				const resDoc =
-					st.reservationCache ||
-					(await cacheReservationByConfirmation(caseId, conf));
-				startTyping(io, caseId, persona.name);
-				let msg = "";
-				if (resDoc && resDoc.confirmation) {
-					msg = addressingLineForReservation({
-						lang: persona.lang,
-						reservation: resDoc,
-					});
-				} else {
-					msg = addressingLineForMissingReservation({
-						lang: persona.lang,
-						confirmation: conf,
-					});
-				}
-				await new Promise((r) => setTimeout(r, computeTypeDelay(msg)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: msg,
-					persona,
-					lang: persona.lang,
+		if (!(st.slots.ci && st.slots.co)) {
+			if (shouldAsk(st, "askDates"))
+				await send(io, {
+					caseId: caseDoc._id,
+					text: L.askDates(st.lang),
+					personaName: st.personaName,
+					lang: st.lang,
 				});
-				replyLock.delete(caseId);
+			st.step = "DATES";
+			return;
+		}
+	}
+
+	if (
+		!st.waitingConfirm &&
+		st.step !== "DETAILS_NAME" &&
+		st.step !== "DETAILS_PHONE" &&
+		st.step !== "DETAILS_NAT" &&
+		st.step !== "FINAL_CONFIRM"
+	) {
+		// price the selection → quote
+		const room = arr.find((r) => r.roomType === st.slots.room_canon);
+		const nights = dayjs(st.slots.co).diff(dayjs(st.slots.ci), "day");
+		const nightly = nightlyArray(room, st.slots.ci, st.slots.co);
+		if (anyBlocked(nightly)) {
+			const alt = nearestAvailableWindow(room, st.slots.ci, nights);
+			if (alt) {
+				st.waitingConfirm = true;
+				st.step = "QUOTE";
+				const msg = ((lang) => {
+					if (lang === "ar")
+						return `هذه التواريخ غير متاحة. أقرب خيار: ${alt.check_in_date} → ${alt.check_out_date} (الإجمالي ${alt.total} SAR). هل تريد استخدامه؟`;
+					if (lang === "es")
+						return `Esas fechas no están disponibles. Opción más cercana: ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). ¿Usamos esa?`;
+					if (lang === "fr")
+						return `Ces dates ne sont pas disponibles. Option la plus proche : ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). L’utiliser ?`;
+					if (lang === "ur")
+						return `یہ تاریخیں دستیاب نہیں۔ قریب ترین آپشن: ${alt.check_in_date} → ${alt.check_out_date} (کل ${alt.total} SAR). کیا اسے اختیار کریں؟`;
+					if (lang === "hi")
+						return `ये तिथियाँ उपलब्ध नहीं हैं। निकटतम विकल्प: ${alt.check_in_date} → ${alt.check_out_date} (कुल ${alt.total} SAR). अपनाएँ?`;
+					return `Those dates aren’t available. Nearest option: ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). Use this?`;
+				})(st.lang);
+				st.slots.nightly = [];
+				st.slots.total = 0;
+				st.slots.alt = alt;
+				await send(io, {
+					caseId: caseDoc._id,
+					text: msg,
+					personaName: st.personaName,
+					lang: st.lang,
+				});
+				return;
+			}
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.cannotPrice(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			st.step = "DATES";
+			return;
+		}
+		const total = totalOf(nightly);
+		if (!(total > 0)) {
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.cannotPrice(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			st.step = "DATES";
+			return;
+		}
+		st.slots.nightly = nightly;
+		st.slots.total = total;
+		st.waitingConfirm = true;
+		st.step = "QUOTE";
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.quote(st.lang, room.roomType, st.slots.ci, st.slots.co, total),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
+
+	// handle quote confirm/deny
+	if (st.step === "QUOTE" && st.waitingConfirm) {
+		if (nluOut?.signals?.is_affirmative) {
+			// proceed to details → ask name confirm using case name
+			const displayName = knownIdentity(caseDoc).name || "";
+			const proposeName = isFullName(displayName)
+				? displayName
+				: displayName
+				? displayName + " Guest"
+				: "Guest";
+			st.slots.name = "";
+			st.waitingConfirm = false;
+			st.step = "DETAILS_NAME";
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.askNameConfirm(st.lang, proposeName),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			st.slots._proposedName = proposeName;
+			return;
+		}
+		if (nluOut?.signals?.is_negative) {
+			// re-ask dates to adjust
+			st.waitingConfirm = false;
+			st.step = "DATES";
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.askDates(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			return;
+		}
+		// if unclear, just re-prompt gently once more
+		if (shouldAsk(st, "quoteNudge", 20000))
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.quote(
+					st.lang,
+					st.slots.room_canon,
+					st.slots.ci,
+					st.slots.co,
+					st.slots.total
+				),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+		return;
+	}
+
+	// NAME
+	if (st.step === "DETAILS_NAME") {
+		if (!st.slots.name) {
+			const nameEnt = e.name;
+			if (nluOut?.signals?.is_affirmative && st.slots._proposedName)
+				st.slots.name = st.slots._proposedName;
+			else if (isFullName(nameEnt || "")) st.slots.name = nameEnt.trim();
+			else if (isFullName(knownIdentity(caseDoc).name || ""))
+				st.slots.name = knownIdentity(caseDoc).name.trim();
+			if (!st.slots.name) {
+				if (shouldAsk(st, "askFullName"))
+					await send(io, {
+						caseId: caseDoc._id,
+						text: L.askFullName(st.lang),
+						personaName: st.personaName,
+						lang: st.lang,
+					});
 				return;
 			}
 		}
+		st.step = "DETAILS_PHONE";
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.askPhone(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
 
-		// On‑demand confirmation link / PDF / receipt request
-		if (isLinkOrReceiptRequest(payload?.message || "")) {
-			const conf =
-				st.lastConfirmation ||
-				st.reservationCache?.confirmation ||
-				freshConf ||
-				extractConfirmationFromCase(caseDoc);
-			if (conf) {
-				await sendPublicLinkMessage(io, {
-					caseId,
-					persona,
-					lang: persona.lang,
-					confirmation: conf,
-					publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${conf}`,
+	// PHONE (optional)
+	if (st.step === "DETAILS_PHONE") {
+		const phone = e.phone || "";
+		if (phone && isLikelyPhone(phone)) st.slots.phone = phone.trim();
+		st.step = "DETAILS_NAT";
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.askNationality(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
+
+	// NATIONALITY (validated; if blank, we still can proceed)
+	if (st.step === "DETAILS_NAT") {
+		const natIn = e.nationality_input || "";
+		if (natIn) {
+			const v = await nlu.validateNationality(natIn);
+			if (v?.valid && v?.canonical_en) st.slots.nationality_en = v.canonical_en;
+			else {
+				if (shouldAsk(st, "natBad"))
+					await send(io, {
+						caseId: caseDoc._id,
+						text: L.nationalityBad(st.lang),
+						personaName: st.personaName,
+						lang: st.lang,
+					});
+				return;
+			}
+		}
+		// Show final summary and ask for confirm to book
+		st.step = "FINAL_CONFIRM";
+		st.waitingConfirm = true;
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.finalSummary(st.lang, st.slots, hotel.hotelName || "our hotel"),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
+
+	// FINAL CONFIRM
+	if (st.step === "FINAL_CONFIRM" && st.waitingConfirm) {
+		if (nluOut?.signals?.is_affirmative) {
+			const { arr } = roomMap(hotel);
+			const room =
+				arr.find((r) => r.roomType === st.slots.room_canon) || arr[0];
+			const pickedRooms = [
+				{
+					room_type: room.roomType,
+					displayName: room.displayName || room.roomType,
+					count: 1,
+					nightly: st.slots.nightly,
+				},
+			];
+			const guest = {
+				name: st.slots.name || "Guest",
+				email: knownIdentity(caseDoc).email || "",
+				phone: st.slots.phone || "",
+				nationality: st.slots.nationality_en || "",
+				adults:
+					room.roomType === "tripleRooms"
+						? 3
+						: room.roomType === "quadRooms"
+						? 4
+						: 2,
+				children: 0,
+			};
+			const stay = { check_in_date: st.slots.ci, check_out_date: st.slots.co };
+			const res = await createReservation({
+				personaName: st.personaName,
+				hotel,
+				caseId: caseDoc._id,
+				guest,
+				stay,
+				pickedRooms,
+			});
+			if (res.ok) {
+				st.waitingConfirm = false;
+				st.step = null;
+				await send(io, {
+					caseId: caseDoc._id,
+					text: L.booked(st.lang, res.confirmation),
+					personaName: st.personaName,
+					lang: st.lang,
+				});
+				await sendPublicLinkOnce(io, {
+					caseId: caseDoc._id,
+					st,
+					confirmation: res.confirmation,
 				});
 			} else {
-				const ask =
-					persona.lang === "ar"
-						? "من فضلك شاركني رقم تأكيد الحجز لأرسل لك الرابط (يتضمن PDF)."
-						: persona.lang === "es"
-						? "Por favor comparte el número de confirmación para enviarte el enlace (incluye PDF)."
-						: persona.lang === "fr"
-						? "Veuillez partager le numéro de confirmation pour que je vous envoie le lien (PDF inclus)."
-						: persona.lang === "ur"
-						? "براہِ کرم کنفرمیشن نمبر شیئر کریں تاکہ میں لنک (PDF کے ساتھ) بھیج دوں۔"
-						: persona.lang === "hi"
-						? "कृपया कन्फर्मेशन नंबर साझा करें ताकि मैं लिंक (PDF सहित) भेज सकूँ।"
-						: "Please share your confirmation number so I can send the link (includes a PDF).";
-				startTyping(io, caseId, persona.name);
-				await new Promise((r) => setTimeout(r, computeTypeDelay(ask)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: ask,
-					persona,
-					lang: persona.lang,
+				await send(io, {
+					caseId: caseDoc._id,
+					text: L.cannotPrice(st.lang),
+					personaName: st.personaName,
+					lang: st.lang,
 				});
 			}
-			replyLock.delete(caseId);
+			return;
+		}
+		if (nluOut?.signals?.is_negative) {
+			// Go back to details (ask which field to change → start with dates)
+			st.waitingConfirm = false;
+			st.step = "DATES";
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.askDates(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			return;
+		}
+		if (shouldAsk(st, "finalNudge", 20000))
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.finalSummary(st.lang, st.slots, hotel.hotelName || "our hotel"),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+		return;
+	}
+}
+
+/* ---------- EXISTING booking runner (change/cancel) ---------- */
+async function runExisting(io, caseDoc, st, nluOut) {
+	const e = nluOut?.entities || {};
+	const conf =
+		e.confirmation_number ||
+		st.slots.confirmation ||
+		extractConfirmation(
+			String(caseDoc?.conversation?.slice(-1)?.[0]?.message || "")
+		) ||
+		null;
+	if (!conf) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: ((lang) => {
+				if (lang === "ar") return "من فضلك شاركني رقم تأكيد الحجز.";
+				if (lang === "es")
+					return "Por favor comparte el número de confirmación.";
+				if (lang === "fr")
+					return "Merci de partager le numéro de confirmation.";
+				if (lang === "ur") return "براہ کرم کنفرمیشن نمبر شیئر کریں۔";
+				if (lang === "hi") return "कृपया कन्फर्मेशन नंबर साझा करें।";
+				return "Please share your confirmation number.";
+			})(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
+	st.slots.confirmation = conf;
+	const found = await findReservationByConfirmation(conf);
+	if (!found?.ok) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: ((lang) => {
+				if (lang === "ar")
+					return "لم أجد هذا الرقم. شارك رقم التأكيد مرة أخرى.";
+				if (lang === "es")
+					return "No encuentro ese número. Compártelo de nuevo, por favor.";
+				if (lang === "fr")
+					return "Je ne trouve pas ce numéro. Merci de le renvoyer.";
+				if (lang === "ur")
+					return "یہ نمبر نہیں ملا۔ براہِ کرم دوبارہ شیئر کریں۔";
+				if (lang === "hi") return "यह नंबर नहीं मिला। कृपया फिर से साझा करें।";
+				return "I couldn’t locate that confirmation. Please share it again.";
+			})(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return;
+	}
+	const res = found.reservation;
+
+	if (nluOut?.intents?.cancel_reservation) {
+		st.waitingConfirm = true;
+		st.step = "EXIST_CANCEL";
+		await send(io, {
+			caseId: caseDoc._id,
+			text: `Cancel reservation ${res.confirmation}?`,
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		if (nluOut?.signals?.is_affirmative) {
+			const out = await cancelReservationByIdOrConfirmation(res._id);
+			if (out.ok) {
+				await send(io, {
+					caseId: caseDoc._id,
+					text: `Reservation ${res.confirmation} cancelled.`,
+					personaName: st.personaName,
+					lang: st.lang,
+				});
+				await sendPublicLinkOnce(io, {
+					caseId: caseDoc._id,
+					st,
+					confirmation: res.confirmation,
+				});
+			} else {
+				await send(io, {
+					caseId: caseDoc._id,
+					text: `Couldn’t cancel: ${out.error || "Unknown error"}`,
+					personaName: st.personaName,
+					lang: st.lang,
+				});
+			}
+			st.waitingConfirm = false;
+			st.step = null;
+		}
+		return;
+	}
+
+	if (nluOut?.intents?.change_dates) {
+		const d = e.dates || {};
+		if (!(d.check_in_date && d.check_out_date)) {
+			await send(io, {
+				caseId: caseDoc._id,
+				text: ((lang) => {
+					if (lang === "ar")
+						return "ما التواريخ الجديدة؟ (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+					if (lang === "es")
+						return "¿Cuáles son las nuevas fechas? (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+					if (lang === "fr")
+						return "Quelles sont les nouvelles dates ? (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+					if (lang === "ur") return "نئی تاریخیں؟ (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+					if (lang === "hi") return "नई तिथियाँ? (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+					return "What are the new dates? (YYYY‑MM‑DD → YYYY‑MM‑DD)";
+				})(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+			return;
+		}
+		const v = validateStay({
+			check_in_date: d.check_in_date,
+			check_out_date: d.check_out_date,
+		});
+		if (!v.ok) {
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.badDates(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
 			return;
 		}
 
-		/* ---------- Deterministic reservation flows (cancel/change) ---------- */
-
-		// CANCEL — if last assistant asked to cancel and user said "yes"
-		if (
-			lastAssistantAskedToCancel(caseDoc.conversation || [], persona.name) &&
-			isAffirmative(payload?.message || "")
-		) {
-			const confToken = st.lastConfirmation || freshConf;
-			const resDoc =
-				st.reservationCache ||
-				(confToken
-					? await cacheReservationByConfirmation(caseId, confToken)
-					: null);
-			if (resDoc?._id || confToken) {
-				startTyping(io, caseId, persona.name);
-				const doing =
-					persona.lang === "ar"
-						? "سألغي الحجز الآن. لحظة من فضلك."
-						: persona.lang === "es"
-						? "Procedo a cancelar la reserva. Un momento, por favor."
-						: persona.lang === "fr"
-						? "J’annule la réservation maintenant. Un instant, s’il vous plaît."
-						: persona.lang === "ur"
-						? "میں ریزرویشن منسوخ کر رہا/رہی ہوں—ایک لمحہ۔"
-						: persona.lang === "hi"
-						? "मैं आरक्षण रद्द करता/करती हूँ—एक क्षण।"
-						: "I’ll cancel the reservation now. One moment, please.";
-				await new Promise((r) => setTimeout(r, computeTypeDelay(doing)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: doing,
-					persona,
-					lang: persona.lang,
+		// price against same room line
+		const hotel = await HotelDetails.findById(res.hotelId).lean();
+		const firstLine = (res.pickedRoomsType || [])[0];
+		const canon =
+			firstLine?.room_type ||
+			canonicalFromText(firstLine?.displayName || "") ||
+			"doubleRooms";
+		const { arr } = roomMap(hotel);
+		const room = arr.find((r) => r.roomType === canon) || arr[0];
+		const nights = dayjs(d.check_out_date).diff(dayjs(d.check_in_date), "day");
+		const nightly = nightlyArray(room, d.check_in_date, d.check_out_date);
+		if (anyBlocked(nightly)) {
+			const alt = nearestAvailableWindow(room, d.check_in_date, nights);
+			if (alt) {
+				st.waitingConfirm = true;
+				st.step = "EXIST_CHANGE_ALT";
+				st.slots.alt = alt;
+				await send(io, {
+					caseId: caseDoc._id,
+					text: ((lang) => {
+						if (lang === "ar")
+							return `هذه التواريخ غير متاحة. أقرب خيار: ${alt.check_in_date} → ${alt.check_out_date} (الإجمالي ${alt.total} SAR). هل تريد استخدامه؟`;
+						if (lang === "es")
+							return `Esas fechas no están disponibles. Opción más cercana: ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). ¿La usamos?`;
+						if (lang === "fr")
+							return `Ces dates ne sont pas disponibles. Option proche : ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). L’utiliser ?`;
+						if (lang === "ur")
+							return `یہ تاریخیں دستیاب نہیں۔ قریب ترین آپشن: ${alt.check_in_date} → ${alt.check_out_date} (کل ${alt.total} SAR). منتخب کریں؟`;
+						if (lang === "hi")
+							return `ये तिथियाँ उपलब्ध नहीं हैं। निकटतम विकल्प: ${alt.check_in_date} → ${alt.check_out_date} (कुल ${alt.total} SAR). अपनाएँ?`;
+						return `Those dates aren’t available. Nearest option: ${alt.check_in_date} → ${alt.check_out_date} (total ${alt.total} SAR). Use this?`;
+					})(st.lang),
+					personaName: st.personaName,
+					lang: st.lang,
 				});
-
-				const upd = await cancelReservationByIdOrConfirmation(
-					resDoc?._id || confToken
-				);
-				const conf = resDoc?.confirmation || confToken || "";
-				const done = upd?.ok
-					? persona.lang === "ar"
-						? `تم إلغاء الحجز ${conf}. رابط التفاصيل: ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\nهل أستطيع مساعدتك بشيء آخر؟`
-						: persona.lang === "es"
-						? `Reserva ${conf} cancelada. Detalles: ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\n¿Puedo ayudarte con algo más?`
-						: persona.lang === "fr"
-						? `Réservation ${conf} annulée. Détails : ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\nPuis‑je vous aider avec autre chose ?`
-						: persona.lang === "ur"
-						? `ریزرویشن ${conf} منسوخ ہوگیا۔ تفصیل: ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\nکیا مزید کسی چیز میں مدد کر سکتا/سکتی ہوں؟`
-						: persona.lang === "hi"
-						? `आरक्षण ${conf} रद्द कर दिया गया। विवरण: ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\nक्या और किसी चीज़ में मदद करूँ?`
-						: `Reservation ${conf} has been cancelled. Details: ${PUBLIC_CLIENT_URL}/single-reservation/${conf}\nIs there anything else I can help you with?`
-					: persona.lang === "ar"
-					? `عذرًا، تعذّر إلغاء الحجز الآن: ${upd?.error || "خطأ غير معروف"}.`
-					: persona.lang === "es"
-					? `No pude cancelar ahora: ${upd?.error || "error desconocido"}.`
-					: persona.lang === "fr"
-					? `Impossible d’annuler : ${upd?.error || "erreur inconnue"}.`
-					: persona.lang === "ur"
-					? `منسوخی ممکن نہیں: ${upd?.error || "نامعلوم خرابی"}.`
-					: persona.lang === "hi"
-					? `रद्दीकरण संभव नहीं: ${upd?.error || "अज्ञात त्रुटि"}.`
-					: `Sorry—couldn’t cancel right now: ${
-							upd?.error || "Unknown error"
-					  }.`;
-				startTyping(io, caseId, persona.name);
-				await new Promise((r) => setTimeout(r, computeTypeDelay(done)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: done,
-					persona,
-					lang: persona.lang,
-				});
-				replyLock.delete(caseId);
-				return;
-			}
-		}
-
-		// CHANGE DATES — detect intent and reprice (unchanged)
-		const hasChangeDatesIntent =
-			lowerIncludesAny(payload?.message || "", CHANGE_WORDS) &&
-			lowerIncludesAny(payload?.message || "", DATE_WORDS);
-		const baseStart = st.reservationCache?.checkin_date || null;
-		const baseEnd = st.reservationCache?.checkout_date || null;
-		const proposedDates = parseDateTokens(
-			payload?.message || "",
-			baseStart,
-			baseEnd
-		);
-		if (
-			(hasChangeDatesIntent || proposedDates) &&
-			(st.reservationCache || freshConf)
-		) {
-			const resDoc =
-				st.reservationCache ||
-				(freshConf
-					? await cacheReservationByConfirmation(caseId, freshConf)
-					: null);
-			if (
-				resDoc &&
-				proposedDates?.check_in_date &&
-				proposedDates?.check_out_date
-			) {
-				const hotel = await HotelDetails.findById(resDoc.hotelId).lean();
-				const repr = await repriceReservation({
-					reservation: resDoc,
-					hotel,
-					newStay: proposedDates,
-					newRoomTypeCanon: null,
-				});
-				if (repr.ok) {
-					startTyping(io, caseId, persona.name);
-					const preview =
-						persona.lang === "ar"
-							? `سأحدّث التواريخ إلى ${repr.next.checkin_date} → ${repr.next.checkout_date}.\nالإجمالي الجديد: ${repr.next.total_amount} SAR.\nأؤكد التعديل؟`
-							: persona.lang === "es"
-							? `Actualizaré las fechas a ${repr.next.checkin_date} → ${repr.next.checkout_date}.\nNuevo total: ${repr.next.total_amount} SAR.\n¿Confirmo el cambio?`
-							: persona.lang === "fr"
-							? `Je mets à jour aux dates ${repr.next.checkin_date} → ${repr.next.checkout_date}.\nNouveau total : ${repr.next.total_amount} SAR.\nConfirmez‑vous ?`
-							: persona.lang === "ur"
-							? `میں تاریخیں ${repr.next.checkin_date} → ${repr.next.checkout_date} کر دوں؟\nنیا ٹوٹل: ${repr.next.total_amount} SAR.\nکیا کنفرم کروں؟`
-							: persona.lang === "hi"
-							? `तिथियाँ ${repr.next.checkin_date} → ${repr.next.checkout_date} कर दूँ?\nनया कुल: ${repr.next.total_amount} SAR.\nक्या पुष्टि कर दूँ?`
-							: `I’ll update the dates to ${repr.next.checkin_date} → ${repr.next.checkout_date}.\nNew total: ${repr.next.total_amount} SAR.\nShall I confirm the change?`;
-					await new Promise((r) => setTimeout(r, computeTypeDelay(preview)));
-					await persistAndBroadcast(io, {
-						caseId,
-						text: preview,
-						persona,
-						lang: persona.lang,
-					});
-
-					st.pendingAction = {
-						kind: "applyDateChange",
-						repr,
-						reservationId: resDoc._id,
-						confirmation: resDoc.confirmation,
-					};
-					replyLock.delete(caseId);
-					return;
-				} else if (repr.blocked && repr.alternative) {
-					startTyping(io, caseId, persona.name);
-					const alt = repr.alternative;
-					const altMsg =
-						persona.lang === "ar"
-							? `هذه التواريخ غير متاحة لنوع الغرفة. أقرب خيار: ${alt.check_in_date} → ${alt.check_out_date} بإجمالي ${alt.totals.totalWithCommission} SAR. هل تود التحويل لهذا الخيار؟`
-							: persona.lang === "es"
-							? `Esas fechas no están disponibles. Opción más cercana: ${alt.check_in_date} → ${alt.check_out_date} por ${alt.totals.totalWithCommission} SAR. ¿Quieres usarla?`
-							: persona.lang === "fr"
-							? `Ces dates ne sont pas disponibles. Option la plus proche : ${alt.check_in_date} → ${alt.check_out_date} pour ${alt.totals.totalWithCommission} SAR. Souhaitez‑vous l’utiliser ?`
-							: persona.lang === "ur"
-							? `یہ تاریخیں دستیاب نہیں۔ قریب ترین ونڈو: ${alt.check_in_date} → ${alt.check_out_date} بمع ${alt.totals.totalWithCommission} SAR۔ کیا اسے منتخب کروں؟`
-							: persona.lang === "hi"
-							? `ये तिथियाँ उपलब्ध नहीं हैं। निकटतम विकल्प: ${alt.check_in_date} → ${alt.check_out_date}, कुल ${alt.totals.totalWithCommission} SAR. क्या इसे चुनूँ?`
-							: `Those dates aren’t available. Nearest option: ${alt.check_in_date} → ${alt.check_out_date}, total ${alt.totals.totalWithCommission} SAR. Use this instead?`;
-					await new Promise((r) => setTimeout(r, computeTypeDelay(altMsg)));
-					await persistAndBroadcast(io, {
-						caseId,
-						text: altMsg,
-						persona,
-						lang: persona.lang,
-					});
-
-					st.pendingAction = {
-						kind: "applyAltWindow",
-						alt,
-						reservationId: resDoc._id,
-						confirmation: resDoc.confirmation,
-					};
-					replyLock.delete(caseId);
-					return;
-				} else {
-					startTyping(io, caseId, persona.name);
-					const fail =
-						persona.lang === "ar"
-							? "تعذّر تسعير هذه التغييرات الآن. هل تودّ تغيير نوع الغرفة أو التواريخ؟"
-							: persona.lang === "es"
-							? "No pude recalcular ahora. ¿Deseas cambiar el tipo de habitación o las fechas?"
-							: persona.lang === "fr"
-							? "Impossible de recalculer maintenant. Voulez‑vous changer le type de chambre ou les dates ?"
-							: persona.lang === "ur"
-							? "اس وقت دوبارہ قیمت نہیں نکال سکا/سکی۔ کیا کمرا ٹائپ یا تاریخیں بدلنا چاہیں گے؟"
-							: persona.lang === "hi"
-							? "अभी फिर से मूल्य नहीं निकाल सका/सकी। क्या कमरा टाइप या तिथियाँ बदलना चाहते हैं?"
-							: "I couldn’t recalculate right now—would you like to change the room type or dates?";
-					await new Promise((r) => setTimeout(r, computeTypeDelay(fail)));
-					await persistAndBroadcast(io, {
-						caseId,
-						text: fail,
-						persona,
-						lang: persona.lang,
-					});
-					replyLock.delete(caseId);
-					return;
-				}
-			}
-		}
-
-		// APPLY pending changes after "yes"
-		if (st.pendingAction && isAffirmative(payload?.message || "")) {
-			if (
-				st.pendingAction.kind === "applyDateChange" &&
-				st.pendingAction.repr
-			) {
-				const { repr, reservationId, confirmation } = st.pendingAction;
-				st.pendingAction = null;
-
-				const updates = {
-					checkin_date: repr.next.checkin_date,
-					checkout_date: repr.next.checkout_date,
-					days_of_residence: repr.next.days_of_residence,
-					pickedRoomsType: repr.next.pickedRoomsType,
-					total_amount: repr.next.total_amount,
-					commission: repr.next.commission,
-				};
-				const out = await applyReservationUpdate({
-					reservation_id: reservationId,
-					changes: updates,
-				});
-
-				startTyping(io, caseId, persona.name);
-				const done = out.ok
-					? persona.lang === "ar"
-						? `تم تحديث التواريخ.\nسأرسل رابط التأكيد في الرسالة التالية.\nهل أساعدك بشيء آخر؟`
-						: persona.lang === "es"
-						? `Fechas actualizadas.\nTe envío el enlace de confirmación enseguida.\n¿Algo más?`
-						: persona.lang === "fr"
-						? `Dates mises à jour.\nJ’envoie le lien de confirmation juste après.\nPuis‑je aider encore ?`
-						: persona.lang === "ur"
-						? `تاریخیں اپڈیٹ ہو گئیں۔\nاگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔\nکیا مزید مدد درکار ہے؟`
-						: persona.lang === "hi"
-						? `तिथियाँ अपडेट हो गईं।\nअगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।\nऔर कुछ?`
-						: `Dates updated.\nI’ll send your confirmation link next.\nIs there anything else I can help you with?`
-					: persona.lang === "ar"
-					? `تعذّر تحديث التواريخ: ${out.error || "خطأ غير معروف"}.`
-					: persona.lang === "es"
-					? `No pude actualizar fechas: ${out.error || "error desconocido"}.`
-					: persona.lang === "fr"
-					? `Impossible de mettre à jour les dates : ${
-							out.error || "erreur inconnue"
-					  }.`
-					: persona.lang === "ur"
-					? `تاریخیں اپڈیٹ نہ ہو سکیں: ${out.error || "نامعلوم خرابی"}.`
-					: persona.lang === "hi"
-					? `तिथियाँ अपडेट नहीं हो सकीं: ${out.error || "अज्ञात त्रुटि"}.`
-					: `Sorry—couldn’t update the dates: ${out.error || "Unknown error"}.`;
-				await new Promise((r) => setTimeout(r, computeTypeDelay(done)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: done,
-					persona,
-					lang: persona.lang,
-				});
-
-				if (out.ok) {
-					await postSuccessLinkIfNeeded(
-						io,
-						{ caseId, persona, lang: persona.lang },
-						{
-							confirmation,
-							publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`,
-							lastText: done,
-						}
-					);
-				}
-				replyLock.delete(caseId);
-				return;
-			}
-			if (st.pendingAction.kind === "applyAltWindow" && st.pendingAction.alt) {
-				const { alt, reservationId, confirmation } = st.pendingAction;
-				st.pendingAction = null;
-
-				const hotelId =
-					(st.reservationCache && st.reservationCache.hotelId) || null;
-				const hotel = hotelId
-					? await HotelDetails.findById(hotelId).lean()
-					: null;
-				const resDoc = st.reservationCache;
-				if (hotel && resDoc) {
-					const repr2 = await repriceReservation({
-						reservation: resDoc,
-						hotel,
-						newStay: {
+				if (nluOut?.signals?.is_affirmative) {
+					const out = await applyReservationUpdate({
+						reservation_id: res._id,
+						changes: {
 							check_in_date: alt.check_in_date,
 							check_out_date: alt.check_out_date,
 						},
-						newRoomTypeCanon: null,
 					});
-					if (repr2.ok) {
-						const updates = {
-							checkin_date: repr2.next.checkin_date,
-							checkout_date: repr2.next.checkout_date,
-							days_of_residence: repr2.next.days_of_residence,
-							pickedRoomsType: repr2.next.pickedRoomsType,
-							total_amount: repr2.next.total_amount,
-							commission: repr2.next.commission,
-						};
-						const out = await applyReservationUpdate({
-							reservation_id: reservationId,
-							changes: updates,
+					if (out.ok) {
+						await send(io, {
+							caseId: caseDoc._id,
+							text: L.updated(st.lang),
+							personaName: st.personaName,
+							lang: st.lang,
 						});
-
-						startTyping(io, caseId, persona.name);
-						const msg = out.ok
-							? persona.lang === "ar"
-								? `تم التحديث إلى ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nسأرسل رابط التأكيد في الرسالة التالية.\nهل أساعدك بشيء آخر؟`
-								: persona.lang === "es"
-								? `Actualizado a ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nTe envío el enlace de confirmación enseguida.\n¿Algo más?`
-								: persona.lang === "fr"
-								? `Mis à jour vers ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nJ’envoie le lien de confirmation juste après.\nPuis‑je aider encore ?`
-								: persona.lang === "ur"
-								? `اب ${repr2.next.checkin_date} → ${repr2.next.checkout_date} پر اپڈیٹ ہو گیا۔\nاگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔\nکیا مزید مدد درکار ہے؟`
-								: persona.lang === "hi"
-								? `${repr2.next.checkin_date} → ${repr2.next.checkout_date} पर अपडेट हो गया।\nअगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।\nऔर कुछ?`
-								: `Updated to ${repr2.next.checkin_date} → ${repr2.next.checkout_date}.\nI’ll send your confirmation link next.\nIs there anything else I can help you with?`
-							: `Sorry—couldn’t apply the alternative window: ${
-									out.error || "Unknown error"
-							  }.`;
-						await new Promise((r) => setTimeout(r, computeTypeDelay(msg)));
-						await persistAndBroadcast(io, {
-							caseId,
-							text: msg,
-							persona,
-							lang: persona.lang,
+						await sendPublicLinkOnce(io, {
+							caseId: caseDoc._id,
+							st,
+							confirmation: res.confirmation,
 						});
-
-						if (out.ok) {
-							await postSuccessLinkIfNeeded(
-								io,
-								{ caseId, persona, lang: persona.lang },
-								{
-									confirmation,
-									publicLink: `${PUBLIC_CLIENT_URL}/single-reservation/${confirmation}`,
-									lastText: msg,
-								}
-							);
-						}
-						replyLock.delete(caseId);
-						return;
+					} else {
+						await send(io, {
+							caseId: caseDoc._id,
+							text: `Couldn't update: ${out.error || "Unknown error"}`,
+							personaName: st.personaName,
+							lang: st.lang,
+						});
 					}
+					st.waitingConfirm = false;
+					st.step = null;
 				}
-			}
-		}
-
-		// Close etiquette after “anything else”
-		if (lowerIncludesAny(payload?.message || "", STRONG_GOODBYE)) {
-			const askedMore = lastAssistantAskedAnythingElse(
-				caseDoc.conversation || [],
-				persona.name
-			);
-			if (askedMore && !st.pendingAction) {
-				const hotelName = caseDoc.hotelId?.hotelName || "our hotel";
-				startTyping(io, caseId, persona.name);
-				const bye =
-					persona.lang === "ar"
-						? `شكرًا لاختيارك ${hotelName}. نسعد بخدمتك دائمًا.`
-						: persona.lang === "es"
-						? `Gracias por elegir ${hotelName}. ¡Siempre a tu servicio!`
-						: persona.lang === "fr"
-						? `Merci d’avoir choisi ${hotelName}. Nous restons à votre service.`
-						: persona.lang === "ur"
-						? `آپ نے ${hotelName} کا انتخاب کیا، شکریہ۔ ہم حاضر ہیں۔`
-						: persona.lang === "hi"
-						? `धन्यवाद, आपने ${hotelName} चुना। हम हमेशा आपकी सेवा में हैं।`
-						: `Thank you for choosing ${hotelName}. We’re always here if you need anything.`;
-				await new Promise((r) => setTimeout(r, computeTypeDelay(bye)));
-				await persistAndBroadcast(io, {
-					caseId,
-					text: bye,
-					persona,
-					lang: persona.lang,
-				});
-				const t = scheduleClose(io, caseId, persona.name, AUTO_CLOSE_AFTER_MS);
-				closeTimers.set(caseId, t);
-				replyLock.delete(caseId);
 				return;
 			}
-		}
-
-		/* ---------- NEW BOOKING flow ---------- */
-		const askedConfirm = lastAssistantAskedForConfirmation(
-			caseDoc.conversation || [],
-			persona.name
-		);
-		st.intentProceed =
-			st.intentProceed ||
-			(askedConfirm &&
-				!lowerIncludesAny(payload?.message || "", CANCEL_WORDS) &&
-				isAffirmative(payload?.message || "")) ||
-			(!lowerIncludesAny(payload?.message || "", CANCEL_WORDS) &&
-				lowerIncludesAny(payload?.message || "", STRONG_BOOK_INTENT));
-
-		const plan = evaluateBookingReadiness(caseDoc, st);
-
-		// v3.7 — Single, bundled clarification if inputs are ambiguous/illogical
-		if (st.intentProceed) {
-			const issues = collectInputIssues({
-				latestText: payload?.message || "",
-				plan,
-				state: st,
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.cannotPrice(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
 			});
-			if (issues.length) {
-				const key = JSON.stringify(issues);
-				const now = Date.now();
-				const cooldownMs = 60000;
-				const canAskAgain =
-					!st.lastClarifyKey ||
-					st.lastClarifyKey !== key ||
-					now - (st.askedClarifyAt || 0) > cooldownMs;
-
-				if (canAskAgain) {
-					const clarifyMsg = buildClarificationMessage({
-						lang: persona.lang,
-						issues,
-						missing: plan.missing,
-					});
-					startTyping(io, caseId, persona.name);
-					await new Promise((r) => setTimeout(r, computeTypeDelay(clarifyMsg)));
-					await persistAndBroadcast(io, {
-						caseId,
-						text: clarifyMsg,
-						persona,
-						lang: persona.lang,
-					});
-
-					st.lastClarifyKey = key;
-					st.askedClarifyAt = now;
-					replyLock.delete(caseId);
-					return;
-				}
-			}
-		}
-
-		// Ask for only truly‑missing fields (with your existing de‑dup)
-		if (st.intentProceed && !plan.ready) {
-			const key = JSON.stringify([...plan.missing].sort());
-			const now = Date.now();
-			const cooldownMs = 60000;
-			const canAskAgain =
-				!st.lastMissingKey ||
-				st.lastMissingKey !== key ||
-				now - (st.askedMissingAt || 0) > cooldownMs;
-
-			startTyping(io, caseId, persona.name);
-			const ask = canAskAgain
-				? askForMissingFieldsText(persona.lang, plan.missing)
-				: askForMissingFieldsText(persona.lang, plan.missing, true);
-			await new Promise((r) => setTimeout(r, computeTypeDelay(ask)));
-			await persistAndBroadcast(io, {
-				caseId,
-				text: ask,
-				persona,
-				lang: persona.lang,
-			});
-
-			st.askedMissingAt = now;
-			st.lastMissingKey = key;
-			st.missingAskCount = (st.missingAskCount || 0) + 1;
-
-			replyLock.delete(caseId);
 			return;
 		}
-
-		// Create reservation when ready (unchanged behavior + separate link message)
-		if (
-			st.intentProceed &&
-			plan.ready &&
-			!st.booked &&
-			(plan.chosen || st.collected.roomTypeHint) &&
-			plan.stay
-		) {
-			startTyping(io, caseId, persona.name);
-			const processingLine =
-				persona.lang === "ar"
-					? "تم—سأُكمل الحجز الآن. لحظة من فضلك."
-					: persona.lang === "es"
-					? "Perfecto—voy a finalizar tu reserva ahora. Un momento, por favor."
-					: persona.lang === "fr"
-					? "Parfait—je finalise votre réservation maintenant. Un instant, s’il vous plaît."
-					: persona.lang === "ur"
-					? "ٹھیک ہے—میں ابھی آپ کی بکنگ مکمل کرتا/کرتی ہوں۔ ذرا سا وقت دیں۔"
-					: persona.lang === "hi"
-					? "ठीक है—मैं अभी आपकी बुकिंग पूरी करता/करती हूँ। एक क्षण।"
-					: "Great—I’ll finalize your reservation now. One moment, please.";
-			await new Promise((r) => setTimeout(r, computeTypeDelay(processingLine)));
-			await persistAndBroadcast(io, {
-				caseId,
-				text: processingLine,
-				persona,
-				lang: persona.lang,
+		const total = totalOf(nightly);
+		if (!(total > 0)) {
+			await send(io, {
+				caseId: caseDoc._id,
+				text: L.cannotPrice(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
 			});
+			return;
+		}
+		// ask to confirm change
+		st.waitingConfirm = true;
+		st.step = "EXIST_CHANGE";
+		st.slots.ci = d.check_in_date;
+		st.slots.co = d.check_out_date;
+		await send(io, {
+			caseId: caseDoc._id,
+			text: ((lang) => {
+				const dates = `${st.slots.ci} → ${st.slots.co}`;
+				if (lang === "ar")
+					return `سأحدث حجز ${res.confirmation} إلى ${dates}. أؤكد التعديل؟`;
+				if (lang === "es")
+					return `Actualizaré la reserva ${res.confirmation} a ${dates}. ¿Confirmo el cambio?`;
+				if (lang === "fr")
+					return `Je mets à jour la réservation ${res.confirmation} en ${dates}. Confirmez‑vous ?`;
+				if (lang === "ur")
+					return `ریزرویشن ${res.confirmation} کو ${dates} میں اپڈیٹ کروں؟ کنفرم؟`;
+				if (lang === "hi")
+					return `आरक्षण ${res.confirmation} को ${dates} में अपडेट कर दूँ? पुष्टि करूँ?`;
+				return `I will update reservation ${res.confirmation} to ${dates}. Shall I confirm the change?`;
+			})(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
 
-			let chosen = plan.chosen;
-			if (!chosen && st.lastPricing?.results?.length)
-				chosen = st.lastPricing.results.find((r) => r.ok) || null;
-
-			const pickedRooms = [
-				{
-					room_type:
-						(chosen && chosen.roomType) ||
-						st.collected.roomTypeHint ||
-						"doubleRooms",
-					displayName: (chosen && chosen.displayName) || "Room",
-					count: plan.roomsCount || (chosen && chosen.count) || 1,
-					pricingByDay:
-						(chosen && chosen.nightly) ||
-						st.lastPricing?.results?.[0]?.nightly ||
-						[],
-				},
-			];
-
-			const result = await createReservationViaEndpointOrLocal({
-				personaName: persona.name,
-				hotel: plan.hotel,
-				caseId,
-				guest: plan.guest,
-				stay: plan.stay,
-				pickedRooms,
+		if (nluOut?.signals?.is_affirmative) {
+			const out = await applyReservationUpdate({
+				reservation_id: res._id,
+				changes: { check_in_date: st.slots.ci, check_out_date: st.slots.co },
 			});
-
-			st.booked = !!result?.ok;
-			st.lastConfirmation = safeConfirmValue(result?.confirmation)
-				? result.confirmation
-				: st.lastConfirmation || "";
-			st.publicLink = result?.publicLink || st.publicLink || null;
-			st.paymentLink = result?.paymentLink || st.paymentLink || null;
-
-			startTyping(io, caseId, persona.name);
-			let confirmText = "";
-			if (result?.ok) {
-				const lines = [];
-				if (persona.lang === "ar") {
-					lines.push("تم تأكيد الحجز ✅");
-					if (st.lastConfirmation)
-						lines.push(`رقم التأكيد: ${st.lastConfirmation}`);
-					lines.push("سأرسل رابط التأكيد في الرسالة التالية.");
-					lines.push("هل أستطيع مساعدتك في شيء آخر؟");
-					confirmText = lines.join("\n");
-				} else if (persona.lang === "es") {
-					lines.push("¡Reserva confirmada! ✅");
-					if (st.lastConfirmation)
-						lines.push(`Número de confirmación: ${st.lastConfirmation}`);
-					lines.push("Te envío el enlace de confirmación enseguida.");
-					lines.push("¿Puedo ayudarte con algo más?");
-					confirmText = lines.join("\n");
-				} else if (persona.lang === "fr") {
-					lines.push("Réservation confirmée ✅");
-					if (st.lastConfirmation)
-						lines.push(`Numéro de confirmation : ${st.lastConfirmation}`);
-					lines.push("J’envoie le lien de confirmation juste après.");
-					lines.push("Puis‑je vous aider avec autre chose ?");
-					confirmText = lines.join("\n");
-				} else if (persona.lang === "ur") {
-					lines.push("بکنگ کنفرم ہو گئی ✅");
-					if (st.lastConfirmation)
-						lines.push(`کنفرمیشن نمبر: ${st.lastConfirmation}`);
-					lines.push("اگلے پیغام میں کنفرمیشن لنک بھیجتا/بھیجتی ہوں۔");
-					lines.push("کیا کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟");
-					confirmText = lines.join("\n");
-				} else if (persona.lang === "hi") {
-					lines.push("आरक्षण की पुष्टि हो गई ✅");
-					if (st.lastConfirmation)
-						lines.push(`कन्फर्मेशन नंबर: ${st.lastConfirmation}`);
-					lines.push("अगले संदेश में पुष्टि लिंक भेजता/भेजती हूँ।");
-					lines.push("क्या और किसी चीज़ में मदद करूँ?");
-					confirmText = lines.join("\n");
-				} else {
-					lines.push("Reservation confirmed! ✅");
-					if (st.lastConfirmation)
-						lines.push(`Confirmation number: ${st.lastConfirmation}`);
-					lines.push("I’ll send your confirmation link next.");
-					lines.push("Is there anything else I can help you with?");
-					confirmText = lines.join("\n");
-				}
+			if (out.ok) {
+				await send(io, {
+					caseId: caseDoc._id,
+					text: L.updated(st.lang),
+					personaName: st.personaName,
+					lang: st.lang,
+				});
+				await sendPublicLinkOnce(io, {
+					caseId: caseDoc._id,
+					st,
+					confirmation: res.confirmation,
+				});
 			} else {
-				const err =
-					result?.error || "Something went wrong finalizing the booking.";
-				confirmText =
-					persona.lang === "ar"
-						? `عذرًا—حدث خطأ أثناء إكمال الحجز: ${err}`
-						: persona.lang === "es"
-						? `Perdona—hubo un problema al finalizar la reserva: ${err}`
-						: persona.lang === "fr"
-						? `Désolé—un problème est survenu : ${err}`
-						: persona.lang === "ur"
-						? `معذرت—بکنگ مکمل کرتے وقت مسئلہ پیش آیا: ${err}`
-						: persona.lang === "hi"
-						? `क्षमा करें—बुकिंग पूरी करते समय समस्या आई: ${err}`
-						: `Sorry—there was an issue finalizing your booking: ${err}`;
+				await send(io, {
+					caseId: caseDoc._id,
+					text: `Couldn't update: ${out.error || "Unknown error"}`,
+					personaName: st.personaName,
+					lang: st.lang,
+				});
 			}
-			await new Promise((r) => setTimeout(r, computeTypeDelay(confirmText)));
-			await persistAndBroadcast(io, {
-				caseId,
-				text: confirmText,
-				persona,
-				lang: persona.lang,
-			});
-
-			if (result?.ok) {
-				await postSuccessLinkIfNeeded(
-					io,
-					{ caseId, persona, lang: persona.lang },
-					{
-						confirmation: st.lastConfirmation,
-						publicLink: st.publicLink,
-						lastText: confirmText,
-					}
-				);
-			}
-
-			replyLock.delete(caseId);
-			return;
+			st.waitingConfirm = false;
+			st.step = null;
 		}
-
-		/* ---------- Fallback to model with guardrails ---------- */
-		startTyping(io, caseId, persona.name);
-
-		let extraPolicy = "";
-		if (inquiryAbout === "reserve_room" || inquiryAbout === "reserve_bed") {
-			extraPolicy +=
-				"This is a new reservation. Start by asking for dates and preferred room type; do not suggest cancel/edit unless guest asks.";
-		}
-		if (st.reservationCache?.confirmation) {
-			extraPolicy +=
-				(extraPolicy ? "\n" : "") +
-				`We already have reservation ${st.reservationCache.confirmation}. If guest asks to cancel/change/add, use it directly. Do not ask for new-booking fields.`;
-		}
-		extraPolicy +=
-			"\nNever claim a cancellation or booking is complete unless the tool call returned ok==true.";
-
-		const asked = lastAssistantAskedForConfirmation(
-			caseDoc.conversation || [],
-			persona.name
-		);
-		const askedToCancel = lastAssistantAskedToCancel(
-			caseDoc.conversation || [],
-			persona.name
-		);
-
-		const confirmedProceed =
-			(asked && isAffirmative(payload?.message || "")) ||
-			lowerIncludesAny(payload?.message || "", STRONG_BOOK_INTENT);
-		const confirmedCancel =
-			(askedToCancel && isAffirmative(payload?.message || "")) ||
-			lowerIncludesAny(payload?.message || "", [
-				"cancel it",
-				"cancel the booking",
-			]);
-
-		const { text: rawText } = await generateReply(client, {
-			caseDoc,
-			persona,
-			currentMessage: payload,
-			model: MODEL,
-			confirmedProceed,
-			confirmedCancel,
-			systemAppend: extraPolicy,
-		});
-		let text = rawText || "";
-		if (!text) {
-			text =
-				persona.lang === "ar"
-					? "هل تفضل حجزًا جديدًا أم لديك حجز تريد تعديله؟"
-					: persona.lang === "es"
-					? "¿Prefieres una nueva reserva o modificar una existente?"
-					: persona.lang === "fr"
-					? "Souhaitez‑vous une nouvelle réservation ou modifier une existante ?"
-					: persona.lang === "ur"
-					? "نئی بکنگ کریں یا موجودہ میں ترمیم؟"
-					: persona.lang === "hi"
-					? "नई बुकिंग करें या मौजूदा में बदलाव?"
-					: "Would you like a new booking or to edit an existing one?";
-		}
-		if (lowerIncludesAny(payload?.message || "", WAITING_SIGNALS)) {
-			if (persona.lang === "ar") text = `شكرًا لصبرك — ${text}`;
-			else if (persona.lang === "es")
-				text = `Gracias por tu paciencia — ${text}`;
-			else if (persona.lang === "fr")
-				text = `Merci pour votre patience — ${text}`;
-			else if (persona.lang === "ur") text = `آپ کے صبر کا شکریہ — ${text}`;
-			else if (persona.lang === "hi")
-				text = `आपके धैर्य के लिए धन्यवाद — ${text}`;
-			else text = `Thanks for your patience — ${text}`;
-		}
-		text = stripRedundantOpeners(text, caseDoc.conversation || []);
-
-		await new Promise((r) => setTimeout(r, computeTypeDelay(text)));
-		await persistAndBroadcast(io, {
-			caseId,
-			text,
-			persona,
-			lang: persona.lang,
-		});
-		replyLock.delete(caseId);
-	} catch (e) {
-		console.error("[AI] processCase error:", e?.message || e);
-		replyLock.delete(caseId);
+		return;
 	}
+
+	// If they said "existing" without action, offer prompt
+	await send(io, {
+		caseId: caseDoc._id,
+		text: ((lang) => {
+			if (lang === "ar") return "هل تريد إلغاء الحجز أو تغيير التواريخ؟";
+			if (lang === "es")
+				return "¿Deseas cancelar la reserva o cambiar las fechas?";
+			if (lang === "fr")
+				return "Souhaitez‑vous annuler la réservation ou changer les dates ?";
+			if (lang === "ur")
+				return "کیا آپ ریزرویشن منسوخ کرنا چاہتے ہیں یا تاریخیں بدلنا؟";
+			if (lang === "hi")
+				return "क्या आप आरक्षण रद्द करना चाहते हैं या तिथियाँ बदलना?";
+			return "Would you like to cancel the reservation or change the dates?";
+		})(st.lang),
+		personaName: st.personaName,
+		lang: st.lang,
+	});
 }
 
-/* ---------- Sockets / init ---------- */
+/* ---------- Identity & link intents ---------- */
+async function handleMetaIntents(io, caseDoc, st, nluOut) {
+	if (nluOut?.intents?.ask_identity_work_for_hotel) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.id_workHotel(),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return true;
+	}
+	if (nluOut?.intents?.ask_identity_reception) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.id_reception(),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return true;
+	}
+	if (nluOut?.intents?.ask_identity_in_saudi) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.id_inSaudi(),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return true;
+	}
+	if (nluOut?.intents?.ask_human_agent) {
+		await send(io, {
+			caseId: caseDoc._id,
+			text: L.askHuman(st.lang),
+			personaName: st.personaName,
+			lang: st.lang,
+		});
+		return true;
+	}
+	if (nluOut?.intents?.ask_link_or_pdf) {
+		const conf =
+			st.slots.confirmation ||
+			extractConfirmation(
+				String(caseDoc?.conversation?.slice(-1)?.[0]?.message || "")
+			) ||
+			extractConfirmation(caseDoc?.inquiryDetails || "");
+		if (conf)
+			await sendPublicLinkOnce(io, {
+				caseId: caseDoc._id,
+				st,
+				confirmation: conf,
+			});
+		else
+			await send(io, {
+				caseId: caseDoc._id,
+				text: ((lang) => {
+					if (lang === "ar") return "شارك رقم التأكيد لأرسل الرابط.";
+					if (lang === "es")
+						return "Comparte el número de confirmación para enviarte el enlace.";
+					if (lang === "fr")
+						return "Partagez le numéro de confirmation pour que j’envoie le lien.";
+					if (lang === "ur")
+						return "لنک بھیجنے کے لیے کنفرمیشن نمبر شیئر کریں۔";
+					if (lang === "hi")
+						return "लिंक भेजने के लिए कृपया कन्फर्मेशन नंबर साझा करें।";
+					return "Please share your confirmation number and I’ll send the link.";
+				})(st.lang),
+				personaName: st.personaName,
+				lang: st.lang,
+			});
+		return true;
+	}
+	return false;
+}
+
+/* ---------- Main processor ---------- */
+async function processPayload(io, payload) {
+	const caseId = payload?.caseId;
+	if (!caseId) return;
+	if (shouldWaitForGuest(caseId)) {
+		const prev = debounceMap.get(caseId);
+		const timer = setTimeout(
+			() => processPayload(io, prev.payload),
+			WAIT_WHILE_TYPING_MS
+		);
+		debounceMap.set(caseId, { payload, timer });
+		return;
+	}
+
+	const caseDoc = await SupportCase.findById(caseId).populate("hotelId").lean();
+	if (!caseDoc?.hotelId || caseDoc?.hotelId?.aiToRespond !== true) return;
+
+	const st = ensureState(caseId);
+	if (!st.hotelDoc) {
+		st.hotelDoc = caseDoc.hotelId;
+		st.hotelId = caseDoc.hotelId?._id || caseDoc.hotelId;
+	}
+	if (!st.personaName) st.personaName = pickPersona(st.lang);
+
+	// Language seed from inquiryDetails (Preferred Language: … (xx))
+	if (!st.greeted) {
+		const hint = (String(caseDoc.inquiryDetails || "").match(
+			/\((en|ar|es|fr|ur|hi)\)/i
+		) || [])[1];
+		if (hint) st.lang = hint.toLowerCase();
+	}
+	await greetIfNeeded(io, caseDoc, st);
+
+	/* Aggregate burst messages (debounce) */
+	const prev = debounceMap.get(caseId);
+	if (prev?.timer) clearTimeout(prev.timer);
+	const timer = setTimeout(async () => {
+		try {
+			const doc = await SupportCase.findById(caseId).lean();
+			const lastMsgs = (doc?.conversation || [])
+				.slice(-5)
+				.filter((m) => !isAssistantLike(m))
+				.map((m) => String(m.message || "").trim())
+				.filter(Boolean);
+			const text = lastMsgs.length
+				? lastMsgs.join("\n")
+				: String(payload?.message || "").trim();
+			const roomTypes = (st.hotelDoc?.roomCountDetails || []).map(
+				(r) => r.roomType
+			);
+			const n = await nlu.classify(text, roomTypes);
+
+			// adapt language if detected (but keep earlier language if confident)
+			if (n?.language && st.lang === "en") st.lang = n.language.toLowerCase();
+
+			// meta/intros
+			if (await handleMetaIntents(io, caseDoc, st, n)) return;
+
+			// decide flow
+			if (!st.flow) {
+				if (n?.intents?.new_booking) st.flow = "NEW";
+				else if (n?.intents?.existing_booking) st.flow = "EXIST";
+				else {
+					const about = String(caseDoc.inquiryAbout || "").toLowerCase();
+					st.flow = about.includes("reserve")
+						? "NEW"
+						: about.includes("reservation")
+						? "EXIST"
+						: "NEW";
+				}
+			}
+
+			if (st.flow === "NEW") {
+				await runNew(io, caseDoc, st, n);
+				return;
+			}
+			if (st.flow === "EXIST") {
+				await runExisting(io, caseDoc, st, n);
+				return;
+			}
+		} catch (e) {
+			console.error("[AI] process burst error:", e?.message || e);
+		}
+	}, DEBOUNCE_MS);
+	debounceMap.set(caseId, { payload, timer });
+}
+
+/* ---------- Sockets & watcher ---------- */
 function initAIAgent({ app, io }) {
 	if (!looksLikeOpenAIKey(RAW_KEY)) {
 		console.error(
@@ -4104,8 +1802,6 @@ function initAIAgent({ app, io }) {
 		);
 		return;
 	}
-	const client = new OpenAI({ apiKey: RAW_KEY });
-	const MODEL = sanitizeModelName(RAW_MODEL) || "gpt-4.1";
 
 	try {
 		if (typeof SupportCase.watch === "function") {
@@ -4113,19 +1809,25 @@ function initAIAgent({ app, io }) {
 				[{ $match: { operationType: "insert" } }],
 				{ fullDocument: "updateLookup" }
 			);
-			stream.on("change", (ch) => {
+			stream.on("change", async (ch) => {
 				const id = ch?.fullDocument?._id;
-				const openedBy = ch?.fullDocument?.openedBy;
-				if (id && openedBy === "client") scheduleGreetingByCaseId(io, id);
+				if (!id) return;
+				const doc = ch.fullDocument;
+				if (doc?.openedBy !== "client") return;
+				const hdoc = await SupportCase.findById(id).populate("hotelId").lean();
+				if (!hdoc?.hotelId?.aiToRespond) return;
+				const st = ensureState(String(id));
+				const hint = (String(hdoc.inquiryDetails || "").match(
+					/\((en|ar|es|fr|ur|hi)\)/i
+				) || [])[1];
+				st.lang = (hint || "en").toLowerCase();
+				st.personaName = pickPersona(st.lang);
+				await greetIfNeeded(io, hdoc, st);
 			});
 			stream.on("error", (err) =>
 				console.error("[AI] change stream error:", err?.message || err)
 			);
 			console.log("[AI] Auto-greet watcher active.");
-		} else {
-			console.log(
-				"[AI] Change streams unavailable; relying on socket fallbacks."
-			);
 		}
 	} catch (e) {
 		console.log(
@@ -4135,227 +1837,38 @@ function initAIAgent({ app, io }) {
 	}
 
 	io.on("connection", (socket) => {
-		socket.on("joinRoom", ({ caseId }) => {
-			if (caseId) scheduleGreetingByCaseId(io, caseId);
-		});
-		socket.on("newChat", (payload) => {
-			if (payload?._id && payload?.openedBy === "client")
-				scheduleGreetingByCaseId(io, payload._id);
+		socket.on("joinRoom", async ({ caseId }) => {
+			if (!caseId) return;
+			const caseDoc = await SupportCase.findById(caseId)
+				.populate("hotelId")
+				.lean();
+			if (!caseDoc?.hotelId?.aiToRespond) return;
+			const st = ensureState(caseId);
+			st.personaName = st.personaName || pickPersona(st.lang);
+			await greetIfNeeded(io, caseDoc, st);
 		});
 
 		socket.on("typing", (data = {}) => {
 			if (!data?.caseId) return;
-			if (data?.name) {
-				setGuestTyping(String(data.caseId), true);
-				cancelClose(String(data.caseId));
-				armIdleClose(
-					io,
-					String(data.caseId),
-					personaByCase.get(String(data.caseId))?.name || "system"
-				);
-			}
+			setGuestTyping(String(data.caseId), true);
 		});
 		socket.on("stopTyping", (data = {}) => {
 			if (!data?.caseId) return;
-			if (data?.name) setGuestTyping(String(data.caseId), false);
+			setGuestTyping(String(data.caseId), false);
 		});
 
-		socket.on("sendMessage", (payload) => {
-			const caseId = payload?.caseId;
-			if (!caseId || !payload?.messageBy) return;
-
-			const existingPersona = personaByCase.get(caseId);
-			if (isFromHumanStaffOrAgent(payload, existingPersona?.name)) return;
-
-			cancelClose(caseId);
-			armIdleClose(io, caseId, existingPersona?.name || "system");
-
-			const prev = debounceMap.get(caseId);
-			if (prev?.timer) clearTimeout(prev.timer);
-
-			const delay = shouldWaitForGuest(caseId)
-				? WAIT_WHILE_TYPING_MS
-				: DEBOUNCE_MS;
-			const timer = setTimeout(
-				() => processCase(io, client, MODEL, caseId),
-				delay
-			);
-			debounceMap.set(caseId, { timer, payload });
+		socket.on("sendMessage", async (payload) => {
+			try {
+				await processPayload(io, payload);
+			} catch (e) {
+				console.error("[AI] processPayload error:", e?.message || e);
+			}
 		});
 	});
 
 	console.log(
-		"[AI] Ready (v3.6): warm‑up greeting, case‑aware second line, robust parsing, single‑confirm booking/cancel/update, re‑pricing, and separate confirmation-link message (PDF) with de‑duplication."
+		"[AI] Ready (v6.0): OQAT (room→dates→quote→details→final confirm), LLM NLU, safe pricing, identity one‑liners, multilingual."
 	);
-}
-
-/* ---------- Rebuilders & misc ---------- */
-function rebuildStateFromConversation(caseDoc) {
-	const convo = Array.isArray(caseDoc?.conversation)
-		? caseDoc.conversation
-		: [];
-	const acc = {
-		collected: {
-			name: knownIdentityFromCase(caseDoc).name || "",
-			email: knownIdentityFromCase(caseDoc).email || "",
-			phone: knownIdentityFromCase(caseDoc).phone || "",
-			nationality: "",
-			adults: undefined,
-			children: undefined,
-			roomsCount: undefined,
-			roomTypeHint: undefined,
-		},
-		intendedStay: undefined,
-	};
-	for (const msg of convo) {
-		if (
-			isAssistantLike(
-				msg?.messageBy?.customerName,
-				msg?.messageBy?.customerEmail
-			)
-		)
-			continue;
-		const text = String(msg?.message || "");
-		const dates = parseDateTokens(text);
-		if (dates?.check_in_date && dates?.check_out_date) {
-			acc.intendedStay = {
-				check_in_date: dates.check_in_date,
-				check_out_date: dates.check_out_date,
-			};
-		}
-		const ac = parseAdultsChildren(text);
-		if (ac.adults != null) acc.collected.adults = ac.adults;
-		if (ac.children != null) acc.collected.children = ac.children;
-		const rc = parseRoomsCount(text);
-		if (rc != null) acc.collected.roomsCount = rc;
-		const rh = parseRoomPreference(text);
-		if (rh) acc.collected.roomTypeHint = rh;
-		const ph = parsePhone(text);
-		if (ph && isLikelyPhone(ph)) acc.collected.phone = ph;
-		const em = parseEmail(text);
-		if (em) acc.collected.email = em;
-		const nm = parseName(text);
-		if (nm) acc.collected.name = nm;
-		const nat = parseNationality(text);
-		if (nat && validateNationality(nat)) acc.collected.nationality = nat;
-	}
-	return acc;
-}
-
-function isFromHumanStaffOrAgent(payload, personaName) {
-	const n = lower(payload?.messageBy?.customerName || "");
-	const e = lower(payload?.messageBy?.customerEmail || "");
-	if (!n && !e) return false;
-	if (e === "management@xhotelpro.com") return true;
-	if (personaName && n === lower(personaName)) return true;
-	if (n.includes("admin") || n.includes("support") || n.includes("agent"))
-		return true;
-	return false;
-}
-
-async function lookupHotelAndPrice({
-	hotelIdOrName,
-	checkIn,
-	checkOut,
-	rooms,
-}) {
-	let hotel = null;
-	if (hotelIdOrName && isValidObjectId(String(hotelIdOrName)))
-		hotel = await HotelDetails.findById(hotelIdOrName).lean();
-	if (!hotel && hotelIdOrName) {
-		hotel = await HotelDetails.findOne({
-			$or: [
-				{ hotelName: new RegExp(`^${hotelIdOrName}$`, "i") },
-				{ hotelName_OtherLanguage: new RegExp(`^${hotelIdOrName}$`, "i") },
-			],
-		}).lean();
-	}
-	if (!hotel) return { ok: false, error: "Hotel not found." };
-
-	const nights = dayjs(checkOut).diff(dayjs(checkIn), "day");
-	if (nights <= 0)
-		return { ok: false, error: "Invalid dates (nights must be >= 1)." };
-
-	const matchRoom = buildRoomMatcher(hotel);
-	const fallbackCommission = num(hotel.commission, 10);
-	const out = [];
-
-	for (const req of rooms || []) {
-		const r = matchRoom(req);
-		if (!r) {
-			out.push({
-				ok: false,
-				requested: req,
-				error: "Requested room type not found for this hotel.",
-				suggestedTypes: (hotel.roomCountDetails || []).map((x) => ({
-					roomType: x.roomType,
-					displayName: x.displayName,
-				})),
-			});
-			continue;
-		}
-		const comm = num(r.roomCommission, fallbackCommission) || 10;
-		const nightly0 = nightlyArrayFrom(
-			r.pricingRate || [],
-			checkIn,
-			checkOut,
-			num(r?.price?.basePrice, 0),
-			num(r.defaultCost, 0),
-			comm
-		);
-		const blocked = anyBlocked(nightly0);
-		const nightly = withCommission(nightly0);
-		const count = num(req.count, 1);
-		const totalWith = Number(
-			(
-				nightly.reduce((a, d) => a + num(d.totalPriceWithCommission), 0) * count
-			).toFixed(2)
-		);
-		const totalRoot = Number(
-			(nightly.reduce((a, d) => a + num(d.rootPrice), 0) * count).toFixed(2)
-		);
-		const commissionAmt = Number((totalWith - totalRoot).toFixed(2));
-		let alternative = null;
-		if (blocked)
-			alternative = nearestAvailableWindow(
-				r,
-				checkIn,
-				nights,
-				fallbackCommission,
-				14
-			);
-
-		out.push({
-			ok: !blocked,
-			hotelId: hotel._id,
-			roomType: r.roomType,
-			displayName: r.displayName,
-			count,
-			nights,
-			blocked,
-			nightly,
-			totals: {
-				totalWithCommission: totalWith,
-				totalRoot,
-				commission: commissionAmt,
-			},
-			alternative,
-		});
-	}
-
-	return {
-		ok: out.some((x) => x.ok),
-		hotel: {
-			_id: hotel._id,
-			hotelName: hotel.hotelName,
-			aiToRespond: !!hotel.aiToRespond,
-			commission: fallbackCommission,
-			city: hotel.hotelCity,
-			country: hotel.hotelCountry,
-			belongsTo: hotel.belongsTo || null,
-		},
-		results: out,
-	};
 }
 
 module.exports = { initAIAgent };

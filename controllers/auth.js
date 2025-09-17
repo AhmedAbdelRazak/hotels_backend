@@ -177,10 +177,17 @@ exports.signin = async (req, res) => {
 exports.propertySignup = async (req, res) => {
 	try {
 		const {
+			// common
 			name,
 			email,
 			password,
 			phone,
+			accepted,
+			// role/employee extras
+			role,
+			hotelsToSupport,
+			accessTo,
+			// hotel fields (owner flow)
 			hotelName,
 			hotelAddress,
 			hotelCountry,
@@ -189,24 +196,20 @@ exports.propertySignup = async (req, res) => {
 			propertyType,
 			hotelFloors,
 			hotelRooms,
+			// existing owner flow
 			existingUser,
-			accepted,
 		} = req.body;
 
 		console.log("Received request body:", req.body);
 
-		// Utility function to clean phone number
-		const cleanPhoneNumber = (phone) => {
-			// Remove spaces
-			let cleaned = phone.replace(/\s+/g, "");
-
-			// Validate and clean phone number
-			const phoneRegex = /^\+?[0-9]*$/;
-			if (!phoneRegex.test(cleaned)) {
+		// --- phone cleaner (as before) ---
+		const cleanPhoneNumber = (rawPhone) => {
+			if (typeof rawPhone !== "string")
 				throw new Error("Invalid phone number format");
-			}
-
-			// Ensure there is only one plus sign and it's at the start
+			let cleaned = rawPhone.replace(/\s+/g, "");
+			const phoneRegex = /^\+?[0-9]*$/;
+			if (!phoneRegex.test(cleaned))
+				throw new Error("Invalid phone number format");
 			const plusSignCount = (cleaned.match(/\+/g) || []).length;
 			if (
 				plusSignCount > 1 ||
@@ -214,20 +217,21 @@ exports.propertySignup = async (req, res) => {
 			) {
 				throw new Error("Invalid phone number format");
 			}
-
 			return cleaned;
 		};
 
-		let cleanedPhone;
+		let cleanedPhone = null;
 		try {
+			if (!phone) throw new Error("Please fill all the fields");
 			cleanedPhone = cleanPhoneNumber(phone);
-		} catch (error) {
-			return res.status(400).json({ error: error.message });
+		} catch (err) {
+			return res.status(400).json({ error: err.message });
 		}
 
-		// If the request is from an existing user
+		// --- Branch A: existing user adds a hotel (unchanged logic) ---
 		if (existingUser) {
 			console.log("Handling existing user:", existingUser);
+
 			if (
 				!hotelName ||
 				!hotelAddress ||
@@ -239,21 +243,19 @@ exports.propertySignup = async (req, res) => {
 				return res.status(400).json({ error: "Please fill all the fields" });
 			}
 
-			// Check for duplicate hotel name
+			// Duplicate hotel name guard
 			let hotelExist = await HotelDetails.findOne({ hotelName }).exec();
 			if (hotelExist) {
 				return res.status(400).json({ error: "Hotel name already exists" });
 			}
 
-			// Get the existing user
+			// Get existing user
 			let user = await User.findById(existingUser).exec();
 			if (!user) {
-				return res.status(400).json({
-					error: "User not found",
-				});
+				return res.status(400).json({ error: "User not found" });
 			}
 
-			// Create new hotel details
+			// Create hotel details
 			const hotelDetails = new HotelDetails({
 				hotelName,
 				hotelAddress,
@@ -261,22 +263,92 @@ exports.propertySignup = async (req, res) => {
 				hotelState,
 				hotelCity,
 				propertyType,
-				hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
-				hotelRooms: hotelRooms ? Number(hotelRooms) : 1, // Ensure hotelFloors is saved as a number
+				hotelFloors: hotelFloors ? Number(hotelFloors) : 1,
+				hotelRooms: hotelRooms ? Number(hotelRooms) : 1,
 				phone: cleanedPhone,
 				belongsTo: user._id,
 				acceptedTermsAndConditions: accepted,
 			});
 			await hotelDetails.save();
 
-			// Update hotelIdsOwner and save the user again
+			// Attach to owner list
 			user.hotelIdsOwner.push(hotelDetails._id);
 			await user.save();
 
 			return res.json({ message: `Hotel ${hotelName} was successfully added` });
 		}
 
-		// If the request is for a new user signup
+		// --- Determine normalized role (default to owner flow = 2000) ---
+		const normalizedRole = Number(role) || 2000;
+
+		// --- Branch B: EMPLOYEE signup (role === 1000) ---
+		if (normalizedRole === 1000) {
+			console.log("Handling employee user signup (role 1000)");
+
+			if (!name || !email || !password || !cleanedPhone) {
+				console.log("Missing fields (employee):", {
+					name,
+					email,
+					hasPassword: !!password,
+					phone: cleanedPhone,
+				});
+				return res.status(400).json({ error: "Please fill all the fields" });
+			}
+			if (String(password).length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Passwords should be 6 characters or more" });
+			}
+
+			// Guard against duplicate email/phone
+			const userExist = await User.findOne({
+				$or: [{ email }, { phone: cleanedPhone }],
+			}).exec();
+			if (userExist) {
+				return res.status(400).json({
+					error: "User already exists, please try a different email/phone",
+				});
+			}
+
+			// (Optional) sanity-check referenced hotel IDs; keep only valid ones, but do not fail
+			let supportIds = Array.isArray(hotelsToSupport)
+				? [...new Set(hotelsToSupport)]
+				: [];
+			if (supportIds.length) {
+				try {
+					const existing = await HotelDetails.find({ _id: { $in: supportIds } })
+						.select("_id")
+						.lean()
+						.exec();
+					const existingIds = new Set(existing.map((h) => String(h._id)));
+					supportIds = supportIds.filter((id) => existingIds.has(String(id)));
+				} catch (e) {
+					// If validation query fails, just fall back to provided list to avoid blocking signup
+				}
+			}
+
+			// Create employee user WITHOUT hotelDetails / hotelIdsOwner
+			const user = new User({
+				name,
+				email,
+				password,
+				phone: cleanedPhone,
+				role: 1000,
+				acceptedTermsAndConditions: accepted,
+				// 🔽 Adjust field names if your schema differs
+				hotelsToSupport: supportIds,
+				accessTo: Array.isArray(accessTo) ? accessTo : [],
+			});
+
+			await user.save();
+
+			return res.json({
+				message: "Employee signup successful",
+				userId: user._id,
+			});
+		}
+
+		// --- Branch C: NEW HOTEL OWNER signup (role 2000: unchanged behavior) ---
 		console.log("Handling new user signup");
 		if (
 			!name ||
@@ -290,10 +362,10 @@ exports.propertySignup = async (req, res) => {
 			!hotelCity ||
 			!propertyType
 		) {
-			console.log("Missing fields:", {
+			console.log("Missing fields (owner):", {
 				name,
 				email,
-				password,
+				hasPassword: !!password,
 				phone: cleanedPhone,
 				hotelName,
 				hotelAddress,
@@ -313,12 +385,13 @@ exports.propertySignup = async (req, res) => {
 			});
 		}
 
-		// Check for duplicate hotel name
+		// Duplicate hotel name guard
 		let hotelExist = await HotelDetails.findOne({ hotelName }).exec();
 		if (hotelExist) {
 			return res.status(400).json({ error: "Hotel name already exists" });
 		}
 
+		// Create owner user
 		const user = new User({
 			name,
 			email,
@@ -333,6 +406,7 @@ exports.propertySignup = async (req, res) => {
 		});
 		await user.save();
 
+		// Create hotel details and link to owner
 		const hotelDetails = new HotelDetails({
 			hotelName,
 			hotelAddress,
@@ -340,22 +414,21 @@ exports.propertySignup = async (req, res) => {
 			hotelState,
 			hotelCity,
 			propertyType,
-			hotelFloors: hotelFloors ? Number(hotelFloors) : 1, // Ensure hotelFloors is saved as a number
+			hotelFloors: hotelFloors ? Number(hotelFloors) : 1,
+			hotelRooms: hotelRooms ? Number(hotelRooms) : 1,
 			phone: cleanedPhone,
 			belongsTo: user._id,
-			hotelRooms: hotelRooms,
 			acceptedTermsAndConditions: accepted,
 		});
 		await hotelDetails.save();
 
-		// Update hotelIdsOwner and save the user again
 		user.hotelIdsOwner = [hotelDetails._id];
 		await user.save();
 
-		res.json({ message: "Signup successful" });
+		return res.json({ message: "Signup successful" });
 	} catch (error) {
 		console.log("Error:", error);
-		res.status(500).json({ error: "Internal Server Error" });
+		return res.status(500).json({ error: "Internal Server Error" });
 	}
 };
 
