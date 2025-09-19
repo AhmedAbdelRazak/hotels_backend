@@ -1777,6 +1777,18 @@ exports.paginatedReservationList = async (req, res) => {
 			limit = 100,
 			filterType = "",
 			searchQuery = "",
+
+			// NEW: extra filters
+			reservedBy = "",
+			checkinDate = "",
+			checkinFrom = "",
+			checkinTo = "",
+			checkoutDate = "",
+			checkoutFrom = "",
+			checkoutTo = "",
+			createdDate = "",
+			createdFrom = "",
+			createdTo = "",
 		} = req.query;
 
 		const pageNumber = parseInt(page, 10) || 1;
@@ -1816,9 +1828,90 @@ exports.paginatedReservationList = async (req, res) => {
 			// primitive id (ObjectId or string)
 			return { _id: String(ref) };
 		};
+		// NEW: escape for regex
+		const escapeRegExp = (s) =>
+			(typeof s === "string" ? s : "")
+				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+				.trim();
+
+		// NEW: date helpers (UTC day ranges)
+		const toISODateYMD = (d) => {
+			const dt = new Date(d);
+			if (!dt || isNaN(dt.getTime())) return null;
+			const y = dt.getUTCFullYear();
+			const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+			const day = String(dt.getUTCDate()).padStart(2, "0");
+			return `${y}-${m}-${day}`;
+		};
+		const dayRangeUTC = (dateLike) => {
+			const ymd = toISODateYMD(dateLike);
+			if (!ymd) return null;
+			return {
+				start: new Date(`${ymd}T00:00:00.000Z`),
+				end: new Date(`${ymd}T23:59:59.999Z`),
+			};
+		};
+		const buildDateClause = (field, single, from, to) => {
+			// single date takes precedence over from/to
+			if (single) {
+				const r = dayRangeUTC(single);
+				if (r) return { [field]: { $gte: r.start, $lte: r.end } };
+			}
+			const clause = {};
+			if (from) {
+				const r = dayRangeUTC(from);
+				if (r) clause.$gte = r.start;
+			}
+			if (to) {
+				const r = dayRangeUTC(to);
+				if (r) clause.$lte = r.end;
+			}
+			return Object.keys(clause).length ? { [field]: clause } : null;
+		};
+
+		// 2.1) NEW: compose server-side filters (reservedBy + dates)
+		const andFilters = [baseFilter];
+
+		// reservedBy (case-insensitive exact match)
+		const rbTrim = (reservedBy || "").trim();
+		if (rbTrim) {
+			andFilters.push({
+				"customer_details.reservedBy": {
+					$regex: new RegExp(`^${escapeRegExp(rbTrim)}$`, "i"),
+				},
+			});
+		}
+
+		// checkin / checkout / createdAt date filters
+		const checkinClause = buildDateClause(
+			"checkin_date",
+			checkinDate,
+			checkinFrom,
+			checkinTo
+		);
+		if (checkinClause) andFilters.push(checkinClause);
+
+		const checkoutClause = buildDateClause(
+			"checkout_date",
+			checkoutDate,
+			checkoutFrom,
+			checkoutTo
+		);
+		if (checkoutClause) andFilters.push(checkoutClause);
+
+		const createdClause = buildDateClause(
+			"createdAt",
+			createdDate,
+			createdFrom,
+			createdTo
+		);
+		if (createdClause) andFilters.push(createdClause);
+
+		const mongoFilter =
+			andFilters.length > 1 ? { $and: andFilters } : baseFilter;
 
 		// 3) First, fetch ALL matching docs (no skip/limit).
-		const allDocs = await Reservations.find(baseFilter)
+		const allDocs = await Reservations.find(mongoFilter)
 			.sort({ createdAt: -1 })
 			.populate("belongsTo")
 			.populate("hotelId")
@@ -2879,7 +2972,11 @@ exports.createNewReservationClient2 = async (req, res) => {
 			const chkInRange = dayRangeUTC(checkin_date);
 			const chkOutRange = dayRangeUTC(checkout_date);
 
-			const reservedById = extractReservedById(req.body?.reservedBy, belongsTo);
+			// CHANGED: read the employee id from customerDetails.reservedById (no belongsTo fallback here)
+			const reservedById = extractReservedById(
+				req.body?.customerDetails?.reservedById,
+				null
+			);
 			const totalNum = Number(total_amount);
 			const roomsSig = buildRoomsSignature(pickedRoomsType);
 
@@ -2914,9 +3011,20 @@ exports.createNewReservationClient2 = async (req, res) => {
 				},
 			];
 
+			// ADDED: scope duplicates to the same hotel
+			if (hotelId) {
+				if (mongoose.Types.ObjectId.isValid(hotelId)) {
+					baseAnd.push({ hotelId: new mongoose.Types.ObjectId(hotelId) });
+				} else {
+					baseAnd.push({ hotelId });
+				}
+			}
+
 			// If we have a reservedBy id, try to match it against either belongsTo or reservedBy
 			if (reservedById) {
 				const orTargets = [];
+				// keep an always-true guard to avoid over-filtering when the model doesn't store the employee id at top-level
+				orTargets.push({ _id: { $exists: true } });
 				if (mongoose.Types.ObjectId.isValid(reservedById)) {
 					const oid = new mongoose.Types.ObjectId(reservedById);
 					orTargets.push({ belongsTo: oid });
@@ -2978,9 +3086,18 @@ exports.createNewReservationClient2 = async (req, res) => {
 				);
 			});
 
+			// CHANGED: ensure customer_details contains reservedById while keeping reservedBy untouched
+			const preparedCustomerDetails = {
+				...customerDetails,
+				reservedById:
+					extractReservedById(customerDetails?.reservedById, null) ||
+					customerDetails?.reservedById ||
+					"",
+			};
+
 			const reservation = new Reservations({
 				hotelId,
-				customer_details: customerDetails,
+				customer_details: preparedCustomerDetails,
 				confirmation_number: confirmationNumber,
 				belongsTo,
 				checkin_date,
@@ -4074,6 +4191,152 @@ exports.sendWhatsAppReservationConfirmation = async (req, res) => {
 			ok: false,
 			message: "Failed to send WhatsApp confirmation.",
 			error: err?.message || String(err),
+		});
+	}
+};
+
+// Returns an array of distinct reservedBy (lowercased, sorted), skipping missing/empty values
+exports.distinctReservedByList = async (req, res) => {
+	try {
+		const JULY_FIRST_2025_UTC = new Date("2025-07-01T00:00:00.000Z");
+
+		// Same base filter used in paginatedReservationList
+		const baseBookingSourceMatch = {
+			$or: [
+				{ booking_source: { $regex: /^online jannat booking$/i } },
+				{ booking_source: { $regex: /^generated link$/i } },
+				{ booking_source: { $regex: /^jannat employee$/i } },
+				{ booking_source: { $regex: /^affiliate$/i } },
+			],
+		};
+
+		const pipeline = [
+			{ $match: { createdAt: { $gte: JULY_FIRST_2025_UTC } } },
+			{ $match: baseBookingSourceMatch },
+
+			// Prefer customer_details.reservedBy; fall back to top-level reservedBy if present
+			{
+				$project: {
+					rb: { $ifNull: ["$customer_details.reservedBy", "$reservedBy"] },
+				},
+			},
+
+			// Keep only string values (skip ObjectId, null, etc.)
+			{ $match: { $expr: { $eq: [{ $type: "$rb" }, "string"] } } },
+
+			// Normalize: trim + lowercase
+			{ $project: { rbLower: { $toLower: { $trim: { input: "$rb" } } } } },
+
+			// Exclude empty strings after trimming
+			{ $match: { rbLower: { $ne: "" } } },
+
+			// Distinct + sort
+			{ $group: { _id: "$rbLower" } },
+			{ $sort: { _id: 1 } },
+		];
+
+		const results = await Reservations.aggregate(pipeline).allowDiskUse(true);
+		const list = results.map((r) => r._id); // array of strings
+
+		return res.status(200).json(list);
+	} catch (err) {
+		console.error("distinctReservedByList error:", err);
+		return res
+			.status(500)
+			.json({ message: "An error occurred while fetching reservedBy list" });
+	}
+};
+
+exports.findConfirmationsByReservedBy = async (req, res) => {
+	try {
+		const escapeRegExp = (s) =>
+			(typeof s === "string" ? s : "")
+				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+				.trim();
+
+		const toISODateYMD = (d) => {
+			const dt = new Date(d);
+			if (!dt || isNaN(dt.getTime())) return null;
+			const y = dt.getUTCFullYear();
+			const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+			const day = String(dt.getUTCDate()).padStart(2, "0");
+			return `${y}-${m}-${day}`;
+		};
+		const dayRangeUTC = (dateLike) => {
+			const ymd = toISODateYMD(dateLike);
+			if (!ymd) return null;
+			return {
+				start: new Date(`${ymd}T00:00:00.000Z`),
+				end: new Date(`${ymd}T23:59:59.999Z`),
+			};
+		};
+
+		const {
+			name = "",
+			from = "2025-07-01",
+			to = "",
+			restrictToBaseSources = "false",
+		} = req.query;
+
+		const trimmed = String(name || "").trim();
+		if (!trimmed) {
+			return res
+				.status(400)
+				.json({ message: "Missing required 'name' query param." });
+		}
+
+		// Date range on createdAt
+		const range = dayRangeUTC(from);
+		const filter = {
+			"customer_details.reservedBy": {
+				$regex: new RegExp(`^${escapeRegExp(trimmed)}$`, "i"),
+			},
+			createdAt: { $gte: range.start },
+		};
+		if (to) {
+			const endRange = dayRangeUTC(to);
+			if (endRange) filter.createdAt.$lte = endRange.end;
+		}
+
+		// Optional: restrict to the same booking sources as the table
+		if (String(restrictToBaseSources).toLowerCase() === "true") {
+			filter.$or = [
+				{ booking_source: { $regex: /^online jannat booking$/i } },
+				{ booking_source: { $regex: /^generated link$/i } },
+				{ booking_source: { $regex: /^jannat employee$/i } },
+				{ booking_source: { $regex: /^affiliate$/i } },
+			];
+		}
+
+		const docs = await Reservations.find(filter, {
+			_id: 1,
+			confirmation_number: 1,
+			booking_source: 1,
+			createdAt: 1,
+			checkin_date: 1,
+			checkout_date: 1,
+			"customer_details.reservedBy": 1,
+		})
+			.sort({ createdAt: -1 })
+			.limit(200)
+			.lean();
+
+		return res.status(200).json({
+			count: docs.length,
+			results: docs.map((d) => ({
+				_id: d._id,
+				confirmation_number: d.confirmation_number,
+				booking_source: d.booking_source,
+				createdAt: d.createdAt,
+				checkin_date: d.checkin_date,
+				checkout_date: d.checkout_date,
+				reservedBy: d?.customer_details?.reservedBy || "",
+			})),
+		});
+	} catch (err) {
+		console.error("findConfirmationsByReservedBy error:", err);
+		return res.status(500).json({
+			message: "An error occurred while fetching confirmations by reservedBy",
 		});
 	}
 };
