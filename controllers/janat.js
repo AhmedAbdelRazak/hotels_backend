@@ -2800,8 +2800,173 @@ exports.createNewReservationClient2 = async (req, res) => {
 			advancePayment,
 		} = req.body;
 
-		// 1) Employee direct creation
+		/** -------------------- DUPLICATE GUARD (helpers) -------------------- */
+		const escapeRegExp = (s) =>
+			(typeof s === "string" ? s : "")
+				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+				.trim();
+
+		const normalizeName = (s) =>
+			(typeof s === "string" ? s : "")
+				.trim()
+				.replace(/\s+/g, " ")
+				.toLowerCase();
+
+		const normalizeEmail = (s) =>
+			(typeof s === "string" ? s : "").trim().toLowerCase();
+
+		const normalizePhone = (raw) => {
+			if (!raw) return "";
+			// uses your global helper to convert Arabic digits
+			const converted = convertArabicToEnglishNumerals(raw);
+			return converted.replace(/\D/g, ""); // keep digits only
+		};
+
+		const normalizeNationality = (s) => normalizeName(s);
+
+		const toISODateYMD = (d) => {
+			const dt = new Date(d);
+			if (!dt || isNaN(dt.getTime())) return null;
+			const y = dt.getUTCFullYear();
+			const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+			const day = String(dt.getUTCDate()).padStart(2, "0");
+			return `${y}-${m}-${day}`;
+		};
+
+		const dayRangeUTC = (dateLike) => {
+			const ymd = toISODateYMD(dateLike);
+			if (!ymd) return null;
+			return {
+				start: new Date(`${ymd}T00:00:00.000Z`),
+				end: new Date(`${ymd}T23:59:59.999Z`),
+			};
+		};
+
+		const extractReservedById = (reservedByMaybe, belongsToMaybe) => {
+			let v = reservedByMaybe ?? belongsToMaybe ?? null;
+			if (!v) return null;
+			if (typeof v === "object") v = v._id || v.id || String(v);
+			return v ? String(v) : null;
+		};
+
+		// Build a canonical, order‑independent signature of the reserved rooms:
+		// key = `${room_type.toLowerCase()}|${displayName.toLowerCase()}` and aggregate counts.
+		const buildRoomsSignature = (arr) => {
+			if (!Array.isArray(arr) || !arr.length) return "[]";
+			const agg = new Map();
+			for (const r of arr) {
+				const rt = (r?.room_type || "").toString().trim().toLowerCase();
+				const dn = (r?.displayName || "").toString().trim().toLowerCase();
+				const count = Number(r?.count ?? 1);
+				const key = `${rt}|${dn}`;
+				agg.set(
+					key,
+					(agg.get(key) || 0) + (Number.isFinite(count) ? count : 1)
+				);
+			}
+			return Array.from(agg.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([k, c]) => `${k}|${c}`)
+				.join("||");
+		};
+
+		const findExactDuplicate = async () => {
+			const nameN = normalizeName(customerDetails?.name);
+			const emailN = normalizeEmail(customerDetails?.email);
+			const phoneN = normalizePhone(customerDetails?.phone);
+			const nationalityN = normalizeNationality(customerDetails?.nationality);
+
+			const chkInRange = dayRangeUTC(checkin_date);
+			const chkOutRange = dayRangeUTC(checkout_date);
+
+			const reservedById = extractReservedById(req.body?.reservedBy, belongsTo);
+			const totalNum = Number(total_amount);
+			const roomsSig = buildRoomsSignature(pickedRoomsType);
+
+			if (!chkInRange || !chkOutRange) return null;
+
+			// Coarse prefilter in Mongo to keep candidate set small.
+			const baseAnd = [
+				{
+					checkin_date: { $gte: chkInRange.start, $lte: chkInRange.end },
+				},
+				{
+					checkout_date: { $gte: chkOutRange.start, $lte: chkOutRange.end },
+				},
+				{
+					// total_amount exact number match
+					total_amount: totalNum,
+				},
+				{
+					"customer_details.email": new RegExp(
+						`^${escapeRegExp(emailN)}$`,
+						"i"
+					),
+				},
+				{
+					"customer_details.name": new RegExp(`^${escapeRegExp(nameN)}$`, "i"),
+				},
+				{
+					"customer_details.nationality": new RegExp(
+						`^${escapeRegExp(nationalityN)}$`,
+						"i"
+					),
+				},
+			];
+
+			// If we have a reservedBy id, try to match it against either belongsTo or reservedBy
+			if (reservedById) {
+				const orTargets = [];
+				if (mongoose.Types.ObjectId.isValid(reservedById)) {
+					const oid = new mongoose.Types.ObjectId(reservedById);
+					orTargets.push({ belongsTo: oid });
+					orTargets.push({ reservedBy: oid });
+				} else {
+					orTargets.push({ belongsTo: reservedById });
+					orTargets.push({ reservedBy: reservedById });
+				}
+				baseAnd.push({ $or: orTargets });
+			}
+
+			const candidates = await Reservations.find({ $and: baseAnd }).lean();
+
+			// Precise comparison in JS: phone (digits only) + room signature
+			for (const cand of candidates) {
+				const cPhoneN = normalizePhone(cand?.customer_details?.phone);
+				if (cPhoneN !== phoneN) continue;
+
+				// If reservedBy not provided in request, require candidate to also lack it
+				if (!reservedById) {
+					const candRB =
+						extractReservedById(cand?.reservedBy, cand?.belongsTo) || null;
+					if (candRB !== null) continue; // request has none, candidate has a value => not exact dup
+				}
+
+				const candRoomsSig = buildRoomsSignature(cand?.pickedRoomsType);
+				if (candRoomsSig !== roomsSig) continue;
+
+				// Found an exact duplicate
+				return cand;
+			}
+			return null;
+		};
+		/** ------------------ END DUPLICATE GUARD (helpers) ------------------ */
+
+		// 1) Employee direct creation (duplicate guard is applied here)
 		if (sentFrom === "employee") {
+			const exactDuplicate = await findExactDuplicate();
+			if (exactDuplicate) {
+				return res.status(409).json({
+					message:
+						"It looks like we have duplicate reservations. Please contact customer service in the chat.",
+					existing: {
+						_id: exactDuplicate._id,
+						confirmation_number: exactDuplicate.confirmation_number,
+						createdAt: exactDuplicate.createdAt,
+					},
+				});
+			}
+
 			const confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(
 					Reservations,
@@ -2937,7 +3102,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			});
 		}
 
-		// 2) Non-employee path (Not Paid → verification link)
+		// 2) Non-employee path (Not Paid → verification link)  **UNCHANGED**
 		const { name, phone, email, passport, passportExpiry, nationality } =
 			customerDetails;
 

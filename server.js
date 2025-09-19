@@ -1,5 +1,4 @@
 /** @format */
-
 const express = require("express");
 const mongoose = require("mongoose");
 const morgan = require("morgan");
@@ -8,14 +7,11 @@ const { readdirSync } = require("fs");
 require("dotenv").config();
 const http = require("http");
 const socketIo = require("socket.io");
-const cron = require("node-cron");
-const axios = require("axios");
 
-// Initialize Express app
 const app = express();
 const server = http.createServer(app);
 
-// Database connection
+// Mongo
 mongoose.set("strictQuery", false);
 mongoose
 	.connect(process.env.DATABASE, {
@@ -29,12 +25,9 @@ mongoose
 app.use(morgan("dev"));
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
+app.get("/", (_req, res) => res.send("Hello From PMS API"));
 
-app.get("/", (req, res) => {
-	res.send("Hello From PMS API");
-});
-
-// Create the io instance
+// Socket.IO
 const io = socketIo(server, {
 	cors: {
 		origin: "*",
@@ -42,93 +35,87 @@ const io = socketIo(server, {
 		allowedHeaders: ["Authorization"],
 		credentials: true,
 	},
+	transports: ["websocket", "polling"],
+	pingTimeout: 25000,
+	pingInterval: 20000,
 });
-
-// Pass the io instance to the app
 app.set("io", io);
-const { initAIAgent } = require("./ai-agent");
+
+// AI agent
+const aiagentMod = require("./aiagent/index.js"); // explicit path to avoid aiagent.js conflicts
+const initAIAgent =
+	aiagentMod.initAIAgent || aiagentMod.default || aiagentMod.init || aiagentMod;
+if (typeof initAIAgent !== "function") {
+	throw new Error(
+		"[aiagent] initAIAgent export not found. Check aiagent/index.js"
+	);
+}
 initAIAgent({ app, io });
 
-// Route middlewares
+// API routes
 readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));
 
-// Schedule task to run every 15 minutes (example task, replace with your logic)
-//I will adjust later but this is important
-// cron.schedule("*/15 * * * *", async () => {
-// 	try {
-// 		console.log("Running scheduled task");
-// 		// Replace with your actual scheduled task logic
-// 		const response = await axios.get("http://localhost:8080/api/get-some-data");
-// 		console.log("Task completed successfully");
-// 	} catch (error) {
-// 		console.error("Error during scheduled task:", error);
-// 	}
-// });
-
-// Server port configuration
 const port = process.env.PORT || 8080;
+server.listen(port, () => console.log(`Server is running on port ${port}`));
 
-server.listen(port, () => {
-	console.log(`Server is running on port ${port}`);
-});
+/* ===== room-scoped relays + DB watcher for late-joiners ===== */
+const SupportCase = require("./models/supportcase");
 
-// Socket.io event handling
 io.on("connection", (socket) => {
-	console.log("A user connected:", socket.id);
+	socket.on("joinRoom", ({ caseId }) => caseId && socket.join(caseId));
+	socket.on("leaveRoom", ({ caseId }) => caseId && socket.leave(caseId));
 
-	// Join a specific room
-	socket.on("joinRoom", ({ caseId }) => {
-		if (caseId) {
-			socket.join(caseId); // Join the room with the given caseId
-			console.log(`Socket ${socket.id} joined room: ${caseId}`);
-		}
+	socket.on("typing", (data = {}) => {
+		const room = data?.caseId;
+		if (room) io.to(room).emit("typing", { ...data, isAi: false });
+	});
+	socket.on("stopTyping", (data = {}) => {
+		const room = data?.caseId;
+		if (room) io.to(room).emit("stopTyping", { ...data, isAi: false });
 	});
 
-	// Leave the room when a user disconnects
-	socket.on("leaveRoom", ({ caseId }) => {
-		if (caseId) {
-			socket.leave(caseId); // Leave the room with the given caseId
-			console.log(`Socket ${socket.id} left room: ${caseId}`);
-		}
-	});
-
+	// Echo guest message to room immediately; AI will also reply to same room
 	socket.on("sendMessage", (message) => {
-		console.log("Message received: ", message);
-		io.emit("receiveMessage", message);
-	});
-
-	socket.on("typing", (data) => {
-		io.emit("typing", data);
-	});
-
-	socket.on("stopTyping", (data) => {
-		io.emit("stopTyping", data);
-	});
-
-	socket.on("newChat", (data) => {
-		// Emit the new chat with relevant data to filter on the frontend
-		io.emit("newChat", {
-			_id: data._id,
-			caseStatus: data.caseStatus,
-			openedBy: data.openedBy, // Include openedBy to filter on the frontend
-			hotelId: data.hotelId,
-			conversation: data.conversation,
-			// ...otherData, // Any other data you need
-		});
-	});
-
-	socket.on("disconnect", (reason) => {
-		console.log(`A user disconnected: ${reason}`);
-	});
-
-	socket.on("deleteMessage", ({ caseId, messageId }) => {
-		console.log(`Message deleted in case ${caseId}: ${messageId}`);
-
-		// Notify all clients in the specific case room
-		io.to(caseId).emit("messageDeleted", { caseId, messageId });
-	});
-
-	socket.on("connect_error", (error) => {
-		console.error(`Connection error: ${error.message}`);
+		const room = message?.caseId;
+		if (room) io.to(room).emit("receiveMessage", message);
 	});
 });
+
+// Re-broadcast last conversation line whenever a case is updated
+try {
+	if (typeof SupportCase.watch === "function") {
+		const stream = SupportCase.watch(
+			[{ $match: { operationType: { $in: ["update", "insert"] } } }],
+			{ fullDocument: "updateLookup" }
+		);
+		stream.on("change", (ch) => {
+			const doc = ch.fullDocument;
+			const caseId = doc?._id && String(doc._id);
+			if (!caseId) return;
+			if (ch.operationType === "insert") {
+				io.to(caseId).emit("newChat", { caseId, case: doc });
+				return;
+			}
+			const updated = ch.updateDescription?.updatedFields || {};
+			const touched = Object.keys(updated).some((k) =>
+				k.startsWith("conversation.")
+			);
+			if (!touched) return;
+			const last =
+				Array.isArray(doc.conversation) &&
+				doc.conversation[doc.conversation.length - 1];
+			if (last) {
+				io.to(caseId).emit("receiveMessage", { ...last, caseId });
+				io.to(caseId).emit("stopTyping", { caseId });
+			}
+		});
+		stream.on("error", (e) =>
+			console.error("[socket] change stream error:", e?.message || e)
+		);
+		console.log(
+			"[socket] DB watcher broadcasting conversation updates enabled."
+		);
+	}
+} catch (e) {
+	console.log("[socket] Change streams not available:", e?.message || e);
+}
