@@ -415,7 +415,6 @@ exports.expediaDataDump = async (req, res) => {
 		}
 
 		console.log("Parsed Data Length:", data.length);
-
 		if (data.length === 0) {
 			console.error("File contains no data");
 			return res.status(400).json({ error: "File contains no data" });
@@ -427,12 +426,10 @@ exports.expediaDataDump = async (req, res) => {
 			console.error("Hotel details not found for ID:", accountId);
 			return res.status(404).json({ error: "Hotel details not found" });
 		}
-
 		console.log("Hotel Details Loaded");
 
-		// Fetch USD to SAR conversion rate
-		const usdToSarRate = await getUSDToSARRate();
-		console.log(`USD to SAR Conversion Rate: ${usdToSarRate}`);
+		// --- CONFIG: USD → SAR fixed conversion (per your requirement) ---
+		const USD_TO_SAR = 3.75;
 
 		// Normalize keys for easier handling
 		const normalizeKeys = (obj) => {
@@ -443,12 +440,69 @@ exports.expediaDataDump = async (req, res) => {
 			return normalized;
 		};
 
-		for (let item of data) {
-			item = normalizeKeys(item);
+		// Parse dates like agodaDataDump, but add fallback for ISO strings
+		const parseDateExpedia = (value) => {
+			// Try the shared parser first
+			const d = parseAndNormalizeDate(value);
+			if (d) return d;
+			// Fallback for ISO timestamps (e.g., 2025-09-30T15:10:00-07:00)
+			const isoTry = dayjs(value);
+			if (isoTry.isValid()) return isoTry.format("YYYY-MM-DD");
+			return null;
+		};
 
-			// Debugging logs
-			console.log("Processed Item Keys:", Object.keys(item));
-			console.log("Guest Name:", item["guest"]);
+		// Safe number parser
+		const n = (v) => {
+			if (v === null || v === undefined) return 0;
+			const num = parseFloat(
+				String(v)
+					.toString()
+					.replace(/[^\d.-]/g, "")
+			);
+			return isNaN(num) ? 0 : num;
+		};
+
+		// Room string → internal roomType mapping
+		const mapExpediaRoomType = (roomNameRaw) => {
+			if (!roomNameRaw) return null;
+			const s = String(roomNameRaw).toLowerCase();
+
+			if (s.includes("master") && s.includes("suite")) return "masterSuite";
+			if (s.includes("quadruple") || s.includes("quad")) return "quadRooms";
+			if (s.includes("triple")) return "tripleRooms";
+			if (s.includes("twin")) return "twinRooms";
+			if (s.includes("double")) return "doubleRooms";
+			if (s.includes("single")) return "singleRooms";
+			if (s.includes("king")) return "kingRooms";
+			if (s.includes("queen")) return "queenRooms";
+			if (s.includes("family")) return "familyRooms";
+			if (s.includes("studio")) return "studioRooms";
+			if (s.includes("suite")) return "suite";
+			if (s.includes("standard")) return "standardRooms";
+			if (s.includes("shared") || s.includes("individual"))
+				return "individualBed";
+			return null;
+		};
+
+		// Get root price (SAR) for a given date from roomDetails (with fallbacks)
+		const resolveRootPriceForDate = (roomDetails, ymd) => {
+			const pr = roomDetails.pricingRate?.find(
+				(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
+			);
+
+			let rootPrice = 0;
+			if (pr) {
+				rootPrice = n(pr.rootPrice || pr.price);
+			} else if (roomDetails.defaultCost) {
+				rootPrice = n(roomDetails.defaultCost);
+			} else if (roomDetails.price?.basePrice) {
+				rootPrice = n(roomDetails.price.basePrice);
+			}
+			return rootPrice;
+		};
+
+		for (let raw of data) {
+			let item = normalizeKeys(raw);
 
 			const reservationId = item["reservation id"]?.toString().trim();
 			const confirmationNumber =
@@ -456,283 +510,198 @@ exports.expediaDataDump = async (req, res) => {
 
 			if (!confirmationNumber) {
 				console.warn(
-					"Skipping record with missing Reservation ID and Confirmation #"
+					"Skipping record with missing Reservation ID / Confirmation #"
 				);
 				continue;
 			}
 
-			console.log("Processing item:", confirmationNumber);
+			// Currency conversion: Booking amount in USD → SAR @ 3.75
+			const totalAmountUSD = n(item["booking amount"]);
+			const totalAmountSAR = Number((totalAmountUSD * USD_TO_SAR).toFixed(2));
 
-			// **Currency Conversion: Only booking amount from USD to SAR**
-			const totalAmountUSD = Number(item["booking amount"] || 0);
-			const totalAmountSAR = Number((totalAmountUSD * usdToSarRate).toFixed(2)); // Ensure it's a number with two decimal places
-
-			console.log("Total Amount (USD):", totalAmountUSD);
-			console.log("Total Amount (SAR):", totalAmountSAR);
-
-			const checkInDate = parseAndNormalizeDate(item["check-in"]);
-			const checkOutDate = parseAndNormalizeDate(item["check-out"]);
-			const bookedDate = parseAndNormalizeDate(item["booked"]);
+			// Parse dates
+			const checkInDate = parseDateExpedia(item["check-in"]);
+			const checkOutDate = parseDateExpedia(item["check-out"]);
+			const bookedDate = parseDateExpedia(item["booked"]);
 
 			if (!checkInDate || !checkOutDate || !bookedDate) {
-				console.error("Invalid date format detected. Skipping record:", {
-					checkInDate: item["check-in"],
-					checkOutDate: item["check-out"],
-					bookedDate: item["booked"],
+				console.error("Invalid date(s). Skipping record:", {
+					checkIn: item["check-in"],
+					checkOut: item["check-out"],
+					booked: item["booked"],
 				});
 				continue;
 			}
-
-			console.log("Processed Dates:", {
-				checkInDate,
-				checkOutDate,
-				bookedDate,
-			});
 
 			const daysOfResidence = calculateDaysOfResidence(
 				checkInDate,
 				checkOutDate
 			);
-			console.log("Days of Residence:", daysOfResidence);
-
 			if (daysOfResidence <= 0) {
-				console.warn(
-					"Skipping record with non-positive days of residence:",
-					confirmationNumber
-				);
+				console.warn("Non-positive nights; skipping:", confirmationNumber);
 				continue;
 			}
 
 			const dateRange = generateDateRange(checkInDate, checkOutDate);
-			console.log("Date Range:", dateRange);
 
-			// **Room Type Mapping Logic Starts Here**
-
-			// Extract the 'room' field from the item
+			// Room mapping
 			const roomField = item["room"];
 			if (!roomField) {
-				console.warn(`Missing 'Room' field in record: ${confirmationNumber}`);
+				console.warn(`Missing 'Room' for record: ${confirmationNumber}`);
 				continue;
 			}
 
-			// Initialize mappedRoomType as null
-			let mappedRoomType = null;
-
-			// Iterate through roomTypes to find a matching room type
-			for (const roomType of roomTypes) {
-				const roomTypeKeyword = roomType.label.split(" ")[0].toLowerCase(); // First word in label
-				if (roomField.toLowerCase().includes(roomTypeKeyword)) {
-					mappedRoomType = roomType.value;
-					break; // Stop at the first match
-				}
-			}
-
-			if (!mappedRoomType) {
-				console.warn(
-					`Room type mapping not found for room: ${roomField} in record: ${confirmationNumber}`
+			const mappedRoomType = mapExpediaRoomType(roomField);
+			// Prefer roomType match; fallback to displayName exact/contains
+			let roomDetails =
+				(mappedRoomType &&
+					hotelDetails.roomCountDetails.find(
+						(r) => r.roomType === mappedRoomType
+					)) ||
+				hotelDetails.roomCountDetails.find(
+					(r) =>
+						r.displayName?.toLowerCase().trim() ===
+						roomField.toLowerCase().trim()
+				) ||
+				hotelDetails.roomCountDetails.find((r) =>
+					roomField.toLowerCase().includes(r.displayName?.toLowerCase() || "")
 				);
-				continue; // Skip this record if no mapping is found
-			}
-
-			// Find the corresponding roomDetails from hotelDetails.roomCountDetails
-			const roomDetails = hotelDetails.roomCountDetails.find(
-				(room) => room.roomType === mappedRoomType
-			);
 
 			if (!roomDetails) {
 				console.warn(
-					`Room details not found for roomType: ${mappedRoomType} in record: ${confirmationNumber}`
+					`Room details not found for "${roomField}" (mapped: ${mappedRoomType}). Skipping ${confirmationNumber}.`
 				);
-				continue; // Skip if roomDetails are not found
+				continue;
 			}
 
-			console.log("Room Details Found:", roomDetails.displayName);
+			// Room count (default 1 if not provided)
+			const roomCount = Math.max(1, n(item["room count"]) || 1);
 
-			// **Room Type Mapping Logic Ends Here**
-
-			// **Room Count Extraction and Validation**
-			const roomCount = Number(item["room count"] || 1); // Ensure it's a number
-			console.log("Room Count:", roomCount);
-
-			// **Build the Initial PricingByDay Array with Root Prices**
-			const initialPricingByDay = dateRange.map((date) => {
-				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
-
-				const pricingRate = roomDetails.pricingRate.find(
-					(rate) =>
-						dayjs(rate.calendarDate).format("YYYY-MM-DD") === standardizedDate
-				);
-
-				let rootPriceSAR = 0; // Since roomDetails.pricingRate.rootPrice is already in SAR
-
-				if (pricingRate && parseFloat(pricingRate.rootPrice) > 0) {
-					rootPriceSAR = parseFloat(pricingRate.rootPrice);
-				} else if (
-					roomDetails.defaultCost &&
-					parseFloat(roomDetails.defaultCost) > 0
-				) {
-					rootPriceSAR = parseFloat(roomDetails.defaultCost);
-				} else if (
-					roomDetails.price &&
-					roomDetails.price.basePrice &&
-					parseFloat(roomDetails.price.basePrice) > 0
-				) {
-					rootPriceSAR = parseFloat(roomDetails.price.basePrice);
-				} else {
-					console.warn(
-						`No pricing or default cost found for room: ${roomDetails.displayName} on date: ${standardizedDate}`
-					);
-				}
-
-				return {
-					date: standardizedDate,
-					price: parseFloat(rootPriceSAR.toFixed(2)), // Ensure number type
-					rootPrice: parseFloat(rootPriceSAR.toFixed(2)), // Ensure number type
-				};
+			// Build root-price timeline (per room)
+			const initialPricingByDay = dateRange.map((ymd) => {
+				const rootPrice = resolveRootPriceForDate(roomDetails, ymd);
+				return { date: ymd, rootPrice: Number(rootPrice.toFixed(2)) };
 			});
 
-			// **Calculate Sum of Root Prices Across All Days**
-			const sumRootPriceSAR = initialPricingByDay.reduce(
-				(acc, day) => acc + day.rootPrice,
+			// Total of root prices (per room across nights)
+			const sumRootPricePerRoom = initialPricingByDay.reduce(
+				(acc, d) => acc + d.rootPrice,
 				0
 			);
-			console.log("Sum of Root Prices (SAR):", sumRootPriceSAR.toFixed(2));
-
-			// **Calculate Commission and Commission Rate Correctly**
-			// Desired:
-			// commissionAmountSAR = total_amount_SAR * commissionRate
-			// sumRootPriceSAR = total_amount_SAR - commissionAmountSAR
-			// Therefore, commissionRate = commissionAmountSAR / total_amount_SAR
-
-			// However, sumRootPriceSAR is already calculated based on root prices
-			// Thus, commissionAmountSAR = total_amount_SAR - sumRootPriceSAR
-			// commissionRate = commissionAmountSAR / total_amount_SAR
-
-			const commissionAmountSAR = parseFloat(
-				(totalAmountSAR - sumRootPriceSAR).toFixed(2)
-			);
-			const commissionRate = parseFloat(
-				(commissionAmountSAR / totalAmountSAR).toFixed(4)
+			// Across all rooms:
+			const sumRootPriceAllRooms = Number(
+				(sumRootPricePerRoom * roomCount).toFixed(2)
 			);
 
-			console.log("Commission Amount (SAR):", commissionAmountSAR.toFixed(2));
-			console.log("Commission Rate:", commissionRate);
+			// Commission math (non-negative)
+			let commissionAmountSAR = Number(
+				(totalAmountSAR - sumRootPriceAllRooms).toFixed(2)
+			);
+			if (commissionAmountSAR < 0) commissionAmountSAR = 0;
+			const commissionRate =
+				totalAmountSAR > 0
+					? Number((commissionAmountSAR / totalAmountSAR).toFixed(4))
+					: 0;
 
-			// **Build the Final PricingByDay Array with Correct Commission Details**
-			// Distribute the total_amount_SAR evenly across nights
-			const pricePerDay = parseFloat(
+			// Per-day, per-room price (gross)
+			const pricePerDayPerRoom = Number(
 				(totalAmountSAR / daysOfResidence / roomCount).toFixed(2)
 			);
 
-			const pricingByDayTemplate = dateRange.map((date) => {
-				const standardizedDate = dayjs(date).format("YYYY-MM-DD");
+			// Pricing by day (per room), mirroring Agoda structure
+			const pricingByDayTemplate = dateRange.map((ymd) => {
+				const rootForDay =
+					initialPricingByDay.find((d) => d.date === ymd)?.rootPrice || 0;
+				// Follow Agoda formula for "totalPriceWithoutCommission"
+				const totalPriceWithoutCommission = Number(
+					(pricePerDayPerRoom - rootForDay * commissionRate).toFixed(2)
+				);
 
 				return {
-					date: standardizedDate,
-					price: pricePerDay, // Same as totalPriceWithCommission
-					rootPrice: initialPricingByDay.find(
-						(day) => day.date === standardizedDate
-					).rootPrice, // As per original logic
-					commissionRate: commissionRate, // As double (e.g., 0.0872)
-					totalPriceWithCommission: pricePerDay, // Same as price
-					totalPriceWithoutCommission: parseFloat(
-						(pricePerDay - pricePerDay * commissionRate).toFixed(2)
-					), // price - (price * commissionRate)
+					date: ymd,
+					price: pricePerDayPerRoom.toFixed(2),
+					rootPrice: rootForDay.toFixed(2),
+					commissionRate: commissionRate.toFixed(2),
+					totalPriceWithCommission: pricePerDayPerRoom.toFixed(2),
+					totalPriceWithoutCommission: totalPriceWithoutCommission.toFixed(2),
 				};
 			});
 
-			// **Calculate Average chosenPrice based on totalPriceWithCommission**
-			const averageChosenPrice = parseFloat(
-				(
-					pricingByDayTemplate.reduce(
-						(acc, day) => acc + day.totalPriceWithCommission,
-						0
-					) / pricingByDayTemplate.length
-				).toFixed(2)
-			);
+			// pickedRoomsType: one entry per room (like Agoda)
+			const chosenPrice = pricePerDayPerRoom.toFixed(2);
+			const pickedRoomsType = Array.from({ length: roomCount }, () => ({
+				room_type: roomDetails.roomType,
+				displayName: roomDetails.displayName,
+				chosenPrice,
+				count: 1,
+				pricingByDay: pricingByDayTemplate,
+			}));
 
-			// **Construct the pickedRoomsType Array with Accurate Pricing in SAR**
-			const pickedRoomsType = [
-				{
-					room_type: roomDetails.roomType,
-					displayName: roomDetails.displayName,
-					chosenPrice: averageChosenPrice, // Average of totalPriceWithCommission
-					count: roomCount, // Already a number
-					pricingByDay: pricingByDayTemplate,
-				},
-			];
+			// Payment mapping
+			const paymentType = (item["payment type"] || "").toString().toLowerCase();
+			const payment = paymentType.includes("expedia collect")
+				? "Paid Online"
+				: paymentType.includes("hotel collect")
+				? "Not Paid"
+				: "Not Paid";
 
-			console.log("Picked Rooms Type:", pickedRoomsType);
-
-			// **Map Payment Type**
-			const paymentType = item["payment type"]?.toLowerCase();
-			const payment =
-				paymentType === "expedia collect"
-					? "Paid Online"
-					: paymentType === "hotel collect"
-					? "Not Paid"
-					: "Not Paid";
-
-			// **Adjust Reservation Status**
-			let reservationStatus = item["status"]?.toLowerCase();
-			if (reservationStatus === "prestay") {
+			// Reservation status mapping to match Agoda-style normalization
+			let reservationStatus = (item["status"] || "").toString().toLowerCase();
+			if (reservationStatus === "prestay" || reservationStatus === "pre-stay") {
 				reservationStatus = "confirmed";
-			} else if (reservationStatus.includes("cancelled")) {
+			} else if (reservationStatus.includes("cancel")) {
 				reservationStatus = "cancelled";
 			} else if (reservationStatus.includes("show")) {
 				reservationStatus = "no_show";
 			}
 
-			// **Construct the Document Object**
+			// Build document (mirror Agoda keys/shape)
 			const document = {
 				confirmation_number: confirmationNumber,
-				booking_source: "online jannat booking", // Consistent Booking Source
+				booking_source: "online jannat booking",
 				customer_details: {
-					name: item["guest"],
-					nationality: "", // Assuming nationality is not provided in Expedia data
-					phone: "", // Assuming phone is not provided in Expedia data
-					email: "", // Assuming email is not provided in Expedia data
+					name: item["guest"] || "",
+					nationality: "",
+					phone: "",
+					email: "",
 				},
 				state: "Expedia",
 				reservation_status: reservationStatus || "confirmed",
+
+				// Expedia flat files often don’t provide split adults/children; keep total_guests = 0 if unknown
 				total_guests:
-					Number(item["no_of_adult"] || 0) +
-					Number(item["no_of_children"] || 0),
-				cancel_reason: "", // Assuming cancel reason is not provided; adjust as needed
-				booked_at: bookedDate, // Use normalized date
-				sub_total: parseFloat(sumRootPriceSAR.toFixed(2)), // Ensure number
-				total_rooms: roomCount, // Already a number
-				total_amount: totalAmountSAR, // Already a number
-				currency: "SAR", // Converted to SAR
-				checkin_date: checkInDate, // Use normalized date
-				checkout_date: checkOutDate, // Use normalized date
-				days_of_residence: daysOfResidence, // Already a number
-				comment: "", // Assuming comments are not provided; adjust as needed
-				financeStatus: payment, // Adjusted based on payment type
+					(n(item["no_of_adult"]) || 0) + (n(item["no_of_children"]) || 0),
+
+				cancel_reason: "",
+				booked_at: bookedDate, // normalized YYYY-MM-DD
+				sub_total: sumRootPriceAllRooms.toFixed(2), // Hotel net (approx; based on root prices)
+				total_rooms: roomCount,
+				total_amount: totalAmountSAR.toFixed(2),
+				currency: "SAR",
+				checkin_date: checkInDate,
+				checkout_date: checkOutDate,
+				days_of_residence: daysOfResidence,
+				comment: "",
+
+				// Finance fields (keep both for compatibility; Agoda uses 'payment')
+				financeStatus: payment,
 				payment: payment,
-				paid_amount: payment === "Paid Online" ? totalAmountSAR : 0, // Already numbers
-				commission: commissionAmountSAR, // Correctly calculated commissionAmountSAR
-				commissionRate: commissionRate, // Store commissionRate as double
+				paid_amount: payment === "Paid Online" ? totalAmountSAR.toFixed(2) : 0,
+
+				commission: commissionAmountSAR.toFixed(2),
+
 				pickedRoomsType,
 				hotelId: accountId,
 				belongsTo: userId,
 			};
 
-			// Debugging log for the document
-			console.log("Document to be saved:", document);
-
-			// **Check if the reservation already exists**
-			const existingReservation = await Reservations.findOne({
+			// Upsert by confirmation_number + booking_source
+			const existing = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
-				booking_source: "online jannat booking", // Ensure consistency
+				booking_source: "online jannat booking",
 			});
 
-			if (existingReservation) {
-				// **Replace the existing document with the new one, regardless of cancellation status**
-				console.log(
-					"Existing reservation found. Replacing with the new document:",
-					confirmationNumber
-				);
+			if (existing) {
 				await Reservations.updateOne(
 					{
 						confirmation_number: confirmationNumber,
@@ -740,18 +709,16 @@ exports.expediaDataDump = async (req, res) => {
 					},
 					{ $set: { ...document } }
 				);
+				console.log("Updated existing reservation:", confirmationNumber);
 			} else {
-				// Create a new reservation
 				await Reservations.create(document);
-				console.log("Saving new reservation to MongoDB:", {
-					checkin_date: checkInDate,
-					checkout_date: checkOutDate,
-				});
+				console.log("Created reservation:", confirmationNumber);
 			}
 		}
 
 		res.status(200).json({
-			message: "Expedia data has been updated and uploaded successfully.",
+			message:
+				"Expedia data has been updated and uploaded successfully (USD→SAR @3.75).",
 		});
 	} catch (error) {
 		console.error("Error in expediaDataDump:", error);
