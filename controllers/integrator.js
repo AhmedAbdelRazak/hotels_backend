@@ -30,12 +30,13 @@ const generateDateRange = (startDate, endDate) => {
 };
 
 const parseCSV = (filePath) => {
-	// Local sanitizer to normalize headers/values uniformly
+	// Add bidi marks removal: \u200E (LRM), \u200F (RLM), and \u202A–\u202E
 	const sanitizeKey = (k) =>
 		String(k)
 			.replace(/^\uFEFF/, "") // BOM at start
-			.replace(/[\u200B-\u200D\u2060]/g, "") // zero-widths
-			.replace(/\u00A0/g, " ") // nbsp → space
+			.replace(/[\u200B-\u200D\u2060]/g, "") // zero-widths (ZWSP/ZWJ/ZWNJ/WORD JOINER)
+			.replace(/[\u200E\u200F\u202A-\u202E]/g, "") // LRM/RLM & bidi embeddings
+			.replace(/\u00A0/g, " ") // NBSP → space
 			.replace(/[._-]+/g, " ") // ., _, - → space
 			.replace(/\s+/g, " ") // collapse spaces
 			.trim()
@@ -46,6 +47,8 @@ const parseCSV = (filePath) => {
 		let s = String(v);
 		s = s
 			.replace(/^\uFEFF/, "")
+			.replace(/[\u200B-\u200D\u2060]/g, "")
+			.replace(/[\u200E\u200F\u202A-\u202E]/g, "")
 			.replace(/\u00A0/g, " ")
 			.trim();
 		return s;
@@ -56,10 +59,8 @@ const parseCSV = (filePath) => {
 		fs.createReadStream(filePath)
 			.pipe(
 				csvParser({
-					// Normalize headers once at ingestion time
 					mapHeaders: ({ header }) => sanitizeKey(header),
-					// Trim values (and strip BOM if it leaked)
-					mapValues: ({ header, value }) => sanitizeValue(value),
+					mapValues: ({ value }) => sanitizeValue(value),
 				})
 			)
 			.on("data", (row) => rows.push(row))
@@ -456,6 +457,7 @@ exports.expediaDataDump = async (req, res) => {
 			String(k)
 				.replace(/^\uFEFF/, "")
 				.replace(/[\u200B-\u200D\u2060]/g, "")
+				.replace(/[\u200E\u200F\u202A-\u202E]/g, "") // <— add this
 				.replace(/\u00A0/g, " ")
 				.replace(/[._-]+/g, " ")
 				.replace(/\s+/g, " ")
@@ -467,6 +469,8 @@ exports.expediaDataDump = async (req, res) => {
 			let s = String(v);
 			s = s
 				.replace(/^\uFEFF/, "")
+				.replace(/[\u200B-\u200D\u2060]/g, "")
+				.replace(/[\u200E\u200F\u202A-\u202E]/g, "") // <— add this
 				.replace(/\u00A0/g, " ")
 				.trim();
 			return s;
