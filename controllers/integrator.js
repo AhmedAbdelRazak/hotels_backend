@@ -428,30 +428,39 @@ exports.expediaDataDump = async (req, res) => {
 		}
 		console.log("Hotel Details Loaded");
 
-		// --- CONFIG: USD → SAR fixed conversion (per your requirement) ---
+		// --- USD → SAR fixed conversion per your requirement ---
 		const USD_TO_SAR = 3.75;
 
-		// Normalize keys for easier handling
+		// --- Helpers ---
+		// 1) Normalize keys (strip BOM/zero-width/nbsp, collapse spaces, lowercase)
 		const normalizeKeys = (obj) => {
 			const normalized = {};
-			for (const key of Object.keys(obj)) {
-				normalized[key.trim().toLowerCase()] = obj[key];
+			for (const rawKey of Object.keys(obj)) {
+				const cleanKey = String(rawKey)
+					.replace(/\uFEFF/g, "") // BOM
+					.replace(/[\u200B-\u200D\u2060]/g, "") // zero-width chars
+					.replace(/\u00A0/g, " ") // non-breaking space → space
+					.replace(/\s+/g, " ") // collapse spaces
+					.trim()
+					.toLowerCase();
+				normalized[cleanKey] = obj[rawKey];
 			}
 			return normalized;
 		};
 
-		// Parse dates like agodaDataDump, but add fallback for ISO strings
-		const parseDateExpedia = (value) => {
-			// Try the shared parser first
-			const d = parseAndNormalizeDate(value);
-			if (d) return d;
-			// Fallback for ISO timestamps (e.g., 2025-09-30T15:10:00-07:00)
-			const isoTry = dayjs(value);
-			if (isoTry.isValid()) return isoTry.format("YYYY-MM-DD");
-			return null;
+		// 2) Pick first non-empty value from normalized keys
+		const pickFirst = (obj, candidates) => {
+			for (const k of candidates) {
+				const val = obj[k];
+				if (val !== undefined && val !== null) {
+					const s = String(val).trim();
+					if (s !== "") return s;
+				}
+			}
+			return "";
 		};
 
-		// Safe number parser
+		// 3) Safe number parser
 		const n = (v) => {
 			if (v === null || v === undefined) return 0;
 			const num = parseFloat(
@@ -462,11 +471,19 @@ exports.expediaDataDump = async (req, res) => {
 			return isNaN(num) ? 0 : num;
 		};
 
-		// Room string → internal roomType mapping
+		// 4) Date parsing (use your shared parser, then ISO fallback)
+		const parseDateExpedia = (value) => {
+			const d = parseAndNormalizeDate(value);
+			if (d) return d;
+			const isoTry = dayjs(value);
+			if (isoTry.isValid()) return isoTry.format("YYYY-MM-DD");
+			return null;
+		};
+
+		// 5) Room mapping
 		const mapExpediaRoomType = (roomNameRaw) => {
 			if (!roomNameRaw) return null;
 			const s = String(roomNameRaw).toLowerCase();
-
 			if (s.includes("master") && s.includes("suite")) return "masterSuite";
 			if (s.includes("quadruple") || s.includes("quad")) return "quadRooms";
 			if (s.includes("triple")) return "tripleRooms";
@@ -484,7 +501,6 @@ exports.expediaDataDump = async (req, res) => {
 			return null;
 		};
 
-		// Get root price (SAR) for a given date from roomDetails (with fallbacks)
 		const resolveRootPriceForDate = (roomDetails, ymd) => {
 			const pr = roomDetails.pricingRate?.find(
 				(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
@@ -504,9 +520,13 @@ exports.expediaDataDump = async (req, res) => {
 		for (let raw of data) {
 			let item = normalizeKeys(raw);
 
+			// DEBUG: uncomment to inspect headers if needed
+			// console.log("Processed Item Keys:", Object.keys(item));
+
 			const reservationId = item["reservation id"]?.toString().trim();
 			const confirmationNumber =
-				item["confirmation #"]?.toString().trim() || reservationId;
+				(item["confirmation #"] && String(item["confirmation #"]).trim()) ||
+				reservationId;
 
 			if (!confirmationNumber) {
 				console.warn(
@@ -519,7 +539,7 @@ exports.expediaDataDump = async (req, res) => {
 			const totalAmountUSD = n(item["booking amount"]);
 			const totalAmountSAR = Number((totalAmountUSD * USD_TO_SAR).toFixed(2));
 
-			// Parse dates
+			// Dates
 			const checkInDate = parseDateExpedia(item["check-in"]);
 			const checkOutDate = parseDateExpedia(item["check-out"]);
 			const bookedDate = parseDateExpedia(item["booked"]);
@@ -552,7 +572,6 @@ exports.expediaDataDump = async (req, res) => {
 			}
 
 			const mappedRoomType = mapExpediaRoomType(roomField);
-			// Prefer roomType match; fallback to displayName exact/contains
 			let roomDetails =
 				(mappedRoomType &&
 					hotelDetails.roomCountDetails.find(
@@ -564,7 +583,7 @@ exports.expediaDataDump = async (req, res) => {
 						roomField.toLowerCase().trim()
 				) ||
 				hotelDetails.roomCountDetails.find((r) =>
-					roomField.toLowerCase().includes(r.displayName?.toLowerCase() || "")
+					roomField.toLowerCase().includes((r.displayName || "").toLowerCase())
 				);
 
 			if (!roomDetails) {
@@ -574,26 +593,22 @@ exports.expediaDataDump = async (req, res) => {
 				continue;
 			}
 
-			// Room count (default 1 if not provided)
 			const roomCount = Math.max(1, n(item["room count"]) || 1);
 
-			// Build root-price timeline (per room)
+			// Root-price timeline (per room)
 			const initialPricingByDay = dateRange.map((ymd) => {
 				const rootPrice = resolveRootPriceForDate(roomDetails, ymd);
 				return { date: ymd, rootPrice: Number(rootPrice.toFixed(2)) };
 			});
 
-			// Total of root prices (per room across nights)
 			const sumRootPricePerRoom = initialPricingByDay.reduce(
 				(acc, d) => acc + d.rootPrice,
 				0
 			);
-			// Across all rooms:
 			const sumRootPriceAllRooms = Number(
 				(sumRootPricePerRoom * roomCount).toFixed(2)
 			);
 
-			// Commission math (non-negative)
 			let commissionAmountSAR = Number(
 				(totalAmountSAR - sumRootPriceAllRooms).toFixed(2)
 			);
@@ -603,20 +618,16 @@ exports.expediaDataDump = async (req, res) => {
 					? Number((commissionAmountSAR / totalAmountSAR).toFixed(4))
 					: 0;
 
-			// Per-day, per-room price (gross)
 			const pricePerDayPerRoom = Number(
 				(totalAmountSAR / daysOfResidence / roomCount).toFixed(2)
 			);
 
-			// Pricing by day (per room), mirroring Agoda structure
 			const pricingByDayTemplate = dateRange.map((ymd) => {
 				const rootForDay =
 					initialPricingByDay.find((d) => d.date === ymd)?.rootPrice || 0;
-				// Follow Agoda formula for "totalPriceWithoutCommission"
 				const totalPriceWithoutCommission = Number(
 					(pricePerDayPerRoom - rootForDay * commissionRate).toFixed(2)
 				);
-
 				return {
 					date: ymd,
 					price: pricePerDayPerRoom.toFixed(2),
@@ -627,7 +638,6 @@ exports.expediaDataDump = async (req, res) => {
 				};
 			});
 
-			// pickedRoomsType: one entry per room (like Agoda)
 			const chosenPrice = pricePerDayPerRoom.toFixed(2);
 			const pickedRoomsType = Array.from({ length: roomCount }, () => ({
 				room_type: roomDetails.roomType,
@@ -637,6 +647,35 @@ exports.expediaDataDump = async (req, res) => {
 				pricingByDay: pricingByDayTemplate,
 			}));
 
+			// --- Guest details (now robust) ---
+			const guestName = pickFirst(item, [
+				"guest",
+				"guest name",
+				"primary guest",
+				"lead guest",
+				"traveler",
+				"traveler name",
+				"name",
+			]);
+
+			const email = pickFirst(item, [
+				"email",
+				"guest email",
+				"e-mail",
+				"guest e-mail",
+			]);
+			const phone = pickFirst(item, [
+				"phone",
+				"guest phone",
+				"telephone",
+				"guest telephone",
+			]);
+			const nationality = pickFirst(item, [
+				"nationality",
+				"guest nationality",
+				"country",
+			]);
+
 			// Payment mapping
 			const paymentType = (item["payment type"] || "").toString().toLowerCase();
 			const payment = paymentType.includes("expedia collect")
@@ -645,7 +684,7 @@ exports.expediaDataDump = async (req, res) => {
 				? "Not Paid"
 				: "Not Paid";
 
-			// Reservation status mapping to match Agoda-style normalization
+			// Reservation status mapping
 			let reservationStatus = (item["status"] || "").toString().toLowerCase();
 			if (reservationStatus === "prestay" || reservationStatus === "pre-stay") {
 				reservationStatus = "confirmed";
@@ -660,21 +699,18 @@ exports.expediaDataDump = async (req, res) => {
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking",
 				customer_details: {
-					name: item["guest"] || "",
-					nationality: "",
-					phone: "",
-					email: "",
+					name: guestName || "",
+					nationality: nationality || "",
+					phone: phone || "",
+					email: email || "",
 				},
 				state: "Expedia",
 				reservation_status: reservationStatus || "confirmed",
-
-				// Expedia flat files often don’t provide split adults/children; keep total_guests = 0 if unknown
 				total_guests:
 					(n(item["no_of_adult"]) || 0) + (n(item["no_of_children"]) || 0),
-
 				cancel_reason: "",
-				booked_at: bookedDate, // normalized YYYY-MM-DD
-				sub_total: sumRootPriceAllRooms.toFixed(2), // Hotel net (approx; based on root prices)
+				booked_at: bookedDate,
+				sub_total: sumRootPriceAllRooms.toFixed(2),
 				total_rooms: roomCount,
 				total_amount: totalAmountSAR.toFixed(2),
 				currency: "SAR",
@@ -682,14 +718,10 @@ exports.expediaDataDump = async (req, res) => {
 				checkout_date: checkOutDate,
 				days_of_residence: daysOfResidence,
 				comment: "",
-
-				// Finance fields (keep both for compatibility; Agoda uses 'payment')
 				financeStatus: payment,
 				payment: payment,
 				paid_amount: payment === "Paid Online" ? totalAmountSAR.toFixed(2) : 0,
-
 				commission: commissionAmountSAR.toFixed(2),
-
 				pickedRoomsType,
 				hotelId: accountId,
 				belongsTo: userId,
