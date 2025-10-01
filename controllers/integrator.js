@@ -30,19 +30,41 @@ const generateDateRange = (startDate, endDate) => {
 };
 
 const parseCSV = (filePath) => {
+	// Local sanitizer to normalize headers/values uniformly
+	const sanitizeKey = (k) =>
+		String(k)
+			.replace(/^\uFEFF/, "") // BOM at start
+			.replace(/[\u200B-\u200D\u2060]/g, "") // zero-widths
+			.replace(/\u00A0/g, " ") // nbsp → space
+			.replace(/[._-]+/g, " ") // ., _, - → space
+			.replace(/\s+/g, " ") // collapse spaces
+			.trim()
+			.toLowerCase();
+
+	const sanitizeValue = (v) => {
+		if (v === null || v === undefined) return v;
+		let s = String(v);
+		s = s
+			.replace(/^\uFEFF/, "")
+			.replace(/\u00A0/g, " ")
+			.trim();
+		return s;
+	};
+
 	return new Promise((resolve, reject) => {
-		const data = [];
+		const rows = [];
 		fs.createReadStream(filePath)
-			.pipe(csvParser())
-			.on("data", (row) => {
-				data.push(row);
-			})
-			.on("end", () => {
-				resolve(data);
-			})
-			.on("error", (error) => {
-				reject(error);
-			});
+			.pipe(
+				csvParser({
+					// Normalize headers once at ingestion time
+					mapHeaders: ({ header }) => sanitizeKey(header),
+					// Trim values (and strip BOM if it leaked)
+					mapValues: ({ header, value }) => sanitizeValue(value),
+				})
+			)
+			.on("data", (row) => rows.push(row))
+			.on("end", () => resolve(rows))
+			.on("error", (error) => reject(error));
 	});
 };
 
@@ -386,7 +408,6 @@ exports.expediaDataDump = async (req, res) => {
 		const accountId = req.params.accountId;
 		const userId = req.params.belongsTo;
 
-		// Validate file upload
 		if (!req.file || !req.file.path) {
 			console.error("No file uploaded");
 			return res.status(400).json({ error: "No file uploaded" });
@@ -400,7 +421,6 @@ exports.expediaDataDump = async (req, res) => {
 
 		let data = [];
 
-		// Parse the uploaded file based on its extension
 		if (fileExtension === ".xlsx" || fileExtension === ".xls") {
 			const workbook = xlsx.readFile(filePath);
 			const sheetName = workbook.SheetNames[0];
@@ -408,6 +428,7 @@ exports.expediaDataDump = async (req, res) => {
 			data = xlsx.utils.sheet_to_json(sheet);
 		} else if (fileExtension === ".csv") {
 			console.log("Processing CSV file...");
+			// Uses the hardened parseCSV above
 			data = await parseCSV(filePath);
 		} else {
 			console.error("Unsupported file format:", fileExtension);
@@ -428,59 +449,66 @@ exports.expediaDataDump = async (req, res) => {
 		}
 		console.log("Hotel Details Loaded");
 
-		// --- USD → SAR fixed conversion per your requirement ---
+		// ---- Helpers (same sanitizer used by parseCSV) ----
 		const USD_TO_SAR = 3.75;
 
-		// --- Helpers ---
-		// 1) Normalize keys (strip BOM/zero-width/nbsp, collapse spaces, lowercase)
-		const normalizeKeys = (obj) => {
-			const normalized = {};
-			for (const rawKey of Object.keys(obj)) {
-				const cleanKey = String(rawKey)
-					.replace(/\uFEFF/g, "") // BOM
-					.replace(/[\u200B-\u200D\u2060]/g, "") // zero-width chars
-					.replace(/\u00A0/g, " ") // non-breaking space → space
-					.replace(/\s+/g, " ") // collapse spaces
-					.trim()
-					.toLowerCase();
-				normalized[cleanKey] = obj[rawKey];
-			}
-			return normalized;
+		const sanitizeKey = (k) =>
+			String(k)
+				.replace(/^\uFEFF/, "")
+				.replace(/[\u200B-\u200D\u2060]/g, "")
+				.replace(/\u00A0/g, " ")
+				.replace(/[._-]+/g, " ")
+				.replace(/\s+/g, " ")
+				.trim()
+				.toLowerCase();
+
+		const sanitizeValue = (v) => {
+			if (v === null || v === undefined) return v;
+			let s = String(v);
+			s = s
+				.replace(/^\uFEFF/, "")
+				.replace(/\u00A0/g, " ")
+				.trim();
+			return s;
 		};
 
-		// 2) Pick first non-empty value from normalized keys
-		const pickFirst = (obj, candidates) => {
-			for (const k of candidates) {
-				const val = obj[k];
-				if (val !== undefined && val !== null) {
-					const s = String(val).trim();
+		// Normalize a row's keys + trim values (safe for XLSX and CSV)
+		const normalizeRow = (obj) => {
+			const out = {};
+			for (const rawKey of Object.keys(obj)) {
+				out[sanitizeKey(rawKey)] = sanitizeValue(obj[rawKey]);
+			}
+			return out;
+		};
+
+		// Pick first non-empty among synonyms
+		const pick = (row, candidates) => {
+			for (const c of candidates) {
+				const key = sanitizeKey(c);
+				if (row[key] !== undefined && row[key] !== null) {
+					const s = String(row[key]).trim();
 					if (s !== "") return s;
 				}
 			}
 			return "";
 		};
 
-		// 3) Safe number parser
 		const n = (v) => {
 			if (v === null || v === undefined) return 0;
-			const num = parseFloat(
-				String(v)
-					.toString()
-					.replace(/[^\d.-]/g, "")
-			);
+			const num = parseFloat(String(v).replace(/[^\d.-]/g, ""));
 			return isNaN(num) ? 0 : num;
 		};
 
-		// 4) Date parsing (use your shared parser, then ISO fallback)
 		const parseDateExpedia = (value) => {
+			// Try your existing parser first
 			const d = parseAndNormalizeDate(value);
 			if (d) return d;
+			// ISO fallback (e.g., 2025-09-30T15:10:00-07:00)
 			const isoTry = dayjs(value);
 			if (isoTry.isValid()) return isoTry.format("YYYY-MM-DD");
 			return null;
 		};
 
-		// 5) Room mapping
 		const mapExpediaRoomType = (roomNameRaw) => {
 			if (!roomNameRaw) return null;
 			const s = String(roomNameRaw).toLowerCase();
@@ -505,7 +533,6 @@ exports.expediaDataDump = async (req, res) => {
 			const pr = roomDetails.pricingRate?.find(
 				(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
 			);
-
 			let rootPrice = 0;
 			if (pr) {
 				rootPrice = n(pr.rootPrice || pr.price);
@@ -517,16 +544,19 @@ exports.expediaDataDump = async (req, res) => {
 			return rootPrice;
 		};
 
-		for (let raw of data) {
-			let item = normalizeKeys(raw);
+		for (const raw of data) {
+			// For XLSX path we still normalize; for CSV path headers are already sanitized
+			const row = normalizeRow(raw);
 
-			// DEBUG: uncomment to inspect headers if needed
-			// console.log("Processed Item Keys:", Object.keys(item));
-
-			const reservationId = item["reservation id"]?.toString().trim();
+			// ---- Field extraction with synonyms (rock‑solid) ----
 			const confirmationNumber =
-				(item["confirmation #"] && String(item["confirmation #"]).trim()) ||
-				reservationId;
+				pick(row, [
+					"confirmation #",
+					"confirmation number",
+					"confirmation",
+					"itinerary number",
+				]) ||
+				pick(row, ["reservation id", "reservationid", "booking id", "res id"]);
 
 			if (!confirmationNumber) {
 				console.warn(
@@ -535,20 +565,38 @@ exports.expediaDataDump = async (req, res) => {
 				continue;
 			}
 
-			// Currency conversion: Booking amount in USD → SAR @ 3.75
-			const totalAmountUSD = n(item["booking amount"]);
-			const totalAmountSAR = Number((totalAmountUSD * USD_TO_SAR).toFixed(2));
+			const bookingAmountUSD = n(
+				pick(row, ["booking amount", "amount", "total amount", "charge amount"])
+			);
+			const totalAmountSAR = Number((bookingAmountUSD * USD_TO_SAR).toFixed(2));
 
-			// Dates
-			const checkInDate = parseDateExpedia(item["check-in"]);
-			const checkOutDate = parseDateExpedia(item["check-out"]);
-			const bookedDate = parseDateExpedia(item["booked"]);
+			const checkInDate = parseDateExpedia(
+				pick(row, [
+					"check-in",
+					"check in",
+					"arrival",
+					"arrival date",
+					"start date",
+				])
+			);
+			const checkOutDate = parseDateExpedia(
+				pick(row, [
+					"check-out",
+					"check out",
+					"departure",
+					"departure date",
+					"end date",
+				])
+			);
+			const bookedDate = parseDateExpedia(
+				pick(row, ["booked", "booked date", "created", "created date"])
+			);
 
 			if (!checkInDate || !checkOutDate || !bookedDate) {
 				console.error("Invalid date(s). Skipping record:", {
-					checkIn: item["check-in"],
-					checkOut: item["check-out"],
-					booked: item["booked"],
+					checkIn: row["check in"] ?? row["check-in"],
+					checkOut: row["check out"] ?? row["check-out"],
+					booked: row["booked"],
 				});
 				continue;
 			}
@@ -564,8 +612,15 @@ exports.expediaDataDump = async (req, res) => {
 
 			const dateRange = generateDateRange(checkInDate, checkOutDate);
 
-			// Room mapping
-			const roomField = item["room"];
+			const roomField =
+				pick(row, [
+					"room",
+					"room type",
+					"room name",
+					"accommodation",
+					"unit",
+					"unit type",
+				]) || "";
 			if (!roomField) {
 				console.warn(`Missing 'Room' for record: ${confirmationNumber}`);
 				continue;
@@ -579,7 +634,7 @@ exports.expediaDataDump = async (req, res) => {
 					)) ||
 				hotelDetails.roomCountDetails.find(
 					(r) =>
-						r.displayName?.toLowerCase().trim() ===
+						(r.displayName || "").toLowerCase().trim() ===
 						roomField.toLowerCase().trim()
 				) ||
 				hotelDetails.roomCountDetails.find((r) =>
@@ -593,9 +648,12 @@ exports.expediaDataDump = async (req, res) => {
 				continue;
 			}
 
-			const roomCount = Math.max(1, n(item["room count"]) || 1);
+			const roomCount = Math.max(
+				1,
+				n(pick(row, ["room count", "rooms", "quantity"])) || 1
+			);
 
-			// Root-price timeline (per room)
+			// ---- Build root-price timeline (per room) ----
 			const initialPricingByDay = dateRange.map((ymd) => {
 				const rootPrice = resolveRootPriceForDate(roomDetails, ymd);
 				return { date: ymd, rootPrice: Number(rootPrice.toFixed(2)) };
@@ -638,54 +696,64 @@ exports.expediaDataDump = async (req, res) => {
 				};
 			});
 
-			const chosenPrice = pricePerDayPerRoom.toFixed(2);
 			const pickedRoomsType = Array.from({ length: roomCount }, () => ({
 				room_type: roomDetails.roomType,
 				displayName: roomDetails.displayName,
-				chosenPrice,
+				chosenPrice: pricePerDayPerRoom.toFixed(2),
 				count: 1,
 				pricingByDay: pricingByDayTemplate,
 			}));
 
-			// --- Guest details (now robust) ---
-			const guestName = pickFirst(item, [
-				"guest",
-				"guest name",
-				"primary guest",
-				"lead guest",
-				"traveler",
-				"traveler name",
-				"name",
-			]);
+			// ---- Guest details (bulletproof) ----
+			let guestName =
+				pick(row, [
+					"guest",
+					"guest name",
+					"primary guest",
+					"lead guest",
+					"traveler",
+					"traveler name",
+					"name",
+				]) || "";
 
-			const email = pickFirst(item, [
+			if (!guestName) {
+				const first = pick(row, ["first name", "first"]);
+				const last = pick(row, ["last name", "last"]);
+				if (first || last) guestName = `${first} ${last}`.trim();
+			}
+
+			const email = pick(row, [
 				"email",
 				"guest email",
 				"e-mail",
 				"guest e-mail",
 			]);
-			const phone = pickFirst(item, [
+			const phone = pick(row, [
 				"phone",
 				"guest phone",
 				"telephone",
 				"guest telephone",
+				"mobile",
 			]);
-			const nationality = pickFirst(item, [
+			const nationality = pick(row, [
 				"nationality",
 				"guest nationality",
 				"country",
 			]);
 
-			// Payment mapping
-			const paymentType = (item["payment type"] || "").toString().toLowerCase();
+			// ---- Payment / status ----
+			const paymentType = (
+				pick(row, ["payment type", "payment model", "payment"]) || ""
+			).toLowerCase();
 			const payment = paymentType.includes("expedia collect")
 				? "Paid Online"
 				: paymentType.includes("hotel collect")
 				? "Not Paid"
 				: "Not Paid";
 
-			// Reservation status mapping
-			let reservationStatus = (item["status"] || "").toString().toLowerCase();
+			let reservationStatus = (
+				pick(row, ["status", "reservation status"]) || ""
+			).toLowerCase();
 			if (reservationStatus === "prestay" || reservationStatus === "pre-stay") {
 				reservationStatus = "confirmed";
 			} else if (reservationStatus.includes("cancel")) {
@@ -694,12 +762,11 @@ exports.expediaDataDump = async (req, res) => {
 				reservationStatus = "no_show";
 			}
 
-			// Build document (mirror Agoda keys/shape)
 			const document = {
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking",
 				customer_details: {
-					name: guestName || "",
+					name: guestName || "", // <— now reliably populated
 					nationality: nationality || "",
 					phone: phone || "",
 					email: email || "",
@@ -707,7 +774,8 @@ exports.expediaDataDump = async (req, res) => {
 				state: "Expedia",
 				reservation_status: reservationStatus || "confirmed",
 				total_guests:
-					(n(item["no_of_adult"]) || 0) + (n(item["no_of_children"]) || 0),
+					(n(pick(row, ["no_of_adult", "adults", "adult"])) || 0) +
+					(n(pick(row, ["no_of_children", "children", "child"])) || 0),
 				cancel_reason: "",
 				booked_at: bookedDate,
 				sub_total: sumRootPriceAllRooms.toFixed(2),
@@ -727,7 +795,6 @@ exports.expediaDataDump = async (req, res) => {
 				belongsTo: userId,
 			};
 
-			// Upsert by confirmation_number + booking_source
 			const existing = await Reservations.findOne({
 				confirmation_number: confirmationNumber,
 				booking_source: "online jannat booking",
