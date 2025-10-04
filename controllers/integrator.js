@@ -457,7 +457,8 @@ exports.expediaDataDump = async (req, res) => {
 			String(k)
 				.replace(/^\uFEFF/, "")
 				.replace(/[\u200B-\u200D\u2060]/g, "")
-				.replace(/[\u200E\u200F\u202A-\u202E]/g, "") // <— add this
+				.replace(/[\u200E\u200F\u202A-\u202E]/g, "")
+				.replace(/[\u2066-\u2069]/g, "") // <— NEW
 				.replace(/\u00A0/g, " ")
 				.replace(/[._-]+/g, " ")
 				.replace(/\s+/g, " ")
@@ -470,7 +471,8 @@ exports.expediaDataDump = async (req, res) => {
 			s = s
 				.replace(/^\uFEFF/, "")
 				.replace(/[\u200B-\u200D\u2060]/g, "")
-				.replace(/[\u200E\u200F\u202A-\u202E]/g, "") // <— add this
+				.replace(/[\u200E\u200F\u202A-\u202E]/g, "")
+				.replace(/[\u2066-\u2069]/g, "") // <— NEW
 				.replace(/\u00A0/g, " ")
 				.trim();
 			return s;

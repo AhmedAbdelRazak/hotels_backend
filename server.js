@@ -41,16 +41,16 @@ const io = socketIo(server, {
 });
 app.set("io", io);
 
-// AI agent
-const aiagentMod = require("./aiagent/index.js"); // explicit path to avoid aiagent.js conflicts
-const initAIAgent =
-	aiagentMod.initAIAgent || aiagentMod.default || aiagentMod.init || aiagentMod;
-if (typeof initAIAgent !== "function") {
-	throw new Error(
-		"[aiagent] initAIAgent export not found. Check aiagent/index.js"
-	);
-}
-initAIAgent({ app, io });
+// // AI agent
+// const aiagentMod = require("./aiagent/index.js"); // explicit path to avoid aiagent.js conflicts
+// const initAIAgent =
+// 	aiagentMod.initAIAgent || aiagentMod.default || aiagentMod.init || aiagentMod;
+// if (typeof initAIAgent !== "function") {
+// 	throw new Error(
+// 		"[aiagent] initAIAgent export not found. Check aiagent/index.js"
+// 	);
+// }
+// initAIAgent({ app, io });
 
 // API routes
 readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));
