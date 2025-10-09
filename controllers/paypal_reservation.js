@@ -776,7 +776,7 @@ exports.createReservationAndProcess = async (req, res) => {
 		const { owner } = await getHotelAndOwner(hotelId);
 		const ownerEmail = owner?.email || null;
 
-		// Employee or Paid Offline
+		// Employee or Paid Offline (unchanged)
 		if (
 			sentFrom === "employee" ||
 			String(payment).toLowerCase() === "paid offline"
@@ -791,8 +791,8 @@ exports.createReservationAndProcess = async (req, res) => {
 				reqBody: {
 					...body,
 					hotelName: hotel.hotelName,
-					payment: "paid offline", // lowercase
-					financeStatus: "paid", // fully paid offline
+					payment: "paid offline",
+					financeStatus: "paid",
 				},
 				confirmationNumber,
 			});
@@ -822,7 +822,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				.json({ message: "Reservation created successfully", data: saved });
 		}
 
-		// Client path validation
+		// Client details validation (unchanged)
 		const {
 			name,
 			phone,
@@ -848,11 +848,11 @@ exports.createReservationAndProcess = async (req, res) => {
 		const pp = body.paypal || {};
 		const pmtLower = String(payment || "").toLowerCase();
 
-		/* ── A) NOT PAID ───────────────────────────────────────────────────── */
+		/* ── A) NOT PAID (unchanged logic) ───────────────────────────────── */
 		if (pmtLower === "not paid") {
 			const hasCard = !!pp.setup_token;
 
-			// A1) Not paid and NO CARD → verification (do NOT create reservation)
+			// A1) not paid + NO card → verification only (unchanged)
 			if (!hasCard) {
 				const confirmationNumber = await new Promise((resolve, reject) => {
 					ensureUniqueNumber(
@@ -930,7 +930,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 			}
 
-			// A2) Not paid but CARD PRESENT → vault save + ledger + create reservation NOW
+			// A2) not paid + CARD → vault + create now (unchanged)
 			let persist = {};
 			try {
 				const tokenData = await paypalExchangeSetupToVault(pp.setup_token);
@@ -959,7 +959,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				persist.pending_total_usd = 0;
 			}
 
-			// Optional: precheck small auth+void
+			// Optional precheck
 			if (pp.precheck?.do && pp.precheck?.amountUSD && persist.vault_id) {
 				const confirmationNumber = await new Promise((resolve, reject) => {
 					ensureUniqueNumber(
@@ -1046,7 +1046,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				.json({ message: "Reservation created successfully", data: saved });
 		}
 
-		/* ── B) DEPOSIT / FULL (AUTHORIZE ONLY) ───────────────────────────── */
+		/* ── B) DEPOSIT / FULL (AUTHORIZE ONLY) — enhanced to ensure future charge ── */
 		if (["deposit paid", "paid online"].includes(pmtLower)) {
 			if (!pp.order_id) {
 				return res.status(400).json({
@@ -1076,7 +1076,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 			}
 
-			// Build meta & patch the order for dashboard clarity
+			// Build meta & patch order
 			const meta = buildMetaBase({
 				confirmationNumber,
 				hotelName: hotel.hotelName,
@@ -1090,7 +1090,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				usdAmount: expectedUsdAmount,
 			});
 
-			// Verify order amount (GET)
+			// Verify amount (GET)
 			const getRes = await ax.get(`${PPM}/v2/checkout/orders/${pp.order_id}`, {
 				auth: { username: clientId, password: secretKey },
 			});
@@ -1158,19 +1158,43 @@ exports.createReservationAndProcess = async (req, res) => {
 			}
 
 			const srcCard = authResult?.payment_source?.card || {};
-			const vaultId =
+			let vaultId =
 				authResult?.payment_source?.card?.attributes?.vault?.id || null;
 
-			// Lowercase label we will store
+			// 🔐 NEW: if guest used PayPal wallet (no card vault) but frontend also sent a setup_token, exchange it now
+			if (!vaultId && pp.setup_token) {
+				try {
+					const tokenData = await paypalExchangeSetupToVault(pp.setup_token);
+					vaultId = tokenData.id;
+					// augment srcCard-like info for persistence
+					srcCard.brand =
+						tokenData.payment_source?.card?.brand || srcCard.brand;
+					srcCard.last_digits =
+						tokenData.payment_source?.card?.last_digits || srcCard.last_digits;
+					srcCard.expiry =
+						tokenData.payment_source?.card?.expiry || srcCard.expiry;
+					if (tokenData.payment_source?.card?.billing_address) {
+						srcCard.billing_address =
+							tokenData.payment_source.card.billing_address;
+					}
+				} catch (e) {
+					console.warn(
+						"Optional vault exchange failed (wallet used):",
+						e?.response?.data || e
+					);
+				}
+			}
+
+			// Lowercase payment label
 			const finalPayment = decidePaymentLabel({
 				option,
 				expectedUsdAmount: pp.expectedUsdAmount || expectedUsdAmount,
 				convertedAmounts: body?.convertedAmounts || {},
 			});
 
-			// Paid (authorized) SAR to store on the reservation even though funds aren’t captured
+			// SAR amount to store on authorization (as you wanted)
 			const paidSar = toNum2(
-				Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0) // safety if FE sends this field
+				Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0)
 			);
 
 			const user = await findOrCreateUserByEmail(customerDetails, body.userId);
@@ -1179,6 +1203,15 @@ exports.createReservationAndProcess = async (req, res) => {
 				user.confirmationNumbersBooked.push(confirmationNumber);
 				await user.save();
 			}
+
+			// Compute long‑lead & store actionable flags if no vault
+			const now = Date.now();
+			const checkinMs = new Date(body.checkin_date).getTime();
+			const longLeadDays = Math.max(
+				0,
+				Math.round((checkinMs - now) / (1000 * 60 * 60 * 24))
+			);
+			const longLeadNoVault = longLeadDays > 26 && !vaultId; // > ~26 days ≈ beyond PayPal reauth window
 
 			const paypalDetails = {
 				bounds: {
@@ -1203,6 +1236,12 @@ exports.createReservationAndProcess = async (req, res) => {
 					cmid: pp.cmid || null,
 					raw: JSON.parse(JSON.stringify(authResult)),
 				},
+				...(longLeadNoVault
+					? {
+							flags: { long_lead_no_vault: true },
+							actions_required: ["attach_vault"],
+					  }
+					: {}),
 			};
 			if (vaultId) {
 				paypalDetails.vault_id = vaultId;
@@ -1219,18 +1258,23 @@ exports.createReservationAndProcess = async (req, res) => {
 				reqBody: {
 					...body,
 					hotelName: hotel.hotelName,
-					payment: finalPayment, // lowercase
+					payment: finalPayment,
 					commissionPaid: true,
 					financeStatus: "authorized",
-					paid_amount: paidSar, // <-- SAR amount saved on reservation
+					paid_amount: paidSar,
 				},
 				confirmationNumber,
 				paypalDetailsToPersist: paypalDetails,
 				paymentDetailsPatch: {
 					captured: false,
 					authorizationId: auth.id,
-					authorizationAmountUSD: toNum2(auth?.amount?.value || 0), // USD
-					authorizationAmountSAR: paidSar, // SAR saved too (new)
+					authorizationAmountUSD: toNum2(auth?.amount?.value || 0),
+					authorizationAmountSAR: paidSar,
+					authorizationExpiresAt: auth?.expiration_time
+						? new Date(auth.expiration_time)
+						: null, // NEW
+					needsVault: !!longLeadNoVault, // NEW
+					longLeadDays: longLeadDays, // NEW
 					chargeCount: 0,
 				},
 			});
@@ -2723,7 +2767,7 @@ exports.verifyReservationAndCreate = async (req, res) => {
  */
 exports.attachVaultToReservation = async (req, res) => {
 	try {
-		const { reservationId, setup_token } = req.body || {};
+		const { reservationId, setup_token, precheckUSD } = req.body || {};
 		if (!reservationId || !setup_token) {
 			return res
 				.status(400)
@@ -2746,17 +2790,55 @@ exports.attachVaultToReservation = async (req, res) => {
 			"paypal_details.card_last4":
 				tokenData.payment_source?.card?.last_digits || null,
 			"paypal_details.card_exp": tokenData.payment_source?.card?.expiry || null,
+			"payment_details.needsVault": false, // cleared once vaulted
+			"payment_details.vaultAttachedAt": new Date(), // NEW audit
 		};
 		if (tokenData.payment_source?.card?.billing_address) {
 			setOps["paypal_details.billing_address"] =
 				tokenData.payment_source.card.billing_address;
 		}
 
-		const updated = await Reservations.findByIdAndUpdate(
+		let updated = await Reservations.findByIdAndUpdate(
 			reservationId,
 			{ $set: setOps },
 			{ new: true }
-		);
+		).populate("hotelId");
+
+		// Optional: tiny precheck (auth+void) to ensure card is OK
+		if (precheckUSD && Number(precheckUSD) > 0) {
+			try {
+				const meta = buildMetaBase({
+					confirmationNumber: updated.confirmation_number,
+					hotelName: updated.hotelName || updated.hotelId?.hotelName || "Hotel",
+					guestName: updated.customer_details?.name || "Guest",
+					guestPhone: updated.customer_details?.phone || "",
+					guestEmail: updated.customer_details?.email || "",
+					guestNationality: updated.customer_details?.nationality || "",
+					reservedBy: updated.customer_details?.reservedBy || "",
+					checkin: updated.checkin_date,
+					checkout: updated.checkout_date,
+					usdAmount: Number(precheckUSD),
+				});
+				await paypalPrecheckAuthorizeVoid({
+					usdAmount: Number(precheckUSD),
+					vault_id: tokenData.id,
+					meta,
+					cmid: null,
+				});
+				updated = await Reservations.findByIdAndUpdate(
+					reservationId,
+					{
+						$set: {
+							"payment_details.precheckUSD": toNum2(precheckUSD),
+							"payment_details.precheckAt": new Date(),
+						},
+					},
+					{ new: true }
+				).populate("hotelId");
+			} catch (e) {
+				console.warn("attachVault precheck failed:", e?.response?.data || e);
+			}
+		}
 
 		return res.status(200).json({
 			ok: true,
