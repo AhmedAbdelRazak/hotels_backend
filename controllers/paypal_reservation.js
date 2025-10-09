@@ -1280,11 +1280,13 @@ exports.createReservationAndProcess = async (req, res) => {
 /**
  * 3) MIT (post‑stay) charge using saved vault token — with hard cap
  * Body: { reservationId, usdAmount, cmid?, sarAmount? }
- * Notes:
- *  - No reauthorize logic (explicitly avoided as requested).
- *  - If the original authorization is expired (or unusable) and there is NO vault token, we return 402 with a clear message.
- *  - Uses a unique invoice_id for each capture to avoid DUPLICATE_INVOICE_ID.
- *  - Fixes chargeCount double-increment and records lastChargeVia/lastChargeAt.
+ *
+ * Enhancements:
+ *  - If original authorization is EXPIRED and there is NO vault, we automatically try
+ *    PayPal REAUTHORIZE (within PayPal's allowed window) and then CAPTURE.
+ *  - If reauthorize fails, we return 402 with a clear, actionable message.
+ *  - MIT fallback still engages when a vault_id exists.
+ *  - Unique invoice_id per capture; correct chargeCount; audit fields.
  */
 exports.mitChargeReservation = async (req, res) => {
 	try {
@@ -1318,7 +1320,7 @@ exports.mitChargeReservation = async (req, res) => {
 			});
 		}
 
-		/* ── Decide path (NO reauthorize; MIT only if vault) ────────────── */
+		/* ── Decide path (add REAUTHORIZE when needed) ───────────────────── */
 		let authId = r?.paypal_details?.initial?.authorization_id || null;
 		const authAmt = Number(r?.paypal_details?.initial?.amount || 0);
 		let authStatus = String(
@@ -1337,7 +1339,7 @@ exports.mitChargeReservation = async (req, res) => {
 		]);
 
 		const remainingAuth = Math.max(0, authAmt - capturedSoFar);
-		let path = null;
+		let path = null; // "AUTH_CAPTURE" | "MIT" | "REAUTH_THEN_CAPTURE"
 		let pathReason = "";
 
 		if (
@@ -1349,24 +1351,29 @@ exports.mitChargeReservation = async (req, res) => {
 			if (amt <= remainingAuth + 1e-9) {
 				path = "AUTH_CAPTURE";
 			} else if (vault_id) {
-				path = "MIT"; // amount larger than remaining auth; use vaulted card
+				path = "MIT";
 				pathReason = "amount exceeds remaining authorization";
 			} else {
 				pathReason = `amount (${toCCY(
 					amt
 				)}) exceeds remaining authorization (${toCCY(
 					remainingAuth
-				)}) and no vault card is saved`;
+				)}) and no vaulted card`;
 			}
 		} else if (isExpired) {
 			if (vault_id) {
-				path = "MIT"; // explicit expired → MIT via vault
+				path = "MIT";
 				pathReason = "authorization expired";
+			} else if (amt <= authAmt + 1e-9) {
+				// No vault, but within original auth amount → try REAUTHORIZE
+				path = "REAUTH_THEN_CAPTURE";
+				pathReason = "authorization expired (auto reauthorize)";
 			} else {
-				pathReason = "authorization expired and no vaulted card";
+				pathReason =
+					"authorization expired, capture exceeds authorized amount, and no vaulted card";
 			}
 		} else if (vault_id) {
-			path = "MIT"; // no valid auth, but we do have a vault card
+			path = "MIT";
 			pathReason = "no valid authorization to capture";
 		} else {
 			pathReason = "no valid authorization to capture and no vaulted card";
@@ -1379,7 +1386,7 @@ exports.mitChargeReservation = async (req, res) => {
 			});
 		}
 
-		/* ── Reserve "pending" in ledger (atomic guard) ─────────────────── */
+		/* ── Reserve "pending" (atomic ledger guard) ─────────────────────── */
 		const reserved = await reservePendingCaptureUSD({
 			reservationId,
 			usdAmount: amt,
@@ -1394,7 +1401,7 @@ exports.mitChargeReservation = async (req, res) => {
 			});
 		}
 
-		/* ── Build rich metadata + unique invoice_id ────────────────────── */
+		/* ── Metadata + unique invoice_id ────────────────────────────────── */
 		const conf = r.confirmation_number;
 		const meta = buildMetaBase({
 			confirmationNumber: conf,
@@ -1408,8 +1415,7 @@ exports.mitChargeReservation = async (req, res) => {
 			checkout: r.checkout_date,
 			usdAmount: amt,
 		});
-		// guarantee uniqueness to avoid DUPLICATE_INVOICE_ID
-		meta.invoice_id = `RSV-${conf}-${Date.now()}`;
+		meta.invoice_id = `RSV-${conf}-${Date.now()}`; // avoid DUPLICATE_INVOICE_ID
 
 		const PPM2 = IS_PROD
 			? "https://api-m.paypal.com"
@@ -1423,10 +1429,79 @@ exports.mitChargeReservation = async (req, res) => {
 
 		let resultCapture = null;
 
-		/* ── Path A: capture against the (still-valid) authorization ────── */
+		/* ── Optional step: REAUTHORIZE then AUTH_CAPTURE ─────────────────── */
+		if (path === "REAUTH_THEN_CAPTURE") {
+			try {
+				const idemReauth = `reauth:${reservationId}:${authId}:${toCCY(
+					authAmt
+				)}`;
+				// Reauthorize for the remaining authorized amount (not greater than original)
+				const { data: reauth } = await ax.post(
+					`${PPM2}/v2/payments/authorizations/${authId}/reauthorize`,
+					{
+						amount: {
+							currency_code: "USD",
+							value: toCCY(Math.min(authAmt, remainingAuth || authAmt)),
+						},
+					},
+					{
+						auth: { username: clientId2, password: secretKey2 },
+						headers: { "PayPal-Request-Id": idemReauth },
+					}
+				);
+
+				// Update reservation with the NEW authorization details
+				authId = reauth?.id || authId;
+				authStatus = String(reauth?.status || "").toUpperCase();
+
+				await Reservations.findByIdAndUpdate(
+					reservationId,
+					{
+						$set: {
+							"paypal_details.initial.authorization_id": authId,
+							"paypal_details.initial.authorization_status":
+								reauth?.status || "AUTHORIZED",
+							"paypal_details.initial.expiration_time":
+								reauth?.expiration_time || null,
+						},
+						$push: {
+							"paypal_details.reauth_history": {
+								at: new Date(),
+								old: r?.paypal_details?.initial?.authorization_id || null,
+								new: reauth?.id || null,
+								status: reauth?.status || null,
+								expiration_time: reauth?.expiration_time || null,
+							},
+						},
+					},
+					{ new: true }
+				);
+
+				// After successful reauth, proceed as normal AUTH_CAPTURE
+				path = "AUTH_CAPTURE";
+				pathReason = "reauthorized successfully";
+			} catch (reauthErr) {
+				await finalizePendingCaptureUSD({
+					reservationId,
+					usdAmount: amt,
+					success: false,
+				});
+				const code =
+					reauthErr?.response?.data?.details?.[0]?.issue ||
+					"AUTHORIZATION_REAUTHORIZE_FAILED";
+				return res.status(402).json({
+					message:
+						"Authorization is expired and could not be reauthorized. Use link-pay (new PayPal order) or add a card (vault) and retry.",
+					code,
+				});
+			}
+		}
+
+		/* ── Path A: capture against (valid or reauthorized) authorization ── */
 		if (path === "AUTH_CAPTURE") {
 			try {
-				const final_capture = Math.abs(remainingAuth - amt) < 1e-9;
+				const final_capture =
+					Math.abs(Math.max(0, authAmt - capturedSoFar) - amt) < 1e-9;
 				const idemKey = `authcap:${reservationId}:${toCCY(amt)}:${conf}`;
 				const body = {
 					amount: { currency_code: "USD", value: toCCY(amt) },
@@ -1463,6 +1538,7 @@ exports.mitChargeReservation = async (req, res) => {
 					_via: "AUTH_CAPTURE",
 				};
 			} catch (capAuthErr) {
+				// If this still fails and we do have a vault token, fall back to MIT
 				const issue =
 					capAuthErr?.response?.data?.details?.[0]?.issue ||
 					"AUTH_CAPTURE_FAILED";
@@ -1495,7 +1571,7 @@ exports.mitChargeReservation = async (req, res) => {
 			}
 		}
 
-		/* ── Path B: MIT charge via vaulted card ────────────────────────── */
+		/* ── Path B: MIT charge via vaulted card ──────────────────────────── */
 		if (!resultCapture && path === "MIT") {
 			const previousCaptureId = r?.paypal_details?.initial?.capture_id || null;
 			try {
@@ -1555,7 +1631,7 @@ exports.mitChargeReservation = async (req, res) => {
 			invoice_id: meta.invoice_id,
 		};
 
-		// 1) finalize ledger & increment chargeCount (done inside helper)
+		// 1) finalize ledger (chargeCount++ inside)
 		let updated = await finalizePendingCaptureUSD({
 			reservationId,
 			usdAmount: capturedUsd,
@@ -1563,7 +1639,7 @@ exports.mitChargeReservation = async (req, res) => {
 			captureDoc,
 		});
 
-		// 2) apply SAR increment + audit fields (no extra chargeCount inc here)
+		// 2) SAR increment + audit fields
 		const sarInc = Number.isFinite(Number(sarAmount))
 			? Math.round(Number(sarAmount) * 100) / 100
 			: 0;
@@ -1585,7 +1661,7 @@ exports.mitChargeReservation = async (req, res) => {
 			{ new: true }
 		).populate("hotelId");
 
-		// 3) normalize payment/finance label based on captured_total_usd vs limit
+		// 3) normalize payment/finance based on ledger
 		const capLimit = toNum2(updated?.paypal_details?.bounds?.limit_usd || 0);
 		const newCapturedTotal = toNum2(
 			updated?.paypal_details?.captured_total_usd || 0
@@ -1604,7 +1680,7 @@ exports.mitChargeReservation = async (req, res) => {
 			{ new: true }
 		).populate("hotelId");
 
-		/* ── Email receipts (best‑effort) ────────────────────────────────── */
+		/* ── Receipt emails (best effort) ─────────────────────────────────── */
 		try {
 			await sgMail.send({
 				to: updated.customer_details.email,
@@ -1628,10 +1704,13 @@ exports.mitChargeReservation = async (req, res) => {
 			message:
 				resultCapture?._via === "AUTH_CAPTURE"
 					? "Authorization captured."
-					: "MIT charge completed.",
+					: resultCapture?._via === "MIT"
+					? "MIT charge completed."
+					: "Payment captured.",
 			transactionId: cap.id,
 			reservation: updated,
 			path: resultCapture?._via,
+			reason: pathReason || undefined,
 		});
 	} catch (error) {
 		console.error(
