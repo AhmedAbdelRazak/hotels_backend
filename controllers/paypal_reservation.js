@@ -1954,6 +1954,13 @@ exports.webhook = async (req, res) => {
 /**
  * 9) Link‑pay (authorize or capture) against existing reservation
  * Body: { reservationKey, option: "deposit" | "full", convertedAmounts, sarAmount?, paypal: { order_id, expectedUsdAmount, cmid?, mode?: "authorize"|"capture" } }
+ *
+ * Enhancements:
+ *  - Robust metadata (unique invoice_id), patch & retry on DUPLICATE_INVOICE_ID.
+ *  - Correct chargeCount (no double increments).
+ *  - Saves vault_id when the PayPal order exposes it (card + store_in_vault).
+ *  - Sets bounds if missing on first capture (so later MIT works reliably).
+ *  - Adds audit: payment_details.lastChargeVia + lastChargeAt.
  */
 exports.linkPayReservation = async (req, res) => {
 	const buildUniqueInvoiceId = (confNumber, existingCount) => {
@@ -2034,10 +2041,12 @@ exports.linkPayReservation = async (req, res) => {
 			sarAmount,
 			paypal: pp,
 		} = req.body || {};
+
 		if (!reservationKey || !option || !pp?.order_id || !pp?.expectedUsdAmount) {
 			return res.status(400).json({ message: "Missing required fields." });
 		}
 
+		// Find reservation by _id or confirmation_number
 		let reservation = null;
 		if (mongoose.Types.ObjectId.isValid(reservationKey)) {
 			reservation = await Reservations.findById(reservationKey).populate(
@@ -2069,6 +2078,7 @@ exports.linkPayReservation = async (req, res) => {
 			? process.env.PAYPAL_SECRET_KEY_LIVE
 			: process.env.PAYPAL_SECRET_KEY_SANDBOX;
 
+		// Verify order amount
 		const getRes = await ax.get(`${PPM2}/v2/checkout/orders/${pp.order_id}`, {
 			auth: { username: clientId2, password: secretKey2 },
 		});
@@ -2087,22 +2097,26 @@ exports.linkPayReservation = async (req, res) => {
 		const hotelName =
 			reservation.hotelName || reservation.hotelId?.hotelName || "Hotel";
 		const guest = reservation.customer_details || {};
+
 		const existingCount =
 			(reservation?.paypal_details?.initial ? 1 : 0) +
 			(Array.isArray(reservation?.paypal_details?.mit)
 				? reservation.paypal_details.mit.length
 				: 0);
 
+		// Unique invoice id for this link-pay attempt
 		const uniqueInvoiceId = buildUniqueInvoiceId(
 			reservation.confirmation_number,
 			existingCount
 		);
+
 		const description = `Hotel reservation — ${hotelName} — ${
 			reservation.checkin_date
 		} → ${reservation.checkout_date} — Guest ${guest.name} (${
 			guest.phone || ""
 		})`;
 
+		// Patch invoice/custom/description for human-readable dashboard
 		try {
 			await patchOrderInvoiceAndDescription({
 				orderId: pp.order_id,
@@ -2129,9 +2143,12 @@ exports.linkPayReservation = async (req, res) => {
 
 		const mode = (pp.mode || "").toLowerCase();
 
-		/* A) AUTHORIZE NOW (preferred default) */
+		/* ───────────────────────────────────────────────────────────────────
+		 * A) AUTHORIZE NOW (preferred to keep state "authorized")
+		 * ─────────────────────────────────────────────────────────────────── */
 		if (mode === "authorize") {
 			let authResult;
+
 			try {
 				const authReq = new paypal.orders.OrdersAuthorizeRequest(pp.order_id);
 				if (pp.cmid) authReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
@@ -2159,6 +2176,7 @@ exports.linkPayReservation = async (req, res) => {
 							: "Failed to authorize payment.",
 					});
 				}
+				// If already authorized, fetch the order to read the authorization object
 				const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
 				if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
 				const { result } = await ppClient.execute(getReq);
@@ -2174,6 +2192,7 @@ exports.linkPayReservation = async (req, res) => {
 				});
 			}
 
+			// Persist vault attributes when present
 			const srcCard = authResult?.payment_source?.card || {};
 			const vaultId =
 				authResult?.payment_source?.card?.attributes?.vault?.id ||
@@ -2197,6 +2216,7 @@ exports.linkPayReservation = async (req, res) => {
 					reservation?.paypal_details?.captured_total_usd || 0,
 				"paypal_details.pending_total_usd":
 					reservation?.paypal_details?.pending_total_usd || 0,
+
 				"paypal_details.initial.intent": "AUTHORIZE",
 				"paypal_details.initial.order_id": authResult.id,
 				"paypal_details.initial.authorization_id": auth.id,
@@ -2252,7 +2272,10 @@ exports.linkPayReservation = async (req, res) => {
 			});
 		}
 
-		/* B) CAPTURE NOW — backoffice use */
+		/* ───────────────────────────────────────────────────────────────────
+		 * B) CAPTURE NOW — Backoffice capture (preferred when funds are due)
+		 * ─────────────────────────────────────────────────────────────────── */
+		// Determine the ledger limit (must exist for pending guard)
 		const limit =
 			reservation?.paypal_details?.bounds?.limit_usd ??
 			(convertedAmounts?.totalUSD ? toNum2(convertedAmounts.totalUSD) : null);
@@ -2275,6 +2298,7 @@ exports.linkPayReservation = async (req, res) => {
 			});
 		}
 
+		// Reserve "pending" (atomic guard)
 		const pendingReserved = await reservePendingCaptureUSD({
 			reservationId: reservation._id,
 			usdAmount: newCapture,
@@ -2305,6 +2329,7 @@ exports.linkPayReservation = async (req, res) => {
 			const raw = err?._originalError?.text || err?.message || "";
 			const isDupInv =
 				err?.statusCode === 422 && /DUPLICATE_INVOICE_ID/i.test(raw);
+
 			if (!isDupInv) {
 				await finalizePendingCaptureUSD({
 					reservationId: reservation._id,
@@ -2313,6 +2338,8 @@ exports.linkPayReservation = async (req, res) => {
 				});
 				throw err;
 			}
+
+			// Refresh invoice_id and retry once
 			const freshInvoiceId = buildUniqueInvoiceId(
 				reservation.confirmation_number,
 				existingCount + 1
@@ -2352,6 +2379,10 @@ exports.linkPayReservation = async (req, res) => {
 
 		const capAmount = toNum2(cap?.amount?.value || newCapture);
 
+		// Persist vault if present on the captured order (rare, but possible)
+		const psCard = capResult?.payment_source?.card || null;
+		const vaultIdFromCap = psCard?.attributes?.vault?.id || null;
+
 		const commonCaptureDoc = {
 			order_id: capResult.id,
 			capture_id: cap.id,
@@ -2367,7 +2398,7 @@ exports.linkPayReservation = async (req, res) => {
 			via: "LINK_CAPTURE",
 		};
 
-		// 1) finalize ledger with capture doc (chargeCount++ inside helper)
+		// 1) finalize ledger (chargeCount++ inside helper)
 		let updated = await finalizePendingCaptureUSD({
 			reservationId: reservation._id,
 			usdAmount: capAmount,
@@ -2375,42 +2406,80 @@ exports.linkPayReservation = async (req, res) => {
 			captureDoc: commonCaptureDoc,
 		});
 
-		// 2) SAR + audit (no extra chargeCount++ here)
-		if (sarAmount) {
+		// 2) Ensure bounds exist after first capture (if they were missing)
+		const needBounds =
+			!updated?.paypal_details?.bounds ||
+			typeof updated?.paypal_details?.bounds?.limit_usd !== "number";
+		if (needBounds) {
 			updated = await Reservations.findByIdAndUpdate(
 				reservation._id,
 				{
-					$inc: { paid_amount: Math.round(Number(sarAmount) * 100) / 100 },
 					$set: {
-						"payment_details.triggeredAmountSAR": toNum2(sarAmount),
+						"paypal_details.bounds.base": "USD",
+						"paypal_details.bounds.limit_usd": toNum2(limit),
 					},
 				},
 				{ new: true }
-			).populate("hotelId");
+			);
 		}
 
-		const newCapturedTotal = toNum2(
-			updated?.paypal_details?.captured_total_usd || 0
-		);
-		const fullyPaid = newCapturedTotal >= limit - 1e-9;
-
-		const setOps2 = {
+		// 3) SAR increment + audit + optional vault persistence
+		const setAfter = {
 			"payment_details.captured": true,
 			"payment_details.triggeredAmountUSD": toNum2(capAmount),
 			"payment_details.finalCaptureTransactionId": cap.id,
 			"payment_details.lastChargeVia": "LINK_CAPTURE",
 			"payment_details.lastChargeAt": new Date(),
-			payment: fullyPaid ? "paid online" : "deposit paid",
-			commissionPaid: true,
-			financeStatus: fullyPaid ? "paid" : "authorized",
+			...(typeof sarAmount !== "undefined"
+				? { "payment_details.triggeredAmountSAR": toNum2(sarAmount) }
+				: {}),
 		};
+
+		const incAfter =
+			typeof sarAmount !== "undefined"
+				? { paid_amount: Math.round(Number(sarAmount) * 100) / 100 }
+				: null;
+
+		if (vaultIdFromCap) {
+			setAfter["paypal_details.vault_id"] = vaultIdFromCap;
+			setAfter["paypal_details.vault_status"] = "ACTIVE";
+			setAfter["paypal_details.vaulted_at"] = new Date();
+			setAfter["paypal_details.card_brand"] = psCard?.brand || null;
+			setAfter["paypal_details.card_last4"] = psCard?.last_digits || null;
+			setAfter["paypal_details.card_exp"] = psCard?.expiry || null;
+			if (psCard?.billing_address) {
+				setAfter["paypal_details.billing_address"] = psCard.billing_address;
+			}
+		}
 
 		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
-			{ $set: setOps2 },
+			{
+				...(incAfter ? { $inc: incAfter } : {}),
+				$set: setAfter,
+			},
 			{ new: true }
 		).populate("hotelId");
 
+		// 4) Normalize labels based on ledger vs. limit
+		const newCapturedTotal = toNum2(
+			updated?.paypal_details?.captured_total_usd || 0
+		);
+		const fullyPaid = newCapturedTotal >= toNum2(limit) - 1e-9;
+
+		updated = await Reservations.findByIdAndUpdate(
+			reservation._id,
+			{
+				$set: {
+					payment: fullyPaid ? "paid online" : "deposit paid",
+					commissionPaid: true,
+					financeStatus: fullyPaid ? "paid" : "authorized",
+				},
+			},
+			{ new: true }
+		).populate("hotelId");
+
+		// 5) Send receipts (best effort)
 		try {
 			const hotelDoc = updated.hotelId || {};
 			const invoiceModel = {
