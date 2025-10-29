@@ -336,40 +336,45 @@ exports.distinctRoomTypes = async (req, res) => {
 
 exports.getHotelFromSlug = async (req, res) => {
 	try {
-		const { hotelSlug } = req.params;
+		// Accept either /:hotelSlug or /:hotelNameSlug to avoid param name mismatch issues
+		const slugParam = req.params.hotelSlug || req.params.hotelNameSlug;
+		if (!slugParam) {
+			return res.status(400).json({ error: "Missing hotel slug." });
+		}
 
-		// Escape special characters in the slug for regex matching
-		const escapedSlug = hotelSlug
-			.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")
-			.replace(/-/g, " ");
+		// Normalize: decode, convert hyphens to spaces, collapse extra spaces
+		const normalized = decodeURIComponent(slugParam)
+			.replace(/-/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
 
-		// Find the hotel where hotelName (with spaces replaced by '-') matches hotelSlug
+		// Escape regex special chars
+		const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 		const hotel = await HotelDetails.findOne({
-			hotelName: {
-				$regex: new RegExp(`^${escapedSlug}$`, "i"),
-			},
-		});
+			hotelName: { $regex: new RegExp(`^${escaped}$`, "i") },
+		}).lean();
 
-		// If no hotel is found, return a 404 response
 		if (!hotel) {
 			return res.status(404).json({
 				message: "No hotel found for the provided slug.",
 			});
 		}
 
-		// Filter the roomCountDetails array to include only active rooms
+		// Filter to active rooms only (defensively)
+		const filteredRooms = Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails.filter((room) => room && room.activeRoom)
+			: [];
+
 		const filteredHotel = {
-			...hotel.toObject(),
-			roomCountDetails: hotel.roomCountDetails.filter(
-				(room) => room.activeRoom
-			),
+			...hotel,
+			roomCountDetails: filteredRooms,
 		};
 
-		// Send the filtered hotel data as the response
-		res.status(200).json(filteredHotel);
+		return res.status(200).json(filteredHotel);
 	} catch (error) {
 		console.error("Error fetching hotel by slug:", error);
-		res.status(500).json({
+		return res.status(500).json({
 			error: "An error occurred while fetching the hotel.",
 		});
 	}
