@@ -36,6 +36,7 @@ const {
 	sendWhatsAppReservationConfirmation,
 	distinctReservedByList,
 	findConfirmationsByReservedBy,
+	distinctBookingSources,
 } = require("../controllers/janat");
 const { createPayment } = require("../controllers/authorizenet");
 
@@ -65,6 +66,14 @@ router.get(
 	isAuth,
 	isAdmin,
 	paginatedReservationList
+);
+
+router.get(
+	"/distinct-booking-sources/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	distinctBookingSources
 );
 
 router.post(

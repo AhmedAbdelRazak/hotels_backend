@@ -1774,6 +1774,30 @@ exports.gettingByReservationId = async (req, res) => {
 	}
 };
 
+exports.distinctBookingSources = async (req, res) => {
+	try {
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
+		const baseFilter = { createdAt: { $gte: PAGE_START_DATE_UTC } };
+
+		const raw = await Reservations.find(baseFilter).distinct("booking_source");
+		const cleaned = (raw || [])
+			.map((s) => (typeof s === "string" ? s.trim() : ""))
+			.filter(Boolean)
+			.map((s) => s.toLowerCase());
+
+		const unique = Array.from(new Set(cleaned)).sort((a, b) =>
+			a.localeCompare(b, undefined, { sensitivity: "base" })
+		);
+
+		return res.status(200).json({ success: true, data: unique });
+	} catch (err) {
+		console.error("Error fetching distinct booking sources:", err.message);
+		return res
+			.status(500)
+			.json({ success: false, message: "Failed to load booking sources" });
+	}
+};
+
 exports.paginatedReservationList = async (req, res) => {
 	try {
 		// 1) Extract query parameters for pagination & filter
@@ -1783,7 +1807,7 @@ exports.paginatedReservationList = async (req, res) => {
 			filterType = "",
 			searchQuery = "",
 
-			// NEW: extra filters
+			// extra filters (unchanged)
 			reservedBy = "",
 			checkinDate = "",
 			checkinFrom = "",
@@ -1794,22 +1818,24 @@ exports.paginatedReservationList = async (req, res) => {
 			createdDate = "",
 			createdFrom = "",
 			createdTo = "",
+
+			// NEW: booking source (case-insensitive exact match)
+			bookingSource = "",
 		} = req.query;
 
 		const pageNumber = parseInt(page, 10) || 1;
 		const pageSize = parseInt(limit, 10) || 100;
 
-		// 2) Base filter: booking_source (case-insensitive)
+		// ------------------------------------------------------------------
+		// BASE FILTER CHANGE:
+		// Show ALL reservations with createdAt >= May 1, 2025 (UTC)
+		// ------------------------------------------------------------------
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 		const baseFilter = {
-			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-				{ booking_source: { $regex: /^affiliate$/i } },
-			],
+			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
 
-		// ---- Helpers ----
+		// ---- Helpers (unchanged) ----
 		const toNum = (v) => {
 			const n = Number(v);
 			return Number.isFinite(n) ? n : 0;
@@ -1830,16 +1856,14 @@ exports.paginatedReservationList = async (req, res) => {
 			if (typeof ref === "object" && ref._id) {
 				return { ...ref, _id: String(ref._id) };
 			}
-			// primitive id (ObjectId or string)
 			return { _id: String(ref) };
 		};
-		// NEW: escape for regex
 		const escapeRegExp = (s) =>
 			(typeof s === "string" ? s : "")
 				.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 				.trim();
 
-		// NEW: date helpers (UTC day ranges)
+		// Date helpers (UTC day ranges)
 		const toISODateYMD = (d) => {
 			const dt = new Date(d);
 			if (!dt || isNaN(dt.getTime())) return null;
@@ -1874,7 +1898,7 @@ exports.paginatedReservationList = async (req, res) => {
 			return Object.keys(clause).length ? { [field]: clause } : null;
 		};
 
-		// 2.1) NEW: compose server-side filters (reservedBy + dates)
+		// 2) Compose server-side filters
 		const andFilters = [baseFilter];
 
 		// reservedBy (case-insensitive exact match)
@@ -1883,6 +1907,16 @@ exports.paginatedReservationList = async (req, res) => {
 			andFilters.push({
 				"customer_details.reservedBy": {
 					$regex: new RegExp(`^${escapeRegExp(rbTrim)}$`, "i"),
+				},
+			});
+		}
+
+		// NEW: bookingSource (case-insensitive exact match)
+		const bsTrim = (bookingSource || "").trim();
+		if (bsTrim) {
+			andFilters.push({
+				booking_source: {
+					$regex: new RegExp(`^${escapeRegExp(bsTrim)}$`, "i"),
 				},
 			});
 		}
@@ -1915,7 +1949,7 @@ exports.paginatedReservationList = async (req, res) => {
 		const mongoFilter =
 			andFilters.length > 1 ? { $and: andFilters } : baseFilter;
 
-		// 3) First, fetch ALL matching docs (no skip/limit).
+		// 3) Fetch ALL matching docs (no skip/limit) for scorecards integrity
 		const allDocs = await Reservations.find(mongoFilter)
 			.sort({ createdAt: -1 })
 			.populate("belongsTo")
@@ -1923,7 +1957,7 @@ exports.paginatedReservationList = async (req, res) => {
 			.lean();
 
 		// 4) Format each doc to compute payment_status (PayPal-aware)
-		const capturedConfirmationNumbers = ["2944008828"]; // your manual override
+		const capturedConfirmationNumbers = ["2944008828"]; // manual override if needed
 
 		function formatReservation(doc) {
 			const customer_details = doc?.customer_details || {};
@@ -1932,7 +1966,6 @@ exports.paginatedReservationList = async (req, res) => {
 			const payment_details = doc?.payment_details || {};
 			const paypal_details = doc?.paypal_details || {};
 
-			// Normalize refs so we always have an object with at least _id
 			const hotelObj = normalizeRef(hotelObjRaw);
 			const belongsToObj = normalizeRef(belongsToRaw);
 
@@ -1973,12 +2006,10 @@ exports.paginatedReservationList = async (req, res) => {
 						(c?.capture_status || c?.status || "").toUpperCase() === "COMPLETED"
 				);
 
-			// Manual override still honored
 			const manualOverrideCaptured = capturedConfirmationNumbers.includes(
 				String(doc.confirmation_number || "")
 			);
 
-			// Final capture decision (settled)
 			const isCaptured =
 				manualOverrideCaptured ||
 				legacyCaptured ||
@@ -1988,7 +2019,6 @@ exports.paginatedReservationList = async (req, res) => {
 				anyCapturesCompleted ||
 				paymentStr === "paid online"; // defensive compatibility
 
-			// Payment status with your same labels
 			let payment_status = "Not Captured";
 			if (isCaptured) {
 				payment_status = "Captured";
@@ -1998,7 +2028,6 @@ exports.paginatedReservationList = async (req, res) => {
 				payment_status = "Not Paid";
 			}
 
-			// "Triggered" = auth attempted, capturing in progress, or captured
 			const isPaymentTriggered =
 				!!payment_details.capturing ||
 				!!paypal_details?.initial?.auth_id ||
@@ -2017,8 +2046,8 @@ exports.paginatedReservationList = async (req, res) => {
 
 			return {
 				...doc,
-				hotelId: hotelObj || doc.hotelId, // always object with _id when possible
-				belongsTo: belongsToObj || doc.belongsTo, // always object with _id when possible
+				hotelId: hotelObj || doc.hotelId,
+				belongsTo: belongsToObj || doc.belongsTo,
 				customer_name: customer_details.name || "N/A",
 				customer_phone: customer_details.phone || "N/A",
 				hotel_name: hotelName,
@@ -2032,12 +2061,11 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const formattedDocs = allDocs.map(formatReservation);
 
-		// 5) filterType logic (+ Paid Offline + NEW status filters)
+		// 5) filterType logic (unchanged)
 		function passesFilter(r) {
 			const status = (r.reservation_status || "").toLowerCase();
 			const pay = (r.payment_status || "").toLowerCase();
 
-			// For these filters, exclude cancelled first (as you already did)
 			if (["checkinToday", "checkoutToday", "notPaid"].includes(filterType)) {
 				if (status === "cancelled") return false;
 			}
@@ -2062,7 +2090,7 @@ exports.paginatedReservationList = async (req, res) => {
 				case "paidOffline":
 					return pay === "paid offline";
 
-				// NEW: reservation_status filters
+				// Reservation_status filters
 				case "confirmed":
 					return status === "confirmed";
 				case "inhouse":
@@ -2087,7 +2115,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		let filteredDocs = formattedDocs.filter(passesFilter);
 
-		// -------------------- Search --------------------
+		// -------------------- Search (unchanged) --------------------
 		const searchQ = (searchQuery || "").trim().toLowerCase();
 		if (searchQ) {
 			filteredDocs = filteredDocs.filter((r) => {
@@ -2104,17 +2132,17 @@ exports.paginatedReservationList = async (req, res) => {
 				);
 			});
 		}
-		// -------------------------------------------------
+		// -----------------------------------------------------------
 
 		// The total AFTER filter + search
 		const totalDocuments = filteredDocs.length;
 
-		// 6) Do skip/limit for final pagination
+		// 6) Pagination
 		const startIndex = (pageNumber - 1) * pageSize;
 		const endIndex = startIndex + pageSize;
 		const finalDocs = filteredDocs.slice(startIndex, endIndex);
 
-		// 7) Scorecards logic on "filteredDocs" (unchanged)
+		// 7) Scorecards logic (unchanged)
 		function isToday(date) {
 			const today = new Date();
 			return (
@@ -2194,7 +2222,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const allReservations = filteredDocs;
 
-		// For row1
+		// Row 1
 		const todayReservations = allReservations.filter((r) =>
 			isToday(new Date(r.createdAt))
 		).length;
@@ -2231,7 +2259,7 @@ exports.paginatedReservationList = async (req, res) => {
 			.slice(0, 3);
 		const totalFilteredReservations = allReservations.length;
 
-		// Row2 => exclude cancelled
+		// Row 2 (exclude cancelled)
 		const nonCancelled = allReservations.filter(
 			(r) => (r.reservation_status || "").toLowerCase() !== "cancelled"
 		);
