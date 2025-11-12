@@ -395,18 +395,6 @@ async function paypalPatchOrderMetadata(orderId, meta) {
 				},
 			],
 		},
-		{
-			op: "add",
-			path: "/purchase_units/@reference_id=='default'/amount/breakdown",
-			value: {
-				item_total: { currency_code: "USD", value: toCCY(meta.usdAmount) },
-			},
-		},
-		{
-			op: "add",
-			path: "/application_context/shipping_preference",
-			value: "NO_SHIPPING",
-		},
 	];
 
 	await ax.patch(`${PPM}/v2/checkout/orders/${orderId}`, ops, {
@@ -1046,7 +1034,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				.json({ message: "Reservation created successfully", data: saved });
 		}
 
-		/* ── B) DEPOSIT / FULL (AUTHORIZE ONLY) — enhanced to ensure future charge ── */
+		/* ── B) DEPOSIT / FULL (AUTHORIZE or CAPTURE) ──────────────────────── */
 		if (["deposit paid", "paid online"].includes(pmtLower)) {
 			if (!pp.order_id) {
 				return res.status(400).json({
@@ -1061,11 +1049,13 @@ exports.createReservationAndProcess = async (req, res) => {
 				);
 			});
 
+			// Calculate the expected amount (USD) based on the label (deposit vs full)
 			const expectedUsdAmount =
 				pmtLower === "deposit paid"
 					? toCCY(body?.convertedAmounts?.depositUSD || 0)
 					: toCCY(body?.convertedAmounts?.totalUSD || 0);
 
+			// Check client-supplied expectedUsdAmount (when provided)
 			if (
 				pp.expectedUsdAmount &&
 				toCCY(pp.expectedUsdAmount) !== expectedUsdAmount
@@ -1076,7 +1066,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 			}
 
-			// Build meta & patch order
+			// Build metadata for PayPal dashboard & receipts
 			const meta = buildMetaBase({
 				confirmationNumber,
 				hotelName: hotel.hotelName,
@@ -1090,7 +1080,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				usdAmount: expectedUsdAmount,
 			});
 
-			// Verify amount (GET)
+			// Verify order amount on PayPal (server-side)
 			const getRes = await ax.get(`${PPM}/v2/checkout/orders/${pp.order_id}`, {
 				auth: { username: clientId, password: secretKey },
 			});
@@ -1103,13 +1093,160 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 			}
 
+			// Patch safe metadata (ignore failures)
 			try {
 				await paypalPatchOrderMetadata(pp.order_id, meta);
 			} catch (e) {
-				console.warn("PATCH metadata:", e?.response?.data || e);
+				console.warn("PATCH metadata (non-fatal):", e?.response?.data || e);
 			}
 
-			// AUTHORIZE (no capture)
+			// Determine requested mode
+			const modeLower = String(pp.mode || "authorize").toLowerCase();
+
+			/* ── B1) CAPTURE NOW branch ─────────────────────────────────────── */
+			if (modeLower === "capture") {
+				let capResult;
+				try {
+					capResult = await paypalCaptureApprovedOrder({
+						orderId: pp.order_id,
+						cmid: pp.cmid,
+					});
+				} catch (err) {
+					const raw = err?._originalError?.text || err?.message || "";
+					const deniedLike =
+						err?.statusCode === 422 &&
+						(/PAYER_CANNOT_PAY|INSTRUMENT_DECLINED|DECLINED|EXPIRED/i.test(
+							raw
+						) ||
+							(Array.isArray(err?.response?.data?.details) &&
+								err.response.data.details.some((d) =>
+									/DENIED|DECLINED|EXPIRED/i.test(String(d?.issue || ""))
+								)));
+					return res.status(deniedLike ? 402 : 500).json({
+						message: deniedLike
+							? "The payment was declined or expired. Please try a different card or create a new PayPal order."
+							: "Failed to capture payment.",
+					});
+				}
+
+				const cap =
+					capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
+				if (cap?.status !== "COMPLETED") {
+					return res
+						.status(402)
+						.json({ message: "Payment was not completed.", details: cap });
+				}
+
+				const capturedUsd = toNum2(cap?.amount?.value || expectedUsdAmount);
+				const limitUsd = toNum2(
+					body?.convertedAmounts?.totalUSD || capturedUsd
+				);
+
+				// Normalize label from option/amounts
+				const finalPayment = decidePaymentLabel({
+					option,
+					expectedUsdAmount: pp.expectedUsdAmount || expectedUsdAmount,
+					convertedAmounts: body?.convertedAmounts || {},
+				});
+
+				const paidSar = toNum2(
+					Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0)
+				);
+
+				const user = await findOrCreateUserByEmail(
+					customerDetails,
+					body.userId
+				);
+				if (user) {
+					user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+					user.confirmationNumbersBooked.push(confirmationNumber);
+					await user.save();
+				}
+
+				// Persist vault if capture response exposes it (rare but possible)
+				const psCard = capResult?.payment_source?.card || null;
+				const vaultIdFromCap = psCard?.attributes?.vault?.id || null;
+
+				const paypalDetails = {
+					bounds: { base: "USD", limit_usd: limitUsd },
+					captured_total_usd: capturedUsd,
+					pending_total_usd: 0,
+					initial: {
+						intent: "CAPTURE",
+						order_id: capResult.id,
+						capture_id: cap.id,
+						capture_status: cap.status,
+						amount: cap?.amount?.value,
+						currency: cap?.amount?.currency_code,
+						invoice_id: meta.invoice_id,
+						cmid: pp.cmid || null,
+						raw: JSON.parse(JSON.stringify(capResult)),
+					},
+				};
+
+				if (vaultIdFromCap) {
+					paypalDetails.vault_id = vaultIdFromCap;
+					paypalDetails.vault_status = "ACTIVE";
+					paypalDetails.vaulted_at = new Date();
+					paypalDetails.card_brand = psCard?.brand || null;
+					paypalDetails.card_last4 = psCard?.last_digits || null;
+					paypalDetails.card_exp = psCard?.expiry || null;
+					if (psCard?.billing_address) {
+						paypalDetails.billing_address = psCard.billing_address;
+					}
+				}
+
+				const fullyPaid = capturedUsd >= limitUsd - 1e-9;
+
+				const saved = await buildAndSaveReservation({
+					reqBody: {
+						...body,
+						hotelName: hotel.hotelName,
+						payment: finalPayment, // "deposit paid" | "paid online"
+						commissionPaid: true,
+						financeStatus: fullyPaid ? "paid" : "authorized",
+						paid_amount: paidSar, // SAR paid now
+					},
+					confirmationNumber,
+					paypalDetailsToPersist: paypalDetails,
+					paymentDetailsPatch: {
+						captured: true,
+						triggeredAmountUSD: capturedUsd,
+						authorizationAmountUSD: undefined,
+						authorizationAmountSAR: undefined,
+						finalCaptureTransactionId: cap.id,
+						lastChargeVia: "CHECKOUT_CAPTURE",
+						lastChargeAt: new Date(),
+						chargeCount: 1,
+					},
+				});
+
+				const resvData = {
+					...saved.toObject(),
+					hotelName: hotel.hotelName,
+					hotelAddress: hotel.hotelAddress,
+					hotelCity: hotel.hotelCity,
+					hotelPhone: hotel.phone,
+				};
+				await sendEmailWithInvoice(
+					resvData,
+					customerDetails.email,
+					body.belongsTo
+				);
+				try {
+					await waSendReservationConfirmation(saved);
+				} catch (_) {}
+				try {
+					await waNotifyNewReservation(saved);
+				} catch (_) {}
+
+				return res.status(201).json({
+					message: "Reservation created successfully (captured).",
+					data: saved,
+				});
+			}
+
+			/* ── B2) AUTHORIZE ONLY branch (existing behavior) ─────────────── */
 			let authResult;
 			try {
 				const authReq = new paypal.orders.OrdersAuthorizeRequest(pp.order_id);
@@ -1161,12 +1298,12 @@ exports.createReservationAndProcess = async (req, res) => {
 			let vaultId =
 				authResult?.payment_source?.card?.attributes?.vault?.id || null;
 
-			// 🔐 NEW: if guest used PayPal wallet (no card vault) but frontend also sent a setup_token, exchange it now
+			// Optional: vault exchange if wallet used + setup_token provided by client
 			if (!vaultId && pp.setup_token) {
 				try {
 					const tokenData = await paypalExchangeSetupToVault(pp.setup_token);
 					vaultId = tokenData.id;
-					// augment srcCard-like info for persistence
+					// augment card-like info for persistence
 					srcCard.brand =
 						tokenData.payment_source?.card?.brand || srcCard.brand;
 					srcCard.last_digits =
@@ -1192,7 +1329,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				convertedAmounts: body?.convertedAmounts || {},
 			});
 
-			// SAR amount to store on authorization (as you wanted)
+			// SAR amount stored at authorization time
 			const paidSar = toNum2(
 				Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0)
 			);
@@ -1204,14 +1341,14 @@ exports.createReservationAndProcess = async (req, res) => {
 				await user.save();
 			}
 
-			// Compute long‑lead & store actionable flags if no vault
+			// Long-lead flag if no vault and check-in far away (reauth window)
 			const now = Date.now();
 			const checkinMs = new Date(body.checkin_date).getTime();
 			const longLeadDays = Math.max(
 				0,
 				Math.round((checkinMs - now) / (1000 * 60 * 60 * 24))
 			);
-			const longLeadNoVault = longLeadDays > 26 && !vaultId; // > ~26 days ≈ beyond PayPal reauth window
+			const longLeadNoVault = longLeadDays > 26 && !vaultId;
 
 			const paypalDetails = {
 				bounds: {
@@ -1272,9 +1409,9 @@ exports.createReservationAndProcess = async (req, res) => {
 					authorizationAmountSAR: paidSar,
 					authorizationExpiresAt: auth?.expiration_time
 						? new Date(auth.expiration_time)
-						: null, // NEW
-					needsVault: !!longLeadNoVault, // NEW
-					longLeadDays: longLeadDays, // NEW
+						: null,
+					needsVault: !!longLeadNoVault,
+					longLeadDays: longLeadDays,
 					chargeCount: 0,
 				},
 			});
@@ -2007,13 +2144,31 @@ exports.webhook = async (req, res) => {
  *  - Adds audit: payment_details.lastChargeVia + lastChargeAt.
  */
 exports.linkPayReservation = async (req, res) => {
+	const logPrefix = "[PP][link-pay]";
+	const DEFAULT_PP_MODE = String(
+		process.env.PAYPAL_DEFAULT_MODE || "capture"
+	).toLowerCase();
+
 	const buildUniqueInvoiceId = (confNumber, existingCount) => {
 		const seq = (existingCount || 0) + 1;
 		const tail = Date.now().toString(36).slice(-6).toUpperCase();
 		return `RSV-${confNumber}-${seq}-${tail}`.slice(0, 127);
 	};
 
-	async function patchOrderInvoiceAndDescription({
+	const toNumber2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+
+	const pickDebug = (obj) => {
+		try {
+			const h =
+				obj?.headers || obj?.response?.headers || obj?.httpHeaders || {};
+			return h["paypal-debug-id"] || h["PayPal-Debug-Id"] || null;
+		} catch {
+			return null;
+		}
+	};
+
+	// Minimal, safe metadata patch (no amount/breakdown to avoid NOT_PATCHABLE)
+	async function patchOrderMetadataSafe({
 		orderId,
 		invoice_id,
 		custom_id,
@@ -2063,18 +2218,31 @@ exports.linkPayReservation = async (req, res) => {
 					},
 				],
 			},
-			{
-				op: "add",
-				path: "/purchase_units/@reference_id=='default'/amount/breakdown",
-				value: {
-					item_total: { currency_code: "USD", value: toCCY(usdAmount) },
-				},
-			},
 		];
-		await ax.patch(`${auth.PPM}/v2/checkout/orders/${orderId}`, ops, {
-			auth: { username: auth.clientId, password: auth.secretKey },
-			headers: { "Content-Type": "application/json" },
-		});
+
+		try {
+			const patchResp = await ax.patch(
+				`${auth.PPM}/v2/checkout/orders/${orderId}`,
+				ops,
+				{
+					auth: { username: auth.clientId, password: auth.secretKey },
+					headers: { "Content-Type": "application/json" },
+				}
+			);
+			console.log(`${logPrefix} patch ok`, {
+				orderId,
+				invoice_id,
+				debugId: pickDebug(patchResp),
+			});
+		} catch (e) {
+			console.warn(`${logPrefix} patch non-fatal`, {
+				orderId,
+				invoice_id,
+				debugId: pickDebug(e),
+				status: e?.response?.status || null,
+				data: e?.response?.data || e?.message || e,
+			});
+		}
 	}
 
 	try {
@@ -2085,12 +2253,23 @@ exports.linkPayReservation = async (req, res) => {
 			sarAmount,
 			paypal: pp,
 		} = req.body || {};
+		const mode = String(pp?.mode || DEFAULT_PP_MODE).toLowerCase();
+
+		console.log(`${logPrefix} in`, {
+			reservationKey,
+			option,
+			mode,
+			order_id: pp?.order_id,
+			expectedUsdAmount: pp?.expectedUsdAmount,
+			hasConverted: !!convertedAmounts,
+		});
 
 		if (!reservationKey || !option || !pp?.order_id || !pp?.expectedUsdAmount) {
+			console.warn(`${logPrefix} missing fields`);
 			return res.status(400).json({ message: "Missing required fields." });
 		}
 
-		// Find reservation by _id or confirmation_number
+		// Lookup reservation
 		let reservation = null;
 		if (mongoose.Types.ObjectId.isValid(reservationKey)) {
 			reservation = await Reservations.findById(reservationKey).populate(
@@ -2102,16 +2281,27 @@ exports.linkPayReservation = async (req, res) => {
 				confirmation_number: String(reservationKey),
 			}).populate("hotelId");
 		}
-		if (!reservation)
+		if (!reservation) {
+			console.warn(`${logPrefix} not found`, { reservationKey });
 			return res.status(404).json({ message: "Reservation not found." });
+		}
 
+		// Amount chosen by guest (deposit or full)
 		const usdAmount =
 			String(option).toLowerCase() === "deposit"
-				? convertedAmounts?.depositUSD
-				: convertedAmounts?.totalUSD;
-		if (!usdAmount)
-			return res.status(400).json({ message: "Converted USD amount missing." });
+				? Number(convertedAmounts?.depositUSD || 0)
+				: Number(convertedAmounts?.totalUSD || 0);
 
+		if (!(usdAmount > 0)) {
+			console.warn(`${logPrefix} bad usdAmount`, {
+				usdAmount,
+				option,
+				convertedAmounts,
+			});
+			return res.status(400).json({ message: "Converted USD amount missing." });
+		}
+
+		// PayPal REST auth for REST endpoints
 		const PPM2 = IS_PROD
 			? "https://api-m.paypal.com"
 			: "https://api-m.sandbox.paypal.com";
@@ -2122,90 +2312,113 @@ exports.linkPayReservation = async (req, res) => {
 			? process.env.PAYPAL_SECRET_KEY_LIVE
 			: process.env.PAYPAL_SECRET_KEY_SANDBOX;
 
-		// Verify order amount
-		const getRes = await ax.get(`${PPM2}/v2/checkout/orders/${pp.order_id}`, {
-			auth: { username: clientId2, password: secretKey2 },
-		});
-		const order = getRes.data;
-		const pu = order?.purchase_units?.[0];
-		const orderAmount = pu?.amount?.value;
-
-		if (
-			Number(orderAmount).toFixed(2) !== Number(pp.expectedUsdAmount).toFixed(2)
-		) {
-			return res.status(400).json({
-				message: `PayPal order amount (${orderAmount}) does not match expected (${pp.expectedUsdAmount}).`,
+		// 1) Verify order amount
+		try {
+			const getRes = await ax.get(`${PPM2}/v2/checkout/orders/${pp.order_id}`, {
+				auth: { username: clientId2, password: secretKey2 },
 			});
+			const debugGetId = pickDebug(getRes);
+			const order = getRes.data;
+			const pu = order?.purchase_units?.[0];
+			const orderAmount = pu?.amount?.value;
+			console.log(`${logPrefix} order.get ok`, {
+				order_id: pp.order_id,
+				debugId: debugGetId,
+				orderAmount,
+				expectedUsdAmount: pp.expectedUsdAmount,
+			});
+			if (
+				Number(orderAmount).toFixed(2) !==
+				Number(pp.expectedUsdAmount).toFixed(2)
+			) {
+				console.warn(`${logPrefix} amount mismatch`, {
+					orderAmount,
+					expectedUsdAmount: pp.expectedUsdAmount,
+				});
+				return res.status(400).json({
+					message: `PayPal order amount (${orderAmount}) does not match expected (${pp.expectedUsdAmount}).`,
+				});
+			}
+		} catch (e) {
+			console.error(`${logPrefix} order.get error`, {
+				order_id: pp.order_id,
+				debugId: pickDebug(e),
+				status: e?.response?.status || null,
+				data: e?.response?.data || e?.message || e,
+			});
+			return res
+				.status(502)
+				.json({ message: "Failed to verify PayPal order." });
 		}
 
+		// 2) Patch invoice/custom/description (best effort)
 		const hotelName =
 			reservation.hotelName || reservation.hotelId?.hotelName || "Hotel";
 		const guest = reservation.customer_details || {};
-
 		const existingCount =
 			(reservation?.paypal_details?.initial ? 1 : 0) +
 			(Array.isArray(reservation?.paypal_details?.mit)
 				? reservation.paypal_details.mit.length
 				: 0);
 
-		// Unique invoice id for this link-pay attempt
 		const uniqueInvoiceId = buildUniqueInvoiceId(
 			reservation.confirmation_number,
 			existingCount
 		);
-
 		const description = `Hotel reservation — ${hotelName} — ${
 			reservation.checkin_date
 		} → ${reservation.checkout_date} — Guest ${guest.name} (${
 			guest.phone || ""
 		})`;
 
-		// Patch invoice/custom/description for human-readable dashboard
-		try {
-			await patchOrderInvoiceAndDescription({
-				orderId: pp.order_id,
-				invoice_id: uniqueInvoiceId,
-				custom_id: reservation.confirmation_number,
-				description,
-				auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
-				usdAmount,
-				hotelName,
-				guestName: guest.name,
-				guestPhone: guest.phone,
-				guestEmail: guest.email,
-				guestNationality: guest.nationality,
-				reservedBy: guest.reservedBy,
-				checkin: reservation.checkin_date,
-				checkout: reservation.checkout_date,
-			});
-		} catch (e) {
-			console.warn(
-				"PATCH metadata (non-fatal):",
-				e?.response?.data || e?.message || e
-			);
-		}
+		await patchOrderMetadataSafe({
+			orderId: pp.order_id,
+			invoice_id: uniqueInvoiceId,
+			custom_id: reservation.confirmation_number,
+			description,
+			auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
+			usdAmount,
+			hotelName,
+			guestName: guest.name,
+			guestPhone: guest.phone,
+			guestEmail: guest.email,
+			guestNationality: guest.nationality,
+			reservedBy: guest.reservedBy,
+			checkin: reservation.checkin_date,
+			checkout: reservation.checkout_date,
+		});
 
-		const mode = (pp.mode || "").toLowerCase();
-
-		/* ───────────────────────────────────────────────────────────────────
-		 * A) AUTHORIZE NOW (preferred to keep state "authorized")
-		 * ─────────────────────────────────────────────────────────────────── */
+		/* ─────────────────────────── AUTHORIZE ─────────────────────────── */
 		if (mode === "authorize") {
-			let authResult;
+			console.log(`${logPrefix} authorize start`, {
+				order_id: pp.order_id,
+				cmid: !!pp.cmid,
+			});
 
+			let authResult;
 			try {
 				const authReq = new paypal.orders.OrdersAuthorizeRequest(pp.order_id);
 				if (pp.cmid) authReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
 				authReq.headers["PayPal-Request-Id"] = `auth-${uuid()}`;
 				authReq.requestBody({});
-				const { result } = await ppClient.execute(authReq);
-				authResult = result;
+				const resp = await ppClient.execute(authReq);
+				authResult = resp.result;
+				console.log(`${logPrefix} authorize ok`, {
+					order_id: pp.order_id,
+					debugId: resp?.headers?.["paypal-debug-id"] || null,
+				});
 			} catch (err) {
 				const raw = err?._originalError?.text || err?.message || "";
 				const alreadyAuth =
 					err?.statusCode === 422 &&
 					(/ORDER_ALREADY_AUTHORIZED/i.test(raw) ||
 						/UNPROCESSABLE_ENTITY/i.test(raw));
+
+				const debugId =
+					err?.headers?.["paypal-debug-id"] ||
+					err?.response?.headers?.["paypal-debug-id"] ||
+					null;
+
 				if (!alreadyAuth) {
 					const deniedLike =
 						err?.statusCode === 422 &&
@@ -2214,29 +2427,53 @@ exports.linkPayReservation = async (req, res) => {
 								err.response.data.details.some((d) =>
 									/DENIED|DECLINED/i.test(String(d?.issue || ""))
 								)));
+					console.error(`${logPrefix} authorize error`, {
+						order_id: pp.order_id,
+						debugId,
+						statusCode: err?.statusCode || null,
+						data: err?.response?.data || raw || err,
+					});
 					return res.status(deniedLike ? 402 : 500).json({
 						message: deniedLike
 							? "The authorization was declined by the card issuer. Please try a different card or capture a smaller amount."
 							: "Failed to authorize payment.",
 					});
 				}
-				// If already authorized, fetch the order to read the authorization object
-				const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
-				if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
-				const { result } = await ppClient.execute(getReq);
-				authResult = result;
+
+				// Already authorized → fetch the order to read the authorization
+				try {
+					const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
+					if (pp.cmid) getReq.headers["PayPal-Client-Metadata-Id"] = pp.cmid;
+					const resp = await ppClient.execute(getReq);
+					authResult = resp.result;
+					console.log(`${logPrefix} authorize already-authorized (fetched)`, {
+						order_id: pp.order_id,
+						debugId: resp?.headers?.["paypal-debug-id"] || null,
+					});
+				} catch (gErr) {
+					console.error(`${logPrefix} authorize get-after-422 error`, {
+						order_id: pp.order_id,
+						debugId: gErr?.headers?.["paypal-debug-id"] || null,
+						data: gErr?.response?.data || gErr?.message || gErr,
+					});
+					return res
+						.status(500)
+						.json({ message: "Failed to finalize authorization." });
+				}
 			}
 
 			const auth =
 				authResult?.purchase_units?.[0]?.payments?.authorizations?.[0] || {};
 			if (!auth?.id) {
+				console.error(`${logPrefix} authorize missing auth object`, {
+					order_id: pp.order_id,
+					authResult,
+				});
 				return res.status(402).json({
 					message: "Authorization was not created.",
-					details: authResult,
 				});
 			}
 
-			// Persist vault attributes when present
 			const srcCard = authResult?.payment_source?.card || {};
 			const vaultId =
 				authResult?.payment_source?.card?.attributes?.vault?.id ||
@@ -2248,12 +2485,11 @@ exports.linkPayReservation = async (req, res) => {
 				expectedUsdAmount: pp.expectedUsdAmount,
 				convertedAmounts,
 			});
-
-			const paidSar = toNum2(Number(sarAmount || 0));
+			const paidSar = toNumber2(Number(sarAmount || 0));
 
 			const setOps = {
 				"paypal_details.bounds.base": "USD",
-				"paypal_details.bounds.limit_usd": toNum2(
+				"paypal_details.bounds.limit_usd": toNumber2(
 					convertedAmounts?.totalUSD || usdAmount
 				),
 				"paypal_details.captured_total_usd":
@@ -2276,7 +2512,7 @@ exports.linkPayReservation = async (req, res) => {
 
 				"payment_details.captured": false,
 				"payment_details.authorizationId": auth.id,
-				"payment_details.authorizationAmountUSD": toNum2(
+				"payment_details.authorizationAmountUSD": toNumber2(
 					auth?.amount?.value || 0
 				),
 				"payment_details.authorizationAmountSAR": paidSar,
@@ -2309,6 +2545,11 @@ exports.linkPayReservation = async (req, res) => {
 				{ new: true }
 			).populate("hotelId");
 
+			console.log(`${logPrefix} authorize persisted`, {
+				reservationId: String(reservation._id),
+				authId: auth.id,
+			});
+
 			return res.status(200).json({
 				message: "Payment authorized (no funds captured).",
 				reservation: updated,
@@ -2316,101 +2557,166 @@ exports.linkPayReservation = async (req, res) => {
 			});
 		}
 
-		/* ───────────────────────────────────────────────────────────────────
-		 * B) CAPTURE NOW — Backoffice capture (preferred when funds are due)
-		 * ─────────────────────────────────────────────────────────────────── */
-		// Determine the ledger limit (must exist for pending guard)
-		const limit =
-			reservation?.paypal_details?.bounds?.limit_usd ??
-			(convertedAmounts?.totalUSD ? toNum2(convertedAmounts.totalUSD) : null);
+		/* ─────────────────────────── CAPTURE ─────────────────────────── */
 
-		if (!limit || limit <= 0) {
+		// Compute the intended limit
+		const computedLimit =
+			typeof reservation?.paypal_details?.bounds?.limit_usd === "number"
+				? toNumber2(reservation.paypal_details.bounds.limit_usd)
+				: convertedAmounts?.totalUSD
+				? toNumber2(convertedAmounts.totalUSD)
+				: toNumber2(pp.expectedUsdAmount); // final fallback
+
+		// **CRITICAL FIX**: pre‑seed bounds in DB BEFORE pending guard
+		if (
+			!reservation?.paypal_details?.bounds ||
+			typeof reservation?.paypal_details?.bounds?.limit_usd !== "number"
+		) {
+			const seeded = await Reservations.findByIdAndUpdate(
+				reservation._id,
+				{
+					$set: {
+						"paypal_details.bounds.base": "USD",
+						"paypal_details.bounds.limit_usd": computedLimit,
+						"paypal_details.captured_total_usd":
+							reservation?.paypal_details?.captured_total_usd || 0,
+						"paypal_details.pending_total_usd":
+							reservation?.paypal_details?.pending_total_usd || 0,
+					},
+				},
+				{ new: true }
+			);
+			console.log(`${logPrefix} preseed bounds`, {
+				reservationId: String(reservation._id),
+				limitSeededUSD: computedLimit,
+			});
+			reservation = seeded;
+		}
+
+		const limit = toNumber2(
+			reservation?.paypal_details?.bounds?.limit_usd || 0
+		);
+		if (!(limit > 0)) {
+			console.warn(`${logPrefix} ledger missing limit after preseed`, {
+				limit,
+				computedLimit,
+			});
 			return res
 				.status(400)
 				.json({ message: "Reservation capture limit is not set." });
 		}
 
-		const capturedSoFar = toNum2(
+		const capturedSoFar = toNumber2(
 			reservation?.paypal_details?.captured_total_usd || 0
 		);
-		const newCapture = toNum2(usdAmount);
+		const pendingSoFar = toNumber2(
+			reservation?.paypal_details?.pending_total_usd || 0
+		);
+		const newCapture = toNumber2(usdAmount);
 
-		if (capturedSoFar + newCapture > limit + 1e-9) {
-			const remaining = (limit - capturedSoFar).toFixed(2);
+		if (capturedSoFar + pendingSoFar + newCapture > limit + 1e-9) {
+			const remaining = (limit - capturedSoFar - pendingSoFar).toFixed(2);
+			console.warn(`${logPrefix} ledger guard trip`, {
+				capturedSoFar,
+				pendingSoFar,
+				newCapture,
+				limit,
+				remaining,
+			});
 			return res.status(400).json({
 				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
 			});
 		}
 
-		// Reserve "pending" (atomic guard)
-		const pendingReserved = await reservePendingCaptureUSD({
+		// Atomic pending guard in DB
+		const reserved = await reservePendingCaptureUSD({
 			reservationId: reservation._id,
 			usdAmount: newCapture,
 		});
-		if (!pendingReserved) {
+
+		if (!reserved) {
 			const remaining = (
 				limit -
 				(capturedSoFar + (reservation?.paypal_details?.pending_total_usd || 0))
 			).toFixed(2);
+			console.warn(`${logPrefix} pending reserve failed`, { remaining, limit });
 			return res.status(400).json({
 				message: `Capture exceeds remaining balance. Remaining USD: ${remaining}`,
 			});
 		}
+		console.log(`${logPrefix} pending reserved`, {
+			newCapture,
+			limit,
+			capturedSoFar,
+			pendingBefore: pendingSoFar,
+		});
 
+		// Capture with idempotency & DUPLICATE_INVOICE_ID retry
+		let capResult;
 		const reqId = `link-cap-${uuid()}`;
-		async function tryCaptureOnce() {
-			return paypalCaptureApprovedOrder({
+		const tryCapture = async () =>
+			paypalCaptureApprovedOrder({
 				orderId: pp.order_id,
 				cmid: pp.cmid,
 				reqId,
 			});
-		}
 
-		let capResult;
 		try {
-			capResult = await tryCaptureOnce();
+			capResult = await tryCapture();
 		} catch (err) {
 			const raw = err?._originalError?.text || err?.message || "";
 			const isDupInv =
 				err?.statusCode === 422 && /DUPLICATE_INVOICE_ID/i.test(raw);
+			const debugId = pickDebug(err);
 
 			if (!isDupInv) {
+				console.error(`${logPrefix} capture error`, {
+					order_id: pp.order_id,
+					debugId,
+					statusCode: err?.statusCode || null,
+					data: err?.response?.data || raw || err,
+				});
 				await finalizePendingCaptureUSD({
 					reservationId: reservation._id,
 					usdAmount: newCapture,
 					success: false,
 				});
-				throw err;
+				return res.status(500).json({ message: "Failed to capture payment." });
 			}
 
-			// Refresh invoice_id and retry once
+			console.warn(`${logPrefix} duplicate invoice, retrying with fresh id`, {
+				order_id: pp.order_id,
+				debugId,
+			});
+
 			const freshInvoiceId = buildUniqueInvoiceId(
 				reservation.confirmation_number,
 				existingCount + 1
 			);
-			try {
-				await patchOrderInvoiceAndDescription({
-					orderId: pp.order_id,
-					invoice_id: freshInvoiceId,
-					custom_id: reservation.confirmation_number,
-					description,
-					auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
-					usdAmount,
-					hotelName,
-					guestName: guest.name,
-					guestPhone: guest.phone,
-					guestEmail: guest.email,
-					guestNationality: guest.nationality,
-					reservedBy: guest.reservedBy,
-					checkin: reservation.checkin_date,
-					checkout: reservation.checkout_date,
-				});
-			} catch (_) {}
-			capResult = await tryCaptureOnce();
+			await patchOrderMetadataSafe({
+				orderId: pp.order_id,
+				invoice_id: freshInvoiceId,
+				custom_id: reservation.confirmation_number,
+				description,
+				auth: { PPM: PPM2, clientId: clientId2, secretKey: secretKey2 },
+				usdAmount,
+				hotelName,
+				guestName: guest.name,
+				guestPhone: guest.phone,
+				guestEmail: guest.email,
+				guestNationality: guest.nationality,
+				reservedBy: guest.reservedBy,
+				checkin: reservation.checkin_date,
+				checkout: reservation.checkout_date,
+			});
+			capResult = await tryCapture();
 		}
 
 		const cap = capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 		if (cap?.status !== "COMPLETED") {
+			console.warn(`${logPrefix} capture not completed`, {
+				status: cap?.status,
+			});
 			await finalizePendingCaptureUSD({
 				reservationId: reservation._id,
 				usdAmount: newCapture,
@@ -2421,13 +2727,20 @@ exports.linkPayReservation = async (req, res) => {
 				.json({ message: "Payment was not completed.", details: cap });
 		}
 
-		const capAmount = toNum2(cap?.amount?.value || newCapture);
+		const capAmount = toNumber2(cap?.amount?.value || newCapture);
+		console.log(`${logPrefix} capture ok`, {
+			orderId: capResult?.id,
+			captureId: cap?.id,
+			amount: capAmount,
+			status: cap?.status,
+		});
 
-		// Persist vault if present on the captured order (rare, but possible)
+		// Persist vault info (wallet + store_in_vault)
 		const psCard = capResult?.payment_source?.card || null;
 		const vaultIdFromCap = psCard?.attributes?.vault?.id || null;
 
-		const commonCaptureDoc = {
+		// Finalize ledger (chargeCount++ inside)
+		const captureDoc = {
 			order_id: capResult.id,
 			capture_id: cap.id,
 			capture_status: cap.status,
@@ -2442,46 +2755,27 @@ exports.linkPayReservation = async (req, res) => {
 			via: "LINK_CAPTURE",
 		};
 
-		// 1) finalize ledger (chargeCount++ inside helper)
 		let updated = await finalizePendingCaptureUSD({
 			reservationId: reservation._id,
 			usdAmount: capAmount,
 			success: true,
-			captureDoc: commonCaptureDoc,
+			captureDoc,
 		});
 
-		// 2) Ensure bounds exist after first capture (if they were missing)
-		const needBounds =
-			!updated?.paypal_details?.bounds ||
-			typeof updated?.paypal_details?.bounds?.limit_usd !== "number";
-		if (needBounds) {
-			updated = await Reservations.findByIdAndUpdate(
-				reservation._id,
-				{
-					$set: {
-						"paypal_details.bounds.base": "USD",
-						"paypal_details.bounds.limit_usd": toNum2(limit),
-					},
-				},
-				{ new: true }
-			);
-		}
-
-		// 3) SAR increment + audit + optional vault persistence
+		// SAR increment + audit + optional vault persistence
 		const setAfter = {
 			"payment_details.captured": true,
-			"payment_details.triggeredAmountUSD": toNum2(capAmount),
+			"payment_details.triggeredAmountUSD": capAmount,
 			"payment_details.finalCaptureTransactionId": cap.id,
 			"payment_details.lastChargeVia": "LINK_CAPTURE",
 			"payment_details.lastChargeAt": new Date(),
 			...(typeof sarAmount !== "undefined"
-				? { "payment_details.triggeredAmountSAR": toNum2(sarAmount) }
+				? { "payment_details.triggeredAmountSAR": toNumber2(sarAmount) }
 				: {}),
 		};
-
 		const incAfter =
 			typeof sarAmount !== "undefined"
-				? { paid_amount: Math.round(Number(sarAmount) * 100) / 100 }
+				? { paid_amount: Math.round(Number(sarAmount || 0) * 100) / 100 }
 				: null;
 
 		if (vaultIdFromCap) {
@@ -2491,25 +2785,21 @@ exports.linkPayReservation = async (req, res) => {
 			setAfter["paypal_details.card_brand"] = psCard?.brand || null;
 			setAfter["paypal_details.card_last4"] = psCard?.last_digits || null;
 			setAfter["paypal_details.card_exp"] = psCard?.expiry || null;
-			if (psCard?.billing_address) {
+			if (psCard?.billing_address)
 				setAfter["paypal_details.billing_address"] = psCard.billing_address;
-			}
 		}
 
 		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
-			{
-				...(incAfter ? { $inc: incAfter } : {}),
-				$set: setAfter,
-			},
+			{ ...(incAfter ? { $inc: incAfter } : {}), $set: setAfter },
 			{ new: true }
 		).populate("hotelId");
 
-		// 4) Normalize labels based on ledger vs. limit
-		const newCapturedTotal = toNum2(
+		// Normalize labels based on ledger
+		const newCapturedTotal = toNumber2(
 			updated?.paypal_details?.captured_total_usd || 0
 		);
-		const fullyPaid = newCapturedTotal >= toNum2(limit) - 1e-9;
+		const fullyPaid = newCapturedTotal >= toNumber2(limit) - 1e-9;
 
 		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
@@ -2523,7 +2813,15 @@ exports.linkPayReservation = async (req, res) => {
 			{ new: true }
 		).populate("hotelId");
 
-		// 5) Send receipts (best effort)
+		console.log(`${logPrefix} done`, {
+			reservationId: String(reservation._id),
+			captureId: cap.id,
+			capturedTotal: newCapturedTotal,
+			limit,
+			fullyPaid,
+		});
+
+		// Best-effort receipts
 		try {
 			const hotelDoc = updated.hotelId || {};
 			const invoiceModel = {
@@ -2540,7 +2838,9 @@ exports.linkPayReservation = async (req, res) => {
 			);
 			await waSendReservationConfirmation(updated);
 			await waNotifyNewReservation(updated);
-		} catch (_) {}
+		} catch (e) {
+			console.warn(`${logPrefix} receipt dispatch warning`, e?.message || e);
+		}
 
 		return res.status(200).json({
 			message: "Payment captured and reservation updated.",
@@ -2548,7 +2848,10 @@ exports.linkPayReservation = async (req, res) => {
 			transactionId: cap.id,
 		});
 	} catch (error) {
-		console.error("linkPayReservation error:", error?.response?.data || error);
+		console.error(`${logPrefix} fatal`, {
+			data: error?.response?.data || error?.message || error,
+			status: error?.response?.status || null,
+		});
 		return res.status(500).json({ message: "Failed to process link payment." });
 	}
 };
@@ -2557,13 +2860,29 @@ exports.linkPayReservation = async (req, res) => {
  * 10) Helper to create PayPal orders (server)
  */
 exports.createPayPalOrder = async (req, res) => {
+	const trace = (uuid && uuid().slice(0, 8)) || String(Date.now()).slice(-8);
+	const log = (msg, obj) =>
+		console.log(
+			`[PP][order.create][${trace}] ${msg}`,
+			obj ? JSON.stringify(obj, null, 2) : ""
+		);
 	try {
 		const body = req.body || {};
+		log("incoming body (sanitized)", {
+			intent: body?.intent,
+			purchase_units_present: Array.isArray(body?.purchase_units),
+			has_payment_source: !!body?.payment_source,
+		});
+
 		let purchase_units = body.purchase_units;
 		if (!Array.isArray(purchase_units)) {
 			const amt = Number(body.usdAmount || 0);
-			if (!amt)
+			if (!amt) {
+				log("validation failed: missing usdAmount", {
+					usdAmount: body.usdAmount,
+				});
 				return res.status(400).json({ message: "usdAmount is required." });
+			}
 			purchase_units = [
 				{
 					reference_id: "default",
@@ -2575,7 +2894,7 @@ exports.createPayPalOrder = async (req, res) => {
 		const request = new paypal.orders.OrdersCreateRequest();
 		request.prefer("return=representation");
 		request.requestBody({
-			intent: body.intent || "CAPTURE",
+			intent: (body.intent || "CAPTURE").toUpperCase(), // honors caller
 			purchase_units,
 			application_context: body.application_context || {
 				user_action: "PAY_NOW",
@@ -2585,10 +2904,39 @@ exports.createPayPalOrder = async (req, res) => {
 			...(body.payment_source ? { payment_source: body.payment_source } : {}),
 		});
 
-		const { result } = await ppClient.execute(request);
+		const response = await ppClient.execute(request);
+		const result = response?.result;
+		const dbgId =
+			response?.headers?.["paypal-debug-id"] ||
+			response?.headers?.["PayPal-Debug-Id"] ||
+			null;
+
+		log("order created", {
+			id: result?.id,
+			status: result?.status,
+			debugId: dbgId,
+		});
 		return res.status(200).json({ id: result.id });
 	} catch (e) {
-		console.error("createPayPalOrder error:", e?.response?.data || e);
+		// Try to unwrap PayPal SDK error
+		const headers = e?.headers || e?.response?.headers || {};
+		const dbgId =
+			headers["paypal-debug-id"] || headers["PayPal-Debug-Id"] || null;
+		const details = e?.response?.data?.details || e?.result?.details || [];
+		console.error(
+			`[PP][order.create][${trace}] error`,
+			JSON.stringify(
+				{
+					message: e?.message,
+					statusCode: e?.statusCode || e?.response?.status,
+					debugId: dbgId,
+					details,
+					body: e?.response?.data || e?.result || null,
+				},
+				null,
+				2
+			)
+		);
 		return res.status(500).json({ message: "Failed to create PayPal order" });
 	}
 };
