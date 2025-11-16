@@ -4239,7 +4239,7 @@ exports.distinctReservedByList = async (req, res) => {
 		};
 
 		const pipeline = [
-			{ $match: { createdAt: { $gte: JULY_FIRST_2025_UTC } } },
+			{ $match: { createdAt: { $gte: PAGE_START_DATE_UTC } } },
 			{ $match: baseBookingSourceMatch },
 
 			// Prefer customer_details.reservedBy; fall back to top-level reservedBy if present
