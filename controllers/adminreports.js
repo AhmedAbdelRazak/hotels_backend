@@ -100,16 +100,9 @@ function computeReservationCommission(reservation) {
       - If `?excludeCancelled=true`, filter out cancelled reservations
    ------------------------------------------------------------------ */
 async function findFilteredReservations(req) {
-	const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
-
-	// Base filter for booking_source & createdAt
+	const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 	const baseFilter = {
-		$or: [
-			{ booking_source: { $regex: /^online jannat booking$/i } },
-			{ booking_source: { $regex: /^generated link$/i } },
-			{ booking_source: { $regex: /^jannat employee$/i } },
-		],
-		createdAt: { $gte: startOfSep2024 },
+		createdAt: { $gte: PAGE_START_DATE_UTC },
 	};
 
 	// If ?excludeCancelled=true, exclude reservation_status = 'cancelled'
@@ -462,28 +455,189 @@ function monthRangeFromString(monthYearStr) {
    Also respects ?excludeCancelled=true to filter out cancelled reservations
 ------------------------------------------------------------------ */
 exports.specificListOfReservations = async (req, res) => {
+	// -------------------- LOCAL HELPERS (for this endpoint only) --------------------
+
+	// Parse "YYYY-MM-DD" into a UTC day range [start, end]
+	function dayRangeFromString(dateStr) {
+		if (!dateStr) return null;
+
+		// Expecting "YYYY-MM-DD"
+		const isoLike = `${dateStr}T00:00:00.000Z`;
+		const date = new Date(isoLike);
+		if (Number.isNaN(date.getTime())) return null;
+
+		const start = new Date(date);
+		start.setUTCHours(0, 0, 0, 0);
+
+		const end = new Date(date);
+		end.setUTCHours(23, 59, 59, 999);
+
+		return { start, end };
+	}
+
+	// Month name map for "october-2025" style inputs
+	const MONTH_NAME_MAP = {
+		january: 0,
+		february: 1,
+		march: 2,
+		april: 3,
+		may: 4,
+		june: 5,
+		july: 6,
+		august: 7,
+		september: 8,
+		october: 9,
+		november: 10,
+		december: 11,
+	};
+
+	// Parse either "YYYY-MM" or "october-2025" into a UTC month range [start, end]
+	function monthRangeFromString(input) {
+		if (!input || typeof input !== "string") return null;
+
+		const value = input.trim().toLowerCase();
+
+		let yearNum;
+		let monthIndex;
+
+		// Case 1: "YYYY-MM"
+		if (/^\d{4}-\d{1,2}$/.test(value)) {
+			const [y, m] = value.split("-");
+			yearNum = parseInt(y, 10);
+			const mNum = parseInt(m, 10);
+			if (!yearNum || !mNum || mNum < 1 || mNum > 12) return null;
+			monthIndex = mNum - 1;
+		} else {
+			// Case 2: "october-2025"
+			const parts = value.split("-");
+			if (parts.length !== 2) return null;
+
+			const [monthName, yearStr] = parts;
+			yearNum = parseInt(yearStr, 10);
+			if (!yearNum || !(monthName in MONTH_NAME_MAP)) return null;
+
+			monthIndex = MONTH_NAME_MAP[monthName];
+		}
+
+		const start = new Date(Date.UTC(yearNum, monthIndex, 1, 0, 0, 0, 0));
+		const nextMonth = new Date(
+			Date.UTC(yearNum, monthIndex + 1, 1, 0, 0, 0, 0)
+		);
+		const end = new Date(nextMonth.getTime() - 1);
+
+		return { start, end };
+	}
+
+	function isToday(date) {
+		const today = new Date();
+		return (
+			date.getDate() === today.getDate() &&
+			date.getMonth() === today.getMonth() &&
+			date.getFullYear() === today.getFullYear()
+		);
+	}
+
+	function isYesterday(date) {
+		const today = new Date();
+		const yesterday = new Date(today);
+		yesterday.setDate(today.getDate() - 1);
+		return (
+			date.getDate() === yesterday.getDate() &&
+			date.getMonth() === yesterday.getMonth() &&
+			date.getFullYear() === yesterday.getFullYear()
+		);
+	}
+
+	function isThisWeek(date) {
+		const now = new Date();
+		// Start of current week (Sunday)
+		const startOfWeek = new Date(now);
+		startOfWeek.setDate(now.getDate() - now.getDay());
+		startOfWeek.setHours(0, 0, 0, 0);
+
+		const endOfWeek = new Date(startOfWeek);
+		endOfWeek.setDate(startOfWeek.getDate() + 6);
+		endOfWeek.setHours(23, 59, 59, 999);
+
+		return date >= startOfWeek && date <= endOfWeek;
+	}
+
+	function isLastWeek(date) {
+		const now = new Date();
+		// Start of this week (Sunday)
+		const startOfThisWeek = new Date(now);
+		startOfThisWeek.setDate(now.getDate() - now.getDay());
+		startOfThisWeek.setHours(0, 0, 0, 0);
+
+		// End of last week is 1 ms before startOfThisWeek
+		const endOfLastWeek = new Date(startOfThisWeek.getTime() - 1);
+
+		// Start of last week is 7 days prior
+		const startOfLastWeek = new Date(startOfThisWeek);
+		startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
+		startOfLastWeek.setHours(0, 0, 0, 0);
+
+		return date >= startOfLastWeek && date <= endOfLastWeek;
+	}
+
+	function safeNumber(val) {
+		const parsed = Number(val);
+		return Number.isNaN(parsed) ? 0 : parsed;
+	}
+
+	function computeReservationCommission(reservation) {
+		if (!reservation || !reservation.pickedRoomsType) return 0;
+
+		const hotelName = reservation.hotelId?.hotelName?.toLowerCase() || "";
+		const totalAmount = safeNumber(reservation.total_amount);
+
+		// Special: 'sahet al hegaz' => flat 10% of total_amount
+		if (hotelName === "sahet al hegaz") {
+			return 0.1 * totalAmount;
+		}
+
+		let totalCommission = 0;
+		reservation.pickedRoomsType.forEach((room) => {
+			if (!room.pricingByDay || room.pricingByDay.length === 0) return;
+
+			room.pricingByDay.forEach((day) => {
+				const rootPrice = safeNumber(day.rootPrice);
+				const rawRate = safeNumber(day.commissionRate);
+				const finalRate = rawRate < 1 ? rawRate : rawRate / 100;
+				const totalPriceWithoutComm = safeNumber(
+					day.totalPriceWithoutCommission
+				);
+
+				const dayCommission =
+					rootPrice * finalRate + (totalPriceWithoutComm - rootPrice);
+
+				totalCommission += dayCommission * safeNumber(room.count);
+			});
+		});
+
+		return totalCommission;
+	}
+
+	// ------------------------------ MAIN LOGIC ------------------------------
+
 	try {
-		// 1) Base filter: booking_source, createdAt >= 2024-09-01
-		const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
+		// 1) Base filter: all reservations created on/after PAGE_START_DATE_UTC
+		//    (adjust this date if you want a different "start of reporting" cutoff)
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // 2025-05-01 UTC
 		const baseFilter = {
-			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-			],
-			createdAt: { $gte: startOfSep2024 },
+			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
 
 		// 2) Build customFilter from query
 		const customFilter = {};
 		const query = req.query;
 
-		// If excludeCancelled=true, exclude reservation_status=cancelled
+		// excludeCancelled=true -> filter out reservation_status = "cancelled"
 		if (query.excludeCancelled === "true") {
 			customFilter.reservation_status = { $ne: "cancelled" };
 		}
 
-		// 3) Parse other keys for date or status filters
+		// 3) Parse dynamic keys for date / month / status
 		Object.keys(query).forEach((key) => {
 			// (a) createdAt DATE
 			if (key.startsWith("createdAtDate_")) {
@@ -494,7 +648,7 @@ exports.specificListOfReservations = async (req, res) => {
 				}
 			}
 
-			// (b) createdAt MONTH
+			// (b) createdAt MONTH (supports "YYYY-MM" and "october-2025")
 			if (key.startsWith("createdAtMonth_")) {
 				const monthStr = key.replace("createdAtMonth_", "");
 				const range = monthRangeFromString(monthStr);
@@ -550,11 +704,12 @@ exports.specificListOfReservations = async (req, res) => {
 			// (g) reservationstatus_...
 			if (key.startsWith("reservationstatus_")) {
 				const statusValue = key.replace("reservationstatus_", "");
+				// This overrides excludeCancelled if both are present, which is what you want
 				customFilter.reservation_status = statusValue;
 			}
 		});
 
-		// 4) hotels param => EXACT match(s) for hotelName, ignoring case
+		// 4) hotels param => EXACT name match(es), case-insensitive
 		const hotelsParam = query.hotels;
 		if (hotelsParam && hotelsParam !== "all") {
 			const hotelsArr = hotelsParam.split(",");
@@ -569,13 +724,14 @@ exports.specificListOfReservations = async (req, res) => {
 			const matchedIds = matchedHotels.map((h) => h._id);
 
 			if (matchedIds.length === 0) {
+				// force no results
 				customFilter.hotelId = { $in: [] };
 			} else {
 				customFilter.hotelId = { $in: matchedIds };
 			}
 		}
 
-		// 5) "hotelId" param => partial approach (if "hotels" param wasn't used)
+		// 5) "hotelId" param => partial search by hotelName (only if "hotels" param wasn't used)
 		if (!hotelsParam && query.hotelId) {
 			const hotelNameRegex = new RegExp(query.hotelId, "i");
 			const matchedHotels = await HotelDetails.find(
@@ -591,131 +747,29 @@ exports.specificListOfReservations = async (req, res) => {
 			}
 		}
 
-		// 6) Combine baseFilter + customFilter with $and
-		const finalFilter = { $and: [baseFilter, customFilter] };
+		// 6) Combine baseFilter + customFilter
+		const finalFilter =
+			Object.keys(customFilter).length > 0
+				? { $and: [baseFilter, customFilter] }
+				: baseFilter;
 
-		// 7) Handle pagination & sorting
+		// 7) Pagination params (used only for metadata; data itself is full set)
 		const page = parseInt(query.page || "1", 10);
 		const limit = parseInt(query.limit || "50", 10);
 
-		// (A) Count how many total match
-		const totalDocuments = await Reservations.countDocuments(finalFilter);
-
-		// (B) Fetch the actual docs (sorted desc by createdAt)
+		// 8) Fetch ALL matching docs (sorted) – frontend does client-side pagination
 		const reservations = await Reservations.find(finalFilter)
 			.sort({ createdAt: -1 })
-			.skip((page - 1) * limit)
-			.limit(limit)
 			.populate("hotelId", "_id hotelName")
 			.lean();
 
+		const totalDocuments = reservations.length;
 		const totalPages = Math.ceil(totalDocuments / limit);
 
-		// ================== FETCH ALL FOR SCORECARDS (NO SKIP/LIMIT) ==================
-		const allForStats = await Reservations.find(finalFilter)
-			.populate("hotelId", "_id hotelName")
-			.lean();
+		// -------------------- SCORECARDS (based on the same filtered set) --------------------
+		const allReservations = Array.isArray(reservations) ? reservations : [];
 
-		// ================== HELPER FUNCTIONS (like your paginated version) ==================
-		function isToday(date) {
-			const today = new Date();
-			return (
-				date.getDate() === today.getDate() &&
-				date.getMonth() === today.getMonth() &&
-				date.getFullYear() === today.getFullYear()
-			);
-		}
-
-		function isYesterday(date) {
-			const today = new Date();
-			const yesterday = new Date(today);
-			yesterday.setDate(today.getDate() - 1);
-			return (
-				date.getDate() === yesterday.getDate() &&
-				date.getMonth() === yesterday.getMonth() &&
-				date.getFullYear() === yesterday.getFullYear()
-			);
-		}
-
-		function isThisWeek(date) {
-			const now = new Date();
-			// Start of current week (Sunday)
-			const startOfWeek = new Date(now);
-			startOfWeek.setDate(now.getDate() - now.getDay());
-			startOfWeek.setHours(0, 0, 0, 0);
-
-			const endOfWeek = new Date(startOfWeek);
-			endOfWeek.setDate(startOfWeek.getDate() + 6);
-			endOfWeek.setHours(23, 59, 59, 999);
-
-			return date >= startOfWeek && date <= endOfWeek;
-		}
-
-		function isLastWeek(date) {
-			const now = new Date();
-			// Start of this week (Sunday)
-			const startOfThisWeek = new Date(now);
-			startOfThisWeek.setDate(now.getDate() - now.getDay());
-			startOfThisWeek.setHours(0, 0, 0, 0);
-
-			// End of last week is 1 ms before startOfThisWeek
-			const endOfLastWeek = new Date(startOfThisWeek.getTime() - 1);
-
-			// Start of last week is 7 days prior
-			const startOfLastWeek = new Date(startOfThisWeek);
-			startOfLastWeek.setDate(startOfThisWeek.getDate() - 7);
-			startOfLastWeek.setHours(0, 0, 0, 0);
-
-			return date >= startOfLastWeek && date <= endOfLastWeek;
-		}
-
-		function safeNumber(val) {
-			const parsed = Number(val);
-			return isNaN(parsed) ? 0 : parsed;
-		}
-
-		function computeReservationCommission(reservation) {
-			if (!reservation || !reservation.pickedRoomsType) return 0;
-
-			const hotelName = reservation.hotelId?.hotelName?.toLowerCase() || "";
-			const totalAmount = safeNumber(reservation.total_amount);
-
-			// If 'sahet al hegaz', override => 10% of total_amount
-			if (hotelName === "sahet al hegaz") {
-				return 0.1 * totalAmount;
-			}
-
-			// Otherwise, normal logic
-			let totalCommission = 0;
-			reservation.pickedRoomsType.forEach((room) => {
-				if (!room.pricingByDay || room.pricingByDay.length === 0) return;
-
-				room.pricingByDay.forEach((day) => {
-					const rootPrice = safeNumber(day.rootPrice);
-					let rawRate = safeNumber(day.commissionRate);
-					const finalRate = rawRate < 1 ? rawRate : rawRate / 100;
-					const totalPriceWithoutComm = safeNumber(
-						day.totalPriceWithoutCommission
-					);
-
-					const dayCommission =
-						rootPrice * finalRate + (totalPriceWithoutComm - rootPrice);
-
-					totalCommission += dayCommission * safeNumber(room.count);
-				});
-			});
-
-			return totalCommission;
-		}
-
-		// ================== SCORECARDS CALCULATION ==================
-		const allReservations = Array.isArray(allForStats) ? allForStats : [];
-
-		// For row 1, do NOT exclude cancelled (unless excludeCancelled was forced),
-		// but here we've already applied "excludeCancelled" if user requested it
-		// through finalFilter. So "allReservations" is everything that matches finalFilter.
-
-		// 1) Today & Yesterday reservations
+		// 1) Today & Yesterday reservations (by createdAt)
 		const todayReservations = allReservations.filter((r) =>
 			isToday(new Date(r.createdAt))
 		).length;
@@ -731,7 +785,7 @@ exports.specificListOfReservations = async (req, res) => {
 				  100
 				: todayReservations * 100;
 
-		// 2) This Week vs Last Week
+		// 2) This Week vs Last Week (by createdAt)
 		const weeklyReservations = allReservations.filter((r) =>
 			isThisWeek(new Date(r.createdAt))
 		).length;
@@ -760,8 +814,7 @@ exports.specificListOfReservations = async (req, res) => {
 		// 4) Overall reservations (everything that matched finalFilter)
 		const totalMatchedReservations = allReservations.length;
 
-		// 5) Commission stats (exclude cancelled if the finalFilter excludes them,
-		//    otherwise you'll see them in allReservations).
+		// 5) Commission stats (non-cancelled)
 		const nonCancelled = allReservations.filter(
 			(r) => r.reservation_status !== "cancelled"
 		);
@@ -813,7 +866,6 @@ exports.specificListOfReservations = async (req, res) => {
 			0
 		);
 
-		// 6) Build the final scorecards object
 		const scorecards = {
 			// row 1
 			todayReservations,
@@ -836,14 +888,14 @@ exports.specificListOfReservations = async (req, res) => {
 			overallCommission,
 		};
 
-		// 8) Return the response (everything remains intact + scorecards)
+		// 9) Return final payload
 		return res.json({
 			success: true,
-			data: reservations,
+			data: reservations, // full set; frontend paginates on the client
 			totalDocuments,
 			currentPage: page,
 			totalPages,
-			scorecards, // <--- appended here
+			scorecards,
 		});
 	} catch (err) {
 		console.error("Error in specificListOfReservations:", err);
@@ -893,14 +945,9 @@ exports.exportToExcel = async (req, res) => {
 		const userId = req.params.userId;
 
 		// 1) Base filter: booking_source + createdAt >= 2024-09-01
-		const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 		const baseFilter = {
-			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-			],
-			createdAt: { $gte: startOfSep2024 },
+			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
 
 		// 2) Parse query for date range, hotels, + NEW: filterType & searchQuery
@@ -1152,14 +1199,9 @@ function makeEmptyReport() {
 exports.adminDashboardReport = async (req, res) => {
 	try {
 		// 1) Base filter (booking_source + createdAt >= 2024-09-01)
-		const startOfSep2024 = new Date("2024-09-01T00:00:00.000Z");
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 		const baseFilter = {
-			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-			],
-			createdAt: { $gte: startOfSep2024 },
+			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
 		console.log("Admin Dashboard Report Data:");
 

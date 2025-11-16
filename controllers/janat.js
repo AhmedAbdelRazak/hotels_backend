@@ -4231,16 +4231,11 @@ exports.sendWhatsAppReservationConfirmation = async (req, res) => {
 // Returns an array of distinct reservedBy (lowercased, sorted), skipping missing/empty values
 exports.distinctReservedByList = async (req, res) => {
 	try {
-		const JULY_FIRST_2025_UTC = new Date("2025-07-01T00:00:00.000Z");
+		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 
 		// Same base filter used in paginatedReservationList
 		const baseBookingSourceMatch = {
-			$or: [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-				{ booking_source: { $regex: /^affiliate$/i } },
-			],
+			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
 
 		const pipeline = [
@@ -4333,12 +4328,9 @@ exports.findConfirmationsByReservedBy = async (req, res) => {
 
 		// Optional: restrict to the same booking sources as the table
 		if (String(restrictToBaseSources).toLowerCase() === "true") {
-			filter.$or = [
-				{ booking_source: { $regex: /^online jannat booking$/i } },
-				{ booking_source: { $regex: /^generated link$/i } },
-				{ booking_source: { $regex: /^jannat employee$/i } },
-				{ booking_source: { $regex: /^affiliate$/i } },
-			];
+			const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
+
+			filter.$or = [{ createdAt: { $gte: PAGE_START_DATE_UTC } }];
 		}
 
 		const docs = await Reservations.find(filter, {
