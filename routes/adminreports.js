@@ -19,6 +19,9 @@ const {
 	specificListOfReservations,
 	exportToExcel,
 	adminDashboardReport,
+	hotelOccupancyCalendar,
+	hotelOccupancyWarnings,
+	hotelOccupancyDayReservations,
 	// ... any other exported controllers
 } = require("../controllers/adminreports");
 
@@ -119,6 +122,30 @@ router.get(
 	exportToExcel
 );
 
+router.get(
+	"/adminreports/hotel-occupancy/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	hotelOccupancyCalendar
+);
+
+router.get(
+	"/adminreports/hotel-occupancy-warnings/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	hotelOccupancyWarnings
+);
+
+router.get(
+	"/adminreports/hotel-occupancy-day-reservations/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	hotelOccupancyDayReservations
+);
+
 //Hotel Owner routes
 // 1) Reservations By Day
 router.get(
@@ -189,6 +216,20 @@ router.get(
 	requireSignin,
 	isAuth,
 	exportToExcel
+);
+
+router.get(
+	"/hotel-adminreports/hotel-occupancy/:userId",
+	requireSignin,
+	isAuth,
+	hotelOccupancyCalendar
+);
+
+router.get(
+	"/hotel-adminreports/hotel-occupancy-day-reservations/:userId",
+	requireSignin,
+	isAuth,
+	hotelOccupancyDayReservations
 );
 
 router.get("/admin-dashboard-reports/:hotelId", adminDashboardReport);
