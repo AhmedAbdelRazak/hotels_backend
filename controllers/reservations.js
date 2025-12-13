@@ -1512,6 +1512,9 @@ exports.updateReservation = async (req, res) => {
 			"customer_details.name": updateData.customerDetails?.name,
 			"customer_details.email": updateData.customerDetails?.email,
 			"customer_details.phone": updateData.customerDetails?.phone,
+			"customer_details.nickName": updateData.customerDetails?.nickName,
+			"customer_details.confirmation_number2":
+				updateData.customerDetails?.confirmation_number2,
 			"customer_details.passport": updateData.customerDetails?.passport,
 			"customer_details.passportExpiry":
 				updateData.customerDetails?.passportExpiry,

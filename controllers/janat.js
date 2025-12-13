@@ -1965,6 +1965,8 @@ exports.paginatedReservationList = async (req, res) => {
 			const belongsToRaw = doc?.belongsTo;
 			const payment_details = doc?.payment_details || {};
 			const paypal_details = doc?.paypal_details || {};
+			const nickName = customer_details.nickName || "";
+			const confirmationNumber2 = customer_details.confirmation_number2 || "";
 
 			const hotelObj = normalizeRef(hotelObjRaw);
 			const belongsToObj = normalizeRef(belongsToRaw);
@@ -2049,7 +2051,9 @@ exports.paginatedReservationList = async (req, res) => {
 				hotelId: hotelObj || doc.hotelId,
 				belongsTo: belongsToObj || doc.belongsTo,
 				customer_name: customer_details.name || "N/A",
+				customer_nick: nickName,
 				customer_phone: customer_details.phone || "N/A",
+				confirmation_number2: confirmationNumber2,
 				hotel_name: hotelName,
 				createdAt: doc.createdAt || null,
 				payment_status,
@@ -2120,14 +2124,18 @@ exports.paginatedReservationList = async (req, res) => {
 		if (searchQ) {
 			filteredDocs = filteredDocs.filter((r) => {
 				const cnum = String(r.confirmation_number || "").toLowerCase();
+				const cnum2 = String(r.confirmation_number2 || "").toLowerCase();
 				const phone = String(r.customer_phone || "").toLowerCase();
 				const name = String(r.customer_name || "").toLowerCase();
+				const nick = String(r.customer_nick || "").toLowerCase();
 				const hname = String(r.hotel_name || "").toLowerCase();
 
 				return (
 					cnum.includes(searchQ) ||
+					cnum2.includes(searchQ) ||
 					phone.includes(searchQ) ||
 					name.includes(searchQ) ||
+					nick.includes(searchQ) ||
 					hname.includes(searchQ)
 				);
 			});
@@ -2950,6 +2958,8 @@ exports.createNewReservationClient2 = async (req, res) => {
 
 		const normalizeNationality = (s) => normalizeName(s);
 
+		const safeString = (s) => (typeof s === "string" ? s.trim() : "");
+
 		const toISODateYMD = (d) => {
 			const dt = new Date(d);
 			if (!dt || isNaN(dt.getTime())) return null;
@@ -3122,6 +3132,10 @@ exports.createNewReservationClient2 = async (req, res) => {
 			// CHANGED: ensure customer_details contains reservedById while keeping reservedBy untouched
 			const preparedCustomerDetails = {
 				...customerDetails,
+				nickName: safeString(customerDetails?.nickName),
+				confirmation_number2: safeString(
+					customerDetails?.confirmation_number2
+				),
 				reservedById:
 					extractReservedById(customerDetails?.reservedById, null) ||
 					customerDetails?.reservedById ||
