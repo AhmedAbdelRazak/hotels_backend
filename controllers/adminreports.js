@@ -1826,16 +1826,67 @@ exports.adminDashboardReport = async (req, res) => {
 };
 
 // -------------------------------
-// Hotel Occupancy (per day / room type) for a single hotel + month
+// Hotel Occupancy (accurate resolver + derived rooms)
 // -------------------------------
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MANUAL_CAPTURED_CONFIRMATIONS = new Set(["2944008828"]);
+
+function safeNumber(val, fallback = 0) {
+	const n = Number(val);
+	return Number.isFinite(n) ? n : fallback;
+}
+
+function setNoCacheHeaders(res) {
+	res.set("Cache-Control", "no-store");
+	res.set("Pragma", "no-cache");
+	res.set("Expires", "0");
+	res.set("ETag", Date.now().toString());
+}
+
+function normalizeRoomKeyLabel(str = "") {
+	const raw = String(str || "").trim();
+	if (!raw) return "";
+	return raw
+		.toLowerCase()
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/[\u200B-\u200D\uFEFF]/g, "")
+		.replace(/[\u2010-\u2015\u2212]/g, "-") // normalize dashes
+		.replace(/[’'`]/g, "")
+		.replace(/[^a-z0-9\u0600-\u06FF]+/g, "-")
+		.replace(/-+/g, "-")
+		.replace(/^-+|-+$/g, "");
+}
+
+function humanizeRoomType(val = "") {
+	const raw = String(val || "").trim();
+	if (!raw) return "Room";
+	const spaced = raw
+		.replace(/_/g, " ")
+		.replace(/([a-z])([A-Z])/g, "$1 $2")
+		.replace(/\s+/g, " ")
+		.trim();
+	return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
+function getRoomTypeLabel(roomTypeVal) {
+	// Use your existing roomTypeLabelMap if present
+	if (
+		typeof roomTypeLabelMap !== "undefined" &&
+		roomTypeLabelMap &&
+		roomTypeLabelMap[roomTypeVal]
+	) {
+		return roomTypeLabelMap[roomTypeVal];
+	}
+	return humanizeRoomType(roomTypeVal);
+}
 
 function parseMonthParam(monthStr) {
-	// Accepts "YYYY-MM"; defaults to current month if invalid/missing
 	const now = new Date();
-	const [yearStr, monthPart] = (monthStr || "").split("-");
+	const [yearStr, monthPart] = String(monthStr || "").split("-");
 	let year = parseInt(yearStr, 10);
-	let monthIndex = parseInt(monthPart, 10) - 1; // 0-based
+	let monthIndex = parseInt(monthPart, 10) - 1;
 
 	if (
 		!Number.isFinite(year) ||
@@ -1849,105 +1900,153 @@ function parseMonthParam(monthStr) {
 
 	const start = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
 	const endExclusive = new Date(Date.UTC(year, monthIndex + 1, 1, 0, 0, 0, 0));
-	const daysInMonth = Math.round(
-		(endExclusive.getTime() - start.getTime()) / DAY_MS
-	);
+	const daysInMonth = Math.max(1, Math.round((endExclusive - start) / DAY_MS));
 
 	return {
-		year,
-		monthIndex,
 		start,
 		endExclusive,
 		daysInMonth,
 		label: `${year}-${String(monthIndex + 1).padStart(2, "0")}`,
+		year,
+		monthIndex,
 	};
 }
 
 function parseCustomRange(startStr, endStr) {
 	if (!startStr || !endStr) return null;
-	const start = new Date(startStr);
-	const endExclusive = new Date(endStr);
-	if (Number.isNaN(start.getTime()) || Number.isNaN(endExclusive.getTime())) {
+
+	const startRaw = new Date(startStr);
+	const endRaw = new Date(endStr);
+	if (Number.isNaN(startRaw.getTime()) || Number.isNaN(endRaw.getTime()))
 		return null;
-	}
-	if (start >= endExclusive) return null;
-	const daysInMonth = Math.max(
-		1,
-		Math.round((endExclusive.getTime() - start.getTime()) / DAY_MS)
+
+	const start = new Date(
+		Date.UTC(
+			startRaw.getUTCFullYear(),
+			startRaw.getUTCMonth(),
+			startRaw.getUTCDate()
+		)
 	);
+
+	let endExclusive = new Date(
+		Date.UTC(endRaw.getUTCFullYear(), endRaw.getUTCMonth(), endRaw.getUTCDate())
+	);
+
+	// If endStr is "YYYY-MM-DD" (no time), treat it as inclusive end date -> endExclusive = +1 day
+	const endHasExplicitTime = String(endStr).includes("T");
+	const endIsMidnightUTC =
+		endRaw.getUTCHours() === 0 &&
+		endRaw.getUTCMinutes() === 0 &&
+		endRaw.getUTCSeconds() === 0 &&
+		endRaw.getUTCMilliseconds() === 0;
+
+	const treatEndInclusive = !endHasExplicitTime || !endIsMidnightUTC;
+	if (treatEndInclusive)
+		endExclusive = new Date(endExclusive.getTime() + DAY_MS);
+
+	if (start >= endExclusive) return null;
+
+	const daysInMonth = Math.max(1, Math.round((endExclusive - start) / DAY_MS));
+	const inclusiveEnd = new Date(endExclusive.getTime() - DAY_MS);
+
 	return {
 		start,
 		endExclusive,
 		daysInMonth,
-		label: `${start.toISOString().slice(0, 10)} - ${endExclusive
+		label: `${start.toISOString().slice(0, 10)} - ${inclusiveEnd
 			.toISOString()
 			.slice(0, 10)}`,
+		year: start.getUTCFullYear(),
+		monthIndex: start.getUTCMonth(),
 	};
 }
 
-function initDaySkeleton(roomTypes, totalRoomsAll) {
-	const rooms = {};
-	roomTypes.forEach((rt) => {
-		rooms[rt.key] = {
-			booked: 0,
-			occupied: 0,
-			available: rt.totalRooms,
-			occupancyRate: 0,
-			overbooked: false,
-		};
-	});
-
-	return {
-		rooms,
-		totals: {
-			occupied: 0,
-			available: totalRoomsAll,
-			occupancyRate: totalRoomsAll ? 0 : 0,
-		},
-	};
-}
-
-function paymentMeta(reservation = {}) {
-	// Mirrors EnhancedContentTable summarizePayment logic
-	const paymentRaw = String(reservation.payment || "")
+function normalizePaymentStatus(value = "") {
+	const raw = String(value || "")
 		.toLowerCase()
 		.trim();
-	const paymentDetails = reservation.payment_details || {};
-	const paypalDetails = reservation.paypal_details || {};
-	const onsitePaidAmount = safeNumber(paymentDetails.onsite_paid_amount);
-	const totalAmount = safeNumber(reservation.total_amount);
-	const legacyCaptured = !!paymentDetails.captured;
-	const payOffline = onsitePaidAmount > 0 || paymentRaw === "paid offline";
+	if (!raw) return "";
+	if (["captured", "paid online", "paid_online"].includes(raw))
+		return "captured";
+	if (["paid offline", "paid_offline", "onsite"].includes(raw))
+		return "paid offline";
+	if (["not paid", "not_paid", "unpaid"].includes(raw)) return "not paid";
+	if (["not captured", "not_captured"].includes(raw)) return "not captured";
+	return raw;
+}
 
-	const capTotalUsd = safeNumber(paypalDetails?.captured_total_usd);
+function parsePaymentStatusFilter(rawStatuses) {
+	if (!rawStatuses) return new Set();
+	const incoming = Array.isArray(rawStatuses)
+		? rawStatuses
+		: String(rawStatuses || "").split(",");
+	const filtered = new Set();
+	incoming.forEach((item) => {
+		const norm = normalizePaymentStatus(item);
+		if (norm) filtered.add(norm);
+	});
+	return filtered;
+}
+
+/**
+ * ✅ Payment logic EXACTLY matching EnhancedContentTable:
+ * Captured / Paid Offline / Not Paid / Not Captured
+ */
+function paymentMeta(reservation = {}) {
+	const pd = reservation?.paypal_details || {};
+	const pmt = String(reservation?.payment || "")
+		.toLowerCase()
+		.trim();
+
+	const legacyCaptured = !!reservation?.payment_details?.captured;
+
+	const onsitePaidAmount = safeNumber(
+		reservation?.payment_details?.onsite_paid_amount
+	);
+	const payOffline = onsitePaidAmount > 0 || pmt === "paid offline";
+
+	const capTotal = safeNumber(pd?.captured_total_usd);
+	const limitUsd =
+		typeof pd?.bounds?.limit_usd === "number"
+			? safeNumber(pd.bounds.limit_usd)
+			: 0;
+	const pendingUsd = safeNumber(pd?.pending_total_usd);
+
 	const initialCompleted =
-		(paypalDetails?.initial?.capture_status || "").toUpperCase() ===
-		"COMPLETED";
+		String(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
 	const anyMitCompleted =
-		Array.isArray(paypalDetails?.mit) &&
-		paypalDetails.mit.some(
-			(c) => (c?.capture_status || "").toUpperCase() === "COMPLETED"
+		Array.isArray(pd?.mit) &&
+		pd.mit.some(
+			(c) => String(c?.capture_status || "").toUpperCase() === "COMPLETED"
 		);
 
-	// Manual override list (same spirit as EnhancedContentTable)
-	const capturedConfirmationNumbers = ["2944008828"];
-	const manualOverrideCaptured = capturedConfirmationNumbers.includes(
-		String(reservation.confirmation_number || "")
+	const manualOverrideCaptured = MANUAL_CAPTURED_CONFIRMATIONS.has(
+		String(reservation?.confirmation_number || "").trim()
 	);
 
 	const isCaptured =
 		manualOverrideCaptured ||
 		legacyCaptured ||
-		capTotalUsd > 0 ||
+		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
-		paymentRaw === "paid online";
+		pmt === "paid online";
+
+	const isNotPaid = pmt === "not paid" && !isCaptured && !payOffline;
 
 	let status = "Not Captured";
 	if (isCaptured) status = "Captured";
 	else if (payOffline) status = "Paid Offline";
-	else if (paymentRaw === "not paid") status = "Not Paid";
+	else if (isNotPaid) status = "Not Paid";
 
+	let hint = "";
+	const pieces = [];
+	if (capTotal > 0) pieces.push(`captured $${capTotal.toFixed(2)}`);
+	if (limitUsd > 0) pieces.push(`limit $${limitUsd.toFixed(2)}`);
+	if (pendingUsd > 0) pieces.push(`pending $${pendingUsd.toFixed(2)}`);
+	if (pieces.length) hint = `PayPal: ${pieces.join(" / ")}`;
+
+	const totalAmount = safeNumber(reservation?.total_amount);
 	const paidAmount =
 		status === "Captured"
 			? totalAmount
@@ -1957,21 +2056,629 @@ function paymentMeta(reservation = {}) {
 
 	return {
 		status,
+		normalizedStatus: normalizePaymentStatus(status),
 		label: status,
 		totalAmount,
 		paidAmount,
 		onsitePaidAmount,
+		hint,
 	};
 }
 
+function buildReservationBaseQuery({
+	hotelId,
+	start,
+	endExclusive,
+	includeCancelled,
+}) {
+	const q = {
+		hotelId: new ObjectId(hotelId),
+		checkin_date: { $lt: endExclusive },
+		checkout_date: { $gt: start },
+	};
+
+	const inc = String(includeCancelled || "").toLowerCase() === "true";
+	if (!inc) {
+		q.reservation_status = {
+			$nin: ["cancelled", "no show", "no_show", "noshow"],
+		};
+	}
+	return q;
+}
+
+function buildDayBaseQuery({ hotelId, dayStart, dayEnd, includeCancelled }) {
+	const q = {
+		hotelId: new ObjectId(hotelId),
+		checkin_date: { $lt: dayEnd },
+		checkout_date: { $gt: dayStart },
+	};
+
+	const inc = String(includeCancelled || "").toLowerCase() === "true";
+	if (!inc) {
+		q.reservation_status = {
+			$nin: ["cancelled", "no show", "no_show", "noshow"],
+		};
+	}
+	return q;
+}
+
+function buildBaseRoomTypes(
+	roomCountDetails = [],
+	displayMode = "displayName"
+) {
+	const rawRooms = Array.isArray(roomCountDetails) ? roomCountDetails : [];
+	const aggregated = new Map();
+
+	for (const r of rawRooms) {
+		if (!r) continue;
+
+		const roomTypeVal = String(r.roomType || r.room_type || "").trim();
+		const displayNameVal = String(r.displayName || "").trim();
+
+		const rawCount = safeNumber(r.count);
+		if (rawCount <= 0) continue;
+
+		const baseKeyRaw =
+			displayMode === "displayName"
+				? displayNameVal || roomTypeVal || String(r._id || "")
+				: roomTypeVal || String(r._id || "");
+
+		let key = normalizeRoomKeyLabel(baseKeyRaw);
+		if (!key)
+			key =
+				normalizeRoomKeyLabel(String(r._id || "")) ||
+				`room-${Math.random().toString(36).slice(2, 8)}`;
+
+		const bedsMultiplier =
+			roomTypeVal === "individualBed"
+				? Math.max(1, Math.round(safeNumber(r.bedsCount, 1)))
+				: 1;
+
+		const totalRooms = rawCount * bedsMultiplier;
+
+		if (!aggregated.has(key)) {
+			aggregated.set(key, {
+				key,
+				roomType: roomTypeVal,
+				displayName: displayNameVal,
+				label:
+					displayMode === "displayName"
+						? displayNameVal || getRoomTypeLabel(roomTypeVal)
+						: getRoomTypeLabel(roomTypeVal) || displayNameVal || "Room",
+				totalRooms,
+				rawRoomCount: rawCount,
+				bedsCount: safeNumber(r.bedsCount),
+				color: r.roomColor || null,
+				derived: false,
+			});
+		} else {
+			const prev = aggregated.get(key);
+			prev.totalRooms += totalRooms;
+			prev.rawRoomCount += rawCount;
+		}
+	}
+
+	return Array.from(aggregated.values());
+}
+
+function initDayCell(capacity = 0) {
+	return {
+		capacity: safeNumber(capacity),
+		booked: 0,
+		occupied: 0,
+		available: safeNumber(capacity),
+		occupancyRate: 0,
+		bookingRate: 0,
+		overbooked: false,
+		overage: 0,
+	};
+}
+
+function initDaySkeleton(roomTypes = []) {
+	const rooms = {};
+	for (const rt of roomTypes) {
+		rooms[rt.key] = initDayCell(rt.totalRooms);
+	}
+	return {
+		rooms,
+		totals: {
+			capacity: 0,
+			booked: 0,
+			occupied: 0,
+			available: 0,
+			occupancyRate: 0,
+			bookingRate: 0,
+			overbooked: false,
+			overage: 0,
+		},
+	};
+}
+
+// -------------------------------
+// Core compute (used by calendar + warnings)
+// -------------------------------
+async function computeOccupancy({
+	hotelId,
+	start,
+	endExclusive,
+	daysInMonth,
+	label,
+	year,
+	monthIndex,
+	displayMode,
+	includeCancelled,
+	paymentStatusFilter,
+}) {
+	const hotel = await HotelDetails.findById(hotelId)
+		.select("hotelName roomCountDetails")
+		.lean();
+	if (!hotel) {
+		return {
+			error: { code: 404, message: "Hotel not found for occupancy view" },
+		};
+	}
+
+	// Base inventory
+	const baseRoomTypes = buildBaseRoomTypes(
+		hotel.roomCountDetails || [],
+		displayMode
+	);
+
+	const baseTotalRoomsAll = baseRoomTypes.reduce(
+		(sum, rt) => sum + safeNumber(rt.totalRooms),
+		0
+	);
+	const totalPhysicalRooms = baseRoomTypes.reduce(
+		(sum, rt) => sum + safeNumber(rt.rawRoomCount),
+		0
+	);
+
+	// Indexes
+	const roomTypeByKey = new Map();
+	const keyNormToKey = new Map();
+	const displayNormToKeys = new Map(); // norm(displayName/label) -> Set(keys)
+	const roomTypeNormToKeys = new Map(); // norm(roomType) -> Set(keys)
+
+	const roomTypes = [...baseRoomTypes];
+
+	const addToSetMap = (map, k, val) => {
+		if (!k) return;
+		if (!map.has(k)) map.set(k, new Set());
+		map.get(k).add(val);
+	};
+
+	const indexRoomType = (rt) => {
+		roomTypeByKey.set(rt.key, rt);
+
+		const normKey = normalizeRoomKeyLabel(rt.key);
+		if (normKey) keyNormToKey.set(normKey, rt.key);
+
+		const aliases = new Set([rt.displayName, rt.label, rt.key].filter(Boolean));
+		for (const a of aliases)
+			addToSetMap(displayNormToKeys, normalizeRoomKeyLabel(a), rt.key);
+
+		if (rt.roomType)
+			addToSetMap(
+				roomTypeNormToKeys,
+				normalizeRoomKeyLabel(rt.roomType),
+				rt.key
+			);
+	};
+
+	for (const rt of baseRoomTypes) indexRoomType(rt);
+
+	// Days skeleton (we will add derived keys to all days if discovered)
+	const days = [];
+	for (let i = 0; i < daysInMonth; i++) {
+		const dateObj = new Date(start.getTime() + i * DAY_MS);
+		const isoDate = dateObj.toISOString().slice(0, 10);
+		days.push({ date: isoDate, ...initDaySkeleton(roomTypes) });
+	}
+
+	const ensureKeyInDays = (key, capacityDefault = 0) => {
+		for (const d of days) {
+			if (!d.rooms[key]) d.rooms[key] = initDayCell(capacityDefault);
+		}
+	};
+
+	const pickFromSet = (set, raw, kind) => {
+		if (!set || set.size === 0) return null;
+		if (set.size === 1) return Array.from(set)[0];
+
+		// If ambiguous, try exact raw match against stored room types
+		const rawLower = String(raw || "")
+			.trim()
+			.toLowerCase();
+		if (!rawLower) return null;
+
+		for (const key of set) {
+			const rt = roomTypeByKey.get(key);
+			if (!rt) continue;
+
+			const candidates =
+				kind === "display"
+					? [rt.displayName, rt.label]
+					: kind === "roomType"
+					? [rt.roomType]
+					: [];
+
+			for (const c of candidates) {
+				if (
+					String(c || "")
+						.trim()
+						.toLowerCase() === rawLower
+				)
+					return key;
+			}
+		}
+
+		// fallback deterministic
+		return Array.from(set)[0];
+	};
+
+	// ✅ KEY FIX: in displayName mode, match displayName FIRST to avoid familyRooms collisions
+	const resolveRoomKey = (room = {}) => {
+		const rawKey = room?.key || room?.roomKey || "";
+		const rawRoomType = room?.room_type || room?.roomType || "";
+		const rawDisplay =
+			room?.displayName || room?.display_name || room?.label || "";
+
+		const normKey = normalizeRoomKeyLabel(rawKey);
+		if (normKey && keyNormToKey.has(normKey)) return keyNormToKey.get(normKey);
+
+		const normDisplay = normalizeRoomKeyLabel(rawDisplay);
+		const normRoomType = normalizeRoomKeyLabel(rawRoomType);
+
+		if (displayMode === "displayName") {
+			if (normDisplay) {
+				const set = displayNormToKeys.get(normDisplay);
+				const picked = pickFromSet(set, rawDisplay, "display");
+				if (picked) return picked;
+			}
+
+			// Only use roomType fallback if UNIQUE
+			if (normRoomType) {
+				const set = roomTypeNormToKeys.get(normRoomType);
+				if (set && set.size === 1) return Array.from(set)[0];
+			}
+
+			return null;
+		}
+
+		// roomType mode: roomType first
+		if (normRoomType) {
+			const set = roomTypeNormToKeys.get(normRoomType);
+			if (set && set.size) return Array.from(set)[0];
+		}
+
+		if (normDisplay) {
+			const set = displayNormToKeys.get(normDisplay);
+			const picked = pickFromSet(set, rawDisplay, "display");
+			if (picked) return picked;
+		}
+
+		return null;
+	};
+
+	const deriveKeyFromRoom = (room = {}) => {
+		const rawRoomType = String(room?.room_type || room?.roomType || "").trim();
+		const rawDisplay = String(
+			room?.displayName || room?.display_name || room?.label || ""
+		).trim();
+
+		const labelCandidate =
+			displayMode === "displayName"
+				? rawDisplay ||
+				  getRoomTypeLabel(rawRoomType) ||
+				  rawRoomType ||
+				  "Unknown Room"
+				: getRoomTypeLabel(rawRoomType) ||
+				  rawDisplay ||
+				  rawRoomType ||
+				  "Unknown Room";
+
+		let key = normalizeRoomKeyLabel(labelCandidate);
+		if (!key)
+			key =
+				normalizeRoomKeyLabel(rawDisplay) || normalizeRoomKeyLabel(rawRoomType);
+		if (!key) key = `unknown-room-${Math.random().toString(36).slice(2, 8)}`;
+
+		return {
+			key,
+			label: labelCandidate,
+			roomType: rawRoomType,
+			displayName: rawDisplay,
+		};
+	};
+
+	const ensureDerivedRoomType = (room = {}) => {
+		const { key, label, roomType, displayName } = deriveKeyFromRoom(room);
+
+		if (roomTypeByKey.has(key)) return key;
+
+		const rt = {
+			key,
+			roomType,
+			displayName,
+			label,
+			totalRooms: 0, // unknown -> capacity will be booked/day
+			rawRoomCount: 0,
+			bedsCount: 0,
+			color: null,
+			derived: true,
+		};
+
+		roomTypes.push(rt);
+		indexRoomType(rt);
+		ensureKeyInDays(key, 0);
+
+		return key;
+	};
+
+	const baseQuery = buildReservationBaseQuery({
+		hotelId,
+		start,
+		endExclusive,
+		includeCancelled,
+	});
+
+	const reservations = await Reservations.find(baseQuery)
+		.select(
+			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details"
+		)
+		.lean();
+
+	let totalAmount = 0;
+	const paymentBreakdown = {};
+
+	// 1) Count bookings into day.rooms[key].booked
+	for (const reservation of reservations) {
+		if (
+			!reservation ||
+			!reservation.checkin_date ||
+			!reservation.checkout_date ||
+			!Array.isArray(reservation.pickedRoomsType)
+		)
+			continue;
+
+		const pay = paymentMeta(reservation);
+		if (
+			paymentStatusFilter.size &&
+			!paymentStatusFilter.has(pay.normalizedStatus)
+		)
+			continue;
+
+		totalAmount += pay.totalAmount;
+
+		if (!paymentBreakdown[pay.status]) {
+			paymentBreakdown[pay.status] = {
+				status: pay.status,
+				label: pay.label,
+				count: 0,
+				totalAmount: 0,
+				paidAmount: 0,
+				onsitePaidAmount: 0,
+			};
+		}
+		paymentBreakdown[pay.status].count += 1;
+		paymentBreakdown[pay.status].totalAmount += pay.totalAmount;
+		paymentBreakdown[pay.status].paidAmount += pay.paidAmount;
+		paymentBreakdown[pay.status].onsitePaidAmount += pay.onsitePaidAmount;
+
+		const ci = new Date(reservation.checkin_date);
+		const co = new Date(reservation.checkout_date);
+		ci.setUTCHours(0, 0, 0, 0);
+		co.setUTCHours(0, 0, 0, 0);
+
+		const overlapStart = Math.max(ci.getTime(), start.getTime());
+		const overlapEnd = Math.min(co.getTime(), endExclusive.getTime());
+		if (overlapStart >= overlapEnd) continue;
+
+		for (const room of reservation.pickedRoomsType) {
+			if (!room) continue;
+
+			let key = resolveRoomKey(room);
+			if (!key) key = ensureDerivedRoomType(room);
+
+			const count = safeNumber(room?.count);
+			if (!count) continue;
+
+			for (let ts = overlapStart; ts < overlapEnd; ts += DAY_MS) {
+				const dayIndex = Math.floor((ts - start.getTime()) / DAY_MS);
+				const dayEntry = days[dayIndex];
+				if (!dayEntry) continue;
+
+				if (!dayEntry.rooms[key]) dayEntry.rooms[key] = initDayCell(0);
+				dayEntry.rooms[key].booked += count;
+			}
+		}
+	}
+
+	// 2) Post-process day cells (capacity/occupied/available/rates) + summary
+	const warnings = [];
+	const occupancyByType = {};
+	for (const rt of roomTypes) {
+		occupancyByType[rt.key] = {
+			key: rt.key,
+			label: rt.label,
+			color: rt.color || null,
+			totalRooms: safeNumber(rt.totalRooms),
+			capacityNights: 0,
+			bookedNights: 0,
+			occupiedNights: 0,
+			derived: !!rt.derived,
+		};
+	}
+
+	let bookedRoomNights = 0;
+	let occupiedRoomNights = 0;
+	let capacityRoomNights = 0;
+
+	let peakDay = {
+		date: null,
+		occupancyRate: 0,
+		booked: 0,
+		occupied: 0,
+		capacity: 0,
+	};
+
+	for (const day of days) {
+		let dayCapacity = 0;
+		let dayBooked = 0;
+		let dayOccupied = 0;
+		let dayAvail = 0;
+
+		for (const rt of roomTypes) {
+			const cell = day.rooms[rt.key] || initDayCell(0);
+
+			const booked = safeNumber(cell.booked);
+			const capacity = rt.derived ? booked : safeNumber(rt.totalRooms); // ✅ derived rooms => capacity = booked (1/1 style)
+			const occupied = Math.min(booked, capacity);
+			const available = Math.max(capacity - occupied, 0);
+
+			cell.capacity = capacity;
+			cell.occupied = occupied;
+			cell.available = available;
+
+			cell.occupancyRate = capacity > 0 ? occupied / capacity : 0;
+			cell.bookingRate = capacity > 0 ? booked / capacity : 0;
+
+			cell.overbooked = !rt.derived && booked > capacity;
+			cell.overage = cell.overbooked ? Math.max(booked - capacity, 0) : 0;
+
+			day.rooms[rt.key] = cell;
+
+			dayCapacity += capacity;
+			dayBooked += booked;
+			dayOccupied += occupied;
+			dayAvail += available;
+
+			occupancyByType[rt.key].capacityNights += capacity;
+			occupancyByType[rt.key].bookedNights += booked;
+			occupancyByType[rt.key].occupiedNights += occupied;
+
+			if (cell.overbooked) {
+				warnings.push({
+					date: day.date,
+					roomType: rt.label || rt.key,
+					roomKey: rt.key,
+					booked,
+					capacity,
+					overage: cell.overage,
+				});
+			}
+		}
+
+		day.totals.capacity = dayCapacity;
+		day.totals.booked = dayBooked;
+		day.totals.occupied = dayOccupied;
+		day.totals.available = dayAvail;
+		day.totals.occupancyRate = dayCapacity > 0 ? dayOccupied / dayCapacity : 0;
+		day.totals.bookingRate = dayCapacity > 0 ? dayBooked / dayCapacity : 0;
+		day.totals.overbooked = dayBooked > dayCapacity;
+		day.totals.overage = day.totals.overbooked
+			? Math.max(dayBooked - dayCapacity, 0)
+			: 0;
+
+		bookedRoomNights += dayBooked;
+		occupiedRoomNights += dayOccupied;
+		capacityRoomNights += dayCapacity;
+
+		if (day.totals.occupancyRate > peakDay.occupancyRate) {
+			peakDay = {
+				date: day.date,
+				occupancyRate: day.totals.occupancyRate,
+				booked: dayBooked,
+				occupied: dayOccupied,
+				capacity: dayCapacity,
+			};
+		}
+	}
+
+	// roomTypes stable sorting by label (nice UI)
+	roomTypes.sort((a, b) =>
+		String(a.label || "").localeCompare(String(b.label || ""), undefined, {
+			sensitivity: "base",
+		})
+	);
+
+	const occupancyByTypeArr = Object.values(occupancyByType).map((v) => ({
+		key: v.key,
+		label: v.label,
+		color: v.color,
+		totalRooms: v.totalRooms,
+		capacityNights: v.capacityNights,
+		bookedNights: v.bookedNights,
+		occupiedNights: v.occupiedNights,
+		derived: v.derived,
+		occupancyRate:
+			v.capacityNights > 0 ? v.occupiedNights / v.capacityNights : 0,
+		bookingRate: v.capacityNights > 0 ? v.bookedNights / v.capacityNights : 0,
+	}));
+
+	const remainingRoomNights = Math.max(
+		capacityRoomNights - occupiedRoomNights,
+		0
+	);
+
+	const paymentBreakdownArr = Object.values(paymentBreakdown).sort(
+		(a, b) => (b.count || 0) - (a.count || 0)
+	);
+
+	return {
+		success: true,
+		hotel: { _id: hotel._id, hotelName: hotel.hotelName },
+		month: {
+			label,
+			year,
+			monthIndex,
+			start: start.toISOString(),
+			endExclusive: endExclusive.toISOString(),
+			daysInMonth,
+		},
+		roomTypes,
+		days,
+		summary: {
+			// legacy-compatible keys
+			soldRoomNights: occupiedRoomNights,
+			availableRoomNights: capacityRoomNights,
+			totalRoomsAll: baseTotalRoomsAll,
+			totalPhysicalRooms,
+
+			// explicit keys
+			capacityRoomNights,
+			bookedRoomNights,
+			occupiedRoomNights,
+			remainingRoomNights,
+
+			averageOccupancyRate:
+				capacityRoomNights > 0 ? occupiedRoomNights / capacityRoomNights : 0,
+			peakDay,
+
+			occupancyByType: occupancyByTypeArr,
+			warnings,
+			totalAmount,
+			paymentBreakdown: paymentBreakdownArr,
+		},
+		displayMode,
+	};
+}
+
+// -------------------------------
+// Calendar endpoint
+// -------------------------------
 exports.hotelOccupancyCalendar = async (req, res) => {
 	try {
+		setNoCacheHeaders(res);
+
 		const hotelId = req.query.hotelId;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res.status(400).json({
-				success: false,
-				message: "hotelId (Mongo ObjectId) is required",
-			});
+			return res
+				.status(400)
+				.json({
+					success: false,
+					message: "hotelId (Mongo ObjectId) is required",
+				});
 		}
 
 		const customRange = parseCustomRange(req.query.start, req.query.end);
@@ -1979,294 +2686,34 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 			customRange || parseMonthParam(req.query.month);
 
 		const displayMode =
-			(req.query.display === "displayName" && "displayName") || "roomType"; // default roomType
-
-		const hotel = await HotelDetails.findById(hotelId)
-			.select("hotelName roomCountDetails")
-			.lean();
-
-		if (!hotel) {
-			return res
-				.status(404)
-				.json({
-					success: false,
-					message: "Hotel not found for occupancy view",
-				});
-		}
-
-		// Normalize room inventory; aggregate by chosen displayMode
-		const rawRooms = (hotel.roomCountDetails || []).filter(
-			(r) => r && safeNumber(r.count) > 0
-		);
-
-		const aggregatedRoomsMap = {};
-		for (const r of rawRooms) {
-			const roomTypeVal = r.roomType || r.room_type || "";
-			const displayNameVal = r.displayName || "";
-			const baseKey =
-				displayMode === "displayName"
-					? displayNameVal || roomTypeVal || String(r._id || "")
-					: roomTypeVal || String(r._id || "");
-
-			// For bed-level inventory (individualBed), multiply by bedsCount
-			const bedsMultiplier =
-				(roomTypeVal === "individualBed" && safeNumber(r.bedsCount || 1)) || 1;
-			const totalRooms = safeNumber(r.count) * bedsMultiplier;
-
-			if (!aggregatedRoomsMap[baseKey]) {
-				aggregatedRoomsMap[baseKey] = {
-					key: baseKey,
-					roomType: roomTypeVal,
-					displayName: displayNameVal,
-					label:
-						displayMode === "displayName"
-							? displayNameVal || roomTypeVal || "Room"
-							: roomTypeLabelMap[roomTypeVal] || roomTypeVal || "Room",
-					totalRooms,
-					color: r.roomColor || null,
-					rawRoomCount: safeNumber(r.count) || 0,
-					bedsCount: safeNumber(r.bedsCount) || 0,
-				};
-			} else {
-				aggregatedRoomsMap[baseKey].totalRooms += totalRooms;
-				aggregatedRoomsMap[baseKey].rawRoomCount += safeNumber(r.count) || 0;
-			}
-		}
-
-		const roomTypes = Object.values(aggregatedRoomsMap);
-
-		const totalRoomsAll = roomTypes.reduce(
-			(sum, rt) => sum + safeNumber(rt.totalRooms),
-			0
-		);
-		const totalPhysicalRooms = roomTypes.reduce(
-			(sum, rt) => sum + safeNumber(rt.rawRoomCount || 0),
-			0
-		);
-
-		// Build a lookup so we only count room types that exist on the hotel
-		const roomTotalsLookup = roomTypes.reduce(
-			(acc, rt) => ({ ...acc, [rt.key]: safeNumber(rt.totalRooms) }),
-			{}
-		);
-		const keyByRoomType = roomTypes.reduce((acc, rt) => {
-			if (rt.roomType) acc[rt.roomType] = rt.key;
-			return acc;
-		}, {});
-		const keyByDisplayName = roomTypes.reduce((acc, rt) => {
-			if (rt.displayName) acc[rt.displayName] = rt.key;
-			return acc;
-		}, {});
-
-		const baseQuery = {
-			hotelId: new ObjectId(hotelId),
-			checkin_date: { $lt: endExclusive },
-			checkout_date: { $gt: start },
-		};
+			(req.query.display === "roomType" && "roomType") || "displayName";
 
 		const includeCancelled =
 			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		if (!includeCancelled) {
-			baseQuery.reservation_status = {
-				$nin: ["cancelled", "no show", "no_show", "noshow"],
-			};
-		}
+		const paymentStatusFilter = parsePaymentStatusFilter(
+			req.query.paymentStatuses || req.query.paymentStatus
+		);
 
-		const reservations = await Reservations.find(baseQuery)
-			.select(
-				"checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details"
-			)
-			.lean();
-
-		const days = [];
-		for (let i = 0; i < daysInMonth; i++) {
-			const dateObj = new Date(start.getTime() + i * DAY_MS);
-			const isoDate = dateObj.toISOString().split("T")[0];
-			days.push({
-				date: isoDate,
-				...initDaySkeleton(roomTypes, totalRoomsAll),
-			});
-		}
-
-		const occupancyByType = roomTypes.reduce((acc, rt) => {
-			acc[rt.key] = {
-				label: rt.label,
-				occupiedNights: 0,
-				capacityNights: safeNumber(rt.totalRooms) * daysInMonth,
-				totalRooms: safeNumber(rt.totalRooms),
-				color: rt.color || null,
-			};
-			return acc;
-		}, {});
-
-		const oversellWarnings = [];
-		let totalAmount = 0;
-		const paymentBreakdown = {};
-
-		for (const reservation of reservations) {
-			if (
-				!reservation ||
-				!reservation.checkin_date ||
-				!reservation.checkout_date ||
-				!Array.isArray(reservation.pickedRoomsType)
-			) {
-				continue;
-			}
-
-			const payment = paymentMeta(reservation);
-			totalAmount += payment.totalAmount;
-			if (!paymentBreakdown[payment.status]) {
-				paymentBreakdown[payment.status] = {
-					status: payment.status,
-					label: payment.label,
-					count: 0,
-					totalAmount: 0,
-					paidAmount: 0,
-					onsitePaidAmount: 0,
-				};
-			}
-			paymentBreakdown[payment.status].count += 1;
-			paymentBreakdown[payment.status].totalAmount += payment.totalAmount;
-			paymentBreakdown[payment.status].paidAmount += payment.paidAmount;
-			paymentBreakdown[payment.status].onsitePaidAmount +=
-				payment.onsitePaidAmount;
-
-			const ci = new Date(reservation.checkin_date);
-			const co = new Date(reservation.checkout_date);
-
-			ci.setUTCHours(0, 0, 0, 0);
-			co.setUTCHours(0, 0, 0, 0);
-
-			const overlapStart = Math.max(ci.getTime(), start.getTime());
-			const overlapEnd = Math.min(co.getTime(), endExclusive.getTime());
-
-			if (overlapStart >= overlapEnd) continue; // no overlap with selected month
-
-			for (const room of reservation.pickedRoomsType) {
-				const rtVal = room?.room_type || room?.roomType;
-
-				let key =
-					displayMode === "displayName"
-						? keyByDisplayName[rtVal] || keyByRoomType[rtVal]
-						: keyByRoomType[rtVal] || keyByDisplayName[rtVal];
-
-				// Fallback: if nothing matched, try direct lookup
-				if (!key && roomTotalsLookup[rtVal]) key = rtVal;
-				if (!key || !roomTotalsLookup[key]) continue;
-
-				const count = safeNumber(room?.count) || 0;
-				for (let ts = overlapStart; ts < overlapEnd; ts += DAY_MS) {
-					const dayIndex = Math.floor((ts - start.getTime()) / DAY_MS);
-					const dayEntry = days[dayIndex];
-					if (!dayEntry) continue;
-
-					if (!dayEntry.rooms[key]) {
-						dayEntry.rooms[key] = {
-							booked: 0,
-							occupied: 0,
-							available: roomTotalsLookup[key],
-							occupancyRate: 0,
-							overbooked: false,
-						};
-					}
-
-					dayEntry.rooms[key].booked += count;
-				}
-			}
-		}
-
-		let soldRoomNights = 0;
-		let peakDay = { date: null, occupancyRate: 0, occupied: 0 };
-
-		days.forEach((day) => {
-			let dayOccupied = 0;
-
-			roomTypes.forEach((rt) => {
-				const cell = day.rooms[rt.key];
-				if (!cell) return;
-
-				const booked = safeNumber(cell.booked);
-				const capped = Math.min(booked, rt.totalRooms);
-
-				cell.occupied = capped;
-				cell.available = Math.max(rt.totalRooms - capped, 0);
-				cell.occupancyRate = rt.totalRooms > 0 ? capped / rt.totalRooms : 0;
-				cell.overbooked = booked > rt.totalRooms;
-
-				if (cell.overbooked) {
-					oversellWarnings.push({
-						date: day.date,
-						roomType: rt.key,
-						booked,
-						capacity: rt.totalRooms,
-					});
-				}
-
-				occupancyByType[rt.key].occupiedNights += capped;
-				dayOccupied += capped;
-			});
-
-			day.totals.occupied = dayOccupied;
-			day.totals.available = Math.max(totalRoomsAll - dayOccupied, 0);
-			day.totals.occupancyRate =
-				totalRoomsAll > 0 ? dayOccupied / totalRoomsAll : 0;
-
-			if (day.totals.occupancyRate > peakDay.occupancyRate) {
-				peakDay = {
-					date: day.date,
-					occupancyRate: day.totals.occupancyRate,
-					occupied: dayOccupied,
-				};
-			}
-
-			soldRoomNights += dayOccupied;
+		const result = await computeOccupancy({
+			hotelId,
+			start,
+			endExclusive,
+			daysInMonth,
+			label,
+			year,
+			monthIndex,
+			displayMode,
+			includeCancelled,
+			paymentStatusFilter,
 		});
 
-		const availableRoomNights = totalRoomsAll * daysInMonth;
-		const response = {
-			success: true,
-			hotel: { _id: hotel._id, hotelName: hotel.hotelName },
-			month: {
-				label,
-				year,
-				monthIndex,
-				start: start.toISOString(),
-				endExclusive: endExclusive.toISOString(),
-				daysInMonth,
-			},
-			roomTypes,
-			days,
-			summary: {
-				soldRoomNights,
-				availableRoomNights,
-				totalRoomsAll,
-				totalPhysicalRooms,
-				averageOccupancyRate:
-					availableRoomNights > 0 ? soldRoomNights / availableRoomNights : 0,
-				peakDay,
-				occupancyByType: Object.entries(occupancyByType).map(([key, val]) => ({
-					key,
-					...val,
-					label:
-						displayMode === "displayName"
-							? roomTypes.find((rt) => rt.key === key)?.label || val.label
-							: roomTypes.find((rt) => rt.key === key)?.label || val.label,
-					occupancyRate:
-						val.capacityNights > 0
-							? val.occupiedNights / val.capacityNights
-							: 0,
-				})),
-				totalRooms: totalRoomsAll,
-				warnings: oversellWarnings,
-				totalAmount,
-				paymentBreakdown: Object.values(paymentBreakdown).sort(
-					(a, b) => b.count - a.count
-				),
-			},
-			displayMode,
-		};
+		if (result?.error) {
+			return res
+				.status(result.error.code || 500)
+				.json({ success: false, message: result.error.message });
+		}
 
-		return res.json(response);
+		return res.json(result);
 	} catch (err) {
 		console.error("Error in hotelOccupancyCalendar:", err);
 		return res.status(500).json({
@@ -2276,15 +2723,21 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 	}
 };
 
-// Lightweight endpoint to return warnings detail only (re-uses same logic)
+// -------------------------------
+// Warnings endpoint (reuses same compute for exact parity)
+// -------------------------------
 exports.hotelOccupancyWarnings = async (req, res) => {
 	try {
+		setNoCacheHeaders(res);
+
 		const hotelId = req.query.hotelId;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res.status(400).json({
-				success: false,
-				message: "hotelId (Mongo ObjectId) is required",
-			});
+			return res
+				.status(400)
+				.json({
+					success: false,
+					message: "hotelId (Mongo ObjectId) is required",
+				});
 		}
 
 		const customRange = parseCustomRange(req.query.start, req.query.end);
@@ -2292,194 +2745,39 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 			customRange || parseMonthParam(req.query.month);
 
 		const displayMode =
-			(req.query.display === "displayName" && "displayName") || "roomType"; // default roomType
-
-		const hotel = await HotelDetails.findById(hotelId)
-			.select("hotelName roomCountDetails")
-			.lean();
-
-		if (!hotel) {
-			return res
-				.status(404)
-				.json({
-					success: false,
-					message: "Hotel not found for occupancy view",
-				});
-		}
-
-		const rawRooms = (hotel.roomCountDetails || []).filter(
-			(r) => r && safeNumber(r.count) > 0
-		);
-
-		const aggregatedRoomsMap = {};
-		for (const r of rawRooms) {
-			const roomTypeVal = r.roomType || r.room_type || "";
-			const displayNameVal = r.displayName || "";
-			const baseKey =
-				displayMode === "displayName"
-					? displayNameVal || roomTypeVal || String(r._id || "")
-					: roomTypeVal || String(r._id || "");
-
-			const bedsMultiplier =
-				(roomTypeVal === "individualBed" && safeNumber(r.bedsCount || 1)) || 1;
-			const totalRooms = safeNumber(r.count) * bedsMultiplier;
-
-			if (!aggregatedRoomsMap[baseKey]) {
-				aggregatedRoomsMap[baseKey] = {
-					key: baseKey,
-					roomType: roomTypeVal,
-					displayName: displayNameVal,
-					label:
-						displayMode === "displayName"
-							? displayNameVal || roomTypeVal || "Room"
-							: roomTypeLabelMap[roomTypeVal] || roomTypeVal || "Room",
-					totalRooms,
-				};
-			} else {
-				aggregatedRoomsMap[baseKey].totalRooms += totalRooms;
-			}
-		}
-
-		const roomTypes = Object.values(aggregatedRoomsMap);
-
-		const totalRoomsAll = roomTypes.reduce(
-			(sum, rt) => sum + safeNumber(rt.totalRooms),
-			0
-		);
-
-		const roomTotalsLookup = roomTypes.reduce(
-			(acc, rt) => ({ ...acc, [rt.key]: safeNumber(rt.totalRooms) }),
-			{}
-		);
-		const keyByRoomType = roomTypes.reduce((acc, rt) => {
-			if (rt.roomType) acc[rt.roomType] = rt.key;
-			return acc;
-		}, {});
-		const keyByDisplayName = roomTypes.reduce((acc, rt) => {
-			if (rt.displayName) acc[rt.displayName] = rt.key;
-			return acc;
-		}, {});
-
-		const baseQuery = {
-			hotelId: new ObjectId(hotelId),
-			checkin_date: { $lt: endExclusive },
-			checkout_date: { $gt: start },
-		};
+			(req.query.display === "roomType" && "roomType") || "displayName";
 
 		const includeCancelled =
 			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		if (!includeCancelled) {
-			baseQuery.reservation_status = {
-				$nin: ["cancelled", "no show", "no_show", "noshow"],
-			};
-		}
+		const paymentStatusFilter = parsePaymentStatusFilter(
+			req.query.paymentStatuses || req.query.paymentStatus
+		);
 
-		const reservations = await Reservations.find(baseQuery)
-			.select("checkin_date checkout_date pickedRoomsType reservation_status")
-			.lean();
-
-		const days = [];
-		for (let i = 0; i < daysInMonth; i++) {
-			const dateObj = new Date(start.getTime() + i * DAY_MS);
-			const isoDate = dateObj.toISOString().split("T")[0];
-			days.push({
-				date: isoDate,
-				...initDaySkeleton(roomTypes, totalRoomsAll),
-			});
-		}
-
-		const oversellWarnings = [];
-
-		for (const reservation of reservations) {
-			if (
-				!reservation ||
-				!reservation.checkin_date ||
-				!reservation.checkout_date ||
-				!Array.isArray(reservation.pickedRoomsType)
-			) {
-				continue;
-			}
-
-			const ci = new Date(reservation.checkin_date);
-			const co = new Date(reservation.checkout_date);
-
-			ci.setUTCHours(0, 0, 0, 0);
-			co.setUTCHours(0, 0, 0, 0);
-
-			const overlapStart = Math.max(ci.getTime(), start.getTime());
-			const overlapEnd = Math.min(co.getTime(), endExclusive.getTime());
-
-			if (overlapStart >= overlapEnd) continue;
-
-			for (const room of reservation.pickedRoomsType) {
-				const rtVal = room?.room_type || room?.roomType;
-
-				let key =
-					displayMode === "displayName"
-						? keyByDisplayName[rtVal] || keyByRoomType[rtVal]
-						: keyByRoomType[rtVal] || keyByDisplayName[rtVal];
-
-				if (!key && roomTotalsLookup[rtVal]) key = rtVal;
-				if (!key || !roomTotalsLookup[key]) continue;
-
-				const count = safeNumber(room?.count) || 0;
-				for (let ts = overlapStart; ts < overlapEnd; ts += DAY_MS) {
-					const dayIndex = Math.floor((ts - start.getTime()) / DAY_MS);
-					const dayEntry = days[dayIndex];
-					if (!dayEntry) continue;
-
-					if (!dayEntry.rooms[key]) {
-						dayEntry.rooms[key] = {
-							booked: 0,
-							occupied: 0,
-							available: roomTotalsLookup[key],
-							occupancyRate: 0,
-							overbooked: false,
-						};
-					}
-
-					dayEntry.rooms[key].booked += count;
-				}
-			}
-		}
-
-		days.forEach((day) => {
-			roomTypes.forEach((rt) => {
-				const cell = day.rooms[rt.key];
-				if (!cell) return;
-
-				const booked = safeNumber(cell.booked);
-				const capped = Math.min(booked, rt.totalRooms);
-
-				cell.occupied = capped;
-				cell.available = Math.max(rt.totalRooms - capped, 0);
-				cell.occupancyRate = rt.totalRooms > 0 ? capped / rt.totalRooms : 0;
-				cell.overbooked = booked > rt.totalRooms;
-
-				if (cell.overbooked) {
-					oversellWarnings.push({
-						date: day.date,
-						roomType: rt.label || rt.key,
-						booked,
-						capacity: rt.totalRooms,
-					});
-				}
-			});
+		const result = await computeOccupancy({
+			hotelId,
+			start,
+			endExclusive,
+			daysInMonth,
+			label,
+			year,
+			monthIndex,
+			displayMode,
+			includeCancelled,
+			paymentStatusFilter,
 		});
+
+		if (result?.error) {
+			return res
+				.status(result.error.code || 500)
+				.json({ success: false, message: result.error.message });
+		}
 
 		return res.json({
 			success: true,
-			hotel: { _id: hotel._id, hotelName: hotel.hotelName },
-			month: {
-				label,
-				year,
-				monthIndex,
-				start: start.toISOString(),
-				endExclusive: endExclusive.toISOString(),
-				daysInMonth,
-			},
-			warnings: oversellWarnings,
-			displayMode,
+			hotel: result.hotel,
+			month: result.month,
+			warnings: result?.summary?.warnings || [],
+			displayMode: result.displayMode,
 		});
 	} catch (err) {
 		console.error("Error in hotelOccupancyWarnings:", err);
@@ -2490,126 +2788,200 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 	}
 };
 
-// Detailed reservations for a specific day/room (used by day-over-day map modal)
+// -------------------------------
+// Day Reservations endpoint (supports derived keys too)
+// -------------------------------
 exports.hotelOccupancyDayReservations = async (req, res) => {
 	try {
+		setNoCacheHeaders(res);
+
 		const { hotelId, date, roomKey, roomLabel } = req.query;
+
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res.status(400).json({
-				success: false,
-				message: "hotelId (Mongo ObjectId) is required",
-			});
+			return res
+				.status(400)
+				.json({
+					success: false,
+					message: "hotelId (Mongo ObjectId) is required",
+				});
 		}
 		if (!date) {
-			return res.status(400).json({
-				success: false,
-				message: "date (YYYY-MM-DD) is required",
-			});
+			return res
+				.status(400)
+				.json({ success: false, message: "date (YYYY-MM-DD) is required" });
 		}
 
 		const dayStart = new Date(`${date}T00:00:00.000Z`);
 		if (Number.isNaN(dayStart.getTime())) {
-			return res.status(400).json({
-				success: false,
-				message: "date must be in YYYY-MM-DD format",
-			});
+			return res
+				.status(400)
+				.json({ success: false, message: "date must be in YYYY-MM-DD format" });
 		}
 		const dayEnd = new Date(dayStart.getTime() + DAY_MS);
 
 		const displayMode =
-			(req.query.display === "displayName" && "displayName") || "roomType";
+			(req.query.display === "roomType" && "roomType") || "displayName";
+		const includeCancelled =
+			String(req.query.includeCancelled || "").toLowerCase() === "true";
+		const paymentStatusFilter = parsePaymentStatusFilter(
+			req.query.paymentStatuses || req.query.paymentStatus
+		);
 
 		const hotel = await HotelDetails.findById(hotelId)
 			.select("hotelName roomCountDetails")
 			.lean();
-
 		if (!hotel) {
-			return res.status(404).json({
-				success: false,
-				message: "Hotel not found for occupancy view",
-			});
+			return res
+				.status(404)
+				.json({
+					success: false,
+					message: "Hotel not found for occupancy view",
+				});
 		}
 
-		const rawRooms = (hotel.roomCountDetails || []).filter(
-			(r) => r && safeNumber(r.count) > 0
+		const baseRoomTypes = buildBaseRoomTypes(
+			hotel.roomCountDetails || [],
+			displayMode
 		);
-
-		const aggregatedRoomsMap = {};
-		for (const r of rawRooms) {
-			const roomTypeVal = r.roomType || r.room_type || "";
-			const displayNameVal = r.displayName || "";
-			const baseKey =
-				displayMode === "displayName"
-					? displayNameVal || roomTypeVal || String(r._id || "")
-					: roomTypeVal || String(r._id || "");
-
-			const bedsMultiplier =
-				(roomTypeVal === "individualBed" && safeNumber(r.bedsCount || 1)) || 1;
-			const totalRooms = safeNumber(r.count) * bedsMultiplier;
-
-			if (!aggregatedRoomsMap[baseKey]) {
-				aggregatedRoomsMap[baseKey] = {
-					key: baseKey,
-					roomType: roomTypeVal,
-					displayName: displayNameVal,
-					label:
-						displayMode === "displayName"
-							? displayNameVal || roomTypeVal || "Room"
-							: roomTypeLabelMap[roomTypeVal] || roomTypeVal || "Room",
-					totalRooms,
-				};
-			} else {
-				aggregatedRoomsMap[baseKey].totalRooms += totalRooms;
-			}
-		}
-
-		const roomTypes = Object.values(aggregatedRoomsMap);
-		const roomTotalsLookup = roomTypes.reduce(
-			(acc, rt) => ({ ...acc, [rt.key]: safeNumber(rt.totalRooms) }),
-			{}
-		);
-		const keyByRoomType = roomTypes.reduce((acc, rt) => {
-			if (rt.roomType) acc[rt.roomType] = rt.key;
+		const baseTotalsLookup = baseRoomTypes.reduce((acc, rt) => {
+			acc[rt.key] = safeNumber(rt.totalRooms);
 			return acc;
 		}, {});
-		const keyByDisplayName = roomTypes.reduce((acc, rt) => {
-			if (rt.displayName) acc[rt.displayName] = rt.key;
-			return acc;
-		}, {});
-		const totalRoomsAll = roomTypes.reduce(
+		const baseTotalRoomsAll = baseRoomTypes.reduce(
 			(sum, rt) => sum + safeNumber(rt.totalRooms),
 			0
 		);
 
-		const roomLabelByKey = roomTypes.reduce((acc, rt) => {
-			acc[rt.key] = rt.label || rt.key;
-			return acc;
-		}, {});
+		// Build same resolver logic (displayName-first in displayName mode)
+		const roomTypeByKey = new Map();
+		const keyNormToKey = new Map();
+		const displayNormToKeys = new Map();
+		const roomTypeNormToKeys = new Map();
 
-		const targetRoom =
-			(roomKey &&
-				roomTypes.find((rt) => String(rt.key) === String(roomKey))) ||
-			(roomLabel && roomTypes.find((rt) => String(rt.label) === String(roomLabel)));
-		if (roomKey && !targetRoom) {
-			return res.status(404).json({
-				success: false,
-				message: "roomKey not found on selected hotel",
-			});
-		}
-
-		const baseQuery = {
-			hotelId: new ObjectId(hotelId),
-			checkin_date: { $lt: dayEnd },
-			checkout_date: { $gt: dayStart },
+		const addToSetMap = (map, k, val) => {
+			if (!k) return;
+			if (!map.has(k)) map.set(k, new Set());
+			map.get(k).add(val);
 		};
 
-		const includeCancelled =
-			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		if (!includeCancelled) {
-			baseQuery.reservation_status = {
-				$nin: ["cancelled", "no show", "no_show", "noshow"],
-			};
-		}
+		const indexRoomType = (rt) => {
+			roomTypeByKey.set(rt.key, rt);
+			const nk = normalizeRoomKeyLabel(rt.key);
+			if (nk) keyNormToKey.set(nk, rt.key);
+
+			const aliases = new Set(
+				[rt.displayName, rt.label, rt.key].filter(Boolean)
+			);
+			for (const a of aliases)
+				addToSetMap(displayNormToKeys, normalizeRoomKeyLabel(a), rt.key);
+
+			if (rt.roomType)
+				addToSetMap(
+					roomTypeNormToKeys,
+					normalizeRoomKeyLabel(rt.roomType),
+					rt.key
+				);
+		};
+
+		for (const rt of baseRoomTypes) indexRoomType(rt);
+
+		const pickFromSet = (set, raw) => {
+			if (!set || set.size === 0) return null;
+			if (set.size === 1) return Array.from(set)[0];
+			const rawLower = String(raw || "")
+				.trim()
+				.toLowerCase();
+			if (!rawLower) return Array.from(set)[0];
+
+			for (const key of set) {
+				const rt = roomTypeByKey.get(key);
+				if (!rt) continue;
+				for (const c of [rt.displayName, rt.label]) {
+					if (
+						String(c || "")
+							.trim()
+							.toLowerCase() === rawLower
+					)
+						return key;
+				}
+			}
+			return Array.from(set)[0];
+		};
+
+		const resolveRoomKey = (room = {}) => {
+			const rawKey = room?.key || room?.roomKey || "";
+			const rawRoomType = room?.room_type || room?.roomType || "";
+			const rawDisplay =
+				room?.displayName || room?.display_name || room?.label || "";
+
+			const nk = normalizeRoomKeyLabel(rawKey);
+			if (nk && keyNormToKey.has(nk)) return keyNormToKey.get(nk);
+
+			const nd = normalizeRoomKeyLabel(rawDisplay);
+			const nrt = normalizeRoomKeyLabel(rawRoomType);
+
+			if (displayMode === "displayName") {
+				if (nd) {
+					const set = displayNormToKeys.get(nd);
+					const picked = pickFromSet(set, rawDisplay);
+					if (picked) return picked;
+				}
+				if (nrt) {
+					const set = roomTypeNormToKeys.get(nrt);
+					if (set && set.size === 1) return Array.from(set)[0];
+				}
+				return null;
+			}
+
+			if (nrt) {
+				const set = roomTypeNormToKeys.get(nrt);
+				if (set && set.size) return Array.from(set)[0];
+			}
+			if (nd) {
+				const set = displayNormToKeys.get(nd);
+				const picked = pickFromSet(set, rawDisplay);
+				if (picked) return picked;
+			}
+			return null;
+		};
+
+		const deriveKeyFromRoom = (room = {}) => {
+			const rawRoomType = String(
+				room?.room_type || room?.roomType || ""
+			).trim();
+			const rawDisplay = String(
+				room?.displayName || room?.display_name || room?.label || ""
+			).trim();
+
+			const labelCandidate =
+				displayMode === "displayName"
+					? rawDisplay ||
+					  getRoomTypeLabel(rawRoomType) ||
+					  rawRoomType ||
+					  "Unknown Room"
+					: getRoomTypeLabel(rawRoomType) ||
+					  rawDisplay ||
+					  rawRoomType ||
+					  "Unknown Room";
+
+			let key = normalizeRoomKeyLabel(labelCandidate);
+			if (!key)
+				key =
+					normalizeRoomKeyLabel(rawDisplay) ||
+					normalizeRoomKeyLabel(rawRoomType);
+			if (!key) key = `unknown-room-${Math.random().toString(36).slice(2, 8)}`;
+
+			return { key, label: labelCandidate };
+		};
+
+		const targetKeyNorm = roomKey ? normalizeRoomKeyLabel(roomKey) : null;
+
+		const baseQuery = buildDayBaseQuery({
+			hotelId,
+			dayStart,
+			dayEnd,
+			includeCancelled,
+		});
 
 		const reservations = await Reservations.find(baseQuery)
 			.select(
@@ -2619,83 +2991,114 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			.lean();
 
 		const reservationsForDay = [];
-		let bookedForKey = 0;
+		let bookedForTarget = 0;
+
+		// track derived totals when roomKey is null (Total column)
+		let derivedBookedTotal = 0;
 
 		for (const reservation of reservations) {
 			if (!reservation || !Array.isArray(reservation.pickedRoomsType)) continue;
+
+			const pay = paymentMeta(reservation);
+			if (
+				paymentStatusFilter.size &&
+				!paymentStatusFilter.has(pay.normalizedStatus)
+			)
+				continue;
 
 			let matchedCount = 0;
 			const roomBreakdownMap = {};
 
 			for (const room of reservation.pickedRoomsType) {
-				const rtVal = room?.room_type || room?.roomType;
-				let key =
-					displayMode === "displayName"
-						? keyByDisplayName[rtVal] || keyByRoomType[rtVal]
-						: keyByRoomType[rtVal] || keyByDisplayName[rtVal];
+				if (!room) continue;
 
-				if (!key && roomTotalsLookup[rtVal]) key = rtVal;
-				if (!key) continue;
+				const resolved = resolveRoomKey(room);
+				const derived = deriveKeyFromRoom(room);
 
-				const labelFromKey =
-					room.displayName ||
-					roomLabelByKey[key] ||
-					roomTypeLabelMap[rtVal] ||
-					room.displayName ||
-					rtVal ||
-					key;
+				const effectiveKey = resolved || derived.key;
+				const effectiveLabel = resolved
+					? roomTypeByKey.get(resolved)?.label || derived.label
+					: derived.label;
 
-				const matchesRequestedRoom =
-					!roomKey && !roomLabel
-						? true
-						: key === roomKey ||
-						  labelFromKey === roomKey ||
-						  labelFromKey === roomLabel ||
-						  room.displayName === roomKey ||
-						  room.displayName === roomLabel;
-
-				if (!matchesRequestedRoom) continue;
-
-				const count = safeNumber(room?.count) || 0;
+				const count = safeNumber(room?.count);
 				if (!count) continue;
 
+				const matchesRequested = !targetKeyNorm
+					? true
+					: normalizeRoomKeyLabel(effectiveKey) === targetKeyNorm;
+
+				if (!matchesRequested) continue;
+
 				matchedCount += count;
-				if (!roomBreakdownMap[key]) {
-					roomBreakdownMap[key] = {
-						key,
-						label: labelFromKey,
+
+				if (!roomBreakdownMap[effectiveKey]) {
+					roomBreakdownMap[effectiveKey] = {
+						key: effectiveKey,
+						label: effectiveLabel,
 						count: 0,
 					};
 				}
-				roomBreakdownMap[key].count += count;
+				roomBreakdownMap[effectiveKey].count += count;
 			}
 
-			const roomBreakdown = Object.values(roomBreakdownMap);
-
 			if (matchedCount > 0) {
-				bookedForKey += matchedCount;
+				bookedForTarget += matchedCount;
+
+				const breakdown = Object.values(roomBreakdownMap);
+
 				reservationsForDay.push({
 					...reservation,
+					payment_status: pay.status,
+					payment_status_hint: pay.hint,
 					roomsForDay: matchedCount,
-					roomBreakdown,
+					roomBreakdown: breakdown,
 				});
 			}
 		}
 
-		const capacity = roomKey
-			? safeNumber(roomTotalsLookup[roomKey])
-			: totalRoomsAll;
+		// If total column (roomKey null), compute derivedBookedTotal from breakdown keys that are not in baseTotalsLookup
+		if (!targetKeyNorm) {
+			for (const resItem of reservationsForDay) {
+				for (const rb of resItem.roomBreakdown || []) {
+					if (!rb?.key) continue;
+					const k = String(rb.key);
+					if (!baseTotalsLookup[k]) {
+						derivedBookedTotal += safeNumber(rb.count);
+					}
+				}
+			}
+		}
+
+		let capacity = 0;
+		let labelOut = "All room types";
+
+		if (targetKeyNorm) {
+			// If key exists in hotel inventory -> use real capacity, else derived capacity = booked (1/1)
+			const exactKey = Object.keys(baseTotalsLookup).find(
+				(k) => normalizeRoomKeyLabel(k) === targetKeyNorm
+			);
+			if (exactKey) {
+				capacity = safeNumber(baseTotalsLookup[exactKey]);
+				labelOut = roomTypeByKey.get(exactKey)?.label || roomLabel || exactKey;
+			} else {
+				capacity = bookedForTarget;
+				labelOut = roomLabel || roomKey || "Derived room";
+			}
+		} else {
+			// Total capacity = base inventory + derived booked (derived capacity=booked)
+			capacity = baseTotalRoomsAll + derivedBookedTotal;
+		}
 
 		return res.json({
 			success: true,
 			hotel: { _id: hotel._id, hotelName: hotel.hotelName },
-			date: dayStart.toISOString().split("T")[0],
+			date: dayStart.toISOString().slice(0, 10),
 			roomKey: roomKey || null,
-			roomLabel: targetRoom?.label || targetRoom?.key || "All room types",
+			roomLabel: labelOut,
 			capacity,
-			booked: bookedForKey,
-			overbooked: bookedForKey > capacity,
-			overage: Math.max(bookedForKey - capacity, 0),
+			booked: bookedForTarget,
+			overbooked: bookedForTarget > capacity,
+			overage: Math.max(bookedForTarget - capacity, 0),
 			displayMode,
 			reservations: reservationsForDay,
 		});

@@ -11,14 +11,11 @@ const socketIo = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
-// Edit Pricing
-// Date range is not being adjusted pop up is not showing
-// Order taker order taking as errors and not consistent
-// Nick name in order taker and it should be searchable.
-// Confirmation number for from other platforms (airbnb) should be searchable
-// OrderDetails format Dec 27, 2025 and the nights and days count should be on the same line.
-// Make a tacket like excel.
-// Mongo
+// Phone 1 and Phone 2 in customer_details
+// Hotel occupancy data is not accurate
+// url query params when openning modals has to be working even when refreshing the page.
+// Reservation Status from the map
+
 mongoose.set("strictQuery", false);
 mongoose
 	.connect(process.env.DATABASE, {
