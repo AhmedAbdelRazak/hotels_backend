@@ -2673,12 +2673,10 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 
 		const hotelId = req.query.hotelId;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res
-				.status(400)
-				.json({
-					success: false,
-					message: "hotelId (Mongo ObjectId) is required",
-				});
+			return res.status(400).json({
+				success: false,
+				message: "hotelId (Mongo ObjectId) is required",
+			});
 		}
 
 		const customRange = parseCustomRange(req.query.start, req.query.end);
@@ -2732,12 +2730,10 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 
 		const hotelId = req.query.hotelId;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res
-				.status(400)
-				.json({
-					success: false,
-					message: "hotelId (Mongo ObjectId) is required",
-				});
+			return res.status(400).json({
+				success: false,
+				message: "hotelId (Mongo ObjectId) is required",
+			});
 		}
 
 		const customRange = parseCustomRange(req.query.start, req.query.end);
@@ -2798,12 +2794,10 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 		const { hotelId, date, roomKey, roomLabel } = req.query;
 
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
-			return res
-				.status(400)
-				.json({
-					success: false,
-					message: "hotelId (Mongo ObjectId) is required",
-				});
+			return res.status(400).json({
+				success: false,
+				message: "hotelId (Mongo ObjectId) is required",
+			});
 		}
 		if (!date) {
 			return res
@@ -2831,12 +2825,10 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			.select("hotelName roomCountDetails")
 			.lean();
 		if (!hotel) {
-			return res
-				.status(404)
-				.json({
-					success: false,
-					message: "Hotel not found for occupancy view",
-				});
+			return res.status(404).json({
+				success: false,
+				message: "Hotel not found for occupancy view",
+			});
 		}
 
 		const baseRoomTypes = buildBaseRoomTypes(
