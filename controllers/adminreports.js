@@ -5,6 +5,7 @@ const moment = require("moment-timezone");
 const ObjectId = mongoose.Types.ObjectId;
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
+const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
 
 /* ------------------------------------------------------------------
    1) Payment Status Helper
@@ -103,7 +104,6 @@ function computeReservationCommission(reservation) {
       - If `?excludeCancelled=true`, filter out cancelled reservations
    ------------------------------------------------------------------ */
 async function findFilteredReservations(req) {
-	const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 	const baseFilter = {
 		createdAt: { $gte: PAGE_START_DATE_UTC },
 	};
@@ -2295,6 +2295,7 @@ function paymentMeta(reservation = {}) {
 	const pmt = String(reservation?.payment || "")
 		.toLowerCase()
 		.trim();
+	const isCardPayment = /\bcredit\b|\bdebit\b/.test(pmt);
 
 	const legacyCaptured = !!reservation?.payment_details?.captured;
 
@@ -2328,7 +2329,8 @@ function paymentMeta(reservation = {}) {
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
-		pmt === "paid online";
+		pmt === "paid online" ||
+		isCardPayment;
 
 	const isNotPaid = pmt === "not paid" && !isCaptured && !payOffline;
 
@@ -2362,6 +2364,200 @@ function paymentMeta(reservation = {}) {
 		hint,
 	};
 }
+
+const PAYMENT_STATUS_ORDER = [
+	"Captured",
+	"Paid Offline",
+	"Not Captured",
+	"Not Paid",
+];
+
+function buildBookingSourcePaymentSummary(
+	reservations = [],
+	paymentStatusFilter = new Set()
+) {
+	const rowsMap = new Map();
+	const columnTotals = {};
+	const statusSet = new Set(PAYMENT_STATUS_ORDER);
+	let overallTotal = 0;
+
+	for (const status of PAYMENT_STATUS_ORDER) {
+		columnTotals[status] = 0;
+	}
+
+	for (const reservation of reservations) {
+		if (!reservation) continue;
+
+		const pay = paymentMeta(reservation);
+		if (paymentStatusFilter.size && !paymentStatusFilter.has(pay.normalizedStatus))
+			continue;
+
+		const bookingSource =
+			String(reservation?.booking_source || "").trim() || "Unknown";
+		const amount = safeNumber(pay.totalAmount);
+
+		if (!rowsMap.has(bookingSource)) {
+			rowsMap.set(bookingSource, {
+				booking_source: bookingSource,
+				totalsByStatus: {},
+				rowTotal: 0,
+			});
+		}
+
+		const row = rowsMap.get(bookingSource);
+		row.totalsByStatus[pay.status] =
+			safeNumber(row.totalsByStatus[pay.status]) + amount;
+		row.rowTotal = safeNumber(row.rowTotal) + amount;
+
+		if (columnTotals[pay.status] == null) columnTotals[pay.status] = 0;
+		columnTotals[pay.status] += amount;
+		overallTotal += amount;
+		statusSet.add(pay.status);
+	}
+
+	const statuses = [
+		...PAYMENT_STATUS_ORDER,
+		...Array.from(statusSet).filter(
+			(status) => !PAYMENT_STATUS_ORDER.includes(status)
+		),
+	];
+
+	const rows = Array.from(rowsMap.values())
+		.map((row) => {
+			statuses.forEach((status) => {
+				if (row.totalsByStatus[status] == null) {
+					row.totalsByStatus[status] = 0;
+				}
+			});
+			return row;
+		})
+		.sort((a, b) => {
+			const diff = safeNumber(b.rowTotal) - safeNumber(a.rowTotal);
+			if (diff !== 0) return diff;
+			return String(a.booking_source || "").localeCompare(
+				String(b.booking_source || ""),
+				undefined,
+				{ sensitivity: "base" }
+			);
+		});
+
+	statuses.forEach((status) => {
+		if (columnTotals[status] == null) columnTotals[status] = 0;
+	});
+
+	return {
+		statuses,
+		rows,
+		columnTotals,
+		overallTotal,
+		currency: "SAR",
+	};
+}
+
+async function resolveHotelIdsByNames(hotelsParam) {
+	if (!hotelsParam || hotelsParam === "all") return [];
+	const names = String(hotelsParam)
+		.split(",")
+		.map((name) => name.trim())
+		.filter(Boolean);
+	if (!names.length) return [];
+	const regexArr = names.map((name) => new RegExp(`^${name}$`, "i"));
+	const matchedHotels = await HotelDetails.find(
+		{ hotelName: { $in: regexArr } },
+		{ _id: 1 }
+	).lean();
+	return matchedHotels.map((h) => h._id);
+}
+
+exports.bookingSourcePaymentSummary = async (req, res) => {
+	try {
+		const {
+			hotelId,
+			hotels,
+			month,
+			start,
+			end,
+			includeCancelled,
+			excludeCancelled,
+			paymentStatuses,
+		} = req.query || {};
+
+		let resolvedHotelId = null;
+		if (hotelId && hotelId !== "all") {
+			if (!ObjectId.isValid(hotelId)) {
+				return res.status(400).json({
+					success: false,
+					message: "Invalid hotelId",
+				});
+			}
+			resolvedHotelId = new ObjectId(hotelId);
+		}
+
+		let hotelIds = [];
+		if (!resolvedHotelId && hotels && hotels !== "all") {
+			hotelIds = await resolveHotelIdsByNames(hotels);
+			if (!hotelIds.length) {
+				return res.json({
+					success: true,
+					data: buildBookingSourcePaymentSummary([], new Set()),
+				});
+			}
+		}
+
+		const range =
+			parseCustomRange(start, end) || (month ? parseMonthParam(month) : null);
+
+		const query = {};
+		if (resolvedHotelId) {
+			query.hotelId = resolvedHotelId;
+		} else if (hotelIds.length) {
+			query.hotelId = { $in: hotelIds };
+		}
+
+		const includeCancelledFlag =
+			String(includeCancelled || "").toLowerCase() === "true";
+		const excludeCancelledFlag =
+			String(excludeCancelled || "").toLowerCase() === "true";
+
+		if (!includeCancelledFlag) {
+			const excludedStatuses = excludeCancelledFlag
+				? ["cancelled"]
+				: ["cancelled", "no show", "no_show", "noshow"];
+			query.reservation_status = { $nin: excludedStatuses };
+		}
+
+		if (range?.start && range?.endExclusive) {
+			query.checkin_date = { $lt: range.endExclusive };
+			query.checkout_date = { $gt: range.start };
+		} else {
+			query.createdAt = { $gte: PAGE_START_DATE_UTC };
+		}
+
+		const reservations = await Reservations.find(query)
+			.select(
+				"booking_source total_amount payment payment_details paypal_details confirmation_number reservation_status"
+			)
+			.lean();
+
+		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
+		const summary = buildBookingSourcePaymentSummary(
+			reservations,
+			paymentStatusFilter
+		);
+
+		return res.json({
+			success: true,
+			data: summary,
+			range: range?.label || null,
+		});
+	} catch (err) {
+		console.error("Error in bookingSourcePaymentSummary:", err);
+		return res.status(500).json({
+			success: false,
+			message: err.message || "Failed to build booking source summary",
+		});
+	}
+};
 
 function buildReservationBaseQuery({
 	hotelId,

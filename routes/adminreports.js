@@ -18,6 +18,7 @@ const {
 	topHotelsByReservations,
 	specificListOfReservations,
 	exportToExcel,
+	bookingSourcePaymentSummary,
 	adminDashboardReport,
 	hotelOccupancyCalendar,
 	hotelOccupancyWarnings,
@@ -120,6 +121,14 @@ router.get(
 	isAuth,
 	isAdmin,
 	exportToExcel
+);
+
+router.get(
+	"/adminreports/booking-source-payment-summary/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	bookingSourcePaymentSummary
 );
 
 router.get(
