@@ -1195,6 +1195,127 @@ exports.removeDuplicates_ConfirmationNumber = async (req, res) => {
 	}
 };
 
+const normalizeDisplayName = (value) => {
+	if (value === null || value === undefined) return "";
+	return String(value).trim();
+};
+
+exports.syncReservationRoomTypesByDisplayName = async (req, res) => {
+	try {
+		const { hotelId, dryRun } = req.query;
+		const isDryRun = String(dryRun).toLowerCase() === "true";
+		const hotelFilter = {};
+		const reservationFilter = {};
+
+		if (hotelId) {
+			if (!ObjectId.isValid(hotelId)) {
+				return res.status(400).json({ error: "Invalid hotelId" });
+			}
+			const parsedHotelId = new ObjectId(hotelId);
+			hotelFilter._id = parsedHotelId;
+			reservationFilter.hotelId = parsedHotelId;
+		}
+
+		const hotels = await HotelDetails.find(hotelFilter)
+			.select("_id roomCountDetails.roomType roomCountDetails.displayName")
+			.lean();
+
+		if (!hotels.length) {
+			return res.status(404).json({ error: "No hotels found to process" });
+		}
+
+		const roomTypeMapByHotel = new Map();
+		const duplicateDisplayNames = {};
+
+		hotels.forEach((hotel) => {
+			const displayNameMap = new Map();
+			const duplicates = new Set();
+			(hotel.roomCountDetails || []).forEach((room) => {
+				const displayName = normalizeDisplayName(room?.displayName);
+				const roomType = room?.roomType;
+				if (!displayName || !roomType) return;
+				if (displayNameMap.has(displayName)) {
+					if (displayNameMap.get(displayName) !== roomType) {
+						duplicates.add(displayName);
+					}
+					return;
+				}
+				displayNameMap.set(displayName, roomType);
+			});
+
+			if (duplicates.size > 0) {
+				duplicateDisplayNames[String(hotel._id)] = Array.from(duplicates);
+			}
+
+			roomTypeMapByHotel.set(String(hotel._id), displayNameMap);
+		});
+
+		const reservations = await Reservations.find(reservationFilter)
+			.select("_id hotelId pickedRoomsType")
+			.lean();
+
+		let reservationsScanned = 0;
+		let reservationsUpdated = 0;
+		let roomsUpdated = 0;
+		const bulkOps = [];
+
+		reservations.forEach((reservation) => {
+			reservationsScanned += 1;
+			const hotelKey = String(reservation.hotelId || "");
+			const displayNameMap = roomTypeMapByHotel.get(hotelKey);
+			if (!displayNameMap || !Array.isArray(reservation.pickedRoomsType)) {
+				return;
+			}
+
+			let changed = false;
+			const updatedRooms = reservation.pickedRoomsType.map((room) => {
+				const displayName = normalizeDisplayName(
+					room?.displayName || room?.display_name
+				);
+				if (!displayName) return room;
+
+				const expectedRoomType = displayNameMap.get(displayName);
+				if (!expectedRoomType || expectedRoomType === room?.room_type) {
+					return room;
+				}
+
+				roomsUpdated += 1;
+				changed = true;
+				return { ...room, room_type: expectedRoomType };
+			});
+
+			if (!changed) return;
+
+			reservationsUpdated += 1;
+			if (isDryRun) return;
+
+			bulkOps.push({
+				updateOne: {
+					filter: { _id: reservation._id },
+					update: { $set: { pickedRoomsType: updatedRooms } },
+				},
+			});
+		});
+
+		if (!isDryRun && bulkOps.length) {
+			await Reservations.bulkWrite(bulkOps);
+		}
+
+		return res.json({
+			success: true,
+			dryRun: isDryRun,
+			hotelsProcessed: hotels.length,
+			reservationsScanned,
+			reservationsUpdated,
+			roomsUpdated,
+			duplicateDisplayNames,
+		});
+	} catch (error) {
+		console.error("Error syncing reservation room types:", error);
+		return res.status(500).json({ error: "Internal Server Error" });
+	}
+};
+
 exports.singleReservation = (req, res) => {
 	const token = process.env.HOTEL_RUNNER_TOKEN;
 	const hrId = process.env.HR_ID;
@@ -1445,7 +1566,8 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
-		const updateData = req.body;
+		const updateData = req.body || {};
+		const normalizedUpdateData = { ...updateData };
 
 		console.log(
 			`[UPDATE RESERVATION] Received update for ID: ${reservationId}`
@@ -1459,18 +1581,18 @@ exports.updateReservation = async (req, res) => {
 
 		// 2️⃣ Validate total_amount if provided
 		if (
-			updateData.total_amount &&
-			typeof updateData.total_amount !== "number"
+			normalizedUpdateData.total_amount &&
+			typeof normalizedUpdateData.total_amount !== "number"
 		) {
 			return res.status(400).json({ error: "Invalid total amount format" });
 		}
 
 		// 3️⃣ Validate belongsTo (convert empty string to undefined)
 		if (
-			!updateData.belongsTo ||
-			!mongoose.Types.ObjectId.isValid(updateData.belongsTo)
+			!normalizedUpdateData.belongsTo ||
+			!mongoose.Types.ObjectId.isValid(normalizedUpdateData.belongsTo)
 		) {
-			updateData.belongsTo = undefined;
+			delete normalizedUpdateData.belongsTo;
 		}
 
 		// 4️⃣ Fetch existing reservation for comparison
@@ -1481,8 +1603,9 @@ exports.updateReservation = async (req, res) => {
 
 		// 5️⃣ Intelligent '_relocate' Increment if hotelId has changed
 		if (
-			updateData.hotelId &&
-			existingReservation.hotelId.toString() !== updateData.hotelId.toString()
+			normalizedUpdateData.hotelId &&
+			existingReservation.hotelId.toString() !==
+				normalizedUpdateData.hotelId.toString()
 		) {
 			const relocatePattern = /_relocate(\d*)$/;
 			const match =
@@ -1490,38 +1613,105 @@ exports.updateReservation = async (req, res) => {
 
 			if (match) {
 				const count = match[1] ? parseInt(match[1], 10) + 1 : 2;
-				updateData.confirmation_number =
+				normalizedUpdateData.confirmation_number =
 					existingReservation.confirmation_number.replace(
 						relocatePattern,
 						`_relocate${count}`
 					);
 			} else {
-				updateData.confirmation_number = `${existingReservation.confirmation_number}_relocate`;
+				normalizedUpdateData.confirmation_number = `${existingReservation.confirmation_number}_relocate`;
 			}
 
 			console.log(
-				`[RELOCATION] Confirmation number updated to: ${updateData.confirmation_number}`
+				`[RELOCATION] Confirmation number updated to: ${normalizedUpdateData.confirmation_number}`
 			);
 		} else {
-			updateData.confirmation_number = existingReservation.confirmation_number;
+			normalizedUpdateData.confirmation_number =
+				existingReservation.confirmation_number;
 		}
 
 		// 6️⃣ Prepare nested fields for update using dot notation
-		const updatePayload = {
-			...updateData,
-			"customer_details.name": updateData.customerDetails?.name,
-			"customer_details.email": updateData.customerDetails?.email,
-			"customer_details.phone": updateData.customerDetails?.phone,
-			"customer_details.nickName": updateData.customerDetails?.nickName,
-			"customer_details.confirmation_number2":
-				updateData.customerDetails?.confirmation_number2,
-			"customer_details.passport": updateData.customerDetails?.passport,
-			"customer_details.passportExpiry":
-				updateData.customerDetails?.passportExpiry,
-			"customer_details.nationality": updateData.customerDetails?.nationality,
-			"customer_details.postalCode": updateData.customerDetails?.postalCode,
-			"customer_details.reservedBy": updateData.customerDetails?.reservedBy,
+		const customerDetails =
+			normalizedUpdateData.customer_details ||
+			normalizedUpdateData.customerDetails ||
+			null;
+
+		if (normalizedUpdateData.customer_details) {
+			delete normalizedUpdateData.customer_details;
+		}
+		if (normalizedUpdateData.customerDetails) {
+			delete normalizedUpdateData.customerDetails;
+		}
+
+		const hasPricingDetails = (rooms) => {
+			if (!Array.isArray(rooms) || rooms.length === 0) return false;
+			return rooms.every(
+				(room) =>
+					Array.isArray(room?.pricingByDay) &&
+					room.pricingByDay.length > 0 &&
+					room.pricingByDay.some(
+						(day) =>
+							day &&
+							(day.rootPrice !== undefined ||
+								day.totalPriceWithCommission !== undefined ||
+								day.totalPriceWithoutCommission !== undefined)
+					)
+			);
 		};
+
+		if (
+			Array.isArray(normalizedUpdateData.pickedRoomsType) &&
+			normalizedUpdateData.pickedRoomsType.length > 0 &&
+			!hasPricingDetails(normalizedUpdateData.pickedRoomsType)
+		) {
+			normalizedUpdateData.pickedRoomsType =
+				existingReservation.pickedRoomsType;
+		}
+
+		if (
+			Array.isArray(normalizedUpdateData.pickedRoomsType) &&
+			normalizedUpdateData.pickedRoomsType.length === 0 &&
+			Array.isArray(existingReservation.pickedRoomsType) &&
+			existingReservation.pickedRoomsType.length > 0
+		) {
+			normalizedUpdateData.pickedRoomsType =
+				existingReservation.pickedRoomsType;
+		}
+
+		if (
+			Array.isArray(normalizedUpdateData.pickedRoomsPricing) &&
+			normalizedUpdateData.pickedRoomsPricing.length > 0 &&
+			!hasPricingDetails(normalizedUpdateData.pickedRoomsPricing)
+		) {
+			normalizedUpdateData.pickedRoomsPricing =
+				existingReservation.pickedRoomsPricing;
+		}
+
+		if (
+			Array.isArray(normalizedUpdateData.pickedRoomsPricing) &&
+			normalizedUpdateData.pickedRoomsPricing.length === 0 &&
+			Array.isArray(existingReservation.pickedRoomsPricing) &&
+			existingReservation.pickedRoomsPricing.length > 0
+		) {
+			normalizedUpdateData.pickedRoomsPricing =
+				existingReservation.pickedRoomsPricing;
+		}
+
+		const updatePayload = {
+			...normalizedUpdateData,
+		};
+
+		if (customerDetails) {
+			const existingCustomerDetails =
+				typeof existingReservation.customer_details?.toObject === "function"
+					? existingReservation.customer_details.toObject()
+					: existingReservation.customer_details || {};
+
+			updatePayload.customer_details = {
+				...existingCustomerDetails,
+				...customerDetails,
+			};
+		}
 
 		// 7️⃣ Update reservation
 		const updatedReservation = await Reservations.findByIdAndUpdate(
@@ -1536,16 +1726,16 @@ exports.updateReservation = async (req, res) => {
 
 		// 8️⃣ Handle "InHouse" status updates
 		if (
-			updateData.reservation_status &&
+			normalizedUpdateData.reservation_status &&
 			["inhouse", "InHouse"].includes(
-				updateData.reservation_status.toLowerCase()
+				normalizedUpdateData.reservation_status.toLowerCase()
 			) &&
-			Array.isArray(updateData.roomId) &&
-			updateData.roomId.length > 0
+			Array.isArray(normalizedUpdateData.roomId) &&
+			normalizedUpdateData.roomId.length > 0
 		) {
 			try {
 				await Rooms.updateMany(
-					{ _id: { $in: updateData.roomId } },
+					{ _id: { $in: normalizedUpdateData.roomId } },
 					{ $set: { cleanRoom: false } }
 				);
 				console.log("[ROOM STATUS] Rooms marked as not clean.");

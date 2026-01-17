@@ -47,6 +47,7 @@ const {
 	ownerReservationToDate,
 	CollectedReservations,
 	aggregateCollectedReservations,
+	syncReservationRoomTypesByDisplayName,
 } = require("../controllers/reservations");
 
 router.post("/reservations/create/:userId/:hotelId", requireSignin, create);
@@ -85,6 +86,10 @@ router.get("/reservations/search/:searchQuery/:accountId", reservationSearch);
 router.get(
 	"/reservations/remove-duplicates",
 	removeDuplicates_ConfirmationNumber
+);
+router.post(
+	"/reservations/sync-room-types-by-display-name",
+	syncReservationRoomTypesByDisplayName
 );
 
 router.get(

@@ -1644,13 +1644,20 @@ exports.adminDashboardReport = async (req, res) => {
 			{ $sort: { revenue: -1 } },
 		];
 		const roomTypesAgg = await safeAggregate(pipelineRoomTypes);
+		const resolveRoomTypeLabel = (value) => {
+			if (value === null || value === undefined || value === "") {
+				return "Unspecified";
+			}
+			const key = String(value);
+			return roomTypeLabelMap[key] || key;
+		};
 		const roomNightsByType = roomTypesAgg.map((rta) => ({
-			type: roomTypeLabelMap[rta?._id] || rta?._id,
+			type: resolveRoomTypeLabel(rta?._id),
 			value: rta?.nights || 0,
 			fillColor: "#E74C3C",
 		}));
 		const roomRevenueByType = roomTypesAgg.map((rta) => ({
-			type: roomTypeLabelMap[rta?._id] || rta?._id,
+			type: resolveRoomTypeLabel(rta?._id),
 			value: rta?.revenue || 0,
 			fillColor: "#FF7373",
 		}));
