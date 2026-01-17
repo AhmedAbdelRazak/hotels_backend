@@ -1,7 +1,10 @@
-﻿const Reservations = require("../models/reservations");
+const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
+const moment = require("moment-timezone");
 const ObjectId = mongoose.Types.ObjectId;
+
+const DEFAULT_TIMEZONE = "Asia/Riyadh";
 
 /* ------------------------------------------------------------------
    1) Payment Status Helper
@@ -1146,15 +1149,11 @@ function tryConvertToObjectId(value) {
 }
 
 // Helper to check if two dates are the same day (robust to non-Date input)
-function isSameDay(date1, date2) {
+function isSameDay(date1, date2, timezone = DEFAULT_TIMEZONE) {
 	if (!date1 || !date2) return false;
-	const d1 = date1 instanceof Date ? date1 : new Date(date1);
-	const d2 = date2 instanceof Date ? date2 : new Date(date2);
-	return (
-		d1.getFullYear() === d2.getFullYear() &&
-		d1.getMonth() === d2.getMonth() &&
-		d1.getDate() === d2.getDate()
-	);
+	const d1 = moment.tz(date1, timezone);
+	const d2 = moment.tz(date2, timezone);
+	return d1.isSame(d2, "day");
 }
 
 // Always provide a full empty report so the frontend can render a zero-state
@@ -1198,11 +1197,8 @@ function makeEmptyReport() {
 // -------------------------------
 exports.adminDashboardReport = async (req, res) => {
 	try {
-		// 1) Base filter (booking_source + createdAt >= 2024-09-01)
-		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
-		const baseFilter = {
-			createdAt: { $gte: PAGE_START_DATE_UTC },
-		};
+		// 1) Base filter (hotel scope only for accuracy across all dates)
+		const baseFilter = {};
 		console.log("Admin Dashboard Report Data:");
 
 		// 2) Optional hotelId param => /admin-dashboard-reports/:hotelId
@@ -1219,6 +1215,43 @@ exports.adminDashboardReport = async (req, res) => {
 			}
 			baseFilter.hotelId = objId;
 		}
+
+		const displayMode = "displayName";
+		const cancelledRegex = /cancelled|canceled/i;
+		const noShowRegex = /no[_\s]?show/i;
+		const excludedStatusRegex = /cancelled|canceled|no[_\s]?show/i;
+		const inHouseRegex = /in\s?house/i;
+		const checkoutRegex =
+			/checked[_-]?out|checkedout|completed|closed|early[_\s-]?checked[_\s-]?out/i;
+		const activeStatusFilter = { $not: excludedStatusRegex };
+
+		const toNumber = (value, fallback = 0) => {
+			const parsed = Number(value);
+			return Number.isFinite(parsed) ? parsed : fallback;
+		};
+
+		const getReservationUnits = (room, reservation) => {
+			const roomType = String(room?.room_type || room?.roomType || "").trim();
+			if (
+				roomType === "individualBed" &&
+				Array.isArray(reservation?.bedNumber) &&
+				reservation.bedNumber.length > 0
+			) {
+				return reservation.bedNumber.length;
+			}
+
+			const countVal = toNumber(room?.count, 0);
+			return countVal > 0 ? countVal : 1;
+		};
+
+		const getRoomDisplayName = (room) => {
+			const displayName =
+				room?.displayName || room?.display_name || room?.label || "";
+			return String(displayName || "").trim();
+		};
+
+		const statusNotExcluded = { reservation_status: activeStatusFilter };
+		const statusNotCheckout = { reservation_status: { $not: checkoutRegex } };
 
 		// Helper to merge baseFilter + condition
 		const withBaseFilter = (cond) => ({ $and: [baseFilter, cond] });
@@ -1273,80 +1306,80 @@ exports.adminDashboardReport = async (req, res) => {
 				data: makeEmptyReport(),
 			});
 		}
-
-		// 4) Define â€œtodayâ€
-		const now = new Date();
-		const startOfToday = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate(),
-			0,
-			0,
-			0,
-			0
-		);
-		const endOfToday = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate(),
-			23,
-			59,
-			59,
-			999
-		);
+		// 4) Define "today" using hotel timezone (default: Asia/Riyadh)
+		const timezone = DEFAULT_TIMEZONE;
+		const nowMoment = moment.tz(timezone);
+		const now = nowMoment.toDate();
+		const startOfToday = nowMoment.clone().startOf("day").toDate();
+		const endOfToday = nowMoment.clone().endOf("day").toDate();
 
 		// We'll do 10 days after "today" (inclusive of today: 0..9)
-		const endOf10Days = new Date(startOfToday);
-		endOf10Days.setDate(endOf10Days.getDate() + 9);
+		const endOf10Days = nowMoment
+			.clone()
+			.startOf("day")
+			.add(9, "days")
+			.endOf("day")
+			.toDate();
 
 		// ============== FIRST ROW ==============
 		const arrivalsCount = await safeCount({
 			checkin_date: { $gte: startOfToday, $lte: endOfToday },
-			reservation_status: { $ne: "cancelled" },
+			...statusNotExcluded,
 		});
 
 		const departuresCount = await safeCount({
 			checkout_date: { $gte: startOfToday, $lte: endOfToday },
-			reservation_status: { $ne: "cancelled" },
+			...statusNotExcluded,
 		});
 
 		const inHouseCount = await safeCount({
-			checkin_date: { $lte: endOfToday },
-			checkout_date: { $gt: startOfToday },
-			reservation_status: { $ne: "cancelled" },
+			$and: [
+				{ checkin_date: { $lte: endOfToday } },
+				{ checkout_date: { $gt: startOfToday } },
+				statusNotExcluded,
+				statusNotCheckout,
+			],
 		});
 
 		const bookingsTodayCount = await safeCount({
-			createdAt: { $gte: startOfToday, $lte: endOfToday },
-			reservation_status: { $ne: "cancelled" },
+			$and: [
+				statusNotExcluded,
+				{
+					$expr: {
+						$and: [
+							{
+								$gte: [
+									{ $ifNull: ["$booked_at", "$createdAt"] },
+									startOfToday,
+								],
+							},
+							{
+								$lte: [{ $ifNull: ["$booked_at", "$createdAt"] }, endOfToday],
+							},
+						],
+					},
+				},
+			],
 		});
 
 		const overAllBookingsCount = await safeCount({
-			reservation_status: { $ne: "cancelled" },
+			$and: [statusNotExcluded, statusNotCheckout],
 		});
 
-		const tomorrowStart = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate() + 1,
-			0,
-			0,
-			0,
-			0
-		);
-		const tomorrowEnd = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate() + 1,
-			23,
-			59,
-			59,
-			999
-		);
+		const tomorrowStart = nowMoment
+			.clone()
+			.add(1, "day")
+			.startOf("day")
+			.toDate();
+		const tomorrowEnd = nowMoment
+			.clone()
+			.add(1, "day")
+			.endOf("day")
+			.toDate();
 
 		const tomorrowArrivalsCount = await safeCount({
 			checkin_date: { $gte: tomorrowStart, $lte: tomorrowEnd },
-			reservation_status: { $ne: "cancelled" },
+			...statusNotExcluded,
 		});
 
 		const firstRow = {
@@ -1360,16 +1393,16 @@ exports.adminDashboardReport = async (req, res) => {
 
 		// ============== SECOND ROW ==============
 		const cancellationsCount = await safeCount({
-			reservation_status: "cancelled",
+			reservation_status: cancelledRegex,
 			updatedAt: { $gte: startOfToday, $lte: endOfToday },
 		});
 
 		const noShowCount = await safeCount({
-			reservation_status: /no\s?show/i,
+			reservation_status: noShowRegex,
 			updatedAt: { $gte: startOfToday, $lte: endOfToday },
 		});
 
-		// totalRoomsAcrossHotels => sum of all .roomCountDetails[].count
+		// Inventory across hotels (displayName-aware, beds for individualBed)
 		const hotelsQuery =
 			hotelId && hotelId !== "all"
 				? { _id: new mongoose.Types.ObjectId(hotelId) }
@@ -1381,59 +1414,246 @@ exports.adminDashboardReport = async (req, res) => {
 				return [];
 			});
 
-		let totalRoomsAcrossHotels = 0;
+		const aggregatedRoomTypes = new Map();
 		for (const h of matchedHotels) {
-			for (const detail of h?.roomCountDetails || []) {
-				totalRoomsAcrossHotels += detail?.count || 0;
+			const baseRoomTypes = buildBaseRoomTypes(
+				h?.roomCountDetails || [],
+				displayMode
+			);
+			for (const rt of baseRoomTypes) {
+				if (!aggregatedRoomTypes.has(rt.key)) {
+					aggregatedRoomTypes.set(rt.key, { ...rt });
+					continue;
+				}
+				const prev = aggregatedRoomTypes.get(rt.key);
+				prev.totalRooms += toNumber(rt.totalRooms);
+				prev.rawRoomCount += toNumber(rt.rawRoomCount);
+				if (!prev.displayName && rt.displayName)
+					prev.displayName = rt.displayName;
+				if (!prev.label && rt.label) prev.label = rt.label;
+				if (!prev.color && rt.color) prev.color = rt.color;
+				if (!prev.roomType && rt.roomType) prev.roomType = rt.roomType;
+				if (!prev.bedsCount && rt.bedsCount) prev.bedsCount = rt.bedsCount;
 			}
 		}
 
-		// Next 10 days => peak usage
+		const baseRoomTypes = Array.from(aggregatedRoomTypes.values());
+		const baseTotalsLookup = {};
+		let baseTotalRoomsAll = 0;
+		for (const rt of baseRoomTypes) {
+			const totalRooms = toNumber(rt.totalRooms);
+			baseTotalsLookup[rt.key] = totalRooms;
+			baseTotalRoomsAll += totalRooms;
+		}
+
+		const roomTypes = [...baseRoomTypes];
+		const roomTypeByKey = new Map();
+		const keyNormToKey = new Map();
+		const displayNormToKeys = new Map();
+		const roomTypeNormToKeys = new Map();
+
+		const addToSetMap = (map, k, val) => {
+			if (!k) return;
+			if (!map.has(k)) map.set(k, new Set());
+			map.get(k).add(val);
+		};
+
+		const indexRoomType = (rt) => {
+			roomTypeByKey.set(rt.key, rt);
+			const nk = normalizeRoomKeyLabel(rt.key);
+			if (nk) keyNormToKey.set(nk, rt.key);
+
+			const aliases = new Set(
+				[rt.displayName, rt.label, rt.key].filter(Boolean)
+			);
+			for (const a of aliases)
+				addToSetMap(displayNormToKeys, normalizeRoomKeyLabel(a), rt.key);
+
+			if (rt.roomType) {
+				addToSetMap(
+					roomTypeNormToKeys,
+					normalizeRoomKeyLabel(rt.roomType),
+					rt.key
+				);
+			}
+		};
+
+		for (const rt of baseRoomTypes) indexRoomType(rt);
+
+		const pickFromSet = (set, raw) => {
+			if (!set || set.size === 0) return null;
+			if (set.size === 1) return Array.from(set)[0];
+			const rawLower = String(raw || "")
+				.trim()
+				.toLowerCase();
+			if (!rawLower) return Array.from(set)[0];
+
+			for (const key of set) {
+				const rt = roomTypeByKey.get(key);
+				if (!rt) continue;
+				for (const c of [rt.displayName, rt.label]) {
+					if (
+						String(c || "")
+							.trim()
+							.toLowerCase() === rawLower
+					)
+						return key;
+				}
+			}
+			return Array.from(set)[0];
+		};
+
+		const resolveRoomKey = (room = {}) => {
+			const rawKey = room?.key || room?.roomKey || "";
+			const rawRoomType = room?.room_type || room?.roomType || "";
+			const rawDisplay =
+				room?.displayName || room?.display_name || room?.label || "";
+
+			const nk = normalizeRoomKeyLabel(rawKey);
+			if (nk && keyNormToKey.has(nk)) return keyNormToKey.get(nk);
+
+			const nd = normalizeRoomKeyLabel(rawDisplay);
+			const nrt = normalizeRoomKeyLabel(rawRoomType);
+
+			if (displayMode === "displayName") {
+				if (nd) {
+					const set = displayNormToKeys.get(nd);
+					const picked = pickFromSet(set, rawDisplay);
+					if (picked) return picked;
+				}
+				if (nrt) {
+					const set = roomTypeNormToKeys.get(nrt);
+					if (set && set.size === 1) return Array.from(set)[0];
+				}
+				return null;
+			}
+
+			if (nrt) {
+				const set = roomTypeNormToKeys.get(nrt);
+				if (set && set.size) return Array.from(set)[0];
+			}
+			if (nd) {
+				const set = displayNormToKeys.get(nd);
+				const picked = pickFromSet(set, rawDisplay);
+				if (picked) return picked;
+			}
+			return null;
+		};
+
+		const deriveKeyFromRoom = (room = {}) => {
+			const rawRoomType = String(
+				room?.room_type || room?.roomType || ""
+			).trim();
+			const rawDisplay = getRoomDisplayName(room);
+
+			const labelCandidate =
+				displayMode === "displayName"
+					? rawDisplay ||
+					  getRoomTypeLabel(rawRoomType) ||
+					  rawRoomType ||
+					  "Unknown Room"
+					: getRoomTypeLabel(rawRoomType) ||
+					  rawDisplay ||
+					  rawRoomType ||
+					  "Unknown Room";
+
+			let key = normalizeRoomKeyLabel(labelCandidate);
+			if (!key)
+				key =
+					normalizeRoomKeyLabel(rawDisplay) ||
+					normalizeRoomKeyLabel(rawRoomType);
+			if (!key) key = `unknown-room-${Math.random().toString(36).slice(2, 8)}`;
+
+			return {
+				key,
+				label: labelCandidate,
+				roomType: rawRoomType,
+				displayName: rawDisplay,
+			};
+		};
+
+		const ensureDerivedRoomType = (room = {}) => {
+			const { key, label, roomType, displayName } = deriveKeyFromRoom(room);
+			if (roomTypeByKey.has(key)) return key;
+
+			const derived = {
+				key,
+				roomType,
+				displayName,
+				label,
+				totalRooms: 0,
+				rawRoomCount: 0,
+				bedsCount: 0,
+				color: null,
+				derived: true,
+			};
+
+			roomTypes.push(derived);
+			indexRoomType(derived);
+			baseTotalsLookup[key] = 0;
+
+			return key;
+		};
+
+		const isExcludedStatus = (status) =>
+			excludedStatusRegex.test(String(status || ""));
+		const isCheckoutStatus = (status) =>
+			checkoutRegex.test(String(status || ""));
+
+		// Next 10 days => usage (used to derive today's occupancy + derived inventory)
 		const relevantFor10Days = await safeFind({
 			cond: {
-				reservation_status: { $ne: "cancelled" },
+				...statusNotExcluded,
 				checkin_date: { $lte: endOf10Days },
 				checkout_date: { $gt: startOfToday },
 			},
-			select: "checkin_date checkout_date pickedRoomsType",
+			select: "checkin_date checkout_date pickedRoomsType reservation_status bedNumber",
 		});
 
 		const usageArray10 = new Array(10).fill(0);
-		const dayList10 = [];
-		for (let i = 0; i < 10; i++) {
-			const d = new Date(startOfToday);
-			d.setDate(d.getDate() + i);
-			dayList10.push(d);
-		}
+		const derivedUsageArray10 = new Array(10).fill(0);
+		const dayList10 = Array.from({ length: 10 }, (_, i) =>
+			nowMoment.clone().startOf("day").add(i, "days").toDate()
+		);
 
 		for (const doc of relevantFor10Days) {
 			if (!Array.isArray(doc?.pickedRoomsType)) continue;
 			const cIn = doc.checkin_date;
 			const cOut = doc.checkout_date;
 
-			let totalRoomsUsed = 0;
-			for (const rtObj of doc.pickedRoomsType) {
-				totalRoomsUsed += rtObj?.count || 1;
-			}
+			if (isExcludedStatus(doc.reservation_status)) continue;
+			if (isCheckoutStatus(doc.reservation_status)) continue;
 
-			for (let i = 0; i < 10; i++) {
-				const dayDate = dayList10[i];
-				if (dayDate >= cIn && dayDate < cOut) {
-					usageArray10[i] += totalRoomsUsed;
+			for (const rtObj of doc.pickedRoomsType) {
+				const units = getReservationUnits(rtObj, doc);
+				if (!units) continue;
+
+				const resolvedKey = resolveRoomKey(rtObj);
+				const isDerived = !resolvedKey;
+				if (!resolvedKey) ensureDerivedRoomType(rtObj);
+
+				for (let i = 0; i < 10; i++) {
+					const dayDate = dayList10[i];
+					if (dayDate >= cIn && dayDate < cOut) {
+						usageArray10[i] += units;
+						if (isDerived) derivedUsageArray10[i] += units;
+					}
 				}
 			}
 		}
 
-		const peakUsageIn10Days = Math.max(...usageArray10);
+		const bookedToday = usageArray10[0] || 0;
+		const derivedBookedToday = derivedUsageArray10[0] || 0;
+		const totalUnitsToday = baseTotalRoomsAll + derivedBookedToday;
 		const occupancy = {
-			booked: peakUsageIn10Days,
-			available: Math.max(totalRoomsAcrossHotels - peakUsageIn10Days, 0),
-			overallRoomsCount: totalRoomsAcrossHotels,
+			booked: bookedToday,
+			available: Math.max(totalUnitsToday - bookedToday, 0),
+			overallRoomsCount: totalUnitsToday,
 		};
 
 		// latestCheckouts
 		const latestCheckoutsRaw = await safeFind({
-			cond: { reservation_status: { $in: ["completed", "checked-out"] } },
+			cond: { reservation_status: checkoutRegex },
 			sort: { checkout_date: -1 },
 			limit: 4,
 		});
@@ -1444,7 +1664,7 @@ exports.adminDashboardReport = async (req, res) => {
 			guestId: r?.customer_details?.passport || "",
 			accommodation: Array.isArray(r?.pickedRoomsType)
 				? r.pickedRoomsType
-						.map((rt) => rt?.room_type)
+						.map((rt) => getRoomDisplayName(rt) || rt?.room_type)
 						.filter(Boolean)
 						.join(", ")
 				: "",
@@ -1461,7 +1681,7 @@ exports.adminDashboardReport = async (req, res) => {
 		// upcomingCheckins => next 10 days (including today)
 		const upcomingRaw = await safeFind({
 			cond: {
-				reservation_status: { $ne: "cancelled" },
+				...statusNotExcluded,
 				checkin_date: { $gte: startOfToday, $lte: endOf10Days },
 			},
 			sort: { checkin_date: 1 },
@@ -1488,7 +1708,8 @@ exports.adminDashboardReport = async (req, res) => {
 				name: doc?.customer_details?.name || "N/A",
 				confirmation_number: doc?.confirmation_number || "N/A",
 				room_type:
-					(doc?.pickedRoomsType?.[0] && doc.pickedRoomsType[0].room_type) ||
+					getRoomDisplayName(doc?.pickedRoomsType?.[0]) ||
+					doc?.pickedRoomsType?.[0]?.room_type ||
 					"N/A",
 				nights,
 				dateRange,
@@ -1507,111 +1728,92 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		// ============== THIRD ROW ==============
-		const reservationsForRooms = await Reservations.find(baseFilter)
-			.select("pickedRoomsType")
-			.lean()
-			.catch((e) => {
-				console.error("Reservations.find(baseFilter) for rooms failed", e);
-				return [];
-			});
-
-		const roomStatsMap = {};
-		for (const r of reservationsForRooms) {
-			if (!Array.isArray(r?.pickedRoomsType)) continue;
-			for (const rtObj of r.pickedRoomsType) {
-				const typeVal = rtObj?.room_type;
-				if (!typeVal) continue;
-				if (!roomStatsMap[typeVal]) roomStatsMap[typeVal] = { sold: 0 };
-				roomStatsMap[typeVal].sold += rtObj?.count || 1;
-			}
-		}
-
-		// combinedInventory => from matchedHotels roomCountDetails
-		const combinedInventory = {};
-		for (const h of matchedHotels) {
-			for (const detail of h?.roomCountDetails || []) {
-				const rtVal = detail?.roomType;
-				if (!rtVal) continue;
-				combinedInventory[rtVal] =
-					(combinedInventory[rtVal] || 0) + (detail?.count || 0);
-			}
-		}
-
-		// Next 7 days usage => usageByDay7
-		const rangeEnd = new Date(startOfToday);
-		rangeEnd.setDate(rangeEnd.getDate() + 7); // up to 7 days from today
+		// Next 7 days usage => usageByDay7 (displayName-aware + beds for individualBed)
+		const rangeEnd = nowMoment
+			.clone()
+			.startOf("day")
+			.add(7, "days")
+			.toDate(); // up to 7 days from today
 
 		const relevantForNext7 = await safeFind({
 			cond: {
-				reservation_status: { $ne: "cancelled" },
+				...statusNotExcluded,
 				checkin_date: { $lte: rangeEnd },
 				checkout_date: { $gt: startOfToday },
 			},
-			select: "checkin_date checkout_date pickedRoomsType",
+			select: "checkin_date checkout_date pickedRoomsType reservation_status bedNumber",
 		});
 
 		const usageByDay7 = {};
-		const allTypeVals = new Set([
-			...Object.keys(combinedInventory),
-			...Object.keys(roomStatsMap),
-		]);
-
-		for (const typeVal of allTypeVals) {
-			usageByDay7[typeVal] = [0, 0, 0, 0, 0, 0, 0];
+		for (const rt of baseRoomTypes) {
+			usageByDay7[rt.key] = [0, 0, 0, 0, 0, 0, 0];
 		}
 
-		const dayList7 = [];
-		for (let i = 0; i < 7; i++) {
-			const dd = new Date(startOfToday);
-			dd.setDate(dd.getDate() + i);
-			dayList7.push(dd);
-		}
+		const dayList7 = Array.from({ length: 7 }, (_, i) =>
+			nowMoment.clone().startOf("day").add(i, "days").toDate()
+		);
 
 		for (const doc of relevantForNext7) {
 			if (!Array.isArray(doc?.pickedRoomsType)) continue;
 			const cIn = doc?.checkin_date;
 			const cOut = doc?.checkout_date;
 
+			if (isExcludedStatus(doc.reservation_status)) continue;
+			if (isCheckoutStatus(doc.reservation_status)) continue;
+
 			for (const rtObj of doc.pickedRoomsType) {
-				const typeVal = rtObj?.room_type;
-				if (!typeVal) continue;
-				const countVal = rtObj?.count || 1;
+				const units = getReservationUnits(rtObj, doc);
+				if (!units) continue;
+
+				let key = resolveRoomKey(rtObj);
+				if (!key) key = ensureDerivedRoomType(rtObj);
+
+				if (!usageByDay7[key]) {
+					usageByDay7[key] = [0, 0, 0, 0, 0, 0, 0];
+				}
 
 				for (let i = 0; i < 7; i++) {
 					const dayDate = dayList7[i];
 					if (dayDate >= cIn && dayDate < cOut) {
-						usageByDay7[typeVal][i] += countVal;
+						usageByDay7[key][i] += units;
 					}
 				}
 			}
 		}
 
-		const availabilityNext7 = {};
-		for (const typeVal of allTypeVals) {
-			const inv = combinedInventory[typeVal] || 0;
-			const peak = Math.max(...usageByDay7[typeVal]);
-			availabilityNext7[typeVal] = Math.max(inv - peak, 0);
-		}
-
 		const dynamicRoomsTable = [];
 		let rowKeyCounter = 1;
-		for (const typeVal of allTypeVals) {
-			const label = roomTypeLabelMap[typeVal] || typeVal;
-			const total = combinedInventory[typeVal] || 0;
-			const sold = roomStatsMap[typeVal]?.sold || 0;
-			const available = Math.max(total - sold, 0);
-			const next7 = availabilityNext7[typeVal] || 0;
+		const allTypeKeys = new Set([
+			...Object.keys(baseTotalsLookup),
+			...Object.keys(usageByDay7),
+		]);
+		for (const key of allTypeKeys) {
+			const rt = roomTypeByKey.get(key);
+			const label = rt?.label || rt?.displayName || rt?.roomType || key;
+			const total = toNumber(baseTotalsLookup[key], 0);
+			const dailyUsage = usageByDay7[key] || [0, 0, 0, 0, 0, 0, 0];
+			const sold = toNumber(dailyUsage[0], 0);
+			const peakBooked = Math.max(...dailyUsage);
+			const totalForDisplay = total > 0 ? total : peakBooked;
+			const available = Math.max(totalForDisplay - sold, 0);
+			const availabilityNext7 = Math.max(totalForDisplay - peakBooked, 0);
 
 			dynamicRoomsTable.push({
 				key: String(rowKeyCounter++),
 				type: label,
 				sold,
-				total,
-				bookingNext7: next7,
-				availabilityNext7: next7,
+				total: totalForDisplay,
+				bookingNext7: peakBooked,
+				availabilityNext7,
 				available,
 			});
 		}
+
+		dynamicRoomsTable.sort((a, b) =>
+			String(a.type || "").localeCompare(String(b.type || ""), undefined, {
+				sensitivity: "base",
+			})
+		);
 
 		// You can wire this to real housekeeping if you have it
 		const housekeeping = { clean: 25, cleaning: 0, dirty: 0 };
@@ -1619,7 +1821,7 @@ exports.adminDashboardReport = async (req, res) => {
 
 		// ============== FOURTH ROW ==============
 		const pipelineTopChannels = [
-			{ $match: baseFilter },
+			{ $match: { $and: [baseFilter, statusNotExcluded] } },
 			{ $group: { _id: "$booking_source", count: { $sum: 1 } } },
 			{ $sort: { count: -1 } },
 			{ $limit: 5 },
@@ -1631,60 +1833,155 @@ exports.adminDashboardReport = async (req, res) => {
 			fillColor: "#4285F4",
 		}));
 
-		const pipelineRoomTypes = [
-			{ $match: baseFilter },
-			{ $unwind: "$pickedRoomsType" },
-			{
-				$group: {
-					_id: "$pickedRoomsType.room_type",
-					nights: { $sum: { $ifNull: ["$days_of_residence", 0] } },
-					revenue: { $sum: { $ifNull: ["$total_amount", 0] } },
-				},
-			},
-			{ $sort: { revenue: -1 } },
-		];
-		const roomTypesAgg = await safeAggregate(pipelineRoomTypes);
-		const resolveRoomTypeLabel = (value) => {
-			if (value === null || value === undefined || value === "") {
-				return "Unspecified";
+		const roomStatsReservations = await safeFind({
+			cond: statusNotExcluded,
+			select:
+				"pickedRoomsType checkin_date checkout_date days_of_residence total_amount reservation_status bedNumber",
+		});
+
+		const roomNightsByKey = {};
+		const roomRevenueByKey = {};
+		const dayMs = 24 * 60 * 60 * 1000;
+
+		const getReservationNights = (reservation) => {
+			const ci = new Date(reservation?.checkin_date || "");
+			const co = new Date(reservation?.checkout_date || "");
+			if (!Number.isNaN(ci.getTime()) && !Number.isNaN(co.getTime())) {
+				const diff = Math.round((co - ci) / dayMs);
+				if (diff > 0) return diff;
 			}
-			const key = String(value);
-			return roomTypeLabelMap[key] || key;
+			const fallback = toNumber(reservation?.days_of_residence, 0);
+			return fallback > 0 ? fallback : 0;
 		};
-		const roomNightsByType = roomTypesAgg.map((rta) => ({
-			type: resolveRoomTypeLabel(rta?._id),
-			value: rta?.nights || 0,
-			fillColor: "#E74C3C",
-		}));
-		const roomRevenueByType = roomTypesAgg.map((rta) => ({
-			type: resolveRoomTypeLabel(rta?._id),
-			value: rta?.revenue || 0,
-			fillColor: "#FF7373",
-		}));
+
+		const getRoomNights = (room, fallbackNights) => {
+			if (Array.isArray(room?.pricingByDay) && room.pricingByDay.length > 0) {
+				return room.pricingByDay.length;
+			}
+			return fallbackNights;
+		};
+
+		const sumRoomPricing = (room) => {
+			if (!Array.isArray(room?.pricingByDay) || room.pricingByDay.length === 0) {
+				return null;
+			}
+
+			const total = room.pricingByDay.reduce((sum, day) => {
+				const dayTotal = toNumber(
+					day?.totalPriceWithCommission ??
+						day?.price ??
+						day?.totalPriceWithoutCommission ??
+						day?.rootPrice,
+					0
+				);
+				return sum + dayTotal;
+			}, 0);
+
+			return total;
+		};
+
+		for (const reservation of roomStatsReservations) {
+			if (!Array.isArray(reservation?.pickedRoomsType)) continue;
+			if (isExcludedStatus(reservation.reservation_status)) continue;
+
+			const fallbackNights = getReservationNights(reservation);
+
+			const roomEntries = reservation.pickedRoomsType.map((room) => {
+				const units = getReservationUnits(room, reservation);
+				let key = resolveRoomKey(room);
+				if (!key) key = ensureDerivedRoomType(room);
+
+				const nights = getRoomNights(room, fallbackNights);
+				const hasPricingByDay = Array.isArray(room?.pricingByDay)
+					? room.pricingByDay.length > 0
+					: false;
+				const chosenPrice = toNumber(room?.chosenPrice, 0);
+
+				let revenue = null;
+				if (hasPricingByDay) {
+					const pricingTotal = sumRoomPricing(room);
+					revenue =
+						pricingTotal === null ? 0 : pricingTotal * Math.max(units, 1);
+				} else if (chosenPrice > 0 && nights > 0) {
+					revenue = chosenPrice * nights * Math.max(units, 1);
+				}
+
+				return {
+					key,
+					units: Math.max(units, 0),
+					nights: Math.max(nights, 0),
+					revenue,
+					hasPricing: revenue !== null,
+				};
+			});
+
+			const knownRevenue = roomEntries.reduce(
+				(sum, entry) => sum + (entry.hasPricing ? entry.revenue : 0),
+				0
+			);
+			const unknownUnits = roomEntries.reduce(
+				(sum, entry) => sum + (!entry.hasPricing ? entry.units : 0),
+				0
+			);
+			const totalAmount = toNumber(reservation?.total_amount, 0);
+			const remaining = Math.max(totalAmount - knownRevenue, 0);
+
+			for (const entry of roomEntries) {
+				if (!entry.key) continue;
+
+				const roomsNights = entry.nights * entry.units;
+				if (roomsNights > 0) {
+					roomNightsByKey[entry.key] =
+						(roomNightsByKey[entry.key] || 0) + roomsNights;
+				}
+
+				let finalRevenue = entry.revenue;
+				if (!entry.hasPricing) {
+					finalRevenue =
+						unknownUnits > 0 ? remaining * (entry.units / unknownUnits) : 0;
+				}
+				if (finalRevenue > 0) {
+					roomRevenueByKey[entry.key] =
+						(roomRevenueByKey[entry.key] || 0) + finalRevenue;
+				}
+			}
+		}
+
+		const resolveRoomLabel = (key) => {
+			const rt = roomTypeByKey.get(key);
+			if (!rt) return key || "Unspecified";
+			return rt.label || rt.displayName || rt.roomType || key || "Unspecified";
+		};
+
+		const roomStatKeys = new Set([
+			...Object.keys(roomNightsByKey),
+			...Object.keys(roomRevenueByKey),
+		]);
+
+		const roomNightsByType = Array.from(roomStatKeys)
+			.map((key) => ({
+				type: resolveRoomLabel(key),
+				value: toNumber(roomNightsByKey[key], 0),
+				fillColor: "#E74C3C",
+			}))
+			.sort((a, b) => b.value - a.value);
+
+		const roomRevenueByType = Array.from(roomStatKeys)
+			.map((key) => ({
+				type: resolveRoomLabel(key),
+				value: toNumber(roomRevenueByKey[key], 0),
+				fillColor: "#FF7373",
+			}))
+			.sort((a, b) => b.value - a.value);
 		const fourthRow = { topChannels, roomNightsByType, roomRevenueByType };
 
 		// ============== FIFTH ROW ==============
-		const lineStart = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate(),
-			0,
-			0,
-			0,
-			0
-		);
-		lineStart.setDate(lineStart.getDate() - 10);
-
-		const lineEnd = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate(),
-			23,
-			59,
-			59,
-			999
-		);
-		lineEnd.setDate(lineEnd.getDate() + 10);
+		const lineEnd = nowMoment.clone().endOf("day").toDate();
+		const lineStart = nowMoment
+			.clone()
+			.startOf("day")
+			.subtract(6, "days")
+			.toDate();
 
 		const pipelineCheckIn = [
 			{
@@ -1692,21 +1989,23 @@ exports.adminDashboardReport = async (req, res) => {
 					$and: [
 						baseFilter,
 						{ checkin_date: { $gte: lineStart, $lte: lineEnd } },
-						{ reservation_status: { $ne: "cancelled" } },
+						{ reservation_status: activeStatusFilter },
 					],
 				},
 			},
 			{
 				$group: {
 					_id: {
-						y: { $year: "$checkin_date" },
-						m: { $month: "$checkin_date" },
-						d: { $dayOfMonth: "$checkin_date" },
+						$dateToString: {
+							format: "%Y-%m-%d",
+							date: "$checkin_date",
+							timezone,
+						},
 					},
 					count: { $sum: 1 },
 				},
 			},
-			{ $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
+			{ $sort: { _id: 1 } },
 		];
 
 		const pipelineCheckOut = [
@@ -1715,21 +2014,23 @@ exports.adminDashboardReport = async (req, res) => {
 					$and: [
 						baseFilter,
 						{ checkout_date: { $gte: lineStart, $lte: lineEnd } },
-						{ reservation_status: { $ne: "cancelled" } },
+						{ reservation_status: activeStatusFilter },
 					],
 				},
 			},
 			{
 				$group: {
 					_id: {
-						y: { $year: "$checkout_date" },
-						m: { $month: "$checkout_date" },
-						d: { $dayOfMonth: "$checkout_date" },
+						$dateToString: {
+							format: "%Y-%m-%d",
+							date: "$checkout_date",
+							timezone,
+						},
 					},
 					count: { $sum: 1 },
 				},
 			},
-			{ $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
+			{ $sort: { _id: 1 } },
 		];
 
 		const [checkInAgg, checkOutAgg] = await Promise.all([
@@ -1741,29 +2042,19 @@ exports.adminDashboardReport = async (req, res) => {
 		const checkInData = [];
 		const checkOutData = [];
 
-		let dayCursor = new Date(lineStart);
-		while (dayCursor <= lineEnd) {
-			const y = dayCursor.getFullYear();
-			const m = dayCursor.getMonth() + 1;
-			const d = dayCursor.getDate();
-
-			const label = `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(
-				2,
-				"0"
-			)}`;
+		let dayCursor = moment.tz(lineStart, timezone).startOf("day");
+		const endCursor = moment.tz(lineEnd, timezone).startOf("day");
+		while (dayCursor.isSameOrBefore(endCursor, "day")) {
+			const label = dayCursor.format("YYYY-MM-DD");
 			lineChartCategories.push(label);
 
-			const foundIn = checkInAgg.find(
-				(x) => x?._id?.y === y && x?._id?.m === m && x?._id?.d === d
-			);
+			const foundIn = checkInAgg.find((x) => x?._id === label);
 			checkInData.push(foundIn ? foundIn.count : 0);
 
-			const foundOut = checkOutAgg.find(
-				(x) => x?._id?.y === y && x?._id?.m === m && x?._id?.d === d
-			);
+			const foundOut = checkOutAgg.find((x) => x?._id === label);
 			checkOutData.push(foundOut ? foundOut.count : 0);
 
-			dayCursor.setDate(dayCursor.getDate() + 1);
+			dayCursor = dayCursor.clone().add(1, "day");
 		}
 
 		// Replace visitorsLine with real data when available

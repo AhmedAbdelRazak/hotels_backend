@@ -18,6 +18,7 @@ const {
 	reservationSearchAllList,
 	reservationsList,
 	reservationsList2,
+	todaysCheckins,
 	updateReservation,
 	agodaDataDump,
 	expediaDataDump,
@@ -100,6 +101,11 @@ router.get(
 router.get(
 	"/reservations/single-reservation/:reservationId",
 	singleReservationById
+);
+
+router.get(
+	"/reservations/checkins-today/:hotelId/:belongsTo",
+	todaysCheckins
 );
 
 router.get(

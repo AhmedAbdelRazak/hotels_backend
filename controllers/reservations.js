@@ -20,6 +20,80 @@ const { decryptWithSecret } = require("./utils");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CANCELLED_REGEX = /cancelled|canceled/i;
+const NO_SHOW_REGEX = /no[_\s-]?show/i;
+const CHECKED_OUT_REGEX =
+	/checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
+const IN_HOUSE_REGEX = /house/i;
+const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
+	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
+	"i"
+);
+
+const getSaudiDayRange = (dateStr) => {
+	if (!dateStr) return null;
+	const start = new Date(`${dateStr}T00:00:00+03:00`);
+	if (Number.isNaN(start.getTime())) return null;
+	const end = new Date(start.getTime() + DAY_MS);
+	return { start, end };
+};
+
+const buildReservationListFilter = ({ selectedFilter, hotelId, dateStr }) => {
+	const dynamicFilter = { hotelId: ObjectId(hotelId) };
+	const dayRange = getSaudiDayRange(dateStr);
+	const addDateRange = (field) => {
+		if (!dayRange) return;
+		dynamicFilter[field] = { $gte: dayRange.start, $lt: dayRange.end };
+	};
+
+	if (selectedFilter === "Specific Date") {
+		addDateRange("checkin_date");
+		dynamicFilter.reservation_status = { $not: CANCELLED_REGEX };
+		return dynamicFilter;
+	}
+
+	if (selectedFilter === "Specific Date2") {
+		addDateRange("checkout_date");
+		dynamicFilter.reservation_status = { $not: CANCELLED_REGEX };
+		return dynamicFilter;
+	}
+
+	if (selectedFilter === "no_show") {
+		addDateRange("checkin_date");
+		dynamicFilter.reservation_status = NO_SHOW_REGEX;
+		return dynamicFilter;
+	}
+
+	switch (selectedFilter) {
+		case "Today's New Reservations":
+			addDateRange("booked_at");
+			dynamicFilter.reservation_status = { $not: CANCELLED_REGEX };
+			break;
+		case "Cancelations":
+			dynamicFilter.reservation_status = CANCELLED_REGEX;
+			break;
+		case "Today's Arrivals":
+			addDateRange("checkin_date");
+			dynamicFilter.reservation_status = { $not: CANCELLED_REGEX };
+			break;
+		case "Today's Departures":
+			addDateRange("checkout_date");
+			dynamicFilter.reservation_status = { $not: CANCELLED_REGEX };
+			break;
+		case "Incomplete reservations":
+			dynamicFilter.reservation_status = { $not: INCOMPLETE_EXCLUDED_REGEX };
+			break;
+		case "In House":
+			dynamicFilter.reservation_status = IN_HOUSE_REGEX;
+			break;
+		default:
+			break;
+	}
+
+	return dynamicFilter;
+};
+
 exports.reservationById = (req, res, next, id) => {
 	Reservations.findById(id).exec((err, reservations) => {
 		if (err || !reservations) {
@@ -441,76 +515,11 @@ exports.getListOfReservations = async (req, res) => {
 		}
 
 		const parsedFilters = JSON.parse(filters);
-		let dynamicFilter = { hotelId: ObjectId(hotelId) };
-
-		const today = new Date();
-		const startOfToday = new Date(today.setHours(0, 0, 0, 0));
-		const endOfToday = new Date(today.setHours(23, 59, 59, 999));
-
-		// Adjusted approach for handling specific dates directly
-		if (parsedFilters.selectedFilter === "Specific Date") {
-			const checkinDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkin_date = {
-				$gte: checkinDate,
-				$lt: new Date(checkinDate.getTime() + 86400000),
-			}; // Adding 24 hours in milliseconds
-			dynamicFilter.reservation_status = {
-				$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-			};
-		} else if (parsedFilters.selectedFilter === "Specific Date2") {
-			const checkoutDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkout_date = {
-				$gte: checkoutDate,
-				$lt: new Date(checkoutDate.getTime() + 86400000),
-			};
-			dynamicFilter.reservation_status = {
-				$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-			};
-		} else if (parsedFilters.selectedFilter === "no_show") {
-			const checkinDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkin_date = {
-				$gte: checkinDate,
-				$lt: new Date(checkinDate.getTime() + 86400000), // Covering the entire day
-			};
-			dynamicFilter.reservation_status = {
-				$regex: "show", // Use a regular expression to match the status text
-				$options: "i", // Case-insensitive matching
-			};
-		} else {
-			// Handling other filters using a switch statement
-			switch (parsedFilters.selectedFilter) {
-				case "Today's New Reservations":
-					dynamicFilter.booked_at = { $gte: startOfToday, $lte: endOfToday };
-					break;
-				case "Cancelations":
-					dynamicFilter.reservation_status = {
-						$in: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Today's Arrivals":
-					dynamicFilter.checkin_date = { $gte: startOfToday, $lte: endOfToday };
-					dynamicFilter.reservation_status = {
-						$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Today's Departures":
-					dynamicFilter.checkout_date = {
-						$gte: startOfToday,
-						$lte: endOfToday,
-					};
-					dynamicFilter.reservation_status = {
-						$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Incomplete reservations":
-					dynamicFilter.reservation_status = { $nin: ["closed", "canceled"] };
-					break;
-				case "In House":
-					dynamicFilter.reservation_status = { $eq: "inhouse" };
-					break;
-				// Additional cases as needed
-			}
-		}
+		const dynamicFilter = buildReservationListFilter({
+			selectedFilter: parsedFilters.selectedFilter,
+			hotelId,
+			dateStr: date,
+		});
 
 		const pipeline = [
 			{ $match: dynamicFilter },
@@ -537,83 +546,18 @@ exports.getListOfReservations = async (req, res) => {
 
 exports.totalRecordsReservations = async (req, res) => {
 	try {
-		const { filters, hotelId } = req.params;
+		const { filters, hotelId, date } = req.params;
 
 		if (!ObjectId.isValid(hotelId)) {
 			return res.status(400).send("Invalid parameters");
 		}
 
 		const parsedFilters = JSON.parse(filters);
-		let dynamicFilter = { hotelId: ObjectId(hotelId) };
-
-		const today = new Date();
-		const startOfToday = new Date(today.setHours(0, 0, 0, 0));
-		const endOfToday = new Date(today.setHours(23, 59, 59, 999));
-
-		// Adjusted approach for handling specific dates directly
-		if (parsedFilters.selectedFilter === "Specific Date") {
-			const checkinDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkin_date = {
-				$gte: checkinDate,
-				$lt: new Date(checkinDate.getTime() + 86400000), // Adding 24 hours in milliseconds
-			};
-			dynamicFilter.reservation_status = {
-				$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-			};
-		} else if (parsedFilters.selectedFilter === "Specific Date2") {
-			const checkoutDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkout_date = {
-				$gte: checkoutDate,
-				$lt: new Date(checkoutDate.getTime() + 86400000),
-			};
-			dynamicFilter.reservation_status = {
-				$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-			};
-		} else if (parsedFilters.selectedFilter === "no_show") {
-			const noShowDate = new Date(`${req.params.date}T00:00:00+03:00`);
-			dynamicFilter.checkin_date = {
-				$gte: noShowDate,
-				$lt: new Date(noShowDate.getTime() + 86400000), // Covering the entire day
-			};
-			dynamicFilter.reservation_status = {
-				$regex: "no_show", // Use a regular expression to match the status text
-				$options: "i", // Case-insensitive matching
-			};
-		} else {
-			// Handling other filters using a switch statement
-			switch (parsedFilters.selectedFilter) {
-				case "Today's New Reservations":
-					dynamicFilter.booked_at = { $gte: startOfToday, $lte: endOfToday };
-					break;
-				case "Cancelations":
-					dynamicFilter.reservation_status = {
-						$in: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Today's Arrivals":
-					dynamicFilter.checkin_date = { $gte: startOfToday, $lte: endOfToday };
-					dynamicFilter.reservation_status = {
-						$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Today's Departures":
-					dynamicFilter.checkout_date = {
-						$gte: startOfToday,
-						$lte: endOfToday,
-					};
-					dynamicFilter.reservation_status = {
-						$nin: ["cancelled_by_guest", "canceled", "Cancelled", "cancelled"],
-					};
-					break;
-				case "Incomplete reservations":
-					dynamicFilter.reservation_status = { $nin: ["closed", "canceled"] };
-					break;
-				case "In House":
-					dynamicFilter.reservation_status = { $eq: "inhouse" };
-					break;
-				// Additional cases as needed
-			}
-		}
+		const dynamicFilter = buildReservationListFilter({
+			selectedFilter: parsedFilters.selectedFilter,
+			hotelId,
+			dateStr: date,
+		});
 
 		const total = await Reservations.countDocuments(dynamicFilter);
 		res.json({ total });
@@ -1042,7 +986,7 @@ exports.reservationObjectSummary = async (req, res) => {
 							if: {
 								$regexMatch: {
 									input: "$reservation_status",
-									regex: /cancelled|canceled/i,
+									regex: CANCELLED_REGEX,
 								},
 							},
 							then: false,
@@ -1074,7 +1018,7 @@ exports.reservationObjectSummary = async (req, res) => {
 								{
 									$regexMatch: {
 										input: "$reservation_status",
-										regex: /cancelled|canceled/i,
+										regex: CANCELLED_REGEX,
 									},
 								},
 								1,
@@ -1116,7 +1060,7 @@ exports.reservationObjectSummary = async (req, res) => {
 								{
 									$regexMatch: {
 										input: "$reservation_status",
-										regex: /house/i,
+										regex: IN_HOUSE_REGEX,
 									},
 								},
 								1,
@@ -1133,7 +1077,7 @@ exports.reservationObjectSummary = async (req, res) => {
 											$not: {
 												$regexMatch: {
 													input: "$reservation_status",
-													regex: /cancelled|canceled|checkedout|show|house/i,
+													regex: INCOMPLETE_EXCLUDED_REGEX,
 												},
 											},
 										},
@@ -1490,6 +1434,40 @@ exports.reservationsList = (req, res) => {
 			}
 			res.json(data);
 		});
+};
+
+exports.todaysCheckins = async (req, res) => {
+	try {
+		const { hotelId, belongsTo } = req.params;
+
+		if (!ObjectId.isValid(hotelId) || !ObjectId.isValid(belongsTo)) {
+			return res.status(400).json({ error: "Invalid parameters" });
+		}
+
+		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
+		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+
+		const reservations = await Reservations.find({
+			hotelId: ObjectId(hotelId),
+			belongsTo: ObjectId(belongsTo),
+			checkin_date: { $gte: startOfDay, $lte: endOfDay },
+			reservation_status: {
+				$nin: [
+					"cancelled_by_guest",
+					"canceled",
+					"Cancelled",
+					"cancelled",
+					"checked_out",
+					"no_show",
+				],
+			},
+		}).sort({ checkin_date: 1 });
+
+		return res.json(reservations);
+	} catch (error) {
+		console.error("Error fetching today's check-ins:", error);
+		return res.status(500).json({ error: "Internal Server Error" });
+	}
 };
 
 exports.reservationsList2 = (req, res) => {
