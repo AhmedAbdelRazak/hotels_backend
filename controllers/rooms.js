@@ -93,6 +93,9 @@ exports.update = (req, res) => {
 	const room = req.room;
 	room.room_number = req.body.room_number;
 	room.room_type = req.body.room_type;
+	if (Object.prototype.hasOwnProperty.call(req.body, "display_name")) {
+		room.display_name = req.body.display_name;
+	}
 	room.room_features = req.body.room_features;
 	room.room_pricing = req.body.room_pricing;
 	room.floor = req.body.floor;
@@ -403,6 +406,12 @@ exports.reservedRoomsSummary = async (req, res) => {
 			_id: accound_id,
 			belongsTo: belongsToId,
 		}).select("roomCountDetails");
+		const roomCountDetails = Array.isArray(hotelDetails?.roomCountDetails)
+			? hotelDetails.roomCountDetails
+			: [];
+		if (roomCountDetails.length === 0) {
+			return res.json([]);
+		}
 
 		const occupiedRooms = await Reservations.aggregate([
 			{
@@ -426,7 +435,7 @@ exports.reservedRoomsSummary = async (req, res) => {
 			},
 		]);
 
-		const totalRooms = hotelDetails.roomCountDetails.map((room) => {
+		const totalRooms = roomCountDetails.map((room) => {
 			const reservedRoom = reservedRooms.find(
 				(r) =>
 					r._id.roomType === room.roomType &&
@@ -442,18 +451,20 @@ exports.reservedRoomsSummary = async (req, res) => {
 			const startDate = moment(startdate);
 			const endDate = moment(enddate);
 			const pricingByDay = [];
+			const pricingRate = Array.isArray(room.pricingRate)
+				? room.pricingRate
+				: [];
+			const basePrice = room?.price?.basePrice || 0;
 			for (
 				let date = startDate.clone();
 				date.isSameOrBefore(endDate);
 				date.add(1, "days")
 			) {
 				const dateString = date.format("YYYY-MM-DD");
-				const specificPricing = room.pricingRate.find(
+				const specificPricing = pricingRate.find(
 					(p) => p.calendarDate === dateString
 				);
-				const price = specificPricing
-					? specificPricing.price
-					: room.price.basePrice;
+				const price = specificPricing ? specificPricing.price : basePrice;
 				pricingByDay.push({ date: dateString, price });
 			}
 

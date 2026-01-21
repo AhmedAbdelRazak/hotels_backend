@@ -1546,6 +1546,18 @@ exports.updateReservation = async (req, res) => {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
 		const normalizedUpdateData = { ...updateData };
+		const normalizeRoomIds = (value) => {
+			if (!Array.isArray(value)) return [];
+			return value
+				.map((room) => {
+					if (!room) return null;
+					if (typeof room === "string") return room;
+					if (typeof room === "object" && room._id) return room._id;
+					return room;
+				})
+				.filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+				.map((id) => String(id));
+		};
 
 		console.log(
 			`[UPDATE RESERVATION] Received update for ID: ${reservationId}`
@@ -1571,6 +1583,18 @@ exports.updateReservation = async (req, res) => {
 			!mongoose.Types.ObjectId.isValid(normalizedUpdateData.belongsTo)
 		) {
 			delete normalizedUpdateData.belongsTo;
+		}
+
+		if (Array.isArray(normalizedUpdateData.roomId)) {
+			const normalizedRoomIds = normalizeRoomIds(normalizedUpdateData.roomId);
+			if (
+				normalizedRoomIds.length > 0 ||
+				normalizedUpdateData.roomId.length === 0
+			) {
+				normalizedUpdateData.roomId = normalizedRoomIds;
+			} else {
+				delete normalizedUpdateData.roomId;
+			}
 		}
 
 		// 4️⃣ Fetch existing reservation for comparison

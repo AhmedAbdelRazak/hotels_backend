@@ -227,14 +227,14 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 						const offers = offersAll.filter((o) =>
 							keepByMode(
 								o.offerFrom || o.from || o.validFrom,
-								o.offerTo || o.to || o.validTo
-							)
+								o.offerTo || o.to || o.validTo,
+							),
 						);
 						const monthly = monthlyAll.filter((m) =>
 							keepByMode(
 								m.monthFrom || m.from || m.validFrom,
-								m.monthTo || m.to || m.validTo
-							)
+								m.monthTo || m.to || m.validTo,
+							),
 						);
 
 						// Optional sort for nicer UX in all consumers
@@ -254,23 +254,23 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 								a,
 								b,
 								(x) => x.offerFrom || x.from || x.validFrom,
-								(x) => x.offerPrice ?? x.price
-							)
+								(x) => x.offerPrice ?? x.price,
+							),
 						);
 						monthly.sort((a, b) =>
 							byValue(
 								a,
 								b,
 								(x) => x.monthFrom || x.from || x.validFrom,
-								(x) => x.monthPrice ?? x.price ?? x.rate
-							)
+								(x) => x.monthPrice ?? x.price ?? x.rate,
+							),
 						);
 
 						return { ...room, offers, monthly };
 					})
 					.filter(
 						(r) =>
-							(r.offers && r.offers.length) || (r.monthly && r.monthly.length)
+							(r.offers && r.offers.length) || (r.monthly && r.monthly.length),
 					);
 
 				return { ...hotel, roomCountDetails: trimmedRooms };
@@ -321,8 +321,9 @@ exports.distinctRoomTypes = async (req, res) => {
 				index ===
 				self.findIndex(
 					(t) =>
-						t.roomType === value.roomType && t.displayName === value.displayName
-				)
+						t.roomType === value.roomType &&
+						t.displayName === value.displayName,
+				),
 		);
 
 		res.json(roomTypes);
@@ -520,7 +521,7 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 		} catch (waErr) {
 			console.error(
 				"[WA] sendEmailForTriggeringPayment:",
-				waErr?.message || waErr
+				waErr?.message || waErr,
 			);
 		}
 
@@ -614,7 +615,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 					(room) =>
 						room.activeRoom === true && // Only include active rooms
 						room.photos.length > 0 &&
-						room.price.basePrice > 0
+						room.price.basePrice > 0,
 				);
 			} else {
 				filteredRoomCountDetails = hotel.roomCountDetails.filter(
@@ -622,7 +623,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 						room.roomType === roomType &&
 						room.activeRoom === true && // Only include active rooms
 						room.photos.length > 0 &&
-						room.price.basePrice > 0
+						room.price.basePrice > 0,
 				);
 			}
 
@@ -635,7 +636,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 
 		// Remove hotels that have no matching roomCountDetails after filtering
 		const result = filteredHotels.filter(
-			(hotel) => hotel.roomCountDetails.length > 0
+			(hotel) => hotel.roomCountDetails.length > 0,
 		);
 
 		// Log filtered results
@@ -746,7 +747,7 @@ const createPdfBuffer = async (html) => {
 const sendEmailWithInvoice = async (
 	reservationData,
 	guestEmail,
-	hotelIdOrNull
+	hotelIdOrNull,
 ) => {
 	try {
 		const html = ClientConfirmationEmail(reservationData);
@@ -804,7 +805,7 @@ const sendEmailWithInvoice = async (
 				await sendCriticalOwnerEmail(
 					ownerEmail,
 					"Reservation Confirmation - Invoice Attached",
-					html
+					html,
 				);
 			}
 		}
@@ -905,7 +906,7 @@ exports.createNewReservationClient = async (req, res) => {
 					await sendCriticalOwnerEmail(
 						ownerEmail,
 						`Reservation Verification Initiated — ${hotel.hotelName}`,
-						emailContent
+						emailContent,
 					);
 				}
 
@@ -913,12 +914,12 @@ exports.createNewReservationClient = async (req, res) => {
 				try {
 					await waSendVerificationLink(
 						{ customer_details: { name, phone, nationality } },
-						confirmationLink
+						confirmationLink,
 					);
 				} catch (waErr) {
 					console.error(
 						"[WA] createNewReservationClient (Not Paid):",
-						waErr?.message || waErr
+						waErr?.message || waErr,
 					);
 				}
 
@@ -974,7 +975,7 @@ exports.createNewReservationClient = async (req, res) => {
 					(err, unique) => {
 						if (err) reject(new Error("Error generating confirmation number."));
 						else resolve(unique);
-					}
+					},
 				);
 			});
 		} else {
@@ -995,7 +996,7 @@ exports.createNewReservationClient = async (req, res) => {
 			res,
 			confirmationNumber,
 			paymentResponse.response,
-			convertedAmounts
+			convertedAmounts,
 		);
 	} catch (error) {
 		console.error("Error creating reservation:", error);
@@ -1011,7 +1012,7 @@ async function handleUserAndReservation(
 	res,
 	confirmationNumber,
 	paymentResponse,
-	convertedAmounts
+	convertedAmounts,
 ) {
 	const { customerDetails } = req.body;
 
@@ -1051,7 +1052,7 @@ async function handleUserAndReservation(
 			req.body.paymentDetails,
 			req.body.belongsTo,
 			paymentResponse,
-			convertedAmounts
+			convertedAmounts,
 		);
 	} catch (error) {
 		console.error("Error handling user creation/update:", error);
@@ -1070,7 +1071,7 @@ async function saveReservation(
 	paymentDetails,
 	belongsTo,
 	paymentResponse,
-	convertedAmounts
+	convertedAmounts,
 ) {
 	const enrichedPaymentDetails = {
 		...paymentResponse,
@@ -1135,7 +1136,7 @@ async function saveReservation(
 		await sendEmailWithInvoice(
 			reservationData,
 			customerDetails.email,
-			belongsTo
+			belongsTo,
 		);
 
 		// ---- WhatsApp: Confirmation to guest + admin notifications ----
@@ -1144,7 +1145,7 @@ async function saveReservation(
 		} catch (waErr) {
 			console.error(
 				"[WA] saveReservation guest confirmation:",
-				waErr?.message || waErr
+				waErr?.message || waErr,
 			);
 		}
 		try {
@@ -1152,7 +1153,7 @@ async function saveReservation(
 		} catch (waErr) {
 			console.error(
 				"[WA] saveReservation owner/platform notify:",
-				waErr?.message || waErr
+				waErr?.message || waErr,
 			);
 		}
 
@@ -1244,7 +1245,7 @@ async function processPayment({
 
 		console.log(
 			"Authorization Payload:",
-			JSON.stringify(authorizationPayload, null, 2)
+			JSON.stringify(authorizationPayload, null, 2),
 		);
 
 		const authorizationResponse = await axios.post(
@@ -1252,7 +1253,7 @@ async function processPayment({
 			authorizationPayload,
 			{
 				headers: { "Content-Type": "application/json" },
-			}
+			},
 		);
 
 		const authorizationData = authorizationResponse.data;
@@ -1264,7 +1265,7 @@ async function processPayment({
 		) {
 			console.log(
 				"Authorization successful:",
-				authorizationData.transactionResponse.transId
+				authorizationData.transactionResponse.transId,
 			);
 
 			// Save the transaction ID for future capture
@@ -1341,12 +1342,12 @@ exports.verifyReservationToken = async (req, res) => {
 		const startOfSameMonth = new Date(
 			checkinDate.getFullYear(),
 			checkinDate.getMonth(),
-			1
+			1,
 		); // Start of the same month
 		const endOfNextMonth = new Date(
 			checkinDate.getFullYear(),
 			checkinDate.getMonth() + 2, // Move to the next month
-			0 // Last day of the next month
+			0, // Last day of the next month
 		);
 
 		// Find reservations with overlapping check-in dates within the same or next month, and matching customer details
@@ -1387,7 +1388,7 @@ exports.verifyReservationToken = async (req, res) => {
 		if (duplicateByEmailOrPhone) {
 			console.log(
 				"Duplicate by email or phone found:",
-				duplicateByEmailOrPhone
+				duplicateByEmailOrPhone,
 			);
 			return res.status(400).json({
 				message:
@@ -1409,7 +1410,7 @@ exports.verifyReservationToken = async (req, res) => {
 						} else {
 							resolve(uniqueNumber);
 						}
-					}
+					},
 				);
 			});
 			reservationData.confirmation_number = confirmationNumber;
@@ -1450,7 +1451,7 @@ exports.verifyReservationToken = async (req, res) => {
 			res,
 			confirmationNumber,
 			{}, // No payment response for "Not Paid"
-			reservationData.convertedAmounts
+			reservationData.convertedAmounts,
 		);
 	} catch (error) {
 		console.error("Error verifying reservation token:", error);
@@ -1489,7 +1490,7 @@ exports.getUserAndReservationData = async (req, res) => {
 							const matchingRoom = hotelDetails.roomCountDetails.find(
 								(detail) =>
 									detail.displayName === room.displayName &&
-									detail.roomType === room.room_type
+									detail.roomType === room.room_type,
 							);
 
 							if (matchingRoom && matchingRoom.photos.length > 0) {
@@ -1499,7 +1500,7 @@ exports.getUserAndReservationData = async (req, res) => {
 							}
 
 							return room;
-						}
+						},
 					);
 				}
 			}
@@ -1685,8 +1686,8 @@ exports.gettingCurrencyConversion = (req, res) => {
 					} else {
 						throw new Error("Currency conversion failed");
 					}
-				})
-		)
+				}),
+		),
 	)
 		.then((results) => {
 			res.json(results); // Respond with the converted results
@@ -1753,11 +1754,11 @@ exports.gettingByReservationId = async (req, res) => {
 				...reservation.customer_details,
 				cardNumber: decryptWithSecret(reservation.customer_details.cardNumber),
 				cardExpiryDate: decryptWithSecret(
-					reservation.customer_details.cardExpiryDate
+					reservation.customer_details.cardExpiryDate,
 				),
 				cardCVV: decryptWithSecret(reservation.customer_details.cardCVV),
 				cardHolderName: decryptWithSecret(
-					reservation.customer_details.cardHolderName
+					reservation.customer_details.cardHolderName,
 				),
 			},
 		};
@@ -1786,7 +1787,7 @@ exports.distinctBookingSources = async (req, res) => {
 			.map((s) => s.toLowerCase());
 
 		const unique = Array.from(new Set(cleaned)).sort((a, b) =>
-			a.localeCompare(b, undefined, { sensitivity: "base" })
+			a.localeCompare(b, undefined, { sensitivity: "base" }),
 		);
 
 		return res.status(200).json({ success: true, data: unique });
@@ -1926,7 +1927,7 @@ exports.paginatedReservationList = async (req, res) => {
 			"checkin_date",
 			checkinDate,
 			checkinFrom,
-			checkinTo
+			checkinTo,
 		);
 		if (checkinClause) andFilters.push(checkinClause);
 
@@ -1934,7 +1935,7 @@ exports.paginatedReservationList = async (req, res) => {
 			"checkout_date",
 			checkoutDate,
 			checkoutFrom,
-			checkoutTo
+			checkoutTo,
 		);
 		if (checkoutClause) andFilters.push(checkoutClause);
 
@@ -1942,7 +1943,7 @@ exports.paginatedReservationList = async (req, res) => {
 			"createdAt",
 			createdDate,
 			createdFrom,
-			createdTo
+			createdTo,
 		);
 		if (createdClause) andFilters.push(createdClause);
 
@@ -1998,18 +1999,20 @@ exports.paginatedReservationList = async (req, res) => {
 				Array.isArray(paypal_details?.mit) &&
 				paypal_details.mit.some(
 					(m) =>
-						(m?.capture_status || m?.status || "").toUpperCase() === "COMPLETED"
+						(m?.capture_status || m?.status || "").toUpperCase() ===
+						"COMPLETED",
 				);
 
 			const anyCapturesCompleted =
 				Array.isArray(paypal_details?.captures) &&
 				paypal_details.captures.some(
 					(c) =>
-						(c?.capture_status || c?.status || "").toUpperCase() === "COMPLETED"
+						(c?.capture_status || c?.status || "").toUpperCase() ===
+						"COMPLETED",
 				);
 
 			const manualOverrideCaptured = capturedConfirmationNumbers.includes(
-				String(doc.confirmation_number || "")
+				String(doc.confirmation_number || ""),
 			);
 
 			const isCaptured =
@@ -2216,7 +2219,7 @@ exports.paginatedReservationList = async (req, res) => {
 					const rawRate = safeNumber(day.commissionRate);
 					const finalRate = rawRate < 1 ? rawRate : rawRate / 100;
 					const totalPriceWithoutComm = safeNumber(
-						day.totalPriceWithoutCommission
+						day.totalPriceWithoutCommission,
 					);
 
 					const dayCommission =
@@ -2232,10 +2235,10 @@ exports.paginatedReservationList = async (req, res) => {
 
 		// Row 1
 		const todayReservations = allReservations.filter((r) =>
-			isToday(new Date(r.createdAt))
+			isToday(new Date(r.createdAt)),
 		).length;
 		const yesterdayReservations = allReservations.filter((r) =>
-			isYesterday(new Date(r.createdAt))
+			isYesterday(new Date(r.createdAt)),
 		).length;
 		const todayRatio =
 			yesterdayReservations > 0
@@ -2245,10 +2248,10 @@ exports.paginatedReservationList = async (req, res) => {
 				: todayReservations * 100;
 
 		const weeklyReservations = allReservations.filter((r) =>
-			isThisWeek(new Date(r.createdAt))
+			isThisWeek(new Date(r.createdAt)),
 		).length;
 		const lastWeekReservations = allReservations.filter((r) =>
-			isLastWeek(new Date(r.createdAt))
+			isLastWeek(new Date(r.createdAt)),
 		).length;
 		const weeklyRatio =
 			lastWeekReservations > 0
@@ -2269,7 +2272,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		// Row 2 (exclude cancelled)
 		const nonCancelled = allReservations.filter(
-			(r) => (r.reservation_status || "").toLowerCase() !== "cancelled"
+			(r) => (r.reservation_status || "").toLowerCase() !== "cancelled",
 		);
 
 		const todayCommission = nonCancelled
@@ -2307,7 +2310,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 		const overallCommission = nonCancelled.reduce(
 			(acc, r) => acc + computeReservationCommission(r),
-			0
+			0,
 		);
 
 		const scorecards = {
@@ -2447,12 +2450,12 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 		try {
 			await waSendPaymentLink(
 				{ customer_details: { name, email, phone, nationality } },
-				generatedLink
+				generatedLink,
 			);
 		} catch (waErr) {
 			console.error(
 				"[WA] sendingEmailForPaymentLink:",
-				waErr?.message || waErr
+				waErr?.message || waErr,
 			);
 		}
 
@@ -2566,11 +2569,11 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		// Log partial keys (for debugging):
 		console.log(
 			"API_LOGIN_ID starts with = ",
-			(process.env.API_LOGIN_ID || "").slice(0, 6)
+			(process.env.API_LOGIN_ID || "").slice(0, 6),
 		);
 		console.log(
 			"TRANSACTION_KEY starts with = ",
-			(process.env.TRANSACTION_KEY || "").slice(0, 6)
+			(process.env.TRANSACTION_KEY || "").slice(0, 6),
 		);
 
 		const { reservationId, amount, paymentOption, customUSD, amountSAR } =
@@ -2594,7 +2597,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		// 2) Find the reservation
 		console.log("Looking up reservation in DB by ID =", reservationId);
 		const reservation = await Reservations.findById(reservationId).populate(
-			"hotelId"
+			"hotelId",
 		);
 		if (!reservation) {
 			console.log("Reservation not found in DB.");
@@ -2610,13 +2613,13 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		console.log("Decrypting card details now...");
 		let cardNumber = decryptWithSecret(reservation.customer_details.cardNumber);
 		const cardExpiryDate = decryptWithSecret(
-			reservation.customer_details.cardExpiryDate
+			reservation.customer_details.cardExpiryDate,
 		);
 		const cardCVV = decryptWithSecret(reservation.customer_details.cardCVV);
 
 		if (!cardNumber || !cardExpiryDate || !cardCVV) {
 			console.log(
-				"Decrypted card details are missing or invalid. Returning 400."
+				"Decrypted card details are missing or invalid. Returning 400.",
 			);
 			return res
 				.status(400)
@@ -2648,7 +2651,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 
 		if (!transId) {
 			console.log(
-				"No transId found in payment_details => skipping priorAuthCaptureTransaction."
+				"No transId found in payment_details => skipping priorAuthCaptureTransaction.",
 			);
 			skipPriorAuthCapture = true;
 		} else {
@@ -2678,7 +2681,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 				captureData = captureResponse.data;
 				console.log(
 					"priorAuthCapture Response Data =",
-					JSON.stringify(captureData, null, 2)
+					JSON.stringify(captureData, null, 2),
 				);
 
 				if (
@@ -2695,7 +2698,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 					// If "The transaction cannot be found" => skip priorAuthCapture
 					if (captureError.includes("The transaction cannot be found")) {
 						console.warn(
-							"Transaction not found in Authorize.Net. Skipping priorAuthCapture and proceeding to authCaptureTransaction."
+							"Transaction not found in Authorize.Net. Skipping priorAuthCapture and proceeding to authCaptureTransaction.",
 						);
 						skipPriorAuthCapture = true;
 					} else {
@@ -2724,7 +2727,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 		const formattedAmount = parseFloat(amount).toFixed(2);
 		console.log(
 			"Preparing authCaptureTransaction with finalAmount (USD) =",
-			formattedAmount
+			formattedAmount,
 		);
 
 		const paymentPayload = {
@@ -2773,7 +2776,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 			paymentData = paymentResponse.data;
 			console.log(
 				"authCaptureTransaction Response Data =",
-				JSON.stringify(paymentData, null, 2)
+				JSON.stringify(paymentData, null, 2),
 			);
 
 			// 8) Check if payment is successful
@@ -2819,7 +2822,7 @@ exports.triggeringSpecificTokenizedIdToCharge = async (req, res) => {
 							"payment_details.chargeCount": 1,
 						},
 					},
-					{ new: true }
+					{ new: true },
 				).populate("hotelId");
 
 				console.log("Reservation updated in DB =>", updatedReservation._id);
@@ -2886,7 +2889,7 @@ exports.getRoomByIds = async (req, res) => {
 		const matchedRooms = [];
 		hotels.forEach((hotel) => {
 			const rooms = hotel.roomCountDetails.filter((room) =>
-				roomIds.includes(room._id.toString())
+				roomIds.includes(room._id.toString()),
 			);
 			rooms.forEach((room) => {
 				matchedRooms.push({
@@ -2997,7 +3000,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				const key = `${rt}|${dn}`;
 				agg.set(
 					key,
-					(agg.get(key) || 0) + (Number.isFinite(count) ? count : 1)
+					(agg.get(key) || 0) + (Number.isFinite(count) ? count : 1),
 				);
 			}
 			return Array.from(agg.entries())
@@ -3018,7 +3021,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			// CHANGED: read the employee id from customerDetails.reservedById (no belongsTo fallback here)
 			const reservedById = extractReservedById(
 				req.body?.customerDetails?.reservedById,
-				null
+				null,
 			);
 			const totalNum = Number(total_amount);
 			const roomsSig = buildRoomsSignature(pickedRoomsType);
@@ -3040,7 +3043,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				{
 					"customer_details.email": new RegExp(
 						`^${escapeRegExp(emailN)}$`,
-						"i"
+						"i",
 					),
 				},
 				{
@@ -3049,7 +3052,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				{
 					"customer_details.nationality": new RegExp(
 						`^${escapeRegExp(nationalityN)}$`,
-						"i"
+						"i",
 					),
 				},
 			];
@@ -3125,7 +3128,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 					(err, unique) => {
 						if (err) reject(new Error("Error generating confirmation number."));
 						else resolve(unique);
-					}
+					},
 				);
 			});
 
@@ -3133,9 +3136,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			const preparedCustomerDetails = {
 				...customerDetails,
 				nickName: safeString(customerDetails?.nickName),
-				confirmation_number2: safeString(
-					customerDetails?.confirmation_number2
-				),
+				confirmation_number2: safeString(customerDetails?.confirmation_number2),
 				reservedById:
 					extractReservedById(customerDetails?.reservedById, null) ||
 					customerDetails?.reservedById ||
@@ -3248,7 +3249,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			} catch (waErr) {
 				console.error(
 					"[WA] createNewReservationClient2 (employee) guest:",
-					waErr?.message || waErr
+					waErr?.message || waErr,
 				);
 			}
 			try {
@@ -3256,7 +3257,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 			} catch (waErr) {
 				console.error(
 					"[WA] createNewReservationClient2 (employee) notify:",
-					waErr?.message || waErr
+					waErr?.message || waErr,
 				);
 			}
 
@@ -3349,12 +3350,12 @@ exports.createNewReservationClient2 = async (req, res) => {
 			try {
 				await waSendVerificationLink(
 					{ customer_details: { name, phone, nationality } },
-					confirmationLink
+					confirmationLink,
 				);
 			} catch (waErr) {
 				console.error(
 					"[WA] createNewReservationClient2 (Not Paid):",
-					waErr?.message || waErr
+					waErr?.message || waErr,
 				);
 			}
 
@@ -3450,7 +3451,7 @@ async function processPaymentFromLink({
 			authorizationPayload,
 			{
 				headers: { "Content-Type": "application/json" },
-			}
+			},
 		);
 
 		const authorizationData = authorizationResponse.data;
@@ -3576,14 +3577,14 @@ exports.updateReservationDetails = async (req, res) => {
 					const matchingNewRoom = updateData.pickedRoomsType.find(
 						(newRoom) =>
 							newRoom.room_type === existingRoom.room_type &&
-							newRoom.chosenPrice === existingRoom.chosenPrice
+							newRoom.chosenPrice === existingRoom.chosenPrice,
 					);
 
 					if (matchingNewRoom && Object.keys(matchingNewRoom).length > 0) {
 						return { ...existingRoom, ...matchingNewRoom };
 					}
 					return existingRoom;
-				}
+				},
 			);
 
 			updateData.pickedRoomsType.forEach((newRoom) => {
@@ -3593,7 +3594,7 @@ exports.updateReservationDetails = async (req, res) => {
 					!updatedPickedRoomsType.some(
 						(room) =>
 							room.room_type === newRoom.room_type &&
-							room.chosenPrice === newRoom.chosenPrice
+							room.chosenPrice === newRoom.chosenPrice,
 					)
 				) {
 					updatedPickedRoomsType.push(newRoom);
@@ -3630,7 +3631,7 @@ exports.updateReservationDetails = async (req, res) => {
 		await sendEmailWithInvoice(
 			emailData,
 			reservation.customer_details?.email,
-			reservation.belongsTo
+			reservation.belongsTo,
 		);
 
 		// ---- WhatsApp: reservation update ----
@@ -3725,7 +3726,7 @@ exports.compileCustomerList = async (req, res) => {
 			const Order = gqB2BConn.model(
 				"Order",
 				new mongoose.Schema({}, { strict: false }),
-				"orders"
+				"orders",
 			);
 
 			const gqB2BOrders = await Order.find({});
@@ -3769,7 +3770,7 @@ exports.compileCustomerList = async (req, res) => {
 			const HairbrushUser = hairbrushConn.model(
 				"User",
 				new mongoose.Schema({}, { strict: false }),
-				"users"
+				"users",
 			);
 
 			const hairbrushUsers = await HairbrushUser.find({});
@@ -3811,7 +3812,7 @@ exports.compileCustomerList = async (req, res) => {
 			const JanatUser = janatConn.model(
 				"User",
 				new mongoose.Schema({}, { strict: false }),
-				"users"
+				"users",
 			);
 
 			const janatUsers = await JanatUser.find({});
@@ -3853,7 +3854,7 @@ exports.compileCustomerList = async (req, res) => {
 			const Reservation = khanConn.model(
 				"Reservation",
 				new mongoose.Schema({}, { strict: false }),
-				"reservations"
+				"reservations",
 			);
 
 			const khanReservations = await Reservation.find({});
@@ -3895,7 +3896,7 @@ exports.compileCustomerList = async (req, res) => {
 			const CallingOrder = palaciosConn.model(
 				"CallingOrder",
 				new mongoose.Schema({}, { strict: false }),
-				"callingorders"
+				"callingorders",
 			);
 
 			const palaciosOrders = await CallingOrder.find({});
@@ -3940,7 +3941,7 @@ exports.compileCustomerList = async (req, res) => {
 			const Reservation = hotelsConn.model(
 				"Reservation",
 				new mongoose.Schema({}, { strict: false }),
-				"reservations"
+				"reservations",
 			);
 			const hotelsReservations = await Reservation.find({});
 			const hotelsResCustomers = hotelsReservations
@@ -3973,7 +3974,7 @@ exports.compileCustomerList = async (req, res) => {
 			const User = hotelsConn.model(
 				"User",
 				new mongoose.Schema({}, { strict: false }),
-				"users"
+				"users",
 			);
 			const hotelUsers = await User.find({ role: 0 });
 			const hotelsUserCustomers = hotelUsers
@@ -4147,7 +4148,7 @@ exports.getSingleReservationInvoicePdf = async (req, res) => {
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader(
 			"Content-Disposition",
-			`attachment; filename="Jannat_Invoice_${confirmation}.pdf"`
+			`attachment; filename="Jannat_Invoice_${confirmation}.pdf"`,
 		);
 		return res.status(200).send(pdfBuffer);
 	} catch (err) {
@@ -4214,7 +4215,7 @@ exports.sendWhatsAppReservationConfirmation = async (req, res) => {
 			} catch (e) {
 				console.error(
 					"[WA] manual confirmation: notifyAdmins failed",
-					e?.message || e
+					e?.message || e,
 				);
 			}
 		}
