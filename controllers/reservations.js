@@ -1419,7 +1419,7 @@ exports.reservationsList = (req, res) => {
 			},
 		],
 		roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
-		reservation_status: { $not: /checked_out/i }, // This line filters out statuses containing "checked_out"
+		reservation_status: { $not: /checked[- _]?out/i }, // Filter checked out variants
 	};
 
 	Reservations.find(queryConditions)
@@ -1434,6 +1434,103 @@ exports.reservationsList = (req, res) => {
 			}
 			res.json(data);
 		});
+};
+
+exports.reservationsOccupancyRange = async (req, res) => {
+	try {
+		const { startdate, enddate, hotelId, belongsTo } = req.params;
+		if (
+			!ObjectId.isValid(hotelId) ||
+			!ObjectId.isValid(belongsTo) ||
+			!startdate ||
+			!enddate
+		) {
+			return res.status(400).json({ error: "Invalid parameters" });
+		}
+
+		const startDate = new Date(startdate);
+		const endDate = new Date(enddate);
+		if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+			return res.status(400).json({ error: "Invalid date range" });
+		}
+		startDate.setUTCHours(0, 0, 0, 0);
+		endDate.setUTCHours(23, 59, 59, 999);
+
+		const todayEnd = moment.tz("Asia/Riyadh").endOf("day").toDate();
+		const overdueInhouseFilter = {
+			reservation_status: IN_HOUSE_REGEX,
+			checkin_date: { $lte: todayEnd },
+			checkout_date: { $lte: todayEnd },
+		};
+
+		const queryConditions = {
+			hotelId: ObjectId(hotelId),
+			belongsTo: ObjectId(belongsTo),
+			$or: [
+				{ checkin_date: { $gte: startDate, $lte: endDate } },
+				{ checkout_date: { $gte: startDate, $lte: endDate } },
+				{
+					$and: [
+						{ checkin_date: { $lte: startDate } },
+						{ checkout_date: { $gte: endDate } },
+					],
+				},
+				overdueInhouseFilter,
+			],
+			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
+			reservation_status: { $not: CHECKED_OUT_REGEX },
+		};
+
+		const reservations = await Reservations.find(queryConditions)
+			.populate("belongsTo")
+			.populate("roomId");
+
+		return res.json(reservations);
+	} catch (error) {
+		console.error("Error fetching occupancy range:", error);
+		return res.status(500).json({ error: "Internal server error" });
+	}
+};
+
+exports.reservationsOccupancyCurrent = async (req, res) => {
+	try {
+		const { hotelId, belongsTo } = req.params;
+		if (!ObjectId.isValid(hotelId) || !ObjectId.isValid(belongsTo)) {
+			return res.status(400).json({ error: "Invalid parameters" });
+		}
+
+		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
+		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+
+		const overdueInhouseFilter = {
+			reservation_status: IN_HOUSE_REGEX,
+			checkin_date: { $lte: endOfDay },
+			checkout_date: { $lte: endOfDay },
+		};
+
+		const queryConditions = {
+			hotelId: ObjectId(hotelId),
+			belongsTo: ObjectId(belongsTo),
+			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
+			reservation_status: { $not: CHECKED_OUT_REGEX },
+			$or: [
+				{
+					checkin_date: { $lte: endOfDay },
+					checkout_date: { $gte: startOfDay },
+				},
+				overdueInhouseFilter,
+			],
+		};
+
+		const reservations = await Reservations.find(queryConditions)
+			.populate("belongsTo")
+			.populate("roomId");
+
+		return res.json(reservations);
+	} catch (error) {
+		console.error("Error fetching current occupancy:", error);
+		return res.status(500).json({ error: "Internal server error" });
+	}
 };
 
 exports.todaysCheckins = async (req, res) => {
@@ -1752,10 +1849,35 @@ exports.updateReservation = async (req, res) => {
 		// 9️⃣ Handle "Checked Out" status updates
 		if (
 			updatedReservation.reservation_status &&
-			updatedReservation.reservation_status
-				.toLowerCase()
-				.includes("checked_out")
+			/checked[- _]?out/.test(
+				String(updatedReservation.reservation_status || "").toLowerCase()
+			)
 		) {
+			const checkedOutRoomIds = normalizeRoomIds(
+				Array.isArray(updatedReservation.roomId)
+					? updatedReservation.roomId
+					: []
+			);
+			if (checkedOutRoomIds.length > 0) {
+				try {
+					await Rooms.updateMany(
+						{ _id: { $in: checkedOutRoomIds } },
+						{ $set: { cleanRoom: false } }
+					);
+					console.log(
+						"[ROOM STATUS] Rooms marked as not clean after checkout."
+					);
+				} catch (err) {
+					console.error(
+						"[ERROR] Failed to update room clean status after checkout:",
+						err
+					);
+					return res
+						.status(500)
+						.json({ error: "Failed to update room clean status" });
+				}
+			}
+
 			const existingTask = await HouseKeeping.findOne({
 				confirmation_number: updatedReservation.confirmation_number,
 			});

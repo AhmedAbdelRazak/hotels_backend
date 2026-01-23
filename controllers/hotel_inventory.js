@@ -193,6 +193,23 @@ const ensureRoomType = (roomTypeMap, key, label, roomType) => {
 	}
 };
 
+const buildPricingByDayFromDetail = (detail, startStr, endStr) => {
+	if (!detail) return [];
+	const start = moment(startStr, "YYYY-MM-DD", true).startOf("day");
+	const end = moment(endStr, "YYYY-MM-DD", true).startOf("day");
+	if (!start.isValid() || !end.isValid()) return [];
+	const pricingRate = Array.isArray(detail.pricingRate) ? detail.pricingRate : [];
+	const basePrice = Number(detail?.price?.basePrice) || 0;
+	const rows = [];
+	for (let d = start.clone(); d.isSameOrBefore(end, "day"); d.add(1, "day")) {
+		const dateString = d.format("YYYY-MM-DD");
+		const match = pricingRate.find((rate) => rate.calendarDate === dateString);
+		const price = Number(match?.price) || basePrice;
+		rows.push({ date: dateString, price });
+	}
+	return rows;
+};
+
 exports.getHotelInventoryCalendar = async (req, res) => {
 	const { hotelId } = req.params;
 	const { start, end, includeCancelled } = req.query;
@@ -496,5 +513,170 @@ exports.getHotelInventoryDay = async (req, res) => {
 	} catch (err) {
 		console.error("Error in getHotelInventoryDay:", err);
 		res.status(500).json({ error: "Failed to load day reservations" });
+	}
+};
+
+exports.getHotelInventoryAvailability = async (req, res) => {
+	const { hotelId } = req.params;
+	const { start, end, includeCancelled } = req.query;
+
+	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+		return res.status(400).json({ error: "Invalid hotelId" });
+	}
+
+	const range = getDateRange(start, end);
+	if (!range) {
+		return res
+			.status(400)
+			.json({ error: "start/end must be valid YYYY-MM-DD dates" });
+	}
+
+	try {
+		const hotel = await HotelDetails.findById(hotelId).select(
+			"hotelName roomCountDetails"
+		);
+		if (!hotel) {
+			return res.status(404).json({ error: "Hotel not found" });
+		}
+
+		const roomCountDetails = Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails
+			: [];
+		if (roomCountDetails.length === 0) {
+			return res.json([]);
+		}
+
+		const roomTypeMap = buildRoomTypeMap(roomCountDetails);
+		const roomKeyByType = new Map();
+		const detailByKey = new Map();
+		roomCountDetails.forEach((detail) => {
+			const roomType = detail?.roomType || detail?.room_type || "";
+			const displayName = detail?.displayName || detail?.display_name || "";
+			const label = displayName || roomType;
+			const key = normalizeKey(label);
+			if (key) {
+				detailByKey.set(key, detail);
+			}
+			const typeKey = normalizeKey(roomType);
+			if (typeKey && !roomKeyByType.has(typeKey)) {
+				roomKeyByType.set(typeKey, key);
+			}
+		});
+
+		const rooms = await Rooms.find({ hotelId })
+			.select("_id display_name room_type individualBeds")
+			.lean();
+		const roomsById = new Map(
+			rooms.map((room) => [String(room._id), room])
+		);
+
+		const startDate = range.start.toDate();
+		const endDate = range.end.clone().add(1, "day").toDate();
+
+		const reservations = await Reservations.find({
+			hotelId,
+			checkin_date: { $lt: endDate },
+			checkout_date: { $gt: startDate },
+		})
+			.populate("roomId", "display_name room_type individualBeds")
+			.lean();
+
+		const reservationPayloads = reservations
+			.filter((reservation) =>
+				isReservationActive(reservation, includeCancelled === "true")
+			)
+			.map((reservation) => ({
+				reservation,
+				counts: extractReservationRoomCounts(reservation, roomsById),
+			}));
+
+		const statsByKey = new Map();
+		roomTypeMap.forEach((rt) => {
+			statsByKey.set(rt.key, {
+				minAvailable: Number(rt.count) || 0,
+				maxReserved: 0,
+				maxOccupied: 0,
+			});
+		});
+
+		range.days.forEach((dayMoment) => {
+			const reservedCounts = {};
+			const occupiedCounts = {};
+
+			reservationPayloads.forEach(({ reservation, counts }) => {
+				if (!reservationCoversDay(reservation, dayMoment)) return;
+				const hasRoomId =
+					Array.isArray(reservation.roomId) && reservation.roomId.length > 0;
+				counts.forEach((line) => {
+					if (!line || !line.key) return;
+					let key = line.key;
+					if (!roomTypeMap.has(key) && line.roomType) {
+						const fallbackKey = roomKeyByType.get(normalizeKey(line.roomType));
+						if (fallbackKey) key = fallbackKey;
+					}
+					ensureRoomType(roomTypeMap, key, line.label, line.roomType);
+					if (!statsByKey.has(key)) {
+						statsByKey.set(key, {
+							minAvailable: 0,
+							maxReserved: 0,
+							maxOccupied: 0,
+						});
+					}
+					const bucket = hasRoomId ? occupiedCounts : reservedCounts;
+					bucket[key] = (bucket[key] || 0) + (Number(line.count) || 0);
+				});
+			});
+
+			roomTypeMap.forEach((rt) => {
+				const reserved = Number(reservedCounts[rt.key]) || 0;
+				const occupied = Number(occupiedCounts[rt.key]) || 0;
+				const used = reserved + occupied;
+				const capacity = Number(rt.count) || 0;
+				const effectiveCapacity = capacity === 0 && used > 0 ? used : capacity;
+				const available = effectiveCapacity - used;
+				const stats = statsByKey.get(rt.key) || {
+					minAvailable: effectiveCapacity,
+					maxReserved: 0,
+					maxOccupied: 0,
+				};
+				stats.minAvailable = Math.min(stats.minAvailable, available);
+				stats.maxReserved = Math.max(stats.maxReserved, reserved);
+				stats.maxOccupied = Math.max(stats.maxOccupied, occupied);
+				statsByKey.set(rt.key, stats);
+			});
+		});
+
+		const startStr = range.start.format("YYYY-MM-DD");
+		const endStr = range.end.format("YYYY-MM-DD");
+		const availability = Array.from(roomTypeMap.values()).map((rt) => {
+			const stats = statsByKey.get(rt.key) || {
+				minAvailable: Number(rt.count) || 0,
+				maxReserved: 0,
+				maxOccupied: 0,
+			};
+			const usedMax = (Number(stats.maxReserved) || 0) + (Number(stats.maxOccupied) || 0);
+			const capacity = Number(rt.count) || 0;
+			const effectiveCapacity = capacity === 0 && usedMax > 0 ? usedMax : capacity;
+			const detail = detailByKey.get(rt.key);
+			const displayName = detail?.displayName || detail?.display_name || rt.label;
+			const roomType = detail?.roomType || detail?.room_type || rt.roomType || "";
+			return {
+				room_type: roomType || displayName,
+				displayName: displayName || roomType || "",
+				total_available: effectiveCapacity,
+				reserved: Number(stats.maxReserved) || 0,
+				occupied: Number(stats.maxOccupied) || 0,
+				available: Math.max(Number(stats.minAvailable) || 0, 0),
+				start_date: startStr,
+				end_date: endStr,
+				pricingByDay: buildPricingByDayFromDetail(detail, startStr, endStr),
+				roomColor: rt.color || "#000",
+			};
+		});
+
+		res.json(availability);
+	} catch (err) {
+		console.error("Error in getHotelInventoryAvailability:", err);
+		res.status(500).json({ error: "Failed to load availability" });
 	}
 };
