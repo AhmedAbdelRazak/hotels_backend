@@ -2520,7 +2520,6 @@ exports.linkPayReservation = async (req, res) => {
 				payment: finalPayment,
 				commissionPaid: true,
 				financeStatus: "authorized",
-				paid_amount: paidSar,
 			};
 
 			if (vaultId) {
@@ -2539,9 +2538,10 @@ exports.linkPayReservation = async (req, res) => {
 					setOps["paypal_details.billing_address"] = srcCard.billing_address;
 			}
 
+			const incOps = paidSar > 0 ? { paid_amount: paidSar } : null;
 			const updated = await Reservations.findByIdAndUpdate(
 				reservation._id,
-				{ $set: setOps },
+				{ ...(incOps ? { $inc: incOps } : {}), $set: setOps },
 				{ new: true }
 			).populate("hotelId");
 
