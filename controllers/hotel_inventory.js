@@ -58,6 +58,113 @@ const isReservationActive = (reservation, includeCancelled) => {
 	return true;
 };
 
+const MANUAL_CAPTURED_CONFIRMATIONS = new Set(["2944008828"]);
+
+const safeNumber = (val, fallback = 0) => {
+	const parsed = Number(val);
+	return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const normalizePaymentStatus = (value = "") => {
+	const raw = String(value || "")
+		.toLowerCase()
+		.trim();
+	if (!raw) return "";
+	if (["captured", "paid online", "paid_online"].includes(raw))
+		return "captured";
+	if (["paid offline", "paid_offline", "onsite"].includes(raw))
+		return "paid offline";
+	if (["not paid", "not_paid", "unpaid"].includes(raw)) return "not paid";
+	if (["not captured", "not_captured"].includes(raw)) return "not captured";
+	return raw;
+};
+
+const parsePaymentStatusFilter = (rawStatuses) => {
+	if (!rawStatuses) return new Set();
+	const incoming = Array.isArray(rawStatuses)
+		? rawStatuses
+		: String(rawStatuses || "").split(",");
+	const filtered = new Set();
+	incoming.forEach((item) => {
+		const norm = normalizePaymentStatus(item);
+		if (norm) filtered.add(norm);
+	});
+	return filtered;
+};
+
+const paymentMeta = (reservation = {}) => {
+	const pd = reservation?.paypal_details || {};
+	const pmt = String(reservation?.payment || "")
+		.toLowerCase()
+		.trim();
+	const isCardPayment = /\bcredit\b|\bdebit\b/.test(pmt);
+
+	const legacyCaptured = !!reservation?.payment_details?.captured;
+
+	const onsitePaidAmount = safeNumber(
+		reservation?.payment_details?.onsite_paid_amount,
+	);
+	const payOffline = onsitePaidAmount > 0 || pmt === "paid offline";
+
+	const capTotal = safeNumber(pd?.captured_total_usd);
+	const limitUsd =
+		typeof pd?.bounds?.limit_usd === "number"
+			? safeNumber(pd.bounds.limit_usd)
+			: 0;
+	const pendingUsd = safeNumber(pd?.pending_total_usd);
+
+	const initialCompleted =
+		String(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
+	const anyMitCompleted =
+		Array.isArray(pd?.mit) &&
+		pd.mit.some(
+			(c) => String(c?.capture_status || "").toUpperCase() === "COMPLETED",
+		);
+
+	const manualOverrideCaptured = MANUAL_CAPTURED_CONFIRMATIONS.has(
+		String(reservation?.confirmation_number || "").trim(),
+	);
+
+	const isCaptured =
+		manualOverrideCaptured ||
+		legacyCaptured ||
+		capTotal > 0 ||
+		initialCompleted ||
+		anyMitCompleted ||
+		pmt === "paid online" ||
+		isCardPayment;
+
+	const isNotPaid = pmt === "not paid" && !isCaptured && !payOffline;
+
+	let status = "Not Captured";
+	if (isCaptured) status = "Captured";
+	else if (payOffline) status = "Paid Offline";
+	else if (isNotPaid) status = "Not Paid";
+
+	let hint = "";
+	const pieces = [];
+	if (capTotal > 0) pieces.push(`captured $${capTotal.toFixed(2)}`);
+	if (limitUsd > 0) pieces.push(`limit $${limitUsd.toFixed(2)}`);
+	if (pendingUsd > 0) pieces.push(`pending $${pendingUsd.toFixed(2)}`);
+	if (pieces.length) hint = `PayPal: ${pieces.join(" / ")}`;
+
+	const totalAmount = safeNumber(reservation?.total_amount);
+	const paidAmount =
+		status === "Captured"
+			? totalAmount
+			: status === "Paid Offline"
+			  ? onsitePaidAmount
+			  : 0;
+
+	return {
+		status,
+		normalizedStatus: normalizePaymentStatus(status),
+		label: status,
+		hint,
+		paidAmount,
+	};
+};
+
 const reservationCoversDay = (reservation, day) => {
 	const checkin = moment(reservation?.checkin_date).startOf("day");
 	const checkout = moment(reservation?.checkout_date).startOf("day");
@@ -212,7 +319,7 @@ const buildPricingByDayFromDetail = (detail, startStr, endStr) => {
 
 exports.getHotelInventoryCalendar = async (req, res) => {
 	const { hotelId } = req.params;
-	const { start, end, includeCancelled } = req.query;
+	const { start, end, includeCancelled, paymentStatuses } = req.query;
 
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		return res.status(400).json({ error: "Invalid hotelId" });
@@ -258,10 +365,16 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 			.populate("roomId", "display_name room_type individualBeds")
 			.lean();
 
+		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const reservationPayloads = reservations
 			.filter((reservation) =>
 				isReservationActive(reservation, includeCancelled === "true")
 			)
+			.filter((reservation) => {
+				if (paymentStatusFilter.size === 0) return true;
+				const meta = paymentMeta(reservation);
+				return paymentStatusFilter.has(meta.normalizedStatus);
+			})
 			.map((reservation) => ({
 				reservation,
 				counts: extractReservationRoomCounts(reservation, roomsById),
@@ -423,7 +536,7 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 
 exports.getHotelInventoryDay = async (req, res) => {
 	const { hotelId } = req.params;
-	const { date, roomKey, includeCancelled } = req.query;
+	const { date, roomKey, includeCancelled, paymentStatuses } = req.query;
 
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		return res.status(400).json({ error: "Invalid hotelId" });
@@ -465,6 +578,7 @@ exports.getHotelInventoryDay = async (req, res) => {
 			.populate("roomId", "display_name room_type individualBeds")
 			.lean();
 
+		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const filteredReservations = [];
 		let occupied = 0;
 
@@ -472,6 +586,13 @@ exports.getHotelInventoryDay = async (req, res) => {
 			if (!isReservationActive(reservation, includeCancelled === "true"))
 				return;
 			if (!reservationCoversDay(reservation, day)) return;
+			const meta = paymentMeta(reservation);
+			if (
+				paymentStatusFilter.size > 0 &&
+				!paymentStatusFilter.has(meta.normalizedStatus)
+			) {
+				return;
+			}
 
 			const counts = extractReservationRoomCounts(reservation, roomsById);
 			if (roomKey) {
@@ -483,7 +604,11 @@ exports.getHotelInventoryDay = async (req, res) => {
 				return sum + (Number(line.count) || 0);
 			}, 0);
 			occupied += roomCount;
-			filteredReservations.push(reservation);
+			filteredReservations.push({
+				...reservation,
+				payment_status: meta.label,
+				payment_status_hint: meta.hint,
+			});
 		});
 
 		const roomLabel = roomKey
