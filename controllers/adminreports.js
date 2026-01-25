@@ -43,6 +43,47 @@ function safeNumber(val) {
 	return isNaN(parsed) ? 0 : parsed;
 }
 
+const PAID_BREAKDOWN_TOTAL_KEYS = [
+	"paid_online_via_link",
+	"paid_at_hotel_cash",
+	"paid_at_hotel_card",
+	"paid_to_zad",
+	"paid_online_jannatbooking",
+	"paid_online_other_platforms",
+];
+
+const PAID_BREAKDOWN_QUERY_KEYS = PAID_BREAKDOWN_TOTAL_KEYS.map(
+	(key) => `paid_amount_breakdown.${key}`,
+);
+
+const escapeRegex = (value) =>
+	String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildPaidBreakdownSearchFilter = (searchQuery) => {
+	const trimmed = (searchQuery || "").trim();
+	if (!trimmed) return null;
+	const regex = new RegExp(escapeRegex(trimmed), "i");
+	return {
+		$or: [
+			{ confirmation_number: regex },
+			{ "customer_details.name": regex },
+			{ "customer_details.fullName": regex },
+			{ "customer_details.phone": regex },
+			{ "customer_details.email": regex },
+		],
+	};
+};
+
+const buildPaidBreakdownNonZeroFilter = () => ({
+	$or: PAID_BREAKDOWN_QUERY_KEYS.map((key) => ({ [key]: { $gt: 0 } })),
+});
+
+const computePaidBreakdownTotal = (breakdown = {}) =>
+	PAID_BREAKDOWN_TOTAL_KEYS.reduce(
+		(sum, key) => sum + safeNumber(breakdown?.[key]),
+		0,
+	);
+
 /* ------------------------------------------------------------------
    3) Commission Calculation
       - If hotelId == "675c41a3fd79ed7586b970ee" => 10% of total_amount
@@ -3594,5 +3635,144 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			success: false,
 			message: err.message || "Failed to load reservations for this day",
 		});
+	}
+};
+
+const parseReportPagination = (req) => {
+	const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+	const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 500);
+	const skip = (page - 1) * limit;
+	return { page, limit, skip };
+};
+
+const buildPaidBreakdownFilter = ({ hotelId, searchQuery }) => {
+	const filters = [];
+	if (hotelId) {
+		filters.push({ hotelId: new ObjectId(hotelId) });
+	}
+	filters.push(buildPaidBreakdownNonZeroFilter());
+	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
+	if (searchFilter) filters.push(searchFilter);
+	return filters.length > 1 ? { $and: filters } : filters[0];
+};
+
+const buildPaidBreakdownScorecards = async (filter) => {
+	const breakdownSum = {
+		$add: PAID_BREAKDOWN_TOTAL_KEYS.map((key) => ({
+			$ifNull: [`$paid_amount_breakdown.${key}`, 0],
+		})),
+	};
+	const breakdownTotalsGroup = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
+		acc[key] = { $sum: { $ifNull: [`$paid_amount_breakdown.${key}`, 0] } };
+		return acc;
+	}, {});
+	const result = await Reservations.aggregate([
+		{ $match: filter },
+		{
+			$addFields: {
+				paid_breakdown_total: breakdownSum,
+				total_amount_safe: { $ifNull: ["$total_amount", 0] },
+			},
+		},
+		{
+			$group: {
+				_id: null,
+				totalAmount: { $sum: "$total_amount_safe" },
+				paidAmount: { $sum: "$paid_breakdown_total" },
+				...breakdownTotalsGroup,
+			},
+		},
+	]);
+	const summary = result[0] || {};
+	const breakdownTotals = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
+		acc[key] = safeNumber(summary[key]);
+		return acc;
+	}, {});
+	return {
+		totalAmount: safeNumber(summary.totalAmount),
+		paidAmount: safeNumber(summary.paidAmount),
+		breakdownTotals,
+	};
+};
+
+exports.paidBreakdownReportAdmin = async (req, res) => {
+	try {
+		const hotelId = req.query.hotelId;
+		if (!hotelId || !ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Valid hotelId is required" });
+		}
+
+		const { page, limit, skip } = parseReportPagination(req);
+		const searchQuery = req.query.searchQuery || "";
+		const baseFilter = buildPaidBreakdownFilter({ hotelId });
+		const finalFilter = buildPaidBreakdownFilter({ hotelId, searchQuery });
+
+		const totalDocuments = await Reservations.countDocuments(finalFilter);
+		const reservations = await Reservations.find(finalFilter)
+			.sort({ checkin_date: -1, createdAt: -1 })
+			.skip(skip)
+			.limit(limit)
+			.populate("hotelId", "hotelName belongsTo")
+			.lean();
+
+		const scorecards = await buildPaidBreakdownScorecards(baseFilter);
+		const data = reservations.map((reservation) => {
+			const breakdown = reservation.paid_amount_breakdown || {};
+			const paidTotal = computePaidBreakdownTotal(breakdown);
+			return {
+				...reservation,
+				paid_breakdown_total: paidTotal,
+				paid_breakdown_remaining: Math.max(
+					safeNumber(reservation.total_amount) - paidTotal,
+					0,
+				),
+			};
+		});
+
+		return res.json({ data, totalDocuments, page, limit, scorecards });
+	} catch (err) {
+		console.error("Error in paidBreakdownReportAdmin:", err);
+		return res.status(500).json({ error: err.message });
+	}
+};
+
+exports.paidBreakdownReportHotel = async (req, res) => {
+	try {
+		const hotelId = req.query.hotelId || req.params.hotelId;
+		if (!hotelId || !ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Valid hotelId is required" });
+		}
+
+		const { page, limit, skip } = parseReportPagination(req);
+		const searchQuery = req.query.searchQuery || "";
+		const baseFilter = buildPaidBreakdownFilter({ hotelId });
+		const finalFilter = buildPaidBreakdownFilter({ hotelId, searchQuery });
+
+		const totalDocuments = await Reservations.countDocuments(finalFilter);
+		const reservations = await Reservations.find(finalFilter)
+			.sort({ checkin_date: -1, createdAt: -1 })
+			.skip(skip)
+			.limit(limit)
+			.populate("hotelId", "hotelName belongsTo")
+			.lean();
+
+		const scorecards = await buildPaidBreakdownScorecards(baseFilter);
+		const data = reservations.map((reservation) => {
+			const breakdown = reservation.paid_amount_breakdown || {};
+			const paidTotal = computePaidBreakdownTotal(breakdown);
+			return {
+				...reservation,
+				paid_breakdown_total: paidTotal,
+				paid_breakdown_remaining: Math.max(
+					safeNumber(reservation.total_amount) - paidTotal,
+					0,
+				),
+			};
+		});
+
+		return res.json({ data, totalDocuments, page, limit, scorecards });
+	} catch (err) {
+		console.error("Error in paidBreakdownReportHotel:", err);
+		return res.status(500).json({ error: err.message });
 	}
 };

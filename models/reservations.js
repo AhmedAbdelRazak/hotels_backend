@@ -192,6 +192,19 @@ const reservationsSchema = new mongoose.Schema(
 			default: 0,
 		},
 
+		paid_amount_breakdown: {
+			type: Object, //Could be left as default
+			default: {
+				paid_online_via_link: 0,
+				paid_at_hotel_cash: 0,
+				paid_at_hotel_card: 0,
+				paid_to_zad: 0,
+				paid_online_jannatbooking: 0,
+				paid_online_other_platforms: 0,
+				payment_comments: "",
+			},
+		},
+
 		commission: {
 			type: Number,
 			default: 0,
@@ -297,7 +310,7 @@ const reservationsSchema = new mongoose.Schema(
 		// Each entry: { at, by: {_id,name,role}, field, from, to, note }
 		adminChangeLog: { type: Array, default: [] },
 	},
-	{ timestamps: true }
+	{ timestamps: true },
 );
 
 module.exports = mongoose.model("Reservations", reservationsSchema);

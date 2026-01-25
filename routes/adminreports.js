@@ -23,6 +23,8 @@ const {
 	hotelOccupancyCalendar,
 	hotelOccupancyWarnings,
 	hotelOccupancyDayReservations,
+	paidBreakdownReportAdmin,
+	paidBreakdownReportHotel,
 	// ... any other exported controllers
 } = require("../controllers/adminreports");
 
@@ -132,6 +134,14 @@ router.get(
 );
 
 router.get(
+	"/adminreports/paid-breakdown/:userId",
+	requireSignin,
+	isAuth,
+	isAdmin,
+	paidBreakdownReportAdmin
+);
+
+router.get(
 	"/adminreports/hotel-occupancy/:userId",
 	requireSignin,
 	isAuth,
@@ -225,6 +235,13 @@ router.get(
 	requireSignin,
 	isAuth,
 	exportToExcel
+);
+
+router.get(
+	"/hotel-adminreports/paid-breakdown/:userId",
+	requireSignin,
+	isAuth,
+	paidBreakdownReportHotel
 );
 
 router.get(
