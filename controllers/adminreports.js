@@ -50,6 +50,7 @@ const PAID_BREAKDOWN_TOTAL_KEYS = [
 	"paid_to_zad",
 	"paid_online_jannatbooking",
 	"paid_online_other_platforms",
+	"paid_online_via_instapay",
 ];
 
 const PAID_BREAKDOWN_QUERY_KEYS = PAID_BREAKDOWN_TOTAL_KEYS.map(

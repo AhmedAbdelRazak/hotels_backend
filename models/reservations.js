@@ -201,6 +201,7 @@ const reservationsSchema = new mongoose.Schema(
 				paid_to_zad: 0,
 				paid_online_jannatbooking: 0,
 				paid_online_other_platforms: 0,
+				paid_online_via_instapay: 0,
 				payment_comments: "",
 			},
 		},

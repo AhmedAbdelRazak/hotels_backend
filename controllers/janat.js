@@ -493,27 +493,82 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 			amountInSAR,
 			totalAmountSAR,
 		});
-
-		const emailOptions = {
-			to: reservation.customer_details.email,
+		const baseEmail = {
 			from: "noreply@jannatbooking.com",
 			subject: "Payment Confirmation Required - Jannat Booking",
 			html: emailHtmlContent,
 		};
-
-		const emailOptions2 = {
-			to: [
-				{ email: "morazzakhamouda@gmail.com" },
-				{ email: "xhoteleg@gmail.com" },
-				{ email: "ahmed.abdelrazak@jannatbooking.com" },
-			],
-			from: "noreply@jannatbooking.com",
-			subject: "Payment Confirmation Required - Jannat Booking",
-			html: emailHtmlContent,
+		const normalizeEmail = (value) =>
+			typeof value === "string" ? value.trim().toLowerCase() : "";
+		const isLikelyEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+		const emailContext = "Payment trigger email";
+		const sendEmailSafe = async (payload, label) => {
+			const to = payload?.to || null;
+			console.log(`[Email][${emailContext}] send start`, { label, to });
+			try {
+				const result = await sgMail.send(payload);
+				const response = Array.isArray(result) ? result[0] : result;
+				console.log(`[Email][${emailContext}] send success`, {
+					label,
+					to,
+					status: response?.statusCode || null,
+					requestId:
+						response?.headers?.["x-request-id"] ||
+						response?.headers?.["x-message-id"] ||
+						null,
+				});
+				return { ok: true };
+			} catch (err) {
+				console.error(`[Email][${emailContext}] send failed`, {
+					label,
+					to,
+					error: err?.response?.body || err?.message || err,
+				});
+				return { ok: false, error: err };
+			}
 		};
 
-		await sgMail.send(emailOptions);
-		await sgMail.send(emailOptions2);
+		const guestAddr = normalizeEmail(reservation?.customer_details?.email);
+		if (!isLikelyEmail(guestAddr)) {
+			return res.status(400).json({ message: "Invalid email address." });
+		}
+		const guestResult = await sendEmailSafe(
+			{ ...baseEmail, to: guestAddr },
+			"guest payment link",
+		);
+
+		const internalEmails = [
+			"morazzakhamouda@gmail.com",
+			"xhoteleg@gmail.com",
+			"ahmed.abdelrazak@jannatbooking.com",
+			"support@jannatbooking.com",
+		]
+			.map(normalizeEmail)
+			.filter(
+				(addr, index, arr) =>
+					isLikelyEmail(addr) && arr.indexOf(addr) === index,
+			);
+
+		console.log(`[Email][${emailContext}] internal list`, {
+			count: internalEmails.length,
+			recipients: internalEmails,
+		});
+
+		const internalResults = await Promise.all(
+			internalEmails.map((addr) =>
+				sendEmailSafe(
+					{ ...baseEmail, to: addr },
+					`staff payment link (${addr})`,
+				),
+			),
+		);
+		const failedInternal = internalEmails.filter(
+			(_, index) => !internalResults[index]?.ok,
+		);
+		console.log(`[Email][${emailContext}] internal summary`, {
+			sent: internalEmails.length - failedInternal.length,
+			failed: failedInternal,
+		});
 
 		// ---- WhatsApp: payment link to guest ----
 		try {
@@ -523,6 +578,12 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 				"[WA] sendEmailForTriggeringPayment:",
 				waErr?.message || waErr,
 			);
+		}
+
+		if (!guestResult.ok) {
+			return res.status(502).json({
+				message: "Failed to send confirmation email. Please try again later.",
+			});
 		}
 
 		return res
@@ -724,7 +785,7 @@ function ensureUniqueNumber(model, fieldName, callback) {
 
 const createPdfBuffer = async (html) => {
 	const browser = await puppeteer.launch({
-		headless: true,
+		headless: "new",
 		args: [
 			"--no-sandbox",
 			"--disable-setuid-sandbox",
@@ -752,43 +813,121 @@ const sendEmailWithInvoice = async (
 	try {
 		const html = ClientConfirmationEmail(reservationData);
 
-		// Generate attached PDF invoice
-		const pdfBuffer = await createPdfBuffer(html);
+		let pdfBuffer = null;
+		try {
+			pdfBuffer = await createPdfBuffer(html);
+		} catch (pdfErr) {
+			console.error(
+				"[Email] Failed to generate confirmation PDF:",
+				pdfErr?.message || pdfErr,
+			);
+		}
 
-		// 1) Send to Guest
-		await sgMail.send({
-			to: guestEmail || "ahmed.abdelrazak20@gmail.com", // fallback
+		const attachments = pdfBuffer
+			? [
+					{
+						content: pdfBuffer.toString("base64"),
+						filename: "Reservation_Invoice.pdf",
+						type: "application/pdf",
+						disposition: "attachment",
+					},
+			  ]
+			: null;
+
+		const baseEmail = {
 			from: "noreply@jannatbooking.com",
 			subject: "Reservation Confirmation - Invoice Attached",
 			html,
-			attachments: [
-				{
-					content: pdfBuffer.toString("base64"),
-					filename: "Reservation_Invoice.pdf",
-					type: "application/pdf",
-					disposition: "attachment",
-				},
-			],
+			...(attachments ? { attachments } : {}),
+		};
+
+		const normalizeEmail = (value) =>
+			typeof value === "string" ? value.trim().toLowerCase() : "";
+		const isLikelyEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+		const emailContext = "Invoice email";
+		const sendEmailSafe = async (payload, label) => {
+			const to = payload?.to || null;
+			console.log(`[Email][${emailContext}] send start`, { label, to });
+			try {
+				const result = await sgMail.send(payload);
+				const response = Array.isArray(result) ? result[0] : result;
+				console.log(`[Email][${emailContext}] send success`, {
+					label,
+					to,
+					status: response?.statusCode || null,
+					requestId:
+						response?.headers?.["x-request-id"] ||
+						response?.headers?.["x-message-id"] ||
+						null,
+				});
+				return { ok: true };
+			} catch (err) {
+				console.error(`[Email][${emailContext}] send failed`, {
+					label,
+					to,
+					error: err?.response?.body || err?.message || err,
+				});
+				return { ok: false, error: err };
+			}
+		};
+
+		const guestRaw = typeof guestEmail === "string" ? guestEmail.trim() : "";
+		const guestAddr = normalizeEmail(guestRaw);
+		const guestTarget = isLikelyEmail(guestAddr)
+			? guestAddr
+			: !guestRaw
+			? "ahmed.abdelrazak20@gmail.com"
+			: "";
+
+		if (guestTarget) {
+			const guestResult = await sendEmailSafe(
+				{ ...baseEmail, to: guestTarget },
+				guestTarget === guestAddr
+					? "guest confirmation"
+					: "guest confirmation fallback",
+			);
+			if (!guestResult.ok) {
+				console.warn("[Email][Invoice email] guest send failed", {
+					email: guestTarget,
+				});
+			}
+		} else {
+			console.warn("[Email] Skipping guest confirmation (invalid email)", {
+				email: guestEmail || "",
+			});
+		}
+
+		const staffEmails = [
+			"morazzakhamouda@gmail.com",
+			"xhoteleg@gmail.com",
+			"ahmed.abdelrazak@jannatbooking.com",
+			"support@jannatbooking.com",
+		]
+			.map(normalizeEmail)
+			.filter(
+				(addr, index, arr) =>
+					isLikelyEmail(addr) && arr.indexOf(addr) === index,
+			);
+
+		console.log("[Email][Invoice email] internal list", {
+			count: staffEmails.length,
+			recipients: staffEmails,
 		});
 
-		// 2) Send to Internal Staff
-		await sgMail.send({
-			to: [
-				{ email: "morazzakhamouda@gmail.com" },
-				{ email: "xhoteleg@gmail.com" },
-				{ email: "ahmed.abdelrazak@jannatbooking.com" },
-			],
-			from: "noreply@jannatbooking.com",
-			subject: "Reservation Confirmation - Invoice Attached",
-			html,
-			attachments: [
-				{
-					content: pdfBuffer.toString("base64"),
-					filename: "Reservation_Invoice.pdf",
-					type: "application/pdf",
-					disposition: "attachment",
-				},
-			],
+		const staffResults = await Promise.all(
+			staffEmails.map((addr) =>
+				sendEmailSafe(
+					{ ...baseEmail, to: addr },
+					`staff confirmation (${addr})`,
+				),
+			),
+		);
+		const failedStaff = staffEmails.filter(
+			(_, index) => !staffResults[index]?.ok,
+		);
+		console.log("[Email][Invoice email] internal summary", {
+			sent: staffEmails.length - failedStaff.length,
+			failed: failedStaff,
 		});
 
 		// 3) Send **separately** to the Hotel Owner (guaranteed via populate)
@@ -802,11 +941,18 @@ const sendEmailWithInvoice = async (
 			const ownerEmail = owner?.email || null;
 
 			if (ownerEmail) {
-				await sendCriticalOwnerEmail(
-					ownerEmail,
-					"Reservation Confirmation - Invoice Attached",
-					html,
-				);
+				try {
+					await sendCriticalOwnerEmail(
+						ownerEmail,
+						"Reservation Confirmation - Invoice Attached",
+						html,
+					);
+				} catch (err) {
+					console.error(
+						"[Email] owner confirmation failed:",
+						err?.response?.body || err,
+					);
+				}
 			}
 		}
 
@@ -889,6 +1035,7 @@ exports.createNewReservationClient = async (req, res) => {
 				"morazzakhamouda@gmail.com",
 				"xhoteleg@gmail.com",
 				"ahmed.abdelrazak@jannatbooking.com",
+				"support@jannatbooking.com",
 			];
 
 			try {
@@ -2406,26 +2553,95 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			confirmationLink: generatedLink,
 		});
 
-		const emailOptions = {
-			to: email,
+		const normalizeEmail = (value) =>
+			typeof value === "string" ? value.trim().toLowerCase() : "";
+		const isLikelyEmail = (value) => {
+			if (!value) return false;
+			return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+		};
+		const emailContext = "Payment link email";
+		const guestEmail = normalizeEmail(email);
+		if (!isLikelyEmail(guestEmail)) {
+			return res.status(400).json({ error: "Invalid guest email address." });
+		}
+
+		const baseEmail = {
 			from: "noreply@jannatbooking.com",
 			subject: `${hotelName} | Reservation Confirmation Link`,
 			html: emailHtmlContent,
 		};
 
-		const emailOptions2 = {
-			to: [
-				{ email: "morazzakhamouda@gmail.com" },
-				{ email: "xhoteleg@gmail.com" },
-				{ email: "ahmed.abdelrazak@jannatbooking.com" },
-			],
-			from: "noreply@jannatbooking.com",
-			subject: `${hotelName} | Reservation Confirmation Link`,
-			html: emailHtmlContent,
+		const sendEmailSafe = async (payload, label) => {
+			const to = payload?.to || null;
+			console.log(`[Email][${emailContext}] send start`, { label, to });
+			try {
+				const result = await sgMail.send(payload);
+				const response = Array.isArray(result) ? result[0] : result;
+				console.log(`[Email][${emailContext}] send success`, {
+					label,
+					to,
+					status: response?.statusCode || null,
+					requestId:
+						response?.headers?.["x-request-id"] ||
+						response?.headers?.["x-message-id"] ||
+						null,
+				});
+				return { ok: true };
+			} catch (err) {
+				console.error(`[Email][${emailContext}] send failed`, {
+					label,
+					to,
+					error: err?.response?.body || err?.message || err,
+				});
+				return { ok: false, error: err };
+			}
 		};
 
-		await sgMail.send(emailOptions);
-		await sgMail.send(emailOptions2);
+		const guestResult = await sendEmailSafe(
+			{ ...baseEmail, to: guestEmail },
+			"payment link guest",
+		);
+
+		const staffEmails = [
+			"morazzakhamouda@gmail.com",
+			"xhoteleg@gmail.com",
+			"ahmed.abdelrazak@jannatbooking.com",
+			"support@jannatbooking.com",
+		]
+			.map(normalizeEmail)
+			.filter(
+				(addr, index, arr) =>
+					isLikelyEmail(addr) && arr.indexOf(addr) === index,
+			);
+
+		console.log(`[Email][${emailContext}] internal list`, {
+			count: staffEmails.length,
+			recipients: staffEmails,
+		});
+
+		const staffResults = await Promise.all(
+			staffEmails.map((addr) =>
+				sendEmailSafe(
+					{ ...baseEmail, to: addr },
+					`payment link staff (${addr})`,
+				),
+			),
+		);
+		const failedStaff = staffEmails.filter(
+			(_, index) => !staffResults[index]?.ok,
+		);
+		console.log(`[Email][${emailContext}] internal summary`, {
+			sent: staffEmails.length - failedStaff.length,
+			failed: failedStaff,
+		});
+
+		const warnings = [];
+		if (!guestResult.ok) warnings.push("guest_email_failed");
+		staffResults.forEach((result, index) => {
+			if (!result.ok) {
+				warnings.push(`staff_email_failed:${staffEmails[index]}`);
+			}
+		});
 
 		// if belongsTo role=2000 then also notify them by email (existing behavior)
 		if (belongsTo) {
@@ -2436,12 +2652,15 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 				const belongsToUser = await User.findById(belongsToId);
 				if (belongsToUser && belongsToUser.role === 2000) {
-					await sgMail.send({
-						to: belongsToUser.email,
-						from: "noreply@jannatbooking.com",
-						subject: `${hotelName} | Reservation Confirmation Link`,
-						html: emailHtmlContent,
-					});
+					if (isLikelyEmail(normalizeEmail(belongsToUser.email))) {
+						const ownerResult = await sendEmailSafe(
+							{ ...baseEmail, to: normalizeEmail(belongsToUser.email) },
+							`payment link owner (${belongsToUser.email})`,
+						);
+						if (!ownerResult.ok) {
+							warnings.push(`owner_email_failed:${belongsToUser.email}`);
+						}
+					}
 				}
 			}
 		}
@@ -2478,7 +2697,13 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			agentName,
 		});
 
-		res.status(200).json({ message: "Email sent successfully." });
+		const statusCode = guestResult.ok ? 200 : 502;
+		res.status(statusCode).json({
+			message: guestResult.ok
+				? "Email sent successfully."
+				: "Failed to send payment link email to the guest.",
+			warnings,
+		});
 	} catch (error) {
 		console.error("Error sending email for payment link:", error);
 		res
@@ -2530,26 +2755,86 @@ const sendPaymentTriggeredEmail = async (reservationData) => {
 	try {
 		const emailHtmlContent = paymentTriggered(reservationData);
 
-		const msg = {
-			to: reservationData.customer_details.email, // Guest's email
+		const baseEmail = {
 			from: "noreply@jannatbooking.com", // Your verified sender
 			subject: "Payment Confirmation - Jannat Booking",
 			html: emailHtmlContent,
 		};
 
-		const msg2 = {
-			to: [
-				{ email: "morazzakhamouda@gmail.com" },
-				{ email: "xhoteleg@gmail.com" },
-				{ email: "ahmed.abdelrazak@jannatbooking.com" },
-			],
-			from: "noreply@jannatbooking.com", // Your verified sender
-			subject: "Payment Confirmation - Jannat Booking",
-			html: emailHtmlContent,
+		const normalizeEmail = (value) =>
+			typeof value === "string" ? value.trim().toLowerCase() : "";
+		const isLikelyEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+		const emailContext = "Payment confirmation email";
+		const sendEmailSafe = async (payload, label) => {
+			const to = payload?.to || null;
+			console.log(`[Email][${emailContext}] send start`, { label, to });
+			try {
+				const result = await sgMail.send(payload);
+				const response = Array.isArray(result) ? result[0] : result;
+				console.log(`[Email][${emailContext}] send success`, {
+					label,
+					to,
+					status: response?.statusCode || null,
+					requestId:
+						response?.headers?.["x-request-id"] ||
+						response?.headers?.["x-message-id"] ||
+						null,
+				});
+				return { ok: true };
+			} catch (err) {
+				console.error(`[Email][${emailContext}] send failed`, {
+					label,
+					to,
+					error: err?.response?.body || err?.message || err,
+				});
+				return { ok: false, error: err };
+			}
 		};
 
-		await sgMail.send(msg);
-		await sgMail.send(msg2);
+		const guestAddr = normalizeEmail(reservationData?.customer_details?.email);
+		if (isLikelyEmail(guestAddr)) {
+			await sendEmailSafe(
+				{ ...baseEmail, to: guestAddr },
+				"guest payment confirmation",
+			);
+		} else {
+			console.warn("[Email] Skipping payment confirmation (invalid email)", {
+				email: reservationData?.customer_details?.email || "",
+			});
+		}
+
+		const staffEmails = [
+			"morazzakhamouda@gmail.com",
+			"xhoteleg@gmail.com",
+			"ahmed.abdelrazak@jannatbooking.com",
+			"support@jannatbooking.com",
+		]
+			.map(normalizeEmail)
+			.filter(
+				(addr, index, arr) =>
+					isLikelyEmail(addr) && arr.indexOf(addr) === index,
+			);
+
+		console.log(`[Email][${emailContext}] internal list`, {
+			count: staffEmails.length,
+			recipients: staffEmails,
+		});
+
+		const staffResults = await Promise.all(
+			staffEmails.map((addr) =>
+				sendEmailSafe(
+					{ ...baseEmail, to: addr },
+					`staff payment confirmation (${addr})`,
+				),
+			),
+		);
+		const failedStaff = staffEmails.filter(
+			(_, index) => !staffResults[index]?.ok,
+		);
+		console.log(`[Email][${emailContext}] internal summary`, {
+			sent: staffEmails.length - failedStaff.length,
+			failed: failedStaff,
+		});
 		console.log("Payment confirmation email sent successfully.");
 	} catch (error) {
 		console.error("Error sending payment confirmation email:", error);
@@ -3181,40 +3466,110 @@ exports.createNewReservationClient2 = async (req, res) => {
 			};
 
 			const emailHtmlContent = ClientConfirmationEmail(reservationData);
-			const pdfBuffer = await createPdfBuffer(emailHtmlContent);
+			let pdfBuffer = null;
+			try {
+				pdfBuffer = await createPdfBuffer(emailHtmlContent);
+			} catch (pdfErr) {
+				console.error(
+					"[Email] Failed to generate confirmation PDF:",
+					pdfErr?.message || pdfErr,
+				);
+			}
 
-			await sgMail.send({
-				to: customerDetails.email || "noreply@jannatbooking.com",
+			const attachments = pdfBuffer
+				? [
+						{
+							content: pdfBuffer.toString("base64"),
+							filename: "Reservation_Invoice.pdf",
+							type: "application/pdf",
+							disposition: "attachment",
+						},
+				  ]
+				: null;
+
+			const baseEmail = {
 				from: "noreply@jannatbooking.com",
 				subject: "Reservation Confirmation - Invoice Attached",
 				html: emailHtmlContent,
-				attachments: [
-					{
-						content: pdfBuffer.toString("base64"),
-						filename: "Reservation_Invoice.pdf",
-						type: "application/pdf",
-						disposition: "attachment",
-					},
-				],
+				...(attachments ? { attachments } : {}),
+			};
+
+			const emailContext = "OrderTaker reservation confirmation";
+			const sendEmailSafe = async (payload, label) => {
+				const to = payload?.to || null;
+				console.log(`[Email][${emailContext}] send start`, { label, to });
+				try {
+					const result = await sgMail.send(payload);
+					const response = Array.isArray(result) ? result[0] : result;
+					console.log(`[Email][${emailContext}] send success`, {
+						label,
+						to,
+						status: response?.statusCode || null,
+						requestId:
+							response?.headers?.["x-request-id"] ||
+							response?.headers?.["x-message-id"] ||
+							null,
+					});
+					return { ok: true };
+				} catch (err) {
+					console.error(`[Email][${emailContext}] send failed`, {
+						label,
+						to,
+						error: err?.response?.body || err?.message || err,
+					});
+					return { ok: false, error: err };
+				}
+			};
+
+			const guestEmail = normalizeEmail(customerDetails?.email);
+			if (isEmailValid(guestEmail)) {
+				const guestResult = await sendEmailSafe(
+					{ ...baseEmail, to: guestEmail },
+					"guest confirmation",
+				);
+				if (!guestResult.ok) {
+					console.warn(`[Email][${emailContext}] guest send failed`, {
+						email: guestEmail,
+					});
+				}
+			} else {
+				console.warn("[Email] Skipping guest confirmation (invalid email)", {
+					email: customerDetails?.email || "",
+					reservationId: savedReservation?._id || "",
+				});
+			}
+
+			const staffEmails = [
+				"morazzakhamouda@gmail.com",
+				"xhoteleg@gmail.com",
+				"ahmed.abdelrazak@jannatbooking.com",
+				"support@jannatbooking.com",
+			]
+				.map((addr) => normalizeEmail(addr))
+				.filter(
+					(addr, index, arr) =>
+						isEmailValid(addr) && arr.indexOf(addr) === index,
+				);
+
+			console.log(`[Email][${emailContext}] internal list`, {
+				count: staffEmails.length,
+				recipients: staffEmails,
 			});
 
-			await sgMail.send({
-				to: [
-					"morazzakhamouda@gmail.com",
-					"xhoteleg@gmail.com",
-					"ahmed.abdelrazak@jannatbooking.com",
-				],
-				from: "noreply@jannatbooking.com",
-				subject: "Reservation Confirmation - Invoice Attached",
-				html: emailHtmlContent,
-				attachments: [
-					{
-						content: pdfBuffer.toString("base64"),
-						filename: "Reservation_Invoice.pdf",
-						type: "application/pdf",
-						disposition: "attachment",
-					},
-				],
+			const staffResults = await Promise.all(
+				staffEmails.map((addr) =>
+					sendEmailSafe(
+						{ ...baseEmail, to: addr },
+						`staff confirmation (${addr})`,
+					),
+				),
+			);
+			const failedStaff = staffEmails.filter(
+				(_, index) => !staffResults[index]?.ok,
+			);
+			console.log(`[Email][${emailContext}] internal summary`, {
+				sent: staffEmails.length - failedStaff.length,
+				failed: failedStaff,
 			});
 
 			if (belongsTo) {
@@ -3225,20 +3580,21 @@ exports.createNewReservationClient2 = async (req, res) => {
 				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 					const belongsToUser = await User.findById(belongsToId);
 					if (belongsToUser && belongsToUser.role === 2000) {
-						await sgMail.send({
-							to: belongsToUser.email,
-							from: "noreply@jannatbooking.com",
-							subject: "Reservation Confirmation - Invoice Attached",
-							html: emailHtmlContent,
-							attachments: [
-								{
-									content: pdfBuffer.toString("base64"),
-									filename: "Reservation_Invoice.pdf",
-									type: "application/pdf",
-									disposition: "attachment",
-								},
-							],
-						});
+						if (isEmailValid(belongsToUser.email)) {
+							const ownerResult = await sendEmailSafe(
+								{ ...baseEmail, to: belongsToUser.email },
+								`owner confirmation (${belongsToUser.email})`,
+							);
+							if (!ownerResult.ok) {
+								console.warn(`[Email][${emailContext}] owner send failed`, {
+									email: belongsToUser.email,
+								});
+							}
+						} else {
+							console.warn(`[Email][${emailContext}] owner email invalid`, {
+								email: belongsToUser.email,
+							});
+						}
 					}
 				}
 			}
@@ -3322,6 +3678,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 					"morazzakhamouda@gmail.com",
 					"xhoteleg@gmail.com",
 					"ahmed.abdelrazak@jannatbooking.com",
+					"support@jannatbooking.com",
 				],
 				from: "noreply@jannatbooking.com",
 				subject: "Verify Your Reservation",

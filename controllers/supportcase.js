@@ -224,6 +224,7 @@ exports.createNewSupportCase = async (req, res) => {
 				"morazzakhamouda@gmail.com",
 				"xhoteleg@gmail.com",
 				"ahmed.abdelrazak@jannatbooking.com",
+				"support@jannatbooking.com",
 			],
 			subject: `New Support Case | ${hotelName}`,
 			html: emailHtml,

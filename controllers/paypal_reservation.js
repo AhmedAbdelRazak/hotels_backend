@@ -96,6 +96,78 @@ const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
 const almostEq = (a, b) => Math.abs(toNum2(a) - toNum2(b)) < 1e-9;
+const INTERNAL_NOTIFICATION_EMAILS = [
+	"morazzakhamouda@gmail.com",
+	"xhoteleg@gmail.com",
+	"ahmed.abdelrazak@jannatbooking.com",
+	"support@jannatbooking.com",
+];
+const normalizeEmail = (value) =>
+	typeof value === "string" ? value.trim().toLowerCase() : "";
+const isLikelyEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const uniqueValidEmails = (emails) => {
+	const seen = new Set();
+	const result = [];
+	emails.forEach((email) => {
+		const normalized = normalizeEmail(email);
+		if (!isLikelyEmail(normalized) || seen.has(normalized)) return;
+		seen.add(normalized);
+		result.push(normalized);
+	});
+	return result;
+};
+const getInternalNotificationEmails = () =>
+	uniqueValidEmails(INTERNAL_NOTIFICATION_EMAILS);
+const sendEmailSafe = async (payload, label) => {
+	const to = payload?.to || null;
+	console.log("[Email] send start", { label, to });
+	try {
+		const result = await sgMail.send(payload);
+		const response = Array.isArray(result) ? result[0] : result;
+		console.log("[Email] send success", {
+			label,
+			to,
+			status: response?.statusCode || null,
+			requestId:
+				response?.headers?.["x-request-id"] ||
+				response?.headers?.["x-message-id"] ||
+				null,
+		});
+		return { ok: true };
+	} catch (err) {
+		console.error("[Email] send failed", {
+			label,
+			to,
+			error: err?.response?.body || err?.message || err,
+		});
+		return { ok: false, error: err };
+	}
+};
+const buildJannatBookingBreakdown = (
+	paymentLabel,
+	paidAmount,
+	existingBreakdown
+) => {
+	if (existingBreakdown && typeof existingBreakdown === "object") {
+		return existingBreakdown;
+	}
+	const amount = toNum2(paidAmount || 0);
+	if (!(amount > 0)) return undefined;
+	const label = String(paymentLabel || "").toLowerCase();
+	if (label !== "paid online" && label !== "deposit paid") {
+		return undefined;
+	}
+	return {
+		paid_online_via_link: 0,
+		paid_at_hotel_cash: 0,
+		paid_at_hotel_card: 0,
+		paid_to_zad: 0,
+		paid_online_jannatbooking: amount,
+		paid_online_other_platforms: 0,
+		paid_online_via_instapay: 0,
+		payment_comments: "",
+	};
+};
 
 function sanitizeCustomerDetails(cd) {
 	const o = { ...(cd || {}) };
@@ -142,7 +214,7 @@ function ensureUniqueNumber(model, fieldName, callback) {
 
 const createPdfBuffer = async (html) => {
 	const browser = await puppeteer.launch({
-		headless: true,
+		headless: "new",
 		args: [
 			"--no-sandbox",
 			"--disable-setuid-sandbox",
@@ -167,56 +239,76 @@ async function sendEmailWithInvoice(
 	hotelIdOrNull
 ) {
 	const html = ClientConfirmationEmail(reservationData);
-	const pdfBuffer = await createPdfBuffer(html);
+	let pdfBuffer = null;
+	try {
+		pdfBuffer = await createPdfBuffer(html);
+	} catch (err) {
+		console.error(
+			"[Email] Failed to generate confirmation PDF:",
+			err?.message || err
+		);
+	}
 
-	// Guest
-	await sgMail.send({
-		to: guestEmail || "noreply@jannatbooking.com",
+	const attachments = pdfBuffer
+		? [
+				{
+					content: pdfBuffer.toString("base64"),
+					filename: "Reservation_Invoice.pdf",
+					type: "application/pdf",
+					disposition: "attachment",
+				},
+		  ]
+		: null;
+
+	const baseEmail = {
 		from: "noreply@jannatbooking.com",
 		subject: "Reservation Confirmation - Invoice Attached",
 		html,
-		attachments: [
-			{
-				content: pdfBuffer.toString("base64"),
-				filename: "Reservation_Invoice.pdf",
-				type: "application/pdf",
-				disposition: "attachment",
-			},
-		],
-	});
+		...(attachments ? { attachments } : {}),
+	};
 
-	// Internal
-	await sgMail.send({
-		to: [
-			{ email: "morazzakhamouda@gmail.com" },
-			{ email: "xhoteleg@gmail.com" },
-			{ email: "ahmed.abdelrazak@jannatbooking.com" },
-		],
-		from: "noreply@jannatbooking.com",
-		subject: "Reservation Confirmation - Invoice Attached",
-		html,
-		attachments: [
-			{
-				content: pdfBuffer.toString("base64"),
-				filename: "Reservation_Invoice.pdf",
-				type: "application/pdf",
-				disposition: "attachment",
-			},
-		],
-	});
+	const guestAddr = normalizeEmail(guestEmail);
+	if (isLikelyEmail(guestAddr)) {
+		await sendEmailSafe(
+			{ ...baseEmail, to: guestAddr },
+			"guest confirmation"
+		);
+	} else {
+		console.warn("[Email] Skipping guest confirmation (invalid email)", {
+			email: guestEmail || "",
+		});
+	}
+
+	const internalEmails = getInternalNotificationEmails();
+
+	await Promise.all(
+		internalEmails.map((addr) =>
+			sendEmailSafe(
+				{ ...baseEmail, to: addr },
+				`staff confirmation (${addr})`
+			)
+		)
+	);
 
 	// Owner
 	const resolvedHotelId =
 		reservationData?.hotelId?._id || reservationData?.hotelId || hotelIdOrNull;
 	if (resolvedHotelId && mongoose.Types.ObjectId.isValid(resolvedHotelId)) {
 		const { owner } = await getHotelAndOwner(resolvedHotelId);
-		const ownerEmail = owner?.email || null;
-		if (ownerEmail) {
-			await sendCriticalOwnerEmail(
-				ownerEmail,
-				"Reservation Confirmation - Invoice Attached",
-				html
-			);
+		const ownerEmail = normalizeEmail(owner?.email);
+		if (isLikelyEmail(ownerEmail)) {
+			try {
+				await sendCriticalOwnerEmail(
+					ownerEmail,
+					"Reservation Confirmation - Invoice Attached",
+					html
+				);
+			} catch (err) {
+				console.error(
+					`[Email] owner confirmation failed:`,
+					err?.response?.body || err
+				);
+			}
 		}
 	}
 }
@@ -550,6 +642,7 @@ async function buildAndSaveReservation({
 		booking_source,
 		pickedRoomsType,
 		payment,
+		paid_amount_breakdown,
 		paid_amount,
 		commission,
 		commissionPaid,
@@ -558,6 +651,11 @@ async function buildAndSaveReservation({
 		convertedAmounts,
 		financeStatus, // lowercase please
 	} = reqBody;
+	const initialBreakdown = buildJannatBookingBreakdown(
+		payment,
+		paid_amount,
+		paid_amount_breakdown
+	);
 
 	const bounds =
 		(paypalDetailsToPersist && paypalDetailsToPersist.bounds) ||
@@ -582,6 +680,7 @@ async function buildAndSaveReservation({
 		pickedRoomsType,
 		payment,
 		paid_amount: toNum2(paid_amount || 0), // <-- SAR
+		...(initialBreakdown ? { paid_amount_breakdown: initialBreakdown } : {}),
 		commission: toNum2(commission || 0),
 		commissionPaid: !!commissionPaid,
 		hotelName,
@@ -885,24 +984,52 @@ exports.createReservationAndProcess = async (req, res) => {
 					hotelName: hotel.hotelName,
 					confirmationLink: verificationLinkEmail,
 				});
-				await sgMail.send({
-					to: email,
+				const baseEmail = {
 					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
 					html: emailContent,
-					bcc: [
-						"morazzakhamouda@gmail.com",
-						"xhoteleg@gmail.com",
-						"ahmed.abdelrazak@jannatbooking.com",
-					],
-				});
+				};
+				const guestAddr = normalizeEmail(email);
+				if (!isLikelyEmail(guestAddr)) {
+					return res
+						.status(400)
+						.json({ message: "Invalid email address." });
+				}
+
+				const guestResult = await sendEmailSafe(
+					{ ...baseEmail, to: guestAddr },
+					"guest verification"
+				);
+				const internalEmails = getInternalNotificationEmails();
+				await Promise.all(
+					internalEmails.map((addr) =>
+						sendEmailSafe(
+							{ ...baseEmail, to: addr },
+							`staff verification (${addr})`
+						)
+					)
+				);
 
 				if (ownerEmail) {
-					await sendCriticalOwnerEmail(
-						ownerEmail,
-						`Reservation Verification Initiated — ${hotel.hotelName}`,
-						emailContent
-					);
+					try {
+						await sendCriticalOwnerEmail(
+							ownerEmail,
+							`Reservation Verification Initiated — ${hotel.hotelName}`,
+							emailContent
+						);
+					} catch (err) {
+						console.error(
+							"[Email] owner verification failed:",
+							err?.response?.body || err
+						);
+					}
+				}
+
+				if (!guestResult.ok) {
+					return res.status(502).json({
+						message:
+							"Failed to send verification email. Please try again.",
+					});
 				}
 				try {
 					await waSendVerificationLink(
@@ -1863,23 +1990,38 @@ exports.mitChargeReservation = async (req, res) => {
 
 		/* ── Receipt emails (best effort) ─────────────────────────────────── */
 		try {
-			await sgMail.send({
-				to: updated.customer_details.email,
+			const baseEmail = {
 				from: "noreply@jannatbooking.com",
 				subject: "Payment Confirmation - Jannat Booking",
 				html: paymentTriggered(updated),
-			});
-			await sgMail.send({
-				to: [
-					{ email: "morazzakhamouda@gmail.com" },
-					{ email: "xhoteleg@gmail.com" },
-					{ email: "ahmed.abdelrazak@jannatbooking.com" },
-				],
-				from: "noreply@jannatbooking.com",
-				subject: "Payment Confirmation - Jannat Booking",
-				html: paymentTriggered(updated),
-			});
-		} catch (_) {}
+			};
+			const guestAddr = normalizeEmail(updated?.customer_details?.email);
+			if (isLikelyEmail(guestAddr)) {
+				await sendEmailSafe(
+					{ ...baseEmail, to: guestAddr },
+					"guest payment confirmation"
+				);
+			} else {
+				console.warn("[Email] Skipping payment confirmation (invalid email)", {
+					email: updated?.customer_details?.email || "",
+				});
+			}
+
+			const internalEmails = getInternalNotificationEmails();
+			await Promise.all(
+				internalEmails.map((addr) =>
+					sendEmailSafe(
+						{ ...baseEmail, to: addr },
+						`staff payment confirmation (${addr})`
+					)
+				)
+			);
+		} catch (err) {
+			console.warn(
+				"[Email] payment confirmation dispatch warning:",
+				err?.message || err
+			);
+		}
 
 		return res.status(200).json({
 			message:
@@ -2775,7 +2917,11 @@ exports.linkPayReservation = async (req, res) => {
 		};
 		const incAfter =
 			typeof sarAmount !== "undefined"
-				? { paid_amount: Math.round(Number(sarAmount || 0) * 100) / 100 }
+				? {
+						paid_amount: Math.round(Number(sarAmount || 0) * 100) / 100,
+						"paid_amount_breakdown.paid_online_via_link":
+							Math.round(Number(sarAmount || 0) * 100) / 100,
+				  }
 				: null;
 
 		if (vaultIdFromCap) {
