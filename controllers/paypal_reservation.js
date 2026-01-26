@@ -38,6 +38,7 @@ const User = require("../models/user");
 /* Templates + WhatsApp */
 const {
 	ClientConfirmationEmail,
+	receiptPdfTemplate,
 	ReservationVerificationEmail,
 	SendingReservationLinkEmailTrigger,
 	paymentTriggered,
@@ -252,7 +253,7 @@ const createPdfBuffer = async (html) => {
 	});
 	const page = await browser.newPage();
 	await page.setContent(html, { waitUntil: "networkidle0" });
-	const pdfBuffer = await page.pdf({ format: "A4" });
+	const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
 	await browser.close();
 	return pdfBuffer;
 };
@@ -263,9 +264,17 @@ async function sendEmailWithInvoice(
 	hotelIdOrNull
 ) {
 	const html = ClientConfirmationEmail(reservationData);
+	const hotelForPdf =
+		reservationData?.hotelId && typeof reservationData.hotelId === "object"
+			? reservationData.hotelId
+			: {
+					hotelName: reservationData?.hotelName || "",
+					suppliedBy: reservationData?.belongsTo?.name || "",
+			  };
+	const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
 	let pdfBuffer = null;
 	try {
-		pdfBuffer = await createPdfBuffer(html);
+		pdfBuffer = await createPdfBuffer(pdfHtml);
 	} catch (err) {
 		console.error(
 			"[Email] Failed to generate confirmation PDF:",

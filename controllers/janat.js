@@ -12,6 +12,7 @@ require("dotenv").config();
 const fetch = require("node-fetch");
 const {
 	ClientConfirmationEmail,
+	receiptPdfTemplate,
 	SendingReservationLinkEmail,
 	ReservationVerificationEmail,
 	SendingReservationLinkEmailTrigger,
@@ -20,8 +21,10 @@ const {
 const {
 	ensureE164Phone,
 	waSendReservationConfirmation,
+	waSendReservationConfirmationToNumber,
 	waSendVerificationLink,
 	waSendPaymentLink,
+	waSendPaymentLinkToNumber,
 	waSendReservationUpdate,
 	waNotifyNewReservation,
 } = require("./whatsappsender");
@@ -800,7 +803,7 @@ const createPdfBuffer = async (html) => {
 
 	const page = await browser.newPage();
 	await page.setContent(html, { waitUntil: "networkidle0" });
-	const pdfBuffer = await page.pdf({ format: "A4" });
+	const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
 	await browser.close();
 	return pdfBuffer;
 };
@@ -812,10 +815,18 @@ const sendEmailWithInvoice = async (
 ) => {
 	try {
 		const html = ClientConfirmationEmail(reservationData);
+		const hotelForPdf =
+			reservationData?.hotelId && typeof reservationData.hotelId === "object"
+				? reservationData.hotelId
+				: {
+						hotelName: reservationData?.hotelName || "",
+						suppliedBy: reservationData?.belongsTo?.name || "",
+				  };
+		const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
 
 		let pdfBuffer = null;
 		try {
-			pdfBuffer = await createPdfBuffer(html);
+			pdfBuffer = await createPdfBuffer(pdfHtml);
 		} catch (pdfErr) {
 			console.error(
 				"[Email] Failed to generate confirmation PDF:",
@@ -3466,9 +3477,17 @@ exports.createNewReservationClient2 = async (req, res) => {
 			};
 
 			const emailHtmlContent = ClientConfirmationEmail(reservationData);
+			const hotelForPdf =
+				hotel && typeof hotel === "object"
+					? hotel
+					: {
+							hotelName: reservationData?.hotelName || "",
+							suppliedBy: reservationData?.belongsTo?.name || "",
+					  };
+			const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
 			let pdfBuffer = null;
 			try {
-				pdfBuffer = await createPdfBuffer(emailHtmlContent);
+				pdfBuffer = await createPdfBuffer(pdfHtml);
 			} catch (pdfErr) {
 				console.error(
 					"[Email] Failed to generate confirmation PDF:",
@@ -4499,8 +4518,12 @@ exports.getSingleReservationInvoicePdf = async (req, res) => {
 			hotelPhone: hotel.phone || "",
 		};
 
-		const html = ClientConfirmationEmail(reservationData);
-		const pdfBuffer = await createPdfBuffer(html);
+		const hotelForPdf =
+			reservation?.hotelId && typeof reservation.hotelId === "object"
+				? reservation.hotelId
+				: hotel;
+		const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
+		const pdfBuffer = await createPdfBuffer(pdfHtml);
 
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader(
@@ -4595,6 +4618,306 @@ exports.sendWhatsAppReservationConfirmation = async (req, res) => {
 		return res.status(500).json({
 			ok: false,
 			message: "Failed to send WhatsApp confirmation.",
+			error: err?.message || String(err),
+		});
+	}
+};
+
+const normalizeManualWhatsAppPhone = (countryCode, phone, rawPhone) => {
+	let raw = String(rawPhone || "").trim();
+	if (!raw) {
+		const cc = String(countryCode || "").trim();
+		const pn = String(phone || "").trim();
+		raw = `${cc}${pn}`;
+	}
+	raw = raw.replace(/[^\d+]/g, "");
+	if (!raw) return "";
+	if (!raw.startsWith("+")) raw = `+${raw}`;
+	return raw;
+};
+
+async function findReservationForWhatsApp(reservationId, bodyReservation) {
+	let reservation = bodyReservation || null;
+	if (reservation) return reservation;
+
+	if (mongoose.Types.ObjectId.isValid(reservationId)) {
+		reservation = await Reservations.findById(reservationId).exec();
+	}
+	if (!reservation) {
+		reservation = await Reservations.findOne({
+			confirmation_number: reservationId,
+		}).exec();
+	}
+	return reservation || null;
+}
+
+exports.sendWhatsAppReservationConfirmationManualAdmin = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+		const notifyAdmins =
+			String(req.query.notifyAdmins || "false").toLowerCase() === "true";
+
+		const reservation = await findReservationForWhatsApp(
+			reservationId,
+			req.body?.reservation,
+		);
+		if (!reservation) {
+			return res.status(404).json({
+				ok: false,
+				message: "Reservation not found.",
+			});
+		}
+
+		const rawPhone = normalizeManualWhatsAppPhone(
+			req.body?.countryCode,
+			req.body?.phone,
+			req.body?.rawPhone || req.body?.to,
+		);
+		if (!rawPhone) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing phone number.",
+			});
+		}
+
+		const wa = await waSendReservationConfirmationToNumber(reservation, rawPhone, {
+			nationality: req.body?.nationality,
+		});
+
+		if (wa?.skipped) {
+			return res.status(400).json({
+				ok: false,
+				message: wa?.reason || "Failed to queue WhatsApp message.",
+				wa,
+			});
+		}
+
+		let notify = null;
+		if (notifyAdmins) {
+			try {
+				notify = await waNotifyNewReservation(reservation);
+			} catch (e) {
+				console.error(
+					"[WA] manual confirmation (admin): notifyAdmins failed",
+					e?.message || e,
+				);
+			}
+		}
+
+		return res.status(200).json({
+			ok: true,
+			message: "WhatsApp confirmation queued.",
+			wa,
+			notify,
+		});
+	} catch (err) {
+		console.error("[WA] manual confirmation (admin): error", err?.message || err);
+		return res.status(500).json({
+			ok: false,
+			message: "Failed to send WhatsApp confirmation.",
+			error: err?.message || String(err),
+		});
+	}
+};
+
+exports.sendWhatsAppReservationConfirmationManualHotel = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+
+		const reservation = await findReservationForWhatsApp(
+			reservationId,
+			req.body?.reservation,
+		);
+		if (!reservation) {
+			return res.status(404).json({
+				ok: false,
+				message: "Reservation not found.",
+			});
+		}
+
+		const rawPhone = normalizeManualWhatsAppPhone(
+			req.body?.countryCode,
+			req.body?.phone,
+			req.body?.rawPhone || req.body?.to,
+		);
+		if (!rawPhone) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing phone number.",
+			});
+		}
+
+		const wa = await waSendReservationConfirmationToNumber(reservation, rawPhone, {
+			nationality: req.body?.nationality,
+		});
+
+		if (wa?.skipped) {
+			return res.status(400).json({
+				ok: false,
+				message: wa?.reason || "Failed to queue WhatsApp message.",
+				wa,
+			});
+		}
+
+		return res.status(200).json({
+			ok: true,
+			message: "WhatsApp confirmation queued.",
+			wa,
+		});
+	} catch (err) {
+		console.error(
+			"[WA] manual confirmation (hotel): error",
+			err?.message || err,
+		);
+		return res.status(500).json({
+			ok: false,
+			message: "Failed to send WhatsApp confirmation.",
+			error: err?.message || String(err),
+		});
+	}
+};
+
+exports.sendWhatsAppPaymentLinkManualAdmin = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+
+		const reservation = await findReservationForWhatsApp(
+			reservationId,
+			req.body?.reservation,
+		);
+		if (!reservation) {
+			return res.status(404).json({
+				ok: false,
+				message: "Reservation not found.",
+			});
+		}
+
+		const rawPhone = normalizeManualWhatsAppPhone(
+			req.body?.countryCode,
+			req.body?.phone,
+			req.body?.rawPhone || req.body?.to,
+		);
+		if (!rawPhone) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing phone number.",
+			});
+		}
+
+		const paymentUrl = String(
+			req.body?.paymentUrl ||
+				req.body?.payment_link ||
+				req.body?.link ||
+				req.body?.url ||
+				"",
+		).trim();
+		if (!paymentUrl) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing payment link.",
+			});
+		}
+
+		const wa = await waSendPaymentLinkToNumber(
+			reservation,
+			paymentUrl,
+			rawPhone,
+			{
+				nationality: req.body?.nationality,
+			},
+		);
+
+		if (wa?.skipped) {
+			return res.status(400).json({
+				ok: false,
+				message: wa?.reason || "Failed to queue WhatsApp payment link.",
+				wa,
+			});
+		}
+
+		return res.status(200).json({
+			ok: true,
+			message: "WhatsApp payment link queued.",
+			wa,
+		});
+	} catch (err) {
+		console.error("[WA] manual payment link (admin): error", err?.message || err);
+		return res.status(500).json({
+			ok: false,
+			message: "Failed to send WhatsApp payment link.",
+			error: err?.message || String(err),
+		});
+	}
+};
+
+exports.sendWhatsAppPaymentLinkManualHotel = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+
+		const reservation = await findReservationForWhatsApp(
+			reservationId,
+			req.body?.reservation,
+		);
+		if (!reservation) {
+			return res.status(404).json({
+				ok: false,
+				message: "Reservation not found.",
+			});
+		}
+
+		const rawPhone = normalizeManualWhatsAppPhone(
+			req.body?.countryCode,
+			req.body?.phone,
+			req.body?.rawPhone || req.body?.to,
+		);
+		if (!rawPhone) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing phone number.",
+			});
+		}
+
+		const paymentUrl = String(
+			req.body?.paymentUrl ||
+				req.body?.payment_link ||
+				req.body?.link ||
+				req.body?.url ||
+				"",
+		).trim();
+		if (!paymentUrl) {
+			return res.status(400).json({
+				ok: false,
+				message: "Missing payment link.",
+			});
+		}
+
+		const wa = await waSendPaymentLinkToNumber(
+			reservation,
+			paymentUrl,
+			rawPhone,
+			{
+				nationality: req.body?.nationality,
+			},
+		);
+
+		if (wa?.skipped) {
+			return res.status(400).json({
+				ok: false,
+				message: wa?.reason || "Failed to queue WhatsApp payment link.",
+				wa,
+			});
+		}
+
+		return res.status(200).json({
+			ok: true,
+			message: "WhatsApp payment link queued.",
+			wa,
+		});
+	} catch (err) {
+		console.error("[WA] manual payment link (hotel): error", err?.message || err);
+		return res.status(500).json({
+			ok: false,
+			message: "Failed to send WhatsApp payment link.",
 			error: err?.message || String(err),
 		});
 	}

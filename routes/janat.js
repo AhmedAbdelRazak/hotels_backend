@@ -34,6 +34,10 @@ const {
 	getSingleReservationInvoice,
 	getSingleReservationInvoicePdf,
 	sendWhatsAppReservationConfirmation,
+	sendWhatsAppReservationConfirmationManualAdmin,
+	sendWhatsAppReservationConfirmationManualHotel,
+	sendWhatsAppPaymentLinkManualAdmin,
+	sendWhatsAppPaymentLinkManualHotel,
 	distinctReservedByList,
 	findConfirmationsByReservedBy,
 	distinctBookingSources,
@@ -128,6 +132,23 @@ router.get(
 router.post(
 	"/reservations/:reservationId/wa/confirmation",
 	sendWhatsAppReservationConfirmation
+);
+
+router.post(
+	"/admin/reservations/:reservationId/wa/confirmation-manual",
+	sendWhatsAppReservationConfirmationManualAdmin
+);
+router.post(
+	"/hotel/reservations/:reservationId/wa/confirmation-manual",
+	sendWhatsAppReservationConfirmationManualHotel
+);
+router.post(
+	"/admin/reservations/:reservationId/wa/payment-link-manual",
+	sendWhatsAppPaymentLinkManualAdmin
+);
+router.post(
+	"/hotel/reservations/:reservationId/wa/payment-link-manual",
+	sendWhatsAppPaymentLinkManualHotel
 );
 
 router.get(

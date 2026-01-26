@@ -14,6 +14,7 @@ const {
 	confirmationEmail,
 	reservationUpdate,
 	emailPaymentLink,
+	receiptPdfTemplate,
 } = require("./assets");
 const { sum } = require("lodash");
 const { decryptWithSecret } = require("./utils");
@@ -144,20 +145,30 @@ const createPdfBuffer = async (html) => {
 
 	const page = await browser.newPage();
 	await page.setContent(html, { waitUntil: "networkidle0" });
-	const pdfBuffer = await page.pdf({ format: "A4" });
+	const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
 	await browser.close();
 	return pdfBuffer;
 };
 
-const sendEmailWithPdf = async (reservationData) => {
+const sendEmailWithPdf = async (reservationData, opts = {}) => {
 	// Dynamically generating HTML content for the email body and PDF
 	const htmlContent = confirmationEmail(reservationData);
-	const pdfBuffer = await createPdfBuffer(htmlContent);
+	const hotelForPdf =
+		reservationData?.hotelId && typeof reservationData.hotelId === "object"
+			? reservationData.hotelId
+			: {
+					hotelName: reservationData?.hotelName || "",
+					suppliedBy: reservationData?.belongsTo?.name || "",
+			  };
+	const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
+	const pdfBuffer = await createPdfBuffer(pdfHtml);
+	const toEmail =
+		opts.toEmail ||
+		reservationData?.customer_details?.email ||
+		"ahmedabdelrazak20@gmail.com";
 
 	const FormSubmittionEmail = {
-		to: reservationData.customer_details.email
-			? reservationData.customer_details.email
-			: "ahmedabdelrazak20@gmail.com",
+		to: toEmail,
 		from: "noreply@jannatbooking.com",
 		// cc: [
 		// 	{ email: "ayed.hotels@gmail.com" },
@@ -252,7 +263,7 @@ exports.create = async (req, res) => {
 };
 
 exports.sendReservationEmail = async (req, res) => {
-	const reservationData = req.body; // Assuming the reservation ID is sent in the request body
+	const reservationData = req.body; // full reservation payload
 	// Fetch the reservation data based on reservationId
 	// This is a placeholder, replace it with your actual data fetching logic
 
@@ -261,7 +272,13 @@ exports.sendReservationEmail = async (req, res) => {
 	}
 
 	try {
-		await sendEmailWithPdf(reservationData);
+		const overrideEmail = req.body?.overrideEmail || req.body?.customerEmail;
+		if (overrideEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(overrideEmail)) {
+			return res.status(400).json({ error: "Invalid email address" });
+		}
+		await sendEmailWithPdf(reservationData, {
+			toEmail: overrideEmail || reservationData?.customer_details?.email,
+		});
 		res.json({ message: "Email sent successfully" });
 	} catch (error) {
 		console.error("Error sending email:", error);
@@ -270,7 +287,18 @@ exports.sendReservationEmail = async (req, res) => {
 };
 
 exports.sendPaymentLinkEmail = async (req, res) => {
-	const { paymentLink, customerEmail } = req.body; // Assuming the payment link and customer's email are sent in the request body
+	const {
+		paymentLink,
+		customerEmail,
+		guestName,
+		hotelName,
+		confirmationNumber,
+		totalAmount,
+		paidAmount,
+		currency,
+		checkinDate,
+		checkoutDate,
+	} = req.body; // payment link + optional context
 
 	if (!paymentLink || !customerEmail) {
 		return res
@@ -278,7 +306,24 @@ exports.sendPaymentLinkEmail = async (req, res) => {
 			.json({ error: "Missing payment link or customer email" });
 	}
 
-	const emailContent = emailPaymentLink(paymentLink); // Generate the email content with the payment link
+	const emailContent = emailPaymentLink({
+		paymentLink,
+		guestName,
+		hotelName,
+		confirmationNumber,
+		totalAmount,
+		paidAmount,
+		currency,
+		checkinDate,
+		checkoutDate,
+	}); // Generate the email content with the payment link
+
+	const subjectBase = hotelName
+		? `Payment Link - ${hotelName}`
+		: "Reservation Payment Link";
+	const subject = confirmationNumber
+		? `${subjectBase} (#${confirmationNumber})`
+		: subjectBase;
 
 	const email = {
 		to: customerEmail, // The customer's email address
@@ -295,7 +340,7 @@ exports.sendPaymentLinkEmail = async (req, res) => {
 			{ email: "ahmed.abdelrazak@jannatbooking.com" },
 			{ email: "support@jannatbooking.com" },
 		],
-		subject: "Reservation Payment Link",
+		subject,
 		html: emailContent, // Use the generated HTML content
 	};
 
@@ -1601,7 +1646,15 @@ exports.reservationsList2 = (req, res) => {
 const sendEmailUpdate = async (reservationData, hotelName) => {
 	// Dynamically generating HTML content for the email body and PDF
 	const htmlContent = reservationUpdate(reservationData, hotelName);
-	const pdfBuffer = await createPdfBuffer(htmlContent);
+	const hotelForPdf =
+		reservationData?.hotelId && typeof reservationData.hotelId === "object"
+			? reservationData.hotelId
+			: {
+					hotelName: hotelName || reservationData?.hotelName || "",
+					suppliedBy: reservationData?.belongsTo?.name || "",
+			  };
+	const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
+	const pdfBuffer = await createPdfBuffer(pdfHtml);
 
 	const FormSubmittionEmail = {
 		to: reservationData.customer_details.email

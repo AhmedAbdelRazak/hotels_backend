@@ -420,6 +420,45 @@ async function waSendReservationConfirmation(reservation) {
 }
 
 /**
+ * Send reservation confirmation to a specific phone number (manual override).
+ * {{1}} = guest first name
+ * {{2}} = reservation link
+ */
+async function waSendReservationConfirmationToNumber(
+	reservation,
+	rawPhone,
+	{ nationality } = {}
+) {
+	log("waSendReservationConfirmationToNumber: start", {
+		confirmation: reservation?.confirmation_number,
+		rawPhone: redactPhone(rawPhone),
+	});
+
+	if (!rawPhone) {
+		warn("waSendReservationConfirmationToNumber: skipped (missing phone).");
+		return { skipped: true, reason: "missing phone" };
+	}
+
+	const guest = reservation?.customer_details || {};
+	const to = await ensureE164Phone({
+		nationality: nationality || guest.nationality,
+		rawPhone,
+	});
+	if (!to) {
+		warn("waSendReservationConfirmationToNumber: skipped (invalid phone).");
+		return { skipped: true, reason: "invalid phone" };
+	}
+
+	const url = `${process.env.CLIENT_URL}/single-reservation/${reservation.confirmation_number}`;
+	return sendTemplate({
+		toE164: to,
+		contentSid: TPL.RESERVATION_CONFIRMATION,
+		variables: { 1: firstWord(guest.name), 2: url },
+		tag: "reservation_confirmation_manual",
+	});
+}
+
+/**
  * Send verification link (Not Paid flow).
  * {{1}} = guest first name
  * {{2}} = verification link
@@ -476,6 +515,50 @@ async function waSendPaymentLink(reservationOrShape, paymentUrl) {
 		contentSid: TPL.PAYMENT_LINK,
 		variables: { 1: firstWord(guest.name), 2: paymentUrl },
 		tag: "payment_link",
+	});
+}
+
+/**
+ * Send a payment link to a specific phone number (manual override).
+ * {{1}} = guest first name
+ * {{2}} = payment link
+ */
+async function waSendPaymentLinkToNumber(
+	reservationOrShape,
+	paymentUrl,
+	rawPhone,
+	{ nationality } = {},
+) {
+	log("waSendPaymentLinkToNumber: start", {
+		guest: reservationOrShape?.customer_details?.name,
+		url: paymentUrl,
+		rawPhone: redactPhone(rawPhone),
+	});
+
+	if (!paymentUrl) {
+		warn("waSendPaymentLinkToNumber: skipped (missing payment link).");
+		return { skipped: true, reason: "missing payment link" };
+	}
+	if (!rawPhone) {
+		warn("waSendPaymentLinkToNumber: skipped (missing phone).");
+		return { skipped: true, reason: "missing phone" };
+	}
+
+	const guest = reservationOrShape?.customer_details || {};
+	const to = await ensureE164Phone({
+		nationality: nationality || guest.nationality,
+		rawPhone,
+	});
+	if (!to) {
+		warn("waSendPaymentLinkToNumber: skipped (invalid phone).");
+		return { skipped: true, reason: "invalid phone" };
+	}
+
+	return sendTemplate({
+		toE164: to,
+		contentSid: TPL.PAYMENT_LINK,
+		variables: { 1: firstWord(guest.name), 2: paymentUrl },
+		tag: "payment_link_manual",
 	});
 }
 
@@ -673,8 +756,10 @@ module.exports = {
 	ensureE164Phone,
 	// high-level senders
 	waSendReservationConfirmation,
+	waSendReservationConfirmationToNumber,
 	waSendVerificationLink,
 	waSendPaymentLink,
+	waSendPaymentLinkToNumber,
 	waSendReservationUpdate,
 	waNotifyNewReservation,
 
