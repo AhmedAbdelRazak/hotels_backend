@@ -460,6 +460,11 @@ function summarizePayment(r) {
 
 	// any signal of online capture
 	const legacyCaptured = !!r?.payment_details?.captured;
+	const breakdown = r?.paid_amount_breakdown || {};
+	const breakdownCaptured = Object.keys(breakdown).some((key) => {
+		if (key === "payment_comments") return false;
+		return Number(breakdown[key]) > 0;
+	});
 	const capTotal = Number(pd?.captured_total_usd || 0);
 	const initialCompleted =
 		(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
@@ -470,6 +475,7 @@ function summarizePayment(r) {
 
 	const isCaptured =
 		legacyCaptured ||
+		breakdownCaptured ||
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
@@ -526,6 +532,7 @@ exports.listHotelCommissions = async (req, res) => {
 				customer_details: 1,
 				payment: 1,
 				payment_details: 1,
+				paid_amount_breakdown: 1,
 				paypal_details: 1,
 				total_amount: 1,
 				paid_amount: 1,
@@ -777,6 +784,7 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				pickedRoomsType: 1,
 				payment: 1,
 				payment_details: 1,
+				paid_amount_breakdown: 1,
 				paypal_details: 1,
 				commissionPaid: 1,
 				commissionStatus: 1,
@@ -1098,6 +1106,7 @@ exports.getHotelFinanceOverview = async (req, res) => {
 				paypal_details: 1,
 				payment: 1,
 				payment_details: 1,
+				paid_amount_breakdown: 1,
 				pickedRoomsType: 1,
 				commission: 1,
 				commissionPaid: 1,

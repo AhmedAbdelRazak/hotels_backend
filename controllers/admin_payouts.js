@@ -49,6 +49,11 @@ function summarizePayment(r) {
 		Number(r?.payment_details?.onsite_paid_amount || 0) > 0 ||
 		pmt === "paid offline";
 	const legacyCaptured = !!r?.payment_details?.captured;
+	const breakdown = r?.paid_amount_breakdown || {};
+	const breakdownCaptured = Object.keys(breakdown).some((key) => {
+		if (key === "payment_comments") return false;
+		return Number(breakdown[key]) > 0;
+	});
 	const capTotal = Number(pd?.captured_total_usd || 0);
 	const initialCompleted =
 		(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
@@ -57,6 +62,7 @@ function summarizePayment(r) {
 		pd.mit.some((c) => (c?.capture_status || "").toUpperCase() === "COMPLETED");
 	const isCaptured =
 		legacyCaptured ||
+		breakdownCaptured ||
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
@@ -150,6 +156,7 @@ exports.listAdminPayouts = async (req, res) => {
 			customer_details: 1,
 			payment: 1,
 			payment_details: 1,
+			paid_amount_breakdown: 1,
 			paypal_details: 1,
 			total_amount: 1,
 			paid_amount: 1,
@@ -300,6 +307,7 @@ exports.getAdminPayoutsOverview = async (req, res) => {
 			paypal_details: 1,
 			payment: 1,
 			payment_details: 1,
+			paid_amount_breakdown: 1,
 			pickedRoomsType: 1,
 			commission: 1,
 			commissionPaid: 1,
@@ -686,6 +694,7 @@ exports.autoReconcileHotel = async (req, res) => {
 			reservation_status: 1,
 			payment: 1,
 			payment_details: 1,
+			paid_amount_breakdown: 1,
 			paypal_details: 1,
 			checkin_date: 1,
 			checkout_date: 1,

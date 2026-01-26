@@ -42,6 +42,12 @@ const getPaymentStatus = (reservation = {}) => {
 	);
 	const payOffline = onsitePaidAmount > 0 || pmt === "paid offline";
 
+	const breakdown = reservation?.paid_amount_breakdown || {};
+	const breakdownCaptured = Object.keys(breakdown).some((key) => {
+		if (key === "payment_comments") return false;
+		return safeNumber(breakdown[key]) > 0;
+	});
+
 	const capTotal = safeNumber(pd?.captured_total_usd);
 	const initialCompleted =
 		String(pd?.initial?.capture_status || "").toUpperCase() === "COMPLETED";
@@ -59,6 +65,7 @@ const getPaymentStatus = (reservation = {}) => {
 	const isCaptured =
 		manualOverrideCaptured ||
 		legacyCaptured ||
+		breakdownCaptured ||
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
@@ -333,7 +340,7 @@ exports.financialReport = async (req, res) => {
 			]),
 			Reservations.find(reservationMatch)
 				.select(
-					"payment payment_details paypal_details total_amount confirmation_number checkout_date"
+					"payment payment_details paypal_details paid_amount_breakdown total_amount confirmation_number checkout_date"
 				)
 				.lean()
 				.exec(),

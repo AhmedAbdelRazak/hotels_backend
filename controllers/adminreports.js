@@ -12,10 +12,19 @@ const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
       Based on your examples:
 
       - "not paid" => no card data in customer_details
-      - "captured" => finalCaptureTransactionId OR payment_details.captured == true
+      - "captured" => paid_amount_breakdown has any value > 0 OR
+                      finalCaptureTransactionId OR payment_details.captured == true
       - otherwise => "not captured"
    ------------------------------------------------------------------ */
 function getPaymentStatus(reservation) {
+	const breakdown = reservation?.paid_amount_breakdown || {};
+	const breakdownCaptured = Object.keys(breakdown).some((key) => {
+		if (key === "payment_comments") return false;
+		const value = Number(breakdown[key]);
+		return Number.isFinite(value) && value > 0;
+	});
+	if (breakdownCaptured) return "captured";
+
 	const hasCardData =
 		reservation?.customer_details?.cardNumber ||
 		reservation?.customer_details?.cardHolderName ||
@@ -1057,7 +1066,9 @@ exports.exportToExcel = async (req, res) => {
 		//    else if doc.payment === "not paid" => "Not Paid"
 		//    else => "Not Captured"
 		function computePaymentStatus(r) {
-			const isCaptured = r.payment_details?.captured;
+			const breakdownCaptured =
+				computePaidBreakdownTotal(r?.paid_amount_breakdown) > 0;
+			const isCaptured = r.payment_details?.captured || breakdownCaptured;
 			const onsitePaid = r.payment_details?.onsite_paid_amount || 0;
 
 			if (isCaptured) {
@@ -2346,6 +2357,9 @@ function paymentMeta(reservation = {}) {
 	);
 	const payOffline = onsitePaidAmount > 0 || pmt === "paid offline";
 
+	const breakdownCaptured =
+		computePaidBreakdownTotal(reservation?.paid_amount_breakdown) > 0;
+
 	const capTotal = safeNumber(pd?.captured_total_usd);
 	const limitUsd =
 		typeof pd?.bounds?.limit_usd === "number"
@@ -2368,6 +2382,7 @@ function paymentMeta(reservation = {}) {
 	const isCaptured =
 		manualOverrideCaptured ||
 		legacyCaptured ||
+		breakdownCaptured ||
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
@@ -2577,7 +2592,7 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 
 		const reservations = await Reservations.find(query)
 			.select(
-				"booking_source total_amount payment payment_details paypal_details confirmation_number reservation_status"
+				"booking_source total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
 			)
 			.lean();
 
@@ -2960,7 +2975,7 @@ async function computeOccupancy({
 
 	const reservations = await Reservations.find(baseQuery)
 		.select(
-			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details"
+			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown"
 		)
 		.lean();
 
@@ -3513,7 +3528,7 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		const reservations = await Reservations.find(baseQuery)
 			.select(
-				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details createdAt booking_source reservedBy room_numbers"
+				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown createdAt booking_source reservedBy room_numbers"
 			)
 			.populate("hotelId", "hotelName")
 			.lean();

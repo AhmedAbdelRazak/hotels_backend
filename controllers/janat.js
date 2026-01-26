@@ -2138,6 +2138,12 @@ exports.paginatedReservationList = async (req, res) => {
 				toNum(payment_details.onsite_paid_amount) > 0 ||
 				paymentStr === "paid offline";
 
+			const breakdown = doc?.paid_amount_breakdown || {};
+			const breakdownCaptured = Object.keys(breakdown).some((key) => {
+				if (key === "payment_comments") return false;
+				return toNum(breakdown[key]) > 0;
+			});
+
 			// PayPal capture signals
 			const capturedTotals = [
 				paypal_details.captured_total_sar,
@@ -2180,7 +2186,8 @@ exports.paginatedReservationList = async (req, res) => {
 				initialCompleted ||
 				anyMitCompleted ||
 				anyCapturesCompleted ||
-				paymentStr === "paid online"; // defensive compatibility
+				paymentStr === "paid online" || // defensive compatibility
+				breakdownCaptured;
 
 			let payment_status = "Not Captured";
 			if (isCaptured) {
