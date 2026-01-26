@@ -5,6 +5,19 @@ const { ObjectId } = mongoose.Schema;
 
 const uncompletedReservationsSchema = new mongoose.Schema(
 	{
+		confirmation_number: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
+		userId: { type: ObjectId, ref: "User", default: null },
+		hotelName: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
 		booking_source: {
 			type: String, //Will be added but based on the file
 			trim: true,
@@ -84,6 +97,28 @@ const uncompletedReservationsSchema = new mongoose.Schema(
 			trim: true,
 			lowercase: true,
 			default: 0,
+		},
+		payment: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
+		paid_amount: {
+			type: Number,
+			default: 0,
+		},
+		commission: {
+			type: Number,
+			default: 0,
+		},
+		commissionPaid: {
+			type: Boolean,
+			default: false,
+		},
+		convertedAmounts: {
+			type: Object,
+			default: {},
 		},
 
 		checkin_date: {

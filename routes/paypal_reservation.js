@@ -8,6 +8,8 @@ const Ctrl = require("../controllers/paypal_reservation");
 router.get("/paypal/token-generated", Ctrl.generateClientToken);
 router.post("/paypal/token-generated", Ctrl.generateClientToken);
 router.post("/paypal/order/create", Ctrl.createPayPalOrder);
+router.post("/reservations/paypal/pending", Ctrl.preparePendingReservation);
+router.post("/reservations/paypal/pending-cancel", Ctrl.cancelPendingReservation);
 
 /* Route 2: One‑call reservation creation + PayPal handling
    - Handles: Not Paid (with/without card), Deposit Paid, Paid Online

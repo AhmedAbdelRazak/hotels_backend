@@ -32,6 +32,7 @@ const crypto = require("crypto");
 /* Models */
 const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
+const UncompleteReservations = require("../models/Uncompleted");
 const User = require("../models/user");
 
 /* Templates + WhatsApp */
@@ -96,6 +97,13 @@ const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
 const almostEq = (a, b) => Math.abs(toNum2(a) - toNum2(b)) < 1e-9;
+const truncate = (value, max = 127) => {
+	if (value == null) return "";
+	const str = String(value);
+	if (str.length <= max) return str;
+	const suffix = "...";
+	return `${str.slice(0, Math.max(0, max - suffix.length))}${suffix}`;
+};
 const INTERNAL_NOTIFICATION_EMAILS = [
 	"morazzakhamouda@gmail.com",
 	"xhoteleg@gmail.com",
@@ -210,6 +218,22 @@ function ensureUniqueNumber(model, fieldName, callback) {
 		else if (doc) ensureUniqueNumber(model, fieldName, callback);
 		else callback(null, randomNumber);
 	});
+}
+
+async function generateUniqueConfirmationNumberAcross() {
+	for (;;) {
+		const randomNumber = generateRandomNumber();
+		const existsInReservations = await Reservations.exists({
+			confirmation_number: randomNumber,
+		});
+		if (existsInReservations) continue;
+		const existsInPending = await UncompleteReservations.exists({
+			confirmation_number: randomNumber,
+			reservation_status: "pending_payment",
+		});
+		if (existsInPending) continue;
+		return randomNumber;
+	}
 }
 
 const createPdfBuffer = async (html) => {
@@ -351,10 +375,13 @@ function buildMetaBase({
 }) {
 	const nat = guestNationality ? `, Nat: ${guestNationality}` : "";
 	const rb = reservedBy ? `, By: ${reservedBy}` : "";
+	const em = guestEmail ? `, Email: ${guestEmail}` : "";
 	return {
 		invoice_id: `RSV-${confirmationNumber}`,
 		custom_id: confirmationNumber,
-		description: `Hotel reservation — ${hotelName} — ${checkin} → ${checkout} — Guest ${guestName} (Phone: ${guestPhone}${nat}${rb})`,
+		description: truncate(
+			`Hotel reservation — ${hotelName} — ${checkin} → ${checkout} — Guest ${guestName} (Phone: ${guestPhone}${em}${nat}${rb})`
+		),
 		hotelName,
 		guestName,
 		guestPhone,
@@ -473,13 +500,15 @@ async function paypalPatchOrderMetadata(orderId, meta) {
 			value: [
 				{
 					name: `Hotel Reservation — ${meta.hotelName}`,
-					description: `Guest: ${meta.guestName}, Phone: ${
-						meta.guestPhone
-					}, Email: ${meta.guestEmail || "n/a"}, Nat: ${
-						meta.guestNationality || "n/a"
-					}, By: ${meta.reservedBy || "n/a"}, ${meta.checkin} → ${
-						meta.checkout
-					}, Conf: ${meta.custom_id}`,
+					description: truncate(
+						`Guest: ${meta.guestName}, Phone: ${
+							meta.guestPhone
+						}, Email: ${meta.guestEmail || "n/a"}, Nat: ${
+							meta.guestNationality || "n/a"
+						}, By: ${meta.reservedBy || "n/a"}, ${meta.checkin} → ${
+							meta.checkout
+						}, Conf: ${meta.custom_id}`
+					),
 					quantity: "1",
 					unit_amount: { currency_code: "USD", value: toCCY(meta.usdAmount) },
 					category: "DIGITAL_GOODS",
@@ -829,6 +858,196 @@ exports.generateClientToken = async (req, res) => {
 };
 
 /**
+ * 1.5) Create a pending reservation shell to reserve confirmation_number
+ * This is used BEFORE PayPal order approval so metadata can include the CNF.
+ */
+exports.preparePendingReservation = async (req, res) => {
+	try {
+		const body = req.body || {};
+		const {
+			userId,
+			hotelId,
+			hotelName,
+			belongsTo,
+			customerDetails,
+			checkin_date,
+			checkout_date,
+			days_of_residence,
+			total_amount,
+			total_rooms,
+			total_guests,
+			adults,
+			children,
+			booking_source,
+			payment,
+			paid_amount,
+			commission,
+			commissionPaid,
+			pickedRoomsType,
+			convertedAmounts,
+			guestAgreedOnTermsAndConditions,
+			rootCause,
+		} = body;
+
+		if (!hotelId) {
+			return res.status(400).json({ message: "Hotel ID is required." });
+		}
+		if (!customerDetails?.name || !customerDetails?.phone || !customerDetails?.email) {
+			return res.status(400).json({
+				message: "Customer name, phone, and email are required.",
+			});
+		}
+		if (!checkin_date || !checkout_date) {
+			return res.status(400).json({
+				message: "Check-in and check-out dates are required.",
+			});
+		}
+
+		const hotel = await HotelDetails.findOne({
+			_id: hotelId,
+			activateHotel: true,
+			hotelPhotos: { $exists: true, $not: { $size: 0 } },
+			"location.coordinates": { $ne: [0, 0] },
+		});
+		if (!hotel) {
+			return res.status(400).json({
+				message:
+					"Error occurred, please contact Jannat Booking Customer Support In The Chat",
+			});
+		}
+
+		const normalizedEmail = normalizeEmail(customerDetails.email);
+		const normalizedPhone = String(customerDetails.phone || "").trim();
+		if (!isLikelyEmail(normalizedEmail)) {
+			return res.status(400).json({
+				message: "Invalid email address.",
+			});
+		}
+
+		const existingPending = await UncompleteReservations.findOne({
+			"customer_details.email": normalizedEmail,
+			"customer_details.phone": normalizedPhone,
+			hotelId,
+			reservation_status: "pending_payment",
+		}).sort({ createdAt: -1 });
+
+		const reuseWindowMs = 15 * 60 * 1000;
+		if (
+			existingPending?.confirmation_number &&
+			existingPending?.createdAt &&
+			Date.now() - new Date(existingPending.createdAt).getTime() < reuseWindowMs
+		) {
+			return res.status(200).json({
+				message: "Pending reservation already exists.",
+				pendingReservationId: existingPending._id,
+				confirmation_number: existingPending.confirmation_number,
+				reused: true,
+			});
+		}
+
+		const confirmationNumber = await generateUniqueConfirmationNumberAcross();
+		const pendingCustomer = sanitizeCustomerDetails(customerDetails);
+		pendingCustomer.email = normalizedEmail;
+		pendingCustomer.phone = normalizedPhone;
+
+		const pendingDoc = new UncompleteReservations({
+			confirmation_number: confirmationNumber,
+			userId: userId || null,
+			hotelId,
+			hotelName: hotelName || hotel.hotelName || "",
+			belongsTo: belongsTo || hotel?.belongsTo || null,
+			customer_details: pendingCustomer,
+			total_rooms: Number(total_rooms || 0),
+			total_guests: Number(total_guests || 0),
+			adults: Number(adults || 0),
+			children: Number(children || 0),
+			total_amount: Number(total_amount || 0),
+			payment: String(payment || "pending_payment").toLowerCase(),
+			paid_amount: Number(paid_amount || 0),
+			commission: Number(commission || 0),
+			commissionPaid: !!commissionPaid,
+			checkin_date,
+			checkout_date,
+			days_of_residence:
+				typeof days_of_residence === "number"
+					? days_of_residence
+					: Math.max(
+							0,
+							Math.round(
+								(new Date(checkout_date).getTime() -
+									new Date(checkin_date).getTime()) /
+									(1000 * 60 * 60 * 24)
+							)
+					  ),
+			booking_source: booking_source || "Online Jannat Booking",
+			pickedRoomsType: Array.isArray(pickedRoomsType) ? pickedRoomsType : [],
+			convertedAmounts: convertedAmounts || {},
+			rootCause: rootCause || "paypal_pending",
+			guestAgreedOnTermsAndConditions: !!guestAgreedOnTermsAndConditions,
+			reservation_status: "pending_payment",
+			state: "pending_payment",
+		});
+
+		await pendingDoc.save();
+
+		return res.status(201).json({
+			message: "Pending reservation created.",
+			pendingReservationId: pendingDoc._id,
+			confirmation_number: confirmationNumber,
+		});
+	} catch (error) {
+		console.error(
+			"preparePendingReservation error:",
+			error?.response?.data || error
+		);
+		return res
+			.status(500)
+			.json({ message: "Failed to prepare pending reservation." });
+	}
+};
+
+/**
+ * 1.6) Cancel pending reservation (if payment fails or user cancels)
+ */
+exports.cancelPendingReservation = async (req, res) => {
+	try {
+		const { pendingReservationId, confirmation_number } = req.body || {};
+		if (!pendingReservationId && !confirmation_number) {
+			return res.status(400).json({
+				message: "pendingReservationId or confirmation_number is required.",
+			});
+		}
+
+		const query = {
+			reservation_status: "pending_payment",
+			...(pendingReservationId ? { _id: pendingReservationId } : {}),
+			...(confirmation_number ? { confirmation_number } : {}),
+		};
+
+		const deleted = await UncompleteReservations.findOneAndDelete(query);
+		if (!deleted) {
+			return res.status(404).json({
+				message: "Pending reservation not found.",
+			});
+		}
+
+		return res.status(200).json({
+			message: "Pending reservation removed.",
+			pendingReservationId: deleted._id,
+			confirmation_number: deleted.confirmation_number,
+		});
+	} catch (error) {
+		console.error(
+			"cancelPendingReservation error:",
+			error?.response?.data || error
+		);
+		return res
+			.status(500)
+			.json({ message: "Failed to cancel pending reservation." });
+	}
+};
+
+/**
  * 2) Create reservation & process PayPal (single call)
  * Flows:
  *   - Not Paid + NO card → send verification email (do NOT create reservation)
@@ -846,6 +1065,39 @@ exports.createReservationAndProcess = async (req, res) => {
 			convertedAmounts,
 			option, // "deposit" | "full"
 		} = body;
+		const pendingReservationId =
+			body.pendingReservationId || body.tempReservationId || null;
+		let pendingReservation = null;
+		const cleanupPending = async (reason) => {
+			if (!pendingReservationId) return false;
+			try {
+				const deleted = await UncompleteReservations.findOneAndDelete({
+					_id: pendingReservationId,
+					reservation_status: "pending_payment",
+				});
+				if (deleted) {
+					console.log("[PP][pending] deleted", {
+						id: pendingReservationId,
+						reason,
+					});
+					return true;
+				}
+			} catch (err) {
+				console.warn("[PP][pending] delete failed", {
+					id: pendingReservationId,
+					reason,
+					error: err?.message || err,
+				});
+			}
+			return false;
+		};
+		const fail = async (status, payload) => {
+			const deleted = await cleanupPending(payload?.message || "failed");
+			return res.status(status).json({
+				...payload,
+				pendingReservationDeleted: deleted,
+			});
+		};
 
 		// Validate hotel
 		const hotel = await HotelDetails.findOne({
@@ -1164,17 +1416,63 @@ exports.createReservationAndProcess = async (req, res) => {
 		/* ── B) DEPOSIT / FULL (AUTHORIZE or CAPTURE) ──────────────────────── */
 		if (["deposit paid", "paid online"].includes(pmtLower)) {
 			if (!pp.order_id) {
-				return res.status(400).json({
+				return await fail(400, {
 					message:
-						"Missing approved PayPal order_id. Create/approve the order on the client, then call this endpoint.",
+						"Missing approved PayPal order_id. If a temporary reservation was created, it has been removed.",
 				});
 			}
 
-			const confirmationNumber = await new Promise((resolve, reject) => {
-				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-					err ? reject(err) : resolve(unique)
+			if (pendingReservationId) {
+				pendingReservation = await UncompleteReservations.findOne({
+					_id: pendingReservationId,
+					reservation_status: "pending_payment",
+				});
+				if (!pendingReservation?.confirmation_number) {
+					return await fail(400, {
+						message:
+							"Pending reservation not found or expired. Please try again.",
+					});
+				}
+				if (
+					pendingReservation?.hotelId &&
+					String(pendingReservation.hotelId) !== String(hotelId)
+				) {
+					return await fail(400, {
+						message:
+							"Pending reservation does not match this hotel. Please retry the payment.",
+					});
+				}
+				const pendingEmail = normalizeEmail(
+					pendingReservation?.customer_details?.email
 				);
-			});
+				const incomingEmail = normalizeEmail(email);
+				if (pendingEmail && incomingEmail && pendingEmail !== incomingEmail) {
+					return await fail(400, {
+						message:
+							"Pending reservation does not match customer email. Please retry the payment.",
+					});
+				}
+			}
+
+			let confirmationNumber =
+				pendingReservation?.confirmation_number || body.confirmation_number;
+			if (confirmationNumber) {
+				const exists = await Reservations.exists({
+					confirmation_number: confirmationNumber,
+				});
+				if (exists) {
+					return await fail(409, {
+						message:
+							"Confirmation number already exists. If a temporary reservation was created, it has been removed. Please retry the payment.",
+					});
+				}
+			} else {
+				confirmationNumber = await new Promise((resolve, reject) => {
+					ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
+						err ? reject(err) : resolve(unique)
+					);
+				});
+			}
 
 			// Calculate the expected amount (USD) based on the label (deposit vs full)
 			const expectedUsdAmount =
@@ -1187,9 +1485,9 @@ exports.createReservationAndProcess = async (req, res) => {
 				pp.expectedUsdAmount &&
 				toCCY(pp.expectedUsdAmount) !== expectedUsdAmount
 			) {
-				return res.status(400).json({
+				return await fail(400, {
 					message:
-						"Mismatch between expectedUsdAmount and convertedAmounts supplied by the frontend.",
+						"Mismatch between expectedUsdAmount and convertedAmounts supplied by the frontend. If a temporary reservation was created, it has been removed.",
 				});
 			}
 
@@ -1206,6 +1504,9 @@ exports.createReservationAndProcess = async (req, res) => {
 				checkout: body.checkout_date,
 				usdAmount: expectedUsdAmount,
 			});
+			if (pp.invoice_id) {
+				meta.invoice_id = truncate(String(pp.invoice_id), 127);
+			}
 
 			// Verify order amount on PayPal (server-side)
 			const getRes = await ax.get(`${PPM}/v2/checkout/orders/${pp.order_id}`, {
@@ -1215,8 +1516,8 @@ exports.createReservationAndProcess = async (req, res) => {
 			const pu = order?.purchase_units?.[0];
 			const orderAmount = pu?.amount?.value;
 			if (toCCY(orderAmount) !== expectedUsdAmount) {
-				return res.status(400).json({
-					message: `The PayPal order amount (${orderAmount}) does not match the expected amount (${expectedUsdAmount}).`,
+				return await fail(400, {
+					message: `The PayPal order amount (${orderAmount}) does not match the expected amount (${expectedUsdAmount}). If a temporary reservation was created, it has been removed.`,
 				});
 			}
 
@@ -1249,19 +1550,21 @@ exports.createReservationAndProcess = async (req, res) => {
 								err.response.data.details.some((d) =>
 									/DENIED|DECLINED|EXPIRED/i.test(String(d?.issue || ""))
 								)));
-					return res.status(deniedLike ? 402 : 500).json({
+					return await fail(deniedLike ? 402 : 500, {
 						message: deniedLike
-							? "The payment was declined or expired. Please try a different card or create a new PayPal order."
-							: "Failed to capture payment.",
+							? "The payment was declined or expired. If a temporary reservation was created, it has been removed."
+							: "Failed to capture payment. If a temporary reservation was created, it has been removed.",
 					});
 				}
 
 				const cap =
 					capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
 				if (cap?.status !== "COMPLETED") {
-					return res
-						.status(402)
-						.json({ message: "Payment was not completed.", details: cap });
+					return await fail(402, {
+						message:
+							"Payment was not completed. If a temporary reservation was created, it has been removed.",
+						details: cap,
+					});
 				}
 
 				const capturedUsd = toNum2(cap?.amount?.value || expectedUsdAmount);
@@ -1367,6 +1670,8 @@ exports.createReservationAndProcess = async (req, res) => {
 					await waNotifyNewReservation(saved);
 				} catch (_) {}
 
+				await cleanupPending("captured");
+
 				return res.status(201).json({
 					message: "Reservation created successfully (captured).",
 					data: saved,
@@ -1397,10 +1702,10 @@ exports.createReservationAndProcess = async (req, res) => {
 								err.response.data.details.some((d) =>
 									/DENIED|DECLINED/i.test(String(d?.issue || ""))
 								)));
-					return res.status(deniedLike ? 402 : 500).json({
+					return await fail(deniedLike ? 402 : 500, {
 						message: deniedLike
-							? "The authorization was declined by the card issuer. No reservation was created. Please try a different card, pay via link (new PayPal order), or add a card (vault) and try again."
-							: "Failed to authorize payment.",
+							? "The authorization was declined by the card issuer. If a temporary reservation was created, it has been removed. Please try a different card, pay via link (new PayPal order), or add a card (vault) and try again."
+							: "Failed to authorize payment. If a temporary reservation was created, it has been removed.",
 					});
 				}
 				const getReq = new paypal.orders.OrdersGetRequest(pp.order_id);
@@ -1414,9 +1719,9 @@ exports.createReservationAndProcess = async (req, res) => {
 			const authStatus = String(auth?.status || "").toUpperCase();
 
 			if (!auth?.id || !isAuthStatusOk(authStatus)) {
-				return res.status(402).json({
+				return await fail(402, {
 					message:
-						"The authorization was declined by the card issuer. No reservation was created.",
+						"The authorization was declined by the card issuer. If a temporary reservation was created, it has been removed.",
 					details: { status: auth?.status || null, id: auth?.id || null },
 				});
 			}
@@ -1562,6 +1867,8 @@ exports.createReservationAndProcess = async (req, res) => {
 				await waNotifyNewReservation(saved);
 			} catch (_) {}
 
+			await cleanupPending("authorized");
+
 			return res.status(201).json({
 				message:
 					"Reservation created successfully (authorized; no funds captured).",
@@ -1569,18 +1876,20 @@ exports.createReservationAndProcess = async (req, res) => {
 			});
 		}
 
-		return res.status(400).json({
+		return await fail(400, {
 			message:
-				"Unsupported flow. Use Not Paid / Deposit Paid / Paid Online / Paid Offline, or sentFrom=employee.",
+				"Unsupported flow. If a temporary reservation was created, it has been removed.",
 		});
 	} catch (error) {
 		console.error(
 			"createReservationAndProcess error:",
 			error?.response?.data || error
 		);
+		const deleted = await cleanupPending("fatal");
 		return res.status(500).json({
 			message: "Failed to create reservation.",
 			error: String(error?.message || error),
+			pendingReservationDeleted: deleted,
 		});
 	}
 };
