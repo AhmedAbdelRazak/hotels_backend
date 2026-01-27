@@ -4687,9 +4687,13 @@ exports.sendWhatsAppReservationConfirmationManualAdmin = async (req, res) => {
 			});
 		}
 
-		const wa = await waSendReservationConfirmationToNumber(reservation, rawPhone, {
-			nationality: req.body?.nationality,
-		});
+		const wa = await waSendReservationConfirmationToNumber(
+			reservation,
+			rawPhone,
+			{
+				nationality: req.body?.nationality,
+			},
+		);
 
 		if (wa?.skipped) {
 			return res.status(400).json({
@@ -4718,7 +4722,10 @@ exports.sendWhatsAppReservationConfirmationManualAdmin = async (req, res) => {
 			notify,
 		});
 	} catch (err) {
-		console.error("[WA] manual confirmation (admin): error", err?.message || err);
+		console.error(
+			"[WA] manual confirmation (admin): error",
+			err?.message || err,
+		);
 		return res.status(500).json({
 			ok: false,
 			message: "Failed to send WhatsApp confirmation.",
@@ -4754,9 +4761,13 @@ exports.sendWhatsAppReservationConfirmationManualHotel = async (req, res) => {
 			});
 		}
 
-		const wa = await waSendReservationConfirmationToNumber(reservation, rawPhone, {
-			nationality: req.body?.nationality,
-		});
+		const wa = await waSendReservationConfirmationToNumber(
+			reservation,
+			rawPhone,
+			{
+				nationality: req.body?.nationality,
+			},
+		);
 
 		if (wa?.skipped) {
 			return res.status(400).json({
@@ -4848,7 +4859,10 @@ exports.sendWhatsAppPaymentLinkManualAdmin = async (req, res) => {
 			wa,
 		});
 	} catch (err) {
-		console.error("[WA] manual payment link (admin): error", err?.message || err);
+		console.error(
+			"[WA] manual payment link (admin): error",
+			err?.message || err,
+		);
 		return res.status(500).json({
 			ok: false,
 			message: "Failed to send WhatsApp payment link.",
@@ -4921,7 +4935,10 @@ exports.sendWhatsAppPaymentLinkManualHotel = async (req, res) => {
 			wa,
 		});
 	} catch (err) {
-		console.error("[WA] manual payment link (hotel): error", err?.message || err);
+		console.error(
+			"[WA] manual payment link (hotel): error",
+			err?.message || err,
+		);
 		return res.status(500).json({
 			ok: false,
 			message: "Failed to send WhatsApp payment link.",
