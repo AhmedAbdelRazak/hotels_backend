@@ -1699,6 +1699,13 @@ exports.updateReservation = async (req, res) => {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
 		const normalizedUpdateData = { ...updateData };
+		const requestingUserId =
+			normalizedUpdateData.requestingUserId ||
+			normalizedUpdateData.updatedBy ||
+			normalizedUpdateData.userId;
+		delete normalizedUpdateData.requestingUserId;
+		delete normalizedUpdateData.updatedBy;
+		delete normalizedUpdateData.userId;
 		const normalizeRoomIds = (value) => {
 			if (!Array.isArray(value)) return [];
 			return value
@@ -1754,6 +1761,41 @@ exports.updateReservation = async (req, res) => {
 		const existingReservation = await Reservations.findById(reservationId);
 		if (!existingReservation) {
 			return res.status(404).json({ error: "Reservation not found" });
+		}
+
+		const restrictedCashUserId = "6969d80da28c78c6280171df";
+		const paymentBreakdownKeys = [
+			"paid_online_via_link",
+			"paid_online_via_instapay",
+			"paid_at_hotel_cash",
+			"paid_at_hotel_card",
+			"paid_to_zad",
+			"paid_online_jannatbooking",
+			"paid_online_other_platforms",
+		];
+		const computeBreakdownTotal = (breakdown) =>
+			paymentBreakdownKeys.reduce((sum, key) => {
+				const value = Number(breakdown?.[key] || 0);
+				return sum + (Number.isFinite(value) ? value : 0);
+			}, 0);
+
+		if (String(requestingUserId || "") === restrictedCashUserId) {
+			const existingCashValue = Number(
+				existingReservation?.paid_amount_breakdown?.paid_at_hotel_cash || 0
+			);
+			if (
+				existingCashValue > 0 &&
+				normalizedUpdateData.paid_amount_breakdown &&
+				typeof normalizedUpdateData.paid_amount_breakdown === "object"
+			) {
+				normalizedUpdateData.paid_amount_breakdown.paid_at_hotel_cash =
+					existingCashValue;
+				if (normalizedUpdateData.paid_amount !== undefined) {
+					normalizedUpdateData.paid_amount = computeBreakdownTotal(
+						normalizedUpdateData.paid_amount_breakdown
+					);
+				}
+			}
 		}
 
 		// 5️⃣ Intelligent '_relocate' Increment if hotelId has changed
