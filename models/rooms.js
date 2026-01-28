@@ -77,6 +77,21 @@ const roomsSchema = new mongoose.Schema(
 			default: false,
 		},
 
+		isHandicapped: {
+			type: Boolean,
+			default: false,
+		},
+
+		isVip: {
+			type: Boolean,
+			default: false,
+		},
+
+		active: {
+			type: Boolean,
+			default: true,
+		},
+
 		bedsNumber: {
 			type: Array,
 			trim: true,

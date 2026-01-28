@@ -101,6 +101,11 @@ exports.update = (req, res) => {
 	room.floor = req.body.floor;
 	room.roomColorCode = req.body.roomColorCode;
 	room.individualBeds = req.body.individualBeds;
+	room.isHandicapped = req.body.isHandicapped;
+	room.isVip = req.body.isVip;
+	if (Object.prototype.hasOwnProperty.call(req.body, "active")) {
+		room.active = req.body.active;
+	}
 	room.bedsNumber = req.body.bedsNumber;
 	room.belongsTo = req.body.belongsTo;
 	room.hotelId = req.body.hotelId;
