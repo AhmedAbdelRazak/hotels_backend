@@ -95,6 +95,39 @@ const buildReservationListFilter = ({ selectedFilter, hotelId, dateStr }) => {
 	return dynamicFilter;
 };
 
+const buildReservationSearchMatch = (searchQuery) => {
+	const trimmed = String(searchQuery || "").trim();
+	if (!trimmed) return null;
+
+	const isRoomSearch = /^r\d+$/i.test(trimmed);
+	const queryValue = isRoomSearch ? trimmed.substring(1) : trimmed;
+	const searchPattern = new RegExp(queryValue, "i");
+
+	if (isRoomSearch) {
+		return { "roomDetails.room_number": searchPattern };
+	}
+
+	return {
+		$or: [
+			{ "customer_details.name": searchPattern },
+			{ "customer_details.phone": searchPattern },
+			{ "customer_details.email": searchPattern },
+			{ "customer_details.carLicensePlate": searchPattern },
+			{ "customer_details.carColor": searchPattern },
+			{ "customer_details.carModel": searchPattern },
+			{ "customer_details.passport": searchPattern },
+			{ "customer_details.passportExpiry": searchPattern },
+			{ "customer_details.nationality": searchPattern },
+			{ confirmation_number: searchPattern },
+			{ reservation_id: searchPattern },
+			{ reservation_status: searchPattern },
+			{ booking_source: searchPattern },
+			{ payment: searchPattern },
+			{ "roomDetails.room_number": searchPattern },
+		],
+	};
+};
+
 exports.reservationById = (req, res, next, id) => {
 	Reservations.findById(id).exec((err, reservations) => {
 		if (err || !reservations) {
@@ -561,27 +594,52 @@ exports.getListOfReservations = async (req, res) => {
 			return res.status(400).send("Invalid parameters");
 		}
 
-		const parsedFilters = JSON.parse(filters);
+		let parsedFilters = {};
+		try {
+			parsedFilters = JSON.parse(filters);
+		} catch (_) {
+			parsedFilters = {};
+		}
+
 		const dynamicFilter = buildReservationListFilter({
 			selectedFilter: parsedFilters.selectedFilter,
 			hotelId,
 			dateStr: date,
 		});
+		const searchMatch = buildReservationSearchMatch(parsedFilters.searchQuery);
 
-		const pipeline = [
-			{ $match: dynamicFilter },
+		const pipeline = [{ $match: dynamicFilter }];
+
+		if (searchMatch) {
+			pipeline.push(
+				{
+					$lookup: {
+						from: "rooms",
+						localField: "roomId",
+						foreignField: "_id",
+						as: "roomDetails",
+					},
+				},
+				{ $match: searchMatch }
+			);
+		}
+
+		pipeline.push(
 			{ $sort: { booked_at: -1 } },
 			{ $skip: (parsedPage - 1) * parsedRecords },
-			{ $limit: parsedRecords },
-			{
+			{ $limit: parsedRecords }
+		);
+
+		if (!searchMatch) {
+			pipeline.push({
 				$lookup: {
 					from: "rooms",
 					localField: "roomId",
 					foreignField: "_id",
 					as: "roomDetails",
 				},
-			},
-		];
+			});
+		}
 
 		const reservations = await Reservations.aggregate(pipeline);
 		res.json(reservations);
@@ -599,15 +657,41 @@ exports.totalRecordsReservations = async (req, res) => {
 			return res.status(400).send("Invalid parameters");
 		}
 
-		const parsedFilters = JSON.parse(filters);
+		let parsedFilters = {};
+		try {
+			parsedFilters = JSON.parse(filters);
+		} catch (_) {
+			parsedFilters = {};
+		}
 		const dynamicFilter = buildReservationListFilter({
 			selectedFilter: parsedFilters.selectedFilter,
 			hotelId,
 			dateStr: date,
 		});
+		const searchMatch = buildReservationSearchMatch(parsedFilters.searchQuery);
 
-		const total = await Reservations.countDocuments(dynamicFilter);
-		res.json({ total });
+		if (!searchMatch) {
+			const total = await Reservations.countDocuments(dynamicFilter);
+			return res.json({ total });
+		}
+
+		const pipeline = [
+			{ $match: dynamicFilter },
+			{
+				$lookup: {
+					from: "rooms",
+					localField: "roomId",
+					foreignField: "_id",
+					as: "roomDetails",
+				},
+			},
+			{ $match: searchMatch },
+			{ $count: "total" },
+		];
+
+		const result = await Reservations.aggregate(pipeline);
+		const total = result?.[0]?.total || 0;
+		return res.json({ total });
 	} catch (error) {
 		console.error("Error fetching total records:", error);
 		res.status(500).send("Server error");
