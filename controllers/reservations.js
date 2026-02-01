@@ -1664,6 +1664,193 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 	}
 };
 
+exports.reservationsOccupancySummary = async (req, res) => {
+	try {
+		const { hotelId, belongsTo } = req.params;
+		if (!ObjectId.isValid(hotelId) || !ObjectId.isValid(belongsTo)) {
+			return res.status(400).json({ error: "Invalid parameters" });
+		}
+
+		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
+		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+
+		const overdueInhouseFilter = {
+			reservation_status: IN_HOUSE_REGEX,
+			checkin_date: { $lte: endOfDay },
+			checkout_date: { $lte: endOfDay },
+		};
+
+		const queryConditions = {
+			hotelId: ObjectId(hotelId),
+			belongsTo: ObjectId(belongsTo),
+			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
+			reservation_status: { $not: CHECKED_OUT_REGEX },
+			$or: [
+				{
+					checkin_date: { $lte: endOfDay },
+					checkout_date: { $gte: startOfDay },
+				},
+				overdueInhouseFilter,
+			],
+		};
+
+		const [rooms, reservations, cleaningTasks] = await Promise.all([
+			Rooms.find({ hotelId: ObjectId(hotelId) })
+				.select("_id room_type bedsNumber cleanRoom active")
+				.lean(),
+			Reservations.find(queryConditions)
+				.select("roomId bedNumber reservation_status")
+				.lean(),
+			HouseKeeping.find({
+				hotelId: ObjectId(hotelId),
+				task_status: { $not: /finished|done|completed/i },
+			})
+				.select("rooms task_status")
+				.lean(),
+		]);
+
+		const roomIdSet = new Set(
+			(Array.isArray(rooms) ? rooms : []).map((room) => String(room._id))
+		);
+
+		const normalizeRoomIds = (roomIdField) => {
+			const rawIds = Array.isArray(roomIdField) ? roomIdField : [roomIdField];
+			return rawIds
+				.map((room) => {
+					if (!room) return null;
+					if (typeof room === "string" || typeof room === "number") {
+						return String(room);
+					}
+					if (typeof room === "object") {
+						return (
+							room._id ||
+							room.id ||
+							room.roomId ||
+							room.room_id ||
+							room.room_number ||
+							null
+						);
+					}
+					return null;
+				})
+				.filter(Boolean)
+				.map((id) => String(id));
+		};
+
+		const isReservationActive = (reservation) => {
+			const status = String(reservation?.reservation_status || "");
+			if (!status) return true;
+			return !CHECKED_OUT_REGEX.test(status);
+		};
+
+		const activeReservations = (Array.isArray(reservations) ? reservations : [])
+			.filter(isReservationActive)
+			.map((reservation) => ({
+				roomIds: normalizeRoomIds(reservation.roomId),
+				bedNumbers: Array.isArray(reservation.bedNumber)
+					? reservation.bedNumber
+					: [],
+			}));
+
+		const bookedBedsByRoom = new Map();
+		const wildcardBeds = [];
+
+		activeReservations.forEach((reservation) => {
+			if (!Array.isArray(reservation.bedNumbers)) return;
+			if (reservation.bedNumbers.length === 0) return;
+
+			if (!reservation.roomIds || reservation.roomIds.length === 0) {
+				wildcardBeds.push(...reservation.bedNumbers);
+				return;
+			}
+
+			reservation.roomIds.forEach((roomId) => {
+				if (!roomIdSet.has(roomId)) return;
+				if (!bookedBedsByRoom.has(roomId)) {
+					bookedBedsByRoom.set(roomId, []);
+				}
+				bookedBedsByRoom.get(roomId).push(...reservation.bedNumbers);
+			});
+		});
+
+		const occupiedRoomIds = new Set();
+		activeReservations.forEach((reservation) => {
+			if (!reservation.roomIds || reservation.roomIds.length === 0) return;
+			reservation.roomIds.forEach((roomId) => {
+				if (!roomIdSet.has(roomId)) return;
+				occupiedRoomIds.add(roomId);
+			});
+		});
+
+		const cleaningRoomIds = new Set();
+		(Array.isArray(cleaningTasks) ? cleaningTasks : []).forEach((task) => {
+			if (!Array.isArray(task.rooms)) return;
+			task.rooms.forEach((roomId) => {
+				if (!roomId) return;
+				const normalized = String(roomId);
+				if (roomIdSet.has(normalized)) {
+					cleaningRoomIds.add(normalized);
+				}
+			});
+		});
+
+		let occupied = 0;
+		let vacant = 0;
+		let clean = 0;
+		let dirty = 0;
+		let outOfService = 0;
+
+		(Array.isArray(rooms) ? rooms : []).forEach((room) => {
+			const roomId = String(room._id);
+			const isBedRoom = room?.room_type === "individualBed";
+			let isBooked = false;
+
+			if (isBedRoom) {
+				const beds = Array.isArray(room?.bedsNumber) ? room.bedsNumber : [];
+				if (beds.length > 0) {
+					const bookedBeds = new Set([
+						...(bookedBedsByRoom.get(roomId) || []),
+						...wildcardBeds,
+					]);
+					isBooked = beds.every((bed) => bookedBeds.has(bed));
+				}
+			} else {
+				isBooked = occupiedRoomIds.has(roomId);
+			}
+
+			if (isBooked) occupied += 1;
+			else vacant += 1;
+
+			if (room?.cleanRoom) clean += 1;
+			else dirty += 1;
+
+			if (room?.active === false) outOfService += 1;
+		});
+
+		return res.json({
+			ok: true,
+			hotelId,
+			summary: {
+				occupied,
+				vacant,
+				clean,
+				dirty,
+				cleaning: cleaningRoomIds.size,
+				outOfService,
+				totalRooms: Array.isArray(rooms) ? rooms.length : 0,
+			},
+			asOf: {
+				timezone: "Asia/Riyadh",
+				startOfDay,
+				endOfDay,
+			},
+		});
+	} catch (error) {
+		console.error("Error fetching occupancy summary:", error);
+		return res.status(500).json({ error: "Internal server error" });
+	}
+};
+
 exports.todaysCheckins = async (req, res) => {
 	try {
 		const { hotelId, belongsTo } = req.params;

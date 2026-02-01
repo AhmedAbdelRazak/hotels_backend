@@ -21,6 +21,7 @@ const {
 	todaysCheckins,
 	reservationsOccupancyRange,
 	reservationsOccupancyCurrent,
+	reservationsOccupancySummary,
 	updateReservation,
 	agodaDataDump,
 	expediaDataDump,
@@ -113,6 +114,10 @@ router.get(
 router.get(
 	"/reservations/occupancy/current/:hotelId/:belongsTo",
 	reservationsOccupancyCurrent
+);
+router.get(
+	"/reservations/occupancy/summary/:hotelId/:belongsTo",
+	reservationsOccupancySummary
 );
 router.get(
 	"/reservations/occupancy/range/:startdate/:enddate/:hotelId/:belongsTo",
