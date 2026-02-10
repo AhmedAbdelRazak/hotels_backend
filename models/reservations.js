@@ -202,6 +202,7 @@ const reservationsSchema = new mongoose.Schema(
 				paid_online_jannatbooking: 0,
 				paid_online_other_platforms: 0,
 				paid_online_via_instapay: 0,
+				paid_no_show: 0,
 				payment_comments: "",
 			},
 		},

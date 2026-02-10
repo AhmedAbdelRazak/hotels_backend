@@ -60,6 +60,7 @@ const PAID_BREAKDOWN_TOTAL_KEYS = [
 	"paid_online_jannatbooking",
 	"paid_online_other_platforms",
 	"paid_online_via_instapay",
+	"paid_no_show",
 ];
 
 const PAID_BREAKDOWN_QUERY_KEYS = PAID_BREAKDOWN_TOTAL_KEYS.map(
@@ -2339,6 +2340,43 @@ function parsePaymentStatusFilter(rawStatuses) {
 	return filtered;
 }
 
+function normalizeBookingSource(value = "") {
+	return String(value || "")
+		.trim()
+		.toLowerCase();
+}
+
+function parseBookingSourceFilter(rawSources) {
+	if (!rawSources) return [];
+	const incoming = Array.isArray(rawSources)
+		? rawSources
+		: String(rawSources || "").split(",");
+	const unique = new Set();
+	incoming.forEach((item) => {
+		const norm = normalizeBookingSource(item);
+		if (norm) unique.add(norm);
+	});
+	return Array.from(unique);
+}
+
+function buildBookingSourceMatchClause(bookingSourceFilter = []) {
+	if (!Array.isArray(bookingSourceFilter) || !bookingSourceFilter.length) {
+		return null;
+	}
+	return {
+		$in: bookingSourceFilter.map(
+			(source) => new RegExp(`^${escapeRegex(source)}$`, "i")
+		),
+	};
+}
+
+function matchesBookingSourceFilter(bookingSource = "", bookingSourceFilter = []) {
+	if (!Array.isArray(bookingSourceFilter) || !bookingSourceFilter.length) {
+		return true;
+	}
+	return bookingSourceFilter.includes(normalizeBookingSource(bookingSource));
+}
+
 /**
  * ✅ Payment logic EXACTLY matching EnhancedContentTable:
  * Captured / Paid Offline / Not Paid / Not Captured
@@ -2420,6 +2458,23 @@ function paymentMeta(reservation = {}) {
 		onsitePaidAmount,
 		hint,
 	};
+}
+
+function normalizeSummaryDateBasis(value = "") {
+	const raw = String(value || "")
+		.toLowerCase()
+		.trim()
+		.replace(/[\s-]+/g, "_");
+
+	if (["checkout", "checkout_date", "checkouts"].includes(raw)) {
+		return "checkout";
+	}
+
+	if (["checkin", "checkin_date", "checkins"].includes(raw)) {
+		return "checkin";
+	}
+
+	return "stay";
 }
 
 const PAYMENT_STATUS_ORDER = [
@@ -2511,6 +2566,104 @@ function buildBookingSourcePaymentSummary(
 	};
 }
 
+function toUtcDateKey(value) {
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return "";
+	date.setUTCHours(0, 0, 0, 0);
+	return date.toISOString().slice(0, 10);
+}
+
+function buildCheckoutDatePaymentSummary(
+	reservations = [],
+	paymentStatusFilter = new Set(),
+	{ dateField = "checkout_date", rowKey = "checkout_date" } = {}
+) {
+	const rowsMap = new Map();
+	const columnTotals = {};
+	const statusSet = new Set(PAYMENT_STATUS_ORDER);
+	let overallTotal = 0;
+	let overallReservationsCount = 0;
+
+	for (const status of PAYMENT_STATUS_ORDER) {
+		columnTotals[status] = 0;
+	}
+
+	for (const reservation of reservations) {
+		if (!reservation) continue;
+
+		const pay = paymentMeta(reservation);
+		if (paymentStatusFilter.size && !paymentStatusFilter.has(pay.normalizedStatus))
+			continue;
+
+		const rowDate = toUtcDateKey(reservation?.[dateField]);
+		if (!rowDate) continue;
+
+		const amount = safeNumber(pay.totalAmount);
+
+		if (!rowsMap.has(rowDate)) {
+			rowsMap.set(rowDate, {
+				date: rowDate,
+				[rowKey]: rowDate,
+				totalsByStatus: {},
+				rowTotal: 0,
+				reservationsCount: 0,
+			});
+		}
+
+		const row = rowsMap.get(rowDate);
+		row.totalsByStatus[pay.status] =
+			safeNumber(row.totalsByStatus[pay.status]) + amount;
+		row.rowTotal = safeNumber(row.rowTotal) + amount;
+		row.reservationsCount = safeNumber(row.reservationsCount) + 1;
+
+		if (columnTotals[pay.status] == null) columnTotals[pay.status] = 0;
+		columnTotals[pay.status] += amount;
+		overallTotal += amount;
+		overallReservationsCount += 1;
+		statusSet.add(pay.status);
+	}
+
+	const statuses = [
+		...PAYMENT_STATUS_ORDER,
+		...Array.from(statusSet).filter(
+			(status) => !PAYMENT_STATUS_ORDER.includes(status)
+		),
+	];
+
+	const rows = Array.from(rowsMap.values())
+		.map((row) => {
+			statuses.forEach((status) => {
+				if (row.totalsByStatus[status] == null) {
+					row.totalsByStatus[status] = 0;
+				}
+			});
+			return row;
+		})
+		.sort((a, b) =>
+			String(a.date || "").localeCompare(
+				String(b.date || ""),
+				undefined,
+				{
+					sensitivity: "base",
+				}
+			)
+		);
+
+	statuses.forEach((status) => {
+		if (columnTotals[status] == null) columnTotals[status] = 0;
+	});
+
+	return {
+		statuses,
+		rows,
+		columnTotals,
+		overallTotal,
+		overallReservationsCount,
+		currency: "SAR",
+		rowType: rowKey,
+	};
+}
+
 async function resolveHotelIdsByNames(hotelsParam) {
 	if (!hotelsParam || hotelsParam === "all") return [];
 	const names = String(hotelsParam)
@@ -2537,6 +2690,9 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			includeCancelled,
 			excludeCancelled,
 			paymentStatuses,
+			dateBasis,
+			bookingSources,
+			bookingSource,
 		} = req.query || {};
 
 		let resolvedHotelId = null;
@@ -2563,6 +2719,7 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 
 		const range =
 			parseCustomRange(start, end) || (month ? parseMonthParam(month) : null);
+		const normalizedDateBasis = normalizeSummaryDateBasis(dateBasis);
 
 		const query = {};
 		if (resolvedHotelId) {
@@ -2584,10 +2741,25 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 		}
 
 		if (range?.start && range?.endExclusive) {
-			query.checkin_date = { $lt: range.endExclusive };
-			query.checkout_date = { $gt: range.start };
+			if (normalizedDateBasis === "checkout") {
+				query.checkout_date = { $gte: range.start, $lt: range.endExclusive };
+			} else if (normalizedDateBasis === "checkin") {
+				query.checkin_date = { $gte: range.start, $lt: range.endExclusive };
+			} else {
+				query.checkin_date = { $lt: range.endExclusive };
+				query.checkout_date = { $gt: range.start };
+			}
 		} else {
 			query.createdAt = { $gte: PAGE_START_DATE_UTC };
+		}
+
+		const bookingSourceFilter = parseBookingSourceFilter(
+			bookingSources || bookingSource
+		);
+		const bookingSourceMatch =
+			buildBookingSourceMatchClause(bookingSourceFilter);
+		if (bookingSourceMatch) {
+			query.booking_source = bookingSourceMatch;
 		}
 
 		const reservations = await Reservations.find(query)
@@ -2606,6 +2778,7 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 			success: true,
 			data: summary,
 			range: range?.label || null,
+			dateBasis: normalizedDateBasis,
 		});
 	} catch (err) {
 		console.error("Error in bookingSourcePaymentSummary:", err);
@@ -2616,11 +2789,120 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 	}
 };
 
+exports.checkoutDatePaymentSummary = async (req, res) => {
+	try {
+		const {
+			hotelId,
+			hotels,
+			month,
+			start,
+			end,
+			includeCancelled,
+			excludeCancelled,
+			paymentStatuses,
+			bookingSources,
+			bookingSource,
+			dateBasis,
+		} = req.query || {};
+
+		let resolvedHotelId = null;
+		if (hotelId && hotelId !== "all") {
+			if (!ObjectId.isValid(hotelId)) {
+				return res.status(400).json({
+					success: false,
+					message: "Invalid hotelId",
+				});
+			}
+			resolvedHotelId = new ObjectId(hotelId);
+		}
+
+		let hotelIds = [];
+		if (!resolvedHotelId && hotels && hotels !== "all") {
+			hotelIds = await resolveHotelIdsByNames(hotels);
+			if (!hotelIds.length) {
+				return res.json({
+					success: true,
+					data: buildCheckoutDatePaymentSummary([], new Set()),
+				});
+			}
+		}
+
+		const range =
+			parseCustomRange(start, end) || (month ? parseMonthParam(month) : null);
+
+		const query = {};
+		if (resolvedHotelId) {
+			query.hotelId = resolvedHotelId;
+		} else if (hotelIds.length) {
+			query.hotelId = { $in: hotelIds };
+		}
+
+		const includeCancelledFlag =
+			String(includeCancelled || "").toLowerCase() === "true";
+		const excludeCancelledFlag =
+			String(excludeCancelled || "").toLowerCase() === "true";
+
+		if (!includeCancelledFlag) {
+			const excludedStatuses = excludeCancelledFlag
+				? ["cancelled"]
+				: ["cancelled", "no show", "no_show", "noshow"];
+			query.reservation_status = { $nin: excludedStatuses };
+		}
+
+		const normalizedDateBasis = normalizeSummaryDateBasis(dateBasis);
+		const rowKey =
+			normalizedDateBasis === "checkin" ? "checkin_date" : "checkout_date";
+		const dateField = rowKey;
+
+		if (range?.start && range?.endExclusive) {
+			query[dateField] = { $gte: range.start, $lt: range.endExclusive };
+		} else {
+			query[dateField] = { $gte: PAGE_START_DATE_UTC };
+		}
+
+		const bookingSourceFilter = parseBookingSourceFilter(
+			bookingSources || bookingSource
+		);
+		const bookingSourceMatch =
+			buildBookingSourceMatchClause(bookingSourceFilter);
+		if (bookingSourceMatch) {
+			query.booking_source = bookingSourceMatch;
+		}
+
+		const reservations = await Reservations.find(query)
+			.select(
+				"checkin_date checkout_date total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
+			)
+			.lean();
+
+		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
+		const summary = buildCheckoutDatePaymentSummary(
+			reservations,
+			paymentStatusFilter,
+			{ dateField, rowKey }
+		);
+
+		return res.json({
+			success: true,
+			data: summary,
+			range: range?.label || null,
+			dateBasis: rowKey === "checkin_date" ? "checkin" : "checkout",
+		});
+	} catch (err) {
+		console.error("Error in checkoutDatePaymentSummary:", err);
+		return res.status(500).json({
+			success: false,
+			message: err.message || "Failed to build checkout date summary",
+		});
+	}
+};
+
 function buildReservationBaseQuery({
 	hotelId,
 	start,
 	endExclusive,
 	includeCancelled,
+	bookingSourceFilter = [],
 }) {
 	const q = {
 		hotelId: new ObjectId(hotelId),
@@ -2634,10 +2916,21 @@ function buildReservationBaseQuery({
 			$nin: ["cancelled", "no show", "no_show", "noshow"],
 		};
 	}
+
+	const bookingSourceMatch = buildBookingSourceMatchClause(bookingSourceFilter);
+	if (bookingSourceMatch) {
+		q.booking_source = bookingSourceMatch;
+	}
 	return q;
 }
 
-function buildDayBaseQuery({ hotelId, dayStart, dayEnd, includeCancelled }) {
+function buildDayBaseQuery({
+	hotelId,
+	dayStart,
+	dayEnd,
+	includeCancelled,
+	bookingSourceFilter = [],
+}) {
 	const q = {
 		hotelId: new ObjectId(hotelId),
 		checkin_date: { $lt: dayEnd },
@@ -2649,6 +2942,11 @@ function buildDayBaseQuery({ hotelId, dayStart, dayEnd, includeCancelled }) {
 		q.reservation_status = {
 			$nin: ["cancelled", "no show", "no_show", "noshow"],
 		};
+	}
+
+	const bookingSourceMatch = buildBookingSourceMatchClause(bookingSourceFilter);
+	if (bookingSourceMatch) {
+		q.booking_source = bookingSourceMatch;
 	}
 	return q;
 }
@@ -2759,6 +3057,7 @@ async function computeOccupancy({
 	displayMode,
 	includeCancelled,
 	paymentStatusFilter,
+	bookingSourceFilter = [],
 }) {
 	const hotel = await HotelDetails.findById(hotelId)
 		.select("hotelName roomCountDetails")
@@ -2971,15 +3270,20 @@ async function computeOccupancy({
 		start,
 		endExclusive,
 		includeCancelled,
+		bookingSourceFilter,
 	});
 
 	const reservations = await Reservations.find(baseQuery)
 		.select(
-			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown"
+			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown booking_source"
 		)
 		.lean();
 
 	let totalAmount = 0;
+	let checkoutGrossTotal = 0;
+	let checkoutReservationsCount = 0;
+	let checkinGrossTotal = 0;
+	let checkinReservationsCount = 0;
 	const paymentBreakdown = {};
 
 	// 1) Count bookings into day.rooms[key].booked
@@ -2996,6 +3300,14 @@ async function computeOccupancy({
 		if (
 			paymentStatusFilter.size &&
 			!paymentStatusFilter.has(pay.normalizedStatus)
+		)
+			continue;
+		if (
+			bookingSourceFilter.length &&
+			!matchesBookingSourceFilter(
+				reservation?.booking_source,
+				bookingSourceFilter
+			)
 		)
 			continue;
 
@@ -3020,9 +3332,21 @@ async function computeOccupancy({
 		const co = new Date(reservation.checkout_date);
 		ci.setUTCHours(0, 0, 0, 0);
 		co.setUTCHours(0, 0, 0, 0);
+		const ciTs = ci.getTime();
+		const coTs = co.getTime();
 
-		const overlapStart = Math.max(ci.getTime(), start.getTime());
-		const overlapEnd = Math.min(co.getTime(), endExclusive.getTime());
+		if (coTs >= start.getTime() && coTs < endExclusive.getTime()) {
+			checkoutGrossTotal += pay.totalAmount;
+			checkoutReservationsCount += 1;
+		}
+
+		if (ciTs >= start.getTime() && ciTs < endExclusive.getTime()) {
+			checkinGrossTotal += pay.totalAmount;
+			checkinReservationsCount += 1;
+		}
+
+		const overlapStart = Math.max(ciTs, start.getTime());
+		const overlapEnd = Math.min(coTs, endExclusive.getTime());
 		if (overlapStart >= overlapEnd) continue;
 
 		for (const room of reservation.pickedRoomsType) {
@@ -3206,13 +3530,17 @@ async function computeOccupancy({
 				capacityRoomNights > 0 ? occupiedRoomNights / capacityRoomNights : 0,
 			peakDay,
 
-			occupancyByType: occupancyByTypeArr,
-			warnings,
-			totalAmount,
-			paymentBreakdown: paymentBreakdownArr,
-		},
-		displayMode,
-	};
+				occupancyByType: occupancyByTypeArr,
+				warnings,
+				totalAmount,
+				checkoutGrossTotal,
+				checkoutReservationsCount,
+				checkinGrossTotal,
+				checkinReservationsCount,
+				paymentBreakdown: paymentBreakdownArr,
+			},
+			displayMode,
+		};
 }
 
 // -------------------------------
@@ -3237,24 +3565,28 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 		const displayMode =
 			(req.query.display === "roomType" && "roomType") || "displayName";
 
-		const includeCancelled =
-			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		const paymentStatusFilter = parsePaymentStatusFilter(
-			req.query.paymentStatuses || req.query.paymentStatus
-		);
+			const includeCancelled =
+				String(req.query.includeCancelled || "").toLowerCase() === "true";
+			const paymentStatusFilter = parsePaymentStatusFilter(
+				req.query.paymentStatuses || req.query.paymentStatus
+			);
+			const bookingSourceFilter = parseBookingSourceFilter(
+				req.query.bookingSources || req.query.bookingSource
+			);
 
-		const result = await computeOccupancy({
-			hotelId,
-			start,
+			const result = await computeOccupancy({
+				hotelId,
+				start,
 			endExclusive,
 			daysInMonth,
 			label,
 			year,
-			monthIndex,
-			displayMode,
-			includeCancelled,
-			paymentStatusFilter,
-		});
+				monthIndex,
+				displayMode,
+				includeCancelled,
+				paymentStatusFilter,
+				bookingSourceFilter,
+			});
 
 		if (result?.error) {
 			return res
@@ -3294,24 +3626,28 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 		const displayMode =
 			(req.query.display === "roomType" && "roomType") || "displayName";
 
-		const includeCancelled =
-			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		const paymentStatusFilter = parsePaymentStatusFilter(
-			req.query.paymentStatuses || req.query.paymentStatus
-		);
+			const includeCancelled =
+				String(req.query.includeCancelled || "").toLowerCase() === "true";
+			const paymentStatusFilter = parsePaymentStatusFilter(
+				req.query.paymentStatuses || req.query.paymentStatus
+			);
+			const bookingSourceFilter = parseBookingSourceFilter(
+				req.query.bookingSources || req.query.bookingSource
+			);
 
-		const result = await computeOccupancy({
-			hotelId,
-			start,
+			const result = await computeOccupancy({
+				hotelId,
+				start,
 			endExclusive,
 			daysInMonth,
 			label,
 			year,
-			monthIndex,
-			displayMode,
-			includeCancelled,
-			paymentStatusFilter,
-		});
+				monthIndex,
+				displayMode,
+				includeCancelled,
+				paymentStatusFilter,
+				bookingSourceFilter,
+			});
 
 		if (result?.error) {
 			return res
@@ -3366,11 +3702,14 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		const displayMode =
 			(req.query.display === "roomType" && "roomType") || "displayName";
-		const includeCancelled =
-			String(req.query.includeCancelled || "").toLowerCase() === "true";
-		const paymentStatusFilter = parsePaymentStatusFilter(
-			req.query.paymentStatuses || req.query.paymentStatus
-		);
+			const includeCancelled =
+				String(req.query.includeCancelled || "").toLowerCase() === "true";
+			const paymentStatusFilter = parsePaymentStatusFilter(
+				req.query.paymentStatuses || req.query.paymentStatus
+			);
+			const bookingSourceFilter = parseBookingSourceFilter(
+				req.query.bookingSources || req.query.bookingSource
+			);
 
 		const hotel = await HotelDetails.findById(hotelId)
 			.select("hotelName roomCountDetails")
@@ -3519,12 +3858,13 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		const targetKeyNorm = roomKey ? normalizeRoomKeyLabel(roomKey) : null;
 
-		const baseQuery = buildDayBaseQuery({
-			hotelId,
-			dayStart,
-			dayEnd,
-			includeCancelled,
-		});
+			const baseQuery = buildDayBaseQuery({
+				hotelId,
+				dayStart,
+				dayEnd,
+				includeCancelled,
+				bookingSourceFilter,
+			});
 
 		const reservations = await Reservations.find(baseQuery)
 			.select(
@@ -3543,11 +3883,19 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			if (!reservation || !Array.isArray(reservation.pickedRoomsType)) continue;
 
 			const pay = paymentMeta(reservation);
-			if (
-				paymentStatusFilter.size &&
-				!paymentStatusFilter.has(pay.normalizedStatus)
-			)
-				continue;
+				if (
+					paymentStatusFilter.size &&
+					!paymentStatusFilter.has(pay.normalizedStatus)
+				)
+					continue;
+				if (
+					bookingSourceFilter.length &&
+					!matchesBookingSourceFilter(
+						reservation?.booking_source,
+						bookingSourceFilter
+					)
+				)
+					continue;
 
 			let matchedCount = 0;
 			const roomBreakdownMap = {};
