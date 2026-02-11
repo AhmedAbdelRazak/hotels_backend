@@ -153,16 +153,18 @@ function computeReservationCommission(reservation) {
       - If `?hotels=all` or not provided => no hotel filter
       - Else parse commaâ€separated hotel names, match them (caseâ€insensitive)
         to actual hotels, then filter reservations by those IDs
-      - If `?excludeCancelled=true`, filter out cancelled reservations
+      - If `?excludeCancelled=true`, filter out cancelled + no-show reservations
    ------------------------------------------------------------------ */
 async function findFilteredReservations(req) {
 	const baseFilter = {
 		createdAt: { $gte: PAGE_START_DATE_UTC },
 	};
 
-	// If ?excludeCancelled=true, exclude reservation_status = 'cancelled'
+	// If ?excludeCancelled=true, exclude cancelled + no-show statuses.
 	if (req.query.excludeCancelled === "true") {
-		baseFilter.reservation_status = { $ne: "cancelled" };
+		baseFilter.reservation_status = {
+			$nin: ["cancelled", "no show", "no_show", "noshow"],
+		};
 	}
 
 	// Check for ?hotels=...
@@ -507,7 +509,7 @@ function monthRangeFromString(monthYearStr) {
 /* ------------------------------------------------------------------
    specificListOfReservations
    Uses its own custom logic to parse query params for date ranges, etc.
-   Also respects ?excludeCancelled=true to filter out cancelled reservations
+   Also respects ?excludeCancelled=true to filter out cancelled + no-show reservations
 ------------------------------------------------------------------ */
 exports.specificListOfReservations = async (req, res) => {
 	// -------------------- LOCAL HELPERS (for this endpoint only) --------------------
@@ -687,9 +689,11 @@ exports.specificListOfReservations = async (req, res) => {
 		const customFilter = {};
 		const query = req.query;
 
-		// excludeCancelled=true -> filter out reservation_status = "cancelled"
+		// excludeCancelled=true -> filter out cancelled + no-show statuses
 		if (query.excludeCancelled === "true") {
-			customFilter.reservation_status = { $ne: "cancelled" };
+			customFilter.reservation_status = {
+				$nin: ["cancelled", "no show", "no_show", "noshow"],
+			};
 		}
 
 		// 3) Parse dynamic keys for date / month / status
@@ -2378,7 +2382,7 @@ function matchesBookingSourceFilter(bookingSource = "", bookingSourceFilter = []
 }
 
 /**
- * ✅ Payment logic EXACTLY matching EnhancedContentTable:
+ * ✅ Payment logic aligned with EnhancedContentTable:
  * Captured / Paid Offline / Not Paid / Not Captured
  */
 function paymentMeta(reservation = {}) {
@@ -2386,17 +2390,18 @@ function paymentMeta(reservation = {}) {
 	const pmt = String(reservation?.payment || "")
 		.toLowerCase()
 		.trim();
-	const isCardPayment = /\bcredit\b|\bdebit\b/.test(pmt);
 
 	const legacyCaptured = !!reservation?.payment_details?.captured;
-
 	const onsitePaidAmount = safeNumber(
 		reservation?.payment_details?.onsite_paid_amount
 	);
 	const payOffline = onsitePaidAmount > 0 || pmt === "paid offline";
-
-	const breakdownCaptured =
-		computePaidBreakdownTotal(reservation?.paid_amount_breakdown) > 0;
+	const breakdown = reservation?.paid_amount_breakdown || {};
+	const breakdownCaptured = Object.keys(breakdown).some((key) => {
+		if (key === "payment_comments") return false;
+		const value = Number(breakdown[key]);
+		return Number.isFinite(value) && value > 0;
+	});
 
 	const capTotal = safeNumber(pd?.captured_total_usd);
 	const limitUsd =
@@ -2420,12 +2425,11 @@ function paymentMeta(reservation = {}) {
 	const isCaptured =
 		manualOverrideCaptured ||
 		legacyCaptured ||
-		breakdownCaptured ||
 		capTotal > 0 ||
 		initialCompleted ||
 		anyMitCompleted ||
 		pmt === "paid online" ||
-		isCardPayment;
+		breakdownCaptured;
 
 	const isNotPaid = pmt === "not paid" && !isCaptured && !payOffline;
 
