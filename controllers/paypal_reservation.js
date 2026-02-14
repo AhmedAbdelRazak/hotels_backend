@@ -618,13 +618,16 @@ function getVccStatusPayload(reservation, provider) {
 	const charged = !!vcc?.charged;
 	const failedAttempts = Number(vcc?.failed_attempts_count || 0);
 	const blocked = !!vcc?.blocked_after_failure;
-	const attemptedBefore = !charged && (failedAttempts > 0 || blocked);
+	const retryableLegacyFailure = isRetrySafeLegacyVccFailure(reservation);
+	const attemptedBefore =
+		!charged && !retryableLegacyFailure && (failedAttempts > 0 || blocked);
 
 	return {
 		provider: provider || "",
 		bookingSource: reservation?.booking_source || "",
 		alreadyCharged: charged,
 		attemptedBefore,
+		retryableLegacyFailure,
 		processing: !!vcc?.processing,
 		chargeCount: Number(vcc?.charge_count || 0),
 		attemptsCount: Number(vcc?.attempts_count || 0),
@@ -635,8 +638,16 @@ function getVccStatusPayload(reservation, provider) {
 			: "",
 		lastSuccessAt: vcc?.last_success_at || null,
 		lastFailureAt: vcc?.last_failure_at || null,
+		lastFailureDebugId: vcc?.last_failure_debug_id || null,
+		lastFailureStatusCode: vcc?.last_failure_status_code || null,
 		lastCaptureId: vcc?.last_capture?.capture_id || null,
 	};
+}
+
+function isRetrySafeLegacyVccFailure(reservation) {
+	const code = String(reservation?.vcc_payment?.last_failure_code || "").toUpperCase();
+	const msg = String(reservation?.vcc_payment?.last_failure_message || "");
+	return code === "VCC_NOT_COMPLETED" && /status:\s*COMPLETED/i.test(msg);
 }
 
 function parsePayPalVccError(err) {
@@ -657,6 +668,26 @@ function parsePayPalVccError(err) {
 		debugId,
 		statusCode:
 			Number(err?.statusCode || err?.response?.status || 0) || 500,
+	};
+}
+
+function buildSanitizedPayPalErrorPayload(err, parsed) {
+	const details = err?.response?.data?.details || err?.result?.details || [];
+	const safeDetails = Array.isArray(details)
+		? details.map((d) => ({
+				issue: d?.issue || null,
+				description: d?.description || null,
+				field: d?.field || null,
+		  }))
+		: [];
+	return {
+		issue: parsed?.issue || null,
+		description: parsed?.description || null,
+		statusCode: parsed?.statusCode || null,
+		debugId: parsed?.debugId || null,
+		name: err?.name || null,
+		message: err?.message || null,
+		details: safeDetails,
 	};
 }
 
@@ -896,6 +927,20 @@ async function paypalMitCharge({
 }
 
 /* ─────────────── 4) Data + ledger helpers ─────────────── */
+function extractFirstCaptureFromOrderPayload(payload) {
+	const units = Array.isArray(payload?.purchase_units) ? payload.purchase_units : [];
+	for (const unit of units) {
+		const captures = unit?.payments?.captures;
+		if (!Array.isArray(captures) || captures.length === 0) continue;
+		const completed =
+			captures.find(
+				(c) => String(c?.status || "").toUpperCase() === "COMPLETED" && c?.id
+			) || captures[0];
+		if (completed) return completed;
+	}
+	return null;
+}
+
 async function paypalVccDirectCharge({
 	usdAmount,
 	cardNumber,
@@ -958,6 +1003,7 @@ async function paypalVccDirectCharge({
 				billing_address: billingAddress,
 				attributes: {
 					verification: { method: "SCA_WHEN_REQUIRED" },
+					vault: { store_in_vault: "ON_SUCCESS" },
 				},
 			},
 		},
@@ -971,27 +1017,59 @@ async function paypalVccDirectCharge({
 		null;
 
 	let resultPayload = createdOrder;
-	let capture = createdOrder?.purchase_units?.[0]?.payments?.captures?.[0] || null;
+	let capture = extractFirstCaptureFromOrderPayload(createdOrder);
 	let path = "DIRECT_CREATE";
+	const orderId = createdOrder?.id || null;
+	const orderStatus = String(createdOrder?.status || "").toUpperCase();
+
+	if ((!capture || !capture?.id) && orderId && orderStatus === "COMPLETED") {
+		const getReq = new paypal.orders.OrdersGetRequest(orderId);
+		if (cmid) getReq.headers["PayPal-Client-Metadata-Id"] = cmid;
+		const { result: gotOrder } = await ppClient.execute(getReq);
+		if (gotOrder) {
+			resultPayload = gotOrder;
+			const fetchedCapture = extractFirstCaptureFromOrderPayload(gotOrder);
+			if (fetchedCapture) {
+				capture = fetchedCapture;
+				path = "DIRECT_GET";
+			}
+		}
+	}
 
 	if (!capture || String(capture?.status || "").toUpperCase() !== "COMPLETED") {
-		const orderStatus = String(createdOrder?.status || "").toUpperCase();
 		if (orderStatus === "APPROVED" || orderStatus === "CREATED") {
 			resultPayload = await paypalCaptureApprovedOrder({
-				orderId: createdOrder?.id,
+				orderId,
 				cmid,
 				reqId: `vcc-cap-${uuid()}`,
 			});
-			capture =
-				resultPayload?.purchase_units?.[0]?.payments?.captures?.[0] || null;
+			capture = extractFirstCaptureFromOrderPayload(resultPayload);
 			path = "DIRECT_CAPTURE";
+
+			if ((!capture || !capture?.id) && orderId) {
+				const getReqAfterCap = new paypal.orders.OrdersGetRequest(orderId);
+				if (cmid)
+					getReqAfterCap.headers["PayPal-Client-Metadata-Id"] = cmid;
+				const { result: gotOrderAfterCap } = await ppClient.execute(
+					getReqAfterCap
+				);
+				if (gotOrderAfterCap) {
+					resultPayload = gotOrderAfterCap;
+					const fetchedAfterCap =
+						extractFirstCaptureFromOrderPayload(gotOrderAfterCap);
+					if (fetchedAfterCap) {
+						capture = fetchedAfterCap;
+						path = "DIRECT_CAPTURE_GET";
+					}
+				}
+			}
 		}
 	}
 
 	return {
 		path,
 		createdDebugId,
-		orderId: createdOrder?.id || resultPayload?.id || null,
+		orderId: orderId || resultPayload?.id || null,
 		resultPayload,
 		capture,
 	};
@@ -3688,7 +3766,7 @@ exports.getReservationVccStatus = async (req, res) => {
 			return res.status(400).json({ message: "Invalid reservationId." });
 		}
 
-		const reservation = await Reservations.findById(reservationId)
+		let reservation = await Reservations.findById(reservationId)
 			.populate("hotelId", "hotelName")
 			.populate("roomId", "room_number")
 			.lean();
@@ -3697,6 +3775,26 @@ exports.getReservationVccStatus = async (req, res) => {
 		}
 
 		const provider = resolveVccProvider(reservation?.booking_source);
+		if (isRetrySafeLegacyVccFailure(reservation)) {
+			const needsCleanup =
+				!!reservation?.vcc_payment?.blocked_after_failure ||
+				!!String(reservation?.vcc_payment?.warning_message || "").trim();
+			if (needsCleanup) {
+				await Reservations.updateOne(
+					{ _id: reservationId },
+					{
+						$set: {
+							"vcc_payment.blocked_after_failure": false,
+							"vcc_payment.warning_message": "",
+						},
+					}
+				);
+				reservation = await Reservations.findById(reservationId)
+					.populate("hotelId", "hotelName")
+					.populate("roomId", "room_number")
+					.lean();
+			}
+		}
 		const roomNumbers = extractReservationRoomNumbers(reservation);
 		const metadata = buildVccMetadataSnapshot({
 			reservation,
@@ -3800,6 +3898,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		}
 
 		const beforeStatus = getVccStatusPayload(reservation, provider);
+		const beforeStatusRetrySafe = isRetrySafeLegacyVccFailure(reservation);
 		if (beforeStatus.alreadyCharged) {
 			return res.status(409).json({
 				message: "This reservation was already charged via VCC.",
@@ -3807,13 +3906,21 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				vccStatus: beforeStatus,
 			});
 		}
-		if (beforeStatus.attemptedBefore) {
+		if (beforeStatus.attemptedBefore && !beforeStatusRetrySafe) {
 			return res.status(409).json({
 				message: beforeStatus.warningMessage || VCC_PROMPT_WARNING_MESSAGE,
 				attemptedBefore: true,
 				warningMessage:
 					beforeStatus.warningMessage || VCC_PROMPT_WARNING_MESSAGE,
 				vccStatus: beforeStatus,
+			});
+		}
+		if (beforeStatus.attemptedBefore && beforeStatusRetrySafe) {
+			await Reservations.findByIdAndUpdate(reservationId, {
+				$set: {
+					"vcc_payment.blocked_after_failure": false,
+					"vcc_payment.warning_message": "",
+				},
 			});
 		}
 
@@ -3849,6 +3956,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		}
 
 		const lockedStatus = getVccStatusPayload(reservation, provider);
+		const lockedStatusRetrySafe = isRetrySafeLegacyVccFailure(reservation);
 		if (lockedStatus.alreadyCharged) {
 			await Reservations.findByIdAndUpdate(reservationId, {
 				$set: { "vcc_payment.processing": false },
@@ -3860,7 +3968,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				vccStatus: lockedStatus,
 			});
 		}
-		if (lockedStatus.attemptedBefore) {
+		if (lockedStatus.attemptedBefore && !lockedStatusRetrySafe) {
 			await Reservations.findByIdAndUpdate(reservationId, {
 				$set: { "vcc_payment.processing": false },
 			});
@@ -3871,6 +3979,14 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				warningMessage:
 					lockedStatus.warningMessage || VCC_PROMPT_WARNING_MESSAGE,
 				vccStatus: lockedStatus,
+			});
+		}
+		if (lockedStatus.attemptedBefore && lockedStatusRetrySafe) {
+			await Reservations.findByIdAndUpdate(reservationId, {
+				$set: {
+					"vcc_payment.blocked_after_failure": false,
+					"vcc_payment.warning_message": "",
+				},
 			});
 		}
 
@@ -3963,14 +4079,31 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			requestId: `vcc:${reservationId}:${toCCY(parsedUsd)}:${cardLast4}`,
 		});
 
-		const capture = vccChargeResult?.capture || {};
-		const captureStatus = String(capture?.status || "").toUpperCase();
+		let capture = vccChargeResult?.capture || {};
+		let captureStatus = String(capture?.status || "").toUpperCase();
+		const payloadStatus = String(
+			vccChargeResult?.resultPayload?.status || "UNKNOWN"
+		).toUpperCase();
+
+		// PayPal can occasionally return order status COMPLETED while capture details
+		// are omitted from the immediate response representation.
+		if ((captureStatus !== "COMPLETED" || !capture?.id) && payloadStatus === "COMPLETED") {
+			capture = {
+				id: vccChargeResult?.orderId || `ORDER-${Date.now()}`,
+				status: "COMPLETED",
+				amount: {
+					value: toCCY(parsedUsd),
+					currency_code: "USD",
+				},
+				create_time: new Date().toISOString(),
+				source: "ORDER_STATUS_COMPLETED_FALLBACK",
+			};
+			captureStatus = "COMPLETED";
+		}
+
 		if (captureStatus !== "COMPLETED" || !capture?.id) {
-			const pendingStatus = String(
-				vccChargeResult?.resultPayload?.status || "UNKNOWN"
-			);
 			const pendingError = new Error(
-				`VCC charge is not completed (status: ${pendingStatus}).`
+				`VCC charge is not completed (status: ${payloadStatus}).`
 			);
 			pendingError.statusCode = 402;
 			pendingError.name = "VCC_NOT_COMPLETED";
@@ -4036,6 +4169,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"vcc_payment.last_failure_at": null,
 					"vcc_payment.last_failure_message": "",
 					"vcc_payment.last_failure_code": "",
+					"vcc_payment.last_failure_debug_id": null,
+					"vcc_payment.last_failure_status_code": null,
+					"vcc_payment.last_failure_payload": null,
 					"vcc_payment.warning_message": "",
 					"vcc_payment.last_capture": captureDoc,
 					"vcc_payment.metadata": metadataSnapshot,
@@ -4061,6 +4197,10 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		});
 	} catch (error) {
 		const parsed = parsePayPalVccError(error);
+		const sanitizedErrorPayload = buildSanitizedPayPalErrorPayload(
+			error,
+			parsed
+		);
 		console.error("chargeReservationViaVcc error:", {
 			statusCode: parsed.statusCode,
 			issue: parsed.issue,
@@ -4078,6 +4218,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				provider,
 				message: parsed.description,
 				error_code: parsed.issue,
+				error_debug_id: parsed.debugId || null,
+				error_status_code: parsed.statusCode || null,
+				error_payload: sanitizedErrorPayload,
 				amount_usd: parsedUsd || null,
 				card_last4: cardLast4 || null,
 				card_expiry: cardExpiryDisplay || null,
@@ -4095,6 +4238,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 						"vcc_payment.last_failure_at": failureAt,
 						"vcc_payment.last_failure_message": parsed.description,
 						"vcc_payment.last_failure_code": parsed.issue,
+						"vcc_payment.last_failure_debug_id": parsed.debugId || null,
+						"vcc_payment.last_failure_status_code": parsed.statusCode || null,
+						"vcc_payment.last_failure_payload": sanitizedErrorPayload,
 						"vcc_payment.warning_message": VCC_PROMPT_WARNING_MESSAGE,
 						"vcc_payment.metadata": metadataSnapshot || {},
 						"payment_details.vccCharged": false,
