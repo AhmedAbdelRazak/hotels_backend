@@ -1081,7 +1081,6 @@ async function paypalVccDirectCharge({
 				billing_address: billingAddress,
 				attributes: {
 					verification: { method: "SCA_WHEN_REQUIRED" },
-					vault: { store_in_vault: "ON_SUCCESS" },
 				},
 			},
 		},
@@ -4130,7 +4129,10 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		});
 
 		paypalMeta.invoice_id = truncate(
-			`VCC-${confirmationNumber || reservationId}-${Date.now()}`,
+			`VCC-${confirmationNumber || reservationId}-${Date.now()}-${uuid().slice(
+				0,
+				8
+			)}`,
 			127
 		);
 		paypalMeta.custom_id = truncate(
@@ -4154,6 +4156,11 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}`
 		);
 
+		const vccAttemptRequestId = `vcc:${reservationId}:${Date.now()}:${uuid().slice(
+			0,
+			8
+		)}`;
+
 		const vccChargeResult = await paypalVccDirectCharge({
 			usdAmount: parsedUsd,
 			cardNumber: cardNumberDigits,
@@ -4163,7 +4170,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			billingAddress: preset.billingAddress,
 			meta: paypalMeta,
 			cmid: req.body?.cmid || null,
-			requestId: `vcc:${reservationId}:${toCCY(parsedUsd)}:${cardLast4}`,
+			requestId: vccAttemptRequestId,
 		});
 
 		let capture = vccChargeResult?.capture || {};
@@ -4222,6 +4229,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			created_at: new Date(capture?.create_time || Date.now()),
 			path: vccChargeResult?.path || null,
 			debug_id: vccChargeResult?.createdDebugId || null,
+			request_id: vccAttemptRequestId,
 			card_last4: cardLast4,
 			card_expiry: cardExpiryDisplay,
 			cardholder_name: `${preset.firstName} ${preset.lastName}`.trim(),
@@ -4237,6 +4245,8 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			booking_source: reservation?.booking_source || "",
 			message: "VCC charge completed.",
 			capture_id: capture?.id || null,
+			order_id: vccChargeResult?.orderId || null,
+			request_id: vccAttemptRequestId,
 			amount_usd: capturedUsd,
 			card_last4: cardLast4,
 			card_expiry: cardExpiryDisplay,
@@ -4256,6 +4266,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"payment_details.lastChargeAt": now,
 					"payment_details.lastVccFailureMessage": "",
 					"payment_details.lastVccFailureAt": null,
+					"payment_details.lastVccRequestId": null,
 
 					"vcc_payment.processing": false,
 					"vcc_payment.source": provider,
@@ -4276,6 +4287,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"vcc_payment.last_failure_avs_code": null,
 					"vcc_payment.last_failure_cvv_code": null,
 					"vcc_payment.warning_message": "",
+					"vcc_payment.last_request_id": vccAttemptRequestId,
 					"vcc_payment.last_capture": captureDoc,
 					"vcc_payment.metadata": metadataSnapshot,
 				},
@@ -4327,6 +4339,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				capture_id: parsed.captureId || null,
 				capture_status: parsed.captureStatus || null,
 				order_id: parsed.orderId || null,
+				request_id: vccAttemptRequestId,
 				processor_response_code: parsed.processorResponseCode || null,
 				payment_advice_code: parsed.paymentAdviceCode || null,
 				avs_code: parsed.avsCode || null,
@@ -4362,10 +4375,12 @@ exports.chargeReservationViaVcc = async (req, res) => {
 						"vcc_payment.last_failure_avs_code": parsed.avsCode || null,
 						"vcc_payment.last_failure_cvv_code": parsed.cvvCode || null,
 						"vcc_payment.warning_message": VCC_PROMPT_WARNING_MESSAGE,
+						"vcc_payment.last_request_id": vccAttemptRequestId,
 						"vcc_payment.metadata": metadataSnapshot || {},
 						"payment_details.vccCharged": false,
 						"payment_details.lastVccFailureMessage": parsed.description,
 						"payment_details.lastVccFailureAt": failureAt,
+						"payment_details.lastVccRequestId": vccAttemptRequestId,
 					},
 					$inc: {
 						"vcc_payment.failed_attempts_count": 1,
