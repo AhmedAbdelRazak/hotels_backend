@@ -98,6 +98,7 @@ const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
 const almostEq = (a, b) => Math.abs(toNum2(a) - toNum2(b)) < 1e-9;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const truncate = (value, max = 127) => {
 	if (value == null) return "";
 	const str = String(value);
@@ -514,6 +515,24 @@ function normalizeCardExpiryForPayPal(rawValue) {
 	};
 }
 
+function isLuhnValid(cardDigits) {
+	const digits = String(cardDigits || "").replace(/\D/g, "");
+	if (!digits) return false;
+	let sum = 0;
+	let shouldDouble = false;
+	for (let i = digits.length - 1; i >= 0; i -= 1) {
+		let d = Number(digits[i]);
+		if (!Number.isFinite(d)) return false;
+		if (shouldDouble) {
+			d *= 2;
+			if (d > 9) d -= 9;
+		}
+		sum += d;
+		shouldDouble = !shouldDouble;
+	}
+	return sum % 10 === 0;
+}
+
 function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput = {}) {
 	const cfg = VCC_PROVIDER_CONFIG[provider];
 	if (!cfg) {
@@ -656,6 +675,8 @@ function parsePayPalVccError(err) {
 		headers?.["paypal-debug-id"] || headers?.["PayPal-Debug-Id"] || null;
 	const details = err?.response?.data?.details || err?.result?.details || [];
 	const first = Array.isArray(details) && details.length ? details[0] : null;
+	const fallbackCapture = err?.paypalCapture || {};
+	const processorResponse = fallbackCapture?.processor_response || {};
 	const issue = first?.issue || err?.name || "PAYPAL_VCC_CHARGE_FAILED";
 	const description =
 		first?.description ||
@@ -668,6 +689,13 @@ function parsePayPalVccError(err) {
 		debugId,
 		statusCode:
 			Number(err?.statusCode || err?.response?.status || 0) || 500,
+		captureId: fallbackCapture?.id || null,
+		captureStatus: fallbackCapture?.status || null,
+		orderId: fallbackCapture?.order_id || null,
+		processorResponseCode: processorResponse?.response_code || null,
+		paymentAdviceCode: processorResponse?.payment_advice_code || null,
+		avsCode: processorResponse?.avs_code || null,
+		cvvCode: processorResponse?.cvv_code || null,
 	};
 }
 
@@ -685,6 +713,13 @@ function buildSanitizedPayPalErrorPayload(err, parsed) {
 		description: parsed?.description || null,
 		statusCode: parsed?.statusCode || null,
 		debugId: parsed?.debugId || null,
+		captureId: parsed?.captureId || null,
+		captureStatus: parsed?.captureStatus || null,
+		orderId: parsed?.orderId || null,
+		processorResponseCode: parsed?.processorResponseCode || null,
+		paymentAdviceCode: parsed?.paymentAdviceCode || null,
+		avsCode: parsed?.avsCode || null,
+		cvvCode: parsed?.cvvCode || null,
 		name: err?.name || null,
 		message: err?.message || null,
 		details: safeDetails,
@@ -932,13 +967,56 @@ function extractFirstCaptureFromOrderPayload(payload) {
 	for (const unit of units) {
 		const captures = unit?.payments?.captures;
 		if (!Array.isArray(captures) || captures.length === 0) continue;
-		const completed =
-			captures.find(
-				(c) => String(c?.status || "").toUpperCase() === "COMPLETED" && c?.id
-			) || captures[0];
+		const completed = captures.find(
+			(c) => String(c?.status || "").toUpperCase() === "COMPLETED" && c?.id
+		);
 		if (completed) return completed;
+		const withId = captures.find((c) => c?.id);
+		if (withId) return withId;
+		if (captures[0]) return captures[0];
 	}
 	return null;
+}
+
+async function fetchOrderWithCaptureRetry({
+	orderId,
+	cmid,
+	maxAttempts = 3,
+	baseDelayMs = 700,
+}) {
+	let lastOrder = null;
+	let lastError = null;
+
+	for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+		try {
+			const getReq = new paypal.orders.OrdersGetRequest(orderId);
+			if (cmid) getReq.headers["PayPal-Client-Metadata-Id"] = cmid;
+			const { result } = await ppClient.execute(getReq);
+			if (result) {
+				lastOrder = result;
+				const capture = extractFirstCaptureFromOrderPayload(result);
+				if (capture?.id) {
+					return { order: result, capture, attempts: attempt };
+				}
+			}
+		} catch (err) {
+			lastError = err;
+		}
+
+		if (attempt < maxAttempts) {
+			await sleep(baseDelayMs * attempt);
+		}
+	}
+
+	if (lastOrder) {
+		return {
+			order: lastOrder,
+			capture: extractFirstCaptureFromOrderPayload(lastOrder),
+			attempts: maxAttempts,
+		};
+	}
+	if (lastError) throw lastError;
+	return { order: null, capture: null, attempts: maxAttempts };
 }
 
 async function paypalVccDirectCharge({
@@ -1023,15 +1101,18 @@ async function paypalVccDirectCharge({
 	const orderStatus = String(createdOrder?.status || "").toUpperCase();
 
 	if ((!capture || !capture?.id) && orderId && orderStatus === "COMPLETED") {
-		const getReq = new paypal.orders.OrdersGetRequest(orderId);
-		if (cmid) getReq.headers["PayPal-Client-Metadata-Id"] = cmid;
-		const { result: gotOrder } = await ppClient.execute(getReq);
-		if (gotOrder) {
-			resultPayload = gotOrder;
-			const fetchedCapture = extractFirstCaptureFromOrderPayload(gotOrder);
-			if (fetchedCapture) {
-				capture = fetchedCapture;
-				path = "DIRECT_GET";
+		const refetched = await fetchOrderWithCaptureRetry({
+			orderId,
+			cmid,
+			maxAttempts: 3,
+			baseDelayMs: 700,
+		});
+		if (refetched?.order) {
+			resultPayload = refetched.order;
+			capture = refetched.capture || capture;
+			if (capture?.id) {
+				path =
+					refetched.attempts > 1 ? "DIRECT_GET_RETRY" : "DIRECT_GET";
 			}
 		}
 	}
@@ -1047,19 +1128,20 @@ async function paypalVccDirectCharge({
 			path = "DIRECT_CAPTURE";
 
 			if ((!capture || !capture?.id) && orderId) {
-				const getReqAfterCap = new paypal.orders.OrdersGetRequest(orderId);
-				if (cmid)
-					getReqAfterCap.headers["PayPal-Client-Metadata-Id"] = cmid;
-				const { result: gotOrderAfterCap } = await ppClient.execute(
-					getReqAfterCap
-				);
-				if (gotOrderAfterCap) {
-					resultPayload = gotOrderAfterCap;
-					const fetchedAfterCap =
-						extractFirstCaptureFromOrderPayload(gotOrderAfterCap);
-					if (fetchedAfterCap) {
-						capture = fetchedAfterCap;
-						path = "DIRECT_CAPTURE_GET";
+				const refetchedAfterCap = await fetchOrderWithCaptureRetry({
+					orderId,
+					cmid,
+					maxAttempts: 3,
+					baseDelayMs: 700,
+				});
+				if (refetchedAfterCap?.order) {
+					resultPayload = refetchedAfterCap.order;
+					capture = refetchedAfterCap.capture || capture;
+					if (capture?.id) {
+						path =
+							refetchedAfterCap.attempts > 1
+								? "DIRECT_CAPTURE_GET_RETRY"
+								: "DIRECT_CAPTURE_GET";
 					}
 				}
 			}
@@ -3859,6 +3941,11 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				message: "Virtual card number must be exactly 16 digits.",
 			});
 		}
+		if (!isLuhnValid(cardNumberDigits)) {
+			return res.status(400).json({
+				message: "Virtual card number appears invalid (checksum failed).",
+			});
+		}
 		cardLast4 = cardNumberDigits.slice(-4);
 
 		const cardCvvDigits = String(
@@ -4085,29 +4172,38 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			vccChargeResult?.resultPayload?.status || "UNKNOWN"
 		).toUpperCase();
 
-		// PayPal can occasionally return order status COMPLETED while capture details
-		// are omitted from the immediate response representation.
-		if ((captureStatus !== "COMPLETED" || !capture?.id) && payloadStatus === "COMPLETED") {
-			capture = {
-				id: vccChargeResult?.orderId || `ORDER-${Date.now()}`,
-				status: "COMPLETED",
-				amount: {
-					value: toCCY(parsedUsd),
-					currency_code: "USD",
-				},
-				create_time: new Date().toISOString(),
-				source: "ORDER_STATUS_COMPLETED_FALLBACK",
+		if (!capture?.id) {
+			const unresolvedCaptureError = new Error(
+				"PayPal did not return a capture id for this charge. Do not retry immediately; review the order in PayPal first."
+			);
+			unresolvedCaptureError.statusCode = 409;
+			unresolvedCaptureError.name = "VCC_CAPTURE_NOT_FOUND";
+			unresolvedCaptureError.paypalCapture = {
+				id: null,
+				status: captureStatus || payloadStatus || "UNKNOWN",
+				order_id: vccChargeResult?.orderId || null,
 			};
-			captureStatus = "COMPLETED";
+			throw unresolvedCaptureError;
 		}
 
-		if (captureStatus !== "COMPLETED" || !capture?.id) {
-			const pendingError = new Error(
-				`VCC charge is not completed (status: ${payloadStatus}).`
+		if (captureStatus !== "COMPLETED") {
+			const processorResponse = capture?.processor_response || {};
+			const responseCode = processorResponse?.response_code || null;
+			const adviceCode = processorResponse?.payment_advice_code || null;
+			const declinedError = new Error(
+				`VCC capture declined (capture status: ${captureStatus}${
+					responseCode ? `, response code: ${responseCode}` : ""
+				}${adviceCode ? `, advice: ${adviceCode}` : ""}).`
 			);
-			pendingError.statusCode = 402;
-			pendingError.name = "VCC_NOT_COMPLETED";
-			throw pendingError;
+			declinedError.statusCode = 402;
+			declinedError.name = "VCC_CAPTURE_DECLINED";
+			declinedError.paypalCapture = {
+				id: capture?.id || null,
+				status: captureStatus,
+				order_id: vccChargeResult?.orderId || null,
+				processor_response: safeClone(processorResponse),
+			};
+			throw declinedError;
 		}
 
 		const now = new Date();
@@ -4172,6 +4268,13 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"vcc_payment.last_failure_debug_id": null,
 					"vcc_payment.last_failure_status_code": null,
 					"vcc_payment.last_failure_payload": null,
+					"vcc_payment.last_failure_capture_id": null,
+					"vcc_payment.last_failure_capture_status": null,
+					"vcc_payment.last_failure_order_id": null,
+					"vcc_payment.last_failure_processor_response_code": null,
+					"vcc_payment.last_failure_payment_advice_code": null,
+					"vcc_payment.last_failure_avs_code": null,
+					"vcc_payment.last_failure_cvv_code": null,
 					"vcc_payment.warning_message": "",
 					"vcc_payment.last_capture": captureDoc,
 					"vcc_payment.metadata": metadataSnapshot,
@@ -4221,6 +4324,13 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				error_debug_id: parsed.debugId || null,
 				error_status_code: parsed.statusCode || null,
 				error_payload: sanitizedErrorPayload,
+				capture_id: parsed.captureId || null,
+				capture_status: parsed.captureStatus || null,
+				order_id: parsed.orderId || null,
+				processor_response_code: parsed.processorResponseCode || null,
+				payment_advice_code: parsed.paymentAdviceCode || null,
+				avs_code: parsed.avsCode || null,
+				cvv_code: parsed.cvvCode || null,
 				amount_usd: parsedUsd || null,
 				card_last4: cardLast4 || null,
 				card_expiry: cardExpiryDisplay || null,
@@ -4241,6 +4351,16 @@ exports.chargeReservationViaVcc = async (req, res) => {
 						"vcc_payment.last_failure_debug_id": parsed.debugId || null,
 						"vcc_payment.last_failure_status_code": parsed.statusCode || null,
 						"vcc_payment.last_failure_payload": sanitizedErrorPayload,
+						"vcc_payment.last_failure_capture_id": parsed.captureId || null,
+						"vcc_payment.last_failure_capture_status":
+							parsed.captureStatus || null,
+						"vcc_payment.last_failure_order_id": parsed.orderId || null,
+						"vcc_payment.last_failure_processor_response_code":
+							parsed.processorResponseCode || null,
+						"vcc_payment.last_failure_payment_advice_code":
+							parsed.paymentAdviceCode || null,
+						"vcc_payment.last_failure_avs_code": parsed.avsCode || null,
+						"vcc_payment.last_failure_cvv_code": parsed.cvvCode || null,
 						"vcc_payment.warning_message": VCC_PROMPT_WARNING_MESSAGE,
 						"vcc_payment.metadata": metadataSnapshot || {},
 						"payment_details.vccCharged": false,
@@ -4266,6 +4386,13 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			message: parsed.description,
 			code: parsed.issue,
 			debugId: parsed.debugId,
+			captureId: parsed.captureId || null,
+			captureStatus: parsed.captureStatus || null,
+			orderId: parsed.orderId || null,
+			processorResponseCode: parsed.processorResponseCode || null,
+			paymentAdviceCode: parsed.paymentAdviceCode || null,
+			avsCode: parsed.avsCode || null,
+			cvvCode: parsed.cvvCode || null,
 			attemptedBefore: true,
 			warningMessage: VCC_PROMPT_WARNING_MESSAGE,
 			reservation: updatedAfterFailure || undefined,
