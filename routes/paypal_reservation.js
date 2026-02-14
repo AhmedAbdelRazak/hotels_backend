@@ -3,6 +3,7 @@
 const express = require("express");
 const router = express.Router();
 const Ctrl = require("../controllers/paypal_reservation");
+const { requireSignin } = require("../controllers/auth");
 
 /* Route 1: JS SDK client token for Card Fields (3‑DS) */
 router.get("/paypal/token-generated", Ctrl.generateClientToken);
@@ -30,6 +31,16 @@ router.post("/reservations/paypal/update-limit", Ctrl.updateCaptureLimit);
 
 /* Route 7: Inspect PayPal ledger for a reservation (debug/admin) */
 router.get("/reservations/paypal/ledger/:reservationId", Ctrl.getLedger);
+router.get(
+	"/reservations/paypal/vcc-status/:reservationId",
+	requireSignin,
+	Ctrl.getReservationVccStatus
+);
+router.post(
+	"/reservations/paypal/vcc-charge",
+	requireSignin,
+	Ctrl.chargeReservationViaVcc
+);
 
 /* Route 8: Webhook endpoint (optional) */
 router.post("/paypal/webhook", Ctrl.webhook);
