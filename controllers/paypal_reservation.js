@@ -93,6 +93,26 @@ const PPM = IS_PROD
 	? "https://api-m.paypal.com"
 	: "https://api-m.sandbox.paypal.com";
 
+const getConfiguredWebhookIds = () => {
+	const singleId = IS_PROD
+		? process.env.PAYPAL_WEBHOOK_ID_LIVE
+		: process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
+	const listIds = IS_PROD
+		? process.env.PAYPAL_WEBHOOK_IDS_LIVE
+		: process.env.PAYPAL_WEBHOOK_IDS_SANDBOX;
+
+	const combined = [singleId, listIds]
+		.filter(Boolean)
+		.flatMap((raw) =>
+			String(raw)
+				.split(/[,\s;]+/)
+				.map((id) => id.trim())
+				.filter(Boolean)
+		);
+
+	return [...new Set(combined)];
+};
+
 /* ─────────────── 2) Helpers ─────────────── */
 const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
@@ -3195,33 +3215,40 @@ exports.webhook = async (req, res) => {
 
 		// Optional signature verification
 		try {
-			const webhookId = IS_PROD
-				? process.env.PAYPAL_WEBHOOK_ID_LIVE
-				: process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
-			if (webhookId) {
+			const webhookIds = getConfiguredWebhookIds();
+			if (webhookIds.length) {
 				const headers = req.headers || {};
-				const verifyPayload = {
-					transmission_id: headers["paypal-transmission-id"],
-					transmission_time: headers["paypal-transmission-time"],
-					cert_url: headers["paypal-cert-url"],
-					auth_algo: headers["paypal-auth-algo"],
-					transmission_sig: headers["paypal-transmission-sig"],
-					webhook_id: webhookId,
-					webhook_event: req.body,
-				};
+				let verificationSuccess = false;
+				for (const webhookId of webhookIds) {
+					const verifyPayload = {
+						transmission_id: headers["paypal-transmission-id"],
+						transmission_time: headers["paypal-transmission-time"],
+						cert_url: headers["paypal-cert-url"],
+						auth_algo: headers["paypal-auth-algo"],
+						transmission_sig: headers["paypal-transmission-sig"],
+						webhook_id: webhookId,
+						webhook_event: req.body,
+					};
 
-				const { data: verify } = await ax.post(
-					`${PPM}/v1/notifications/verify-webhook-signature`,
-					verifyPayload,
-					{ auth: { username: clientId, password: secretKey } }
-				);
+					const { data: verify } = await ax.post(
+						`${PPM}/v1/notifications/verify-webhook-signature`,
+						verifyPayload,
+						{ auth: { username: clientId, password: secretKey } }
+					);
+					if (verify?.verification_status === "SUCCESS") {
+						verificationSuccess = true;
+						break;
+					}
+				}
 
-				if (verify?.verification_status !== "SUCCESS") {
-					console.warn("PayPal webhook verification failed:", verify);
+				if (!verificationSuccess) {
+					console.warn(
+						"PayPal webhook verification failed for configured webhook IDs."
+					);
 				}
 			} else {
 				console.warn(
-					"[PayPal] WEBHOOK_ID not configured; skipping signature verification."
+					"[PayPal] WEBHOOK_ID(S) not configured; skipping signature verification."
 				);
 			}
 		} catch (vErr) {

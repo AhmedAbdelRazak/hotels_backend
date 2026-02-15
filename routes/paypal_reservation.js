@@ -53,6 +53,9 @@ router.post(
 );
 
 /* Route 8: Webhook endpoint (optional) */
+router.get("/paypal/webhook", (_req, res) =>
+	res.status(200).json({ ok: true, message: "PayPal webhook endpoint is live." })
+);
 router.post("/paypal/webhook", Ctrl.webhook);
 
 /* Route 9: Link‑pay (guest pays against an existing reservation) */
