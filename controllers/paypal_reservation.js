@@ -426,6 +426,15 @@ const VCC_PROVIDER_CONFIG = {
 			postal_code: "98119",
 			country_code: "US",
 		},
+		billingOverridesByPostalCode: {
+			D02XF99: {
+				address_line_1: "25 St Stephen's Green",
+				admin_area_2: "Dublin 2",
+				admin_area_1: "Dublin",
+				postal_code: "D02 XF99",
+				country_code: "IE",
+			},
+		},
 	},
 	agoda: {
 		label: "Agoda",
@@ -559,23 +568,40 @@ function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput =
 	const finalPostalCode = fallback(
 		inputPostalCode || fixedBilling.postal_code
 	).toUpperCase();
+	const normalizedPostalCodeKey = finalPostalCode.replace(/[^A-Z0-9]/g, "");
+	const billingOverride =
+		(cfg.billingOverridesByPostalCode &&
+			cfg.billingOverridesByPostalCode[normalizedPostalCodeKey]) ||
+		null;
+	const overrideBilling = billingOverride || {};
 
 	const firstName = fallback(fixedCardholder.first_name || cardholderInput.first_name);
 	const lastName = fallback(fixedCardholder.last_name || cardholderInput.last_name);
 
 	const billingAddress = {
 		address_line_1: fallback(
-			fixedBilling.address_line_1 || billingInput.address_line_1
+			overrideBilling.address_line_1 ||
+				fixedBilling.address_line_1 ||
+				billingInput.address_line_1
 		),
 		admin_area_2: fallback(
-			fixedBilling.admin_area_2 || billingInput.admin_area_2
+			overrideBilling.admin_area_2 ||
+				fixedBilling.admin_area_2 ||
+				billingInput.admin_area_2
 		),
 		admin_area_1: fallback(
-			fixedBilling.admin_area_1 || billingInput.admin_area_1
+			overrideBilling.admin_area_1 ||
+				fixedBilling.admin_area_1 ||
+				billingInput.admin_area_1
 		),
-		postal_code: finalPostalCode,
+		postal_code: fallback(
+			overrideBilling.postal_code || finalPostalCode
+		).toUpperCase(),
 		country_code: fallback(
-			fixedBilling.country_code || billingInput.country_code || "US"
+			overrideBilling.country_code ||
+				fixedBilling.country_code ||
+				billingInput.country_code ||
+				"US"
 		).toUpperCase(),
 	};
 
