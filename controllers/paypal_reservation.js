@@ -95,19 +95,21 @@ const PPM = IS_PROD
 
 const getConfiguredWebhookIds = () => {
 	const singleId = IS_PROD
-		? process.env.PAYPAL_WEBHOOK_ID_LIVE
+		? process.env.PAYPAL_WEBHOOK_ID_XHOTEL
 		: process.env.PAYPAL_WEBHOOK_ID_SANDBOX;
 	const listIds = IS_PROD
 		? process.env.PAYPAL_WEBHOOK_IDS_LIVE
 		: process.env.PAYPAL_WEBHOOK_IDS_SANDBOX;
+	const genericSingleId = process.env.PAYPAL_WEBHOOK_ID;
+	const genericListIds = process.env.PAYPAL_WEBHOOK_IDS;
 
-	const combined = [singleId, listIds]
+	const combined = [singleId, listIds, genericSingleId, genericListIds]
 		.filter(Boolean)
 		.flatMap((raw) =>
 			String(raw)
 				.split(/[,\s;]+/)
 				.map((id) => id.trim())
-				.filter(Boolean)
+				.filter(Boolean),
 		);
 
 	return [...new Set(combined)];
@@ -176,7 +178,7 @@ const sendEmailSafe = async (payload, label) => {
 const buildJannatBookingBreakdown = (
 	paymentLabel,
 	paidAmount,
-	existingBreakdown
+	existingBreakdown,
 ) => {
 	if (existingBreakdown && typeof existingBreakdown === "object") {
 		return existingBreakdown;
@@ -282,7 +284,7 @@ const createPdfBuffer = async (html) => {
 async function sendEmailWithInvoice(
 	reservationData,
 	guestEmail,
-	hotelIdOrNull
+	hotelIdOrNull,
 ) {
 	const html = ClientConfirmationEmail(reservationData);
 	const hotelForPdf =
@@ -299,7 +301,7 @@ async function sendEmailWithInvoice(
 	} catch (err) {
 		console.error(
 			"[Email] Failed to generate confirmation PDF:",
-			err?.message || err
+			err?.message || err,
 		);
 	}
 
@@ -323,10 +325,7 @@ async function sendEmailWithInvoice(
 
 	const guestAddr = normalizeEmail(guestEmail);
 	if (isLikelyEmail(guestAddr)) {
-		await sendEmailSafe(
-			{ ...baseEmail, to: guestAddr },
-			"guest confirmation"
-		);
+		await sendEmailSafe({ ...baseEmail, to: guestAddr }, "guest confirmation");
 	} else {
 		console.warn("[Email] Skipping guest confirmation (invalid email)", {
 			email: guestEmail || "",
@@ -337,11 +336,8 @@ async function sendEmailWithInvoice(
 
 	await Promise.all(
 		internalEmails.map((addr) =>
-			sendEmailSafe(
-				{ ...baseEmail, to: addr },
-				`staff confirmation (${addr})`
-			)
-		)
+			sendEmailSafe({ ...baseEmail, to: addr }, `staff confirmation (${addr})`),
+		),
 	);
 
 	// Owner
@@ -355,12 +351,12 @@ async function sendEmailWithInvoice(
 				await sendCriticalOwnerEmail(
 					ownerEmail,
 					"Reservation Confirmation - Invoice Attached",
-					html
+					html,
 				);
 			} catch (err) {
 				console.error(
 					`[Email] owner confirmation failed:`,
-					err?.response?.body || err
+					err?.response?.body || err,
 				);
 			}
 		}
@@ -410,7 +406,7 @@ function buildMetaBase({
 		invoice_id: `RSV-${confirmationNumber}`,
 		custom_id: confirmationNumber,
 		description: truncate(
-			`Hotel reservation — ${hotelName} — ${checkin} → ${checkout} — Guest ${guestName} (Phone: ${guestPhone}${em}${nat}${rb})`
+			`Hotel reservation — ${hotelName} — ${checkin} → ${checkout} — Guest ${guestName} (Phone: ${guestPhone}${em}${nat}${rb})`,
 		),
 		hotelName,
 		guestName,
@@ -575,7 +571,11 @@ function isLuhnValid(cardDigits) {
 	return sum % 10 === 0;
 }
 
-function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput = {}) {
+function resolveVccProviderPreset(
+	provider,
+	billingInput = {},
+	cardholderInput = {},
+) {
 	const cfg = VCC_PROVIDER_CONFIG[provider];
 	if (!cfg) {
 		return { ok: false, message: "Unsupported VCC booking source." };
@@ -586,7 +586,7 @@ function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput =
 	const fixedBilling = cfg.staticBillingAddress || {};
 	const inputPostalCode = fallback(billingInput.postal_code).toUpperCase();
 	const finalPostalCode = fallback(
-		inputPostalCode || fixedBilling.postal_code
+		inputPostalCode || fixedBilling.postal_code,
 	).toUpperCase();
 	const normalizedPostalCodeKey = finalPostalCode.replace(/[^A-Z0-9]/g, "");
 	const billingOverride =
@@ -595,33 +595,37 @@ function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput =
 		null;
 	const overrideBilling = billingOverride || {};
 
-	const firstName = fallback(fixedCardholder.first_name || cardholderInput.first_name);
-	const lastName = fallback(fixedCardholder.last_name || cardholderInput.last_name);
+	const firstName = fallback(
+		fixedCardholder.first_name || cardholderInput.first_name,
+	);
+	const lastName = fallback(
+		fixedCardholder.last_name || cardholderInput.last_name,
+	);
 
 	const billingAddress = {
 		address_line_1: fallback(
 			overrideBilling.address_line_1 ||
 				fixedBilling.address_line_1 ||
-				billingInput.address_line_1
+				billingInput.address_line_1,
 		),
 		admin_area_2: fallback(
 			overrideBilling.admin_area_2 ||
 				fixedBilling.admin_area_2 ||
-				billingInput.admin_area_2
+				billingInput.admin_area_2,
 		),
 		admin_area_1: fallback(
 			overrideBilling.admin_area_1 ||
 				fixedBilling.admin_area_1 ||
-				billingInput.admin_area_1
+				billingInput.admin_area_1,
 		),
 		postal_code: fallback(
-			overrideBilling.postal_code || finalPostalCode
+			overrideBilling.postal_code || finalPostalCode,
 		).toUpperCase(),
 		country_code: fallback(
 			overrideBilling.country_code ||
 				fixedBilling.country_code ||
 				billingInput.country_code ||
-				"US"
+				"US",
 		).toUpperCase(),
 	};
 
@@ -728,13 +732,13 @@ function buildVccPayPalMeta({
 	paypalMeta.invoice_id = truncate(
 		`VCC-${confirmationNumber || reservationId}-${Date.now()}-${uuid().slice(
 			0,
-			8
+			8,
 		)}`,
-		127
+		127,
 	);
 	paypalMeta.custom_id = truncate(
 		String(confirmationNumber || reservationId),
-		127
+		127,
 	);
 	paypalMeta.confirmationNumber2 = metadataSnapshot.confirmationNumber2 || "";
 	paypalMeta.reservationStatus = metadataSnapshot.reservationStatus || "";
@@ -750,7 +754,7 @@ function buildVccPayPalMeta({
 			metadataSnapshot.checkoutDate || "N/A"
 		} | Status: ${metadataSnapshot.reservationStatus || "N/A"} | Room: ${
 			metadataSnapshot.guestHousedInRoom || "N/A"
-		}`
+		}`,
 	);
 
 	return {
@@ -803,7 +807,9 @@ function getVccStatusPayload(reservation, provider) {
 }
 
 function isRetrySafeLegacyVccFailure(reservation) {
-	const code = String(reservation?.vcc_payment?.last_failure_code || "").toUpperCase();
+	const code = String(
+		reservation?.vcc_payment?.last_failure_code || "",
+	).toUpperCase();
 	const msg = String(reservation?.vcc_payment?.last_failure_message || "");
 	return code === "VCC_NOT_COMPLETED" && /status:\s*COMPLETED/i.test(msg);
 }
@@ -826,8 +832,7 @@ function parsePayPalVccError(err) {
 		issue,
 		description: String(description),
 		debugId,
-		statusCode:
-			Number(err?.statusCode || err?.response?.status || 0) || 500,
+		statusCode: Number(err?.statusCode || err?.response?.status || 0) || 500,
 		captureId: fallbackCapture?.id || null,
 		captureStatus: fallbackCapture?.status || null,
 		orderId: fallbackCapture?.order_id || null,
@@ -872,7 +877,7 @@ async function paypalExchangeSetupToVault(setup_token_id) {
 		{
 			auth: { username: clientId, password: secretKey },
 			headers: { "Content-Type": "application/json" },
-		}
+		},
 	);
 	return data;
 }
@@ -942,7 +947,7 @@ async function paypalPrecheckAuthorizeVoid({
 		await ax.post(
 			`${PPM}/v2/payments/authorizations/${auth.id}/void`,
 			{},
-			{ auth: { username: clientId, password: secretKey } }
+			{ auth: { username: clientId, password: secretKey } },
 		);
 	}
 	return { orderId: order.id, authorization: auth };
@@ -972,13 +977,11 @@ async function paypalPatchOrderMetadata(orderId, meta) {
 				{
 					name: `Hotel Reservation — ${meta.hotelName}`,
 					description: truncate(
-						`Guest: ${meta.guestName}, Phone: ${
-							meta.guestPhone
-						}, Email: ${meta.guestEmail || "n/a"}, Nat: ${
-							meta.guestNationality || "n/a"
-						}, By: ${meta.reservedBy || "n/a"}, ${meta.checkin} → ${
-							meta.checkout
-						}, Conf: ${meta.custom_id}`
+						`Guest: ${meta.guestName}, Phone: ${meta.guestPhone}, Email: ${
+							meta.guestEmail || "n/a"
+						}, Nat: ${meta.guestNationality || "n/a"}, By: ${
+							meta.reservedBy || "n/a"
+						}, ${meta.checkin} → ${meta.checkout}, Conf: ${meta.custom_id}`,
 					),
 					quantity: "1",
 					unit_amount: { currency_code: "USD", value: toCCY(meta.usdAmount) },
@@ -1102,12 +1105,14 @@ async function paypalMitCharge({
 
 /* ─────────────── 4) Data + ledger helpers ─────────────── */
 function extractFirstCaptureFromOrderPayload(payload) {
-	const units = Array.isArray(payload?.purchase_units) ? payload.purchase_units : [];
+	const units = Array.isArray(payload?.purchase_units)
+		? payload.purchase_units
+		: [];
 	for (const unit of units) {
 		const captures = unit?.payments?.captures;
 		if (!Array.isArray(captures) || captures.length === 0) continue;
 		const completed = captures.find(
-			(c) => String(c?.status || "").toUpperCase() === "COMPLETED" && c?.id
+			(c) => String(c?.status || "").toUpperCase() === "COMPLETED" && c?.id,
 		);
 		if (completed) return completed;
 		const withId = captures.find((c) => c?.id);
@@ -1138,7 +1143,7 @@ function buildVccPurchaseUnit({ usdAmount, meta }) {
 						meta.confirmationNumber2 || "n/a"
 					}, ${meta.checkin} -> ${meta.checkout}, Room: ${
 						meta.guestHousedInRoom || "n/a"
-					}, Status: ${meta.reservationStatus || "n/a"}`
+					}, Status: ${meta.reservationStatus || "n/a"}`,
 				),
 				quantity: "1",
 				unit_amount: { currency_code: "USD", value: toCCY(usdAmount) },
@@ -1260,8 +1265,7 @@ async function paypalVccDirectCharge({
 			resultPayload = refetched.order;
 			capture = refetched.capture || capture;
 			if (capture?.id) {
-				path =
-					refetched.attempts > 1 ? "DIRECT_GET_RETRY" : "DIRECT_GET";
+				path = refetched.attempts > 1 ? "DIRECT_GET_RETRY" : "DIRECT_GET";
 			}
 		}
 	}
@@ -1359,7 +1363,7 @@ async function buildAndSaveReservation({
 	const initialBreakdown = buildJannatBookingBreakdown(
 		payment,
 		paid_amount,
-		paid_amount_breakdown
+		paid_amount_breakdown,
 	);
 
 	const bounds =
@@ -1456,14 +1460,14 @@ async function finalizePendingCaptureUSD({
 					"payment_details.triggeredAmountUSD": toNum2(amount), // USD captured
 				},
 			},
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 	}
 	// revert pending only
 	return Reservations.findByIdAndUpdate(
 		reservationId,
 		{ $inc: { "paypal_details.pending_total_usd": -amount } },
-		{ new: true }
+		{ new: true },
 	).populate("hotelId");
 }
 
@@ -1487,7 +1491,8 @@ exports.generateClientToken = async (req, res) => {
 		const dbgRaw = req.query?.dbg ?? req.body?.dbg ?? "";
 		const bcRaw = req.query?.bc ?? req.body?.bc ?? "";
 		const dbg =
-			String(dbgRaw || "") === "1" || String(dbgRaw || "").toLowerCase() === "true";
+			String(dbgRaw || "") === "1" ||
+			String(dbgRaw || "").toLowerCase() === "true";
 		const bc = String(bcRaw || "").toUpperCase() || null;
 		res.set({
 			"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
@@ -1514,7 +1519,7 @@ exports.generateClientToken = async (req, res) => {
 		const { data, headers } = await ax.post(
 			`${PPM}/v1/identity/generate-token`,
 			{},
-			{ auth: { username: clientId, password: secretKey } }
+			{ auth: { username: clientId, password: secretKey } },
 		);
 
 		cachedClientToken = data.client_token;
@@ -1576,7 +1581,11 @@ exports.preparePendingReservation = async (req, res) => {
 		if (!hotelId) {
 			return res.status(400).json({ message: "Hotel ID is required." });
 		}
-		if (!customerDetails?.name || !customerDetails?.phone || !customerDetails?.email) {
+		if (
+			!customerDetails?.name ||
+			!customerDetails?.phone ||
+			!customerDetails?.email
+		) {
 			return res.status(400).json({
 				message: "Customer name, phone, and email are required.",
 			});
@@ -1660,8 +1669,8 @@ exports.preparePendingReservation = async (req, res) => {
 							Math.round(
 								(new Date(checkout_date).getTime() -
 									new Date(checkin_date).getTime()) /
-									(1000 * 60 * 60 * 24)
-							)
+									(1000 * 60 * 60 * 24),
+							),
 					  ),
 			booking_source: booking_source || "Online Jannat Booking",
 			pickedRoomsType: Array.isArray(pickedRoomsType) ? pickedRoomsType : [],
@@ -1682,7 +1691,7 @@ exports.preparePendingReservation = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"preparePendingReservation error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		return res
 			.status(500)
@@ -1723,7 +1732,7 @@ exports.cancelPendingReservation = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"cancelPendingReservation error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		return res
 			.status(500)
@@ -1806,7 +1815,7 @@ exports.createReservationAndProcess = async (req, res) => {
 		) {
 			const confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-					err ? reject(err) : resolve(unique)
+					err ? reject(err) : resolve(unique),
 				);
 			});
 
@@ -1831,7 +1840,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			await sendEmailWithInvoice(
 				resvData,
 				body?.customerDetails?.email,
-				body.belongsTo
+				body.belongsTo,
 			);
 			try {
 				await waSendReservationConfirmation(saved);
@@ -1881,7 +1890,7 @@ exports.createReservationAndProcess = async (req, res) => {
 					ensureUniqueNumber(
 						Reservations,
 						"confirmation_number",
-						(err, unique) => (err ? reject(err) : resolve(unique))
+						(err, unique) => (err ? reject(err) : resolve(unique)),
 					);
 				});
 
@@ -1927,23 +1936,21 @@ exports.createReservationAndProcess = async (req, res) => {
 				};
 				const guestAddr = normalizeEmail(email);
 				if (!isLikelyEmail(guestAddr)) {
-					return res
-						.status(400)
-						.json({ message: "Invalid email address." });
+					return res.status(400).json({ message: "Invalid email address." });
 				}
 
 				const guestResult = await sendEmailSafe(
 					{ ...baseEmail, to: guestAddr },
-					"guest verification"
+					"guest verification",
 				);
 				const internalEmails = getInternalNotificationEmails();
 				await Promise.all(
 					internalEmails.map((addr) =>
 						sendEmailSafe(
 							{ ...baseEmail, to: addr },
-							`staff verification (${addr})`
-						)
-					)
+							`staff verification (${addr})`,
+						),
+					),
 				);
 
 				if (ownerEmail) {
@@ -1951,26 +1958,25 @@ exports.createReservationAndProcess = async (req, res) => {
 						await sendCriticalOwnerEmail(
 							ownerEmail,
 							`Reservation Verification Initiated — ${hotel.hotelName}`,
-							emailContent
+							emailContent,
 						);
 					} catch (err) {
 						console.error(
 							"[Email] owner verification failed:",
-							err?.response?.body || err
+							err?.response?.body || err,
 						);
 					}
 				}
 
 				if (!guestResult.ok) {
 					return res.status(502).json({
-						message:
-							"Failed to send verification email. Please try again.",
+						message: "Failed to send verification email. Please try again.",
 					});
 				}
 				try {
 					await waSendVerificationLink(
 						{ customer_details: { name, phone, nationality } },
-						verificationLinkWA
+						verificationLinkWA,
 					);
 				} catch (_) {}
 
@@ -2016,7 +2022,7 @@ exports.createReservationAndProcess = async (req, res) => {
 					ensureUniqueNumber(
 						Reservations,
 						"confirmation_number",
-						(err, unique) => (err ? reject(err) : resolve(unique))
+						(err, unique) => (err ? reject(err) : resolve(unique)),
 					);
 				});
 				const meta = buildMetaBase({
@@ -2048,7 +2054,7 @@ exports.createReservationAndProcess = async (req, res) => {
 
 			const confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-					err ? reject(err) : resolve(unique)
+					err ? reject(err) : resolve(unique),
 				);
 			});
 
@@ -2083,7 +2089,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			await sendEmailWithInvoice(
 				resvData,
 				customerDetails.email,
-				body.belongsTo
+				body.belongsTo,
 			);
 			try {
 				await waSendReservationConfirmation(saved);
@@ -2127,7 +2133,7 @@ exports.createReservationAndProcess = async (req, res) => {
 					});
 				}
 				const pendingEmail = normalizeEmail(
-					pendingReservation?.customer_details?.email
+					pendingReservation?.customer_details?.email,
 				);
 				const incomingEmail = normalizeEmail(email);
 				if (pendingEmail && incomingEmail && pendingEmail !== incomingEmail) {
@@ -2152,8 +2158,10 @@ exports.createReservationAndProcess = async (req, res) => {
 				}
 			} else {
 				confirmationNumber = await new Promise((resolve, reject) => {
-					ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-						err ? reject(err) : resolve(unique)
+					ensureUniqueNumber(
+						Reservations,
+						"confirmation_number",
+						(err, unique) => (err ? reject(err) : resolve(unique)),
 					);
 				});
 			}
@@ -2228,11 +2236,11 @@ exports.createReservationAndProcess = async (req, res) => {
 					const deniedLike =
 						err?.statusCode === 422 &&
 						(/PAYER_CANNOT_PAY|INSTRUMENT_DECLINED|DECLINED|EXPIRED/i.test(
-							raw
+							raw,
 						) ||
 							(Array.isArray(err?.response?.data?.details) &&
 								err.response.data.details.some((d) =>
-									/DENIED|DECLINED|EXPIRED/i.test(String(d?.issue || ""))
+									/DENIED|DECLINED|EXPIRED/i.test(String(d?.issue || "")),
 								)));
 					return await fail(deniedLike ? 402 : 500, {
 						message: deniedLike
@@ -2253,7 +2261,7 @@ exports.createReservationAndProcess = async (req, res) => {
 
 				const capturedUsd = toNum2(cap?.amount?.value || expectedUsdAmount);
 				const limitUsd = toNum2(
-					body?.convertedAmounts?.totalUSD || capturedUsd
+					body?.convertedAmounts?.totalUSD || capturedUsd,
 				);
 
 				// Normalize label from option/amounts
@@ -2264,12 +2272,12 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 
 				const paidSar = toNum2(
-					Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0)
+					Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0),
 				);
 
 				const user = await findOrCreateUserByEmail(
 					customerDetails,
-					body.userId
+					body.userId,
 				);
 				if (user) {
 					user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
@@ -2345,7 +2353,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				await sendEmailWithInvoice(
 					resvData,
 					customerDetails.email,
-					body.belongsTo
+					body.belongsTo,
 				);
 				try {
 					await waSendReservationConfirmation(saved);
@@ -2384,7 +2392,7 @@ exports.createReservationAndProcess = async (req, res) => {
 						(/AUTHORIZATION_DENIED|INSTRUMENT_DECLINED|DECLINED/i.test(raw) ||
 							(Array.isArray(err?.response?.data?.details) &&
 								err.response.data.details.some((d) =>
-									/DENIED|DECLINED/i.test(String(d?.issue || ""))
+									/DENIED|DECLINED/i.test(String(d?.issue || "")),
 								)));
 					return await fail(deniedLike ? 402 : 500, {
 						message: deniedLike
@@ -2433,7 +2441,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				} catch (e) {
 					console.warn(
 						"Optional vault exchange failed (wallet used):",
-						e?.response?.data || e
+						e?.response?.data || e,
 					);
 				}
 			}
@@ -2447,7 +2455,7 @@ exports.createReservationAndProcess = async (req, res) => {
 
 			// SAR amount stored at authorization time
 			const paidSar = toNum2(
-				Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0)
+				Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0),
 			);
 
 			const user = await findOrCreateUserByEmail(customerDetails, body.userId);
@@ -2462,7 +2470,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			const checkinMs = new Date(body.checkin_date).getTime();
 			const longLeadDays = Math.max(
 				0,
-				Math.round((checkinMs - now) / (1000 * 60 * 60 * 24))
+				Math.round((checkinMs - now) / (1000 * 60 * 60 * 24)),
 			);
 			const longLeadNoVault = longLeadDays > 26 && !vaultId;
 
@@ -2470,7 +2478,7 @@ exports.createReservationAndProcess = async (req, res) => {
 				bounds: {
 					base: "USD",
 					limit_usd: toNum2(
-						body?.convertedAmounts?.totalUSD || auth?.amount?.value || 0
+						body?.convertedAmounts?.totalUSD || auth?.amount?.value || 0,
 					),
 				},
 				captured_total_usd: 0,
@@ -2542,7 +2550,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			await sendEmailWithInvoice(
 				resvData,
 				customerDetails.email,
-				body.belongsTo
+				body.belongsTo,
 			);
 			try {
 				await waSendReservationConfirmation(saved);
@@ -2567,7 +2575,7 @@ exports.createReservationAndProcess = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"createReservationAndProcess error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		const deleted = await cleanupPending("fatal");
 		return res.status(500).json({
@@ -2616,7 +2624,7 @@ exports.mitChargeReservation = async (req, res) => {
 		if (amt > remainingLedger + 1e-9) {
 			return res.status(400).json({
 				message: `Capture exceeds remaining balance. Remaining USD: ${remainingLedger.toFixed(
-					2
+					2,
 				)}`,
 			});
 		}
@@ -2625,7 +2633,7 @@ exports.mitChargeReservation = async (req, res) => {
 		let authId = r?.paypal_details?.initial?.authorization_id || null;
 		const authAmt = Number(r?.paypal_details?.initial?.amount || 0);
 		let authStatus = String(
-			r?.paypal_details?.initial?.authorization_status || ""
+			r?.paypal_details?.initial?.authorization_status || "",
 		).toUpperCase();
 		const expIso = r?.paypal_details?.initial?.expiration_time || null;
 		const expMs = expIso ? new Date(expIso).getTime() : null;
@@ -2656,9 +2664,9 @@ exports.mitChargeReservation = async (req, res) => {
 				pathReason = "amount exceeds remaining authorization";
 			} else {
 				pathReason = `amount (${toCCY(
-					amt
+					amt,
 				)}) exceeds remaining authorization (${toCCY(
-					remainingAuth
+					remainingAuth,
 				)}) and no vaulted card`;
 			}
 		} else if (isExpired) {
@@ -2734,7 +2742,7 @@ exports.mitChargeReservation = async (req, res) => {
 		if (path === "REAUTH_THEN_CAPTURE") {
 			try {
 				const idemReauth = `reauth:${reservationId}:${authId}:${toCCY(
-					authAmt
+					authAmt,
 				)}`;
 				// Reauthorize for the remaining authorized amount (not greater than original)
 				const { data: reauth } = await ax.post(
@@ -2748,7 +2756,7 @@ exports.mitChargeReservation = async (req, res) => {
 					{
 						auth: { username: clientId2, password: secretKey2 },
 						headers: { "PayPal-Request-Id": idemReauth },
-					}
+					},
 				);
 
 				// Update reservation with the NEW authorization details
@@ -2775,7 +2783,7 @@ exports.mitChargeReservation = async (req, res) => {
 							},
 						},
 					},
-					{ new: true }
+					{ new: true },
 				);
 
 				// After successful reauth, proceed as normal AUTH_CAPTURE
@@ -2815,7 +2823,7 @@ exports.mitChargeReservation = async (req, res) => {
 					{
 						auth: { username: clientId2, password: secretKey2 },
 						headers: { "PayPal-Request-Id": idemKey },
-					}
+					},
 				);
 				resultCapture = {
 					purchase_units: [
@@ -2848,7 +2856,7 @@ exports.mitChargeReservation = async (req, res) => {
 
 				console.warn(
 					"Authorization capture failed; inspecting.",
-					capAuthErr?.response?.data || capAuthErr
+					capAuthErr?.response?.data || capAuthErr,
 				);
 
 				if (vault_id && (expiredLike || invalidLike)) {
@@ -2959,13 +2967,13 @@ exports.mitChargeReservation = async (req, res) => {
 				...(sarInc > 0 ? { $inc: { paid_amount: sarInc } } : {}),
 				$set: setAfter,
 			},
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 
 		// 3) normalize payment/finance based on ledger
 		const capLimit = toNum2(updated?.paypal_details?.bounds?.limit_usd || 0);
 		const newCapturedTotal = toNum2(
-			updated?.paypal_details?.captured_total_usd || 0
+			updated?.paypal_details?.captured_total_usd || 0,
 		);
 		const fullyPaid = newCapturedTotal >= capLimit - 1e-9;
 
@@ -2978,7 +2986,7 @@ exports.mitChargeReservation = async (req, res) => {
 					financeStatus: fullyPaid ? "paid" : "authorized",
 				},
 			},
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 
 		/* ── Receipt emails (best effort) ─────────────────────────────────── */
@@ -2992,7 +3000,7 @@ exports.mitChargeReservation = async (req, res) => {
 			if (isLikelyEmail(guestAddr)) {
 				await sendEmailSafe(
 					{ ...baseEmail, to: guestAddr },
-					"guest payment confirmation"
+					"guest payment confirmation",
 				);
 			} else {
 				console.warn("[Email] Skipping payment confirmation (invalid email)", {
@@ -3005,14 +3013,14 @@ exports.mitChargeReservation = async (req, res) => {
 				internalEmails.map((addr) =>
 					sendEmailSafe(
 						{ ...baseEmail, to: addr },
-						`staff payment confirmation (${addr})`
-					)
-				)
+						`staff payment confirmation (${addr})`,
+					),
+				),
 			);
 		} catch (err) {
 			console.warn(
 				"[Email] payment confirmation dispatch warning:",
-				err?.message || err
+				err?.message || err,
 			);
 		}
 
@@ -3031,7 +3039,7 @@ exports.mitChargeReservation = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"mitChargeReservation error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		return res
 			.status(500)
@@ -3088,7 +3096,7 @@ exports.creditPrecheck = async (req, res) => {
 
 		const confirmationNumber = await new Promise((resolve, reject) => {
 			ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-				err ? reject(err) : resolve(unique)
+				err ? reject(err) : resolve(unique),
 			);
 		});
 
@@ -3152,7 +3160,7 @@ exports.updateCaptureLimit = async (req, res) => {
 		if (newLimit < captured) {
 			return res.status(400).json({
 				message: `New limit (${toCCY(
-					newLimit
+					newLimit,
 				)}) is below captured total (${toCCY(captured)}).`,
 			});
 		}
@@ -3172,7 +3180,7 @@ exports.updateCaptureLimit = async (req, res) => {
 				},
 				$push: { "paypal_details.bounds_history": historyEntry },
 			},
-			{ new: true }
+			{ new: true },
 		);
 
 		return res.status(200).json({ ok: true, reservation: updated });
@@ -3233,7 +3241,7 @@ exports.webhook = async (req, res) => {
 					const { data: verify } = await ax.post(
 						`${PPM}/v1/notifications/verify-webhook-signature`,
 						verifyPayload,
-						{ auth: { username: clientId, password: secretKey } }
+						{ auth: { username: clientId, password: secretKey } },
 					);
 					if (verify?.verification_status === "SUCCESS") {
 						verificationSuccess = true;
@@ -3243,18 +3251,18 @@ exports.webhook = async (req, res) => {
 
 				if (!verificationSuccess) {
 					console.warn(
-						"PayPal webhook verification failed for configured webhook IDs."
+						"PayPal webhook verification failed for configured webhook IDs.",
 					);
 				}
 			} else {
 				console.warn(
-					"[PayPal] WEBHOOK_ID(S) not configured; skipping signature verification."
+					"[PayPal] WEBHOOK_ID(S) not configured; skipping signature verification.",
 				);
 			}
 		} catch (vErr) {
 			console.error(
 				"[PayPal] Webhook verification error:",
-				vErr?.response?.data || vErr
+				vErr?.response?.data || vErr,
 			);
 		}
 
@@ -3288,7 +3296,7 @@ exports.webhook = async (req, res) => {
 exports.linkPayReservation = async (req, res) => {
 	const logPrefix = "[PP][link-pay]";
 	const DEFAULT_PP_MODE = String(
-		process.env.PAYPAL_DEFAULT_MODE || "capture"
+		process.env.PAYPAL_DEFAULT_MODE || "capture",
 	).toLowerCase();
 
 	const buildUniqueInvoiceId = (confNumber, existingCount) => {
@@ -3369,7 +3377,7 @@ exports.linkPayReservation = async (req, res) => {
 				{
 					auth: { username: auth.clientId, password: auth.secretKey },
 					headers: { "Content-Type": "application/json" },
-				}
+				},
 			);
 			console.log(`${logPrefix} patch ok`, {
 				orderId,
@@ -3415,7 +3423,7 @@ exports.linkPayReservation = async (req, res) => {
 		let reservation = null;
 		if (mongoose.Types.ObjectId.isValid(reservationKey)) {
 			reservation = await Reservations.findById(reservationKey).populate(
-				"hotelId"
+				"hotelId",
 			);
 		}
 		if (!reservation) {
@@ -3505,7 +3513,7 @@ exports.linkPayReservation = async (req, res) => {
 
 		const uniqueInvoiceId = buildUniqueInvoiceId(
 			reservation.confirmation_number,
-			existingCount
+			existingCount,
 		);
 		const description = `Hotel reservation — ${hotelName} — ${
 			reservation.checkin_date
@@ -3567,7 +3575,7 @@ exports.linkPayReservation = async (req, res) => {
 						(/AUTHORIZATION_DENIED|INSTRUMENT_DECLINED|DECLINED/i.test(raw) ||
 							(Array.isArray(err?.response?.data?.details) &&
 								err.response.data.details.some((d) =>
-									/DENIED|DECLINED/i.test(String(d?.issue || ""))
+									/DENIED|DECLINED/i.test(String(d?.issue || "")),
 								)));
 					console.error(`${logPrefix} authorize error`, {
 						order_id: pp.order_id,
@@ -3632,7 +3640,7 @@ exports.linkPayReservation = async (req, res) => {
 			const setOps = {
 				"paypal_details.bounds.base": "USD",
 				"paypal_details.bounds.limit_usd": toNumber2(
-					convertedAmounts?.totalUSD || usdAmount
+					convertedAmounts?.totalUSD || usdAmount,
 				),
 				"paypal_details.captured_total_usd":
 					reservation?.paypal_details?.captured_total_usd || 0,
@@ -3655,7 +3663,7 @@ exports.linkPayReservation = async (req, res) => {
 				"payment_details.captured": false,
 				"payment_details.authorizationId": auth.id,
 				"payment_details.authorizationAmountUSD": toNumber2(
-					auth?.amount?.value || 0
+					auth?.amount?.value || 0,
 				),
 				"payment_details.authorizationAmountSAR": paidSar,
 
@@ -3684,7 +3692,7 @@ exports.linkPayReservation = async (req, res) => {
 			const updated = await Reservations.findByIdAndUpdate(
 				reservation._id,
 				{ ...(incOps ? { $inc: incOps } : {}), $set: setOps },
-				{ new: true }
+				{ new: true },
 			).populate("hotelId");
 
 			console.log(`${logPrefix} authorize persisted`, {
@@ -3726,7 +3734,7 @@ exports.linkPayReservation = async (req, res) => {
 							reservation?.paypal_details?.pending_total_usd || 0,
 					},
 				},
-				{ new: true }
+				{ new: true },
 			);
 			console.log(`${logPrefix} preseed bounds`, {
 				reservationId: String(reservation._id),
@@ -3736,7 +3744,7 @@ exports.linkPayReservation = async (req, res) => {
 		}
 
 		const limit = toNumber2(
-			reservation?.paypal_details?.bounds?.limit_usd || 0
+			reservation?.paypal_details?.bounds?.limit_usd || 0,
 		);
 		if (!(limit > 0)) {
 			console.warn(`${logPrefix} ledger missing limit after preseed`, {
@@ -3749,10 +3757,10 @@ exports.linkPayReservation = async (req, res) => {
 		}
 
 		const capturedSoFar = toNumber2(
-			reservation?.paypal_details?.captured_total_usd || 0
+			reservation?.paypal_details?.captured_total_usd || 0,
 		);
 		const pendingSoFar = toNumber2(
-			reservation?.paypal_details?.pending_total_usd || 0
+			reservation?.paypal_details?.pending_total_usd || 0,
 		);
 		const newCapture = toNumber2(usdAmount);
 
@@ -3833,7 +3841,7 @@ exports.linkPayReservation = async (req, res) => {
 
 			const freshInvoiceId = buildUniqueInvoiceId(
 				reservation.confirmation_number,
-				existingCount + 1
+				existingCount + 1,
 			);
 			await patchOrderMetadataSafe({
 				orderId: pp.order_id,
@@ -3938,12 +3946,12 @@ exports.linkPayReservation = async (req, res) => {
 		updated = await Reservations.findByIdAndUpdate(
 			reservation._id,
 			{ ...(incAfter ? { $inc: incAfter } : {}), $set: setAfter },
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 
 		// Normalize labels based on ledger
 		const newCapturedTotal = toNumber2(
-			updated?.paypal_details?.captured_total_usd || 0
+			updated?.paypal_details?.captured_total_usd || 0,
 		);
 		const fullyPaid = newCapturedTotal >= toNumber2(limit) - 1e-9;
 
@@ -3956,7 +3964,7 @@ exports.linkPayReservation = async (req, res) => {
 					financeStatus: fullyPaid ? "paid" : "authorized",
 				},
 			},
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 
 		console.log(`${logPrefix} done`, {
@@ -3980,7 +3988,7 @@ exports.linkPayReservation = async (req, res) => {
 			await sendEmailWithInvoice(
 				invoiceModel,
 				updated.customer_details?.email,
-				updated.belongsTo
+				updated.belongsTo,
 			);
 			await waSendReservationConfirmation(updated);
 			await waNotifyNewReservation(updated);
@@ -3988,17 +3996,17 @@ exports.linkPayReservation = async (req, res) => {
 			console.warn(`${logPrefix} receipt dispatch warning`, e?.message || e);
 		}
 
-	return res.status(200).json({
-		message: "Payment captured and reservation updated.",
-		reservation: updated,
-		transactionId: cap.id,
-	});
+		return res.status(200).json({
+			message: "Payment captured and reservation updated.",
+			reservation: updated,
+			transactionId: cap.id,
+		});
 	} catch (error) {
 		console.error(`${logPrefix} fatal`, {
 			data: error?.response?.data || error?.message || error,
 			status: error?.response?.status || null,
 		});
-	return res.status(500).json({ message: "Failed to process link payment." });
+		return res.status(500).json({ message: "Failed to process link payment." });
 	}
 };
 
@@ -4033,7 +4041,7 @@ exports.getReservationVccStatus = async (req, res) => {
 							"vcc_payment.blocked_after_failure": false,
 							"vcc_payment.warning_message": "",
 						},
-					}
+					},
 				);
 				reservation = await Reservations.findById(reservationId)
 					.populate("hotelId", "hotelName")
@@ -4042,7 +4050,7 @@ exports.getReservationVccStatus = async (req, res) => {
 			}
 		}
 		const failedAttempts = Number(
-			reservation?.vcc_payment?.failed_attempts_count || 0
+			reservation?.vcc_payment?.failed_attempts_count || 0,
 		);
 		if (
 			failedAttempts < VCC_MAX_ATTEMPTS &&
@@ -4058,7 +4066,7 @@ exports.getReservationVccStatus = async (req, res) => {
 						"vcc_payment.warning_message":
 							failedAttempts > 0 ? VCC_RETRY_AVAILABLE_MESSAGE : "",
 					},
-				}
+				},
 			);
 			reservation = await Reservations.findById(reservationId)
 				.populate("hotelId", "hotelName")
@@ -4082,7 +4090,7 @@ exports.getReservationVccStatus = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"getReservationVccStatus error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		return res.status(500).json({ message: "Failed to read VCC status." });
 	}
@@ -4156,7 +4164,7 @@ exports.createReservationVccOrder = async (req, res) => {
 
 		const roomNumbers = extractReservationRoomNumbers(reservation);
 		const cancelledOrNoShow = isCancelledOrNoShowForVcc(
-			reservation?.reservation_status
+			reservation?.reservation_status,
 		);
 		const proceedWithoutRoom = !!req.body?.proceedWithoutRoom;
 		if (!cancelledOrNoShow && roomNumbers.length === 0 && !proceedWithoutRoom) {
@@ -4169,7 +4177,7 @@ exports.createReservationVccOrder = async (req, res) => {
 		const preset = resolveVccProviderPreset(
 			provider,
 			req.body?.billingAddress || {},
-			req.body?.cardholder || {}
+			req.body?.cardholder || {},
 		);
 		if (!preset?.ok) {
 			return res.status(400).json({
@@ -4188,7 +4196,7 @@ exports.createReservationVccOrder = async (req, res) => {
 
 		const createOrderRequestId = `vcc-order:${reservationId}:${Date.now()}:${uuid().slice(
 			0,
-			8
+			8,
 		)}`;
 		const createReq = new paypal.orders.OrdersCreateRequest();
 		createReq.prefer("return=representation");
@@ -4197,7 +4205,9 @@ exports.createReservationVccOrder = async (req, res) => {
 			createReq.headers["PayPal-Client-Metadata-Id"] = req.body.cmid;
 		createReq.requestBody({
 			intent: "CAPTURE",
-			purchase_units: [buildVccPurchaseUnit({ usdAmount: parsedUsd, meta: paypalMeta })],
+			purchase_units: [
+				buildVccPurchaseUnit({ usdAmount: parsedUsd, meta: paypalMeta }),
+			],
 			application_context: {
 				brand_name: "Jannat Booking",
 				user_action: "PAY_NOW",
@@ -4240,7 +4250,7 @@ exports.createReservationVccOrder = async (req, res) => {
 					},
 				},
 			},
-			{ new: true }
+			{ new: true },
 		)
 			.populate("hotelId")
 			.populate("roomId");
@@ -4306,7 +4316,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		}
 
 		const hostedOrderId = String(
-			req.body?.orderId || req.body?.paypalOrderId || ""
+			req.body?.orderId || req.body?.paypalOrderId || "",
 		).trim();
 		const isHostedOrderCapture = !!hostedOrderId;
 		let normalizedExpiry = null;
@@ -4316,7 +4326,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		if (!isHostedOrderCapture) {
 			const cardInput = req.body?.card || {};
 			cardNumberDigits = String(
-				cardInput.number || req.body?.cardNumber || ""
+				cardInput.number || req.body?.cardNumber || "",
 			).replace(/\D/g, "");
 			if (!/^\d{16}$/.test(cardNumberDigits)) {
 				return res.status(400).json({
@@ -4330,9 +4340,10 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}
 			cardLast4 = cardNumberDigits.slice(-4);
 
-			cardCvvDigits = String(
-				cardInput.cvv || req.body?.cardCVV || ""
-			).replace(/\D/g, "");
+			cardCvvDigits = String(cardInput.cvv || req.body?.cardCVV || "").replace(
+				/\D/g,
+				"",
+			);
 			if (!/^\d{3,4}$/.test(cardCvvDigits)) {
 				return res.status(400).json({
 					message: "Virtual card CVV must be 3 or 4 digits.",
@@ -4340,7 +4351,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}
 
 			normalizedExpiry = normalizeCardExpiryForPayPal(
-				cardInput.expiry || req.body?.cardExpiry
+				cardInput.expiry || req.body?.cardExpiry,
 			);
 			if (!normalizedExpiry) {
 				return res.status(400).json({
@@ -4402,10 +4413,10 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"vcc_payment.last_attempt_at": new Date(),
 					"vcc_payment.source": provider,
 				},
-			}
+			},
 		);
 		const lockModified = Number(
-			lockResult?.modifiedCount ?? lockResult?.nModified ?? 0
+			lockResult?.modifiedCount ?? lockResult?.nModified ?? 0,
 		);
 		if (!lockModified) {
 			return res.status(409).json({
@@ -4462,7 +4473,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 
 		const roomNumbers = extractReservationRoomNumbers(reservation);
 		const cancelledOrNoShow = isCancelledOrNoShowForVcc(
-			reservation?.reservation_status
+			reservation?.reservation_status,
 		);
 		const proceedWithoutRoom = !!req.body?.proceedWithoutRoom;
 		if (!cancelledOrNoShow && roomNumbers.length === 0 && !proceedWithoutRoom) {
@@ -4479,7 +4490,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		const preset = resolveVccProviderPreset(
 			provider,
 			req.body?.billingAddress || {},
-			req.body?.cardholder || {}
+			req.body?.cardholder || {},
 		);
 		if (!preset?.ok) {
 			await Reservations.findByIdAndUpdate(reservationId, {
@@ -4504,13 +4515,13 @@ exports.chargeReservationViaVcc = async (req, res) => {
 
 		vccAttemptRequestId = `vcc:${reservationId}:${Date.now()}:${uuid().slice(
 			0,
-			8
+			8,
 		)}`;
 
 		let vccChargeResult = null;
 		if (isHostedOrderCapture) {
 			const pendingOrderId = String(
-				reservation?.vcc_payment?.pending_order?.order_id || ""
+				reservation?.vcc_payment?.pending_order?.order_id || "",
 			).trim();
 			if (pendingOrderId && pendingOrderId !== hostedOrderId) {
 				await Reservations.findByIdAndUpdate(reservationId, {
@@ -4532,7 +4543,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				existingOrder = result || null;
 			} catch (getErr) {
 				const orderLookupError = new Error(
-					"Unable to read the PayPal VCC order. Please create a new VCC order and retry."
+					"Unable to read the PayPal VCC order. Please create a new VCC order and retry.",
 				);
 				orderLookupError.statusCode =
 					Number(getErr?.statusCode || getErr?.response?.status || 409) || 409;
@@ -4541,14 +4552,14 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}
 
 			const expectedCustomId = String(
-				reservation?.confirmation_number || reservationId
+				reservation?.confirmation_number || reservationId,
 			).trim();
 			const orderCustomId = String(
-				existingOrder?.purchase_units?.[0]?.custom_id || ""
+				existingOrder?.purchase_units?.[0]?.custom_id || "",
 			).trim();
 			if (orderCustomId && orderCustomId !== expectedCustomId) {
 				const mismatchError = new Error(
-					"This PayPal order is not linked to this reservation."
+					"This PayPal order is not linked to this reservation.",
 				);
 				mismatchError.statusCode = 409;
 				mismatchError.name = "VCC_ORDER_RESERVATION_MISMATCH";
@@ -4556,11 +4567,11 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}
 
 			const orderCurrency = String(
-				existingOrder?.purchase_units?.[0]?.amount?.currency_code || "USD"
+				existingOrder?.purchase_units?.[0]?.amount?.currency_code || "USD",
 			).toUpperCase();
 			if (orderCurrency !== "USD") {
 				const currencyError = new Error(
-					`PayPal order currency mismatch. Expected USD, got ${orderCurrency}.`
+					`PayPal order currency mismatch. Expected USD, got ${orderCurrency}.`,
 				);
 				currencyError.statusCode = 400;
 				currencyError.name = "VCC_ORDER_CURRENCY_MISMATCH";
@@ -4568,14 +4579,13 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			}
 
 			const orderAmount = toNum2(
-				existingOrder?.purchase_units?.[0]?.amount?.value || parsedUsd
+				existingOrder?.purchase_units?.[0]?.amount?.value || parsedUsd,
 			);
-			if (
-				orderAmount > 0 &&
-				Math.abs(orderAmount - parsedUsd) >= 0.01
-			) {
+			if (orderAmount > 0 && Math.abs(orderAmount - parsedUsd) >= 0.01) {
 				const amountError = new Error(
-					`PayPal order amount mismatch. Expected ${toCCY(parsedUsd)} USD, got ${toCCY(orderAmount)} USD.`
+					`PayPal order amount mismatch. Expected ${toCCY(
+						parsedUsd,
+					)} USD, got ${toCCY(orderAmount)} USD.`,
 				);
 				amountError.statusCode = 409;
 				amountError.name = "VCC_ORDER_AMOUNT_MISMATCH";
@@ -4612,21 +4622,24 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		let capture = vccChargeResult?.capture || {};
 		let captureStatus = String(capture?.status || "").toUpperCase();
 		const payloadStatus = String(
-			vccChargeResult?.resultPayload?.status || "UNKNOWN"
+			vccChargeResult?.resultPayload?.status || "UNKNOWN",
 		).toUpperCase();
 		if (isHostedOrderCapture) {
-			const hostedCard = vccChargeResult?.resultPayload?.payment_source?.card || {};
+			const hostedCard =
+				vccChargeResult?.resultPayload?.payment_source?.card || {};
 			if (!cardLast4 && hostedCard?.last_digits) {
 				cardLast4 = String(hostedCard.last_digits).replace(/\D/g, "");
 			}
 			if (!cardExpiryDisplay) {
-				cardExpiryDisplay = normalizePayPalCardExpiryDisplay(hostedCard?.expiry);
+				cardExpiryDisplay = normalizePayPalCardExpiryDisplay(
+					hostedCard?.expiry,
+				);
 			}
 		}
 
 		if (!capture?.id) {
 			const unresolvedCaptureError = new Error(
-				"PayPal did not return a capture id for this charge. Do not retry immediately; review the order in PayPal first."
+				"PayPal did not return a capture id for this charge. Do not retry immediately; review the order in PayPal first.",
 			);
 			unresolvedCaptureError.statusCode = 409;
 			unresolvedCaptureError.name = "VCC_CAPTURE_NOT_FOUND";
@@ -4645,7 +4658,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			const declinedError = new Error(
 				`VCC capture declined (capture status: ${captureStatus}${
 					responseCode ? `, response code: ${responseCode}` : ""
-				}${adviceCode ? `, advice: ${adviceCode}` : ""}).`
+				}${adviceCode ? `, advice: ${adviceCode}` : ""}).`,
 			);
 			declinedError.statusCode = 402;
 			declinedError.name = "VCC_CAPTURE_DECLINED";
@@ -4746,7 +4759,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 				},
 				$push: { "vcc_payment.attempts": successAttempt },
 			},
-			{ new: true }
+			{ new: true },
 		)
 			.populate("hotelId")
 			.populate("roomId");
@@ -4762,7 +4775,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		const parsed = parsePayPalVccError(error);
 		const sanitizedErrorPayload = buildSanitizedPayPalErrorPayload(
 			error,
-			parsed
+			parsed,
 		);
 		console.error("chargeReservationViaVcc error:", {
 			statusCode: parsed.statusCode,
@@ -4774,7 +4787,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		let updatedAfterFailure = null;
 		const failureAt = new Date();
 		const existingFailedAttempts = Number(
-			reservation?.vcc_payment?.failed_attempts_count || 0
+			reservation?.vcc_payment?.failed_attempts_count || 0,
 		);
 		const nextFailedAttempts = existingFailedAttempts + 1;
 		const shouldBlockAfterFailure = nextFailedAttempts >= VCC_MAX_ATTEMPTS;
@@ -4782,7 +4795,11 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			? VCC_PROMPT_WARNING_MESSAGE
 			: VCC_RETRY_AVAILABLE_MESSAGE;
 
-		if (lockAcquired && reservationId && mongoose.Types.ObjectId.isValid(reservationId)) {
+		if (
+			lockAcquired &&
+			reservationId &&
+			mongoose.Types.ObjectId.isValid(reservationId)
+		) {
 			const failureAttempt = {
 				at: failureAt,
 				success: false,
@@ -4845,7 +4862,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					},
 					$push: { "vcc_payment.attempts": failureAttempt },
 				},
-				{ new: true }
+				{ new: true },
 			)
 				.populate("hotelId")
 				.populate("roomId");
@@ -4869,8 +4886,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			avsCode: parsed.avsCode || null,
 			cvvCode: parsed.cvvCode || null,
 			attemptedBefore: !!statusSnapshot?.attemptedBefore,
-			warningMessage:
-				statusSnapshot?.warningMessage || failureWarningMessage,
+			warningMessage: statusSnapshot?.warningMessage || failureWarningMessage,
 			reservation: updatedAfterFailure || undefined,
 			vccStatus: statusSnapshot || undefined,
 		});
@@ -4885,7 +4901,7 @@ exports.createPayPalOrder = async (req, res) => {
 	const log = (msg, obj) =>
 		console.log(
 			`[PP][order.create][${trace}] ${msg}`,
-			obj ? JSON.stringify(obj, null, 2) : ""
+			obj ? JSON.stringify(obj, null, 2) : "",
 		);
 	try {
 		const body = req.body || {};
@@ -4955,8 +4971,8 @@ exports.createPayPalOrder = async (req, res) => {
 					body: e?.response?.data || e?.result || null,
 				},
 				null,
-				2
-			)
+				2,
+			),
 		);
 		return res.status(500).json({ message: "Failed to create PayPal order" });
 	}
@@ -5013,12 +5029,12 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		const startOfSameMonth = new Date(
 			checkinDate.getFullYear(),
 			checkinDate.getMonth(),
-			1
+			1,
 		);
 		const endOfNextMonth = new Date(
 			checkinDate.getFullYear(),
 			checkinDate.getMonth() + 2,
-			0
+			0,
 		);
 		const partialDuplicate = await Reservations.findOne({
 			"customer_details.name": reservationData.customerDetails.name,
@@ -5055,7 +5071,7 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		if (!confirmationNumber) {
 			confirmationNumber = await new Promise((resolve, reject) => {
 				ensureUniqueNumber(Reservations, "confirmation_number", (err, unique) =>
-					err ? reject(err) : resolve(unique)
+					err ? reject(err) : resolve(unique),
 				);
 			});
 			reservationData.confirmation_number = confirmationNumber;
@@ -5103,7 +5119,7 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		await sendEmailWithInvoice(
 			resvData,
 			saved.customer_details?.email,
-			saved.belongsTo
+			saved.belongsTo,
 		);
 		try {
 			await waSendReservationConfirmation(saved);
@@ -5125,7 +5141,7 @@ exports.verifyReservationAndCreate = async (req, res) => {
 	} catch (err) {
 		console.error(
 			"verifyReservationAndCreate error:",
-			err?.response?.data || err
+			err?.response?.data || err,
 		);
 		return res.status(500).json({ message: "Verification failed." });
 	}
@@ -5152,7 +5168,7 @@ exports.attachVaultToReservation = async (req, res) => {
 			"paypal_details.vault_id": tokenData.id,
 			"paypal_details.vault_status": tokenData.status || "ACTIVE",
 			"paypal_details.vaulted_at": new Date(
-				tokenData.create_time || Date.now()
+				tokenData.create_time || Date.now(),
 			),
 			"paypal_details.card_brand":
 				tokenData.payment_source?.card?.brand || null,
@@ -5170,7 +5186,7 @@ exports.attachVaultToReservation = async (req, res) => {
 		let updated = await Reservations.findByIdAndUpdate(
 			reservationId,
 			{ $set: setOps },
-			{ new: true }
+			{ new: true },
 		).populate("hotelId");
 
 		// Optional: tiny precheck (auth+void) to ensure card is OK
@@ -5202,7 +5218,7 @@ exports.attachVaultToReservation = async (req, res) => {
 							"payment_details.precheckAt": new Date(),
 						},
 					},
-					{ new: true }
+					{ new: true },
 				).populate("hotelId");
 			} catch (e) {
 				console.warn("attachVault precheck failed:", e?.response?.data || e);
@@ -5217,7 +5233,7 @@ exports.attachVaultToReservation = async (req, res) => {
 	} catch (error) {
 		console.error(
 			"attachVaultToReservation error:",
-			error?.response?.data || error
+			error?.response?.data || error,
 		);
 		return res.status(500).json({ message: "Failed to attach vault token." });
 	}
