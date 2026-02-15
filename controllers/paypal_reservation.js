@@ -406,6 +406,11 @@ function buildMetaBase({
 
 const VCC_PROMPT_WARNING_MESSAGE =
 	"This reservation was prompted once before, please reach out to Ahmed Admin for more details.";
+const VCC_ROOM_UNASSIGNED_CONFIRM_MESSAGE =
+	"Are you sure you want to proceed without assigning a room to the reservation?";
+const VCC_MAX_ATTEMPTS = 2;
+const VCC_RETRY_AVAILABLE_MESSAGE =
+	"One VCC attempt failed before. One final retry is still allowed.";
 
 const VCC_PROVIDER_CONFIG = {
 	expedia: {
@@ -424,9 +429,17 @@ const VCC_PROVIDER_CONFIG = {
 	},
 	agoda: {
 		label: "Agoda",
+		staticCardholder: {
+			first_name: "Agoda",
+			last_name: "VirtualCard",
+		},
 	},
 	booking: {
 		label: "Booking.com",
+		staticCardholder: {
+			first_name: "Booking",
+			last_name: "VirtualCard",
+		},
 	},
 };
 
@@ -542,6 +555,10 @@ function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput =
 	const fallback = (v) => String(v || "").trim();
 	const fixedCardholder = cfg.staticCardholder || {};
 	const fixedBilling = cfg.staticBillingAddress || {};
+	const inputPostalCode = fallback(billingInput.postal_code).toUpperCase();
+	const finalPostalCode = fallback(
+		inputPostalCode || fixedBilling.postal_code
+	).toUpperCase();
 
 	const firstName = fallback(fixedCardholder.first_name || cardholderInput.first_name);
 	const lastName = fallback(fixedCardholder.last_name || cardholderInput.last_name);
@@ -556,17 +573,17 @@ function resolveVccProviderPreset(provider, billingInput = {}, cardholderInput =
 		admin_area_1: fallback(
 			fixedBilling.admin_area_1 || billingInput.admin_area_1
 		),
-		postal_code: fallback(
-			fixedBilling.postal_code || billingInput.postal_code
-		),
+		postal_code: finalPostalCode,
 		country_code: fallback(
 			fixedBilling.country_code || billingInput.country_code || "US"
 		).toUpperCase(),
 	};
 
-	// Expedia is fixed by business rule
-	if (provider === "expedia") {
-		billingAddress.postal_code = "98119";
+	if (!/^[A-Z0-9 -]{3,12}$/.test(billingAddress.postal_code)) {
+		return {
+			ok: false,
+			message: "A valid billing ZIP/postal code is required for VCC charging.",
+		};
 	}
 
 	if (!firstName || !lastName) {
@@ -632,28 +649,104 @@ function buildVccMetadataSnapshot({ reservation, provider, roomNumbers }) {
 	};
 }
 
+function buildVccPayPalMeta({
+	reservation,
+	reservationId,
+	provider,
+	preset,
+	parsedUsd,
+	roomNumbers,
+}) {
+	const metadataSnapshot = buildVccMetadataSnapshot({
+		reservation,
+		provider,
+		roomNumbers,
+	});
+
+	const confirmationNumber = reservation?.confirmation_number || "";
+	const hotelName =
+		reservation?.hotelName || reservation?.hotelId?.hotelName || "Hotel";
+	const paypalMeta = buildMetaBase({
+		confirmationNumber: confirmationNumber || reservationId,
+		hotelName,
+		guestName: metadataSnapshot.guestName || "Guest",
+		guestPhone: reservation?.customer_details?.phone || "",
+		guestEmail: reservation?.customer_details?.email || "",
+		guestNationality: reservation?.customer_details?.nationality || "",
+		reservedBy: reservation?.customer_details?.reservedBy || "",
+		checkin: metadataSnapshot.checkinDate || "",
+		checkout: metadataSnapshot.checkoutDate || "",
+		usdAmount: parsedUsd,
+	});
+
+	paypalMeta.invoice_id = truncate(
+		`VCC-${confirmationNumber || reservationId}-${Date.now()}-${uuid().slice(
+			0,
+			8
+		)}`,
+		127
+	);
+	paypalMeta.custom_id = truncate(
+		String(confirmationNumber || reservationId),
+		127
+	);
+	paypalMeta.confirmationNumber2 = metadataSnapshot.confirmationNumber2 || "";
+	paypalMeta.reservationStatus = metadataSnapshot.reservationStatus || "";
+	paypalMeta.guestHousedInRoom = metadataSnapshot.guestHousedInRoom || "";
+	paypalMeta.description = truncate(
+		`VCC ${preset?.label || provider} charge | Hotel: ${hotelName} | Guest: ${
+			metadataSnapshot.guestName || "Guest"
+		} | Conf: ${metadataSnapshot.confirmationNumber || "N/A"}${
+			metadataSnapshot.confirmationNumber2
+				? ` / ${metadataSnapshot.confirmationNumber2}`
+				: ""
+		} | ${metadataSnapshot.checkinDate || "N/A"} -> ${
+			metadataSnapshot.checkoutDate || "N/A"
+		} | Status: ${metadataSnapshot.reservationStatus || "N/A"} | Room: ${
+			metadataSnapshot.guestHousedInRoom || "N/A"
+		}`
+	);
+
+	return {
+		metadataSnapshot,
+		paypalMeta,
+		confirmationNumber,
+		hotelName,
+	};
+}
+
 function getVccStatusPayload(reservation, provider) {
 	const vcc = reservation?.vcc_payment || {};
 	const charged = !!vcc?.charged;
 	const failedAttempts = Number(vcc?.failed_attempts_count || 0);
-	const blocked = !!vcc?.blocked_after_failure;
 	const retryableLegacyFailure = isRetrySafeLegacyVccFailure(reservation);
+	const blockedByAttempts = failedAttempts >= VCC_MAX_ATTEMPTS;
 	const attemptedBefore =
-		!charged && !retryableLegacyFailure && (failedAttempts > 0 || blocked);
+		!charged && !retryableLegacyFailure && blockedByAttempts;
+	const retryAllowed =
+		!charged &&
+		!retryableLegacyFailure &&
+		failedAttempts > 0 &&
+		failedAttempts < VCC_MAX_ATTEMPTS;
 
 	return {
 		provider: provider || "",
 		bookingSource: reservation?.booking_source || "",
 		alreadyCharged: charged,
 		attemptedBefore,
+		retryAllowed,
 		retryableLegacyFailure,
 		processing: !!vcc?.processing,
 		chargeCount: Number(vcc?.charge_count || 0),
 		attemptsCount: Number(vcc?.attempts_count || 0),
 		failedAttemptsCount: failedAttempts,
+		maxAttempts: VCC_MAX_ATTEMPTS,
+		remainingAttempts: Math.max(0, VCC_MAX_ATTEMPTS - failedAttempts),
 		lastFailureMessage: vcc?.last_failure_message || "",
 		warningMessage: attemptedBefore
-			? vcc?.warning_message || VCC_PROMPT_WARNING_MESSAGE
+			? VCC_PROMPT_WARNING_MESSAGE
+			: retryAllowed
+			? VCC_RETRY_AVAILABLE_MESSAGE
 			: "",
 		lastSuccessAt: vcc?.last_success_at || null,
 		lastFailureAt: vcc?.last_failure_at || null,
@@ -978,6 +1071,47 @@ function extractFirstCaptureFromOrderPayload(payload) {
 	return null;
 }
 
+function buildVccPurchaseUnit({ usdAmount, meta }) {
+	return {
+		reference_id: "default",
+		invoice_id: meta.invoice_id,
+		custom_id: meta.custom_id,
+		description: meta.description,
+		amount: {
+			currency_code: "USD",
+			value: toCCY(usdAmount),
+			breakdown: {
+				item_total: { currency_code: "USD", value: toCCY(usdAmount) },
+			},
+		},
+		items: [
+			{
+				name: `VCC Reservation Charge - ${meta.hotelName}`,
+				description: truncate(
+					`Guest: ${meta.guestName}, Conf: ${meta.custom_id}, Conf2: ${
+						meta.confirmationNumber2 || "n/a"
+					}, ${meta.checkin} -> ${meta.checkout}, Room: ${
+						meta.guestHousedInRoom || "n/a"
+					}, Status: ${meta.reservationStatus || "n/a"}`
+				),
+				quantity: "1",
+				unit_amount: { currency_code: "USD", value: toCCY(usdAmount) },
+				category: "DIGITAL_GOODS",
+				sku: `VCC-${meta.custom_id}`,
+			},
+		],
+	};
+}
+
+function normalizePayPalCardExpiryDisplay(rawValue) {
+	const raw = String(rawValue || "").trim();
+	if (!raw) return "";
+	const normalized = normalizeCardExpiryForPayPal(raw);
+	if (normalized?.display) return normalized.display;
+	if (/^\d{2}\/\d{2}$/.test(raw)) return raw;
+	return "";
+}
+
 async function fetchOrderWithCaptureRetry({
 	orderId,
 	cmid,
@@ -1036,37 +1170,7 @@ async function paypalVccDirectCharge({
 	if (cmid) createReq.headers["PayPal-Client-Metadata-Id"] = cmid;
 	createReq.requestBody({
 		intent: "CAPTURE",
-		purchase_units: [
-			{
-				reference_id: "default",
-				invoice_id: meta.invoice_id,
-				custom_id: meta.custom_id,
-				description: meta.description,
-				amount: {
-					currency_code: "USD",
-					value: toCCY(usdAmount),
-					breakdown: {
-						item_total: { currency_code: "USD", value: toCCY(usdAmount) },
-					},
-				},
-				items: [
-					{
-						name: `VCC Reservation Charge - ${meta.hotelName}`,
-						description: truncate(
-							`Guest: ${meta.guestName}, Conf: ${meta.custom_id}, Conf2: ${
-								meta.confirmationNumber2 || "n/a"
-							}, ${meta.checkin} -> ${meta.checkout}, Room: ${
-								meta.guestHousedInRoom || "n/a"
-							}, Status: ${meta.reservationStatus || "n/a"}`
-						),
-						quantity: "1",
-						unit_amount: { currency_code: "USD", value: toCCY(usdAmount) },
-						category: "DIGITAL_GOODS",
-						sku: `VCC-${meta.custom_id}`,
-					},
-				],
-			},
-		],
+		purchase_units: [buildVccPurchaseUnit({ usdAmount, meta })],
 		application_context: {
 			brand_name: "Jannat Booking",
 			user_action: "PAY_NOW",
@@ -1334,8 +1438,16 @@ function idSig(id) {
 
 exports.generateClientToken = async (req, res) => {
 	try {
-		const dbg = String(req.query?.dbg || "") === "1";
-		const bc = (req.query?.bc || "").toUpperCase() || null;
+		const dbgRaw = req.query?.dbg ?? req.body?.dbg ?? "";
+		const bcRaw = req.query?.bc ?? req.body?.bc ?? "";
+		const dbg =
+			String(dbgRaw || "") === "1" || String(dbgRaw || "").toLowerCase() === "true";
+		const bc = String(bcRaw || "").toUpperCase() || null;
+		res.set({
+			"Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+			Pragma: "no-cache",
+			Expires: "0",
+		});
 
 		if (cachedClientToken && Date.now() < cachedClientTokenExp) {
 			return res.json({
@@ -3876,6 +3988,30 @@ exports.getReservationVccStatus = async (req, res) => {
 					.lean();
 			}
 		}
+		const failedAttempts = Number(
+			reservation?.vcc_payment?.failed_attempts_count || 0
+		);
+		if (
+			failedAttempts < VCC_MAX_ATTEMPTS &&
+			(reservation?.vcc_payment?.blocked_after_failure ||
+				String(reservation?.vcc_payment?.warning_message || "").trim() ===
+					VCC_PROMPT_WARNING_MESSAGE)
+		) {
+			await Reservations.updateOne(
+				{ _id: reservationId },
+				{
+					$set: {
+						"vcc_payment.blocked_after_failure": false,
+						"vcc_payment.warning_message":
+							failedAttempts > 0 ? VCC_RETRY_AVAILABLE_MESSAGE : "",
+					},
+				}
+			);
+			reservation = await Reservations.findById(reservationId)
+				.populate("hotelId", "hotelName")
+				.populate("roomId", "room_number")
+				.lean();
+		}
 		const roomNumbers = extractReservationRoomNumbers(reservation);
 		const metadata = buildVccMetadataSnapshot({
 			reservation,
@@ -3900,12 +4036,195 @@ exports.getReservationVccStatus = async (req, res) => {
 };
 
 /**
- * 11) Charge reservation via OTA virtual card (currently Expedia)
+ * 11) Create VCC order (Card Fields / hosted flow)
  * Body:
  * {
  *   reservationId,
  *   usdAmount,
- *   card: { number, expiry, cvv },
+ *   billingAddress?: { postal_code },
+ *   cardholder?, cmid?
+ * }
+ */
+exports.createReservationVccOrder = async (req, res) => {
+	try {
+		const reservationId = String(req.body?.reservationId || "");
+		if (!reservationId || !mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ message: "Invalid reservationId." });
+		}
+
+		const parsedUsd = toNum2(req.body?.usdAmount);
+		if (!(parsedUsd > 0)) {
+			return res.status(400).json({
+				message: "usdAmount must be a positive number.",
+			});
+		}
+
+		const reservation = await Reservations.findById(reservationId)
+			.populate("hotelId", "hotelName")
+			.populate("roomId", "room_number")
+			.exec();
+		if (!reservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		const provider = resolveVccProvider(reservation?.booking_source);
+		if (provider !== "expedia") {
+			return res.status(400).json({
+				message:
+					"VCC charging is currently enabled only for Expedia reservations.",
+			});
+		}
+
+		if (reservation?.vcc_payment?.processing) {
+			return res.status(409).json({
+				message:
+					"A VCC payment attempt is already in progress for this reservation.",
+			});
+		}
+
+		const beforeStatus = getVccStatusPayload(reservation, provider);
+		const retrySafe = isRetrySafeLegacyVccFailure(reservation);
+		if (beforeStatus.alreadyCharged) {
+			return res.status(409).json({
+				message: "This reservation was already charged via VCC.",
+				alreadyCharged: true,
+				vccStatus: beforeStatus,
+			});
+		}
+		if (beforeStatus.attemptedBefore && !retrySafe) {
+			return res.status(409).json({
+				message: beforeStatus.warningMessage || VCC_PROMPT_WARNING_MESSAGE,
+				attemptedBefore: true,
+				warningMessage:
+					beforeStatus.warningMessage || VCC_PROMPT_WARNING_MESSAGE,
+				vccStatus: beforeStatus,
+			});
+		}
+
+		const roomNumbers = extractReservationRoomNumbers(reservation);
+		const cancelledOrNoShow = isCancelledOrNoShowForVcc(
+			reservation?.reservation_status
+		);
+		const proceedWithoutRoom = !!req.body?.proceedWithoutRoom;
+		if (!cancelledOrNoShow && roomNumbers.length === 0 && !proceedWithoutRoom) {
+			return res.status(400).json({
+				message: VCC_ROOM_UNASSIGNED_CONFIRM_MESSAGE,
+				code: "VCC_ROOM_CONFIRM_REQUIRED",
+			});
+		}
+
+		const preset = resolveVccProviderPreset(
+			provider,
+			req.body?.billingAddress || {},
+			req.body?.cardholder || {}
+		);
+		if (!preset?.ok) {
+			return res.status(400).json({
+				message: preset?.message || "Invalid VCC billing/cardholder data.",
+			});
+		}
+
+		const { metadataSnapshot, paypalMeta } = buildVccPayPalMeta({
+			reservation,
+			reservationId,
+			provider,
+			preset,
+			parsedUsd,
+			roomNumbers,
+		});
+
+		const createOrderRequestId = `vcc-order:${reservationId}:${Date.now()}:${uuid().slice(
+			0,
+			8
+		)}`;
+		const createReq = new paypal.orders.OrdersCreateRequest();
+		createReq.prefer("return=representation");
+		createReq.headers["PayPal-Request-Id"] = createOrderRequestId;
+		if (req.body?.cmid)
+			createReq.headers["PayPal-Client-Metadata-Id"] = req.body.cmid;
+		createReq.requestBody({
+			intent: "CAPTURE",
+			purchase_units: [buildVccPurchaseUnit({ usdAmount: parsedUsd, meta: paypalMeta })],
+			application_context: {
+				brand_name: "Jannat Booking",
+				user_action: "PAY_NOW",
+				shipping_preference: "NO_SHIPPING",
+			},
+			payment_source: {
+				card: {
+					attributes: {
+						verification: { method: "SCA_WHEN_REQUIRED" },
+					},
+				},
+			},
+		});
+
+		const createResp = await ppClient.execute(createReq);
+		const order = createResp?.result || {};
+		const orderId = order?.id || "";
+		if (!orderId) {
+			throw new Error("PayPal did not return an order id for VCC flow.");
+		}
+
+		const updated = await Reservations.findByIdAndUpdate(
+			reservationId,
+			{
+				$set: {
+					"vcc_payment.source": provider,
+					"vcc_payment.metadata": metadataSnapshot,
+					"vcc_payment.last_request_id": createOrderRequestId,
+					"vcc_payment.pending_order": {
+						order_id: orderId,
+						status: String(order?.status || "").toUpperCase() || "CREATED",
+						request_id: createOrderRequestId,
+						amount_usd: parsedUsd,
+						currency: "USD",
+						invoice_id: paypalMeta.invoice_id,
+						custom_id: paypalMeta.custom_id,
+						billing_address: preset.billingAddress,
+						metadata: metadataSnapshot,
+						created_at: new Date(),
+					},
+				},
+			},
+			{ new: true }
+		)
+			.populate("hotelId")
+			.populate("roomId");
+
+		return res.status(200).json({
+			message: "VCC order created. Submit card fields to complete capture.",
+			orderId,
+			reservation: updated,
+			vccStatus: getVccStatusPayload(updated, provider),
+			metadata: metadataSnapshot,
+		});
+	} catch (error) {
+		const parsed = parsePayPalVccError(error);
+		console.error("createReservationVccOrder error:", {
+			statusCode: parsed.statusCode,
+			issue: parsed.issue,
+			description: parsed.description,
+			debugId: parsed.debugId,
+		});
+		const statusCode =
+			parsed.statusCode >= 400 && parsed.statusCode < 500 ? 400 : 500;
+		return res.status(statusCode).json({
+			message: parsed.description || "Failed to create VCC order.",
+			code: parsed.issue || "VCC_ORDER_CREATE_FAILED",
+			debugId: parsed.debugId || null,
+		});
+	}
+};
+
+/**
+ * 12) Charge reservation via OTA virtual card (currently Expedia)
+ * Body:
+ * {
+ *   reservationId,
+ *   usdAmount,
+ *   orderId?, // hosted-card flow
+ *   card?: { number, expiry, cvv }, // legacy direct-card flow
  *   billingAddress?, cardholder?, cmid?
  * }
  */
@@ -3917,6 +4236,8 @@ exports.chargeReservationViaVcc = async (req, res) => {
 	let cardLast4 = "";
 	let cardExpiryDisplay = "";
 	let metadataSnapshot = null;
+	let vccAttemptRequestId = "";
+	let reservation = null;
 
 	try {
 		reservationId = String(req.body?.reservationId || "");
@@ -3931,43 +4252,53 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			});
 		}
 
-		const cardInput = req.body?.card || {};
-		const cardNumberDigits = String(
-			cardInput.number || req.body?.cardNumber || ""
-		).replace(/\D/g, "");
-		if (!/^\d{16}$/.test(cardNumberDigits)) {
-			return res.status(400).json({
-				message: "Virtual card number must be exactly 16 digits.",
-			});
-		}
-		if (!isLuhnValid(cardNumberDigits)) {
-			return res.status(400).json({
-				message: "Virtual card number appears invalid (checksum failed).",
-			});
-		}
-		cardLast4 = cardNumberDigits.slice(-4);
+		const hostedOrderId = String(
+			req.body?.orderId || req.body?.paypalOrderId || ""
+		).trim();
+		const isHostedOrderCapture = !!hostedOrderId;
+		let normalizedExpiry = null;
+		let cardNumberDigits = "";
+		let cardCvvDigits = "";
 
-		const cardCvvDigits = String(
-			cardInput.cvv || req.body?.cardCVV || ""
-		).replace(/\D/g, "");
-		if (!/^\d{3,4}$/.test(cardCvvDigits)) {
-			return res.status(400).json({
-				message: "Virtual card CVV must be 3 or 4 digits.",
-			});
+		if (!isHostedOrderCapture) {
+			const cardInput = req.body?.card || {};
+			cardNumberDigits = String(
+				cardInput.number || req.body?.cardNumber || ""
+			).replace(/\D/g, "");
+			if (!/^\d{16}$/.test(cardNumberDigits)) {
+				return res.status(400).json({
+					message: "Virtual card number must be exactly 16 digits.",
+				});
+			}
+			if (!isLuhnValid(cardNumberDigits)) {
+				return res.status(400).json({
+					message: "Virtual card number appears invalid (checksum failed).",
+				});
+			}
+			cardLast4 = cardNumberDigits.slice(-4);
+
+			cardCvvDigits = String(
+				cardInput.cvv || req.body?.cardCVV || ""
+			).replace(/\D/g, "");
+			if (!/^\d{3,4}$/.test(cardCvvDigits)) {
+				return res.status(400).json({
+					message: "Virtual card CVV must be 3 or 4 digits.",
+				});
+			}
+
+			normalizedExpiry = normalizeCardExpiryForPayPal(
+				cardInput.expiry || req.body?.cardExpiry
+			);
+			if (!normalizedExpiry) {
+				return res.status(400).json({
+					message:
+						"Invalid card expiry format. Use MM/YY, MM/YYYY, or YYYY-MM.",
+				});
+			}
+			cardExpiryDisplay = normalizedExpiry.display;
 		}
 
-		const normalizedExpiry = normalizeCardExpiryForPayPal(
-			cardInput.expiry || req.body?.cardExpiry
-		);
-		if (!normalizedExpiry) {
-			return res.status(400).json({
-				message:
-					"Invalid card expiry format. Use MM/YY, MM/YYYY, or YYYY-MM.",
-			});
-		}
-		cardExpiryDisplay = normalizedExpiry.display;
-
-		let reservation = await Reservations.findById(reservationId)
+		reservation = await Reservations.findById(reservationId)
 			.populate("hotelId", "hotelName")
 			.populate("roomId", "room_number")
 			.exec();
@@ -4080,14 +4411,15 @@ exports.chargeReservationViaVcc = async (req, res) => {
 		const cancelledOrNoShow = isCancelledOrNoShowForVcc(
 			reservation?.reservation_status
 		);
-		if (!cancelledOrNoShow && roomNumbers.length === 0) {
+		const proceedWithoutRoom = !!req.body?.proceedWithoutRoom;
+		if (!cancelledOrNoShow && roomNumbers.length === 0 && !proceedWithoutRoom) {
 			await Reservations.findByIdAndUpdate(reservationId, {
 				$set: { "vcc_payment.processing": false },
 			});
 			lockAcquired = false;
 			return res.status(400).json({
-				message:
-					"Guest housed room number is required before charging VCC when reservation is not cancelled/no-show.",
+				message: VCC_ROOM_UNASSIGNED_CONFIRM_MESSAGE,
+				code: "VCC_ROOM_CONFIRM_REQUIRED",
 			});
 		}
 
@@ -4106,78 +4438,138 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			});
 		}
 
-		metadataSnapshot = buildVccMetadataSnapshot({
+		const vccMetaBundle = buildVccPayPalMeta({
 			reservation,
+			reservationId,
 			provider,
+			preset,
+			parsedUsd,
 			roomNumbers,
 		});
+		metadataSnapshot = vccMetaBundle.metadataSnapshot;
+		const paypalMeta = vccMetaBundle.paypalMeta;
 
-		const confirmationNumber = reservation?.confirmation_number || "";
-		const hotelName =
-			reservation?.hotelName || reservation?.hotelId?.hotelName || "Hotel";
-		const paypalMeta = buildMetaBase({
-			confirmationNumber: confirmationNumber || reservationId,
-			hotelName,
-			guestName: metadataSnapshot.guestName || "Guest",
-			guestPhone: reservation?.customer_details?.phone || "",
-			guestEmail: reservation?.customer_details?.email || "",
-			guestNationality: reservation?.customer_details?.nationality || "",
-			reservedBy: reservation?.customer_details?.reservedBy || "",
-			checkin: metadataSnapshot.checkinDate || "",
-			checkout: metadataSnapshot.checkoutDate || "",
-			usdAmount: parsedUsd,
-		});
-
-		paypalMeta.invoice_id = truncate(
-			`VCC-${confirmationNumber || reservationId}-${Date.now()}-${uuid().slice(
-				0,
-				8
-			)}`,
-			127
-		);
-		paypalMeta.custom_id = truncate(
-			String(confirmationNumber || reservationId),
-			127
-		);
-		paypalMeta.confirmationNumber2 = metadataSnapshot.confirmationNumber2 || "";
-		paypalMeta.reservationStatus = metadataSnapshot.reservationStatus || "";
-		paypalMeta.guestHousedInRoom = metadataSnapshot.guestHousedInRoom || "";
-		paypalMeta.description = truncate(
-			`VCC ${preset.label} charge | Hotel: ${hotelName} | Guest: ${
-				metadataSnapshot.guestName || "Guest"
-			} | Conf: ${metadataSnapshot.confirmationNumber || "N/A"}${
-				metadataSnapshot.confirmationNumber2
-					? ` / ${metadataSnapshot.confirmationNumber2}`
-					: ""
-			} | ${metadataSnapshot.checkinDate || "N/A"} -> ${
-				metadataSnapshot.checkoutDate || "N/A"
-			} | Status: ${metadataSnapshot.reservationStatus || "N/A"} | Room: ${
-				metadataSnapshot.guestHousedInRoom || "N/A"
-			}`
-		);
-
-		const vccAttemptRequestId = `vcc:${reservationId}:${Date.now()}:${uuid().slice(
+		vccAttemptRequestId = `vcc:${reservationId}:${Date.now()}:${uuid().slice(
 			0,
 			8
 		)}`;
 
-		const vccChargeResult = await paypalVccDirectCharge({
-			usdAmount: parsedUsd,
-			cardNumber: cardNumberDigits,
-			cardExpiry: normalizedExpiry.paypal,
-			cardCvv: cardCvvDigits,
-			cardholderName: `${preset.firstName} ${preset.lastName}`.trim(),
-			billingAddress: preset.billingAddress,
-			meta: paypalMeta,
-			cmid: req.body?.cmid || null,
-			requestId: vccAttemptRequestId,
-		});
+		let vccChargeResult = null;
+		if (isHostedOrderCapture) {
+			const pendingOrderId = String(
+				reservation?.vcc_payment?.pending_order?.order_id || ""
+			).trim();
+			if (pendingOrderId && pendingOrderId !== hostedOrderId) {
+				await Reservations.findByIdAndUpdate(reservationId, {
+					$set: { "vcc_payment.processing": false },
+				});
+				lockAcquired = false;
+				return res.status(409).json({
+					message:
+						"The selected PayPal order does not match the latest VCC order for this reservation. Please restart the VCC flow.",
+				});
+			}
+
+			let existingOrder = null;
+			try {
+				const getReq = new paypal.orders.OrdersGetRequest(hostedOrderId);
+				if (req.body?.cmid)
+					getReq.headers["PayPal-Client-Metadata-Id"] = req.body.cmid;
+				const { result } = await ppClient.execute(getReq);
+				existingOrder = result || null;
+			} catch (getErr) {
+				const orderLookupError = new Error(
+					"Unable to read the PayPal VCC order. Please create a new VCC order and retry."
+				);
+				orderLookupError.statusCode =
+					Number(getErr?.statusCode || getErr?.response?.status || 409) || 409;
+				orderLookupError.name = "VCC_ORDER_LOOKUP_FAILED";
+				throw orderLookupError;
+			}
+
+			const expectedCustomId = String(
+				reservation?.confirmation_number || reservationId
+			).trim();
+			const orderCustomId = String(
+				existingOrder?.purchase_units?.[0]?.custom_id || ""
+			).trim();
+			if (orderCustomId && orderCustomId !== expectedCustomId) {
+				const mismatchError = new Error(
+					"This PayPal order is not linked to this reservation."
+				);
+				mismatchError.statusCode = 409;
+				mismatchError.name = "VCC_ORDER_RESERVATION_MISMATCH";
+				throw mismatchError;
+			}
+
+			const orderCurrency = String(
+				existingOrder?.purchase_units?.[0]?.amount?.currency_code || "USD"
+			).toUpperCase();
+			if (orderCurrency !== "USD") {
+				const currencyError = new Error(
+					`PayPal order currency mismatch. Expected USD, got ${orderCurrency}.`
+				);
+				currencyError.statusCode = 400;
+				currencyError.name = "VCC_ORDER_CURRENCY_MISMATCH";
+				throw currencyError;
+			}
+
+			const orderAmount = toNum2(
+				existingOrder?.purchase_units?.[0]?.amount?.value || parsedUsd
+			);
+			if (
+				orderAmount > 0 &&
+				Math.abs(orderAmount - parsedUsd) >= 0.01
+			) {
+				const amountError = new Error(
+					`PayPal order amount mismatch. Expected ${toCCY(parsedUsd)} USD, got ${toCCY(orderAmount)} USD.`
+				);
+				amountError.statusCode = 409;
+				amountError.name = "VCC_ORDER_AMOUNT_MISMATCH";
+				throw amountError;
+			}
+
+			const capturedOrder = await paypalCaptureApprovedOrder({
+				orderId: hostedOrderId,
+				cmid: req.body?.cmid || null,
+				reqId: `vcc-cap:${reservationId}:${Date.now()}:${uuid().slice(0, 8)}`,
+			});
+
+			vccChargeResult = {
+				path: "HOSTED_CAPTURE",
+				createdDebugId: null,
+				orderId: hostedOrderId,
+				resultPayload: capturedOrder || {},
+				capture: extractFirstCaptureFromOrderPayload(capturedOrder || {}),
+			};
+		} else {
+			vccChargeResult = await paypalVccDirectCharge({
+				usdAmount: parsedUsd,
+				cardNumber: cardNumberDigits,
+				cardExpiry: normalizedExpiry.paypal,
+				cardCvv: cardCvvDigits,
+				cardholderName: `${preset.firstName} ${preset.lastName}`.trim(),
+				billingAddress: preset.billingAddress,
+				meta: paypalMeta,
+				cmid: req.body?.cmid || null,
+				requestId: vccAttemptRequestId,
+			});
+		}
 
 		let capture = vccChargeResult?.capture || {};
 		let captureStatus = String(capture?.status || "").toUpperCase();
 		const payloadStatus = String(
 			vccChargeResult?.resultPayload?.status || "UNKNOWN"
 		).toUpperCase();
+		if (isHostedOrderCapture) {
+			const hostedCard = vccChargeResult?.resultPayload?.payment_source?.card || {};
+			if (!cardLast4 && hostedCard?.last_digits) {
+				cardLast4 = String(hostedCard.last_digits).replace(/\D/g, "");
+			}
+			if (!cardExpiryDisplay) {
+				cardExpiryDisplay = normalizePayPalCardExpiryDisplay(hostedCard?.expiry);
+			}
+		}
 
 		if (!capture?.id) {
 			const unresolvedCaptureError = new Error(
@@ -4262,7 +4654,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"payment_details.vccCharged": true,
 					"payment_details.vccCaptureId": capture?.id || null,
 					"payment_details.triggeredAmountUSD": capturedUsd,
-					"payment_details.lastChargeVia": "VCC_PAYPAL_DIRECT",
+					"payment_details.lastChargeVia": isHostedOrderCapture
+						? "VCC_PAYPAL_HOSTED_CARD_FIELDS"
+						: "VCC_PAYPAL_DIRECT",
 					"payment_details.lastChargeAt": now,
 					"payment_details.lastVccFailureMessage": "",
 					"payment_details.lastVccFailureAt": null,
@@ -4288,6 +4682,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 					"vcc_payment.last_failure_cvv_code": null,
 					"vcc_payment.warning_message": "",
 					"vcc_payment.last_request_id": vccAttemptRequestId,
+					"vcc_payment.pending_order": null,
 					"vcc_payment.last_capture": captureDoc,
 					"vcc_payment.metadata": metadataSnapshot,
 				},
@@ -4325,6 +4720,14 @@ exports.chargeReservationViaVcc = async (req, res) => {
 
 		let updatedAfterFailure = null;
 		const failureAt = new Date();
+		const existingFailedAttempts = Number(
+			reservation?.vcc_payment?.failed_attempts_count || 0
+		);
+		const nextFailedAttempts = existingFailedAttempts + 1;
+		const shouldBlockAfterFailure = nextFailedAttempts >= VCC_MAX_ATTEMPTS;
+		const failureWarningMessage = shouldBlockAfterFailure
+			? VCC_PROMPT_WARNING_MESSAGE
+			: VCC_RETRY_AVAILABLE_MESSAGE;
 
 		if (lockAcquired && reservationId && mongoose.Types.ObjectId.isValid(reservationId)) {
 			const failureAttempt = {
@@ -4357,7 +4760,7 @@ exports.chargeReservationViaVcc = async (req, res) => {
 						"vcc_payment.processing": false,
 						"vcc_payment.source": provider || "",
 						"vcc_payment.charged": false,
-						"vcc_payment.blocked_after_failure": true,
+						"vcc_payment.blocked_after_failure": shouldBlockAfterFailure,
 						"vcc_payment.last_failure_at": failureAt,
 						"vcc_payment.last_failure_message": parsed.description,
 						"vcc_payment.last_failure_code": parsed.issue,
@@ -4374,8 +4777,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 							parsed.paymentAdviceCode || null,
 						"vcc_payment.last_failure_avs_code": parsed.avsCode || null,
 						"vcc_payment.last_failure_cvv_code": parsed.cvvCode || null,
-						"vcc_payment.warning_message": VCC_PROMPT_WARNING_MESSAGE,
+						"vcc_payment.warning_message": failureWarningMessage,
 						"vcc_payment.last_request_id": vccAttemptRequestId,
+						"vcc_payment.pending_order": null,
 						"vcc_payment.metadata": metadataSnapshot || {},
 						"payment_details.vccCharged": false,
 						"payment_details.lastVccFailureMessage": parsed.description,
@@ -4397,6 +4801,9 @@ exports.chargeReservationViaVcc = async (req, res) => {
 
 		const statusCode =
 			parsed.statusCode >= 400 && parsed.statusCode < 500 ? 402 : 500;
+		const statusSnapshot = updatedAfterFailure
+			? getVccStatusPayload(updatedAfterFailure, provider)
+			: null;
 		return res.status(statusCode).json({
 			message: parsed.description,
 			code: parsed.issue,
@@ -4408,12 +4815,11 @@ exports.chargeReservationViaVcc = async (req, res) => {
 			paymentAdviceCode: parsed.paymentAdviceCode || null,
 			avsCode: parsed.avsCode || null,
 			cvvCode: parsed.cvvCode || null,
-			attemptedBefore: true,
-			warningMessage: VCC_PROMPT_WARNING_MESSAGE,
+			attemptedBefore: !!statusSnapshot?.attemptedBefore,
+			warningMessage:
+				statusSnapshot?.warningMessage || failureWarningMessage,
 			reservation: updatedAfterFailure || undefined,
-			vccStatus: updatedAfterFailure
-				? getVccStatusPayload(updatedAfterFailure, provider)
-				: undefined,
+			vccStatus: statusSnapshot || undefined,
 		});
 	}
 };

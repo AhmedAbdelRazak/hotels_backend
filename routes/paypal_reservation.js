@@ -37,6 +37,16 @@ router.get(
 	Ctrl.getReservationVccStatus
 );
 router.post(
+	"/reservations/paypal/vcc-order/create",
+	requireSignin,
+	Ctrl.createReservationVccOrder
+);
+router.post(
+	"/reservations/paypal/vcc-order/capture",
+	requireSignin,
+	Ctrl.chargeReservationViaVcc
+);
+router.post(
 	"/reservations/paypal/vcc-charge",
 	requireSignin,
 	Ctrl.chargeReservationViaVcc
