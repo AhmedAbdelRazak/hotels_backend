@@ -118,7 +118,18 @@ const splitCardholderName = (fullName, fallback) => {
 		.trim()
 		.replace(/\s+/g, " ");
 	const defaults = fallback || PROVIDER_CARDS.other;
+	const normalizedRaw = raw.toLowerCase();
+	const normalizedDefault = String(defaults.cardholder || "")
+		.trim()
+		.toLowerCase();
 	if (!raw) {
+		return {
+			full: defaults.cardholder,
+			firstName: defaults.firstName,
+			lastName: defaults.lastName,
+		};
+	}
+	if (normalizedRaw && normalizedRaw === normalizedDefault) {
 		return {
 			full: defaults.cardholder,
 			firstName: defaults.firstName,
@@ -867,6 +878,12 @@ exports.captureReservationVccSale = async (req, res) => {
 			secretConfigured: !!secretB64,
 			nodeEnv,
 		});
+		if (/^\d+$/.test(merchantId)) {
+			bofaWarn(
+				"BOFA_REST_MERCHANT_ID is numeric-only. If this is your MID, replace with REST transacting merchant id from REST Shared Secret key screen.",
+				{ merchantIdMasked: maskValue(merchantId, 3, 2) },
+			);
+		}
 		if (nodeEnv && nodeEnv !== "production" && /(^|\.)(api)\./i.test(host)) {
 			bofaWarn(
 				"Non-production NODE_ENV with live REST host detected. If using test keys/cards, switch BOFA_REST_HOST to the test host (often apitest...).",
@@ -1069,6 +1086,11 @@ exports.captureReservationVccSale = async (req, res) => {
 			typeof rawResponseData === "string" ? rawResponseData.slice(0, 2000) : "";
 		const httpStatus = apiRes?.status || 0;
 		const httpStatusText = String(apiRes?.statusText || "");
+		const correlationId = String(
+			apiRes?.headers?.["x-correlation-id"] ||
+				apiRes?.headers?.["v-c-correlation-id"] ||
+				"",
+		);
 		const txnStatus = String(data?.status || "").toUpperCase();
 		const declined = [
 			"DECLINED",
@@ -1090,6 +1112,10 @@ exports.captureReservationVccSale = async (req, res) => {
 				"x-correlation-id":
 					apiRes?.headers?.["x-correlation-id"] ||
 					apiRes?.headers?.["X-Correlation-ID"] ||
+					"",
+				"v-c-correlation-id":
+					apiRes?.headers?.["v-c-correlation-id"] ||
+					apiRes?.headers?.["V-C-Correlation-ID"] ||
 					"",
 				"content-type":
 					apiRes?.headers?.["content-type"] ||
@@ -1116,6 +1142,8 @@ exports.captureReservationVccSale = async (req, res) => {
 		const b = normalizeBofaPayment(reservation?.bofa_payment);
 		const v = b.vcc;
 		const now = new Date();
+		const attemptsBefore = Number(v.attempts_count || 0);
+		const failedAttemptsBefore = Number(v.failed_attempts_count || 0);
 		const cardLast4 = cardNumber.slice(-4);
 		const processorCode = String(
 			data?.processorInformation?.responseCode ||
@@ -1146,6 +1174,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			clientReferenceCode: String(data?.clientReferenceInformation?.code || ""),
 			httpStatus,
 			httpStatusText,
+			correlationId,
 			processorResponseCode: processorCode,
 			processorResponseDetails: processorDetails,
 			gatewayReason,
@@ -1156,7 +1185,7 @@ exports.captureReservationVccSale = async (req, res) => {
 		v.source = provider;
 		v.last_request_id = requestId;
 		v.last_attempt_at = now;
-		v.attempts_count = Number(v.attempts_count || 0) + 1;
+		v.attempts_count = attemptsBefore + 1;
 		v.metadata = {
 			provider,
 			bookingSource: snapshot?.booking_source || "",
@@ -1285,15 +1314,25 @@ exports.captureReservationVccSale = async (req, res) => {
 				(responseText ? truncate(responseText, 400) : "") ||
 				fallbackFailureMessage,
 		);
+		const isConfigNotFoundError =
+			httpStatus === 404 &&
+			/resource not found/i.test(String(responseText || "")) &&
+			!txnStatus &&
+			!processorCode;
 		const failureCode = String(
 			data?.errorInformation?.reason ||
 				data?.reason ||
-				(httpStatus === 404
-					? "BOFA_REST_ENDPOINT_OR_MERCHANT_NOT_FOUND"
+				(isConfigNotFoundError
+					? "BOFA_REST_CONFIGURATION_NOT_FOUND"
 					: "BOFA_VCC_DECLINED"),
 		);
 		v.charged = false;
-		v.failed_attempts_count = Number(v.failed_attempts_count || 0) + 1;
+		v.failed_attempts_count = isConfigNotFoundError
+			? failedAttemptsBefore
+			: failedAttemptsBefore + 1;
+		v.attempts_count = isConfigNotFoundError
+			? attemptsBefore
+			: attemptsBefore + 1;
 		v.last_failure_at = now;
 		v.last_failure_message = failureMessage;
 		v.last_failure_code = failureCode;
@@ -1313,7 +1352,11 @@ exports.captureReservationVccSale = async (req, res) => {
 			responseText,
 		});
 		v.blocked_after_failure = v.failed_attempts_count >= maxAttempts();
-		v.warning_message = v.blocked_after_failure ? BLOCK_WARNING : RETRY_WARNING;
+		v.warning_message = isConfigNotFoundError
+			? ""
+			: v.blocked_after_failure
+				? BLOCK_WARNING
+				: RETRY_WARNING;
 		v.last_capture = {
 			...capture,
 			amount_usd: amountUsd,
@@ -1322,6 +1365,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			cardholder_name: cardholder.full,
 			postal_code: billTo.postalCode,
 			country_code: billTo.country,
+			configuration_error: isConfigNotFoundError,
 		};
 		v.attempts.push({
 			at: now,
@@ -1344,6 +1388,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			country_code: billTo.country,
 			gateway_reason: gatewayReason,
 			gateway_message: gatewayMessage,
+			configuration_error: isConfigNotFoundError,
 		});
 		reservation.bofa_payment = b;
 		reservation.payment_details = {
@@ -1354,6 +1399,25 @@ exports.captureReservationVccSale = async (req, res) => {
 		};
 		await reservation.save();
 		lockAcquired = false;
+		if (isConfigNotFoundError) {
+			bofaWarn("configuration-level BoA error detected; attempt counters were not incremented", {
+				reservationId,
+				requestId,
+				httpStatus,
+				httpStatusText,
+				failureCode,
+				failureMessage,
+			});
+			return res.status(502).json({
+				success: false,
+				issue: "BOFA_REST_CONFIGURATION_ERROR",
+				message: failureMessage,
+				error: { reason: failureCode, httpStatus },
+				transaction: capture,
+				bofaStatus: vccStatusPayload(reservation, provider),
+				reservation,
+			});
+		}
 		bofaWarn("capture declined and saved", {
 			reservationId,
 			requestId,
