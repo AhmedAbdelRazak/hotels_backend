@@ -388,9 +388,15 @@ const buildRestHeaders = ({
 };
 const getRestRuntimeConfig = () => {
 	const host = normalizeHost(process.env.BOFA_REST_HOST);
-	const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "").trim();
-	const keyId = String(process.env.BOFA_REST_KEY_ID || "").trim();
-	const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "").trim();
+	const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "")
+		.replace(/\s+/g, "")
+		.trim();
+	const keyId = String(process.env.BOFA_REST_KEY_ID || "")
+		.replace(/\s+/g, "")
+		.trim();
+	const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "")
+		.replace(/\s+/g, "")
+		.trim();
 	const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
 	const hostType = /(^|\.)(apitest)\./i.test(host)
 		? "test"
@@ -1075,11 +1081,17 @@ exports.captureReservationVccSale = async (req, res) => {
 			: null;
 
 		const host = normalizeHost(process.env.BOFA_REST_HOST);
-		const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "").trim();
-		const keyId = String(process.env.BOFA_REST_KEY_ID || "").trim();
+		const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "")
+			.replace(/\s+/g, "")
+			.trim();
+		const keyId = String(process.env.BOFA_REST_KEY_ID || "")
+			.replace(/\s+/g, "")
+			.trim();
 		const secretB64 = String(
 			process.env.BOFA_REST_SHARED_SECRET_B64 || "",
-		).trim();
+		)
+			.replace(/\s+/g, "")
+			.trim();
 		const nodeEnv = String(process.env.NODE_ENV || "")
 			.trim()
 			.toLowerCase();
