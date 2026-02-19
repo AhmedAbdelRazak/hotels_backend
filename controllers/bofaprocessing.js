@@ -953,11 +953,8 @@ exports.captureReservationVccSale = async (req, res) => {
 						country: String(process.env.BOFA_VCC_DEFAULT_COUNTRY || "US"),
 				  };
 		const billTo = {
-			firstName: truncate(
-				String(billing.firstName || cardholder.firstName),
-				60,
-			),
-			lastName: truncate(String(billing.lastName || cardholder.lastName), 60),
+			firstName: truncate(String(cardholder.firstName), 60),
+			lastName: truncate(String(cardholder.lastName), 60),
 			address1: truncate(
 				String(
 					billing.address1 || billing.addressLine1 || defaultAddress.address1,
