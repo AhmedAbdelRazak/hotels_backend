@@ -155,6 +155,7 @@ const safeLogObject = (value, maxDepth = 4) => {
 			const exemptSignatureDiagnostic =
 				/^signatureStyle$/i.test(k) ||
 				/^signatureHeaders$/i.test(k) ||
+				/^signatureMeta$/i.test(k) ||
 				/^x-bofa-signature-headers$/i.test(k);
 			if (
 				!exemptSignatureDiagnostic &&
