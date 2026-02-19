@@ -15,6 +15,8 @@ const BLOCK_WARNING =
 	"This reservation was prompted once before, please reach out to Ahmed Admin for more details";
 const ROOM_CONFIRM_MESSAGE =
 	"Are you sure you want to proceed without assigning a room to the reservation?";
+const REST_SIGNATURE_HEADERS =
+	"host v-c-date request-target digest v-c-merchant-id";
 const BOFA_DEBUG =
 	String(process.env.BOFA_DEBUG || "true")
 		.trim()
@@ -91,6 +93,19 @@ const csv = (v) =>
 		.filter(Boolean);
 const truncate = (v, max = 255) => String(v || "").slice(0, max);
 const digits = (v) => String(v || "").replace(/\D/g, "");
+const cleanEnvValue = (value, collapseWhitespace = false) => {
+	let out = String(value || "").trim();
+	if (
+		(out.startsWith("\"") && out.endsWith("\"")) ||
+		(out.startsWith("'") && out.endsWith("'"))
+	) {
+		out = out.slice(1, -1).trim();
+	}
+	if (collapseWhitespace) {
+		out = out.replace(/\s+/g, "");
+	}
+	return out;
+};
 const statusNorm = (v) =>
 	String(v || "")
 		.trim()
@@ -360,20 +375,13 @@ const buildRestHeaders = ({
 	path,
 	body,
 }) => {
-	const date = new Date().toUTCString();
+	const vcDate = new Date().toUTCString();
 	const digest = buildDigest(body);
 	const requestTarget = `${method.toLowerCase()} ${path}`;
-	const signatureHeaders = [
-		"host",
-		"date",
-		"(request-target)",
-		"digest",
-		"v-c-merchant-id",
-	];
 	const toSign =
 		`host: ${host}\n` +
-		`date: ${date}\n` +
-		`(request-target): ${requestTarget}\n` +
+		`v-c-date: ${vcDate}\n` +
+		`request-target: ${requestTarget}\n` +
 		`digest: ${digest}\n` +
 		`v-c-merchant-id: ${merchantId}`;
 	const secret = Buffer.from(secretB64, "base64");
@@ -386,36 +394,62 @@ const buildRestHeaders = ({
 		"Content-Type": "application/json",
 		Accept: "application/json",
 		host,
-		date,
-		"v-c-date": date,
+		"v-c-date": vcDate,
 		digest,
 		"v-c-merchant-id": merchantId,
-		signature: `keyid=\"${keyId}\", algorithm=\"HmacSHA256\", headers=\"${signatureHeaders.join(
-			" ",
-		)}\", signature=\"${signature}\"`,
-		"x-bofa-signature-headers": signatureHeaders.join(" "),
+		signature: `keyid=\"${keyId}\", algorithm=\"HmacSHA256\", headers=\"${REST_SIGNATURE_HEADERS}\", signature=\"${signature}\"`,
 	};
 };
 const getRestRuntimeConfig = () => {
-	const host = normalizeHost(process.env.BOFA_REST_HOST);
-	const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "")
-		.replace(/\s+/g, "")
-		.trim();
-	const keyId = String(process.env.BOFA_REST_KEY_ID || "")
-		.replace(/\s+/g, "")
-		.trim();
-	const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "")
-		.replace(/\s+/g, "")
-		.trim();
-	const nodeEnv = String(process.env.NODE_ENV || "")
-		.trim()
-		.toLowerCase();
+	const host = normalizeHost(cleanEnvValue(process.env.BOFA_REST_HOST));
+	const merchantId = cleanEnvValue(process.env.BOFA_REST_MERCHANT_ID, true);
+	const keyId = cleanEnvValue(process.env.BOFA_REST_KEY_ID, true);
+	const secretB64 = cleanEnvValue(
+		process.env.BOFA_REST_SHARED_SECRET_B64,
+		true,
+	);
+	const nodeEnv = cleanEnvValue(process.env.NODE_ENV).toLowerCase();
 	const hostType = /(^|\.)(apitest)\./i.test(host)
 		? "test"
 		: /(^|\.)(api)\./i.test(host)
 		? "live"
 		: "custom";
 	return { host, merchantId, keyId, secretB64, nodeEnv, hostType };
+};
+const suggestedVisaHostFor = (host = "") => {
+	const normalized = String(host || "").toLowerCase();
+	if (!normalized) return "";
+	if (normalized.includes("merchant-services.bankofamerica.com")) {
+		if (
+			normalized.startsWith("api-test.") ||
+			normalized.startsWith("apitest.")
+		) {
+			return "apitest.visaacceptance.com";
+		}
+		return "api.visaacceptance.com";
+	}
+	if (normalized.includes("visaacceptance.com")) return "";
+	return "";
+};
+const alternateRestHostForProbe = (host = "") => {
+	const normalized = String(host || "").toLowerCase();
+	if (!normalized) return "";
+	if (normalized.startsWith("api.merchant-services.bankofamerica.com")) {
+		return "api.visaacceptance.com";
+	}
+	if (
+		normalized.startsWith("api-test.merchant-services.bankofamerica.com") ||
+		normalized.startsWith("apitest.merchant-services.bankofamerica.com")
+	) {
+		return "apitest.visaacceptance.com";
+	}
+	if (normalized.startsWith("api.visaacceptance.com")) {
+		return "api.merchant-services.bankofamerica.com";
+	}
+	if (normalized.startsWith("apitest.visaacceptance.com")) {
+		return "api-test.merchant-services.bankofamerica.com";
+	}
+	return "";
 };
 const evaluateRestRuntimeConfig = (cfg) => {
 	const warnings = [];
@@ -437,6 +471,12 @@ const evaluateRestRuntimeConfig = (cfg) => {
 	if (cfg.nodeEnv === "production" && cfg.hostType === "test") {
 		warnings.push(
 			"Production NODE_ENV with test REST host. Ensure credentials/environment are aligned.",
+		);
+	}
+	const suggestedHost = suggestedVisaHostFor(cfg.host);
+	if (suggestedHost) {
+		warnings.push(
+			`Configured BOFA_REST_HOST may be incorrect for REST Payments. Suggested host: ${suggestedHost}.`,
 		);
 	}
 	return { warnings, errors };
@@ -492,7 +532,20 @@ const classifyProbeResult = ({ httpStatus, bodyText }) => {
 };
 const runBofaRestHealthProbe = async (cfg) => {
 	const path = "/pts/v2/payments";
-	const bodyObj = {};
+	const bodyObj = {
+		clientReferenceInformation: {
+			code: `health-probe-${Date.now()}`,
+		},
+		merchantInformation: {
+			transactionLocalDateTime: new Date().toISOString(),
+		},
+		orderInformation: {
+			amountDetails: {
+				totalAmount: "1.00",
+				currency: "USD",
+			},
+		},
+	};
 	const body = JSON.stringify(bodyObj);
 	const requestId = `bofa-health:${Date.now()}:${crypto
 		.randomUUID()
@@ -510,7 +563,8 @@ const runBofaRestHealthProbe = async (cfg) => {
 	bofaLog("health probe request prepared", {
 		requestId,
 		url: `https://${cfg.host}${path}`,
-		signatureHeaders: headers?.["x-bofa-signature-headers"] || "",
+		signatureHeaders: REST_SIGNATURE_HEADERS,
+		samplePayload: safeLogObject(bodyObj),
 	});
 	const startedAt = Date.now();
 	const response = await axios({
@@ -849,6 +903,7 @@ exports.getBofaVccHealth = async (req, res) => {
 			recommendations: [
 				"BOFA_REST_MERCHANT_ID must be the REST transacting merchant id from key management.",
 				"Use live host with live credentials and test host with test credentials.",
+				"Prefer api.visaacceptance.com (or apitest.visaacceptance.com) for REST Payments unless BoA explicitly provisioned a different host.",
 				"Ensure REST Payments API (PTS) is provisioned for this merchant profile.",
 			],
 		};
@@ -872,6 +927,32 @@ exports.getBofaVccHealth = async (req, res) => {
 			health.probe = probe;
 			health.readyForCharge =
 				checks.errors.length === 0 && !!probe?.classification?.readyForCharge;
+			if (probe?.classification?.code === "RESOURCE_NOT_FOUND") {
+				const alternateHost = alternateRestHostForProbe(cfg.host);
+				if (alternateHost) {
+					try {
+						const altProbe = await runBofaRestHealthProbe({
+							...cfg,
+							host: alternateHost,
+						});
+						health.alternateProbe = altProbe;
+						if (altProbe?.classification?.readyForCharge) {
+							health.recommendations.push(
+								`Alternate host ${alternateHost} looks reachable. Update BOFA_REST_HOST and retry.`,
+							);
+						}
+					} catch (altProbeError) {
+						health.alternateProbe = {
+							host: alternateHost,
+							error: {
+								message: altProbeError?.message || "Alternate probe failed.",
+								issue:
+									altProbeError?.issue || "BOFA_HEALTH_ALTERNATE_PROBE_FAILED",
+							},
+						};
+					}
+				}
+			}
 			bofaLog("health probe result", safeLogObject(health));
 			return res.status(200).json(health);
 		} catch (probeError) {
@@ -1100,19 +1181,14 @@ exports.captureReservationVccSale = async (req, res) => {
 					.lean()
 			: null;
 
-		const host = normalizeHost(process.env.BOFA_REST_HOST);
-		const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "")
-			.replace(/\s+/g, "")
-			.trim();
-		const keyId = String(process.env.BOFA_REST_KEY_ID || "")
-			.replace(/\s+/g, "")
-			.trim();
-		const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "")
-			.replace(/\s+/g, "")
-			.trim();
-		const nodeEnv = String(process.env.NODE_ENV || "")
-			.trim()
-			.toLowerCase();
+		const host = normalizeHost(cleanEnvValue(process.env.BOFA_REST_HOST));
+		const merchantId = cleanEnvValue(process.env.BOFA_REST_MERCHANT_ID, true);
+		const keyId = cleanEnvValue(process.env.BOFA_REST_KEY_ID, true);
+		const secretB64 = cleanEnvValue(
+			process.env.BOFA_REST_SHARED_SECRET_B64,
+			true,
+		);
+		const nodeEnv = cleanEnvValue(process.env.NODE_ENV).toLowerCase();
 		bofaLog("rest config resolved", {
 			reservationId,
 			host,
@@ -1131,6 +1207,16 @@ exports.captureReservationVccSale = async (req, res) => {
 			bofaWarn(
 				"Non-production NODE_ENV with live REST host detected. If using test keys/cards, switch BOFA_REST_HOST to the test host (often apitest...).",
 				{ nodeEnv, host },
+			);
+		}
+		const suggestedHost = suggestedVisaHostFor(host);
+		if (suggestedHost) {
+			bofaWarn(
+				"Configured BOFA_REST_HOST may be incorrect for REST Payments. Suggested host:",
+				{
+					currentHost: host,
+					suggestedHost,
+				},
 			);
 		}
 		if (!host || !merchantId || !keyId || !secretB64) {
@@ -1300,9 +1386,8 @@ exports.captureReservationVccSale = async (req, res) => {
 			signatureHeaderMeta: {
 				keyId: maskValue(keyId, 8, 4),
 				signatureLength: String(headers?.signature || "").length,
-				signatureHeaders: headers?.["x-bofa-signature-headers"] || "",
+				signatureHeaders: REST_SIGNATURE_HEADERS,
 				digest: headers?.digest || "",
-				date: headers?.date || "",
 				vcDate: headers?.["v-c-date"] || "",
 				hostHeader: headers?.host || "",
 				merchantHeader: maskValue(headers?.["v-c-merchant-id"] || "", 3, 2),
@@ -1370,7 +1455,7 @@ exports.captureReservationVccSale = async (req, res) => {
 		if (httpStatus === 404) {
 			bofaWarn("BoA REST returned HTTP 404. Common causes:", {
 				cause1:
-					"BOFA_REST_HOST points to wrong environment (live host with test credentials or vice versa).",
+					"BOFA_REST_HOST points to wrong environment/cluster. For REST Payments typically use api.visaacceptance.com (or apitest.visaacceptance.com).",
 				cause2:
 					"BOFA_REST_MERCHANT_ID is not the REST transacting merchant id from key-management output.",
 				cause3:
