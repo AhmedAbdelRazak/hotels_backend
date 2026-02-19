@@ -17,6 +17,7 @@
 const crypto = require("crypto");
 const https = require("https");
 const axios = require("axios");
+const util = require("util");
 
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
@@ -159,14 +160,35 @@ const safeLogObject = (value, maxDepth = 4) => {
 	return out;
 };
 
+const toLogArg = (value) => {
+	if (value == null) return value;
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean") return value;
+	if (value instanceof Error) {
+		return value.stack || value.message || String(value);
+	}
+	try {
+		return util.inspect(value, {
+			depth: 10,
+			colors: false,
+			compact: false,
+			breakLength: 120,
+			maxArrayLength: 100,
+			maxStringLength: 5000,
+		});
+	} catch (_err) {
+		return String(value);
+	}
+};
+
 const bofaLog = (...args) => {
 	if (!BOFA_DEBUG) return;
-	console.log("[BOFA VCC]", ...args);
+	console.log("[BOFA VCC]", ...args.map(toLogArg));
 };
 
 const bofaWarn = (...args) => {
 	if (!BOFA_DEBUG) return;
-	console.warn("[BOFA VCC][WARN]", ...args);
+	console.warn("[BOFA VCC][WARN]", ...args.map(toLogArg));
 };
 
 /* =========================================================
@@ -743,7 +765,7 @@ const restPostJson = async ({ host, path, bodyObj, cfg, requestId }) => {
 	const responseText =
 		typeof rawData === "string" ? rawData.slice(0, 2000) : "";
 	const responseJson =
-		rawData && typeof rawData === "object" ? safeLogObject(rawData) : {};
+		rawData && typeof rawData === "object" ? safeLogObject(rawData, 10) : {};
 
 	const httpStatus = res?.status || 0;
 	const httpStatusText = String(res?.statusText || "");
