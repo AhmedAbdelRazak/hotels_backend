@@ -363,10 +363,17 @@ const buildRestHeaders = ({
 	const date = new Date().toUTCString();
 	const digest = buildDigest(body);
 	const requestTarget = `${method.toLowerCase()} ${path}`;
+	const signatureHeaders = [
+		"host",
+		"date",
+		"(request-target)",
+		"digest",
+		"v-c-merchant-id",
+	];
 	const toSign =
 		`host: ${host}\n` +
-		`v-c-date: ${date}\n` +
-		`request-target: ${requestTarget}\n` +
+		`date: ${date}\n` +
+		`(request-target): ${requestTarget}\n` +
 		`digest: ${digest}\n` +
 		`v-c-merchant-id: ${merchantId}`;
 	const secret = Buffer.from(secretB64, "base64");
@@ -383,7 +390,10 @@ const buildRestHeaders = ({
 		"v-c-date": date,
 		digest,
 		"v-c-merchant-id": merchantId,
-		signature: `keyid=\"${keyId}\", algorithm=\"HmacSHA256\", headers=\"host v-c-date request-target digest v-c-merchant-id\", signature=\"${signature}\"`,
+		signature: `keyid=\"${keyId}\", algorithm=\"HmacSHA256\", headers=\"${signatureHeaders.join(
+			" ",
+		)}\", signature=\"${signature}\"`,
+		"x-bofa-signature-headers": signatureHeaders.join(" "),
 	};
 };
 const getRestRuntimeConfig = () => {
@@ -397,12 +407,14 @@ const getRestRuntimeConfig = () => {
 	const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "")
 		.replace(/\s+/g, "")
 		.trim();
-	const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+	const nodeEnv = String(process.env.NODE_ENV || "")
+		.trim()
+		.toLowerCase();
 	const hostType = /(^|\.)(apitest)\./i.test(host)
 		? "test"
 		: /(^|\.)(api)\./i.test(host)
-			? "live"
-			: "custom";
+		? "live"
+		: "custom";
 	return { host, merchantId, keyId, secretB64, nodeEnv, hostType };
 };
 const evaluateRestRuntimeConfig = (cfg) => {
@@ -434,13 +446,15 @@ const classifyProbeResult = ({ httpStatus, bodyText }) => {
 		return {
 			code: "AUTHENTICATION_FAILED",
 			readyForCharge: false,
-			message: "Authentication failed. Key id/secret or merchant binding is invalid.",
+			message:
+				"Authentication failed. Key id/secret or merchant binding is invalid.",
 		};
 	if (httpStatus === 403)
 		return {
 			code: "AUTHORIZATION_FAILED",
 			readyForCharge: false,
-			message: "Authorization failed. Merchant may lack REST Payments permission.",
+			message:
+				"Authorization failed. Merchant may lack REST Payments permission.",
 		};
 	if (httpStatus === 404)
 		return {
@@ -471,10 +485,9 @@ const classifyProbeResult = ({ httpStatus, bodyText }) => {
 	return {
 		code: "UNEXPECTED_STATUS",
 		readyForCharge: false,
-		message: `Unexpected status from probe: ${httpStatus || "unknown"} (${truncate(
-			bodyText || "",
-			120,
-		)})`,
+		message: `Unexpected status from probe: ${
+			httpStatus || "unknown"
+		} (${truncate(bodyText || "", 120)})`,
 	};
 };
 const runBofaRestHealthProbe = async (cfg) => {
@@ -494,6 +507,11 @@ const runBofaRestHealthProbe = async (cfg) => {
 		body,
 	});
 	headers["x-request-id"] = requestId;
+	bofaLog("health probe request prepared", {
+		requestId,
+		url: `https://${cfg.host}${path}`,
+		signatureHeaders: headers?.["x-bofa-signature-headers"] || "",
+	});
 	const startedAt = Date.now();
 	const response = await axios({
 		method: "POST",
@@ -516,7 +534,10 @@ const runBofaRestHealthProbe = async (cfg) => {
 			response?.headers?.["x-correlation-id"] ||
 			"",
 	);
-	const classification = classifyProbeResult({ httpStatus, bodyText: responseText });
+	const classification = classifyProbeResult({
+		httpStatus,
+		bodyText: responseText,
+	});
 	return {
 		requestId,
 		path,
@@ -624,7 +645,7 @@ exports.createGuestCheckoutSession = async (req, res) => {
 			merchant_defined_data3: "RESERVATION",
 		};
 		if (process.env.BOFA_SA_MERCHANT_POST_URL)
-			fields.override_custom_merchant_post_url = truncate(
+			fields.override_backoffice_post_url = truncate(
 				process.env.BOFA_SA_MERCHANT_POST_URL,
 				255,
 			);
@@ -850,8 +871,7 @@ exports.getBofaVccHealth = async (req, res) => {
 			const probe = await runBofaRestHealthProbe(cfg);
 			health.probe = probe;
 			health.readyForCharge =
-				checks.errors.length === 0 &&
-				!!probe?.classification?.readyForCharge;
+				checks.errors.length === 0 && !!probe?.classification?.readyForCharge;
 			bofaLog("health probe result", safeLogObject(health));
 			return res.status(200).json(health);
 		} catch (probeError) {
@@ -1087,9 +1107,7 @@ exports.captureReservationVccSale = async (req, res) => {
 		const keyId = String(process.env.BOFA_REST_KEY_ID || "")
 			.replace(/\s+/g, "")
 			.trim();
-		const secretB64 = String(
-			process.env.BOFA_REST_SHARED_SECRET_B64 || "",
-		)
+		const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "")
 			.replace(/\s+/g, "")
 			.trim();
 		const nodeEnv = String(process.env.NODE_ENV || "")
@@ -1282,7 +1300,9 @@ exports.captureReservationVccSale = async (req, res) => {
 			signatureHeaderMeta: {
 				keyId: maskValue(keyId, 8, 4),
 				signatureLength: String(headers?.signature || "").length,
+				signatureHeaders: headers?.["x-bofa-signature-headers"] || "",
 				digest: headers?.digest || "",
+				date: headers?.date || "",
 				vcDate: headers?.["v-c-date"] || "",
 				hostHeader: headers?.host || "",
 				merchantHeader: maskValue(headers?.["v-c-merchant-id"] || "", 3, 2),
@@ -1577,8 +1597,8 @@ exports.captureReservationVccSale = async (req, res) => {
 		v.warning_message = isConfigNotFoundError
 			? ""
 			: v.blocked_after_failure
-				? BLOCK_WARNING
-				: RETRY_WARNING;
+			? BLOCK_WARNING
+			: RETRY_WARNING;
 		v.last_capture = {
 			...capture,
 			amount_usd: amountUsd,
@@ -1622,14 +1642,17 @@ exports.captureReservationVccSale = async (req, res) => {
 		await reservation.save();
 		lockAcquired = false;
 		if (isConfigNotFoundError) {
-			bofaWarn("configuration-level BoA error detected; attempt counters were not incremented", {
-				reservationId,
-				requestId,
-				httpStatus,
-				httpStatusText,
-				failureCode,
-				failureMessage,
-			});
+			bofaWarn(
+				"configuration-level BoA error detected; attempt counters were not incremented",
+				{
+					reservationId,
+					requestId,
+					httpStatus,
+					httpStatusText,
+					failureCode,
+					failureMessage,
+				},
+			);
 			return res.status(502).json({
 				success: false,
 				issue: "BOFA_REST_CONFIGURATION_ERROR",
