@@ -89,6 +89,11 @@ const SIGNATURE_STYLES = Object.freeze({
 		dateHeader: "v-c-date",
 		requestTargetHeader: "request-target",
 	},
+	vas_vc_paren: {
+		headersList: "host v-c-date (request-target) digest v-c-merchant-id",
+		dateHeader: "v-c-date",
+		requestTargetHeader: "(request-target)",
+	},
 	cs: {
 		headersList: "host date (request-target) digest v-c-merchant-id",
 		dateHeader: "date",
@@ -147,7 +152,12 @@ const safeLogObject = (value, maxDepth = 4) => {
 	Object.entries(value)
 		.slice(0, 120)
 		.forEach(([k, v]) => {
+			const exemptSignatureDiagnostic =
+				/^signatureStyle$/i.test(k) ||
+				/^signatureHeaders$/i.test(k) ||
+				/^x-bofa-signature-headers$/i.test(k);
 			if (
+				!exemptSignatureDiagnostic &&
 				/(card_number|number|securityCode|security_code|cvv|card_cvn|secret|shared|token|signature|authorization|password|api_key)/i.test(
 					k,
 				)
@@ -539,9 +549,10 @@ const resolveSignatureStyle = (platform) => {
 		.trim();
 	if (raw && SIGNATURE_STYLES[raw]) return raw;
 	// Sensible defaults:
-	// - CyberSource frequently documents (request-target) style; VAS uses request-target.
+	// - CyberSource frequently documents (request-target) style.
+	// - Visa Acceptance latest auth examples commonly use v-c-date + request-target.
 	if (platform === "cybersource") return "cs";
-	return "vas";
+	return "vas_vc";
 };
 
 const getRestRuntimeConfig = () => {
@@ -617,10 +628,40 @@ const evaluateRestRuntimeConfig = (cfg) => {
 };
 
 const decodeSharedSecret = (secretB64) => {
-	const buf = Buffer.from(String(secretB64 || ""), "base64");
+	const raw = cleanEnvValue(secretB64, true);
+	if (!raw) {
+		const e = new Error("Invalid BOFA_REST_SHARED_SECRET_B64 (empty).");
+		e.issue = "BOFA_REST_SECRET_INVALID";
+		e.statusCode = 500;
+		throw e;
+	}
+	const normalized = raw.replace(/-/g, "+").replace(/_/g, "/");
+	if (/[^A-Za-z0-9+/=]/.test(normalized)) {
+		const e = new Error(
+			"Invalid BOFA_REST_SHARED_SECRET_B64 (contains non-base64 characters).",
+		);
+		e.issue = "BOFA_REST_SECRET_INVALID";
+		e.statusCode = 500;
+		throw e;
+	}
+	const padded = normalized.padEnd(
+		normalized.length + ((4 - (normalized.length % 4 || 4)) % 4),
+		"=",
+	);
+	const buf = Buffer.from(padded, "base64");
 	if (!buf || buf.length === 0) {
 		const e = new Error(
 			"Invalid BOFA_REST_SHARED_SECRET_B64 (base64 decode failed).",
+		);
+		e.issue = "BOFA_REST_SECRET_INVALID";
+		e.statusCode = 500;
+		throw e;
+	}
+	const roundtrip = buf.toString("base64").replace(/=+$/g, "");
+	const sourceNoPad = padded.replace(/=+$/g, "");
+	if (roundtrip !== sourceNoPad) {
+		const e = new Error(
+			"Invalid BOFA_REST_SHARED_SECRET_B64 (roundtrip validation failed).",
 		);
 		e.issue = "BOFA_REST_SECRET_INVALID";
 		e.statusCode = 500;
@@ -633,7 +674,7 @@ const buildHttpSignatureHeaders = (
 	{ host, merchantId, keyId, secretB64, signatureStyle },
 	{ method, path, bodyString },
 ) => {
-	const style = SIGNATURE_STYLES[signatureStyle] || SIGNATURE_STYLES.vas;
+	const style = SIGNATURE_STYLES[signatureStyle] || SIGNATURE_STYLES.vas_vc;
 
 	// RFC1123 UTC string
 	const rfc1123 = new Date().toUTCString();
@@ -671,22 +712,44 @@ const buildHttpSignatureHeaders = (
 		.digest("base64");
 
 	// Build outbound headers
+	const includeBothDateHeaders =
+		String(process.env.BOFA_REST_INCLUDE_BOTH_DATE_HEADERS || "")
+			.trim()
+			.toLowerCase() === "true";
 	const headers = {
 		Accept: "application/json",
 		"Content-Type": "application/json",
 		Host: host, // Node will normalize
 		Digest: digest,
 		"v-c-merchant-id": merchantId,
-		// Provide both date headers for interoperability; only one is signed.
-		Date: rfc1123,
-		"v-c-date": rfc1123,
 		Signature: `keyid="${keyId}", algorithm="HmacSHA256", headers="${style.headersList}", signature="${signature}"`,
 	};
+	if (style.dateHeader === "date") {
+		headers.Date = rfc1123;
+		if (includeBothDateHeaders) headers["v-c-date"] = rfc1123;
+	} else {
+		headers["v-c-date"] = rfc1123;
+		if (includeBothDateHeaders) headers.Date = rfc1123;
+	}
 
-	// helpful for debugging (do NOT include secret)
-	headers["x-bofa-signature-headers"] = style.headersList;
-
-	return headers;
+	const maskedMerchant = maskValue(merchantId, 3, 2);
+	const canonicalSafe = canonical.replace(
+		new RegExp(merchantId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+		maskedMerchant,
+	);
+	return {
+		headers,
+		meta: {
+			signatureStyle,
+			signatureHeaders: style.headersList,
+			dateHeader: style.dateHeader,
+			requestTargetHeader: style.requestTargetHeader,
+			digest,
+			canonicalSha256: sha256Base64(canonical),
+			canonicalPreview: canonicalSafe,
+			includeBothDateHeaders,
+		},
+	};
 };
 
 const classifyProbeResult = ({ httpStatus, bodyText }) => {
@@ -741,11 +804,12 @@ const classifyProbeResult = ({ httpStatus, bodyText }) => {
 
 const restPostJson = async ({ host, path, bodyObj, cfg, requestId }) => {
 	const body = JSON.stringify(bodyObj ?? {});
-	const headers = buildHttpSignatureHeaders(cfg, {
+	const signed = buildHttpSignatureHeaders(cfg, {
 		method: "POST",
 		path,
 		bodyString: body,
 	});
+	const headers = signed.headers;
 	if (requestId) headers["x-request-id"] = requestId;
 
 	const startedAt = Date.now();
@@ -786,6 +850,7 @@ const restPostJson = async ({ host, path, bodyObj, cfg, requestId }) => {
 		responseJson,
 		data: rawData,
 		headers: res?.headers || {},
+		signatureMeta: signed.meta,
 	};
 };
 
@@ -798,9 +863,22 @@ const runRestHealthProbe = async (
 
 	const path = PTS_PAYMENTS_PATH;
 
-	// Intentionally invalid payload to avoid creating an authorization/capture.
+	// Intentionally incomplete payload to avoid creating an authorization/capture.
 	// A reachable + authenticated endpoint should respond 400 (validation error).
-	const bodyObj = {};
+	const bodyObj = {
+		clientReferenceInformation: {
+			code: `health-probe-${Date.now()}`,
+		},
+		merchantInformation: {
+			transactionLocalDateTime: new Date().toISOString(),
+		},
+		orderInformation: {
+			amountDetails: {
+				totalAmount: "1.00",
+				currency: "USD",
+			},
+		},
+	};
 
 	const requestId = `bofa-health:${Date.now()}:${crypto
 		.randomUUID()
@@ -816,6 +894,7 @@ const runRestHealthProbe = async (
 		signatureStyle: probeCfg.signatureStyle,
 		signatureHeaders:
 			SIGNATURE_STYLES[probeCfg.signatureStyle]?.headersList || "",
+		samplePayload: safeLogObject(bodyObj, 6),
 	});
 
 	const resp = await restPostJson({
@@ -831,6 +910,14 @@ const runRestHealthProbe = async (
 		httpStatus,
 		bodyText: resp.responseText,
 	});
+	if (httpStatus === 401 && resp?.responseJson?.response) {
+		classification.message = `${
+			classification.message
+		} Provider response: ${truncate(
+			JSON.stringify(resp.responseJson.response),
+			600,
+		)}`;
+	}
 
 	return {
 		requestId,
@@ -843,6 +930,7 @@ const runRestHealthProbe = async (
 		correlationId: resp.correlationId,
 		durationMs: resp.durationMs,
 		classification,
+		signatureMeta: resp.signatureMeta || {},
 		responseText: resp.responseText,
 		responseJson: resp.responseJson,
 	};
@@ -1255,7 +1343,7 @@ exports.getBofaVccHealth = async (req, res) => {
 				};
 			}
 
-			bofaLog("health probe result", safeLogObject(health));
+			bofaLog("health probe result", safeLogObject(health, 10));
 			return res.status(200).json(health);
 		} catch (probeError) {
 			health.probe = {
@@ -1728,7 +1816,8 @@ exports.captureReservationVccSale = async (req, res) => {
 			txnStatus,
 			approved,
 			declined,
-			responseJson: safeLogObject(data),
+			signatureMeta: safeLogObject(providerResp?.signatureMeta || {}, 8),
+			responseJson: safeLogObject(data, 10),
 			responseText,
 		});
 
