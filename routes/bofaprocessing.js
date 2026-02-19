@@ -42,6 +42,7 @@ router.post(
 /*
  * OTA VCC flow (server-to-server REST Payments API).
  */
+router.get("/bofa/health", requireSignin, Ctrl.getBofaVccHealth);
 router.get(
 	"/reservations/bofa/vcc-status/:reservationId",
 	requireSignin,

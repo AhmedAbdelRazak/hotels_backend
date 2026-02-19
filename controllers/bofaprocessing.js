@@ -386,6 +386,144 @@ const buildRestHeaders = ({
 		signature: `keyid=\"${keyId}\", algorithm=\"HmacSHA256\", headers=\"host v-c-date request-target digest v-c-merchant-id\", signature=\"${signature}\"`,
 	};
 };
+const getRestRuntimeConfig = () => {
+	const host = normalizeHost(process.env.BOFA_REST_HOST);
+	const merchantId = String(process.env.BOFA_REST_MERCHANT_ID || "").trim();
+	const keyId = String(process.env.BOFA_REST_KEY_ID || "").trim();
+	const secretB64 = String(process.env.BOFA_REST_SHARED_SECRET_B64 || "").trim();
+	const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+	const hostType = /(^|\.)(apitest)\./i.test(host)
+		? "test"
+		: /(^|\.)(api)\./i.test(host)
+			? "live"
+			: "custom";
+	return { host, merchantId, keyId, secretB64, nodeEnv, hostType };
+};
+const evaluateRestRuntimeConfig = (cfg) => {
+	const warnings = [];
+	const errors = [];
+	if (!cfg.host) errors.push("BOFA_REST_HOST is missing.");
+	if (!cfg.merchantId) errors.push("BOFA_REST_MERCHANT_ID is missing.");
+	if (!cfg.keyId) errors.push("BOFA_REST_KEY_ID is missing.");
+	if (!cfg.secretB64) errors.push("BOFA_REST_SHARED_SECRET_B64 is missing.");
+	if (cfg.merchantId && /^\d+$/.test(cfg.merchantId)) {
+		warnings.push(
+			"BOFA_REST_MERCHANT_ID is numeric-only. Verify this is the REST transacting merchant id, not only MID.",
+		);
+	}
+	if (cfg.nodeEnv && cfg.hostType === "live" && cfg.nodeEnv !== "production") {
+		warnings.push(
+			"Non-production NODE_ENV with live REST host. Ensure credentials/environment are intentionally live.",
+		);
+	}
+	if (cfg.nodeEnv === "production" && cfg.hostType === "test") {
+		warnings.push(
+			"Production NODE_ENV with test REST host. Ensure credentials/environment are aligned.",
+		);
+	}
+	return { warnings, errors };
+};
+const classifyProbeResult = ({ httpStatus, bodyText }) => {
+	if (httpStatus === 401)
+		return {
+			code: "AUTHENTICATION_FAILED",
+			readyForCharge: false,
+			message: "Authentication failed. Key id/secret or merchant binding is invalid.",
+		};
+	if (httpStatus === 403)
+		return {
+			code: "AUTHORIZATION_FAILED",
+			readyForCharge: false,
+			message: "Authorization failed. Merchant may lack REST Payments permission.",
+		};
+	if (httpStatus === 404)
+		return {
+			code: "RESOURCE_NOT_FOUND",
+			readyForCharge: false,
+			message:
+				"Resource not found. Usually wrong REST transacting merchant id, wrong environment host, or missing REST Payments provisioning.",
+		};
+	if (httpStatus === 400)
+		return {
+			code: "ENDPOINT_REACHABLE_INVALID_PAYLOAD",
+			readyForCharge: true,
+			message:
+				"REST endpoint/auth path is reachable. Probe payload was intentionally invalid.",
+		};
+	if (httpStatus >= 200 && httpStatus < 300)
+		return {
+			code: "ENDPOINT_REACHABLE",
+			readyForCharge: true,
+			message: "REST endpoint is reachable and accepted probe payload.",
+		};
+	if (httpStatus >= 500)
+		return {
+			code: "GATEWAY_SERVER_ERROR",
+			readyForCharge: false,
+			message: "Gateway server error. Retry later or contact BoA support.",
+		};
+	return {
+		code: "UNEXPECTED_STATUS",
+		readyForCharge: false,
+		message: `Unexpected status from probe: ${httpStatus || "unknown"} (${truncate(
+			bodyText || "",
+			120,
+		)})`,
+	};
+};
+const runBofaRestHealthProbe = async (cfg) => {
+	const path = "/pts/v2/payments";
+	const bodyObj = {};
+	const body = JSON.stringify(bodyObj);
+	const requestId = `bofa-health:${Date.now()}:${crypto
+		.randomUUID()
+		.slice(0, 8)}`;
+	const headers = buildRestHeaders({
+		host: cfg.host,
+		merchantId: cfg.merchantId,
+		keyId: cfg.keyId,
+		secretB64: cfg.secretB64,
+		method: "POST",
+		path,
+		body,
+	});
+	headers["x-request-id"] = requestId;
+	const startedAt = Date.now();
+	const response = await axios({
+		method: "POST",
+		url: `https://${cfg.host}${path}`,
+		data: bodyObj,
+		headers,
+		timeout: Number(process.env.BOFA_REST_TIMEOUT_MS || 25000),
+		validateStatus: () => true,
+	});
+	const durationMs = Date.now() - startedAt;
+	const rawData = response?.data;
+	const responseText =
+		typeof rawData === "string" ? rawData.slice(0, 2000) : "";
+	const responseJson =
+		rawData && typeof rawData === "object" ? safeLogObject(rawData) : {};
+	const httpStatus = response?.status || 0;
+	const httpStatusText = String(response?.statusText || "");
+	const correlationId = String(
+		response?.headers?.["v-c-correlation-id"] ||
+			response?.headers?.["x-correlation-id"] ||
+			"",
+	);
+	const classification = classifyProbeResult({ httpStatus, bodyText: responseText });
+	return {
+		requestId,
+		path,
+		url: `https://${cfg.host}${path}`,
+		httpStatus,
+		httpStatusText,
+		correlationId,
+		durationMs,
+		classification,
+		responseText,
+		responseJson,
+	};
+};
 
 const roomNumbersFromReservation = async (reservation) => {
 	const set = new Set();
@@ -658,6 +796,81 @@ exports.handleCustomerResponsePagePost = async (req, res) =>
 	handleSaCallback(req, res, "customer_response");
 exports.handleMerchantPostNotification = async (req, res) =>
 	handleSaCallback(req, res, "merchant_post");
+
+exports.getBofaVccHealth = async (req, res) => {
+	try {
+		await requireStaff(req);
+		const cfg = getRestRuntimeConfig();
+		const checks = evaluateRestRuntimeConfig(cfg);
+		const probeRequested =
+			String(req.query?.probe ?? "true").toLowerCase() !== "false";
+
+		const health = {
+			success: true,
+			timestamp: new Date().toISOString(),
+			config: {
+				host: cfg.host,
+				hostType: cfg.hostType,
+				nodeEnv: cfg.nodeEnv || "",
+				merchantId: maskValue(cfg.merchantId, 3, 2),
+				keyId: maskValue(cfg.keyId, 8, 4),
+				secretConfigured: !!cfg.secretB64,
+			},
+			checks,
+			probeRequested,
+			readyForCharge: false,
+			recommendations: [
+				"BOFA_REST_MERCHANT_ID must be the REST transacting merchant id from key management.",
+				"Use live host with live credentials and test host with test credentials.",
+				"Ensure REST Payments API (PTS) is provisioned for this merchant profile.",
+			],
+		};
+
+		if (!probeRequested) {
+			health.readyForCharge = checks.errors.length === 0;
+			return res.status(200).json(health);
+		}
+
+		if (checks.errors.length > 0) {
+			health.probe = {
+				skipped: true,
+				reason: "Missing required REST configuration values.",
+			};
+			health.readyForCharge = false;
+			return res.status(200).json(health);
+		}
+
+		try {
+			const probe = await runBofaRestHealthProbe(cfg);
+			health.probe = probe;
+			health.readyForCharge =
+				checks.errors.length === 0 &&
+				!!probe?.classification?.readyForCharge;
+			bofaLog("health probe result", safeLogObject(health));
+			return res.status(200).json(health);
+		} catch (probeError) {
+			health.probe = {
+				skipped: false,
+				error: {
+					message: probeError?.message || "Probe failed.",
+					issue: probeError?.issue || "BOFA_HEALTH_PROBE_FAILED",
+				},
+			};
+			health.readyForCharge = false;
+			bofaWarn("health probe failed", {
+				message: probeError?.message || "",
+				issue: probeError?.issue || "",
+			});
+			return res.status(200).json(health);
+		}
+	} catch (error) {
+		return res.status(error?.statusCode || 500).json({
+			success: false,
+			issue: "BOFA_VCC_HEALTH_FAILED",
+			message: error?.message || "Failed to run BoA VCC health check.",
+		});
+	}
+};
 
 exports.getReservationBofaVccStatus = async (req, res) => {
 	try {
