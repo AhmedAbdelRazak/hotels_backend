@@ -15,6 +15,10 @@ const BLOCK_WARNING =
 	"This reservation was prompted once before, please reach out to Ahmed Admin for more details";
 const ROOM_CONFIRM_MESSAGE =
 	"Are you sure you want to proceed without assigning a room to the reservation?";
+const BOFA_DEBUG =
+	String(process.env.BOFA_DEBUG || "true")
+		.trim()
+		.toLowerCase() !== "false";
 const PROVIDER_CARDS = {
 	expedia: {
 		cardholder: "Expedia Virtual Card",
@@ -36,6 +40,46 @@ const PROVIDER_CARDS = {
 		firstName: "Virtual",
 		lastName: "Card",
 	},
+};
+const maskValue = (value = "", showHead = 6, showTail = 4) => {
+	const raw = String(value || "");
+	if (!raw) return "";
+	if (raw.length <= showHead + showTail) return raw;
+	return `${raw.slice(0, showHead)}...${raw.slice(-showTail)}`;
+};
+const safeLogObject = (value, maxDepth = 4) => {
+	if (maxDepth <= 0) return "[depth-limited]";
+	if (value == null) return value;
+	if (Array.isArray(value)) {
+		return value.slice(0, 20).map((item) => safeLogObject(item, maxDepth - 1));
+	}
+	if (typeof value !== "object") {
+		if (typeof value === "string") return value.slice(0, 1200);
+		return value;
+	}
+	const out = {};
+	Object.entries(value)
+		.slice(0, 80)
+		.forEach(([k, v]) => {
+			if (
+				/(card_number|number|securityCode|security_code|cvv|card_cvn|secret|shared|token|signature)/i.test(
+					k,
+				)
+			) {
+				out[k] = "[redacted]";
+				return;
+			}
+			out[k] = safeLogObject(v, maxDepth - 1);
+		});
+	return out;
+};
+const bofaLog = (...args) => {
+	if (!BOFA_DEBUG) return;
+	console.log("[BOFA VCC]", ...args);
+};
+const bofaWarn = (...args) => {
+	if (!BOFA_DEBUG) return;
+	console.warn("[BOFA VCC][WARN]", ...args);
 };
 
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100;
@@ -373,44 +417,36 @@ exports.createGuestCheckoutSession = async (req, res) => {
 			billTo = {},
 		} = req.body || {};
 		if (!reservationId)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_SA_RESERVATION_ID_REQUIRED",
-					message: "reservationId is required.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_SA_RESERVATION_ID_REQUIRED",
+				message: "reservationId is required.",
+			});
 		if (!(Number(amount) > 0))
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_SA_INVALID_AMOUNT",
-					message: "Valid amount is required.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_SA_INVALID_AMOUNT",
+				message: "Valid amount is required.",
+			});
 		if (
 			!["sale", "authorization"].includes(String(transactionType).toLowerCase())
 		)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_SA_INVALID_TRANSACTION_TYPE",
-					message: "transactionType must be sale or authorization.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_SA_INVALID_TRANSACTION_TYPE",
+				message: "transactionType must be sale or authorization.",
+			});
 
 		const profileId = String(process.env.BOFA_SA_PROFILE_ID || "").trim();
 		const accessKey = String(process.env.BOFA_SA_ACCESS_KEY || "").trim();
 		const secretKey = String(process.env.BOFA_SA_SECRET_KEY || "").trim();
 		const endpoint = String(process.env.BOFA_SA_ENDPOINT || "").trim();
 		if (!profileId || !accessKey || !secretKey || !endpoint)
-			return res
-				.status(500)
-				.json({
-					success: false,
-					issue: "BOFA_SA_CONFIG_MISSING",
-					message: "Secure Acceptance credentials are missing.",
-				});
+			return res.status(500).json({
+				success: false,
+				issue: "BOFA_SA_CONFIG_MISSING",
+				message: "Secure Acceptance credentials are missing.",
+			});
 
 		const fields = {
 			access_key: accessKey,
@@ -500,14 +536,11 @@ exports.createGuestCheckoutSession = async (req, res) => {
 			.json({ success: true, endpointUrl: endpoint, method: "POST", fields });
 	} catch (error) {
 		console.error("createGuestCheckoutSession error:", error);
-		return res
-			.status(500)
-			.json({
-				success: false,
-				issue: "BOFA_SA_SESSION_FAILED",
-				message:
-					error?.message || "Failed to create Secure Acceptance session.",
-			});
+		return res.status(500).json({
+			success: false,
+			issue: "BOFA_SA_SESSION_FAILED",
+			message: error?.message || "Failed to create Secure Acceptance session.",
+		});
 	}
 };
 
@@ -515,13 +548,11 @@ exports.verifyCheckoutResponseSignature = async (req, res) => {
 	try {
 		const secret = String(process.env.BOFA_SA_SECRET_KEY || "").trim();
 		if (!secret)
-			return res
-				.status(500)
-				.json({
-					success: false,
-					issue: "BOFA_SA_CONFIG_MISSING",
-					message: "BOFA_SA_SECRET_KEY is missing.",
-				});
+			return res.status(500).json({
+				success: false,
+				issue: "BOFA_SA_CONFIG_MISSING",
+				message: "BOFA_SA_SECRET_KEY is missing.",
+			});
 		const v = verifySaSignature(req.body || {}, secret);
 		const p = req.body || {};
 		return res.status(v.ok ? 200 : 400).json({
@@ -537,13 +568,11 @@ exports.verifyCheckoutResponseSignature = async (req, res) => {
 			),
 		});
 	} catch (error) {
-		return res
-			.status(500)
-			.json({
-				success: false,
-				issue: "BOFA_SA_VERIFY_FAILED",
-				message: error?.message || "Failed to verify response signature.",
-			});
+		return res.status(500).json({
+			success: false,
+			issue: "BOFA_SA_VERIFY_FAILED",
+			message: error?.message || "Failed to verify response signature.",
+		});
 	}
 };
 
@@ -623,6 +652,10 @@ exports.getReservationBofaVccStatus = async (req, res) => {
 	try {
 		await requireStaff(req);
 		const reservationId = String(req.params?.reservationId || "").trim();
+		bofaLog("status requested", {
+			reservationId,
+			userId: req?.auth?._id || "",
+		});
 		if (!reservationId)
 			return res
 				.status(400)
@@ -633,21 +666,21 @@ exports.getReservationBofaVccStatus = async (req, res) => {
 				.status(404)
 				.json({ success: false, message: "Reservation not found." });
 		const provider = resolveProvider(reservation?.booking_source);
-		return res
-			.status(200)
-			.json({
-				success: true,
-				...vccStatusPayload(reservation, provider),
-				state: normalizeBofaPayment(reservation?.bofa_payment).vcc,
-			});
+		return res.status(200).json({
+			success: true,
+			...vccStatusPayload(reservation, provider),
+			state: normalizeBofaPayment(reservation?.bofa_payment).vcc,
+		});
 	} catch (error) {
-		return res
-			.status(error?.statusCode || 500)
-			.json({
-				success: false,
-				issue: "BOFA_VCC_STATUS_FAILED",
-				message: error?.message || "Failed to fetch BoA VCC status.",
-			});
+		bofaWarn("status lookup failed", {
+			statusCode: error?.statusCode || null,
+			message: error?.message || "",
+		});
+		return res.status(error?.statusCode || 500).json({
+			success: false,
+			issue: "BOFA_VCC_STATUS_FAILED",
+			message: error?.message || "Failed to fetch BoA VCC status.",
+		});
 	}
 };
 
@@ -658,23 +691,27 @@ exports.captureReservationVccSale = async (req, res) => {
 	try {
 		await requireStaff(req);
 		reservationId = String(req.body?.reservationId || "").trim();
+		bofaLog("capture request received", {
+			reservationId,
+			userId: req?.auth?._id || "",
+			hasCardObject: !!req.body?.card,
+			hasBillingAddress: !!req.body?.billingAddress,
+			proceedWithoutRoom: !!req.body?.proceedWithoutRoom,
+			rawAmount: req.body?.usdAmount || req.body?.amount || null,
+		});
 		if (!reservationId)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_RESERVATION_ID_REQUIRED",
-					message: "reservationId is required.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_VCC_RESERVATION_ID_REQUIRED",
+				message: "reservationId is required.",
+			});
 		const amountUsd = toNum2(req.body?.usdAmount || req.body?.amount);
 		if (!(amountUsd > 0))
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_INVALID_AMOUNT",
-					message: "Please provide a valid amount in USD.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_VCC_INVALID_AMOUNT",
+				message: "Please provide a valid amount in USD.",
+			});
 
 		const rawCard = req.body?.card || {};
 		const cardNumber = digits(rawCard.number || req.body?.cardNumber);
@@ -687,80 +724,92 @@ exports.captureReservationVccSale = async (req, res) => {
 		const cardTypeCode = String(
 			rawCard.type || req.body?.cardType || inferCardTypeCode(cardNumber) || "",
 		).trim();
+		bofaLog("card payload normalized", {
+			reservationId,
+			amountUsd,
+			cardLast4: cardNumber ? cardNumber.slice(-4) : "",
+			cardLength: cardNumber.length,
+			cvvLength: cardCVV.length,
+			expiry: expiry?.display || "",
+			cardTypeCode,
+		});
 		if (!cardNumber || cardNumber.length < 12 || cardNumber.length > 19)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_INVALID_CARD_NUMBER",
-					message: "Card number is invalid.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_VCC_INVALID_CARD_NUMBER",
+				message: "Card number is invalid.",
+			});
 		if (!cardCVV || cardCVV.length < 3 || cardCVV.length > 4)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_INVALID_CVV",
-					message: "CVV is invalid.",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_VCC_INVALID_CVV",
+				message: "CVV is invalid.",
+			});
 		if (!cardTypeCode)
-			return res
-				.status(400)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_CARD_TYPE_REQUIRED",
-					message: "Card type could not be inferred (or provided).",
-				});
+			return res.status(400).json({
+				success: false,
+				issue: "BOFA_VCC_CARD_TYPE_REQUIRED",
+				message: "Card type could not be inferred (or provided).",
+			});
 
 		const snapshot = await Reservations.findById(reservationId).lean();
 		if (!snapshot)
-			return res
-				.status(404)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_RESERVATION_NOT_FOUND",
-					message: "Reservation not found.",
-				});
+			return res.status(404).json({
+				success: false,
+				issue: "BOFA_VCC_RESERVATION_NOT_FOUND",
+				message: "Reservation not found.",
+			});
 		const provider = resolveProvider(snapshot?.booking_source);
 		const status = vccStatusPayload(snapshot, provider);
+		bofaLog("reservation + status resolved", {
+			reservationId,
+			confirmationNumber: snapshot?.confirmation_number || "",
+			bookingSource: snapshot?.booking_source || "",
+			reservationStatus: snapshot?.reservation_status || "",
+			provider,
+			statusSnapshot: safeLogObject(status),
+		});
 		if (status.alreadyCharged)
-			return res
-				.status(409)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_ALREADY_CHARGED",
-					message: "This reservation was already charged via VCC.",
-					alreadyCharged: true,
-					bofaStatus: status,
-				});
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_VCC_ALREADY_CHARGED",
+				message: "This reservation was already charged via VCC.",
+				alreadyCharged: true,
+				bofaStatus: status,
+			});
 		if (status.attemptedBefore)
-			return res
-				.status(409)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_ATTEMPTS_EXHAUSTED",
-					message: status.warningMessage || BLOCK_WARNING,
-					attemptedBefore: true,
-					bofaStatus: status,
-				});
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_VCC_ATTEMPTS_EXHAUSTED",
+				message: status.warningMessage || BLOCK_WARNING,
+				attemptedBefore: true,
+				bofaStatus: status,
+			});
 
 		const rooms = await roomNumbersFromReservation(snapshot);
 		const proceedWithoutRoom = !!req.body?.proceedWithoutRoom;
+		bofaLog("room validation", {
+			reservationId,
+			rooms,
+			roomCount: rooms.length,
+			proceedWithoutRoom,
+			reservationCancelledOrNoShow: isCancelledOrNoShow(
+				snapshot?.reservation_status,
+			),
+		});
 		if (
 			!isCancelledOrNoShow(snapshot?.reservation_status) &&
 			rooms.length === 0 &&
 			!proceedWithoutRoom
 		) {
-			return res
-				.status(409)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_ROOM_CONFIRM_REQUIRED",
-					message:
-						"Room assignment is missing for this reservation. Confirm you want to proceed without a room assignment.",
-					confirmationMessage: ROOM_CONFIRM_MESSAGE,
-					bofaStatus: status,
-				});
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_VCC_ROOM_CONFIRM_REQUIRED",
+				message:
+					"Room assignment is missing for this reservation. Confirm you want to proceed without a room assignment.",
+				confirmationMessage: ROOM_CONFIRM_MESSAGE,
+				bofaStatus: status,
+			});
 		}
 
 		const lock = await Reservations.findOneAndUpdate(
@@ -775,25 +824,26 @@ exports.captureReservationVccSale = async (req, res) => {
 			{ new: true },
 		);
 		if (!lock)
-			return res
-				.status(409)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_ALREADY_PROCESSING",
-					message:
-						"A BoA VCC charge is already in progress for this reservation.",
-				});
+			return res.status(409).json({
+				success: false,
+				issue: "BOFA_VCC_ALREADY_PROCESSING",
+				message:
+					"A BoA VCC charge is already in progress for this reservation.",
+			});
 		lockAcquired = true;
+		bofaLog("processing lock acquired", {
+			reservationId,
+			lockSource: lock?.bofa_payment?.vcc?.source || provider,
+			lockAttemptAt: lock?.bofa_payment?.vcc?.last_attempt_at || null,
+		});
 
 		const reservation = await Reservations.findById(reservationId);
 		if (!reservation)
-			return res
-				.status(404)
-				.json({
-					success: false,
-					issue: "BOFA_VCC_RESERVATION_NOT_FOUND",
-					message: "Reservation not found.",
-				});
+			return res.status(404).json({
+				success: false,
+				issue: "BOFA_VCC_RESERVATION_NOT_FOUND",
+				message: "Reservation not found.",
+			});
 		const hotel = reservation?.hotelId
 			? await HotelDetails.findById(reservation.hotelId)
 					.select("hotelName")
@@ -806,6 +856,23 @@ exports.captureReservationVccSale = async (req, res) => {
 		const secretB64 = String(
 			process.env.BOFA_REST_SHARED_SECRET_B64 || "",
 		).trim();
+		const nodeEnv = String(process.env.NODE_ENV || "")
+			.trim()
+			.toLowerCase();
+		bofaLog("rest config resolved", {
+			reservationId,
+			host,
+			merchantId: maskValue(merchantId, 3, 2),
+			keyId: maskValue(keyId, 8, 4),
+			secretConfigured: !!secretB64,
+			nodeEnv,
+		});
+		if (nodeEnv && nodeEnv !== "production" && /(^|\.)(api)\./i.test(host)) {
+			bofaWarn(
+				"Non-production NODE_ENV with live REST host detected. If using test keys/cards, switch BOFA_REST_HOST to the test host (often apitest...).",
+				{ nodeEnv, host },
+			);
+		}
 		if (!host || !merchantId || !keyId || !secretB64) {
 			const configError = new Error("Missing BoA REST credentials.");
 			configError.statusCode = 500;
@@ -962,6 +1029,26 @@ exports.captureReservationVccSale = async (req, res) => {
 			body,
 		});
 		headers["x-request-id"] = requestId;
+		bofaLog("rest request prepared", {
+			reservationId,
+			requestId,
+			url: `https://${host}${path}`,
+			refCode,
+			amountUsd: toCCY(amountUsd),
+			currency: "USD",
+			cardLast4: cardNumber.slice(-4),
+			expiry: expiry.display,
+			cardTypeCode,
+			billTo: safeLogObject(billTo),
+			signatureHeaderMeta: {
+				keyId: maskValue(keyId, 8, 4),
+				signatureLength: String(headers?.signature || "").length,
+				digest: headers?.digest || "",
+				vcDate: headers?.["v-c-date"] || "",
+				hostHeader: headers?.host || "",
+				merchantHeader: maskValue(headers?.["v-c-merchant-id"] || "", 3, 2),
+			},
+		});
 
 		const timeout = Number(process.env.BOFA_REST_TIMEOUT_MS || 25000);
 		providerAttemptSubmitted = true;
@@ -973,8 +1060,15 @@ exports.captureReservationVccSale = async (req, res) => {
 			timeout: Number.isFinite(timeout) && timeout > 0 ? timeout : 25000,
 			validateStatus: () => true,
 		});
-		const data = apiRes?.data || {};
+		const rawResponseData = apiRes?.data;
+		const data =
+			rawResponseData && typeof rawResponseData === "object"
+				? rawResponseData
+				: {};
+		const responseText =
+			typeof rawResponseData === "string" ? rawResponseData.slice(0, 2000) : "";
 		const httpStatus = apiRes?.status || 0;
+		const httpStatusText = String(apiRes?.statusText || "");
 		const txnStatus = String(data?.status || "").toUpperCase();
 		const declined = [
 			"DECLINED",
@@ -984,6 +1078,40 @@ exports.captureReservationVccSale = async (req, res) => {
 			"ERROR",
 		].includes(txnStatus);
 		const approved = httpStatus >= 200 && httpStatus < 300 && !declined;
+		bofaLog("rest response received", {
+			reservationId,
+			requestId,
+			httpStatus,
+			httpStatusText,
+			txnStatus,
+			approved,
+			declined,
+			responseHeaders: safeLogObject({
+				"x-correlation-id":
+					apiRes?.headers?.["x-correlation-id"] ||
+					apiRes?.headers?.["X-Correlation-ID"] ||
+					"",
+				"content-type":
+					apiRes?.headers?.["content-type"] ||
+					apiRes?.headers?.["Content-Type"] ||
+					"",
+			}),
+			responseJson: safeLogObject(data),
+			responseText,
+		});
+		if (httpStatus === 404) {
+			bofaWarn("BoA REST returned HTTP 404. Common causes:", {
+				cause1:
+					"BOFA_REST_HOST points to wrong environment (live host with test credentials or vice versa).",
+				cause2:
+					"BOFA_REST_MERCHANT_ID is not the REST transacting merchant id from key-management output.",
+				cause3:
+					"REST Payments API product not provisioned/enabled on this account.",
+				host,
+				merchantIdMasked: maskValue(merchantId, 3, 2),
+				keyIdMasked: maskValue(keyId, 8, 4),
+			});
+		}
 
 		const b = normalizeBofaPayment(reservation?.bofa_payment);
 		const v = b.vcc;
@@ -998,6 +1126,18 @@ exports.captureReservationVccSale = async (req, res) => {
 			String(data?.processorInformation?.responseDetails || ""),
 			255,
 		);
+		const gatewayReason = String(
+			data?.errorInformation?.reason || data?.reason || "",
+		);
+		const gatewayMessage = truncate(
+			String(
+				data?.errorInformation?.message ||
+					data?.message ||
+					data?.details?.[0]?.message ||
+					"",
+			),
+			600,
+		);
 		const capture = {
 			id: String(data?.id || ""),
 			status: txnStatus,
@@ -1005,8 +1145,11 @@ exports.captureReservationVccSale = async (req, res) => {
 			reconciliationId: String(data?.reconciliationId || ""),
 			clientReferenceCode: String(data?.clientReferenceInformation?.code || ""),
 			httpStatus,
+			httpStatusText,
 			processorResponseCode: processorCode,
 			processorResponseDetails: processorDetails,
+			gatewayReason,
+			gatewayMessage,
 		};
 
 		v.processing = false;
@@ -1056,6 +1199,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			v.last_failure_message = "";
 			v.last_failure_code = "";
 			v.last_failure_http_status = null;
+			v.last_failure_payload = null;
 			v.last_transaction_id = capture.id;
 			v.last_reconciliation_id = capture.reconciliationId;
 			v.last_processor_response_code = processorCode;
@@ -1085,11 +1229,14 @@ exports.captureReservationVccSale = async (req, res) => {
 				processor_response_code: processorCode,
 				processor_response_details: processorDetails,
 				http_status: httpStatus,
+				http_status_text: httpStatusText,
 				status: txnStatus,
 				order_reference: refCode,
 				cardholder_name: cardholder.full,
 				postal_code: billTo.postalCode,
 				country_code: billTo.country,
+				gateway_reason: gatewayReason,
+				gateway_message: gatewayMessage,
 			});
 			reservation.bofa_payment = b;
 			reservation.payment_details = {
@@ -1106,24 +1253,44 @@ exports.captureReservationVccSale = async (req, res) => {
 			};
 			await reservation.save();
 			lockAcquired = false;
-			return res
-				.status(200)
-				.json({
-					success: true,
-					message: "VCC payment completed via Bank of America REST API.",
-					transaction: capture,
-					bofaStatus: vccStatusPayload(reservation, provider),
-					reservation,
-				});
+			bofaLog("capture approved and saved", {
+				reservationId,
+				requestId,
+				transactionId: capture.id,
+				reconciliationId: capture.reconciliationId,
+				httpStatus,
+				txnStatus,
+				amountUsd,
+				cardLast4,
+			});
+			return res.status(200).json({
+				success: true,
+				message: "VCC payment completed via Bank of America REST API.",
+				transaction: capture,
+				bofaStatus: vccStatusPayload(reservation, provider),
+				reservation,
+			});
 		}
 
+		const fallbackFailureMessage =
+			httpStatus === 404
+				? `BoA REST endpoint returned HTTP 404 (${
+						httpStatusText || "Not Found"
+				  }). Check host, REST merchant id, and REST API provisioning.`
+				: "Bank of America declined this VCC charge.";
 		const failureMessage = String(
 			data?.errorInformation?.message ||
 				data?.message ||
-				"Bank of America declined this VCC charge.",
+				data?.details?.[0]?.message ||
+				(responseText ? truncate(responseText, 400) : "") ||
+				fallbackFailureMessage,
 		);
 		const failureCode = String(
-			data?.errorInformation?.reason || "BOFA_VCC_DECLINED",
+			data?.errorInformation?.reason ||
+				data?.reason ||
+				(httpStatus === 404
+					? "BOFA_REST_ENDPOINT_OR_MERCHANT_NOT_FOUND"
+					: "BOFA_VCC_DECLINED"),
 		);
 		v.charged = false;
 		v.failed_attempts_count = Number(v.failed_attempts_count || 0) + 1;
@@ -1135,6 +1302,16 @@ exports.captureReservationVccSale = async (req, res) => {
 		v.last_reconciliation_id = capture.reconciliationId;
 		v.last_processor_response_code = processorCode;
 		v.last_processor_response_details = processorDetails;
+		v.last_failure_payload = safeLogObject({
+			httpStatus,
+			httpStatusText,
+			txnStatus,
+			gatewayReason,
+			gatewayMessage,
+			errorInformation: data?.errorInformation || null,
+			details: data?.details || null,
+			responseText,
+		});
 		v.blocked_after_failure = v.failed_attempts_count >= maxAttempts();
 		v.warning_message = v.blocked_after_failure ? BLOCK_WARNING : RETRY_WARNING;
 		v.last_capture = {
@@ -1159,11 +1336,14 @@ exports.captureReservationVccSale = async (req, res) => {
 			processor_response_code: processorCode,
 			processor_response_details: processorDetails,
 			http_status: httpStatus,
+			http_status_text: httpStatusText,
 			status: txnStatus,
 			order_reference: refCode,
 			cardholder_name: cardholder.full,
 			postal_code: billTo.postalCode,
 			country_code: billTo.country,
+			gateway_reason: gatewayReason,
+			gateway_message: gatewayMessage,
 		});
 		reservation.bofa_payment = b;
 		reservation.payment_details = {
@@ -1174,22 +1354,35 @@ exports.captureReservationVccSale = async (req, res) => {
 		};
 		await reservation.save();
 		lockAcquired = false;
-		return res
-			.status(402)
-			.json({
-				success: false,
-				issue: "BOFA_VCC_CAPTURE_DECLINED",
-				message: failureMessage,
-				error: { reason: failureCode, httpStatus },
-				transaction: capture,
-				bofaStatus: vccStatusPayload(reservation, provider),
-				reservation,
-			});
+		bofaWarn("capture declined and saved", {
+			reservationId,
+			requestId,
+			httpStatus,
+			httpStatusText,
+			txnStatus,
+			failureCode,
+			failureMessage,
+			transactionId: capture.id || "",
+			reconciliationId: capture.reconciliationId || "",
+		});
+		return res.status(402).json({
+			success: false,
+			issue: "BOFA_VCC_CAPTURE_DECLINED",
+			message: failureMessage,
+			error: { reason: failureCode, httpStatus },
+			transaction: capture,
+			bofaStatus: vccStatusPayload(reservation, provider),
+			reservation,
+		});
 	} catch (error) {
 		console.error("captureReservationVccSale error:", {
 			statusCode: error?.statusCode || null,
 			issue: error?.issue || null,
 			message: error?.message || "",
+			stack: error?.stack || "",
+			isAxiosError: !!error?.isAxiosError,
+			axiosStatus: error?.response?.status || null,
+			axiosData: safeLogObject(error?.response?.data || null),
 		});
 		if (reservationId && lockAcquired) {
 			try {
@@ -1235,14 +1428,12 @@ exports.captureReservationVccSale = async (req, res) => {
 				console.error("captureReservationVccSale persist error:", persistErr);
 			}
 		}
-		return res
-			.status(error?.statusCode || 500)
-			.json({
-				success: false,
-				issue: error?.issue || "BOFA_VCC_CAPTURE_FAILED",
-				message:
-					error?.message ||
-					"Bank of America could not process this virtual card charge.",
-			});
+		return res.status(error?.statusCode || 500).json({
+			success: false,
+			issue: error?.issue || "BOFA_VCC_CAPTURE_FAILED",
+			message:
+				error?.message ||
+				"Bank of America could not process this virtual card charge.",
+		});
 	}
 };
