@@ -3238,6 +3238,10 @@ exports.createNewReservationClient2 = async (req, res) => {
 			paid_amount,
 			commissionPaid,
 			advancePayment,
+			createdByUserId,
+			orderTakeId,
+			orderTaker,
+			orderTakenAt,
 		} = req.body;
 
 		/** -------------------- DUPLICATE GUARD (helpers) -------------------- */
@@ -3467,6 +3471,47 @@ exports.createNewReservationClient2 = async (req, res) => {
 				hotelName: hotel_name,
 				pickedRoomsType,
 				advancePayment,
+				createdByUserId:
+					createdByUserId && mongoose.Types.ObjectId.isValid(createdByUserId)
+						? createdByUserId
+						: null,
+				createdBy: orderTaker || {},
+				orderTakeId:
+					orderTakeId && mongoose.Types.ObjectId.isValid(orderTakeId)
+						? orderTakeId
+						: null,
+				orderTaker: orderTaker || {},
+				orderTakenAt: orderTakenAt || new Date(),
+				reservationAuditLog: [
+					{
+						at: new Date(),
+						action: "reservation_created",
+						field: "reservation",
+						by: {
+							_id:
+								orderTakeId && mongoose.Types.ObjectId.isValid(orderTakeId)
+									? orderTakeId
+									: undefined,
+							name:
+								orderTaker?.name ||
+								orderTaker?.email ||
+								"Jannat employee",
+							role:
+								orderTaker?.roleDescription ||
+								orderTaker?.role ||
+								"order_taker",
+						},
+						from: null,
+						to: {
+							confirmation_number: confirmationNumber,
+							hotelId,
+							booking_source,
+							total_amount,
+							reservation_status: "Confirmed",
+							orderTakeId: orderTakeId || "",
+						},
+					},
+				],
 			});
 
 			const savedReservation = await reservation.save();

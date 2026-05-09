@@ -72,6 +72,22 @@ const roomsSchema = new mongoose.Schema(
 			default: true,
 		},
 
+		housekeepingLastCleanedAt: {
+			type: Date,
+			default: Date.now,
+		},
+
+		housekeepingLastDirtyAt: {
+			type: Date,
+			default: null,
+		},
+
+		housekeepingDirtyReason: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+
 		individualBeds: {
 			type: Boolean,
 			default: false,
@@ -109,5 +125,7 @@ const roomsSchema = new mongoose.Schema(
 	},
 	{ timestamps: true }
 );
+
+roomsSchema.index({ cleanRoom: 1, housekeepingLastCleanedAt: 1 });
 
 module.exports = mongoose.model("Rooms", roomsSchema);

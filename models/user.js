@@ -20,6 +20,10 @@ const userSchema = new mongoose.Schema(
 			unique: true,
 			lowercase: true,
 		},
+		emailIsPlaceholder: {
+			type: Boolean,
+			default: false,
+		},
 		hashed_password: {
 			type: String,
 			required: true,
@@ -57,6 +61,12 @@ const userSchema = new mongoose.Schema(
 			lowercase: true,
 		},
 
+		companyName: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+
 		hotelAddress: {
 			type: String,
 			trim: true,
@@ -78,6 +88,16 @@ const userSchema = new mongoose.Schema(
 			trim: true,
 			lowercase: true,
 			default: "",
+		},
+
+		roles: {
+			type: Array,
+			default: [],
+		},
+
+		roleDescriptions: {
+			type: Array,
+			default: [],
 		},
 
 		resetPasswordLink: {

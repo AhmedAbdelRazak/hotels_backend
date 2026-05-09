@@ -2,6 +2,467 @@ const HotelDetails = require("../models/hotel_details");
 const mongoose = require("mongoose");
 const _ = require("lodash");
 const axios = require("axios");
+const User = require("../models/user");
+const Reservations = require("../models/reservations");
+const Rooms = require("../models/rooms");
+const UncompleteReservations = require("../models/Uncompleted");
+
+const isConfiguredSuperAdmin = (user) => {
+	const configuredIds = [
+		process.env.SUPER_ADMIN_ID,
+		process.env.REACT_APP_SUPER_ADMIN_ID,
+	]
+		.filter(Boolean)
+		.map((id) => String(id).trim());
+	return configuredIds.includes(String(user?._id || "").trim());
+};
+
+const canReassignPropertyOwner = (user) =>
+	Boolean(user) && (Number(user.role) === 1000 || isConfiguredSuperAdmin(user));
+
+const normalizeId = (value) => String(value?._id || value || "").trim();
+
+const includesId = (list = [], targetId) =>
+	Array.isArray(list) &&
+	list.some((item) => normalizeId(item) === normalizeId(targetId));
+
+const canViewHotelStats = (user, hotel) => {
+	if (!user || !hotel) return false;
+	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) return true;
+
+	const hotelId = normalizeId(hotel._id);
+	const ownerId = normalizeId(hotel.belongsTo);
+	const userId = normalizeId(user._id);
+
+	if (Number(user.role) === 2000 && userId === ownerId) return true;
+	if (includesId(user.hotelIdsOwner, hotelId)) return true;
+	if (includesId(user.hotelsToSupport, hotelId)) return true;
+
+	return (
+		normalizeId(user.hotelIdWork) === hotelId &&
+		normalizeId(user.belongsToId) === ownerId
+	);
+};
+
+const DONE_RESERVATION_STATUS =
+	/checked[-_\s]?out|early[-_\s]?checked[-_\s]?out|closed|cancelled|canceled|no[-_\s]?show/i;
+const CONFIRMED_RESERVATION_STATUS = /^confirmed$/i;
+const FINANCIAL_CYCLE_REQUIRED_FROM = new Date("2026-05-08T00:00:00.000Z");
+
+const getDeclaredRoomsTotal = (hotel = {}) => {
+	const directTotal = Number(hotel.overallRoomsCount || 0);
+	if (directTotal > 0) return directTotal;
+
+	return (hotel.roomCountDetails || []).reduce((total, room) => {
+		const possibleCount =
+			Number(room.count) ||
+			Number(room.roomCount) ||
+			Number(room.totalRooms) ||
+			Number(room.availableRooms) ||
+			0;
+		return total + possibleCount;
+	}, 0);
+};
+
+const extractReservationRoomIds = (roomId) => {
+	if (!roomId) return [];
+	if (Array.isArray(roomId)) return roomId.map(normalizeId).filter(Boolean);
+	return [normalizeId(roomId)].filter(Boolean);
+};
+
+const getTodayEnd = () => {
+	const endOfDay = new Date();
+	endOfDay.setHours(23, 59, 59, 999);
+	return endOfDay;
+};
+
+const buildOperationalOpenReservationFilter = (hotelObjectId) => ({
+	hotelId: hotelObjectId,
+	checkout_date: { $lte: getTodayEnd() },
+	reservation_status: { $not: DONE_RESERVATION_STATUS },
+});
+
+const buildFinancialCycleRequiredDateFilter = () => ({
+	$or: [
+		{
+			booked_at: { $gte: FINANCIAL_CYCLE_REQUIRED_FROM },
+		},
+		{
+			$and: [
+				{ $or: [{ booked_at: { $exists: false } }, { booked_at: null }] },
+				{ createdAt: { $gte: FINANCIAL_CYCLE_REQUIRED_FROM } },
+			],
+		},
+	],
+});
+
+const buildDashboardOpenReservationFilter = buildOperationalOpenReservationFilter;
+
+const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
+	hotelId: hotelObjectId,
+	$or: [
+		{
+			checkout_date: { $lte: getTodayEnd() },
+			reservation_status: { $not: DONE_RESERVATION_STATUS },
+		},
+		{
+			$and: [
+				buildFinancialCycleRequiredDateFilter(),
+				{ "financial_cycle.status": { $ne: "closed" } },
+			],
+		},
+	],
+});
+
+const buildStoredHotelIdFilter = (hotelId) => ({
+	$expr: { $eq: [{ $toString: "$hotelId" }, String(hotelId)] },
+});
+
+const makeReason = (code, en, ar) => ({ code, en, ar });
+
+const compactReasons = (reasons = []) => {
+	const seen = new Set();
+	return reasons.filter((reason) => {
+		const key = reason?.code || reason?.en;
+		if (!key || seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
+};
+
+const serializeReasonText = (reasons = [], language = "en") =>
+	reasons
+		.map((reason) => reason?.[language] || reason?.en || "")
+		.filter(Boolean)
+		.join(language === "ar" ? "؛ " : "; ");
+
+const isDueCheckoutWithoutDoneStatus = (reservation = {}) => {
+	if (!reservation.checkout_date) return false;
+	const checkoutDate = new Date(reservation.checkout_date);
+	if (Number.isNaN(checkoutDate.getTime())) return false;
+
+	return (
+		checkoutDate <= getTodayEnd() &&
+		!DONE_RESERVATION_STATUS.test(String(reservation.reservation_status || ""))
+	);
+};
+
+const getOpenReservationReasons = (reservation = {}) => {
+	const reasons = [];
+	const cycle = reservation.financial_cycle || {};
+	const cycleStatus = String(cycle.status || "").toLowerCase();
+	const collectionModel = String(cycle.collectionModel || "").toLowerCase();
+
+	if (cycleStatus !== "closed") {
+		if (collectionModel === "pms_collected" && !reservation.moneyTransferredToHotel) {
+			reasons.push(
+				makeReason(
+					"pms_transfer_pending",
+					"PMS collected the payment, but transfer to the hotel is not marked complete.",
+					"تم تحصيل المبلغ من النظام، لكن تحويل المبلغ للفندق غير مكتمل."
+				)
+			);
+		} else if (collectionModel === "hotel_collected" && !reservation.commissionPaid) {
+			reasons.push(
+				makeReason(
+					"hotel_commission_pending",
+					"Hotel collected the payment, but commission is not marked paid.",
+					"الفندق حصّل المبلغ، لكن العمولة غير مؤكدة السداد."
+				)
+			);
+		} else if (
+			collectionModel === "mixed" &&
+			(!reservation.moneyTransferredToHotel || !reservation.commissionPaid)
+		) {
+			reasons.push(
+				makeReason(
+					"mixed_cycle_pending",
+					"Mixed payment cycle still needs reconciliation.",
+					"دورة دفع مختلطة ما زالت تحتاج مطابقة مالية."
+				)
+			);
+		} else {
+			reasons.push(
+				makeReason(
+					"financial_cycle_open",
+					"Financial cycle is not closed yet.",
+					"الدورة المالية لم تغلق بعد."
+				)
+			);
+		}
+	}
+
+	if (isDueCheckoutWithoutDoneStatus(reservation)) {
+		const status = reservation.reservation_status || "confirmed";
+		reasons.push(
+			makeReason(
+				"checkout_due_status_open",
+				`Checkout date is due, but reservation status is still ${status}.`,
+				`تاريخ المغادرة مستحق، لكن حالة الحجز ما زالت ${status}.`
+			)
+		);
+	}
+
+	if (!reasons.length) {
+		reasons.push(
+			makeReason(
+				"open_follow_up",
+				"Reservation needs follow-up before it can be closed.",
+				"الحجز يحتاج متابعة قبل إغلاقه."
+			)
+		);
+	}
+
+	return compactReasons(reasons);
+};
+
+const hasValidDate = (value) => {
+	if (!value) return false;
+	const date = new Date(value);
+	return !Number.isNaN(date.getTime());
+};
+
+const hasPickedRoomType = (reservation = {}) =>
+	Array.isArray(reservation.pickedRoomsType) &&
+	reservation.pickedRoomsType.some((room) =>
+		Boolean(room?.room_type || room?.roomType || room?.displayName)
+	);
+
+const getIncompleteReservationReasons = (reservation = {}) => {
+	const reasons = [];
+	const customer = reservation.customer_details || {};
+	const status = String(
+		reservation.reservation_status || reservation.state || ""
+	).toLowerCase();
+	const contactExists = Boolean(customer.phone || customer.email);
+
+	if (reservation.rootCause) {
+		reasons.push(
+			makeReason(
+				"root_cause",
+				`Saved reason: ${reservation.rootCause}`,
+				`السبب المسجل: ${reservation.rootCause}`
+			)
+		);
+	}
+
+	if (!reservation.confirmation_number) {
+		reasons.push(
+			makeReason(
+				"missing_confirmation",
+				"Missing confirmation number.",
+				"رقم التأكيد غير موجود."
+			)
+		);
+	}
+
+	if (!customer.name) {
+		reasons.push(
+			makeReason("missing_guest_name", "Missing guest name.", "اسم الضيف غير موجود.")
+		);
+	}
+
+	if (!contactExists) {
+		reasons.push(
+			makeReason(
+				"missing_guest_contact",
+				"Missing guest phone or email.",
+				"رقم الهاتف أو البريد الإلكتروني للضيف غير موجود."
+			)
+		);
+	}
+
+	if (!hasValidDate(reservation.checkin_date) || !hasValidDate(reservation.checkout_date)) {
+		reasons.push(
+			makeReason(
+				"missing_stay_dates",
+				"Missing check-in or checkout date.",
+				"تاريخ الوصول أو المغادرة غير مكتمل."
+			)
+		);
+	}
+
+	if (!hasPickedRoomType(reservation) || Number(reservation.total_rooms || 0) <= 0) {
+		reasons.push(
+			makeReason(
+				"missing_room_details",
+				"Missing room type or room count.",
+				"نوع الغرفة أو عدد الغرف غير مكتمل."
+			)
+		);
+	}
+
+	if (!reservation.booking_source) {
+		reasons.push(
+			makeReason("missing_source", "Missing booking source.", "مصدر الحجز غير موجود.")
+		);
+	}
+
+	if (reservation.guestAgreedOnTermsAndConditions === false) {
+		reasons.push(
+			makeReason(
+				"terms_not_completed",
+				"Guest terms and conditions were not completed.",
+				"لم يتم استكمال موافقة الضيف على الشروط والأحكام."
+			)
+		);
+	}
+
+	if (status.includes("uncomplete") || status.includes("incomplete")) {
+		reasons.push(
+			makeReason(
+				"saved_as_incomplete",
+				"Reservation is still saved as incomplete.",
+				"الحجز ما زال محفوظاً كحجز غير مكتمل."
+			)
+		);
+	}
+
+	if (!reasons.length) {
+		reasons.push(
+			makeReason(
+				"incomplete_follow_up",
+				"Reservation data needs review before completion.",
+				"بيانات الحجز تحتاج مراجعة قبل الإكمال."
+			)
+		);
+	}
+
+	return compactReasons(reasons);
+};
+
+const getReservationBookedOrCreatedAt = (reservation = {}) => {
+	const value = reservation.booked_at || reservation.createdAt;
+	if (!value) return null;
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const isFinancialCycleRequired = (reservation = {}) => {
+	const bookedOrCreatedAt = getReservationBookedOrCreatedAt(reservation);
+	return Boolean(
+		bookedOrCreatedAt && bookedOrCreatedAt >= FINANCIAL_CYCLE_REQUIRED_FROM
+	);
+};
+
+const isFinancialCycleOpen = (reservation = {}) =>
+	String(reservation?.financial_cycle?.status || "").toLowerCase() !== "closed";
+
+const getDashboardFinancialReasons = (reservation = {}) => {
+	const cycle = reservation.financial_cycle || {};
+	const collectionModel = String(cycle.collectionModel || "").toLowerCase();
+
+	if (!isFinancialCycleRequired(reservation) || !isFinancialCycleOpen(reservation)) {
+		return [];
+	}
+
+	if (collectionModel === "pms_collected" && !reservation.moneyTransferredToHotel) {
+		return [
+			makeReason(
+				"pms_transfer_pending",
+				"PMS collected the payment, but transfer to the hotel is not marked complete.",
+				"تم تحصيل المبلغ من النظام، لكن تحويل المبلغ للفندق غير مكتمل."
+			),
+		];
+	}
+
+	if (collectionModel === "hotel_collected" && !reservation.commissionPaid) {
+		return [
+			makeReason(
+				"hotel_commission_pending",
+				"Hotel collected the payment, but commission is not marked paid.",
+				"الفندق حصل المبلغ، لكن العمولة غير مؤكدة السداد."
+			),
+		];
+	}
+
+	if (
+		collectionModel === "mixed" &&
+		(!reservation.moneyTransferredToHotel || !reservation.commissionPaid)
+	) {
+		return [
+			makeReason(
+				"mixed_cycle_pending",
+				"Mixed payment cycle still needs reconciliation.",
+				"دورة دفع مختلطة ما زالت تحتاج مطابقة مالية."
+			),
+		];
+	}
+
+	return [
+		makeReason(
+			"financial_cycle_open_after_cutoff",
+			"Financial cycle is open.",
+			"الدورة المالية مفتوحة."
+		),
+	];
+};
+
+const getOperationalDueReservationReasons = (reservation = {}) => {
+	const reasons = [];
+
+	if (isDueCheckoutWithoutDoneStatus(reservation)) {
+		const status = reservation.reservation_status || "confirmed";
+		reasons.push(
+			makeReason(
+				"checkout_due_status_open",
+				`Checkout date is today or older, but reservation status is still ${status}.`,
+				`تاريخ المغادرة اليوم أو أقدم، لكن حالة الحجز ما زالت ${status}.`
+			)
+		);
+	}
+
+	return reasons;
+};
+
+const getDashboardOpenReservationReasons = (reservation = {}) => {
+	const reasons = getOperationalDueReservationReasons(reservation);
+
+	return compactReasons(
+		reasons.length
+			? reasons
+			: [
+					makeReason(
+						"open_follow_up",
+						"Reservation needs follow-up before it can be closed.",
+						"الحجز يحتاج متابعة قبل إغلاقه."
+					),
+			  ]
+	);
+};
+
+const getDashboardIncompleteReservationReasons = (reservation = {}) => {
+	const reasons = [...getOperationalDueReservationReasons(reservation)];
+	const financialReasons = getDashboardFinancialReasons(reservation);
+
+	if (financialReasons.length) {
+		reasons.push(...financialReasons);
+	}
+
+	return compactReasons(
+		reasons.length
+			? reasons
+			: [
+					makeReason(
+						"incomplete_follow_up",
+						"Reservation needs operational or financial review before completion.",
+						"الحجز يحتاج مراجعة تشغيلية أو مالية قبل الإغلاق."
+					),
+			  ]
+	);
+};
+
+const attachReasonFields = (reservation, reasonGetter) => {
+	const reasons = reasonGetter(reservation);
+	return {
+		...reservation,
+		reasonDetails: reasons,
+		reasons: reasons.map((reason) => reason.en),
+		reasonsArabic: reasons.map((reason) => reason.ar),
+		reason: serializeReasonText(reasons, "en"),
+		reasonArabic: serializeReasonText(reasons, "ar"),
+	};
+};
 
 exports.hotelDetailsById = (req, res, next, id) => {
 	if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -34,6 +495,362 @@ exports.create = (req, res) => {
 
 exports.read = (req, res) => {
 	return res.json(req.hotelDetails);
+};
+
+exports.hotelGeneralStats = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Invalid hotel ID" });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(hotelId);
+		const hotel = await HotelDetails.findById(hotelObjectId).lean().exec();
+
+		if (!hotel) {
+			return res.status(404).json({ error: "Hotel details were not found" });
+		}
+
+		if (!canViewHotelStats(req.profile, hotel)) {
+			return res
+				.status(403)
+				.json({ error: "You do not have access to these hotel stats" });
+		}
+
+		const now = new Date();
+		const startOfDay = new Date(now);
+		startOfDay.setHours(0, 0, 0, 0);
+		const endOfDay = new Date(now);
+		endOfDay.setHours(23, 59, 59, 999);
+
+		const dashboardOpenFilter =
+			buildDashboardOpenReservationFilter(hotelObjectId);
+		const dashboardIncompleteFilter =
+			buildDashboardIncompleteReservationFilter(hotelObjectId);
+		const [rooms, totalReservations, openReservations, uncompleted, sources] =
+			await Promise.all([
+				Rooms.find({ hotelId: hotelObjectId })
+					.select("_id active activeRoom cleanRoom room_type display_name")
+					.lean()
+					.exec(),
+				Reservations.countDocuments({ hotelId: hotelObjectId }),
+				Reservations.countDocuments(dashboardOpenFilter),
+				Reservations.countDocuments(dashboardIncompleteFilter),
+				Reservations.aggregate([
+					{ $match: { hotelId: hotelObjectId } },
+					{
+						$group: {
+							_id: {
+								$ifNull: ["$booking_source", "Unknown"],
+							},
+							count: { $sum: 1 },
+						},
+					},
+					{ $sort: { count: -1, _id: 1 } },
+					{ $limit: 5 },
+				]),
+			]);
+
+		const todayReservations = await Reservations.find({
+			hotelId: hotelObjectId,
+			checkin_date: { $lte: endOfDay },
+			checkout_date: { $gte: startOfDay },
+			reservation_status: { $not: DONE_RESERVATION_STATUS },
+		})
+			.select("roomId reservation_status")
+			.lean()
+			.exec();
+
+		const physicalRoomsTotal = rooms.length;
+		const declaredRoomsTotal = getDeclaredRoomsTotal(hotel);
+		const totalRooms = physicalRoomsTotal || declaredRoomsTotal;
+		const activeRoomsList = rooms.filter(
+			(room) => room.active !== false && room.activeRoom !== false
+		);
+		const activeRooms = physicalRoomsTotal
+			? activeRoomsList.length
+			: declaredRoomsTotal;
+		const activeRoomIds = new Set(activeRoomsList.map((room) => normalizeId(room._id)));
+		const occupiedRoomIds = new Set();
+
+		todayReservations.forEach((reservation) => {
+			extractReservationRoomIds(reservation.roomId).forEach((id) => {
+				if (!activeRoomIds.size || activeRoomIds.has(id)) {
+					occupiedRoomIds.add(id);
+				}
+			});
+		});
+
+		const occupiedRooms = occupiedRoomIds.size;
+		const availableRooms = Math.max(activeRooms - occupiedRooms, 0);
+		const inactiveRooms = Math.max(totalRooms - activeRooms, 0);
+
+		const photosDone = !!hotel?.hotelPhotos?.length;
+		const roomsDone = !!hotel?.roomCountDetails?.length;
+		const locationDone =
+			Array.isArray(hotel?.location?.coordinates) &&
+			hotel.location.coordinates[0] !== 0 &&
+			hotel.location.coordinates[1] !== 0;
+		const dataDone = Boolean(
+			hotel?.aboutHotel || hotel?.aboutHotelArabic || hotel?.overallRoomsCount
+		);
+		const bankDone = !!hotel?.paymentSettings?.length;
+		const settingsDone = roomsDone && photosDone && locationDone && dataDone;
+		const activationReady = roomsDone && photosDone && locationDone && dataDone;
+
+		return res.json({
+			hotelId: normalizeId(hotel._id),
+			asOf: now,
+			setup: {
+				roomsDone,
+				photosDone,
+				locationDone,
+				dataDone,
+				bankDone,
+				settingsDone,
+				activationReady,
+				activeHotel: !!hotel.activateHotel,
+			},
+			stats: {
+				totalRooms,
+				activeRooms,
+				availableRooms,
+				occupiedRooms,
+				inactiveRooms,
+				totalReservations,
+				activeReservations: todayReservations.length,
+				nonDoneReservations: openReservations,
+				openReservations,
+				uncompletedReservations: uncompleted,
+				bookingSources: sources.map((source) => ({
+					source: source._id || "Unknown",
+					count: source.count || 0,
+				})),
+			},
+		});
+	} catch (err) {
+		console.error("hotelGeneralStats error:", err);
+		return res.status(500).json({ error: "Could not load hotel stats" });
+	}
+};
+
+exports.hotelOpenReservations = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Invalid hotel ID" });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(hotelId);
+		const hotel = await HotelDetails.findById(hotelObjectId).lean().exec();
+		if (!hotel) {
+			return res.status(404).json({ error: "Hotel details were not found" });
+		}
+
+		if (!canViewHotelStats(req.profile, hotel)) {
+			return res
+				.status(403)
+				.json({ error: "You do not have access to these reservations" });
+		}
+
+		const {
+			page = 1,
+			limit = 10,
+			search = "",
+			sortBy = "booked_at",
+			sortOrder = "asc",
+			dateBy = "booked_at",
+			dateFrom = "",
+			dateTo = "",
+			exportAll = "",
+		} = req.query || {};
+
+		const currentPage = Math.max(parseInt(page, 10) || 1, 1);
+		const pageSize = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 30);
+		const shouldExportAll = ["1", "true", "yes", "all"].includes(
+			String(exportAll).toLowerCase()
+		);
+		const allowedSorts = ["booked_at", "checkin_date", "checkout_date"];
+		const sortField = allowedSorts.includes(sortBy) ? sortBy : "booked_at";
+		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
+		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
+
+		const filters = [buildDashboardOpenReservationFilter(hotelObjectId)];
+		const trimmedSearch = String(search || "").trim();
+
+		if (trimmedSearch) {
+			const searchRegex = new RegExp(
+				trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+				"i"
+			);
+			filters.push({
+				$or: [
+					{ confirmation_number: searchRegex },
+					{ "customer_details.name": searchRegex },
+				],
+			});
+		}
+
+		if (dateFrom || dateTo) {
+			const dateRange = {};
+			if (dateFrom) {
+				const from = new Date(`${dateFrom}T00:00:00.000Z`);
+				if (!Number.isNaN(from.getTime())) dateRange.$gte = from;
+			}
+			if (dateTo) {
+				const to = new Date(`${dateTo}T23:59:59.999Z`);
+				if (!Number.isNaN(to.getTime())) dateRange.$lte = to;
+			}
+			if (Object.keys(dateRange).length) {
+				filters.push({ [dateField]: dateRange });
+			}
+		}
+
+		const filter = filters.length > 1 ? { $and: filters } : filters[0];
+		let reservationsQuery = Reservations.find(filter)
+			.select(
+				"confirmation_number customer_details.name booking_source booked_at checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+			)
+			.sort({ [sortField]: direction, _id: 1 })
+			.lean();
+		if (!shouldExportAll) {
+			reservationsQuery = reservationsQuery
+				.skip((currentPage - 1) * pageSize)
+				.limit(pageSize);
+		}
+
+		const [total, reservations] = await Promise.all([
+			Reservations.countDocuments(filter),
+			reservationsQuery.exec(),
+		]);
+
+		return res.json({
+			page: shouldExportAll ? 1 : currentPage,
+			limit: shouldExportAll ? total : pageSize,
+			total,
+			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
+			reservations: reservations.map((reservation) =>
+				attachReasonFields(reservation, getDashboardOpenReservationReasons)
+			),
+		});
+	} catch (err) {
+		console.error("hotelOpenReservations error:", err);
+		return res.status(500).json({ error: "Could not load open reservations" });
+	}
+};
+
+exports.hotelIncompleteReservations = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Invalid hotel ID" });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(hotelId);
+		const hotel = await HotelDetails.findById(hotelObjectId).lean().exec();
+		if (!hotel) {
+			return res.status(404).json({ error: "Hotel details were not found" });
+		}
+
+		if (!canViewHotelStats(req.profile, hotel)) {
+			return res
+				.status(403)
+				.json({ error: "You do not have access to these reservations" });
+		}
+
+		const {
+			page = 1,
+			limit = 10,
+			search = "",
+			sortBy = "booked_at",
+			sortOrder = "asc",
+			dateBy = "booked_at",
+			dateFrom = "",
+			dateTo = "",
+			exportAll = "",
+		} = req.query || {};
+
+		const currentPage = Math.max(parseInt(page, 10) || 1, 1);
+		const pageSize = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 30);
+		const shouldExportAll = ["1", "true", "yes", "all"].includes(
+			String(exportAll).toLowerCase()
+		);
+		const allowedSorts = ["booked_at", "checkin_date", "checkout_date"];
+		const sortField = allowedSorts.includes(sortBy) ? sortBy : "booked_at";
+		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
+		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
+
+		const filters = [buildDashboardIncompleteReservationFilter(hotelObjectId)];
+		const trimmedSearch = String(search || "").trim();
+
+		if (trimmedSearch) {
+			const searchRegex = new RegExp(
+				trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+				"i"
+			);
+			filters.push({
+				$or: [
+					{ confirmation_number: searchRegex },
+					{ "customer_details.name": searchRegex },
+				],
+			});
+		}
+
+		if (dateFrom || dateTo) {
+			const dateRange = {};
+			if (dateFrom) {
+				const from = new Date(`${dateFrom}T00:00:00.000Z`);
+				if (!Number.isNaN(from.getTime())) dateRange.$gte = from;
+			}
+			if (dateTo) {
+				const to = new Date(`${dateTo}T23:59:59.999Z`);
+				if (!Number.isNaN(to.getTime())) dateRange.$lte = to;
+			}
+			if (Object.keys(dateRange).length) {
+				filters.push({ [dateField]: dateRange });
+			}
+		}
+
+		const filter = filters.length > 1 ? { $and: filters } : filters[0];
+		let reservationsQuery = Reservations.find(filter)
+			.select(
+				"confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+			)
+			.sort({ [sortField]: direction, _id: 1 })
+			.lean();
+		if (!shouldExportAll) {
+			reservationsQuery = reservationsQuery
+				.skip((currentPage - 1) * pageSize)
+				.limit(pageSize);
+		}
+
+		const [total, reservations] = await Promise.all([
+			Reservations.countDocuments(filter),
+			reservationsQuery.exec(),
+		]);
+
+		return res.json({
+			page: shouldExportAll ? 1 : currentPage,
+			limit: shouldExportAll ? total : pageSize,
+			total,
+			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
+			reservations: reservations.map((reservation) =>
+				attachReasonFields(
+					{
+						...reservation,
+						reservationId: reservation._id,
+					},
+					getDashboardIncompleteReservationReasons
+				)
+			),
+		});
+	} catch (err) {
+		console.error("hotelIncompleteReservations error:", err);
+		return res
+			.status(500)
+			.json({ error: "Could not load incomplete reservations" });
+	}
 };
 
 const hasRoomIdentity = (room = {}) => {
@@ -330,6 +1147,142 @@ exports.updateHotelDetails = async (req, res) => {
 	} catch (err) {
 		console.error("updateHotelDetails error:", err);
 		return res.status(500).json({ error: "Internal server error" });
+	}
+};
+
+exports.reassignHotelOwner = async (req, res) => {
+	try {
+		if (!canReassignPropertyOwner(req.profile)) {
+			return res
+				.status(403)
+				.json({ error: "Only platform admins can reassign a property owner" });
+		}
+
+		const { hotelId } = req.params;
+		const { newOwnerId, transferExistingReservations = true } = req.body || {};
+
+		if (
+			!mongoose.Types.ObjectId.isValid(hotelId) ||
+			!mongoose.Types.ObjectId.isValid(newOwnerId)
+		) {
+			return res.status(400).json({ error: "Invalid hotel or owner id" });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(hotelId);
+		const newOwnerObjectId = mongoose.Types.ObjectId(newOwnerId);
+
+		const [hotelDetails, newOwner] = await Promise.all([
+			HotelDetails.findById(hotelObjectId).exec(),
+			User.findById(newOwnerObjectId).exec(),
+		]);
+
+		if (!hotelDetails) {
+			return res.status(404).json({ error: "Hotel details not found" });
+		}
+		if (!newOwner || Number(newOwner.role) !== 2000) {
+			return res
+				.status(400)
+				.json({ error: "Please select a valid hotel owner account" });
+		}
+		if (newOwner.activeUser === false) {
+			return res.status(400).json({ error: "Selected owner account is inactive" });
+		}
+
+		const oldOwnerId = hotelDetails.belongsTo
+			? mongoose.Types.ObjectId(hotelDetails.belongsTo)
+			: null;
+		const sameOwner =
+			oldOwnerId && String(oldOwnerId) === String(newOwnerObjectId);
+
+		if (sameOwner) {
+			const populated = await HotelDetails.findById(hotelObjectId)
+				.populate("belongsTo", "name email phone role activeUser hotelIdsOwner")
+				.exec();
+			return res.json({
+				message: "Property already belongs to this owner",
+				hotel: populated,
+				counts: {
+					hotelUpdated: 0,
+					oldOwnerUpdated: 0,
+					newOwnerUpdated: 0,
+					reservationsUpdated: 0,
+					uncompletedReservationsUpdated: 0,
+					roomsUpdated: 0,
+					scopedStaffUpdated: 0,
+				},
+			});
+		}
+
+		hotelDetails.belongsTo = newOwnerObjectId;
+		await hotelDetails.save();
+
+		const counts = {
+			hotelUpdated: 1,
+			oldOwnerUpdated: 0,
+			newOwnerUpdated: 0,
+			reservationsUpdated: 0,
+			uncompletedReservationsUpdated: 0,
+			roomsUpdated: 0,
+			scopedStaffUpdated: 0,
+		};
+
+		if (oldOwnerId) {
+			const oldOwnerResult = await User.updateOne(
+				{ _id: oldOwnerId },
+				{ $pull: { hotelIdsOwner: hotelObjectId } }
+			).exec();
+			counts.oldOwnerUpdated =
+				oldOwnerResult.modifiedCount || oldOwnerResult.nModified || 0;
+		}
+
+		const newOwnerResult = await User.updateOne(
+			{ _id: newOwnerObjectId },
+			{ $addToSet: { hotelIdsOwner: hotelObjectId } }
+		).exec();
+		counts.newOwnerUpdated =
+			newOwnerResult.modifiedCount || newOwnerResult.nModified || 0;
+
+		if (transferExistingReservations) {
+			const reservationsResult = await Reservations.updateMany(
+				{ hotelId: hotelObjectId },
+				{ $set: { belongsTo: newOwnerObjectId } }
+			).exec();
+			counts.reservationsUpdated =
+				reservationsResult.modifiedCount || reservationsResult.nModified || 0;
+
+			const uncompletedResult = await UncompleteReservations.updateMany(
+				{ hotelId: hotelObjectId },
+				{ $set: { belongsTo: newOwnerObjectId } }
+			).exec();
+			counts.uncompletedReservationsUpdated =
+				uncompletedResult.modifiedCount || uncompletedResult.nModified || 0;
+		}
+
+		const roomsResult = await Rooms.updateMany(
+			{ hotelId: hotelObjectId },
+			{ $set: { belongsTo: newOwnerObjectId } }
+		).exec();
+		counts.roomsUpdated = roomsResult.modifiedCount || roomsResult.nModified || 0;
+
+		const staffResult = await User.updateMany(
+			{ hotelIdWork: String(hotelObjectId) },
+			{ $set: { belongsToId: String(newOwnerObjectId) } }
+		).exec();
+		counts.scopedStaffUpdated =
+			staffResult.modifiedCount || staffResult.nModified || 0;
+
+		const populated = await HotelDetails.findById(hotelObjectId)
+			.populate("belongsTo", "name email phone role activeUser hotelIdsOwner")
+			.exec();
+
+		return res.json({
+			message: "Property owner reassigned successfully",
+			hotel: populated,
+			counts,
+		});
+	} catch (err) {
+		console.error("reassignHotelOwner error:", err);
+		return res.status(500).json({ error: "Property reassignment failed" });
 	}
 };
 

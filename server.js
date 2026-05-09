@@ -7,14 +7,13 @@ const { readdirSync } = require("fs");
 require("dotenv").config();
 const http = require("http");
 const socketIo = require("socket.io");
+const {
+	startHousekeepingMaintenanceJob,
+} = require("./services/housekeepingMaintenance");
+
 
 const app = express();
 const server = http.createServer(app);
-
-// Phone 1 and Phone 2 in customer_details
-// Hotel occupancy data is not accurate
-// url query params when openning modals has to be working even when refreshing the page.
-// Reservation Status from the map
 
 mongoose.set("strictQuery", false);
 mongoose
@@ -22,7 +21,10 @@ mongoose
 		useNewUrlParser: true,
 		useUnifiedTopology: true,
 	})
-	.then(() => console.log("MongoDB Atlas is connected"))
+	.then(() => {
+		console.log("MongoDB Atlas is connected");
+		startHousekeepingMaintenanceJob();
+	})
 	.catch((err) => console.log("DB Connection Error: ", err));
 
 // Middlewares
@@ -68,6 +70,12 @@ const SupportCase = require("./models/supportcase");
 io.on("connection", (socket) => {
 	socket.on("joinRoom", ({ caseId }) => caseId && socket.join(caseId));
 	socket.on("leaveRoom", ({ caseId }) => caseId && socket.leave(caseId));
+	socket.on("joinHousekeeping", ({ hotelId } = {}) => {
+		if (hotelId) socket.join(`housekeeping:${hotelId}`);
+	});
+	socket.on("leaveHousekeeping", ({ hotelId } = {}) => {
+		if (hotelId) socket.leave(`housekeeping:${hotelId}`);
+	});
 
 	socket.on("typing", (data = {}) => {
 		const room = data?.caseId;

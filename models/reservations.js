@@ -292,7 +292,7 @@ const reservationsSchema = new mongoose.Schema(
 				paid_online_via_link: 0,
 				paid_at_hotel_cash: 0,
 				paid_at_hotel_card: 0,
-				paid_to_zad: 0,
+				paid_to_hotel: 0,
 				paid_online_jannatbooking: 0,
 				paid_online_other_platforms: 0,
 				paid_online_via_instapay: 0,
@@ -320,6 +320,29 @@ const reservationsSchema = new mongoose.Schema(
 		},
 		commissionPaidAt: { type: Date },
 
+		financial_cycle: {
+			type: Object,
+			default: {
+				// PMS reconciliation snapshot for this reservation.
+				// If the PMS collected the money, moneyTransferredToHotel closes the cycle.
+				// If the hotel collected the money, commissionPaid closes the cycle.
+				collectionModel: "pending",
+				status: "open",
+				commissionType: "amount",
+				commissionValue: 0,
+				commissionAmount: 0,
+				pmsCollectedAmount: 0,
+				hotelCollectedAmount: 0,
+				hotelPayoutDue: 0,
+				commissionDueToPms: 0,
+				closedAt: null,
+				closedBy: null,
+				notes: "",
+				lastUpdatedAt: null,
+				lastUpdatedBy: null,
+			},
+		},
+
 		pickedRoomsType: {
 			type: Array,
 			default: [
@@ -346,6 +369,38 @@ const reservationsSchema = new mongoose.Schema(
 				name: "",
 			},
 		},
+		createdByUserId: {
+			type: ObjectId,
+			ref: "User",
+			default: null,
+		},
+		createdBy: {
+			type: Object,
+			default: {
+				_id: "",
+				name: "",
+				email: "",
+				role: "",
+				roleDescription: "",
+			},
+		},
+		// Tracks the PMS user who originally took/created the reservation.
+		orderTakeId: {
+			type: ObjectId,
+			ref: "User",
+			default: null,
+		},
+		orderTaker: {
+			type: Object,
+			default: {
+				_id: "",
+				name: "",
+				email: "",
+				role: "",
+				roleDescription: "",
+			},
+		},
+		orderTakenAt: { type: Date, default: null },
 		moneyTransferredToHotel: {
 			type: Boolean,
 			default: false,
@@ -405,6 +460,10 @@ const reservationsSchema = new mongoose.Schema(
 		// Append-only journal of changes to payout/commission fields
 		// Each entry: { at, by: {_id,name,role}, field, from, to, note }
 		adminChangeLog: { type: Array, default: [] },
+
+		// General PMS reservation tracker. This records housing, finance,
+		// commission, and manual reservation edits for auditability.
+		reservationAuditLog: { type: Array, default: [] },
 	},
 	{ timestamps: true },
 );

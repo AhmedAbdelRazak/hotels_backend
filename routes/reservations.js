@@ -52,12 +52,14 @@ const {
 	CollectedReservations,
 	aggregateCollectedReservations,
 	syncReservationRoomTypesByDisplayName,
+	openFinanceCycleNotifications,
 } = require("../controllers/reservations");
 
 router.post("/reservations/create/:userId/:hotelId", requireSignin, create);
 
 router.get(
 	"/reservations/list/:page/:records/:filters/:hotelId/:date",
+	requireSignin,
 	getListOfReservations
 );
 
@@ -78,6 +80,7 @@ router.get(
 
 router.get(
 	"/reservations/get-total-records/:page/:records/:filters/:hotelId/:date",
+	requireSignin,
 	totalRecordsReservations
 );
 
@@ -104,6 +107,11 @@ router.get(
 router.get(
 	"/reservations/single-reservation/:reservationId",
 	singleReservationById
+);
+
+router.get(
+	"/reservations/open-finance-cycles/:hotelId/:userId",
+	openFinanceCycleNotifications
 );
 
 router.get(

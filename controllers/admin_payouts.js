@@ -131,6 +131,37 @@ function groupedLog(field, changes, note, by) {
 	};
 }
 
+function applyFinancialCycleUpdate($set, reservation, nextValues, now, by) {
+	const collectionModel = reservation?.financial_cycle?.collectionModel || "pending";
+	const nextCommissionPaid =
+		nextValues.commissionPaid !== undefined
+			? !!nextValues.commissionPaid
+			: !!reservation?.commissionPaid;
+	const nextTransferred =
+		nextValues.moneyTransferredToHotel !== undefined
+			? !!nextValues.moneyTransferredToHotel
+			: !!reservation?.moneyTransferredToHotel;
+
+	const cycleClosed =
+		collectionModel === "hotel_collected"
+			? nextCommissionPaid
+			: collectionModel === "pms_collected"
+			? nextTransferred
+			: collectionModel === "mixed"
+			? nextCommissionPaid && nextTransferred
+			: nextCommissionPaid || nextTransferred;
+
+	$set["financial_cycle.status"] = cycleClosed ? "closed" : "open";
+	$set["financial_cycle.closedAt"] = cycleClosed
+		? reservation?.financial_cycle?.closedAt || now
+		: null;
+	$set["financial_cycle.closedBy"] = cycleClosed
+		? reservation?.financial_cycle?.closedBy || by?._id || null
+		: null;
+	$set["financial_cycle.lastUpdatedAt"] = now;
+	$set["financial_cycle.lastUpdatedBy"] = by?._id || null;
+}
+
 /* ───────── GET /admin-payouts/commissions ───────── */
 exports.listAdminPayouts = async (req, res) => {
 	try {
@@ -478,6 +509,14 @@ exports.updateCommissionStatus = async (req, res) => {
 			chg("commissionPaidAt", r.commissionPaidAt || null, nextPaidAt),
 		];
 		const logEntry = groupedLog("commission", changes, note, by);
+		const financialCycleSet = {};
+		applyFinancialCycleUpdate(
+			financialCycleSet,
+			r,
+			{ commissionPaid: nextPaid },
+			now,
+			by
+		);
 
 		await Reservations.updateOne(
 			{ _id: reservationId },
@@ -486,6 +525,7 @@ exports.updateCommissionStatus = async (req, res) => {
 					commissionPaid: nextPaid,
 					commissionStatus: nextStatus,
 					commissionPaidAt: nextPaidAt,
+					...financialCycleSet,
 					adminLastUpdatedAt: now,
 					adminLastUpdatedBy: {
 						_id: by?._id,
@@ -493,7 +533,10 @@ exports.updateCommissionStatus = async (req, res) => {
 						role: by?.role || "admin",
 					},
 				},
-				$push: { adminChangeLog: logEntry },
+				$push: {
+					adminChangeLog: logEntry,
+					reservationAuditLog: logEntry,
+				},
 			}
 		);
 
@@ -543,6 +586,14 @@ exports.updateTransferStatus = async (req, res) => {
 			chg("moneyTransferredAt", r.moneyTransferredAt || null, nextTrAt),
 		];
 		const logEntry = groupedLog("transfer", changes, note, by);
+		const financialCycleSet = {};
+		applyFinancialCycleUpdate(
+			financialCycleSet,
+			r,
+			{ moneyTransferredToHotel: nextTr },
+			now,
+			by
+		);
 
 		await Reservations.updateOne(
 			{ _id: reservationId },
@@ -550,6 +601,7 @@ exports.updateTransferStatus = async (req, res) => {
 				$set: {
 					moneyTransferredToHotel: nextTr,
 					moneyTransferredAt: nextTrAt,
+					...financialCycleSet,
 					adminLastUpdatedAt: now,
 					adminLastUpdatedBy: {
 						_id: by?._id,
@@ -557,7 +609,10 @@ exports.updateTransferStatus = async (req, res) => {
 						role: by?.role || "admin",
 					},
 				},
-				$push: { adminChangeLog: logEntry },
+				$push: {
+					adminChangeLog: logEntry,
+					reservationAuditLog: logEntry,
+				},
 			}
 		);
 
@@ -655,10 +710,26 @@ exports.updateReservationPayoutFlags = async (req, res) => {
 			name: by?.name,
 			role: by?.role || "admin",
 		};
+		applyFinancialCycleUpdate(
+			$set,
+			r,
+			{
+				commissionPaid: $set.commissionPaid,
+				moneyTransferredToHotel: $set.moneyTransferredToHotel,
+			},
+			now,
+			by
+		);
 
 		await Reservations.updateOne(
 			{ _id: reservationId },
-			{ $set, $push: { adminChangeLog: { $each: logs } } }
+			{
+				$set,
+				$push: {
+					adminChangeLog: { $each: logs },
+					reservationAuditLog: { $each: logs },
+				},
+			}
 		);
 
 		return res.json({ ok: true, reservationId });
@@ -923,6 +994,14 @@ exports.autoReconcileHotel = async (req, res) => {
 			];
 			const msg = `AutoReconcile ${batchKey} — Netted against ONLINE [${onlineConfs}] • Settled ${settled} SAR${baseNote}`;
 			const logEntry = groupedLog("commission", changes, msg, by);
+			const financialCycleSet = {};
+			applyFinancialCycleUpdate(
+				financialCycleSet,
+				r,
+				{ commissionPaid: true },
+				now,
+				by
+			);
 
 			await Reservations.updateOne(
 				{ _id: r._id },
@@ -931,6 +1010,7 @@ exports.autoReconcileHotel = async (req, res) => {
 						commissionPaid: true,
 						commissionStatus: nextStatus,
 						commissionPaidAt: now,
+						...financialCycleSet,
 						adminLastUpdatedAt: now,
 						adminLastUpdatedBy: {
 							_id: by?._id,
@@ -938,7 +1018,10 @@ exports.autoReconcileHotel = async (req, res) => {
 							role: by?.role || "admin",
 						},
 					},
-					$push: { adminChangeLog: logEntry },
+					$push: {
+						adminChangeLog: logEntry,
+						reservationAuditLog: logEntry,
+					},
 				}
 			);
 		}
@@ -953,6 +1036,14 @@ exports.autoReconcileHotel = async (req, res) => {
 			];
 			const msg = `AutoReconcile ${batchKey} — Paired with OFFLINE [${offlineConfs}] • Settled ${settled} SAR${baseNote}`;
 			const logEntry = groupedLog("transfer", changes, msg, by);
+			const financialCycleSet = {};
+			applyFinancialCycleUpdate(
+				financialCycleSet,
+				r,
+				{ moneyTransferredToHotel: true },
+				now,
+				by
+			);
 
 			await Reservations.updateOne(
 				{ _id: r._id },
@@ -960,6 +1051,7 @@ exports.autoReconcileHotel = async (req, res) => {
 					$set: {
 						moneyTransferredToHotel: true,
 						moneyTransferredAt: now,
+						...financialCycleSet,
 						adminLastUpdatedAt: now,
 						adminLastUpdatedBy: {
 							_id: by?._id,
@@ -967,7 +1059,10 @@ exports.autoReconcileHotel = async (req, res) => {
 							role: by?.role || "admin",
 						},
 					},
-					$push: { adminChangeLog: logEntry },
+					$push: {
+						adminChangeLog: logEntry,
+						reservationAuditLog: logEntry,
+					},
 				}
 			);
 		}

@@ -154,6 +154,20 @@ const uncompletedReservationsSchema = new mongoose.Schema(
 		},
 		belongsTo: { type: ObjectId, ref: "User" }, //this will be taken care of later
 		hotelId: { type: ObjectId, ref: "HotelDetails" }, //this will be taken care of later
+		// Tracks the PMS user who originally took/created the pending reservation.
+		orderTakeId: { type: ObjectId, ref: "User", default: null },
+		orderTaker: {
+			type: Object,
+			default: {
+				_id: "",
+				name: "",
+				email: "",
+				role: "",
+				roleDescription: "",
+			},
+		},
+		orderTakenAt: { type: Date, default: null },
+		reservationAuditLog: { type: Array, default: [] },
 		rootCause: {
 			type: String,
 			trim: true,

@@ -21,6 +21,8 @@ const {
 	updatedUserId,
 	getSingleUser,
 	houseKeepingStaff,
+	listHotelStaffUsers,
+	updateHotelStaffUser,
 	allHotelAccounts,
 } = require("../controllers/user");
 
@@ -60,8 +62,22 @@ router.put(
 	updateUserByAdmin
 );
 
-/* Housekeeping list (public for your usage; protect if needed) */
-router.get("/house-keeping-staff/:hotelId", houseKeepingStaff);
+/* Housekeeping staff list */
+router.get("/house-keeping-staff/:hotelId", requireSignin, houseKeepingStaff);
+
+/* Hotel-scoped staff management */
+router.get(
+	"/hotel-staff/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	listHotelStaffUsers
+);
+router.put(
+	"/hotel-staff/:staffId/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	updateHotelStaffUser
+);
 
 /* Param resolvers */
 router.param("userId", userById);

@@ -95,6 +95,37 @@ function groupedLog(field, changes, note, by) {
 }
 
 /* ───────── PayPal vault helpers (owner) ───────── */
+function applyFinancialCycleUpdate($set, reservation, nextValues, now, by) {
+	const collectionModel = reservation?.financial_cycle?.collectionModel || "pending";
+	const nextCommissionPaid =
+		nextValues.commissionPaid !== undefined
+			? !!nextValues.commissionPaid
+			: !!reservation?.commissionPaid;
+	const nextTransferred =
+		nextValues.moneyTransferredToHotel !== undefined
+			? !!nextValues.moneyTransferredToHotel
+			: !!reservation?.moneyTransferredToHotel;
+
+	const cycleClosed =
+		collectionModel === "hotel_collected"
+			? nextCommissionPaid
+			: collectionModel === "pms_collected"
+			? nextTransferred
+			: collectionModel === "mixed"
+			? nextCommissionPaid && nextTransferred
+			: nextCommissionPaid || nextTransferred;
+
+	$set["financial_cycle.status"] = cycleClosed ? "closed" : "open";
+	$set["financial_cycle.closedAt"] = cycleClosed
+		? reservation?.financial_cycle?.closedAt || now
+		: null;
+	$set["financial_cycle.closedBy"] = cycleClosed
+		? reservation?.financial_cycle?.closedBy || by?._id || null
+		: null;
+	$set["financial_cycle.lastUpdatedAt"] = now;
+	$set["financial_cycle.lastUpdatedBy"] = by?._id || null;
+}
+
 async function exchangeSetupToVaultToken(setupTokenId) {
 	try {
 		const { data } = await ax.post(
@@ -695,6 +726,8 @@ exports.markCommissionsPaid = async (req, res) => {
 				commissionPaid: 1,
 				commissionStatus: 1,
 				commissionPaidAt: 1,
+				moneyTransferredToHotel: 1,
+				financial_cycle: 1,
 			}
 		).lean();
 
@@ -707,6 +740,14 @@ exports.markCommissionsPaid = async (req, res) => {
 			];
 
 			const logEntry = groupedLog("commission", changes, note || null, by);
+			const financialCycleSet = {};
+			applyFinancialCycleUpdate(
+				financialCycleSet,
+				r,
+				{ commissionPaid: true },
+				now,
+				by
+			);
 
 			const resu = await Reservations.updateOne(
 				{ _id: r._id, hotelId },
@@ -715,6 +756,7 @@ exports.markCommissionsPaid = async (req, res) => {
 						commissionPaid: true,
 						commissionStatus: "commission paid",
 						commissionPaidAt: now,
+						...financialCycleSet,
 						"commissionData.manual": {
 							by: "manual-mark",
 							note: note || null,
@@ -727,7 +769,10 @@ exports.markCommissionsPaid = async (req, res) => {
 							role: by?.role || "owner",
 						},
 					},
-					$push: { adminChangeLog: logEntry },
+					$push: {
+						adminChangeLog: logEntry,
+						reservationAuditLog: logEntry,
+					},
 				}
 			);
 			if (resu?.modifiedCount || resu?.nModified) updated += 1;
@@ -789,6 +834,8 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				commissionPaid: 1,
 				commissionStatus: 1,
 				commissionPaidAt: 1, // <<< ADDED (for accurate 'from' in changes)
+				moneyTransferredToHotel: 1,
+				financial_cycle: 1,
 				total_amount: 1,
 				paid_amount: 1,
 				createdAt: 1,
@@ -1047,6 +1094,21 @@ exports.chargeOwnerCommissions = async (req, res) => {
 				payMethod.label || ""
 			} • batch ${batchKey}`.trim();
 
+			const commissionLogEntry = groupedLog(
+				"commission",
+				changes,
+				autoNote,
+				by
+			);
+			const financialCycleSet = {};
+			applyFinancialCycleUpdate(
+				financialCycleSet,
+				t,
+				{ commissionPaid: true },
+				now,
+				by
+			);
+
 			await Reservations.updateOne(
 				{ _id: t._id, hotelId },
 				{
@@ -1055,6 +1117,7 @@ exports.chargeOwnerCommissions = async (req, res) => {
 						commissionStatus: "commission paid",
 						commissionPaidAt: now,
 						"commissionData.last": entry,
+						...financialCycleSet,
 						adminLastUpdatedAt: now,
 						adminLastUpdatedBy: {
 							_id: by?._id || null,
@@ -1064,7 +1127,8 @@ exports.chargeOwnerCommissions = async (req, res) => {
 					},
 					$push: {
 						"commissionData.history": entry,
-						adminChangeLog: groupedLog("commission", changes, autoNote, by), // <<< ADDED
+						adminChangeLog: commissionLogEntry, // <<< ADDED
+						reservationAuditLog: commissionLogEntry,
 					},
 				}
 			);

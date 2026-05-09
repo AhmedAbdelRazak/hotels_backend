@@ -4,6 +4,7 @@
 
 const mongoose = require("mongoose");
 const User = require("../models/user");
+const HotelDetails = require("../models/hotel_details");
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -21,6 +22,153 @@ const validateEmailFormat = (e) => {
 	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 };
 
+const normalizeOptionalEmail = (value) => String(value || "").trim().toLowerCase();
+
+const buildStaffPlaceholderEmail = (phoneValue, hotelValue) => {
+	const phonePart = String(phoneValue || "").replace(/[^0-9]/g, "") || "staff";
+	const hotelPart = String(hotelValue || "").replace(/[^a-zA-Z0-9]/g, "");
+	return `staff-${hotelPart}-${phonePart}@staff.jannatbooking.local`.toLowerCase();
+};
+
+const isStaffPlaceholderEmail = (email) =>
+	String(email || "").toLowerCase().endsWith("@staff.jannatbooking.local");
+
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.filter(Boolean)
+		.map((id) => String(id).trim());
+
+const isConfiguredSuperAdmin = (userOrId) => {
+	const userId =
+		typeof userOrId === "object" ? userOrId?._id || userOrId?.id : userOrId;
+	return configuredSuperAdminIds().includes(String(userId || "").trim());
+};
+
+const cleanPhoneNumber = (rawPhone) => {
+	if (typeof rawPhone !== "string") throw new Error("Invalid phone number format");
+	const cleaned = rawPhone.replace(/\s+/g, "");
+	const phoneRegex = /^\+?[0-9]*$/;
+	if (!phoneRegex.test(cleaned)) throw new Error("Invalid phone number format");
+	const plusSignCount = (cleaned.match(/\+/g) || []).length;
+	if (
+		plusSignCount > 1 ||
+		(plusSignCount === 1 && cleaned.indexOf("+") !== 0)
+	) {
+		throw new Error("Invalid phone number format");
+	}
+	return cleaned;
+};
+
+const HOTEL_STAFF_ROLES = [2000, 3000, 4000, 5000, 6000, 7000];
+const ROLE_BY_DESCRIPTION = {
+	hotelmanager: 2000,
+	reception: 3000,
+	housekeepingmanager: 4000,
+	housekeeping: 5000,
+	finance: 6000,
+	ordertaker: 7000,
+};
+
+const normalizeObjectIdString = (value) => String(value?._id || value || "");
+
+const uniqueValidObjectIds = (values = []) => [
+	...new Set(
+		values
+			.map(normalizeObjectIdString)
+			.filter((value) => value && isValidObjectId(value))
+	),
+];
+
+const canManageHotelStaff = async (creator, hotelId) => {
+	if (!creator || creator.activeUser === false || !isValidObjectId(hotelId)) {
+		return { allowed: false, error: "Access denied" };
+	}
+
+	const hotel = await HotelDetails.findById(hotelId)
+		.select("_id belongsTo hotelName hotelAddress hotelCountry hotelState hotelCity")
+		.lean()
+		.exec();
+
+	if (!hotel) {
+		return { allowed: false, error: "Hotel was not found" };
+	}
+
+	const normalizedHotelId = String(hotel._id);
+	const ownerId = String(hotel.belongsTo || "");
+	const creatorId = String(creator._id || "");
+	const creatorRole = Number(creator.role);
+	const supportIds = Array.isArray(creator.hotelsToSupport)
+		? creator.hotelsToSupport.map((h) => String(h?._id || h))
+		: [];
+	const ownedIds = Array.isArray(creator.hotelIdsOwner)
+		? creator.hotelIdsOwner.map((h) => String(h?._id || h))
+		: [];
+	const roleDescriptions = [
+		String(creator.roleDescription || "").toLowerCase(),
+		...(Array.isArray(creator.roleDescriptions)
+			? creator.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+
+	const creatorOwnsHotel =
+		creatorRole === 2000 &&
+		(creatorId === ownerId || ownedIds.includes(normalizedHotelId));
+	const creatorIsAssignedHotelManager =
+		creatorRole === 2000 &&
+		roleDescriptions.includes("hotelmanager") &&
+		String(creator.belongsToId || ownerId) === ownerId &&
+		(String(creator.hotelIdWork || "") === normalizedHotelId ||
+			supportIds.includes(normalizedHotelId));
+	const adminCanSupportHotel =
+		isConfiguredSuperAdmin(creator) ||
+		(creatorRole === 1000 &&
+			(supportIds.length === 0 || supportIds.includes(normalizedHotelId)));
+
+	return {
+		allowed:
+			creatorOwnsHotel || creatorIsAssignedHotelManager || adminCanSupportHotel,
+		error: "You cannot manage users for this hotel",
+		hotel,
+		hotelId: normalizedHotelId,
+		ownerId,
+		creatorOwnsHotel,
+		creatorIsAssignedHotelManager,
+		adminCanSupportHotel,
+	};
+};
+
+const getManageableStaffHotelIds = async (creator, permission) => {
+	const ownerHotels = await HotelDetails.find({ belongsTo: permission.ownerId })
+		.select("_id")
+		.lean()
+		.exec();
+	const ownerHotelIds = ownerHotels.map((hotel) => String(hotel._id));
+	const creatorRole = Number(creator.role);
+	const creatorId = String(creator._id || "");
+	const creatorOwnedIds = Array.isArray(creator.hotelIdsOwner)
+		? creator.hotelIdsOwner.map(normalizeObjectIdString)
+		: [];
+
+	if (
+		creatorRole === 1000 ||
+		isConfiguredSuperAdmin(creator) ||
+		creatorId === permission.ownerId ||
+		creatorOwnedIds.some((id) => ownerHotelIds.includes(id))
+	) {
+		return ownerHotelIds;
+	}
+
+	const creatorScopedIds = uniqueValidObjectIds([
+		creator.hotelIdWork,
+		...(Array.isArray(creator.hotelsToSupport)
+			? creator.hotelsToSupport
+			: []),
+	]);
+	return ownerHotelIds.filter((id) => creatorScopedIds.includes(id));
+};
+
 /* ───────────────────── Param Loaders ───────────────────── */
 
 exports.userById = (req, res, next, id) => {
@@ -30,7 +178,7 @@ exports.userById = (req, res, next, id) => {
 
 	User.findById(id)
 		.select(
-			"_id name email phone role user points activeUser hotelsToSupport accessTo"
+			"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelIdsOwner hotelsToSupport accessTo"
 		)
 		.populate("hotelsToSupport")
 		.exec((err, user) => {
@@ -49,7 +197,7 @@ exports.updatedUserId = async (req, res, next, id) => {
 	try {
 		const target = await User.findById(id)
 			.select(
-				"_id name email role activeUser employeeImage userRole userStore userBranch"
+				"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser employeeImage hotelIdWork belongsToId hotelsToSupport accessTo userRole userStore userBranch"
 			)
 			.exec();
 		if (!target) {
@@ -86,7 +234,7 @@ exports.remove = (req, res) => {
 exports.allUsersList = (req, res) => {
 	User.find()
 		.select(
-			"_id name email role user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
+			"_id name email phone role roleDescription hotelIdWork belongsToId user points activePoints likesUser activeUser employeeImage userRole history userStore userBranch"
 		)
 		.exec((err, users) => {
 			if (err) return res.status(400).json({ error: "Users not found" });
@@ -232,8 +380,16 @@ exports.updateUserByAdmin = async (req, res) => {
 
 		/* --- Legacy fields kept for backward compatibility --- */
 		if ("role" in payload && payload.role != null) userDoc.role = payload.role;
+		if ("roleDescription" in payload)
+			userDoc.roleDescription = payload.roleDescription || "";
 		if ("activeUser" in payload && payload.activeUser != null)
 			userDoc.activeUser = payload.activeUser;
+		if ("hotelIdWork" in payload) userDoc.hotelIdWork = payload.hotelIdWork || "";
+		if ("belongsToId" in payload) userDoc.belongsToId = payload.belongsToId || "";
+		if ("accessTo" in payload && Array.isArray(payload.accessTo))
+			userDoc.accessTo = payload.accessTo;
+		if ("hotelsToSupport" in payload && Array.isArray(payload.hotelsToSupport))
+			userDoc.hotelsToSupport = payload.hotelsToSupport;
 		if ("employeeImage" in payload)
 			userDoc.employeeImage = payload.employeeImage;
 		if ("userRole" in payload) userDoc.userRole = payload.userRole;
@@ -273,14 +429,278 @@ exports.houseKeepingStaff = async (req, res) => {
 		return res.status(400).json({ error: "Invalid hotel id" });
 	}
 	try {
+		const actor = req.auth?._id
+			? await User.findById(req.auth._id).lean().exec()
+			: null;
+		const permission = await canManageHotelStaff(actor, hotelId);
+		if (!permission.allowed) {
+			return res.status(403).json({ error: permission.error });
+		}
+
 		const staffList = await User.find({
-			hotelIdWork: hotelId,
-			role: 5000,
+			$and: [
+				{
+					$or: [{ hotelIdWork: hotelId }, { hotelsToSupport: hotelId }],
+				},
+				{
+					$or: [
+						{ role: 5000 },
+						{ roles: 5000 },
+						{ roleDescription: "housekeeping" },
+						{ roleDescriptions: "housekeeping" },
+					],
+				},
+			],
 		}).select("_id name email role");
 		res.json(staffList.map(sanitizeUserForResponse));
 	} catch (err) {
 		console.error(err);
 		res.status(500).json({ error: "Error retrieving housekeeping staff list" });
+	}
+};
+
+exports.listHotelStaffUsers = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		const permission = await canManageHotelStaff(req.profile, hotelId);
+		if (!permission.allowed) {
+			return res.status(403).json({ error: permission.error });
+		}
+
+		const staffList = await User.find({
+			belongsToId: permission.ownerId,
+			$and: [
+				{
+					$or: [
+						{ hotelIdWork: permission.hotelId },
+						{ hotelsToSupport: permission.hotelId },
+					],
+				},
+				{
+					$or: [
+						{ role: { $in: HOTEL_STAFF_ROLES } },
+						{ roles: { $in: HOTEL_STAFF_ROLES } },
+					],
+				},
+			],
+		})
+			.select(
+				"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
+			)
+			.populate("hotelsToSupport", "_id hotelName")
+			.sort({ role: 1, name: 1 })
+			.exec();
+
+		return res.json(staffList.map(sanitizeUserForResponse));
+	} catch (err) {
+		console.error("listHotelStaffUsers error:", err);
+		return res.status(500).json({ error: "Error retrieving hotel staff list" });
+	}
+};
+
+exports.updateHotelStaffUser = async (req, res) => {
+	try {
+		const { hotelId, staffId } = req.params;
+		const permission = await canManageHotelStaff(req.profile, hotelId);
+		if (!permission.allowed) {
+			return res.status(403).json({ error: permission.error });
+		}
+		if (!isValidObjectId(staffId)) {
+			return res.status(400).json({ error: "Invalid staff id" });
+		}
+
+		const staffUser = await User.findById(staffId).exec();
+		if (!staffUser) {
+			return res.status(400).json({ error: "Staff user was not found" });
+		}
+
+		const staffHotelIds = uniqueValidObjectIds([
+			staffUser.hotelIdWork,
+			...(Array.isArray(staffUser.hotelsToSupport)
+				? staffUser.hotelsToSupport
+				: []),
+		]);
+		const staffRoles = [
+			Number(staffUser.role),
+			...(Array.isArray(staffUser.roles)
+				? staffUser.roles.map((role) => Number(role))
+				: []),
+		];
+		if (
+			!staffHotelIds.includes(permission.hotelId) ||
+			String(staffUser.belongsToId || "") !== permission.ownerId ||
+			!staffRoles.some((role) => HOTEL_STAFF_ROLES.includes(role))
+		) {
+			return res
+				.status(403)
+				.json({ error: "This staff account does not belong to this hotel" });
+		}
+
+		const payload = req.body || {};
+
+		if ("name" in payload) {
+			if (!String(payload.name || "").trim()) {
+				return res.status(400).json({ error: "Name is required" });
+			}
+			staffUser.name = String(payload.name).trim();
+		}
+
+		if ("email" in payload) {
+			const email = normalizeOptionalEmail(payload.email);
+			if (email) {
+				if (!validateEmailFormat(email)) {
+					return res.status(400).json({ error: "Invalid email format" });
+				}
+				const duplicateEmail = await User.findOne({
+					_id: { $ne: staffUser._id },
+					email: { $regex: new RegExp("^" + escapeRegExp(email) + "$", "i") },
+				}).select("_id");
+				if (duplicateEmail) {
+					return res.status(400).json({ error: "Email already in use" });
+				}
+				staffUser.email = email;
+				staffUser.emailIsPlaceholder = false;
+			} else {
+				staffUser.email = buildStaffPlaceholderEmail(
+					staffUser.phone || payload.phone || "",
+					permission.hotelId
+				);
+				staffUser.emailIsPlaceholder = true;
+			}
+		}
+
+		if ("phone" in payload) {
+			const phone = cleanPhoneNumber(payload.phone || "");
+			const duplicatePhone = await User.findOne({
+				_id: { $ne: staffUser._id },
+				phone,
+			}).select("_id");
+			if (duplicatePhone) {
+				return res.status(400).json({ error: "Phone already in use" });
+			}
+			staffUser.phone = phone;
+			if (staffUser.emailIsPlaceholder || isStaffPlaceholderEmail(staffUser.email)) {
+				staffUser.email = buildStaffPlaceholderEmail(phone, permission.hotelId);
+				staffUser.emailIsPlaceholder = true;
+			}
+		}
+
+		if ("companyName" in payload) {
+			staffUser.companyName = String(payload.companyName || "").trim();
+		}
+
+		if ("roleDescription" in payload || "role" in payload) {
+			const normalizedRoleDescription = String(
+				payload.roleDescription || staffUser.roleDescription || ""
+			)
+				.trim()
+				.toLowerCase();
+			const nextRole =
+				Number(payload.role) ||
+				ROLE_BY_DESCRIPTION[normalizedRoleDescription] ||
+				Number(staffUser.role);
+
+			if (!ROLE_BY_DESCRIPTION[normalizedRoleDescription]) {
+				return res.status(400).json({ error: "Please select a valid role" });
+			}
+			if (ROLE_BY_DESCRIPTION[normalizedRoleDescription] !== nextRole) {
+				return res
+					.status(400)
+					.json({ error: "Role does not match department" });
+			}
+
+			staffUser.role = nextRole;
+			staffUser.roleDescription = normalizedRoleDescription;
+		}
+
+		if ("roleDescriptions" in payload && Array.isArray(payload.roleDescriptions)) {
+			const normalizedRoleDescriptions = [
+				...new Set(
+					payload.roleDescriptions
+						.map((item) => String(item || "").trim().toLowerCase())
+						.filter((item) => ROLE_BY_DESCRIPTION[item])
+				),
+			];
+			if (!normalizedRoleDescriptions.length) {
+				return res.status(400).json({ error: "Please select a valid role" });
+			}
+			staffUser.roleDescriptions = normalizedRoleDescriptions;
+			staffUser.roles = normalizedRoleDescriptions.map(
+				(item) => ROLE_BY_DESCRIPTION[item]
+			);
+			if (!normalizedRoleDescriptions.includes(staffUser.roleDescription)) {
+				staffUser.roleDescription = normalizedRoleDescriptions[0];
+				staffUser.role = ROLE_BY_DESCRIPTION[normalizedRoleDescriptions[0]];
+			}
+		}
+
+		if ("activeUser" in payload) {
+			staffUser.activeUser = Boolean(payload.activeUser);
+		}
+
+		if (payload.password != null && payload.password !== "") {
+			if (String(payload.password).length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Password should be min 6 characters long" });
+			}
+			staffUser.password = String(payload.password);
+		}
+
+		if ("accessTo" in payload && Array.isArray(payload.accessTo)) {
+			staffUser.accessTo = payload.accessTo;
+		}
+
+		const hasHotelScopePayload =
+			"hotelIdWork" in payload ||
+			"hotelIdsWork" in payload ||
+			"hotelsToSupport" in payload;
+
+		if (hasHotelScopePayload) {
+			const requestedHotelIds = uniqueValidObjectIds([
+				payload.hotelIdWork,
+				...(Array.isArray(payload.hotelIdsWork) ? payload.hotelIdsWork : []),
+				...(Array.isArray(payload.hotelsToSupport)
+					? payload.hotelsToSupport
+					: []),
+			]);
+			if (!requestedHotelIds.length) {
+				return res
+					.status(400)
+					.json({ error: "Please select at least one hotel" });
+			}
+
+			const manageableHotelIds = await getManageableStaffHotelIds(
+				req.profile,
+				permission
+			);
+			const invalidHotel = requestedHotelIds.some(
+				(id) => !manageableHotelIds.includes(id)
+			);
+			if (invalidHotel) {
+				return res
+					.status(403)
+					.json({ error: "You cannot assign this account to that hotel" });
+			}
+
+			staffUser.hotelIdWork = requestedHotelIds[0];
+			staffUser.hotelsToSupport = requestedHotelIds;
+		} else if (!staffUser.hotelIdWork) {
+			staffUser.hotelIdWork = permission.hotelId;
+		}
+
+		if (!Array.isArray(staffUser.hotelsToSupport) || !staffUser.hotelsToSupport.length) {
+			staffUser.hotelsToSupport = [staffUser.hotelIdWork || permission.hotelId];
+		}
+		staffUser.belongsToId = permission.ownerId;
+
+		const saved = await staffUser.save();
+		return res.json(sanitizeUserForResponse(saved));
+	} catch (err) {
+		console.error("updateHotelStaffUser error:", err);
+		return res
+			.status(400)
+			.json({ error: err.message || "Hotel staff update failed" });
 	}
 };
 

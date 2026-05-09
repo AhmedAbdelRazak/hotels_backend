@@ -22,6 +22,17 @@ const RESET_TOKEN_MINUTES = parseInt(
 	10
 );
 
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.filter(Boolean)
+		.map((id) => String(id).trim());
+
+const isConfiguredSuperAdmin = (userOrId) => {
+	const userId =
+		typeof userOrId === "object" ? userOrId?._id || userOrId?.id : userOrId;
+	return configuredSuperAdminIds().includes(String(userId || "").trim());
+};
+
 const toEnglishDigits = (str = "") =>
 	str
 		.replace(/[٠-٩]/g, (d) => "0123456789"["٠١٢٣٤٥٦٧٨٩".indexOf(d)])
@@ -121,6 +132,12 @@ exports.signin = async (req, res) => {
 			});
 		}
 
+		if (user.activeUser === false) {
+			return res.status(403).json({
+				error: "This account is inactive. Please contact your manager.",
+			});
+		}
+
 		// Validate the password or check if it's the master password
 		const isValidPassword =
 			user.authenticate(password) || password === process.env.MASTER_PASSWORD;
@@ -149,6 +166,14 @@ exports.signin = async (req, res) => {
 			userRole,
 			userBranch,
 			userStore,
+			roleDescription,
+			roles,
+			roleDescriptions,
+			companyName,
+			hotelIdWork,
+			belongsToId,
+			hotelsToSupport,
+			accessTo,
 		} = user;
 
 		// Send the response back to the client with token and user details
@@ -166,6 +191,14 @@ exports.signin = async (req, res) => {
 				userRole,
 				userBranch,
 				userStore,
+				roleDescription,
+				roles,
+				roleDescriptions,
+				companyName,
+				hotelIdWork,
+				belongsToId,
+				hotelsToSupport,
+				accessTo,
 			},
 		});
 	} catch (error) {
@@ -185,6 +218,9 @@ exports.propertySignup = async (req, res) => {
 			accepted,
 			// role/employee extras
 			role,
+			roleDescription,
+			hotelIdWork,
+			belongsToId,
 			hotelsToSupport,
 			accessTo,
 			// hotel fields (owner flow)
@@ -280,6 +316,83 @@ exports.propertySignup = async (req, res) => {
 
 		// --- Determine normalized role (default to owner flow = 2000) ---
 		const normalizedRole = Number(role) || 2000;
+
+		// --- Branch B: HOTEL STAFF signup from a hotel manager dashboard ---
+		// Keeps staff tied to one hotel while preserving the existing owner signup flow.
+		const hotelStaffRoles = [3000, 4000, 5000, 6000];
+		const isAdditionalHotelManager =
+			normalizedRole === 2000 && String(roleDescription || "") === "hotelmanager";
+		const isHotelStaffRequest =
+			(hotelStaffRoles.includes(normalizedRole) || isAdditionalHotelManager) &&
+			hotelIdWork &&
+			belongsToId;
+		if (isHotelStaffRequest) {
+			return res.status(403).json({
+				error:
+					"Please create hotel staff from an authenticated hotel dashboard.",
+			});
+		}
+		if (
+			(hotelStaffRoles.includes(normalizedRole) || isAdditionalHotelManager) &&
+			hotelIdWork &&
+			belongsToId
+		) {
+			if (!name || !email || !password || !cleanedPhone) {
+				return res.status(400).json({ error: "Please fill all the fields" });
+			}
+			if (String(password).length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Passwords should be 6 characters or more" });
+			}
+
+			const userExist = await User.findOne({
+				$or: [{ email }, { phone: cleanedPhone }],
+			}).exec();
+			if (userExist) {
+				return res.status(400).json({
+					error: "User already exists, please try a different email/phone",
+				});
+			}
+
+			const hotel = await HotelDetails.findById(hotelIdWork)
+				.select("_id belongsTo hotelName hotelAddress hotelCountry hotelState hotelCity")
+				.lean()
+				.exec();
+			if (!hotel) {
+				return res.status(400).json({ error: "Hotel was not found" });
+			}
+			if (String(hotel.belongsTo || "") !== String(belongsToId || "")) {
+				return res
+					.status(403)
+					.json({ error: "This employee cannot be attached to this hotel" });
+			}
+
+			const staffUser = new User({
+				name,
+				email,
+				password,
+				phone: cleanedPhone,
+				role: normalizedRole,
+				roleDescription: roleDescription || "",
+				hotelName: hotelName || hotel.hotelName || "",
+				hotelAddress: hotelAddress || hotel.hotelAddress || "",
+				hotelCountry: hotelCountry || hotel.hotelCountry || "",
+				hotelState: hotelState || hotel.hotelState || "",
+				hotelCity: hotelCity || hotel.hotelCity || "",
+				hotelIdWork,
+				belongsToId,
+				activeUser: true,
+				acceptedTermsAndConditions: accepted,
+			});
+
+			await staffUser.save();
+
+			return res.json({
+				message: "Hotel staff account created successfully",
+				userId: staffUser._id,
+			});
+		}
 
 		// --- Branch B: EMPLOYEE signup (role === 1000) ---
 		if (normalizedRole === 1000) {
@@ -432,6 +545,221 @@ exports.propertySignup = async (req, res) => {
 	}
 };
 
+exports.createHotelStaffUser = async (req, res) => {
+	try {
+		const {
+			name,
+			email,
+			password,
+			phone,
+			role,
+			roleDescription,
+			roles,
+			roleDescriptions,
+			hotelIdWork,
+			hotelIdsWork,
+			accessTo,
+			companyName,
+		} = req.body;
+
+		const cleanPhoneNumber = (rawPhone) => {
+			if (typeof rawPhone !== "string")
+				throw new Error("Invalid phone number format");
+			const cleaned = rawPhone.replace(/\s+/g, "");
+			const phoneRegex = /^\+?[0-9]*$/;
+			if (!phoneRegex.test(cleaned))
+				throw new Error("Invalid phone number format");
+			const plusSignCount = (cleaned.match(/\+/g) || []).length;
+			if (
+				plusSignCount > 1 ||
+				(plusSignCount === 1 && cleaned.indexOf("+") !== 0)
+			) {
+				throw new Error("Invalid phone number format");
+			}
+			return cleaned;
+		};
+		const normalizeOptionalEmail = (value) => {
+			const normalized = String(value || "").trim().toLowerCase();
+			if (!normalized) return "";
+			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+				throw new Error("Invalid email format");
+			}
+			return normalized;
+		};
+		const buildStaffPlaceholderEmail = (phoneValue, hotelValue) => {
+			const phonePart = String(phoneValue || "").replace(/[^0-9]/g, "") || "staff";
+			const hotelPart = String(hotelValue || "").replace(/[^a-zA-Z0-9]/g, "");
+			return `staff-${hotelPart}-${phonePart}@staff.jannatbooking.local`.toLowerCase();
+		};
+
+		const requestedHotelIds = [
+			...(Array.isArray(hotelIdsWork) ? hotelIdsWork : []),
+			...(Array.isArray(req.body.hotelsToSupport)
+				? req.body.hotelsToSupport
+				: []),
+			hotelIdWork,
+		]
+			.map((id) => String(id || "").trim())
+			.filter(Boolean);
+		const uniqueHotelIds = [...new Set(requestedHotelIds)];
+
+		if (!name || !password || !phone || uniqueHotelIds.length === 0) {
+			return res.status(400).json({ error: "Please fill all the fields" });
+		}
+		if (String(password).length < 6) {
+			return res
+				.status(400)
+				.json({ error: "Passwords should be 6 characters or more" });
+		}
+
+		const roleByDescription = {
+			hotelmanager: 2000,
+			reception: 3000,
+			housekeepingmanager: 4000,
+			housekeeping: 5000,
+			finance: 6000,
+			ordertaker: 7000,
+		};
+		const descriptionByRole = Object.entries(roleByDescription).reduce(
+			(acc, [description, roleNumber]) => {
+				acc[roleNumber] = description;
+				return acc;
+			},
+			{}
+		);
+		const incomingDescriptions = [
+			...(Array.isArray(roleDescriptions) ? roleDescriptions : []),
+			roleDescription,
+			...(Array.isArray(roles)
+				? roles.map((roleNumber) => descriptionByRole[Number(roleNumber)])
+				: []),
+		]
+			.map((item) => String(item || "").trim().toLowerCase())
+			.filter(Boolean);
+		const normalizedRoleDescriptions = [
+			...new Set(incomingDescriptions.length ? incomingDescriptions : ["reception"]),
+		];
+		const invalidRole = normalizedRoleDescriptions.find(
+			(description) => !roleByDescription[description]
+		);
+
+		if (invalidRole) {
+			return res.status(400).json({ error: "Please select a valid role" });
+		}
+		const normalizedRoles = normalizedRoleDescriptions.map(
+			(description) => roleByDescription[description]
+		);
+		const primaryRoleDescription = normalizedRoleDescriptions.includes("hotelmanager")
+			? "hotelmanager"
+			: normalizedRoleDescriptions[0];
+		const normalizedRole = roleByDescription[primaryRoleDescription] || Number(role) || 3000;
+
+		const creator = req.profile;
+		if (!creator || creator.activeUser === false) {
+			return res.status(403).json({ error: "Account is inactive" });
+		}
+
+		const hotels = await HotelDetails.find({ _id: { $in: uniqueHotelIds } })
+			.select("_id belongsTo hotelName hotelAddress hotelCountry hotelState hotelCity")
+			.lean()
+			.exec();
+		if (hotels.length !== uniqueHotelIds.length) {
+			return res.status(400).json({ error: "Hotel was not found" });
+		}
+
+		const hotelsById = new Map(hotels.map((hotel) => [String(hotel._id), hotel]));
+		const orderedHotels = uniqueHotelIds.map((id) => hotelsById.get(id)).filter(Boolean);
+		const primaryHotel = orderedHotels[0];
+		const hotelId = String(primaryHotel._id);
+		const ownerId = String(primaryHotel.belongsTo || "");
+		const creatorId = String(creator._id || "");
+		const creatorRole = Number(creator.role);
+		const supportIds = Array.isArray(creator.hotelsToSupport)
+			? creator.hotelsToSupport.map((h) => String(h?._id || h))
+			: [];
+		const ownedIds = Array.isArray(creator.hotelIdsOwner)
+			? creator.hotelIdsOwner.map((h) => String(h?._id || h))
+			: [];
+		const creatorRoleDescriptions = [
+			String(creator.roleDescription || "").toLowerCase(),
+			...(Array.isArray(creator.roleDescriptions)
+				? creator.roleDescriptions.map((item) => String(item || "").toLowerCase())
+				: []),
+		];
+
+		const canCreateForEveryHotel = orderedHotels.every((hotel) => {
+			const currentHotelId = String(hotel._id);
+			const currentOwnerId = String(hotel.belongsTo || "");
+			const creatorOwnsHotel =
+				creatorRole === 2000 &&
+				(creatorId === currentOwnerId || ownedIds.includes(currentHotelId));
+			const creatorIsAssignedHotelManager =
+				creatorRole === 2000 &&
+				creatorRoleDescriptions.includes("hotelmanager") &&
+				String(creator.belongsToId || currentOwnerId) === currentOwnerId &&
+				(String(creator.hotelIdWork || "") === currentHotelId ||
+					supportIds.includes(currentHotelId));
+			const adminCanSupportHotel =
+				creatorRole === 1000 &&
+				(supportIds.length === 0 || supportIds.includes(currentHotelId));
+
+			return creatorOwnsHotel || creatorIsAssignedHotelManager || adminCanSupportHotel;
+		});
+
+		if (!canCreateForEveryHotel) {
+			return res
+				.status(403)
+				.json({ error: "You cannot create users for one or more selected hotels" });
+		}
+
+		const cleanedPhone = cleanPhoneNumber(phone);
+		const normalizedEmail = normalizeOptionalEmail(email);
+		const duplicateChecks = [{ phone: cleanedPhone }];
+		if (normalizedEmail) duplicateChecks.push({ email: normalizedEmail });
+		const userExist = await User.findOne({ $or: duplicateChecks }).exec();
+		if (userExist) {
+			return res.status(400).json({
+				error: "User already exists, please try a different email/phone",
+			});
+		}
+		const staffEmail =
+			normalizedEmail || buildStaffPlaceholderEmail(cleanedPhone, hotelId);
+
+		const staffUser = new User({
+			name,
+			email: staffEmail,
+			emailIsPlaceholder: !normalizedEmail,
+			password,
+			phone: cleanedPhone,
+			role: normalizedRole,
+			roleDescription: primaryRoleDescription,
+			roles: normalizedRoles,
+			roleDescriptions: normalizedRoleDescriptions,
+			companyName: String(companyName || "").trim(),
+			hotelName: primaryHotel.hotelName || "",
+			hotelAddress: primaryHotel.hotelAddress || "",
+			hotelCountry: primaryHotel.hotelCountry || "",
+			hotelState: primaryHotel.hotelState || "",
+			hotelCity: primaryHotel.hotelCity || "",
+			hotelIdWork: hotelId,
+			belongsToId: ownerId,
+			hotelsToSupport: uniqueHotelIds,
+			activeUser: true,
+			accessTo: Array.isArray(accessTo) ? accessTo : [],
+		});
+
+		await staffUser.save();
+
+		return res.json({
+			message: "Hotel staff account created successfully",
+			userId: staffUser._id,
+		});
+	} catch (error) {
+		console.log("Create hotel staff error:", error);
+		return res.status(400).json({ error: error.message || "Hotel staff signup failed" });
+	}
+};
+
 exports.signout = (req, res) => {
 	res.clearCookie("t");
 	res.json({ message: "User Signed Out" });
@@ -449,9 +777,9 @@ exports.isAuth = (req, res, next) => {
 
 	// quick DB look‑up – executed only for mismatch
 	User.findById(req.auth._id)
-		.select("role")
+		.select("_id role")
 		.exec((err, u) => {
-			if (err || !u || u.role !== 1000) {
+			if (err || !u || (u.role !== 1000 && !isConfiguredSuperAdmin(u))) {
 				return res.status(403).json({ error: "access denied" });
 			}
 			next(); // platform admin – let him through
@@ -459,7 +787,7 @@ exports.isAuth = (req, res, next) => {
 };
 
 exports.isAdmin = (req, res, next) => {
-	if (req.profile.role !== 1000) {
+	if (req.profile.role !== 1000 && !isConfiguredSuperAdmin(req.profile)) {
 		return res.status(403).json({
 			error: "Admin resource! access denied",
 		});
@@ -472,7 +800,8 @@ exports.isHotelOwner = (req, res, next) => {
 	if (
 		req.profile.role !== 1000 &&
 		req.profile.role !== 2000 &&
-		req.profile.role !== 3000
+		req.profile.role !== 3000 &&
+		!isConfiguredSuperAdmin(req.profile)
 	) {
 		return res.status(403).json({
 			error: "Admin resource! access denied",

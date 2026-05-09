@@ -181,7 +181,15 @@ const buildJannatBookingBreakdown = (
 	existingBreakdown,
 ) => {
 	if (existingBreakdown && typeof existingBreakdown === "object") {
-		return existingBreakdown;
+		const breakdown = { ...existingBreakdown };
+		if (
+			breakdown.paid_to_zad !== undefined &&
+			breakdown.paid_to_hotel === undefined
+		) {
+			breakdown.paid_to_hotel = breakdown.paid_to_zad;
+		}
+		delete breakdown.paid_to_zad;
+		return breakdown;
 	}
 	const amount = toNum2(paidAmount || 0);
 	if (!(amount > 0)) return undefined;
@@ -193,7 +201,7 @@ const buildJannatBookingBreakdown = (
 		paid_online_via_link: 0,
 		paid_at_hotel_cash: 0,
 		paid_at_hotel_card: 0,
-		paid_to_zad: 0,
+		paid_to_hotel: 0,
 		paid_online_jannatbooking: amount,
 		paid_online_other_platforms: 0,
 		paid_online_via_instapay: 0,

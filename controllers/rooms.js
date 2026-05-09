@@ -5,6 +5,55 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const moment = require("moment");
 
+const HOUSED_EXCLUDED_STATUS =
+	/cancelled|canceled|no[_\s-]?show|checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
+
+const normalizeId = (value) => {
+	if (!value) return "";
+	if (typeof value === "object") {
+		return String(value._id || value.id || value.roomId || "");
+	}
+	return String(value);
+};
+
+const extractReservationRoomIds = (roomIdField) =>
+	(Array.isArray(roomIdField) ? roomIdField : [roomIdField])
+		.map(normalizeId)
+		.filter(Boolean);
+
+const getCurrentlyHousedRoomIds = async (hotelId) => {
+	const startOfDay = moment().startOf("day").toDate();
+	const endOfDay = moment().endOf("day").toDate();
+	const reservations = await Reservations.find({
+		hotelId,
+		checkin_date: { $lte: endOfDay },
+		checkout_date: { $gte: startOfDay },
+		reservation_status: { $not: HOUSED_EXCLUDED_STATUS },
+		roomId: { $exists: true, $ne: [] },
+	})
+		.select("roomId")
+		.lean()
+		.exec();
+
+	const housedRoomIds = new Set();
+	reservations.forEach((reservation) => {
+		extractReservationRoomIds(reservation.roomId).forEach((roomId) =>
+			housedRoomIds.add(roomId)
+		);
+	});
+	return housedRoomIds;
+};
+
+const attachCurrentlyHousedFlag = (rooms = [], housedRoomIds = new Set()) =>
+	rooms.map((room) => {
+		const plainRoom =
+			room && typeof room.toObject === "function" ? room.toObject() : room;
+		return {
+			...plainRoom,
+			isCurrentlyHoused: housedRoomIds.has(normalizeId(plainRoom?._id)),
+		};
+	});
+
 exports.roomById = (req, res, next, id) => {
 	Rooms.findById(id).exec((err, room) => {
 		if (err || !room) {
@@ -151,22 +200,25 @@ exports.deleteRooms = (req, res) => {
 	);
 };
 
-exports.list = (req, res) => {
+exports.list = async (req, res) => {
 	const hotelId = mongoose.Types.ObjectId(req.params.accountId);
 	const belongsTo = mongoose.Types.ObjectId(req.params.mainUserId);
 
-	Rooms.find({ hotelId: hotelId, belongsTo: belongsTo })
-		.populate("belongsTo")
-		.exec((err, data) => {
-			if (err) {
-				console.log(err, "err");
-
-				return res.status(400).json({
-					error: err,
-				});
-			}
-			res.json(data);
+	try {
+		const [rooms, housedRoomIds] = await Promise.all([
+			Rooms.find({ hotelId: hotelId, belongsTo: belongsTo })
+				.populate("belongsTo")
+				.lean()
+				.exec(),
+			getCurrentlyHousedRoomIds(hotelId),
+		]);
+		res.json(attachCurrentlyHousedFlag(rooms, housedRoomIds));
+	} catch (err) {
+		console.log(err, "err");
+		return res.status(400).json({
+			error: err,
 		});
+	}
 };
 
 exports.remove = (req, res) => {

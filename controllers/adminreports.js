@@ -1,5 +1,7 @@
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
+const HouseKeeping = require("../models/housekeeping");
+const Rooms = require("../models/rooms");
 const mongoose = require("mongoose");
 const moment = require("moment-timezone");
 const ObjectId = mongoose.Types.ObjectId;
@@ -56,7 +58,7 @@ const PAID_BREAKDOWN_TOTAL_KEYS = [
 	"paid_online_via_link",
 	"paid_at_hotel_cash",
 	"paid_at_hotel_card",
-	"paid_to_zad",
+	"paid_to_hotel",
 	"paid_online_jannatbooking",
 	"paid_online_other_platforms",
 	"paid_online_via_instapay",
@@ -1214,9 +1216,85 @@ function isSameDay(date1, date2, timezone = DEFAULT_TIMEZONE) {
 	return d1.isSame(d2, "day");
 }
 
-// Always provide a full empty report so the frontend can render a zero-state
-function makeEmptyReport() {
+function parsePositiveIntegerParam(value, fallback, max = 31) {
+	const parsed = parseInt(value, 10);
+	if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+	return Math.min(parsed, max);
+}
+
+function parseDashboardDate(value, timezone) {
+	if (!value) return null;
+
+	const dateOnly = moment.tz(String(value), "YYYY-MM-DD", true, timezone);
+	if (dateOnly.isValid()) return dateOnly;
+
+	const parsed = moment.tz(value, timezone);
+	return parsed.isValid() ? parsed : null;
+}
+
+function resolveDashboardWindow(query = {}) {
+	const timezone =
+		query.timezone && moment.tz.zone(query.timezone)
+			? query.timezone
+			: DEFAULT_TIMEZONE;
+	const nowMoment = moment.tz(timezone);
+	const requestedStart = parseDashboardDate(query.startDate, timezone);
+	const requestedEnd = parseDashboardDate(query.endDate, timezone);
+	const hasCustomDateRange = Boolean(requestedStart || requestedEnd);
+
+	let reportStartMoment = (requestedStart || nowMoment).clone().startOf("day");
+	let reportEndMoment = (requestedEnd || reportStartMoment).clone().endOf("day");
+
+	if (reportEndMoment.isBefore(reportStartMoment)) {
+		reportEndMoment = reportStartMoment.clone().endOf("day");
+	}
+
+	const forecastDays = parsePositiveIntegerParam(query.forecastDays, 10, 31);
+	const inventoryDays = parsePositiveIntegerParam(query.inventoryDays, 7, 21);
+	const trendDays = parsePositiveIntegerParam(query.trendDays, 7, 31);
+
 	return {
+		timezone,
+		nowMoment,
+		reportStartMoment,
+		reportEndMoment,
+		forecastDays,
+		inventoryDays,
+		trendDays,
+		hasCustomDateRange,
+	};
+}
+
+function buildDashboardMeta({
+	hotelId,
+	timezone = DEFAULT_TIMEZONE,
+	reportStartMoment,
+	reportEndMoment,
+	forecastDays = 10,
+	inventoryDays = 7,
+	trendDays = 7,
+	hasCustomDateRange = false,
+} = {}) {
+	const start = reportStartMoment || moment.tz(timezone).startOf("day");
+	const end = reportEndMoment || start.clone().endOf("day");
+
+	return {
+		hotelId: hotelId || "all",
+		timezone,
+		startDate: start.format("YYYY-MM-DD"),
+		endDate: end.format("YYYY-MM-DD"),
+		forecastDays,
+		inventoryDays,
+		trendDays,
+		hasCustomDateRange,
+		generatedAt: moment.tz(timezone).toISOString(),
+	};
+}
+
+// Always provide a full empty report so the frontend can render a zero-state
+function makeEmptyReport(meta = {}) {
+	return {
+		meta,
 		firstRow: {
 			arrivals: 0,
 			departures: 0,
@@ -1231,6 +1309,8 @@ function makeEmptyReport() {
 			occupancy: { booked: 0, available: 0, overallRoomsCount: 0 },
 			latestCheckouts: [],
 			upcomingCheckins: [],
+			bookingMix: { individuals: 0, online: 0, company: 0 },
+			financialSummary: { revenue: 0, collected: 0, outstanding: 0 },
 		},
 		thirdRow: {
 			roomsTable: [],
@@ -1265,14 +1345,39 @@ exports.adminDashboardReport = async (req, res) => {
 			const objId = tryConvertToObjectId(hotelId);
 			if (!objId) {
 				// Keep 400, but still send consistent data shape
+				const fallbackWindow = resolveDashboardWindow(req.query || {});
 				return res.status(400).json({
 					success: false,
 					message: `Invalid hotelId '${hotelId}'`,
-					data: makeEmptyReport(),
+					data: makeEmptyReport(
+						buildDashboardMeta({ hotelId, ...fallbackWindow })
+					),
 				});
 			}
 			baseFilter.hotelId = objId;
 		}
+
+		const {
+			timezone,
+			nowMoment,
+			reportStartMoment,
+			reportEndMoment,
+			forecastDays,
+			inventoryDays,
+			trendDays,
+			hasCustomDateRange,
+		} = resolveDashboardWindow(req.query || {});
+
+		const responseMeta = buildDashboardMeta({
+			hotelId,
+			timezone,
+			reportStartMoment,
+			reportEndMoment,
+			forecastDays,
+			inventoryDays,
+			trendDays,
+			hasCustomDateRange,
+		});
 
 		const displayMode = "displayName";
 		const cancelledRegex = /cancelled|canceled/i;
@@ -1361,23 +1466,51 @@ exports.adminDashboardReport = async (req, res) => {
 			return res.json({
 				success: true,
 				message: "No Reservations Found",
-				data: makeEmptyReport(),
+				data: makeEmptyReport(responseMeta),
 			});
 		}
-		// 4) Define "today" using hotel timezone (default: Asia/Riyadh)
-		const timezone = DEFAULT_TIMEZONE;
-		const nowMoment = moment.tz(timezone);
-		const now = nowMoment.toDate();
-		const startOfToday = nowMoment.clone().startOf("day").toDate();
-		const endOfToday = nowMoment.clone().endOf("day").toDate();
+		// 4) Define the reporting window using hotel timezone (default: Asia/Riyadh)
+		const now = reportStartMoment.clone().toDate();
+		const startOfToday = reportStartMoment.clone().startOf("day").toDate();
+		const endOfToday = reportEndMoment.clone().endOf("day").toDate();
 
-		// We'll do 10 days after "today" (inclusive of today: 0..9)
-		const endOf10Days = nowMoment
+		// Forecast starts at the selected report start date (inclusive)
+		const endOf10Days = reportStartMoment
 			.clone()
 			.startOf("day")
-			.add(9, "days")
+			.add(forecastDays - 1, "days")
 			.endOf("day")
 			.toDate();
+		const reportWindowOverlapCondition = {
+			$or: [
+				{ checkin_date: { $gte: startOfToday, $lte: endOfToday } },
+				{ checkout_date: { $gte: startOfToday, $lte: endOfToday } },
+				{
+					$and: [
+						{ checkin_date: { $lte: endOfToday } },
+						{ checkout_date: { $gt: startOfToday } },
+					],
+				},
+				{
+					$expr: {
+						$and: [
+							{
+								$gte: [
+									{ $ifNull: ["$booked_at", "$createdAt"] },
+									startOfToday,
+								],
+							},
+							{
+								$lte: [{ $ifNull: ["$booked_at", "$createdAt"] }, endOfToday],
+							},
+						],
+					},
+				},
+			],
+		};
+		const reportWindowActiveFilter = {
+			$and: [statusNotExcluded, reportWindowOverlapCondition],
+		};
 
 		// ============== FIRST ROW ==============
 		const arrivalsCount = await safeCount({
@@ -1424,12 +1557,12 @@ exports.adminDashboardReport = async (req, res) => {
 			$and: [statusNotExcluded, statusNotCheckout],
 		});
 
-		const tomorrowStart = nowMoment
+		const tomorrowStart = reportEndMoment
 			.clone()
 			.add(1, "day")
 			.startOf("day")
 			.toDate();
-		const tomorrowEnd = nowMoment
+		const tomorrowEnd = reportEndMoment
 			.clone()
 			.add(1, "day")
 			.endOf("day")
@@ -1668,10 +1801,10 @@ exports.adminDashboardReport = async (req, res) => {
 			select: "checkin_date checkout_date pickedRoomsType reservation_status bedNumber",
 		});
 
-		const usageArray10 = new Array(10).fill(0);
-		const derivedUsageArray10 = new Array(10).fill(0);
-		const dayList10 = Array.from({ length: 10 }, (_, i) =>
-			nowMoment.clone().startOf("day").add(i, "days").toDate()
+		const usageArray10 = new Array(forecastDays).fill(0);
+		const derivedUsageArray10 = new Array(forecastDays).fill(0);
+		const dayList10 = Array.from({ length: forecastDays }, (_, i) =>
+			reportStartMoment.clone().startOf("day").add(i, "days").toDate()
 		);
 
 		for (const doc of relevantFor10Days) {
@@ -1690,7 +1823,7 @@ exports.adminDashboardReport = async (req, res) => {
 				const isDerived = !resolvedKey;
 				if (!resolvedKey) ensureDerivedRoomType(rtObj);
 
-				for (let i = 0; i < 10; i++) {
+				for (let i = 0; i < forecastDays; i++) {
 					const dayDate = dayList10[i];
 					if (dayDate >= cIn && dayDate < cOut) {
 						usageArray10[i] += units;
@@ -1777,21 +1910,75 @@ exports.adminDashboardReport = async (req, res) => {
 			};
 		});
 
+		const windowReservations = await safeFind({
+			cond: reportWindowActiveFilter,
+			select:
+				"booking_source reservedBy total_amount paid_amount paid_amount_breakdown payment_details",
+		});
+		const bookingMix = { individuals: 0, online: 0, company: 0 };
+		const classifyBookingSource = (value) => {
+			const text = String(value || "").toLowerCase();
+			if (/company|corporate|corp|business|group/.test(text)) {
+				return "company";
+			}
+			if (
+				/online|website|web|ota|booking|expedia|agoda|airbnb|jannat|hotelrunner|hotels\.com|trip|travel|google/.test(
+					text
+				)
+			) {
+				return "online";
+			}
+			return "individuals";
+		};
+
+		const financialSummary = windowReservations.reduce(
+			(summary, reservation) => {
+				const source =
+					reservation?.booking_source ||
+					reservation?.reservedBy?.name ||
+					reservation?.reservedBy ||
+					"";
+				bookingMix[classifyBookingSource(source)] += 1;
+
+				const revenue = toNumber(reservation?.total_amount, 0);
+				const paidBreakdownTotal = computePaidBreakdownTotal(
+					reservation?.paid_amount_breakdown
+				);
+				const onsitePaid = toNumber(
+					reservation?.payment_details?.onsite_paid_amount,
+					0
+				);
+				const paid = Math.max(
+					toNumber(reservation?.paid_amount, 0),
+					paidBreakdownTotal,
+					onsitePaid
+				);
+
+				summary.revenue += revenue;
+				summary.collected += paid;
+				summary.outstanding += Math.max(revenue - paid, 0);
+				return summary;
+			},
+			{ revenue: 0, collected: 0, outstanding: 0 }
+		);
+
 		const secondRow = {
 			cancellations: cancellationsCount,
 			noShow: noShowCount,
 			occupancy, // { booked, available, overallRoomsCount }
 			latestCheckouts,
 			upcomingCheckins,
+			bookingMix,
+			financialSummary,
 		};
 
 		// ============== THIRD ROW ==============
-		// Next 7 days usage => usageByDay7 (displayName-aware + beds for individualBed)
-		const rangeEnd = nowMoment
+		// Next inventoryDays usage => usageByDay7 (displayName-aware + beds for individualBed)
+		const rangeEnd = reportStartMoment
 			.clone()
 			.startOf("day")
-			.add(7, "days")
-			.toDate(); // up to 7 days from today
+			.add(inventoryDays, "days")
+			.toDate(); // up to inventoryDays from the report start date
 
 		const relevantForNext7 = await safeFind({
 			cond: {
@@ -1804,11 +1991,11 @@ exports.adminDashboardReport = async (req, res) => {
 
 		const usageByDay7 = {};
 		for (const rt of baseRoomTypes) {
-			usageByDay7[rt.key] = [0, 0, 0, 0, 0, 0, 0];
+			usageByDay7[rt.key] = new Array(inventoryDays).fill(0);
 		}
 
-		const dayList7 = Array.from({ length: 7 }, (_, i) =>
-			nowMoment.clone().startOf("day").add(i, "days").toDate()
+		const dayList7 = Array.from({ length: inventoryDays }, (_, i) =>
+			reportStartMoment.clone().startOf("day").add(i, "days").toDate()
 		);
 
 		for (const doc of relevantForNext7) {
@@ -1827,10 +2014,10 @@ exports.adminDashboardReport = async (req, res) => {
 				if (!key) key = ensureDerivedRoomType(rtObj);
 
 				if (!usageByDay7[key]) {
-					usageByDay7[key] = [0, 0, 0, 0, 0, 0, 0];
+					usageByDay7[key] = new Array(inventoryDays).fill(0);
 				}
 
-				for (let i = 0; i < 7; i++) {
+				for (let i = 0; i < inventoryDays; i++) {
 					const dayDate = dayList7[i];
 					if (dayDate >= cIn && dayDate < cOut) {
 						usageByDay7[key][i] += units;
@@ -1849,7 +2036,7 @@ exports.adminDashboardReport = async (req, res) => {
 			const rt = roomTypeByKey.get(key);
 			const label = rt?.label || rt?.displayName || rt?.roomType || key;
 			const total = toNumber(baseTotalsLookup[key], 0);
-			const dailyUsage = usageByDay7[key] || [0, 0, 0, 0, 0, 0, 0];
+			const dailyUsage = usageByDay7[key] || new Array(inventoryDays).fill(0);
 			const sold = toNumber(dailyUsage[0], 0);
 			const peakBooked = Math.max(...dailyUsage);
 			const totalForDisplay = total > 0 ? total : peakBooked;
@@ -1873,13 +2060,50 @@ exports.adminDashboardReport = async (req, res) => {
 			})
 		);
 
-		// You can wire this to real housekeeping if you have it
-		const housekeeping = { clean: 25, cleaning: 0, dirty: 0 };
+		const roomsCleanMatch = {};
+		if (baseFilter.hotelId) roomsCleanMatch.hotelId = baseFilter.hotelId;
+		const roomCleanStatusAgg = await Rooms.aggregate([
+			{ $match: roomsCleanMatch },
+			{ $group: { _id: "$cleanRoom", count: { $sum: 1 } } },
+		]).catch((e) => {
+			console.error("Rooms clean status aggregation failed", e);
+			return [];
+		});
+		const dirtyRooms = roomCleanStatusAgg.reduce(
+			(sum, item) => sum + (item?._id === false ? toNumber(item.count) : 0),
+			0
+		);
+		const housekeepingMatch = {};
+		if (baseFilter.hotelId) housekeepingMatch.hotelId = baseFilter.hotelId;
+		const cleaningTasksCount = await HouseKeeping.countDocuments({
+			...housekeepingMatch,
+			task_status: /unfinished|cleaning/i,
+		}).catch((e) => {
+			console.error("HouseKeeping unfinished count failed", e);
+			return 0;
+		});
+		const configuredHousekeepingTotal = Math.max(baseTotalRoomsAll, 0);
+		const cappedDirtyRooms = Math.min(dirtyRooms, configuredHousekeepingTotal);
+		const cappedCleaningRooms = Math.min(
+			cleaningTasksCount,
+			Math.max(configuredHousekeepingTotal - cappedDirtyRooms, 0)
+		);
+		const housekeeping = {
+			clean: Math.max(
+				configuredHousekeepingTotal - cappedDirtyRooms - cappedCleaningRooms,
+				0
+			),
+			cleaning: cappedCleaningRooms,
+			dirty: cappedDirtyRooms,
+		};
 		const thirdRow = { roomsTable: dynamicRoomsTable, housekeeping };
 
 		// ============== FOURTH ROW ==============
+		const reportStatsFilter = hasCustomDateRange
+			? reportWindowActiveFilter
+			: statusNotExcluded;
 		const pipelineTopChannels = [
-			{ $match: { $and: [baseFilter, statusNotExcluded] } },
+			{ $match: { $and: [baseFilter, reportStatsFilter] } },
 			{ $group: { _id: "$booking_source", count: { $sum: 1 } } },
 			{ $sort: { count: -1 } },
 			{ $limit: 5 },
@@ -1892,7 +2116,7 @@ exports.adminDashboardReport = async (req, res) => {
 		}));
 
 		const roomStatsReservations = await safeFind({
-			cond: statusNotExcluded,
+			cond: reportStatsFilter,
 			select:
 				"pickedRoomsType checkin_date checkout_date days_of_residence total_amount reservation_status bedNumber",
 		});
@@ -2034,12 +2258,16 @@ exports.adminDashboardReport = async (req, res) => {
 		const fourthRow = { topChannels, roomNightsByType, roomRevenueByType };
 
 		// ============== FIFTH ROW ==============
-		const lineEnd = nowMoment.clone().endOf("day").toDate();
-		const lineStart = nowMoment
-			.clone()
-			.startOf("day")
-			.subtract(6, "days")
-			.toDate();
+		const lineEnd = hasCustomDateRange
+			? reportEndMoment.clone().endOf("day").toDate()
+			: reportStartMoment.clone().endOf("day").toDate();
+		const lineStart = hasCustomDateRange
+			? reportStartMoment.clone().startOf("day").toDate()
+			: reportStartMoment
+					.clone()
+					.startOf("day")
+					.subtract(trendDays - 1, "days")
+					.toDate();
 
 		const pipelineCheckIn = [
 			{
@@ -2115,11 +2343,55 @@ exports.adminDashboardReport = async (req, res) => {
 			dayCursor = dayCursor.clone().add(1, "day");
 		}
 
-		// Replace visitorsLine with real data when available
+		const bookingActivityForDay = async (dayMoment) => {
+			const dayStart = dayMoment.clone().startOf("day").toDate();
+			const dayEnd = dayMoment.clone().endOf("day").toDate();
+			const activityDocs = await safeFind({
+				cond: {
+					$and: [
+						statusNotExcluded,
+						{
+							$expr: {
+								$and: [
+									{
+										$gte: [
+											{ $ifNull: ["$booked_at", "$createdAt"] },
+											dayStart,
+										],
+									},
+									{
+										$lte: [
+											{ $ifNull: ["$booked_at", "$createdAt"] },
+											dayEnd,
+										],
+									},
+								],
+							},
+						},
+					],
+				},
+				select: "booked_at createdAt",
+			});
+			const buckets = [0, 0, 0, 0];
+			activityDocs.forEach((doc) => {
+				const bookedAt = doc?.booked_at || doc?.createdAt;
+				if (!bookedAt) return;
+				const hour = moment.tz(bookedAt, timezone).hour();
+				const bucketIndex = Math.min(Math.floor(hour / 6), 3);
+				buckets[bucketIndex] += 1;
+			});
+			return buckets;
+		};
+
+		const [previousDayActivity, selectedDayActivity] = await Promise.all([
+			bookingActivityForDay(reportStartMoment.clone().subtract(1, "day")),
+			bookingActivityForDay(reportStartMoment),
+		]);
+
 		const visitorsLine = {
-			categories: ["10am", "2pm", "6pm", "11pm"],
-			yesterday: [10, 20, 30, 40],
-			today: [20, 40, 35, 50],
+			categories: ["00:00", "06:00", "12:00", "18:00"],
+			yesterday: previousDayActivity,
+			today: selectedDayActivity,
 		};
 
 		const fifthRow = {
@@ -2160,6 +2432,7 @@ exports.adminDashboardReport = async (req, res) => {
 
 		// ============== Final response ==============
 		const responseData = {
+			meta: responseMeta,
 			firstRow,
 			secondRow,
 			thirdRow,

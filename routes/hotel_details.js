@@ -19,11 +19,36 @@ const {
 	updateHotelDetails,
 	listOfHotelUser,
 	listForAdminAll,
+	reassignHotelOwner,
+	hotelGeneralStats,
+	hotelOpenReservations,
+	hotelIncompleteReservations,
 	saveOwnerPaymentMethod,
 	getOwnerPaymentMethods,
 	setOwnerDefaultPaymentMethod,
 	removeOwnerPaymentMethod,
 } = require("../controllers/hotel_details");
+
+router.get(
+	"/hotel-details/stats/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	hotelGeneralStats
+);
+
+router.get(
+	"/hotel-details/open-reservations/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	hotelOpenReservations
+);
+
+router.get(
+	"/hotel-details/incomplete-reservations/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	hotelIncompleteReservations
+);
 
 router.get("/hotel-details/:hotelDetailsId", read); // Consolidated into a single route
 
@@ -57,6 +82,13 @@ router.put(
 	isAuth,
 	isHotelOwner,
 	updateHotelDetails
+);
+
+router.put(
+	"/hotel-details/reassign-owner/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	reassignHotelOwner
 );
 
 /* Owner payment methods (save/list/manage) */
