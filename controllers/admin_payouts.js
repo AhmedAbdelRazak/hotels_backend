@@ -35,10 +35,16 @@ function computeCommissionFromPickedRooms(pickedRoomsType = []) {
 		const count = Number(room?.count || 1) || 0;
 		const days = Array.isArray(room?.pricingByDay) ? room.pricingByDay : [];
 		if (!days.length) return total;
-		const diff = days.reduce(
-			(acc, d) => acc + (Number(d?.price || 0) - Number(d?.rootPrice || 0)),
-			0
-		);
+		const diff = days.reduce((acc, d) => {
+			const finalPrice = Number(
+				d?.totalPriceWithCommission ?? d?.price ?? room?.chosenPrice ?? 0
+			);
+			const rootPrice = Number(
+				d?.rootPrice ?? d?.totalPriceWithoutCommission ?? finalPrice
+			);
+			const commission = finalPrice - rootPrice;
+			return acc + (Number.isFinite(commission) && commission > 0 ? commission : 0);
+		}, 0);
 		return total + diff * count;
 	}, 0);
 }

@@ -21,6 +21,10 @@ const {
 const { sum } = require("lodash");
 const { decryptWithSecret } = require("./utils");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
+const {
+	ReservationPricingError,
+	normalizeReservationStayPricing,
+} = require("../services/reservationPricing");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -218,11 +222,13 @@ const TRACKED_RESERVATION_FIELDS = [
 	"paid_amount_breakdown",
 	"paid_amount",
 	"total_amount",
+	"sub_total",
 	"financial_cycle",
 	"pendingConfirmation",
 	"customer_details",
 	"checkin_date",
 	"checkout_date",
+	"days_of_residence",
 	"payment",
 	"booking_source",
 	"comment",
@@ -3477,59 +3483,10 @@ exports.updateReservation = async (req, res) => {
 			delete normalizedUpdateData.customerDetails;
 		}
 
-		const hasPricingDetails = (rooms) => {
-			if (!Array.isArray(rooms) || rooms.length === 0) return false;
-			return rooms.every(
-				(room) =>
-					Array.isArray(room?.pricingByDay) &&
-					room.pricingByDay.length > 0 &&
-					room.pricingByDay.some(
-						(day) =>
-							day &&
-							(day.rootPrice !== undefined ||
-								day.totalPriceWithCommission !== undefined ||
-								day.totalPriceWithoutCommission !== undefined)
-					)
-			);
-		};
-
-		if (
-			Array.isArray(normalizedUpdateData.pickedRoomsType) &&
-			normalizedUpdateData.pickedRoomsType.length > 0 &&
-			!hasPricingDetails(normalizedUpdateData.pickedRoomsType)
-		) {
-			normalizedUpdateData.pickedRoomsType =
-				existingReservation.pickedRoomsType;
-		}
-
-		if (
-			Array.isArray(normalizedUpdateData.pickedRoomsType) &&
-			normalizedUpdateData.pickedRoomsType.length === 0 &&
-			Array.isArray(existingReservation.pickedRoomsType) &&
-			existingReservation.pickedRoomsType.length > 0
-		) {
-			normalizedUpdateData.pickedRoomsType =
-				existingReservation.pickedRoomsType;
-		}
-
-		if (
-			Array.isArray(normalizedUpdateData.pickedRoomsPricing) &&
-			normalizedUpdateData.pickedRoomsPricing.length > 0 &&
-			!hasPricingDetails(normalizedUpdateData.pickedRoomsPricing)
-		) {
-			normalizedUpdateData.pickedRoomsPricing =
-				existingReservation.pickedRoomsPricing;
-		}
-
-		if (
-			Array.isArray(normalizedUpdateData.pickedRoomsPricing) &&
-			normalizedUpdateData.pickedRoomsPricing.length === 0 &&
-			Array.isArray(existingReservation.pickedRoomsPricing) &&
-			existingReservation.pickedRoomsPricing.length > 0
-		) {
-			normalizedUpdateData.pickedRoomsPricing =
-				existingReservation.pickedRoomsPricing;
-		}
+		normalizedUpdateData = await normalizeReservationStayPricing(
+			existingReservation,
+			normalizedUpdateData
+		);
 
 		if (orderTakerBasicEditOnly) {
 			const existingPlain =
@@ -3758,6 +3715,13 @@ exports.updateReservation = async (req, res) => {
 			reservation: updatedReservation,
 		});
 	} catch (err) {
+		if (err instanceof ReservationPricingError || err?.statusCode) {
+			return res.status(err.statusCode || 400).json({
+				error: err.message,
+				code: err.code || "reservation_pricing_error",
+				details: err.details || {},
+			});
+		}
 		console.error("[ERROR] General error updating reservation:", err);
 		return res.status(500).json({ error: "Internal server error" });
 	}

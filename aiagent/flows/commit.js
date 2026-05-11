@@ -1,5 +1,8 @@
 /** @format */
 const { Reservation } = require("../core/db");
+const {
+	normalizeReservationStayPricing,
+} = require("../../services/reservationPricing");
 
 function genConfirmation() {
 	let s = "";
@@ -100,7 +103,7 @@ async function commitUpdateReservation(state) {
 		state.agentName || "Aisha | Customer Support"
 	} (aiagent)`;
 
-	const update = {
+	let update = {
 		checkin_date: draft.checkin_date,
 		checkout_date: draft.checkout_date,
 		days_of_residence: draft.days_of_residence,
@@ -124,6 +127,8 @@ async function commitUpdateReservation(state) {
 			{ at: new Date(), by: reservedBy, note: "Updated via aiagent chat" },
 		],
 	};
+
+	update = await normalizeReservationStayPricing(resv, update);
 
 	const updated = await Reservation.findByIdAndUpdate(resv._id, update, {
 		new: true,
