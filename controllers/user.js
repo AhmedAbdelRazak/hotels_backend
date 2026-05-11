@@ -42,7 +42,7 @@ const sanitizeCompanyDocuments = (documents = []) =>
 			fileName: String(document.fileName || document.name || "Company document").slice(0, 180),
 			fileType: String(document.fileType || document.type || "").slice(0, 120),
 			fileSize: Number(document.fileSize || document.size || 0),
-			dataUrl: String(document.dataUrl || document.url || "").slice(0, 4 * 1024 * 1024),
+			dataUrl: String(document.dataUrl || document.url || "").slice(0, 5 * 1024 * 1024),
 			uploadedAt: document.uploadedAt || new Date(),
 			notes: String(document.notes || "").slice(0, 500),
 		}));

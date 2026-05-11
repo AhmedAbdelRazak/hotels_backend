@@ -49,7 +49,7 @@ const sanitizeCompanyDocuments = (documents = []) =>
 			fileName: String(document.fileName || document.name || "Company document").slice(0, 180),
 			fileType: String(document.fileType || document.type || "").slice(0, 120),
 			fileSize: Number(document.fileSize || document.size || 0),
-			dataUrl: String(document.dataUrl || document.url || "").slice(0, 4 * 1024 * 1024),
+			dataUrl: String(document.dataUrl || document.url || "").slice(0, 5 * 1024 * 1024),
 			uploadedAt: document.uploadedAt || new Date(),
 			notes: String(document.notes || "").slice(0, 500),
 		}));
@@ -828,10 +828,28 @@ exports.isAdmin = (req, res, next) => {
 };
 
 exports.isHotelOwner = (req, res, next) => {
+	const roleNumbers = [
+		Number(req.profile?.role),
+		...(Array.isArray(req.profile?.roles)
+			? req.profile.roles.map((role) => Number(role))
+			: []),
+	].filter(Boolean);
+	const roleDescriptions = [
+		String(req.profile?.roleDescription || "").toLowerCase(),
+		...(Array.isArray(req.profile?.roleDescriptions)
+			? req.profile.roleDescriptions.map((role) =>
+					String(role || "").toLowerCase()
+			  )
+			: []),
+	];
+	const canManageHotelSettings =
+		roleNumbers.some((role) => [1000, 2000, 3000, 8000].includes(role)) ||
+		["hotelmanager", "reception", "reservationemployee"].some((role) =>
+			roleDescriptions.includes(role)
+		);
+
 	if (
-		req.profile.role !== 1000 &&
-		req.profile.role !== 2000 &&
-		req.profile.role !== 3000 &&
+		!canManageHotelSettings &&
 		!isConfiguredSuperAdmin(req.profile)
 	) {
 		return res.status(403).json({
