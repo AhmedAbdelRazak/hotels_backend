@@ -320,6 +320,61 @@ const reservationsSchema = new mongoose.Schema(
 		},
 		commissionPaidAt: { type: Date },
 
+		pendingConfirmation: {
+			type: Object,
+			default: {
+				status: "",
+				rejectionReason: "",
+				confirmationReason: "",
+				confirmedAt: null,
+				rejectedAt: null,
+				lastUpdatedAt: null,
+				lastUpdatedBy: null,
+			},
+		},
+
+		agentWalletSnapshot: {
+			type: Object,
+			default: {
+				// Captures the agent wallet at reservation time so reservation details
+				// never change just because the agent wallet changes later.
+				captured: false,
+				capturedAt: null,
+				snapshotAt: null,
+				capturedReason: "",
+				currency: "SAR",
+				agent: {
+					_id: "",
+					name: "",
+					email: "",
+					phone: "",
+					companyName: "",
+				},
+				walletAddedBeforeReservation: 0,
+				walletUsedBeforeReservation: 0,
+				priorReservationValue: 0,
+				manualDebitsBeforeReservation: 0,
+				balanceBeforeReservation: 0,
+				reservationAmount: 0,
+				balanceAfterReservation: 0,
+				commissionAmount: 0,
+				bookingSource: "",
+				confirmationNumber: "",
+				capturedBy: null,
+			},
+		},
+
+		agentDecisionSnapshot: {
+			type: Object,
+			default: {
+				// Last confirmation decision shown in reservation details.
+				status: "",
+				reason: "",
+				decidedAt: null,
+				decidedBy: null,
+			},
+		},
+
 		financial_cycle: {
 			type: Object,
 			default: {
@@ -331,6 +386,10 @@ const reservationsSchema = new mongoose.Schema(
 				commissionType: "amount",
 				commissionValue: 0,
 				commissionAmount: 0,
+				// true means finance reviewed commission, even when amount is 0.
+				commissionAssigned: false,
+				commissionAssignedAt: null,
+				commissionAssignedBy: null,
 				pmsCollectedAmount: 0,
 				hotelCollectedAmount: 0,
 				hotelPayoutDue: 0,

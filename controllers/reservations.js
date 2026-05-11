@@ -5,6 +5,7 @@ const ObjectId = mongoose.Types.ObjectId;
 const fetch = require("node-fetch");
 const Rooms = require("../models/rooms");
 const HouseKeeping = require("../models/housekeeping");
+const AgentWallet = require("../models/agent_wallet");
 const User = require("../models/user");
 const xlsx = require("xlsx");
 const sgMail = require("@sendgrid/mail");
@@ -19,6 +20,7 @@ const {
 } = require("./assets");
 const { sum } = require("lodash");
 const { decryptWithSecret } = require("./utils");
+const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -29,6 +31,7 @@ const CHECKED_OUT_REGEX =
 	/checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
 const IN_HOUSE_REGEX = /house/i;
 const HOUSEKEEPING_FINISHED_REGEX = /finished|done|completed|clean/i;
+const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
 	"i"
@@ -107,6 +110,14 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 	const totalAmount = Number(updates.total_amount ?? reservation?.total_amount ?? 0);
 	const storedReservationCommission = Number(reservation?.commission || 0);
 	const storedCycleCommission = Number(existingCycle.commissionAmount || 0);
+	const commissionWasReviewed =
+		updates.commission !== undefined ||
+		updates.financial_cycle?.commissionAssigned === true ||
+		reservation?.commissionData?.assigned === true ||
+		existingCycle.commissionAssigned === true ||
+		Boolean(reservation?.commissionStatus) ||
+		storedReservationCommission > 0 ||
+		storedCycleCommission > 0;
 	const commissionAmount = n2(
 		updates.commission !== undefined
 			? updates.commission
@@ -140,14 +151,16 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		collectionModel === "hotel_collected" || collectionModel === "mixed"
 			? commissionAmount
 			: 0;
+	const commissionSideClosed =
+		!!commissionPaid || (commissionWasReviewed && commissionAmount <= 0);
 
 	const isClosed =
 		collectionModel === "pms_collected"
 			? !!moneyTransferredToHotel
-			: collectionModel === "hotel_collected"
-			? !!commissionPaid
-			: collectionModel === "mixed"
-			? !!moneyTransferredToHotel && !!commissionPaid
+		: collectionModel === "hotel_collected"
+			? commissionSideClosed
+		: collectionModel === "mixed"
+			? !!moneyTransferredToHotel && commissionSideClosed
 			: false;
 	const now = new Date();
 
@@ -161,6 +174,21 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		commissionType: existingCycle.commissionType || "amount",
 		commissionValue: commissionAmount,
 		commissionAmount,
+		// Zero can be a deliberate finance decision. This flag separates
+		// "not reviewed yet" from "reviewed and no commission is due".
+		commissionAssigned: commissionWasReviewed,
+		commissionAssignedAt:
+			updates.commission !== undefined
+				? now
+				: existingCycle.commissionAssignedAt ||
+				  reservation?.commissionData?.assignedAt ||
+				  null,
+		commissionAssignedBy:
+			updates.commission !== undefined
+				? actorId || null
+				: existingCycle.commissionAssignedBy ||
+				  reservation?.commissionData?.assignedBy ||
+				  null,
 		pmsCollectedAmount,
 		hotelCollectedAmount,
 		hotelPayoutDue: n2(hotelPayoutDue),
@@ -183,6 +211,7 @@ const TRACKED_RESERVATION_FIELDS = [
 	"housedBy",
 	"inhouse_date",
 	"commission",
+	"commissionData",
 	"commissionPaid",
 	"commissionStatus",
 	"moneyTransferredToHotel",
@@ -190,6 +219,7 @@ const TRACKED_RESERVATION_FIELDS = [
 	"paid_amount",
 	"total_amount",
 	"financial_cycle",
+	"pendingConfirmation",
 	"customer_details",
 	"checkin_date",
 	"checkout_date",
@@ -205,6 +235,8 @@ const TRACKED_RESERVATION_FIELDS = [
 	"orderTakeId",
 	"orderTaker",
 	"orderTakenAt",
+	"agentWalletSnapshot",
+	"agentDecisionSnapshot",
 ];
 
 const simplifyAuditValue = (value) => {
@@ -435,13 +467,364 @@ const isOrderTakingAccount = (user = {}) => {
 		Number(user.role) === 1000 ||
 		Number(user.role) === 2000 ||
 		Number(user.role) === 3000 ||
+		Number(user.role) === 8000 ||
 		roles.includes(1000) ||
 		roles.includes(2000) ||
 		roles.includes(3000) ||
+		roles.includes(8000) ||
 		descriptions.includes("hotelmanager") ||
-		descriptions.includes("reception");
+		descriptions.includes("reception") ||
+		descriptions.includes("reservationemployee");
 
 	return hasOrderTakingScope && !hasFullReservationScope;
+};
+
+const dateOnlyKey = (value) => {
+	if (!value) return "";
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+		return value.slice(0, 10);
+	}
+	const parsed = moment.utc(value);
+	return parsed.isValid() ? parsed.format("YYYY-MM-DD") : "";
+};
+
+const buildStayDateKeys = (checkinDate, checkoutDate) => {
+	const startKey = dateOnlyKey(checkinDate);
+	const endKey = dateOnlyKey(checkoutDate);
+	const start = moment.utc(startKey, "YYYY-MM-DD", true);
+	const endExclusive = moment.utc(endKey, "YYYY-MM-DD", true);
+	if (!start.isValid() || !endExclusive.isValid() || !endExclusive.isAfter(start)) {
+		return [];
+	}
+
+	const days = [];
+	for (
+		const day = start.clone();
+		day.isBefore(endExclusive, "day");
+		day.add(1, "day")
+	) {
+		days.push(day.format("YYYY-MM-DD"));
+	}
+	return days;
+};
+
+const normalizeCalendarText = (value) =>
+	String(value || "")
+		.trim()
+		.toLowerCase();
+
+const pushRoomSelection = (target, roomType, displayName, count = 1) => {
+	const normalizedType = String(roomType || "").trim();
+	const normalizedDisplay = String(displayName || "").trim();
+	if (!normalizedType && !normalizedDisplay) return;
+	const key = `${normalizeCalendarText(normalizedType)}|${normalizeCalendarText(
+		normalizedDisplay
+	)}`;
+	if (!target.has(key)) {
+		target.set(key, {
+			room_type: normalizedType,
+			displayName: normalizedDisplay,
+			count: Math.max(1, Number(count || 1)),
+		});
+		return;
+	}
+	const current = target.get(key);
+	current.count += Math.max(1, Number(count || 1));
+};
+
+const getReservationRoomSelections = async (reservationData = {}) => {
+	const selectionMap = new Map();
+	const selectedRooms = Array.isArray(reservationData.pickedRoomsType)
+		? reservationData.pickedRoomsType
+		: Array.isArray(reservationData.pickedRoomsPricing)
+		  ? reservationData.pickedRoomsPricing
+		  : [];
+
+	selectedRooms.forEach((room) => {
+		pushRoomSelection(
+			selectionMap,
+			room?.room_type || room?.roomType,
+			room?.displayName || room?.display_name,
+			room?.count
+		);
+	});
+
+	if (
+		selectionMap.size === 0 &&
+		Array.isArray(reservationData.roomId) &&
+		reservationData.roomId.length > 0
+	) {
+		const roomIds = reservationData.roomId
+			.map((roomId) => String(roomId || "").trim())
+			.filter((roomId) => ObjectId.isValid(roomId));
+		if (roomIds.length > 0) {
+			const rooms = await Rooms.find({ _id: { $in: roomIds } })
+				.select("room_type display_name displayName")
+				.lean()
+				.exec();
+			rooms.forEach((room) => {
+				pushRoomSelection(
+					selectionMap,
+					room?.room_type,
+					room?.displayName || room?.display_name,
+					1
+				);
+			});
+		}
+	}
+
+	return Array.from(selectionMap.values());
+};
+
+const calendarRateIsBlocked = (rate = {}) => {
+	if (!rate || typeof rate !== "object") return false;
+	const price = Number(rate.price);
+	const rootPrice = Number(rate.rootPrice);
+	const color = String(rate.color || "").toLowerCase();
+	return (
+		(Number.isFinite(price) && price <= 0) ||
+		(Number.isFinite(rootPrice) && rootPrice <= 0 && color === "black") ||
+		color === "black"
+	);
+};
+
+const findRoomDetailForCalendar = (details = [], selection = {}) => {
+	const roomType = normalizeCalendarText(selection.room_type);
+	const displayName = normalizeCalendarText(selection.displayName);
+	const exact = details.find(
+		(detail) =>
+			normalizeCalendarText(detail?.roomType || detail?.room_type) ===
+				roomType &&
+			normalizeCalendarText(detail?.displayName || detail?.display_name) ===
+				displayName
+	);
+	if (exact) return exact;
+	const byRoomType = details.find(
+		(detail) =>
+			normalizeCalendarText(detail?.roomType || detail?.room_type) === roomType
+	);
+	if (byRoomType) return byRoomType;
+	return details.find(
+		(detail) =>
+			displayName &&
+			normalizeCalendarText(detail?.displayName || detail?.display_name) ===
+				displayName
+	);
+};
+
+// Agent/order-taker reservations must respect hotel calendar blocks.
+// The public booking site treats a nightly pricing row with price <= 0 as unavailable;
+// this validator mirrors that rule on the PMS API so agents cannot bypass it.
+const validateOrderTakerBlockedCalendar = async (reservationData = {}) => {
+	const hotelId = String(reservationData.hotelId || "").trim();
+	if (!ObjectId.isValid(hotelId)) return { allowed: true };
+
+	const stayDates = buildStayDateKeys(
+		reservationData.checkin_date,
+		reservationData.checkout_date
+	);
+	if (stayDates.length === 0) return { allowed: true };
+
+	const selections = await getReservationRoomSelections(reservationData);
+	if (selections.length === 0) return { allowed: true };
+
+	const hotel = await HotelDetails.findById(hotelId)
+		.select("hotelName roomCountDetails")
+		.lean()
+		.exec();
+	const details = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+	const blockedRooms = [];
+
+	selections.forEach((selection) => {
+		const detail = findRoomDetailForCalendar(details, selection);
+		const rates = Array.isArray(detail?.pricingRate) ? detail.pricingRate : [];
+		const blockedDates = stayDates.filter((date) => {
+			const rate = rates.find((item) => item?.calendarDate === date);
+			return calendarRateIsBlocked(rate);
+		});
+		if (blockedDates.length > 0) {
+			blockedRooms.push({
+				room_type:
+					selection.room_type || detail?.roomType || detail?.room_type || "",
+				displayName:
+					selection.displayName ||
+					detail?.displayName ||
+					detail?.display_name ||
+					"",
+				blockedDates,
+			});
+		}
+	});
+
+	if (blockedRooms.length === 0) return { allowed: true };
+	const roomLabel =
+		blockedRooms[0].displayName || blockedRooms[0].room_type || "Selected room";
+	const dateLabel = blockedRooms[0].blockedDates.join(", ");
+
+	return {
+		allowed: false,
+		agentCalendarBlocked: true,
+		hotelName: hotel?.hotelName || "",
+		blockedRooms,
+		message: `${roomLabel} is blocked on the hotel calendar for ${dateLabel}. Agents cannot create reservations over blocked dates.`,
+		messageArabic: `الغرفة ${roomLabel} محجوبة في تقويم الفندق خلال ${dateLabel}. لا يمكن للوكيل إنشاء حجز في هذه الفترة.`,
+	};
+};
+
+const PENDING_CONFIRMATION_REGEX = /pending[\s_-]?confirmation/i;
+
+const buildNewReservationProcessFilter = () => ({
+	$or: [
+		{ booked_at: { $gte: NEW_RESERVATION_PROCESS_START } },
+		{
+			$and: [
+				{ $or: [{ booked_at: { $exists: false } }, { booked_at: null }] },
+				{ createdAt: { $gte: NEW_RESERVATION_PROCESS_START } },
+			],
+		},
+	],
+});
+
+const hasAssignedCommission = (reservation = {}) => {
+	const directCommission = moneyNumber(reservation?.commission);
+	const cycleCommission = moneyNumber(
+		reservation?.financial_cycle?.commissionAmount
+	);
+	return (
+		directCommission > 0 ||
+		cycleCommission > 0 ||
+		reservation?.commissionData?.assigned === true ||
+		reservation?.financial_cycle?.commissionAssigned === true ||
+		Boolean(String(reservation?.commissionStatus || "").trim())
+	);
+};
+
+const buildCommissionMissingFilter = () => ({
+	$and: [
+		{
+			$or: [
+				{ commission: { $exists: false } },
+				{ commission: null },
+				{ commission: "" },
+				{ commission: "0" },
+				{ commission: { $lte: 0 } },
+			],
+		},
+		{
+			$or: [
+				{ "financial_cycle.commissionAmount": { $exists: false } },
+				{ "financial_cycle.commissionAmount": null },
+				{ "financial_cycle.commissionAmount": "" },
+				{ "financial_cycle.commissionAmount": "0" },
+				{ "financial_cycle.commissionAmount": { $lte: 0 } },
+			],
+		},
+		{ "commissionData.assigned": { $ne: true } },
+		{ "financial_cycle.commissionAssigned": { $ne: true } },
+		{
+			$or: [
+				{ commissionStatus: { $exists: false } },
+				{ commissionStatus: null },
+				{ commissionStatus: "" },
+			],
+		},
+	],
+});
+
+const getReservationNotificationType = (reservation = {}) => {
+	const reasons = getPendingConfirmationReasons(reservation);
+	if (
+		reasons.includes("commission_missing") &&
+		!reasons.includes("pending_confirmation") &&
+		!reasons.includes("pending_rejected")
+	) {
+		return "commission_review";
+	}
+	return "pending_confirmation";
+};
+
+const buildPendingConfirmationFilter = (hotelId) => ({
+	hotelId: ObjectId(hotelId),
+	$and: [
+		buildNewReservationProcessFilter(),
+		{
+			$or: [
+				{ reservation_status: PENDING_CONFIRMATION_REGEX },
+				{ state: PENDING_CONFIRMATION_REGEX },
+				buildCommissionMissingFilter(),
+			],
+		},
+	],
+});
+
+const getPendingConfirmationReasons = (reservation = {}) => {
+	const reasons = [];
+	if (
+		PENDING_CONFIRMATION_REGEX.test(
+			String(reservation.reservation_status || reservation.state || "")
+		)
+	) {
+		reasons.push("pending_confirmation");
+	}
+	if (
+		String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
+		"rejected"
+	) {
+		reasons.push("pending_rejected");
+	}
+	if (!hasAssignedCommission(reservation)) {
+		reasons.push("commission_missing");
+	}
+	return reasons;
+};
+
+const sanitizeOrderTakerUpdate = (updates = {}) => {
+	const allowed = {};
+	const allowedCustomerFields = [
+		"name",
+		"phone",
+		"email",
+		"passport",
+		"passportExpiry",
+		"nationality",
+		"copyNumber",
+		"hasCar",
+		"carLicensePlate",
+		"carColor",
+		"carModel",
+		"carYear",
+		"confirmationNumber",
+	];
+	const rawCustomerDetails =
+		updates.customer_details || updates.customerDetails || null;
+
+	if (rawCustomerDetails && typeof rawCustomerDetails === "object") {
+		allowed.customer_details = allowedCustomerFields.reduce((acc, field) => {
+			if (Object.prototype.hasOwnProperty.call(rawCustomerDetails, field)) {
+				acc[field] = rawCustomerDetails[field];
+			}
+			return acc;
+		}, {});
+	}
+
+	[
+		"checkin_date",
+		"checkout_date",
+		"days_of_residence",
+		"total_guests",
+		"adults",
+		"children",
+		"comment",
+		"booking_comment",
+	].forEach((field) => {
+		if (Object.prototype.hasOwnProperty.call(updates, field)) {
+			allowed[field] = updates[field];
+		}
+	});
+
+	return allowed;
 };
 
 const normalizeId = (value) => String(value?._id || value || "").trim();
@@ -482,6 +865,299 @@ const canViewReservationHotel = async (actor, hotelId) => {
 		normalizeId(actor.hotelIdWork) === normalizedHotelId &&
 		normalizeId(actor.belongsToId) === ownerId
 	);
+};
+
+const canUsePendingConfirmationWorkflow = (actor = {}) => {
+	const roles = [
+		Number(actor.role),
+		...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+	].filter(Boolean);
+	const descriptions = [
+		String(actor.roleDescription || "").toLowerCase(),
+		...(Array.isArray(actor.roleDescriptions)
+			? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+	return (
+		isConfiguredSuperAdmin(actor) ||
+		[1000, 2000, 6000, 8000].some((role) => roles.includes(role)) ||
+		descriptions.includes("hotelmanager") ||
+		descriptions.includes("finance") ||
+		descriptions.includes("reservationemployee")
+	);
+};
+
+const getPendingNotificationHotelsForActor = async (actor = {}, ownerId = "") => {
+	if (!actor) return [];
+
+	const requestedOwnerId = normalizeId(ownerId);
+	const actorId = normalizeId(actor._id);
+	const role = Number(actor.role);
+
+	let query = null;
+	if (
+		(role === 1000 || isConfiguredSuperAdmin(actor)) &&
+		requestedOwnerId &&
+		ObjectId.isValid(requestedOwnerId)
+	) {
+		query = { belongsTo: ObjectId(requestedOwnerId) };
+	} else if (role === 1000 || isConfiguredSuperAdmin(actor)) {
+		query = {};
+	} else if (role === 2000 && !normalizeId(actor.belongsToId)) {
+		const ids = [
+			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
+			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+		]
+			.map(normalizeId)
+			.filter((id) => id && ObjectId.isValid(id))
+			.map((id) => ObjectId(id));
+		query = {
+			$or: [
+				{ belongsTo: ObjectId(actorId) },
+				...(ids.length ? [{ _id: { $in: ids } }] : []),
+			],
+		};
+	} else {
+		const ids = [
+			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+			normalizeId(actor.hotelIdWork),
+		]
+			.map(normalizeId)
+			.filter((id) => id && ObjectId.isValid(id))
+			.map((id) => ObjectId(id));
+		if (!ids.length) return [];
+		query = { _id: { $in: ids } };
+	}
+
+	return HotelDetails.find(query)
+		.select("_id hotelName belongsTo")
+		.lean()
+		.exec();
+};
+
+const accountLooksLikeAgent = (account = {}) => {
+	const roles = [
+		Number(account.role),
+		...(Array.isArray(account.roles) ? account.roles.map(Number) : []),
+	].filter(Boolean);
+	const descriptions = [
+		String(account.roleDescription || "").toLowerCase(),
+		...(Array.isArray(account.roleDescriptions)
+			? account.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+	return (
+		roles.includes(7000) ||
+		descriptions.some((description) =>
+			/(ordertaker|order taker|external agent|agent)/i.test(description)
+		) ||
+		(Array.isArray(account.accessTo) && account.accessTo.includes("ownReservations"))
+	);
+};
+
+const buildAgentReservationOwnerClauses = (agentId) => {
+	const normalizedAgentId = normalizeId(agentId);
+	const clauses = [];
+	if (ObjectId.isValid(normalizedAgentId)) {
+		clauses.push(
+			{ createdByUserId: ObjectId(normalizedAgentId) },
+			{ orderTakeId: ObjectId(normalizedAgentId) }
+		);
+	}
+	clauses.push(
+		{ "createdBy._id": normalizedAgentId },
+		{ "orderTaker._id": normalizedAgentId }
+	);
+	return clauses;
+};
+
+const reservationIsWalletDeductible = (reservation = {}) => {
+	const status = String(
+		reservation.reservation_status ||
+			reservation.state ||
+			reservation?.pendingConfirmation?.status ||
+			""
+	).toLowerCase();
+	return !/(cancel|reject|void)/i.test(status);
+};
+
+const resolveReservationAgent = async (reservation = {}) => {
+	const possibleIds = [
+		normalizeId(reservation.orderTakeId),
+		normalizeId(reservation.createdByUserId),
+		normalizeId(reservation?.orderTaker?._id),
+		normalizeId(reservation?.createdBy?._id),
+	].filter(Boolean);
+	const uniqueIds = [...new Set(possibleIds)];
+	const snapshotCandidate = accountLooksLikeAgent(reservation.orderTaker)
+		? reservation.orderTaker
+		: accountLooksLikeAgent(reservation.createdBy)
+		? reservation.createdBy
+		: null;
+
+	for (const possibleId of uniqueIds) {
+		if (!ObjectId.isValid(possibleId)) continue;
+		const agent = await User.findById(possibleId)
+			.select(
+				"_id name email phone companyName role roleDescription roles roleDescriptions accessTo"
+			)
+			.lean()
+			.exec();
+		if (agent && accountLooksLikeAgent(agent)) return agent;
+	}
+
+	if (snapshotCandidate && normalizeId(snapshotCandidate._id)) {
+		return {
+			_id: snapshotCandidate._id,
+			name: snapshotCandidate.name || "",
+			email: snapshotCandidate.email || "",
+			phone: snapshotCandidate.phone || "",
+			companyName: snapshotCandidate.companyName || "",
+			role: snapshotCandidate.role || 7000,
+			roleDescription: snapshotCandidate.roleDescription || "ordertaker",
+		};
+	}
+
+	return null;
+};
+
+const resolveSnapshotDate = (reservation = {}) => {
+	const candidates = [
+		reservation.orderTakenAt,
+		reservation.booked_at,
+		reservation.createdAt,
+		new Date(),
+	];
+	for (const candidate of candidates) {
+		const date = candidate instanceof Date ? candidate : new Date(candidate);
+		if (!Number.isNaN(date.getTime())) return date;
+	}
+	return new Date();
+};
+
+const buildReservationAgentWalletSnapshot = async ({
+	reservation,
+	actor,
+	reason = "reservation_detail",
+	force = false,
+}) => {
+	const existingSnapshot =
+		reservation?.agentWalletSnapshot &&
+		typeof reservation.agentWalletSnapshot.toObject === "function"
+			? reservation.agentWalletSnapshot.toObject()
+			: reservation?.agentWalletSnapshot || {};
+
+	if (existingSnapshot?.captured && !force) {
+		return existingSnapshot;
+	}
+
+	const hotelId = normalizeId(reservation?.hotelId);
+	if (!hotelId || !ObjectId.isValid(hotelId)) return null;
+
+	const agent = await resolveReservationAgent(reservation);
+	const agentId = normalizeId(agent?._id);
+	if (!agentId || !ObjectId.isValid(agentId)) return null;
+
+	const snapshotAt = resolveSnapshotDate(reservation);
+	const agentClauses = buildAgentReservationOwnerClauses(agentId);
+	const transactionDateMatch = {
+		hotelId: ObjectId(hotelId),
+		agentId: ObjectId(agentId),
+		status: { $ne: "void" },
+		transactionDate: { $lte: snapshotAt },
+	};
+	const priorReservationMatch = {
+		hotelId: ObjectId(hotelId),
+		_id: { $ne: reservation._id },
+		$and: [
+			{ $or: agentClauses },
+			{
+				$or: [
+					{ booked_at: { $lte: snapshotAt } },
+					{
+						$and: [
+							{ $or: [{ booked_at: { $exists: false } }, { booked_at: null }] },
+							{ createdAt: { $lte: snapshotAt } },
+						],
+					},
+				],
+			},
+		],
+	};
+
+	const [transactions, priorReservations] = await Promise.all([
+		AgentWallet.find(transactionDateMatch)
+			.select("transactionType amount transactionDate status")
+			.lean()
+			.exec(),
+		Reservations.find(priorReservationMatch)
+			.select("_id total_amount reservation_status state pendingConfirmation")
+			.lean()
+			.exec(),
+	]);
+
+	const transactionTotals = transactions.reduce(
+		(acc, transaction) => {
+			const amount = n2(transaction.amount);
+			if (
+				transaction.transactionType === "deposit" ||
+				transaction.transactionType === "refund"
+			) {
+				acc.credits += amount;
+			} else if (transaction.transactionType === "debit") {
+				acc.manualDebits += amount;
+			} else {
+				acc.adjustments += amount;
+			}
+			return acc;
+		},
+		{ credits: 0, adjustments: 0, manualDebits: 0 }
+	);
+
+	const priorReservationValue = priorReservations.reduce((sum, item) => {
+		return reservationIsWalletDeductible(item)
+			? n2(sum + moneyNumber(item.total_amount))
+			: sum;
+	}, 0);
+
+	const walletAddedBeforeReservation = n2(
+		transactionTotals.credits + transactionTotals.adjustments
+	);
+	const walletUsedBeforeReservation = n2(
+		priorReservationValue + transactionTotals.manualDebits
+	);
+	const balanceBeforeReservation = n2(
+		walletAddedBeforeReservation - walletUsedBeforeReservation
+	);
+	const reservationAmount = n2(reservation?.total_amount || 0);
+
+	return {
+		captured: true,
+		capturedAt: new Date(),
+		snapshotAt,
+		capturedReason: reason,
+		currency: reservation?.currency || "SAR",
+		agent: {
+			_id: agentId,
+			name: agent.name || agent.email || "",
+			email: agent.email || "",
+			phone: agent.phone || "",
+			companyName: agent.companyName || "",
+		},
+		walletAddedBeforeReservation,
+		walletUsedBeforeReservation,
+		priorReservationValue: n2(priorReservationValue),
+		manualDebitsBeforeReservation: n2(transactionTotals.manualDebits),
+		balanceBeforeReservation,
+		reservationAmount,
+		balanceAfterReservation: n2(balanceBeforeReservation - reservationAmount),
+		commissionAmount: n2(
+			reservation?.commission || reservation?.financial_cycle?.commissionAmount || 0
+		),
+		bookingSource: reservation?.booking_source || "",
+		confirmationNumber: reservation?.confirmation_number || "",
+		capturedBy: actor || null,
+	};
 };
 
 const resolveReservationListActor = async (req) => {
@@ -661,10 +1337,6 @@ const sendEmailWithPdf = async (reservationData, opts = {}) => {
 };
 
 exports.create = async (req, res) => {
-	console.log(req.body, "req.body");
-	console.log(req.body.sendEmail, "req.body.sendEmail");
-	console.log(req.body.hotelName, "req.body.hotelName");
-	console.log(req.body.belongsTo, "req.body.belongsTo");
 	const resolveCreatedBy = async () => {
 		const actorId =
 			req.auth?._id ||
@@ -673,17 +1345,22 @@ exports.create = async (req, res) => {
 			req.params?.userId;
 		if (actorId && ObjectId.isValid(actorId)) {
 			const actor = await User.findById(actorId)
-				.select("_id name email role roleDescription")
+				.select(
+					"_id name email companyName role roleDescription roles roleDescriptions accessTo"
+				)
 				.lean()
 			.exec();
 			if (actor) {
 				const actorSnapshot = buildReservationActorSnapshot(actor);
+				const actorBookingSource = String(actor.companyName || actor.name || actor.email || "").trim();
 				return {
 					createdByUserId: actor._id,
 					createdBy: actorSnapshot,
 					orderTakeId: actor._id,
 					orderTaker: actorSnapshot,
 					orderTakenAt: new Date(),
+					booking_source: req.body?.booking_source || actorBookingSource,
+					forcePendingConfirmation: isOrderTakingAccount(actor),
 				};
 			}
 		}
@@ -691,6 +1368,57 @@ exports.create = async (req, res) => {
 	};
 
 	const saveReservation = async (reservationData) => {
+		const actorFields = await resolveCreatedBy();
+		const { forcePendingConfirmation, ...reservationActorFields } = actorFields;
+		const existingAuditLog = Array.isArray(reservationData.reservationAuditLog)
+			? reservationData.reservationAuditLog
+			: [];
+		const reservationPayload = {
+			...reservationData,
+			...reservationActorFields,
+		};
+		if (forcePendingConfirmation) {
+			reservationPayload.reservation_status = "Pending Confirmation";
+			reservationPayload.state = "Pending Confirmation";
+			// Agent/order-taker reservations always start with a 0 SAR commission
+			// that is intentionally not assigned yet. Hotel/finance can later
+			// review it and save 0 again when no commission is due.
+			reservationPayload.commission = 0;
+			reservationPayload.commissionPaid = false;
+			reservationPayload.commissionStatus = "";
+			reservationPayload.commissionData = {
+				...(reservationPayload.commissionData &&
+				typeof reservationPayload.commissionData === "object"
+					? reservationPayload.commissionData
+					: {}),
+				assigned: false,
+				amount: 0,
+				status: "pending hotel review",
+				source: "agent_reservation",
+			};
+			reservationPayload.financial_cycle = {
+				...(reservationPayload.financial_cycle &&
+				typeof reservationPayload.financial_cycle === "object"
+					? reservationPayload.financial_cycle
+					: {}),
+				commissionAmount: 0,
+				commissionValue: 0,
+				commissionAssigned: false,
+				status: "open",
+			};
+
+			const calendarValidation =
+				await validateOrderTakerBlockedCalendar(reservationPayload);
+			if (!calendarValidation.allowed) {
+				return res.status(409).json({
+					error: calendarValidation.message,
+					errorArabic: calendarValidation.messageArabic,
+					agentCalendarBlocked: true,
+					blockedCalendar: calendarValidation,
+				});
+			}
+		}
+
 		// Check if roomId array is present and has length more than 0
 		if (reservationData.roomId && reservationData.roomId.length > 0) {
 			try {
@@ -713,22 +1441,21 @@ exports.create = async (req, res) => {
 			}
 		}
 
-		const actorFields = await resolveCreatedBy();
-		const existingAuditLog = Array.isArray(reservationData.reservationAuditLog)
-			? reservationData.reservationAuditLog
-			: [];
-		const reservationPayload = {
-			...reservationData,
-			...actorFields,
-		};
 		reservationPayload.reservationAuditLog = [
 			...existingAuditLog,
-			buildReservationCreatedAuditEntry(reservationPayload, actorFields),
+			buildReservationCreatedAuditEntry(reservationPayload, reservationActorFields),
 		];
 		const reservations = new Reservations(reservationPayload);
 		try {
 			const data = await reservations.save();
 			res.json({ data });
+			emitHotelNotificationRefresh(req, data.hotelId, {
+				type: forcePendingConfirmation ? "pending_confirmation" : "reservation_update",
+				reservationId: data._id,
+				ownerId: data.belongsTo,
+			}).catch((error) =>
+				console.error("Error emitting reservation notification:", error)
+			);
 			if (req.body.sendEmail) {
 				await sendEmailWithPdf(reservationData);
 			}
@@ -2565,7 +3292,7 @@ exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
-		const normalizedUpdateData = { ...updateData };
+		let normalizedUpdateData = { ...updateData };
 		const requestingUserId =
 			normalizedUpdateData.requestingUserId ||
 			normalizedUpdateData.updatedBy ||
@@ -2633,6 +3360,19 @@ exports.updateReservation = async (req, res) => {
 			requestingUserId,
 			updateData
 		);
+		const requestingActor =
+			requestingUserId && mongoose.Types.ObjectId.isValid(requestingUserId)
+				? await User.findById(requestingUserId)
+						.select(
+							"_id role roleDescription roles roleDescriptions accessTo"
+						)
+						.lean()
+						.exec()
+				: null;
+		const orderTakerBasicEditOnly = isOrderTakingAccount(requestingActor || {});
+		if (orderTakerBasicEditOnly) {
+			normalizedUpdateData = sanitizeOrderTakerUpdate(normalizedUpdateData);
+		}
 
 		const restrictedCashUserId = "6969d80da28c78c6280171df";
 		const normalizePaymentBreakdown = (breakdown = {}) => {
@@ -2789,6 +3529,35 @@ exports.updateReservation = async (req, res) => {
 		) {
 			normalizedUpdateData.pickedRoomsPricing =
 				existingReservation.pickedRoomsPricing;
+		}
+
+		if (orderTakerBasicEditOnly) {
+			const existingPlain =
+				typeof existingReservation.toObject === "function"
+					? existingReservation.toObject()
+					: existingReservation;
+			const mergedReservationForCalendar = {
+				...existingPlain,
+				...normalizedUpdateData,
+			};
+			if (customerDetails) {
+				mergedReservationForCalendar.customer_details = {
+					...(existingPlain.customer_details || {}),
+					...customerDetails,
+				};
+			}
+
+			const calendarValidation = await validateOrderTakerBlockedCalendar(
+				mergedReservationForCalendar
+			);
+			if (!calendarValidation.allowed) {
+				return res.status(409).json({
+					error: calendarValidation.message,
+					errorArabic: calendarValidation.messageArabic,
+					agentCalendarBlocked: true,
+					blockedCalendar: calendarValidation,
+				});
+			}
 		}
 
 		const touchesFinancialCycle = [
@@ -2963,6 +3732,27 @@ exports.updateReservation = async (req, res) => {
 		}
 
 		// ✅ Successful update response
+		const shouldRefreshPendingNotifications =
+			touchesFinancialCycle ||
+			[
+				"reservation_status",
+				"state",
+				"pendingConfirmation",
+				"commissionData",
+				"commissionStatus",
+				"commissionPaid",
+			].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
+
+		if (shouldRefreshPendingNotifications) {
+			emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
+				type: getReservationNotificationType(updatedReservation),
+				reservationId: updatedReservation._id,
+				ownerId: updatedReservation.belongsTo,
+			}).catch((error) =>
+				console.error("Error emitting reservation notification:", error)
+			);
+		}
+
 		return res.json({
 			message: "Reservation updated successfully",
 			reservation: updatedReservation,
@@ -4541,6 +5331,637 @@ exports.commissionPaidReservations = async (req, res) => {
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
+	}
+};
+
+exports.pendingConfirmationReservations = async (req, res) => {
+	try {
+		const { page = 1, records = 50, hotelId, userId } = req.params;
+		const search = String(req.query?.search || "").trim();
+		const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+		const parsedRecords = Math.min(
+			Math.max(parseInt(records, 10) || 50, 1),
+			500
+		);
+
+		if (!ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Invalid hotel ID" });
+		}
+
+		const actorId = req.auth?._id || userId;
+		const actor =
+			actorId && ObjectId.isValid(actorId)
+				? await User.findById(actorId)
+						.select(
+							"_id role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner"
+						)
+						.lean()
+						.exec()
+				: null;
+
+		if (!actor) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+		if (!(await canViewReservationHotel(actor, hotelId))) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!canUsePendingConfirmationWorkflow(actor)) {
+			return res.status(403).json({
+				error: "This account cannot view pending confirmation reservations",
+			});
+		}
+
+		const dynamicFilter = buildPendingConfirmationFilter(hotelId);
+		if (search) {
+			const searchMatch = buildReservationSearchMatch(search);
+			if (searchMatch) {
+				dynamicFilter.$and = [
+					...(Array.isArray(dynamicFilter.$and) ? dynamicFilter.$and : []),
+					searchMatch,
+				];
+			}
+		}
+
+		const pipelineBase = [
+			{ $match: dynamicFilter },
+			{
+				$lookup: {
+					from: "rooms",
+					localField: "roomId",
+					foreignField: "_id",
+					as: "roomDetails",
+				},
+			},
+			{
+				$addFields: {
+					bookingSortDate: {
+						$ifNull: ["$booked_at", "$createdAt"],
+					},
+				},
+			},
+			{ $sort: { bookingSortDate: 1, createdAt: 1 } },
+		];
+
+		const [rows, total] = await Promise.all([
+			Reservations.aggregate([
+				...pipelineBase,
+				{ $skip: (parsedPage - 1) * parsedRecords },
+				{ $limit: parsedRecords },
+			]),
+			Reservations.countDocuments(dynamicFilter),
+		]);
+
+		res.json({
+			total,
+			page: parsedPage,
+			records: parsedRecords,
+			data: rows.map((reservation) => ({
+				...reservation,
+				pendingReasons: getPendingConfirmationReasons(reservation),
+			})),
+		});
+	} catch (error) {
+		console.error("Error fetching pending confirmation reservations:", error);
+		res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.pendingConfirmationNotificationFeed = async (req, res) => {
+	try {
+		const { userId } = req.params;
+		const hotelId = normalizeId(req.query?.hotelId);
+		const ownerId = normalizeId(req.query?.ownerId);
+		const limit = Math.min(
+			Math.max(parseInt(req.query?.limit, 10) || 8, 1),
+			25
+		);
+		const actorId = req.auth?._id || userId;
+
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+
+		const actor = await User.findById(actorId)
+			.select(
+				"_id role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+			)
+			.lean()
+			.exec();
+
+		if (!actor || actor.activeUser === false) {
+			return res.status(401).json({ error: "Valid active user is required" });
+		}
+		if (isOrderTakingAccount(actor)) {
+			let hotels = [];
+			if (hotelId) {
+				if (!ObjectId.isValid(hotelId)) {
+					return res.status(400).json({ error: "Invalid hotel ID" });
+				}
+				if (!(await canViewReservationHotel(actor, hotelId))) {
+					return res.status(403).json({ error: "Access denied" });
+				}
+				const hotel = await HotelDetails.findById(hotelId)
+					.select("_id hotelName belongsTo")
+					.lean()
+					.exec();
+				hotels = hotel ? [hotel] : [];
+			} else {
+				hotels = await getPendingNotificationHotelsForActor(actor, ownerId);
+			}
+
+			const hotelIds = hotels
+				.map((hotel) => normalizeId(hotel?._id))
+				.filter((id) => ObjectId.isValid(id));
+			if (!hotelIds.length) {
+				return res.json({ total: 0, data: [] });
+			}
+
+			const hotelMap = hotels.reduce((acc, hotel) => {
+				const id = normalizeId(hotel?._id);
+				if (id) {
+					acc[id] = {
+						hotelName: hotel.hotelName || "",
+						hotelOwnerId: normalizeId(hotel.belongsTo),
+					};
+				}
+				return acc;
+			}, {});
+
+			const agentOwnReservationClause = {
+				$or: [
+					{ orderTakeId: ObjectId(normalizeId(actor._id)) },
+					{ createdByUserId: ObjectId(normalizeId(actor._id)) },
+				],
+			};
+			const agentDecisionQuery = {
+				hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
+				$and: [
+					agentOwnReservationClause,
+					buildNewReservationProcessFilter(),
+					{
+						$or: [
+							{ reservation_status: PENDING_CONFIRMATION_REGEX },
+							{ state: PENDING_CONFIRMATION_REGEX },
+							{
+								"agentDecisionSnapshot.status": {
+									$in: ["confirmed", "rejected"],
+								},
+							},
+							{
+								"pendingConfirmation.status": {
+									$in: ["confirmed", "rejected"],
+								},
+							},
+						],
+					},
+				],
+			};
+			const [rows, total] = await Promise.all([
+				Reservations.find(agentDecisionQuery)
+					.select(
+						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount agentDecisionSnapshot pendingConfirmation"
+					)
+					.sort({ updatedAt: -1, createdAt: -1 })
+					.limit(limit)
+					.lean()
+					.exec(),
+				Reservations.countDocuments(agentDecisionQuery),
+			]);
+
+			return res.json({
+				total,
+				data: rows.map((reservation) => {
+					const currentHotelId = normalizeId(reservation.hotelId);
+					const hotel = hotelMap[currentHotelId] || {};
+					const decision =
+						reservation.agentDecisionSnapshot ||
+						reservation.pendingConfirmation ||
+						{};
+					const decisionStatus = String(decision.status || "").toLowerCase();
+					const isDecision = ["confirmed", "rejected"].includes(decisionStatus);
+					return {
+						_id: reservation._id,
+						notificationType: isDecision ? "agent_decision" : "agent_review",
+						hotelId: currentHotelId,
+						hotelName: hotel.hotelName || "",
+						hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
+						confirmation_number: reservation.confirmation_number,
+						guestName: reservation.customer_details?.name || "",
+						booking_source: reservation.booking_source || "",
+						booked_at: reservation.booked_at || reservation.createdAt,
+						checkin_date: reservation.checkin_date,
+						checkout_date: reservation.checkout_date,
+						reservation_status:
+							reservation.reservation_status || reservation.state || "",
+						total_amount: reservation.total_amount || 0,
+						pendingReasons: isDecision ? [] : ["agent_pending_review"],
+						decisionStatus: decision.status || "",
+						decisionReason:
+							decision.reason ||
+							decision.rejectionReason ||
+							decision.confirmationReason ||
+							"",
+					};
+				}),
+			});
+		}
+		if (!canUsePendingConfirmationWorkflow(actor)) {
+			return res.json({ total: 0, data: [] });
+		}
+
+		let hotels = [];
+		if (hotelId) {
+			if (!ObjectId.isValid(hotelId)) {
+				return res.status(400).json({ error: "Invalid hotel ID" });
+			}
+			if (!(await canViewReservationHotel(actor, hotelId))) {
+				return res.status(403).json({ error: "Access denied" });
+			}
+			const hotel = await HotelDetails.findById(hotelId)
+				.select("_id hotelName belongsTo")
+				.lean()
+				.exec();
+			hotels = hotel ? [hotel] : [];
+		} else {
+			hotels = await getPendingNotificationHotelsForActor(actor, ownerId);
+		}
+
+		const hotelIds = hotels
+			.map((hotel) => normalizeId(hotel?._id))
+			.filter((id) => ObjectId.isValid(id));
+
+		if (!hotelIds.length) {
+			return res.json({ total: 0, data: [] });
+		}
+
+		const hotelMap = hotels.reduce((acc, hotel) => {
+			const id = normalizeId(hotel?._id);
+			if (id) {
+				acc[id] = {
+					hotelName: hotel.hotelName || "",
+					hotelOwnerId: normalizeId(hotel.belongsTo),
+				};
+			}
+			return acc;
+		}, {});
+
+		const filters = hotelIds.map((id) => buildPendingConfirmationFilter(id));
+		const query = filters.length === 1 ? filters[0] : { $or: filters };
+		const [rows, total] = await Promise.all([
+			Reservations.find(query)
+				.select(
+					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus financial_cycle pendingConfirmation"
+				)
+				.sort({ booked_at: 1, createdAt: 1 })
+				.limit(limit)
+				.lean()
+				.exec(),
+			Reservations.countDocuments(query),
+		]);
+
+		return res.json({
+			total,
+			data: rows.map((reservation) => {
+				const currentHotelId = normalizeId(reservation.hotelId);
+				const hotel = hotelMap[currentHotelId] || {};
+				const pendingReasons = getPendingConfirmationReasons(reservation);
+				return {
+					_id: reservation._id,
+					notificationType: getReservationNotificationType(reservation),
+					hotelId: currentHotelId,
+					hotelName: hotel.hotelName || "",
+					hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
+					confirmation_number: reservation.confirmation_number,
+					guestName: reservation.customer_details?.name || "",
+					guestPhone: reservation.customer_details?.phone || "",
+					booking_source: reservation.booking_source || "",
+					booked_at: reservation.booked_at || reservation.createdAt,
+					checkin_date: reservation.checkin_date,
+					checkout_date: reservation.checkout_date,
+					reservation_status:
+						reservation.reservation_status || reservation.state || "",
+					total_amount: reservation.total_amount || 0,
+					pendingReasons,
+				};
+			}),
+		});
+	} catch (error) {
+		console.error("Error fetching pending confirmation notifications:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.updatePendingConfirmationReservation = async (req, res) => {
+	try {
+		const { reservationId, userId } = req.params;
+		const body = req.body || {};
+		const actorId = req.auth?._id || body.userId || userId;
+
+		if (!ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+
+		const [reservation, actor] = await Promise.all([
+			Reservations.findById(reservationId),
+			User.findById(actorId)
+				.select(
+					"_id name email role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner"
+				)
+				.lean()
+				.exec(),
+		]);
+
+		if (!reservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+		if (!actor || !(await canViewReservationHotel(actor, reservation.hotelId))) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!canUsePendingConfirmationWorkflow(actor)) {
+			return res.status(403).json({
+				error: "This account cannot confirm or financially reconcile reservations",
+			});
+		}
+		if (isOrderTakingAccount(actor)) {
+			return res.status(403).json({
+				error: "External agents cannot confirm or financially reconcile reservations",
+			});
+		}
+
+		const processDate = reservation.booked_at || reservation.createdAt;
+		if (!processDate || new Date(processDate) < NEW_RESERVATION_PROCESS_START) {
+			return res.status(400).json({
+				error: "This confirmation workflow only applies to new-process reservations",
+			});
+		}
+
+		const action = String(body.action || "").toLowerCase();
+		const now = new Date();
+		const auditActor = await resolveReservationAuditActor(actorId, body);
+		const confirmationReason = String(
+			body.confirmationReason || body.reason || ""
+		).trim();
+		const existingPending =
+			reservation.pendingConfirmation &&
+			typeof reservation.pendingConfirmation.toObject === "function"
+				? reservation.pendingConfirmation.toObject()
+				: reservation.pendingConfirmation || {};
+		const updatePayload = {};
+
+		if (body.commission !== undefined) {
+			updatePayload.commission = n2(body.commission);
+			const existingCommissionData =
+				reservation.commissionData &&
+				typeof reservation.commissionData.toObject === "function"
+					? reservation.commissionData.toObject()
+					: reservation.commissionData || {};
+			updatePayload.commissionData = {
+				...existingCommissionData,
+				// A 0 SAR commission is valid when finance reviewed it and decided
+				// no commission is due for this source/reservation.
+				assigned: true,
+				amount: updatePayload.commission,
+				status:
+					body.commissionStatus ||
+					existingCommissionData.status ||
+					reservation.commissionStatus ||
+					"commission due",
+				assignedAt: now,
+				assignedBy: auditActor,
+			};
+		}
+		if (body.commissionPaid !== undefined) {
+			updatePayload.commissionPaid = !!body.commissionPaid;
+			if (updatePayload.commissionPaid && !reservation.commissionPaid) {
+				updatePayload.commissionPaidAt = now;
+			}
+		}
+		if (body.commissionStatus !== undefined) {
+			updatePayload.commissionStatus = String(body.commissionStatus || "").trim();
+		} else if (body.commissionPaid !== undefined) {
+			updatePayload.commissionStatus = updatePayload.commissionPaid
+				? "commission paid"
+				: "commission due";
+		}
+
+		if (action === "confirm") {
+			updatePayload.reservation_status = "Confirmed";
+			updatePayload.state = "Confirmed";
+			updatePayload.pendingConfirmation = {
+				...existingPending,
+				status: "confirmed",
+				rejectionReason: "",
+				confirmationReason,
+				confirmedAt: now,
+				rejectedAt: null,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+			updatePayload.agentDecisionSnapshot = {
+				status: "confirmed",
+				reason: confirmationReason,
+				decidedAt: now,
+				decidedBy: auditActor,
+			};
+		}
+
+		if (["pending", "revert", "revert_to_pending"].includes(action)) {
+			updatePayload.reservation_status = "Pending Confirmation";
+			updatePayload.state = "Pending Confirmation";
+			updatePayload.pendingConfirmation = {
+				...existingPending,
+				status: "pending",
+				rejectionReason: "",
+				confirmationReason: "",
+				confirmedAt: null,
+				rejectedAt: null,
+				revertedAt: now,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+			updatePayload.agentDecisionSnapshot = {
+				status: "pending",
+				reason: confirmationReason,
+				decidedAt: now,
+				decidedBy: auditActor,
+			};
+		}
+
+		if (action === "reject") {
+			const rejectionReason = String(
+				body.rejectionReason || body.rejectionComment || body.comment || ""
+			).trim();
+			if (!rejectionReason) {
+				return res
+					.status(400)
+					.json({ error: "Rejection reason is required" });
+			}
+			updatePayload.reservation_status = "Rejected";
+			updatePayload.state = "Rejected";
+			updatePayload.pendingConfirmation = {
+				...existingPending,
+				status: "rejected",
+				rejectionReason,
+				confirmationReason: "",
+				confirmedAt: null,
+				rejectedAt: now,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+			updatePayload.agentDecisionSnapshot = {
+				status: "rejected",
+				reason: rejectionReason,
+				decidedAt: now,
+				decidedBy: auditActor,
+			};
+		}
+
+		const touchesFinancialCycle = [
+			"commission",
+			"commissionData",
+			"commissionPaid",
+			"commissionStatus",
+		].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
+
+		if (touchesFinancialCycle) {
+			updatePayload.financial_cycle = buildFinancialCycleSnapshot(
+				reservation,
+				updatePayload,
+				actorId
+			);
+		}
+
+		if (["confirm", "reject", "pending", "revert", "revert_to_pending"].includes(action)) {
+			const walletSnapshot = await buildReservationAgentWalletSnapshot({
+				reservation,
+				actor: auditActor,
+				reason: `pending_confirmation_${action || "update"}`,
+			});
+			if (walletSnapshot) {
+				updatePayload.agentWalletSnapshot = walletSnapshot;
+			}
+		}
+
+		if (!Object.keys(updatePayload).length) {
+			return res.status(400).json({ error: "No update was provided" });
+		}
+
+		const auditEntries = buildReservationAuditEntries(
+			reservation,
+			updatePayload,
+			auditActor
+		);
+		const updateOperation = {
+			$set: {
+				...updatePayload,
+				adminLastUpdatedAt: now,
+				adminLastUpdatedBy: auditActor,
+			},
+		};
+		if (auditEntries.length) {
+			updateOperation.$push = {
+				adminChangeLog: { $each: auditEntries },
+				reservationAuditLog: { $each: auditEntries },
+			};
+		}
+
+		const updatedReservation = await Reservations.findByIdAndUpdate(
+			reservationId,
+			updateOperation,
+			{ new: true }
+		)
+			.populate("roomId", "room_number room_type displayName")
+			.lean()
+			.exec();
+
+		emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
+			type: "pending_confirmation",
+			reservationId: updatedReservation._id,
+			ownerId: updatedReservation.belongsTo,
+		}).catch((error) =>
+			console.error("Error emitting reservation notification:", error)
+		);
+
+		return res.json({
+			...updatedReservation,
+			pendingReasons: getPendingConfirmationReasons(updatedReservation),
+		});
+	} catch (error) {
+		console.error("Error updating pending confirmation reservation:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.reservationAgentWalletSnapshot = async (req, res) => {
+	try {
+		const { reservationId, userId } = req.params;
+		const actorId = req.auth?._id || userId;
+
+		if (!ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+
+		const [reservation, actor] = await Promise.all([
+			Reservations.findById(reservationId),
+			User.findById(actorId)
+				.select(
+					"_id name email role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+				)
+				.lean()
+				.exec(),
+		]);
+
+		if (!reservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+		if (
+			!actor ||
+			actor.activeUser === false ||
+			!(await canViewReservationHotel(actor, reservation.hotelId)) ||
+			!canUsePendingConfirmationWorkflow(actor)
+		) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+
+		const agent = await resolveReservationAgent(reservation);
+		if (!agent) {
+			return res.json({ isAgentReservation: false, snapshot: null });
+		}
+
+		const existingSnapshot =
+			reservation.agentWalletSnapshot &&
+			typeof reservation.agentWalletSnapshot.toObject === "function"
+				? reservation.agentWalletSnapshot.toObject()
+				: reservation.agentWalletSnapshot || {};
+		const snapshot = existingSnapshot?.captured
+			? existingSnapshot
+			: await buildReservationAgentWalletSnapshot({
+					reservation,
+					actor: buildReservationActorSnapshot(actor),
+					reason: "reservation_detail_backfill",
+			  });
+
+		if (snapshot && !existingSnapshot?.captured) {
+			// Silent backfill for older reservations. This makes future detail views
+			// read a fixed wallet snapshot instead of recalculating current balance.
+			await Reservations.findByIdAndUpdate(reservationId, {
+				$set: { agentWalletSnapshot: snapshot },
+			}).exec();
+		}
+
+		return res.json({
+			isAgentReservation: true,
+			snapshot,
+		});
+	} catch (error) {
+		console.error("Error reading reservation agent wallet snapshot:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
 	}
 };
 

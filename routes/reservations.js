@@ -53,9 +53,33 @@ const {
 	aggregateCollectedReservations,
 	syncReservationRoomTypesByDisplayName,
 	openFinanceCycleNotifications,
+	pendingConfirmationReservations,
+	pendingConfirmationNotificationFeed,
+	updatePendingConfirmationReservation,
+	reservationAgentWalletSnapshot,
 } = require("../controllers/reservations");
+const {
+	previewReservationExcelImport,
+	commitReservationExcelImport,
+} = require("../controllers/reservation_excel_import");
 
 router.post("/reservations/create/:userId/:hotelId", requireSignin, create);
+
+// AI-assisted Excel import workflow:
+// 1) preview: parse + normalize uploaded Excel and return clarification questions.
+// 2) commit: create only the employee-confirmed rows as Pending Confirmation.
+router.post(
+	"/reservations/import-excel/:userId/:hotelId/preview",
+	requireSignin,
+	upload.single("file"),
+	previewReservationExcelImport
+);
+
+router.post(
+	"/reservations/import-excel/:userId/:hotelId/commit",
+	requireSignin,
+	commitReservationExcelImport
+);
 
 router.get(
 	"/reservations/list/:page/:records/:filters/:hotelId/:date",
@@ -112,6 +136,30 @@ router.get(
 router.get(
 	"/reservations/open-finance-cycles/:hotelId/:userId",
 	openFinanceCycleNotifications
+);
+
+router.get(
+	"/reservations/pending-confirmation/:page/:records/:hotelId/:userId",
+	requireSignin,
+	pendingConfirmationReservations
+);
+
+router.get(
+	"/reservations/notifications/pending-confirmation/:userId",
+	requireSignin,
+	pendingConfirmationNotificationFeed
+);
+
+router.put(
+	"/reservations/pending-confirmation/:reservationId/:userId",
+	requireSignin,
+	updatePendingConfirmationReservation
+);
+
+router.get(
+	"/reservations/agent-wallet-snapshot/:reservationId/:userId",
+	requireSignin,
+	reservationAgentWalletSnapshot
 );
 
 router.get(

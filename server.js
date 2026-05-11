@@ -11,7 +11,6 @@ const {
 	startHousekeepingMaintenanceJob,
 } = require("./services/housekeepingMaintenance");
 
-
 const app = express();
 const server = http.createServer(app);
 
@@ -75,6 +74,18 @@ io.on("connection", (socket) => {
 	});
 	socket.on("leaveHousekeeping", ({ hotelId } = {}) => {
 		if (hotelId) socket.leave(`housekeeping:${hotelId}`);
+	});
+	socket.on("joinHotelNotifications", ({ hotelId } = {}) => {
+		if (hotelId) socket.join(`hotel-notifications:${hotelId}`);
+	});
+	socket.on("leaveHotelNotifications", ({ hotelId } = {}) => {
+		if (hotelId) socket.leave(`hotel-notifications:${hotelId}`);
+	});
+	socket.on("joinOwnerNotifications", ({ ownerId } = {}) => {
+		if (ownerId) socket.join(`owner-notifications:${ownerId}`);
+	});
+	socket.on("leaveOwnerNotifications", ({ ownerId } = {}) => {
+		if (ownerId) socket.leave(`owner-notifications:${ownerId}`);
 	});
 
 	socket.on("typing", (data = {}) => {

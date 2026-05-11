@@ -114,6 +114,37 @@ const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
 	],
 });
 
+const buildDashboardIncompleteReservationFilterForHotels = (hotelObjectIds = []) => ({
+	hotelId: { $in: hotelObjectIds },
+	$or: [
+		{
+			checkout_date: { $lte: getTodayEnd() },
+			reservation_status: { $not: DONE_RESERVATION_STATUS },
+		},
+		{
+			$and: [
+				buildFinancialCycleRequiredDateFilter(),
+				{ "financial_cycle.status": { $ne: "closed" } },
+			],
+		},
+	],
+});
+
+const buildRecentReservationFilterForHotels = (hotelObjectIds = [], startDate) => ({
+	hotelId: { $in: hotelObjectIds },
+	$or: [
+		{
+			booked_at: { $gte: startDate },
+		},
+		{
+			$and: [
+				{ $or: [{ booked_at: { $exists: false } }, { booked_at: null }] },
+				{ createdAt: { $gte: startDate } },
+			],
+		},
+	],
+});
+
 const buildStoredHotelIdFilter = (hotelId) => ({
 	$expr: { $eq: [{ $toString: "$hotelId" }, String(hotelId)] },
 });
@@ -167,7 +198,7 @@ const getOpenReservationReasons = (reservation = {}) => {
 				makeReason(
 					"hotel_commission_pending",
 					"Hotel collected the payment, but commission is not marked paid.",
-					"الفندق حصّل المبلغ، لكن العمولة غير مؤكدة السداد."
+					"الفندق حصّل المبلغ، لكن دفع العمولة غير مكتمل."
 				)
 			);
 		} else if (
@@ -371,7 +402,7 @@ const getDashboardFinancialReasons = (reservation = {}) => {
 			makeReason(
 				"hotel_commission_pending",
 				"Hotel collected the payment, but commission is not marked paid.",
-				"الفندق حصل المبلغ، لكن العمولة غير مؤكدة السداد."
+				"الفندق حصل المبلغ، لكن دفع العمولة غير مكتمل."
 			),
 		];
 	}
@@ -462,6 +493,52 @@ const attachReasonFields = (reservation, reasonGetter) => {
 		reason: serializeReasonText(reasons, "en"),
 		reasonArabic: serializeReasonText(reasons, "ar"),
 	};
+};
+
+const toValidObjectIds = (values = []) =>
+	[
+		...new Set(
+			(Array.isArray(values) ? values : [values])
+				.map(normalizeId)
+				.filter((id) => mongoose.Types.ObjectId.isValid(id))
+		),
+	].map((id) => mongoose.Types.ObjectId(id));
+
+const getDashboardAccessibleHotels = async (user = {}) => {
+	if (!user?._id) return [];
+
+	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) {
+		return HotelDetails.find({})
+			.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel")
+			.lean()
+			.exec();
+	}
+
+	const scopedHotelIds = toValidObjectIds([
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+	]);
+	const filters = [];
+
+	if (Number(user.role) === 2000 && mongoose.Types.ObjectId.isValid(user._id)) {
+		filters.push({ belongsTo: mongoose.Types.ObjectId(user._id) });
+	}
+
+	if (scopedHotelIds.length) {
+		filters.push({ _id: { $in: scopedHotelIds } });
+	}
+
+	if (!filters.length) return [];
+
+	const hotels = await HotelDetails.find(
+		filters.length === 1 ? filters[0] : { $or: filters }
+	)
+		.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel")
+		.lean()
+		.exec();
+
+	return hotels.filter((hotel) => canViewHotelStats(user, hotel));
 };
 
 exports.hotelDetailsById = (req, res, next, id) => {
@@ -632,6 +709,264 @@ exports.hotelGeneralStats = async (req, res) => {
 	} catch (err) {
 		console.error("hotelGeneralStats error:", err);
 		return res.status(500).json({ error: "Could not load hotel stats" });
+	}
+};
+
+exports.managerExecutiveSummary = async (req, res) => {
+	try {
+		const hotels = await getDashboardAccessibleHotels(req.profile);
+		const hotelObjectIds = hotels
+			.map((hotel) => hotel._id)
+			.filter(Boolean)
+			.map((id) => mongoose.Types.ObjectId(id));
+
+		if (!hotelObjectIds.length) {
+			return res.json({
+				asOf: new Date(),
+				period: {
+					reservationsFrom: null,
+					reservationsTo: new Date(),
+				},
+				stats: {
+					totalHotels: 0,
+					totalRooms: 0,
+					availableRooms: 0,
+					reservationsPastThreeMonths: 0,
+					incompleteReservations: 0,
+				},
+			});
+		}
+
+		const now = new Date();
+		const startOfDay = new Date(now);
+		startOfDay.setHours(0, 0, 0, 0);
+		const endOfDay = new Date(now);
+		endOfDay.setHours(23, 59, 59, 999);
+		const threeMonthsAgo = new Date(now);
+		threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+		threeMonthsAgo.setHours(0, 0, 0, 0);
+
+		const [rooms, todayReservations, recentReservations, incompleteReservations] =
+			await Promise.all([
+				Rooms.find({ hotelId: { $in: hotelObjectIds } })
+					.select("_id hotelId active activeRoom")
+					.lean()
+					.exec(),
+				Reservations.find({
+					hotelId: { $in: hotelObjectIds },
+					checkin_date: { $lte: endOfDay },
+					checkout_date: { $gte: startOfDay },
+					reservation_status: { $not: DONE_RESERVATION_STATUS },
+				})
+					.select("hotelId roomId reservation_status")
+					.lean()
+					.exec(),
+				Reservations.countDocuments(
+					buildRecentReservationFilterForHotels(hotelObjectIds, threeMonthsAgo)
+				),
+				Reservations.countDocuments(
+					buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds)
+				),
+			]);
+
+		const roomsByHotel = new Map();
+		rooms.forEach((room) => {
+			const hotelId = normalizeId(room.hotelId);
+			if (!roomsByHotel.has(hotelId)) roomsByHotel.set(hotelId, []);
+			roomsByHotel.get(hotelId).push(room);
+		});
+
+		const occupiedByHotel = new Map();
+		todayReservations.forEach((reservation) => {
+			const hotelId = normalizeId(reservation.hotelId);
+			if (!occupiedByHotel.has(hotelId)) occupiedByHotel.set(hotelId, new Set());
+			const occupiedSet = occupiedByHotel.get(hotelId);
+			extractReservationRoomIds(reservation.roomId).forEach((roomId) => {
+				if (roomId) occupiedSet.add(roomId);
+			});
+		});
+
+		const totals = hotels.reduce(
+			(acc, hotel) => {
+				const hotelId = normalizeId(hotel._id);
+				const hotelRooms = roomsByHotel.get(hotelId) || [];
+				const physicalRoomsTotal = hotelRooms.length;
+				const declaredRoomsTotal = getDeclaredRoomsTotal(hotel);
+				const totalRooms = physicalRoomsTotal || declaredRoomsTotal;
+				const activeRoomsList = hotelRooms.filter(
+					(room) => room.active !== false && room.activeRoom !== false
+				);
+				const activeRooms = physicalRoomsTotal
+					? activeRoomsList.length
+					: declaredRoomsTotal;
+				const activeRoomIds = new Set(
+					activeRoomsList.map((room) => normalizeId(room._id))
+				);
+				const rawOccupied = occupiedByHotel.get(hotelId) || new Set();
+				const occupiedRooms = activeRoomIds.size
+					? [...rawOccupied].filter((roomId) => activeRoomIds.has(roomId)).length
+					: Math.min(rawOccupied.size, activeRooms);
+
+				acc.totalRooms += totalRooms;
+				acc.availableRooms += Math.max(activeRooms - occupiedRooms, 0);
+				return acc;
+			},
+			{ totalRooms: 0, availableRooms: 0 }
+		);
+
+		return res.json({
+			asOf: now,
+			period: {
+				reservationsFrom: threeMonthsAgo,
+				reservationsTo: now,
+			},
+			stats: {
+				totalHotels: hotels.length,
+				totalRooms: totals.totalRooms,
+				availableRooms: totals.availableRooms,
+				reservationsPastThreeMonths: recentReservations,
+				incompleteReservations,
+			},
+		});
+	} catch (err) {
+		console.error("managerExecutiveSummary error:", err);
+		return res.status(500).json({ error: "Could not load executive summary" });
+	}
+};
+
+exports.managerIncompleteReservations = async (req, res) => {
+	try {
+		const hotels = await getDashboardAccessibleHotels(req.profile);
+		const hotelObjectIds = hotels
+			.map((hotel) => hotel._id)
+			.filter(Boolean)
+			.map((id) => mongoose.Types.ObjectId(id));
+
+		const hotelNameById = new Map(
+			hotels.map((hotel) => [normalizeId(hotel._id), hotel.hotelName || "Hotel"])
+		);
+		const hotelOwnerById = new Map(
+			hotels.map((hotel) => [normalizeId(hotel._id), normalizeId(hotel.belongsTo)])
+		);
+
+		if (!hotelObjectIds.length) {
+			return res.json({
+				page: 1,
+				limit: 0,
+				total: 0,
+				pages: 0,
+				reservations: [],
+			});
+		}
+
+		const {
+			page = 1,
+			limit = 10,
+			search = "",
+			sortBy = "booked_at",
+			sortOrder = "asc",
+			dateBy = "booked_at",
+			dateFrom = "",
+			dateTo = "",
+			exportAll = "",
+		} = req.query || {};
+
+		const currentPage = Math.max(parseInt(page, 10) || 1, 1);
+		const pageSize = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 50);
+		const shouldExportAll = ["1", "true", "yes", "all"].includes(
+			String(exportAll).toLowerCase()
+		);
+		const allowedSorts = ["booked_at", "checkin_date", "checkout_date"];
+		const sortField = allowedSorts.includes(sortBy) ? sortBy : "booked_at";
+		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
+		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
+
+		const filters = [
+			buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds),
+		];
+		const trimmedSearch = String(search || "").trim();
+
+		if (trimmedSearch) {
+			const searchRegex = new RegExp(
+				trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+				"i"
+			);
+			const matchingHotelIds = hotels
+				.filter((hotel) => searchRegex.test(String(hotel.hotelName || "")))
+				.map((hotel) => hotel._id)
+				.filter(Boolean)
+				.map((id) => mongoose.Types.ObjectId(id));
+			const searchConditions = [
+				{ confirmation_number: searchRegex },
+				{ "customer_details.name": searchRegex },
+			];
+			if (matchingHotelIds.length) {
+				searchConditions.push({ hotelId: { $in: matchingHotelIds } });
+			}
+			filters.push({
+				$or: searchConditions,
+			});
+		}
+
+		if (dateFrom || dateTo) {
+			const dateRange = {};
+			if (dateFrom) {
+				const from = new Date(`${dateFrom}T00:00:00.000Z`);
+				if (!Number.isNaN(from.getTime())) dateRange.$gte = from;
+			}
+			if (dateTo) {
+				const to = new Date(`${dateTo}T23:59:59.999Z`);
+				if (!Number.isNaN(to.getTime())) dateRange.$lte = to;
+			}
+			if (Object.keys(dateRange).length) {
+				filters.push({ [dateField]: dateRange });
+			}
+		}
+
+		const filter = filters.length > 1 ? { $and: filters } : filters[0];
+		let reservationsQuery = Reservations.find(filter)
+			.select(
+				"hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+			)
+			.sort({ [sortField]: direction, _id: 1 })
+			.lean();
+
+		if (!shouldExportAll) {
+			reservationsQuery = reservationsQuery
+				.skip((currentPage - 1) * pageSize)
+				.limit(pageSize);
+		}
+
+		const [total, reservations] = await Promise.all([
+			Reservations.countDocuments(filter),
+			reservationsQuery.exec(),
+		]);
+
+		return res.json({
+			page: shouldExportAll ? 1 : currentPage,
+			limit: shouldExportAll ? total : pageSize,
+			total,
+			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
+			reservations: reservations.map((reservation) =>
+				attachReasonFields(
+					{
+						...reservation,
+						reservationId: reservation._id,
+						hotelName:
+							hotelNameById.get(normalizeId(reservation.hotelId)) || "Hotel",
+						hotelOwnerId:
+							hotelOwnerById.get(normalizeId(reservation.hotelId)) ||
+							normalizeId(req.profile?._id),
+					},
+					getDashboardIncompleteReservationReasons
+				)
+			),
+		});
+	} catch (err) {
+		console.error("managerIncompleteReservations error:", err);
+		return res
+			.status(500)
+			.json({ error: "Could not load incomplete reservations" });
 	}
 };
 

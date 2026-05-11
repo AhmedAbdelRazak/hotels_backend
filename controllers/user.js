@@ -33,6 +33,19 @@ const buildStaffPlaceholderEmail = (phoneValue, hotelValue) => {
 const isStaffPlaceholderEmail = (email) =>
 	String(email || "").toLowerCase().endsWith("@staff.jannatbooking.local");
 
+const sanitizeCompanyDocuments = (documents = []) =>
+	(Array.isArray(documents) ? documents : [])
+		.filter((document) => document && (document.fileName || document.dataUrl || document.url))
+		.slice(0, 8)
+		.map((document) => ({
+			fileName: String(document.fileName || document.name || "Company document").slice(0, 180),
+			fileType: String(document.fileType || document.type || "").slice(0, 120),
+			fileSize: Number(document.fileSize || document.size || 0),
+			dataUrl: String(document.dataUrl || document.url || "").slice(0, 4 * 1024 * 1024),
+			uploadedAt: document.uploadedAt || new Date(),
+			notes: String(document.notes || "").slice(0, 500),
+		}));
+
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const configuredSuperAdminIds = () =>
@@ -61,7 +74,7 @@ const cleanPhoneNumber = (rawPhone) => {
 	return cleaned;
 };
 
-const HOTEL_STAFF_ROLES = [2000, 3000, 4000, 5000, 6000, 7000];
+const HOTEL_STAFF_ROLES = [2000, 3000, 4000, 5000, 6000, 7000, 8000];
 const ROLE_BY_DESCRIPTION = {
 	hotelmanager: 2000,
 	reception: 3000,
@@ -69,6 +82,7 @@ const ROLE_BY_DESCRIPTION = {
 	housekeeping: 5000,
 	finance: 6000,
 	ordertaker: 7000,
+	reservationemployee: 8000,
 };
 
 const normalizeObjectIdString = (value) => String(value?._id || value || "");
@@ -388,6 +402,20 @@ exports.updateUserByAdmin = async (req, res) => {
 		if ("belongsToId" in payload) userDoc.belongsToId = payload.belongsToId || "";
 		if ("accessTo" in payload && Array.isArray(payload.accessTo))
 			userDoc.accessTo = payload.accessTo;
+		const userRoleDescriptions = [
+			String(userDoc.roleDescription || "").toLowerCase(),
+			...(Array.isArray(userDoc.roleDescriptions)
+				? userDoc.roleDescriptions.map((item) => String(item || "").toLowerCase())
+				: []),
+		];
+		if (userRoleDescriptions.includes("reservationemployee")) {
+			userDoc.accessTo = [
+				...new Set([
+					...(Array.isArray(userDoc.accessTo) ? userDoc.accessTo : []),
+					"settings",
+				]),
+			];
+		}
 		if ("hotelsToSupport" in payload && Array.isArray(payload.hotelsToSupport))
 			userDoc.hotelsToSupport = payload.hotelsToSupport;
 		if ("employeeImage" in payload)
@@ -485,7 +513,7 @@ exports.listHotelStaffUsers = async (req, res) => {
 			],
 		})
 			.select(
-				"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
+				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
 			)
 			.populate("hotelsToSupport", "_id hotelName")
 			.sort({ role: 1, name: 1 })
@@ -589,6 +617,18 @@ exports.updateHotelStaffUser = async (req, res) => {
 			staffUser.companyName = String(payload.companyName || "").trim();
 		}
 
+		if ("companyOfficialName" in payload) {
+			staffUser.companyOfficialName = String(payload.companyOfficialName || "").trim();
+		}
+
+		if ("companyEin" in payload) {
+			staffUser.companyEin = String(payload.companyEin || "").trim();
+		}
+
+		if ("companyDocuments" in payload) {
+			staffUser.companyDocuments = sanitizeCompanyDocuments(payload.companyDocuments);
+		}
+
 		if ("roleDescription" in payload || "role" in payload) {
 			const normalizedRoleDescription = String(
 				payload.roleDescription || staffUser.roleDescription || ""
@@ -649,6 +689,20 @@ exports.updateHotelStaffUser = async (req, res) => {
 
 		if ("accessTo" in payload && Array.isArray(payload.accessTo)) {
 			staffUser.accessTo = payload.accessTo;
+		}
+		const staffRoleDescriptions = [
+			String(staffUser.roleDescription || "").toLowerCase(),
+			...(Array.isArray(staffUser.roleDescriptions)
+				? staffUser.roleDescriptions.map((item) => String(item || "").toLowerCase())
+				: []),
+		];
+		if (staffRoleDescriptions.includes("reservationemployee")) {
+			staffUser.accessTo = [
+				...new Set([
+					...(Array.isArray(staffUser.accessTo) ? staffUser.accessTo : []),
+					"settings",
+				]),
+			];
 		}
 
 		const hasHotelScopePayload =

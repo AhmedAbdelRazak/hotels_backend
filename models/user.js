@@ -67,6 +67,23 @@ const userSchema = new mongoose.Schema(
 			default: "",
 		},
 
+		companyOfficialName: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+
+		companyEin: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+
+		companyDocuments: {
+			type: Array,
+			default: [],
+		},
+
 		hotelAddress: {
 			type: String,
 			trim: true,

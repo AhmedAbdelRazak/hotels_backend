@@ -41,6 +41,19 @@ const toEnglishDigits = (str = "") =>
 const isEmail = (v = "") => /@/.test(v);
 const onlyDigits = (v = "") => toEnglishDigits(v).replace(/\D/g, "");
 
+const sanitizeCompanyDocuments = (documents = []) =>
+	(Array.isArray(documents) ? documents : [])
+		.filter((document) => document && (document.fileName || document.dataUrl || document.url))
+		.slice(0, 8)
+		.map((document) => ({
+			fileName: String(document.fileName || document.name || "Company document").slice(0, 180),
+			fileType: String(document.fileType || document.type || "").slice(0, 120),
+			fileSize: Number(document.fileSize || document.size || 0),
+			dataUrl: String(document.dataUrl || document.url || "").slice(0, 4 * 1024 * 1024),
+			uploadedAt: document.uploadedAt || new Date(),
+			notes: String(document.notes || "").slice(0, 500),
+		}));
+
 // wa.me fallback link builder
 const buildWaText = ({ name, url }) =>
 	`Hi ${
@@ -560,6 +573,9 @@ exports.createHotelStaffUser = async (req, res) => {
 			hotelIdsWork,
 			accessTo,
 			companyName,
+			companyOfficialName,
+			companyEin,
+			companyDocuments,
 		} = req.body;
 
 		const cleanPhoneNumber = (rawPhone) => {
@@ -619,6 +635,7 @@ exports.createHotelStaffUser = async (req, res) => {
 			housekeeping: 5000,
 			finance: 6000,
 			ordertaker: 7000,
+			reservationemployee: 8000,
 		};
 		const descriptionByRole = Object.entries(roleByDescription).reduce(
 			(acc, [description, roleNumber]) => {
@@ -700,8 +717,9 @@ exports.createHotelStaffUser = async (req, res) => {
 				(String(creator.hotelIdWork || "") === currentHotelId ||
 					supportIds.includes(currentHotelId));
 			const adminCanSupportHotel =
-				creatorRole === 1000 &&
-				(supportIds.length === 0 || supportIds.includes(currentHotelId));
+				isConfiguredSuperAdmin(creator) ||
+				(creatorRole === 1000 &&
+					(supportIds.length === 0 || supportIds.includes(currentHotelId)));
 
 			return creatorOwnsHotel || creatorIsAssignedHotelManager || adminCanSupportHotel;
 		});
@@ -724,6 +742,16 @@ exports.createHotelStaffUser = async (req, res) => {
 		}
 		const staffEmail =
 			normalizedEmail || buildStaffPlaceholderEmail(cleanedPhone, hotelId);
+		const normalizedAccessTo = [
+			...new Set([
+				...(Array.isArray(accessTo)
+					? accessTo.map((item) => String(item || "").trim()).filter(Boolean)
+					: []),
+				...(normalizedRoleDescriptions.includes("reservationemployee")
+					? ["settings"]
+					: []),
+			]),
+		];
 
 		const staffUser = new User({
 			name,
@@ -736,6 +764,9 @@ exports.createHotelStaffUser = async (req, res) => {
 			roles: normalizedRoles,
 			roleDescriptions: normalizedRoleDescriptions,
 			companyName: String(companyName || "").trim(),
+			companyOfficialName: String(companyOfficialName || "").trim(),
+			companyEin: String(companyEin || "").trim(),
+			companyDocuments: sanitizeCompanyDocuments(companyDocuments),
 			hotelName: primaryHotel.hotelName || "",
 			hotelAddress: primaryHotel.hotelAddress || "",
 			hotelCountry: primaryHotel.hotelCountry || "",
@@ -745,7 +776,7 @@ exports.createHotelStaffUser = async (req, res) => {
 			belongsToId: ownerId,
 			hotelsToSupport: uniqueHotelIds,
 			activeUser: true,
-			accessTo: Array.isArray(accessTo) ? accessTo : [],
+			accessTo: normalizedAccessTo,
 		});
 
 		await staffUser.save();

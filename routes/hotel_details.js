@@ -21,6 +21,8 @@ const {
 	listForAdminAll,
 	reassignHotelOwner,
 	hotelGeneralStats,
+	managerExecutiveSummary,
+	managerIncompleteReservations,
 	hotelOpenReservations,
 	hotelIncompleteReservations,
 	saveOwnerPaymentMethod,
@@ -34,6 +36,20 @@ router.get(
 	requireSignin,
 	isAuth,
 	hotelGeneralStats
+);
+
+router.get(
+	"/hotel-details/executive-summary/:userId",
+	requireSignin,
+	isAuth,
+	managerExecutiveSummary
+);
+
+router.get(
+	"/hotel-details/executive-incomplete-reservations/:userId",
+	requireSignin,
+	isAuth,
+	managerIncompleteReservations
 );
 
 router.get(
