@@ -23,6 +23,7 @@ const {
 	houseKeepingStaff,
 	listHotelStaffUsers,
 	updateHotelStaffUser,
+	previewHotelStaffDashboard,
 	allHotelAccounts,
 } = require("../controllers/user");
 
@@ -77,6 +78,12 @@ router.put(
 	requireSignin,
 	isAuth,
 	updateHotelStaffUser
+);
+router.post(
+	"/hotel-staff/:staffId/:hotelId/:userId/preview-dashboard",
+	requireSignin,
+	isAuth,
+	previewHotelStaffDashboard
 );
 
 /* Param resolvers */

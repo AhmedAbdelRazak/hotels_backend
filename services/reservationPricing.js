@@ -82,6 +82,29 @@ const normalizeCommissionPercent = (raw, fallback = 10) => {
 	return value;
 };
 
+const resolveDetailBasePrice = (detail = {}) => {
+	const candidates = [
+		detail?.price?.basePrice,
+		detail?.basePrice,
+		detail?.roomPrice,
+		detail?.price,
+	];
+	const resolved = candidates.map(moneyNumber).find((value) => value > 0);
+	return resolved || 0;
+};
+
+const resolveDetailDefaultCost = (detail = {}, basePrice = 0) => {
+	const candidates = [
+		detail?.defaultCost,
+		detail?.cost,
+		detail?.rootPrice,
+		detail?.price?.defaultCost,
+		basePrice,
+	];
+	const resolved = candidates.map(moneyNumber).find((value) => value > 0);
+	return resolved || 0;
+};
+
 const resolveDailyPrice = (rate, basePrice, defaultCost) => {
 	const calendarPrice = moneyNumber(rate?.price);
 	if (rate && calendarPrice > 0) return calendarPrice;
@@ -174,15 +197,29 @@ const normalizeProvidedPricingDay = (day = {}) => {
 	const totalPriceWithoutCommission = n2(
 		day.totalPriceWithoutCommission ?? finalPrice
 	);
+	const rootPrice = resolveDayRootPrice(day, totalPriceWithoutCommission || finalPrice);
 	return {
 		...day,
 		date: dateOnlyKey(day.date || day.calendarDate),
 		price: finalPrice,
-		rootPrice: n2(day.rootPrice),
+		rootPrice,
 		commissionRate: n2(day.commissionRate),
 		totalPriceWithCommission,
 		totalPriceWithoutCommission,
 	};
+};
+
+const resolveDayRootPrice = (day = {}, fallback = 0) => {
+	const explicitRoot = moneyNumber(day.rootPrice);
+	if (explicitRoot > 0) return n2(explicitRoot);
+
+	const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
+	if (withoutCommission > 0) return n2(withoutCommission);
+
+	const finalPrice = moneyNumber(day.totalPriceWithCommission ?? day.price);
+	if (finalPrice > 0) return n2(finalPrice);
+
+	return n2(fallback);
 };
 
 const normalizeProvidedRoomPricing = (room = {}) => {
@@ -251,9 +288,8 @@ const buildDayWithNightlyPrice = (template = {}, date, nightlyPrice) => {
 		...template,
 		date,
 		price: finalPrice,
-		rootPrice: getDayValue(
-			template,
-			"rootPrice",
+		rootPrice: resolveDayRootPrice(
+			{ ...template, totalPriceWithoutCommission },
 			totalPriceWithoutCommission || finalPrice
 		),
 		commissionRate: getDayValue(template, "commissionRate", 0),
@@ -305,6 +341,15 @@ const roomsAreSame = (left = [], right = []) =>
 const roomIdentity = (room = {}) =>
 	`${normalizeText(getRoomType(room))}|${normalizeText(getRoomDisplayName(room))}`;
 
+const roomIdentitiesAreSame = (left = [], right = []) => {
+	const leftRooms = Array.isArray(left) ? left : [];
+	const rightRooms = Array.isArray(right) ? right : [];
+	if (leftRooms.length !== rightRooms.length) return false;
+	return leftRooms.every(
+		(room, index) => roomIdentity(room) === roomIdentity(rightRooms[index])
+	);
+};
+
 const findExistingRoomFor = (existingRooms = [], room = {}, index = 0) => {
 	const byIndex = Array.isArray(existingRooms) ? existingRooms[index] : null;
 	if (byIndex && roomIdentity(byIndex) === roomIdentity(room)) return byIndex;
@@ -335,6 +380,9 @@ const buildCanonicalRoomPricing = ({
 	room,
 	stayDates,
 	preferChosenPrice = false,
+	preferCalendarPrice = false,
+	allowBlockedCalendar = false,
+	warnings = [],
 }) => {
 	const details = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -353,8 +401,8 @@ const buildCanonicalRoomPricing = ({
 	}
 
 	const rates = Array.isArray(detail.pricingRate) ? detail.pricingRate : [];
-	const basePrice = moneyNumber(detail?.price?.basePrice);
-	const defaultCost = moneyNumber(detail?.defaultCost);
+	const basePrice = resolveDetailBasePrice(detail);
+	const defaultCost = resolveDetailDefaultCost(detail, basePrice);
 	const fallbackCommission = normalizeCommissionPercent(
 		detail?.roomCommission,
 		hotel?.commission || 10
@@ -367,7 +415,8 @@ const buildCanonicalRoomPricing = ({
 	const roomNightlyPrice = getRoomNightlyPrice(room);
 	const pricingByDay = stayDates.map((date, index) => {
 		const rate = rates.find((item) => item?.calendarDate === date);
-		if (calendarRateIsBlocked(rate)) {
+		const blockedOnCalendar = calendarRateIsBlocked(rate);
+		if (blockedOnCalendar && !allowBlockedCalendar) {
 			throw new ReservationPricingError(
 				`${normalizedDisplayName || normalizedRoomType} is blocked on the hotel calendar for ${date}.`,
 				409,
@@ -379,16 +428,34 @@ const buildCanonicalRoomPricing = ({
 				}
 			);
 		}
+		if (blockedOnCalendar) {
+			warnings.push({
+				code: "calendar_date_blocked_override",
+				message: `${normalizedDisplayName || normalizedRoomType} is blocked on the hotel calendar for ${date}. The reservation was allowed because it was created by hotel staff.`,
+				room_type: normalizedRoomType,
+				displayName: normalizedDisplayName,
+				date,
+			});
+		}
 
-		const dayPrice = resolveDailyPrice(rate, basePrice, defaultCost);
-		const rootPrice = resolveDailyRootPrice(rate, defaultCost, dayPrice);
+		const effectiveRate = blockedOnCalendar ? null : rate;
+		const dayPrice = resolveDailyPrice(effectiveRate, basePrice, defaultCost);
+		const rootPrice = resolveDailyRootPrice(
+			effectiveRate,
+			defaultCost || basePrice,
+			dayPrice
+		);
 		const commissionRate = normalizeCommissionPercent(
-			rate?.commissionRate,
+			effectiveRate?.commissionRate,
 			fallbackCommission
 		);
 		const calendarTotalPriceWithCommission = n2(
 			dayPrice + rootPrice * (commissionRate / 100)
 		);
+		const canonicalDailyPrice =
+			calendarTotalPriceWithCommission > 0
+				? calendarTotalPriceWithCommission
+				: 0;
 		const providedDay =
 			findPricingDayForDate(providedRows, date) ||
 			providedRows[index] ||
@@ -397,16 +464,21 @@ const buildCanonicalRoomPricing = ({
 		const totalPriceWithCommission =
 			preferChosenPrice && roomNightlyPrice > 0
 				? roomNightlyPrice
+				: preferCalendarPrice && canonicalDailyPrice > 0
+				  ? canonicalDailyPrice
 				: providedFinal > 0
 				  ? n2(providedFinal)
 				  : roomNightlyPrice > 0
 				    ? roomNightlyPrice
-				    : calendarTotalPriceWithCommission;
-		const resolvedRootPrice = getDayValue(providedDay, "rootPrice", rootPrice);
+				    : canonicalDailyPrice;
 		const totalPriceWithoutCommission = getDayValue(
 			providedDay,
 			"totalPriceWithoutCommission",
 			dayPrice || totalPriceWithCommission
+		);
+		const resolvedRootPrice = resolveDayRootPrice(
+			{ ...providedDay, totalPriceWithoutCommission },
+			rootPrice || totalPriceWithoutCommission || totalPriceWithCommission
 		);
 		const resolvedCommissionRate = getDayValue(
 			providedDay,
@@ -449,6 +521,74 @@ const buildCanonicalRoomPricing = ({
 	});
 };
 
+const normalizeReservationCreationPricing = async (
+	reservationPayload = {},
+	options = {}
+) => {
+	const updates = { ...reservationPayload };
+	const warnings = [];
+	const stayDates = buildStayDateKeys(updates.checkin_date, updates.checkout_date);
+	const rooms = Array.isArray(updates.pickedRoomsType)
+		? updates.pickedRoomsType
+		: [];
+	const pricingRooms = Array.isArray(updates.pickedRoomsPricing)
+		? updates.pickedRoomsPricing
+		: [];
+	const primaryRooms = rooms.length > 0 ? rooms : pricingRooms;
+	const nextHotelId = normalizeId(updates.hotelId);
+
+	if (!stayDates.length || !primaryRooms.length) {
+		return { reservation: updates, warnings };
+	}
+
+	if (!mongoose.Types.ObjectId.isValid(nextHotelId)) {
+		throw new ReservationPricingError(
+			"A valid hotel is required to calculate reservation pricing.",
+			400,
+			"invalid_hotel_for_pricing"
+		);
+	}
+
+	const hotel = await HotelDetails.findById(nextHotelId)
+		.select("_id hotelName commission currency roomCountDetails")
+		.lean()
+		.exec();
+	if (!hotel) {
+		throw new ReservationPricingError(
+			"Hotel pricing details were not found.",
+			404,
+			"hotel_pricing_not_found",
+			{ hotelId: nextHotelId }
+		);
+	}
+
+	const nextRooms = primaryRooms.map((room, index) => {
+		const existingRoom = findExistingRoomFor(primaryRooms, room, index);
+		return buildCanonicalRoomPricing({
+			hotel,
+			room,
+			stayDates,
+			preferChosenPrice: shouldPreferChosenNightlyPrice(room, existingRoom),
+			preferCalendarPrice: true,
+			allowBlockedCalendar: !!options.allowBlockedCalendar,
+			warnings,
+		});
+	});
+
+	const totals = summarizeRooms(nextRooms);
+	updates.pickedRoomsType = nextRooms;
+	updates.pickedRoomsPricing = nextRooms;
+	updates.total_rooms = nextRooms.reduce(
+		(sum, room) => sum + normalizeRoomCount(room.count),
+		0
+	);
+	updates.days_of_residence = stayDates.length;
+	updates.total_amount = totals.total_amount;
+	updates.sub_total = totals.sub_total;
+
+	return { reservation: updates, warnings };
+};
+
 const summarizeRooms = (rooms = []) => {
 	const totals = rooms.reduce(
 		(acc, room) => {
@@ -462,7 +602,12 @@ const summarizeRooms = (rooms = []) => {
 				0
 			);
 			const roomRoot = pricingByDay.reduce(
-				(sum, day) => sum + moneyNumber(day.rootPrice),
+				(sum, day) =>
+					sum +
+					resolveDayRootPrice(
+						day,
+						moneyNumber(day.totalPriceWithCommission ?? day.price)
+					),
 				0
 			);
 			acc.totalAmount += roomTotal * count;
@@ -477,6 +622,24 @@ const summarizeRooms = (rooms = []) => {
 		sub_total: n2(totals.subTotal),
 		commission: n2(totals.totalAmount - totals.subTotal),
 	};
+};
+
+const resetCommissionAssignmentForPricingChange = (updates, existing) => {
+	const existingCommissionData = toPlainObject(existing.commissionData);
+	updates.commission = 0;
+	updates.commissionPaid = false;
+	updates.commissionStatus = "";
+	updates.commissionData = {
+		...existingCommissionData,
+		assigned: false,
+		amount: 0,
+		status: "",
+		assignedAt: null,
+		assignedBy: null,
+		resetAt: new Date(),
+		resetReason: "reservation_pricing_changed",
+	};
+	updates.__commissionAssignmentReset = true;
 };
 
 const getRoomSource = (existingReservation, updatePayload, field) => {
@@ -567,13 +730,20 @@ const normalizeReservationStayPricing = async (
 		hasOwn(updates, "pickedRoomsPricing") &&
 		!roomsAreSame(pricingRooms, existingPricingRooms);
 	const roomsTouched = roomsChanged || pricingRoomsChanged;
+	const roomIdentityChanged =
+		(hasOwn(updates, "pickedRoomsType") &&
+			!roomIdentitiesAreSame(rooms, existingRooms)) ||
+		(hasOwn(updates, "pickedRoomsPricing") &&
+			!roomIdentitiesAreSame(pricingRooms, existingPricingRooms));
 	const primaryRoomsComplete = roomsHaveCompleteStayPricing(
 		primaryRooms,
 		stayDates
 	);
 	const mustReprice =
 		hasRooms &&
-		(hotelChanged || (!primaryRoomsComplete && (dateChanged || roomsTouched)));
+		(hotelChanged ||
+			roomIdentityChanged ||
+			(!primaryRoomsComplete && (dateChanged || roomsTouched)));
 	const canUseProvidedPricing =
 		hasRooms && !hotelChanged && primaryRoomsComplete && roomsTouched;
 
@@ -623,7 +793,10 @@ const normalizeReservationStayPricing = async (
 				hotel,
 				room,
 				stayDates,
-				preferChosenPrice: shouldPreferChosenNightlyPrice(room, existingRoom),
+				preferChosenPrice:
+					!roomIdentityChanged &&
+					shouldPreferChosenNightlyPrice(room, existingRoom),
+				preferCalendarPrice: roomIdentityChanged,
 			});
 		});
 	} else if (canUseProvidedPricing) {
@@ -658,7 +831,7 @@ const normalizeReservationStayPricing = async (
 	updates.days_of_residence = stayDates.length;
 	updates.total_amount = totals.total_amount;
 	updates.sub_total = totals.sub_total;
-	updates.commission = totals.commission;
+	resetCommissionAssignmentForPricingChange(updates, existing);
 
 	return updates;
 };
@@ -668,6 +841,7 @@ module.exports = {
 	buildCanonicalRoomPricing,
 	buildStayDateKeys,
 	dateOnlyKey,
+	normalizeReservationCreationPricing,
 	normalizeReservationStayPricing,
 	roomsHaveCompleteStayPricing,
 	summarizeRooms,

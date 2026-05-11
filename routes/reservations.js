@@ -221,7 +221,7 @@ router.post(
 );
 
 router.get("/reservations2/:accountId", reservationsList2);
-router.put("/reservation-update/:reservationId", updateReservation);
+router.put("/reservation-update/:reservationId", requireSignin, updateReservation);
 router.post("/send-reservation-email", sendReservationEmail);
 router.post("/send-payment-link-email", sendPaymentLinkEmail);
 router.get("/reservations-summary/:accountId/:date", reservationObjectSummary);

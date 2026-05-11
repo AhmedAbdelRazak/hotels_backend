@@ -13,6 +13,27 @@ const normalizeKey = (value) =>
 
 const normalizeLower = (value) => String(value || "").trim().toLowerCase();
 
+const dateOnlyKey = (value) => {
+	if (!value) return "";
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+		return value.slice(0, 10);
+	}
+	const parsed = moment(value);
+	return parsed.isValid() ? parsed.format("YYYY-MM-DD") : "";
+};
+
+const calendarRateIsBlocked = (rate = {}) => {
+	if (!rate || typeof rate !== "object") return false;
+	const price = Number(rate.price);
+	const rootPrice = Number(rate.rootPrice);
+	const color = String(rate.color || "").toLowerCase();
+	return (
+		(Number.isFinite(price) && price <= 0) ||
+		(Number.isFinite(rootPrice) && rootPrice <= 0 && color === "black") ||
+		color === "black"
+	);
+};
+
 const isSharedLabel = (label = "") => {
 	const lowered = normalizeLower(label);
 	return (
@@ -317,9 +338,12 @@ const buildPricingByDayFromDetail = (detail, startStr, endStr) => {
 	const rows = [];
 	for (let d = start.clone(); d.isSameOrBefore(end, "day"); d.add(1, "day")) {
 		const dateString = d.format("YYYY-MM-DD");
-		const match = pricingRate.find((rate) => rate.calendarDate === dateString);
-		const price = Number(match?.price) || basePrice;
-		rows.push({ date: dateString, price });
+		const match = pricingRate.find(
+			(rate) => dateOnlyKey(rate?.calendarDate) === dateString
+		);
+		const calendarBlocked = calendarRateIsBlocked(match);
+		const price = calendarBlocked ? 0 : Number(match?.price) || basePrice;
+		rows.push({ date: dateString, price, calendarBlocked });
 	}
 	return rows;
 };
@@ -792,6 +816,10 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			const detail = detailByKey.get(rt.key);
 			const displayName = detail?.displayName || detail?.display_name || rt.label;
 			const roomType = detail?.roomType || detail?.room_type || rt.roomType || "";
+			const pricingByDay = buildPricingByDayFromDetail(detail, startStr, endStr);
+			const blockedDates = pricingByDay
+				.filter((day) => day.calendarBlocked)
+				.map((day) => day.date);
 			return {
 				room_type: roomType || displayName,
 				displayName: displayName || roomType || "",
@@ -801,7 +829,9 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 				available: Math.max(Number(stats.minAvailable) || 0, 0),
 				start_date: startStr,
 				end_date: endStr,
-				pricingByDay: buildPricingByDayFromDetail(detail, startStr, endStr),
+				pricingByDay,
+				blockedDates,
+				calendarBlocked: blockedDates.length > 0,
 				roomColor: rt.color || "#000",
 			};
 		});

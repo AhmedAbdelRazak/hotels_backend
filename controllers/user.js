@@ -3,6 +3,7 @@
 "use strict";
 
 const mongoose = require("mongoose");
+const jwt = require("jsonwebtoken");
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
 
@@ -84,6 +85,32 @@ const ROLE_BY_DESCRIPTION = {
 	ordertaker: 7000,
 	reservationemployee: 8000,
 };
+
+const USER_AUTH_SELECT =
+	"_id name email phone companyName role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelsToSupport accessTo";
+
+const buildAuthUserPayload = (user = {}) => ({
+	_id: user._id,
+	email: user.email,
+	phone: user.phone,
+	name: user.name,
+	role: user.role,
+	activePoints: user.activePoints,
+	activeUser: user.activeUser,
+	employeeImage: user.employeeImage,
+	userRole: user.userRole,
+	userBranch: user.userBranch,
+	userStore: user.userStore,
+	roleDescription: user.roleDescription,
+	roles: user.roles,
+	roleDescriptions: user.roleDescriptions,
+	companyName: user.companyName,
+	hotelIdWork: user.hotelIdWork,
+	hotelIdsWork: user.hotelIdsWork,
+	belongsToId: user.belongsToId,
+	hotelsToSupport: user.hotelsToSupport,
+	accessTo: user.accessTo,
+});
 
 const normalizeObjectIdString = (value) => String(value?._id || value || "");
 
@@ -523,6 +550,90 @@ exports.listHotelStaffUsers = async (req, res) => {
 	} catch (err) {
 		console.error("listHotelStaffUsers error:", err);
 		return res.status(500).json({ error: "Error retrieving hotel staff list" });
+	}
+};
+
+exports.previewHotelStaffDashboard = async (req, res) => {
+	try {
+		const { hotelId, staffId } = req.params;
+		const permission = await canManageHotelStaff(req.profile, hotelId);
+		if (!permission.allowed) {
+			return res.status(403).json({ error: permission.error });
+		}
+		if (!isValidObjectId(staffId)) {
+			return res.status(400).json({ error: "Invalid staff id" });
+		}
+
+		const staffUser = await User.findById(staffId)
+			.select(USER_AUTH_SELECT)
+			.lean()
+			.exec();
+		if (!staffUser) {
+			return res.status(400).json({ error: "Staff user was not found" });
+		}
+		if (staffUser.activeUser === false) {
+			return res.status(403).json({ error: "This account is inactive." });
+		}
+		if (Number(staffUser.role) === 1000 || isConfiguredSuperAdmin(staffUser)) {
+			return res
+				.status(403)
+				.json({ error: "Admin accounts cannot be previewed from here." });
+		}
+
+		const staffHotelIds = uniqueValidObjectIds([
+			staffUser.hotelIdWork,
+			...(Array.isArray(staffUser.hotelIdsWork) ? staffUser.hotelIdsWork : []),
+			...(Array.isArray(staffUser.hotelsToSupport)
+				? staffUser.hotelsToSupport
+				: []),
+		]);
+		const staffRoles = [
+			Number(staffUser.role),
+			...(Array.isArray(staffUser.roles)
+				? staffUser.roles.map((role) => Number(role))
+				: []),
+		];
+		if (
+			!staffHotelIds.includes(permission.hotelId) ||
+			String(staffUser.belongsToId || "") !== permission.ownerId ||
+			!staffRoles.some((role) => HOTEL_STAFF_ROLES.includes(role))
+		) {
+			return res.status(403).json({
+				error: "This account is not scoped to the selected hotel.",
+			});
+		}
+
+		const previewUser = {
+			...staffUser,
+			hotelIdWork: permission.hotelId,
+			belongsToId: permission.ownerId,
+		};
+		const token = jwt.sign(
+			{
+				_id: staffUser._id,
+				preview: true,
+				previewActorId: req.profile?._id,
+			},
+			process.env.JWT_SECRET,
+			{ expiresIn: "2h" }
+		);
+
+		return res.json({
+			token,
+			user: buildAuthUserPayload(previewUser),
+			preview: {
+				actorId: req.profile?._id,
+				actorName: req.profile?.name || "",
+				targetUserId: staffUser._id,
+				targetName: staffUser.name || staffUser.email || "",
+				hotelId: permission.hotelId,
+				hotelName: permission.hotel?.hotelName || "",
+				ownerId: permission.ownerId,
+			},
+		});
+	} catch (err) {
+		console.error("previewHotelStaffDashboard error:", err);
+		return res.status(500).json({ error: "Unable to start account preview" });
 	}
 };
 

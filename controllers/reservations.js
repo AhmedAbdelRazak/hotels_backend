@@ -23,6 +23,7 @@ const { decryptWithSecret } = require("./utils");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 const {
 	ReservationPricingError,
+	normalizeReservationCreationPricing,
 	normalizeReservationStayPricing,
 } = require("../services/reservationPricing");
 
@@ -51,6 +52,12 @@ const moneyNumber = (value) => {
 };
 
 const n2 = (value) => Number(moneyNumber(value).toFixed(2));
+
+const ASSIGNED_COMMISSION_STATUSES = new Set([
+	"commission due",
+	"commission paid",
+	"no commission due",
+]);
 
 const PAYMENT_BREAKDOWN_ONLINE_KEYS = [
 	"paid_online_via_link",
@@ -86,9 +93,13 @@ const computeCommissionFromRooms = (pickedRoomsType = []) => {
 			const finalPrice = Number(
 				day?.totalPriceWithCommission ?? day?.price ?? day?.chosenPrice ?? 0
 			);
-			const rootPrice = Number(
-				day?.rootPrice ?? day?.totalPriceWithoutCommission ?? finalPrice
-			);
+			let rootPrice = Number(day?.rootPrice);
+			if (!(Number.isFinite(rootPrice) && rootPrice > 0)) {
+				rootPrice = Number(day?.totalPriceWithoutCommission ?? finalPrice);
+			}
+			if (!(Number.isFinite(rootPrice) && rootPrice > 0)) {
+				rootPrice = finalPrice;
+			}
 			const diff = finalPrice - rootPrice;
 			return sum + (Number.isFinite(diff) && diff > 0 ? diff : 0);
 		}, 0);
@@ -101,6 +112,7 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		reservation?.financial_cycle && typeof reservation.financial_cycle === "object"
 			? reservation.financial_cycle
 			: {};
+	const commissionAssignmentReset = updates.__commissionAssignmentReset === true;
 	const breakdown =
 		updates.paid_amount_breakdown ||
 		reservation?.paid_amount_breakdown ||
@@ -114,16 +126,22 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 	const totalAmount = Number(updates.total_amount ?? reservation?.total_amount ?? 0);
 	const storedReservationCommission = Number(reservation?.commission || 0);
 	const storedCycleCommission = Number(existingCycle.commissionAmount || 0);
+	const storedCommissionStatus = String(reservation?.commissionStatus || "")
+		.trim()
+		.toLowerCase();
 	const commissionWasReviewed =
-		updates.commission !== undefined ||
-		updates.financial_cycle?.commissionAssigned === true ||
-		reservation?.commissionData?.assigned === true ||
-		existingCycle.commissionAssigned === true ||
-		Boolean(reservation?.commissionStatus) ||
-		storedReservationCommission > 0 ||
-		storedCycleCommission > 0;
+		!commissionAssignmentReset &&
+		(updates.commission !== undefined ||
+			updates.financial_cycle?.commissionAssigned === true ||
+			reservation?.commissionData?.assigned === true ||
+			existingCycle.commissionAssigned === true ||
+			ASSIGNED_COMMISSION_STATUSES.has(storedCommissionStatus) ||
+			storedReservationCommission > 0 ||
+			storedCycleCommission > 0);
 	const commissionAmount = n2(
-		updates.commission !== undefined
+		commissionAssignmentReset
+			? 0
+			: updates.commission !== undefined
 			? updates.commission
 			: storedReservationCommission > 0
 			? storedReservationCommission
@@ -180,15 +198,19 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		commissionAmount,
 		// Zero can be a deliberate finance decision. This flag separates
 		// "not reviewed yet" from "reviewed and no commission is due".
-		commissionAssigned: commissionWasReviewed,
+		commissionAssigned: commissionAssignmentReset ? false : commissionWasReviewed,
 		commissionAssignedAt:
-			updates.commission !== undefined
+			commissionAssignmentReset
+				? null
+			: updates.commission !== undefined
 				? now
 				: existingCycle.commissionAssignedAt ||
 				  reservation?.commissionData?.assignedAt ||
 				  null,
 		commissionAssignedBy:
-			updates.commission !== undefined
+			commissionAssignmentReset
+				? null
+			: updates.commission !== undefined
 				? actorId || null
 				: existingCycle.commissionAssignedBy ||
 				  reservation?.commissionData?.assignedBy ||
@@ -244,6 +266,27 @@ const TRACKED_RESERVATION_FIELDS = [
 	"agentWalletSnapshot",
 	"agentDecisionSnapshot",
 ];
+
+const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
+	"_id",
+	"id",
+	"__v",
+	"createdAt",
+	"updatedAt",
+	"adminLastUpdatedAt",
+	"adminLastUpdatedBy",
+	"adminChangeLog",
+	"reservationAuditLog",
+];
+
+const stripServerManagedReservationUpdateFields = (payload = {}) => {
+	SERVER_MANAGED_RESERVATION_UPDATE_FIELDS.forEach((field) => {
+		if (Object.prototype.hasOwnProperty.call(payload, field)) {
+			delete payload[field];
+		}
+	});
+	return payload;
+};
 
 const simplifyAuditValue = (value) => {
 	if (value === undefined) return undefined;
@@ -307,10 +350,17 @@ const getAuditAction = (fields = []) => {
 	return "reservation_update";
 };
 
-const resolveReservationAuditActor = async (actorId = "", payload = {}) => {
+const resolveReservationAuditActor = async (
+	actorId = "",
+	payload = {},
+	options = {}
+) => {
 	const fallback = payload.housedBy && typeof payload.housedBy === "object"
 		? payload.housedBy
 		: {};
+	const previewAuth = options.previewAuth || {};
+	const previewMode = previewAuth?.preview === true;
+	const previewActorId = previewAuth?.previewActorId;
 
 	if (actorId && mongoose.Types.ObjectId.isValid(actorId)) {
 		const actor = await User.findById(actorId)
@@ -318,11 +368,42 @@ const resolveReservationAuditActor = async (actorId = "", payload = {}) => {
 			.lean()
 			.exec();
 		if (actor) {
-			return {
+			const actorSnapshot = {
 				_id: actor._id,
 				name: actor.name || actor.email || "Unknown user",
 				role: actor.roleDescription || actor.role || "user",
 			};
+			if (
+				previewMode &&
+				previewActorId &&
+				String(previewActorId) !== String(actor._id) &&
+				mongoose.Types.ObjectId.isValid(previewActorId)
+			) {
+				const previewActor = await User.findById(previewActorId)
+					.select("_id name email role roleDescription")
+					.lean()
+					.exec();
+				return {
+					...actorSnapshot,
+					name: `-- ${actorSnapshot.name}`,
+					preview: true,
+					previewedBy: previewActor
+						? {
+								_id: previewActor._id,
+								name: previewActor.name || previewActor.email || "Unknown user",
+								role:
+									previewActor.roleDescription ||
+									previewActor.role ||
+									"user",
+						  }
+						: {
+								_id: previewActorId,
+								name: "Unknown preview actor",
+								role: "user",
+						  },
+				};
+			}
+			return actorSnapshot;
 		}
 	}
 
@@ -485,6 +566,111 @@ const isOrderTakingAccount = (user = {}) => {
 	return hasOrderTakingScope && !hasFullReservationScope;
 };
 
+const isOrderTakerEditableReservation = (reservation = {}) => {
+	const status = String(
+		reservation?.reservation_status || reservation?.state || ""
+	)
+		.trim()
+		.toLowerCase();
+	const pendingStatus = String(reservation?.pendingConfirmation?.status || "")
+		.trim()
+		.toLowerCase();
+	const agentDecisionStatus = String(
+		reservation?.agentDecisionSnapshot?.status || ""
+	)
+		.trim()
+		.toLowerCase();
+
+	if (["confirmed", "rejected"].includes(agentDecisionStatus)) return false;
+	if (["confirmed", "rejected"].includes(pendingStatus)) return false;
+	if (
+		/(confirmed|inhouse|checked[_\s-]?in|checked[_\s-]?out|cancel|reject|no[_\s-]?show|relocated)/i.test(
+			status
+		)
+	) {
+		return false;
+	}
+
+	return (
+		PENDING_CONFIRMATION_REGEX.test(status) ||
+		pendingStatus === "pending" ||
+		!status
+	);
+};
+
+const getAccountRoleNumbers = (account = {}) =>
+	[
+		Number(account.role),
+		...(Array.isArray(account.roles) ? account.roles.map(Number) : []),
+	].filter(Boolean);
+
+const getAccountRoleDescriptions = (account = {}) => [
+	String(account.roleDescription || "").toLowerCase(),
+	...(Array.isArray(account.roleDescriptions)
+		? account.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const accountHasRole = (account = {}, role) =>
+	getAccountRoleNumbers(account).includes(Number(role));
+
+const accountHasDescription = (account = {}, description) =>
+	getAccountRoleDescriptions(account).includes(
+		String(description || "").toLowerCase()
+	);
+
+const isManagerOrAdminAccount = (account = {}) =>
+	isConfiguredSuperAdmin(account) ||
+	accountHasRole(account, 1000) ||
+	accountHasRole(account, 2000) ||
+	accountHasDescription(account, "hotelmanager");
+
+const isFinanceAccount = (account = {}) =>
+	accountHasRole(account, 6000) || accountHasDescription(account, "finance");
+
+const isReservationEmployeeAccount = (account = {}) =>
+	accountHasRole(account, 8000) ||
+	accountHasDescription(account, "reservationemployee");
+
+const isFinanceOnlyAccount = (account = {}) =>
+	isFinanceAccount(account) &&
+	!isManagerOrAdminAccount(account) &&
+	!isReservationEmployeeAccount(account);
+
+const isReservationEmployeeOnlyAccount = (account = {}) =>
+	isReservationEmployeeAccount(account) &&
+	!isManagerOrAdminAccount(account) &&
+	!isFinanceAccount(account);
+
+const getPendingWorkflowScopeForActor = (actor = {}) => {
+	if (isFinanceOnlyAccount(actor)) return "commission";
+	if (isReservationEmployeeOnlyAccount(actor)) return "pending";
+	return "all";
+};
+
+const FINANCE_ONLY_RESERVATION_UPDATE_FIELDS = new Set([
+	"commission",
+	"commissionData",
+	"commissionPaid",
+	"commissionPaidAt",
+	"commissionStatus",
+	"financial_cycle",
+	"financeStatus",
+	"moneyTransferredToHotel",
+	"moneyTransferredAt",
+	"paid_amount",
+	"paid_amount_breakdown",
+	"payment",
+	"sendEmail",
+	"hotel_name",
+	"hotelName",
+]);
+
+const getForbiddenFinanceReservationUpdateFields = (updates = {}) =>
+	Object.keys(updates).filter(
+		(field) => !FINANCE_ONLY_RESERVATION_UPDATE_FIELDS.has(field)
+	);
+
 const dateOnlyKey = (value) => {
 	if (!value) return "";
 	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
@@ -622,7 +808,7 @@ const findRoomDetailForCalendar = (details = [], selection = {}) => {
 // The public booking site treats a nightly pricing row with price <= 0 as unavailable;
 // this validator mirrors that rule on the PMS API so agents cannot bypass it.
 const validateOrderTakerBlockedCalendar = async (reservationData = {}) => {
-	const hotelId = String(reservationData.hotelId || "").trim();
+	const hotelId = normalizeId(reservationData.hotelId);
 	if (!ObjectId.isValid(hotelId)) return { allowed: true };
 
 	const stayDates = buildStayDateKeys(
@@ -679,6 +865,145 @@ const validateOrderTakerBlockedCalendar = async (reservationData = {}) => {
 	};
 };
 
+const roomSelectionMatches = (left = {}, right = {}) => {
+	const leftType = normalizeCalendarText(left.room_type || left.roomType);
+	const rightType = normalizeCalendarText(right.room_type || right.roomType);
+	const leftDisplay = normalizeCalendarText(
+		left.displayName || left.display_name
+	);
+	const rightDisplay = normalizeCalendarText(
+		right.displayName || right.display_name
+	);
+	if (leftType && rightType && leftType !== rightType) return false;
+	return !leftDisplay || !rightDisplay || leftDisplay === rightDisplay;
+};
+
+const reservationCoversStayDate = (reservation = {}, dateKey = "") => {
+	const checkinKey = dateOnlyKey(reservation.checkin_date);
+	const checkoutKey = dateOnlyKey(reservation.checkout_date);
+	return checkinKey && checkoutKey && checkinKey <= dateKey && dateKey < checkoutKey;
+};
+
+const reservationBlocksInventory = (reservation = {}) => {
+	const status = String(reservation.reservation_status || reservation.state || "")
+		.toLowerCase()
+		.trim();
+	return !/(cancel|reject|void|no[_\s-]?show|checked[_\s-]?out|checkedout)/i.test(
+		status
+	);
+};
+
+const validateReservationInventoryForCreate = async (
+	reservationData = {},
+	{ allowOverbook = false, excludeReservationId = "" } = {}
+) => {
+	const hotelId = String(reservationData.hotelId || "").trim();
+	if (!ObjectId.isValid(hotelId)) return { allowed: true, issues: [], warnings: [] };
+
+	const stayDates = buildStayDateKeys(
+		reservationData.checkin_date,
+		reservationData.checkout_date
+	);
+	if (!stayDates.length) return { allowed: true, issues: [], warnings: [] };
+
+	const selections = await getReservationRoomSelections(reservationData);
+	if (!selections.length) return { allowed: true, issues: [], warnings: [] };
+
+	const hotel = await HotelDetails.findById(hotelId)
+		.select("hotelName roomCountDetails")
+		.lean()
+		.exec();
+	const details = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+
+	const reservations = await Reservations.find({
+		hotelId: ObjectId(hotelId),
+		checkin_date: { $lt: new Date(`${stayDates[stayDates.length - 1]}T23:59:59.999Z`) },
+		checkout_date: { $gt: new Date(`${stayDates[0]}T00:00:00.000Z`) },
+	})
+		.select("_id checkin_date checkout_date reservation_status state pickedRoomsType pickedRoomsPricing")
+		.lean()
+		.exec();
+
+	const excludedId = normalizeId(excludeReservationId);
+	const activeReservations = reservations
+		.filter(reservationBlocksInventory)
+		.filter((reservation) => !excludedId || normalizeId(reservation._id) !== excludedId);
+	const issues = [];
+
+	for (const selection of selections) {
+		const detail = findRoomDetailForCalendar(details, selection);
+		const capacity = Math.max(0, Number(detail?.count || 0));
+		for (const date of stayDates) {
+			let reserved = 0;
+			for (const reservation of activeReservations) {
+				if (!reservationCoversStayDate(reservation, date)) continue;
+				const reservationSelections = await getReservationRoomSelections(reservation);
+				reserved += reservationSelections.reduce((sum, existingSelection) => {
+					return roomSelectionMatches(selection, existingSelection)
+						? sum + Math.max(1, Number(existingSelection.count || 1))
+						: sum;
+				}, 0);
+			}
+			const requested = Math.max(1, Number(selection.count || 1));
+			const available = capacity - reserved;
+			if (requested > available) {
+				issues.push({
+					code: "inventory_overbook",
+					message: `${selection.displayName || selection.room_type || "Selected room"} has ${Math.max(available, 0)} available room(s) on ${date}, but ${requested} were requested.`,
+					room_type: selection.room_type,
+					displayName: selection.displayName,
+					date,
+					capacity,
+					reserved,
+					available: Math.max(available, 0),
+					requested,
+				});
+			}
+		}
+	}
+
+	const warnings = issues.map((issue) => ({
+		...issue,
+		code: "inventory_overbook_override",
+		message: `${issue.message} The reservation was allowed because it was created by hotel staff.`,
+	}));
+
+	return {
+		allowed: allowOverbook || issues.length === 0,
+		issues,
+		warnings: allowOverbook ? warnings : [],
+		message:
+			issues[0]?.message ||
+			"Selected room type does not have enough available inventory.",
+	};
+};
+
+const getReservationPricingErrorArabic = (error = {}) => {
+	const roomLabel =
+		error?.details?.displayName ||
+		error?.details?.room_type ||
+		"الغرفة المحددة";
+	const dateLabel = error?.details?.date ? ` بتاريخ ${error.details.date}` : "";
+	switch (error?.code) {
+		case "calendar_date_blocked":
+			return `${roomLabel} محجوبة في تقويم الفندق${dateLabel}. لا يمكن للوكيل الحجز على تاريخ محجوب.`;
+		case "calendar_price_missing":
+			return `لا يوجد سعر صالح للغرفة ${roomLabel}${dateLabel}. يرجى مراجعة تقويم الأسعار أو سعر الغرفة الأساسي.`;
+		case "room_pricing_not_found":
+			return "تعذر حساب سعر الغرفة المحددة. يرجى إعادة اختيار نوع الغرفة قبل الحفظ.";
+		case "invalid_stay_dates":
+			return "يجب أن يكون تاريخ المغادرة بعد تاريخ الوصول.";
+		case "invalid_hotel_for_pricing":
+			return "يجب تحديد فندق صحيح لحساب سعر الحجز.";
+		case "hotel_pricing_not_found":
+			return "لم يتم العثور على إعدادات أسعار الفندق.";
+		default:
+			return "تعذر حساب سعر الحجز. يرجى مراجعة التواريخ والغرف والمحاولة مرة أخرى.";
+	}
+};
+
 const PENDING_CONFIRMATION_REGEX = /pending[\s_-]?confirmation/i;
 
 const buildNewReservationProcessFilter = () => ({
@@ -698,12 +1023,15 @@ const hasAssignedCommission = (reservation = {}) => {
 	const cycleCommission = moneyNumber(
 		reservation?.financial_cycle?.commissionAmount
 	);
+	const commissionStatus = String(reservation?.commissionStatus || "")
+		.trim()
+		.toLowerCase();
 	return (
 		directCommission > 0 ||
 		cycleCommission > 0 ||
 		reservation?.commissionData?.assigned === true ||
 		reservation?.financial_cycle?.commissionAssigned === true ||
-		Boolean(String(reservation?.commissionStatus || "").trim())
+		ASSIGNED_COMMISSION_STATUSES.has(commissionStatus)
 	);
 };
 
@@ -734,6 +1062,11 @@ const buildCommissionMissingFilter = () => ({
 				{ commissionStatus: { $exists: false } },
 				{ commissionStatus: null },
 				{ commissionStatus: "" },
+				{
+					commissionStatus: {
+						$nin: Array.from(ASSIGNED_COMMISSION_STATUSES),
+					},
+				},
 			],
 		},
 	],
@@ -751,19 +1084,52 @@ const getReservationNotificationType = (reservation = {}) => {
 	return "pending_confirmation";
 };
 
-const buildPendingConfirmationFilter = (hotelId) => ({
-	hotelId: ObjectId(hotelId),
-	$and: [
-		buildNewReservationProcessFilter(),
-		{
-			$or: [
-				{ reservation_status: PENDING_CONFIRMATION_REGEX },
-				{ state: PENDING_CONFIRMATION_REGEX },
-				buildCommissionMissingFilter(),
-			],
-		},
+const buildPendingStatusFilter = () => ({
+	$or: [
+		{ reservation_status: PENDING_CONFIRMATION_REGEX },
+		{ state: PENDING_CONFIRMATION_REGEX },
 	],
 });
+
+const buildPendingConfirmationFilter = (hotelId, scope = "all") => {
+	const reasonFilters =
+		scope === "commission"
+			? [buildCommissionMissingFilter()]
+			: scope === "pending"
+			? [buildPendingStatusFilter()]
+			: [buildPendingStatusFilter(), buildCommissionMissingFilter()];
+
+	return {
+		hotelId: ObjectId(hotelId),
+		$and: [
+			buildNewReservationProcessFilter(),
+			{ $or: reasonFilters },
+		],
+	};
+};
+
+const getPendingConfirmationReasonsForActor = (reservation = {}, actor = {}) => {
+	const reasons = getPendingConfirmationReasons(reservation);
+	if (isFinanceOnlyAccount(actor)) {
+		return reasons.filter((reason) => reason === "commission_missing");
+	}
+	if (isReservationEmployeeOnlyAccount(actor)) {
+		return reasons.filter((reason) => reason !== "commission_missing");
+	}
+	return reasons;
+};
+
+const getReservationNotificationTypeForActor = (reservation = {}, actor = {}) => {
+	const reasons = getPendingConfirmationReasonsForActor(reservation, actor);
+	if (
+		reasons.includes("commission_missing") &&
+		!reasons.includes("pending_confirmation") &&
+		!reasons.includes("pending_rejected")
+	) {
+		return "commission_review";
+	}
+	return getReservationNotificationType(reservation);
+};
 
 const getPendingConfirmationReasons = (reservation = {}) => {
 	const reasons = [];
@@ -824,6 +1190,11 @@ const sanitizeOrderTakerUpdate = (updates = {}) => {
 		"children",
 		"comment",
 		"booking_comment",
+		"pickedRoomsType",
+		"pickedRoomsPricing",
+		"total_rooms",
+		"sub_total",
+		"total_amount",
 	].forEach((field) => {
 		if (Object.prototype.hasOwnProperty.call(updates, field)) {
 			allowed[field] = updates[field];
@@ -1041,20 +1412,81 @@ const resolveSnapshotDate = (reservation = {}) => {
 	return new Date();
 };
 
+const getPlainAgentWalletSnapshot = (reservationOrSnapshot = {}) => {
+	const snapshot =
+		reservationOrSnapshot?.agentWalletSnapshot !== undefined
+			? reservationOrSnapshot.agentWalletSnapshot
+			: reservationOrSnapshot;
+	if (snapshot && typeof snapshot.toObject === "function") {
+		return snapshot.toObject();
+	}
+	return snapshot || {};
+};
+
+const reconcileAgentWalletSnapshotAmount = (
+	snapshot = {},
+	reservation = {},
+	updates = {}
+) => {
+	if (!snapshot?.captured) return snapshot;
+	const hasTotalAmount =
+		Object.prototype.hasOwnProperty.call(updates, "total_amount") ||
+		reservation?.total_amount !== undefined;
+	if (!hasTotalAmount) return snapshot;
+
+	const reservationAmount = n2(
+		Object.prototype.hasOwnProperty.call(updates, "total_amount")
+			? updates.total_amount
+			: reservation.total_amount
+	);
+	const balanceBeforeReservation = n2(snapshot.balanceBeforeReservation);
+	const commissionAmount = n2(
+		updates.commission ??
+			updates.financial_cycle?.commissionAmount ??
+			reservation?.commission ??
+			reservation?.financial_cycle?.commissionAmount ??
+			snapshot.commissionAmount ??
+			0
+	);
+
+	return {
+		...snapshot,
+		reservationAmount,
+		balanceAfterReservation: n2(balanceBeforeReservation - reservationAmount),
+		commissionAmount,
+	};
+};
+
+const agentWalletSnapshotNeedsSync = (currentSnapshot = {}, nextSnapshot = {}) =>
+	n2(currentSnapshot?.reservationAmount) !== n2(nextSnapshot?.reservationAmount) ||
+	n2(currentSnapshot?.balanceAfterReservation) !==
+		n2(nextSnapshot?.balanceAfterReservation) ||
+	n2(currentSnapshot?.commissionAmount) !== n2(nextSnapshot?.commissionAmount);
+
+const syncExistingAgentWalletSnapshotForUpdates = (reservation = {}, updates = {}) => {
+	if (!Object.prototype.hasOwnProperty.call(updates, "total_amount")) return null;
+	const existingSnapshot = getPlainAgentWalletSnapshot(reservation);
+	if (!existingSnapshot?.captured) return null;
+	const nextSnapshot = reconcileAgentWalletSnapshotAmount(
+		existingSnapshot,
+		reservation,
+		updates
+	);
+	return agentWalletSnapshotNeedsSync(existingSnapshot, nextSnapshot)
+		? nextSnapshot
+		: null;
+};
+
 const buildReservationAgentWalletSnapshot = async ({
 	reservation,
 	actor,
 	reason = "reservation_detail",
 	force = false,
 }) => {
-	const existingSnapshot =
-		reservation?.agentWalletSnapshot &&
-		typeof reservation.agentWalletSnapshot.toObject === "function"
-			? reservation.agentWalletSnapshot.toObject()
-			: reservation?.agentWalletSnapshot || {};
+	const existingSnapshot = getPlainAgentWalletSnapshot(reservation);
 
 	if (existingSnapshot?.captured && !force) {
-		return existingSnapshot;
+		return reconcileAgentWalletSnapshotAmount(existingSnapshot, reservation);
 	}
 
 	const hotelId = normalizeId(reservation?.hotelId);
@@ -1383,6 +1815,7 @@ exports.create = async (req, res) => {
 			...reservationData,
 			...reservationActorFields,
 		};
+		const reservationWarnings = [];
 		if (forcePendingConfirmation) {
 			reservationPayload.reservation_status = "Pending Confirmation";
 			reservationPayload.state = "Pending Confirmation";
@@ -1423,6 +1856,45 @@ exports.create = async (req, res) => {
 					blockedCalendar: calendarValidation,
 				});
 			}
+
+		}
+
+		try {
+			const pricingResult = await normalizeReservationCreationPricing(
+				reservationPayload,
+				{ allowBlockedCalendar: !forcePendingConfirmation }
+			);
+			Object.assign(reservationPayload, pricingResult.reservation);
+			if (Array.isArray(pricingResult.warnings)) {
+				reservationWarnings.push(...pricingResult.warnings);
+			}
+
+			const inventoryValidation = await validateReservationInventoryForCreate(
+				reservationPayload,
+				{ allowOverbook: !forcePendingConfirmation }
+			);
+			if (!inventoryValidation.allowed) {
+				return res.status(409).json({
+					error: inventoryValidation.message,
+					errorArabic:
+						"\u0644\u0627 \u062a\u0648\u062c\u062f \u063a\u0631\u0641 \u0643\u0627\u0641\u064a\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0646\u0648\u0639 \u0641\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u062d\u062f\u062f\u0629. \u0644\u0627 \u064a\u0645\u0643\u0646 \u0644\u0644\u0648\u0643\u064a\u0644 \u062a\u062c\u0627\u0648\u0632 \u0627\u0644\u0645\u062e\u0632\u0648\u0646.",
+					agentInventoryBlocked: true,
+					inventory: inventoryValidation,
+				});
+			}
+			if (Array.isArray(inventoryValidation.warnings)) {
+				reservationWarnings.push(...inventoryValidation.warnings);
+			}
+		} catch (error) {
+			if (error instanceof ReservationPricingError || error?.statusCode) {
+				return res.status(error.statusCode || 400).json({
+					error: error.message,
+					errorArabic: getReservationPricingErrorArabic(error),
+					code: error.code || "reservation_pricing_error",
+					details: error.details || {},
+				});
+			}
+			throw error;
 		}
 
 		// Check if roomId array is present and has length more than 0
@@ -1454,7 +1926,7 @@ exports.create = async (req, res) => {
 		const reservations = new Reservations(reservationPayload);
 		try {
 			const data = await reservations.save();
-			res.json({ data });
+			res.json({ data, warnings: reservationWarnings });
 			emitHotelNotificationRefresh(req, data.hotelId, {
 				type: forcePendingConfirmation ? "pending_confirmation" : "reservation_update",
 				reservationId: data._id,
@@ -3299,13 +3771,29 @@ exports.updateReservation = async (req, res) => {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
 		let normalizedUpdateData = { ...updateData };
-		const requestingUserId =
-			normalizedUpdateData.requestingUserId ||
-			normalizedUpdateData.updatedBy ||
-			normalizedUpdateData.userId;
+		const previewAuditFromPayload =
+			normalizedUpdateData.__previewAudit === true &&
+			normalizedUpdateData.__previewAuditActorId &&
+			mongoose.Types.ObjectId.isValid(normalizedUpdateData.__previewAuditActorId)
+				? {
+						preview: true,
+						previewActorId: normalizedUpdateData.__previewAuditActorId,
+						_id: normalizedUpdateData.requestingUserId,
+				  }
+				: null;
+		delete normalizedUpdateData.__previewAudit;
+		delete normalizedUpdateData.__previewAuditActorId;
+		const authenticatedActorId = req.auth?._id || "";
+		const requestingUserId = req.auth?.preview
+			? authenticatedActorId
+			: authenticatedActorId ||
+			  normalizedUpdateData.requestingUserId ||
+			  normalizedUpdateData.updatedBy ||
+			  normalizedUpdateData.userId;
 		delete normalizedUpdateData.requestingUserId;
 		delete normalizedUpdateData.updatedBy;
 		delete normalizedUpdateData.userId;
+		stripServerManagedReservationUpdateFields(normalizedUpdateData);
 		const normalizeRoomIds = (value) => {
 			if (!Array.isArray(value)) return [];
 			return value
@@ -3364,7 +3852,8 @@ exports.updateReservation = async (req, res) => {
 		}
 		const auditActor = await resolveReservationAuditActor(
 			requestingUserId,
-			updateData
+			updateData,
+			{ previewAuth: req.auth || previewAuditFromPayload }
 		);
 		const requestingActor =
 			requestingUserId && mongoose.Types.ObjectId.isValid(requestingUserId)
@@ -3377,7 +3866,52 @@ exports.updateReservation = async (req, res) => {
 				: null;
 		const orderTakerBasicEditOnly = isOrderTakingAccount(requestingActor || {});
 		if (orderTakerBasicEditOnly) {
+			const reservationOwnerIds = [
+				existingReservation.createdByUserId,
+				existingReservation.orderTakeId,
+				existingReservation.createdBy?._id,
+				existingReservation.orderTaker?._id,
+			]
+				.map(normalizeId)
+				.filter(Boolean);
+			if (
+				requestingUserId &&
+				reservationOwnerIds.length > 0 &&
+				!reservationOwnerIds.includes(normalizeId(requestingUserId))
+			) {
+				return res.status(403).json({
+					error: "Agents can only update reservations created by their own account.",
+					errorArabic:
+						"يمكن للوكلاء تحديث الحجوزات التي تم إنشاؤها من حسابهم فقط.",
+					code: "agent_reservation_owner_mismatch",
+				});
+			}
+		}
+		if (
+			orderTakerBasicEditOnly &&
+			!isOrderTakerEditableReservation(existingReservation)
+		) {
+			return res.status(403).json({
+				error:
+					"This reservation is already confirmed or closed. Only hotel staff can update it now.",
+				errorArabic:
+					"تم تأكيد هذا الحجز أو إغلاقه بالفعل. يمكن لموظفي الفندق فقط تحديثه الآن.",
+				code: "agent_confirmed_reservation_locked",
+			});
+		}
+		if (orderTakerBasicEditOnly) {
 			normalizedUpdateData = sanitizeOrderTakerUpdate(normalizedUpdateData);
+		}
+		if (requestingActor && isFinanceOnlyAccount(requestingActor)) {
+			const forbiddenFinanceFields =
+				getForbiddenFinanceReservationUpdateFields(normalizedUpdateData);
+			if (forbiddenFinanceFields.length) {
+				return res.status(403).json({
+					error:
+						"Finance users can update commission and payment cycle fields only.",
+					forbiddenFields: forbiddenFinanceFields,
+				});
+			}
 		}
 
 		const restrictedCashUserId = "6969d80da28c78c6280171df";
@@ -3515,6 +4049,34 @@ exports.updateReservation = async (req, res) => {
 					blockedCalendar: calendarValidation,
 				});
 			}
+
+			const agentInventorySensitiveChanged = [
+				"checkin_date",
+				"checkout_date",
+				"pickedRoomsType",
+				"pickedRoomsPricing",
+				"total_rooms",
+			].some(
+				(field) =>
+					Object.prototype.hasOwnProperty.call(normalizedUpdateData, field) &&
+					auditStringify(normalizedUpdateData[field]) !==
+						auditStringify(existingPlain[field])
+			);
+			if (agentInventorySensitiveChanged) {
+				const inventoryValidation = await validateReservationInventoryForCreate(
+					mergedReservationForCalendar,
+					{ allowOverbook: false, excludeReservationId: reservationId }
+				);
+				if (!inventoryValidation.allowed) {
+					return res.status(409).json({
+						error: inventoryValidation.message,
+						errorArabic:
+							"\u0644\u0627 \u062a\u0648\u062c\u062f \u063a\u0631\u0641 \u0643\u0627\u0641\u064a\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0646\u0648\u0639 \u0641\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u062d\u062f\u062f\u0629. \u0644\u0627 \u064a\u0645\u0643\u0646 \u0644\u0644\u0648\u0643\u064a\u0644 \u062a\u062c\u0627\u0648\u0632 \u0627\u0644\u0645\u062e\u0632\u0648\u0646.",
+						agentInventoryBlocked: true,
+						inventory: inventoryValidation,
+					});
+				}
+			}
 		}
 
 		const updateFieldChanged = (field) => {
@@ -3544,6 +4106,7 @@ exports.updateReservation = async (req, res) => {
 				requestingUserId
 			);
 		}
+		delete normalizedUpdateData.__commissionAssignmentReset;
 
 		const updatePayload = {
 			...normalizedUpdateData,
@@ -3562,6 +4125,14 @@ exports.updateReservation = async (req, res) => {
 		}
 
 		// 7️⃣ Update reservation
+		const syncedAgentWalletSnapshot = syncExistingAgentWalletSnapshotForUpdates(
+			existingReservation,
+			updatePayload
+		);
+		if (syncedAgentWalletSnapshot) {
+			updatePayload.agentWalletSnapshot = syncedAgentWalletSnapshot;
+		}
+
 		const auditEntries = buildReservationAuditEntries(
 			existingReservation,
 			updatePayload,
@@ -3734,6 +4305,7 @@ exports.updateReservation = async (req, res) => {
 			});
 			return res.status(err.statusCode || 400).json({
 				error: err.message,
+				errorArabic: getReservationPricingErrorArabic(err),
 				code: err.code || "reservation_pricing_error",
 				details: err.details || {},
 			});
@@ -5351,7 +5923,8 @@ exports.pendingConfirmationReservations = async (req, res) => {
 			});
 		}
 
-		const dynamicFilter = buildPendingConfirmationFilter(hotelId);
+		const workflowScope = getPendingWorkflowScopeForActor(actor);
+		const dynamicFilter = buildPendingConfirmationFilter(hotelId, workflowScope);
 		if (search) {
 			const searchMatch = buildReservationSearchMatch(search);
 			if (searchMatch) {
@@ -5397,7 +5970,10 @@ exports.pendingConfirmationReservations = async (req, res) => {
 			records: parsedRecords,
 			data: rows.map((reservation) => ({
 				...reservation,
-				pendingReasons: getPendingConfirmationReasons(reservation),
+				pendingReasons: getPendingConfirmationReasonsForActor(
+					reservation,
+					actor
+				),
 			})),
 		});
 	} catch (error) {
@@ -5492,6 +6068,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 									$in: ["confirmed", "rejected"],
 								},
 							},
+							buildCommissionMissingFilter(),
 						],
 					},
 				],
@@ -5499,7 +6076,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			const [rows, total] = await Promise.all([
 				Reservations.find(agentDecisionQuery)
 					.select(
-						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount agentDecisionSnapshot pendingConfirmation"
+						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus financial_cycle agentDecisionSnapshot pendingConfirmation"
 					)
 					.sort({ updatedAt: -1, createdAt: -1 })
 					.limit(limit)
@@ -5519,9 +6096,17 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						{};
 					const decisionStatus = String(decision.status || "").toLowerCase();
 					const isDecision = ["confirmed", "rejected"].includes(decisionStatus);
+					const pendingReasons = isDecision
+						? []
+						: getPendingConfirmationReasons(reservation);
 					return {
 						_id: reservation._id,
-						notificationType: isDecision ? "agent_decision" : "agent_review",
+						notificationType: isDecision
+							? "agent_decision"
+							: pendingReasons.includes("commission_missing") &&
+							  !pendingReasons.includes("pending_confirmation")
+							? "commission_review"
+							: "agent_review",
 						hotelId: currentHotelId,
 						hotelName: hotel.hotelName || "",
 						hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
@@ -5534,7 +6119,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						reservation_status:
 							reservation.reservation_status || reservation.state || "",
 						total_amount: reservation.total_amount || 0,
-						pendingReasons: isDecision ? [] : ["agent_pending_review"],
+						pendingReasons,
 						decisionStatus: decision.status || "",
 						decisionReason:
 							decision.reason ||
@@ -5585,7 +6170,10 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			return acc;
 		}, {});
 
-		const filters = hotelIds.map((id) => buildPendingConfirmationFilter(id));
+		const workflowScope = getPendingWorkflowScopeForActor(actor);
+		const filters = hotelIds.map((id) =>
+			buildPendingConfirmationFilter(id, workflowScope)
+		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
 		const [rows, total] = await Promise.all([
 			Reservations.find(query)
@@ -5604,10 +6192,16 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			data: rows.map((reservation) => {
 				const currentHotelId = normalizeId(reservation.hotelId);
 				const hotel = hotelMap[currentHotelId] || {};
-				const pendingReasons = getPendingConfirmationReasons(reservation);
+				const pendingReasons = getPendingConfirmationReasonsForActor(
+					reservation,
+					actor
+				);
 				return {
 					_id: reservation._id,
-					notificationType: getReservationNotificationType(reservation),
+					notificationType: getReservationNotificationTypeForActor(
+						reservation,
+						actor
+					),
 					hotelId: currentHotelId,
 					hotelName: hotel.hotelName || "",
 					hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
@@ -5679,8 +6273,26 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}
 
 		const action = String(body.action || "").toLowerCase();
+		const financeFieldsProvided = [
+			"commission",
+			"commissionPaid",
+			"commissionStatus",
+		].some((field) => Object.prototype.hasOwnProperty.call(body, field));
+		const isFinanceAction = action === "finance" || (!action && financeFieldsProvided);
+		if (isFinanceOnlyAccount(actor) && !isFinanceAction) {
+			return res.status(403).json({
+				error: "Finance users can only assign or reconcile reservation commission.",
+			});
+		}
+		if (isReservationEmployeeOnlyAccount(actor) && isFinanceAction) {
+			return res.status(403).json({
+				error: "Reservation employees can confirm reservations, but commission review is handled by finance or management.",
+			});
+		}
 		const now = new Date();
-		const auditActor = await resolveReservationAuditActor(actorId, body);
+		const auditActor = await resolveReservationAuditActor(actorId, body, {
+			previewAuth: req.auth,
+		});
 		const confirmationReason = String(
 			body.confirmationReason || body.reason || ""
 		).trim();
@@ -5867,7 +6479,10 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 
 		return res.json({
 			...updatedReservation,
-			pendingReasons: getPendingConfirmationReasons(updatedReservation),
+			pendingReasons: getPendingConfirmationReasonsForActor(
+				updatedReservation,
+				actor
+			),
 		});
 	} catch (error) {
 		console.error("Error updating pending confirmation reservation:", error);
@@ -5914,22 +6529,22 @@ exports.reservationAgentWalletSnapshot = async (req, res) => {
 			return res.json({ isAgentReservation: false, snapshot: null });
 		}
 
-		const existingSnapshot =
-			reservation.agentWalletSnapshot &&
-			typeof reservation.agentWalletSnapshot.toObject === "function"
-				? reservation.agentWalletSnapshot.toObject()
-				: reservation.agentWalletSnapshot || {};
+		const existingSnapshot = getPlainAgentWalletSnapshot(reservation);
 		const snapshot = existingSnapshot?.captured
-			? existingSnapshot
+			? reconcileAgentWalletSnapshotAmount(existingSnapshot, reservation)
 			: await buildReservationAgentWalletSnapshot({
 					reservation,
 					actor: buildReservationActorSnapshot(actor),
 					reason: "reservation_detail_backfill",
 			  });
 
-		if (snapshot && !existingSnapshot?.captured) {
-			// Silent backfill for older reservations. This makes future detail views
-			// read a fixed wallet snapshot instead of recalculating current balance.
+		if (
+			snapshot &&
+			(!existingSnapshot?.captured ||
+				agentWalletSnapshotNeedsSync(existingSnapshot, snapshot))
+		) {
+			// Silent backfill/sync for older or repriced reservations. The wallet
+			// before-balance stays fixed, while the reservation amount follows edits.
 			await Reservations.findByIdAndUpdate(reservationId, {
 				$set: { agentWalletSnapshot: snapshot },
 			}).exec();
