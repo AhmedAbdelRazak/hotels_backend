@@ -49,9 +49,6 @@ const dateOnlyKey = (value) => {
 	return parsed.isValid() ? parsed.format("YYYY-MM-DD") : "";
 };
 
-const dateAtUtcMidnight = (dateKey) =>
-	dateKey ? new Date(`${dateKey}T00:00:00.000Z`) : null;
-
 const buildStayDateKeys = (checkinDate, checkoutDate) => {
 	const startKey = dateOnlyKey(checkinDate);
 	const endKey = dateOnlyKey(checkoutDate);
@@ -218,7 +215,127 @@ const normalizeProvidedRoomPricing = (room = {}) => {
 	};
 };
 
-const buildCanonicalRoomPricing = ({ hotel, room, stayDates }) => {
+const getPricingDayFinal = (day = {}) =>
+	moneyNumber(day.totalPriceWithCommission ?? day.price);
+
+const findPricingDayForDate = (rows = [], date) =>
+	(Array.isArray(rows) ? rows : []).find(
+		(day) => dateOnlyKey(day?.date || day?.calendarDate) === date
+	);
+
+const averagePricingFinal = (rows = []) => {
+	const pricedRows = (Array.isArray(rows) ? rows : [])
+		.map(getPricingDayFinal)
+		.filter((value) => value > 0);
+	if (!pricedRows.length) return 0;
+	return n2(pricedRows.reduce((sum, value) => sum + value, 0) / pricedRows.length);
+};
+
+const getRoomNightlyPrice = (room = {}) => {
+	const chosenPrice = moneyNumber(room.chosenPrice);
+	if (chosenPrice > 0) return n2(chosenPrice);
+	return averagePricingFinal(room.pricingByDay);
+};
+
+const getDayValue = (day = {}, field, fallback) =>
+	hasOwn(day, field) ? n2(day[field]) : n2(fallback);
+
+const buildDayWithNightlyPrice = (template = {}, date, nightlyPrice) => {
+	const finalPrice = n2(nightlyPrice);
+	const totalPriceWithoutCommission = getDayValue(
+		template,
+		"totalPriceWithoutCommission",
+		finalPrice
+	);
+	return {
+		...template,
+		date,
+		price: finalPrice,
+		rootPrice: getDayValue(
+			template,
+			"rootPrice",
+			totalPriceWithoutCommission || finalPrice
+		),
+		commissionRate: getDayValue(template, "commissionRate", 0),
+		totalPriceWithCommission: finalPrice,
+		totalPriceWithoutCommission,
+	};
+};
+
+const projectRoomPricingToNightlyPrice = (room = {}, stayDates = []) => {
+	const nightlyPrice = getRoomNightlyPrice(room);
+	if (!(nightlyPrice > 0) || !stayDates.length) return room;
+	const rows = Array.isArray(room.pricingByDay) ? room.pricingByDay : [];
+	const firstTemplate = rows[0] || {};
+	return {
+		...room,
+		pricingByDay: stayDates.map((date, index) => {
+			const template =
+				findPricingDayForDate(rows, date) || rows[index] || firstTemplate;
+			return buildDayWithNightlyPrice(template, date, nightlyPrice);
+		}),
+	};
+};
+
+const comparableRoomDay = (day = {}) => ({
+	date: dateOnlyKey(day.date || day.calendarDate),
+	price: n2(day.totalPriceWithCommission ?? day.price),
+	rootPrice: n2(day.rootPrice),
+	commissionRate: n2(day.commissionRate),
+	totalPriceWithCommission: n2(day.totalPriceWithCommission ?? day.price),
+	totalPriceWithoutCommission: n2(
+		day.totalPriceWithoutCommission ?? day.totalPriceWithCommission ?? day.price
+	),
+});
+
+const comparableRoom = (room = {}) => ({
+	room_type: getRoomType(room),
+	displayName: getRoomDisplayName(room),
+	count: normalizeRoomCount(room.count),
+	chosenPrice: n2(room.chosenPrice),
+	pricingByDay: Array.isArray(room.pricingByDay)
+		? room.pricingByDay.map(comparableRoomDay)
+		: [],
+});
+
+const roomsAreSame = (left = [], right = []) =>
+	JSON.stringify((Array.isArray(left) ? left : []).map(comparableRoom)) ===
+	JSON.stringify((Array.isArray(right) ? right : []).map(comparableRoom));
+
+const roomIdentity = (room = {}) =>
+	`${normalizeText(getRoomType(room))}|${normalizeText(getRoomDisplayName(room))}`;
+
+const findExistingRoomFor = (existingRooms = [], room = {}, index = 0) => {
+	const byIndex = Array.isArray(existingRooms) ? existingRooms[index] : null;
+	if (byIndex && roomIdentity(byIndex) === roomIdentity(room)) return byIndex;
+	return (Array.isArray(existingRooms) ? existingRooms : []).find(
+		(existingRoom) => roomIdentity(existingRoom) === roomIdentity(room)
+	);
+};
+
+const pricingRowsAreSame = (left = [], right = []) =>
+	JSON.stringify((Array.isArray(left) ? left : []).map(comparableRoomDay)) ===
+	JSON.stringify((Array.isArray(right) ? right : []).map(comparableRoomDay));
+
+const shouldPreferChosenNightlyPrice = (room = {}, existingRoom = null) => {
+	const chosenPrice = getRoomNightlyPrice(room);
+	if (!(chosenPrice > 0)) return false;
+	if (!existingRoom) return true;
+	const existingChosen = getRoomNightlyPrice(existingRoom);
+	const chosenChanged = n2(chosenPrice) !== n2(existingChosen);
+	const pricingUnchanged = pricingRowsAreSame(
+		room.pricingByDay,
+		existingRoom.pricingByDay
+	);
+	return chosenChanged && pricingUnchanged;
+};
+
+const buildCanonicalRoomPricing = ({
+	hotel,
+	room,
+	stayDates,
+	preferChosenPrice = false,
+}) => {
 	const details = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
 		: [];
@@ -245,7 +362,10 @@ const buildCanonicalRoomPricing = ({ hotel, room, stayDates }) => {
 	const normalizedRoomType = roomType || detail.roomType || detail.room_type || "";
 	const normalizedDisplayName =
 		displayName || detail.displayName || detail.display_name || normalizedRoomType;
-	const pricingByDay = stayDates.map((date) => {
+	const providedRows = Array.isArray(room.pricingByDay) ? room.pricingByDay : [];
+	const firstProvidedRow = providedRows[0] || {};
+	const roomNightlyPrice = getRoomNightlyPrice(room);
+	const pricingByDay = stayDates.map((date, index) => {
 		const rate = rates.find((item) => item?.calendarDate === date);
 		if (calendarRateIsBlocked(rate)) {
 			throw new ReservationPricingError(
@@ -266,8 +386,32 @@ const buildCanonicalRoomPricing = ({ hotel, room, stayDates }) => {
 			rate?.commissionRate,
 			fallbackCommission
 		);
-		const totalPriceWithCommission = n2(
+		const calendarTotalPriceWithCommission = n2(
 			dayPrice + rootPrice * (commissionRate / 100)
+		);
+		const providedDay =
+			findPricingDayForDate(providedRows, date) ||
+			providedRows[index] ||
+			firstProvidedRow;
+		const providedFinal = getPricingDayFinal(providedDay);
+		const totalPriceWithCommission =
+			preferChosenPrice && roomNightlyPrice > 0
+				? roomNightlyPrice
+				: providedFinal > 0
+				  ? n2(providedFinal)
+				  : roomNightlyPrice > 0
+				    ? roomNightlyPrice
+				    : calendarTotalPriceWithCommission;
+		const resolvedRootPrice = getDayValue(providedDay, "rootPrice", rootPrice);
+		const totalPriceWithoutCommission = getDayValue(
+			providedDay,
+			"totalPriceWithoutCommission",
+			dayPrice || totalPriceWithCommission
+		);
+		const resolvedCommissionRate = getDayValue(
+			providedDay,
+			"commissionRate",
+			commissionRate
 		);
 
 		if (!(totalPriceWithCommission > 0)) {
@@ -289,10 +433,10 @@ const buildCanonicalRoomPricing = ({ hotel, room, stayDates }) => {
 			// nightly amount. Keep that shape while also storing the no-commission
 			// portion explicitly for reports that need it.
 			price: totalPriceWithCommission,
-			rootPrice: n2(rootPrice),
-			commissionRate: n2(commissionRate),
+			rootPrice: resolvedRootPrice,
+			commissionRate: resolvedCommissionRate,
 			totalPriceWithCommission,
-			totalPriceWithoutCommission: n2(dayPrice),
+			totalPriceWithoutCommission,
 		};
 	});
 
@@ -361,7 +505,7 @@ const normalizeReservationStayPricing = async (
 	const checkoutTouched = hasOwn(updates, "checkout_date");
 	const dateTouched = checkinTouched || checkoutTouched;
 	const hotelTouched = hasOwn(updates, "hotelId");
-	const roomsTouched =
+	const roomFieldsSent =
 		hasOwn(updates, "pickedRoomsType") || hasOwn(updates, "pickedRoomsPricing");
 
 	const nextHotelId = normalizeId(
@@ -385,22 +529,17 @@ const normalizeReservationStayPricing = async (
 		return updates;
 	}
 
-	if (dateTouched) {
-		const checkinKey = dateOnlyKey(nextCheckin);
-		const checkoutKey = dateOnlyKey(nextCheckout);
-		updates.checkin_date = dateAtUtcMidnight(checkinKey);
-		updates.checkout_date = dateAtUtcMidnight(checkoutKey);
-		updates.days_of_residence = stayDates.length;
-	}
-
 	const dateChanged =
 		(checkinTouched &&
-			dateOnlyKey(updates.checkin_date) !== dateOnlyKey(existing.checkin_date)) ||
+			dateOnlyKey(nextCheckin) !== dateOnlyKey(existing.checkin_date)) ||
 		(checkoutTouched &&
-			dateOnlyKey(updates.checkout_date) !==
-				dateOnlyKey(existing.checkout_date));
+			dateOnlyKey(nextCheckout) !== dateOnlyKey(existing.checkout_date));
 	const hotelChanged =
 		hotelTouched && nextHotelId !== normalizeId(existing.hotelId);
+
+	if (dateChanged) {
+		updates.days_of_residence = stayDates.length;
+	}
 
 	const sourceRooms = getRoomSource(existing, updates, "pickedRoomsType");
 	const sourceRoomsPricing = getRoomSource(
@@ -414,18 +553,42 @@ const normalizeReservationStayPricing = async (
 		: [];
 	const hasRooms = rooms.length > 0 || pricingRooms.length > 0;
 	const primaryRooms = rooms.length > 0 ? rooms : pricingRooms;
+	const existingRooms = Array.isArray(existing.pickedRoomsType)
+		? existing.pickedRoomsType
+		: [];
+	const existingPricingRooms = Array.isArray(existing.pickedRoomsPricing)
+		? existing.pickedRoomsPricing
+		: [];
+	const existingPrimaryRooms =
+		rooms.length > 0 ? existingRooms : existingPricingRooms;
+	const roomsChanged =
+		hasOwn(updates, "pickedRoomsType") && !roomsAreSame(rooms, existingRooms);
+	const pricingRoomsChanged =
+		hasOwn(updates, "pickedRoomsPricing") &&
+		!roomsAreSame(pricingRooms, existingPricingRooms);
+	const roomsTouched = roomsChanged || pricingRoomsChanged;
 	const primaryRoomsComplete = roomsHaveCompleteStayPricing(
 		primaryRooms,
 		stayDates
 	);
 	const mustReprice =
 		hasRooms &&
-		(!primaryRoomsComplete || (hotelChanged && !roomsTouched)) &&
-		(dateChanged || hotelChanged || roomsTouched);
+		(hotelChanged || (!primaryRoomsComplete && (dateChanged || roomsTouched)));
 	const canUseProvidedPricing =
-		hasRooms && primaryRoomsComplete && roomsTouched;
+		hasRooms && !hotelChanged && primaryRoomsComplete && roomsTouched;
 
 	if (!hasRooms) {
+		return updates;
+	}
+
+	if (roomFieldsSent && !roomsTouched && !dateChanged && !hotelChanged) {
+		delete updates.pickedRoomsType;
+		delete updates.pickedRoomsPricing;
+		delete updates.total_rooms;
+		delete updates.days_of_residence;
+		delete updates.total_amount;
+		delete updates.sub_total;
+		delete updates.commission;
 		return updates;
 	}
 
@@ -450,11 +613,31 @@ const normalizeReservationStayPricing = async (
 				{ hotelId: nextHotelId }
 			);
 		}
-		nextRooms = primaryRooms.map((room) =>
-			buildCanonicalRoomPricing({ hotel, room, stayDates })
-		);
+		nextRooms = primaryRooms.map((room, index) => {
+			const existingRoom = findExistingRoomFor(
+				existingPrimaryRooms,
+				room,
+				index
+			);
+			return buildCanonicalRoomPricing({
+				hotel,
+				room,
+				stayDates,
+				preferChosenPrice: shouldPreferChosenNightlyPrice(room, existingRoom),
+			});
+		});
 	} else if (canUseProvidedPricing) {
-		nextRooms = primaryRooms.map(normalizeProvidedRoomPricing);
+		nextRooms = primaryRooms.map((room, index) => {
+			const existingRoom = findExistingRoomFor(
+				existingPrimaryRooms,
+				room,
+				index
+			);
+			const roomForPricing = shouldPreferChosenNightlyPrice(room, existingRoom)
+				? projectRoomPricingToNightlyPrice(room, stayDates)
+				: room;
+			return normalizeProvidedRoomPricing(roomForPricing);
+		});
 	} else {
 		return updates;
 	}

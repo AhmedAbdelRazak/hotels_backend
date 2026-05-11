@@ -3517,6 +3517,16 @@ exports.updateReservation = async (req, res) => {
 			}
 		}
 
+		const updateFieldChanged = (field) => {
+			if (!Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)) {
+				return false;
+			}
+			const beforeValue = existingReservation.get
+				? existingReservation.get(field)
+				: existingReservation[field];
+			return auditStringify(beforeValue) !== auditStringify(normalizedUpdateData[field]);
+		};
+
 		const touchesFinancialCycle = [
 			"commission",
 			"commissionPaid",
@@ -3525,7 +3535,7 @@ exports.updateReservation = async (req, res) => {
 			"paid_amount",
 			"total_amount",
 			"financial_cycle",
-		].some((key) => Object.prototype.hasOwnProperty.call(normalizedUpdateData, key));
+		].some(updateFieldChanged);
 
 		if (touchesFinancialCycle) {
 			normalizedUpdateData.financial_cycle = buildFinancialCycleSnapshot(
@@ -3716,6 +3726,12 @@ exports.updateReservation = async (req, res) => {
 		});
 	} catch (err) {
 		if (err instanceof ReservationPricingError || err?.statusCode) {
+			console.warn("[RESERVATION PRICING] Update rejected:", {
+				reservationId: req.params.reservationId,
+				code: err.code || "reservation_pricing_error",
+				message: err.message,
+				details: err.details || {},
+			});
 			return res.status(err.statusCode || 400).json({
 				error: err.message,
 				code: err.code || "reservation_pricing_error",
