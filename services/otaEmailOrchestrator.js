@@ -105,6 +105,38 @@ const cleanStatusWarnings = (warnings = []) =>
 			)
 	);
 
+const CLEAR_STATUS_VALUES = new Set([
+	"cancelled",
+	"no_show",
+	"confirmed",
+	"inhouse",
+	"checked_out",
+]);
+
+const getDeterministicStatusSkipReason = (heuristic = {}, emailContext = {}) => {
+	const confirmationNumber = normalizeConfirmation(
+		heuristic.confirmationNumber || heuristic.reservationId || ""
+	);
+	const eventType = normalizeWhitespace(heuristic.eventType || "").toLowerCase();
+	const intent = normalizeIntent(heuristic.intent);
+	const statusToApply = normalizeStatus(heuristic.statusToApply || eventType);
+	const providerKnown = !!heuristic.provider && heuristic.provider !== "unknown";
+	const hasStatusIntent =
+		intent === "reservation_status" ||
+		["cancelled", "no_show", "status"].includes(eventType);
+	const hasTrustedContext =
+		providerKnown ||
+		emailContext.senderLooksLikeOta ||
+		(emailContext.forwarded && emailContext.subjectHasStrongReservationSignal);
+
+	if (!hasStatusIntent) return "";
+	if (!confirmationNumber) return "";
+	if (!CLEAR_STATUS_VALUES.has(statusToApply)) return "";
+	if (!hasTrustedContext) return "";
+
+	return "Deterministic status email: clear status, exact confirmation number, and trusted OTA/forwarded context were already extracted.";
+};
+
 const stripSubjectPrefixes = (subject = "") => {
 	let value = normalizeWhitespace(subject);
 	let previous = "";
@@ -316,6 +348,26 @@ const getOpenAiClient = () => {
 };
 
 const askOpenAiForDecision = async (email, heuristic, emailContext) => {
+	const deterministicStatusReason = getDeterministicStatusSkipReason(
+		heuristic,
+		emailContext
+	);
+	if (deterministicStatusReason) {
+		logOrchestrator("ai.skipped", {
+			reason: deterministicStatusReason,
+			intent: heuristic.intent,
+			provider: heuristic.provider,
+			eventType: heuristic.eventType,
+			statusToApply: heuristic.statusToApply || "",
+			confirmationNumber: heuristic.confirmationNumber,
+		});
+		return {
+			usedAI: false,
+			skipped: true,
+			reason: deterministicStatusReason,
+		};
+	}
+
 	const client = getOpenAiClient();
 	if (!client) {
 		logOrchestrator("ai.skipped", {
@@ -625,6 +677,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 			usedAI: !!aiResult?.usedAI,
 			model: aiResult?.model || "",
 			skipped: !!aiResult?.skipped,
+			skipReason: aiResult?.reason || "",
 			error: aiResult?.error || "",
 			intent: merged.intent,
 			confidence: aiConfidence || 0,
@@ -713,6 +766,7 @@ const orchestrateInboundReservationEmail = async (email = {}) => {
 		checkoutDate: merged.normalized.checkoutDate,
 		usedAI: !!merged.decision?.usedAI,
 		aiSkipped: !!merged.decision?.skipped,
+		aiSkipReason: merged.decision?.skipReason || "",
 		warnings: merged.normalized.warnings || [],
 		errors: merged.normalized.errors || [],
 	});
