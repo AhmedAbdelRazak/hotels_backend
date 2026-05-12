@@ -527,4 +527,22 @@ const reservationsSchema = new mongoose.Schema(
 	{ timestamps: true },
 );
 
+reservationsSchema.index({ reservation_id: 1 }, { sparse: true });
+reservationsSchema.index(
+	{ "customer_details.confirmation_number2": 1 },
+	{ sparse: true },
+);
+reservationsSchema.index(
+	{ "supplierData.suppliedBookingNo": 1 },
+	{ sparse: true },
+);
+reservationsSchema.index(
+	{ "supplierData.otaConfirmationNumber": 1 },
+	{ sparse: true },
+);
+reservationsSchema.index(
+	{ "supplierData.platformConfirmationNumber": 1 },
+	{ sparse: true },
+);
+
 module.exports = mongoose.model("Reservations", reservationsSchema);

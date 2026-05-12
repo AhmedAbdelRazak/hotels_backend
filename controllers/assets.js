@@ -814,18 +814,18 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 	).toLocaleDateString("en-US");
 
 	const totalAmount = safeNumber(reservationData?.total_amount);
-	const paidAmountAuthorized = safeNumber(reservationData?.paid_amount);
-	const paidAmountOffline = safeNumber(
-		reservationData?.payment_details?.onsite_paid_amount
-	);
-	const totalPaid = paidAmountAuthorized + paidAmountOffline;
-
 	const paymentStatus = String(reservationData?.payment || "").toLowerCase();
 	const isNotCapturedStatus =
 		paymentStatus === "credit/ debit" ||
 		paymentStatus === "credit/debit" ||
 		paymentStatus === "credit / debit" ||
 		paymentStatus === "not captured";
+	const rawPaidAmount = safeNumber(reservationData?.paid_amount);
+	const paidAmountAuthorized = isNotCapturedStatus ? 0 : rawPaidAmount;
+	const paidAmountOffline = safeNumber(
+		reservationData?.payment_details?.onsite_paid_amount
+	);
+	const totalPaid = paidAmountAuthorized + paidAmountOffline;
 
 	const toCents = (n) => Math.round(Number(n || 0) * 100);
 	const isFullyPaid =
@@ -913,7 +913,7 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 				: isNotPaid
 					? "Not Paid"
 					: isNotCapturedStatus
-						? "Authorized (Not Captured)"
+						? "Not Captured"
 						: `${depositPercentage}% Deposit`;
 
 	const paymentHeaderValue =
@@ -926,7 +926,7 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 				: isNotPaid
 					? "Not Paid"
 					: isNotCapturedStatus
-						? `${paidAmountAuthorized.toFixed(2)} SAR`
+						? "Not Captured"
 						: `${depositPercentage}% Deposit`;
 
 	const paymentMethodText =
@@ -937,7 +937,7 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 				: isNotPaid
 					? "Not Paid"
 					: isNotCapturedStatus
-						? "Authorized (Not Captured)"
+						? "Not Captured"
 						: `${depositPercentage}% Deposit`;
 
 	const remaining = Math.max(
@@ -1175,12 +1175,10 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 									? `<div><strong>Paid Amount Onsite:</strong> ${paidAmountOffline.toFixed(
 											2
 									  )} SAR</div>`
-									: isNotPaid
-										? `<div><strong>Payment Status:</strong> Not Paid</div>`
-										: isNotCapturedStatus && paidAmountAuthorized > 0
-											? `<div><strong>Authorized (Not Captured):</strong> ${paidAmountAuthorized.toFixed(
-													2
-											  )} SAR</div>`
+										: isNotPaid
+											? `<div><strong>Payment Status:</strong> Not Paid</div>`
+										: isNotCapturedStatus
+											? `<div><strong>Payment Status:</strong> Not Captured</div>`
 											: paidAmountAuthorized > 0
 												? `<div><strong>Deposit:</strong> ${paidAmountAuthorized.toFixed(
 														2
