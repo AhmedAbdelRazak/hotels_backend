@@ -1,7 +1,6 @@
 /** @format */
 
 const multer = require("multer");
-const { simpleParser } = require("mailparser");
 const mongoose = require("mongoose");
 const InboundEmail = require("../models/inbound_email");
 const User = require("../models/user");
@@ -17,6 +16,15 @@ const {
 } = require("../services/otaEmailOrchestrator");
 const { reconcileOtaReservation } = require("../services/otaReservationMapper");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
+
+let simpleParser = null;
+try {
+	({ simpleParser } = require("mailparser"));
+} catch (error) {
+	console.warn(
+		"[ota-inbound] Optional dependency mailparser is not installed. Raw MIME payloads will use a basic fallback parser until `npm install` is run."
+	);
+}
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -141,28 +149,61 @@ const getHeaderMessageId = (headers = "") => {
 	return normalizeWhitespace(match?.[1] || "");
 };
 
+const getMimeHeader = (raw = "", headerName = "") => {
+	const pattern = new RegExp(`^${headerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:\\s*(.+)$`, "im");
+	return normalizeWhitespace(String(raw || "").match(pattern)?.[1] || "");
+};
+
+const getRawMimeBodyFallback = (raw = "") => {
+	const text = String(raw || "");
+	const body = text.split(/\r?\n\r?\n/).slice(1).join("\n\n");
+	return normalizeWhitespace(body || text);
+};
+
 const parseSendGridPayload = async (body = {}, files = []) => {
 	const rawMime = body.email || body.raw || body.mime || body.rawEmail || "";
 	if (rawMime) {
-		const parsed = await simpleParser(rawMime);
-		const attachments = [
-			...(Array.isArray(parsed.attachments)
-				? parsed.attachments.map(fileMetadata)
-				: []),
-			...(Array.isArray(files) ? files.map(fileMetadata) : []),
-		];
+		if (simpleParser) {
+			const parsed = await simpleParser(rawMime);
+			const attachments = [
+				...(Array.isArray(parsed.attachments)
+					? parsed.attachments.map(fileMetadata)
+					: []),
+				...(Array.isArray(files) ? files.map(fileMetadata) : []),
+			];
+			return {
+				from: parsed.from?.text || body.from || "",
+				to: parsed.to?.text || body.to || "",
+				cc: parsed.cc?.text || body.cc || "",
+				bcc: parsed.bcc?.text || body.bcc || "",
+				subject: parsed.subject || body.subject || "",
+				text: parsed.text || body.text || "",
+				html: parsed.html || body.html || "",
+				messageId:
+					parsed.messageId || body.messageId || getHeaderMessageId(body.headers),
+				rawHash: hashText(rawMime),
+				attachments,
+			};
+		}
+
+		console.warn(
+			"[ota-inbound] mailparser unavailable; using raw MIME fallback parser."
+		);
 		return {
-			from: parsed.from?.text || body.from || "",
-			to: parsed.to?.text || body.to || "",
-			cc: parsed.cc?.text || body.cc || "",
-			bcc: parsed.bcc?.text || body.bcc || "",
-			subject: parsed.subject || body.subject || "",
-			text: parsed.text || body.text || "",
-			html: parsed.html || body.html || "",
+			from: body.from || getMimeHeader(rawMime, "from"),
+			to: body.to || getMimeHeader(rawMime, "to"),
+			cc: body.cc || getMimeHeader(rawMime, "cc"),
+			bcc: body.bcc || getMimeHeader(rawMime, "bcc"),
+			subject: body.subject || getMimeHeader(rawMime, "subject"),
+			text: body.text || getRawMimeBodyFallback(rawMime),
+			html: body.html || "",
 			messageId:
-				parsed.messageId || body.messageId || getHeaderMessageId(body.headers),
+				body.messageId ||
+				body["message-id"] ||
+				getMimeHeader(rawMime, "message-id") ||
+				getHeaderMessageId(body.headers),
 			rawHash: hashText(rawMime),
-			attachments,
+			attachments: Array.isArray(files) ? files.map(fileMetadata) : [],
 		};
 	}
 
