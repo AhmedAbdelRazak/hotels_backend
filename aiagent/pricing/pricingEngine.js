@@ -1,11 +1,31 @@
 /** @format */
 const { eachDate } = require("../utils/date");
 
+const hasCommissionValue = (value) =>
+	value !== null && value !== undefined && value !== "";
+
+function resolveCommissionRate(room, hotel) {
+	const hotelCommission = hasCommissionValue(hotel?.commission)
+		? Number(hotel.commission)
+		: 10;
+	const fallback =
+		Number.isFinite(hotelCommission) && hotelCommission >= 0
+			? hotelCommission
+			: 10;
+	const roomCommission = hasCommissionValue(room?.roomCommission)
+		? Number(room.roomCommission)
+		: fallback;
+
+	return Number.isFinite(roomCommission) && roomCommission >= 0
+		? roomCommission
+		: fallback;
+}
+
 // Your rules:
 // 1) If a date exists and price === 0 in the middle → BLOCKED (handled in availability.js)
 // 2) If a date is missing from calendar → use basePrice
 // 3) If basePrice blank or 0 → use defaultCost for that date
-// Commission: use room.roomCommission if > 0 else hotel.commission or 10%
+// Commission: use room.roomCommission when provided, including 0.
 
 function resolveNightly(room, hotel, dateStr) {
 	const row = (room.pricingRate || []).find((r) => r.calendarDate === dateStr);
@@ -29,8 +49,7 @@ function resolveNightly(room, hotel, dateStr) {
 			? defaultCost
 			: finalPrice;
 
-	const commission =
-		Number(room?.roomCommission || hotel?.commission || 10) || 10;
+	const commission = resolveCommissionRate(room, hotel);
 	const totalWithCommission = finalPrice + finalRoot * (commission / 100);
 
 	return {

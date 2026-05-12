@@ -47,6 +47,43 @@ const sanitizeCompanyDocuments = (documents = []) =>
 			notes: String(document.notes || "").slice(0, 500),
 		}));
 
+const AGENT_COMMERCIAL_MODELS = new Set([
+	"wallet_inventory",
+	"commission_only",
+	"mixed",
+]);
+
+const normalizeAgentCommercialModel = (value) => {
+	const normalized = String(value || "").trim().toLowerCase();
+	return AGENT_COMMERCIAL_MODELS.has(normalized)
+		? normalized
+		: "wallet_inventory";
+};
+
+const nonNegativeMoney = (value) => {
+	const parsed = Number(String(value ?? 0).replace(/,/g, "").trim());
+	return Number.isFinite(parsed) && parsed > 0 ? Number(parsed.toFixed(2)) : 0;
+};
+
+const sanitizeAgentWalletOpeningBalances = (
+	balances = [],
+	hotelIds = [],
+	fallbackAmount = 0
+) => {
+	const byHotel = new Map();
+	(Array.isArray(balances) ? balances : []).forEach((entry) => {
+		const hotelId = String(entry?.hotelId || entry?.hotel || "").trim();
+		if (!hotelId) return;
+		byHotel.set(hotelId, nonNegativeMoney(entry?.amount));
+	});
+	return hotelIds.map((hotelId) => ({
+		hotelId,
+		amount: byHotel.has(hotelId)
+			? byHotel.get(hotelId)
+			: nonNegativeMoney(fallbackAmount),
+	}));
+};
+
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const configuredSuperAdminIds = () =>
@@ -87,7 +124,7 @@ const ROLE_BY_DESCRIPTION = {
 };
 
 const USER_AUTH_SELECT =
-	"_id name email phone companyName role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelsToSupport accessTo";
+	"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelsToSupport accessTo";
 
 const buildAuthUserPayload = (user = {}) => ({
 	_id: user._id,
@@ -105,6 +142,9 @@ const buildAuthUserPayload = (user = {}) => ({
 	roles: user.roles,
 	roleDescriptions: user.roleDescriptions,
 	companyName: user.companyName,
+	agentCommercialModel: user.agentCommercialModel,
+	agentOpeningWalletCredit: user.agentOpeningWalletCredit,
+	agentWalletOpeningBalances: user.agentWalletOpeningBalances,
 	hotelIdWork: user.hotelIdWork,
 	hotelIdsWork: user.hotelIdsWork,
 	belongsToId: user.belongsToId,
@@ -219,7 +259,7 @@ exports.userById = (req, res, next, id) => {
 
 	User.findById(id)
 		.select(
-			"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelIdsOwner hotelsToSupport accessTo"
+			"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelIdsOwner hotelsToSupport accessTo"
 		)
 		.populate("hotelsToSupport")
 		.exec((err, user) => {
@@ -238,7 +278,7 @@ exports.updatedUserId = async (req, res, next, id) => {
 	try {
 		const target = await User.findById(id)
 			.select(
-				"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser employeeImage hotelIdWork belongsToId hotelsToSupport accessTo userRole userStore userBranch"
+				"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser employeeImage hotelIdWork belongsToId hotelsToSupport accessTo userRole userStore userBranch"
 			)
 			.exec();
 		if (!target) {
@@ -540,7 +580,7 @@ exports.listHotelStaffUsers = async (req, res) => {
 			],
 		})
 			.select(
-				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
+				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
 			)
 			.populate("hotelsToSupport", "_id hotelName")
 			.sort({ role: 1, name: 1 })
@@ -740,6 +780,32 @@ exports.updateHotelStaffUser = async (req, res) => {
 			staffUser.companyDocuments = sanitizeCompanyDocuments(payload.companyDocuments);
 		}
 
+		if ("agentCommercialModel" in payload) {
+			staffUser.agentCommercialModel = normalizeAgentCommercialModel(
+				payload.agentCommercialModel
+			);
+		}
+
+		if ("agentOpeningWalletCredit" in payload) {
+			staffUser.agentOpeningWalletCredit = nonNegativeMoney(
+				payload.agentOpeningWalletCredit
+			);
+		}
+
+		if ("agentWalletOpeningBalances" in payload && Array.isArray(payload.agentWalletOpeningBalances)) {
+			const currentHotelIds = uniqueValidObjectIds([
+				staffUser.hotelIdWork,
+				...(Array.isArray(staffUser.hotelsToSupport)
+					? staffUser.hotelsToSupport
+					: []),
+			]);
+			staffUser.agentWalletOpeningBalances = sanitizeAgentWalletOpeningBalances(
+				payload.agentWalletOpeningBalances,
+				currentHotelIds.length ? currentHotelIds : [permission.hotelId],
+				payload.agentOpeningWalletCredit ?? staffUser.agentOpeningWalletCredit
+			);
+		}
+
 		if ("roleDescription" in payload || "role" in payload) {
 			const normalizedRoleDescription = String(
 				payload.roleDescription || staffUser.roleDescription || ""
@@ -850,6 +916,16 @@ exports.updateHotelStaffUser = async (req, res) => {
 
 			staffUser.hotelIdWork = requestedHotelIds[0];
 			staffUser.hotelsToSupport = requestedHotelIds;
+			if (
+				"agentWalletOpeningBalances" in payload ||
+				"agentOpeningWalletCredit" in payload
+			) {
+				staffUser.agentWalletOpeningBalances = sanitizeAgentWalletOpeningBalances(
+					payload.agentWalletOpeningBalances,
+					requestedHotelIds,
+					payload.agentOpeningWalletCredit ?? staffUser.agentOpeningWalletCredit
+				);
+			}
 		} else if (!staffUser.hotelIdWork) {
 			staffUser.hotelIdWork = permission.hotelId;
 		}

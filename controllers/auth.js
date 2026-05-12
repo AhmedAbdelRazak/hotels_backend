@@ -54,6 +54,43 @@ const sanitizeCompanyDocuments = (documents = []) =>
 			notes: String(document.notes || "").slice(0, 500),
 		}));
 
+const AGENT_COMMERCIAL_MODELS = new Set([
+	"wallet_inventory",
+	"commission_only",
+	"mixed",
+]);
+
+const normalizeAgentCommercialModel = (value) => {
+	const normalized = String(value || "").trim().toLowerCase();
+	return AGENT_COMMERCIAL_MODELS.has(normalized)
+		? normalized
+		: "wallet_inventory";
+};
+
+const nonNegativeMoney = (value) => {
+	const parsed = Number(String(value ?? 0).replace(/,/g, "").trim());
+	return Number.isFinite(parsed) && parsed > 0 ? Number(parsed.toFixed(2)) : 0;
+};
+
+const sanitizeAgentWalletOpeningBalances = (
+	balances = [],
+	hotelIds = [],
+	fallbackAmount = 0
+) => {
+	const byHotel = new Map();
+	(Array.isArray(balances) ? balances : []).forEach((entry) => {
+		const hotelId = String(entry?.hotelId || entry?.hotel || "").trim();
+		if (!hotelId) return;
+		byHotel.set(hotelId, nonNegativeMoney(entry?.amount));
+	});
+	return hotelIds.map((hotelId) => ({
+		hotelId,
+		amount: byHotel.has(hotelId)
+			? byHotel.get(hotelId)
+			: nonNegativeMoney(fallbackAmount),
+	}));
+};
+
 // wa.me fallback link builder
 const buildWaText = ({ name, url }) =>
 	`Hi ${
@@ -183,6 +220,9 @@ exports.signin = async (req, res) => {
 			roles,
 			roleDescriptions,
 			companyName,
+			agentCommercialModel,
+			agentOpeningWalletCredit,
+			agentWalletOpeningBalances,
 			hotelIdWork,
 			belongsToId,
 			hotelsToSupport,
@@ -208,6 +248,9 @@ exports.signin = async (req, res) => {
 				roles,
 				roleDescriptions,
 				companyName,
+				agentCommercialModel,
+				agentOpeningWalletCredit,
+				agentWalletOpeningBalances,
 				hotelIdWork,
 				belongsToId,
 				hotelsToSupport,
@@ -576,6 +619,9 @@ exports.createHotelStaffUser = async (req, res) => {
 			companyOfficialName,
 			companyEin,
 			companyDocuments,
+			agentCommercialModel,
+			agentOpeningWalletCredit,
+			agentWalletOpeningBalances,
 		} = req.body;
 
 		const cleanPhoneNumber = (rawPhone) => {
@@ -767,6 +813,13 @@ exports.createHotelStaffUser = async (req, res) => {
 			companyOfficialName: String(companyOfficialName || "").trim(),
 			companyEin: String(companyEin || "").trim(),
 			companyDocuments: sanitizeCompanyDocuments(companyDocuments),
+			agentCommercialModel: normalizeAgentCommercialModel(agentCommercialModel),
+			agentOpeningWalletCredit: nonNegativeMoney(agentOpeningWalletCredit),
+			agentWalletOpeningBalances: sanitizeAgentWalletOpeningBalances(
+				agentWalletOpeningBalances,
+				uniqueHotelIds,
+				agentOpeningWalletCredit
+			),
 			hotelName: primaryHotel.hotelName || "",
 			hotelAddress: primaryHotel.hotelAddress || "",
 			hotelCountry: primaryHotel.hotelCountry || "",

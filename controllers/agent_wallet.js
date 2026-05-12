@@ -60,7 +60,7 @@ const isOrderTaker = (user = {}) =>
 	(Array.isArray(user.accessTo) && user.accessTo.includes("ownReservations"));
 
 const actorSelect =
-	"_id name email companyName role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser";
+	"_id name email companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser";
 
 const getActor = async (req, fallbackUserId) => {
 	const actorId = req.auth?._id || fallbackUserId;
@@ -169,6 +169,31 @@ const moneyNumber = (value) => {
 };
 
 const n2 = (value) => Number(moneyNumber(value).toFixed(2));
+
+const AGENT_COMMERCIAL_MODELS = new Set([
+	"wallet_inventory",
+	"commission_only",
+	"mixed",
+]);
+
+const normalizeAgentCommercialModel = (value) => {
+	const normalized = String(value || "").trim().toLowerCase();
+	return AGENT_COMMERCIAL_MODELS.has(normalized)
+		? normalized
+		: "wallet_inventory";
+};
+
+const agentOpeningWalletCreditForHotel = (agent = {}, hotelId = "") => {
+	const normalizedHotelId = normalizeId(hotelId);
+	const balances = Array.isArray(agent.agentWalletOpeningBalances)
+		? agent.agentWalletOpeningBalances
+		: [];
+	const matched = balances.find(
+		(entry) => normalizeId(entry?.hotelId || entry?.hotel) === normalizedHotelId
+	);
+	if (matched) return n2(matched.amount);
+	return n2(agent.agentOpeningWalletCredit);
+};
 
 const reservationIsDeductible = (reservation = {}) => {
 	const status = String(
@@ -401,10 +426,19 @@ const calculateAgentWalletSummary = async ({
 		}
 	);
 
-	const walletAdded = n2(
-		transactionTotals.credits + transactionTotals.adjustments
+	const commercialModel = normalizeAgentCommercialModel(
+		agent.agentCommercialModel
 	);
-	const walletUsed = n2(reservationTotals.walletDeducted + transactionTotals.manualDebits);
+	const isCommissionOnly = commercialModel === "commission_only";
+	const openingWalletCredit = agentOpeningWalletCreditForHotel(agent, hotelId);
+	const reservationWalletDeducted = isCommissionOnly
+		? 0
+		: reservationTotals.walletDeducted;
+
+	const walletAdded = n2(
+		openingWalletCredit + transactionTotals.credits + transactionTotals.adjustments
+	);
+	const walletUsed = n2(reservationWalletDeducted + transactionTotals.manualDebits);
 	const balance = n2(walletAdded - walletUsed);
 
 	return {
@@ -414,14 +448,22 @@ const calculateAgentWalletSummary = async ({
 			email: agent.email || "",
 			phone: agent.phone || "",
 			companyName: agent.companyName || "",
+			agentCommercialModel: commercialModel,
+			agentOpeningWalletCredit: openingWalletCredit,
 		},
+		commercialModel,
+		openingWalletCredit,
+		walletRequired: !isCommissionOnly,
 		walletAdded,
 		walletUsed,
 		balance,
 		manualDebits: n2(transactionTotals.manualDebits),
 		totalReservations: reservationTotals.totalReservations,
 		totalReservationValue: n2(reservationTotals.totalReservationValue),
-		walletDeducted: n2(reservationTotals.walletDeducted),
+		walletDeducted: n2(reservationWalletDeducted),
+		reservationValueNotWalletDeducted: n2(
+			reservationTotals.walletDeducted - reservationWalletDeducted
+		),
 		totalCommission: n2(reservationTotals.totalCommission),
 		commissionPaid: n2(reservationTotals.commissionPaid),
 		commissionDue: n2(
@@ -458,7 +500,9 @@ exports.agentWalletSummary = async (req, res) => {
 				_id: ObjectId(requestedAgentId),
 				...buildAgentHotelQuery(hotelId),
 			})
-				.select("_id name email phone companyName")
+				.select(
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+				)
 				.lean()
 				.exec();
 			if (!agent || !actorCanSeeAgent(actor, requestedAgentId)) {
@@ -467,7 +511,9 @@ exports.agentWalletSummary = async (req, res) => {
 			agents = [agent];
 		} else {
 			agents = await User.find(buildAgentHotelQuery(hotelId))
-				.select("_id name email phone companyName")
+				.select(
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+				)
 				.sort({ companyName: 1, name: 1 })
 				.lean()
 				.exec();
@@ -544,7 +590,9 @@ exports.createAgentWalletTransaction = async (req, res) => {
 			_id: ObjectId(agentId),
 			...buildAgentHotelQuery(hotelId),
 		})
-			.select("_id name email phone companyName")
+			.select(
+				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+			)
 			.lean()
 			.exec();
 		if (!agent) {

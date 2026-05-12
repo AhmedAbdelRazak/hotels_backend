@@ -138,7 +138,6 @@ exports.read = (req, res) => {
 };
 
 exports.update = (req, res) => {
-	console.log(req.body);
 	const room = req.room;
 	room.room_number = req.body.room_number;
 	room.room_type = req.body.room_type;
@@ -221,17 +220,36 @@ exports.list = async (req, res) => {
 	}
 };
 
-exports.remove = (req, res) => {
+exports.remove = async (req, res) => {
 	const room = req.room;
 
-	room.remove((err, data) => {
-		if (err) {
-			return res.status(400).json({
-				err: "error while removing",
+	try {
+		const blockingReservation = await Reservations.findOne({
+			roomId: room._id,
+			reservation_status: { $not: HOUSED_EXCLUDED_STATUS },
+		})
+			.select("_id confirmation_number reservation_status")
+			.lean()
+			.exec();
+
+		if (blockingReservation) {
+			return res.status(409).json({
+				error:
+					"This room is connected to an active reservation and cannot be removed from the map.",
+				reservationId: blockingReservation._id,
+				confirmationNumber: blockingReservation.confirmation_number || "",
+				reservationStatus: blockingReservation.reservation_status || "",
 			});
 		}
-		res.json({ message: "room deleted" });
-	});
+
+		await Rooms.deleteOne({ _id: room._id }).exec();
+		return res.json({ message: "room deleted" });
+	} catch (err) {
+		console.error("Error while removing room:", err);
+		return res.status(400).json({
+			error: "error while removing",
+		});
+	}
 };
 
 exports.listForAdmin = (req, res) => {

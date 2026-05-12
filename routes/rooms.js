@@ -23,6 +23,7 @@ const {
 	reservedRoomsSummary,
 	roomsInventorySummary,
 	deleteRooms,
+	remove,
 } = require("../controllers/rooms");
 
 router.get("/room-single/:roomId", read);
@@ -41,6 +42,14 @@ router.put(
 	isAuth,
 	isHotelOwner,
 	update
+);
+
+router.delete(
+	"/room/:roomId/:userId",
+	requireSignin,
+	isAuth,
+	isHotelOwner,
+	remove
 );
 
 router.get("/room/:accountId/:mainUserId", list);

@@ -2,6 +2,19 @@
 import dayjs from "dayjs";
 
 const num = (v, f = 0) => (Number.isFinite(+v) ? +v : f);
+const hasCommissionValue = (value) =>
+	value !== null && value !== undefined && value !== "";
+
+const resolveCommissionRate = (hotel, room) => {
+	const hotelComm = hasCommissionValue(hotel?.commission)
+		? num(hotel.commission, 10)
+		: 10;
+	const fallback = hotelComm >= 0 ? hotelComm : 10;
+	const roomComm = hasCommissionValue(room?.roomCommission)
+		? num(room.roomCommission, fallback)
+		: fallback;
+	return roomComm >= 0 ? roomComm : fallback;
+};
 
 export function quoteRoom(hotel, roomTypeKey, checkinISO, checkoutISO) {
 	const room = (hotel?.roomCountDetails || []).find(
@@ -15,9 +28,7 @@ export function quoteRoom(hotel, roomTypeKey, checkinISO, checkoutISO) {
 
 	const basePrice = num(room?.price?.basePrice, 0); // no‑commission portion
 	const defaultCost = num(room?.defaultCost, 0); // hotel’s base (root) cost
-	const hotelComm = num(hotel?.commission, 10);
-	const roomComm = num(room?.roomCommission, hotelComm);
-	const commissionRate = roomComm > 0 ? roomComm : 10;
+	const commissionRate = resolveCommissionRate(hotel, room);
 
 	const map = {};
 	(room.pricingRate || []).forEach((r) => (map[r.calendarDate] = r));

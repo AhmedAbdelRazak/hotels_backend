@@ -53,6 +53,31 @@ const moneyNumber = (value) => {
 
 const n2 = (value) => Number(moneyNumber(value).toFixed(2));
 
+const AGENT_COMMERCIAL_MODELS = new Set([
+	"wallet_inventory",
+	"commission_only",
+	"mixed",
+]);
+
+const normalizeAgentCommercialModel = (value) => {
+	const normalized = String(value || "").trim().toLowerCase();
+	return AGENT_COMMERCIAL_MODELS.has(normalized)
+		? normalized
+		: "wallet_inventory";
+};
+
+const agentOpeningWalletCreditForHotel = (agent = {}, hotelId = "") => {
+	const normalizedHotelId = normalizeId(hotelId);
+	const balances = Array.isArray(agent.agentWalletOpeningBalances)
+		? agent.agentWalletOpeningBalances
+		: [];
+	const matched = balances.find(
+		(entry) => normalizeId(entry?.hotelId || entry?.hotel) === normalizedHotelId
+	);
+	if (matched) return n2(matched.amount);
+	return n2(agent.agentOpeningWalletCredit);
+};
+
 const ASSIGNED_COMMISSION_STATUSES = new Set([
 	"commission due",
 	"commission paid",
@@ -1376,7 +1401,7 @@ const resolveReservationAgent = async (reservation = {}) => {
 		if (!ObjectId.isValid(possibleId)) continue;
 		const agent = await User.findById(possibleId)
 			.select(
-				"_id name email phone companyName role roleDescription roles roleDescriptions accessTo"
+				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo"
 			)
 			.lean()
 			.exec();
@@ -1390,6 +1415,12 @@ const resolveReservationAgent = async (reservation = {}) => {
 			email: snapshotCandidate.email || "",
 			phone: snapshotCandidate.phone || "",
 			companyName: snapshotCandidate.companyName || "",
+			agentCommercialModel:
+				snapshotCandidate.agentCommercialModel || "wallet_inventory",
+			agentOpeningWalletCredit:
+				snapshotCandidate.agentOpeningWalletCredit || 0,
+			agentWalletOpeningBalances:
+				snapshotCandidate.agentWalletOpeningBalances || [],
 			role: snapshotCandidate.role || 7000,
 			roleDescription: snapshotCandidate.roleDescription || "ordertaker",
 		};
@@ -1440,6 +1471,8 @@ const reconcileAgentWalletSnapshotAmount = (
 			: reservation.total_amount
 	);
 	const balanceBeforeReservation = n2(snapshot.balanceBeforeReservation);
+	const walletRequired = snapshot.walletRequired !== false;
+	const reservationWalletAmount = walletRequired ? reservationAmount : 0;
 	const commissionAmount = n2(
 		updates.commission ??
 			updates.financial_cycle?.commissionAmount ??
@@ -1452,7 +1485,10 @@ const reconcileAgentWalletSnapshotAmount = (
 	return {
 		...snapshot,
 		reservationAmount,
-		balanceAfterReservation: n2(balanceBeforeReservation - reservationAmount),
+		reservationWalletAmount: n2(reservationWalletAmount),
+		balanceAfterReservation: n2(
+			balanceBeforeReservation - reservationWalletAmount
+		),
 		commissionAmount,
 	};
 };
@@ -1557,17 +1593,24 @@ const buildReservationAgentWalletSnapshot = async ({
 			? n2(sum + moneyNumber(item.total_amount))
 			: sum;
 	}, 0);
+	const commercialModel = normalizeAgentCommercialModel(
+		agent.agentCommercialModel
+	);
+	const walletRequired = commercialModel !== "commission_only";
+	const openingWalletCredit = agentOpeningWalletCreditForHotel(agent, hotelId);
+	const priorReservationWalletValue = walletRequired ? priorReservationValue : 0;
 
 	const walletAddedBeforeReservation = n2(
-		transactionTotals.credits + transactionTotals.adjustments
+		openingWalletCredit + transactionTotals.credits + transactionTotals.adjustments
 	);
 	const walletUsedBeforeReservation = n2(
-		priorReservationValue + transactionTotals.manualDebits
+		priorReservationWalletValue + transactionTotals.manualDebits
 	);
 	const balanceBeforeReservation = n2(
 		walletAddedBeforeReservation - walletUsedBeforeReservation
 	);
 	const reservationAmount = n2(reservation?.total_amount || 0);
+	const reservationWalletAmount = walletRequired ? reservationAmount : 0;
 
 	return {
 		captured: true,
@@ -1581,14 +1624,22 @@ const buildReservationAgentWalletSnapshot = async ({
 			email: agent.email || "",
 			phone: agent.phone || "",
 			companyName: agent.companyName || "",
+			agentCommercialModel: commercialModel,
 		},
+		commercialModel,
+		walletRequired,
+		openingWalletCredit,
 		walletAddedBeforeReservation,
 		walletUsedBeforeReservation,
 		priorReservationValue: n2(priorReservationValue),
+		priorReservationWalletValue: n2(priorReservationWalletValue),
 		manualDebitsBeforeReservation: n2(transactionTotals.manualDebits),
 		balanceBeforeReservation,
 		reservationAmount,
-		balanceAfterReservation: n2(balanceBeforeReservation - reservationAmount),
+		reservationWalletAmount: n2(reservationWalletAmount),
+		balanceAfterReservation: n2(
+			balanceBeforeReservation - reservationWalletAmount
+		),
 		commissionAmount: n2(
 			reservation?.commission || reservation?.financial_cycle?.commissionAmount || 0
 		),

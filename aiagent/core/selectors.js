@@ -9,6 +9,9 @@ const num = (v, f = 0) => {
 	return Number.isFinite(n) ? n : f;
 };
 
+const hasCommissionValue = (value) =>
+	value !== null && value !== undefined && value !== "";
+
 function addDays(iso, days) {
 	const d = new Date(iso + "T00:00:00");
 	d.setDate(d.getDate() + days);
@@ -27,9 +30,14 @@ function eachDate(checkinISO, checkoutISO) {
 
 /** Commission fallback: roomCommission > hotel.commission > 10 */
 function resolveCommissionRate(hotel, room) {
-	const h = num(hotel?.commission, 10);
-	const r = num(room?.roomCommission, h);
-	return r > 0 ? r : 10;
+	const h = hasCommissionValue(hotel?.commission)
+		? num(hotel.commission, 10)
+		: 10;
+	const fallback = h >= 0 ? h : 10;
+	const r = hasCommissionValue(room?.roomCommission)
+		? num(room.roomCommission, fallback)
+		: fallback;
+	return r >= 0 ? r : fallback;
 }
 
 /** Quick amenity check on a room object with robust fallbacks */

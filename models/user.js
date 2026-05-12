@@ -84,6 +84,24 @@ const userSchema = new mongoose.Schema(
 			default: [],
 		},
 
+		agentCommercialModel: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			enum: ["wallet_inventory", "commission_only", "mixed"],
+			default: "wallet_inventory",
+		},
+
+		agentOpeningWalletCredit: {
+			type: Number,
+			default: 0,
+		},
+
+		agentWalletOpeningBalances: {
+			type: Array,
+			default: [],
+		},
+
 		hotelAddress: {
 			type: String,
 			trim: true,

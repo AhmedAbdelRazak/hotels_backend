@@ -25,6 +25,18 @@ const moneyNumber = (value) => {
 	return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const hasNumericInput = (value) =>
+	value !== null && value !== undefined && value !== "";
+
+const nullableNumber = (value) => {
+	if (!hasNumericInput(value)) return null;
+	if (typeof value === "number") {
+		return Number.isFinite(value) ? value : null;
+	}
+	const parsed = Number(String(value).replace(/,/g, "").trim());
+	return Number.isFinite(parsed) ? parsed : null;
+};
+
 const n2 = (value) => Number(moneyNumber(value).toFixed(2));
 
 const hasOwn = (object, key) =>
@@ -75,10 +87,10 @@ const normalizeText = (value) =>
 		.toLowerCase();
 
 const normalizeCommissionPercent = (raw, fallback = 10) => {
-	let value = moneyNumber(raw);
-	if (!(value > 0)) value = moneyNumber(fallback);
-	if (!(value > 0)) value = 10;
-	if (value <= 1) value *= 100;
+	let value = nullableNumber(raw);
+	if (value === null || value < 0) value = nullableNumber(fallback);
+	if (value === null || value < 0) value = 10;
+	if (value > 0 && value <= 1) value *= 100;
 	return value;
 };
 
@@ -405,7 +417,7 @@ const buildCanonicalRoomPricing = ({
 	const defaultCost = resolveDetailDefaultCost(detail, basePrice);
 	const fallbackCommission = normalizeCommissionPercent(
 		detail?.roomCommission,
-		hotel?.commission || 10
+		hotel?.commission ?? 10
 	);
 	const normalizedRoomType = roomType || detail.roomType || detail.room_type || "";
 	const normalizedDisplayName =
