@@ -461,9 +461,78 @@ function pick(row, candidates) {
 	return "";
 }
 
+function normalizeMoneyCurrency(value) {
+	const token = normalizeWhitespace(value).toUpperCase();
+	if (!token) return "";
+	if (token.includes("$") || token === "US$") return "USD";
+	if (token.includes("\u20ac")) return "EUR";
+	if (token.includes("\u00a3")) return "GBP";
+	if (/^(SR|SAUDI\s+RIYAL|RIYAL)$/.test(token)) return "SAR";
+	const matchedCode = MONEY_CURRENCY_CODES.find((code) => code === token);
+	return matchedCode || "";
+}
+
+function moneyNumberPattern() {
+	return String.raw`-?\d{1,3}(?:[,.]\d{3})*(?:[,.]\d{1,2})?|-?\d+(?:[,.]\d{1,2})?`;
+}
+
+function parseMoneyCandidates(value) {
+	const source = normalizeWhitespace(value);
+	if (!source) return [];
+
+	const currencyPattern = [
+		...MONEY_CURRENCY_CODES,
+		"US\\$",
+		"\\$",
+		"SR",
+		"SAUDI\\s+RIYAL",
+		"RIYAL",
+		"\u20ac",
+		"\u00a3",
+	].join("|");
+	const numberPattern = moneyNumberPattern();
+	const candidates = [];
+	const seen = new Set();
+	const pushCandidate = (rawAmount, rawCurrency, index) => {
+		const currency = normalizeMoneyCurrency(rawCurrency);
+		const amount = parseMoneyNumber(rawAmount);
+		if (!currency || !Number.isFinite(amount)) return;
+		const key = `${index}:${currency}:${amount}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		candidates.push({ amount, currency, index });
+	};
+
+	const prefixed = new RegExp(
+		`(^|[^A-Z0-9])(${currencyPattern})\\s*(${numberPattern})`,
+		"gi"
+	);
+	let match;
+	while ((match = prefixed.exec(source))) {
+		pushCandidate(match[3], match[2], match.index + match[1].length);
+	}
+
+	const suffixed = new RegExp(
+		`(${numberPattern})\\s*(${currencyPattern})(?=$|[^A-Z0-9])`,
+		"gi"
+	);
+	while ((match = suffixed.exec(source))) {
+		pushCandidate(match[1], match[2], match.index);
+	}
+
+	return candidates.sort((a, b) => a.index - b.index);
+}
+
 function parseMoney(value) {
 	const source = normalizeWhitespace(value);
 	if (!source) return { amount: 0, currency: "" };
+	const candidates = parseMoneyCandidates(source);
+	if (candidates.length) {
+		return {
+			amount: candidates[0].amount,
+			currency: candidates[0].currency,
+		};
+	}
 	let currency = "";
 	const upper = source.toUpperCase();
 	const matchedCode = MONEY_CURRENCY_CODES.find((code) =>
@@ -480,6 +549,54 @@ function parseMoney(value) {
 		currency = "GBP";
 	}
 	return { amount: parseMoneyNumber(source), currency };
+}
+
+function firstMoneyCandidateByCurrency(candidates = [], currency) {
+	const code = String(currency || "").toUpperCase();
+	return (Array.isArray(candidates) ? candidates : []).find(
+		(candidate) => candidate.currency === code
+	);
+}
+
+function resolveVccAmountDetails(amountToChargeField, fallbackCurrency) {
+	const source = normalizeWhitespace(amountToChargeField);
+	const candidates = parseMoneyCandidates(source);
+	const parsedAmount = candidates.length
+		? { amount: candidates[0].amount, currency: candidates[0].currency }
+		: parseMoney(source);
+	const amount = Number(parsedAmount.amount || 0);
+	const currency = parsedAmount.currency || fallbackCurrency || "";
+	const conversion = getVccAmountConversionMeta(amount, currency || "SAR");
+	const usdCandidate = firstMoneyCandidateByCurrency(candidates, "USD");
+	const sarCandidate = firstMoneyCandidateByCurrency(candidates, "SAR");
+	const amountToChargeSar = sarCandidate
+		? round2(sarCandidate.amount)
+		: conversion.totalAmountSar;
+	const amountToChargeUsd = usdCandidate
+		? round2(usdCandidate.amount)
+		: conversion.amountUsd;
+
+	return {
+		amountToCharge: Number.isFinite(amount) ? amount : 0,
+		amountToChargeCurrency: currency,
+		amountToChargeSar,
+		amountToChargeUsd,
+		amountToChargeSarSource: sarCandidate
+			? "email"
+			: conversion.exchangeRateSource,
+		amountToChargeUsdSource: usdCandidate
+			? "email"
+			: conversion.sourceCurrency === "USD"
+			? "source_currency"
+			: "converted_from_sar",
+		amountToChargeExchangeRateToSar: conversion.exchangeRateToSar,
+		amountToChargeExchangeRateSource: conversion.exchangeRateSource,
+		amountToChargeUsdExchangeRateToSar: conversion.usdExchangeRateToSar,
+		amountToChargeUsdExchangeRateSource: conversion.usdExchangeRateSource,
+		amountToChargeConvertedAt: conversion.convertedAt,
+		amountToChargeHasUsdInEmail: !!usdCandidate,
+		amountToChargeHasSarInEmail: !!sarCandidate,
+	};
 }
 
 function parseConfiguredSarRates() {
@@ -588,6 +705,43 @@ function getSarConversionMeta(amount, currency) {
 	};
 }
 
+function getUsdToSarExchangeRate() {
+	const exchange = getSarExchangeRate("USD");
+	const fallbackRate = Number.isFinite(USD_TO_SAR) && USD_TO_SAR > 0 ? USD_TO_SAR : 3.75;
+	const rate = Number(exchange.rate || fallbackRate);
+	return {
+		code: "USD",
+		rate: Number.isFinite(rate) && rate > 0 ? rate : fallbackRate,
+		source: exchange.rate ? exchange.source : "fallback_default",
+	};
+}
+
+function sarToUsdAmount(amountSar) {
+	const numericSar = Number(amountSar || 0);
+	if (!Number.isFinite(numericSar) || numericSar < 0) return 0;
+	const usdExchange = getUsdToSarExchangeRate();
+	return usdExchange.rate ? round2(numericSar / usdExchange.rate) : 0;
+}
+
+function withUsdConversionMeta(conversion = {}) {
+	const usdExchange = getUsdToSarExchangeRate();
+	const sourceAmount = Number(conversion.sourceAmount || 0);
+	const amountUsd =
+		conversion.sourceCurrency === "USD"
+			? round2(sourceAmount)
+			: sarToUsdAmount(conversion.totalAmountSar);
+	return {
+		...conversion,
+		amountUsd,
+		usdExchangeRateToSar: usdExchange.rate,
+		usdExchangeRateSource: usdExchange.source,
+	};
+}
+
+function getVccAmountConversionMeta(amount, currency) {
+	return withUsdConversionMeta(getSarConversionMeta(amount, currency));
+}
+
 async function getSarConversionMetaAsync(amount, currency) {
 	const numericAmount = Number(amount || 0);
 	const code = String(currency || "SAR").trim().toUpperCase() || "SAR";
@@ -611,6 +765,10 @@ async function getSarConversionMetaAsync(amount, currency) {
 		totalAmountSar: exchange.rate ? round2(numericAmount * exchange.rate) : 0,
 		convertedAt: new Date().toISOString(),
 	};
+}
+
+async function getVccAmountConversionMetaAsync(amount, currency) {
+	return withUsdConversionMeta(await getSarConversionMetaAsync(amount, currency));
 }
 
 function toSarAmount(amount, currency) {
@@ -658,6 +816,34 @@ function parseDate(value) {
 
 	const fallback = dayjs(cleaned);
 	return fallback.isValid() ? fallback.format("YYYY-MM-DD") : null;
+}
+
+function parseCardExpirationDate(value) {
+	const s = normalizeWhitespace(value);
+	if (!s) return null;
+	const cleaned = s.replace(/\s+/g, " ").trim();
+	const numericExpiry = cleaned.match(/^(\d{1,2})\s*[/-]\s*(\d{2}|\d{4})$/);
+	if (numericExpiry) {
+		const month = Number(numericExpiry[1]);
+		const yearRaw = Number(numericExpiry[2]);
+		const year = yearRaw < 100 ? 2000 + yearRaw : yearRaw;
+		if (month >= 1 && month <= 12 && year >= 2000 && year <= 2099) {
+			return `${year}-${String(month).padStart(2, "0")}`;
+		}
+	}
+	const formats = ["MMM YYYY", "MMMM YYYY", "MM/YYYY", "M/YYYY", "MM/YY", "M/YY"];
+	for (const format of formats) {
+		const parsed = dayjs(cleaned, format, true);
+		if (parsed.isValid()) return parsed.format("YYYY-MM");
+	}
+	const monthYear = cleaned.match(/\b([A-Za-z]{3,9})\s+(\d{4})\b/);
+	if (monthYear) {
+		const longParsed = dayjs(`${monthYear[1]} ${monthYear[2]}`, "MMMM YYYY", true);
+		if (longParsed.isValid()) return longParsed.format("YYYY-MM");
+		const shortParsed = dayjs(`${monthYear[1]} ${monthYear[2]}`, "MMM YYYY", true);
+		if (shortParsed.isValid()) return shortParsed.format("YYYY-MM");
+	}
+	return parseDate(value);
 }
 
 function calculateDaysOfResidence(checkIn, checkOut) {
@@ -723,6 +909,20 @@ function findFirstPattern(text, patterns) {
 	for (const pattern of patterns) {
 		const match = String(text || "").match(pattern);
 		if (match && match[1]) return normalizeWhitespace(match[1]);
+	}
+	return "";
+}
+
+function findFirstMoneyPatternOutsideVccLines(text, patterns) {
+	const lines = String(text || "").split(/\r?\n/);
+	for (const line of lines) {
+		if (/\b(amount\s+to\s+charge|charge\s+amount|vcc\s+amount)\b/i.test(line)) {
+			continue;
+		}
+		for (const pattern of patterns) {
+			const match = String(line || "").match(pattern);
+			if (match && match[1]) return normalizeWhitespace(match[1]);
+		}
 	}
 	return "";
 }
@@ -890,6 +1090,8 @@ function detectReservationIntent({
 }
 
 function extractCardLast4(text) {
+	const redactedCard = String(text || "").match(/\[CARD-(\d{4})\]/i);
+	if (redactedCard) return redactedCard[1];
 	const nearCard = findFirstPattern(text, [
 		/\b(?:card number|card no\.?|pan)\s*[:#-]?\s*((?:\d[\s-]*){13,19})\b/i,
 	]);
@@ -1136,20 +1338,22 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?Out\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const bookedAt =
-		parseDate(findField(text, ["Booked on", "Booking date", "Booked", "Created"])) ||
-		dayjs().format("YYYY-MM-DD");
+	const bookedAtField = findField(text, [
+		"Booked on",
+		"Booking date",
+		"Booked",
+		"Created",
+	]);
+	const bookedAt = parseDate(bookedAtField) || dayjs().format("YYYY-MM-DD");
 
 	const amountText = firstNonEmpty(
 		findField(text, [
 			"Booking amount",
 			"Total booking amount",
 			"Total amount",
-			"Amount to charge",
-			"Amount",
 			"Total",
 		]),
-		findFirstPattern(text, [
+		findFirstMoneyPatternOutsideVccLines(text, [
 			new RegExp(
 				`\\b((?:${MONEY_CURRENCY_CODES.join("|")})\\s*[0-9][0-9,.]*)`,
 				"i"
@@ -1162,38 +1366,57 @@ function extractNormalizedReservation(email) {
 		parsedMoney.currency ||
 		(/\$\s*\d/.test(amountText) ? "USD" : process.env.OTA_DEFAULT_CURRENCY || "SAR");
 	const conversion = getSarConversionMeta(parsedMoney.amount, amountCurrency);
-	const adults = countNumber(
-		findField(text, ["Adults", "Adult guests", "Adult"])
-	);
-	const children = countNumber(
-		findField(text, [
-			"Children",
-			"Child guests",
-			"Kids/Ages",
-			"Kids Ages",
-			"Kids",
-			"Child",
-		])
-	);
+	const adultsField = findField(text, ["Adults", "Adult guests", "Adult"]);
+	const childrenField = findField(text, [
+		"Children",
+		"Child guests",
+		"Kids/Ages",
+		"Kids Ages",
+		"Kids",
+		"Child",
+	]);
+	const totalGuestsField = findField(text, [
+		"Total guests",
+		"Guest count",
+		"Guests",
+	]);
+	const roomCountField = findField(text, [
+		"Room count",
+		"Number of rooms",
+		"Rooms",
+	]);
+	const adults = countNumber(adultsField);
+	const children = countNumber(childrenField);
 	const totalGuests =
-		countNumber(findField(text, ["Total guests", "Guest count", "Guests"])) ||
+		countNumber(totalGuestsField) ||
 		adults + children ||
 		1;
-	const roomCount =
-		countNumber(findField(text, ["Room count", "Number of rooms", "Rooms"])) || 1;
+	const roomCount = countNumber(roomCountField) || 1;
+	const guestEmailField = findField(text, [
+		"Guest email",
+		"Email",
+		"Guest e-mail",
+	]);
+	const guestEmailPattern = findFirstPattern(text, [
+		/\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i,
+	]);
 	const guestEmail = firstNonEmpty(
-		findField(text, ["Guest email", "Email", "Guest e-mail"]),
-		findFirstPattern(text, [/\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i])
+		guestEmailField,
+		guestEmailPattern
 	);
+	const guestNameField = findField(text, [
+		"Guest name",
+		"Primary guest",
+		"Lead guest",
+		"Customer name",
+		"Guest",
+	]);
+	const guestNamePattern = findFirstPattern(text, [
+		/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i,
+	]);
 	const guestName = firstNonEmpty(
-		findField(text, [
-			"Guest name",
-			"Primary guest",
-			"Lead guest",
-			"Customer name",
-			"Guest",
-		]),
-		findFirstPattern(text, [/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i])
+		guestNameField,
+		guestNamePattern
 	);
 	const nationality = findField(text, [
 		"Nationality",
@@ -1217,20 +1440,27 @@ function extractNormalizedReservation(email) {
 	]);
 	const paymentText = `${paymentInstructionField} ${text}`.toLowerCase();
 
-	const activationDate = parseDate(
-		findField(text, ["Activation date", "Card activation date"])
-	);
-	const expirationDate = parseDate(
-		findField(text, ["Expiration date", "Expiry date", "Card expiration date"])
-	);
-	const amountToCharge = parseMoney(
-		findField(text, ["Amount to charge", "Charge amount", "VCC amount"])
-	);
+	const activationDateField = findField(text, [
+		"Activation date",
+		"Card activation date",
+	]);
+	const expirationDateField = findField(text, [
+		"Expiration date",
+		"Expiry date",
+		"Card expiration date",
+	]);
+	const amountToChargeField = findField(text, [
+		"Amount to charge",
+		"Charge amount",
+		"VCC amount",
+	]);
+	const activationDate = parseDate(activationDateField);
+	const expirationDate = parseCardExpirationDate(expirationDateField);
 	const cardLast4 = extractCardLast4(text);
-	const amountToChargeCurrency = amountToCharge.currency || amountCurrency;
-	const amountToChargeSar = amountToCharge.amount
-		? toSarAmount(amountToCharge.amount, amountToChargeCurrency)
-		: 0;
+	const vccAmountDetails = resolveVccAmountDetails(
+		amountToChargeField,
+		amountCurrency
+	);
 	const paymentCollectionModel = detectPaymentCollectionModel(paymentText, {
 		cardLast4,
 	});
@@ -1286,11 +1516,42 @@ function extractNormalizedReservation(email) {
 			paymentInstructionField || paymentCollectionModel,
 			500
 		),
+		sourcePresence: {
+			reservationId: !!reservationId,
+			confirmationNumber: !!reservationId,
+			bookingSource: !!sourceField,
+			hotelName: !!hotelName,
+			roomName: !!roomName,
+			checkinDate: !!checkinDate,
+			checkoutDate: !!checkoutDate,
+			bookedAt: !!parseDate(bookedAtField),
+			amount: !!amountText && Number(parsedMoney.amount || 0) > 0,
+			adults: !!adultsField,
+			children: !!childrenField,
+			totalGuests: !!totalGuestsField,
+			roomCount: !!roomCountField,
+			guestName: !!guestName,
+			guestEmail: !!guestEmail,
+			guestPhone: !!guestPhone,
+			nationality: !!nationality,
+			paymentInstructions: !!paymentInstructionField,
+			paymentCollectionModel: paymentCollectionModel !== "unknown",
+			vccCardLast4: !!cardLast4,
+			vccAmountToCharge: !!amountToChargeField && /\d/.test(amountToChargeField),
+			vccAmountToChargeUsd:
+				!!amountToChargeField &&
+				/\d/.test(amountToChargeField) &&
+				hasOtaValue(vccAmountDetails.amountToChargeUsd, { allowZero: true }),
+			vccAmountToChargeSar:
+				!!amountToChargeField &&
+				/\d/.test(amountToChargeField) &&
+				hasOtaValue(vccAmountDetails.amountToChargeSar, { allowZero: true }),
+			vccActivationDate: !!activationDate,
+			vccExpirationDate: !!expirationDate,
+		},
 		vcc: {
 			cardLast4,
-			amountToCharge: amountToCharge.amount,
-			amountToChargeCurrency,
-			amountToChargeSar,
+			...vccAmountDetails,
 			activationDate,
 			expirationDate,
 		},
@@ -1722,6 +1983,287 @@ function compactUpdate(document) {
 	return set;
 }
 
+function hasOtaValue(value, options = {}) {
+	if (value === undefined || value === null) return false;
+	if (typeof value === "string") return normalizeWhitespace(value) !== "";
+	if (typeof value === "number") {
+		return Number.isFinite(value) && (options.allowZero || value !== 0);
+	}
+	return true;
+}
+
+function setIfOtaValue(target, path, value, options = {}) {
+	if (hasOtaValue(value, options)) target[path] = value;
+}
+
+function sourcePresence(normalized = {}) {
+	return normalized.sourcePresence && typeof normalized.sourcePresence === "object"
+		? normalized.sourcePresence
+		: {};
+}
+
+function hasSourceField(normalized = {}, field) {
+	return sourcePresence(normalized)[field] === true;
+}
+
+function hasKnownProvider(normalized = {}) {
+	return !!normalized.provider && normalized.provider !== "unknown";
+}
+
+function hasIncomingAmount(normalized = {}) {
+	const hasAmountValue =
+		Number(normalized.amount || 0) > 0 ||
+		Number(normalized.totalAmountSar || 0) > 0;
+	const presence = sourcePresence(normalized);
+	if (Object.prototype.hasOwnProperty.call(presence, "amount")) {
+		return presence.amount === true && hasAmountValue;
+	}
+	return hasAmountValue;
+}
+
+function hasIncomingVccAmount(normalized = {}) {
+	const vcc = normalized.vcc || {};
+	const amount = Number(vcc.amountToCharge);
+	if (hasSourceField(normalized, "vccAmountToCharge")) {
+		return Number.isFinite(amount) && amount >= 0;
+	}
+	return Number.isFinite(amount) && amount > 0;
+}
+
+function resolveExistingUpdateStatus(statusToApply, normalized = {}) {
+	const normalizedStatus = normalizeStatusToApply(
+		statusToApply || normalized.statusToApply || normalized.eventType
+	);
+	if (normalizedStatus) return normalizedStatus;
+	if (normalized.eventType === "cancelled") return "cancelled";
+	return "";
+}
+
+function buildExistingReservationUpdateSet({
+	normalized = {},
+	existing = {},
+	document = null,
+	statusToApply = "",
+} = {}) {
+	const set = {};
+	const confirmationNumber = normalizeConfirmation(
+		normalized.confirmationNumber || normalized.reservationId
+	);
+	const providerLabel =
+		normalized.bookingSource ||
+		(normalized.providerLabel && normalized.providerLabel !== "unknown"
+			? normalized.providerLabel
+			: "");
+	const incomingStatus = resolveExistingUpdateStatus(statusToApply, normalized);
+	const incomingAmount = hasIncomingAmount(normalized);
+	const incomingPaymentModel =
+		hasSourceField(normalized, "paymentCollectionModel") &&
+		normalized.paymentCollectionModel !== "unknown";
+
+	if (document) {
+		const docSet = compactUpdate(document);
+		if (incomingAmount) {
+			[
+				"sub_total",
+				"total_amount",
+				"currency",
+				"commission",
+				"pickedRoomsType",
+				"pickedRoomsPricing",
+			].forEach((field) => {
+				setIfOtaValue(set, field, docSet[field]);
+			});
+		}
+		if (incomingAmount && incomingPaymentModel) {
+			[
+				"financeStatus",
+				"payment",
+				"paid_amount",
+				"paid_amount_breakdown",
+				"financial_cycle",
+			].forEach((field) => {
+				setIfOtaValue(set, field, docSet[field]);
+			});
+		}
+
+		if (hasSourceField(normalized, "roomName")) {
+			setIfOtaValue(
+				set,
+				"supplierData.otaMatchedRoomName",
+				document.supplierData?.otaMatchedRoomName
+			);
+			setIfOtaValue(
+				set,
+				"supplierData.otaRoomMatchScore",
+				document.supplierData?.otaRoomMatchScore
+			);
+			setIfOtaValue(
+				set,
+				"supplierData.otaRoomMatchType",
+				document.supplierData?.otaRoomMatchType
+			);
+		}
+		if (hasSourceField(normalized, "hotelName") || normalized.hotelId) {
+			setIfOtaValue(set, "hotelId", docSet.hotelId);
+			setIfOtaValue(set, "belongsTo", docSet.belongsTo);
+		}
+	}
+
+	setIfOtaValue(set, "reservation_id", normalized.reservationId || confirmationNumber);
+	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
+		setIfOtaValue(set, "booking_source", providerLabel);
+	}
+	setIfOtaValue(set, "customer_details.name", normalized.guestName);
+	setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
+	setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
+	setIfOtaValue(set, "customer_details.nationality", normalized.nationality);
+	setIfOtaValue(set, "checkin_date", normalized.checkinDate);
+	setIfOtaValue(set, "checkout_date", normalized.checkoutDate);
+	if (hasSourceField(normalized, "bookedAt")) {
+		setIfOtaValue(set, "booked_at", normalized.bookedAt);
+	}
+
+	const checkinForDays = normalized.checkinDate || existing.checkin_date;
+	const checkoutForDays = normalized.checkoutDate || existing.checkout_date;
+	const daysOfResidence = calculateDaysOfResidence(checkinForDays, checkoutForDays);
+	if (
+		daysOfResidence > 0 &&
+		(hasSourceField(normalized, "checkinDate") ||
+			hasSourceField(normalized, "checkoutDate"))
+	) {
+		set.days_of_residence = daysOfResidence;
+	}
+
+	if (hasSourceField(normalized, "adults") && Number(normalized.adults || 0) > 0) {
+		set.adults = Number(normalized.adults);
+	}
+	if (
+		hasSourceField(normalized, "children") &&
+		Number(normalized.children || 0) >= 0
+	) {
+		set.children = Number(normalized.children);
+	}
+	if (
+		hasSourceField(normalized, "totalGuests") &&
+		Number(normalized.totalGuests || 0) > 0
+	) {
+		set.total_guests = Number(normalized.totalGuests);
+	}
+	if (
+		hasSourceField(normalized, "roomCount") &&
+		Number(normalized.roomCount || 0) > 0
+	) {
+		set.total_rooms = Number(normalized.roomCount);
+	}
+
+	if (incomingAmount) {
+		set.total_amount = Number(normalized.totalAmountSar || 0);
+		set.currency = "SAR";
+	}
+
+	if (incomingStatus) {
+		set.reservation_status = incomingStatus;
+		if (incomingStatus === "cancelled") set.state = "cancelled";
+		if (["cancelled", "no_show"].includes(incomingStatus)) {
+			set.cancel_reason = `${normalized.providerLabel || "OTA"} status email`;
+		}
+	}
+
+	if (confirmationNumber) {
+		set["customer_details.confirmation_number2"] = confirmationNumber;
+		set["supplierData.suppliedBookingNo"] = confirmationNumber;
+		set["supplierData.otaConfirmationNumber"] = confirmationNumber;
+		set["supplierData.platformConfirmationNumber"] = confirmationNumber;
+	}
+	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
+		setIfOtaValue(set, "supplierData.supplierName", providerLabel);
+	}
+	if (hasKnownProvider(normalized)) {
+		setIfOtaValue(set, "supplierData.otaProvider", normalized.provider);
+	}
+	if (hasSourceField(normalized, "hotelName")) {
+		setIfOtaValue(set, "supplierData.otaHotelName", normalized.hotelName);
+	}
+	if (hasSourceField(normalized, "roomName")) {
+		setIfOtaValue(set, "supplierData.otaRoomName", normalized.roomName);
+	}
+	if (incomingAmount) {
+		setIfOtaValue(set, "supplierData.otaCurrency", normalized.currency);
+		set["supplierData.otaAmount"] = Number(normalized.amount);
+		set["supplierData.otaAmountSar"] = Number(normalized.totalAmountSar);
+		if (Number(normalized.exchangeRateToSar || 0) > 0) {
+			set["supplierData.otaExchangeRateToSar"] = Number(
+				normalized.exchangeRateToSar
+			);
+		}
+		setIfOtaValue(
+			set,
+			"supplierData.otaExchangeRateSource",
+			normalized.exchangeRateSource
+		);
+		setIfOtaValue(
+			set,
+			"supplierData.otaAmountConvertedAt",
+			normalized.amountConvertedAt
+		);
+	}
+	if (
+		hasSourceField(normalized, "paymentCollectionModel") &&
+		normalized.paymentCollectionModel !== "unknown"
+	) {
+		setIfOtaValue(
+			set,
+			"supplierData.otaPaymentCollectionModel",
+			normalized.paymentCollectionModel
+		);
+	}
+	if (hasSourceField(normalized, "paymentInstructions")) {
+		setIfOtaValue(
+			set,
+			"supplierData.otaPaymentInstructions",
+			normalized.paymentInstructions
+		);
+	}
+	setIfOtaValue(
+		set,
+		"supplierData.otaLastInboundEmailId",
+		normalized.inboundEmailId
+	);
+	set["supplierData.otaLastEmailAt"] = new Date();
+	if (normalized.eventType && normalized.eventType !== "unknown") {
+		setIfOtaValue(set, "supplierData.otaLastEventType", normalized.eventType);
+	}
+
+	applyVccSafeFields(set, normalized);
+	return set;
+}
+
+async function applyExistingReservationEmailUpdate({
+	normalized,
+	existing,
+	statusToApply = "",
+	warnings = [],
+	action = "updated-from-email",
+	document = null,
+} = {}) {
+	const set = buildExistingReservationUpdateSet({
+		normalized,
+		existing,
+		document,
+		statusToApply,
+	});
+	await Reservations.updateOne(
+		{ _id: existing._id },
+		{
+			$set: set,
+			$push: {
+				reservationAuditLog: buildAuditEntry(normalized, action, warnings),
+			},
+		}
+	);
+	return set;
+}
+
 function buildAuditEntry(normalized, action, warnings = []) {
 	return {
 		at: new Date(),
@@ -1807,20 +2349,62 @@ async function resolveHotel(normalized, existingReservation = null) {
 
 function applyVccSafeFields(target, normalized) {
 	const vcc = normalized.vcc || {};
-	if (vcc.cardLast4) {
+	const hasAmountToCharge = hasIncomingVccAmount(normalized);
+	const hasAnyVccDetail =
+		!!vcc.cardLast4 ||
+		hasAmountToCharge ||
+		!!vcc.activationDate ||
+		!!vcc.expirationDate;
+	if (hasAnyVccDetail) {
 		target["vcc_payment.source"] = normalized.provider;
+	}
+	if (vcc.cardLast4) {
 		target["vcc_payment.metadata.card_last4"] = vcc.cardLast4;
 	}
-	if (vcc.amountToCharge) {
-		target["vcc_payment.metadata.amount_to_charge"] = vcc.amountToCharge;
-	}
-	if (vcc.amountToChargeCurrency) {
-		target["vcc_payment.metadata.amount_to_charge_currency"] =
-			vcc.amountToChargeCurrency;
-	}
-	if (vcc.amountToChargeSar) {
-		target["vcc_payment.metadata.amount_to_charge_sar"] =
-			vcc.amountToChargeSar;
+	if (hasAmountToCharge) {
+		target["vcc_payment.metadata.amount_to_charge"] = Number(
+			vcc.amountToCharge || 0
+		);
+		if (vcc.amountToChargeCurrency) {
+			target["vcc_payment.metadata.amount_to_charge_currency"] =
+				vcc.amountToChargeCurrency;
+		}
+		if (hasOtaValue(vcc.amountToChargeSar, { allowZero: true })) {
+			target["vcc_payment.metadata.amount_to_charge_sar"] =
+				Number(vcc.amountToChargeSar || 0);
+		}
+		if (hasOtaValue(vcc.amountToChargeUsd, { allowZero: true })) {
+			target["vcc_payment.metadata.amount_to_charge_usd"] =
+				Number(vcc.amountToChargeUsd || 0);
+		}
+		if (Number(vcc.amountToChargeExchangeRateToSar || 0) > 0) {
+			target["vcc_payment.metadata.amount_to_charge_exchange_rate_to_sar"] =
+				Number(vcc.amountToChargeExchangeRateToSar);
+		}
+		if (vcc.amountToChargeExchangeRateSource) {
+			target["vcc_payment.metadata.amount_to_charge_exchange_rate_source"] =
+				vcc.amountToChargeExchangeRateSource;
+		}
+		if (Number(vcc.amountToChargeUsdExchangeRateToSar || 0) > 0) {
+			target["vcc_payment.metadata.amount_to_charge_usd_exchange_rate_to_sar"] =
+				Number(vcc.amountToChargeUsdExchangeRateToSar);
+		}
+		if (vcc.amountToChargeUsdExchangeRateSource) {
+			target["vcc_payment.metadata.amount_to_charge_usd_exchange_rate_source"] =
+				vcc.amountToChargeUsdExchangeRateSource;
+		}
+		if (vcc.amountToChargeConvertedAt) {
+			target["vcc_payment.metadata.amount_to_charge_converted_at"] =
+				vcc.amountToChargeConvertedAt;
+		}
+		if (vcc.amountToChargeSarSource) {
+			target["vcc_payment.metadata.amount_to_charge_sar_source"] =
+				vcc.amountToChargeSarSource;
+		}
+		if (vcc.amountToChargeUsdSource) {
+			target["vcc_payment.metadata.amount_to_charge_usd_source"] =
+				vcc.amountToChargeUsdSource;
+		}
 	}
 	if (vcc.activationDate) {
 		target["vcc_payment.metadata.activation_date"] = vcc.activationDate;
@@ -1832,9 +2416,10 @@ function applyVccSafeFields(target, normalized) {
 
 function applyVccSafeFieldsToDocument(document, normalized) {
 	const vcc = normalized.vcc || {};
+	const hasAmountToCharge = hasIncomingVccAmount(normalized);
 	if (
 		!vcc.cardLast4 &&
-		!vcc.amountToCharge &&
+		!hasAmountToCharge &&
 		!vcc.activationDate &&
 		!vcc.expirationDate
 	) {
@@ -1846,16 +2431,50 @@ function applyVccSafeFieldsToDocument(document, normalized) {
 		...(document.vcc_payment.metadata || {}),
 	};
 	if (vcc.cardLast4) document.vcc_payment.metadata.card_last4 = vcc.cardLast4;
-	if (vcc.amountToCharge) {
-		document.vcc_payment.metadata.amount_to_charge = vcc.amountToCharge;
-	}
-	if (vcc.amountToChargeCurrency) {
-		document.vcc_payment.metadata.amount_to_charge_currency =
-			vcc.amountToChargeCurrency;
-	}
-	if (vcc.amountToChargeSar) {
-		document.vcc_payment.metadata.amount_to_charge_sar =
-			vcc.amountToChargeSar;
+	if (hasAmountToCharge) {
+		document.vcc_payment.metadata.amount_to_charge = Number(
+			vcc.amountToCharge || 0
+		);
+		if (vcc.amountToChargeCurrency) {
+			document.vcc_payment.metadata.amount_to_charge_currency =
+				vcc.amountToChargeCurrency;
+		}
+		if (hasOtaValue(vcc.amountToChargeSar, { allowZero: true })) {
+			document.vcc_payment.metadata.amount_to_charge_sar =
+				Number(vcc.amountToChargeSar || 0);
+		}
+		if (hasOtaValue(vcc.amountToChargeUsd, { allowZero: true })) {
+			document.vcc_payment.metadata.amount_to_charge_usd =
+				Number(vcc.amountToChargeUsd || 0);
+		}
+		if (Number(vcc.amountToChargeExchangeRateToSar || 0) > 0) {
+			document.vcc_payment.metadata.amount_to_charge_exchange_rate_to_sar =
+				Number(vcc.amountToChargeExchangeRateToSar);
+		}
+		if (vcc.amountToChargeExchangeRateSource) {
+			document.vcc_payment.metadata.amount_to_charge_exchange_rate_source =
+				vcc.amountToChargeExchangeRateSource;
+		}
+		if (Number(vcc.amountToChargeUsdExchangeRateToSar || 0) > 0) {
+			document.vcc_payment.metadata.amount_to_charge_usd_exchange_rate_to_sar =
+				Number(vcc.amountToChargeUsdExchangeRateToSar);
+		}
+		if (vcc.amountToChargeUsdExchangeRateSource) {
+			document.vcc_payment.metadata.amount_to_charge_usd_exchange_rate_source =
+				vcc.amountToChargeUsdExchangeRateSource;
+		}
+		if (vcc.amountToChargeConvertedAt) {
+			document.vcc_payment.metadata.amount_to_charge_converted_at =
+				vcc.amountToChargeConvertedAt;
+		}
+		if (vcc.amountToChargeSarSource) {
+			document.vcc_payment.metadata.amount_to_charge_sar_source =
+				vcc.amountToChargeSarSource;
+		}
+		if (vcc.amountToChargeUsdSource) {
+			document.vcc_payment.metadata.amount_to_charge_usd_source =
+				vcc.amountToChargeUsdSource;
+		}
 	}
 	if (vcc.activationDate) {
 		document.vcc_payment.metadata.activation_date = vcc.activationDate;
@@ -1895,40 +2514,74 @@ async function applyLiveSarConversion(normalized = {}) {
 		errors: [...(normalized.errors || [])],
 	};
 	const amount = Number(next.amount || 0);
-	if (!amount) return next;
+	if (amount) {
+		const conversion = await getSarConversionMetaAsync(
+			amount,
+			next.currency || "SAR"
+		);
+		next.totalAmountSar = conversion.totalAmountSar;
+		next.exchangeRateToSar = conversion.exchangeRateToSar;
+		next.exchangeRateSource = conversion.exchangeRateSource;
+		next.amountConvertedAt = conversion.convertedAt;
 
-	const conversion = await getSarConversionMetaAsync(amount, next.currency || "SAR");
-	next.totalAmountSar = conversion.totalAmountSar;
-	next.exchangeRateToSar = conversion.exchangeRateToSar;
-	next.exchangeRateSource = conversion.exchangeRateSource;
-	next.amountConvertedAt = conversion.convertedAt;
-
-	if (
-		conversion.sourceCurrency !== "SAR" &&
-		conversion.exchangeRateSource === "fallback_default" &&
-		!STABLE_DEFAULT_RATE_CURRENCIES.has(conversion.sourceCurrency)
-	) {
-		const warning = `Using fallback SAR exchange rate for ${conversion.sourceCurrency}; configure OTA_${conversion.sourceCurrency}_TO_SAR_RATE or EXCHANGE_RATE for exact production accounting.`;
-		if (!next.warnings.includes(warning)) next.warnings.push(warning);
-	}
-	if (
-		conversion.sourceCurrency !== "SAR" &&
-		conversion.exchangeRateSource === "missing"
-	) {
-		const error = `Missing SAR exchange rate for ${conversion.sourceCurrency}.`;
-		if (!next.errors.includes(error)) next.errors.push(error);
+		if (
+			conversion.sourceCurrency !== "SAR" &&
+			conversion.exchangeRateSource === "fallback_default" &&
+			!STABLE_DEFAULT_RATE_CURRENCIES.has(conversion.sourceCurrency)
+		) {
+			const warning = `Using fallback SAR exchange rate for ${conversion.sourceCurrency}; configure OTA_${conversion.sourceCurrency}_TO_SAR_RATE or EXCHANGE_RATE for exact production accounting.`;
+			if (!next.warnings.includes(warning)) next.warnings.push(warning);
+		}
+		if (
+			conversion.sourceCurrency !== "SAR" &&
+			conversion.exchangeRateSource === "missing"
+		) {
+			const error = `Missing SAR exchange rate for ${conversion.sourceCurrency}.`;
+			if (!next.errors.includes(error)) next.errors.push(error);
+		}
 	}
 
 	const vcc = { ...(next.vcc || {}) };
-	if (Number(vcc.amountToCharge || 0) && vcc.amountToChargeCurrency) {
-		const vccConversion = await getSarConversionMetaAsync(
+	if (hasIncomingVccAmount(next) && vcc.amountToChargeCurrency) {
+		const vccConversion = await getVccAmountConversionMetaAsync(
 			vcc.amountToCharge,
 			vcc.amountToChargeCurrency
 		);
-		vcc.amountToChargeSar = vccConversion.totalAmountSar;
+		if (!vcc.amountToChargeHasSarInEmail) {
+			vcc.amountToChargeSar = vccConversion.totalAmountSar;
+			vcc.amountToChargeSarSource = vccConversion.exchangeRateSource;
+		}
+		if (!vcc.amountToChargeHasUsdInEmail) {
+			vcc.amountToChargeUsd = vccConversion.amountUsd;
+			vcc.amountToChargeUsdSource =
+				vccConversion.sourceCurrency === "USD"
+					? "source_currency"
+					: "converted_from_sar";
+		}
 		vcc.amountToChargeExchangeRateToSar = vccConversion.exchangeRateToSar;
 		vcc.amountToChargeExchangeRateSource = vccConversion.exchangeRateSource;
+		vcc.amountToChargeUsdExchangeRateToSar =
+			vccConversion.usdExchangeRateToSar;
+		vcc.amountToChargeUsdExchangeRateSource =
+			vccConversion.usdExchangeRateSource;
+		vcc.amountToChargeConvertedAt = vccConversion.convertedAt;
 		next.vcc = vcc;
+
+		if (
+			vccConversion.sourceCurrency !== "SAR" &&
+			vccConversion.exchangeRateSource === "fallback_default" &&
+			!STABLE_DEFAULT_RATE_CURRENCIES.has(vccConversion.sourceCurrency)
+		) {
+			const warning = `Using fallback SAR exchange rate for VCC amount ${vccConversion.sourceCurrency}; configure OTA_${vccConversion.sourceCurrency}_TO_SAR_RATE or EXCHANGE_RATE for exact production accounting.`;
+			if (!next.warnings.includes(warning)) next.warnings.push(warning);
+		}
+		if (
+			vccConversion.sourceCurrency !== "SAR" &&
+			vccConversion.exchangeRateSource === "missing"
+		) {
+			const error = `Missing SAR exchange rate for VCC amount ${vccConversion.sourceCurrency}.`;
+			if (!next.errors.includes(error)) next.errors.push(error);
+		}
 	}
 
 	return next;
@@ -2242,37 +2895,18 @@ async function reconcileOtaReservation(inputNormalized) {
 			reservationId: String(existing._id),
 			statusToApply,
 		});
-		const set = {
-			reservation_status: statusToApply,
-			"customer_details.confirmation_number2": confirmationNumber,
-			"supplierData.suppliedBookingNo": confirmationNumber,
-			"supplierData.otaConfirmationNumber": confirmationNumber,
-			"supplierData.platformConfirmationNumber": confirmationNumber,
-			"supplierData.otaLastInboundEmailId": normalized.inboundEmailId || "",
-			"supplierData.otaLastEmailAt": new Date(),
-			"supplierData.otaLastEventType": normalized.eventType,
-		};
-		if (["cancelled", "no_show"].includes(statusToApply)) {
-			set.cancel_reason = `${normalized.providerLabel || "OTA"} status email`;
-		}
-		applyVccSafeFields(set, normalized);
-		await Reservations.updateOne(
-			{ _id: existing._id },
-			{
-				$set: set,
-				$push: {
-					reservationAuditLog: buildAuditEntry(
-						normalized,
-						`${statusToApply}-from-email`,
-						warnings
-					),
-				},
-			}
-		);
+		const set = await applyExistingReservationEmailUpdate({
+			normalized,
+			existing,
+			statusToApply,
+			warnings,
+			action: `${statusToApply}-from-email`,
+		});
 		logReconcile("status.update.done", {
 			confirmationNumber,
 			reservationId: String(existing._id),
 			statusToApply,
+			updatedFields: Object.keys(set),
 		});
 		return {
 			status: statusToApply === "cancelled" ? "cancelled" : "status_updated",
@@ -2299,27 +2933,8 @@ async function reconcileOtaReservation(inputNormalized) {
 		};
 	}
 
-	if (!isUpdateIntent && existing) {
-		logReconcile("duplicate_reservation", {
-			confirmationNumber,
-			reservationId: String(existing._id),
-		});
-		return {
-			status: "duplicate_reservation",
-			warnings,
-			errors: [
-				...errors,
-				"Existing reservation matched by confirmation number; no new reservation was created.",
-			],
-			reservationId: existing._id,
-			hotelId: existing.hotelId,
-			pmsConfirmationNumber: existing.confirmation_number,
-			matchedReservationBy,
-		};
-	}
-
 	const missing = requiredNewReservationMissing(normalized);
-	if (!isUpdateIntent && missing.length) {
+	if (!existing && !isUpdateIntent && missing.length) {
 		logReconcile("needs_review.missing_required_fields", {
 			confirmationNumber,
 			missing,
@@ -2340,6 +2955,34 @@ async function reconcileOtaReservation(inputNormalized) {
 			confirmationNumber,
 			hotelName: normalized.hotelName || "",
 		});
+		if (existing) {
+			const partialWarnings = [
+				...warnings,
+				"Could not resolve hotel from inbound email; updated existing reservation with available non-room fields only.",
+			];
+			const set = await applyExistingReservationEmailUpdate({
+				normalized,
+				existing,
+				statusToApply,
+				warnings: partialWarnings,
+				action: "updated-existing-partial-from-email",
+			});
+			logReconcile("update.partial.done", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				reason: "hotel_not_resolved",
+				updatedFields: Object.keys(set),
+			});
+			return {
+				status: "updated",
+				warnings: partialWarnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 		return {
 			status: "needs_mapping",
 			warnings,
@@ -2369,6 +3012,35 @@ async function reconcileOtaReservation(inputNormalized) {
 			roomName: normalized.roomName || "",
 			error: built.error,
 		});
+		if (existing) {
+			const partialWarnings = [
+				...warnings,
+				`${built.error} Existing reservation was updated with available non-room fields only.`,
+			];
+			const set = await applyExistingReservationEmailUpdate({
+				normalized,
+				existing,
+				statusToApply,
+				warnings: partialWarnings,
+				action: "updated-existing-partial-from-email",
+			});
+			logReconcile("update.partial.done", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				hotelId: String(hotelDetails._id),
+				reason: "room_or_pricing_not_resolved",
+				updatedFields: Object.keys(set),
+			});
+			return {
+				status: "updated",
+				warnings: partialWarnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: hotelDetails._id,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 		return {
 			status: "needs_mapping",
 			warnings,
@@ -2389,6 +3061,35 @@ async function reconcileOtaReservation(inputNormalized) {
 			hotelId: String(hotelDetails._id),
 			error: error.message,
 		});
+		if (existing) {
+			const partialWarnings = [
+				...warnings,
+				`${error.message || "Could not calculate reservation pricing."} Existing reservation was updated with available non-pricing fields only.`,
+			];
+			const set = await applyExistingReservationEmailUpdate({
+				normalized,
+				existing,
+				statusToApply,
+				warnings: partialWarnings,
+				action: "updated-existing-partial-from-email",
+			});
+			logReconcile("update.partial.done", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				hotelId: String(hotelDetails._id),
+				reason: "pricing_error",
+				updatedFields: Object.keys(set),
+			});
+			return {
+				status: "updated",
+				warnings: partialWarnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: hotelDetails._id,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 		return {
 			status: "needs_mapping",
 			warnings,
@@ -2405,25 +3106,19 @@ async function reconcileOtaReservation(inputNormalized) {
 			payment: document.payment,
 			financeStatus: document.financeStatus,
 		});
-		const set = compactUpdate(document);
-		applyVccSafeFields(set, normalized);
-		await Reservations.updateOne(
-			{ _id: existing._id },
-			{
-				$set: set,
-				$push: {
-					reservationAuditLog: buildAuditEntry(
-						normalized,
-						"updated-from-email",
-						warnings
-					),
-				},
-			}
-		);
+		const set = await applyExistingReservationEmailUpdate({
+			normalized,
+			existing,
+			statusToApply,
+			warnings,
+			action: "updated-from-email",
+			document,
+		});
 		logReconcile("update.done", {
 			confirmationNumber,
 			reservationId: String(existing._id),
 			hotelId: String(hotelDetails._id),
+			updatedFields: Object.keys(set),
 		});
 		return {
 			status: "updated",

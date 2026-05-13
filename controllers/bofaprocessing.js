@@ -23,6 +23,7 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const Rooms = require("../models/rooms");
 const User = require("../models/user");
+const { getSarConversionMeta } = require("../services/otaReservationMapper");
 
 /* =========================================================
  * Constants
@@ -364,6 +365,7 @@ const defaultBofaPayment = () => ({
 		failed_attempts_count: 0,
 		blocked_after_failure: false,
 		total_captured_usd: 0,
+		total_captured_sar: 0,
 		last_attempt_at: null,
 		last_success_at: null,
 		last_failure_at: null,
@@ -1443,6 +1445,8 @@ exports.captureReservationVccSale = async (req, res) => {
 				issue: "BOFA_VCC_INVALID_AMOUNT",
 				message: "Please provide a valid amount in USD.",
 			});
+		const amountConversion = getSarConversionMeta(amountUsd, "USD");
+		const amountSar = toNum2(amountConversion.totalAmountSar);
 
 		// Normalize card input
 		const rawCard = req.body?.card || {};
@@ -1460,6 +1464,7 @@ exports.captureReservationVccSale = async (req, res) => {
 		bofaLog("card payload normalized", {
 			reservationId,
 			amountUsd,
+			amountSar,
 			cardLast4: cardNumber ? cardNumber.slice(-4) : "",
 			cardLength: cardNumber.length,
 			cvvLength: cardCVV.length,
@@ -1493,6 +1498,11 @@ exports.captureReservationVccSale = async (req, res) => {
 				issue: "BOFA_VCC_RESERVATION_NOT_FOUND",
 				message: "Reservation not found.",
 			});
+		const sourceVccMetadata =
+			snapshot?.vcc_payment?.metadata &&
+			typeof snapshot.vcc_payment.metadata === "object"
+				? snapshot.vcc_payment.metadata
+				: {};
 
 		const provider = resolveProvider(snapshot?.booking_source);
 		const status = vccStatusPayload(snapshot, provider);
@@ -1768,6 +1778,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			url: `https://${cfg.host}${PTS_PAYMENTS_PATH}`,
 			refCode,
 			amountUsd: toCCY(amountUsd),
+			amountSar: toCCY(amountSar),
 			cardLast4: cardNumber.slice(-4),
 			expiry: expiry.display,
 			cardTypeCode,
@@ -1879,6 +1890,7 @@ exports.captureReservationVccSale = async (req, res) => {
 
 		// metadata for audit/debug (no PAN)
 		v.metadata = {
+			...sourceVccMetadata,
 			provider,
 			bookingSource: snapshot?.booking_source || "",
 			guestName:
@@ -1905,6 +1917,12 @@ exports.captureReservationVccSale = async (req, res) => {
 			cardholderName: cardholder.full,
 			postalCode: billTo.postalCode,
 			countryCode: billTo.country,
+			chargeAmountUsd: amountUsd,
+			chargeAmountSar: amountSar,
+			chargeCurrency: "USD",
+			chargeExchangeRateToSar: amountConversion.exchangeRateToSar,
+			chargeExchangeRateSource: amountConversion.exchangeRateSource,
+			chargeAmountConvertedAt: amountConversion.convertedAt,
 			restHost: cfg.host,
 			restPlatform: cfg.platform,
 			restEnv: cfg.env,
@@ -1928,6 +1946,9 @@ exports.captureReservationVccSale = async (req, res) => {
 			v.total_captured_usd = toNum2(
 				Number(v.total_captured_usd || 0) + amountUsd,
 			);
+			v.total_captured_sar = toNum2(
+				Number(v.total_captured_sar || 0) + amountSar,
+			);
 
 			v.last_success_at = now;
 			v.last_failure_at = null;
@@ -1945,6 +1966,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			v.last_capture = {
 				...capture,
 				amount_usd: amountUsd,
+				amount_sar: amountSar,
 				card_last4: cardLast4,
 				card_expiry: expiry.display,
 				cardholder_name: cardholder.full,
@@ -1963,6 +1985,7 @@ exports.captureReservationVccSale = async (req, res) => {
 				reconciliation_id: capture.reconciliationId,
 				request_id: requestId,
 				amount_usd: amountUsd,
+				amount_sar: amountSar,
 				card_last4: cardLast4,
 				card_expiry: expiry.display,
 				processor_response_code: processorCode,
@@ -1990,6 +2013,7 @@ exports.captureReservationVccSale = async (req, res) => {
 				lastChargeAt: now,
 				lastChargeVia: "VCC_BOFA_REST",
 				triggeredAmountUSD: amountUsd,
+				triggeredAmountSAR: amountSar,
 			};
 
 			await reservation.save();
@@ -2003,6 +2027,7 @@ exports.captureReservationVccSale = async (req, res) => {
 				httpStatus,
 				txnStatus,
 				amountUsd,
+				amountSar,
 				cardLast4,
 			});
 
@@ -2078,6 +2103,7 @@ exports.captureReservationVccSale = async (req, res) => {
 		v.last_capture = {
 			...capture,
 			amount_usd: amountUsd,
+			amount_sar: amountSar,
 			card_last4: cardLast4,
 			card_expiry: expiry.display,
 			cardholder_name: cardholder.full,
@@ -2094,6 +2120,7 @@ exports.captureReservationVccSale = async (req, res) => {
 			error_code: failureCode,
 			request_id: requestId,
 			amount_usd: amountUsd,
+			amount_sar: amountSar,
 			card_last4: cardLast4,
 			card_expiry: expiry.display,
 			processor_response_code: processorCode,
@@ -2152,6 +2179,8 @@ exports.captureReservationVccSale = async (req, res) => {
 			txnStatus,
 			failureCode,
 			failureMessage,
+			amountUsd,
+			amountSar,
 			transactionId: capture.id || "",
 			reconciliationId: capture.reconciliationId || "",
 		});

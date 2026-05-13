@@ -261,6 +261,7 @@ const reservationsSchema = new mongoose.Schema(
 					failed_attempts_count: 0,
 					blocked_after_failure: false,
 					total_captured_usd: 0,
+					total_captured_sar: 0,
 					last_attempt_at: null,
 					last_success_at: null,
 					last_failure_at: null,

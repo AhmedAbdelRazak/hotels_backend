@@ -279,6 +279,7 @@ const buildEmailContext = (email = {}) => {
 const applyEmailContextToHeuristic = (heuristic = {}, emailContext = {}, emailText = "") => {
 	const merged = {
 		...heuristic,
+		sourcePresence: { ...(heuristic.sourcePresence || {}) },
 		warnings: [...(heuristic.warnings || [])],
 		errors: [...(heuristic.errors || [])],
 	};
@@ -509,8 +510,12 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	const decision = aiResult?.decision || {};
 	const merged = {
 		...heuristic,
+		sourcePresence: { ...(heuristic.sourcePresence || {}) },
 		warnings: [...(heuristic.warnings || [])],
 		errors: [...(heuristic.errors || [])],
+	};
+	const markPresent = (field) => {
+		merged.sourcePresence[field] = true;
 	};
 
 	const aiIntent = normalizeIntent(decision.intent);
@@ -557,6 +562,8 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	) {
 		merged.confirmationNumber = confirmationNumber;
 		merged.reservationId = confirmationNumber;
+		markPresent("confirmationNumber");
+		markPresent("reservationId");
 	}
 
 	const fillString = (targetKey, aiKey = targetKey, requireAppears = false) => {
@@ -565,6 +572,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 		if (!value) return;
 		if (requireAppears && !fieldAppearsInText(value, emailText)) return;
 		merged[targetKey] = value;
+		markPresent(targetKey);
 	};
 
 	fillString("guestName", "guestName");
@@ -582,21 +590,34 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	const checkinDate = parseDate(decision.checkinDate);
 	const checkoutDate = parseDate(decision.checkoutDate);
 	const bookedAt = parseDate(decision.bookedAt);
-	if (!merged.checkinDate && checkinDate) merged.checkinDate = checkinDate;
-	if (!merged.checkoutDate && checkoutDate) merged.checkoutDate = checkoutDate;
-	if (!merged.bookedAt && bookedAt) merged.bookedAt = bookedAt;
+	if (!merged.checkinDate && checkinDate) {
+		merged.checkinDate = checkinDate;
+		markPresent("checkinDate");
+	}
+	if (!merged.checkoutDate && checkoutDate) {
+		merged.checkoutDate = checkoutDate;
+		markPresent("checkoutDate");
+	}
+	if (!merged.bookedAt && bookedAt) {
+		merged.bookedAt = bookedAt;
+		markPresent("bookedAt");
+	}
 
 	if (!merged.totalGuests && numberOrZero(decision.totalGuests)) {
 		merged.totalGuests = numberOrZero(decision.totalGuests);
+		markPresent("totalGuests");
 	}
 	if (!merged.adults && numberOrZero(decision.adults)) {
 		merged.adults = numberOrZero(decision.adults);
+		markPresent("adults");
 	}
 	if (!merged.children && numberOrZero(decision.children)) {
 		merged.children = numberOrZero(decision.children);
+		markPresent("children");
 	}
 	if (!merged.roomCount && numberOrZero(decision.roomCount)) {
 		merged.roomCount = numberOrZero(decision.roomCount);
+		markPresent("roomCount");
 	}
 
 	if (!merged.amount && numberOrZero(decision.totalAmount)) {
@@ -607,6 +628,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 		merged.exchangeRateToSar = conversion.exchangeRateToSar;
 		merged.exchangeRateSource = conversion.exchangeRateSource;
 		merged.amountConvertedAt = conversion.convertedAt;
+		markPresent("amount");
 	} else if (!merged.amount && pickAiString(decision, "totalAmount")) {
 		const parsedMoney = parseMoney(pickAiString(decision, "totalAmount"));
 		if (parsedMoney.amount) {
@@ -617,6 +639,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 			merged.exchangeRateToSar = conversion.exchangeRateToSar;
 			merged.exchangeRateSource = conversion.exchangeRateSource;
 			merged.amountConvertedAt = conversion.convertedAt;
+			markPresent("amount");
 		}
 	}
 

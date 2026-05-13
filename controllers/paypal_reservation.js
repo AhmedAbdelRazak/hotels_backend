@@ -677,6 +677,11 @@ function buildVccMetadataSnapshot({ reservation, provider, roomNumbers }) {
 	const cancelledOrNoShow = isCancelledOrNoShowForVcc(status);
 	const hotelName =
 		reservation?.hotelName || reservation?.hotelId?.hotelName || "Hotel";
+	const existingVccMeta =
+		reservation?.vcc_payment?.metadata &&
+		typeof reservation.vcc_payment.metadata === "object"
+			? reservation.vcc_payment.metadata
+			: {};
 	const guestName = reservation?.customer_details?.name || "";
 	const confirmationNumber = reservation?.confirmation_number || "";
 	const confirmationNumber2 =
@@ -691,6 +696,7 @@ function buildVccMetadataSnapshot({ reservation, provider, roomNumbers }) {
 			: "";
 
 	return {
+		...existingVccMeta,
 		provider,
 		bookingSource: reservation?.booking_source || "",
 		guestName,
