@@ -5,6 +5,10 @@ const Rooms = require("../models/rooms");
 const mongoose = require("mongoose");
 const moment = require("moment-timezone");
 const ObjectId = mongoose.Types.ObjectId;
+const {
+	isPendingConfirmationReservation,
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -1414,6 +1418,7 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		const statusNotExcluded = { reservation_status: activeStatusFilter };
+		const inventoryPendingExclusion = buildPendingConfirmationExclusionFilter();
 		const statusNotCheckout = { reservation_status: { $not: checkoutRegex } };
 
 		// Helper to merge baseFilter + condition
@@ -1788,6 +1793,9 @@ exports.adminDashboardReport = async (req, res) => {
 
 		const isExcludedStatus = (status) =>
 			excludedStatusRegex.test(String(status || ""));
+		const isInventoryExcludedReservation = (reservation) =>
+			isExcludedStatus(reservation?.reservation_status) ||
+			isPendingConfirmationReservation(reservation);
 		const isCheckoutStatus = (status) =>
 			checkoutRegex.test(String(status || ""));
 
@@ -1795,10 +1803,11 @@ exports.adminDashboardReport = async (req, res) => {
 		const relevantFor10Days = await safeFind({
 			cond: {
 				...statusNotExcluded,
+				...inventoryPendingExclusion,
 				checkin_date: { $lte: endOf10Days },
 				checkout_date: { $gt: startOfToday },
 			},
-			select: "checkin_date checkout_date pickedRoomsType reservation_status bedNumber",
+			select: "checkin_date checkout_date pickedRoomsType reservation_status state pendingConfirmation agentDecisionSnapshot bedNumber",
 		});
 
 		const usageArray10 = new Array(forecastDays).fill(0);
@@ -1812,7 +1821,7 @@ exports.adminDashboardReport = async (req, res) => {
 			const cIn = doc.checkin_date;
 			const cOut = doc.checkout_date;
 
-			if (isExcludedStatus(doc.reservation_status)) continue;
+			if (isInventoryExcludedReservation(doc)) continue;
 			if (isCheckoutStatus(doc.reservation_status)) continue;
 
 			for (const rtObj of doc.pickedRoomsType) {
@@ -1983,10 +1992,11 @@ exports.adminDashboardReport = async (req, res) => {
 		const relevantForNext7 = await safeFind({
 			cond: {
 				...statusNotExcluded,
+				...inventoryPendingExclusion,
 				checkin_date: { $lte: rangeEnd },
 				checkout_date: { $gt: startOfToday },
 			},
-			select: "checkin_date checkout_date pickedRoomsType reservation_status bedNumber",
+			select: "checkin_date checkout_date pickedRoomsType reservation_status state pendingConfirmation agentDecisionSnapshot bedNumber",
 		});
 
 		const usageByDay7 = {};
@@ -2003,7 +2013,7 @@ exports.adminDashboardReport = async (req, res) => {
 			const cIn = doc?.checkin_date;
 			const cOut = doc?.checkout_date;
 
-			if (isExcludedStatus(doc.reservation_status)) continue;
+			if (isInventoryExcludedReservation(doc)) continue;
 			if (isCheckoutStatus(doc.reservation_status)) continue;
 
 			for (const rtObj of doc.pickedRoomsType) {
@@ -3185,6 +3195,7 @@ function buildReservationBaseQuery({
 		hotelId: new ObjectId(hotelId),
 		checkin_date: { $lt: endExclusive },
 		checkout_date: { $gt: start },
+		...buildPendingConfirmationExclusionFilter(),
 	};
 
 	const inc = String(includeCancelled || "").toLowerCase() === "true";
@@ -3212,6 +3223,7 @@ function buildDayBaseQuery({
 		hotelId: new ObjectId(hotelId),
 		checkin_date: { $lt: dayEnd },
 		checkout_date: { $gt: dayStart },
+		...buildPendingConfirmationExclusionFilter(),
 	};
 
 	const inc = String(includeCancelled || "").toLowerCase() === "true";
@@ -3552,7 +3564,7 @@ async function computeOccupancy({
 
 	const reservations = await Reservations.find(baseQuery)
 		.select(
-			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown booking_source"
+			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status state pendingConfirmation agentDecisionSnapshot total_amount payment payment_details paypal_details paid_amount_breakdown booking_source"
 		)
 		.lean();
 
@@ -3572,6 +3584,7 @@ async function computeOccupancy({
 			!Array.isArray(reservation.pickedRoomsType)
 		)
 			continue;
+		if (isPendingConfirmationReservation(reservation)) continue;
 
 		const pay = paymentMeta(reservation);
 		if (

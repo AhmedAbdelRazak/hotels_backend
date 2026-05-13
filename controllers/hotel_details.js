@@ -6,6 +6,9 @@ const User = require("../models/user");
 const Reservations = require("../models/reservations");
 const Rooms = require("../models/rooms");
 const UncompleteReservations = require("../models/Uncompleted");
+const {
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 const isConfiguredSuperAdmin = (user) => {
 	const configuredIds = [
@@ -634,6 +637,7 @@ exports.hotelGeneralStats = async (req, res) => {
 			checkin_date: { $lte: endOfDay },
 			checkout_date: { $gte: startOfDay },
 			reservation_status: { $not: DONE_RESERVATION_STATUS },
+			...buildPendingConfirmationExclusionFilter(),
 		})
 			.select("roomId reservation_status")
 			.lean()
@@ -757,6 +761,7 @@ exports.managerExecutiveSummary = async (req, res) => {
 					checkin_date: { $lte: endOfDay },
 					checkout_date: { $gte: startOfDay },
 					reservation_status: { $not: DONE_RESERVATION_STATUS },
+					...buildPendingConfirmationExclusionFilter(),
 				})
 					.select("hotelId roomId reservation_status")
 					.lean()

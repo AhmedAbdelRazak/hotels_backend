@@ -8,6 +8,9 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const Rooms = require("../models/rooms");
 const User = require("../models/user");
+const {
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -367,6 +370,7 @@ const getExistingReservedCount = async ({ hotelId, checkinDate, checkoutDate, ro
 	const reservations = await Reservations.find({
 		hotelId: ObjectId(hotelId),
 		reservation_status: { $not: CLOSED_STATUS_REGEX },
+		...buildPendingConfirmationExclusionFilter(),
 		checkin_date: { $lt: new Date(checkoutDate) },
 		checkout_date: { $gt: new Date(checkinDate) },
 	})

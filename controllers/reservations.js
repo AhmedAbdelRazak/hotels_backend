@@ -26,6 +26,11 @@ const {
 	normalizeReservationCreationPricing,
 	normalizeReservationStayPricing,
 } = require("../services/reservationPricing");
+const {
+	isPendingConfirmationReservation,
+	shouldCountReservationForInventory,
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -910,12 +915,7 @@ const reservationCoversStayDate = (reservation = {}, dateKey = "") => {
 };
 
 const reservationBlocksInventory = (reservation = {}) => {
-	const status = String(reservation.reservation_status || reservation.state || "")
-		.toLowerCase()
-		.trim();
-	return !/(cancel|reject|void|no[_\s-]?show|checked[_\s-]?out|checkedout)/i.test(
-		status
-	);
+	return shouldCountReservationForInventory(reservation);
 };
 
 const validateReservationInventoryForCreate = async (
@@ -947,7 +947,7 @@ const validateReservationInventoryForCreate = async (
 		checkin_date: { $lt: new Date(`${stayDates[stayDates.length - 1]}T23:59:59.999Z`) },
 		checkout_date: { $gt: new Date(`${stayDates[0]}T00:00:00.000Z`) },
 	})
-		.select("_id checkin_date checkout_date reservation_status state pickedRoomsType pickedRoomsPricing")
+		.select("_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing")
 		.lean()
 		.exec();
 
@@ -3348,6 +3348,7 @@ exports.reservationsList = (req, res) => {
 		],
 		roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 		reservation_status: { $not: /checked[- _]?out/i }, // Filter checked out variants
+		...buildPendingConfirmationExclusionFilter(),
 	};
 
 	Reservations.find(queryConditions)
@@ -3407,6 +3408,7 @@ exports.reservationsOccupancyRange = async (req, res) => {
 			],
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
+			...buildPendingConfirmationExclusionFilter(),
 		};
 
 		const reservations = await Reservations.find(queryConditions)
@@ -3441,6 +3443,7 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 			belongsTo: ObjectId(belongsTo),
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
+			...buildPendingConfirmationExclusionFilter(),
 			$or: [
 				{
 					checkin_date: { $lte: endOfDay },
@@ -3482,6 +3485,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			belongsTo: ObjectId(belongsTo),
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
+			...buildPendingConfirmationExclusionFilter(),
 			$or: [
 				{
 					checkin_date: { $lte: endOfDay },
@@ -3537,6 +3541,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 		};
 
 		const isReservationActive = (reservation) => {
+			if (isPendingConfirmationReservation(reservation)) return false;
 			const status = String(reservation?.reservation_status || "");
 			if (!status) return true;
 			return !CHECKED_OUT_REGEX.test(status);

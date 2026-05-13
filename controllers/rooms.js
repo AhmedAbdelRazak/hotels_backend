@@ -4,6 +4,9 @@ const fetch = require("node-fetch");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const moment = require("moment");
+const {
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 const HOUSED_EXCLUDED_STATUS =
 	/cancelled|canceled|no[_\s-]?show|checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
@@ -29,6 +32,7 @@ const getCurrentlyHousedRoomIds = async (hotelId) => {
 		checkin_date: { $lte: endOfDay },
 		checkout_date: { $gte: startOfDay },
 		reservation_status: { $not: HOUSED_EXCLUDED_STATUS },
+		...buildPendingConfirmationExclusionFilter(),
 		roomId: { $exists: true, $ne: [] },
 	})
 		.select("roomId")
@@ -227,6 +231,7 @@ exports.remove = async (req, res) => {
 		const blockingReservation = await Reservations.findOne({
 			roomId: room._id,
 			reservation_status: { $not: HOUSED_EXCLUDED_STATUS },
+			...buildPendingConfirmationExclusionFilter(),
 		})
 			.select("_id confirmation_number reservation_status")
 			.lean()
@@ -460,6 +465,7 @@ exports.reservedRoomsSummary = async (req, res) => {
 					belongsTo: belongsToId,
 					hotelId: accound_id,
 					$or: [{ roomId: { $eq: [] } }, { roomId: { $eq: [null] } }],
+					...buildPendingConfirmationExclusionFilter(),
 					checkin_date: { $gte: new Date(startdate) },
 					checkout_date: { $lte: new Date(enddate) },
 				},
@@ -494,6 +500,7 @@ exports.reservedRoomsSummary = async (req, res) => {
 					belongsTo: belongsToId,
 					hotelId: accound_id,
 					roomId: { $not: { $size: 0 } },
+					...buildPendingConfirmationExclusionFilter(),
 					checkin_date: { $gte: new Date(startdate) },
 					checkout_date: { $lte: new Date(enddate) },
 				},
@@ -637,6 +644,7 @@ async function calculateDailyInventory(
 				belongsTo: belongsToId,
 				hotelId: accountId,
 				reservation_status: { $nin: ["cancelled", "no_show"] }, // Exclude both cancelled and no_show statuses
+				...buildPendingConfirmationExclusionFilter(),
 				checkin_date: { $lte: date },
 				checkout_date: { $gt: date },
 			});

@@ -3,6 +3,9 @@ const moment = require("moment");
 const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
 const Rooms = require("../models/rooms");
+const {
+	isPendingConfirmationReservation,
+} = require("../services/reservationStatus");
 
 const normalizeKey = (value) =>
 	String(value || "")
@@ -71,6 +74,7 @@ const getDateRange = (startStr, endStr) => {
 };
 
 const isReservationActive = (reservation, includeCancelled) => {
+	if (isPendingConfirmationReservation(reservation)) return false;
 	if (includeCancelled) return true;
 	const status = String(reservation?.reservation_status || "").toLowerCase();
 	if (!status) return true;

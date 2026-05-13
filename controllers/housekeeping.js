@@ -6,6 +6,9 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const HousekeepingSupply = require("../models/housekeeping_supply");
 const HousekeepingSupplyRequest = require("../models/housekeeping_supply_request");
+const {
+	buildPendingConfirmationExclusionFilter,
+} = require("../services/reservationStatus");
 
 const isFinishedStatus = (status = "") =>
 	["finished", "done", "completed", "clean"].includes(
@@ -255,6 +258,7 @@ const getCurrentlyHousedRoomIds = async (hotelId) => {
 		checkin_date: { $lte: end },
 		checkout_date: { $gte: start },
 		reservation_status: { $not: HOUSED_EXCLUDED_STATUS },
+		...buildPendingConfirmationExclusionFilter(),
 		roomId: { $exists: true, $ne: [] },
 	})
 		.select("roomId")
