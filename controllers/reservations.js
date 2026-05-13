@@ -39,6 +39,7 @@ const CANCELLED_REGEX = /cancelled|canceled/i;
 const NO_SHOW_REGEX = /no[_\s-]?show/i;
 const CHECKED_OUT_REGEX =
 	/checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
+const EARLY_CLOSED_REGEX = /cancelled|canceled|no[_\s-]?show/i;
 const IN_HOUSE_REGEX = /house/i;
 const HOUSEKEEPING_FINISHED_REGEX = /finished|done|completed|clean/i;
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
@@ -153,6 +154,12 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 	const hotelCollectedAmount = n2(
 		sumBreakdownKeys(breakdown, PAYMENT_BREAKDOWN_HOTEL_KEYS)
 	);
+	const walletSnapshot =
+		updates.agentWalletSnapshot ||
+		reservation?.agentWalletSnapshot ||
+		{};
+	const walletCoversReservation =
+		walletSnapshot?.captured === true && walletSnapshot?.walletRequired !== false;
 	const totalAmount = Number(updates.total_amount ?? reservation?.total_amount ?? 0);
 	const storedReservationCommission = Number(reservation?.commission || 0);
 	const storedCycleCommission = Number(existingCycle.commissionAmount || 0);
@@ -201,6 +208,8 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		collectionModel = "pms_collected";
 	} else if (hotelCollectedAmount > 0 || String(reservation?.payment || "").toLowerCase().includes("offline")) {
 		collectionModel = "hotel_collected";
+	} else if (walletCoversReservation) {
+		collectionModel = "agent_wallet";
 	}
 
 	const hotelPayoutDue =
@@ -223,7 +232,9 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 			? commissionSideClosed
 		: collectionModel === "mixed"
 			? !!moneyTransferredToHotel && commissionSideClosed
-			: false;
+		: collectionModel === "agent_wallet"
+			? commissionSideClosed
+		: false;
 	const now = new Date();
 
 	return {
@@ -622,10 +633,11 @@ const isOrderTakerEditableReservation = (reservation = {}) => {
 		.trim()
 		.toLowerCase();
 
-	if (["confirmed", "rejected"].includes(agentDecisionStatus)) return false;
-	if (["confirmed", "rejected"].includes(pendingStatus)) return false;
+	const financeRejected = FINANCE_REJECTED_REGEX.test(status);
+	if (!financeRejected && agentDecisionStatus === "confirmed") return false;
+	if (!financeRejected && pendingStatus === "confirmed") return false;
 	if (
-		/(confirmed|inhouse|checked[_\s-]?in|checked[_\s-]?out|cancel|reject|no[_\s-]?show|relocated)/i.test(
+		/(confirmed|pending[\s_-]?finance[\s_-]?review|pending[\s_-]?agent[\s_-]?commission[\s_-]?approval|inhouse|checked[_\s-]?in|checked[_\s-]?out|cancel|no[_\s-]?show|relocated)/i.test(
 			status
 		)
 	) {
@@ -635,6 +647,9 @@ const isOrderTakerEditableReservation = (reservation = {}) => {
 	return (
 		PENDING_CONFIRMATION_REGEX.test(status) ||
 		pendingStatus === "pending" ||
+		pendingStatus === "rejected" ||
+		agentDecisionStatus === "rejected" ||
+		financeRejected ||
 		!status
 	);
 };
@@ -1041,6 +1056,17 @@ const getReservationPricingErrorArabic = (error = {}) => {
 };
 
 const PENDING_CONFIRMATION_REGEX = /pending[\s_-]?confirmation/i;
+const PENDING_FINANCE_REVIEW_REGEX = /pending[\s_-]?finance[\s_-]?review/i;
+const PENDING_AGENT_COMMISSION_APPROVAL_REGEX =
+	/pending[\s_-]?agent[\s_-]?commission[\s_-]?approval/i;
+const FINANCE_REJECTED_REGEX = /finance[\s_-]?rejected/i;
+const STATUS_PENDING_CONFIRMATION = "Pending Confirmation";
+const STATUS_PENDING_FINANCE_REVIEW = "Pending Finance Review";
+const STATUS_PENDING_AGENT_COMMISSION_APPROVAL =
+	"Pending Agent Commission Approval";
+const STATUS_FINANCE_REJECTED = "Finance Rejected";
+const STATUS_CONFIRMED = "Confirmed";
+const STATUS_CANCELLED = "cancelled";
 
 const buildNewReservationProcessFilter = () => ({
 	$or: [
@@ -1069,6 +1095,65 @@ const hasAssignedCommission = (reservation = {}) => {
 		reservation?.financial_cycle?.commissionAssigned === true ||
 		ASSIGNED_COMMISSION_STATUSES.has(commissionStatus)
 	);
+};
+
+const plainReservationObject = (reservation = {}) =>
+	reservation && typeof reservation.toObject === "function"
+		? reservation.toObject()
+		: reservation || {};
+
+const mergeReservationWithUpdates = (reservation = {}, updates = {}) => {
+	const plain = plainReservationObject(reservation);
+	return {
+		...plain,
+		...updates,
+		financial_cycle: {
+			...(plain.financial_cycle || {}),
+			...(updates.financial_cycle || {}),
+		},
+		commissionAgentApproval:
+			updates.commissionAgentApproval ||
+			plain.commissionAgentApproval ||
+			commissionAgentApprovalDefault(),
+	};
+};
+
+const getReservationLifecycleStatusAfterFinance = (
+	reservation = {},
+	updates = {}
+) => {
+	const merged = mergeReservationWithUpdates(reservation, updates);
+	const statusText = String(merged.reservation_status || merged.state || "");
+	const pendingStatus = String(merged?.pendingConfirmation?.status || "")
+		.trim()
+		.toLowerCase();
+	const totalReviewStatus = String(
+		merged?.financial_cycle?.totalReviewStatus || ""
+	)
+		.trim()
+		.toLowerCase();
+	const commissionApproval = merged.commissionAgentApproval || {};
+	const commissionApprovalStatus = String(commissionApproval.status || "")
+		.trim()
+		.toLowerCase();
+
+	if (
+		EARLY_CLOSED_REGEX.test(statusText) ||
+		CHECKED_OUT_REGEX.test(statusText) ||
+		IN_HOUSE_REGEX.test(statusText)
+	) {
+		return null;
+	}
+	if (pendingStatus !== "confirmed") return null;
+	if (totalReviewStatus === "rejected") return STATUS_FINANCE_REJECTED;
+	if (totalReviewStatus !== "approved") return STATUS_PENDING_FINANCE_REVIEW;
+	if (!hasAssignedCommission(merged)) return STATUS_PENDING_FINANCE_REVIEW;
+	if (commissionApproval.required === true) {
+		return commissionApprovalStatus === "approved"
+			? STATUS_CONFIRMED
+			: STATUS_PENDING_AGENT_COMMISSION_APPROVAL;
+	}
+	return STATUS_CONFIRMED;
 };
 
 const buildCommissionMissingFilter = () => ({
@@ -1127,18 +1212,48 @@ const buildPendingStatusFilter = () => ({
 	],
 });
 
+const buildPendingFinanceReviewFilter = () => ({
+	$or: [
+		{ reservation_status: PENDING_FINANCE_REVIEW_REGEX },
+		{ state: PENDING_FINANCE_REVIEW_REGEX },
+		{ reservation_status: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+		{ state: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+		{ reservation_status: FINANCE_REJECTED_REGEX },
+		{ state: FINANCE_REJECTED_REGEX },
+		{ "financial_cycle.totalReviewStatus": "rejected" },
+		{ "commissionAgentApproval.status": { $in: ["pending", "rejected"] } },
+	],
+});
+
+const buildFinanceWorkflowReadyFilter = () => ({
+	$or: [
+		{ "pendingConfirmation.status": "confirmed" },
+		{ reservation_status: PENDING_FINANCE_REVIEW_REGEX },
+		{ state: PENDING_FINANCE_REVIEW_REGEX },
+		{ reservation_status: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+		{ state: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+		{ reservation_status: FINANCE_REJECTED_REGEX },
+		{ state: FINANCE_REJECTED_REGEX },
+	],
+});
+
 const buildPendingConfirmationFilter = (hotelId, scope = "all") => {
 	const reasonFilters =
 		scope === "commission"
-			? [buildCommissionMissingFilter()]
+			? [buildCommissionMissingFilter(), buildPendingFinanceReviewFilter()]
 			: scope === "pending"
 			? [buildPendingStatusFilter()]
-			: [buildPendingStatusFilter(), buildCommissionMissingFilter()];
+			: [
+					buildPendingStatusFilter(),
+					buildCommissionMissingFilter(),
+					buildPendingFinanceReviewFilter(),
+			  ];
 
 	return {
 		hotelId: ObjectId(hotelId),
 		$and: [
 			buildNewReservationProcessFilter(),
+			...(scope === "commission" ? [buildFinanceWorkflowReadyFilter()] : []),
 			{ $or: reasonFilters },
 		],
 	};
@@ -1147,10 +1262,27 @@ const buildPendingConfirmationFilter = (hotelId, scope = "all") => {
 const getPendingConfirmationReasonsForActor = (reservation = {}, actor = {}) => {
 	const reasons = getPendingConfirmationReasons(reservation);
 	if (isFinanceOnlyAccount(actor)) {
-		return reasons.filter((reason) => reason === "commission_missing");
+		return reasons.filter((reason) =>
+			[
+				"commission_missing",
+				"finance_review_pending",
+				"finance_total_rejected",
+				"agent_commission_pending",
+				"agent_commission_rejected",
+			].includes(reason)
+		);
 	}
 	if (isReservationEmployeeOnlyAccount(actor)) {
-		return reasons.filter((reason) => reason !== "commission_missing");
+		return reasons.filter(
+			(reason) =>
+				![
+					"commission_missing",
+					"finance_review_pending",
+					"finance_total_rejected",
+					"agent_commission_pending",
+					"agent_commission_rejected",
+				].includes(reason)
+		);
 	}
 	return reasons;
 };
@@ -1169,12 +1301,42 @@ const getReservationNotificationTypeForActor = (reservation = {}, actor = {}) =>
 
 const getPendingConfirmationReasons = (reservation = {}) => {
 	const reasons = [];
+	const statusText = String(reservation.reservation_status || reservation.state || "");
+	const commissionApprovalStatus = String(
+		reservation?.commissionAgentApproval?.status || ""
+	)
+		.trim()
+		.toLowerCase();
+	const totalReviewStatus = String(
+		reservation?.financial_cycle?.totalReviewStatus || ""
+	)
+		.trim()
+		.toLowerCase();
+
 	if (
 		PENDING_CONFIRMATION_REGEX.test(
-			String(reservation.reservation_status || reservation.state || "")
+			statusText
 		)
 	) {
 		reasons.push("pending_confirmation");
+	}
+	if (PENDING_FINANCE_REVIEW_REGEX.test(statusText)) {
+		reasons.push("finance_review_pending");
+	}
+	if (
+		PENDING_AGENT_COMMISSION_APPROVAL_REGEX.test(statusText) ||
+		commissionApprovalStatus === "pending"
+	) {
+		reasons.push("agent_commission_pending");
+	}
+	if (
+		FINANCE_REJECTED_REGEX.test(statusText) ||
+		totalReviewStatus === "rejected"
+	) {
+		reasons.push("finance_total_rejected");
+	}
+	if (commissionApprovalStatus === "rejected") {
+		reasons.push("agent_commission_rejected");
 	}
 	if (
 		String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
@@ -1349,6 +1511,170 @@ const getPendingNotificationHotelsForActor = async (actor = {}, ownerId = "") =>
 		.select("_id hotelName belongsTo")
 		.lean()
 		.exec();
+};
+
+const canApproveAgentAccountsForOwner = async (actor = {}, ownerId = "") => {
+	const normalizedOwnerId = normalizeId(ownerId);
+	if (!actor || !normalizedOwnerId) return false;
+	if (isConfiguredSuperAdmin(actor) || accountHasRole(actor, 1000)) return true;
+	if (normalizeId(actor._id) === normalizedOwnerId) return true;
+	if (!accountHasDescription(actor, "hotelmanager")) return false;
+
+	const ownerHotels = await HotelDetails.find({ belongsTo: ObjectId(normalizedOwnerId) })
+		.select("_id")
+		.lean()
+		.exec();
+	const ownerHotelIds = ownerHotels.map((hotel) => normalizeId(hotel._id));
+	if (!ownerHotelIds.length) return false;
+	const actorScope = new Set(
+		[
+			actor.hotelIdWork,
+			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
+		]
+			.map(normalizeId)
+			.filter(Boolean)
+	);
+	return ownerHotelIds.every((hotelId) => actorScope.has(hotelId));
+};
+
+const getAgentAccountNotificationFeed = async ({
+	actor,
+	hotels = [],
+	hotelMap = {},
+	limit = 8,
+}) => {
+	const actorId = normalizeId(actor?._id);
+	const hotelIds = hotels
+		.map((hotel) => normalizeId(hotel?._id))
+		.filter((id) => ObjectId.isValid(id));
+	if (!actorId || !hotelIds.length) {
+		return { total: 0, data: [] };
+	}
+
+	const ownerIds = [
+		...new Set(
+			hotels
+				.map((hotel) => normalizeId(hotel?.belongsTo))
+				.filter((id) => id && ObjectId.isValid(id))
+		),
+	];
+	const approvableOwnerIds = [];
+	for (const currentOwnerId of ownerIds) {
+		if (await canApproveAgentAccountsForOwner(actor, currentOwnerId)) {
+			approvableOwnerIds.push(currentOwnerId);
+		}
+	}
+
+	const visibilityClauses = [];
+	if (isFinanceAccount(actor) || isReservationEmployeeAccount(actor)) {
+		visibilityClauses.push({
+			"agentApproval.requestedBy._id": actorId,
+			"agentApproval.status": { $in: ["approved", "rejected"] },
+		});
+	}
+	if (approvableOwnerIds.length) {
+		visibilityClauses.push({
+			belongsToId: { $in: approvableOwnerIds },
+			"agentApproval.status": "pending",
+		});
+	}
+	if (!visibilityClauses.length) {
+		return { total: 0, data: [] };
+	}
+
+	const agentScopeFilter = {
+		$or: [
+			{ hotelIdWork: { $in: hotelIds } },
+			{ hotelsToSupport: { $in: hotelIds.map((id) => ObjectId(id)) } },
+		],
+	};
+	const agentRoleFilter = {
+		$or: [
+			{ role: 7000 },
+			{ roles: 7000 },
+			{ roleDescription: "ordertaker" },
+			{ roleDescriptions: "ordertaker" },
+		],
+	};
+	const query = {
+		$and: [
+			agentScopeFilter,
+			agentRoleFilter,
+			{ $or: visibilityClauses },
+		],
+	};
+
+	const [rows, total] = await Promise.all([
+		User.find(query)
+			.select(
+				"_id name email phone companyName activeUser agentApproval hotelIdWork hotelsToSupport belongsToId createdAt updatedAt"
+			)
+			.sort({ "agentApproval.lastUpdatedAt": -1, updatedAt: -1, createdAt: -1 })
+			.limit(limit)
+			.lean()
+			.exec(),
+		User.countDocuments(query),
+	]);
+
+	return {
+		total,
+		data: rows.map((agent) => {
+			const scopeIds = [
+				normalizeId(agent.hotelIdWork),
+				...(Array.isArray(agent.hotelsToSupport)
+					? agent.hotelsToSupport.map(normalizeId)
+					: []),
+			].filter(Boolean);
+			const currentHotelId =
+				scopeIds.find((id) => hotelIds.includes(id)) || hotelIds[0] || "";
+			const hotel = hotelMap[currentHotelId] || {};
+			const approval = agent.agentApproval || {};
+			const status = String(approval.status || "").toLowerCase();
+			const notificationType =
+				status === "approved"
+					? "agent_account_approved"
+					: status === "rejected"
+					? "agent_account_rejected"
+					: "agent_account_pending";
+			const agentName =
+				agent.name || agent.companyName || agent.email || "External agent";
+			const eventDate =
+				approval.lastUpdatedAt ||
+				approval.approvedAt ||
+				approval.rejectedAt ||
+				approval.requestedAt ||
+				agent.updatedAt ||
+				agent.createdAt;
+			return {
+				_id: `agent-account-${agent._id}`,
+				agentId: agent._id,
+				notificationType,
+				hotelId: currentHotelId,
+				hotelName: hotel.hotelName || "",
+				hotelOwnerId:
+					hotel.hotelOwnerId || normalizeId(agent.belongsToId) || "",
+				agentName,
+				guestName: agentName,
+				agentEmail: agent.email || "",
+				confirmation_number: "Agent account",
+				booking_source: hotel.hotelName || "Hotel",
+				booked_at: eventDate,
+				checkin_date: eventDate,
+				total_amount: 0,
+				pendingReasons:
+					notificationType === "agent_account_approved"
+						? ["agent_account_approved"]
+						: notificationType === "agent_account_rejected"
+						? ["agent_account_rejected"]
+						: ["agent_account_pending_approval"],
+				decisionStatus: status,
+				decisionReason: approval.rejectionReason || "",
+				requestedBy: approval.requestedBy || null,
+				approvedBy: approval.approvedBy || null,
+			};
+		}),
+	};
 };
 
 const accountLooksLikeAgent = (account = {}) => {
@@ -4061,8 +4387,96 @@ exports.updateReservation = async (req, res) => {
 				code: "agent_confirmed_reservation_locked",
 			});
 		}
+		const requestedAgentStatus = String(
+			normalizedUpdateData.reservation_status ||
+				normalizedUpdateData.state ||
+				""
+		)
+			.trim()
+			.toLowerCase();
+		const orderTakerRequestedCancel =
+			orderTakerBasicEditOnly && /cancel/.test(requestedAgentStatus);
 		if (orderTakerBasicEditOnly) {
 			normalizedUpdateData = sanitizeOrderTakerUpdate(normalizedUpdateData);
+			const existingPending =
+				existingReservation.pendingConfirmation &&
+				typeof existingReservation.pendingConfirmation.toObject === "function"
+					? existingReservation.pendingConfirmation.toObject()
+					: existingReservation.pendingConfirmation || {};
+			const now = new Date();
+			if (orderTakerRequestedCancel) {
+				const cancellationReason = String(
+					updateData.cancel_reason ||
+						updateData.cancelReason ||
+						updateData.reason ||
+						"Agent cancelled the reservation."
+				).trim();
+				normalizedUpdateData.reservation_status = STATUS_CANCELLED;
+				normalizedUpdateData.state = STATUS_CANCELLED;
+				normalizedUpdateData.cancel_reason = cancellationReason;
+				normalizedUpdateData.pendingConfirmation = {
+					...existingPending,
+					status: STATUS_CANCELLED,
+					rejectionReason: cancellationReason,
+					confirmationReason: "",
+					cancelledAt: now,
+					lastUpdatedAt: now,
+					lastUpdatedBy: auditActor,
+				};
+				normalizedUpdateData.agentDecisionSnapshot = {
+					status: STATUS_CANCELLED,
+					reason: cancellationReason,
+					decidedAt: now,
+					decidedBy: auditActor,
+				};
+			} else {
+				const existingCycle =
+					existingReservation.financial_cycle &&
+					typeof existingReservation.financial_cycle.toObject === "function"
+						? existingReservation.financial_cycle.toObject()
+						: existingReservation.financial_cycle || {};
+				const hadFinanceRejection =
+					FINANCE_REJECTED_REGEX.test(
+						String(
+							existingReservation.reservation_status ||
+								existingReservation.state ||
+								""
+						)
+					) ||
+					String(existingCycle.totalReviewStatus || "").toLowerCase() ===
+						"rejected";
+				normalizedUpdateData.reservation_status = STATUS_PENDING_CONFIRMATION;
+				normalizedUpdateData.state = STATUS_PENDING_CONFIRMATION;
+				normalizedUpdateData.pendingConfirmation = {
+					...existingPending,
+					status: "pending",
+					rejectionReason: "",
+					confirmationReason: "",
+					confirmedAt: null,
+					rejectedAt: null,
+					resubmittedAt: now,
+					lastUpdatedAt: now,
+					lastUpdatedBy: auditActor,
+				};
+				normalizedUpdateData.agentDecisionSnapshot = {
+					status: "pending",
+					reason: "Agent updated and resubmitted the reservation.",
+					decidedAt: now,
+					decidedBy: auditActor,
+				};
+				if (hadFinanceRejection) {
+					normalizedUpdateData.financial_cycle = {
+						...existingCycle,
+						status: "open",
+						totalReviewStatus: "pending",
+						totalRejectionReason: "",
+						totalReviewedAt: null,
+						totalReviewedBy: null,
+						lastUpdatedAt: now,
+						lastUpdatedBy: requestingUserId || null,
+					};
+				}
+			}
 		}
 		if (requestingActor && isFinanceOnlyAccount(requestingActor)) {
 			const forbiddenFinanceFields =
@@ -4329,6 +4743,21 @@ exports.updateReservation = async (req, res) => {
 				normalizedUpdateData,
 				requestingUserId
 			);
+			const lifecycleStatus = getReservationLifecycleStatusAfterFinance(
+				existingReservation,
+				normalizedUpdateData
+			);
+			if (
+				lifecycleStatus &&
+				!Object.prototype.hasOwnProperty.call(
+					normalizedUpdateData,
+					"reservation_status"
+				) &&
+				!Object.prototype.hasOwnProperty.call(normalizedUpdateData, "state")
+			) {
+				normalizedUpdateData.reservation_status = lifecycleStatus;
+				normalizedUpdateData.state = lifecycleStatus;
+			}
 		}
 		delete normalizedUpdateData.__commissionAssignmentReset;
 
@@ -6283,6 +6712,12 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						$or: [
 							{ reservation_status: PENDING_CONFIRMATION_REGEX },
 							{ state: PENDING_CONFIRMATION_REGEX },
+							{ reservation_status: PENDING_FINANCE_REVIEW_REGEX },
+							{ state: PENDING_FINANCE_REVIEW_REGEX },
+							{ reservation_status: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+							{ state: PENDING_AGENT_COMMISSION_APPROVAL_REGEX },
+							{ reservation_status: FINANCE_REJECTED_REGEX },
+							{ state: FINANCE_REJECTED_REGEX },
 							{
 								"agentDecisionSnapshot.status": {
 									$in: ["confirmed", "rejected"],
@@ -6295,6 +6730,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							},
 							buildCommissionMissingFilter(),
 							{ "commissionAgentApproval.status": "pending" },
+							{ "commissionAgentApproval.status": "rejected" },
+							{ "financial_cycle.totalReviewStatus": "rejected" },
 						],
 					},
 				],
@@ -6409,49 +6846,61 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			buildPendingConfirmationFilter(id, workflowScope)
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
-		const [rows, total] = await Promise.all([
+		const [rows, total, agentAccountFeed] = await Promise.all([
 			Reservations.find(query)
 				.select(
-					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus financial_cycle pendingConfirmation"
+					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
 				)
 				.sort({ booked_at: 1, createdAt: 1 })
 				.limit(limit)
 				.lean()
 				.exec(),
 			Reservations.countDocuments(query),
+			getAgentAccountNotificationFeed({
+				actor,
+				hotels,
+				hotelMap,
+				limit,
+			}),
 		]);
-
-		return res.json({
-			total,
-			data: rows.map((reservation) => {
-				const currentHotelId = normalizeId(reservation.hotelId);
-				const hotel = hotelMap[currentHotelId] || {};
-				const pendingReasons = getPendingConfirmationReasonsForActor(
+		const reservationNotifications = rows.map((reservation) => {
+			const currentHotelId = normalizeId(reservation.hotelId);
+			const hotel = hotelMap[currentHotelId] || {};
+			const pendingReasons = getPendingConfirmationReasonsForActor(
+				reservation,
+				actor
+			);
+			return {
+				_id: reservation._id,
+				notificationType: getReservationNotificationTypeForActor(
 					reservation,
 					actor
-				);
-				return {
-					_id: reservation._id,
-					notificationType: getReservationNotificationTypeForActor(
-						reservation,
-						actor
-					),
-					hotelId: currentHotelId,
-					hotelName: hotel.hotelName || "",
-					hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
-					confirmation_number: reservation.confirmation_number,
-					guestName: reservation.customer_details?.name || "",
-					guestPhone: reservation.customer_details?.phone || "",
-					booking_source: reservation.booking_source || "",
-					booked_at: reservation.booked_at || reservation.createdAt,
-					checkin_date: reservation.checkin_date,
-					checkout_date: reservation.checkout_date,
-					reservation_status:
-						reservation.reservation_status || reservation.state || "",
-					total_amount: reservation.total_amount || 0,
-					pendingReasons,
-				};
-			}),
+				),
+				hotelId: currentHotelId,
+				hotelName: hotel.hotelName || "",
+				hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
+				confirmation_number: reservation.confirmation_number,
+				guestName: reservation.customer_details?.name || "",
+				guestPhone: reservation.customer_details?.phone || "",
+				booking_source: reservation.booking_source || "",
+				booked_at: reservation.booked_at || reservation.createdAt,
+				checkin_date: reservation.checkin_date,
+				checkout_date: reservation.checkout_date,
+				reservation_status:
+					reservation.reservation_status || reservation.state || "",
+				total_amount: reservation.total_amount || 0,
+				pendingReasons,
+			};
+		});
+
+		return res.json({
+			total: total + Number(agentAccountFeed.total || 0),
+			data: [
+				...(Array.isArray(agentAccountFeed.data)
+					? agentAccountFeed.data
+					: []),
+				...reservationNotifications,
+			].slice(0, limit),
 		});
 	} catch (error) {
 		console.error("Error fetching pending confirmation notifications:", error);
@@ -6524,6 +6973,12 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 					"This finance cycle is closed. Only hotel managers or admins can change it.",
 			});
 		}
+		if (action === "cancel" && financialCycleLocked && !isManagerOrAdminAccount(actor)) {
+			return res.status(403).json({
+				error:
+					"This reservation has an approved finance cycle. Only hotel managers or admins can cancel it.",
+			});
+		}
 		if (isFinanceOnlyAccount(actor) && !isFinanceAction) {
 			return res.status(403).json({
 				error: "Finance users can only assign or reconcile reservation commission.",
@@ -6546,10 +7001,21 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			typeof reservation.pendingConfirmation.toObject === "function"
 				? reservation.pendingConfirmation.toObject()
 				: reservation.pendingConfirmation || {};
+		if (
+			isFinanceAction &&
+			String(existingPending.status || "").toLowerCase() !== "confirmed" &&
+			!isManagerOrAdminAccount(actor)
+		) {
+			return res.status(409).json({
+				error:
+					"Finance review starts after the reservation team accepts the reservation.",
+			});
+		}
 		const updatePayload = {};
 		const statusDecisionAction = [
 			"confirm",
 			"reject",
+			"cancel",
 			"pending",
 			"revert",
 			"revert_to_pending",
@@ -6559,6 +7025,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		);
 		if (
 			statusDecisionAction &&
+			action !== "cancel" &&
 			statusDecisionLocked &&
 			!isManagerOrAdminAccount(actor)
 		) {
@@ -6627,10 +7094,63 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 				updatePayload.commissionAgentApproval = commissionAgentApproval;
 			}
 		}
+		if (isFinanceAction) {
+			const existingCycle =
+				reservation.financial_cycle &&
+				typeof reservation.financial_cycle.toObject === "function"
+					? reservation.financial_cycle.toObject()
+					: reservation.financial_cycle || {};
+			const totalReviewInput =
+				body.totalReviewStatus ??
+				body.totalApprovalStatus ??
+				(body.totalAmountApproved === false
+					? "rejected"
+					: body.totalAmountApproved === true
+					? "approved"
+					: undefined);
+			const totalReviewStatus = String(totalReviewInput || "approved")
+				.trim()
+				.toLowerCase();
+			if (!["approved", "rejected", "pending"].includes(totalReviewStatus)) {
+				return res.status(400).json({
+					error:
+						"Total review status must be approved, rejected, or pending.",
+				});
+			}
+			const totalRejectionReason = String(
+				body.totalRejectionReason ||
+					body.amountRejectionReason ||
+					body.rejectionReason ||
+					body.reason ||
+					""
+			).trim();
+			if (totalReviewStatus === "rejected" && !totalRejectionReason) {
+				return res.status(400).json({
+					error: "Total amount rejection reason is required.",
+				});
+			}
+			updatePayload.financial_cycle = {
+				...existingCycle,
+				...(updatePayload.financial_cycle || {}),
+				totalReviewStatus,
+				totalReviewedAt: now,
+				totalReviewedBy: auditActor,
+				totalRejectionReason:
+					totalReviewStatus === "rejected" ? totalRejectionReason : "",
+			};
+			if (totalReviewStatus === "rejected") {
+				updatePayload.agentDecisionSnapshot = {
+					status: "rejected",
+					reason: totalRejectionReason,
+					decidedAt: now,
+					decidedBy: auditActor,
+				};
+			}
+		}
 
 		if (action === "confirm") {
-			updatePayload.reservation_status = "Confirmed";
-			updatePayload.state = "Confirmed";
+			updatePayload.reservation_status = STATUS_PENDING_FINANCE_REVIEW;
+			updatePayload.state = STATUS_PENDING_FINANCE_REVIEW;
 			updatePayload.pendingConfirmation = {
 				...existingPending,
 				status: "confirmed",
@@ -6650,8 +7170,8 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}
 
 		if (["pending", "revert", "revert_to_pending"].includes(action)) {
-			updatePayload.reservation_status = "Pending Confirmation";
-			updatePayload.state = "Pending Confirmation";
+			updatePayload.reservation_status = STATUS_PENDING_CONFIRMATION;
+			updatePayload.state = STATUS_PENDING_CONFIRMATION;
 			updatePayload.pendingConfirmation = {
 				...existingPending,
 				status: "pending",
@@ -6666,6 +7186,34 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			updatePayload.agentDecisionSnapshot = {
 				status: "pending",
 				reason: confirmationReason,
+				decidedAt: now,
+				decidedBy: auditActor,
+			};
+		}
+
+		if (action === "cancel") {
+			const cancellationReason = String(
+				body.cancelReason ||
+					body.cancel_reason ||
+					body.rejectionReason ||
+					body.reason ||
+					"Reservation cancelled."
+			).trim();
+			updatePayload.reservation_status = STATUS_CANCELLED;
+			updatePayload.state = STATUS_CANCELLED;
+			updatePayload.cancel_reason = cancellationReason;
+			updatePayload.pendingConfirmation = {
+				...existingPending,
+				status: STATUS_CANCELLED,
+				rejectionReason: cancellationReason,
+				confirmationReason: "",
+				cancelledAt: now,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+			updatePayload.agentDecisionSnapshot = {
+				status: STATUS_CANCELLED,
+				reason: cancellationReason,
 				decidedAt: now,
 				decidedBy: auditActor,
 			};
@@ -6706,6 +7254,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"commissionPaid",
 			"commissionStatus",
 			"commissionAgentApproval",
+			"financial_cycle",
 		].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
 
 		if (touchesFinancialCycle) {
@@ -6715,8 +7264,22 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 				actorId
 			);
 		}
+		if (isFinanceAction) {
+			const lifecycleStatus = getReservationLifecycleStatusAfterFinance(
+				reservation,
+				updatePayload
+			);
+			if (lifecycleStatus) {
+				updatePayload.reservation_status = lifecycleStatus;
+				updatePayload.state = lifecycleStatus;
+			}
+		}
 
-		if (["confirm", "reject", "pending", "revert", "revert_to_pending"].includes(action)) {
+		if (
+			["confirm", "reject", "cancel", "pending", "revert", "revert_to_pending"].includes(
+				action
+			)
+		) {
 			const walletSnapshot = await buildReservationAgentWalletSnapshot({
 				reservation,
 				actor: auditActor,
@@ -6962,6 +7525,14 @@ exports.updateAgentCommissionApproval = async (req, res) => {
 			updatePayload,
 			actorId
 		);
+		const lifecycleStatus = getReservationLifecycleStatusAfterFinance(
+			reservation,
+			updatePayload
+		);
+		if (lifecycleStatus) {
+			updatePayload.reservation_status = lifecycleStatus;
+			updatePayload.state = lifecycleStatus;
+		}
 
 		const auditEntries = buildReservationAuditEntries(
 			reservation,

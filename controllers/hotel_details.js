@@ -50,7 +50,16 @@ const canViewHotelStats = (user, hotel) => {
 const DONE_RESERVATION_STATUS =
 	/checked[-_\s]?out|early[-_\s]?checked[-_\s]?out|closed|cancelled|canceled|no[-_\s]?show/i;
 const CONFIRMED_RESERVATION_STATUS = /^confirmed$/i;
+const EARLY_CLOSED_RESERVATION_STATUS =
+	/cancelled|canceled|no[-_\s]?show/i;
+const PENDING_RECONCILIATION_STATUS =
+	/pending[-_\s]?confirmation|pending[-_\s]?finance[-_\s]?review|pending[-_\s]?agent[-_\s]?commission[-_\s]?approval|finance[-_\s]?rejected|rejected/i;
 const FINANCIAL_CYCLE_REQUIRED_FROM = new Date("2026-05-08T00:00:00.000Z");
+const ASSIGNED_COMMISSION_STATUSES = new Set([
+	"commission due",
+	"commission paid",
+	"no commission due",
+]);
 
 const getDeclaredRoomsTotal = (hotel = {}) => {
 	const directTotal = Number(hotel.overallRoomsCount || 0);
@@ -101,6 +110,22 @@ const buildFinancialCycleRequiredDateFilter = () => ({
 
 const buildDashboardOpenReservationFilter = buildOperationalOpenReservationFilter;
 
+const buildDashboardFinancialReconciliationBranch = () => ({
+	$and: [
+		buildFinancialCycleRequiredDateFilter(),
+		{ reservation_status: { $not: EARLY_CLOSED_RESERVATION_STATUS } },
+		{
+			$or: [
+				{ reservation_status: PENDING_RECONCILIATION_STATUS },
+				{ state: PENDING_RECONCILIATION_STATUS },
+				{ "financial_cycle.status": { $ne: "closed" } },
+				{ "financial_cycle.totalReviewStatus": "rejected" },
+				{ "commissionAgentApproval.status": { $in: ["pending", "rejected"] } },
+			],
+		},
+	],
+});
+
 const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
 	hotelId: hotelObjectId,
 	$or: [
@@ -108,12 +133,7 @@ const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
 			checkout_date: { $lte: getTodayEnd() },
 			reservation_status: { $not: DONE_RESERVATION_STATUS },
 		},
-		{
-			$and: [
-				buildFinancialCycleRequiredDateFilter(),
-				{ "financial_cycle.status": { $ne: "closed" } },
-			],
-		},
+		buildDashboardFinancialReconciliationBranch(),
 	],
 });
 
@@ -124,29 +144,86 @@ const buildDashboardIncompleteReservationFilterForHotels = (hotelObjectIds = [])
 			checkout_date: { $lte: getTodayEnd() },
 			reservation_status: { $not: DONE_RESERVATION_STATUS },
 		},
-		{
-			$and: [
-				buildFinancialCycleRequiredDateFilter(),
-				{ "financial_cycle.status": { $ne: "closed" } },
-			],
-		},
+		buildDashboardFinancialReconciliationBranch(),
 	],
 });
 
-const buildRecentReservationFilterForHotels = (hotelObjectIds = [], startDate) => ({
-	hotelId: { $in: hotelObjectIds },
-	$or: [
-		{
-			booked_at: { $gte: startDate },
-		},
-		{
-			$and: [
-				{ $or: [{ booked_at: { $exists: false } }, { booked_at: null }] },
-				{ createdAt: { $gte: startDate } },
+const EXECUTIVE_DATE_FIELDS = new Set([
+	"createdAt",
+	"checkin_date",
+	"checkout_date",
+]);
+
+const normalizeExecutiveDateField = (value = "") => {
+	const normalized = String(value || "").trim();
+	if (["checkin", "checkinDate", "check_in"].includes(normalized)) {
+		return "checkin_date";
+	}
+	if (["checkout", "checkoutDate", "check_out"].includes(normalized)) {
+		return "checkout_date";
+	}
+	if (["booked_at", "bookedAt", "created_at"].includes(normalized)) {
+		return "createdAt";
+	}
+	return EXECUTIVE_DATE_FIELDS.has(normalized) ? normalized : "createdAt";
+};
+
+const executiveDateRange = (range = "all") => {
+	const normalized = String(range || "all").trim().toLowerCase();
+	if (normalized === "all") {
+		return { range: "all", from: null, to: new Date() };
+	}
+
+	const now = new Date();
+	const start = new Date(now);
+	start.setHours(0, 0, 0, 0);
+	const end = new Date(now);
+	end.setHours(23, 59, 59, 999);
+
+	if (normalized === "yesterday") {
+		start.setDate(start.getDate() - 1);
+		end.setDate(end.getDate() - 1);
+		return { range: "yesterday", from: start, to: end };
+	}
+
+	if (normalized === "last7") {
+		start.setDate(start.getDate() - 6);
+		return { range: "last7", from: start, to: end };
+	}
+
+	return { range: "today", from: start, to: end };
+};
+
+const buildExecutiveReservationFilterForHotels = (
+	hotelObjectIds = [],
+	{ range = "all", dateBy = "createdAt" } = {}
+) => {
+	const filter = { hotelId: { $in: hotelObjectIds } };
+	const period = executiveDateRange(range);
+	if (!period.from || !period.to) return filter;
+
+	const dateField = normalizeExecutiveDateField(dateBy);
+	const dateFilter = { $gte: period.from, $lte: period.to };
+	if (dateField === "createdAt") {
+		return {
+			...filter,
+			$or: [
+				{ createdAt: dateFilter },
+				{
+					$and: [
+						{ $or: [{ createdAt: { $exists: false } }, { createdAt: null }] },
+						{ booked_at: dateFilter },
+					],
+				},
 			],
-		},
-	],
-});
+		};
+	}
+
+	return {
+		...filter,
+		[dateField]: dateFilter,
+	};
+};
 
 const buildStoredHotelIdFilter = (hotelId) => ({
 	$expr: { $eq: [{ $toString: "$hotelId" }, String(hotelId)] },
@@ -382,7 +459,27 @@ const isFinancialCycleRequired = (reservation = {}) => {
 const isFinancialCycleOpen = (reservation = {}) =>
 	String(reservation?.financial_cycle?.status || "").toLowerCase() !== "closed";
 
-const getDashboardFinancialReasons = (reservation = {}) => {
+const moneyNumber = (value) => {
+	if (value === null || value === undefined || value === "") return 0;
+	if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+	const parsed = Number(String(value).replace(/,/g, "").trim());
+	return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const hasDashboardAssignedCommission = (reservation = {}) => {
+	const commissionStatus = String(reservation?.commissionStatus || "")
+		.trim()
+		.toLowerCase();
+	return (
+		moneyNumber(reservation?.commission) > 0 ||
+		moneyNumber(reservation?.financial_cycle?.commissionAmount) > 0 ||
+		reservation?.commissionData?.assigned === true ||
+		reservation?.financial_cycle?.commissionAssigned === true ||
+		ASSIGNED_COMMISSION_STATUSES.has(commissionStatus)
+	);
+};
+
+const getDashboardFinancialReasonsLegacy = (reservation = {}) => {
 	const cycle = reservation.financial_cycle || {};
 	const collectionModel = String(cycle.collectionModel || "").toLowerCase();
 
@@ -430,6 +527,185 @@ const getDashboardFinancialReasons = (reservation = {}) => {
 			"الدورة المالية مفتوحة."
 		),
 	];
+};
+
+const getDashboardFinancialReasons = (reservation = {}) => {
+	const cycle = reservation.financial_cycle || {};
+	const collectionModel = String(cycle.collectionModel || "").toLowerCase();
+	const statusText = String(reservation.reservation_status || reservation.state || "");
+	const totalReviewStatus = String(cycle.totalReviewStatus || "")
+		.trim()
+		.toLowerCase();
+	const commissionApprovalStatus = String(
+		reservation?.commissionAgentApproval?.status || ""
+	)
+		.trim()
+		.toLowerCase();
+
+	if (
+		!isFinancialCycleRequired(reservation) ||
+		EARLY_CLOSED_RESERVATION_STATUS.test(statusText)
+	) {
+		return [];
+	}
+
+	const reasons = [];
+
+	if (/pending[-_\s]?confirmation/i.test(statusText)) {
+		reasons.push(
+			makeReason(
+				"pending_confirmation",
+				"Reservation is waiting for the reservation team confirmation.",
+				"الحجز ينتظر تأكيد فريق الحجوزات."
+			)
+		);
+	}
+
+	if (
+		String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
+			"rejected" ||
+		(/rejected/i.test(statusText) && !/finance[-_\s]?rejected/i.test(statusText))
+	) {
+		const rejectionReason =
+			reservation?.pendingConfirmation?.rejectionReason ||
+			reservation?.agentDecisionSnapshot?.reason ||
+			"Reservation team rejected it and the agent must update it.";
+		reasons.push(
+			makeReason(
+				"pending_rejected",
+				`Reservation team rejected it: ${rejectionReason}`,
+				`رفض فريق الحجوزات الحجز: ${rejectionReason}`
+			)
+		);
+	}
+
+	if (/pending[-_\s]?finance[-_\s]?review/i.test(statusText)) {
+		reasons.push(
+			makeReason(
+				"finance_review_pending",
+				"Reservation was accepted by reservations and is waiting for finance review.",
+				"الحجز مقبول من قسم الحجوزات وينتظر مراجعة المالية."
+			)
+		);
+	}
+
+	if (
+		/pending[-_\s]?agent[-_\s]?commission[-_\s]?approval/i.test(statusText) ||
+		commissionApprovalStatus === "pending"
+	) {
+		reasons.push(
+			makeReason(
+				"agent_commission_pending",
+				"Finance marked commission as paid; the agent still needs to approve it.",
+				"تم تحديد العمولة كمدفوعة ويجب أن يوافق الوكيل عليها."
+			)
+		);
+	}
+
+	if (
+		/finance[-_\s]?rejected/i.test(statusText) ||
+		totalReviewStatus === "rejected"
+	) {
+		reasons.push(
+			makeReason(
+				"finance_total_rejected",
+				`Finance rejected the total amount${cycle.totalRejectionReason ? `: ${cycle.totalRejectionReason}` : "."}`,
+				`رفضت المالية المبلغ الإجمالي${cycle.totalRejectionReason ? `: ${cycle.totalRejectionReason}` : "."}`
+			)
+		);
+	}
+
+	if (commissionApprovalStatus === "rejected") {
+		reasons.push(
+			makeReason(
+				"agent_commission_rejected",
+				`Agent rejected the commission status${reservation?.commissionAgentApproval?.rejectionReason ? `: ${reservation.commissionAgentApproval.rejectionReason}` : "."}`,
+				`رفض الوكيل حالة العمولة${reservation?.commissionAgentApproval?.rejectionReason ? `: ${reservation.commissionAgentApproval.rejectionReason}` : "."}`
+			)
+		);
+	}
+
+	if (!hasDashboardAssignedCommission(reservation)) {
+		reasons.push(
+			makeReason(
+				"commission_missing",
+				"Finance has not assigned or reviewed commission yet.",
+				"لم تحدد المالية العمولة أو تراجعها بعد."
+			)
+		);
+	}
+
+	if (collectionModel === "pms_collected" && !reservation.moneyTransferredToHotel) {
+		reasons.push(
+			makeReason(
+				"pms_transfer_pending",
+				"PMS collected the payment, but transfer to the hotel is not marked complete.",
+				"تم تحصيل المبلغ من النظام، لكن تحويل المبلغ للفندق غير مكتمل."
+			)
+		);
+	}
+
+	if (collectionModel === "hotel_collected" && !reservation.commissionPaid) {
+		reasons.push(
+			makeReason(
+				"hotel_commission_pending",
+				"Hotel collected the payment, but commission is not marked paid.",
+				"الفندق حصل المبلغ، لكن دفع العمولة غير مكتمل."
+			)
+		);
+	}
+
+	if (
+		collectionModel === "mixed" &&
+		(!reservation.moneyTransferredToHotel || !reservation.commissionPaid)
+	) {
+		reasons.push(
+			makeReason(
+				"mixed_cycle_pending",
+				"Mixed payment cycle still needs reconciliation.",
+				"دورة دفع مختلطة ما زالت تحتاج مطابقة مالية."
+			)
+		);
+	}
+
+	if (collectionModel === "agent_wallet") {
+		reasons.push(
+			makeReason(
+				"agent_wallet_reconciliation_open",
+				"Hotel amount is covered by the agent wallet; finance still needs to close commission and reconciliation.",
+				"المبلغ مغطى من محفظة الوكيل وتحتاج المالية إلى إغلاق العمولة والمطابقة."
+			)
+		);
+	}
+
+	if (isFinancialCycleOpen(reservation) && !reasons.length) {
+		reasons.push(
+			makeReason(
+				"financial_cycle_open_after_cutoff",
+				"Financial cycle is open.",
+				"الدورة المالية مفتوحة."
+			)
+		);
+	}
+
+	if (
+		/checked[-_\s]?out|early[-_\s]?checked[-_\s]?out/i.test(statusText) &&
+		isFinancialCycleOpen(reservation)
+	) {
+		reasons.push(
+			makeReason(
+				"checked_out_finance_open",
+				"Guest is checked out, but payment, commission, or wallet reconciliation is still open.",
+				"غادر الضيف لكن تسوية الدفع أو العمولة أو المحفظة ما زالت مفتوحة."
+			)
+		);
+	}
+
+	if (!isFinancialCycleOpen(reservation) && !reasons.length) {
+		return [];
+	}
+
+	return compactReasons(reasons);
 };
 
 const getOperationalDueReservationReasons = (reservation = {}) => {
@@ -603,6 +879,12 @@ exports.hotelGeneralStats = async (req, res) => {
 		startOfDay.setHours(0, 0, 0, 0);
 		const endOfDay = new Date(now);
 		endOfDay.setHours(23, 59, 59, 999);
+		const period = executiveDateRange(req.query?.range || "all");
+		const dateBy = normalizeExecutiveDateField(req.query?.dateBy || "createdAt");
+		const reservationStatsFilter = buildExecutiveReservationFilterForHotels(
+			[hotelObjectId],
+			{ range: period.range, dateBy }
+		);
 
 		const dashboardOpenFilter =
 			buildDashboardOpenReservationFilter(hotelObjectId);
@@ -614,11 +896,11 @@ exports.hotelGeneralStats = async (req, res) => {
 					.select("_id active activeRoom cleanRoom room_type display_name")
 					.lean()
 					.exec(),
-				Reservations.countDocuments({ hotelId: hotelObjectId }),
+				Reservations.countDocuments(reservationStatsFilter),
 				Reservations.countDocuments(dashboardOpenFilter),
 				Reservations.countDocuments(dashboardIncompleteFilter),
 				Reservations.aggregate([
-					{ $match: { hotelId: hotelObjectId } },
+					{ $match: reservationStatsFilter },
 					{
 						$group: {
 							_id: {
@@ -683,6 +965,12 @@ exports.hotelGeneralStats = async (req, res) => {
 		return res.json({
 			hotelId: normalizeId(hotel._id),
 			asOf: now,
+			period: {
+				reservationsFrom: period.from,
+				reservationsTo: period.to || now,
+				range: period.range,
+				dateBy,
+			},
 			setup: {
 				roomsDone,
 				photosDone,
@@ -718,6 +1006,8 @@ exports.hotelGeneralStats = async (req, res) => {
 
 exports.managerExecutiveSummary = async (req, res) => {
 	try {
+		const period = executiveDateRange(req.query?.range || "all");
+		const dateBy = normalizeExecutiveDateField(req.query?.dateBy || "createdAt");
 		const hotels = await getDashboardAccessibleHotels(req.profile);
 		const hotelObjectIds = hotels
 			.map((hotel) => hotel._id)
@@ -730,6 +1020,8 @@ exports.managerExecutiveSummary = async (req, res) => {
 				period: {
 					reservationsFrom: null,
 					reservationsTo: new Date(),
+					range: period.range,
+					dateBy,
 				},
 				stats: {
 					totalHotels: 0,
@@ -746,10 +1038,6 @@ exports.managerExecutiveSummary = async (req, res) => {
 		startOfDay.setHours(0, 0, 0, 0);
 		const endOfDay = new Date(now);
 		endOfDay.setHours(23, 59, 59, 999);
-		const threeMonthsAgo = new Date(now);
-		threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-		threeMonthsAgo.setHours(0, 0, 0, 0);
-
 		const [rooms, todayReservations, recentReservations, incompleteReservations] =
 			await Promise.all([
 				Rooms.find({ hotelId: { $in: hotelObjectIds } })
@@ -767,7 +1055,10 @@ exports.managerExecutiveSummary = async (req, res) => {
 					.lean()
 					.exec(),
 				Reservations.countDocuments(
-					buildRecentReservationFilterForHotels(hotelObjectIds, threeMonthsAgo)
+					buildExecutiveReservationFilterForHotels(hotelObjectIds, {
+						range: period.range,
+						dateBy,
+					})
 				),
 				Reservations.countDocuments(
 					buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds)
@@ -822,8 +1113,10 @@ exports.managerExecutiveSummary = async (req, res) => {
 		return res.json({
 			asOf: now,
 			period: {
-				reservationsFrom: threeMonthsAgo,
-				reservationsTo: now,
+				reservationsFrom: period.from,
+				reservationsTo: period.to || now,
+				range: period.range,
+				dateBy,
 			},
 			stats: {
 				totalHotels: hotels.length,
@@ -931,7 +1224,7 @@ exports.managerIncompleteReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();
@@ -1050,7 +1343,7 @@ exports.hotelOpenReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"confirmation_number customer_details.name booking_source booked_at checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"confirmation_number customer_details.name booking_source booked_at checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();
@@ -1155,7 +1448,7 @@ exports.hotelIncompleteReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status financial_cycle commission commissionPaid moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();

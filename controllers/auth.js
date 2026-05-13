@@ -11,6 +11,7 @@ const {
 	waSendResetPasswordLink,
 	ensureE164Phone, // if you want to use/extend later
 } = require("./whatsappsender");
+const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const ahmed2 = "ahmedabdelrazzak1001010@gmail.com";
@@ -89,6 +90,78 @@ const sanitizeAgentWalletOpeningBalances = (
 			? byHotel.get(hotelId)
 			: nonNegativeMoney(fallbackAmount),
 	}));
+};
+
+const normalizeId = (value) => String(value?._id || value || "").trim();
+
+const actorRoleDescriptions = (actor = {}) => [
+	String(actor.roleDescription || "").toLowerCase(),
+	...(Array.isArray(actor.roleDescriptions)
+		? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const actorRoleNumbers = (actor = {}) => [
+	Number(actor.role),
+	...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+];
+
+const actorHasRoleDescription = (actor = {}, description) =>
+	actorRoleDescriptions(actor).includes(String(description || "").toLowerCase());
+
+const actorScopedHotelIds = (actor = {}) => [
+	normalizeId(actor.hotelIdWork),
+	...(Array.isArray(actor.hotelIdsWork)
+		? actor.hotelIdsWork.map(normalizeId)
+		: []),
+	...(Array.isArray(actor.hotelsToSupport)
+		? actor.hotelsToSupport.map(normalizeId)
+		: []),
+	...(Array.isArray(actor.hotelIdsOwner)
+		? actor.hotelIdsOwner.map(normalizeId)
+		: []),
+].filter(Boolean);
+
+const buildAgentApprovalActor = (actor = {}) => ({
+	_id: normalizeId(actor._id),
+	name: actor.name || "",
+	email: actor.email || "",
+	role: actor.roleDescription || actor.role || "",
+});
+
+const canCreateAgentForHotel = (creator = {}, hotelId = "", ownerId = "") => {
+	const roles = actorRoleNumbers(creator);
+	const descriptions = actorRoleDescriptions(creator);
+	const scopedIds = actorScopedHotelIds(creator);
+	const belongsToId = normalizeId(creator.belongsToId || ownerId);
+	const isAssignedToHotel =
+		normalizeId(creator.hotelIdWork) === hotelId || scopedIds.includes(hotelId);
+	return (
+		isConfiguredSuperAdmin(creator) ||
+		roles.includes(1000) ||
+		normalizeId(creator._id) === ownerId ||
+		(belongsToId === ownerId &&
+			isAssignedToHotel &&
+			(descriptions.includes("finance") ||
+				descriptions.includes("reservationemployee") ||
+				descriptions.includes("hotelmanager")))
+	);
+};
+
+const canApproveAgentAccountsForOwner = async (creator = {}, ownerId = "") => {
+	const roles = actorRoleNumbers(creator);
+	if (isConfiguredSuperAdmin(creator) || roles.includes(1000)) return true;
+	if (normalizeId(creator._id) === ownerId) return true;
+	if (!actorHasRoleDescription(creator, "hotelmanager")) return false;
+
+	const ownerHotels = await HotelDetails.find({ belongsTo: ownerId })
+		.select("_id")
+		.lean()
+		.exec();
+	const ownerHotelIds = ownerHotels.map((hotel) => normalizeId(hotel._id));
+	if (!ownerHotelIds.length) return false;
+	const scopedIds = new Set(actorScopedHotelIds(creator));
+	return ownerHotelIds.every((hotelId) => scopedIds.has(hotelId));
 };
 
 // wa.me fallback link builder
@@ -752,6 +825,9 @@ exports.createHotelStaffUser = async (req, res) => {
 		const normalizedRoleDescriptions = [
 			...new Set(incomingDescriptions.length ? incomingDescriptions : ["reception"]),
 		];
+		const isAgentOnlyAccount =
+			normalizedRoleDescriptions.length === 1 &&
+			normalizedRoleDescriptions.includes("ordertaker");
 		const invalidRole = normalizedRoleDescriptions.find(
 			(description) => !roleByDescription[description]
 		);
@@ -799,6 +875,22 @@ exports.createHotelStaffUser = async (req, res) => {
 				? creator.roleDescriptions.map((item) => String(item || "").toLowerCase())
 				: []),
 		];
+		const creatorRoleNumbers = [
+			Number(creator.role),
+			...(Array.isArray(creator.roles) ? creator.roles.map(Number) : []),
+		];
+		const creatorIsAgentAccountRequester =
+			creatorRoleNumbers.includes(6000) ||
+			creatorRoleNumbers.includes(8000) ||
+			creatorRoleDescriptions.includes("finance") ||
+			creatorRoleDescriptions.includes("reservationemployee");
+
+		if (creatorIsAgentAccountRequester && !isAgentOnlyAccount) {
+			return res.status(403).json({
+				error:
+					"Finance and reservation users can create external agent accounts only.",
+			});
+		}
 
 		const canCreateForEveryHotel = orderedHotels.every((hotel) => {
 			const currentHotelId = String(hotel._id);
@@ -816,8 +908,16 @@ exports.createHotelStaffUser = async (req, res) => {
 				isConfiguredSuperAdmin(creator) ||
 				(creatorRole === 1000 &&
 					(supportIds.length === 0 || supportIds.includes(currentHotelId)));
+			const canCreateAgentForThisHotel =
+				isAgentOnlyAccount &&
+				canCreateAgentForHotel(creator, currentHotelId, currentOwnerId);
 
-			return creatorOwnsHotel || creatorIsAssignedHotelManager || adminCanSupportHotel;
+			return (
+				creatorOwnsHotel ||
+				creatorIsAssignedHotelManager ||
+				adminCanSupportHotel ||
+				canCreateAgentForThisHotel
+			);
 		});
 
 		if (!canCreateForEveryHotel) {
@@ -840,7 +940,9 @@ exports.createHotelStaffUser = async (req, res) => {
 			normalizedEmail || buildStaffPlaceholderEmail(cleanedPhone, hotelId);
 		const normalizedAccessTo = [
 			...new Set([
-				...(Array.isArray(accessTo)
+				...(isAgentOnlyAccount
+					? ["newReservation", "ownReservations"]
+					: Array.isArray(accessTo)
 					? accessTo.map((item) => String(item || "").trim()).filter(Boolean)
 					: []),
 				...(normalizedRoleDescriptions.includes("reservationemployee")
@@ -848,6 +950,11 @@ exports.createHotelStaffUser = async (req, res) => {
 					: []),
 			]),
 		];
+		const creatorCanApproveAgent = isAgentOnlyAccount
+			? await canApproveAgentAccountsForOwner(creator, ownerId)
+			: false;
+		const pendingAgentApproval = isAgentOnlyAccount && !creatorCanApproveAgent;
+		const agentApprovalActor = buildAgentApprovalActor(creator);
 
 		const staffUser = new User({
 			name,
@@ -878,14 +985,49 @@ exports.createHotelStaffUser = async (req, res) => {
 			hotelIdWork: hotelId,
 			belongsToId: ownerId,
 			hotelsToSupport: uniqueHotelIds,
-			activeUser: true,
+			activeUser: pendingAgentApproval ? false : true,
+			agentApproval: isAgentOnlyAccount
+				? {
+						status: pendingAgentApproval ? "pending" : "approved",
+						requestedAt: new Date(),
+						requestedBy: agentApprovalActor,
+						approvedAt: pendingAgentApproval ? null : new Date(),
+						approvedBy: pendingAgentApproval ? null : agentApprovalActor,
+						rejectedAt: null,
+						rejectedBy: null,
+						rejectionReason: "",
+						lastUpdatedAt: new Date(),
+						lastUpdatedBy: agentApprovalActor,
+				  }
+				: {
+						status: "approved",
+						requestedAt: null,
+						requestedBy: null,
+						approvedAt: null,
+						approvedBy: null,
+						rejectedAt: null,
+						rejectedBy: null,
+						rejectionReason: "",
+						lastUpdatedAt: null,
+						lastUpdatedBy: null,
+				  },
 			accessTo: normalizedAccessTo,
 		});
 
 		await staffUser.save();
+		if (pendingAgentApproval) {
+			await emitHotelNotificationRefresh(req, hotelId, {
+				type: "agent_account_pending",
+				ownerId,
+				agentId: staffUser._id,
+			});
+		}
 
 		return res.json({
-			message: "Hotel staff account created successfully",
+			message: pendingAgentApproval
+				? "External agent account submitted for hotel director approval"
+				: "Hotel staff account created successfully",
+			pendingApproval: pendingAgentApproval,
 			userId: staffUser._id,
 		});
 	} catch (error) {

@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const morgan = require("morgan");
 const cors = require("cors");
 const { readdirSync } = require("fs");
+const path = require("path");
 require("dotenv").config();
 const http = require("http");
 const socketIo = require("socket.io");
@@ -30,6 +31,7 @@ mongoose
 app.use(morgan("dev"));
 app.use(cors());
 app.use(express.json({ limit: "50mb" }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (_req, res) => res.send("Hello From PMS API"));
 
 // Socket.IO

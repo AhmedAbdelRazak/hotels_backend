@@ -145,6 +145,22 @@ const userSchema = new mongoose.Schema(
 			default: true,
 		},
 
+		agentApproval: {
+			type: Object,
+			default: {
+				status: "approved",
+				requestedAt: null,
+				requestedBy: null,
+				approvedAt: null,
+				approvedBy: null,
+				rejectedAt: null,
+				rejectedBy: null,
+				rejectionReason: "",
+				lastUpdatedAt: null,
+				lastUpdatedBy: null,
+			},
+		},
+
 		hotelIdWork: {
 			type: String,
 			lowercase: true,

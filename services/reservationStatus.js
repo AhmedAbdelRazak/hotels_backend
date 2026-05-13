@@ -1,5 +1,5 @@
 const PENDING_CONFIRMATION_STATUS_REGEX =
-	/(?:pending[\s_-]?confirmation|^pending$)/i;
+	/(?:pending[\s_-]?confirmation|pending[\s_-]?finance[\s_-]?review|pending[\s_-]?agent[\s_-]?commission[\s_-]?approval|^pending$)/i;
 const PENDING_DECISION_STATUS_REGEX = /^pending$/i;
 const INVENTORY_NON_BLOCKING_STATUS_REGEX =
 	/cancel|reject|void|no[_\s-]?show|checked[_\s-]?out|checkedout/i;

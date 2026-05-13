@@ -6,6 +6,7 @@ const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
+const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -154,6 +155,66 @@ const buildAuthUserPayload = (user = {}) => ({
 
 const normalizeObjectIdString = (value) => String(value?._id || value || "");
 
+const normalizeBooleanInput = (value) =>
+	value === true || value === "true" || value === 1 || value === "1";
+
+const userRoleDescriptions = (user = {}) => [
+	String(user.roleDescription || "").toLowerCase(),
+	...(Array.isArray(user.roleDescriptions)
+		? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const userRoleNumbers = (user = {}) => [
+	Number(user.role),
+	...(Array.isArray(user.roles) ? user.roles.map(Number) : []),
+];
+
+const userHasRoleDescription = (user = {}, description = "") =>
+	userRoleDescriptions(user).includes(String(description || "").toLowerCase());
+
+const userLooksLikeAgent = (user = {}) =>
+	userRoleNumbers(user).includes(7000) ||
+	userHasRoleDescription(user, "ordertaker") ||
+	(Array.isArray(user.accessTo) && user.accessTo.includes("ownReservations"));
+
+const buildAgentApprovalActor = (actor = {}) => ({
+	_id: normalizeObjectIdString(actor._id),
+	name: actor.name || "",
+	email: actor.email || "",
+	role: actor.roleDescription || actor.role || "",
+});
+
+const canApproveAgentAccountsForOwner = async (actor = {}, ownerId = "") => {
+	if (!actor || actor.activeUser === false) return false;
+	const roles = userRoleNumbers(actor);
+	if (isConfiguredSuperAdmin(actor) || roles.includes(1000)) return true;
+	if (normalizeObjectIdString(actor._id) === String(ownerId || "")) return true;
+	if (!userHasRoleDescription(actor, "hotelmanager")) return false;
+
+	const ownerHotels = await HotelDetails.find({ belongsTo: ownerId })
+		.select("_id")
+		.lean()
+		.exec();
+	const ownerHotelIds = ownerHotels.map((hotel) =>
+		normalizeObjectIdString(hotel._id)
+	);
+	if (!ownerHotelIds.length) return false;
+	const scope = new Set([
+		normalizeObjectIdString(actor.hotelIdWork),
+		...(Array.isArray(actor.hotelIdsWork)
+			? actor.hotelIdsWork.map(normalizeObjectIdString)
+			: []),
+		...(Array.isArray(actor.hotelsToSupport)
+			? actor.hotelsToSupport.map(normalizeObjectIdString)
+			: []),
+		...(Array.isArray(actor.hotelIdsOwner)
+			? actor.hotelIdsOwner.map(normalizeObjectIdString)
+			: []),
+	].filter(Boolean));
+	return ownerHotelIds.every((hotelId) => scope.has(hotelId));
+};
+
 const uniqueValidObjectIds = (values = []) => [
 	...new Set(
 		values
@@ -192,6 +253,10 @@ const canManageHotelStaff = async (creator, hotelId) => {
 			? creator.roleDescriptions.map((item) => String(item || "").toLowerCase())
 			: []),
 	];
+	const roleNumbers = [
+		Number(creator.role),
+		...(Array.isArray(creator.roles) ? creator.roles.map(Number) : []),
+	];
 
 	const creatorOwnsHotel =
 		creatorRole === 2000 &&
@@ -206,10 +271,21 @@ const canManageHotelStaff = async (creator, hotelId) => {
 		isConfiguredSuperAdmin(creator) ||
 		(creatorRole === 1000 &&
 			(supportIds.length === 0 || supportIds.includes(normalizedHotelId)));
+	const creatorIsAgentAccountManager =
+		(roleNumbers.includes(6000) ||
+			roleNumbers.includes(8000) ||
+			roleDescriptions.includes("finance") ||
+			roleDescriptions.includes("reservationemployee")) &&
+		String(creator.belongsToId || ownerId) === ownerId &&
+		(String(creator.hotelIdWork || "") === normalizedHotelId ||
+			supportIds.includes(normalizedHotelId));
 
 	return {
 		allowed:
-			creatorOwnsHotel || creatorIsAssignedHotelManager || adminCanSupportHotel,
+			creatorOwnsHotel ||
+			creatorIsAssignedHotelManager ||
+			adminCanSupportHotel ||
+			creatorIsAgentAccountManager,
 		error: "You cannot manage users for this hotel",
 		hotel,
 		hotelId: normalizedHotelId,
@@ -217,6 +293,7 @@ const canManageHotelStaff = async (creator, hotelId) => {
 		creatorOwnsHotel,
 		creatorIsAssignedHotelManager,
 		adminCanSupportHotel,
+		agentOnlyManager: creatorIsAgentAccountManager,
 	};
 };
 
@@ -573,14 +650,32 @@ exports.listHotelStaffUsers = async (req, res) => {
 				},
 				{
 					$or: [
-						{ role: { $in: HOTEL_STAFF_ROLES } },
-						{ roles: { $in: HOTEL_STAFF_ROLES } },
+						{
+							role: {
+								$in: permission.agentOnlyManager
+									? [7000]
+									: HOTEL_STAFF_ROLES,
+							},
+						},
+						{
+							roles: {
+								$in: permission.agentOnlyManager
+									? [7000]
+									: HOTEL_STAFF_ROLES,
+							},
+						},
+						...(permission.agentOnlyManager
+							? [
+									{ roleDescription: "ordertaker" },
+									{ roleDescriptions: "ordertaker" },
+							  ]
+							: []),
 					],
 				},
 			],
 		})
 			.select(
-				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
+				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser agentApproval hotelIdWork belongsToId hotelsToSupport accessTo createdAt updatedAt"
 			)
 			.populate("hotelsToSupport", "_id hotelName")
 			.sort({ role: 1, name: 1 })
@@ -714,8 +809,53 @@ exports.updateHotelStaffUser = async (req, res) => {
 				.status(403)
 				.json({ error: "This staff account does not belong to this hotel" });
 		}
+		const staffIsAgent = userLooksLikeAgent(staffUser);
+		if (permission.agentOnlyManager && !staffIsAgent) {
+			return res.status(403).json({
+				error: "This account manager can update external agents only.",
+			});
+		}
 
 		const payload = req.body || {};
+		const payloadRoleDescriptions = [
+			...(Array.isArray(payload.roleDescriptions) ? payload.roleDescriptions : []),
+			payload.roleDescription,
+		]
+			.map((item) => String(item || "").trim().toLowerCase())
+			.filter(Boolean);
+		if (
+			permission.agentOnlyManager &&
+			payloadRoleDescriptions.some((description) => description !== "ordertaker")
+		) {
+			return res.status(403).json({
+				error: "Finance and reservation users can create or edit agents only.",
+			});
+		}
+		if (
+			permission.agentOnlyManager &&
+			"activeUser" in payload &&
+			normalizeBooleanInput(payload.activeUser)
+		) {
+			return res.status(403).json({
+				error:
+					"New agent accounts must be approved by the hotel director or platform admin.",
+			});
+		}
+		const actorCanApproveAgent = await canApproveAgentAccountsForOwner(
+			req.profile,
+			permission.ownerId
+		);
+		if (
+			staffIsAgent &&
+			"activeUser" in payload &&
+			normalizeBooleanInput(payload.activeUser) &&
+			!actorCanApproveAgent
+		) {
+			return res.status(403).json({
+				error:
+					"Only the hotel director with full group access or platform admin can approve this agent.",
+			});
+		}
 
 		if ("name" in payload) {
 			if (!String(payload.name || "").trim()) {
@@ -851,8 +991,44 @@ exports.updateHotelStaffUser = async (req, res) => {
 			}
 		}
 
+		let agentApprovedNow = false;
 		if ("activeUser" in payload) {
-			staffUser.activeUser = Boolean(payload.activeUser);
+			const nextActiveUser = normalizeBooleanInput(payload.activeUser);
+			if (staffIsAgent) {
+				const now = new Date();
+				const actorSnapshot = buildAgentApprovalActor(req.profile);
+				const currentApproval =
+					staffUser.agentApproval && typeof staffUser.agentApproval === "object"
+						? staffUser.agentApproval
+						: {};
+				if (nextActiveUser) {
+					staffUser.agentApproval = {
+						...currentApproval,
+						status: "approved",
+						approvedAt: now,
+						approvedBy: actorSnapshot,
+						rejectedAt: null,
+						rejectedBy: null,
+						rejectionReason: "",
+						lastUpdatedAt: now,
+						lastUpdatedBy: actorSnapshot,
+					};
+					agentApprovedNow =
+						String(currentApproval.status || "").toLowerCase() !== "approved" ||
+						staffUser.activeUser === false;
+				} else {
+					staffUser.agentApproval = {
+						...currentApproval,
+						status:
+							String(currentApproval.status || "").toLowerCase() === "pending"
+								? "pending"
+								: "inactive",
+						lastUpdatedAt: now,
+						lastUpdatedBy: actorSnapshot,
+					};
+				}
+			}
+			staffUser.activeUser = nextActiveUser;
 		}
 
 		if (payload.password != null && payload.password !== "") {
@@ -936,6 +1112,13 @@ exports.updateHotelStaffUser = async (req, res) => {
 		staffUser.belongsToId = permission.ownerId;
 
 		const saved = await staffUser.save();
+		if (agentApprovedNow) {
+			await emitHotelNotificationRefresh(req, permission.hotelId, {
+				type: "agent_account_approved",
+				ownerId: permission.ownerId,
+				agentId: saved._id,
+			});
+		}
 		return res.json(sanitizeUserForResponse(saved));
 	} catch (err) {
 		console.error("updateHotelStaffUser error:", err);
