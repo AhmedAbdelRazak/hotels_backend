@@ -103,9 +103,34 @@ const agentWalletSchema = new mongoose.Schema(
 		],
 		status: {
 			type: String,
-			enum: ["posted", "void"],
+			enum: ["pending", "posted", "rejected", "void"],
 			default: "posted",
 			index: true,
+		},
+		source: {
+			type: String,
+			enum: ["manual", "agent_claim", "reservation"],
+			default: "manual",
+			index: true,
+		},
+		reviewStatus: {
+			type: String,
+			enum: ["not_required", "pending", "approved", "rejected"],
+			default: "not_required",
+			index: true,
+		},
+		reviewedAt: {
+			type: Date,
+			default: null,
+		},
+		reviewedBy: {
+			type: Object,
+			default: null,
+		},
+		rejectionReason: {
+			type: String,
+			trim: true,
+			default: "",
 		},
 		createdBy: {
 			type: Object,

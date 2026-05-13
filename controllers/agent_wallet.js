@@ -8,6 +8,7 @@ const AgentWallet = require("../models/agent_wallet");
 const Reservations = require("../models/reservations");
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
+const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -97,6 +98,16 @@ const canManageHotelFinancials = (actor = {}, hotel = {}) => {
 	if (hasRole(actor, 2000) || hasRoleDescription(actor, "hotelmanager")) return true;
 	if (hasRole(actor, 6000) || hasRoleDescription(actor, "finance")) return true;
 	return false;
+};
+
+const canOverrideApprovedFinancials = (actor = {}, hotel = {}) => {
+	if (!canAccessHotelFinancials(actor, hotel)) return false;
+	return (
+		isSuperAdmin(actor) ||
+		hasRole(actor, 1000) ||
+		hasRole(actor, 2000) ||
+		hasRoleDescription(actor, "hotelmanager")
+	);
 };
 
 const canManageRole = (actor = {}) =>
@@ -348,17 +359,22 @@ const calculateAgentWalletSummary = async ({
 		  }
 		: {};
 
-	const walletBaseMatch = {
+	const walletDisplayMatch = {
 		hotelId: ObjectId(hotelId),
 		agentId: ObjectId(agentId),
 		status: { $ne: "void" },
+	};
+	const walletPostedMatch = {
+		hotelId: ObjectId(hotelId),
+		agentId: ObjectId(agentId),
+		$or: [{ status: "posted" }, { status: { $exists: false } }, { status: null }],
 	};
 	const reservationBaseMatch = buildAgentReservationMatch(hotelId, agentId);
 
 	const [transactions, reservations, allTransactions, allReservations] =
 		await Promise.all([
 			AgentWallet.find({
-				...walletBaseMatch,
+				...walletDisplayMatch,
 				...walletDateFilter,
 			})
 			.sort({ transactionDate: -1, createdAt: -1 })
@@ -369,15 +385,15 @@ const calculateAgentWalletSummary = async ({
 				...reservationDateFilter,
 			})
 			.select(
-				"_id confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid financial_cycle pendingConfirmation"
+				"_id confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
 			)
-			.sort({ booked_at: -1, createdAt: -1 })
-			.lean()
-			.exec(),
-			AgentWallet.find(walletBaseMatch).lean().exec(),
+				.sort({ booked_at: -1, createdAt: -1 })
+				.lean()
+				.exec(),
+			AgentWallet.find(walletPostedMatch).lean().exec(),
 			Reservations.find(reservationBaseMatch)
 				.select(
-					"_id reservation_status state total_amount commission commissionPaid financial_cycle pendingConfirmation"
+					"_id reservation_status state total_amount commission commissionPaid commissionAgentApproval financial_cycle pendingConfirmation"
 				)
 				.lean()
 				.exec(),
@@ -440,6 +456,12 @@ const calculateAgentWalletSummary = async ({
 	);
 	const walletUsed = n2(reservationWalletDeducted + transactionTotals.manualDebits);
 	const balance = n2(walletAdded - walletUsed);
+	const pendingWalletClaims = transactions.filter(
+		(tx) => tx.source === "agent_claim" && tx.status === "pending"
+	);
+	const rejectedWalletClaims = transactions.filter(
+		(tx) => tx.source === "agent_claim" && tx.status === "rejected"
+	);
 
 	return {
 		agent: {
@@ -470,6 +492,14 @@ const calculateAgentWalletSummary = async ({
 			reservationTotals.totalCommission - reservationTotals.commissionPaid
 		),
 		pendingConfirmation: reservationTotals.pendingConfirmation,
+		pendingWalletClaims: pendingWalletClaims.length,
+		pendingWalletClaimAmount: n2(
+			pendingWalletClaims.reduce((sum, tx) => sum + moneyNumber(tx.amount), 0)
+		),
+		rejectedWalletClaims: rejectedWalletClaims.length,
+		rejectedWalletClaimAmount: n2(
+			rejectedWalletClaims.reduce((sum, tx) => sum + moneyNumber(tx.amount), 0)
+		),
 		transactions,
 		reservations,
 	};
@@ -535,6 +565,10 @@ exports.agentWalletSummary = async (req, res) => {
 				acc.totalCommission += item.totalCommission;
 				acc.commissionDue += item.commissionDue;
 				acc.pendingConfirmation += item.pendingConfirmation;
+				acc.pendingWalletClaims += item.pendingWalletClaims || 0;
+				acc.pendingWalletClaimAmount += item.pendingWalletClaimAmount || 0;
+				acc.rejectedWalletClaims += item.rejectedWalletClaims || 0;
+				acc.rejectedWalletClaimAmount += item.rejectedWalletClaimAmount || 0;
 				return acc;
 			},
 			{
@@ -546,6 +580,10 @@ exports.agentWalletSummary = async (req, res) => {
 				totalCommission: 0,
 				commissionDue: 0,
 				pendingConfirmation: 0,
+				pendingWalletClaims: 0,
+				pendingWalletClaimAmount: 0,
+				rejectedWalletClaims: 0,
+				rejectedWalletClaimAmount: 0,
 			}
 		);
 
@@ -620,6 +658,11 @@ exports.createAgentWalletTransaction = async (req, res) => {
 			transactionType: normalizeTransactionType(body.transactionType),
 			amount,
 			currency: "SAR",
+			source: "manual",
+			status: "posted",
+			reviewStatus: "approved",
+			reviewedAt: new Date(),
+			reviewedBy: actorSnapshot(actor),
 			note: String(body.note || "").trim(),
 			reference: String(body.reference || "").trim(),
 			transactionDate: parseTransactionDate(body.transactionDate),
@@ -673,6 +716,16 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 			return res
 				.status(400)
 				.json({ error: "Reservation wallet deductions cannot be edited here" });
+		}
+		if (
+			transaction.source === "agent_claim" &&
+			transaction.status === "posted" &&
+			!canOverrideApprovedFinancials(actor, hotel)
+		) {
+			return res.status(403).json({
+				error:
+					"Approved wallet claims can only be changed by hotel managers or admins.",
+			});
 		}
 
 		const amount = n2(body.amount);
@@ -735,6 +788,16 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 				.status(400)
 				.json({ error: "Reservation wallet deductions cannot be deleted here" });
 		}
+		if (
+			transaction.source === "agent_claim" &&
+			transaction.status === "posted" &&
+			!canOverrideApprovedFinancials(actor, hotel)
+		) {
+			return res.status(403).json({
+				error:
+					"Approved wallet claims can only be changed by hotel managers or admins.",
+			});
+		}
 
 		transaction.status = "void";
 		transaction.voidedAt = new Date();
@@ -744,6 +807,298 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 		return res.json({ deleted: true, transactionId });
 	} catch (error) {
 		console.error("voidAgentWalletTransaction error:", error);
+		return res.status(500).json({ error: error.message });
+	}
+};
+
+exports.createAgentWalletClaim = async (req, res) => {
+	try {
+		const { hotelId, userId } = req.params;
+		const body = req.body || {};
+		const [actor, hotel] = await Promise.all([
+			getActor(req, userId),
+			getHotel(hotelId),
+		]);
+
+		if (!actor || !hotel || !canAccessHotelFinancials(actor, hotel)) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!isOrderTaker(actor) || canManageRole(actor)) {
+			return res.status(403).json({
+				error: "Only the assigned external agent can submit a wallet credit claim.",
+			});
+		}
+		if (
+			normalizeAgentCommercialModel(actor.agentCommercialModel) ===
+			"commission_only"
+		) {
+			return res.status(400).json({
+				error: "This agent is commission-only and does not have wallet credit.",
+			});
+		}
+
+		const amount = n2(body.amount);
+		if (!amount) {
+			return res.status(400).json({ error: "Amount is required" });
+		}
+
+		let attachments = [];
+		try {
+			attachments = await buildWalletAttachments(body.attachments, actor);
+		} catch (uploadError) {
+			return res.status(400).json({ error: uploadError.message });
+		}
+
+		const transaction = await AgentWallet.create({
+			hotelId: ObjectId(hotelId),
+			ownerId: ObjectId.isValid(normalizeId(hotel.belongsTo))
+				? ObjectId(normalizeId(hotel.belongsTo))
+				: null,
+			agentId: ObjectId(normalizeId(actor._id)),
+			transactionType: "deposit",
+			amount,
+			currency: "SAR",
+			source: "agent_claim",
+			status: "pending",
+			reviewStatus: "pending",
+			note: String(body.note || "").trim(),
+			reference: String(body.reference || "").trim(),
+			transactionDate: parseTransactionDate(body.transactionDate),
+			attachments,
+			createdBy: actorSnapshot(actor),
+		});
+
+		emitHotelNotificationRefresh(req, hotelId, {
+			type: "agent_wallet_claim",
+			walletTransactionId: transaction._id,
+			ownerId: hotel.belongsTo,
+		}).catch((error) =>
+			console.error("Error emitting wallet claim notification:", error)
+		);
+
+		return res.json({ transaction });
+	} catch (error) {
+		console.error("createAgentWalletClaim error:", error);
+		return res.status(500).json({ error: error.message });
+	}
+};
+
+exports.reviewAgentWalletClaim = async (req, res) => {
+	try {
+		const { hotelId, userId, transactionId } = req.params;
+		const body = req.body || {};
+		const action = String(body.action || "").trim().toLowerCase();
+		const [actor, hotel] = await Promise.all([
+			getActor(req, userId),
+			getHotel(hotelId),
+		]);
+
+		if (!actor || !hotel || !canManageHotelFinancials(actor, hotel)) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!["approve", "reject"].includes(action)) {
+			return res.status(400).json({ error: "Action must be approve or reject" });
+		}
+		if (!ObjectId.isValid(transactionId)) {
+			return res.status(400).json({ error: "Invalid transaction id" });
+		}
+
+		const transaction = await AgentWallet.findOne({
+			_id: ObjectId(transactionId),
+			hotelId: ObjectId(hotelId),
+			source: "agent_claim",
+			status: "pending",
+			reviewStatus: "pending",
+		}).exec();
+
+		if (!transaction) {
+			return res.status(404).json({ error: "Pending wallet claim was not found" });
+		}
+
+		const now = new Date();
+		if (action === "approve") {
+			transaction.status = "posted";
+			transaction.reviewStatus = "approved";
+			transaction.reviewedAt = now;
+			transaction.reviewedBy = actorSnapshot(actor);
+			transaction.rejectionReason = "";
+		} else {
+			const rejectionReason = String(body.rejectionReason || body.reason || "").trim();
+			if (!rejectionReason) {
+				return res.status(400).json({ error: "Rejection reason is required" });
+			}
+			transaction.status = "rejected";
+			transaction.reviewStatus = "rejected";
+			transaction.reviewedAt = now;
+			transaction.reviewedBy = actorSnapshot(actor);
+			transaction.rejectionReason = rejectionReason;
+		}
+		transaction.updatedBy = actorSnapshot(actor);
+		await transaction.save();
+
+		emitHotelNotificationRefresh(req, hotelId, {
+			type: action === "approve" ? "agent_wallet_claim_approved" : "agent_wallet_claim_rejected",
+			walletTransactionId: transaction._id,
+			ownerId: hotel.belongsTo,
+		}).catch((error) =>
+			console.error("Error emitting wallet claim review notification:", error)
+		);
+
+		return res.json({ transaction });
+	} catch (error) {
+		console.error("reviewAgentWalletClaim error:", error);
+		return res.status(500).json({ error: error.message });
+	}
+};
+
+exports.agentTodoList = async (req, res) => {
+	try {
+		const { hotelId, userId } = req.params;
+		const { agentId = "" } = req.query || {};
+		const [actor, hotel] = await Promise.all([
+			getActor(req, userId),
+			getHotel(hotelId),
+		]);
+
+		if (!actor || !hotel || !canAccessHotelFinancials(actor, hotel)) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+
+		const requestedAgentId = normalizeId(agentId) || normalizeId(actor._id);
+		if (!ObjectId.isValid(requestedAgentId)) {
+			return res.status(400).json({ error: "Valid agent is required" });
+		}
+		if (!actorCanSeeAgent(actor, requestedAgentId)) {
+			return res.status(403).json({ error: "Agent access denied" });
+		}
+
+		const reservationMatch = buildAgentReservationMatch(hotelId, requestedAgentId);
+		const reservationQuery = {
+			...reservationMatch,
+			$and: [
+				...(Array.isArray(reservationMatch.$and) ? reservationMatch.$and : []),
+				{
+					$or: [
+						{ reservation_status: /pending[\s_-]?confirmation/i },
+						{ state: /pending[\s_-]?confirmation/i },
+						{ "pendingConfirmation.status": "rejected" },
+						{ "commissionAgentApproval.status": { $in: ["pending", "rejected"] } },
+					],
+				},
+			],
+		};
+		delete reservationQuery.$or;
+		reservationQuery.$and.unshift({ $or: reservationMatch.$or || [] });
+
+		const [reservations, walletClaims] = await Promise.all([
+			Reservations.find(reservationQuery)
+				.select(
+					"_id confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionStatus commissionPaid commissionAgentApproval pendingConfirmation financial_cycle"
+				)
+				.sort({ updatedAt: -1, createdAt: -1 })
+				.limit(100)
+				.lean()
+				.exec(),
+			AgentWallet.find({
+				hotelId: ObjectId(hotelId),
+				agentId: ObjectId(requestedAgentId),
+				source: "agent_claim",
+				status: { $in: ["pending", "rejected"] },
+			})
+				.sort({ updatedAt: -1, createdAt: -1 })
+				.limit(50)
+				.lean()
+				.exec(),
+		]);
+
+		const reservationTodos = reservations.flatMap((reservation) => {
+			const todos = [];
+			const approvalStatus = String(
+				reservation?.commissionAgentApproval?.status || ""
+			).toLowerCase();
+			if (approvalStatus === "pending") {
+				todos.push({
+					type: "commission_agent_approval",
+					severity: "high",
+					reservationId: normalizeId(reservation._id),
+					confirmation_number: reservation.confirmation_number,
+					guestName: reservation.customer_details?.name || "",
+					amount: commissionAmount(reservation),
+					status: approvalStatus,
+					title: "Commission marked paid needs your approval",
+				});
+			}
+			if (approvalStatus === "rejected") {
+				todos.push({
+					type: "commission_agent_rejected",
+					severity: "medium",
+					reservationId: normalizeId(reservation._id),
+					confirmation_number: reservation.confirmation_number,
+					guestName: reservation.customer_details?.name || "",
+					amount: commissionAmount(reservation),
+					status: approvalStatus,
+					rejectionReason:
+						reservation.commissionAgentApproval?.rejectionReason || "",
+					title: "Commission payment is disputed",
+				});
+			}
+			const pendingStatus = String(
+				reservation?.pendingConfirmation?.status || ""
+			).toLowerCase();
+			const reservationStatus = String(
+				reservation.reservation_status || reservation.state || ""
+			).toLowerCase();
+			if (/pending[\s_-]?confirmation/i.test(reservationStatus)) {
+				todos.push({
+					type: "pending_confirmation",
+					severity: "medium",
+					reservationId: normalizeId(reservation._id),
+					confirmation_number: reservation.confirmation_number,
+					guestName: reservation.customer_details?.name || "",
+					status: reservation.reservation_status || reservation.state || "",
+					title: "Reservation is waiting for hotel confirmation",
+				});
+			}
+			if (pendingStatus === "rejected") {
+				todos.push({
+					type: "reservation_rejected",
+					severity: "high",
+					reservationId: normalizeId(reservation._id),
+					confirmation_number: reservation.confirmation_number,
+					guestName: reservation.customer_details?.name || "",
+					status: pendingStatus,
+					rejectionReason:
+						reservation.pendingConfirmation?.rejectionReason ||
+						reservation.agentDecisionSnapshot?.reason ||
+						"",
+					title: "Reservation was rejected by the hotel",
+				});
+			}
+			return todos;
+		});
+
+		const walletTodos = walletClaims.map((claim) => ({
+			type:
+				claim.status === "pending"
+					? "wallet_claim_pending"
+					: "wallet_claim_rejected",
+			severity: claim.status === "pending" ? "low" : "medium",
+			walletTransactionId: normalizeId(claim._id),
+			amount: n2(claim.amount),
+			status: claim.status,
+			rejectionReason: claim.rejectionReason || "",
+			reference: claim.reference || "",
+			attachments: claim.attachments || [],
+			title:
+				claim.status === "pending"
+					? "Wallet credit claim is waiting for approval"
+					: "Wallet credit claim was rejected",
+		}));
+
+		const data = [...reservationTodos, ...walletTodos];
+		return res.json({ total: data.length, data });
+	} catch (error) {
+		console.error("agentTodoList error:", error);
 		return res.status(500).json({ error: error.message });
 	}
 };

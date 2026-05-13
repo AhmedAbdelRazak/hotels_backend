@@ -185,6 +185,14 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		false;
 	const commissionPaid =
 		updates.commissionPaid ?? reservation?.commissionPaid ?? false;
+	const commissionAgentApproval =
+		updates.commissionAgentApproval ||
+		reservation?.commissionAgentApproval ||
+		{};
+	const commissionRequiresAgentApproval =
+		!!commissionPaid && commissionAgentApproval.required === true;
+	const commissionAgentApproved =
+		String(commissionAgentApproval.status || "").toLowerCase() === "approved";
 
 	let collectionModel = existingCycle.collectionModel || "pending";
 	if (pmsCollectedAmount > 0 && hotelCollectedAmount > 0) {
@@ -204,7 +212,9 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 			? commissionAmount
 			: 0;
 	const commissionSideClosed =
-		!!commissionPaid || (commissionWasReviewed && commissionAmount <= 0);
+		(!!commissionPaid &&
+			(!commissionRequiresAgentApproval || commissionAgentApproved)) ||
+		(commissionWasReviewed && commissionAmount <= 0);
 
 	const isClosed =
 		collectionModel === "pms_collected"
@@ -270,6 +280,7 @@ const TRACKED_RESERVATION_FIELDS = [
 	"commissionData",
 	"commissionPaid",
 	"commissionStatus",
+	"commissionAgentApproval",
 	"moneyTransferredToHotel",
 	"paid_amount_breakdown",
 	"paid_amount",
@@ -1430,6 +1441,98 @@ const resolveReservationAgent = async (reservation = {}) => {
 	}
 
 	return null;
+};
+
+const commissionAgentApprovalDefault = () => ({
+	required: false,
+	status: "not_required",
+	requestedAt: null,
+	requestedBy: null,
+	approvedAt: null,
+	approvedBy: null,
+	rejectedAt: null,
+	rejectedBy: null,
+	rejectionReason: "",
+	lastUpdatedAt: null,
+	lastUpdatedBy: null,
+});
+
+const buildCommissionAgentApprovalForFinanceUpdate = async ({
+	reservation,
+	updates = {},
+	actor = {},
+}) => {
+	const existingApproval =
+		reservation?.commissionAgentApproval &&
+		typeof reservation.commissionAgentApproval.toObject === "function"
+			? reservation.commissionAgentApproval.toObject()
+			: reservation?.commissionAgentApproval || {};
+	const current = {
+		...commissionAgentApprovalDefault(),
+		...existingApproval,
+	};
+	const paidProvided = Object.prototype.hasOwnProperty.call(
+		updates,
+		"commissionPaid"
+	);
+	const statusProvided = Object.prototype.hasOwnProperty.call(
+		updates,
+		"commissionStatus"
+	);
+	const nextPaid = paidProvided
+		? !!updates.commissionPaid
+		: statusProvided &&
+		  String(updates.commissionStatus || "").trim().toLowerCase() ===
+				"commission paid"
+		? true
+		: !!reservation?.commissionPaid;
+	const currentPaid = !!reservation?.commissionPaid;
+	const nextStatus = statusProvided
+		? String(updates.commissionStatus || "").trim().toLowerCase()
+		: nextPaid
+		? "commission paid"
+		: "";
+	const changingIntoPaid =
+		nextPaid &&
+		(!currentPaid ||
+			String(current.status || "").toLowerCase() === "rejected" ||
+			nextStatus === "commission paid");
+
+	if (!nextPaid) {
+		if (!current.required && current.status === "not_required") return null;
+		const now = new Date();
+		return {
+			...current,
+			required: false,
+			status: "not_required",
+			requestedAt: null,
+			requestedBy: null,
+			lastUpdatedAt: now,
+			lastUpdatedBy: actor,
+		};
+	}
+
+	if (!changingIntoPaid) return null;
+
+	const agent = await resolveReservationAgent(reservation);
+	if (!agent) {
+		return {
+			...current,
+			required: false,
+			status: "not_required",
+		};
+	}
+
+	const now = new Date();
+	return {
+		...commissionAgentApprovalDefault(),
+		required: true,
+		status: "pending",
+		requestedAt: now,
+		requestedBy: actor,
+		lastUpdatedAt: now,
+		lastUpdatedBy: actor,
+	};
 };
 
 const resolveSnapshotDate = (reservation = {}) => {
@@ -3972,6 +4075,34 @@ exports.updateReservation = async (req, res) => {
 				});
 			}
 		}
+		const financeSensitiveUpdateRequested = [
+			"commission",
+			"commissionPaid",
+			"commissionPaidAt",
+			"commissionStatus",
+			"commissionAgentApproval",
+			"financial_cycle",
+			"moneyTransferredToHotel",
+			"moneyTransferredAt",
+		].some((field) =>
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)
+		);
+		const financialCycleLocked =
+			String(existingReservation?.financial_cycle?.status || "").toLowerCase() ===
+				"closed" ||
+			String(existingReservation?.commissionAgentApproval?.status || "").toLowerCase() ===
+				"approved";
+		if (
+			financeSensitiveUpdateRequested &&
+			financialCycleLocked &&
+			requestingActor &&
+			!isManagerOrAdminAccount(requestingActor)
+		) {
+			return res.status(403).json({
+				error:
+					"This finance cycle is closed. Only hotel managers or admins can change it.",
+			});
+		}
 
 		const restrictedCashUserId = "6969d80da28c78c6280171df";
 		const normalizePaymentBreakdown = (breakdown = {}) => {
@@ -4138,6 +4269,39 @@ exports.updateReservation = async (req, res) => {
 			}
 		}
 
+		if (
+			normalizedUpdateData.commissionStatus &&
+			String(normalizedUpdateData.commissionStatus).trim().toLowerCase() ===
+				"commission paid" &&
+			normalizedUpdateData.commissionPaid === undefined
+		) {
+			normalizedUpdateData.commissionPaid = true;
+			if (!existingReservation.commissionPaid) {
+				normalizedUpdateData.commissionPaidAt = new Date();
+			}
+		}
+		if (
+			normalizedUpdateData.commissionPaid === true &&
+			!existingReservation.commissionPaid &&
+			normalizedUpdateData.commissionPaidAt === undefined
+		) {
+			normalizedUpdateData.commissionPaidAt = new Date();
+		}
+		if (
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commissionPaid") ||
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commissionStatus")
+		) {
+			const commissionAgentApproval =
+				await buildCommissionAgentApprovalForFinanceUpdate({
+					reservation: existingReservation,
+					updates: normalizedUpdateData,
+					actor: auditActor,
+				});
+			if (commissionAgentApproval) {
+				normalizedUpdateData.commissionAgentApproval = commissionAgentApproval;
+			}
+		}
+
 		const updateFieldChanged = (field) => {
 			if (!Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)) {
 				return false;
@@ -4151,6 +4315,7 @@ exports.updateReservation = async (req, res) => {
 		const touchesFinancialCycle = [
 			"commission",
 			"commissionPaid",
+			"commissionAgentApproval",
 			"moneyTransferredToHotel",
 			"paid_amount_breakdown",
 			"paid_amount",
@@ -4338,6 +4503,7 @@ exports.updateReservation = async (req, res) => {
 				"commissionData",
 				"commissionStatus",
 				"commissionPaid",
+				"commissionAgentApproval",
 			].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
 
 		if (shouldRefreshPendingNotifications) {
@@ -6128,6 +6294,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 								},
 							},
 							buildCommissionMissingFilter(),
+							{ "commissionAgentApproval.status": "pending" },
 						],
 					},
 				],
@@ -6135,7 +6302,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			const [rows, total] = await Promise.all([
 				Reservations.find(agentDecisionQuery)
 					.select(
-						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus financial_cycle agentDecisionSnapshot pendingConfirmation"
+						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
 					)
 					.sort({ updatedAt: -1, createdAt: -1 })
 					.limit(limit)
@@ -6158,9 +6325,15 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					const pendingReasons = isDecision
 						? []
 						: getPendingConfirmationReasons(reservation);
+					const commissionApprovalPending =
+						String(
+							reservation?.commissionAgentApproval?.status || ""
+						).toLowerCase() === "pending";
 					return {
 						_id: reservation._id,
-						notificationType: isDecision
+						notificationType: commissionApprovalPending
+							? "commission_agent_approval"
+							: isDecision
 							? "agent_decision"
 							: pendingReasons.includes("commission_missing") &&
 							  !pendingReasons.includes("pending_confirmation")
@@ -6179,6 +6352,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							reservation.reservation_status || reservation.state || "",
 						total_amount: reservation.total_amount || 0,
 						pendingReasons,
+						commissionAgentApproval:
+							reservation.commissionAgentApproval || null,
 						decisionStatus: decision.status || "",
 						decisionReason:
 							decision.reason ||
@@ -6338,6 +6513,17 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"commissionStatus",
 		].some((field) => Object.prototype.hasOwnProperty.call(body, field));
 		const isFinanceAction = action === "finance" || (!action && financeFieldsProvided);
+		const financialCycleLocked =
+			String(reservation?.financial_cycle?.status || "").toLowerCase() ===
+				"closed" ||
+			String(reservation?.commissionAgentApproval?.status || "").toLowerCase() ===
+				"approved";
+		if (isFinanceAction && financialCycleLocked && !isManagerOrAdminAccount(actor)) {
+			return res.status(403).json({
+				error:
+					"This finance cycle is closed. Only hotel managers or admins can change it.",
+			});
+		}
 		if (isFinanceOnlyAccount(actor) && !isFinanceAction) {
 			return res.status(403).json({
 				error: "Finance users can only assign or reconcile reservation commission.",
@@ -6361,6 +6547,26 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 				? reservation.pendingConfirmation.toObject()
 				: reservation.pendingConfirmation || {};
 		const updatePayload = {};
+		const statusDecisionAction = [
+			"confirm",
+			"reject",
+			"pending",
+			"revert",
+			"revert_to_pending",
+		].includes(action);
+		const statusDecisionLocked = ["confirmed", "rejected"].includes(
+			String(existingPending.status || "").toLowerCase()
+		);
+		if (
+			statusDecisionAction &&
+			statusDecisionLocked &&
+			!isManagerOrAdminAccount(actor)
+		) {
+			return res.status(403).json({
+				error:
+					"This reservation decision is locked. Only hotel managers or admins can change it.",
+			});
+		}
 
 		if (body.commission !== undefined) {
 			updatePayload.commission = n2(body.commission);
@@ -6396,6 +6602,30 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			updatePayload.commissionStatus = updatePayload.commissionPaid
 				? "commission paid"
 				: "commission due";
+		}
+		if (
+			updatePayload.commissionStatus &&
+			updatePayload.commissionStatus.toLowerCase() === "commission paid" &&
+			updatePayload.commissionPaid === undefined
+		) {
+			updatePayload.commissionPaid = true;
+			if (!reservation.commissionPaid) {
+				updatePayload.commissionPaidAt = now;
+			}
+		}
+		if (
+			Object.prototype.hasOwnProperty.call(updatePayload, "commissionPaid") ||
+			Object.prototype.hasOwnProperty.call(updatePayload, "commissionStatus")
+		) {
+			const commissionAgentApproval =
+				await buildCommissionAgentApprovalForFinanceUpdate({
+					reservation,
+					updates: updatePayload,
+					actor: auditActor,
+				});
+			if (commissionAgentApproval) {
+				updatePayload.commissionAgentApproval = commissionAgentApproval;
+			}
 		}
 
 		if (action === "confirm") {
@@ -6475,6 +6705,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"commissionData",
 			"commissionPaid",
 			"commissionStatus",
+			"commissionAgentApproval",
 		].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
 
 		if (touchesFinancialCycle) {
@@ -6615,6 +6846,164 @@ exports.reservationAgentWalletSnapshot = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Error reading reservation agent wallet snapshot:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.updateAgentCommissionApproval = async (req, res) => {
+	try {
+		const { reservationId, userId } = req.params;
+		const { action, reason = "" } = req.body || {};
+		const actorId = req.auth?._id || userId;
+		const normalizedAction = String(action || "").trim().toLowerCase();
+
+		if (!["approve", "reject"].includes(normalizedAction)) {
+			return res.status(400).json({ error: "Action must be approve or reject" });
+		}
+		if (!ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+
+		const [reservation, actor] = await Promise.all([
+			Reservations.findById(reservationId),
+			User.findById(actorId)
+				.select(
+					"_id name email role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+				)
+				.lean()
+				.exec(),
+		]);
+
+		if (!reservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+		if (!actor || actor.activeUser === false || !isOrderTakingAccount(actor)) {
+			return res
+				.status(403)
+				.json({ error: "Only the assigned agent can approve this commission status" });
+		}
+
+		const ownerClauses = buildAgentReservationOwnerClauses(actorId);
+		const ownsReservation = ownerClauses.some((clause) => {
+			const [path, value] = Object.entries(clause)[0] || [];
+			if (!path) return false;
+			const current = path.split(".").reduce((acc, part) => acc?.[part], reservation);
+			return normalizeId(current) === normalizeId(value);
+		});
+		if (!ownsReservation) {
+			return res.status(403).json({
+				error: "Agents can only approve commission status for their own reservations.",
+			});
+		}
+
+		const existingApproval =
+			reservation.commissionAgentApproval &&
+			typeof reservation.commissionAgentApproval.toObject === "function"
+				? reservation.commissionAgentApproval.toObject()
+				: reservation.commissionAgentApproval || {};
+		if (
+			!reservation.commissionPaid ||
+			existingApproval.required !== true ||
+			String(existingApproval.status || "").toLowerCase() !== "pending"
+		) {
+			return res.status(400).json({
+				error: "This reservation does not have a pending commission approval.",
+			});
+		}
+
+		const auditActor = await resolveReservationAuditActor(actorId, req.body, {
+			previewAuth: req.auth,
+		});
+		const now = new Date();
+		const updatePayload = {};
+
+		if (normalizedAction === "approve") {
+			updatePayload.commissionAgentApproval = {
+				...commissionAgentApprovalDefault(),
+				...existingApproval,
+				required: true,
+				status: "approved",
+				approvedAt: now,
+				approvedBy: auditActor,
+				rejectedAt: null,
+				rejectedBy: null,
+				rejectionReason: "",
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+		} else {
+			const rejectionReason = String(reason || "").trim();
+			if (!rejectionReason) {
+				return res
+					.status(400)
+					.json({ error: "Rejection reason is required" });
+			}
+			updatePayload.commissionPaid = false;
+			updatePayload.commissionPaidAt = null;
+			updatePayload.commissionStatus = "commission disputed";
+			updatePayload.commissionAgentApproval = {
+				...commissionAgentApprovalDefault(),
+				...existingApproval,
+				required: true,
+				status: "rejected",
+				rejectedAt: now,
+				rejectedBy: auditActor,
+				rejectionReason,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			};
+		}
+
+		updatePayload.financial_cycle = buildFinancialCycleSnapshot(
+			reservation,
+			updatePayload,
+			actorId
+		);
+
+		const auditEntries = buildReservationAuditEntries(
+			reservation,
+			updatePayload,
+			auditActor
+		);
+		const updateOperation = {
+			$set: {
+				...updatePayload,
+				adminLastUpdatedAt: now,
+				adminLastUpdatedBy: auditActor,
+			},
+		};
+		if (auditEntries.length) {
+			updateOperation.$push = {
+				adminChangeLog: { $each: auditEntries },
+				reservationAuditLog: { $each: auditEntries },
+			};
+		}
+
+		const updatedReservation = await Reservations.findByIdAndUpdate(
+			reservationId,
+			updateOperation,
+			{ new: true }
+		)
+			.lean()
+			.exec();
+
+		emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
+			type:
+				normalizedAction === "approve"
+					? "commission_agent_approved"
+					: "commission_agent_rejected",
+			reservationId: updatedReservation._id,
+			ownerId: updatedReservation.belongsTo,
+		}).catch((error) =>
+			console.error("Error emitting commission approval notification:", error)
+		);
+
+		return res.json({ reservation: updatedReservation });
+	} catch (error) {
+		console.error("Error updating agent commission approval:", error);
 		return res.status(500).json({ error: "Server error: " + error.message });
 	}
 };

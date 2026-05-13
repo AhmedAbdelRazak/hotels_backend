@@ -368,11 +368,12 @@ exports.getHotelFromSlug = async (req, res) => {
 
 		const hotel = await HotelDetails.findOne({
 			hotelName: { $regex: new RegExp(`^${escaped}$`, "i") },
+			activateHotel: true,
 		}).lean();
 
 		if (!hotel) {
 			return res.status(404).json({
-				message: "No hotel found for the provided slug.",
+				message: "No active hotel found for the provided slug.",
 			});
 		}
 

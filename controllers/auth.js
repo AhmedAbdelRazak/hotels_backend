@@ -105,6 +105,56 @@ const waLinkFromE164 = (e164, text) => {
 	return `https://wa.me/${p}?text=${encodeURIComponent(text)}`;
 };
 
+const trimTrailingSlash = (value = "") =>
+	String(value || "")
+		.trim()
+		.replace(/\/+$/, "");
+
+const requestOrigin = (req) => {
+	const raw = req.get("origin") || req.get("referer") || "";
+	if (!raw) return "";
+	try {
+		return trimTrailingSlash(new URL(raw).origin).toLowerCase();
+	} catch {
+		return trimTrailingSlash(raw).toLowerCase();
+	}
+};
+
+const getResetClientBaseUrl = (req, requestedClient = "") => {
+	const publicUrl = trimTrailingSlash(
+		process.env.PUBLIC_CLIENT_URL || process.env.CLIENT_URL || "http://localhost:3001"
+	);
+	const hotelUrl = trimTrailingSlash(
+		process.env.CLIENT_URL_XHOTEL || "http://localhost:3000"
+	);
+	const client = String(
+		requestedClient || req.body?.client || req.body?.app || req.body?.source || ""
+	)
+		.trim()
+		.toLowerCase();
+
+	if (/^(jannat|public|guest|booking|jannatbooking)$/.test(client)) {
+		return publicUrl;
+	}
+	if (/^(hotel|hotels|xhotel|pms|admin|manager)$/.test(client)) {
+		return hotelUrl;
+	}
+
+	const origin = requestOrigin(req);
+	if (origin && origin === publicUrl.toLowerCase()) return publicUrl;
+	if (origin && origin === hotelUrl.toLowerCase()) return hotelUrl;
+
+	return hotelUrl;
+};
+
+const getForgotPasswordChannel = (raw = "") =>
+	isEmail(raw) ? "email" : "whatsapp";
+
+const resetResponseMessage = (channel) =>
+	channel === "email"
+		? "If an account exists, a reset link will be sent to that email."
+		: "If an account exists, a reset link will be sent to that WhatsApp number.";
+
 // reset email html (bilingual)
 const resetEmailHtml = ({ name, resetUrl, minutes }) => `
   <div style="font-family:Arial,sans-serif;line-height:1.55">
@@ -914,17 +964,24 @@ exports.isHotelOwner = (req, res, next) => {
 
 exports.forgotPassword = async (req, res) => {
 	try {
-		const { emailOrPhone, email, phone } = req.body;
+		const { emailOrPhone, email, phone, client } = req.body;
 		const raw = (emailOrPhone || email || phone || "").trim();
 		if (!raw)
 			return res.status(400).json({ error: "Please provide email or phone." });
+		const channel = getForgotPasswordChannel(raw);
+		const neutralMessage = resetResponseMessage(channel);
 
 		// 1) Locate the user (email exact OR phone in a few common formats)
 		let user = null;
-		if (isEmail(raw)) {
+		if (channel === "email") {
 			user = await User.findOne({ email: raw.toLowerCase() }).exec();
 		} else {
 			const digits = onlyDigits(raw);
+			if (!digits) {
+				return res
+					.status(400)
+					.json({ error: "Please provide a valid email or phone." });
+			}
 			const candidates = [digits, `+${digits}`];
 			for (const c of candidates) {
 				user = await User.findOne({ phone: c }).exec();
@@ -941,8 +998,12 @@ exports.forgotPassword = async (req, res) => {
 		//    But only actually send WA/email if the user exists.
 		if (!user) {
 			return res.json({
-				message:
-					"If an account exists, you will receive a reset link shortly (email + WhatsApp).",
+				message: neutralMessage,
+				via: {
+					requested: channel,
+					emailUser: channel === "email" ? "unknown" : "not_requested",
+					whatsapp: channel === "whatsapp" ? "unknown" : "not_requested",
+				},
 			});
 		}
 
@@ -955,7 +1016,8 @@ exports.forgotPassword = async (req, res) => {
 		user.resetPasswordLink = token;
 		await user.save();
 
-		const resetUrl = `${process.env.CLIENT_URL_XHOTEL}/auth/password/reset/${token}`;
+		const resetClientBaseUrl = getResetClientBaseUrl(req, client);
+		const resetUrl = `${resetClientBaseUrl}/auth/password/reset/${token}`;
 
 		// 4) Prepare emails (user + admin)
 		const emailToUser = {
@@ -979,19 +1041,35 @@ exports.forgotPassword = async (req, res) => {
           <p><strong>User:</strong> ${user.name}</p>
           <p><strong>Email:</strong> ${user.email || "-"}</p>
           <p><strong>Phone:</strong> ${user.phone || "-"}</p>
-          <p><strong>Reset URL:</strong> <a href="${resetUrl}">${resetUrl}</a></p>
+          <p><strong>Requested delivery:</strong> ${channel}</p>
+          <p><strong>Reset client:</strong> ${resetClientBaseUrl}</p>
         </div>
       `,
 		};
 
-		// 5) Attempt WhatsApp via Twilio content template
+		// 5) Attempt WhatsApp only when the user typed a phone number.
 		let wa = null;
 		let wa_link = null;
-		try {
-			wa = await waSendResetPasswordLink(user, resetUrl);
-			if (wa?.skipped) {
-				// Build a wa.me fallback if number exists but Twilio not available or phone invalid
-				// Try to generate E.164 from user.phone; if fails use raw digits (best effort)
+		if (channel === "whatsapp") {
+			try {
+				wa = await waSendResetPasswordLink(user, resetUrl);
+				if (wa?.skipped) {
+					// Build a wa.me fallback if Twilio cannot send directly.
+					let e164 = null;
+					try {
+						e164 = await ensureE164Phone({
+							nationality: user?.hotelCountry || user?.nationality || null,
+							rawPhone: user?.phone,
+							fallbackRegion: "SA",
+						});
+					} catch {}
+					if (e164)
+						wa_link = waLinkFromE164(
+							e164,
+							buildWaText({ name: user.name, url: resetUrl })
+						);
+				}
+			} catch (e) {
 				let e164 = null;
 				try {
 					e164 = await ensureE164Phone({
@@ -1006,27 +1084,14 @@ exports.forgotPassword = async (req, res) => {
 						buildWaText({ name: user.name, url: resetUrl })
 					);
 			}
-		} catch (e) {
-			// On Twilio error, fallback to wa.me if possible; DO NOT fail the whole flow
-			let e164 = null;
-			try {
-				e164 = await ensureE164Phone({
-					nationality: user?.hotelCountry || user?.nationality || null,
-					rawPhone: user?.phone,
-					fallbackRegion: "SA",
-				});
-			} catch {}
-			if (e164)
-				wa_link = waLinkFromE164(
-					e164,
-					buildWaText({ name: user.name, url: resetUrl })
-				);
 		}
 
 		// 6) Send emails (do not fail the whole flow if one email fails)
 		const emailResults = { user: null, admin: null };
 		try {
-			if (user.email) emailResults.user = await sgMail.send(emailToUser);
+			if (channel === "email" && user.email && !user.emailIsPlaceholder) {
+				emailResults.user = await sgMail.send(emailToUser);
+			}
 		} catch (e) {
 			console.log("SENDGRID user email error:", e?.message || e);
 		}
@@ -1038,17 +1103,25 @@ exports.forgotPassword = async (req, res) => {
 
 		// 7) Respond success; include wa_link if we built a fallback
 		return res.json({
-			message:
-				"If an account exists, you will receive a reset link shortly (email + WhatsApp).",
+			message: neutralMessage,
 			via: {
-				whatsapp: wa?.sid
-					? "sent"
-					: wa?.skipped
-					? "skipped"
-					: wa_link
-					? "wa_link"
-					: "unknown",
-				emailUser: user.email ? "attempted" : "no_email_on_file",
+				requested: channel,
+				whatsapp:
+					channel === "whatsapp"
+						? wa?.sid
+							? "sent"
+							: wa?.skipped
+							? "skipped"
+							: wa_link
+							? "wa_link"
+							: "unknown"
+						: "not_requested",
+				emailUser:
+					channel === "email"
+						? user.email && !user.emailIsPlaceholder
+							? "attempted"
+							: "no_email_on_file"
+						: "not_requested",
 				emailAdmin: "attempted",
 			},
 			wa_link, // optional – frontend may show a button "Open WhatsApp"

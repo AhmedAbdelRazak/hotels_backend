@@ -321,6 +321,23 @@ const reservationsSchema = new mongoose.Schema(
 		},
 		commissionPaidAt: { type: Date },
 
+		commissionAgentApproval: {
+			type: Object,
+			default: {
+				required: false,
+				status: "not_required",
+				requestedAt: null,
+				requestedBy: null,
+				approvedAt: null,
+				approvedBy: null,
+				rejectedAt: null,
+				rejectedBy: null,
+				rejectionReason: "",
+				lastUpdatedAt: null,
+				lastUpdatedBy: null,
+			},
+		},
+
 		pendingConfirmation: {
 			type: Object,
 			default: {
