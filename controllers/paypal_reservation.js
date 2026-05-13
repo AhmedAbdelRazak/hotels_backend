@@ -58,9 +58,20 @@ const {
 	decryptWithSecret,
 	verifyToken,
 } = require("./utils");
+const {
+	validateReservationInventoryForCreate,
+} = require("./reservations");
 
 /* Email setup */
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
+	message:
+		inventoryValidation.message ||
+		"Selected room type does not have enough available inventory.",
+	code: "inventory_unavailable",
+	inventory: inventoryValidation,
+});
 
 /* PayPal env/client */
 const IS_PROD = /prod/i.test(process.env.NODE_ENV);
@@ -1623,6 +1634,16 @@ exports.preparePendingReservation = async (req, res) => {
 			});
 		}
 
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			body,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return res
+				.status(409)
+				.json(buildInventoryUnavailableResponse(inventoryValidation));
+		}
+
 		const normalizedEmail = normalizeEmail(customerDetails.email);
 		const normalizedPhone = String(customerDetails.phone || "").trim();
 		if (!isLikelyEmail(normalizedEmail)) {
@@ -1821,6 +1842,17 @@ exports.createReservationAndProcess = async (req, res) => {
 		}
 		const { owner } = await getHotelAndOwner(hotelId);
 		const ownerEmail = owner?.email || null;
+
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			body,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return await fail(
+				409,
+				buildInventoryUnavailableResponse(inventoryValidation),
+			);
+		}
 
 		// Employee or Paid Offline (unchanged)
 		if (
@@ -5025,6 +5057,16 @@ exports.verifyReservationAndCreate = async (req, res) => {
 
 		// Duplicates
 		const reservationData = decoded;
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			reservationData,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return res
+				.status(409)
+				.json(buildInventoryUnavailableResponse(inventoryValidation));
+		}
+
 		const checkinDate = new Date(reservationData.checkin_date);
 
 		const exactDuplicate = await Reservations.findOne({

@@ -1231,6 +1231,9 @@ const sanitizeOrderTakerUpdate = (updates = {}) => {
 
 const normalizeId = (value) => String(value?._id || value || "").trim();
 
+exports.validateReservationInventoryForCreate =
+	validateReservationInventoryForCreate;
+
 const includesId = (list = [], targetId) =>
 	Array.isArray(list) &&
 	list.some((item) => normalizeId(item) === normalizeId(targetId));

@@ -36,8 +36,19 @@ const {
 	decryptWithSecret,
 	verifyToken,
 } = require("./utils");
+const {
+	validateReservationInventoryForCreate,
+} = require("./reservations");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
+	message:
+		inventoryValidation.message ||
+		"Selected room type does not have enough available inventory.",
+	code: "inventory_unavailable",
+	inventory: inventoryValidation,
+});
 
 async function getHotelAndOwner(hotelId) {
 	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
@@ -1016,6 +1027,16 @@ exports.createNewReservationClient = async (req, res) => {
 				.json({ message: "Invalid customer details provided." });
 		}
 
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			req.body,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return res
+				.status(409)
+				.json(buildInventoryUnavailableResponse(inventoryValidation));
+		}
+
 		// ========== Not Paid => send verification ==========
 		if (req.body.payment === "Not Paid") {
 			if (!email) {
@@ -1476,6 +1497,16 @@ exports.verifyReservationToken = async (req, res) => {
 
 		// Token is valid, extract the reservation data
 		let reservationData = decoded;
+
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			reservationData,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return res
+				.status(409)
+				.json(buildInventoryUnavailableResponse(inventoryValidation));
+		}
 
 		// Parse the check-in date from the reservation data
 		const checkinDate = new Date(reservationData.checkin_date);
@@ -3412,6 +3443,16 @@ exports.createNewReservationClient2 = async (req, res) => {
 			return null;
 		};
 		/** ------------------ END DUPLICATE GUARD (helpers) ------------------ */
+
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			req.body,
+			{ allowOverbook: false },
+		);
+		if (!inventoryValidation.allowed) {
+			return res
+				.status(409)
+				.json(buildInventoryUnavailableResponse(inventoryValidation));
+		}
 
 		// 1) Employee direct creation (duplicate guard is applied here)
 		if (sentFrom === "employee") {
