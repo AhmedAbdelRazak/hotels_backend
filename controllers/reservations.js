@@ -2533,6 +2533,24 @@ const buildReservationSearchMatch = (searchQuery) => {
 	};
 };
 
+const reservationListSortFromFilters = (filters = {}, fallback = "booked_at") => {
+	const allowedSortFields = new Set([
+		"bookingSortDate",
+		"booked_at",
+		"createdAt",
+		"checkin_date",
+		"checkout_date",
+		"booking_source",
+		"reservation_status",
+		"total_amount",
+	]);
+	const requested = String(filters.sortBy || fallback || "booked_at").trim();
+	const sortBy = allowedSortFields.has(requested) ? requested : "booked_at";
+	const direction =
+		String(filters.sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
+	return { [sortBy]: direction, _id: -1 };
+};
+
 exports.reservationById = (req, res, next, id) => {
 	Reservations.findById(id).exec((err, reservations) => {
 		if (err || !reservations) {
@@ -3223,7 +3241,7 @@ exports.getListOfReservations = async (req, res) => {
 		}
 
 		pipeline.push(
-			{ $sort: { booked_at: -1 } },
+			{ $sort: reservationListSortFromFilters(parsedFilters) },
 			{ $skip: (parsedPage - 1) * parsedRecords },
 			{ $limit: parsedRecords }
 		);
@@ -7092,7 +7110,15 @@ exports.pendingConfirmationReservations = async (req, res) => {
 					},
 				},
 			},
-			{ $sort: { bookingSortDate: 1, createdAt: 1 } },
+			{
+				$sort: reservationListSortFromFilters(
+					{
+						sortBy: req.query?.sortBy || "bookingSortDate",
+						sortOrder: req.query?.sortOrder || "asc",
+					},
+					"bookingSortDate"
+				),
+			},
 		];
 
 		const [rows, total] = await Promise.all([

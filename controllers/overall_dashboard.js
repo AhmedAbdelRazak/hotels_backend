@@ -30,6 +30,8 @@ const SIGNUP_INVITATION_DAYS = 30;
 
 const DONE_RESERVATION_STATUS =
 	/checked[-_\s]?out|early[-_\s]?checked[-_\s]?out|closed|cancelled|canceled|no[-_\s]?show/i;
+const CHECKED_OUT_STATUS = /checked[-_\s]?out|early[-_\s]?checked[-_\s]?out|closed/i;
+const CONFIRMED_STATUS = /confirmed|^ok$/i;
 const CANCELLED_STATUS = /cancelled|canceled/i;
 const NO_SHOW_STATUS = /no[-_\s]?show/i;
 const IN_HOUSE_STATUS = /house|in[-_\s]?house|checked[-_\s]?in/i;
@@ -483,26 +485,86 @@ const applyDateFilter = (match, query = {}) => {
 	return { dateField, period };
 };
 
-const reservationStatusFilter = (status = "") => {
+const reservationPrimaryStatusMissingFilter = () => ({
+	$or: [
+		{ reservation_status: { $exists: false } },
+		{ reservation_status: null },
+		{ reservation_status: "" },
+	],
+});
+
+const reservationStatusOrStateFallbackFilter = (statusMatcher) => ({
+	$or: [
+		{ reservation_status: statusMatcher },
+		{
+			$and: [
+				reservationPrimaryStatusMissingFilter(),
+				{ state: statusMatcher },
+			],
+		},
+	],
+});
+
+const singleReservationStatusFilter = (status = "") => {
 	const normalized = String(status || "").trim().toLowerCase();
+	const statusKey = normalized.replace(/[_-]+/g, " ").replace(/\s+/g, " ");
 	if (!normalized || normalized === "all") return null;
-	if (normalized === "active") return { reservation_status: { $not: DONE_RESERVATION_STATUS } };
-	if (normalized === "cancelled" || normalized === "canceled")
-		return { reservation_status: CANCELLED_STATUS };
-	if (normalized === "no_show") return { reservation_status: NO_SHOW_STATUS };
-	if (normalized === "inhouse" || normalized === "in_house")
-		return { reservation_status: IN_HOUSE_STATUS };
-	if (normalized === "pending") {
+	if (statusKey === "active") {
+		return {
+			$nor: [
+				{ reservation_status: DONE_RESERVATION_STATUS },
+				{ state: DONE_RESERVATION_STATUS },
+			],
+		};
+	}
+	if (statusKey === "cancelled" || statusKey === "canceled")
+		return reservationStatusOrStateFallbackFilter(CANCELLED_STATUS);
+	if (statusKey === "confirmed" || statusKey === "ok")
+		return reservationStatusOrStateFallbackFilter(CONFIRMED_STATUS);
+	if (statusKey === "no show")
+		return reservationStatusOrStateFallbackFilter(NO_SHOW_STATUS);
+	if (["inhouse", "in house", "checked in"].includes(statusKey))
+		return reservationStatusOrStateFallbackFilter(IN_HOUSE_STATUS);
+	if (
+		/^(early\s*)?checked\s*out$/.test(statusKey) ||
+		statusKey === "closed"
+	)
+		return reservationStatusOrStateFallbackFilter(CHECKED_OUT_STATUS);
+	if (statusKey === "pending finance review")
+		return reservationStatusOrStateFallbackFilter(PENDING_FINANCE_REVIEW_STATUS);
+	if (statusKey === "pending agent commission approval")
+		return reservationStatusOrStateFallbackFilter(PENDING_AGENT_COMMISSION_STATUS);
+	if (statusKey === "finance rejected")
+		return reservationStatusOrStateFallbackFilter(FINANCE_REJECTED_STATUS);
+	if (statusKey === "pending") {
 		return {
 			$or: [
 				{ reservation_status: PENDING_CONFIRMATION_STATUS },
-				{ state: PENDING_CONFIRMATION_STATUS },
+				{
+					$and: [
+						reservationPrimaryStatusMissingFilter(),
+						{ state: PENDING_CONFIRMATION_STATUS },
+					],
+				},
 				{ "pendingConfirmation.status": { $in: ["pending", "rejected"] } },
 				{ "agentDecisionSnapshot.status": { $in: ["pending", "rejected"] } },
 			],
 		};
 	}
-	return { reservation_status: new RegExp(escapeRegex(normalized), "i") };
+	const regex = new RegExp(escapeRegex(statusKey).replace(/\\ /g, "[-_\\s]?"), "i");
+	return reservationStatusOrStateFallbackFilter(regex);
+};
+
+const reservationStatusFilter = (status = "") => {
+	const statuses = parseQueryList(status).filter(
+		(item) => String(item || "").trim().toLowerCase() !== "all"
+	);
+	if (!statuses.length) return null;
+	const filters = statuses
+		.map((item) => singleReservationStatusFilter(item))
+		.filter(Boolean);
+	if (!filters.length) return null;
+	return filters.length === 1 ? filters[0] : { $or: filters };
 };
 
 const isOrderTakerOnly = (actor = {}) => {
@@ -642,9 +704,12 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 	const clauses = [];
 	const statusFilter = reservationStatusFilter(query.status);
 	if (statusFilter) clauses.push(statusFilter);
-	if (query.bookingSource) {
+	const bookingSources = parseQueryList(query.bookingSource);
+	if (bookingSources.length) {
 		clauses.push({
-			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
+			$or: bookingSources.map((source) => ({
+				booking_source: new RegExp(escapeRegex(source), "i"),
+			})),
 		});
 	}
 	if (query.payment) {
@@ -732,6 +797,7 @@ const sortFromQuery = (query = {}) => {
 		"checkout_date",
 		"total_amount",
 		"reservation_status",
+		"booking_source",
 		"hotelName",
 		"updatedAt",
 	]);

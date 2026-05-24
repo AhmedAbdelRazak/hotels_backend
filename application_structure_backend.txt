@@ -80,6 +80,7 @@ Critical Backend Authorization Helpers
   - requireOverallSection, canAccessOverallSection, and getAccessibleOverallHotels are the main overall-dashboard guards.
   - Owner-like access is not the same as global access. System admins and scoped managers must still be limited to assigned hotels.
   - Platform super admins must load overall hotels globally by default. ownerId may narrow the view, but stale hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport values on the super-admin account must never restrict global access.
+  - Overall reservation list sorting supports the frontend sort controls for booking source, hotel name, arrival date, and departure date through sortFromQuery.
 - controllers/reservations.js
   - canCreateReservationForActor and canViewReservationHotel protect reservation creation and visibility.
   - Order takers are restricted to their allowed reservation flows and own reservation records.
@@ -88,6 +89,7 @@ Critical Backend Authorization Helpers
   - canManageHotelStaff protects staff/account management by hotel scope.
   - isPlatformSuperAdmin must be treated as an unrestricted staff/account-management actor. Super admins can update any hotel staff or owner-like account through PUT /hotel-staff/:staffId/:hotelId/:userId.
   - updateHotelStaffUser must recognize root owner accounts by _id === ownerId and hotelIdsOwner, not only belongsToId. Root owner accounts normally have no belongsToId and should not be rejected as "not belonging to this hotel".
+  - Agent and employee activation from the overall activate-accounts screen should still go through updateHotelStaffUser, not the System Admin endpoint, so activeUser, agentApproval/applicationReview, approvedHotelIds, notifications, and ActivityTracker updates remain consistent.
 - controllers/agent_wallet.js
   - Financial access guards protect agent wallet, claims, transactions, and commission review.
   - Wallet claim statuses drive finance reporting: posted/approved movements are accepted and can affect wallet totals; pending/rejected/void movements must remain visible for audit but are reconciliationEligible = false and must never be included in reservation reconciliation totals. Both status and reviewStatus must be checked so mixed legacy records cannot slip into totals.
@@ -251,3 +253,13 @@ Backend Change Checklist
 - When adding fields to models, update both create and update controllers, relevant report aggregations, imports/exports, and frontend API clients.
 - When adding a route, place the route in ./routes and the business logic in ./controllers unless the local pattern clearly differs.
 - When changing reservation or housekeeping status behavior, test owner, super admin, system admin, hotel manager, reception, finance, order taker, reservation employee, housekeeping manager, and housekeeper scenarios.
+
+Final Production Readiness Notes
+- Overall reservation queries must remain scoped by actor role and assigned hotels. Approved agents/order takers may read their own overall pending/finance reservations only; hotel staff, managers, system admins, and super admins keep their broader authorized queue visibility.
+- Overall reservation list sorting is backend-supported for the frontend table controls. Keep sort keys such as booking_source, hotel, check-in, and checkout routed through controllers/overall_dashboard.js without bypassing hotel-scope or agent-scope filtering.
+- Reservation sorting must support creation date in addition to booking date, source, arrival/check-in, and departure/check-out. Overall reservations use controllers/overall_dashboard.js; single-hotel reservation lists and pending-confirmation queues use controllers/reservations.js and must keep auth/hotel/agent scope checks before sorting.
+- Overall reservation filters accept repeated or comma-separated hotelId, status, and bookingSource query params. Preserve parseQueryList behavior so frontend multi-select filters can send several values without bypassing hotel/role scoping.
+- Overall reservation status filtering normalizes user-facing status names to lifecycle aliases before querying. Examples: Checked Out matches checked_out, early_checked_out, and closed; Confirmed also covers legacy ok; and state is only used as a fallback when reservation_status is missing/blank so old state values cannot pollute filtered results.
+- Financial and reservation notification routes must keep acknowledgement notifications separate from operational queue notifications. Ackable account/wallet/reservation decisions can disappear after click; pending reservation confirmation and pending financial actions must remain until the workflow state changes.
+- Tracker privacy remains production-critical. Any admin/super-admin/system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
+- For production readiness, run node --check server.js, node --check controllers/overall_dashboard.js, git diff --check, and a scoped manual test of signup invitation, activation, agent pending reservations, finance actions, notifications, and super-admin account updates.
