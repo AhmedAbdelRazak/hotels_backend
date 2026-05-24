@@ -18,6 +18,10 @@ const crypto = require("crypto");
 
 const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
+const {
+	resolveAuditViewerFromRequest,
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
 
 /* ─────────── Env & PayPal client ─────────── */
 const IS_PROD = /prod/i.test(process.env.NODE_ENV);
@@ -562,7 +566,8 @@ exports.listHotelCommissions = async (req, res) => {
 		}
 
 		// <<< CHANGED: richer projection so UI can show notes/last updated & USD >>>
-		const raw = await Reservations.find(
+		const auditViewer = await resolveAuditViewerFromRequest(req);
+		const rawRows = await Reservations.find(
 			{ hotelId },
 			{
 				confirmation_number: 1,
@@ -591,6 +596,10 @@ exports.listHotelCommissions = async (req, res) => {
 				updatedAt: 1, // <<< ADDED
 			}
 		).lean();
+		const raw = sanitizeReservationAuditLogsCollectionForViewer(
+			rawRows,
+			auditViewer
+		);
 
 		const derived = raw
 			.filter((r) => statusIncluded(r?.reservation_status))

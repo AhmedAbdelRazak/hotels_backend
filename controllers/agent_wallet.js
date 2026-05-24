@@ -8,6 +8,7 @@ const AgentWallet = require("../models/agent_wallet");
 const Reservations = require("../models/reservations");
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
+const ActivityTracker = require("../models/activity_tracker");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 const ObjectId = mongoose.Types.ObjectId;
@@ -95,7 +96,13 @@ const canAccessHotelFinancials = (actor = {}, hotel = {}) => {
 const canManageHotelFinancials = (actor = {}, hotel = {}) => {
 	if (!canAccessHotelFinancials(actor, hotel)) return false;
 	if (isSuperAdmin(actor) || hasRole(actor, 1000)) return true;
-	if (hasRole(actor, 2000) || hasRoleDescription(actor, "hotelmanager")) return true;
+	if (
+		hasRole(actor, 2000) ||
+		hasRole(actor, 10000) ||
+		hasRoleDescription(actor, "hotelmanager") ||
+		hasRoleDescription(actor, "systemadmin") ||
+		hasRoleDescription(actor, "system admin")
+	) return true;
 	if (hasRole(actor, 6000) || hasRoleDescription(actor, "finance")) return true;
 	return false;
 };
@@ -106,7 +113,10 @@ const canOverrideApprovedFinancials = (actor = {}, hotel = {}) => {
 		isSuperAdmin(actor) ||
 		hasRole(actor, 1000) ||
 		hasRole(actor, 2000) ||
-		hasRoleDescription(actor, "hotelmanager")
+		hasRole(actor, 10000) ||
+		hasRoleDescription(actor, "hotelmanager") ||
+		hasRoleDescription(actor, "systemadmin") ||
+		hasRoleDescription(actor, "system admin")
 	);
 };
 
@@ -114,7 +124,10 @@ const canManageRole = (actor = {}) =>
 	isSuperAdmin(actor) ||
 	hasRole(actor, 1000) ||
 	hasRole(actor, 2000) ||
+	hasRole(actor, 10000) ||
 	hasRoleDescription(actor, "hotelmanager") ||
+	hasRoleDescription(actor, "systemadmin") ||
+	hasRoleDescription(actor, "system admin") ||
 	hasRole(actor, 6000) ||
 	hasRoleDescription(actor, "finance");
 
@@ -213,6 +226,32 @@ const reservationIsDeductible = (reservation = {}) => {
 	return !/(cancelled|canceled|rejected)/i.test(status);
 };
 
+const walletTransactionFinancialStatus = (transaction = {}) => {
+	const status = String(transaction.status || "").trim().toLowerCase();
+	const reviewStatus = String(transaction.reviewStatus || "").trim().toLowerCase();
+	if (status === "rejected" || reviewStatus === "rejected") return "rejected";
+	if (status === "pending" || reviewStatus === "pending") return "pending";
+	if (status === "void") return "void";
+	if (
+		status === "posted" ||
+		reviewStatus === "approved" ||
+		reviewStatus === "not_required" ||
+		(!status && !reviewStatus)
+	) {
+		return "accepted";
+	}
+	return status || reviewStatus || "accepted";
+};
+
+const walletTransactionReconciliationEligible = (transaction = {}) =>
+	walletTransactionFinancialStatus(transaction) === "accepted";
+
+const decorateWalletTransactionForReport = (transaction = {}) => ({
+	...transaction,
+	financialStatus: walletTransactionFinancialStatus(transaction),
+	reconciliationEligible: walletTransactionReconciliationEligible(transaction),
+});
+
 const commissionAmount = (reservation = {}) =>
 	n2(
 		moneyNumber(reservation.commission) ||
@@ -224,7 +263,99 @@ const actorSnapshot = (actor = {}) => ({
 	name: actor.name || actor.email || "",
 	email: actor.email || "",
 	role: actor.role || "",
+	roleDescription: actor.roleDescription || "",
 });
+
+const normalizeTrackerRoleKey = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[\s_-]+/g, "")
+		.trim();
+
+const trackerVisibilityForActor = (actor = {}) => {
+	const values = [
+		actor.role,
+		actor.roleDescription,
+		...(Array.isArray(actor.roles) ? actor.roles : []),
+		...(Array.isArray(actor.roleDescriptions) ? actor.roleDescriptions : []),
+	];
+	const roleNumbers = values
+		.map((role) => Number(role))
+		.filter((role) => Number.isFinite(role));
+	const roleKeys = values.map(normalizeTrackerRoleKey).filter(Boolean);
+	const privileged =
+		roleNumbers.some((role) => role === 1000 || role === 10000) ||
+		roleKeys.some((role) =>
+			[
+				"admin",
+				"administrator",
+				"platformadmin",
+				"superadmin",
+				"systemadmin",
+				"systemadministrator",
+			].includes(role)
+		);
+	return privileged ? "super_admin_only" : "standard";
+};
+
+const trackerObjectId = (value) => {
+	const normalized = normalizeId(value);
+	return ObjectId.isValid(normalized) ? ObjectId(normalized) : null;
+};
+
+const requestSnapshot = (req = {}) => ({
+	ipAddress: req.ip || req.headers?.["x-forwarded-for"] || "",
+	userAgent: req.headers?.["user-agent"] || "",
+	method: req.method || "",
+	path: req.originalUrl || req.url || "",
+});
+
+const trackWalletActivity = async (
+	req,
+	{
+		action,
+		description = "",
+		actor = {},
+		transaction = {},
+		hotel = {},
+		change = {},
+		metadata = {},
+	} = {}
+) => {
+	try {
+		const actorDetails = actorSnapshot(actor);
+		await ActivityTracker.create({
+			action,
+			category: "agent_wallet",
+			source: "hotel_management",
+			description,
+			visibility: trackerVisibilityForActor(actorDetails),
+			actor: actorDetails,
+			entityType: "agent_wallet_transaction",
+			entityModel: "AgentWallet",
+			entityId: trackerObjectId(transaction?._id),
+			hotelId: trackerObjectId(transaction?.hotelId || hotel?._id),
+			ownerId: trackerObjectId(transaction?.ownerId || hotel?.belongsTo),
+			change,
+			metadata: {
+				agentId: normalizeId(transaction?.agentId),
+				transactionType: transaction?.transactionType || "",
+				amount: transaction?.amount || 0,
+				status: transaction?.status || "",
+				reviewStatus: transaction?.reviewStatus || "",
+				source: transaction?.source || "",
+				reference: transaction?.reference || "",
+				attachmentsCount: Array.isArray(transaction?.attachments)
+					? transaction.attachments.length
+					: 0,
+				...metadata,
+			},
+			request: requestSnapshot(req),
+		});
+	} catch (error) {
+		console.error("trackWalletActivity error:", error);
+	}
+};
 
 const allowedTransactionTypes = ["deposit", "debit", "adjustment", "refund"];
 
@@ -367,7 +498,14 @@ const calculateAgentWalletSummary = async ({
 	const walletPostedMatch = {
 		hotelId: ObjectId(hotelId),
 		agentId: ObjectId(agentId),
-		$or: [{ status: "posted" }, { status: { $exists: false } }, { status: null }],
+		status: { $nin: ["pending", "rejected", "void"] },
+		reviewStatus: { $nin: ["pending", "rejected"] },
+		$or: [
+			{ status: "posted" },
+			{ status: { $exists: false } },
+			{ status: null },
+			{ status: "" },
+		],
 	};
 	const reservationBaseMatch = buildAgentReservationMatch(hotelId, agentId);
 
@@ -456,10 +594,11 @@ const calculateAgentWalletSummary = async ({
 	);
 	const walletUsed = n2(reservationWalletDeducted + transactionTotals.manualDebits);
 	const balance = n2(walletAdded - walletUsed);
-	const pendingWalletClaims = transactions.filter(
+	const decoratedTransactions = transactions.map(decorateWalletTransactionForReport);
+	const pendingWalletClaims = decoratedTransactions.filter(
 		(tx) => tx.source === "agent_claim" && tx.status === "pending"
 	);
-	const rejectedWalletClaims = transactions.filter(
+	const rejectedWalletClaims = decoratedTransactions.filter(
 		(tx) => tx.source === "agent_claim" && tx.status === "rejected"
 	);
 
@@ -500,7 +639,7 @@ const calculateAgentWalletSummary = async ({
 		rejectedWalletClaimAmount: n2(
 			rejectedWalletClaims.reduce((sum, tx) => sum + moneyNumber(tx.amount), 0)
 		),
-		transactions,
+		transactions: decoratedTransactions,
 		reservations,
 	};
 };
@@ -563,6 +702,7 @@ exports.agentWalletSummary = async (req, res) => {
 				acc.totalReservations += item.totalReservations;
 				acc.totalReservationValue += item.totalReservationValue;
 				acc.totalCommission += item.totalCommission;
+				acc.commissionPaid += item.commissionPaid;
 				acc.commissionDue += item.commissionDue;
 				acc.pendingConfirmation += item.pendingConfirmation;
 				acc.pendingWalletClaims += item.pendingWalletClaims || 0;
@@ -578,6 +718,7 @@ exports.agentWalletSummary = async (req, res) => {
 				totalReservations: 0,
 				totalReservationValue: 0,
 				totalCommission: 0,
+				commissionPaid: 0,
 				commissionDue: 0,
 				pendingConfirmation: 0,
 				pendingWalletClaims: 0,
@@ -670,6 +811,14 @@ exports.createAgentWalletTransaction = async (req, res) => {
 			createdBy: actorSnapshot(actor),
 		});
 
+		await trackWalletActivity(req, {
+			action: "agent_wallet_manual_transaction_created",
+			description: "Manual agent wallet movement was created by finance.",
+			actor,
+			transaction,
+			hotel,
+		});
+
 		const summary = await calculateAgentWalletSummary({
 			agent,
 			hotelId,
@@ -750,6 +899,23 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 
 		await transaction.save();
 
+		await trackWalletActivity(req, {
+			action: "agent_wallet_transaction_updated",
+			description: "Agent wallet movement was updated.",
+			actor,
+			transaction,
+			hotel,
+			change: {
+				field: "wallet_transaction",
+				from: "previous_values",
+				to: {
+					transactionType: transaction.transactionType,
+					amount: transaction.amount,
+					transactionDate: transaction.transactionDate,
+				},
+			},
+		});
+
 		return res.json({ transaction });
 	} catch (error) {
 		console.error("updateAgentWalletTransaction error:", error);
@@ -804,6 +970,19 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 		transaction.voidedBy = actorSnapshot(actor);
 		await transaction.save();
 
+		await trackWalletActivity(req, {
+			action: "agent_wallet_transaction_voided",
+			description: "Agent wallet movement was voided.",
+			actor,
+			transaction,
+			hotel,
+			change: {
+				field: "status",
+				from: "posted",
+				to: "void",
+			},
+		});
+
 		return res.json({ deleted: true, transactionId });
 	} catch (error) {
 		console.error("voidAgentWalletTransaction error:", error);
@@ -842,11 +1021,28 @@ exports.createAgentWalletClaim = async (req, res) => {
 			return res.status(400).json({ error: "Amount is required" });
 		}
 
+		if (!Array.isArray(body.attachments) || !body.attachments.length) {
+			return res.status(400).json({
+				error:
+					"Please attach a transfer receipt, PDF, or image before submitting a wallet claim.",
+				errorArabic:
+					"\u064a\u062c\u0628 \u0625\u0631\u0641\u0627\u0642 \u0625\u064a\u0635\u0627\u0644 \u0623\u0648 PDF \u0623\u0648 \u0635\u0648\u0631\u0629 \u0642\u0628\u0644 \u0625\u0631\u0633\u0627\u0644 \u0645\u0637\u0627\u0644\u0628\u0629 \u0627\u0644\u0645\u062d\u0641\u0638\u0629.",
+			});
+		}
+
 		let attachments = [];
 		try {
 			attachments = await buildWalletAttachments(body.attachments, actor);
 		} catch (uploadError) {
 			return res.status(400).json({ error: uploadError.message });
+		}
+		if (!attachments.length) {
+			return res.status(400).json({
+				error:
+					"Please attach a transfer receipt, PDF, or image before submitting a wallet claim.",
+				errorArabic:
+					"\u064a\u062c\u0628 \u0625\u0631\u0641\u0627\u0642 \u0625\u064a\u0635\u0627\u0644 \u0623\u0648 PDF \u0623\u0648 \u0635\u0648\u0631\u0629 \u0642\u0628\u0644 \u0625\u0631\u0633\u0627\u0644 \u0645\u0637\u0627\u0644\u0628\u0629 \u0627\u0644\u0645\u062d\u0641\u0638\u0629.",
+			});
 		}
 
 		const transaction = await AgentWallet.create({
@@ -868,9 +1064,23 @@ exports.createAgentWalletClaim = async (req, res) => {
 			createdBy: actorSnapshot(actor),
 		});
 
+		await trackWalletActivity(req, {
+			action: "agent_wallet_claim_submitted",
+			description: "Agent submitted a wallet credit claim for finance approval.",
+			actor,
+			transaction,
+			hotel,
+			change: {
+				field: "reviewStatus",
+				from: "not_submitted",
+				to: "pending",
+			},
+		});
+
 		emitHotelNotificationRefresh(req, hotelId, {
 			type: "agent_wallet_claim",
 			walletTransactionId: transaction._id,
+			agentId: actor._id,
 			ownerId: hotel.belongsTo,
 		}).catch((error) =>
 			console.error("Error emitting wallet claim notification:", error)
@@ -917,12 +1127,31 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 
 		const now = new Date();
 		if (action === "approve") {
+			const previousStatus = transaction.status;
+			const previousReviewStatus = transaction.reviewStatus;
 			transaction.status = "posted";
 			transaction.reviewStatus = "approved";
 			transaction.reviewedAt = now;
 			transaction.reviewedBy = actorSnapshot(actor);
 			transaction.rejectionReason = "";
+			transaction.updatedBy = actorSnapshot(actor);
+			await transaction.save();
+
+			await trackWalletActivity(req, {
+				action: "agent_wallet_claim_approved",
+				description: "Finance approved an agent wallet credit claim.",
+				actor,
+				transaction,
+				hotel,
+				change: {
+					field: "reviewStatus",
+					from: previousReviewStatus || previousStatus || "pending",
+					to: "approved",
+				},
+			});
 		} else {
+			const previousStatus = transaction.status;
+			const previousReviewStatus = transaction.reviewStatus;
 			const rejectionReason = String(body.rejectionReason || body.reason || "").trim();
 			if (!rejectionReason) {
 				return res.status(400).json({ error: "Rejection reason is required" });
@@ -932,13 +1161,28 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			transaction.reviewedAt = now;
 			transaction.reviewedBy = actorSnapshot(actor);
 			transaction.rejectionReason = rejectionReason;
+			transaction.updatedBy = actorSnapshot(actor);
+			await transaction.save();
+
+			await trackWalletActivity(req, {
+				action: "agent_wallet_claim_rejected",
+				description: "Finance rejected an agent wallet credit claim.",
+				actor,
+				transaction,
+				hotel,
+				change: {
+					field: "reviewStatus",
+					from: previousReviewStatus || previousStatus || "pending",
+					to: "rejected",
+				},
+				metadata: { rejectionReason },
+			});
 		}
-		transaction.updatedBy = actorSnapshot(actor);
-		await transaction.save();
 
 		emitHotelNotificationRefresh(req, hotelId, {
 			type: action === "approve" ? "agent_wallet_claim_approved" : "agent_wallet_claim_rejected",
 			walletTransactionId: transaction._id,
+			agentId: transaction.agentId,
 			ownerId: hotel.belongsTo,
 		}).catch((error) =>
 			console.error("Error emitting wallet claim review notification:", error)

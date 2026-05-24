@@ -2,7 +2,9 @@
 
 const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
+const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 const _ = require("lodash");
 const expressJwt = require("express-jwt");
 const { OAuth2Client } = require("google-auth-library");
@@ -12,6 +14,8 @@ const {
 	ensureE164Phone, // if you want to use/extend later
 } = require("./whatsappsender");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
+const { trackAccountCreation } = require("../services/activityTracker");
+const SignupInvitation = require("../models/signup_invitation");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const ahmed2 = "ahmedabdelrazzak1001010@gmail.com";
@@ -33,6 +37,34 @@ const isConfiguredSuperAdmin = (userOrId) => {
 		typeof userOrId === "object" ? userOrId?._id || userOrId?.id : userOrId;
 	return configuredSuperAdminIds().includes(String(userId || "").trim());
 };
+
+const normalizeRoleDescriptionKey = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[\s_-]+/g, "");
+
+const actorRoleDescriptions = (actor = {}) => [
+	String(actor.roleDescription || "").toLowerCase(),
+	...(Array.isArray(actor.roleDescriptions)
+		? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const actorRoleNumbers = (actor = {}) => [
+	Number(actor.role),
+	...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+];
+
+const actorHasRoleDescription = (actor = {}, description) =>
+	actorRoleDescriptions(actor)
+		.map(normalizeRoleDescriptionKey)
+		.includes(normalizeRoleDescriptionKey(description));
+
+const isPlatformSuperAdmin = (actor = {}) =>
+	isConfiguredSuperAdmin(actor) ||
+	actorRoleNumbers(actor).includes(1000) ||
+	actorHasRoleDescription(actor, "super admin") ||
+	actorHasRoleDescription(actor, "superadmin");
 
 const toEnglishDigits = (str = "") =>
 	str
@@ -92,22 +124,240 @@ const sanitizeAgentWalletOpeningBalances = (
 	}));
 };
 
+const PUBLIC_APPLICATION_ROLE_BY_DESCRIPTION = {
+	hotelmanager: 2000,
+	reception: 3000,
+	housekeepingmanager: 4000,
+	housekeeping: 5000,
+	finance: 6000,
+	ordertaker: 7000,
+	reservationemployee: 8000,
+};
+
+const PUBLIC_JOB_ROLE_DESCRIPTIONS = new Set([
+	"hotelmanager",
+	"reception",
+	"housekeepingmanager",
+	"housekeeping",
+	"finance",
+	"reservationemployee",
+]);
+
+const normalizePublicRoleDescription = (value = "") => {
+	const normalized = String(value || "").trim().toLowerCase();
+	return PUBLIC_APPLICATION_ROLE_BY_DESCRIPTION[normalized]
+		? normalized
+		: "reception";
+};
+
+const defaultAccessForPublicRole = (roleDescription = "") => {
+	const role = normalizePublicRoleDescription(roleDescription);
+	if (role === "hotelmanager") {
+		return [
+			"overall",
+			"dashboard",
+			"reservations",
+			"newReservation",
+			"reports",
+			"finance",
+			"housekeeping",
+			"settings",
+		];
+	}
+	if (role === "finance") return ["dashboard", "reservations", "reports", "finance"];
+	if (role === "reservationemployee") return ["reservations", "newReservation", "settings"];
+	if (role === "housekeepingmanager") return ["dashboard", "housekeeping"];
+	if (role === "housekeeping") return ["housekeeping"];
+	if (role === "ordertaker") return ["newReservation", "ownReservations"];
+	return ["reservations", "newReservation"];
+};
+
+const uniqueStringIds = (values = []) => [
+	...new Set(
+		(Array.isArray(values) ? values : [values])
+			.map(normalizeId)
+			.filter(Boolean)
+	),
+];
+
+const publicPublishedHotelFilter = (hotelIds = []) => ({
+	_id: { $in: hotelIds },
+	activateHotel: true,
+	hotelPhotos: { $exists: true, $not: { $size: 0 } },
+	"location.coordinates": { $ne: [0, 0] },
+});
+
+const SIGNUP_INVITATION_PURPOSE = "public-signup-invitation";
+
+const hashInvitationCode = (code = "") =>
+	crypto.createHash("sha256").update(String(code || "")).digest("hex");
+
+const normalizeSignupInvitationPayload = (payload = {}) => {
+	const accountType = String(payload.accountType || payload.signupIntent || "")
+		.trim()
+		.toLowerCase();
+	if (!["agent", "job"].includes(accountType)) return null;
+	const hotelIds = uniqueStringIds(payload.hotelIds || []).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+	if (!hotelIds.length) return null;
+	return {
+		...payload,
+		accountType,
+		signupIntent: accountType,
+		hotelIds,
+		hotelNames: Array.isArray(payload.hotelNames) ? payload.hotelNames : [],
+		roleDescription:
+			accountType === "agent"
+				? "ordertaker"
+				: normalizePublicRoleDescription(payload.roleDescription),
+	};
+};
+
+const verifySignupInvitationToken = (token = "") => {
+	if (!token) return null;
+	try {
+		const decoded = jwt.verify(String(token), process.env.JWT_SECRET);
+		if (decoded?.purpose !== SIGNUP_INVITATION_PURPOSE) return null;
+		return normalizeSignupInvitationPayload(decoded);
+	} catch (error) {
+		return null;
+	}
+};
+
+const resolveSignupInvitationCode = async (code = "") => {
+	const normalizedCode = String(code || "").trim();
+	if (!normalizedCode || normalizedCode.length > 160) return null;
+	const record = await SignupInvitation.findOne({
+		codeHash: hashInvitationCode(normalizedCode),
+		revokedAt: null,
+		expiresAt: { $gt: new Date() },
+	})
+		.select("payload")
+		.lean()
+		.exec();
+	return normalizeSignupInvitationPayload(record?.payload || {});
+};
+
+const publicInvitationResponse = async (invitation = {}) => {
+	const normalized = normalizeSignupInvitationPayload(invitation);
+	if (!normalized) return null;
+	const hotels = await loadInvitedHotelsForApplication(normalized.hotelIds);
+	if (hotels.length !== normalized.hotelIds.length) return null;
+	const hotelMap = new Map(
+		hotels.map((hotel) => [
+			normalizeId(hotel._id),
+			{
+				_id: normalizeId(hotel._id),
+				hotelName: hotel.hotelName || "Hotel",
+				hotelCity: hotel.hotelCity || "",
+				hotelState: hotel.hotelState || "",
+				hotelCountry: hotel.hotelCountry || "",
+			},
+		])
+	);
+	const responseHotels = normalized.hotelIds.map((hotelId, index) => ({
+		_id: hotelId,
+		hotelName:
+			hotelMap.get(hotelId)?.hotelName ||
+			normalized.hotelNames?.[index] ||
+			"Hotel",
+		hotelCity: hotelMap.get(hotelId)?.hotelCity || "",
+		hotelState: hotelMap.get(hotelId)?.hotelState || "",
+		hotelCountry: hotelMap.get(hotelId)?.hotelCountry || "",
+	}));
+	return {
+		accountType: normalized.accountType,
+		signupIntent: normalized.signupIntent,
+		roleDescription: normalized.roleDescription,
+		hotelIds: normalized.hotelIds,
+		hotelNames: responseHotels.map((hotel) => hotel.hotelName),
+		hotels: responseHotels,
+		name: normalized.name || "",
+		email: normalized.email || "",
+		phone: normalized.phone || "",
+		companyName: normalized.companyName || "",
+		companyOfficialName: normalized.companyOfficialName || "",
+		companyEin: normalized.companyEin || "",
+		agentCommercialModel: normalizeAgentCommercialModel(
+			normalized.agentCommercialModel
+		),
+		agentOpeningWalletCredit: nonNegativeMoney(
+			normalized.agentOpeningWalletCredit
+		),
+		applicationNotes: normalized.applicationNotes || "",
+	};
+};
+
+const loadPublishedHotelsForApplication = async (hotelIds = []) => {
+	const ids = uniqueStringIds(hotelIds).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+	if (!ids.length) return [];
+	return HotelDetails.find(publicPublishedHotelFilter(ids))
+		.select("_id hotelName hotelAddress hotelCountry hotelState hotelCity belongsTo activateHotel")
+		.lean()
+		.exec();
+};
+
+const loadInvitedHotelsForApplication = async (hotelIds = []) => {
+	const ids = uniqueStringIds(hotelIds).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+	if (!ids.length) return [];
+	return HotelDetails.find({ _id: { $in: ids } })
+		.select("_id hotelName hotelAddress hotelCountry hotelState hotelCity belongsTo activateHotel")
+		.lean()
+		.exec();
+};
+
+exports.resolveSignupInvitation = async (req, res) => {
+	try {
+		const code =
+			req.params?.code || req.query?.invite || req.query?.code || req.body?.invite;
+		const token = req.query?.token || req.query?.invitationToken || req.body?.token;
+		const invitation = code
+			? await resolveSignupInvitationCode(code)
+			: verifySignupInvitationToken(token);
+		const response = await publicInvitationResponse(invitation);
+		if (!response) {
+			return res.status(400).json({
+				error:
+					"This invitation link is invalid or expired. Please ask the hotel management team for a fresh link.",
+			});
+		}
+		return res.json({ invitation: response });
+	} catch (error) {
+		console.error("resolveSignupInvitation error:", error);
+		return res.status(500).json({ error: "Could not verify invitation link." });
+	}
+};
+
+const buildPublicApplicationReview = ({
+	type,
+	roleDescription,
+	hotelIds,
+	actor,
+	notes,
+}) => ({
+	type,
+	status: "pending",
+	targetRoleDescription: roleDescription || "",
+	requestedHotelIds: uniqueStringIds(hotelIds),
+	approvedHotelIds: [],
+	requestedAt: new Date(),
+	requestedBy: actor || null,
+	approvedAt: null,
+	approvedBy: null,
+	rejectedAt: null,
+	rejectedBy: null,
+	rejectionReason: "",
+	lastUpdatedAt: new Date(),
+	lastUpdatedBy: actor || null,
+	notes: String(notes || "").trim().slice(0, 1000),
+});
+
 const normalizeId = (value) => String(value?._id || value || "").trim();
-
-const actorRoleDescriptions = (actor = {}) => [
-	String(actor.roleDescription || "").toLowerCase(),
-	...(Array.isArray(actor.roleDescriptions)
-		? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
-		: []),
-];
-
-const actorRoleNumbers = (actor = {}) => [
-	Number(actor.role),
-	...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
-];
-
-const actorHasRoleDescription = (actor = {}, description) =>
-	actorRoleDescriptions(actor).includes(String(description || "").toLowerCase());
 
 const actorScopedHotelIds = (actor = {}) => [
 	normalizeId(actor.hotelIdWork),
@@ -137,8 +387,7 @@ const canCreateAgentForHotel = (creator = {}, hotelId = "", ownerId = "") => {
 	const isAssignedToHotel =
 		normalizeId(creator.hotelIdWork) === hotelId || scopedIds.includes(hotelId);
 	return (
-		isConfiguredSuperAdmin(creator) ||
-		roles.includes(1000) ||
+		isPlatformSuperAdmin(creator) ||
 		normalizeId(creator._id) === ownerId ||
 		(belongsToId === ownerId &&
 			isAssignedToHotel &&
@@ -148,11 +397,17 @@ const canCreateAgentForHotel = (creator = {}, hotelId = "", ownerId = "") => {
 	);
 };
 
-const canApproveAgentAccountsForOwner = async (creator = {}, ownerId = "") => {
+const canApproveAgentAccountsForOwner = async (
+	creator = {},
+	ownerId = "",
+	hotelIds = []
+) => {
 	const roles = actorRoleNumbers(creator);
-	if (isConfiguredSuperAdmin(creator) || roles.includes(1000)) return true;
+	if (isPlatformSuperAdmin(creator)) return true;
 	if (normalizeId(creator._id) === ownerId) return true;
-	if (!actorHasRoleDescription(creator, "hotelmanager")) return false;
+	const isSystemAdmin =
+		roles.includes(10000) || actorHasRoleDescription(creator, "systemadmin");
+	if (!isSystemAdmin && !actorHasRoleDescription(creator, "hotelmanager")) return false;
 
 	const ownerHotels = await HotelDetails.find({ belongsTo: ownerId })
 		.select("_id")
@@ -160,7 +415,28 @@ const canApproveAgentAccountsForOwner = async (creator = {}, ownerId = "") => {
 		.exec();
 	const ownerHotelIds = ownerHotels.map((hotel) => normalizeId(hotel._id));
 	if (!ownerHotelIds.length) return false;
+	const requestedHotelIds = [...new Set(
+		(Array.isArray(hotelIds) ? hotelIds : [hotelIds])
+			.map(normalizeId)
+			.filter(Boolean)
+	)];
 	const scopedIds = new Set(actorScopedHotelIds(creator));
+	if (isSystemAdmin) {
+		const requiredHotelIds = requestedHotelIds.length
+			? requestedHotelIds
+			: ownerHotelIds;
+		return requiredHotelIds.every(
+			(hotelId) => ownerHotelIds.includes(hotelId) && scopedIds.has(hotelId)
+		);
+	}
+	if (actorHasRoleDescription(creator, "hotelmanager")) {
+		return (
+			requestedHotelIds.length > 0 &&
+			requestedHotelIds.every(
+				(hotelId) => ownerHotelIds.includes(hotelId) && scopedIds.has(hotelId)
+			)
+		);
+	}
 	return ownerHotelIds.every((hotelId) => scopedIds.has(hotelId));
 };
 
@@ -305,7 +581,12 @@ exports.signin = async (req, res) => {
 			});
 		}
 
-		if (user.activeUser === false) {
+		const applicationReviewStatus = String(
+			user.applicationReview?.status || ""
+		).toLowerCase();
+		const canSigninWhilePending =
+			user.activeUser === false && applicationReviewStatus === "pending";
+		if (user.activeUser === false && !canSigninWhilePending) {
 			return res.status(403).json({
 				error: "This account is inactive. Please contact your manager.",
 			});
@@ -347,9 +628,13 @@ exports.signin = async (req, res) => {
 			agentOpeningWalletCredit,
 			agentWalletOpeningBalances,
 			hotelIdWork,
+			hotelIdsWork,
 			belongsToId,
+			hotelIdsOwner,
 			hotelsToSupport,
 			accessTo,
+			agentApproval,
+			applicationReview,
 		} = user;
 
 		// Send the response back to the client with token and user details
@@ -375,9 +660,13 @@ exports.signin = async (req, res) => {
 				agentOpeningWalletCredit,
 				agentWalletOpeningBalances,
 				hotelIdWork,
+				hotelIdsWork,
 				belongsToId,
+				hotelIdsOwner,
 				hotelsToSupport,
 				accessTo,
+				agentApproval,
+				applicationReview,
 			},
 		});
 	} catch (error) {
@@ -413,9 +702,36 @@ exports.propertySignup = async (req, res) => {
 			hotelRooms,
 			// existing owner flow
 			existingUser,
+			// public agent / job application flow
+			signupIntent,
+			applicationType,
+			hotelIds,
+			hotelIdsWork,
+			requestedHotelIds,
+			selectedHotelIds,
+			requestedRoleDescription,
+			jobRoleDescription,
+			companyName,
+			companyOfficialName,
+			companyEin,
+			companyDocuments,
+			agentCommercialModel,
+			agentOpeningWalletCredit,
+			agentWalletOpeningBalances,
+			applicationNotes,
+			invitationCode,
+			invitationToken,
 		} = req.body;
 
 		console.log("Received request body:", req.body);
+		let signupInvitation = null;
+		if (invitationCode) {
+			signupInvitation = await resolveSignupInvitationCode(invitationCode);
+		}
+		if (!signupInvitation) {
+			signupInvitation = verifySignupInvitationToken(invitationToken);
+		}
+		const effectivePhone = signupInvitation?.phone || phone;
 
 		// --- phone cleaner (as before) ---
 		const cleanPhoneNumber = (rawPhone) => {
@@ -437,8 +753,8 @@ exports.propertySignup = async (req, res) => {
 
 		let cleanedPhone = null;
 		try {
-			if (!phone) throw new Error("Please fill all the fields");
-			cleanedPhone = cleanPhoneNumber(phone);
+			if (!effectivePhone) throw new Error("Please fill all the fields");
+			cleanedPhone = cleanPhoneNumber(effectivePhone);
 		} catch (err) {
 			return res.status(400).json({ error: err.message });
 		}
@@ -491,6 +807,219 @@ exports.propertySignup = async (req, res) => {
 			await user.save();
 
 			return res.json({ message: `Hotel ${hotelName} was successfully added` });
+		}
+
+		const normalizedSignupIntent = String(
+			signupInvitation?.accountType || signupIntent || applicationType || ""
+		)
+			.trim()
+			.toLowerCase();
+		const publicApplicationHotelIds = signupInvitation
+			? uniqueStringIds(signupInvitation.hotelIds)
+			: uniqueStringIds([
+					...(Array.isArray(hotelIds) ? hotelIds : []),
+					...(Array.isArray(hotelIdsWork) ? hotelIdsWork : []),
+					...(Array.isArray(requestedHotelIds) ? requestedHotelIds : []),
+					...(Array.isArray(selectedHotelIds) ? selectedHotelIds : []),
+					hotelIdWork,
+			  ]);
+		const isPublicAgentApplication =
+			["agent", "ordertaker", "external_agent"].includes(
+				normalizedSignupIntent
+			);
+		const isPublicJobApplication =
+			["job", "jobseeker", "job_applicant", "looking_for_job"].includes(
+				normalizedSignupIntent
+			);
+
+		if (isPublicAgentApplication || isPublicJobApplication) {
+			if (!signupInvitation) {
+				return res.status(403).json({
+					error:
+						"Agent and employee applications require a valid hotel invitation link.",
+				});
+			}
+			const applicantName = String(name || signupInvitation?.name || "").trim();
+			const applicantEmail = String(signupInvitation?.email || email || "")
+				.trim()
+				.toLowerCase();
+			const applicantCompanyName = signupInvitation?.companyName ?? companyName;
+			const applicantCompanyOfficialName =
+				signupInvitation?.companyOfficialName ?? companyOfficialName;
+			const applicantCompanyEin = signupInvitation?.companyEin ?? companyEin;
+			const applicantCommercialModel =
+				signupInvitation?.agentCommercialModel || agentCommercialModel;
+			const applicantOpeningWalletCredit =
+				signupInvitation?.agentOpeningWalletCredit ?? agentOpeningWalletCredit;
+			const applicantNotes =
+				signupInvitation?.applicationNotes ?? applicationNotes;
+			if (!applicantName || !applicantEmail || !password || !cleanedPhone) {
+				return res.status(400).json({ error: "Please fill all the fields" });
+			}
+			if (String(password).length < 6) {
+				return res
+					.status(400)
+					.json({ error: "Passwords should be 6 characters or more" });
+			}
+			if (!accepted) {
+				return res
+					.status(400)
+					.json({ error: "Please accept the terms and conditions" });
+			}
+
+			const requestedIds = isPublicJobApplication
+				? publicApplicationHotelIds.slice(0, 1)
+				: publicApplicationHotelIds;
+			if (!requestedIds.length) {
+				return res.status(400).json({
+					error: isPublicAgentApplication
+						? "Please select at least one hotel"
+						: "Please select one hotel",
+				});
+			}
+			if (isPublicJobApplication && publicApplicationHotelIds.length > 1) {
+				return res.status(400).json({
+					error: "Job applications can be submitted to one hotel only",
+				});
+			}
+
+			const hotels = signupInvitation
+				? await loadInvitedHotelsForApplication(requestedIds)
+				: await loadPublishedHotelsForApplication(requestedIds);
+			const foundHotelIds = new Set(hotels.map((hotel) => normalizeId(hotel._id)));
+			const missingHotel = requestedIds.find((id) => !foundHotelIds.has(id));
+			if (missingHotel || hotels.length !== requestedIds.length) {
+				return res.status(400).json({
+					error:
+						signupInvitation
+							? "This invitation link has an invalid hotel."
+							: "Please choose from the active published hotels only.",
+				});
+			}
+
+			const duplicate = await User.findOne({
+				$or: [{ email: applicantEmail }, { phone: cleanedPhone }],
+			})
+				.select("_id")
+				.lean()
+				.exec();
+			if (duplicate) {
+				return res.status(400).json({
+					error: "User already exists, please try a different email/phone",
+				});
+			}
+
+			const primaryHotel = hotels[0];
+			const selectedHotelIdsForUser = hotels.map((hotel) => normalizeId(hotel._id));
+			const primaryOwnerId = normalizeId(primaryHotel.belongsTo);
+			const publicRoleDescription = isPublicAgentApplication
+				? "ordertaker"
+				: normalizePublicRoleDescription(
+						signupInvitation?.roleDescription ||
+							jobRoleDescription ||
+							requestedRoleDescription ||
+							roleDescription
+				  );
+			if (
+				isPublicJobApplication &&
+				!PUBLIC_JOB_ROLE_DESCRIPTIONS.has(publicRoleDescription)
+			) {
+				return res.status(400).json({ error: "Please select a valid job role" });
+			}
+			const roleNumber =
+				PUBLIC_APPLICATION_ROLE_BY_DESCRIPTION[publicRoleDescription];
+			const invitedCommercialModel = normalizeAgentCommercialModel(
+				applicantCommercialModel
+			);
+			const openingWalletCredit =
+				isPublicAgentApplication && invitedCommercialModel !== "commission_only"
+					? nonNegativeMoney(applicantOpeningWalletCredit)
+					: 0;
+
+			const applicant = new User({
+				name: applicantName,
+				email: applicantEmail,
+				password,
+				phone: cleanedPhone,
+				role: roleNumber,
+				roleDescription: publicRoleDescription,
+				roles: [roleNumber],
+				roleDescriptions: [publicRoleDescription],
+				companyName: String(applicantCompanyName || "").trim(),
+				companyOfficialName: String(applicantCompanyOfficialName || "").trim(),
+				companyEin: String(applicantCompanyEin || "").trim(),
+				companyDocuments: sanitizeCompanyDocuments(companyDocuments),
+				agentCommercialModel: isPublicAgentApplication
+					? invitedCommercialModel
+					: "wallet_inventory",
+				agentOpeningWalletCredit: openingWalletCredit,
+				agentWalletOpeningBalances: isPublicAgentApplication
+					? sanitizeAgentWalletOpeningBalances(
+							agentWalletOpeningBalances,
+							selectedHotelIdsForUser,
+							openingWalletCredit
+					  )
+					: [],
+				hotelName: primaryHotel.hotelName || "",
+				hotelAddress: primaryHotel.hotelAddress || "",
+				hotelCountry: primaryHotel.hotelCountry || "",
+				hotelState: primaryHotel.hotelState || "",
+				hotelCity: primaryHotel.hotelCity || "",
+				hotelIdWork: selectedHotelIdsForUser[0],
+				hotelIdsWork: selectedHotelIdsForUser,
+				belongsToId: primaryOwnerId,
+				hotelsToSupport: selectedHotelIdsForUser,
+				activeUser: false,
+				acceptedTermsAndConditions: accepted,
+				accessTo: defaultAccessForPublicRole(publicRoleDescription),
+			});
+
+			await applicant.save();
+
+			const applicantActor = buildAgentApprovalActor(applicant);
+			applicant.applicationReview = buildPublicApplicationReview({
+				type: isPublicAgentApplication ? "agent" : "job",
+				roleDescription: publicRoleDescription,
+				hotelIds: selectedHotelIdsForUser,
+				actor: applicantActor,
+				notes: applicantNotes,
+			});
+			if (isPublicAgentApplication) {
+				applicant.agentApproval = {
+					status: "pending",
+					requestedAt: new Date(),
+					requestedBy: applicantActor,
+					approvedAt: null,
+					approvedBy: null,
+					rejectedAt: null,
+					rejectedBy: null,
+					rejectionReason: "",
+					lastUpdatedAt: new Date(),
+					lastUpdatedBy: applicantActor,
+				};
+			}
+			await applicant.save();
+
+			await Promise.all(
+				hotels.map((hotel) =>
+					emitHotelNotificationRefresh(req, hotel._id, {
+						type: isPublicAgentApplication
+							? "agent_account_pending"
+							: "staff_application_pending",
+						ownerId: normalizeId(hotel.belongsTo),
+						agentId: applicant._id,
+						applicantId: applicant._id,
+					})
+				)
+			);
+
+			return res.json({
+				message: isPublicAgentApplication
+					? "Agent application submitted for hotel review"
+					: "Job application submitted for hotel review",
+				pendingApproval: true,
+				userId: applicant._id,
+			});
 		}
 
 		// --- Determine normalized role (default to owner flow = 2000) ---
@@ -798,6 +1327,7 @@ exports.createHotelStaffUser = async (req, res) => {
 		}
 
 		const roleByDescription = {
+			systemadmin: 10000,
 			hotelmanager: 2000,
 			reception: 3000,
 			housekeepingmanager: 4000,
@@ -825,6 +1355,8 @@ exports.createHotelStaffUser = async (req, res) => {
 		const normalizedRoleDescriptions = [
 			...new Set(incomingDescriptions.length ? incomingDescriptions : ["reception"]),
 		];
+		const isSystemAdminAccount =
+			normalizedRoleDescriptions.includes("systemadmin");
 		const isAgentOnlyAccount =
 			normalizedRoleDescriptions.length === 1 &&
 			normalizedRoleDescriptions.includes("ordertaker");
@@ -838,7 +1370,9 @@ exports.createHotelStaffUser = async (req, res) => {
 		const normalizedRoles = normalizedRoleDescriptions.map(
 			(description) => roleByDescription[description]
 		);
-		const primaryRoleDescription = normalizedRoleDescriptions.includes("hotelmanager")
+		const primaryRoleDescription = normalizedRoleDescriptions.includes("systemadmin")
+			? "systemadmin"
+			: normalizedRoleDescriptions.includes("hotelmanager")
 			? "hotelmanager"
 			: normalizedRoleDescriptions[0];
 		const normalizedRole = roleByDescription[primaryRoleDescription] || Number(role) || 3000;
@@ -895,19 +1429,23 @@ exports.createHotelStaffUser = async (req, res) => {
 		const canCreateForEveryHotel = orderedHotels.every((hotel) => {
 			const currentHotelId = String(hotel._id);
 			const currentOwnerId = String(hotel.belongsTo || "");
+			const creatorIsOwnerLike =
+				creatorRole === 2000 ||
+				creatorRole === 10000 ||
+				creatorRoleNumbers.includes(10000) ||
+				creatorRoleDescriptions.includes("systemadmin");
 			const creatorOwnsHotel =
-				creatorRole === 2000 &&
-				(creatorId === currentOwnerId || ownedIds.includes(currentHotelId));
+				creatorIsOwnerLike &&
+				(creatorId === currentOwnerId ||
+					ownedIds.includes(currentHotelId) ||
+					supportIds.includes(currentHotelId));
 			const creatorIsAssignedHotelManager =
 				creatorRole === 2000 &&
 				creatorRoleDescriptions.includes("hotelmanager") &&
 				String(creator.belongsToId || currentOwnerId) === currentOwnerId &&
 				(String(creator.hotelIdWork || "") === currentHotelId ||
 					supportIds.includes(currentHotelId));
-			const adminCanSupportHotel =
-				isConfiguredSuperAdmin(creator) ||
-				(creatorRole === 1000 &&
-					(supportIds.length === 0 || supportIds.includes(currentHotelId)));
+			const adminCanSupportHotel = isPlatformSuperAdmin(creator);
 			const canCreateAgentForThisHotel =
 				isAgentOnlyAccount &&
 				canCreateAgentForHotel(creator, currentHotelId, currentOwnerId);
@@ -945,13 +1483,25 @@ exports.createHotelStaffUser = async (req, res) => {
 					: Array.isArray(accessTo)
 					? accessTo.map((item) => String(item || "").trim()).filter(Boolean)
 					: []),
+				...(isSystemAdminAccount
+					? [
+							"overall",
+							"dashboard",
+							"reservations",
+							"newReservation",
+							"reports",
+							"finance",
+							"housekeeping",
+							"settings",
+					  ]
+					: []),
 				...(normalizedRoleDescriptions.includes("reservationemployee")
 					? ["settings"]
 					: []),
 			]),
 		];
 		const creatorCanApproveAgent = isAgentOnlyAccount
-			? await canApproveAgentAccountsForOwner(creator, ownerId)
+			? await canApproveAgentAccountsForOwner(creator, ownerId, uniqueHotelIds)
 			: false;
 		const pendingAgentApproval = isAgentOnlyAccount && !creatorCanApproveAgent;
 		const agentApprovalActor = buildAgentApprovalActor(creator);
@@ -983,7 +1533,9 @@ exports.createHotelStaffUser = async (req, res) => {
 			hotelState: primaryHotel.hotelState || "",
 			hotelCity: primaryHotel.hotelCity || "",
 			hotelIdWork: hotelId,
-			belongsToId: ownerId,
+			hotelIdsWork: uniqueHotelIds,
+			belongsToId: isSystemAdminAccount ? "" : ownerId,
+			hotelIdsOwner: isSystemAdminAccount ? uniqueHotelIds : [],
 			hotelsToSupport: uniqueHotelIds,
 			activeUser: pendingAgentApproval ? false : true,
 			agentApproval: isAgentOnlyAccount
@@ -1015,6 +1567,22 @@ exports.createHotelStaffUser = async (req, res) => {
 		});
 
 		await staffUser.save();
+		await trackAccountCreation({
+			req,
+			actor: creator,
+			account: staffUser,
+			source: "hotel_staff_create",
+			hotelId,
+			ownerId,
+			hotelIds: uniqueHotelIds,
+			ownerIds: [
+				...new Set(
+					orderedHotels
+						.map((hotel) => normalizeId(hotel.belongsTo))
+						.filter(Boolean)
+				),
+			],
+		});
 		if (pendingAgentApproval) {
 			await emitHotelNotificationRefresh(req, hotelId, {
 				type: "agent_account_pending",
@@ -1053,9 +1621,9 @@ exports.isAuth = (req, res, next) => {
 
 	// quick DB look‑up – executed only for mismatch
 	User.findById(req.auth._id)
-		.select("_id role")
+		.select("_id role roles roleDescription roleDescriptions")
 		.exec((err, u) => {
-			if (err || !u || (u.role !== 1000 && !isConfiguredSuperAdmin(u))) {
+			if (err || !u || !isPlatformSuperAdmin(u)) {
 				return res.status(403).json({ error: "access denied" });
 			}
 			next(); // platform admin – let him through
@@ -1063,7 +1631,7 @@ exports.isAuth = (req, res, next) => {
 };
 
 exports.isAdmin = (req, res, next) => {
-	if (req.profile.role !== 1000 && !isConfiguredSuperAdmin(req.profile)) {
+	if (!isPlatformSuperAdmin(req.profile)) {
 		return res.status(403).json({
 			error: "Admin resource! access denied",
 		});
@@ -1088,14 +1656,16 @@ exports.isHotelOwner = (req, res, next) => {
 			: []),
 	];
 	const canManageHotelSettings =
-		roleNumbers.some((role) => [1000, 2000, 3000, 8000].includes(role)) ||
+		roleNumbers.some((role) =>
+			[1000, 2000, 3000, 8000, 10000].includes(role)
+		) ||
 		["hotelmanager", "reception", "reservationemployee"].some((role) =>
 			roleDescriptions.includes(role)
 		);
 
 	if (
 		!canManageHotelSettings &&
-		!isConfiguredSuperAdmin(req.profile)
+		!isPlatformSuperAdmin(req.profile)
 	) {
 		return res.status(403).json({
 			error: "Admin resource! access denied",

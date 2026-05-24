@@ -135,6 +135,11 @@ const userSchema = new mongoose.Schema(
 			default: [],
 		},
 
+		applicationReview: {
+			type: Object,
+			default: {},
+		},
+
 		resetPasswordLink: {
 			type: String,
 			default: "",
@@ -161,12 +166,38 @@ const userSchema = new mongoose.Schema(
 			},
 		},
 
+		notificationAcknowledgements: [
+			{
+				key: {
+					type: String,
+					trim: true,
+					required: true,
+				},
+				notificationType: {
+					type: String,
+					trim: true,
+					default: "",
+				},
+				entityId: {
+					type: String,
+					trim: true,
+					default: "",
+				},
+				acknowledgedAt: {
+					type: Date,
+					default: Date.now,
+				},
+			},
+		],
+
 		hotelIdWork: {
 			type: String,
 			lowercase: true,
 			trim: true,
 			default: "",
 		},
+
+		hotelIdsWork: [{ type: ObjectId, ref: "HotelDetails" }],
 
 		belongsToId: {
 			type: String,

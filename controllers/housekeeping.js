@@ -44,14 +44,45 @@ const isConfiguredSuperAdmin = (userOrId) => {
 	return configuredSuperAdminIds().includes(String(userId || "").trim());
 };
 
-const canUserMarkRoomClean = (user = {}) => {
+const isSuperAdminActor = (user = {}) => {
 	const roles = userRoles(user);
 	const descriptions = userRoleDescriptions(user);
 	return (
 		isConfiguredSuperAdmin(user) ||
-		roles.some((role) => [1000, 2000, 4000, 5000].includes(role)) ||
+		roles.includes(1000) ||
+		descriptions.includes("superadmin") ||
+		descriptions.includes("super admin")
+	);
+};
+
+const housekeepingStatusRank = (status = "") => {
+	const normalized = String(status || "").toLowerCase();
+	if (isFinishedStatus(normalized)) return 2;
+	if (normalized === "cleaning") return 1;
+	if (normalized === "unfinished" || normalized === "unassigned") return 0;
+	return null;
+};
+
+const isBackwardHousekeepingStatusChange = (fromStatus = "", toStatus = "") => {
+	const fromRank = housekeepingStatusRank(fromStatus);
+	const toRank = housekeepingStatusRank(toStatus);
+	return fromRank !== null && toRank !== null && toRank < fromRank;
+};
+
+const isHousekeepingStaffRole = (user = {}) => {
+	const roles = userRoles(user);
+	const descriptions = userRoleDescriptions(user);
+	return roles.includes(5000) || descriptions.includes("housekeeping");
+};
+
+const canUserMarkRoomClean = (user = {}) => {
+	const roles = userRoles(user);
+	const descriptions = userRoleDescriptions(user);
+	return (
+		isSuperAdminActor(user) ||
+		roles.some((role) => [1000, 2000, 4000, 5000, 10000].includes(role)) ||
 		descriptions.some((role) =>
-			["hotelmanager", "housekeepingmanager", "housekeeping"].includes(role)
+			["hotelmanager", "housekeepingmanager", "housekeeping", "systemadmin"].includes(role)
 		)
 	);
 };
@@ -87,7 +118,7 @@ const getRequestUser = async (req) => {
 const canAccessHousekeepingHotel = async (user, hotelId) => {
 	if (!user || user.activeUser === false) return false;
 	if (!mongoose.Types.ObjectId.isValid(String(hotelId))) return false;
-	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) return true;
+	if (isSuperAdminActor(user)) return true;
 
 	const hotel = await HotelDetails.findById(hotelId)
 		.select("_id belongsTo")
@@ -112,10 +143,10 @@ const canManageHousekeepingHotel = async (user, hotelId) => {
 	const roles = userRoles(user);
 	const descriptions = userRoleDescriptions(user);
 	const hasManagerRole =
-		isConfiguredSuperAdmin(user) ||
-		roles.some((role) => [1000, 2000, 4000].includes(role)) ||
+		isSuperAdminActor(user) ||
+		roles.some((role) => [1000, 2000, 4000, 10000].includes(role)) ||
 		descriptions.some((role) =>
-			["hotelmanager", "housekeepingmanager"].includes(role)
+			["hotelmanager", "housekeepingmanager", "systemadmin"].includes(role)
 		);
 	return hasManagerRole && (await canAccessHousekeepingHotel(user, hotelId));
 };
@@ -125,13 +156,29 @@ const canApproveHousekeepingSupplies = async (user, hotelId) => {
 	const descriptions = userRoleDescriptions(user);
 	const hasFinanceRole =
 		isConfiguredSuperAdmin(user) ||
-		roles.some((role) => [1000, 2000, 6000].includes(role)) ||
-		descriptions.some((role) => ["finance", "accounting", "accountant"].includes(role));
+		roles.some((role) => [1000, 2000, 6000, 10000].includes(role)) ||
+		descriptions.some((role) =>
+			["finance", "accounting", "accountant", "systemadmin"].includes(role)
+		);
 	return hasFinanceRole && (await canAccessHousekeepingHotel(user, hotelId));
 };
 
 const isAssignedHousekeepingUser = (user, task) =>
 	Boolean(user && task && sameId(user._id, task.assignedTo));
+
+const getAssignableHousekeeper = async (userId, hotelId) => {
+	if (!userId || !mongoose.Types.ObjectId.isValid(String(userId))) return null;
+	const user = await User.findById(userId)
+		.select(
+			"_id name email role roles roleDescription roleDescriptions activeUser hotelIdWork belongsToId hotelsToSupport hotelIdsOwner"
+		)
+		.lean();
+	if (!user || user.activeUser === false || !isHousekeepingStaffRole(user)) {
+		return null;
+	}
+	if (!(await canAccessHousekeepingHotel(user, hotelId))) return null;
+	return user;
+};
 
 const emitHousekeepingUpdate = (req, hotelId, payload = {}) => {
 	const io = req.app && req.app.get("io");
@@ -436,6 +483,23 @@ exports.create = async (req, res) => {
 		const generalAreas = normalizeGeneralAreas(req.body.generalAreas);
 		const customTask = String(req.body.customTask || "").trim();
 		const taskComment = String(req.body.task_comment || "").trim();
+		const assignedToId = normalizeObjectId(req.body.assignedTo);
+
+		if (!assignedToId) {
+			return res.status(400).json({
+				error: "Please assign this housekeeping task to a housekeeper.",
+			});
+		}
+
+		const assignedHousekeeper = await getAssignableHousekeeper(
+			assignedToId,
+			hotelId
+		);
+		if (!assignedHousekeeper) {
+			return res.status(403).json({
+				error: "The selected housekeeper is not authorized for this hotel.",
+			});
+		}
 
 		if (taskType === "room" && !selectedRooms.length) {
 			return res.status(400).json({
@@ -484,6 +548,8 @@ exports.create = async (req, res) => {
 				req.body.confirmation_number ||
 				(taskType === "general" ? "general task" : "manual task"),
 			hotelId,
+			assignedTo: assignedToId,
+			assignedBy: actor?._id || req.body.assignedBy || null,
 			rooms,
 			task_status: status,
 			cleaningStartedAt: isCleaningStatus(status) ? now : null,
@@ -517,6 +583,8 @@ exports.create = async (req, res) => {
 		}
 		emitHousekeepingUpdate(req, hotelId, {
 			action: "created",
+			assignedTo: String(assignedToId),
+			assignedToName: assignedHousekeeper.name || "",
 			taskIds: data.map((task) => String(task._id)),
 		});
 		res.json({ data, created: data.length });
@@ -559,6 +627,7 @@ exports.updateHouseKeepingTask = async (req, res) => {
 			canUserMarkRoomClean(actor) &&
 			isAssignedHousekeepingUser(actor, existingTask) &&
 			(await canAccessHousekeepingHotel(actor, existingTask.hotelId));
+		const actorIsSuperAdmin = isSuperAdminActor(actor);
 		const roomIdToClean =
 			updateData.cleanRoomId ||
 			updateData.roomIdToClean ||
@@ -566,6 +635,13 @@ exports.updateHouseKeepingTask = async (req, res) => {
 			null;
 
 		if (roomIdToClean) {
+			if (isFinishedStatus(existingTask.task_status) && !actorIsSuperAdmin) {
+				return res.status(403).json({
+					error:
+						"This housekeeping task is already closed. Only a super admin can reopen or change it.",
+				});
+			}
+
 			if (!mongoose.Types.ObjectId.isValid(String(roomIdToClean))) {
 				return res.status(400).json({ error: "Invalid room selected." });
 			}
@@ -657,6 +733,36 @@ exports.updateHouseKeepingTask = async (req, res) => {
 		}
 
 		const nextStatus = updateData.task_status || existingTask.task_status;
+		const assignmentRequested = Object.prototype.hasOwnProperty.call(
+			updateData,
+			"assignedTo"
+		);
+		const assignmentChanged =
+			assignmentRequested &&
+			String(normalizeObjectId(updateData.assignedTo || "")) !==
+				String(normalizeObjectId(existingTask.assignedTo || ""));
+		const reopeningClosedTask =
+			updateData.task_status &&
+			isFinishedStatus(existingTask.task_status) &&
+			!isFinishedStatus(nextStatus);
+
+		if (isFinishedStatus(existingTask.task_status) && !actorIsSuperAdmin) {
+			return res.status(403).json({
+				error:
+					"This housekeeping task is already closed. Only a super admin can reopen or change it.",
+			});
+		}
+
+		if (
+			updateData.task_status &&
+			isBackwardHousekeepingStatusChange(existingTask.task_status, nextStatus) &&
+			!actorIsSuperAdmin
+		) {
+			return res.status(403).json({
+				error: "Only a super admin can move a housekeeping task backward.",
+			});
+		}
+
 		if (updateData.task_status) {
 			const existingHasRooms = normalizeRoomIds(existingTask.rooms).length > 0;
 			const cleanerMayStartOwnTask =
@@ -680,26 +786,58 @@ exports.updateHouseKeepingTask = async (req, res) => {
 				error: "You are not allowed to update this housekeeping task.",
 			});
 		}
-		const now = new Date();
-		if (isFinishedStatus(nextStatus)) {
-			updateData.cleanedBy = updateData.cleanedBy || actorId || existingTask.cleanedBy;
-			updateData.cleaningStartedAt = existingTask.cleaningStartedAt || now;
-			updateData.cleaningDate = now;
-			updateData.completedAt = now;
-			updateData.cleaningDurationMs = durationBetween(
-				updateData.cleaningStartedAt,
-				now
+
+		if (assignmentRequested) {
+			const assignedToId = normalizeObjectId(updateData.assignedTo);
+			if (!assignedToId) {
+				return res.status(400).json({
+					error: "Please assign this housekeeping task to a housekeeper.",
+				});
+			}
+			const assignedHousekeeper = await getAssignableHousekeeper(
+				assignedToId,
+				existingTask.hotelId
 			);
-		} else if (isCleaningStatus(nextStatus)) {
-			updateData.cleaningStartedAt = existingTask.cleaningStartedAt || now;
-			updateData.completedAt = null;
-			updateData.cleaningDurationMs = 0;
-		} else {
-			updateData.cleanedBy = null;
-			updateData.cleaningDate = null;
-			updateData.cleaningStartedAt = null;
-			updateData.completedAt = null;
-			updateData.cleaningDurationMs = 0;
+			if (!assignedHousekeeper) {
+				return res.status(403).json({
+					error: "The selected housekeeper is not authorized for this hotel.",
+				});
+			}
+			updateData.assignedTo = assignedToId;
+			if (assignmentChanged) {
+				updateData.assignedBy = actorId || updateData.assignedBy || null;
+			}
+		}
+
+		const now = new Date();
+		if (updateData.task_status) {
+			if (isFinishedStatus(nextStatus)) {
+				updateData.cleanedBy = updateData.cleanedBy || actorId || existingTask.cleanedBy;
+				updateData.cleaningStartedAt = existingTask.cleaningStartedAt || now;
+				updateData.cleaningDate = now;
+				updateData.completedAt = now;
+				updateData.cleaningDurationMs = durationBetween(
+					updateData.cleaningStartedAt,
+					now
+				);
+			} else if (isCleaningStatus(nextStatus)) {
+				updateData.cleaningStartedAt = existingTask.cleaningStartedAt || now;
+				updateData.completedAt = null;
+				updateData.cleaningDurationMs = 0;
+			} else {
+				updateData.cleanedBy = null;
+				updateData.cleaningDate = null;
+				updateData.cleaningStartedAt = null;
+				updateData.completedAt = null;
+				updateData.cleaningDurationMs = 0;
+			}
+			if (reopeningClosedTask && actorIsSuperAdmin) {
+				updateData.cleanedBy = null;
+				updateData.cleaningDate = null;
+				updateData.cleaningStartedAt = null;
+				updateData.completedAt = null;
+				updateData.cleaningDurationMs = 0;
+			}
 		}
 
 		const historyEntry = {
@@ -764,6 +902,17 @@ exports.updateHouseKeepingTask = async (req, res) => {
 		);
 		if (updateData.task_status) {
 			nextRoomStatus = nextRoomStatus.map((entry) => {
+				if (reopeningClosedTask && actorIsSuperAdmin) {
+					return {
+						...entry,
+						status: nextStatus === "cleaning" ? "cleaning" : "unfinished",
+						startedBy: null,
+						startedAt: null,
+						cleanedBy: null,
+						cleanedAt: null,
+						durationMs: 0,
+					};
+				}
 				if (isFinishedStatus(nextStatus)) {
 					const startedAt =
 						entry.startedAt || existingTask.cleaningStartedAt || now;
@@ -819,8 +968,9 @@ exports.updateHouseKeepingTask = async (req, res) => {
 			await markTaskRoomsByStatus(updateHouseKeeping.rooms, nextStatus);
 		}
 		emitHousekeepingUpdate(req, updateHouseKeeping.hotelId, {
-			action: "updated",
+			action: assignmentChanged ? "assigned" : "updated",
 			taskId: String(updateHouseKeeping._id),
+			assignedTo: normalizeObjectId(updateHouseKeeping.assignedTo),
 		});
 		res.json(updateHouseKeeping);
 	} catch (err) {

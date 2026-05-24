@@ -55,6 +55,7 @@ const {
 	openFinanceCycleNotifications,
 	pendingConfirmationReservations,
 	pendingConfirmationNotificationFeed,
+	acknowledgePendingNotification,
 	updatePendingConfirmationReservation,
 	updateAgentCommissionApproval,
 	reservationAgentWalletSnapshot,
@@ -149,6 +150,12 @@ router.get(
 	"/reservations/notifications/pending-confirmation/:userId",
 	requireSignin,
 	pendingConfirmationNotificationFeed
+);
+
+router.put(
+	"/reservations/notifications/pending-confirmation/:userId/acknowledge",
+	requireSignin,
+	acknowledgePendingNotification
 );
 
 router.put(

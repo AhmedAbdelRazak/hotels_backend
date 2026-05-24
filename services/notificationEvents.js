@@ -8,9 +8,12 @@ const emitHotelNotificationRefresh = async (req, hotelId, payload = {}) => {
 	if (!io || !normalizedHotelId) return;
 
 	const basePayload = {
+		...payload,
 		type: payload.type || "hotel_notification_refresh",
 		hotelId: normalizedHotelId,
 		reservationId: normalizeId(payload.reservationId),
+		walletTransactionId: normalizeId(payload.walletTransactionId),
+		agentId: normalizeId(payload.agentId),
 		emittedAt: new Date().toISOString(),
 	};
 

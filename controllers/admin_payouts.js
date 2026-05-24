@@ -9,6 +9,10 @@
 const mongoose = require("mongoose");
 const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
+const {
+	resolveAuditViewerFromRequest,
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
 
 const SINCE_UTC = new Date("2025-06-01T00:00:00.000Z");
 
@@ -187,7 +191,8 @@ exports.listAdminPayouts = async (req, res) => {
 			findBase.hotelId = hotelId;
 		}
 
-		const raw = await Reservations.find(findBase, {
+		const auditViewer = await resolveAuditViewerFromRequest(req);
+		const rawRows = await Reservations.find(findBase, {
 			hotelId: 1,
 			confirmation_number: 1,
 			customer_details: 1,
@@ -214,6 +219,10 @@ exports.listAdminPayouts = async (req, res) => {
 			createdAt: 1,
 			updatedAt: 1,
 		}).lean();
+		const raw = sanitizeReservationAuditLogsCollectionForViewer(
+			rawRows,
+			auditViewer
+		);
 
 		const included = raw.filter((r) => statusIncluded(r?.reservation_status));
 		const hotelIdSet = new Set(included.map((r) => String(r.hotelId)));
@@ -786,7 +795,11 @@ exports.autoReconcileHotel = async (req, res) => {
 			customer_details: 1,
 		};
 
-		const rows = await Reservations.find(findBase, fields).lean();
+		const auditViewer = await resolveAuditViewerFromRequest(req);
+		const rows = sanitizeReservationAuditLogsCollectionForViewer(
+			await Reservations.find(findBase, fields).lean(),
+			auditViewer
+		);
 		const included = rows.filter((r) => statusIncluded(r?.reservation_status));
 
 		// derive channel + amounts

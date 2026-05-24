@@ -1,0 +1,243 @@
+JANNATBOOKING BACKEND APPLICATION STRUCTURE
+Audited: 2026-05-23
+
+Purpose
+This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
+
+Runtime Entry Point
+- server.js
+  - Creates the Express app, HTTP server, Socket.IO server, MongoDB connection, middleware, and route mounting.
+  - Loads every file in ./routes dynamically under the /api prefix.
+  - Serves static uploads from /uploads.
+  - Starts the housekeeping maintenance scheduler after MongoDB connects.
+  - Socket rooms currently used:
+    - support case rooms by support-case id.
+    - housekeeping:{hotelId} for housekeeping updates.
+    - hotel-notifications:{hotelId} for hotel notification counters.
+    - owner-notifications:{ownerId} for owner-level notification counters.
+  - Watches SupportCase changes and broadcasts the latest conversation activity.
+
+Top-Level Backend Structure
+- aiagent/
+  - AI agent orchestration, learning, policy, memory, ingestion, and reservation support utilities.
+- controllers/
+  - Business logic for every domain: auth, users, hotels, rooms, reservations, housekeeping, overall dashboards, reports, payments, support, OTA tools, and wallet operations.
+- models/
+  - Mongoose schemas for users, hotels, rooms, reservations, housekeeping tasks, support cases, expenses, agent wallets, activity tracking, and integration data.
+- routes/
+  - Express route definitions. Most routes delegate to controllers and are loaded by server.js under /api.
+- services/
+  - Shared backend services for notifications, activity tracking, reservation pricing/status, OTA email mapping, and housekeeping maintenance.
+- uploads/
+  - Uploaded hotel images, user documents, reservation documents, and generated/imported assets.
+
+Core User Roles And Scope Rules
+- role 1000
+  - Platform admin / super admin level. Also treat REACT_APP_SUPER_ADMIN_ID and SUPER_ADMIN_ID style configured users as super admins where used.
+  - Backend helpers must also recognize roleDescription/roleDescriptions values such as superadmin and super admin as platform-super-admin grants.
+  - Can access admin routes, owner-style hotel operations, account management, hotel-staff updates, and cross-hotel reporting without being restricted by hotelIdWork, hotelIdsWork, hotelIdsOwner, hotelsToSupport, or belongsToId.
+- role 2000
+  - Root hotel owner when the account has no belongsToId.
+  - Also appears for scoped hotel managers when roleDescription is hotelmanager and hotelIdWork / hotelIdsWork / belongsToId are set.
+- role 10000
+  - System admin for an owner account. Broad owner-like access, but scoped to assigned hotels through hotelIdsOwner, hotelsToSupport, hotelIdWork, or belongsToId.
+- role 3000
+  - Reception. Reservation-facing access for assigned hotel scope.
+- role 4000
+  - Housekeeping manager. Housekeeping reports, task assignment, and operational task management for assigned hotels.
+- role 5000
+  - Housekeeper. Assigned housekeeping task access.
+- role 6000
+  - Finance. Financial dashboards, reports, wallet/commission actions, and selected reservation reporting within hotel scope.
+- role 7000
+  - Order taker / external agent. Usually limited to newReservation and ownReservations access. Booking source should default to the agent/company identity.
+  - Public agent signup creates this role as inactive with agentApproval.status = pending and applicationReview.status = pending until a hotel owner/manager approves it.
+- role 8000
+  - Reservation employee. Reservation operations, pending confirmations, and selected settings/report access.
+- role 0
+  - Legacy/client/public-style role still appears in older code paths and should be treated carefully before removal.
+
+Role Data Model Notes
+- models/user.js is the source of account and staff-role data.
+- Important fields:
+  - role: primary numeric role.
+  - roleDescription: primary text role.
+  - roles and roleDescriptions: additional role grants.
+  - belongsToId: parent owner/account id for staff or scoped users.
+  - hotelIdWork and hotelIdsWork: assigned hotel scope used by hotel staff flows.
+  - hotelIdsOwner and hotelsToSupport: owner/system-admin support scope.
+  - accessTo: feature-level access such as newReservation and ownReservations.
+  - activeUser: account activation gate.
+  - companyName, agentCommercialModel, agentApproval, wallet opening balances: agent/ordertaker finance context.
+  - applicationReview: public signup review state for agent and job applicants before hotel approval.
+
+Critical Backend Authorization Helpers
+- controllers/auth.js
+  - createHotelStaffUser maps role descriptions to numeric roles and validates that the creator can create accounts for the requested hotels.
+  - Finance and reservation employee roles can create external agent/order-taker accounts in specific paths.
+  - isPlatformSuperAdmin is the global admin source for auth middleware and staff creation. isAuth, isAdmin, isHotelOwner, agent approval, and staff-creation checks should use this broad helper instead of only checking a single configured id or role number.
+- controllers/overall_dashboard.js
+  - requireOverallSection, canAccessOverallSection, and getAccessibleOverallHotels are the main overall-dashboard guards.
+  - Owner-like access is not the same as global access. System admins and scoped managers must still be limited to assigned hotels.
+  - Platform super admins must load overall hotels globally by default. ownerId may narrow the view, but stale hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport values on the super-admin account must never restrict global access.
+- controllers/reservations.js
+  - canCreateReservationForActor and canViewReservationHotel protect reservation creation and visibility.
+  - Order takers are restricted to their allowed reservation flows and own reservation records.
+  - Reservation status progression and backward status changes must remain protected.
+- controllers/user.js
+  - canManageHotelStaff protects staff/account management by hotel scope.
+  - isPlatformSuperAdmin must be treated as an unrestricted staff/account-management actor. Super admins can update any hotel staff or owner-like account through PUT /hotel-staff/:staffId/:hotelId/:userId.
+  - updateHotelStaffUser must recognize root owner accounts by _id === ownerId and hotelIdsOwner, not only belongsToId. Root owner accounts normally have no belongsToId and should not be rejected as "not belonging to this hotel".
+- controllers/agent_wallet.js
+  - Financial access guards protect agent wallet, claims, transactions, and commission review.
+  - Wallet claim statuses drive finance reporting: posted/approved movements are accepted and can affect wallet totals; pending/rejected/void movements must remain visible for audit but are reconciliationEligible = false and must never be included in reservation reconciliation totals. Both status and reviewStatus must be checked so mixed legacy records cannot slip into totals.
+
+Primary Route Files And API Areas
+- routes/auth.js
+  - Signup, property listing, signin/signout, password reset, Google login, and hotel staff account creation.
+  - Key routes include POST /signup, GET /signup-invitation, GET /signup-invitation/:code, POST /signin, POST /property-listing, POST /hotel-staff/create/:userId.
+  - POST /property-listing supports owner signup, public agent applications, and public job applications.
+- routes/user.js
+  - User profile reads/updates, admin account lists, hotel staff lists, staff updates, housekeeper lookup, and preview dashboard data.
+- routes/hotel_details.js
+  - Hotel profile creation/update, owner/admin hotel lists, executive summaries, open/incomplete reservation summaries, hotel stats, reassignment, and owner PayPal methods.
+- routes/rooms.js
+  - Room CRUD, distinct room values, room inventory availability, reservation-room availability, room deletion checks, and inventory reports.
+- routes/reservations.js
+  - Reservation creation, update, search/list, import preview/commit, pending confirmations, occupancy/current/range reports, payment links, guest emails, OTA dumps, source/status reports, and owner aggregation reports.
+- routes/overall_dashboard.js
+  - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, system admin actions, and settings.
+- routes/housekeeping.js
+  - Housekeeping task creation/list/count/update, assigned employee task views, supplies, and supply requests.
+- routes/agent_wallet.js
+  - Agent wallet summaries, todos, claims, transactions, reviews, voids, and adjustments.
+- routes/expenses.js
+  - Expense CRUD, hotel financial-report data, and expense support endpoints.
+- routes/adminreports.js
+  - Admin and hotel reports, reservation/check-in/check-out reports, top hotels, export, paid breakdown, and occupancy.
+- routes/hotel_inventory.js
+  - Calendar/day/availability inventory endpoints.
+- routes/supportcase.js
+  - Support cases by status/hotel, case details, updates, unseen counters, seen status, and message deletion.
+- routes/janat.js
+  - Public website and client booking APIs: active hotels, single hotel by slug, public room query, client reservations, payment verification, invoices, user reservations, currency, public payment flows, WhatsApp confirmations, and admin public-site reservation tools.
+- Payment and payout route files
+  - paypal_owner.js, paypal_reservation.js, braintree.js, braintree_reservation.js, stripe.js, square.js, bofaprocessing.js, and admin_payouts.js.
+- Integration route files
+  - otaInbound.js, integrator.js, and aiagent_learning.js.
+
+Core Models
+- models/user.js
+  - Account, role, staff scope, agent/company, and access data.
+  - notificationAcknowledgements stores per-user read receipts for generated dashboard notifications. Use stable ack keys so resolved agent-facing wallet/reservation notifications disappear after click without hiding pending operational queues.
+- models/signup_invitation.js
+  - Stores short public signup invitation records for /signup?invite=<code>. Codes are stored only as SHA-256 hashes; payloads include signed invitation scope such as account type, hotels, hotel names, role, agent commercial model, optional prefill data, creator, and expiry.
+- models/hotel_details.js
+  - Hotel profile, owner link, setup completion fields, rooms/photos/location/payment settings, activation state, and wallet/payment fields.
+- models/rooms.js
+  - Physical room records, room type/display, room cleanliness state, housekeeping dirty metadata, bed setup, and hotel ownership.
+- models/reservations.js
+  - Reservation status, guest details, confirmation number, room ids, pricing, payment data, source/order-taker fields, pending confirmation state, commission snapshots, wallet snapshots, financial cycle, and audit fields.
+- models/housekeeping.js
+  - Housekeeping tasks, room/task status, assignedTo/assignedBy, status history, start/end timestamps, duration, and hotel scope.
+- models/agent_wallet.js
+  - Agent wallet balances, claims, transactions, review/void flows, and commission tracking.
+- models/expenses.js
+  - Hotel/account expenses and financial-report support data.
+- models/supportcase.js
+  - Support cases, conversations, seen/unseen tracking, and case status.
+- Supporting models
+  - activity_tracker, housekeeping_supply, housekeeping_supply_request, Uncompleted, aiagent learning models, and integration/inbound data.
+
+Important Services
+- services/housekeepingMaintenance.js
+  - Scheduled job that marks rooms dirty after the configured clean-room window.
+- services/notificationEvents.js
+  - Emits hotel and owner notification counter updates through Socket.IO rooms.
+- services/reservationStatus.js
+  - Shared pending-confirmation and reservation-status helpers.
+- services/reservationPricing.js
+  - Reservation pricing calculations and shared pricing behavior.
+- services/activityTracker.js
+  - Writes operational activity/audit history.
+  - Tracks reservation status/scope changes, reservation exports, financial report exports, account creation, and account updates.
+  - Account tracking stores safe before/after field changes for role, hotel scope, active state, access, agent wallet setup, approval status, and company-document metadata only. It must never store plaintext passwords, password hashes, or full attachment data.
+- services/auditPrivacy.js
+  - Central privacy guard for reservation/admin tracker visibility.
+  - Reservation adminChangeLog and reservationAuditLog entries made by superadmin/admin/systemadmin actors are removed from backend responses unless the requesting viewer is a true super admin.
+  - Optional Authorization headers are respected on public-safe single-reservation fetches so super admins can see privileged tracker rows while public/client views and ordinary hotel users cannot.
+  - ActivityTracker records created by privileged actors are marked visibility=super_admin_only for future reporting surfaces.
+- services/otaEmailOrchestrator.js and services/otaReservationMapper.js
+  - OTA email/reservation parsing and mapping support.
+
+Critical Workflows To Protect
+- Reservation creation
+  - Always verify the acting user can create a reservation for the target hotel.
+  - For overall-dashboard reservation creation, require the hotel dropdown to be selected from hotels assigned to the user.
+  - For agents/order takers, source should come from the agent/company identity unless a role explicitly requires a manual source.
+- Public signup applications
+  - Direct public signup is for hotel manager/owner registration only.
+  - Agent and job applicants require a valid backend invitation generated from the overall create-account flow. New invitations use a short /signup?invite=<code> URL backed by models/signup_invitation.js; legacy invitationToken links are still accepted for compatibility.
+  - GET /signup-invitation/:code resolves a short code only after checking the stored hash, expiry, revoked state, and invited hotel records. It returns public-safe hotel names/locations and locked invitation fields for the frontend.
+  - POST /property-listing must remain the source of truth for invitation validation, hotel validation, and pending approval creation. It accepts invitationCode first and falls back to invitationToken.
+  - Signed invitations may include assigned hotels that are not public/published on the Janat frontend; public non-invited agent applications must still use active published hotels.
+  - If a pending applicant requested hotels across owners, approval must scope the account to the approving owner's hotel(s), not blindly activate every requested hotel.
+  - Application attachments are stored in companyDocuments and may include company files, CVs, or wallet/payment proof.
+  - Emit hotel/owner notification refresh events when a public application is submitted or approved.
+  - Keep applicationReview and agentApproval in user read/auth payloads because the pending applicant dashboard refreshes its approval status from /user/:userId.
+  - Agent-facing notifications
+  - GET /reservations/notifications/pending-confirmation/:userId generates reservation, finance, account, and wallet notification feeds. Resolved agent wallet claims and accepted/rejected reservation decisions include ackKey/ackable fields.
+  - PUT /reservations/notifications/pending-confirmation/:userId/acknowledge stores the ack key on the user. Pending work-queue items should not be made ackable; resolved account approvals/rejections, wallet claim approved/rejected, and reservation/finance accepted notifications should disappear after one click.
+- Reservation status changes
+  - Prevent non-super-admin users from moving reservation/task status backward.
+  - Closed/completed records should not be reopened except by a super admin path that also clears start/end timestamps where required by the business rule.
+- Tracker privacy
+  - Any reservation tracker/audit update performed by a super admin, platform admin, or system admin must only be visible to true super admins.
+  - Apply services/auditPrivacy.js before returning reservation details, pending-reservation queues, finance/payment commission rows, reservation searches, and report rows that include adminChangeLog or reservationAuditLog.
+  - Do not rely on frontend hiding alone for privileged audit rows. Backend responses should already be sanitized for non-super-admin viewers and for unauthenticated public/client payment fetches.
+- Housekeeping task assignment
+  - Managers and authorized hotel users can assign/update housekeeping tasks within assigned hotel scope.
+  - Housekeepers must only receive and act on tasks assigned to them or scoped to their hotel.
+  - Notifications must be emitted through hotel/owner/housekeeping socket rooms when assignments or task states change.
+- Overall dashboard
+  - Use backend hotel-scope helpers for every multi-hotel query. Never trust ownerId or hotelId query values without checking the actor's allowed hotels.
+  - Platform super admins are the exception to hotel-scope limits and must remain global across ownerId/hotelId contexts.
+  - Overall pending-reservations is available to approved order-taker/agent accounts as a read-only operational queue. Agents must only receive reservations tied to their own createdByUserId/orderTakeId/createdBy/orderTaker identifiers, while hotel staff keep their normal pending/finance workflow scope.
+- Account management
+  - Staff creation and updates must validate that the creator controls every hotel selected for the new or updated account.
+  - Super admins can create, activate, update, approve, and scope accounts across any hotel. Do not add hotel assignment restrictions to role 1000 / configured super-admin / superadmin role-description users.
+  - Root owner accounts should preserve hotelIdsOwner and avoid forcing belongsToId during account updates. Updating a root owner through staff-management routes must not convert it into a scoped staff account.
+  - PUT /overall-dashboard/system-admin/:accountId/:userId and POST /overall-dashboard/system-admin/:userId must validate hotel assignments differently by actor: super admins validate selected hotel IDs against real HotelDetails records globally; owner/system-admin/hotel-manager actors validate selected hotel IDs as a subset of their accessible overall hotels.
+  - The system-admin update route may convert an existing managed account into a system admin. It must force role/roles/roleDescription/roleDescriptions to systemadmin only, clear belongsToId, set hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport from the selected hotels, and preserve sanitized accessTo.
+  - Staff creation with roleDescription systemadmin must also keep System Admin mutually exclusive, set hotelIdsWork/hotelIdsOwner/hotelsToSupport from selected hotels, and avoid assigning belongsToId like a regular hotel employee.
+  - Converting a system admin back to hotel manager/reception/finance/etc. is handled through the hotel-staff update route. That route must allow accounts scoped by hotelIdsOwner/hotelsToSupport, then clear hotelIdsOwner for non-system-admin non-root-owner accounts and restore belongsToId to the hotel owner.
+  - Account create/update routes must call services/activityTracker.js. Staff creation uses hotel_staff_create, staff updates use hotel_staff_update, and system-admin create/update uses overall_system_admin_create / overall_system_admin_update.
+  - Overall create-account must not auto-select hotels or roles. Backend account creation and signup invitation creation should reject missing hotel/role scope, even if the frontend already validates it.
+  - Overall update-account should require an explicit account selection in the frontend before update fields are populated. Backend update routes must continue validating account id, creator scope, selected hotels, and role changes because query params or prefilled UI state are never trusted.
+  - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend.
+- Financial actions
+  - Wallet, commission, payout, expense, and financial report actions must remain restricted to owner/admin/finance/reservation roles with valid hotel/account scope.
+  - Approved order-taker/agent accounts may read overall financial surfaces only for their assigned hotels and their own agent wallet/reservation records. If financial-actions is opened by an agent, both reservation actions and pending wallet-claim rows must be filtered to that actor's own agent id.
+  - Overall financial-actions returns both reservation finance actions and a separately paginated pending wallet-approval queue. Pending wallet claims are sourced from AgentWallet records with source=agent_claim, status=pending, and reviewStatus=pending.
+  - Overall financial-report wallet movements must expose financialStatus and reconciliationEligible so rejected claims can remain visible while staying excluded from wallet totals and reconciliation. Rejected rows are audit history only, not reservation reconciliation data.
+  - Agent wallet summaries must return both commissionPaid and commissionDue totals. commissionPaid is the already-paid-out commission amount, while commissionDue is the unpaid/outstanding amount. Frontend reports and exports depend on this split for agent and finance reconciliation.
+- Agent overall regression scenario
+  - Create/approve an order-taker agent assigned to multiple hotels, then create reservations for that agent and for another agent in the same hotel set.
+  - As the approved agent, GET /overall-dashboard/pending-reservations/:userId with ownerId and optional assigned hotelId. The response must include only the authenticated agent's pending/rejected/finance-review/commission-review reservations and must exclude every other agent's records.
+  - As the approved agent, GET /overall-dashboard/financial-actions/:userId and GET /agent-wallet/summary/:hotelId/:userId, including attempts to pass another agentId. The backend must still return only the authenticated agent's wallet, commission, reservation, and claim data.
+  - Repeat with an unassigned hotelId. The API must not expose data for that hotel.
+  - Repeat as reservation employee, finance, manager, system admin, and super admin to confirm staff/admin queue visibility still follows their broader role scope and was not narrowed by the agent-only filters.
+- Public website routes
+  - Keep public Janat routes separate from authenticated hotel-management behavior. Public booking/payment endpoints still need reservation/payment validation.
+
+Backend Change Checklist
+- Start by identifying the route file, controller, model, and frontend caller for the feature.
+- Check roleDescription, role, roles, roleDescriptions, accessTo, belongsToId, hotelIdWork, hotelIdsWork, hotelIdsOwner, and hotelsToSupport before changing authorization.
+- When a true super admin receives 403, audit all helper layers for inconsistent checks. The expected platform-super-admin test is configured super-admin id OR numeric role 1000 OR normalized role description superadmin/super admin.
+- Reuse existing helpers such as canCreateReservationForActor, getAccessibleOverallHotels, canAccessOverallSection, canManageHotelStaff, and reservation status helpers.
+- Keep hotelId and ownerId values scoped to the authenticated user; do not rely on request params alone.
+- Preserve Socket.IO notification behavior for reservations, housekeeping, support, and notification counters.
+- Preserve ActivityTracker behavior for reservations, financial exports, and account management. When adding any account-management mutation, record actor, target account, changed fields, hotel scope, owner scope, and request metadata.
+- When adding fields to models, update both create and update controllers, relevant report aggregations, imports/exports, and frontend API clients.
+- When adding a route, place the route in ./routes and the business logic in ./controllers unless the local pattern clearly differs.
+- When changing reservation or housekeeping status behavior, test owner, super admin, system admin, hotel manager, reception, finance, order taker, reservation employee, housekeeping manager, and housekeeper scenarios.

@@ -11,6 +11,7 @@ const {
 	resetPassword,
 	googleLogin,
 	propertySignup,
+	resolveSignupInvitation,
 	createHotelStaffUser,
 	requireSignin,
 	isAuth,
@@ -18,6 +19,8 @@ const {
 const { userById } = require("../controllers/user");
 
 router.post("/signup", signup);
+router.get("/signup-invitation", resolveSignupInvitation);
+router.get("/signup-invitation/:code", resolveSignupInvitation);
 router.post("/property-listing", propertySignup);
 router.post(
 	"/hotel-staff/create/:userId",

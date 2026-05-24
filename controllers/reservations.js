@@ -31,6 +31,14 @@ const {
 	shouldCountReservationForInventory,
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
+const {
+	trackReservationStatusChange,
+} = require("../services/activityTracker");
+const {
+	resolveAuditViewerFromRequest,
+	sanitizeReservationAuditLogsCollectionForViewer,
+	sanitizeReservationAuditLogsForViewer,
+} = require("../services/auditPrivacy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -607,13 +615,16 @@ const isOrderTakingAccount = (user = {}) => {
 		Number(user.role) === 2000 ||
 		Number(user.role) === 3000 ||
 		Number(user.role) === 8000 ||
+		Number(user.role) === 10000 ||
 		roles.includes(1000) ||
 		roles.includes(2000) ||
 		roles.includes(3000) ||
 		roles.includes(8000) ||
+		roles.includes(10000) ||
 		descriptions.includes("hotelmanager") ||
 		descriptions.includes("reception") ||
-		descriptions.includes("reservationemployee");
+		descriptions.includes("reservationemployee") ||
+		descriptions.includes("systemadmin");
 
 	return hasOrderTakingScope && !hasFullReservationScope;
 };
@@ -679,6 +690,8 @@ const isManagerOrAdminAccount = (account = {}) =>
 	isConfiguredSuperAdmin(account) ||
 	accountHasRole(account, 1000) ||
 	accountHasRole(account, 2000) ||
+	accountHasRole(account, 10000) ||
+	accountHasDescription(account, "systemadmin") ||
 	accountHasDescription(account, "hotelmanager");
 
 const isFinanceAccount = (account = {}) =>
@@ -1237,7 +1250,11 @@ const buildFinanceWorkflowReadyFilter = () => ({
 	],
 });
 
-const buildPendingConfirmationFilter = (hotelId, scope = "all") => {
+const buildPendingConfirmationFilter = (
+	hotelId,
+	scope = "all",
+	{ includeLegacy = false } = {}
+) => {
 	const reasonFilters =
 		scope === "commission"
 			? [buildCommissionMissingFilter(), buildPendingFinanceReviewFilter()]
@@ -1252,7 +1269,7 @@ const buildPendingConfirmationFilter = (hotelId, scope = "all") => {
 	return {
 		hotelId: ObjectId(hotelId),
 		$and: [
-			buildNewReservationProcessFilter(),
+			...(includeLegacy ? [] : [buildNewReservationProcessFilter()]),
 			...(scope === "commission" ? [buildFinanceWorkflowReadyFilter()] : []),
 			{ $or: reasonFilters },
 		],
@@ -1421,9 +1438,77 @@ const isConfiguredSuperAdmin = (user) => {
 	return configuredIds.includes(normalizeId(user));
 };
 
+const reservationActorRoles = (actor = {}) => [
+	Number(actor.role),
+	...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+].filter(Boolean);
+
+const reservationActorDescriptions = (actor = {}) => [
+	String(actor.roleDescription || "").toLowerCase(),
+	...(Array.isArray(actor.roleDescriptions)
+		? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const isSuperAdminReservationActor = (actor = {}) =>
+	isConfiguredSuperAdmin(actor) ||
+	reservationActorRoles(actor).includes(1000) ||
+	reservationActorDescriptions(actor).includes("superadmin") ||
+	reservationActorDescriptions(actor).includes("super admin");
+
+const reservationStatusProgressRank = (status = "") => {
+	const normalized = String(status || "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+	if (!normalized) return null;
+	if (
+		[
+			"pendingconfirmation",
+			"pendinghotelreview",
+			"pendingfinancereview",
+			"pendingagentcommissionapproval",
+			"financerejected",
+			"rejected",
+			"pending",
+		].includes(normalized)
+	) {
+		return 0;
+	}
+	if (["confirmed", "ok", "reserved"].includes(normalized)) return 1;
+	if (["inhouse", "checkedin", "checkin"].includes(normalized)) return 2;
+	if (
+		[
+			"checkedout",
+			"checkout",
+			"cancelled",
+			"canceled",
+			"noshow",
+			"closed",
+		].includes(normalized)
+	) {
+		return 3;
+	}
+	return null;
+};
+
+const isTerminalReservationStatus = (status = "") => {
+	const normalized = String(status || "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+	return ["checkedout", "checkout", "cancelled", "canceled", "noshow", "closed"].includes(
+		normalized
+	);
+};
+
+const isBackwardReservationStatusChange = (fromStatus = "", toStatus = "") => {
+	const fromRank = reservationStatusProgressRank(fromStatus);
+	const toRank = reservationStatusProgressRank(toStatus);
+	return fromRank !== null && toRank !== null && toRank < fromRank;
+};
+
 const canViewReservationHotel = async (actor, hotelId) => {
 	if (!actor || !ObjectId.isValid(hotelId)) return false;
-	if (Number(actor.role) === 1000 || isConfiguredSuperAdmin(actor)) return true;
+	if (isSuperAdminReservationActor(actor)) return true;
 
 	const hotel = await HotelDetails.findById(hotelId)
 		.select("_id belongsTo")
@@ -1445,6 +1530,42 @@ const canViewReservationHotel = async (actor, hotelId) => {
 	);
 };
 
+const canCreateReservationForActor = (actor = {}) => {
+	if (!actor || actor.activeUser === false) return false;
+	if (isConfiguredSuperAdmin(actor)) return true;
+
+	const roles = [
+		Number(actor.role),
+		...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+	].filter(Boolean);
+	const descriptions = [
+		String(actor.roleDescription || "").toLowerCase(),
+		...(Array.isArray(actor.roleDescriptions)
+			? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+	const accessTo = Array.isArray(actor.accessTo) ? actor.accessTo : [];
+
+	if ([1000, 2000, 3000, 7000, 8000, 10000].some((role) => roles.includes(role))) {
+		return true;
+	}
+
+	if (
+		[
+			"hotelmanager",
+			"reception",
+			"ordertaker",
+			"reservationemployee",
+			"systemadmin",
+			"system admin",
+		].some((role) => descriptions.includes(role))
+	) {
+		return true;
+	}
+
+	return accessTo.includes("newReservation");
+};
+
 const canUsePendingConfirmationWorkflow = (actor = {}) => {
 	const roles = [
 		Number(actor.role),
@@ -1458,8 +1579,9 @@ const canUsePendingConfirmationWorkflow = (actor = {}) => {
 	];
 	return (
 		isConfiguredSuperAdmin(actor) ||
-		[1000, 2000, 6000, 8000].some((role) => roles.includes(role)) ||
+		[1000, 2000, 6000, 8000, 10000].some((role) => roles.includes(role)) ||
 		descriptions.includes("hotelmanager") ||
+		descriptions.includes("systemadmin") ||
 		descriptions.includes("finance") ||
 		descriptions.includes("reservationemployee")
 	);
@@ -1497,7 +1619,9 @@ const getPendingNotificationHotelsForActor = async (actor = {}, ownerId = "") =>
 		};
 	} else {
 		const ids = [
+			...(Array.isArray(actor.hotelIdsWork) ? actor.hotelIdsWork : []),
 			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
 			normalizeId(actor.hotelIdWork),
 		]
 			.map(normalizeId)
@@ -1518,7 +1642,13 @@ const canApproveAgentAccountsForOwner = async (actor = {}, ownerId = "") => {
 	if (!actor || !normalizedOwnerId) return false;
 	if (isConfiguredSuperAdmin(actor) || accountHasRole(actor, 1000)) return true;
 	if (normalizeId(actor._id) === normalizedOwnerId) return true;
-	if (!accountHasDescription(actor, "hotelmanager")) return false;
+	if (
+		!accountHasRole(actor, 10000) &&
+		!accountHasDescription(actor, "systemadmin") &&
+		!accountHasDescription(actor, "hotelmanager")
+	) {
+		return false;
+	}
 
 	const ownerHotels = await HotelDetails.find({ belongsTo: ObjectId(normalizedOwnerId) })
 		.select("_id")
@@ -1529,20 +1659,82 @@ const canApproveAgentAccountsForOwner = async (actor = {}, ownerId = "") => {
 	const actorScope = new Set(
 		[
 			actor.hotelIdWork,
+			...(Array.isArray(actor.hotelIdsWork) ? actor.hotelIdsWork : []),
 			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
 			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
 		]
 			.map(normalizeId)
 			.filter(Boolean)
 	);
+	if (accountHasDescription(actor, "hotelmanager")) {
+		return ownerHotelIds.some((hotelId) => actorScope.has(hotelId));
+	}
 	return ownerHotelIds.every((hotelId) => actorScope.has(hotelId));
 };
+
+const notificationAcknowledgementKeys = (actor = {}) =>
+	new Set(
+		(Array.isArray(actor.notificationAcknowledgements)
+			? actor.notificationAcknowledgements
+			: []
+		)
+			.map((item) => (typeof item === "string" ? item : item?.key))
+			.map((item) => String(item || "").trim())
+			.filter(Boolean)
+	);
+
+const notificationTimestampKey = (value) => {
+	const date = value ? new Date(value) : null;
+	return date && !Number.isNaN(date.getTime()) ? String(date.getTime()) : "0";
+};
+
+const buildNotificationAckKey = ({
+	notificationType = "",
+	entityType = "",
+	entityId = "",
+	status = "",
+	eventDate = "",
+}) =>
+	[
+		String(notificationType || "").trim(),
+		String(entityType || "").trim(),
+		normalizeId(entityId),
+		String(status || "").trim().toLowerCase(),
+		notificationTimestampKey(eventDate),
+	]
+		.filter(Boolean)
+		.join(":");
+
+const withNotificationAcknowledgement = (
+	item = {},
+	{ entityType = "", entityId = "", status = "", eventDate = "" } = {}
+) => {
+	const notificationType = String(item.notificationType || "").trim();
+	const ackKey = buildNotificationAckKey({
+		notificationType,
+		entityType,
+		entityId,
+		status,
+		eventDate,
+	});
+	return {
+		...item,
+		ackable: !!ackKey,
+		ackKey,
+	};
+};
+
+const filterAcknowledgedNotifications = (
+	items = [],
+	acknowledgedKeys = new Set()
+) => items.filter((item) => !item.ackKey || !acknowledgedKeys.has(item.ackKey));
 
 const getAgentAccountNotificationFeed = async ({
 	actor,
 	hotels = [],
 	hotelMap = {},
 	limit = 8,
+	acknowledgedKeys = new Set(),
 }) => {
 	const actorId = normalizeId(actor?._id);
 	const hotelIds = hotels
@@ -1567,6 +1759,15 @@ const getAgentAccountNotificationFeed = async ({
 	}
 
 	const visibilityClauses = [];
+	if (isOrderTakingAccount(actor) || accountLooksLikeAgent(actor)) {
+		visibilityClauses.push({
+			_id: ObjectId(actorId),
+			$or: [
+				{ "agentApproval.status": { $in: ["approved", "rejected"] } },
+				{ "applicationReview.status": { $in: ["approved", "rejected"] } },
+			],
+		});
+	}
 	if (isFinanceAccount(actor) || isReservationEmployeeAccount(actor)) {
 		visibilityClauses.push({
 			"agentApproval.requestedBy._id": actorId,
@@ -1575,8 +1776,10 @@ const getAgentAccountNotificationFeed = async ({
 	}
 	if (approvableOwnerIds.length) {
 		visibilityClauses.push({
-			belongsToId: { $in: approvableOwnerIds },
-			"agentApproval.status": "pending",
+			$or: [
+				{ belongsToId: { $in: approvableOwnerIds }, "agentApproval.status": "pending" },
+				{ "applicationReview.status": "pending" },
+			],
 		});
 	}
 	if (!visibilityClauses.length) {
@@ -1597,29 +1800,31 @@ const getAgentAccountNotificationFeed = async ({
 			{ roleDescriptions: "ordertaker" },
 		],
 	};
+	const publicStaffApplicationFilter = {
+		"applicationReview.type": "job",
+		"applicationReview.status": "pending",
+	};
 	const query = {
 		$and: [
 			agentScopeFilter,
-			agentRoleFilter,
+			{ $or: [agentRoleFilter, publicStaffApplicationFilter] },
 			{ $or: visibilityClauses },
 		],
 	};
 
-	const [rows, total] = await Promise.all([
+	const queryLimit = Math.max(limit * 4, 50);
+	const [rows] = await Promise.all([
 		User.find(query)
 			.select(
-				"_id name email phone companyName activeUser agentApproval hotelIdWork hotelsToSupport belongsToId createdAt updatedAt"
+				"_id name email phone companyName activeUser agentApproval applicationReview role roleDescription roles roleDescriptions hotelIdWork hotelsToSupport belongsToId createdAt updatedAt"
 			)
 			.sort({ "agentApproval.lastUpdatedAt": -1, updatedAt: -1, createdAt: -1 })
-			.limit(limit)
+			.limit(queryLimit)
 			.lean()
 			.exec(),
-		User.countDocuments(query),
 	]);
 
-	return {
-		total,
-		data: rows.map((agent) => {
+	const notifications = rows.map((agent) => {
 			const scopeIds = [
 				normalizeId(agent.hotelIdWork),
 				...(Array.isArray(agent.hotelsToSupport)
@@ -1630,9 +1835,18 @@ const getAgentAccountNotificationFeed = async ({
 				scopeIds.find((id) => hotelIds.includes(id)) || hotelIds[0] || "";
 			const hotel = hotelMap[currentHotelId] || {};
 			const approval = agent.agentApproval || {};
-			const status = String(approval.status || "").toLowerCase();
+			const application = agent.applicationReview || {};
+			const applicationStatus = String(application.status || "").toLowerCase();
+			const isStaffApplication =
+				String(application.type || "").toLowerCase() === "job" &&
+				applicationStatus === "pending";
+			const status = isStaffApplication
+				? applicationStatus
+				: String(approval.status || "").toLowerCase();
 			const notificationType =
-				status === "approved"
+				isStaffApplication
+					? "staff_application_pending"
+					: status === "approved"
 					? "agent_account_approved"
 					: status === "rejected"
 					? "agent_account_rejected"
@@ -1640,13 +1854,15 @@ const getAgentAccountNotificationFeed = async ({
 			const agentName =
 				agent.name || agent.companyName || agent.email || "External agent";
 			const eventDate =
+				application.lastUpdatedAt ||
+				application.requestedAt ||
 				approval.lastUpdatedAt ||
 				approval.approvedAt ||
 				approval.rejectedAt ||
 				approval.requestedAt ||
 				agent.updatedAt ||
 				agent.createdAt;
-			return {
+			const item = {
 				_id: `agent-account-${agent._id}`,
 				agentId: agent._id,
 				notificationType,
@@ -1657,23 +1873,194 @@ const getAgentAccountNotificationFeed = async ({
 				agentName,
 				guestName: agentName,
 				agentEmail: agent.email || "",
-				confirmation_number: "Agent account",
+				confirmation_number: isStaffApplication
+					? "Staff application"
+					: "Agent account",
 				booking_source: hotel.hotelName || "Hotel",
 				booked_at: eventDate,
 				checkin_date: eventDate,
 				total_amount: 0,
 				pendingReasons:
-					notificationType === "agent_account_approved"
+					notificationType === "staff_application_pending"
+						? ["staff_application_pending_review"]
+						: notificationType === "agent_account_approved"
 						? ["agent_account_approved"]
 						: notificationType === "agent_account_rejected"
 						? ["agent_account_rejected"]
 						: ["agent_account_pending_approval"],
 				decisionStatus: status,
-				decisionReason: approval.rejectionReason || "",
-				requestedBy: approval.requestedBy || null,
-				approvedBy: approval.approvedBy || null,
+				decisionReason:
+					application.rejectionReason || approval.rejectionReason || "",
+				requestedBy: application.requestedBy || approval.requestedBy || null,
+				approvedBy: application.approvedBy || approval.approvedBy || null,
+				applicationReview: application,
 			};
-		}),
+			return ["approved", "rejected"].includes(status)
+				? withNotificationAcknowledgement(item, {
+						entityType: "user_account",
+						entityId: agent._id,
+						status,
+						eventDate,
+				  })
+				: item;
+		});
+	const filteredNotifications = filterAcknowledgedNotifications(
+		notifications,
+		acknowledgedKeys
+	);
+
+	return {
+		total: filteredNotifications.length,
+		data: filteredNotifications.slice(0, limit),
+	};
+};
+
+const getAgentWalletClaimNotificationFeed = async ({
+	actor,
+	hotels = [],
+	hotelMap = {},
+	limit = 8,
+	acknowledgedKeys = new Set(),
+}) => {
+	const actorId = normalizeId(actor?._id);
+	const hotelIds = hotels
+		.map((hotel) => normalizeId(hotel?._id))
+		.filter((id) => ObjectId.isValid(id));
+	if (!actorId || !hotelIds.length) {
+		return { total: 0, data: [] };
+	}
+
+	const hotelObjectIds = hotelIds.map((id) => ObjectId(id));
+	const isAgent = isOrderTakingAccount(actor);
+	const canReviewWalletClaims =
+		isManagerOrAdminAccount(actor) || isFinanceAccount(actor);
+
+	if (!isAgent && !canReviewWalletClaims) {
+		return { total: 0, data: [] };
+	}
+
+	const query = isAgent
+		? {
+				hotelId: { $in: hotelObjectIds },
+				agentId: ObjectId(actorId),
+				source: "agent_claim",
+				$or: [
+					{ status: "pending", reviewStatus: "pending" },
+					{ status: "rejected" },
+					{ reviewStatus: "rejected" },
+					{ status: "posted", reviewStatus: "approved" },
+					{ reviewStatus: "approved" },
+				],
+		  }
+		: {
+				hotelId: { $in: hotelObjectIds },
+				source: "agent_claim",
+				status: "pending",
+				reviewStatus: "pending",
+		  };
+	const queryLimit = isAgent ? Math.max(limit * 4, 50) : limit;
+
+	const [rows, total] = await Promise.all([
+		AgentWallet.find(query)
+			.sort({ updatedAt: -1, createdAt: -1 })
+			.limit(queryLimit)
+			.lean()
+			.exec(),
+		AgentWallet.countDocuments(query),
+	]);
+
+	const agentIds = [
+		...new Set(
+			rows
+				.map((transaction) => normalizeId(transaction.agentId))
+				.filter((id) => ObjectId.isValid(id))
+		),
+	];
+	const agents = agentIds.length
+		? await User.find({ _id: { $in: agentIds.map((id) => ObjectId(id)) } })
+				.select("_id name email companyName")
+				.lean()
+				.exec()
+		: [];
+	const agentMap = agents.reduce((acc, agent) => {
+		acc[normalizeId(agent._id)] = agent;
+		return acc;
+	}, {});
+
+	const notifications = rows.map((transaction) => {
+		const currentHotelId = normalizeId(transaction.hotelId);
+		const hotel = hotelMap[currentHotelId] || {};
+		const currentAgentId = normalizeId(transaction.agentId);
+		const agent = agentMap[currentAgentId] || {};
+		const status = String(transaction.status || "").toLowerCase();
+		const reviewStatus = String(transaction.reviewStatus || "").toLowerCase();
+		const notificationStatus =
+			status === "rejected" || reviewStatus === "rejected"
+				? "rejected"
+				: status === "pending" || reviewStatus === "pending"
+				? "pending"
+				: status === "posted" || reviewStatus === "approved"
+				? "approved"
+				: status || reviewStatus || "pending";
+		const notificationType =
+			notificationStatus === "rejected"
+				? "agent_wallet_claim_rejected"
+				: notificationStatus === "approved"
+				? "agent_wallet_claim_approved"
+				: "agent_wallet_claim_pending";
+		const agentName =
+			agent.name ||
+			agent.companyName ||
+			agent.email ||
+			transaction.createdBy?.name ||
+			"External agent";
+		const eventDate =
+			transaction.reviewedAt ||
+			transaction.updatedAt ||
+			transaction.transactionDate ||
+			transaction.createdAt;
+		const item = {
+			_id: `agent-wallet-${transaction._id}`,
+			walletTransactionId: normalizeId(transaction._id),
+			agentId: currentAgentId,
+			notificationType,
+			hotelId: currentHotelId,
+			hotelName: hotel.hotelName || "",
+			hotelOwnerId: hotel.hotelOwnerId || normalizeId(transaction.ownerId) || "",
+			agentName,
+			guestName: agentName,
+			booking_source: transaction.reference || hotel.hotelName || "Wallet",
+			confirmation_number: "Wallet claim",
+			booked_at: eventDate,
+			checkin_date: transaction.transactionDate || eventDate,
+			checkout_date: "",
+			total_amount: transaction.amount || 0,
+			pendingReasons:
+				notificationType === "agent_wallet_claim_rejected"
+					? ["wallet_claim_rejected"]
+					: notificationType === "agent_wallet_claim_approved"
+					? ["wallet_claim_approved"]
+					: ["wallet_claim_pending"],
+			decisionStatus: notificationStatus,
+			decisionReason: transaction.rejectionReason || "",
+			attachments: transaction.attachments || [],
+		};
+		return notificationStatus === "pending"
+			? item
+			: withNotificationAcknowledgement(item, {
+					entityType: "agent_wallet",
+					entityId: transaction._id,
+					status: notificationStatus,
+					eventDate,
+			  });
+	});
+	const filteredNotifications = isAgent
+		? filterAcknowledgedNotifications(notifications, acknowledgedKeys)
+		: notifications;
+
+	return {
+		total: isAgent ? filteredNotifications.length : total,
+		data: filteredNotifications.slice(0, limit),
 	};
 };
 
@@ -2258,6 +2645,60 @@ const sendEmailWithPdf = async (reservationData, opts = {}) => {
 };
 
 exports.create = async (req, res) => {
+	const routeHotelId = normalizeId(req.params?.hotelId);
+	const bodyHotelId = normalizeId(req.body?.hotelId);
+	const createActorId = normalizeId(req.auth?._id || req.params?.userId);
+
+	if (!routeHotelId || !ObjectId.isValid(routeHotelId)) {
+		return res.status(400).json({ error: "Valid hotel id is required" });
+	}
+	if (bodyHotelId && bodyHotelId !== routeHotelId) {
+		return res.status(400).json({ error: "Reservation hotel does not match the route" });
+	}
+	if (!createActorId || !ObjectId.isValid(createActorId)) {
+		return res.status(401).json({ error: "Valid active user is required" });
+	}
+
+	const [createActor, routeHotel] = await Promise.all([
+		User.findById(createActorId)
+			.select(
+				"_id name email companyName role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+			)
+			.lean()
+			.exec(),
+		HotelDetails.findById(routeHotelId)
+			.select("_id belongsTo hotelName")
+			.lean()
+			.exec(),
+	]);
+
+	if (!createActor || createActor.activeUser === false) {
+		return res.status(401).json({ error: "Valid active user is required" });
+	}
+	if (!routeHotel) {
+		return res.status(404).json({ error: "Hotel was not found" });
+	}
+	if (!canCreateReservationForActor(createActor)) {
+		return res.status(403).json({ error: "This account cannot create reservations" });
+	}
+	if (!(await canViewReservationHotel(createActor, routeHotelId))) {
+		return res
+			.status(403)
+			.json({ error: "You cannot create reservations for this hotel" });
+	}
+	if (
+		!isOrderTakingAccount(createActor) &&
+		!String(req.body?.booking_source || "").trim()
+	) {
+		return res.status(400).json({ error: "Booking Source is required" });
+	}
+
+	req.body.hotelId = routeHotel._id;
+	req.body.belongsTo = routeHotel.belongsTo;
+	req.body.requestingUserId = createActor._id;
+	req.body.createdByUserId = createActor._id;
+	req.body.orderTakeId = createActor._id;
+
 	const resolveCreatedBy = async () => {
 		const actorId =
 			req.auth?._id ||
@@ -2619,7 +3060,7 @@ exports.reservationSearchAllList = async (req, res) => {
 			});
 		}
 
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error("Error in reservationSearchAllList:", error);
 		res.status(500).send("Server error");
@@ -2657,7 +3098,7 @@ exports.reservationSearch = async (req, res) => {
 			});
 		}
 
-		res.json(reservation);
+		res.json(sanitizeReservationAuditLogsForViewer(reservation));
 	} catch (error) {
 		res.status(500).send("Server error");
 	}
@@ -2799,7 +3240,9 @@ exports.getListOfReservations = async (req, res) => {
 		}
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor)
+		);
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -3006,7 +3449,7 @@ exports.checkedoutReport = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -3233,7 +3676,7 @@ exports.generalReservationsReport = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -3628,6 +4071,7 @@ exports.singleReservationById = async (req, res) => {
 	try {
 		// Extract reservationId from request parameters
 		const { reservationId } = req.params;
+		const auditViewer = await resolveAuditViewerFromRequest(req);
 
 		// Find the reservation by its ID and populate related fields
 		const reservation = await Reservations.findById(reservationId)
@@ -3675,7 +4119,9 @@ exports.singleReservationById = async (req, res) => {
 			customer_details: decryptedCustomerDetails, // Replace with decrypted and masked details
 		};
 
-		res.status(200).json(responseReservation);
+		res
+			.status(200)
+			.json(sanitizeReservationAuditLogsForViewer(responseReservation, auditViewer));
 	} catch (error) {
 		// Log the error for debugging purposes
 		console.error("Error fetching reservation:", error.message || error);
@@ -3793,7 +4239,7 @@ exports.reservationsList = (req, res) => {
 					error: err,
 				});
 			}
-			res.json(data);
+			res.json(sanitizeReservationAuditLogsCollectionForViewer(data));
 		});
 };
 
@@ -3847,7 +4293,7 @@ exports.reservationsOccupancyRange = async (req, res) => {
 			.populate("belongsTo")
 			.populate("roomId");
 
-		return res.json(reservations);
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error("Error fetching occupancy range:", error);
 		return res.status(500).json({ error: "Internal server error" });
@@ -3889,7 +4335,7 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 			.populate("belongsTo")
 			.populate("roomId");
 
-		return res.json(reservations);
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error("Error fetching current occupancy:", error);
 		return res.status(500).json({ error: "Internal server error" });
@@ -4167,7 +4613,7 @@ exports.todaysCheckins = async (req, res) => {
 			},
 		}).sort({ checkin_date: 1 });
 
-		return res.json(reservations);
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error("Error fetching today's check-ins:", error);
 		return res.status(500).json({ error: "Internal Server Error" });
@@ -4199,7 +4645,7 @@ exports.reservationsList2 = (req, res) => {
 					error: err,
 				});
 			}
-			res.json(data);
+			res.json(sanitizeReservationAuditLogsCollectionForViewer(data));
 		});
 };
 
@@ -4352,6 +4798,34 @@ exports.updateReservation = async (req, res) => {
 						.lean()
 						.exec()
 				: null;
+		const requestedLifecycleStatus = String(
+			normalizedUpdateData.reservation_status ||
+				normalizedUpdateData.state ||
+				""
+		).trim();
+		const currentLifecycleStatus = String(
+			existingReservation.reservation_status ||
+				existingReservation.state ||
+				""
+		).trim();
+		if (
+			requestedLifecycleStatus &&
+			requestedLifecycleStatus.toLowerCase() !==
+				currentLifecycleStatus.toLowerCase() &&
+			(isBackwardReservationStatusChange(
+				currentLifecycleStatus,
+				requestedLifecycleStatus
+			) ||
+				(isTerminalReservationStatus(currentLifecycleStatus) &&
+					!isTerminalReservationStatus(requestedLifecycleStatus))) &&
+			!isSuperAdminReservationActor(requestingActor)
+		) {
+			return res.status(403).json({
+				error:
+					"Only a super admin can move a closed reservation backward or reopen it.",
+				code: "reservation_status_reversion_locked",
+			});
+		}
 		const orderTakerBasicEditOnly = isOrderTakingAccount(requestingActor || {});
 		if (orderTakerBasicEditOnly) {
 			const reservationOwnerIds = [
@@ -4812,6 +5286,15 @@ exports.updateReservation = async (req, res) => {
 			return res.status(404).json({ error: "Failed to update reservation." });
 		}
 
+		await trackReservationStatusChange({
+			req,
+			actor: auditActor,
+			reservationBefore: existingReservation,
+			reservationAfter: updatedReservation,
+			auditEntries,
+			source: "reservation_update",
+		});
+
 		// 8️⃣ Handle "InHouse" status updates
 		if (
 			normalizedUpdateData.reservation_status &&
@@ -4947,7 +5430,10 @@ exports.updateReservation = async (req, res) => {
 
 		return res.json({
 			message: "Reservation updated successfully",
-			reservation: updatedReservation,
+			reservation: sanitizeReservationAuditLogsForViewer(
+				updatedReservation,
+				requestingActor
+			),
 		});
 	} catch (err) {
 		if (err instanceof ReservationPricingError || err?.statusCode) {
@@ -6028,7 +6514,7 @@ exports.dateReport = async (req, res) => {
 			],
 		});
 
-		return res.json(reservations);
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		return res
@@ -6431,7 +6917,7 @@ exports.CheckedOutReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -6482,7 +6968,7 @@ exports.pendingPaymentReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -6533,7 +7019,7 @@ exports.commissionPaidReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -6622,17 +7108,83 @@ exports.pendingConfirmationReservations = async (req, res) => {
 			total,
 			page: parsedPage,
 			records: parsedRecords,
-			data: rows.map((reservation) => ({
-				...reservation,
-				pendingReasons: getPendingConfirmationReasonsForActor(
-					reservation,
-					actor
-				),
-			})),
+			data: sanitizeReservationAuditLogsCollectionForViewer(rows, actor).map(
+				(reservation) => ({
+					...reservation,
+					pendingReasons: getPendingConfirmationReasonsForActor(
+						reservation,
+						actor
+					),
+				})
+			),
 		});
 	} catch (error) {
 		console.error("Error fetching pending confirmation reservations:", error);
 		res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.acknowledgePendingNotification = async (req, res) => {
+	try {
+		const actorId = normalizeId(req.auth?._id || req.params.userId);
+		const requestedUserId = normalizeId(req.params.userId);
+		const body = req.body || {};
+		const ackKey = String(body.ackKey || body.notificationKey || "")
+			.trim()
+			.slice(0, 260);
+		const notificationType = String(body.notificationType || "")
+			.trim()
+			.slice(0, 80);
+		const entityId = String(
+			body.entityId ||
+				body.reservationId ||
+				body.walletTransactionId ||
+				""
+		)
+			.trim()
+			.slice(0, 80);
+
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+		if (
+			requestedUserId &&
+			ObjectId.isValid(requestedUserId) &&
+			requestedUserId !== actorId
+		) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!ackKey || ackKey.length < 8) {
+			return res.status(400).json({ error: "Notification key is required" });
+		}
+
+		await User.updateOne(
+			{ _id: ObjectId(actorId) },
+			{ $pull: { notificationAcknowledgements: { key: ackKey } } }
+		).exec();
+		await User.updateOne(
+			{ _id: ObjectId(actorId) },
+			{
+				$push: {
+					notificationAcknowledgements: {
+						$each: [
+							{
+								key: ackKey,
+								notificationType,
+								entityId,
+								acknowledgedAt: new Date(),
+							},
+						],
+						$slice: -500,
+					},
+				},
+			}
+		).exec();
+
+		return res.json({ acknowledged: true, ackKey });
+	} catch (error) {
+		console.error("acknowledgePendingNotification error:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
 	}
 };
 
@@ -6653,7 +7205,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 
 		const actor = await User.findById(actorId)
 			.select(
-				"_id role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+				"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser notificationAcknowledgements"
 			)
 			.lean()
 			.exec();
@@ -6696,6 +7248,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				}
 				return acc;
 			}, {});
+			const acknowledgedKeys = notificationAcknowledgementKeys(actor);
 
 			const agentOwnReservationClause = {
 				$or: [
@@ -6707,7 +7260,6 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
 				$and: [
 					agentOwnReservationClause,
-					buildNewReservationProcessFilter(),
 					{
 						$or: [
 							{ reservation_status: PENDING_CONFIRMATION_REGEX },
@@ -6736,46 +7288,85 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					},
 				],
 			};
-			const [rows, total] = await Promise.all([
+			const [rows, walletClaimFeed, agentAccountFeed] = await Promise.all([
 				Reservations.find(agentDecisionQuery)
 					.select(
-						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
+						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
 					)
 					.sort({ updatedAt: -1, createdAt: -1 })
-					.limit(limit)
+					.limit(Math.max(limit * 4, 50))
 					.lean()
 					.exec(),
-				Reservations.countDocuments(agentDecisionQuery),
+				getAgentWalletClaimNotificationFeed({
+					actor,
+					hotels,
+					hotelMap,
+					limit,
+					acknowledgedKeys,
+				}),
+				getAgentAccountNotificationFeed({
+					actor,
+					hotels,
+					hotelMap,
+					limit,
+					acknowledgedKeys,
+				}),
 			]);
 
-			return res.json({
-				total,
-				data: rows.map((reservation) => {
+			const reservationNotifications = rows.map((reservation) => {
 					const currentHotelId = normalizeId(reservation.hotelId);
 					const hotel = hotelMap[currentHotelId] || {};
+					const financialCycle = reservation.financial_cycle || {};
 					const decision =
 						reservation.agentDecisionSnapshot ||
 						reservation.pendingConfirmation ||
 						{};
 					const decisionStatus = String(decision.status || "").toLowerCase();
 					const isDecision = ["confirmed", "rejected"].includes(decisionStatus);
-					const pendingReasons = isDecision
+					const totalReviewStatus = String(
+						financialCycle.totalReviewStatus || ""
+					).toLowerCase();
+					const financeAccepted =
+						String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
+							"confirmed" &&
+						totalReviewStatus === "approved" &&
+						hasAssignedCommission(reservation) &&
+						!["pending", "rejected"].includes(
+							String(
+								reservation?.commissionAgentApproval?.status || ""
+							).toLowerCase()
+						);
+					const pendingReasons = financeAccepted
+						? ["finance_accepted"]
+						: isDecision
 						? []
 						: getPendingConfirmationReasons(reservation);
 					const commissionApprovalPending =
 						String(
 							reservation?.commissionAgentApproval?.status || ""
 						).toLowerCase() === "pending";
-					return {
+					const notificationType = financeAccepted
+						? "agent_finance_accepted"
+						: commissionApprovalPending
+						? "commission_agent_approval"
+						: isDecision
+						? "agent_decision"
+						: pendingReasons.includes("commission_missing") &&
+						  !pendingReasons.includes("pending_confirmation")
+						? "commission_review"
+						: "agent_review";
+					const eventDate = financeAccepted
+						? financialCycle.totalReviewedAt ||
+						  financialCycle.lastUpdatedAt ||
+						  reservation.updatedAt ||
+						  reservation.createdAt
+						: decision.decidedAt ||
+						  decision.lastUpdatedAt ||
+						  reservation.updatedAt ||
+						  reservation.createdAt;
+					const item = {
 						_id: reservation._id,
-						notificationType: commissionApprovalPending
-							? "commission_agent_approval"
-							: isDecision
-							? "agent_decision"
-							: pendingReasons.includes("commission_missing") &&
-							  !pendingReasons.includes("pending_confirmation")
-							? "commission_review"
-							: "agent_review",
+						notificationType,
 						hotelId: currentHotelId,
 						hotelName: hotel.hotelName || "",
 						hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
@@ -6791,14 +7382,41 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						pendingReasons,
 						commissionAgentApproval:
 							reservation.commissionAgentApproval || null,
-						decisionStatus: decision.status || "",
+						decisionStatus: financeAccepted ? "accepted" : decision.status || "",
 						decisionReason:
 							decision.reason ||
 							decision.rejectionReason ||
 							decision.confirmationReason ||
 							"",
 					};
-				}),
+					return financeAccepted || isDecision
+						? withNotificationAcknowledgement(item, {
+								entityType: "reservation",
+								entityId: reservation._id,
+								status: financeAccepted ? "finance_accepted" : decisionStatus,
+								eventDate,
+						  })
+						: item;
+				});
+			const visibleReservationNotifications = filterAcknowledgedNotifications(
+				reservationNotifications,
+				acknowledgedKeys
+			).slice(0, limit);
+
+			return res.json({
+				total:
+					Number(agentAccountFeed.total || 0) +
+					visibleReservationNotifications.length +
+					Number(walletClaimFeed.total || 0),
+				data: [
+					...(Array.isArray(agentAccountFeed.data)
+						? agentAccountFeed.data
+						: []),
+					...(Array.isArray(walletClaimFeed.data)
+						? walletClaimFeed.data
+						: []),
+					...visibleReservationNotifications,
+				].slice(0, limit),
 			});
 		}
 		if (!canUsePendingConfirmationWorkflow(actor)) {
@@ -6840,13 +7458,14 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			}
 			return acc;
 		}, {});
+		const acknowledgedKeys = notificationAcknowledgementKeys(actor);
 
 		const workflowScope = getPendingWorkflowScopeForActor(actor);
 		const filters = hotelIds.map((id) =>
 			buildPendingConfirmationFilter(id, workflowScope)
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
-		const [rows, total, agentAccountFeed] = await Promise.all([
+		const [rows, total, agentAccountFeed, walletClaimFeed] = await Promise.all([
 			Reservations.find(query)
 				.select(
 					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
@@ -6857,6 +7476,13 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				.exec(),
 			Reservations.countDocuments(query),
 			getAgentAccountNotificationFeed({
+				actor,
+				hotels,
+				hotelMap,
+				limit,
+				acknowledgedKeys,
+			}),
+			getAgentWalletClaimNotificationFeed({
 				actor,
 				hotels,
 				hotelMap,
@@ -6894,8 +7520,14 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		});
 
 		return res.json({
-			total: total + Number(agentAccountFeed.total || 0),
+			total:
+				total +
+				Number(agentAccountFeed.total || 0) +
+				Number(walletClaimFeed.total || 0),
 			data: [
+				...(Array.isArray(walletClaimFeed.data)
+					? walletClaimFeed.data
+					: []),
 				...(Array.isArray(agentAccountFeed.data)
 					? agentAccountFeed.data
 					: []),
@@ -6945,13 +7577,6 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		if (isOrderTakingAccount(actor)) {
 			return res.status(403).json({
 				error: "External agents cannot confirm or financially reconcile reservations",
-			});
-		}
-
-		const processDate = reservation.booked_at || reservation.createdAt;
-		if (!processDate || new Date(processDate) < NEW_RESERVATION_PROCESS_START) {
-			return res.status(400).json({
-				error: "This confirmation workflow only applies to new-process reservations",
 			});
 		}
 
@@ -7322,6 +7947,15 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			.lean()
 			.exec();
 
+		await trackReservationStatusChange({
+			req,
+			actor: { ...actor, ...auditActor },
+			reservationBefore: reservation,
+			reservationAfter: updatedReservation,
+			auditEntries,
+			source: `pending_confirmation_${action || "finance"}`,
+		});
+
 		emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
 			type: "pending_confirmation",
 			reservationId: updatedReservation._id,
@@ -7330,10 +7964,15 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			console.error("Error emitting reservation notification:", error)
 		);
 
+		const safeUpdatedReservation = sanitizeReservationAuditLogsForViewer(
+			updatedReservation,
+			actor
+		);
+
 		return res.json({
-			...updatedReservation,
+			...safeUpdatedReservation,
 			pendingReasons: getPendingConfirmationReasonsForActor(
-				updatedReservation,
+				safeUpdatedReservation,
 				actor
 			),
 		});
@@ -7561,6 +8200,15 @@ exports.updateAgentCommissionApproval = async (req, res) => {
 			.lean()
 			.exec();
 
+		await trackReservationStatusChange({
+			req,
+			actor: { ...actor, ...auditActor },
+			reservationBefore: reservation,
+			reservationAfter: updatedReservation,
+			auditEntries,
+			source: `agent_commission_${normalizedAction}`,
+		});
+
 		emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
 			type:
 				normalizedAction === "approve"
@@ -7572,7 +8220,9 @@ exports.updateAgentCommissionApproval = async (req, res) => {
 			console.error("Error emitting commission approval notification:", error)
 		);
 
-		return res.json({ reservation: updatedReservation });
+		return res.json({
+			reservation: sanitizeReservationAuditLogsForViewer(updatedReservation, actor),
+		});
 	} catch (error) {
 		console.error("Error updating agent commission approval:", error);
 		return res.status(500).json({ error: "Server error: " + error.message });
@@ -7718,7 +8368,7 @@ exports.ownerReservationToDate = async (req, res) => {
 			reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
 		}).populate("hotelId", "hotelName"); // Assuming you want to include the hotel name in the response
 
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -7765,7 +8415,7 @@ exports.CollectedReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(reservations);
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
