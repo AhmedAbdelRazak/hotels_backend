@@ -232,6 +232,14 @@ Critical Workflows To Protect
 - Public website routes
   - Keep public Janat routes separate from authenticated hotel-management behavior. Public booking/payment endpoints still need reservation/payment validation.
 
+Recent Production Guardrails
+- Reservation detail privacy, May 2026:
+  - Non-super-admin viewers must never receive privileged admin actor names in reservation detail, pending queue, finance queue, report, or public-safe reservation responses.
+  - When extending reservation workflow metadata, run the field through services/auditPrivacy.js if it contains a by/actor/admin/lastUpdatedBy style snapshot.
+- Payment-state consistency, May 2026:
+  - Backend payment fields may contain both a selected payment method and actual collected amounts. Do not infer a paid reservation from a method label alone.
+  - Reconciliation and financial reports should use recorded/captured amounts and review statuses, not display labels, when deciding paid/due/rejected/eligible states.
+
 Backend Change Checklist
 - Start by identifying the route file, controller, model, and frontend caller for the feature.
 - Check roleDescription, role, roles, roleDescriptions, accessTo, belongsToId, hotelIdWork, hotelIdsWork, hotelIdsOwner, and hotelsToSupport before changing authorization.
