@@ -103,6 +103,43 @@ const sanitizeReservationAuditLogsForViewer = (reservation, viewer = {}) => {
 		);
 	});
 
+	const stripPrivilegedActorAtPath = (path = "") => {
+		const parts = path.split(".");
+		const last = parts.pop();
+		let sourceParent = plain;
+		let targetParent = sanitized;
+
+		for (const part of parts) {
+			if (!sourceParent?.[part] || typeof sourceParent[part] !== "object") {
+				return;
+			}
+			if (targetParent[part] === sourceParent[part]) {
+				targetParent[part] = Array.isArray(sourceParent[part])
+					? [...sourceParent[part]]
+					: { ...sourceParent[part] };
+			}
+			sourceParent = sourceParent[part];
+			targetParent = targetParent[part];
+		}
+
+		if (targetParent?.[last] && isPrivilegedAuditActor(targetParent[last])) {
+			targetParent[last] = null;
+		}
+	};
+
+	[
+		"adminLastUpdatedBy",
+		"pendingConfirmation.lastUpdatedBy",
+		"agentDecisionSnapshot.decidedBy",
+		"agentDecisionSnapshot.lastUpdatedBy",
+		"financial_cycle.lastUpdatedBy",
+		"financial_cycle.commissionAssignedBy",
+		"financial_cycle.closedBy",
+		"commissionAgentApproval.approvedBy",
+		"commissionAgentApproval.rejectedBy",
+		"commissionAgentApproval.lastUpdatedBy",
+	].forEach(stripPrivilegedActorAtPath);
+
 	return sanitized;
 };
 

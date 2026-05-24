@@ -165,6 +165,7 @@ Important Services
 - services/auditPrivacy.js
   - Central privacy guard for reservation/admin tracker visibility.
   - Reservation adminChangeLog and reservationAuditLog entries made by superadmin/admin/systemadmin actors are removed from backend responses unless the requesting viewer is a true super admin.
+  - Privileged actor snapshots such as adminLastUpdatedBy, pendingConfirmation.lastUpdatedBy, agentDecisionSnapshot.decidedBy, financial_cycle.*By, and commission approval reviewers are also nulled for non-super-admin viewers so ordinary agents/staff never see platform admin names in reservation details.
   - Optional Authorization headers are respected on public-safe single-reservation fetches so super admins can see privileged tracker rows while public/client views and ordinary hotel users cannot.
   - ActivityTracker records created by privileged actors are marked visibility=super_admin_only for future reporting surfaces.
 - services/otaEmailOrchestrator.js and services/otaReservationMapper.js
@@ -194,6 +195,7 @@ Critical Workflows To Protect
 - Tracker privacy
   - Any reservation tracker/audit update performed by a super admin, platform admin, or system admin must only be visible to true super admins.
   - Apply services/auditPrivacy.js before returning reservation details, pending-reservation queues, finance/payment commission rows, reservation searches, and report rows that include adminChangeLog or reservationAuditLog.
+  - Sanitize both audit arrays and standalone "last updated by" snapshots before responding; hiding the table rows alone is not enough because ReservationDetail also renders workflow summary metadata.
   - Do not rely on frontend hiding alone for privileged audit rows. Backend responses should already be sanitized for non-super-admin viewers and for unauthenticated public/client payment fetches.
 - Housekeeping task assignment
   - Managers and authorized hotel users can assign/update housekeeping tasks within assigned hotel scope.
