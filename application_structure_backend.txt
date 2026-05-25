@@ -298,12 +298,14 @@ Critical Workflows To Protect
   - The overview, reservations overview, and paid reservations overview executive tabs may accept multi-hotel and multi-month filters for broad historical analysis.
   - These non-inventory executive tabs may send hotelId/invHotel as comma-separated lists, invMonths/invHMonth/invHYear/invCal, dateFrom/dateTo, invStart/invEnd, dateBy, status, search, and includeCancelled.
   - Backend report handlers must keep parsing repeated or comma-separated hotel/status/month params while enforcing accessible-hotel scope before aggregation.
+  - dateFrom/dateTo and invStart/invEnd are authoritative date filters. If a legacy/shared URL contains date filters together with range=all, the effective report range must still be treated as a custom date range so database output and visible UI filters remain aligned.
   - Inventory remains stricter than the other executive tabs: exactly one hotel must be selected, and occupancy remains based on arrival/check-in date.
 - Query, loop, and performance guardrails
   - Overall summary and inventory endpoints are expensive; frontend callers should debounce/stabilize query dependencies and backend should avoid unnecessary broad queries.
   - The summary endpoint should not be repeatedly called by the inventory report unless that tab truly needs summary data.
   - GET request logs alternating between different invHMonth/invStart/invEnd values usually indicate a frontend query synchronization loop, not a database issue.
   - For report work, always verify that selected filters, reflected UI labels, and backend results agree before considering the feature complete.
+  - Backend report endpoints should stay idempotent: do not return response fields that force the frontend to rewrite query dates or range values repeatedly.
 - 2026-05-25 backend file and route map
   - server.js mounts the backend route modules. Any new route must be registered here or through an already-mounted route file.
   - routes/overall_dashboard.js owns hotel-management overall dashboard/report endpoints.
@@ -347,3 +349,4 @@ Final Production Readiness Notes
 - Financial and reservation notification routes must keep acknowledgement notifications separate from operational queue notifications. Ackable account/wallet/reservation decisions can disappear after click; pending reservation confirmation and pending financial actions must remain until the workflow state changes.
 - Tracker privacy remains production-critical. Any admin/super-admin/hotel-system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
 - For production readiness, run node --check server.js, node --check controllers/overall_dashboard.js, git diff --check, and a scoped manual test of signup invitation, activation, agent pending reservations, finance actions, notifications, and super-admin account updates.
+- 2026-05-25 production validation: frontend and backend production HEADs were checked against origin; hotels-frontend and hotels-backend were online in PM2; executive summary reservation, inventory, paid-overview, B2B chat SPA routes returned 200; /api/currency-rates returned 200. Frontend runtime fixes were deployed without backend runtime changes.
