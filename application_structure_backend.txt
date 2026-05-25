@@ -268,6 +268,11 @@ Critical Workflows To Protect
   - The paid overview returns hotel-level breakdown first, followed by the rest of the report data.
   - Payment summaries must distinguish paid amount, due amount, commission, and booking source/hotel grouping.
   - Data must stay scoped to assigned hotels unless the actor is a true super admin.
+- Financial actions export behavior
+  - GET /overall-dashboard/financial-actions/:userId supports exportAll=true for Excel export callers.
+  - exportAll keeps the same role, owner, hotel, booking source, action type, date, and agent/order-taker scoping as the visible financial-actions page.
+  - exportAll raises the reservation and wallet-claim limits up to a guarded maximum of 5000 rows per queue so the frontend can export the full filtered report without changing authorization logic.
+  - Export tracking should continue through /overall-dashboard/financial-report-export/:userId with dataset=overall_financial_actions, including filters, hotel scope, row counts, reservation rows, and wallet transaction rows.
 - Reservation summary modal and export tracking
   - Reservation list summary exports must create ActivityTracker records so report downloads are attributable.
   - Tracked metadata should include actor, owner scope, hotel scope, active filters, selected date field, row counts, and export/report type.

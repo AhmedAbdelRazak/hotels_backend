@@ -1610,11 +1610,21 @@ const walletClaimDateFilter = (query = {}) => {
 
 const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} }) => {
 	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
-	const page = Math.max(parseInt(query.walletPage || query.claimPage, 10) || 1, 1);
-	const limit = Math.min(
-		Math.max(parseInt(query.walletLimit || query.claimLimit, 10) || 8, 1),
-		50
+	const exportAll = ["1", "true", "yes", "all"].includes(
+		String(query.exportAll || "").toLowerCase()
 	);
+	const page = exportAll
+		? 1
+		: Math.max(parseInt(query.walletPage || query.claimPage, 10) || 1, 1);
+	const limit = exportAll
+		? Math.min(
+				Math.max(parseInt(query.walletLimit || query.claimLimit, 10) || 5000, 1),
+				5000
+		  )
+		: Math.min(
+				Math.max(parseInt(query.walletLimit || query.claimLimit, 10) || 8, 1),
+				50
+		  );
 	if (!hotelIds.length) {
 		return { page, limit, total: 0, pages: 0, transactions: [] };
 	}
@@ -1686,7 +1696,13 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 	}
 
 	const page = Math.max(parseInt(query.page, 10) || 1, 1);
-	const limit = Math.min(Math.max(parseInt(query.limit, 10) || 25, 1), 100);
+	const exportAll = ["1", "true", "yes", "all"].includes(
+		String(query.exportAll || "").toLowerCase()
+	);
+	const pageForQuery = exportAll ? 1 : page;
+	const limit = exportAll
+		? Math.min(Math.max(parseInt(query.limit, 10) || 5000, 1), 5000)
+		: Math.min(Math.max(parseInt(query.limit, 10) || 25, 1), 100);
 	const bookingSourceMatch = buildFinancialActionsMatch({
 		actor,
 		hotels,
@@ -1702,7 +1718,7 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		Reservations.aggregate([
 			...basePipeline,
 			{ $sort: sortFromQuery({ ...query, sortBy: query.sortBy || "updatedAt" }) },
-			{ $skip: (page - 1) * limit },
+			{ $skip: (pageForQuery - 1) * limit },
 			{ $limit: limit },
 			{ $project: { hotelDetails: 0 } },
 		]),
@@ -1711,7 +1727,7 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 
 	const total = countResult?.[0]?.total || 0;
 	return {
-		page,
+		page: pageForQuery,
 		limit,
 		total,
 		pages: Math.ceil(total / limit),
