@@ -286,6 +286,7 @@ Critical Workflows To Protect
   - Attachments and pasted screenshots are supported. Backend responses should expose enough metadata for inline preview while keeping safe download/open URLs available.
   - Unread counters and seen updates must not create request loops. Prefer stable polling/socket triggers and avoid marking a chat as seen merely because the top-navbar icon was clicked.
   - Socket events should refresh active chat lists and unread counters without rebinding listeners on every render.
+  - Socket typing events use b2bTyping and b2bStopTyping rooms scoped to b2b-chat:<chatId>. They are transient relays only and should not write to MongoDB.
   - Frontend chat pages may receive legacy/null attachment rows from historical data. Backend should continue returning safe attachment metadata, but frontend must also guard null attachment entries before previewing kind/type/source fields.
   - The B2B chat route is an overall hotel-management surface, not a single-hotel surface. Top-navbar notification context should stay owner/overall scoped unless the user opens a true single-hotel route.
 - Executive summary filter model

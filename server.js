@@ -119,6 +119,18 @@ io.on("connection", (socket) => {
 	socket.on("leaveB2BPlatform", () => {
 		socket.leave("b2b-platform");
 	});
+	socket.on("b2bTyping", (data = {}) => {
+		const chatId = data?.chatId;
+		if (chatId) {
+			socket.to(`b2b-chat:${chatId}`).emit("b2bTyping", data);
+		}
+	});
+	socket.on("b2bStopTyping", (data = {}) => {
+		const chatId = data?.chatId;
+		if (chatId) {
+			socket.to(`b2b-chat:${chatId}`).emit("b2bStopTyping", data);
+		}
+	});
 
 	socket.on("typing", (data = {}) => {
 		const room = data?.caseId;
