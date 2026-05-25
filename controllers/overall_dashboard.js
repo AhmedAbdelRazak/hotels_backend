@@ -13,11 +13,16 @@ const HouseKeeping = require("../models/housekeeping");
 const AgentWallet = require("../models/agent_wallet");
 const SignupInvitation = require("../models/signup_invitation");
 const {
+	buildHotelInventoryCalendarPayload,
+	buildHotelInventoryDayPayload,
+} = require("./hotel_inventory");
+const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
 const {
 	trackFinancialReportExport,
 	trackReservationExport,
+	trackReservationSummaryExport,
 	trackAccountCreation,
 	trackAccountUpdate,
 } = require("../services/activityTracker");
@@ -27,6 +32,18 @@ const SYSTEM_ADMIN_ROLE = 10000;
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const SIGNUP_INVITATION_PURPOSE = "public-signup-invitation";
 const SIGNUP_INVITATION_DAYS = 30;
+const EXECUTIVE_REPORT_START_DATE = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
+const EXECUTIVE_REPORT_TIMEZONE = "Asia/Riyadh";
+const EXECUTIVE_PAID_BREAKDOWN_KEYS = [
+	"paid_online_via_link",
+	"paid_at_hotel_cash",
+	"paid_at_hotel_card",
+	"paid_to_hotel",
+	"paid_online_jannatbooking",
+	"paid_online_other_platforms",
+	"paid_online_via_instapay",
+	"paid_no_show",
+];
 
 const DONE_RESERVATION_STATUS =
 	/checked[-_\s]?out|early[-_\s]?checked[-_\s]?out|closed|cancelled|canceled|no[-_\s]?show/i;
@@ -230,12 +247,18 @@ const cleanDateRange = ({ dateFrom = "", dateTo = "", range = "all" } = {}) => {
 
 const normalizeDateField = (value = "") => {
 	const normalized = String(value || "").trim();
-	if (["checkin", "checkinDate", "check_in"].includes(normalized))
+	if (["checkin", "checkinDate", "check_in", "checkin_date"].includes(normalized))
 		return "checkin_date";
-	if (["checkout", "checkoutDate", "check_out"].includes(normalized))
+	if (
+		["checkout", "checkoutDate", "check_out", "checkout_date"].includes(
+			normalized
+		)
+	)
 		return "checkout_date";
 	if (["createdAt", "created_at", "created"].includes(normalized))
 		return "createdAt";
+	if (["booked_at", "bookedAt", "bookingSortDate"].includes(normalized))
+		return "booked_at";
 	return "booked_at";
 };
 
@@ -406,6 +429,18 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 				"reception",
 				"finance",
 				"ordertaker",
+				"reservationemployee",
+			])
+		);
+	}
+
+	if (section === "executive") {
+		return (
+			hasAnyRole([3000, 6000, 8000]) ||
+			hasAnyDescription([
+				"hotelmanager",
+				"reception",
+				"finance",
 				"reservationemployee",
 			])
 		);
@@ -892,6 +927,477 @@ const moneyNumber = (value) => {
 	return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const executivePaidBreakdownTotalExpression = () => ({
+	$add: EXECUTIVE_PAID_BREAKDOWN_KEYS.map((key) => ({
+		$ifNull: [`$paid_amount_breakdown.${key}`, 0],
+	})),
+});
+
+const executiveStoredCommissionExpression = () => ({
+	$cond: [
+		{ $gt: [{ $ifNull: ["$commission", 0] }, 0] },
+		{ $ifNull: ["$commission", 0] },
+		{ $ifNull: ["$financial_cycle.commissionAmount", 0] },
+	],
+});
+
+const executiveGroupTotals = () => ({
+	reservationsCount: { $sum: 1 },
+	total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+	commission: { $sum: executiveStoredCommissionExpression() },
+	paidAmount: {
+		$sum: {
+			$cond: [
+				{ $gt: ["$paidBreakdownTotal", 0] },
+				"$paidBreakdownTotal",
+				{ $ifNull: ["$paid_amount", 0] },
+			],
+		},
+	},
+	capturedCount: {
+		$sum: { $cond: [{ $gt: ["$paidBreakdownTotal", 0] }, 1, 0] },
+	},
+});
+
+const executiveDateString = (field) => ({
+	$dateToString: {
+		format: "%Y-%m-%d",
+		date: `$${field}`,
+		timezone: EXECUTIVE_REPORT_TIMEZONE,
+	},
+});
+
+const mergeMatchDatePresence = (match = {}, field = "createdAt") => {
+	const next = { ...match };
+	const existing = next[field];
+	const existingObject =
+		existing &&
+		typeof existing === "object" &&
+		!Array.isArray(existing) &&
+		!(existing instanceof Date);
+	next[field] = {
+		...(existingObject ? existing : {}),
+		$ne: null,
+	};
+	return next;
+};
+
+const executiveHotelOptions = (hotels = []) =>
+	hotels.map((hotel) => ({
+		_id: normalizeId(hotel._id),
+		hotelName: hotel.hotelName || "Hotel",
+		ownerId: normalizeId(hotel.belongsTo),
+		ownerName: hotel.belongsTo?.name || "",
+	}));
+
+const executiveReservationSearchFilter = (search = "", hotels = []) => {
+	const trimmed = String(search || "").trim();
+	if (!trimmed) return null;
+	const regex = new RegExp(escapeRegex(trimmed), "i");
+	const matchingHotelIds = hotels
+		.filter((hotel) => regex.test(String(hotel.hotelName || "")))
+		.map((hotel) => normalizeId(hotel._id))
+		.filter((id) => ObjectId.isValid(id))
+		.map((id) => ObjectId(id));
+
+	return {
+		$or: [
+			{ confirmation_number: regex },
+			{ reservation_id: regex },
+			{ pms_number: regex },
+			{ "customer_details.name": regex },
+			{ "customer_details.fullName": regex },
+			{ "customer_details.phone": regex },
+			{ "customer_details.email": regex },
+			{ booking_source: regex },
+			{ payment: regex },
+			{ reservation_status: regex },
+			...(matchingHotelIds.length ? [{ hotelId: { $in: matchingHotelIds } }] : []),
+		],
+	};
+};
+
+const summaryOperationalReservationFilter = () => ({
+	$nor: [
+		{ reservation_status: CANCELLED_STATUS },
+		{ state: CANCELLED_STATUS },
+		{ reservation_status: NO_SHOW_STATUS },
+		{ state: NO_SHOW_STATUS },
+		{ reservation_status: PENDING_CONFIRMATION_STATUS },
+		{ state: PENDING_CONFIRMATION_STATUS },
+	],
+	$and: [buildPendingConfirmationExclusionFilter()],
+});
+
+const buildExecutiveReservationMatch = ({ actor, hotels, query = {} }) => {
+	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
+	if (!hotelIds.length) return null;
+
+	const match = { hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } };
+	const dateField = normalizeDateField(query.dateBy || "createdAt");
+	const period = cleanDateRange(query);
+	const dateFilter = {};
+
+	if (period.from) dateFilter.$gte = period.from;
+	if (period.to) dateFilter.$lte = period.to;
+	if (Object.keys(dateFilter).length) {
+		match[dateField] = dateFilter;
+	} else {
+		match.createdAt = { $gte: EXECUTIVE_REPORT_START_DATE };
+	}
+
+	const clauses = [];
+	const includeCancelled =
+		String(query.includeCancelled || "").toLowerCase() === "true";
+	const excludeCancelled =
+		String(query.excludeCancelled ?? "true").toLowerCase() !== "false";
+	if (!includeCancelled && excludeCancelled) {
+		clauses.push({
+			$nor: [
+				{ reservation_status: CANCELLED_STATUS },
+				{ state: CANCELLED_STATUS },
+				{ reservation_status: NO_SHOW_STATUS },
+				{ state: NO_SHOW_STATUS },
+			],
+		});
+	}
+
+	const statusFilter = reservationStatusFilter(query.status);
+	if (statusFilter) clauses.push(statusFilter);
+
+	const bookingSources = parseQueryList(query.bookingSource);
+	if (bookingSources.length) {
+		clauses.push({
+			$or: bookingSources.map((source) => ({
+				booking_source: new RegExp(escapeRegex(source), "i"),
+			})),
+		});
+	}
+
+	if (query.payment) {
+		clauses.push({ payment: new RegExp(escapeRegex(query.payment), "i") });
+	}
+	const searchFilter = executiveReservationSearchFilter(query.search, hotels);
+	if (searchFilter) clauses.push(searchFilter);
+
+	if (isOrderTakerOnly(actor)) {
+		const actorId = normalizeId(actor._id);
+		if (ObjectId.isValid(actorId)) {
+			clauses.push({
+				$or: [
+					{ createdByUserId: ObjectId(actorId) },
+					{ "createdBy._id": actorId },
+					{ orderTakeId: ObjectId(actorId) },
+					{ "orderTaker._id": actorId },
+				],
+			});
+		}
+	}
+
+	if (clauses.length) match.$and = clauses;
+	return { match, hotelIds, dateField, period };
+};
+
+const aggregateExecutiveByDate = (match, field) =>
+	Reservations.aggregate([
+		{ $match: mergeMatchDatePresence(match, field) },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		{
+			$group: {
+				_id: executiveDateString(field),
+				...executiveGroupTotals(),
+			},
+		},
+		{
+			$project: {
+				_id: 0,
+				groupKey: "$_id",
+				reservationsCount: 1,
+				total_amount: 1,
+				commission: 1,
+				paidAmount: 1,
+				capturedCount: 1,
+			},
+		},
+		{ $sort: { groupKey: 1 } },
+	]);
+
+const aggregateExecutiveByStatus = (match) =>
+	Reservations.aggregate([
+		{ $match: match },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		{
+			$group: {
+				_id: { $ifNull: ["$reservation_status", "unknown"] },
+				...executiveGroupTotals(),
+			},
+		},
+		{
+			$project: {
+				_id: 0,
+				reservation_status: { $cond: [{ $eq: ["$_id", ""] }, "unknown", "$_id"] },
+				reservationsCount: 1,
+				total_amount: 1,
+				commission: 1,
+				paidAmount: 1,
+				capturedCount: 1,
+			},
+		},
+		{ $sort: { reservationsCount: -1, reservation_status: 1 } },
+	]);
+
+const aggregateExecutiveByHotel = (match, limit = 0) =>
+	Reservations.aggregate([
+		{ $match: match },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		...reservationLookupStages(),
+		{
+			$group: {
+				_id: {
+					hotelId: "$hotelId",
+					hotelName: { $ifNull: ["$hotelName", "Unknown Hotel"] },
+				},
+				...executiveGroupTotals(),
+			},
+		},
+		{
+			$project: {
+				_id: 0,
+				hotelId: "$_id.hotelId",
+				hotelName: "$_id.hotelName",
+				reservationsCount: 1,
+				total_amount: 1,
+				commission: 1,
+				paidAmount: 1,
+				capturedCount: 1,
+			},
+		},
+		{ $sort: { reservationsCount: -1, total_amount: -1, hotelName: 1 } },
+		...(limit ? [{ $limit: limit }] : []),
+	]);
+
+const aggregateExecutiveByBookingSource = (match) =>
+	Reservations.aggregate([
+		{ $match: match },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		{
+			$group: {
+				_id: {
+					$trim: {
+						input: { $ifNull: ["$booking_source", ""] },
+					},
+				},
+				...executiveGroupTotals(),
+			},
+		},
+		{
+			$project: {
+				_id: 0,
+				source: { $cond: [{ $eq: ["$_id", ""] }, "Unknown", "$_id"] },
+				reservationsCount: 1,
+				total_amount: 1,
+				commission: 1,
+				paidAmount: 1,
+				capturedCount: 1,
+			},
+		},
+		{ $sort: { reservationsCount: -1, total_amount: -1, source: 1 } },
+	]);
+
+const aggregateExecutiveReservationStats = (match) =>
+	Reservations.aggregate([
+		{ $match: match },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		{
+			$group: {
+				_id: null,
+				...executiveGroupTotals(),
+				hotelsWithReservations: { $addToSet: "$hotelId" },
+			},
+		},
+		{
+			$project: {
+				_id: 0,
+				reservationsCount: 1,
+				total_amount: 1,
+				commission: 1,
+				paidAmount: 1,
+				capturedCount: 1,
+				hotelsWithReservations: { $size: "$hotelsWithReservations" },
+			},
+		},
+	]);
+
+const ymdFromDate = (date) => {
+	const parsed = date instanceof Date ? date : new Date(date);
+	if (Number.isNaN(parsed.getTime())) return "";
+	return parsed.toISOString().split("T")[0];
+};
+
+const startOfUtcDate = (date) => {
+	const parsed = date instanceof Date ? date : new Date(date);
+	return new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate()));
+};
+
+const addUtcDays = (date, days) => {
+	const next = new Date(date);
+	next.setUTCDate(next.getUTCDate() + days);
+	return next;
+};
+
+const inventoryRangeFromQuery = (query = {}) => {
+	const period = cleanDateRange({
+		dateFrom:
+			query.invStart ||
+			query.start ||
+			query.dateFrom ||
+			query.fromDate ||
+			"",
+		dateTo: query.invEnd || query.end || query.dateTo || query.toDate || "",
+		range: query.range,
+	});
+	let start = period.from ? startOfUtcDate(period.from) : null;
+	let end = period.to ? startOfUtcDate(period.to) : null;
+
+	if (!start && !end) {
+		const now = new Date();
+		start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+		end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
+	} else if (start && !end) {
+		end = addUtcDays(start, 30);
+	} else if (!start && end) {
+		start = addUtcDays(end, -30);
+	}
+
+	if (end < start) {
+		const swap = start;
+		start = end;
+		end = swap;
+	}
+
+	const maxDays = 62;
+	const days = [];
+	let cursor = new Date(start);
+	while (cursor <= end && days.length < maxDays) {
+		days.push(ymdFromDate(cursor));
+		cursor = addUtcDays(cursor, 1);
+	}
+	const adjustedEnd = days.length ? new Date(`${days[days.length - 1]}T23:59:59.999Z`) : end;
+	return {
+		start,
+		end: adjustedEnd,
+		endExclusive: addUtcDays(startOfUtcDate(adjustedEnd), 1),
+		days,
+		period,
+	};
+};
+
+const reservationUnitCount = (reservation = {}) => {
+	const roomIds = extractReservationRoomIds(reservation.roomId);
+	if (roomIds.length) return roomIds.length;
+	const totalRooms = Number(reservation.total_rooms || 0);
+	if (totalRooms > 0) return totalRooms;
+	const pickedTotal = (reservation.pickedRoomsType || []).reduce(
+		(total, room) => total + Math.max(Number(room?.count || 0), 0),
+		0
+	);
+	return Math.max(pickedTotal, 1);
+};
+
+const paidBreakdownTotal = (breakdown = {}) =>
+	EXECUTIVE_PAID_BREAKDOWN_KEYS.reduce(
+		(total, key) => total + moneyNumber(breakdown?.[key]),
+		0
+	);
+
+const executivePaidNonZeroFilter = () => ({
+	$or: [
+		{ paid_amount: { $gt: 0 } },
+		...EXECUTIVE_PAID_BREAKDOWN_KEYS.map((key) => ({
+			[`paid_amount_breakdown.${key}`]: { $gt: 0 },
+		})),
+	],
+});
+
+const executivePaidSearchFilter = (searchQuery = "", hotels = []) => {
+	const trimmed = String(searchQuery || "").trim();
+	if (!trimmed) return null;
+	const regex = new RegExp(escapeRegex(trimmed), "i");
+	const matchingHotelIds = hotels
+		.filter((hotel) => regex.test(String(hotel.hotelName || "")))
+		.map((hotel) => normalizeId(hotel._id))
+		.filter((id) => ObjectId.isValid(id))
+		.map((id) => ObjectId(id));
+
+	return {
+		$or: [
+			{ confirmation_number: regex },
+			{ reservation_id: regex },
+			{ pms_number: regex },
+			{ "customer_details.name": regex },
+			{ "customer_details.fullName": regex },
+			{ "customer_details.phone": regex },
+			{ "customer_details.email": regex },
+			{ booking_source: regex },
+			{ reservation_status: regex },
+			...(matchingHotelIds.length ? [{ hotelId: { $in: matchingHotelIds } }] : []),
+		],
+	};
+};
+
+const buildExecutivePaidMatch = ({ hotels, query = {} }) => {
+	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
+	if (!hotelIds.length) return null;
+
+	const match = {
+		hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
+		$and: [executivePaidNonZeroFilter()],
+	};
+	const { dateField, period } = applyDateFilter(match, query);
+	if (!match[dateField]) {
+		match.createdAt = { $gte: EXECUTIVE_REPORT_START_DATE };
+	}
+
+	const includeCancelled =
+		String(query.includeCancelled || "").toLowerCase() === "true";
+	const excludeCancelled =
+		String(query.excludeCancelled ?? "true").toLowerCase() !== "false";
+	if (!includeCancelled && excludeCancelled) {
+		match.$and.push({
+			$nor: [
+				{ reservation_status: CANCELLED_STATUS },
+				{ state: CANCELLED_STATUS },
+				{ reservation_status: NO_SHOW_STATUS },
+				{ state: NO_SHOW_STATUS },
+			],
+		});
+	}
+
+	const statusFilter = reservationStatusFilter(query.status);
+	if (statusFilter) match.$and.push(statusFilter);
+
+	const bookingSources = parseQueryList(query.bookingSource);
+	if (bookingSources.length) {
+		match.$and.push({
+			$or: bookingSources.map((source) => ({
+				booking_source: new RegExp(escapeRegex(source), "i"),
+			})),
+		});
+	}
+
+	if (query.payment) {
+		match.$and.push({ payment: new RegExp(escapeRegex(query.payment), "i") });
+	}
+
+	const searchFilter = executivePaidSearchFilter(
+		query.searchQuery || query.search,
+		hotels
+	);
+	if (searchFilter) match.$and.push(searchFilter);
+
+	return { match, hotelIds, dateField, period };
+};
+
 const financialCommissionMissingFilter = () => ({
 	$and: [
 		{
@@ -1224,7 +1730,12 @@ exports.overallSummary = async (req, res) => {
 		const context = await requireOverallSection(req, res, "summary");
 		if (!context) return;
 		const { actor, hotels } = context;
-		const hotelIds = selectedHotelObjectIds(hotels);
+		const selectedIds = filterHotelIdsForQuery(hotels, req.query?.hotelId);
+		const selectedSet = new Set(selectedIds);
+		const selectedHotels = hotels.filter((hotel) =>
+			selectedSet.has(normalizeId(hotel._id))
+		);
+		const hotelIds = selectedIds.map((id) => ObjectId(id));
 		const period = cleanDateRange(req.query || {});
 		const dateField = normalizeDateField(req.query?.dateBy || "createdAt");
 
@@ -1234,6 +1745,7 @@ exports.overallSummary = async (req, res) => {
 				period: { ...period, dateBy: dateField },
 				stats: {},
 				hotels: [],
+				allHotels: executiveHotelOptions(hotels),
 				bookingSources: [],
 			});
 		}
@@ -1249,6 +1761,67 @@ exports.overallSummary = async (req, res) => {
 		if (period.from) dateFilter.$gte = period.from;
 		if (period.to) dateFilter.$lte = period.to;
 		if (Object.keys(dateFilter).length) reservationMatch[dateField] = dateFilter;
+
+		const statusValues = parseQueryList(req.query?.status).filter(
+			(status) => String(status || "").trim().toLowerCase() !== "all"
+		);
+		const hasExplicitStatus = statusValues.length > 0;
+		const summaryClauses = [];
+		const statusFilter = reservationStatusFilter(req.query?.status);
+		if (hasExplicitStatus && statusFilter) {
+			summaryClauses.push(statusFilter);
+		} else if (String(req.query?.includeCancelled || "").toLowerCase() !== "true") {
+			summaryClauses.push(summaryOperationalReservationFilter());
+		}
+
+		const bookingSourceFilters = parseQueryList(req.query?.bookingSource);
+		if (bookingSourceFilters.length) {
+			summaryClauses.push({
+				$or: bookingSourceFilters.map((source) => ({
+					booking_source: new RegExp(escapeRegex(source), "i"),
+				})),
+			});
+		}
+		if (req.query?.payment) {
+			summaryClauses.push({
+				payment: new RegExp(escapeRegex(req.query.payment), "i"),
+			});
+		}
+		const searchFilter = executiveReservationSearchFilter(
+			req.query?.search,
+			selectedHotels
+		);
+		if (searchFilter) summaryClauses.push(searchFilter);
+		if (summaryClauses.length) reservationMatch.$and = summaryClauses;
+
+		const pendingReservationMatch = {
+			hotelId: { $in: hotelIds },
+			$and: [
+				{
+					$or: [
+						{ reservation_status: PENDING_CONFIRMATION_STATUS },
+						{ state: PENDING_CONFIRMATION_STATUS },
+						{ "pendingConfirmation.status": { $in: ["pending", "rejected"] } },
+						{ "agentDecisionSnapshot.status": { $in: ["pending", "rejected"] } },
+					],
+				},
+			],
+		};
+		if (Object.keys(dateFilter).length) pendingReservationMatch[dateField] = dateFilter;
+		if (hasExplicitStatus && statusFilter) pendingReservationMatch.$and.push(statusFilter);
+		if (bookingSourceFilters.length) {
+			pendingReservationMatch.$and.push({
+				$or: bookingSourceFilters.map((source) => ({
+					booking_source: new RegExp(escapeRegex(source), "i"),
+				})),
+			});
+		}
+		if (req.query?.payment) {
+			pendingReservationMatch.$and.push({
+				payment: new RegExp(escapeRegex(req.query.payment), "i"),
+			});
+		}
+		if (searchFilter) pendingReservationMatch.$and.push(searchFilter);
 
 		const [
 			rooms,
@@ -1302,17 +1875,7 @@ exports.overallSummary = async (req, res) => {
 				},
 			]),
 			Reservations.aggregate([
-				{
-					$match: {
-						hotelId: { $in: hotelIds },
-						$or: [
-							{ reservation_status: PENDING_CONFIRMATION_STATUS },
-							{ state: PENDING_CONFIRMATION_STATUS },
-							{ "pendingConfirmation.status": { $in: ["pending", "rejected"] } },
-							{ "agentDecisionSnapshot.status": { $in: ["pending", "rejected"] } },
-						],
-					},
-				},
+				{ $match: pendingReservationMatch },
 				{ $group: { _id: "$hotelId", total: { $sum: 1 } } },
 			]),
 			HouseKeeping.aggregate([
@@ -1341,7 +1904,7 @@ exports.overallSummary = async (req, res) => {
 			User.countDocuments({
 				activeUser: true,
 				$or: [
-					{ hotelIdWork: { $in: selectedHotelIds(hotels) } },
+					{ hotelIdWork: { $in: selectedHotelIds(selectedHotels) } },
 					{ hotelsToSupport: { $in: hotelIds } },
 					{ hotelIdsOwner: { $in: hotelIds } },
 				],
@@ -1386,7 +1949,7 @@ exports.overallSummary = async (req, res) => {
 			housekeepingStats.map((item) => [normalizeId(item._id), item])
 		);
 
-		const hotelSummaries = hotels.map((hotel) => {
+		const hotelSummaries = selectedHotels.map((hotel) => {
 			const hotelId = normalizeId(hotel._id);
 			const hotelRooms = roomsByHotel.get(hotelId) || [];
 			const physicalRoomsTotal = hotelRooms.length;
@@ -1426,8 +1989,18 @@ exports.overallSummary = async (req, res) => {
 				setup: setupSnapshot(hotel),
 			};
 		});
+		const visibleHotelSummaries = req.query?.search
+			? hotelSummaries.filter((hotel) => {
+					const regex = new RegExp(escapeRegex(req.query.search), "i");
+					return (
+						hotel.totalReservations > 0 ||
+						regex.test(hotel.hotelName || "") ||
+						regex.test(hotel.ownerName || "")
+					);
+			  })
+			: hotelSummaries;
 
-		const totals = hotelSummaries.reduce(
+		const totals = visibleHotelSummaries.reduce(
 			(acc, hotel) => {
 				acc.totalRooms += hotel.totalRooms;
 				acc.availableRooms += hotel.availableRooms;
@@ -1440,7 +2013,7 @@ exports.overallSummary = async (req, res) => {
 				return acc;
 			},
 			{
-				totalHotels: hotelSummaries.length,
+				totalHotels: visibleHotelSummaries.length,
 				totalRooms: 0,
 				availableRooms: 0,
 				occupiedRooms: 0,
@@ -1462,7 +2035,8 @@ exports.overallSummary = async (req, res) => {
 			},
 			period: { ...period, dateBy: dateField },
 			stats: totals,
-			hotels: hotelSummaries,
+			hotels: visibleHotelSummaries,
+			allHotels: executiveHotelOptions(hotels),
 			bookingSources: bookingSources.map((source) => ({
 				source: source._id || "Unknown",
 				count: source.count || 0,
@@ -1472,6 +2046,481 @@ exports.overallSummary = async (req, res) => {
 	} catch (error) {
 		console.error("overallSummary error:", error);
 		return res.status(500).json({ error: "Could not load overall summary" });
+	}
+};
+
+exports.overallExecutiveReservationsReport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "executive");
+		if (!context) return;
+
+		const built = buildExecutiveReservationMatch({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+		});
+
+		if (!built) {
+			return res.json({
+				asOf: new Date(),
+				period: {},
+				hotels: [],
+				stats: {},
+				reservationsByDay: [],
+				checkinsByDay: [],
+				checkoutsByDay: [],
+				reservationsByBookingStatus: [],
+				reservationsByHotelNames: [],
+				topHotels: [],
+				bookingSources: [],
+			});
+		}
+
+		const topLimit = Math.min(
+			Math.max(parseInt(req.query?.limit, 10) || 20, 1),
+			100
+		);
+		const [
+			statsRows,
+			reservationsByDay,
+			checkinsByDay,
+			checkoutsByDay,
+			reservationsByBookingStatus,
+			reservationsByHotelNames,
+			topHotels,
+			bookingSources,
+		] = await Promise.all([
+			aggregateExecutiveReservationStats(built.match),
+			aggregateExecutiveByDate(built.match, "createdAt"),
+			aggregateExecutiveByDate(built.match, "checkin_date"),
+			aggregateExecutiveByDate(built.match, "checkout_date"),
+			aggregateExecutiveByStatus(built.match),
+			aggregateExecutiveByHotel(built.match),
+			aggregateExecutiveByHotel(built.match, topLimit),
+			aggregateExecutiveByBookingSource(built.match),
+		]);
+
+		return res.json({
+			asOf: new Date(),
+			period: {
+				...built.period,
+				dateBy: built.dateField,
+				reportStartDate: EXECUTIVE_REPORT_START_DATE,
+			},
+			hotels: executiveHotelOptions(context.hotels).filter((hotel) =>
+				built.hotelIds.includes(hotel._id)
+			),
+			stats: {
+				totalHotels: built.hotelIds.length,
+				...(statsRows?.[0] || {}),
+			},
+			reservationsByDay,
+			checkinsByDay,
+			checkoutsByDay,
+			reservationsByBookingStatus,
+			reservationsByHotelNames,
+			topHotels,
+			bookingSources,
+		});
+	} catch (error) {
+		console.error("overallExecutiveReservationsReport error:", error);
+		return res.status(500).json({
+			error: "Could not load executive reservations report",
+		});
+	}
+};
+
+exports.overallExecutiveInventoryReport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "executive");
+		if (!context) return;
+
+		const requestedHotelId = req.query?.hotelId || req.query?.invHotel || "";
+		if (!requestedHotelId) {
+			return res.status(400).json({
+				error: "hotelId is required for inventory report",
+				allHotels: executiveHotelOptions(context.hotels),
+				hotels: [],
+				days: [],
+				stats: {},
+				range: inventoryRangeFromQuery(req.query || {}),
+			});
+		}
+		const hotelIds = filterHotelIdsForQuery(context.hotels, requestedHotelId);
+		if (hotelIds.length !== 1) {
+			return res.status(403).json({
+				error: "You cannot view inventory for this hotel",
+				allHotels: executiveHotelOptions(context.hotels),
+				hotels: [],
+				days: [],
+				stats: {},
+				range: inventoryRangeFromQuery(req.query || {}),
+			});
+		}
+		const selectedHotels = context.hotels.filter((hotel) =>
+			hotelIds.includes(normalizeId(hotel._id))
+		);
+
+		const range = inventoryRangeFromQuery(req.query || {});
+		const hotelObjectIds = hotelIds.map((id) => ObjectId(id));
+		const includeCancelled =
+			String(req.query?.includeCancelled || "").toLowerCase() === "true";
+		const excludeCancelled =
+			String(req.query?.excludeCancelled ?? "true").toLowerCase() !== "false";
+		const reservationMatch = {
+			hotelId: { $in: hotelObjectIds },
+			checkin_date: { $lt: range.endExclusive },
+			checkout_date: { $gt: range.start },
+		};
+		if (!includeCancelled && excludeCancelled) {
+			reservationMatch.$nor = [
+				{ reservation_status: CANCELLED_STATUS },
+				{ state: CANCELLED_STATUS },
+				{ reservation_status: NO_SHOW_STATUS },
+				{ state: NO_SHOW_STATUS },
+			];
+		}
+		const reservationClauses = [];
+		const statusFilter = reservationStatusFilter(req.query?.status);
+		if (statusFilter) reservationClauses.push(statusFilter);
+		const bookingSources = parseQueryList(req.query?.bookingSource);
+		if (bookingSources.length) {
+			reservationClauses.push({
+				$or: bookingSources.map((source) => ({
+					booking_source: new RegExp(escapeRegex(source), "i"),
+				})),
+			});
+		}
+		if (req.query?.payment) {
+			reservationClauses.push({
+				payment: new RegExp(escapeRegex(req.query.payment), "i"),
+			});
+		}
+		const searchFilter = executiveReservationSearchFilter(
+			req.query?.search,
+			selectedHotels
+		);
+		if (searchFilter) reservationClauses.push(searchFilter);
+		if (reservationClauses.length) {
+			reservationMatch.$and = reservationClauses;
+		}
+
+		const [rooms, reservations] = await Promise.all([
+			Rooms.find({ hotelId: { $in: hotelObjectIds } })
+				.select("_id hotelId active activeRoom")
+				.lean()
+				.exec(),
+			Reservations.find(reservationMatch)
+				.select(
+					"hotelId roomId total_rooms pickedRoomsType checkin_date checkout_date total_amount reservation_status state"
+				)
+				.lean()
+				.exec(),
+		]);
+
+		const roomsByHotel = new Map();
+		rooms.forEach((room) => {
+			const hotelId = normalizeId(room.hotelId);
+			if (!roomsByHotel.has(hotelId)) roomsByHotel.set(hotelId, []);
+			roomsByHotel.get(hotelId).push(room);
+		});
+
+		const hotelRows = selectedHotels.map((hotel) => {
+			const hotelId = normalizeId(hotel._id);
+			const hotelRooms = roomsByHotel.get(hotelId) || [];
+			const activePhysicalRooms = hotelRooms.filter(
+				(room) => room.active !== false && room.activeRoom !== false
+			).length;
+			const declaredRooms = getDeclaredRoomsTotal(hotel);
+			const capacity = activePhysicalRooms || declaredRooms;
+			return {
+				_id: hotelId,
+				hotelName: hotel.hotelName || "Hotel",
+				ownerId: normalizeId(hotel.belongsTo),
+				ownerName: hotel.belongsTo?.name || "",
+				totalRooms: capacity,
+				occupiedRoomNights: 0,
+				totalRoomNights: capacity * range.days.length,
+				reservationsCount: 0,
+				totalAmount: 0,
+				todayOccupied: 0,
+				todayAvailable: capacity,
+			};
+		});
+
+		const hotelRowMap = new Map(hotelRows.map((hotel) => [hotel._id, hotel]));
+		const dayRows = range.days.map((date) => ({
+			date,
+			capacity: hotelRows.reduce((total, hotel) => total + hotel.totalRooms, 0),
+			occupied: 0,
+			available: 0,
+			reservationsCount: 0,
+			occupancyRate: 0,
+		}));
+		const dayRowMap = new Map(dayRows.map((day) => [day.date, day]));
+		const todayKey = ymdFromDate(new Date());
+
+		reservations.forEach((reservation) => {
+			const hotelId = normalizeId(reservation.hotelId);
+			const hotelRow = hotelRowMap.get(hotelId);
+			if (!hotelRow) return;
+			const units = reservationUnitCount(reservation);
+			const checkin = startOfUtcDate(reservation.checkin_date);
+			const checkout = startOfUtcDate(reservation.checkout_date);
+			hotelRow.reservationsCount += 1;
+			hotelRow.totalAmount += moneyNumber(reservation.total_amount);
+
+			range.days.forEach((date) => {
+				const dayStart = new Date(`${date}T00:00:00.000Z`);
+				const nextDay = addUtcDays(dayStart, 1);
+				if (checkin < nextDay && checkout > dayStart) {
+					const dayRow = dayRowMap.get(date);
+					if (dayRow) {
+						dayRow.occupied += units;
+						dayRow.reservationsCount += 1;
+					}
+					hotelRow.occupiedRoomNights += units;
+					if (date === todayKey) hotelRow.todayOccupied += units;
+				}
+			});
+		});
+
+		hotelRows.forEach((hotel) => {
+			hotel.todayOccupied = Math.min(hotel.todayOccupied, hotel.totalRooms);
+			hotel.todayAvailable = Math.max(hotel.totalRooms - hotel.todayOccupied, 0);
+			hotel.occupancyRate = hotel.totalRoomNights
+				? Math.round((hotel.occupiedRoomNights / hotel.totalRoomNights) * 10000) / 100
+				: 0;
+		});
+
+		dayRows.forEach((day) => {
+			day.occupied = Math.min(day.occupied, day.capacity);
+			day.available = Math.max(day.capacity - day.occupied, 0);
+			day.occupancyRate = day.capacity
+				? Math.round((day.occupied / day.capacity) * 10000) / 100
+				: 0;
+		});
+
+		const stats = hotelRows.reduce(
+			(acc, hotel) => {
+				acc.totalRooms += hotel.totalRooms;
+				acc.todayOccupied += hotel.todayOccupied;
+				acc.todayAvailable += hotel.todayAvailable;
+				acc.occupiedRoomNights += hotel.occupiedRoomNights;
+				acc.totalRoomNights += hotel.totalRoomNights;
+				acc.reservationsCount += hotel.reservationsCount;
+				acc.totalAmount += hotel.totalAmount;
+				return acc;
+			},
+			{
+				totalHotels: hotelRows.length,
+				totalRooms: 0,
+				todayOccupied: 0,
+				todayAvailable: 0,
+				occupiedRoomNights: 0,
+				totalRoomNights: 0,
+				reservationsCount: 0,
+				totalAmount: 0,
+			}
+		);
+		stats.occupancyRate = stats.totalRoomNights
+			? Math.round((stats.occupiedRoomNights / stats.totalRoomNights) * 10000) / 100
+			: 0;
+
+		let calendar = null;
+		let calendarError = "";
+		if (hotelIds.length === 1) {
+			try {
+				calendar = await buildHotelInventoryCalendarPayload(hotelIds[0], {
+					start: ymdFromDate(range.start),
+					end: ymdFromDate(range.end),
+					includeCancelled,
+					paymentStatuses: req.query?.paymentStatuses,
+				});
+			} catch (calendarBuildError) {
+				calendarError = calendarBuildError?.message || "Could not load inventory calendar";
+			}
+		}
+
+		return res.json({
+			asOf: new Date(),
+			range: {
+				start: ymdFromDate(range.start),
+				end: ymdFromDate(range.end),
+				days: range.days,
+				period: range.period,
+			},
+			allHotels: executiveHotelOptions(context.hotels),
+			hotels: hotelRows.sort((a, b) => b.occupancyRate - a.occupancyRate),
+			days: dayRows,
+			stats,
+			calendar,
+			calendarError,
+		});
+	} catch (error) {
+		console.error("overallExecutiveInventoryReport error:", error);
+		return res.status(500).json({
+			error: "Could not load executive inventory report",
+		});
+	}
+};
+
+exports.overallExecutiveInventoryDayReport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "executive");
+		if (!context) return;
+
+		const requestedHotelId = req.query?.hotelId || req.query?.invHotel || "";
+		if (!requestedHotelId) {
+			return res.status(400).json({ error: "hotelId is required" });
+		}
+
+		const hotelIds = filterHotelIdsForQuery(context.hotels, requestedHotelId);
+		if (hotelIds.length !== 1) {
+			return res.status(403).json({
+				error: "You cannot view inventory for this hotel",
+			});
+		}
+
+		const payload = await buildHotelInventoryDayPayload(hotelIds[0], {
+			date: req.query?.date,
+			roomKey: req.query?.roomKey,
+			includeCancelled:
+				String(req.query?.includeCancelled || "").toLowerCase() === "true",
+			paymentStatuses: req.query?.paymentStatuses,
+		});
+
+		return res.json(payload);
+	} catch (error) {
+		console.error("overallExecutiveInventoryDayReport error:", error);
+		return res.status(error?.status || 500).json({
+			error: error?.message || "Could not load inventory day report",
+		});
+	}
+};
+
+exports.overallExecutivePaidReport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "executive");
+		if (!context) return;
+
+		const built = buildExecutivePaidMatch({
+			hotels: context.hotels,
+			query: req.query || {},
+		});
+		if (!built) {
+			return res.json({
+				data: [],
+				totalDocuments: 0,
+				page: 1,
+				limit: 0,
+				hotels: [],
+				allHotels: executiveHotelOptions(context.hotels),
+				scorecards: {},
+				byHotel: [],
+				byBookingSource: [],
+			});
+		}
+
+		const page = Math.max(parseInt(req.query?.page, 10) || 1, 1);
+		const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 250);
+		const skip = (page - 1) * limit;
+		const breakdownTotalsProjection = EXECUTIVE_PAID_BREAKDOWN_KEYS.reduce(
+			(acc, key) => ({
+				...acc,
+				[key]: { $sum: { $ifNull: [`$paid_amount_breakdown.${key}`, 0] } },
+			}),
+			{}
+		);
+
+		const [totalDocuments, reservations, scorecardRows, byHotel, byBookingSource] =
+			await Promise.all([
+				Reservations.countDocuments(built.match),
+				Reservations.find(built.match)
+					.sort({ checkin_date: -1, createdAt: -1 })
+					.skip(skip)
+					.limit(limit)
+					.populate("hotelId", "hotelName belongsTo")
+					.lean()
+					.exec(),
+				Reservations.aggregate([
+					{ $match: built.match },
+					{
+						$addFields: {
+							paidBreakdownTotal: executivePaidBreakdownTotalExpression(),
+						},
+					},
+					{
+						$group: {
+							_id: null,
+							reservationsCount: { $sum: 1 },
+							totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+							paidAmount: {
+								$sum: {
+									$cond: [
+										{ $gt: ["$paidBreakdownTotal", 0] },
+										"$paidBreakdownTotal",
+										{ $ifNull: ["$paid_amount", 0] },
+									],
+								},
+							},
+							commission: { $sum: executiveStoredCommissionExpression() },
+							...breakdownTotalsProjection,
+						},
+					},
+				]),
+				aggregateExecutiveByHotel(built.match),
+				aggregateExecutiveByBookingSource(built.match),
+			]);
+
+		const data = reservations.map((reservation) => {
+			const paidTotal = paidBreakdownTotal(reservation.paid_amount_breakdown);
+			const fallbackPaid = paidTotal || moneyNumber(reservation.paid_amount);
+			return {
+				...reservation,
+				paid_breakdown_total: fallbackPaid,
+				paid_breakdown_remaining: Math.max(
+					moneyNumber(reservation.total_amount) - fallbackPaid,
+					0
+				),
+			};
+		});
+
+		const scorecard = scorecardRows?.[0] || {};
+		const breakdownTotals = EXECUTIVE_PAID_BREAKDOWN_KEYS.reduce((acc, key) => {
+			acc[key] = moneyNumber(scorecard[key]);
+			return acc;
+		}, {});
+
+		return res.json({
+			data,
+			totalDocuments,
+			page,
+			limit,
+			pages: Math.ceil(totalDocuments / limit),
+			hotels: executiveHotelOptions(context.hotels).filter((hotel) =>
+				built.hotelIds.includes(hotel._id)
+			),
+			allHotels: executiveHotelOptions(context.hotels),
+			scorecards: {
+				reservationsCount: moneyNumber(scorecard.reservationsCount),
+				totalAmount: moneyNumber(scorecard.totalAmount),
+				paidAmount: moneyNumber(scorecard.paidAmount),
+				remainingAmount: Math.max(
+					moneyNumber(scorecard.totalAmount) - moneyNumber(scorecard.paidAmount),
+					0
+				),
+				commission: moneyNumber(scorecard.commission),
+				breakdownTotals,
+			},
+			byHotel,
+			byBookingSource,
+		});
+	} catch (error) {
+		console.error("overallExecutivePaidReport error:", error);
+		return res.status(500).json({
+			error: "Could not load executive paid report",
+		});
 	}
 };
 
@@ -1598,6 +2647,77 @@ const idsFromFinancialExportPayload = (payload = {}) => {
 		...(Array.isArray(filters.hotelIds) ? filters.hotelIds : []),
 		...rows.map((row) => row.hotelId || row.HotelId || row._hotelId),
 	]);
+};
+
+const idsFromReservationSummaryExportPayload = (payload = {}) => {
+	const filters = payload.filters || {};
+	const rows = Array.isArray(payload.reservations) ? payload.reservations : [];
+	return uniqueValidIds([
+		...parseQueryList(filters.hotelId),
+		...parseQueryList(filters.hotelIds),
+		...parseQueryList(payload.hotelId),
+		...parseQueryList(payload.hotelIds),
+		...rows.map((row) => row.hotelId || row.HotelId || row._hotelId),
+	]);
+};
+
+exports.trackOverallReservationSummaryExport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "reservations");
+		if (!context) return;
+		const payload = req.body || {};
+		const allowedHotelIds = new Set(selectedHotelIds(context.hotels));
+		const payloadHotelIds = idsFromReservationSummaryExportPayload(payload);
+		const blockedHotelId = payloadHotelIds.find((id) => !allowedHotelIds.has(id));
+		if (blockedHotelId) {
+			return res
+				.status(403)
+				.json({ error: "You cannot export reservation data for this hotel" });
+		}
+
+		const selectedPayloadHotels = payloadHotelIds.length
+			? payloadHotelIds
+			: filterHotelIdsForQuery(
+					context.hotels,
+					payload.filters?.hotelId || req.query?.hotelId
+			  );
+		const exportedHotels = selectedPayloadHotels.length
+			? context.hotels.filter((hotel) =>
+					selectedPayloadHotels.includes(normalizeId(hotel._id))
+			  )
+			: context.hotels;
+		const tracked = await trackReservationSummaryExport({
+			req,
+			actor: context.actor,
+			hotels: exportedHotels,
+			filters: {
+				...(payload.filters || {}),
+				ownerId: payload.filters?.ownerId || req.query?.ownerId || "",
+			},
+			dataset: payload.dataset || "overall_reservation_summary",
+			format: payload.format || "XLSX",
+			dateBy: payload.dateBy || payload.filters?.dateBy || "createdAt",
+			totalRows: payload.totalRows,
+			summary: payload.summary || {},
+			rows: Array.isArray(payload.reservations) ? payload.reservations : [],
+		});
+
+		if (!tracked) {
+			return res
+				.status(500)
+				.json({ error: "Could not track reservation summary export" });
+		}
+
+		return res.json({
+			exportTracked: true,
+			exportedAt: new Date(),
+		});
+	} catch (error) {
+		console.error("trackOverallReservationSummaryExport error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not track reservation summary export" });
+	}
 };
 
 exports.trackOverallFinancialReportExport = async (req, res) => {
@@ -2218,7 +3338,7 @@ exports.createOverallSystemAdmin = async (req, res) => {
 		const context = await requireOverallSection(req, res, "accounts");
 		if (!context) return;
 		if (!canManageSystemAdminAccounts(context.actor)) {
-			return res.status(403).json({ error: "You cannot create system admins" });
+			return res.status(403).json({ error: "You cannot create hotel system admins" });
 		}
 
 		const payload = req.body || {};
@@ -2301,12 +3421,12 @@ exports.createOverallSystemAdmin = async (req, res) => {
 			],
 		});
 		return res.json({
-			message: "System Admin account created successfully",
+			message: "Hotel System Admin account created successfully",
 			user: sanitizeUserForResponse(user),
 		});
 	} catch (error) {
 		console.error("createOverallSystemAdmin error:", error);
-		return res.status(500).json({ error: "Could not create system admin" });
+		return res.status(500).json({ error: "Could not create hotel system admin" });
 	}
 };
 
@@ -2315,7 +3435,7 @@ exports.updateOverallSystemAdmin = async (req, res) => {
 		const context = await requireOverallSection(req, res, "accounts");
 		if (!context) return;
 		if (!canManageSystemAdminAccounts(context.actor)) {
-			return res.status(403).json({ error: "You cannot update system admins" });
+			return res.status(403).json({ error: "You cannot update hotel system admins" });
 		}
 
 		const { accountId } = req.params;
@@ -2452,12 +3572,12 @@ exports.updateOverallSystemAdmin = async (req, res) => {
 			],
 		});
 		return res.json({
-			message: "System Admin account updated successfully",
+			message: "Hotel System Admin account updated successfully",
 			user: sanitizeUserForResponse(account),
 		});
 	} catch (error) {
 		console.error("updateOverallSystemAdmin error:", error);
-		return res.status(500).json({ error: "Could not update system admin" });
+		return res.status(500).json({ error: "Could not update hotel system admin" });
 	}
 };
 

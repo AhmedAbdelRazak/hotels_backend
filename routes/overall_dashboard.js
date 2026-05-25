@@ -8,8 +8,13 @@ const { requireSignin, isAuth } = require("../controllers/auth");
 const { userById } = require("../controllers/user");
 const {
 	overallSummary,
+	overallExecutiveReservationsReport,
+	overallExecutiveInventoryReport,
+	overallExecutiveInventoryDayReport,
+	overallExecutivePaidReport,
 	overallReservations,
 	exportOverallReservations,
+	trackOverallReservationSummaryExport,
 	overallPendingReservations,
 	exportOverallPendingReservations,
 	overallFinancialActions,
@@ -30,6 +35,34 @@ router.get(
 );
 
 router.get(
+	"/overall-dashboard/executive-report/reservations/:userId",
+	requireSignin,
+	isAuth,
+	overallExecutiveReservationsReport
+);
+
+router.get(
+	"/overall-dashboard/executive-report/inventory/:userId",
+	requireSignin,
+	isAuth,
+	overallExecutiveInventoryReport
+);
+
+router.get(
+	"/overall-dashboard/executive-report/inventory-day/:userId",
+	requireSignin,
+	isAuth,
+	overallExecutiveInventoryDayReport
+);
+
+router.get(
+	"/overall-dashboard/executive-report/paid/:userId",
+	requireSignin,
+	isAuth,
+	overallExecutivePaidReport
+);
+
+router.get(
 	"/overall-dashboard/reservations/:userId",
 	requireSignin,
 	isAuth,
@@ -41,6 +74,13 @@ router.get(
 	requireSignin,
 	isAuth,
 	exportOverallReservations
+);
+
+router.post(
+	"/overall-dashboard/reservation-summary-export/:userId",
+	requireSignin,
+	isAuth,
+	trackOverallReservationSummaryExport
 );
 
 router.get(

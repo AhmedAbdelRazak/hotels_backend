@@ -33,14 +33,17 @@ Top-Level Backend Structure
 
 Core User Roles And Scope Rules
 - role 1000
-  - Platform admin / super admin level. Also treat REACT_APP_SUPER_ADMIN_ID and SUPER_ADMIN_ID style configured users as super admins where used.
+  - Platform admin / super admin level. In business terminology, Super Admins are the platform owners/operators, and platform admins belong to the JannatBooking platform side.
+  - Also treat REACT_APP_SUPER_ADMIN_ID and SUPER_ADMIN_ID style configured users as super admins where used.
   - Backend helpers must also recognize roleDescription/roleDescriptions values such as superadmin and super admin as platform-super-admin grants.
   - Can access admin routes, owner-style hotel operations, account management, hotel-staff updates, and cross-hotel reporting without being restricted by hotelIdWork, hotelIdsWork, hotelIdsOwner, hotelsToSupport, or belongsToId.
 - role 2000
   - Root hotel owner when the account has no belongsToId.
   - Also appears for scoped hotel managers when roleDescription is hotelmanager and hotelIdWork / hotelIdsWork / belongsToId are set.
 - role 10000
-  - System admin for an owner account. Broad owner-like access, but scoped to assigned hotels through hotelIdsOwner, hotelsToSupport, hotelIdWork, or belongsToId.
+  - Hotel System Admin for an owner account. This is still a hotel-side employee/admin for one hotel or a group of hotels.
+  - Broad owner-like access, but always scoped to assigned hotels through hotelIdsOwner, hotelsToSupport, hotelIdWork, or belongsToId.
+  - Keep the internal roleDescription value as systemadmin for compatibility, but user-facing UI and documentation should call it Hotel System Admin, not generic System Admin.
 - role 3000
   - Reception. Reservation-facing access for assigned hotel scope.
 - role 4000
@@ -65,7 +68,7 @@ Role Data Model Notes
   - roles and roleDescriptions: additional role grants.
   - belongsToId: parent owner/account id for staff or scoped users.
   - hotelIdWork and hotelIdsWork: assigned hotel scope used by hotel staff flows.
-  - hotelIdsOwner and hotelsToSupport: owner/system-admin support scope.
+  - hotelIdsOwner and hotelsToSupport: owner/hotel-system-admin support scope.
   - accessTo: feature-level access such as newReservation and ownReservations.
   - activeUser: account activation gate.
   - companyName, agentCommercialModel, agentApproval, wallet opening balances: agent/ordertaker finance context.
@@ -78,7 +81,7 @@ Critical Backend Authorization Helpers
   - isPlatformSuperAdmin is the global admin source for auth middleware and staff creation. isAuth, isAdmin, isHotelOwner, agent approval, and staff-creation checks should use this broad helper instead of only checking a single configured id or role number.
 - controllers/overall_dashboard.js
   - requireOverallSection, canAccessOverallSection, and getAccessibleOverallHotels are the main overall-dashboard guards.
-  - Owner-like access is not the same as global access. System admins and scoped managers must still be limited to assigned hotels.
+  - Owner-like access is not the same as global access. Hotel System Admins and scoped managers must still be limited to assigned hotels.
   - Platform super admins must load overall hotels globally by default. ownerId may narrow the view, but stale hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport values on the super-admin account must never restrict global access.
   - Overall reservation list sorting supports the frontend sort controls for booking source, hotel name, arrival date, and departure date through sortFromQuery.
 - controllers/reservations.js
@@ -89,7 +92,7 @@ Critical Backend Authorization Helpers
   - canManageHotelStaff protects staff/account management by hotel scope.
   - isPlatformSuperAdmin must be treated as an unrestricted staff/account-management actor. Super admins can update any hotel staff or owner-like account through PUT /hotel-staff/:staffId/:hotelId/:userId.
   - updateHotelStaffUser must recognize root owner accounts by _id === ownerId and hotelIdsOwner, not only belongsToId. Root owner accounts normally have no belongsToId and should not be rejected as "not belonging to this hotel".
-  - Agent and employee activation from the overall activate-accounts screen should still go through updateHotelStaffUser, not the System Admin endpoint, so activeUser, agentApproval/applicationReview, approvedHotelIds, notifications, and ActivityTracker updates remain consistent.
+  - Agent and employee activation from the overall activate-accounts screen should still go through updateHotelStaffUser, not the Hotel System Admin endpoint, so activeUser, agentApproval/applicationReview, approvedHotelIds, notifications, and ActivityTracker updates remain consistent.
 - controllers/agent_wallet.js
   - Financial access guards protect agent wallet, claims, transactions, and commission review.
   - Wallet claim statuses drive finance reporting: posted/approved movements are accepted and can affect wallet totals; pending/rejected/void movements must remain visible for audit but are reconciliationEligible = false and must never be included in reservation reconciliation totals. Both status and reviewStatus must be checked so mixed legacy records cannot slip into totals.
@@ -108,7 +111,7 @@ Primary Route Files And API Areas
 - routes/reservations.js
   - Reservation creation, update, search/list, import preview/commit, pending confirmations, occupancy/current/range reports, payment links, guest emails, OTA dumps, source/status reports, and owner aggregation reports.
 - routes/overall_dashboard.js
-  - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, system admin actions, and settings.
+  - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, hotel-system-admin actions, and settings.
 - routes/housekeeping.js
   - Housekeeping task creation/list/count/update, assigned employee task views, supplies, and supply requests.
 - routes/agent_wallet.js
@@ -195,7 +198,7 @@ Critical Workflows To Protect
   - Prevent non-super-admin users from moving reservation/task status backward.
   - Closed/completed records should not be reopened except by a super admin path that also clears start/end timestamps where required by the business rule.
 - Tracker privacy
-  - Any reservation tracker/audit update performed by a super admin, platform admin, or system admin must only be visible to true super admins.
+  - Any reservation tracker/audit update performed by a super admin, platform admin, or Hotel System Admin must only be visible to true super admins.
   - Apply services/auditPrivacy.js before returning reservation details, pending-reservation queues, finance/payment commission rows, reservation searches, and report rows that include adminChangeLog or reservationAuditLog.
   - Sanitize both audit arrays and standalone "last updated by" snapshots before responding; hiding the table rows alone is not enough because ReservationDetail also renders workflow summary metadata.
   - Do not rely on frontend hiding alone for privileged audit rows. Backend responses should already be sanitized for non-super-admin viewers and for unauthenticated public/client payment fetches.
@@ -211,11 +214,11 @@ Critical Workflows To Protect
   - Staff creation and updates must validate that the creator controls every hotel selected for the new or updated account.
   - Super admins can create, activate, update, approve, and scope accounts across any hotel. Do not add hotel assignment restrictions to role 1000 / configured super-admin / superadmin role-description users.
   - Root owner accounts should preserve hotelIdsOwner and avoid forcing belongsToId during account updates. Updating a root owner through staff-management routes must not convert it into a scoped staff account.
-  - PUT /overall-dashboard/system-admin/:accountId/:userId and POST /overall-dashboard/system-admin/:userId must validate hotel assignments differently by actor: super admins validate selected hotel IDs against real HotelDetails records globally; owner/system-admin/hotel-manager actors validate selected hotel IDs as a subset of their accessible overall hotels.
-  - The system-admin update route may convert an existing managed account into a system admin. It must force role/roles/roleDescription/roleDescriptions to systemadmin only, clear belongsToId, set hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport from the selected hotels, and preserve sanitized accessTo.
-  - Staff creation with roleDescription systemadmin must also keep System Admin mutually exclusive, set hotelIdsWork/hotelIdsOwner/hotelsToSupport from selected hotels, and avoid assigning belongsToId like a regular hotel employee.
-  - Converting a system admin back to hotel manager/reception/finance/etc. is handled through the hotel-staff update route. That route must allow accounts scoped by hotelIdsOwner/hotelsToSupport, then clear hotelIdsOwner for non-system-admin non-root-owner accounts and restore belongsToId to the hotel owner.
-  - Account create/update routes must call services/activityTracker.js. Staff creation uses hotel_staff_create, staff updates use hotel_staff_update, and system-admin create/update uses overall_system_admin_create / overall_system_admin_update.
+  - PUT /overall-dashboard/system-admin/:accountId/:userId and POST /overall-dashboard/system-admin/:userId are legacy route names for Hotel System Admin account management. They must validate hotel assignments differently by actor: super admins validate selected hotel IDs against real HotelDetails records globally; owner/hotel-system-admin/hotel-manager actors validate selected hotel IDs as a subset of their accessible overall hotels.
+  - The system-admin update route may convert an existing managed account into a Hotel System Admin. It must force role/roles/roleDescription/roleDescriptions to systemadmin only, clear belongsToId, set hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport from the selected hotels, and preserve sanitized accessTo.
+  - Staff creation with roleDescription systemadmin must also keep Hotel System Admin mutually exclusive, set hotelIdsWork/hotelIdsOwner/hotelsToSupport from selected hotels, and avoid assigning belongsToId like a regular hotel employee.
+  - Converting a Hotel System Admin back to hotel manager/reception/finance/etc. is handled through the hotel-staff update route. That route must allow accounts scoped by hotelIdsOwner/hotelsToSupport, then clear hotelIdsOwner for non-system-admin non-root-owner accounts and restore belongsToId to the hotel owner.
+  - Account create/update routes must call services/activityTracker.js. Staff creation uses hotel_staff_create, staff updates use hotel_staff_update, and Hotel System Admin create/update uses overall_system_admin_create / overall_system_admin_update.
   - Overall create-account must not auto-select hotels or roles. Backend account creation and signup invitation creation should reject missing hotel/role scope, even if the frontend already validates it.
   - Overall update-account should require an explicit account selection in the frontend before update fields are populated. Backend update routes must continue validating account id, creator scope, selected hotels, and role changes because query params or prefilled UI state are never trusted.
   - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend.
@@ -230,9 +233,84 @@ Critical Workflows To Protect
   - As the approved agent, GET /overall-dashboard/pending-reservations/:userId with ownerId and optional assigned hotelId. The response must include only the authenticated agent's pending/rejected/finance-review/commission-review reservations and must exclude every other agent's records.
   - As the approved agent, GET /overall-dashboard/financial-actions/:userId and GET /agent-wallet/summary/:hotelId/:userId, including attempts to pass another agentId. The backend must still return only the authenticated agent's wallet, commission, reservation, and claim data.
   - Repeat with an unassigned hotelId. The API must not expose data for that hotel.
-  - Repeat as reservation employee, finance, manager, system admin, and super admin to confirm staff/admin queue visibility still follows their broader role scope and was not narrowed by the agent-only filters.
+  - Repeat as reservation employee, finance, manager, Hotel System Admin, and super admin to confirm staff/admin queue visibility still follows their broader role scope and was not narrowed by the agent-only filters.
 - Public website routes
   - Keep public Janat routes separate from authenticated hotel-management behavior. Public booking/payment endpoints still need reservation/payment validation.
+
+2026-05-25 Implementation Log
+- Role naming and access language
+  - The hotel-side systemadmin role is now documented and displayed as Hotel System Admin.
+  - Keep the stored/internal roleDescription value as systemadmin and the numeric role 10000 for compatibility.
+  - Hotel System Admin is scoped hotel-side administration, not platform-wide administration.
+  - Platform admins and true super admins remain separate: super admins are global platform owners, while Hotel System Admin users are limited to assigned hotels.
+- Overall executive reports for hotel owners and authorized hotel staff
+  - Executive summary data must use owner/hotel scoped backend routes instead of reusing global admin report routes directly.
+  - Super admins can view across the platform; owners, Hotel System Admins, hotel managers, finance users, reservation employees, and other permitted roles must be constrained to assigned hotels.
+  - Use getAccessibleOverallHotels, requireOverallSection, and related overall-dashboard helpers before applying hotelId, invHotel, ownerId, or query filters.
+  - Never trust ownerId or hotelId from the query string until it has been checked against the acting user's accessible hotel set.
+  - The overall summary page has four business surfaces: general hotel summary, reservation analytics, inventory/occupancy, and paid reservations overview.
+  - Admin global reports remain separate from hotel-management executive reports for security and data-boundary clarity.
+- Reservation executive report backend behavior
+  - The reservation analytics endpoint supports hotel, status, source, payment, search, dateBy, dateFrom, dateTo, includeCancelled, and excludeCancelled query semantics.
+  - dateBy must map only to approved date fields such as createdAt, check-in/arrival, or checkout/departure.
+  - Cancelled, no-show, and pending reservations must be counted only when the filter or include/exclude setting says so. Do not silently exclude them when a user explicitly asks for those statuses.
+  - Aggregations should return creation-date, arrival-date, departure-date, status, source, payment, hotel, and room-type level summaries needed by the frontend charts.
+  - Status labels may be humanized on the frontend, but backend values should remain normalized for filtering and reporting stability.
+- Inventory/occupancy executive report backend behavior
+  - The hotel-management overall inventory report must require one selected hotel before returning occupancy output.
+  - Occupancy is calculated from arrival/check-in dates, not creation date or checkout date.
+  - The month/range should be controlled by calendar type plus month/year selectors. Frontend may pass invCal, invHMonth/invHYear, invStart, and invEnd, but backend must compute and validate the effective range consistently.
+  - Hijri is the default report calendar and should default to the current Hijri month when no valid month query exists.
+  - includeCancelled/excludeCancelled must be honored consistently so the UI toggle matches the returned data.
+  - The overall inventory endpoint should mirror the single-hotel inventory report structure while still using overall role and hotel-scope validation.
+  - Avoid response/query feedback loops: do not mutate query dates from backend responses in a way that causes alternating invHMonth/invStart/invEnd requests.
+- Paid reservations overview backend behavior
+  - The paid overview returns hotel-level breakdown first, followed by the rest of the report data.
+  - Payment summaries must distinguish paid amount, due amount, commission, and booking source/hotel grouping.
+  - Data must stay scoped to assigned hotels unless the actor is a true super admin.
+- Reservation summary modal and export tracking
+  - Reservation list summary exports must create ActivityTracker records so report downloads are attributable.
+  - Tracked metadata should include actor, owner scope, hotel scope, active filters, selected date field, row counts, and export/report type.
+  - Summary aggregations include date, booking source, status, and room type. Source/status/room-type summaries should be sorted by total amount descending.
+- B2B chat backend
+  - Chat is B2B only and lives under the b2b-chat backend controller/routes/model/service structure.
+  - Staff can chat internally with users allowed by their assigned hotel scope.
+  - Hotel managers, Hotel System Admins, owners, finance users, and reservation users can chat with agents assigned to their hotels only.
+  - Reception and housekeeping-style accounts should not gain agent chat access unless their role/scope explicitly permits it.
+  - Owners and Hotel System Admins are powerful inside their assigned hotels but are not global chat users.
+  - Super admins can view and participate across the platform.
+  - Chat recipient lookup must filter by role and shared hotel assignment. A hotel owner should not see unrelated super admins or unrelated agents as start-new-chat recipients.
+  - Chat recipient API responses should provide friendly roleLabel values such as Owner, Hotel System Admin, Hotel Manager, Finance, Reservations Officer, Agent, and Super Admin. Do not return numeric role codes as the display fallback.
+  - Active chats are not closed chats. Historical chats are closed chats.
+  - Chats with no activity for 2 hours should be marked seen and closed by the maintenance service. Shorter timeouts may be used only for local testing and then reverted.
+  - Attachments and pasted screenshots are supported. Backend responses should expose enough metadata for inline preview while keeping safe download/open URLs available.
+  - Unread counters and seen updates must not create request loops. Prefer stable polling/socket triggers and avoid marking a chat as seen merely because the top-navbar icon was clicked.
+  - Socket events should refresh active chat lists and unread counters without rebinding listeners on every render.
+  - Frontend chat pages may receive legacy/null attachment rows from historical data. Backend should continue returning safe attachment metadata, but frontend must also guard null attachment entries before previewing kind/type/source fields.
+  - The B2B chat route is an overall hotel-management surface, not a single-hotel surface. Top-navbar notification context should stay owner/overall scoped unless the user opens a true single-hotel route.
+- Executive summary filter model
+  - The overview, reservations overview, and paid reservations overview executive tabs may accept multi-hotel and multi-month filters for broad historical analysis.
+  - These non-inventory executive tabs may send hotelId/invHotel as comma-separated lists, invMonths/invHMonth/invHYear/invCal, dateFrom/dateTo, invStart/invEnd, dateBy, status, search, and includeCancelled.
+  - Backend report handlers must keep parsing repeated or comma-separated hotel/status/month params while enforcing accessible-hotel scope before aggregation.
+  - Inventory remains stricter than the other executive tabs: exactly one hotel must be selected, and occupancy remains based on arrival/check-in date.
+- Query, loop, and performance guardrails
+  - Overall summary and inventory endpoints are expensive; frontend callers should debounce/stabilize query dependencies and backend should avoid unnecessary broad queries.
+  - The summary endpoint should not be repeatedly called by the inventory report unless that tab truly needs summary data.
+  - GET request logs alternating between different invHMonth/invStart/invEnd values usually indicate a frontend query synchronization loop, not a database issue.
+  - For report work, always verify that selected filters, reflected UI labels, and backend results agree before considering the feature complete.
+- 2026-05-25 backend file and route map
+  - server.js mounts the backend route modules. Any new route must be registered here or through an already-mounted route file.
+  - routes/overall_dashboard.js owns hotel-management overall dashboard/report endpoints.
+  - controllers/overall_dashboard.js owns the owner/hotel scoped executive summary logic, reservation analytics, inventory/occupancy report data, paid overview data, account-management actions, and signup invitation handling.
+  - controllers/reservations.js remains the single-hotel reservation workflow source and should stay aligned with overall reservation list filtering/sorting behavior.
+  - routes/b2b_chat.js and controllers/b2b_chat.js own B2B chat access, recipient lookup, chat lists, messages, attachments, unread counters, seen state, and close-chat behavior.
+  - models/b2b_chat.js stores B2B chat threads/messages/attachment metadata.
+  - services/b2bChatMaintenance.js owns inactive-chat cleanup. Production inactivity should remain 2 hours after local testing.
+  - services/activityTracker.js records account-management mutations and report/export activity, including reservation summary report downloads.
+  - services/auditPrivacy.js must continue sanitizing privileged audit actor data before reservation/report responses are returned to non-super-admin viewers.
+  - Frontend callers for the overall report routes are mainly hotels_frontend/src/HotelModule/apiAdmin.js and hotels_frontend/src/HotelModule/TheOverallStructure/OverallSummary/*.js.
+  - Frontend callers for B2B chat are mainly hotels_frontend/src/HotelModule/B2BChat/* and hotels_frontend/src/HotelModule/AdminNavbar/TopNavbar.js.
+  - If future logs show repeated OPTIONS/GET calls for chat or inventory, check frontend effect dependencies first, then verify that backend endpoints are idempotent and do not return query-normalization values that cause URL churn.
 
 Recent Production Guardrails
 - Reservation detail privacy, May 2026:
@@ -252,14 +330,14 @@ Backend Change Checklist
 - Preserve ActivityTracker behavior for reservations, financial exports, and account management. When adding any account-management mutation, record actor, target account, changed fields, hotel scope, owner scope, and request metadata.
 - When adding fields to models, update both create and update controllers, relevant report aggregations, imports/exports, and frontend API clients.
 - When adding a route, place the route in ./routes and the business logic in ./controllers unless the local pattern clearly differs.
-- When changing reservation or housekeeping status behavior, test owner, super admin, system admin, hotel manager, reception, finance, order taker, reservation employee, housekeeping manager, and housekeeper scenarios.
+- When changing reservation or housekeeping status behavior, test owner, super admin, Hotel System Admin, hotel manager, reception, finance, order taker, reservation employee, housekeeping manager, and housekeeper scenarios.
 
 Final Production Readiness Notes
-- Overall reservation queries must remain scoped by actor role and assigned hotels. Approved agents/order takers may read their own overall pending/finance reservations only; hotel staff, managers, system admins, and super admins keep their broader authorized queue visibility.
+- Overall reservation queries must remain scoped by actor role and assigned hotels. Approved agents/order takers may read their own overall pending/finance reservations only; hotel staff, managers, Hotel System Admins, and super admins keep their broader authorized queue visibility.
 - Overall reservation list sorting is backend-supported for the frontend table controls. Keep sort keys such as booking_source, hotel, check-in, and checkout routed through controllers/overall_dashboard.js without bypassing hotel-scope or agent-scope filtering.
 - Reservation sorting must support creation date in addition to booking date, source, arrival/check-in, and departure/check-out. Overall reservations use controllers/overall_dashboard.js; single-hotel reservation lists and pending-confirmation queues use controllers/reservations.js and must keep auth/hotel/agent scope checks before sorting.
 - Overall reservation filters accept repeated or comma-separated hotelId, status, and bookingSource query params. Preserve parseQueryList behavior so frontend multi-select filters can send several values without bypassing hotel/role scoping.
 - Overall reservation status filtering normalizes user-facing status names to lifecycle aliases before querying. Examples: Checked Out matches checked_out, early_checked_out, and closed; Confirmed also covers legacy ok; and state is only used as a fallback when reservation_status is missing/blank so old state values cannot pollute filtered results.
 - Financial and reservation notification routes must keep acknowledgement notifications separate from operational queue notifications. Ackable account/wallet/reservation decisions can disappear after click; pending reservation confirmation and pending financial actions must remain until the workflow state changes.
-- Tracker privacy remains production-critical. Any admin/super-admin/system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
+- Tracker privacy remains production-critical. Any admin/super-admin/hotel-system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
 - For production readiness, run node --check server.js, node --check controllers/overall_dashboard.js, git diff --check, and a scoped manual test of signup invitation, activation, agent pending reservations, finance actions, notifications, and super-admin account updates.

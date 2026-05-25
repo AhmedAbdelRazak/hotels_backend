@@ -161,6 +161,7 @@ const cleanExportFilters = (query = {}) => {
 		"bookingSource",
 		"payment",
 		"dateBy",
+		"summaryDateBy",
 		"sortBy",
 		"sortOrder",
 		"dateFrom",
@@ -401,6 +402,92 @@ const trackReservationExport = async ({
 					.filter(Boolean),
 				recordsStoredLimit: EXPORT_RECORD_LIMIT,
 				recordsTruncated: reservationRows.length > EXPORT_RECORD_LIMIT,
+			},
+		},
+		req
+	);
+};
+
+const summaryRowHotelId = (row = {}) =>
+	normalizeId(row.hotelId || row.HotelId || row._hotelId || row.hotel?._id || row.hotel);
+
+const summaryRowReservationId = (row = {}) =>
+	normalizeId(row.reservationId || row._id || row.id || row._reservationId);
+
+const summaryRowConfirmationNumber = (row = {}) =>
+	String(
+		row.confirmation_number ||
+			row.confirmationNumber ||
+			row.Confirmation ||
+			row.confirmation ||
+			""
+	).trim();
+
+const trackReservationSummaryExport = async ({
+	req,
+	actor,
+	hotels = [],
+	filters = {},
+	dataset = "overall_reservation_summary",
+	format = "XLSX",
+	dateBy = "createdAt",
+	totalRows = 0,
+	summary = {},
+	rows = [],
+}) => {
+	const reservationRows = Array.isArray(rows) ? rows : [];
+	const cappedRows = reservationRows.slice(0, EXPORT_RECORD_LIMIT);
+	const summarySnapshot = cleanForAudit(summary || {});
+	const trackerTotalRows =
+		Number(totalRows || 0) ||
+		Number(summarySnapshot?.totals?.reservationCount || 0) ||
+		reservationRows.length;
+	const hotelIds = (Array.isArray(hotels) ? hotels : [])
+		.map((hotel) => toObjectId(hotel?._id || hotel))
+		.filter(Boolean);
+	const exportedHotelIds = uniqueStrings([
+		filters.hotelId,
+		...(Array.isArray(filters.hotelIds) ? filters.hotelIds : []),
+		...reservationRows.map(summaryRowHotelId),
+		...(Array.isArray(hotels)
+			? hotels.map((hotel) => normalizeId(hotel?._id || hotel))
+			: []),
+	]);
+
+	return safeCreateTracker(
+		{
+			action: "reservation_summary_exported",
+			category: "reservations",
+			source: "overall_dashboard",
+			description: `${dataset} exported to Excel`,
+			actor: actorSnapshot(actor),
+			entityType: "reservation_summary_export",
+			exportDetails: {
+				dataset,
+				format,
+				totalRows: trackerTotalRows,
+				dateRange: exportDateRange(filters),
+				filters: cleanExportFilters({ ...filters, summaryDateBy: dateBy }),
+				columns: [
+					"overview",
+					"summary_by_date",
+					"summary_by_booking_source",
+					"summary_by_status",
+					"summary_by_room_type",
+				],
+				hotelIds,
+			},
+			metadata: {
+				dateBy,
+				summary: summarySnapshot,
+				hotelIds: exportedHotelIds,
+				reservationIds: uniqueStrings(cappedRows.map(summaryRowReservationId)),
+				confirmationNumbers: uniqueStrings(
+					cappedRows.map(summaryRowConfirmationNumber)
+				),
+				recordsStoredLimit: EXPORT_RECORD_LIMIT,
+				recordsTruncated: reservationRows.length > EXPORT_RECORD_LIMIT,
+				reservations: capAuditRows(cappedRows),
 			},
 		},
 		req
@@ -701,6 +788,7 @@ const trackAccountCreation = async ({
 module.exports = {
 	trackFinancialReportExport,
 	trackReservationExport,
+	trackReservationSummaryExport,
 	trackReservationStatusChange,
 	trackAccountUpdate,
 	trackAccountCreation,

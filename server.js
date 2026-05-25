@@ -11,10 +11,15 @@ const socketIo = require("socket.io");
 const {
 	startHousekeepingMaintenanceJob,
 } = require("./services/housekeepingMaintenance");
+const {
+	startB2BChatMaintenanceJob,
+} = require("./services/b2bChatMaintenance");
 
 const app = express();
 const server = http.createServer(app);
-
+//IMPORTANT TO ASK YOUR FRIEND => ANY RESERVATION ACROSS THE BOARD SHOULD INCLUDE THE ROOMID WHICH IS THE COMBNINATION OF DISPLAYNAME & ROOMTYPE.
+//THIS ID IS IMPORTANT, BECAUSE IF THE SETTINGS OF DISPLAYNAME CHANGED, THEN THE OCCUPANCY REPORT SHOULD CONSIDER THE ID FIRST THEN DISPLAYNAME SECOND
+// IF ROOMID DOESN'T EXIST IN THE DOCUMENT OF RESERVATION.
 mongoose.set("strictQuery", false);
 mongoose
 	.connect(process.env.DATABASE, {
@@ -24,6 +29,7 @@ mongoose
 	.then(() => {
 		console.log("MongoDB Atlas is connected");
 		startHousekeepingMaintenanceJob();
+		startB2BChatMaintenanceJob();
 	})
 	.catch((err) => console.log("DB Connection Error: ", err));
 
@@ -88,6 +94,30 @@ io.on("connection", (socket) => {
 	});
 	socket.on("leaveOwnerNotifications", ({ ownerId } = {}) => {
 		if (ownerId) socket.leave(`owner-notifications:${ownerId}`);
+	});
+	socket.on("joinB2BChat", ({ chatId } = {}) => {
+		if (chatId) socket.join(`b2b-chat:${chatId}`);
+	});
+	socket.on("leaveB2BChat", ({ chatId } = {}) => {
+		if (chatId) socket.leave(`b2b-chat:${chatId}`);
+	});
+	socket.on("joinB2BUser", ({ userId } = {}) => {
+		if (userId) socket.join(`b2b-user:${userId}`);
+	});
+	socket.on("leaveB2BUser", ({ userId } = {}) => {
+		if (userId) socket.leave(`b2b-user:${userId}`);
+	});
+	socket.on("joinB2BHotel", ({ hotelId } = {}) => {
+		if (hotelId) socket.join(`b2b-hotel:${hotelId}`);
+	});
+	socket.on("leaveB2BHotel", ({ hotelId } = {}) => {
+		if (hotelId) socket.leave(`b2b-hotel:${hotelId}`);
+	});
+	socket.on("joinB2BPlatform", () => {
+		socket.join("b2b-platform");
+	});
+	socket.on("leaveB2BPlatform", () => {
+		socket.leave("b2b-platform");
 	});
 
 	socket.on("typing", (data = {}) => {
