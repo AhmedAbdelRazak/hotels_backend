@@ -350,3 +350,135 @@ Final Production Readiness Notes
 - Tracker privacy remains production-critical. Any admin/super-admin/hotel-system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
 - For production readiness, run node --check server.js, node --check controllers/overall_dashboard.js, git diff --check, and a scoped manual test of signup invitation, activation, agent pending reservations, finance actions, notifications, and super-admin account updates.
 - 2026-05-25 production validation: frontend and backend production HEADs were checked against origin; hotels-frontend and hotels-backend were online in PM2; executive summary reservation, inventory, paid-overview, B2B chat SPA routes returned 200; /api/currency-rates returned 200. Frontend runtime fixes were deployed without backend runtime changes.
+
+2026-05-26 Thread Addendum - Backend Decisions, Data Rules, And References
+- Purpose of this addendum
+  - This section documents the latest hotel-management and admin-platform work from the full session so future changes do not accidentally undo the new behavior.
+  - The work touched backend scoping, report data quality, support/B2B chat authorization, admin route security, and frontend-facing API expectations.
+  - Frontend implementation references live in hotels_frontend/application_structure_frontend.txt under the matching 2026-05-26 addendum.
+
+- Exact routes and business surfaces discussed
+  - Hotel owner / hotel-management executive summary:
+    - /hotel-management/main-dashboard?overall=summary&page=1
+    - Important tabs: hotel summary, reservations overview, hotel inventory, and paid reservations report.
+  - Hotel rooms map:
+    - /hotel-management/main-dashboard?overall=hotel-map&page=1&mapHotelId=<hotelId>&mapOwnerId=<ownerId>
+  - Admin platform dashboard and reports:
+    - /admin/dashboard
+    - /admin/jannatbooking-tools?tab=calculator
+    - /admin/janat-website
+    - /admin/customer-service
+    - /admin/customer-service?tab=history-client-cases
+    - /admin/overall-hotel-reports?tab=inventory
+    - /admin/accounts-management
+  - B2B chat:
+    - /hotel-management/b2b-chat
+    - Admin top-navbar chat dropdown links into the same B2B chat route with the exact chatId query when possible.
+
+- Executive summary hotel table data quality
+  - Occupancy in the hotel-summary table is displayed as occupied/totalRooms at the hotel level.
+  - Blocked/out-of-service rooms must be excluded from room inventory and room availability denominators when they are not guest-sellable rooms.
+  - In-house reservations remain occupied even if their scheduled checkout date has passed. A reservation still in-house is operationally occupied until it is actually checked out.
+  - Cleaning/housekeeping summary is displayed as a fraction. The intended meaning is clean-or-available rooms versus dirty/unclean rooms, using room map/housekeeping state rather than a reservation-only shortcut.
+  - Grand total rows must aggregate the same semantics as regular hotel rows. Do not sum display percentages; aggregate raw counts first and then format.
+  - The "hotel path" column was removed from the summary table. Backend consumers should not rely on that value being displayed.
+
+- Inventory/occupancy report data rules
+  - Overall inventory report mirrors the single-hotel inventory logic.
+  - It requires one selected hotel; broad all-hotel inventory maps are not expected in the occupancy grid.
+  - Hijri calendar is the default calendar for the inventory tab and should default to the effective/current Hijri month when query state is missing.
+  - Occupancy cells compare booked/occupied room nights against sellable capacity for the selected day and room-display group.
+  - Admin inventory reports must match hotel-management inventory color and data logic. If they diverge, align the admin route to the hotel-management implementation.
+  - The rightmost date/day column must remain visible and readable in RTL and LTR.
+  - Payment-status and booking-source filters may be multi-select. Query handlers must keep parsing repeated and comma-separated params without bypassing authorization.
+  - Modal day-details tables must show actual reservation rows behind a selected cell; style is frontend-side, but backend must keep returning reservation detail fields needed for guest, confirmation, phone, status, check-in, check-out, total, payment, source, count, and room type.
+
+- Hotel rooms map data rules
+  - The hotel rooms map is live/current state, not date-range based. It is expected to differ from inventory/occupancy reports that are date-range based.
+  - Score cards on the rooms map should explain current state only: occupied/live, available, clean, dirty, under cleaning, and out-of-service/blocked.
+  - Out-of-service/blocked pseudo rooms may exist in room maps and should be visible in the live map when useful, but they should not inflate sellable inventory in reports.
+  - Room status filters must include clean versus dirty/unclean filtering; applying a clean/dirty filter must actually reduce the returned/displayed room set.
+  - Tooltip hover behavior is frontend-side, but backend should keep returning enough room identity/status data so tooltips can be positioned away from clickable rooms.
+
+- Super admin and platform admin separation
+  - True platform super admins are configured through SUPER_ADMIN_ID in hotels_backend/.env. The value can contain comma-separated ids.
+  - Configured super-admin ids are the source of truth for unrestricted platform-owner behavior.
+  - Role 1000 alone is not enough to mean unrestricted platform owner. Role 1000 can also represent scoped platform employees. Always combine role/access/hotel-scope checks with configured super-admin checks.
+  - Platform employees can work for the platform owner but may still be limited to specific admin routes, specific hotels, and specific customer/hotel conversations.
+  - AdminRoute and backend requireAdminAccess should allow configured super admins across admin pages, while scoped platform employees must be restricted by accessTo and assigned hotels.
+  - When a configured super admin enters a hotel-management route as a specific owner/staff context, data and mutations should behave as the dashboard user/context allows unless the route is explicitly a platform-admin route.
+  - The /admin route family is the platform control panel. Keep its backend route authorization separate from hotel-management routes.
+
+- Admin account management backend references
+  - routes/admin_accounts.js and controllers/overall_dashboard.js/admin-account sections own platform/hotel account creation and updating.
+  - models/user.js must remain the canonical place for account fields:
+    - accountScope or equivalent platform/hotel distinction.
+    - role, roles, roleDescription, roleDescriptions.
+    - accessTo for admin feature links.
+    - hotelIdWork, hotelIdsWork, hotelIdsOwner, hotelsToSupport, belongsToId for hotel scope.
+  - Role labels must be friendly in responses and UI. Avoid showing numeric role codes such as 1000/2000 as the user-facing role.
+  - Platform employee accounts require both route-level access and hotel/client scope. Do not treat every platform employee as a global super admin.
+  - Admin accounts may create internal platform employees and hotel employees, but the backend must persist the right scope and permissions for each type.
+
+- Support case backend updates and rules
+  - routes/supportcase.js and controllers/supportcase.js own B2C/support-case chat and support case history.
+  - Active and historical support cases must be scoped to the current actor:
+    - Configured super admins can see all.
+    - Platform employees see only cases allowed by accessTo and assigned hotels.
+    - Hotel-side users see cases for their assigned hotels or cases assigned to them.
+  - /support-cases/closed/clients supports pagination and newest-first sorting. It returns cases plus page, limit, total, pages, and sort metadata.
+  - History client cases should be sorted newest to oldest by closedAt, updatedAt, createdAt, and _id fallback.
+  - Support-case notification summaries must count only pending/unseen items visible to the actor.
+  - Mark-all-seen and seen-by-admin operations must respect the same scope instead of globally clearing unrelated users' notifications.
+  - deleteMessageFromConversation must check canSeeSupportCase before removing a message.
+  - updateSupportCase sanitizes pushed conversation payloads and enforces sender display-name rules.
+
+- Super-admin custom chat display name
+  - Configured super admins may freely choose the sender display name shown in chat messages.
+  - This is intentionally limited to configured SUPER_ADMIN_ID users, not all role 1000 users.
+  - controllers/b2b_chat.js:
+    - messageSenderNameForActor(actor, requestedName) accepts req.body.chatDisplayName or req.body.senderName only when isPlatformSuperAdmin(actor) is true.
+    - Non-super-admin users are forced back to actor.name, actor.email, or Account.
+  - controllers/supportcase.js:
+    - enforceConversationSenderName(conversation, actor) accepts custom messageBy.customerName only for configured super admins.
+    - Non-super-admin actor messages are forced back to actor.name, actor.email, or Account.
+  - Names are trimmed, null-byte stripped, whitespace-normalized, and limited to 80 characters.
+  - This backend enforcement is required even if the frontend hides the alias field from non-super-admins.
+
+- B2B chat backend updates and rules
+  - routes/b2b_chat.js, controllers/b2b_chat.js, models/b2b_chat.js, and services/b2bChatMaintenance.js own B2B chat.
+  - Active B2B recipients should include active B2B-capable users only.
+  - Configured super admins can speak to any active hotel manager or staff member across the platform.
+  - Platform employees with role 1000 but no configured super-admin id must be scoped to their assigned hotels and allowed accessTo values.
+  - Hotel owners, Hotel System Admins, managers, finance users, and reservation users remain hotel-scoped.
+  - Team-side seen behavior:
+    - For agent chats, when one team-side participant reads or takes over the chat, team-side unread notifications can be reduced for the relevant targeted team side.
+    - Agent-side unread notifications must still depend on the agent participant's seen state.
+  - Unread and seen endpoints must not create loops. Marking seen happens on explicit chat open/read, not merely by rendering a top-navbar dropdown.
+  - Chat list and unread-summary endpoints must use visibleChatQueryForActor and unreadCountForActor so counts match what the actor can actually see.
+  - emitChatUpdate broadcasts to b2b-chat:<chatId>, b2b-user:<userId>, b2b-platform, and b2b-hotel:<hotelId> rooms as appropriate.
+  - Inactive chats are closed by services/b2bChatMaintenance.js after the configured production timeout, currently 2 hours.
+
+- Notification backend behavior
+  - Platform-admin top-navbar notification bell should summarize pending hotel notifications across all platform hotels for configured super admins.
+  - Hotel-management top-navbar notifications stay scoped to the current owner/assigned hotel context.
+  - Clicking a platform-admin notification should route the user into the exact hotel-management page where the pending action lives, not to a generic admin page.
+  - Acknowledgement notifications can be deducted after action/ack; workflow notifications should remain until the underlying workflow state changes.
+  - Chat notification dropdown should list active chats and route to the exact chatId when clicked.
+
+- Server/runtime guardrails from this thread
+  - server.js must keep one backend listener on port 8080. EADDRINUSE means another process is already using the port; do not start duplicate nodemon/server processes.
+  - Socket listener setup must avoid repeated listener registration that causes MaxListenersExceededWarning. Watch for repeated server restarts and duplicate event binding.
+  - CORS font errors from fonts.gstatic.com are frontend asset/font-loading issues; they are not backend route failures.
+  - WebSocket connection errors often followed from the backend crash or EADDRINUSE, not an application infinite loop by themselves.
+
+- Verification commands used during this session
+  - Backend:
+    - node --check controllers/b2b_chat.js
+    - node --check controllers/supportcase.js
+  - Frontend:
+    - node --check src/AdminModule/AdminNavbar/AdminTopNavbar.js
+    - node --check src/HotelModule/B2BChat/B2BChatMain.js
+    - node --check src/AdminModule/CustomerService/ChatDetail.js
+    - npm.cmd run build
+  - Future backend validation should also include node --check server.js and route-specific API calls for support cases, B2B chat, admin accounts, and overall reports.

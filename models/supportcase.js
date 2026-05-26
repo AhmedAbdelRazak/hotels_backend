@@ -42,6 +42,14 @@ const supportCaseSchema = new Schema({
 		type: Date,
 		default: Date.now,
 	},
+	updatedAt: {
+		type: Date,
+		default: Date.now,
+	},
+	closedAt: {
+		type: Date,
+		default: null,
+	},
 	rating: {
 		type: Number,
 		default: null,
@@ -56,6 +64,19 @@ const supportCaseSchema = new Schema({
 		ref: "User",
 	},
 	supporterName: {
+		type: String,
+		default: "",
+	},
+	targetUserId: {
+		type: Schema.Types.ObjectId,
+		ref: "User",
+		default: null,
+	},
+	targetUserName: {
+		type: String,
+		default: "",
+	},
+	targetUserRole: {
 		type: String,
 		default: "",
 	},

@@ -29,8 +29,9 @@ const RESET_TOKEN_MINUTES = parseInt(
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 
 const isConfiguredSuperAdmin = (userOrId) => {
 	const userId =
@@ -60,11 +61,38 @@ const actorHasRoleDescription = (actor = {}, description) =>
 		.map(normalizeRoleDescriptionKey)
 		.includes(normalizeRoleDescriptionKey(description));
 
-const isPlatformSuperAdmin = (actor = {}) =>
+const isPlatformSuperAdmin = (actor = {}) => isConfiguredSuperAdmin(actor);
+
+const ADMIN_PANEL_ACCESS_KEYS = new Set([
+	"AdminDashboard",
+	"CustomerService",
+	"Integrator",
+	"HotelsReservations",
+	"AllReservations",
+	"JannatTools",
+	"JannatBookingWebsite",
+	"HotelReports",
+	"Financials",
+	"Payouts",
+	"AdminAccounts",
+]);
+
+const hasExplicitAdminPanelAccess = (actor = {}) =>
+	Array.isArray(actor.accessTo) &&
+	actor.accessTo.some((key) => ADMIN_PANEL_ACCESS_KEYS.has(String(key || "").trim()));
+
+const isAdminPanelUser = (actor = {}) =>
 	isConfiguredSuperAdmin(actor) ||
-	actorRoleNumbers(actor).includes(1000) ||
-	actorHasRoleDescription(actor, "super admin") ||
-	actorHasRoleDescription(actor, "superadmin");
+	(actorRoleNumbers(actor).includes(1000) && hasExplicitAdminPanelAccess(actor));
+
+const hasSpecificAdminPanelAccess = (actor = {}, allowedKeys = []) => {
+	if (isConfiguredSuperAdmin(actor)) return true;
+	if (!actorRoleNumbers(actor).includes(1000)) return false;
+	const accessTo = Array.isArray(actor.accessTo)
+		? actor.accessTo.map((key) => String(key || "").trim()).filter(Boolean)
+		: [];
+	return allowedKeys.some((key) => accessTo.includes(key));
+};
 
 const toEnglishDigits = (str = "") =>
 	str
@@ -1621,9 +1649,9 @@ exports.isAuth = (req, res, next) => {
 
 	// quick DB look‑up – executed only for mismatch
 	User.findById(req.auth._id)
-		.select("_id role roles roleDescription roleDescriptions")
+		.select("_id")
 		.exec((err, u) => {
-			if (err || !u || !isPlatformSuperAdmin(u)) {
+			if (err || !u || !isConfiguredSuperAdmin(u)) {
 				return res.status(403).json({ error: "access denied" });
 			}
 			next(); // platform admin – let him through
@@ -1631,13 +1659,49 @@ exports.isAuth = (req, res, next) => {
 };
 
 exports.isAdmin = (req, res, next) => {
-	if (!isPlatformSuperAdmin(req.profile)) {
+	if (!isAdminPanelUser(req.profile)) {
 		return res.status(403).json({
 			error: "Admin resource! access denied",
 		});
 	}
 
 	next();
+};
+
+exports.requireAdminAccess = (...allowedKeys) => async (req, res, next) => {
+	try {
+		const normalizedKeys = allowedKeys
+			.flat()
+			.map((key) => String(key || "").trim())
+			.filter(Boolean);
+		const loadActor = async () => {
+			if (req.profile) return req.profile;
+			const authId = req.auth?._id || req.auth?.id;
+			if (!authId) return null;
+			const actor = await User.findById(authId)
+				.select(
+					"_id role roles roleDescription roleDescriptions activeUser accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId accountScope platformEmployee"
+				)
+				.exec();
+			if (actor) req.profile = actor;
+			return actor;
+		};
+		const actor = await loadActor();
+		if (
+			!actor ||
+			actor.activeUser === false ||
+			!hasSpecificAdminPanelAccess(actor, normalizedKeys)
+		) {
+			return res.status(403).json({
+				error: "Admin resource! access denied",
+			});
+		}
+		next();
+	} catch (error) {
+		return res.status(403).json({
+			error: "Admin resource! access denied",
+		});
+	}
 };
 
 exports.isHotelOwner = (req, res, next) => {
@@ -1657,7 +1721,7 @@ exports.isHotelOwner = (req, res, next) => {
 	];
 	const canManageHotelSettings =
 		roleNumbers.some((role) =>
-			[1000, 2000, 3000, 8000, 10000].includes(role)
+			[2000, 3000, 8000, 10000].includes(role)
 		) ||
 		["hotelmanager", "reception", "reservationemployee"].some((role) =>
 			roleDescriptions.includes(role)

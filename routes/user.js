@@ -10,6 +10,7 @@ const {
 	isAuth,
 	isAdmin,
 	isHotelOwner,
+	requireAdminAccess,
 } = require("../controllers/auth");
 
 const {
@@ -28,7 +29,7 @@ const {
 } = require("../controllers/user");
 
 /* Admin-only secret probe */
-router.get("/secret/:userId", requireSignin, isAuth, isAdmin, (req, res) => {
+router.get("/secret/:userId", requireSignin, isAuth, requireAdminAccess("AdminDashboard"), (req, res) => {
 	res.json({ user: req.profile });
 });
 
@@ -37,12 +38,18 @@ router.get("/user/:userId", requireSignin, isAuth, read);
 router.put("/user/:userId", requireSignin, isAuth, update);
 
 /* Admin lists */
-router.get("/allUsers/:userId", requireSignin, isAuth, isAdmin, allUsersList);
+router.get(
+	"/allUsers/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("AdminAccounts"),
+	allUsersList
+);
 router.get(
 	"/all-hotel-accounts/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("AdminAccounts", "AdminDashboard"),
 	allHotelAccounts
 );
 
@@ -59,7 +66,7 @@ router.put(
 	"/user/:updatedUserId/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("AdminAccounts", "AdminDashboard"),
 	updateUserByAdmin
 );
 

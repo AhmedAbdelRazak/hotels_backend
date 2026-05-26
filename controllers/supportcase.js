@@ -4,6 +4,7 @@ const ObjectId = mongoose.Types.ObjectId;
 const sgMail = require("@sendgrid/mail");
 const { newSupportCaseEmail } = require("./assets");
 const HotelDetails = require("../models/hotel_details");
+const User = require("../models/user");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -13,6 +14,266 @@ const supportCaseEmail = twilio(
 	process.env.TWILIO_ACCOUNT_SID,
 	process.env.TWILIO_AUTH_TOKEN
 );
+
+const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => id.trim())
+		.filter(Boolean);
+
+const isConfiguredSuperAdmin = (user = {}) =>
+	configuredSuperAdminIds().includes(normalizeId(user._id || user));
+
+const assignedHotelIdsFromUser = (user = {}) =>
+	[
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+	]
+		.map(normalizeId)
+		.filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+const SUPPORT_CHAT_ROLES = [2000, 3000, 4000, 5000, 6000, 8000, 10000];
+const SUPPORT_CHAT_ROLE_KEYS = new Set([
+	"hotelmanager",
+	"systemadmin",
+	"system admin",
+	"reception",
+	"housekeepingmanager",
+	"housekeeping",
+	"finance",
+	"reservationemployee",
+]);
+
+const userRoleNumbers = (user = {}) => [
+	Number(user.role),
+	...(Array.isArray(user.roles) ? user.roles.map(Number) : []),
+];
+
+const userRoleKeys = (user = {}) =>
+	[
+		String(user.roleDescription || "").toLowerCase(),
+		...(Array.isArray(user.roleDescriptions)
+			? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	].map((item) => item.replace(/[\s_-]+/g, ""));
+
+const isSupportChatUser = (user = {}) => {
+	if (!user || user.activeUser === false || isConfiguredSuperAdmin(user)) return false;
+	const roleMatch = userRoleNumbers(user).some((role) =>
+		SUPPORT_CHAT_ROLES.includes(role)
+	);
+	const roleKeyMatch = userRoleKeys(user).some((key) =>
+		SUPPORT_CHAT_ROLE_KEYS.has(key)
+	);
+	return roleMatch || roleKeyMatch;
+};
+
+const supportRecipientScopeHotelIds = (actor = {}) => {
+	if (!actor || isConfiguredSuperAdmin(actor)) return null;
+	return assignedHotelIdsFromUser(actor).filter((id) => ObjectId.isValid(id));
+};
+
+const supportChatRoleLabel = (user = {}) => {
+	const roles = userRoleNumbers(user);
+	const keys = userRoleKeys(user);
+	if (roles.includes(10000) || keys.includes("systemadmin")) return "Hotel System Admin";
+	if (roles.includes(2000) || keys.includes("hotelmanager")) {
+		return normalizeId(user.belongsToId) ? "Hotel Manager" : "Hotel Owner";
+	}
+	if (roles.includes(3000) || keys.includes("reception")) return "Reception";
+	if (roles.includes(4000) || keys.includes("housekeepingmanager")) {
+		return "Housekeeping Manager";
+	}
+	if (roles.includes(5000) || keys.includes("housekeeping")) return "Housekeeping";
+	if (roles.includes(6000) || keys.includes("finance")) return "Finance";
+	if (roles.includes(8000) || keys.includes("reservationemployee")) {
+		return "Reservations Officer";
+	}
+	return "Hotel Staff";
+};
+
+const objectIdList = (ids = []) =>
+	ids.filter((id) => ObjectId.isValid(id)).map((id) => ObjectId(id));
+
+const supportCaseScopeFilter = (req = {}) => {
+	const actor = req.profile;
+	if (!actor || isConfiguredSuperAdmin(actor)) return {};
+	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
+		ObjectId.isValid(id)
+	);
+	const visibility = [{ supporterId: ObjectId(actor._id) }];
+	if (hotelIds.length) {
+		visibility.push({ hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } });
+	}
+	return { $or: visibility };
+};
+
+const withSupportCaseScope = (req, baseFilter = {}) => {
+	const scopeFilter = supportCaseScopeFilter(req);
+	if (!Object.keys(scopeFilter).length) return baseFilter;
+	return { $and: [baseFilter, scopeFilter] };
+};
+
+const parsePaginationQuery = (query = {}) => {
+	const page = Math.max(parseInt(query.page, 10) || 1, 1);
+	const limit = Math.min(Math.max(parseInt(query.limit, 10) || 20, 1), 100);
+	return { page, limit, skip: (page - 1) * limit };
+};
+
+const canSeeSupportCase = (req, supportCase = {}) => {
+	const scopeFilter = supportCaseScopeFilter(req);
+	if (!Object.keys(scopeFilter).length) return true;
+	const actorId = normalizeId(req.profile?._id);
+	if (normalizeId(supportCase.supporterId) === actorId) return true;
+	const actorHotelIds = new Set(assignedHotelIdsFromUser(req.profile));
+	return actorHotelIds.has(normalizeId(supportCase.hotelId));
+};
+
+const cleanText = (value = "", max = 8000) =>
+	String(value || "")
+		.replace(/\u0000/g, "")
+		.trim()
+		.slice(0, max);
+
+const cleanChatDisplayName = (value = "") =>
+	cleanText(value, 80).replace(/\s+/g, " ");
+
+const enforceConversationSenderName = (conversation = {}, actor = {}) => {
+	if (!conversation || typeof conversation !== "object") return conversation;
+	const nextConversation = { ...conversation };
+	const messageBy = { ...(conversation.messageBy || {}) };
+	const isActorMessage =
+		normalizeId(messageBy.userId) && normalizeId(messageBy.userId) === normalizeId(actor._id);
+
+	if (isActorMessage) {
+		const actorFallback =
+			cleanChatDisplayName(actor.name || actor.email || "Account") || "Account";
+		messageBy.customerName = isConfiguredSuperAdmin(actor)
+			? cleanChatDisplayName(messageBy.customerName) || actorFallback
+			: actorFallback;
+	}
+
+	if (messageBy.customerName) {
+		messageBy.customerName = cleanChatDisplayName(messageBy.customerName);
+	}
+	if (messageBy.customerEmail) {
+		messageBy.customerEmail = cleanText(messageBy.customerEmail, 180);
+	}
+
+	nextConversation.messageBy = messageBy;
+	return nextConversation;
+};
+
+exports.getSupportChatRecipients = async (req, res) => {
+	try {
+		const scopedHotelIds = supportRecipientScopeHotelIds(req.profile);
+		if (Array.isArray(scopedHotelIds) && !scopedHotelIds.length) {
+			return res.json({ recipients: [] });
+		}
+
+		const scopedHotelObjectIds = Array.isArray(scopedHotelIds)
+			? objectIdList(scopedHotelIds)
+			: [];
+		const hotelScopeQuery = Array.isArray(scopedHotelIds)
+			? { _id: { $in: scopedHotelObjectIds } }
+			: {};
+
+		const hotels = await HotelDetails.find(hotelScopeQuery)
+			.select("_id hotelName hotelName_OtherLanguage belongsTo")
+			.lean()
+			.exec();
+		const hotelsById = new Map(hotels.map((hotel) => [normalizeId(hotel._id), hotel]));
+		const ownedHotelIdsByOwner = new Map();
+		hotels.forEach((hotel) => {
+			const ownerId = normalizeId(hotel.belongsTo);
+			if (!ownerId) return;
+			if (!ownedHotelIdsByOwner.has(ownerId)) ownedHotelIdsByOwner.set(ownerId, []);
+			ownedHotelIdsByOwner.get(ownerId).push(normalizeId(hotel._id));
+		});
+
+		const scopedOwnerIds = [...ownedHotelIdsByOwner.keys()].filter((id) =>
+			ObjectId.isValid(id)
+		);
+		const hotelRelationFilter = Array.isArray(scopedHotelIds)
+			? {
+					$or: [
+						{ hotelIdWork: { $in: scopedHotelIds } },
+						{ hotelIdsWork: { $in: scopedHotelObjectIds } },
+						{ hotelsToSupport: { $in: scopedHotelObjectIds } },
+						{ hotelIdsOwner: { $in: scopedHotelObjectIds } },
+						...(scopedOwnerIds.length
+							? [{ _id: { $in: objectIdList(scopedOwnerIds) } }]
+							: []),
+					],
+			  }
+			: {};
+
+		const users = await User.find({
+			...hotelRelationFilter,
+			activeUser: { $ne: false },
+			_id: {
+				$nin: objectIdList(configuredSuperAdminIds()),
+				...(req.profile?._id ? { $ne: ObjectId(req.profile._id) } : {}),
+			},
+			$or: [
+				{ role: { $in: SUPPORT_CHAT_ROLES } },
+				{ roles: { $in: SUPPORT_CHAT_ROLES } },
+				{ roleDescription: { $in: [...SUPPORT_CHAT_ROLE_KEYS] } },
+				{ roleDescriptions: { $in: [...SUPPORT_CHAT_ROLE_KEYS] } },
+			],
+		})
+			.select(
+				"_id name email companyName role roles roleDescription roleDescriptions activeUser hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId"
+			)
+			.lean()
+			.exec();
+
+		const recipients = users
+			.filter(isSupportChatUser)
+			.map((user) => {
+				const ownedHotelIds = ownedHotelIdsByOwner.get(normalizeId(user._id)) || [];
+				const directHotelIds = assignedHotelIdsFromUser(user);
+				const hotelIds = [
+					...new Set([...ownedHotelIds, ...directHotelIds]),
+				].filter((id) => hotelsById.has(id));
+				if (!hotelIds.length) return null;
+				const recipientHotels = hotelIds.map((id) => {
+					const hotel = hotelsById.get(id);
+					return {
+						_id: normalizeId(hotel._id),
+						hotelName: hotel.hotelName || hotel.hotelName_OtherLanguage || "Hotel",
+						hotelName_OtherLanguage: hotel.hotelName_OtherLanguage || "",
+						belongsTo: normalizeId(hotel.belongsTo),
+					};
+				});
+				return {
+					_id: normalizeId(user._id),
+					name: user.name || user.companyName || user.email || "Hotel user",
+					email: user.email || "",
+					companyName: user.companyName || "",
+					role: Number(user.role || 0),
+					roleDescription: user.roleDescription || "",
+					roleLabel: supportChatRoleLabel(user),
+					hotels: recipientHotels,
+					hotelIds: recipientHotels.map((hotel) => hotel._id),
+				};
+			})
+			.filter(Boolean)
+			.sort((a, b) => {
+				if (a.roleLabel !== b.roleLabel) return a.roleLabel.localeCompare(b.roleLabel);
+				return a.name.localeCompare(b.name);
+			});
+
+		return res.json({ recipients });
+	} catch (error) {
+		console.error("getSupportChatRecipients error:", error);
+		return res.status(500).json({ error: "Could not load support chat recipients" });
+	}
+};
 
 // Get all support cases
 exports.getSupportCases = async (req, res) => {
@@ -53,6 +314,9 @@ exports.getSupportCaseById = async (req, res) => {
 			console.log("Support case not found:", req.params.id);
 			return res.status(404).json({ error: "Support case not found" });
 		}
+		if (!canSeeSupportCase(req, supportCase)) {
+			return res.status(403).json({ error: "Support case access denied" });
+		}
 
 		res.status(200).json(supportCase);
 	} catch (error) {
@@ -76,28 +340,44 @@ exports.updateSupportCase = async (req, res) => {
 
 		console.log(req.body, "req.body");
 
-		const updateFields = {};
-		if (supporterId) updateFields.supporterId = supporterId;
-		if (caseStatus) updateFields.caseStatus = caseStatus;
-		if (conversation) updateFields.$push = { conversation: conversation };
-		if (closedBy) updateFields.closedBy = closedBy;
-		if (rating) updateFields.rating = rating;
-		if (supporterName) updateFields.supporterName = supporterName;
-		if (hotelId) updateFields.hotelId = hotelId;
+		const setFields = {};
+		if (supporterId) setFields.supporterId = supporterId;
+		if (caseStatus) {
+			setFields.caseStatus = caseStatus;
+			if (caseStatus === "closed") setFields.closedAt = new Date();
+			if (caseStatus === "open") setFields.closedAt = null;
+		}
+		if (closedBy) setFields.closedBy = closedBy;
+		if (rating) setFields.rating = rating;
+		if (supporterName) setFields.supporterName = supporterName;
+		if (hotelId) setFields.hotelId = hotelId;
+		setFields.updatedAt = new Date();
 
-		if (Object.keys(updateFields).length === 0) {
+		if (!conversation && Object.keys(setFields).length === 1) {
 			return res
 				.status(400)
 				.json({ error: "No valid fields provided for update" });
 		}
 
-		const updatedCase = await SupportCase.findByIdAndUpdate(
-			req.params.id,
-			updateFields,
-			{
-				new: true,
-			}
-		);
+		const currentCase = await SupportCase.findById(req.params.id).lean();
+		if (!currentCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+		if (!canSeeSupportCase(req, currentCase)) {
+			return res.status(403).json({ error: "Support case access denied" });
+		}
+
+		const safeConversation = conversation
+			? enforceConversationSenderName(conversation, req.profile)
+			: null;
+
+		const updateDoc = safeConversation
+			? { $set: setFields, $push: { conversation: safeConversation } }
+			: setFields;
+
+		const updatedCase = await SupportCase.findByIdAndUpdate(req.params.id, updateDoc, {
+			new: true,
+		});
 
 		if (!updatedCase) {
 			return res.status(404).json({ error: "Support case not found" });
@@ -105,7 +385,7 @@ exports.updateSupportCase = async (req, res) => {
 
 		if (caseStatus === "closed") {
 			req.io.emit("closeCase", { case: updatedCase, closedBy });
-		} else if (conversation) {
+		} else if (safeConversation) {
 			req.io.emit("receiveMessage", updatedCase);
 		}
 
@@ -131,6 +411,9 @@ exports.createNewSupportCase = async (req, res) => {
 			displayName1, // Add displayName1 from the request
 			displayName2, // Add displayName2 from the request
 			supporterName,
+			targetUserId,
+			targetUserName,
+			targetUserRole,
 		} = req.body;
 
 		console.log(req.body.displayName1, "displayName1");
@@ -191,6 +474,11 @@ exports.createNewSupportCase = async (req, res) => {
 			supporterId,
 			ownerId,
 			hotelId,
+			targetUserId: ObjectId.isValid(normalizeId(targetUserId))
+				? ObjectId(normalizeId(targetUserId))
+				: null,
+			targetUserName: targetUserName || displayName2 || "",
+			targetUserRole: targetUserRole || "",
 			caseStatus: "open",
 			openedBy, // Store who opened the case
 			conversation,
@@ -259,10 +547,10 @@ exports.getUnassignedSupportCasesCount = async (req, res) => {
 
 exports.getOpenSupportCases = async (req, res) => {
 	try {
-		const cases = await SupportCase.find({
+		const cases = await SupportCase.find(withSupportCaseScope(req, {
 			caseStatus: "open",
 			openedBy: { $in: ["super admin", "hotel owner"] }, // Adjusting for case sensitivity
-		})
+		}))
 			.populate("supporterId")
 			.populate("hotelId");
 
@@ -301,10 +589,10 @@ exports.getOpenSupportCasesForHotel = async (req, res) => {
 
 exports.getOpenSupportCasesClients = async (req, res) => {
 	try {
-		const cases = await SupportCase.find({
+		const cases = await SupportCase.find(withSupportCaseScope(req, {
 			caseStatus: "open",
 			openedBy: { $in: ["client"] }, // Client-related cases only
-		})
+		}))
 			.populate("supporterId")
 			.populate("hotelId");
 		res.status(200).json(cases);
@@ -315,10 +603,10 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 
 exports.getCloseSupportCases = async (req, res) => {
 	try {
-		const cases = await SupportCase.find({
+		const cases = await SupportCase.find(withSupportCaseScope(req, {
 			caseStatus: "closed",
 			openedBy: { $in: ["super admin", "hotel owner"] }, // Adjusting for case sensitivity
-		})
+		}))
 			.populate("supporterId")
 			.populate("hotelId");
 
@@ -382,14 +670,30 @@ exports.getCloseSupportCasesForHotelClients = async (req, res) => {
 
 exports.getCloseSupportCasesClients = async (req, res) => {
 	try {
-		const cases = await SupportCase.find({
+		const { page, limit, skip } = parsePaginationQuery(req.query);
+		const filter = withSupportCaseScope(req, {
 			caseStatus: "closed",
 			openedBy: { $in: ["client"] }, // Adjusting for case sensitivity
-		})
-			.populate("supporterId")
-			.populate("hotelId");
+		});
+		const [cases, total] = await Promise.all([
+			SupportCase.find(filter)
+				.sort({ closedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+				.skip(skip)
+				.limit(limit)
+				.populate("supporterId")
+				.populate("hotelId")
+				.exec(),
+			SupportCase.countDocuments(filter),
+		]);
 
-		res.status(200).json(cases);
+		res.status(200).json({
+			cases,
+			page,
+			limit,
+			total,
+			pages: Math.max(Math.ceil(total / limit), 1),
+			sort: "newest",
+		});
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -403,7 +707,9 @@ exports.getUnseenMessagesCountByAdmin = async (req, res) => {
 		console.log("Received userId:", userId);
 
 		// Count the unseen messages where the userId in messageBy does not match the current user
+		const scopeFilter = supportCaseScopeFilter(req);
 		const count = await SupportCase.aggregate([
+			...(Object.keys(scopeFilter).length ? [{ $match: scopeFilter }] : []),
 			{ $unwind: "$conversation" },
 			{
 				$match: {
@@ -421,6 +727,71 @@ exports.getUnseenMessagesCountByAdmin = async (req, res) => {
 	} catch (error) {
 		console.error("Error fetching unseen messages count:", error);
 		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.getSupportCaseNotificationSummary = async (req, res) => {
+	try {
+		const actorId = normalizeId(req.auth?._id || req.params.userId);
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+		const actor = req.profile;
+		if (!actor || actor.activeUser === false) {
+			return res.status(401).json({ error: "Valid active user is required" });
+		}
+
+		const scopeFilter = supportCaseScopeFilter(req);
+		const scoped = (filter = {}) =>
+			Object.keys(scopeFilter).length ? { $and: [filter, scopeFilter] } : filter;
+
+		const conversationSenderExclusion = {
+			$nin: [actorId, ObjectId(actorId)],
+		};
+		const unseenMessageMatch = {
+			"conversation.seenByAdmin": false,
+			"conversation.messageBy.userId": conversationSenderExclusion,
+		};
+
+		const [openCases, openClientCases, openHotelCases, unseenMessages, unseenCases] =
+			await Promise.all([
+				SupportCase.countDocuments(scoped({ caseStatus: "open" })),
+				SupportCase.countDocuments(
+					scoped({ caseStatus: "open", openedBy: "client" })
+				),
+				SupportCase.countDocuments(
+					scoped({
+						caseStatus: "open",
+						openedBy: { $in: ["super admin", "hotel owner"] },
+					})
+				),
+				SupportCase.aggregate([
+					...(Object.keys(scopeFilter).length ? [{ $match: scopeFilter }] : []),
+					{ $match: { caseStatus: { $ne: "closed" } } },
+					{ $unwind: "$conversation" },
+					{ $match: unseenMessageMatch },
+					{ $count: "count" },
+				]),
+				SupportCase.aggregate([
+					...(Object.keys(scopeFilter).length ? [{ $match: scopeFilter }] : []),
+					{ $match: { caseStatus: { $ne: "closed" } } },
+					{ $unwind: "$conversation" },
+					{ $match: unseenMessageMatch },
+					{ $group: { _id: "$_id" } },
+					{ $count: "count" },
+				]),
+			]);
+
+		return res.json({
+			openCases,
+			openClientCases,
+			openHotelCases,
+			unseenMessages: Number(unseenMessages?.[0]?.count || 0),
+			unseenCases: Number(unseenCases?.[0]?.count || 0),
+		});
+	} catch (error) {
+		console.error("getSupportCaseNotificationSummary error:", error);
+		return res.status(500).json({ error: "Could not load support notifications" });
 	}
 };
 
@@ -541,6 +912,13 @@ exports.markAllMessagesAsSeenByAdmin = async (req, res) => {
 	try {
 		const { id } = req.params; // id refers to the support case ID
 		const { userId } = req.body; // userId is the admin's ID
+		const currentCase = await SupportCase.findById(id).lean();
+		if (!currentCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+		if (!canSeeSupportCase(req, currentCase)) {
+			return res.status(403).json({ error: "Support case access denied" });
+		}
 
 		// Update the conversation messages that are not seen by the admin
 		const result = await SupportCase.updateOne(
@@ -613,9 +991,10 @@ exports.markAllMessagesAsSeenByHotels = async (req, res) => {
 
 exports.markEverythingAsSeen = async (req, res) => {
 	try {
+		const scopeFilter = supportCaseScopeFilter(req);
 		// Update all messages across all cases to be marked as seen
 		const result = await SupportCase.updateMany(
-			{}, // No filter, meaning all support cases will be updated
+			scopeFilter,
 			{
 				$set: {
 					"conversation.$[].seenByAdmin": true,
@@ -649,6 +1028,16 @@ exports.deleteMessageFromConversation = async (req, res) => {
 		}
 
 		// Find the support case and remove the specific message
+		const currentCase = await SupportCase.findById(caseId).lean();
+		if (!currentCase) {
+			return res
+				.status(404)
+				.json({ error: "Support case or message not found" });
+		}
+		if (!canSeeSupportCase(req, currentCase)) {
+			return res.status(403).json({ error: "Support case access denied" });
+		}
+
 		const updatedCase = await SupportCase.findByIdAndUpdate(
 			caseId,
 			{

@@ -59,17 +59,24 @@ const hasRoleKey = (user = {}, key) =>
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 
 const isConfiguredSuperAdmin = (user = {}) =>
 	configuredSuperAdminIds().includes(normalizeId(user._id || user));
 
-const isPlatformSuperAdmin = (user = {}) =>
-	isConfiguredSuperAdmin(user) ||
-	hasRole(user, 1000) ||
-	hasRoleKey(user, "superadmin") ||
-	hasRoleKey(user, "super admin");
+const isPlatformSuperAdmin = (user = {}) => isConfiguredSuperAdmin(user);
+
+const accessList = (user = {}) =>
+	Array.isArray(user.accessTo)
+		? user.accessTo.map((item) => String(item || "").trim()).filter(Boolean)
+		: [];
+
+const hasAnyAccess = (user = {}, keys = []) => {
+	const granted = accessList(user);
+	return keys.some((key) => granted.includes(key));
+};
 
 const isSystemAdmin = (user = {}) =>
 	hasRole(user, 10000) ||
@@ -90,6 +97,7 @@ const isReservationUser = (user = {}) =>
 
 const hasStaffOrAdminRole = (user = {}) =>
 	isPlatformSuperAdmin(user) ||
+	canSupportAssignedHotelChats(user) ||
 	isSystemAdmin(user) ||
 	isOwnerAccount(user) ||
 	isHotelManager(user) ||
@@ -108,7 +116,12 @@ const isAgentUser = (user = {}) =>
 		!hasStaffOrAdminRole(user));
 
 const isB2BAccount = (user = {}) => {
-	if (isPlatformSuperAdmin(user) || isSystemAdmin(user) || isAgentUser(user))
+	if (
+		isPlatformSuperAdmin(user) ||
+		canSupportAssignedHotelChats(user) ||
+		isSystemAdmin(user) ||
+		isAgentUser(user)
+	)
 		return true;
 	return roleNumbers(user).some((role) =>
 		[2000, 3000, 4000, 5000, 6000, 8000, 10000].includes(role)
@@ -117,6 +130,7 @@ const isB2BAccount = (user = {}) => {
 
 const canInitiateAgentChat = (user = {}) =>
 	isPlatformSuperAdmin(user) ||
+	canSupportAssignedHotelChats(user) ||
 	isOwnerAccount(user) ||
 	isSystemAdmin(user) ||
 	isHotelManager(user) ||
@@ -124,7 +138,10 @@ const canInitiateAgentChat = (user = {}) =>
 	isReservationUser(user);
 
 const canManageHotelChats = (user = {}) =>
-	isPlatformSuperAdmin(user) || isOwnerAccount(user) || isSystemAdmin(user);
+	isPlatformSuperAdmin(user) ||
+	canSupportAssignedHotelChats(user) ||
+	isOwnerAccount(user) ||
+	isSystemAdmin(user);
 
 const assignedHotelIdsFromUser = (user = {}) =>
 	validIds([
@@ -133,6 +150,12 @@ const assignedHotelIdsFromUser = (user = {}) =>
 		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
 		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
 	]);
+
+const canSupportAssignedHotelChats = (user = {}) =>
+	hasRole(user, 1000) &&
+	!isPlatformSuperAdmin(user) &&
+	assignedHotelIdsFromUser(user).length > 0 &&
+	hasAnyAccess(user, ["CustomerService", "HotelsReservations", "AllReservations"]);
 
 const intersectIds = (left = [], right = []) => {
 	const rightSet = new Set(right.map(String));
@@ -144,6 +167,17 @@ const cleanText = (value = "", max = 8000) =>
 		.replace(/\u0000/g, "")
 		.trim()
 		.slice(0, max);
+
+const cleanChatDisplayName = (value = "") =>
+	cleanText(value, 80).replace(/\s+/g, " ");
+
+const messageSenderNameForActor = (actor = {}, requestedName = "") => {
+	if (isPlatformSuperAdmin(actor)) {
+		const alias = cleanChatDisplayName(requestedName);
+		if (alias) return alias;
+	}
+	return cleanChatDisplayName(actor.name || actor.email || "Account") || "Account";
+};
 
 const ROLE_LABEL_BY_KEY = {
 	systemadmin: "Hotel System Admin",
@@ -220,6 +254,21 @@ const loadActorHotelScope = async (actor = {}) => {
 	}
 
 	let hotelIds = assignedHotelIdsFromUser(actor);
+	if (isSystemAdmin(actor)) {
+		const ownerId = normalizeId(actor.belongsToId) || normalizeId(actor._id);
+		const ownedHotels = ownerId
+			? await HotelDetails.find({ belongsTo: ownerId })
+					.select("_id hotelName belongsTo")
+					.populate("belongsTo", "_id name email")
+					.lean()
+					.exec()
+			: [];
+		hotelIds = uniqueIds([
+			...hotelIds,
+			...ownedHotels.map((hotel) => normalizeId(hotel._id)),
+		]);
+		if (ownedHotels.length) return { all: false, hotelIds, hotels: ownedHotels };
+	}
 	if (isOwnerAccount(actor)) {
 		const ownedHotels = await HotelDetails.find({ belongsTo: actor._id })
 			.select("_id hotelName belongsTo")
@@ -314,6 +363,9 @@ const loadAllowedRecipients = async (actor = {}) => {
 				? rawHotelIds
 				: intersectIds(rawHotelIds, scope.hotelIds);
 			if (!scope.all && !sharedHotelIds.length) return null;
+			if (scope.all && !rawHotelIds.length && !isPlatformSuperAdmin(candidate)) {
+				return null;
+			}
 			if (!recipientAllowed(actor, candidate)) return null;
 			const hotelIds = scope.all ? rawHotelIds : sharedHotelIds;
 			return {
@@ -349,6 +401,66 @@ const buildParticipantSnapshot = (user = {}, hotelIds = []) => ({
 	lastSeenAt: null,
 });
 
+const participantIsTeamSide = (participant = {}) =>
+	String(participant.participantType || "staff") !== "agent";
+
+const chatHasAgentSide = (chat = {}) =>
+	String(chat.scope || "").toLowerCase() === "agent" ||
+	(chat.participants || []).some(
+		(participant) => String(participant.participantType || "") === "agent"
+	);
+
+const participantTypeForChatUser = (chat = {}, userId = "") => {
+	const normalizedUserId = normalizeId(userId);
+	const participant = (chat.participants || []).find(
+		(item) => normalizeId(item.userId) === normalizedUserId
+	);
+	return participant?.participantType || "";
+};
+
+const actorIsTeamSideForChat = (chat = {}, actor = {}) => {
+	if (!chatHasAgentSide(chat)) return false;
+	const actorId = normalizeId(actor._id || actor);
+	if (!actorId) return false;
+	const participantType = participantTypeForChatUser(chat, actorId);
+	if (participantType) return participantType !== "agent";
+	return !isAgentUser(actor);
+};
+
+const teamParticipantIdsForChat = (chat = {}) =>
+	uniqueIds(
+		(chat.participants || [])
+			.filter(participantIsTeamSide)
+			.map((participant) => normalizeId(participant.userId))
+	);
+
+const messageSenderIsTeamSide = (chat = {}, message = {}) => {
+	const senderId = normalizeId(message.senderId);
+	if (!senderId) return false;
+	const participantType = participantTypeForChatUser(chat, senderId);
+	if (participantType) return participantType !== "agent";
+	const senderRole = normalizeRoleKey(message.senderRole || "");
+	if (senderRole === "agent" || senderRole === "ordertaker") return false;
+	return Boolean(senderRole);
+};
+
+const messageSeenByAnyTeamParticipant = (chat = {}, message = {}) => {
+	const teamIds = new Set(teamParticipantIdsForChat(chat));
+	if (!teamIds.size) return false;
+	return (message.seenBy || []).some((item) =>
+		teamIds.has(normalizeId(item.userId))
+	);
+};
+
+const addSeenByUser = (message = {}, userId = "", seenAt = new Date()) => {
+	const normalizedUserId = normalizeId(userId);
+	if (!normalizedUserId) return;
+	const exists = (message.seenBy || []).some(
+		(item) => normalizeId(item.userId) === normalizedUserId
+	);
+	if (!exists) message.seenBy.push({ userId: normalizedUserId, seenAt });
+};
+
 const serializeMessage = (message = {}) => ({
 	_id: normalizeId(message._id),
 	senderId: normalizeId(message.senderId),
@@ -363,14 +475,23 @@ const serializeMessage = (message = {}) => ({
 	createdAt: message.createdAt,
 });
 
-const unreadCountForActor = (chat = {}, actorId = "") =>
-	(chat.messages || []).reduce((count, message) => {
+const unreadCountForActor = (chat = {}, actor = {}) => {
+	const actorId = normalizeId(actor._id || actor);
+	if (!actorId) return 0;
+	const actorIsTeamSide = actorIsTeamSideForChat(chat, actor);
+
+	return (chat.messages || []).reduce((count, message) => {
 		if (normalizeId(message.senderId) === actorId) return count;
+		if (actorIsTeamSide) {
+			if (messageSenderIsTeamSide(chat, message)) return count;
+			return messageSeenByAnyTeamParticipant(chat, message) ? count : count + 1;
+		}
 		const seen = (message.seenBy || []).some(
 			(item) => normalizeId(item.userId) === actorId
 		);
 		return seen ? count : count + 1;
 	}, 0);
+};
 
 const serializeChat = (chat = {}, actor = {}, { includeMessages = false } = {}) => {
 	const actorId = normalizeId(actor._id);
@@ -400,7 +521,7 @@ const serializeChat = (chat = {}, actor = {}, { includeMessages = false } = {}) 
 		closedAt: chat.closedAt,
 		closedBy: normalizeId(chat.closedBy),
 		closedReason: chat.closedReason || "",
-		unreadCount: actorId ? unreadCountForActor(chat, actorId) : 0,
+		unreadCount: actorId ? unreadCountForActor(chat, actor) : 0,
 		lastMessage: last ? serializeMessage(last) : null,
 		messageCount: messages.length,
 	};
@@ -438,20 +559,36 @@ const visibleChatQueryForActor = async (actor = {}, status = "active") => {
 	return { ...query, $or: visibility };
 };
 
+const ensureActorParticipant = async (chat = {}, actor = {}) => {
+	const actorId = normalizeId(actor._id);
+	if (!actorId) return false;
+	const participantIds = (chat.participantIds || []).map(normalizeId);
+	if (participantIds.includes(actorId)) return false;
+	const scope = await loadActorHotelScope(actor);
+	const chatHotelIds = (chat.hotelIds || []).map(normalizeId);
+	const sharedHotelIds = scope.all
+		? chatHotelIds
+		: intersectIds(scope.hotelIds, chatHotelIds);
+	chat.participantIds.push(actor._id);
+	chat.participants.push(buildParticipantSnapshot(actor, sharedHotelIds));
+	return true;
+};
+
 const markSeenOnChat = (chat = {}, actor = {}) => {
 	const actorId = normalizeId(actor._id);
 	if (!actorId) return;
 	const now = new Date();
+	const seenUserIds = new Set([actorId]);
+	if (actorIsTeamSideForChat(chat, actor)) {
+		teamParticipantIdsForChat(chat).forEach((userId) => seenUserIds.add(userId));
+	}
 	(chat.participants || []).forEach((participant) => {
-		if (normalizeId(participant.userId) === actorId) {
+		if (seenUserIds.has(normalizeId(participant.userId))) {
 			participant.lastSeenAt = now;
 		}
 	});
 	(chat.messages || []).forEach((message) => {
-		const exists = (message.seenBy || []).some(
-			(item) => normalizeId(item.userId) === actorId
-		);
-		if (!exists) message.seenBy.push({ userId: actorId, seenAt: now });
+		seenUserIds.forEach((userId) => addSeenByUser(message, userId, now));
 	});
 };
 
@@ -557,18 +694,17 @@ exports.b2bChatUnreadSummary = async (req, res) => {
 	try {
 		await ensureInactiveChatsClosed();
 		const actor = req.profile;
-		const actorIdString = normalizeId(actor._id);
 		const query = await visibleChatQueryForActor(actor, "active");
 
 		const chats = await B2BChat.find(query)
-			.select("participantIds messages status hotelIds lastActivityAt")
+			.select("participantIds participants messages status scope hotelIds lastActivityAt")
 			.lean()
 			.exec();
 
 		let unreadMessages = 0;
 		let unreadChats = 0;
 		chats.forEach((chat) => {
-			const count = unreadCountForActor(chat, actorIdString);
+			const count = unreadCountForActor(chat, actor);
 			if (count > 0) {
 				unreadChats += 1;
 				unreadMessages += count;
@@ -701,20 +837,14 @@ exports.b2bChatSendMessage = async (req, res) => {
 			return res.status(400).json({ error: "Please write a message or attach a file" });
 		}
 
-		const actorId = normalizeId(actor._id);
-		const participantIds = (chat.participantIds || []).map(normalizeId);
-		if (!participantIds.includes(actorId)) {
-			const scope = await loadActorHotelScope(actor);
-			const sharedHotelIds = scope.all
-				? (chat.hotelIds || []).map(normalizeId)
-				: intersectIds(scope.hotelIds, (chat.hotelIds || []).map(normalizeId));
-			chat.participantIds.push(actor._id);
-			chat.participants.push(buildParticipantSnapshot(actor, sharedHotelIds));
-		}
+		await ensureActorParticipant(chat, actor);
 
 		const message = {
 			senderId: actor._id,
-			senderName: actor.name || actor.email || "Account",
+			senderName: messageSenderNameForActor(
+				actor,
+				req.body?.chatDisplayName || req.body?.senderName || ""
+			),
 			senderRole: titleForUser(actor),
 			body,
 			attachments,
@@ -742,7 +872,8 @@ exports.b2bChatMarkSeen = async (req, res) => {
 		if (!(await canViewChat(req.profile, chat))) {
 			return res.status(403).json({ error: "You cannot view this chat" });
 		}
-		if (unreadCountForActor(chat, normalizeId(req.profile._id)) <= 0) {
+		await ensureActorParticipant(chat, req.profile);
+		if (unreadCountForActor(chat, req.profile) <= 0) {
 			return res.json({ chat: serializeChat(chat, req.profile, { includeMessages: true }) });
 		}
 		markSeenOnChat(chat, req.profile);

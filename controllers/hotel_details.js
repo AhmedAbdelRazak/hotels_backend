@@ -15,13 +15,14 @@ const isConfiguredSuperAdmin = (user) => {
 		process.env.SUPER_ADMIN_ID,
 		process.env.REACT_APP_SUPER_ADMIN_ID,
 	]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 	return configuredIds.includes(String(user?._id || "").trim());
 };
 
 const canReassignPropertyOwner = (user) =>
-	Boolean(user) && (Number(user.role) === 1000 || isConfiguredSuperAdmin(user));
+	Boolean(user) && isConfiguredSuperAdmin(user);
 
 const normalizeId = (value) => String(value?._id || value || "").trim();
 
@@ -31,7 +32,7 @@ const includesId = (list = [], targetId) =>
 
 const canViewHotelStats = (user, hotel) => {
 	if (!user || !hotel) return false;
-	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) return true;
+	if (isConfiguredSuperAdmin(user)) return true;
 
 	const hotelId = normalizeId(hotel._id);
 	const ownerId = normalizeId(hotel.belongsTo);
@@ -45,6 +46,30 @@ const canViewHotelStats = (user, hotel) => {
 		normalizeId(user.hotelIdWork) === hotelId &&
 		normalizeId(user.belongsToId) === ownerId
 	);
+};
+
+const assignedHotelIdsFromUser = (user = {}) =>
+	[
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+	]
+		.map(normalizeId)
+		.filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+const applyAdminHotelScope = (req, match = {}) => {
+	const actor = req.profile;
+	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+		return match;
+	}
+	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+	return {
+		...match,
+		_id: { $in: hotelIds.map((id) => mongoose.Types.ObjectId(id)) },
+	};
 };
 
 const DONE_RESERVATION_STATUS =
@@ -1971,7 +1996,7 @@ exports.listForAdmin = async (req, res) => {
 		const skip = (page - 1) * limit;
 
 		/* 2️⃣  Base filter (status) */
-		const baseMatch = {};
+		const baseMatch = applyAdminHotelScope(req, {});
 		if (status === "active") baseMatch.activateHotel = true;
 		if (status === "inactive") baseMatch.activateHotel = false;
 
@@ -2250,7 +2275,7 @@ exports.listForAdminAll = async (req, res) => {
 		let { status, q = "" } = req.query;
 
 		/* 2️⃣  Base filter (status) */
-		const baseMatch = {};
+		const baseMatch = applyAdminHotelScope(req, {});
 		if (status === "active") baseMatch.activateHotel = true;
 		if (status === "inactive") baseMatch.activateHotel = false;
 

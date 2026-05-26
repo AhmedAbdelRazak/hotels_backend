@@ -50,6 +50,48 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	inventory: inventoryValidation,
 });
 
+const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => id.trim())
+		.filter(Boolean);
+
+const isConfiguredSuperAdmin = (user = {}) =>
+	configuredSuperAdminIds().includes(normalizeId(user._id || user));
+
+const assignedHotelIdsFromUser = (user = {}) =>
+	[
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+	]
+		.map(normalizeId)
+		.filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+const platformReservationScopeFilter = (req = {}) => {
+	const actor = req.profile;
+	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+		return null;
+	}
+	const hotelIds = assignedHotelIdsFromUser(actor).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+	return {
+		hotelId: {
+			$in: hotelIds.map((id) => mongoose.Types.ObjectId(id)),
+		},
+	};
+};
+
+const withPlatformReservationScope = (req, baseFilter = {}) => {
+	const scope = platformReservationScopeFilter(req);
+	if (!scope) return baseFilter;
+	return { $and: [baseFilter, scope] };
+};
+
 async function getHotelAndOwner(hotelId) {
 	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
 		return { hotel: null, owner: null };
@@ -1968,7 +2010,9 @@ exports.gettingByReservationId = async (req, res) => {
 exports.distinctBookingSources = async (req, res) => {
 	try {
 		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
-		const baseFilter = { createdAt: { $gte: PAGE_START_DATE_UTC } };
+		const baseFilter = withPlatformReservationScope(req, {
+			createdAt: { $gte: PAGE_START_DATE_UTC },
+		});
 
 		const raw = await Reservations.find(baseFilter).distinct("booking_source");
 		const cleaned = (raw || [])
@@ -2025,6 +2069,7 @@ exports.paginatedReservationList = async (req, res) => {
 		const baseFilter = {
 			createdAt: { $gte: PAGE_START_DATE_UTC },
 		};
+		const scopedBaseFilter = withPlatformReservationScope(req, baseFilter);
 
 		// ---- Helpers (unchanged) ----
 		const toNum = (v) => {
@@ -2090,7 +2135,7 @@ exports.paginatedReservationList = async (req, res) => {
 		};
 
 		// 2) Compose server-side filters
-		const andFilters = [baseFilter];
+		const andFilters = [scopedBaseFilter];
 
 		// reservedBy (case-insensitive exact match)
 		const rbTrim = (reservedBy || "").trim();
@@ -2138,7 +2183,7 @@ exports.paginatedReservationList = async (req, res) => {
 		if (createdClause) andFilters.push(createdClause);
 
 		const mongoFilter =
-			andFilters.length > 1 ? { $and: andFilters } : baseFilter;
+			andFilters.length > 1 ? { $and: andFilters } : scopedBaseFilter;
 
 		// 3) Fetch ALL matching docs (no skip/limit) for scorecards integrity
 		const allDocs = await Reservations.find(mongoFilter)
@@ -5040,12 +5085,11 @@ exports.distinctReservedByList = async (req, res) => {
 		const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0)); // May is month 4 (0-indexed)
 
 		// Same base filter used in paginatedReservationList
-		const baseBookingSourceMatch = {
+		const baseBookingSourceMatch = withPlatformReservationScope(req, {
 			createdAt: { $gte: PAGE_START_DATE_UTC },
-		};
+		});
 
 		const pipeline = [
-			{ $match: { createdAt: { $gte: PAGE_START_DATE_UTC } } },
 			{ $match: baseBookingSourceMatch },
 
 			// Prefer customer_details.reservedBy; fall back to top-level reservedBy if present

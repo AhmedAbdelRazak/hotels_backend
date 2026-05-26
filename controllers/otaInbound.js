@@ -30,8 +30,9 @@ const ObjectId = mongoose.Types.ObjectId;
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 
 const canViewInboundEmails = (user = {}) => {
 	const role = Number(user?.role);

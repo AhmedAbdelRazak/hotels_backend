@@ -2,7 +2,11 @@
 
 const express = require("express");
 const router = express.Router();
-const { requireSignin, isAuth, isAdmin } = require("../controllers/auth");
+const {
+	requireSignin,
+	isAuth,
+	requireAdminAccess,
+} = require("../controllers/auth");
 const { agodaDataDump, expediaDataDump } = require("../controllers/integrator");
 const { userById } = require("../controllers/user");
 const multer = require("multer");
@@ -13,7 +17,7 @@ router.post(
 	upload.single("file"),
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("Integrator"),
 	agodaDataDump
 );
 
@@ -22,7 +26,7 @@ router.post(
 	upload.single("file"),
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("Integrator"),
 	expediaDataDump
 );
 

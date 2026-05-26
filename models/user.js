@@ -220,6 +220,36 @@ const userSchema = new mongoose.Schema(
 			default: [],
 		},
 
+		accountScope: {
+			type: String,
+			enum: ["hotel", "platform"],
+			default: "hotel",
+		},
+
+		platformEmployee: {
+			type: Boolean,
+			default: false,
+		},
+
+		platformEmployeeType: {
+			type: String,
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
+
+		createdByAdmin: {
+			type: ObjectId,
+			ref: "User",
+			default: null,
+		},
+
+		updatedByAdmin: {
+			type: ObjectId,
+			ref: "User",
+			default: null,
+		},
+
 		confirmationNumbersBooked: {
 			type: Array,
 			lowercase: true,

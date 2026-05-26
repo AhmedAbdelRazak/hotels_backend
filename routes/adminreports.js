@@ -7,6 +7,7 @@ const {
 	isAuth,
 	isAdmin,
 	isHotelOwner,
+	requireAdminAccess,
 } = require("../controllers/auth");
 const {
 	reservationsByDay,
@@ -51,7 +52,7 @@ router.get(
 	"/adminreports/reservations-by-day/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	reservationsByDay
 );
 
@@ -60,7 +61,7 @@ router.get(
 	"/adminreports/checkins-by-day/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	checkinsByDay
 );
 
@@ -69,7 +70,7 @@ router.get(
 	"/adminreports/checkouts-by-day/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	checkoutsByDay
 );
 
@@ -78,7 +79,7 @@ router.get(
 	"/adminreports/reservations-by-day-by-hotel/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	reservationsByDayByHotelName
 );
 
@@ -87,7 +88,7 @@ router.get(
 	"/adminreports/reservations-by-booking-status/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	reservationsByBookingStatus
 );
 
@@ -96,7 +97,7 @@ router.get(
 	"/adminreports/reservations-by-hotel-names/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	reservationsByHotelNames
 );
 
@@ -105,7 +106,7 @@ router.get(
 	"/adminreports/top-hotels-by-reservations/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	topHotelsByReservations
 );
 
@@ -114,7 +115,7 @@ router.get(
 	"/adminreports/specific-list/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	specificListOfReservations
 );
 
@@ -122,7 +123,7 @@ router.get(
 	"/adminreports/export-to-excel/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	exportToExcel
 );
 
@@ -130,7 +131,7 @@ router.get(
 	"/adminreports/booking-source-payment-summary/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	bookingSourcePaymentSummary
 );
 
@@ -138,7 +139,7 @@ router.get(
 	"/adminreports/checkout-date-payment-summary/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	checkoutDatePaymentSummary
 );
 
@@ -146,7 +147,7 @@ router.get(
 	"/adminreports/paid-breakdown/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard", "Financials"),
 	paidBreakdownReportAdmin
 );
 
@@ -154,7 +155,7 @@ router.get(
 	"/adminreports/hotel-occupancy/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	hotelOccupancyCalendar
 );
 
@@ -162,7 +163,7 @@ router.get(
 	"/adminreports/hotel-occupancy-warnings/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	hotelOccupancyWarnings
 );
 
@@ -170,7 +171,7 @@ router.get(
 	"/adminreports/hotel-occupancy-day-reservations/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelReports", "AdminDashboard"),
 	hotelOccupancyDayReservations
 );
 

@@ -17,9 +17,7 @@ const {
 
 const app = express();
 const server = http.createServer(app);
-//IMPORTANT TO ASK YOUR FRIEND => ANY RESERVATION ACROSS THE BOARD SHOULD INCLUDE THE ROOMID WHICH IS THE COMBNINATION OF DISPLAYNAME & ROOMTYPE.
-//THIS ID IS IMPORTANT, BECAUSE IF THE SETTINGS OF DISPLAYNAME CHANGED, THEN THE OCCUPANCY REPORT SHOULD CONSIDER THE ID FIRST THEN DISPLAYNAME SECOND
-// IF ROOMID DOESN'T EXIST IN THE DOCUMENT OF RESERVATION.
+
 mongoose.set("strictQuery", false);
 mongoose
 	.connect(process.env.DATABASE, {
@@ -94,6 +92,12 @@ io.on("connection", (socket) => {
 	});
 	socket.on("leaveOwnerNotifications", ({ ownerId } = {}) => {
 		if (ownerId) socket.leave(`owner-notifications:${ownerId}`);
+	});
+	socket.on("joinPlatformNotifications", () => {
+		socket.join("platform-notifications");
+	});
+	socket.on("leavePlatformNotifications", () => {
+		socket.leave("platform-notifications");
 	});
 	socket.on("joinB2BChat", ({ chatId } = {}) => {
 		if (chatId) socket.join(`b2b-chat:${chatId}`);

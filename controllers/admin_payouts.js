@@ -16,6 +16,52 @@ const {
 
 const SINCE_UTC = new Date("2025-06-01T00:00:00.000Z");
 
+const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => id.trim())
+		.filter(Boolean);
+
+const isConfiguredSuperAdmin = (user = {}) =>
+	configuredSuperAdminIds().includes(normalizeId(user._id || user));
+
+const assignedHotelIdsFromUser = (user = {}) =>
+	[
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+	]
+		.map(normalizeId)
+		.filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+const payoutHotelScopeIds = (req = {}) => {
+	const actor = req.profile;
+	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+		return null;
+	}
+	return assignedHotelIdsFromUser(actor).filter((id) =>
+		mongoose.Types.ObjectId.isValid(id)
+	);
+};
+
+const applyPayoutHotelScope = (req, findBase = {}, hotelId = "") => {
+	const ids = payoutHotelScopeIds(req);
+	if (!ids) return true;
+	if (hotelId && !ids.includes(String(hotelId))) return false;
+	if (hotelId) return true;
+	findBase.hotelId = { $in: ids.map((id) => mongoose.Types.ObjectId(id)) };
+	return true;
+};
+
+const canAccessPayoutReservation = (req, reservation = {}) => {
+	const ids = payoutHotelScopeIds(req);
+	if (!ids) return true;
+	return ids.includes(normalizeId(reservation.hotelId));
+};
+
 /* ───────── Helpers ───────── */
 function normalizeStatus(s) {
 	const t = String(s || "")
@@ -190,6 +236,9 @@ exports.listAdminPayouts = async (req, res) => {
 				return res.status(400).json({ message: "Invalid hotelId." });
 			findBase.hotelId = hotelId;
 		}
+		if (!applyPayoutHotelScope(req, findBase, hotelId)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
+		}
 
 		const auditViewer = await resolveAuditViewerFromRequest(req);
 		const rawRows = await Reservations.find(findBase, {
@@ -343,6 +392,9 @@ exports.getAdminPayoutsOverview = async (req, res) => {
 			if (!mongoose.Types.ObjectId.isValid(hotelId))
 				return res.status(400).json({ message: "Invalid hotelId." });
 			findBase.hotelId = hotelId;
+		}
+		if (!applyPayoutHotelScope(req, findBase, hotelId)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
 		}
 
 		const raw = await Reservations.find(findBase, {
@@ -507,6 +559,12 @@ exports.updateCommissionStatus = async (req, res) => {
 		const by = getAdminActor(req);
 		const r = await Reservations.findById(reservationId).lean();
 		if (!r) return res.status(404).json({ message: "Reservation not found." });
+		if (!canAccessPayoutReservation(req, r)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
+		}
+		if (!canAccessPayoutReservation(req, r)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
+		}
 
 		const prevPaid = !!r.commissionPaid;
 		const nextPaid = !!commissionPaid;
@@ -586,6 +644,9 @@ exports.updateTransferStatus = async (req, res) => {
 		const by = getAdminActor(req);
 		const r = await Reservations.findById(reservationId).lean();
 		if (!r) return res.status(404).json({ message: "Reservation not found." });
+		if (!canAccessPayoutReservation(req, r)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
+		}
 
 		const prevTr = !!r.moneyTransferredToHotel;
 		const nextTr = !!moneyTransferredToHotel;
@@ -767,6 +828,9 @@ exports.autoReconcileHotel = async (req, res) => {
 			return res
 				.status(400)
 				.json({ message: "hotelId is required and must be valid." });
+		}
+		if (!applyPayoutHotelScope(req, {}, hotelId)) {
+			return res.status(403).json({ message: "Hotel payout access denied." });
 		}
 
 		// Load reservations for this hotel since SINCE_UTC
@@ -1181,7 +1245,11 @@ exports.autoReconcileHotel = async (req, res) => {
 /* ───────── GET /admin-payouts/hotels-lite ───────── */
 exports.listHotelsLite = async (req, res) => {
 	try {
-		const hotels = await HotelDetails.find({}, { _id: 1, hotelName: 1 })
+		const scopeIds = payoutHotelScopeIds(req);
+		const filter = scopeIds
+			? { _id: { $in: scopeIds.map((id) => mongoose.Types.ObjectId(id)) } }
+			: {};
+		const hotels = await HotelDetails.find(filter, { _id: 1, hotelName: 1 })
 			.sort({ hotelName: 1 })
 			.limit(2000)
 			.lean();

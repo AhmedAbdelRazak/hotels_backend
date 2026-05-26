@@ -90,8 +90,9 @@ const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 
 const isConfiguredSuperAdmin = (userOrId) => {
 	const userId =
@@ -188,11 +189,7 @@ const userHasRoleDescriptionKey = (user = {}, description = "") =>
 		.map(normalizeRoleDescriptionKey)
 		.includes(normalizeRoleDescriptionKey(description));
 
-const isPlatformSuperAdmin = (user = {}) =>
-	isConfiguredSuperAdmin(user) ||
-	userRoleNumbers(user).includes(1000) ||
-	userHasRoleDescriptionKey(user, "super admin") ||
-	userHasRoleDescriptionKey(user, "superadmin");
+const isPlatformSuperAdmin = (user = {}) => isConfiguredSuperAdmin(user);
 
 const userLooksLikeAgent = (user = {}) =>
 	userRoleNumbers(user).includes(7000) ||

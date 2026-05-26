@@ -13,6 +13,53 @@ const {
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
 
+const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+
+const configuredSuperAdminIds = () =>
+	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => id.trim())
+		.filter(Boolean);
+
+const isConfiguredSuperAdmin = (user = {}) =>
+	configuredSuperAdminIds().includes(normalizeId(user._id || user));
+
+const assignedHotelIdsFromUser = (user = {}) =>
+	[
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+	]
+		.map(normalizeId)
+		.filter((id, index, arr) => id && arr.indexOf(id) === index);
+
+const platformHotelScopeIds = (req = {}) => {
+	const actor = req.profile;
+	if (!actor || isConfiguredSuperAdmin(actor) || Number(actor.role) !== 1000) {
+		return null;
+	}
+	return assignedHotelIdsFromUser(actor).filter((id) => ObjectId.isValid(id));
+};
+
+const hotelScopeFilterForRequest = (req = {}) => {
+	const ids = platformHotelScopeIds(req);
+	if (!ids) return null;
+	return { hotelId: { $in: ids.map((id) => ObjectId(id)) } };
+};
+
+const withPlatformHotelScope = (req, filter = {}) => {
+	const scopeFilter = hotelScopeFilterForRequest(req);
+	if (!scopeFilter) return filter;
+	return { $and: [filter, scopeFilter] };
+};
+
+const adminCanAccessHotel = (req, hotelId) => {
+	const ids = platformHotelScopeIds(req);
+	if (!ids) return true;
+	return ids.includes(String(hotelId || ""));
+};
+
 /* ------------------------------------------------------------------
    1) Payment Status Helper
       Based on your examples:
@@ -199,7 +246,9 @@ async function findFilteredReservations(req) {
 	}
 
 	// Now fetch reservations
-	const reservations = await Reservations.find(baseFilter)
+	const reservations = await Reservations.find(
+		withPlatformHotelScope(req, baseFilter)
+	)
 		.populate("hotelId", "hotelName")
 		.lean();
 
@@ -817,13 +866,14 @@ exports.specificListOfReservations = async (req, res) => {
 			Object.keys(customFilter).length > 0
 				? { $and: [baseFilter, customFilter] }
 				: baseFilter;
+		const scopedFinalFilter = withPlatformHotelScope(req, finalFilter);
 
 		// 7) Pagination params (used only for metadata; data itself is full set)
 		const page = parseInt(query.page || "1", 10);
 		const limit = parseInt(query.limit || "50", 10);
 
 		// 8) Fetch ALL matching docs (sorted) â€“ frontend does client-side pagination
-		const reservations = await Reservations.find(finalFilter)
+		const reservations = await Reservations.find(scopedFinalFilter)
 			.sort({ createdAt: -1 })
 			.populate("hotelId", "_id hotelName")
 			.lean();
@@ -1064,7 +1114,9 @@ exports.exportToExcel = async (req, res) => {
 		}
 
 		// 5) Fetch reservations
-		const reservations = await Reservations.find(finalFilter)
+		const reservations = await Reservations.find(
+			withPlatformHotelScope(req, finalFilter)
+		)
 			.populate("hotelId", "hotelName")
 			.populate("belongsTo", "name phone email")
 			.populate("payment_details")
@@ -1384,6 +1436,7 @@ exports.adminDashboardReport = async (req, res) => {
 		});
 
 		const displayMode = "displayName";
+		const scopedBaseFilter = withPlatformHotelScope(req, baseFilter);
 		const cancelledRegex = /cancelled|canceled/i;
 		const noShowRegex = /no[_\s]?show/i;
 		const excludedStatusRegex = /cancelled|canceled|no[_\s]?show/i;
@@ -1422,7 +1475,7 @@ exports.adminDashboardReport = async (req, res) => {
 		const statusNotCheckout = { reservation_status: { $not: checkoutRegex } };
 
 		// Helper to merge baseFilter + condition
-		const withBaseFilter = (cond) => ({ $and: [baseFilter, cond] });
+		const withBaseFilter = (cond) => ({ $and: [scopedBaseFilter, cond] });
 
 		// Safe wrappers so one failed query doesn't doom the whole report
 		const safeCount = async (cond) => {
@@ -1459,7 +1512,7 @@ exports.adminDashboardReport = async (req, res) => {
 		};
 
 		// 3) Check if there are ANY documents matching baseFilter
-		const totalMatches = await Reservations.countDocuments(baseFilter).catch(
+		const totalMatches = await Reservations.countDocuments(scopedBaseFilter).catch(
 			(e) => {
 				console.error("countDocuments(baseFilter) failed", e);
 				return 0;
@@ -2070,8 +2123,14 @@ exports.adminDashboardReport = async (req, res) => {
 			})
 		);
 
+		const restrictedHotelIds = platformHotelScopeIds(req);
 		const roomsCleanMatch = {};
 		if (baseFilter.hotelId) roomsCleanMatch.hotelId = baseFilter.hotelId;
+		else if (restrictedHotelIds) {
+			roomsCleanMatch.hotelId = {
+				$in: restrictedHotelIds.map((id) => ObjectId(id)),
+			};
+		}
 		const roomCleanStatusAgg = await Rooms.aggregate([
 			{ $match: roomsCleanMatch },
 			{ $group: { _id: "$cleanRoom", count: { $sum: 1 } } },
@@ -2085,6 +2144,11 @@ exports.adminDashboardReport = async (req, res) => {
 		);
 		const housekeepingMatch = {};
 		if (baseFilter.hotelId) housekeepingMatch.hotelId = baseFilter.hotelId;
+		else if (restrictedHotelIds) {
+			housekeepingMatch.hotelId = {
+				$in: restrictedHotelIds.map((id) => ObjectId(id)),
+			};
+		}
 		const cleaningTasksCount = await HouseKeeping.countDocuments({
 			...housekeepingMatch,
 			task_status: /unfinished|cleaning/i,
@@ -2113,7 +2177,7 @@ exports.adminDashboardReport = async (req, res) => {
 			? reportWindowActiveFilter
 			: statusNotExcluded;
 		const pipelineTopChannels = [
-			{ $match: { $and: [baseFilter, reportStatsFilter] } },
+			{ $match: { $and: [scopedBaseFilter, reportStatsFilter] } },
 			{ $group: { _id: "$booking_source", count: { $sum: 1 } } },
 			{ $sort: { count: -1 } },
 			{ $limit: 5 },
@@ -2283,7 +2347,7 @@ exports.adminDashboardReport = async (req, res) => {
 			{
 				$match: {
 					$and: [
-						baseFilter,
+						scopedBaseFilter,
 						{ checkin_date: { $gte: lineStart, $lte: lineEnd } },
 						{ reservation_status: activeStatusFilter },
 					],
@@ -2308,7 +2372,7 @@ exports.adminDashboardReport = async (req, res) => {
 			{
 				$match: {
 					$and: [
-						baseFilter,
+						scopedBaseFilter,
 						{ checkout_date: { $gte: lineStart, $lte: lineEnd } },
 						{ reservation_status: activeStatusFilter },
 					],
@@ -3048,8 +3112,9 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 		if (bookingSourceMatch) {
 			query.booking_source = bookingSourceMatch;
 		}
+		const scopedQuery = withPlatformHotelScope(req, query);
 
-		const reservations = await Reservations.find(query)
+		const reservations = await Reservations.find(scopedQuery)
 			.select(
 				"booking_source total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
 			)
@@ -3155,8 +3220,9 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 		if (bookingSourceMatch) {
 			query.booking_source = bookingSourceMatch;
 		}
+		const scopedQuery = withPlatformHotelScope(req, query);
 
-		const reservations = await Reservations.find(query)
+		const reservations = await Reservations.find(scopedQuery)
 			.select(
 				"checkin_date checkout_date total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
 			)
@@ -3847,6 +3913,12 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 				message: "hotelId (Mongo ObjectId) is required",
 			});
 		}
+		if (!adminCanAccessHotel(req, hotelId)) {
+			return res.status(403).json({
+				success: false,
+				message: "Hotel report access denied",
+			});
+		}
 
 		const customRange = parseCustomRange(req.query.start, req.query.end);
 		const { start, endExclusive, daysInMonth, label, year, monthIndex } =
@@ -3906,6 +3978,12 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 			return res.status(400).json({
 				success: false,
 				message: "hotelId (Mongo ObjectId) is required",
+			});
+		}
+		if (!adminCanAccessHotel(req, hotelId)) {
+			return res.status(403).json({
+				success: false,
+				message: "Hotel report access denied",
 			});
 		}
 
@@ -3974,6 +4052,12 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			return res.status(400).json({
 				success: false,
 				message: "hotelId (Mongo ObjectId) is required",
+			});
+		}
+		if (!adminCanAccessHotel(req, hotelId)) {
+			return res.status(403).json({
+				success: false,
+				message: "Hotel report access denied",
 			});
 		}
 		if (!date) {
@@ -4354,6 +4438,9 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 		const hotelId = req.query.hotelId;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
 			return res.status(400).json({ error: "Valid hotelId is required" });
+		}
+		if (!adminCanAccessHotel(req, hotelId)) {
+			return res.status(403).json({ error: "Hotel report access denied" });
 		}
 
 		const { page, limit, skip } = parseReportPagination(req);

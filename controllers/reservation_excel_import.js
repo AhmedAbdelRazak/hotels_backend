@@ -194,8 +194,9 @@ const normalizedRoleDescriptions = (user = {}) => [
 const isConfiguredSuperAdmin = (user) => {
 	const id = String(user?._id || user || "");
 	return [process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
-		.filter(Boolean)
+		.flatMap((value) => String(value || "").split(","))
 		.map((value) => String(value).trim())
+		.filter(Boolean)
 		.includes(id);
 };
 

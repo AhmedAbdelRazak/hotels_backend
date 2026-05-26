@@ -49,7 +49,11 @@ const CHECKED_OUT_REGEX =
 	/checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
 const EARLY_CLOSED_REGEX = /cancelled|canceled|no[_\s-]?show/i;
 const IN_HOUSE_REGEX = /house/i;
-const HOUSEKEEPING_FINISHED_REGEX = /finished|done|completed|clean/i;
+const HOUSEKEEPING_FINISHED_REGEX = /^(finished|done|completed|clean)$/i;
+const MAP_DIRTY_ROOM_REASONS = new Set([
+	"guest_checked_out",
+	"housekeeping_task_open",
+]);
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
@@ -1433,8 +1437,9 @@ const isConfiguredSuperAdmin = (user) => {
 		process.env.SUPER_ADMIN_ID,
 		process.env.REACT_APP_SUPER_ADMIN_ID,
 	]
-		.filter(Boolean)
-		.map((id) => String(id).trim());
+		.flatMap((value) => String(value || "").split(","))
+		.map((id) => String(id).trim())
+		.filter(Boolean);
 	return configuredIds.includes(normalizeId(user));
 };
 
@@ -4402,14 +4407,20 @@ exports.reservationsOccupancySummary = async (req, res) => {
 				.lean(),
 			HouseKeeping.find({
 				hotelId: ObjectId(hotelId),
-				task_status: { $not: /finished|done|completed/i },
+				task_status: { $not: HOUSEKEEPING_FINISHED_REGEX },
 			})
 				.select("rooms roomStatus task_status")
 				.lean(),
 		]);
 
-		const roomIdSet = new Set(
-			(Array.isArray(rooms) ? rooms : []).map((room) => String(room._id))
+		const activeRooms = (Array.isArray(rooms) ? rooms : []).filter(
+			(room) => room?.active !== false && room?.activeRoom !== false
+		);
+		const activeRoomIdSet = new Set(
+			activeRooms.map((room) => String(room._id))
+		);
+		const outOfServiceRooms = (Array.isArray(rooms) ? rooms : []).filter(
+			(room) => room?.active === false || room?.activeRoom === false
 		);
 
 		const normalizeRoomIds = (roomIdField) => {
@@ -4465,7 +4476,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			}
 
 			reservation.roomIds.forEach((roomId) => {
-				if (!roomIdSet.has(roomId)) return;
+				if (!activeRoomIdSet.has(roomId)) return;
 				if (!bookedBedsByRoom.has(roomId)) {
 					bookedBedsByRoom.set(roomId, []);
 				}
@@ -4477,7 +4488,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 		activeReservations.forEach((reservation) => {
 			if (!reservation.roomIds || reservation.roomIds.length === 0) return;
 			reservation.roomIds.forEach((roomId) => {
-				if (!roomIdSet.has(roomId)) return;
+				if (!activeRoomIdSet.has(roomId)) return;
 				occupiedRoomIds.add(roomId);
 			});
 		});
@@ -4488,7 +4499,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 				task.roomStatus.forEach((entry) => {
 					const roomId = entry?.room ? String(entry.room) : "";
 					if (
-						roomIdSet.has(roomId) &&
+						activeRoomIdSet.has(roomId) &&
 						!HOUSEKEEPING_FINISHED_REGEX.test(String(entry?.status || ""))
 					) {
 						cleaningRoomIds.add(roomId);
@@ -4500,7 +4511,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			task.rooms.forEach((roomId) => {
 				if (!roomId) return;
 				const normalized = String(roomId);
-				if (roomIdSet.has(normalized)) {
+				if (activeRoomIdSet.has(normalized)) {
 					cleaningRoomIds.add(normalized);
 				}
 			});
@@ -4535,7 +4546,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			...flags,
 		});
 
-		(Array.isArray(rooms) ? rooms : []).forEach((room) => {
+		activeRooms.forEach((room) => {
 			const roomId = String(room._id);
 			const isBedRoom = room?.room_type === "individualBed";
 			let isBooked = false;
@@ -4554,12 +4565,20 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			}
 
 			const isCleaning = cleaningRoomIds.has(roomId);
-			const isOutOfService = room?.active === false || room?.activeRoom === false;
 			const roomStatusDetails = formatRoomForStatus(room, {
 				isBooked,
 				isCleaning,
-				isOutOfService,
+				isOutOfService: false,
 			});
+			const dirtyReason = String(room?.housekeepingDirtyReason || "")
+				.trim()
+				.toLowerCase();
+			const isDirty =
+				!isBooked &&
+				(isCleaning ||
+					(room?.cleanRoom === false &&
+						MAP_DIRTY_ROOM_REASONS.has(dirtyReason)));
+			const isClean = !isBooked && !isDirty;
 
 			if (isBooked) occupied += 1;
 			else vacant += 1;
@@ -4567,16 +4586,24 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			if (isBooked) roomsByStatus.occupied.push(roomStatusDetails);
 			else roomsByStatus.vacant.push(roomStatusDetails);
 
-			if (room?.cleanRoom) clean += 1;
-			else dirty += 1;
+			if (isClean) clean += 1;
+			if (isDirty) dirty += 1;
 
-			if (room?.cleanRoom) roomsByStatus.clean.push(roomStatusDetails);
-			else roomsByStatus.dirty.push(roomStatusDetails);
+			if (isClean) roomsByStatus.clean.push(roomStatusDetails);
+			if (isDirty) roomsByStatus.dirty.push(roomStatusDetails);
 
 			if (isCleaning) roomsByStatus.cleaning.push(roomStatusDetails);
+		});
 
-			if (isOutOfService) outOfService += 1;
-			if (isOutOfService) roomsByStatus.outOfService.push(roomStatusDetails);
+		outOfServiceRooms.forEach((room) => {
+			outOfService += 1;
+			roomsByStatus.outOfService.push(
+				formatRoomForStatus(room, {
+					isBooked: false,
+					isCleaning: false,
+					isOutOfService: true,
+				})
+			);
 		});
 
 		return res.json({
@@ -4589,7 +4616,8 @@ exports.reservationsOccupancySummary = async (req, res) => {
 				dirty,
 				cleaning: cleaningRoomIds.size,
 				outOfService,
-				totalRooms: Array.isArray(rooms) ? rooms.length : 0,
+				totalRooms: activeRooms.length,
+				physicalRooms: Array.isArray(rooms) ? rooms.length : 0,
 			},
 			roomsByStatus,
 			asOf: {

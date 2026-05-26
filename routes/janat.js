@@ -2,7 +2,12 @@
 
 const express = require("express");
 const router = express.Router();
-const { requireSignin, isAuth, isAdmin } = require("../controllers/auth");
+const {
+	requireSignin,
+	isAuth,
+	isAdmin,
+	requireAdminAccess,
+} = require("../controllers/auth");
 
 const { userById } = require("../controllers/user");
 const {
@@ -68,7 +73,7 @@ router.get(
 	"/all-reservations-list-admin/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	paginatedReservationList
 );
 
@@ -76,7 +81,7 @@ router.get(
 	"/distinct-booking-sources/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	distinctBookingSources
 );
 
@@ -84,7 +89,7 @@ router.post(
 	"/send-payment-link-email/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	sendingEmailForPaymentLink
 );
 
@@ -92,7 +97,7 @@ router.post(
 	"/email-send/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	sendEmailForTriggeringPayment
 );
 
@@ -100,7 +105,7 @@ router.post(
 	"/update-payment-token/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	updatingTokenizedId
 );
 
@@ -108,7 +113,7 @@ router.post(
 	"/create-payment/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	triggeringSpecificTokenizedIdToCharge
 );
 
@@ -155,7 +160,7 @@ router.get(
 	"/reserved-by-list/:userId",
 	requireSignin,
 	isAuth,
-	isAdmin,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
 	distinctReservedByList
 );
 

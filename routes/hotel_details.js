@@ -7,6 +7,7 @@ const {
 	isAuth,
 	isHotelOwner,
 	isAdmin,
+	requireAdminAccess,
 } = require("../controllers/auth");
 const { userById } = require("../controllers/user");
 
@@ -81,14 +82,14 @@ router.get("/hotel-details/super-admin/:accountId", listOfHotelUser);
 router.get(
 	"/hotel-details/admin/:userId",
 	requireSignin,
-	isAdmin,
+	requireAdminAccess("AdminDashboard"),
 	listForAdmin
 );
 
 router.get(
 	"/all/hotel-details/admin/:userId",
 	requireSignin,
-	isAdmin,
+	requireAdminAccess("AdminDashboard"),
 	listForAdminAll
 );
 

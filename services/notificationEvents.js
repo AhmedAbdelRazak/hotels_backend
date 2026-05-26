@@ -21,6 +21,7 @@ const emitHotelNotificationRefresh = async (req, hotelId, payload = {}) => {
 		"hotelNotificationsUpdated",
 		basePayload
 	);
+	io.to("platform-notifications").emit("hotelNotificationsUpdated", basePayload);
 
 	let ownerId = normalizeId(payload.ownerId);
 	if (!ownerId) {

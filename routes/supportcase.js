@@ -1,6 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const supportCaseController = require("../controllers/supportcase");
+const {
+	requireSignin,
+	requireAdminAccess,
+} = require("../controllers/auth");
 
 // Middleware to attach io to req
 const attachIo = (req, res, next) => {
@@ -15,9 +19,31 @@ router.post(
 	supportCaseController.createNewSupportCase
 );
 
-router.get("/support-cases/active", supportCaseController.getOpenSupportCases);
+const customerServiceAccess = [
+	requireSignin,
+	requireAdminAccess("CustomerService"),
+];
+
+router.get(
+	"/support-cases/recipients/:userId",
+	...customerServiceAccess,
+	supportCaseController.getSupportChatRecipients
+);
+
+router.get(
+	"/support-cases/notifications/summary/:userId",
+	...customerServiceAccess,
+	supportCaseController.getSupportCaseNotificationSummary
+);
+
+router.get(
+	"/support-cases/active",
+	...customerServiceAccess,
+	supportCaseController.getOpenSupportCases
+);
 router.get(
 	"/support-cases-clients/active",
+	...customerServiceAccess,
 	supportCaseController.getOpenSupportCasesClients
 );
 router.get(
@@ -25,9 +51,14 @@ router.get(
 	supportCaseController.getOpenSupportCasesForHotel
 );
 
-router.get("/support-cases/closed", supportCaseController.getCloseSupportCases);
+router.get(
+	"/support-cases/closed",
+	...customerServiceAccess,
+	supportCaseController.getCloseSupportCases
+);
 router.get(
 	"/support-cases/closed/clients",
+	...customerServiceAccess,
 	supportCaseController.getCloseSupportCasesClients
 );
 router.get(
@@ -41,11 +72,16 @@ router.get(
 );
 
 // Get a specific support case by ID
-router.get("/support-cases/:id", supportCaseController.getSupportCaseById);
+router.get(
+	"/support-cases/:id",
+	...customerServiceAccess,
+	supportCaseController.getSupportCaseById
+);
 
 // Update a support case by ID
 router.put(
 	"/support-cases/:id",
+	...customerServiceAccess,
 	attachIo,
 	supportCaseController.updateSupportCase
 );
@@ -53,6 +89,7 @@ router.put(
 // Fetch unseen messages by Super Admin or PMS Owner
 router.get(
 	"/support-cases/:hotelId/unseen/admin-owner",
+	...customerServiceAccess,
 	supportCaseController.getUnseenMessagesCountByAdmin
 );
 
@@ -71,6 +108,7 @@ router.get(
 // Update seen status for Admin or Owner
 router.put(
 	"/support-cases/:id/seen/admin-owner",
+	...customerServiceAccess,
 	supportCaseController.updateSeenStatusForAdminOrOwner
 );
 
@@ -82,11 +120,13 @@ router.put(
 
 router.get(
 	"/support-cases/unseen/count",
+	...customerServiceAccess,
 	supportCaseController.getUnseenMessagesCountByAdmin
 );
 
 router.put(
 	"/support-cases/:id/seen-by-admin",
+	...customerServiceAccess,
 	supportCaseController.markAllMessagesAsSeenByAdmin
 );
 
@@ -97,11 +137,13 @@ router.put(
 
 router.put(
 	"/mark-all-cases-as-seen",
+	...customerServiceAccess,
 	supportCaseController.markEverythingAsSeen
 );
 
 router.delete(
 	"/support-cases/:caseId/messages/:messageId",
+	...customerServiceAccess,
 	attachIo, // Attach the `io` instance
 	supportCaseController.deleteMessageFromConversation
 );
