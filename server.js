@@ -66,6 +66,18 @@ app.set("io", io);
 // API routes
 readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));
 
+app.use((err, _req, res, next) => {
+	if (!err || err.name !== "UnauthorizedError") return next(err);
+	const isExpired =
+		err.code === "invalid_token" &&
+		(err.inner?.name === "TokenExpiredError" ||
+			/jwt expired/i.test(err.message || err.inner?.message || ""));
+	return res.status(401).json({
+		error: isExpired ? "Session expired. Please sign in again." : "Unauthorized",
+		code: isExpired ? "TOKEN_EXPIRED" : "UNAUTHORIZED",
+	});
+});
+
 const port = process.env.PORT || 8080;
 server.listen(port, () => console.log(`Server is running on port ${port}`));
 

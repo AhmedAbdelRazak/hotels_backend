@@ -514,3 +514,158 @@ Final Production Readiness Notes
   - The deployment was a fast-forward pull; no server-side merge conflict occurred.
   - Existing UnauthorizedError entries in PM2 error logs are expected when protected routes are hit without an authorization token. They were not caused by the deployment itself.
   - Future deployments should repeat: local build/checks, commit/push, ssh jannat, git pull --ff-only, frontend build if frontend changed, PM2 restart, curl smoke checks, and documentation update.
+
+Future TODO Backlog - Added 2026-05-26
+- TODO 1: Executive summary data-quality audit and user-readability guide
+  - Route to audit first:
+    - /hotel-management/main-dashboard?ownerId=68b74714fb50e159d48c714d&overall=summary&page=1
+  - Backend references:
+    - controllers/overall_dashboard.js
+    - routes/overall_dashboard.js
+    - models/reservation.js or the active reservation model used by the route.
+    - models/hotel_details.js for room-count, room-map, blocked/out-of-service, and roomCountDetails semantics.
+  - Data-quality goals:
+    - Verify hotel count, total rooms, available rooms, occupied fraction, clean/dirty fraction, reservations count, gross total, and blocked/out-of-service count against MongoDB.
+    - Confirm blocked/out-of-service rooms are excluded from sellable capacity.
+    - Confirm in-house reservations still count as occupied even after the planned checkout date until the operational checkout state changes.
+    - Confirm the grand-total row aggregates raw values before formatting.
+    - Confirm date filters, calendar filters, dateBy, status, hotelId/invHotel, and includeCancelled/no-show flags are reflected exactly in the query output.
+  - User-readability goals:
+    - Document how a hotel owner should read each score card and table fraction.
+    - Add short, non-intrusive UI explanations/tooltips only where a number can be misunderstood, especially occupied/totalRooms and clean/dirty.
+    - Avoid adding marketing copy or large help blocks to the operational report.
+  - Acceptance criteria:
+    - A written data-quality checklist exists for this route.
+    - At least one real hotel, including Zad Al Safa, is manually reconciled against DB records and the UI output.
+    - Any discrepancy is traced to either filter state, room-map state, reservation status, or backend aggregation logic before changing display code.
+
+- TODO 2: Restructure the chatbot / AI agent properly, using SereneJannat as the reference pattern
+  - Existing backend AI references:
+    - aiagent/
+    - aiagent/index.js
+    - aiagent/core/*
+    - aiagent/routes.js and aiagent/routes/index.js
+    - routes/aiagent_learning.js
+    - controllers/aiagent_learning.js
+    - models/aiagent_learning.js
+    - models/aiagent_learning_batch.js
+  - Reference pattern to inspect before implementation:
+    - SereneJannat setup on the home server or the corresponding repo/folder if available locally.
+    - Compare folder boundaries, orchestration entry points, prompt/policy storage, learning flow, memory/state model, route shape, and deployment model before refactoring JannatBooking.
+  - Restructure goals:
+    - Separate chatbot transport, orchestration, policy, memory, tools/actions, learning, evaluation, and admin controls.
+    - Avoid a single large prompt as the core behavior. The bot should retrieve and apply structured knowledge, policy, learned examples, and hotel-specific context.
+    - Keep reservation creation/update actions guarded by deterministic validators before writing to reservations.
+    - Keep human handoff and support-case visibility rules aligned with supportcase.js and B2B/chat access rules.
+    - Keep logs/audit records for AI actions so production behavior can be reviewed.
+  - Acceptance criteria:
+    - A future AI module map exists before code moves.
+    - Existing aiagent routes and support-case integration are not broken during refactor.
+    - The final bot can explain why it answered or acted using retrieved policy/learning/tool context, not only a prompt blob.
+
+- TODO 3: AI Learning Schema and dynamic learning behavior
+  - Important note:
+    - A first-pass learning schema already exists in models/aiagent_learning.js and models/aiagent_learning_batch.js. Future work should audit, improve, and migrate if needed rather than blindly creating duplicate models.
+  - Schema goals:
+    - Support hotel-specific and platform-wide learning.
+    - Store source type, source case/reservation ids, anonymized examples, extracted intent, successful response pattern, decision rules, confidence/quality score, tags/topics, language, createdBy/reviewedBy, approval status, version, and timestamps.
+    - Track negative examples and corrections, not only successful summaries.
+    - Support batch summaries/playbooks while preserving the underlying case-level learnings.
+  - Dynamic AI goals:
+    - The AI should retrieve relevant approved learning records by hotel, language, topic, intent, and conversation context.
+    - Prompt construction should be data-driven: policy + active hotel context + retrieved learning + deterministic tool results.
+    - Admins should be able to review/approve/disable learning records before they affect production answers.
+    - Learning rebuild jobs should be idempotent and safe to rerun.
+  - Acceptance criteria:
+    - Clear migration plan for existing AiAgentLearning and AiAgentLearningBatch collections.
+    - Preview endpoint shows which learning records would influence a response.
+    - Production answer path can run with learning enabled or disabled for safe rollout.
+
+- TODO 4: Optional later - SSR public JannatBooking frontend support
+  - Backend relevance:
+    - SSR may require backend/API CORS, cookies, auth/session, cache-control, sitemap/metadata, and reverse-proxy considerations.
+    - This is optional and should not disrupt the current hotels_backend production API.
+    - Current public frontend reference directory: D:\JannatBooking\jannatbooking_frontend.
+    - Proposed future SSR sibling directory: D:\JannatBooking\jannatbooking_ssr.
+    - Backend API behavior should remain compatible with both the existing React app and the future SSR app during migration.
+  - Frontend details live in hotels_frontend/application_structure_frontend.txt under the matching TODO.
+
+- TODO 5: Chat authorization and visibility hardening
+  - Goal:
+    - A chat must only be visible to authorized participants and supervisors.
+  - Required access model:
+    - The two direct parties in the conversation can see and respond.
+    - Hotel Managers and Hotel System Admins can see chats for hotels they are authorized to manage.
+    - Jannat/XHotelPro SUPER ADMINS from the backend SUPER_ADMIN_ID environment list can see platform-wide chats.
+    - Platform employees can only see chats permitted by their assigned route, hotel, client, and role scope. They must not inherit super-admin visibility.
+  - Backend checks:
+    - Audit all B2B and B2C chat list/detail/send/read/unread endpoints.
+    - Enforce authorization server-side even if the frontend hides links or filters lists.
+    - Ensure unread counters decrease only for users who are actually allowed to see and mark the conversation as read.
+    - Ensure socket rooms/events are scoped to authorized user ids, hotel ids, and platform-super-admin rooms where appropriate.
+    - Add regression tests or manual verification for hotel owner, hotel manager, hotel system admin, receptionist/agent/finance/housekeeping, platform employee, and SUPER ADMIN roles.
+  - Acceptance criteria:
+    - No user can fetch, subscribe to, or mark read a chat outside their allowed scope.
+    - SUPER ADMIN can monitor all platform chats, but normal platform employees cannot.
+    - Real-time notification counts match the authorized user's scope.
+
+- TODO 6: Retire SendGrid and migrate secure outbound email
+  - Goal:
+    - Replace SendGrid with Nodemailer or another reputable email provider/library while keeping backend changes contained and secure.
+  - Requirements:
+    - Use API-key or token-based credentials from environment variables; never hardcode secrets.
+    - Keep an email service abstraction so reservation, support, notification, and admin flows do not call a provider directly.
+    - Preserve existing email templates, language handling, and business triggers unless intentionally improved.
+    - Support secure production delivery with SPF, DKIM, and DMARC aligned to the sending domain.
+    - Update Cloudflare DNS records for the new provider and remove obsolete SendGrid DNS records after the new path is verified.
+    - Avoid open relay patterns, user-controlled From headers, header injection, and unsafe HTML/template rendering.
+    - Add rate limiting, structured logging, and retry/error handling for outbound email failures.
+  - Migration plan:
+    - Inventory all current SendGrid imports/usages and templates.
+    - Create a provider-neutral mail adapter.
+    - Add the new provider using environment-based API credentials.
+    - Test in sandbox/staging with DNS alignment before production switch.
+    - Switch production gradually and monitor bounces, spam placement, and delivery logs.
+    - Remove SendGrid credentials and DNS only after successful verification.
+  - Acceptance criteria:
+    - Existing email-triggering code changes minimally because it calls the mail adapter.
+    - Production DNS passes SPF/DKIM/DMARC checks for the active sending domain.
+    - SendGrid is no longer required after migration and cleanup.
+
+- TODO 7: OTA inbound reliability and correctness audit
+  - Goal:
+    - Ensure OTA inbound reservations/updates/cancellations are processed correctly with no damage to existing PMS data.
+  - Backend audit areas:
+    - Identify every OTA inbound endpoint, webhook, parser, queue/job, and reservation mapping path.
+    - Validate idempotency using OTA reservation ids, update ids, or provider event ids.
+    - Confirm create/update/cancel/no-show flows map cleanly to the internal reservation schema.
+    - Confirm room type, room count, guest count, dates, price, tax/fees, payment status, source/channel, confirmation number, and hotel owner/hotel id are mapped correctly.
+    - Prevent duplicate reservations when providers retry webhooks.
+    - Verify timezone/date-boundary handling, especially check-in/check-out and Hijri/Gregorian reporting implications.
+    - Ensure inbound OTA data cannot bypass hotel/owner authorization or overwrite protected internal fields.
+    - Log raw inbound payload references safely for traceability without exposing secrets or sensitive payment data.
+  - Acceptance criteria:
+    - OTA inbound test cases cover new booking, modified booking, cancellation, provider retry, and partial/invalid payloads.
+    - Existing dashboards and reports remain consistent after OTA events.
+    - Manual reconciliation can trace an OTA booking from inbound payload to reservation record to report totals.
+
+2026-05-26 JWT Expired Session Handling Fix
+- Problem observed:
+  - Expired JWTs on protected routes produced noisy UnauthorizedError stack traces in the backend logs, for example:
+    - /api/reservations/notifications/pending-confirmation/:userId
+    - /api/hotel-details/executive-summary/:userId
+    - /api/account-data/:accountId/:userId
+    - /api/overall-dashboard/summary/:userId
+- Backend fix:
+  - File: server.js
+  - Added a global Express error handler after route registration.
+  - UnauthorizedError from express-jwt is now converted to a clean 401 JSON response:
+    - code: TOKEN_EXPIRED
+    - error: Session expired. Please sign in again.
+  - Non-expired unauthorized JWT failures return:
+    - code: UNAUTHORIZED
+    - error: Unauthorized
+- Security note:
+  - Route protection was not weakened. The handler only normalizes the response and prevents stack-trace noise for expected authentication expiry.
+- Frontend companion fix:
+  - The matching frontend change clears expired stored JWTs and expired dashboard-preview tokens before API calls are made.
