@@ -482,3 +482,35 @@ Final Production Readiness Notes
     - node --check src/AdminModule/CustomerService/ChatDetail.js
     - npm.cmd run build
   - Future backend validation should also include node --check server.js and route-specific API calls for support cases, B2B chat, admin accounts, and overall reports.
+
+2026-05-26 Production Deployment Record
+- Local Git publication
+  - Backend repo: hotels_backend on master.
+  - Commit pushed before deployment: 5778c93, message "Finalize admin platform and hotel management updates".
+  - Remote: origin https://github.com/AhmedAbdelRazak/hotels_backend.git.
+  - Command pattern used locally: git add ., git commit, git push -u origin master.
+  - .env stayed ignored by .gitignore and was not committed.
+  - GitHub reported existing Dependabot vulnerability counts after push. Treat those as follow-up dependency/security work, not as deployment blockers for this application-code push.
+- Production server pull
+  - SSH target: jannat.
+  - Production directory: /home/ahmedadmin/Hotels/hotels_backend.
+  - Pull command: git pull --ff-only origin master.
+  - Production backend HEAD after pull: 5778c93.
+  - Production working tree was clean before pull and clean after pull.
+- Production validation and restart
+  - Backend syntax checks on server:
+    - node --check server.js
+    - node --check controllers/b2b_chat.js
+    - node --check controllers/supportcase.js
+  - PM2 process restarted: hotels-backend.
+  - PM2 status after restart: hotels-backend online.
+  - Smoke API check:
+    - curl http://localhost:8080/api/currency-rates returned HTTP 200 JSON.
+  - Server log after restart included:
+    - "Server is running on port 8080"
+    - "MongoDB Atlas is connected"
+    - "[socket] DB watcher broadcasting conversation updates enabled."
+- Deployment notes
+  - The deployment was a fast-forward pull; no server-side merge conflict occurred.
+  - Existing UnauthorizedError entries in PM2 error logs are expected when protected routes are hit without an authorization token. They were not caused by the deployment itself.
+  - Future deployments should repeat: local build/checks, commit/push, ssh jannat, git pull --ff-only, frontend build if frontend changed, PM2 restart, curl smoke checks, and documentation update.
