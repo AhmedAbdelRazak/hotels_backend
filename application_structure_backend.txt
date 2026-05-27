@@ -908,6 +908,26 @@ Future TODO Backlog - Added 2026-05-26
 - Once those are done, start:
   - pm2 start scripts/otaMailboxPoller.js --name ota-mailbox-poller
   - pm2 save
+- 2026-05-27 follow-up:
+  - A one-time mailbox pull reached Microsoft 365 but failed before reading mail:
+    - response: 3 NO AUTHENTICATE failed.
+    - authenticationFailed: true.
+  - This means Outlook accepted the email, but the home server could not authenticate to the mailbox.
+  - scripts/otaMailboxPoller.js now has:
+    - --test-connection mode for redacted mailbox authentication checks.
+    - richer IMAP/Graph error logging.
+    - optional Microsoft Graph polling mode.
+  - Graph mode environment variables:
+    - OTA_MAILBOX_PROVIDER=graph
+    - OTA_MAILBOX_USER=<real mailbox address>
+    - OTA_GRAPH_TENANT_ID=<Azure tenant id>
+    - OTA_GRAPH_CLIENT_ID=<Azure app/client id>
+    - OTA_GRAPH_CLIENT_SECRET=<Azure app client secret>
+    - OTA_INBOUND_EMAIL_SECRET=<long random backend secret>
+    - OTA_INBOUND_POST_URL=http://127.0.0.1:8080/api/ota/inbound/email
+  - Graph app permission needed:
+    - Microsoft Graph application permission Mail.ReadWrite, with admin consent.
+  - Current production remains in IMAP mode until OTA_MAILBOX_PROVIDER=graph and Graph credentials are added.
 
 2026-05-27 Home-Server Email And OTA SendGrid Retirement Work
 - Source notes studied for this work:
