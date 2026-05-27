@@ -29,74 +29,40 @@ const numberEnv = (name, fallback) => {
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const getConfig = () => {
-	const graphTenantId = env(["OTA_GRAPH_TENANT_ID", "MS_GRAPH_TENANT_ID"]);
-	const graphClientId = env(["OTA_GRAPH_CLIENT_ID", "MS_GRAPH_CLIENT_ID"]);
-	const graphClientSecret = env([
-		"OTA_GRAPH_CLIENT_SECRET",
-		"MS_GRAPH_CLIENT_SECRET",
-	]);
-	const provider = env(
-		"OTA_MAILBOX_PROVIDER",
-		graphTenantId && graphClientId && graphClientSecret ? "graph" : "imap"
-	).toLowerCase();
-
-	return {
-		provider,
-		host: env(["OTA_MAILBOX_HOST", "IMAP_HOST"]),
-		port: numberEnv("OTA_MAILBOX_PORT", numberEnv("IMAP_PORT", 993)),
-		secure: boolEnv("OTA_MAILBOX_SECURE", boolEnv("IMAP_SECURE", true)),
-		user: env(["OTA_MAILBOX_USER", "IMAP_USER", "OTA_GRAPH_MAILBOX_USER"]),
-		pass: env(["OTA_MAILBOX_PASS", "IMAP_PASS"]),
-		folder: env("OTA_MAILBOX_FOLDER", provider === "graph" ? "inbox" : "INBOX"),
-		graphTenantId,
-		graphClientId,
-		graphClientSecret,
-		postUrl: env(
-			["OTA_INBOUND_POST_URL", "OTA_INBOUND_EMAIL_URL"],
-			"http://127.0.0.1:8080/api/ota/inbound/email"
-		),
-		secret: env(["OTA_INBOUND_EMAIL_SECRET", "INBOUND_EMAIL_SECRET"]),
-		allowMissingSecret: boolEnv("OTA_INBOUND_ALLOW_MISSING_SECRET", false),
-		markSeenAfterSuccess: boolEnv("OTA_MAILBOX_SEEN_AFTER_SUCCESS", true),
-		maxPerPoll: numberEnv("OTA_MAILBOX_MAX_PER_POLL", 25),
-		pollIntervalMs: numberEnv("OTA_MAILBOX_POLL_INTERVAL_MS", 60000),
-		dryRun: boolEnv("OTA_MAILBOX_DRY_RUN", false),
-	};
-};
+const getConfig = () => ({
+	host: env(["OTA_MAILBOX_HOST", "IMAP_HOST"]),
+	port: numberEnv("OTA_MAILBOX_PORT", numberEnv("IMAP_PORT", 993)),
+	secure: boolEnv("OTA_MAILBOX_SECURE", boolEnv("IMAP_SECURE", true)),
+	user: env(["OTA_MAILBOX_USER", "IMAP_USER"]),
+	pass: env(["OTA_MAILBOX_PASS", "IMAP_PASS"]),
+	folder: env("OTA_MAILBOX_FOLDER", "INBOX"),
+	postUrl: env(
+		["OTA_INBOUND_POST_URL", "OTA_INBOUND_EMAIL_URL"],
+		"http://127.0.0.1:8080/api/ota/inbound/email"
+	),
+	secret: env(["OTA_INBOUND_EMAIL_SECRET", "INBOUND_EMAIL_SECRET"]),
+	allowMissingSecret: boolEnv("OTA_INBOUND_ALLOW_MISSING_SECRET", false),
+	markSeenAfterSuccess: boolEnv("OTA_MAILBOX_SEEN_AFTER_SUCCESS", true),
+	maxPerPoll: numberEnv("OTA_MAILBOX_MAX_PER_POLL", 25),
+	pollIntervalMs: numberEnv("OTA_MAILBOX_POLL_INTERVAL_MS", 60000),
+	dryRun: boolEnv("OTA_MAILBOX_DRY_RUN", false),
+});
 
 const redact = (value = "") => (value ? `${String(value).slice(0, 3)}***` : "");
 
 const validateConfig = (config) => {
 	const missing = [];
-	if (!["imap", "graph"].includes(config.provider)) {
-		missing.push("OTA_MAILBOX_PROVIDER must be imap or graph");
-	}
+	if (!config.host) missing.push("OTA_MAILBOX_HOST");
 	if (!config.user) missing.push("OTA_MAILBOX_USER");
-	if (config.provider === "imap") {
-		if (!config.host) missing.push("OTA_MAILBOX_HOST");
-		if (!config.pass) missing.push("OTA_MAILBOX_PASS");
-	}
-	if (config.provider === "graph") {
-		if (!config.graphTenantId) missing.push("OTA_GRAPH_TENANT_ID");
-		if (!config.graphClientId) missing.push("OTA_GRAPH_CLIENT_ID");
-		if (!config.graphClientSecret) missing.push("OTA_GRAPH_CLIENT_SECRET");
-	}
+	if (!config.pass) missing.push("OTA_MAILBOX_PASS");
 	if (!config.postUrl) missing.push("OTA_INBOUND_POST_URL");
 	if (!config.secret && !config.allowMissingSecret) {
 		missing.push("OTA_INBOUND_EMAIL_SECRET");
 	}
 	const placeholders = [];
 	const placeholderPattern = /^<.*>$|password|credential|long\s+secret|secret\s+here|change\s+me/i;
-	if (config.provider === "imap" && config.pass && placeholderPattern.test(config.pass)) {
+	if (config.pass && placeholderPattern.test(config.pass)) {
 		placeholders.push("OTA_MAILBOX_PASS");
-	}
-	if (
-		config.provider === "graph" &&
-		config.graphClientSecret &&
-		placeholderPattern.test(config.graphClientSecret)
-	) {
-		placeholders.push("OTA_GRAPH_CLIENT_SECRET");
 	}
 	if (
 		config.secret &&
@@ -114,14 +80,11 @@ const validateConfig = (config) => {
 };
 
 const diagnostics = (config) => ({
-	provider: config.provider,
 	host: config.host,
 	port: config.port,
 	secure: config.secure,
 	user: redact(config.user),
 	folder: config.folder,
-	graphTenantId: redact(config.graphTenantId),
-	hasGraphClientId: !!config.graphClientId,
 	postUrl: config.postUrl,
 	hasSecret: !!config.secret,
 	markSeenAfterSuccess: config.markSeenAfterSuccess,
@@ -135,8 +98,6 @@ const describeError = (error = {}) => ({
 	message: error.message || String(error || ""),
 	code: error.code || "",
 	response: error.response || "",
-	status: error.status || "",
-	body: error.body || "",
 	serverResponseCode: error.serverResponseCode || "",
 	authenticationFailed: !!error.authenticationFailed,
 });
@@ -153,110 +114,10 @@ const buildClient = (config) =>
 		logger: false,
 	});
 
-const graphToken = async (config) => {
-	const params = new URLSearchParams();
-	params.set("client_id", config.graphClientId);
-	params.set("client_secret", config.graphClientSecret);
-	params.set("scope", "https://graph.microsoft.com/.default");
-	params.set("grant_type", "client_credentials");
-
-	const response = await fetch(
-		`https://login.microsoftonline.com/${encodeURIComponent(
-			config.graphTenantId
-		)}/oauth2/v2.0/token`,
-		{
-			method: "POST",
-			headers: { "content-type": "application/x-www-form-urlencoded" },
-			body: params.toString(),
-		}
-	);
-	const body = await response.json().catch(async () => ({
-		error_description: await response.text(),
-	}));
-	if (!response.ok) {
-		const error = new Error(body.error_description || body.error || "Graph token request failed");
-		error.status = response.status;
-		error.body = JSON.stringify(body).slice(0, 1000);
-		throw error;
-	}
-	return body.access_token;
-};
-
-const graphRequest = async (config, path, options = {}) => {
-	const token = options.token || (await graphToken(config));
-	const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-		...options,
-		headers: {
-			authorization: `Bearer ${token}`,
-			...(options.headers || {}),
-		},
-	});
-	if (!response.ok) {
-		const body = await response.text();
-		const error = new Error(`Graph request failed: ${response.status}`);
-		error.status = response.status;
-		error.body = body.slice(0, 1000);
-		throw error;
-	}
-	return response;
-};
-
-const graphMailboxPath = (config) =>
-	`/users/${encodeURIComponent(config.user)}/mailFolders/${encodeURIComponent(
-		config.folder || "inbox"
-	)}`;
-
-const listGraphUnreadMessages = async (config, token) => {
-	const select = "id,subject,from,receivedDateTime,internetMessageId,isRead";
-	const path = `${graphMailboxPath(config)}/messages?$filter=isRead eq false&$top=${
-		config.maxPerPoll
-	}&$select=${encodeURIComponent(select)}`;
-	const response = await graphRequest(config, path, { token });
-	const body = await response.json();
-	return Array.isArray(body.value) ? body.value : [];
-};
-
-const graphMessageRaw = async (config, token, messageId) => {
-	const response = await graphRequest(
-		config,
-		`/users/${encodeURIComponent(config.user)}/messages/${encodeURIComponent(
-			messageId
-		)}/$value`,
-		{ token, headers: { accept: "message/rfc822" } }
-	);
-	return response.buffer();
-};
-
-const markGraphMessageRead = async (config, token, messageId) => {
-	await graphRequest(
-		config,
-		`/users/${encodeURIComponent(config.user)}/messages/${encodeURIComponent(
-			messageId
-		)}`,
-		{
-			token,
-			method: "PATCH",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ isRead: true }),
-		}
-	);
-};
-
 const testConnection = async (config) => {
 	const missing = validateConfig(config);
 	if (missing.length) {
 		throw new Error(`Missing required mailbox configuration: ${missing.join(", ")}`);
-	}
-
-	if (config.provider === "graph") {
-		const token = await graphToken(config);
-		const messages = await listGraphUnreadMessages(config, token);
-		return {
-			connected: true,
-			provider: "graph",
-			folder: config.folder,
-			unseenCount: messages.length,
-		};
 	}
 
 	const client = buildClient(config);
@@ -305,62 +166,7 @@ const postInboundEmail = async (config, source) => {
 	return { ok: response.ok, status: response.status, body };
 };
 
-const processGraphMailbox = async (config) => {
-	const missing = validateConfig(config);
-	if (missing.length) {
-		throw new Error(`Missing required mailbox configuration: ${missing.join(", ")}`);
-	}
-
-	const token = await graphToken(config);
-	const messages = await listGraphUnreadMessages(config, token);
-	let processed = 0;
-	let succeeded = 0;
-	let failed = 0;
-
-	if (!messages.length) {
-		console.log("[ota-mailbox] no unread graph messages");
-		return { processed, succeeded, failed };
-	}
-
-	for (const message of messages) {
-		processed += 1;
-		console.log("[ota-mailbox] forwarding graph message", {
-			id: String(message.id || "").slice(0, 12),
-			subject: message.subject || "",
-			from: message.from?.emailAddress?.address || "",
-			messageId: message.internetMessageId || "",
-		});
-
-		try {
-			const source = await graphMessageRaw(config, token, message.id);
-			const result = await postInboundEmail(config, source);
-			if (!result.ok) {
-				failed += 1;
-				console.error("[ota-mailbox] inbound post failed", {
-					id: String(message.id || "").slice(0, 12),
-					status: result.status,
-					body: String(result.body || "").slice(0, 500),
-				});
-				continue;
-			}
-
-			succeeded += 1;
-			if (config.markSeenAfterSuccess && !config.dryRun) {
-				await markGraphMessageRead(config, token, message.id);
-			}
-		} catch (error) {
-			failed += 1;
-			console.error("[ota-mailbox] graph message failed", {
-				id: String(message.id || "").slice(0, 12),
-				error: describeError(error),
-			});
-		}
-	}
-
-	return { processed, succeeded, failed };
-};
-
-const processImapMailbox = async (config) => {
+const processMailbox = async (config) => {
 	const missing = validateConfig(config);
 	if (missing.length) {
 		throw new Error(`Missing required mailbox configuration: ${missing.join(", ")}`);
@@ -428,11 +234,6 @@ const processImapMailbox = async (config) => {
 
 	return { processed, succeeded, failed };
 };
-
-const processMailbox = async (config) =>
-	config.provider === "graph"
-		? processGraphMailbox(config)
-		: processImapMailbox(config);
 
 const runOnce = async () => {
 	const config = getConfig();
