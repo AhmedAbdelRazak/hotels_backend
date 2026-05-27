@@ -14,6 +14,9 @@ const {
 const {
 	startB2BChatMaintenanceJob,
 } = require("./services/b2bChatMaintenance");
+const {
+	startSupportCaseMaintenanceJob,
+} = require("./services/supportCaseMaintenance");
 
 const app = express();
 const server = http.createServer(app);
@@ -28,6 +31,7 @@ mongoose
 		console.log("MongoDB Atlas is connected");
 		startHousekeepingMaintenanceJob();
 		startB2BChatMaintenanceJob();
+		startSupportCaseMaintenanceJob({ getIo: () => app.get("io") });
 	})
 	.catch((err) => console.log("DB Connection Error: ", err));
 

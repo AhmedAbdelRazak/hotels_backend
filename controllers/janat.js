@@ -52,6 +52,20 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 
+const stripAgentRoomOverrides = (hotel = {}) => {
+	const plain =
+		hotel && typeof hotel.toObject === "function" ? hotel.toObject() : { ...hotel };
+	if (!Array.isArray(plain.roomCountDetails)) return plain;
+	plain.roomCountDetails = plain.roomCountDetails.map((room = {}) => {
+		const nextRoom =
+			room && typeof room.toObject === "function" ? room.toObject() : { ...room };
+		delete nextRoom.agentInventory;
+		delete nextRoom.agentPricingRate;
+		return nextRoom;
+	});
+	return plain;
+};
+
 const parseBooleanFlag = (value) =>
 	value === true || value === "true" || value === 1 || value === "1";
 
@@ -201,7 +215,7 @@ exports.listOfAllActiveHotels = async (req, res) => {
 			},
 		});
 
-		res.json(activeHotels);
+		res.json(activeHotels.map(stripAgentRoomOverrides));
 	} catch (err) {
 		console.error(err);
 		res
@@ -342,7 +356,7 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 			})
 			.filter((h) => (h.roomCountDetails || []).length > 0);
 
-		return res.status(200).json(filtered);
+		return res.status(200).json(filtered.map(stripAgentRoomOverrides));
 	} catch (err) {
 		console.error("Error fetching hotels with monthly/offers:", err);
 		return res.status(500).json({
@@ -440,7 +454,7 @@ exports.getHotelFromSlug = async (req, res) => {
 			roomCountDetails: filteredRooms,
 		};
 
-		return res.status(200).json(filteredHotel);
+		return res.status(200).json(stripAgentRoomOverrides(filteredHotel));
 	} catch (error) {
 		console.error("Error fetching hotel by slug:", error);
 		return res.status(500).json({
@@ -508,7 +522,7 @@ exports.getListOfHotels = async (req, res) => {
 		// );
 
 		// Send the sorted hotels as the response
-		res.status(200).json(sortedHotels);
+		res.status(200).json(sortedHotels.map(stripAgentRoomOverrides));
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
@@ -820,7 +834,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		// );
 
 		// Send the sorted hotels as the response
-		res.status(200).json(sortedHotels);
+		res.status(200).json(sortedHotels.map(stripAgentRoomOverrides));
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
@@ -1789,7 +1803,7 @@ exports.getHotelDetailsById = async (req, res) => {
 		}
 
 		// Return hotel details as the response
-		res.status(200).json(hotel);
+		res.status(200).json(stripAgentRoomOverrides(hotel));
 	} catch (error) {
 		console.error("Error fetching hotel details:", error);
 		res.status(500).json({

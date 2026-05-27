@@ -132,6 +132,8 @@ const hotel_detailsSchema = new mongoose.Schema(
 					extraAmenities: Array,
 					pricedExtras: Array,
 					pricingRate: Array,
+					agentInventory: Array,
+					agentPricingRate: Array,
 					roomColor: String,
 					activeRoom: Boolean,
 					commisionIncluded: Boolean,

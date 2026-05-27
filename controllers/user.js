@@ -763,6 +763,101 @@ exports.listHotelStaffUsers = async (req, res) => {
 	}
 };
 
+exports.listHotelAgentOptions = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		const permission = await canManageHotelStaff(req.profile, hotelId);
+		if (!permission.allowed) {
+			return res.status(403).json({ error: permission.error });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(permission.hotelId);
+		const limit = Math.min(Math.max(Number(req.query.limit) || 80, 1), 200);
+		const search = String(req.query.q || "").trim();
+		const searchFilter = search
+			? {
+					$or: [
+						{ name: { $regex: new RegExp(escapeRegExp(search), "i") } },
+						{ email: { $regex: new RegExp(escapeRegExp(search), "i") } },
+						{ companyName: { $regex: new RegExp(escapeRegExp(search), "i") } },
+						{
+							companyOfficialName: {
+								$regex: new RegExp(escapeRegExp(search), "i"),
+							},
+						},
+					],
+			  }
+			: {};
+
+		const agents = await User.find({
+			$and: [
+				{
+					$or: [
+						{ belongsToId: permission.ownerId },
+						{ hotelsToSupport: hotelObjectId },
+						{ hotelIdsWork: hotelObjectId },
+						{ hotelIdWork: permission.hotelId },
+					],
+				},
+				{
+					$or: [
+						{ hotelIdWork: permission.hotelId },
+						{ hotelIdsWork: hotelObjectId },
+						{ hotelsToSupport: hotelObjectId },
+					],
+				},
+				{
+					$or: [
+						{ role: 7000 },
+						{ roles: 7000 },
+						{ roleDescription: "ordertaker" },
+						{ roleDescriptions: "ordertaker" },
+					],
+				},
+				{
+					$or: [
+						{ activeUser: { $exists: false } },
+						{ activeUser: { $ne: false } },
+					],
+				},
+				{
+					$or: [
+						{ "agentApproval.status": { $exists: false } },
+						{ "agentApproval.status": null },
+						{ "agentApproval.status": { $regex: /^approved$/i } },
+					],
+				},
+				searchFilter,
+			],
+		})
+			.select(
+				"_id name email companyName companyOfficialName role roleDescription roles roleDescriptions activeUser agentApproval"
+			)
+			.sort({ companyName: 1, name: 1, email: 1 })
+			.limit(limit)
+			.lean()
+			.exec();
+
+		return res.json({
+			agents: agents.map((agent) => ({
+				_id: agent._id,
+				name: agent.name || "",
+				email: agent.email || "",
+				companyName: agent.companyName || agent.companyOfficialName || "",
+				role: agent.role,
+				roleDescription: agent.roleDescription || "",
+				roles: agent.roles || [],
+				roleDescriptions: agent.roleDescriptions || [],
+			})),
+			totalReturned: agents.length,
+			limit,
+		});
+	} catch (err) {
+		console.error("listHotelAgentOptions error:", err);
+		return res.status(500).json({ error: "Error retrieving hotel agents" });
+	}
+};
+
 exports.previewHotelStaffDashboard = async (req, res) => {
 	try {
 		const { hotelId, staffId } = req.params;

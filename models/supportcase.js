@@ -207,6 +207,14 @@ const supportCaseSchema = new Schema({
 	},
 });
 
+supportCaseSchema.index({ openedBy: 1, caseStatus: 1, updatedAt: 1 });
+supportCaseSchema.index({
+	openedBy: 1,
+	caseStatus: 1,
+	escalationStatus: 1,
+	updatedAt: -1,
+});
+
 const SupportCase = mongoose.model("SupportCase", supportCaseSchema);
 
 module.exports = SupportCase;

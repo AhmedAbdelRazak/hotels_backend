@@ -33,6 +33,7 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 	if (Object.keys(other).length) {
 		update.$set = other;
 	}
+	update.$set = { ...(update.$set || {}), updatedAt: new Date() };
 
 	return SupportCase.findByIdAndUpdate(_id, update, { new: true })
 		.lean()
@@ -42,7 +43,11 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 async function setCaseStatus(caseId, fields) {
 	const _id = safeId(caseId);
 	if (!_id) return null;
-	return SupportCase.findByIdAndUpdate(_id, { $set: fields }, { new: true })
+	return SupportCase.findByIdAndUpdate(
+		_id,
+		{ $set: { ...fields, updatedAt: new Date() } },
+		{ new: true }
+	)
 		.lean()
 		.exec();
 }

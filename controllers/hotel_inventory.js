@@ -3,9 +3,18 @@ const moment = require("moment");
 const HotelDetails = require("../models/hotel_details");
 const Reservations = require("../models/reservations");
 const Rooms = require("../models/rooms");
+const User = require("../models/user");
 const {
 	isPendingConfirmationReservation,
 } = require("../services/reservationStatus");
+const {
+	agentIdFromReservation,
+	canUseAgentOverrides,
+	getAgentAssignedStock,
+	getAgentPricingForDate,
+	hasAgentInventory,
+	normalizeId,
+} = require("../services/agentRoomOverrides");
 
 const normalizeKey = (value) =>
 	String(value || "")
@@ -73,8 +82,14 @@ const getDateRange = (startStr, endStr) => {
 	return { start, end, days };
 };
 
-const isReservationActive = (reservation, includeCancelled) => {
-	if (isPendingConfirmationReservation(reservation)) return false;
+const isReservationActive = (
+	reservation,
+	includeCancelled,
+	includePendingConfirmation = false
+) => {
+	if (!includePendingConfirmation && isPendingConfirmationReservation(reservation)) {
+		return false;
+	}
 	if (includeCancelled) return true;
 	const status = String(reservation?.reservation_status || "").toLowerCase();
 	if (!status) return true;
@@ -88,6 +103,57 @@ const MANUAL_CAPTURED_CONFIRMATIONS = new Set(["2944008828"]);
 const safeNumber = (val, fallback = 0) => {
 	const parsed = Number(val);
 	return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const n2 = (value) => Number(safeNumber(value, 0).toFixed(2));
+
+const positiveNumber = (value, fallback = 0) => {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const normalizeCommissionPercent = (value, fallback = 10) => {
+	let parsed = Number(value);
+	if (!Number.isFinite(parsed) || parsed < 0) parsed = Number(fallback);
+	if (!Number.isFinite(parsed) || parsed < 0) parsed = 10;
+	if (parsed > 0 && parsed <= 1) parsed *= 100;
+	return parsed;
+};
+
+const resolveDetailBasePrice = (detail = {}) => {
+	const explicitBasePrice =
+		detail?.price && typeof detail.price === "object"
+			? detail.price.basePrice
+			: detail?.price;
+	return positiveNumber(
+		explicitBasePrice,
+		positiveNumber(detail?.basePrice, 0)
+	);
+};
+
+const resolveDetailRootPrice = (detail = {}, basePrice = 0) =>
+	positiveNumber(
+		detail?.defaultCost,
+		positiveNumber(
+			detail?.rootPrice,
+			positiveNumber(
+				detail?.price && typeof detail.price === "object"
+					? detail.price.defaultCost
+					: undefined,
+				basePrice
+			)
+		)
+	);
+
+const loadInventoryActor = async (actorId = "") => {
+	const normalized = normalizeId(actorId);
+	if (!mongoose.Types.ObjectId.isValid(normalized)) return null;
+	return User.findById(normalized)
+		.select(
+			"_id role roles roleDescription roleDescriptions accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId activeUser"
+		)
+		.lean()
+		.exec();
 };
 
 const normalizePaymentStatus = (value = "") => {
@@ -332,22 +398,60 @@ const ensureRoomType = (roomTypeMap, key, label, roomType) => {
 	}
 };
 
-const buildPricingByDayFromDetail = (detail, startStr, endStr) => {
+const buildPricingByDayFromDetail = (
+	detail,
+	startStr,
+	endStr,
+	hotelCommission = 10,
+	agentId = ""
+) => {
 	if (!detail) return [];
 	const start = moment(startStr, "YYYY-MM-DD", true).startOf("day");
 	const end = moment(endStr, "YYYY-MM-DD", true).startOf("day");
 	if (!start.isValid() || !end.isValid()) return [];
 	const pricingRate = Array.isArray(detail.pricingRate) ? detail.pricingRate : [];
-	const basePrice = Number(detail?.price?.basePrice) || 0;
+	const basePrice = resolveDetailBasePrice(detail);
+	const defaultRootPrice = resolveDetailRootPrice(detail, basePrice);
+	const fallbackCommission = normalizeCommissionPercent(
+		detail?.roomCommission,
+		hotelCommission
+	);
 	const rows = [];
 	for (let d = start.clone(); d.isSameOrBefore(end, "day"); d.add(1, "day")) {
 		const dateString = d.format("YYYY-MM-DD");
 		const match = pricingRate.find(
 			(rate) => dateOnlyKey(rate?.calendarDate) === dateString
 		);
-		const calendarBlocked = calendarRateIsBlocked(match);
-		const price = calendarBlocked ? 0 : Number(match?.price) || basePrice;
-		rows.push({ date: dateString, price, calendarBlocked });
+		const agentMatch = getAgentPricingForDate(detail, agentId, dateString);
+		const effectiveRate = agentMatch || match;
+		const calendarBlocked = calendarRateIsBlocked(effectiveRate);
+		const price = calendarBlocked
+			? 0
+			: positiveNumber(effectiveRate?.price, basePrice || defaultRootPrice);
+		const rootPrice = calendarBlocked
+			? 0
+			: positiveNumber(
+					effectiveRate?.rootPrice ?? effectiveRate?.defaultCost,
+					defaultRootPrice || price
+			  );
+		const commissionRate = calendarBlocked
+			? 0
+			: normalizeCommissionPercent(effectiveRate?.commissionRate, fallbackCommission);
+		const totalPriceWithCommission = calendarBlocked
+			? 0
+			: n2(price + rootPrice * (commissionRate / 100));
+		rows.push({
+			date: dateString,
+			price,
+			rootPrice,
+			commissionRate,
+			totalPriceWithCommission,
+			totalPriceWithoutCommission: price,
+			basePrice,
+			defaultRootPrice,
+			calendarBlocked,
+			agentPricingApplied: Boolean(agentMatch),
+		});
 	}
 	return rows;
 };
@@ -692,7 +796,7 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 
 	try {
 		const hotel = await HotelDetails.findById(hotelId).select(
-			"hotelName roomCountDetails"
+			"hotelName belongsTo roomCountDetails commission"
 		);
 		if (!hotel) {
 			return res.status(404).json({ error: "Hotel not found" });
@@ -910,7 +1014,7 @@ exports.getHotelInventoryDay = async (req, res) => {
 
 	try {
 		const hotel = await HotelDetails.findById(hotelId).select(
-			"hotelName roomCountDetails"
+			"hotelName roomCountDetails commission"
 		);
 		if (!hotel) {
 			return res.status(404).json({ error: "Hotel not found" });
@@ -1002,6 +1106,7 @@ exports.getHotelInventoryDay = async (req, res) => {
 exports.getHotelInventoryAvailability = async (req, res) => {
 	const { hotelId } = req.params;
 	const { start, end, includeCancelled } = req.query;
+	const requestedAgentId = normalizeId(req.query.agentId);
 
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		return res.status(400).json({ error: "Invalid hotelId" });
@@ -1016,10 +1121,18 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 
 	try {
 		const hotel = await HotelDetails.findById(hotelId).select(
-			"hotelName roomCountDetails"
+			"hotelName roomCountDetails commission"
 		);
 		if (!hotel) {
 			return res.status(404).json({ error: "Hotel not found" });
+		}
+		let agentOverrideId = "";
+		if (requestedAgentId) {
+			const actor = await loadInventoryActor(req.auth?._id);
+			if (!canUseAgentOverrides(actor, hotel, requestedAgentId)) {
+				return res.status(403).json({ error: "Not authorized for agent inventory" });
+			}
+			agentOverrideId = requestedAgentId;
 		}
 
 		const roomCountDetails = Array.isArray(hotel.roomCountDetails)
@@ -1045,6 +1158,16 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 				roomKeyByType.set(typeKey, key);
 			}
 		});
+		const agentAssignedStockByKey = new Map();
+		if (agentOverrideId) {
+			detailByKey.forEach((detail, key) => {
+				if (!hasAgentInventory(detail, agentOverrideId)) return;
+				agentAssignedStockByKey.set(
+					key,
+					Math.max(0, Number(getAgentAssignedStock(detail, agentOverrideId) || 0))
+				);
+			});
+		}
 
 		const rooms = await Rooms.find({ hotelId })
 			.select("_id display_name room_type individualBeds")
@@ -1062,11 +1185,16 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			checkout_date: { $gt: startDate },
 		})
 			.populate("roomId", "display_name room_type individualBeds")
+			.select("checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing roomId bedNumber orderTakeId createdByUserId requestingUserId orderTaker createdBy")
 			.lean();
 
 		const reservationPayloads = reservations
 			.filter((reservation) =>
-				isReservationActive(reservation, includeCancelled === "true")
+				isReservationActive(
+					reservation,
+					includeCancelled === "true",
+					Boolean(agentOverrideId)
+				)
 			)
 			.map((reservation) => ({
 				reservation,
@@ -1074,17 +1202,27 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			}));
 
 		const statsByKey = new Map();
+		const agentStatsByKey = new Map();
 		roomTypeMap.forEach((rt) => {
 			statsByKey.set(rt.key, {
 				minAvailable: Number(rt.count) || 0,
 				maxReserved: 0,
 				maxOccupied: 0,
 			});
+			if (agentAssignedStockByKey.has(rt.key)) {
+				agentStatsByKey.set(rt.key, {
+					minAvailable: agentAssignedStockByKey.get(rt.key) || 0,
+					maxReserved: 0,
+					maxOccupied: 0,
+				});
+			}
 		});
 
 		range.days.forEach((dayMoment) => {
 			const reservedCounts = {};
 			const occupiedCounts = {};
+			const agentReservedCounts = {};
+			const agentOccupiedCounts = {};
 
 			reservationPayloads.forEach(({ reservation, counts }) => {
 				if (!reservationCoversDay(reservation, dayMoment)) return;
@@ -1107,6 +1245,17 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 					}
 					const bucket = hasRoomId ? occupiedCounts : reservedCounts;
 					bucket[key] = (bucket[key] || 0) + (Number(line.count) || 0);
+					if (
+						agentOverrideId &&
+						agentAssignedStockByKey.has(key) &&
+						agentIdFromReservation(reservation) === agentOverrideId
+					) {
+						const agentBucket = hasRoomId
+							? agentOccupiedCounts
+							: agentReservedCounts;
+						agentBucket[key] =
+							(agentBucket[key] || 0) + (Number(line.count) || 0);
+					}
 				});
 			});
 
@@ -1126,6 +1275,32 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 				stats.maxReserved = Math.max(stats.maxReserved, reserved);
 				stats.maxOccupied = Math.max(stats.maxOccupied, occupied);
 				statsByKey.set(rt.key, stats);
+
+				if (agentAssignedStockByKey.has(rt.key)) {
+					const agentReserved = Number(agentReservedCounts[rt.key]) || 0;
+					const agentOccupied = Number(agentOccupiedCounts[rt.key]) || 0;
+					const agentUsed = agentReserved + agentOccupied;
+					const agentCapacity = agentAssignedStockByKey.get(rt.key) || 0;
+					const agentAvailable = agentCapacity - agentUsed;
+					const agentStats = agentStatsByKey.get(rt.key) || {
+						minAvailable: agentCapacity,
+						maxReserved: 0,
+						maxOccupied: 0,
+					};
+					agentStats.minAvailable = Math.min(
+						agentStats.minAvailable,
+						agentAvailable
+					);
+					agentStats.maxReserved = Math.max(
+						agentStats.maxReserved,
+						agentReserved
+					);
+					agentStats.maxOccupied = Math.max(
+						agentStats.maxOccupied,
+						agentOccupied
+					);
+					agentStatsByKey.set(rt.key, agentStats);
+				}
 			});
 		});
 
@@ -1141,9 +1316,19 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			const capacity = Number(rt.count) || 0;
 			const effectiveCapacity = capacity === 0 && usedMax > 0 ? usedMax : capacity;
 			const detail = detailByKey.get(rt.key);
+			const agentStats = agentStatsByKey.get(rt.key);
+			const agentAssignedStock = agentAssignedStockByKey.has(rt.key)
+				? agentAssignedStockByKey.get(rt.key)
+				: null;
 			const displayName = detail?.displayName || detail?.display_name || rt.label;
 			const roomType = detail?.roomType || detail?.room_type || rt.roomType || "";
-			const pricingByDay = buildPricingByDayFromDetail(detail, startStr, endStr);
+			const pricingByDay = buildPricingByDayFromDetail(
+				detail,
+				startStr,
+				endStr,
+				hotel?.commission,
+				agentOverrideId
+			);
 			const blockedDates = pricingByDay
 				.filter((day) => day.calendarBlocked)
 				.map((day) => day.date);
@@ -1153,7 +1338,15 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 				total_available: effectiveCapacity,
 				reserved: Number(stats.maxReserved) || 0,
 				occupied: Number(stats.maxOccupied) || 0,
-				available: Math.max(Number(stats.minAvailable) || 0, 0),
+				available: Math.max(
+					Number(agentStats?.minAvailable ?? stats.minAvailable) || 0,
+					0
+				),
+				globalAvailable: Math.max(Number(stats.minAvailable) || 0, 0),
+				agentAssignedStock,
+				agentReserved: Number(agentStats?.maxReserved || 0),
+				agentOccupied: Number(agentStats?.maxOccupied || 0),
+				agentInventoryApplied: agentAssignedStock !== null,
 				start_date: startStr,
 				end_date: endStr,
 				pricingByDay,

@@ -58,6 +58,84 @@ const attachCurrentlyHousedFlag = (rooms = [], housedRoomIds = new Set()) =>
 		};
 	});
 
+const positiveNumber = (value, fallback = 0) => {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const normalizeCommissionPercent = (value, fallback = 10) => {
+	let parsed = Number(value);
+	if (!Number.isFinite(parsed) || parsed < 0) parsed = Number(fallback);
+	if (!Number.isFinite(parsed) || parsed < 0) parsed = 10;
+	if (parsed > 0 && parsed <= 1) parsed *= 100;
+	return parsed;
+};
+
+const calendarRateIsBlocked = (rate = {}) => {
+	if (!rate || typeof rate !== "object") return false;
+	const color = String(rate.color || "").toLowerCase();
+	const price = Number(rate.price);
+	const rootPrice = Number(rate.rootPrice);
+	return (
+		color === "black" ||
+		(Number.isFinite(price) && price <= 0) ||
+		(Number.isFinite(rootPrice) && rootPrice <= 0 && color === "black")
+	);
+};
+
+const buildRoomPricingDay = (room = {}, rate = null, hotelCommission = 10) => {
+	const calendarBlocked = calendarRateIsBlocked(rate);
+	const explicitBasePrice =
+		room?.price && typeof room.price === "object"
+			? room.price.basePrice
+			: room?.price;
+	const basePrice = positiveNumber(
+		explicitBasePrice,
+		positiveNumber(room?.basePrice, 0)
+	);
+	const defaultRootPrice = positiveNumber(
+		room?.defaultCost,
+		positiveNumber(
+			room?.rootPrice,
+			positiveNumber(
+				room?.price && typeof room.price === "object"
+					? room.price.defaultCost
+					: undefined,
+				basePrice
+			)
+		)
+	);
+	const price = calendarBlocked
+		? 0
+		: positiveNumber(rate?.price, basePrice || defaultRootPrice);
+	const rootPrice = calendarBlocked
+		? 0
+		: positiveNumber(
+				rate?.rootPrice ?? rate?.defaultCost,
+				defaultRootPrice || price
+		  );
+	const commissionRate = calendarBlocked
+		? 0
+		: normalizeCommissionPercent(
+				rate?.commissionRate,
+				room?.roomCommission ?? hotelCommission
+		  );
+	const totalPriceWithCommission = calendarBlocked
+		? 0
+		: Number((price + rootPrice * (commissionRate / 100)).toFixed(2));
+
+	return {
+		price,
+		rootPrice,
+		commissionRate,
+		totalPriceWithCommission,
+		totalPriceWithoutCommission: price,
+		basePrice,
+		defaultRootPrice,
+		calendarBlocked,
+	};
+};
+
 exports.roomById = (req, res, next, id) => {
 	Rooms.findById(id).exec((err, room) => {
 		if (err || !room) {
@@ -486,7 +564,7 @@ exports.reservedRoomsSummary = async (req, res) => {
 		const hotelDetails = await HotelDetails.findOne({
 			_id: accound_id,
 			belongsTo: belongsToId,
-		}).select("roomCountDetails");
+		}).select("roomCountDetails commission");
 		const roomCountDetails = Array.isArray(hotelDetails?.roomCountDetails)
 			? hotelDetails.roomCountDetails
 			: [];
@@ -536,7 +614,6 @@ exports.reservedRoomsSummary = async (req, res) => {
 			const pricingRate = Array.isArray(room.pricingRate)
 				? room.pricingRate
 				: [];
-			const basePrice = room?.price?.basePrice || 0;
 			for (
 				let date = startDate.clone();
 				date.isSameOrBefore(endDate);
@@ -546,8 +623,14 @@ exports.reservedRoomsSummary = async (req, res) => {
 				const specificPricing = pricingRate.find(
 					(p) => p.calendarDate === dateString
 				);
-				const price = specificPricing ? specificPricing.price : basePrice;
-				pricingByDay.push({ date: dateString, price });
+				pricingByDay.push({
+					date: dateString,
+					...buildRoomPricingDay(
+						room,
+						specificPricing,
+						hotelDetails?.commission
+					),
+				});
 			}
 
 			return {

@@ -48,6 +48,94 @@ const canViewHotelStats = (user, hotel) => {
 	);
 };
 
+const actorRoleNumbers = (actor = {}) =>
+	[
+		Number(actor.role),
+		...(Array.isArray(actor.roles) ? actor.roles.map(Number) : []),
+	].filter((role) => Number.isFinite(role));
+
+const actorRoleDescriptions = (actor = {}) => [
+	String(actor.roleDescription || "").toLowerCase(),
+	...(Array.isArray(actor.roleDescriptions)
+		? actor.roleDescriptions.map((item) => String(item || "").toLowerCase())
+		: []),
+];
+
+const isAgentAccount = (actor = {}) => {
+	const roles = actorRoleNumbers(actor);
+	const descriptions = actorRoleDescriptions(actor);
+	return (
+		roles.includes(7000) ||
+		descriptions.includes("ordertaker") ||
+		(Array.isArray(actor.accessTo) && actor.accessTo.includes("ownReservations"))
+	);
+};
+
+const canManageHotelAgentOverrides = (actor = {}, hotel = {}) => {
+	if (!actor || !hotel || actor.activeUser === false) return false;
+	if (isConfiguredSuperAdmin(actor)) return true;
+
+	const roles = actorRoleNumbers(actor);
+	const descriptions = actorRoleDescriptions(actor);
+	const actorId = normalizeId(actor._id);
+	const hotelId = normalizeId(hotel._id);
+	const ownerId = normalizeId(hotel.belongsTo);
+	const assignedHotelIds = assignedHotelIdsFromUser(actor);
+	const assignedToHotel = !hotelId || assignedHotelIds.includes(hotelId);
+
+	if (roles.includes(1000)) return true;
+	if (actorId && actorId === ownerId) return true;
+	if (roles.includes(2000) && (assignedToHotel || actorId === ownerId)) return true;
+	if (
+		assignedToHotel &&
+		(roles.includes(10000) ||
+			descriptions.includes("hotelmanager") ||
+			descriptions.includes("systemadmin") ||
+			Array.isArray(actor.accessTo) && actor.accessTo.includes("settings"))
+	) {
+		return true;
+	}
+
+	return false;
+};
+
+const sanitizeAgentRoomOverridesForViewer = (hotelDetails, viewer = null) => {
+	const hotel =
+		hotelDetails && typeof hotelDetails.toObject === "function"
+			? hotelDetails.toObject()
+			: { ...(hotelDetails || {}) };
+	const actorId = normalizeId(viewer?._id);
+	const canManage = canManageHotelAgentOverrides(viewer, hotel);
+	const canSeeSelf = actorId && isAgentAccount(viewer);
+
+	if (!Array.isArray(hotel.roomCountDetails)) return hotel;
+
+	hotel.roomCountDetails = hotel.roomCountDetails.map((room = {}) => {
+		const nextRoom =
+			room && typeof room.toObject === "function" ? room.toObject() : { ...room };
+		if (canManage) return nextRoom;
+		if (canSeeSelf) {
+			nextRoom.agentInventory = Array.isArray(nextRoom.agentInventory)
+				? nextRoom.agentInventory.filter(
+						(row) => normalizeId(row.agentId) === actorId
+				  )
+				: [];
+			nextRoom.agentPricingRate = Array.isArray(nextRoom.agentPricingRate)
+				? nextRoom.agentPricingRate.filter(
+						(row) => normalizeId(row.agentId) === actorId
+				  )
+				: [];
+			return nextRoom;
+		}
+
+		delete nextRoom.agentInventory;
+		delete nextRoom.agentPricingRate;
+		return nextRoom;
+	});
+
+	return hotel;
+};
+
 const assignedHotelIdsFromUser = (user = {}) =>
 	[
 		user.hotelIdWork,
@@ -874,8 +962,19 @@ exports.create = (req, res) => {
 	});
 };
 
-exports.read = (req, res) => {
-	return res.json(req.hotelDetails);
+exports.read = async (req, res) => {
+	try {
+		let viewer = null;
+		if (req.auth?._id && mongoose.Types.ObjectId.isValid(req.auth._id)) {
+			viewer = await User.findById(req.auth._id).lean().exec();
+		}
+		return res.json(sanitizeAgentRoomOverridesForViewer(req.hotelDetails, viewer));
+	} catch (error) {
+		console.log("hotel details read error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not load hotel details securely." });
+	}
 };
 
 exports.hotelGeneralStats = async (req, res) => {
@@ -1529,6 +1628,229 @@ const normalizeIdentity = (room = {}) => {
 	return out;
 };
 
+const hasNumberValue = (value) =>
+	value !== undefined && value !== null && value !== "";
+
+const toFiniteNumber = (value, fallback = 0) => {
+	if (!hasNumberValue(value)) return fallback;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const toPositiveNumber = (value, fallback = 0) => {
+	if (!hasNumberValue(value)) return fallback;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const toDateKey = (value) => {
+	if (!value) return "";
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+		return value.slice(0, 10);
+	}
+	const parsed = new Date(value);
+	return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+};
+
+const isBlockedPricingRate = (rate = {}) => {
+	if (!rate || typeof rate !== "object") return false;
+	const color = String(rate.color || "").toLowerCase();
+	const price = Number(rate.price);
+	const rootPrice = Number(rate.rootPrice);
+	return (
+		color === "black" ||
+		(Number.isFinite(price) && price <= 0) ||
+		(Number.isFinite(rootPrice) && rootPrice <= 0 && color === "black")
+	);
+};
+
+const normalizeRoomPricing = (room = {}) => {
+	const out = { ...room };
+	const explicitBasePrice =
+		out.price && typeof out.price === "object"
+			? out.price.basePrice
+			: out.price;
+	const basePrice = toFiniteNumber(
+		explicitBasePrice ?? out.basePrice,
+		toFiniteNumber(out.defaultCost ?? out.rootPrice, 0)
+	);
+	const defaultCost = toFiniteNumber(
+		out.defaultCost ??
+			out.rootPrice ??
+			(out.price && typeof out.price === "object"
+				? out.price.defaultCost
+				: undefined),
+		basePrice
+	);
+
+	out.price = {
+		...(out.price && typeof out.price === "object" ? out.price : {}),
+		basePrice,
+	};
+	out.defaultCost = defaultCost;
+
+	out.pricingRate = Array.isArray(out.pricingRate)
+		? out.pricingRate.map((rate) => {
+				const next = { ...rate };
+				if (isBlockedPricingRate(next)) {
+					return { ...next, price: 0, rootPrice: 0 };
+				}
+
+				const regularPrice = hasNumberValue(next.price)
+					? toPositiveNumber(next.price, basePrice || defaultCost)
+					: basePrice || defaultCost;
+				const rootPrice = hasNumberValue(next.rootPrice)
+					? toPositiveNumber(next.rootPrice, defaultCost || regularPrice)
+					: defaultCost || regularPrice;
+
+				return {
+					...next,
+					price: regularPrice,
+					rootPrice,
+				};
+		  })
+		: [];
+	out.agentInventory = Array.isArray(out.agentInventory)
+		? out.agentInventory
+				.map((row) => ({
+					...row,
+					agentId: normalizeId(row?.agentId),
+					stock: Math.max(0, Math.floor(toFiniteNumber(row?.stock, 0))),
+				}))
+				.filter((row) => row.agentId)
+		: [];
+	out.agentPricingRate = Array.isArray(out.agentPricingRate)
+		? out.agentPricingRate
+				.map((rate) => {
+					const next = { ...rate, agentId: normalizeId(rate?.agentId) };
+					const calendarDate = toDateKey(next.calendarDate);
+					if (!next.agentId || !calendarDate) return null;
+					if (isBlockedPricingRate(next)) {
+						return { ...next, calendarDate, price: 0, rootPrice: 0 };
+					}
+					const regularPrice = hasNumberValue(next.price)
+						? toPositiveNumber(next.price, basePrice || defaultCost)
+						: basePrice || defaultCost;
+					const rootPrice = hasNumberValue(next.rootPrice)
+						? toPositiveNumber(next.rootPrice, defaultCost || regularPrice)
+						: defaultCost || regularPrice;
+					return {
+						...next,
+						calendarDate,
+						price: regularPrice,
+						rootPrice,
+					};
+				})
+				.filter(Boolean)
+		: [];
+
+	return out;
+};
+
+const objectIdOrNull = (value) => {
+	const id = normalizeId(value);
+	return mongoose.Types.ObjectId.isValid(id) ? mongoose.Types.ObjectId(id) : null;
+};
+
+const getRoomFromHotel = (hotel = {}, roomId) =>
+	(hotel.roomCountDetails || []).find(
+		(room) => normalizeId(room?._id) === normalizeId(roomId)
+	);
+
+const asPlainObject = (doc = {}) =>
+	doc && typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+
+const scopedHotelAgentQuery = (hotel = {}, agentId) => {
+	const hotelId = normalizeId(hotel._id);
+	const hotelObjectId = objectIdOrNull(hotelId);
+	const ownerId = normalizeId(hotel.belongsTo);
+
+	return {
+		_id: objectIdOrNull(agentId),
+		$and: [
+			{
+				$or: [
+					{ belongsToId: ownerId },
+					{ hotelsToSupport: hotelObjectId },
+					{ hotelIdsWork: hotelObjectId },
+					{ hotelIdWork: hotelId },
+				],
+			},
+			{
+				$or: [
+					{ hotelIdWork: hotelId },
+					{ hotelIdsWork: hotelObjectId },
+					{ hotelsToSupport: hotelObjectId },
+				],
+			},
+			{
+				$or: [
+					{ role: 7000 },
+					{ roles: 7000 },
+					{ roleDescription: "ordertaker" },
+					{ roleDescriptions: "ordertaker" },
+				],
+			},
+			{
+				$or: [
+					{ activeUser: { $exists: false } },
+					{ activeUser: { $ne: false } },
+				],
+			},
+			{
+				$or: [
+					{ "agentApproval.status": { $exists: false } },
+					{ "agentApproval.status": null },
+					{ "agentApproval.status": { $regex: /^approved$/i } },
+				],
+			},
+		],
+	};
+};
+
+const agentOverrideSnapshot = (agent = {}) => ({
+	agentId: normalizeId(agent._id),
+	agentName: agent.name || agent.email || "",
+	agentEmail: agent.email || "",
+	companyName: agent.companyName || agent.companyOfficialName || "",
+});
+
+const normalizeStockValue = (value) =>
+	Math.max(0, Math.floor(toFiniteNumber(value, 0)));
+
+const normalizeAgentPricingPayload = (rows = [], agentSnapshot = {}, room = {}) => {
+	const normalizedRoom = normalizeRoomPricing(room);
+	const basePrice = toFiniteNumber(
+		normalizedRoom?.price?.basePrice,
+		toFiniteNumber(normalizedRoom?.defaultCost ?? normalizedRoom?.rootPrice, 0)
+	);
+	const defaultCost = toFiniteNumber(
+		normalizedRoom?.defaultCost ?? normalizedRoom?.rootPrice,
+		basePrice
+	);
+
+	return (Array.isArray(rows) ? rows : [])
+		.map((row) => {
+			const calendarDate = toDateKey(row?.calendarDate);
+			if (!calendarDate) return null;
+
+			const price = toPositiveNumber(row?.price, basePrice || defaultCost);
+			const rootPrice = toPositiveNumber(
+				row?.rootPrice,
+				defaultCost || price
+			);
+			if (!(price > 0) || !(rootPrice > 0)) return null;
+
+			return {
+				...agentSnapshot,
+				calendarDate,
+				price,
+				rootPrice,
+			};
+		})
+		.filter(Boolean);
+};
+
 // Keep your existing color uniqueness behavior; only minor safety guards
 const ensureUniqueRoomColors = (roomCountDetails = []) => {
 	const colorMap = {};
@@ -1618,13 +1940,14 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 
 				if (existingIndex !== -1) {
 					// Merge
-					updatedRoomCountDetails[existingIndex] = {
+					updatedRoomCountDetails[existingIndex] = normalizeRoomPricing({
 						...updatedRoomCountDetails[existingIndex],
 						...newRoom,
-					};
+					});
 				} else {
 					if (newRoom.activeRoom === undefined) newRoom.activeRoom = true;
-					updatedRoomCountDetails.push(newRoom);
+					const normalizedNewRoom = normalizeRoomPricing(newRoom);
+					updatedRoomCountDetails.push(normalizedNewRoom);
 					console.log(`Added new room: ${JSON.stringify(newRoom)}`);
 				}
 			} else {
@@ -1637,7 +1960,7 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 					if (existingIndex !== -1) {
 						// Merge but protect identity from being blanked by accidental empty values
 						const existing = updatedRoomCountDetails[existingIndex];
-						const merged = { ...existing, ...newRoom };
+						const merged = normalizeRoomPricing({ ...existing, ...newRoom });
 						if (!hasRoomIdentity(newRoom)) {
 							// keep existing identity if incoming lacks it
 							merged.roomType = existing.roomType;
@@ -1648,7 +1971,8 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 						// Only allow adding a *new* room here if it also has identity
 						if (identityOK) {
 							if (newRoom.activeRoom === undefined) newRoom.activeRoom = true;
-							updatedRoomCountDetails.push(newRoom);
+							const normalizedNewRoom = normalizeRoomPricing(newRoom);
+							updatedRoomCountDetails.push(normalizedNewRoom);
 							console.log(`Added new room with _id: ${newRoom._id}`);
 						} else {
 							console.warn(
@@ -1671,6 +1995,7 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 
 		// Ensure all room colors are unique within the same roomType
 		ensureUniqueRoomColors(updatedRoomCountDetails);
+		updatedRoomCountDetails = updatedRoomCountDetails.map(normalizeRoomPricing);
 
 		// Assign the updated rooms
 		updatedFields.roomCountDetails = updatedRoomCountDetails;
@@ -1742,6 +2067,160 @@ const calcDistances = async (coords, hotelState = "") => {
 };
 
 /* ────────────────── UPDATE HANDLER ────────────────── */
+
+exports.updateRoomAgentOverrides = async (req, res) => {
+	try {
+		const { hotelId, roomId } = req.params;
+		const { action } = req.body || {};
+		const normalizedAction = String(action || "").trim();
+
+		if (
+			!mongoose.Types.ObjectId.isValid(hotelId) ||
+			!mongoose.Types.ObjectId.isValid(roomId)
+		) {
+			return res.status(400).json({ error: "Invalid hotel or room id" });
+		}
+
+		const hotel = await HotelDetails.findById(hotelId).exec();
+		if (!hotel) return res.status(404).json({ error: "Hotel details not found" });
+
+		if (!canManageHotelAgentOverrides(req.profile, hotel)) {
+			return res
+				.status(403)
+				.json({ error: "Not allowed to update agent room settings" });
+		}
+
+		const room = getRoomFromHotel(hotel, roomId);
+		if (!room) return res.status(404).json({ error: "Room was not found" });
+
+		const roomObjectId = objectIdOrNull(roomId);
+		const agentId = normalizeId(req.body?.agentId);
+		const needsAgentValidation = ["saveStock", "savePricingRange"].includes(
+			normalizedAction
+		);
+		let agentSnapshot = null;
+
+		if (
+			[
+				"saveStock",
+				"removeStock",
+				"savePricingRange",
+				"removePricingDate",
+			].includes(normalizedAction) &&
+			!mongoose.Types.ObjectId.isValid(agentId)
+		) {
+			return res.status(400).json({ error: "Please choose a valid agent" });
+		}
+
+		if (needsAgentValidation) {
+			const agent = await User.findOne(scopedHotelAgentQuery(hotel, agentId))
+				.select("_id name email companyName companyOfficialName")
+				.lean()
+				.exec();
+
+			if (!agent) {
+				return res
+					.status(403)
+					.json({ error: "This agent is not assigned to this hotel" });
+			}
+
+			agentSnapshot = agentOverrideSnapshot(agent);
+		}
+
+		const plainRoom = asPlainObject(room);
+		let updatePath = "";
+		let nextRows = [];
+
+		if (normalizedAction === "saveStock") {
+			updatePath = "roomCountDetails.$.agentInventory";
+			nextRows = [
+				...(Array.isArray(plainRoom.agentInventory)
+					? plainRoom.agentInventory.filter(
+							(row) => normalizeId(row?.agentId) !== agentId
+					  )
+					: []),
+				{
+					...agentSnapshot,
+					stock: normalizeStockValue(req.body?.stock),
+				},
+			];
+		} else if (normalizedAction === "removeStock") {
+			updatePath = "roomCountDetails.$.agentInventory";
+			nextRows = (Array.isArray(plainRoom.agentInventory)
+				? plainRoom.agentInventory
+				: []
+			).filter((row) => normalizeId(row?.agentId) !== agentId);
+		} else if (normalizedAction === "savePricingRange") {
+			updatePath = "roomCountDetails.$.agentPricingRate";
+			const pricingRows = normalizeAgentPricingPayload(
+				req.body?.pricingRows,
+				agentSnapshot,
+				plainRoom
+			);
+			if (!pricingRows.length) {
+				return res
+					.status(400)
+					.json({ error: "Please provide a valid pricing range" });
+			}
+			const dates = new Set(pricingRows.map((row) => row.calendarDate));
+			nextRows = [
+				...(Array.isArray(plainRoom.agentPricingRate)
+					? plainRoom.agentPricingRate.filter(
+							(row) =>
+								normalizeId(row?.agentId) !== agentId ||
+								!dates.has(toDateKey(row?.calendarDate))
+					  )
+					: []),
+				...pricingRows,
+			];
+		} else if (normalizedAction === "removePricingDate") {
+			updatePath = "roomCountDetails.$.agentPricingRate";
+			const calendarDate = toDateKey(req.body?.calendarDate);
+			if (!calendarDate) {
+				return res.status(400).json({ error: "Please provide a valid date" });
+			}
+			nextRows = (Array.isArray(plainRoom.agentPricingRate)
+				? plainRoom.agentPricingRate
+				: []
+			).filter(
+				(row) =>
+					normalizeId(row?.agentId) !== agentId ||
+					toDateKey(row?.calendarDate) !== calendarDate
+			);
+		} else {
+			return res.status(400).json({ error: "Unsupported agent override action" });
+		}
+
+		const updatedHotel = await HotelDetails.findOneAndUpdate(
+			{ _id: hotel._id, "roomCountDetails._id": roomObjectId },
+			{ $set: { [updatePath]: nextRows } },
+			{ new: true, runValidators: true }
+		)
+			.lean()
+			.exec();
+
+		if (!updatedHotel) {
+			return res.status(404).json({ error: "Room was not found" });
+		}
+
+		const updatedRoom = getRoomFromHotel(updatedHotel, roomId) || {};
+		return res.json({
+			ok: true,
+			saved: true,
+			action: normalizedAction,
+			roomId: normalizeId(roomId),
+			agentInventory: Array.isArray(updatedRoom.agentInventory)
+				? updatedRoom.agentInventory
+				: [],
+			agentPricingRate: Array.isArray(updatedRoom.agentPricingRate)
+				? updatedRoom.agentPricingRate
+				: [],
+		});
+	} catch (err) {
+		console.error("updateRoomAgentOverrides error:", err);
+		return res.status(500).json({ error: "Could not save agent room settings" });
+	}
+};
 
 exports.updateHotelDetails = async (req, res) => {
 	const hotelDetailsId = req.params.hotelId;
@@ -1976,7 +2455,11 @@ exports.list = (req, res) => {
 				console.log(err, "err");
 				return res.status(400).json({ error: err });
 			}
-			res.json(data);
+			res.json(
+				(Array.isArray(data) ? data : []).map((hotel) =>
+					sanitizeAgentRoomOverridesForViewer(hotel, null)
+				)
+			);
 		});
 };
 
@@ -1992,7 +2475,7 @@ exports.remove = (req, res) => {
 };
 
 exports.getHotelDetails = (req, res) => {
-	return res.json(req.hotelDetails);
+	return res.json(sanitizeAgentRoomOverridesForViewer(req.hotelDetails, null));
 };
 
 exports.listForAdmin = async (req, res) => {
@@ -2261,7 +2744,7 @@ exports.listForAdmin = async (req, res) => {
 				};
 			}
 			delete out.owner;
-			return out;
+			return sanitizeAgentRoomOverridesForViewer(out, null);
 		});
 
 		const safeSummary = (arr) =>
@@ -2376,7 +2859,7 @@ exports.listForAdminAll = async (req, res) => {
 				};
 			}
 			delete h.owner;
-			return h;
+			return sanitizeAgentRoomOverridesForViewer(h, null);
 		});
 
 		/* 7️⃣  Send (no page/pages since it's "all") */
@@ -2404,7 +2887,9 @@ exports.listOfHotelUser = async (req, res) => {
 			});
 		}
 
-		res.status(200).json(hotels);
+		res
+			.status(200)
+			.json(hotels.map((hotel) => sanitizeAgentRoomOverridesForViewer(hotel, null)));
 	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({

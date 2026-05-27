@@ -104,8 +104,11 @@ Primary Route Files And API Areas
   - POST /property-listing supports owner signup, public agent applications, and public job applications.
 - routes/user.js
   - User profile reads/updates, admin account lists, hotel staff lists, staff updates, housekeeper lookup, and preview dashboard data.
+  - GET /hotel-agents/:hotelId/:userId returns a scoped, minimal, searchable approved-agent option list for room inventory/pricing assignment UIs.
 - routes/hotel_details.js
   - Hotel profile creation/update, owner/admin hotel lists, executive summaries, open/incomplete reservation summaries, hotel stats, reassignment, and owner PayPal methods.
+  - Public hotel-detail reads use optional auth and strip room-level agentInventory/agentPricingRate unless the viewer is the agent for those rows or an authorized settings user.
+  - PATCH /hotel-details/:hotelId/rooms/:roomId/agent-overrides/:userId persists only a room's private agentInventory or agentPricingRate override data. It must not save the whole hotel/room form, so unrelated unsaved settings changes are not committed by the agent override modal.
 - routes/rooms.js
   - Room CRUD, distinct room values, room inventory availability, reservation-room availability, room deletion checks, and inventory reports.
 - routes/reservations.js
@@ -122,6 +125,8 @@ Primary Route Files And API Areas
   - Admin and hotel reports, reservation/check-in/check-out reports, top hotels, export, paid breakdown, and occupancy.
 - routes/hotel_inventory.js
   - Calendar/day/availability inventory endpoints.
+  - Availability supports an authorized agentId query to return agent-scoped assigned stock/pricing while falling back to hotel-wide inventory/calendar when no override exists.
+  - Agent-scoped availability must count pending-confirmation reservations against that agent's assigned stock. This is intentional because order-taker/agent reservations start as Pending Confirmation, and the same agent must not be able to place multiple pending reservations against stock=1.
 - routes/supportcase.js
   - Support cases by status/hotel, case details, updates, unseen counters, seen status, and message deletion.
 - routes/janat.js
@@ -139,6 +144,8 @@ Core Models
   - Stores short public signup invitation records for /signup?invite=<code>. Codes are stored only as SHA-256 hashes; payloads include signed invitation scope such as account type, hotels, hotel names, role, agent commercial model, optional prefill data, creator, and expiry.
 - models/hotel_details.js
   - Hotel profile, owner link, setup completion fields, rooms/photos/location/payment settings, activation state, and wallet/payment fields.
+  - roomCountDetails may include private per-agent agentInventory and agentPricingRate rows; do not expose them to public/B2C hotel responses.
+  - 2026-05-27 regression: virtual reservation employee codex.virtual.res.employee.qa@jannatbooking.test assigned stock for virtual agent codex.virtual.agent.qa@jannatbooking.test on hotel 68da202900a070e8123c27c4 / room 68da23fe00a070e8123c2aa4. Stock=1 allowed exactly one agent reservation over 2032-04-19..2032-04-22 and blocked an overlapping 2032-04-20 request. Stock=0 then blocked 2032-04-29..2032-05-01. All assertions passed.
 - models/rooms.js
   - Physical room records, room type/display, room cleanliness state, housekeeping dirty metadata, bed setup, and hotel ownership.
 - models/reservations.js
@@ -157,12 +164,17 @@ Core Models
 Important Services
 - services/housekeepingMaintenance.js
   - Scheduled job that marks rooms dirty after the configured clean-room window.
+- services/supportCaseMaintenance.js
+  - Scheduled job that closes inactive open B2C client SupportCase records after 1 hour.
+  - It must only set the case to closed and preserve the SupportCase document and conversation history.
 - services/notificationEvents.js
   - Emits hotel and owner notification counter updates through Socket.IO rooms.
 - services/reservationStatus.js
   - Shared pending-confirmation and reservation-status helpers.
 - services/reservationPricing.js
   - Reservation pricing calculations and shared pricing behavior.
+- services/agentRoomOverrides.js
+  - Shared helpers for per-agent room inventory/pricing overrides, agent identity resolution, and authorization checks for agent-scoped availability.
 - services/activityTracker.js
   - Writes operational activity/audit history.
   - Tracks reservation status/scope changes, reservation exports, financial report exports, account creation, and account updates.
@@ -181,6 +193,8 @@ Critical Workflows To Protect
   - Always verify the acting user can create a reservation for the target hotel.
   - For overall-dashboard reservation creation, require the hotel dropdown to be selected from hotels assigned to the user.
   - For agents/order takers, source should come from the agent/company identity unless a role explicitly requires a manual source.
+  - If a room has assigned stock for the booking agent, reservation inventory validation counts against that agent stock first and only counts reservations created by that same agent.
+  - If a room has agent-specific calendar pricing for the booking agent, reservation pricing uses that row first and falls back to the hotel-wide room calendar otherwise.
 - Public signup applications
   - Direct public signup is for hotel manager/owner registration only.
   - Agent and job applicants require a valid backend invitation generated from the overall create-account flow. New invitations use a short /signup?invite=<code> URL backed by models/signup_invitation.js; legacy invitationToken links are still accepted for compatibility.
@@ -422,6 +436,9 @@ Final Production Readiness Notes
 
 - Support case backend updates and rules
   - routes/supportcase.js and controllers/supportcase.js own B2C/support-case chat and support case history.
+  - services/supportCaseMaintenance.js auto-closes open client/B2C support cases after 1 hour of no activity.
+  - Inactive B2C auto-close must never delete the SupportCase document or conversation; it only sets caseStatus=closed, closedAt, closedBy=csr, pauses AI, and preserves history.
+  - Public/client message appends to an already closed B2C case are rejected so new activity cannot be hidden inside a closed history case.
   - Active and historical support cases must be scoped to the current actor:
     - Configured super admins can see all.
     - Platform employees see only cases allowed by accessTo and assigned hotels.

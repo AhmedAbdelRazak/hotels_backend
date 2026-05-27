@@ -1644,6 +1644,13 @@ exports.requireSignin = expressJwt({
 	algorithms: ["HS256"],
 });
 
+exports.optionalSignin = expressJwt({
+	secret: process.env.JWT_SECRET,
+	userProperty: "auth",
+	algorithms: ["HS256"],
+	credentialsRequired: false,
+});
+
 exports.isAuth = (req, res, next) => {
 	const sameUser = req.profile && req.auth && req.profile._id == req.auth._id;
 	if (sameUser) return next();

@@ -4,6 +4,7 @@ const express = require("express");
 const router = express.Router();
 const {
 	requireSignin,
+	optionalSignin,
 	isAuth,
 	isHotelOwner,
 	isAdmin,
@@ -18,6 +19,7 @@ const {
 	list,
 	listForAdmin,
 	updateHotelDetails,
+	updateRoomAgentOverrides,
 	listOfHotelUser,
 	listForAdminAll,
 	reassignHotelOwner,
@@ -67,7 +69,7 @@ router.get(
 	hotelIncompleteReservations
 );
 
-router.get("/hotel-details/:hotelDetailsId", read); // Consolidated into a single route
+router.get("/hotel-details/:hotelDetailsId", optionalSignin, read); // Consolidated into a single route
 
 router.post(
 	"/hotel-details/create/:userId",
@@ -99,6 +101,13 @@ router.put(
 	isAuth,
 	isHotelOwner,
 	updateHotelDetails
+);
+
+router.patch(
+	"/hotel-details/:hotelId/rooms/:roomId/agent-overrides/:userId",
+	requireSignin,
+	isAuth,
+	updateRoomAgentOverrides
 );
 
 router.put(

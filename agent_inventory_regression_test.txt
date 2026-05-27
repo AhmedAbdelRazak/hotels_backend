@@ -1,0 +1,27 @@
+Agent Inventory Regression Test - 2026-05-27
+
+Purpose
+- Verify that private per-agent room stock is enforced for agent/order-taker reservations.
+- Verify that reservation employees assigned to the hotel can read the agent-scoped calendar/availability view.
+- Verify that closing the modal save path persists only the agent override portion, not the whole room form.
+
+Local Test Data
+- Hotel: zad al safa, 68da202900a070e8123c27c4
+- Room: Triple Room - Spacious & Budget-Friendly, 68da23fe00a070e8123c2aa4
+- Virtual agent: codex.virtual.agent.qa@jannatbooking.test, role 7000 ordertaker
+- Virtual reservation employee: codex.virtual.res.employee.qa@jannatbooking.test, role 8000 reservationemployee
+
+Scenario
+- Reservation employee assigned stock=1 for the virtual agent on the room.
+- Reservation employee successfully read agent-scoped availability for 2032-04-19 through 2032-04-21.
+- Agent created one reservation for 2032-04-19 through 2032-04-22.
+- The created reservation stayed in Pending Confirmation, which still consumed the agent assigned stock.
+- Agent attempted an overlapping reservation starting 2032-04-20 and was blocked with agentInventoryBlocked.
+- Reservation employee changed the same assigned stock to 0.
+- Agent attempted a separate reservation for 2032-04-29 through 2032-05-01 and was blocked with agentInventoryBlocked.
+
+Result
+- All assertions passed.
+- Key invariant: agent-scoped inventory counts pending-confirmation reservations because agent-created reservations begin as pending and must still consume the assigned stock.
+- Key invariant: stock 0 is valid data and means the agent cannot book that room until the value is changed.
+

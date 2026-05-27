@@ -32,6 +32,12 @@ const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
 const {
+	agentIdFromReservation,
+	getAgentAssignedStock,
+	getAgentPricingForDate,
+	hasAgentInventory,
+} = require("../services/agentRoomOverrides");
+const {
 	trackReservationStatusChange,
 } = require("../services/activityTracker");
 const {
@@ -901,12 +907,15 @@ const validateOrderTakerBlockedCalendar = async (reservationData = {}) => {
 		? hotel.roomCountDetails
 		: [];
 	const blockedRooms = [];
+	const agentId = agentIdFromReservation(reservationData);
 
 	selections.forEach((selection) => {
 		const detail = findRoomDetailForCalendar(details, selection);
 		const rates = Array.isArray(detail?.pricingRate) ? detail.pricingRate : [];
 		const blockedDates = stayDates.filter((date) => {
-			const rate = rates.find((item) => item?.calendarDate === date);
+			const rate =
+				getAgentPricingForDate(detail, agentId, date) ||
+				rates.find((item) => item?.calendarDate === date);
 			return calendarRateIsBlocked(rate);
 		});
 		if (blockedDates.length > 0) {
@@ -957,8 +966,13 @@ const reservationCoversStayDate = (reservation = {}, dateKey = "") => {
 	return checkinKey && checkoutKey && checkinKey <= dateKey && dateKey < checkoutKey;
 };
 
-const reservationBlocksInventory = (reservation = {}) => {
-	return shouldCountReservationForInventory(reservation);
+const reservationBlocksInventory = (
+	reservation = {},
+	{ includePendingConfirmation = false } = {}
+) => {
+	return shouldCountReservationForInventory(reservation, {
+		includePendingConfirmation,
+	});
 };
 
 const validateReservationInventoryForCreate = async (
@@ -990,23 +1004,43 @@ const validateReservationInventoryForCreate = async (
 		checkin_date: { $lt: new Date(`${stayDates[stayDates.length - 1]}T23:59:59.999Z`) },
 		checkout_date: { $gt: new Date(`${stayDates[0]}T00:00:00.000Z`) },
 	})
-		.select("_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing")
+		.select("_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing orderTakeId createdByUserId requestingUserId orderTaker createdBy")
 		.lean()
 		.exec();
 
 	const excludedId = normalizeId(excludeReservationId);
-	const activeReservations = reservations
-		.filter(reservationBlocksInventory)
-		.filter((reservation) => !excludedId || normalizeId(reservation._id) !== excludedId);
+	const candidateReservations = reservations.filter(
+		(reservation) => !excludedId || normalizeId(reservation._id) !== excludedId
+	);
 	const issues = [];
+	const agentId = agentIdFromReservation(reservationData);
 
 	for (const selection of selections) {
 		const detail = findRoomDetailForCalendar(details, selection);
-		const capacity = Math.max(0, Number(detail?.count || 0));
+		const useAgentInventory = agentId && hasAgentInventory(detail, agentId);
+		const assignedStock = useAgentInventory
+			? getAgentAssignedStock(detail, agentId)
+			: null;
+		const capacity = useAgentInventory
+			? Math.max(0, Number(assignedStock || 0))
+			: Math.max(0, Number(detail?.count || 0));
 		for (const date of stayDates) {
 			let reserved = 0;
-			for (const reservation of activeReservations) {
+			for (const reservation of candidateReservations) {
+				if (
+					!reservationBlocksInventory(reservation, {
+						includePendingConfirmation: useAgentInventory,
+					})
+				) {
+					continue;
+				}
 				if (!reservationCoversStayDate(reservation, date)) continue;
+				if (
+					useAgentInventory &&
+					agentIdFromReservation(reservation) !== agentId
+				) {
+					continue;
+				}
 				const reservationSelections = await getReservationRoomSelections(reservation);
 				reserved += reservationSelections.reduce((sum, existingSelection) => {
 					return roomSelectionMatches(selection, existingSelection)
@@ -1024,6 +1058,8 @@ const validateReservationInventoryForCreate = async (
 					displayName: selection.displayName,
 					date,
 					capacity,
+					assignedStock,
+					agentScoped: useAgentInventory,
 					reserved,
 					available: Math.max(available, 0),
 					requested,

@@ -5,6 +5,10 @@
 const mongoose = require("mongoose");
 const moment = require("moment-timezone");
 const HotelDetails = require("../models/hotel_details");
+const {
+	agentIdFromReservation,
+	getAgentPricingForDate,
+} = require("./agentRoomOverrides");
 
 class ReservationPricingError extends Error {
 	constructor(message, statusCode = 400, code = "reservation_pricing_error", details = {}) {
@@ -395,6 +399,7 @@ const buildCanonicalRoomPricing = ({
 	preferCalendarPrice = false,
 	allowBlockedCalendar = false,
 	warnings = [],
+	agentId = "",
 }) => {
 	const details = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -413,6 +418,7 @@ const buildCanonicalRoomPricing = ({
 	}
 
 	const rates = Array.isArray(detail.pricingRate) ? detail.pricingRate : [];
+	const agentOverrideId = normalizeId(agentId || agentIdFromReservation(room));
 	const basePrice = resolveDetailBasePrice(detail);
 	const defaultCost = resolveDetailDefaultCost(detail, basePrice);
 	const fallbackCommission = normalizeCommissionPercent(
@@ -426,7 +432,9 @@ const buildCanonicalRoomPricing = ({
 	const firstProvidedRow = providedRows[0] || {};
 	const roomNightlyPrice = getRoomNightlyPrice(room);
 	const pricingByDay = stayDates.map((date, index) => {
-		const rate = rates.find((item) => item?.calendarDate === date);
+		const agentRate = getAgentPricingForDate(detail, agentOverrideId, date);
+		const hotelRate = rates.find((item) => item?.calendarDate === date);
+		const rate = agentRate || hotelRate;
 		const blockedOnCalendar = calendarRateIsBlocked(rate);
 		if (blockedOnCalendar && !allowBlockedCalendar) {
 			throw new ReservationPricingError(
@@ -548,6 +556,12 @@ const normalizeReservationCreationPricing = async (
 		: [];
 	const primaryRooms = rooms.length > 0 ? rooms : pricingRooms;
 	const nextHotelId = normalizeId(updates.hotelId);
+	const agentId = normalizeId(
+		options.agentId ||
+			agentIdFromReservation(updates) ||
+			updates.requestingUserId ||
+			updates.createdByUserId
+	);
 
 	if (!stayDates.length || !primaryRooms.length) {
 		return { reservation: updates, warnings };
@@ -584,6 +598,7 @@ const normalizeReservationCreationPricing = async (
 			preferCalendarPrice: true,
 			allowBlockedCalendar: !!options.allowBlockedCalendar,
 			warnings,
+			agentId,
 		});
 	});
 
@@ -685,6 +700,9 @@ const normalizeReservationStayPricing = async (
 
 	const nextHotelId = normalizeId(
 		hotelTouched ? updates.hotelId : existing.hotelId
+	);
+	const agentId = normalizeId(
+		agentIdFromReservation(updates) || agentIdFromReservation(existing)
 	);
 	const nextCheckin = checkinTouched ? updates.checkin_date : existing.checkin_date;
 	const nextCheckout = checkoutTouched
@@ -809,6 +827,7 @@ const normalizeReservationStayPricing = async (
 					!roomIdentityChanged &&
 					shouldPreferChosenNightlyPrice(room, existingRoom),
 				preferCalendarPrice: roomIdentityChanged,
+				agentId,
 			});
 		});
 	} else if (canUseProvidedPricing) {

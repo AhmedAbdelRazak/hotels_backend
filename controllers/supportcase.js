@@ -670,6 +670,12 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		if (!currentCase) {
 			return res.status(404).json({ error: "Support case not found" });
 		}
+		if (currentCase.caseStatus === "closed" && req.body.conversation) {
+			return res.status(409).json({
+				error: "This support case is closed. Please start a new chat.",
+				code: "SUPPORT_CASE_CLOSED",
+			});
+		}
 
 		const setFields = { updatedAt: new Date() };
 		if (

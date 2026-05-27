@@ -22,6 +22,7 @@ const {
 	updatedUserId,
 	getSingleUser,
 	houseKeepingStaff,
+	listHotelAgentOptions,
 	listHotelStaffUsers,
 	updateHotelStaffUser,
 	previewHotelStaffDashboard,
@@ -79,6 +80,12 @@ router.get(
 	requireSignin,
 	isAuth,
 	listHotelStaffUsers
+);
+router.get(
+	"/hotel-agents/:hotelId/:userId",
+	requireSignin,
+	isAuth,
+	listHotelAgentOptions
 );
 router.put(
 	"/hotel-staff/:staffId/:hotelId/:userId",
