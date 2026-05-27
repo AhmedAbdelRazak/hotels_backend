@@ -55,6 +55,7 @@ const PROVIDER_LABELS = {
 	expedia: "Expedia",
 	booking: "Booking.com",
 	agoda: "Agoda",
+	hotels: "Hotels.com",
 	airbnb: "Airbnb",
 	hotelrunner: "HotelRunner",
 	trip: "Trip.com",
@@ -959,14 +960,175 @@ function findStandaloneHotelName(text) {
 	return "";
 }
 
+function cleanEmailValue(value = "") {
+	const match = String(value || "").match(
+		/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+	);
+	return normalizeWhitespace(match?.[0] || value).replace(/^\*+\s*/, "");
+}
+
+function cleanOtaDisplayValue(value = "") {
+	const cleaned = normalizeWhitespace(value)
+		.replace(/^\*+\s*/, "")
+		.replace(/\s+\*+$/g, "")
+		.replace(/\[image:[^\]]+\]/gi, " ")
+		.replace(/\b(?:image|logo)\b/gi, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!cleaned) return "";
+	if (
+		/(hotel\s+conf\b|tax invoice|official tax|pre[-\s]?paid|notice|vendor|enumerated|lodging partner services|partner central|do not reply)/i.test(
+			cleaned
+		)
+	) {
+		return "";
+	}
+	return cleaned;
+}
+
+function extractProviderLogoHotelName(text = "", provider = "") {
+	const providerPattern =
+		provider === "booking"
+			? "booking\\.com"
+			: provider === "agoda"
+			? "agoda"
+			: provider === "hotels"
+			? "hotels\\.com"
+			: "expedia";
+	const lines = String(text || "")
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => normalizeWhitespace(line))
+		.filter(Boolean);
+
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		if (!new RegExp(providerPattern, "i").test(line) || !/logo|image/i.test(line)) {
+			continue;
+		}
+		const combined = `${line} ${lines[index + 1] || ""}`;
+		const match = combined.match(
+			new RegExp(
+				`${providerPattern}\\s+logo\\]?\\s+(.+?)(?:\\s+\\[?(?:image:\\s*)?(?:expedia\\s+lodging\\s+partner\\s+services|lodging\\s+partner\\s+services|booking\\.com|agoda|hotels\\.com)|$)`,
+				"i"
+			)
+		);
+		const candidate = cleanOtaDisplayValue(match?.[1] || "");
+		if (candidate && candidate.length <= 90) return candidate;
+	}
+
+	const expediaFallback = String(text || "").match(
+		/(?:New Reservation|New Booking|Cancellation|Modified Reservation)[\s\S]{0,220}?Expedia\s+Logo\]?\s+(.+?)(?:\s+\[?(?:image:\s*)?Expedia\s+Lodging\s+Partner\s+Services|\n[A-Za-z ,]+,\s*[A-Z]{3})/i
+	);
+	const candidate = cleanOtaDisplayValue(expediaFallback?.[1] || "");
+	return candidate && candidate.length <= 90 ? candidate : "";
+}
+
+function extractProviderGuestName(text = "") {
+	const source = String(text || "");
+	const matches = [
+		source.match(
+			/\bGuest\s*:\s*\*?\s*(?:\n\s*\*?\s*)?([^\n]{1,140}?)(?=\s+Booked\s+on:|\s+\d{1,2}\s+\d{6,}|\n|$)/i
+		),
+		source.match(
+			/(?:^|\n)\s*(?:Guest name|Primary guest|Lead guest)\s*[:#-]\s*([^\n]{1,140})/i
+		),
+		source.match(
+			/(?:^|\n)\s*(?:Customer name|Name)\s*[:#-]\s*([^\n]{1,140})/i
+		),
+	];
+	for (const match of matches) {
+		const candidate = cleanOtaDisplayValue(match?.[1] || "");
+		if (
+			candidate &&
+			!/pre[-\s]?paid|email|phone|room|reservation|booking|payment/i.test(candidate)
+		) {
+			return candidate;
+		}
+	}
+	return "";
+}
+
+function monthDatePattern() {
+	return dateTextPattern();
+}
+
+function dateTextPattern() {
+	const month = "(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*";
+	return `(?:${month}\\s+\\d{1,2},?\\s+\\d{4}|\\d{1,2}\\s+${month}\\s+\\d{4}|\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})`;
+}
+
+function extractTableStayDates(text = "") {
+	const datePattern = dateTextPattern();
+	const source = String(text || "");
+	const tableMatch = source.match(
+		new RegExp(
+			`Check[-\\s]?In\\s+Check[-\\s]?Out[\\s\\S]{0,260}?(${datePattern})\\s+(${datePattern})`,
+			"i"
+		)
+	);
+	if (tableMatch) {
+		return {
+			checkinDate: parseDate(tableMatch[1]),
+			checkoutDate: parseDate(tableMatch[2]),
+		};
+	}
+	const inlineMatch = source.match(
+		new RegExp(
+			`(?:Check[-\\s]?In|Arrival)[^\\n]{0,80}?(${datePattern})[\\s\\S]{0,160}?(?:Check[-\\s]?Out|Departure)[^\\n]{0,80}?(${datePattern})`,
+			"i"
+		)
+	);
+	return {
+		checkinDate: parseDate(inlineMatch?.[1] || ""),
+		checkoutDate: parseDate(inlineMatch?.[2] || ""),
+	};
+}
+
+function extractTableOccupancy(text = "") {
+	const lines = String(text || "")
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => normalizeWhitespace(line))
+		.filter(Boolean);
+	const datePattern = monthDatePattern();
+	const datePair = new RegExp(`^${datePattern}\\s+${datePattern}\\s+(.+)$`, "i");
+
+	for (let index = 0; index < lines.length; index += 1) {
+		if (
+			!/Check[-\s]?In/i.test(lines[index]) ||
+			!/Check[-\s]?Out/i.test(lines[index]) ||
+			!/Adults/i.test(lines[index])
+		) {
+			continue;
+		}
+		const match = lines[index + 1]?.match(datePair);
+		if (!match) continue;
+		const numbers = normalizeWhitespace(match[1])
+			.match(/\b\d+\b/g)
+			?.map(Number)
+			.filter((item) => Number.isFinite(item)) || [];
+		const adults = numbers[0] || 0;
+		const children = numbers[1] || 0;
+		return {
+			adults,
+			children,
+			totalGuests: adults + children,
+		};
+	}
+	return { adults: 0, children: 0, totalGuests: 0 };
+}
+
+function cleanFieldValue(value = "") {
+	return cleanOtaDisplayValue(value).replace(/^\*+\s*/, "");
+}
+
 function detectProvider({ from = "", to = "", subject = "", text = "" } = {}) {
 	const haystack = `${from} ${to} ${subject} ${text}`.toLowerCase();
-	if (
-		haystack.includes("expedia") ||
-		haystack.includes("expediapartnercentral")
-	) {
+	if (haystack.includes("expedia") || haystack.includes("expediapartnercentral")) {
 		return "expedia";
 	}
+	if (haystack.includes("hotels.com")) return "hotels";
 	if (
 		/(^|[^a-z0-9])booking\.com([^a-z0-9]|$)/i.test(haystack) ||
 		/@(?:[\w.-]+\.)?booking\.com\b/i.test(haystack)
@@ -1031,10 +1193,13 @@ function detectEventType({ subject = "", text = "" } = {}) {
 	if (/(cancelled|canceled|cancellation|cancelation)/i.test(haystack)) {
 		return "cancelled";
 	}
+	if (/(no[- ]?show)/i.test(haystack)) return "no_show";
+	if (/(new booking|new reservation|reservation confirmation|booking confirmation|confirmed reservation|booking confirmed)/i.test(subjectOnly)) {
+		return "new";
+	}
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(haystack)) {
 		return "modified";
 	}
-	if (/(no[- ]?show)/i.test(haystack)) return "no_show";
 	if (
 		/(reservation\s+status|booking\s+status|\bstatus\b)/i.test(subjectOnly) ||
 		/(reservation\s+status|booking\s+status)/i.test(text)
@@ -1237,6 +1402,8 @@ function extractNormalizedReservation(email) {
 		subject: email.subject,
 		text,
 	});
+	const tableStayDates = extractTableStayDates(text);
+	const tableOccupancy = extractTableOccupancy(text);
 	const providerLabel = PROVIDER_LABELS[provider] || provider;
 	const eventType = detectEventType({ subject: email.subject, text });
 	const rawStatusToApply = detectStatusToApply({ subject: email.subject, text });
@@ -1282,16 +1449,17 @@ function extractNormalizedReservation(email) {
 	));
 
 	const hotelName = firstNonEmpty(
-		findField(text, [
+		extractProviderLogoHotelName(text, provider),
+		cleanFieldValue(findField(text, [
 			"Property name",
 			"Hotel name",
 			"Property",
 			"Accommodation",
 			"Listing",
-		]),
+		])),
 		findStandaloneHotelName(text)
 	);
-	const roomName = findField(text, [
+	const roomName = cleanFieldValue(findField(text, [
 		"Room type name",
 		"Room name",
 		"Room type code/name",
@@ -1299,8 +1467,8 @@ function extractNormalizedReservation(email) {
 		"Room type",
 		"Room",
 		"Unit type",
-	]);
-	const checkinDate = findDateValue(
+	]));
+	const checkinDate = tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -1319,7 +1487,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = findDateValue(
+	const checkoutDate = tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -1385,10 +1553,11 @@ function extractNormalizedReservation(email) {
 		"Number of rooms",
 		"Rooms",
 	]);
-	const adults = countNumber(adultsField);
-	const children = countNumber(childrenField);
+	const adults = tableOccupancy.adults || countNumber(adultsField);
+	const children = tableOccupancy.children || countNumber(childrenField);
 	const totalGuests =
 		countNumber(totalGuestsField) ||
+		tableOccupancy.totalGuests ||
 		adults + children ||
 		1;
 	const roomCount = countNumber(roomCountField) || 1;
@@ -1400,21 +1569,21 @@ function extractNormalizedReservation(email) {
 	const guestEmailPattern = findFirstPattern(text, [
 		/\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i,
 	]);
-	const guestEmail = firstNonEmpty(
+	const guestEmail = cleanEmailValue(firstNonEmpty(
 		guestEmailField,
 		guestEmailPattern
-	);
+	));
 	const guestNameField = findField(text, [
 		"Guest name",
 		"Primary guest",
 		"Lead guest",
 		"Customer name",
-		"Guest",
 	]);
 	const guestNamePattern = findFirstPattern(text, [
 		/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i,
 	]);
 	const guestName = firstNonEmpty(
+		extractProviderGuestName(text),
 		guestNameField,
 		guestNamePattern
 	);
@@ -1522,13 +1691,13 @@ function extractNormalizedReservation(email) {
 			bookingSource: !!sourceField,
 			hotelName: !!hotelName,
 			roomName: !!roomName,
-			checkinDate: !!checkinDate,
-			checkoutDate: !!checkoutDate,
+			checkinDate: !!checkinDate || !!tableStayDates.checkinDate,
+			checkoutDate: !!checkoutDate || !!tableStayDates.checkoutDate,
 			bookedAt: !!parseDate(bookedAtField),
 			amount: !!amountText && Number(parsedMoney.amount || 0) > 0,
-			adults: !!adultsField,
-			children: !!childrenField,
-			totalGuests: !!totalGuestsField,
+			adults: !!adultsField || tableOccupancy.adults > 0,
+			children: !!childrenField || tableOccupancy.children > 0,
+			totalGuests: !!totalGuestsField || tableOccupancy.totalGuests > 0,
 			roomCount: !!roomCountField,
 			guestName: !!guestName,
 			guestEmail: !!guestEmail,
@@ -1581,6 +1750,7 @@ function mapRoomType(roomNameRaw) {
 		);
 	if (hasKeyword("master") && hasKeyword("suite")) return "masterSuite";
 	if (hasKeyword("quadruple") || hasKeyword("quad")) return "quadRooms";
+	if (hasKeyword("quintuple") || hasKeyword("five") || hasKeyword("5")) return "familyRooms";
 	if (hasKeyword("triple")) return "tripleRooms";
 	if (hasKeyword("twin")) return "twinRooms";
 	if (hasKeyword("double")) return "doubleRooms";
@@ -1648,6 +1818,49 @@ function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 	};
 }
 
+function roomCapacityFromLabels(room = {}) {
+	const label = normalizeComparable(
+		[
+			room.displayName,
+			room.displayName_OtherLanguage,
+			roomTypeLabel(room.roomType),
+			room.roomType,
+		]
+			.filter(Boolean)
+			.join(" ")
+	);
+	if (/\b(single|individual)\b/.test(label)) return 1;
+	if (/\b(double|twin|king|queen)\b/.test(label)) return 2;
+	if (/\btriple\b/.test(label)) return 3;
+	if (/\bquad(?:ruple)?\b/.test(label)) return 4;
+	if (/\bquint(?:uple)?\b|\bfive\b|\b5\b/.test(label)) return 5;
+	if (/\bfamily\b/.test(label)) return 5;
+	return 0;
+}
+
+function resolveRoomByOccupancy(rooms = [], totalGuests = 0) {
+	const guests = Number(totalGuests || 0);
+	if (!Number.isFinite(guests) || guests <= 0) return null;
+	const candidates = rooms
+		.map((room, index) => ({
+			room,
+			index,
+			capacity: roomCapacityFromLabels(room),
+		}))
+		.filter((candidate) => candidate.capacity >= guests)
+		.sort((left, right) => {
+			if (left.capacity !== right.capacity) return left.capacity - right.capacity;
+			if (left.room.activeRoom !== false && right.room.activeRoom === false) {
+				return -1;
+			}
+			if (left.room.activeRoom === false && right.room.activeRoom !== false) {
+				return 1;
+			}
+			return left.index - right.index;
+		});
+	return candidates[0] || null;
+}
+
 function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 	const rooms = (hotelDetails?.roomCountDetails || []).filter(
 		(room) => room && room.roomType
@@ -1683,6 +1896,20 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 		});
 
 	if (!candidates.length) {
+		const occupancyMatch = resolveRoomByOccupancy(rooms, options.totalGuests);
+		if (occupancyMatch) {
+			return {
+				roomDetails: occupancyMatch.room,
+				score: 0.7,
+				displayScore: 0,
+				matchType: "guest_count_fallback",
+				threshold: 0.75,
+				mappedRoomType,
+				warnings: [
+					`Room "${roomName}" was matched by OTA guest count (${options.totalGuests}) to "${occupancyMatch.room.displayName || occupancyMatch.room.roomType}".`,
+				],
+			};
+		}
 		return {
 			roomDetails: null,
 			score: 0,
@@ -1824,7 +2051,9 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 
 function buildReservationDocument(normalized, hotelDetails) {
 	if (!hotelDetails) return { ok: false, error: "Hotel could not be resolved." };
-	const roomMatch = resolveRoomMatch(hotelDetails, normalized.roomName);
+	const roomMatch = resolveRoomMatch(hotelDetails, normalized.roomName, {
+		totalGuests: normalized.totalGuests,
+	});
 	const roomDetails = roomMatch.roomDetails;
 	if (!roomDetails) {
 		return {
@@ -2861,22 +3090,38 @@ async function reconcileOtaReservation(inputNormalized) {
 		);
 	}
 
+	const missingForCreate = requiredNewReservationMissing(normalized);
+	const hasCompleteCreatePayload =
+		!missingForCreate.length &&
+		confirmationNumber &&
+		(hasKnownProvider(normalized) || !!normalizeWhitespace(normalized.bookingSource));
+
 	if (isStatusIntent) {
 		if (!existing) {
-			logReconcile("status.needs_review.no_exact_match", {
-				confirmationNumber,
-				statusToApply,
-			});
-			return {
-				status: "needs_review",
-				warnings,
-				errors: [
-					...errors,
-					"Status email did not match an existing reservation by confirmation number.",
-				],
-			};
+			if (hasCompleteCreatePayload && statusToApply === "confirmed") {
+				const warning =
+					"Status email did not match an existing reservation, but complete confirmed reservation data was present; creating a new OTA reservation.";
+				if (!warnings.includes(warning)) warnings.push(warning);
+				logReconcile("status.unmatched_confirmed.create_from_complete_payload", {
+					confirmationNumber,
+					statusToApply,
+				});
+			} else {
+				logReconcile("status.needs_review.no_exact_match", {
+					confirmationNumber,
+					statusToApply,
+				});
+				return {
+					status: "needs_review",
+					warnings,
+					errors: [
+						...errors,
+						"Status email did not match an existing reservation by confirmation number.",
+					],
+				};
+			}
 		}
-		if (!statusToApply) {
+		if (existing && !statusToApply) {
 			logReconcile("status.needs_review.unknown_status", {
 				confirmationNumber,
 			});
@@ -2890,50 +3135,61 @@ async function reconcileOtaReservation(inputNormalized) {
 				matchedReservationBy,
 			};
 		}
-		logReconcile("status.update.start", {
-			confirmationNumber,
-			reservationId: String(existing._id),
-			statusToApply,
-		});
-		const set = await applyExistingReservationEmailUpdate({
-			normalized,
-			existing,
-			statusToApply,
-			warnings,
-			action: `${statusToApply}-from-email`,
-		});
-		logReconcile("status.update.done", {
-			confirmationNumber,
-			reservationId: String(existing._id),
-			statusToApply,
-			updatedFields: Object.keys(set),
-		});
-		return {
-			status: statusToApply === "cancelled" ? "cancelled" : "status_updated",
-			warnings,
-			errors,
-			reservationId: existing._id,
-			hotelId: existing.hotelId,
-			pmsConfirmationNumber: existing.confirmation_number,
-			matchedReservationBy,
-		};
+		if (existing) {
+			logReconcile("status.update.start", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				statusToApply,
+			});
+			const set = await applyExistingReservationEmailUpdate({
+				normalized,
+				existing,
+				statusToApply,
+				warnings,
+				action: `${statusToApply}-from-email`,
+			});
+			logReconcile("status.update.done", {
+				confirmationNumber,
+				reservationId: String(existing._id),
+				statusToApply,
+				updatedFields: Object.keys(set),
+			});
+			return {
+				status: statusToApply === "cancelled" ? "cancelled" : "status_updated",
+				warnings,
+				errors,
+				reservationId: existing._id,
+				hotelId: existing.hotelId,
+				pmsConfirmationNumber: existing.confirmation_number,
+				matchedReservationBy,
+			};
+		}
 	}
 
 	if (isUpdateIntent && !existing) {
-		logReconcile("update.needs_review.no_exact_match", {
-			confirmationNumber,
-		});
-		return {
-			status: "needs_review",
-			warnings,
-			errors: [
-				...errors,
-				"Update email did not match an existing reservation by confirmation number.",
-			],
-		};
+		if (hasCompleteCreatePayload) {
+			const warning =
+				"Update-labeled OTA email did not match an existing reservation, but complete reservation data was present; creating a new OTA reservation.";
+			if (!warnings.includes(warning)) warnings.push(warning);
+			logReconcile("update.unmatched.create_from_complete_payload", {
+				confirmationNumber,
+			});
+		} else {
+			logReconcile("update.needs_review.no_exact_match", {
+				confirmationNumber,
+			});
+			return {
+				status: "needs_review",
+				warnings,
+				errors: [
+					...errors,
+					"Update email did not match an existing reservation by confirmation number.",
+				],
+			};
+		}
 	}
 
-	const missing = requiredNewReservationMissing(normalized);
+	const missing = missingForCreate;
 	if (!existing && !isUpdateIntent && missing.length) {
 		logReconcile("needs_review.missing_required_fields", {
 			confirmationNumber,

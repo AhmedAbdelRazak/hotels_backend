@@ -43,6 +43,9 @@ const providerAliases = {
 	"booking.com": "booking",
 	booking: "booking",
 	agoda: "agoda",
+	"hotels.com": "hotels",
+	"hotel.com": "hotels",
+	hotels: "hotels",
 	airbnb: "airbnb",
 	hotelrunner: "hotelrunner",
 	"hotel runner": "hotelrunner",
@@ -104,6 +107,41 @@ const cleanStatusWarnings = (warnings = []) =>
 				String(warning || "")
 			)
 	);
+
+const hasStrongNewReservationSubject = (subject = "") => {
+	const value = normalizeWhitespace(subject);
+	if (!value) return false;
+	if (/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(value)) {
+		return false;
+	}
+	if (/(modified|modification|changed|updated|amended|amendment)/i.test(value)) {
+		return false;
+	}
+	return /(new reservation|new booking|reservation confirmation|booking confirmation|confirmed reservation|booking confirmed)/i.test(
+		value
+	);
+};
+
+const cleanResolvedFieldWarnings = (warnings = [], normalized = {}) => {
+	const hasStayDates = !!normalized.checkinDate && !!normalized.checkoutDate;
+	const filtered = (Array.isArray(warnings) ? warnings : []).filter((warning) => {
+		const value = String(warning || "");
+		if (hasStayDates && /missing or invalid stay dates/i.test(value)) return false;
+		if (normalized.hotelName && /missing hotel\/property name/i.test(value)) return false;
+		if (normalized.roomName && /missing room type\/name/i.test(value)) return false;
+		if (
+			(normalized.confirmationNumber || normalized.reservationId) &&
+			/missing reservation\/confirmation id/i.test(value)
+		) {
+			return false;
+		}
+		if (normalized.provider && normalized.provider !== "unknown" && /could not detect ota provider/i.test(value)) {
+			return false;
+		}
+		return true;
+	});
+	return uniqueStrings(filtered);
+};
 
 const CLEAR_STATUS_VALUES = new Set([
 	"cancelled",
@@ -291,6 +329,10 @@ const applyEmailContextToHeuristic = (heuristic = {}, emailContext = {}, emailTe
 	if ((!merged.eventType || merged.eventType === "unknown") && emailContext.eventType) {
 		merged.eventType = emailContext.eventType;
 	}
+	if (hasStrongNewReservationSubject(emailContext.subjectForClassification)) {
+		merged.eventType = "new";
+		merged.statusToApply = "";
+	}
 	if (
 		!merged.statusToApply &&
 		emailContext.statusToApply &&
@@ -339,6 +381,7 @@ const applyEmailContextToHeuristic = (heuristic = {}, emailContext = {}, emailTe
 	if (emailContext.forwarded) {
 		merged.warnings.push("Email appears to be forwarded; original sender/subject were included in the decision.");
 	}
+	merged.warnings = cleanResolvedFieldWarnings(merged.warnings, merged);
 
 	return merged;
 };
@@ -651,7 +694,10 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 		subject: emailContext.subjectForClassification || email.subject,
 		text: emailText,
 	});
-	if (!merged.eventType || merged.eventType === "unknown") {
+	if (hasStrongNewReservationSubject(emailContext.subjectForClassification || email.subject)) {
+		merged.eventType = "new";
+		merged.statusToApply = "";
+	} else if (!merged.eventType || merged.eventType === "unknown") {
 		merged.eventType = detectedEventType;
 	}
 	if (
@@ -679,6 +725,7 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	} else if (merged.intent === "reservation_status") {
 		merged.warnings = cleanStatusWarnings(merged.warnings);
 	}
+	merged.warnings = cleanResolvedFieldWarnings(merged.warnings, merged);
 	if (!merged.bookingSource) {
 		merged.bookingSource = resolveBookingSource({
 			provider: merged.provider,

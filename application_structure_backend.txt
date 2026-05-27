@@ -994,3 +994,31 @@ Future TODO Backlog - Added 2026-05-26
   - Production should continue using the existing SendGrid inbound DNS and SendGrid email sending until a future Microsoft Graph or dedicated mail-server plan is deliberately approved.
 - Future note:
   - If this migration is retried, prefer Microsoft Graph application access over password-based IMAP, or keep SendGrid for inbound parsing.
+
+2026-05-27 OTA Inbound Parser Hardening After SendGrid Rollback
+- Active decision:
+  - Keep SendGrid as the production email provider and inbound webhook path.
+  - Do not use the failed home-server mailbox poller path for production OTA processing.
+- Why this update was needed:
+  - A forwarded Expedia test reached POST /api/inbound/sendgrid and saved an InboundEmail audit record.
+  - The old deterministic parser misclassified the forwarded "New Booking" email as a reservation update because the body contained update/status language.
+  - The old parser also missed table-style stay dates and could misread generic lines such as "Guest has PRE-PAID" as guest identity data.
+- Backend changes:
+  - services/otaReservationMapper.js now handles Expedia, Booking.com, Agoda, and Hotels.com provider detection more explicitly.
+  - Strong "New Booking" / "New Reservation" / "Booking Confirmation" subjects take precedence over body-only update words.
+  - Table-style OTA stay dates now parse month-first, day-first, and numeric date formats.
+  - Table-style adults/children counts are extracted for room-capacity fallback matching.
+  - Provider logo/header hotel names are cleaned so boilerplate such as "Hotel Conf" or image alt text is not used as the hotel name.
+  - Generic guest parsing was tightened so payment boilerplate is not treated as a guest name.
+  - If a provider labels an email as an update but no existing reservation matches, the backend can create a new reservation only when the email has a complete trusted OTA reservation payload.
+  - Room matching now has a guarded occupancy fallback when the OTA room label is too different from the PMS room display names.
+- services/otaEmailOrchestrator.js changes:
+  - Added Hotels.com provider aliases.
+  - Forwarded-email context can force a strong new-reservation classification from subject candidates.
+  - Stale missing-field warnings are removed after fields are recovered by the parser/orchestrator.
+- Local verification completed:
+  - node --check services/otaReservationMapper.js.
+  - node --check services/otaEmailOrchestrator.js.
+  - Parser samples for Expedia, Booking.com, Agoda, and Hotels.com all returned new_reservation with provider, confirmation number, hotel, room, dates, guest, and guest-count fields populated.
+  - Read-only MongoDB check resolved "Zad Al sad" to allowed hotel 68b74714fb50e159d48c714f and built a reservation document successfully.
+  - Dry-run reconciliation with Reservations.create mocked confirmed that a complete update-labeled unmatched OTA email can proceed to created without writing to MongoDB during the test.
