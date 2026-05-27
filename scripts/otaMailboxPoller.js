@@ -93,15 +93,6 @@ const diagnostics = (config) => ({
 	dryRun: config.dryRun,
 });
 
-const describeError = (error = {}) => ({
-	name: error.name || "",
-	message: error.message || String(error || ""),
-	code: error.code || "",
-	response: error.response || "",
-	serverResponseCode: error.serverResponseCode || "",
-	authenticationFailed: !!error.authenticationFailed,
-});
-
 const buildClient = (config) =>
 	new ImapFlow({
 		host: config.host,
@@ -113,28 +104,6 @@ const buildClient = (config) =>
 		},
 		logger: false,
 	});
-
-const testConnection = async (config) => {
-	const missing = validateConfig(config);
-	if (missing.length) {
-		throw new Error(`Missing required mailbox configuration: ${missing.join(", ")}`);
-	}
-
-	const client = buildClient(config);
-	await client.connect();
-	const lock = await client.getMailboxLock(config.folder);
-	try {
-		const unseen = (await client.search({ seen: false }, { uid: true })) || [];
-		return {
-			connected: true,
-			folder: config.folder,
-			unseenCount: Array.isArray(unseen) ? unseen.length : 0,
-		};
-	} finally {
-		lock.release();
-		await client.logout().catch(() => {});
-	}
-};
 
 const parseForLog = async (source) => {
 	try {
@@ -223,7 +192,7 @@ const processMailbox = async (config) => {
 				failed += 1;
 				console.error("[ota-mailbox] message failed", {
 					uid: message.uid,
-					error: describeError(error),
+					error: error.message,
 				});
 			}
 		}
@@ -256,17 +225,6 @@ const main = async () => {
 		process.exit(missing.length ? 1 : 0);
 	}
 
-	if (process.argv.includes("--test-connection")) {
-		try {
-			const result = await testConnection(config);
-			console.log("[ota-mailbox] connection", result);
-			process.exit(0);
-		} catch (error) {
-			console.error("[ota-mailbox] connection failed", describeError(error));
-			process.exit(1);
-		}
-	}
-
 	const once = process.argv.includes("--once") || boolEnv("OTA_MAILBOX_ONCE", false);
 	if (once) {
 		await runOnce();
@@ -283,7 +241,7 @@ const main = async () => {
 		try {
 			await runOnce();
 		} catch (error) {
-			console.error("[ota-mailbox] poll failed", describeError(error));
+			console.error("[ota-mailbox] poll failed", error.message);
 		} finally {
 			running = false;
 		}
@@ -297,7 +255,7 @@ const main = async () => {
 
 if (require.main === module) {
 	main().catch((error) => {
-		console.error("[ota-mailbox] fatal", describeError(error));
+		console.error("[ota-mailbox] fatal", error.message);
 		process.exit(1);
 	});
 }
@@ -305,7 +263,6 @@ if (require.main === module) {
 module.exports = {
 	getConfig,
 	validateConfig,
-	testConnection,
 	processMailbox,
 	postInboundEmail,
 };
