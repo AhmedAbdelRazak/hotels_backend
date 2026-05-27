@@ -8,7 +8,7 @@ const HouseKeeping = require("../models/housekeeping");
 const AgentWallet = require("../models/agent_wallet");
 const User = require("../models/user");
 const xlsx = require("xlsx");
-const emailService = require("../services/emailService");
+const sgMail = require("@sendgrid/mail");
 const puppeteer = require("puppeteer");
 const moment = require("moment-timezone");
 const saudiDateTime = moment().tz("Asia/Riyadh").format();
@@ -39,6 +39,8 @@ const {
 	sanitizeReservationAuditLogsCollectionForViewer,
 	sanitizeReservationAuditLogsForViewer,
 } = require("../services/auditPrivacy");
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CANCELLED_REGEX = /cancelled|canceled/i;
@@ -2654,11 +2656,11 @@ const sendEmailWithPdf = async (reservationData, opts = {}) => {
 	};
 
 	try {
-		await emailService.send(FormSubmittionEmail);
+		await sgMail.send(FormSubmittionEmail);
 	} catch (error) {
 		console.error(
 			"Error sending email with PDF error.response.boyd",
-			error.response?.body || error.message
+			error.response.body
 		);
 		console.error("Error sending email with PDF", error);
 		// Handle error appropriately
@@ -2992,7 +2994,7 @@ exports.sendPaymentLinkEmail = async (req, res) => {
 	};
 
 	try {
-		await emailService.send(email);
+		await sgMail.send(email);
 		res.json({ message: "Payment link email sent successfully" });
 	} catch (error) {
 		console.error("Error sending payment link email:", error);
@@ -4737,7 +4739,7 @@ const sendEmailUpdate = async (reservationData, hotelName) => {
 	};
 
 	try {
-		await emailService.send(FormSubmittionEmail);
+		await sgMail.send(FormSubmittionEmail);
 	} catch (error) {
 		console.error("Error sending email with PDF", error);
 		// Handle error appropriately

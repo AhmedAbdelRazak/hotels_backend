@@ -26,7 +26,7 @@ const { v4: uuid } = require("uuid");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const puppeteer = require("puppeteer");
-const emailService = require("../services/emailService");
+const sgMail = require("@sendgrid/mail");
 const crypto = require("crypto");
 
 /* Models */
@@ -61,6 +61,9 @@ const {
 const {
 	validateReservationInventoryForCreate,
 } = require("./reservations");
+
+/* Email setup */
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	message:
@@ -162,7 +165,7 @@ const sendEmailSafe = async (payload, label) => {
 	const to = payload?.to || null;
 	console.log("[Email] send start", { label, to });
 	try {
-		const result = await emailService.send(payload);
+		const result = await sgMail.send(payload);
 		const response = Array.isArray(result) ? result[0] : result;
 		console.log("[Email] send success", {
 			label,
@@ -238,7 +241,7 @@ async function getHotelAndOwner(hotelId) {
 
 async function sendCriticalOwnerEmail(to, subject, html) {
 	if (!to) return;
-	await emailService.send({
+	await sgMail.send({
 		to,
 		cc: "ahmed.abdelrazak@jannatbooking.com",
 		from: "noreply@jannatbooking.com",

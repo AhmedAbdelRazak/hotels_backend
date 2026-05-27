@@ -1,10 +1,12 @@
 const SupportCase = require("../models/supportcase");
 const mongoose = require("mongoose");
 const ObjectId = mongoose.Types.ObjectId;
-const emailService = require("../services/emailService");
+const sgMail = require("@sendgrid/mail");
 const { newSupportCaseEmail } = require("./assets");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const twilio = require("twilio");
 
@@ -904,7 +906,7 @@ exports.createNewSupportCase = async (req, res) => {
 		// 3) Send email as a best-effort notification only. The chat case is
 		// already saved, so provider/network issues must not make clients retry.
 		try {
-			await emailService.send({
+			await sgMail.send({
 				from: "noreply@jannatbooking.com",
 				to: [
 					"morazzakhamouda@gmail.com",

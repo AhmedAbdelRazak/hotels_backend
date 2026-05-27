@@ -30,7 +30,7 @@ const {
 } = require("./whatsappsender");
 
 const puppeteer = require("puppeteer");
-const emailService = require("../services/emailService");
+const sgMail = require("@sendgrid/mail");
 const {
 	encryptWithSecret,
 	decryptWithSecret,
@@ -39,6 +39,8 @@ const {
 const {
 	validateReservationInventoryForCreate,
 } = require("./reservations");
+
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	message:
@@ -113,7 +115,7 @@ async function getHotelAndOwner(hotelId) {
  */
 async function sendCriticalOwnerEmail(to, subject, html) {
 	if (!to) return;
-	await emailService.send({
+	await sgMail.send({
 		to,
 		cc: "ahmed.abdelrazak@jannatbooking.com",
 		from: "noreply@jannatbooking.com",
@@ -573,7 +575,7 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 			const to = payload?.to || null;
 			console.log(`[Email][${emailContext}] send start`, { label, to });
 			try {
-				const result = await emailService.send(payload);
+				const result = await sgMail.send(payload);
 				const response = Array.isArray(result) ? result[0] : result;
 				console.log(`[Email][${emailContext}] send success`, {
 					label,
@@ -659,10 +661,10 @@ exports.sendEmailForTriggeringPayment = async (req, res) => {
 	} catch (error) {
 		console.error("Error sending confirmation email:", error);
 		if (error.response && error.response.body && error.response.body.errors) {
-			const emailErrors = error.response.body.errors
+			const sgErrors = error.response.body.errors
 				.map((err) => err.message)
 				.join(" ");
-			return res.status(500).json({ message: `Email delivery error: ${emailErrors}` });
+			return res.status(500).json({ message: `SendGrid Error: ${sgErrors}` });
 		}
 		return res
 			.status(500)
@@ -925,7 +927,7 @@ const sendEmailWithInvoice = async (
 			const to = payload?.to || null;
 			console.log(`[Email][${emailContext}] send start`, { label, to });
 			try {
-				const result = await emailService.send(payload);
+				const result = await sgMail.send(payload);
 				const response = Array.isArray(result) ? result[0] : result;
 				console.log(`[Email][${emailContext}] send success`, {
 					label,
@@ -1127,7 +1129,7 @@ exports.createNewReservationClient = async (req, res) => {
 
 			try {
 				// Guest email
-				await emailService.send({
+				await sgMail.send({
 					to: email,
 					from: "noreply@jannatbooking.com",
 					subject: "Verify Your Reservation",
@@ -2682,7 +2684,7 @@ exports.sendingEmailForPaymentLink = async (req, res) => {
 			const to = payload?.to || null;
 			console.log(`[Email][${emailContext}] send start`, { label, to });
 			try {
-				const result = await emailService.send(payload);
+				const result = await sgMail.send(payload);
 				const response = Array.isArray(result) ? result[0] : result;
 				console.log(`[Email][${emailContext}] send success`, {
 					label,
@@ -2876,7 +2878,7 @@ const sendPaymentTriggeredEmail = async (reservationData) => {
 			const to = payload?.to || null;
 			console.log(`[Email][${emailContext}] send start`, { label, to });
 			try {
-				const result = await emailService.send(payload);
+				const result = await sgMail.send(payload);
 				const response = Array.isArray(result) ? result[0] : result;
 				console.log(`[Email][${emailContext}] send success`, {
 					label,
@@ -3669,7 +3671,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				const to = payload?.to || null;
 				console.log(`[Email][${emailContext}] send start`, { label, to });
 				try {
-					const result = await emailService.send(payload);
+					const result = await sgMail.send(payload);
 					const response = Array.isArray(result) ? result[0] : result;
 					console.log(`[Email][${emailContext}] send success`, {
 						label,
@@ -3837,14 +3839,14 @@ exports.createNewReservationClient2 = async (req, res) => {
 				confirmationLink,
 			});
 
-			await emailService.send({
+			await sgMail.send({
 				to: email,
 				from: "noreply@jannatbooking.com",
 				subject: "Verify Your Reservation",
 				html: emailContent,
 			});
 
-			await emailService.send({
+			await sgMail.send({
 				to: [
 					"morazzakhamouda@gmail.com",
 					"xhoteleg@gmail.com",
@@ -3864,7 +3866,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				if (belongsToId && mongoose.Types.ObjectId.isValid(belongsToId)) {
 					const belongsToUser = await User.findById(belongsToId);
 					if (belongsToUser && belongsToUser.role === 2000) {
-						await emailService.send({
+						await sgMail.send({
 							to: belongsToUser.email,
 							from: "noreply@jannatbooking.com",
 							subject: "Verify Your Reservation",

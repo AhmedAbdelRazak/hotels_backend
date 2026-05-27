@@ -105,24 +105,6 @@ const cleanStatusWarnings = (warnings = []) =>
 			)
 	);
 
-const cleanResolvedFieldWarnings = (warnings = [], normalized = {}) =>
-	(Array.isArray(warnings) ? warnings : []).filter((warning) => {
-		const text = String(warning || "");
-		if (normalized.confirmationNumber && /missing reservation\/confirmation id/i.test(text)) {
-			return false;
-		}
-		if (normalized.checkinDate && normalized.checkoutDate && /missing or invalid stay dates/i.test(text)) {
-			return false;
-		}
-		if (normalized.hotelName && /missing hotel\/property name/i.test(text)) {
-			return false;
-		}
-		if (normalized.roomName && /missing room type\/name/i.test(text)) {
-			return false;
-		}
-		return true;
-	});
-
 const CLEAR_STATUS_VALUES = new Set([
 	"cancelled",
 	"no_show",
@@ -692,7 +674,6 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	if (!(merged.intent === "not_reservation" && recalculatedIntent === "unknown")) {
 		merged.intent = recalculatedIntent;
 	}
-	merged.warnings = cleanResolvedFieldWarnings(merged.warnings, merged);
 	if (merged.intent === "not_reservation") {
 		merged.warnings = cleanNonReservationWarnings(merged.warnings);
 	} else if (merged.intent === "reservation_status") {

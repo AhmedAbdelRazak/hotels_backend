@@ -5,7 +5,7 @@ const { ObjectId } = mongoose.Schema;
 
 const inboundEmailSchema = new mongoose.Schema(
 	{
-		source: { type: String, trim: true, lowercase: true, default: "email" },
+		source: { type: String, trim: true, lowercase: true, default: "sendgrid" },
 		provider: { type: String, trim: true, lowercase: true, default: "" },
 		providerLabel: { type: String, trim: true, default: "" },
 		intent: { type: String, trim: true, lowercase: true, default: "" },
