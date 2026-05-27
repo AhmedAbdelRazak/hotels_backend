@@ -4,12 +4,10 @@ const braintree = require("braintree");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const fetch = require("node-fetch");
-const sgMail = require("@sendgrid/mail");
+const emailService = require("../services/emailService");
 require("dotenv").config();
 const puppeteer = require("puppeteer");
 const { paymentReceipt } = require("./assets");
-
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 var gateway = new braintree.BraintreeGateway({
 	environment: braintree.Environment.Production, // Production Sandbox
@@ -86,11 +84,11 @@ const sendEmailWithPdf = async (
 	};
 
 	try {
-		await sgMail.send(FormSubmittionEmail);
+		await emailService.send(FormSubmittionEmail);
 	} catch (error) {
 		console.error(
 			"Error sending email with PDF error.response.boyd",
-			error.response.body
+			error.response?.body || error.message
 		);
 		console.error("Error sending email with PDF", error);
 		// Handle error appropriately

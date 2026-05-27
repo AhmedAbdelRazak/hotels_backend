@@ -95,9 +95,9 @@ const fileMetadata = (file = {}) => ({
 exports.parseInboundForm = (req, res, next) => {
 	upload.any()(req, res, (err) => {
 		if (err) {
-			console.error("[SendGrid Inbound] multipart parse error:", err.message);
+			console.error("[OTA Inbound Email] multipart parse error:", err.message);
 			InboundEmail.create({
-				source: "sendgrid",
+				source: "email",
 				processingStatus: "failed",
 				reconcileErrors: [`multipart parse error: ${err.message}`],
 				receivedAt: new Date(),
@@ -109,8 +109,8 @@ exports.parseInboundForm = (req, res, next) => {
 	});
 };
 
-exports.sendgridHealth = (_req, res) => {
-	res.status(200).json({ ok: true, msg: "SendGrid inbound endpoint is live" });
+exports.inboundEmailHealth = (_req, res) => {
+	res.status(200).json({ ok: true, msg: "OTA inbound email endpoint is live" });
 };
 
 exports.requireInboundEmailAdmin = async (req, res, next) => {
@@ -135,7 +135,8 @@ exports.requireInboundEmailAdmin = async (req, res, next) => {
 };
 
 const inboundSecretIsValid = (req) => {
-	const expected = process.env.SENDGRID_INBOUND_SECRET;
+	const expected =
+		process.env.OTA_INBOUND_EMAIL_SECRET || process.env.INBOUND_EMAIL_SECRET;
 	if (!expected) return true;
 	const provided =
 		req.query.token ||
@@ -161,7 +162,7 @@ const getRawMimeBodyFallback = (raw = "") => {
 	return normalizeWhitespace(body || text);
 };
 
-const parseSendGridPayload = async (body = {}, files = []) => {
+const parseInboundPayload = async (body = {}, files = []) => {
 	const rawMime = body.email || body.raw || body.mime || body.rawEmail || "";
 	if (rawMime) {
 		if (simpleParser) {
@@ -227,6 +228,8 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 	};
 };
 
+exports.parseInboundPayload = parseInboundPayload;
+
 const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (!emailHash && !messageId) return null;
 	const query = {
@@ -267,7 +270,7 @@ const createInboundEmailRecord = async (email, duplicate) => {
 	const redactedText = buildRedactedEmailText(email);
 	const emailHash = email.rawHash || hashText(redactedText);
 	return InboundEmail.create({
-		source: "sendgrid",
+		source: "email",
 		processingStatus: "received",
 		from: email.from || "",
 		to: email.to || "",
@@ -397,7 +400,7 @@ const emitReservationRefreshIfNeeded = async (req, reconciliation) => {
 	});
 };
 
-exports.handleSendGridInbound = async (req, res) => {
+exports.handleInboundEmail = async (req, res) => {
 	let inboundRecord = null;
 	try {
 		logInbound("request.received", {
@@ -407,12 +410,12 @@ exports.handleSendGridInbound = async (req, res) => {
 		});
 
 		if (!inboundSecretIsValid(req)) {
-			console.warn("[SendGrid Inbound] rejected invalid secret");
+			console.warn("[OTA Inbound Email] rejected invalid secret");
 			return res.status(401).send("Unauthorized");
 		}
 		logInbound("secret.accepted");
 
-		const email = await parseSendGridPayload(req.body || {}, req.files || []);
+		const email = await parseInboundPayload(req.body || {}, req.files || []);
 		logInbound("payload.parsed", {
 			from: email.from,
 			to: email.to,
@@ -567,7 +570,7 @@ exports.handleSendGridInbound = async (req, res) => {
 		});
 
 		await emitReservationRefreshIfNeeded(req, reconciliation).catch((error) =>
-			console.error("[SendGrid Inbound] notification emit failed:", error.message)
+			console.error("[OTA Inbound Email] notification emit failed:", error.message)
 		);
 		logInbound("socket.emit", {
 			inboundEmailId: String(inboundRecord._id),
@@ -587,7 +590,7 @@ exports.handleSendGridInbound = async (req, res) => {
 			reservationMongoId: reconciliation.reservationId,
 		});
 
-		console.log("[SendGrid Inbound]", {
+		console.log("[OTA Inbound Email]", {
 			status: reconciliation.status,
 			provider: normalized.provider,
 			intent: normalized.intent,
@@ -598,7 +601,7 @@ exports.handleSendGridInbound = async (req, res) => {
 
 		return res.status(200).send("OK");
 	} catch (err) {
-		console.error("[SendGrid Inbound] error:", err.message);
+		console.error("[OTA Inbound Email] error:", err.message);
 		if (inboundRecord?._id) {
 			const updated = await finalizeRecord(inboundRecord._id, {
 				processingStatus: "failed",
@@ -607,7 +610,7 @@ exports.handleSendGridInbound = async (req, res) => {
 			emitInboundEmailUpdated(req, updated || inboundRecord);
 		} else {
 			await InboundEmail.create({
-				source: "sendgrid",
+				source: "email",
 				processingStatus: "failed",
 				subject: req.body?.subject || "",
 				from: req.body?.from || "",

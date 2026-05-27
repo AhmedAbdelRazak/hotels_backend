@@ -5,19 +5,19 @@ const router = express.Router();
 const { requireSignin } = require("../controllers/auth");
 const {
 	parseInboundForm,
-	sendgridHealth,
-	handleSendGridInbound,
+	inboundEmailHealth,
+	handleInboundEmail,
 	requireInboundEmailAdmin,
 	listInboundEmails,
 	singleInboundEmail,
 } = require("../controllers/otaInbound");
 
-router.get(["/inbound/sendgrid", "/ota/inbound/sendgrid"], sendgridHealth);
+router.get(["/inbound/email", "/ota/inbound/email"], inboundEmailHealth);
 
 router.post(
-	["/inbound/sendgrid", "/ota/inbound/sendgrid"],
+	["/inbound/email", "/ota/inbound/email"],
 	parseInboundForm,
-	handleSendGridInbound
+	handleInboundEmail
 );
 
 router.get(

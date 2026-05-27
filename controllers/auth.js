@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const _ = require("lodash");
 const expressJwt = require("express-jwt");
 const { OAuth2Client } = require("google-auth-library");
-const sgMail = require("@sendgrid/mail");
+const emailService = require("../services/emailService");
 const {
 	waSendResetPasswordLink,
 	ensureE164Phone, // if you want to use/extend later
@@ -17,7 +17,6 @@ const { emitHotelNotificationRefresh } = require("../services/notificationEvents
 const { trackAccountCreation } = require("../services/activityTracker");
 const SignupInvitation = require("../models/signup_invitation");
 
-sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const ahmed2 = "ahmedabdelrazzak1001010@gmail.com";
 
 const FROM_EMAIL = "noreply@jannatbooking.com";
@@ -1867,15 +1866,15 @@ exports.forgotPassword = async (req, res) => {
 		const emailResults = { user: null, admin: null };
 		try {
 			if (channel === "email" && user.email && !user.emailIsPlaceholder) {
-				emailResults.user = await sgMail.send(emailToUser);
+				emailResults.user = await emailService.send(emailToUser);
 			}
 		} catch (e) {
-			console.log("SENDGRID user email error:", e?.message || e);
+			console.log("Password reset user email error:", e?.message || e);
 		}
 		try {
-			emailResults.admin = await sgMail.send(emailToAdmin);
+			emailResults.admin = await emailService.send(emailToAdmin);
 		} catch (e) {
-			console.log("SENDGRID admin email error:", e?.message || e);
+			console.log("Password reset admin email error:", e?.message || e);
 		}
 
 		// 7) Respond success; include wa_link if we built a fallback
@@ -2020,7 +2019,7 @@ exports.googleLogin = (req, res) => {
 
         `,
 						};
-						sgMail.send(welcomingEmail);
+						emailService.send(welcomingEmail);
 						const GoodNews = {
 							to: ahmed2,
 							from: "noreply@tier-one.com",
@@ -2045,7 +2044,7 @@ exports.googleLogin = (req, res) => {
 
         `,
 						};
-						sgMail.send(GoodNews);
+						emailService.send(GoodNews);
 					}
 				});
 			} else {
