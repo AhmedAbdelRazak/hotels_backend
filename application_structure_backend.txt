@@ -955,3 +955,42 @@ Future TODO Backlog - Added 2026-05-26
   - Run one supervised production B2C test chat during a low-risk window, then remove the exact test support-case ID.
   - Decide whether to initialize jannatbooking_ssr as a Git repo or keep it as local planning documentation until implementation starts.
   - Add automated regression tests for support-case escalation transitions and B2C/B2B AI boundaries.
+
+2026-05-27 Email Provider Rollback To SendGrid
+- Summary:
+  - We attempted to replace SendGrid with a home-server-controlled email path.
+  - Outbound SMTP helper and OTA mailbox polling were implemented and tested in dry-run.
+  - Outlook delivery to a real mailbox worked, but the home server could not authenticate to the Microsoft 365 mailbox over IMAP.
+  - Microsoft returned:
+    - 3 NO AUTHENTICATE failed.
+  - Because the poller could not read the mailbox, no OTA email reached /api/ota/inbound/email and no reservation was saved from that path.
+- Decision:
+  - Roll back to the previous SendGrid-based implementation to protect production stability.
+- Backend rollback:
+  - Reverted the SendGrid-retirement commits.
+  - Restored @sendgrid/mail dependency in package.json/package-lock.json.
+  - Restored sgMail usage in:
+    - controllers/auth.js.
+    - controllers/braintree.js.
+    - controllers/supportcase.js.
+    - controllers/reservations.js.
+    - controllers/janat.js.
+    - controllers/paypal_reservation.js.
+  - Restored SendGrid inbound route names:
+    - GET /api/inbound/sendgrid.
+    - GET /api/ota/inbound/sendgrid.
+    - POST /api/inbound/sendgrid.
+    - POST /api/ota/inbound/sendgrid.
+  - Removed the temporary home-server mailbox poller and SMTP adapter files from the repository:
+    - scripts/otaMailboxPoller.js.
+    - services/emailService.js.
+- Environment rollback:
+  - Restored SENDGRID_API_KEY from the protected env backup.
+  - Removed temporary OTA mailbox/Graph env values from local and production .env files.
+  - Kept OTA_INBOUND_EMAIL_HOTEL_IDS because it existed before the experiment and remains part of OTA safety scoping.
+- Safety verification:
+  - No database records were deleted.
+  - Read-only checks during the failed mailbox test showed no new InboundEmail record and no reservation created by the failed home-server path.
+  - Production should continue using the existing SendGrid inbound DNS and SendGrid email sending until a future Microsoft Graph or dedicated mail-server plan is deliberately approved.
+- Future note:
+  - If this migration is retried, prefer Microsoft Graph application access over password-based IMAP, or keep SendGrid for inbound parsing.
