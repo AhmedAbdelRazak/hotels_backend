@@ -59,15 +59,13 @@ const upload = multer({
 	},
 });
 
-const terminalEmailStatuses = [
+const duplicateBlockingEmailStatuses = [
 	"created",
 	"updated",
 	"cancelled",
 	"status_updated",
 	"duplicate_reservation",
 	"not_reservation",
-	"needs_review",
-	"needs_mapping",
 ];
 
 const shortHash = (value = "") => String(value || "").slice(0, 12);
@@ -230,7 +228,8 @@ const parseSendGridPayload = async (body = {}, files = []) => {
 const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (!emailHash && !messageId) return null;
 	const query = {
-		processingStatus: { $in: terminalEmailStatuses },
+		// Review/mapping failures are intentionally retryable after parser or mapping fixes.
+		processingStatus: { $in: duplicateBlockingEmailStatuses },
 		$or: [],
 	};
 	if (emailHash) query.$or.push({ emailHash });

@@ -1012,6 +1012,7 @@ Future TODO Backlog - Added 2026-05-26
   - Generic guest parsing was tightened so payment boilerplate is not treated as a guest name.
   - If a provider labels an email as an update but no existing reservation matches, the backend can create a new reservation only when the email has a complete trusted OTA reservation payload.
   - Room matching now has a guarded occupancy fallback when the OTA room label is too different from the PMS room display names.
+  - controllers/otaInbound.js duplicate blocking no longer treats needs_review or needs_mapping as final duplicate blockers, so previously failed OTA emails can be retried after parser or mapping fixes.
 - services/otaEmailOrchestrator.js changes:
   - Added Hotels.com provider aliases.
   - Forwarded-email context can force a strong new-reservation classification from subject candidates.
@@ -1023,7 +1024,7 @@ Future TODO Backlog - Added 2026-05-26
   - Read-only MongoDB check resolved "Zad Al sad" to allowed hotel 68b74714fb50e159d48c714f and built a reservation document successfully.
   - Dry-run reconciliation with Reservations.create mocked confirmed that a complete update-labeled unmatched OTA email can proceed to created without writing to MongoDB during the test.
 - Production deployment:
-  - Commit faf74e3 was pushed to origin/master and pulled into /home/ahmedadmin/Hotels/hotels_backend.
+  - OTA parser hardening and retry-safety commits were pushed to origin/master and pulled into /home/ahmedadmin/Hotels/hotels_backend.
   - Production node --check passed for services/otaReservationMapper.js and services/otaEmailOrchestrator.js.
   - pm2 restart hotels-backend --update-env completed and hotels-backend is online.
   - GET http://127.0.0.1:8080/api/inbound/sendgrid returned the SendGrid inbound health response.
