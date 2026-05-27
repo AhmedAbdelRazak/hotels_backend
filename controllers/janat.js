@@ -52,6 +52,9 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 
+const parseBooleanFlag = (value) =>
+	value === true || value === "true" || value === 1 || value === "1";
+
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
 		.flatMap((value) => String(value || "").split(","))
@@ -123,11 +126,15 @@ async function sendCriticalOwnerEmail(to, subject, html) {
 
 exports.createUpdateDocument = (req, res) => {
 	const { documentId } = req.params;
+	const updateBody = { ...req.body };
+	if (Object.prototype.hasOwnProperty.call(updateBody, "aiToRespond")) {
+		updateBody.aiToRespond = parseBooleanFlag(updateBody.aiToRespond);
+	}
 
 	// Check if documentId is provided and is a valid ObjectId
 	if (documentId && mongoose.Types.ObjectId.isValid(documentId)) {
 		const condition = { _id: mongoose.Types.ObjectId(documentId) };
-		const update = req.body;
+		const update = updateBody;
 
 		Janat.findOneAndUpdate(condition, update, { new: true }, (err, data) => {
 			if (err) {
@@ -150,7 +157,7 @@ exports.createUpdateDocument = (req, res) => {
 		});
 	} else {
 		// If documentId is not provided, create a new document
-		const newDocument = new Janat(req.body);
+		const newDocument = new Janat(updateBody);
 
 		newDocument.save((err, data) => {
 			if (err) {
@@ -183,6 +190,7 @@ exports.listOfAllActiveHotels = async (req, res) => {
 	try {
 		const activeHotels = await HotelDetails.find({
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 			roomCountDetails: {
@@ -245,6 +253,7 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 		// Require hotel active, photos exist, coordinates valid, and at least one room with media+basePrice.
 		const baseFilter = {
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 			roomCountDetails: {
@@ -347,6 +356,7 @@ exports.distinctRoomTypes = async (req, res) => {
 	try {
 		const activeHotels = await HotelDetails.find({
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 			roomCountDetails: {
@@ -411,6 +421,7 @@ exports.getHotelFromSlug = async (req, res) => {
 		const hotel = await HotelDetails.findOne({
 			hotelName: { $regex: new RegExp(`^${escaped}$`, "i") },
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 		}).lean();
 
 		if (!hotel) {
@@ -447,6 +458,7 @@ exports.getListOfHotels = async (req, res) => {
 		const hotels = await HotelDetails.find({
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			"location.coordinates": { $ne: [0, 0] },
 		});
 
@@ -688,6 +700,7 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		// Define base hotel query
 		let hotelQuery = {
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		};
@@ -1041,6 +1054,7 @@ exports.createNewReservationClient = async (req, res) => {
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		});
@@ -3788,6 +3802,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		});

@@ -139,7 +139,8 @@ async function detectIntentLLM({
 		"{ intent:'reserve_room'|'reservation_lookup'|'smalltalk'|'confirm_check'|'other',",
 		"  smalltalkType:null|'greet'|'how_are_you'|'thanks'|'are_you_there'|'farewell'|'wow'|'chitchat',",
 		"  dates:{ checkin:string|null, checkout:string|null, calendar:'gregorian'|'hijri'|null }|null,",
-		"  roomText:string|null, confirmation:string|null }",
+		"  roomText:string|null, roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', confirmation:string|null }",
+		"Prefer roomTypeKey from meaning, not exact words, for any language.",
 	].join(" ");
 
 	const user = [
@@ -287,7 +288,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 	}
 
 	const lu = await detectIntentLLM({ text, preferredLanguage, inquiryAbout });
-	const roomKey = lu?.roomText ? mapRoomToKey(lu.roomText) : null;
+	const roomKey = lu?.roomTypeKey || (lu?.roomText ? mapRoomToKey(lu.roomText) : null);
 
 	const iso = await normalizeDatesLLM({
 		checkin: lu?.dates?.checkin || null,

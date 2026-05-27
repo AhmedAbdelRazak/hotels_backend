@@ -669,3 +669,289 @@ Future TODO Backlog - Added 2026-05-26
   - Route protection was not weakened. The handler only normalizes the response and prevents stack-trace noise for expected authentication expiry.
 - Frontend companion fix:
   - The matching frontend change clears expired stored JWTs and expired dashboard-preview tokens before API calls are made.
+
+2026-05-26 Executive Summary Audit Completion
+- User-facing issue investigated:
+  - Route:
+    - /hotel-management/main-dashboard?ownerId=68b74714fb50e159d48c714d&overall=summary&page=1&dateFrom=2026-03-27&invStart=2026-03-27&dateTo=2026-05-26&invEnd=2026-05-26&dateBy=createdAt&range=custom
+  - Screenshot concern:
+    - Zad Al Safa showed 7/56 in the occupied column, while the live room map appeared to show fewer current guests.
+- Backend finding:
+  - controllers/overall_dashboard.js computes summary occupancy as the peak occupied sellable rooms on any day inside the selected reporting range.
+  - The live hotel room map uses current-day operational occupancy and can therefore show a lower number at the same moment.
+  - For Zad Al Safa:
+    - Hotel id: 68da202900a070e8123c27c4.
+    - Owner id: 68b74714fb50e159d48c714d.
+    - Physical rooms: 60.
+    - Active/sellable rooms: 56.
+    - Out-of-service rooms: 4.
+    - Peak occupied rooms in 2026-03-27 through 2026-05-26: 7.
+    - Peak dates: 2026-03-27 and 2026-03-28.
+    - Current/live occupied rooms on 2026-05-26: 4.
+    - Created-at reservation stats for the selected range: 0 reservations and 0 SAR for Zad Al Safa, matching the screenshot row.
+  - Conclusion:
+    - 7/56 is correct for the current executive-summary definition.
+    - The old table label was ambiguous because it looked like live occupancy instead of range-peak occupancy.
+- Documentation created:
+  - audits/executive-summary-data-quality-2026-05-26.md
+  - This audit is the source of truth for the Zad Al Safa reconciliation and the expected summary semantics.
+- Future backend rule:
+  - Do not change summary occupancy from range peak to live current state without a product decision.
+  - If a future report needs current live occupancy, add a separate field such as currentOccupiedRooms instead of overloading occupiedRooms.
+  - Keep blocked/out-of-service rooms excluded from sellable room capacity.
+  - Keep in-house after planned checkout counted as occupied until operational checkout/room state changes.
+
+2026-05-26 B2C Chat, AI Guardrails, And SEO Backend Alignment
+- Reference studied:
+  - D:\SereneJannat\serene_backend\controllers
+  - D:\SereneJannat\serene_backend\services\supportChatOrchestrator.js
+  - D:\SereneJannat\serene_ssr\src
+- Important SereneJannat lesson:
+  - B2C support automation should be guarded by per-case AI state.
+  - Staff takeover should stop automation.
+  - Customer-opened cases are the only automation target.
+  - SSR metadata, JSON-LD, sitemap, and crawler support are valuable, but JannatBooking should not copy Serene's AI-crawler blocking behavior.
+- Backend files changed:
+  - models/supportcase.js
+  - controllers/supportcase.js
+  - routes/supportcase.js
+  - server.js
+  - aiagent/core/policy.js
+  - aiagent/core/watcher.js
+  - aiagent/core/orchestrator.js
+  - aiagent/core/planner.js
+  - aiagent/core/actions.js
+- New SupportCase AI fields:
+  - aiToRespond:
+    - Per-case switch. This is the live source of truth for whether automation may respond.
+    - Defaults to false.
+  - aiResponderName:
+    - Stable support name for the AI-assisted Jannat Booking support responder on a B2C case.
+  - aiPausedAt:
+    - Timestamp when automation was paused.
+  - aiHandoffReason:
+    - Reason code such as human_admin_message, manual_admin_toggle, reservation_cancellation, reservation_update, reservation_finalize, client_closed_case, or case_closed.
+  - escalationStatus:
+    - Separate B2C escalation lifecycle: none, active, addressed.
+    - Active escalations are cases the AI or staff marked for personal Jannat Booking review.
+    - Addressed escalations stay on the case audit trail but leave the active escalations workload.
+  - escalationReason, escalationSource, escalatedAt, escalatedBy:
+    - Explain why/how the case was escalated and by whom when applicable.
+  - escalationAddressedAt, escalationAddressedBy, escalationAddressedNote:
+    - Record when an employee marked the escalation as addressed.
+  - humanTakeoverAt and humanTakeoverBy:
+    - Admin/staff takeover audit fields.
+- Public B2C support endpoints added:
+  - GET /api/support-cases/client/:id
+  - PUT /api/support-cases/client/:id
+- Admin B2C escalation endpoint:
+  - GET /api/support-cases-clients/escalated
+  - Returns open client cases where escalationStatus=active, scoped by the same CustomerService visibility rules as other support-case admin endpoints.
+- Public B2C endpoint rules:
+  - Only openedBy=client support cases are exposed.
+  - Public users can append sanitized customer messages.
+  - Public users can close/rate their own client case.
+  - Public users cannot change supporterId, hotelId, target user fields, admin assignment, AI fields, or staff metadata.
+- Admin/staff support endpoint behavior:
+  - PUT /api/support-cases/:id remains protected by CustomerService access.
+  - Any authenticated admin/staff message on a B2C case sets aiToRespond=false.
+  - The system records humanTakeoverAt, humanTakeoverBy, aiPausedAt, and aiHandoffReason=human_admin_message.
+  - The socket room receives aiPaused so the public widget knows a human takeover occurred.
+  - CustomerService staff can set escalationStatus=addressed after resolving an active escalation.
+  - Closing an actively escalated B2C case also marks the escalation addressed so it leaves the escalated workload.
+- B2B rule:
+  - B2B chat remains owned by models/b2b_chat.js and controllers/b2b_chat.js.
+  - B2B chats must not call aiagent, SupportCase AI fields, public B2C endpoints, or bot responder code.
+  - Attempts to toggle AI on a non-client SupportCase are rejected.
+- AI agent activation rule:
+  - server.js only mounts aiagent when AI_AGENT_ENABLED=true.
+  - aiagent/core/policy.js also checks:
+    - global AI_AGENT_ENABLED=true or AI_FORCE_RESPOND=true.
+    - supportCase.openedBy === "client".
+    - supportCase.caseStatus === "open".
+    - supportCase.aiToRespond === true.
+    - hotel.activateHotel === true and hotel.xHotelProActive !== false unless force is explicitly enabled.
+    - hotel.aiToRespond === true unless force is explicitly enabled.
+  - This double guard is intentional. Do not remove one guard because the other exists.
+- AI message identity:
+  - AI-assisted support messages now use support@jannatbooking.com instead of management@xhotelpro.com.
+  - Message userId is jannat-ai-support.
+  - The visible name comes from the case's aiResponderName when present.
+  - If asked directly, the assistant should be transparent that it is AI-assisted Jannat Booking support monitored by the team. It should not pretend to be a human.
+- Human-only actions:
+  - Cancellation and refund requests must stop automation and go to a human.
+  - Existing reservation updates must stop automation and go to a human.
+  - Final reservation commit/write is now human handoff in the AI planner, not automatic reservation creation.
+  - The AI may help triage pricing by date range, hotel options near Al Haram, payment questions, and reservation context gathering.
+  - Hotel recommendations and price quotes must read from active PMS/admin hotel inventory only:
+    - activateHotel is the owner/manager activation gate.
+    - xHotelProActive is the Jannat/XHotelPro platform activation gate.
+    - Missing xHotelProActive on legacy hotel documents is treated as active until an admin explicitly sets it false.
+    - aiagent/core/db.js listActivePublicHotels requires both gates and an active priced room.
+- Hotel activation fields:
+  - models/hotel_details.js stores activateHotel for hotel owner/manager activation.
+  - models/hotel_details.js stores xHotelProActive for Jannat/XHotelPro platform activation.
+  - Public hotel endpoints, public checkout guards, signup hotel filters, AI policy, and AI hotel recommendations must respect both gates.
+- Documentation created:
+  - audits/b2c-chat-and-seo-audit-2026-05-26.md
+- Validation run after the change:
+  - node --check controllers/supportcase.js
+  - node --check models/supportcase.js
+  - node --check aiagent/core/policy.js
+  - node --check aiagent/core/orchestrator.js
+  - node --check aiagent/core/watcher.js
+  - node --check server.js
+  - git diff --check in hotels_backend.
+  - Frontend builds were also run in their repositories.
+- Future backend follow-up:
+  - Before enabling AI_AGENT_ENABLED in production, confirm OpenAI credentials, hotel-level aiToRespond opt-ins, admin monitoring workflow, and support escalation coverage.
+  - Add API-level regression tests for:
+    - B2B cannot trigger AI.
+    - B2C client case can append via public endpoint.
+    - Admin message pauses AI.
+    - Cancellation text pauses AI.
+    - Non-client support case rejects AI toggle.
+  - If jannatbooking_ssr is built later, keep these public B2C endpoints compatible with both CRA and SSR clients.
+
+2026-05-27 B2C AI Chat QA, Professional Tone, And Runtime Notes
+- User-facing support tone:
+  - Arabic B2C AI replies should address known clients respectfully as "أستاذ {first name}" when natural, for example "أستاذ ناصر".
+  - The English operational shorthand for this rule is "Ostaz Nasser", but Arabic UI/chat output should render the Arabic title.
+  - The tone should remain official, warm, concise, and human-like. Do not become stiff, generic, or overly long.
+  - The brand must always be written exactly as "Jannat Booking"; do not shorten it and do not translate the brand.
+- AI writer/orchestrator behavior:
+  - aiagent/core/orchestrator.js now passes a respectfulAddress into every writer call.
+  - The writer prompt instructs the LLM to reread the full conversation transcript before responding, avoid redundancy, and not ask for details already supplied.
+  - The old "reason is not defined" save-path bug was fixed. The generated reply now saves after the typing delay instead of failing after the UI shows "typing".
+  - The in-flight reply race was tightened so a newer client message can interrupt/cancel an older pending reply cleanly.
+  - Payment guidance now passes known confirmation numbers into the writer so it does not ask again for a reference the client already supplied.
+  - Hotel recommendation matches are title-cased before writing, so links render as names such as "Zad Al Sad" rather than lower-case hotel identifiers.
+- AI scope and activation recap:
+  - AI remains B2C only.
+  - B2B chat must never trigger aiagent.
+  - AI responds only when AI_AGENT_ENABLED=true and all Janat/global, support-case, hotel owner activation, platform activation, and hotel AI switches allow it.
+  - AI_FORCE_RESPOND is local QA-only and should not be used as production behavior.
+  - Admin/staff takeover pauses AI by setting aiToRespond=false and emitting aiPaused.
+  - Closed cases and human-only reservation update/cancellation paths remove AI from the notification workload.
+- Typing and notification QA:
+  - The bot emits typing and stopTyping with isAi=true and the case aiResponderName.
+  - Admin and public chat UIs should show the typing indicator during the human-like delay.
+  - The public widget and admin ChatDetail should clear typing when receiveMessage arrives or stopTyping is emitted.
+  - Chat notifications should disappear when the underlying case closes or when unseen counts are resolved by the proper seen endpoint.
+- Long Arabic QA conversations run on 2026-05-26/2026-05-27:
+  - Pricing/hotel-near-Al-Haram case:
+    - Case 6a1634012f2ba647fbd0bdaf.
+    - Confirmed Arabic replies, typing events, hotel links, and date-range price quote.
+    - Quote observed for Zad Al Hayah double room, 2026-06-10 through 2026-06-12: 120 SAR total for 2 nights.
+  - Payment case:
+    - Case 6a1634542f2ba647fbd0bfd4.
+    - Confirmed safe payment guidance, no card-data request, and follow-up no longer repeats the supplied confirmation JBQA777.
+  - Reservation update/handoff case:
+    - Case 6a1634942f2ba647fbd0c190.
+    - Confirmed update request triggers human takeover and aiToRespond=false.
+  - Hotel link retest:
+    - Case 6a163538a7da89c44769e6f0.
+    - Confirmed links show title-cased hotel names such as Zad Al Sad, Wardat Al Kheir, and Taaj Alzahabiya.
+- Email notification resilience:
+  - controllers/supportcase.js now treats SendGrid support-case email notifications as best-effort.
+  - Once a SupportCase is saved, an email provider/network error is logged but does not turn the create endpoint into a 400.
+  - This prevents duplicate client chats when SendGrid times out after MongoDB already saved the case.
+- Local runtime note:
+  - During QA, an extra background node server briefly occupied port 8080 and caused EADDRINUSE for nodemon.
+  - The correct local posture is one backend process on port 8080. If EADDRINUSE appears, inspect Get-NetTCPConnection -LocalPort 8080 and stop only the extra server.js process, not frontend dev servers.
+- Verification after these changes:
+  - node --check aiagent/core/orchestrator.js.
+  - node --check controllers/supportcase.js.
+  - node --check hotels_frontend/src/AdminModule/CustomerService/ChatDetail.js.
+  - npm.cmd run build in hotels_frontend compiled successfully.
+
+2026-05-27 B2C Escalation Workflow
+- Real escalation is now persisted on SupportCase, not just implied by chat wording.
+- AI human handoff paths call updateSupportCaseAppend with:
+  - aiToRespond=false.
+  - aiPausedAt set.
+  - aiHandoffReason set to the orchestrator reason.
+  - escalationStatus=active.
+  - escalationSource=ai.
+  - escalationReason set from the orchestrator decision.
+- The orchestrator decision schema includes human_escalation for requests outside available context or requiring human review.
+- The handoff message is produced by the LLM writer after reading the full conversation, so wording is context-aware and multilingual.
+- Escalation socket events:
+  - supportCaseEscalated.
+  - supportCaseEscalationAddressed.
+  - supportCaseEscalationUpdated.
+  - supportCaseUpdated remains the general sync event.
+- Admin update behavior:
+  - PUT /api/support-cases/:id with escalationStatus=addressed marks the escalation resolved.
+  - If AI is restarted for a case, escalation fields are cleared back to none.
+  - If an active escalated case is closed by staff or client, escalationStatus becomes addressed.
+- Frontend route:
+  - /admin/customer-service?tab=escalated-client-cases
+  - Only open B2C cases with escalationStatus=active should appear in this tab.
+  - Once addressed, the case should leave the escalated tab without closing the whole support case.
+- Verification after escalation wiring:
+  - node --check hotels_backend/controllers/supportcase.js.
+  - node --check hotels_backend/routes/supportcase.js.
+  - node --check hotels_backend/models/supportcase.js.
+  - node --check hotels_backend/aiagent/core/orchestrator.js.
+  - node --check hotels_frontend/src/AdminModule/CustomerService/ActiveClientsSupportCases.js.
+  - node --check hotels_frontend/src/AdminModule/CustomerService/ChatDetail.js.
+  - node --check hotels_frontend/src/AdminModule/CustomerService/CustomerServiceDetails.js.
+  - node --check hotels_frontend/src/AdminModule/apiAdmin.js.
+  - npm.cmd run build in hotels_frontend compiled successfully.
+
+2026-05-27 B2C Chat QA Data Cleanup Record
+- Purpose:
+  - Clean chatbot QA trials before production-facing work continues.
+  - Ensure no AI/chatbot test reservations remained in the PMS data.
+- SupportCase cleanup:
+  - Removed six client-opened, AI-related Arabic QA support cases from MongoDB.
+  - Deleted case IDs:
+    - 6a162ea65d1803768d198829
+    - 6a1631155d1803768d198cce
+    - 6a1634012f2ba647fbd0bdaf
+    - 6a1634542f2ba647fbd0bfd4
+    - 6a1634942f2ba647fbd0c190
+    - 6a163538a7da89c44769e6f0
+  - These cases were created for Arabic chatbot QA only and used names containing "اختبار".
+- Reservation cleanup verification:
+  - Explicit QA reservation marker count was 0.
+  - Reservations created during the chatbot QA window, 2026-05-26 through 2026-05-28 UTC, was 0.
+  - No reservation deletion was needed because the chatbot did not create reservations.
+- Final verification after cleanup:
+  - supportCaseQaLeftovers: 0.
+  - explicitQaReservationCount: 0.
+  - recentReservationCountInQaWindow: 0.
+- Future QA cleanup rule:
+  - Use explicit QA naming such as "اختبار", "QA Pass", or "JBQA" on support cases only.
+  - Never use broad regex terms such as "QA" alone for reservations because real names can contain those letters.
+  - Before deleting anything, run a read-only query and inspect the candidate IDs, dates, names, openedBy, and aiRelated fields.
+  - Delete only targeted support-case IDs or unmistakable test reservations.
+
+2026-05-27 Final Pre-Production Cleanup And Deployment Notes
+- Final rude escalation QA cleanup:
+  - Temporary case 6a16417650a34b197ce4d2ee was created only to verify the new escalated-cases tab.
+  - It was removed before production deployment.
+  - Final cleanup verification:
+    - supportCaseQaLeftovers: 0.
+    - explicitQaReservationCount: 0.
+    - recentReservationCountInQaWindow: 0.
+- No chatbot QA reservations were created or deleted.
+- Deployment scope:
+  - Backend B2C AI guardrails, escalation state, support-case cleanup docs, and related API changes.
+  - PMS frontend customer-service AI controls, escalated-cases tab, notification/query-param behavior, and related docs.
+  - Public frontend SEO/chat endpoint alignment and public chat docs.
+  - jannatbooking_ssr remains documentation-only and is not yet a Git repository.
+- Production deployment sequence:
+  - Commit and push local Git repos to GitHub.
+  - SSH target: jannat.
+  - Pull backend in /home/ahmedadmin/Hotels/hotels_backend with git pull --ff-only origin master.
+  - Pull PMS frontend in /home/ahmedadmin/Hotels/hotels_frontend with git pull --ff-only origin master.
+  - Pull public frontend if a production checkout exists and it is tied to the same GitHub origin.
+  - Build frontend apps that serve compiled assets.
+  - Restart PM2 processes and run route/API smoke checks.
+- Tomorrow follow-up action items:
+  - Turn AI_AGENT_ENABLED on only after confirming production OpenAI key, Janat global AI switch, hotel AI switches, and support-team monitoring coverage.
+  - Run one supervised production B2C test chat during a low-risk window, then remove the exact test support-case ID.
+  - Decide whether to initialize jannatbooking_ssr as a Git repo or keep it as local planning documentation until implementation starts.
+  - Add automated regression tests for support-case escalation transitions and B2C/B2B AI boundaries.

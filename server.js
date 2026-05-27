@@ -52,16 +52,20 @@ const io = socketIo(server, {
 });
 app.set("io", io);
 
-// // AI agent
-// const aiagentMod = require("./aiagent/index.js"); // explicit path to avoid aiagent.js conflicts
-// const initAIAgent =
-// 	aiagentMod.initAIAgent || aiagentMod.default || aiagentMod.init || aiagentMod;
-// if (typeof initAIAgent !== "function") {
-// 	throw new Error(
-// 		"[aiagent] initAIAgent export not found. Check aiagent/index.js"
-// 	);
-// }
-// initAIAgent({ app, io });
+// AI agent is opt-in and guarded again at case/hotel level.
+if (String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true") {
+	const aiagentMod = require("./aiagent/index.js"); // explicit path to avoid aiagent.js conflicts
+	const initAIAgent =
+		aiagentMod.initAIAgent || aiagentMod.default || aiagentMod.init || aiagentMod;
+	if (typeof initAIAgent !== "function") {
+		throw new Error(
+			"[aiagent] initAIAgent export not found. Check aiagent/index.js"
+		);
+	}
+	initAIAgent({ app, io });
+} else {
+	console.log("[aiagent] disabled; set AI_AGENT_ENABLED=true to enable B2C AI support.");
+}
 
 // API routes
 readdirSync("./routes").map((r) => app.use("/api", require(`./routes/${r}`)));

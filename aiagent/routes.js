@@ -41,7 +41,7 @@ function attachRoutes(app, io) {
 				return res.status(404).json({ ok: false, error: "case_not_found" });
 
 			const state = getOrCreateCaseState(caseId);
-			const { allowed, hotel } = await ensureAIAllowed(sc.hotelId);
+			const { allowed, hotel } = await ensureAIAllowed(sc.hotelId, sc);
 			const convo = Array.isArray(sc.conversation)
 				? sc.conversation.slice(-20)
 				: [];

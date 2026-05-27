@@ -127,6 +127,11 @@ const janatSchema = new mongoose.Schema(
 			type: String,
 			trim: true,
 		},
+
+		aiToRespond: {
+			type: Boolean,
+			default: true,
+		},
 	},
 	{ timestamps: true }
 );

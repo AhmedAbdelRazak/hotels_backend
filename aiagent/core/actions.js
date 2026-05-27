@@ -147,8 +147,9 @@ async function postReservationLinks(io, sc, reservation) {
 	for (const text of messages) {
 		const messageData = {
 			messageBy: {
-				customerName: "System",
-				customerEmail: "management@xhotelpro.com",
+				customerName: "Jannat Booking Support",
+				customerEmail: "support@jannatbooking.com",
+				userId: "jannat-ai-support",
 			},
 			message: text,
 			date: new Date(),

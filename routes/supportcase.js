@@ -47,6 +47,11 @@ router.get(
 	supportCaseController.getOpenSupportCasesClients
 );
 router.get(
+	"/support-cases-clients/escalated",
+	...customerServiceAccess,
+	supportCaseController.getEscalatedSupportCasesClients
+);
+router.get(
 	"/support-cases-hotels/active/:hotelId",
 	supportCaseController.getOpenSupportCasesForHotel
 );
@@ -72,6 +77,17 @@ router.get(
 );
 
 // Get a specific support case by ID
+router.get(
+	"/support-cases/client/:id",
+	supportCaseController.getPublicClientSupportCaseById
+);
+
+router.put(
+	"/support-cases/client/:id",
+	attachIo,
+	supportCaseController.updatePublicClientSupportCase
+);
+
 router.get(
 	"/support-cases/:id",
 	...customerServiceAccess,

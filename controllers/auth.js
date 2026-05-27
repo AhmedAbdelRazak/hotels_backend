@@ -211,6 +211,7 @@ const uniqueStringIds = (values = []) => [
 const publicPublishedHotelFilter = (hotelIds = []) => ({
 	_id: { $in: hotelIds },
 	activateHotel: true,
+	xHotelProActive: { $ne: false },
 	hotelPhotos: { $exists: true, $not: { $size: 0 } },
 	"location.coordinates": { $ne: [0, 0] },
 });

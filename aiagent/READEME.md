@@ -1,5 +1,26 @@
 # AI Agent (Hotels – Makkah/Madinah)
 
+## Current Production Contract - 2026-05-27
+
+- The AI agent is B2C support only. B2B/internal chats must never trigger it.
+- It mounts only when `AI_AGENT_ENABLED=true`; hotel/case/global switches still gate every reply.
+- Janat/global AI switch, hotel owner activation, Jannat/XHotelPro platform activation, hotel `aiToRespond`, and support-case `aiToRespond` must all allow the reply.
+- `AI_FORCE_RESPOND=true` is local QA-only and should not be used as production behavior.
+- The writer reads the full support-case conversation before replying and should not ask again for information already supplied.
+- Arabic customer-facing replies should address known clients respectfully as `أستاذ {first name}`, for example `أستاذ ناصر`.
+- Tone is official, concise, warm, and useful. Brand must remain exactly `Jannat Booking`.
+- The assistant may help with hotels near Al Haram, date-range pricing, payment troubleshooting, and reservation triage.
+- Cancellation, refunds, existing-reservation mutation, and final booking confirmation are human handoff paths.
+- Human handoff paths are real escalations: the support case is saved with
+  `escalationStatus=active`, `escalationSource=ai`, and an escalation reason.
+- If the orchestrator decides the request is outside available context or should
+  be reviewed before answering, it can choose `human_escalation` and stop AI.
+- Admin Customer Service has an escalated cases tab. Staff must mark
+  `escalationStatus=addressed` after resolving the escalation.
+- AI replies are saved with `support@jannatbooking.com`, `userId=jannat-ai-support`, and the case `aiResponderName`.
+- Admin/staff messages pause AI through `aiToRespond=false`, `aiPausedAt`, `humanTakeoverAt`, and `aiHandoffReason`.
+- SendGrid support-case email notification failures must not fail a saved support case.
+
 - **Delays**:
   - 5s greeting after case creation, context-aware (new reservation vs update).
   - 1.5s minimum delay for every reply.
@@ -27,10 +48,10 @@
   7. Email
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
-  - On **Yes**: create reservation (or update if a confirmation number was
-    recognized and loaded).
-  - Reception is considered **notified** (field saved; backend staff sees
-    instantly).
+  - On **Yes**: hand off to a Jannat Booking team member for verification,
+    payment, and final reservation confirmation.
+  - The AI does not directly create, cancel, refund, or mutate reservations in
+    production support flow.
 - **Languages**: English, Arabic (Fos7a/Egyptian/Saudi tone), Spanish, French,
   Urdu, Hindi with Islamic-friendly assistant names.
 

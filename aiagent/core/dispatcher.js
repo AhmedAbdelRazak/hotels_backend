@@ -2,6 +2,7 @@
 const { sendAgentMessage } = require("./sender");
 const { getOrCreateCaseState } = require("./state");
 const { ensureAIAllowed } = require("./policy");
+const { getSupportCaseById } = require("./db");
 
 // One pending message per caseId to avoid overlaps
 const PENDING = new Map();
@@ -25,7 +26,11 @@ function scheduleReply({
 	const run = async () => {
 		const s = getOrCreateCaseState(caseId);
 		// Always re-check policy before sending
-		const { allowed } = await ensureAIAllowed(s.hotelId);
+		const supportCase = await getSupportCaseById(caseId);
+		const { allowed } = await ensureAIAllowed(
+			supportCase?.hotelId || s.hotelId,
+			supportCase || s
+		);
 		if (!allowed) {
 			PENDING.delete(caseId);
 			return;

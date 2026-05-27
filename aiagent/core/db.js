@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const SupportCase = require("../../models/supportcase");
 const HotelDetails = require("../../models/hotel_details");
 const Reservations = require("../../models/reservations");
+const Janat = require("../../models/janat");
 
 function safeId(id) {
 	try {
@@ -52,6 +53,35 @@ async function getHotelById(id) {
 	return HotelDetails.findById(_id).lean().exec();
 }
 
+async function getJanatAiSettings() {
+	const doc = await Janat.findOne({})
+		.sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+		.select("aiToRespond")
+		.lean()
+		.exec();
+	return {
+		aiToRespond: !doc || doc.aiToRespond !== false,
+	};
+}
+
+async function listActivePublicHotels() {
+	return HotelDetails.find({
+		activateHotel: true,
+		xHotelProActive: { $ne: false },
+		roomCountDetails: {
+			$elemMatch: {
+				activeRoom: true,
+				"price.basePrice": { $gt: 0 },
+			},
+		},
+	})
+		.select(
+			"_id hotelName hotelName_OtherLanguage hotelCity distances roomCountDetails currency"
+		)
+		.lean()
+		.exec();
+}
+
 async function getReservationByConfirmation(cn) {
 	if (!cn) return null;
 	return Reservations.findOne({ confirmation_number: String(cn) })
@@ -64,5 +94,7 @@ module.exports = {
 	updateSupportCaseAppend,
 	setCaseStatus,
 	getHotelById,
+	getJanatAiSettings,
+	listActivePublicHotels,
 	getReservationByConfirmation,
 };

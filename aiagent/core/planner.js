@@ -15,8 +15,11 @@ function convoToBullets(conversation = []) {
 	const last = conversation.slice(-12);
 	return last
 		.map((m) => {
+			const email = String(m?.messageBy?.customerEmail || "").toLowerCase();
 			const who =
-				m?.messageBy?.customerEmail === "management@xhotelpro.com"
+				m?.isAi ||
+				email === "support@jannatbooking.com" ||
+				email === "management@xhotelpro.com"
 					? "Agent"
 					: "Guest";
 			return `${who}: ${String(m.message || "").slice(0, 260)}`;

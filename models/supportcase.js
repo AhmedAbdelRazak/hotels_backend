@@ -35,6 +35,26 @@ const conversationSchema = new Schema({
 		type: Boolean,
 		default: false,
 	},
+	isAi: {
+		type: Boolean,
+		default: false,
+	},
+	isSystem: {
+		type: Boolean,
+		default: false,
+	},
+	clientTag: {
+		type: String,
+		default: "",
+	},
+	preferredLanguage: {
+		type: String,
+		default: "",
+	},
+	preferredLanguageCode: {
+		type: String,
+		default: "",
+	},
 });
 
 const supportCaseSchema = new Schema({
@@ -94,6 +114,14 @@ const supportCaseSchema = new Schema({
 		enum: ["super admin", "hotel owner", "client"],
 		required: true,
 	},
+	preferredLanguage: {
+		type: String,
+		default: "English",
+	},
+	preferredLanguageCode: {
+		type: String,
+		default: "en",
+	},
 	conversation: [conversationSchema],
 	displayName1: {
 		type: String,
@@ -106,6 +134,67 @@ const supportCaseSchema = new Schema({
 	aiRelated: {
 		type: Boolean,
 		default: false,
+	},
+	aiToRespond: {
+		type: Boolean,
+		default: false,
+	},
+	aiResponderName: {
+		type: String,
+		default: "",
+	},
+	aiPausedAt: {
+		type: Date,
+		default: null,
+	},
+	aiHandoffReason: {
+		type: String,
+		default: "",
+	},
+	escalationStatus: {
+		type: String,
+		enum: ["none", "active", "addressed"],
+		default: "none",
+	},
+	escalationReason: {
+		type: String,
+		default: "",
+	},
+	escalationSource: {
+		type: String,
+		enum: ["", "ai", "admin", "client", "system"],
+		default: "",
+	},
+	escalatedAt: {
+		type: Date,
+		default: null,
+	},
+	escalatedBy: {
+		type: Schema.Types.ObjectId,
+		ref: "User",
+		default: null,
+	},
+	escalationAddressedAt: {
+		type: Date,
+		default: null,
+	},
+	escalationAddressedBy: {
+		type: Schema.Types.ObjectId,
+		ref: "User",
+		default: null,
+	},
+	escalationAddressedNote: {
+		type: String,
+		default: "",
+	},
+	humanTakeoverAt: {
+		type: Date,
+		default: null,
+	},
+	humanTakeoverBy: {
+		type: Schema.Types.ObjectId,
+		ref: "User",
+		default: null,
 	},
 	managerRatingAI: {
 		type: Number,

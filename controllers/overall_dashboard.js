@@ -313,7 +313,10 @@ const setupSnapshot = (hotel = {}) => {
 		bankDone,
 		settingsDone: roomsDone && photosDone && locationDone && dataDone,
 		activationReady: roomsDone && photosDone && locationDone && dataDone,
-		activeHotel: !!hotel?.activateHotel,
+		activeHotel:
+			hotel?.activateHotel === true && hotel?.xHotelProActive !== false,
+		ownerActivatedHotel: hotel?.activateHotel === true,
+		xHotelProActive: hotel?.xHotelProActive !== false,
 	};
 };
 
@@ -395,7 +398,7 @@ const getAccessibleOverallHotels = async (actor = {}, query = {}) => {
 
 	const hotels = await HotelDetails.find(hotelFilter)
 		.select(
-			"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel createdAt updatedAt"
+			"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel xHotelProActive createdAt updatedAt"
 		)
 		.populate("belongsTo", "_id name email phone")
 		.lean()
@@ -3825,7 +3828,10 @@ exports.overallSettings = async (req, res) => {
 			hotelCity: hotel.hotelCity || "",
 			hotelState: hotel.hotelState || "",
 			hotelCountry: hotel.hotelCountry || "",
-			activateHotel: !!hotel.activateHotel,
+			activateHotel:
+				hotel.activateHotel === true && hotel.xHotelProActive !== false,
+			ownerActivatedHotel: hotel.activateHotel === true,
+			xHotelProActive: hotel.xHotelProActive !== false,
 			overallRoomsCount: hotel.overallRoomsCount || 0,
 			roomTypes: Array.isArray(hotel.roomCountDetails)
 				? hotel.roomCountDetails.length

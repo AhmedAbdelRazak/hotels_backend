@@ -49,7 +49,7 @@ function makeGreeting(st, sc, hotel) {
 	if (isAr) {
 		return hotelName
 			? `السلام عليكم ${fn}. أنا ${st.agentName} من فندق ${hotelName}.`
-			: `السلام عليكم ${fn}. أنا ${st.agentName} من جناّت بوكينج.`;
+			: `السلام عليكم ${fn}. أنا ${st.agentName} من Jannat Booking.`;
 	}
 	return hotelName
 		? `As-salāmu ʿalaykum, ${fn}. I’m ${st.agentName} from ${hotelName}.`

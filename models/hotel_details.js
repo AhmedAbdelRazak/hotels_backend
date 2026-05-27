@@ -237,6 +237,10 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		xHotelProActive: {
+			type: Boolean,
+			default: true,
+		},
 		aiToRespond: {
 			type: Boolean,
 			default: false,

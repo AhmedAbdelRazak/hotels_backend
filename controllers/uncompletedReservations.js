@@ -46,6 +46,7 @@ exports.createNewTrackingUncompleteReservation = async (req, res) => {
 		const hotel = await HotelDetails.findOne({
 			_id: hotelId,
 			activateHotel: true,
+			xHotelProActive: { $ne: false },
 			hotelPhotos: { $exists: true, $not: { $size: 0 } },
 			"location.coordinates": { $ne: [0, 0] },
 		});

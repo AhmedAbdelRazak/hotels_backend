@@ -142,6 +142,110 @@ const cleanText = (value = "", max = 8000) =>
 const cleanChatDisplayName = (value = "") =>
 	cleanText(value, 80).replace(/\s+/g, " ");
 
+const hasCorruptedEncoding = (value = "") =>
+	/\uFFFD|\?{3,}/.test(String(value || ""));
+
+const validateReadableTextFields = (res, fields = {}) => {
+	const badField = Object.entries(fields).find(([, value]) =>
+		hasCorruptedEncoding(value)
+	);
+	if (!badField) return true;
+	res.status(400).json({
+		error:
+			"Unreadable text was received. Please resend the message using UTF-8 text.",
+		field: badField[0],
+	});
+	return false;
+};
+
+const parseBooleanFlag = (value) =>
+	value === true || value === "true" || value === 1 || value === "1";
+
+const ESCALATION_STATUSES = new Set(["none", "active", "addressed"]);
+
+const actorObjectId = (actor = {}) => {
+	const id = normalizeId(actor._id);
+	return ObjectId.isValid(id) ? ObjectId(id) : null;
+};
+
+const B2C_AI_RESPONDER_NAMES = ["Aisha", "Hana", "Sara", "Amira", "Yasmin"];
+
+const hashText = (value = "") =>
+	String(value || "")
+		.split("")
+		.reduce((acc, char) => (acc * 31 + char.charCodeAt(0)) % 1000003, 7);
+
+const pickB2CAiResponderName = (...parts) => {
+	const seed = parts.map((part) => String(part || "")).join("|");
+	return B2C_AI_RESPONDER_NAMES[
+		hashText(seed) % B2C_AI_RESPONDER_NAMES.length
+	];
+};
+
+const isClientSupportCase = (supportCase = {}) => supportCase.openedBy === "client";
+
+const isAiForceRespondEnabled = () =>
+	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
+
+const localizedClientHoldMessage = (language = "", languageCode = "") => {
+	const lang = `${language} ${languageCode}`.toLowerCase();
+	if (lang.includes("arabic") || /\bar\b/.test(lang)) {
+		return "\u0641\u0631\u064a\u0642 Jannat Booking \u064a\u0631\u0627\u062c\u0639 \u0631\u0633\u0627\u0644\u062a\u0643 \u0627\u0644\u0622\u0646.";
+	}
+	if (lang.includes("hindi") || /\bhi\b/.test(lang)) {
+		return "\u091c\u0928\u094d\u0928\u0924 \u092c\u0941\u0915\u093f\u0902\u0917 \u0938\u092a\u094b\u0930\u094d\u091f \u0906\u092a\u0915\u093e \u0938\u0902\u0926\u0947\u0936 \u0905\u092d\u0940 \u0926\u0947\u0916 \u0930\u0939\u093e \u0939\u0948.";
+	}
+	return "Jannat Booking support is reviewing your message now.";
+};
+
+const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
+	if (!conversation || typeof conversation !== "object") return null;
+	const firstMessage = Array.isArray(supportCase.conversation)
+		? supportCase.conversation[0] || {}
+		: {};
+	const rawMessageBy = conversation.messageBy || {};
+	const message = cleanText(conversation.message, 8000);
+	if (!message) return null;
+
+	return {
+		messageBy: {
+			customerName:
+				cleanChatDisplayName(
+					rawMessageBy.customerName ||
+						supportCase.displayName1 ||
+						firstMessage.messageBy?.customerName
+				) || "Guest",
+			customerEmail:
+				cleanText(
+					rawMessageBy.customerEmail || firstMessage.messageBy?.customerEmail,
+					180
+				) || "guest@jannatbooking.com",
+			userId: cleanText(rawMessageBy.userId || firstMessage.messageBy?.userId, 180),
+		},
+		message,
+		date: new Date(),
+		inquiryAbout:
+			cleanText(conversation.inquiryAbout || firstMessage.inquiryAbout, 120) ||
+			"support",
+		inquiryDetails: cleanText(
+			conversation.inquiryDetails || firstMessage.inquiryDetails,
+			1200
+		),
+		clientTag: cleanText(conversation.clientTag, 120),
+		preferredLanguage:
+			cleanText(conversation.preferredLanguage || supportCase.preferredLanguage, 80) ||
+			"English",
+		preferredLanguageCode:
+			cleanText(
+				conversation.preferredLanguageCode || supportCase.preferredLanguageCode,
+				20
+			) || "en",
+		seenByAdmin: false,
+		seenByHotel: false,
+		seenByCustomer: true,
+	};
+};
+
 const enforceConversationSenderName = (conversation = {}, actor = {}) => {
 	if (!conversation || typeof conversation !== "object") return conversation;
 	const nextConversation = { ...conversation };
@@ -336,27 +440,26 @@ exports.updateSupportCase = async (req, res) => {
 			rating,
 			supporterName,
 			hotelId,
+			aiToRespond,
+			inquiryAbout,
+			inquiryDetails,
+			escalationStatus,
+			escalationReason,
+			escalationSource,
+			escalationAddressedNote,
 		} = req.body;
 
 		console.log(req.body, "req.body");
-
-		const setFields = {};
-		if (supporterId) setFields.supporterId = supporterId;
-		if (caseStatus) {
-			setFields.caseStatus = caseStatus;
-			if (caseStatus === "closed") setFields.closedAt = new Date();
-			if (caseStatus === "open") setFields.closedAt = null;
-		}
-		if (closedBy) setFields.closedBy = closedBy;
-		if (rating) setFields.rating = rating;
-		if (supporterName) setFields.supporterName = supporterName;
-		if (hotelId) setFields.hotelId = hotelId;
-		setFields.updatedAt = new Date();
-
-		if (!conversation && Object.keys(setFields).length === 1) {
-			return res
-				.status(400)
-				.json({ error: "No valid fields provided for update" });
+		if (
+			!validateReadableTextFields(res, {
+				inquiryAbout,
+				inquiryDetails,
+				supporterName,
+				conversationMessage: conversation?.message,
+				conversationSender: conversation?.messageBy?.customerName,
+			})
+		) {
+			return;
 		}
 
 		const currentCase = await SupportCase.findById(req.params.id).lean();
@@ -367,13 +470,127 @@ exports.updateSupportCase = async (req, res) => {
 			return res.status(403).json({ error: "Support case access denied" });
 		}
 
+		const setFields = {};
+		if (supporterId) setFields.supporterId = supporterId;
+		if (caseStatus) {
+			setFields.caseStatus = caseStatus;
+			if (caseStatus === "closed") {
+				setFields.closedAt = new Date();
+				if (isClientSupportCase(currentCase)) {
+					setFields.aiToRespond = false;
+					setFields.aiPausedAt = new Date();
+					setFields.aiHandoffReason = "case_closed";
+					if (currentCase.escalationStatus === "active") {
+						setFields.escalationStatus = "addressed";
+						setFields.escalationAddressedAt = new Date();
+						setFields.escalationAddressedBy = actorObjectId(req.profile);
+						setFields.escalationAddressedNote = "Case closed";
+					}
+				}
+			}
+			if (caseStatus === "open") setFields.closedAt = null;
+		}
+		if (closedBy) setFields.closedBy = closedBy;
+		if (rating) setFields.rating = rating;
+		if (supporterName) setFields.supporterName = supporterName;
+		if (hotelId) setFields.hotelId = hotelId;
+		if (Object.prototype.hasOwnProperty.call(req.body, "escalationStatus")) {
+			if (!isClientSupportCase(currentCase)) {
+				return res
+					.status(400)
+					.json({ error: "Escalation status can only be used on B2C cases" });
+			}
+			const nextEscalationStatus = cleanText(escalationStatus, 40).toLowerCase();
+			if (!ESCALATION_STATUSES.has(nextEscalationStatus)) {
+				return res.status(400).json({ error: "Invalid escalation status" });
+			}
+			const nowDate = new Date();
+			const cleanReason =
+				cleanText(escalationReason || currentCase.aiHandoffReason, 240) ||
+				"human_review_needed";
+			setFields.escalationStatus = nextEscalationStatus;
+
+			if (nextEscalationStatus === "active") {
+				setFields.escalationReason = cleanReason;
+				setFields.escalationSource =
+					cleanText(escalationSource, 30) || "admin";
+				setFields.escalatedAt = nowDate;
+				setFields.escalatedBy = actorObjectId(req.profile);
+				setFields.escalationAddressedAt = null;
+				setFields.escalationAddressedBy = null;
+				setFields.escalationAddressedNote = "";
+				setFields.aiToRespond = false;
+				setFields.aiPausedAt = nowDate;
+				setFields.aiHandoffReason = cleanReason;
+			}
+
+			if (nextEscalationStatus === "addressed") {
+				setFields.escalationAddressedAt = nowDate;
+				setFields.escalationAddressedBy = actorObjectId(req.profile);
+				setFields.escalationAddressedNote = cleanText(
+					escalationAddressedNote,
+					500
+				);
+			}
+
+			if (nextEscalationStatus === "none") {
+				setFields.escalationReason = "";
+				setFields.escalationSource = "";
+				setFields.escalatedAt = null;
+				setFields.escalatedBy = null;
+				setFields.escalationAddressedAt = null;
+				setFields.escalationAddressedBy = null;
+				setFields.escalationAddressedNote = "";
+			}
+		}
+		if (Object.prototype.hasOwnProperty.call(req.body, "aiToRespond")) {
+			if (!isClientSupportCase(currentCase)) {
+				return res
+					.status(400)
+					.json({ error: "AI responder can only be controlled on B2C cases" });
+			}
+			const nextAiToRespond = parseBooleanFlag(aiToRespond);
+			setFields.aiToRespond = nextAiToRespond;
+			setFields.aiPausedAt = nextAiToRespond ? null : new Date();
+			setFields.aiHandoffReason = nextAiToRespond ? "" : "manual_admin_toggle";
+			if (nextAiToRespond) {
+				setFields.escalationStatus = "none";
+				setFields.escalationReason = "";
+				setFields.escalationSource = "";
+				setFields.escalatedAt = null;
+				setFields.escalatedBy = null;
+				setFields.escalationAddressedAt = null;
+				setFields.escalationAddressedBy = null;
+				setFields.escalationAddressedNote = "";
+			}
+		}
+		setFields.updatedAt = new Date();
+
+		if (!conversation && Object.keys(setFields).length === 1) {
+			return res
+				.status(400)
+				.json({ error: "No valid fields provided for update" });
+		}
+
 		const safeConversation = conversation
 			? enforceConversationSenderName(conversation, req.profile)
 			: null;
+		const actorId = normalizeId(req.profile?._id);
+		const actorSentMessage =
+			safeConversation &&
+			actorId &&
+			normalizeId(safeConversation.messageBy?.userId) === actorId;
+		if (actorSentMessage && isClientSupportCase(currentCase)) {
+			setFields.aiToRespond = false;
+			setFields.aiPausedAt = new Date();
+			setFields.aiHandoffReason = "human_admin_message";
+			setFields.humanTakeoverAt = new Date();
+			setFields.humanTakeoverBy = req.profile._id;
+		}
 
 		const updateDoc = safeConversation
 			? { $set: setFields, $push: { conversation: safeConversation } }
-			: setFields;
+			: { $set: setFields };
 
 		const updatedCase = await SupportCase.findByIdAndUpdate(req.params.id, updateDoc, {
 			new: true,
@@ -388,10 +605,149 @@ exports.updateSupportCase = async (req, res) => {
 		} else if (safeConversation) {
 			req.io.emit("receiveMessage", updatedCase);
 		}
+		req.io.to(String(updatedCase._id)).emit("supportCaseUpdated", updatedCase);
+		req.io.emit("supportCaseUpdated", updatedCase);
+		const previousEscalationStatus = currentCase.escalationStatus || "none";
+		const nextEscalationStatus = updatedCase.escalationStatus || "none";
+		if (previousEscalationStatus !== nextEscalationStatus) {
+			const escalationPayload = {
+				case: updatedCase,
+				caseId: String(updatedCase._id),
+				escalationStatus: nextEscalationStatus,
+			};
+			if (nextEscalationStatus === "active") {
+				req.io.emit("supportCaseEscalated", escalationPayload);
+			}
+			if (nextEscalationStatus === "addressed") {
+				req.io.emit("supportCaseEscalationAddressed", escalationPayload);
+			}
+			req.io.emit("supportCaseEscalationUpdated", escalationPayload);
+		}
+		if (currentCase.aiToRespond && updatedCase.aiToRespond === false) {
+			req.io.to(String(updatedCase._id)).emit("aiPaused", {
+				caseId: String(updatedCase._id),
+				reason: updatedCase.aiHandoffReason || "human_takeover",
+				agentName:
+					req.profile?.name || req.profile?.email || updatedCase.supporterName || "Jannat Booking",
+			});
+		}
 
 		res.status(200).json(updatedCase);
 	} catch (error) {
 		console.log(error, "error");
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.getPublicClientSupportCaseById = async (req, res) => {
+	try {
+		const supportCase = await SupportCase.findOne({
+			_id: req.params.id,
+			openedBy: "client",
+		})
+			.populate("hotelId")
+			.lean()
+			.exec();
+
+		if (!supportCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+
+		res.status(200).json(supportCase);
+	} catch (error) {
+		console.error("Error fetching public client support case:", error);
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.updatePublicClientSupportCase = async (req, res) => {
+	try {
+		const currentCase = await SupportCase.findOne({
+			_id: req.params.id,
+			openedBy: "client",
+		}).lean();
+
+		if (!currentCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+
+		const setFields = { updatedAt: new Date() };
+		if (
+			!validateReadableTextFields(res, {
+				conversationMessage: req.body.conversation?.message,
+				conversationSender: req.body.conversation?.messageBy?.customerName,
+				conversationInquiryAbout: req.body.conversation?.inquiryAbout,
+				conversationInquiryDetails: req.body.conversation?.inquiryDetails,
+			})
+		) {
+			return;
+		}
+		const safeConversation = req.body.conversation
+			? buildPublicClientConversation(req.body.conversation, currentCase)
+			: null;
+
+		if (req.body.caseStatus === "closed") {
+			setFields.caseStatus = "closed";
+			setFields.closedAt = new Date();
+			setFields.closedBy = "client";
+			setFields.aiToRespond = false;
+			setFields.aiPausedAt = new Date();
+			setFields.aiHandoffReason = "client_closed_case";
+			if (currentCase.escalationStatus === "active") {
+				setFields.escalationStatus = "addressed";
+				setFields.escalationAddressedAt = new Date();
+				setFields.escalationAddressedBy = null;
+				setFields.escalationAddressedNote = "Client closed case";
+			}
+		}
+
+		if (Object.prototype.hasOwnProperty.call(req.body, "rating")) {
+			const rating = Number(req.body.rating);
+			if (Number.isFinite(rating) && rating >= 1 && rating <= 5) {
+				setFields.rating = rating;
+			}
+		}
+
+		if (!safeConversation && Object.keys(setFields).length === 1) {
+			return res
+				.status(400)
+				.json({ error: "No valid fields provided for update" });
+		}
+
+		const updateDoc = safeConversation
+			? { $set: setFields, $push: { conversation: safeConversation } }
+			: { $set: setFields };
+
+		const updatedCase = await SupportCase.findByIdAndUpdate(
+			req.params.id,
+			updateDoc,
+			{ new: true }
+		)
+			.populate("hotelId")
+			.exec();
+
+		if (!updatedCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+
+		if (req.body.caseStatus === "closed") {
+			req.io.emit("closeCase", { case: updatedCase, closedBy: "client" });
+		} else if (safeConversation) {
+			req.io.to(String(updatedCase._id)).emit("receiveMessage", {
+				...safeConversation,
+				caseId: String(updatedCase._id),
+			});
+		}
+		if (currentCase.aiToRespond && updatedCase.aiToRespond === false) {
+			req.io.to(String(updatedCase._id)).emit("aiPaused", {
+				caseId: String(updatedCase._id),
+				reason: updatedCase.aiHandoffReason || "client_closed_case",
+			});
+		}
+
+		res.status(200).json(updatedCase);
+	} catch (error) {
+		console.error("Error updating public client support case:", error);
 		res.status(400).json({ error: error.message });
 	}
 };
@@ -414,10 +770,26 @@ exports.createNewSupportCase = async (req, res) => {
 			targetUserId,
 			targetUserName,
 			targetUserRole,
+			preferredLanguage,
+			preferredLanguageCode,
 		} = req.body;
 
 		console.log(req.body.displayName1, "displayName1");
 		console.log("Received Payload:", req.body);
+		if (
+			!validateReadableTextFields(res, {
+				customerName,
+				customerEmail,
+				inquiryAbout,
+				inquiryDetails,
+				displayName1,
+				displayName2,
+				supporterName,
+				targetUserName,
+			})
+		) {
+			return;
+		}
 
 		// Basic validation
 		if (
@@ -440,22 +812,49 @@ exports.createNewSupportCase = async (req, res) => {
 				? "hotel owner"
 				: "client";
 
+		let hotelName = "Unknown Hotel";
+		let hotelDoc = null;
+		if (hotelId && mongoose.Types.ObjectId.isValid(hotelId)) {
+			hotelDoc = await HotelDetails.findById(hotelId).select(
+				"hotelName aiToRespond"
+			);
+			if (hotelDoc && hotelDoc.hotelName) {
+				hotelName = hotelDoc.hotelName;
+			}
+		}
+		const aiEnabledForClient =
+			openedBy === "client" &&
+			(Boolean(hotelDoc?.aiToRespond) || isAiForceRespondEnabled());
+		const aiResponderName = aiEnabledForClient
+			? pickB2CAiResponderName(customerName, customerEmail, hotelId)
+			: "";
+
 		// First conversation entry
 		const conversation = [
 			{
-				messageBy: {
-					customerName,
-					customerEmail: customerEmail || "superadmin@example.com",
-					userId:
-						role === 1000
-							? supporterId
-							: role === 2000
-							? ownerId
-							: customerEmail,
-				},
+				messageBy:
+					openedBy === "client"
+						? {
+								customerName: "Jannat Booking",
+								customerEmail: "support@jannatbooking.com",
+								userId: "jannat-system",
+						  }
+						: {
+								customerName,
+								customerEmail: customerEmail || "superadmin@example.com",
+								userId:
+									role === 1000
+										? supporterId
+										: role === 2000
+										? ownerId
+										: customerEmail,
+						  },
 				message:
 					openedBy === "client"
-						? "A representative will be with you in 3 to 5 minutes"
+						? localizedClientHoldMessage(
+								preferredLanguage,
+								preferredLanguageCode
+						  )
 						: `New support case created by ${
 								openedBy === "super admin"
 									? "Xhotelpro Administration"
@@ -463,9 +862,12 @@ exports.createNewSupportCase = async (req, res) => {
 						  }`,
 				inquiryAbout,
 				inquiryDetails,
-				seenByAdmin: role === 1000,
+				seenByAdmin: openedBy === "client" ? true : role === 1000,
 				seenByHotel: role === 2000,
 				seenByCustomer: role === 0,
+				isSystem: openedBy === "client",
+				preferredLanguage: preferredLanguage || "English",
+				preferredLanguageCode: preferredLanguageCode || "en",
 			},
 		];
 
@@ -485,6 +887,11 @@ exports.createNewSupportCase = async (req, res) => {
 			displayName1, // Store the display name of the case opener
 			displayName2, // Store the display name of the receiver
 			supporterName,
+			preferredLanguage: preferredLanguage || "English",
+			preferredLanguageCode: preferredLanguageCode || "en",
+			aiToRespond: aiEnabledForClient,
+			aiResponderName,
+			aiRelated: aiEnabledForClient,
 		});
 
 		// Save to DB
@@ -493,30 +900,29 @@ exports.createNewSupportCase = async (req, res) => {
 		// Emit Socket.IO event for new chat
 		req.io.emit("newChat", newCase);
 
-		// 1) Fetch the hotel's name from the hotelId field, if valid
-		let hotelName = "Unknown Hotel";
-		if (hotelId && mongoose.Types.ObjectId.isValid(hotelId)) {
-			const hotelDoc = await HotelDetails.findById(hotelId).select("hotelName");
-			if (hotelDoc && hotelDoc.hotelName) {
-				hotelName = hotelDoc.hotelName;
-			}
-		}
-
 		// 2) Generate the HTML from your email template
 		const emailHtml = newSupportCaseEmail(newCase, hotelName);
 
-		// 3) Send the email notification to the three addresses
-		await sgMail.send({
-			from: "noreply@jannatbooking.com",
-			to: [
-				"morazzakhamouda@gmail.com",
-				"xhoteleg@gmail.com",
-				"ahmed.abdelrazak@jannatbooking.com",
-				"support@jannatbooking.com",
-			],
-			subject: `New Support Case | ${hotelName}`,
-			html: emailHtml,
-		});
+		// 3) Send email as a best-effort notification only. The chat case is
+		// already saved, so provider/network issues must not make clients retry.
+		try {
+			await sgMail.send({
+				from: "noreply@jannatbooking.com",
+				to: [
+					"morazzakhamouda@gmail.com",
+					"xhoteleg@gmail.com",
+					"ahmed.abdelrazak@jannatbooking.com",
+					"support@jannatbooking.com",
+				],
+				subject: `New Support Case | ${hotelName}`,
+				html: emailHtml,
+			});
+		} catch (emailError) {
+			console.error(
+				"Support case email notification failed:",
+				emailError?.message || emailError
+			);
+		}
 
 		// Finally, respond with the new case
 		return res.status(201).json(newCase);
@@ -593,6 +999,22 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 			caseStatus: "open",
 			openedBy: { $in: ["client"] }, // Client-related cases only
 		}))
+			.populate("supporterId")
+			.populate("hotelId");
+		res.status(200).json(cases);
+	} catch (error) {
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.getEscalatedSupportCasesClients = async (req, res) => {
+	try {
+		const cases = await SupportCase.find(withSupportCaseScope(req, {
+			caseStatus: "open",
+			openedBy: { $in: ["client"] },
+			escalationStatus: "active",
+		}))
+			.sort({ escalatedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
 			.populate("supporterId")
 			.populate("hotelId");
 		res.status(200).json(cases);
@@ -709,7 +1131,12 @@ exports.getUnseenMessagesCountByAdmin = async (req, res) => {
 		// Count the unseen messages where the userId in messageBy does not match the current user
 		const scopeFilter = supportCaseScopeFilter(req);
 		const count = await SupportCase.aggregate([
-			...(Object.keys(scopeFilter).length ? [{ $match: scopeFilter }] : []),
+			{
+				$match: {
+					...scopeFilter,
+					caseStatus: { $ne: "closed" },
+				},
+			},
 			{ $unwind: "$conversation" },
 			{
 				$match: {
@@ -753,8 +1180,14 @@ exports.getSupportCaseNotificationSummary = async (req, res) => {
 			"conversation.messageBy.userId": conversationSenderExclusion,
 		};
 
-		const [openCases, openClientCases, openHotelCases, unseenMessages, unseenCases] =
-			await Promise.all([
+		const [
+			openCases,
+			openClientCases,
+			openHotelCases,
+			activeEscalatedClientCases,
+			unseenMessages,
+			unseenCases,
+		] = await Promise.all([
 				SupportCase.countDocuments(scoped({ caseStatus: "open" })),
 				SupportCase.countDocuments(
 					scoped({ caseStatus: "open", openedBy: "client" })
@@ -763,6 +1196,13 @@ exports.getSupportCaseNotificationSummary = async (req, res) => {
 					scoped({
 						caseStatus: "open",
 						openedBy: { $in: ["super admin", "hotel owner"] },
+					})
+				),
+				SupportCase.countDocuments(
+					scoped({
+						caseStatus: "open",
+						openedBy: "client",
+						escalationStatus: "active",
 					})
 				),
 				SupportCase.aggregate([
@@ -786,6 +1226,7 @@ exports.getSupportCaseNotificationSummary = async (req, res) => {
 			openCases,
 			openClientCases,
 			openHotelCases,
+			activeEscalatedClientCases,
 			unseenMessages: Number(unseenMessages?.[0]?.count || 0),
 			unseenCases: Number(unseenCases?.[0]?.count || 0),
 		});
@@ -809,7 +1250,12 @@ exports.getUnseenMessagesCountByHotelOwner = async (req, res) => {
 
 		// Count the unseen messages for the hotel owner
 		const count = await SupportCase.aggregate([
-			{ $match: { hotelId: mongoose.Types.ObjectId(hotelId) } },
+			{
+				$match: {
+					hotelId: mongoose.Types.ObjectId(hotelId),
+					caseStatus: { $ne: "closed" },
+				},
+			},
 			{ $unwind: "$conversation" },
 			{
 				$match: {

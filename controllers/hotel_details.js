@@ -813,7 +813,7 @@ const getDashboardAccessibleHotels = async (user = {}) => {
 
 	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) {
 		return HotelDetails.find({})
-			.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel")
+			.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive")
 			.lean()
 			.exec();
 	}
@@ -838,7 +838,7 @@ const getDashboardAccessibleHotels = async (user = {}) => {
 	const hotels = await HotelDetails.find(
 		filters.length === 1 ? filters[0] : { $or: filters }
 	)
-		.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel")
+		.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive")
 		.lean()
 		.exec();
 
@@ -1004,7 +1004,10 @@ exports.hotelGeneralStats = async (req, res) => {
 				bankDone,
 				settingsDone,
 				activationReady,
-				activeHotel: !!hotel.activateHotel,
+				activeHotel:
+					hotel.activateHotel === true && hotel.xHotelProActive !== false,
+				ownerActivatedHotel: hotel.activateHotel === true,
+				xHotelProActive: hotel.xHotelProActive !== false,
 			},
 			stats: {
 				totalRooms,
@@ -1763,6 +1766,12 @@ exports.updateHotelDetails = async (req, res) => {
 		if (Object.prototype.hasOwnProperty.call(updateData, "aiToRespond")) {
 			updatedFields.aiToRespond = toBoolean(updateData.aiToRespond); // ← NEW
 		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "activateHotel")) {
+			updatedFields.activateHotel = toBoolean(updateData.activateHotel);
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "xHotelProActive")) {
+			updatedFields.xHotelProActive = toBoolean(updateData.xHotelProActive);
+		}
 
 		/* 3. Detect coordinate change */
 		const newCoords = updateData?.location?.coordinates;
@@ -1997,8 +2006,16 @@ exports.listForAdmin = async (req, res) => {
 
 		/* 2️⃣  Base filter (status) */
 		const baseMatch = applyAdminHotelScope(req, {});
-		if (status === "active") baseMatch.activateHotel = true;
-		if (status === "inactive") baseMatch.activateHotel = false;
+		if (status === "active") {
+			baseMatch.activateHotel = true;
+			baseMatch.xHotelProActive = { $ne: false };
+		}
+		if (status === "inactive") {
+			baseMatch.$or = [
+				{ activateHotel: { $ne: true } },
+				{ xHotelProActive: false },
+			];
+		}
 
 		/* 3️⃣  Search filter (if q present) */
 		const search = q.trim();
@@ -2120,12 +2137,30 @@ exports.listForAdmin = async (req, res) => {
 			total: { $sum: 1 },
 			active: {
 				$sum: {
-					$cond: [{ $eq: ["$activateHotel", true] }, 1, 0],
+					$cond: [
+						{
+							$and: [
+								{ $eq: ["$activateHotel", true] },
+								{ $ne: ["$xHotelProActive", false] },
+							],
+						},
+						1,
+						0,
+					],
 				},
 			},
 			inactive: {
 				$sum: {
-					$cond: [{ $ne: ["$activateHotel", true] }, 1, 0],
+					$cond: [
+						{
+							$or: [
+								{ $ne: ["$activateHotel", true] },
+								{ $eq: ["$xHotelProActive", false] },
+							],
+						},
+						1,
+						0,
+					],
 				},
 			},
 
@@ -2276,8 +2311,16 @@ exports.listForAdminAll = async (req, res) => {
 
 		/* 2️⃣  Base filter (status) */
 		const baseMatch = applyAdminHotelScope(req, {});
-		if (status === "active") baseMatch.activateHotel = true;
-		if (status === "inactive") baseMatch.activateHotel = false;
+		if (status === "active") {
+			baseMatch.activateHotel = true;
+			baseMatch.xHotelProActive = { $ne: false };
+		}
+		if (status === "inactive") {
+			baseMatch.$or = [
+				{ activateHotel: { $ne: true } },
+				{ xHotelProActive: false },
+			];
+		}
 
 		/* 3️⃣  Search filter (if q present) */
 		const search = (typeof q === "string" ? q : "").trim();

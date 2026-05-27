@@ -38,7 +38,11 @@ async function scheduleGreeting(io, caseId) {
 	try {
 		const sc = await getSupportCaseById(caseId);
 		if (!sc) return;
-		let { allowed, hotel } = await ensureAIAllowed(sc.hotelId);
+		let { allowed, hotel, reason } = await ensureAIAllowed(sc.hotelId, sc);
+		if (!allowed) {
+			console.log("[aiagent] greeting skipped:", reason);
+			return;
+		}
 		if (!hotel) hotel = await getHotelById(sc.hotelId); // always fetch full hotel for name
 
 		ensureIdentity(st, sc, hotel);
@@ -106,7 +110,11 @@ async function scheduleReply(io, caseId, lastUserMsg) {
 	try {
 		const sc = await getSupportCaseById(caseId);
 		if (!sc) return;
-		let { allowed, hotel } = await ensureAIAllowed(sc.hotelId);
+		let { allowed, hotel, reason } = await ensureAIAllowed(sc.hotelId, sc);
+		if (!allowed) {
+			console.log("[aiagent] reply skipped:", reason);
+			return;
+		}
 		if (!hotel) hotel = await getHotelById(sc.hotelId);
 		ensureIdentity(st, sc, hotel);
 
