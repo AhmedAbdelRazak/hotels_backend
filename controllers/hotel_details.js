@@ -89,7 +89,9 @@ const canManageHotelAgentOverrides = (actor = {}, hotel = {}) => {
 	if (
 		assignedToHotel &&
 		(roles.includes(10000) ||
+			roles.includes(8000) ||
 			descriptions.includes("hotelmanager") ||
+			descriptions.includes("reservationemployee") ||
 			descriptions.includes("systemadmin") ||
 			Array.isArray(actor.accessTo) && actor.accessTo.includes("settings"))
 	) {
@@ -1833,6 +1835,22 @@ const normalizeAgentPricingPayload = (rows = [], agentSnapshot = {}, room = {}) 
 		.map((row) => {
 			const calendarDate = toDateKey(row?.calendarDate);
 			if (!calendarDate) return null;
+			if (
+				row?.blocked === true ||
+				row?.isBlocked === true ||
+				String(row?.status || "").toLowerCase() === "blocked" ||
+				isBlockedPricingRate(row)
+			) {
+				return {
+					...agentSnapshot,
+					calendarDate,
+					price: 0,
+					rootPrice: 0,
+					color: "black",
+					status: "blocked",
+					blocked: true,
+				};
+			}
 
 			const price = toPositiveNumber(row?.price, basePrice || defaultCost);
 			const rootPrice = toPositiveNumber(

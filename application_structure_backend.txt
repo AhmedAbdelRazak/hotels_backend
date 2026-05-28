@@ -109,6 +109,7 @@ Primary Route Files And API Areas
   - Hotel profile creation/update, owner/admin hotel lists, executive summaries, open/incomplete reservation summaries, hotel stats, reassignment, and owner PayPal methods.
   - Public hotel-detail reads use optional auth and strip room-level agentInventory/agentPricingRate unless the viewer is the agent for those rows or an authorized settings user.
   - PATCH /hotel-details/:hotelId/rooms/:roomId/agent-overrides/:userId persists only a room's private agentInventory or agentPricingRate override data. It must not save the whole hotel/room form, so unrelated unsaved settings changes are not committed by the agent override modal.
+  - The same agent-overrides PATCH endpoint supports agent-specific blocked calendar dates by saving agentPricingRate rows with price=0, rootPrice=0, color=black, status=blocked, blocked=true. Assigned reservation employees, system admins, hotel managers, owners, and platform admins can save these rows when scoped to the hotel.
 - routes/rooms.js
   - Room CRUD, distinct room values, room inventory availability, reservation-room availability, room deletion checks, and inventory reports.
 - routes/reservations.js
@@ -146,6 +147,7 @@ Core Models
   - Hotel profile, owner link, setup completion fields, rooms/photos/location/payment settings, activation state, and wallet/payment fields.
   - roomCountDetails may include private per-agent agentInventory and agentPricingRate rows; do not expose them to public/B2C hotel responses.
   - 2026-05-27 regression: virtual reservation employee codex.virtual.res.employee.qa@jannatbooking.test assigned stock for virtual agent codex.virtual.agent.qa@jannatbooking.test on hotel 68da202900a070e8123c27c4 / room 68da23fe00a070e8123c2aa4. Stock=1 allowed exactly one agent reservation over 2032-04-19..2032-04-22 and blocked an overlapping 2032-04-20 request. Stock=0 then blocked 2032-04-29..2032-05-01. All assertions passed.
+  - 2026-05-28 regression: temporary users codex.block.* saved an agent-specific blocked range on hotel 68da202900a070e8123c27c4 / room 68da23fe00a070e8123c2aa4. A reservation employee and a system admin could save the blocked range; agent availability returned blockedDates; an overlapping agent reservation returned agentCalendarBlocked; a non-overlapping reservation was allowed. The temp users, temp reservation, and temp agent override rows were removed and verified at zero remaining documents/rows.
 - models/rooms.js
   - Physical room records, room type/display, room cleanliness state, housekeeping dirty metadata, bed setup, and hotel ownership.
 - models/reservations.js
