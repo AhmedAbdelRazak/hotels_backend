@@ -4,6 +4,7 @@ const SupportCase = require("../../models/supportcase");
 const HotelDetails = require("../../models/hotel_details");
 const Reservations = require("../../models/reservations");
 const Janat = require("../../models/janat");
+const AiAgentLearning = require("../../models/aiagent_learning");
 const AiAgentTrainingChat = require("../../models/aiagent_training_chat");
 
 function safeId(id) {
@@ -128,29 +129,43 @@ function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "") {
 	return score;
 }
 
+async function findTrainingDocs(Model, filter) {
+	try {
+		return await Model.find(filter)
+			.select(
+				"chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt createdAt"
+			)
+			.sort({ updatedAt: -1, createdAt: -1 })
+			.limit(80)
+			.lean()
+			.exec();
+	} catch (error) {
+		console.error("[aiagent] training lookup failed:", error?.message || error);
+		return [];
+	}
+}
+
 async function listRelevantTrainingChats({ hotelId, text, limit = 4 } = {}) {
 	const safeHotelId = safeId(hotelId);
-	const filter = { status: "active" };
+	const scopedFilter = { status: "active" };
 	if (safeHotelId) {
-		filter.$or = [
+		scopedFilter.$or = [
 			{ hotelId: safeHotelId },
 			{ hotelId: null },
 			{ hotelId: { $exists: false } },
 		];
 	}
+	const learningFilter = { ...scopedFilter, sourceType: "manual_chat" };
 
-	const docs = await AiAgentTrainingChat.find(filter)
-		.select(
-			"chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt"
-		)
-		.sort({ updatedAt: -1, createdAt: -1 })
-		.limit(80)
-		.lean()
-		.exec();
+	const [learningDocs, legacyTrainingDocs] = await Promise.all([
+		findTrainingDocs(AiAgentLearning, learningFilter),
+		findTrainingDocs(AiAgentTrainingChat, scopedFilter),
+	]);
+	const docs = [...learningDocs, ...legacyTrainingDocs];
 
 	const tokens = new Set(learningTokens(text));
 	const hotelIdString = safeHotelId ? String(safeHotelId) : "";
-	return docs
+	const sortedDocs = docs
 		.map((doc) => ({
 			...doc,
 			_relevanceScore: scoreTrainingChat(doc, tokens, hotelIdString),
@@ -159,8 +174,37 @@ async function listRelevantTrainingChats({ hotelId, text, limit = 4 } = {}) {
 			(a, b) =>
 				b._relevanceScore - a._relevanceScore ||
 				new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)
-		)
-		.slice(0, Math.max(1, Math.min(Number(limit) || 4, 8)));
+		);
+
+	const max = Math.max(1, Math.min(Number(limit) || 4, 8));
+	const picked = [];
+	const seenLanguages = new Set();
+	const topRelevantSlots = Math.max(1, Math.floor(max / 2));
+	for (const doc of sortedDocs) {
+		if (picked.length >= topRelevantSlots) break;
+		if (doc._relevanceScore > 0 || picked.length < 2) {
+			picked.push(doc);
+			seenLanguages.add(String(doc.language || "unknown").toLowerCase());
+		}
+	}
+	for (const doc of sortedDocs) {
+		if (picked.length >= max) break;
+		const language = String(doc.language || "unknown").toLowerCase();
+		if (
+			!seenLanguages.has(language) &&
+			!picked.some((item) => String(item._id) === String(doc._id))
+		) {
+			picked.push(doc);
+			seenLanguages.add(language);
+		}
+	}
+	for (const doc of sortedDocs) {
+		if (picked.length >= max) break;
+		if (!picked.some((item) => String(item._id) === String(doc._id))) {
+			picked.push(doc);
+		}
+	}
+	return picked;
 }
 
 module.exports = {

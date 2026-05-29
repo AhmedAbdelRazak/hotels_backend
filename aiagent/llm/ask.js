@@ -5,6 +5,10 @@ try {
 } catch (_) {
 	/* optional */
 }
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+} = require("../../services/openaiModelConfig");
 
 /**
  * If OPENAI_API_KEY exists, ask the LLM to clarify/extract fields from free text.
@@ -37,15 +41,16 @@ async function refineWithLLM({ text, state }) {
 	});
 
 	try {
-		const res = await client.chat.completions.create({
-			model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+		const res = await client.chat.completions.create(buildChatCompletionBody({
+			model: pickOpenAIModel("nlu"),
 			temperature: 0.2,
+			maxTokens: 900,
 			response_format: { type: "json_object" },
 			messages: [
 				{ role: "system", content: sys },
 				{ role: "user", content: user },
 			],
-		});
+		}));
 		const json = res?.choices?.[0]?.message?.content || "{}";
 		const data = JSON.parse(json);
 		return data && typeof data === "object" ? data : null;

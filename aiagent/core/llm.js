@@ -1,9 +1,13 @@
 /** @format */
 // aiagent/core/llm.js
 const fetch = require("node-fetch");
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+} = require("../../services/openaiModelConfig");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini"; // pick your default
+const OPENAI_MODEL = pickOpenAIModel("writer");
 
 const hasOpenAI = !!OPENAI_API_KEY;
 
@@ -15,14 +19,14 @@ async function generateWithOpenAI(system, user) {
 			Authorization: `Bearer ${OPENAI_API_KEY}`,
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify({
+		body: JSON.stringify(buildChatCompletionBody({
 			model: OPENAI_MODEL,
 			temperature: 0.5,
 			messages: [
 				{ role: "system", content: system },
 				{ role: "user", content: user },
 			],
-		}),
+		})),
 	});
 	const data = await resp.json();
 	const txt =

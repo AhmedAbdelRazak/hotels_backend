@@ -28,6 +28,10 @@ const twilio = require("twilio");
 const countries = require("i18n-iso-countries");
 const libphone = require("google-libphonenumber");
 const OpenAI = require("openai");
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+} = require("../services/openaiModelConfig");
 
 // Models (for owner/agent lookup)
 const User = require("../models/user");
@@ -217,14 +221,15 @@ Example: {"e164":"+14155552671"}
 			nationality,
 			raw: cleanedDigitsMaybePlus,
 		});
-		const r = await openai.chat.completions.create({
-			model: "gpt-4o-mini",
+		const r = await openai.chat.completions.create(buildChatCompletionBody({
+			model: pickOpenAIModel("nlu"),
 			temperature: 0,
+			maxTokens: 300,
 			messages: [
 				{ role: "system", content: "Respond with strict JSON only." },
 				{ role: "user", content: prompt },
 			],
-		});
+		}));
 		const txt = r.choices?.[0]?.message?.content?.trim() || "";
 		log("OpenAI raw response:", txt);
 		const match = txt.match(/\{[\s\S]*\}/);

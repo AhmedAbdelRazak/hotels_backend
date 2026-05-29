@@ -1050,8 +1050,10 @@ Future TODO Backlog - Added 2026-05-26
   - A production dry-run extraction returned Expedia/new_reservation with confirmation 245715336, hotel Zad Al sad, 2026-12-21 to 2026-12-25, guest name, and totalGuests 5.
 
 2026-05-28 Manual AI Chat Teaching For B2C Support
-- New model:
-  - models/aiagent_training_chat.js.
+- Storage model:
+  - models/aiagent_learning.js.
+  - Manual uploads are stored in the aiagentlearnings collection with sourceType=manual_chat.
+  - aiagentlearnings is the source of truth for newly uploaded teaching chats. Do not hardcode sample/training chats in backend responses, frontend modal state, or the orchestrator prompt.
   - Stores employee-uploaded external chat examples with:
     - chatTitle.
     - chatKeywords.
@@ -1067,8 +1069,15 @@ Future TODO Backlog - Added 2026-05-26
   - Manual teaching-chat endpoints require requireSignin and CustomerService admin access.
   - Existing aiagent-learning build/selftest/debug endpoints remain unchanged.
 - Chatbot orchestration:
+  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5.5, and env values such as OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL can override by use case.
+  - OpenAI callers should use pickOpenAIModel/buildChatCompletionBody instead of hardcoded model names. The helper uses max_completion_tokens for GPT-5/o-series style models and max_tokens for older chat-completion models.
   - aiagent/core/db.js exposes listRelevantTrainingChats.
+  - listRelevantTrainingChats reads active manual learning records across languages from aiagentlearnings and legacy aiagenttrainingchats; retrieval must not filter examples by the guest's preferred language.
+  - The legacy aiagenttrainingchats collection is read only as backward-compatible learning context. New manual uploads and admin history records should go to aiagentlearnings/sourceType=manual_chat.
+  - Teaching chats may be Arabic, Hindi, English, Spanish, or mixed language. The AI should learn the support behavior from all relevant languages.
   - aiagent/core/orchestrator.js now loads relevant employee learning examples inside the writer before each LLM-written reply.
+  - The writer treats employee examples as private multilingual guidance only and must answer strictly in the support case preferredLanguage/preferredLanguageCode sent by the guest frontend.
+  - controllers/supportcase.js keeps preferredLanguage/preferredLanguageCode on the SupportCase in sync with public/client message metadata, so jannatbooking_frontend remains the source for the guest's preferred response language.
   - Learning examples are passed as private context only; the guest should never be told that examples were consulted.
   - When a support case has a hotel, the writer now speaks as that hotel support/reservation desk and avoids presenting Jannat Booking as a separate middleman unless platform/payment/final verification context requires the brand.
   - Greetings, introductions, transcript labels, quote continuations, and human handoff messages now prefer the active hotel support voice when hotel context exists, so the guest does not feel passed through a platform middleman.
@@ -1079,7 +1088,7 @@ Future TODO Backlog - Added 2026-05-26
   - Live-chat quote pricing now uses a bounded orchestrator-local pricing helper with date-loop guards and array checks, so a malformed pricing row cannot stall a chat turn.
   - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
 - Validation completed locally:
-  - node --check models/aiagent_training_chat.js.
+  - node --check models/aiagent_learning.js.
   - node --check controllers/aiagent_training_chats.js.
   - node --check routes/aiagent_learning.js.
   - node --check aiagent/core/db.js.

@@ -1,6 +1,7 @@
 /** @format */
 
 const OpenAI = require("openai");
+const { pickOpenAIModel } = require("./openaiModelConfig");
 const {
 	PROVIDER_LABELS,
 	extractNormalizedReservation,
@@ -427,10 +428,7 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 		};
 	}
 
-	const model =
-		process.env.OPENAI_REASONING_MODEL ||
-		process.env.OPENAI_MODEL_NLU ||
-		"gpt-4o-mini";
+	const model = pickOpenAIModel("reasoning");
 	const body = buildRedactedEmailText(email).slice(0, 8000);
 
 	try {

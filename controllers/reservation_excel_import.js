@@ -8,6 +8,7 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const Rooms = require("../models/rooms");
 const User = require("../models/user");
+const { pickOpenAIModel } = require("../services/openaiModelConfig");
 const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
@@ -143,10 +144,7 @@ const getOpenAiMapping = async ({ headers, sampleRows }) => {
 	if (!apiKey) return {};
 	try {
 		const client = new OpenAI({ apiKey });
-		const model =
-			process.env.OPENAI_REASONING_MODEL ||
-			process.env.OPENAI_MODEL_NLU ||
-			"gpt-4o-mini";
+		const model = pickOpenAIModel("reasoning");
 		const response = await client.chat.completions.create({
 			model,
 			response_format: { type: "json_object" },

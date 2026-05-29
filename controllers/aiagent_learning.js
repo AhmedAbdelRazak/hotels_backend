@@ -5,21 +5,19 @@ const mongoose = require("mongoose");
 const SupportCase = require("../models/supportcase");
 const AiAgentLearning = require("../models/aiagent_learning");
 const AiAgentLearningBatch = require("../models/aiagent_learning_batch");
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+} = require("../services/openaiModelConfig");
 
 // Env
 const RAW_KEY =
 	process.env.OPENAI_API_KEY || process.env.CHATGPT_API_TOKEN || "";
-const RAW_ANALYSIS_MODEL = process.env.AI_ANALYSIS_MODEL || "gpt-4.1";
+const ANALYSIS_MODEL = pickOpenAIModel("analysis");
 
 // Helpers
 function looksLikeOpenAIKey(k) {
 	return typeof k === "string" && /^sk-/.test(k.trim());
-}
-function sanitizeModelName(m) {
-	if (!m) return null;
-	const noHash = String(m).split("#")[0];
-	const token = noHash.trim().split(/\s+/)[0];
-	return token || null;
 }
 function maskKey(k) {
 	if (!k) return "";
@@ -33,7 +31,6 @@ function stableHash(str) {
 		.update(String(str || ""))
 		.digest("hex");
 }
-const ANALYSIS_MODEL = sanitizeModelName(RAW_ANALYSIS_MODEL) || "gpt-4.1";
 
 // ---- One-time repair: drop legacy unique indexes & backfill fields
 async function ensureLearningCollectionConsistency() {
@@ -56,8 +53,13 @@ async function ensureLearningCollectionConsistency() {
 				fixes.dropped.push(idx.name);
 			} catch (_) {}
 		}
-		// wrong non-unique caseId index (we want unique)
-		if (idx.name === "caseId_1" && !idx.unique) {
+		// caseId must be unique only when it exists, so manual chats can share
+		// the same collection without fake SupportCase ids.
+		const isCaseIdIndex = idx.key && idx.key.caseId === 1;
+		const isWrongCaseIdIndex =
+			(idx.name === "caseId_1" && !idx.unique) ||
+			(isCaseIdIndex && idx.unique && !idx.partialFilterExpression);
+		if (isWrongCaseIdIndex) {
 			try {
 				await AiAgentLearning.collection.dropIndex(idx.name);
 				fixes.dropped.push(idx.name);
@@ -65,16 +67,26 @@ async function ensureLearningCollectionConsistency() {
 		}
 	}
 
-	// 2) Ensure unique index on caseId
+	// 2) Ensure partial unique index on caseId
 	const idx2 = await AiAgentLearning.collection.indexes();
-	const hasCaseUnique = idx2.some((i) => i.name === "caseId_1" && i.unique);
+	const hasCaseUnique = idx2.some(
+		(i) =>
+			i.key &&
+			i.key.caseId === 1 &&
+			i.unique &&
+			i.partialFilterExpression
+	);
 	if (!hasCaseUnique) {
 		try {
 			await AiAgentLearning.collection.createIndex(
 				{ caseId: 1 },
-				{ unique: true }
+				{
+					unique: true,
+					name: "caseId_unique_support_case",
+					partialFilterExpression: { caseId: { $type: "objectId" } },
+				}
 			);
-			fixes.created.push("caseId_1(unique)");
+			fixes.created.push("caseId_unique_support_case(partial_unique)");
 		} catch (_) {}
 	}
 
@@ -135,6 +147,39 @@ function toPairsForLLM(conversation = []) {
 		})
 		.filter((t) => t.text);
 }
+
+function cleanField(value = "", max = 3000) {
+	return String(value || "")
+		.replace(/\u0000/g, "")
+		.trim()
+		.slice(0, max);
+}
+
+function toLearningConversation(conversation = []) {
+	return (conversation || [])
+		.filter((m) => m && typeof m.message === "string")
+		.map((m, index) => {
+			const name = cleanField(m?.messageBy?.customerName || "", 90);
+			const email = String(m?.messageBy?.customerEmail || "").toLowerCase();
+			const lowerName = name.toLowerCase();
+			const supportish =
+				email === "management@xhotelpro.com" ||
+				lowerName.includes("admin") ||
+				lowerName.includes("support") ||
+				lowerName.includes("agent") ||
+				lowerName.includes("system");
+			return {
+				sequence: index + 1,
+				speakerName: name,
+				role: supportish ? "support" : "client",
+				message: cleanField(m.message, 3000),
+				date: m.date || null,
+			};
+		})
+		.filter((turn) => turn.message)
+		.slice(0, 160);
+}
+
 function extractJSON(text) {
 	if (!text) return null;
 	try {
@@ -192,12 +237,12 @@ Context:
 		},
 	];
 
-	const r = await client.chat.completions.create({
+	const r = await client.chat.completions.create(buildChatCompletionBody({
 		model,
 		messages,
 		temperature: 0.2,
-		max_tokens: 900,
-	});
+		maxTokens: 2700,
+	}));
 
 	const raw = (r.choices?.[0]?.message?.content || "").trim();
 	const json = extractJSON(raw);
@@ -245,15 +290,15 @@ Tasks:
 Return JSON only.
 `.trim();
 
-	const r = await client.chat.completions.create({
+	const r = await client.chat.completions.create(buildChatCompletionBody({
 		model,
 		temperature: 0.4,
 		messages: [
 			{ role: "system", content: system },
 			{ role: "user", content: user },
 		],
-		max_tokens: 1200,
-	});
+		maxTokens: 3600,
+	}));
 
 	const raw = (r.choices?.[0]?.message?.content || "").trim();
 	try {
@@ -337,6 +382,10 @@ exports.buildFromSupportCases = async (req, res) => {
 
 		for (const c of candidates) {
 			try {
+				const learningConversation = toLearningConversation(c.conversation || []);
+				const firstMessage = Array.isArray(c.conversation)
+					? c.conversation[0] || {}
+					: {};
 				const sourceText = (c.conversation || [])
 					.map(
 						(m) =>
@@ -372,6 +421,7 @@ exports.buildFromSupportCases = async (req, res) => {
 						{ caseId: c._id },
 						{
 							$set: {
+								sourceType: "support_case",
 								caseId: c._id,
 								supportCaseId: c._id,
 								sourceCaseId: c._id, // <-- important for legacy index
@@ -379,6 +429,13 @@ exports.buildFromSupportCases = async (req, res) => {
 								model: MODEL,
 								messageCount: c.messageCount || (c.conversation || []).length,
 								sourceHash,
+								chatTitle:
+									cleanField(firstMessage.inquiryAbout, 140) ||
+									cleanField(firstMessage.message, 140) ||
+									`Support case ${String(c._id)}`,
+								conversation: learningConversation,
+								source: "support_case",
+								status: "active",
 								summary: analysis.summary,
 								steps: analysis.steps,
 								decisionRules: analysis.decisionRules,
@@ -541,12 +598,12 @@ exports.selfTest = async (req, res) => {
 		}
 		const client = new OpenAI({ apiKey: RAW_KEY });
 		const model = ANALYSIS_MODEL;
-		const r = await client.chat.completions.create({
+		const r = await client.chat.completions.create(buildChatCompletionBody({
 			model,
 			messages: [{ role: "user", content: "Return the string OK only." }],
 			temperature: 0,
-			max_tokens: 5,
-		});
+			maxTokens: 100,
+		}));
 		const text = (r.choices?.[0]?.message?.content || "").trim();
 		return res.json({
 			ok: text === "OK",

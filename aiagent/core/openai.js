@@ -1,5 +1,10 @@
 // aiagent/core/openai.js
 const OpenAI = require("openai");
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+	usesCompletionTokens,
+} = require("../../services/openaiModelConfig");
 
 function intFromEnv(name, fallback) {
 	const value = parseInt(process.env[name] || "", 10);
@@ -32,10 +37,7 @@ async function withDeadline(factory, timeoutMs) {
 }
 
 function pickModel(kind = "nlu") {
-	// small ops -> mini; responses -> 4o
-	if (kind === "nlu") return process.env.OPENAI_MODEL_NLU || "gpt-4o-mini";
-	if (kind === "writer") return process.env.OPENAI_MODEL || "gpt-4o";
-	return process.env.OPENAI_MODEL || "gpt-4o";
+	return pickOpenAIModel(kind);
 }
 
 async function chat(
@@ -43,18 +45,16 @@ async function chat(
 	{ kind = "nlu", temperature = 0, max_tokens = 350 } = {}
 ) {
 	const model = pickModel(kind);
-	const usesCompletionTokens = /^(gpt-5|o\d|o-)/i.test(model);
-	const tokenLimit = usesCompletionTokens
+	const gpt5Style = usesCompletionTokens(model);
+	const tokenLimit = gpt5Style
 		? Math.max(max_tokens * 3, kind === "writer" ? 900 : 600)
 		: max_tokens;
-	const body = {
+	const body = buildChatCompletionBody({
 		model,
 		messages,
-		...(usesCompletionTokens ? {} : { temperature }),
-		...(usesCompletionTokens
-			? { max_completion_tokens: tokenLimit }
-			: { max_tokens: tokenLimit }),
-	};
+		temperature,
+		maxTokens: tokenLimit,
+	});
 	const res = await withDeadline(
 		(signal) =>
 			client.chat.completions.create(body, {

@@ -1,7 +1,12 @@
 // controllers/aiagent_training_chats.js
 const OpenAI = require("openai");
+const crypto = require("crypto");
 const mongoose = require("mongoose");
-const AiAgentTrainingChat = require("../models/aiagent_training_chat");
+const AiAgentLearning = require("../models/aiagent_learning");
+const {
+	buildChatCompletionBody,
+	pickOpenAIModel,
+} = require("../services/openaiModelConfig");
 
 const MAX_RAW_LENGTH = 50000;
 const MAX_MESSAGE_LENGTH = 3000;
@@ -31,6 +36,47 @@ const cleanText = (value = "", max = MAX_RAW_LENGTH) =>
 const normalizeId = (value) => String(value?._id || value || "").trim();
 
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
+
+const stableHash = (value = "") =>
+	crypto.createHash("sha256").update(String(value || "")).digest("hex");
+
+let learningIndexesReady = false;
+async function ensureManualLearningIndexes() {
+	if (learningIndexesReady) return;
+	const indexes = await AiAgentLearning.collection.indexes();
+	for (const index of indexes) {
+		const isCaseIdIndex = index.key && index.key.caseId === 1;
+		const isFullUniqueCaseId =
+			isCaseIdIndex && index.unique && !index.partialFilterExpression;
+		if (isFullUniqueCaseId || (index.name === "caseId_1" && !index.unique)) {
+			try {
+				await AiAgentLearning.collection.dropIndex(index.name);
+			} catch (_) {}
+		}
+	}
+
+	const refreshed = await AiAgentLearning.collection.indexes();
+	const hasPartialUniqueCaseId = refreshed.some(
+		(index) =>
+			index.key &&
+			index.key.caseId === 1 &&
+			index.unique &&
+			index.partialFilterExpression
+	);
+	if (!hasPartialUniqueCaseId) {
+		try {
+			await AiAgentLearning.collection.createIndex(
+				{ caseId: 1 },
+				{
+					unique: true,
+					name: "caseId_unique_support_case",
+					partialFilterExpression: { caseId: { $type: "objectId" } },
+				}
+			);
+		} catch (_) {}
+	}
+	learningIndexesReady = true;
+}
 
 const sanitizeList = (values = [], maxItems = 12, maxLength = 80) =>
 	Array.from(
@@ -203,16 +249,7 @@ const fallbackParseChat = (rawText = "") => {
 	};
 };
 
-const pickModel = () =>
-	String(
-		process.env.OPENAI_MODEL_NLU ||
-			process.env.OPENAI_MODEL ||
-			process.env.AI_ANALYSIS_MODEL ||
-			"gpt-4o-mini"
-	)
-		.split("#")[0]
-		.trim()
-		.split(/\s+/)[0];
+const pickModel = () => pickOpenAIModel("analysis");
 
 const hasUsableOpenAIKey = () =>
 	/^sk-/.test(String(process.env.OPENAI_API_KEY || process.env.CHATGPT_API_TOKEN || "").trim());
@@ -228,7 +265,6 @@ async function cleanChatWithOpenAI(rawText) {
 	const model = pickModel();
 	try {
 		const client = new OpenAI({ apiKey });
-		const usesCompletionTokens = /^(gpt-5|o\d|o-)/i.test(model);
 		const messages = [
 			{
 				role: "system",
@@ -274,15 +310,13 @@ async function cleanChatWithOpenAI(rawText) {
 			},
 		];
 
-		const response = await client.chat.completions.create({
+		const response = await client.chat.completions.create(buildChatCompletionBody({
 			model,
 			messages,
 			response_format: { type: "json_object" },
-			...(usesCompletionTokens ? {} : { temperature: 0.1 }),
-			...(usesCompletionTokens
-				? { max_completion_tokens: 2200 }
-				: { max_tokens: 2200 }),
-		});
+			temperature: 0.1,
+			maxTokens: 2200,
+		}));
 
 		const parsed = extractJson(response.choices?.[0]?.message?.content || "");
 		if (!parsed) {
@@ -369,6 +403,7 @@ const publicChat = (doc = {}) => ({
 
 exports.createTrainingChat = async (req, res) => {
 	try {
+		await ensureManualLearningIndexes();
 		const rawText = cleanText(
 			req.body?.rawText || req.body?.chatText || req.body?.text || ""
 		);
@@ -382,8 +417,12 @@ exports.createTrainingChat = async (req, res) => {
 		const cleaned = normalizeCleanedChat(await cleanChatWithOpenAI(rawText), rawText);
 		const hotelId = normalizeId(req.body?.hotelId);
 		const createdById = normalizeId(req.profile?._id);
-		const doc = await AiAgentTrainingChat.create({
+		const doc = await AiAgentLearning.create({
 			...cleaned,
+			sourceType: "manual_chat",
+			caseId: null,
+			supportCaseId: null,
+			sourceCaseId: null,
 			hotelId: isValidObjectId(hotelId) ? hotelId : null,
 			hotelName: cleanText(req.body?.hotelName || "", 180),
 			source: ["manual_paste", "messenger", "whatsapp", "other"].includes(
@@ -392,6 +431,10 @@ exports.createTrainingChat = async (req, res) => {
 				? req.body.source
 				: "manual_paste",
 			rawText,
+			sourceHash: stableHash(rawText),
+			messageCount: cleaned.conversation.length,
+			model: cleaned.analysisModel || "",
+			status: "active",
 			createdBy: {
 				userId: isValidObjectId(createdById) ? createdById : null,
 				name: cleanText(req.profile?.name || "", 120),
@@ -412,12 +455,13 @@ exports.createTrainingChat = async (req, res) => {
 
 exports.listTrainingChats = async (req, res) => {
 	try {
+		await ensureManualLearningIndexes();
 		const limit = Math.min(
 			Math.max(parseInt(req.query?.limit || "30", 10) || 30, 1),
 			100
 		);
 		const page = Math.max(parseInt(req.query?.page || "1", 10) || 1, 1);
-		const filter = {};
+		const filter = { sourceType: "manual_chat" };
 		if (req.query?.includeArchived !== "true") filter.status = "active";
 		const hotelId = normalizeId(req.query?.hotelId);
 		if (isValidObjectId(hotelId)) filter.hotelId = hotelId;
@@ -431,13 +475,13 @@ exports.listTrainingChats = async (req, res) => {
 		}
 
 		const [docs, total] = await Promise.all([
-			AiAgentTrainingChat.find(filter)
+			AiAgentLearning.find(filter)
 				.sort({ updatedAt: -1, createdAt: -1 })
 				.skip((page - 1) * limit)
 				.limit(limit)
 				.lean()
 				.exec(),
-			AiAgentTrainingChat.countDocuments(filter),
+			AiAgentLearning.countDocuments(filter),
 		]);
 
 		return res.json({
@@ -460,12 +504,13 @@ exports.listTrainingChats = async (req, res) => {
 
 exports.archiveTrainingChat = async (req, res) => {
 	try {
+		await ensureManualLearningIndexes();
 		const id = normalizeId(req.params?.id);
 		if (!isValidObjectId(id)) {
 			return res.status(400).json({ error: "Invalid training chat id." });
 		}
-		const doc = await AiAgentTrainingChat.findByIdAndUpdate(
-			id,
+		const doc = await AiAgentLearning.findOneAndUpdate(
+			{ _id: id, sourceType: "manual_chat" },
 			{ $set: { status: "archived", updatedAt: new Date() } },
 			{ new: true }
 		)

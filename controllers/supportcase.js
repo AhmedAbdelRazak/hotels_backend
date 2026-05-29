@@ -691,6 +691,12 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		const safeConversation = req.body.conversation
 			? buildPublicClientConversation(req.body.conversation, currentCase)
 			: null;
+		if (safeConversation?.preferredLanguage) {
+			setFields.preferredLanguage = safeConversation.preferredLanguage;
+		}
+		if (safeConversation?.preferredLanguageCode) {
+			setFields.preferredLanguageCode = safeConversation.preferredLanguageCode;
+		}
 
 		if (req.body.caseStatus === "closed") {
 			setFields.caseStatus = "closed";

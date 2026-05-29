@@ -81,7 +81,30 @@ function firstNumber(value) {
 	return match ? Number(match[0]) : Number.POSITIVE_INFINITY;
 }
 function languageOf(sc = {}, st = {}) {
-	return st.language || sc.preferredLanguage || "English";
+	return preferredLanguageOf(sc) || st.language || "English";
+}
+function preferredLanguageOf(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let i = conversation.length - 1; i >= 0; i -= 1) {
+		const language = String(conversation[i]?.preferredLanguage || "").trim();
+		if (language) return language;
+	}
+	return String(sc.preferredLanguage || "").trim();
+}
+function preferredLanguageCodeOf(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let i = conversation.length - 1; i >= 0; i -= 1) {
+		const languageCode = String(
+			conversation[i]?.preferredLanguageCode || ""
+		).trim();
+		if (languageCode) return languageCode;
+	}
+	return String(sc.preferredLanguageCode || "").trim();
+}
+function targetLanguageLabel(sc = {}, st = {}) {
+	const language = languageOf(sc, st) || "English";
+	const languageCode = preferredLanguageCodeOf(sc);
+	return languageCode ? `${language} (${languageCode})` : language;
 }
 
 function respectfulGuestName(sc = {}, st = {}) {
@@ -485,7 +508,7 @@ function ensureState(sc, hotel) {
 			agentName:
 				sc.aiResponderName ||
 				AGENT_POOL[Math.floor(Math.random() * AGENT_POOL.length)],
-			language: sc.preferredLanguage || "English",
+			language: preferredLanguageOf(sc) || "English",
 			greeted: false,
 			greetScheduled: false,
 			guestTypingUntil: 0,
@@ -517,6 +540,7 @@ function ensureState(sc, hotel) {
 	} else {
 		if (hotel) st.hotel = hotel;
 		if (sc.aiResponderName) st.agentName = sc.aiResponderName;
+		st.language = preferredLanguageOf(sc) || st.language || "English";
 	}
 	return st;
 }
@@ -774,6 +798,7 @@ function compactLearningChat(chat = {}) {
 		: [];
 	return {
 		title: chat.chatTitle || "",
+		language: chat.language || "",
 		keywords: Array.isArray(chat.chatKeywords)
 			? chat.chatKeywords.slice(0, 10)
 			: [],
@@ -794,17 +819,19 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 	try {
 		const lookupText = [
 			lastUserText(sc),
+			targetLanguageLabel(sc, st),
 			instruction,
 			JSON.stringify({
 				waitFor: st.waitFor,
 				slots: st.slots,
+				preferredLanguage: targetLanguageLabel(sc, st),
 				context,
 			}).slice(0, 2000),
 		].join("\n");
 		const chats = await listRelevantTrainingChats({
 			hotelId: sc.hotelId || st.hotel?._id || null,
 			text: lookupText,
-			limit: 4,
+			limit: 6,
 		});
 		return chats.map(compactLearningChat);
 	} catch (error) {
@@ -819,38 +846,144 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
 	const supportDesk = hotelName ? `${hotelName} support` : "Jannat Booking support";
 	const text = String(instruction || "").toLowerCase();
-	if (context.fallbackText) return String(context.fallbackText);
+	const lang = languageOf(sc, st);
+	const isArabic = /arabic/i.test(lang);
+	const isSpanish = /spanish/i.test(lang);
+	const isHindi = /hindi/i.test(lang);
+	const isFrench = /french/i.test(lang);
+	const isUrdu = /urdu/i.test(lang);
+	if (context.fallbackText) {
+		const fallbackText = String(context.fallbackText);
+		if (!isArabic && !isSpanish && !isHindi && !isFrench && !isUrdu) {
+			return fallbackText;
+		}
+		if (!/human|handoff|specialist|escalat|handled by/i.test(text)) {
+			return fallbackText;
+		}
+	}
 	if (context.quote) return simpleQuoteText({ sc, st, quote: context.quote });
 	if (/greet/.test(text)) {
+		if (isArabic) return `أهلاً ${respectfulAddress}، معك ${st.agentName} من ${supportDesk}. كيف أقدر أساعدك اليوم؟`;
+		if (isSpanish) return `Hola ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
+		if (isHindi) return `नमस्ते ${respectfulAddress}, मैं ${supportDesk} से ${st.agentName} हूं। मैं आपकी कैसे मदद कर सकता हूं?`;
+		if (isFrench) return `Bonjour ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
+		if (isUrdu) return `السلام علیکم ${respectfulAddress}، میں ${supportDesk} سے ${st.agentName} ہوں۔ میں آپ کی کیسے مدد کر سکتا ہوں؟`;
 		return `Hi ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
 	}
 	if (/date|check-in|check.?in|checkout|check-out/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، من فضلك أرسل تاريخ الدخول وتاريخ الخروج لأراجع التوفر.`;
+		if (isSpanish) return `${respectfulAddress}, por favor enviame las fechas de check-in y check-out para revisar disponibilidad.`;
+		if (isHindi) return `${respectfulAddress}, कृपया चेक-इन और चेक-आउट की तारीखें भेजें ताकि मैं उपलब्धता देख सकूं।`;
+		if (isFrench) return `${respectfulAddress}, veuillez envoyer les dates d'arrivee et de depart pour que je verifie la disponibilite.`;
+		if (isUrdu) return `${respectfulAddress}، براہ کرم چیک اِن اور چیک آؤٹ کی تاریخیں بھیجیں تاکہ میں دستیابی چیک کر سکوں۔`;
 		return `${respectfulAddress}, please send your check-in and checkout dates and I can check availability.`;
 	}
 	if (/room type/.test(text)) {
 		const examples = Array.isArray(context.roomExamples)
 			? context.roomExamples.filter(Boolean).slice(0, 4)
 			: [];
+		if (isArabic) {
+			return examples.length
+				? `${respectfulAddress}، أي نوع غرفة يناسبك؟ مثلاً: ${examples.join(" / ")}.`
+				: `${respectfulAddress}، ما نوع الغرفة الذي تفضله؟`;
+		}
+		if (isSpanish) {
+			return examples.length
+				? `${respectfulAddress}, que tipo de habitacion prefieres? Por ejemplo: ${examples.join(" / ")}.`
+				: `${respectfulAddress}, que tipo de habitacion prefieres?`;
+		}
+		if (isHindi) {
+			return examples.length
+				? `${respectfulAddress}, आपको कौन सा रूम टाइप चाहिए? उदाहरण: ${examples.join(" / ")}.`
+				: `${respectfulAddress}, आपको कौन सा रूम टाइप चाहिए?`;
+		}
+		if (isFrench) {
+			return examples.length
+				? `${respectfulAddress}, quel type de chambre preferez-vous ? Par exemple : ${examples.join(" / ")}.`
+				: `${respectfulAddress}, quel type de chambre preferez-vous ?`;
+		}
+		if (isUrdu) {
+			return examples.length
+				? `${respectfulAddress}، آپ کو کون سا کمرہ چاہیے؟ مثال کے طور پر: ${examples.join(" / ")}.`
+				: `${respectfulAddress}، آپ کو کون سا کمرہ چاہیے؟`;
+		}
 		return examples.length
 			? `${respectfulAddress}, which room type suits you best? For example: ${examples.join(" / ")}.`
 			: `${respectfulAddress}, which room type would you like?`;
 	}
 	if (/payment/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، أقدر أساعدك في مشكلة الدفع. أرسل رقم التأكيد أو رابط الدفع فقط، ولا ترسل أي بيانات بطاقة.`;
+		if (isSpanish) return `${respectfulAddress}, puedo ayudarte con el pago. Enviame el numero de confirmacion o el enlace de pago, pero no datos de tarjeta.`;
+		if (isHindi) return `${respectfulAddress}, मैं भुगतान की समस्या में मदद कर सकता हूं। कृपया कन्फर्मेशन नंबर या पेमेंट लिंक भेजें, कार्ड की जानकारी नहीं।`;
+		if (isFrench) return `${respectfulAddress}, je peux vous aider pour le paiement. Envoyez le numero de confirmation ou le lien de paiement, mais pas de donnees de carte.`;
+		if (isUrdu) return `${respectfulAddress}، میں ادائیگی کے مسئلے میں مدد کر سکتا ہوں۔ براہ کرم کنفرمیشن نمبر یا پیمنٹ لنک بھیجیں، کارڈ کی معلومات نہیں۔`;
 		return `${respectfulAddress}, I can help with the payment issue. Please send the confirmation number or payment link, but not card details.`;
 	}
 	if (/reservation|confirmation/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، من فضلك أرسل رقم التأكيد والتغيير المطلوب في الحجز.`;
+		if (isSpanish) return `${respectfulAddress}, por favor enviame el numero de confirmacion y que cambio necesitas.`;
+		if (isHindi) return `${respectfulAddress}, कृपया कन्फर्मेशन नंबर और बताएं कि आप क्या बदलना चाहते हैं।`;
+		if (isFrench) return `${respectfulAddress}, veuillez envoyer le numero de confirmation et le changement souhaite.`;
+		if (isUrdu) return `${respectfulAddress}، براہ کرم کنفرمیشن نمبر اور مطلوبہ تبدیلی بھیجیں۔`;
 		return `${respectfulAddress}, please send the confirmation number and what you would like to update.`;
 	}
 	if (/human|handoff|specialist|escalat/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، سيتابع معك أحد مختصي الدعم من هنا.`;
+		if (isSpanish) return `${respectfulAddress}, un especialista de soporte continuara contigo desde aqui.`;
+		if (isHindi) return `${respectfulAddress}, अब हमारी सपोर्ट टीम का विशेषज्ञ आपकी मदद जारी रखेगा।`;
+		if (isFrench) return `${respectfulAddress}, un specialiste du support va poursuivre avec vous ici.`;
+		if (isUrdu) return `${respectfulAddress}، اب سپورٹ ٹیم کا ایک ماہر آپ کے ساتھ بات جاری رکھے گا۔`;
 		return `${respectfulAddress}, a support specialist will continue with you from here.`;
 	}
+	if (isArabic) return `${respectfulAddress}، أقدر أساعدك. هل يمكنك إرسال تفاصيل أكثر؟`;
+	if (isSpanish) return `${respectfulAddress}, puedo ayudarte con eso. Puedes enviarme un poco mas de detalle?`;
+	if (isHindi) return `${respectfulAddress}, मैं इसमें मदद कर सकता हूं। कृपया थोड़ा और विवरण भेजें।`;
+	if (isFrench) return `${respectfulAddress}, je peux vous aider. Pouvez-vous envoyer un peu plus de details ?`;
+	if (isUrdu) return `${respectfulAddress}، میں مدد کر سکتا ہوں۔ براہ کرم تھوڑی مزید تفصیل بھیجیں۔`;
 	return `${respectfulAddress}, I can help with that. Could you share a little more detail?`;
+}
+
+function languageMismatchLikely(answer = "", targetLanguage = "") {
+	const text = String(answer || "").trim();
+	const lang = String(targetLanguage || "").toLowerCase();
+	if (!text || !lang) return false;
+	if (/arabic|urdu/.test(lang)) return !/[\u0600-\u06FF]/.test(text);
+	if (/hindi/.test(lang)) return !/[\u0900-\u097F]/.test(text);
+	if (/spanish/.test(lang)) {
+		const looksEnglish =
+			/\b(the|please|could|would|check-in|checkout|reservation|support|payment|confirm)\b/i.test(
+				text
+			);
+		const looksSpanish =
+			/\b(hola|por favor|reserva|habitaci[oó]n|fechas|gracias|puedo|necesitas|confirmaci[oó]n|pago|soporte)\b/i.test(
+				text
+			);
+		return looksEnglish && !looksSpanish;
+	}
+	if (/french/.test(lang)) {
+		const looksEnglish =
+			/\b(the|please|could|would|check-in|checkout|reservation|support|payment|confirm)\b/i.test(
+				text
+			);
+		const looksFrench =
+			/\b(bonjour|merci|reservation|chambre|dates|paiement|veuillez|support|confirmer)\b/i.test(
+				text
+			);
+		return looksEnglish && !looksFrench;
+	}
+	return false;
 }
 
 /* LLM writer */
 async function write(io, sc, st, instruction, context = {}) {
 	const respectfulAddress = respectfulGuestName(sc, st);
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
+	const targetLanguage = languageOf(sc, st) || "English";
+	const targetLanguageCode = preferredLanguageCodeOf(sc);
+	const targetLanguageText = targetLanguageCode
+		? `${targetLanguage} (${targetLanguageCode})`
+		: targetLanguage;
+	st.language = targetLanguage;
 	const learningContext = await loadLearningContext(sc, st, instruction, context);
 	const introRule = hotelName
 		? `For greetings and introductions, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
@@ -868,7 +1001,10 @@ async function write(io, sc, st, instruction, context = {}) {
 		hotelName
 			? `Speak as the hotel's own support desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
 			: `Represent Jannat Booking directly.`,
-		`Write in ${st.language}.`,
+		`The guest's preferred language is ${targetLanguageText}.`,
+		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
+		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
+		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
@@ -882,11 +1018,16 @@ async function write(io, sc, st, instruction, context = {}) {
 	].join(" ");
 
 	const payload = JSON.stringify(
-		{ ...context, respectfulAddress, employeeLearningExamples: learningContext },
+		{
+			...context,
+			targetResponseLanguage: targetLanguageText,
+			respectfulAddress,
+			employeeLearningExamples: learningContext,
+		},
 		null,
 		2
 	);
-	const content = `${instruction}\n\nFull conversation so far:\n${
+	const content = `${instruction}\n\nTarget response language: ${targetLanguageText}\n\nFull conversation so far:\n${
 		recentConversationLines(sc, st) || "(empty)"
 	}\n\nContext JSON:\n${payload}`;
 
@@ -912,6 +1053,32 @@ async function write(io, sc, st, instruction, context = {}) {
 	}
 	if (!answer) {
 		answer = fallbackWriterText(sc, st, instruction, context, respectfulAddress);
+	}
+	if (languageMismatchLikely(answer, targetLanguage)) {
+		try {
+			const rewritten = await chat(
+				[
+					{
+						role: "system",
+						content: `Rewrite the assistant answer strictly in ${targetLanguage}. Preserve the meaning, hotel names, prices, dates, links, and brand names. Output only the rewritten answer.`,
+					},
+					{ role: "user", content: answer },
+				],
+				{
+					kind: "writer",
+					temperature: 0,
+					max_tokens: 240,
+				}
+			);
+			if (rewritten && !languageMismatchLikely(rewritten, targetLanguage)) {
+				answer = rewritten;
+			}
+		} catch (error) {
+			logStep(String(sc._id), "llm.language_rewrite_failed", {
+				targetLanguage,
+				message: error?.message || error,
+			});
+		}
 	}
 
 	logStep(String(sc._id), "llm.write", { instruction, outLen: answer.length });
