@@ -139,6 +139,41 @@ const cleanText = (value = "", max = 8000) =>
 		.trim()
 		.slice(0, max);
 
+const LOCALIZED_DIGIT_RANGES = [
+	[0x0660, 0x0669],
+	[0x06f0, 0x06f9],
+	[0x0966, 0x096f],
+	[0x09e6, 0x09ef],
+	[0x0ae6, 0x0aef],
+	[0x0be6, 0x0bef],
+	[0x0c66, 0x0c6f],
+	[0x0ce6, 0x0cef],
+	[0x0d66, 0x0d6f],
+	[0x0e50, 0x0e59],
+	[0x0ed0, 0x0ed9],
+	[0xff10, 0xff19],
+];
+
+const normalizeLocalizedDigits = (value = "") =>
+	Array.from(String(value || ""))
+		.map((char) => {
+			const code = char.codePointAt(0);
+			const range = LOCALIZED_DIGIT_RANGES.find(
+				([start, end]) => code >= start && code <= end
+			);
+			return range ? String(code - range[0]) : char;
+		})
+		.join("");
+
+const normalizeEmailOrPhone = (value = "") => {
+	const normalized = cleanText(normalizeLocalizedDigits(value), 180);
+	if (!normalized) return "";
+	if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+		return normalized.toLowerCase();
+	}
+	return normalized.replace(/[^\d+]/g, "");
+};
+
 const cleanChatDisplayName = (value = "") =>
 	cleanText(value, 80).replace(/\s+/g, " ");
 
@@ -292,9 +327,8 @@ const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
 						firstMessage.messageBy?.customerName
 				) || "Guest",
 			customerEmail:
-				cleanText(
-					rawMessageBy.customerEmail || firstMessage.messageBy?.customerEmail,
-					180
+				normalizeEmailOrPhone(
+					rawMessageBy.customerEmail || firstMessage.messageBy?.customerEmail
 				) || "guest@jannatbooking.com",
 			userId: cleanText(rawMessageBy.userId || firstMessage.messageBy?.userId, 180),
 		},
@@ -891,6 +925,7 @@ exports.createNewSupportCase = async (req, res) => {
 		) {
 			return res.status(400).json({ error: "All fields are required" });
 		}
+		const normalizedCustomerEmail = normalizeEmailOrPhone(customerEmail);
 
 		// Determine who opened the case (super admin, hotel owner, or client)
 		const openedBy =
@@ -916,7 +951,7 @@ exports.createNewSupportCase = async (req, res) => {
 		const aiResponderName = aiEnabledForClient
 			? await pickB2CAiResponderName({
 					customerName,
-					customerEmail,
+					customerEmail: normalizedCustomerEmail || customerEmail,
 					hotelId,
 					hotelName,
 					preferredLanguage,
@@ -935,13 +970,16 @@ exports.createNewSupportCase = async (req, res) => {
 						  }
 						: {
 								customerName,
-								customerEmail: customerEmail || "superadmin@example.com",
+								customerEmail:
+									normalizedCustomerEmail ||
+									customerEmail ||
+									"superadmin@example.com",
 								userId:
 									role === 1000
 										? supporterId
 										: role === 2000
 										? ownerId
-										: customerEmail,
+										: normalizedCustomerEmail || customerEmail,
 						  },
 				message:
 					openedBy === "client"

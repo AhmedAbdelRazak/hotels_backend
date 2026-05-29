@@ -1156,6 +1156,13 @@ Future TODO Backlog - Added 2026-05-26
     - AI_HUMAN_TYPE_CLAMP_MAX_MS default 7000.
   - Normal short replies should start typing much faster; total delivery still depends on OpenAI latency and message length.
 
+2026-05-29 Localized Phone Digit Normalization
+- Backend behavior:
+  - aiagent/core/nlu.js digitsToEnglish now normalizes Arabic-Indic, Eastern Arabic/Persian/Urdu, Devanagari/Hindi, Bengali, Gujarati, Tamil, Telugu, Kannada, Malayalam, Thai, Lao, and full-width digits to English digits.
+  - This protects the AI reservation-detail phone capture step when guests type phone numbers in non-English digit scripts.
+  - controllers/supportcase.js normalizes localized digits in public support-case contact identifiers before storing conversation sender email/phone values.
+  - Phone-like contact identifiers are stored as English digits so SupportCase matching, previous-chat lookup, and downstream English-only systems stay consistent.
+
 2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
 - controllers/supportcase.js:
   - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.

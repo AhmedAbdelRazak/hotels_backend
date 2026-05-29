@@ -116,19 +116,27 @@ function asciiize(s = "") {
 		.replace(/[^\x20-\x7E]/g, "");
 }
 function digitsToEnglish(s = "") {
-	const map = {
-		"٠": "0",
-		"١": "1",
-		"٢": "2",
-		"٣": "3",
-		"٤": "4",
-		"٥": "5",
-		"٦": "6",
-		"٧": "7",
-		"٨": "8",
-		"٩": "9",
-	};
-	return String(s).replace(/[٠-٩]/g, (ch) => map[ch] || ch);
+	const ranges = [
+		[0x0660, 0x0669],
+		[0x06f0, 0x06f9],
+		[0x0966, 0x096f],
+		[0x09e6, 0x09ef],
+		[0x0ae6, 0x0aef],
+		[0x0be6, 0x0bef],
+		[0x0c66, 0x0c6f],
+		[0x0ce6, 0x0cef],
+		[0x0d66, 0x0d6f],
+		[0x0e50, 0x0e59],
+		[0x0ed0, 0x0ed9],
+		[0xff10, 0xff19],
+	];
+	return Array.from(String(s || ""))
+		.map((ch) => {
+			const code = ch.codePointAt(0);
+			const range = ranges.find(([start, end]) => code >= start && code <= end);
+			return range ? String(code - range[0]) : ch;
+		})
+		.join("");
 }
 
 function isPastISO(iso) {
