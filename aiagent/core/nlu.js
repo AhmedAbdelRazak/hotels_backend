@@ -207,20 +207,38 @@ async function detectIntentLLM({
 	text,
 	preferredLanguage = "English",
 	inquiryAbout,
+	hotel,
 }) {
+	const activeRoomOptions = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+				.filter((room) => room?.activeRoom)
+				.map((room) => ({
+					roomType: room.roomType,
+					displayName: room.displayName || room.roomType,
+					basePrice: room.price?.basePrice || 0,
+				}))
+				.slice(0, 12)
+		: [];
 	const sys = [
 		"Classify hotel chat messages.",
+		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics, language hint, ticket context, and hotel context instead of exact spellings.",
+		"Examples of writing styles include Franko Arabic/Arabizi, Hinglish, Urdu or Hindi in Latin characters, Spanish or French without accents, and mixed English with another language.",
 		"Return ONLY JSON:",
 		"{ intent:'reserve_room'|'reservation_lookup'|'smalltalk'|'confirm_check'|'other',",
 		"  smalltalkType:null|'greet'|'how_are_you'|'thanks'|'are_you_there'|'farewell'|'wow'|'chitchat',",
 		"  dates:{ checkin:string|null, checkout:string|null, calendar:'gregorian'|'hijri'|null }|null,",
-		"  roomText:string|null, roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', confirmation:string|null }",
+		"  roomText:string|null, roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms',",
+		"  amenity:null|'wifi'|'parking'|'breakfast'|'ac', confirmation:string|null }",
 		"Prefer roomTypeKey from meaning, not exact words, for any language.",
+		"Use active hotel room options as context when available, but never invent a room type that is not implied by the guest.",
 	].join(" ");
 
 	const user = [
 		`Language hint: ${preferredLanguage}`,
 		inquiryAbout ? `Ticket inquiryAbout: ${inquiryAbout}` : "",
+		activeRoomOptions.length
+			? `Active hotel room options: ${JSON.stringify(activeRoomOptions)}`
+			: "",
 		`Message: """${text}"""`,
 	].join("\n");
 
@@ -240,6 +258,7 @@ async function detectIntentLLM({
 			smalltalkType: null,
 			dates: null,
 			roomText: null,
+			amenity: null,
 			confirmation: null,
 		};
 	}
@@ -397,7 +416,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 		};
 	}
 
-	const lu = await detectIntentLLM({ text, preferredLanguage, inquiryAbout });
+	const lu = await detectIntentLLM({ text, preferredLanguage, inquiryAbout, hotel });
 	const roomKey = lu?.roomTypeKey || (lu?.roomText ? mapRoomToKey(lu.roomText) : null);
 
 	const iso = await normalizeDatesLLM({
@@ -426,7 +445,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 		dates,
 		confirmation: lu.confirmation || null,
 		firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
-		amenity: detectAmenityQuestion(text),
+		amenity: lu.amenity || detectAmenityQuestion(text),
 	};
 }
 

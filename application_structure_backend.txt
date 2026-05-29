@@ -1107,6 +1107,25 @@ Future TODO Backlog - Added 2026-05-26
 - Production note:
   - The hotel-level aiToRespond switch still controls whether public B2C AI runs for a hotel. If the UI shows "Chat Available" but aiToRespond=false, the chat is human reception support, not AI.
 
+2026-05-29 AI Chat Multilingual Understanding And Hotel Scope Guard
+- Production review:
+  - The latest Amira/Zad Al Safa production chat showed a selected-hotel room question being answered with other hotel recommendations.
+  - The guest then challenged the answer in Franko Arabic/Arabizi, and the AI correctly escalated to a human, but the earlier answer should have stayed scoped to Zad Al Safa.
+- Backend behavior:
+  - aiagent/core/nlu.js now tells the NLU model that guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal.
+  - The NLU prompt explicitly covers Franko Arabic/Arabizi, Hinglish, Urdu/Hindi in Latin characters, Spanish/French without accents, and mixed-language writing as meaning-based input, not exact keyword input.
+  - The NLU call passes active hotel room options as context so room-type mapping can use the selected hotel's real active room list.
+  - Amenity detection can now come from the NLU model as well as the older deterministic fallback.
+  - aiagent/core/orchestrator.js decision prompts now require a scope value: selected_hotel, alternative_hotels, platform, or null.
+  - When an active hotel exists and the guest asks whether "you", "your hotel", or the selected hotel has rooms, amenities, availability, or pricing, the orchestrator must keep the turn scoped to that hotel.
+  - Hotel recommendations are only used when the guest asks for other hotels, nearby alternatives, platform options, or when no hotel context exists.
+  - The writer prompt repeats this selected-hotel rule so generated replies do not drift into cross-hotel suggestions unless alternatives are explicitly requested.
+  - Selected-hotel room-type questions now answer from the active hotel room list first, then ask for dates if pricing/availability needs dates.
+- Validation completed locally:
+  - node --check aiagent/core/nlu.js.
+  - node --check aiagent/core/orchestrator.js.
+  - NLU smoke tests confirmed Arabic script and Franko Arabic room questions map to tripleRooms, Franko Arabic complaints remain other, and Hinglish/Spanish room requests map to tripleRooms.
+
 2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
 - controllers/supportcase.js:
   - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.

@@ -259,9 +259,11 @@ function extractDateRange(text = "") {
 }
 
 function roomTypeLabel(roomTypeKey = "") {
+	if (roomTypeKey === "singleRooms") return "single room";
 	if (roomTypeKey === "doubleRooms") return "double room";
 	if (roomTypeKey === "tripleRooms") return "triple room";
 	if (roomTypeKey === "quadRooms") return "quad room";
+	if (roomTypeKey === "familyRooms") return "family room";
 	return "selected room";
 }
 
@@ -418,6 +420,69 @@ function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
 	);
 }
 
+function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
+	const rooms = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+	return rooms
+		.filter(
+			(room) =>
+				room?.activeRoom &&
+				(!roomTypeKey || room.roomType === roomTypeKey)
+		)
+		.map((room) => ({
+			roomType: room.roomType,
+			displayName: room.displayName || room.roomType,
+			basePrice: room.price?.basePrice || 0,
+			currency: hotel?.currency || "SAR",
+		}));
+}
+
+function decisionWantsAlternativeHotels(decision = {}) {
+	const scope = String(decision?.scope || "").toLowerCase();
+	return ["alternative_hotels", "platform", "cross_hotel"].includes(scope);
+}
+
+async function answerSelectedHotelRoomQuestion(
+	io,
+	sc,
+	st,
+	userText,
+	roomTypeKey = null
+) {
+	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
+	const matchingRooms = roomTypeKey
+		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
+		: [];
+	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+	if (
+		roomTypeKey &&
+		matchingRooms.length &&
+		st.slots.checkinISO &&
+		st.slots.checkoutISO
+	) {
+		st.slots.roomTypeKey = roomTypeKey;
+		await shareKnownStayQuote(io, sc, st);
+		return;
+	}
+	const instruction = roomTypeKey
+		? matchingRooms.length
+			? `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say that this hotel has matching active room options, mention up to two provided matching room names if helpful, and ask for check-in and checkout dates if they are missing. Do not mention or link other hotels unless the guest explicitly asks for alternatives.`
+			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or whether they want nearby alternatives. Do not list other hotels yet.`
+		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Do not mention or link other hotels unless the guest explicitly asks for alternatives.`;
+	const reply = await write(io, sc, st, instruction, {
+		latestUserMessage: userText,
+		selectedHotel: hotelName,
+		requestedRoomTypeKey: roomTypeKey,
+		matchingRooms: matchingRooms.slice(0, 3),
+		activeRoomOptions: activeRooms,
+		slots: st.slots,
+	});
+	if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
+	await humanSend(io, sc, st, reply);
+	st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
+}
+
 async function buildHotelRecommendations({
 	text,
 	sc,
@@ -445,7 +510,7 @@ async function buildHotelRecommendations({
 				name: toTitle(hotel.hotelName),
 				walking: hotel.distances?.walkingToElHaram || "",
 				driving: hotel.distances?.drivingToElHaram || "",
-				roomLabel: room?.displayName || "Double room",
+				roomLabel: room?.displayName || roomTypeLabel(selectedRoomTypeKey),
 				url: publicHotelUrl(hotel.hotelName),
 			};
 		})
@@ -1034,10 +1099,14 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
+		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
+		hotelName
+			? `When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Do not recommend or link other hotels unless the guest explicitly asks for alternatives.`
+			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
 		`Do not cancel, refund, or mutate existing reservations; send those requests to a human team member.`,
@@ -1124,12 +1193,13 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
 	}
 	if (wantsReservationHelp(userText)) {
-		return { action: "reservation_lookup", roomTypeKey: null, reason: "reservation_keyword" };
+		return { action: "reservation_lookup", roomTypeKey: null, scope: null, reason: "reservation_keyword" };
 	}
-	if (wantsHotelRecommendation(userText)) {
+	if (!st.hotel && wantsHotelRecommendation(userText)) {
 		return {
 			action: "hotel_recommendation",
 			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: "platform",
 			reason: "hotel_recommendation_keyword",
 		};
 	}
@@ -1137,6 +1207,7 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 		return {
 			action: "ask_dates_for_price",
 			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : null,
 			reason: "price_missing_dates",
 		};
 	}
@@ -1148,16 +1219,17 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 		return {
 			action: "continue_booking",
 			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : null,
 			reason: "dates_and_room_present",
 		};
 	}
 	if (lu.amenity) {
-		return { action: "amenity_question", roomTypeKey: lu.roomTypeKey || null, reason: "amenity_detected" };
+		return { action: "amenity_question", roomTypeKey: lu.roomTypeKey || null, scope: st.hotel ? "selected_hotel" : null, reason: "amenity_detected" };
 	}
 	if (lu.intent === "smalltalk" || looksLikeGreetingOnly(userText)) {
-		return { action: "smalltalk", roomTypeKey: null, reason: "smalltalk_detected" };
+		return { action: "smalltalk", roomTypeKey: null, scope: null, reason: "smalltalk_detected" };
 	}
-	return { action: "other", roomTypeKey: lu.roomTypeKey || null, reason: "fallback_decision" };
+	return { action: "other", roomTypeKey: lu.roomTypeKey || null, scope: st.hotel ? "selected_hotel" : null, reason: "fallback_decision" };
 }
 
 async function decideSupportAction({ sc, st, userText, lu }) {
@@ -1178,10 +1250,13 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"You are the hotel support chat orchestrator.",
 		"Read the whole conversation and decide the next support action before any answer is written.",
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
+		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics and context instead of exact spellings.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
-		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', reason:string }",
+		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
+		"If an active hotel is present and the guest asks whether you/this hotel has rooms, room types, amenities, availability, or pricing, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
+		"Choose hotel_recommendation only when the guest asks for other hotels, nearby alternatives, general platform options, or there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
 		"Choose human_escalation when the request is outside hotel/platform support scope, needs facts/tools not available in context, or should be reviewed by a person before answering.",
 	].join(" ");
@@ -1218,6 +1293,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		return {
 			action: parsed.action || "other",
 			roomTypeKey: parsed.roomTypeKey || null,
+			scope: parsed.scope || null,
 			reason: parsed.reason || "",
 		};
 	} catch {
@@ -1553,19 +1629,46 @@ async function planTurn(io, sc) {
 			return;
 		}
 
+		if (
+			supportDecision.action === "ask_dates_for_price" &&
+			st.hotel &&
+			st.slots.roomTypeKey &&
+			(!st.slots.checkinISO || !st.slots.checkoutISO)
+		) {
+			await answerSelectedHotelRoomQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				st.slots.roomTypeKey
+			);
+			return;
+		}
+
 		if (supportDecision.action === "hotel_recommendation") {
 			const roomTypeKey =
 				supportDecision.roomTypeKey ||
 				decisionLu.roomTypeKey ||
 				st.slots.roomTypeKey ||
-				"doubleRooms";
+				null;
+			if (st.hotel && !decisionWantsAlternativeHotels(supportDecision)) {
+				await answerSelectedHotelRoomQuestion(
+					io,
+					sc,
+					st,
+					userText,
+					roomTypeKey
+				);
+				return;
+			}
+			const recommendationRoomTypeKey = roomTypeKey || "doubleRooms";
 			const reply = await buildHotelRecommendations({
 				text: userText,
 				sc,
 				st,
-				requestedRoomTypeKey: roomTypeKey,
+				requestedRoomTypeKey: recommendationRoomTypeKey,
 			});
-			st.slots.roomTypeKey = roomTypeKey;
+			st.slots.roomTypeKey = recommendationRoomTypeKey;
 			await humanSend(io, sc, st, reply);
 			st.waitFor = "dates";
 			return;
@@ -1658,6 +1761,16 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (wantsHotelRecommendation(userText)) {
+			if (st.hotel) {
+				await answerSelectedHotelRoomQuestion(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu.roomTypeKey || st.slots.roomTypeKey || null
+				);
+				return;
+			}
 			const reply = await buildHotelRecommendations({ text: userText, sc, st });
 			st.slots.roomTypeKey = /triple|ثلاث|triple/i.test(userText)
 				? "tripleRooms"
