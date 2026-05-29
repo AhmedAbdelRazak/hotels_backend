@@ -2354,6 +2354,10 @@ exports.paginatedReservationList = async (req, res) => {
 			}
 
 			switch (filterType) {
+				case "createdToday":
+					return isToday(new Date(r.createdAt));
+				case "createdThisWeek":
+					return isThisWeek(new Date(r.createdAt));
 				case "checkinToday":
 					return r.isCheckinToday;
 				case "checkoutToday":
@@ -2374,6 +2378,8 @@ exports.paginatedReservationList = async (req, res) => {
 					return pay === "paid offline";
 
 				// Reservation_status filters
+				case "pendingConfirmation":
+					return status === "pending confirmation";
 				case "confirmed":
 					return status === "confirmed";
 				case "inhouse":
@@ -2545,6 +2551,23 @@ exports.paginatedReservationList = async (req, res) => {
 			.sort((a, b) => b.reservations - a.reservations)
 			.slice(0, 3);
 		const totalFilteredReservations = allReservations.length;
+		const pendingConfirmationReservations = allReservations.filter(
+			(r) =>
+				(r.reservation_status || "").toLowerCase() ===
+				"pending confirmation",
+		).length;
+		const notCapturedReservations = allReservations.filter(
+			(r) => (r.payment_status || "").toLowerCase() === "not captured",
+		).length;
+		const capturedReservations = allReservations.filter(
+			(r) => (r.payment_status || "").toLowerCase() === "captured",
+		).length;
+		const notPaidReservations = allReservations.filter(
+			(r) => (r.payment_status || "").toLowerCase() === "not paid",
+		).length;
+		const paidOfflineReservations = allReservations.filter(
+			(r) => (r.payment_status || "").toLowerCase() === "paid offline",
+		).length;
 
 		// Row 2 (exclude cancelled)
 		const nonCancelled = allReservations.filter(
@@ -2599,6 +2622,11 @@ exports.paginatedReservationList = async (req, res) => {
 			weeklyRatio,
 			topHotels,
 			totalReservations: totalFilteredReservations,
+			pendingConfirmationReservations,
+			notCapturedReservations,
+			capturedReservations,
+			notPaidReservations,
+			paidOfflineReservations,
 
 			// Row 2
 			todayCommission,

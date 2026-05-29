@@ -1268,3 +1268,12 @@ Future TODO Backlog - Added 2026-05-26
   - node --check services/auditPrivacy.js.
   - node --check controllers/janat.js.
   - Node smoke test verified hotel-management root-only sanitization, platform-admin full visibility, and public/client client-price-only sanitization.
+
+2026-05-29 Admin Reservation Scorecard Filters
+- controllers/janat.js:
+  - Admin paginated reservation list now supports scorecard-driven filterType values for createdToday, createdThisWeek, and pendingConfirmation.
+  - Existing payment/status filterType values remain unchanged for the manual filter buttons.
+  - The scorecards payload now also includes pendingConfirmationReservations, notCapturedReservations, capturedReservations, notPaidReservations, and paidOfflineReservations.
+  - These counts use the same formatted reservation/payment status values as the admin table so the clickable frontend scorecards and the table stay aligned.
+- Validation target:
+  - node --check controllers/janat.js.
