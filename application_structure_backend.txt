@@ -1074,6 +1074,7 @@ Future TODO Backlog - Added 2026-05-26
   - Greetings, introductions, transcript labels, quote continuations, and human handoff messages now prefer the active hotel support voice when hotel context exists, so the guest does not feel passed through a platform middleman.
   - Legacy fallback replies for date/payment/reservation/amenity/handoff handling now pass through the same writer path where practical, so relevant training chats can shape tone and flow before a customer-facing answer is sent.
   - OpenAI calls now use bounded timeout/retry settings with an explicit 20s request deadline/no retry by default for live chat, and the orchestrator has deterministic decision/writer fallbacks so a slow model call does not leave the guest without a reply.
+  - Complete booking requests that already contain dates and room type can go directly from deterministic NLU to quote writing, avoiding an extra planning model call.
   - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
 - Validation completed locally:
   - node --check models/aiagent_training_chat.js.

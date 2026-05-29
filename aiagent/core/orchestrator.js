@@ -1105,7 +1105,7 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Greet the guest by first name and ask how you can help today. Keep it one short line.",
+					"Greet the guest by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line.",
 					{ latestUserMessage: userText }
 				);
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -1153,6 +1153,26 @@ async function planTurn(io, sc) {
 		if (decisionLu.dates?.checkoutISO)
 			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
+
+		const readyToQuoteFromNlu =
+			st.slots.checkinISO &&
+			st.slots.checkoutISO &&
+			st.slots.roomTypeKey &&
+			/\b(book|reserve|price|rate|availability|available|room|stay|double|triple|quad)\b/i.test(
+				userText
+			) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!wantsReservationHelp(userText);
+		if (readyToQuoteFromNlu) {
+			logStep(caseId, "nlu.direct_quote", {
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+				roomTypeKey: st.slots.roomTypeKey,
+			});
+			await shareKnownStayQuote(io, sc, st);
+			return;
+		}
 
 		const supportDecision = await decideSupportAction({
 			sc,
