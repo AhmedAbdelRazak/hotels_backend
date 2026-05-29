@@ -1134,6 +1134,15 @@ Future TODO Backlog - Added 2026-05-26
   - Production can override the pool without code changes using B2C_AI_RESPONDER_NAMES or AI_RESPONDER_NAMES as comma-separated names.
   - aiagent/core/orchestrator.js and the legacy aiagent/core/brain.js fallback also read the same environment-based pool when a case does not already have aiResponderName.
 
+2026-05-29 Private Previous-Chat Preparation For B2C AI
+- Backend behavior:
+  - aiagent/core/db.js now exposes listPreviousGuestSupportChats for private same-guest support-case lookup.
+  - Matching prefers stable guest identifiers from prior customer messages, such as messageBy.customerEmail or messageBy.userId. If no stable identifier is available yet, it falls back only to exact displayName1 within the same hotel.
+  - models/supportcase.js includes supporting indexes for same-guest previous-chat lookup by openedBy/hotel/displayName and openedBy/conversation sender identifiers.
+  - aiagent/core/orchestrator.js compacts up to four previous same-guest client support cases and passes them as privatePreviousGuestChats to the decision and writer prompts.
+  - The previous-chat context is private operational memory only. The assistant must never tell the guest that old chats are visible, quote old chats, or reveal old private details unless the guest explicitly brings that detail into the current conversation.
+  - The intended use is quiet preparedness: recurring preferences, unresolved issues, language style, and avoiding repeated questions.
+
 2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
 - controllers/supportcase.js:
   - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.

@@ -4,6 +4,7 @@ const {
 	updateSupportCaseAppend,
 	getHotelById,
 	listActivePublicHotels,
+	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
@@ -924,6 +925,68 @@ function compactLearningChat(chat = {}) {
 	};
 }
 
+function compactPreviousGuestChat(supportCase = {}, st = {}) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const hotelName =
+		supportCase.hotelId?.hotelName ||
+		supportCase.displayName2 ||
+		st.hotel?.hotelName ||
+		"";
+	const firstMessage = conversation[0] || {};
+	const recentTurns = conversation
+		.filter((message) => message?.message && !message?.isSystem)
+		.slice(-8)
+		.map((message) => ({
+			role: isAiConversationMessage(message) ? "support" : "guest",
+			at: message.date || null,
+			message: String(message.message || "").slice(0, 260),
+		}));
+	return {
+		hotelName,
+		caseStatus: supportCase.caseStatus || "",
+		escalationStatus: supportCase.escalationStatus || "none",
+		handoffReason: supportCase.aiHandoffReason || "",
+		preferredLanguage: supportCase.preferredLanguage || "",
+		updatedAt: supportCase.updatedAt || supportCase.createdAt || null,
+		inquiryAbout: firstMessage.inquiryAbout || "",
+		inquiryDetails: String(firstMessage.inquiryDetails || "").slice(0, 320),
+		recentTurns,
+	};
+}
+
+async function loadPreviousGuestContext(sc, st) {
+	const cacheKey = `${String(sc._id || "")}|${(sc.conversation || []).length}`;
+	if (
+		st.previousGuestContext &&
+		st.previousGuestContext.cacheKey === cacheKey &&
+		now() - st.previousGuestContext.loadedAt < 60000
+	) {
+		return st.previousGuestContext.items;
+	}
+	try {
+		const previousCases = await listPreviousGuestSupportChats({
+			supportCase: sc,
+			limit: 4,
+		});
+		const items = previousCases.map((supportCase) =>
+			compactPreviousGuestChat(supportCase, st)
+		);
+		st.previousGuestContext = {
+			cacheKey,
+			loadedAt: now(),
+			items,
+		};
+		return items;
+	} catch (error) {
+		logStep(String(sc._id), "previous_chats.lookup_failed", {
+			message: error?.message || error,
+		});
+		return [];
+	}
+}
+
 async function loadLearningContext(sc, st, instruction, context = {}) {
 	try {
 		const lookupText = [
@@ -1093,7 +1156,10 @@ async function write(io, sc, st, instruction, context = {}) {
 		? `${targetLanguage} (${targetLanguageCode})`
 		: targetLanguage;
 	st.language = targetLanguage;
-	const learningContext = await loadLearningContext(sc, st, instruction, context);
+	const [learningContext, previousGuestContext] = await Promise.all([
+		loadLearningContext(sc, st, instruction, context),
+		loadPreviousGuestContext(sc, st),
+	]);
 	const introRule = hotelName
 		? `For greetings and introductions, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
 		: `For greetings and introductions, introduce yourself as ${st.agentName} from Jannat Booking support.`;
@@ -1121,6 +1187,8 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
+		`Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity.`,
+		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
 		hotelName
 			? `When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Do not recommend or link other hotels unless the guest explicitly asks for alternatives.`
 			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
@@ -1135,6 +1203,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			...context,
 			targetResponseLanguage: targetLanguageText,
 			respectfulAddress,
+			privatePreviousGuestChats: previousGuestContext,
 			employeeLearningExamples: learningContext,
 		},
 		null,
@@ -1250,6 +1319,7 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 }
 
 async function decideSupportAction({ sc, st, userText, lu }) {
+	const previousGuestContext = await loadPreviousGuestContext(sc, st);
 	const hotelSummary = st.hotel
 		? {
 				hotelName: st.hotel.hotelName,
@@ -1268,6 +1338,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Read the whole conversation and decide the next support action before any answer is written.",
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics and context instead of exact spellings.",
+		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
@@ -1286,6 +1357,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 			waitFor: st.waitFor,
 			nlu: lu || null,
 			hotel: hotelSummary,
+			privatePreviousGuestChats: previousGuestContext,
 		},
 		null,
 		2

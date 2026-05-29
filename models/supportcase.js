@@ -214,6 +214,17 @@ supportCaseSchema.index({
 	escalationStatus: 1,
 	updatedAt: -1,
 });
+supportCaseSchema.index({ openedBy: 1, hotelId: 1, displayName1: 1, updatedAt: -1 });
+supportCaseSchema.index({
+	openedBy: 1,
+	"conversation.messageBy.customerEmail": 1,
+	updatedAt: -1,
+});
+supportCaseSchema.index({
+	openedBy: 1,
+	"conversation.messageBy.userId": 1,
+	updatedAt: -1,
+});
 
 const SupportCase = mongoose.model("SupportCase", supportCaseSchema);
 

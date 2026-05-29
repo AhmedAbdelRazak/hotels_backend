@@ -96,6 +96,92 @@ async function getReservationByConfirmation(cn) {
 		.exec();
 }
 
+const AI_SUPPORT_EMAILS = new Set([
+	"support@jannatbooking.com",
+	"management@xhotelpro.com",
+]);
+const AI_SUPPORT_USER_IDS = new Set([
+	"jannat-system",
+	"jannat-ai-support",
+	"system",
+]);
+
+function normalizeIdentity(value = "") {
+	return String(value || "").trim().toLowerCase();
+}
+
+function collectGuestIdentity(supportCase = {}) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const customerEmails = new Set();
+	const userIds = new Set();
+	const names = new Set();
+	for (const message of conversation) {
+		if (message?.isAi || message?.isSystem) continue;
+		const messageBy = message?.messageBy || {};
+		const email = normalizeIdentity(messageBy.customerEmail);
+		const userId = String(messageBy.userId || "").trim();
+		const name = String(messageBy.customerName || "").trim();
+		if (email && !AI_SUPPORT_EMAILS.has(email)) customerEmails.add(email);
+		if (userId && !AI_SUPPORT_USER_IDS.has(userId)) userIds.add(userId);
+		if (name) names.add(name);
+	}
+	const displayName = String(supportCase.displayName1 || "").trim();
+	if (displayName) names.add(displayName);
+	return {
+		customerEmails: [...customerEmails],
+		userIds: [...userIds],
+		names: [...names].filter((name) => name.length >= 2),
+	};
+}
+
+async function listPreviousGuestSupportChats({ supportCase, limit = 4 } = {}) {
+	const currentId = safeId(supportCase?._id);
+	const hotelId = safeId(supportCase?.hotelId);
+	const { customerEmails, userIds, names } = collectGuestIdentity(supportCase);
+	const stableMatches = [];
+	if (customerEmails.length) {
+		stableMatches.push({
+			"conversation.messageBy.customerEmail": { $in: customerEmails },
+		});
+	}
+	if (userIds.length) {
+		stableMatches.push({
+			"conversation.messageBy.userId": { $in: userIds },
+		});
+	}
+
+	const filter = {
+		openedBy: "client",
+		conversation: { $exists: true, $ne: [] },
+	};
+	if (currentId) filter._id = { $ne: currentId };
+	if (stableMatches.length) {
+		filter.$or = stableMatches;
+	} else if (names.length && hotelId) {
+		filter.hotelId = hotelId;
+		filter.displayName1 = { $in: names };
+	} else {
+		return [];
+	}
+
+	try {
+		return await SupportCase.find(filter)
+			.select(
+				"_id hotelId displayName1 displayName2 preferredLanguage preferredLanguageCode caseStatus escalationStatus aiHandoffReason createdAt updatedAt conversation"
+			)
+			.populate("hotelId", "hotelName hotelNameSlug")
+			.sort({ updatedAt: -1, createdAt: -1 })
+			.limit(Math.max(1, Math.min(Number(limit) || 4, 6)))
+			.lean()
+			.exec();
+	} catch (error) {
+		console.error("[aiagent] previous guest chat lookup failed:", error?.message || error);
+		return [];
+	}
+}
+
 const learningTokens = (text = "") =>
 	String(text || "")
 		.toLowerCase()
@@ -215,5 +301,6 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
+	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
 };
