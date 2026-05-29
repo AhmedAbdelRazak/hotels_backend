@@ -1106,3 +1106,14 @@ Future TODO Backlog - Added 2026-05-26
   - humanSend re-checks ensureAIAllowed immediately before saving an AI message, so a delayed AI response is cancelled if the guest closes the case, staff pauses AI, the hotel switch is turned off, or the case is no longer open.
 - Production note:
   - The hotel-level aiToRespond switch still controls whether public B2C AI runs for a hotel. If the UI shows "Chat Available" but aiToRespond=false, the chat is human reception support, not AI.
+
+2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
+- controllers/supportcase.js:
+  - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.
+  - AI/system messages are excluded from admin unread totals by isAi, isSystem, AI support sender emails, and the jannat-ai-support sender id.
+  - The notification summary still returns activeEscalatedClientCases so the admin top navbar can mark escalated chats separately from normal active chat volume.
+- Product behavior:
+  - AI messages can still appear in the conversation transcript, but they should not inflate admin unread badges.
+  - Escalated B2C cases remain open support cases until closed; resolving the escalation changes escalationStatus to addressed rather than closing the chat.
+- Validation completed locally:
+  - node --check controllers/supportcase.js.

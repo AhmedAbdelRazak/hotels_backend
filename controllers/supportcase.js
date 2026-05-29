@@ -169,6 +169,10 @@ const actorObjectId = (actor = {}) => {
 };
 
 const B2C_AI_RESPONDER_NAMES = ["Aisha", "Hana", "Sara", "Amira", "Yasmin"];
+const AI_SUPPORT_MESSAGE_EMAILS = [
+	"support@jannatbooking.com",
+	"management@xhotelpro.com",
+];
 
 const hashText = (value = "") =>
 	String(value || "")
@@ -183,6 +187,27 @@ const pickB2CAiResponderName = (...parts) => {
 };
 
 const isClientSupportCase = (supportCase = {}) => supportCase.openedBy === "client";
+
+const adminUnseenClientMessageMatch = (actorId = "") => {
+	const normalizedActorId = normalizeId(actorId);
+	const excludedSenders = ["jannat-ai-support"];
+	if (normalizedActorId) {
+		excludedSenders.push(normalizedActorId);
+		if (ObjectId.isValid(normalizedActorId)) {
+			excludedSenders.push(ObjectId(normalizedActorId));
+		}
+	}
+
+	return {
+		"conversation.seenByAdmin": false,
+		"conversation.isAi": { $ne: true },
+		"conversation.isSystem": { $ne: true },
+		"conversation.messageBy.customerEmail": {
+			$nin: AI_SUPPORT_MESSAGE_EMAILS,
+		},
+		"conversation.messageBy.userId": { $nin: excludedSenders },
+	};
+};
 
 const isAiForceRespondEnabled = () =>
 	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
@@ -1151,10 +1176,7 @@ exports.getUnseenMessagesCountByAdmin = async (req, res) => {
 			},
 			{ $unwind: "$conversation" },
 			{
-				$match: {
-					"conversation.seenByAdmin": false,
-					"conversation.messageBy.userId": { $ne: userId }, // Ensure messages sent by others are included
-				},
+				$match: adminUnseenClientMessageMatch(userId),
 			},
 			{ $count: "unseenCount" },
 		]);
@@ -1184,13 +1206,7 @@ exports.getSupportCaseNotificationSummary = async (req, res) => {
 		const scoped = (filter = {}) =>
 			Object.keys(scopeFilter).length ? { $and: [filter, scopeFilter] } : filter;
 
-		const conversationSenderExclusion = {
-			$nin: [actorId, ObjectId(actorId)],
-		};
-		const unseenMessageMatch = {
-			"conversation.seenByAdmin": false,
-			"conversation.messageBy.userId": conversationSenderExclusion,
-		};
+		const unseenMessageMatch = adminUnseenClientMessageMatch(actorId);
 
 		const [
 			openCases,
