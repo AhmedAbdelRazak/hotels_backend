@@ -1073,6 +1073,7 @@ Future TODO Backlog - Added 2026-05-26
   - When a support case has a hotel, the writer now speaks as that hotel support/reservation desk and avoids presenting Jannat Booking as a separate middleman unless platform/payment/final verification context requires the brand.
   - Greetings, introductions, transcript labels, quote continuations, and human handoff messages now prefer the active hotel support voice when hotel context exists, so the guest does not feel passed through a platform middleman.
   - Legacy fallback replies for date/payment/reservation/amenity/handoff handling now pass through the same writer path where practical, so relevant training chats can shape tone and flow before a customer-facing answer is sent.
+  - OpenAI calls now use bounded timeout/retry settings, and the orchestrator has deterministic decision/writer fallbacks so a slow model call does not leave the guest without a reply.
   - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
 - Validation completed locally:
   - node --check models/aiagent_training_chat.js.

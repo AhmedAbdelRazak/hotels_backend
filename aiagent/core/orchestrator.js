@@ -688,6 +688,38 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 	}
 }
 
+function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAddress = "Guest") {
+	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
+	const supportDesk = hotelName ? `${hotelName} support` : "Jannat Booking support";
+	const text = String(instruction || "").toLowerCase();
+	if (context.fallbackText) return String(context.fallbackText);
+	if (context.quote) return simpleQuoteText({ sc, st, quote: context.quote });
+	if (/greet/.test(text)) {
+		return `Hi ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
+	}
+	if (/date|check-in|check.?in|checkout|check-out/.test(text)) {
+		return `${respectfulAddress}, please send your check-in and checkout dates and I can check availability.`;
+	}
+	if (/room type/.test(text)) {
+		const examples = Array.isArray(context.roomExamples)
+			? context.roomExamples.filter(Boolean).slice(0, 4)
+			: [];
+		return examples.length
+			? `${respectfulAddress}, which room type suits you best? For example: ${examples.join(" / ")}.`
+			: `${respectfulAddress}, which room type would you like?`;
+	}
+	if (/payment/.test(text)) {
+		return `${respectfulAddress}, I can help with the payment issue. Please send the confirmation number or payment link, but not card details.`;
+	}
+	if (/reservation|confirmation/.test(text)) {
+		return `${respectfulAddress}, please send the confirmation number and what you would like to update.`;
+	}
+	if (/human|handoff|specialist|escalat/.test(text)) {
+		return `${respectfulAddress}, a support specialist will continue with you from here.`;
+	}
+	return `${respectfulAddress}, I can help with that. Could you share a little more detail?`;
+}
+
 /* LLM writer */
 async function write(io, sc, st, instruction, context = {}) {
 	const respectfulAddress = respectfulGuestName(sc, st);
@@ -731,20 +763,80 @@ async function write(io, sc, st, instruction, context = {}) {
 		recentConversationLines(sc, st) || "(empty)"
 	}\n\nContext JSON:\n${payload}`;
 
-	const answer = await chat(
-		[
-			{ role: "system", content: sys },
-			{ role: "user", content },
-		],
-		{
-			kind: "writer",
-			temperature: 0.25,
-			max_tokens: 240,
-		}
-	);
+	let answer = "";
+	try {
+		answer = await chat(
+			[
+				{ role: "system", content: sys },
+				{ role: "user", content },
+			],
+			{
+				kind: "writer",
+				temperature: 0.25,
+				max_tokens: 240,
+			}
+		);
+	} catch (error) {
+		logStep(String(sc._id), "llm.write_failed", {
+			instruction,
+			message: error?.message || error,
+		});
+		answer = fallbackWriterText(sc, st, instruction, context, respectfulAddress);
+	}
+	if (!answer) {
+		answer = fallbackWriterText(sc, st, instruction, context, respectfulAddress);
+	}
 
 	logStep(String(sc._id), "llm.write", { instruction, outLen: answer.length });
 	return answer;
+}
+
+function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
+	const handoffReason = humanHandoffReason(userText);
+	if (handoffReason === "reservation_cancellation") {
+		return { action: "reservation_cancellation", roomTypeKey: null, reason: handoffReason };
+	}
+	if (handoffReason === "reservation_update") {
+		return { action: "reservation_update", roomTypeKey: null, reason: handoffReason };
+	}
+	if (wantsPaymentHelp(userText)) {
+		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
+	}
+	if (wantsReservationHelp(userText)) {
+		return { action: "reservation_lookup", roomTypeKey: null, reason: "reservation_keyword" };
+	}
+	if (wantsHotelRecommendation(userText)) {
+		return {
+			action: "hotel_recommendation",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			reason: "hotel_recommendation_keyword",
+		};
+	}
+	if (wantsPriceButMissingDates(userText, st)) {
+		return {
+			action: "ask_dates_for_price",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			reason: "price_missing_dates",
+		};
+	}
+	if (
+		(lu.dates?.checkinISO || st.slots?.checkinISO) &&
+		(lu.dates?.checkoutISO || st.slots?.checkoutISO) &&
+		(lu.roomTypeKey || st.slots?.roomTypeKey)
+	) {
+		return {
+			action: "continue_booking",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			reason: "dates_and_room_present",
+		};
+	}
+	if (lu.amenity) {
+		return { action: "amenity_question", roomTypeKey: lu.roomTypeKey || null, reason: "amenity_detected" };
+	}
+	if (lu.intent === "smalltalk" || looksLikeGreetingOnly(userText)) {
+		return { action: "smalltalk", roomTypeKey: null, reason: "smalltalk_detected" };
+	}
+	return { action: "other", roomTypeKey: lu.roomTypeKey || null, reason: "fallback_decision" };
 }
 
 async function decideSupportAction({ sc, st, userText, lu }) {
@@ -785,13 +877,21 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		null,
 		2
 	);
-	const raw = await chat(
-		[
-			{ role: "system", content: sys },
-			{ role: "user", content: user },
-		],
-		{ kind: "nlu", temperature: 0, max_tokens: 180 }
-	);
+	let raw = "";
+	try {
+		raw = await chat(
+			[
+				{ role: "system", content: sys },
+				{ role: "user", content: user },
+			],
+			{ kind: "nlu", temperature: 0, max_tokens: 180 }
+		);
+	} catch (error) {
+		logStep(String(sc._id), "orchestrator.decision_failed", {
+			message: error?.message || error,
+		});
+		return fallbackSupportDecision(userText, st, lu);
+	}
 	try {
 		const parsed = JSON.parse(raw);
 		return {
@@ -800,7 +900,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 			reason: parsed.reason || "",
 		};
 	} catch {
-		return { action: "other", roomTypeKey: null, reason: "decision_parse_failed" };
+		return fallbackSupportDecision(userText, st, lu);
 	}
 }
 
@@ -816,6 +916,11 @@ async function shareKnownStayQuote(io, sc, st) {
 		at: now(),
 		data: quote,
 	};
+	logStep(String(sc._id), "quote.prepared", {
+		available: quote.available,
+		reason: quote.reason || null,
+		roomTypeKey: st.slots.roomTypeKey,
+	});
 	const quoteReply = await write(
 		io,
 		sc,

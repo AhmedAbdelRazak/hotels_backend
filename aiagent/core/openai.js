@@ -1,8 +1,18 @@
 // aiagent/core/openai.js
 const OpenAI = require("openai");
 
+function intFromEnv(name, fallback) {
+	const value = parseInt(process.env[name] || "", 10);
+	return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const OPENAI_TIMEOUT_MS = intFromEnv("OPENAI_TIMEOUT_MS", 45000);
+const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 1);
+
 const client = new OpenAI({
 	apiKey: process.env.OPENAI_API_KEY,
+	timeout: OPENAI_TIMEOUT_MS,
+	maxRetries: OPENAI_MAX_RETRIES,
 });
 
 function pickModel(kind = "nlu") {
@@ -21,14 +31,17 @@ async function chat(
 	const tokenLimit = usesCompletionTokens
 		? Math.max(max_tokens * 3, kind === "writer" ? 900 : 600)
 		: max_tokens;
-	const res = await client.chat.completions.create({
-		model,
-		messages,
-		...(usesCompletionTokens ? {} : { temperature }),
-		...(usesCompletionTokens
-			? { max_completion_tokens: tokenLimit }
-			: { max_tokens: tokenLimit }),
-	});
+	const res = await client.chat.completions.create(
+		{
+			model,
+			messages,
+			...(usesCompletionTokens ? {} : { temperature }),
+			...(usesCompletionTokens
+				? { max_completion_tokens: tokenLimit }
+				: { max_tokens: tokenLimit }),
+		},
+		{ timeout: OPENAI_TIMEOUT_MS, maxRetries: OPENAI_MAX_RETRIES }
+	);
 	return res.choices?.[0]?.message?.content?.trim() || "";
 }
 
