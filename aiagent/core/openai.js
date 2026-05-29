@@ -15,6 +15,22 @@ const client = new OpenAI({
 	maxRetries: OPENAI_MAX_RETRIES,
 });
 
+async function withDeadline(factory, timeoutMs) {
+	const controller = new AbortController();
+	let timer = null;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => {
+			controller.abort();
+			reject(new Error(`OpenAI request timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+	});
+	try {
+		return await Promise.race([factory(controller.signal), timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 function pickModel(kind = "nlu") {
 	// small ops -> mini; responses -> 4o
 	if (kind === "nlu") return process.env.OPENAI_MODEL_NLU || "gpt-4o-mini";
@@ -31,16 +47,22 @@ async function chat(
 	const tokenLimit = usesCompletionTokens
 		? Math.max(max_tokens * 3, kind === "writer" ? 900 : 600)
 		: max_tokens;
-	const res = await client.chat.completions.create(
-		{
-			model,
-			messages,
-			...(usesCompletionTokens ? {} : { temperature }),
-			...(usesCompletionTokens
-				? { max_completion_tokens: tokenLimit }
-				: { max_tokens: tokenLimit }),
-		},
-		{ timeout: OPENAI_TIMEOUT_MS, maxRetries: OPENAI_MAX_RETRIES }
+	const body = {
+		model,
+		messages,
+		...(usesCompletionTokens ? {} : { temperature }),
+		...(usesCompletionTokens
+			? { max_completion_tokens: tokenLimit }
+			: { max_tokens: tokenLimit }),
+	};
+	const res = await withDeadline(
+		(signal) =>
+			client.chat.completions.create(body, {
+				timeout: OPENAI_TIMEOUT_MS,
+				maxRetries: OPENAI_MAX_RETRIES,
+				signal,
+			}),
+		OPENAI_TIMEOUT_MS
 	);
 	return res.choices?.[0]?.message?.content?.trim() || "";
 }
