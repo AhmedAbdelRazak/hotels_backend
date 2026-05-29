@@ -1275,5 +1275,16 @@ Future TODO Backlog - Added 2026-05-26
   - Existing payment/status filterType values remain unchanged for the manual filter buttons.
   - The scorecards payload now also includes pendingConfirmationReservations, notCapturedReservations, capturedReservations, notPaidReservations, and paidOfflineReservations.
   - These counts use the same formatted reservation/payment status values as the admin table so the clickable frontend scorecards and the table stay aligned.
+  - Overall/payment/status scorecard counts are historical/current-filter-scope totals; createdToday and createdThisWeek remain created-date metrics.
 - Validation target:
   - node --check controllers/janat.js.
+
+2026-05-29 Platform Admin Reservation Status Overrides
+- controllers/reservations.js:
+  - Platform admins and super admins can still move closed reservations backward or reopen them through the reservation update endpoint.
+  - A stricter configured-super-admin-only guard was added for force operational jumps from unconfirmed workflow states directly into in-house or checked-out statuses.
+  - That force jump also requires the platform all-reservations status-update marker, so the exceptional check-in/check-out override remains tied to the /admin/all-reservations workflow.
+  - Runtime-only admin override markers are stripped before persistence so they cannot be saved into reservation documents.
+  - This protects hotel-management and regular admin flows while allowing configured super admins using the platform admin all-reservations workflow to correct exceptional lifecycle states.
+- Validation target:
+  - node --check controllers/reservations.js.

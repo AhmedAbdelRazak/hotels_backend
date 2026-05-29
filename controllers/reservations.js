@@ -351,6 +351,8 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"reservationAuditLog",
 	"adminPricing",
 	"adminPricingVisibility",
+	"adminAllReservationsStatusUpdate",
+	"adminAllReservationsSuperAdminForceStatus",
 ];
 
 const stripServerManagedReservationUpdateFields = (payload = {}) => {
@@ -1552,6 +1554,30 @@ const isSuperAdminReservationActor = (actor = {}) =>
 	reservationActorDescriptions(actor).includes("superadmin") ||
 	reservationActorDescriptions(actor).includes("super admin");
 
+const isConfiguredSuperAdminReservationActor = (actor = {}) =>
+	isConfiguredSuperAdmin(actor);
+
+const isPlatformAdminReservationActor = (actor = {}) => {
+	const roles = reservationActorRoles(actor);
+	const descriptions = reservationActorDescriptions(actor);
+	return (
+		isSuperAdminReservationActor(actor) ||
+		roles.includes(10000) ||
+		descriptions.some((description) =>
+			[
+				"admin",
+				"administrator",
+				"platformadmin",
+				"platform admin",
+				"systemadmin",
+				"system admin",
+				"systemadministrator",
+				"system administrator",
+			].includes(description),
+		)
+	);
+};
+
 const reservationStatusProgressRank = (status = "") => {
 	const normalized = String(status || "")
 		.toLowerCase()
@@ -1600,6 +1626,23 @@ const isBackwardReservationStatusChange = (fromStatus = "", toStatus = "") => {
 	const fromRank = reservationStatusProgressRank(fromStatus);
 	const toRank = reservationStatusProgressRank(toStatus);
 	return fromRank !== null && toRank !== null && toRank < fromRank;
+};
+
+const isOperationalStatusJumpFromUnconfirmed = (
+	fromStatus = "",
+	toStatus = "",
+) => {
+	const fromRank = reservationStatusProgressRank(fromStatus);
+	const normalizedTo = String(toStatus || "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+	return (
+		fromRank !== null &&
+		fromRank < 1 &&
+		["inhouse", "checkedin", "checkin", "checkedout", "checkout"].includes(
+			normalizedTo
+		)
+	);
 };
 
 const canViewReservationHotel = async (actor, hotelId) => {
@@ -4846,6 +4889,12 @@ exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
+		const isAdminAllReservationsStatusUpdate =
+			updateData.adminAllReservationsStatusUpdate === true ||
+			updateData.adminAllReservationsStatusUpdate === "true";
+		const isAdminAllReservationsSuperAdminForceStatus =
+			updateData.adminAllReservationsSuperAdminForceStatus === true ||
+			updateData.adminAllReservationsSuperAdminForceStatus === "true";
 		let normalizedUpdateData = { ...updateData };
 		const previewAuditFromPayload =
 			normalizedUpdateData.__previewAudit === true &&
@@ -4950,6 +4999,26 @@ exports.updateReservation = async (req, res) => {
 				existingReservation.state ||
 				""
 		).trim();
+		const isConfiguredSuperAdminPlatformStatusOverride =
+			isAdminAllReservationsStatusUpdate &&
+			isAdminAllReservationsSuperAdminForceStatus &&
+			isConfiguredSuperAdminReservationActor(requestingActor);
+		if (
+			requestedLifecycleStatus &&
+			requestedLifecycleStatus.toLowerCase() !==
+				currentLifecycleStatus.toLowerCase() &&
+			isOperationalStatusJumpFromUnconfirmed(
+				currentLifecycleStatus,
+				requestedLifecycleStatus
+			) &&
+			!isConfiguredSuperAdminPlatformStatusOverride
+		) {
+			return res.status(403).json({
+				error:
+					"Only a configured super admin can move an unconfirmed reservation directly to in-house or checked-out from the platform admin reservations page.",
+				code: "reservation_status_force_jump_super_admin_only",
+			});
+		}
 		if (
 			requestedLifecycleStatus &&
 			requestedLifecycleStatus.toLowerCase() !==
@@ -4960,11 +5029,11 @@ exports.updateReservation = async (req, res) => {
 			) ||
 				(isTerminalReservationStatus(currentLifecycleStatus) &&
 					!isTerminalReservationStatus(requestedLifecycleStatus))) &&
-			!isSuperAdminReservationActor(requestingActor)
+			!isPlatformAdminReservationActor(requestingActor)
 		) {
 			return res.status(403).json({
 				error:
-					"Only a super admin can move a closed reservation backward or reopen it.",
+					"Only a platform admin or super admin can move a closed reservation backward or reopen it.",
 				code: "reservation_status_reversion_locked",
 			});
 		}
