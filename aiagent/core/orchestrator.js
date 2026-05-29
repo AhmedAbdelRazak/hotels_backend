@@ -27,7 +27,7 @@ const {
 
 const { chat } = require("./openai");
 
-const AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
+const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
 const LEGACY_AI_SUPPORT_EMAIL = "management@xhotelpro.com";
 
@@ -57,6 +57,22 @@ function toTitle(s = "") {
 		/\w\S*/g,
 		(m) => m[0].toUpperCase() + m.slice(1)
 	);
+}
+function uniqueAgentNames(names = []) {
+	return [
+		...new Set(
+			names
+				.map((name) => String(name || "").trim().replace(/\s+/g, " "))
+				.filter(Boolean)
+		),
+	];
+}
+function configuredAgentPool() {
+	const configured = uniqueAgentNames(
+		[process.env.B2C_AI_RESPONDER_NAMES, process.env.AI_RESPONDER_NAMES]
+			.flatMap((value) => String(value || "").split(","))
+	);
+	return configured.length >= 2 ? configured : DEFAULT_AGENT_POOL;
 }
 function usDate(iso) {
 	if (!iso) return "";
@@ -575,11 +591,12 @@ function ensureState(sc, hotel) {
 	const id = String(sc._id);
 	let st = memo.get(id);
 	if (!st) {
+		const agentPool = configuredAgentPool();
 		st = {
 			hotel,
 			agentName:
 				sc.aiResponderName ||
-				AGENT_POOL[Math.floor(Math.random() * AGENT_POOL.length)],
+				agentPool[Math.floor(Math.random() * agentPool.length)],
 			language: preferredLanguageOf(sc) || "English",
 			greeted: false,
 			greetScheduled: false,

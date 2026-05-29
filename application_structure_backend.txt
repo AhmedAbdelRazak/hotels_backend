@@ -1126,6 +1126,14 @@ Future TODO Backlog - Added 2026-05-26
   - node --check aiagent/core/orchestrator.js.
   - NLU smoke tests confirmed Arabic script and Franko Arabic room questions map to tripleRooms, Franko Arabic complaints remain other, and Hinglish/Spanish room requests map to tripleRooms.
 
+2026-05-29 B2C AI Responder Name Rotation
+- Backend behavior:
+  - controllers/supportcase.js now rotates public B2C AI responder names per hotel instead of deterministically hashing the same guest/hotel into the same name every time.
+  - The assigned aiResponderName is still saved on the SupportCase, so the visible assistant name remains stable for that one conversation.
+  - The default responder pool is Aisha, Hana, Sara, Amira, Yasmin, and Nadia.
+  - Production can override the pool without code changes using B2C_AI_RESPONDER_NAMES or AI_RESPONDER_NAMES as comma-separated names.
+  - aiagent/core/orchestrator.js and the legacy aiagent/core/brain.js fallback also read the same environment-based pool when a case does not already have aiResponderName.
+
 2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
 - controllers/supportcase.js:
   - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.

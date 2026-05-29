@@ -168,22 +168,73 @@ const actorObjectId = (actor = {}) => {
 	return ObjectId.isValid(id) ? ObjectId(id) : null;
 };
 
-const B2C_AI_RESPONDER_NAMES = ["Aisha", "Hana", "Sara", "Amira", "Yasmin"];
+const DEFAULT_B2C_AI_RESPONDER_NAMES = [
+	"Aisha",
+	"Hana",
+	"Sara",
+	"Amira",
+	"Yasmin",
+	"Nadia",
+];
 const AI_SUPPORT_MESSAGE_EMAILS = [
 	"support@jannatbooking.com",
 	"management@xhotelpro.com",
 ];
+
+const uniqueResponderNames = (names = []) => [
+	...new Set(
+		names
+			.map((name) => cleanChatDisplayName(name))
+			.filter(Boolean)
+	),
+];
+
+const configuredB2CAiResponderNames = () => {
+	const configured = uniqueResponderNames(
+		[process.env.B2C_AI_RESPONDER_NAMES, process.env.AI_RESPONDER_NAMES]
+			.flatMap((value) => String(value || "").split(","))
+	);
+	return configured.length >= 2
+		? configured
+		: uniqueResponderNames(DEFAULT_B2C_AI_RESPONDER_NAMES);
+};
 
 const hashText = (value = "") =>
 	String(value || "")
 		.split("")
 		.reduce((acc, char) => (acc * 31 + char.charCodeAt(0)) % 1000003, 7);
 
-const pickB2CAiResponderName = (...parts) => {
-	const seed = parts.map((part) => String(part || "")).join("|");
-	return B2C_AI_RESPONDER_NAMES[
-		hashText(seed) % B2C_AI_RESPONDER_NAMES.length
-	];
+const pickB2CAiResponderName = async ({
+	customerName,
+	customerEmail,
+	hotelId,
+	hotelName,
+	preferredLanguage,
+} = {}) => {
+	const responderNames = configuredB2CAiResponderNames();
+	if (responderNames.length === 1) return responderNames[0];
+
+	const filter = {
+		openedBy: "client",
+		aiRelated: true,
+		aiResponderName: { $in: responderNames },
+	};
+	if (hotelId && ObjectId.isValid(normalizeId(hotelId))) {
+		filter.hotelId = ObjectId(normalizeId(hotelId));
+	}
+	const latestCase = await SupportCase.findOne(filter)
+		.sort({ createdAt: -1, _id: -1 })
+		.select("aiResponderName")
+		.lean();
+	const latestIndex = responderNames.indexOf(latestCase?.aiResponderName);
+	if (latestIndex >= 0) {
+		return responderNames[(latestIndex + 1) % responderNames.length];
+	}
+
+	const seed = [customerName, customerEmail, hotelId, hotelName, preferredLanguage]
+		.map((part) => String(part || ""))
+		.join("|");
+	return responderNames[hashText(seed) % responderNames.length];
 };
 
 const isClientSupportCase = (supportCase = {}) => supportCase.openedBy === "client";
@@ -863,7 +914,13 @@ exports.createNewSupportCase = async (req, res) => {
 			openedBy === "client" &&
 			(Boolean(hotelDoc?.aiToRespond) || isAiForceRespondEnabled());
 		const aiResponderName = aiEnabledForClient
-			? pickB2CAiResponderName(customerName, customerEmail, hotelId)
+			? await pickB2CAiResponderName({
+					customerName,
+					customerEmail,
+					hotelId,
+					hotelName,
+					preferredLanguage,
+			  })
 			: "";
 
 		// First conversation entry

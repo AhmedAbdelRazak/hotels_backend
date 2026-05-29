@@ -21,7 +21,16 @@ const HI = ["हना", "आइशा", "यास्मीन", "अमीर�
 function rand(a) {
 	return a[Math.floor(Math.random() * a.length)];
 }
+function configuredResponderNames() {
+	const names = [process.env.B2C_AI_RESPONDER_NAMES, process.env.AI_RESPONDER_NAMES]
+		.flatMap((value) => String(value || "").split(","))
+		.map((name) => String(name || "").trim().replace(/\s+/g, " "))
+		.filter(Boolean);
+	return [...new Set(names)];
+}
 function pickFirstName(lang) {
+	const configuredNames = configuredResponderNames();
+	if (configuredNames.length >= 2) return rand(configuredNames);
 	if (/Arabic/.test(lang)) return "Hana";
 	if (lang === "French") return rand(FR);
 	if (lang === "Spanish") return rand(ES);
