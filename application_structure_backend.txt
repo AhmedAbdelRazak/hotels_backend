@@ -1124,3 +1124,15 @@ Future TODO Backlog - Added 2026-05-26
   - pm2 restart hotels-backend --update-env completed and hotels-backend was online.
   - Health check returned 200 for http://127.0.0.1:8080/api/inbound/sendgrid.
   - Production logs showed /api/support-cases/notifications/summary returning 200 after restart.
+
+2026-05-29 Housekeeping Actor Null Guard
+- File:
+  - controllers/housekeeping.js.
+- Root cause:
+  - Some housekeeping task requests can arrive without a resolvable active actor, causing userRoles(null) to throw "Cannot read properties of null (reading 'role')" in canManageHousekeepingHotel/listOfTasksForEmployee.
+- Backend behavior:
+  - userRoles and userRoleDescriptions now normalize null/undefined user objects to an empty object.
+  - canManageHousekeepingHotel returns false immediately for missing or inactive actors.
+  - The endpoint should now deny/return normally instead of writing a TypeError to the PM2 error log.
+- Validation completed locally:
+  - node --check controllers/housekeeping.js.

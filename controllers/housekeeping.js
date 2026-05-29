@@ -18,20 +18,26 @@ const isFinishedStatus = (status = "") =>
 const isCleaningStatus = (status = "") =>
 	String(status || "").toLowerCase() === "cleaning";
 
-const userRoles = (user = {}) => [
-	...new Set(
-		[user.role, ...(Array.isArray(user.roles) ? user.roles : [])]
-			.map(Number)
-			.filter(Boolean)
-	),
-];
+const userRoles = (user = {}) => {
+	const safeUser = user || {};
+	return [
+		...new Set(
+			[safeUser.role, ...(Array.isArray(safeUser.roles) ? safeUser.roles : [])]
+				.map(Number)
+				.filter(Boolean)
+		),
+	];
+};
 
-const userRoleDescriptions = (user = {}) => [
-	String(user.roleDescription || "").toLowerCase(),
-	...(Array.isArray(user.roleDescriptions)
-		? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
-		: []),
-];
+const userRoleDescriptions = (user = {}) => {
+	const safeUser = user || {};
+	return [
+		String(safeUser.roleDescription || "").toLowerCase(),
+		...(Array.isArray(safeUser.roleDescriptions)
+			? safeUser.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+};
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -141,6 +147,7 @@ const canAccessHousekeepingHotel = async (user, hotelId) => {
 };
 
 const canManageHousekeepingHotel = async (user, hotelId) => {
+	if (!user || user.activeUser === false) return false;
 	const roles = userRoles(user);
 	const descriptions = userRoleDescriptions(user);
 	const hasManagerRole =
