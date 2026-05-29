@@ -230,7 +230,8 @@ async function detectIntentLLM({
 	const sys = [
 		"Classify hotel chat messages.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics, language hint, ticket context, and hotel context instead of exact spellings.",
-		"Examples of writing styles include Franko Arabic/Arabizi, Hinglish, Urdu or Hindi in Latin characters, Spanish or French without accents, and mixed English with another language.",
+		"Examples of writing styles include Franko Arabic/Arabizi, Algerian/Moroccan/Tunisian/Egyptian/Gulf Arabic dialects, Hinglish, Urdu or Hindi in Latin characters, Spanish or French without accents, and mixed English with another language.",
+		"Do not classify a message as other just because the language is dialectal, romanized, or mixed-script; infer the hotel-support intent when possible.",
 		"Return ONLY JSON:",
 		"{ intent:'reserve_room'|'reservation_lookup'|'smalltalk'|'confirm_check'|'other',",
 		"  smalltalkType:null|'greet'|'how_are_you'|'thanks'|'are_you_there'|'farewell'|'wow'|'chitchat',",

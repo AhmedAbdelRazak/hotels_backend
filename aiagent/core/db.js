@@ -186,7 +186,7 @@ const learningTokens = (text = "") =>
 	String(text || "")
 		.toLowerCase()
 		.replace(/https?:\/\/\S+/g, " ")
-		.replace(/[^a-z0-9\u0600-\u06FF\s]/gi, " ")
+		.replace(/[^a-z0-9\u00C0-\u024F\u0600-\u06FF\u0900-\u097F\s]/gi, " ")
 		.split(/\s+/)
 		.map((word) => word.trim())
 		.filter((word) => word.length >= 4);
@@ -200,12 +200,16 @@ function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "") {
 		if (queryTokens.has(String(keyword || "").toLowerCase())) score += 3;
 	});
 	const haystack = [
+		doc.sourceType,
 		doc.chatTitle,
 		doc.summary,
 		doc.customerIntent,
 		doc.supportResolution,
 		...(doc.learningNotes || []),
 		...(doc.responseGuidance || []),
+		...(Array.isArray(doc.conversation)
+			? doc.conversation.map((turn) => turn?.message || "")
+			: []),
 	]
 		.join(" ")
 		.toLowerCase();
@@ -219,7 +223,7 @@ async function findTrainingDocs(Model, filter) {
 	try {
 		return await Model.find(filter)
 			.select(
-				"chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt createdAt"
+				"sourceType chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt createdAt"
 			)
 			.sort({ updatedAt: -1, createdAt: -1 })
 			.limit(80)
@@ -241,10 +245,8 @@ async function listRelevantTrainingChats({ hotelId, text, limit = 4 } = {}) {
 			{ hotelId: { $exists: false } },
 		];
 	}
-	const learningFilter = { ...scopedFilter, sourceType: "manual_chat" };
-
 	const [learningDocs, legacyTrainingDocs] = await Promise.all([
-		findTrainingDocs(AiAgentLearning, learningFilter),
+		findTrainingDocs(AiAgentLearning, scopedFilter),
 		findTrainingDocs(AiAgentTrainingChat, scopedFilter),
 	]);
 	const docs = [...learningDocs, ...legacyTrainingDocs];

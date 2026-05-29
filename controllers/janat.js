@@ -39,6 +39,10 @@ const {
 const {
 	validateReservationInventoryForCreate,
 } = require("./reservations");
+const {
+	sanitizeReservationAdminWorkflowForPublicViewer,
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -2023,8 +2027,10 @@ exports.gettingByReservationId = async (req, res) => {
 			},
 		};
 
-		// Return the reservation with decrypted details
-		return res.status(200).json(decryptedReservation);
+		// Return client-safe reservation details without platform-admin workflow data.
+		return res
+			.status(200)
+			.json(sanitizeReservationAdminWorkflowForPublicViewer(decryptedReservation));
 	} catch (error) {
 		// Log the error and send a 500 response
 		console.error("Error fetching reservation:", error.message || error);
@@ -2608,7 +2614,10 @@ exports.paginatedReservationList = async (req, res) => {
 		// Return response
 		return res.status(200).json({
 			success: true,
-			data: finalDocs, // after filter+search + skip/limit
+			data: sanitizeReservationAuditLogsCollectionForViewer(
+				finalDocs,
+				req.profile
+			), // after filter+search + skip/limit
 			totalDocuments,
 			currentPage: pageNumber,
 			totalPages: Math.ceil(totalDocuments / pageSize),
@@ -4189,7 +4198,11 @@ exports.updateReservationDetails = async (req, res) => {
 
 		res.status(200).json({
 			message: "Reservation updated successfully.",
-			data: updatedReservation,
+			data: sanitizeReservationAdminWorkflowForPublicViewer(
+				typeof updatedReservation.toObject === "function"
+					? updatedReservation.toObject()
+					: updatedReservation
+			),
 		});
 	} catch (error) {
 		console.error("Error updating reservation:", error);

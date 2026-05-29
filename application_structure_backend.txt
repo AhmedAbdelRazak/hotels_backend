@@ -1231,3 +1231,40 @@ Future TODO Backlog - Added 2026-05-26
   - node --check controllers/reservations.js.
   - node --check models/reservations.js.
   - Node smoke test verified client/root/net/expense/margin totals and root-only hotel-manager sanitization.
+
+2026-05-29 AI Chatbot Learning Context And Dialect Handling
+- aiagent/core/orchestrator.js:
+  - Every writer response continues to receive the full current support-case transcript, private previous guest chat context, and relevant employee learning examples.
+  - The learning lookup now includes the latest guest message, the recent/full conversation transcript, preferred language, ticket inquiry data, current wait state, slots, and action context.
+  - The support-action decision step now also loads employee learning examples before it can choose human_escalation.
+  - The decision prompt instructs the orchestrator to use reusable learning examples as a safe next step before escalating, while still escalating cancellations, refunds, mutations to existing reservations, or unsupported facts/tools.
+  - The writer prompt now explicitly handles Arabic dialects including Egyptian/Gulf/Levantine/Maghrebi/Algerian/Tunisian, Franko Arabic/Arabizi, Hinglish, Urdu/Hindi Latin text, Spanish/French phonetic text, misspellings, and code-switching.
+  - If the guest writes in a language different from the preferred language sent by the frontend, the bot must answer in the preferred language first and then ask one short language-switch question rather than silently switching languages.
+  - The writer is constrained to known Jannat Booking routes/context URLs and should use concise markdown hotel links instead of inventing PMS/admin/payment links.
+- aiagent/core/db.js:
+  - listRelevantTrainingChats now reads all active AiAgentLearning records, including support_case and manual_chat sources, plus legacy AiAgentTrainingChat records.
+  - Training relevance now searches the uploaded conversation turns themselves, not only summaries/keywords/guidance.
+  - Token matching now preserves accented Latin, Arabic, and Devanagari script characters for multilingual learning search.
+- aiagent/core/nlu.js:
+  - The LLM fallback classifier was reinforced to infer hotel-support intent from dialectal, romanized, or mixed-script messages instead of classifying them as other.
+- Validation completed locally:
+  - node --check aiagent/core/orchestrator.js.
+  - node --check aiagent/core/db.js.
+  - node --check aiagent/core/nlu.js.
+
+2026-05-29 Reservation Admin Workflow Privacy Hardening
+- services/auditPrivacy.js:
+  - Platform admin viewers now include configured super admins, role 1000, role 10000, and admin/platform/system admin role descriptions.
+  - Privileged audit actors now include platform admins, order takers, reservation employees, and system admins by role number or role description.
+  - Non-platform viewers have privileged admin/order-taker/reservation-employee audit entries removed from adminChangeLog and reservationAuditLog.
+  - Related privileged workflow actor fields and timestamps are stripped for non-platform viewers so admin update steps do not appear in the reservation cycle.
+  - Root-only hotel-management pricing remains limited to reservations flagged with adminPricingVisibility.rootOnlyForHotelManagement.
+  - A public/client reservation sanitizer removes platform-admin workflow data and admin-only pricing fields while preserving client/main pricing.
+- controllers/janat.js:
+  - Public reservation lookup by confirmation now returns the public/client-safe reservation shape.
+  - Public client reservation update responses also return the same client-safe reservation shape.
+  - The admin all-reservations list uses the shared audit sanitizer with req.profile so platform admins keep full details and non-platform viewers do not see privileged workflow entries.
+- Validation completed locally:
+  - node --check services/auditPrivacy.js.
+  - node --check controllers/janat.js.
+  - Node smoke test verified hotel-management root-only sanitization, platform-admin full visibility, and public/client client-price-only sanitization.

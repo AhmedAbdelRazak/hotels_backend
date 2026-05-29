@@ -837,6 +837,50 @@ function recentConversationLines(sc = {}, st = {}) {
 		.join("\n");
 }
 
+function latestGuestLanguageStyle(sc = {}, targetLanguage = "") {
+	const latest = lastUserText(sc);
+	const text = String(latest || "").trim();
+	const target = String(targetLanguage || "").toLowerCase();
+	if (!text) {
+		return {
+			latestGuestTextSample: "",
+			likelyDifferentFromPreferred: false,
+			style: "unknown",
+			guidance: "No latest guest message is available.",
+		};
+	}
+	const hasArabicScript = /[\u0600-\u06FF]/.test(text);
+	const hasDevanagari = /[\u0900-\u097F]/.test(text);
+	const latinLetters = (text.match(/[A-Za-z]/g) || []).length;
+	const hasLatinWords = latinLetters >= 3;
+	const likelyLatinOnly = hasLatinWords && !hasArabicScript && !hasDevanagari;
+	const likelyArabicTarget = /arabic|ar\b/.test(target);
+	const likelyHindiTarget = /hindi|hi\b/.test(target);
+	const likelyUrduTarget = /urdu|ur\b/.test(target);
+	const likelyRomanizedPreferredLanguage =
+		(likelyArabicTarget || likelyHindiTarget || likelyUrduTarget) &&
+		likelyLatinOnly;
+	const likelyDifferentFromPreferred =
+		(!likelyArabicTarget && !likelyHindiTarget && !likelyUrduTarget && hasArabicScript);
+	const style = hasArabicScript
+		? "Arabic-script or Urdu-script"
+		: hasDevanagari
+		? "Devanagari-script"
+		: likelyLatinOnly
+		? "Latin-script; may be English, romanized Arabic/Urdu/Hindi, or code-switching"
+		: "mixed or unclear";
+	return {
+		latestGuestTextSample: text.slice(0, 260),
+		likelyDifferentFromPreferred,
+		style,
+		guidance: likelyRomanizedPreferredLanguage
+			? "Treat this as possible romanized preferred-language text, such as Franko Arabic/Arabizi or Urdu/Hindi in Latin characters. Answer in the preferred language. Only ask a language-switch question when the latest message is clearly in another language, such as plain English."
+			: likelyDifferentFromPreferred
+			? "Answer the request in the preferred language first. Then add one short, polite language-switch check in the preferred language, using the guest name when available. Do not switch languages unless the guest asks for it or the frontend preference changes."
+			: "Keep the response in the preferred language and interpret dialect, transliteration, spelling mistakes, and code-switching from context.",
+	};
+}
+
 function latestKnownConfirmation(sc = {}, lu = {}) {
 	if (lu?.confirmation) return lu.confirmation;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
@@ -1035,9 +1079,15 @@ async function loadPreviousGuestContext(sc, st) {
 
 async function loadLearningContext(sc, st, instruction, context = {}) {
 	try {
+		const firstConversationTurn = Array.isArray(sc.conversation)
+			? sc.conversation[0] || {}
+			: {};
 		const lookupText = [
 			lastUserText(sc),
+			recentConversationLines(sc, st).slice(-8000),
 			targetLanguageLabel(sc, st),
+			sc.inquiryAbout || firstConversationTurn.inquiryAbout || "",
+			sc.inquiryDetails || firstConversationTurn.inquiryDetails || "",
 			instruction,
 			JSON.stringify({
 				waitFor: st.waitFor,
@@ -1202,6 +1252,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		? `${targetLanguage} (${targetLanguageCode})`
 		: targetLanguage;
 	st.language = targetLanguage;
+	const languageStyle = latestGuestLanguageStyle(sc, targetLanguageText);
 	const [learningContext, previousGuestContext] = await Promise.all([
 		loadLearningContext(sc, st, instruction, context),
 		loadPreviousGuestContext(sc, st),
@@ -1229,6 +1280,8 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
+		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, and Spanish guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
+		`If the latest guest message appears to be in a different language from the preferred language, still answer the actual request in ${targetLanguage} first. Then add one short polite question, in ${targetLanguage}, asking whether they would prefer to continue in that other language. Do not switch languages until the guest asks or the frontend preferred language changes.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
@@ -1240,6 +1293,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
+		`Use only known Jannat Booking routes or URLs supplied in context. For hotel recommendations, prefer concise markdown links using the hotel name as the link text. Never invent routes, payment links, reservation links, or admin/PMS links.`,
 		`Do not cancel, refund, or mutate existing reservations; send those requests to a human team member.`,
 		`Avoid repeating the same question if just asked; prefer a soft pivot.`,
 	].join(" ");
@@ -1249,6 +1303,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			...context,
 			targetResponseLanguage: targetLanguageText,
 			respectfulAddress,
+			latestGuestLanguageStyle: languageStyle,
 			privatePreviousGuestChats: previousGuestContext,
 			employeeLearningExamples: learningContext,
 		},
@@ -1365,7 +1420,15 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 }
 
 async function decideSupportAction({ sc, st, userText, lu }) {
-	const previousGuestContext = await loadPreviousGuestContext(sc, st);
+	const [previousGuestContext, learningContext] = await Promise.all([
+		loadPreviousGuestContext(sc, st),
+		loadLearningContext(
+			sc,
+			st,
+			"Decide the next support action. Use relevant employee learning examples before choosing escalation.",
+			{ latestUserMessage: userText, nlu: lu || null }
+		),
+	]);
 	const hotelSummary = st.hotel
 		? {
 				hotelName: st.hotel.hotelName,
@@ -1384,7 +1447,9 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Read the whole conversation and decide the next support action before any answer is written.",
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics and context instead of exact spellings.",
+		"Arabic may appear as Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, Franko Arabic, or Arabizi. Indian and Pakistani guests may use Hinglish, Urdu/Hindi in Latin characters, or mixed scripts. Do not escalate only because the writing style is unusual.",
 		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
+		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
@@ -1392,18 +1457,23 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If an active hotel is present and the guest asks whether you/this hotel has rooms, room types, amenities, availability, or pricing, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"Choose hotel_recommendation only when the guest asks for other hotels, nearby alternatives, general platform options, or there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
-		"Choose human_escalation when the request is outside hotel/platform support scope, needs facts/tools not available in context, or should be reviewed by a person before answering.",
+		"Choose human_escalation only when the request is outside hotel/platform support scope, needs facts/tools not available in context or learning examples, asks to cancel/refund/mutate an existing reservation, or should be reviewed by a person before answering.",
 	].join(" ");
 	const user = JSON.stringify(
 		{
 			language: languageOf(sc, st),
 			latestUserMessage: userText,
+			latestGuestLanguageStyle: latestGuestLanguageStyle(
+				sc,
+				targetLanguageLabel(sc, st)
+			),
 			fullConversation: recentConversationLines(sc, st),
 			currentSlots: st.slots,
 			waitFor: st.waitFor,
 			nlu: lu || null,
 			hotel: hotelSummary,
 			privatePreviousGuestChats: previousGuestContext,
+			employeeLearningExamples: learningContext,
 		},
 		null,
 		2

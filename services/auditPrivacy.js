@@ -44,8 +44,17 @@ const roleKeys = (actor = {}) =>
 
 const isSuperAdminViewer = (viewer = {}) =>
 	isConfiguredSuperAdmin(viewer) ||
-	roleNumbers(viewer).includes(1000) ||
-	roleKeys(viewer).includes("superadmin");
+	roleNumbers(viewer).some((role) => [1000, 10000].includes(role)) ||
+	roleKeys(viewer).some((role) =>
+		[
+			"admin",
+			"administrator",
+			"platformadmin",
+			"superadmin",
+			"systemadmin",
+			"systemadministrator",
+		].includes(role)
+	);
 
 const moneyNumber = (value) => {
 	if (value === null || value === undefined || value === "") return 0;
@@ -208,10 +217,91 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	return sanitized;
 };
 
+const clientPriceFromDay = (day = {}) => {
+	const explicitClient =
+		day.clientPrice ?? day.mainPrice ?? day.totalPriceWithCommission ?? day.price;
+	const clientPrice = moneyNumber(explicitClient);
+	if (clientPrice > 0) return n2(clientPrice);
+	const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
+	return withoutCommission > 0 ? n2(withoutCommission) : rootPriceFromDay(day);
+};
+
+const stripAdminPricingDayFieldsForClient = (day = {}) => {
+	const clientPrice = clientPriceFromDay(day);
+	const sanitized = {
+		...day,
+		price: clientPrice,
+		clientPrice,
+		mainPrice: clientPrice,
+		totalPriceWithCommission: clientPrice,
+	};
+
+	[
+		"rootPrice",
+		"netAfterExpenses",
+		"netAfterOtaExpenses",
+		"netAfterOtherExpenses",
+		"otaExpenseAmount",
+		"otherExpenseAmount",
+		"expenseAmount",
+		"otaExpenseRate",
+		"platformMargin",
+		"platformMarginRate",
+	].forEach((field) => {
+		delete sanitized[field];
+	});
+
+	return sanitized;
+};
+
+const sanitizeRoomsToClientOnly = (rooms = []) =>
+	(Array.isArray(rooms) ? rooms : []).map((room) => {
+		const pricingByDay = Array.isArray(room?.pricingByDay)
+			? room.pricingByDay.map(stripAdminPricingDayFieldsForClient)
+			: [];
+		const clientTotal = n2(
+			pricingByDay.reduce(
+				(sum, day) => sum + moneyNumber(day.totalPriceWithCommission),
+				0
+			)
+		);
+		const averageClient =
+			pricingByDay.length > 0 ? n2(clientTotal / pricingByDay.length) : 0;
+		const sanitized = {
+			...room,
+			chosenPrice:
+				averageClient > 0 ? averageClient.toFixed(2) : room?.chosenPrice,
+			pricingByDay,
+			totalPriceWithCommission:
+				clientTotal > 0 ? clientTotal : room?.totalPriceWithCommission,
+		};
+		delete sanitized.adminPricing;
+		return sanitized;
+	});
+
+const sanitizeReservationPricingForClientViewer = (reservation = {}) => {
+	const sanitized = { ...reservation };
+	if (Array.isArray(sanitized.pickedRoomsType)) {
+		sanitized.pickedRoomsType = sanitizeRoomsToClientOnly(
+			sanitized.pickedRoomsType
+		);
+	}
+	if (Array.isArray(sanitized.pickedRoomsPricing)) {
+		sanitized.pickedRoomsPricing = sanitizeRoomsToClientOnly(
+			sanitized.pickedRoomsPricing
+		);
+	}
+	delete sanitized.adminPricing;
+	delete sanitized.adminPricingVisibility;
+	return sanitized;
+};
+
 const PRIVILEGED_AUDIT_ROLE_KEYS = new Set([
 	"admin",
 	"administrator",
+	"ordertaker",
 	"platformadmin",
+	"reservationemployee",
 	"superadmin",
 	"systemadmin",
 	"systemadministrator",
@@ -220,7 +310,11 @@ const PRIVILEGED_AUDIT_ROLE_KEYS = new Set([
 const isPrivilegedAuditActor = (actor) => {
 	if (!actor || typeof actor !== "object") return false;
 	if (isConfiguredSuperAdmin(actor)) return true;
-	if (roleNumbers(actor).some((role) => role === 1000 || role === 10000)) {
+	if (
+		roleNumbers(actor).some((role) =>
+			[1000, 7000, 8000, 10000].includes(role)
+		)
+	) {
 		return true;
 	}
 	if (roleKeys(actor).some((role) => PRIVILEGED_AUDIT_ROLE_KEYS.has(role))) {
@@ -252,7 +346,11 @@ const toPlain = (value) => {
 	return value;
 };
 
-const sanitizeReservationAuditLogsForViewer = (reservation, viewer = {}) => {
+const sanitizeReservationAuditLogsForViewer = (
+	reservation,
+	viewer = {},
+	options = {}
+) => {
 	if (!reservation || isSuperAdminViewer(viewer)) return reservation;
 
 	const plain = toPlain(reservation);
@@ -265,7 +363,31 @@ const sanitizeReservationAuditLogsForViewer = (reservation, viewer = {}) => {
 		);
 	});
 
-	const stripPrivilegedActorAtPath = (path = "") => {
+	const stripValueAtPath = (path = "") => {
+		const parts = path.split(".");
+		const last = parts.pop();
+		let sourceParent = plain;
+		let targetParent = sanitized;
+
+		for (const part of parts) {
+			if (!sourceParent?.[part] || typeof sourceParent[part] !== "object") {
+				return;
+			}
+			if (targetParent[part] === sourceParent[part]) {
+				targetParent[part] = Array.isArray(sourceParent[part])
+					? [...sourceParent[part]]
+					: { ...sourceParent[part] };
+			}
+			sourceParent = sourceParent[part];
+			targetParent = targetParent[part];
+		}
+
+		if (targetParent && Object.prototype.hasOwnProperty.call(targetParent, last)) {
+			targetParent[last] = null;
+		}
+	};
+
+	const stripPrivilegedActorAtPath = (path = "", relatedTimestampPaths = []) => {
 		const parts = path.split(".");
 		const last = parts.pop();
 		let sourceParent = plain;
@@ -286,26 +408,54 @@ const sanitizeReservationAuditLogsForViewer = (reservation, viewer = {}) => {
 
 		if (targetParent?.[last] && isPrivilegedAuditActor(targetParent[last])) {
 			targetParent[last] = null;
+			relatedTimestampPaths.forEach(stripValueAtPath);
 		}
 	};
 
 	[
-		"adminLastUpdatedBy",
-		"pendingConfirmation.lastUpdatedBy",
-		"agentDecisionSnapshot.decidedBy",
-		"agentDecisionSnapshot.lastUpdatedBy",
-		"financial_cycle.lastUpdatedBy",
-		"financial_cycle.commissionAssignedBy",
-		"financial_cycle.closedBy",
-		"commissionAgentApproval.approvedBy",
-		"commissionAgentApproval.rejectedBy",
-		"commissionAgentApproval.lastUpdatedBy",
-	].forEach(stripPrivilegedActorAtPath);
+		["adminLastUpdatedBy", ["adminLastUpdatedAt"]],
+		[
+			"pendingConfirmation.lastUpdatedBy",
+			[
+				"pendingConfirmation.lastUpdatedAt",
+				"pendingConfirmation.confirmedAt",
+				"pendingConfirmation.rejectedAt",
+			],
+		],
+		["agentDecisionSnapshot.decidedBy", ["agentDecisionSnapshot.decidedAt"]],
+		[
+			"agentDecisionSnapshot.lastUpdatedBy",
+			["agentDecisionSnapshot.lastUpdatedAt"],
+		],
+		["financial_cycle.lastUpdatedBy", ["financial_cycle.lastUpdatedAt"]],
+		[
+			"financial_cycle.commissionAssignedBy",
+			["financial_cycle.commissionAssignedAt"],
+		],
+		["financial_cycle.closedBy", ["financial_cycle.closedAt"]],
+		["commissionAgentApproval.approvedBy", ["commissionAgentApproval.approvedAt"]],
+		["commissionAgentApproval.rejectedBy", ["commissionAgentApproval.rejectedAt"]],
+		[
+			"commissionAgentApproval.lastUpdatedBy",
+			["commissionAgentApproval.lastUpdatedAt"],
+		],
+	].forEach(([path, timestamps]) =>
+		stripPrivilegedActorAtPath(path, timestamps)
+	);
 
-	return shouldApplyRootOnlyPricing(plain, viewer)
+	return !options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
 		? sanitizeReservationPricingForHotelViewer(sanitized)
 		: sanitized;
 };
+
+const sanitizeReservationAdminWorkflowForPublicViewer = (reservation) =>
+	sanitizeReservationPricingForClientViewer(
+		sanitizeReservationAuditLogsForViewer(
+			reservation,
+			{ role: "client" },
+			{ preservePricing: true }
+		)
+	);
 
 const sanitizeReservationAuditLogsCollectionForViewer = (
 	reservations = [],
@@ -362,6 +512,7 @@ module.exports = {
 	isPrivilegedAuditActor,
 	isSuperAdminViewer,
 	resolveAuditViewerFromRequest,
+	sanitizeReservationAdminWorkflowForPublicViewer,
 	sanitizeReservationAuditLogsCollectionForViewer,
 	sanitizeReservationAuditLogsForViewer,
 	shouldHideAuditEntry,
