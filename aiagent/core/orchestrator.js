@@ -905,6 +905,12 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 }
 
 async function shareKnownStayQuote(io, sc, st) {
+	logStep(String(sc._id), "quote.start", {
+		roomTypeKey: st.slots.roomTypeKey,
+		checkinISO: st.slots.checkinISO,
+		checkoutISO: st.slots.checkoutISO,
+		hasHotel: Boolean(st.hotel),
+	});
 	const quote = priceRoomForStay(
 		st.hotel,
 		{ roomType: st.slots.roomTypeKey },
