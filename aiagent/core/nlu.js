@@ -34,6 +34,81 @@ function mapRoomToKey(text = "") {
 	return null;
 }
 
+const MONTHS = {
+	jan: 1,
+	january: 1,
+	feb: 2,
+	february: 2,
+	mar: 3,
+	march: 3,
+	apr: 4,
+	april: 4,
+	may: 5,
+	jun: 6,
+	june: 6,
+	jul: 7,
+	july: 7,
+	aug: 8,
+	august: 8,
+	sep: 9,
+	september: 9,
+	oct: 10,
+	october: 10,
+	nov: 11,
+	november: 11,
+	dec: 12,
+	december: 12,
+};
+
+function isoFromParts(year, month, day) {
+	const y = Number(year);
+	const m = Number(month);
+	const d = Number(day);
+	const date = new Date(Date.UTC(y, m - 1, d));
+	if (
+		date.getUTCFullYear() !== y ||
+		date.getUTCMonth() !== m - 1 ||
+		date.getUTCDate() !== d
+	) {
+		return null;
+	}
+	return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function quickDateRange(text = "") {
+	const raw = digitsToEnglish(String(text || ""));
+	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
+	if (isoMatches?.length >= 2) {
+		return { checkinISO: isoMatches[0], checkoutISO: isoMatches[1] };
+	}
+	const monthNames = Object.keys(MONTHS).join("|");
+	const matches = [];
+	const pushMatch = (day, monthName, year) => {
+		const month = MONTHS[String(monthName || "").toLowerCase()];
+		const iso = isoFromParts(year, month, day);
+		if (iso) matches.push(iso);
+	};
+	const dayMonth = new RegExp(
+		`\\b(\\d{1,2})\\s+(${monthNames})\\s*,?\\s*(20\\d{2})\\b`,
+		"gi"
+	);
+	let match = null;
+	while ((match = dayMonth.exec(raw))) {
+		pushMatch(match[1], match[2], match[3]);
+	}
+	const monthDay = new RegExp(
+		`\\b(${monthNames})\\s+(\\d{1,2})\\s*,?\\s*(20\\d{2})\\b`,
+		"gi"
+	);
+	while ((match = monthDay.exec(raw))) {
+		pushMatch(match[2], match[1], match[3]);
+	}
+	if (matches.length >= 2) {
+		return { checkinISO: matches[0], checkoutISO: matches[1] };
+	}
+	return { checkinISO: null, checkoutISO: null };
+}
+
 function asciiize(s = "") {
 	return String(s)
 		.normalize("NFD")
@@ -284,6 +359,41 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			confirmation: null,
 			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
 			amenity: detectAmenityQuestion(text), // allow amenity while in smalltalk
+		};
+	}
+
+	const quickRoomTypeKey = mapRoomToKey(text);
+	const quickDates = quickDateRange(text);
+	const looksLikeBooking =
+		/\b(book|reserve|reservation|price|rate|availability|available|room|stay)\b/i.test(
+			text
+		) ||
+		Boolean(quickRoomTypeKey);
+	if (
+		looksLikeBooking &&
+		quickRoomTypeKey &&
+		quickDates.checkinISO &&
+		quickDates.checkoutISO
+	) {
+		return {
+			intent: "reserve_room",
+			smalltalkType: null,
+			roomTypeKey: quickRoomTypeKey,
+			dates: {
+				checkinISO: quickDates.checkinISO,
+				checkoutISO: quickDates.checkoutISO,
+				reason: null,
+				checkinPast: isPastISO(quickDates.checkinISO),
+				checkoutPast: isPastISO(quickDates.checkoutISO),
+				raw: {
+					checkin: quickDates.checkinISO,
+					checkout: quickDates.checkoutISO,
+					calendar: "gregorian",
+				},
+			},
+			confirmation: null,
+			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
+			amenity: detectAmenityQuestion(text),
 		};
 	}
 
