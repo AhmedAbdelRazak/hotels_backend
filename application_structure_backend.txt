@@ -1093,3 +1093,16 @@ Future TODO Backlog - Added 2026-05-26
   - node --check routes/aiagent_learning.js.
   - node --check aiagent/core/db.js.
   - node --check aiagent/core/orchestrator.js.
+
+2026-05-29 Production B2C AI Chat Open Greeting Guard
+- Root cause found during production monitoring:
+  - A newly opened public B2C support chat initially contains only the system hold message.
+  - aiagent/core/orchestrator.js joins the Socket.IO room and starts planTurn, but lastUserText is empty until the guest sends a message.
+  - Without a proactive open-chat greeting, the widget can look idle even when the hotel/global AI switches are enabled.
+- Backend behavior:
+  - AI-enabled client cases with no customer message and no prior AI assistant reply now send one short hotel-support greeting on room join.
+  - The greeting uses support-case preferredLanguage/preferredLanguageCode and the active hotel support voice.
+  - The bot should not duplicate the greeting after refresh/rejoin because existing AI assistant replies are detected before sending.
+  - humanSend re-checks ensureAIAllowed immediately before saving an AI message, so a delayed AI response is cancelled if the guest closes the case, staff pauses AI, the hotel switch is turned off, or the case is no longer open.
+- Production note:
+  - The hotel-level aiToRespond switch still controls whether public B2C AI runs for a hotel. If the UI shows "Chat Available" but aiToRespond=false, the chat is human reception support, not AI.

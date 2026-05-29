@@ -148,6 +148,13 @@ function isAiConversationMessage(message = {}) {
 	);
 }
 
+function hasAiAssistantReply(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	return conversation.some(
+		(message) => !message?.isSystem && isAiConversationMessage(message)
+	);
+}
+
 function humanHandoffReason(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (
@@ -606,6 +613,26 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 
 	if (st.lastBotText && st.lastBotText.trim() === String(text).trim()) {
 		logStep(caseId, "dedupe.skip", { reason: "same_as_last" });
+		return;
+	}
+
+	try {
+		const latestCase = await getSupportCaseById(caseId);
+		const policy = latestCase
+			? await ensureAIAllowed(latestCase.hotelId, latestCase)
+			: { allowed: false, reason: "support case missing" };
+		if (!policy.allowed) {
+			logStep(caseId, "human.cancelled", {
+				stage: "policy-before-save",
+				reason: policy.reason,
+			});
+			return;
+		}
+	} catch (error) {
+		logStep(caseId, "human.cancelled", {
+			stage: "policy-check-failed",
+			message: error?.message || error,
+		});
 		return;
 	}
 
@@ -1394,6 +1421,26 @@ async function planTurn(io, sc) {
 
 		const userText = lastUserText(sc);
 		if (!userText) {
+			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
+				st.greetScheduled = true;
+				st.greeted = true;
+				const initialInquiry = [sc.inquiryAbout, sc.inquiryDetails]
+					.filter(Boolean)
+					.join("\n")
+					.trim();
+				const greeting = await write(
+					io,
+					sc,
+					st,
+					initialInquiry
+						? "The guest has just opened chat. Use the initial inquiry details as context, greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, then ask one helpful next question. Keep it short."
+						: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line.",
+					{ initialInquiry }
+				);
+				await humanSend(io, sc, st, greeting, { first: true });
+				st.waitFor = "clarify";
+				return;
+			}
 			logStep(caseId, "turn.skip", { reason: "no_customer_message" });
 			return;
 		}
