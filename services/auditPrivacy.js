@@ -47,6 +47,167 @@ const isSuperAdminViewer = (viewer = {}) =>
 	roleNumbers(viewer).includes(1000) ||
 	roleKeys(viewer).includes("superadmin");
 
+const moneyNumber = (value) => {
+	if (value === null || value === undefined || value === "") return 0;
+	if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+	const parsed = Number(String(value).replace(/,/g, "").trim());
+	return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const n2 = (value) => Number(moneyNumber(value).toFixed(2));
+
+const normalizeRoomCount = (count) => {
+	const parsed = Number(count);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+};
+
+const hasViewerIdentity = (viewer = {}) =>
+	!!normalizeId(viewer) || roleValues(viewer).some((role) => role !== undefined && role !== null && role !== "");
+
+const ADMIN_PRICING_ROLE_KEYS = new Set([
+	"admin",
+	"administrator",
+	"ordertaker",
+	"platformadmin",
+	"reservationemployee",
+	"superadmin",
+	"systemadmin",
+	"systemadministrator",
+]);
+
+const canViewAdminPricing = (viewer = {}) =>
+	isSuperAdminViewer(viewer) ||
+	roleNumbers(viewer).some((role) =>
+		[7000, 8000, 10000].includes(Number(role))
+	) ||
+	roleKeys(viewer).some((role) => ADMIN_PRICING_ROLE_KEYS.has(role));
+
+const adminRootOnlyPricingEnabled = (reservation = {}) =>
+	reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true;
+
+const shouldApplyRootOnlyPricing = (reservation = {}, viewer = {}) =>
+	adminRootOnlyPricingEnabled(reservation) &&
+	(!hasViewerIdentity(viewer) || !canViewAdminPricing(viewer));
+
+const rootPriceFromDay = (day = {}) => {
+	if (
+		Object.prototype.hasOwnProperty.call(day || {}, "rootPrice") &&
+		day.rootPrice !== null &&
+		day.rootPrice !== undefined &&
+		day.rootPrice !== ""
+	) {
+		const explicitRoot = moneyNumber(day.rootPrice);
+		if (explicitRoot >= 0) return n2(explicitRoot);
+	}
+	const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
+	if (withoutCommission > 0) return n2(withoutCommission);
+	const finalPrice = moneyNumber(day.totalPriceWithCommission ?? day.price);
+	return n2(finalPrice);
+};
+
+const stripAdminPricingDayFields = (day = {}) => {
+	const rootPrice = rootPriceFromDay(day);
+	const sanitized = {
+		...day,
+		price: rootPrice,
+		rootPrice,
+		commissionRate: 0,
+		totalPriceWithCommission: rootPrice,
+		totalPriceWithoutCommission: rootPrice,
+	};
+
+	[
+		"clientPrice",
+		"mainPrice",
+		"netAfterExpenses",
+		"netAfterOtaExpenses",
+		"netAfterOtherExpenses",
+		"otaExpenseAmount",
+		"otherExpenseAmount",
+		"expenseAmount",
+		"otaExpenseRate",
+		"platformMargin",
+		"platformMarginRate",
+	].forEach((field) => {
+		delete sanitized[field];
+	});
+
+	return sanitized;
+};
+
+const rootTotalForRooms = (rooms = []) =>
+	(Array.isArray(rooms) ? rooms : []).reduce((reservationTotal, room) => {
+		const pricingByDay = Array.isArray(room?.pricingByDay)
+			? room.pricingByDay
+			: [];
+		const roomRoot = pricingByDay.reduce(
+			(sum, day) => sum + rootPriceFromDay(day),
+			0
+		);
+		if (roomRoot > 0) return reservationTotal + roomRoot * normalizeRoomCount(room?.count);
+		return reservationTotal + moneyNumber(room?.hotelShouldGet || room?.totalPriceWithCommission);
+	}, 0);
+
+const sanitizeRoomsToRootOnly = (rooms = []) =>
+	(Array.isArray(rooms) ? rooms : []).map((room) => {
+		const pricingByDay = Array.isArray(room?.pricingByDay)
+			? room.pricingByDay.map(stripAdminPricingDayFields)
+			: [];
+		const roomRootTotal = n2(
+			pricingByDay.reduce((sum, day) => sum + moneyNumber(day.rootPrice), 0)
+		);
+		const averageRoot =
+			pricingByDay.length > 0 ? n2(roomRootTotal / pricingByDay.length) : 0;
+		const sanitized = {
+			...room,
+			chosenPrice: averageRoot > 0 ? averageRoot.toFixed(2) : room?.chosenPrice,
+			pricingByDay,
+			totalPriceWithCommission: roomRootTotal,
+			hotelShouldGet: roomRootTotal,
+		};
+		delete sanitized.adminPricing;
+		return sanitized;
+	});
+
+const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
+	const sanitized = { ...reservation };
+	const sourceRooms = Array.isArray(sanitized.pickedRoomsType)
+		? sanitized.pickedRoomsType
+		: [];
+	const sourcePricingRooms = Array.isArray(sanitized.pickedRoomsPricing)
+		? sanitized.pickedRoomsPricing
+		: [];
+	const sanitizedRooms = sanitizeRoomsToRootOnly(sourceRooms);
+	const sanitizedPricingRooms = sanitizeRoomsToRootOnly(sourcePricingRooms);
+	const rootTotal = n2(
+		rootTotalForRooms(sourceRooms.length ? sourceRooms : sourcePricingRooms) ||
+			sanitized?.adminPricing?.rootTotal ||
+			sanitized.sub_total ||
+			sanitized.total_amount
+	);
+
+	sanitized.pickedRoomsType = sanitizedRooms;
+	if (sourcePricingRooms.length) {
+		sanitized.pickedRoomsPricing = sanitizedPricingRooms;
+	}
+	sanitized.total_amount = rootTotal;
+	sanitized.sub_total = rootTotal;
+	sanitized.commission = 0;
+	if (sanitized.financial_cycle && typeof sanitized.financial_cycle === "object") {
+		sanitized.financial_cycle = {
+			...sanitized.financial_cycle,
+			commissionAmount: 0,
+			commissionValue: 0,
+			commissionDueToPms: 0,
+			hotelPayoutDue: rootTotal,
+		};
+	}
+	delete sanitized.adminPricing;
+	delete sanitized.adminPricingVisibility;
+
+	return sanitized;
+};
+
 const PRIVILEGED_AUDIT_ROLE_KEYS = new Set([
 	"admin",
 	"administrator",
@@ -141,7 +302,9 @@ const sanitizeReservationAuditLogsForViewer = (reservation, viewer = {}) => {
 		"commissionAgentApproval.lastUpdatedBy",
 	].forEach(stripPrivilegedActorAtPath);
 
-	return sanitized;
+	return shouldApplyRootOnlyPricing(plain, viewer)
+		? sanitizeReservationPricingForHotelViewer(sanitized)
+		: sanitized;
 };
 
 const sanitizeReservationAuditLogsCollectionForViewer = (

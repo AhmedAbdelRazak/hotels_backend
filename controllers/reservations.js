@@ -328,6 +328,8 @@ const TRACKED_RESERVATION_FIELDS = [
 	"total_rooms",
 	"pickedRoomsType",
 	"pickedRoomsPricing",
+	"adminPricing",
+	"adminPricingVisibility",
 	"createdByUserId",
 	"createdBy",
 	"orderTakeId",
@@ -347,6 +349,8 @@ const SERVER_MANAGED_RESERVATION_UPDATE_FIELDS = [
 	"adminLastUpdatedBy",
 	"adminChangeLog",
 	"reservationAuditLog",
+	"adminPricing",
+	"adminPricingVisibility",
 ];
 
 const stripServerManagedReservationUpdateFields = (payload = {}) => {
@@ -710,6 +714,57 @@ const isFinanceAccount = (account = {}) =>
 const isReservationEmployeeAccount = (account = {}) =>
 	accountHasRole(account, 8000) ||
 	accountHasDescription(account, "reservationemployee");
+
+const isPlatformAdminPricingActor = (account = {}) =>
+	isConfiguredSuperAdmin(account) ||
+	[1000, 7000, 8000, 10000].some((role) => accountHasRole(account, role)) ||
+	[
+		"admin",
+		"administrator",
+		"ordertaker",
+		"reservationemployee",
+		"systemadmin",
+		"system admin",
+	].some((description) => accountHasDescription(account, description));
+
+const roomHasDailyPricing = (room = {}) =>
+	Array.isArray(room?.pricingByDay) && room.pricingByDay.length > 0;
+
+const payloadTouchesReservationPricing = (payload = {}) =>
+	Object.prototype.hasOwnProperty.call(payload, "total_amount") ||
+	Object.prototype.hasOwnProperty.call(payload, "sub_total") ||
+	Object.prototype.hasOwnProperty.call(payload, "adminPricing") ||
+	(Array.isArray(payload.pickedRoomsType) &&
+		payload.pickedRoomsType.some(roomHasDailyPricing)) ||
+	(Array.isArray(payload.pickedRoomsPricing) &&
+		payload.pickedRoomsPricing.some(roomHasDailyPricing));
+
+const applyAdminPricingVisibilityForActor = (
+	payload = {},
+	actor = {},
+	source = "admin_reservation_pricing"
+) => {
+	if (
+		!payload ||
+		!isPlatformAdminPricingActor(actor) ||
+		!payloadTouchesReservationPricing(payload)
+	) {
+		return payload;
+	}
+
+	payload.adminPricingVisibility = {
+		...(payload.adminPricingVisibility &&
+		typeof payload.adminPricingVisibility === "object"
+			? payload.adminPricingVisibility
+			: {}),
+		rootOnlyForHotelManagement: true,
+		source,
+		appliedAt: new Date(),
+		appliedBy: normalizeId(actor?._id || actor) || null,
+	};
+
+	return payload;
+};
 
 const isFinanceOnlyAccount = (account = {}) =>
 	isFinanceAccount(account) &&
@@ -2848,6 +2903,11 @@ exports.create = async (req, res) => {
 				{ allowBlockedCalendar: !forcePendingConfirmation }
 			);
 			Object.assign(reservationPayload, pricingResult.reservation);
+			applyAdminPricingVisibilityForActor(
+				reservationPayload,
+				createActor,
+				"admin_reservation_create"
+			);
 			if (Array.isArray(pricingResult.warnings)) {
 				reservationWarnings.push(...pricingResult.warnings);
 			}
@@ -5045,6 +5105,31 @@ exports.updateReservation = async (req, res) => {
 				});
 			}
 		}
+		const adminManagedPricingLocked =
+			existingReservation?.adminPricingVisibility
+				?.rootOnlyForHotelManagement === true &&
+			!isPlatformAdminPricingActor(requestingActor || {});
+		const adminManagedPricingFieldsTouched = [
+			"checkin_date",
+			"checkout_date",
+			"hotelId",
+			"pickedRoomsType",
+			"pickedRoomsPricing",
+			"total_amount",
+			"sub_total",
+			"commission",
+			"adminPricing",
+			"adminPricingVisibility",
+		].some((field) =>
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)
+		);
+		if (adminManagedPricingLocked && adminManagedPricingFieldsTouched) {
+			return res.status(403).json({
+				error:
+					"This reservation has admin-managed pricing. Only platform admins can change its dates, rooms, or pricing.",
+				code: "admin_managed_pricing_locked",
+			});
+		}
 		const financeSensitiveUpdateRequested = [
 			"commission",
 			"commissionPaid",
@@ -5180,6 +5265,11 @@ exports.updateReservation = async (req, res) => {
 		normalizedUpdateData = await normalizeReservationStayPricing(
 			existingReservation,
 			normalizedUpdateData
+		);
+		applyAdminPricingVisibilityForActor(
+			normalizedUpdateData,
+			requestingActor || {},
+			"admin_reservation_update"
 		);
 
 		if (orderTakerBasicEditOnly) {

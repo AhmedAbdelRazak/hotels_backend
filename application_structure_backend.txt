@@ -1207,3 +1207,27 @@ Future TODO Backlog - Added 2026-05-26
   - node --check controllers/supportcase.js.
   - node --check models/supportcase.js.
   - Mongo smoke test inserted two exact Codex QA closed client cases with the same contact, verified caseTopic=reserve_room and totalChatsWithSameContact=2, then deleted those exact QA cases and verified zero leftovers.
+
+2026-05-29 Admin Reservation Three-Price Breakdown
+- Backend pricing model:
+  - models/reservations.js now stores adminPricing and adminPricingVisibility as top-level reservation objects.
+  - adminPricing summarizes clientTotal, rootTotal, netAfterExpensesTotal, otaExpenseTotal, and platformMarginTotal.
+  - adminPricingVisibility.rootOnlyForHotelManagement marks reservations whose hotel-management view must show only root pricing.
+- Pricing normalization:
+  - services/reservationPricing.js now preserves the existing client-facing total_amount behavior while adding explicit per-day clientPrice/mainPrice, rootPrice, netAfterExpenses/netAfterOtaExpenses, otaExpenseAmount, and platformMargin values.
+  - Existing price and totalPriceWithCommission remain the client/main price for backward compatibility with calendars, receipts, and older reservation screens.
+  - summarizeRooms still returns total_amount as the client/admin total and sub_total as the root total, with adminPricing carrying the extra net/expense/margin totals.
+- Admin-created and admin-updated reservations:
+  - controllers/reservations.js flags new admin/order-taker priced reservations with adminPricingVisibility.rootOnlyForHotelManagement=true.
+  - Admin reservation updates only receive the root-only hotel-management flag when pricing actually changes after server normalization.
+  - adminPricing and adminPricingVisibility are server-managed on updates so the browser cannot force or spoof the visibility state.
+- Hotel-management privacy:
+  - services/auditPrivacy.js sanitizes flagged reservations for hotel-management/non-platform viewers by returning total_amount/sub_total as the root total, zeroing the visible commission, converting per-day room prices to rootPrice, and removing admin-only client/net/expense/margin fields.
+  - Platform pricing viewers include super admin, admin/system admin, order taker, and reservation employee roles.
+  - Non-platform users are blocked from changing dates, rooms, or pricing for admin-managed priced reservations to avoid overwriting hidden admin/client pricing with sanitized root-only data.
+- Validation completed locally:
+  - node --check services/reservationPricing.js.
+  - node --check services/auditPrivacy.js.
+  - node --check controllers/reservations.js.
+  - node --check models/reservations.js.
+  - Node smoke test verified client/root/net/expense/margin totals and root-only hotel-manager sanitization.

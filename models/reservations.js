@@ -431,6 +431,26 @@ const reservationsSchema = new mongoose.Schema(
 				},
 			],
 		},
+		adminPricing: {
+			type: Object,
+			default: {
+				mode: "",
+				clientTotal: 0,
+				rootTotal: 0,
+				netAfterExpensesTotal: 0,
+				otaExpenseTotal: 0,
+				platformMarginTotal: 0,
+			},
+		},
+		adminPricingVisibility: {
+			type: Object,
+			default: {
+				rootOnlyForHotelManagement: false,
+				source: "",
+				appliedAt: null,
+				appliedBy: null,
+			},
+		},
 		roomId: [{ type: ObjectId, ref: "Rooms", default: null }], //This could be left
 		bedNumber: {
 			type: Array, //If the guest chose to rent only a bed in a room

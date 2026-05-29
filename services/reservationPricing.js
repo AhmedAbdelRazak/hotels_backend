@@ -46,6 +46,63 @@ const n2 = (value) => Number(moneyNumber(value).toFixed(2));
 const hasOwn = (object, key) =>
 	Object.prototype.hasOwnProperty.call(object || {}, key);
 
+const firstNumericInput = (...values) => {
+	for (const value of values) {
+		const parsed = nullableNumber(value);
+		if (parsed !== null) return parsed;
+	}
+	return null;
+};
+
+const resolveClientPrice = (day = {}) =>
+	n2(
+		firstNumericInput(
+			day.clientPrice,
+			day.mainPrice,
+			day.totalPriceWithCommission,
+			day.price
+		) ?? 0
+	);
+
+const resolveNetAfterExpenses = (day = {}, clientPrice = 0) => {
+	const explicitNet = firstNumericInput(
+		day.netAfterExpenses,
+		day.netAfterOtaExpenses,
+		day.netAfterOtherExpenses
+	);
+	if (explicitNet !== null) return n2(explicitNet);
+
+	const explicitExpense = firstNumericInput(
+		day.otaExpenseAmount,
+		day.otherExpenseAmount,
+		day.expenseAmount
+	);
+	if (explicitExpense !== null) return n2(clientPrice - explicitExpense);
+
+	return n2(clientPrice);
+};
+
+const buildAdminPricingDayFields = (day = {}, clientPrice = 0, rootPrice = 0) => {
+	const netAfterExpenses = resolveNetAfterExpenses(day, clientPrice);
+	const otaExpenseAmount = n2(clientPrice - netAfterExpenses);
+	const platformMargin = n2(netAfterExpenses - rootPrice);
+	const otaExpenseRate =
+		clientPrice > 0 ? n2((otaExpenseAmount / clientPrice) * 100) : 0;
+	const platformMarginRate =
+		netAfterExpenses > 0 ? n2((platformMargin / netAfterExpenses) * 100) : 0;
+
+	return {
+		clientPrice: n2(clientPrice),
+		mainPrice: n2(clientPrice),
+		netAfterExpenses,
+		netAfterOtaExpenses: netAfterExpenses,
+		otaExpenseAmount,
+		otaExpenseRate,
+		platformMargin,
+		platformMarginRate,
+	};
+};
+
 const toPlainObject = (value) => {
 	if (!value) return {};
 	if (typeof value.toObject === "function") return value.toObject();
@@ -206,14 +263,17 @@ const roomsHaveCompleteStayPricing = (rooms = [], stayDates = []) =>
 	rooms.every((room) => roomHasCompleteStayPricing(room, stayDates));
 
 const normalizeProvidedPricingDay = (day = {}) => {
-	const finalPrice = n2(day.totalPriceWithCommission ?? day.price);
-	const totalPriceWithCommission = n2(
-		day.totalPriceWithCommission ?? finalPrice
-	);
+	const finalPrice = resolveClientPrice(day);
+	const totalPriceWithCommission = finalPrice;
 	const totalPriceWithoutCommission = n2(
-		day.totalPriceWithoutCommission ?? finalPrice
+		day.totalPriceWithoutCommission ?? day.clientPrice ?? day.mainPrice ?? finalPrice
 	);
 	const rootPrice = resolveDayRootPrice(day, totalPriceWithoutCommission || finalPrice);
+	const adminPricingDayFields = buildAdminPricingDayFields(
+		day,
+		finalPrice,
+		rootPrice
+	);
 	return {
 		...day,
 		date: dateOnlyKey(day.date || day.calendarDate),
@@ -222,12 +282,15 @@ const normalizeProvidedPricingDay = (day = {}) => {
 		commissionRate: n2(day.commissionRate),
 		totalPriceWithCommission,
 		totalPriceWithoutCommission,
+		...adminPricingDayFields,
 	};
 };
 
 const resolveDayRootPrice = (day = {}, fallback = 0) => {
-	const explicitRoot = moneyNumber(day.rootPrice);
-	if (explicitRoot > 0) return n2(explicitRoot);
+	if (hasNumericInput(day.rootPrice)) {
+		const explicitRoot = moneyNumber(day.rootPrice);
+		if (explicitRoot >= 0) return n2(explicitRoot);
+	}
 
 	const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
 	if (withoutCommission > 0) return n2(withoutCommission);
@@ -236,6 +299,36 @@ const resolveDayRootPrice = (day = {}, fallback = 0) => {
 	if (finalPrice > 0) return n2(finalPrice);
 
 	return n2(fallback);
+};
+
+const summarizePricingDays = (pricingByDay = []) => {
+	const rows = Array.isArray(pricingByDay) ? pricingByDay : [];
+	return rows.reduce(
+		(acc, day) => {
+			const clientPrice = resolveClientPrice(day);
+			const rootPrice = resolveDayRootPrice(day, clientPrice);
+			const netAfterExpenses = resolveNetAfterExpenses(day, clientPrice);
+			acc.clientTotal = n2(acc.clientTotal + clientPrice);
+			acc.rootTotal = n2(acc.rootTotal + rootPrice);
+			acc.netAfterExpensesTotal = n2(
+				acc.netAfterExpensesTotal + netAfterExpenses
+			);
+			acc.otaExpenseTotal = n2(
+				acc.otaExpenseTotal + (clientPrice - netAfterExpenses)
+			);
+			acc.platformMarginTotal = n2(
+				acc.platformMarginTotal + (netAfterExpenses - rootPrice)
+			);
+			return acc;
+		},
+		{
+			clientTotal: 0,
+			rootTotal: 0,
+			netAfterExpensesTotal: 0,
+			otaExpenseTotal: 0,
+			platformMarginTotal: 0,
+		}
+	);
 };
 
 const normalizeProvidedRoomPricing = (room = {}) => {
@@ -251,6 +344,7 @@ const normalizeProvidedRoomPricing = (room = {}) => {
 	const hotelShouldGet = n2(
 		pricingByDay.reduce((sum, day) => sum + moneyNumber(day.rootPrice), 0)
 	);
+	const adminPricing = summarizePricingDays(pricingByDay);
 	const averageNight =
 		pricingByDay.length > 0
 			? n2(totalWithCommission / pricingByDay.length)
@@ -265,6 +359,7 @@ const normalizeProvidedRoomPricing = (room = {}) => {
 		pricingByDay,
 		totalPriceWithCommission: totalWithCommission,
 		hotelShouldGet,
+		adminPricing,
 	};
 };
 
@@ -300,17 +395,19 @@ const buildDayWithNightlyPrice = (template = {}, date, nightlyPrice) => {
 		"totalPriceWithoutCommission",
 		finalPrice
 	);
+	const rootPrice = resolveDayRootPrice(
+		{ ...template, totalPriceWithoutCommission },
+		totalPriceWithoutCommission || finalPrice
+	);
 	return {
 		...template,
 		date,
 		price: finalPrice,
-		rootPrice: resolveDayRootPrice(
-			{ ...template, totalPriceWithoutCommission },
-			totalPriceWithoutCommission || finalPrice
-		),
+		rootPrice,
 		commissionRate: getDayValue(template, "commissionRate", 0),
 		totalPriceWithCommission: finalPrice,
 		totalPriceWithoutCommission,
+		...buildAdminPricingDayFields(template, finalPrice, rootPrice),
 	};
 };
 
@@ -338,6 +435,15 @@ const comparableRoomDay = (day = {}) => ({
 	totalPriceWithoutCommission: n2(
 		day.totalPriceWithoutCommission ?? day.totalPriceWithCommission ?? day.price
 	),
+	clientPrice: n2(day.clientPrice ?? day.totalPriceWithCommission ?? day.price),
+	netAfterExpenses: n2(
+		day.netAfterExpenses ??
+			day.netAfterOtaExpenses ??
+			day.totalPriceWithCommission ??
+			day.price
+	),
+	otaExpenseAmount: n2(day.otaExpenseAmount),
+	platformMargin: n2(day.platformMargin),
 });
 
 const comparableRoom = (room = {}) => ({
@@ -519,6 +625,12 @@ const buildCanonicalRoomPricing = ({
 			);
 		}
 
+		const adminPricingDayFields = buildAdminPricingDayFields(
+			providedDay,
+			totalPriceWithCommission,
+			resolvedRootPrice
+		);
+
 		return {
 			date,
 			// Stored reservation rows have historically used price as the final
@@ -529,6 +641,7 @@ const buildCanonicalRoomPricing = ({
 			commissionRate: resolvedCommissionRate,
 			totalPriceWithCommission,
 			totalPriceWithoutCommission,
+			...adminPricingDayFields,
 		};
 	});
 
@@ -612,6 +725,7 @@ const normalizeReservationCreationPricing = async (
 	updates.days_of_residence = stayDates.length;
 	updates.total_amount = totals.total_amount;
 	updates.sub_total = totals.sub_total;
+	updates.adminPricing = totals.adminPricing;
 
 	return { reservation: updates, warnings };
 };
@@ -637,17 +751,40 @@ const summarizeRooms = (rooms = []) => {
 					),
 				0
 			);
+			const roomAdminPricing = summarizePricingDays(pricingByDay);
 			acc.totalAmount += roomTotal * count;
 			acc.subTotal += roomRoot * count;
+			acc.netAfterExpenses += roomAdminPricing.netAfterExpensesTotal * count;
+			acc.otaExpenses += roomAdminPricing.otaExpenseTotal * count;
+			acc.platformMargin += roomAdminPricing.platformMarginTotal * count;
 			return acc;
 		},
-		{ totalAmount: 0, subTotal: 0 }
+		{
+			totalAmount: 0,
+			subTotal: 0,
+			netAfterExpenses: 0,
+			otaExpenses: 0,
+			platformMargin: 0,
+		}
 	);
+	const totalAmount = n2(totals.totalAmount);
+	const subTotal = n2(totals.subTotal);
+	const netAfterExpensesTotal = n2(totals.netAfterExpenses);
+	const otaExpenseTotal = n2(totals.otaExpenses);
+	const platformMarginTotal = n2(totals.platformMargin);
 
 	return {
-		total_amount: n2(totals.totalAmount),
-		sub_total: n2(totals.subTotal),
-		commission: n2(totals.totalAmount - totals.subTotal),
+		total_amount: totalAmount,
+		sub_total: subTotal,
+		commission: n2(totalAmount - subTotal),
+		adminPricing: {
+			mode: "admin_three_price",
+			clientTotal: totalAmount,
+			rootTotal: subTotal,
+			netAfterExpensesTotal,
+			otaExpenseTotal,
+			platformMarginTotal,
+		},
 	};
 };
 
@@ -862,6 +999,7 @@ const normalizeReservationStayPricing = async (
 	updates.days_of_residence = stayDates.length;
 	updates.total_amount = totals.total_amount;
 	updates.sub_total = totals.sub_total;
+	updates.adminPricing = totals.adminPricing;
 	resetCommissionAssignmentForPricingChange(updates, existing);
 
 	return updates;
