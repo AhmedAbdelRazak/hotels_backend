@@ -10,7 +10,6 @@ const { ensureAIAllowed } = require("./policy");
 
 const {
 	listAvailableRoomsForStay,
-	priceRoomForStay,
 	roomHasAmenity,
 	hotelHasAmenity,
 	findAmenityMatch,
@@ -238,6 +237,134 @@ function roomTypeLabel(roomTypeKey = "") {
 
 function cleanCurrency(value) {
 	return String(value || "SAR").toUpperCase();
+}
+
+const safeNum = (value, fallback = 0) => {
+	const number = parseFloat(value);
+	return Number.isFinite(number) ? number : fallback;
+};
+
+function safeAddDays(iso, days) {
+	const date = new Date(`${iso}T00:00:00Z`);
+	if (Number.isNaN(date.getTime())) return null;
+	date.setUTCDate(date.getUTCDate() + days);
+	return date.toISOString().slice(0, 10);
+}
+
+function safeStayDates(checkinISO, checkoutISO, maxNights = 60) {
+	if (!checkinISO || !checkoutISO || checkinISO >= checkoutISO) return null;
+	const dates = [];
+	let current = checkinISO;
+	for (let guard = 0; current < checkoutISO && guard < maxNights; guard += 1) {
+		dates.push(current);
+		current = safeAddDays(current, 1);
+		if (!current) return null;
+	}
+	if (!dates.length || current < checkoutISO) return null;
+	return dates;
+}
+
+function safeCommissionRate(hotel = {}, room = {}) {
+	const hotelCommission =
+		hotel.commission !== null && hotel.commission !== undefined && hotel.commission !== ""
+			? safeNum(hotel.commission, 10)
+			: 10;
+	const fallback = hotelCommission >= 0 ? hotelCommission : 10;
+	const roomCommission =
+		room.roomCommission !== null &&
+		room.roomCommission !== undefined &&
+		room.roomCommission !== ""
+			? safeNum(room.roomCommission, fallback)
+			: fallback;
+	return roomCommission >= 0 ? roomCommission : fallback;
+}
+
+function safePriceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
+	const rooms = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+	const room = rooms.find((item) => item?.roomType === roomType);
+	if (!room) {
+		return {
+			available: false,
+			reason: "room_not_found",
+			currency: hotel?.currency || "SAR",
+			room: null,
+		};
+	}
+	const dates = safeStayDates(checkinISO, checkoutISO);
+	if (!dates) {
+		return {
+			available: false,
+			reason: "bad_dates",
+			currency: hotel?.currency || "SAR",
+			room,
+		};
+	}
+
+	const basePrice = safeNum(room?.price?.basePrice, 0);
+	const defaultCost = safeNum(room?.defaultCost, 0);
+	const commissionRate = safeCommissionRate(hotel, room);
+	const rateMap = new Map();
+	const pricingRates = Array.isArray(room.pricingRate) ? room.pricingRate : [];
+	for (const rate of pricingRates.slice(0, 10000)) {
+		if (!rate?.calendarDate) continue;
+		rateMap.set(String(rate.calendarDate).slice(0, 10), rate);
+	}
+
+	const pricingByDay = [];
+	const perNight = [];
+	for (const date of dates) {
+		const rate = rateMap.get(date);
+		const dayPrice = rate ? safeNum(rate.price, basePrice) : basePrice;
+		const dayRoot = rate ? safeNum(rate.rootPrice, defaultCost) : defaultCost;
+		const dayComm = rate
+			? safeNum(rate.commissionRate, commissionRate)
+			: commissionRate;
+		if (rate && (safeNum(rate.price, 0) === 0 || safeNum(rate.rootPrice, 0) === 0)) {
+			return {
+				available: false,
+				reason: "blocked",
+				currency: hotel?.currency || "SAR",
+				room,
+				nights: dates.length,
+			};
+		}
+		const final = dayPrice + dayRoot * (dayComm / 100);
+		pricingByDay.push({
+			date,
+			price: Number(dayPrice.toFixed(2)),
+			rootPrice: Number(dayRoot.toFixed(2)),
+			commissionRate: Number(dayComm.toFixed(2)),
+			totalPriceWithCommission: Number(final.toFixed(2)),
+			totalPriceWithoutCommission: Number(dayPrice.toFixed(2)),
+		});
+		perNight.push(Number(final.toFixed(2)));
+	}
+
+	const totalWithComm = pricingByDay.reduce(
+		(total, row) => total + safeNum(row.totalPriceWithCommission, 0),
+		0
+	);
+	const hotelShouldGet = pricingByDay.reduce(
+		(total, row) => total + safeNum(row.rootPrice, 0),
+		0
+	);
+	const totalCommission = Number((totalWithComm - hotelShouldGet).toFixed(2));
+	return {
+		available: true,
+		reason: null,
+		room,
+		nights: dates.length,
+		currency: hotel?.currency || "SAR",
+		pricingByDay,
+		perNight,
+		totals: {
+			totalPriceWithCommission: Number(totalWithComm.toFixed(2)),
+			hotelShouldGet: Number(hotelShouldGet.toFixed(2)),
+			totalCommission,
+		},
+	};
 }
 
 function simpleQuoteText({ sc, st, quote }) {
@@ -911,7 +1038,7 @@ async function shareKnownStayQuote(io, sc, st) {
 		checkoutISO: st.slots.checkoutISO,
 		hasHotel: Boolean(st.hotel),
 	});
-	const quote = priceRoomForStay(
+	const quote = safePriceRoomForStay(
 		st.hotel,
 		{ roomType: st.slots.roomTypeKey },
 		st.slots.checkinISO,
@@ -1568,7 +1695,7 @@ async function planTurn(io, sc) {
 			st.quote && st.quote.key === qKey && now() - st.quote.at < 120000;
 		let quote;
 		if (!reuse) {
-			quote = priceRoomForStay(
+			quote = safePriceRoomForStay(
 				st.hotel,
 				{ roomType: st.slots.roomTypeKey },
 				st.slots.checkinISO,

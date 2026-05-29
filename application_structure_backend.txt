@@ -1076,6 +1076,7 @@ Future TODO Backlog - Added 2026-05-26
   - OpenAI calls now use bounded timeout/retry settings with an explicit 20s request deadline/no retry by default for live chat, and the orchestrator has deterministic decision/writer fallbacks so a slow model call does not leave the guest without a reply.
   - Complete booking requests that already contain dates and room type can go directly from deterministic NLU to quote writing, avoiding an extra planning model call.
   - English booking phrases with explicit room type and dates now have a deterministic NLU fast path, avoiding model calls for common messages such as double-room date-range requests.
+  - Live-chat quote pricing now uses a bounded orchestrator-local pricing helper with date-loop guards and array checks, so a malformed pricing row cannot stall a chat turn.
   - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
 - Validation completed locally:
   - node --check models/aiagent_training_chat.js.
