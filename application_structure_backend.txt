@@ -1143,6 +1143,19 @@ Future TODO Backlog - Added 2026-05-26
   - The previous-chat context is private operational memory only. The assistant must never tell the guest that old chats are visible, quote old chats, or reveal old private details unless the guest explicitly brings that detail into the current conversation.
   - The intended use is quiet preparedness: recurring preferences, unresolved issues, language style, and avoiding repeated questions.
 
+2026-05-29 B2C AI Response Timing
+- Backend behavior:
+  - aiagent/core/orchestrator.js now makes human-like response timing configurable by environment variables instead of fixed constants.
+  - Defaults reduce the hidden pre-typing delay while preserving the existing visible typing cadence:
+    - AI_HUMAN_THINK_MIN_MS default 300.
+    - AI_HUMAN_THINK_MAX_MS default 650.
+    - AI_HUMAN_GREET_THINK_MS default 1200.
+    - AI_HUMAN_TYPE_CHAR_MIN_MS default 48.
+    - AI_HUMAN_TYPE_CHAR_MAX_MS default 60.
+    - AI_HUMAN_TYPE_CLAMP_MIN_MS default 2200.
+    - AI_HUMAN_TYPE_CLAMP_MAX_MS default 7000.
+  - Normal short replies should start typing much faster; total delivery still depends on OpenAI latency and message length.
+
 2026-05-29 Admin Support Chat Unread/Escalation Notification Rules
 - controllers/supportcase.js:
   - getUnseenMessagesCountByAdmin and getSupportCaseNotificationSummary now count admin-unseen messages as real client/guest messages only.

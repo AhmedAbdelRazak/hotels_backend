@@ -32,16 +32,62 @@ const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"]
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
 const LEGACY_AI_SUPPORT_EMAIL = "management@xhotelpro.com";
 
+function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
+	const parsed = parseInt(process.env[name] || "", 10);
+	const value = Number.isFinite(parsed) ? parsed : fallback;
+	return Math.min(max, Math.max(min, value));
+}
+
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 300, {
+	min: 0,
+	max: 5000,
+});
+const HUMAN_THINK_MAX_MS = Math.max(
+	HUMAN_THINK_MIN_MS,
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 650, { min: 0, max: 5000 })
+);
+const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 48, {
+	min: 1,
+	max: 300,
+});
+const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
+	HUMAN_TYPE_CHAR_MIN_MS,
+	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 60, { min: 1, max: 300 })
+);
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 2200, {
+	min: 250,
+	max: 10000,
+});
+const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
+	HUMAN_TYPE_CLAMP_MIN_MS,
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 7000, { min: 250, max: 15000 })
+);
+const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
+	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
+	1700,
+	{ min: 0, max: 10000 }
+);
+const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
+	HUMAN_BETWEEN_SENDS_MIN_MS,
+	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 2200, {
+		min: 0,
+		max: 10000,
+	})
+);
+
 const HUMAN = {
-	greetThinkMs: 5000,
-	thinkMinMs: 2000,
-	thinkMaxMs: 2600,
-	typeCharMinMs: 48,
-	typeCharMaxMs: 60,
-	typeClampMinMs: 2200,
-	typeClampMaxMs: 7000,
-	betweenSendsMinMs: 1700,
-	betweenSendsMaxMs: 2200,
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 1200, {
+		min: 0,
+		max: 7000,
+	}),
+	thinkMinMs: HUMAN_THINK_MIN_MS,
+	thinkMaxMs: HUMAN_THINK_MAX_MS,
+	typeCharMinMs: HUMAN_TYPE_CHAR_MIN_MS,
+	typeCharMaxMs: HUMAN_TYPE_CHAR_MAX_MS,
+	typeClampMinMs: HUMAN_TYPE_CLAMP_MIN_MS,
+	typeClampMaxMs: HUMAN_TYPE_CLAMP_MAX_MS,
+	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
+	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
 
 const SOFT_PIVOT_MS = 35000;
