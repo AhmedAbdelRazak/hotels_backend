@@ -4,6 +4,7 @@ const SupportCase = require("../../models/supportcase");
 const HotelDetails = require("../../models/hotel_details");
 const Reservations = require("../../models/reservations");
 const Janat = require("../../models/janat");
+const AiAgentTrainingChat = require("../../models/aiagent_training_chat");
 
 function safeId(id) {
 	try {
@@ -94,6 +95,74 @@ async function getReservationByConfirmation(cn) {
 		.exec();
 }
 
+const learningTokens = (text = "") =>
+	String(text || "")
+		.toLowerCase()
+		.replace(/https?:\/\/\S+/g, " ")
+		.replace(/[^a-z0-9\u0600-\u06FF\s]/gi, " ")
+		.split(/\s+/)
+		.map((word) => word.trim())
+		.filter((word) => word.length >= 4);
+
+function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "") {
+	let score = 0;
+	const docHotelId = doc.hotelId ? String(doc.hotelId) : "";
+	if (hotelId && docHotelId === hotelId) score += 8;
+	const keywords = Array.isArray(doc.chatKeywords) ? doc.chatKeywords : [];
+	keywords.forEach((keyword) => {
+		if (queryTokens.has(String(keyword || "").toLowerCase())) score += 3;
+	});
+	const haystack = [
+		doc.chatTitle,
+		doc.summary,
+		doc.customerIntent,
+		doc.supportResolution,
+		...(doc.learningNotes || []),
+		...(doc.responseGuidance || []),
+	]
+		.join(" ")
+		.toLowerCase();
+	queryTokens.forEach((token) => {
+		if (haystack.includes(token)) score += 1;
+	});
+	return score;
+}
+
+async function listRelevantTrainingChats({ hotelId, text, limit = 4 } = {}) {
+	const safeHotelId = safeId(hotelId);
+	const filter = { status: "active" };
+	if (safeHotelId) {
+		filter.$or = [
+			{ hotelId: safeHotelId },
+			{ hotelId: null },
+			{ hotelId: { $exists: false } },
+		];
+	}
+
+	const docs = await AiAgentTrainingChat.find(filter)
+		.select(
+			"chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt"
+		)
+		.sort({ updatedAt: -1, createdAt: -1 })
+		.limit(80)
+		.lean()
+		.exec();
+
+	const tokens = new Set(learningTokens(text));
+	const hotelIdString = safeHotelId ? String(safeHotelId) : "";
+	return docs
+		.map((doc) => ({
+			...doc,
+			_relevanceScore: scoreTrainingChat(doc, tokens, hotelIdString),
+		}))
+		.sort(
+			(a, b) =>
+				b._relevanceScore - a._relevanceScore ||
+				new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0)
+		)
+		.slice(0, Math.max(1, Math.min(Number(limit) || 4, 8)));
+}
+
 module.exports = {
 	getSupportCaseById,
 	updateSupportCaseAppend,
@@ -102,4 +171,5 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
+	listRelevantTrainingChats,
 };

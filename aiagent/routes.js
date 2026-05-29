@@ -110,22 +110,33 @@ function attachRoutes(app, io) {
 					available: false,
 					reason: "no_room_match",
 				});
-			if (chosen.blocked)
+			if (chosen.reason === "blocked")
 				return res.json({
 					ok: true,
 					available: false,
 					reason: "blocked",
 					date: chosen.blockedOn,
 				});
+			if (chosen.available === false)
+				return res.json({
+					ok: true,
+					available: false,
+					reason: chosen.reason || "not_available",
+				});
 
 			const quote = priceRoomForStay(hotel, chosen.room, checkin, checkout);
+			const totalWithCommission =
+				quote.totals?.totalPriceWithCommission || quote.totalWithCommission || 0;
+			const totalRoot = quote.totals?.hotelShouldGet || quote.totalRoot || 0;
+			const commission =
+				quote.totals?.totalCommission || quote.commission || 0;
 			const zero =
 				Array.isArray(quote.perNight) &&
 				quote.perNight.some((v) => !v || Number(v) <= 0);
 			if (
 				zero ||
-				!quote.totalWithCommission ||
-				Number(quote.totalWithCommission) <= 0
+				!totalWithCommission ||
+				Number(totalWithCommission) <= 0
 			) {
 				return res.json({ ok: true, available: false, reason: "zero_price" });
 			}
@@ -140,9 +151,9 @@ function attachRoutes(app, io) {
 					displayName: chosen.room.displayName || chosen.room.roomType,
 				},
 				perNight: quote.perNight,
-				totalWithCommission: quote.totalWithCommission,
-				totalRoot: quote.totalRoot,
-				commission: quote.commission,
+				totalWithCommission,
+				totalRoot,
+				commission,
 			});
 		} catch (e) {
 			console.error("[aiagent] preview-quote error:", e?.message || e);

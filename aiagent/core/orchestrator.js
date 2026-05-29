@@ -4,6 +4,7 @@ const {
 	updateSupportCaseAppend,
 	getHotelById,
 	listActivePublicHotels,
+	listRelevantTrainingChats,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
 
@@ -248,7 +249,7 @@ function simpleQuoteText({ sc, st, quote }) {
 	}
 	return `${name}, ${roomName} at ${hotelName} is ${quote.totals.totalPriceWithCommission} ${cleanCurrency(
 		quote.currency
-	)} total for ${quote.nights} nights. A Jannat Booking team member can continue the reservation if you like.`;
+	)} total for ${quote.nights} nights. Our support team can continue the reservation if you like.`;
 }
 
 function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
@@ -457,22 +458,6 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 		return;
 	}
 
-	try {
-		const handoffText = await write(
-			io,
-			sc,
-			st,
-			"Tell the guest their request is being escalated to a Jannat Booking team member for personal review. Use the handoff reason only as internal context, keep it one short sentence, and do not ask another question.",
-			{ handoffReason: reason }
-		);
-		if (handoffText) text = handoffText;
-	} catch (error) {
-		logStep(caseId, "handoff.write_failed", {
-			message: error?.message || error,
-			reason,
-		});
-	}
-
 	const messageData = {
 		messageBy: {
 			customerName: st.agentName,
@@ -530,12 +515,15 @@ function lastUserText(sc) {
 	return lastUser?.message || "";
 }
 
-function recentConversationLines(sc = {}) {
+function recentConversationLines(sc = {}, st = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const aiSender = st?.hotel?.hotelName
+		? `${toTitle(st.hotel.hotelName)} support`
+		: "Jannat Booking support";
 	return conversation
 		.map((message) => {
 			const sender = isAiConversationMessage(message)
-				? "Jannat Booking support"
+				? aiSender
 				: message?.messageBy?.customerName || "Guest";
 			return `${sender}: ${String(message?.message || "").slice(0, 300)}`;
 		})
@@ -556,27 +544,46 @@ function latestKnownConfirmation(sc = {}, lu = {}) {
 async function handoffToHuman(io, sc, st, reason) {
 	const caseId = String(sc._id);
 	const lang = languageOf(sc, st);
+	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
+	const humanTeam = hotelName
+		? `the ${hotelName} support team`
+		: "the Jannat Booking support team";
 	let text =
 		reason === "reservation_cancellation"
-			? "I understand you want to cancel a reservation. A Jannat Booking team member will take over from here, because cancellations must be handled by a human specialist."
+			? `I understand you want to cancel a reservation. ${humanTeam} will take over from here, because cancellations must be handled by a human specialist.`
 			: reason === "reservation_finalize"
-			? "I have the booking details needed to continue. A Jannat Booking team member will take over from here to verify the reservation and payment details before final confirmation."
-			: "I understand you want to update an existing reservation. A Jannat Booking team member will take over from here so the change is reviewed correctly.";
+			? `I have the booking details needed to continue. ${humanTeam} will take over from here to verify the reservation and payment details before final confirmation.`
+			: `I understand you want to update an existing reservation. ${humanTeam} will take over from here so the change is reviewed correctly.`;
 	if (/spanish/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
-				? "Entiendo que quieres cancelar una reserva. Una persona del equipo de Jannat Booking tomara el chat desde aqui."
-				: "Entiendo tu solicitud de reserva. Una persona del equipo de Jannat Booking tomara el chat para revisarla correctamente.";
+				? "Entiendo que quieres cancelar una reserva. Un especialista de soporte tomara el chat desde aqui."
+				: "Entiendo tu solicitud de reserva. Un especialista de soporte tomara el chat para revisarla correctamente.";
 	} else if (/french/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
-				? "Je comprends que vous voulez annuler une reservation. Un membre de Jannat Booking va prendre le relais ici."
-				: "Je comprends votre demande de reservation. Un membre de Jannat Booking va prendre le relais pour la verifier correctement.";
+				? "Je comprends que vous voulez annuler une reservation. Un specialiste du support va prendre le relais ici."
+				: "Je comprends votre demande de reservation. Un specialiste du support va prendre le relais pour la verifier correctement.";
 	} else if (/arabic/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
-				? "فهمت أنك تريد إلغاء حجز. سيتابع معك أحد مختصي Jannat Booking من هنا."
-				: "فهمت طلبك. سيتابع معك أحد مختصي Jannat Booking من هنا.";
+				? "فهمت أنك تريد إلغاء حجز. سيتابع معك أحد مختصي الدعم من هنا."
+				: "فهمت طلبك. سيتابع معك أحد مختصي الدعم من هنا.";
+	}
+	try {
+		const learnedText = await write(
+			io,
+			sc,
+			st,
+			"Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel support voice when hotel context exists, and do not ask another question.",
+			{ handoffReason: reason, fallbackText: text }
+		);
+		if (learnedText) text = learnedText;
+	} catch (error) {
+		logStep(caseId, "handoff.write_failed", {
+			message: error?.message || error,
+			reason,
+		});
 	}
 	const messageData = {
 		messageBy: {
@@ -630,30 +637,98 @@ function looksLikeClosureAck(s = "") {
 	return /(that'?s\s+good|good|great|nice|تمام|حلو|كويس|جميل)/i.test(t);
 }
 
+function compactLearningChat(chat = {}) {
+	const turns = Array.isArray(chat.conversation)
+		? chat.conversation.slice(0, 8).map((turn) => ({
+				role: turn.role || "unknown",
+				speakerName: turn.speakerName || "",
+				message: String(turn.message || "").slice(0, 260),
+		  }))
+		: [];
+	return {
+		title: chat.chatTitle || "",
+		keywords: Array.isArray(chat.chatKeywords)
+			? chat.chatKeywords.slice(0, 10)
+			: [],
+		summary: chat.summary || "",
+		customerIntent: chat.customerIntent || "",
+		supportResolution: chat.supportResolution || "",
+		learningNotes: Array.isArray(chat.learningNotes)
+			? chat.learningNotes.slice(0, 6)
+			: [],
+		responseGuidance: Array.isArray(chat.responseGuidance)
+			? chat.responseGuidance.slice(0, 6)
+			: [],
+		exampleTurns: turns,
+	};
+}
+
+async function loadLearningContext(sc, st, instruction, context = {}) {
+	try {
+		const lookupText = [
+			lastUserText(sc),
+			instruction,
+			JSON.stringify({
+				waitFor: st.waitFor,
+				slots: st.slots,
+				context,
+			}).slice(0, 2000),
+		].join("\n");
+		const chats = await listRelevantTrainingChats({
+			hotelId: sc.hotelId || st.hotel?._id || null,
+			text: lookupText,
+			limit: 4,
+		});
+		return chats.map(compactLearningChat);
+	} catch (error) {
+		logStep(String(sc._id), "learning.lookup_failed", {
+			message: error?.message || error,
+		});
+		return [];
+	}
+}
+
 /* LLM writer */
 async function write(io, sc, st, instruction, context = {}) {
 	const respectfulAddress = respectfulGuestName(sc, st);
+	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
+	const learningContext = await loadLearningContext(sc, st, instruction, context);
+	const introRule = hotelName
+		? `For greetings and introductions, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
+		: `For greetings and introductions, introduce yourself as ${st.agentName} from Jannat Booking support.`;
+	const aiIdentityRule = hotelName
+		? `If asked directly whether you are AI, say you are AI-assisted ${hotelName} support monitored by the support team; do not claim to be human.`
+		: `If asked directly whether you are AI, say you are AI-assisted Jannat Booking support monitored by Jannat Booking admins; do not claim to be human.`;
 	const sys = [
-		`You are ${st.agentName} from Jannat Booking support.`,
-		`Always write the brand exactly as "Jannat Booking"; do not translate or shorten it.`,
-		`You are AI-assisted support monitored by Jannat Booking admins; do not claim to be a human if asked.`,
+		hotelName
+			? `You are ${st.agentName}, the support and reservation assistant for "${hotelName}".`
+			: `You are ${st.agentName} from Jannat Booking support.`,
+		introRule,
+		`If Jannat Booking must be named, write the brand exactly as "Jannat Booking"; do not translate or shorten it.`,
+		aiIdentityRule,
+		hotelName
+			? `Speak as the hotel's own support desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
+			: `Represent Jannat Booking directly.`,
 		`Write in ${st.language}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
-		st.hotel?.hotelName
-			? `Your hotel is "${toTitle(st.hotel.hotelName)}".`
-			: `You represent Jannat Booking.`,
+		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
+		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
 		`Do not cancel, refund, or mutate existing reservations; send those requests to a human team member.`,
 		`Avoid repeating the same question if just asked; prefer a soft pivot.`,
 	].join(" ");
 
-	const payload = JSON.stringify({ ...context, respectfulAddress }, null, 2);
+	const payload = JSON.stringify(
+		{ ...context, respectfulAddress, employeeLearningExamples: learningContext },
+		null,
+		2
+	);
 	const content = `${instruction}\n\nFull conversation so far:\n${
-		recentConversationLines(sc) || "(empty)"
+		recentConversationLines(sc, st) || "(empty)"
 	}\n\nContext JSON:\n${payload}`;
 
 	const answer = await chat(
@@ -687,7 +762,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		  }
 		: null;
 	const sys = [
-		"You are the Jannat Booking chat orchestrator.",
+		"You are the hotel support chat orchestrator.",
 		"Read the whole conversation and decide the next support action before any answer is written.",
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
 		"Return ONLY valid JSON with this shape:",
@@ -695,13 +770,13 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
-		"Choose human_escalation when the request is outside Jannat Booking support scope, needs facts/tools not available in context, or should be reviewed by a person before answering.",
+		"Choose human_escalation when the request is outside hotel/platform support scope, needs facts/tools not available in context, or should be reviewed by a person before answering.",
 	].join(" ");
 	const user = JSON.stringify(
 		{
 			language: languageOf(sc, st),
 			latestUserMessage: userText,
-			fullConversation: recentConversationLines(sc),
+			fullConversation: recentConversationLines(sc, st),
 			currentSlots: st.slots,
 			waitFor: st.waitFor,
 			nlu: lu || null,
@@ -938,15 +1013,14 @@ async function planTurn(io, sc) {
 		if (!st.greeted && !st.greetScheduled) {
 			st.greetScheduled = true;
 			st.waitFor = "intentConfirm";
+			const greetOwner = st.hotel?.hotelName
+				? `the ${toTitle(st.hotel.hotelName)} support desk`
+				: "Jannat Booking support";
 			const greetText = await write(
 				io,
 				sc,
 				st,
-				`Start: "As‑salāmu ʿalaykum, ${st.slots.name}." Introduce as ${
-					st.agentName
-				} from ${toTitle(
-					st.hotel?.hotelName || "Jannat Booking"
-				)}. Then ask: "I see you'd like to make a new reservation — is that correct?" (ONE yes/no).`
+				`Start: "As‑salāmu ʿalaykum, ${st.slots.name}." Introduce as ${st.agentName} from ${greetOwner}. Then ask: "I see you'd like to make a new reservation — is that correct?" (ONE yes/no).`
 			);
 			await humanSend(io, sc, st, greetText, { first: true });
 			st.greeted = true;
@@ -1160,44 +1234,6 @@ async function planTurn(io, sc) {
 			st.waitFor = "reservation_reference";
 			return;
 		}
-		if (wantsPriceButMissingDates(userText, st)) {
-			const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
-			const lang = languageOf(sc, st);
-			const reply = /arabic/i.test(lang)
-				? `${name}، أرسل تاريخ الدخول والخروج وسأراجع لك السعر.`
-				: /spanish/i.test(lang)
-				? `${name}, enviame las fechas de check-in y check-out y reviso el precio.`
-				: /french/i.test(lang)
-				? `${name}, envoyez les dates d'arrivée et de départ et je vérifierai le prix.`
-				: `${name}, please send check-in and checkout dates and I can check the price.`;
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
-			return;
-		}
-		if (wantsPaymentHelp(userText)) {
-			const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
-			const lang = languageOf(sc, st);
-			const reply = /arabic/i.test(lang)
-				? `آسف على مشكلة الدفع يا ${name}. أرسل رقم تأكيد الحجز أو رابط الدفع، وسنراجعها معك.`
-				: `Sorry about the payment issue, ${name}. Please send the confirmation number or payment link so we can review it.`;
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "payment_reference";
-			return;
-		}
-		if (wantsReservationHelp(userText)) {
-			const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
-			const lang = languageOf(sc, st);
-			const reply = /arabic/i.test(lang)
-				? `${name}، أرسل رقم تأكيد الحجز وما الذي تريد تعديله وسنراجع الطلب معك.`
-				: /spanish/i.test(lang)
-				? `${name}, enviame el numero de confirmacion y que quieres actualizar. Lo revisamos contigo.`
-				: /french/i.test(lang)
-				? `${name}, envoyez le numero de confirmation et ce que vous voulez modifier. Nous allons verifier avec vous.`
-				: `${name}, please send the confirmation number and what you want to update. We will review it with you.`;
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "reservation_reference";
-			return;
-		}
 		const dateRange = extractDateRange(userText);
 		if (
 			dateRange.checkinISO &&
@@ -1289,7 +1325,21 @@ async function planTurn(io, sc) {
 				st.waitFor = "proceed";
 			}
 
-			await humanSend(io, sc, st, ask ? `${line} ${ask}` : line);
+			const reply = await write(
+				io,
+				sc,
+				st,
+				"Answer the guest's amenity question using the provided amenity result. Then, only if nextQuestion is present, add that next booking question naturally. Do not invent amenities.",
+				{
+					amenityLabel,
+					amenityAvailableOnRoom: hasOnRoom,
+					amenityAvailableOnHotel: hasOnHotel,
+					roomLabel: chosenRoom?.displayName || chosenRoom?.roomType || "",
+					answerDraft: line,
+					nextQuestion: ask,
+				}
+			);
+			await humanSend(io, sc, st, reply);
 			return;
 		}
 
@@ -1666,7 +1716,7 @@ async function planTurn(io, sc) {
 			st.waitFor = "finalize";
 		}
 
-		// Final reservation commits stay with a human Jannat Booking team member.
+		// Final reservation commits stay with a human support team member.
 		if (st.waitFor === "finalize") {
 			await handoffToHuman(io, sc, st, "reservation_finalize");
 			return;

@@ -1048,3 +1048,35 @@ Future TODO Backlog - Added 2026-05-26
   - pm2 restart hotels-backend --update-env completed and hotels-backend is online.
   - GET http://127.0.0.1:8080/api/inbound/sendgrid returned the SendGrid inbound health response.
   - A production dry-run extraction returned Expedia/new_reservation with confirmation 245715336, hotel Zad Al sad, 2026-12-21 to 2026-12-25, guest name, and totalGuests 5.
+
+2026-05-28 Manual AI Chat Teaching For B2C Support
+- New model:
+  - models/aiagent_training_chat.js.
+  - Stores employee-uploaded external chat examples with:
+    - chatTitle.
+    - chatKeywords.
+    - conversation array of {sequence, speakerName, role, message}.
+    - summary, participants, customerIntent, supportResolution, learningNotes, responseGuidance, optional hotelId/hotelName, status, and createdBy.
+- New controller:
+  - controllers/aiagent_training_chats.js.
+  - POST /api/aiagent-learning/chats accepts a pasted raw chat and uses OpenAI to clean spacing, fix obvious wording issues, infer client/support roles, produce keywords/title/guidance, and save the structured result.
+  - If OpenAI is unavailable or model credentials fail, the endpoint falls back to deterministic parsing so the PMS can still save a usable training chat.
+  - GET /api/aiagent-learning/chats lists active training chats for the admin history tab.
+  - DELETE /api/aiagent-learning/chats/:id archives a training chat.
+- Route protection:
+  - Manual teaching-chat endpoints require requireSignin and CustomerService admin access.
+  - Existing aiagent-learning build/selftest/debug endpoints remain unchanged.
+- Chatbot orchestration:
+  - aiagent/core/db.js exposes listRelevantTrainingChats.
+  - aiagent/core/orchestrator.js now loads relevant employee learning examples inside the writer before each LLM-written reply.
+  - Learning examples are passed as private context only; the guest should never be told that examples were consulted.
+  - When a support case has a hotel, the writer now speaks as that hotel support/reservation desk and avoids presenting Jannat Booking as a separate middleman unless platform/payment/final verification context requires the brand.
+  - Greetings, introductions, transcript labels, quote continuations, and human handoff messages now prefer the active hotel support voice when hotel context exists, so the guest does not feel passed through a platform middleman.
+  - Legacy fallback replies for date/payment/reservation/amenity/handoff handling now pass through the same writer path where practical, so relevant training chats can shape tone and flow before a customer-facing answer is sent.
+  - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
+- Validation completed locally:
+  - node --check models/aiagent_training_chat.js.
+  - node --check controllers/aiagent_training_chats.js.
+  - node --check routes/aiagent_learning.js.
+  - node --check aiagent/core/db.js.
+  - node --check aiagent/core/orchestrator.js.
