@@ -215,6 +215,121 @@ const AI_SUPPORT_MESSAGE_EMAILS = [
 	"support@jannatbooking.com",
 	"management@xhotelpro.com",
 ];
+const SYSTEM_SUPPORT_CONTACTS = new Set([
+	...AI_SUPPORT_MESSAGE_EMAILS,
+	"noreply@jannatbooking.com",
+	"guest@jannatbooking.com",
+]);
+
+const clientContactType = (contact = "") => {
+	const normalized = normalizeEmailOrPhone(contact);
+	if (!normalized) return "";
+	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized) ? "email" : "phone";
+};
+
+const isSystemSupportContact = (contact = "") =>
+	SYSTEM_SUPPORT_CONTACTS.has(String(contact || "").toLowerCase());
+
+const isGuestConversationEntry = (entry = {}) => {
+	if (!entry || entry.isSystem || entry.isAi) return false;
+	const contact = normalizeEmailOrPhone(entry.messageBy?.customerEmail);
+	if (!contact || isSystemSupportContact(contact)) return false;
+	if (entry.seenByCustomer === true && entry.seenByAdmin !== true) return true;
+	return !normalizeId(entry.messageBy?.userId) && !entry.seenByAdmin;
+};
+
+const firstCaseInquiry = (supportCase = {}) => {
+	const firstWithInquiry = Array.isArray(supportCase.conversation)
+		? supportCase.conversation.find((entry) => cleanText(entry?.inquiryAbout, 120))
+		: null;
+	return (
+		cleanText(supportCase.inquiryAbout, 120) ||
+		cleanText(firstWithInquiry?.inquiryAbout, 120) ||
+		""
+	);
+};
+
+const clientIdentityFromCase = (supportCase = {}) => {
+	const guestEntry = Array.isArray(supportCase.conversation)
+		? supportCase.conversation.find(isGuestConversationEntry)
+		: null;
+	const contact =
+		normalizeEmailOrPhone(supportCase.clientContact) ||
+		normalizeEmailOrPhone(guestEntry?.messageBy?.customerEmail);
+	const name =
+		cleanChatDisplayName(supportCase.clientName) ||
+		cleanChatDisplayName(guestEntry?.messageBy?.customerName) ||
+		cleanChatDisplayName(supportCase.displayName1) ||
+		"Guest";
+
+	return {
+		name,
+		contact,
+		contactType: clientContactType(contact),
+		topic: firstCaseInquiry(supportCase),
+	};
+};
+
+const sameClientCaseFilter = (req, contact = "") => {
+	const normalizedContact = normalizeEmailOrPhone(contact);
+	if (!normalizedContact) return null;
+	return withSupportCaseScope(req, {
+		openedBy: "client",
+		$or: [
+			{ clientContact: normalizedContact },
+			{
+				conversation: {
+					$elemMatch: {
+						"messageBy.customerEmail": normalizedContact,
+						isSystem: { $ne: true },
+						isAi: { $ne: true },
+						seenByCustomer: true,
+					},
+				},
+			},
+		],
+	});
+};
+
+const enrichClientSupportCases = async (cases = [], req = {}) => {
+	const plainCases = cases.map((supportCase) =>
+		typeof supportCase?.toObject === "function"
+			? supportCase.toObject()
+			: supportCase
+	);
+	const identities = plainCases.map(clientIdentityFromCase);
+	const uniqueContacts = [
+		...new Set(identities.map((identity) => identity.contact).filter(Boolean)),
+	];
+	const contactCounts = new Map();
+
+	await Promise.all(
+		uniqueContacts.map(async (contact) => {
+			const filter = sameClientCaseFilter(req, contact);
+			const total = filter ? await SupportCase.countDocuments(filter) : 0;
+			contactCounts.set(contact, total);
+		})
+	);
+
+	return plainCases.map((supportCase, index) => {
+		const identity = identities[index] || {};
+		const totalChatsWithSameContact = identity.contact
+			? contactCounts.get(identity.contact) || 1
+			: 1;
+		return {
+			...supportCase,
+			caseTopic: identity.topic,
+			caseSubject: identity.topic,
+			clientProfile: {
+				name: identity.name || "Guest",
+				contact: identity.contact || "",
+				contactType: identity.contactType || "",
+				totalChatsWithSameContact,
+				otherChatsWithSameContact: Math.max(totalChatsWithSameContact - 1, 0),
+			},
+		};
+	});
+};
 
 const uniqueResponderNames = (names = []) => [
 	...new Set(
@@ -807,6 +922,20 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		if (safeConversation?.preferredLanguageCode) {
 			setFields.preferredLanguageCode = safeConversation.preferredLanguageCode;
 		}
+		if (safeConversation) {
+			const safeContact = normalizeEmailOrPhone(
+				safeConversation.messageBy?.customerEmail
+			);
+			if (safeContact && !isSystemSupportContact(safeContact)) {
+				setFields.clientName =
+					cleanChatDisplayName(safeConversation.messageBy?.customerName) ||
+					currentCase.clientName ||
+					currentCase.displayName1 ||
+					"Guest";
+				setFields.clientContact = safeContact;
+				setFields.clientContactType = clientContactType(safeContact);
+			}
+		}
 
 		if (req.body.caseStatus === "closed") {
 			setFields.caseStatus = "closed";
@@ -1019,6 +1148,9 @@ exports.createNewSupportCase = async (req, res) => {
 			displayName1, // Store the display name of the case opener
 			displayName2, // Store the display name of the receiver
 			supporterName,
+			clientName: cleanChatDisplayName(customerName),
+			clientContact: normalizedCustomerEmail || "",
+			clientContactType: clientContactType(normalizedCustomerEmail),
 			preferredLanguage: preferredLanguage || "English",
 			preferredLanguageCode: preferredLanguageCode || "en",
 			aiToRespond: aiEnabledForClient,
@@ -1132,8 +1264,10 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 			openedBy: { $in: ["client"] }, // Client-related cases only
 		}))
 			.populate("supporterId")
-			.populate("hotelId");
-		res.status(200).json(cases);
+			.populate("hotelId")
+			.lean()
+			.exec();
+		res.status(200).json(await enrichClientSupportCases(cases, req));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1148,8 +1282,10 @@ exports.getEscalatedSupportCasesClients = async (req, res) => {
 		}))
 			.sort({ escalatedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
 			.populate("supporterId")
-			.populate("hotelId");
-		res.status(200).json(cases);
+			.populate("hotelId")
+			.lean()
+			.exec();
+		res.status(200).json(await enrichClientSupportCases(cases, req));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1186,10 +1322,12 @@ exports.getCloseSupportCasesForHotel = async (req, res) => {
 			hotelId: mongoose.Types.ObjectId(hotelId), // Ensure hotelId is treated as ObjectId
 		})
 			.populate("supporterId")
-			.populate("hotelId");
+			.populate("hotelId")
+			.lean()
+			.exec();
 
 		// Return the cases in the response
-		res.status(200).json(cases);
+		res.status(200).json(await enrichClientSupportCases(cases, req));
 	} catch (error) {
 		// Handle any errors that occur during the query
 		res.status(400).json({ error: error.message });
@@ -1236,12 +1374,13 @@ exports.getCloseSupportCasesClients = async (req, res) => {
 				.limit(limit)
 				.populate("supporterId")
 				.populate("hotelId")
+				.lean()
 				.exec(),
 			SupportCase.countDocuments(filter),
 		]);
 
 		res.status(200).json({
-			cases,
+			cases: await enrichClientSupportCases(cases, req),
 			page,
 			limit,
 			total,

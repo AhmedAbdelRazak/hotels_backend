@@ -122,6 +122,19 @@ const supportCaseSchema = new Schema({
 		type: String,
 		default: "en",
 	},
+	clientName: {
+		type: String,
+		default: "",
+	},
+	clientContact: {
+		type: String,
+		default: "",
+	},
+	clientContactType: {
+		type: String,
+		enum: ["", "email", "phone"],
+		default: "",
+	},
 	conversation: [conversationSchema],
 	displayName1: {
 		type: String,
@@ -208,6 +221,7 @@ const supportCaseSchema = new Schema({
 });
 
 supportCaseSchema.index({ openedBy: 1, caseStatus: 1, updatedAt: 1 });
+supportCaseSchema.index({ openedBy: 1, clientContact: 1, updatedAt: -1 });
 supportCaseSchema.index({
 	openedBy: 1,
 	caseStatus: 1,

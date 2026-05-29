@@ -1190,5 +1190,20 @@ Future TODO Backlog - Added 2026-05-26
   - userRoles and userRoleDescriptions now normalize null/undefined user objects to an empty object.
   - canManageHousekeepingHotel returns false immediately for missing or inactive actors.
   - The endpoint should now deny/return normally instead of writing a TypeError to the PM2 error log.
-- Validation completed locally:
+ - Validation completed locally:
   - node --check controllers/housekeeping.js.
+
+2026-05-29 Support Case Client Identity And History Metrics
+- models/supportcase.js:
+  - SupportCase now has clientName, clientContact, and clientContactType for public/client B2C chats.
+  - New cases store the normalized guest email/phone contact at creation time, and public guest messages refresh these fields when a real guest contact is present.
+  - A supporting openedBy/clientContact/updatedAt index helps same-contact support history lookups.
+- controllers/supportcase.js:
+  - Client support-case list endpoints enrich B2C cases with clientProfile, caseTopic, and caseSubject before returning them to the admin UI.
+  - clientProfile includes name, contact, contactType, totalChatsWithSameContact, and otherChatsWithSameContact.
+  - Existing legacy cases are backfilled at response time from real guest conversation entries, while system/AI/support senders are ignored.
+  - The history topic is derived from the case inquiry data instead of relying on a missing top-level inquiryAbout field.
+- Validation completed locally:
+  - node --check controllers/supportcase.js.
+  - node --check models/supportcase.js.
+  - Mongo smoke test inserted two exact Codex QA closed client cases with the same contact, verified caseTopic=reserve_room and totalChatsWithSameContact=2, then deleted those exact QA cases and verified zero leftovers.
