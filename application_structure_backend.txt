@@ -1117,3 +1117,10 @@ Future TODO Backlog - Added 2026-05-26
   - Escalated B2C cases remain open support cases until closed; resolving the escalation changes escalationStatus to addressed rather than closing the chat.
 - Validation completed locally:
   - node --check controllers/supportcase.js.
+- Commit and deployment:
+  - Commit pushed to origin/master: 4d9c60d Refine support chat unread counts.
+  - Production server /home/ahmedadmin/Hotels/hotels_backend pulled with git pull --ff-only.
+  - Production validation: node --check controllers/supportcase.js passed.
+  - pm2 restart hotels-backend --update-env completed and hotels-backend was online.
+  - Health check returned 200 for http://127.0.0.1:8080/api/inbound/sendgrid.
+  - Production logs showed /api/support-cases/notifications/summary returning 200 after restart.
