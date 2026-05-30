@@ -1288,3 +1288,9 @@ Future TODO Backlog - Added 2026-05-26
   - This protects hotel-management and regular admin flows while allowing configured super admins using the platform admin all-reservations workflow to correct exceptional lifecycle states.
 - Validation target:
   - node --check controllers/reservations.js.
+
+2026-05-29 Edit Reservation Modal Draft-State Follow-Up
+- Backend/API status:
+  - No backend schema, controller, or API change was required for the hotel-management edit reservation modal closing/refresh behavior.
+  - The frontend now keeps edit changes in a local modal draft until updateSingleReservation succeeds, so the existing backend update endpoint continues to receive the same normalized reservation payload only on explicit save.
+  - Inactive hotel access remains an edit-mode frontend selection concern; backend persistence behavior is unchanged.
