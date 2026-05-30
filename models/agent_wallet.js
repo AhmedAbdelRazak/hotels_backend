@@ -8,7 +8,13 @@ const agentWalletSchema = new mongoose.Schema(
 		hotelId: {
 			type: ObjectId,
 			ref: "HotelDetails",
-			required: true,
+			default: null,
+			index: true,
+		},
+		legacyHotelId: {
+			type: ObjectId,
+			ref: "HotelDetails",
+			default: null,
 			index: true,
 		},
 		ownerId: {
@@ -158,5 +164,6 @@ const agentWalletSchema = new mongoose.Schema(
 );
 
 agentWalletSchema.index({ hotelId: 1, agentId: 1, transactionDate: -1 });
+agentWalletSchema.index({ agentId: 1, transactionDate: -1 });
 
 module.exports = mongoose.model("AgentWallet", agentWalletSchema);

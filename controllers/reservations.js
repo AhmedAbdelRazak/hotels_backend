@@ -90,16 +90,22 @@ const normalizeAgentCommercialModel = (value) => {
 		: "wallet_inventory";
 };
 
-const agentOpeningWalletCreditForHotel = (agent = {}, hotelId = "") => {
-	const normalizedHotelId = normalizeId(hotelId);
+const uniqueValidObjectIdStrings = (values = []) => [
+	...new Set(
+		(Array.isArray(values) ? values : [values])
+			.map(normalizeId)
+			.filter((id) => id && ObjectId.isValid(id))
+	),
+];
+
+const agentOpeningWalletCreditGlobal = (agent = {}) => {
 	const balances = Array.isArray(agent.agentWalletOpeningBalances)
 		? agent.agentWalletOpeningBalances
 		: [];
-	const matched = balances.find(
-		(entry) => normalizeId(entry?.hotelId || entry?.hotel) === normalizedHotelId
-	);
-	if (matched) return n2(matched.amount);
-	return n2(agent.agentOpeningWalletCredit);
+	const topLevelCredit = n2(agent.agentOpeningWalletCredit);
+	if (topLevelCredit) return topLevelCredit;
+	const balanceAmounts = balances.map((entry) => n2(entry?.amount)).filter(Boolean);
+	return n2(balanceAmounts.length ? Math.max(...balanceAmounts) : 0);
 };
 
 const ASSIGNED_COMMISSION_STATUSES = new Set([
@@ -2078,9 +2084,42 @@ const getAgentWalletClaimNotificationFeed = async ({
 		return { total: 0, data: [] };
 	}
 
+	const visibleAgentIds = isAgent
+		? [actorId]
+		: (
+				await User.find({
+					activeUser: { $ne: false },
+					$and: [
+						{
+							$or: [
+								{ role: 7000 },
+								{ roles: 7000 },
+								{ roleDescription: "ordertaker" },
+								{ roleDescriptions: "ordertaker" },
+							],
+						},
+						{
+							$or: [
+								{ hotelIdWork: { $in: hotelIds } },
+								{ hotelIdWork: { $in: hotelObjectIds } },
+								{ hotelIdsWork: { $in: hotelObjectIds } },
+								{ hotelsToSupport: { $in: hotelObjectIds } },
+								{ hotelIdsOwner: { $in: hotelObjectIds } },
+							],
+						},
+					],
+				})
+					.select("_id")
+					.lean()
+					.exec()
+		  ).map((agent) => normalizeId(agent._id));
+
+	if (!visibleAgentIds.length) {
+		return { total: 0, data: [] };
+	}
+
 	const query = isAgent
 		? {
-				hotelId: { $in: hotelObjectIds },
 				agentId: ObjectId(actorId),
 				source: "agent_claim",
 				$or: [
@@ -2092,7 +2131,7 @@ const getAgentWalletClaimNotificationFeed = async ({
 				],
 		  }
 		: {
-				hotelId: { $in: hotelObjectIds },
+				agentId: { $in: visibleAgentIds.map((id) => ObjectId(id)) },
 				source: "agent_claim",
 				status: "pending",
 				reviewStatus: "pending",
@@ -2117,7 +2156,7 @@ const getAgentWalletClaimNotificationFeed = async ({
 	];
 	const agents = agentIds.length
 		? await User.find({ _id: { $in: agentIds.map((id) => ObjectId(id)) } })
-				.select("_id name email companyName")
+				.select("_id name email companyName hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner")
 				.lean()
 				.exec()
 		: [];
@@ -2125,12 +2164,29 @@ const getAgentWalletClaimNotificationFeed = async ({
 		acc[normalizeId(agent._id)] = agent;
 		return acc;
 	}, {});
+	const agentNotificationHotelId = (agent = {}, fallbackHotelId = "") => {
+		const assignedIds = uniqueValidObjectIdStrings([
+			agent.hotelIdWork,
+			...(Array.isArray(agent.hotelIdsWork) ? agent.hotelIdsWork : []),
+			...(Array.isArray(agent.hotelsToSupport) ? agent.hotelsToSupport : []),
+			...(Array.isArray(agent.hotelIdsOwner) ? agent.hotelIdsOwner : []),
+		]);
+		return (
+			assignedIds.find((id) => hotelIds.includes(id)) ||
+			normalizeId(fallbackHotelId) ||
+			hotelIds[0] ||
+			""
+		);
+	};
 
 	const notifications = rows.map((transaction) => {
-		const currentHotelId = normalizeId(transaction.hotelId);
-		const hotel = hotelMap[currentHotelId] || {};
 		const currentAgentId = normalizeId(transaction.agentId);
 		const agent = agentMap[currentAgentId] || {};
+		const currentHotelId = agentNotificationHotelId(
+			agent,
+			transaction.hotelId || transaction.legacyHotelId
+		);
+		const hotel = hotelMap[currentHotelId] || {};
 		const status = String(transaction.status || "").toLowerCase();
 		const reviewStatus = String(transaction.reviewStatus || "").toLowerCase();
 		const notificationStatus =
@@ -2267,7 +2323,7 @@ const resolveReservationAgent = async (reservation = {}) => {
 		if (!ObjectId.isValid(possibleId)) continue;
 		const agent = await User.findById(possibleId)
 			.select(
-				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo"
+				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 			)
 			.lean()
 			.exec();
@@ -2287,6 +2343,10 @@ const resolveReservationAgent = async (reservation = {}) => {
 				snapshotCandidate.agentOpeningWalletCredit || 0,
 			agentWalletOpeningBalances:
 				snapshotCandidate.agentWalletOpeningBalances || [],
+			hotelIdWork: snapshotCandidate.hotelIdWork || null,
+			hotelIdsWork: snapshotCandidate.hotelIdsWork || [],
+			hotelsToSupport: snapshotCandidate.hotelsToSupport || [],
+			hotelIdsOwner: snapshotCandidate.hotelIdsOwner || [],
 			role: snapshotCandidate.role || 7000,
 			roleDescription: snapshotCandidate.roleDescription || "ordertaker",
 		};
@@ -2492,14 +2552,22 @@ const buildReservationAgentWalletSnapshot = async ({
 
 	const snapshotAt = resolveSnapshotDate(reservation);
 	const agentClauses = buildAgentReservationOwnerClauses(agentId);
+	const agentScopeHotelIds = uniqueValidObjectIdStrings([
+		agent.hotelIdWork,
+		...(Array.isArray(agent.hotelIdsWork) ? agent.hotelIdsWork : []),
+		...(Array.isArray(agent.hotelsToSupport) ? agent.hotelsToSupport : []),
+		...(Array.isArray(agent.hotelIdsOwner) ? agent.hotelIdsOwner : []),
+	]);
+	const walletReservationHotelIds = agentScopeHotelIds.length
+		? agentScopeHotelIds
+		: [hotelId];
 	const transactionDateMatch = {
-		hotelId: ObjectId(hotelId),
 		agentId: ObjectId(agentId),
 		status: { $ne: "void" },
 		transactionDate: { $lte: snapshotAt },
 	};
 	const priorReservationMatch = {
-		hotelId: ObjectId(hotelId),
+		hotelId: { $in: walletReservationHotelIds.map((id) => ObjectId(id)) },
 		_id: { $ne: reservation._id },
 		$and: [
 			{ $or: agentClauses },
@@ -2555,7 +2623,7 @@ const buildReservationAgentWalletSnapshot = async ({
 		agent.agentCommercialModel
 	);
 	const walletRequired = commercialModel !== "commission_only";
-	const openingWalletCredit = agentOpeningWalletCreditForHotel(agent, hotelId);
+	const openingWalletCredit = agentOpeningWalletCreditGlobal(agent);
 	const priorReservationWalletValue = walletRequired ? priorReservationValue : 0;
 
 	const walletAddedBeforeReservation = n2(

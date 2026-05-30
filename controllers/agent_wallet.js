@@ -37,18 +37,24 @@ const includesId = (values = [], id) =>
 		.filter(Boolean)
 		.includes(String(id || ""));
 
-const roleNumbers = (user = {}) => [
-	...new Set([user.role, ...(Array.isArray(user.roles) ? user.roles : [])]
-		.map(Number)
-		.filter(Boolean)),
-];
+const roleNumbers = (user = {}) => {
+	const account = user || {};
+	return [
+		...new Set([account.role, ...(Array.isArray(account.roles) ? account.roles : [])]
+			.map(Number)
+			.filter(Boolean)),
+	];
+};
 
-const roleDescriptions = (user = {}) => [
-	String(user.roleDescription || "").toLowerCase(),
-	...(Array.isArray(user.roleDescriptions)
-		? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
-		: []),
-];
+const roleDescriptions = (user = {}) => {
+	const account = user || {};
+	return [
+		String(account.roleDescription || "").toLowerCase(),
+		...(Array.isArray(account.roleDescriptions)
+			? account.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+};
 
 const hasRole = (user, role) => roleNumbers(user).includes(Number(role));
 const hasRoleDescription = (user, description) =>
@@ -57,13 +63,19 @@ const hasRoleDescription = (user, description) =>
 const isSuperAdmin = (user = {}) =>
 	configuredSuperAdminIds().includes(normalizeId(user._id));
 
+const isPlatformAdmin = (user = {}) =>
+	isSuperAdmin(user) ||
+	hasRole(user, 1000) ||
+	hasRoleDescription(user, "superadmin") ||
+	hasRoleDescription(user, "super admin");
+
 const isOrderTaker = (user = {}) =>
 	hasRole(user, 7000) ||
 	hasRoleDescription(user, "ordertaker") ||
 	(Array.isArray(user.accessTo) && user.accessTo.includes("ownReservations"));
 
 const actorSelect =
-	"_id name email companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner activeUser";
+	"_id name email companyName phone agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser";
 
 const getActor = async (req, fallbackUserId) => {
 	const actorId = req.auth?._id || fallbackUserId;
@@ -79,13 +91,91 @@ const getHotel = async (hotelId) => {
 		.exec();
 };
 
+const uniqueValidIds = (values = []) => [
+	...new Set(
+		(Array.isArray(values) ? values : [values])
+			.map(normalizeId)
+			.filter((id) => id && ObjectId.isValid(id))
+	),
+];
+
+const toObjectIds = (values = []) => uniqueValidIds(values).map((id) => ObjectId(id));
+
+const userHotelScopeIds = (user = {}) =>
+	uniqueValidIds([
+		user.hotelIdWork,
+		...(Array.isArray(user.hotelIdsWork) ? user.hotelIdsWork : []),
+		...(Array.isArray(user.hotelIdsOwner) ? user.hotelIdsOwner : []),
+		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
+	]);
+
+const getAccessibleWalletHotels = async (actor = {}) => {
+	if (!actor || actor.activeUser === false) return [];
+
+	if (isPlatformAdmin(actor)) {
+		return HotelDetails.find({})
+			.select("_id hotelName belongsTo")
+			.lean()
+			.exec();
+	}
+
+	const actorId = normalizeId(actor._id);
+	if (hasRole(actor, 2000) && actorId && !normalizeId(actor.belongsToId)) {
+		const scopedIds = toObjectIds([
+			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
+			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
+		]);
+		return HotelDetails.find({
+			$or: [
+				{ belongsTo: ObjectId(actorId) },
+				...(scopedIds.length ? [{ _id: { $in: scopedIds } }] : []),
+			],
+		})
+			.select("_id hotelName belongsTo")
+			.lean()
+			.exec();
+	}
+
+	const scopedIds = toObjectIds(userHotelScopeIds(actor));
+	if (!scopedIds.length) return [];
+	return HotelDetails.find({ _id: { $in: scopedIds } })
+		.select("_id hotelName belongsTo")
+		.lean()
+		.exec();
+};
+
+const hotelIdsFromHotels = (hotels = []) =>
+	uniqueValidIds((Array.isArray(hotels) ? hotels : []).map((hotel) => hotel?._id));
+
+const hotelMapFromHotels = (hotels = []) =>
+	(Array.isArray(hotels) ? hotels : []).reduce((map, hotel) => {
+		const id = normalizeId(hotel?._id);
+		if (id) map.set(id, hotel);
+		return map;
+	}, new Map());
+
+const ownerIdForWalletContext = (actor = {}, hotels = []) => {
+	const actorId = normalizeId(actor._id);
+	if (hasRole(actor, 2000) && actorId && !normalizeId(actor.belongsToId)) {
+		return actorId;
+	}
+	const ownerIds = [
+		...new Set(
+			(Array.isArray(hotels) ? hotels : [])
+				.map((hotel) => normalizeId(hotel?.belongsTo))
+				.filter(Boolean)
+		),
+	];
+	return ownerIds.length === 1 ? ownerIds[0] : "";
+};
+
 const canAccessHotelFinancials = (actor = {}, hotel = {}) => {
 	if (!actor || actor.activeUser === false || !hotel?._id) return false;
 	const hotelId = normalizeId(hotel._id);
 	const ownerId = normalizeId(hotel.belongsTo);
 	const actorId = normalizeId(actor._id);
 
-	if (isSuperAdmin(actor) || hasRole(actor, 1000)) return true;
+	if (isPlatformAdmin(actor)) return true;
 	if (actorId === ownerId && hasRole(actor, 2000)) return true;
 	if (includesId(actor.hotelIdsOwner, hotelId)) return true;
 	if (includesId(actor.hotelsToSupport, hotelId)) return true;
@@ -96,7 +186,7 @@ const canAccessHotelFinancials = (actor = {}, hotel = {}) => {
 
 const canManageHotelFinancials = (actor = {}, hotel = {}) => {
 	if (!canAccessHotelFinancials(actor, hotel)) return false;
-	if (isSuperAdmin(actor) || hasRole(actor, 1000)) return true;
+	if (isPlatformAdmin(actor)) return true;
 	if (
 		hasRole(actor, 2000) ||
 		hasRole(actor, 10000) ||
@@ -111,8 +201,7 @@ const canManageHotelFinancials = (actor = {}, hotel = {}) => {
 const canOverrideApprovedFinancials = (actor = {}, hotel = {}) => {
 	if (!canAccessHotelFinancials(actor, hotel)) return false;
 	return (
-		isSuperAdmin(actor) ||
-		hasRole(actor, 1000) ||
+		isPlatformAdmin(actor) ||
 		hasRole(actor, 2000) ||
 		hasRole(actor, 10000) ||
 		hasRoleDescription(actor, "hotelmanager") ||
@@ -122,8 +211,7 @@ const canOverrideApprovedFinancials = (actor = {}, hotel = {}) => {
 };
 
 const canManageRole = (actor = {}) =>
-	isSuperAdmin(actor) ||
-	hasRole(actor, 1000) ||
+	isPlatformAdmin(actor) ||
 	hasRole(actor, 2000) ||
 	hasRole(actor, 10000) ||
 	hasRoleDescription(actor, "hotelmanager") ||
@@ -141,28 +229,81 @@ const actorCanSeeAgent = (actor = {}, agentId = "") =>
 	canReadAgentWalletRole(actor) ||
 	normalizeId(actor._id) === normalizeId(agentId);
 
-const buildAgentHotelQuery = (hotelId) => ({
+const buildAgentRoleQuery = () => ({
 	activeUser: { $ne: false },
-	$and: [
-		{
-			$or: [
-				{ role: 7000 },
-				{ roles: 7000 },
-				{ roleDescription: "ordertaker" },
-				{ roleDescriptions: "ordertaker" },
-			],
-		},
-		{
-			$or: [
-				{ hotelIdWork: String(hotelId) },
-				{ hotelsToSupport: ObjectId(hotelId) },
-			],
-		},
+	$or: [
+		{ role: 7000 },
+		{ roles: 7000 },
+		{ roleDescription: "ordertaker" },
+		{ roleDescriptions: "ordertaker" },
 	],
 });
 
-const buildAgentReservationMatch = (hotelId, agentId) => ({
-	hotelId: ObjectId(hotelId),
+const buildAgentHotelAssignmentClause = (hotelIds = []) => {
+	const ids = uniqueValidIds(hotelIds);
+	const objectIds = toObjectIds(ids);
+	if (!ids.length) return {};
+	return {
+		$or: [
+			{ hotelIdWork: { $in: ids } },
+			...(objectIds.length
+				? [
+						{ hotelIdWork: { $in: objectIds } },
+						{ hotelIdsWork: { $in: objectIds } },
+						{ hotelsToSupport: { $in: objectIds } },
+						{ hotelIdsOwner: { $in: objectIds } },
+				  ]
+				: []),
+		],
+	};
+};
+
+const buildAgentWalletScopeQuery = (hotelIds = [], actor = {}) => {
+	const roleQuery = buildAgentRoleQuery();
+	if (isPlatformAdmin(actor)) return roleQuery;
+	const assignmentClause = buildAgentHotelAssignmentClause(hotelIds);
+	if (!Object.keys(assignmentClause).length) {
+		return { ...roleQuery, _id: { $exists: false } };
+	}
+	return {
+		activeUser: roleQuery.activeUser,
+		$and: [{ $or: roleQuery.$or }, assignmentClause],
+	};
+};
+
+const agentAssignedHotelIds = (agent = {}) =>
+	userHotelScopeIds(agent);
+
+const agentOverlapsHotelScope = (agent = {}, hotelIds = []) => {
+	const allowed = new Set(uniqueValidIds(hotelIds));
+	if (!allowed.size) return false;
+	return agentAssignedHotelIds(agent).some((id) => allowed.has(id));
+};
+
+const actorCanAccessAgentInScope = (actor = {}, agent = {}, hotelIds = []) => {
+	const agentId = normalizeId(agent?._id || agent);
+	if (!actorCanSeeAgent(actor, agentId)) return false;
+	if (normalizeId(actor._id) === agentId) return true;
+	if (isPlatformAdmin(actor)) return true;
+	return agentOverlapsHotelScope(agent, hotelIds);
+};
+
+const canManageGlobalWallet = (actor = {}, hotels = []) =>
+	Boolean(actor && actor.activeUser !== false && canManageRole(actor)) &&
+	(isPlatformAdmin(actor) || hotelIdsFromHotels(hotels).length > 0);
+
+const canOverrideApprovedGlobalFinancials = (actor = {}, hotels = []) =>
+	Boolean(actor && actor.activeUser !== false) &&
+	(isPlatformAdmin(actor) ||
+		hasRole(actor, 2000) ||
+		hasRole(actor, 10000) ||
+		hasRoleDescription(actor, "hotelmanager") ||
+		hasRoleDescription(actor, "systemadmin") ||
+		hasRoleDescription(actor, "system admin")) &&
+	(isPlatformAdmin(actor) || hotelIdsFromHotels(hotels).length > 0);
+
+const buildAgentReservationMatch = (hotelIds, agentId) => ({
+	hotelId: { $in: toObjectIds(hotelIds) },
 	$or: [
 		{ createdByUserId: ObjectId(agentId) },
 		{ orderTakeId: ObjectId(agentId) },
@@ -208,16 +349,14 @@ const normalizeAgentCommercialModel = (value) => {
 		: "wallet_inventory";
 };
 
-const agentOpeningWalletCreditForHotel = (agent = {}, hotelId = "") => {
-	const normalizedHotelId = normalizeId(hotelId);
+const agentOpeningWalletCreditGlobal = (agent = {}) => {
 	const balances = Array.isArray(agent.agentWalletOpeningBalances)
 		? agent.agentWalletOpeningBalances
 		: [];
-	const matched = balances.find(
-		(entry) => normalizeId(entry?.hotelId || entry?.hotel) === normalizedHotelId
-	);
-	if (matched) return n2(matched.amount);
-	return n2(agent.agentOpeningWalletCredit);
+	const topLevelCredit = n2(agent.agentOpeningWalletCredit);
+	if (topLevelCredit) return topLevelCredit;
+	const balanceAmounts = balances.map((entry) => n2(entry?.amount)).filter(Boolean);
+	return n2(balanceAmounts.length ? Math.max(...balanceAmounts) : 0);
 };
 
 const reservationIsDeductible = (reservation = {}) => {
@@ -469,13 +608,36 @@ const buildWalletAttachments = async (items = [], actor = {}) => {
 	return attachments.filter(Boolean);
 };
 
+const hotelsForAgentInScope = (agent = {}, hotels = []) => {
+	const assigned = new Set(agentAssignedHotelIds(agent));
+	const scoped = Array.isArray(hotels) ? hotels : [];
+	const matched = scoped.filter((hotel) => assigned.has(normalizeId(hotel?._id)));
+	return matched.length ? matched : scoped.slice(0, 1);
+};
+
+const emitWalletNotificationRefresh = async (req, hotels = [], payload = {}) => {
+	const targets = Array.isArray(hotels) ? hotels : [];
+	await Promise.all(
+		targets.map((hotel) =>
+			emitHotelNotificationRefresh(req, hotel?._id, {
+				...payload,
+				ownerId: payload.ownerId || hotel?.belongsTo,
+				walletScope: "agent_global",
+			})
+		)
+	);
+};
+
 const calculateAgentWalletSummary = async ({
 	agent,
-	hotelId,
+	hotelIds = [],
+	hotels = [],
 	startDate,
 	endDate,
 }) => {
 	const agentId = normalizeId(agent._id);
+	const scopeHotelIds = uniqueValidIds(hotelIds);
+	const scopeHotelMap = hotelMapFromHotels(hotels);
 	const walletDateFilter = buildDateFilter("transactionDate", startDate, endDate);
 	const reservationDateFilter = Object.keys(
 		buildDateFilter("createdAt", startDate, endDate)
@@ -492,12 +654,10 @@ const calculateAgentWalletSummary = async ({
 		: {};
 
 	const walletDisplayMatch = {
-		hotelId: ObjectId(hotelId),
 		agentId: ObjectId(agentId),
 		status: { $ne: "void" },
 	};
 	const walletPostedMatch = {
-		hotelId: ObjectId(hotelId),
 		agentId: ObjectId(agentId),
 		status: { $nin: ["pending", "rejected", "void"] },
 		reviewStatus: { $nin: ["pending", "rejected"] },
@@ -508,7 +668,7 @@ const calculateAgentWalletSummary = async ({
 			{ status: "" },
 		],
 	};
-	const reservationBaseMatch = buildAgentReservationMatch(hotelId, agentId);
+	const reservationBaseMatch = buildAgentReservationMatch(scopeHotelIds, agentId);
 
 	const [transactions, reservations, allTransactions, allReservations] =
 		await Promise.all([
@@ -524,7 +684,7 @@ const calculateAgentWalletSummary = async ({
 				...reservationDateFilter,
 			})
 			.select(
-				"_id confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
+				"_id hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionPaid commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
 			)
 				.sort({ booked_at: -1, createdAt: -1 })
 				.lean()
@@ -532,7 +692,7 @@ const calculateAgentWalletSummary = async ({
 			AgentWallet.find(walletPostedMatch).lean().exec(),
 			Reservations.find(reservationBaseMatch)
 				.select(
-					"_id reservation_status state total_amount commission commissionPaid commissionAgentApproval financial_cycle pendingConfirmation"
+					"_id hotelId reservation_status state total_amount commission commissionPaid commissionAgentApproval financial_cycle pendingConfirmation"
 				)
 				.lean()
 				.exec(),
@@ -585,7 +745,7 @@ const calculateAgentWalletSummary = async ({
 		agent.agentCommercialModel
 	);
 	const isCommissionOnly = commercialModel === "commission_only";
-	const openingWalletCredit = agentOpeningWalletCreditForHotel(agent, hotelId);
+	const openingWalletCredit = agentOpeningWalletCreditGlobal(agent);
 	const reservationWalletDeducted = isCommissionOnly
 		? 0
 		: reservationTotals.walletDeducted;
@@ -595,7 +755,25 @@ const calculateAgentWalletSummary = async ({
 	);
 	const walletUsed = n2(reservationWalletDeducted + transactionTotals.manualDebits);
 	const balance = n2(walletAdded - walletUsed);
-	const decoratedTransactions = transactions.map(decorateWalletTransactionForReport);
+	const decoratedTransactions = transactions.map((transaction) => {
+		const txHotelId = normalizeId(transaction.hotelId || transaction.legacyHotelId);
+		const txHotel = scopeHotelMap.get(txHotelId) || {};
+		return decorateWalletTransactionForReport({
+			...transaction,
+			hotelId: normalizeId(transaction.hotelId),
+			legacyHotelId: normalizeId(transaction.legacyHotelId),
+			hotelName: txHotel.hotelName || (txHotelId ? "" : "General wallet"),
+		});
+	});
+	const decoratedReservations = reservations.map((reservation) => {
+		const reservationHotelId = normalizeId(reservation.hotelId);
+		const hotel = scopeHotelMap.get(reservationHotelId) || {};
+		return {
+			...reservation,
+			hotelId: reservationHotelId,
+			hotelName: hotel.hotelName || "",
+		};
+	});
 	const pendingWalletClaims = decoratedTransactions.filter(
 		(tx) => tx.source === "agent_claim" && tx.status === "pending"
 	);
@@ -612,6 +790,7 @@ const calculateAgentWalletSummary = async ({
 			companyName: agent.companyName || "",
 			agentCommercialModel: commercialModel,
 			agentOpeningWalletCredit: openingWalletCredit,
+			assignedHotelIds: agentAssignedHotelIds(agent),
 		},
 		commercialModel,
 		openingWalletCredit,
@@ -641,21 +820,24 @@ const calculateAgentWalletSummary = async ({
 			rejectedWalletClaims.reduce((sum, tx) => sum + moneyNumber(tx.amount), 0)
 		),
 		transactions: decoratedTransactions,
-		reservations,
+		reservations: decoratedReservations,
 	};
 };
 
 exports.agentWalletSummary = async (req, res) => {
 	try {
-		const { hotelId, userId } = req.params;
+		const { userId } = req.params;
 		const { agentId = "", startDate = "", endDate = "" } = req.query || {};
 
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
-		if (!actor || !hotel || !canAccessHotelFinancials(actor, hotel)) {
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
+
+		if (!actor || actor.activeUser === false) {
 			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!scopeHotelIds.length && !isPlatformAdmin(actor)) {
+			return res.status(403).json({ error: "No wallet hotel scope is available" });
 		}
 
 		const requestedAgentId = normalizeId(agentId);
@@ -668,21 +850,24 @@ exports.agentWalletSummary = async (req, res) => {
 			}
 			const agent = await User.findOne({
 				_id: ObjectId(requestedAgentId),
-				...buildAgentHotelQuery(hotelId),
+				...buildAgentRoleQuery(),
 			})
 				.select(
-					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 				)
 				.lean()
 				.exec();
-			if (!agent || !actorCanSeeAgent(actor, requestedAgentId)) {
+			if (
+				!agent ||
+				!actorCanAccessAgentInScope(actor, agent, scopeHotelIds)
+			) {
 				return res.status(403).json({ error: "Agent access denied" });
 			}
 			agents = [agent];
 		} else {
-			agents = await User.find(buildAgentHotelQuery(hotelId))
+			agents = await User.find(buildAgentWalletScopeQuery(scopeHotelIds, actor))
 				.select(
-					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 				)
 				.sort({ companyName: 1, name: 1 })
 				.lean()
@@ -691,7 +876,13 @@ exports.agentWalletSummary = async (req, res) => {
 
 		const summaries = await Promise.all(
 			agents.map((agent) =>
-				calculateAgentWalletSummary({ agent, hotelId, startDate, endDate })
+				calculateAgentWalletSummary({
+					agent,
+					hotelIds: scopeHotelIds,
+					hotels: scopeHotels,
+					startDate,
+					endDate,
+				})
 			)
 		);
 
@@ -734,13 +925,15 @@ exports.agentWalletSummary = async (req, res) => {
 		});
 
 		return res.json({
-			hotel: {
+			walletScope: "agent_global",
+			hotels: scopeHotels.map((hotel) => ({
 				_id: normalizeId(hotel._id),
 				hotelName: hotel.hotelName || "",
-			},
+				belongsTo: normalizeId(hotel.belongsTo),
+			})),
 			agents: summaries,
 			totals,
-			canManage: canManageHotelFinancials(actor, hotel),
+			canManage: canManageGlobalWallet(actor, scopeHotels),
 		});
 	} catch (error) {
 		console.error("agentWalletSummary error:", error);
@@ -750,14 +943,13 @@ exports.agentWalletSummary = async (req, res) => {
 
 exports.createAgentWalletTransaction = async (req, res) => {
 	try {
-		const { hotelId, userId } = req.params;
+		const { userId } = req.params;
 		const body = req.body || {};
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
-		if (!actor || !hotel || !canManageHotelFinancials(actor, hotel)) {
+		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 
@@ -768,15 +960,15 @@ exports.createAgentWalletTransaction = async (req, res) => {
 
 		const agent = await User.findOne({
 			_id: ObjectId(agentId),
-			...buildAgentHotelQuery(hotelId),
+			...buildAgentRoleQuery(),
 		})
 			.select(
-				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances"
+				"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 			)
 			.lean()
 			.exec();
-		if (!agent) {
-			return res.status(404).json({ error: "Agent was not found for this hotel" });
+		if (!agent || !actorCanAccessAgentInScope(actor, agent, scopeHotelIds)) {
+			return res.status(404).json({ error: "Agent was not found for your wallet scope" });
 		}
 
 		const amount = n2(body.amount);
@@ -792,9 +984,9 @@ exports.createAgentWalletTransaction = async (req, res) => {
 		}
 
 		const transaction = await AgentWallet.create({
-			hotelId: ObjectId(hotelId),
-			ownerId: ObjectId.isValid(normalizeId(hotel.belongsTo))
-				? ObjectId(normalizeId(hotel.belongsTo))
+			hotelId: null,
+			ownerId: ObjectId.isValid(ownerIdForWalletContext(actor, scopeHotels))
+				? ObjectId(ownerIdForWalletContext(actor, scopeHotels))
 				: null,
 			agentId: ObjectId(agentId),
 			transactionType: normalizeTransactionType(body.transactionType),
@@ -817,12 +1009,14 @@ exports.createAgentWalletTransaction = async (req, res) => {
 			description: "Manual agent wallet movement was created by finance.",
 			actor,
 			transaction,
-			hotel,
+			hotel: {},
+			metadata: { walletScope: "agent_global" },
 		});
 
 		const summary = await calculateAgentWalletSummary({
 			agent,
-			hotelId,
+			hotelIds: scopeHotelIds,
+			hotels: scopeHotels,
 			startDate: body.startDate || "",
 			endDate: body.endDate || "",
 		});
@@ -836,15 +1030,14 @@ exports.createAgentWalletTransaction = async (req, res) => {
 
 exports.updateAgentWalletTransaction = async (req, res) => {
 	try {
-		const { hotelId, userId, transactionId } = req.params;
+		const { userId, transactionId } = req.params;
 		const body = req.body || {};
 
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
-		if (!actor || !hotel || !canManageHotelFinancials(actor, hotel)) {
+		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 
@@ -854,7 +1047,6 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 
 		const transaction = await AgentWallet.findOne({
 			_id: ObjectId(transactionId),
-			hotelId: ObjectId(hotelId),
 			status: { $ne: "void" },
 		}).exec();
 
@@ -867,10 +1059,17 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 				.status(400)
 				.json({ error: "Reservation wallet deductions cannot be edited here" });
 		}
+		const agent = await User.findById(transaction.agentId)
+			.select("_id hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner")
+			.lean()
+			.exec();
+		if (!agent || !actorCanAccessAgentInScope(actor, agent, scopeHotelIds)) {
+			return res.status(403).json({ error: "Agent access denied" });
+		}
 		if (
 			transaction.source === "agent_claim" &&
 			transaction.status === "posted" &&
-			!canOverrideApprovedFinancials(actor, hotel)
+			!canOverrideApprovedGlobalFinancials(actor, scopeHotels)
 		) {
 			return res.status(403).json({
 				error:
@@ -905,7 +1104,7 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 			description: "Agent wallet movement was updated.",
 			actor,
 			transaction,
-			hotel,
+			hotel: {},
 			change: {
 				field: "wallet_transaction",
 				from: "previous_values",
@@ -926,13 +1125,12 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 
 exports.voidAgentWalletTransaction = async (req, res) => {
 	try {
-		const { hotelId, userId, transactionId } = req.params;
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const { userId, transactionId } = req.params;
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
-		if (!actor || !hotel || !canManageHotelFinancials(actor, hotel)) {
+		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 
@@ -942,7 +1140,6 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 
 		const transaction = await AgentWallet.findOne({
 			_id: ObjectId(transactionId),
-			hotelId: ObjectId(hotelId),
 			status: { $ne: "void" },
 		}).exec();
 
@@ -955,10 +1152,17 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 				.status(400)
 				.json({ error: "Reservation wallet deductions cannot be deleted here" });
 		}
+		const agent = await User.findById(transaction.agentId)
+			.select("_id hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner")
+			.lean()
+			.exec();
+		if (!agent || !actorCanAccessAgentInScope(actor, agent, scopeHotelIds)) {
+			return res.status(403).json({ error: "Agent access denied" });
+		}
 		if (
 			transaction.source === "agent_claim" &&
 			transaction.status === "posted" &&
-			!canOverrideApprovedFinancials(actor, hotel)
+			!canOverrideApprovedGlobalFinancials(actor, scopeHotels)
 		) {
 			return res.status(403).json({
 				error:
@@ -976,7 +1180,7 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 			description: "Agent wallet movement was voided.",
 			actor,
 			transaction,
-			hotel,
+			hotel: {},
 			change: {
 				field: "status",
 				from: "posted",
@@ -993,14 +1197,12 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 
 exports.createAgentWalletClaim = async (req, res) => {
 	try {
-		const { hotelId, userId } = req.params;
+		const { userId } = req.params;
 		const body = req.body || {};
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
 
-		if (!actor || !hotel || !canAccessHotelFinancials(actor, hotel)) {
+		if (!actor || actor.activeUser === false || !scopeHotels.length) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 		if (!isOrderTaker(actor) || canManageRole(actor)) {
@@ -1047,9 +1249,9 @@ exports.createAgentWalletClaim = async (req, res) => {
 		}
 
 		const transaction = await AgentWallet.create({
-			hotelId: ObjectId(hotelId),
-			ownerId: ObjectId.isValid(normalizeId(hotel.belongsTo))
-				? ObjectId(normalizeId(hotel.belongsTo))
+			hotelId: null,
+			ownerId: ObjectId.isValid(ownerIdForWalletContext(actor, scopeHotels))
+				? ObjectId(ownerIdForWalletContext(actor, scopeHotels))
 				: null,
 			agentId: ObjectId(normalizeId(actor._id)),
 			transactionType: "deposit",
@@ -1070,7 +1272,7 @@ exports.createAgentWalletClaim = async (req, res) => {
 			description: "Agent submitted a wallet credit claim for finance approval.",
 			actor,
 			transaction,
-			hotel,
+			hotel: {},
 			change: {
 				field: "reviewStatus",
 				from: "not_submitted",
@@ -1078,11 +1280,10 @@ exports.createAgentWalletClaim = async (req, res) => {
 			},
 		});
 
-		emitHotelNotificationRefresh(req, hotelId, {
+		emitWalletNotificationRefresh(req, hotelsForAgentInScope(actor, scopeHotels), {
 			type: "agent_wallet_claim",
 			walletTransactionId: transaction._id,
 			agentId: actor._id,
-			ownerId: hotel.belongsTo,
 		}).catch((error) =>
 			console.error("Error emitting wallet claim notification:", error)
 		);
@@ -1096,15 +1297,14 @@ exports.createAgentWalletClaim = async (req, res) => {
 
 exports.reviewAgentWalletClaim = async (req, res) => {
 	try {
-		const { hotelId, userId, transactionId } = req.params;
+		const { userId, transactionId } = req.params;
 		const body = req.body || {};
 		const action = String(body.action || "").trim().toLowerCase();
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
-		if (!actor || !hotel || !canManageHotelFinancials(actor, hotel)) {
+		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 		if (!["approve", "reject"].includes(action)) {
@@ -1116,7 +1316,6 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 
 		const transaction = await AgentWallet.findOne({
 			_id: ObjectId(transactionId),
-			hotelId: ObjectId(hotelId),
 			source: "agent_claim",
 			status: "pending",
 			reviewStatus: "pending",
@@ -1124,6 +1323,13 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 
 		if (!transaction) {
 			return res.status(404).json({ error: "Pending wallet claim was not found" });
+		}
+		const agent = await User.findById(transaction.agentId)
+			.select("_id hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner")
+			.lean()
+			.exec();
+		if (!agent || !actorCanAccessAgentInScope(actor, agent, scopeHotelIds)) {
+			return res.status(403).json({ error: "Agent access denied" });
 		}
 
 		const now = new Date();
@@ -1143,7 +1349,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 				description: "Finance approved an agent wallet credit claim.",
 				actor,
 				transaction,
-				hotel,
+				hotel: {},
 				change: {
 					field: "reviewStatus",
 					from: previousReviewStatus || previousStatus || "pending",
@@ -1170,7 +1376,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 				description: "Finance rejected an agent wallet credit claim.",
 				actor,
 				transaction,
-				hotel,
+				hotel: {},
 				change: {
 					field: "reviewStatus",
 					from: previousReviewStatus || previousStatus || "pending",
@@ -1180,11 +1386,10 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			});
 		}
 
-		emitHotelNotificationRefresh(req, hotelId, {
+		emitWalletNotificationRefresh(req, hotelsForAgentInScope(agent, scopeHotels), {
 			type: action === "approve" ? "agent_wallet_claim_approved" : "agent_wallet_claim_rejected",
 			walletTransactionId: transaction._id,
 			agentId: transaction.agentId,
-			ownerId: hotel.belongsTo,
 		}).catch((error) =>
 			console.error("Error emitting wallet claim review notification:", error)
 		);
@@ -1198,14 +1403,13 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 
 exports.agentTodoList = async (req, res) => {
 	try {
-		const { hotelId, userId } = req.params;
+		const { userId } = req.params;
 		const { agentId = "" } = req.query || {};
-		const [actor, hotel] = await Promise.all([
-			getActor(req, userId),
-			getHotel(hotelId),
-		]);
+		const actor = await getActor(req, userId);
+		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
-		if (!actor || !hotel || !canAccessHotelFinancials(actor, hotel)) {
+		if (!actor || actor.activeUser === false || !scopeHotelIds.length) {
 			return res.status(403).json({ error: "Access denied" });
 		}
 
@@ -1213,11 +1417,21 @@ exports.agentTodoList = async (req, res) => {
 		if (!ObjectId.isValid(requestedAgentId)) {
 			return res.status(400).json({ error: "Valid agent is required" });
 		}
-		if (!actorCanSeeAgent(actor, requestedAgentId)) {
+		const requestedAgent = await User.findById(requestedAgentId)
+			.select("_id hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner")
+			.lean()
+			.exec();
+		if (
+			!requestedAgent ||
+			!actorCanAccessAgentInScope(actor, requestedAgent, scopeHotelIds)
+		) {
 			return res.status(403).json({ error: "Agent access denied" });
 		}
 
-		const reservationMatch = buildAgentReservationMatch(hotelId, requestedAgentId);
+		const reservationMatch = buildAgentReservationMatch(
+			scopeHotelIds,
+			requestedAgentId
+		);
 		const reservationQuery = {
 			...reservationMatch,
 			$and: [
@@ -1245,7 +1459,6 @@ exports.agentTodoList = async (req, res) => {
 				.lean()
 				.exec(),
 			AgentWallet.find({
-				hotelId: ObjectId(hotelId),
 				agentId: ObjectId(requestedAgentId),
 				source: "agent_claim",
 				status: { $in: ["pending", "rejected"] },

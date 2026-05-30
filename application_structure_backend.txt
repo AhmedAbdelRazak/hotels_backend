@@ -95,6 +95,9 @@ Critical Backend Authorization Helpers
   - Agent and employee activation from the overall activate-accounts screen should still go through updateHotelStaffUser, not the Hotel System Admin endpoint, so activeUser, agentApproval/applicationReview, approvedHotelIds, notifications, and ActivityTracker updates remain consistent.
 - controllers/agent_wallet.js
   - Financial access guards protect agent wallet, claims, transactions, and commission review.
+  - Agent wallets are global per agent, not per hotel. Wallet ledger rows should use agentId as the financial scope; hotelId is nullable and legacyHotelId is only audit/display context from older hotel-scoped records.
+  - Wallet summaries and transactions must calculate deposits/claims/manual adjustments across the agent's global wallet, while reservation usage remains filtered to the acting user's authorized hotel scope.
+  - Agent wallet claims no longer accept or require a hotel selection. Finance/manager/admin users can review global agent claims if the agent belongs to one of their accessible hotels; agents can only submit/read their own wallet.
   - Wallet claim statuses drive finance reporting: posted/approved movements are accepted and can affect wallet totals; pending/rejected/void movements must remain visible for audit but are reconciliationEligible = false and must never be included in reservation reconciliation totals. Both status and reviewStatus must be checked so mixed legacy records cannot slip into totals.
 
 Primary Route Files And API Areas
@@ -120,6 +123,7 @@ Primary Route Files And API Areas
   - Housekeeping task creation/list/count/update, assigned employee task views, supplies, and supply requests.
 - routes/agent_wallet.js
   - Agent wallet summaries, todos, claims, transactions, reviews, voids, and adjustments.
+  - Primary wallet routes are global by agent/actor: /agent-wallet/summary/:userId, /agent-wallet/todos/:userId, /agent-wallet/claims/:userId, /agent-wallet/claims/:userId/:transactionId/review, and /agent-wallet/transactions/:userId. Older /:hotelId/:userId forms remain only for compatibility and must not reintroduce hotel-scoped wallet logic.
 - routes/expenses.js
   - Expense CRUD, hotel financial-report data, and expense support endpoints.
 - routes/adminreports.js
@@ -156,6 +160,7 @@ Core Models
   - Housekeeping tasks, room/task status, assignedTo/assignedBy, status history, start/end timestamps, duration, and hotel scope.
 - models/agent_wallet.js
   - Agent wallet balances, claims, transactions, review/void flows, and commission tracking.
+  - Wallet rows are keyed by agentId for balance math. hotelId is optional/null for current rows; legacyHotelId preserves the previous hotel context for historical rows and notification/report display only.
 - models/expenses.js
   - Hotel/account expenses and financial-report support data.
 - models/supportcase.js
@@ -241,13 +246,14 @@ Critical Workflows To Protect
 - Financial actions
   - Wallet, commission, payout, expense, and financial report actions must remain restricted to owner/admin/finance/reservation roles with valid hotel/account scope.
   - Approved order-taker/agent accounts may read overall financial surfaces only for their assigned hotels and their own agent wallet/reservation records. If financial-actions is opened by an agent, both reservation actions and pending wallet-claim rows must be filtered to that actor's own agent id.
-  - Overall financial-actions returns both reservation finance actions and a separately paginated pending wallet-approval queue. Pending wallet claims are sourced from AgentWallet records with source=agent_claim, status=pending, and reviewStatus=pending.
+  - Overall financial-actions returns both reservation finance actions and a separately paginated pending wallet-approval queue. Pending wallet claims are sourced globally by visible agentId from AgentWallet records with source=agent_claim, status=pending, and reviewStatus=pending; do not filter claims by AgentWallet.hotelId.
   - Overall financial-report wallet movements must expose financialStatus and reconciliationEligible so rejected claims can remain visible while staying excluded from wallet totals and reconciliation. Rejected rows are audit history only, not reservation reconciliation data.
   - Agent wallet summaries must return both commissionPaid and commissionDue totals. commissionPaid is the already-paid-out commission amount, while commissionDue is the unpaid/outstanding amount. Frontend reports and exports depend on this split for agent and finance reconciliation.
+  - Agent opening wallet credit is a global account value. Per-hotel opening balance arrays should be sanitized to empty for new/update flows and should only be read as a legacy fallback when needed.
 - Agent overall regression scenario
   - Create/approve an order-taker agent assigned to multiple hotels, then create reservations for that agent and for another agent in the same hotel set.
   - As the approved agent, GET /overall-dashboard/pending-reservations/:userId with ownerId and optional assigned hotelId. The response must include only the authenticated agent's pending/rejected/finance-review/commission-review reservations and must exclude every other agent's records.
-  - As the approved agent, GET /overall-dashboard/financial-actions/:userId and GET /agent-wallet/summary/:hotelId/:userId, including attempts to pass another agentId. The backend must still return only the authenticated agent's wallet, commission, reservation, and claim data.
+  - As the approved agent, GET /overall-dashboard/financial-actions/:userId and GET /agent-wallet/summary/:userId, including attempts to pass another agentId. The backend must still return only the authenticated agent's global wallet, commission, reservation, and claim data.
   - Repeat with an unassigned hotelId. The API must not expose data for that hotel.
   - Repeat as reservation employee, finance, manager, Hotel System Admin, and super admin to confirm staff/admin queue visibility still follows their broader role scope and was not narrowed by the agent-only filters.
 - Public website routes

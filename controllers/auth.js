@@ -138,18 +138,7 @@ const sanitizeAgentWalletOpeningBalances = (
 	hotelIds = [],
 	fallbackAmount = 0
 ) => {
-	const byHotel = new Map();
-	(Array.isArray(balances) ? balances : []).forEach((entry) => {
-		const hotelId = String(entry?.hotelId || entry?.hotel || "").trim();
-		if (!hotelId) return;
-		byHotel.set(hotelId, nonNegativeMoney(entry?.amount));
-	});
-	return hotelIds.map((hotelId) => ({
-		hotelId,
-		amount: byHotel.has(hotelId)
-			? byHotel.get(hotelId)
-			: nonNegativeMoney(fallbackAmount),
-	}));
+	return [];
 };
 
 const PUBLIC_APPLICATION_ROLE_BY_DESCRIPTION = {

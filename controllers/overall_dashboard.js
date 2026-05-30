@@ -149,17 +149,23 @@ const isConfiguredSuperAdmin = (userOrId) => {
 	return configuredSuperAdminIds().includes(String(userId || "").trim());
 };
 
-const roleNumbers = (user = {}) => [
-	Number(user.role),
-	...(Array.isArray(user.roles) ? user.roles.map(Number) : []),
-];
+const roleNumbers = (user = {}) => {
+	const account = user || {};
+	return [
+		Number(account.role),
+		...(Array.isArray(account.roles) ? account.roles.map(Number) : []),
+	];
+};
 
-const roleDescriptions = (user = {}) => [
-	String(user.roleDescription || "").toLowerCase(),
-	...(Array.isArray(user.roleDescriptions)
-		? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
-		: []),
-];
+const roleDescriptions = (user = {}) => {
+	const account = user || {};
+	return [
+		String(account.roleDescription || "").toLowerCase(),
+		...(Array.isArray(account.roleDescriptions)
+			? account.roleDescriptions.map((item) => String(item || "").toLowerCase())
+			: []),
+	];
+};
 
 const normalizeRoleDescriptionKey = (value = "") =>
 	String(value || "")
@@ -1677,6 +1683,47 @@ const walletClaimDateFilter = (query = {}) => {
 	return Object.keys(filter).length ? { transactionDate: filter } : {};
 };
 
+const walletAgentRoleClause = () => ({
+	$or: [
+		{ role: 7000 },
+		{ roles: 7000 },
+		{ roleDescription: "ordertaker" },
+		{ roleDescriptions: "ordertaker" },
+	],
+});
+
+const walletAgentAssignmentClause = (hotelIds = []) => {
+	const ids = uniqueValidIds(hotelIds);
+	const objectIds = ids.map((id) => ObjectId(id));
+	if (!ids.length) return {};
+	return {
+		$or: [
+			{ hotelIdWork: { $in: ids } },
+			{ hotelIdWork: { $in: objectIds } },
+			{ hotelIdsWork: { $in: objectIds } },
+			{ hotelsToSupport: { $in: objectIds } },
+			{ hotelIdsOwner: { $in: objectIds } },
+		],
+	};
+};
+
+const walletAgentIdsForHotels = async (hotelIds = [], actor = {}) => {
+	if (isOrderTakerOnly(actor)) {
+		const actorId = normalizeId(actor._id);
+		return ObjectId.isValid(actorId) ? [actorId] : [];
+	}
+	const assignment = walletAgentAssignmentClause(hotelIds);
+	if (!Object.keys(assignment).length && !isSuperAdmin(actor)) return [];
+	const query = isSuperAdmin(actor)
+		? { activeUser: { $ne: false }, ...walletAgentRoleClause() }
+		: {
+				activeUser: { $ne: false },
+				$and: [walletAgentRoleClause(), assignment],
+		  };
+	const agents = await User.find(query).select("_id").lean().exec();
+	return agents.map((agent) => normalizeId(agent._id)).filter(Boolean);
+};
+
 const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} }) => {
 	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
 	const exportAll = ["1", "true", "yes", "all"].includes(
@@ -1697,24 +1744,21 @@ const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} 
 	if (!hotelIds.length) {
 		return { page, limit, total: 0, pages: 0, transactions: [] };
 	}
+	const visibleAgentIds = await walletAgentIdsForHotels(hotelIds, actor);
+	if (!visibleAgentIds.length) {
+		return { page, limit, total: 0, pages: 0, transactions: [] };
+	}
 
 	const hotelMap = new Map(
 		hotels.map((hotel) => [normalizeId(hotel._id), hotel])
 	);
 	const match = {
-		hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
+		agentId: { $in: visibleAgentIds.map((id) => ObjectId(id)) },
 		source: "agent_claim",
 		status: "pending",
 		reviewStatus: "pending",
 		...walletClaimDateFilter(query),
 	};
-	if (isOrderTakerOnly(actor)) {
-		const actorId = normalizeId(actor._id);
-		if (!ObjectId.isValid(actorId)) {
-			return { page, limit, total: 0, pages: 0, transactions: [] };
-		}
-		match.agentId = ObjectId(actorId);
-	}
 	const [total, transactions] = await Promise.all([
 		AgentWallet.countDocuments(match),
 		AgentWallet.find(match)
@@ -1732,9 +1776,15 @@ const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} 
 		total,
 		pages: Math.ceil(total / limit),
 		transactions: transactions.map((transaction) => {
-			const hotel = hotelMap.get(normalizeId(transaction.hotelId)) || {};
+			const currentHotelId =
+				normalizeId(transaction.hotelId || transaction.legacyHotelId) ||
+				hotelIds[0] ||
+				"";
+			const hotel = hotelMap.get(currentHotelId) || {};
 			return {
 				...transaction,
+				hotelId: normalizeId(transaction.hotelId) || currentHotelId,
+				legacyHotelId: normalizeId(transaction.legacyHotelId),
 				hotelName: hotel.hotelName || "",
 				ownerId: normalizeId(hotel.belongsTo || transaction.ownerId),
 				agent: transaction.agentId || null,
