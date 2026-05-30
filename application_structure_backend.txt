@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-05-23
+Audited: 2026-05-30
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -155,7 +155,8 @@ Core Models
 - models/rooms.js
   - Physical room records, room type/display, room cleanliness state, housekeeping dirty metadata, bed setup, and hotel ownership.
 - models/reservations.js
-  - Reservation status, guest details, confirmation number, room ids, pricing, payment data, source/order-taker fields, pending confirmation state, commission snapshots, wallet snapshots, financial cycle, and audit fields.
+  - Reservation status, guest details, confirmation number, room ids, pricing, payment data, source/order-taker fields, pending confirmation state, commission snapshots, wallet snapshots, availabilitySnapshot, financial cycle, and audit fields.
+  - availabilitySnapshot captures selected-room availability at reservation creation time. It stores the reserved stay dates, requested room count, lowest available rooms for the selected room lines during the stay before the reservation, remaining availability after the reservation, per-room/per-day capacity and reserved counts, and whether an authorized overbook override happened.
 - models/housekeeping.js
   - Housekeeping tasks, room/task status, assignedTo/assignedBy, status history, start/end timestamps, duration, and hotel scope.
 - models/agent_wallet.js
@@ -202,6 +203,8 @@ Critical Workflows To Protect
   - For agents/order takers, source should come from the agent/company identity unless a role explicitly requires a manual source.
   - If a room has assigned stock for the booking agent, reservation inventory validation counts against that agent stock first and only counts reservations created by that same agent.
   - If a room has agent-specific calendar pricing for the booking agent, reservation pricing uses that row first and falls back to the hotel-wide room calendar otherwise.
+  - New reservations must persist availabilitySnapshot from the same validateReservationInventoryForCreate result used for inventory blocking/overbook warnings. Do not let the frontend submit this count as trusted data; backend creation paths should stamp it after validation for hotel-management, public/PayPal, employee-direct, verification, admin Order Taker, OTA/integrator imports, Excel imports, and AI-assisted creation flows.
+  - Historical/import creation can allow overbook for compatibility, but should still capture the snapshot with overrideAllowed/overbooked metadata so reservation staff can audit what inventory looked like when the row was written.
 - Public signup applications
   - Direct public signup is for hotel manager/owner registration only.
   - Agent and job applicants require a valid backend invitation generated from the overall create-account flow. New invitations use a short /signup?invite=<code> URL backed by models/signup_invitation.js; legacy invitationToken links are still accepted for compatibility.
@@ -240,9 +243,10 @@ Critical Workflows To Protect
   - Staff creation with roleDescription systemadmin must also keep Hotel System Admin mutually exclusive, set hotelIdsWork/hotelIdsOwner/hotelsToSupport from selected hotels, and avoid assigning belongsToId like a regular hotel employee.
   - Converting a Hotel System Admin back to hotel manager/reception/finance/etc. is handled through the hotel-staff update route. That route must allow accounts scoped by hotelIdsOwner/hotelsToSupport, then clear hotelIdsOwner for non-system-admin non-root-owner accounts and restore belongsToId to the hotel owner.
   - Account create/update routes must call services/activityTracker.js. Staff creation uses hotel_staff_create, staff updates use hotel_staff_update, and Hotel System Admin create/update uses overall_system_admin_create / overall_system_admin_update.
-  - Overall create-account must not auto-select hotels or roles. Backend account creation and signup invitation creation should reject missing hotel/role scope, even if the frontend already validates it.
+  - Overall create-account is a two-mode frontend flow, but backend validation remains authoritative. Internal Staff mode must receive explicit hotel scope and a non-agent staff role; External Agents mode must receive explicit hotel scope and ordertaker/agent role data. Backend account creation and signup invitation creation should reject missing or mismatched hotel/role scope even if the frontend already validates it.
+  - Overall account-management list filters must support the UI split between Hotel Employees and External Agents. The employee view excludes order-taker/agent accounts, while the agent view returns only order-taker/external-agent accounts inside the actor's authorized hotel/account scope.
   - Overall update-account should require an explicit account selection in the frontend before update fields are populated. Backend update routes must continue validating account id, creator scope, selected hotels, and role changes because query params or prefilled UI state are never trusted.
-  - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend.
+  - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend. Agent invitations should be locked to ordertaker semantics; employee invitations should require the requested employee role.
 - Financial actions
   - Wallet, commission, payout, expense, and financial report actions must remain restricted to owner/admin/finance/reservation roles with valid hotel/account scope.
   - Approved order-taker/agent accounts may read overall financial surfaces only for their assigned hotels and their own agent wallet/reservation records. If financial-actions is opened by an agent, both reservation actions and pending wallet-claim rows must be filtered to that actor's own agent id.
@@ -267,15 +271,24 @@ Critical Workflows To Protect
   - Platform admins and true super admins remain separate: super admins are global platform owners, while Hotel System Admin users are limited to assigned hotels.
 - Overall executive reports for hotel owners and authorized hotel staff
   - Executive summary data must use owner/hotel scoped backend routes instead of reusing global admin report routes directly.
-  - Super admins can view across the platform; owners, Hotel System Admins, hotel managers, finance users, reservation employees, and other permitted roles must be constrained to assigned hotels.
+  - Super admins can view across the platform; owners, Hotel System Admins, hotel managers, finance users, reservation employees, order-taker/agent users, and other permitted roles must be constrained to assigned hotels.
   - Use getAccessibleOverallHotels, requireOverallSection, and related overall-dashboard helpers before applying hotelId, invHotel, ownerId, or query filters.
   - Never trust ownerId or hotelId from the query string until it has been checked against the acting user's accessible hotel set.
-  - The overall summary page has four business surfaces: general hotel summary, reservation analytics, inventory/occupancy, and paid reservations overview.
+  - The overall summary page has four frontend tabs: combined Hotels Summary, reservation analytics, inventory/occupancy, and paid reservations overview. The combined Hotels Summary embeds the former My Summary reservation-department dashboard above the hotels summary table, and it reuses the reservation analytics and overall reservation-list backends with the acting user's existing hotel/agent scope.
   - Admin global reports remain separate from hotel-management executive reports for security and data-boundary clarity.
 - Reservation executive report backend behavior
   - The reservation analytics endpoint supports hotel, status, source, payment, search, dateBy, dateFrom, dateTo, includeCancelled, and excludeCancelled query semantics.
+  - Order-taker/agent actors may access the executive reservation analytics route for the embedded Hotels Summary reservation-department report, but isOrderTakerOnly must continue adding the actor-created/order-taker reservation constraint before aggregation.
+  - dateFrom/dateTo may be plain yyyy-mm-dd values or exact ISO timestamps. ISO timestamp support is required for chart drill-downs because report charts group by Asia/Riyadh day while Mongo date ranges are stored in UTC.
+  - The overall reservation list endpoint supports bucketDateBy/bucketDateFrom/bucketDateTo in addition to the main dateBy/dateFrom/dateTo filters. The embedded Hotels Summary reservation-department report uses these bucket filters when a user clicks an arrival/departure bar so the original report range is preserved while the modal narrows to the clicked Asia/Riyadh day.
+  - Executive reservation aggregates include roomNights and distinct source counts so the embedded Hotels Summary report can display nights and source scorecards without client-side shortcuts.
+  - The embedded Hotels Summary "new reservations today" group is always createdAt-today in the Asia/Riyadh day window. It ignores the main report date range/dateBy/status/search filters, but still inherits actor authorization and selected hotel scope.
+  - The embedded Hotels Summary "today's operation" group is also fixed to the Asia/Riyadh today window. Arrivals use checkin_date today, departures use checkout_date today, checked-in/no-show use the appropriate operational status plus today's operational date, and only hotel/actor scope should change those numbers.
+  - The embedded future-operation chart is a fixed 29-day operational window: previous 14 Riyadh days, today, and next 14 Riyadh days. It switches between checkin_date and checkout_date by the frontend toggle, zero-fills dates with no activity, and keeps drill-down rows scoped to the clicked day plus actor/hotel authorization.
+  - Overall reservation list responses used by reservation-main must include scorecards that match the same scoped filter set as the visible table. Clickable scorecard filterType values should never bypass getAccessibleOverallHotels, agent ownership checks, or the regular reservation match builder.
   - dateBy must map only to approved date fields such as createdAt, check-in/arrival, or checkout/departure.
   - Cancelled, no-show, and pending reservations must be counted only when the filter or include/exclude setting says so. Do not silently exclude them when a user explicitly asks for those statuses.
+  - The overall reservation list endpoint also accepts excludeCancelled=true for scorecard/chart drill-down modals. This keeps modal rows aligned with reservation analytics totals while still allowing explicit cancelled/no-show status filters to include those records.
   - Aggregations should return creation-date, arrival-date, departure-date, status, source, payment, hotel, and room-type level summaries needed by the frontend charts.
   - Status labels may be humanized on the frontend, but backend values should remain normalized for filtering and reporting stability.
 - Inventory/occupancy executive report backend behavior
@@ -368,6 +381,8 @@ Final Production Readiness Notes
 - Reservation sorting must support creation date in addition to booking date, source, arrival/check-in, and departure/check-out. Overall reservations use controllers/overall_dashboard.js; single-hotel reservation lists and pending-confirmation queues use controllers/reservations.js and must keep auth/hotel/agent scope checks before sorting.
 - Overall reservation filters accept repeated or comma-separated hotelId, status, and bookingSource query params. Preserve parseQueryList behavior so frontend multi-select filters can send several values without bypassing hotel/role scoping.
 - Overall reservation status filtering normalizes user-facing status names to lifecycle aliases before querying. Examples: Checked Out matches checked_out, early_checked_out, and closed; Confirmed also covers legacy ok; and state is only used as a fallback when reservation_status is missing/blank so old state values cannot pollute filtered results.
+- Scorecard and chart drill-down requests from the overall summary must use the same actor/hotel/agent scoping as the visible reservation analytics. Do not add a shortcut endpoint that bypasses buildReservationMatch or getAccessibleOverallHotels.
+- When a chart groups by a secondary date field, drill-down requests must keep the primary report date filter and add the secondary bucketDateBy/bucketDateFrom/bucketDateTo filter instead of replacing dateBy. This prevents a clicked bar from showing reservations outside the visible report basis.
 - Financial and reservation notification routes must keep acknowledgement notifications separate from operational queue notifications. Ackable account/wallet/reservation decisions can disappear after click; pending reservation confirmation and pending financial actions must remain until the workflow state changes.
 - Tracker privacy remains production-critical. Any admin/super-admin/hotel-system-admin audit actor details must be sanitized server-side for non-super-admin viewers before frontend rendering.
 - For production readiness, run node --check server.js, node --check controllers/overall_dashboard.js, git diff --check, and a scoped manual test of signup invitation, activation, agent pending reservations, finance actions, notifications, and super-admin account updates.
@@ -382,7 +397,7 @@ Final Production Readiness Notes
 - Exact routes and business surfaces discussed
   - Hotel owner / hotel-management executive summary:
     - /hotel-management/main-dashboard?overall=summary&page=1
-    - Important tabs: hotel summary, reservations overview, hotel inventory, and paid reservations report.
+    - Important tabs: combined Hotels Summary, reservations overview, hotel inventory, and paid reservations report.
   - Hotel rooms map:
     - /hotel-management/main-dashboard?overall=hotel-map&page=1&mapHotelId=<hotelId>&mapOwnerId=<ownerId>
   - Admin platform dashboard and reports:

@@ -9,6 +9,9 @@ const HotelDetails = require("../models/hotel_details");
 const {
 	normalizeReservationCreationPricing,
 } = require("./reservationPricing");
+const {
+	createReservationWithAvailabilitySnapshot,
+} = require("../controllers/reservations");
 
 dayjs.extend(customParseFormat);
 
@@ -3448,7 +3451,10 @@ async function reconcileOtaReservation(inputNormalized) {
 				sourceCurrency: normalized.currency || "",
 				exchangeRateToSar: normalized.exchangeRateToSar || 0,
 			});
-			created = await Reservations.create(document);
+			created = await createReservationWithAvailabilitySnapshot(
+				document,
+				"ota_email_create"
+			);
 			break;
 		} catch (error) {
 			if (error?.code === 11000) {

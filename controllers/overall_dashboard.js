@@ -221,13 +221,25 @@ const uniqueValidIds = (values = []) => [
 const toObjectIds = (values = []) =>
 	uniqueValidIds(values).map((id) => ObjectId(id));
 
+const parseDateBoundary = (value = "", endOfDay = false) => {
+	const text = String(value || "").trim();
+	if (!text) return null;
+	if (/[tT]/.test(text)) {
+		const parsed = new Date(text);
+		return Number.isNaN(parsed.getTime()) ? null : parsed;
+	}
+	const suffix = endOfDay ? "T23:59:59.999Z" : "T00:00:00.000Z";
+	const parsed = new Date(`${text}${suffix}`);
+	return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
 const cleanDateRange = ({ dateFrom = "", dateTo = "", range = "all" } = {}) => {
 	if (dateFrom || dateTo) {
-		const start = dateFrom ? new Date(`${dateFrom}T00:00:00.000Z`) : null;
-		const end = dateTo ? new Date(`${dateTo}T23:59:59.999Z`) : null;
+		const start = parseDateBoundary(dateFrom, false);
+		const end = parseDateBoundary(dateTo, true);
 		return {
-			from: start && !Number.isNaN(start.getTime()) ? start : null,
-			to: end && !Number.isNaN(end.getTime()) ? end : null,
+			from: start,
+			to: end,
 			range: "custom",
 		};
 	}
@@ -453,13 +465,15 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "executive") {
 		return (
-			hasAnyRole([3000, 6000, 8000]) ||
+			hasAnyRole([3000, 6000, 7000, 8000]) ||
 			hasAnyDescription([
 				"hotelmanager",
 				"reception",
 				"finance",
+				"ordertaker",
 				"reservationemployee",
-			])
+			]) ||
+			isOrderTakingScope(actor)
 		);
 	}
 
@@ -535,6 +549,24 @@ const applyDateFilter = (match, query = {}) => {
 	if (period.to) dateFilter.$lte = period.to;
 	if (Object.keys(dateFilter).length) match[dateField] = dateFilter;
 	return { dateField, period };
+};
+
+const bucketDateFilterFromQuery = (query = {}) => {
+	const bucketDateBy = query.bucketDateBy || query.bucketDateField || "";
+	const bucketDateFrom = query.bucketDateFrom || query.bucketFrom || "";
+	const bucketDateTo = query.bucketDateTo || query.bucketTo || "";
+	if (!bucketDateBy || (!bucketDateFrom && !bucketDateTo)) return null;
+
+	const dateField = normalizeDateField(bucketDateBy);
+	const period = cleanDateRange({
+		dateFrom: bucketDateFrom,
+		dateTo: bucketDateTo,
+		range: "custom",
+	});
+	const dateFilter = {};
+	if (period.from) dateFilter.$gte = period.from;
+	if (period.to) dateFilter.$lte = period.to;
+	return Object.keys(dateFilter).length ? { [dateField]: dateFilter } : null;
 };
 
 const reservationPrimaryStatusMissingFilter = () => ({
@@ -618,6 +650,11 @@ const reservationStatusFilter = (status = "") => {
 	if (!filters.length) return null;
 	return filters.length === 1 ? filters[0] : { $or: filters };
 };
+
+const statusFilterNeedsCancelledScope = (status = "") =>
+	parseQueryList(status).some((item) =>
+		/cancel|canceled|no[-_\s]?show/i.test(String(item || ""))
+	);
 
 const isOrderTakerOnly = (actor = {}) => {
 	const roles = roleNumbers(actor);
@@ -754,6 +791,24 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 	applyDateFilter(match, query);
 
 	const clauses = [];
+	const includeCancelled =
+		String(query.includeCancelled || "").toLowerCase() === "true";
+	const excludeCancelled =
+		String(query.excludeCancelled || "").toLowerCase() === "true";
+	if (
+		excludeCancelled &&
+		!includeCancelled &&
+		!statusFilterNeedsCancelledScope(query.status)
+	) {
+		clauses.push({
+			$nor: [
+				{ reservation_status: CANCELLED_STATUS },
+				{ state: CANCELLED_STATUS },
+				{ reservation_status: NO_SHOW_STATUS },
+				{ state: NO_SHOW_STATUS },
+			],
+		});
+	}
 	const statusFilter = reservationStatusFilter(query.status);
 	if (statusFilter) clauses.push(statusFilter);
 	const bookingSources = parseQueryList(query.bookingSource);
@@ -767,6 +822,8 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 	if (query.payment) {
 		clauses.push({ payment: new RegExp(escapeRegex(query.payment), "i") });
 	}
+	const bucketDateFilter = bucketDateFilterFromQuery(query);
+	if (bucketDateFilter) clauses.push(bucketDateFilter);
 	if (isOrderTakerOnly(actor)) {
 		const actorId = normalizeId(actor._id);
 		if (ObjectId.isValid(actorId)) {
@@ -881,6 +938,155 @@ const bookingSourceOptionsFromMatch = async (match) => {
 	}));
 };
 
+const emptyReservationScorecards = () => ({
+	totals: {
+		reservationsCount: 0,
+		totalAmount: 0,
+		nights: 0,
+		hotelsCount: 0,
+	},
+	statusCounts: {
+		confirmed: 0,
+		pending: 0,
+		inHouse: 0,
+		checkedOut: 0,
+		cancelled: 0,
+		noShow: 0,
+		other: 0,
+	},
+});
+
+const reservationListRoomNightsExpression = () => ({
+	$cond: [
+		{ $gt: [{ $ifNull: ["$days_of_residence", 0] }, 0] },
+		{ $ifNull: ["$days_of_residence", 0] },
+		{
+			$cond: [
+				{
+					$and: [
+						{ $ne: ["$checkin_date", null] },
+						{ $ne: ["$checkout_date", null] },
+					],
+				},
+				{
+					$max: [
+						0,
+						{
+							$dateDiff: {
+								startDate: "$checkin_date",
+								endDate: "$checkout_date",
+								unit: "day",
+							},
+						},
+					],
+				},
+				0,
+			],
+		},
+	],
+});
+
+const reservationStatusBucketKey = (bucket = {}) => {
+	const status = String(bucket.status || "");
+	const state = String(bucket.state || "");
+	const combined = `${status} ${state}`;
+	const pendingConfirmationStatus = String(
+		bucket.pendingConfirmationStatus || ""
+	).toLowerCase();
+	const agentDecisionStatus = String(bucket.agentDecisionStatus || "").toLowerCase();
+
+	if (NO_SHOW_STATUS.test(combined)) return "noShow";
+	if (CANCELLED_STATUS.test(combined)) return "cancelled";
+	if (CHECKED_OUT_STATUS.test(combined)) return "checkedOut";
+	if (IN_HOUSE_STATUS.test(combined)) return "inHouse";
+	if (
+		PENDING_CONFIRMATION_STATUS.test(combined) ||
+		["pending", "rejected"].includes(pendingConfirmationStatus) ||
+		["pending", "rejected"].includes(agentDecisionStatus)
+	) {
+		return "pending";
+	}
+	if (CONFIRMED_STATUS.test(combined)) return "confirmed";
+	return "other";
+};
+
+const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly }) => {
+	const scorecardMatch = buildReservationMatch({
+		actor,
+		hotels,
+		query: { ...(query || {}), status: "" },
+		pendingOnly,
+	});
+	if (!scorecardMatch) return emptyReservationScorecards();
+
+	const search = reservationSearchStage((query || {}).search);
+	const pipeline = [{ $match: scorecardMatch }, ...reservationLookupStages()];
+	if (search) pipeline.push({ $match: search });
+
+	const [facet = {}] = await Reservations.aggregate([
+		...pipeline,
+		{
+			$facet: {
+				totals: [
+					{
+						$group: {
+							_id: null,
+							reservationsCount: { $sum: 1 },
+							totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+							nights: { $sum: reservationListRoomNightsExpression() },
+							hotels: { $addToSet: "$hotelId" },
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							reservationsCount: 1,
+							totalAmount: 1,
+							nights: 1,
+							hotelsCount: { $size: "$hotels" },
+						},
+					},
+				],
+				statuses: [
+					{
+						$group: {
+							_id: {
+								status: { $ifNull: ["$reservation_status", ""] },
+								state: { $ifNull: ["$state", ""] },
+								pendingConfirmationStatus: {
+									$ifNull: ["$pendingConfirmation.status", ""],
+								},
+								agentDecisionStatus: {
+									$ifNull: ["$agentDecisionSnapshot.status", ""],
+								},
+							},
+							count: { $sum: 1 },
+						},
+					},
+				],
+			},
+		},
+	]);
+
+	const empty = emptyReservationScorecards();
+	const totals = facet.totals?.[0] || empty.totals;
+	const statusCounts = { ...empty.statusCounts };
+	(facet.statuses || []).forEach((row) => {
+		const key = reservationStatusBucketKey(row._id || {});
+		statusCounts[key] = (statusCounts[key] || 0) + Number(row.count || 0);
+	});
+
+	return {
+		totals: {
+			reservationsCount: Number(totals.reservationsCount || 0),
+			totalAmount: moneyNumber(totals.totalAmount),
+			nights: Number(totals.nights || 0),
+			hotelsCount: Number(totals.hotelsCount || 0),
+		},
+		statusCounts,
+	};
+};
+
 const listReservations = async ({ actor, hotels, query, pendingOnly = false }) => {
 	const match = buildReservationMatch({ actor, hotels, query, pendingOnly });
 	if (!match) {
@@ -892,6 +1098,7 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 			reservations: [],
 			hotels,
 			bookingSources: [],
+			scorecards: emptyReservationScorecards(),
 		};
 	}
 
@@ -912,7 +1119,7 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 		  })
 		: null;
 
-	const [countResult, rows, bookingSources] = await Promise.all([
+	const [countResult, rows, bookingSources, scorecards] = await Promise.all([
 		Reservations.aggregate([...basePipeline, { $count: "total" }]),
 		Reservations.aggregate([
 			...basePipeline,
@@ -925,6 +1132,7 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 			},
 		]),
 		pendingOnly ? bookingSourceOptionsFromMatch(bookingSourceMatch) : [],
+		buildReservationScorecards({ actor, hotels, query, pendingOnly }),
 	]);
 	const total = countResult?.[0]?.total || 0;
 	return {
@@ -935,6 +1143,7 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 		reservations: rows,
 		hotels,
 		bookingSources,
+		scorecards,
 	};
 };
 
@@ -958,9 +1167,40 @@ const executiveStoredCommissionExpression = () => ({
 	],
 });
 
+const executiveRoomNightsExpression = () => ({
+	$cond: [
+		{ $gt: [{ $ifNull: ["$days_of_residence", 0] }, 0] },
+		{ $ifNull: ["$days_of_residence", 0] },
+		{
+			$cond: [
+				{
+					$and: [
+						{ $ne: ["$checkin_date", null] },
+						{ $ne: ["$checkout_date", null] },
+					],
+				},
+				{
+					$max: [
+						0,
+						{
+							$dateDiff: {
+								startDate: "$checkin_date",
+								endDate: "$checkout_date",
+								unit: "day",
+							},
+						},
+					],
+				},
+				0,
+			],
+		},
+	],
+});
+
 const executiveGroupTotals = () => ({
 	reservationsCount: { $sum: 1 },
 	total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+	roomNights: { $sum: executiveRoomNightsExpression() },
 	commission: { $sum: executiveStoredCommissionExpression() },
 	paidAmount: {
 		$sum: {
@@ -1237,6 +1477,11 @@ const aggregateExecutiveReservationStats = (match) =>
 				_id: null,
 				...executiveGroupTotals(),
 				hotelsWithReservations: { $addToSet: "$hotelId" },
+				sourcesWithReservations: {
+					$addToSet: {
+						$trim: { input: { $ifNull: ["$booking_source", ""] } },
+					},
+				},
 			},
 		},
 		{
@@ -1244,10 +1489,20 @@ const aggregateExecutiveReservationStats = (match) =>
 				_id: 0,
 				reservationsCount: 1,
 				total_amount: 1,
+				roomNights: 1,
 				commission: 1,
 				paidAmount: 1,
 				capturedCount: 1,
 				hotelsWithReservations: { $size: "$hotelsWithReservations" },
+				sourcesWithReservations: {
+					$size: {
+						$filter: {
+							input: "$sourcesWithReservations",
+							as: "source",
+							cond: { $ne: ["$$source", ""] },
+						},
+					},
+				},
 			},
 		},
 	]);

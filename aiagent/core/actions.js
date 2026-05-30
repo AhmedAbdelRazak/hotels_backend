@@ -1,5 +1,8 @@
 // aiagent/core/actions.js
 const Reservations = require("../../models/reservations");
+const {
+	createReservationWithAvailabilitySnapshot,
+} = require("../../controllers/reservations");
 const { updateSupportCaseAppend } = require("./db");
 const { asciiize, digitsToEnglish } = require("./nlu");
 
@@ -86,7 +89,7 @@ async function createReservationForCase({
 	});
 	const totals = sumPickedRooms(pickedRoomsType);
 
-	const doc = new Reservations({
+	const reservationPayload = {
 		hotelId: hotel._id,
 		hotelName: hotel.hotelName,
 		belongsTo: hotel.belongsTo || undefined,
@@ -118,9 +121,12 @@ async function createReservationForCase({
 
 		confirmation_number,
 		advancePayment: 0,
-	});
+	};
 
-	const saved = await doc.save();
+	const saved = await createReservationWithAvailabilitySnapshot(
+		reservationPayload,
+		"ai_chat_reservation_create"
+	);
 
 	log(caseId, "reservation.created", {
 		reservationId: String(saved._id),

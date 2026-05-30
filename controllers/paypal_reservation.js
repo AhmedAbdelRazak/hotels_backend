@@ -60,6 +60,7 @@ const {
 } = require("./utils");
 const {
 	validateReservationInventoryForCreate,
+	captureReservationAvailabilitySnapshot,
 } = require("./reservations");
 
 /* Email setup */
@@ -1419,6 +1420,7 @@ async function buildAndSaveReservation({
 		commissionPaid: !!commissionPaid,
 		hotelName,
 		advancePayment,
+		availabilitySnapshot: reqBody.availabilitySnapshot,
 		...(financeStatus ? { financeStatus } : {}),
 	});
 
@@ -1855,6 +1857,11 @@ exports.createReservationAndProcess = async (req, res) => {
 				buildInventoryUnavailableResponse(inventoryValidation),
 			);
 		}
+		captureReservationAvailabilitySnapshot(
+			body,
+			inventoryValidation,
+			"paypal_reservation_create"
+		);
 
 		// Employee or Paid Offline (unchanged)
 		if (
@@ -5068,6 +5075,11 @@ exports.verifyReservationAndCreate = async (req, res) => {
 				.status(409)
 				.json(buildInventoryUnavailableResponse(inventoryValidation));
 		}
+		captureReservationAvailabilitySnapshot(
+			reservationData,
+			inventoryValidation,
+			"paypal_verified_reservation_create"
+		);
 
 		const checkinDate = new Date(reservationData.checkin_date);
 

@@ -6,6 +6,9 @@ const moment = require("moment-timezone");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const dayjs = require("dayjs");
+const {
+	createReservationWithAvailabilitySnapshot,
+} = require("./reservations");
 
 const calculateDaysOfResidence = (checkIn, checkOut) => {
 	const checkInDate = new Date(new Date(checkIn).setHours(0, 0, 0, 0));
@@ -387,7 +390,10 @@ exports.agodaDataDump = async (req, res) => {
 				);
 			} else {
 				// console.log("Creating new reservation:", itemNumber);
-				await Reservations.create(document);
+				await createReservationWithAvailabilitySnapshot(
+					document,
+					"integrator_agoda_import"
+				);
 				console.log("Saving to MongoDB:", {
 					checkin_date: checkInDate,
 					checkout_date: checkOutDate,
@@ -816,7 +822,10 @@ exports.expediaDataDump = async (req, res) => {
 				);
 				console.log("Updated existing reservation:", confirmationNumber);
 			} else {
-				await Reservations.create(document);
+				await createReservationWithAvailabilitySnapshot(
+					document,
+					"integrator_expedia_import"
+				);
 				console.log("Created reservation:", confirmationNumber);
 			}
 		}

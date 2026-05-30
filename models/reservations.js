@@ -382,6 +382,32 @@ const reservationsSchema = new mongoose.Schema(
 			},
 		},
 
+		availabilitySnapshot: {
+			type: Object,
+			default: {
+				// Captures room availability at reservation creation time so teams can
+				// audit what inventory looked like during the reserved stay.
+				captured: false,
+				capturedAt: null,
+				source: "",
+				hotelId: "",
+				hotelName: "",
+				checkin_date: null,
+				checkout_date: null,
+				stayDates: [],
+				requestedRooms: 0,
+				availableRoomsAtCreation: null,
+				availableRoomsAfterReservation: null,
+				minAvailableBefore: null,
+				minAvailableAfter: null,
+				totalAvailableBefore: 0,
+				totalAvailableAfter: 0,
+				overbooked: false,
+				overrideAllowed: false,
+				rooms: [],
+			},
+		},
+
 		agentDecisionSnapshot: {
 			type: Object,
 			default: {

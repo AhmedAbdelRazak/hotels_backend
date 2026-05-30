@@ -38,6 +38,7 @@ const {
 } = require("./utils");
 const {
 	validateReservationInventoryForCreate,
+	captureReservationAvailabilitySnapshot,
 } = require("./reservations");
 const {
 	sanitizeReservationAdminWorkflowForPublicViewer,
@@ -1244,6 +1245,11 @@ exports.createNewReservationClient = async (req, res) => {
 		}
 
 		req.body.confirmation_number = confirmationNumber;
+		captureReservationAvailabilitySnapshot(
+			req.body,
+			inventoryValidation,
+			"public_client_reservation_create"
+		);
 
 		await handleUserAndReservation(
 			req,
@@ -1369,6 +1375,7 @@ async function saveReservation(
 		payment_details: enrichedPaymentDetails,
 		hotelName: req.body.hotelName,
 		hazent: req.body.usePassword,
+		availabilitySnapshot: req.body.availabilitySnapshot,
 	});
 
 	try {
@@ -1704,6 +1711,11 @@ exports.verifyReservationToken = async (req, res) => {
 		reservationData.payment = "Not Paid";
 		reservationData.commission = 0;
 		reservationData.commissionPaid = false;
+		captureReservationAvailabilitySnapshot(
+			reservationData,
+			inventoryValidation,
+			"public_verified_reservation_create"
+		);
 
 		// Call the handleUserAndReservation function to create the user and reservation document
 		req.body = reservationData;
@@ -3602,7 +3614,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 					"",
 			};
 
-			const reservation = new Reservations({
+			const reservationPayload = {
 				hotelId,
 				customer_details: preparedCustomerDetails,
 				confirmation_number: confirmationNumber,
@@ -3664,7 +3676,14 @@ exports.createNewReservationClient2 = async (req, res) => {
 						},
 					},
 				],
-			});
+			};
+			captureReservationAvailabilitySnapshot(
+				reservationPayload,
+				inventoryValidation,
+				"janat_employee_reservation_create"
+			);
+
+			const reservation = new Reservations(reservationPayload);
 
 			const savedReservation = await reservation.save();
 			const hotel = await HotelDetails.findById(hotelId).exec();

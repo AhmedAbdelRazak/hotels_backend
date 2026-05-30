@@ -1038,6 +1038,92 @@ const reservationBlocksInventory = (
 	});
 };
 
+const buildReservationAvailabilitySnapshot = ({
+	reservationData = {},
+	hotel = {},
+	stayDates = [],
+	roomSnapshots = [],
+	issues = [],
+	allowOverbook = false,
+} = {}) => {
+	const minBeforeRaw = roomSnapshots.length
+		? Math.min(...roomSnapshots.map((room) => room.minAvailableBeforeRaw || 0))
+		: null;
+	const minAfterRaw = roomSnapshots.length
+		? Math.min(...roomSnapshots.map((room) => room.minAvailableAfterRaw || 0))
+		: null;
+	const totalAvailableBefore = roomSnapshots.reduce(
+		(sum, room) => sum + Math.max(0, Number(room.minAvailableBeforeRaw || 0)),
+		0
+	);
+	const totalAvailableAfter = roomSnapshots.reduce(
+		(sum, room) => sum + Math.max(0, Number(room.minAvailableAfterRaw || 0)),
+		0
+	);
+
+	return {
+		captured: false,
+		capturedAt: null,
+		source: "inventory_validation",
+		hotelId: normalizeId(reservationData.hotelId),
+		hotelName: hotel?.hotelName || reservationData.hotelName || "",
+		checkin_date: reservationData.checkin_date || null,
+		checkout_date: reservationData.checkout_date || null,
+		stayDates,
+		requestedRooms: roomSnapshots.reduce(
+			(sum, room) => sum + Math.max(1, Number(room.requested || 1)),
+			0
+		),
+		availableRoomsAtCreation:
+			minBeforeRaw === null ? null : Math.max(0, minBeforeRaw),
+		availableRoomsAfterReservation:
+			minAfterRaw === null ? null : Math.max(0, minAfterRaw),
+		minAvailableBefore:
+			minBeforeRaw === null ? null : Math.max(0, minBeforeRaw),
+		minAvailableBeforeRaw: minBeforeRaw,
+		minAvailableAfter: minAfterRaw === null ? null : Math.max(0, minAfterRaw),
+		minAvailableAfterRaw: minAfterRaw,
+		totalAvailableBefore,
+		totalAvailableAfter,
+		overbooked: issues.length > 0,
+		overrideAllowed: Boolean(allowOverbook && issues.length > 0),
+		issueCount: issues.length,
+		rooms: roomSnapshots,
+	};
+};
+
+const captureReservationAvailabilitySnapshot = (
+	reservationData = {},
+	inventoryValidation = {},
+	source = "reservation_create"
+) => {
+	const snapshot = inventoryValidation?.availabilitySnapshot;
+	if (!snapshot || typeof snapshot !== "object") return reservationData;
+	reservationData.availabilitySnapshot = {
+		...snapshot,
+		captured: true,
+		capturedAt: new Date(),
+		source,
+	};
+	return reservationData;
+};
+
+const createReservationWithAvailabilitySnapshot = async (
+	reservationData = {},
+	source = "reservation_import"
+) => {
+	const inventoryValidation = await validateReservationInventoryForCreate(
+		reservationData,
+		{ allowOverbook: true }
+	);
+	captureReservationAvailabilitySnapshot(
+		reservationData,
+		inventoryValidation,
+		source
+	);
+	return Reservations.create(reservationData);
+};
+
 const validateReservationInventoryForCreate = async (
 	reservationData = {},
 	{ allowOverbook = false, excludeReservationId = "" } = {}
@@ -1076,6 +1162,7 @@ const validateReservationInventoryForCreate = async (
 		(reservation) => !excludedId || normalizeId(reservation._id) !== excludedId
 	);
 	const issues = [];
+	const roomSnapshots = [];
 	const agentId = agentIdFromReservation(reservationData);
 
 	for (const selection of selections) {
@@ -1087,6 +1174,8 @@ const validateReservationInventoryForCreate = async (
 		const capacity = useAgentInventory
 			? Math.max(0, Number(assignedStock || 0))
 			: Math.max(0, Number(detail?.count || 0));
+		const requested = Math.max(1, Number(selection.count || 1));
+		const dailyAvailability = [];
 		for (const date of stayDates) {
 			let reserved = 0;
 			for (const reservation of candidateReservations) {
@@ -1111,8 +1200,17 @@ const validateReservationInventoryForCreate = async (
 						: sum;
 				}, 0);
 			}
-			const requested = Math.max(1, Number(selection.count || 1));
 			const available = capacity - reserved;
+			dailyAvailability.push({
+				date,
+				capacity,
+				reservedBefore: reserved,
+				availableBefore: Math.max(available, 0),
+				availableBeforeRaw: available,
+				requested,
+				availableAfter: Math.max(available - requested, 0),
+				availableAfterRaw: available - requested,
+			});
 			if (requested > available) {
 				issues.push({
 					code: "inventory_overbook",
@@ -1129,6 +1227,29 @@ const validateReservationInventoryForCreate = async (
 				});
 			}
 		}
+		const minAvailableBeforeRaw = dailyAvailability.length
+			? Math.min(...dailyAvailability.map((day) => day.availableBeforeRaw))
+			: 0;
+		const minAvailableAfterRaw = dailyAvailability.length
+			? Math.min(...dailyAvailability.map((day) => day.availableAfterRaw))
+			: 0;
+		roomSnapshots.push({
+			room_type: selection.room_type || detail?.roomType || detail?.room_type || "",
+			displayName:
+				selection.displayName ||
+				detail?.displayName ||
+				detail?.display_name ||
+				"",
+			requested,
+			capacity,
+			assignedStock,
+			agentScoped: Boolean(useAgentInventory),
+			minAvailableBefore: Math.max(minAvailableBeforeRaw, 0),
+			minAvailableBeforeRaw,
+			minAvailableAfter: Math.max(minAvailableAfterRaw, 0),
+			minAvailableAfterRaw,
+			days: dailyAvailability,
+		});
 	}
 
 	const warnings = issues.map((issue) => ({
@@ -1136,11 +1257,20 @@ const validateReservationInventoryForCreate = async (
 		code: "inventory_overbook_override",
 		message: `${issue.message} The reservation was allowed because it was created by hotel staff.`,
 	}));
+	const availabilitySnapshot = buildReservationAvailabilitySnapshot({
+		reservationData,
+		hotel,
+		stayDates,
+		roomSnapshots,
+		issues,
+		allowOverbook,
+	});
 
 	return {
 		allowed: allowOverbook || issues.length === 0,
 		issues,
 		warnings: allowOverbook ? warnings : [],
+		availabilitySnapshot,
 		message:
 			issues[0]?.message ||
 			"Selected room type does not have enough available inventory.",
@@ -1526,6 +1656,10 @@ const normalizeId = (value) => String(value?._id || value || "").trim();
 
 exports.validateReservationInventoryForCreate =
 	validateReservationInventoryForCreate;
+exports.captureReservationAvailabilitySnapshot =
+	captureReservationAvailabilitySnapshot;
+exports.createReservationWithAvailabilitySnapshot =
+	createReservationWithAvailabilitySnapshot;
 
 const includesId = (list = [], targetId) =>
 	Array.isArray(list) &&
@@ -3039,6 +3173,13 @@ exports.create = async (req, res) => {
 			if (Array.isArray(inventoryValidation.warnings)) {
 				reservationWarnings.push(...inventoryValidation.warnings);
 			}
+			captureReservationAvailabilitySnapshot(
+				reservationPayload,
+				inventoryValidation,
+				forcePendingConfirmation
+					? "agent_reservation_create"
+					: "hotel_reservation_create"
+			);
 		} catch (error) {
 			if (error instanceof ReservationPricingError || error?.statusCode) {
 				return res.status(error.statusCode || 400).json({
@@ -5979,7 +6120,10 @@ exports.agodaDataDump = async (req, res) => {
 				);
 			} else {
 				try {
-					await Reservations.create(document);
+					await createReservationWithAvailabilitySnapshot(
+						document,
+						"agoda_import"
+					);
 				} catch (error) {
 					if (error.code === 11000) {
 						// Check for duplicate key error
@@ -6158,7 +6302,10 @@ exports.expediaDataDump = async (req, res) => {
 				);
 			} else {
 				try {
-					await Reservations.create(document);
+					await createReservationWithAvailabilitySnapshot(
+						document,
+						"expedia_import"
+					);
 				} catch (error) {
 					if (error.code === 11000) {
 						// Check for duplicate key error
@@ -6334,7 +6481,10 @@ exports.airbnb = async (req, res) => {
 				);
 			} else {
 				try {
-					await Reservations.create(document);
+					await createReservationWithAvailabilitySnapshot(
+						document,
+						"airbnb_import"
+					);
 				} catch (error) {
 					if (error.code === 11000) {
 						// Check for duplicate key error
@@ -6552,7 +6702,10 @@ exports.bookingDataDump = async (req, res) => {
 				);
 			} else {
 				try {
-					await Reservations.create(document);
+					await createReservationWithAvailabilitySnapshot(
+						document,
+						"booking_import"
+					);
 				} catch (error) {
 					if (error.code === 11000) {
 						// Check for duplicate key error
@@ -6772,7 +6925,10 @@ exports.janatDataDump = async (req, res) => {
 				);
 			} else {
 				try {
-					await Reservations.create(document);
+					await createReservationWithAvailabilitySnapshot(
+						document,
+						"jannat_import"
+					);
 				} catch (error) {
 					if (error.code === 11000) {
 						// Check for duplicate key error

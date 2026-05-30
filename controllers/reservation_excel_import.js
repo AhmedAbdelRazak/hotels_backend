@@ -12,6 +12,9 @@ const { pickOpenAIModel } = require("../services/openaiModelConfig");
 const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
+const {
+	createReservationWithAvailabilitySnapshot,
+} = require("./reservations");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -649,7 +652,7 @@ exports.commitReservationExcelImport = async (req, res) => {
 					row.agentCompanyName ||
 					row.agentName ||
 					"Excel Upload";
-				const reservation = new Reservations({
+				const reservationPayload = {
 					confirmation_number: confirmationNumber,
 					customer_details: {
 						name: row.guestName || "Guest",
@@ -736,8 +739,11 @@ exports.commitReservationExcelImport = async (req, res) => {
 								"Reservation was created from AI-assisted Excel import and set to Pending Confirmation.",
 						},
 					],
-				});
-				const saved = await reservation.save();
+				};
+				const saved = await createReservationWithAvailabilitySnapshot(
+					reservationPayload,
+					"ai_excel_import"
+				);
 				created.push({
 					_id: saved._id,
 					confirmation_number: saved.confirmation_number,
