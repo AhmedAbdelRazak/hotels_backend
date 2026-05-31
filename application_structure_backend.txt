@@ -1321,7 +1321,7 @@ Future TODO Backlog - Added 2026-05-26
   - GET /api/hotel-inventory/:hotelId/availability now accepts includePendingConfirmation=true.
   - The default endpoint behavior is unchanged: pending-confirmation reservations are excluded from regular hotel-wide availability unless agent-scoped availability already requires them.
   - When includePendingConfirmation=true is supplied, pending-confirmation holds are counted in the current availability response for the requested stay range. This is used by PMS confirmation/review modals so staff can see what inventory is available now before accepting or financially approving a reservation.
-  - Agent-scoped requests still require the existing agent override authorization and continue to use agentId as the private stock scope.
+  - Agent-scoped requests still require the agent override authorization and continue to use agentId as the private stock scope. Hotel-scoped finance and reservation employees may read this agent-scoped availability for their assigned hotel so confirmation and finance-review modals can show current inventory for the agent reservation being reviewed.
 - Reservation inventory audit rule:
   - availabilitySnapshot remains the source of truth for what inventory looked like when the reservation was created.
   - Current availability must be loaded from the live hotel-inventory availability endpoint rather than recalculated in the frontend.

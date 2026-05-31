@@ -94,15 +94,21 @@ const canUseAgentOverrides = (actor = {}, hotel = {}, agentId = "") => {
 		roles.includes(10000) ||
 		descriptions.includes("hotelmanager") ||
 		descriptions.includes("systemadmin");
-	const isReservationStaff =
-		roles.includes(8000) || descriptions.includes("reservationemployee");
+	const isHotelReviewStaff =
+		roles.includes(6000) ||
+		roles.includes(8000) ||
+		descriptions.includes("finance") ||
+		descriptions.includes("reservationemployee");
 	const isAgentSelf =
 		actorId === targetAgentId &&
 		(roles.includes(7000) ||
 			descriptions.includes("ordertaker") ||
 			(Array.isArray(actor.accessTo) && actor.accessTo.includes("ownReservations")));
 
-	return isPlatform || (assignedToHotel && (isOwnerLike || isReservationStaff || isAgentSelf));
+	return (
+		isPlatform ||
+		(assignedToHotel && (isOwnerLike || isHotelReviewStaff || isAgentSelf))
+	);
 };
 
 module.exports = {
