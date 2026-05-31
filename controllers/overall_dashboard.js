@@ -788,7 +788,17 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 	if (!hotelIds.length) return null;
 
 	const match = { hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } };
-	applyDateFilter(match, query);
+	const scorecardScope = String(query.scorecardScope || "").trim().toLowerCase();
+	const actionRequiredOnly =
+		["1", "true", "yes"].includes(
+			String(query.actionRequiredOnly || "").toLowerCase()
+		) || scorecardScope === "actionrequired";
+	if (scorecardScope === "today") {
+		const todayRange = riyadhTodayRange();
+		match.createdAt = { $gte: todayRange.start, $lte: todayRange.end };
+	} else if (!actionRequiredOnly) {
+		applyDateFilter(match, query);
+	}
 
 	const clauses = [];
 	const includeCancelled =
@@ -836,6 +846,9 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 				],
 			});
 		}
+	}
+	if (actionRequiredOnly) {
+		clauses.push(pendingWorkflowFilterForActor(actor));
 	}
 	if (pendingOnly) {
 		clauses.push(pendingWorkflowFilterForActor(actor));
@@ -944,6 +957,19 @@ const emptyReservationScorecards = () => ({
 		totalAmount: 0,
 		nights: 0,
 		hotelsCount: 0,
+		todayCreated: 0,
+	},
+	today: {
+		reservationsCount: 0,
+		totalAmount: 0,
+		nights: 0,
+		hotelsCount: 0,
+	},
+	actionRequired: {
+		reservationsCount: 0,
+		totalAmount: 0,
+		nights: 0,
+		hotelsCount: 0,
 	},
 	statusCounts: {
 		confirmed: 0,
@@ -954,12 +980,37 @@ const emptyReservationScorecards = () => ({
 		noShow: 0,
 		other: 0,
 	},
+	todayStatusCounts: {
+		confirmed: 0,
+		pending: 0,
+		inHouse: 0,
+		checkedOut: 0,
+		cancelled: 0,
+		noShow: 0,
+		other: 0,
+	},
 });
+
+const riyadhTodayRange = () => {
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone: EXECUTIVE_REPORT_TIMEZONE,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(new Date());
+	const partValue = (type) =>
+		parts.find((part) => part.type === type)?.value || "";
+	const dateText = `${partValue("year")}-${partValue("month")}-${partValue("day")}`;
+	return {
+		start: new Date(`${dateText}T00:00:00.000+03:00`),
+		end: new Date(`${dateText}T23:59:59.999+03:00`),
+	};
+};
 
 const reservationListRoomNightsExpression = () => ({
 	$cond: [
-		{ $gt: [{ $ifNull: ["$days_of_residence", 0] }, 0] },
-		{ $ifNull: ["$days_of_residence", 0] },
+		{ $gt: [reservationNumberExpression("$days_of_residence"), 0] },
+		reservationNumberExpression("$days_of_residence"),
 		{
 			$cond: [
 				{
@@ -984,6 +1035,35 @@ const reservationListRoomNightsExpression = () => ({
 			],
 		},
 	],
+});
+
+const reservationNumberExpression = (field) => ({
+	$convert: {
+		input: field,
+		to: "double",
+		onError: 0,
+		onNull: 0,
+	},
+});
+
+const reservationScorecardGroupStage = () => ({
+	$group: {
+		_id: null,
+		reservationsCount: { $sum: 1 },
+		totalAmount: { $sum: reservationNumberExpression("$total_amount") },
+		nights: { $sum: reservationListRoomNightsExpression() },
+		hotels: { $addToSet: "$hotelId" },
+	},
+});
+
+const reservationScorecardProjectStage = () => ({
+	$project: {
+		_id: 0,
+		reservationsCount: 1,
+		totalAmount: 1,
+		nights: 1,
+		hotelsCount: { $size: "$hotels" },
+	},
 });
 
 const reservationStatusBucketKey = (bucket = {}) => {
@@ -1011,43 +1091,47 @@ const reservationStatusBucketKey = (bucket = {}) => {
 };
 
 const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly }) => {
+	const scorecardQuery = {
+		hotelId: (query || {}).hotelId || "",
+	};
 	const scorecardMatch = buildReservationMatch({
 		actor,
 		hotels,
-		query: { ...(query || {}), status: "" },
+		query: scorecardQuery,
 		pendingOnly,
 	});
 	if (!scorecardMatch) return emptyReservationScorecards();
 
-	const search = reservationSearchStage((query || {}).search);
-	const pipeline = [{ $match: scorecardMatch }, ...reservationLookupStages()];
-	if (search) pipeline.push({ $match: search });
+	const todayRange = riyadhTodayRange();
 
 	const [facet = {}] = await Reservations.aggregate([
-		...pipeline,
+		{ $match: scorecardMatch },
 		{
 			$facet: {
 				totals: [
-					{
-						$group: {
-							_id: null,
-							reservationsCount: { $sum: 1 },
-							totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
-							nights: { $sum: reservationListRoomNightsExpression() },
-							hotels: { $addToSet: "$hotelId" },
-						},
-					},
-					{
-						$project: {
-							_id: 0,
-							reservationsCount: 1,
-							totalAmount: 1,
-							nights: 1,
-							hotelsCount: { $size: "$hotels" },
-						},
-					},
+					reservationScorecardGroupStage(),
+					reservationScorecardProjectStage(),
 				],
-				statuses: [
+				today: [
+					{
+						$match: {
+							createdAt: { $gte: todayRange.start, $lte: todayRange.end },
+						},
+					},
+					reservationScorecardGroupStage(),
+					reservationScorecardProjectStage(),
+				],
+				actionRequired: [
+					{ $match: pendingWorkflowFilterForActor(actor) },
+					reservationScorecardGroupStage(),
+					reservationScorecardProjectStage(),
+				],
+				todayStatuses: [
+					{
+						$match: {
+							createdAt: { $gte: todayRange.start, $lte: todayRange.end },
+						},
+					},
 					{
 						$group: {
 							_id: {
@@ -1070,10 +1154,13 @@ const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly })
 
 	const empty = emptyReservationScorecards();
 	const totals = facet.totals?.[0] || empty.totals;
-	const statusCounts = { ...empty.statusCounts };
-	(facet.statuses || []).forEach((row) => {
+	const today = facet.today?.[0] || empty.today;
+	const actionRequired = facet.actionRequired?.[0] || empty.actionRequired;
+	const todayStatusCounts = { ...empty.todayStatusCounts };
+	(facet.todayStatuses || []).forEach((row) => {
 		const key = reservationStatusBucketKey(row._id || {});
-		statusCounts[key] = (statusCounts[key] || 0) + Number(row.count || 0);
+		todayStatusCounts[key] =
+			(todayStatusCounts[key] || 0) + Number(row.count || 0);
 	});
 
 	return {
@@ -1082,8 +1169,22 @@ const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly })
 			totalAmount: moneyNumber(totals.totalAmount),
 			nights: Number(totals.nights || 0),
 			hotelsCount: Number(totals.hotelsCount || 0),
+			todayCreated: Number(today.reservationsCount || 0),
 		},
-		statusCounts,
+		today: {
+			reservationsCount: Number(today.reservationsCount || 0),
+			totalAmount: moneyNumber(today.totalAmount),
+			nights: Number(today.nights || 0),
+			hotelsCount: Number(today.hotelsCount || 0),
+		},
+		actionRequired: {
+			reservationsCount: Number(actionRequired.reservationsCount || 0),
+			totalAmount: moneyNumber(actionRequired.totalAmount),
+			nights: Number(actionRequired.nights || 0),
+			hotelsCount: Number(actionRequired.hotelsCount || 0),
+		},
+		statusCounts: todayStatusCounts,
+		todayStatusCounts,
 	};
 };
 
@@ -3671,7 +3772,7 @@ exports.overallAccounts = async (req, res) => {
 			User.countDocuments(query),
 			User.find(query)
 				.select(
-					"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentApproval applicationReview role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accessTo createdAt updatedAt"
+					"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails agentApproval applicationReview role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accessTo createdAt updatedAt"
 				)
 				.populate("hotelsToSupport", "_id hotelName belongsTo")
 				.populate("hotelIdsOwner", "_id hotelName belongsTo")

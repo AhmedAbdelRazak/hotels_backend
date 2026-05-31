@@ -49,6 +49,11 @@ const sanitizeCompanyDocuments = (documents = []) =>
 			notes: String(document.notes || "").slice(0, 500),
 		}));
 
+const cleanPayoutText = (value, max = 180) =>
+	String(value || "")
+		.trim()
+		.slice(0, max);
+
 const AGENT_COMMERCIAL_MODELS = new Set([
 	"wallet_inventory",
 	"commission_only",
@@ -122,7 +127,7 @@ const ROLE_BY_DESCRIPTION = {
 };
 
 const USER_AUTH_SELECT =
-	"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo agentApproval applicationReview";
+	"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo agentApproval applicationReview";
 
 const buildAuthUserPayload = (user = {}) => ({
 	_id: user._id,
@@ -143,6 +148,7 @@ const buildAuthUserPayload = (user = {}) => ({
 	agentCommercialModel: user.agentCommercialModel,
 	agentOpeningWalletCredit: user.agentOpeningWalletCredit,
 	agentWalletOpeningBalances: user.agentWalletOpeningBalances,
+	agentPayoutDetails: user.agentPayoutDetails || {},
 	hotelIdWork: user.hotelIdWork,
 	hotelIdsWork: user.hotelIdsWork,
 	hotelIdsOwner: user.hotelIdsOwner,
@@ -152,6 +158,15 @@ const buildAuthUserPayload = (user = {}) => ({
 	agentApproval: user.agentApproval,
 	applicationReview: user.applicationReview,
 });
+
+const loadAuthenticatedPreviewActor = async (req = {}) => {
+	const authId = normalizeObjectIdString(req.auth?._id || req.auth?.id);
+	if (!authId || !isValidObjectId(authId)) return null;
+	if (req.profile && normalizeObjectIdString(req.profile._id) === authId) {
+		return req.profile;
+	}
+	return User.findById(authId).select(USER_AUTH_SELECT).lean().exec();
+};
 
 const normalizeObjectIdString = (value) => String(value?._id || value || "");
 
@@ -191,6 +206,43 @@ const buildAgentApprovalActor = (actor = {}) => ({
 	email: actor.email || "",
 	role: actor.roleDescription || actor.role || "",
 });
+
+const sanitizeAgentPayoutDetails = (details = {}, current = {}, actor = {}) => {
+	const source = details && typeof details === "object" ? details : {};
+	const existing =
+		current && typeof current === "object"
+			? current.toObject
+				? current.toObject()
+				: current
+			: {};
+	const readValue = (key) =>
+		Object.prototype.hasOwnProperty.call(source, key) ? source[key] : existing[key];
+	const preferredCurrency = cleanPayoutText(
+		readValue("preferredCurrency") || "SAR",
+		8
+	).toUpperCase();
+	const next = {
+		country: cleanPayoutText(readValue("country"), 80),
+		preferredCurrency: preferredCurrency || "SAR",
+		preferredMethod: cleanPayoutText(readValue("preferredMethod"), 60),
+		accountHolderName: cleanPayoutText(readValue("accountHolderName"), 160),
+		bankName: cleanPayoutText(readValue("bankName"), 160),
+		bankCountry: cleanPayoutText(readValue("bankCountry"), 80),
+		iban: cleanPayoutText(readValue("iban"), 80).replace(/\s+/g, "").toUpperCase(),
+		accountNumber: cleanPayoutText(readValue("accountNumber"), 80),
+		swiftCode: cleanPayoutText(readValue("swiftCode"), 40).toUpperCase(),
+		instapayAddress: cleanPayoutText(readValue("instapayAddress"), 160),
+		instapayPhone: cleanPayoutText(readValue("instapayPhone"), 40),
+		mobileWalletProvider: cleanPayoutText(readValue("mobileWalletProvider"), 80),
+		mobileWalletNumber: cleanPayoutText(readValue("mobileWalletNumber"), 40),
+		stcPayNumber: cleanPayoutText(readValue("stcPayNumber"), 40),
+		paypalEmail: normalizeOptionalEmail(readValue("paypalEmail")),
+		notes: cleanPayoutText(readValue("notes"), 800),
+		updatedAt: new Date(),
+		updatedBy: buildAgentApprovalActor(actor),
+	};
+	return next;
+};
 
 const canApproveAgentAccountsForOwner = async (
 	actor = {},
@@ -408,7 +460,7 @@ exports.updatedUserId = async (req, res, next, id) => {
 	try {
 		const target = await User.findById(id)
 			.select(
-				"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser employeeImage hotelIdWork belongsToId hotelsToSupport accessTo userRole userStore userBranch"
+				"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails role roleDescription roles roleDescriptions activeUser employeeImage hotelIdWork belongsToId hotelsToSupport accessTo userRole userStore userBranch"
 			)
 			.exec();
 		if (!target) {
@@ -456,6 +508,10 @@ exports.allUsersList = (req, res) => {
 exports.update = async (req, res) => {
 	try {
 		const { name, email, password } = req.body;
+		const payoutDetailsProvided = Object.prototype.hasOwnProperty.call(
+			req.body || {},
+			"agentPayoutDetails"
+		);
 
 		const user = await User.findById(req.profile._id);
 		if (!user) return res.status(400).json({ error: "User not found" });
@@ -497,11 +553,25 @@ exports.update = async (req, res) => {
 			user.password = String(password);
 		}
 
+		if (payoutDetailsProvided) {
+			if (!userLooksLikeAgent(user)) {
+				return res
+					.status(403)
+					.json({ error: "Only external agents can update payout details" });
+			}
+			user.agentPayoutDetails = sanitizeAgentPayoutDetails(
+				req.body.agentPayoutDetails,
+				user.agentPayoutDetails,
+				user
+			);
+		}
+
 		// If nothing was provided, just respond with current user
 		if (
 			typeof name === "undefined" &&
 			typeof email === "undefined" &&
-			(typeof password === "undefined" || password === "")
+			(typeof password === "undefined" || password === "") &&
+			!payoutDetailsProvided
 		) {
 			return res.json({
 				_id: user._id,
@@ -509,6 +579,7 @@ exports.update = async (req, res) => {
 				email: user.email,
 				role: user.role,
 				activeUser: user.activeUser,
+				agentPayoutDetails: user.agentPayoutDetails || {},
 			});
 		}
 
@@ -738,7 +809,7 @@ exports.listHotelStaffUsers = async (req, res) => {
 			],
 		})
 			.select(
-				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances role roleDescription roles roleDescriptions activeUser agentApproval applicationReview hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo createdAt updatedAt"
+				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails role roleDescription roles roleDescriptions activeUser agentApproval applicationReview hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo createdAt updatedAt"
 			)
 			.populate("hotelsToSupport", "_id hotelName")
 			.populate("hotelIdsOwner", "_id hotelName")
@@ -850,7 +921,18 @@ exports.listHotelAgentOptions = async (req, res) => {
 exports.previewHotelStaffDashboard = async (req, res) => {
 	try {
 		const { hotelId, staffId } = req.params;
-		const permission = await canManageHotelStaff(req.profile, hotelId);
+		const previewActor = await loadAuthenticatedPreviewActor(req);
+		if (
+			!previewActor ||
+			previewActor.activeUser === false ||
+			!isPlatformSuperAdmin(previewActor)
+		) {
+			return res.status(403).json({
+				error: "Only super admins can open another account dashboard.",
+			});
+		}
+
+		const permission = await canManageHotelStaff(previewActor, hotelId);
 		if (!permission.allowed) {
 			return res.status(403).json({ error: permission.error });
 		}
@@ -928,7 +1010,7 @@ exports.previewHotelStaffDashboard = async (req, res) => {
 			{
 				_id: staffUser._id,
 				preview: true,
-				previewActorId: req.profile?._id,
+				previewActorId: previewActor?._id,
 			},
 			process.env.JWT_SECRET,
 			{ expiresIn: "2h" }
@@ -938,8 +1020,8 @@ exports.previewHotelStaffDashboard = async (req, res) => {
 			token,
 			user: buildAuthUserPayload(previewUser),
 			preview: {
-				actorId: req.profile?._id,
-				actorName: req.profile?.name || "",
+				actorId: previewActor?._id,
+				actorName: previewActor?.name || "",
 				targetUserId: staffUser._id,
 				targetName: staffUser.name || staffUser.email || "",
 				hotelId: permission.hotelId,
@@ -1137,6 +1219,19 @@ exports.updateHotelStaffUser = async (req, res) => {
 		if ("agentOpeningWalletCredit" in payload) {
 			staffUser.agentOpeningWalletCredit = nonNegativeMoney(
 				payload.agentOpeningWalletCredit
+			);
+		}
+
+		if ("agentPayoutDetails" in payload) {
+			if (!staffIsAgent) {
+				return res
+					.status(400)
+					.json({ error: "Payout details are available for external agents only." });
+			}
+			staffUser.agentPayoutDetails = sanitizeAgentPayoutDetails(
+				payload.agentPayoutDetails,
+				staffUser.agentPayoutDetails,
+				req.profile
 			);
 		}
 

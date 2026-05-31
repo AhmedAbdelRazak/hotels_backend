@@ -790,6 +790,7 @@ const calculateAgentWalletSummary = async ({
 			companyName: agent.companyName || "",
 			agentCommercialModel: commercialModel,
 			agentOpeningWalletCredit: openingWalletCredit,
+			agentPayoutDetails: agent.agentPayoutDetails || {},
 			assignedHotelIds: agentAssignedHotelIds(agent),
 		},
 		commercialModel,
@@ -853,7 +854,7 @@ exports.agentWalletSummary = async (req, res) => {
 				...buildAgentRoleQuery(),
 			})
 				.select(
-					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 				)
 				.lean()
 				.exec();
@@ -867,7 +868,7 @@ exports.agentWalletSummary = async (req, res) => {
 		} else {
 			agents = await User.find(buildAgentWalletScopeQuery(scopeHotelIds, actor))
 				.select(
-					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
+					"_id name email phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
 				)
 				.sort({ companyName: 1, name: 1 })
 				.lean()

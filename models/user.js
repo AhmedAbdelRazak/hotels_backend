@@ -102,6 +102,30 @@ const userSchema = new mongoose.Schema(
 			default: [],
 		},
 
+		agentPayoutDetails: {
+			type: Object,
+			default: {
+				country: "",
+				preferredCurrency: "SAR",
+				preferredMethod: "",
+				accountHolderName: "",
+				bankName: "",
+				bankCountry: "",
+				iban: "",
+				accountNumber: "",
+				swiftCode: "",
+				instapayAddress: "",
+				instapayPhone: "",
+				mobileWalletProvider: "",
+				mobileWalletNumber: "",
+				stcPayNumber: "",
+				paypalEmail: "",
+				notes: "",
+				updatedAt: null,
+				updatedBy: null,
+			},
+		},
+
 		hotelAddress: {
 			type: String,
 			trim: true,

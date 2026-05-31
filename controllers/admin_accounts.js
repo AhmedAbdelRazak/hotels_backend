@@ -532,7 +532,7 @@ exports.listAdminAccounts = async (req, res) => {
 		const [accounts, total, hotels] = await Promise.all([
 			User.find(query)
 				.select(
-					"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo accountScope platformEmployee platformEmployeeType createdAt updatedAt"
+					"_id name email emailIsPlaceholder phone companyName companyOfficialName agentCommercialModel agentPayoutDetails role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo accountScope platformEmployee platformEmployeeType createdAt updatedAt"
 				)
 				.populate("hotelIdsWork", "_id hotelName hotelName_OtherLanguage belongsTo")
 				.populate("hotelsToSupport", "_id hotelName hotelName_OtherLanguage belongsTo")

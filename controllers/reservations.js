@@ -467,7 +467,6 @@ const resolveReservationAuditActor = async (
 					.exec();
 				return {
 					...actorSnapshot,
-					name: `-- ${actorSnapshot.name}`,
 					preview: true,
 					previewedBy: previewActor
 						? {
@@ -5117,13 +5116,32 @@ exports.updateReservation = async (req, res) => {
 				: null;
 		delete normalizedUpdateData.__previewAudit;
 		delete normalizedUpdateData.__previewAuditActorId;
-		const authenticatedActorId = req.auth?._id || "";
+		const authenticatedActorId = normalizeId(req.auth?._id || "");
+		const payloadPreviewActorId = normalizeId(
+			previewAuditFromPayload?.previewActorId
+		);
+		const canUsePayloadPreviewAudit = Boolean(
+			previewAuditFromPayload &&
+				authenticatedActorId &&
+				payloadPreviewActorId &&
+				authenticatedActorId === payloadPreviewActorId &&
+				isConfiguredSuperAdmin(authenticatedActorId) &&
+				normalizedUpdateData.requestingUserId &&
+				mongoose.Types.ObjectId.isValid(normalizedUpdateData.requestingUserId)
+		);
 		const requestingUserId = req.auth?.preview
 			? authenticatedActorId
+			: canUsePayloadPreviewAudit
+			  ? normalizedUpdateData.requestingUserId
 			: authenticatedActorId ||
 			  normalizedUpdateData.requestingUserId ||
 			  normalizedUpdateData.updatedBy ||
 			  normalizedUpdateData.userId;
+		const effectivePreviewAuth = req.auth?.preview
+			? req.auth
+			: canUsePayloadPreviewAudit
+			  ? previewAuditFromPayload
+			  : req.auth || null;
 		delete normalizedUpdateData.requestingUserId;
 		delete normalizedUpdateData.updatedBy;
 		delete normalizedUpdateData.userId;
@@ -5187,7 +5205,7 @@ exports.updateReservation = async (req, res) => {
 		const auditActor = await resolveReservationAuditActor(
 			requestingUserId,
 			updateData,
-			{ previewAuth: req.auth || previewAuditFromPayload }
+			{ previewAuth: effectivePreviewAuth }
 		);
 		const requestingActor =
 			requestingUserId && mongoose.Types.ObjectId.isValid(requestingUserId)
@@ -8451,6 +8469,137 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Error updating pending confirmation reservation:", error);
+		return res.status(500).json({ error: "Server error: " + error.message });
+	}
+};
+
+exports.markReservationCommissionPaid = async (req, res) => {
+	try {
+		const { reservationId, userId } = req.params;
+		const body = req.body || {};
+		const actorId = req.auth?._id || body.userId || userId;
+
+		if (!ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ error: "Invalid reservation ID" });
+		}
+		if (!actorId || !ObjectId.isValid(actorId)) {
+			return res.status(401).json({ error: "Valid user is required" });
+		}
+
+		const [reservation, actor] = await Promise.all([
+			Reservations.findById(reservationId),
+			User.findById(actorId)
+				.select(
+					"_id name email role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner"
+				)
+				.lean()
+				.exec(),
+		]);
+
+		if (!reservation) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
+		if (!actor || !(await canViewReservationHotel(actor, reservation.hotelId))) {
+			return res.status(403).json({ error: "Access denied" });
+		}
+		if (!isManagerOrAdminAccount(actor) && !isFinanceOnlyAccount(actor)) {
+			return res.status(403).json({
+				error: "Only finance, hotel managers, or admins can mark commission paid.",
+			});
+		}
+
+		const now = new Date();
+		const auditActor = await resolveReservationAuditActor(actorId, body, {
+			previewAuth: req.auth,
+		});
+		const updatePayload = {
+			commissionPaid: true,
+			commissionStatus: "commission paid",
+			commissionPaidAt: reservation.commissionPaidAt || now,
+		};
+
+		if (body.commission !== undefined) {
+			updatePayload.commission = n2(body.commission);
+			const existingCommissionData =
+				reservation.commissionData &&
+				typeof reservation.commissionData.toObject === "function"
+					? reservation.commissionData.toObject()
+					: reservation.commissionData || {};
+			updatePayload.commissionData = {
+				...existingCommissionData,
+				assigned: true,
+				amount: updatePayload.commission,
+				status: "commission paid",
+				assignedAt: existingCommissionData.assignedAt || now,
+				assignedBy: existingCommissionData.assignedBy || auditActor,
+			};
+		}
+
+		const commissionAgentApproval =
+			await buildCommissionAgentApprovalForFinanceUpdate({
+				reservation,
+				updates: updatePayload,
+				actor: auditActor,
+			});
+		if (commissionAgentApproval) {
+			updatePayload.commissionAgentApproval = commissionAgentApproval;
+		}
+		updatePayload.financial_cycle = buildFinancialCycleSnapshot(
+			reservation,
+			updatePayload,
+			actorId
+		);
+
+		const auditEntries = buildReservationAuditEntries(
+			reservation,
+			updatePayload,
+			auditActor
+		);
+		const updateOperation = {
+			$set: {
+				...updatePayload,
+				adminLastUpdatedAt: now,
+				adminLastUpdatedBy: auditActor,
+			},
+		};
+		if (auditEntries.length) {
+			updateOperation.$push = {
+				adminChangeLog: { $each: auditEntries },
+				reservationAuditLog: { $each: auditEntries },
+			};
+		}
+
+		const updatedReservation = await Reservations.findByIdAndUpdate(
+			reservationId,
+			updateOperation,
+			{ new: true }
+		)
+			.populate("roomId", "room_number room_type displayName")
+			.lean()
+			.exec();
+
+		await trackReservationStatusChange({
+			req,
+			actor: { ...actor, ...auditActor },
+			reservationBefore: reservation,
+			reservationAfter: updatedReservation,
+			auditEntries,
+			source: "commission_mark_paid",
+		});
+
+		emitHotelNotificationRefresh(req, updatedReservation.hotelId, {
+			type: "commission_paid",
+			reservationId: updatedReservation._id,
+			ownerId: updatedReservation.belongsTo,
+		}).catch((error) =>
+			console.error("Error emitting commission paid notification:", error)
+		);
+
+		return res.json(
+			sanitizeReservationAuditLogsForViewer(updatedReservation, actor)
+		);
+	} catch (error) {
+		console.error("Error marking reservation commission paid:", error);
 		return res.status(500).json({ error: "Server error: " + error.message });
 	}
 };

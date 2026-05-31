@@ -64,6 +64,14 @@ const actorSnapshot = (actor = {}) => {
 	};
 };
 
+const previewMetadata = (actor = {}) => {
+	if (!actor?.preview) return {};
+	return {
+		preview: true,
+		previewedBy: cleanForAudit(actor.previewedBy || null),
+	};
+};
+
 const normalizeRoleKey = (value = "") =>
 	String(value || "")
 		.toLowerCase()
@@ -94,7 +102,8 @@ const isPrivilegedTrackerActor = (actor = {}) => {
 	const roleKeys = values.map(normalizeRoleKey).filter(Boolean);
 	return (
 		roleNumbers.some((role) => role === 1000 || role === 10000) ||
-		roleKeys.some((role) => privilegedActorRoleKeys.has(role))
+		roleKeys.some((role) => privilegedActorRoleKeys.has(role)) ||
+		isPrivilegedTrackerActor(actor.previewedBy)
 	);
 };
 
@@ -582,6 +591,7 @@ const trackReservationStatusChange = async ({
 			metadata: {
 				auditFields: [...changedAuditFields],
 				sourceAction: source,
+				...previewMetadata(actor),
 			},
 		});
 		return acc;

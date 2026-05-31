@@ -645,6 +645,7 @@ exports.signin = async (req, res) => {
 			agentCommercialModel,
 			agentOpeningWalletCredit,
 			agentWalletOpeningBalances,
+			agentPayoutDetails,
 			hotelIdWork,
 			hotelIdsWork,
 			belongsToId,
@@ -677,6 +678,7 @@ exports.signin = async (req, res) => {
 				agentCommercialModel,
 				agentOpeningWalletCredit,
 				agentWalletOpeningBalances,
+				agentPayoutDetails,
 				hotelIdWork,
 				hotelIdsWork,
 				belongsToId,
@@ -1627,11 +1629,25 @@ exports.signout = (req, res) => {
 	res.json({ message: "User Signed Out" });
 };
 
-exports.requireSignin = expressJwt({
+const requireSigninJwt = expressJwt({
 	secret: process.env.JWT_SECRET,
 	userProperty: "auth",
 	algorithms: ["HS256"],
 });
+
+exports.requireSignin = (req, res, next) =>
+	requireSigninJwt(req, res, (error) => {
+		if (error) return next(error);
+		if (
+			req.auth?.preview === true &&
+			!isConfiguredSuperAdmin(req.auth?.previewActorId)
+		) {
+			return res.status(403).json({
+				error: "Only super admins can use dashboard preview.",
+			});
+		}
+		return next();
+	});
 
 exports.optionalSignin = expressJwt({
 	secret: process.env.JWT_SECRET,

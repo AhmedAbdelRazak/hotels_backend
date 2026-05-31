@@ -57,6 +57,7 @@ const {
 	pendingConfirmationNotificationFeed,
 	acknowledgePendingNotification,
 	updatePendingConfirmationReservation,
+	markReservationCommissionPaid,
 	updateAgentCommissionApproval,
 	reservationAgentWalletSnapshot,
 } = require("../controllers/reservations");
@@ -162,6 +163,12 @@ router.put(
 	"/reservations/pending-confirmation/:reservationId/:userId",
 	requireSignin,
 	updatePendingConfirmationReservation
+);
+
+router.put(
+	"/reservations/commission-paid/:reservationId/:userId",
+	requireSignin,
+	markReservationCommissionPaid
 );
 
 router.put(

@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-05-30
+Audited: 2026-05-31
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -1332,3 +1332,127 @@ Future TODO Backlog - Added 2026-05-26
 - Validation completed locally:
   - node --check controllers/hotel_inventory.js.
   - hotels_frontend npm.cmd run build compiled successfully.
+
+2026-05-31 Agent Accounts, Payout Details, Wallet Claims, And Finance QA
+- Business purpose:
+  - External agents/order takers need to create reservations, maintain payout details for commission payment, submit wallet top-up claims, and see only their own agent-scoped dashboard context.
+  - Owners, Hotel System Admins, hotel managers, finance users, authorized account-management users, and configured Super Admins need to see agent payout details where their hotel scope allows it.
+  - Finance users need to approve wallet claims and mark unpaid reservation commissions as paid without breaking agent auditability.
+- Role and scope expectations:
+  - Agent accounts use role 7000 and roleDescription/roleDescriptions value ordertaker.
+  - Agent accounts should normally have accessTo values newReservation and ownReservations.
+  - Agent wallet and reservation queries are scoped through hotelIdWork, hotelIdsWork, hotelsToSupport, hotelIdsOwner, belongsToId, createdByUserId, orderTakeId, createdBy._id, and orderTaker._id.
+  - Finance users can review wallet claims and mark commissions paid only within their hotel scope.
+  - Finance and reservation employees may create external agent accounts where allowed, but they cannot activate/approve those agents unless owner/platform approval rules allow it.
+  - Only configured platform Super Admins can preview/open another account's dashboard as that user. Normal owners, staff, finance users, reservation employees, and agents cannot access another user's dashboard as themselves.
+- Agent invitation link backend flow:
+  - Route: POST /api/overall-dashboard/signup-invitation/:userId.
+  - Controller: controllers/overall_dashboard.js createSignupInvitation.
+  - Creates a SignupInvitation record with a hashed invite code and a signed token.
+  - Invitation payload may include accountType, hotelIds, name, email, phone, company fields, agentCommercialModel, agentOpeningWalletCredit, and applicationNotes.
+  - Invitation payload must never include passwords, hashed_password, salt, or any credential field.
+  - Route: GET /api/signup-invitation and GET /api/signup-invitation/:code.
+  - Controller: controllers/auth.js resolveSignupInvitation.
+  - Resolves invite code or token into a public-safe invitation response and validates invited hotel ids.
+- Public invited agent signup backend flow:
+  - Route: POST /api/signup.
+  - Controller: controllers/auth.js signup.
+  - Public agent/job applications require a valid invitation link.
+  - Public agent signup creates an inactive ordertaker with agentApproval.status = pending and applicationReview.status = pending.
+  - Public agent signup uses invited hotel scope and invited commercial model/opening wallet values when present.
+- Immediate create-agent backend flow:
+  - Route: POST /api/hotel-staff/create/:userId.
+  - Controller: controllers/auth.js createHotelStaffUser.
+  - Authorized owners/platform users can create an ordertaker directly.
+  - If creatorCanApproveAgent is true, the agent is active immediately and agentApproval.status = approved.
+  - If the creator cannot approve agents, the account remains inactive with pending approval and an agent_account_pending notification is emitted.
+  - Finance/reservation users are constrained to external agent creation only when they use this path.
+- Agent approval/update backend flow:
+  - Route: PUT /api/hotel-staff/:staffId/:hotelId/:userId.
+  - Controller: controllers/user.js updateHotelStaffUser.
+  - Activation is controlled by canApproveAgentAccountsForOwner.
+  - Approving an agent sets activeUser = true, agentApproval.status = approved, approvedAt, approvedBy, lastUpdatedAt, and lastUpdatedBy.
+  - Public application approval also updates applicationReview.status = approved and approvedHotelIds.
+  - Approval/update notifications should send users back to the overall account activation view, e.g. /hotel-management/main-dashboard?ownerId=<ownerId>&overall=activate-accounts&page=1&range=custom.
+- Agent payout details backend flow:
+  - Model: models/user.js agentPayoutDetails.
+  - Self-update route: PUT /api/user/:userId.
+  - Controller: controllers/user.js update.
+  - Only users that look like agents/order takers can update their own agentPayoutDetails.
+  - sanitizeAgentPayoutDetails stores country, preferredCurrency, preferredMethod, accountHolderName, bankName, bankCountry, iban, accountNumber, swiftCode, instapayAddress, instapayPhone, mobileWalletProvider, mobileWalletNumber, stcPayNumber, paypalEmail, and notes.
+  - IBAN is trimmed, spaces are removed, and it is uppercased.
+  - preferredCurrency and swiftCode are uppercased.
+  - paypalEmail is normalized through the optional-email validator.
+  - updatedAt and updatedBy are recorded inside the payout details object.
+  - Authorized account updates can also set agentPayoutDetails through updateHotelStaffUser, but only for external agent accounts.
+- Payout detail visibility:
+  - Route: GET /api/overall-dashboard/accounts/:userId.
+  - Controller: controllers/overall_dashboard.js overallAccounts.
+  - Account-management responses include agentPayoutDetails for authorized owner/manager/Super Admin account views.
+  - Route: GET /api/agent-wallet/summary/:userId and /api/agent-wallet/summary/:hotelId/:userId.
+  - Controller: controllers/agent_wallet.js agentWalletSummary.
+  - Wallet summary selects agentPayoutDetails and returns it under each summary's agent object for finance/owner views.
+- Agent wallet claim backend flow:
+  - Route: POST /api/agent-wallet/claims/:userId and /api/agent-wallet/claims/:hotelId/:userId.
+  - Controller: controllers/agent_wallet.js createAgentWalletClaim.
+  - Only the signed-in external agent can submit a wallet credit claim.
+  - The endpoint derives the agent from req.auth/userId; it should not require the agent to type or select their own name.
+  - Commission-only agents cannot submit wallet top-up claims.
+  - Attachments are required, but pre-existing attachment objects with public_id and url can be accepted without uploading again.
+  - Claim transactions are stored in AgentWallet with source = agent_claim, transactionType = deposit, status = pending, and reviewStatus = pending.
+  - Agent wallet activities are tracked under category agent_wallet.
+  - Wallet claim notifications are emitted to the relevant hotel/owner scope.
+- Finance wallet claim review backend flow:
+  - Route: PUT /api/agent-wallet/claims/:userId/:transactionId/review and /api/agent-wallet/claims/:hotelId/:userId/:transactionId/review.
+  - Controller: controllers/agent_wallet.js reviewAgentWalletClaim.
+  - Finance/manager/admin actors with wallet scope can approve or reject pending agent claims.
+  - Approve changes status to posted and reviewStatus to approved, records reviewedAt, reviewedBy, and updatedBy.
+  - Reject changes status/reviewStatus to rejected and requires rejectionReason.
+  - Approved posted claims are included in walletAdded and balance calculations.
+- Agent wallet todo backend flow:
+  - Route: GET /api/agent-wallet/todos/:userId and /api/agent-wallet/todos/:hotelId/:userId.
+  - Controller: controllers/agent_wallet.js agentTodoList.
+  - Returns wallet_claim_pending / wallet_claim_rejected tasks plus reservation commission and pending-confirmation tasks for the requested agent.
+  - The default requested agent is the signed-in agent when no agentId query is supplied.
+- Commission-paid backend flow:
+  - Route: PUT /api/reservations/commission-paid/:reservationId/:userId.
+  - Controller: controllers/reservations.js markReservationCommissionPaid.
+  - Finance, hotel managers, and admins can mark a scoped reservation commission as paid.
+  - The endpoint sets commissionPaid = true, commissionStatus = commission paid, commissionPaidAt, commissionData when commission is supplied, and refreshes financial_cycle.
+  - If the reservation belongs to an agent/order taker, buildCommissionAgentApprovalForFinanceUpdate creates commissionAgentApproval.status = pending so the agent can confirm/dispute the marked payment.
+  - adminChangeLog and reservationAuditLog receive audit entries.
+  - ActivityTracker receives a reservation status change from source commission_mark_paid.
+- Super Admin dashboard preview backend safety:
+  - controllers/user.js previewHotelStaffDashboard returns preview auth only to configured platform Super Admins.
+  - controllers/auth.js requireSignin rejects preview JWTs unless previewActorId belongs to a configured Super Admin.
+  - Reservation updates that include preview audit metadata only accept it when the authenticated actor is a configured Super Admin and the preview actor matches the request.
+  - When preview auth is used on hotel-management routes, backend behavior should act as the previewed employee/agent for scoping and audit actor purposes, with preview metadata retained only for privileged auditing.
+  - AdminModule /admin routes should not run as preview auth.
+- 2026-05-31 local end-to-end QA completed:
+  - Environment verified as local database host 127.0.0.1:27019 before mutating test data.
+  - Created a Codex QA agent invitation through POST /api/overall-dashboard/signup-invitation/:ownerId.
+  - Resolved the invite code through GET /api/signup-invitation/:code.
+  - Confirmed invitation responses did not include password, hashed_password, or salt fields.
+  - Created a fresh ordertaker agent through POST /api/hotel-staff/create/:ownerId.
+  - Saved payout details as that agent through PUT /api/user/:agentId.
+  - Confirmed owner account-management view can see the payout details through GET /api/overall-dashboard/accounts/:ownerId.
+  - Confirmed finance wallet view can see payout details through GET /api/agent-wallet/summary/:financeId?agentId=<agentId>.
+  - Confirmed opening wallet credit appears in agent wallet summary.
+  - Submitted a wallet top-up claim as the agent through POST /api/agent-wallet/claims/:agentId without passing/selecting an agent name.
+  - Confirmed the agent todo list shows wallet_claim_pending.
+  - Approved the claim as a finance employee through PUT /api/agent-wallet/claims/:financeId/:transactionId/review.
+  - Confirmed reviewedBy is the finance user and wallet balance increased.
+  - Created a temporary agent-owned reservation directly in the local DB for commission testing.
+  - Marked its commission paid as finance through PUT /api/reservations/commission-paid/:reservationId/:financeId.
+  - Confirmed commissionPaid = true, commissionStatus = commission paid, and commissionAgentApproval.status = pending.
+  - Confirmed the agent todo list receives a commission_agent_approval item.
+  - Cleanup verified zero Codex QA users, zero Codex QA wallet transactions, zero Codex QA reservations, and zero Codex QA signup invitations remained.
+  - Backend validation passed:
+    - node --check controllers/auth.js
+    - node --check controllers/user.js
+    - node --check controllers/overall_dashboard.js
+    - node --check controllers/agent_wallet.js
+    - node --check controllers/reservations.js
+    - node --check services/activityTracker.js
+  - Frontend validation passed:
+    - hotels_frontend npm.cmd run build compiled successfully.
