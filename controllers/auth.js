@@ -211,24 +211,25 @@ const hashInvitationCode = (code = "") =>
 	crypto.createHash("sha256").update(String(code || "")).digest("hex");
 
 const normalizeSignupInvitationPayload = (payload = {}) => {
-	const accountType = String(payload.accountType || payload.signupIntent || "")
+	const source = payload && typeof payload === "object" ? payload : {};
+	const accountType = String(source.accountType || source.signupIntent || "")
 		.trim()
 		.toLowerCase();
 	if (!["agent", "job"].includes(accountType)) return null;
-	const hotelIds = uniqueStringIds(payload.hotelIds || []).filter((id) =>
+	const hotelIds = uniqueStringIds(source.hotelIds || []).filter((id) =>
 		mongoose.Types.ObjectId.isValid(id)
 	);
 	if (!hotelIds.length) return null;
 	return {
-		...payload,
+		...source,
 		accountType,
 		signupIntent: accountType,
 		hotelIds,
-		hotelNames: Array.isArray(payload.hotelNames) ? payload.hotelNames : [],
+		hotelNames: Array.isArray(source.hotelNames) ? source.hotelNames : [],
 		roleDescription:
 			accountType === "agent"
 				? "ordertaker"
-				: normalizePublicRoleDescription(payload.roleDescription),
+				: normalizePublicRoleDescription(source.roleDescription),
 	};
 };
 
