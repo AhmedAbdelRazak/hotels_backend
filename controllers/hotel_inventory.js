@@ -1107,6 +1107,8 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 	const { hotelId } = req.params;
 	const { start, end, includeCancelled } = req.query;
 	const requestedAgentId = normalizeId(req.query.agentId);
+	const includePendingConfirmation =
+		String(req.query.includePendingConfirmation || "").toLowerCase() === "true";
 
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		return res.status(400).json({ error: "Invalid hotelId" });
@@ -1193,7 +1195,7 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 				isReservationActive(
 					reservation,
 					includeCancelled === "true",
-					Boolean(agentOverrideId)
+					Boolean(agentOverrideId) || includePendingConfirmation
 				)
 			)
 			.map((reservation) => ({

@@ -1313,5 +1313,22 @@ Future TODO Backlog - Added 2026-05-26
 2026-05-29 Edit Reservation Modal Draft-State Follow-Up
 - Backend/API status:
   - No backend schema, controller, or API change was required for the hotel-management edit reservation modal closing/refresh behavior.
-  - The frontend now keeps edit changes in a local modal draft until updateSingleReservation succeeds, so the existing backend update endpoint continues to receive the same normalized reservation payload only on explicit save.
-  - Inactive hotel access remains an edit-mode frontend selection concern; backend persistence behavior is unchanged.
+ - The frontend now keeps edit changes in a local modal draft until updateSingleReservation succeeds, so the existing backend update endpoint continues to receive the same normalized reservation payload only on explicit save.
+ - Inactive hotel access remains an edit-mode frontend selection concern; backend persistence behavior is unchanged.
+
+2026-05-31 Pending Confirmation Inventory Brief
+- controllers/hotel_inventory.js:
+  - GET /api/hotel-inventory/:hotelId/availability now accepts includePendingConfirmation=true.
+  - The default endpoint behavior is unchanged: pending-confirmation reservations are excluded from regular hotel-wide availability unless agent-scoped availability already requires them.
+  - When includePendingConfirmation=true is supplied, pending-confirmation holds are counted in the current availability response for the requested stay range. This is used by PMS confirmation/review modals so staff can see what inventory is available now before accepting or financially approving a reservation.
+  - Agent-scoped requests still require the existing agent override authorization and continue to use agentId as the private stock scope.
+- Reservation inventory audit rule:
+  - availabilitySnapshot remains the source of truth for what inventory looked like when the reservation was created.
+  - Current availability must be loaded from the live hotel-inventory availability endpoint rather than recalculated in the frontend.
+  - Confirmation and finance modals should display both values when available: booking-time before/after inventory from availabilitySnapshot and current available inventory for the same room displayName/roomType and date range.
+- Frontend callers:
+  - hotels_frontend/src/HotelModule/NewReservation/PendingReservationInventoryBrief.js renders the compact room inventory card.
+  - The single-hotel pending confirmation modal, overall pending confirmation modal, and finance review modals request includePendingConfirmation=true so the displayed "available now" number reflects pending holds during staff review.
+- Validation completed locally:
+  - node --check controllers/hotel_inventory.js.
+  - hotels_frontend npm.cmd run build compiled successfully.
