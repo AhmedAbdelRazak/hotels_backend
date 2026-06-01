@@ -2014,6 +2014,10 @@ const buildFinancialActionsMatch = ({
 			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
 		});
 	}
+	const requestedAgentId = normalizeId(query.agentId);
+	if (requestedAgentId && ObjectId.isValid(requestedAgentId)) {
+		clauses.push({ $or: agentReservationOwnerClauses(requestedAgentId) });
+	}
 	if (isOrderTakerOnly(actor)) {
 		const actorId = normalizeId(actor._id);
 		if (ObjectId.isValid(actorId)) {
@@ -2063,10 +2067,15 @@ const walletAgentAssignmentClause = (hotelIds = []) => {
 	};
 };
 
-const walletAgentIdsForHotels = async (hotelIds = [], actor = {}) => {
+const walletAgentsForHotels = async (hotelIds = [], actor = {}) => {
 	if (isOrderTakerOnly(actor)) {
 		const actorId = normalizeId(actor._id);
-		return ObjectId.isValid(actorId) ? [actorId] : [];
+		if (!ObjectId.isValid(actorId)) return [];
+		const actorAccount = await User.findById(actorId)
+			.select("_id name email phone companyName agentCommercialModel")
+			.lean()
+			.exec();
+		return actorAccount ? [actorAccount] : [];
 	}
 	const assignment = walletAgentAssignmentClause(hotelIds);
 	if (!Object.keys(assignment).length && !isSuperAdmin(actor)) return [];
@@ -2076,9 +2085,17 @@ const walletAgentIdsForHotels = async (hotelIds = [], actor = {}) => {
 				activeUser: { $ne: false },
 				$and: [walletAgentRoleClause(), assignment],
 		  };
-	const agents = await User.find(query).select("_id").lean().exec();
-	return agents.map((agent) => normalizeId(agent._id)).filter(Boolean);
+	return User.find(query)
+		.select("_id name email phone companyName agentCommercialModel")
+		.sort({ companyName: 1, name: 1, email: 1 })
+		.lean()
+		.exec();
 };
+
+const walletAgentIdsForHotels = async (hotelIds = [], actor = {}) =>
+	(await walletAgentsForHotels(hotelIds, actor))
+		.map((agent) => normalizeId(agent._id))
+		.filter(Boolean);
 
 const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} }) => {
 	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
@@ -2100,7 +2117,11 @@ const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} 
 	if (!hotelIds.length) {
 		return { page, limit, total: 0, pages: 0, transactions: [] };
 	}
-	const visibleAgentIds = await walletAgentIdsForHotels(hotelIds, actor);
+	let visibleAgentIds = await walletAgentIdsForHotels(hotelIds, actor);
+	const requestedAgentId = normalizeId(query.agentId);
+	if (requestedAgentId && ObjectId.isValid(requestedAgentId)) {
+		visibleAgentIds = visibleAgentIds.filter((id) => id === requestedAgentId);
+	}
 	if (!visibleAgentIds.length) {
 		return { page, limit, total: 0, pages: 0, transactions: [] };
 	}
@@ -2154,9 +2175,231 @@ const listPendingWalletFinanceActions = async ({ actor = {}, hotels, query = {} 
 	};
 };
 
+const commissionMonthRange = (value = "") => {
+	const raw = String(value || "").trim();
+	const match = raw.match(/^(\d{4})-(\d{2})$/);
+	if (!match) return null;
+	const year = Number(match[1]);
+	const monthIndex = Number(match[2]) - 1;
+	if (!Number.isFinite(year) || monthIndex < 0 || monthIndex > 11) return null;
+	const start = new Date(Date.UTC(year, monthIndex, 1, 0, 0, 0, 0));
+	const endExclusive = new Date(Date.UTC(year, monthIndex + 1, 1, 0, 0, 0, 0));
+	return { start, endExclusive };
+};
+
+const agentReservationOwnerClauses = (agentId = "") => {
+	const id = normalizeId(agentId);
+	if (!ObjectId.isValid(id)) return [];
+	const objectId = ObjectId(id);
+	return [
+		{ createdByUserId: objectId },
+		{ createdByUserId: id },
+		{ orderTakeId: objectId },
+		{ orderTakeId: id },
+		{ "createdBy._id": id },
+		{ "orderTaker._id": id },
+		{ "agentWalletSnapshot.agent._id": id },
+		{ "agent._id": id },
+		{ agentId: objectId },
+		{ agentId: id },
+	];
+};
+
+const agentIdFromReservationRow = (reservation = {}, visibleAgentIds = []) => {
+	const visible = new Set(visibleAgentIds.map(normalizeId).filter(Boolean));
+	const candidates = [
+		reservation.orderTakeId,
+		reservation.createdByUserId,
+		reservation.orderTaker?._id,
+		reservation.createdBy?._id,
+		reservation.agentWalletSnapshot?.agent?._id,
+		reservation.agent?._id,
+		reservation.agentId,
+	]
+		.map(normalizeId)
+		.filter(Boolean);
+	return (
+		candidates.find((id) => visible.has(id)) ||
+		candidates.find((id) => ObjectId.isValid(id)) ||
+		""
+	);
+};
+
+const commissionAmountFromReservation = (reservation = {}) =>
+	moneyNumber(reservation.commission) ||
+	moneyNumber(reservation?.commissionData?.amount) ||
+	moneyNumber(reservation?.financial_cycle?.commissionAmount);
+
+const listCommissionReconciliationActions = async ({
+	actor = {},
+	hotels,
+	query = {},
+}) => {
+	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
+	const exportAll = ["1", "true", "yes", "all"].includes(
+		String(query.exportAll || "").toLowerCase()
+	);
+	const page = exportAll
+		? 1
+		: Math.max(parseInt(query.commissionPage, 10) || 1, 1);
+	const limit = exportAll
+		? Math.min(
+				Math.max(parseInt(query.commissionLimit, 10) || 5000, 1),
+				5000
+		  )
+		: Math.min(
+				Math.max(parseInt(query.commissionLimit, 10) || 8, 1),
+				50
+		  );
+
+	if (!hotelIds.length) {
+		return { page, limit, total: 0, pages: 0, rows: [] };
+	}
+
+	let visibleAgentIds = await walletAgentIdsForHotels(hotelIds, actor);
+	const requestedAgentId = normalizeId(query.agentId);
+	if (requestedAgentId && ObjectId.isValid(requestedAgentId)) {
+		visibleAgentIds = visibleAgentIds.filter((id) => id === requestedAgentId);
+	}
+	if (!visibleAgentIds.length) {
+		return { page, limit, total: 0, pages: 0, rows: [] };
+	}
+
+	const monthRange = commissionMonthRange(query.commissionMonth);
+	const now = new Date();
+	const checkoutFilter = { $lte: now };
+	if (monthRange) {
+		checkoutFilter.$gte = monthRange.start;
+		checkoutFilter.$lt = monthRange.endExclusive < now ? monthRange.endExclusive : now;
+	}
+
+	const agentClauses = visibleAgentIds.flatMap(agentReservationOwnerClauses);
+	const match = {
+		hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
+		checkout_date: checkoutFilter,
+		commissionPaid: { $ne: true },
+		$and: [
+			{
+				$or: [
+					{ reservation_status: CHECKED_OUT_STATUS },
+					{ state: CHECKED_OUT_STATUS },
+					{ checkout_date: { $lte: now } },
+				],
+			},
+			{
+				$or: [
+					{ commission: { $gt: 0 } },
+					{ "commissionData.amount": { $gt: 0 } },
+					{ "financial_cycle.commissionAmount": { $gt: 0 } },
+					{ commissionStatus: /commission due/i },
+				],
+			},
+			{ $or: agentClauses },
+			{
+				$and: [
+					{ reservation_status: { $not: CANCELLED_STATUS } },
+					{ state: { $not: CANCELLED_STATUS } },
+					{ reservation_status: { $not: NO_SHOW_STATUS } },
+					{ state: { $not: NO_SHOW_STATUS } },
+				],
+			},
+		],
+	};
+	if (query.bookingSource) {
+		match.$and.push({
+			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
+		});
+	}
+
+	const search = reservationSearchStage(query.search);
+	const basePipeline = [{ $match: match }, ...reservationLookupStages()];
+	if (search) basePipeline.push({ $match: search });
+
+	const [countResult, rows] = await Promise.all([
+		Reservations.aggregate([...basePipeline, { $count: "total" }]),
+		Reservations.aggregate([
+			...basePipeline,
+			{ $sort: { checkout_date: -1, bookingSortDate: -1, _id: -1 } },
+			{ $skip: (page - 1) * limit },
+			{ $limit: limit },
+			{
+				$project: {
+					hotelDetails: 0,
+					roomDetails: 0,
+					adminChangeLog: 0,
+					reservationAuditLog: 0,
+				},
+			},
+		]),
+	]);
+
+	const rowAgentIds = [
+		...new Set(
+			rows
+				.map((reservation) =>
+					agentIdFromReservationRow(reservation, visibleAgentIds)
+				)
+				.filter((id) => ObjectId.isValid(id))
+		),
+	];
+	const agents = rowAgentIds.length
+		? await User.find({ _id: { $in: rowAgentIds.map((id) => ObjectId(id)) } })
+				.select("_id name email phone companyName agentCommercialModel agentPayoutDetails")
+				.lean()
+				.exec()
+		: [];
+	const agentMap = agents.reduce((map, agent) => {
+		map[normalizeId(agent._id)] = agent;
+		return map;
+	}, {});
+	const total = countResult?.[0]?.total || 0;
+
+	return {
+		page,
+		limit,
+		total,
+		pages: Math.ceil(total / limit),
+		rows: rows.map((reservation) => {
+			const agentId = agentIdFromReservationRow(reservation, visibleAgentIds);
+			const fallbackAgent =
+				reservation.orderTaker || reservation.createdBy || {};
+			const agent = agentMap[agentId] || fallbackAgent || {};
+			return {
+				...reservation,
+				agentId,
+				agent: {
+					_id: agentId,
+					name: agent.name || agent.email || "",
+					email: agent.email || "",
+					phone: agent.phone || "",
+					companyName: agent.companyName || "",
+					agentCommercialModel: agent.agentCommercialModel || "",
+					agentPayoutDetails: agent.agentPayoutDetails || {},
+				},
+				commissionAmount: commissionAmountFromReservation(reservation),
+				reconciliationMonth: reservation.checkout_date
+					? ymdFromDate(reservation.checkout_date).slice(0, 7)
+					: "",
+			};
+		}),
+	};
+};
+
 const listFinancialActions = async ({ actor, hotels, query = {} }) => {
+	const selectedHotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
 	const match = buildFinancialActionsMatch({ actor, hotels, query });
-	const walletClaims = await listPendingWalletFinanceActions({ actor, hotels, query });
+	const [agentOptions, walletClaims, commissionReconciliation] = await Promise.all([
+		walletAgentsForHotels(selectedHotelIds, actor),
+		listPendingWalletFinanceActions({ actor, hotels, query }),
+		listCommissionReconciliationActions({
+			actor,
+			hotels,
+			query,
+		}),
+	]);
+	const visibleAgentIds = agentOptions
+		.map((agent) => normalizeId(agent._id))
+		.filter(Boolean);
 	if (!match) {
 		return {
 			page: 1,
@@ -2165,8 +2408,10 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 			pages: 0,
 			reservations: [],
 			walletClaims,
+			commissionReconciliation,
 			hotels,
 			bookingSources: [],
+			agentOptions,
 		};
 	}
 
@@ -2201,6 +2446,10 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 	]);
 
 	const total = countResult?.[0]?.total || 0;
+	const agentMap = agentOptions.reduce((map, agent) => {
+		map[normalizeId(agent._id)] = agent;
+		return map;
+	}, {});
 	return {
 		page: pageForQuery,
 		limit,
@@ -2208,11 +2457,39 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		pages: Math.ceil(total / limit),
 		hotels,
 		bookingSources,
+		agentOptions,
 		walletClaims,
-		reservations: rows.map((reservation) => ({
-			...reservation,
-			financialActionReasons: financialActionReasons(reservation),
-		})),
+		commissionReconciliation,
+		reservations: rows.map((reservation) => {
+			const agentId = agentIdFromReservationRow(reservation, visibleAgentIds);
+			const fallbackAgent =
+				reservation.agentWalletSnapshot?.agent ||
+				reservation.agent ||
+				reservation.orderTaker ||
+				reservation.createdBy ||
+				{};
+			const agent = agentMap[agentId] || fallbackAgent || {};
+			const agentPayload = agentId
+				? {
+						_id: agentId,
+						name: agent.name || agent.email || "",
+						email: agent.email || "",
+						phone: agent.phone || "",
+						companyName: agent.companyName || "",
+						agentCommercialModel:
+							agent.agentCommercialModel ||
+							reservation.agentWalletSnapshot?.commercialModel ||
+							reservation.agentWalletSnapshot?.agent?.agentCommercialModel ||
+							"",
+				  }
+				: null;
+			return {
+				...reservation,
+				agentId,
+				agent: agentPayload,
+				financialActionReasons: financialActionReasons(reservation),
+			};
+		}),
 	};
 };
 

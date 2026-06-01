@@ -109,11 +109,22 @@ const userHotelScopeIds = (user = {}) =>
 		...(Array.isArray(user.hotelsToSupport) ? user.hotelsToSupport : []),
 	]);
 
-const getAccessibleWalletHotels = async (actor = {}) => {
+const applyOwnerScopeToHotelQuery = (query = {}, ownerId = "") => {
+	const scopedOwnerId = normalizeId(ownerId);
+	if (!ObjectId.isValid(scopedOwnerId)) return query;
+	return {
+		$and: [query, { belongsTo: ObjectId(scopedOwnerId) }],
+	};
+};
+
+const getAccessibleWalletHotels = async (actor = {}, query = {}) => {
 	if (!actor || actor.activeUser === false) return [];
+	const requestedOwnerId = normalizeId(query.ownerId);
 
 	if (isPlatformAdmin(actor)) {
-		return HotelDetails.find({})
+		return HotelDetails.find(
+			applyOwnerScopeToHotelQuery({}, requestedOwnerId)
+		)
 			.select("_id hotelName belongsTo")
 			.lean()
 			.exec();
@@ -125,12 +136,12 @@ const getAccessibleWalletHotels = async (actor = {}) => {
 			...(Array.isArray(actor.hotelIdsOwner) ? actor.hotelIdsOwner : []),
 			...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
 		]);
-		return HotelDetails.find({
+		return HotelDetails.find(applyOwnerScopeToHotelQuery({
 			$or: [
 				{ belongsTo: ObjectId(actorId) },
 				...(scopedIds.length ? [{ _id: { $in: scopedIds } }] : []),
 			],
-		})
+		}, requestedOwnerId))
 			.select("_id hotelName belongsTo")
 			.lean()
 			.exec();
@@ -138,7 +149,9 @@ const getAccessibleWalletHotels = async (actor = {}) => {
 
 	const scopedIds = toObjectIds(userHotelScopeIds(actor));
 	if (!scopedIds.length) return [];
-	return HotelDetails.find({ _id: { $in: scopedIds } })
+	return HotelDetails.find(
+		applyOwnerScopeToHotelQuery({ _id: { $in: scopedIds } }, requestedOwnerId)
+	)
 		.select("_id hotelName belongsTo")
 		.lean()
 		.exec();
@@ -383,6 +396,20 @@ const walletTransactionFinancialStatus = (transaction = {}) => {
 	return status || reviewStatus || "accepted";
 };
 
+const normalizeWalletRejectionType = (body = {}) => {
+	const raw = String(
+		body.rejectionType ||
+			body.rejectType ||
+			(body.finalRejection || body.permanentRejection ? "final" : "")
+	)
+		.trim()
+		.toLowerCase()
+		.replace(/[\s-]+/g, "_");
+	return raw === "final" || raw === "total" || raw === "permanent"
+		? "final"
+		: "correction_required";
+};
+
 const walletTransactionReconciliationEligible = (transaction = {}) =>
 	walletTransactionFinancialStatus(transaction) === "accepted";
 
@@ -390,6 +417,8 @@ const decorateWalletTransactionForReport = (transaction = {}) => ({
 	...transaction,
 	financialStatus: walletTransactionFinancialStatus(transaction),
 	reconciliationEligible: walletTransactionReconciliationEligible(transaction),
+	correctionAllowed:
+		String(transaction.rejectionType || "").toLowerCase() !== "final",
 });
 
 const commissionAmount = (reservation = {}) =>
@@ -831,7 +860,7 @@ exports.agentWalletSummary = async (req, res) => {
 		const { agentId = "", startDate = "", endDate = "" } = req.query || {};
 
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || actor.activeUser === false) {
@@ -947,7 +976,7 @@ exports.createAgentWalletTransaction = async (req, res) => {
 		const { userId } = req.params;
 		const body = req.body || {};
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
@@ -1035,7 +1064,7 @@ exports.updateAgentWalletTransaction = async (req, res) => {
 		const body = req.body || {};
 
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
@@ -1128,7 +1157,7 @@ exports.voidAgentWalletTransaction = async (req, res) => {
 	try {
 		const { userId, transactionId } = req.params;
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
@@ -1201,7 +1230,7 @@ exports.createAgentWalletClaim = async (req, res) => {
 		const { userId } = req.params;
 		const body = req.body || {};
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 
 		if (!actor || actor.activeUser === false || !scopeHotels.length) {
 			return res.status(403).json({ error: "Access denied" });
@@ -1302,7 +1331,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 		const body = req.body || {};
 		const action = String(body.action || "").trim().toLowerCase();
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || !canManageGlobalWallet(actor, scopeHotels)) {
@@ -1342,6 +1371,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			transaction.reviewedAt = now;
 			transaction.reviewedBy = actorSnapshot(actor);
 			transaction.rejectionReason = "";
+			transaction.rejectionType = "";
 			transaction.updatedBy = actorSnapshot(actor);
 			await transaction.save();
 
@@ -1361,6 +1391,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			const previousStatus = transaction.status;
 			const previousReviewStatus = transaction.reviewStatus;
 			const rejectionReason = String(body.rejectionReason || body.reason || "").trim();
+			const rejectionType = normalizeWalletRejectionType(body);
 			if (!rejectionReason) {
 				return res.status(400).json({ error: "Rejection reason is required" });
 			}
@@ -1369,6 +1400,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			transaction.reviewedAt = now;
 			transaction.reviewedBy = actorSnapshot(actor);
 			transaction.rejectionReason = rejectionReason;
+			transaction.rejectionType = rejectionType;
 			transaction.updatedBy = actorSnapshot(actor);
 			await transaction.save();
 
@@ -1383,7 +1415,11 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 					from: previousReviewStatus || previousStatus || "pending",
 					to: "rejected",
 				},
-				metadata: { rejectionReason },
+				metadata: {
+					rejectionReason,
+					rejectionType,
+					correctionAllowed: rejectionType !== "final",
+				},
 			});
 		}
 
@@ -1391,6 +1427,7 @@ exports.reviewAgentWalletClaim = async (req, res) => {
 			type: action === "approve" ? "agent_wallet_claim_approved" : "agent_wallet_claim_rejected",
 			walletTransactionId: transaction._id,
 			agentId: transaction.agentId,
+			rejectionType: transaction.rejectionType || "",
 		}).catch((error) =>
 			console.error("Error emitting wallet claim review notification:", error)
 		);
@@ -1407,7 +1444,7 @@ exports.agentTodoList = async (req, res) => {
 		const { userId } = req.params;
 		const { agentId = "" } = req.query || {};
 		const actor = await getActor(req, userId);
-		const scopeHotels = await getAccessibleWalletHotels(actor);
+		const scopeHotels = await getAccessibleWalletHotels(actor, req.query);
 		const scopeHotelIds = hotelIdsFromHotels(scopeHotels);
 
 		if (!actor || actor.activeUser === false || !scopeHotelIds.length) {
@@ -1541,17 +1578,26 @@ exports.agentTodoList = async (req, res) => {
 				claim.status === "pending"
 					? "wallet_claim_pending"
 					: "wallet_claim_rejected",
-			severity: claim.status === "pending" ? "low" : "medium",
+			severity:
+				claim.status === "pending"
+					? "low"
+					: claim.rejectionType === "final"
+					? "high"
+					: "medium",
 			walletTransactionId: normalizeId(claim._id),
 			amount: n2(claim.amount),
 			status: claim.status,
 			rejectionReason: claim.rejectionReason || "",
+			rejectionType: claim.rejectionType || "correction_required",
+			correctionAllowed: claim.rejectionType !== "final",
 			reference: claim.reference || "",
 			attachments: claim.attachments || [],
 			title:
 				claim.status === "pending"
 					? "Wallet credit claim is waiting for approval"
-					: "Wallet credit claim was rejected",
+					: claim.rejectionType === "final"
+					? "Wallet credit claim was finally rejected"
+					: "Wallet credit claim needs correction",
 		}));
 
 		const data = [...reservationTodos, ...walletTodos];

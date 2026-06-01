@@ -90,6 +90,83 @@ const normalizeAgentCommercialModel = (value) => {
 		: "wallet_inventory";
 };
 
+const FINANCE_SETTLEMENT_MODELS = new Set([
+	"source_commission_only",
+	"agent_commission_only",
+	"agent_wallet_commission",
+]);
+
+const normalizeFinanceSettlementModel = (value = "", hasAgent = false) => {
+	const normalizedInput = String(value || "").trim().toLowerCase();
+	const normalized =
+		normalizedInput === "agent_wallet"
+			? "agent_wallet_commission"
+		: normalizedInput === "agent_commission"
+			? "agent_commission_only"
+		: normalizedInput === "source_commission"
+			? "source_commission_only"
+		: normalizedInput;
+	if (!normalized) return "";
+	if (!FINANCE_SETTLEMENT_MODELS.has(normalized)) return "";
+	if (!hasAgent && normalized !== "source_commission_only") return "";
+	if (hasAgent && normalized === "source_commission_only") return "";
+	return normalized;
+};
+
+const collectionModelFromFinanceSettlement = (model = "") => {
+	if (model === "agent_wallet_commission") return "agent_wallet";
+	if (model === "agent_commission_only") return "agent_commission_only";
+	if (model === "source_commission_only") return "source_commission_only";
+	return "";
+};
+
+const agentSettlementModelForReservation = (agent = {}, requestedModel = "") => {
+	const commercialModel = normalizeAgentCommercialModel(
+		agent?.agentCommercialModel
+	);
+	if (commercialModel === "commission_only") return "agent_commission_only";
+	if (commercialModel === "wallet_inventory") return "agent_wallet_commission";
+	if (commercialModel === "mixed") {
+		return (
+			normalizeFinanceSettlementModel(requestedModel, true) ||
+			"agent_wallet_commission"
+		);
+	}
+	return "agent_wallet_commission";
+};
+
+const FINANCE_REJECTION_TYPES = new Set([
+	"total_amount",
+	"commission",
+	"total_and_commission",
+]);
+
+const normalizeFinanceRejectionType = (value = "") => {
+	const normalizedInput = String(value || "").trim().toLowerCase();
+	const normalized =
+		normalizedInput === "total" ||
+		normalizedInput === "amount" ||
+		normalizedInput === "total_rejected"
+			? "total_amount"
+		: normalizedInput === "commission_rejected"
+			? "commission"
+		: normalizedInput === "both" ||
+		  normalizedInput === "amount_and_commission" ||
+		  normalizedInput === "total_amount_and_commission"
+			? "total_and_commission"
+		: normalizedInput;
+	return FINANCE_REJECTION_TYPES.has(normalized) ? normalized : "";
+};
+
+const financeRejectionTypeLabel = (value = "") => {
+	const normalized = normalizeFinanceRejectionType(value);
+	if (normalized === "commission") return "Commission Rejected";
+	if (normalized === "total_and_commission") {
+		return "Total Amount & Commission Rejected";
+	}
+	return "Total Amount Rejected";
+};
+
 const uniqueValidObjectIdStrings = (values = []) => [
 	...new Set(
 		(Array.isArray(values) ? values : [values])
@@ -224,9 +301,16 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		!!commissionPaid && commissionAgentApproval.required === true;
 	const commissionAgentApproved =
 		String(commissionAgentApproval.status || "").toLowerCase() === "approved";
+	const requestedCollectionModel = String(
+		updates.financial_cycle?.collectionModel || ""
+	)
+		.trim()
+		.toLowerCase();
 
 	let collectionModel = existingCycle.collectionModel || "pending";
-	if (pmsCollectedAmount > 0 && hotelCollectedAmount > 0) {
+	if (requestedCollectionModel) {
+		collectionModel = requestedCollectionModel;
+	} else if (pmsCollectedAmount > 0 && hotelCollectedAmount > 0) {
 		collectionModel = "mixed";
 	} else if (pmsCollectedAmount > 0) {
 		collectionModel = "pms_collected";
@@ -241,7 +325,9 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 			? Math.max(totalAmount - commissionAmount, 0)
 			: 0;
 	const commissionDueToPms =
-		collectionModel === "hotel_collected" || collectionModel === "mixed"
+		collectionModel === "hotel_collected" ||
+		collectionModel === "mixed" ||
+		collectionModel === "source_commission_only"
 			? commissionAmount
 			: 0;
 	const commissionSideClosed =
@@ -257,6 +343,9 @@ const buildFinancialCycleSnapshot = (reservation, updates = {}, actorId = "") =>
 		: collectionModel === "mixed"
 			? !!moneyTransferredToHotel && commissionSideClosed
 		: collectionModel === "agent_wallet"
+			? commissionSideClosed
+		: collectionModel === "agent_commission_only" ||
+		  collectionModel === "source_commission_only"
 			? commissionSideClosed
 		: false;
 	const now = new Date();
@@ -397,6 +486,8 @@ const buildReservationActorSnapshot = (actor = {}) => ({
 	_id: actor?._id ? String(actor._id) : "",
 	name: actor?.name || actor?.email || "",
 	email: actor?.email || "",
+	companyName: actor?.companyName || "",
+	agentCommercialModel: actor?.agentCommercialModel || "",
 	role: actor?.role || "",
 	roleDescription: actor?.roleDescription || "",
 });
@@ -1333,6 +1424,12 @@ const hasAssignedCommission = (reservation = {}) => {
 	const commissionStatus = String(reservation?.commissionStatus || "")
 		.trim()
 		.toLowerCase();
+	const agentProposalPending =
+		(reservation?.commissionData?.proposedByAgent === true ||
+			reservation?.financial_cycle?.proposedByAgent === true) &&
+		(reservation?.commissionData?.assigned === false ||
+			reservation?.financial_cycle?.commissionAssigned === false);
+	if (agentProposalPending) return false;
 	return (
 		directCommission > 0 ||
 		cycleCommission > 0 ||
@@ -1402,37 +1499,53 @@ const getReservationLifecycleStatusAfterFinance = (
 };
 
 const buildCommissionMissingFilter = () => ({
-	$and: [
+	$or: [
 		{
-			$or: [
-				{ commission: { $exists: false } },
-				{ commission: null },
-				{ commission: "" },
-				{ commission: "0" },
-				{ commission: { $lte: 0 } },
-			],
-		},
-		{
-			$or: [
-				{ "financial_cycle.commissionAmount": { $exists: false } },
-				{ "financial_cycle.commissionAmount": null },
-				{ "financial_cycle.commissionAmount": "" },
-				{ "financial_cycle.commissionAmount": "0" },
-				{ "financial_cycle.commissionAmount": { $lte: 0 } },
-			],
-		},
-		{ "commissionData.assigned": { $ne: true } },
-		{ "financial_cycle.commissionAssigned": { $ne: true } },
-		{
-			$or: [
-				{ commissionStatus: { $exists: false } },
-				{ commissionStatus: null },
-				{ commissionStatus: "" },
+			$and: [
 				{
-					commissionStatus: {
-						$nin: Array.from(ASSIGNED_COMMISSION_STATUSES),
-					},
+					$or: [
+						{ commission: { $exists: false } },
+						{ commission: null },
+						{ commission: "" },
+						{ commission: "0" },
+						{ commission: { $lte: 0 } },
+					],
 				},
+				{
+					$or: [
+						{ "financial_cycle.commissionAmount": { $exists: false } },
+						{ "financial_cycle.commissionAmount": null },
+						{ "financial_cycle.commissionAmount": "" },
+						{ "financial_cycle.commissionAmount": "0" },
+						{ "financial_cycle.commissionAmount": { $lte: 0 } },
+					],
+				},
+				{ "commissionData.assigned": { $ne: true } },
+				{ "financial_cycle.commissionAssigned": { $ne: true } },
+				{
+					$or: [
+						{ commissionStatus: { $exists: false } },
+						{ commissionStatus: null },
+						{ commissionStatus: "" },
+						{
+							commissionStatus: {
+								$nin: Array.from(ASSIGNED_COMMISSION_STATUSES),
+							},
+						},
+					],
+				},
+			],
+		},
+		{
+			$and: [
+				{
+					$or: [
+						{ "commissionData.proposedByAgent": true },
+						{ "financial_cycle.proposedByAgent": true },
+					],
+				},
+				{ "commissionData.assigned": { $ne: true } },
+				{ "financial_cycle.commissionAssigned": { $ne: true } },
 			],
 		},
 	],
@@ -2371,6 +2484,10 @@ const getAgentWalletClaimNotificationFeed = async ({
 					: ["wallet_claim_pending"],
 			decisionStatus: notificationStatus,
 			decisionReason: transaction.rejectionReason || "",
+			rejectionType:
+				transaction.rejectionType ||
+				(notificationStatus === "rejected" ? "correction_required" : ""),
+			correctionAllowed: transaction.rejectionType !== "final",
 			attachments: transaction.attachments || [],
 		};
 		return notificationStatus === "pending"
@@ -2755,7 +2872,15 @@ const buildReservationAgentWalletSnapshot = async ({
 	const commercialModel = normalizeAgentCommercialModel(
 		agent.agentCommercialModel
 	);
-	const walletRequired = commercialModel !== "commission_only";
+	const settlementModel = normalizeFinanceSettlementModel(
+		reservation?.financial_cycle?.agentSettlementModel ||
+			reservation?.financial_cycle?.settlementModel ||
+			"",
+		true
+	);
+	const walletRequired = settlementModel
+		? settlementModel === "agent_wallet_commission"
+		: commercialModel !== "commission_only";
 	const openingWalletCredit = agentOpeningWalletCreditGlobal(agent);
 	const priorReservationWalletValue = walletRequired ? priorReservationValue : 0;
 
@@ -2786,6 +2911,7 @@ const buildReservationAgentWalletSnapshot = async ({
 			agentCommercialModel: commercialModel,
 		},
 		commercialModel,
+		settlementModel: settlementModel || "",
 		walletRequired,
 		openingWalletCredit,
 		walletAddedBeforeReservation,
@@ -2806,6 +2932,68 @@ const buildReservationAgentWalletSnapshot = async ({
 		confirmationNumber: reservation?.confirmation_number || "",
 		capturedBy: actor || null,
 	};
+};
+
+const escapeEmailHtml = (value = "") =>
+	String(value ?? "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+
+const validEmailAddress = (value = "") =>
+	/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+
+const sendAgentFinanceRejectionEmail = async ({
+	reservation = {},
+	agent = {},
+	rejectionType = "",
+	rejectionReason = "",
+}) => {
+	const toEmail = String(agent.email || "").trim();
+	if (!validEmailAddress(toEmail)) return;
+	const label = financeRejectionTypeLabel(rejectionType);
+	const confirmationNumber = reservation.confirmation_number || "Reservation";
+	let hotelName =
+		reservation.hotelName ||
+		reservation.hotelDetails?.hotelName ||
+		reservation.hotelId?.hotelName ||
+		"";
+	if (!hotelName && ObjectId.isValid(normalizeId(reservation.hotelId))) {
+		const hotel = await HotelDetails.findById(normalizeId(reservation.hotelId))
+			.select("hotelName")
+			.lean()
+			.exec();
+		hotelName = hotel?.hotelName || "";
+	}
+	const html = `
+		<div style="font-family:Arial,sans-serif;line-height:1.6;color:#102033">
+			<h2 style="margin:0 0 12px;color:#64166e">Finance review needs correction</h2>
+			<p style="margin:0 0 12px">A reservation linked to your agent account was reviewed by finance and needs your action.</p>
+			<table style="border-collapse:collapse;width:100%;max-width:640px">
+				<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700">Confirmation</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeEmailHtml(confirmationNumber)}</td></tr>
+				<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700">Hotel</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeEmailHtml(hotelName || "-")}</td></tr>
+				<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700">Booking source</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeEmailHtml(reservation.booking_source || "-")}</td></tr>
+				<tr><td style="padding:8px;border:1px solid #e5e7eb;font-weight:700">Rejected item</td><td style="padding:8px;border:1px solid #e5e7eb">${escapeEmailHtml(label)}</td></tr>
+			</table>
+			<div style="margin-top:14px;padding:12px;border:1px solid #ffd6d6;background:#fff7f7;border-radius:8px">
+				<strong>Finance comments</strong>
+				<p style="margin:8px 0 0;white-space:pre-wrap">${escapeEmailHtml(rejectionReason || "-")}</p>
+			</div>
+			<p style="margin-top:16px">Please sign in to your Jannat Booking dashboard and adjust the reservation accordingly.</p>
+		</div>
+	`;
+	try {
+		await sgMail.send({
+			to: toEmail,
+			from: "noreply@jannatbooking.com",
+			subject: `Finance correction required - ${confirmationNumber}`,
+			html,
+		});
+	} catch (error) {
+		console.error("Error sending finance rejection email:", error);
+	}
 };
 
 const resolveReservationListActor = async (req) => {
@@ -3020,7 +3208,7 @@ exports.create = async (req, res) => {
 	const [createActor, routeHotel] = await Promise.all([
 		User.findById(createActorId)
 			.select(
-				"_id name email companyName role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
+				"_id name email companyName agentCommercialModel role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser"
 			)
 			.lean()
 			.exec(),
@@ -3066,7 +3254,7 @@ exports.create = async (req, res) => {
 		if (actorId && ObjectId.isValid(actorId)) {
 			const actor = await User.findById(actorId)
 				.select(
-					"_id name email companyName role roleDescription roles roleDescriptions accessTo"
+					"_id name email companyName agentCommercialModel role roleDescription roles roleDescriptions accessTo"
 				)
 				.lean()
 			.exec();
@@ -3099,12 +3287,50 @@ exports.create = async (req, res) => {
 		};
 		const reservationWarnings = [];
 		if (forcePendingConfirmation) {
+			const requestedAgentSettlementModel =
+				reservationPayload.agentSettlementModel ||
+				reservationPayload?.financial_cycle?.agentSettlementModel ||
+				reservationPayload?.financial_cycle?.settlementModel ||
+				reservationPayload?.financial_cycle?.collectionModel ||
+				reservationPayload.collectionModel ||
+				"";
+			const agentSettlementModel = agentSettlementModelForReservation(
+				createActor,
+				requestedAgentSettlementModel
+			);
+			const walletRequired = agentSettlementModel === "agent_wallet_commission";
+			const collectionModel =
+				collectionModelFromFinanceSettlement(agentSettlementModel);
+			const hasAgentCommissionProposal =
+				Object.prototype.hasOwnProperty.call(reservationPayload, "commission") ||
+				Object.prototype.hasOwnProperty.call(
+					reservationPayload?.financial_cycle || {},
+					"commissionAmount"
+				) ||
+				Object.prototype.hasOwnProperty.call(
+					reservationPayload?.commissionData || {},
+					"amount"
+				);
+			const proposedCommissionRate = n2(
+				reservationPayload?.commissionData?.rate ??
+					reservationPayload?.financial_cycle?.commissionValue ??
+					8
+			);
+			const proposedCommissionAmount = n2(
+				hasAgentCommissionProposal
+					? reservationPayload.commission ??
+							reservationPayload?.financial_cycle?.commissionAmount ??
+							reservationPayload?.commissionData?.amount ??
+							0
+					: (Number(reservationPayload.total_amount || 0) *
+							proposedCommissionRate) /
+						100
+			);
 			reservationPayload.reservation_status = "Pending Confirmation";
 			reservationPayload.state = "Pending Confirmation";
-			// Agent/order-taker reservations always start with a 0 SAR commission
-			// that is intentionally not assigned yet. Hotel/finance can later
-			// review it and save 0 again when no commission is due.
-			reservationPayload.commission = 0;
+			// Agent/order-taker reservations may propose commission, but it stays
+			// unassigned until finance explicitly reviews and approves it.
+			reservationPayload.commission = proposedCommissionAmount;
 			reservationPayload.commissionPaid = false;
 			reservationPayload.commissionStatus = "";
 			reservationPayload.commissionData = {
@@ -3113,18 +3339,30 @@ exports.create = async (req, res) => {
 					? reservationPayload.commissionData
 					: {}),
 				assigned: false,
-				amount: 0,
+				amount: proposedCommissionAmount,
+				rate: proposedCommissionRate,
 				status: "pending hotel review",
 				source: "agent_reservation",
+				proposedByAgent: true,
 			};
 			reservationPayload.financial_cycle = {
 				...(reservationPayload.financial_cycle &&
 				typeof reservationPayload.financial_cycle === "object"
 					? reservationPayload.financial_cycle
 					: {}),
-				commissionAmount: 0,
-				commissionValue: 0,
+				settlementModel: agentSettlementModel,
+				agentSettlementModel,
+				collectionModel,
+				walletRequired,
+				agentCommercialModel: normalizeAgentCommercialModel(
+					createActor.agentCommercialModel
+				),
+				commissionType: "percentage",
+				commissionAmount: proposedCommissionAmount,
+				commissionValue: proposedCommissionRate,
 				commissionAssigned: false,
+				commissionReviewStatus: "pending",
+				proposedByAgent: true,
 				status: "open",
 			};
 
@@ -5382,6 +5620,12 @@ exports.updateReservation = async (req, res) => {
 						status: "open",
 						totalReviewStatus: "pending",
 						totalRejectionReason: "",
+						financeRejectionType: "",
+						financeRejectionLabel: "",
+						financeRejectionComment: "",
+						amountReviewStatus: "pending",
+						commissionReviewStatus: "pending",
+						commissionRejectionReason: "",
 						totalReviewedAt: null,
 						totalReviewedBy: null,
 						lastUpdatedAt: now,
@@ -7817,6 +8061,18 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					const totalReviewStatus = String(
 						financialCycle.totalReviewStatus || ""
 					).toLowerCase();
+					const financeRejected = totalReviewStatus === "rejected";
+					const financeRejectionType = normalizeFinanceRejectionType(
+						financialCycle.financeRejectionType ||
+							decision.rejectionType ||
+							"total_amount"
+					);
+					const financeRejectionReasonKey =
+						financeRejectionType === "commission"
+							? "finance_commission_rejected"
+						: financeRejectionType === "total_and_commission"
+						? "finance_amount_and_commission_rejected"
+						: "finance_total_rejected";
 					const financeAccepted =
 						String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
 							"confirmed" &&
@@ -7829,6 +8085,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						);
 					const pendingReasons = financeAccepted
 						? ["finance_accepted"]
+						: financeRejected
+						? [financeRejectionReasonKey]
 						: isDecision
 						? []
 						: getPendingConfirmationReasons(reservation);
@@ -7838,6 +8096,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						).toLowerCase() === "pending";
 					const notificationType = financeAccepted
 						? "agent_finance_accepted"
+						: financeRejected
+						? "agent_finance_rejected"
 						: commissionApprovalPending
 						? "commission_agent_approval"
 						: isDecision
@@ -7849,6 +8109,12 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					const eventDate = financeAccepted
 						? financialCycle.totalReviewedAt ||
 						  financialCycle.lastUpdatedAt ||
+						  reservation.updatedAt ||
+						  reservation.createdAt
+						: financeRejected
+						? financialCycle.totalReviewedAt ||
+						  financialCycle.lastUpdatedAt ||
+						  decision.decidedAt ||
 						  reservation.updatedAt ||
 						  reservation.createdAt
 						: decision.decidedAt ||
@@ -7873,18 +8139,35 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						pendingReasons,
 						commissionAgentApproval:
 							reservation.commissionAgentApproval || null,
-						decisionStatus: financeAccepted ? "accepted" : decision.status || "",
+						decisionStatus: financeAccepted
+							? "accepted"
+							: financeRejected
+							? "rejected"
+							: decision.status || "",
 						decisionReason:
+							(financeRejected &&
+								(financialCycle.financeRejectionComment ||
+									financialCycle.totalRejectionReason)) ||
 							decision.reason ||
 							decision.rejectionReason ||
 							decision.confirmationReason ||
 							"",
+						financeRejectionType: financeRejected
+							? financeRejectionType
+							: "",
+						financeRejectionLabel: financeRejected
+							? financeRejectionTypeLabel(financeRejectionType)
+							: "",
 					};
-					return financeAccepted || isDecision
+					return financeAccepted || financeRejected || isDecision
 						? withNotificationAcknowledgement(item, {
 								entityType: "reservation",
 								entityId: reservation._id,
-								status: financeAccepted ? "finance_accepted" : decisionStatus,
+								status: financeAccepted
+									? "finance_accepted"
+									: financeRejected
+									? `finance_rejected_${financeRejectionType}`
+									: decisionStatus,
 								eventDate,
 						  })
 						: item;
@@ -8076,6 +8359,11 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"commission",
 			"commissionPaid",
 			"commissionStatus",
+			"financeSettlementModel",
+			"settlementModel",
+			"agentSettlementModel",
+			"sourceSettlementModel",
+			"collectionModel",
 		].some((field) => Object.prototype.hasOwnProperty.call(body, field));
 		const isFinanceAction = action === "finance" || (!action && financeFieldsProvided);
 		const financialCycleLocked =
@@ -8128,6 +8416,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			});
 		}
 		const updatePayload = {};
+		let financeRejectionNotice = null;
 		const statusDecisionAction = [
 			"confirm",
 			"reject",
@@ -8242,9 +8531,37 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			).trim();
 			if (totalReviewStatus === "rejected" && !totalRejectionReason) {
 				return res.status(400).json({
-					error: "Total amount rejection reason is required.",
+					error: "Finance rejection comments are required.",
 				});
 			}
+			const rawFinanceRejectionType =
+				body.financeRejectionType ||
+				body.financeRejectionScope ||
+				body.reviewRejectionType ||
+				body.rejectionType ||
+				"";
+			const financeRejectionType =
+				totalReviewStatus === "rejected"
+					? normalizeFinanceRejectionType(rawFinanceRejectionType) ||
+					  "total_amount"
+					: "";
+			if (
+				totalReviewStatus === "rejected" &&
+				rawFinanceRejectionType &&
+				!normalizeFinanceRejectionType(rawFinanceRejectionType)
+			) {
+				return res.status(400).json({
+					error:
+						"Finance rejection type must be total amount, commission, or both.",
+				});
+			}
+			const amountRejected =
+				financeRejectionType === "total_amount" ||
+				financeRejectionType === "total_and_commission";
+			const commissionRejected =
+				financeRejectionType === "commission" ||
+				financeRejectionType === "total_and_commission";
+			const reservationAgent = await resolveReservationAgent(reservation);
 			updatePayload.financial_cycle = {
 				...existingCycle,
 				...(updatePayload.financial_cycle || {}),
@@ -8253,11 +8570,153 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 				totalReviewedBy: auditActor,
 				totalRejectionReason:
 					totalReviewStatus === "rejected" ? totalRejectionReason : "",
+				financeRejectionType,
+				financeRejectionLabel:
+					totalReviewStatus === "rejected"
+						? financeRejectionTypeLabel(financeRejectionType)
+						: "",
+				financeRejectionComment:
+					totalReviewStatus === "rejected" ? totalRejectionReason : "",
+				amountReviewStatus:
+					totalReviewStatus === "rejected" && amountRejected
+						? "rejected"
+						: totalReviewStatus === "approved"
+						? "approved"
+						: existingCycle.amountReviewStatus || "pending",
+				commissionReviewStatus:
+					totalReviewStatus === "rejected" && commissionRejected
+						? "rejected"
+						: totalReviewStatus === "approved"
+						? "approved"
+						: existingCycle.commissionReviewStatus || "pending",
+				commissionRejectionReason:
+					totalReviewStatus === "rejected" && commissionRejected
+						? totalRejectionReason
+						: "",
 			};
+			const rawSettlementModel =
+				body.financeSettlementModel ??
+				body.settlementModel ??
+				body.agentSettlementModel ??
+				body.sourceSettlementModel ??
+				body.collectionModel ??
+				"";
+			const settlementModel = normalizeFinanceSettlementModel(
+				rawSettlementModel,
+				!!reservationAgent
+			);
+			if (rawSettlementModel && !settlementModel) {
+				return res.status(400).json({
+					error:
+						"Finance handling is invalid for this reservation source.",
+				});
+			}
+			if (
+				reservationAgent &&
+				settlementModel &&
+				settlementModel !==
+					agentSettlementModelForReservation(reservationAgent, settlementModel)
+			) {
+				return res.status(400).json({
+					error:
+						"This agent account is not configured for the selected finance handling.",
+				});
+			}
+			if (settlementModel) {
+				const collectionModel =
+					collectionModelFromFinanceSettlement(settlementModel);
+				const walletDeductionRequired =
+					settlementModel === "agent_wallet_commission";
+				const bookingSource = String(
+					reservation.booking_source || body.bookingSource || ""
+				).trim();
+				updatePayload.financial_cycle = {
+					...updatePayload.financial_cycle,
+					settlementModel,
+					agentSettlementModel: reservationAgent ? settlementModel : "",
+					sourceSettlementModel: reservationAgent ? "" : settlementModel,
+					collectionModel,
+					walletDeductionRequired,
+					commissionOnly: !walletDeductionRequired,
+					bookingSource,
+					sourceName: bookingSource,
+					agent: reservationAgent
+						? {
+								_id: normalizeId(reservationAgent._id),
+								name: reservationAgent.name || reservationAgent.email || "",
+								email: reservationAgent.email || "",
+								phone: reservationAgent.phone || "",
+								companyName: reservationAgent.companyName || "",
+								agentCommercialModel: normalizeAgentCommercialModel(
+									reservationAgent.agentCommercialModel
+								),
+						  }
+						: null,
+				};
+				if (reservationAgent) {
+					const plainReservation = plainReservationObject(reservation);
+					const reservationForSnapshot = {
+						...plainReservation,
+						...updatePayload,
+						booking_source: bookingSource || plainReservation.booking_source,
+						financial_cycle: {
+							...(plainReservation.financial_cycle || {}),
+							...(updatePayload.financial_cycle || {}),
+						},
+					};
+					const snapshot = await buildReservationAgentWalletSnapshot({
+						reservation: reservationForSnapshot,
+						actor: auditActor,
+						reason: `finance_${settlementModel}`,
+						force: true,
+					});
+					if (snapshot) {
+						const reservationAmount = n2(
+							updatePayload.total_amount ?? reservation.total_amount ?? 0
+						);
+						const balanceBeforeReservation = n2(
+							snapshot.balanceBeforeReservation
+						);
+						const reservationWalletAmount = walletDeductionRequired
+							? reservationAmount
+							: 0;
+						updatePayload.agentWalletSnapshot = {
+							...snapshot,
+							agent: updatePayload.financial_cycle.agent,
+							commercialModel: walletDeductionRequired
+								? "wallet_inventory"
+								: "commission_only",
+							walletRequired: walletDeductionRequired,
+							reservationAmount,
+							reservationWalletAmount: n2(reservationWalletAmount),
+							balanceAfterReservation: n2(
+								balanceBeforeReservation - reservationWalletAmount
+							),
+							commissionAmount: n2(
+								updatePayload.commission ??
+									reservation.commission ??
+									reservation.financial_cycle?.commissionAmount ??
+									0
+							),
+							bookingSource,
+						};
+						updatePayload.financial_cycle.agentWalletSnapshotCaptured = true;
+					}
+				}
+			}
 			if (totalReviewStatus === "rejected") {
+				if (reservationAgent) {
+					financeRejectionNotice = {
+						agent: reservationAgent,
+						rejectionType: financeRejectionType,
+						rejectionReason: totalRejectionReason,
+					};
+				}
 				updatePayload.agentDecisionSnapshot = {
 					status: "rejected",
 					reason: totalRejectionReason,
+					rejectionType: financeRejectionType,
+					rejectionLabel: financeRejectionTypeLabel(financeRejectionType),
 					decidedAt: now,
 					decidedBy: auditActor,
 				};
@@ -8454,6 +8913,17 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}).catch((error) =>
 			console.error("Error emitting reservation notification:", error)
 		);
+
+		if (financeRejectionNotice?.agent) {
+			sendAgentFinanceRejectionEmail({
+				reservation: updatedReservation,
+				agent: financeRejectionNotice.agent,
+				rejectionType: financeRejectionNotice.rejectionType,
+				rejectionReason: financeRejectionNotice.rejectionReason,
+			}).catch((error) =>
+				console.error("Error queueing finance rejection email:", error)
+			);
+		}
 
 		const safeUpdatedReservation = sanitizeReservationAuditLogsForViewer(
 			updatedReservation,

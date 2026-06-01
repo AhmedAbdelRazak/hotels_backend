@@ -1428,6 +1428,59 @@ Future TODO Backlog - Added 2026-05-26
   - Reservation updates that include preview audit metadata only accept it when the authenticated actor is a configured Super Admin and the preview actor matches the request.
   - When preview auth is used on hotel-management routes, backend behavior should act as the previewed employee/agent for scoping and audit actor purposes, with preview metadata retained only for privileged auditing.
   - AdminModule /admin routes should not run as preview auth.
+- 2026-05-31 finance actions, wallet review, and agent commission settlement:
+  - controllers/overall_dashboard.js financial-actions response now includes three finance queues in one response:
+    - reservations: reservation finance-action rows.
+    - commissionReconciliation: checked-out agent reservations with unpaid/unreconciled commission for the selected commissionMonth.
+    - walletClaims: pending wallet approval transactions.
+  - The same endpoint also returns agentOptions so frontend filters can filter by agent/company across the finance queues.
+  - commissionMonth is parsed as YYYY-MM and converted to a checkout_date range bounded by the current date for commission reconciliation.
+  - Agent filtering uses the same ownership candidates as agent-scoped reservations: createdByUserId, orderTakeId, createdBy._id, orderTaker._id, agentWalletSnapshot.agent._id, agent._id, and agentId.
+  - controllers/agent_wallet.js getAccessibleWalletHotels accepts ownerId from query so Super Admin/owner-scoped wallet views can be narrowed without reintroducing hotel-scoped wallet balances.
+  - AgentWallet model/controller now stores rejectionType for wallet claims:
+    - correction_required means the agent may correct/resubmit.
+    - final means a total/permanent rejection and correctionAllowed is false.
+  - Wallet claim review still requires a rejectionReason on reject and records reviewedAt, reviewedBy, updatedBy, reviewStatus, status, and ActivityTracker metadata.
+  - Agent wallet todos and wallet notification feeds include rejectionType and correctionAllowed so the frontend can distinguish correctable rejection from final rejection.
+  - controllers/reservations.js defines the finance settlement model helpers:
+    - normalizeFinanceSettlementModel.
+    - collectionModelFromFinanceSettlement.
+    - agentSettlementModelForReservation.
+  - Settlement model meanings are important:
+    - source_commission_only: source commission only for non-agent reservations.
+    - agent_commission_only: agent commission without wallet deduction.
+    - agent_wallet_commission: wallet-backed agent reservation plus commission.
+  - Agent commercial model meanings are important:
+    - wallet_inventory means the agent has wallet-backed trust/stock behavior, but the agent still earns commission.
+    - commission_only means no wallet backing, but the agent still earns commission.
+    - mixed means finance/agent may choose wallet-backed plus commission or commission-only per reservation.
+  - New agent/order-taker reservation creation:
+    - create selects agentCommercialModel on the actor snapshot.
+    - Force-pending agent reservations resolve an agentSettlementModel from the actor model and requested payload.
+    - Default proposed commission rate is 8 when no rate is supplied.
+    - Proposed commission amount is accepted from the payload if supplied; otherwise it is total_amount * rate / 100.
+    - commissionData.assigned remains false and proposedByAgent is true.
+    - financial_cycle.commissionAssigned remains false, commissionReviewStatus is pending, commissionType is percentage, and proposedByAgent is true.
+    - walletRequired is true only for agent_wallet_commission.
+    - collectionModel is agent_wallet for agent_wallet_commission and agent_commission_only for commission-only reservations.
+  - buildCommissionMissingFilter treats proposed agent commissions as still needing finance review until commissionData.assigned or financial_cycle.commissionAssigned becomes true.
+  - Finance review update flow in updatePendingConfirmationReservation:
+    - Accept/reject finance fields are processed through the finance action path.
+    - Rejection requires comments and supports financeRejectionType values total_amount, commission, and total_and_commission.
+    - Rejection stores financeRejectionType, financeRejectionLabel, financeRejectionComment, amountReviewStatus, commissionReviewStatus, and commissionRejectionReason inside financial_cycle.
+    - Rejection also updates agentDecisionSnapshot with the rejection type/label and sends a best-effort SendGrid email to the linked agent when the reservation has an agent email.
+    - pendingConfirmationNotificationFeed emits agent_finance_rejected / finance_*_rejected notification items with rejection type, label, and comments so the agent dashboard has an action item.
+  - Finance handling update flow:
+    - financeSettlementModel/settlementModel/agentSettlementModel/sourceSettlementModel/collectionModel are accepted aliases.
+    - The selected settlement model is validated against whether the reservation has an agent and against the agentCommercialModel.
+    - Invalid combinations, such as source-only on an agent reservation or wallet handling for a commission-only agent, are rejected.
+    - When an agent settlement model is saved, financial_cycle stores settlementModel, agentSettlementModel, collectionModel, walletDeductionRequired, commissionOnly, bookingSource, sourceName, and an agent snapshot.
+    - For agent_wallet_commission, buildReservationAgentWalletSnapshot computes reservationWalletAmount = total_amount and balanceAfterReservation = balanceBeforeReservation - reservationWalletAmount.
+    - For agent_commission_only or source_commission_only, wallet deduction is zero.
+  - Commission reconciliation:
+    - listCommissionReconciliationActions returns checked-out, unpaid agent commission rows inside the actor's hotel/agent scope.
+    - The frontend marks selected rows by calling PUT /api/reservations/commission-paid/:reservationId/:userId.
+    - Marking paid still creates commissionAgentApproval for agent-owned reservations, so the agent can approve/dispute the reconciled commission.
 - 2026-05-31 local end-to-end QA completed:
   - Environment verified as local database host 127.0.0.1:27019 before mutating test data.
   - Created a Codex QA agent invitation through POST /api/overall-dashboard/signup-invitation/:ownerId.
@@ -1456,3 +1509,7 @@ Future TODO Backlog - Added 2026-05-26
     - node --check services/activityTracker.js
   - Frontend validation passed:
     - hotels_frontend npm.cmd run build compiled successfully.
+- 2026-05-31 final documentation-pass validation:
+  - node -c controllers/reservations.js passed after the final agent wallet/commission clarification.
+  - hotels_frontend npm.cmd run build passed after the final agent wallet/commission clarification.
+  - No additional live QA reservations were created during this documentation pass.

@@ -138,6 +138,12 @@ const agentWalletSchema = new mongoose.Schema(
 			trim: true,
 			default: "",
 		},
+		rejectionType: {
+			type: String,
+			enum: ["", "correction_required", "final"],
+			default: "",
+			index: true,
+		},
 		createdBy: {
 			type: Object,
 			default: {
