@@ -69,6 +69,23 @@ const inboundEmailSchema = new mongoose.Schema(
 		emailContext: { type: Object, default: {} },
 		orchestratorDecision: { type: Object, default: {} },
 		reconciliation: { type: Object, default: {} },
+		forwardDecision: {
+			shouldForward: { type: Boolean, default: false },
+			reason: { type: String, trim: true, lowercase: true, default: "" },
+			categories: { type: [String], default: [] },
+			matchedTerms: { type: [String], default: [] },
+			linkCount: { type: Number, default: 0 },
+			status: { type: String, trim: true, lowercase: true, default: "" },
+		},
+		forwarding: {
+			status: { type: String, trim: true, lowercase: true, default: "not_required" },
+			provider: { type: String, trim: true, lowercase: true, default: "" },
+			forwardedTo: { type: [String], default: [] },
+			attemptedAt: { type: Date, default: null },
+			forwardedAt: { type: Date, default: null },
+			messageId: { type: String, trim: true, default: "" },
+			error: { type: String, trim: true, default: "" },
+		},
 		parseWarnings: { type: [String], default: [] },
 		parseErrors: { type: [String], default: [] },
 		reconcileWarnings: { type: [String], default: [] },
@@ -87,6 +104,8 @@ inboundEmailSchema.index({ paymentCollectionModel: 1, receivedAt: -1 });
 inboundEmailSchema.index({ processingStatus: 1, receivedAt: -1 });
 inboundEmailSchema.index({ automationAction: 1, receivedAt: -1 });
 inboundEmailSchema.index({ skipReason: 1, receivedAt: -1 });
+inboundEmailSchema.index({ "forwardDecision.shouldForward": 1, receivedAt: -1 });
+inboundEmailSchema.index({ "forwarding.status": 1, receivedAt: -1 });
 inboundEmailSchema.index({ hasReservationConnection: 1, receivedAt: -1 });
 inboundEmailSchema.index({ hotelId: 1, receivedAt: -1 });
 inboundEmailSchema.index({ reservationMongoId: 1, receivedAt: -1 });

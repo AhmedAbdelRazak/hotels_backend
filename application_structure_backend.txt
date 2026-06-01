@@ -1070,6 +1070,32 @@ Future TODO Backlog - Added 2026-05-26
   - GET http://127.0.0.1:8080/api/inbound/sendgrid returned the SendGrid inbound health response.
   - A production dry-run extraction returned Expedia/new_reservation with confirmation 245715336, hotel Zad Al sad, 2026-12-21 to 2026-12-25, guest name, and totalGuests 5.
 
+2026-06-01 OTA Inbound Verification And Important Email Forwarding
+- Business purpose:
+  - OTA inbox addresses such as expedia-*/agoda-* at ota.inbound.jannatbooking.com may receive non-reservation emails that require human account control, such as email verification, one-time login codes, account-security alerts, or OTA action-required notices.
+  - These emails should not be auto-clicked by the backend. The safe behavior is to forward them to an authorized human inbox while keeping the inbound audit record.
+- Backend implementation:
+  - services/inboundEmailForwarder.js classifies important non-reservation/security emails with deterministic rules and forwards them through SendGrid.
+  - Default forwarding destination is ahmed.abdelrazak@jannatbooking.com.
+  - Optional environment controls:
+    - OTA_INBOUND_FORWARD_TO for comma-separated recipients.
+    - OTA_SECURITY_FORWARD_TO as a fallback recipient variable.
+    - OTA_INBOUND_FORWARD_FROM, default noreply@jannatbooking.com.
+    - OTA_INBOUND_FORWARD_ENABLED=false/off disables forwarding.
+    - OTA_INBOUND_FORWARD_DRY_RUN=true records a dry-run result without sending.
+  - controllers/otaInbound.js runs forwarding after the inbound email has been parsed, audited, orchestrated, and reconciled.
+  - Verification/security/action-required emails are forwarded even when the orchestrator classifies them as not_reservation.
+  - OTA emails that land in needs_review, needs_mapping, or failed are forwarded when they appear to come from an OTA/provider context.
+  - Normal successfully created/updated/cancelled OTA reservation emails are not forwarded by default to avoid noise.
+- Audit model:
+  - models/inbound_email.js stores forwardDecision and forwarding metadata, including reason, categories, link count, recipients, forwarding status, SendGrid message id, and errors.
+  - Inbound email list API supports shouldForward and forwardingStatus query filters.
+- Validation completed locally:
+  - node --check controllers/otaInbound.js.
+  - node --check services/inboundEmailForwarder.js.
+  - node --check models/inbound_email.js.
+  - Dry-run classification confirmed verification emails forward, normal created booking emails do not, and needs_mapping OTA emails forward for human review.
+
 2026-05-28 Manual AI Chat Teaching For B2C Support
 - Storage model:
   - models/aiagent_learning.js.

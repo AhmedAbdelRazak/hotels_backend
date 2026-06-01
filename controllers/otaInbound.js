@@ -15,6 +15,9 @@ const {
 	buildRedactedEmailText,
 } = require("../services/otaEmailOrchestrator");
 const { reconcileOtaReservation } = require("../services/otaReservationMapper");
+const {
+	forwardImportantInboundEmail,
+} = require("../services/inboundEmailForwarder");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 
 let simpleParser = null;
@@ -258,6 +261,10 @@ const emitInboundEmailUpdated = (req, record, extra = {}) => {
 		reservationMongoId: String(
 			record.reservationMongoId || extra.reservationMongoId || ""
 		),
+		forwardingStatus:
+			record.forwarding?.status || extra.forwardingStatus || "",
+		forwardReason:
+			record.forwardDecision?.reason || extra.forwardReason || "",
 		updatedAt: new Date().toISOString(),
 	});
 };
@@ -380,6 +387,64 @@ const finalizeRecord = async (recordId, update) => {
 		.exec();
 };
 
+const buildForwardDecisionAudit = (decision = {}) => ({
+	shouldForward: !!decision.shouldForward,
+	reason: String(decision.reason || "").toLowerCase(),
+	categories: Array.isArray(decision.categories) ? decision.categories : [],
+	matchedTerms: Array.isArray(decision.matchedTerms) ? decision.matchedTerms : [],
+	linkCount: Number(decision.linkCount || 0),
+	status: String(decision.status || "").toLowerCase(),
+});
+
+const persistForwardingResult = async (recordId, result = {}) => {
+	if (!recordId || !result?.decision || !result?.forwarding) return null;
+	return InboundEmail.findByIdAndUpdate(
+		recordId,
+		{
+			$set: {
+				forwardDecision: buildForwardDecisionAudit(result.decision),
+				forwarding: result.forwarding,
+			},
+		},
+		{ new: true }
+	)
+		.lean()
+		.exec();
+};
+
+const handleImportantInboundForwarding = async ({
+	req,
+	record,
+	email,
+	normalized,
+	reconciliation,
+} = {}) => {
+	if (!record?._id || !email) return record || null;
+	const result = await forwardImportantInboundEmail({
+		email,
+		inboundRecord: record,
+		normalized,
+		reconciliation,
+	});
+	const updated = await persistForwardingResult(record._id, result);
+	if (result?.decision?.shouldForward) {
+		logInbound("forwarding.checked", {
+			inboundEmailId: String(record._id),
+			shouldForward: true,
+			reason: result.decision.reason || "",
+			categories: result.decision.categories || [],
+			forwardingStatus: result.forwarding?.status || "",
+			forwardedTo: result.forwarding?.forwardedTo || [],
+			error: result.forwarding?.error || "",
+		});
+		emitInboundEmailUpdated(req, updated || record, {
+			forwardingStatus: result.forwarding?.status || "",
+			forwardReason: result.decision.reason || "",
+		});
+	}
+	return updated || record;
+};
+
 const emitReservationRefreshIfNeeded = async (req, reconciliation) => {
 	if (
 		!reconciliation?.hotelId ||
@@ -398,6 +463,7 @@ const emitReservationRefreshIfNeeded = async (req, reconciliation) => {
 
 exports.handleSendGridInbound = async (req, res) => {
 	let inboundRecord = null;
+	let parsedEmail = null;
 	try {
 		logInbound("request.received", {
 			contentType: req.get("content-type") || "",
@@ -412,6 +478,7 @@ exports.handleSendGridInbound = async (req, res) => {
 		logInbound("secret.accepted");
 
 		const email = await parseSendGridPayload(req.body || {}, req.files || []);
+		parsedEmail = email;
 		logInbound("payload.parsed", {
 			from: email.from,
 			to: email.to,
@@ -585,6 +652,13 @@ exports.handleSendGridInbound = async (req, res) => {
 			hotelId: reconciliation.hotelId,
 			reservationMongoId: reconciliation.reservationId,
 		});
+		await handleImportantInboundForwarding({
+			req,
+			record: updated || inboundRecord,
+			email,
+			normalized,
+			reconciliation,
+		});
 
 		console.log("[SendGrid Inbound]", {
 			status: reconciliation.status,
@@ -603,6 +677,18 @@ exports.handleSendGridInbound = async (req, res) => {
 				processingStatus: "failed",
 				reconcileErrors: [err.message],
 			}).catch(() => null);
+			await handleImportantInboundForwarding({
+				req,
+				record: updated || inboundRecord,
+				email: parsedEmail,
+				normalized: {},
+				reconciliation: {
+					status: "failed",
+					errors: [err.message],
+				},
+			}).catch((forwardError) =>
+				console.error("[SendGrid Inbound] forwarding failed:", forwardError.message)
+			);
 			emitInboundEmailUpdated(req, updated || inboundRecord);
 		} else {
 			await InboundEmail.create({
@@ -644,6 +730,13 @@ exports.listInboundEmails = async (req, res) => {
 		if (req.query.hasReservationConnection !== undefined) {
 			query.hasReservationConnection =
 				String(req.query.hasReservationConnection).toLowerCase() === "true";
+		}
+		if (req.query.shouldForward !== undefined) {
+			query["forwardDecision.shouldForward"] =
+				String(req.query.shouldForward).toLowerCase() === "true";
+		}
+		if (req.query.forwardingStatus) {
+			query["forwarding.status"] = String(req.query.forwardingStatus).toLowerCase();
 		}
 		if (req.query.hotelId && ObjectId.isValid(req.query.hotelId)) {
 			query.hotelId = ObjectId(req.query.hotelId);
