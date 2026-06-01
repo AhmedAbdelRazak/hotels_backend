@@ -25,6 +25,10 @@ const {
 	createOverallSystemAdmin,
 	updateOverallSystemAdmin,
 	overallSettings,
+	overallRoomManagerOptions,
+	saveOverallRoomManagerRoom,
+	overallCalendarPricingOptions,
+	saveOverallCalendarPricing,
 } = require("../controllers/overall_dashboard");
 
 router.get(
@@ -151,6 +155,34 @@ router.get(
 	requireSignin,
 	isAuth,
 	overallSettings
+);
+
+router.get(
+	"/overall-dashboard/settings-room-manager/:userId",
+	requireSignin,
+	isAuth,
+	overallRoomManagerOptions
+);
+
+router.post(
+	"/overall-dashboard/settings-room-manager/:userId",
+	requireSignin,
+	isAuth,
+	saveOverallRoomManagerRoom
+);
+
+router.get(
+	"/overall-dashboard/settings-calendar-pricing/:userId",
+	requireSignin,
+	isAuth,
+	overallCalendarPricingOptions
+);
+
+router.post(
+	"/overall-dashboard/settings-calendar-pricing/:userId",
+	requireSignin,
+	isAuth,
+	saveOverallCalendarPricing
 );
 
 router.param("userId", userById);

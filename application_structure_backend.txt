@@ -1539,3 +1539,133 @@ Future TODO Backlog - Added 2026-05-26
   - node -c controllers/reservations.js passed after the final agent wallet/commission clarification.
   - hotels_frontend npm.cmd run build passed after the final agent wallet/commission clarification.
   - No additional live QA reservations were created during this documentation pass.
+
+2026-06-01 OTA Calendar Orchestrator Preparation
+- Business purpose:
+  - Super Admins need a low-cost way to prepare calendar/rate/availability changes for Expedia, Agoda, Airbnb, and Booking.com from the PMS calendar screen.
+  - The first implementation is deliberately a supervised preparation layer, not an unattended scraper or channel-manager replacement.
+- Backend files:
+  - routes/ota_calendar.js.
+  - controllers/ota_calendar.js.
+  - services/otaCalendarOrchestrator.js.
+  - models/ota_calendar_job.js.
+- API:
+  - GET /api/ota-calendar/options/:userId returns supported OTAs and credential-readiness metadata for Super Admins.
+  - POST /api/ota-calendar/jobs/:userId/prepare creates an OtaCalendarJob for a hotel room/date range.
+  - GET /api/ota-calendar/jobs/:userId/:jobId returns a prepared job.
+- Authorization and safety:
+  - Only Super Admin actors may use the endpoint. The controller checks configured Super Admin ids, role 1000, and superadmin-style role descriptions.
+  - Payloads are restricted to calendar/rate/availability fields only.
+  - Payloads must include confirmSupervisedOnly: true, so callers explicitly acknowledge that this is not an unattended OTA submitter.
+  - Passwords, secrets, tokens, cookies, and session data are rejected in API payloads.
+  - OTA password lookup is by environment reference only: OTA_PASSWORD.
+  - Optional OTA username env vars: OTA_EXPEDIA_USERNAME, OTA_AGODA_USERNAME, OTA_AIRBNB_USERNAME, OTA_BOOKING_USERNAME.
+  - Optional dashboard URL env vars: OTA_EXPEDIA_DASHBOARD_URL, OTA_AGODA_DASHBOARD_URL, OTA_AIRBNB_DASHBOARD_URL, OTA_BOOKING_DASHBOARD_URL.
+  - The saved job policy states no captcha bypass, no guest/payment/reservation access, human verification required, and manual final submit required.
+- Job behavior:
+  - Supported OTAs are expedia, agoda, airbnb, and booking.
+  - Jobs store dateFrom/dateTo, nightlyRateSar, rootRateSar, availability, closed state, selected OTAs, per-day calendar rows, credential readiness, and supervised task steps.
+  - Missing usernames or missing OTA_PASSWORD creates status needs_credentials; otherwise status is prepared.
+  - This endpoint prepares a supervised calendar task. It does not currently log into OTA dashboards or submit changes.
+
+2026-06-01 Overall Settings Room Manager And Calendar Pricing Backend
+- Business purpose:
+  - The Overall Settings screen now has separate backend endpoints for bulk room management and bulk calendar pricing.
+  - These endpoints were added without changing the existing single-hotel settings routes, so the older stable setup remains intact.
+  - Both workflows write to the existing HotelDetails.roomCountDetails structure.
+- Backend files:
+  - routes/overall_dashboard.js wires the new GET/POST routes.
+  - controllers/overall_dashboard.js owns option loading, validation, schema-safe merging, and saves.
+  - services/overallRoomTextOrchestrator.js handles bilingual room name/description orchestration.
+  - services/overallCalendarPricingOrchestrator.js builds pricing plans and calendar rows.
+  - services/openaiModelConfig.js is used by the room text orchestrator when OpenAI is configured.
+- API routes:
+  - GET /api/overall-dashboard/settings-room-manager/:userId.
+  - POST /api/overall-dashboard/settings-room-manager/:userId.
+  - GET /api/overall-dashboard/settings-calendar-pricing/:userId.
+  - POST /api/overall-dashboard/settings-calendar-pricing/:userId.
+  - All four routes use requireSignin, isAuth, and router.param("userId", userById).
+  - Controllers call requireOverallSection(req, res, "settings"), so access is scoped to the hotels visible in the Overall Settings section and the ownerId query parameter.
+- Room manager options endpoint:
+  - Handler: overallRoomManagerOptions.
+  - Returns the accessible hotels and their roomCountDetails in a frontend-friendly shape.
+  - Response is used by src/HotelModule/TheOverallStructure/OverallSettings/OverallRoomManagerModal.js.
+- Room manager save endpoint:
+  - Handler: saveOverallRoomManagerRoom.
+  - Accepts action add or update.
+  - Add mode accepts multiple hotelIds so the same room can be created across several hotels in one operation.
+  - Add mode supports per-hotel counts through the submitted roomCounts map/array.
+  - Update mode targets one hotel and one roomId.
+  - The endpoint validates that every requested hotel belongs to the actor's allowed Overall Settings scope.
+  - Duplicate room protection checks same roomType/displayName combination inside each target hotel.
+  - Existing room arrays are reused; no new top-level room collection is introduced.
+  - New rooms are appended to hotel.roomCountDetails with default arrays for pricedExtras, pricingRate, agentInventory, agentPricingRate, photos, offers, and monthly.
+  - overallRoomsCount is recalculated from roomCountDetails after add/update.
+  - Shared men/women rooms stay in the existing structure by using the existing room type plus roomForGender instead of adding a new schema path.
+- Room text AI orchestration:
+  - Service: overallRoomTextOrchestrator.orchestrateRoomText.
+  - The user submits one room name and one description.
+  - If OpenAI is configured, the service creates polished English and Arabic values:
+    - displayName.
+    - displayName_OtherLanguage.
+    - description.
+    - description_OtherLanguage.
+  - The service also infers bedsCount from explicit text when possible, but the UI does not require the user to enter a bed count.
+  - OpenAI key lookup supports OPENAI_API_KEY and CHATGPT_API_TOKEN.
+  - If no key is configured, the key is invalid, or the model call fails, the endpoint still saves fallback text so the user is not blocked.
+  - The API response includes ai.applied, ai.model, ai.skippedReason, and ai.error for diagnostics.
+- Calendar pricing options endpoint:
+  - Handler: overallCalendarPricingOptions.
+  - Returns accessible hotels, rooms, and approved/active order taker agents related to those hotels.
+  - Rooms include roomType, displayName, displayName_OtherLanguage, roomForGender, count, activeRoom, roomColor, pricingDays, and agentPricingDays.
+  - Agent options are filtered by hotel assignments and active/approved account state.
+  - Response is used by src/HotelModule/TheOverallStructure/OverallSettings/OverallCalendarPricingModal.js.
+- Calendar pricing save endpoint:
+  - Handler: saveOverallCalendarPricing.
+  - Accepts scope general or agents.
+  - General scope writes to roomCountDetails[n].pricingRate.
+  - Agents scope writes to roomCountDetails[n].agentPricingRate.
+  - The endpoint requires at least one hotel and one room selection.
+  - Agent scope also requires at least one selected agent.
+  - Every hotel, room, and agent is validated against the actor's allowed Overall Settings scope.
+  - Bulk mode accepts dates, roomSelections, sellingPrice, commissionPercent, status, and calendarType.
+  - Explicit row mode accepts rows with hotelId, roomId, calendarDate, status, sellingPrice, and commissionPercent; this is what the preview modal sends after row-level edits.
+  - The maximum generated payload is protected by services/overallCalendarPricingOrchestrator.ensurePlanSize, currently capped at 25000 generated rows.
+- Calendar pricing plan rules:
+  - Service: overallCalendarPricingOrchestrator.buildPricingPlan.
+  - Selling price is the PMS user-facing nightly price.
+  - Commission percent is converted to the room/calendar root price:
+    - rootPrice = sellingPrice - (sellingPrice * commissionPercent / 100).
+  - Saved calendar rows store:
+    - price = sellingPrice.
+    - rootPrice = calculated root price.
+    - sellingPrice = sellingPrice.
+    - commissionPercent = commission percent.
+    - commissionRate = 0.
+  - commissionRate is intentionally saved as 0 so the existing PMS calendar/reservation logic does not add the commission a second time.
+  - Blocked/closed/restricted rows save selling price, root price, and commission as 0 and use black as the row color.
+  - Non-blocked rows receive a deterministic color based on scope, selling price, and commission.
+- General calendar fallback pricing:
+  - General Calendar Pricing saves also update the selected room's fallback price fields.
+  - roomCountDetails[n].price.basePrice is set to the top-level selling price per night.
+  - roomCountDetails[n].defaultCost is set to the calculated top-level nightly root price.
+  - This ensures a general fallback price exists when no calendar row is available for a date.
+  - Agent Calendar Pricing does not update these public/general fallback fields.
+  - If explicit preview-row mode has no usable top-level price, the backend can fall back to the first open explicit row, but the frontend normally submits the top-level selling price per night and commission.
+- Calendar merge and overwrite behavior:
+  - General calendar rows are merged by room + calendarDate.
+  - Saving a full month replaces only submitted dates for the selected rooms.
+  - Saving a smaller range, such as July 7 to July 20, replaces only those submitted dates and leaves the other dates unchanged.
+  - Agent calendar rows are merged by agent + room + calendarDate.
+  - Updating Agent A for a room/date range does not overwrite Agent B for the same room/date range.
+  - Updating a later version of July after a previous July save will overwrite only the dates included in the new request.
+- Calendar row builders:
+  - buildGeneralRow writes public/general pricingRate rows with calendarDate, room_type, displayName, price, rootPrice, commissionRate, sellingPrice, commissionPercent, color, calendarType, source, and blocked status when relevant.
+  - buildAgentRow adds agentId, agentName, agentEmail, and companyName on top of the general row shape.
+  - agentSnapshot normalizes agent metadata for agentPricingRate rows.
+- Validation performed during implementation:
+  - node --check controllers/overall_dashboard.js passed.
+  - node --check services/overallCalendarPricingOrchestrator.js passed.
+  - Frontend build passed after the related UI/API wiring.
+  - Local smoke tests created temporary Codex-marked owner/hotel/agent/calendar documents only, verified general and agent calendar saves, verified blocked row behavior, verified fallback basePrice/defaultCost updates, and then deleted only those temporary test documents.
+  - Cleanup was verified with zero remaining Codex test documents for those smoke runs.
