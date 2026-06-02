@@ -103,7 +103,7 @@ const isPrivilegedTrackerActor = (actor = {}) => {
 	return (
 		roleNumbers.some((role) => role === 1000 || role === 10000) ||
 		roleKeys.some((role) => privilegedActorRoleKeys.has(role)) ||
-		isPrivilegedTrackerActor(actor.previewedBy)
+		(Boolean(actor?.previewedBy) && isPrivilegedTrackerActor(actor.previewedBy))
 	);
 };
 

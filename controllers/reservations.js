@@ -1712,23 +1712,24 @@ const getPendingConfirmationReasons = (reservation = {}) => {
 	return reasons;
 };
 
-const sanitizeOrderTakerUpdate = (updates = {}) => {
+const ORDER_TAKER_MINOR_CUSTOMER_FIELDS = [
+	"name",
+	"phone",
+	"email",
+	"passport",
+	"passportExpiry",
+	"nationality",
+	"copyNumber",
+	"hasCar",
+	"carLicensePlate",
+	"carColor",
+	"carModel",
+	"carYear",
+	"confirmationNumber",
+];
+
+const orderTakerCustomerUpdate = (updates = {}, allowedCustomerFields = []) => {
 	const allowed = {};
-	const allowedCustomerFields = [
-		"name",
-		"phone",
-		"email",
-		"passport",
-		"passportExpiry",
-		"nationality",
-		"copyNumber",
-		"hasCar",
-		"carLicensePlate",
-		"carColor",
-		"carModel",
-		"carYear",
-		"confirmationNumber",
-	];
 	const rawCustomerDetails =
 		updates.customer_details || updates.customerDetails || null;
 
@@ -1740,6 +1741,18 @@ const sanitizeOrderTakerUpdate = (updates = {}) => {
 			return acc;
 		}, {});
 	}
+
+	return allowed;
+};
+
+const sanitizeOrderTakerMinorUpdate = (updates = {}) =>
+	orderTakerCustomerUpdate(updates, ORDER_TAKER_MINOR_CUSTOMER_FIELDS);
+
+const sanitizeOrderTakerUpdate = (updates = {}) => {
+	const allowed = orderTakerCustomerUpdate(
+		updates,
+		ORDER_TAKER_MINOR_CUSTOMER_FIELDS
+	);
 
 	[
 		"checkin_date",
@@ -1762,6 +1775,27 @@ const sanitizeOrderTakerUpdate = (updates = {}) => {
 	});
 
 	return allowed;
+};
+
+const hasMeaningfulUpdatePayload = (updates = {}) =>
+	Object.values(updates || {}).some((value) => {
+		if (value === undefined) return false;
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			return Object.keys(value).length > 0;
+		}
+		return true;
+	});
+
+const isOrderTakerMinorUpdateAllowedReservation = (reservation = {}) => {
+	const combinedStatus = [
+		reservation?.reservation_status,
+		reservation?.state,
+		reservation?.pendingConfirmation?.status,
+		reservation?.agentDecisionSnapshot?.status,
+	]
+		.map((value) => String(value || "").toLowerCase())
+		.join(" ");
+	return !/(cancel|no[_\s-]?show)/i.test(combinedStatus);
 };
 
 const normalizeId = (value) => String(value?._id || value || "").trim();
@@ -5525,13 +5559,17 @@ exports.updateReservation = async (req, res) => {
 				});
 			}
 		}
+		const orderTakerCanFullCorrection =
+			orderTakerBasicEditOnly &&
+			isOrderTakerEditableReservation(existingReservation);
 		if (
 			orderTakerBasicEditOnly &&
-			!isOrderTakerEditableReservation(existingReservation)
+			!orderTakerCanFullCorrection &&
+			!isOrderTakerMinorUpdateAllowedReservation(existingReservation)
 		) {
 			return res.status(403).json({
 				error:
-					"This reservation is already confirmed or closed. Only hotel staff can update it now.",
+					"This reservation is cancelled or closed. The agent cannot update it.",
 				errorArabic:
 					"تم تأكيد هذا الحجز أو إغلاقه بالفعل. يمكن لموظفي الفندق فقط تحديثه الآن.",
 				code: "agent_confirmed_reservation_locked",
@@ -5546,7 +5584,18 @@ exports.updateReservation = async (req, res) => {
 			.toLowerCase();
 		const orderTakerRequestedCancel =
 			orderTakerBasicEditOnly && /cancel/.test(requestedAgentStatus);
-		if (orderTakerBasicEditOnly) {
+		if (orderTakerBasicEditOnly && !orderTakerCanFullCorrection) {
+			normalizedUpdateData = sanitizeOrderTakerMinorUpdate(normalizedUpdateData);
+			if (!hasMeaningfulUpdatePayload(normalizedUpdateData)) {
+				return res.status(403).json({
+					error:
+						"Agents can only update minor guest details after hotel or finance review locks the reservation.",
+					errorArabic:
+						"\u0628\u0639\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0641\u0646\u062f\u0642 \u0623\u0648 \u0627\u0644\u0645\u0627\u0644\u064a\u0629\u060c \u064a\u0645\u0643\u0646 \u0644\u0644\u0648\u0643\u064a\u0644 \u062a\u0639\u062f\u064a\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0636\u064a\u0641 \u0627\u0644\u0628\u0633\u064a\u0637\u0629 \u0641\u0642\u0637.",
+					code: "agent_minor_guest_update_only",
+				});
+			}
+		} else if (orderTakerBasicEditOnly) {
 			normalizedUpdateData = sanitizeOrderTakerUpdate(normalizedUpdateData);
 			const existingPending =
 				existingReservation.pendingConfirmation &&
@@ -8007,12 +8056,12 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							{ state: FINANCE_REJECTED_REGEX },
 							{
 								"agentDecisionSnapshot.status": {
-									$in: ["confirmed", "rejected"],
+									$in: ["confirmed", "rejected", "cancelled"],
 								},
 							},
 							{
 								"pendingConfirmation.status": {
-									$in: ["confirmed", "rejected"],
+									$in: ["confirmed", "rejected", "cancelled"],
 								},
 							},
 							buildCommissionMissingFilter(),
@@ -8057,7 +8106,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						reservation.pendingConfirmation ||
 						{};
 					const decisionStatus = String(decision.status || "").toLowerCase();
-					const isDecision = ["confirmed", "rejected"].includes(decisionStatus);
+					const isDecision = ["confirmed", "rejected", "cancelled"].includes(
+						decisionStatus
+					);
 					const totalReviewStatus = String(
 						financialCycle.totalReviewStatus || ""
 					).toLowerCase();
@@ -8772,8 +8823,13 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 					body.cancel_reason ||
 					body.rejectionReason ||
 					body.reason ||
-					"Reservation cancelled."
+					""
 			).trim();
+			if (!cancellationReason) {
+				return res.status(400).json({
+					error: "Cancellation reason is required",
+				});
+			}
 			updatePayload.reservation_status = STATUS_CANCELLED;
 			updatePayload.state = STATUS_CANCELLED;
 			updatePayload.cancel_reason = cancellationReason;

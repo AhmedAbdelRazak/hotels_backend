@@ -1669,3 +1669,52 @@ Future TODO Backlog - Added 2026-05-26
   - Frontend build passed after the related UI/API wiring.
   - Local smoke tests created temporary Codex-marked owner/hotel/agent/calendar documents only, verified general and agent calendar saves, verified blocked row behavior, verified fallback basePrice/defaultCost updates, and then deleted only those temporary test documents.
   - Cleanup was verified with zero remaining Codex test documents for those smoke runs.
+
+2026-06-02 Reservation Team Reject/Cancel And Agent Update Restrictions
+- Backend files:
+  - controllers/reservations.js.
+  - services/activityTracker.js.
+  - routes/reservations.js already exposes PUT /api/reservations/pending-confirmation/:reservationId/:userId.
+- Pending-confirmation decision behavior:
+  - updatePendingConfirmationReservation supports action=confirm, action=reject, action=cancel, and revert-to-pending actions.
+  - Reservation employees, managers, admins, and Hotel System Admin style actors may use the status decision workflow within their hotel scope.
+  - Finance-only users remain restricted to finance/commission review and cannot make reservation-team confirm/reject/cancel decisions.
+  - action=reject requires rejectionReason/rejectionComment/comment.
+  - action=cancel now requires an explicit cancelReason/cancel_reason/rejectionReason/reason. It must not silently default to a generic cancellation reason.
+- Reject semantics:
+  - Reject sets reservation_status/state to Rejected.
+  - pendingConfirmation.status becomes rejected.
+  - pendingConfirmation.rejectionReason stores the reservation employee comment.
+  - agentDecisionSnapshot.status becomes rejected with the same reason.
+  - The agent sees the rejection notification and can update/resubmit the reservation for another hotel review.
+- Cancel semantics:
+  - Cancel sets reservation_status/state to cancelled.
+  - cancel_reason stores the reservation employee cancellation reason.
+  - pendingConfirmation.status and agentDecisionSnapshot.status become cancelled.
+  - The agent sees a notification but cannot update the reservation because it is closed.
+- Agent notification feed:
+  - Agent pending-confirmation notifications now include pendingConfirmation.status/agentDecisionSnapshot.status = cancelled in addition to confirmed/rejected.
+  - Cancelled reservation-team decisions are emitted as agent_decision-style notification rows with decisionStatus cancelled and the cancellation reason.
+- Agent update permissions:
+  - Order-taker/agent users can fully correct and resubmit their own reservations only when the reservation is still pending confirmation, rejected by the reservation team, or rejected by finance.
+  - Full correction may include dates, rooms, pricing, comments, and guest details through the existing sanitizeOrderTakerUpdate path.
+  - Once hotel/finance review has locked the reservation, agents can only update minor guest/customer details.
+  - Minor guest/customer details include name, phone, email, passport, passportExpiry, nationality, copyNumber, car details, and confirmationNumber.
+  - Agents cannot update checkin, checkout, rooms, pricing, total amount, status, payment/finance fields, or commission fields once the reservation is confirmed, in-house, checked-out, pending finance review, or otherwise locked.
+  - Cancelled/no-show/closed reservations are not agent-editable at all.
+- Activity tracker guard:
+  - services/activityTracker.js must only recurse into actor.previewedBy when previewedBy exists.
+  - This prevents normal reservation employee decisions from logging a harmless but noisy maximum call stack error during activity tracking.
+- Workflow test performed after implementation:
+  - Successful run key: codex-reservation-workflow-1780373168982.
+  - Created Codex-marked owner, hotel, reservation employee, agent, and three reservations in the hotels database.
+  - Confirm test: reservation employee action=confirm returned 200, pendingConfirmation.status became confirmed, and reservation_status moved to pending finance review.
+  - Reject test: reservation employee action=reject returned 200, the rejection comment was stored in pendingConfirmation/agentDecisionSnapshot, and the agent notification feed returned decisionStatus rejected.
+  - Agent correction test: the agent updated the rejected reservation's guest name and dates; updateReservation returned 200 and resubmitted the reservation to pending confirmation.
+  - Cancel test: reservation employee action=cancel returned 200, cancel_reason was stored, pendingConfirmation/agentDecisionSnapshot became cancelled, and the agent notification feed returned decisionStatus cancelled.
+  - Cancel lock test: the agent then attempted to update guest/dates on the cancelled reservation; updateReservation returned 403 with code agent_confirmed_reservation_locked and the reservation data remained unchanged.
+  - Before production push, only this successful Codex workflow run was cleaned up: 3 reservations, 3 users, and 1 hotel were deleted by exact run key, with zero remaining matching reservations/users/hotels.
+  - Backend checks passed after the workflow test:
+    - node --check controllers/reservations.js.
+    - node --check services/activityTracker.js.
+  - Frontend npm.cmd run build also passed after the table/modal/notification UI updates.
