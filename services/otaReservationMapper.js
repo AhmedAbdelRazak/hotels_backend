@@ -3093,6 +3093,29 @@ async function reconcileOtaReservation(inputNormalized) {
 		);
 	}
 
+	if (existing && intent === "new_reservation" && !isStatusIntent && !isUpdateIntent) {
+		logReconcile("duplicate_reservation.existing_new_booking", {
+			confirmationNumber,
+			reservationId: String(existing._id),
+			pmsConfirmationNumber: existing.confirmation_number || "",
+			hotelId: existing.hotelId ? String(existing.hotelId) : "",
+			matchedReservationBy,
+		});
+		return {
+			status: "duplicate_reservation",
+			actionTaken: "skipped",
+			skipReason: "duplicate_existing_reservation_no_update",
+			automationComment:
+				"New OTA reservation email matched an existing reservation by confirmation number; no reservation fields were changed.",
+			warnings,
+			errors,
+			reservationId: existing._id,
+			hotelId: existing.hotelId,
+			pmsConfirmationNumber: existing.confirmation_number,
+			matchedReservationBy,
+		};
+	}
+
 	const missingForCreate = requiredNewReservationMissing(normalized);
 	const hasCompleteCreatePayload =
 		!missingForCreate.length &&

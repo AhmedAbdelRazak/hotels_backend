@@ -239,11 +239,31 @@ const findProcessedDuplicate = async (emailHash, messageId) => {
 	if (messageId) query.$or.push({ messageId });
 	if (!query.$or.length) return null;
 	return InboundEmail.findOne(query)
-		.select("_id processingStatus reservationMongoId hotelId pmsConfirmationNumber")
+		.select(
+			"_id processingStatus reservationMongoId hotelId provider providerLabel intent eventType confirmationNumber pmsConfirmationNumber hotelName roomName sourceAmount sourceCurrency totalAmountSar exchangeRateToSar exchangeRateSource paymentCollectionModel"
+		)
 		.sort({ receivedAt: 1 })
 		.lean()
 		.exec();
 };
+
+const buildNormalizedFromDuplicateRecord = (duplicate = {}) => ({
+	provider: duplicate.provider || "",
+	providerLabel: duplicate.providerLabel || "",
+	intent: duplicate.intent || "",
+	eventType: duplicate.eventType || "",
+	confirmationNumber: duplicate.confirmationNumber || "",
+	hotelName: duplicate.hotelName || "",
+	roomName: duplicate.roomName || "",
+	amount: Number(duplicate.sourceAmount || 0),
+	currency: duplicate.sourceCurrency || "",
+	totalAmountSar: Number(duplicate.totalAmountSar || 0),
+	exchangeRateToSar: Number(duplicate.exchangeRateToSar || 0),
+	exchangeRateSource: duplicate.exchangeRateSource || "",
+	paymentCollectionModel: duplicate.paymentCollectionModel || "",
+	warnings: [],
+	errors: [],
+});
 
 const emitInboundEmailUpdated = (req, record, extra = {}) => {
 	const io = req?.app?.get("io");
@@ -512,6 +532,60 @@ exports.handleSendGridInbound = async (req, res) => {
 			duplicateOf: duplicate?._id ? String(duplicate._id) : "",
 		});
 
+		if (duplicate) {
+			const normalized = buildNormalizedFromDuplicateRecord(duplicate);
+			normalized.inboundEmailId = String(inboundRecord._id);
+			const duplicateReconciliation = {
+				status: "duplicate_email",
+				duplicateOf: duplicate._id,
+				reservationId: duplicate.reservationMongoId || null,
+				hotelId: duplicate.hotelId || null,
+				pmsConfirmationNumber: duplicate.pmsConfirmationNumber || "",
+				actionTaken: "skipped",
+				skipReason: "duplicate_email",
+				automationComment:
+					"Duplicate inbound email payload; email was saved for audit only.",
+				matchedReservationBy: ["email_hash_or_message_id"],
+			};
+			const updated = await finalizeRecord(inboundRecord._id, {
+				processingStatus: "duplicate_email",
+				provider: normalized.provider || "",
+				providerLabel: normalized.providerLabel || "",
+				intent: normalized.intent || "",
+				eventType: normalized.eventType || "",
+				confirmationNumber: normalized.confirmationNumber || "",
+				hotelName: normalized.hotelName || "",
+				roomName: normalized.roomName || "",
+				...buildInboundExtractionFields(normalized, duplicateReconciliation),
+				reservationMongoId: duplicate.reservationMongoId || null,
+				hotelId: duplicate.hotelId || null,
+				normalizedReservation: normalized,
+				emailContext: {
+					duplicateOf: String(duplicate._id),
+					duplicatePrecheck: true,
+				},
+				orchestratorDecision: {
+					usedAI: false,
+					skipped: true,
+					skipReason: "duplicate_email_precheck",
+				},
+				reconciliation: duplicateReconciliation,
+				parseWarnings: [],
+				parseErrors: [],
+				safeSnippet: safeSnippet(buildRedactedEmailText(email), 800),
+			});
+			logInbound("duplicate.audited", {
+				inboundEmailId: String(inboundRecord._id),
+				duplicateOf: String(duplicate._id),
+				provider: normalized.provider,
+				intent: normalized.intent,
+				confirmationNumber: normalized.confirmationNumber,
+				orchestrationSkipped: true,
+			});
+			emitInboundEmailUpdated(req, updated || inboundRecord);
+			return res.status(200).send("OK");
+		}
+
 		logInbound("orchestrator.start", {
 			inboundEmailId: String(inboundRecord._id),
 		});
@@ -538,52 +612,6 @@ exports.handleSendGridInbound = async (req, res) => {
 			warnings: normalized.warnings || [],
 			errors: normalized.errors || [],
 		});
-
-		if (duplicate) {
-			const duplicateReconciliation = {
-				status: "duplicate_email",
-				duplicateOf: duplicate._id,
-				reservationId: duplicate.reservationMongoId || null,
-				hotelId: duplicate.hotelId || null,
-				pmsConfirmationNumber: duplicate.pmsConfirmationNumber || "",
-				actionTaken: "skipped",
-				skipReason: "duplicate_email",
-				automationComment:
-					"Duplicate inbound email payload; email was saved for audit only.",
-				matchedReservationBy: ["email_hash_or_message_id"],
-			};
-			const updated = await finalizeRecord(inboundRecord._id, {
-				processingStatus: "duplicate_email",
-				provider: normalized.provider || "",
-				providerLabel: normalized.providerLabel || "",
-				intent: normalized.intent || "",
-				eventType: normalized.eventType || "",
-				confirmationNumber: normalized.confirmationNumber || "",
-				hotelName: normalized.hotelName || "",
-				roomName: normalized.roomName || "",
-				...buildInboundExtractionFields(normalized, duplicateReconciliation),
-				reservationMongoId: duplicate.reservationMongoId || null,
-				hotelId: duplicate.hotelId || null,
-				normalizedReservation: normalized,
-				emailContext: orchestration.emailContext || {},
-				orchestratorDecision: orchestration.decision || {},
-				reconciliation: duplicateReconciliation,
-				parseWarnings: normalized.warnings || [],
-				parseErrors: normalized.errors || [],
-				safeSnippet:
-					orchestration.safeSnippet ||
-					safeSnippet(`${email.subject || ""}\n${email.text || ""}`, 800),
-			});
-			logInbound("duplicate.audited", {
-				inboundEmailId: String(inboundRecord._id),
-				duplicateOf: String(duplicate._id),
-				provider: normalized.provider,
-				intent: normalized.intent,
-				confirmationNumber: normalized.confirmationNumber,
-			});
-			emitInboundEmailUpdated(req, updated || inboundRecord);
-			return res.status(200).send("OK");
-		}
 
 		logInbound("reconcile.start", {
 			inboundEmailId: String(inboundRecord._id),
