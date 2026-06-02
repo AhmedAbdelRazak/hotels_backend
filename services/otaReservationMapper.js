@@ -944,8 +944,20 @@ function findDateValue(text, labels, patterns = []) {
 	return parseDate(findFirstPattern(text, patterns));
 }
 
+function isOtaHotelBoilerplateLine(value = "") {
+	return /(tax invoice|official tax|enumerated|identified bookings|expedia partner central|lodging partner services|unless properly|total transaction amounts|supersede any other tax invoices|for suppliers in us only|do not reply|privacy policy)/i.test(
+		String(value || "")
+	);
+}
+
+function cleanHotelNameCandidate(value = "") {
+	const candidate = cleanOtaDisplayValue(value);
+	if (!candidate || isOtaHotelBoilerplateLine(candidate)) return "";
+	return candidate;
+}
+
 function findStandaloneHotelName(text) {
-	const blocked = /(notice|reservation|confirmation|cancellation|cancelled|booking|guest|email|room|payment|billing|check[-\s]?in|check[-\s]?out|daily base|rate code|taxes|charges|amount|card|activation|expiration|validation|virtual card|logo|province|country|date|subject|from|to)/i;
+	const blocked = /(notice|reservation|confirmation|cancellation|cancelled|booking|guest|email|room|payment|billing|check[-\s]?in|check[-\s]?out|daily base|rate code|taxes|charges|amount|card|activation|expiration|validation|virtual card|logo|province|country|date|subject|from|to|tax invoice|official tax|enumerated|supplier|supersede|identified bookings)/i;
 	const lines = String(text || "")
 		.replace(/\r/g, "")
 		.split("\n")
@@ -958,7 +970,9 @@ function findStandaloneHotelName(text) {
 		}
 		if (blocked.test(line)) continue;
 		if (line.length < 4 || line.length > 90) continue;
-		return line;
+		const candidate = cleanHotelNameCandidate(line);
+		if (!candidate || candidate.length > 90) continue;
+		return candidate;
 	}
 	return "";
 }
@@ -989,6 +1003,51 @@ function cleanOtaDisplayValue(value = "") {
 	return cleaned;
 }
 
+function findHotelNameField(text = "") {
+	const labeled = cleanFieldValue(findField(text, [
+		"Property name",
+		"Hotel name",
+		"Accommodation",
+		"Listing",
+	]));
+	if (labeled) return labeled;
+
+	const source = String(text || "").replace(/\r/g, "");
+	const inline = source.match(/(?:^|\n)\s*Property\s*[:#-]\s*([^\n]{1,140})/i);
+	const inlineCandidate = cleanFieldValue(inline?.[1] || "");
+	if (inlineCandidate) return inlineCandidate;
+
+	const lines = source
+		.split("\n")
+		.map((line) => normalizeWhitespace(line))
+		.filter(Boolean);
+	const propertyIndex = lines.findIndex(
+		(line) => normalizeComparable(line) === "property"
+	);
+	if (propertyIndex >= 0) {
+		return cleanFieldValue(lines[propertyIndex + 1] || "");
+	}
+	return "";
+}
+
+function cleanExpediaHeaderHotelName(value = "") {
+	const candidate = cleanHotelNameCandidate(
+		String(value || "")
+			.replace(/\[image:[^\]]+\]/gi, " ")
+			.replace(/\b(?:expedia|lodging|partner|services|ean|logo)\b/gi, " ")
+	);
+	if (
+		!candidate ||
+		candidate.length > 90 ||
+		!/\b(hotel|resort|suite|suites|inn|apartment|apartments|motel|property)\b/i.test(
+			candidate
+		)
+	) {
+		return "";
+	}
+	return candidate;
+}
+
 function extractProviderLogoHotelName(text = "", provider = "") {
 	const providerPattern =
 		provider === "booking"
@@ -1004,6 +1063,17 @@ function extractProviderLogoHotelName(text = "", provider = "") {
 		.map((line) => normalizeWhitespace(line))
 		.filter(Boolean);
 
+	if (provider === "expedia") {
+		for (let index = 0; index < lines.length; index += 1) {
+			const combined = `${lines[index]} ${lines[index + 1] || ""}`;
+			const match = combined.match(
+				/\[image:\s*(?:EAN|Expedia)\s+logo\]\s+(.+?)(?:\s+\[image:\s*Expedia\s+Lodging(?:\s+Partner\s+Services)?\]?|\s+Expedia\s+Lodging(?:\s+Partner\s+Services)?|$)/i
+			);
+			const candidate = cleanExpediaHeaderHotelName(match?.[1] || "");
+			if (candidate) return candidate;
+		}
+	}
+
 	for (let index = 0; index < lines.length; index += 1) {
 		const line = lines[index];
 		if (!new RegExp(providerPattern, "i").test(line) || !/logo|image/i.test(line)) {
@@ -1016,14 +1086,14 @@ function extractProviderLogoHotelName(text = "", provider = "") {
 				"i"
 			)
 		);
-		const candidate = cleanOtaDisplayValue(match?.[1] || "");
+		const candidate = cleanHotelNameCandidate(match?.[1] || "");
 		if (candidate && candidate.length <= 90) return candidate;
 	}
 
 	const expediaFallback = String(text || "").match(
 		/(?:New Reservation|New Booking|Cancellation|Modified Reservation)[\s\S]{0,220}?Expedia\s+Logo\]?\s+(.+?)(?:\s+\[?(?:image:\s*)?Expedia\s+Lodging\s+Partner\s+Services|\n[A-Za-z ,]+,\s*[A-Z]{3})/i
 	);
-	const candidate = cleanOtaDisplayValue(expediaFallback?.[1] || "");
+	const candidate = cleanHotelNameCandidate(expediaFallback?.[1] || "");
 	return candidate && candidate.length <= 90 ? candidate : "";
 }
 
@@ -1453,13 +1523,7 @@ function extractNormalizedReservation(email) {
 
 	const hotelName = firstNonEmpty(
 		extractProviderLogoHotelName(text, provider),
-		cleanFieldValue(findField(text, [
-			"Property name",
-			"Hotel name",
-			"Property",
-			"Accommodation",
-			"Listing",
-		])),
+		findHotelNameField(text),
 		findStandaloneHotelName(text)
 	);
 	const roomName = cleanFieldValue(findField(text, [
