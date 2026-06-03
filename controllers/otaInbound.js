@@ -24,6 +24,7 @@ const {
 } = require("../services/notificationEvents");
 const {
 	OTA_PLATFORM_REVIEW_PENDING,
+	canManageOtaReservations,
 } = require("../services/otaReservationVisibility");
 
 let simpleParser = null;
@@ -43,21 +44,10 @@ const configuredSuperAdminIds = () =>
 		.map((id) => String(id).trim())
 		.filter(Boolean);
 
-const canViewInboundEmails = (user = {}) => {
-	const role = Number(user?.role);
-	const roleDescriptions = [
-		String(user?.roleDescription || "").toLowerCase(),
-		...(Array.isArray(user?.roleDescriptions)
-			? user.roleDescriptions.map((item) => String(item || "").toLowerCase())
-			: []),
-	];
-	return (
-		role === 1000 ||
-		configuredSuperAdminIds().includes(String(user?._id || user?.id || "").trim()) ||
-		roleDescriptions.includes("superadmin") ||
-		roleDescriptions.includes("admin")
-	);
-};
+const canViewInboundEmails = (user = {}) =>
+	user?.activeUser !== false &&
+	(configuredSuperAdminIds().includes(String(user?._id || user?.id || "").trim()) ||
+		canManageOtaReservations(user));
 
 const upload = multer({
 	limits: {
@@ -127,7 +117,7 @@ exports.requireInboundEmailAdmin = async (req, res, next) => {
 			return res.status(403).json({ error: "Admin resource! access denied" });
 		}
 		const user = await User.findById(userId)
-			.select("_id role roleDescription roleDescriptions")
+			.select("_id role roles roleDescription roleDescriptions accessTo activeUser")
 			.lean()
 			.exec();
 		if (!user || !canViewInboundEmails(user)) {

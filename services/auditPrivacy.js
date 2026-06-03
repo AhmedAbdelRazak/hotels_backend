@@ -86,6 +86,31 @@ const shouldApplyRootOnlyPricing = (reservation = {}, viewer = {}) =>
 	adminRootOnlyPricingEnabled(reservation) &&
 	(!hasViewerIdentity(viewer) || !canViewAdminPricing(viewer));
 
+const OTA_EMAIL_AUDIT_SUPPLIER_FIELDS = [
+	"otaCreatedFromEmail",
+	"otaInboundEmailId",
+	"otaLastInboundEmailId",
+	"otaProvider",
+	"otaPaymentCollectionModel",
+	"otaConfirmationNumber",
+	"platformConfirmationNumber",
+];
+
+const redactOtaEmailAuditFieldsForHotelViewer = (reservation = {}) => {
+	if (!reservation || typeof reservation !== "object") return reservation;
+	const sanitized = { ...reservation };
+
+	if (sanitized.supplierData && typeof sanitized.supplierData === "object") {
+		sanitized.supplierData = { ...sanitized.supplierData };
+		OTA_EMAIL_AUDIT_SUPPLIER_FIELDS.forEach((field) => {
+			delete sanitized.supplierData[field];
+		});
+	}
+
+	delete sanitized.otaPlatformReview;
+	return sanitized;
+};
+
 const hasExplicitMoneyField = (source = {}, field) =>
 	Object.prototype.hasOwnProperty.call(source || {}, field) &&
 	source[field] !== null &&
@@ -169,7 +194,7 @@ const sanitizeRoomsToRootOnly = (rooms = []) =>
 	});
 
 const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
-	const sanitized = { ...reservation };
+	const sanitized = redactOtaEmailAuditFieldsForHotelViewer(reservation);
 	const sourceRooms = Array.isArray(sanitized.pickedRoomsType)
 		? sanitized.pickedRoomsType
 		: [];
@@ -211,7 +236,6 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	}
 	delete sanitized.adminPricing;
 	delete sanitized.adminPricingVisibility;
-	delete sanitized.otaPlatformReview;
 
 	return sanitized;
 };
@@ -279,7 +303,7 @@ const sanitizeRoomsToClientOnly = (rooms = []) =>
 	});
 
 const sanitizeReservationPricingForClientViewer = (reservation = {}) => {
-	const sanitized = { ...reservation };
+	const sanitized = redactOtaEmailAuditFieldsForHotelViewer(reservation);
 	if (Array.isArray(sanitized.pickedRoomsType)) {
 		sanitized.pickedRoomsType = sanitizeRoomsToClientOnly(
 			sanitized.pickedRoomsType
@@ -292,7 +316,6 @@ const sanitizeReservationPricingForClientViewer = (reservation = {}) => {
 	}
 	delete sanitized.adminPricing;
 	delete sanitized.adminPricingVisibility;
-	delete sanitized.otaPlatformReview;
 	return sanitized;
 };
 
@@ -354,8 +377,7 @@ const sanitizeReservationAuditLogsForViewer = (
 	if (!reservation || isSuperAdminViewer(viewer)) return reservation;
 
 	const plain = toPlain(reservation);
-	const sanitized = { ...plain };
-	delete sanitized.otaPlatformReview;
+	const sanitized = redactOtaEmailAuditFieldsForHotelViewer(plain);
 
 	["adminChangeLog", "reservationAuditLog"].forEach((field) => {
 		if (!Array.isArray(plain?.[field])) return;
@@ -512,6 +534,7 @@ const resolveAuditViewerFromRequest = async (req = {}, fallbackViewer = null) =>
 module.exports = {
 	isPrivilegedAuditActor,
 	isSuperAdminViewer,
+	redactOtaEmailAuditFieldsForHotelViewer,
 	resolveAuditViewerFromRequest,
 	sanitizeReservationAdminWorkflowForPublicViewer,
 	sanitizeReservationAuditLogsCollectionForViewer,

@@ -1835,8 +1835,12 @@ Future TODO Backlog - Added 2026-05-26
   - OTA/platform-managed reservations can carry both client/OTA gross pricing and hotel-visible/root pricing.
   - adminPricingVisibility.rootOnlyForHotelManagement = true means hotel-management users must see only the assigned root/hotel price.
   - Hotel-facing sanitization returns total_amount/sub_total as the hotel-visible root amount, removes adminPricing, removes otaPlatformReview, hides client/net/expense/margin fields, and keeps commission display from exposing the OTA gross amount.
+  - Hotel-facing sanitization also removes OTA email audit keys from supplierData, including otaCreatedFromEmail, otaInboundEmailId, otaLastInboundEmailId, otaProvider, otaConfirmationNumber, and platformConfirmationNumber. Hotel-management users must not receive the classified inbound-email audit linkage after release.
   - Platform admins and SUPER admins may still see the raw OTA/client total and adminPricing breakdown.
   - Aggregations and scorecards in hotel-facing reports must use the same hotel-visible amount expression, not raw total_amount.
+- Classified inbound email audit access:
+  - GET /api/inbound-emails/single/:inboundEmailId and the inbound email list are restricted to active SUPER admins or platform users who canManageOtaReservations, which requires the OTAReservations admin permission.
+  - Hotel owners, hotel system admins, reservation employees, reception, finance, and order takers must not be able to fetch inbound email audit bodies directly, even if a frontend route accidentally exposes an id.
 - Notification behavior:
   - New pending OTA reservations should create a live platform-admin notification and bell sound opportunity in the admin UI.
   - Pending OTA review notifications must not be sent to hotel users.
@@ -1859,6 +1863,7 @@ Future TODO Backlog - Added 2026-05-26
     - Pricing update with explicit client/root daily prices marks the reservation release-ready.
     - Release succeeds after explicit reviewed base hotel pricing.
     - Hotel viewer receives only the root/base amount and does not receive adminPricing or otaPlatformReview.
+    - Hotel/non-platform viewer receives no OTA email audit supplierData keys and cannot fetch the inbound email audit endpoint.
     - Pending OTA reservation is admin-filter visible and hotel-management-filter hidden.
   - Cleanup deleted exactly the temporary 2 reservations, 1 hotel, and 1 user created by the QA run, then verified zero remaining matching temporary records.
   - Validation passed:
