@@ -41,13 +41,11 @@ const canManageOtaReservations = (account = {}) => {
 		: [];
 	const roleNumbers = accountRoleNumbers(account);
 	const descriptions = accountRoleDescriptions(account);
-	const isPlatformStaff =
-		roleNumbers.includes(1000) ||
-		roleNumbers.includes(10000) ||
-		descriptions.some((description) =>
-			/(admin|platform|systemadmin|system admin)/i.test(description)
-		);
-	return isPlatformStaff && accessTo.includes("OTAReservations");
+	const isSuperAdminStyle = descriptions.some((description) =>
+		/(^|\s)super[\s_-]?admin(\s|$)/i.test(description)
+	);
+	const isPlatformAdmin = roleNumbers.includes(1000) || isSuperAdminStyle;
+	return isPlatformAdmin && accessTo.includes("OTAReservations");
 };
 
 const buildPendingOtaReviewFilter = () => ({

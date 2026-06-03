@@ -86,20 +86,22 @@ const shouldApplyRootOnlyPricing = (reservation = {}, viewer = {}) =>
 	adminRootOnlyPricingEnabled(reservation) &&
 	(!hasViewerIdentity(viewer) || !canViewAdminPricing(viewer));
 
+const hasExplicitMoneyField = (source = {}, field) =>
+	Object.prototype.hasOwnProperty.call(source || {}, field) &&
+	source[field] !== null &&
+	source[field] !== undefined &&
+	source[field] !== "";
+
 const rootPriceFromDay = (day = {}) => {
-	if (
-		Object.prototype.hasOwnProperty.call(day || {}, "rootPrice") &&
-		day.rootPrice !== null &&
-		day.rootPrice !== undefined &&
-		day.rootPrice !== ""
-	) {
+	if (hasExplicitMoneyField(day, "rootPrice")) {
 		const explicitRoot = moneyNumber(day.rootPrice);
 		if (explicitRoot >= 0) return n2(explicitRoot);
 	}
-	const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
-	if (withoutCommission > 0) return n2(withoutCommission);
-	const finalPrice = moneyNumber(day.totalPriceWithCommission ?? day.price);
-	return n2(finalPrice);
+	if (hasExplicitMoneyField(day, "totalPriceWithoutCommission")) {
+		const withoutCommission = moneyNumber(day.totalPriceWithoutCommission);
+		if (withoutCommission >= 0) return n2(withoutCommission);
+	}
+	return 0;
 };
 
 const stripAdminPricingDayFields = (day = {}) => {
@@ -176,11 +178,19 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 		: [];
 	const sanitizedRooms = sanitizeRoomsToRootOnly(sourceRooms);
 	const sanitizedPricingRooms = sanitizeRoomsToRootOnly(sourcePricingRooms);
+	const roomRootTotal = rootTotalForRooms(
+		sourceRooms.length ? sourceRooms : sourcePricingRooms
+	);
+	const adminRootTotal = moneyNumber(sanitized?.adminPricing?.rootTotal);
+	const fallbackSubTotal = moneyNumber(sanitized.sub_total);
 	const rootTotal = n2(
-		rootTotalForRooms(sourceRooms.length ? sourceRooms : sourcePricingRooms) ||
-			sanitized?.adminPricing?.rootTotal ||
-			sanitized.sub_total ||
-			sanitized.total_amount
+		adminRootTotal > 0
+			? adminRootTotal
+			: roomRootTotal > 0
+			? roomRootTotal
+			: fallbackSubTotal > 0
+			? fallbackSubTotal
+			: 0
 	);
 
 	sanitized.pickedRoomsType = sanitizedRooms;

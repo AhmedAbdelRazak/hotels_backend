@@ -1748,6 +1748,8 @@ Future TODO Backlog - Added 2026-05-26
   - Access is limited to SUPER admins and internal platform employees with OTAReservations permission.
 - Release behavior:
   - Release To Hotel changes reservation_status/state from "OTA Platform Review" to "Pending Confirmation".
+  - Release To Hotel must fail when the OTA review has no positive Total base hotel price/adminPricing.rootTotal or when daily pricing rows do not have explicit base/root hotel prices.
+  - The release endpoint returns ota_hotel_base_price_required / ota_daily_base_price_required-style errors for missing hotel-base pricing; this must remain server-side, not only a frontend disabled button.
   - Release sets otaPlatformReview.status = released and preserves audit metadata showing who released the reservation and when.
   - After release, the reservation should enter the normal reservation employee pending-confirmation workflow before final hotel confirmation.
   - Hotels must only receive normal hotel notifications after release; pending OTA review notifications are platform-only.
@@ -1765,3 +1767,24 @@ Future TODO Backlog - Added 2026-05-26
   - A pending OTA reservation should be present in /admin/ota-reservations and absent from /hotel-management/main-dashboard reservation lists and hotel reports.
   - After release, the reservation should become visible to hotel users as Pending Confirmation.
   - For flagged OTA/platform-managed reservations, hotel owner, hotel system admin, reservation employee, and order taker responses must show the assigned hotel/root amount, while platform admin responses can show the raw OTA/client amount.
+- 2026-06-03 strict OTA QA completed:
+  - Confirmations 1445133730, 4794240937, and 3331936952 were reverted to pending OTA Platform Review by exact confirmation-number filters.
+  - Post-revert verification: buildPendingOtaReviewFilter saw all 3 and buildExcludePendingOtaReviewFilter saw 0, confirming admin-only visibility before release.
+  - releaseOtaReservationToHotel now refuses release unless the OTA review has explicit positive adminPricing.rootTotal / Total base hotel price and explicit daily root/base pricing rows.
+  - Hotel-facing sanitization must not fall back to client/OTA gross pricing when root/base values are missing.
+  - canManageOtaReservations now treats OTA review as platform-admin/SUPER-admin work; hotel-side System Admin accounts cannot become OTA reviewers just by carrying an OTAReservations access string.
+  - Local QA run codex-ota-strict-1780486464216 created only temporary Codex-marked records: 1 owner user, 1 hotel, and 2 OTA reservations.
+  - QA assertions passed:
+    - Platform admin with OTAReservations can manage OTA reservations.
+    - Hotel-side System Admin with OTAReservations string cannot manage OTA reservations.
+    - Release is blocked with a 422 when OTA pricing review/base hotel price is missing.
+    - Pricing update with explicit client/root daily prices marks the reservation release-ready.
+    - Release succeeds after explicit reviewed base hotel pricing.
+    - Hotel viewer receives only the root/base amount and does not receive adminPricing or otaPlatformReview.
+    - Pending OTA reservation is admin-filter visible and hotel-management-filter hidden.
+  - Cleanup deleted exactly the temporary 2 reservations, 1 hotel, and 1 user created by the QA run, then verified zero remaining matching temporary records.
+  - Validation passed:
+    - node --check controllers/janat.js.
+    - node --check services/auditPrivacy.js.
+    - node --check services/otaReservationVisibility.js.
+    - hotels_frontend npm.cmd run build compiled successfully.

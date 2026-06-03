@@ -2161,6 +2161,125 @@ const computeOtaHotelVisibleAmount = (reservation = {}) => {
 	return round2(reservation.total_amount);
 };
 
+const hasExplicitMoneyField = (source = {}, field) =>
+	Object.prototype.hasOwnProperty.call(source || {}, field) &&
+	source[field] !== null &&
+	source[field] !== undefined &&
+	source[field] !== "";
+
+const explicitPositiveMoney = (source = {}, field) =>
+	hasExplicitMoneyField(source, field) ? round2(source[field]) : 0;
+
+const explicitOtaDayRootPrice = (day = {}) => {
+	const rootPrice = explicitPositiveMoney(day, "rootPrice");
+	if (rootPrice > 0) return rootPrice;
+	const withoutCommission = explicitPositiveMoney(
+		day,
+		"totalPriceWithoutCommission"
+	);
+	return withoutCommission > 0 ? withoutCommission : 0;
+};
+
+const validateOtaReleaseHotelBasePrice = (reservation = {}) => {
+	const adminPricing = reservation?.adminPricing || {};
+	const pricingMode = String(adminPricing.mode || "").trim().toLowerCase();
+	const reviewedInOtaQueue =
+		pricingMode === "ota_review" ||
+		Boolean(reservation?.otaPlatformReview?.lastPricingUpdatedAt);
+
+	if (!reviewedInOtaQueue) {
+		return {
+			ready: false,
+			code: "ota_pricing_review_required",
+			message:
+				"Update and save the OTA pricing review before releasing this reservation to the hotel.",
+			hotelBaseTotal: 0,
+		};
+	}
+
+	const adminRootTotal = explicitPositiveMoney(adminPricing, "rootTotal");
+	if (adminRootTotal <= 0) {
+		return {
+			ready: false,
+			code: "ota_hotel_base_price_required",
+			message:
+				"Total base hotel price is required before releasing this OTA reservation to the hotel.",
+			hotelBaseTotal: 0,
+		};
+	}
+
+	const sourceRooms = Array.isArray(reservation.pickedRoomsType)
+		? reservation.pickedRoomsType
+		: [];
+	const pricingRooms = Array.isArray(reservation.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: [];
+	const rooms = sourceRooms.length ? sourceRooms : pricingRooms;
+	if (!rooms.length) {
+		return {
+			ready: false,
+			code: "ota_daily_base_price_required",
+			message:
+				"Daily room pricing rows are required before releasing this OTA reservation to the hotel.",
+			hotelBaseTotal: adminRootTotal,
+		};
+	}
+
+	let dailyBaseTotal = 0;
+	let dailyRows = 0;
+	let missingBaseRows = 0;
+	rooms.forEach((room) => {
+		const count = roomCountValue(room);
+		const pricingByDay = Array.isArray(room?.pricingByDay)
+			? room.pricingByDay
+			: [];
+		if (!pricingByDay.length) {
+			missingBaseRows += 1;
+			return;
+		}
+		pricingByDay.forEach((day) => {
+			dailyRows += 1;
+			const rootPrice = explicitOtaDayRootPrice(day);
+			if (rootPrice <= 0) {
+				missingBaseRows += 1;
+				return;
+			}
+			dailyBaseTotal = round2(dailyBaseTotal + rootPrice * count);
+		});
+	});
+
+	if (!dailyRows || missingBaseRows > 0 || dailyBaseTotal <= 0) {
+		return {
+			ready: false,
+			code: "ota_daily_base_price_required",
+			message:
+				"Every OTA pricing day must have a base hotel price before release.",
+			hotelBaseTotal: adminRootTotal,
+			missingBaseRows,
+		};
+	}
+
+	if (Math.abs(dailyBaseTotal - adminRootTotal) > 0.05) {
+		return {
+			ready: false,
+			code: "ota_hotel_base_price_mismatch",
+			message:
+				"Total base hotel price must match the saved daily base hotel pricing before release.",
+			hotelBaseTotal: adminRootTotal,
+			dailyBaseTotal,
+		};
+	}
+
+	return {
+		ready: true,
+		code: "",
+		message: "",
+		hotelBaseTotal: adminRootTotal,
+		dailyBaseTotal,
+		missingBaseRows: 0,
+	};
+};
+
 const buildOtaReviewAuditActor = (actor = {}) => ({
 	_id: normalizeOtaReviewId(actor?._id || actor),
 	name: actor?.name || actor?.email || "Platform Admin",
@@ -2174,7 +2293,9 @@ const formatOtaAdminReservation = (doc = {}) => {
 	const belongsToObj = normalizePopulatedRef(doc.belongsTo);
 	const nights = Number(doc.days_of_residence || 0);
 	const totalAmount = moneyNumber(doc.total_amount);
-	const hotelVisibleAmount = computeOtaHotelVisibleAmount(doc);
+	const releaseValidation = validateOtaReleaseHotelBasePrice(doc);
+	const hotelVisibleAmount =
+		explicitPositiveMoney(doc?.adminPricing || {}, "rootTotal") || 0;
 	const hotelName =
 		(hotelObj && hotelObj.hotelName) ||
 		doc?.hotelId?.hotelName ||
@@ -2190,6 +2311,9 @@ const formatOtaAdminReservation = (doc = {}) => {
 		confirmation_number2: customerDetails.confirmation_number2 || "",
 		hotel_name: hotelName,
 		hotel_visible_amount: hotelVisibleAmount,
+		hotel_base_price_ready: releaseValidation.ready,
+		hotel_base_price_issue: releaseValidation.message,
+		hotel_base_price_issue_code: releaseValidation.code,
 		price_per_day: nights > 0 ? round2(totalAmount / nights) : totalAmount,
 		otaReviewStatus: doc?.otaPlatformReview?.status || "",
 	};
@@ -2461,10 +2585,28 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 				message: "This OTA reservation has already been released or is not pending review.",
 			});
 		}
+		const releasePricingValidation =
+			validateOtaReleaseHotelBasePrice(reservation);
+		if (!releasePricingValidation.ready) {
+			return res.status(422).json({
+				success: false,
+				code:
+					releasePricingValidation.code ||
+					"ota_hotel_base_price_required",
+				message:
+					releasePricingValidation.message ||
+					"Total base hotel price is required before releasing this OTA reservation to the hotel.",
+				details: {
+					hotelBaseTotal: releasePricingValidation.hotelBaseTotal || 0,
+					dailyBaseTotal: releasePricingValidation.dailyBaseTotal || 0,
+					missingBaseRows: releasePricingValidation.missingBaseRows || 0,
+				},
+			});
+		}
 
 		const now = new Date();
 		const auditActor = buildOtaReviewAuditActor(actor);
-		const hotelVisibleAmount = computeOtaHotelVisibleAmount(reservation);
+		const hotelVisibleAmount = releasePricingValidation.hotelBaseTotal;
 		const existingPending = reservation.pendingConfirmation || {};
 		const updatePayload = {
 			state: OTA_RELEASED_RESERVATION_STATUS,
