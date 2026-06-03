@@ -1814,6 +1814,10 @@ Future TODO Backlog - Added 2026-05-26
   - Pending review reservations use reservation_status/state = "OTA Platform Review" and otaPlatformReview.status = pending.
   - The reservation remains connected to the inbound email audit record for duplicate detection, reconciliation, and traceability.
   - OTA duplicate emails are still saved as audit records, but duplicate_email processing must not create a second reservation or overwrite the original reservation.
+- OTA inbound hotel-name matching:
+  - services/otaReservationMapper.js resolves extracted OTA hotel names against PMS hotels after AI extraction; the AI should still preserve the email hotel text and avoid guessing PMS hotels.
+  - Explicit exception: AlSukareya HOTEL / Al Sukareya / Al Sukareya Hotel is the same property as ZAD AL SAD / Zad Al Sad. The mapper expands only this exact alias group before scoring hotel matches.
+  - Do not lower the global hotel-name match threshold or add broad fuzzy rules for this exception.
 - Hotel visibility invariant:
   - Pending OTA platform-review reservations must not appear in any hotel-management, hotel owner, hotel system admin, reservation employee, order taker, hotel report, hotel details, overall dashboard, payment summary, search/list, or drill-down response.
   - Hotel-facing queries must use buildExcludePendingOtaReviewFilter, appendExcludePendingOtaReviewFilter, or the equivalent centralized guard from services/otaReservationVisibility.js.

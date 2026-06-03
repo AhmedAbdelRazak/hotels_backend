@@ -117,6 +117,45 @@ function comparableVariants(value) {
 	);
 }
 
+const EXPLICIT_HOTEL_ALIAS_GROUPS = [
+	[
+		"AlSukareya HOTEL",
+		"Al Sukareya Hotel",
+		"AlSukareya",
+		"Al Sukareya",
+		"ZAD AL SAD",
+		"Zad Al Sad",
+	],
+];
+
+const EXPLICIT_HOTEL_ALIAS_INDEX = EXPLICIT_HOTEL_ALIAS_GROUPS.map((group) => ({
+	labels: group,
+	keys: new Set(
+		group.flatMap((label) => comparableVariants(label).map(normalizeComparable))
+	),
+}));
+
+function explicitHotelNameAliases(value = "") {
+	const key = normalizeComparable(value);
+	if (!key) return [];
+	const match = EXPLICIT_HOTEL_ALIAS_INDEX.find((group) => group.keys.has(key));
+	return match ? match.labels.filter((label) => normalizeComparable(label) !== key) : [];
+}
+
+function expandHotelNameCandidates(candidates = []) {
+	return Array.from(
+		new Set(
+			(Array.isArray(candidates) ? candidates : [candidates])
+				.flatMap((candidate) => [
+					candidate,
+					...explicitHotelNameAliases(candidate),
+				])
+				.map((item) => normalizeWhitespace(item))
+				.filter(Boolean)
+		)
+	);
+}
+
 const HOTEL_NAME_STOPWORDS = new Set([
 	"hotel",
 	"hotels",
@@ -2657,18 +2696,12 @@ async function resolveHotel(normalized, existingReservation = null) {
 	}
 
 	const wanted = normalizeComparable(normalized.hotelName);
-	const hotelNameCandidates = Array.from(
-		new Set(
-			[
-				normalized.hotelName,
-				...(Array.isArray(normalized.hotelNameAliases)
-					? normalized.hotelNameAliases
-					: []),
-			]
-				.map((item) => normalizeWhitespace(item))
-				.filter(Boolean)
-		)
-	);
+	const hotelNameCandidates = expandHotelNameCandidates([
+		normalized.hotelName,
+		...(Array.isArray(normalized.hotelNameAliases)
+			? normalized.hotelNameAliases
+			: []),
+	]);
 	if (!wanted || !hotelNameCandidates.length) return null;
 
 	const selectFields =
@@ -3696,6 +3729,8 @@ module.exports = {
 	hashText,
 	normalizeWhitespace,
 	normalizeComparable,
+	explicitHotelNameAliases,
+	expandHotelNameCandidates,
 	normalizeConfirmation,
 	detectProvider,
 	detectEventType,
