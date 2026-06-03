@@ -40,6 +40,9 @@ const {
 	normalizeId: normalizeCalendarId,
 	toDateKey: toCalendarDateKey,
 } = require("../services/overallCalendarPricingOrchestrator");
+const {
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
 
 const ObjectId = mongoose.Types.ObjectId;
 const SYSTEM_ADMIN_ROLE = 10000;
@@ -921,6 +924,8 @@ const reservationLookupStages = () => [
 			hotelName: { $ifNull: ["$hotelDetails.hotelName", ""] },
 			hotelOwnerId: "$hotelDetails.belongsTo",
 			bookingSortDate: { $ifNull: ["$booked_at", "$createdAt"] },
+			hotelVisibleTotalAmount: hotelVisibleReservationAmountExpression(),
+			total_amount: hotelVisibleReservationAmountExpression(),
 		},
 	},
 ];
@@ -1060,11 +1065,53 @@ const reservationNumberExpression = (field) => ({
 	},
 });
 
+const hotelVisibleReservationAmountExpression = () => ({
+	$cond: [
+		{ $eq: ["$adminPricingVisibility.rootOnlyForHotelManagement", true] },
+		{
+			$let: {
+				vars: {
+					rootTotal: reservationNumberExpression("$adminPricing.rootTotal"),
+					subTotal: reservationNumberExpression("$sub_total"),
+					totalAmount: reservationNumberExpression("$total_amount"),
+				},
+				in: {
+					$cond: [
+						{ $gt: ["$$rootTotal", 0] },
+						"$$rootTotal",
+						{
+							$cond: [
+								{ $gt: ["$$subTotal", 0] },
+								"$$subTotal",
+								"$$totalAmount",
+							],
+						},
+					],
+				},
+			},
+		},
+		reservationNumberExpression("$total_amount"),
+	],
+});
+
+const hotelVisibleReservationAmount = (reservation = {}) => {
+	if (
+		reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true
+	) {
+		return (
+			moneyNumber(reservation?.adminPricing?.rootTotal) ||
+			moneyNumber(reservation.sub_total) ||
+			moneyNumber(reservation.total_amount)
+		);
+	}
+	return moneyNumber(reservation.total_amount);
+};
+
 const reservationScorecardGroupStage = () => ({
 	$group: {
 		_id: null,
 		reservationsCount: { $sum: 1 },
-		totalAmount: { $sum: reservationNumberExpression("$total_amount") },
+		totalAmount: { $sum: hotelVisibleReservationAmountExpression() },
 		nights: { $sum: reservationListRoomNightsExpression() },
 		hotels: { $addToSet: "$hotelId" },
 	},
@@ -1250,12 +1297,13 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 		buildReservationScorecards({ actor, hotels, query, pendingOnly }),
 	]);
 	const total = countResult?.[0]?.total || 0;
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
 	return {
 		page: exportAll ? 1 : page,
 		limit: exportAll ? total : limit,
 		total,
 		pages: exportAll ? 1 : Math.ceil(total / limit),
-		reservations: rows,
+		reservations: hotelVisibleRows,
 		hotels,
 		bookingSources,
 		scorecards,
@@ -1314,7 +1362,7 @@ const executiveRoomNightsExpression = () => ({
 
 const executiveGroupTotals = () => ({
 	reservationsCount: { $sum: 1 },
-	total_amount: { $sum: { $ifNull: ["$total_amount", 0] } },
+	total_amount: { $sum: hotelVisibleReservationAmountExpression() },
 	roomNights: { $sum: executiveRoomNightsExpression() },
 	commission: { $sum: executiveStoredCommissionExpression() },
 	paidAmount: {
@@ -2369,6 +2417,7 @@ const listCommissionReconciliationActions = async ({
 				.lean()
 				.exec()
 		: [];
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
 	const agentMap = agents.reduce((map, agent) => {
 		map[normalizeId(agent._id)] = agent;
 		return map;
@@ -2380,7 +2429,7 @@ const listCommissionReconciliationActions = async ({
 		limit,
 		total,
 		pages: Math.ceil(total / limit),
-		rows: rows.map((reservation) => {
+		rows: hotelVisibleRows.map((reservation) => {
 			const agentId = agentIdFromReservationRow(reservation, visibleAgentIds);
 			const fallbackAgent =
 				reservation.orderTaker || reservation.createdBy || {};
@@ -2467,6 +2516,7 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 	]);
 
 	const total = countResult?.[0]?.total || 0;
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
 	const agentMap = agentOptions.reduce((map, agent) => {
 		map[normalizeId(agent._id)] = agent;
 		return map;
@@ -2481,7 +2531,7 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		agentOptions,
 		walletClaims,
 		commissionReconciliation,
-		reservations: rows.map((reservation) => {
+		reservations: hotelVisibleRows.map((reservation) => {
 			const agentId = agentIdFromReservationRow(reservation, visibleAgentIds);
 			const fallbackAgent =
 				reservation.agentWalletSnapshot?.agent ||
@@ -2681,7 +2731,7 @@ exports.overallSummary = async (req, res) => {
 					$group: {
 						_id: "$hotelId",
 						totalReservations: { $sum: 1 },
-						totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+						totalAmount: { $sum: hotelVisibleReservationAmountExpression() },
 						activeReservations: {
 							$sum: {
 								$cond: [
@@ -2751,7 +2801,7 @@ exports.overallSummary = async (req, res) => {
 					$group: {
 						_id: { $ifNull: ["$booking_source", "Unknown"] },
 						count: { $sum: 1 },
-						totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+						totalAmount: { $sum: hotelVisibleReservationAmountExpression() },
 					},
 				},
 				{ $sort: { count: -1, _id: 1 } },
@@ -3151,7 +3201,7 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 				.exec(),
 			Reservations.find(reservationMatch)
 				.select(
-					"hotelId roomId total_rooms pickedRoomsType checkin_date checkout_date total_amount reservation_status state"
+					"hotelId roomId total_rooms pickedRoomsType pickedRoomsPricing checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility reservation_status state"
 				)
 				.lean()
 				.exec(),
@@ -3207,7 +3257,7 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 			const checkin = startOfUtcDate(reservation.checkin_date);
 			const checkout = startOfUtcDate(reservation.checkout_date);
 			hotelRow.reservationsCount += 1;
-			hotelRow.totalAmount += moneyNumber(reservation.total_amount);
+			hotelRow.totalAmount += hotelVisibleReservationAmount(reservation);
 
 			range.days.forEach((date) => {
 				const dayStart = new Date(`${date}T00:00:00.000Z`);
@@ -3393,7 +3443,7 @@ exports.overallExecutivePaidReport = async (req, res) => {
 						$group: {
 							_id: null,
 							reservationsCount: { $sum: 1 },
-							totalAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+							totalAmount: { $sum: hotelVisibleReservationAmountExpression() },
 							paidAmount: {
 								$sum: {
 									$cond: [
@@ -3412,7 +3462,7 @@ exports.overallExecutivePaidReport = async (req, res) => {
 				aggregateExecutiveByBookingSource(built.match),
 			]);
 
-		const data = reservations.map((reservation) => {
+		const data = sanitizeReservationAuditLogsCollectionForViewer(reservations).map((reservation) => {
 			const paidTotal = paidBreakdownTotal(reservation.paid_amount_breakdown);
 			const fallbackPaid = paidTotal || moneyNumber(reservation.paid_amount);
 			return {

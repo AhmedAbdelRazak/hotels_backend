@@ -9,6 +9,12 @@ const {
 	isPendingConfirmationReservation,
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
+const {
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
+const {
+	buildExcludePendingOtaReviewFilter,
+} = require("../services/otaReservationVisibility");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -104,6 +110,44 @@ function safeNumber(val) {
 	const parsed = Number(val);
 	return isNaN(parsed) ? 0 : parsed;
 }
+
+const numberExpression = (field) => ({
+	$convert: {
+		input: field,
+		to: "double",
+		onError: 0,
+		onNull: 0,
+	},
+});
+
+const hotelVisibleAmountExpression = () => ({
+	$cond: [
+		{ $eq: ["$adminPricingVisibility.rootOnlyForHotelManagement", true] },
+		{
+			$let: {
+				vars: {
+					rootTotal: numberExpression("$adminPricing.rootTotal"),
+					subTotal: numberExpression("$sub_total"),
+					totalAmount: numberExpression("$total_amount"),
+				},
+				in: {
+					$cond: [
+						{ $gt: ["$$rootTotal", 0] },
+						"$$rootTotal",
+						{
+							$cond: [
+								{ $gt: ["$$subTotal", 0] },
+								"$$subTotal",
+								"$$totalAmount",
+							],
+						},
+					],
+				},
+			},
+		},
+		numberExpression("$total_amount"),
+	],
+});
 
 const PAID_BREAKDOWN_TOTAL_KEYS = [
 	"paid_online_via_link",
@@ -3116,13 +3160,15 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 
 		const reservations = await Reservations.find(scopedQuery)
 			.select(
-				"booking_source total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
+				"booking_source total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
 			)
 			.lean();
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
 		const summary = buildBookingSourcePaymentSummary(
-			reservations,
+			hotelVisibleReservations,
 			paymentStatusFilter
 		);
 
@@ -3224,13 +3270,15 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 
 		const reservations = await Reservations.find(scopedQuery)
 			.select(
-				"checkin_date checkout_date total_amount payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
+				"checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment payment_details paypal_details paid_amount_breakdown confirmation_number reservation_status"
 			)
 			.lean();
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
 		const summary = buildCheckoutDatePaymentSummary(
-			reservations,
+			hotelVisibleReservations,
 			paymentStatusFilter,
 			{ dateField, rowKey }
 		);
@@ -3262,6 +3310,7 @@ function buildReservationBaseQuery({
 		checkin_date: { $lt: endExclusive },
 		checkout_date: { $gt: start },
 		...buildPendingConfirmationExclusionFilter(),
+		...buildExcludePendingOtaReviewFilter(),
 	};
 
 	const inc = String(includeCancelled || "").toLowerCase() === "true";
@@ -3290,6 +3339,7 @@ function buildDayBaseQuery({
 		checkin_date: { $lt: dayEnd },
 		checkout_date: { $gt: dayStart },
 		...buildPendingConfirmationExclusionFilter(),
+		...buildExcludePendingOtaReviewFilter(),
 	};
 
 	const inc = String(includeCancelled || "").toLowerCase() === "true";
@@ -3630,9 +3680,11 @@ async function computeOccupancy({
 
 	const reservations = await Reservations.find(baseQuery)
 		.select(
-			"confirmation_number checkin_date checkout_date pickedRoomsType reservation_status state pendingConfirmation agentDecisionSnapshot total_amount payment payment_details paypal_details paid_amount_breakdown booking_source"
+			"confirmation_number checkin_date checkout_date pickedRoomsType pickedRoomsPricing reservation_status state pendingConfirmation agentDecisionSnapshot total_amount sub_total adminPricing adminPricingVisibility payment payment_details paypal_details paid_amount_breakdown booking_source"
 		)
 		.lean();
+	const hotelVisibleReservations =
+		sanitizeReservationAuditLogsCollectionForViewer(reservations);
 
 	let totalAmount = 0;
 	let checkoutGrossTotal = 0;
@@ -3642,7 +3694,7 @@ async function computeOccupancy({
 	const paymentBreakdown = {};
 
 	// 1) Count bookings into day.rooms[key].booked
-	for (const reservation of reservations) {
+	for (const reservation of hotelVisibleReservations) {
 		if (
 			!reservation ||
 			!reservation.checkin_date ||
@@ -4242,10 +4294,12 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		const reservations = await Reservations.find(baseQuery)
 			.select(
-				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType reservation_status total_amount payment payment_details paypal_details paid_amount_breakdown createdAt booking_source reservedBy room_numbers"
+				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType pickedRoomsPricing reservation_status total_amount sub_total adminPricing adminPricingVisibility payment payment_details paypal_details paid_amount_breakdown createdAt booking_source reservedBy room_numbers"
 			)
 			.populate("hotelId", "hotelName")
 			.lean();
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
 
 		const reservationsForDay = [];
 		let bookedForTarget = 0;
@@ -4253,7 +4307,7 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 		// track derived totals when roomKey is null (Total column)
 		let derivedBookedTotal = 0;
 
-		for (const reservation of reservations) {
+		for (const reservation of hotelVisibleReservations) {
 			if (!reservation || !Array.isArray(reservation.pickedRoomsType)) continue;
 
 			const pay = paymentMeta(reservation);
@@ -4388,13 +4442,17 @@ const buildPaidBreakdownFilter = ({ hotelId, searchQuery }) => {
 	if (hotelId) {
 		filters.push({ hotelId: new ObjectId(hotelId) });
 	}
+	filters.push(buildExcludePendingOtaReviewFilter());
 	filters.push(buildPaidBreakdownNonZeroFilter());
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
 	return filters.length > 1 ? { $and: filters } : filters[0];
 };
 
-const buildPaidBreakdownScorecards = async (filter) => {
+const buildPaidBreakdownScorecards = async (
+	filter,
+	{ hotelVisible = false } = {}
+) => {
 	const breakdownSum = {
 		$add: PAID_BREAKDOWN_TOTAL_KEYS.map((key) => ({
 			$ifNull: [`$paid_amount_breakdown.${key}`, 0],
@@ -4409,7 +4467,9 @@ const buildPaidBreakdownScorecards = async (filter) => {
 		{
 			$addFields: {
 				paid_breakdown_total: breakdownSum,
-				total_amount_safe: { $ifNull: ["$total_amount", 0] },
+				total_amount_safe: hotelVisible
+					? hotelVisibleAmountExpression()
+					: { $ifNull: ["$total_amount", 0] },
 			},
 		},
 		{
@@ -4497,8 +4557,12 @@ exports.paidBreakdownReportHotel = async (req, res) => {
 			.populate("hotelId", "hotelName belongsTo")
 			.lean();
 
-		const scorecards = await buildPaidBreakdownScorecards(baseFilter);
-		const data = reservations.map((reservation) => {
+		const scorecards = await buildPaidBreakdownScorecards(baseFilter, {
+			hotelVisible: true,
+		});
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+		const data = hotelVisibleReservations.map((reservation) => {
 			const breakdown = reservation.paid_amount_breakdown || {};
 			const paidTotal = computePaidBreakdownTotal(breakdown);
 			return {

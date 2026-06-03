@@ -12,6 +12,9 @@ const {
 const {
 	buildExcludePendingOtaReviewFilter,
 } = require("../services/otaReservationVisibility");
+const {
+	sanitizeReservationAuditLogsCollectionForViewer,
+} = require("../services/auditPrivacy");
 
 const isConfiguredSuperAdmin = (user) => {
 	const configuredIds = [
@@ -1364,7 +1367,7 @@ exports.managerIncompleteReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"hotelId confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();
@@ -1380,12 +1383,15 @@ exports.managerIncompleteReservations = async (req, res) => {
 			reservationsQuery.exec(),
 		]);
 
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,
 			limit: shouldExportAll ? total : pageSize,
 			total,
 			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
-			reservations: reservations.map((reservation) =>
+			reservations: hotelVisibleReservations.map((reservation) =>
 				attachReasonFields(
 					{
 						...reservation,
@@ -1483,7 +1489,7 @@ exports.hotelOpenReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"confirmation_number customer_details.name booking_source booked_at checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"confirmation_number customer_details.name booking_source booked_at checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();
@@ -1498,12 +1504,15 @@ exports.hotelOpenReservations = async (req, res) => {
 			reservationsQuery.exec(),
 		]);
 
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,
 			limit: shouldExportAll ? total : pageSize,
 			total,
 			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
-			reservations: reservations.map((reservation) =>
+			reservations: hotelVisibleReservations.map((reservation) =>
 				attachReasonFields(reservation, getDashboardOpenReservationReasons)
 			),
 		});
@@ -1588,7 +1597,7 @@ exports.hotelIncompleteReservations = async (req, res) => {
 		const filter = filters.length > 1 ? { $and: filters } : filters[0];
 		let reservationsQuery = Reservations.find(filter)
 			.select(
-				"confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
+				"confirmation_number customer_details.name booking_source booked_at createdAt checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility pickedRoomsType pickedRoomsPricing payment reservation_status state pendingConfirmation agentDecisionSnapshot financial_cycle commission commissionStatus commissionData commissionPaid commissionAgentApproval moneyTransferredToHotel createdByUserId createdBy orderTakeId orderTaker orderTakenAt"
 			)
 			.sort({ [sortField]: direction, _id: 1 })
 			.lean();
@@ -1603,12 +1612,15 @@ exports.hotelIncompleteReservations = async (req, res) => {
 			reservationsQuery.exec(),
 		]);
 
+		const hotelVisibleReservations =
+			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,
 			limit: shouldExportAll ? total : pageSize,
 			total,
 			pages: shouldExportAll ? 1 : Math.ceil(total / pageSize),
-			reservations: reservations.map((reservation) =>
+			reservations: hotelVisibleReservations.map((reservation) =>
 				attachReasonFields(
 					{
 						...reservation,

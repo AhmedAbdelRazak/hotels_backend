@@ -44,15 +44,11 @@ const roleKeys = (actor = {}) =>
 
 const isSuperAdminViewer = (viewer = {}) =>
 	isConfiguredSuperAdmin(viewer) ||
-	roleNumbers(viewer).some((role) => [1000, 10000].includes(role)) ||
+	roleNumbers(viewer).some((role) => Number(role) === 1000) ||
 	roleKeys(viewer).some((role) =>
 		[
-			"admin",
-			"administrator",
 			"platformadmin",
 			"superadmin",
-			"systemadmin",
-			"systemadministrator",
 		].includes(role)
 	);
 
@@ -74,21 +70,13 @@ const hasViewerIdentity = (viewer = {}) =>
 	!!normalizeId(viewer) || roleValues(viewer).some((role) => role !== undefined && role !== null && role !== "");
 
 const ADMIN_PRICING_ROLE_KEYS = new Set([
-	"admin",
-	"administrator",
-	"ordertaker",
 	"platformadmin",
-	"reservationemployee",
 	"superadmin",
-	"systemadmin",
-	"systemadministrator",
 ]);
 
 const canViewAdminPricing = (viewer = {}) =>
 	isSuperAdminViewer(viewer) ||
-	roleNumbers(viewer).some((role) =>
-		[7000, 8000, 10000].includes(Number(role))
-	) ||
+	roleNumbers(viewer).some((role) => Number(role) === 1000) ||
 	roleKeys(viewer).some((role) => ADMIN_PRICING_ROLE_KEYS.has(role));
 
 const adminRootOnlyPricingEnabled = (reservation = {}) =>
