@@ -20,6 +20,9 @@ const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
 const {
+	buildExcludePendingOtaReviewFilter,
+} = require("../services/otaReservationVisibility");
+const {
 	trackFinancialReportExport,
 	trackReservationExport,
 	trackReservationSummaryExport,
@@ -811,7 +814,7 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 		applyDateFilter(match, query);
 	}
 
-	const clauses = [];
+	const clauses = [buildExcludePendingOtaReviewFilter()];
 	const includeCancelled =
 		String(query.includeCancelled || "").toLowerCase() === "true";
 	const excludeCancelled =
@@ -1401,7 +1404,10 @@ const summaryOperationalReservationFilter = ({ includeCancelled = false } = {}) 
 	}
 	return {
 		$nor: excludedStatuses,
-		$and: [buildPendingConfirmationExclusionFilter()],
+		$and: [
+			buildPendingConfirmationExclusionFilter(),
+			buildExcludePendingOtaReviewFilter(),
+		],
 	};
 };
 
@@ -1422,7 +1428,7 @@ const buildExecutiveReservationMatch = ({ actor, hotels, query = {} }) => {
 		match.createdAt = { $gte: EXECUTIVE_REPORT_START_DATE };
 	}
 
-	const clauses = [];
+	const clauses = [buildExcludePendingOtaReviewFilter()];
 	const includeCancelled =
 		String(query.includeCancelled || "").toLowerCase() === "true";
 	const excludeCancelled =
@@ -1793,7 +1799,7 @@ const buildExecutivePaidMatch = ({ hotels, query = {} }) => {
 
 	const match = {
 		hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
-		$and: [executivePaidNonZeroFilter()],
+		$and: [executivePaidNonZeroFilter(), buildExcludePendingOtaReviewFilter()],
 	};
 	const { dateField, period } = applyDateFilter(match, query);
 	if (!match[dateField]) {
@@ -2019,7 +2025,10 @@ const buildFinancialActionsMatch = ({
 	const match = { hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } };
 	applyDateFilter(match, query);
 
-	const clauses = [financialActionFilter(query.actionType)];
+	const clauses = [
+		financialActionFilter(query.actionType),
+		buildExcludePendingOtaReviewFilter(),
+	];
 	if (includeBookingSource && query.bookingSource) {
 		clauses.push({
 			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
@@ -2290,6 +2299,7 @@ const listCommissionReconciliationActions = async ({
 		checkout_date: checkoutFilter,
 		commissionPaid: { $ne: true },
 		$and: [
+			buildExcludePendingOtaReviewFilter(),
 			{
 				$or: [
 					{ reservation_status: CHECKED_OUT_STATUS },
@@ -2547,6 +2557,7 @@ exports.overallSummary = async (req, res) => {
 		const includeCancelled =
 			String(req.query?.includeCancelled || "").toLowerCase() === "true";
 		const summaryClauses = [];
+		summaryClauses.push(buildExcludePendingOtaReviewFilter());
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (hasExplicitStatus && statusFilter) {
 			summaryClauses.push(statusFilter);
@@ -2590,7 +2601,10 @@ exports.overallSummary = async (req, res) => {
 				],
 			});
 		}
-		const occupancyClauses = [{ $or: occupancyDateClauses }];
+		const occupancyClauses = [
+			buildExcludePendingOtaReviewFilter(),
+			{ $or: occupancyDateClauses },
+		];
 		if (hasExplicitStatus && statusFilter) {
 			occupancyClauses.push(statusFilter);
 		} else {
@@ -2614,6 +2628,7 @@ exports.overallSummary = async (req, res) => {
 		const pendingReservationMatch = {
 			hotelId: { $in: hotelIds },
 			$and: [
+				buildExcludePendingOtaReviewFilter(),
 				{
 					$or: [
 						{ reservation_status: PENDING_CONFIRMATION_STATUS },
@@ -3104,7 +3119,7 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 				{ state: NO_SHOW_STATUS },
 			];
 		}
-		const reservationClauses = [];
+		const reservationClauses = [buildExcludePendingOtaReviewFilter()];
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (statusFilter) reservationClauses.push(statusFilter);
 		const bookingSources = parseQueryList(req.query?.bookingSource);

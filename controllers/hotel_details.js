@@ -9,6 +9,9 @@ const UncompleteReservations = require("../models/Uncompleted");
 const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
+const {
+	buildExcludePendingOtaReviewFilter,
+} = require("../services/otaReservationVisibility");
 
 const isConfiguredSuperAdmin = (user) => {
 	const configuredIds = [
@@ -207,6 +210,7 @@ const buildOperationalOpenReservationFilter = (hotelObjectId) => ({
 	hotelId: hotelObjectId,
 	checkout_date: { $lte: getTodayEnd() },
 	reservation_status: { $not: DONE_RESERVATION_STATUS },
+	...buildExcludePendingOtaReviewFilter(),
 });
 
 const buildFinancialCycleRequiredDateFilter = () => ({
@@ -243,6 +247,7 @@ const buildDashboardFinancialReconciliationBranch = () => ({
 
 const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
 	hotelId: hotelObjectId,
+	...buildExcludePendingOtaReviewFilter(),
 	$or: [
 		{
 			checkout_date: { $lte: getTodayEnd() },
@@ -254,6 +259,7 @@ const buildDashboardIncompleteReservationFilter = (hotelObjectId) => ({
 
 const buildDashboardIncompleteReservationFilterForHotels = (hotelObjectIds = []) => ({
 	hotelId: { $in: hotelObjectIds },
+	...buildExcludePendingOtaReviewFilter(),
 	$or: [
 		{
 			checkout_date: { $lte: getTodayEnd() },
@@ -313,7 +319,10 @@ const buildExecutiveReservationFilterForHotels = (
 	hotelObjectIds = [],
 	{ range = "all", dateBy = "createdAt" } = {}
 ) => {
-	const filter = { hotelId: { $in: hotelObjectIds } };
+	const filter = {
+		hotelId: { $in: hotelObjectIds },
+		...buildExcludePendingOtaReviewFilter(),
+	};
 	const period = executiveDateRange(range);
 	if (!period.from || !period.to) return filter;
 
@@ -1046,6 +1055,7 @@ exports.hotelGeneralStats = async (req, res) => {
 			checkout_date: { $gte: startOfDay },
 			reservation_status: { $not: DONE_RESERVATION_STATUS },
 			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
 		})
 			.select("roomId reservation_status")
 			.lean()
@@ -1179,6 +1189,7 @@ exports.managerExecutiveSummary = async (req, res) => {
 					checkout_date: { $gte: startOfDay },
 					reservation_status: { $not: DONE_RESERVATION_STATUS },
 					...buildPendingConfirmationExclusionFilter(),
+					...buildExcludePendingOtaReviewFilter(),
 				})
 					.select("hotelId roomId reservation_status")
 					.lean()

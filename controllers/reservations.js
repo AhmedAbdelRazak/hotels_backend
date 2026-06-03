@@ -3648,7 +3648,12 @@ exports.reservationSearchAllList = async (req, res) => {
 		}
 
 		let pipeline = [
-			{ $match: { hotelId: hotelId } },
+			{
+				$match: {
+					hotelId: hotelId,
+					...buildExcludePendingOtaReviewFilter(),
+				},
+			},
 			// Lookup (populate) roomId details
 			{
 				$lookup: {
@@ -3729,6 +3734,7 @@ exports.reservationSearch = async (req, res) => {
 		// Query to search across various fields
 		const query = {
 			hotelId: hotelId,
+			...buildExcludePendingOtaReviewFilter(),
 			$or: [
 				{ "customer_details.name": searchPattern },
 				{ "customer_details.phone": searchPattern },
@@ -3982,6 +3988,7 @@ exports.totalCheckoutRecords = async (req, res) => {
 				},
 			],
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		if (channel && channel !== "undefined") {
 			const channelFilter = {
@@ -4074,6 +4081,7 @@ exports.checkedoutReport = async (req, res) => {
 				},
 			],
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		if (channel && channel !== "undefined") {
 			const channelFilter = {
@@ -4146,6 +4154,7 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 			hotelId: ObjectId(accountId),
 			[dateField]: { $gte: formattedStartDate, $lte: formattedEndDate },
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		if (channel && channel !== "undefined") {
 			dynamicFilter.booking_source = { $regex: new RegExp(channel, "i") };
@@ -4268,6 +4277,7 @@ exports.generalReservationsReport = async (req, res) => {
 			hotelId: ObjectId(accountId),
 			[dateField]: { $gte: formattedStartDate, $lte: formattedEndDate },
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		if (channel && channel !== "undefined") {
 			dynamicFilter.booking_source = { $regex: new RegExp(channel, "i") };
@@ -4341,6 +4351,7 @@ exports.reservationObjectSummary = async (req, res) => {
 		const { createdByUserId = "" } = req.query || {};
 		const formattedDate = new Date(`${date}T00:00:00+03:00`); // Use Saudi Arabia time zone
 		const matchStage = { hotelId: mongoose.Types.ObjectId(accountId) };
+		addExcludePendingOtaReviewToMutableFilter(matchStage);
 
 		if (createdByUserId && ObjectId.isValid(createdByUserId)) {
 			const actorId = String(createdByUserId);
@@ -4887,6 +4898,7 @@ exports.reservationsList = (req, res) => {
 		roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 		reservation_status: { $not: /checked[- _]?out/i }, // Filter checked out variants
 		...buildPendingConfirmationExclusionFilter(),
+		...buildExcludePendingOtaReviewFilter(),
 	};
 
 	Reservations.find(queryConditions)
@@ -4947,6 +4959,7 @@ exports.reservationsOccupancyRange = async (req, res) => {
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
 			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
 		};
 
 		const reservations = await Reservations.find(queryConditions)
@@ -4982,6 +4995,7 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
 			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
 			$or: [
 				{
 					checkin_date: { $lte: endOfDay },
@@ -5024,6 +5038,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 			roomId: { $exists: true, $ne: [], $not: { $elemMatch: { $eq: null } } },
 			reservation_status: { $not: CHECKED_OUT_REGEX },
 			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
 			$or: [
 				{
 					checkin_date: { $lte: endOfDay },
@@ -5284,6 +5299,7 @@ exports.todaysCheckins = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			belongsTo: ObjectId(belongsTo),
 			checkin_date: { $gte: startOfDay, $lte: endOfDay },
+			...buildExcludePendingOtaReviewFilter(),
 			reservation_status: {
 				$nin: [
 					"cancelled_by_guest",
@@ -5314,6 +5330,7 @@ exports.reservationsList2 = (req, res) => {
 		checkin_date: {
 			$gte: thirtyDaysAgo, // Greater than or equal to 30 days ago
 		},
+		...buildExcludePendingOtaReviewFilter(),
 	})
 		.populate("belongsTo")
 		.populate(
@@ -7298,6 +7315,7 @@ exports.dateReport = async (req, res) => {
 		const reservations = await Reservations.find({
 			belongsTo: mongoose.Types.ObjectId(userMainId),
 			hotelId: mongoose.Types.ObjectId(hotelId),
+			...buildExcludePendingOtaReviewFilter(),
 			$or: [
 				{
 					$and: [
@@ -7347,6 +7365,7 @@ exports.dayoverday = async (req, res) => {
 				],
 			},
 		};
+		addExcludePendingOtaReviewToMutableFilter(matchCondition);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7416,6 +7435,7 @@ exports.monthovermonth = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			belongsTo: ObjectId(userMainId),
 		};
+		addExcludePendingOtaReviewToMutableFilter(matchCondition);
 
 		// Get the current month and year
 		const currentMonth = new Date().getMonth() + 3; // +1 because getMonth() returns 0-11
@@ -7535,6 +7555,7 @@ exports.bookingSource = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			belongsTo: ObjectId(userMainId),
 		};
+		addExcludePendingOtaReviewToMutableFilter(matchCondition);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7602,6 +7623,7 @@ exports.reservationstatus = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			belongsTo: ObjectId(userMainId),
 		};
+		addExcludePendingOtaReviewToMutableFilter(matchCondition);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7687,6 +7709,7 @@ exports.CheckedOutReservations = async (req, res) => {
 			reservation_status: "checked_out",
 			"roomId.0": { $exists: true }, // Ensure at least one roomId exists
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -7744,6 +7767,7 @@ exports.pendingPaymentReservations = async (req, res) => {
 			reservation_status: { $in: ["checked_out"] },
 			financeStatus: { $in: ["not moved", "not paid", "", undefined] },
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -7795,6 +7819,7 @@ exports.commissionPaidReservations = async (req, res) => {
 			reservation_status: { $in: ["checked_out"] },
 			financeStatus: { $in: ["paid"] },
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -9537,6 +9562,7 @@ exports.ownerReport = async (req, res) => {
 				$match: {
 					hotelId: { $in: hotelIdsArray },
 					checkout_date: { $gte: startDate, $lte: endDate },
+					...buildExcludePendingOtaReviewFilter(),
 					reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
 				},
 			},
@@ -9638,6 +9664,7 @@ exports.ownerReservationToDate = async (req, res) => {
 				$gte: checkinDate,
 				$lt: new Date(checkinDate.getTime() + 86400000), // Add 24 hours to get the end of the day
 			},
+			...buildExcludePendingOtaReviewFilter(),
 			reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
 		}).populate("hotelId", "hotelName"); // Assuming you want to include the hotel name in the response
 
@@ -9666,6 +9693,7 @@ exports.CollectedReservations = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			payment: "collected", // Filter for payment field to be "collected"
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		// Add reservation_status to the filter if the status is not "all"
 		if (status !== "all") {
@@ -9713,6 +9741,7 @@ exports.aggregateCollectedReservations = async (req, res) => {
 			hotelId: ObjectId(hotelId),
 			payment: "collected", // Filter for payment field to be "collected"
 		};
+		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 
 		// Add reservation_status to the filter if the status is not "all"
 		if (status !== "all") {
