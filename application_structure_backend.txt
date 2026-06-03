@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-05-31
+Audited: 2026-06-03
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -84,6 +84,11 @@ Critical Backend Authorization Helpers
   - Owner-like access is not the same as global access. Hotel System Admins and scoped managers must still be limited to assigned hotels.
   - Platform super admins must load overall hotels globally by default. ownerId may narrow the view, but stale hotelIdWork/hotelIdsWork/hotelIdsOwner/hotelsToSupport values on the super-admin account must never restrict global access.
   - Overall reservation list sorting supports the frontend sort controls for booking source, hotel name, arrival date, and departure date through sortFromQuery.
+- controllers/admin_global_hotel_settings.js
+  - Owns platform-admin global hotel settings workflows for all hotels across the platform.
+  - This controller intentionally does not expose or reuse the hotel-management /overall-dashboard/settings routes.
+  - Access is route-guarded by requireAdminAccess("AdminDashboard", "HotelReports"), so configured SUPER admins and role 1000 platform admins with those access keys may use it.
+  - Reuses shared services/overallRoomTextOrchestrator.js and services/overallCalendarPricingOrchestrator.js for bilingual room text and calendar row construction while keeping a separate admin-global controller and route namespace.
 - controllers/reservations.js
   - canCreateReservationForActor and canViewReservationHotel protect reservation creation and visibility.
   - Order takers are restricted to their allowed reservation flows and own reservation records.
@@ -119,6 +124,9 @@ Primary Route Files And API Areas
   - Reservation creation, update, search/list, import preview/commit, pending confirmations, occupancy/current/range reports, payment links, guest emails, OTA dumps, source/status reports, and owner aggregation reports.
 - routes/overall_dashboard.js
   - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, hotel-system-admin actions, and settings.
+- routes/admin_global_hotel_settings.js
+  - Platform-admin global hotel settings endpoints under /api/admin/global-hotel-settings/*.
+  - These routes are separate from /api/overall-dashboard/* and are meant for all-hotels platform administration, not owner-scoped hotel-management screens.
 - routes/housekeeping.js
   - Housekeeping task creation/list/count/update, assigned employee task views, supplies, and supply requests.
 - routes/agent_wallet.js
@@ -1669,6 +1677,76 @@ Future TODO Backlog - Added 2026-05-26
   - Frontend build passed after the related UI/API wiring.
   - Local smoke tests created temporary Codex-marked owner/hotel/agent/calendar documents only, verified general and agent calendar saves, verified blocked row behavior, verified fallback basePrice/defaultCost updates, and then deleted only those temporary test documents.
   - Cleanup was verified with zero remaining Codex test documents for those smoke runs.
+
+2026-06-03 Admin Global Hotel Settings Backend
+- Business purpose:
+  - Platform admins and SUPER admins have a separate admin-global settings workflow for all hotels across the platform.
+  - This is not an owner-scoped or hotel-management Overall Settings route. Do not route admin-global callers through /api/overall-dashboard/settings*, and do not rely on ownerId query scoping for this workflow.
+  - The admin-global workflow writes to the same existing HotelDetails.roomCountDetails structure used by regular hotel settings so room/calendar data stays compatible with reservation, inventory, OTA, and public hotel flows.
+- Backend files:
+  - routes/admin_global_hotel_settings.js wires the admin-global GET/POST routes.
+  - controllers/admin_global_hotel_settings.js owns all option loading, validation, schema-safe merging, and saves for this admin-global workflow.
+  - services/overallRoomTextOrchestrator.js handles bilingual room name/description orchestration.
+  - services/overallCalendarPricingOrchestrator.js builds pricing plans and calendar rows.
+- Authorization:
+  - All routes use requireSignin, isAuth, requireAdminAccess("AdminDashboard", "HotelReports"), and router.param("userId", userById).
+  - Configured SUPER admins pass through requireAdminAccess.
+  - Role 1000 platform admins must have AdminDashboard or HotelReports in accessTo.
+  - Hotel owners, Hotel System Admins, hotel managers, reservation employees, finance users, order takers, and other hotel-management users should not receive these admin-global routes unless they are also true platform admins with the required access.
+- API routes:
+  - GET /api/admin/global-hotel-settings/overview/:userId.
+  - GET /api/admin/global-hotel-settings/room-manager/:userId.
+  - POST /api/admin/global-hotel-settings/room-manager/:userId.
+  - GET /api/admin/global-hotel-settings/calendar-pricing/:userId.
+  - POST /api/admin/global-hotel-settings/calendar-pricing/:userId.
+- Overview endpoint:
+  - Handler: adminGlobalHotelSettingsOverview.
+  - Returns every hotel sorted by hotelName with owner metadata, setup readiness, activation flags, room counts, room type count, photo count, and timestamps.
+  - Response is used by src/AdminModule/GlobalHotelSettings/AdminGlobalHotelSettingsMain.js.
+- Room manager options endpoint:
+  - Handler: adminGlobalRoomManagerOptions.
+  - Returns all hotels and their roomCountDetails in a frontend-friendly shape for admin room add/update workflows.
+  - Response is used by src/AdminModule/GlobalHotelSettings/AdminGlobalRoomManagerModal.js.
+- Room manager save endpoint:
+  - Handler: saveAdminGlobalRoomManagerRoom.
+  - Accepts action add or update.
+  - Add mode accepts multiple hotelIds so the same room definition can be created across multiple hotels in one operation.
+  - Add mode supports per-hotel room counts through countsByHotelId / hotelCounts style maps.
+  - Update mode targets one hotelId and one roomId.
+  - Every hotel id must be a valid HotelDetails id, but no ownerId scope filter is applied because this route is platform-admin global.
+  - Duplicate room protection checks same roomType/displayName or roomType/displayName_OtherLanguage combination inside each target hotel.
+  - New rooms are appended to hotel.roomCountDetails with default arrays for pricedExtras, pricingRate, agentInventory, agentPricingRate, photos, offers, and monthly.
+  - overallRoomsCount is recalculated from roomCountDetails after add/update.
+  - Shared men/women rooms stay in the existing structure by using individualBed plus roomForGender instead of adding a new schema path.
+- Calendar pricing options endpoint:
+  - Handler: adminGlobalCalendarPricingOptions.
+  - Returns all hotels, active rooms, and active/approved order-taker agents related to those hotels.
+  - Agent options are derived from hotelIdWork, hotelIdsWork, hotelsToSupport, and hotelIdsOwner.
+  - Response is used by src/AdminModule/GlobalHotelSettings/AdminGlobalCalendarPricingModal.js.
+- Calendar pricing save endpoint:
+  - Handler: saveAdminGlobalCalendarPricing.
+  - Accepts scope general or agents.
+  - General scope writes to roomCountDetails[n].pricingRate.
+  - Agents scope writes to roomCountDetails[n].agentPricingRate.
+  - The endpoint requires at least one hotel and one room selection.
+  - Agent scope also requires at least one selected agent.
+  - Every selected hotel and room is validated against real HotelDetails records; every selected agent must match the active/approved agent query for the selected hotel ids.
+  - Bulk mode accepts dates, roomSelections, sellingPrice, commissionPercent, status, and calendarType.
+  - Explicit row mode accepts rows with hotelId, roomId, calendarDate, status, sellingPrice, and commissionPercent; this is what the admin preview modal sends after row-level edits.
+  - The maximum generated payload is protected by services/overallCalendarPricingOrchestrator.ensurePlanSize, currently capped at 25000 generated rows.
+  - General calendar saves also update the selected room fallback price fields: price.basePrice receives the selling price, and defaultCost receives the calculated root price.
+  - Agent calendar saves do not update public/general fallback room price fields.
+- Calendar merge behavior:
+  - General calendar rows are merged by room + calendarDate.
+  - Agent calendar rows are merged by agent + room + calendarDate.
+  - Saving a range or month replaces only the submitted dates for the selected rooms/agents and leaves other dates untouched.
+  - Blocked rows save price/rootPrice/sellingPrice/commission as 0 and mark status=blocked, blocked=true.
+- Validation performed during implementation:
+  - node --check server.js passed.
+  - node --check controllers/admin_global_hotel_settings.js passed.
+  - node --check routes/admin_global_hotel_settings.js passed.
+  - Route module import smoke check passed with local dummy JWT/SENDGRID env values.
+  - hotels_frontend npm.cmd run build compiled successfully after the related admin UI/API wiring.
 
 2026-06-02 Reservation Team Reject/Cancel And Agent Update Restrictions
 - Backend files:
