@@ -18,7 +18,13 @@ const { reconcileOtaReservation } = require("../services/otaReservationMapper");
 const {
 	forwardImportantInboundEmail,
 } = require("../services/inboundEmailForwarder");
-const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
+const {
+	emitHotelNotificationRefresh,
+	emitPlatformNotificationRefresh,
+} = require("../services/notificationEvents");
+const {
+	OTA_PLATFORM_REVIEW_PENDING,
+} = require("../services/otaReservationVisibility");
 
 let simpleParser = null;
 try {
@@ -472,6 +478,15 @@ const emitReservationRefreshIfNeeded = async (req, reconciliation) => {
 			reconciliation.status
 		)
 	) {
+		return;
+	}
+	if (reconciliation.otaPlatformReviewStatus === OTA_PLATFORM_REVIEW_PENDING) {
+		emitPlatformNotificationRefresh(req, {
+			type: "ota_reservation_pending",
+			reservationId: reconciliation.reservationId,
+			hotelId: reconciliation.hotelId,
+			ownerId: reconciliation.ownerId,
+		});
 		return;
 	}
 	await emitHotelNotificationRefresh(req, reconciliation.hotelId, {

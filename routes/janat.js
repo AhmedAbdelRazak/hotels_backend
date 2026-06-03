@@ -26,6 +26,9 @@ const {
 	getCurrencyRates,
 	gettingByReservationId,
 	paginatedReservationList,
+	paginatedOtaReservationList,
+	updateOtaReservationPricing,
+	releaseOtaReservationToHotel,
 	sendingEmailForPaymentLink,
 	verifyReservationToken,
 	updatingTokenizedId,
@@ -75,6 +78,30 @@ router.get(
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
 	paginatedReservationList
+);
+
+router.get(
+	"/admin/ota-reservations/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("OTAReservations"),
+	paginatedOtaReservationList
+);
+
+router.put(
+	"/admin/ota-reservations/:reservationId/pricing/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("OTAReservations"),
+	updateOtaReservationPricing
+);
+
+router.put(
+	"/admin/ota-reservations/:reservationId/release/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("OTAReservations"),
+	releaseOtaReservationToHotel
 );
 
 router.get(

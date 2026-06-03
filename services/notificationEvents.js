@@ -40,6 +40,22 @@ const emitHotelNotificationRefresh = async (req, hotelId, payload = {}) => {
 	}
 };
 
+const emitPlatformNotificationRefresh = (req, payload = {}) => {
+	const io = req?.app?.get("io");
+	if (!io) return;
+
+	io.to("platform-notifications").emit("hotelNotificationsUpdated", {
+		...payload,
+		type: payload.type || "platform_notification_refresh",
+		reservationId: normalizeId(payload.reservationId),
+		hotelId: normalizeId(payload.hotelId),
+		walletTransactionId: normalizeId(payload.walletTransactionId),
+		agentId: normalizeId(payload.agentId),
+		emittedAt: new Date().toISOString(),
+	});
+};
+
 module.exports = {
 	emitHotelNotificationRefresh,
+	emitPlatformNotificationRefresh,
 };

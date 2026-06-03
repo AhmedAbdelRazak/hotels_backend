@@ -213,6 +213,7 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	}
 	delete sanitized.adminPricing;
 	delete sanitized.adminPricingVisibility;
+	delete sanitized.otaPlatformReview;
 
 	return sanitized;
 };
@@ -293,6 +294,7 @@ const sanitizeReservationPricingForClientViewer = (reservation = {}) => {
 	}
 	delete sanitized.adminPricing;
 	delete sanitized.adminPricingVisibility;
+	delete sanitized.otaPlatformReview;
 	return sanitized;
 };
 
@@ -355,6 +357,7 @@ const sanitizeReservationAuditLogsForViewer = (
 
 	const plain = toPlain(reservation);
 	const sanitized = { ...plain };
+	delete sanitized.otaPlatformReview;
 
 	["adminChangeLog", "reservationAuditLog"].forEach((field) => {
 		if (!Array.isArray(plain?.[field])) return;

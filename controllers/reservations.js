@@ -45,6 +45,14 @@ const {
 	sanitizeReservationAuditLogsCollectionForViewer,
 	sanitizeReservationAuditLogsForViewer,
 } = require("../services/auditPrivacy");
+const {
+	addExcludePendingOtaReviewToMutableFilter,
+	applyPlatformOtaScope,
+	buildExcludePendingOtaReviewFilter,
+	buildPendingOtaReviewFilter,
+	canManageOtaReservations,
+	isOtaPlatformReviewPending,
+} = require("../services/otaReservationVisibility");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -655,6 +663,7 @@ const getSaudiDayRange = (dateStr) => {
 
 const buildReservationListFilter = ({ selectedFilter, hotelId, dateStr }) => {
 	const dynamicFilter = { hotelId: ObjectId(hotelId) };
+	addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
 	const dayRange = getSaudiDayRange(dateStr);
 	const addDateRange = (field) => {
 		if (!dayRange) return;
@@ -1614,6 +1623,7 @@ const buildPendingConfirmationFilter = (
 	return {
 		hotelId: ObjectId(hotelId),
 		$and: [
+			buildExcludePendingOtaReviewFilter(),
 			...(includeLegacy ? [] : [buildNewReservationProcessFilter()]),
 			...(scope === "commission" ? [buildFinanceWorkflowReadyFilter()] : []),
 			{ $or: reasonFilters },
@@ -4730,6 +4740,14 @@ exports.singleReservationById = async (req, res) => {
 				message: `Reservation not found with id ${reservationId}`,
 			});
 		}
+		if (
+			isOtaPlatformReviewPending(reservation) &&
+			!canManageOtaReservations(auditViewer)
+		) {
+			return res.status(404).json({
+				message: `Reservation not found with id ${reservationId}`,
+			});
+		}
 
 		// Decrypt sensitive customer details
 		const decryptedCardNumber = decryptWithSecret(
@@ -5488,6 +5506,12 @@ exports.updateReservation = async (req, res) => {
 						.lean()
 						.exec()
 				: null;
+		if (
+			isOtaPlatformReviewPending(existingReservation) &&
+			!canManageOtaReservations(requestingActor)
+		) {
+			return res.status(404).json({ error: "Reservation not found" });
+		}
 		const requestedLifecycleStatus = String(
 			normalizedUpdateData.reservation_status ||
 				normalizedUpdateData.state ||
@@ -7972,6 +7996,97 @@ exports.acknowledgePendingNotification = async (req, res) => {
 	}
 };
 
+const otaNotificationMoney = (value) => {
+	const number = Number(value || 0);
+	return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
+};
+
+const otaHotelVisibleAmountForNotification = (reservation = {}) => {
+	const adminRoot = Number(reservation?.adminPricing?.rootTotal || 0);
+	if (Number.isFinite(adminRoot) && adminRoot > 0) return otaNotificationMoney(adminRoot);
+	const rooms = Array.isArray(reservation.pickedRoomsType)
+		? reservation.pickedRoomsType
+		: [];
+	const pricingRooms = Array.isArray(reservation.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: [];
+	const sourceRooms = rooms.length ? rooms : pricingRooms;
+	const rootTotal = sourceRooms.reduce((reservationSum, room = {}) => {
+		const count = Number(room.count || 1) > 0 ? Number(room.count || 1) : 1;
+		const pricingByDay = Array.isArray(room.pricingByDay)
+			? room.pricingByDay
+			: [];
+		if (!pricingByDay.length) {
+			return reservationSum + Number(room.hotelShouldGet || room.subTotal || 0) * count;
+		}
+		return (
+			reservationSum +
+			pricingByDay.reduce((sum, day = {}) => {
+				const root = Number(
+					day.rootPrice ?? day.totalPriceWithoutCommission ?? day.price ?? 0
+				);
+				return sum + (Number.isFinite(root) ? root : 0) * count;
+			}, 0)
+		);
+	}, 0);
+	if (rootTotal > 0) return otaNotificationMoney(rootTotal);
+	const subTotal = Number(reservation.sub_total || 0);
+	if (Number.isFinite(subTotal) && subTotal > 0) return otaNotificationMoney(subTotal);
+	return otaNotificationMoney(reservation.total_amount);
+};
+
+const getOtaPlatformReviewNotificationFeed = async ({
+	actor,
+	limit = 8,
+	hotelId = "",
+	ownerId = "",
+} = {}) => {
+	if (!canManageOtaReservations(actor) || hotelId || ownerId) {
+		return { total: 0, data: [] };
+	}
+	const query = applyPlatformOtaScope(actor, buildPendingOtaReviewFilter());
+	const [rows, total] = await Promise.all([
+		Reservations.find(query)
+			.select(
+				"_id hotelId belongsTo confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount sub_total adminPricing pickedRoomsType pickedRoomsPricing otaPlatformReview supplierData"
+			)
+			.populate({ path: "hotelId", select: "_id hotelName belongsTo" })
+			.sort({ createdAt: -1 })
+			.limit(limit)
+			.lean()
+			.exec(),
+		Reservations.countDocuments(query),
+	]);
+	return {
+		total,
+		data: rows.map((reservation) => {
+			const hotel = reservation.hotelId || {};
+			return {
+				_id: reservation._id,
+				reservationId: reservation._id,
+				notificationType: "ota_platform_review",
+				hotelId: normalizeId(hotel._id || reservation.hotelId),
+				hotelName: hotel.hotelName || "",
+				hotelOwnerId: normalizeId(hotel.belongsTo || reservation.belongsTo),
+				confirmation_number: reservation.confirmation_number,
+				guestName: reservation.customer_details?.name || "",
+				guestPhone: reservation.customer_details?.phone || "",
+				booking_source: reservation.booking_source || "",
+				booked_at: reservation.booked_at || reservation.createdAt,
+				checkin_date: reservation.checkin_date,
+				checkout_date: reservation.checkout_date,
+				reservation_status:
+					reservation.reservation_status || reservation.state || "",
+				total_amount: reservation.total_amount || 0,
+				hotel_visible_amount:
+					otaHotelVisibleAmountForNotification(reservation),
+				pendingReasons: ["ota_platform_review"],
+				ackable: false,
+			};
+		}),
+	};
+};
+
 exports.pendingConfirmationNotificationFeed = async (req, res) => {
 	try {
 		const { userId } = req.params;
@@ -8043,6 +8158,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			const agentDecisionQuery = {
 				hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
 				$and: [
+					buildExcludePendingOtaReviewFilter(),
 					agentOwnReservationClause,
 					{
 						$or: [
@@ -8290,7 +8406,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			buildPendingConfirmationFilter(id, workflowScope)
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
-		const [rows, total, agentAccountFeed, walletClaimFeed] = await Promise.all([
+		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
+			await Promise.all([
 			Reservations.find(query)
 				.select(
 					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
@@ -8312,6 +8429,12 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				hotels,
 				hotelMap,
 				limit,
+			}),
+			getOtaPlatformReviewNotificationFeed({
+				actor,
+				limit,
+				hotelId,
+				ownerId,
 			}),
 		]);
 		const reservationNotifications = rows.map((reservation) => {
@@ -8348,8 +8471,10 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			total:
 				total +
 				Number(agentAccountFeed.total || 0) +
-				Number(walletClaimFeed.total || 0),
+				Number(walletClaimFeed.total || 0) +
+				Number(otaReviewFeed.total || 0),
 			data: [
+				...(Array.isArray(otaReviewFeed.data) ? otaReviewFeed.data : []),
 				...(Array.isArray(walletClaimFeed.data)
 					? walletClaimFeed.data
 					: []),

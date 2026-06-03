@@ -556,6 +556,21 @@ const reservationsSchema = new mongoose.Schema(
 				suppliedBookingNo: "",
 			},
 		},
+		otaPlatformReview: {
+			type: Object,
+			default: {
+				status: "",
+				source: "",
+				inboundEmailId: "",
+				provider: "",
+				providerLabel: "",
+				confirmationNumber: "",
+				createdAt: null,
+				releasedAt: null,
+				releasedBy: null,
+				priceAtRelease: 0,
+			},
+		},
 		advancePayment: {
 			type: Object,
 			trim: true,
@@ -608,5 +623,6 @@ reservationsSchema.index(
 	{ "supplierData.platformConfirmationNumber": 1 },
 	{ sparse: true },
 );
+reservationsSchema.index({ "otaPlatformReview.status": 1, createdAt: -1 });
 
 module.exports = mongoose.model("Reservations", reservationsSchema);

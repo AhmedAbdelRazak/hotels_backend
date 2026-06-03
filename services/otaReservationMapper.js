@@ -10,6 +10,10 @@ const {
 	normalizeReservationCreationPricing,
 } = require("./reservationPricing");
 const {
+	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+	buildOtaReviewSnapshot,
+} = require("./otaReservationVisibility");
+const {
 	createReservationWithAvailabilitySnapshot,
 } = require("../controllers/reservations");
 
@@ -2152,6 +2156,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 		pricing.subTotalSar,
 		pricing.commissionAmountSar
 	);
+	const requiresPlatformReview = !isCancelled;
 
 	return {
 		ok: true,
@@ -2170,8 +2175,16 @@ function buildReservationDocument(normalized, hotelDetails) {
 				postalCode: "00000",
 				confirmation_number2: normalized.confirmationNumber,
 			},
-			state: isCancelled ? "cancelled" : "confirmed",
-			reservation_status: isCancelled ? "cancelled" : "confirmed",
+			state: isCancelled
+				? "cancelled"
+				: requiresPlatformReview
+				? OTA_PLATFORM_REVIEW_RESERVATION_STATUS
+				: "confirmed",
+			reservation_status: isCancelled
+				? "cancelled"
+				: requiresPlatformReview
+				? OTA_PLATFORM_REVIEW_RESERVATION_STATUS
+				: "confirmed",
 			total_guests: Number(normalized.totalGuests || 1),
 			adults: Number(normalized.adults || 0),
 			children: Number(normalized.children || 0),
@@ -2197,6 +2210,23 @@ function buildReservationDocument(normalized, hotelDetails) {
 			financial_cycle: paymentMapping.financialCycle,
 			pickedRoomsType: pricing.pickedRoomsType,
 			pickedRoomsPricing: pricing.pickedRoomsType,
+			adminPricingVisibility: requiresPlatformReview
+				? {
+						rootOnlyForHotelManagement: true,
+						source: "ota_email_create",
+						appliedAt: new Date(),
+						appliedBy: null,
+				  }
+				: undefined,
+			otaPlatformReview: requiresPlatformReview
+				? buildOtaReviewSnapshot({
+						source: "ota_email_create",
+						inboundEmailId: normalized.inboundEmailId,
+						provider: normalized.provider,
+						providerLabel,
+						confirmationNumber: normalized.confirmationNumber,
+				  })
+				: undefined,
 			hotelId: hotelDetails._id,
 			belongsTo: hotelDetails.belongsTo,
 			supplierData: {
@@ -2528,6 +2558,43 @@ function buildExistingReservationUpdateSet({
 	set["supplierData.otaLastEmailAt"] = new Date();
 	if (normalized.eventType && normalized.eventType !== "unknown") {
 		setIfOtaValue(set, "supplierData.otaLastEventType", normalized.eventType);
+	}
+
+	const normalizedIncomingStatus = String(
+		incomingStatus || statusToApply || normalized.statusToApply || ""
+	).toLowerCase();
+	const routesThroughPlatformReview =
+		normalized.eventType !== "cancelled" &&
+		!["cancelled", "canceled", "no_show"].includes(normalizedIncomingStatus);
+	if (routesThroughPlatformReview) {
+		set.state = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set.reservation_status = OTA_PLATFORM_REVIEW_RESERVATION_STATUS;
+		set["otaPlatformReview.status"] = "pending";
+		set["otaPlatformReview.source"] = "ota_email_update";
+		setIfOtaValue(
+			set,
+			"otaPlatformReview.inboundEmailId",
+			normalized.inboundEmailId
+		);
+		setIfOtaValue(set, "otaPlatformReview.provider", normalized.provider);
+		setIfOtaValue(
+			set,
+			"otaPlatformReview.providerLabel",
+			normalized.providerLabel || providerLabel
+		);
+		setIfOtaValue(
+			set,
+			"otaPlatformReview.confirmationNumber",
+			confirmationNumber
+		);
+		set["otaPlatformReview.lastUpdatedAt"] = new Date();
+		if (!existing?.otaPlatformReview?.createdAt) {
+			set["otaPlatformReview.createdAt"] = new Date();
+		}
+		set["adminPricingVisibility.rootOnlyForHotelManagement"] = true;
+		set["adminPricingVisibility.source"] = "ota_email_update";
+		set["adminPricingVisibility.appliedAt"] = new Date();
+		set["adminPricingVisibility.appliedBy"] = null;
 	}
 
 	applyVccSafeFields(set, normalized);
@@ -3384,6 +3451,10 @@ async function reconcileOtaReservation(inputNormalized) {
 				reservationId: existing._id,
 				hotelId: hotelDetails._id,
 				pmsConfirmationNumber: existing.confirmation_number,
+				otaPlatformReviewStatus:
+					set?.["otaPlatformReview.status"] ||
+					existing?.otaPlatformReview?.status ||
+					"",
 				matchedReservationBy,
 			};
 		}
@@ -3433,6 +3504,10 @@ async function reconcileOtaReservation(inputNormalized) {
 				reservationId: existing._id,
 				hotelId: hotelDetails._id,
 				pmsConfirmationNumber: existing.confirmation_number,
+				otaPlatformReviewStatus:
+					set?.["otaPlatformReview.status"] ||
+					existing?.otaPlatformReview?.status ||
+					"",
 				matchedReservationBy,
 			};
 		}
@@ -3473,6 +3548,10 @@ async function reconcileOtaReservation(inputNormalized) {
 			reservationId: existing._id,
 			hotelId: hotelDetails._id,
 			pmsConfirmationNumber: existing.confirmation_number,
+			otaPlatformReviewStatus:
+				set?.["otaPlatformReview.status"] ||
+				existing?.otaPlatformReview?.status ||
+				"",
 			matchedReservationBy,
 		};
 	}
@@ -3593,6 +3672,7 @@ async function reconcileOtaReservation(inputNormalized) {
 		reservationId: created._id,
 		hotelId: hotelDetails._id,
 		pmsConfirmationNumber: created.confirmation_number,
+		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
 		matchedReservationBy: [],
 	};
 }
