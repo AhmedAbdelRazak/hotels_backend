@@ -1788,3 +1788,22 @@ Future TODO Backlog - Added 2026-05-26
     - node --check services/auditPrivacy.js.
     - node --check services/otaReservationVisibility.js.
     - hotels_frontend npm.cmd run build compiled successfully.
+
+2026-06-03 Overall Financial Actions OTA Commission Display
+- Backend file:
+  - controllers/overall_dashboard.js.
+- Route:
+  - GET /api/overall-dashboard/financial-actions/:userId.
+- Issue fixed:
+  - Hotel-facing OTA pricing privacy correctly sanitizes released OTA/platform-managed reservations to the hotel-visible root/base total.
+  - That sanitization zeros generic commission fields in the hotel-facing shape, while the valid assigned commission may remain in commissionData.amount.
+  - The financial-actions API now adds a safe commissionAmount to each reservation row by resolving the raw reservation before sanitization and falling back to the sanitized row when needed.
+- Privacy invariant:
+  - Financial-actions may expose the assigned commission needed for finance review.
+  - It must still not expose adminPricing, adminPricingVisibility, otaPlatformReview, OTA gross/client totals, platform margin, OTA expenses, or net-after-expense fields to hotel-management users.
+  - Hotel-visible total_amount/sub_total must remain the assigned root/base hotel amount for adminPricingVisibility.rootOnlyForHotelManagement reservations.
+- Production verification:
+  - Reservation 3331936952 raw commission was 60 and commissionData.amount was 60.
+  - The sanitized hotel-management row keeps total_amount/sub_total at 510 and hides admin pricing fields.
+  - The financial-actions response shape now resolves commissionAmount 60, so the frontend modal displays 60 and 11.76% of 510.
+  - node --check controllers/overall_dashboard.js passed before production restart.
