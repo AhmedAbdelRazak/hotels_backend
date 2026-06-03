@@ -2531,7 +2531,11 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		agentOptions,
 		walletClaims,
 		commissionReconciliation,
-		reservations: hotelVisibleRows.map((reservation) => {
+		reservations: hotelVisibleRows.map((reservation, index) => {
+			const rawReservation = rows[index] || {};
+			const commissionAmount =
+				commissionAmountFromReservation(rawReservation) ||
+				commissionAmountFromReservation(reservation);
 			const agentId = agentIdFromReservationRow(reservation, visibleAgentIds);
 			const fallbackAgent =
 				reservation.agentWalletSnapshot?.agent ||
@@ -2558,7 +2562,8 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 				...reservation,
 				agentId,
 				agent: agentPayload,
-				financialActionReasons: financialActionReasons(reservation),
+				commissionAmount,
+				financialActionReasons: financialActionReasons(rawReservation),
 			};
 		}),
 	};
