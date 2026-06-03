@@ -1718,3 +1718,50 @@ Future TODO Backlog - Added 2026-05-26
     - node --check controllers/reservations.js.
     - node --check services/activityTracker.js.
   - Frontend npm.cmd run build also passed after the table/modal/notification UI updates.
+
+2026-06-03 OTA Platform Review, Release, And Hotel Pricing Privacy
+- Backend files:
+  - services/otaReservationVisibility.js.
+  - services/auditPrivacy.js.
+  - controllers/otaInbound.js.
+  - controllers/janat.js.
+  - controllers/overall_dashboard.js.
+  - controllers/reservations.js.
+  - controllers/hotel_details.js.
+  - controllers/adminreports.js.
+  - services/otaReservationMapper.js.
+  - services/notificationEvents.js.
+- OTA email-created reservation lifecycle:
+  - Successful OTA email reservation creation saves the reservation internally first, but non-cancelled OTA bookings must enter platform review before any hotel user can see or act on them.
+  - Pending review reservations use reservation_status/state = "OTA Platform Review" and otaPlatformReview.status = pending.
+  - The reservation remains connected to the inbound email audit record for duplicate detection, reconciliation, and traceability.
+  - OTA duplicate emails are still saved as audit records, but duplicate_email processing must not create a second reservation or overwrite the original reservation.
+- Hotel visibility invariant:
+  - Pending OTA platform-review reservations must not appear in any hotel-management, hotel owner, hotel system admin, reservation employee, order taker, hotel report, hotel details, overall dashboard, payment summary, search/list, or drill-down response.
+  - Hotel-facing queries must use buildExcludePendingOtaReviewFilter, appendExcludePendingOtaReviewFilter, or the equivalent centralized guard from services/otaReservationVisibility.js.
+  - Platform admin/SUPER admin OTA review screens may use buildPendingOtaReviewFilter to fetch only pending OTA reservations.
+  - Do not add a new hotel-facing reservation endpoint without applying the pending OTA exclusion.
+- Platform admin OTA review API:
+  - GET /api/admin/ota-reservations/:userId returns pending OTA platform-review reservations for authorized platform users.
+  - PUT /api/admin/ota-reservations/:reservationId/pricing/:userId updates the platform/admin pricing fields before hotel release.
+  - PUT /api/admin/ota-reservations/:reservationId/release/:userId releases the reviewed reservation to the hotel workflow.
+  - Access is limited to SUPER admins and internal platform employees with OTAReservations permission.
+- Release behavior:
+  - Release To Hotel changes reservation_status/state from "OTA Platform Review" to "Pending Confirmation".
+  - Release sets otaPlatformReview.status = released and preserves audit metadata showing who released the reservation and when.
+  - After release, the reservation should enter the normal reservation employee pending-confirmation workflow before final hotel confirmation.
+  - Hotels must only receive normal hotel notifications after release; pending OTA review notifications are platform-only.
+- OTA pricing privacy:
+  - OTA/platform-managed reservations can carry both client/OTA gross pricing and hotel-visible/root pricing.
+  - adminPricingVisibility.rootOnlyForHotelManagement = true means hotel-management users must see only the assigned root/hotel price.
+  - Hotel-facing sanitization returns total_amount/sub_total as the hotel-visible root amount, removes adminPricing, removes otaPlatformReview, hides client/net/expense/margin fields, and keeps commission display from exposing the OTA gross amount.
+  - Platform admins and SUPER admins may still see the raw OTA/client total and adminPricing breakdown.
+  - Aggregations and scorecards in hotel-facing reports must use the same hotel-visible amount expression, not raw total_amount.
+- Notification behavior:
+  - New pending OTA reservations should create a live platform-admin notification and bell sound opportunity in the admin UI.
+  - Pending OTA review notifications must not be sent to hotel users.
+  - Release can trigger the normal hotel-facing pending-confirmation notification/workflow.
+- Important testing checks:
+  - A pending OTA reservation should be present in /admin/ota-reservations and absent from /hotel-management/main-dashboard reservation lists and hotel reports.
+  - After release, the reservation should become visible to hotel users as Pending Confirmation.
+  - For flagged OTA/platform-managed reservations, hotel owner, hotel system admin, reservation employee, and order taker responses must show the assigned hotel/root amount, while platform admin responses can show the raw OTA/client amount.
