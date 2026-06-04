@@ -265,10 +265,16 @@ const roomsHaveCompleteStayPricing = (rooms = [], stayDates = []) =>
 const normalizeProvidedPricingDay = (day = {}) => {
 	const finalPrice = resolveClientPrice(day);
 	const totalPriceWithCommission = finalPrice;
-	const totalPriceWithoutCommission = n2(
-		day.totalPriceWithoutCommission ?? day.clientPrice ?? day.mainPrice ?? finalPrice
+	const providedWithoutCommission = firstNumericInput(day.totalPriceWithoutCommission);
+	const rootPrice = resolveDayRootPrice(
+		day,
+		providedWithoutCommission ?? finalPrice
 	);
-	const rootPrice = resolveDayRootPrice(day, totalPriceWithoutCommission || finalPrice);
+	const totalPriceWithoutCommission = n2(
+		hasNumericInput(day.rootPrice)
+			? rootPrice
+			: providedWithoutCommission ?? rootPrice ?? finalPrice
+	);
 	const adminPricingDayFields = buildAdminPricingDayFields(
 		day,
 		finalPrice,

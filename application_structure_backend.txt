@@ -1966,3 +1966,21 @@ Future TODO Backlog - Added 2026-05-26
     - Zad Al-Mashaer Hotel, Property ID 120211153.
   - Current parser limitation: the last property address can include trailing page text such as Add a property / Check for updates. Property name and Expedia property ID extraction are correct.
   - The Expedia session was reused on the second run through the persistent server browser profile.
+
+2026-06-04 Admin All-Reservations OTA Pricing Summary And Edit Prefill
+- Backend files:
+  - controllers/janat.js adds ota_financial_summary to rows returned by GET /api/all-reservations-list-admin/:userId when an OTA/platform-managed pricing signal is present.
+  - services/reservationPricing.js normalizes provided pricing rows so an explicit rootPrice remains the hotel/root value when the reservation is re-saved.
+- Role and privacy rules:
+  - Hotel-facing sanitization still removes adminPricing, adminPricingVisibility, otaPlatformReview, OTA audit supplierData keys, OTA expenses, net-after-expense fields, platform margin, and client gross pricing.
+  - Admin all-reservations may expose a safe ota_financial_summary for internal platform employees so the frontend can show what the hotel sees and the total after OTA expenses.
+  - platformProfit is included in that summary only for configured SUPER_ADMIN_ID / REACT_APP_SUPER_ADMIN_ID users; regular platform employees must not receive that safe-summary profit field.
+- Summary fields:
+  - clientTotal is the OTA/client gross reservation value.
+  - clientPaidAmount is resolved from paid_amount_breakdown when present, otherwise paid_amount.
+  - hotelVisibleAmount is adminPricing.rootTotal when present, otherwise the computed hotel-visible/root amount.
+  - netAfterExpenses is adminPricing.netAfterExpensesTotal when present, otherwise clientTotal minus OTA expense, falling back to hotelVisibleAmount.
+  - otaExpenseTotal is adminPricing.otaExpenseTotal when present, otherwise clientTotal minus netAfterExpenses.
+- Edit/save behavior:
+  - When the admin Edit Pricing modal posts saved daily rows, normalizeProvidedPricingDay now keeps totalPriceWithoutCommission aligned to explicit rootPrice for admin three-price/OTA rows.
+  - This prevents previously saved OTA breakdowns such as reservation 1445133730 from reopening or saving with the client gross amount duplicated into the hotel/root no-commission field.

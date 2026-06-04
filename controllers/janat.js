@@ -2193,6 +2193,73 @@ const hasExplicitMoneyField = (source = {}, field) =>
 const explicitPositiveMoney = (source = {}, field) =>
 	hasExplicitMoneyField(source, field) ? round2(source[field]) : 0;
 
+const OTA_BOOKING_SOURCE_PATTERN =
+	/(ota|expedia|agoda|booking\.?com|airbnb|hotels?\.?com|trivago)/i;
+
+const sumPaymentBreakdownMoney = (breakdown = {}) =>
+	Object.entries(breakdown || {}).reduce((sum, [key, value]) => {
+		if (key === "payment_comments") return sum;
+		return sum + moneyNumber(value);
+	}, 0);
+
+const hasOtaManagedPricingSignal = (reservation = {}) => {
+	const adminPricing = reservation?.adminPricing || {};
+	const pricingMode = String(adminPricing.mode || "").toLowerCase();
+	const supplierData = reservation?.supplierData || {};
+	return (
+		!!reservation?.otaPlatformReview ||
+		!!supplierData.otaCreatedFromEmail ||
+		!!supplierData.otaProvider ||
+		!!reservation?.adminPricingVisibility?.rootOnlyForHotelManagement ||
+		/(ota|admin_three_price|platform)/i.test(pricingMode) ||
+		OTA_BOOKING_SOURCE_PATTERN.test(String(reservation?.booking_source || ""))
+	);
+};
+
+const buildAdminOtaFinancialSummary = (reservation = {}, actor = {}) => {
+	if (!hasOtaManagedPricingSignal(reservation)) return null;
+
+	const adminPricing = reservation?.adminPricing || {};
+	const clientTotal =
+		explicitPositiveMoney(adminPricing, "clientTotal") ||
+		round2(reservation?.total_amount);
+	const hotelVisibleAmount =
+		explicitPositiveMoney(adminPricing, "rootTotal") ||
+		computeOtaHotelVisibleAmount(reservation);
+	const otaExpenseTotal = explicitPositiveMoney(adminPricing, "otaExpenseTotal");
+	const netAfterExpenses =
+		explicitPositiveMoney(adminPricing, "netAfterExpensesTotal") ||
+		(clientTotal > 0 && otaExpenseTotal > 0
+			? round2(clientTotal - otaExpenseTotal)
+			: hotelVisibleAmount);
+	const paidFromBreakdown = sumPaymentBreakdownMoney(
+		reservation?.paid_amount_breakdown,
+	);
+	const clientPaidAmount =
+		paidFromBreakdown > 0
+			? round2(paidFromBreakdown)
+			: round2(reservation?.paid_amount);
+	const platformProfit =
+		explicitPositiveMoney(adminPricing, "platformMarginTotal") ||
+		round2(netAfterExpenses - hotelVisibleAmount);
+
+	const summary = {
+		show: true,
+		clientTotal,
+		clientPaidAmount,
+		hotelVisibleAmount,
+		netAfterExpenses,
+		otaExpenseTotal:
+			otaExpenseTotal > 0 ? otaExpenseTotal : round2(clientTotal - netAfterExpenses),
+	};
+
+	if (isConfiguredSuperAdmin(actor)) {
+		summary.platformProfit = platformProfit;
+	}
+
+	return summary;
+};
+
 const explicitOtaDayRootPrice = (day = {}) => {
 	const rootPrice = explicitPositiveMoney(day, "rootPrice");
 	if (rootPrice > 0) return rootPrice;
@@ -2968,6 +3035,10 @@ exports.paginatedReservationList = async (req, res) => {
 				(hotelObj && hotelObj.hotelName) ||
 				doc?.hotelId?.hotelName ||
 				"Unknown Hotel";
+			const otaFinancialSummary = buildAdminOtaFinancialSummary(
+				doc,
+				req.profile,
+			);
 
 			return {
 				...doc,
@@ -2983,6 +3054,14 @@ exports.paginatedReservationList = async (req, res) => {
 				isCheckinToday,
 				isCheckoutToday,
 				isPaymentTriggered,
+				...(otaFinancialSummary
+					? {
+							hotel_visible_amount:
+								otaFinancialSummary.hotelVisibleAmount ||
+								computeOtaHotelVisibleAmount(doc),
+							ota_financial_summary: otaFinancialSummary,
+					  }
+					: {}),
 			};
 		}
 
