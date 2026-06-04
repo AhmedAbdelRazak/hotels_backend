@@ -201,6 +201,7 @@ Important Services
   - Reservation adminChangeLog and reservationAuditLog entries made by superadmin/admin/systemadmin actors are removed from backend responses unless the requesting viewer is a true super admin.
   - Privileged actor snapshots such as adminLastUpdatedBy, pendingConfirmation.lastUpdatedBy, agentDecisionSnapshot.decidedBy, financial_cycle.*By, and commission approval reviewers are also nulled for non-super-admin viewers so ordinary agents/staff never see platform admin names in reservation details.
   - Optional Authorization headers are respected on public-safe single-reservation fetches so super admins can see privileged tracker rows while public/client views and ordinary hotel users cannot.
+  - Public-safe reservation fetches must tolerate an unauthenticated/null viewer and treat it as a client viewer. Passing null into audit privacy helpers must never crash a payment link.
   - ActivityTracker records created by privileged actors are marked visibility=super_admin_only for future reporting surfaces.
 - services/otaEmailOrchestrator.js and services/otaReservationMapper.js
   - OTA email/reservation parsing and mapping support.
@@ -271,6 +272,9 @@ Critical Workflows To Protect
   - Repeat as reservation employee, finance, manager, Hotel System Admin, and super admin to confirm staff/admin queue visibility still follows their broader role scope and was not narrowed by the agent-only filters.
 - Public website routes
   - Keep public Janat routes separate from authenticated hotel-management behavior. Public booking/payment endpoints still need reservation/payment validation.
+  - GET /api/reservations/single-reservation/:reservationId is used by /client-payment/:reservationId/:confirmation and must return a client-safe reservation payload without requiring req.profile.
+  - Optional encrypted customer payment fields may be blank, plaintext legacy placeholders, or encrypted values; single-reservation lookup must not fail the public payment page when optional card fields cannot be decrypted.
+  - GET /api/support-cases-customer/:caseId/unseen-count returns { count } for the public chat badge and should return count 0 for missing/invalid/closed cases so public pages do not show noisy 404 polling errors.
 
 2026-05-25 Implementation Log
 - Role naming and access language

@@ -1565,6 +1565,39 @@ exports.getUnseenMessagesByClient = async (req, res) => {
 	}
 };
 
+exports.getUnseenMessagesCountByCustomerCase = async (req, res) => {
+	try {
+		const { caseId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(caseId)) {
+			return res.status(200).json({ count: 0 });
+		}
+
+		const supportCase = await SupportCase.findOne({
+			_id: ObjectId(caseId),
+			openedBy: "client",
+		})
+			.select("clientContact conversation caseStatus")
+			.lean();
+
+		if (!supportCase || supportCase.caseStatus === "closed") {
+			return res.status(200).json({ count: 0 });
+		}
+
+		const clientContact = normalizeEmailOrPhone(supportCase.clientContact);
+		const count = (supportCase.conversation || []).filter((entry) => {
+			if (!entry || entry.seenByCustomer === true) return false;
+			if (entry.isSystem) return false;
+			const senderContact = normalizeEmailOrPhone(entry.messageBy?.customerEmail);
+			return !clientContact || senderContact !== clientContact;
+		}).length;
+
+		return res.status(200).json({ count });
+	} catch (error) {
+		console.error("Error fetching customer unseen messages count:", error);
+		return res.status(200).json({ count: 0 });
+	}
+};
+
 // Update seen status for Super Admin or PMS Owner
 exports.updateSeenStatusForAdminOrOwner = async (req, res) => {
 	try {

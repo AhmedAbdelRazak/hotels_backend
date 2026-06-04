@@ -121,6 +121,11 @@ router.get(
 	supportCaseController.getUnseenMessagesByClient
 );
 
+router.get(
+	"/support-cases-customer/:caseId/unseen-count",
+	supportCaseController.getUnseenMessagesCountByCustomerCase
+);
+
 // Update seen status for Admin or Owner
 router.put(
 	"/support-cases/:id/seen/admin-owner",

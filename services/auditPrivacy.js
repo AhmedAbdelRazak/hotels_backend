@@ -25,14 +25,19 @@ const configuredSuperAdminIds = () =>
 const isConfiguredSuperAdmin = (userOrId) =>
 	configuredSuperAdminIds().includes(normalizeId(userOrId));
 
-const roleValues = (actor = {}) => [
-	actor.role,
-	actor.roleDescription,
-	actor.userRole,
-	actor.adminRole,
-	...(Array.isArray(actor.roles) ? actor.roles : []),
-	...(Array.isArray(actor.roleDescriptions) ? actor.roleDescriptions : []),
-];
+const roleValues = (actor = {}) => {
+	const safeActor = actor && typeof actor === "object" ? actor : {};
+	return [
+		safeActor.role,
+		safeActor.roleDescription,
+		safeActor.userRole,
+		safeActor.adminRole,
+		...(Array.isArray(safeActor.roles) ? safeActor.roles : []),
+		...(Array.isArray(safeActor.roleDescriptions)
+			? safeActor.roleDescriptions
+			: []),
+	];
+};
 
 const roleNumbers = (actor = {}) =>
 	roleValues(actor)

@@ -4833,11 +4833,22 @@ exports.singleReservation = (req, res) => {
 };
 
 const maskCardNumber = (cardNumber) => {
-	if (!cardNumber || cardNumber.length < 4) return "Invalid Card Number";
+	if (!cardNumber || cardNumber.length < 4) return "";
 
 	const lastFour = cardNumber.slice(-4);
 	const maskedSection = "*".repeat(cardNumber.length - 4);
 	return `${maskedSection}${lastFour}`;
+};
+
+const safeDecryptCustomerSecret = (value) => {
+	if (!value || typeof value !== "string") return "";
+	if (!value.includes(":")) return "";
+	try {
+		return decryptWithSecret(value);
+	} catch (error) {
+		console.warn("Unable to decrypt optional customer secret:", error.message);
+		return "";
+	}
 };
 
 /**
@@ -4848,7 +4859,10 @@ exports.singleReservationById = async (req, res) => {
 	try {
 		// Extract reservationId from request parameters
 		const { reservationId } = req.params;
-		const auditViewer = await resolveAuditViewerFromRequest(req);
+		const auditViewer = (await resolveAuditViewerFromRequest(req)) || {
+			role: "client",
+			roleDescription: "client",
+		};
 
 		// Find the reservation by its ID and populate related fields
 		const reservation = await Reservations.findById(reservationId)
@@ -4875,11 +4889,11 @@ exports.singleReservationById = async (req, res) => {
 		}
 
 		// Decrypt sensitive customer details
-		const decryptedCardNumber = decryptWithSecret(
-			reservation.customer_details.cardNumber
+		const decryptedCardNumber = safeDecryptCustomerSecret(
+			reservation.customer_details?.cardNumber
 		);
-		const decryptedCardExpiryDate = decryptWithSecret(
-			reservation.customer_details.cardExpiryDate
+		const decryptedCardExpiryDate = safeDecryptCustomerSecret(
+			reservation.customer_details?.cardExpiryDate
 		);
 
 		// Mask the card number to show only the last four digits
