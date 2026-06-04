@@ -2009,5 +2009,29 @@ Future TODO Backlog - Added 2026-05-26
   - Reservation list responses return compact hotel filter options only (_id, hotelName, belongsTo) instead of full hotel documents, keeping rejected/pending payloads small.
 - Notification behavior:
   - Pending-confirmation notifications now include pendingConfirmation.status = rejected and agentDecisionSnapshot.status = rejected.
-  - Notification rows include decisionStatus and decisionReason so platform/admin frontends can show the reservation employee rejection comment.
+ - Notification rows include decisionStatus and decisionReason so platform/admin frontends can show the reservation employee rejection comment.
   - Finance rejections still route through finance review behavior, while hotel/reservation-team rejections can route to the rejected reservations workspace.
+
+2026-06-04 Platform Admin Rejected Reservations Separation
+- Backend files:
+  - controllers/janat.js adds a platform-admin rejected reservation list/export implementation.
+  - routes/janat.js exposes the platform-admin endpoints:
+    - GET /api/admin/rejected-reservations/:userId
+    - GET /api/admin/rejected-reservations-export/:userId
+- Scope rule:
+  - These /api/admin/* endpoints are intentionally separate from /api/overall-dashboard/*.
+  - They do not call withPlatformReservationScope and therefore do not limit the list to hotelsToSupport / assigned hotels.
+  - They are protected by requireSignin, isAuth, and requireAdminAccess("HotelsReservations", "AllReservations").
+  - Configured SUPER ADMIN users and authorized platform reservation employees can load rejected reservations across all hotels from the platform-admin route.
+- Rejected matching:
+  - The query includes reservations rejected through reservation_status, state, pendingConfirmation.status, agentDecisionSnapshot.status, financial_cycle.totalReviewStatus, or commissionAgentApproval.status.
+  - Pending OTA Platform Review reservations remain excluded by appendExcludePendingOtaReviewFilter.
+  - Optional filters include reservationId, hotelId, bookingSource, check-in range, checkout range, created range, and text search.
+- Response shape:
+  - data rows include customer_name, customer_phone, customer_email, hotel_name, rejection_type, rejection_label, rejection_reason, rejected_at, and safe OTA financial summary where applicable.
+  - ota_financial_summary still includes platformProfit only for configured SUPER ADMIN users through buildAdminOtaFinancialSummary.
+  - scorecards include totalRejected, rejectedToday, hotelsWithRejections, clientTotal, hotelVisibleTotal, and rejected counts by hotel/finance/commission/reservation type.
+  - hotels and bookingSources are compact filter-option arrays derived from the returned all-hotels rejected set.
+- Workflow:
+  - This endpoint only lists/export rejected reservations for the platform-admin workspace.
+  - Corrections and resubmission still go through the existing reservation update flow, which pushes corrected rejected reservations back to Pending Confirmation.

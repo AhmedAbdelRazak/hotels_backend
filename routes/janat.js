@@ -27,6 +27,8 @@ const {
 	gettingByReservationId,
 	paginatedReservationList,
 	paginatedOtaReservationList,
+	paginatedAdminRejectedReservationList,
+	exportAdminRejectedReservationList,
 	updateOtaReservationPricing,
 	releaseOtaReservationToHotel,
 	sendingEmailForPaymentLink,
@@ -86,6 +88,22 @@ router.get(
 	isAuth,
 	requireAdminAccess("OTAReservations"),
 	paginatedOtaReservationList
+);
+
+router.get(
+	"/admin/rejected-reservations/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	paginatedAdminRejectedReservationList
+);
+
+router.get(
+	"/admin/rejected-reservations-export/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	exportAdminRejectedReservationList
 );
 
 router.put(

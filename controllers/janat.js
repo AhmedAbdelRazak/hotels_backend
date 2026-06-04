@@ -2540,6 +2540,390 @@ exports.paginatedOtaReservationList = async (req, res) => {
 	}
 };
 
+const ADMIN_REJECTED_STATUS_REGEX = /^rejected$/i;
+const ADMIN_FINANCE_REJECTED_REGEX = /finance[\s_-]?rejected/i;
+
+const buildAdminRejectedReservationFilter = () => ({
+	$or: [
+		{ reservation_status: ADMIN_REJECTED_STATUS_REGEX },
+		{ state: ADMIN_REJECTED_STATUS_REGEX },
+		{ reservation_status: ADMIN_FINANCE_REJECTED_REGEX },
+		{ state: ADMIN_FINANCE_REJECTED_REGEX },
+		{ "pendingConfirmation.status": ADMIN_REJECTED_STATUS_REGEX },
+		{ "agentDecisionSnapshot.status": ADMIN_REJECTED_STATUS_REGEX },
+		{ "financial_cycle.totalReviewStatus": ADMIN_REJECTED_STATUS_REGEX },
+		{ "commissionAgentApproval.status": ADMIN_REJECTED_STATUS_REGEX },
+	],
+});
+
+const adminRejectedEscapeRegExp = (value = "") =>
+	String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const adminRejectedFirstText = (...values) =>
+	values
+		.map((value) => String(value || "").trim())
+		.find((value) => value.length > 0) || "";
+
+const adminRejectedFirstDate = (...values) => {
+	for (const value of values) {
+		if (!value) continue;
+		const date = new Date(value);
+		if (!Number.isNaN(date.getTime())) return date;
+	}
+	return null;
+};
+
+const adminRejectedReasonDetails = (reservation = {}) => {
+	const pending = reservation.pendingConfirmation || {};
+	const decision = reservation.agentDecisionSnapshot || {};
+	const cycle = reservation.financial_cycle || {};
+	const commissionApproval = reservation.commissionAgentApproval || {};
+	const statusText = String(
+		reservation.reservation_status || reservation.state || ""
+	);
+	const pendingStatus = String(pending.status || "").toLowerCase();
+	const decisionStatus = String(decision.status || "").toLowerCase();
+	const totalReviewStatus = String(cycle.totalReviewStatus || "").toLowerCase();
+	const commissionStatus = String(commissionApproval.status || "").toLowerCase();
+
+	if (ADMIN_FINANCE_REJECTED_REGEX.test(statusText) || totalReviewStatus === "rejected") {
+		return {
+			type: "finance",
+			label: "Finance rejection",
+			reason: adminRejectedFirstText(
+				cycle.totalRejectionReason,
+				cycle.financeRejectionComment,
+				cycle.commissionRejectionReason,
+				pending.rejectionReason,
+				decision.reason
+			),
+			at: adminRejectedFirstDate(
+				cycle.totalReviewedAt,
+				cycle.lastUpdatedAt,
+				pending.rejectedAt,
+				decision.decidedAt,
+				reservation.updatedAt
+			),
+		};
+	}
+
+	if (commissionStatus === "rejected") {
+		return {
+			type: "commission",
+			label: "Commission rejection",
+			reason: adminRejectedFirstText(
+				commissionApproval.rejectionReason,
+				commissionApproval.reason,
+				cycle.commissionRejectionReason,
+				decision.reason,
+				pending.rejectionReason
+			),
+			at: adminRejectedFirstDate(
+				commissionApproval.rejectedAt,
+				commissionApproval.lastUpdatedAt,
+				cycle.lastUpdatedAt,
+				reservation.updatedAt
+			),
+		};
+	}
+
+	if (pendingStatus === "rejected" || decisionStatus === "rejected") {
+		return {
+			type: "hotel",
+			label: "Hotel confirmation rejection",
+			reason: adminRejectedFirstText(
+				pending.rejectionReason,
+				pending.reason,
+				decision.reason,
+				decision.rejectionReason,
+				reservation.cancel_reason,
+				reservation.cancelReason
+			),
+			at: adminRejectedFirstDate(
+				pending.rejectedAt,
+				decision.decidedAt,
+				pending.lastUpdatedAt,
+				decision.lastUpdatedAt,
+				reservation.updatedAt
+			),
+		};
+	}
+
+	return {
+		type: "reservation",
+		label: "Reservation rejected",
+		reason: adminRejectedFirstText(
+			reservation.cancel_reason,
+			reservation.cancelReason,
+			pending.rejectionReason,
+			decision.reason
+		),
+		at: adminRejectedFirstDate(
+			pending.rejectedAt,
+			decision.decidedAt,
+			cycle.lastUpdatedAt,
+			reservation.updatedAt
+		),
+	};
+};
+
+const formatAdminRejectedReservation = (doc = {}, actor = {}) => {
+	const customerDetails = doc.customer_details || {};
+	const hotelObj = normalizePopulatedRef(doc.hotelId);
+	const belongsToObj = normalizePopulatedRef(doc.belongsTo);
+	const rejection = adminRejectedReasonDetails(doc);
+	const otaFinancialSummary = buildAdminOtaFinancialSummary(doc, actor);
+	const hotelName =
+		(hotelObj && hotelObj.hotelName) ||
+		doc?.hotelId?.hotelName ||
+		"Unknown Hotel";
+
+	return {
+		...doc,
+		hotelId: hotelObj || doc.hotelId,
+		belongsTo: belongsToObj || doc.belongsTo,
+		customer_name: customerDetails.name || "N/A",
+		customer_phone: customerDetails.phone || "N/A",
+		customer_email: customerDetails.email || "",
+		customer_nick: customerDetails.nickName || "",
+		confirmation_number2: customerDetails.confirmation_number2 || "",
+		hotel_name: hotelName,
+		rejection_type: rejection.type,
+		rejection_label: rejection.label,
+		rejection_reason: rejection.reason || "No rejection comment was recorded.",
+		rejected_at: rejection.at,
+		...(otaFinancialSummary
+			? {
+					hotel_visible_amount:
+						otaFinancialSummary.hotelVisibleAmount ||
+						computeOtaHotelVisibleAmount(doc),
+					ota_financial_summary: otaFinancialSummary,
+			  }
+			: {}),
+	};
+};
+
+const adminRejectedSearchMatch = (reservation = {}, search = "") => {
+	const needle = String(search || "").trim().toLowerCase();
+	if (!needle) return true;
+	const fields = [
+		reservation.confirmation_number,
+		reservation.confirmation_number2,
+		reservation.reservation_id,
+		reservation.pms_number,
+		reservation.customer_name,
+		reservation.customer_phone,
+		reservation.customer_email,
+		reservation.customer_nick,
+		reservation.hotel_name,
+		reservation.booking_source,
+		reservation.rejection_reason,
+		reservation.rejection_label,
+	].map((value) => String(value || "").toLowerCase());
+	return fields.some((value) => value.includes(needle));
+};
+
+const isDateInRiyadhToday = (value) => {
+	if (!value) return false;
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return false;
+	const parts = new Intl.DateTimeFormat("en-CA", {
+		timeZone: "Asia/Riyadh",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(new Date());
+	const todayKey = `${parts.find((part) => part.type === "year")?.value}-${parts.find(
+		(part) => part.type === "month"
+	)?.value}-${parts.find((part) => part.type === "day")?.value}`;
+	const rowParts = new Intl.DateTimeFormat("en-CA", {
+		timeZone: "Asia/Riyadh",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(date);
+	const rowKey = `${rowParts.find((part) => part.type === "year")?.value}-${rowParts.find(
+		(part) => part.type === "month"
+	)?.value}-${rowParts.find((part) => part.type === "day")?.value}`;
+	return todayKey === rowKey;
+};
+
+const buildAdminRejectedMongoFilter = (query = {}) => {
+	const andFilters = [
+		appendExcludePendingOtaReviewFilter(buildAdminRejectedReservationFilter()),
+	];
+	const reservationId = normalizeId(query.reservationId);
+	if (reservationId && mongoose.Types.ObjectId.isValid(reservationId)) {
+		andFilters.push({ _id: mongoose.Types.ObjectId(reservationId) });
+	}
+
+	const hotelId = normalizeId(query.hotelId);
+	if (hotelId && mongoose.Types.ObjectId.isValid(hotelId)) {
+		andFilters.push({ hotelId: mongoose.Types.ObjectId(hotelId) });
+	}
+
+	const bookingSource = String(query.bookingSource || "").trim();
+	if (bookingSource) {
+		andFilters.push({
+			booking_source: {
+				$regex: new RegExp(`^${adminRejectedEscapeRegExp(bookingSource)}$`, "i"),
+			},
+		});
+	}
+
+	[
+		buildOtaAdminDateClause("checkin_date", query.checkinFrom, query.checkinTo),
+		buildOtaAdminDateClause("checkout_date", query.checkoutFrom, query.checkoutTo),
+		buildOtaAdminDateClause("createdAt", query.createdFrom, query.createdTo),
+	]
+		.filter(Boolean)
+		.forEach((clause) => andFilters.push(clause));
+
+	return andFilters.length > 1 ? { $and: andFilters } : andFilters[0];
+};
+
+const buildAdminRejectedScorecards = (reservations = []) => {
+	const hotelIds = new Set();
+	const countsByType = {
+		hotel: 0,
+		finance: 0,
+		commission: 0,
+		reservation: 0,
+	};
+	const totals = reservations.reduce(
+		(acc, reservation) => {
+			const hotelId = normalizeId(reservation.hotelId);
+			if (hotelId) hotelIds.add(hotelId);
+			const type = reservation.rejection_type || "reservation";
+			countsByType[type] = (countsByType[type] || 0) + 1;
+			acc.clientTotal += moneyNumber(reservation.total_amount);
+			acc.hotelVisibleTotal += moneyNumber(
+				reservation.hotel_visible_amount || reservation.total_amount
+			);
+			if (isDateInRiyadhToday(reservation.rejected_at || reservation.updatedAt)) {
+				acc.rejectedToday += 1;
+			}
+			return acc;
+		},
+		{
+			clientTotal: 0,
+			hotelVisibleTotal: 0,
+			rejectedToday: 0,
+		}
+	);
+
+	return {
+		totalRejected: reservations.length,
+		rejectedToday: totals.rejectedToday,
+		hotelsWithRejections: hotelIds.size,
+		clientTotal: round2(totals.clientTotal),
+		hotelVisibleTotal: round2(totals.hotelVisibleTotal),
+		hotelRejections: countsByType.hotel || 0,
+		financeRejections: countsByType.finance || 0,
+		commissionRejections: countsByType.commission || 0,
+		reservationRejections: countsByType.reservation || 0,
+	};
+};
+
+const listAdminRejectedReservations = async (req, { exportAll = false } = {}) => {
+	const actor = req.profile || {};
+	const {
+		page = 1,
+		limit = 25,
+		searchQuery = "",
+	} = req.query || {};
+	const pageNumber = Math.max(parseInt(page, 10) || 1, 1);
+	const pageSize = exportAll
+		? 5000
+		: Math.min(Math.max(parseInt(limit, 10) || 25, 1), 100);
+	const mongoFilter = buildAdminRejectedMongoFilter(req.query || {});
+	const allDocs = await Reservations.find(mongoFilter)
+		.sort({ updatedAt: -1, createdAt: -1 })
+		.populate("belongsTo")
+		.populate("hotelId")
+		.lean();
+	let formattedDocs = allDocs.map((doc) =>
+		formatAdminRejectedReservation(doc, actor)
+	);
+
+	formattedDocs = formattedDocs.filter((reservation) =>
+		adminRejectedSearchMatch(reservation, searchQuery)
+	);
+
+	const totalDocuments = formattedDocs.length;
+	const data = exportAll
+		? formattedDocs.slice(0, pageSize)
+		: formattedDocs.slice(
+				(pageNumber - 1) * pageSize,
+				(pageNumber - 1) * pageSize + pageSize
+		  );
+	const hotelCounts = new Map();
+	const bookingSourceCounts = new Map();
+	formattedDocs.forEach((reservation) => {
+		const hotelId = normalizeId(reservation.hotelId);
+		if (hotelId) {
+			const current = hotelCounts.get(hotelId) || {
+				_id: hotelId,
+				hotelName: reservation.hotel_name || "Unknown Hotel",
+				count: 0,
+			};
+			current.count += 1;
+			hotelCounts.set(hotelId, current);
+		}
+		const source = String(reservation.booking_source || "").trim();
+		if (source) bookingSourceCounts.set(source, (bookingSourceCounts.get(source) || 0) + 1);
+	});
+
+	return {
+		success: true,
+		data,
+		totalDocuments,
+		totalPages: pageSize > 0 ? Math.ceil(totalDocuments / pageSize) : 0,
+		page: exportAll ? 1 : pageNumber,
+		limit: pageSize,
+		scorecards: buildAdminRejectedScorecards(formattedDocs),
+		hotels: Array.from(hotelCounts.values()).sort((a, b) =>
+			String(a.hotelName || "").localeCompare(String(b.hotelName || ""))
+		),
+		bookingSources: Array.from(bookingSourceCounts.entries())
+			.map(([source, count]) => ({ source, count }))
+			.sort((a, b) => String(a.source).localeCompare(String(b.source))),
+	};
+};
+
+exports.paginatedAdminRejectedReservationList = async (req, res) => {
+	try {
+		const payload = await listAdminRejectedReservations(req);
+		return res.status(200).json(payload);
+	} catch (error) {
+		console.error("Error fetching admin rejected reservations:", error);
+		return res.status(500).json({
+			success: false,
+			message: "Failed to load rejected reservations",
+			error: error.message,
+		});
+	}
+};
+
+exports.exportAdminRejectedReservationList = async (req, res) => {
+	try {
+		const payload = await listAdminRejectedReservations(req, {
+			exportAll: true,
+		});
+		return res.status(200).json({
+			...payload,
+			exportedAt: new Date(),
+		});
+	} catch (error) {
+		console.error("Error exporting admin rejected reservations:", error);
+		return res.status(500).json({
+			success: false,
+			message: "Failed to export rejected reservations",
+			error: error.message,
+		});
+	}
+};
+
 exports.updateOtaReservationPricing = async (req, res) => {
 	try {
 		const actor = req.profile || {};
