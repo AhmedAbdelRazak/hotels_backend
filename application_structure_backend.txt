@@ -147,6 +147,7 @@ Primary Route Files And API Areas
 - Payment and payout route files
   - paypal_owner.js, paypal_reservation.js, braintree.js, braintree_reservation.js, stripe.js, square.js, bofaprocessing.js, and admin_payouts.js.
   - 2026-06-04 checkout account safety: controllers/paypal_reservation.js findOrCreateUserByEmail creates a client account during public checkout when no existing email/user is found. It must accept customerDetails.password, customerDetails.usePassword, or a phone-derived fallback so paid checkout does not fail after PayPal approval because the guest was not already signed in.
+  - 2026-06-04 PayPal capture safety: controllers/paypal_reservation.js must treat the nested capture status as the source of truth. A PayPal order may be APPROVED or COMPLETED while purchase_units[].payments.captures[].status is DECLINED; that is not a paid reservation and must return 402 with a clear message that Jannat Booking did not receive a successful captured payment.
 - Integration route files
   - otaInbound.js, integrator.js, and aiagent_learning.js.
 

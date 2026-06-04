@@ -1148,6 +1148,35 @@ function extractFirstCaptureFromOrderPayload(payload) {
 	return null;
 }
 
+function buildCaptureNotCompletedPayload(capture, context = {}) {
+	const status = String(capture?.status || "").toUpperCase() || "UNKNOWN";
+	const processorResponse = capture?.processor_response || {};
+	const processorResponseCode =
+		processorResponse?.response_code ||
+		processorResponse?.payment_advice_code ||
+		processorResponse?.avs_code ||
+		null;
+	const amountValue = capture?.amount?.value || context?.amount || null;
+	const currency = capture?.amount?.currency_code || context?.currency || "USD";
+	const captureId = capture?.id || null;
+	const isDeclined = status === "DECLINED";
+	const processorText = processorResponseCode
+		? ` PayPal processor response: ${processorResponseCode}.`
+		: "";
+	const amountText = amountValue ? ` for ${amountValue} ${currency}` : "";
+
+	return {
+		message: isDeclined
+			? `Payment declined by the card issuer or PayPal${amountText}. Jannat Booking did not receive a successful captured payment. If the guest sees a pending bank hold, it is not a completed Jannat Booking charge and should be released by the bank or PayPal. Please try another card or contact the card issuer.${processorText}`
+			: `Payment was not completed by PayPal${amountText}. Jannat Booking did not receive a successful captured payment. Please try again or use another card.${processorText}`,
+		code: `PAYPAL_CAPTURE_${status}`,
+		captureStatus: status,
+		captureId,
+		processorResponseCode,
+		details: capture || null,
+	};
+}
+
 function buildVccPurchaseUnit({ usdAmount, meta }) {
 	return {
 		reference_id: "default",
@@ -2304,18 +2333,20 @@ exports.createReservationAndProcess = async (req, res) => {
 								)));
 					return await fail(deniedLike ? 402 : 500, {
 						message: deniedLike
-							? "The payment was declined or expired. If a temporary reservation was created, it has been removed."
-							: "Failed to capture payment. If a temporary reservation was created, it has been removed.",
+							? "Payment was declined by the card issuer or PayPal. Jannat Booking did not receive a successful captured payment. If the guest sees a pending bank hold, it is not a completed Jannat Booking charge and should be released by the bank or PayPal. Please try another card or contact the card issuer. If a temporary reservation was created, it has been removed."
+							: "Failed to capture payment. Jannat Booking did not receive a successful captured payment from this attempt. If a temporary reservation was created, it has been removed.",
 					});
 				}
 
-				const cap =
-					capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
-				if (cap?.status !== "COMPLETED") {
+				const cap = extractFirstCaptureFromOrderPayload(capResult) || {};
+				if (String(cap?.status || "").toUpperCase() !== "COMPLETED") {
+					const payload = buildCaptureNotCompletedPayload(cap, {
+						amount: expectedUsdAmount,
+						currency: "USD",
+					});
 					return await fail(402, {
-						message:
-							"Payment was not completed. If a temporary reservation was created, it has been removed.",
-						details: cap,
+						...payload,
+						pendingReservationRemoved: true,
 					});
 				}
 
@@ -2968,17 +2999,18 @@ exports.mitChargeReservation = async (req, res) => {
 		}
 
 		/* ── Validate capture result ─────────────────────────────────────── */
-		const cap =
-			resultCapture?.purchase_units?.[0]?.payments?.captures?.[0] || {};
-		if (cap?.status !== "COMPLETED") {
+		const cap = extractFirstCaptureFromOrderPayload(resultCapture) || {};
+		if (String(cap?.status || "").toUpperCase() !== "COMPLETED") {
 			await finalizePendingCaptureUSD({
 				reservationId,
 				usdAmount: amt,
 				success: false,
 			});
 			return res.status(402).json({
-				message: "Charge not completed.",
-				details: cap,
+				...buildCaptureNotCompletedPayload(cap, {
+					amount: amt,
+					currency: "USD",
+				}),
 				path: resultCapture?._via || "UNKNOWN",
 			});
 		}
@@ -3891,7 +3923,34 @@ exports.linkPayReservation = async (req, res) => {
 					usdAmount: newCapture,
 					success: false,
 				});
-				return res.status(500).json({ message: "Failed to capture payment." });
+				const declinedLike =
+					err?.statusCode === 422 &&
+					(/PAYER_CANNOT_PAY|INSTRUMENT_DECLINED|DECLINED|EXPIRED/i.test(
+						raw,
+					) ||
+						(Array.isArray(err?.response?.data?.details) &&
+							err.response.data.details.some((d) =>
+								/DENIED|DECLINED|EXPIRED/i.test(String(d?.issue || "")),
+							)));
+				if (declinedLike) {
+					return res.status(402).json(
+						buildCaptureNotCompletedPayload(
+							{
+								status: "DECLINED",
+								amount: { currency_code: "USD", value: toCCY(newCapture) },
+								processor_response: {
+									response_code:
+										err?.response?.data?.details?.[0]?.issue || null,
+								},
+							},
+							{ amount: newCapture, currency: "USD" },
+						),
+					);
+				}
+				return res.status(500).json({
+					message:
+						"Failed to capture payment. Jannat Booking did not receive a successful captured payment from this attempt.",
+				});
 			}
 
 			console.warn(`${logPrefix} duplicate invoice, retrying with fresh id`, {
@@ -3922,10 +3981,12 @@ exports.linkPayReservation = async (req, res) => {
 			capResult = await tryCapture();
 		}
 
-		const cap = capResult?.purchase_units?.[0]?.payments?.captures?.[0] || {};
-		if (cap?.status !== "COMPLETED") {
+		const cap = extractFirstCaptureFromOrderPayload(capResult) || {};
+		if (String(cap?.status || "").toUpperCase() !== "COMPLETED") {
 			console.warn(`${logPrefix} capture not completed`, {
 				status: cap?.status,
+				captureId: cap?.id || null,
+				processorResponse: cap?.processor_response || null,
 			});
 			await finalizePendingCaptureUSD({
 				reservationId: reservation._id,
@@ -3934,7 +3995,12 @@ exports.linkPayReservation = async (req, res) => {
 			});
 			return res
 				.status(402)
-				.json({ message: "Payment was not completed.", details: cap });
+				.json(
+					buildCaptureNotCompletedPayload(cap, {
+						amount: newCapture,
+						currency: "USD",
+					}),
+				);
 		}
 
 		const capAmount = toNumber2(cap?.amount?.value || newCapture);
