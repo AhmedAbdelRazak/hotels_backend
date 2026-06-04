@@ -1894,3 +1894,27 @@ Future TODO Backlog - Added 2026-05-26
   - The sanitized hotel-management row keeps total_amount/sub_total at 510 and hides admin pricing fields.
   - The financial-actions response shape now resolves commissionAmount 60, so the frontend modal displays 60 and 11.76% of 510.
   - node --check controllers/overall_dashboard.js passed before production restart.
+
+2026-06-03 Expedia Partner Central Dry-Run Property Collector
+- Backend script:
+  - scripts/expedia/dryRunProperties.js.
+- NPM shortcuts:
+  - npm run expedia:properties:dry-run.
+  - npm run expedia:properties:self-test.
+- Purpose:
+  - Small, read-only dry run for Expedia Partner Central browser access after the owner received approval to scrape/browser-automate within the approved Expedia support scope.
+  - Opens Partner Central in a visible Puppeteer browser with a persistent profile, lets the human owner complete login and MFA manually, navigates to ManageProperty, and extracts the visible property list.
+  - Saves a JSON audit and full-page screenshot under audits/expedia-dry-run by default.
+- Safety boundaries:
+  - This script does not read, store, or submit the Expedia password.
+  - This script does not update room counts, rates, restrictions, inventory, reservations, or calendar data.
+  - This script does not click property update controls or write to PMS/MongoDB.
+  - MFA and any account-security challenge remain human-controlled.
+  - Keep future Expedia automation scoped to the written Expedia approval/case wording, with dry-run and audit logs before any write-capable workflow.
+- Useful environment variables:
+  - EXPEDIA_DRY_RUN_PROFILE_DIR controls the persistent browser profile folder.
+  - EXPEDIA_DRY_RUN_OUTPUT_DIR controls where JSON/screenshot audit files are saved.
+  - EXPEDIA_DRY_RUN_TIMEOUT_MINUTES controls how long the script waits for manual login/MFA.
+  - EXPEDIA_BROWSER_PATH can point to the installed Chrome/Edge binary on the home server.
+  - EXPEDIA_DRY_RUN_KEEP_OPEN=true keeps the browser open after extraction for manual inspection.
+  - EXPEDIA_BROWSER_NO_SANDBOX=true is available only for Linux/root server environments that require it.
