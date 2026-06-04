@@ -129,6 +129,79 @@ function ensureDirectory(dir) {
 	fs.mkdirSync(dir, { recursive: true });
 }
 
+function delay(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasPropertyListText(value) {
+	return /Your Properties|Property ID|Manage a property/i.test(value || "");
+}
+
+async function safePageSnapshot(page) {
+	try {
+		return await page.evaluate(() => ({
+			text: document.body.innerText || "",
+			title: document.title || "",
+			url: window.location.href || "",
+		}));
+	} catch (error) {
+		return {
+			text: "",
+			title: "",
+			url: page.url(),
+			error: error && error.message ? error.message : String(error),
+		};
+	}
+}
+
+async function findPageByContent(browser, matcher, timeoutMs) {
+	const deadline = Date.now() + timeoutMs;
+	let lastSeen = [];
+
+	while (Date.now() < deadline) {
+		const pages = await browser.pages();
+		lastSeen = [];
+
+		for (const candidate of pages) {
+			const snapshot = await safePageSnapshot(candidate);
+			lastSeen.push({
+				title: snapshot.title,
+				url: snapshot.url || candidate.url(),
+				hasBodyText: Boolean(snapshot.text),
+			});
+			if (matcher(snapshot, candidate)) {
+				return candidate;
+			}
+		}
+
+		await delay(1000);
+	}
+
+	const detail = lastSeen
+		.map((page) => `${page.title || "Untitled"} <${page.url}>`)
+		.join("; ");
+	throw new Error(`Timed out waiting for Expedia page. Last tabs: ${detail}`);
+}
+
+async function findPartnerCentralPage(browser, timeoutMs) {
+	return findPageByContent(
+		browser,
+		(snapshot, page) =>
+			/apps\.expediapartnercentral\.com/i.test(snapshot.url || page.url()) ||
+			/expediapartnercentral\.com/i.test(snapshot.url || page.url()) ||
+			/Your Properties|Manage a property|Select a property/i.test(snapshot.text),
+		timeoutMs
+	);
+}
+
+async function findPropertyListPage(browser, timeoutMs) {
+	return findPageByContent(
+		browser,
+		(snapshot) => hasPropertyListText(snapshot.text),
+		timeoutMs
+	);
+}
+
 function runSelfTest() {
 	const sample = `
 Home
@@ -199,37 +272,37 @@ async function main() {
 		waitUntil: "domcontentloaded",
 	});
 
-	await page.waitForFunction(
-		() =>
-			/apps\.expediapartnercentral\.com/i.test(window.location.href) ||
-			/manageproperty/i.test(window.location.href) ||
-			/Your Properties|Manage a property|Select a property/i.test(
-				document.body.innerText || ""
-			),
-		{ timeout: timeoutMinutes * 60 * 1000 }
-	);
+	let propertyPage;
+	try {
+		propertyPage = await findPropertyListPage(browser, 5000);
+	} catch (error) {
+		const partnerPage = await findPartnerCentralPage(
+			browser,
+			timeoutMinutes * 60 * 1000
+		);
+		await partnerPage.goto(MANAGE_PROPERTY_URL, { waitUntil: "domcontentloaded" });
+		propertyPage = await findPropertyListPage(
+			browser,
+			timeoutMinutes * 60 * 1000
+		);
+	}
+	await propertyPage.bringToFront();
+	await scrollToLoadVisibleProperties(propertyPage);
 
-	await page.goto(MANAGE_PROPERTY_URL, { waitUntil: "domcontentloaded" });
-	await page.waitForFunction(
-		() => /Your Properties|Property ID|Manage a property/i.test(document.body.innerText || ""),
-		{ timeout: 90 * 1000 }
-	);
-	await scrollToLoadVisibleProperties(page);
-
-	const properties = await extractProperties(page);
+	const properties = await extractProperties(propertyPage);
 	const screenshotPath = path.join(outputDir, `properties-${timestamp}.png`);
 	const jsonPath = path.join(outputDir, `properties-${timestamp}.json`);
 	const result = {
 		dryRun: true,
 		action: "expedia_property_list_read_only",
 		extractedAt: new Date().toISOString(),
-		currentUrl: page.url(),
+		currentUrl: propertyPage.url(),
 		propertyCount: properties.length,
 		properties,
 		screenshotPath,
 	};
 
-	await page.screenshot({ path: screenshotPath, fullPage: true });
+	await propertyPage.screenshot({ path: screenshotPath, fullPage: true });
 	fs.writeFileSync(jsonPath, JSON.stringify(result, null, 2));
 
 	console.log(JSON.stringify(result, null, 2));
