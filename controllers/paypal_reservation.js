@@ -1345,11 +1345,16 @@ async function findOrCreateUserByEmail(customerDetails, explicitUserId) {
 		user = await User.findById(explicitUserId);
 	}
 	if (!user) {
+		const checkoutPassword =
+			customerDetails?.password ||
+			customerDetails?.usePassword ||
+			String(customerDetails?.phone || "").replace(/\s+/g, "") ||
+			crypto.randomBytes(8).toString("hex");
 		user = new User({
 			name: customerDetails?.name,
 			email: customerDetails?.email,
 			phone: customerDetails?.phone,
-			password: customerDetails?.password, // hashed by model
+			password: checkoutPassword, // hashed by model
 		});
 		await user.save();
 	}

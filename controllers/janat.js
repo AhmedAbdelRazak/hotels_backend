@@ -438,6 +438,20 @@ exports.distinctRoomTypes = async (req, res) => {
 	}
 };
 
+const escapeRegex = (value = "") =>
+	String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const buildHotelSlugRegex = (slug = "") => {
+	const decoded = decodeURIComponent(slug || "")
+		.replace(/[_-]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const parts = decoded.split(" ").filter(Boolean).map(escapeRegex);
+	return parts.length
+		? new RegExp(`^${parts.join("[\\s_-]+")}$`, "i")
+		: null;
+};
+
 exports.getHotelFromSlug = async (req, res) => {
 	try {
 		// Accept either /:hotelSlug or /:hotelNameSlug to avoid param name mismatch issues
@@ -446,17 +460,16 @@ exports.getHotelFromSlug = async (req, res) => {
 			return res.status(400).json({ error: "Missing hotel slug." });
 		}
 
-		// Normalize: decode, convert hyphens to spaces, collapse extra spaces
-		const normalized = decodeURIComponent(slugParam)
-			.replace(/-/g, " ")
-			.replace(/\s+/g, " ")
-			.trim();
-
-		// Escape regex special chars
-		const escaped = normalized.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const slugRegex = buildHotelSlugRegex(slugParam);
+		if (!slugRegex) {
+			return res.status(400).json({ error: "Invalid hotel slug." });
+		}
 
 		const hotel = await HotelDetails.findOne({
-			hotelName: { $regex: new RegExp(`^${escaped}$`, "i") },
+			$or: [
+				{ hotelName: { $regex: slugRegex } },
+				{ hotelName_OtherLanguage: { $regex: slugRegex } },
+			],
 			activateHotel: true,
 			xHotelProActive: { $ne: false },
 		}).lean();

@@ -786,6 +786,120 @@ const isOrderTakerEditableReservation = (reservation = {}) => {
 	);
 };
 
+const ADMIN_REJECTED_CORRECTION_FIELDS = [
+	"hotelId",
+	"belongsTo",
+	"customerDetails",
+	"customer_details",
+	"checkin_date",
+	"checkout_date",
+	"days_of_residence",
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"roomId",
+	"total_rooms",
+	"total_guests",
+	"adults",
+	"children",
+	"booking_source",
+	"total_amount",
+	"sub_total",
+	"commission",
+	"adminPricing",
+	"adminPricingVisibility",
+];
+
+const EXPLICIT_WORKFLOW_UPDATE_FIELDS = [
+	"reservation_status",
+	"state",
+	"pendingConfirmation",
+	"agentDecisionSnapshot",
+	"financial_cycle",
+	"cancel_reason",
+	"cancelReason",
+	"adminAllReservationsStatusUpdate",
+];
+
+const payloadHasAnyOwnField = (payload = {}, fields = []) =>
+	fields.some((field) => Object.prototype.hasOwnProperty.call(payload, field));
+
+const shouldAdminEditResubmitRejectedReservation = (
+	reservation = {},
+	payload = {},
+	actor = {}
+) =>
+	isPlatformAdminReservationActor(actor) &&
+	isOrderTakerEditableReservation(reservation) &&
+	payloadHasAnyOwnField(payload, ADMIN_REJECTED_CORRECTION_FIELDS) &&
+	!payloadHasAnyOwnField(payload, EXPLICIT_WORKFLOW_UPDATE_FIELDS);
+
+const buildAdminCorrectionResubmission = (
+	reservation = {},
+	auditActor = {},
+	actorId = ""
+) => {
+	const existingPending =
+		reservation.pendingConfirmation &&
+		typeof reservation.pendingConfirmation.toObject === "function"
+			? reservation.pendingConfirmation.toObject()
+			: reservation.pendingConfirmation || {};
+	const existingCycle =
+		reservation.financial_cycle &&
+		typeof reservation.financial_cycle.toObject === "function"
+			? reservation.financial_cycle.toObject()
+			: reservation.financial_cycle || {};
+	const now = new Date();
+	const hadFinanceRejection =
+		FINANCE_REJECTED_REGEX.test(
+			String(reservation.reservation_status || reservation.state || "")
+		) ||
+		String(existingCycle.totalReviewStatus || "").toLowerCase() === "rejected";
+	const update = {
+		reservation_status: STATUS_PENDING_CONFIRMATION,
+		state: STATUS_PENDING_CONFIRMATION,
+		pendingConfirmation: {
+			...existingPending,
+			status: "pending",
+			rejectionReason: "",
+			confirmationReason: "",
+			confirmedAt: null,
+			rejectedAt: null,
+			resubmittedAt: now,
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor,
+		},
+		agentDecisionSnapshot: {
+			status: "pending",
+			reason: "Admin updated and resubmitted the rejected reservation.",
+			decidedAt: now,
+			decidedBy: auditActor,
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor,
+		},
+	};
+
+	if (hadFinanceRejection) {
+		update.financial_cycle = {
+			...existingCycle,
+			status: "open",
+			totalReviewStatus: "pending",
+			totalRejectionReason: "",
+			financeRejectionType: "",
+			financeRejectionLabel: "",
+			financeRejectionComment: "",
+			amountReviewStatus: "pending",
+			commissionReviewStatus: "pending",
+			commissionRejectionReason: "",
+			totalReviewedAt: null,
+			totalReviewedBy: null,
+			lastUpdatedAt: now,
+			lastUpdatedBy: actorId || null,
+		};
+	}
+
+	return update;
+};
+
 const getAccountRoleNumbers = (account = {}) =>
 	[
 		Number(account.role),
@@ -5523,6 +5637,7 @@ exports.updateReservation = async (req, res) => {
 						.lean()
 						.exec()
 				: null;
+		let adminCorrectionResubmitted = false;
 		if (
 			isOtaPlatformReviewPending(existingReservation) &&
 			!canManageOtaReservations(requestingActor)
@@ -5901,6 +6016,33 @@ exports.updateReservation = async (req, res) => {
 			requestingActor || {},
 			"admin_reservation_update"
 		);
+		if (
+			shouldAdminEditResubmitRejectedReservation(
+				existingReservation,
+				updateData,
+				requestingActor || {}
+			)
+		) {
+			const correctionResubmission = buildAdminCorrectionResubmission(
+				existingReservation,
+				auditActor,
+				requestingUserId
+			);
+			normalizedUpdateData = {
+				...normalizedUpdateData,
+				...correctionResubmission,
+				financial_cycle: correctionResubmission.financial_cycle
+					? {
+							...(normalizedUpdateData.financial_cycle || {}),
+							...correctionResubmission.financial_cycle,
+					  }
+					: normalizedUpdateData.financial_cycle,
+			};
+			if (!correctionResubmission.financial_cycle) {
+				delete normalizedUpdateData.financial_cycle;
+			}
+			adminCorrectionResubmitted = true;
+		}
 
 		if (orderTakerBasicEditOnly) {
 			const existingPlain =
@@ -6232,6 +6374,7 @@ exports.updateReservation = async (req, res) => {
 
 		return res.json({
 			message: "Reservation updated successfully",
+			adminCorrectionResubmitted,
 			reservation: sanitizeReservationAuditLogsForViewer(
 				updatedReservation,
 				requestingActor

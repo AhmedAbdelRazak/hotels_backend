@@ -456,6 +456,31 @@ const buildPricingByDayFromDetail = (
 	return rows;
 };
 
+const isAuthenticatedInventoryRequest = (req = {}) =>
+	Boolean(req.auth?._id || req.auth?.id);
+
+const sanitizePricingByDayForPublic = (pricingByDay = []) =>
+	(Array.isArray(pricingByDay) ? pricingByDay : []).map((day) => ({
+		date: day?.date,
+		price: day?.price,
+		calendarBlocked: Boolean(day?.calendarBlocked),
+	}));
+
+const sanitizeAvailabilityForPublic = (availability = []) =>
+	(Array.isArray(availability) ? availability : []).map((row) => ({
+		room_type: row?.room_type || "",
+		displayName: row?.displayName || "",
+		total_available: row?.total_available,
+		available: row?.available,
+		globalAvailable: row?.globalAvailable,
+		start_date: row?.start_date,
+		end_date: row?.end_date,
+		pricingByDay: sanitizePricingByDayForPublic(row?.pricingByDay),
+		blockedDates: Array.isArray(row?.blockedDates) ? row.blockedDates : [],
+		calendarBlocked: Boolean(row?.calendarBlocked),
+		roomColor: row?.roomColor || "#000",
+	}));
+
 const inventoryHttpError = (status, message) => {
 	const error = new Error(message);
 	error.status = status;
@@ -1109,6 +1134,7 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 	const requestedAgentId = normalizeId(req.query.agentId);
 	const includePendingConfirmation =
 		String(req.query.includePendingConfirmation || "").toLowerCase() === "true";
+	const isAuthenticated = isAuthenticatedInventoryRequest(req);
 
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		return res.status(400).json({ error: "Invalid hotelId" });
@@ -1130,6 +1156,11 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 		}
 		let agentOverrideId = "";
 		if (requestedAgentId) {
+			if (!isAuthenticated) {
+				return res.status(401).json({
+					error: "Authentication required for agent inventory",
+				});
+			}
 			const actor = await loadInventoryActor(req.auth?._id);
 			if (!canUseAgentOverrides(actor, hotel, requestedAgentId)) {
 				return res.status(403).json({ error: "Not authorized for agent inventory" });
@@ -1194,8 +1225,9 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			.filter((reservation) =>
 				isReservationActive(
 					reservation,
-					includeCancelled === "true",
-					Boolean(agentOverrideId) || includePendingConfirmation
+					isAuthenticated && includeCancelled === "true",
+					Boolean(agentOverrideId) ||
+						(isAuthenticated && includePendingConfirmation)
 				)
 			)
 			.map((reservation) => ({
@@ -1358,7 +1390,11 @@ exports.getHotelInventoryAvailability = async (req, res) => {
 			};
 		});
 
-		res.json(availability);
+		res.json(
+			isAuthenticated
+				? availability
+				: sanitizeAvailabilityForPublic(availability)
+		);
 	} catch (err) {
 		console.error("Error in getHotelInventoryAvailability:", err);
 		res.status(500).json({ error: "Failed to load availability" });

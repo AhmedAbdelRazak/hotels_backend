@@ -146,6 +146,7 @@ Primary Route Files And API Areas
   - Public website and client booking APIs: active hotels, single hotel by slug, public room query, client reservations, payment verification, invoices, user reservations, currency, public payment flows, WhatsApp confirmations, and admin public-site reservation tools.
 - Payment and payout route files
   - paypal_owner.js, paypal_reservation.js, braintree.js, braintree_reservation.js, stripe.js, square.js, bofaprocessing.js, and admin_payouts.js.
+  - 2026-06-04 checkout account safety: controllers/paypal_reservation.js findOrCreateUserByEmail creates a client account during public checkout when no existing email/user is found. It must accept customerDetails.password, customerDetails.usePassword, or a phone-derived fallback so paid checkout does not fail after PayPal approval because the guest was not already signed in.
 - Integration route files
   - otaInbound.js, integrator.js, and aiagent_learning.js.
 
@@ -1366,6 +1367,21 @@ Future TODO Backlog - Added 2026-05-26
 - Validation completed locally:
   - node --check controllers/hotel_inventory.js.
   - hotels_frontend npm.cmd run build compiled successfully.
+
+2026-06-04 Public Checkout Inventory Availability Hotfix
+- routes/hotel_inventory.js:
+  - GET /api/hotel-inventory/:hotelId/availability uses optionalSignin, not requireSignin, so public JannatBooking checkout and hotel-page callers can load safe availability without a staff JWT.
+  - Invalid Authorization headers must still return 401. Do not treat a bad token as an anonymous public request.
+  - Public requests with agentId must return 401 because agent-scoped stock/pricing is private inventory.
+- controllers/hotel_inventory.js:
+  - Public/no-auth responses are sanitized to room_type, displayName, total_available, available, globalAvailable, start_date, end_date, pricingByDay date/price/calendarBlocked, blockedDates, calendarBlocked, and roomColor.
+  - Public/no-auth responses must not expose reserved, occupied, rootPrice, commissionRate, totalPriceWithCommission, totalPriceWithoutCommission, basePrice, defaultRootPrice, agentPricingApplied, agentAssignedStock, agentReserved, agentOccupied, or agentInventoryApplied.
+  - includeCancelled and includePendingConfirmation are honored only for authenticated PMS/admin/staff requests.
+  - Authenticated PMS/admin/staff callers keep the full internal availability payload, including hotel cost/root price, commission, reserved/occupied counts, and authorized agent inventory fields.
+- Production verification on 2026-06-04:
+  - Public live URL for hotel 68bca932d0ce3198b51d0ba9 and 2026-06-05..2026-06-09 returned 200 with 5 rows and no private keys.
+  - Fake Authorization and public agentId guard checks returned 401.
+  - Authenticated JWT smoke test returned 200 and preserved internal fields.
 
 2026-05-31 Agent Accounts, Payout Details, Wallet Claims, And Finance QA
 - Business purpose:

@@ -61,6 +61,74 @@ const moneyNumber = (value) => {
 
 const n2 = (value) => Number(moneyNumber(value).toFixed(2));
 
+const HOTEL_VISIBLE_PAYMENT_KEYS = [
+	"paid_online_via_link",
+	"paid_at_hotel_cash",
+	"paid_at_hotel_card",
+	"paid_to_hotel",
+	"paid_online_jannatbooking",
+	"paid_online_other_platforms",
+	"paid_online_via_instapay",
+	"paid_no_show",
+];
+
+const paymentBreakdownTotal = (breakdown = {}) =>
+	HOTEL_VISIBLE_PAYMENT_KEYS.reduce(
+		(sum, key) => sum + moneyNumber(breakdown?.[key]),
+		0
+	);
+
+const scalePaymentBreakdownToHotelAmount = (breakdown = {}, rootTotal = 0) => {
+	if (!breakdown || typeof breakdown !== "object") return breakdown;
+	const total = paymentBreakdownTotal(breakdown);
+	if (!(total > 0) || total <= rootTotal) return { ...breakdown };
+
+	const ratio = rootTotal > 0 ? rootTotal / total : 0;
+	const sanitized = { ...breakdown };
+	let allocated = 0;
+	const keysWithValue = HOTEL_VISIBLE_PAYMENT_KEYS.filter(
+		(key) => moneyNumber(breakdown[key]) > 0
+	);
+
+	keysWithValue.forEach((key, index) => {
+		const isLast = index === keysWithValue.length - 1;
+		const nextValue = isLast
+			? n2(Math.max(rootTotal - allocated, 0))
+			: n2(moneyNumber(breakdown[key]) * ratio);
+		sanitized[key] = nextValue;
+		allocated = n2(allocated + nextValue);
+	});
+
+	return sanitized;
+};
+
+const scaleFinancialCyclePaymentsToHotelAmount = (cycle = {}, rootTotal = 0) => {
+	if (!cycle || typeof cycle !== "object") return cycle;
+	const pmsCollected = moneyNumber(cycle.pmsCollectedAmount);
+	const hotelCollected = moneyNumber(cycle.hotelCollectedAmount);
+	const totalCollected = pmsCollected + hotelCollected;
+	if (!(totalCollected > 0) || totalCollected <= rootTotal) return { ...cycle };
+
+	const ratio = rootTotal > 0 ? rootTotal / totalCollected : 0;
+	const nextPmsCollected = n2(pmsCollected * ratio);
+	const nextHotelCollected = n2(Math.max(rootTotal - nextPmsCollected, 0));
+
+	return {
+		...cycle,
+		pmsCollectedAmount: nextPmsCollected,
+		hotelCollectedAmount: nextHotelCollected,
+	};
+};
+
+const sanitizePaidAmountForRootOnly = (reservation = {}, rootTotal = 0) => {
+	const paidFromBreakdown = paymentBreakdownTotal(reservation?.paid_amount_breakdown);
+	const paidAmount = moneyNumber(reservation?.paid_amount);
+	const rawPaidAmount = paidFromBreakdown > 0 ? paidFromBreakdown : paidAmount;
+	if (!(rawPaidAmount > 0)) return 0;
+	if (!(rootTotal > 0)) return 0;
+	return n2(Math.min(rawPaidAmount, rootTotal));
+};
+
 const normalizeRoomCount = (count) => {
 	const parsed = Number(count);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
@@ -224,10 +292,24 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	}
 	sanitized.total_amount = rootTotal;
 	sanitized.sub_total = rootTotal;
+	sanitized.paid_amount = sanitizePaidAmountForRootOnly(sanitized, rootTotal);
+	if (
+		sanitized.paid_amount_breakdown &&
+		typeof sanitized.paid_amount_breakdown === "object"
+	) {
+		sanitized.paid_amount_breakdown = scalePaymentBreakdownToHotelAmount(
+			sanitized.paid_amount_breakdown,
+			rootTotal
+		);
+	}
 	sanitized.commission = 0;
 	if (sanitized.financial_cycle && typeof sanitized.financial_cycle === "object") {
+		const hotelVisibleCycle = scaleFinancialCyclePaymentsToHotelAmount(
+			sanitized.financial_cycle,
+			rootTotal
+		);
 		sanitized.financial_cycle = {
-			...sanitized.financial_cycle,
+			...hotelVisibleCycle,
 			commissionAmount: 0,
 			commissionValue: 0,
 			commissionDueToPms: 0,

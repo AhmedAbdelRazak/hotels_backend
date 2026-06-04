@@ -2,7 +2,7 @@
 
 const express = require("express");
 const router = express.Router();
-const { requireSignin } = require("../controllers/auth");
+const { optionalSignin } = require("../controllers/auth");
 
 const {
 	getHotelInventoryCalendar,
@@ -14,7 +14,7 @@ router.get("/hotel-inventory/:hotelId/calendar", getHotelInventoryCalendar);
 router.get("/hotel-inventory/:hotelId/day", getHotelInventoryDay);
 router.get(
 	"/hotel-inventory/:hotelId/availability",
-	requireSignin,
+	optionalSignin,
 	getHotelInventoryAvailability
 );
 
