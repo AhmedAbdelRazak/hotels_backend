@@ -1690,6 +1690,7 @@ const buildPendingStatusFilter = () => ({
 	$or: [
 		{ reservation_status: PENDING_CONFIRMATION_REGEX },
 		{ state: PENDING_CONFIRMATION_REGEX },
+		{ "pendingConfirmation.status": "pending" },
 	],
 });
 
@@ -1798,11 +1799,15 @@ const getPendingConfirmationReasons = (reservation = {}) => {
 	)
 		.trim()
 		.toLowerCase();
+	const pendingStatus = String(reservation?.pendingConfirmation?.status || "")
+		.trim()
+		.toLowerCase();
 
 	if (
 		PENDING_CONFIRMATION_REGEX.test(
 			statusText
-		)
+		) ||
+		pendingStatus === "pending"
 	) {
 		reasons.push("pending_confirmation");
 	}
@@ -1824,10 +1829,7 @@ const getPendingConfirmationReasons = (reservation = {}) => {
 	if (commissionApprovalStatus === "rejected") {
 		reasons.push("agent_commission_rejected");
 	}
-	if (
-		String(reservation?.pendingConfirmation?.status || "").toLowerCase() ===
-		"rejected"
-	) {
+	if (pendingStatus === "rejected") {
 		reasons.push("pending_rejected");
 	}
 	if (!hasAssignedCommission(reservation)) {

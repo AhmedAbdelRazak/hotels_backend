@@ -62,6 +62,9 @@ const {
 	validateReservationInventoryForCreate,
 	captureReservationAvailabilitySnapshot,
 } = require("./reservations");
+const {
+	markReservationPendingConfirmation,
+} = require("../services/pendingConfirmationPolicy");
 
 /* Email setup */
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -1432,7 +1435,7 @@ async function buildAndSaveReservation({
 			? { base: "USD", limit_usd: toNum2(convertedAmounts.totalUSD) }
 			: undefined);
 
-	const r = new Reservations({
+	const reservationPayload = {
 		hotelId,
 		customer_details: sanitizeCustomerDetails(customerDetails),
 		confirmation_number: confirmationNumber,
@@ -1456,7 +1459,13 @@ async function buildAndSaveReservation({
 		advancePayment,
 		availabilitySnapshot: reqBody.availabilitySnapshot,
 		...(financeStatus ? { financeStatus } : {}),
+	};
+	markReservationPendingConfirmation(reservationPayload, {
+		source: reqBody.pendingConfirmationSource || "public_paypal_reservation_create",
+		operationalStatus: false,
+		clientVisibleStatus: "confirmed",
 	});
+	const r = new Reservations(reservationPayload);
 
 	const pd = { ...(paypalDetailsToPersist || {}) };
 	if (bounds) {

@@ -31,7 +31,7 @@ const shouldCountReservationForInventory = (
 		!includePendingConfirmation &&
 		isPendingConfirmationReservation(reservation)
 	) {
-		return false;
+		return reservation?.pendingConfirmation?.inventoryBlocks === true;
 	}
 
 	if (includeCancelled) return true;

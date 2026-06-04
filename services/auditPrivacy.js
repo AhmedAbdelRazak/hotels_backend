@@ -5,6 +5,9 @@
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const User = require("../models/user");
+const {
+	hidePendingConfirmationForClient,
+} = require("./pendingConfirmationPolicy");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -56,6 +59,11 @@ const isSuperAdminViewer = (viewer = {}) =>
 			"superadmin",
 		].includes(role)
 	);
+
+const isPublicClientViewer = (viewer = {}) =>
+	!isSuperAdminViewer(viewer) &&
+	!roleNumbers(viewer).some(Boolean) &&
+	roleKeys(viewer).includes("client");
 
 const moneyNumber = (value) => {
 	if (value === null || value === undefined || value === "") return 0;
@@ -552,6 +560,12 @@ const sanitizeReservationAuditLogsForViewer = (
 	].forEach(([path, timestamps]) =>
 		stripPrivilegedActorAtPath(path, timestamps)
 	);
+
+	if (isPublicClientViewer(viewer)) {
+		return sanitizeReservationPricingForClientViewer(
+			hidePendingConfirmationForClient(sanitized)
+		);
+	}
 
 	return !options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
 		? sanitizeReservationPricingForHotelViewer(sanitized)

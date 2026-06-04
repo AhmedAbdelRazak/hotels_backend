@@ -5,7 +5,7 @@ const Reservations = require("../models/reservations");
 const Rooms = require("../models/rooms");
 const User = require("../models/user");
 const {
-	isPendingConfirmationReservation,
+	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
 const {
 	agentIdFromReservation,
@@ -87,7 +87,12 @@ const isReservationActive = (
 	includeCancelled,
 	includePendingConfirmation = false
 ) => {
-	if (!includePendingConfirmation && isPendingConfirmationReservation(reservation)) {
+	if (
+		!shouldCountReservationForInventory(reservation, {
+			includeCancelled,
+			includePendingConfirmation,
+		})
+	) {
 		return false;
 	}
 	if (includeCancelled) return true;

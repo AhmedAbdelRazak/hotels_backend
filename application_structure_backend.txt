@@ -189,6 +189,9 @@ Important Services
   - Emits hotel and owner notification counter updates through Socket.IO rooms.
 - services/reservationStatus.js
   - Shared pending-confirmation and reservation-status helpers.
+- services/pendingConfirmationPolicy.js
+  - Shared creation policy for internal hotel review. Use markReservationPendingConfirmation when a new booking should enter the hotel confirmation queue.
+  - The policy can set reservation_status/state to Pending Confirmation for operational staff flows, or keep client-facing status confirmed while pendingConfirmation.status="pending" drives the hotel queue.
 - services/reservationPricing.js
   - Reservation pricing calculations and shared pricing behavior.
 - services/agentRoomOverrides.js
@@ -215,6 +218,11 @@ Critical Workflows To Protect
   - If a room has assigned stock for the booking agent, reservation inventory validation counts against that agent stock first and only counts reservations created by that same agent.
   - If a room has agent-specific calendar pricing for the booking agent, reservation pricing uses that row first and falls back to the hotel-wide room calendar otherwise.
   - New reservations must persist availabilitySnapshot from the same validateReservationInventoryForCreate result used for inventory blocking/overbook warnings. Do not let the frontend submit this count as trusted data; backend creation paths should stamp it after validation for hotel-management, public/PayPal, employee-direct, verification, admin Order Taker, OTA/integrator imports, Excel imports, and AI-assisted creation flows.
+  - 2026-06-04 mandatory hotel confirmation: newly created reservations from admin Jannat Tools Order Taker, public/client booking, PayPal checkout, payment verification, and chatbot-assisted public booking paths must set pendingConfirmation.status="pending" so the hotel team confirms them before the internal cycle closes.
+  - Manual admin/Jannat Tools Order Taker creation must also set reservation_status/state to Pending Confirmation because the hotel team should see it as an operational pending item immediately.
+  - Paid/public/client-created reservations should keep clientVisibleStatus="confirmed" and should not expose pending-confirmation wording in public invoice, payment-link, WhatsApp, or single-reservation responses. The internal pendingConfirmation object is for hotel/admin workflow only.
+  - Public/admin-created pending confirmations must keep pendingConfirmation.inventoryBlocks=true so the booking remains counted against public/hotel availability while the hotel team reviews it. Do not make paid public bookings reappear as available inventory just because they are internally pending confirmation.
+  - controllers/reservations.js pending-confirmation list/notification filters must include pendingConfirmation.status="pending" in addition to text statuses, otherwise paid/public bookings can be marked internally but hidden from the hotel queue.
   - Historical/import creation can allow overbook for compatibility, but should still capture the snapshot with overrideAllowed/overbooked metadata so reservation staff can audit what inventory looked like when the row was written.
 - Public signup applications
   - Direct public signup is for hotel manager/owner registration only.
@@ -274,6 +282,7 @@ Critical Workflows To Protect
 - Public website routes
   - Keep public Janat routes separate from authenticated hotel-management behavior. Public booking/payment endpoints still need reservation/payment validation.
   - GET /api/reservations/single-reservation/:reservationId is used by /client-payment/:reservationId/:confirmation and must return a client-safe reservation payload without requiring req.profile.
+  - Public/client reservation responses must apply the client-visible status from pendingConfirmation.clientVisibleStatus and remove pendingConfirmation/agentDecisionSnapshot so guests do not see internal hotel-review state while a paid booking is operationally pending.
   - Optional encrypted customer payment fields may be blank, plaintext legacy placeholders, or encrypted values; single-reservation lookup must not fail the public payment page when optional card fields cannot be decrypted.
   - GET /api/support-cases-customer/:caseId/unseen-count returns { count } for the public chat badge and should return count 0 for missing/invalid/closed cases so public pages do not show noisy 404 polling errors.
 

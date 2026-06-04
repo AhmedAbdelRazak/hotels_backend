@@ -52,6 +52,10 @@ const {
 	emitHotelNotificationRefresh,
 } = require("../services/notificationEvents");
 const {
+	markReservationPendingConfirmation,
+	hidePendingConfirmationForClient,
+} = require("../services/pendingConfirmationPolicy");
+const {
 	OTA_PLATFORM_REVIEW_PENDING,
 	OTA_PLATFORM_REVIEW_RELEASED,
 	OTA_RELEASED_RESERVATION_STATUS,
@@ -1373,7 +1377,7 @@ async function saveReservation(
 				: convertedAmounts.totalUSD,
 	};
 
-	const newReservation = new Reservations({
+	const reservationPayload = {
 		hotelId,
 		customer_details: {
 			...customerDetails,
@@ -1407,7 +1411,13 @@ async function saveReservation(
 		hotelName: req.body.hotelName,
 		hazent: req.body.usePassword,
 		availabilitySnapshot: req.body.availabilitySnapshot,
+	};
+	markReservationPendingConfirmation(reservationPayload, {
+		source: "public_client_reservation_create",
+		operationalStatus: false,
+		clientVisibleStatus: "confirmed",
 	});
+	const newReservation = new Reservations(reservationPayload);
 
 	try {
 		const savedReservation = await newReservation.save();
@@ -4293,16 +4303,26 @@ exports.createNewReservationClient2 = async (req, res) => {
 							hotelId,
 							booking_source,
 							total_amount,
-							reservation_status: "Confirmed",
+							reservation_status: "Pending Confirmation",
 							orderTakeId: orderTakeId || "",
 						},
 					},
 				],
 			};
+			markReservationPendingConfirmation(reservationPayload, {
+				actor: orderTaker || {
+					_id: orderTakeId || createdByUserId || "",
+					name: "Jannat employee",
+					roleDescription: "order_taker",
+				},
+				source: "admin_jannat_tools_order_taker",
+				operationalStatus: true,
+				clientVisibleStatus: "confirmed",
+			});
 			captureReservationAvailabilitySnapshot(
 				reservationPayload,
 				inventoryValidation,
-				"janat_employee_reservation_create"
+				"janat_employee_pending_confirmation_create"
 			);
 
 			const reservation = new Reservations(reservationPayload);
@@ -4480,6 +4500,16 @@ exports.createNewReservationClient2 = async (req, res) => {
 					waErr?.message || waErr,
 				);
 			}
+			emitHotelNotificationRefresh(req, savedReservation.hotelId, {
+				type: "pending_confirmation",
+				reservationId: savedReservation._id,
+				ownerId: savedReservation.belongsTo,
+			}).catch((notifyErr) =>
+				console.error(
+					"Error emitting admin order-taker pending notification:",
+					notifyErr,
+				)
+			);
 
 			return res.status(201).json({
 				message: "Reservation created successfully",
@@ -5258,7 +5288,7 @@ function sanitizeReservationForPublicInvoice(doc) {
 	if (!doc) return null;
 
 	// Clone shallowly so we can delete sensitive keys
-	const r = { ...doc };
+	const r = hidePendingConfirmationForClient({ ...doc });
 
 	// Never expose card/credential fields on a public invoice endpoint
 	if (r.customer_details) {
@@ -5367,12 +5397,14 @@ exports.getSingleReservationInvoicePdf = async (req, res) => {
 			hotelCity: hotel.hotelCity || "",
 			hotelPhone: hotel.phone || "",
 		};
+		const publicReservationData =
+			hidePendingConfirmationForClient(reservationData);
 
 		const hotelForPdf =
 			reservation?.hotelId && typeof reservation.hotelId === "object"
 				? reservation.hotelId
 				: hotel;
-		const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
+		const pdfHtml = receiptPdfTemplate(publicReservationData, hotelForPdf);
 		const pdfBuffer = await createPdfBuffer(pdfHtml);
 
 		res.setHeader("Content-Type", "application/pdf");
