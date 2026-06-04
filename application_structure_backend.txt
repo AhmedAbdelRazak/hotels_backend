@@ -2006,6 +2006,7 @@ Future TODO Backlog - Added 2026-05-26
   - The rejected feed includes reservations whose rejection signal is in reservation_status, state, pendingConfirmation.status, agentDecisionSnapshot.status, financial_cycle.totalReviewStatus, or commissionAgentApproval.status.
   - Status filter value rejected now maps to that full rejected workflow filter instead of only matching the primary reservation_status text.
   - Scorecards and booking-source options use the same rejected-only scope so counts match the table.
+  - Reservation list responses return compact hotel filter options only (_id, hotelName, belongsTo) instead of full hotel documents, keeping rejected/pending payloads small.
 - Notification behavior:
   - Pending-confirmation notifications now include pendingConfirmation.status = rejected and agentDecisionSnapshot.status = rejected.
   - Notification rows include decisionStatus and decisionReason so platform/admin frontends can show the reservation employee rejection comment.

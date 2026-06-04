@@ -1017,6 +1017,13 @@ const bookingSourceOptionsFromMatch = async (match) => {
 	}));
 };
 
+const reservationFilterHotelsForResponse = (hotels = []) =>
+	(Array.isArray(hotels) ? hotels : []).map((hotel = {}) => ({
+		_id: hotel._id,
+		hotelName: hotel.hotelName || "",
+		belongsTo: hotel.belongsTo || hotel.ownerId || "",
+	}));
+
 const emptyReservationScorecards = () => ({
 	totals: {
 		reservationsCount: 0,
@@ -1328,7 +1335,7 @@ const listReservations = async ({
 			total: 0,
 			pages: 0,
 			reservations: [],
-			hotels,
+			hotels: reservationFilterHotelsForResponse(hotels),
 			bookingSources: [],
 			scorecards: emptyReservationScorecards(),
 		};
@@ -1383,7 +1390,7 @@ const listReservations = async ({
 		total,
 		pages: exportAll ? 1 : Math.ceil(total / limit),
 		reservations: hotelVisibleRows,
-		hotels,
+		hotels: reservationFilterHotelsForResponse(hotels),
 		bookingSources,
 		scorecards,
 	};
