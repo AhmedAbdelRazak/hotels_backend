@@ -1918,3 +1918,21 @@ Future TODO Backlog - Added 2026-05-26
   - EXPEDIA_BROWSER_PATH can point to the installed Chrome/Edge binary on the home server.
   - EXPEDIA_DRY_RUN_KEEP_OPEN=true keeps the browser open after extraction for manual inspection.
   - EXPEDIA_BROWSER_NO_SANDBOX=true is available only for Linux/root server environments that require it.
+- 2026-06-03 server dry-run verification:
+  - Server path: /home/ahmedadmin/Hotels/hotels_backend.
+  - Persistent Expedia browser profile path: /home/ahmedadmin/.jannatbooking/expedia-dry-run-profile.
+  - Audit output path: /home/ahmedadmin/Hotels/hotels_backend/audits/expedia-dry-run.
+  - Visible-browser runs from SSH require Windows VcXsrv plus ssh -Y jannat. The forwarded DISPLAY should look like localhost:10.0. Do not use DISPLAY=:0 unless a real server desktop exists.
+  - Linux Chromium on jannat requires EXPEDIA_BROWSER_NO_SANDBOX=true.
+  - Verified command:
+    EXPEDIA_BROWSER_NO_SANDBOX=true EXPEDIA_DRY_RUN_TIMEOUT_MINUTES=20 EXPEDIA_DRY_RUN_KEEP_OPEN=true npm run expedia:properties:dry-run
+  - Successful read-only extraction returned 7 Expedia properties:
+    - Al-Magd Hotel, Property ID 120233712.
+    - Al-Qemma Hotel, Property ID 120208625.
+    - Al-Rehab Hotel, Property ID 120233940.
+    - AlSukareya HOTEL, Property ID 120199112.
+    - Taj Al Zahabiya Hotel, Property ID 119872210.
+    - Zad Al Safa Hotel, Property ID 122352868.
+    - Zad Al-Mashaer Hotel, Property ID 120211153.
+  - Current parser limitation: the last property address can include trailing page text such as Add a property / Check for updates. Property name and Expedia property ID extraction are correct.
+  - The Expedia session was reused on the second run through the persistent server browser profile.
