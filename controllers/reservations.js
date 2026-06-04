@@ -32,6 +32,9 @@ const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
 const {
+	markReservationPendingConfirmation,
+} = require("../services/pendingConfirmationPolicy");
+const {
 	agentIdFromReservation,
 	getAgentAssignedStock,
 	getAgentPricingForDate,
@@ -3452,6 +3455,11 @@ exports.create = async (req, res) => {
 	const saveReservation = async (reservationData) => {
 		const actorFields = await resolveCreatedBy();
 		const { forcePendingConfirmation, ...reservationActorFields } = actorFields;
+		const isAgentOrderTakingCreation = Boolean(forcePendingConfirmation);
+		const requiresPendingConfirmationCycle = true;
+		const pendingConfirmationSource = isAgentOrderTakingCreation
+			? "agent_reservation_create"
+			: "manual_admin_reservation_create";
 		const existingAuditLog = Array.isArray(reservationData.reservationAuditLog)
 			? reservationData.reservationAuditLog
 			: [];
@@ -3460,7 +3468,7 @@ exports.create = async (req, res) => {
 			...reservationActorFields,
 		};
 		const reservationWarnings = [];
-		if (forcePendingConfirmation) {
+		if (isAgentOrderTakingCreation) {
 			const requestedAgentSettlementModel =
 				reservationPayload.agentSettlementModel ||
 				reservationPayload?.financial_cycle?.agentSettlementModel ||
@@ -3553,10 +3561,23 @@ exports.create = async (req, res) => {
 
 		}
 
+		if (requiresPendingConfirmationCycle) {
+			markReservationPendingConfirmation(reservationPayload, {
+				actor:
+					reservationActorFields.orderTaker ||
+					reservationActorFields.createdBy ||
+					createActor,
+				source: pendingConfirmationSource,
+				operationalStatus: true,
+				clientVisibleStatus: "confirmed",
+				inventoryBlocks: true,
+			});
+		}
+
 		try {
 			const pricingResult = await normalizeReservationCreationPricing(
 				reservationPayload,
-				{ allowBlockedCalendar: !forcePendingConfirmation }
+				{ allowBlockedCalendar: !isAgentOrderTakingCreation }
 			);
 			Object.assign(reservationPayload, pricingResult.reservation);
 			applyAdminPricingVisibilityForActor(
@@ -3570,7 +3591,7 @@ exports.create = async (req, res) => {
 
 			const inventoryValidation = await validateReservationInventoryForCreate(
 				reservationPayload,
-				{ allowOverbook: !forcePendingConfirmation }
+				{ allowOverbook: !isAgentOrderTakingCreation }
 			);
 			if (!inventoryValidation.allowed) {
 				return res.status(409).json({
@@ -3587,9 +3608,7 @@ exports.create = async (req, res) => {
 			captureReservationAvailabilitySnapshot(
 				reservationPayload,
 				inventoryValidation,
-				forcePendingConfirmation
-					? "agent_reservation_create"
-					: "hotel_reservation_create"
+				pendingConfirmationSource
 			);
 		} catch (error) {
 			if (error instanceof ReservationPricingError || error?.statusCode) {
@@ -3603,8 +3622,18 @@ exports.create = async (req, res) => {
 			throw error;
 		}
 
+		const finalStatusText = String(
+			reservationPayload.reservation_status || reservationPayload.state || ""
+		).toLowerCase();
+		const shouldDirtySelectedRooms =
+			/in[-_\s]?house|checked[-_\s]?in/.test(finalStatusText);
+
 		// Check if roomId array is present and has length more than 0
-		if (reservationData.roomId && reservationData.roomId.length > 0) {
+		if (
+			shouldDirtySelectedRooms &&
+			reservationData.roomId &&
+			reservationData.roomId.length > 0
+		) {
 			try {
 				// Update cleanRoom field for all rooms in the roomId array
 				await Rooms.updateMany(
@@ -3634,7 +3663,9 @@ exports.create = async (req, res) => {
 			const data = await reservations.save();
 			res.json({ data, warnings: reservationWarnings });
 			emitHotelNotificationRefresh(req, data.hotelId, {
-				type: forcePendingConfirmation ? "pending_confirmation" : "reservation_update",
+				type: requiresPendingConfirmationCycle
+					? "pending_confirmation"
+					: "reservation_update",
 				reservationId: data._id,
 				ownerId: data.belongsTo,
 			}).catch((error) =>
