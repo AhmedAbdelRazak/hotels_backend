@@ -1722,7 +1722,7 @@ const buildFinanceWorkflowReadyFilter = () => ({
 const buildPendingConfirmationFilter = (
 	hotelId,
 	scope = "all",
-	{ includeLegacy = false } = {}
+	{ includeLegacy = false, includeLegacyPendingStatus = false } = {}
 ) => {
 	const reasonFilters =
 		scope === "commission"
@@ -1735,13 +1735,27 @@ const buildPendingConfirmationFilter = (
 					buildPendingFinanceReviewFilter(),
 			  ];
 
+	const workflowFilter = {
+		$and: [
+			...(includeLegacy ? [] : [buildNewReservationProcessFilter()]),
+			...(scope === "commission" ? [buildFinanceWorkflowReadyFilter()] : []),
+			{ $or: reasonFilters },
+		],
+	};
+	const workflowFilters = [workflowFilter];
+
+	// Keep old finance/commission clean-up rows behind the workflow start date,
+	// but never hide a reservation that is explicitly still waiting for hotel
+	// confirmation. This keeps notification badges aligned with the pending card.
+	if (includeLegacyPendingStatus && scope !== "commission") {
+		workflowFilters.push(buildPendingStatusFilter());
+	}
+
 	return {
 		hotelId: ObjectId(hotelId),
 		$and: [
 			buildExcludePendingOtaReviewFilter(),
-			...(includeLegacy ? [] : [buildNewReservationProcessFilter()]),
-			...(scope === "commission" ? [buildFinanceWorkflowReadyFilter()] : []),
-			{ $or: reasonFilters },
+			{ $or: workflowFilters },
 		],
 	};
 };
@@ -8587,7 +8601,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 
 		const workflowScope = getPendingWorkflowScopeForActor(actor);
 		const filters = hotelIds.map((id) =>
-			buildPendingConfirmationFilter(id, workflowScope)
+			buildPendingConfirmationFilter(id, workflowScope, {
+				includeLegacyPendingStatus: true,
+			})
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
 		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =

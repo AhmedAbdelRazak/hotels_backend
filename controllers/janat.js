@@ -3102,7 +3102,7 @@ exports.paginatedReservationList = async (req, res) => {
 
 				// Reservation_status filters
 				case "pendingConfirmation":
-					return status === "pending confirmation";
+					return isOperationalPendingConfirmation(r);
 				case "confirmed":
 					return status === "confirmed";
 				case "inhouse":
@@ -3207,6 +3207,19 @@ exports.paginatedReservationList = async (req, res) => {
 			const parsed = Number(val);
 			return isNaN(parsed) ? 0 : parsed;
 		}
+		function isOperationalPendingConfirmation(reservation = {}) {
+			const status = String(
+				reservation.reservation_status || reservation.state || "",
+			)
+				.trim()
+				.toLowerCase();
+			const pendingStatus = String(
+				reservation?.pendingConfirmation?.status || "",
+			)
+				.trim()
+				.toLowerCase();
+			return status === "pending confirmation" || pendingStatus === "pending";
+		}
 		function computeReservationCommission(reservation) {
 			if (!reservation || !reservation.pickedRoomsType) return 0;
 			const hotelName = reservation.hotelId?.hotelName?.toLowerCase() || "";
@@ -3275,9 +3288,7 @@ exports.paginatedReservationList = async (req, res) => {
 			.slice(0, 3);
 		const totalFilteredReservations = allReservations.length;
 		const pendingConfirmationReservations = allReservations.filter(
-			(r) =>
-				(r.reservation_status || "").toLowerCase() ===
-				"pending confirmation",
+			(r) => isOperationalPendingConfirmation(r),
 		).length;
 		const notCapturedReservations = allReservations.filter(
 			(r) => (r.payment_status || "").toLowerCase() === "not captured",

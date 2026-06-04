@@ -71,6 +71,7 @@ const NO_SHOW_STATUS = /no[-_\s]?show/i;
 const IN_HOUSE_STATUS = /house|in[-_\s]?house|checked[-_\s]?in/i;
 const PENDING_CONFIRMATION_STATUS =
 	/pending[-_\s]?confirmation|pending[-_\s]?finance[-_\s]?review|pending[-_\s]?agent[-_\s]?commission[-_\s]?approval|finance[-_\s]?rejected|rejected/i;
+const PENDING_CONFIRMATION_ONLY_STATUS = /pending[-_\s]?confirmation/i;
 const FINISHED_HOUSEKEEPING_STATUS = /^(finished|done|completed|clean)$/i;
 const SUMMARY_DIRTY_ROOM_REASONS = new Set([
 	"guest_checked_out",
@@ -740,6 +741,19 @@ const pendingConfirmationOnlyFilter = () => ({
 	],
 });
 
+const legacyPendingConfirmationStatusFilter = () => ({
+	$or: [
+		{ reservation_status: PENDING_CONFIRMATION_ONLY_STATUS },
+		{
+			$and: [
+				reservationPrimaryStatusMissingFilter(),
+				{ state: PENDING_CONFIRMATION_ONLY_STATUS },
+			],
+		},
+		{ "pendingConfirmation.status": "pending" },
+	],
+});
+
 const pendingFinanceReviewFilter = () => ({
 	$or: [
 		{ reservation_status: PENDING_FINANCE_REVIEW_STATUS },
@@ -790,13 +804,22 @@ const pendingWorkflowFilterForActor = (actor = {}) => {
 					financialCommissionMissingFilter(),
 					pendingFinanceReviewFilter(),
 			  ];
+	const workflowFilters = [
+		{
+			$and: [
+				newReservationProcessFilter(),
+				...(scope === "commission" ? [pendingFinanceWorkflowReadyFilter()] : []),
+				{ $or: reasonFilters },
+			],
+		},
+	];
+
+	if (scope !== "commission") {
+		workflowFilters.push(legacyPendingConfirmationStatusFilter());
+	}
 
 	return {
-		$and: [
-			newReservationProcessFilter(),
-			...(scope === "commission" ? [pendingFinanceWorkflowReadyFilter()] : []),
-			{ $or: reasonFilters },
-		],
+		$or: workflowFilters,
 	};
 };
 
