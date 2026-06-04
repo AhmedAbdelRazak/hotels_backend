@@ -81,6 +81,7 @@ const PENDING_FINANCE_REVIEW_STATUS = /pending[-_\s]?finance[-_\s]?review/i;
 const PENDING_AGENT_COMMISSION_STATUS =
 	/pending[-_\s]?agent[-_\s]?commission[-_\s]?approval/i;
 const FINANCE_REJECTED_STATUS = /finance[-_\s]?rejected/i;
+const REJECTED_STATUS = /^rejected$/i;
 const ASSIGNED_COMMISSION_STATUSES = new Set([
 	"commission due",
 	"commission paid",
@@ -638,6 +639,7 @@ const singleReservationStatusFilter = (status = "") => {
 		return reservationStatusOrStateFallbackFilter(PENDING_AGENT_COMMISSION_STATUS);
 	if (statusKey === "finance rejected")
 		return reservationStatusOrStateFallbackFilter(FINANCE_REJECTED_STATUS);
+	if (statusKey === "rejected") return rejectedWorkflowFilterForActor();
 	if (statusKey === "pending") {
 		return {
 			$or: [
@@ -823,7 +825,26 @@ const pendingWorkflowFilterForActor = (actor = {}) => {
 	};
 };
 
-const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false }) => {
+const rejectedWorkflowFilterForActor = () => ({
+	$or: [
+		{ reservation_status: REJECTED_STATUS },
+		{ state: REJECTED_STATUS },
+		{ reservation_status: FINANCE_REJECTED_STATUS },
+		{ state: FINANCE_REJECTED_STATUS },
+		{ "pendingConfirmation.status": "rejected" },
+		{ "agentDecisionSnapshot.status": "rejected" },
+		{ "financial_cycle.totalReviewStatus": "rejected" },
+		{ "commissionAgentApproval.status": "rejected" },
+	],
+});
+
+const buildReservationMatch = ({
+	actor,
+	hotels,
+	query = {},
+	pendingOnly = false,
+	rejectedOnly = false,
+}) => {
 	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
 	if (!hotelIds.length) return null;
 
@@ -892,6 +913,9 @@ const buildReservationMatch = ({ actor, hotels, query = {}, pendingOnly = false 
 	}
 	if (pendingOnly) {
 		clauses.push(pendingWorkflowFilterForActor(actor));
+	}
+	if (rejectedOnly) {
+		clauses.push(rejectedWorkflowFilterForActor(actor));
 	}
 
 	if (clauses.length) match.$and = clauses;
@@ -1174,7 +1198,13 @@ const reservationStatusBucketKey = (bucket = {}) => {
 	return "other";
 };
 
-const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly }) => {
+const buildReservationScorecards = async ({
+	actor,
+	hotels,
+	query,
+	pendingOnly,
+	rejectedOnly,
+}) => {
 	const scorecardQuery = {
 		hotelId: (query || {}).hotelId || "",
 	};
@@ -1183,6 +1213,7 @@ const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly })
 		hotels,
 		query: scorecardQuery,
 		pendingOnly,
+		rejectedOnly,
 	});
 	if (!scorecardMatch) return emptyReservationScorecards();
 
@@ -1206,7 +1237,11 @@ const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly })
 					reservationScorecardProjectStage(),
 				],
 				actionRequired: [
-					{ $match: pendingWorkflowFilterForActor(actor) },
+					{
+						$match: rejectedOnly
+							? rejectedWorkflowFilterForActor(actor)
+							: pendingWorkflowFilterForActor(actor),
+					},
 					reservationScorecardGroupStage(),
 					reservationScorecardProjectStage(),
 				],
@@ -1272,8 +1307,20 @@ const buildReservationScorecards = async ({ actor, hotels, query, pendingOnly })
 	};
 };
 
-const listReservations = async ({ actor, hotels, query, pendingOnly = false }) => {
-	const match = buildReservationMatch({ actor, hotels, query, pendingOnly });
+const listReservations = async ({
+	actor,
+	hotels,
+	query,
+	pendingOnly = false,
+	rejectedOnly = false,
+}) => {
+	const match = buildReservationMatch({
+		actor,
+		hotels,
+		query,
+		pendingOnly,
+		rejectedOnly,
+	});
 	if (!match) {
 		return {
 			page: 1,
@@ -1295,12 +1342,13 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 	const search = reservationSearchStage(query.search);
 	const basePipeline = [{ $match: match }, ...reservationLookupStages()];
 	if (search) basePipeline.push({ $match: search });
-	const bookingSourceMatch = pendingOnly
+	const bookingSourceMatch = pendingOnly || rejectedOnly
 		? buildReservationMatch({
 				actor,
 				hotels,
 				query: { ...query, bookingSource: "" },
 				pendingOnly,
+				rejectedOnly,
 		  })
 		: null;
 
@@ -1316,8 +1364,16 @@ const listReservations = async ({ actor, hotels, query, pendingOnly = false }) =
 				},
 			},
 		]),
-		pendingOnly ? bookingSourceOptionsFromMatch(bookingSourceMatch) : [],
-		buildReservationScorecards({ actor, hotels, query, pendingOnly }),
+		pendingOnly || rejectedOnly
+			? bookingSourceOptionsFromMatch(bookingSourceMatch)
+			: [],
+		buildReservationScorecards({
+			actor,
+			hotels,
+			query,
+			pendingOnly,
+			rejectedOnly,
+		}),
 	]);
 	const total = countResult?.[0]?.total || 0;
 	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
@@ -3628,6 +3684,53 @@ exports.exportOverallPendingReservations = async (req, res) => {
 		return res
 			.status(500)
 			.json({ error: "Could not export pending reservations" });
+	}
+};
+
+exports.overallRejectedReservations = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "pending");
+		if (!context) return;
+		const data = await listReservations({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+			rejectedOnly: true,
+		});
+		return res.json(data);
+	} catch (error) {
+		console.error("overallRejectedReservations error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not load rejected reservations" });
+	}
+};
+
+exports.exportOverallRejectedReservations = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "pending");
+		if (!context) return;
+		const data = await listReservations({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: { ...(req.query || {}), exportAll: "true", page: 1 },
+			rejectedOnly: true,
+		});
+		await trackReservationExport({
+			req,
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+			dataset: "overall_rejected_reservations",
+			totalRows: data.total,
+			rows: data.reservations,
+		});
+		return res.json({ ...data, exportedAt: new Date(), exportTracked: true });
+	} catch (error) {
+		console.error("exportOverallRejectedReservations error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not export rejected reservations" });
 	}
 };
 

@@ -1989,3 +1989,24 @@ Future TODO Backlog - Added 2026-05-26
 - Edit/save behavior:
   - When the admin Edit Pricing modal posts saved daily rows, normalizeProvidedPricingDay now keeps totalPriceWithoutCommission aligned to explicit rootPrice for admin three-price/OTA rows.
   - This prevents previously saved OTA breakdowns such as reservation 1445133730 from reopening or saving with the client gross amount duplicated into the hotel/root no-commission field.
+
+2026-06-04 Overall Rejected Reservations Workspace And Notifications
+- Backend files:
+  - controllers/overall_dashboard.js adds rejected-only reservation listing/export support.
+  - routes/overall_dashboard.js exposes:
+    - GET /api/overall-dashboard/rejected-reservations/:userId
+    - GET /api/overall-dashboard/rejected-reservations-export/:userId
+  - controllers/reservations.js keeps rejected reservations visible in the pending-confirmation notification feed and includes the rejection comment in notification payloads.
+- Role and scope rules:
+  - SUPER ADMIN, platform admin, owner-like/system admin, hotel manager, reservation employee, finance, and order-taking accounts use the same access family as Pending Reservations.
+  - SUPER ADMIN/platform/admin users can see rejected reservations across their permitted hotel scope and can edit/resubmit them.
+  - Pure order-taking/agent accounts remain scoped to their own reservations only.
+  - Admin/SUPER ADMIN power does not bypass the cycle: rejected reservations are corrected through the details/edit flow and sent back to Pending Confirmation for hotel review.
+- Rejected query behavior:
+  - The rejected feed includes reservations whose rejection signal is in reservation_status, state, pendingConfirmation.status, agentDecisionSnapshot.status, financial_cycle.totalReviewStatus, or commissionAgentApproval.status.
+  - Status filter value rejected now maps to that full rejected workflow filter instead of only matching the primary reservation_status text.
+  - Scorecards and booking-source options use the same rejected-only scope so counts match the table.
+- Notification behavior:
+  - Pending-confirmation notifications now include pendingConfirmation.status = rejected and agentDecisionSnapshot.status = rejected.
+  - Notification rows include decisionStatus and decisionReason so platform/admin frontends can show the reservation employee rejection comment.
+  - Finance rejections still route through finance review behavior, while hotel/reservation-team rejections can route to the rejected reservations workspace.

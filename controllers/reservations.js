@@ -1694,6 +1694,8 @@ const buildPendingStatusFilter = () => ({
 		{ reservation_status: PENDING_CONFIRMATION_REGEX },
 		{ state: PENDING_CONFIRMATION_REGEX },
 		{ "pendingConfirmation.status": "pending" },
+		{ "pendingConfirmation.status": "rejected" },
+		{ "agentDecisionSnapshot.status": "rejected" },
 	],
 });
 
@@ -8641,7 +8643,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			await Promise.all([
 			Reservations.find(query)
 				.select(
-					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle pendingConfirmation"
+					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
 				)
 				.sort({ booked_at: 1, createdAt: 1 })
 				.limit(limit)
@@ -8675,6 +8677,11 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				reservation,
 				actor
 			);
+			const decision =
+				reservation.agentDecisionSnapshot ||
+				reservation.pendingConfirmation ||
+				{};
+			const financialCycle = reservation.financial_cycle || {};
 			return {
 				_id: reservation._id,
 				notificationType: getReservationNotificationTypeForActor(
@@ -8695,6 +8702,14 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					reservation.reservation_status || reservation.state || "",
 				total_amount: reservation.total_amount || 0,
 				pendingReasons,
+				decisionStatus: decision.status || "",
+				decisionReason:
+					decision.reason ||
+					decision.rejectionReason ||
+					decision.cancelReason ||
+					financialCycle.financeRejectionComment ||
+					financialCycle.totalRejectionReason ||
+					"",
 			};
 		});
 

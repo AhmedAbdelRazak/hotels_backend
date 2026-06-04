@@ -17,6 +17,8 @@ const {
 	trackOverallReservationSummaryExport,
 	overallPendingReservations,
 	exportOverallPendingReservations,
+	overallRejectedReservations,
+	exportOverallRejectedReservations,
 	overallFinancialActions,
 	trackOverallFinancialReportExport,
 	overallHousekeeping,
@@ -99,6 +101,20 @@ router.get(
 	requireSignin,
 	isAuth,
 	exportOverallPendingReservations
+);
+
+router.get(
+	"/overall-dashboard/rejected-reservations/:userId",
+	requireSignin,
+	isAuth,
+	overallRejectedReservations
+);
+
+router.get(
+	"/overall-dashboard/rejected-reservations-export/:userId",
+	requireSignin,
+	isAuth,
+	exportOverallRejectedReservations
 );
 
 router.get(
