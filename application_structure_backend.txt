@@ -2035,3 +2035,41 @@ Future TODO Backlog - Added 2026-05-26
 - Workflow:
   - This endpoint only lists/export rejected reservations for the platform-admin workspace.
   - Corrections and resubmission still go through the existing reservation update flow, which pushes corrected rejected reservations back to Pending Confirmation.
+
+2026-06-04 Reservation Lifecycle Summary For Future Reference
+- Core lifecycle:
+  - Every new operational reservation should enter the internal workflow as Pending Confirmation.
+  - This includes hotel manual reservations, Jannat Tools / Order Taker reservations, chatbot-created reservations, platform-admin manual reservations, SUPER ADMIN manual reservations, and OTA reservations after they are released from OTA Platform Review to the hotel.
+  - Public paid/client-facing reservations may still present a friendly confirmed status to the guest through pendingConfirmation.clientVisibleStatus, but internally the hotel team must still review pendingConfirmation.status = pending.
+- Primary workflow statuses:
+  - Pending Confirmation: hotel reservation employee/team must accept or reject.
+  - Confirmed by hotel: pendingConfirmation.status becomes confirmed and the reservation can move into finance review.
+  - Pending Finance Review: finance/management reviews total amount, settlement model, and commission.
+  - Pending Agent Commission Approval: used when agent commission approval is required before final confirmation.
+  - Confirmed: finance/commission requirements are satisfied and the reservation can continue to in-house / checked-out / other operational statuses.
+  - Rejected / Finance Rejected: the reservation needs correction and should not be treated as complete.
+- Rejection cycle:
+  - Hotel reservation rejection can be stored through reservation_status/state, pendingConfirmation.status, or agentDecisionSnapshot.status.
+  - Finance rejection can be stored through reservation_status/state = Finance Rejected or financial_cycle.totalReviewStatus = rejected.
+  - Commission rejection can be stored through commissionAgentApproval.status = rejected.
+  - Rejected reservations remain visible in rejected-reservation queues and notification feeds with decisionReason / rejection comments when available.
+  - A rejected reservation is corrected through the existing reservation details/edit flow; saving a meaningful correction pushes it back to Pending Confirmation for another hotel review.
+  - Admin/SUPER ADMIN power does not remove the cycle. They can correct and manage everything, but the corrected reservation should still return to Pending Confirmation unless an explicit workflow override is intentionally performed.
+- Role behavior:
+  - Agent / Order Taker accounts can create reservations and correct allowed rejected reservations, but cannot confirm hotel acceptance or financially reconcile reservations.
+  - Reservation employee accounts can accept/reject Pending Confirmation reservations but cannot perform finance review.
+  - Finance accounts can assign/review commission and financial cycle fields after hotel acceptance; they cannot accept/reject the hotel confirmation decision.
+  - Hotel manager / system admin style accounts can manage hotel-side workflow actions within their hotel scope.
+  - Platform admins and SUPER ADMINs can see/administer broader workflow queues; configured SUPER ADMIN users have full visibility and special access such as platform-profit visibility where explicitly allowed.
+- Platform admin rejected endpoints:
+  - /api/admin/rejected-reservations/:userId and /api/admin/rejected-reservations-export/:userId are platform-admin all-hotel endpoints.
+  - They intentionally do not use withPlatformReservationScope, so role-1000 platform admins with HotelsReservations/AllReservations access and configured SUPER ADMIN users can review all hotels' rejected reservations.
+  - Hotel-management rejected endpoints remain separate and hotel/owner scoped.
+- Notification behavior:
+  - Pending-confirmation notification feeds include pending reservations, rejected reservations, finance rejections, commission rejections, and relevant agent decision outcomes.
+  - For role-1000 platform admins and configured SUPER ADMIN users, the pending-confirmation notification hotel set is all hotels when no ownerId/hotelId filter is supplied.
+  - Rejected notification payloads include decisionStatus and decisionReason when available so the frontend can show "Reservation #<confirmation> was rejected" and the rejection comment.
+- OTA pricing privacy in the lifecycle:
+  - Pending OTA Platform Review reservations stay hidden from hotel-management until platform admins release them.
+  - After release, the hotel sees the reservation as Pending Confirmation and sees only the hotel-visible/root amount.
+  - Admin/SUPER ADMIN screens may show safe OTA financial summaries, with platformProfit included only for configured SUPER ADMIN users.
