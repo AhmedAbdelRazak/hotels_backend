@@ -86,6 +86,14 @@ app.use((err, _req, res, next) => {
 	});
 });
 
+//hijri and melady date in the chat bot
+//sometimes in the learning of the AI chatbot, the user rights in the beginning between Parenthesis like general intstructions. Let the chatbot consider this in learning
+//If somebody chose English and spoke french, then complete the chat in the preferred language, this is important
+//Id doesn't work with "Okay" or "Na3am" and it doesn't take the reservation.
+
+// Calendar in link like "http://localhost:3000/hotel-management/main-dashboard?ownerId=68b74714fb50e159d48c714d&overall=settings&page=1&range=custom&settingsModal=calendar&settingsCalendarTab=general" is Price main 1
+//Based on calendar price, you can add multiple variants from the pricing which eventually will be based on calendar price.
+
 const port = process.env.PORT || 8080;
 server.listen(port, () => console.log(`Server is running on port ${port}`));
 

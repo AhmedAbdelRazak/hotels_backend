@@ -103,6 +103,30 @@ const buildAdminPricingDayFields = (day = {}, clientPrice = 0, rootPrice = 0) =>
 	};
 };
 
+const pricingSourceFields = (source = {}) => {
+	const fields = {};
+	[
+		"sellingPrice",
+		"commissionPercent",
+		"priceVariantDataId",
+		"priceVariantItemId",
+		"priceVariantName",
+		"priceVariantNameOtherLanguage",
+		"source",
+		"calendarType",
+		"color",
+	].forEach((field) => {
+		if (
+			source[field] !== undefined &&
+			source[field] !== null &&
+			source[field] !== ""
+		) {
+			fields[field] = source[field];
+		}
+	});
+	return fields;
+};
+
 const toPlainObject = (value) => {
 	if (!value) return {};
 	if (typeof value.toObject === "function") return value.toObject();
@@ -512,6 +536,7 @@ const buildCanonicalRoomPricing = ({
 	allowBlockedCalendar = false,
 	warnings = [],
 	agentId = "",
+	requireAgentAssignedPricing = false,
 }) => {
 	const details = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -546,7 +571,32 @@ const buildCanonicalRoomPricing = ({
 	const pricingByDay = stayDates.map((date, index) => {
 		const agentRate = getAgentPricingForDate(detail, agentOverrideId, date);
 		const hotelRate = rates.find((item) => item?.calendarDate === date);
-		const rate = agentRate || hotelRate;
+		if (requireAgentAssignedPricing && !agentOverrideId) {
+			throw new ReservationPricingError(
+				"Assigned agent pricing is required for agent reservations.",
+				409,
+				"agent_assigned_pricing_missing",
+				{
+					room_type: normalizedRoomType,
+					displayName: normalizedDisplayName,
+					date,
+				}
+			);
+		}
+		if (requireAgentAssignedPricing && !agentRate) {
+			throw new ReservationPricingError(
+				`${normalizedDisplayName || normalizedRoomType} has no assigned agent price for ${date}.`,
+				409,
+				"agent_assigned_pricing_missing",
+				{
+					room_type: normalizedRoomType,
+					displayName: normalizedDisplayName,
+					date,
+					agentId: agentOverrideId,
+				}
+			);
+		}
+		const rate = requireAgentAssignedPricing ? agentRate : agentRate || hotelRate;
 		const blockedOnCalendar = calendarRateIsBlocked(rate);
 		if (blockedOnCalendar && !allowBlockedCalendar) {
 			throw new ReservationPricingError(
@@ -592,9 +642,16 @@ const buildCanonicalRoomPricing = ({
 			findPricingDayForDate(providedRows, date) ||
 			providedRows[index] ||
 			firstProvidedRow;
-		const providedFinal = getPricingDayFinal(providedDay);
+		const trustedDay = requireAgentAssignedPricing
+			? effectiveRate || {}
+			: providedDay;
+		const providedFinal = requireAgentAssignedPricing
+			? 0
+			: getPricingDayFinal(providedDay);
 		const totalPriceWithCommission =
-			preferChosenPrice && roomNightlyPrice > 0
+			requireAgentAssignedPricing && canonicalDailyPrice > 0
+				? canonicalDailyPrice
+				: preferChosenPrice && roomNightlyPrice > 0
 				? roomNightlyPrice
 				: preferCalendarPrice && canonicalDailyPrice > 0
 				  ? canonicalDailyPrice
@@ -604,16 +661,16 @@ const buildCanonicalRoomPricing = ({
 				    ? roomNightlyPrice
 				    : canonicalDailyPrice;
 		const totalPriceWithoutCommission = getDayValue(
-			providedDay,
+			trustedDay,
 			"totalPriceWithoutCommission",
 			dayPrice || totalPriceWithCommission
 		);
 		const resolvedRootPrice = resolveDayRootPrice(
-			{ ...providedDay, totalPriceWithoutCommission },
+			{ ...trustedDay, totalPriceWithoutCommission },
 			rootPrice || totalPriceWithoutCommission || totalPriceWithCommission
 		);
 		const resolvedCommissionRate = getDayValue(
-			providedDay,
+			trustedDay,
 			"commissionRate",
 			commissionRate
 		);
@@ -632,7 +689,7 @@ const buildCanonicalRoomPricing = ({
 		}
 
 		const adminPricingDayFields = buildAdminPricingDayFields(
-			providedDay,
+			trustedDay,
 			totalPriceWithCommission,
 			resolvedRootPrice
 		);
@@ -648,6 +705,7 @@ const buildCanonicalRoomPricing = ({
 			totalPriceWithCommission,
 			totalPriceWithoutCommission,
 			...adminPricingDayFields,
+			...pricingSourceFields(effectiveRate || {}),
 		};
 	});
 
@@ -680,6 +738,9 @@ const normalizeReservationCreationPricing = async (
 			agentIdFromReservation(updates) ||
 			updates.requestingUserId ||
 			updates.createdByUserId
+	);
+	const requireAgentAssignedPricing = Boolean(
+		options.requireAgentAssignedPricing
 	);
 
 	if (!stayDates.length || !primaryRooms.length) {
@@ -718,6 +779,7 @@ const normalizeReservationCreationPricing = async (
 			allowBlockedCalendar: !!options.allowBlockedCalendar,
 			warnings,
 			agentId,
+			requireAgentAssignedPricing,
 		});
 	});
 

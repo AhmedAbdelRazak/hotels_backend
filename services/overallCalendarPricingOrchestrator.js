@@ -118,6 +118,16 @@ const buildGeneralRow = (plan, room = {}, calendarDate) => ({
 	color: plan.color,
 	calendarType: plan.calendarType,
 	source: plan.source,
+	...(plan.priceVariantDataId
+		? { priceVariantDataId: normalizeId(plan.priceVariantDataId) }
+		: {}),
+	...(plan.priceVariantItemId
+		? { priceVariantItemId: normalizeId(plan.priceVariantItemId) }
+		: {}),
+	...(plan.priceVariantName ? { priceVariantName: plan.priceVariantName } : {}),
+	...(plan.priceVariantNameOtherLanguage
+		? { priceVariantNameOtherLanguage: plan.priceVariantNameOtherLanguage }
+		: {}),
 	...(plan.blocked
 		? {
 				status: "blocked",

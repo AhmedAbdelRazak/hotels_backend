@@ -16,6 +16,10 @@ const {
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 const { trackAccountCreation } = require("../services/activityTracker");
 const SignupInvitation = require("../models/signup_invitation");
+const {
+	normalizePriceVariantAssignments,
+	syncPriceVariantAssignmentsForAgent,
+} = require("../services/priceVariantAssignmentService");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 const ahmed2 = "ahmedabdelrazzak1001010@gmail.com";
@@ -646,6 +650,7 @@ exports.signin = async (req, res) => {
 			agentCommercialModel,
 			agentOpeningWalletCredit,
 			agentWalletOpeningBalances,
+			priceVariantAssignments,
 			agentPayoutDetails,
 			hotelIdWork,
 			hotelIdsWork,
@@ -679,6 +684,7 @@ exports.signin = async (req, res) => {
 				agentCommercialModel,
 				agentOpeningWalletCredit,
 				agentWalletOpeningBalances,
+				priceVariantAssignments,
 				agentPayoutDetails,
 				hotelIdWork,
 				hotelIdsWork,
@@ -739,6 +745,7 @@ exports.propertySignup = async (req, res) => {
 			agentCommercialModel,
 			agentOpeningWalletCredit,
 			agentWalletOpeningBalances,
+			priceVariantAssignments,
 			applicationNotes,
 			invitationCode,
 			invitationToken,
@@ -956,6 +963,16 @@ exports.propertySignup = async (req, res) => {
 				isPublicAgentApplication && invitedCommercialModel !== "commission_only"
 					? nonNegativeMoney(applicantOpeningWalletCredit)
 					: 0;
+			const invitedPriceVariantAssignments = isPublicAgentApplication
+				? await normalizePriceVariantAssignments({
+						assignments:
+							signupInvitation?.priceVariantAssignments ||
+							priceVariantAssignments ||
+							[],
+						hotelIds: selectedHotelIdsForUser,
+						actor: signupInvitation?.createdBy || {},
+				  })
+				: [];
 
 			const applicant = new User({
 				name: applicantName,
@@ -981,6 +998,7 @@ exports.propertySignup = async (req, res) => {
 							openingWalletCredit
 					  )
 					: [],
+				priceVariantAssignments: invitedPriceVariantAssignments,
 				hotelName: primaryHotel.hotelName || "",
 				hotelAddress: primaryHotel.hotelAddress || "",
 				hotelCountry: primaryHotel.hotelCountry || "",
@@ -1020,6 +1038,14 @@ exports.propertySignup = async (req, res) => {
 				};
 			}
 			await applicant.save();
+			if (isPublicAgentApplication && invitedPriceVariantAssignments.length) {
+				await syncPriceVariantAssignmentsForAgent({
+					agent: applicant,
+					assignments: invitedPriceVariantAssignments,
+					previousAssignments: [],
+					actor: signupInvitation?.createdBy || {},
+				});
+			}
 
 			await Promise.all(
 				hotels.map((hotel) =>
@@ -1295,6 +1321,7 @@ exports.createHotelStaffUser = async (req, res) => {
 			agentCommercialModel,
 			agentOpeningWalletCredit,
 			agentWalletOpeningBalances,
+			priceVariantAssignments,
 		} = req.body;
 
 		const cleanPhoneNumber = (rawPhone) => {
@@ -1526,6 +1553,13 @@ exports.createHotelStaffUser = async (req, res) => {
 			: false;
 		const pendingAgentApproval = isAgentOnlyAccount && !creatorCanApproveAgent;
 		const agentApprovalActor = buildAgentApprovalActor(creator);
+		const normalizedPriceVariantAssignments = isAgentOnlyAccount
+			? await normalizePriceVariantAssignments({
+					assignments: priceVariantAssignments,
+					hotelIds: uniqueHotelIds,
+					actor: creator,
+			  })
+			: [];
 
 		const staffUser = new User({
 			name,
@@ -1548,6 +1582,7 @@ exports.createHotelStaffUser = async (req, res) => {
 				uniqueHotelIds,
 				agentOpeningWalletCredit
 			),
+			priceVariantAssignments: normalizedPriceVariantAssignments,
 			hotelName: primaryHotel.hotelName || "",
 			hotelAddress: primaryHotel.hotelAddress || "",
 			hotelCountry: primaryHotel.hotelCountry || "",
@@ -1588,6 +1623,14 @@ exports.createHotelStaffUser = async (req, res) => {
 		});
 
 		await staffUser.save();
+		if (isAgentOnlyAccount && normalizedPriceVariantAssignments.length) {
+			await syncPriceVariantAssignmentsForAgent({
+				agent: staffUser,
+				assignments: normalizedPriceVariantAssignments,
+				previousAssignments: [],
+				actor: creator,
+			});
+		}
 		await trackAccountCreation({
 			req,
 			actor: creator,

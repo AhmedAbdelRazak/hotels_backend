@@ -269,6 +269,58 @@ const roomCountForHotel = (body = {}, hotelId = "", fallback = 1) => {
 	);
 };
 
+const pricingEntryForHotel = (body = {}, hotelId = "") => {
+	const roomInput = body.room || {};
+	const priceMap =
+		body.basePricesByHotelId ||
+		body.hotelBasePrices ||
+		body.pricesByHotelId ||
+		body.basePriceByHotelId ||
+		roomInput.basePricesByHotelId ||
+		roomInput.hotelBasePrices ||
+		roomInput.pricesByHotelId ||
+		roomInput.basePriceByHotelId ||
+		{};
+	return priceMap[hotelId] ?? priceMap[String(hotelId)];
+};
+
+const roomPricingForHotel = (
+	body = {},
+	hotelId = "",
+	fallbackBasePrice = 0,
+	fallbackDefaultCost = fallbackBasePrice
+) => {
+	const roomInput = body.room || {};
+	const rawEntry = pricingEntryForHotel(body, hotelId);
+	const entry =
+		rawEntry && typeof rawEntry === "object" && !Array.isArray(rawEntry)
+			? rawEntry
+			: {};
+	const rawBasePrice =
+		entry?.price?.basePrice ??
+		entry.price ??
+		entry.basePrice ??
+		rawEntry ??
+		roomInput.basePrice ??
+		roomInput?.price?.basePrice ??
+		body.basePrice;
+	const basePrice = toMoneyNumber(rawBasePrice, fallbackBasePrice);
+	const defaultCost = toMoneyNumber(
+		entry.defaultCost ??
+			entry.rootPrice ??
+			entry.cost ??
+			roomInput.defaultCost ??
+			roomInput.rootPrice ??
+			body.defaultCost ??
+			body.rootPrice,
+		basePrice || fallbackDefaultCost || fallbackBasePrice
+	);
+	return {
+		basePrice,
+		defaultCost: defaultCost || basePrice,
+	};
+};
+
 const findRoomDuplicate = (rooms = [], candidate = {}, ignoreRoomId = "") => {
 	const roomType = normalizeRoomIdentity(candidate.roomType);
 	const englishName = normalizeRoomIdentity(candidate.displayName);
@@ -301,19 +353,31 @@ const buildRoomFieldsFromBody = async (body = {}, existingRoom = {}) => {
 			existing.displayName_OtherLanguage,
 		180
 	);
-	const rawDescription = compactRoomText(
-		roomInput.descriptionInput ||
-			roomInput.description ||
-			roomInput.description_OtherLanguage ||
-			existing.description ||
-			existing.description_OtherLanguage,
-		1200
-	);
+	const shouldRegenerateDescription =
+		roomInput.regenerateDescription === true ||
+		roomInput.regenerateDescription === "true" ||
+		body.regenerateDescription === true ||
+		body.regenerateDescription === "true";
+	const rawDescription = shouldRegenerateDescription
+		? ""
+		: compactRoomText(
+				roomInput.descriptionInput ||
+					roomInput.description ||
+					roomInput.description_OtherLanguage ||
+					existing.description ||
+					existing.description_OtherLanguage,
+				1200
+		  );
 	const orchestrated = await orchestrateRoomText({
 		name: rawName,
 		description: rawDescription,
 		roomType,
 		language: body.language || roomInput.language || "English",
+		amenities: normalizeRoomArray(roomInput.amenities ?? existing.amenities),
+		views: normalizeRoomArray(roomInput.views ?? existing.views),
+		extraAmenities: normalizeRoomArray(
+			roomInput.extraAmenities ?? existing.extraAmenities
+		),
 	});
 	const basePrice = toMoneyNumber(
 		roomInput.basePrice ?? roomInput?.price?.basePrice,
@@ -484,29 +548,6 @@ const mergeAgentCalendarRows = (
 		...nextRows,
 	]);
 
-const applyRoomFallbackPricing = (room = {}, fallbackPlan = null) => {
-	if (
-		!room ||
-		!fallbackPlan?.ok ||
-		fallbackPlan.blocked ||
-		!(Number(fallbackPlan.sellingPrice) > 0)
-	) {
-		return false;
-	}
-	const existingPrice =
-		room.price && typeof room.price === "object" && !Array.isArray(room.price)
-			? room.price.toObject
-				? room.price.toObject()
-				: { ...room.price }
-			: {};
-	room.price = {
-		...existingPrice,
-		basePrice: fallbackPlan.sellingPrice,
-	};
-	room.defaultCost = fallbackPlan.rootPrice;
-	return true;
-};
-
 exports.adminGlobalHotelSettingsOverview = async (_req, res) => {
 	try {
 		const hotels = await allHotelsQuery();
@@ -627,17 +668,48 @@ exports.saveAdminGlobalRoomManagerRoom = async (req, res) => {
 				})),
 			});
 		}
+		const hotelPricingRows = orderedHotels.map((hotel) => {
+			const hotelId = normalizeId(hotel._id);
+			return {
+				hotel,
+				hotelId,
+				pricing: roomPricingForHotel(
+					req.body,
+					hotelId,
+					fields.price?.basePrice || 0,
+					fields.defaultCost || fields.price?.basePrice || 0
+				),
+			};
+		});
+		const missingBasePriceHotels = hotelPricingRows.filter(
+			(row) => !(Number(row.pricing?.basePrice) > 0)
+		);
+		if (missingBasePriceHotels.length) {
+			return res.status(400).json({
+				error: "Base price is required for every selected hotel",
+				hotels: missingBasePriceHotels.map(({ hotel }) => ({
+					_id: normalizeId(hotel._id),
+					hotelName: hotel.hotelName || "Hotel",
+				})),
+			});
+		}
 		const { ai, ...roomFields } = fields;
 		const savedHotels = [];
 		const savedRooms = [];
-		for (const hotel of orderedHotels) {
+		for (const { hotel, hotelId, pricing } of hotelPricingRows) {
 			const existingRooms = Array.isArray(hotel.roomCountDetails)
 				? hotel.roomCountDetails
 				: [];
-			const hotelId = normalizeId(hotel._id);
 			const nextRoom = {
 				...roomFields,
 				count: roomCountForHotel(req.body, hotelId, fields.count || 1),
+				price: {
+					...(roomFields.price && typeof roomFields.price === "object"
+						? roomFields.price
+						: {}),
+					basePrice: pricing.basePrice,
+				},
+				defaultCost: pricing.defaultCost || pricing.basePrice,
 				pricedExtras: [],
 				pricingRate: [],
 				agentInventory: [],
@@ -782,36 +854,6 @@ exports.saveAdminGlobalCalendarPricing = async (req, res) => {
 			  });
 		if (!sizeCheck.ok) return res.status(400).json({ error: sizeCheck.error });
 
-		let fallbackPlan = null;
-		if (scope === "general") {
-			const fallbackDate = explicitRowMode
-				? explicitRows[0]?.calendarDate
-				: plan?.dates?.[0];
-			fallbackPlan = buildPricingPlan({
-				scope,
-				dates: fallbackDate ? [fallbackDate] : [],
-				sellingPrice: body.sellingPrice ?? body.price,
-				commissionPercent: body.commissionPercent ?? body.commission,
-				status: body.status,
-				calendarType: body.calendarType,
-			});
-			if ((!fallbackPlan.ok || fallbackPlan.blocked) && explicitRowMode) {
-				const firstOpenRow = explicitRows.find(
-					(row) => row.status !== "blocked" && Number(row.sellingPrice) > 0
-				);
-				if (firstOpenRow) {
-					fallbackPlan = buildPricingPlan({
-						scope,
-						dates: [firstOpenRow.calendarDate],
-						sellingPrice: firstOpenRow.sellingPrice,
-						commissionPercent: firstOpenRow.commissionPercent,
-						status: "open",
-						calendarType: body.calendarType,
-					});
-				}
-			}
-		}
-
 		const hotelDocs = await HotelDetails.find({ _id: { $in: hotelIds } })
 			.populate("belongsTo", "_id name email phone")
 			.exec();
@@ -849,7 +891,6 @@ exports.saveAdminGlobalCalendarPricing = async (req, res) => {
 		const agentSet = new Set(agentIds.map(normalizeId));
 		const agentMap = new Map(agentDocs.map((agent) => [normalizeId(agent._id), agent]));
 		let updatedRows = 0;
-		let fallbackPricingUpdatedRooms = 0;
 		const updatedHotels = [];
 		const calendarType = body.calendarType === "gregorian" ? "gregorian" : "hijri";
 
@@ -867,9 +908,6 @@ exports.saveAdminGlobalCalendarPricing = async (req, res) => {
 					(room) => normalizeId(room?._id) === selection.roomId
 				);
 				const room = roomToPlain(rooms[roomIndex]);
-				if (scope === "general" && applyRoomFallbackPricing(rooms[roomIndex], fallbackPlan)) {
-					fallbackPricingUpdatedRooms += 1;
-				}
 				const roomRows = explicitRowMode
 					? explicitRows.filter(
 							(row) =>
@@ -965,9 +1003,6 @@ exports.saveAdminGlobalCalendarPricing = async (req, res) => {
 				rootPrice: plan?.rootPrice ?? null,
 				commissionPercent: plan?.commissionPercent ?? null,
 				blocked: plan?.blocked ?? null,
-				fallbackSellingPrice: fallbackPlan?.ok ? fallbackPlan.sellingPrice : null,
-				fallbackRootPrice: fallbackPlan?.ok ? fallbackPlan.rootPrice : null,
-				fallbackPricingUpdatedRooms,
 			},
 		});
 	} catch (error) {

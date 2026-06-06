@@ -1504,6 +1504,8 @@ const getReservationPricingErrorArabic = (error = {}) => {
 			return `${roomLabel} محجوبة في تقويم الفندق${dateLabel}. لا يمكن للوكيل الحجز على تاريخ محجوب.`;
 		case "calendar_price_missing":
 			return `لا يوجد سعر صالح للغرفة ${roomLabel}${dateLabel}. يرجى مراجعة تقويم الأسعار أو سعر الغرفة الأساسي.`;
+		case "agent_assigned_pricing_missing":
+			return `لا يوجد سعر مخصص للوكيل للغرفة ${roomLabel}${dateLabel}. يرجى مراجعة تسعير الوكلاء.`;
 		case "room_pricing_not_found":
 			return "تعذر حساب سعر الغرفة المحددة. يرجى إعادة اختيار نوع الغرفة قبل الحفظ.";
 		case "invalid_stay_dates":
@@ -3470,6 +3472,9 @@ exports.create = async (req, res) => {
 			...reservationActorFields,
 		};
 		const reservationWarnings = [];
+		let agentSettlementModel = "";
+		let agentWalletRequired = false;
+		let agentCollectionModel = "";
 		if (isAgentOrderTakingCreation) {
 			const requestedAgentSettlementModel =
 				reservationPayload.agentSettlementModel ||
@@ -3478,43 +3483,17 @@ exports.create = async (req, res) => {
 				reservationPayload?.financial_cycle?.collectionModel ||
 				reservationPayload.collectionModel ||
 				"";
-			const agentSettlementModel = agentSettlementModelForReservation(
+			agentSettlementModel = agentSettlementModelForReservation(
 				createActor,
 				requestedAgentSettlementModel
 			);
-			const walletRequired = agentSettlementModel === "agent_wallet_commission";
-			const collectionModel =
+			agentWalletRequired =
+				agentSettlementModel === "agent_wallet_commission";
+			agentCollectionModel =
 				collectionModelFromFinanceSettlement(agentSettlementModel);
-			const hasAgentCommissionProposal =
-				Object.prototype.hasOwnProperty.call(reservationPayload, "commission") ||
-				Object.prototype.hasOwnProperty.call(
-					reservationPayload?.financial_cycle || {},
-					"commissionAmount"
-				) ||
-				Object.prototype.hasOwnProperty.call(
-					reservationPayload?.commissionData || {},
-					"amount"
-				);
-			const proposedCommissionRate = n2(
-				reservationPayload?.commissionData?.rate ??
-					reservationPayload?.financial_cycle?.commissionValue ??
-					8
-			);
-			const proposedCommissionAmount = n2(
-				hasAgentCommissionProposal
-					? reservationPayload.commission ??
-							reservationPayload?.financial_cycle?.commissionAmount ??
-							reservationPayload?.commissionData?.amount ??
-							0
-					: (Number(reservationPayload.total_amount || 0) *
-							proposedCommissionRate) /
-						100
-			);
 			reservationPayload.reservation_status = "Pending Confirmation";
 			reservationPayload.state = "Pending Confirmation";
-			// Agent/order-taker reservations may propose commission, but it stays
-			// unassigned until finance explicitly reviews and approves it.
-			reservationPayload.commission = proposedCommissionAmount;
+			reservationPayload.commission = 0;
 			reservationPayload.commissionPaid = false;
 			reservationPayload.commissionStatus = "";
 			reservationPayload.commissionData = {
@@ -3523,8 +3502,8 @@ exports.create = async (req, res) => {
 					? reservationPayload.commissionData
 					: {}),
 				assigned: false,
-				amount: proposedCommissionAmount,
-				rate: proposedCommissionRate,
+				amount: 0,
+				rate: 0,
 				status: "pending hotel review",
 				source: "agent_reservation",
 				proposedByAgent: true,
@@ -3536,14 +3515,14 @@ exports.create = async (req, res) => {
 					: {}),
 				settlementModel: agentSettlementModel,
 				agentSettlementModel,
-				collectionModel,
-				walletRequired,
+				collectionModel: agentCollectionModel,
+				walletRequired: agentWalletRequired,
 				agentCommercialModel: normalizeAgentCommercialModel(
 					createActor.agentCommercialModel
 				),
 				commissionType: "percentage",
-				commissionAmount: proposedCommissionAmount,
-				commissionValue: proposedCommissionRate,
+				commissionAmount: 0,
+				commissionValue: 0,
 				commissionAssigned: false,
 				commissionReviewStatus: "pending",
 				proposedByAgent: true,
@@ -3579,9 +3558,63 @@ exports.create = async (req, res) => {
 		try {
 			const pricingResult = await normalizeReservationCreationPricing(
 				reservationPayload,
-				{ allowBlockedCalendar: !isAgentOrderTakingCreation }
+				{
+					allowBlockedCalendar: !isAgentOrderTakingCreation,
+					agentId: isAgentOrderTakingCreation ? createActor._id : "",
+					requireAgentAssignedPricing: isAgentOrderTakingCreation,
+				}
 			);
 			Object.assign(reservationPayload, pricingResult.reservation);
+			if (isAgentOrderTakingCreation) {
+				const clientTotal = n2(
+					reservationPayload?.adminPricing?.clientTotal ||
+						reservationPayload.total_amount
+				);
+				const rootTotal = n2(
+					reservationPayload?.adminPricing?.rootTotal ||
+						reservationPayload.sub_total
+				);
+				const derivedCommissionAmount = n2(
+					Math.max(clientTotal - rootTotal, 0)
+				);
+				const derivedCommissionRate =
+					clientTotal > 0
+						? n2((derivedCommissionAmount / clientTotal) * 100)
+						: 0;
+				reservationPayload.commission = derivedCommissionAmount;
+				reservationPayload.commissionData = {
+					...(reservationPayload.commissionData &&
+					typeof reservationPayload.commissionData === "object"
+						? reservationPayload.commissionData
+						: {}),
+					assigned: false,
+					amount: derivedCommissionAmount,
+					rate: derivedCommissionRate,
+					status: "pending hotel review",
+					source: "assigned_agent_pricing",
+					proposedByAgent: true,
+				};
+				reservationPayload.financial_cycle = {
+					...(reservationPayload.financial_cycle &&
+					typeof reservationPayload.financial_cycle === "object"
+						? reservationPayload.financial_cycle
+						: {}),
+					settlementModel: agentSettlementModel,
+					agentSettlementModel,
+					collectionModel: agentCollectionModel,
+					walletRequired: agentWalletRequired,
+					agentCommercialModel: normalizeAgentCommercialModel(
+						createActor.agentCommercialModel
+					),
+					commissionType: "assigned_pricing",
+					commissionAmount: derivedCommissionAmount,
+					commissionValue: derivedCommissionRate,
+					commissionAssigned: false,
+					commissionReviewStatus: "pending",
+					proposedByAgent: true,
+					status: "open",
+				};
+			}
 			applyAdminPricingVisibilityForActor(
 				reservationPayload,
 				createActor,

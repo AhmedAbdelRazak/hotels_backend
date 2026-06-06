@@ -31,6 +31,8 @@ const {
 	saveOverallRoomManagerRoom,
 	overallCalendarPricingOptions,
 	saveOverallCalendarPricing,
+	overallPriceVariantOptions,
+	saveOverallPriceVariant,
 } = require("../controllers/overall_dashboard");
 
 router.get(
@@ -185,6 +187,20 @@ router.post(
 	requireSignin,
 	isAuth,
 	saveOverallRoomManagerRoom
+);
+
+router.get(
+	"/overall-dashboard/settings-price-variants/:userId",
+	requireSignin,
+	isAuth,
+	overallPriceVariantOptions
+);
+
+router.post(
+	"/overall-dashboard/settings-price-variants/:userId",
+	requireSignin,
+	isAuth,
+	saveOverallPriceVariant
 );
 
 router.get(

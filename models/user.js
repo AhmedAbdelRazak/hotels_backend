@@ -102,6 +102,42 @@ const userSchema = new mongoose.Schema(
 			default: [],
 		},
 
+		priceVariantAssignments: {
+			type: [
+				{
+					priceVariantDataId: {
+						type: ObjectId,
+						ref: "PriceVariant",
+					},
+					priceVariantItemId: {
+						type: ObjectId,
+					},
+					pricingName: {
+						type: String,
+						default: "",
+					},
+					pricingNameOtherLanguage: {
+						type: String,
+						default: "",
+					},
+					hotelIds: {
+						type: [{ type: ObjectId, ref: "HotelDetails" }],
+						default: [],
+					},
+					assignedAt: {
+						type: Date,
+						default: Date.now,
+					},
+					assignedBy: {
+						type: ObjectId,
+						ref: "User",
+						default: null,
+					},
+				},
+			],
+			default: [],
+		},
+
 		agentPayoutDetails: {
 			type: Object,
 			default: {

@@ -12,6 +12,7 @@ const Rooms = require("../models/rooms");
 const HouseKeeping = require("../models/housekeeping");
 const AgentWallet = require("../models/agent_wallet");
 const SignupInvitation = require("../models/signup_invitation");
+const PriceVariant = require("../models/price_variant");
 const {
 	buildHotelInventoryCalendarPayload,
 	buildHotelInventoryDayPayload,
@@ -32,6 +33,12 @@ const {
 const {
 	orchestrateRoomText,
 } = require("../services/overallRoomTextOrchestrator");
+const {
+	normalizePriceVariantAssignments,
+} = require("../services/priceVariantAssignmentService");
+const {
+	translatePriceVariantName,
+} = require("../services/priceVariantNameTranslator");
 const {
 	buildAgentRow,
 	buildGeneralRow,
@@ -375,6 +382,24 @@ const sanitizeAccountForOverallResponse = (user = {}, allowedHotelIds = []) => {
 
 	plain.hotelsToSupport = keepAllowedHotels(plain.hotelsToSupport);
 	plain.hotelIdsOwner = keepAllowedHotels(plain.hotelIdsOwner);
+	plain.priceVariantAssignments = (
+		Array.isArray(plain.priceVariantAssignments) ? plain.priceVariantAssignments : []
+	)
+		.map((assignment) => ({
+			priceVariantDataId: normalizeId(assignment.priceVariantDataId),
+			priceVariantItemId: normalizeId(assignment.priceVariantItemId),
+			pricingName: assignment.pricingName || "",
+			pricingNameOtherLanguage: assignment.pricingNameOtherLanguage || "",
+			hotelIds: keepAllowedHotels(assignment.hotelIds),
+			assignedAt: assignment.assignedAt,
+			assignedBy: normalizeId(assignment.assignedBy),
+		}))
+		.filter(
+			(assignment) =>
+				assignment.priceVariantDataId &&
+				assignment.priceVariantItemId &&
+				assignment.hotelIds.length
+		);
 	return plain;
 };
 
@@ -4263,7 +4288,7 @@ exports.overallAccounts = async (req, res) => {
 			User.countDocuments(query),
 			User.find(query)
 				.select(
-					"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails agentApproval applicationReview role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accessTo createdAt updatedAt"
+					"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances priceVariantAssignments agentPayoutDetails agentApproval applicationReview role roleDescription roles roleDescriptions activeUser hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accessTo createdAt updatedAt"
 				)
 				.populate("hotelsToSupport", "_id hotelName belongsTo")
 				.populate("hotelIdsOwner", "_id hotelName belongsTo")
@@ -4355,6 +4380,20 @@ exports.createSignupInvitation = async (req, res) => {
 							payload.requestedRoleDescription ||
 							payload.jobRole
 				  );
+		let priceVariantAssignments = [];
+		if (accountType === "agent") {
+			try {
+				priceVariantAssignments = await normalizePriceVariantAssignments({
+					assignments: payload.priceVariantAssignments,
+					hotelIds,
+					actor: context.actor,
+				});
+			} catch (error) {
+				return res.status(400).json({
+					error: error.message || "Invalid price variant assignment",
+				});
+			}
+		}
 		const invitationPayload = {
 			purpose: SIGNUP_INVITATION_PURPOSE,
 			accountType,
@@ -4373,6 +4412,7 @@ exports.createSignupInvitation = async (req, res) => {
 				.trim()
 				.toLowerCase(),
 			agentOpeningWalletCredit: Number(payload.agentOpeningWalletCredit || 0) || 0,
+			priceVariantAssignments,
 			applicationNotes: String(payload.applicationNotes || "").trim().slice(0, 1000),
 			createdBy: {
 				_id: normalizeId(context.actor._id),
@@ -4852,6 +4892,58 @@ const roomCountForHotel = (body = {}, hotelId = "", fallback = 1) => {
 	);
 };
 
+const pricingEntryForHotel = (body = {}, hotelId = "") => {
+	const roomInput = body.room || {};
+	const priceMap =
+		body.basePricesByHotelId ||
+		body.hotelBasePrices ||
+		body.pricesByHotelId ||
+		body.basePriceByHotelId ||
+		roomInput.basePricesByHotelId ||
+		roomInput.hotelBasePrices ||
+		roomInput.pricesByHotelId ||
+		roomInput.basePriceByHotelId ||
+		{};
+	return priceMap[hotelId] ?? priceMap[String(hotelId)];
+};
+
+const roomPricingForHotel = (
+	body = {},
+	hotelId = "",
+	fallbackBasePrice = 0,
+	fallbackDefaultCost = fallbackBasePrice
+) => {
+	const roomInput = body.room || {};
+	const rawEntry = pricingEntryForHotel(body, hotelId);
+	const entry =
+		rawEntry && typeof rawEntry === "object" && !Array.isArray(rawEntry)
+			? rawEntry
+			: {};
+	const rawBasePrice =
+		entry?.price?.basePrice ??
+		entry.price ??
+		entry.basePrice ??
+		rawEntry ??
+		roomInput.basePrice ??
+		roomInput?.price?.basePrice ??
+		body.basePrice;
+	const basePrice = toMoneyNumber(rawBasePrice, fallbackBasePrice);
+	const defaultCost = toMoneyNumber(
+		entry.defaultCost ??
+			entry.rootPrice ??
+			entry.cost ??
+			roomInput.defaultCost ??
+			roomInput.rootPrice ??
+			body.defaultCost ??
+			body.rootPrice,
+		basePrice || fallbackDefaultCost || fallbackBasePrice
+	);
+	return {
+		basePrice,
+		defaultCost: defaultCost || basePrice,
+	};
+};
+
 const findRoomDuplicate = (rooms = [], candidate = {}, ignoreRoomId = "") => {
 	const roomType = normalizeRoomIdentity(candidate.roomType);
 	const englishName = normalizeRoomIdentity(candidate.displayName);
@@ -4884,19 +4976,31 @@ const buildRoomFieldsFromBody = async (body = {}, existingRoom = {}) => {
 			existing.displayName_OtherLanguage,
 		180
 	);
-	const rawDescription = compactRoomText(
-		roomInput.descriptionInput ||
-			roomInput.description ||
-			roomInput.description_OtherLanguage ||
-			existing.description ||
-			existing.description_OtherLanguage,
-		1200
-	);
+	const shouldRegenerateDescription =
+		roomInput.regenerateDescription === true ||
+		roomInput.regenerateDescription === "true" ||
+		body.regenerateDescription === true ||
+		body.regenerateDescription === "true";
+	const rawDescription = shouldRegenerateDescription
+		? ""
+		: compactRoomText(
+				roomInput.descriptionInput ||
+					roomInput.description ||
+					roomInput.description_OtherLanguage ||
+					existing.description ||
+					existing.description_OtherLanguage,
+				1200
+		  );
 	const orchestrated = await orchestrateRoomText({
 		name: rawName,
 		description: rawDescription,
 		roomType,
 		language: body.language || roomInput.language || "English",
+		amenities: normalizeRoomArray(roomInput.amenities ?? existing.amenities),
+		views: normalizeRoomArray(roomInput.views ?? existing.views),
+		extraAmenities: normalizeRoomArray(
+			roomInput.extraAmenities ?? existing.extraAmenities
+		),
 	});
 	const basePrice = toMoneyNumber(
 		roomInput.basePrice ?? roomInput?.price?.basePrice,
@@ -5067,17 +5171,48 @@ exports.saveOverallRoomManagerRoom = async (req, res) => {
 				})),
 			});
 		}
+		const hotelPricingRows = orderedHotels.map((hotel) => {
+			const hotelId = normalizeId(hotel._id);
+			return {
+				hotel,
+				hotelId,
+				pricing: roomPricingForHotel(
+					req.body,
+					hotelId,
+					fields.price?.basePrice || 0,
+					fields.defaultCost || fields.price?.basePrice || 0
+				),
+			};
+		});
+		const missingBasePriceHotels = hotelPricingRows.filter(
+			(row) => !(Number(row.pricing?.basePrice) > 0)
+		);
+		if (missingBasePriceHotels.length) {
+			return res.status(400).json({
+				error: "Base price is required for every selected hotel",
+				hotels: missingBasePriceHotels.map(({ hotel }) => ({
+					_id: normalizeId(hotel._id),
+					hotelName: hotel.hotelName || "Hotel",
+				})),
+			});
+		}
 		const { ai, ...roomFields } = fields;
 		const savedHotels = [];
 		const savedRooms = [];
-		for (const hotel of orderedHotels) {
+		for (const { hotel, hotelId, pricing } of hotelPricingRows) {
 			const existingRooms = Array.isArray(hotel.roomCountDetails)
 				? hotel.roomCountDetails
 				: [];
-			const hotelId = normalizeId(hotel._id);
 			const nextRoom = {
 				...roomFields,
 				count: roomCountForHotel(req.body, hotelId, fields.count || 1),
+				price: {
+					...(roomFields.price && typeof roomFields.price === "object"
+						? roomFields.price
+						: {}),
+					basePrice: pricing.basePrice,
+				},
+				defaultCost: pricing.defaultCost || pricing.basePrice,
 				pricedExtras: [],
 				pricingRate: [],
 				agentInventory: [],
@@ -5123,6 +5258,20 @@ const serializeCalendarRoom = (room = {}) => {
 		count: Number(plain.count || 0),
 		activeRoom: plain.activeRoom !== false,
 		roomColor: plain.roomColor || "",
+		basePrice: Number(plain?.price?.basePrice || plain.basePrice || 0),
+		defaultCost: Number(plain.defaultCost || plain.rootPrice || 0),
+		pricingRate: (Array.isArray(plain.pricingRate) ? plain.pricingRate : []).map(
+			(row) => ({
+				calendarDate: toCalendarDateKey(row?.calendarDate),
+				status: row?.status === "blocked" || row?.blocked === true ? "blocked" : "open",
+				blocked: row?.blocked === true || row?.status === "blocked",
+				sellingPrice: Number(row?.sellingPrice ?? row?.price ?? 0),
+				price: Number(row?.price ?? row?.sellingPrice ?? 0),
+				rootPrice: Number(row?.rootPrice || 0),
+				commissionPercent: Number(row?.commissionPercent || 0),
+				color: row?.color || "",
+			})
+		),
 		pricingDays: Array.isArray(plain.pricingRate) ? plain.pricingRate.length : 0,
 		agentPricingDays: Array.isArray(plain.agentPricingRate)
 			? plain.agentPricingRate.length
@@ -5230,6 +5379,46 @@ const requestedCalendarRows = (body = {}) =>
 		}))
 		.filter((row) => row.hotelId && row.roomId && row.calendarDate);
 
+const requestedCalendarPriceVariantSelections = (body = {}) => {
+	const rawSelections = Array.isArray(body.priceVariantSelections)
+		? body.priceVariantSelections
+		: Array.isArray(body.priceVariantAssignments)
+		  ? body.priceVariantAssignments
+		  : [];
+	const selections = rawSelections.length
+		? rawSelections
+		: body.priceVariantDataId || body.priceVariantItemId
+		  ? [
+					{
+						priceVariantDataId: body.priceVariantDataId,
+						priceVariantItemId: body.priceVariantItemId,
+					},
+			  ]
+		  : [];
+	const byKey = new Map();
+	selections.forEach((selection) => {
+		const priceVariantDataId = normalizeId(
+			selection?.priceVariantDataId || selection?.dataId
+		);
+		const priceVariantItemId = normalizeId(
+			selection?.priceVariantItemId || selection?.itemId
+		);
+		if (!priceVariantDataId || !priceVariantItemId) return;
+		const key = `${priceVariantDataId}:${priceVariantItemId}`;
+		byKey.set(key, { priceVariantDataId, priceVariantItemId });
+	});
+	return [...byKey.values()];
+};
+
+const isAgentPriceVariantAssignmentRequest = (body = {}) => {
+	const mode = String(
+		body.assignmentMode || body.agentPricingMode || body.pricingMode || ""
+	).toLowerCase();
+	return ["price_variants", "price-variants", "variants", "variant"].includes(
+		mode
+	);
+};
+
 const sortCalendarRows = (rows = []) =>
 	[...(Array.isArray(rows) ? rows : [])].sort((left, right) =>
 		toCalendarDateKey(left?.calendarDate).localeCompare(
@@ -5244,6 +5433,71 @@ const mergeGeneralCalendarRows = (existing = [], nextRows = [], dateSet = new Se
 		),
 		...nextRows,
 	]);
+
+const normalizeCalendarPricingOperation = (body = {}) => {
+	const operation = String(
+		body.operation || body.pricingOperation || body.action || ""
+	).toLowerCase();
+	return ["add", "create", "new"].includes(operation) ? "add" : "update";
+};
+
+const findGeneralCalendarPricingDuplicates = ({
+	hotelDocs = [],
+	roomSelections = [],
+	explicitRows = [],
+	defaultDates = [],
+} = {}) => {
+	const hotelMap = new Map(
+		(Array.isArray(hotelDocs) ? hotelDocs : []).map((hotel) => [
+			normalizeId(hotel._id),
+			hotel,
+		])
+	);
+	const explicitMode = Array.isArray(explicitRows) && explicitRows.length > 0;
+	const duplicates = [];
+	(Array.isArray(roomSelections) ? roomSelections : []).forEach((selection) => {
+		const hotel = hotelMap.get(normalizeId(selection.hotelId));
+		const rooms = Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails
+			: [];
+		const room = rooms.find(
+			(item) => normalizeId(item?._id) === normalizeId(selection.roomId)
+		);
+		if (!room) return;
+		const roomPlain = roomToPlain(room);
+		const candidateDates = explicitMode
+			? explicitRows
+					.filter(
+						(row) =>
+							normalizeId(row.hotelId) === normalizeId(selection.hotelId) &&
+							normalizeId(row.roomId) === normalizeId(selection.roomId)
+					)
+					.map((row) => row.calendarDate)
+			: defaultDates;
+		if (!candidateDates.length) return;
+		const existingDateSet = new Set(
+			(Array.isArray(roomPlain.pricingRate) ? roomPlain.pricingRate : [])
+				.map((row) => toCalendarDateKey(row?.calendarDate))
+				.filter(Boolean)
+		);
+		[...new Set(candidateDates)].forEach((calendarDate) => {
+			if (!existingDateSet.has(calendarDate)) return;
+			duplicates.push({
+				hotelId: normalizeId(hotel?._id),
+				hotelName: hotel?.hotelName || "Hotel",
+				roomId: normalizeId(roomPlain._id),
+				roomType: roomPlain.roomType || "",
+				displayName:
+					roomPlain.displayName ||
+					roomPlain.displayName_OtherLanguage ||
+					roomPlain.roomType ||
+					"",
+				calendarDate,
+			});
+		});
+	});
+	return duplicates;
+};
 
 const mergeAgentCalendarRows = (
 	existing = [],
@@ -5260,27 +5514,1725 @@ const mergeAgentCalendarRows = (
 		...nextRows,
 	]);
 
-const applyRoomFallbackPricing = (room = {}, fallbackPlan = null) => {
-	if (
-		!room ||
-		!fallbackPlan?.ok ||
-		fallbackPlan.blocked ||
-		!(Number(fallbackPlan.sellingPrice) > 0)
-	) {
-		return false;
+const replaceAgentCalendarRowsForAgents = (
+	existing = [],
+	nextRows = [],
+	agentSet = new Set()
+) =>
+	sortCalendarRows([
+		...(Array.isArray(existing) ? existing : []).filter(
+			(row) => !agentSet.has(normalizeCalendarId(row?.agentId))
+		),
+		...nextRows,
+	]);
+
+const MAX_PRICE_VARIANT_ITEMS = 100;
+
+const normalizePriceVariantMonths = (values = []) =>
+	[
+		...new Set(
+			(Array.isArray(values) ? values : [values])
+				.map((value) => Number(value))
+				.filter((value) => Number.isInteger(value) && value >= 0 && value <= 11)
+		),
+	].sort((left, right) => left - right);
+
+const normalizePriceVariantItemName = (value = "") =>
+	String(value || "").trim().slice(0, 140);
+
+const requestedPriceVariantItems = (body = {}) => {
+	const rawItems = Array.isArray(body.pricingItems) ? body.pricingItems : [];
+	if (rawItems.length) return rawItems;
+	if (body.name || body.pricingName || body.sellingPrice || body.price) {
+		return [body];
 	}
-	const existingPrice =
-		room.price && typeof room.price === "object" && !Array.isArray(room.price)
-			? room.price.toObject
-				? room.price.toObject()
-				: { ...room.price }
-			: {};
-	room.price = {
-		...existingPrice,
-		basePrice: fallbackPlan.sellingPrice,
+	return [];
+};
+
+const buildPriceVariantItems = ({ body = {}, dates = [], calendarType = "hijri" }) => {
+	const rawItems = requestedPriceVariantItems(body);
+	if (!rawItems.length) {
+		return { ok: false, error: "Please add at least one pricing item" };
+	}
+	if (rawItems.length > MAX_PRICE_VARIANT_ITEMS) {
+		return {
+			ok: false,
+			error: `Please save ${MAX_PRICE_VARIANT_ITEMS} pricing items or fewer at once`,
+		};
+	}
+
+	const items = [];
+	for (let index = 0; index < rawItems.length; index += 1) {
+		const item = rawItems[index] || {};
+		const name = normalizePriceVariantItemName(
+			item.name || item.pricingName || item.label
+		);
+		if (!name) {
+			return {
+				ok: false,
+				error: `Pricing name is required for price ${index + 1}`,
+			};
+		}
+		const status = ["blocked", "closed", "restricted"].includes(
+			String(item.status || body.status || "open").toLowerCase()
+		)
+			? "blocked"
+			: "open";
+		const plan = buildPricingPlan({
+			scope: "price-variants",
+			dates,
+			sellingPrice: item.sellingPrice ?? item.price,
+			commissionPercent: item.commissionPercent ?? item.commission,
+			status,
+			calendarType,
+			source: "price-variants",
+		});
+		if (!plan.ok) {
+			return {
+				ok: false,
+				error: `${name}: ${plan.error}`,
+			};
+		}
+		items.push({
+			...(ObjectId.isValid(normalizeId(item._id || item.id))
+				? { _id: ObjectId(normalizeId(item._id || item.id)) }
+				: {}),
+			name,
+			nameOtherLanguage: normalizePriceVariantItemName(
+				item.nameOtherLanguage || item.nameAr || item.arabicName
+			),
+			status,
+			sellingPrice: plan.sellingPrice,
+			commissionPercent: plan.commissionPercent,
+			rootPrice: plan.rootPrice,
+			color: plan.color,
+			sortOrder: Number.isFinite(Number(item.sortOrder))
+				? Number(item.sortOrder)
+				: index,
+		});
+	}
+	return { ok: true, items };
+};
+
+const roomPricingInputForRoom = (item = {}, room = {}) => {
+	const roomPrices = Array.isArray(item.roomPrices) ? item.roomPrices : [];
+	const roomId = normalizeId(room.roomId);
+	const hotelId = normalizeId(room.hotelId);
+	return (
+		roomPrices.find((entry) => normalizeId(entry?.roomId) === roomId) ||
+		roomPrices.find((entry) => normalizeId(entry?.roomKey) === `${hotelId}::${roomId}`) ||
+		roomPrices.find((entry) => normalizeId(entry?.key) === `${hotelId}::${roomId}`) ||
+		null
+	);
+};
+
+const normalizePriceVariantPeriods = (body = {}, dates = []) => {
+	const rawPeriods = Array.isArray(body.periods) ? body.periods : [];
+	const periods = rawPeriods
+		.map((period, index) => {
+			const periodKey = String(
+				period?.periodKey || period?.key || `period-${index + 1}`
+			).trim();
+			const startDate = toCalendarDateKey(period?.startDate);
+			const endDate = toCalendarDateKey(period?.endDate);
+			if (!periodKey || !startDate || !endDate || endDate < startDate) {
+				return null;
+			}
+			return {
+				periodKey,
+				label: String(period?.label || periodKey).trim(),
+				calendarType:
+					period?.calendarType === "gregorian" ? "gregorian" : "hijri",
+				periodMode: period?.periodMode === "custom" ? "custom" : "months",
+				year: Number.isFinite(Number(period?.year)) ? Number(period.year) : null,
+				month: Number.isInteger(Number(period?.month))
+					? Number(period.month)
+					: null,
+				startDate,
+				endDate,
+			};
+		})
+		.filter(Boolean);
+	if (periods.length) return periods;
+	const sortedDates = [...new Set((Array.isArray(dates) ? dates : []).filter(Boolean))].sort();
+	if (!sortedDates.length) return [];
+	return [
+		{
+			periodKey: "default",
+			label: "Default",
+			calendarType: body.calendarType === "gregorian" ? "gregorian" : "hijri",
+			periodMode: body.periodMode === "custom" ? "custom" : "months",
+			year: null,
+			month: null,
+			startDate: sortedDates[0],
+			endDate: sortedDates[sortedDates.length - 1],
+		},
+	];
+};
+
+const periodPricingInputForPeriod = (roomInput = {}, period = {}) => {
+	const periodPrices = Array.isArray(roomInput.periodPrices)
+		? roomInput.periodPrices
+		: [];
+	return (
+		periodPrices.find(
+			(entry) => String(entry?.periodKey || "").trim() === period.periodKey
+		) || null
+	);
+};
+
+const normalizePricingBasis = (item = {}, index = 0, baseItemId = null) => {
+	const source = item.pricingBasis && typeof item.pricingBasis === "object"
+		? item.pricingBasis
+		: {};
+	const mode = index === 0 ? "manual" : source.mode === "manual" ? "manual" : "derived";
+	const direction =
+		source.direction === "increase" ? "increase" : "decrease";
+	const adjustmentType =
+		source.adjustmentType === "percentage" ? "percentage" : "money";
+	const amount = Number(source.amount || 0);
+	return {
+		mode,
+		basePriceVariantItemId: mode === "derived" ? baseItemId : null,
+		direction,
+		adjustmentType,
+		amount: Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : 0,
 	};
-	room.defaultCost = fallbackPlan.rootPrice;
-	return true;
+};
+
+const isPricingVariantRequest = (body = {}) =>
+	body.variantMode === true ||
+	body.dataType === "price_variant" ||
+	body.mode === "price_variants" ||
+	body.basePriceSource === "calendar_main_price";
+
+const roundPricingNumber = (value = 0, fallback = 0) => {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Number(parsed.toFixed(2));
+};
+
+const normalizeVariantPricingBasis = (item = {}) => {
+	const source = item.pricingBasis && typeof item.pricingBasis === "object"
+		? item.pricingBasis
+		: item;
+	const direction =
+		source.direction === "decrease" ? "decrease" : "increase";
+	const adjustmentType =
+		source.adjustmentType === "money" ? "money" : "percentage";
+	const amount = Number(source.amount ?? source.adjustmentValue ?? 0);
+	return {
+		mode: "calendar_base",
+		basePriceVariantItemId: null,
+		direction,
+		adjustmentType,
+		amount: Number.isFinite(amount) && amount > 0 ? Number(amount.toFixed(2)) : 0,
+	};
+};
+
+const applyDerivedPricingAdjustment = (basePrice = 0, basis = {}) => {
+	const amount = Number(basis.amount || 0);
+	const sign = basis.direction === "decrease" ? -1 : 1;
+	const nextPrice =
+		basis.adjustmentType === "percentage"
+			? Number(basePrice || 0) * (1 + sign * (amount / 100))
+			: Number(basePrice || 0) + sign * amount;
+	return Number(Math.max(nextPrice, 0).toFixed(2));
+};
+
+const PRICING_VARIANT_DAY_MONTHS = 18;
+
+const addUtcMonths = (date = new Date(), monthCount = 0) => {
+	const next = new Date(date.getTime());
+	next.setUTCMonth(next.getUTCMonth() + monthCount);
+	return next;
+};
+
+const nextPricingVariantDateKeys = (
+	monthCount = PRICING_VARIANT_DAY_MONTHS
+) => {
+	const start = new Date();
+	start.setUTCHours(0, 0, 0, 0);
+	const end = addUtcMonths(start, monthCount);
+	end.setUTCDate(end.getUTCDate() - 1);
+	const dates = [];
+	const cursor = new Date(start.getTime());
+	while (cursor <= end) {
+		dates.push(cursor.toISOString().slice(0, 10));
+		cursor.setUTCDate(cursor.getUTCDate() + 1);
+	}
+	return dates;
+};
+
+const variantOverrideRowsFromBody = (body = {}) =>
+	(Array.isArray(body.variantPreviewRows)
+		? body.variantPreviewRows
+		: Array.isArray(body.previewRows)
+		  ? body.previewRows
+		  : []
+	)
+		.map((row = {}) => {
+			const calendarDate = toCalendarDateKey(
+				row.calendarDate || row.date || row.pricingDate
+			);
+			const hotelId = normalizeId(row.hotelId);
+			const roomId = normalizeId(row.roomId);
+			if (!calendarDate || !hotelId || !roomId) return null;
+			const status = ["blocked", "closed", "restricted"].includes(
+				String(row.status || (row.blocked ? "blocked" : "open")).toLowerCase()
+			)
+				? "blocked"
+				: "open";
+			return {
+				priceVariantItemId: normalizeId(row.priceVariantItemId),
+				pricingIndex: Number.isInteger(Number(row.pricingIndex))
+					? Number(row.pricingIndex)
+					: 0,
+				hotelId,
+				roomId,
+				roomKey: normalizeId(row.roomKey),
+				calendarDate,
+				status,
+				sellingPrice: roundPricingNumber(row.sellingPrice ?? row.price, 0),
+				commissionPercent: Math.min(
+					100,
+					Math.max(0, roundPricingNumber(row.commissionPercent ?? row.commission, 0))
+				),
+				mainCalendarPrice: roundPricingNumber(row.mainCalendarPrice, 0),
+				baseSource: String(row.baseSource || "").trim(),
+				manualOverride: row.manualOverride !== false,
+			};
+		})
+		.filter(Boolean);
+
+const variantOverrideMapFromBody = (body = {}) => {
+	const map = new Map();
+	variantOverrideRowsFromBody(body).forEach((row) => {
+		const keys = [
+			`${row.priceVariantItemId}::${row.hotelId}::${row.roomId}::${row.calendarDate}`,
+			`${row.pricingIndex}::${row.hotelId}::${row.roomId}::${row.calendarDate}`,
+			`${row.roomKey}::${row.calendarDate}`,
+		].filter((key) => key && !key.startsWith("::"));
+		keys.forEach((key) => map.set(key, row));
+	});
+	return map;
+};
+
+const variantOverrideForRoomDate = ({
+	overrideMap = new Map(),
+	itemId = "",
+	itemIndex = 0,
+	room = {},
+	date = "",
+}) => {
+	const keys = [
+		`${normalizeId(itemId)}::${normalizeId(room.hotelId)}::${normalizeId(
+			room.roomId
+		)}::${date}`,
+		`${itemIndex}::${normalizeId(room.hotelId)}::${normalizeId(
+			room.roomId
+		)}::${date}`,
+		`${normalizeId(room.roomKey)}::${date}`,
+	];
+	return keys.map((key) => overrideMap.get(key)).find(Boolean) || null;
+};
+
+const roomBasePricingSnapshot = (room = {}) => {
+	const plain = roomToPlain(room);
+	const basePrice = roundPricingNumber(
+		plain?.price?.basePrice ?? plain.basePrice,
+		0
+	);
+	const defaultCost = roundPricingNumber(
+		plain.defaultCost ?? plain.rootPrice,
+		0
+	);
+	return {
+		basePrice,
+		defaultCost,
+		hasBasePricing: basePrice > 0 && defaultCost > 0,
+	};
+};
+
+const validateRoomsReadyForPricingVariants = (hotel = {}) => {
+	const activeRooms = (Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: []
+	).filter((room) => room?.activeRoom !== false);
+	const missingRooms = activeRooms
+		.map((room) => {
+			const plain = roomToPlain(room);
+			const snapshot = roomBasePricingSnapshot(room);
+			return {
+				roomId: normalizeId(plain._id),
+				roomType: plain.roomType || "",
+				displayName:
+					plain.displayName || plain.displayName_OtherLanguage || plain.roomType || "",
+				basePrice: snapshot.basePrice,
+				defaultCost: snapshot.defaultCost,
+				hasBasePricing: snapshot.hasBasePricing,
+			};
+		})
+		.filter((room) => !room.hasBasePricing);
+	return {
+		ok: activeRooms.length > 0 && missingRooms.length === 0,
+		activeRooms,
+		missingRooms,
+	};
+};
+
+const resolveCalendarBasePricingForRoom = (room = {}, calendarDate = "") => {
+	const plain = roomToPlain(room);
+	const snapshot = roomBasePricingSnapshot(room);
+	const dateKey = toCalendarDateKey(calendarDate);
+	const rows = Array.isArray(plain.pricingRate) ? plain.pricingRate : [];
+	const calendarRow = dateKey
+		? rows.find((row) => toCalendarDateKey(row?.calendarDate) === dateKey)
+		: null;
+	if (calendarRow) {
+		const blocked =
+			calendarRow.blocked === true ||
+			String(calendarRow.status || "").toLowerCase() === "blocked" ||
+			String(calendarRow.color || "").toLowerCase() === "black";
+		if (blocked) {
+			return {
+				status: "blocked",
+				sellingPrice: snapshot.basePrice,
+				mainCalendarPrice: 0,
+				commissionPercent: 0,
+				source: "calendar",
+				fallbackSource: "room-base",
+			};
+		}
+		const rowPrice = roundPricingNumber(
+			calendarRow.sellingPrice ?? calendarRow.price,
+			0
+		);
+		if (rowPrice > 0) {
+			return {
+				status: "open",
+				sellingPrice: rowPrice,
+				mainCalendarPrice: rowPrice,
+				commissionPercent: roundPricingNumber(calendarRow.commissionPercent, 0),
+				source: "calendar",
+			};
+		}
+	}
+	return {
+		status: snapshot.hasBasePricing ? "open" : "missing",
+		sellingPrice: snapshot.basePrice,
+		mainCalendarPrice: snapshot.basePrice,
+		commissionPercent: 0,
+		source: "room-base",
+	};
+};
+
+const isCalendarBasePricingSelection = (selection = null) =>
+	selection?.doc?.dataType === "price_variant" ||
+	selection?.doc?.basePriceSource === "calendar_main_price" ||
+	selection?.item?.pricingBasis?.mode === "calendar_base";
+
+const buildPricingVariantItemsForRooms = async ({
+	body = {},
+	calendarType = "hijri",
+	rooms = [],
+	roomDocs = [],
+}) => {
+	const rawItems = requestedPriceVariantItems(body);
+	if (!rawItems.length) {
+		return { ok: false, error: "Please add at least one price variant" };
+	}
+	if (rawItems.length > MAX_PRICE_VARIANT_ITEMS) {
+		return {
+			ok: false,
+			error: `Please save ${MAX_PRICE_VARIANT_ITEMS} price variants or fewer at once`,
+		};
+	}
+	if (!rooms.length || !roomDocs.length) {
+		return { ok: false, error: "No rooms are available for the selected hotels" };
+	}
+
+	const roomPricing = rooms.map((room) => ({
+		hotelId: ObjectId(room.hotelId),
+		roomId: ObjectId(room.roomId),
+		roomType: room.roomType,
+		displayName: room.displayName,
+		displayNameOtherLanguage: room.displayNameOtherLanguage,
+		roomForGender: room.roomForGender,
+		pricingItems: [],
+	}));
+	const globalItems = [];
+	const variantDates = nextPricingVariantDateKeys();
+	const overrideMap = variantOverrideMapFromBody(body);
+
+	for (let index = 0; index < rawItems.length; index += 1) {
+		const item = rawItems[index] || {};
+		const submittedName = normalizePriceVariantItemName(
+			item.name ||
+				item.pricingName ||
+				item.label ||
+				item.nameOtherLanguage ||
+				item.nameAr ||
+				item.arabicName
+		);
+		if (!submittedName) {
+			return {
+				ok: false,
+				error: `Variant name is required for variant ${index + 1}`,
+			};
+		}
+		const translatedName = body.skipNameTranslation
+			? {
+					name: item.name || submittedName,
+					nameOtherLanguage: item.nameOtherLanguage || submittedName,
+			  }
+			: await translatePriceVariantName({
+					name: submittedName,
+					nameOtherLanguage: "",
+			  });
+		const name = normalizePriceVariantItemName(
+			translatedName.name || submittedName
+		);
+		const nameOtherLanguage = normalizePriceVariantItemName(
+			translatedName.nameOtherLanguage || submittedName
+		);
+		const itemId = ObjectId.isValid(normalizeId(item._id || item.id))
+			? ObjectId(normalizeId(item._id || item.id))
+			: new ObjectId();
+		const status = ["blocked", "closed", "restricted"].includes(
+			String(item.status || body.status || "open").toLowerCase()
+		)
+			? "blocked"
+			: "open";
+		const pricingBasis = normalizeVariantPricingBasis(item);
+		const commissionPercent = Math.min(
+			100,
+			Math.max(
+				0,
+				roundPricingNumber(item.commissionPercent ?? item.commission, 0)
+			)
+		);
+		let representativePeriod = null;
+
+		for (let roomIndex = 0; roomIndex < roomDocs.length; roomIndex += 1) {
+			const roomDoc = roomDocs[roomIndex];
+			const roomMeta = {
+				...(rooms[roomIndex] || {}),
+				roomKey: `${normalizeId(rooms[roomIndex]?.hotelId)}::${normalizeId(
+					rooms[roomIndex]?.roomId
+				)}`,
+			};
+			const periodPrices = [];
+
+			for (const calendarDate of variantDates) {
+				const base = resolveCalendarBasePricingForRoom(roomDoc, calendarDate);
+				const override = variantOverrideForRoomDate({
+					overrideMap,
+					itemId,
+					itemIndex: index,
+					room: roomMeta,
+					date: calendarDate,
+				});
+				const baseUnavailable = base.status === "missing";
+				const defaultBlocked =
+					status === "blocked" || baseUnavailable || base.status === "blocked";
+				const periodStatus = override?.manualOverride
+					? override.status === "blocked" || status === "blocked" || baseUnavailable
+						? "blocked"
+						: "open"
+					: defaultBlocked
+					  ? "blocked"
+					  : "open";
+				const derivedSellingPrice = applyDerivedPricingAdjustment(
+					base.sellingPrice,
+					pricingBasis
+				);
+				const periodSellingPrice =
+					periodStatus === "blocked"
+						? 0
+						: override?.manualOverride
+						  ? override.sellingPrice || derivedSellingPrice
+						  : derivedSellingPrice;
+				const periodCommission =
+					periodStatus === "blocked"
+						? 0
+						: override?.manualOverride
+						  ? override.commissionPercent
+						  : commissionPercent;
+				const periodPlan = buildPricingPlan({
+					scope: "price-variants",
+					dates: [calendarDate],
+					sellingPrice: periodSellingPrice,
+					commissionPercent: periodCommission,
+					status: periodStatus,
+					calendarType,
+					source: "price-variant",
+				});
+				if (!periodPlan.ok) {
+					return {
+						ok: false,
+						error: `${name} / ${
+							roomMeta.displayName || roomMeta.roomType || "Room"
+						} / ${calendarDate}: ${periodPlan.error}`,
+					};
+				}
+				const periodPayload = {
+					periodKey: calendarDate,
+					label: calendarDate,
+					calendarType,
+					periodMode: "custom",
+					year: null,
+					month: null,
+					startDate: calendarDate,
+					endDate: calendarDate,
+					status: periodPlan.blocked ? "blocked" : "open",
+					sellingPrice: periodPlan.sellingPrice,
+					mainCalendarPrice: roundPricingNumber(
+						base.mainCalendarPrice ?? base.sellingPrice,
+						0
+					),
+					commissionPercent: periodPlan.commissionPercent,
+					baseSource: base.source || "",
+					manualOverride: Boolean(override?.manualOverride),
+					rootPrice: periodPlan.rootPrice,
+					color: periodPlan.color,
+				};
+				periodPrices.push(periodPayload);
+				if (!representativePeriod && periodPayload.status === "open") {
+					representativePeriod = periodPayload;
+				}
+			}
+
+			const roomRepresentativePeriod =
+				periodPrices.find((period) => period.status === "open") ||
+				periodPrices[0] ||
+				{};
+			roomPricing[roomIndex].pricingItems.push({
+				priceVariantItemId: itemId,
+				name,
+				nameOtherLanguage,
+				status: roomRepresentativePeriod.status || status,
+				sellingPrice: roomRepresentativePeriod.sellingPrice || 0,
+				commissionPercent: roomRepresentativePeriod.commissionPercent || 0,
+				rootPrice: roomRepresentativePeriod.rootPrice || 0,
+				color: roomRepresentativePeriod.color || "black",
+				sortOrder: Number.isFinite(Number(item.sortOrder))
+					? Number(item.sortOrder)
+					: index,
+				periodPrices,
+			});
+		}
+
+		const globalRepresentativePeriod = representativePeriod || {
+			status: status === "blocked" ? "blocked" : "open",
+			sellingPrice: 0,
+			commissionPercent,
+			rootPrice: 0,
+			color: status === "blocked" ? "black" : "",
+		};
+
+		globalItems.push({
+			_id: itemId,
+			name,
+			nameOtherLanguage,
+			status,
+			sellingPrice: globalRepresentativePeriod.sellingPrice || 0,
+			commissionPercent: globalRepresentativePeriod.commissionPercent || 0,
+			rootPrice: globalRepresentativePeriod.rootPrice || 0,
+			color: globalRepresentativePeriod.color || "",
+			sortOrder: Number.isFinite(Number(item.sortOrder))
+				? Number(item.sortOrder)
+				: index,
+			pricingBasis,
+		});
+	}
+
+	return { ok: true, items: globalItems, roomPricing };
+};
+
+const buildPriceVariantItemsForRooms = async ({
+	body = {},
+	dates = [],
+	calendarType = "hijri",
+	rooms = [],
+	periods = [],
+}) => {
+	const rawItems = requestedPriceVariantItems(body);
+	if (!rawItems.length) {
+		return { ok: false, error: "Please add at least one pricing item" };
+	}
+	if (rawItems.length > MAX_PRICE_VARIANT_ITEMS) {
+		return {
+			ok: false,
+			error: `Please save ${MAX_PRICE_VARIANT_ITEMS} pricing items or fewer at once`,
+		};
+	}
+	if (!rooms.length) {
+		return { ok: false, error: "No rooms are available for the selected hotels" };
+	}
+	if (!periods.length) {
+		return { ok: false, error: "Please select at least one pricing period" };
+	}
+
+	const globalItems = [];
+	const roomPricing = rooms.map((room) => ({
+		hotelId: ObjectId(room.hotelId),
+		roomId: ObjectId(room.roomId),
+		roomType: room.roomType,
+		displayName: room.displayName,
+		displayNameOtherLanguage: room.displayNameOtherLanguage,
+		roomForGender: room.roomForGender,
+		pricingItems: [],
+	}));
+	const baseValues = new Map();
+	let baseItemId = null;
+
+	for (let index = 0; index < rawItems.length; index += 1) {
+		const item = rawItems[index] || {};
+		const submittedName = normalizePriceVariantItemName(
+			item.name ||
+				item.pricingName ||
+				item.label ||
+				item.nameOtherLanguage ||
+				item.nameAr ||
+				item.arabicName
+		);
+		if (!submittedName) {
+			return {
+				ok: false,
+				error: `Pricing name is required for price ${index + 1}`,
+			};
+		}
+		const translatedName = await translatePriceVariantName({
+			name: submittedName,
+			nameOtherLanguage: "",
+		});
+		const name = normalizePriceVariantItemName(
+			translatedName.name || submittedName
+		);
+		const nameOtherLanguage = normalizePriceVariantItemName(
+			translatedName.nameOtherLanguage || submittedName
+		);
+		const itemId = ObjectId.isValid(normalizeId(item._id || item.id))
+			? ObjectId(normalizeId(item._id || item.id))
+			: new ObjectId();
+		if (index === 0) baseItemId = itemId;
+		const pricingBasis = normalizePricingBasis(item, index, baseItemId);
+		const status = ["blocked", "closed", "restricted"].includes(
+			String(item.status || body.status || "open").toLowerCase()
+		)
+			? "blocked"
+			: "open";
+
+		let representativePlan = null;
+		for (let roomIndex = 0; roomIndex < rooms.length; roomIndex += 1) {
+			const room = rooms[roomIndex];
+			const roomInput = roomPricingInputForRoom(item, room) || {};
+			const periodPrices = [];
+			for (const period of periods) {
+				const periodInput = periodPricingInputForPeriod(roomInput, period) || {};
+				const baseKey = `${normalizeId(room.roomId)}::${period.periodKey}`;
+				const baseEntry = baseValues.get(baseKey);
+				const periodStatus = ["blocked", "closed", "restricted"].includes(
+					String(
+						periodInput.status ||
+							(periodInput.blocked ? "blocked" : "") ||
+							status
+					).toLowerCase()
+				)
+					? "blocked"
+					: "open";
+				const effectiveStatus =
+					pricingBasis.mode === "derived" && baseEntry?.status === "blocked"
+						? "blocked"
+						: periodStatus;
+				const sellingPrice =
+					pricingBasis.mode === "derived" && baseEntry
+						? applyDerivedPricingAdjustment(
+								baseEntry.sellingPrice,
+								pricingBasis
+						  )
+						: periodInput.sellingPrice ??
+						  periodInput.price ??
+						  roomInput.sellingPrice ??
+						  roomInput.price ??
+						  item.sellingPrice ??
+						  item.price;
+				const commissionPercent =
+					periodInput.commissionPercent ??
+					periodInput.commission ??
+					roomInput.commissionPercent ??
+					roomInput.commission ??
+					item.commissionPercent ??
+					item.commission;
+				const plan = buildPricingPlan({
+					scope: "price-variants",
+					dates: [period.startDate],
+					sellingPrice,
+					commissionPercent,
+					status: effectiveStatus,
+					calendarType,
+					source: "price-variants",
+				});
+				if (!plan.ok) {
+					return {
+						ok: false,
+						error: `${name} / ${
+							room.displayName || room.roomType || "Room"
+						} / ${period.label || period.periodKey}: ${plan.error}`,
+					};
+				}
+				if (!representativePlan) representativePlan = plan;
+				if (index === 0) {
+					baseValues.set(baseKey, {
+						sellingPrice: plan.sellingPrice,
+						commissionPercent: plan.commissionPercent,
+						status: plan.blocked ? "blocked" : "open",
+					});
+				}
+				periodPrices.push({
+					...period,
+					status: plan.blocked ? "blocked" : "open",
+					sellingPrice: plan.sellingPrice,
+					commissionPercent: plan.commissionPercent,
+					rootPrice: plan.rootPrice,
+					color: plan.color,
+				});
+			}
+			const representativePeriod = periodPrices[0] || {};
+			roomPricing[roomIndex].pricingItems.push({
+				priceVariantItemId: itemId,
+				name,
+				nameOtherLanguage,
+				status,
+				sellingPrice: representativePeriod.sellingPrice || 0,
+				commissionPercent: representativePeriod.commissionPercent || 0,
+				rootPrice: representativePeriod.rootPrice || 0,
+				color: representativePlan?.color || "",
+				sortOrder: Number.isFinite(Number(item.sortOrder))
+					? Number(item.sortOrder)
+					: index,
+				periodPrices,
+			});
+		}
+
+		globalItems.push({
+			_id: itemId,
+			name,
+			nameOtherLanguage,
+			status,
+			sellingPrice: representativePlan?.sellingPrice || 0,
+			commissionPercent: representativePlan?.commissionPercent || 0,
+			rootPrice: representativePlan?.rootPrice || 0,
+			color: representativePlan?.color || "",
+			sortOrder: Number.isFinite(Number(item.sortOrder))
+				? Number(item.sortOrder)
+				: index,
+			pricingBasis,
+		});
+	}
+
+	return { ok: true, items: globalItems, roomPricing };
+};
+
+const serializePriceVariantRoom = (hotel = {}, room = {}) => {
+	const plain = roomToPlain(room);
+	return {
+		hotelId: normalizeId(hotel._id),
+		roomId: normalizeId(plain._id),
+		roomType: plain.roomType || "",
+		displayName: plain.displayName || plain.displayName_OtherLanguage || "",
+		displayNameOtherLanguage: plain.displayName_OtherLanguage || "",
+		roomForGender: plain.roomForGender || "",
+	};
+};
+
+const serializePriceVariant = (doc = {}, hotelMap = new Map()) => {
+	const plain = doc.toObject ? doc.toObject() : doc;
+	const hotelIds = uniqueValidIds(plain.hotelIds);
+	return {
+		_id: normalizeId(plain._id),
+		ownerId: normalizeId(plain.ownerId),
+		hotelIds,
+		hotelNames: hotelIds
+			.map((hotelId) => hotelMap.get(hotelId)?.hotelName || "")
+			.filter(Boolean),
+		roomSelections: (Array.isArray(plain.roomSelections)
+			? plain.roomSelections
+			: []
+		).map((room) => ({
+			hotelId: normalizeId(room.hotelId),
+			roomId: normalizeId(room.roomId),
+			roomType: room.roomType || "",
+			displayName: room.displayName || "",
+			displayNameOtherLanguage: room.displayNameOtherLanguage || "",
+			roomForGender: room.roomForGender || "",
+		})),
+		dataType: plain.dataType || "price_variant",
+		basePriceSource: plain.basePriceSource || "manual",
+		calendarType: plain.calendarType || "hijri",
+		periodMode: plain.periodMode || "months",
+		hijriYear: plain.hijriYear ?? null,
+		hijriMonths: normalizePriceVariantMonths(plain.hijriMonths),
+		gregorianYear: plain.gregorianYear ?? null,
+		gregorianMonths: normalizePriceVariantMonths(plain.gregorianMonths),
+		startDate: plain.startDate || "",
+		endDate: plain.endDate || "",
+		dates: Array.isArray(plain.dates) ? plain.dates : [],
+		pricingItems: (Array.isArray(plain.pricingItems) ? plain.pricingItems : []).map(
+			(item) => ({
+				_id: normalizeId(item._id),
+				name: item.name || "",
+				nameOtherLanguage: item.nameOtherLanguage || "",
+				status: item.status || "open",
+				sellingPrice: Number(item.sellingPrice || 0),
+				commissionPercent: Number(item.commissionPercent || 0),
+				rootPrice: Number(item.rootPrice || 0),
+				color: item.color || "",
+				sortOrder: Number(item.sortOrder || 0),
+				pricingBasis:
+					item.pricingBasis && typeof item.pricingBasis === "object"
+						? {
+								mode: item.pricingBasis.mode || "manual",
+								basePriceVariantItemId: normalizeId(
+									item.pricingBasis.basePriceVariantItemId
+								),
+								direction: item.pricingBasis.direction || "increase",
+								adjustmentType: item.pricingBasis.adjustmentType || "money",
+								amount: Number(item.pricingBasis.amount || 0),
+						  }
+						: {
+								mode: "manual",
+								basePriceVariantItemId: "",
+								direction: "increase",
+								adjustmentType: "money",
+								amount: 0,
+						  },
+				assignedAgents: (Array.isArray(item.assignedAgents)
+					? item.assignedAgents
+					: []
+				).map((assignment) => ({
+					agentId: normalizeId(assignment.agentId),
+					agentName: assignment.agentName || "",
+					agentEmail: assignment.agentEmail || "",
+					companyName: assignment.companyName || "",
+					hotelIds: uniqueValidIds(assignment.hotelIds),
+					assignedAt: assignment.assignedAt,
+					assignedBy: normalizeId(assignment.assignedBy),
+				})),
+			})
+		),
+		roomPricing: (Array.isArray(plain.roomPricing) ? plain.roomPricing : []).map(
+			(room) => ({
+				hotelId: normalizeId(room.hotelId),
+				roomId: normalizeId(room.roomId),
+				roomType: room.roomType || "",
+				displayName: room.displayName || "",
+				displayNameOtherLanguage: room.displayNameOtherLanguage || "",
+				roomForGender: room.roomForGender || "",
+				pricingItems: (Array.isArray(room.pricingItems)
+					? room.pricingItems
+					: []
+				).map((item) => ({
+					priceVariantItemId: normalizeId(item.priceVariantItemId),
+					name: item.name || "",
+					nameOtherLanguage: item.nameOtherLanguage || "",
+					status: item.status || "open",
+					sellingPrice: Number(item.sellingPrice || 0),
+					commissionPercent: Number(item.commissionPercent || 0),
+					rootPrice: Number(item.rootPrice || 0),
+					color: item.color || "",
+					sortOrder: Number(item.sortOrder || 0),
+					periodPrices: (plain.dataType === "price_variant"
+						? (Array.isArray(item.periodPrices) ? item.periodPrices : []).filter(
+								(period) => period?.manualOverride === true
+						  )
+						: Array.isArray(item.periodPrices)
+						  ? item.periodPrices
+						  : []
+					).map((period) => ({
+						periodKey: period.periodKey || "",
+						label: period.label || "",
+						calendarType: period.calendarType || "hijri",
+						periodMode: period.periodMode || "months",
+						year: period.year ?? null,
+						month: period.month ?? null,
+						startDate: period.startDate || "",
+						endDate: period.endDate || "",
+						status: period.status === "blocked" ? "blocked" : "open",
+						sellingPrice: Number(period.sellingPrice || 0),
+						mainCalendarPrice: Number(period.mainCalendarPrice || 0),
+						commissionPercent: Number(period.commissionPercent || 0),
+						baseSource: period.baseSource || "",
+						manualOverride: period.manualOverride === true,
+						rootPrice: Number(period.rootPrice || 0),
+						color: period.color || "",
+					})),
+				})),
+			})
+		),
+		active: plain.active !== false,
+		createdAt: plain.createdAt,
+		updatedAt: plain.updatedAt,
+	};
+};
+
+const decoratePlanWithPriceVariant = (plan = {}, selection = null) => {
+	if (!selection) return plan;
+	return {
+		...plan,
+		source: "price-variants",
+		priceVariantDataId: selection.priceVariantDataId,
+		priceVariantItemId: selection.priceVariantItemId,
+		priceVariantName: selection.item?.name || "",
+		priceVariantNameOtherLanguage: selection.item?.nameOtherLanguage || "",
+	};
+};
+
+const resolvePriceVariantSelection = async ({
+	context,
+	hotelIds = [],
+	priceVariantDataId = "",
+	priceVariantItemId = "",
+}) => {
+	const dataId = normalizeId(priceVariantDataId);
+	const itemId = normalizeId(priceVariantItemId);
+	if (!dataId && !itemId) return { ok: true, selection: null };
+	if (!ObjectId.isValid(dataId) || !ObjectId.isValid(itemId)) {
+		return { ok: false, error: "Valid price variant selection is required" };
+	}
+	const allowedHotelIds = new Set(
+		(context?.hotels || []).map((hotel) => normalizeId(hotel._id))
+	);
+	const doc = await PriceVariant.findOne({
+		_id: ObjectId(dataId),
+		active: { $ne: false },
+	}).exec();
+	if (!doc) {
+		return { ok: false, error: "Selected price variant was not found" };
+	}
+	const docHotelIds = new Set(uniqueValidIds(doc.hotelIds));
+	const selectedHotelIds = uniqueValidIds(hotelIds);
+	const blockedHotel = selectedHotelIds.find(
+		(hotelId) => !allowedHotelIds.has(hotelId) || !docHotelIds.has(hotelId)
+	);
+	if (blockedHotel) {
+		return {
+			ok: false,
+			error: "Selected price variant is not available for one or more selected hotels",
+		};
+	}
+	const item = (Array.isArray(doc.pricingItems) ? doc.pricingItems : []).find(
+		(row) => normalizeId(row?._id) === itemId
+	);
+	if (!item) {
+		return { ok: false, error: "Selected price variant item was not found" };
+	}
+	return {
+		ok: true,
+		selection: {
+			doc,
+			item,
+			priceVariantDataId: dataId,
+			priceVariantItemId: itemId,
+		},
+	};
+};
+
+const priceVariantValues = (selection = null, fallback = {}) => {
+	if (!selection?.item) {
+		return {
+			status: fallback.status,
+			sellingPrice: fallback.sellingPrice,
+			commissionPercent: fallback.commissionPercent,
+		};
+	}
+	return {
+		status: selection.item.status || "open",
+		sellingPrice: selection.item.sellingPrice,
+		commissionPercent: selection.item.commissionPercent,
+	};
+};
+
+const priceVariantValuesForRoom = (
+	selection = null,
+	fallback = {},
+	roomSelection = {}
+) => {
+	if (!selection?.doc || !selection?.priceVariantItemId) {
+		return priceVariantValues(selection, fallback);
+	}
+	if (isCalendarBasePricingSelection(selection)) {
+		const itemStatus =
+			selection.item?.status === "blocked" ? "blocked" : "open";
+		const commissionPercent = Math.min(
+			100,
+			Math.max(0, roundPricingNumber(selection.item?.commissionPercent, 0))
+		);
+		const roomDoc =
+			roomSelection.room || roomSelection.roomDoc || roomSelection.roomDetails || null;
+		if (!roomDoc) {
+			return priceVariantValues(selection, fallback);
+		}
+		const calendarDate = toCalendarDateKey(
+			roomSelection.calendarDate || roomSelection.date || roomSelection.pricingDate
+		);
+		const roomPricing = (Array.isArray(selection.doc.roomPricing)
+			? selection.doc.roomPricing
+			: []
+		).find(
+			(room) =>
+				normalizeId(room.hotelId) === normalizeId(roomSelection.hotelId) &&
+				normalizeId(room.roomId) === normalizeId(roomSelection.roomId)
+		);
+		const roomItem = (Array.isArray(roomPricing?.pricingItems)
+			? roomPricing.pricingItems
+			: []
+		).find(
+			(item) =>
+				normalizeId(item.priceVariantItemId) ===
+				normalizeId(selection.priceVariantItemId)
+		);
+		const manualPeriodPrice = (Array.isArray(roomItem?.periodPrices)
+			? roomItem.periodPrices
+			: []
+		).find((period) => {
+			if (!calendarDate || period?.manualOverride !== true) return false;
+			const startDate = toCalendarDateKey(period.startDate);
+			const endDate = toCalendarDateKey(period.endDate);
+			return startDate && endDate && calendarDate >= startDate && calendarDate <= endDate;
+		});
+		if (manualPeriodPrice && itemStatus !== "blocked") {
+			const baseValues = resolveCalendarBasePricingForRoom(roomDoc, calendarDate);
+			if (baseValues.status !== "open") {
+				return {
+					status: "blocked",
+					sellingPrice: 0,
+					commissionPercent: 0,
+				};
+			}
+			return {
+				status: manualPeriodPrice.status === "blocked" ? "blocked" : "open",
+				sellingPrice:
+					manualPeriodPrice.status === "blocked"
+						? 0
+						: roundPricingNumber(manualPeriodPrice.sellingPrice, 0),
+				commissionPercent:
+					manualPeriodPrice.status === "blocked"
+						? 0
+						: Math.min(
+								100,
+								Math.max(
+									0,
+									roundPricingNumber(manualPeriodPrice.commissionPercent, 0)
+								)
+						  ),
+			};
+		}
+		const baseValues = resolveCalendarBasePricingForRoom(
+			roomDoc,
+			calendarDate
+		);
+		if (itemStatus === "blocked" || baseValues.status === "blocked") {
+			return {
+				status: "blocked",
+				sellingPrice: 0,
+				commissionPercent: 0,
+			};
+		}
+		if (baseValues.status !== "open" || !(baseValues.sellingPrice > 0)) {
+			return priceVariantValues(selection, fallback);
+		}
+		return {
+			status: "open",
+			sellingPrice: applyDerivedPricingAdjustment(
+				baseValues.sellingPrice,
+				normalizeVariantPricingBasis(selection.item)
+			),
+			commissionPercent,
+		};
+	}
+	const roomPricing = (Array.isArray(selection.doc.roomPricing)
+		? selection.doc.roomPricing
+		: []
+	).find(
+		(room) =>
+			normalizeId(room.hotelId) === normalizeId(roomSelection.hotelId) &&
+			normalizeId(room.roomId) === normalizeId(roomSelection.roomId)
+	);
+	const roomItem = (Array.isArray(roomPricing?.pricingItems)
+		? roomPricing.pricingItems
+		: []
+	).find(
+		(item) =>
+			normalizeId(item.priceVariantItemId) ===
+			normalizeId(selection.priceVariantItemId)
+	);
+	if (!roomItem) return priceVariantValues(selection, fallback);
+	const calendarDate = toCalendarDateKey(
+		roomSelection.calendarDate || roomSelection.date || roomSelection.pricingDate
+	);
+	const periodPrice = (Array.isArray(roomItem.periodPrices)
+		? roomItem.periodPrices
+		: []
+	).find((period) => {
+		if (!calendarDate) return false;
+		const startDate = toCalendarDateKey(period.startDate);
+		const endDate = toCalendarDateKey(period.endDate);
+		return startDate && endDate && calendarDate >= startDate && calendarDate <= endDate;
+	});
+	if (periodPrice) {
+		return {
+			status:
+				periodPrice.status ||
+				roomItem.status ||
+				selection.item.status ||
+				"open",
+			sellingPrice: periodPrice.sellingPrice,
+			commissionPercent: periodPrice.commissionPercent,
+		};
+	}
+	return {
+		status: roomItem.status || selection.item.status || "open",
+		sellingPrice: roomItem.sellingPrice,
+		commissionPercent: roomItem.commissionPercent,
+	};
+};
+
+const mergePriceVariantItemAssignments = ({
+	existingAssignments = [],
+	agentDocs = [],
+	hotelIds = [],
+	actor = {},
+}) => {
+	const byAgentId = new Map(
+		(Array.isArray(existingAssignments) ? existingAssignments : []).map((item) => [
+			normalizeId(item.agentId),
+			{
+				agentId: item.agentId,
+				agentName: item.agentName || "",
+				agentEmail: item.agentEmail || "",
+				companyName: item.companyName || "",
+				hotelIds: uniqueValidIds(item.hotelIds).map((hotelId) => ObjectId(hotelId)),
+				assignedAt: item.assignedAt || new Date(),
+				assignedBy: item.assignedBy || null,
+			},
+		])
+	);
+	agentDocs.forEach((agent) => {
+		const agentId = normalizeId(agent._id);
+		if (!agentId || !ObjectId.isValid(agentId)) return;
+		byAgentId.set(agentId, {
+			agentId: ObjectId(agentId),
+			agentName: agent.name || agent.email || "",
+			agentEmail: agent.email || "",
+			companyName: agent.companyName || agent.companyOfficialName || "",
+			hotelIds: uniqueValidIds(hotelIds).map((hotelId) => ObjectId(hotelId)),
+			assignedAt: new Date(),
+			assignedBy: actor?._id || null,
+		});
+	});
+	return [...byAgentId.values()];
+};
+
+const recordPriceVariantAssignments = async ({
+	selection = null,
+	agentDocs = [],
+	hotelIds = [],
+	actor = {},
+}) => {
+	if (!selection || !agentDocs.length) return null;
+	const doc = await PriceVariant.findById(selection.priceVariantDataId).exec();
+	if (!doc) return null;
+	const item = doc.pricingItems.id(selection.priceVariantItemId);
+	if (!item) return null;
+	item.assignedAgents = mergePriceVariantItemAssignments({
+		existingAssignments: item.assignedAgents,
+		agentDocs,
+		hotelIds,
+		actor,
+	});
+	doc.markModified("pricingItems");
+	await doc.save();
+
+	const agentIds = agentDocs.map((agent) => normalizeId(agent._id)).filter(ObjectId.isValid);
+	if (agentIds.length) {
+		const priceVariantDataId = ObjectId(selection.priceVariantDataId);
+		const priceVariantItemId = ObjectId(selection.priceVariantItemId);
+		await User.updateMany(
+			{ _id: { $in: agentIds.map((id) => ObjectId(id)) } },
+			{
+				$pull: {
+					priceVariantAssignments: {
+						priceVariantDataId,
+						priceVariantItemId,
+					},
+				},
+			}
+		).exec();
+		await User.updateMany(
+			{ _id: { $in: agentIds.map((id) => ObjectId(id)) } },
+			{
+				$push: {
+					priceVariantAssignments: {
+						priceVariantDataId,
+						priceVariantItemId,
+						pricingName: selection.item?.name || "",
+						pricingNameOtherLanguage: selection.item?.nameOtherLanguage || "",
+						hotelIds: uniqueValidIds(hotelIds).map((hotelId) => ObjectId(hotelId)),
+						assignedAt: new Date(),
+						assignedBy: actor?._id || null,
+					},
+				},
+			}
+		).exec();
+	}
+	return doc;
+};
+
+const saveAgentPriceVariantAssignments = async ({
+	context = {},
+	hotelDocs = [],
+	hotelIds = [],
+	agentDocs = [],
+	selections = [],
+} = {}) => {
+	const requestedSelections = Array.isArray(selections) ? selections : [];
+	if (!requestedSelections.length) {
+		return {
+			ok: false,
+			status: 400,
+			error: "Please select at least one price variant",
+		};
+	}
+	if (requestedSelections.length > 100) {
+		return {
+			ok: false,
+			status: 400,
+			error: "Please assign 100 price variants or fewer at once",
+		};
+	}
+	const selectedHotelIds = uniqueValidIds(hotelIds);
+	const selectedHotelSet = new Set(selectedHotelIds);
+	const allowedHotelIds = new Set(
+		(context?.hotels || []).map((hotel) => normalizeId(hotel._id))
+	);
+	const dataIds = uniqueValidIds(
+		requestedSelections.map((selection) => selection.priceVariantDataId)
+	);
+	const docs = await PriceVariant.find({
+		_id: { $in: dataIds.map((id) => ObjectId(id)) },
+		active: { $ne: false },
+		hotelIds: { $in: selectedHotelIds.map((id) => ObjectId(id)) },
+	}).exec();
+	const docsById = new Map(docs.map((doc) => [normalizeId(doc._id), doc]));
+	const hotelMap = new Map(
+		(Array.isArray(hotelDocs) ? hotelDocs : []).map((hotel) => [
+			normalizeId(hotel._id),
+			hotel,
+		])
+	);
+	const agentSet = new Set(agentDocs.map((agent) => normalizeId(agent._id)));
+	const rowsByRoomKey = new Map();
+	const savedDocsById = new Map();
+	const resolvedSelections = [];
+	let plannedRows = 0;
+
+	for (const requested of requestedSelections) {
+		const doc = docsById.get(normalizeId(requested.priceVariantDataId));
+		if (!doc) {
+			return {
+				ok: false,
+				status: 400,
+				error: "Selected price variant is not available for the selected hotels",
+			};
+		}
+		const item = (Array.isArray(doc.pricingItems) ? doc.pricingItems : []).find(
+			(row) => normalizeId(row?._id) === normalizeId(requested.priceVariantItemId)
+		);
+		if (!item) {
+			return {
+				ok: false,
+				status: 400,
+				error: "Selected price variant item was not found",
+			};
+		}
+		const docHotelIds = uniqueValidIds(doc.hotelIds);
+		const scopedHotelIds = selectedHotelIds.filter(
+			(hotelId) =>
+				selectedHotelSet.has(hotelId) &&
+				allowedHotelIds.has(hotelId) &&
+				docHotelIds.includes(hotelId)
+		);
+		if (!scopedHotelIds.length) {
+			return {
+				ok: false,
+				status: 400,
+				error: `${item.name || "Selected price variant"} does not match the selected hotels`,
+			};
+		}
+		const selection = {
+			doc,
+			item,
+			priceVariantDataId: normalizeId(doc._id),
+			priceVariantItemId: normalizeId(item._id),
+		};
+		resolvedSelections.push({ selection, scopedHotelIds });
+
+		(Array.isArray(doc.roomPricing) ? doc.roomPricing : []).forEach(
+			(roomPricing) => {
+				const hotelId = normalizeId(roomPricing.hotelId);
+				if (!scopedHotelIds.includes(hotelId)) return;
+				const hotel = hotelMap.get(hotelId);
+				const rooms = Array.isArray(hotel?.roomCountDetails)
+					? hotel.roomCountDetails
+					: [];
+				const roomId = normalizeId(roomPricing.roomId);
+				const roomIndex = rooms.findIndex(
+					(room) => normalizeId(room?._id) === roomId
+				);
+				if (roomIndex < 0) return;
+				const room = roomToPlain(rooms[roomIndex]);
+				const roomItem = (Array.isArray(roomPricing.pricingItems)
+					? roomPricing.pricingItems
+					: []
+				).find(
+					(price) =>
+						normalizeId(price.priceVariantItemId) ===
+						normalizeId(item._id)
+				);
+				if (!roomItem) return;
+				const periodPrices = Array.isArray(roomItem.periodPrices)
+					? roomItem.periodPrices
+					: [];
+				const roomKey = `${hotelId}:${roomId}`;
+				const roomRows = rowsByRoomKey.get(roomKey) || [];
+				periodPrices.forEach((period) => {
+					const calendarDate = toCalendarDateKey(
+						period.startDate || period.periodKey || period.label
+					);
+					if (!calendarDate) return;
+					const rowPlan = buildPricingPlan({
+						scope: "price-variants",
+						dates: [calendarDate],
+						sellingPrice: period.sellingPrice,
+						commissionPercent: period.commissionPercent,
+						status: period.status,
+						calendarType: period.calendarType || doc.calendarType,
+						source: "price-variants",
+					});
+					if (!rowPlan.ok) return;
+					const decoratedPlan = decoratePlanWithPriceVariant(rowPlan, selection);
+					if (!decoratedPlan.ok) return;
+					agentDocs.forEach((agent) => {
+						roomRows.push(
+							buildAgentRow(decoratedPlan, room, calendarDate, agent)
+						);
+						plannedRows += 1;
+					});
+				});
+				rowsByRoomKey.set(roomKey, roomRows);
+			}
+		);
+	}
+
+	if (plannedRows > 25000) {
+		return {
+			ok: false,
+			status: 400,
+			error:
+				"This would assign too many agent calendar rows. Please split it into fewer variants or hotels.",
+		};
+	}
+
+	for (const { selection, scopedHotelIds } of resolvedSelections) {
+		const savedDoc = await recordPriceVariantAssignments({
+			selection,
+			agentDocs,
+			hotelIds: scopedHotelIds,
+			actor: context.actor,
+		});
+		if (savedDoc) savedDocsById.set(normalizeId(savedDoc._id), savedDoc);
+	}
+
+	const updatedHotels = [];
+	let updatedRows = 0;
+	for (const hotel of hotelDocs) {
+		const hotelId = normalizeId(hotel._id);
+		if (!selectedHotelSet.has(hotelId)) continue;
+		const rooms = Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails
+			: [];
+		let hotelChanged = false;
+		rooms.forEach((room, roomIndex) => {
+			const roomId = normalizeId(room?._id);
+			const roomRows = rowsByRoomKey.get(`${hotelId}:${roomId}`) || [];
+			const roomPlain = roomToPlain(room);
+			const existingAgentRows = (Array.isArray(roomPlain.agentPricingRate)
+				? roomPlain.agentPricingRate
+				: []
+			).filter((row) => agentSet.has(normalizeCalendarId(row?.agentId)));
+			if (!roomRows.length && !existingAgentRows.length) return;
+			rooms[roomIndex].agentPricingRate = replaceAgentCalendarRowsForAgents(
+				roomPlain.agentPricingRate,
+				roomRows,
+				agentSet
+			);
+			updatedRows += roomRows.length;
+			hotelChanged = true;
+		});
+		if (hotelChanged) {
+			hotel.roomCountDetails = rooms;
+			hotel.markModified("roomCountDetails");
+			await hotel.save();
+			updatedHotels.push(serializeCalendarHotel(hotel));
+		}
+	}
+
+	return {
+		ok: true,
+		updatedRows,
+		updatedHotels,
+		priceVariantData: [...savedDocsById.values()],
+		assignedPriceVariants: requestedSelections.length,
+		assignedAgents: agentDocs.length,
+	};
+};
+
+const propagatePriceVariantUpdates = async (doc = {}, changedItemIds = []) => {
+	const priceVariantDataId = normalizeId(doc?._id);
+	if (!priceVariantDataId) return { updatedRows: 0, updatedHotels: 0 };
+	const changedIds = new Set(uniqueValidIds(changedItemIds));
+	const items = (Array.isArray(doc.pricingItems) ? doc.pricingItems : []).filter(
+		(item) => {
+			const itemId = normalizeId(item?._id);
+			return itemId && (!changedIds.size || changedIds.has(itemId));
+		}
+	);
+	if (!items.length) return { updatedRows: 0, updatedHotels: 0 };
+	const itemsById = new Map(items.map((item) => [normalizeId(item._id), item]));
+	const hotelDocs = await HotelDetails.find({
+		"roomCountDetails.agentPricingRate.priceVariantDataId": priceVariantDataId,
+	}).exec();
+	let updatedRows = 0;
+	let updatedHotels = 0;
+	for (const hotel of hotelDocs) {
+		let hotelChanged = false;
+		const rooms = Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails
+			: [];
+		rooms.forEach((room) => {
+			const roomId = normalizeId(room?._id);
+			const hotelId = normalizeId(hotel._id);
+			const rows = Array.isArray(room.agentPricingRate)
+				? room.agentPricingRate
+				: [];
+			rows.forEach((row) => {
+				const rowVariantDataId = normalizeId(row?.priceVariantDataId);
+				if (rowVariantDataId !== priceVariantDataId) return;
+				const itemId = normalizeId(row?.priceVariantItemId);
+				const item = itemsById.get(itemId);
+				if (!item) return;
+				const values = priceVariantValuesForRoom(
+					{
+						doc,
+						item,
+						priceVariantDataId,
+						priceVariantItemId: itemId,
+					},
+					{
+						status: item.status,
+						sellingPrice: item.sellingPrice,
+						commissionPercent: item.commissionPercent,
+					},
+					{ hotelId, roomId, calendarDate: row.calendarDate, room }
+				);
+				const plan = buildPricingPlan({
+					scope: "price-variants",
+					dates: ["2000-01-01"],
+					sellingPrice: values.sellingPrice,
+					commissionPercent: values.commissionPercent,
+					status: values.status,
+					calendarType: doc.calendarType,
+					source: "price-variants",
+				});
+				if (!plan) return;
+				const decoratedPlan = decoratePlanWithPriceVariant(plan, {
+					priceVariantDataId,
+					priceVariantItemId: itemId,
+					item,
+				});
+				if (!decoratedPlan.ok) return;
+				row.price = decoratedPlan.sellingPrice;
+				row.rootPrice = decoratedPlan.rootPrice;
+				row.sellingPrice = decoratedPlan.sellingPrice;
+				row.commissionPercent = decoratedPlan.commissionPercent;
+				row.commissionRate = decoratedPlan.commissionRateForPms;
+				row.color = decoratedPlan.color;
+				row.source = "price-variants";
+				row.priceVariantName = decoratedPlan.priceVariantName;
+				row.priceVariantNameOtherLanguage =
+					decoratedPlan.priceVariantNameOtherLanguage;
+				if (decoratedPlan.blocked) {
+					row.status = "blocked";
+					row.blocked = true;
+				} else {
+					row.status = "open";
+					row.blocked = false;
+				}
+				updatedRows += 1;
+				hotelChanged = true;
+			});
+		});
+		if (hotelChanged) {
+			hotel.roomCountDetails = rooms;
+			hotel.markModified("roomCountDetails");
+			await hotel.save();
+			updatedHotels += 1;
+		}
+	}
+	return { updatedRows, updatedHotels };
+};
+
+const rebuildCalendarBasedPriceVariant = async (doc = {}) => {
+	const hotelIds = uniqueValidIds(doc?.hotelIds);
+	if (!hotelIds.length) {
+		return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+	}
+	const hotelDocs = await HotelDetails.find({
+		_id: { $in: hotelIds.map((hotelId) => ObjectId(hotelId)) },
+	}).exec();
+	const hotelMap = new Map(
+		hotelDocs.map((hotel) => [normalizeId(hotel._id), hotel])
+	);
+	const roomPairs = hotelIds.flatMap((hotelId) => {
+		const hotel = hotelMap.get(hotelId);
+		return (Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails
+			: []
+		)
+			.filter((room) => room?.activeRoom !== false)
+			.map((roomDoc) => ({
+				hotel,
+				roomDoc,
+				room: serializePriceVariantRoom(hotel, roomDoc),
+			}))
+			.filter((entry) => entry.room.roomId);
+	});
+	if (!roomPairs.length) {
+		return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+	}
+	const missingRooms = hotelDocs.flatMap((hotel) =>
+		validateRoomsReadyForPricingVariants(hotel).missingRooms.map((room) => ({
+			...room,
+			hotelId: normalizeId(hotel._id),
+			hotelName: hotel.hotelName || "Hotel",
+		}))
+	);
+	if (missingRooms.length) {
+		throw new Error(
+			"Cannot refresh price variants until every active room has a base price and default cost"
+		);
+	}
+	const existingItemsById = new Map(
+		(Array.isArray(doc.pricingItems) ? doc.pricingItems : []).map((item) => [
+			normalizeId(item._id),
+			item,
+		])
+	);
+	const pricingItems = await buildPricingVariantItemsForRooms({
+		body: {
+			skipNameTranslation: true,
+			pricingItems: (Array.isArray(doc.pricingItems) ? doc.pricingItems : []).map(
+				(item) => ({
+					_id: normalizeId(item._id),
+					name: item.name || item.nameOtherLanguage || "Price variant",
+					nameOtherLanguage: item.nameOtherLanguage || item.name || "",
+					status: item.status || "open",
+					commissionPercent: item.commissionPercent || 0,
+					sortOrder: item.sortOrder,
+					pricingBasis: item.pricingBasis || {},
+				})
+			),
+		},
+		calendarType: doc.calendarType === "gregorian" ? "gregorian" : "hijri",
+		rooms: roomPairs.map((entry) => entry.room),
+		roomDocs: roomPairs.map((entry) => entry.roomDoc),
+	});
+	if (!pricingItems.ok) {
+		throw new Error(pricingItems.error || "Could not refresh price variants");
+	}
+	const pricingItemPayload = pricingItems.items.map((item) => {
+		const existingItem = existingItemsById.get(normalizeId(item._id));
+		return {
+			...item,
+			assignedAgents: Array.isArray(existingItem?.assignedAgents)
+				? existingItem.assignedAgents
+				: [],
+		};
+	});
+	doc.roomSelections = roomPairs.map(({ room }) => ({
+		hotelId: ObjectId(room.hotelId),
+		roomId: ObjectId(room.roomId),
+		roomType: room.roomType,
+		displayName: room.displayName,
+		displayNameOtherLanguage: room.displayNameOtherLanguage,
+		roomForGender: room.roomForGender,
+	}));
+	doc.roomPricing = pricingItems.roomPricing;
+	doc.pricingItems = pricingItemPayload;
+	doc.dataType = "price_variant";
+	doc.basePriceSource = "calendar_main_price";
+	doc.periodMode = "custom";
+	doc.dates = [];
+	doc.hijriMonths = [];
+	doc.gregorianMonths = [];
+	doc.startDate = "";
+	doc.endDate = "";
+	doc.markModified("roomSelections");
+	doc.markModified("roomPricing");
+	doc.markModified("pricingItems");
+	const saved = await doc.save();
+	const propagation = await propagatePriceVariantUpdates(saved);
+	return {
+		rebuilt: true,
+		updatedRows: propagation.updatedRows || 0,
+		updatedHotels: propagation.updatedHotels || 0,
+	};
+};
+
+const propagateCalendarBasePricingVariants = async ({ hotelIds = [] } = {}) => {
+	const ids = uniqueValidIds(hotelIds);
+	if (!ids.length) {
+		return {
+			variantDocs: 0,
+			rebuiltVariantDocs: 0,
+			updatedRows: 0,
+			updatedHotels: 0,
+		};
+	}
+	const docs = await PriceVariant.find({
+		active: { $ne: false },
+		hotelIds: { $in: ids.map((hotelId) => ObjectId(hotelId)) },
+		$or: [
+			{ dataType: "price_variant" },
+			{ basePriceSource: "calendar_main_price" },
+			{ "pricingItems.pricingBasis.mode": "calendar_base" },
+		],
+	}).exec();
+	const summary = {
+		variantDocs: docs.length,
+		rebuiltVariantDocs: 0,
+		updatedRows: 0,
+		updatedHotels: 0,
+	};
+	for (const doc of docs) {
+		const result = await rebuildCalendarBasedPriceVariant(doc);
+		if (result.rebuilt) summary.rebuiltVariantDocs += 1;
+		summary.updatedRows += result.updatedRows || 0;
+		summary.updatedHotels += result.updatedHotels || 0;
+	}
+	return summary;
 };
 
 exports.overallCalendarPricingOptions = async (req, res) => {
@@ -5297,15 +7249,303 @@ exports.overallCalendarPricingOptions = async (req, res) => {
 					.lean()
 					.exec()
 			: [];
+		const priceVariantData = hotelIds.length
+			? await PriceVariant.find({
+					active: { $ne: false },
+					hotelIds: { $in: hotelIds.map((hotelId) => ObjectId(hotelId)) },
+			  })
+					.sort({ createdAt: -1 })
+					.limit(200)
+					.lean()
+					.exec()
+			: [];
+		const hotelMap = new Map(
+			context.hotels.map((hotel) => [normalizeId(hotel._id), hotel])
+		);
 		return res.json({
 			hotels: context.hotels.map(serializeCalendarHotel),
 			agents: agents.map(serializeCalendarAgent),
+			priceVariantData: priceVariantData.map((item) =>
+				serializePriceVariant(item, hotelMap)
+			),
 		});
 	} catch (error) {
 		console.error("overallCalendarPricingOptions error:", error);
 		return res
 			.status(500)
 			.json({ error: "Could not load calendar pricing options" });
+	}
+};
+
+exports.overallPriceVariantOptions = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "settings");
+		if (!context) return;
+		const hotelIds = context.hotels.map((hotel) => normalizeId(hotel._id));
+		const hotelMap = new Map(
+			context.hotels.map((hotel) => [normalizeId(hotel._id), hotel])
+		);
+		const priceVariantData = hotelIds.length
+			? await PriceVariant.find({
+					active: { $ne: false },
+					hotelIds: { $in: hotelIds.map((hotelId) => ObjectId(hotelId)) },
+			  })
+					.sort({ createdAt: -1 })
+					.limit(200)
+					.lean()
+					.exec()
+			: [];
+		return res.json({
+			hotels: context.hotels.map(serializeCalendarHotel),
+			priceVariantData: priceVariantData.map((item) =>
+				serializePriceVariant(item, hotelMap)
+			),
+		});
+	} catch (error) {
+		console.error("overallPriceVariantOptions error:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not load price variants options" });
+	}
+};
+
+exports.saveOverallPriceVariant = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "settings");
+		if (!context) return;
+		const body = req.body || {};
+		const variantMode = isPricingVariantRequest(body);
+		const hotelIds = requestedCalendarHotelIds(body);
+		const dates = [
+			...new Set(
+				(Array.isArray(body.dates) ? body.dates : [])
+					.map(toCalendarDateKey)
+					.filter(Boolean)
+			),
+		].sort();
+		const calendarType = body.calendarType === "gregorian" ? "gregorian" : "hijri";
+		const periodMode = variantMode
+			? "custom"
+			: body.periodMode === "custom"
+			  ? "custom"
+			  : "months";
+		const periods = variantMode ? [] : normalizePriceVariantPeriods(body, dates);
+
+		if (
+			!hotelIds.length ||
+			hotelIds.some((hotelId) => !ObjectId.isValid(hotelId))
+		) {
+			return res.status(400).json({
+				error: "Please select at least one valid hotel for price variants",
+			});
+		}
+		const allowedHotelIds = new Set(context.hotels.map((hotel) => normalizeId(hotel._id)));
+		const forbiddenHotelIds = hotelIds.filter((hotelId) => !allowedHotelIds.has(hotelId));
+		if (forbiddenHotelIds.length) {
+			return res
+				.status(403)
+				.json({
+					error: "You cannot save price variants for one or more selected hotels",
+				});
+		}
+
+		const hotelDocs = await HotelDetails.find({ _id: { $in: hotelIds } }).exec();
+		if (hotelDocs.length !== hotelIds.length) {
+			return res.status(404).json({ error: "One or more hotels were not found" });
+		}
+		const hotelMap = new Map(hotelDocs.map((hotel) => [normalizeId(hotel._id), hotel]));
+		const roomPairs = hotelIds.flatMap((hotelId) => {
+			const hotel = hotelMap.get(hotelId);
+			return (Array.isArray(hotel?.roomCountDetails)
+				? hotel.roomCountDetails
+				: []
+			)
+				.filter((room) => room?.activeRoom !== false)
+				.map((roomDoc) => ({
+					hotel,
+					roomDoc,
+					room: serializePriceVariantRoom(hotel, roomDoc),
+				}))
+				.filter((entry) => entry.room.roomId);
+		});
+		const activeRoomDocs = roomPairs.map((entry) => entry.roomDoc);
+		const serializedRooms = roomPairs.map((entry) => entry.room);
+		if (!serializedRooms.length) {
+			return res
+				.status(400)
+				.json({ error: "No rooms are available for the selected hotels" });
+		}
+		if (variantMode) {
+			const readinessByHotel = hotelIds.map((hotelId) => {
+				const hotel = hotelMap.get(hotelId);
+				const readiness = validateRoomsReadyForPricingVariants(hotel);
+				return {
+					hotelId,
+					hotelName: hotel?.hotelName || "",
+					...readiness,
+					missingRooms: readiness.missingRooms.map((room) => ({
+						...room,
+						hotelId,
+						hotelName: hotel?.hotelName || "",
+					})),
+				};
+			});
+			const missingRooms = readinessByHotel.flatMap(
+				(readiness) => readiness.missingRooms
+			);
+			const hotelsWithoutRooms = readinessByHotel
+				.filter((readiness) => !readiness.activeRooms.length)
+				.map((readiness) => ({
+					hotelId: readiness.hotelId,
+					hotelName: readiness.hotelName,
+				}));
+			if (missingRooms.length || hotelsWithoutRooms.length) {
+				return res.status(400).json({
+					error:
+						"Please add the main calendar/base price for every active room before creating price variants",
+					missingRooms: missingRooms.slice(0, 25),
+					hotelsWithoutRooms,
+				});
+			}
+		}
+
+		const pricingItems = variantMode
+			? await buildPricingVariantItemsForRooms({
+					body,
+					calendarType,
+					rooms: serializedRooms,
+					roomDocs: activeRoomDocs,
+			  })
+			: await buildPriceVariantItemsForRooms({
+					body,
+					dates,
+					calendarType,
+					rooms: serializedRooms,
+					periods,
+			  });
+		if (!pricingItems.ok) {
+			return res.status(400).json({ error: pricingItems.error });
+		}
+
+		const priceVariantDataId = normalizeId(
+			body.priceVariantDataId || body._id
+		);
+		let existingDoc = null;
+		if (priceVariantDataId) {
+			if (!ObjectId.isValid(priceVariantDataId)) {
+				return res.status(400).json({ error: "Valid price variant id is required" });
+			}
+			existingDoc = await PriceVariant.findOne({
+				_id: ObjectId(priceVariantDataId),
+				active: { $ne: false },
+			}).exec();
+			if (!existingDoc) {
+				return res.status(404).json({ error: "Price variants was not found" });
+			}
+			const existingHotelIds = uniqueValidIds(existingDoc.hotelIds);
+			const blockedExistingHotel = existingHotelIds.find(
+				(hotelId) => !allowedHotelIds.has(hotelId)
+			);
+			if (blockedExistingHotel) {
+				return res.status(403).json({
+					error: "You cannot update this price variants",
+				});
+			}
+		}
+
+		const ownerIds = uniqueValidIds(hotelDocs.map((hotel) => hotel.belongsTo));
+		const queryOwnerId = normalizeId(req.query?.ownerId);
+		const ownerId =
+			ownerIds.length === 1
+				? ownerIds[0]
+				: ownerIds.includes(queryOwnerId)
+				  ? queryOwnerId
+				  : null;
+		const roomSelectionPayload = serializedRooms.map((room) => ({
+			hotelId: ObjectId(room.hotelId),
+			roomId: ObjectId(room.roomId),
+			roomType: room.roomType,
+			displayName: room.displayName,
+			displayNameOtherLanguage: room.displayNameOtherLanguage,
+			roomForGender: room.roomForGender,
+		}));
+		const existingItemsById = new Map(
+			(Array.isArray(existingDoc?.pricingItems) ? existingDoc.pricingItems : []).map(
+				(item) => [normalizeId(item._id), item]
+			)
+		);
+		const pricingItemPayload = pricingItems.items.map((item) => {
+			const existingItem = existingItemsById.get(normalizeId(item._id));
+			return {
+				...item,
+				assignedAgents: Array.isArray(existingItem?.assignedAgents)
+					? existingItem.assignedAgents
+					: item.assignedAgents || [],
+			};
+		});
+		const payload = {
+			ownerId: ownerId && ObjectId.isValid(ownerId) ? ObjectId(ownerId) : null,
+			hotelIds: hotelIds.map((hotelId) => ObjectId(hotelId)),
+			roomSelections: roomSelectionPayload,
+			roomPricing: pricingItems.roomPricing,
+			dataType: "price_variant",
+			basePriceSource: variantMode ? "calendar_main_price" : "manual",
+			calendarType,
+			periodMode,
+			hijriYear: variantMode
+				? null
+				: Number.isFinite(Number(body.hijriYear))
+				? Number(body.hijriYear)
+				: null,
+			hijriMonths: variantMode
+				? []
+				: normalizePriceVariantMonths(body.hijriMonths),
+			gregorianYear: variantMode
+				? null
+				: Number.isFinite(Number(body.gregorianYear))
+				? Number(body.gregorianYear)
+				: null,
+			gregorianMonths: variantMode
+				? []
+				: normalizePriceVariantMonths(body.gregorianMonths),
+			startDate: variantMode ? "" : toCalendarDateKey(body.startDate),
+			endDate: variantMode ? "" : toCalendarDateKey(body.endDate),
+			dates: variantMode ? [] : dates,
+			pricingItems: pricingItemPayload,
+			updatedBy: context.actor?._id || null,
+		};
+
+		if (existingDoc) {
+			Object.assign(existingDoc, payload);
+			existingDoc.markModified("pricingItems");
+			existingDoc.markModified("roomPricing");
+			const saved = await existingDoc.save();
+			const propagation = await propagatePriceVariantUpdates(
+				saved,
+				pricingItemPayload.map((item) => normalizeId(item._id)).filter(Boolean)
+			);
+			return res.json({
+				ok: true,
+				action: "update",
+				priceVariantData: serializePriceVariant(saved, hotelMap),
+				propagation,
+			});
+		}
+
+		const created = await PriceVariant.create({
+			...payload,
+			createdBy: context.actor?._id || null,
+		});
+
+		return res.status(201).json({
+			ok: true,
+			action: "create",
+			priceVariantData: serializePriceVariant(created, hotelMap),
+			propagation: { updatedRows: 0, updatedHotels: 0 },
+		});
+	} catch (error) {
+		console.error("saveOverallPriceVariant error:", error);
+		return res.status(500).json({ error: "Could not save price variants" });
 	}
 };
 
@@ -5317,6 +7557,10 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 		const scope = String(body.scope || "general").toLowerCase() === "agents"
 			? "agents"
 			: "general";
+		const pricingOperation =
+			scope === "general" ? normalizeCalendarPricingOperation(body) : "update";
+		const variantAssignmentMode =
+			scope === "agents" && isAgentPriceVariantAssignmentRequest(body);
 		const explicitRows = requestedCalendarRows(body);
 		const explicitRowMode = explicitRows.length > 0;
 		const hotelIds = explicitRowMode
@@ -5336,15 +7580,23 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 			scope === "agents"
 				? uniqueValidIds(Array.isArray(body.agentIds) ? body.agentIds : [body.agentId])
 				: [];
+		const priceVariantSelections = variantAssignmentMode
+			? requestedCalendarPriceVariantSelections(body)
+			: [];
 
 		if (!hotelIds.length || hotelIds.some((hotelId) => !ObjectId.isValid(hotelId))) {
 			return res.status(400).json({ error: "Valid hotel selection is required" });
 		}
-		if (!roomSelections.length) {
+		if (!variantAssignmentMode && !roomSelections.length) {
 			return res.status(400).json({ error: "Please select at least one room" });
 		}
 		if (scope === "agents" && !agentIds.length) {
 			return res.status(400).json({ error: "Please select at least one agent" });
+		}
+		if (variantAssignmentMode && !priceVariantSelections.length) {
+			return res.status(400).json({
+				error: "Please select at least one price variant",
+			});
 		}
 
 		const allowedHotelIds = new Set(context.hotels.map((hotel) => normalizeId(hotel._id)));
@@ -5363,27 +7615,105 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 				.json({ error: "You cannot update one or more selected rooms" });
 		}
 
+		if (variantAssignmentMode) {
+			const hotelDocs = await HotelDetails.find({ _id: { $in: hotelIds } }).exec();
+			if (hotelDocs.length !== hotelIds.length) {
+				return res.status(404).json({ error: "One or more hotels were not found" });
+			}
+			const agentDocs = await User.find(buildCalendarAgentQuery(hotelIds, agentIds))
+				.select("_id name email companyName companyOfficialName")
+				.lean()
+				.exec();
+			if (agentDocs.length !== agentIds.length) {
+				return res.status(404).json({
+					error: "One or more selected agents were not found for these hotels",
+				});
+			}
+			const assignmentResult = await saveAgentPriceVariantAssignments({
+				context,
+				hotelDocs,
+				hotelIds,
+				agentDocs,
+				selections: priceVariantSelections,
+			});
+			if (!assignmentResult.ok) {
+				return res
+					.status(assignmentResult.status || 400)
+					.json({ error: assignmentResult.error });
+			}
+			const hotelMap = new Map(
+				(context.hotels || []).map((hotel) => [normalizeId(hotel._id), hotel])
+			);
+			return res.json({
+				ok: true,
+				scope,
+				assignmentMode: "price_variants",
+				updatedRows: assignmentResult.updatedRows,
+				updatedHotels: assignmentResult.updatedHotels,
+				priceVariantDataList: (assignmentResult.priceVariantData || []).map(
+					(doc) => serializePriceVariant(doc, hotelMap)
+				),
+				summary: {
+					hotels: hotelIds.length,
+					agents: agentIds.length,
+					priceVariants: assignmentResult.assignedPriceVariants || 0,
+					rows: assignmentResult.updatedRows,
+				},
+			});
+		}
+
+		const variantSelectionResult =
+			scope === "agents"
+				? await resolvePriceVariantSelection({
+						context,
+						hotelIds,
+						priceVariantDataId: body.priceVariantDataId,
+						priceVariantItemId: body.priceVariantItemId,
+				  })
+				: { ok: true, selection: null };
+		if (!variantSelectionResult.ok) {
+			return res.status(400).json({ error: variantSelectionResult.error });
+		}
+		const variantSelection = variantSelectionResult.selection;
+		const basePricingValues = priceVariantValues(variantSelection, {
+			status: body.status,
+			sellingPrice: body.sellingPrice ?? body.price,
+			commissionPercent: body.commissionPercent ?? body.commission,
+		});
+
 		const plan = explicitRowMode
 			? null
 			: buildPricingPlan({
 					scope,
 					dates: body.dates,
-					sellingPrice: body.sellingPrice ?? body.price,
-					commissionPercent: body.commissionPercent ?? body.commission,
-					status: body.status,
+					sellingPrice: basePricingValues.sellingPrice,
+					commissionPercent: basePricingValues.commissionPercent,
+					status: basePricingValues.status,
 					calendarType: body.calendarType,
 			  });
-		if (!explicitRowMode && !plan.ok) {
-			return res.status(400).json({ error: plan.error });
+		const decoratedPlan = plan
+			? decoratePlanWithPriceVariant(plan, variantSelection)
+			: null;
+		if (!explicitRowMode && !decoratedPlan.ok) {
+			return res.status(400).json({ error: decoratedPlan.error });
 		}
 		if (explicitRowMode) {
 			const invalidRow = explicitRows.find((row) => {
+				const rowPricingValues = priceVariantValuesForRoom(
+					variantSelection,
+					{
+						status: row.status,
+						sellingPrice: row.sellingPrice,
+						commissionPercent: row.commissionPercent,
+					},
+					row
+				);
 				const rowPlan = buildPricingPlan({
 					scope,
 					dates: [row.calendarDate],
-					sellingPrice: row.sellingPrice,
-					commissionPercent: row.commissionPercent,
-					status: row.status,
+					sellingPrice: rowPricingValues.sellingPrice,
+					commissionPercent: rowPricingValues.commissionPercent,
+					status: rowPricingValues.status,
 					calendarType: body.calendarType,
 				});
 				return !rowPlan.ok;
@@ -5405,41 +7735,11 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 						"This would update too many rows. Please split it into smaller batches.",
 			  }
 			: ensurePlanSize({
-					dates: plan.dates,
+					dates: decoratedPlan.dates,
 					roomCount: roomSelections.length,
 					agentCount: scope === "agents" ? agentIds.length : 1,
 			  });
 		if (!sizeCheck.ok) return res.status(400).json({ error: sizeCheck.error });
-
-		let fallbackPlan = null;
-		if (scope === "general") {
-			const fallbackDate = explicitRowMode
-				? explicitRows[0]?.calendarDate
-				: plan?.dates?.[0];
-			fallbackPlan = buildPricingPlan({
-				scope,
-				dates: fallbackDate ? [fallbackDate] : [],
-				sellingPrice: body.sellingPrice ?? body.price,
-				commissionPercent: body.commissionPercent ?? body.commission,
-				status: body.status,
-				calendarType: body.calendarType,
-			});
-			if ((!fallbackPlan.ok || fallbackPlan.blocked) && explicitRowMode) {
-				const firstOpenRow = explicitRows.find(
-					(row) => row.status !== "blocked" && Number(row.sellingPrice) > 0
-				);
-				if (firstOpenRow) {
-					fallbackPlan = buildPricingPlan({
-						scope,
-						dates: [firstOpenRow.calendarDate],
-						sellingPrice: firstOpenRow.sellingPrice,
-						commissionPercent: firstOpenRow.commissionPercent,
-						status: "open",
-						calendarType: body.calendarType,
-					});
-				}
-			}
-		}
 
 		const hotelDocs = await HotelDetails.find({ _id: { $in: hotelIds } }).exec();
 		if (hotelDocs.length !== hotelIds.length) {
@@ -5459,6 +7759,23 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 				missingRooms: [missingRoom],
 			});
 		}
+		const defaultDateSet = new Set(decoratedPlan?.dates || []);
+		if (scope === "general" && pricingOperation === "add") {
+			const duplicateRows = findGeneralCalendarPricingDuplicates({
+				hotelDocs,
+				roomSelections,
+				explicitRows,
+				defaultDates: [...defaultDateSet],
+			});
+			if (duplicateRows.length) {
+				return res.status(409).json({
+					error:
+						"Main calendar pricing already exists for one or more selected rooms and dates. Please use the Update tab to change existing pricing.",
+					duplicates: duplicateRows.slice(0, 50),
+					duplicateCount: duplicateRows.length,
+				});
+			}
+		}
 
 		const agentDocs =
 			scope === "agents"
@@ -5472,11 +7789,9 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 				error: "One or more selected agents were not found for these hotels",
 			});
 		}
-		const defaultDateSet = new Set(plan?.dates || []);
 		const agentSet = new Set(agentIds.map(normalizeId));
 		const agentMap = new Map(agentDocs.map((agent) => [normalizeId(agent._id), agent]));
 		let updatedRows = 0;
-		let fallbackPricingUpdatedRooms = 0;
 		const updatedHotels = [];
 		const calendarType = body.calendarType === "gregorian" ? "gregorian" : "hijri";
 
@@ -5494,9 +7809,6 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 					(room) => normalizeId(room?._id) === selection.roomId
 				);
 				const room = roomToPlain(rooms[roomIndex]);
-				if (scope === "general" && applyRoomFallbackPricing(rooms[roomIndex], fallbackPlan)) {
-					fallbackPricingUpdatedRooms += 1;
-				}
 				const roomRows = explicitRowMode
 					? explicitRows.filter(
 							(row) =>
@@ -5511,27 +7823,62 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 					const nextRows = [];
 					if (explicitRowMode) {
 						roomRows.forEach((row) => {
+							const rowPricingValues = priceVariantValuesForRoom(
+								variantSelection,
+								{
+									status: row.status,
+									sellingPrice: row.sellingPrice,
+									commissionPercent: row.commissionPercent,
+								},
+								{ ...row, room: rooms[roomIndex] }
+							);
 							const rowPlan = buildPricingPlan({
 								scope,
 								dates: [row.calendarDate],
-								sellingPrice: row.sellingPrice,
-								commissionPercent: row.commissionPercent,
-								status: row.status,
+								sellingPrice: rowPricingValues.sellingPrice,
+								commissionPercent: rowPricingValues.commissionPercent,
+								status: rowPricingValues.status,
 								calendarType,
 							});
 							if (!rowPlan.ok) return;
+							const nextRowPlan = decoratePlanWithPriceVariant(
+								rowPlan,
+								variantSelection
+							);
 							agentIds.forEach((agentId) => {
 								const agent = agentMap.get(normalizeId(agentId));
 								nextRows.push(
-									buildAgentRow(rowPlan, room, row.calendarDate, agent)
+									buildAgentRow(nextRowPlan, room, row.calendarDate, agent)
 								);
 							});
 						});
 					} else {
 						agentIds.forEach((agentId) => {
 							const agent = agentMap.get(normalizeId(agentId));
-							plan.dates.forEach((calendarDate) => {
-								nextRows.push(buildAgentRow(plan, room, calendarDate, agent));
+							decoratedPlan.dates.forEach((calendarDate) => {
+								const roomPricingValues = priceVariantValuesForRoom(
+									variantSelection,
+									basePricingValues,
+									{ ...selection, calendarDate, room: rooms[roomIndex] }
+								);
+								const roomPlan = variantSelection
+									? decoratePlanWithPriceVariant(
+											buildPricingPlan({
+												scope,
+												dates: [calendarDate],
+												sellingPrice: roomPricingValues.sellingPrice,
+												commissionPercent:
+													roomPricingValues.commissionPercent,
+												status: roomPricingValues.status,
+												calendarType,
+											}),
+											variantSelection
+									  )
+									: decoratedPlan;
+								if (!roomPlan.ok) return;
+								nextRows.push(
+									buildAgentRow(roomPlan, room, calendarDate, agent)
+								);
 							});
 						});
 					}
@@ -5559,8 +7906,8 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 										: null;
 								})
 								.filter(Boolean)
-						: plan.dates.map((calendarDate) =>
-								buildGeneralRow(plan, room, calendarDate)
+						: decoratedPlan.dates.map((calendarDate) =>
+								buildGeneralRow(decoratedPlan, room, calendarDate)
 						  );
 					rooms[roomIndex].pricingRate = mergeGeneralCalendarRows(
 						room.pricingRate,
@@ -5576,25 +7923,50 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 			updatedHotels.push(serializeCalendarHotel(hotelMap.get(hotelId) || hotel));
 		}
 
+		const variantPropagation =
+			scope === "general"
+				? await propagateCalendarBasePricingVariants({ hotelIds })
+				: { variantDocs: 0, updatedRows: 0, updatedHotels: 0 };
+
+		const assignedPriceVariant =
+			scope === "agents" && variantSelection
+				? await recordPriceVariantAssignments({
+						selection: variantSelection,
+						agentDocs,
+						hotelIds,
+						actor: context.actor,
+				  })
+				: null;
+
 		return res.json({
 			ok: true,
 			scope,
+			operation: pricingOperation,
 			updatedRows,
 			updatedHotels,
+			priceVariant: variantSelection
+				? {
+						priceVariantDataId: variantSelection.priceVariantDataId,
+						priceVariantItemId: variantSelection.priceVariantItemId,
+						name: variantSelection.item?.name || "",
+						assignedAgents: agentIds.length,
+				  }
+				: null,
+			priceVariantData: assignedPriceVariant
+				? serializePriceVariant(assignedPriceVariant, hotelMap)
+				: null,
 			summary: {
 				days: explicitRowMode
 					? new Set(explicitRows.map((row) => row.calendarDate)).size
-					: plan.dates.length,
+					: decoratedPlan.dates.length,
 				rows: explicitRowMode ? explicitRows.length : undefined,
 				rooms: roomSelections.length,
 				agents: scope === "agents" ? agentIds.length : 0,
-				sellingPrice: plan?.sellingPrice ?? null,
-				rootPrice: plan?.rootPrice ?? null,
-				commissionPercent: plan?.commissionPercent ?? null,
-				blocked: plan?.blocked ?? null,
-				fallbackSellingPrice: fallbackPlan?.ok ? fallbackPlan.sellingPrice : null,
-				fallbackRootPrice: fallbackPlan?.ok ? fallbackPlan.rootPrice : null,
-				fallbackPricingUpdatedRooms,
+				sellingPrice: decoratedPlan?.sellingPrice ?? null,
+				rootPrice: decoratedPlan?.rootPrice ?? null,
+				commissionPercent: decoratedPlan?.commissionPercent ?? null,
+				blocked: decoratedPlan?.blocked ?? null,
+				variantPropagation,
 			},
 		});
 	} catch (error) {

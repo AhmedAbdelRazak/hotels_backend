@@ -8,6 +8,10 @@ const User = require("../models/user");
 const HotelDetails = require("../models/hotel_details");
 const { emitHotelNotificationRefresh } = require("../services/notificationEvents");
 const { trackAccountUpdate } = require("../services/activityTracker");
+const {
+	normalizePriceVariantAssignments,
+	syncPriceVariantAssignmentsForAgent,
+} = require("../services/priceVariantAssignmentService");
 
 const isValidObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -127,7 +131,7 @@ const ROLE_BY_DESCRIPTION = {
 };
 
 const USER_AUTH_SELECT =
-	"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo agentApproval applicationReview";
+	"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances priceVariantAssignments agentPayoutDetails role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo agentApproval applicationReview";
 
 const buildAuthUserPayload = (user = {}) => ({
 	_id: user._id,
@@ -148,6 +152,7 @@ const buildAuthUserPayload = (user = {}) => ({
 	agentCommercialModel: user.agentCommercialModel,
 	agentOpeningWalletCredit: user.agentOpeningWalletCredit,
 	agentWalletOpeningBalances: user.agentWalletOpeningBalances,
+	priceVariantAssignments: user.priceVariantAssignments,
 	agentPayoutDetails: user.agentPayoutDetails || {},
 	hotelIdWork: user.hotelIdWork,
 	hotelIdsWork: user.hotelIdsWork,
@@ -1103,6 +1108,8 @@ exports.updateHotelStaffUser = async (req, res) => {
 		}
 
 		const payload = req.body || {};
+		let shouldSyncPriceVariantAssignments = false;
+		let normalizedPriceVariantAssignmentsForSync = null;
 		const payloadRoleDescriptions = [
 			...(Array.isArray(payload.roleDescriptions) ? payload.roleDescriptions : []),
 			payload.roleDescription,
@@ -1546,7 +1553,55 @@ exports.updateHotelStaffUser = async (req, res) => {
 			};
 		}
 
+		const priceVariantAssignmentsInput = payload.priceVariantAssignments;
+		if (
+			Object.prototype.hasOwnProperty.call(payload, "priceVariantAssignments")
+		) {
+			shouldSyncPriceVariantAssignments = true;
+			const nextStaffIsAgent = userLooksLikeAgent(staffUser);
+			const currentHotelIds = uniqueValidObjectIds([
+				staffUser.hotelIdWork,
+				...(Array.isArray(staffUser.hotelIdsWork)
+					? staffUser.hotelIdsWork
+					: []),
+				...(Array.isArray(staffUser.hotelsToSupport)
+					? staffUser.hotelsToSupport
+					: []),
+				...(Array.isArray(staffUser.hotelIdsOwner)
+					? staffUser.hotelIdsOwner
+					: []),
+			]);
+			if (!nextStaffIsAgent && Array.isArray(priceVariantAssignmentsInput)) {
+				const hasAssignments = priceVariantAssignmentsInput.some(
+					(assignment) => assignment && typeof assignment === "object"
+				);
+				if (hasAssignments) {
+					return res.status(400).json({
+						error:
+							"Price variant assignments are available for external agents only.",
+					});
+				}
+			}
+			normalizedPriceVariantAssignmentsForSync = nextStaffIsAgent
+				? await normalizePriceVariantAssignments({
+						assignments: priceVariantAssignmentsInput,
+						hotelIds: currentHotelIds,
+						actor: req.profile,
+				  })
+				: [];
+			staffUser.priceVariantAssignments =
+				normalizedPriceVariantAssignmentsForSync;
+		}
+
 		const saved = await staffUser.save();
+		if (shouldSyncPriceVariantAssignments) {
+			await syncPriceVariantAssignmentsForAgent({
+				agent: saved,
+				assignments: normalizedPriceVariantAssignmentsForSync || [],
+				previousAssignments: staffUserBefore.priceVariantAssignments || [],
+				actor: req.profile,
+			});
+		}
 		await trackAccountUpdate({
 			req,
 			actor: req.profile,
