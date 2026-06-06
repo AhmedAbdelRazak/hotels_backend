@@ -4381,7 +4381,9 @@ exports.createSignupInvitation = async (req, res) => {
 							payload.jobRole
 				  );
 		let priceVariantAssignments = [];
-		if (accountType === "agent") {
+		const canReceivePriceVariantAssignments =
+			accountType === "agent" || roleDescription === "reception";
+		if (canReceivePriceVariantAssignments) {
 			try {
 				priceVariantAssignments = await normalizePriceVariantAssignments({
 					assignments: payload.priceVariantAssignments,
@@ -4393,6 +4395,16 @@ exports.createSignupInvitation = async (req, res) => {
 					error: error.message || "Invalid price variant assignment",
 				});
 			}
+		} else if (
+			Array.isArray(payload.priceVariantAssignments) &&
+			payload.priceVariantAssignments.some(
+				(assignment) => assignment && typeof assignment === "object"
+			)
+		) {
+			return res.status(400).json({
+				error:
+					"Price variant assignments are available for agents and reception only.",
+			});
 		}
 		const invitationPayload = {
 			purpose: SIGNUP_INVITATION_PURPOSE,
@@ -5837,6 +5849,33 @@ const variantOverrideForRoomDate = ({
 	return keys.map((key) => overrideMap.get(key)).find(Boolean) || null;
 };
 
+const normalizeTouchedCalendarRows = (rows = []) =>
+	[
+		...new Map(
+			(Array.isArray(rows) ? rows : [])
+				.map((row = {}) => {
+					const hotelId = normalizeId(row.hotelId);
+					const roomId = normalizeId(row.roomId);
+					const calendarDate = toCalendarDateKey(
+						row.calendarDate || row.date || row.pricingDate
+					);
+					if (!hotelId || !roomId || !calendarDate) return null;
+					return {
+						hotelId,
+						roomId,
+						calendarDate,
+					};
+				})
+				.filter(Boolean)
+				.map((row) => [`${row.hotelId}:${row.roomId}:${row.calendarDate}`, row])
+		).values(),
+	];
+
+const calendarTouchedRowKey = (row = {}) =>
+	`${normalizeId(row.hotelId)}:${normalizeId(row.roomId)}:${toCalendarDateKey(
+		row.calendarDate || row.date || row.pricingDate
+	)}`;
+
 const roomBasePricingSnapshot = (room = {}) => {
 	const plain = roomToPlain(room);
 	const basePrice = roundPricingNumber(
@@ -6999,10 +7038,19 @@ const saveAgentPriceVariantAssignments = async ({
 	};
 };
 
-const propagatePriceVariantUpdates = async (doc = {}, changedItemIds = []) => {
+const propagatePriceVariantUpdates = async (
+	doc = {},
+	changedItemIds = [],
+	{ touchedRows = [] } = {}
+) => {
 	const priceVariantDataId = normalizeId(doc?._id);
 	if (!priceVariantDataId) return { updatedRows: 0, updatedHotels: 0 };
 	const changedIds = new Set(uniqueValidIds(changedItemIds));
+	const normalizedTouchedRows = normalizeTouchedCalendarRows(touchedRows);
+	const touchedRowKeys = new Set(normalizedTouchedRows.map(calendarTouchedRowKey));
+	const touchedHotelIds = uniqueValidIds(
+		normalizedTouchedRows.map((row) => row.hotelId)
+	);
 	const items = (Array.isArray(doc.pricingItems) ? doc.pricingItems : []).filter(
 		(item) => {
 			const itemId = normalizeId(item?._id);
@@ -7011,9 +7059,13 @@ const propagatePriceVariantUpdates = async (doc = {}, changedItemIds = []) => {
 	);
 	if (!items.length) return { updatedRows: 0, updatedHotels: 0 };
 	const itemsById = new Map(items.map((item) => [normalizeId(item._id), item]));
-	const hotelDocs = await HotelDetails.find({
+	const hotelQuery = {
 		"roomCountDetails.agentPricingRate.priceVariantDataId": priceVariantDataId,
-	}).exec();
+	};
+	if (touchedHotelIds.length) {
+		hotelQuery._id = { $in: touchedHotelIds.map((hotelId) => ObjectId(hotelId)) };
+	}
+	const hotelDocs = await HotelDetails.find(hotelQuery).exec();
 	let updatedRows = 0;
 	let updatedHotels = 0;
 	for (const hotel of hotelDocs) {
@@ -7030,6 +7082,18 @@ const propagatePriceVariantUpdates = async (doc = {}, changedItemIds = []) => {
 			rows.forEach((row) => {
 				const rowVariantDataId = normalizeId(row?.priceVariantDataId);
 				if (rowVariantDataId !== priceVariantDataId) return;
+				if (
+					touchedRowKeys.size &&
+					!touchedRowKeys.has(
+						calendarTouchedRowKey({
+							hotelId,
+							roomId,
+							calendarDate: row.calendarDate,
+						})
+					)
+				) {
+					return;
+				}
 				const itemId = normalizeId(row?.priceVariantItemId);
 				const item = itemsById.get(itemId);
 				if (!item) return;
@@ -7201,7 +7265,247 @@ const rebuildCalendarBasedPriceVariant = async (doc = {}) => {
 	};
 };
 
-const propagateCalendarBasePricingVariants = async ({ hotelIds = [] } = {}) => {
+const buildCalendarBasedVariantPeriodPayload = ({
+	item = {},
+	roomDoc = {},
+	calendarDate = "",
+	calendarType = "hijri",
+} = {}) => {
+	const base = resolveCalendarBasePricingForRoom(roomDoc, calendarDate);
+	const itemStatus = item.status === "blocked" ? "blocked" : "open";
+	const commissionPercent = Math.min(
+		100,
+		Math.max(0, roundPricingNumber(item.commissionPercent, 0))
+	);
+	const baseUnavailable = base.status === "missing";
+	const periodStatus =
+		itemStatus === "blocked" || baseUnavailable || base.status === "blocked"
+			? "blocked"
+			: "open";
+	const derivedSellingPrice = applyDerivedPricingAdjustment(
+		base.sellingPrice,
+		normalizeVariantPricingBasis(item)
+	);
+	const periodSellingPrice =
+		periodStatus === "blocked" ? 0 : derivedSellingPrice;
+	const periodCommission =
+		periodStatus === "blocked" ? 0 : commissionPercent;
+	const periodPlan = buildPricingPlan({
+		scope: "price-variants",
+		dates: [calendarDate],
+		sellingPrice: periodSellingPrice,
+		commissionPercent: periodCommission,
+		status: periodStatus,
+		calendarType,
+		source: "price-variant",
+	});
+	if (!periodPlan.ok) {
+		return { ok: false, error: periodPlan.error };
+	}
+	return {
+		ok: true,
+		payload: {
+			periodKey: calendarDate,
+			label: calendarDate,
+			calendarType,
+			periodMode: "custom",
+			year: null,
+			month: null,
+			startDate: calendarDate,
+			endDate: calendarDate,
+			status: periodPlan.blocked ? "blocked" : "open",
+			sellingPrice: periodPlan.sellingPrice,
+			mainCalendarPrice: roundPricingNumber(
+				base.mainCalendarPrice ?? base.sellingPrice,
+				0
+			),
+			commissionPercent: periodPlan.commissionPercent,
+			baseSource: base.source || "",
+			manualOverride: false,
+			rootPrice: periodPlan.rootPrice,
+			color: periodPlan.color,
+		},
+	};
+};
+
+const refreshCalendarBasedPriceVariantDates = async (doc = {}, touchedRows = []) => {
+	const docHotelIds = uniqueValidIds(doc?.hotelIds);
+	const docHotelIdSet = new Set(docHotelIds);
+	const variantDateSet = new Set(nextPricingVariantDateKeys());
+	const rowsByRoomKey = new Map();
+	normalizeTouchedCalendarRows(touchedRows).forEach((row) => {
+		if (!docHotelIdSet.has(row.hotelId) || !variantDateSet.has(row.calendarDate)) {
+			return;
+		}
+		const key = `${row.hotelId}:${row.roomId}`;
+		if (!rowsByRoomKey.has(key)) rowsByRoomKey.set(key, new Set());
+		rowsByRoomKey.get(key).add(row.calendarDate);
+	});
+	if (!rowsByRoomKey.size) {
+		return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+	}
+
+	const touchedHotelIds = uniqueValidIds(
+		[...rowsByRoomKey.keys()].map((key) => key.split(":")[0])
+	);
+	const hotelDocs = await HotelDetails.find({
+		_id: { $in: touchedHotelIds.map((hotelId) => ObjectId(hotelId)) },
+	}).exec();
+	const hotelMap = new Map(
+		hotelDocs.map((hotel) => [normalizeId(hotel._id), hotel])
+	);
+	const globalItemsById = new Map(
+		(Array.isArray(doc.pricingItems) ? doc.pricingItems : []).map((item) => [
+			normalizeId(item._id),
+			item,
+		])
+	);
+	const calendarType = doc.calendarType === "gregorian" ? "gregorian" : "hijri";
+	const touchedItemIds = new Set();
+	const propagatedRows = [];
+	let docChanged = false;
+
+	(Array.isArray(doc.roomPricing) ? doc.roomPricing : []).forEach((roomPricing) => {
+		const hotelId = normalizeId(roomPricing.hotelId);
+		const roomId = normalizeId(roomPricing.roomId);
+		const dateSet = rowsByRoomKey.get(`${hotelId}:${roomId}`);
+		if (!dateSet?.size) return;
+		const hotel = hotelMap.get(hotelId);
+		const roomDoc = (Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails
+			: []
+		).find((room) => normalizeId(room?._id) === roomId);
+		if (!roomDoc) return;
+		(Array.isArray(roomPricing.pricingItems)
+			? roomPricing.pricingItems
+			: []
+		).forEach((roomItem) => {
+			const itemId = normalizeId(roomItem.priceVariantItemId);
+			const globalItem = globalItemsById.get(itemId) || roomItem;
+			if (!itemId || !globalItem) return;
+			const periodPrices = Array.isArray(roomItem.periodPrices)
+				? [...roomItem.periodPrices]
+				: [];
+			const periodIndexByDate = new Map();
+			periodPrices.forEach((period, index) => {
+				const date = toCalendarDateKey(
+					period.startDate || period.periodKey || period.label
+				);
+				if (date) periodIndexByDate.set(date, index);
+			});
+			let itemChanged = false;
+			dateSet.forEach((calendarDate) => {
+				const builtPeriod = buildCalendarBasedVariantPeriodPayload({
+					item: globalItem,
+					roomDoc,
+					calendarDate,
+					calendarType,
+				});
+				if (!builtPeriod.ok) {
+					throw new Error(
+						`Could not refresh ${globalItem.name || "price variant"} / ${
+							roomPricing.displayName || roomPricing.roomType || "Room"
+						} / ${calendarDate}: ${builtPeriod.error}`
+					);
+				}
+				const existingIndex = periodIndexByDate.get(calendarDate);
+				if (Number.isInteger(existingIndex)) {
+					periodPrices[existingIndex] = {
+						...periodPrices[existingIndex],
+						...builtPeriod.payload,
+					};
+				} else {
+					periodIndexByDate.set(calendarDate, periodPrices.length);
+					periodPrices.push(builtPeriod.payload);
+				}
+				itemChanged = true;
+				touchedItemIds.add(itemId);
+				propagatedRows.push({ hotelId, roomId, calendarDate });
+			});
+			if (!itemChanged) return;
+			periodPrices.sort((left, right) =>
+				toCalendarDateKey(left.startDate || left.periodKey).localeCompare(
+					toCalendarDateKey(right.startDate || right.periodKey)
+				)
+			);
+			const representativePeriod =
+				periodPrices.find((period) => period.status === "open") ||
+				periodPrices[0] ||
+				{};
+			roomItem.status = representativePeriod.status || globalItem.status || "open";
+			roomItem.sellingPrice = roundPricingNumber(
+				representativePeriod.sellingPrice,
+				0
+			);
+			roomItem.commissionPercent = roundPricingNumber(
+				representativePeriod.commissionPercent,
+				0
+			);
+			roomItem.rootPrice = roundPricingNumber(representativePeriod.rootPrice, 0);
+			roomItem.color = representativePeriod.color || "";
+			roomItem.periodPrices = periodPrices;
+			docChanged = true;
+		});
+	});
+
+	if (!docChanged) {
+		return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+	}
+
+	const openRepresentativesByItemId = new Map();
+	const fallbackRepresentativesByItemId = new Map();
+	(Array.isArray(doc.roomPricing) ? doc.roomPricing : []).forEach((roomPricing) => {
+		(Array.isArray(roomPricing.pricingItems)
+			? roomPricing.pricingItems
+			: []
+		).forEach((roomItem) => {
+			const itemId = normalizeId(roomItem.priceVariantItemId);
+			if (!itemId) return;
+			const periods = Array.isArray(roomItem.periodPrices)
+				? roomItem.periodPrices
+				: [];
+			const openPeriod = periods.find((period) => period.status === "open");
+			if (openPeriod && !openRepresentativesByItemId.has(itemId)) {
+				openRepresentativesByItemId.set(itemId, openPeriod);
+			}
+			if (periods[0] && !fallbackRepresentativesByItemId.has(itemId)) {
+				fallbackRepresentativesByItemId.set(itemId, periods[0]);
+			}
+		});
+	});
+	(Array.isArray(doc.pricingItems) ? doc.pricingItems : []).forEach((item) => {
+		const itemId = normalizeId(item._id);
+		const representativePeriod =
+			openRepresentativesByItemId.get(itemId) ||
+			fallbackRepresentativesByItemId.get(itemId);
+		if (!representativePeriod) return;
+		item.sellingPrice = roundPricingNumber(representativePeriod.sellingPrice, 0);
+		item.commissionPercent = roundPricingNumber(
+			representativePeriod.commissionPercent,
+			0
+		);
+		item.rootPrice = roundPricingNumber(representativePeriod.rootPrice, 0);
+		item.color = representativePeriod.color || "";
+	});
+
+	doc.markModified("roomPricing");
+	doc.markModified("pricingItems");
+	const saved = await doc.save();
+	const propagation = await propagatePriceVariantUpdates(saved, [...touchedItemIds], {
+		touchedRows: propagatedRows,
+	});
+	return {
+		rebuilt: true,
+		partial: true,
+		updatedRows: propagation.updatedRows || 0,
+		updatedHotels: propagation.updatedHotels || 0,
+	};
+};
+
+const propagateCalendarBasePricingVariants = async ({
+	hotelIds = [],
+	touchedRows = [],
+} = {}) => {
 	const ids = uniqueValidIds(hotelIds);
 	if (!ids.length) {
 		return {
@@ -7226,8 +7530,11 @@ const propagateCalendarBasePricingVariants = async ({ hotelIds = [] } = {}) => {
 		updatedRows: 0,
 		updatedHotels: 0,
 	};
+	const normalizedTouchedRows = normalizeTouchedCalendarRows(touchedRows);
 	for (const doc of docs) {
-		const result = await rebuildCalendarBasedPriceVariant(doc);
+		const result = normalizedTouchedRows.length
+			? await refreshCalendarBasedPriceVariantDates(doc, normalizedTouchedRows)
+			: await rebuildCalendarBasedPriceVariant(doc);
 		if (result.rebuilt) summary.rebuiltVariantDocs += 1;
 		summary.updatedRows += result.updatedRows || 0;
 		summary.updatedHotels += result.updatedHotels || 0;
@@ -7793,6 +8100,7 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 		const agentMap = new Map(agentDocs.map((agent) => [normalizeId(agent._id), agent]));
 		let updatedRows = 0;
 		const updatedHotels = [];
+		const touchedGeneralCalendarRows = [];
 		const calendarType = body.calendarType === "gregorian" ? "gregorian" : "hijri";
 
 		for (const hotel of hotelDocs) {
@@ -7914,6 +8222,13 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 						nextRows,
 						roomDateSet
 					);
+					nextRows.forEach((row) => {
+						touchedGeneralCalendarRows.push({
+							hotelId: selection.hotelId,
+							roomId: selection.roomId,
+							calendarDate: row.calendarDate,
+						});
+					});
 					updatedRows += nextRows.length;
 				}
 			});
@@ -7925,7 +8240,10 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 
 		const variantPropagation =
 			scope === "general"
-				? await propagateCalendarBasePricingVariants({ hotelIds })
+				? await propagateCalendarBasePricingVariants({
+						hotelIds,
+						touchedRows: touchedGeneralCalendarRows,
+				  })
 				: { variantDocs: 0, updatedRows: 0, updatedHotels: 0 };
 
 		const assignedPriceVariant =

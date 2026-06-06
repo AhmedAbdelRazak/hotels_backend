@@ -963,7 +963,9 @@ exports.propertySignup = async (req, res) => {
 				isPublicAgentApplication && invitedCommercialModel !== "commission_only"
 					? nonNegativeMoney(applicantOpeningWalletCredit)
 					: 0;
-			const invitedPriceVariantAssignments = isPublicAgentApplication
+			const canReceiveInvitedPriceVariants =
+				isPublicAgentApplication || publicRoleDescription === "reception";
+			const invitedPriceVariantAssignments = canReceiveInvitedPriceVariants
 				? await normalizePriceVariantAssignments({
 						assignments:
 							signupInvitation?.priceVariantAssignments ||
@@ -1038,7 +1040,7 @@ exports.propertySignup = async (req, res) => {
 				};
 			}
 			await applicant.save();
-			if (isPublicAgentApplication && invitedPriceVariantAssignments.length) {
+			if (canReceiveInvitedPriceVariants && invitedPriceVariantAssignments.length) {
 				await syncPriceVariantAssignmentsForAgent({
 					agent: applicant,
 					assignments: invitedPriceVariantAssignments,
@@ -1408,6 +1410,9 @@ exports.createHotelStaffUser = async (req, res) => {
 		const isAgentOnlyAccount =
 			normalizedRoleDescriptions.length === 1 &&
 			normalizedRoleDescriptions.includes("ordertaker");
+		const canReceivePriceVariantAssignments =
+			normalizedRoleDescriptions.includes("ordertaker") ||
+			normalizedRoleDescriptions.includes("reception");
 		const invalidRole = normalizedRoleDescriptions.find(
 			(description) => !roleByDescription[description]
 		);
@@ -1553,7 +1558,19 @@ exports.createHotelStaffUser = async (req, res) => {
 			: false;
 		const pendingAgentApproval = isAgentOnlyAccount && !creatorCanApproveAgent;
 		const agentApprovalActor = buildAgentApprovalActor(creator);
-		const normalizedPriceVariantAssignments = isAgentOnlyAccount
+		if (
+			!canReceivePriceVariantAssignments &&
+			Array.isArray(priceVariantAssignments) &&
+			priceVariantAssignments.some(
+				(assignment) => assignment && typeof assignment === "object"
+			)
+		) {
+			return res.status(400).json({
+				error:
+					"Price variant assignments are available for agents and reception only.",
+			});
+		}
+		const normalizedPriceVariantAssignments = canReceivePriceVariantAssignments
 			? await normalizePriceVariantAssignments({
 					assignments: priceVariantAssignments,
 					hotelIds: uniqueHotelIds,
@@ -1623,7 +1640,7 @@ exports.createHotelStaffUser = async (req, res) => {
 		});
 
 		await staffUser.save();
-		if (isAgentOnlyAccount && normalizedPriceVariantAssignments.length) {
+		if (canReceivePriceVariantAssignments && normalizedPriceVariantAssignments.length) {
 			await syncPriceVariantAssignmentsForAgent({
 				agent: staffUser,
 				assignments: normalizedPriceVariantAssignments,

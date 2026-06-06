@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-06-03
+Audited: 2026-06-06
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -72,6 +72,7 @@ Role Data Model Notes
   - accessTo: feature-level access such as newReservation and ownReservations.
   - activeUser: account activation gate.
   - companyName, agentCommercialModel, agentApproval, wallet opening balances: agent/ordertaker finance context.
+  - priceVariantAssignments: assigned Price Variant references for agents and reception users. Each assignment stores priceVariantDataId, priceVariantItemId, pricing names, hotelIds, assignedAt, and assignedBy.
   - applicationReview: public signup review state for agent and job applicants before hotel approval.
 
 Critical Backend Authorization Helpers
@@ -79,6 +80,7 @@ Critical Backend Authorization Helpers
   - createHotelStaffUser maps role descriptions to numeric roles and validates that the creator can create accounts for the requested hotels.
   - Finance and reservation employee roles can create external agent/order-taker accounts in specific paths.
   - isPlatformSuperAdmin is the global admin source for auth middleware and staff creation. isAuth, isAdmin, isHotelOwner, agent approval, and staff-creation checks should use this broad helper instead of only checking a single configured id or role number.
+  - createHotelStaffUser and signup invitation completion accept priceVariantAssignments only for ordertaker/agent and reception accounts. Other roles must receive a clear validation error if assignments are supplied.
 - controllers/overall_dashboard.js
   - requireOverallSection, canAccessOverallSection, and getAccessibleOverallHotels are the main overall-dashboard guards.
   - Owner-like access is not the same as global access. Hotel System Admins and scoped managers must still be limited to assigned hotels.
@@ -98,6 +100,7 @@ Critical Backend Authorization Helpers
   - isPlatformSuperAdmin must be treated as an unrestricted staff/account-management actor. Super admins can update any hotel staff or owner-like account through PUT /hotel-staff/:staffId/:hotelId/:userId.
   - updateHotelStaffUser must recognize root owner accounts by _id === ownerId and hotelIdsOwner, not only belongsToId. Root owner accounts normally have no belongsToId and should not be rejected as "not belonging to this hotel".
   - Agent and employee activation from the overall activate-accounts screen should still go through updateHotelStaffUser, not the Hotel System Admin endpoint, so activeUser, agentApproval/applicationReview, approvedHotelIds, notifications, and ActivityTracker updates remain consistent.
+  - updateHotelStaffUser may normalize/sync priceVariantAssignments for agents and reception users. It must reject non-empty assignments for roles that are neither ordertaker/agent nor reception.
 - controllers/agent_wallet.js
   - Financial access guards protect agent wallet, claims, transactions, and commission review.
   - Agent wallets are global per agent, not per hotel. Wallet ledger rows should use agentId as the financial scope; hotelId is nullable and legacyHotelId is only audit/display context from older hotel-scoped records.
@@ -123,7 +126,7 @@ Primary Route Files And API Areas
 - routes/reservations.js
   - Reservation creation, update, search/list, import preview/commit, pending confirmations, occupancy/current/range reports, payment links, guest emails, OTA dumps, source/status reports, and owner aggregation reports.
 - routes/overall_dashboard.js
-  - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, hotel-system-admin actions, and settings.
+  - Multi-hotel overall dashboard endpoints: summary, reservations, exports, pending reservations, financial actions/report export, housekeeping, accounts, hotel-system-admin actions, settings, room manager, calendar pricing, and Price Variants.
 - routes/admin_global_hotel_settings.js
   - Platform-admin global hotel settings endpoints under /api/admin/global-hotel-settings/*.
   - These routes are separate from /api/overall-dashboard/* and are meant for all-hotels platform administration, not owner-scoped hotel-management screens.
@@ -155,6 +158,11 @@ Core Models
 - models/user.js
   - Account, role, staff scope, agent/company, and access data.
   - notificationAcknowledgements stores per-user read receipts for generated dashboard notifications. Use stable ack keys so resolved agent-facing wallet/reservation notifications disappear after click without hiding pending operational queues.
+  - priceVariantAssignments stores the user's assigned Price Variant selections for agent/reception pricing permissions.
+- models/price_variant.js
+  - Stores Price Variants in the pricevariants collection. Use Price Variant naming only.
+  - Documents are scoped by ownerId/hotelIds and contain roomSelections, pricingItems, roomPricing, basePriceSource, active state, and created/updated actor ids.
+  - Current business mode uses basePriceSource = calendar_main_price so variant day rows derive from the main/general calendar price or room basePrice fallback.
 - models/signup_invitation.js
   - Stores short public signup invitation records for /signup?invite=<code>. Codes are stored only as SHA-256 hashes; payloads include signed invitation scope such as account type, hotels, hotel names, role, agent commercial model, optional prefill data, creator, and expiry.
 - models/hotel_details.js
@@ -194,6 +202,10 @@ Important Services
   - The policy can set reservation_status/state to Pending Confirmation for operational staff flows, or keep client-facing status confirmed while pendingConfirmation.status="pending" drives the hotel queue.
 - services/reservationPricing.js
   - Reservation pricing calculations and shared pricing behavior.
+- services/priceVariantAssignmentService.js
+  - Normalizes selected Price Variant assignments, validates selected variants against the user's assigned hotel ids, rejects blocked/non-priced variant items, and syncs PriceVariant.pricingItems.assignedAgents snapshots.
+- services/priceVariantNameTranslator.js
+  - Uses the configured OpenAI backend support to translate the single visible Price Variant name between Arabic and English before saving name/nameOtherLanguage.
 - services/agentRoomOverrides.js
   - Shared helpers for per-agent room inventory/pricing overrides, agent identity resolution, and authorization checks for agent-scoped availability.
 - services/activityTracker.js
@@ -268,9 +280,10 @@ Critical Workflows To Protect
   - Converting a Hotel System Admin back to hotel manager/reception/finance/etc. is handled through the hotel-staff update route. That route must allow accounts scoped by hotelIdsOwner/hotelsToSupport, then clear hotelIdsOwner for non-system-admin non-root-owner accounts and restore belongsToId to the hotel owner.
   - Account create/update routes must call services/activityTracker.js. Staff creation uses hotel_staff_create, staff updates use hotel_staff_update, and Hotel System Admin create/update uses overall_system_admin_create / overall_system_admin_update.
   - Overall create-account is a two-mode frontend flow, but backend validation remains authoritative. Internal Staff mode must receive explicit hotel scope and a non-agent staff role; External Agents mode must receive explicit hotel scope and ordertaker/agent role data. Backend account creation and signup invitation creation should reject missing or mismatched hotel/role scope even if the frontend already validates it.
+  - Overall create-account may include priceVariantAssignments for External Agents and Reception staff. The backend must normalize those assignments against selected hotels through services/priceVariantAssignmentService.js and reject assignments for any other role.
   - Overall account-management list filters must support the UI split between Hotel Employees and External Agents. The employee view excludes order-taker/agent accounts, while the agent view returns only order-taker/external-agent accounts inside the actor's authorized hotel/account scope.
   - Overall update-account mirrors the frontend Hotel Employees / External Agents accountView split and may preselect a matching accountId row for convenience. Backend update routes must continue validating account id, creator scope, selected hotels, and role changes because query params or prefilled UI state are never trusted.
-  - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend. Agent invitations should be locked to ordertaker semantics; employee invitations should require the requested employee role.
+  - Signup invitation creation in controllers/overall_dashboard.js must verify the actor controls every selected hotel, store the short-code invitation payload, and return only the generated code/token metadata needed by the frontend. Agent invitations should be locked to ordertaker semantics; employee invitations should require the requested employee role. Agent and reception invitations may carry validated priceVariantAssignments.
 - Financial actions
   - Wallet, commission, payout, expense, and financial report actions must remain restricted to owner/admin/finance/reservation roles with valid hotel/account scope.
   - Approved order-taker/agent accounts may read overall financial surfaces only for their assigned hotels and their own agent wallet/reservation records. If financial-actions is opened by an agent, both reservation actions and pending wallet-claim rows must be filtered to that actor's own agent id.
@@ -1611,9 +1624,9 @@ Future TODO Backlog - Added 2026-05-26
   - Missing usernames or missing OTA_PASSWORD creates status needs_credentials; otherwise status is prepared.
   - This endpoint prepares a supervised calendar task. It does not currently log into OTA dashboards or submit changes.
 
-2026-06-01 Overall Settings Room Manager And Calendar Pricing Backend
+2026-06-01 / 2026-06-06 Overall Settings Rooms, Main Calendar Pricing, And Price Variants Backend
 - Business purpose:
-  - The Overall Settings screen now has separate backend endpoints for bulk room management and bulk calendar pricing.
+  - The Overall Settings screen has separate backend endpoints for bulk room management, main/general calendar pricing, and Price Variants.
   - These endpoints were added without changing the existing single-hotel settings routes, so the older stable setup remains intact.
   - Both workflows write to the existing HotelDetails.roomCountDetails structure.
 - Backend files:
@@ -1621,13 +1634,18 @@ Future TODO Backlog - Added 2026-05-26
   - controllers/overall_dashboard.js owns option loading, validation, schema-safe merging, and saves.
   - services/overallRoomTextOrchestrator.js handles bilingual room name/description orchestration.
   - services/overallCalendarPricingOrchestrator.js builds pricing plans and calendar rows.
+  - models/price_variant.js stores PriceVariant documents in the pricevariants collection.
+  - services/priceVariantAssignmentService.js normalizes and syncs user/agent Price Variant assignments.
+  - services/priceVariantNameTranslator.js translates the single visible Price Variant name between English and Arabic.
   - services/openaiModelConfig.js is used by the room text orchestrator when OpenAI is configured.
 - API routes:
   - GET /api/overall-dashboard/settings-room-manager/:userId.
   - POST /api/overall-dashboard/settings-room-manager/:userId.
   - GET /api/overall-dashboard/settings-calendar-pricing/:userId.
   - POST /api/overall-dashboard/settings-calendar-pricing/:userId.
-  - All four routes use requireSignin, isAuth, and router.param("userId", userById).
+  - GET /api/overall-dashboard/settings-price-variants/:userId.
+  - POST /api/overall-dashboard/settings-price-variants/:userId.
+  - All six routes use requireSignin, isAuth, and router.param("userId", userById).
   - Controllers call requireOverallSection(req, res, "settings"), so access is scoped to the hotels visible in the Overall Settings section and the ownerId query parameter.
 - Room manager options endpoint:
   - Handler: overallRoomManagerOptions.
@@ -1638,7 +1656,9 @@ Future TODO Backlog - Added 2026-05-26
   - Accepts action add or update.
   - Add mode accepts multiple hotelIds so the same room can be created across several hotels in one operation.
   - Add mode supports per-hotel counts through the submitted roomCounts map/array.
+  - Add mode also requires a positive per-hotel base price. The endpoint saves price.basePrice and defaultCost for the new room in each selected hotel.
   - Update mode targets one hotel and one roomId.
+  - Update mode can update the selected room's base price/defaultCost.
   - The endpoint validates that every requested hotel belongs to the actor's allowed Overall Settings scope.
   - Duplicate room protection checks same roomType/displayName combination inside each target hotel.
   - Existing room arrays are reused; no new top-level room collection is introduced.
@@ -1647,12 +1667,13 @@ Future TODO Backlog - Added 2026-05-26
   - Shared men/women rooms stay in the existing structure by using the existing room type plus roomForGender instead of adding a new schema path.
 - Room text AI orchestration:
   - Service: overallRoomTextOrchestrator.orchestrateRoomText.
-  - The user submits one room name and one description.
+  - The user submits one room name. The UI no longer requires a typed room description.
   - If OpenAI is configured, the service creates polished English and Arabic values:
     - displayName.
     - displayName_OtherLanguage.
     - description.
     - description_OtherLanguage.
+  - Descriptions should be concise hotel-room copy derived from room type/name, amenities, views, and hotel context.
   - The service also infers bedsCount from explicit text when possible, but the UI does not require the user to enter a bed count.
   - OpenAI key lookup supports OPENAI_API_KEY and CHATGPT_API_TOKEN.
   - If no key is configured, the key is invalid, or the model call fails, the endpoint still saves fallback text so the user is not blocked.
@@ -1666,14 +1687,20 @@ Future TODO Backlog - Added 2026-05-26
 - Calendar pricing save endpoint:
   - Handler: saveOverallCalendarPricing.
   - Accepts scope general or agents.
+  - General scope supports pricingOperation add/update. Add rejects duplicate main-calendar rows for the selected room/date set; update replaces the affected existing rows.
   - General scope writes to roomCountDetails[n].pricingRate.
   - Agents scope writes to roomCountDetails[n].agentPricingRate.
+  - Agents scope can either assign saved Price Variants to selected agents or save a custom agent calendar.
   - The endpoint requires at least one hotel and one room selection.
-  - Agent scope also requires at least one selected agent.
+  - Agent custom-calendar scope also requires at least one selected agent.
+  - Agent Price Variant assignment mode requires at least one selected agent and at least one priceVariantSelection.
+  - Agent Price Variant assignment mode does not require manual room/date/pricing inputs; it validates selected variants, filters them against the selected hotels and agents, and writes the decorated agentPricingRate rows from the variant data.
+  - Agent custom-calendar mode keeps the manual hotel/room/date/price/commission workflow for authorized staff only.
   - Every hotel, room, and agent is validated against the actor's allowed Overall Settings scope.
   - Bulk mode accepts dates, roomSelections, sellingPrice, commissionPercent, status, and calendarType.
   - Explicit row mode accepts rows with hotelId, roomId, calendarDate, status, sellingPrice, and commissionPercent; this is what the preview modal sends after row-level edits.
   - The maximum generated payload is protected by services/overallCalendarPricingOrchestrator.ensurePlanSize, currently capped at 25000 generated rows.
+  - Main/general calendar pricing no longer updates roomCountDetails[n].price.basePrice or roomCountDetails[n].defaultCost. Room Manager owns those fallback fields.
 - Calendar pricing plan rules:
   - Service: overallCalendarPricingOrchestrator.buildPricingPlan.
   - Selling price is the PMS user-facing nightly price.
@@ -1688,13 +1715,11 @@ Future TODO Backlog - Added 2026-05-26
   - commissionRate is intentionally saved as 0 so the existing PMS calendar/reservation logic does not add the commission a second time.
   - Blocked/closed/restricted rows save selling price, root price, and commission as 0 and use black as the row color.
   - Non-blocked rows receive a deterministic color based on scope, selling price, and commission.
-- General calendar fallback pricing:
-  - General Calendar Pricing saves also update the selected room's fallback price fields.
-  - roomCountDetails[n].price.basePrice is set to the top-level selling price per night.
-  - roomCountDetails[n].defaultCost is set to the calculated top-level nightly root price.
-  - This ensures a general fallback price exists when no calendar row is available for a date.
-  - Agent Calendar Pricing does not update these public/general fallback fields.
-  - If explicit preview-row mode has no usable top-level price, the backend can fall back to the first open explicit row, but the frontend normally submits the top-level selling price per night and commission.
+- Room fallback pricing:
+  - Room Manager saves roomCountDetails[n].price.basePrice and roomCountDetails[n].defaultCost.
+  - Main/general Calendar Pricing saves room/date pricing only and must not mutate fallback basePrice/defaultCost.
+  - Price Variants use the main/general calendar row when present, otherwise they fall back to roomCountDetails[n].price.basePrice.
+  - A room without positive basePrice/defaultCost should block Price Variant creation until Room Manager or the main calendar/base pricing is completed.
 - Calendar merge and overwrite behavior:
   - General calendar rows are merged by room + calendarDate.
   - Saving a full month replaces only submitted dates for the selected rooms.
@@ -1706,11 +1731,32 @@ Future TODO Backlog - Added 2026-05-26
   - buildGeneralRow writes public/general pricingRate rows with calendarDate, room_type, displayName, price, rootPrice, commissionRate, sellingPrice, commissionPercent, color, calendarType, source, and blocked status when relevant.
   - buildAgentRow adds agentId, agentName, agentEmail, and companyName on top of the general row shape.
   - agentSnapshot normalizes agent metadata for agentPricingRate rows.
+- Price Variants endpoint:
+  - Handler: overallPriceVariantOptions loads accessible hotels and active PriceVariant documents.
+  - Handler: saveOverallPriceVariant creates/updates PriceVariant documents.
+  - Stored documents use dataType=price_variant and basePriceSource=calendar_main_price for the current business flow.
+  - The collection is pricevariants. Do not use pricingmasterdatas naming for this feature.
+  - Variant creation/update validates that every selected hotel is in the actor's Overall Settings scope.
+  - All active rooms in the selected hotels are included automatically in roomSelections and roomPricing.
+  - validateRoomsReadyForPricingVariants blocks creation when selected hotels have no active rooms or active rooms without usable main calendar/base pricing.
+  - buildPricingVariantItemsForRooms derives each variant day/room price from the main/general calendar row, falling back to room basePrice when no calendar row exists.
+  - Pricing adjustment supports increase/discount plus money/percentage, rounded to two decimals.
+  - Period/day rows store mainCalendarPrice, sellingPrice, commissionPercent, rootPrice, status, source, and manualOverride.
+  - Manual variant preview edits and month open/block actions save variant-specific day rows that override the main calendar for that variant until the main calendar changes again.
+  - Updating a PriceVariant calls propagatePriceVariantUpdates so assigned agentPricingRate rows receive the new values.
+  - Updating main/general calendar pricing calls propagateCalendarBasePricingVariants. For touched dates it refreshes only affected variant rows where possible, then propagates the corresponding agentPricingRate rows instead of rebuilding every saved variant unnecessarily.
+- Agent/reception Price Variant assignments:
+  - User.priceVariantAssignments stores assigned variant data/item ids with scoped hotelIds and pricing names.
+  - createHotelStaffUser, public signup completion, signup invitations, and updateHotelStaffUser allow assignments for ordertaker/agent and reception roles only.
+  - normalizePriceVariantAssignments validates that selected variants are active, match the user's hotel scope, are not blocked, and have positive sellingPrice.
+  - syncPriceVariantAssignmentsForAgent keeps PriceVariant.pricingItems.assignedAgents snapshots aligned with the user's assignments.
+  - Agent Price Variant assignment through saveOverallCalendarPricing writes decorated agentPricingRate rows with priceVariantDataId, priceVariantItemId, priceVariantName, and priceVariantNameOtherLanguage.
 - Validation performed during implementation:
   - node --check controllers/overall_dashboard.js passed.
   - node --check services/overallCalendarPricingOrchestrator.js passed.
   - Frontend build passed after the related UI/API wiring.
-  - Local smoke tests created temporary Codex-marked owner/hotel/agent/calendar documents only, verified general and agent calendar saves, verified blocked row behavior, verified fallback basePrice/defaultCost updates, and then deleted only those temporary test documents.
+  - Earlier local smoke tests created temporary Codex-marked owner/hotel/agent/calendar documents only, verified general and agent calendar saves and blocked row behavior, and then deleted only those temporary test documents.
+  - 2026-06-06 documentation pass reflects later Price Variant work; latest code checks included node --check for controllers/auth.js, controllers/user.js, and controllers/overall_dashboard.js plus scoped frontend eslint for OverallPriceVariantModal.js and CreateNewAccount.js. Full frontend build was intentionally deferred.
   - Cleanup was verified with zero remaining Codex test documents for those smoke runs.
 
 2026-06-03 Admin Global Hotel Settings Backend

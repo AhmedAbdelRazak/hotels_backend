@@ -205,6 +205,11 @@ const userLooksLikeAgent = (user = {}) =>
 	userHasRoleDescription(user, "ordertaker") ||
 	(Array.isArray(user.accessTo) && user.accessTo.includes("ownReservations"));
 
+const userCanReceivePriceVariantAssignments = (user = {}) =>
+	userLooksLikeAgent(user) ||
+	userRoleNumbers(user).includes(3000) ||
+	userHasRoleDescription(user, "reception");
+
 const buildAgentApprovalActor = (actor = {}) => ({
 	_id: normalizeObjectIdString(actor._id),
 	name: actor.name || "",
@@ -814,7 +819,7 @@ exports.listHotelStaffUsers = async (req, res) => {
 			],
 		})
 			.select(
-				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances agentPayoutDetails role roleDescription roles roleDescriptions activeUser agentApproval applicationReview hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo createdAt updatedAt"
+				"_id name email emailIsPlaceholder phone companyName companyOfficialName companyEin companyDocuments agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances priceVariantAssignments agentPayoutDetails role roleDescription roles roleDescriptions activeUser agentApproval applicationReview hotelIdWork hotelIdsWork belongsToId hotelIdsOwner hotelsToSupport accessTo createdAt updatedAt"
 			)
 			.populate("hotelsToSupport", "_id hotelName")
 			.populate("hotelIdsOwner", "_id hotelName")
@@ -1558,7 +1563,8 @@ exports.updateHotelStaffUser = async (req, res) => {
 			Object.prototype.hasOwnProperty.call(payload, "priceVariantAssignments")
 		) {
 			shouldSyncPriceVariantAssignments = true;
-			const nextStaffIsAgent = userLooksLikeAgent(staffUser);
+			const nextStaffCanReceivePriceVariants =
+				userCanReceivePriceVariantAssignments(staffUser);
 			const currentHotelIds = uniqueValidObjectIds([
 				staffUser.hotelIdWork,
 				...(Array.isArray(staffUser.hotelIdsWork)
@@ -1571,18 +1577,21 @@ exports.updateHotelStaffUser = async (req, res) => {
 					? staffUser.hotelIdsOwner
 					: []),
 			]);
-			if (!nextStaffIsAgent && Array.isArray(priceVariantAssignmentsInput)) {
+			if (
+				!nextStaffCanReceivePriceVariants &&
+				Array.isArray(priceVariantAssignmentsInput)
+			) {
 				const hasAssignments = priceVariantAssignmentsInput.some(
 					(assignment) => assignment && typeof assignment === "object"
 				);
 				if (hasAssignments) {
 					return res.status(400).json({
 						error:
-							"Price variant assignments are available for external agents only.",
+							"Price variant assignments are available for agents and reception only.",
 					});
 				}
 			}
-			normalizedPriceVariantAssignmentsForSync = nextStaffIsAgent
+			normalizedPriceVariantAssignmentsForSync = nextStaffCanReceivePriceVariants
 				? await normalizePriceVariantAssignments({
 						assignments: priceVariantAssignmentsInput,
 						hotelIds: currentHotelIds,
