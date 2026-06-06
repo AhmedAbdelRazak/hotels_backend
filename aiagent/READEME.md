@@ -1,6 +1,6 @@
 # AI Agent (Hotels – Makkah/Madinah)
 
-## Current Production Contract - 2026-05-27
+## Current Production Contract - 2026-06-06
 
 - The AI agent is B2C support only. B2B/internal chats must never trigger it.
 - It mounts only when `AI_AGENT_ENABLED=true`; hotel/case/global switches still gate every reply.
@@ -10,7 +10,8 @@
 - Arabic customer-facing replies should address known clients respectfully as `أستاذ {first name}`, for example `أستاذ ناصر`.
 - Tone is official, concise, warm, and useful. Brand must remain exactly `Jannat Booking`.
 - The assistant may help with hotels near Al Haram, date-range pricing, payment troubleshooting, and reservation triage.
-- Cancellation, refunds, existing-reservation mutation, and final booking confirmation are human handoff paths.
+- Cancellation, refunds, and existing-reservation mutation are human handoff paths.
+- New-reservation finalization can be completed by the AI only after the guest explicitly confirms the review summary and provides full name, nationality, phone, and email/skip. The AI-created reservation must use inventory validation, save an availability snapshot, and enter the internal hotel pending-confirmation workflow.
 - Human handoff paths are real escalations: the support case is saved with
   `escalationStatus=active`, `escalationSource=ai`, and an escalation reason.
 - If the orchestrator decides the request is outside available context or should
@@ -42,18 +43,23 @@
   1. Check-in date
   2. Check-out date
   3. Room type (from `roomCountDetails`)
-  4. Confirm name (or ask full name)
-  5. Phone
+  4. Review quote and ask the guest to confirm
+  5. Full name in English
   6. Nationality
-  7. Email
+  7. Phone
+  8. Email, or `skip` if the guest does not want to provide one
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
-  - On **Yes**: hand off to a Jannat Booking team member for verification,
-    payment, and final reservation confirmation.
-  - The AI does not directly create, cancel, refund, or mutate reservations in
-    production support flow.
+- On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.
+  - The saved reservation uses `booking_source="AI Chat"`, `payment="Not Paid"`, `pendingConfirmation.status="pending"`, `pendingConfirmation.clientVisibleStatus="confirmed"`, and `availabilitySnapshot.source="ai_chat_reservation_create"`.
+  - The guest receives a friendly created/confirmation response with the confirmation number, details link, and payment link. Internally the hotel team still reviews the pending-confirmation reservation.
+  - If inventory is no longer available or creation fails, the AI escalates to human support with `aiHandoffReason=reservation_finalize_failed`.
+- **Dates**:
+  - The chatbot accepts Gregorian/Miladi and Hijri date ranges.
+  - Hijri ranges such as `20 ذو الحجة 1447 إلى 22 ذو الحجة 1447` are converted to Gregorian ISO for pricing/reservation storage while keeping the Hijri range in `dateRaw` so replies can mention both calendars.
 - **Languages**: English, Arabic (Fos7a/Egyptian/Saudi tone), Spanish, French,
   Urdu, Hindi with Islamic-friendly assistant names.
+  - The active response language follows the latest clear guest language. For example, if the frontend preference is English but the guest writes Arabic or French, the bot answers in Arabic or French rather than asking permission to switch.
 
   ## Debug API
 

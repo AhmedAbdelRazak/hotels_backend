@@ -1,10 +1,14 @@
 // aiagent/core/actions.js
 const Reservations = require("../../models/reservations");
 const {
-	createReservationWithAvailabilitySnapshot,
+	validateReservationInventoryForCreate,
+	captureReservationAvailabilitySnapshot,
 } = require("../../controllers/reservations");
 const { updateSupportCaseAppend } = require("./db");
 const { asciiize, digitsToEnglish } = require("./nlu");
+const {
+	markReservationPendingConfirmation,
+} = require("../../services/pendingConfirmationPolicy");
 
 function log(caseId, msg, payload = {}) {
 	console.log(`[aiagent] case=${caseId} ${msg}`, payload);
@@ -27,7 +31,7 @@ async function uniqueConfirmation() {
 
 function clonePricingRows(rows) {
 	// exact daily structure as in OrderTaker
-	return rows.map((d) => ({
+	return (rows || []).map((d) => ({
 		date: d.date, // YYYY-MM-DD
 		price: Number(d.price),
 		rootPrice: Number(d.rootPrice),
@@ -80,11 +84,19 @@ async function createReservationForCase({
 	quoteData,
 	room,
 }) {
+	const dailyRows = Array.isArray(quoteData?.rows)
+		? quoteData.rows
+		: Array.isArray(quoteData?.pricingByDay)
+		? quoteData.pricingByDay
+		: [];
+	if (!dailyRows.length) {
+		throw new Error("AI reservation quote is missing daily pricing rows.");
+	}
 	const confirmation_number = await uniqueConfirmation();
 
 	const pickedRoomsType = buildPickedRoomsType({
 		room,
-		dailyRows: quoteData.rows,
+		dailyRows,
 		count: Number(slots.rooms || 1),
 	});
 	const totals = sumPickedRooms(pickedRoomsType);
@@ -107,10 +119,12 @@ async function createReservationForCase({
 		total_amount: totals.total_amount, // Grand total with commission
 		commission: totals.commission, // Commission portion
 		payment: "Not Paid",
+		financeStatus: "not paid",
 		paid_amount: 0,
 		commissionPaid: 0,
 		booking_source: "AI Chat",
 		pickedRoomsType,
+		pickedRoomsPricing: pickedRoomsType,
 
 		customer_details: {
 			name: asciiize(slots.name || "Guest"),
@@ -123,10 +137,29 @@ async function createReservationForCase({
 		advancePayment: 0,
 	};
 
-	const saved = await createReservationWithAvailabilitySnapshot(
+	const inventoryValidation = await validateReservationInventoryForCreate(
 		reservationPayload,
+		{ allowOverbook: false }
+	);
+	if (!inventoryValidation.allowed) {
+		const message =
+			inventoryValidation.message ||
+			inventoryValidation.issues?.[0]?.message ||
+			"Selected room is no longer available.";
+		throw new Error(message);
+	}
+	captureReservationAvailabilitySnapshot(
+		reservationPayload,
+		inventoryValidation,
 		"ai_chat_reservation_create"
 	);
+	markReservationPendingConfirmation(reservationPayload, {
+		source: "ai_chat_reservation_create",
+		operationalStatus: false,
+		clientVisibleStatus: "confirmed",
+		inventoryBlocks: true,
+	});
+	const saved = await Reservations.create(reservationPayload);
 
 	log(caseId, "reservation.created", {
 		reservationId: String(saved._id),
@@ -141,12 +174,17 @@ async function postReservationLinks(io, sc, reservation) {
 	const caseId = String(sc._id);
 	const conf = reservation.confirmation_number;
 	const rid = String(reservation._id);
+	const publicBase = String(
+		process.env.CLIENT_URL ||
+			process.env.REACT_APP_MAIN_URL_JANNAT ||
+			"https://jannatbooking.com"
+	).replace(/\/+$/, "");
 
-	const link1 = `https://jannatbooking.com/single-reservation/${conf}`;
-	const link2 = `https://jannatbooking.com/client-payment/${rid}/${conf}`;
+	const link1 = `${publicBase}/single-reservations/${conf}`;
+	const link2 = `${publicBase}/client-payment/${rid}/${conf}`;
 
 	const messages = [
-		`Your reservation is confirmed. View details here:\n${link1}`,
+		`Your reservation has been created. View details here:\n${link1}`,
 		`For serious confirmation, you may pay a small deposit here (optional):\n${link2}`,
 	];
 
@@ -169,7 +207,23 @@ async function postReservationLinks(io, sc, reservation) {
 	}
 }
 
+async function pushReservationLinks(io, caseId, _st, payload = {}) {
+	const reservationId = payload.reservationId || payload._id || "";
+	const confirmation =
+		payload.confirmation || payload.confirmation_number || payload.conf || "";
+	if (!reservationId || !confirmation) return;
+	return postReservationLinks(
+		io,
+		{ _id: caseId },
+		{
+			_id: reservationId,
+			confirmation_number: confirmation,
+		}
+	);
+}
+
 module.exports = {
 	createReservationForCase,
 	postReservationLinks,
+	pushReservationLinks,
 };

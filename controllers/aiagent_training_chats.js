@@ -274,6 +274,8 @@ async function cleanChatWithOpenAI(rawText) {
 					"Fix obvious spacing, duplicated line breaks, and simple spelling issues without changing meaning.",
 					"Infer who is the client and who is the support employee from names, wording, and context.",
 					"Preserve useful hospitality details: hotel names, dates, room types, prices, payment links, cancellation/update cues, and tone.",
+					"Parentheses can mean two different things: if a parenthesized line is clearly an out-of-band teacher/admin instruction, convert it into learningNotes/responseGuidance; if parentheses are part of a client/support sentence, preserve them as normal chat text and do not treat them as instructions.",
+					"Teacher/admin parenthetical notes usually contain instruction wording such as always, never, important, note, instruction, bot should, AI should, reply this way, or Arabic equivalents like \u0644\u0627\u0632\u0645, \u0645\u0645\u0646\u0648\u0639, \u0645\u0644\u0627\u062d\u0638\u0629, \u062a\u0639\u0644\u064a\u0645\u0627\u062a.",
 					"Do not invent facts that are not in the chat.",
 				].join(" "),
 			},

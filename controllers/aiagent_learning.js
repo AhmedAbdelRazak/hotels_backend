@@ -225,6 +225,7 @@ async function analyzeOneCase({ client, model, caseDoc }) {
 
 Notes:
 - Concise, no PII, language‑agnostic phrasing.
+- Parentheses inside normal guest/support messages are ordinary chat content. Only treat parenthesized text as teacher/admin guidance when it is clearly out-of-band instruction wording (for example: always, never, important, note, instruction, bot/AI should, reply this way, or Arabic equivalents like \u0644\u0627\u0632\u0645, \u0645\u0645\u0646\u0648\u0639, \u0645\u0644\u0627\u062d\u0638\u0629, \u062a\u0639\u0644\u064a\u0645\u0627\u062a).
 - Do NOT wrap in markdown. Do NOT add keys.
 
 Context:

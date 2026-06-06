@@ -27,6 +27,7 @@ const {
 } = require("./nlu");
 
 const { chat } = require("./openai");
+const { createReservationForCase } = require("./actions");
 
 const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
@@ -128,6 +129,30 @@ function usDate(iso) {
 		d.getDate()
 	).padStart(2, "0")}/${d.getFullYear()}`;
 }
+function stayDateDisplay(st = {}) {
+	const raw = st.dateRaw || {};
+	const gregorian = {
+		checkinISO: st.slots?.checkinISO || null,
+		checkoutISO: st.slots?.checkoutISO || null,
+		checkin: usDate(st.slots?.checkinISO),
+		checkout: usDate(st.slots?.checkoutISO),
+	};
+	const hijri =
+		String(raw.calendar || "").toLowerCase() === "hijri"
+			? {
+					checkin: raw.checkin || "",
+					checkout: raw.checkout || "",
+					checkinHijri: raw.checkinHijri || null,
+					checkoutHijri: raw.checkoutHijri || null,
+			  }
+			: null;
+	return {
+		calendarProvided: raw.calendar || null,
+		gregorian,
+		hijri,
+		shouldShowBoth: Boolean(hijri),
+	};
+}
 function slugifyHotelName(name = "") {
 	return String(name || "")
 		.trim()
@@ -144,7 +169,7 @@ function firstNumber(value) {
 	return match ? Number(match[0]) : Number.POSITIVE_INFINITY;
 }
 function languageOf(sc = {}, st = {}) {
-	return preferredLanguageOf(sc) || st.language || "English";
+	return st.language || preferredLanguageOf(sc) || "English";
 }
 function preferredLanguageOf(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
@@ -164,10 +189,123 @@ function preferredLanguageCodeOf(sc = {}) {
 	}
 	return String(sc.preferredLanguageCode || "").trim();
 }
+function activeLanguageCodeOf(sc = {}, st = {}) {
+	return String(st.languageCode || preferredLanguageCodeOf(sc) || "").trim();
+}
 function targetLanguageLabel(sc = {}, st = {}) {
 	const language = languageOf(sc, st) || "English";
-	const languageCode = preferredLanguageCodeOf(sc);
+	const languageCode = activeLanguageCodeOf(sc, st);
 	return languageCode ? `${language} (${languageCode})` : language;
+}
+
+function detectGuestLanguageFromText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw || raw.length < 2) return null;
+
+	const arabicLetters = (raw.match(/[\u0600-\u06FF]/g) || []).length;
+	if (arabicLetters >= 2) {
+		return { language: "Arabic", code: "ar", confidence: arabicLetters >= 8 ? 0.95 : 0.8 };
+	}
+
+	const hindiLetters = (raw.match(/[\u0900-\u097F]/g) || []).length;
+	if (hindiLetters >= 2) {
+		return { language: "Hindi", code: "hi", confidence: hindiLetters >= 8 ? 0.95 : 0.8 };
+	}
+
+	const lower = raw
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, " ");
+	const wordSet = new Set((lower.match(/[a-z]+/g) || []).map((w) => w.trim()));
+	const scoreWords = (words = []) =>
+		words.reduce((score, word) => score + (wordSet.has(word) ? 1 : 0), 0);
+
+	const frenchScore =
+		scoreWords([
+			"bonjour",
+			"salut",
+			"merci",
+			"chambre",
+			"hotel",
+			"arrivee",
+			"depart",
+			"reservation",
+			"prix",
+			"nuit",
+			"nuits",
+			"disponible",
+			"voudrais",
+			"veux",
+			"combien",
+			"confirmer",
+		]) + (/\bs[' ]?il vous plait\b|\bje voudrais\b|\bje veux\b/.test(lower) ? 2 : 0);
+	if (frenchScore >= 2) {
+		return { language: "French", code: "fr", confidence: Math.min(0.95, 0.6 + frenchScore * 0.1) };
+	}
+
+	const spanishScore =
+		scoreWords([
+			"hola",
+			"gracias",
+			"habitacion",
+			"hotel",
+			"reserva",
+			"precio",
+			"fechas",
+			"llegada",
+			"salida",
+			"quiero",
+			"quisiera",
+			"cuanto",
+			"disponible",
+			"confirmar",
+		]) + (/\bpor favor\b|\bme gustaria\b/.test(lower) ? 2 : 0);
+	if (spanishScore >= 2) {
+		return { language: "Spanish", code: "es", confidence: Math.min(0.95, 0.6 + spanishScore * 0.1) };
+	}
+
+	const englishScore =
+		scoreWords([
+			"hello",
+			"thanks",
+			"please",
+			"room",
+			"hotel",
+			"booking",
+			"reservation",
+			"reserve",
+			"price",
+			"availability",
+			"available",
+			"checkin",
+			"checkout",
+			"confirm",
+			"payment",
+			"email",
+			"phone",
+		]) + (/\b(check[ -]?in|check[ -]?out|thank you|how much)\b/.test(lower) ? 2 : 0);
+	if (englishScore >= 3) {
+		return { language: "English", code: "en", confidence: Math.min(0.95, 0.55 + englishScore * 0.1) };
+	}
+
+	return null;
+}
+
+function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
+	const detected = detectGuestLanguageFromText(text);
+	if (!detected || detected.confidence < 0.75) return;
+	const current = String(languageOf(sc, st) || "").toLowerCase();
+	if (current !== detected.language.toLowerCase()) {
+		logStep(String(sc._id || ""), "language.override", {
+			from: languageOf(sc, st),
+			to: detected.language,
+			code: detected.code,
+			confidence: detected.confidence,
+		});
+	}
+	st.language = detected.language;
+	st.languageCode = detected.code;
+	st.languageOverrideAt = now();
 }
 
 function respectfulGuestName(sc = {}, st = {}) {
@@ -645,6 +783,8 @@ function ensureState(sc, hotel) {
 				sc.aiResponderName ||
 				agentPool[Math.floor(Math.random() * agentPool.length)],
 			language: preferredLanguageOf(sc) || "English",
+			languageCode: preferredLanguageCodeOf(sc) || "",
+			languageOverrideAt: 0,
 			greeted: false,
 			greetScheduled: false,
 			guestTypingUntil: 0,
@@ -676,7 +816,10 @@ function ensureState(sc, hotel) {
 	} else {
 		if (hotel) st.hotel = hotel;
 		if (sc.aiResponderName) st.agentName = sc.aiResponderName;
-		st.language = preferredLanguageOf(sc) || st.language || "English";
+		if (!st.languageOverrideAt) {
+			st.language = preferredLanguageOf(sc) || st.language || "English";
+			st.languageCode = preferredLanguageCodeOf(sc) || st.languageCode || "";
+		}
 	}
 	return st;
 }
@@ -808,6 +951,28 @@ function nextPivot(st) {
 	return "finalize";
 }
 
+function confirmsText(text = "") {
+	const raw = String(text || "");
+	if (
+		/(?:\u062a\u0645\u0627\u0645|\u0646\u0639\u0645|\u0627\u064a\u0648\u0647|\u0623\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f)/i.test(raw)
+	) {
+		return true;
+	}
+	return /\b(confirm(?:ed)?|yes|yep|yeah|ok|okay|proceed|go ahead|book it|reserve it|تمام|نعم|ايوه|أيوه|ايوا|احجز|اكد|تأكيد|confirmer|oui|d'accord|si|sí|vale)\b/i.test(
+		String(text || "")
+	);
+}
+
+function declinesText(text = "") {
+	const raw = String(text || "");
+	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627)/i.test(raw)) {
+		return true;
+	}
+	return /\b(no|nope|not now|later|cancel|لا|مش دلوقتي|لاحقا|non|pas maintenant|no gracias)\b/i.test(
+		String(text || "")
+	);
+}
+
 function lastUserText(sc) {
 	const convo = Array.isArray(sc.conversation) ? sc.conversation : [];
 	const lastUser = [...convo]
@@ -874,10 +1039,10 @@ function latestGuestLanguageStyle(sc = {}, targetLanguage = "") {
 		likelyDifferentFromPreferred,
 		style,
 		guidance: likelyRomanizedPreferredLanguage
-			? "Treat this as possible romanized preferred-language text, such as Franko Arabic/Arabizi or Urdu/Hindi in Latin characters. Answer in the preferred language. Only ask a language-switch question when the latest message is clearly in another language, such as plain English."
+			? "Treat this as possible romanized active-language text, such as Franko Arabic/Arabizi or Urdu/Hindi in Latin characters. Answer in the active response language."
 			: likelyDifferentFromPreferred
-			? "Answer the request in the preferred language first. Then add one short, polite language-switch check in the preferred language, using the guest name when available. Do not switch languages unless the guest asks for it or the frontend preference changes."
-			: "Keep the response in the preferred language and interpret dialect, transliteration, spelling mistakes, and code-switching from context.",
+			? "If the latest guest language is clear, the active response language should already reflect it. Answer in the active response language without asking permission to switch."
+			: "Keep the response in the active response language and interpret dialect, transliteration, spelling mistakes, and code-switching from context.",
 	};
 }
 
@@ -902,6 +1067,8 @@ async function handoffToHuman(io, sc, st, reason) {
 	let text =
 		reason === "reservation_cancellation"
 			? `I understand you want to cancel a reservation. ${humanTeam} will take over from here, because cancellations must be handled by a human specialist.`
+			: reason === "reservation_finalize_failed"
+			? `I could not finalize this reservation automatically. ${humanTeam} will take over from here and review it right away.`
 			: reason === "reservation_finalize"
 			? `I have the booking details needed to continue. ${humanTeam} will take over from here to verify the reservation and payment details before final confirmation.`
 			: `I understand you want to update an existing reservation. ${humanTeam} will take over from here so the change is reviewed correctly.`;
@@ -909,12 +1076,19 @@ async function handoffToHuman(io, sc, st, reason) {
 		text =
 			reason === "reservation_cancellation"
 				? "Entiendo que quieres cancelar una reserva. Un especialista de soporte tomara el chat desde aqui."
+				: reason === "reservation_finalize_failed"
+				? "No pude finalizar esta reserva automaticamente. Un especialista de soporte tomara el chat para revisarla enseguida."
 				: "Entiendo tu solicitud de reserva. Un especialista de soporte tomara el chat para revisarla correctamente.";
 	} else if (/french/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
 				? "Je comprends que vous voulez annuler une reservation. Un specialiste du support va prendre le relais ici."
+				: reason === "reservation_finalize_failed"
+				? "Je n'ai pas pu finaliser cette reservation automatiquement. Un specialiste du support va la verifier tout de suite."
 				: "Je comprends votre demande de reservation. Un specialiste du support va prendre le relais pour la verifier correctement.";
+	} else if (/arabic/i.test(lang) && reason === "reservation_finalize_failed") {
+		text =
+			"\u062a\u0639\u0630\u0631 \u0625\u062a\u0645\u0627\u0645 \u0647\u0630\u0627 \u0627\u0644\u062d\u062c\u0632 \u062a\u0644\u0642\u0627\u0626\u064a\u0627. \u0633\u064a\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u0623\u062d\u062f \u0645\u062e\u062a\u0635\u064a \u0627\u0644\u062f\u0639\u0645 \u0644\u0645\u0631\u0627\u062c\u0639\u062a\u0647 \u0641\u0648\u0631\u0627.";
 	} else if (/arabic/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
@@ -1247,7 +1421,7 @@ async function write(io, sc, st, instruction, context = {}) {
 	const respectfulAddress = respectfulGuestName(sc, st);
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
 	const targetLanguage = languageOf(sc, st) || "English";
-	const targetLanguageCode = preferredLanguageCodeOf(sc);
+	const targetLanguageCode = activeLanguageCodeOf(sc, st);
 	const targetLanguageText = targetLanguageCode
 		? `${targetLanguage} (${targetLanguageCode})`
 		: targetLanguage;
@@ -1273,7 +1447,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		hotelName
 			? `Speak as the hotel's own support desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
 			: `Represent Jannat Booking directly.`,
-		`The guest's preferred language is ${targetLanguageText}.`,
+		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
 		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
@@ -1281,7 +1455,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, and Spanish guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
-		`If the latest guest message appears to be in a different language from the preferred language, still answer the actual request in ${targetLanguage} first. Then add one short polite question, in ${targetLanguage}, asking whether they would prefer to continue in that other language. Do not switch languages until the guest asks or the frontend preferred language changes.`,
+		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
@@ -1533,8 +1707,8 @@ async function shareKnownStayQuote(io, sc, st) {
 		io,
 		sc,
 		st,
-		"Share the availability and price result from the quote context. If unavailable, offer another date range or room type. If available, ask one concise follow-up about whether to continue.",
-		{ quote }
+		"Share the availability and price result from the quote context. If the guest provided Hijri dates, mention the Hijri range and the matching Gregorian range. If unavailable, offer another date range or room type. If available, ask one concise follow-up about whether to continue.",
+		{ quote, dates: stayDateDisplay(st) }
 	);
 	await humanSend(io, sc, st, quoteReply);
 	st.waitFor = "proceed";
@@ -1701,6 +1875,7 @@ async function planTurn(io, sc) {
 		});
 
 		const userText = lastUserText(sc);
+		updateActiveLanguageFromText(sc, st, userText);
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
 				st.greetScheduled = true;
@@ -1775,6 +1950,10 @@ async function planTurn(io, sc) {
 				st.dateRaw.checkout = decisionLu.dates.raw.checkout;
 			if (decisionLu.dates.raw.calendar)
 				st.dateRaw.calendar = decisionLu.dates.raw.calendar;
+			if (decisionLu.dates.raw.checkinHijri)
+				st.dateRaw.checkinHijri = decisionLu.dates.raw.checkinHijri;
+			if (decisionLu.dates.raw.checkoutHijri)
+				st.dateRaw.checkoutHijri = decisionLu.dates.raw.checkoutHijri;
 		}
 		if (decisionLu.dates?.checkinISO)
 			st.slots.checkinISO = decisionLu.dates.checkinISO;
@@ -2047,6 +2226,10 @@ async function planTurn(io, sc) {
 			if (lu.dates.raw.checkin) st.dateRaw.checkin = lu.dates.raw.checkin;
 			if (lu.dates.raw.checkout) st.dateRaw.checkout = lu.dates.raw.checkout;
 			if (lu.dates.raw.calendar) st.dateRaw.calendar = lu.dates.raw.calendar;
+			if (lu.dates.raw.checkinHijri)
+				st.dateRaw.checkinHijri = lu.dates.raw.checkinHijri;
+			if (lu.dates.raw.checkoutHijri)
+				st.dateRaw.checkoutHijri = lu.dates.raw.checkoutHijri;
 		}
 
 		// merge slots
@@ -2306,12 +2489,13 @@ async function planTurn(io, sc) {
 					checkin: usDate(st.slots.checkinISO),
 					checkout: usDate(st.slots.checkoutISO),
 				},
+				dateDisplay: stayDateDisplay(st),
 			};
 			const quoteMsg = await write(
 				io,
 				sc,
 				st,
-				"Share a concise availability & price summary (no upsell). Then ask a single yes/no: proceed to confirm?",
+				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: proceed to confirm?",
 				display
 			);
 			await humanSend(io, sc, st, quoteMsg);
@@ -2321,6 +2505,49 @@ async function planTurn(io, sc) {
 
 		// proceed?
 		if (st.waitFor === "proceed") {
+			if (confirmsText(userText)) {
+				const q = st.quote?.data || quote;
+				const reviewPayload = {
+					hotel: toTitle(st.hotel?.hotelName || "Hotel"),
+					room: q.room?.displayName || q.room?.roomType || st.slots.roomTypeKey,
+					roomsCount: st.slots.rooms || 1,
+					currency: q.currency,
+					nights: q.nights,
+					totals: q.totals,
+					perNightAvg:
+						Math.round(
+							(q.totals.totalPriceWithCommission / Math.max(1, q.nights)) * 100
+						) / 100,
+					gregorian: {
+						checkin: usDate(st.slots.checkinISO),
+						checkout: usDate(st.slots.checkoutISO),
+					},
+					dateDisplay: stayDateDisplay(st),
+					rawDates: st.dateRaw,
+				};
+				logStep(caseId, "review.summaryBuilt", reviewPayload);
+				const reviewText = await write(
+					io,
+					sc,
+					st,
+					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.'",
+					reviewPayload
+				);
+				await humanSend(io, sc, st, reviewText);
+				st.reviewSent = true;
+				st.waitFor = "reviewConfirm";
+				return;
+			}
+			if (declinesText(userText)) {
+				const msg = await write(
+					io,
+					sc,
+					st,
+					"Acknowledge politely and offer to notify when availability changes, or help with other dates."
+				);
+				await humanSend(io, sc, st, msg);
+				return;
+			}
 			if (
 				/\b(yes|yep|yeah|ok|okay|proceed|go ahead|confirm|تمام|نعم|ايه)\b/i.test(
 					userText
@@ -2343,6 +2570,7 @@ async function planTurn(io, sc) {
 						checkin: usDate(st.slots.checkinISO),
 						checkout: usDate(st.slots.checkoutISO),
 					},
+					dateDisplay: stayDateDisplay(st),
 					rawDates: st.dateRaw,
 				};
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
@@ -2382,6 +2610,209 @@ async function planTurn(io, sc) {
 		}
 
 		// After review: collect details (full name → nationality → phone → email)
+		if (
+			[
+				"reviewConfirm",
+				"fullname",
+				"nationality",
+				"phone",
+				"email_or_skip",
+				"finalize",
+			].includes(st.waitFor)
+		) {
+			if (st.waitFor === "reviewConfirm") {
+				if (!confirmsText(userText)) return;
+				st.waitFor = "fullname";
+				const prompt = await write(
+					io,
+					sc,
+					st,
+					"Ask ONE question: 'Is the reservation under your full name as in passport? Please type the full name in English.'"
+				);
+				await humanSend(io, sc, st, prompt);
+				stampAsk(st, "fullname");
+				return;
+			}
+
+			if (st.waitFor === "fullname" && !st.slots.fullName) {
+				const norm = await normalizeNameLLM(userText, st.language);
+				if (norm?.valid && norm.fullNameAscii) {
+					st.slots.fullName = asciiize(norm.fullNameAscii).trim();
+					st.slots.name = st.slots.fullName;
+					logStep(caseId, "fullname.captured", {
+						fullName: st.slots.fullName,
+					});
+					st.waitFor = "nationality";
+					const askNat = await write(
+						io,
+						sc,
+						st,
+						"Ask ONE question: 'What is the guest's nationality?' Ask for the country/nationality name in English."
+					);
+					await humanSend(io, sc, st, askNat);
+					stampAsk(st, "nationality");
+					return;
+				}
+				const askAgain = await write(
+					io,
+					sc,
+					st,
+					"Kindly ask for a valid full name in English letters. Keep it polite and brief."
+				);
+				await humanSend(io, sc, st, askAgain);
+				stampAsk(st, "fullname");
+				return;
+			}
+
+			if (st.waitFor === "nationality" && !st.slots.nationality) {
+				const nat = await validateNationalityLLM(userText, st.language);
+				if (nat?.valid && nat.normalized) {
+					st.slots.nationality = nat.normalized;
+					logStep(caseId, "nationality.captured", {
+						nationality: st.slots.nationality,
+					});
+					st.waitFor = "phone";
+					const askPhone = await write(
+						io,
+						sc,
+						st,
+						"Ask ONE question for a reachable phone number. WhatsApp is preferred, but do not make it mandatory."
+					);
+					await humanSend(io, sc, st, askPhone);
+					stampAsk(st, "phone");
+					return;
+				}
+				const again = await write(
+					io,
+					sc,
+					st,
+					"Politely say the nationality was not recognized and ask again for the nationality/country name in English."
+				);
+				await humanSend(io, sc, st, again);
+				stampAsk(st, "nationality");
+				return;
+			}
+
+			if (st.waitFor === "phone" && !st.slots.phone) {
+				const clean = digitsToEnglish(userText).replace(/\D/g, "");
+				if (clean.length >= 5) {
+					st.slots.phone = clean;
+					logStep(caseId, "phone.captured", { phone: st.slots.phone });
+					st.waitFor = "email_or_skip";
+					const askEmail = await write(
+						io,
+						sc,
+						st,
+						"Ask ONE question for an email address. If they prefer not to share it, tell them they can type skip."
+					);
+					await humanSend(io, sc, st, askEmail);
+					stampAsk(st, "email_or_skip");
+					return;
+				}
+				const again = await write(
+					io,
+					sc,
+					st,
+					"Kindly ask for a reachable phone number using digits. Keep it polite."
+				);
+				await humanSend(io, sc, st, again);
+				stampAsk(st, "phone");
+				return;
+			}
+
+			if (st.waitFor === "email_or_skip" && !st.slots.email) {
+				const txt = String(userText).trim();
+				if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(txt)) {
+					st.slots.email = txt;
+					logStep(caseId, "email.captured", { email: st.slots.email });
+				} else if (
+					/\b(no|skip|don'?t have|later|none|لا|تخطي|مش موجود)\b/i.test(txt)
+				) {
+					st.slots.email = "";
+					logStep(caseId, "email.skipped", {});
+				} else {
+					const ask = await write(
+						io,
+						sc,
+						st,
+						"If that does not look like an email, ask once more briefly and say they can type 'skip' if they prefer."
+					);
+					await humanSend(io, sc, st, ask);
+					stampAsk(st, "email_or_skip");
+					return;
+				}
+				st.waitFor = "finalize";
+			}
+
+			if (st.waitFor === "finalize") {
+				try {
+					const quoteForCreate =
+						st.quote?.data ||
+						safePriceRoomForStay(
+							st.hotel,
+							{ roomType: st.slots.roomTypeKey },
+							st.slots.checkinISO,
+							st.slots.checkoutISO
+						);
+					if (!quoteForCreate?.available) {
+						await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+						return;
+					}
+					const reservation = await createReservationForCase({
+						caseId,
+						hotel: st.hotel,
+						slots: {
+							...st.slots,
+							name: st.slots.fullName || st.slots.name,
+						},
+						quoteData: quoteForCreate,
+						room: quoteForCreate.room,
+					});
+					const publicBase = String(
+						process.env.CLIENT_URL ||
+							process.env.REACT_APP_MAIN_URL_JANNAT ||
+							"https://jannatbooking.com"
+					).replace(/\/+$/, "");
+					const links = {
+						reservationDetails: `${publicBase}/single-reservations/${reservation.confirmation_number}`,
+						payment: `${publicBase}/client-payment/${reservation._id}/${reservation.confirmation_number}`,
+					};
+					const finalText = await write(
+						io,
+						sc,
+						st,
+						"Tell the guest the reservation has been created and is pending hotel confirmation internally, while keeping the message guest-friendly. Include the confirmation number, total, reservation details link, and payment link exactly from context. Keep it concise.",
+						{
+							reservation: {
+								id: String(reservation._id),
+								confirmation: reservation.confirmation_number,
+								total: reservation.total_amount,
+								currency: quoteForCreate.currency || "SAR",
+								hotel: st.hotel?.hotelName || "",
+								room:
+									quoteForCreate.room?.displayName ||
+									quoteForCreate.room?.roomType ||
+									st.slots.roomTypeKey,
+								dates: stayDateDisplay(st),
+								links,
+							},
+						}
+					);
+					await humanSend(io, sc, st, finalText);
+					st.waitFor = null;
+					st.reviewSent = false;
+					st.quoteSummarizedAt = 0;
+					return;
+				} catch (error) {
+					logStep(caseId, "reservation.create_failed", {
+						message: error?.message || error,
+					});
+					await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+					return;
+				}
+			}
+		}
+
 		if (st.waitFor === "reviewConfirm") {
 			if (/\bconfirm(ed)?\b/i.test(userText)) {
 				st.waitFor = "fullname";

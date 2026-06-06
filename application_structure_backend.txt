@@ -1164,7 +1164,7 @@ Future TODO Backlog - Added 2026-05-26
   - The legacy aiagenttrainingchats collection is read only as backward-compatible learning context. New manual uploads and admin history records should go to aiagentlearnings/sourceType=manual_chat.
   - Teaching chats may be Arabic, Hindi, English, Spanish, or mixed language. The AI should learn the support behavior from all relevant languages.
   - aiagent/core/orchestrator.js now loads relevant employee learning examples inside the writer before each LLM-written reply.
-  - The writer treats employee examples as private multilingual guidance only and must answer strictly in the support case preferredLanguage/preferredLanguageCode sent by the guest frontend.
+  - The writer treats employee examples as private multilingual guidance only and must answer in the active response language. The frontend preferredLanguage/preferredLanguageCode seeds the conversation, but the live orchestrator can override it when the latest guest message is clearly in another language.
   - controllers/supportcase.js keeps preferredLanguage/preferredLanguageCode on the SupportCase in sync with public/client message metadata, so jannatbooking_frontend remains the source for the guest's preferred response language.
   - Learning examples are passed as private context only; the guest should never be told that examples were consulted.
   - When a support case has a hotel, the writer now speaks as that hotel support/reservation desk and avoids presenting Jannat Booking as a separate middleman unless platform/payment/final verification context requires the brand.
@@ -1327,7 +1327,7 @@ Future TODO Backlog - Added 2026-05-26
   - The support-action decision step now also loads employee learning examples before it can choose human_escalation.
   - The decision prompt instructs the orchestrator to use reusable learning examples as a safe next step before escalating, while still escalating cancellations, refunds, mutations to existing reservations, or unsupported facts/tools.
   - The writer prompt now explicitly handles Arabic dialects including Egyptian/Gulf/Levantine/Maghrebi/Algerian/Tunisian, Franko Arabic/Arabizi, Hinglish, Urdu/Hindi Latin text, Spanish/French phonetic text, misspellings, and code-switching.
-  - If the guest writes in a language different from the preferred language sent by the frontend, the bot must answer in the preferred language first and then ask one short language-switch question rather than silently switching languages.
+  - If the latest guest message is clearly in a different language from the frontend preference, the bot now updates the active response language and answers in the guest's current language immediately. It should not ask permission to switch when the language signal is clear.
   - The writer is constrained to known Jannat Booking routes/context URLs and should use concise markdown hotel links instead of inventing PMS/admin/payment links.
 - aiagent/core/db.js:
   - listRelevantTrainingChats now reads all active AiAgentLearning records, including support_case and manual_chat sources, plus legacy AiAgentTrainingChat records.
@@ -1339,6 +1339,38 @@ Future TODO Backlog - Added 2026-05-26
   - node --check aiagent/core/orchestrator.js.
   - node --check aiagent/core/db.js.
   - node --check aiagent/core/nlu.js.
+
+2026-06-06 B2C AI Chatbot Date, Learning, Language, And Booking Enhancements
+- Hijri and Gregorian date handling:
+  - aiagent/core/nlu.js now has deterministic Hijri range parsing before the LLM fallback.
+  - Supported examples include Arabic-script and transliterated ranges such as "من 20 الى 22 ذو الحجة 1447" and "20 dhu al hijjah 1447 to 22 dhu al hijjah 1447".
+  - Hijri ranges are converted to Gregorian ISO for pricing and reservation persistence, while raw Hijri display data is preserved in dateRaw/checkinHijri/checkoutHijri.
+  - aiagent/core/orchestrator.js passes dateDisplay/rawDates into quote and review writer calls so the guest can be shown both Hijri and Gregorian dates when they supplied Hijri dates.
+  - Gregorian/Miladi ISO and English month-name date ranges continue to use the existing quickDateRange behavior.
+- Active response language override:
+  - aiagent/core/orchestrator.js now treats preferredLanguage/preferredLanguageCode as the initial language only.
+  - The live active response language is updated when the latest guest message is clearly Arabic, French, Spanish, Hindi, or clearly English again.
+  - The writer prompt now answers in the active response language directly instead of replying in the frontend preference and asking permission to switch.
+  - This supports cases where the widget says English but the guest actually writes Arabic or French.
+- Parenthesized teaching notes:
+  - controllers/aiagent_training_chats.js tells the OpenAI cleaner that parenthesized text is only teacher/admin guidance when it is clearly out-of-band instruction wording.
+  - Normal guest/support parentheses remain ordinary chat text.
+  - controllers/aiagent_learning.js has the same rule for support-case learning analysis so manual and historical learning stay consistent.
+- AI reservation creation flow:
+  - aiagent/core/orchestrator.js fixed the post-review slot collection state machine. After the review confirmation, the bot asks once for full name, nationality, phone, and email/skip, then captures the next guest answer instead of repeatedly asking the same field.
+  - On finalize, the orchestrator creates the reservation through aiagent/core/actions.js instead of handing off by default.
+  - aiagent/core/actions.js now accepts the current quote.pricingByDay shape, builds pickedRoomsType/pickedRoomsPricing daily rows, validates inventory with allowOverbook=false, captures availabilitySnapshot, and marks pendingConfirmation.status="pending".
+  - Saved AI reservations use booking_source="AI Chat", payment="Not Paid", financeStatus="not paid", pendingConfirmation.clientVisibleStatus="confirmed", and availabilitySnapshot.source="ai_chat_reservation_create".
+  - Guests receive a friendly created confirmation with reservation details and payment links. Internal hotel staff still review the reservation through the normal pending-confirmation workflow.
+  - If creation or inventory validation fails, the bot escalates with aiHandoffReason="reservation_finalize_failed" and uses a booking-specific failure handoff message.
+- Validation completed locally:
+  - node -c aiagent/core/nlu.js.
+  - node -c aiagent/core/orchestrator.js.
+  - node -c aiagent/core/actions.js.
+  - node -c controllers/aiagent_training_chats.js.
+  - node -c controllers/aiagent_learning.js.
+  - git diff --check for the changed backend files.
+  - Node smoke test with OPENAI_API_KEY=sk-test confirmed "من 20 الى 22 ذو الحجة 1447" maps to 2026-06-06 through 2026-06-08.
 
 2026-05-29 Reservation Admin Workflow Privacy Hardening
 - services/auditPrivacy.js:
