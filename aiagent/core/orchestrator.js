@@ -93,6 +93,7 @@ const HUMAN = {
 
 const SOFT_PIVOT_MS = 35000;
 const QUOTE_SUMMARY_COOLDOWN = 45000;
+const PUBLIC_DISCOUNT_PERCENT = 15;
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
@@ -373,6 +374,48 @@ function humanHandoffReason(text = "") {
 		return "reservation_update";
 	}
 	return "";
+}
+
+function publicDiscountPercent() {
+	return PUBLIC_DISCOUNT_PERCENT;
+}
+
+function wantsDiscountQuestion(text = "") {
+	const normalized = String(text || "").toLowerCase();
+	return /discount|discounts|promo|promotion|coupon|voucher|offer|offers|deal|deals|special rate|best price|lower price|cheaper|reduce price|make it less|خصم|خصومات|تخفيض|تخفيضات|عرض|عروض|كوبون|برومو|اقل سعر|أقل سعر|ارخص|أرخص|نزل السعر|ينفع خصم|descuento|oferta|promocion|promoción|remise|reduction|réduction|promo|offre/i.test(
+		normalized
+	);
+}
+
+function discountDisplayContext(st = {}) {
+	const quote = st.quote?.data;
+	const discountPercent = publicDiscountPercent();
+	const factor = 1 - discountPercent / 100;
+	const perNightValues = Array.isArray(quote?.perNight)
+		? quote.perNight.map((value) => Number(value)).filter((value) => value > 0)
+		: [];
+	const displayedPerNight =
+		perNightValues.length === 1
+			? perNightValues[0]
+			: perNightValues.length
+			? Number(
+					(
+						perNightValues.reduce((sum, value) => sum + value, 0) /
+						perNightValues.length
+					).toFixed(2)
+			  )
+			: null;
+	const beforeDiscount =
+		displayedPerNight && factor > 0
+			? Number((displayedPerNight / factor).toFixed(2))
+			: null;
+	return {
+		discountPercent,
+		displayedPerNight,
+		beforeDiscount,
+		currency: quote?.currency || st.hotel?.currency || "SAR",
+		hasQuote: Boolean(quote?.available),
+	};
 }
 
 function looksLikeGreetingOnly(text = "") {
@@ -1467,6 +1510,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
+		`Do not mention discounts, coupons, promos, offers, or before-discount prices unless the latest guest message explicitly asks about them.`,
 		`Use only known Jannat Booking routes or URLs supplied in context. For hotel recommendations, prefer concise markdown links using the hotel name as the link text. Never invent routes, payment links, reservation links, or admin/PMS links.`,
 		`Do not cancel, refund, or mutate existing reservations; send those requests to a human team member.`,
 		`Avoid repeating the same question if just asked; prefer a soft pivot.`,
@@ -1550,6 +1594,9 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	if (handoffReason === "reservation_update") {
 		return { action: "reservation_update", roomTypeKey: null, reason: handoffReason };
 	}
+	if (wantsDiscountQuestion(userText)) {
+		return { action: "discount_question", roomTypeKey: null, reason: "discount_keyword" };
+	}
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
 	}
@@ -1625,12 +1672,13 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
-		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
+		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
 		"If an active hotel is present and the guest asks whether you/this hotel has rooms, room types, amenities, availability, or pricing, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"Choose hotel_recommendation only when the guest asks for other hotels, nearby alternatives, general platform options, or there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
+		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose human_escalation only when the request is outside hotel/platform support scope, needs facts/tools not available in context or learning examples, asks to cancel/refund/mutate an existing reservation, or should be reviewed by a person before answering.",
 	].join(" ");
 	const user = JSON.stringify(
@@ -1712,6 +1760,29 @@ async function shareKnownStayQuote(io, sc, st) {
 	);
 	await humanSend(io, sc, st, quoteReply);
 	st.waitFor = "proceed";
+}
+
+async function answerDiscountQuestion(io, sc, st, userText = "") {
+	const discount = discountDisplayContext(st);
+	const fallbackText = discount.displayedPerNight
+		? `Sir, our published prices already include a ${discount.discountPercent}% across-the-board discount and are among the best market rates. The displayed nightly rate of ${discount.displayedPerNight} ${cleanCurrency(
+				discount.currency
+		  )} is already after the discount; before discount it would be about ${
+				discount.beforeDiscount
+		  } ${cleanCurrency(discount.currency)}. There is no extra manual discount.`
+		: `Sir, our published prices already include a ${discount.discountPercent}% across-the-board discount and are among the best market rates. The displayed price is already the discounted price, so there is no extra manual discount. For example, 85 SAR means it was 100 SAR before the discount.`;
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest asked about discounts or offers. Reply professionally without escalation. Say the published/displayed prices already include a 15% across-the-board discount and are among the best market rates. Do not present a new discounted total. Do not offer an extra manual discount. If useful, explain briefly that a displayed nightly price of 85 SAR means it is already after 15% from 100 SAR. Keep the normal booking flow unchanged and answer only because the guest asked.",
+		{
+			latestUserMessage: userText,
+			discountPolicy: discount,
+			fallbackText,
+		}
+	);
+	await humanSend(io, sc, st, reply);
 }
 
 /* ------------------- SMALLTALK ------------------- */
@@ -1961,6 +2032,12 @@ async function planTurn(io, sc) {
 			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
 
+		if (!humanHandoffReason(userText) && wantsDiscountQuestion(userText)) {
+			logStep(caseId, "discount.question", { source: "deterministic" });
+			await answerDiscountQuestion(io, sc, st, userText);
+			return;
+		}
+
 		const readyToQuoteFromNlu =
 			st.slots.checkinISO &&
 			st.slots.checkoutISO &&
@@ -1991,6 +2068,12 @@ async function planTurn(io, sc) {
 
 		if (supportDecision.roomTypeKey) {
 			st.slots.roomTypeKey = supportDecision.roomTypeKey;
+		}
+
+		if (supportDecision.action === "discount_question") {
+			logStep(caseId, "discount.question", { source: "decision" });
+			await answerDiscountQuestion(io, sc, st, userText);
+			return;
 		}
 
 		if (supportDecision.action === "reservation_cancellation") {
