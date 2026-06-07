@@ -1157,7 +1157,7 @@ Future TODO Backlog - Added 2026-05-26
   - Manual teaching-chat endpoints require requireSignin and CustomerService admin access.
   - Existing aiagent-learning build/selftest/debug endpoints remain unchanged.
 - Chatbot orchestration:
-  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5-mini, with chatbot-specific env values such as OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, and OPENAI_CHATBOT_NLU_MODEL available before the broader OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL fallbacks.
+  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5.5, with chatbot-specific env values such as OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, and OPENAI_CHATBOT_NLU_MODEL available before the broader OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL fallbacks.
   - OpenAI callers should use pickOpenAIModel/buildChatCompletionBody instead of hardcoded model names. The helper uses max_completion_tokens for GPT-5/o-series style models and max_tokens for older chat-completion models.
   - aiagent/core/db.js exposes listRelevantTrainingChats.
   - listRelevantTrainingChats reads active manual learning records across languages from aiagentlearnings and legacy aiagenttrainingchats; retrieval must not filter examples by the guest's preferred language.
@@ -1185,15 +1185,20 @@ Future TODO Backlog - Added 2026-05-26
   - aiagent/core/orchestrator.js hydrates booking slots from the saved support-case transcript before asking for missing details. Recovery covers Gregorian/Hijri dates, selected room type, full name, phone, email, adult count, child count, child ages, and prior AI prompts.
   - Transcript recovery prevents "I already told you" loops after state loss, server restart, or a late turn that arrives without the full in-memory state.
   - Active new-reservation flow must not route to reservation_lookup merely because the guest asks for a confirmation number. Treat "where is my confirmation number?" as continuation/finalization of the new booking unless the guest clearly says they already have an existing reservation.
+  - Opening behavior must remain CS-first, not form-first. Even if the support case indicates a new reservation, the first assistant reply should ask how it can help today and may gently confirm that the guest wants to reserve a room; it must not open by asking for check-in/check-out dates.
+  - Selected-hotel room/capacity questions must answer the direct question first in a natural hospitality/sales tone using real active room facts. For example, a "room for 3 individuals" question should confirm the matching triple-room fit before inviting dates for availability/price. Do not replace the answer with a date question and do not hardcode one fixed sales sentence.
+  - If the room is already selected and the guest then provides dates, the orchestrator should quote directly from deterministic date/room slots rather than running another planning turn that might ask for the same dates again.
+  - Delayed AI sends capture the specific customer message they are answering. If a newer guest message arrives before save, humanSend cancels the stale reply so old generated text cannot appear after the conversation has moved on.
   - Quote and finalize paths send a short progress acknowledgement when AI_INSTANT_PROGRESS_ENABLED is true, but it must still go through humanSend so the guest sees the AI responder typing before the message appears. Do not save progress messages instantly.
   - Reservation finalization must call createReservationForCase and wait for the MongoDB save before sending confirmation, details, or payment links.
+  - AI-created reservations must use the same PMS-style 10-digit confirmation number pattern as normal reservation/payment/import flows. Do not use 6-digit AI-only confirmation numbers. The AI generator checks both Reservations and UncompleteReservations before assigning the number.
   - Details link format is CLIENT_URL/single-reservation/:confirmation. Payment link format is CLIENT_URL/client-payment/:reservationId/:confirmation.
   - The final reservation-created message is deterministic, not LLM-authored: confirmation number, total, "Please click here to find more details" link, payment link, then a follow-up asking whether anything else is needed.
   - After final confirmation, st.waitFor="post_booking_followup". The AI waits for the guest's answer, closes warmly on no/thanks, asks for details on vague yes, or passes a concrete new request back into normal orchestration.
   - Nationality is required by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=false only if the business explicitly allows skipping it.
   - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
-  - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current default is gpt-5-mini for an accessible, cheaper, high-quality live-chat baseline. Do not use invalid model slugs such as gpt-5.3; they force fallback text and make the bot feel less human.
-  - GPT-5-style chatbot calls default to OPENAI_CHATBOT_REASONING_EFFORT=minimal to reduce latency for live support turns. Increase only for a measured quality need.
+  - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current quality-first default is gpt-5.5 for more polished, human-like customer-facing support. Do not use invalid model slugs such as gpt-5.3; they force fallback text and make the bot feel less human.
+  - GPT-5-style chatbot calls default to OPENAI_CHATBOT_REASONING_EFFORT=medium with gpt-5.5. Lower only if measured latency/cost becomes more important than conversational quality.
   - Detailed AI step logs are disabled unless AI_AGENT_DEBUG=true. Keep production default quiet so names, phones, slots, and QA transcript details are not written to PM2 logs during normal operation.
   - NLU supports Arabic room synonyms and no-year Hijri ranges such as "1 Ramadan to 10 Ramadan / next Ramadan"; nearest future Hijri occurrence is used unless explicit past wording is present, and explicit Hijri years remain authoritative.
 - Validation completed locally:
@@ -1202,6 +1207,7 @@ Future TODO Backlog - Added 2026-05-26
   - node --check routes/aiagent_learning.js.
   - node --check aiagent/core/db.js.
   - node --check aiagent/core/orchestrator.js.
+  - 2026-06-06 local Socket.IO AI QA with gpt-5.5 passed: greeting did not ask dates, excited Umrah smalltalk stayed open/helpful, "rooms for 3 individuals" answered with the matching triple room before dates, Ramadan dates quoted directly, reservation saved with a 10-digit confirmation number, final links were sent, post-booking feedback did not push payment, and the QA support case/reservation were deleted.
 
 2026-05-29 Production B2C AI Chat Open Greeting Guard
 - Root cause found during production monitoring:
@@ -1267,6 +1273,7 @@ Future TODO Backlog - Added 2026-05-26
     - AI_HUMAN_BETWEEN_SENDS_MAX_MS default 1600.
   - Normal short replies should feel like a person is reviewing/typing for about 3 seconds, while longer replies can take longer without returning to 20-40 second silent waits.
   - Frontend language selection should expose a single Arabic option. Dialect/tone such as Modern Standard Arabic, Egyptian, Algerian, or other regional Arabic is inferred by the orchestrator from the guest's messages, not chosen as separate frontend options.
+  - AI_INSTANT_PROGRESS_ENABLED should default to false for production conversational quality. Prefer one thoughtful typed answer over extra "checking..." progress messages, unless a measured operation truly needs an interim acknowledgement.
 
 2026-05-29 Localized Phone Digit Normalization
 - Backend behavior:

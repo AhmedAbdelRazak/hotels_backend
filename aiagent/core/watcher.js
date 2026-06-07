@@ -68,11 +68,11 @@ async function scheduleGreeting(io, caseId) {
 					io,
 					caseId,
 					st,
-					"I understand you’d like a new reservation. Please share your check‑in and check‑out dates.",
+					"I see you may want to reserve a room. How can I help you today?",
 					st.languageLabel,
 					{ minDelayMs: 600 }
 				);
-				st.awaiting = "ask_dates";
+				st.awaiting = "clarify";
 			} else if (st.ctx.intent === "reservation_inquiry") {
 				await sendAiText(
 					io,
@@ -284,8 +284,8 @@ async function scheduleReply(io, caseId, lastUserMsg) {
 		) {
 			if (!st.ctx.checkinISO || !st.ctx.checkoutISO) {
 				text =
-					"Alhamdulillah, I’m well — how are you? When would you like to check in and check out?";
-				st.awaiting = "ask_dates";
+					"Alhamdulillah, I’m well - thank you for asking. How can I help with your stay today?";
+				st.awaiting = "clarify";
 			} else if (!st.ctx.roomType) {
 				const ex = sampleDisplayNames(hotel);
 				const suffix = ex.length

@@ -34,20 +34,28 @@
   ambiguous inputs (typos, mixed languages). Otherwise local extractors are
   used.
 - **Model latency**:
-  - Default chatbot model is `gpt-5-mini`, configurable through the central OpenAI model env keys.
-  - GPT-5-style chatbot calls use `OPENAI_CHATBOT_REASONING_EFFORT=minimal` by default for live-chat latency.
+  - Default chatbot model is `gpt-5.5`, configurable through the central OpenAI model env keys.
+  - GPT-5-style chatbot calls use `OPENAI_CHATBOT_REASONING_EFFORT=medium` by default for quality-first live-chat behavior.
+  - `AI_INSTANT_PROGRESS_ENABLED=false` is preferred in production so guests receive one thoughtful typed answer instead of extra bot-like progress messages.
   - Detailed AI step logs are off unless `AI_AGENT_DEBUG=true`, so production PM2 logs do not include guest names, phones, or slot state during normal operation.
-- **No redundancy**: Agent reads `inquiryAbout` from SupportCase and starts the
-  exact flow without “How can I help?”.
+- **Warm CS opening**: Agent reads `inquiryAbout` from SupportCase as private
+  context, but still opens like a helpful hotel support agent. Even when a
+  new-reservation intent is known, the first reply should ask how it can help
+  and may gently confirm the guest wants to reserve a room; it must not open by
+  asking for check-in/check-out dates.
+- **Direct room answers**: When a guest asks whether the hotel has a room for a
+  capacity or room type, the answer should first confirm the fit using real
+  `roomCountDetails` facts in a natural hospitality/sales tone, then invite dates
+  only as the next step for availability and price.
 - **Pricing**:
   - Middle-day `price = 0` ⇒ **blocked**.
   - Missing calendar day ⇒ `basePrice`.
   - `basePrice` blank/0 ⇒ `defaultCost`.
   - Commission = `room.roomCommission || hotel.commission || 10`.
 - **Flow** (one question each step):
-  1. Check-in date
-  2. Check-out date
-  3. Room type (from `roomCountDetails`)
+  1. Understand and answer the guest's latest question first
+  2. Room type/capacity if the guest asks about it first
+  3. Check-in and check-out dates after the guest is ready for availability/price
   4. Review quote and ask the guest to confirm
   5. Full name in English
   6. Nationality
@@ -57,6 +65,7 @@
   - Agent summarizes and asks to proceed.
 - On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.
   - The saved reservation uses `booking_source="AI Chat"`, `payment="Not Paid"`, `pendingConfirmation.status="pending"`, `pendingConfirmation.clientVisibleStatus="confirmed"`, and `availabilitySnapshot.source="ai_chat_reservation_create"`.
+  - The confirmation number follows the normal PMS reservation pattern: a unique 10-digit value checked against saved and pending/uncompleted reservations. Do not use AI-only 6-digit numbers.
   - The guest receives a friendly created/confirmation response with the confirmation number, details link, and payment link. Internally the hotel team still reviews the pending-confirmation reservation.
   - If inventory is no longer available or creation fails, the AI escalates to human support with `aiHandoffReason=reservation_finalize_failed`.
 - **Dates**:

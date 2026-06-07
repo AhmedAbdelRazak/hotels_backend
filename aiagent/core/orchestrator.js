@@ -105,7 +105,7 @@ const PUBLIC_DISCOUNT_PERCENT = 15;
 const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
-	true
+	false
 );
 
 function randomBetween(a, b) {
@@ -667,6 +667,41 @@ function wantsPriceButMissingDates(text = "", st = {}) {
 	);
 }
 
+function selectedHotelRoomQuestionText(text = "") {
+	const normalized = String(text || "").toLowerCase();
+	if (!normalized.trim()) return false;
+	const mentionsRoom =
+		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
+			normalized
+		) || /غرف|غرفة|سرير|أسرة|اشخاص|أشخاص|افراد|أفراد/.test(normalized);
+	if (!mentionsRoom) return false;
+	const hasRoomTypeOrCapacity =
+		Boolean(mapRoomToKey(normalized)) ||
+		/\b(?:for\s*)?(?:2|two|3|three|4|four|5|five)\b/i.test(normalized);
+	if (!hasRoomTypeOrCapacity) return false;
+	return (
+		/[?]/.test(normalized) ||
+		/\b(do you|you guys|u guys|does the hotel|does your hotel|is there|are there|any|available|availability|have|has|looking for|need|want|book|reserve)\b/i.test(
+			normalized
+		) ||
+		/عندكم|فيه|هل|متاح|ابغى|أبغى|عايز|عاوز|احتاج/.test(normalized)
+	);
+}
+
+function hasOperationalBookingSignal(text = "") {
+	const normalized = String(text || "").toLowerCase();
+	if (!normalized.trim()) return false;
+	return (
+		selectedHotelRoomQuestionText(normalized) ||
+		Boolean(mapRoomToKey(normalized)) ||
+		Boolean(extractDateRange(normalized)?.checkinISO) ||
+		/\b(book|reserve|reservation|availability|available|room|rooms|bed|beds|price|rate|cost|stay|check[\s-]?in|check[\s-]?out|dates?)\b/i.test(
+			normalized
+		) ||
+		/حجز|غرفة|غرف|متاح|سعر|دخول|خروج|موعد|تاريخ/.test(normalized)
+	);
+}
+
 function wantsPaymentHelp(text = "") {
 	return /payment|pay|card|link|declined|not going through|failed|دفع|بطاقة|رابط|pago|paiement|ادائیگی/i.test(
 		String(text || "")
@@ -916,7 +951,7 @@ async function answerSelectedHotelRoomQuestion(
 	}
 	const instruction = roomTypeKey
 		? matchingRooms.length
-			? `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say that this hotel has matching active room options, mention up to two provided matching room names if helpful, and ask for check-in and checkout dates if they are missing. Do not mention or link other hotels unless the guest explicitly asks for alternatives.`
+			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other room types or alternatives unless the guest asks. If dates are missing, add one soft next-step invitation to share dates so availability and price can be checked.`
 			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or whether they want nearby alternatives. Do not list other hotels yet.`
 		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Do not mention or link other hotels unless the guest explicitly asks for alternatives.`;
 	const reply = await write(io, sc, st, instruction, {
@@ -924,7 +959,7 @@ async function answerSelectedHotelRoomQuestion(
 		selectedHotel: hotelName,
 		requestedRoomTypeKey: roomTypeKey,
 		matchingRooms: matchingRooms.slice(0, 3),
-		activeRoomOptions: activeRooms,
+		activeRoomOptions: matchingRooms.length ? [] : activeRooms,
 		slots: st.slots,
 	});
 	if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
@@ -1088,6 +1123,7 @@ function emitTyping(io, caseId, st, on = true) {
 async function humanSend(io, sc, st, text, { first = false } = {}) {
 	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
+	const expectedTurnUserText = st.activeTurnUserText || "";
 
 	const token = Math.random().toString(36).slice(2);
 	st.sendingToken = token;
@@ -1151,6 +1187,20 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 			logStep(caseId, "human.cancelled", {
 				stage: "policy-before-save",
 				reason: policy.reason,
+			});
+			return false;
+		}
+		const latestCustomerText = latestCase ? lastUserText(latestCase) : "";
+		if (
+			expectedTurnUserText &&
+			latestCustomerText &&
+			latestCustomerText !== expectedTurnUserText
+		) {
+			logStep(caseId, "human.cancelled", {
+				stage: "stale-turn",
+				token,
+				expectedTurnUserText,
+				latestCustomerText,
 			});
 			return false;
 		}
@@ -1812,9 +1862,13 @@ async function write(io, sc, st, instruction, context = {}) {
 		loadLearningContext(sc, st, instruction, context),
 		loadPreviousGuestContext(sc, st),
 	]);
-	const introRule = hotelName
-		? `For greetings and introductions, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
-		: `For greetings and introductions, introduce yourself as ${st.agentName} from Jannat Booking support.`;
+	const alreadyIntroduced =
+		st.greeted || Boolean(st.lastBotText) || hasAiAssistantReply(sc);
+	const introRule = alreadyIntroduced
+		? `You already introduced yourself earlier in this chat. Do not start with "I'm ${st.agentName}" or repeat the support/reservation desk title unless the guest directly asks who you are.`
+		: hotelName
+		? `For the first greeting only, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
+		: `For the first greeting only, introduce yourself as ${st.agentName} from Jannat Booking support.`;
 	const aiIdentityRule = hotelName
 		? `If asked directly whether you are AI, say you are AI-assisted ${hotelName} support monitored by the support team; do not claim to be human.`
 		: `If asked directly whether you are AI, say you are AI-assisted Jannat Booking support monitored by Jannat Booking admins; do not claim to be human.`;
@@ -1833,6 +1887,13 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
+		`For every reply, first understand what the guest just asked or felt, then answer that directly before moving the booking forward.`,
+		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
+		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
+		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
+		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
+		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
+		`If the guest complains about repetition, speed, or not being answered, apologize briefly, correct course, and avoid defending yourself.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, and Spanish guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
@@ -1840,6 +1901,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
+		`Avoid repeated openings such as "Hello {name}" or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
 		`Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity.`,
 		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
@@ -1859,6 +1921,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			...context,
 			targetResponseLanguage: targetLanguageText,
 			respectfulAddress,
+			alreadyIntroduced,
 			latestGuestLanguageStyle: languageStyle,
 			privatePreviousGuestChats: previousGuestContext,
 			employeeLearningExamples: learningContext,
@@ -2345,6 +2408,20 @@ function postBookingCloseText(sc = {}, st = {}) {
 	return "You are very welcome. I hope you have a wonderful stay.";
 }
 
+async function postBookingCloseReply(io, sc, st, userText = "") {
+	const instruction = botExperienceComplaintText(userText) ||
+		/\b(answer\s+(?:the\s+)?questions?|can't\s+you\s+answer|can'?t\s+you\s+answer)\b/i.test(
+			String(userText || "")
+		)
+		? "The guest is closing the chat and gave feedback that the assistant should answer direct questions. Apologize briefly, acknowledge the feedback sincerely, confirm the reservation is already created, and close warmly. Do not ask another question and do not push payment."
+		: "The guest said no/thanks after the final reservation-created message. Close warmly in one short human sentence. Do not ask another question and do not push payment.";
+	const reply = await write(io, sc, st, instruction, {
+		latestUserMessage: userText,
+		slots: st.slots,
+	});
+	return reply || postBookingCloseText(sc, st);
+}
+
 function postBookingClarifyText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
@@ -2361,8 +2438,36 @@ function postBookingClarifyText(sc = {}, st = {}) {
 
 function isPostBookingClosure(text = "") {
 	const normalized = String(text || "").trim().toLowerCase();
+	if (!normalized) return false;
+	if (
+		/^(no|nope|no thanks|no thank you|nothing|that's all|that is all|all good|thanks|thank you)\b/i.test(
+			normalized
+		) &&
+		!(
+			/\b(pay|payment|link|change|update|cancel|refund|another booking|new booking|book another|reserve another)\b/i.test(
+				normalized
+			) && !botExperienceComplaintText(normalized)
+		)
+	) {
+		return true;
+	}
 	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|شكرا|شكرًا|لا|لا شكرا|خلاص|تمام شكرا|كده تمام|مافيش|مش محتاج|بس كده|merci|non merci|gracias|no gracias)\.?$/i.test(
 		normalized
+	);
+}
+
+function isPostBookingConcreteRequest(text = "") {
+	const normalized = String(text || "").trim();
+	if (!normalized) return false;
+	if (botExperienceComplaintText(normalized)) return false;
+	return (
+		wantsPaymentHelp(normalized) ||
+		wantsReservationHelp(normalized) ||
+		selectedHotelRoomQuestionText(normalized) ||
+		Boolean(findAmenityMatch(normalized)) ||
+		/\b(can you|could you|please tell|tell me|i need|i want|where|when|how much|how do|what is|what time|is there|do you)\b/i.test(
+			normalized
+		)
 	);
 }
 
@@ -2376,13 +2481,38 @@ function isVaguePositive(text = "") {
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
 	if (isPostBookingClosure(userText)) {
-		await humanSend(io, sc, st, postBookingCloseText(sc, st));
+		const closeReply = await postBookingCloseReply(io, sc, st, userText);
+		await humanSend(io, sc, st, closeReply);
+		st.waitFor = null;
+		return true;
+	}
+	if (botExperienceComplaintText(userText) && !isPostBookingConcreteRequest(userText)) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest gave feedback after the reservation was created. Apologize briefly, acknowledge that direct questions should be answered directly, and close warmly unless they ask for a specific new thing. Do not repeat booking details and do not push payment.",
+			{ latestUserMessage: userText, slots: st.slots }
+		);
+		await humanSend(io, sc, st, reply || postBookingCloseText(sc, st));
 		st.waitFor = null;
 		return true;
 	}
 	if (isVaguePositive(userText)) {
 		await humanSend(io, sc, st, postBookingClarifyText(sc, st));
 		st.waitFor = "post_booking_followup";
+		return true;
+	}
+	if (!isPostBookingConcreteRequest(userText)) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest sent a post-booking note without a clear new request. Reply naturally and briefly, acknowledging the message. Do not repeat reservation details and do not push payment.",
+			{ latestUserMessage: userText }
+		);
+		await humanSend(io, sc, st, reply || postBookingCloseText(sc, st));
+		st.waitFor = null;
 		return true;
 	}
 	st.waitFor = null;
@@ -2400,13 +2530,13 @@ function nextReservationDetailStep(st = {}) {
 async function askForReservationDetail(io, sc, st, step) {
 	const instructions = {
 		fullname:
-			"Ask ONE question: 'Is the reservation under your full name as in passport? Please type the full name in English.'",
+			"Ask naturally for the guest's full name in English as it should appear on the reservation/passport. Keep it warm and ask only this one question.",
 		nationality:
-			"Ask ONE question: 'What is the guest's nationality?' Ask for the country/nationality name in English.",
+			"Ask naturally for the guest's nationality/country name in English. Keep it warm and ask only this one question.",
 		phone:
-			"Ask ONE question for a reachable phone number. WhatsApp is preferred, but do not make it mandatory.",
+			"Ask naturally for a reachable phone number. Mention WhatsApp is helpful/preferred, but do not make it sound mandatory. Ask only this one question.",
 		email_or_skip:
-			"Ask ONE question for an email address. If they prefer not to share it, tell them they can type skip.",
+			"Ask naturally for an email address for reservation details. Let the guest know they can type skip if they prefer not to share one. Ask only this one question.",
 	};
 	const instruction = instructions[step];
 	if (!instruction) return;
@@ -2648,8 +2778,14 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 		thread.waitingForGuest &&
 		(looksLikeWellnessReply(userText) || looksLikeClosureAck(userText))
 	) {
+		const openHelpPivot =
+			pivot === "dates" &&
+			!st.slots.roomTypeKey &&
+			!hasOperationalBookingSignal(userText);
 		const softPivot = askedRecently(st, pivot);
-		const instr = softPivot
+		const instr = openHelpPivot
+			? "Acknowledge the guest's personal/casual reply warmly and naturally. If they mention Umrah, add a sincere short well-wish. Then ask an open question like how you can help with their stay today. Do not ask for check-in/check-out dates yet."
+			: softPivot
 			? "Acknowledge warmly. Add a soft pivot line (no direct repeated question)."
 			: "Acknowledge warmly, then ask exactly ONE booking question for the next step (dates if missing, otherwise room type, otherwise proceed).";
 		const msg = await write(io, sc, st, instr, { pivot });
@@ -2690,10 +2826,12 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 				io,
 				sc,
 				st,
-				"Reply briefly to their casual line, then ask for check‑in and check‑out in ONE question."
+				hasOperationalBookingSignal(userText)
+					? "Reply briefly to their casual line, then ask for check-in and check-out in ONE question."
+					: "Reply warmly to their casual line, then ask an open question like how you can help with their stay today. Do not ask for check-in/check-out dates yet."
 			);
 			await humanSend(io, sc, st, msg);
-			stampAsk(st, "dates");
+			if (hasOperationalBookingSignal(userText)) stampAsk(st, "dates");
 		} else if (pivot === "room") {
 			const examples = (st.hotel?.roomCountDetails || [])
 				.filter((r) => r.activeRoom)
@@ -2762,6 +2900,7 @@ async function planTurn(io, sc) {
 		});
 
 		const userText = lastUserText(sc);
+		st.activeTurnUserText = userText || "";
 		updateActiveLanguageFromText(sc, st, userText);
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
@@ -2776,8 +2915,8 @@ async function planTurn(io, sc) {
 					sc,
 					st,
 					initialInquiry
-						? "The guest has just opened chat. Use the initial inquiry details as context, greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, then ask one helpful next question. Keep it short."
-						: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line.",
+						? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+						: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 					{ initialInquiry }
 				);
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -2795,7 +2934,7 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Greet the guest by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line.",
+					"Greet the guest by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 					{ latestUserMessage: userText }
 				);
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -2828,6 +2967,30 @@ async function planTurn(io, sc) {
 			{ allowGeneric: false }
 		);
 		if (preNluProceedHandled) return;
+
+		const quickTurnDates = quickDateRange(userText);
+		if (
+			st.hotel &&
+			st.slots.roomTypeKey &&
+			quickTurnDates.checkinISO &&
+			quickTurnDates.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			st.slots.checkinISO = quickTurnDates.checkinISO;
+			st.slots.checkoutISO = quickTurnDates.checkoutISO;
+			if (quickTurnDates.raw) {
+				st.dateRaw = { ...st.dateRaw, ...quickTurnDates.raw };
+			}
+			logStep(caseId, "quick_dates.direct_quote", {
+				roomTypeKey: st.slots.roomTypeKey,
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+			});
+			await shareKnownStayQuote(io, sc, st);
+			return;
+		}
 
 		// Legacy greeting branch is skipped after the first real customer turn.
 		if (!st.greeted && !st.greetScheduled) {
@@ -2872,6 +3035,25 @@ async function planTurn(io, sc) {
 		if (decisionLu.dates?.checkoutISO)
 			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
+
+		if (
+			st.hotel &&
+			selectedHotelRoomQuestionText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			const requestedRoomTypeKey =
+				decisionLu.roomTypeKey || mapRoomToKey(userText) || st.slots.roomTypeKey || null;
+			await answerSelectedHotelRoomQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				requestedRoomTypeKey
+			);
+			return;
+		}
 
 		if (!humanHandoffReason(userText) && wantsDiscountQuestion(userText)) {
 			logStep(caseId, "discount.question", { source: "deterministic" });
@@ -3576,7 +3758,7 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Ask ONE question: 'Is the reservation under your full name as in passport? Please type the full name in English.'"
+					"Ask naturally for the guest's full name in English as it should appear on the reservation/passport. Keep it warm and ask only this one question."
 				);
 				await humanSend(io, sc, st, prompt);
 				stampAsk(st, "fullname");
@@ -3596,7 +3778,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"Ask ONE question: 'What is the guest's nationality?' Ask for the country/nationality name in English."
+						"Ask naturally for the guest's nationality/country name in English. Keep it warm and ask only this one question."
 					);
 					await humanSend(io, sc, st, askNat);
 					stampAsk(st, "nationality");
@@ -3625,7 +3807,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"Ask ONE question for a reachable phone number. WhatsApp is preferred, but do not make it mandatory."
+						"Ask naturally for a reachable phone number. Mention WhatsApp is helpful/preferred, but do not make it sound mandatory. Ask only this one question."
 					);
 					await humanSend(io, sc, st, askPhone);
 					stampAsk(st, "phone");
@@ -3652,7 +3834,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"Ask ONE question for an email address. If they prefer not to share it, tell them they can type skip."
+						"Ask naturally for an email address for reservation details. Let the guest know they can type skip if they prefer not to share one. Ask only this one question."
 					);
 					await humanSend(io, sc, st, askEmail);
 					stampAsk(st, "email_or_skip");
@@ -3720,7 +3902,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Ask ONE question: 'Is the reservation under your full name (as in passport)? If yes, please type your full name in English. If for someone else, share their full name in English.'"
+				"Ask naturally for the guest's full name in English as it should appear on the reservation/passport. If it is for someone else, ask for that guest's full name. Keep it warm and ask only this one question."
 			);
 			await humanSend(io, sc, st, prompt);
 			return;
@@ -3748,7 +3930,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Ask ONE question: 'What is the guest's nationality?' (English name)."
+				"Ask naturally for the guest's nationality/country name in English. Keep it warm and ask only this one question."
 			);
 			await humanSend(io, sc, st, askNat);
 			return;
@@ -3778,7 +3960,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Ask ONE question for a phone number (WhatsApp preferred, but not mandatory)."
+				"Ask naturally for a reachable phone number. Mention WhatsApp is helpful/preferred, but do not make it sound mandatory. Ask only this one question."
 			);
 			await humanSend(io, sc, st, askPhone);
 			return;
@@ -3806,7 +3988,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Ask ONE question for an email address (do NOT say optional). If they resist, accept continuing without email."
+				"Ask naturally for an email address for reservation details. Let the guest know they can continue without one if they prefer. Ask only this one question."
 			);
 			await humanSend(io, sc, st, askEmail);
 			return;

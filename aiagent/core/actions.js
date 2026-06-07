@@ -1,5 +1,6 @@
 // aiagent/core/actions.js
 const Reservations = require("../../models/reservations");
+const UncompleteReservations = require("../../models/Uncompleted");
 const {
 	validateReservationInventoryForCreate,
 	captureReservationAvailabilitySnapshot,
@@ -20,16 +21,27 @@ function onlyDigits(s = "") {
 	return digitsToEnglish(String(s)).replace(/\D+/g, "");
 }
 
+function generateReservationConfirmationCandidate() {
+	return String(Math.floor(1000000000 + Math.random() * 9000000000));
+}
+
+async function confirmationNumberExists(candidate) {
+	const [existsInReservations, existsInPending] = await Promise.all([
+		Reservations.exists({ confirmation_number: candidate }),
+		UncompleteReservations.exists({ confirmation_number: candidate }),
+	]);
+	return Boolean(existsInReservations || existsInPending);
+}
+
 async function uniqueConfirmation() {
 	const tries = 30;
-	for (let i = 0; i < tries; i++) {
-		const num = String(Math.floor(100000 + Math.random() * 900000));
-		const exists = await Reservations.findOne({ confirmation_number: num })
-			.lean()
-			.exec();
-		if (!exists) return num;
+	for (let i = 0; i < tries; i += 1) {
+		const candidate = generateReservationConfirmationCandidate();
+		if (!(await confirmationNumberExists(candidate))) return candidate;
 	}
-	return String(Date.now()).slice(-6);
+	const fallback = `${Date.now()}`.slice(-10).padStart(10, "1");
+	if (!(await confirmationNumberExists(fallback))) return fallback;
+	throw new Error("Could not generate a unique reservation confirmation number.");
 }
 
 function clonePricingRows(rows) {

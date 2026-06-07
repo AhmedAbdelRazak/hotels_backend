@@ -25,9 +25,68 @@ const ROOM_SYNONYMS = [
 			"ثنائية",
 		],
 	},
-	{ key: "tripleRooms", terms: ["triple", "3 bed", "three beds", "ثلاثية"] },
-	{ key: "quadRooms", terms: ["quad", "4 bed", "four beds", "رباعية"] },
-	{ key: "familyRooms", terms: ["family", "quintuple", "5 bed", "خماسية"] },
+	{
+		key: "tripleRooms",
+		terms: [
+			"triple",
+			"3 bed",
+			"3 beds",
+			"three bed",
+			"three beds",
+			"3 people",
+			"three people",
+			"3 persons",
+			"three persons",
+			"3 individuals",
+			"three individuals",
+			"room for 3",
+			"rooms for 3",
+			"room for three",
+			"rooms for three",
+			"ثلاثية",
+		],
+	},
+	{
+		key: "quadRooms",
+		terms: [
+			"quad",
+			"4 bed",
+			"4 beds",
+			"four bed",
+			"four beds",
+			"4 people",
+			"four people",
+			"4 persons",
+			"four persons",
+			"4 individuals",
+			"four individuals",
+			"room for 4",
+			"rooms for 4",
+			"room for four",
+			"rooms for four",
+			"رباعية",
+		],
+	},
+	{
+		key: "familyRooms",
+		terms: [
+			"family",
+			"quintuple",
+			"5 bed",
+			"5 beds",
+			"five bed",
+			"five beds",
+			"5 people",
+			"five people",
+			"5 persons",
+			"five persons",
+			"room for 5",
+			"rooms for 5",
+			"room for five",
+			"rooms for five",
+			"خماسية",
+		],
+	},
 ];
 
 ROOM_SYNONYMS.push(
@@ -907,7 +966,10 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			confirmation: null,
 		};
 	}
-	const roomKey = lu?.roomTypeKey || (lu?.roomText ? mapRoomToKey(lu.roomText) : null);
+	const roomKey =
+		lu?.roomTypeKey ||
+		(lu?.roomText ? mapRoomToKey(lu.roomText) : null) ||
+		quickRoomTypeKey;
 
 	let iso = { checkinISO: null, checkoutISO: null, reason: null };
 	try {
