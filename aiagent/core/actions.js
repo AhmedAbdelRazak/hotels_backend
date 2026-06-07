@@ -180,11 +180,11 @@ async function postReservationLinks(io, sc, reservation) {
 			"https://jannatbooking.com"
 	).replace(/\/+$/, "");
 
-	const link1 = `${publicBase}/single-reservations/${conf}`;
+	const link1 = `${publicBase}/single-reservation/${conf}`;
 	const link2 = `${publicBase}/client-payment/${rid}/${conf}`;
 
 	const messages = [
-		`Your reservation has been created. View details here:\n${link1}`,
+		`Your reservation has been created. [Please click here to find more details](${link1})`,
 		`For serious confirmation, you may pay a small deposit here (optional):\n${link2}`,
 	];
 

@@ -1157,7 +1157,7 @@ Future TODO Backlog - Added 2026-05-26
   - Manual teaching-chat endpoints require requireSignin and CustomerService admin access.
   - Existing aiagent-learning build/selftest/debug endpoints remain unchanged.
 - Chatbot orchestration:
-  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5.5, and env values such as OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL can override by use case.
+  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5.3, with chatbot-specific env values such as OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, and OPENAI_CHATBOT_NLU_MODEL available before the broader OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL fallbacks.
   - OpenAI callers should use pickOpenAIModel/buildChatCompletionBody instead of hardcoded model names. The helper uses max_completion_tokens for GPT-5/o-series style models and max_tokens for older chat-completion models.
   - aiagent/core/db.js exposes listRelevantTrainingChats.
   - listRelevantTrainingChats reads active manual learning records across languages from aiagentlearnings and legacy aiagenttrainingchats; retrieval must not filter examples by the guest's preferred language.
@@ -1170,11 +1170,30 @@ Future TODO Backlog - Added 2026-05-26
   - When a support case has a hotel, the writer now speaks as that hotel support/reservation desk and avoids presenting Jannat Booking as a separate middleman unless platform/payment/final verification context requires the brand.
   - Greetings, introductions, transcript labels, quote continuations, and human handoff messages now prefer the active hotel support voice when hotel context exists, so the guest does not feel passed through a platform middleman.
   - Legacy fallback replies for date/payment/reservation/amenity/handoff handling now pass through the same writer path where practical, so relevant training chats can shape tone and flow before a customer-facing answer is sent.
-  - OpenAI calls now use bounded timeout/retry settings with an explicit 20s request deadline/no retry by default for live chat, and the orchestrator has deterministic decision/writer fallbacks so a slow model call does not leave the guest without a reply.
+  - OpenAI calls now use bounded timeout/retry settings with an explicit 8s request deadline/no retry by default for live chat, and the orchestrator has deterministic decision/writer fallbacks so a slow model call does not leave the guest without a reply.
   - Complete booking requests that already contain dates and room type can go directly from deterministic NLU to quote writing, avoiding an extra planning model call.
   - English booking phrases with explicit room type and dates now have a deterministic NLU fast path, avoiding model calls for common messages such as double-room date-range requests.
   - Live-chat quote pricing now uses a bounded orchestrator-local pricing helper with date-loop guards and array checks, so a malformed pricing row cannot stall a chat turn.
   - The previous humanSend undefined reason failure was removed so normal replies can save after the typing delay.
+- 2026-06-07 production chat 6a24a8f4276a5702204fdb55 findings:
+  - The guest supplied booking details, but the AI repeatedly asked for dates and lost already-given context.
+  - The guest asked for a confirmation number for the new booking, but the flow was misread as an existing-reservation lookup and asked the guest to provide the confirmation number instead.
+  - The AI claimed the booking request was submitted before a matching AI Chat reservation existed in the database.
+  - Response latency was unacceptable for live support: some replies were around 20-40 seconds or longer. Live chat should acknowledge quickly and avoid long silent waits.
+  - The reservation-created message must only be sent after the database save succeeds and real confirmation/payment/detail links can be generated.
+- 2026-06-07 live booking hardening:
+  - aiagent/core/orchestrator.js hydrates booking slots from the saved support-case transcript before asking for missing details. Recovery covers Gregorian/Hijri dates, selected room type, full name, phone, email, adult count, child count, child ages, and prior AI prompts.
+  - Transcript recovery prevents "I already told you" loops after state loss, server restart, or a late turn that arrives without the full in-memory state.
+  - Active new-reservation flow must not route to reservation_lookup merely because the guest asks for a confirmation number. Treat "where is my confirmation number?" as continuation/finalization of the new booking unless the guest clearly says they already have an existing reservation.
+  - Quote and finalize paths send an immediate progress acknowledgement when AI_INSTANT_PROGRESS_ENABLED is true, then perform quote/create work. Keep artificial typing delays short; do not reintroduce 20-40 second silent waits.
+  - Reservation finalization must call createReservationForCase and wait for the MongoDB save before sending confirmation, details, or payment links.
+  - Details link format is CLIENT_URL/single-reservation/:confirmation. Payment link format is CLIENT_URL/client-payment/:reservationId/:confirmation.
+  - The final reservation-created message is deterministic, not LLM-authored: confirmation number, total, "Please click here to find more details" link, payment link, then a follow-up asking whether anything else is needed.
+  - After final confirmation, st.waitFor="post_booking_followup". The AI waits for the guest's answer, closes warmly on no/thanks, asks for details on vague yes, or passes a concrete new request back into normal orchestration.
+  - Nationality is optional by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=true only when the business requires it.
+  - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
+  - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current default is gpt-5.3 for a cheaper, high-quality live-chat baseline.
+  - NLU supports Arabic room synonyms and no-year Hijri ranges such as "1 Ramadan to 10 Ramadan / next Ramadan"; nearest future Hijri occurrence is used unless explicit past wording is present, and explicit Hijri years remain authoritative.
 - Validation completed locally:
   - node --check models/aiagent_learning.js.
   - node --check controllers/aiagent_training_chats.js.

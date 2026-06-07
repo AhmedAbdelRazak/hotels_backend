@@ -21,6 +21,8 @@ const {
 	firstNameOf,
 	validateNationalityLLM,
 	normalizeNameLLM,
+	mapRoomToKey,
+	quickDateRange,
 	asciiize,
 	digitsToEnglish,
 	detectAmenityQuestion,
@@ -39,45 +41,51 @@ function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
 	return Math.min(max, Math.max(min, value));
 }
 
-const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 300, {
+function boolFromEnv(name, fallback = false) {
+	const raw = String(process.env[name] || "").trim().toLowerCase();
+	if (!raw) return fallback;
+	return ["1", "true", "yes", "on"].includes(raw);
+}
+
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 80, {
 	min: 0,
 	max: 5000,
 });
 const HUMAN_THINK_MAX_MS = Math.max(
 	HUMAN_THINK_MIN_MS,
-	intFromEnv("AI_HUMAN_THINK_MAX_MS", 650, { min: 0, max: 5000 })
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 220, { min: 0, max: 5000 })
 );
-const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 48, {
+const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 5, {
 	min: 1,
 	max: 300,
 });
 const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
 	HUMAN_TYPE_CHAR_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 60, { min: 1, max: 300 })
+	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 9, { min: 1, max: 300 })
 );
-const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 2200, {
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 350, {
 	min: 250,
 	max: 10000,
 });
 const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
 	HUMAN_TYPE_CLAMP_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 7000, { min: 250, max: 15000 })
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 1400, { min: 250, max: 15000 })
 );
 const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
 	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
-	1700,
+	250,
 	{ min: 0, max: 10000 }
 );
 const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
 	HUMAN_BETWEEN_SENDS_MIN_MS,
-	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 2200, {
+	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 600, {
 		min: 0,
 		max: 10000,
 	})
 );
 
 const HUMAN = {
-	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 1200, {
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 250, {
 		min: 0,
 		max: 7000,
 	}),
@@ -94,6 +102,11 @@ const HUMAN = {
 const SOFT_PIVOT_MS = 35000;
 const QUOTE_SUMMARY_COOLDOWN = 45000;
 const PUBLIC_DISCOUNT_PERCENT = 15;
+const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", false);
+const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
+	"AI_INSTANT_PROGRESS_ENABLED",
+	true
+);
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
@@ -355,6 +368,195 @@ function hasAiAssistantReply(sc = {}) {
 	return conversation.some(
 		(message) => !message?.isSystem && isAiConversationMessage(message)
 	);
+}
+
+function isGuestConversationMessage(message = {}) {
+	return (
+		message?.message &&
+		!message?.isSystem &&
+		!isAiConversationMessage(message)
+	);
+}
+
+function conversationText(sc = {}, { guestsOnly = false } = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	return conversation
+		.filter((message) =>
+			guestsOnly ? isGuestConversationMessage(message) : message?.message
+		)
+		.map((message) => String(message.message || ""))
+		.join("\n");
+}
+
+function cleanPhoneCandidate(text = "") {
+	const digits = digitsToEnglish(text).replace(/\D/g, "");
+	return digits.length >= 5 && digits.length <= 18 ? digits : "";
+}
+
+function latestEmailFromText(text = "") {
+	const matches = String(text || "").match(/[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/g);
+	return matches?.length ? matches[matches.length - 1] : "";
+}
+
+function latestPhoneFromText(text = "") {
+	const matches = String(text || "").match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9\s().-]{4,}/g);
+	if (!matches?.length) return "";
+	for (let i = matches.length - 1; i >= 0; i -= 1) {
+		const phone = cleanPhoneCandidate(matches[i]);
+		if (phone) return phone;
+	}
+	return "";
+}
+
+function guestCountNumber(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const digit = normalized.match(/\b([1-9]|10)\b/);
+	if (digit) return Number(digit[1]);
+	const words = [
+		[/\b(one|single)\b|\u0648\u0627\u062d\u062f|\u0648\u0627\u062d\u062f\u0629/i, 1],
+		[/\b(two)\b|\u0627\u062b\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646/i, 2],
+		[/\b(three)\b|\u062b\u0644\u0627\u062b\u0629|\u062a\u0644\u0627\u062a\u0629|\u062a\u0644\u062a/i, 3],
+		[/\b(four)\b|\u0627\u0631\u0628\u0639\u0629|\u0623\u0631\u0628\u0639\u0629/i, 4],
+		[/\b(five)\b|\u062e\u0645\u0633\u0629/i, 5],
+	];
+	const found = words.find(([pattern]) => pattern.test(normalized));
+	return found ? found[1] : null;
+}
+
+function applyGuestCountsFromText(st, text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const adultMatch = normalized.match(
+		/(\d{1,2})\s*(?:adult|adults|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
+	);
+	const childMatch = normalized.match(
+		/(\d{1,2})\s*(?:child|children|kid|kids|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
+	);
+	if (adultMatch) st.slots.adults = Math.max(1, Number(adultMatch[1]));
+	if (childMatch) st.slots.children = Math.max(0, Number(childMatch[1]));
+	if (
+		!childMatch &&
+		/\b(child|kid)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
+	) {
+		st.slots.children = Math.max(1, Number(st.slots.children || 0));
+	}
+	if (!adultMatch && !childMatch) {
+		const total =
+			/(?:guest|guests|people|persons|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u062a\u0646\u0641\u0627\u0631)/i.test(
+				normalized
+			)
+				? guestCountNumber(normalized)
+				: null;
+		if (total) st.slots.adults = total;
+	}
+}
+
+function looksLikeNameCandidate(text = "") {
+	const value = String(text || "").trim();
+	if (!value || value.length > 80) return false;
+	if (latestEmailFromText(value) || cleanPhoneCandidate(value)) return false;
+	if (/confirm|confirmation|book|reserve|price|date|room|\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641/i.test(value)) return false;
+	return /[A-Za-z\u0600-\u06FF]{2,}/.test(value);
+}
+
+function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	if (!conversation.length || st.hydratedConversationLength === conversation.length) {
+		return;
+	}
+	const before = JSON.stringify(st.slots || {});
+	const allText = conversationText(sc);
+	const guestText = conversationText(sc, { guestsOnly: true });
+	const dates = quickDateRange(allText);
+	if (dates.checkinISO && dates.checkoutISO) {
+		st.slots.checkinISO = st.slots.checkinISO || dates.checkinISO;
+		st.slots.checkoutISO = st.slots.checkoutISO || dates.checkoutISO;
+		if (dates.raw) {
+			st.dateRaw = { ...st.dateRaw, ...dates.raw };
+		}
+	}
+	const roomKey = mapRoomToKey(guestText) || mapRoomToKey(allText);
+	if (roomKey && !st.slots.roomTypeKey) st.slots.roomTypeKey = roomKey;
+	const email = latestEmailFromText(guestText);
+	if (email && !st.slots.email) st.slots.email = email;
+	const phone = latestPhoneFromText(guestText);
+	if (phone && !st.slots.phone) st.slots.phone = phone;
+	for (const message of conversation) {
+		if (isGuestConversationMessage(message)) {
+			applyGuestCountsFromText(st, message.message);
+		}
+	}
+	let lastAsk = "";
+	for (const message of conversation) {
+		const text = String(message?.message || "");
+		if (isAiConversationMessage(message)) {
+			if (/full name|passport|guest name|name|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645/i.test(text)) {
+				lastAsk = "name";
+			} else if (/nationality|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a/i.test(text)) {
+				lastAsk = "nationality";
+			} else if (/phone|mobile|whatsapp|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633/i.test(text)) {
+				lastAsk = "phone";
+			} else if (/email|mail|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644/i.test(text)) {
+				lastAsk = "email";
+			}
+			continue;
+		}
+		if (!isGuestConversationMessage(message)) continue;
+		if (lastAsk === "name" && !st.slots.fullName && looksLikeNameCandidate(text)) {
+			st.slots.fullName = asciiize(text).trim() || text.trim();
+			st.slots.name = st.slots.fullName;
+		} else if (lastAsk === "phone" && !st.slots.phone) {
+			const candidate = latestPhoneFromText(text);
+			if (candidate) st.slots.phone = candidate;
+		} else if (lastAsk === "email" && !st.slots.email) {
+			const candidate = latestEmailFromText(text);
+			if (candidate) st.slots.email = candidate;
+		} else if (lastAsk === "nationality" && !st.slots.nationality) {
+			const value = asciiize(text).trim();
+			if (value && value.length <= 40) st.slots.nationality = value;
+		}
+	}
+	st.hydratedConversationLength = conversation.length;
+	if (before !== JSON.stringify(st.slots || {})) {
+		logStep(String(sc._id || ""), "slots.hydrated", { slots: st.slots });
+	}
+}
+
+function isNewReservationFlowActive(st = {}) {
+	return Boolean(
+		st.quote ||
+			st.reviewSent ||
+			st.slots?.checkinISO ||
+			st.slots?.checkoutISO ||
+			st.slots?.roomTypeKey ||
+			[
+				"dates",
+				"room",
+				"proceed",
+				"reviewConfirm",
+				"fullname",
+				"nationality",
+				"phone",
+				"email_or_skip",
+				"finalize",
+			].includes(st.waitFor)
+	);
+}
+
+function explicitlyExistingReservationIntent(text = "") {
+	return /\b(existing|old|already have|my reservation|my booking|change my|update my)\b|\u0639\u0646\u062f\u064a \u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632 \u0642\u062f\u064a\u0645|\u062d\u062c\u0632 \u0633\u0627\u0628\u0642|\u062a\u0639\u062f\u064a\u0644 \u062d\u062c\u0632/i.test(
+		String(text || "")
+	);
+}
+
+function isReservationDetailStep(st = {}) {
+	return [
+		"reviewConfirm",
+		"fullname",
+		"nationality",
+		"phone",
+		"email_or_skip",
+		"finalize",
+	].includes(st.waitFor);
 }
 
 function humanHandoffReason(text = "") {
@@ -841,6 +1043,8 @@ function ensureState(sc, hotel) {
 			quote: null,
 			reviewSent: false,
 			quoteSummarizedAt: 0,
+			progressSentAt: {},
+			hydratedConversationLength: 0,
 			dateRaw: { calendar: null, checkin: null, checkout: null },
 			smalltalkThread: { topic: null, waitingForGuest: false, lastAt: 0 },
 			slots: {
@@ -852,6 +1056,8 @@ function ensureState(sc, hotel) {
 				nationality: null,
 				phone: null,
 				email: null,
+				adults: 2,
+				children: 0,
 				rooms: 1,
 			},
 		};
@@ -971,6 +1177,59 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 }
 
 /* soft‑pivot memory */
+function progressText(sc = {}, st = {}, purpose = "checking") {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return purpose === "finalizing"
+			? "\u062a\u0645\u0627\u0645\u060c \u0623\u0646\u0627 \u0628\u0646\u0634\u0626 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0622\u0646. \u0644\u062d\u0638\u0629 \u0648\u0627\u062d\u062f\u0629 \u0645\u0646 \u0641\u0636\u0644\u0643."
+			: "\u062a\u0645\u0627\u0645\u060c \u0623\u0646\u0627 \u0628\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0622\u0646. \u0644\u062d\u0638\u0629 \u0648\u0627\u062d\u062f\u0629 \u0645\u0646 \u0641\u0636\u0644\u0643.";
+	}
+	if (/spanish/i.test(lang)) {
+		return purpose === "finalizing"
+			? "Perfecto, estoy creando la reserva ahora. Un momento, por favor."
+			: "Perfecto, estoy revisando disponibilidad y precio ahora. Un momento, por favor.";
+	}
+	if (/french/i.test(lang)) {
+		return purpose === "finalizing"
+			? "Parfait, je cree la reservation maintenant. Un instant, s'il vous plait."
+			: "Parfait, je verifie la disponibilite et le prix maintenant. Un instant, s'il vous plait.";
+	}
+	return purpose === "finalizing"
+		? "Perfect, I am creating the reservation now. One moment please."
+		: "Perfect, I am checking availability and price now. One moment please.";
+}
+
+async function sendProgressMessage(io, sc, st, purpose = "checking") {
+	if (!AI_INSTANT_PROGRESS_ENABLED || !io || !st) return;
+	const caseId = String(sc._id || sc.id || "unknown");
+	const key = `${purpose}|${st.slots?.roomTypeKey || ""}|${
+		st.slots?.checkinISO || ""
+	}|${st.slots?.checkoutISO || ""}`;
+	if (st.progressSentAt?.[key] && now() - st.progressSentAt[key] < 30000) {
+		return;
+	}
+	st.progressSentAt = st.progressSentAt || {};
+	st.progressSentAt[key] = now();
+	const text = progressText(sc, st, purpose);
+	const messageData = {
+		messageBy: {
+			customerName: st.agentName,
+			customerEmail: AI_SUPPORT_EMAIL,
+			userId: "jannat-ai-support",
+		},
+		message: text,
+		date: new Date(),
+		isAi: true,
+		clientTag: `ai-progress-${key}-${Date.now()}`,
+	};
+	await updateSupportCaseAppend(caseId, {
+		conversation: messageData,
+		aiRelated: true,
+	});
+	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
+	st.lastBotText = text;
+}
+
 function askedRecently(st, key, ms = SOFT_PIVOT_MS) {
 	const t = now();
 	const last = st.lastAskAt[key] || 0;
@@ -988,7 +1247,7 @@ function nextPivot(st) {
 	if (!st.slots.roomTypeKey) return "room";
 	if (!st.reviewSent) return "proceed";
 	if (!st.slots.fullName) return "fullname";
-	if (!st.slots.nationality) return "nationality";
+	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) return "nationality";
 	if (!st.slots.phone) return "phone";
 	if (!st.slots.email) return "email_or_skip";
 	return "finalize";
@@ -1094,8 +1353,21 @@ function latestKnownConfirmation(sc = {}, lu = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let i = conversation.length - 1; i >= 0; i -= 1) {
 		const text = String(conversation[i]?.message || "");
-		const match = text.match(/\b[A-Z]{1,6}[A-Z0-9-]{3,20}\b/i);
-		if (match) return match[0].toUpperCase();
+		if (
+			!/confirmation|confirm|reference|booking\s*(?:no|number|#)|reservation\s*(?:no|number|#)|\u062a\u0623\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639|\u0643\u0648\u0646\u0641\u064a\u0631\u0645\u064a\u0634\u0646/i.test(
+				text
+			)
+		) {
+			continue;
+		}
+		const candidates =
+			text.match(/\b(?:[A-Z]{1,6}[A-Z0-9-]{3,20}|\d{5,12})\b/gi) || [];
+		const match = candidates.find(
+			(candidate) =>
+				/\d/.test(candidate) &&
+				!/^(?:20\d{2}|1[34]\d{2}|15\d{2})$/.test(candidate)
+		);
+		if (match) return match.toUpperCase();
 	}
 	return null;
 }
@@ -1600,6 +1872,19 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
 	}
+	if (
+		isNewReservationFlowActive(st) &&
+		wantsReservationHelp(userText) &&
+		!lu?.confirmation &&
+		!explicitlyExistingReservationIntent(userText)
+	) {
+		return {
+			action: "continue_booking",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : null,
+			reason: "new_reservation_flow_active",
+		};
+	}
 	if (wantsReservationHelp(userText)) {
 		return { action: "reservation_lookup", roomTypeKey: null, scope: null, reason: "reservation_keyword" };
 	}
@@ -1678,6 +1963,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If an active hotel is present and the guest asks whether you/this hotel has rooms, room types, amenities, availability, or pricing, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"Choose hotel_recommendation only when the guest asks for other hotels, nearby alternatives, general platform options, or there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
+		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose human_escalation only when the request is outside hotel/platform support scope, needs facts/tools not available in context or learning examples, asks to cancel/refund/mutate an existing reservation, or should be reviewed by a person before answering.",
 	].join(" ");
@@ -1735,6 +2021,7 @@ async function shareKnownStayQuote(io, sc, st) {
 		checkoutISO: st.slots.checkoutISO,
 		hasHotel: Boolean(st.hotel),
 	});
+	await sendProgressMessage(io, sc, st, "checking");
 	const quote = safePriceRoomForStay(
 		st.hotel,
 		{ roomType: st.slots.roomTypeKey },
@@ -1760,6 +2047,339 @@ async function shareKnownStayQuote(io, sc, st) {
 	);
 	await humanSend(io, sc, st, quoteReply);
 	st.waitFor = "proceed";
+}
+
+function publicBaseUrl() {
+	return String(
+		process.env.CLIENT_URL ||
+			process.env.REACT_APP_MAIN_URL_JANNAT ||
+			"https://jannatbooking.com"
+	).replace(/\/+$/, "");
+}
+
+function reservationLinks(reservation) {
+	const publicBase = publicBaseUrl();
+	const confirmation = reservation.confirmation_number;
+	const id = String(reservation._id);
+	return {
+		reservationDetails: `${publicBase}/single-reservation/${confirmation}`,
+		payment: `${publicBase}/client-payment/${id}/${confirmation}`,
+	};
+}
+
+function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
+	const lang = languageOf(sc, st);
+	const confirmation = reservation.confirmation_number;
+	const currency = quoteData?.currency || "SAR";
+	const total = reservation.total_amount;
+	if (/arabic/i.test(lang)) {
+		return [
+			`\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
+			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${total} ${currency}**.`,
+			`[\u0627\u0636\u063a\u0637 \u0647\u0646\u0627 \u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u0632\u064a\u062f \u0645\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644](${links.reservationDetails})`,
+			`[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`,
+			"\u0647\u0644 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0623\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f",
+		].join("\n");
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			`La reserva se ha creado correctamente. Numero de confirmacion: **${confirmation}**.`,
+			`Total: **${total} ${currency}**.`,
+			`[Please click here to find more details](${links.reservationDetails})`,
+			`[Payment link](${links.payment})`,
+			"Is there anything else I can help you with?",
+		].join("\n");
+	}
+	if (/french/i.test(lang)) {
+		return [
+			`La reservation a ete creee avec succes. Numero de confirmation : **${confirmation}**.`,
+			`Total : **${total} ${currency}**.`,
+			`[Please click here to find more details](${links.reservationDetails})`,
+			`[Payment link](${links.payment})`,
+			"Is there anything else I can help you with?",
+		].join("\n");
+	}
+	return [
+		`Your reservation has been created. Confirmation number: **${confirmation}**.`,
+		`Total: **${total} ${currency}**.`,
+		`[Please click here to find more details](${links.reservationDetails})`,
+		`[Payment link](${links.payment})`,
+		"Is there anything else I can help you with?",
+	].join("\n");
+}
+
+async function finalizeReservationForGuest(io, sc, st, caseId) {
+	await sendProgressMessage(io, sc, st, "finalizing");
+	const quoteForCreate =
+		st.quote?.data ||
+		safePriceRoomForStay(
+			st.hotel,
+			{ roomType: st.slots.roomTypeKey },
+			st.slots.checkinISO,
+			st.slots.checkoutISO
+		);
+	if (!quoteForCreate?.available) {
+		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+		return true;
+	}
+	const reservation = await createReservationForCase({
+		caseId,
+		hotel: st.hotel,
+		slots: {
+			...st.slots,
+			name: st.slots.fullName || st.slots.name,
+		},
+		quoteData: quoteForCreate,
+		room: quoteForCreate.room,
+	});
+	const links = reservationLinks(reservation);
+	const finalText = reservationCreatedMessage(
+		sc,
+		st,
+		reservation,
+		quoteForCreate,
+		links
+	);
+	await humanSend(io, sc, st, finalText);
+	st.waitFor = "post_booking_followup";
+	st.reviewSent = false;
+	st.quoteSummarizedAt = 0;
+	return true;
+}
+
+function postBookingCloseText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0639\u0644\u0649 \u0627\u0644\u0631\u062d\u0628 \u0648\u0627\u0644\u0633\u0639\u0629. \u0623\u062a\u0645\u0646\u0649 \u0644\u0643 \u0625\u0642\u0627\u0645\u0629 \u0645\u0648\u0641\u0642\u0629.";
+	}
+	if (/spanish/i.test(lang)) {
+		return "Con mucho gusto. Te deseo una excelente estancia.";
+	}
+	if (/french/i.test(lang)) {
+		return "Avec plaisir. Je vous souhaite un excellent sejour.";
+	}
+	return "You are very welcome. I hope you have a wonderful stay.";
+}
+
+function postBookingClarifyText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0623\u0643\u064a\u062f\u060c \u0623\u0646\u0627 \u0645\u0639\u0643. \u0645\u0627 \u0627\u0644\u0634\u064a\u0621 \u0627\u0644\u0622\u062e\u0631 \u0627\u0644\u0630\u064a \u062a\u062d\u0628 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a\u0647\u061f";
+	}
+	if (/spanish/i.test(lang)) {
+		return "Claro, estoy contigo. Que mas puedo hacer por ti?";
+	}
+	if (/french/i.test(lang)) {
+		return "Bien sur, je suis avec vous. Que puis-je faire d'autre pour vous?";
+	}
+	return "Of course, I am here. What else can I help you with?";
+}
+
+function isPostBookingClosure(text = "") {
+	const normalized = String(text || "").trim().toLowerCase();
+	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|شكرا|شكرًا|لا|لا شكرا|خلاص|تمام شكرا|كده تمام|مافيش|مش محتاج|بس كده|merci|non merci|gracias|no gracias)\.?$/i.test(
+		normalized
+	);
+}
+
+function isVaguePositive(text = "") {
+	const normalized = String(text || "").trim().toLowerCase();
+	return /^(yes|yes please|yeah|yep|sure|ok|okay|ايوه|أيوه|نعم|تمام|اه|آه|oui|si|sí)\.?$/i.test(
+		normalized
+	);
+}
+
+async function handlePostBookingFollowup(io, sc, st, userText) {
+	if (st.waitFor !== "post_booking_followup") return false;
+	if (isPostBookingClosure(userText)) {
+		await humanSend(io, sc, st, postBookingCloseText(sc, st));
+		st.waitFor = null;
+		return true;
+	}
+	if (isVaguePositive(userText)) {
+		await humanSend(io, sc, st, postBookingClarifyText(sc, st));
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
+	st.waitFor = null;
+	return false;
+}
+
+function nextReservationDetailStep(st = {}) {
+	if (!st.slots?.fullName) return "fullname";
+	if (AI_REQUIRE_NATIONALITY && !st.slots?.nationality) return "nationality";
+	if (!st.slots?.phone) return "phone";
+	if (!st.slots?.email) return "email_or_skip";
+	return "finalize";
+}
+
+async function askForReservationDetail(io, sc, st, step) {
+	const instructions = {
+		fullname:
+			"Ask ONE question: 'Is the reservation under your full name as in passport? Please type the full name in English.'",
+		nationality:
+			"Ask ONE question: 'What is the guest's nationality?' Ask for the country/nationality name in English.",
+		phone:
+			"Ask ONE question for a reachable phone number. WhatsApp is preferred, but do not make it mandatory.",
+		email_or_skip:
+			"Ask ONE question for an email address. If they prefer not to share it, tell them they can type skip.",
+	};
+	const instruction = instructions[step];
+	if (!instruction) return;
+	const prompt = await write(io, sc, st, instruction);
+	await humanSend(io, sc, st, prompt);
+	stampAsk(st, step);
+}
+
+async function handleReservationDetailStep(io, sc, st, userText, caseId) {
+	if (!isReservationDetailStep(st)) return false;
+	for (let guard = 0; guard < 6; guard += 1) {
+		if (st.waitFor === "reviewConfirm") {
+			if (!confirmsText(userText)) return true;
+			st.waitFor = nextReservationDetailStep(st);
+			if (st.waitFor !== "finalize") {
+				await askForReservationDetail(io, sc, st, st.waitFor);
+				return true;
+			}
+		}
+
+		if (st.waitFor === "fullname") {
+			if (st.slots.fullName) {
+				st.waitFor = nextReservationDetailStep(st);
+				continue;
+			}
+			const norm = await normalizeNameLLM(userText, st.language);
+			if (norm?.valid && norm.fullNameAscii) {
+				st.slots.fullName = asciiize(norm.fullNameAscii).trim();
+			} else if (looksLikeNameCandidate(userText)) {
+				st.slots.fullName = asciiize(userText).trim() || String(userText).trim();
+			}
+			if (st.slots.fullName) {
+				st.slots.name = st.slots.fullName;
+				logStep(caseId, "fullname.captured", {
+					fullName: st.slots.fullName,
+				});
+				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
+				continue;
+			}
+			const askAgain = await write(
+				io,
+				sc,
+				st,
+				"Kindly ask for a valid full name in English letters. Keep it polite and brief."
+			);
+			await humanSend(io, sc, st, askAgain);
+			stampAsk(st, "fullname");
+			return true;
+		}
+
+		if (st.waitFor === "nationality") {
+			if (st.slots.nationality || !AI_REQUIRE_NATIONALITY) {
+				st.waitFor = nextReservationDetailStep(st);
+				continue;
+			}
+			const nat = await validateNationalityLLM(userText, st.language);
+			if (nat?.valid && nat.normalized) {
+				st.slots.nationality = nat.normalized;
+				logStep(caseId, "nationality.captured", {
+					nationality: st.slots.nationality,
+				});
+				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
+				continue;
+			}
+			const again = await write(
+				io,
+				sc,
+				st,
+				"Politely say the nationality was not recognized and ask again for the nationality/country name in English."
+			);
+			await humanSend(io, sc, st, again);
+			stampAsk(st, "nationality");
+			return true;
+		}
+
+		if (st.waitFor === "phone") {
+			if (st.slots.phone) {
+				st.waitFor = nextReservationDetailStep(st);
+				continue;
+			}
+			const clean = cleanPhoneCandidate(userText);
+			if (clean) {
+				st.slots.phone = clean;
+				logStep(caseId, "phone.captured", { phone: st.slots.phone });
+				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
+				continue;
+			}
+			const again = await write(
+				io,
+				sc,
+				st,
+				"Kindly ask for a reachable phone number using digits. Keep it polite."
+			);
+			await humanSend(io, sc, st, again);
+			stampAsk(st, "phone");
+			return true;
+		}
+
+		if (st.waitFor === "email_or_skip") {
+			if (st.slots.email) {
+				st.waitFor = "finalize";
+				continue;
+			}
+			const txt = String(userText).trim();
+			const email = latestEmailFromText(txt);
+			if (email) {
+				st.slots.email = email;
+				logStep(caseId, "email.captured", { email: st.slots.email });
+				st.waitFor = "finalize";
+				continue;
+			}
+			if (
+				/\b(no|skip|don'?t have|later|none)\b|\u0644\u0627|\u062a\u062e\u0637\u064a|\u0645\u0634 \u0645\u0648\u062c\u0648\u062f/i.test(
+					txt
+				)
+			) {
+				st.slots.email = "";
+				logStep(caseId, "email.skipped", {});
+				st.waitFor = "finalize";
+				continue;
+			}
+			const ask = await write(
+				io,
+				sc,
+				st,
+				"If that does not look like an email, ask once more briefly and say they can type 'skip' if they prefer."
+			);
+			await humanSend(io, sc, st, ask);
+			stampAsk(st, "email_or_skip");
+			return true;
+		}
+
+		if (st.waitFor === "finalize") {
+			try {
+				return await finalizeReservationForGuest(io, sc, st, caseId);
+			} catch (error) {
+				logStep(caseId, "reservation.create_failed", {
+					message: error?.message || error,
+				});
+				await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 async function answerDiscountQuestion(io, sc, st, userText = "") {
@@ -1988,6 +2608,22 @@ async function planTurn(io, sc) {
 			}
 		}
 
+		hydrateKnownSlotsFromConversation(sc, st);
+		if (st.waitFor === "post_booking_followup") {
+			const handled = await handlePostBookingFollowup(io, sc, st, userText);
+			if (handled) return;
+		}
+		if (isReservationDetailStep(st)) {
+			const handled = await handleReservationDetailStep(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handled) return;
+		}
+
 		// Legacy greeting branch is skipped after the first real customer turn.
 		if (!st.greeted && !st.greetScheduled) {
 			st.greetScheduled = true;
@@ -2064,6 +2700,15 @@ async function planTurn(io, sc) {
 			userText,
 			lu: decisionLu,
 		});
+		if (
+			supportDecision.action === "reservation_lookup" &&
+			isNewReservationFlowActive(st) &&
+			!decisionLu?.confirmation &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			supportDecision.action = "continue_booking";
+			supportDecision.reason = "new_reservation_flow_active";
+		}
 		logStep(caseId, "orchestrator.decision", supportDecision);
 
 		if (supportDecision.roomTypeKey) {
@@ -2273,7 +2918,14 @@ async function planTurn(io, sc) {
 			st.waitFor = "payment_reference";
 			return;
 		}
-		if (wantsReservationHelp(userText)) {
+		if (
+			wantsReservationHelp(userText) &&
+			!(
+				isNewReservationFlowActive(st) &&
+				!latestKnownConfirmation(sc, {}) &&
+				!explicitlyExistingReservationIntent(userText)
+			)
+		) {
 			const knownConfirmation = latestKnownConfirmation(sc, {});
 			const reply = await write(
 				io,
@@ -2829,62 +3481,7 @@ async function planTurn(io, sc) {
 
 			if (st.waitFor === "finalize") {
 				try {
-					const quoteForCreate =
-						st.quote?.data ||
-						safePriceRoomForStay(
-							st.hotel,
-							{ roomType: st.slots.roomTypeKey },
-							st.slots.checkinISO,
-							st.slots.checkoutISO
-						);
-					if (!quoteForCreate?.available) {
-						await handoffToHuman(io, sc, st, "reservation_finalize_failed");
-						return;
-					}
-					const reservation = await createReservationForCase({
-						caseId,
-						hotel: st.hotel,
-						slots: {
-							...st.slots,
-							name: st.slots.fullName || st.slots.name,
-						},
-						quoteData: quoteForCreate,
-						room: quoteForCreate.room,
-					});
-					const publicBase = String(
-						process.env.CLIENT_URL ||
-							process.env.REACT_APP_MAIN_URL_JANNAT ||
-							"https://jannatbooking.com"
-					).replace(/\/+$/, "");
-					const links = {
-						reservationDetails: `${publicBase}/single-reservations/${reservation.confirmation_number}`,
-						payment: `${publicBase}/client-payment/${reservation._id}/${reservation.confirmation_number}`,
-					};
-					const finalText = await write(
-						io,
-						sc,
-						st,
-						"Tell the guest the reservation has been created and is pending hotel confirmation internally, while keeping the message guest-friendly. Include the confirmation number, total, reservation details link, and payment link exactly from context. Keep it concise.",
-						{
-							reservation: {
-								id: String(reservation._id),
-								confirmation: reservation.confirmation_number,
-								total: reservation.total_amount,
-								currency: quoteForCreate.currency || "SAR",
-								hotel: st.hotel?.hotelName || "",
-								room:
-									quoteForCreate.room?.displayName ||
-									quoteForCreate.room?.roomType ||
-									st.slots.roomTypeKey,
-								dates: stayDateDisplay(st),
-								links,
-							},
-						}
-					);
-					await humanSend(io, sc, st, finalText);
-					st.waitFor = null;
-					st.reviewSent = false;
-					st.quoteSummarizedAt = 0;
+					await finalizeReservationForGuest(io, sc, st, caseId);
 					return;
 				} catch (error) {
 					logStep(caseId, "reservation.create_failed", {
@@ -3020,9 +3617,16 @@ async function planTurn(io, sc) {
 			st.waitFor = "finalize";
 		}
 
-		// Final reservation commits stay with a human support team member.
+		// Final reservation commits are guarded by inventory validation and pending-confirmation policy.
 		if (st.waitFor === "finalize") {
-			await handoffToHuman(io, sc, st, "reservation_finalize");
+			try {
+				await finalizeReservationForGuest(io, sc, st, caseId);
+			} catch (error) {
+				logStep(caseId, "reservation.create_failed", {
+					message: error?.message || error,
+				});
+				await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+			}
 			return;
 		}
 	} catch (e) {

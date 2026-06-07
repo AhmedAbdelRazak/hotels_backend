@@ -17,6 +17,10 @@ const ROOM_SYNONYMS = [
 			"king",
 			"queen",
 			"twin",
+			"\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629",
+			"\u0645\u0632\u062f\u0648\u062c\u0629",
+			"\u062b\u0646\u0627\u0626\u064a\u0629",
+			"\u062f\u0628\u0644",
 			"غرفة مزدوجة",
 			"ثنائية",
 		],
@@ -25,6 +29,29 @@ const ROOM_SYNONYMS = [
 	{ key: "quadRooms", terms: ["quad", "4 bed", "four beds", "رباعية"] },
 	{ key: "familyRooms", terms: ["family", "quintuple", "5 bed", "خماسية"] },
 ];
+
+ROOM_SYNONYMS.push(
+	{
+		key: "tripleRooms",
+		terms: [
+			"\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a\u0629",
+			"\u062b\u0644\u0627\u062b\u064a\u0629",
+			"\u062a\u0644\u0627\u062a\u0629",
+			"\u062a\u0644\u062a",
+		],
+	},
+	{
+		key: "quadRooms",
+		terms: [
+			"\u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
+			"\u0631\u0628\u0627\u0639\u064a\u0629",
+		],
+	},
+	{
+		key: "familyRooms",
+		terms: ["\u0639\u0627\u0626\u0644\u064a\u0629", "\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629"],
+	}
+);
 
 function mapRoomToKey(text = "") {
 	const low = text.toLowerCase();
@@ -58,6 +85,21 @@ const MONTHS = {
 	november: 11,
 	dec: 12,
 	december: 12,
+	"\u064a\u0646\u0627\u064a\u0631": 1,
+	"\u0641\u0628\u0631\u0627\u064a\u0631": 2,
+	"\u0645\u0627\u0631\u0633": 3,
+	"\u0627\u0628\u0631\u064a\u0644": 4,
+	"\u0623\u0628\u0631\u064a\u0644": 4,
+	"\u0645\u0627\u064a\u0648": 5,
+	"\u064a\u0648\u0646\u064a\u0648": 6,
+	"\u064a\u0648\u0644\u064a\u0648": 7,
+	"\u0627\u063a\u0633\u0637\u0633": 8,
+	"\u0623\u063a\u0633\u0637\u0633": 8,
+	"\u0633\u0628\u062a\u0645\u0628\u0631": 9,
+	"\u0627\u0643\u062a\u0648\u0628\u0631": 10,
+	"\u0623\u0643\u062a\u0648\u0628\u0631": 10,
+	"\u0646\u0648\u0641\u0645\u0628\u0631": 11,
+	"\u062f\u064a\u0633\u0645\u0628\u0631": 12,
 };
 
 const HIJRI_MONTH_LABELS = [
@@ -255,17 +297,108 @@ function hijriToGregorianISO(year, month, day) {
 	return civilISO;
 }
 
+function todayISO() {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function nextHijriYearForMonthDay(month, day, baseISO = todayISO()) {
+	const current = intlHijriParts(baseISO);
+	if (!current) return null;
+	let year = current.year;
+	let candidate = hijriToGregorianISO(year, month, day);
+	while (candidate && candidate < baseISO && year < current.year + 3) {
+		year += 1;
+		candidate = hijriToGregorianISO(year, month, day);
+	}
+	return candidate ? year : null;
+}
+
+function quickHijriDateRangeNoYear(text = "") {
+	const raw = normalizeArabicSearchText(text);
+	if (
+		/\b(last|past|previous)\b|\u0641\u0627\u062a|\u0627\u0644\u0645\u0627\u0636\u064a|\u0627\u0644\u0644\u064a \u0641\u0627\u062a|\u0627\u0644\u0649 \u0641\u0627\u062a/.test(
+			raw
+		)
+	) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	const dayPart = "(\\d{1,2})";
+	const connector =
+		"(?:-|to|until|through|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
+	const sharedMonthNoYear = new RegExp(
+		`${dayPart}\\s+${connector}\\s+${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})`,
+		"i"
+	);
+	const match = raw.match(sharedMonthNoYear);
+	let month = null;
+	let checkinDay = null;
+	let checkoutDay = null;
+	if (match) {
+		month = hijriMonthFromText(match[3]);
+		checkinDay = Number(match[1]);
+		checkoutDay = Number(match[2]);
+	} else {
+		const fullNoYear = new RegExp(
+			`${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})`,
+			"gi"
+		);
+		const found = [];
+		let foundMatch = null;
+		while ((foundMatch = fullNoYear.exec(raw))) {
+			const foundMonth = hijriMonthFromText(foundMatch[2]);
+			const foundDay = Number(foundMatch[1]);
+			if (foundMonth && foundDay) found.push({ month: foundMonth, day: foundDay });
+		}
+		if (found.length >= 2 && found[0].month === found[1].month) {
+			month = found[0].month;
+			checkinDay = found[0].day;
+			checkoutDay = found[1].day;
+		}
+	}
+	if (!month || !checkinDay || !checkoutDay) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	if (!month || !checkinDay || !checkoutDay || checkoutDay <= checkinDay) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	const year = nextHijriYearForMonthDay(month, checkinDay);
+	if (!year) return { checkinISO: null, checkoutISO: null, raw: null };
+	const checkinISO = hijriToGregorianISO(year, month, checkinDay);
+	const checkoutISO = hijriToGregorianISO(year, month, checkoutDay);
+	if (!checkinISO || !checkoutISO || checkoutISO <= checkinISO) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			calendar: "hijri",
+			checkin: hijriDisplay(month, checkinDay, year),
+			checkout: hijriDisplay(month, checkoutDay, year),
+			checkinHijri: { year, month, day: checkinDay },
+			checkoutHijri: { year, month, day: checkoutDay },
+		},
+	};
+}
+
 function quickHijriDateRange(text = "") {
 	if (!HIJRI_MONTH_REGEX_PART) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}
 	const raw = normalizeArabicSearchText(text);
+	const hasExplicitHijriYear = /\b(?:1[34]\d{2}|15\d{2})\b/.test(raw);
+	if (!hasExplicitHijriYear) {
+		const noYear = quickHijriDateRangeNoYear(raw);
+		if (noYear.checkinISO && noYear.checkoutISO) return noYear;
+	}
 	const yearPart = "(1[34]\\d{2}|15\\d{2})";
 	const dayPart = "(\\d{1,2})";
 	const connector = "(?:-|to|until|through|till|from|الى|الي|حتى|ل)";
 
+	const connectorUnicode =
+		"(?:-|to|until|through|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
 	const sharedMonth = new RegExp(
-		`${dayPart}\\s+${connector}\\s+${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})\\s+${yearPart}`,
+		`${dayPart}\\s+${connectorUnicode}\\s+${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})\\s+${yearPart}`,
 		"i"
 	);
 	let match = raw.match(sharedMonth);

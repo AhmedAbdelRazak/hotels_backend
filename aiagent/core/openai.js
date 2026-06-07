@@ -11,14 +11,16 @@ function intFromEnv(name, fallback) {
 	return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const OPENAI_TIMEOUT_MS = intFromEnv("OPENAI_TIMEOUT_MS", 20000);
+const OPENAI_TIMEOUT_MS = intFromEnv("OPENAI_TIMEOUT_MS", 8000);
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
 
-const client = new OpenAI({
-	apiKey: process.env.OPENAI_API_KEY,
-	timeout: OPENAI_TIMEOUT_MS,
-	maxRetries: OPENAI_MAX_RETRIES,
-});
+const client = process.env.OPENAI_API_KEY
+	? new OpenAI({
+			apiKey: process.env.OPENAI_API_KEY,
+			timeout: OPENAI_TIMEOUT_MS,
+			maxRetries: OPENAI_MAX_RETRIES,
+	  })
+	: null;
 
 async function withDeadline(factory, timeoutMs) {
 	const controller = new AbortController();
@@ -44,6 +46,9 @@ async function chat(
 	messages,
 	{ kind = "nlu", temperature = 0, max_tokens = 350 } = {}
 ) {
+	if (!client) {
+		throw new Error("OPENAI_API_KEY is not configured.");
+	}
 	const model = pickModel(kind);
 	const gpt5Style = usesCompletionTokens(model);
 	const tokenLimit = gpt5Style

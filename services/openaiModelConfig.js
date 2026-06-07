@@ -1,26 +1,48 @@
-const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+const DEFAULT_OPENAI_MODEL = "gpt-5.3";
+const DEFAULT_OPENAI_FAST_MODEL = "gpt-5.3";
+
+const KIND_DEFAULT_MODELS = {
+	analysis: DEFAULT_OPENAI_FAST_MODEL,
+	reasoning: DEFAULT_OPENAI_MODEL,
+	nlu: DEFAULT_OPENAI_FAST_MODEL,
+	writer: DEFAULT_OPENAI_MODEL,
+	default: DEFAULT_OPENAI_MODEL,
+};
 
 const KIND_ENV_KEYS = {
 	analysis: [
+		"OPENAI_CHATBOT_ANALYSIS_MODEL",
 		"AI_ANALYSIS_MODEL",
+		"OPENAI_FAST_MODEL",
 		"OPENAI_REASONING_MODEL",
 		"OPENAI_MODEL",
 		"AI_MODEL",
 	],
 	reasoning: [
+		"OPENAI_CHATBOT_REASONING_MODEL",
 		"OPENAI_REASONING_MODEL",
 		"OPENAI_MODEL_NLU",
 		"OPENAI_MODEL",
 		"AI_MODEL",
 	],
 	nlu: [
+		"OPENAI_CHATBOT_NLU_MODEL",
 		"OPENAI_MODEL_NLU",
+		"OPENAI_FAST_MODEL",
 		"OPENAI_REASONING_MODEL",
 		"OPENAI_MODEL",
 		"AI_MODEL",
 	],
-	writer: ["OPENAI_MODEL", "AI_MODEL", "OPENAI_REASONING_MODEL"],
+	writer: [
+		"OPENAI_CHATBOT_WRITER_MODEL",
+		"OPENAI_CHATBOT_MODEL",
+		"OPENAI_MODEL_WRITER",
+		"OPENAI_MODEL",
+		"AI_MODEL",
+		"OPENAI_REASONING_MODEL",
+	],
 	default: [
+		"OPENAI_CHATBOT_MODEL",
 		"OPENAI_MODEL",
 		"AI_MODEL",
 		"OPENAI_REASONING_MODEL",
@@ -39,7 +61,11 @@ function pickOpenAIModel(kind = "default") {
 		const model = sanitizeModelName(process.env[key]);
 		if (model) return model;
 	}
-	return sanitizeModelName(process.env.OPENAI_DEFAULT_MODEL) || DEFAULT_OPENAI_MODEL;
+	return (
+		sanitizeModelName(process.env.OPENAI_DEFAULT_MODEL) ||
+		KIND_DEFAULT_MODELS[kind] ||
+		DEFAULT_OPENAI_MODEL
+	);
 }
 
 function usesCompletionTokens(model = "") {
@@ -73,6 +99,7 @@ function buildChatCompletionBody({
 
 module.exports = {
 	DEFAULT_OPENAI_MODEL,
+	DEFAULT_OPENAI_FAST_MODEL,
 	pickOpenAIModel,
 	sanitizeModelName,
 	usesCompletionTokens,
