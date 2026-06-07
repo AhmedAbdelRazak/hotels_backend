@@ -1194,6 +1194,7 @@ Future TODO Backlog - Added 2026-05-26
   - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
   - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current default is gpt-5-mini for an accessible, cheaper, high-quality live-chat baseline. Do not use invalid model slugs such as gpt-5.3; they force fallback text and make the bot feel less human.
   - GPT-5-style chatbot calls default to OPENAI_CHATBOT_REASONING_EFFORT=minimal to reduce latency for live support turns. Increase only for a measured quality need.
+  - Detailed AI step logs are disabled unless AI_AGENT_DEBUG=true. Keep production default quiet so names, phones, slots, and QA transcript details are not written to PM2 logs during normal operation.
   - NLU supports Arabic room synonyms and no-year Hijri ranges such as "1 Ramadan to 10 Ramadan / next Ramadan"; nearest future Hijri occurrence is used unless explicit past wording is present, and explicit Hijri years remain authoritative.
 - Validation completed locally:
   - node --check models/aiagent_learning.js.
@@ -1265,6 +1266,7 @@ Future TODO Backlog - Added 2026-05-26
     - AI_HUMAN_BETWEEN_SENDS_MIN_MS default 800.
     - AI_HUMAN_BETWEEN_SENDS_MAX_MS default 1600.
   - Normal short replies should feel like a person is reviewing/typing for about 3 seconds, while longer replies can take longer without returning to 20-40 second silent waits.
+  - Frontend language selection should expose a single Arabic option. Dialect/tone such as Modern Standard Arabic, Egyptian, Algerian, or other regional Arabic is inferred by the orchestrator from the guest's messages, not chosen as separate frontend options.
 
 2026-05-29 Localized Phone Digit Normalization
 - Backend behavior:

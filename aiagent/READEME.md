@@ -36,6 +36,7 @@
 - **Model latency**:
   - Default chatbot model is `gpt-5-mini`, configurable through the central OpenAI model env keys.
   - GPT-5-style chatbot calls use `OPENAI_CHATBOT_REASONING_EFFORT=minimal` by default for live-chat latency.
+  - Detailed AI step logs are off unless `AI_AGENT_DEBUG=true`, so production PM2 logs do not include guest names, phones, or slot state during normal operation.
 - **No redundancy**: Agent reads `inquiryAbout` from SupportCase and starts the
   exact flow without “How can I help?”.
 - **Pricing**:
@@ -61,9 +62,10 @@
 - **Dates**:
   - The chatbot accepts Gregorian/Miladi and Hijri date ranges.
   - Hijri ranges such as `20 ذو الحجة 1447 إلى 22 ذو الحجة 1447` are converted to Gregorian ISO for pricing/reservation storage while keeping the Hijri range in `dateRaw` so replies can mention both calendars.
-- **Languages**: English, Arabic (Fos7a/Egyptian/Saudi tone), Spanish, French,
+- **Languages**: English, Arabic, Spanish, French,
   Urdu, Hindi with Islamic-friendly assistant names.
   - The active response language follows the latest clear guest language. For example, if the frontend preference is English but the guest writes Arabic or French, the bot answers in Arabic or French rather than asking permission to switch.
+  - The frontend should expose a single Arabic option; the orchestrator infers Arabic dialect/tone from the guest's actual wording.
 
   ## Debug API
 
