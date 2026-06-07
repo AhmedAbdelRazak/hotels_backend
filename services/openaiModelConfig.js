@@ -1,5 +1,5 @@
-const DEFAULT_OPENAI_MODEL = "gpt-5.3";
-const DEFAULT_OPENAI_FAST_MODEL = "gpt-5.3";
+const DEFAULT_OPENAI_MODEL = "gpt-5-mini";
+const DEFAULT_OPENAI_FAST_MODEL = "gpt-5-mini";
 
 const KIND_DEFAULT_MODELS = {
 	analysis: DEFAULT_OPENAI_FAST_MODEL,
@@ -69,7 +69,7 @@ function pickOpenAIModel(kind = "default") {
 }
 
 function usesCompletionTokens(model = "") {
-	return /^(gpt-5|o\d|o-)/i.test(String(model || ""));
+	return /^(gpt-5|o\d|o-|chat-latest$)/i.test(String(model || ""));
 }
 
 function buildChatCompletionBody({
@@ -83,11 +83,28 @@ function buildChatCompletionBody({
 	const resolvedModel = sanitizeModelName(model) || pickOpenAIModel();
 	const gpt5Style = usesCompletionTokens(resolvedModel);
 	const tokenLimit = Number(maxTokens);
+	const reasoningEffort = String(rest.reasoning_effort || "")
+		.trim()
+		.toLowerCase();
+	const allowedReasoningEffort = [
+		"none",
+		"minimal",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+	].includes(reasoningEffort)
+		? reasoningEffort
+		: "";
+	delete rest.reasoning_effort;
 	return {
 		model: resolvedModel,
 		messages,
 		...rest,
 		...(response_format ? { response_format } : {}),
+		...(gpt5Style && allowedReasoningEffort
+			? { reasoning_effort: allowedReasoningEffort }
+			: {}),
 		...(gpt5Style || temperature === undefined ? {} : { temperature }),
 		...(Number.isFinite(tokenLimit) && tokenLimit > 0
 			? gpt5Style

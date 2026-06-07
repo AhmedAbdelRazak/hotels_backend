@@ -47,45 +47,45 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 80, {
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 700, {
 	min: 0,
 	max: 5000,
 });
 const HUMAN_THINK_MAX_MS = Math.max(
 	HUMAN_THINK_MIN_MS,
-	intFromEnv("AI_HUMAN_THINK_MAX_MS", 220, { min: 0, max: 5000 })
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 1400, { min: 0, max: 5000 })
 );
-const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 5, {
+const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 12, {
 	min: 1,
 	max: 300,
 });
 const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
 	HUMAN_TYPE_CHAR_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 9, { min: 1, max: 300 })
+	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 22, { min: 1, max: 300 })
 );
-const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 350, {
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 2200, {
 	min: 250,
 	max: 10000,
 });
 const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
 	HUMAN_TYPE_CLAMP_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 1400, { min: 250, max: 15000 })
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 6500, { min: 250, max: 15000 })
 );
 const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
 	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
-	250,
+	800,
 	{ min: 0, max: 10000 }
 );
 const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
 	HUMAN_BETWEEN_SENDS_MIN_MS,
-	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 600, {
+	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 1600, {
 		min: 0,
 		max: 10000,
 	})
 );
 
 const HUMAN = {
-	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 250, {
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 1200, {
 		min: 0,
 		max: 7000,
 	}),
@@ -102,7 +102,7 @@ const HUMAN = {
 const SOFT_PIVOT_MS = 35000;
 const QUOTE_SUMMARY_COOLDOWN = 45000;
 const PUBLIC_DISCOUNT_PERCENT = 15;
-const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", false);
+const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
 	true
@@ -854,7 +854,7 @@ function simpleQuoteText({ sc, st, quote }) {
 	}
 	return `${name}, ${roomName} at ${hotelName} is ${quote.totals.totalPriceWithCommission} ${cleanCurrency(
 		quote.currency
-	)} total for ${quote.nights} nights. Our support team can continue the reservation if you like.`;
+	)} total for ${quote.nights} nights. Would you like me to continue to the review step?`;
 }
 
 function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
@@ -1083,24 +1083,27 @@ function emitTyping(io, caseId, st, on = true) {
 
 /* --------- humanSend with pre‑emption (cancellable) --------- */
 async function humanSend(io, sc, st, text, { first = false } = {}) {
-	if (!text) return;
+	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
 
 	const token = Math.random().toString(36).slice(2);
 	st.sendingToken = token;
 	if (st.interrupt) {
 		logStep(caseId, "human.cancelled", { stage: "pre-send", token });
-		return;
+		return false;
 	}
 
 	const think = first
 		? HUMAN.greetThinkMs
 		: randomBetween(HUMAN.thinkMinMs, HUMAN.thinkMaxMs);
 	logStep(caseId, "human.delay.think", { ms: think, first });
+	while (st.guestTypingUntil > now()) await sleep(300);
+	emitTyping(io, caseId, st, true);
 	for (let t = 0; t < think; t += 150) {
 		if (st.interrupt || st.sendingToken !== token) {
+			emitTyping(io, caseId, st, false);
 			logStep(caseId, "human.cancelled", { stage: "think", token });
-			return;
+			return false;
 		}
 		while (st.guestTypingUntil > now()) await sleep(300);
 		await sleep(150);
@@ -1117,24 +1120,23 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 		typeMs,
 	});
 	while (st.guestTypingUntil > now()) await sleep(300);
-	emitTyping(io, caseId, st, true);
 	for (let t = 0; t < typeMs; t += 120) {
 		if (st.interrupt || st.sendingToken !== token) {
 			emitTyping(io, caseId, st, false);
 			logStep(caseId, "human.cancelled", { stage: "typing", token });
-			return;
+			return false;
 		}
 		await sleep(120);
 	}
 	emitTyping(io, caseId, st, false);
 	if (st.interrupt || st.sendingToken !== token) {
 		logStep(caseId, "human.cancelled", { stage: "post-type", token });
-		return;
+		return false;
 	}
 
 	if (st.lastBotText && st.lastBotText.trim() === String(text).trim()) {
 		logStep(caseId, "dedupe.skip", { reason: "same_as_last" });
-		return;
+		return false;
 	}
 
 	try {
@@ -1147,14 +1149,14 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 				stage: "policy-before-save",
 				reason: policy.reason,
 			});
-			return;
+			return false;
 		}
 	} catch (error) {
 		logStep(caseId, "human.cancelled", {
 			stage: "policy-check-failed",
 			message: error?.message || error,
 		});
-		return;
+		return false;
 	}
 
 	const messageData = {
@@ -1174,6 +1176,7 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
 	st.lastBotText = text;
+	return true;
 }
 
 /* soft‑pivot memory */
@@ -1211,23 +1214,7 @@ async function sendProgressMessage(io, sc, st, purpose = "checking") {
 	st.progressSentAt = st.progressSentAt || {};
 	st.progressSentAt[key] = now();
 	const text = progressText(sc, st, purpose);
-	const messageData = {
-		messageBy: {
-			customerName: st.agentName,
-			customerEmail: AI_SUPPORT_EMAIL,
-			userId: "jannat-ai-support",
-		},
-		message: text,
-		date: new Date(),
-		isAi: true,
-		clientTag: `ai-progress-${key}-${Date.now()}`,
-	};
-	await updateSupportCaseAppend(caseId, {
-		conversation: messageData,
-		aiRelated: true,
-	});
-	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
-	st.lastBotText = text;
+	await humanSend(io, sc, st, text);
 }
 
 function askedRecently(st, key, ms = SOFT_PIVOT_MS) {
@@ -1271,6 +1258,24 @@ function declinesText(text = "") {
 		return true;
 	}
 	return /\b(no|nope|not now|later|cancel|لا|مش دلوقتي|لاحقا|non|pas maintenant|no gracias)\b/i.test(
+		String(text || "")
+	);
+}
+
+function patienceText(text = "") {
+	return /\b(take your time|no rush|whenever|slow down|wait|one moment|moment|براحتك|براحتك|خد وقتك|خدي وقتك|استنى|انتظر)\b/i.test(
+		String(text || "")
+	);
+}
+
+function botExperienceComplaintText(text = "") {
+	return /\b(repeat|repeating|again|too fast|typing so fast|bot|robot|worst|bad cs|bad support|wrong with you|omg|lol)\b|تكرر|بتكرر|بسرعة|سريعة|روبوت|بوت|وحش|سيئ|غلط/i.test(
+		String(text || "")
+	);
+}
+
+function asksAiIdentity(text = "") {
+	return /\b(are you (?:a )?(?:human|bot|robot|ai)|you are (?:a )?(?:bot|robot|ai)|real person)\b|انتي\s+انسان|انت\s+انسان|روبوت|بوت|ذكاء\s+اصطناعي/i.test(
 		String(text || "")
 	);
 }
@@ -1619,6 +1624,64 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		}
 	}
 	if (context.quote) return simpleQuoteText({ sc, st, quote: context.quote });
+	if (/review before we finalize|type confirm to finalize/.test(text)) {
+		const total = context.totals?.totalPriceWithCommission || context.total || "";
+		const currency = cleanCurrency(context.currency || st.quote?.data?.currency || "SAR");
+		const room = context.room || roomTypeLabel(st.slots?.roomTypeKey);
+		const hotel = context.hotel || toTitle(st.hotel?.hotelName || "Hotel");
+		const gregorian = context.gregorian || {};
+		const hijri = context.dateDisplay?.hijri || {};
+		const dateLine =
+			hijri?.checkin && hijri?.checkout
+				? `${hijri.checkin} to ${hijri.checkout} (Gregorian: ${
+						gregorian.checkin || usDate(st.slots?.checkinISO)
+				  } to ${gregorian.checkout || usDate(st.slots?.checkoutISO)})`
+				: `${gregorian.checkin || usDate(st.slots?.checkinISO)} to ${
+						gregorian.checkout || usDate(st.slots?.checkoutISO)
+				  }`;
+		if (isArabic) {
+			return [
+				`${respectfulAddress}، هذه مراجعة سريعة قبل الإتمام:`,
+				`الفندق: ${hotel}`,
+				`الغرفة: ${room}`,
+				`التواريخ: ${dateLine}`,
+				total ? `الإجمالي: ${total} ${currency}` : "",
+				`اكتب confirm للإتمام، أو أخبرني بما تريد تغييره.`,
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		return [
+			"Review before we finalize:",
+			`Hotel: ${hotel}`,
+			`Room: ${room}`,
+			`Dates: ${dateLine}`,
+			total ? `Total: ${total} ${currency}` : "",
+			"Type confirm to finalize, or tell me what to change.",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	if (/how about you|doing well/.test(text)) {
+		if (isArabic) return `أنا بخير، شكرًا ${respectfulAddress}. وأنت كيف حالك؟`;
+		return `I'm doing well, thank you ${respectfulAddress}. How about you?`;
+	}
+	if (/full name|passport/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، من فضلك اكتب الاسم الكامل للحجز باللغة الإنجليزية كما في جواز السفر.`;
+		return `${respectfulAddress}, please type the full name for the reservation in English as in the passport.`;
+	}
+	if (/nationality/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، ما جنسية الضيف؟ من فضلك اكتب اسم الدولة/الجنسية باللغة الإنجليزية.`;
+		return `${respectfulAddress}, what is the guest's nationality? Please type the country/nationality name in English.`;
+	}
+	if (/phone|whatsapp|reachable/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، من فضلك أرسل رقم جوال يمكننا التواصل عليه. واتساب مفضل لكنه ليس إلزاميًا.`;
+		return `${respectfulAddress}, please share a reachable phone number. WhatsApp is preferred, but not mandatory.`;
+	}
+	if (/email address|type 'skip'|type skip|email/.test(text)) {
+		if (isArabic) return `${respectfulAddress}، من فضلك أرسل البريد الإلكتروني لتفاصيل الحجز، أو اكتب skip إذا تفضل المتابعة بدونه.`;
+		return `${respectfulAddress}, please share an email address for the reservation details, or type skip if you prefer to continue without one.`;
+	}
 	if (/greet/.test(text)) {
 		if (isArabic) return `أهلاً ${respectfulAddress}، معك ${st.agentName} من ${supportDesk}. كيف أقدر أساعدك اليوم؟`;
 		if (isSpanish) return `Hola ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
@@ -2049,6 +2112,124 @@ async function shareKnownStayQuote(io, sc, st) {
 	st.waitFor = "proceed";
 }
 
+function quoteKeyForSlots(st = {}) {
+	if (!st.slots?.roomTypeKey || !st.slots?.checkinISO || !st.slots?.checkoutISO) {
+		return "";
+	}
+	return `${st.slots.roomTypeKey}|${st.slots.checkinISO}|${st.slots.checkoutISO}`;
+}
+
+function activeQuoteMatchesSlots(st = {}) {
+	const key = quoteKeyForSlots(st);
+	return Boolean(key && st.quote?.key === key && st.quote?.data);
+}
+
+function buildReservationReviewPayload(st = {}, quote = {}) {
+	return {
+		hotel: toTitle(st.hotel?.hotelName || "Hotel"),
+		room: quote.room?.displayName || quote.room?.roomType || st.slots.roomTypeKey,
+		roomsCount: st.slots.rooms || 1,
+		currency: quote.currency,
+		nights: quote.nights,
+		totals: quote.totals,
+		perNightAvg:
+			Math.round(
+				(quote.totals.totalPriceWithCommission / Math.max(1, quote.nights)) * 100
+			) / 100,
+		gregorian: {
+			checkin: usDate(st.slots.checkinISO),
+			checkout: usDate(st.slots.checkoutISO),
+		},
+		dateDisplay: stayDateDisplay(st),
+		rawDates: st.dateRaw,
+	};
+}
+
+async function sendReservationReview(io, sc, st, quote = null) {
+	const q = quote || st.quote?.data;
+	if (!q?.available) {
+		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
+		return true;
+	}
+	const reviewPayload = buildReservationReviewPayload(st, q);
+	logStep(String(sc._id), "review.summaryBuilt", reviewPayload);
+	const reviewText = await write(
+		io,
+		sc,
+		st,
+		"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.",
+		reviewPayload
+	);
+	await humanSend(io, sc, st, reviewText);
+	st.reviewSent = true;
+	st.waitFor = "reviewConfirm";
+	stampAsk(st, "reviewConfirm");
+	return true;
+}
+
+async function handleProceedStageInput(
+	io,
+	sc,
+	st,
+	userText,
+	lu = {},
+	{ allowGeneric = true } = {}
+) {
+	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
+	if (wantsPaymentHelp(userText) || lu.amenity || detectAmenityQuestion(userText)) {
+		return false;
+	}
+	if (confirmsText(userText)) {
+		return sendReservationReview(io, sc, st, st.quote.data);
+	}
+	if (declinesText(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Acknowledge politely and offer to help with different dates or another room type. Do not repeat the quote.",
+			{ quote: st.quote.data, slots: st.slots }
+		);
+		await humanSend(io, sc, st, msg);
+		return true;
+	}
+	if (patienceText(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Thank the guest naturally and say there is no rush. Mention that the quote is ready and they can say yes when they want to continue. Do not repeat the price.",
+			{ quoteReady: true, nextStep: "proceed_to_review" }
+		);
+		await humanSend(io, sc, st, msg);
+		return true;
+	}
+	if (asksAiIdentity(userText) || botExperienceComplaintText(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Answer the guest's concern transparently and warmly. If they ask whether you are human or AI, say you are AI-assisted support monitored by the team; do not claim to be human. Apologize briefly if the speed or repetition felt unnatural. Say the quote is ready and ask whether to continue to the review step. Do not repeat the full quote.",
+			{ quoteReady: true, nextStep: "proceed_to_review" }
+		);
+		await humanSend(io, sc, st, msg);
+		return true;
+	}
+	if (lu.intent === "smalltalk" || looksLikeGreetingOnly(userText)) {
+		return handleSmalltalk(io, sc, st, lu, userText);
+	}
+	if (!allowGeneric) return false;
+	const msg = await write(
+		io,
+		sc,
+		st,
+		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue to the review step for this reservation?",
+		{ quoteReady: true, nextStep: "proceed_to_review" }
+	);
+	await humanSend(io, sc, st, msg);
+	return true;
+}
+
 function publicBaseUrl() {
 	return String(
 		process.env.CLIENT_URL ||
@@ -2070,7 +2251,7 @@ function reservationLinks(reservation) {
 function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	const lang = languageOf(sc, st);
 	const confirmation = reservation.confirmation_number;
-	const currency = quoteData?.currency || "SAR";
+	const currency = cleanCurrency(quoteData?.currency || "SAR");
 	const total = reservation.total_amount;
 	if (/arabic/i.test(lang)) {
 		return [
@@ -2246,6 +2427,10 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		if (st.waitFor === "fullname") {
 			if (st.slots.fullName) {
 				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
 				continue;
 			}
 			const norm = await normalizeNameLLM(userText, st.language);
@@ -2280,6 +2465,10 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		if (st.waitFor === "nationality") {
 			if (st.slots.nationality || !AI_REQUIRE_NATIONALITY) {
 				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
 				continue;
 			}
 			const nat = await validateNationalityLLM(userText, st.language);
@@ -2309,6 +2498,10 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		if (st.waitFor === "phone") {
 			if (st.slots.phone) {
 				st.waitFor = nextReservationDetailStep(st);
+				if (st.waitFor !== "finalize") {
+					await askForReservationDetail(io, sc, st, st.waitFor);
+					return true;
+				}
 				continue;
 			}
 			const clean = cleanPhoneCandidate(userText);
@@ -2623,6 +2816,15 @@ async function planTurn(io, sc) {
 			);
 			if (handled) return;
 		}
+		const preNluProceedHandled = await handleProceedStageInput(
+			io,
+			sc,
+			st,
+			userText,
+			{},
+			{ allowGeneric: false }
+		);
+		if (preNluProceedHandled) return;
 
 		// Legacy greeting branch is skipped after the first real customer turn.
 		if (!st.greeted && !st.greetScheduled) {
@@ -2673,6 +2875,15 @@ async function planTurn(io, sc) {
 			await answerDiscountQuestion(io, sc, st, userText);
 			return;
 		}
+
+		const proceedHandled = await handleProceedStageInput(
+			io,
+			sc,
+			st,
+			userText,
+			decisionLu
+		);
+		if (proceedHandled) return;
 
 		const readyToQuoteFromNlu =
 			st.slots.checkinISO &&

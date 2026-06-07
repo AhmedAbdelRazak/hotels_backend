@@ -23,8 +23,9 @@
 - SendGrid support-case email notification failures must not fail a saved support case.
 
 - **Delays**:
-  - 5s greeting after case creation, context-aware (new reservation vs update).
-  - 1.5s minimum delay for every reply.
+  - Greeting and replies use configurable human-style pacing.
+  - Normal short replies should show the AI responder typing and land around 3 seconds after the reply is ready; longer replies can take longer based on length.
+  - Progress acknowledgements must go through the same humanized send path, not instant direct database appends.
   - If guest is typing (or typed within 800ms), agent **waits** and reschedules
     (max 30s).
 - **Guard**: Replies only if `hotel.aiToRespond === true`; else emits
@@ -32,6 +33,9 @@
 - **LLM fallback** (optional): set `OPENAI_API_KEY` to let the agent clarify
   ambiguous inputs (typos, mixed languages). Otherwise local extractors are
   used.
+- **Model latency**:
+  - Default chatbot model is `gpt-5-mini`, configurable through the central OpenAI model env keys.
+  - GPT-5-style chatbot calls use `OPENAI_CHATBOT_REASONING_EFFORT=minimal` by default for live-chat latency.
 - **No redundancy**: Agent reads `inquiryAbout` from SupportCase and starts the
   exact flow without “How can I help?”.
 - **Pricing**:

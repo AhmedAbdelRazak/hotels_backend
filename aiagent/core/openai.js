@@ -42,6 +42,16 @@ function pickModel(kind = "nlu") {
 	return pickOpenAIModel(kind);
 }
 
+function pickReasoningEffort() {
+	return String(
+		process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
+			process.env.OPENAI_REASONING_EFFORT ||
+			"minimal"
+	)
+		.trim()
+		.toLowerCase();
+}
+
 async function chat(
 	messages,
 	{ kind = "nlu", temperature = 0, max_tokens = 350 } = {}
@@ -59,6 +69,7 @@ async function chat(
 		messages,
 		temperature,
 		maxTokens: tokenLimit,
+		reasoning_effort: gpt5Style ? pickReasoningEffort() : "",
 	});
 	const res = await withDeadline(
 		(signal) =>

@@ -53,10 +53,25 @@ ROOM_SYNONYMS.push(
 	}
 );
 
+function escapeRoomTerm(value = "") {
+	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function roomTermMatches(text = "", term = "") {
+	const low = String(text || "").toLowerCase();
+	const raw = String(term || "").toLowerCase().trim();
+	if (!raw) return false;
+	if (/^[a-z0-9\s-]+$/.test(raw)) {
+		const pattern = escapeRoomTerm(raw).replace(/[\s-]+/g, "[\\s-]+");
+		return new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`).test(low);
+	}
+	return low.includes(raw);
+}
+
 function mapRoomToKey(text = "") {
 	const low = text.toLowerCase();
 	for (const r of ROOM_SYNONYMS) {
-		if (r.terms.some((t) => low.includes(t.toLowerCase()))) return r.key;
+		if (r.terms.some((t) => roomTermMatches(low, t))) return r.key;
 	}
 	return null;
 }
@@ -607,6 +622,8 @@ function bumpDatesToFuture({ checkinISO, checkoutISO }) {
 /* ---------------- quick smalltalk (multi‑lingual) ---------------- */
 function quickSmalltalkType(text = "") {
 	const t = text.trim().toLowerCase();
+	if (/(how\s*(are|r)\s*(you|u))(?:\s*today)?/.test(t)) return "how_are_you";
+	if (/(?:\u0643\u064a\u0641\s+\u062d\u0627\u0644\u0643|\u0627\u062e\u0628\u0627\u0631\u0643|\u0623\u062e\u0628\u0627\u0631\u0643|\u0639\u0627\u0645\u0644\s+\u0627\u064a\u0647|\u0639\u0627\u0645\u0644\u0629\s+\u0627\u064a\u0647|\u0643\u064a\u0641\u0643|\u0627\u0632\u064a\u0643|\u0625\u0632\u064a\u0643)/.test(t)) return "how_are_you";
 	if (/^(hi|hello|hey|السلام|مرحبا|اهلا|أهلاً)\b/.test(t)) return "greet";
 	if (
 		/(how\s*(are|r)\s*(you|u))(?:\s*today)?|كيف حالك|اخبارك|عامل ايه|كيفك/.test(
@@ -754,20 +771,25 @@ async function normalizeDatesLLM({
 
 /* ---------------- nationality + name helpers ---------------- */
 async function validateNationalityLLM(text, language = "English") {
-	const raw = await chat(
-		[
-			{
-				role: "system",
-				content:
-					"Validate nationalities/demonyms in ANY language. Return ONLY JSON: { valid:boolean, normalized:string|null, country:string|null }. 'normalized' MUST be English (Latin).",
-			},
-			{
-				role: "user",
-				content: `Language hint: ${language}\nNationality text: """${text}"""\nReturn ONLY JSON.`,
-			},
-		],
-		{ kind: "nlu", temperature: 0, max_tokens: 80 }
-	);
+	let raw = "";
+	try {
+		raw = await chat(
+			[
+				{
+					role: "system",
+					content:
+						"Validate nationalities/demonyms in ANY language. Return ONLY JSON: { valid:boolean, normalized:string|null, country:string|null }. 'normalized' MUST be English (Latin).",
+				},
+				{
+					role: "user",
+					content: `Language hint: ${language}\nNationality text: """${text}"""\nReturn ONLY JSON.`,
+				},
+			],
+			{ kind: "nlu", temperature: 0, max_tokens: 80 }
+		);
+	} catch {
+		return { valid: false, normalized: null, country: null };
+	}
 	try {
 		return JSON.parse(raw);
 	} catch {
@@ -776,20 +798,25 @@ async function validateNationalityLLM(text, language = "English") {
 }
 
 async function normalizeNameLLM(text, language = "English") {
-	const raw = await chat(
-		[
-			{
-				role: "system",
-				content:
-					"Normalize a person's FULL NAME. If text is in Arabic/other script, transliterate to ASCII Latin. Reject gibberish. Return ONLY JSON: { valid:boolean, fullNameAscii:string|null, first:string|null, last:string|null }.",
-			},
-			{
-				role: "user",
-				content: `Language hint: ${language}\nName text: """${text}"""\nReturn ONLY JSON.`,
-			},
-		],
-		{ kind: "nlu", temperature: 0, max_tokens: 80 }
-	);
+	let raw = "";
+	try {
+		raw = await chat(
+			[
+				{
+					role: "system",
+					content:
+						"Normalize a person's FULL NAME. If text is in Arabic/other script, transliterate to ASCII Latin. Reject gibberish. Return ONLY JSON: { valid:boolean, fullNameAscii:string|null, first:string|null, last:string|null }.",
+				},
+				{
+					role: "user",
+					content: `Language hint: ${language}\nName text: """${text}"""\nReturn ONLY JSON.`,
+				},
+			],
+			{ kind: "nlu", temperature: 0, max_tokens: 80 }
+		);
+	} catch {
+		return { valid: false, fullNameAscii: null, first: null, last: null };
+	}
 	try {
 		return JSON.parse(raw);
 	} catch {
@@ -864,14 +891,36 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 		};
 	}
 
-	const lu = await detectIntentLLM({ text, preferredLanguage, inquiryAbout, hotel });
+	let lu = null;
+	try {
+		lu = await detectIntentLLM({ text, preferredLanguage, inquiryAbout, hotel });
+	} catch (error) {
+		console.log("[aiagent] nlu.detect_failed", {
+			message: error?.message || error,
+		});
+		lu = {
+			intent: "other",
+			smalltalkType: null,
+			dates: null,
+			roomText: null,
+			amenity: detectAmenityQuestion(text),
+			confirmation: null,
+		};
+	}
 	const roomKey = lu?.roomTypeKey || (lu?.roomText ? mapRoomToKey(lu.roomText) : null);
 
-	const iso = await normalizeDatesLLM({
-		checkin: lu?.dates?.checkin || null,
-		checkout: lu?.dates?.checkout || null,
-		preferredLanguage,
-	});
+	let iso = { checkinISO: null, checkoutISO: null, reason: null };
+	try {
+		iso = await normalizeDatesLLM({
+			checkin: lu?.dates?.checkin || null,
+			checkout: lu?.dates?.checkout || null,
+			preferredLanguage,
+		});
+	} catch (error) {
+		console.log("[aiagent] nlu.date_failed", {
+			message: error?.message || error,
+		});
+	}
 
 	const mergedCheckinISO = quickDates.checkinISO || iso?.checkinISO || null;
 	const mergedCheckoutISO = quickDates.checkoutISO || iso?.checkoutISO || null;

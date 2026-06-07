@@ -1157,7 +1157,7 @@ Future TODO Backlog - Added 2026-05-26
   - Manual teaching-chat endpoints require requireSignin and CustomerService admin access.
   - Existing aiagent-learning build/selftest/debug endpoints remain unchanged.
 - Chatbot orchestration:
-  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5.3, with chatbot-specific env values such as OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, and OPENAI_CHATBOT_NLU_MODEL available before the broader OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL fallbacks.
+  - OpenAI model selection is centralized in services/openaiModelConfig.js. The default model constant is gpt-5-mini, with chatbot-specific env values such as OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, and OPENAI_CHATBOT_NLU_MODEL available before the broader OPENAI_MODEL, OPENAI_MODEL_NLU, OPENAI_REASONING_MODEL, AI_ANALYSIS_MODEL, AI_MODEL, and OPENAI_DEFAULT_MODEL fallbacks.
   - OpenAI callers should use pickOpenAIModel/buildChatCompletionBody instead of hardcoded model names. The helper uses max_completion_tokens for GPT-5/o-series style models and max_tokens for older chat-completion models.
   - aiagent/core/db.js exposes listRelevantTrainingChats.
   - listRelevantTrainingChats reads active manual learning records across languages from aiagentlearnings and legacy aiagenttrainingchats; retrieval must not filter examples by the guest's preferred language.
@@ -1185,14 +1185,15 @@ Future TODO Backlog - Added 2026-05-26
   - aiagent/core/orchestrator.js hydrates booking slots from the saved support-case transcript before asking for missing details. Recovery covers Gregorian/Hijri dates, selected room type, full name, phone, email, adult count, child count, child ages, and prior AI prompts.
   - Transcript recovery prevents "I already told you" loops after state loss, server restart, or a late turn that arrives without the full in-memory state.
   - Active new-reservation flow must not route to reservation_lookup merely because the guest asks for a confirmation number. Treat "where is my confirmation number?" as continuation/finalization of the new booking unless the guest clearly says they already have an existing reservation.
-  - Quote and finalize paths send an immediate progress acknowledgement when AI_INSTANT_PROGRESS_ENABLED is true, then perform quote/create work. Keep artificial typing delays short; do not reintroduce 20-40 second silent waits.
+  - Quote and finalize paths send a short progress acknowledgement when AI_INSTANT_PROGRESS_ENABLED is true, but it must still go through humanSend so the guest sees the AI responder typing before the message appears. Do not save progress messages instantly.
   - Reservation finalization must call createReservationForCase and wait for the MongoDB save before sending confirmation, details, or payment links.
   - Details link format is CLIENT_URL/single-reservation/:confirmation. Payment link format is CLIENT_URL/client-payment/:reservationId/:confirmation.
   - The final reservation-created message is deterministic, not LLM-authored: confirmation number, total, "Please click here to find more details" link, payment link, then a follow-up asking whether anything else is needed.
   - After final confirmation, st.waitFor="post_booking_followup". The AI waits for the guest's answer, closes warmly on no/thanks, asks for details on vague yes, or passes a concrete new request back into normal orchestration.
-  - Nationality is optional by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=true only when the business requires it.
+  - Nationality is required by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=false only if the business explicitly allows skipping it.
   - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
-  - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current default is gpt-5.3 for a cheaper, high-quality live-chat baseline.
+  - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current default is gpt-5-mini for an accessible, cheaper, high-quality live-chat baseline. Do not use invalid model slugs such as gpt-5.3; they force fallback text and make the bot feel less human.
+  - GPT-5-style chatbot calls default to OPENAI_CHATBOT_REASONING_EFFORT=minimal to reduce latency for live support turns. Increase only for a measured quality need.
   - NLU supports Arabic room synonyms and no-year Hijri ranges such as "1 Ramadan to 10 Ramadan / next Ramadan"; nearest future Hijri occurrence is used unless explicit past wording is present, and explicit Hijri years remain authoritative.
 - Validation completed locally:
   - node --check models/aiagent_learning.js.
@@ -1253,15 +1254,17 @@ Future TODO Backlog - Added 2026-05-26
 2026-05-29 B2C AI Response Timing
 - Backend behavior:
   - aiagent/core/orchestrator.js now makes human-like response timing configurable by environment variables instead of fixed constants.
-  - Defaults reduce the hidden pre-typing delay while preserving the existing visible typing cadence:
-    - AI_HUMAN_THINK_MIN_MS default 300.
-    - AI_HUMAN_THINK_MAX_MS default 650.
+  - Defaults keep the chat responsive while preserving a human visible typing cadence:
+    - AI_HUMAN_THINK_MIN_MS default 700.
+    - AI_HUMAN_THINK_MAX_MS default 1400.
     - AI_HUMAN_GREET_THINK_MS default 1200.
-    - AI_HUMAN_TYPE_CHAR_MIN_MS default 48.
-    - AI_HUMAN_TYPE_CHAR_MAX_MS default 60.
+    - AI_HUMAN_TYPE_CHAR_MIN_MS default 12.
+    - AI_HUMAN_TYPE_CHAR_MAX_MS default 22.
     - AI_HUMAN_TYPE_CLAMP_MIN_MS default 2200.
-    - AI_HUMAN_TYPE_CLAMP_MAX_MS default 7000.
-  - Normal short replies should start typing much faster; total delivery still depends on OpenAI latency and message length.
+    - AI_HUMAN_TYPE_CLAMP_MAX_MS default 6500.
+    - AI_HUMAN_BETWEEN_SENDS_MIN_MS default 800.
+    - AI_HUMAN_BETWEEN_SENDS_MAX_MS default 1600.
+  - Normal short replies should feel like a person is reviewing/typing for about 3 seconds, while longer replies can take longer without returning to 20-40 second silent waits.
 
 2026-05-29 Localized Phone Digit Normalization
 - Backend behavior:
