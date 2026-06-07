@@ -344,6 +344,9 @@ function respectfulGuestName(sc = {}, st = {}) {
 }
 
 function logStep(caseId, message, payload = {}) {
+	if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() !== "true") {
+		return;
+	}
 	console.log(`[aiagent] case=${caseId} ${message}`, payload);
 }
 async function sleep(ms) {

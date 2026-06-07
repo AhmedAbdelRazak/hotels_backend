@@ -11,6 +11,9 @@ const {
 } = require("../../services/pendingConfirmationPolicy");
 
 function log(caseId, msg, payload = {}) {
+	if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() !== "true") {
+		return;
+	}
 	console.log(`[aiagent] case=${caseId} ${msg}`, payload);
 }
 function onlyDigits(s = "") {
