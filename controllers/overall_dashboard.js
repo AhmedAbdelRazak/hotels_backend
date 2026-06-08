@@ -986,6 +986,14 @@ const reservationSearchStage = (search = "") => {
 	};
 };
 
+const reservationComputedFieldsStage = () => ({
+	$addFields: {
+		bookingSortDate: { $ifNull: ["$booked_at", "$createdAt"] },
+		hotelVisibleTotalAmount: hotelVisibleReservationAmountExpression(),
+		total_amount: hotelVisibleReservationAmountExpression(),
+	},
+});
+
 const reservationLookupStages = () => [
 	{
 		$lookup: {
@@ -1008,11 +1016,9 @@ const reservationLookupStages = () => [
 		$addFields: {
 			hotelName: { $ifNull: ["$hotelDetails.hotelName", ""] },
 			hotelOwnerId: "$hotelDetails.belongsTo",
-			bookingSortDate: { $ifNull: ["$booked_at", "$createdAt"] },
-			hotelVisibleTotalAmount: hotelVisibleReservationAmountExpression(),
-			total_amount: hotelVisibleReservationAmountExpression(),
 		},
 	},
+	reservationComputedFieldsStage(),
 ];
 
 const sortFromQuery = (query = {}) => {
@@ -1031,6 +1037,9 @@ const sortFromQuery = (query = {}) => {
 	const direction = String(query.sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
 	return { [field]: direction, _id: -1 };
 };
+
+const reservationListNeedsLookupBeforePage = (query = {}) =>
+	Boolean(String(query.search || "").trim()) || query.sortBy === "hotelName";
 
 const bookingSourceOptionsFromMatch = async (match, actor = {}) => {
 	if (!match) return [];
@@ -1388,8 +1397,42 @@ const listReservations = async ({
 		String(query.exportAll || "").toLowerCase()
 	);
 	const search = reservationSearchStage(query.search);
-	const basePipeline = [{ $match: match }, ...reservationLookupStages()];
+	const needsLookupBeforePage = reservationListNeedsLookupBeforePage(query);
+	const basePipeline = needsLookupBeforePage
+		? [{ $match: match }, ...reservationLookupStages()]
+		: [{ $match: match }];
 	if (search) basePipeline.push({ $match: search });
+	const pageStages = exportAll
+		? []
+		: [{ $skip: (page - 1) * limit }, { $limit: limit }];
+	const rowPipeline = needsLookupBeforePage
+		? [
+				...basePipeline,
+				{ $sort: sortFromQuery(query) },
+				...pageStages,
+				{
+					$project: {
+						hotelDetails: 0,
+					},
+				},
+		  ]
+		: [
+				{ $match: match },
+				reservationComputedFieldsStage(),
+				{ $sort: sortFromQuery(query) },
+				...pageStages,
+				...reservationLookupStages(),
+				{
+					$project: {
+						hotelDetails: 0,
+					},
+				},
+		  ];
+	const totalPromise = search
+		? Reservations.aggregate([...basePipeline, { $count: "total" }]).then(
+				(countRows) => countRows?.[0]?.total || 0
+		  )
+		: Reservations.countDocuments(match);
 	const bookingSourceMatch = pendingOnly || rejectedOnly
 		? buildReservationMatch({
 				actor,
@@ -1400,18 +1443,9 @@ const listReservations = async ({
 		  })
 		: null;
 
-	const [countResult, rows, bookingSources, scorecards] = await Promise.all([
-		Reservations.aggregate([...basePipeline, { $count: "total" }]),
-		Reservations.aggregate([
-			...basePipeline,
-			{ $sort: sortFromQuery(query) },
-			...(exportAll ? [] : [{ $skip: (page - 1) * limit }, { $limit: limit }]),
-			{
-				$project: {
-					hotelDetails: 0,
-				},
-			},
-		]),
+	const [total, rows, bookingSources, scorecards] = await Promise.all([
+		totalPromise,
+		Reservations.aggregate(rowPipeline),
 		pendingOnly || rejectedOnly
 			? bookingSourceOptionsFromMatch(bookingSourceMatch, actor)
 			: [],
@@ -1423,7 +1457,6 @@ const listReservations = async ({
 			rejectedOnly,
 		}),
 	]);
-	const total = countResult?.[0]?.total || 0;
 	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(
 		rows,
 		actor
@@ -2525,25 +2558,45 @@ const listCommissionReconciliationActions = async ({
 	}
 
 	const search = reservationSearchStage(query.search);
-	const basePipeline = [{ $match: match }, ...reservationLookupStages()];
+	const needsLookupBeforePage = reservationListNeedsLookupBeforePage(query);
+	const basePipeline = needsLookupBeforePage
+		? [{ $match: match }, ...reservationLookupStages()]
+		: [{ $match: match }];
 	if (search) basePipeline.push({ $match: search });
+	const rowProjectStage = {
+		$project: {
+			hotelDetails: 0,
+			roomDetails: 0,
+			adminChangeLog: 0,
+			reservationAuditLog: 0,
+		},
+	};
+	const rowPipeline = needsLookupBeforePage
+		? [
+				...basePipeline,
+				{ $sort: { checkout_date: -1, bookingSortDate: -1, _id: -1 } },
+				{ $skip: (page - 1) * limit },
+				{ $limit: limit },
+				rowProjectStage,
+		  ]
+		: [
+				{ $match: match },
+				reservationComputedFieldsStage(),
+				{ $sort: { checkout_date: -1, bookingSortDate: -1, _id: -1 } },
+				{ $skip: (page - 1) * limit },
+				{ $limit: limit },
+				...reservationLookupStages(),
+				rowProjectStage,
+		  ];
+	const totalPromise = search
+		? Reservations.aggregate([...basePipeline, { $count: "total" }]).then(
+				(countRows) => countRows?.[0]?.total || 0
+		  )
+		: Reservations.countDocuments(match);
 
-	const [countResult, rows] = await Promise.all([
-		Reservations.aggregate([...basePipeline, { $count: "total" }]),
-		Reservations.aggregate([
-			...basePipeline,
-			{ $sort: { checkout_date: -1, bookingSortDate: -1, _id: -1 } },
-			{ $skip: (page - 1) * limit },
-			{ $limit: limit },
-			{
-				$project: {
-					hotelDetails: 0,
-					roomDetails: 0,
-					adminChangeLog: 0,
-					reservationAuditLog: 0,
-				},
-			},
-		]),
+	const [total, rows] = await Promise.all([
+		totalPromise,
+		Reservations.aggregate(rowPipeline),
 	]);
 
 	const rowAgentIds = [
@@ -2569,8 +2622,6 @@ const listCommissionReconciliationActions = async ({
 		map[normalizeId(agent._id)] = agent;
 		return map;
 	}, {});
-	const total = countResult?.[0]?.total || 0;
-
 	return {
 		page,
 		limit,
@@ -2647,22 +2698,41 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		includeBookingSource: false,
 	});
 	const search = reservationSearchStage(query.search);
-	const basePipeline = [{ $match: match }, ...reservationLookupStages()];
+	const sortQuery = { ...query, sortBy: query.sortBy || "updatedAt" };
+	const needsLookupBeforePage = reservationListNeedsLookupBeforePage(sortQuery);
+	const basePipeline = needsLookupBeforePage
+		? [{ $match: match }, ...reservationLookupStages()]
+		: [{ $match: match }];
 	if (search) basePipeline.push({ $match: search });
+	const rowPipeline = needsLookupBeforePage
+		? [
+				...basePipeline,
+				{ $sort: sortFromQuery(sortQuery) },
+				{ $skip: (pageForQuery - 1) * limit },
+				{ $limit: limit },
+				{ $project: { hotelDetails: 0 } },
+		  ]
+		: [
+				{ $match: match },
+				reservationComputedFieldsStage(),
+				{ $sort: sortFromQuery(sortQuery) },
+				{ $skip: (pageForQuery - 1) * limit },
+				{ $limit: limit },
+				...reservationLookupStages(),
+				{ $project: { hotelDetails: 0 } },
+		  ];
+	const totalPromise = search
+		? Reservations.aggregate([...basePipeline, { $count: "total" }]).then(
+				(countRows) => countRows?.[0]?.total || 0
+		  )
+		: Reservations.countDocuments(match);
 
-	const [countResult, rows, bookingSources] = await Promise.all([
-		Reservations.aggregate([...basePipeline, { $count: "total" }]),
-		Reservations.aggregate([
-			...basePipeline,
-			{ $sort: sortFromQuery({ ...query, sortBy: query.sortBy || "updatedAt" }) },
-			{ $skip: (pageForQuery - 1) * limit },
-			{ $limit: limit },
-			{ $project: { hotelDetails: 0 } },
-		]),
+	const [total, rows, bookingSources] = await Promise.all([
+		totalPromise,
+		Reservations.aggregate(rowPipeline),
 		bookingSourceOptionsFromMatch(bookingSourceMatch, actor),
 	]);
 
-	const total = countResult?.[0]?.total || 0;
 	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(
 		rows,
 		actor

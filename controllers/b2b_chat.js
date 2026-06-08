@@ -730,7 +730,10 @@ exports.b2bChatList = async (req, res) => {
 exports.b2bChatUnreadSummary = async (req, res) => {
 	try {
 		const actor = req.profile;
-		const cacheKey = normalizeId(actor?._id || req.params.userId);
+		const cacheKey =
+			normalizeId(req.params.userId) ||
+			normalizeId(req.auth?._id) ||
+			normalizeId(actor?._id);
 		const cached = getShortCache(b2bUnreadSummaryCache, cacheKey);
 		if (cached) return res.json(cached);
 
