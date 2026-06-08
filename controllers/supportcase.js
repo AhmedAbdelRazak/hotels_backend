@@ -19,6 +19,8 @@ const supportCaseEmail = twilio(
 );
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+const SUPPORT_CASE_HOTEL_POPULATE =
+	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances";
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -640,7 +642,7 @@ exports.getSupportCaseById = async (req, res) => {
 		// Find the support case by ID without attempting to populate 'messageBy'
 		const supportCase = await SupportCase.findById(req.params.id)
 			.populate("supporterId") // Only populate fields that reference another model
-			.populate("hotelId");
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		if (!supportCase) {
 			console.log("Support case not found:", req.params.id);
@@ -1244,7 +1246,7 @@ exports.getOpenSupportCases = async (req, res) => {
 			openedBy: { $in: ["super admin", "hotel owner"] }, // Adjusting for case sensitivity
 		}))
 			.populate("supporterId")
-			.populate("hotelId");
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		res.status(200).json(cases);
 	} catch (error) {
@@ -1269,7 +1271,7 @@ exports.getOpenSupportCasesForHotel = async (req, res) => {
 			hotelId: mongoose.Types.ObjectId(hotelId), // Ensure hotelId is treated as ObjectId
 		})
 			.populate("supporterId")
-			.populate("hotelId");
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		// Return the cases in the response
 		res.status(200).json(cases);
@@ -1286,7 +1288,7 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 			openedBy: { $in: ["client"] }, // Client-related cases only
 		}))
 			.populate("supporterId")
-			.populate("hotelId")
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
 			.exec();
 		res.status(200).json(await enrichClientSupportCases(cases, req));
@@ -1304,7 +1306,7 @@ exports.getEscalatedSupportCasesClients = async (req, res) => {
 		}))
 			.sort({ escalatedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
 			.populate("supporterId")
-			.populate("hotelId")
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
 			.exec();
 		res.status(200).json(await enrichClientSupportCases(cases, req));
@@ -1320,7 +1322,7 @@ exports.getCloseSupportCases = async (req, res) => {
 			openedBy: { $in: ["super admin", "hotel owner"] }, // Adjusting for case sensitivity
 		}))
 			.populate("supporterId")
-			.populate("hotelId");
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		res.status(200).json(cases);
 	} catch (error) {
@@ -1344,7 +1346,7 @@ exports.getCloseSupportCasesForHotel = async (req, res) => {
 			hotelId: mongoose.Types.ObjectId(hotelId), // Ensure hotelId is treated as ObjectId
 		})
 			.populate("supporterId")
-			.populate("hotelId")
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
 			.exec();
 
@@ -1372,7 +1374,7 @@ exports.getCloseSupportCasesForHotelClients = async (req, res) => {
 			hotelId: mongoose.Types.ObjectId(hotelId), // Ensure hotelId is treated as ObjectId
 		})
 			.populate("supporterId")
-			.populate("hotelId");
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		// Return the cases in the response
 		res.status(200).json(cases);
@@ -1395,7 +1397,7 @@ exports.getCloseSupportCasesClients = async (req, res) => {
 				.skip(skip)
 				.limit(limit)
 				.populate("supporterId")
-				.populate("hotelId")
+				.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 				.lean()
 				.exec(),
 			SupportCase.countDocuments(filter),
