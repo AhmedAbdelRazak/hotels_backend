@@ -57,13 +57,13 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 500, {
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
 	max: 5000,
 });
 const HUMAN_THINK_MAX_MS = Math.max(
 	HUMAN_THINK_MIN_MS,
-	intFromEnv("AI_HUMAN_THINK_MAX_MS", 900, { min: 0, max: 5000 })
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 1400, { min: 0, max: 5000 })
 );
 const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 2, {
 	min: 1,
@@ -73,13 +73,13 @@ const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
 	HUMAN_TYPE_CHAR_MIN_MS,
 	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 5, { min: 1, max: 300 })
 );
-const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 1200, {
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 1700, {
 	min: 250,
 	max: 10000,
 });
 const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
 	HUMAN_TYPE_CLAMP_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 2800, { min: 250, max: 15000 })
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 3200, { min: 250, max: 15000 })
 );
 const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
 	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
@@ -95,7 +95,7 @@ const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
 );
 
 const HUMAN = {
-	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 700, {
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 1400, {
 		min: 0,
 		max: 7000,
 	}),
@@ -1125,6 +1125,23 @@ function selectedHotelOnlyReply(sc = {}, st = {}, userText = "") {
 	return `${name}, I can help with ${hotelName} only in this chat. I can check availability, another room type, or different dates at ${hotelName}.`;
 }
 
+function initialHotelGreetingText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
+	const agentName = st.agentName || "Sara";
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `\u0623\u0647\u0644\u0627\u064b ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u062f\u0639\u0645 ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `Hola ${name}, soy ${agentName} del equipo de ${hotelName}. Como puedo ayudarte hoy?`;
+	}
+	if (/french/i.test(lang)) {
+		return `Bonjour ${name}, je suis ${agentName} de l'equipe de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
+	}
+	return `Hello ${name}, this is ${agentName} from ${hotelName} support. How can I help you today?`;
+}
+
 function hotelComplaintText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	return (
@@ -2118,6 +2135,14 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 			return false;
 		}
 		const latestCustomerText = latestCase ? lastUserText(latestCase) : "";
+		if (first && !expectedTurnUserText && latestCustomerText) {
+			logStep(caseId, "human.cancelled", {
+				stage: "stale-greeting",
+				token,
+				latestCustomerText,
+			});
+			return false;
+		}
 		if (
 			expectedTurnUserText &&
 			latestCustomerText &&
@@ -4801,15 +4826,17 @@ async function planTurn(io, sc) {
 					);
 					if (handled) return;
 				}
-				const greeting = await write(
-					io,
-					sc,
-					st,
-					initialInquiry
-						? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-						: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-					{ initialInquiry }
-				);
+				const greeting = st.hotel
+					? initialHotelGreetingText(sc, st)
+					: await write(
+							io,
+							sc,
+							st,
+							initialInquiry
+								? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active support assistant, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+								: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active support assistant, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+							{ initialInquiry }
+					  );
 				await humanSend(io, sc, st, greeting, { first: true });
 				st.waitFor = "clarify";
 				return;
@@ -4821,13 +4848,15 @@ async function planTurn(io, sc) {
 			st.greetScheduled = true;
 			st.greeted = true;
 			if (looksLikeGreetingOnly(userText)) {
-				const greeting = await write(
-					io,
-					sc,
-					st,
-					"Greet the guest by first name, introduce yourself as the active hotel support and reservation assistant when hotel context exists, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-					{ latestUserMessage: userText }
-				);
+				const greeting = st.hotel
+					? initialHotelGreetingText(sc, st)
+					: await write(
+							io,
+							sc,
+							st,
+							"Greet the guest by first name, introduce yourself as the active support assistant, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+							{ latestUserMessage: userText }
+					  );
 				await humanSend(io, sc, st, greeting, { first: true });
 				st.waitFor = "clarify";
 				return;
@@ -6216,6 +6245,27 @@ async function planTurn(io, sc) {
 	}
 }
 
+const scheduledTurns = new Map();
+
+function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
+	const caseId = idText(caseOrId);
+	if (!io || !caseId) return false;
+	const existing = scheduledTurns.get(caseId);
+	if (existing) clearTimeout(existing);
+	const timer = setTimeout(async () => {
+		scheduledTurns.delete(caseId);
+		try {
+			const latestCase = await getSupportCaseById(caseId);
+			if (latestCase) await planTurn(io, latestCase);
+		} catch (error) {
+			console.error("[aiagent] scheduled plan error:", error?.message || error);
+		}
+	}, Math.max(0, Number(delayMs) || 0));
+	if (typeof timer.unref === "function") timer.unref();
+	scheduledTurns.set(caseId, timer);
+	return true;
+}
+
 /* ------------------- socket wiring ------------------- */
 function wireSocket(io) {
 	io.on("connection", (socket) => {
@@ -6239,7 +6289,9 @@ function wireSocket(io) {
 					hotelName: st.hotel?.hotelName,
 				});
 
-				if (!st.greeted && !st.greetScheduled) planTurn(io, sc);
+				if (!st.greeted && !st.greetScheduled) {
+					schedulePlanTurn(io, caseId, { delayMs: 75 });
+				}
 			} catch (e) {
 				console.error("[aiagent] joinRoom error:", e?.message || e);
 			}
@@ -6264,9 +6316,7 @@ function wireSocket(io) {
 					});
 					return;
 				}
-				const sc = await getSupportCaseById(caseId);
-				if (!sc) return;
-				await planTurn(io, sc);
+				schedulePlanTurn(io, caseId, { delayMs: 75 });
 			} catch (e) {
 				console.error("[aiagent] sendMessage plan error:", e?.message || e);
 			}
@@ -6276,4 +6326,4 @@ function wireSocket(io) {
 	console.log("[aiagent] socket-driven AI planner active.");
 }
 
-module.exports = { wireSocket };
+module.exports = { wireSocket, schedulePlanTurn };

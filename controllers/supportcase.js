@@ -8,6 +8,7 @@ const User = require("../models/user");
 const {
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
+const { schedulePlanTurn } = require("../aiagent/core/orchestrator");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -22,6 +23,16 @@ const normalizeId = (value) => String(value?._id || value?.id || value || "").tr
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
+
+const isAiAgentEnabled = () =>
+	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
+
+function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 100 } = {}) {
+	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
+		return;
+	}
+	schedulePlanTurn(io, supportCaseOrId, { delayMs });
+}
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -1101,6 +1112,13 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				reason: updatedCase.aiHandoffReason || "client_closed_case",
 			});
 		}
+		if (
+			safeConversation &&
+			updatedCase.aiToRespond !== false &&
+			updatedCase.caseStatus !== "closed"
+		) {
+			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 100 });
+		}
 
 		res.status(200).json(updatedCase);
 	} catch (error) {
@@ -1282,6 +1300,9 @@ exports.createNewSupportCase = async (req, res) => {
 
 		// Emit Socket.IO event for new chat
 		req.io.emit("newChat", newCase);
+		if (aiEnabledForClient) {
+			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 150 });
+		}
 
 		// 2) Generate the HTML from your email template
 		const emailHtml = newSupportCaseEmail(newCase, hotelName);
