@@ -1992,6 +1992,7 @@ const memo = new Map();
 function ensureState(sc, hotel) {
 	const id = String(sc._id);
 	let st = memo.get(id);
+	const alreadyGreeted = hasAiAssistantReply(sc);
 	if (!st) {
 		const agentPool = configuredAgentPool();
 		const initialFullName = cleanFullNameCandidate(
@@ -2005,8 +2006,8 @@ function ensureState(sc, hotel) {
 			language: preferredLanguageOf(sc) || "English",
 			languageCode: preferredLanguageCodeOf(sc) || "",
 			languageOverrideAt: 0,
-			greeted: false,
-			greetScheduled: false,
+			greeted: alreadyGreeted,
+			greetScheduled: alreadyGreeted,
 			guestTypingUntil: 0,
 			turnInFlight: false,
 			interrupt: false,
@@ -2043,6 +2044,10 @@ function ensureState(sc, hotel) {
 		};
 		memo.set(id, st);
 	} else {
+		if (alreadyGreeted) {
+			st.greeted = true;
+			st.greetScheduled = true;
+		}
 		if (isJannatBookingSupportCase(sc, hotel)) st.hotel = null;
 		else if (hotel) st.hotel = hotel;
 		if (sc.aiResponderName) st.agentName = sc.aiResponderName;
