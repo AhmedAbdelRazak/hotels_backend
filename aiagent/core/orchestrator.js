@@ -633,6 +633,73 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	}
 }
 
+function lastAssistantMessageBeforeLatestGuest(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let sawLatestGuest = false;
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const message = conversation[index];
+		if (!sawLatestGuest) {
+			if (isGuestConversationMessage(message)) {
+				sawLatestGuest = true;
+			}
+			continue;
+		}
+		if (isAiConversationMessage(message)) return message;
+	}
+	return null;
+}
+
+function quickReplyActions(message = {}) {
+	return Array.isArray(message.quickReplies)
+		? message.quickReplies
+				.map((reply) => String(reply?.action || "").trim().toLowerCase())
+				.filter(Boolean)
+		: [];
+}
+
+function recoverBookingStageFromConversation(sc = {}, st = {}) {
+	if (!st || isReservationDetailStep(st)) return;
+	const lastAssistant = lastAssistantMessageBeforeLatestGuest(sc);
+	if (!lastAssistant) return;
+	const text = String(lastAssistant.message || "");
+	const actions = quickReplyActions(lastAssistant);
+	if (actions.some((action) => action.startsWith("connect_hotel_"))) {
+		st.waitFor = "platform_hotel_choice";
+		return;
+	}
+	const hasConfirmAction =
+		actions.includes("confirm") || actions.includes("correction");
+	const looksLikeReview =
+		/review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change/i.test(
+			text
+		);
+	if (hasConfirmAction || looksLikeReview) {
+		st.reviewSent = true;
+		st.waitFor = "reviewConfirm";
+		return;
+	}
+
+	const hasProceedAction = actions.includes("proceed");
+	const looksLikeProceed =
+		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
+			text
+		);
+	if ((hasProceedAction || looksLikeProceed) && st.hotel && quoteKeyForSlots(st)) {
+		if (!st.quote || st.quote.key !== quoteKeyForSlots(st)) {
+			const quote = safePriceRoomForStay(
+				st.hotel,
+				{ roomType: st.slots.roomTypeKey },
+				st.slots.checkinISO,
+				st.slots.checkoutISO
+			);
+			st.quote = { key: quoteKeyForSlots(st), at: now(), data: quote };
+		}
+		if (st.quote?.data?.available) {
+			st.waitFor = "proceed";
+		}
+	}
+}
+
 function isNewReservationFlowActive(st = {}) {
 	return Boolean(
 		st.quote ||
@@ -1258,6 +1325,36 @@ function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
 	);
 }
 
+function hotelCityText(hotel = {}) {
+	return [
+		hotel.hotelCity,
+		hotel.hotelState,
+		hotel.hotelAddress,
+		hotel.aboutHotel,
+		hotel.aboutHotelArabic,
+	]
+		.filter(Boolean)
+		.join(" ")
+		.toLowerCase();
+}
+
+function isMakkahHotel(hotel = {}) {
+	const text = hotelCityText(hotel);
+	return /\b(makkah|mecca|mekkah)\b|\u0645\u0643\u0629|\u0645\u0643\u0647/.test(text);
+}
+
+function wantsMakkahNearHaram(text = "") {
+	const value = String(text || "").toLowerCase();
+	const mentionsMadinah =
+		/\b(madinah|medina|madina)\b|\u0627\u0644\u0645\u062f\u064a\u0646\u0629|\u0645\u062f\u064a\u0646\u0629|\u0645\u062f\u064a\u0646\u0647/.test(
+			value
+		);
+	if (mentionsMadinah) return false;
+	return /\b(makkah|mecca|mekkah|al\s*haram|haram|kaaba|ka'ba|umrah)\b|\u0645\u0643\u0629|\u0645\u0643\u0647|\u0627\u0644\u062d\u0631\u0645|\u0643\u0639\u0628\u0629|\u0639\u0645\u0631\u0629/.test(
+		value
+	);
+}
+
 function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 	const rooms = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -1333,7 +1430,9 @@ async function buildHotelRecommendations({
 		: "doubleRooms";
 	const selectedRoomTypeKey = requestedRoomTypeKey || roomTypeKey;
 	const hotels = await listActivePublicHotels();
-	const matches = hotels
+	const makkahOnly = wantsMakkahNearHaram(text);
+	const scopedHotels = makkahOnly ? hotels.filter(isMakkahHotel) : hotels;
+	const matches = scopedHotels
 		.filter((hotel) =>
 			(hotel.roomCountDetails || []).some((room) =>
 				roomMatches(room, selectedRoomTypeKey)
@@ -1366,6 +1465,7 @@ async function buildHotelRecommendations({
 		{
 			requestedRoomType: selectedRoomTypeKey,
 			activeHotelMatches: matches,
+			locationScope: makkahOnly ? "makkah_near_al_haram" : "all_active_hotels",
 			latestUserMessage: text,
 		}
 	);
@@ -1427,7 +1527,13 @@ async function buildJannatBookingHotelOptions({
 		].join("\n")
 	);
 	const hotels = await listActivePublicHotels();
-	const options = hotels
+	const makkahOnly = wantsMakkahNearHaram(
+		[text, initialInquiryText(sc), recentConversationLines(sc, st).slice(-2000)]
+			.filter(Boolean)
+			.join("\n")
+	);
+	const scopedHotels = makkahOnly ? hotels.filter(isMakkahHotel) : hotels;
+	const options = scopedHotels
 		.filter(
 			(hotel) =>
 				hotel.aiToRespond === true &&
@@ -1493,6 +1599,7 @@ async function buildJannatBookingHotelOptions({
 			checkinISO: st.slots.checkinISO,
 			checkoutISO: st.slots.checkoutISO,
 			budget,
+			locationScope: makkahOnly ? "makkah_near_al_haram" : "all_active_hotels",
 			activeHotelOptions: options.map((option) => ({
 				hotelName: option.hotelName,
 				roomLabel: option.roomLabel,
@@ -1681,7 +1788,42 @@ async function handlePlatformHotelChoice(io, sc, st, userText) {
 	const options = Array.isArray(st.platformHotelOptions)
 		? st.platformHotelOptions
 		: [];
-	if (!options.length) return false;
+	if (!options.length) {
+		if (!st.slots.roomTypeKey) {
+			st.slots.roomTypeKey =
+				mapRoomToKey(conversationText(sc, { guestsOnly: true })) ||
+				mapRoomToKey(userText) ||
+				"doubleRooms";
+		}
+		const rebuilt = await buildJannatBookingHotelOptions({
+			text: userText,
+			sc,
+			st,
+			requestedRoomTypeKey: st.slots.roomTypeKey,
+		});
+		const rebuiltIndex = parsePlatformHotelChoice(
+			userText,
+			st.platformHotelOptions || []
+		);
+		if (rebuiltIndex >= 0) {
+			return connectJannatCaseToHotelSupport(
+				io,
+				sc,
+				st,
+				st.platformHotelOptions[rebuiltIndex],
+				{ reason: "new_reservation" }
+			);
+		}
+		const sent = await humanSend(io, sc, st, rebuilt.reply, {
+			quickReplies: rebuilt.options.length
+				? platformHotelOptionQuickReplies(sc, st)
+				: [],
+		});
+		if (sent) {
+			st.waitFor = rebuilt.options.length ? "platform_hotel_choice" : "dates";
+		}
+		return true;
+	}
 	const index = parsePlatformHotelChoice(userText, options);
 	if (index < 0) {
 		const sent = await humanSend(
@@ -3511,7 +3653,8 @@ async function shareKnownStayQuote(io, sc, st) {
 		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
 	});
 	if (!sent) return false;
-	st.waitFor = "proceed";
+	st.reviewSent = false;
+	st.waitFor = quote?.available ? "proceed" : "room";
 	return true;
 }
 
@@ -3524,7 +3667,7 @@ function quoteKeyForSlots(st = {}) {
 
 function activeQuoteMatchesSlots(st = {}) {
 	const key = quoteKeyForSlots(st);
-	return Boolean(key && st.quote?.key === key && st.quote?.data);
+	return Boolean(key && st.quote?.key === key && st.quote?.data?.available);
 }
 
 function hijriGregorianDateLine(sc = {}, st = {}) {
@@ -4198,7 +4341,15 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				await humanSend(io, sc, st, ask);
 				return true;
 			}
-			if (!confirmsText(userText)) return true;
+			if (!confirmsText(userText)) {
+				const ask = /arabic/i.test(languageOf(sc, st))
+					? "\u0647\u0644 \u062a\u0624\u0643\u062f \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644\u060c \u0623\u0645 \u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u062a\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644\u0647\u061f"
+					: "Would you like to confirm these details, or is there something you want me to change?";
+				await humanSend(io, sc, st, ask, {
+					quickReplies: confirmationQuickReplies(sc, st),
+				});
+				return true;
+			}
 			st.waitFor = nextReservationDetailStep(st);
 			if (st.waitFor !== "finalize") {
 				await askForReservationDetail(io, sc, st, st.waitFor);
@@ -4444,6 +4595,7 @@ async function planTurn(io, sc) {
 	}
 	st.turnInFlight = true;
 	st.interrupt = false;
+	let planningTyping = false;
 
 	try {
 		logStep(caseId, "context.loaded", {
@@ -4456,6 +4608,10 @@ async function planTurn(io, sc) {
 
 		const userText = lastUserText(sc);
 		st.activeTurnUserText = userText || "";
+		if (userText || !hasAiAssistantReply(sc)) {
+			emitTyping(io, caseId, st, true);
+			planningTyping = true;
+		}
 		updateActiveLanguageFromText(sc, st, userText);
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
@@ -4517,6 +4673,7 @@ async function planTurn(io, sc) {
 		}
 
 		hydrateKnownSlotsFromConversation(sc, st);
+		recoverBookingStageFromConversation(sc, st);
 		if (
 			st.slots.roomTypeKey &&
 			st.slots.checkinISO &&
@@ -5845,6 +6002,9 @@ async function planTurn(io, sc) {
 		logStep(caseId, "error", { message: e?.message || e });
 	} finally {
 		const st2 = memo.get(caseId);
+		if (planningTyping) {
+			emitTyping(io, caseId, st2 || st, false);
+		}
 		if (st2) {
 			st2.turnInFlight = false;
 			if (st2.queue.length > 0) {

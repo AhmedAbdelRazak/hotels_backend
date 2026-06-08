@@ -2400,3 +2400,20 @@ Future TODO Backlog - Added 2026-05-26
   - node --check passed for aiagent/core/orchestrator.js and aiagent/core/nlu.js.
   - Node smoke tests confirmed "1 ramadan to 10th or ramadan" and "1 Ramadan to 10th of Ramadan" resolve to 1-10 Ramadan 1448 AH / 2027-02-08 to 2027-02-17 from the current production timeframe.
   - git diff --check passed apart from normal Windows LF-to-CRLF warnings.
+
+2026-06-08 Chatbot State Recovery And Makkah Recommendation QA
+- Backend behavior:
+  - aiagent/core/orchestrator.js now recovers booking state from the saved SupportCase transcript when in-memory case state is missing after PM2 restart, socket reconnect, or delayed guest replies.
+  - Recovery restores platform hotel-choice, quote-proceed, and review-confirm states from the last AI message and saved quickReplies, so guests who click Confirm / Yes / hotel option after a restart are not sent backward into the quote loop.
+  - Proceed buttons are only shown/accepted when the active quote is available. Unavailable same-hotel quote paths must ask for different dates or another same-hotel room type instead of offering "Yes, proceed".
+  - Review-confirm turns no longer go silent when the guest sends an unclear reply; the bot asks whether to confirm or change details and re-sends Confirm / Something is wrong quick replies.
+  - AI typing is emitted at the start of planning, before LLM/tool work finishes, so guests see that support is working during slower model/tool calls.
+- Jannat Booking concierge recommendations:
+  - If the guest asks for Makkah, Mecca, Al Haram, Kaaba, or Umrah options and does not explicitly ask for Madinah, platform hotel recommendations are scoped to Makkah hotels before distance/price sorting.
+  - This prevents Madinah hotels with short local-distance values from outranking Makkah near-Al-Haram options in Jannat Booking concierge chat.
+  - If a guest chooses a Jannat Booking hotel option after server memory was lost, the backend rebuilds the option list from the transcript and proceeds with the hotel handoff when the selected option can be resolved.
+- QA requirements:
+  - Regression test at least three new-reservation chats across different languages: two direct hotel support chats and one Jannat Booking concierge-to-hotel handoff.
+  - In the Jannat Booking concierge test, ask for hotels near Al Haram and verify the recommended options are Makkah/Mecca options, not Madinah options.
+  - Regression test existing-reservation date updates for confirmation 9550176494 in Arabic and English, then restore the reservation to its pre-test snapshot.
+  - Always delete QA SupportCase documents and any chatbot-created QA reservations after production testing.
