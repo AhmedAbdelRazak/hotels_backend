@@ -1731,6 +1731,24 @@ async function connectJannatCaseToHotelSupport(
 		io.emit("supportCaseUpdated", updatedCase);
 	}
 
+	const introInstruction =
+		reason === "reservation_update"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
+			: reason === "payment_help"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
+			: reason === "reservation_support"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
+			: optionOrHotel?.quote?.available
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
+			: "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk and ask for check-in and checkout dates so you can confirm availability officially.";
+	const hotelIntro = await write(io, sc, st, introInstruction, {
+		hotelName,
+		agentName: nextAgentName,
+		selectedOption: optionOrHotel,
+		confirmation,
+		requestedDates,
+	});
+
 	await sendSystemNotice(
 		io,
 		sc,
@@ -1755,23 +1773,6 @@ async function connectJannatCaseToHotelSupport(
 		return true;
 	}
 
-	const introInstruction =
-		reason === "reservation_update"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
-			: reason === "payment_help"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
-			: reason === "reservation_support"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
-			: optionOrHotel?.quote?.available
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
-			: "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk and ask for check-in and checkout dates so you can confirm availability officially.";
-	const hotelIntro = await write(io, sc, st, introInstruction, {
-		hotelName,
-		agentName: nextAgentName,
-		selectedOption: optionOrHotel,
-		confirmation,
-		requestedDates,
-	});
 	const introSent = await humanSend(io, sc, st, hotelIntro, {
 		quickReplies:
 			reason === "new_reservation" && optionOrHotel?.quote?.available
