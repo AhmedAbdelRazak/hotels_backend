@@ -2415,6 +2415,7 @@ Future TODO Backlog - Added 2026-05-26
   - Required guest-detail parsing accepts Spanish labels such as "Nombre completo", "Telefono", "Nacionalidad", "Adultos", and "Ninos/Niños"; Spanish retry prompts use Spanish missing-field names.
   - AI typing is emitted at the start of planning, before LLM/tool work finishes, so guests see that support is working during slower model/tool calls.
   - Public client support-case GET/PUT responses populate hotelId with identity/display fields only, not full room/pricing inventory, to keep chat polling small and reduce Cloudflare timeout risk.
+  - Existing-reservation date updates deterministically extract confirmation numbers from phrases such as "reservation 9550176494" / "booking 9550176494" / Arabic "reservation number" variants, so a complete request with confirmation plus check-in/check-out dates proceeds to the availability-checked update path instead of asking for the same details again.
 - Jannat Booking concierge recommendations:
   - If the guest asks for Makkah, Mecca, Al Haram, Kaaba, or Umrah options and does not explicitly ask for Madinah, platform hotel recommendations are scoped to Makkah hotels before distance/price sorting.
   - This prevents Madinah hotels with short local-distance values from outranking Makkah near-Al-Haram options in Jannat Booking concierge chat.
