@@ -2292,3 +2292,22 @@ Future TODO Backlog - Added 2026-05-26
   - Frontend production build was run from hotels_frontend and compiled successfully.
   - Frontend CRA test command has no test files in the repo; use --passWithNoTests for a non-watch smoke check.
   - git diff --check should remain clean apart from normal Windows LF-to-CRLF warnings.
+
+2026-06-08 Production Deployment Note - xhotelpro / jannat
+- Deployment:
+  - Local backend master was pushed through commit a26441a.
+  - Local frontend master was pushed through commit 853351f.
+  - Production host ssh jannat pulled /home/ahmedadmin/Hotels/hotels_backend and /home/ahmedadmin/Hotels/hotels_frontend with fast-forward updates.
+  - hotels_frontend package files did not change, so no dependency install was required. The production React build was regenerated and PM2 restarted hotels-backend and hotels-frontend.
+- Frontend build ownership fix:
+  - The existing production build directory was root-owned, so npm run build could not overwrite build/asset-manifest.json.
+  - A new build was generated with BUILD_PATH=build-next, then promoted to build. The active build directory is owned by ahmedadmin.
+  - A root-owned backup directory named build-root-owned-backup-before-853351f may remain on the production host until removed with sudo; it is ignored by git and not served.
+- Production chatbot pacing:
+  - Production .env had older slow AI_HUMAN_* overrides. These were tuned after deployment so the chatbot does not spend 15-20 seconds in artificial typing delays.
+  - Current production pacing: AI_HUMAN_GREET_THINK_MS=600, AI_HUMAN_THINK_MIN_MS=250, AI_HUMAN_THINK_MAX_MS=650, AI_HUMAN_TYPE_CHAR_MIN_MS=4, AI_HUMAN_TYPE_CHAR_MAX_MS=8, AI_HUMAN_TYPE_CLAMP_MIN_MS=900, AI_HUMAN_TYPE_CLAMP_MAX_MS=2500, AI_HUMAN_BETWEEN_SENDS_MIN_MS=250, AI_HUMAN_BETWEEN_SENDS_MAX_MS=650.
+  - AI_INSTANT_PROGRESS_ENABLED remains false and OPENAI_CHATBOT_REASONING_EFFORT remains medium, preserving one thoughtful human-like answer instead of noisy progress spam.
+- Production verification:
+  - PM2 showed hotels-backend and hotels-frontend online after restart.
+  - Backend logs showed aiagent initialized, socket-driven AI planner active, DB watcher enabled, server listening on port 8080, and MongoDB Atlas connected.
+  - Public checks returned 200 for https://xhotelpro.com, /admin/all-reservations, /api/currency-rates, and /socket.io/?EIO=4&transport=polling.
