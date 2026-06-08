@@ -435,7 +435,22 @@ const getActorScopedHotelObjectIds = (actor = {}) =>
 		...(Array.isArray(actor.hotelsToSupport) ? actor.hotelsToSupport : []),
 	]);
 
-const getAccessibleOverallHotels = async (actor = {}, query = {}) => {
+const OVERALL_HOTEL_FULL_SELECT =
+	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel xHotelProActive createdAt updatedAt";
+const OVERALL_HOTEL_COMPACT_SELECT =
+	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity activateHotel xHotelProActive createdAt updatedAt";
+const OVERALL_HOTEL_COMPACT_SECTIONS = new Set([
+	"reservations",
+	"pending",
+	"financials",
+]);
+
+const overallHotelSelectForSection = (section = "") =>
+	OVERALL_HOTEL_COMPACT_SECTIONS.has(section)
+		? OVERALL_HOTEL_COMPACT_SELECT
+		: OVERALL_HOTEL_FULL_SELECT;
+
+const getAccessibleOverallHotels = async (actor = {}, query = {}, section = "") => {
 	if (!actor?._id || actor.activeUser === false) return [];
 
 	let hotelFilter = {};
@@ -466,9 +481,7 @@ const getAccessibleOverallHotels = async (actor = {}, query = {}) => {
 	}
 
 	const hotels = await HotelDetails.find(hotelFilter)
-		.select(
-			"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel xHotelProActive createdAt updatedAt"
-		)
+		.select(overallHotelSelectForSection(section))
 		.populate("belongsTo", "_id name email phone")
 		.lean()
 		.exec();
@@ -582,7 +595,7 @@ const requireOverallSection = async (req, res, section) => {
 		res.status(403).json({ error: "You cannot view this overall section" });
 		return null;
 	}
-	const hotels = await getAccessibleOverallHotels(actor, req.query || {});
+	const hotels = await getAccessibleOverallHotels(actor, req.query || {}, section);
 	return { actor, hotels };
 };
 
@@ -1006,8 +1019,11 @@ const reservationLookupStages = () => [
 	{
 		$lookup: {
 			from: "hoteldetails",
-			localField: "hotelId",
-			foreignField: "_id",
+			let: { lookupHotelId: "$hotelId" },
+			pipeline: [
+				{ $match: { $expr: { $eq: ["$_id", "$$lookupHotelId"] } } },
+				{ $project: { _id: 1, hotelName: 1, belongsTo: 1 } },
+			],
 			as: "hotelDetails",
 		},
 	},

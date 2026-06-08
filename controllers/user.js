@@ -453,7 +453,7 @@ exports.userById = (req, res, next, id) => {
 
 	User.findById(id)
 		.select(USER_AUTH_SELECT)
-		.populate("hotelsToSupport")
+		.populate("hotelsToSupport", "_id hotelName hotelName_OtherLanguage belongsTo")
 		.exec((err, user) => {
 			if (err || !user) {
 				return res.status(400).json({ error: "User not found" });
