@@ -3,6 +3,7 @@ const {
 	getSupportCaseById,
 	updateSupportCaseAppend,
 	getHotelById,
+	getReservationByConfirmation,
 	listActivePublicHotels,
 	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
@@ -33,6 +34,12 @@ const {
 	createReservationForCase,
 	updateReservationDatesForCase,
 } = require("./actions");
+const {
+	isJannatBookingSupportCase,
+} = require("../../services/jannatBookingSupportScope");
+const {
+	waNotifyImmediateSupportEscalation,
+} = require("../../controllers/whatsappsender");
 
 const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
@@ -369,6 +376,13 @@ function logStep(caseId, message, payload = {}) {
 	}
 	console.log(`[aiagent] case=${caseId} ${message}`, payload);
 }
+
+const idText = (value) => String(value?._id || value?.id || value || "").trim();
+
+function activeHotelContextForCase(sc = {}, hotel = null) {
+	return isJannatBookingSupportCase(sc, hotel) ? null : hotel;
+}
+
 async function sleep(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
@@ -1017,6 +1031,112 @@ function selectedHotelOnlyReply(sc = {}, st = {}, userText = "") {
 	return `${name}, I can help with ${hotelName} only in this chat. I can check availability, another room type, or different dates at ${hotelName}.`;
 }
 
+function hotelComplaintText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(complain|complaint|bad experience|terrible|unsafe|dirty|unclean|rude|mistreat|overcharg|fraud|scam|not as described|no one helped|hotel problem|hotel issue|manager|staff issue)\b/i.test(
+			lower
+		) ||
+		/(?:شكوى|اشتك|مشكلة|سيئ|وسخ|غير\s+نظيف|مو\s+نظيف|غير\s+آمن|نصب|احتيال|تعامل\s+سيئ|موظف\s+سيئ|ادارة\s+الفندق|إدارة\s+الفندق)/i.test(
+			arabic
+		) ||
+		/(?:complain|complaint|badexperience|terrible|dirty|unclean|rude|scam|fraud|hotelproblem|hotelissue|shakwa|shakwaya|moshkela|mushkila|wese5|wasikh|naseb)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function jannatReservationHotelRedirectIntent(text = "", lu = {}, sc = {}) {
+	return (
+		looksLikeReservationDateUpdate(text, lu) ||
+		wantsPaymentHelp(text) ||
+		(explicitlyExistingReservationIntent(text) && wantsReservationHelp(text)) ||
+		(Boolean(latestKnownConfirmation(sc, lu)) && wantsReservationHelp(text))
+	);
+}
+
+function budgetFromText(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const matches = [...normalized.matchAll(/(?:budget|around|about|max|maximum|under|up to|less than|below|حدود|ميزانية|ميزانيتي|اقصى|أقصى|تحت)?\s*(\d{2,6})(?:\s*(?:sar|riyal|riyal|ريال))?/gi)]
+		.map((match) => Number(match[1]))
+		.filter((value) => Number.isFinite(value) && value >= 50);
+	if (!matches.length) return null;
+	return Math.max(...matches);
+}
+
+function sameId(a, b) {
+	const left = idText(a);
+	const right = idText(b);
+	return Boolean(left && right && left === right);
+}
+
+function platformHotelOptionQuickReplies(sc = {}, st = {}) {
+	const options = Array.isArray(st.platformHotelOptions)
+		? st.platformHotelOptions
+		: [];
+	const lang = languageOf(sc, st);
+	return options.slice(0, 3).map((option, index) => {
+		const number = index + 1;
+		let label = `Connect to ${option.hotelName}`;
+		if (/arabic/i.test(lang)) label = `تواصل مع ${option.hotelName}`;
+		if (/spanish/i.test(lang)) label = `Conectar con ${option.hotelName}`;
+		if (/french/i.test(lang)) label = `Contacter ${option.hotelName}`;
+		if (/urdu/i.test(lang)) label = `${option.hotelName} سے رابطہ`;
+		if (/hindi/i.test(lang)) label = `${option.hotelName} से जोड़ें`;
+		return {
+			label: label.slice(0, 80),
+			value: `Connect me to option ${number}: ${option.hotelName}`,
+			action: `connect_hotel_${number}`,
+		};
+	});
+}
+
+function parsePlatformHotelChoice(text = "", options = []) {
+	if (!options.length) return -1;
+	const { lower, latinCompact } = normalizeControlText(text);
+	const digit = lower.match(/\b([1-4])\b/);
+	if (digit) {
+		const index = Number(digit[1]) - 1;
+		return options[index] ? index : -1;
+	}
+	const actionDigit = lower.match(/connect\s+me\s+to\s+option\s+([1-4])/i);
+	if (actionDigit) {
+		const index = Number(actionDigit[1]) - 1;
+		return options[index] ? index : -1;
+	}
+	if (/^(yes|yes please|please|ok|okay|sure|connect|go ahead|proceed|book it|reserve it)\b/i.test(lower)) {
+		return options[0] ? 0 : -1;
+	}
+	const compact = latinCompact || lower.replace(/[^a-z0-9]/gi, "");
+	const byName = options.findIndex((option) => {
+		const name = String(option.hotelName || "").toLowerCase();
+		const nameCompact = name.replace(/[^a-z0-9]/gi, "");
+		return (
+			(name && lower.includes(name)) ||
+			(nameCompact && compact.includes(nameCompact))
+		);
+	});
+	return byName >= 0 ? byName : -1;
+}
+
+function chooseHotelHandoffAgentName(caseId = "", hotelId = "", current = "") {
+	const names = [
+		process.env.B2C_AI_HOTEL_HANDOFF_NAMES,
+		"Sara,Aisha,Amira,Yasmin,Nadia",
+	]
+		.flatMap((value) => String(value || "").split(","))
+		.map((name) => String(name || "").trim())
+		.filter(Boolean)
+		.filter((name, index, list) => list.indexOf(name) === index)
+		.filter((name) => name.toLowerCase() !== String(current || "").toLowerCase());
+	if (!names.length) return current || "Sara";
+	const seed = `${caseId}|${hotelId}`;
+	const index =
+		seed.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0) %
+		names.length;
+	return names[index];
+}
+
 function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
 	return (
 		room &&
@@ -1174,6 +1294,327 @@ async function buildHotelRecommendations({
 	)}\nSend check-in and checkout dates and I can check prices.`;
 }
 
+async function buildJannatBookingHotelOptions({
+	text,
+	sc,
+	st,
+	requestedRoomTypeKey = null,
+}) {
+	const selectedRoomTypeKey =
+		requestedRoomTypeKey ||
+		st.slots.roomTypeKey ||
+		mapRoomToKey(text) ||
+		"doubleRooms";
+	const hasDates = Boolean(st.slots.checkinISO && st.slots.checkoutISO);
+	const budget = budgetFromText(
+		[
+			text,
+			initialInquiryText(sc),
+			recentConversationLines(sc, st).slice(-3000),
+		].join("\n")
+	);
+	const hotels = await listActivePublicHotels();
+	const options = hotels
+		.filter(
+			(hotel) =>
+				hotel.aiToRespond === true &&
+				!isJannatBookingSupportCase({ hotelId: hotel._id }, hotel)
+		)
+		.map((hotel) => {
+			const room = (hotel.roomCountDetails || []).find((item) =>
+				roomMatches(item, selectedRoomTypeKey)
+			);
+			if (!room) return null;
+			const quote = hasDates
+				? safePriceRoomForStay(
+						hotel,
+						{ roomType: selectedRoomTypeKey },
+						st.slots.checkinISO,
+						st.slots.checkoutISO
+				  )
+				: null;
+			if (hasDates && !quote?.available) return null;
+			const total = Number(quote?.totals?.totalPriceWithCommission || 0);
+			const distanceScore =
+				firstNumber(hotel.distances?.walkingToElHaram || "") ||
+				firstNumber(hotel.distances?.drivingToElHaram || "") ||
+				999;
+			const budgetScore =
+				budget && total
+					? total <= budget
+						? Math.max(0, budget - total) / 1000
+						: 100 + (total - budget) / 100
+					: 0;
+			return {
+				hotelId: idText(hotel._id),
+				hotelName: toTitle(hotel.hotelName),
+				roomTypeKey: selectedRoomTypeKey,
+				roomLabel: room.displayName || roomTypeLabel(selectedRoomTypeKey),
+				walking: hotel.distances?.walkingToElHaram || "",
+				driving: hotel.distances?.drivingToElHaram || "",
+				url: publicHotelUrl(hotel.hotelName),
+				quote,
+				total,
+				currency: cleanCurrency(quote?.currency || hotel.currency || "SAR"),
+				nights: quote?.nights || 0,
+				_score: budgetScore + distanceScore,
+			};
+		})
+		.filter(Boolean)
+		.sort((a, b) => a._score - b._score || a.total - b.total)
+		.slice(0, 4);
+
+	st.platformHotelOptions = options;
+	st.slots.roomTypeKey = selectedRoomTypeKey;
+
+	const reply = await write(
+		null,
+		sc,
+		st,
+		hasDates
+			? "You are Jannat Booking concierge support. Recommend the best available hotel options from activeHotelOptions only, using totals/prices exactly as provided. Mention budget fit if budget is present. Be warm and helpful. Important: say Jannat Booking support can help compare options and pricing, but the official reservation confirmation and payment/details link must be completed by the selected hotel's support desk. End by asking which hotel they would like to connect with."
+			: "You are Jannat Booking concierge support. Recommend the active hotel options from activeHotelOptions only, focusing on fit and distance if available. Do not invent prices because stay dates are missing. Ask for check-in/check-out dates and approximate budget so you can compare properly. Mention that once they choose a hotel, that hotel's support desk will confirm the reservation and links.",
+		{
+			latestUserMessage: text,
+			requestedRoomType: selectedRoomTypeKey,
+			checkinISO: st.slots.checkinISO,
+			checkoutISO: st.slots.checkoutISO,
+			budget,
+			activeHotelOptions: options.map((option) => ({
+				hotelName: option.hotelName,
+				roomLabel: option.roomLabel,
+				walking: option.walking,
+				driving: option.driving,
+				total: option.total || null,
+				currency: option.currency,
+				nights: option.nights || null,
+				url: option.url,
+			})),
+		}
+	);
+	return {
+		reply,
+		options,
+		hasDates,
+	};
+}
+
+async function answerJannatBookingHotelOptions(
+	io,
+	sc,
+	st,
+	userText,
+	requestedRoomTypeKey = null
+) {
+	const result = await buildJannatBookingHotelOptions({
+		text: userText,
+		sc,
+		st,
+		requestedRoomTypeKey,
+	});
+	await humanSend(io, sc, st, result.reply, {
+		quickReplies: result.options.length
+			? platformHotelOptionQuickReplies(sc, st)
+			: [],
+	});
+	st.waitFor = result.options.length ? "platform_hotel_choice" : "dates";
+	return true;
+}
+
+async function connectJannatCaseToHotelSupport(
+	io,
+	sc,
+	st,
+	optionOrHotel,
+	{ reason = "new_reservation", confirmation = "", requestedDates = null } = {}
+) {
+	const caseId = String(sc._id);
+	const targetHotelId = idText(optionOrHotel?.hotelId || optionOrHotel?._id);
+	if (!targetHotelId) return false;
+	const hotel = optionOrHotel?.roomCountDetails
+		? optionOrHotel
+		: await getHotelById(targetHotelId);
+	if (!hotel) return false;
+	const hotelName = toTitle(hotel.hotelName || optionOrHotel.hotelName || "the hotel");
+	const conciergeText = await write(
+		io,
+		sc,
+		st,
+		"Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now. Reassure them that the selected hotel's team will handle the official confirmation and reservation/payment/details links. Keep it one warm sentence.",
+		{
+			hotelName,
+			reason,
+			confirmation,
+			requestedDates,
+			selectedOption: optionOrHotel,
+		}
+	);
+	await humanSend(
+		io,
+		sc,
+		st,
+		conciergeText ||
+			`Great, I will connect you with ${hotelName} support now so their team can handle the official confirmation and links.`
+	);
+
+	const nextAgentName = chooseHotelHandoffAgentName(
+		caseId,
+		targetHotelId,
+		st.agentName
+	);
+	st.hotel = hotel;
+	st.agentName = nextAgentName;
+	st.greeted = true;
+	sc.hotelId = hotel._id || targetHotelId;
+	sc.supportScope = "hotel";
+	sc.aiResponderName = nextAgentName;
+	if (optionOrHotel?.roomTypeKey) st.slots.roomTypeKey = optionOrHotel.roomTypeKey;
+	if (optionOrHotel?.quote?.available) {
+		st.quote = {
+			key: quoteKeyForSlots(st),
+			at: now(),
+			data: optionOrHotel.quote,
+		};
+	}
+
+	const updatedCase = await updateSupportCaseAppend(caseId, {
+		hotelId: hotel._id || targetHotelId,
+		supportScope: "hotel",
+		displayName2: hotelName,
+		targetUserName: hotelName,
+		aiResponderName: nextAgentName,
+		aiToRespond: true,
+		aiRelated: true,
+		aiHandoffReason: "",
+		aiPausedAt: null,
+	});
+	if (updatedCase) {
+		io.to(caseId).emit("supportCaseUpdated", updatedCase);
+		io.emit("supportCaseUpdated", updatedCase);
+	}
+
+	const introInstruction =
+		reason === "reservation_update"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
+			: reason === "payment_help"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
+			: reason === "reservation_support"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
+			: optionOrHotel?.quote?.available
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
+			: "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk and ask for check-in and checkout dates so you can confirm availability officially.";
+	const hotelIntro = await write(io, sc, st, introInstruction, {
+		hotelName,
+		agentName: nextAgentName,
+		selectedOption: optionOrHotel,
+		confirmation,
+		requestedDates,
+	});
+	await humanSend(io, sc, st, hotelIntro, {
+		quickReplies:
+			reason === "new_reservation" && optionOrHotel?.quote?.available
+				? proceedQuickReplies(sc, st)
+				: [],
+	});
+	st.waitFor =
+		reason === "reservation_update"
+			? "reservation_update_clarify"
+			: reason === "payment_help"
+			? "payment_reference"
+			: reason === "reservation_support"
+			? "reservation_reference"
+			: optionOrHotel?.quote?.available
+			? "proceed"
+			: "dates";
+	return true;
+}
+
+async function handlePlatformHotelChoice(io, sc, st, userText) {
+	const options = Array.isArray(st.platformHotelOptions)
+		? st.platformHotelOptions
+		: [];
+	if (!options.length) return false;
+	const index = parsePlatformHotelChoice(userText, options);
+	if (index < 0) {
+		await humanSend(
+			io,
+			sc,
+			st,
+			"Of course. Please choose one of the hotel options, and I will connect you with that hotel's support desk for the official confirmation.",
+			{ quickReplies: platformHotelOptionQuickReplies(sc, st) }
+		);
+		st.waitFor = "platform_hotel_choice";
+		return true;
+	}
+	return connectJannatCaseToHotelSupport(io, sc, st, options[index], {
+		reason: "new_reservation",
+	});
+}
+
+async function redirectJannatReservationToHotelSupport(
+	io,
+	sc,
+	st,
+	userText,
+	lu = {}
+) {
+	const confirmation = latestKnownConfirmation(sc, lu);
+	if (!confirmation) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest is asking Jannat Booking support about an existing reservation. Jannat Booking must connect them to the reservation hotel's support desk before updates, payment links, or reservation actions. Ask for the reservation confirmation number in one reassuring sentence.",
+			{ latestUserMessage: userText }
+		);
+		await humanSend(io, sc, st, reply);
+		st.waitFor = "jannat_reservation_reference";
+		return true;
+	}
+	const reservation = await getReservationByConfirmation(confirmation);
+	if (!reservation) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest sent a confirmation number but it was not found. Ask them to recheck it and send it again. Keep it short and reassuring.",
+			{ confirmation, latestUserMessage: userText }
+		);
+		await humanSend(io, sc, st, reply);
+		st.waitFor = "jannat_reservation_reference";
+		return true;
+	}
+	const hotelId = idText(reservation.hotelId);
+	const hotel = hotelId ? await getHotelById(hotelId) : null;
+	if (!hotel) {
+		await handoffToHuman(io, sc, st, "human_review_needed");
+		return true;
+	}
+	const requestedDates = latestTurnDateRange(userText, lu);
+	const reason = looksLikeReservationDateUpdate(userText, lu)
+		? "reservation_update"
+		: wantsPaymentHelp(userText)
+		? "payment_help"
+		: "reservation_support";
+	await connectJannatCaseToHotelSupport(io, sc, st, hotel, {
+		reason,
+		confirmation,
+		requestedDates,
+	});
+	if (
+		looksLikeReservationDateUpdate(userText, lu) &&
+		requestedDates.checkinISO &&
+		requestedDates.checkoutISO
+	) {
+		return finishReservationDateUpdate(io, sc, st, {
+			confirmation,
+			checkinISO: requestedDates.checkinISO,
+			checkoutISO: requestedDates.checkoutISO,
+		});
+	}
+	return true;
+}
+
 const memo = new Map();
 
 /* per case state incl. queue & preemption */
@@ -1231,7 +1672,8 @@ function ensureState(sc, hotel) {
 		};
 		memo.set(id, st);
 	} else {
-		if (hotel) st.hotel = hotel;
+		if (isJannatBookingSupportCase(sc, hotel)) st.hotel = null;
+		else if (hotel) st.hotel = hotel;
 		if (sc.aiResponderName) st.agentName = sc.aiResponderName;
 		if (!st.languageOverrideAt) {
 			st.language = preferredLanguageOf(sc) || st.language || "English";
@@ -2095,7 +2537,9 @@ async function handoffToHuman(io, sc, st, reason) {
 		? `the ${hotelName} support team`
 		: "the Jannat Booking support team";
 	let text =
-		reason === "reservation_cancellation"
+		reason === "jannat_hotel_complaint"
+			? `I am truly sorry this happened. Jannat Booking management will review this immediately, and action will be taken with the hotel team as needed.`
+			: reason === "reservation_cancellation"
 			? `I understand you want to cancel a reservation. ${humanTeam} will take over from here, because cancellations must be handled by a human specialist.`
 			: reason === "abusive_guest"
 			? `${humanTeam} will continue this conversation from here.`
@@ -2106,7 +2550,9 @@ async function handoffToHuman(io, sc, st, reason) {
 			: `I understand you want to update an existing reservation. ${humanTeam} will take over from here so the change is reviewed correctly.`;
 	if (/spanish/i.test(lang)) {
 		text =
-			reason === "reservation_cancellation"
+			reason === "jannat_hotel_complaint"
+				? "Lamento mucho lo ocurrido. La administracion de Jannat Booking revisara esto de inmediato y tomara accion con el hotel si es necesario."
+				: reason === "reservation_cancellation"
 				? "Entiendo que quieres cancelar una reserva. Un especialista de soporte tomara el chat desde aqui."
 				: reason === "abusive_guest"
 				? "Un especialista de soporte continuara esta conversacion desde aqui."
@@ -2115,7 +2561,9 @@ async function handoffToHuman(io, sc, st, reason) {
 				: "Entiendo tu solicitud de reserva. Un especialista de soporte tomara el chat para revisarla correctamente.";
 	} else if (/french/i.test(lang)) {
 		text =
-			reason === "reservation_cancellation"
+			reason === "jannat_hotel_complaint"
+				? "Je suis vraiment desole pour cette situation. La direction de Jannat Booking va l'examiner immediatement et prendre les mesures necessaires avec l'hotel."
+				: reason === "reservation_cancellation"
 				? "Je comprends que vous voulez annuler une reservation. Un specialiste du support va prendre le relais ici."
 				: reason === "abusive_guest"
 				? "Un specialiste du support va poursuivre cette conversation ici."
@@ -2138,6 +2586,8 @@ async function handoffToHuman(io, sc, st, reason) {
 			st,
 			reason === "abusive_guest"
 				? "The latest guest message is abusive or extremely rude. Do not argue, lecture, or mirror the language. Calmly state that a human support specialist will continue the conversation. Keep it one short sentence and do not ask another question."
+				: reason === "jannat_hotel_complaint"
+				? "The guest is making a complaint about a hotel or hotel experience through Jannat Booking support. Show sincere empathy, reassure them that Jannat Booking management has been urgently alerted, and say action will be taken with the hotel team as needed. Keep it professional, warm, and concise. Do not ask another question."
 				: "Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel support voice when hotel context exists, and do not ask another question.",
 			{ handoffReason: reason, fallbackText: text }
 		);
@@ -2185,6 +2635,19 @@ async function handoffToHuman(io, sc, st, reason) {
 		io.emit("supportCaseUpdated", updatedCase);
 		io.emit("supportCaseEscalated", escalationPayload);
 		io.emit("supportCaseEscalationUpdated", escalationPayload);
+	}
+	if (reason === "jannat_hotel_complaint") {
+		waNotifyImmediateSupportEscalation({
+			caseId,
+			guestName: sc.displayName1 || st.slots?.name || "Guest",
+			hotelName: hotelName || "Jannat Booking support",
+			reason,
+		}).catch((error) => {
+			console.error(
+				"[aiagent] support escalation WhatsApp failed:",
+				error?.message || error
+			);
+		});
 	}
 }
 
@@ -2308,7 +2771,7 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 				context,
 			}).slice(0, 2000),
 		].join("\n");
-		const activeHotelId = sc.hotelId?._id || sc.hotelId || st.hotel?._id || null;
+		const activeHotelId = st.hotel?._id || null;
 		const chats = await listRelevantTrainingChats({
 			hotelId: activeHotelId,
 			includeGlobal: !activeHotelId,
@@ -2575,11 +3038,11 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
 		hotelName
 			? `This chat is exclusively for "${hotelName}". When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Never recommend, link, name, compare, summarize, or imply knowledge of other hotels, even if the guest explicitly asks for alternatives. If the guest asks about other hotels, say this chat can only help with "${hotelName}" and offer to check dates or room types at "${hotelName}".`
-			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
+			: `When no active hotel context exists, you are Jannat Booking concierge support. You may recommend, compare, and price Jannat Booking hotel options using provided facts, but you must not create, confirm, mutate, cancel, or payment-link a reservation. Official reservation confirmation, details/payment links, and existing-reservation updates must be handled only after connecting the guest to the selected hotel's support desk.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		hotelName
 			? `Help with date-range pricing, room options, payment questions, and reservation triage for "${hotelName}" only.`
-			: `Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
+			: `Help with date-range hotel pricing, budget-aware hotel options near Al Haram, hotel complaints, and routing payment/reservation triage to the correct hotel support desk.`,
 		`Do not mention discounts, coupons, promos, offers, or before-discount prices unless the latest guest message explicitly asks about them.`,
 		hotelName
 			? `Use only URLs supplied in context for "${hotelName}", its reservation, or its payment flow. Never use public hotel recommendation links or links for another hotel in this active hotel chat. Never invent routes, payment links, reservation links, or admin/PMS links.`
@@ -3282,6 +3745,21 @@ async function handleReservationUpdateRequest(
 }
 
 async function finalizeReservationForGuest(io, sc, st, caseId) {
+	if (!st.hotel) {
+		if (Array.isArray(st.platformHotelOptions) && st.platformHotelOptions.length) {
+			st.waitFor = "platform_hotel_choice";
+			await humanSend(
+				io,
+				sc,
+				st,
+				"Jannat Booking support can help you choose the best option, and the hotel support desk will complete the official reservation and links. Please choose a hotel option so I can connect you.",
+				{ quickReplies: platformHotelOptionQuickReplies(sc, st) }
+			);
+			return true;
+		}
+		await answerJannatBookingHotelOptions(io, sc, st, lastUserText(sc));
+		return true;
+	}
 	if (!hasMandatoryReservationDetails(st)) {
 		st.waitFor = "reservation_details";
 		await askForReservationDetail(io, sc, st, st.waitFor);
@@ -3723,7 +4201,8 @@ async function planTurn(io, sc) {
 		logStep(caseId, "policy.skip", { reason: policy.reason });
 		return;
 	}
-	const hotel = policy.hotel || (await getHotelById(sc.hotelId));
+	const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+	const hotel = activeHotelContextForCase(sc, policyHotel);
 	const st = ensureState(sc, hotel);
 	if (st.turnInFlight) {
 		logStep(caseId, "turn.enqueue", {
@@ -3754,6 +4233,23 @@ async function planTurn(io, sc) {
 				st.greetScheduled = true;
 				st.greeted = true;
 				const initialInquiry = initialInquiryText(sc);
+				if (!st.hotel && hotelComplaintText(initialInquiry)) {
+					await handoffToHuman(io, sc, st, "jannat_hotel_complaint");
+					return;
+				}
+				if (
+					!st.hotel &&
+					jannatReservationHotelRedirectIntent(initialInquiry, {}, sc)
+				) {
+					await redirectJannatReservationToHotelSupport(
+						io,
+						sc,
+						st,
+						initialInquiry,
+						{}
+					);
+					return;
+				}
 				const greeting = await write(
 					io,
 					sc,
@@ -3792,6 +4288,22 @@ async function planTurn(io, sc) {
 		}
 
 		hydrateKnownSlotsFromConversation(sc, st);
+		if (!st.hotel && hotelComplaintText(userText)) {
+			await handoffToHuman(io, sc, st, "jannat_hotel_complaint");
+			return;
+		}
+		if (!st.hotel && st.waitFor === "platform_hotel_choice") {
+			const handled = await handlePlatformHotelChoice(io, sc, st, userText);
+			if (handled) return;
+		}
+		if (
+			!st.hotel &&
+			st.waitFor === "jannat_reservation_reference" &&
+			(latestKnownConfirmation(sc, {}) || wantsReservationHelp(userText))
+		) {
+			await redirectJannatReservationToHotelSupport(io, sc, st, userText, {});
+			return;
+		}
 		if (st.waitFor === "reservation_update_option") {
 			const handled = await handlePendingReservationUpdateChoice(
 				io,
@@ -3874,6 +4386,20 @@ async function planTurn(io, sc) {
 			lastUserMessage: userText,
 		});
 		logStep(caseId, "nlu.decision", decisionLu);
+
+		if (
+			!st.hotel &&
+			jannatReservationHotelRedirectIntent(userText, decisionLu, sc)
+		) {
+			await redirectJannatReservationToHotelSupport(
+				io,
+				sc,
+				st,
+				userText,
+				decisionLu
+			);
+			return;
+		}
 
 		if (decisionLu?.dates?.raw) {
 			if (decisionLu.dates.raw.checkin)
@@ -3958,7 +4484,17 @@ async function planTurn(io, sc) {
 				checkoutISO: st.slots.checkoutISO,
 				roomTypeKey: st.slots.roomTypeKey,
 			});
-			await shareKnownStayQuote(io, sc, st);
+			if (st.hotel) {
+				await shareKnownStayQuote(io, sc, st);
+			} else {
+				await answerJannatBookingHotelOptions(
+					io,
+					sc,
+					st,
+					userText,
+					st.slots.roomTypeKey
+				);
+			}
 			return;
 		}
 
@@ -4002,6 +4538,16 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_update") {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
 			const handled = await handleReservationUpdateRequest(
 				io,
 				sc,
@@ -4061,15 +4607,13 @@ async function planTurn(io, sc) {
 				return;
 			}
 			const recommendationRoomTypeKey = roomTypeKey || "doubleRooms";
-			const reply = await buildHotelRecommendations({
-				text: userText,
+			await answerJannatBookingHotelOptions(
+				io,
 				sc,
 				st,
-				requestedRoomTypeKey: recommendationRoomTypeKey,
-			});
-			st.slots.roomTypeKey = recommendationRoomTypeKey;
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+				userText,
+				recommendationRoomTypeKey
+			);
 			return;
 		}
 
@@ -4080,7 +4624,17 @@ async function planTurn(io, sc) {
 			st.slots.checkoutISO &&
 			st.slots.roomTypeKey
 		) {
-			await shareKnownStayQuote(io, sc, st);
+			if (st.hotel) {
+				await shareKnownStayQuote(io, sc, st);
+			} else {
+				await answerJannatBookingHotelOptions(
+					io,
+					sc,
+					st,
+					userText,
+					st.slots.roomTypeKey
+				);
+			}
 			return;
 		}
 
@@ -4098,6 +4652,16 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "payment_help") {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
 			const knownConfirmation = latestKnownConfirmation(sc, decisionLu);
 			const reply = await write(
 				io,
@@ -4112,6 +4676,16 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_lookup") {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
 			const knownConfirmation = latestKnownConfirmation(sc, decisionLu);
 			const reply = await write(
 				io,
@@ -4160,6 +4734,16 @@ async function planTurn(io, sc) {
 		const handoffReason = humanHandoffReason(userText);
 		if (handoffReason) {
 			if (handoffReason === "reservation_update") {
+				if (!st.hotel) {
+					await redirectJannatReservationToHotelSupport(
+						io,
+						sc,
+						st,
+						userText,
+						decisionLu
+					);
+					return;
+				}
 				const handled = await handleReservationUpdateRequest(
 					io,
 					sc,
@@ -4189,14 +4773,9 @@ async function planTurn(io, sc) {
 				);
 				return;
 			}
-			const reply = await buildHotelRecommendations({ text: userText, sc, st });
-			st.slots.roomTypeKey = /triple|ثلاث|triple/i.test(userText)
-				? "tripleRooms"
-				: /quad|رباع|quad/i.test(userText)
-				? "quadRooms"
-				: "doubleRooms";
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+			const roomTypeKey =
+				decisionLu.roomTypeKey || mapRoomToKey(userText) || st.slots.roomTypeKey || null;
+			await answerJannatBookingHotelOptions(io, sc, st, userText, roomTypeKey);
 			return;
 		}
 		if (wantsPriceButMissingDates(userText, st)) {
@@ -4212,6 +4791,16 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (wantsPaymentHelp(userText)) {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
 			const knownConfirmation = latestKnownConfirmation(sc, {});
 			const reply = await write(
 				io,
@@ -4232,6 +4821,16 @@ async function planTurn(io, sc) {
 				!explicitlyExistingReservationIntent(userText)
 			)
 		) {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
 			const knownConfirmation = latestKnownConfirmation(sc, {});
 			const reply = await write(
 				io,
@@ -4252,7 +4851,17 @@ async function planTurn(io, sc) {
 		) {
 			st.slots.checkinISO = dateRange.checkinISO;
 			st.slots.checkoutISO = dateRange.checkoutISO;
-			await shareKnownStayQuote(io, sc, st);
+			if (st.hotel) {
+				await shareKnownStayQuote(io, sc, st);
+			} else {
+				await answerJannatBookingHotelOptions(
+					io,
+					sc,
+					st,
+					userText,
+					st.slots.roomTypeKey
+				);
+			}
 			return;
 		}
 		const lu = await nluStep({
@@ -4442,6 +5051,17 @@ async function planTurn(io, sc) {
 				stampAsk(st, "room");
 			}
 			st.waitFor = "room";
+			return;
+		}
+
+		if (!st.hotel) {
+			await answerJannatBookingHotelOptions(
+				io,
+				sc,
+				st,
+				userText,
+				st.slots.roomTypeKey
+			);
 			return;
 		}
 
@@ -4986,7 +5606,8 @@ function wireSocket(io) {
 					logStep(caseId, "join.policy.skip", { reason: policy.reason });
 					return;
 				}
-				const hotel = policy.hotel || (await getHotelById(sc.hotelId));
+				const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+				const hotel = activeHotelContextForCase(sc, policyHotel);
 				const st = ensureState(sc, hotel);
 				logStep(caseId, "joined_room", {
 					hotelId: sc.hotelId,

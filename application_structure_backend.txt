@@ -2357,6 +2357,26 @@ Future TODO Backlog - Added 2026-05-26
   - aiagent/core/db.js now scopes previous guest support chats by the active hotel when a hotelId exists, even when the guest email/user id matches cases from other hotels.
   - listRelevantTrainingChats supports includeGlobal=false; active hotel chats pass includeGlobal=false so employee-learning examples come only from that same hotel. Platform/global recommendation chats without an active hotel may still use global learning.
 - Maintenance requirements:
-  - Do not add new chatbot branches that call listActivePublicHotels, publicHotelUrl, or platform recommendation copy while st.hotel is present.
-  - Do not pass cross-hotel previous chats or other-hotel learning examples into active hotel prompts.
-  - Hotel-scoped AI can still help dynamically with availability, pricing, same-hotel room alternatives, date changes, payment links, and reservation triage for the active hotel.
+ - Do not add new chatbot branches that call listActivePublicHotels, publicHotelUrl, or platform recommendation copy while st.hotel is present.
+ - Do not pass cross-hotel previous chats or other-hotel learning examples into active hotel prompts.
+ - Hotel-scoped AI can still help dynamically with availability, pricing, same-hotel room alternatives, date changes, payment links, and reservation triage for the active hotel.
+
+2026-06-08 Jannat Booking Concierge Support Exception
+- Scope:
+  - "Speak With Jannat Booking" is the only B2C chatbot context allowed to recommend, compare, and price hotels across the platform.
+  - This concierge context must not create, confirm, mutate, cancel, or payment-link reservations itself.
+  - Official reservation confirmation, payment/details links, and existing-reservation updates must happen only after the case is connected to the selected/reservation hotel's support scope.
+- Backend enforcement:
+  - services/jannatBookingSupportScope.js identifies the public widget's Jannat Booking support selector by supportScope and the configured/special support hotel id.
+  - aiagent/core/policy.js allows AI for Jannat Booking support even though it is not a normal hotel-support context.
+  - aiagent/core/orchestrator.js treats Jannat Booking support as platform concierge with no active st.hotel, builds budget-aware cross-hotel options, stores platformHotelOptions, and sends quick replies to connect the guest to a hotel support desk.
+  - Once a guest chooses a hotel option, the same support case is updated to supportScope="hotel", hotelId=<selected hotel>, displayName2=<hotel name>, and a new hotel AI responder name so the guest stays in the same chat while the hotel bot takes over.
+  - Existing-reservation update, payment, and reservation lookup requests in Jannat Booking support are routed by confirmation number to the reservation hotel before any update/payment flow proceeds.
+  - finalizeReservationForGuest has a no-hotel guard so Jannat Booking support cannot save a reservation before hotel handoff.
+- Complaint escalation:
+  - Hotel complaint / urgent issue messages in Jannat Booking support immediately pause AI, mark escalationStatus="active", reassure the guest, emit the normal support-case escalation socket events, and send a best-effort WhatsApp admin notification.
+  - controllers/whatsappsender.js exports waNotifyImmediateSupportEscalation and uses JANNAT_SUPPORT_ESCALATION_WHATSAPP / REACT_APP_JANNAT_SUPPORT_ESCALATION_WHATSAPP or default 9092223374.
+- Maintenance requirements:
+  - Keep the strict hotel-only rule for real hotel support cases.
+  - Do not let Jannat Booking concierge support call createReservationForCase or updateReservationDatesForCase before connectJannatCaseToHotelSupport changes the case into hotel scope.
+  - Cross-hotel hotel recommendation links/options are allowed only while st.hotel is absent and the case is Jannat Booking support.

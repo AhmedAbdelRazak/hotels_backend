@@ -129,6 +129,11 @@ const supportCaseSchema = new Schema({
 		type: String,
 		default: "en",
 	},
+	supportScope: {
+		type: String,
+		enum: ["", "jannat_booking", "hotel"],
+		default: "",
+	},
 	clientName: {
 		type: String,
 		default: "",

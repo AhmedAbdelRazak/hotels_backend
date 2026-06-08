@@ -85,7 +85,7 @@ async function listActivePublicHotels() {
 		},
 	})
 		.select(
-			"_id hotelName hotelName_OtherLanguage hotelCity distances roomCountDetails currency"
+			"_id hotelName hotelName_OtherLanguage hotelCity distances roomCountDetails currency aiToRespond"
 		)
 		.lean()
 		.exec();

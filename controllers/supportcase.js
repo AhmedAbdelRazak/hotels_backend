@@ -5,6 +5,9 @@ const sgMail = require("@sendgrid/mail");
 const { newSupportCaseEmail } = require("./assets");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
+const {
+	isJannatBookingSupportCase,
+} = require("../services/jannatBookingSupportScope");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1023,6 +1026,7 @@ exports.createNewSupportCase = async (req, res) => {
 			targetUserRole,
 			preferredLanguage,
 			preferredLanguageCode,
+			supportScope,
 		} = req.body;
 
 		console.log(req.body.displayName1, "displayName1");
@@ -1074,9 +1078,20 @@ exports.createNewSupportCase = async (req, res) => {
 				hotelName = hotelDoc.hotelName;
 			}
 		}
+		const isJannatSupportCase = isJannatBookingSupportCase(
+			{
+				hotelId,
+				supportScope,
+				displayName2,
+				hotelName,
+			},
+			hotelDoc
+		);
 		const aiEnabledForClient =
 			openedBy === "client" &&
-			(Boolean(hotelDoc?.aiToRespond) || isAiForceRespondEnabled());
+			(isJannatSupportCase ||
+				Boolean(hotelDoc?.aiToRespond) ||
+				isAiForceRespondEnabled());
 		const aiResponderName = aiEnabledForClient
 			? await pickB2CAiResponderName({
 					customerName,
@@ -1153,6 +1168,7 @@ exports.createNewSupportCase = async (req, res) => {
 			clientContactType: clientContactType(normalizedCustomerEmail),
 			preferredLanguage: preferredLanguage || "English",
 			preferredLanguageCode: preferredLanguageCode || "en",
+			supportScope: isJannatSupportCase ? "jannat_booking" : "hotel",
 			aiToRespond: aiEnabledForClient,
 			aiResponderName,
 			aiRelated: aiEnabledForClient,

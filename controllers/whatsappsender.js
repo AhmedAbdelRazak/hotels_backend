@@ -725,6 +725,43 @@ async function waNotifyNewReservation(reservation) {
 	return out;
 }
 
+async function waNotifyImmediateSupportEscalation({
+	caseId,
+	guestName,
+	hotelName,
+	reason,
+} = {}) {
+	const rawPhone =
+		process.env.JANNAT_SUPPORT_ESCALATION_WHATSAPP ||
+		process.env.REACT_APP_JANNAT_SUPPORT_ESCALATION_WHATSAPP ||
+		"9092223374";
+	const toE164 = await ensureE164Phone({
+		nationality: "SA",
+		rawPhone,
+		fallbackRegion: "SA",
+	});
+	if (!toE164) {
+		warn("waNotifyImmediateSupportEscalation: skipped invalid admin phone.", {
+			phone: redactPhone(rawPhone),
+			caseId,
+		});
+		return { skipped: true, reason: "invalid_admin_phone" };
+	}
+	return sendTemplate({
+		toE164,
+		contentSid: TPL.ADMIN_NOTIFICATION,
+		variables: {
+			1: "Jannat Admin",
+			2: `Support case ${caseId || "N/A"} - ${String(
+				hotelName || "Jannat Booking"
+			).slice(0, 60)} - ${String(guestName || "Guest").slice(0, 40)} - ${String(
+				reason || "urgent complaint"
+			).slice(0, 80)}`,
+		},
+		tag: "support_escalation_immediate",
+	});
+}
+
 async function waSendResetPasswordLink(userLike, resetUrl) {
 	log("waSendResetPasswordLink: start", {
 		userId: userLike?._id,
@@ -767,6 +804,7 @@ module.exports = {
 	waSendPaymentLinkToNumber,
 	waSendReservationUpdate,
 	waNotifyNewReservation,
+	waNotifyImmediateSupportEscalation,
 
 	waSendResetPasswordLink,
 };
