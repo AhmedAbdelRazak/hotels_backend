@@ -93,6 +93,196 @@ const stripAgentRoomOverrides = (hotel = {}) => {
 	return plain;
 };
 
+const PUBLIC_HOTEL_CACHE_TTL_MS = 60 * 1000;
+const PUBLIC_HOTEL_CACHE_MAX_KEYS = 80;
+const publicHotelResponseCache = new Map();
+
+const PUBLIC_HOTEL_LIST_SELECT = [
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelCountry",
+	"hotelState",
+	"hotelCity",
+	"hotelAddress",
+	"distances",
+	"hotelPhotos",
+	"hotelRating",
+	"location",
+	"commission",
+	"belongsTo",
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.count",
+	"roomCountDetails.price",
+	"roomCountDetails.photos",
+	"roomCountDetails.displayName",
+	"roomCountDetails.displayName_OtherLanguage",
+	"roomCountDetails.description",
+	"roomCountDetails.description_OtherLanguage",
+	"roomCountDetails.amenities",
+	"roomCountDetails.views",
+	"roomCountDetails.extraAmenities",
+	"roomCountDetails.roomColor",
+	"roomCountDetails.activeRoom",
+	"roomCountDetails.refundPolicyDays",
+	"roomCountDetails.roomSize",
+	"roomCountDetails.defaultCost",
+	"roomCountDetails.roomCommission",
+	"roomCountDetails.bedsCount",
+	"roomCountDetails.roomForGender",
+].join(" ");
+
+const publicCacheGet = (key) => {
+	const hit = publicHotelResponseCache.get(key);
+	if (!hit) return null;
+	if (Date.now() > hit.expiresAt) {
+		publicHotelResponseCache.delete(key);
+		return null;
+	}
+	return hit.value;
+};
+
+const publicCacheSet = (key, value) => {
+	if (publicHotelResponseCache.size >= PUBLIC_HOTEL_CACHE_MAX_KEYS) {
+		const oldestKey = publicHotelResponseCache.keys().next().value;
+		if (oldestKey) publicHotelResponseCache.delete(oldestKey);
+	}
+	publicHotelResponseCache.set(key, {
+		value,
+		expiresAt: Date.now() + PUBLIC_HOTEL_CACHE_TTL_MS,
+	});
+};
+
+const setPublicHotelCacheHeaders = (res) => {
+	res.setHeader("Cache-Control", "public, max-age=60, s-maxage=120");
+};
+
+const parseTimeToMinutes = (timeStr) => {
+	if (!timeStr || typeof timeStr !== "string") return Infinity;
+
+	let totalMinutes = 0;
+	const dayMatch = timeStr.match(/(\d+)\s*day[s]?/i);
+	const hourMatch = timeStr.match(/(\d+)\s*hour[s]?/i);
+	const minMatch = timeStr.match(/(\d+)\s*min[s]?/i);
+
+	if (dayMatch) totalMinutes += parseInt(dayMatch[1], 10) * 1440;
+	if (hourMatch) totalMinutes += parseInt(hourMatch[1], 10) * 60;
+	if (minMatch) totalMinutes += parseInt(minMatch[1], 10);
+
+	return totalMinutes;
+};
+
+const sortPublicHotels = (hotels = []) =>
+	[...hotels].sort((a, b) => {
+		if ((b.hotelRating || 0) !== (a.hotelRating || 0)) {
+			return (b.hotelRating || 0) - (a.hotelRating || 0);
+		}
+		return (
+			parseTimeToMinutes(a.distances?.walkingToElHaram) -
+			parseTimeToMinutes(b.distances?.walkingToElHaram)
+		);
+	});
+
+const compactArray = (value = [], limit = 8) =>
+	Array.isArray(value) ? value.filter(Boolean).slice(0, limit) : [];
+
+const compactPricingRate = (pricingRate = [], startDate, endDate) => {
+	if (!Array.isArray(pricingRate)) return [];
+	if (!startDate || !endDate) return [];
+
+	return pricingRate
+		.filter((rate) => {
+			const dateKey = String(rate?.calendarDate || "").slice(0, 10);
+			return dateKey && dateKey >= startDate && dateKey < endDate;
+		})
+		.map((rate) => ({
+			calendarDate: rate.calendarDate,
+			room_type: rate.room_type,
+			price: rate.price,
+			rootPrice: rate.rootPrice,
+			commissionRate: rate.commissionRate,
+			color: rate.color,
+		}));
+};
+
+const compactPublicRoom = (
+	room = {},
+	{ includePricingRate = false, startDate, endDate } = {},
+) => ({
+	_id: room._id,
+	roomType: room.roomType,
+	count: room.count,
+	price: room.price || { basePrice: 0 },
+	photos: compactArray(room.photos, 8),
+	displayName: room.displayName,
+	displayName_OtherLanguage: room.displayName_OtherLanguage,
+	description: room.description,
+	description_OtherLanguage: room.description_OtherLanguage,
+	amenities: compactArray(room.amenities, 40),
+	views: compactArray(room.views, 20),
+	extraAmenities: compactArray(room.extraAmenities, 20),
+	pricingRate: includePricingRate
+		? compactPricingRate(room.pricingRate, startDate, endDate)
+		: [],
+	roomColor: room.roomColor,
+	activeRoom: room.activeRoom,
+	refundPolicyDays: room.refundPolicyDays,
+	roomSize: room.roomSize,
+	defaultCost: room.defaultCost,
+	roomCommission: room.roomCommission,
+	bedsCount: room.bedsCount,
+	roomForGender: room.roomForGender,
+});
+
+const isPublicRoomVisible = (room = {}, roomType = "all") => {
+	const matchesRoomType = roomType === "all" || room.roomType === roomType;
+	return (
+		matchesRoomType &&
+		room.activeRoom === true &&
+		Number(room?.price?.basePrice || 0) > 0 &&
+		Array.isArray(room.photos) &&
+		room.photos.length > 0
+	);
+};
+
+const compactPublicHotel = (
+	hotel = {},
+	{ includePricingRate = false, startDate, endDate, roomType = "all" } = {},
+) => ({
+	_id: hotel._id,
+	hotelName: hotel.hotelName,
+	hotelName_OtherLanguage: hotel.hotelName_OtherLanguage,
+	hotelCountry: hotel.hotelCountry,
+	hotelState: hotel.hotelState,
+	hotelCity: hotel.hotelCity,
+	hotelAddress: hotel.hotelAddress,
+	distances: hotel.distances,
+	hotelPhotos: compactArray(hotel.hotelPhotos, 8),
+	hotelRating: hotel.hotelRating,
+	location: hotel.location,
+	commission: hotel.commission,
+	belongsTo: hotel.belongsTo,
+	roomCountDetails: compactArray(hotel.roomCountDetails, 80)
+		.filter((room) => isPublicRoomVisible(room, roomType))
+		.map((room) =>
+			compactPublicRoom(room, {
+				includePricingRate,
+				startDate,
+				endDate,
+			}),
+		),
+});
+
+const sendCachedPublicJson = async (req, res, cacheKey, loader) => {
+	setPublicHotelCacheHeaders(res);
+	const cached = publicCacheGet(cacheKey);
+	if (cached) return res.status(200).json(cached);
+
+	const value = await loader();
+	publicCacheSet(cacheKey, value);
+	return res.status(200).json(value);
+};
+
 const parseBooleanFlag = (value) =>
 	value === true || value === "true" || value === 1 || value === "1";
 
@@ -229,20 +419,30 @@ exports.list = (req, res) => {
 
 exports.listOfAllActiveHotels = async (req, res) => {
 	try {
-		const activeHotels = await HotelDetails.find({
-			activateHotel: true,
-			xHotelProActive: { $ne: false },
-			hotelPhotos: { $exists: true, $not: { $size: 0 } },
-			"location.coordinates": { $ne: [0, 0] },
-			roomCountDetails: {
-				$elemMatch: {
-					"price.basePrice": { $gt: 0 },
-					photos: { $exists: true, $not: { $size: 0 } },
+		return sendCachedPublicJson(req, res, "active-hotels", async () => {
+			const activeHotels = await HotelDetails.find({
+				activateHotel: true,
+				xHotelProActive: { $ne: false },
+				hotelPhotos: { $exists: true, $not: { $size: 0 } },
+				"location.coordinates": { $ne: [0, 0] },
+				roomCountDetails: {
+					$elemMatch: {
+						activeRoom: true,
+						"price.basePrice": { $gt: 0 },
+						photos: { $exists: true, $not: { $size: 0 } },
+					},
 				},
-			},
-		});
+			})
+				.select(PUBLIC_HOTEL_LIST_SELECT)
+				.lean()
+				.exec();
 
-		res.json(activeHotels.map(stripAgentRoomOverrides));
+			return sortPublicHotels(
+				activeHotels
+					.map((hotel) => compactPublicHotel(hotel))
+					.filter((hotel) => hotel.roomCountDetails.length > 0),
+			);
+		});
 	} catch (err) {
 		console.error(err);
 		res
@@ -395,45 +595,44 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 
 exports.distinctRoomTypes = async (req, res) => {
 	try {
-		const activeHotels = await HotelDetails.find({
-			activateHotel: true,
-			xHotelProActive: { $ne: false },
-			hotelPhotos: { $exists: true, $not: { $size: 0 } },
-			"location.coordinates": { $ne: [0, 0] },
-			roomCountDetails: {
-				$elemMatch: {
-					"price.basePrice": { $gt: 0 },
-					photos: { $exists: true, $not: { $size: 0 } },
+		return sendCachedPublicJson(req, res, "distinct-rooms", async () => {
+			const activeHotels = await HotelDetails.find({
+				activateHotel: true,
+				xHotelProActive: { $ne: false },
+				hotelPhotos: { $exists: true, $not: { $size: 0 } },
+				"location.coordinates": { $ne: [0, 0] },
+				roomCountDetails: {
+					$elemMatch: {
+						activeRoom: true,
+						"price.basePrice": { $gt: 0 },
+						photos: { $exists: true, $not: { $size: 0 } },
+					},
 				},
-			},
-		});
+			})
+				.select(
+					"roomCountDetails._id roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.price roomCountDetails.photos roomCountDetails.activeRoom",
+				)
+				.lean()
+				.exec();
 
-		// Extract distinct room types, display names, and _id
-		let roomTypes = [];
-		activeHotels.forEach((hotel) => {
-			hotel.roomCountDetails.forEach((room) => {
-				if (room.price.basePrice > 0 && room.photos.length > 1) {
+			const seen = new Set();
+			const roomTypes = [];
+			activeHotels.forEach((hotel) => {
+				(hotel.roomCountDetails || []).forEach((room) => {
+					if (!isPublicRoomVisible(room)) return;
+					const key = `${room.roomType || ""}:${room.displayName || ""}`;
+					if (seen.has(key)) return;
+					seen.add(key);
 					roomTypes.push({
 						roomType: room.roomType,
 						displayName: room.displayName,
 						_id: room._id,
 					});
-				}
+				});
 			});
+
+			return roomTypes;
 		});
-
-		// Remove duplicates
-		roomTypes = roomTypes.filter(
-			(value, index, self) =>
-				index ===
-				self.findIndex(
-					(t) =>
-						t.roomType === value.roomType &&
-						t.displayName === value.displayName,
-				),
-		);
-
-		res.json(roomTypes);
 	} catch (err) {
 		console.error(err);
 		res
@@ -505,65 +704,44 @@ exports.getHotelFromSlug = async (req, res) => {
 
 exports.getListOfHotels = async (req, res) => {
 	try {
-		// Find all hotels where:
-		// 1. hotelPhotos exist and is not empty
-		// 2. activateHotel is true
-		// 3. location coordinates are not [0, 0]
-		const hotels = await HotelDetails.find({
-			hotelPhotos: { $exists: true, $not: { $size: 0 } },
-			activateHotel: true,
-			xHotelProActive: { $ne: false },
-			"location.coordinates": { $ne: [0, 0] },
-		});
+		return sendCachedPublicJson(req, res, "active-hotel-list", async () => {
+			const hotels = await HotelDetails.find({
+				hotelPhotos: { $exists: true, $not: { $size: 0 } },
+				activateHotel: true,
+				xHotelProActive: { $ne: false },
+				"location.coordinates": { $ne: [0, 0] },
+				roomCountDetails: {
+					$elemMatch: {
+						activeRoom: true,
+						"price.basePrice": { $gt: 0 },
+						photos: { $exists: true, $not: { $size: 0 } },
+					},
+				},
+			})
+				.select(PUBLIC_HOTEL_LIST_SELECT)
+				.lean()
+				.exec();
 
-		if (!hotels.length) {
+			const publicHotels = sortPublicHotels(
+				hotels
+					.map((hotel) => compactPublicHotel(hotel))
+					.filter((hotel) => hotel.roomCountDetails.length > 0),
+			);
+
+			if (!publicHotels.length) {
+				const error = new Error("No hotels found with the specified criteria.");
+				error.statusCode = 404;
+				throw error;
+			}
+
+			return publicHotels;
+		});
+	} catch (error) {
+		if (error.statusCode === 404) {
 			return res.status(404).json({
-				message: "No hotels found with the specified criteria.",
+				message: error.message,
 			});
 		}
-
-		// Enhanced function to parse time strings and convert them to total minutes
-		const parseTimeToMinutes = (timeStr) => {
-			if (!timeStr || typeof timeStr !== "string") return Infinity;
-
-			let totalMinutes = 0;
-			const dayMatch = timeStr.match(/(\d+)\s*day[s]?/i);
-			const hourMatch = timeStr.match(/(\d+)\s*hour[s]?/i);
-			const minMatch = timeStr.match(/(\d+)\s*min[s]?/i);
-
-			if (dayMatch) totalMinutes += parseInt(dayMatch[1], 10) * 1440; // 1 day = 1440 minutes
-			if (hourMatch) totalMinutes += parseInt(hourMatch[1], 10) * 60; // 1 hour = 60 minutes
-			if (minMatch) totalMinutes += parseInt(minMatch[1], 10); // minutes
-
-			return totalMinutes;
-		};
-
-		// Sort hotels by hotelRating (highest to lowest) and then by walkingToElHaram distance
-		const sortedHotels = hotels.sort((a, b) => {
-			// Parse walking times
-			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
-			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
-
-			// Sort by hotelRating first (descending order), then by walking distance (ascending order)
-			if (b.hotelRating !== a.hotelRating) {
-				return b.hotelRating - a.hotelRating; // Descending order for hotelRating
-			}
-			return aWalkingTime - bWalkingTime; // Ascending order for walking distance
-		});
-
-		// Log sorted hotels for debugging
-		// console.log(
-		// 	"Sorted Hotels:",
-		// 	sortedHotels.map((hotel) => ({
-		// 		name: hotel.hotelName,
-		// 		rating: hotel.hotelRating,
-		// 		walkingTime: hotel.distances?.walkingToElHaram,
-		// 	}))
-		// );
-
-		// Send the sorted hotels as the response
-		res.status(200).json(sortedHotels.map(stripAgentRoomOverrides));
-	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
 			error: "An error occurred while fetching hotels.",
@@ -734,16 +912,6 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 		const [startDate, endDate, roomType, adults, children, destination] =
 			query.split("_");
 
-		// Log extracted parameters
-		console.log("Extracted Parameters:", {
-			startDate,
-			endDate,
-			roomType,
-			adults,
-			children,
-			destination,
-		});
-
 		// Validate the extracted parameters
 		if (!startDate || !endDate || !roomType || !adults) {
 			return res.status(400).json({
@@ -751,131 +919,155 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 			});
 		}
 
-		// Define base hotel query
-		let hotelQuery = {
-			activateHotel: true,
-			xHotelProActive: { $ne: false },
-			hotelPhotos: { $exists: true, $not: { $size: 0 } },
-			"location.coordinates": { $ne: [0, 0] },
-		};
+		const cacheKey = `room-query-list:${query}`;
+		return sendCachedPublicJson(req, res, cacheKey, async () => {
+			const hotelQuery = {
+				activateHotel: true,
+				xHotelProActive: { $ne: false },
+				hotelPhotos: { $exists: true, $not: { $size: 0 } },
+				"location.coordinates": { $ne: [0, 0] },
+			};
 
-		// Add destination filter if provided
-		if (destination) {
-			const standardizedDestination = destination.toLowerCase();
-			hotelQuery.$or = [
-				{
-					hotelState: {
-						$regex: new RegExp(standardizedDestination, "i"), // Match destination in hotelState
+			if (destination) {
+				const standardizedDestination = destination.toLowerCase();
+				hotelQuery.$or = [
+					{
+						hotelState: {
+							$regex: new RegExp(standardizedDestination, "i"),
+						},
 					},
-				},
-				{
-					hotelCity: {
-						$regex: new RegExp(standardizedDestination, "i"), // Match destination in hotelCity
+					{
+						hotelCity: {
+							$regex: new RegExp(standardizedDestination, "i"),
+						},
 					},
+				];
+			}
+
+			const roomFilterConditions = [
+				{ $eq: ["$$room.activeRoom", true] },
+				{ $gt: [{ $ifNull: ["$$room.price.basePrice", 0] }, 0] },
+				{
+					$gt: [
+						{ $size: { $ifNull: ["$$room.photos", []] } },
+						0,
+					],
 				},
 			];
-			// Log destination-related query
-			console.log("Destination Query Condition:", hotelQuery.$or);
-		}
-
-		// Add room type filter if not "all"
-		if (roomType !== "all") {
-			hotelQuery["roomCountDetails.roomType"] = roomType;
-			// Log room type filter
-			console.log("Room Type Filter:", hotelQuery["roomCountDetails.roomType"]);
-		}
-
-		// Fetch hotels matching the base query
-		let hotels = await HotelDetails.find(hotelQuery);
-		// Log initial query results
-		console.log("Initial Query Results:", hotels.length, "hotels found");
-
-		// Filter out relevant room types in roomCountDetails
-		const filteredHotels = hotels.map((hotel) => {
-			let filteredRoomCountDetails;
-
-			// Filter room details based on type, availability, and activeRoom
-			if (roomType === "all") {
-				filteredRoomCountDetails = hotel.roomCountDetails.filter(
-					(room) =>
-						room.activeRoom === true && // Only include active rooms
-						room.photos.length > 0 &&
-						room.price.basePrice > 0,
-				);
-			} else {
-				filteredRoomCountDetails = hotel.roomCountDetails.filter(
-					(room) =>
-						room.roomType === roomType &&
-						room.activeRoom === true && // Only include active rooms
-						room.photos.length > 0 &&
-						room.price.basePrice > 0,
-				);
+			if (roomType !== "all") {
+				hotelQuery["roomCountDetails.roomType"] = roomType;
+				roomFilterConditions.push({ $eq: ["$$room.roomType", roomType] });
 			}
 
-			// Return the hotel with updated roomCountDetails
-			return {
-				...hotel.toObject(),
-				roomCountDetails: filteredRoomCountDetails,
-			};
+			const hotels = await HotelDetails.aggregate([
+				{ $match: hotelQuery },
+				{
+					$project: {
+						hotelName: 1,
+						hotelName_OtherLanguage: 1,
+						hotelCountry: 1,
+						hotelState: 1,
+						hotelCity: 1,
+						hotelAddress: 1,
+						distances: 1,
+						hotelPhotos: { $slice: [{ $ifNull: ["$hotelPhotos", []] }, 8] },
+						hotelRating: 1,
+						location: 1,
+						commission: 1,
+						belongsTo: 1,
+						roomCountDetails: {
+							$map: {
+								input: {
+									$filter: {
+										input: { $ifNull: ["$roomCountDetails", []] },
+										as: "room",
+										cond: { $and: roomFilterConditions },
+									},
+								},
+								as: "room",
+								in: {
+									_id: "$$room._id",
+									roomType: "$$room.roomType",
+									count: "$$room.count",
+									price: "$$room.price",
+									photos: {
+										$slice: [{ $ifNull: ["$$room.photos", []] }, 8],
+									},
+									displayName: "$$room.displayName",
+									displayName_OtherLanguage:
+										"$$room.displayName_OtherLanguage",
+									description: "$$room.description",
+									description_OtherLanguage:
+										"$$room.description_OtherLanguage",
+									amenities: { $ifNull: ["$$room.amenities", []] },
+									views: { $ifNull: ["$$room.views", []] },
+									extraAmenities: {
+										$ifNull: ["$$room.extraAmenities", []],
+									},
+									pricingRate: {
+										$filter: {
+											input: {
+												$ifNull: ["$$room.pricingRate", []],
+											},
+											as: "rate",
+											cond: {
+												$and: [
+													{
+														$gte: [
+															"$$rate.calendarDate",
+															startDate,
+														],
+													},
+													{
+														$lt: ["$$rate.calendarDate", endDate],
+													},
+												],
+											},
+										},
+									},
+									roomColor: "$$room.roomColor",
+									activeRoom: "$$room.activeRoom",
+									refundPolicyDays: "$$room.refundPolicyDays",
+									roomSize: "$$room.roomSize",
+									defaultCost: "$$room.defaultCost",
+									roomCommission: "$$room.roomCommission",
+									bedsCount: "$$room.bedsCount",
+									roomForGender: "$$room.roomForGender",
+								},
+							},
+						},
+					},
+				},
+				{ $match: { "roomCountDetails.0": { $exists: true } } },
+			]).exec();
+
+			const publicHotels = sortPublicHotels(
+				hotels
+					.map((hotel) =>
+						compactPublicHotel(hotel, {
+							includePricingRate: true,
+							startDate,
+							endDate,
+							roomType,
+						}),
+					)
+					.filter((hotel) => hotel.roomCountDetails.length > 0),
+			);
+
+			if (!publicHotels.length) {
+				const error = new Error("No hotels found matching the criteria.");
+				error.statusCode = 404;
+				throw error;
+			}
+
+			return publicHotels;
 		});
-
-		// Remove hotels that have no matching roomCountDetails after filtering
-		const result = filteredHotels.filter(
-			(hotel) => hotel.roomCountDetails.length > 0,
-		);
-
-		// Log filtered results
-		console.log("Filtered Hotels After Room Validation:", result.length);
-
-		// If no hotels match the criteria, return a 404
-		if (!result.length) {
-			console.error("No hotels found matching the criteria.");
+	} catch (error) {
+		if (error.statusCode === 404) {
 			return res.status(404).json({
-				message: "No hotels found matching the criteria.",
+				message: error.message,
 			});
 		}
-
-		// Enhanced function to parse time strings and convert them to total minutes
-		const parseTimeToMinutes = (timeStr) => {
-			if (!timeStr || typeof timeStr !== "string") return Infinity;
-
-			let totalMinutes = 0;
-			const dayMatch = timeStr.match(/(\d+)\s*day[s]?/i);
-			const hourMatch = timeStr.match(/(\d+)\s*hour[s]?/i);
-			const minMatch = timeStr.match(/(\d+)\s*min[s]?/i);
-
-			if (dayMatch) totalMinutes += parseInt(dayMatch[1], 10) * 1440; // 1 day = 1440 minutes
-			if (hourMatch) totalMinutes += parseInt(hourMatch[1], 10) * 60; // 1 hour = 60 minutes
-			if (minMatch) totalMinutes += parseInt(minMatch[1], 10); // minutes
-
-			return totalMinutes;
-		};
-
-		// Sort hotels by hotelRating (highest to lowest) and then by walkingToElHaram distance
-		const sortedHotels = result.sort((a, b) => {
-			const aWalkingTime = parseTimeToMinutes(a.distances?.walkingToElHaram);
-			const bWalkingTime = parseTimeToMinutes(b.distances?.walkingToElHaram);
-
-			// Sort by hotelRating first (descending), then by walking distance (ascending)
-			if (b.hotelRating !== a.hotelRating) {
-				return b.hotelRating - a.hotelRating; // Descending order for hotelRating
-			}
-			return aWalkingTime - bWalkingTime; // Ascending order for walking distance
-		});
-
-		// Log sorted hotels
-		// console.log(
-		// 	"Sorted Hotels:",
-		// 	sortedHotels.map((hotel) => ({
-		// 		name: hotel.hotelName,
-		// 		rating: hotel.hotelRating,
-		// 		walkingTime: hotel.distances?.walkingToElHaram,
-		// 	}))
-		// );
-
-		// Send the sorted hotels as the response
-		res.status(200).json(sortedHotels.map(stripAgentRoomOverrides));
-	} catch (error) {
 		console.error("Error fetching hotels:", error);
 		res.status(500).json({
 			error: "An error occurred while fetching rooms.",
