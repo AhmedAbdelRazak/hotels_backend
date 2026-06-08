@@ -82,10 +82,31 @@ const MAP_DIRTY_ROOM_REASONS = new Set([
 	"housekeeping_task_open",
 ]);
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
+const PENDING_NOTIFICATION_CACHE_TTL_MS = 5000;
+const PENDING_NOTIFICATION_CACHE_MAX = 500;
+const pendingNotificationFeedCache = new Map();
 const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
 	"i"
 );
+
+const getShortCache = (cache, key) => {
+	const entry = cache.get(key);
+	if (!entry) return null;
+	if (entry.expiresAt <= Date.now()) {
+		cache.delete(key);
+		return null;
+	}
+	return entry.value;
+};
+
+const setShortCache = (cache, key, value, ttlMs, maxEntries) => {
+	if (cache.size >= maxEntries) {
+		const firstKey = cache.keys().next().value;
+		if (firstKey) cache.delete(firstKey);
+	}
+	cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
 
 const moneyNumber = (value) => {
 	if (value === null || value === undefined || value === "") return 0;
@@ -2522,6 +2543,17 @@ const notificationAcknowledgementKeys = (actor = {}) =>
 			.map((item) => String(item || "").trim())
 			.filter(Boolean)
 	);
+
+const notificationAcknowledgementSignature = (actor = {}) =>
+	(Array.isArray(actor.notificationAcknowledgements)
+		? actor.notificationAcknowledgements
+		: []
+	)
+		.slice(-100)
+		.map((item) => (typeof item === "string" ? item : item?.key))
+		.map((item) => String(item || "").trim())
+		.filter(Boolean)
+		.join("|");
 
 const notificationTimestampKey = (value) => {
 	const date = value ? new Date(value) : null;
@@ -8792,6 +8824,26 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		if (!actor || actor.activeUser === false) {
 			return res.status(401).json({ error: "Valid active user is required" });
 		}
+		const cacheKey = [
+			normalizeId(actor._id),
+			hotelId || "",
+			ownerId || "",
+			limit,
+			notificationAcknowledgementSignature(actor),
+		].join("|");
+		const cached = getShortCache(pendingNotificationFeedCache, cacheKey);
+		if (cached) return res.json(cached);
+		const sendCached = (payload) => {
+			setShortCache(
+				pendingNotificationFeedCache,
+				cacheKey,
+				payload,
+				PENDING_NOTIFICATION_CACHE_TTL_MS,
+				PENDING_NOTIFICATION_CACHE_MAX
+			);
+			return res.json(payload);
+		};
+
 		if (isOrderTakingAccount(actor)) {
 			let hotels = [];
 			if (hotelId) {
@@ -8814,7 +8866,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				.map((hotel) => normalizeId(hotel?._id))
 				.filter((id) => ObjectId.isValid(id));
 			if (!hotelIds.length) {
-				return res.json({ total: 0, data: [] });
+				return sendCached({ total: 0, data: [] });
 			}
 
 			const hotelMap = hotels.reduce((acc, hotel) => {
@@ -9027,7 +9079,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				acknowledgedKeys
 			).slice(0, limit);
 
-			return res.json({
+			return sendCached({
 				total:
 					Number(agentAccountFeed.total || 0) +
 					visibleReservationNotifications.length +
@@ -9044,7 +9096,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			});
 		}
 		if (!canUsePendingConfirmationWorkflow(actor)) {
-			return res.json({ total: 0, data: [] });
+			return sendCached({ total: 0, data: [] });
 		}
 
 		let hotels = [];
@@ -9069,7 +9121,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			.filter((id) => ObjectId.isValid(id));
 
 		if (!hotelIds.length) {
-			return res.json({ total: 0, data: [] });
+			return sendCached({ total: 0, data: [] });
 		}
 
 		const hotelMap = hotels.reduce((acc, hotel) => {
@@ -9168,7 +9220,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			};
 		});
 
-		return res.json({
+		return sendCached({
 			total:
 				total +
 				Number(agentAccountFeed.total || 0) +

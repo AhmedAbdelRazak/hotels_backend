@@ -15,6 +15,9 @@ const CHAT_USER_SELECT =
 const CHAT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const MAX_ATTACHMENT_COUNT = 6;
 const MAX_ATTACHMENT_DATA_URL = 7 * 1024 * 1024;
+const B2B_UNREAD_CACHE_TTL_MS = 5000;
+const B2B_UNREAD_CACHE_MAX = 500;
+const b2bUnreadSummaryCache = new Map();
 
 const normalizeId = (value) => {
 	if (!value) return "";
@@ -167,6 +170,24 @@ const cleanText = (value = "", max = 8000) =>
 		.replace(/\u0000/g, "")
 		.trim()
 		.slice(0, max);
+
+const getShortCache = (cache, key) => {
+	const entry = cache.get(key);
+	if (!entry) return null;
+	if (entry.expiresAt <= Date.now()) {
+		cache.delete(key);
+		return null;
+	}
+	return entry.value;
+};
+
+const setShortCache = (cache, key, value, ttlMs, maxEntries) => {
+	if (cache.size >= maxEntries) {
+		const firstKey = cache.keys().next().value;
+		if (firstKey) cache.delete(firstKey);
+	}
+	cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
 
 const cleanChatDisplayName = (value = "") =>
 	cleanText(value, 80).replace(/\s+/g, " ");
@@ -708,8 +729,12 @@ exports.b2bChatList = async (req, res) => {
 
 exports.b2bChatUnreadSummary = async (req, res) => {
 	try {
-		await ensureInactiveChatsClosed();
 		const actor = req.profile;
+		const cacheKey = normalizeId(actor?._id || req.params.userId);
+		const cached = getShortCache(b2bUnreadSummaryCache, cacheKey);
+		if (cached) return res.json(cached);
+
+		await ensureInactiveChatsClosed();
 		const query = await visibleChatQueryForActor(actor, "active");
 		const actorObjectId = ObjectId(normalizeId(actor._id));
 
@@ -833,11 +858,19 @@ exports.b2bChatUnreadSummary = async (req, res) => {
 			}
 		});
 
-		return res.json({
+		const payload = {
 			unreadChats,
 			unreadMessages,
 			activeChats: chats.length,
-		});
+		};
+		setShortCache(
+			b2bUnreadSummaryCache,
+			cacheKey,
+			payload,
+			B2B_UNREAD_CACHE_TTL_MS,
+			B2B_UNREAD_CACHE_MAX
+		);
+		return res.json(payload);
 	} catch (error) {
 		console.error("b2bChatUnreadSummary error:", error);
 		return res.status(500).json({ error: "Could not load chat notifications" });
