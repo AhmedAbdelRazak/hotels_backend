@@ -7069,7 +7069,7 @@ const saveAgentPriceVariantAssignments = async ({
 		const rooms = Array.isArray(hotel.roomCountDetails)
 			? hotel.roomCountDetails
 			: [];
-		let hotelChanged = false;
+		const roomUpdateOps = [];
 		rooms.forEach((room, roomIndex) => {
 			const roomId = normalizeId(room?._id);
 			const roomRows = rowsByRoomKey.get(`${hotelId}:${roomId}`) || [];
@@ -7079,18 +7079,27 @@ const saveAgentPriceVariantAssignments = async ({
 				: []
 			).filter((row) => agentSet.has(normalizeCalendarId(row?.agentId)));
 			if (!roomRows.length && !existingAgentRows.length) return;
-			rooms[roomIndex].agentPricingRate = replaceAgentCalendarRowsForAgents(
+			const nextAgentPricingRate = replaceAgentCalendarRowsForAgents(
 				roomPlain.agentPricingRate,
 				roomRows,
 				agentSet
 			);
+			rooms[roomIndex].agentPricingRate = nextAgentPricingRate;
+			roomUpdateOps.push(
+				HotelDetails.updateOne(
+					{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
+					{
+						$set: {
+							"roomCountDetails.$.agentPricingRate": nextAgentPricingRate,
+							updatedAt: new Date(),
+						},
+					}
+				)
+			);
 			updatedRows += roomRows.length;
-			hotelChanged = true;
 		});
-		if (hotelChanged) {
-			hotel.roomCountDetails = rooms;
-			hotel.markModified("roomCountDetails");
-			await hotel.save();
+		if (roomUpdateOps.length) {
+			await Promise.all(roomUpdateOps);
 			updatedHotels.push(serializeCalendarHotel(hotel));
 		}
 	}
@@ -7136,16 +7145,17 @@ const propagatePriceVariantUpdates = async (
 	let updatedRows = 0;
 	let updatedHotels = 0;
 	for (const hotel of hotelDocs) {
-		let hotelChanged = false;
 		const rooms = Array.isArray(hotel.roomCountDetails)
 			? hotel.roomCountDetails
 			: [];
-		rooms.forEach((room) => {
+		const roomUpdateOps = [];
+		rooms.forEach((room, roomIndex) => {
 			const roomId = normalizeId(room?._id);
 			const hotelId = normalizeId(hotel._id);
 			const rows = Array.isArray(room.agentPricingRate)
 				? room.agentPricingRate
 				: [];
+			let roomChanged = false;
 			rows.forEach((row) => {
 				const rowVariantDataId = normalizeId(row?.priceVariantDataId);
 				if (rowVariantDataId !== priceVariantDataId) return;
@@ -7212,13 +7222,24 @@ const propagatePriceVariantUpdates = async (
 					row.blocked = false;
 				}
 				updatedRows += 1;
-				hotelChanged = true;
+				roomChanged = true;
 			});
+			if (roomChanged) {
+				roomUpdateOps.push(
+					HotelDetails.updateOne(
+						{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
+						{
+							$set: {
+								"roomCountDetails.$.agentPricingRate": rows,
+								updatedAt: new Date(),
+							},
+						}
+					)
+				);
+			}
 		});
-		if (hotelChanged) {
-			hotel.roomCountDetails = rooms;
-			hotel.markModified("roomCountDetails");
-			await hotel.save();
+		if (roomUpdateOps.length) {
+			await Promise.all(roomUpdateOps);
 			updatedHotels += 1;
 		}
 	}
@@ -8179,6 +8200,7 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 			const rooms = Array.isArray(hotel.roomCountDetails)
 				? hotel.roomCountDetails
 				: [];
+			const roomUpdateOps = [];
 			hotelSelections.forEach((selection) => {
 				const roomIndex = rooms.findIndex(
 					(room) => normalizeId(room?._id) === selection.roomId
@@ -8257,11 +8279,23 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 							});
 						});
 					}
-					rooms[roomIndex].agentPricingRate = mergeAgentCalendarRows(
+					const nextAgentPricingRate = mergeAgentCalendarRows(
 						room.agentPricingRate,
 						nextRows,
 						roomDateSet,
 						agentSet
+					);
+					rooms[roomIndex].agentPricingRate = nextAgentPricingRate;
+					roomUpdateOps.push(
+						HotelDetails.updateOne(
+							{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
+							{
+								$set: {
+									"roomCountDetails.$.agentPricingRate": nextAgentPricingRate,
+									updatedAt: new Date(),
+								},
+							}
+						)
 					);
 					updatedRows += nextRows.length;
 				} else {
@@ -8284,10 +8318,22 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 						: decoratedPlan.dates.map((calendarDate) =>
 								buildGeneralRow(decoratedPlan, room, calendarDate)
 						  );
-					rooms[roomIndex].pricingRate = mergeGeneralCalendarRows(
+					const nextPricingRate = mergeGeneralCalendarRows(
 						room.pricingRate,
 						nextRows,
 						roomDateSet
+					);
+					rooms[roomIndex].pricingRate = nextPricingRate;
+					roomUpdateOps.push(
+						HotelDetails.updateOne(
+							{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
+							{
+								$set: {
+									"roomCountDetails.$.pricingRate": nextPricingRate,
+									updatedAt: new Date(),
+								},
+							}
+						)
 					);
 					nextRows.forEach((row) => {
 						touchedGeneralCalendarRows.push({
@@ -8299,10 +8345,10 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 					updatedRows += nextRows.length;
 				}
 			});
-			hotel.roomCountDetails = rooms;
-			hotel.markModified("roomCountDetails");
-			await hotel.save();
-			updatedHotels.push(serializeCalendarHotel(hotelMap.get(hotelId) || hotel));
+			if (roomUpdateOps.length) {
+				await Promise.all(roomUpdateOps);
+				updatedHotels.push(serializeCalendarHotel(hotelMap.get(hotelId) || hotel));
+			}
 		}
 
 		const variantPropagation =
