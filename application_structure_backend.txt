@@ -315,6 +315,7 @@ Critical Workflows To Protect
   - Super admins can view across the platform; owners, Hotel System Admins, hotel managers, finance users, reservation employees, order-taker/agent users, and other permitted roles must be constrained to assigned hotels.
   - Use getAccessibleOverallHotels, requireOverallSection, and related overall-dashboard helpers before applying hotelId, invHotel, ownerId, or query filters.
   - Never trust ownerId or hotelId from the query string until it has been checked against the acting user's accessible hotel set.
+  - Scoped role 2000 accounts must be treated as hotel-manager-equivalent for overall reservations, executive reports, pending/rejected queues, financial actions, housekeeping, hotel map, and settings even if roleDescription is missing. Root owners remain role 2000 without belongsToId and are owner-like; scoped hotel managers remain limited by hotelIdWork, hotelIdsWork, hotelsToSupport, hotelIdsOwner, and belongsToId.
   - The overall summary page has four frontend tabs: combined Hotels Summary, reservation analytics, inventory/occupancy, and paid reservations overview. The combined Hotels Summary embeds the former My Summary reservation-department dashboard above the hotels summary table, and it reuses the reservation analytics and overall reservation-list backends with the acting user's existing hotel/agent scope.
   - Admin global reports remain separate from hotel-management executive reports for security and data-boundary clarity.
 - Reservation executive report backend behavior

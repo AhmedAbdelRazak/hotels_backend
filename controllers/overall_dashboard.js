@@ -503,7 +503,7 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "reservations") {
 		return (
-			hasAnyRole([3000, 6000, 7000, 8000]) ||
+			hasAnyRole([2000, 3000, 6000, 7000, 8000]) ||
 			hasAnyDescription([
 				"hotelmanager",
 				"reception",
@@ -516,7 +516,7 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "executive") {
 		return (
-			hasAnyRole([3000, 6000, 7000, 8000]) ||
+			hasAnyRole([2000, 3000, 6000, 7000, 8000]) ||
 			hasAnyDescription([
 				"hotelmanager",
 				"reception",
@@ -530,7 +530,7 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "pending") {
 		return (
-			hasAnyRole([6000, 8000]) ||
+			hasAnyRole([2000, 6000, 8000]) ||
 			hasAnyDescription([
 				"hotelmanager",
 				"finance",
@@ -542,7 +542,7 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "financials") {
 		return (
-			hasAnyRole([6000]) ||
+			hasAnyRole([2000, 6000]) ||
 			hasAnyDescription(["hotelmanager", "finance"]) ||
 			isOrderTakingScope(actor)
 		);
@@ -550,20 +550,23 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 
 	if (section === "housekeeping") {
 		return (
-			hasAnyRole([4000, 5000]) ||
+			hasAnyRole([2000, 4000, 5000]) ||
 			hasAnyDescription(["hotelmanager", "housekeepingmanager", "housekeeping"])
 		);
 	}
 
 	if (section === "hotel-map") {
 		return (
-			hasAnyRole([3000, 6000, 8000]) ||
+			hasAnyRole([2000, 3000, 6000, 8000]) ||
 			hasAnyDescription(["hotelmanager", "reception", "finance", "reservationemployee"])
 		);
 	}
 
 	if (section === "settings") {
-		return hasAnyRole([8000]) || hasAnyDescription(["hotelmanager", "reservationemployee"]);
+		return (
+			hasAnyRole([2000, 8000]) ||
+			hasAnyDescription(["hotelmanager", "reservationemployee"])
+		);
 	}
 
 	return true;
