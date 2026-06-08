@@ -711,18 +711,122 @@ exports.b2bChatUnreadSummary = async (req, res) => {
 		await ensureInactiveChatsClosed();
 		const actor = req.profile;
 		const query = await visibleChatQueryForActor(actor, "active");
+		const actorObjectId = ObjectId(normalizeId(actor._id));
 
-		const chats = await B2BChat.find(query)
-			.select(
-				"participantIds participants messages.senderId messages.senderRole messages.seenBy status scope hotelIds lastActivityAt"
-			)
-			.lean()
-			.exec();
+		const chats = await B2BChat.aggregate([
+			{ $match: query },
+			{
+				$addFields: {
+					teamIds: {
+						$map: {
+							input: {
+								$filter: {
+									input: { $ifNull: ["$participants", []] },
+									as: "participant",
+									cond: {
+										$ne: [
+											{
+												$ifNull: [
+													"$$participant.participantType",
+													"staff",
+												],
+											},
+											"agent",
+										],
+									},
+								},
+							},
+							as: "participant",
+							in: "$$participant.userId",
+						},
+					},
+				},
+			},
+			{
+				$project: {
+					scope: 1,
+					participants: 1,
+					directUnreadCount: {
+						$size: {
+							$filter: {
+								input: { $ifNull: ["$messages", []] },
+								as: "message",
+								cond: {
+									$and: [
+										{ $ne: ["$$message.senderId", actorObjectId] },
+										{
+											$not: [
+												{
+													$in: [
+														actorObjectId,
+														{
+															$map: {
+																input: {
+																	$ifNull: [
+																		"$$message.seenBy",
+																		[],
+																	],
+																},
+																as: "seen",
+																in: "$$seen.userId",
+															},
+														},
+													],
+												},
+											],
+										},
+									],
+								},
+							},
+						},
+					},
+					teamUnreadCount: {
+						$size: {
+							$filter: {
+								input: { $ifNull: ["$messages", []] },
+								as: "message",
+								cond: {
+									$and: [
+										{ $not: [{ $in: ["$$message.senderId", "$teamIds"] }] },
+										{
+											$eq: [
+												{
+													$size: {
+														$setIntersection: [
+															"$teamIds",
+															{
+																$map: {
+																	input: {
+																		$ifNull: [
+																			"$$message.seenBy",
+																			[],
+																		],
+																	},
+																	as: "seen",
+																	in: "$$seen.userId",
+																},
+															},
+														],
+													},
+												},
+												0,
+											],
+										},
+									],
+								},
+							},
+						},
+					},
+				},
+			},
+		]).exec();
 
 		let unreadMessages = 0;
 		let unreadChats = 0;
 		chats.forEach((chat) => {
-			const count = unreadCountForActor(chat, actor);
+			const count = actorIsTeamSideForChat(chat, actor)
+				? Number(chat.teamUnreadCount || 0)
+				: Number(chat.directUnreadCount || 0);
 			if (count > 0) {
 				unreadChats += 1;
 				unreadMessages += count;
