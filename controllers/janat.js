@@ -142,6 +142,7 @@ const PUBLIC_HOTEL_LIST_SELECT = [
 	"roomCountDetails.bedsCount",
 	"roomCountDetails.roomForGender",
 ].join(" ");
+const PUBLIC_HOTEL_DEALS_SELECT = `${PUBLIC_HOTEL_LIST_SELECT} roomCountDetails.offers roomCountDetails.monthly`;
 
 const publicCacheGet = (key) => {
 	const hit = publicHotelResponseCache.get(key);
@@ -475,6 +476,7 @@ exports.listOfAllActiveHotels = async (req, res) => {
 
 exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 	try {
+		setPublicHotelCacheHeaders(res);
 		// ---- Controls (safe defaults) ----
 		const mode = String(req.query.mode || "activeOrUpcoming").toLowerCase();
 		const requireActiveRoom =
@@ -533,7 +535,10 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 			},
 		};
 
-		const hotels = await HotelDetails.find(baseFilter).lean().exec();
+		const hotels = await HotelDetails.find(baseFilter)
+			.select(PUBLIC_HOTEL_DEALS_SELECT)
+			.lean()
+			.exec();
 
 		// ---- Trim arrays + remove rooms/hotels that no longer qualify ----
 		const filtered = hotels
