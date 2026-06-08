@@ -2262,3 +2262,33 @@ Future TODO Backlog - Added 2026-05-26
 - Admin filter behavior:
   - /all-reservations-list-admin/:userId bookingSource filtering matches either top-level booking_source or customer_details.booking_source.
   - /distinct-booking-sources/:userId returns values from both top-level booking_source and customer_details.booking_source so admins can filter by an original OTA source even after the main source was changed.
+
+2026-06-08 Final Reservation Policy Audit And Verification Notes
+- Scope reviewed in this pass:
+  - Hotel-management reservation-history visibility cutoff for non-platform/non-SUPER users.
+  - AI chatbot booking flow speed, localized confirmation spell checks, quick replies, mandatory guest-details capture, optional email skip, guest-facing confirmed copy, and internal Pending Confirmation save state.
+  - AI Chat source privacy: platform admin /admin views may see AI Chat, while /hotel-management views must see Jannat Employee.
+  - Reservation booking_source immutability for all non-authorized users, including Hotel System Admins and hotel-management admins.
+  - Configured SUPER ADMIN-only direct reversion from confirmed/accepted/closed workflow states back to Pending Confirmation.
+  - OTA inbound email original-source persistence through customer_details.booking_source.
+- Backend files to protect:
+  - services/reservationVisibility.js owns shared history cutoff, source masking, source edit permissions, and booking-source summary masking helpers.
+  - services/auditPrivacy.js applies source masking during hotel-management-safe reservation serialization.
+  - controllers/reservations.js is the main enforcement point for reservation updates, pending-confirmation reversion, notification refreshes, source immutability, history cutoff filters, availability validation, and AI reservation creation helpers.
+  - controllers/janat.js owns /admin all-reservations list filters, distinct booking-source options, public client update source stripping, and customer_booking_source response projection.
+  - services/otaReservationMapper.js stamps customer_details.booking_source for OTA-created reservations and only backfills it during OTA reconciliation when missing.
+  - aiagent/core/orchestrator.js owns the active socket-driven chatbot flow, quickReplies persistence, confirmation/correction/skip detection, mandatory one-message guest-detail capture, optional email prompt, and final guest confirmation copy.
+  - aiagent/core/actions.js rejects AI reservation creation unless full name, phone, nationality, adults count, and children count are valid, then validates inventory and stamps pendingConfirmation.clientVisibleStatus="confirmed".
+  - models/supportcase.js allows AI conversation turns to store quickReplies for audit/display.
+- Maintenance requirements:
+  - Do not implement the April 1, 2026 hotel-management cutoff only in React. Backend queries must call the shared helper when reading reservation history for hotel-side routes.
+  - Do not rewrite stored AI Chat booking_source to Jannat Employee. Mask it only in hotel-management responses.
+  - Do not allow hotel-management updates to change booking_source or customer_details.booking_source, even when the user is a hotel system admin.
+  - Do not allow role-1000 platform admins to directly revert a non-pending reservation to Pending Confirmation; that direct reversion is configured SUPER ADMIN-only.
+  - Do not let later OTA emails overwrite an existing customer_details.booking_source. It is the immutable original OTA/email source marker.
+  - Keep public availability checks aware of all inventory-blocking reservations; the history cutoff is for visibility/reporting, not inventory protection.
+- Verification performed locally:
+  - node --check was run across all backend JavaScript files.
+  - Frontend production build was run from hotels_frontend and compiled successfully.
+  - Frontend CRA test command has no test files in the repo; use --passWithNoTests for a non-watch smoke check.
+  - git diff --check should remain clean apart from normal Windows LF-to-CRLF warnings.

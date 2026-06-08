@@ -4141,7 +4141,7 @@ async function planTurn(io, sc) {
 			}
 		}
 
-		// After review: collect details (full name → nationality → phone → email)
+		// After review: collect mandatory guest details in one prompt, then optional email.
 		if (
 			[
 				"reviewConfirm",
@@ -4161,6 +4161,7 @@ async function planTurn(io, sc) {
 				caseId
 			);
 			if (handledDetailStep) return;
+			return;
 
 			if (st.waitFor === "reviewConfirm") {
 				if (!confirmsText(userText)) return;
