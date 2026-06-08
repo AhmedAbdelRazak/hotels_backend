@@ -122,9 +122,16 @@ const hasHotelManagementSourceViewHeader = (req = {}) => {
 	return normalizeSourceKey(value) === "hotelmanagement";
 };
 
+const plainActorForContext = (actor = null) => {
+	if (!actor || typeof actor !== "object") return {};
+	if (typeof actor.toObject === "function") return actor.toObject();
+	if (actor._doc && typeof actor._doc === "object") return { ...actor._doc };
+	return { ...actor };
+};
+
 const withHotelManagementSourceViewContext = (actor = null, req = {}) => {
 	if (!hasHotelManagementSourceViewHeader(req)) return actor;
-	const safeActor = actor && typeof actor === "object" ? actor : {};
+	const safeActor = plainActorForContext(actor);
 	return { ...safeActor, __hotelManagementSourceView: true };
 };
 

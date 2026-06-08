@@ -2229,6 +2229,7 @@ Future TODO Backlog - Added 2026-05-26
 - Backend implementation:
   - services/reservationVisibility.js owns HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL, the X-Reservation-Source-View route marker, AI-source detection, row masking, and booking-source summary merge helpers.
   - services/reservationVisibility.js also owns canEditReservationSource. Keep source-edit permission stricter than source/history viewing.
+  - When adding the X-Reservation-Source-View context flag, convert Mongoose user documents with toObject() before cloning. Do not object-spread req.profile directly, because spreading a Mongoose document drops role/belongsToId/hotel-scope fields and can make a valid owner fail overall-dashboard executive/reservation access checks.
   - services/auditPrivacy.js masks booking_source, bookingSource, and financial_cycle.sourceName for hotel-management source-view responses while leaving authorized platform-admin responses unmasked.
   - controllers/reservations.js masks single-hotel lists/details and legacy booking-source/owner aggregation summaries, and blocks unauthorized booking_source / bookingSource / financial_cycle source edits on PUT /reservation-update/:reservationId.
  - controllers/janat.js strips source fields from public update-reservation-client payloads before saving.
