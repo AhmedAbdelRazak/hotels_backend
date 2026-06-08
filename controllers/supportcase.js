@@ -21,6 +21,7 @@ const supportCaseEmail = twilio(
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances";
+const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -414,6 +415,97 @@ const adminUnseenClientMessageMatch = (actorId = "") => {
 		"conversation.messageBy.userId": { $nin: excludedSenders },
 	};
 };
+
+const isAdminUnreadClientMessage = (entry = {}, actorId = "") => {
+	if (!entry || entry.seenByAdmin) return false;
+	if (entry.isAi || entry.isSystem) return false;
+	const contact = normalizeEmailOrPhone(entry.messageBy?.customerEmail).toLowerCase();
+	if (AI_SUPPORT_MESSAGE_EMAILS.includes(contact)) return false;
+	const senderId = normalizeId(entry.messageBy?.userId);
+	if (senderId === "jannat-ai-support") return false;
+	const normalizedActorId = normalizeId(actorId);
+	if (senderId && normalizedActorId && senderId === normalizedActorId) return false;
+	return true;
+};
+
+const compactConversationEntryForList = (entry = {}) => ({
+	_id: entry._id,
+	messageBy: {
+		customerName: cleanChatDisplayName(entry.messageBy?.customerName),
+		customerEmail: cleanText(entry.messageBy?.customerEmail, 180),
+		userId: cleanText(entry.messageBy?.userId, 180),
+	},
+	message: cleanText(entry.message, 1200),
+	date: entry.date,
+	inquiryAbout: cleanText(entry.inquiryAbout, 120),
+	inquiryDetails: cleanText(entry.inquiryDetails, 1200),
+	seenByAdmin: entry.seenByAdmin,
+	seenByHotel: entry.seenByHotel,
+	seenByCustomer: entry.seenByCustomer,
+	isAi: entry.isAi,
+	isSystem: entry.isSystem,
+	clientTag: cleanText(entry.clientTag, 120),
+	preferredLanguage: cleanText(entry.preferredLanguage, 80),
+	preferredLanguageCode: cleanText(entry.preferredLanguageCode, 20),
+	quickReplies: Array.isArray(entry.quickReplies)
+		? entry.quickReplies.slice(0, 6).map((reply) => ({
+				label: cleanText(reply?.label, 80),
+				value: cleanText(reply?.value, 240),
+				action: cleanText(reply?.action, 60),
+		  }))
+		: [],
+});
+
+const compactConversationForList = (conversation = []) => {
+	const entries = Array.isArray(conversation) ? conversation : [];
+	const selectedEntries = [
+		...(entries[0] ? [entries[0]] : []),
+		...entries.slice(-SUPPORT_CASE_LIST_CONVERSATION_LIMIT),
+	];
+	const seenKeys = new Set();
+	return selectedEntries
+		.filter((entry, index) => {
+			const key = normalizeId(entry?._id) || `${entry?.date || ""}-${index}`;
+			if (seenKeys.has(key)) return false;
+			seenKeys.add(key);
+			return true;
+		})
+		.map(compactConversationEntryForList);
+};
+
+const latestConversationDate = (conversation = [], fallback = null) => {
+	const entries = Array.isArray(conversation) ? conversation : [];
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		if (entries[index]?.date) return entries[index].date;
+	}
+	return fallback;
+};
+
+const compactClientSupportCaseForList = (supportCase = {}, req = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const compactConversation = compactConversationForList(conversation);
+	const adminUnreadCount = conversation.filter((entry) =>
+		isAdminUnreadClientMessage(entry, req.profile?._id || req.user?._id)
+	).length;
+	return {
+		...supportCase,
+		conversation: compactConversation,
+		conversationCount: conversation.length,
+		conversationPreview:
+			compactConversation[compactConversation.length - 1] || null,
+		latestConversationAt: latestConversationDate(
+			conversation,
+			supportCase.updatedAt || supportCase.createdAt
+		),
+		adminUnreadCount,
+		isConversationPreview: conversation.length > compactConversation.length,
+	};
+};
+
+const compactClientSupportCasesForList = (cases = [], req = {}) =>
+	cases.map((supportCase) => compactClientSupportCaseForList(supportCase, req));
 
 const isAiForceRespondEnabled = () =>
 	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
@@ -1291,7 +1383,8 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
 			.exec();
-		res.status(200).json(await enrichClientSupportCases(cases, req));
+		const enrichedCases = await enrichClientSupportCases(cases, req);
+		res.status(200).json(compactClientSupportCasesForList(enrichedCases, req));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1309,7 +1402,8 @@ exports.getEscalatedSupportCasesClients = async (req, res) => {
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
 			.exec();
-		res.status(200).json(await enrichClientSupportCases(cases, req));
+		const enrichedCases = await enrichClientSupportCases(cases, req);
+		res.status(200).json(compactClientSupportCasesForList(enrichedCases, req));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1377,7 +1471,8 @@ exports.getCloseSupportCasesForHotelClients = async (req, res) => {
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		// Return the cases in the response
-		res.status(200).json(cases);
+		const enrichedCases = await enrichClientSupportCases(cases, req);
+		res.status(200).json(compactClientSupportCasesForList(enrichedCases, req));
 	} catch (error) {
 		// Handle any errors that occur during the query
 		res.status(400).json({ error: error.message });
@@ -1404,7 +1499,10 @@ exports.getCloseSupportCasesClients = async (req, res) => {
 		]);
 
 		res.status(200).json({
-			cases: await enrichClientSupportCases(cases, req),
+			cases: compactClientSupportCasesForList(
+				await enrichClientSupportCases(cases, req),
+				req
+			),
 			page,
 			limit,
 			total,
