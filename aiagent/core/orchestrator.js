@@ -4682,10 +4682,24 @@ async function planTurn(io, sc) {
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
+		const assistantBeforeLatestGuest = lastAssistantMessageBeforeLatestGuest(sc);
+		const assistantBeforeLatestGuestActions = quickReplyActions(
+			assistantBeforeLatestGuest
+		);
+		const assistantBeforeLatestGuestHasBookingChoice =
+			assistantBeforeLatestGuestActions.includes("confirm") ||
+			assistantBeforeLatestGuestActions.includes("correction") ||
+			assistantBeforeLatestGuestActions.includes("proceed") ||
+			assistantBeforeLatestGuestActions.some((action) =>
+				action.startsWith("connect_hotel_")
+			);
 		if (
 			st.slots.roomTypeKey &&
 			st.slots.checkinISO &&
 			st.slots.checkoutISO &&
+			!isReservationDetailStep(st) &&
+			st.waitFor !== "proceed" &&
+			!assistantBeforeLatestGuestHasBookingChoice &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
