@@ -190,6 +190,127 @@ function stayDateDisplay(st = {}) {
 		shouldShowBoth: Boolean(hijri),
 	};
 }
+const ARABIC_HIJRI_MONTHS = [
+	"\u0645\u062d\u0631\u0645",
+	"\u0635\u0641\u0631",
+	"\u0631\u0628\u064a\u0639 \u0627\u0644\u0623\u0648\u0644",
+	"\u0631\u0628\u064a\u0639 \u0627\u0644\u0622\u062e\u0631",
+	"\u062c\u0645\u0627\u062f\u0649 \u0627\u0644\u0623\u0648\u0644\u0649",
+	"\u062c\u0645\u0627\u062f\u0649 \u0627\u0644\u0622\u062e\u0631\u0629",
+	"\u0631\u062c\u0628",
+	"\u0634\u0639\u0628\u0627\u0646",
+	"\u0631\u0645\u0636\u0627\u0646",
+	"\u0634\u0648\u0627\u0644",
+	"\u0630\u0648 \u0627\u0644\u0642\u0639\u062f\u0629",
+	"\u0630\u0648 \u0627\u0644\u062d\u062c\u0629",
+];
+
+function hasArabicScript(value = "") {
+	return /[\u0600-\u06FF]/.test(String(value || ""));
+}
+
+function arabicDigits(value = "") {
+	return String(value ?? "").replace(/\d/g, (digit) =>
+		String.fromCharCode(0x0660 + Number(digit))
+	);
+}
+
+function localizedHotelName(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const other = String(st.hotel?.hotelName_OtherLanguage || "").trim();
+	if (/arabic/i.test(lang) && other && hasArabicScript(other)) return other;
+	return toTitle(st.hotel?.hotelName || sc.displayName2 || "Hotel");
+}
+
+function localizedRoomName(sc = {}, st = {}, quote = {}) {
+	const lang = languageOf(sc, st);
+	const room = quote?.room || {};
+	const other = String(room.displayName_OtherLanguage || "").trim();
+	if (/arabic/i.test(lang) && other && hasArabicScript(other)) return other;
+	return room.displayName || room.roomType || roomTypeLabel(st.slots?.roomTypeKey);
+}
+
+function localizedCurrencyLabel(currency = "SAR", lang = "English") {
+	const code = cleanCurrency(currency || "SAR");
+	if (/arabic/i.test(lang) && code === "SAR") {
+		return "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a";
+	}
+	return code;
+}
+
+function localizedNumber(value, lang = "English") {
+	const raw =
+		typeof value === "number" && Number.isFinite(value)
+			? Number.isInteger(value)
+				? String(value)
+				: String(Number(value.toFixed(2)))
+			: String(value ?? "");
+	return /arabic/i.test(lang) ? arabicDigits(raw) : raw;
+}
+
+function localizedMoney(value, currency = "SAR", lang = "English") {
+	const amount = localizedNumber(value, lang);
+	const label = localizedCurrencyLabel(currency, lang);
+	return [amount, label].filter(Boolean).join(" ");
+}
+
+function arabicHijriDate(parts = null, fallback = "") {
+	const month = Number(parts?.month || 0);
+	const day = Number(parts?.day || 0);
+	const year = Number(parts?.year || 0);
+	if (month >= 1 && month <= 12 && day && year) {
+		return `${arabicDigits(day)} ${ARABIC_HIJRI_MONTHS[month - 1]} ${arabicDigits(
+			year
+		)}\u0647\u0640`;
+	}
+	return arabicDigits(fallback || "");
+}
+
+function localizedGregorianDate(iso = "", lang = "English") {
+	if (!iso) return "";
+	if (!/arabic/i.test(lang)) return usDate(iso);
+	try {
+		return new Intl.DateTimeFormat("ar-EG-u-nu-arab", {
+			timeZone: "UTC",
+			day: "numeric",
+			month: "long",
+			year: "numeric",
+		}).format(new Date(`${iso}T12:00:00Z`));
+	} catch {
+		return arabicDigits(usDate(iso));
+	}
+}
+
+function localizedStayDateLines(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const display = stayDateDisplay(st);
+	const gregorianLine = `${localizedGregorianDate(
+		st.slots?.checkinISO,
+		lang
+	)} \u2013 ${localizedGregorianDate(st.slots?.checkoutISO, lang)}`;
+	if (!/arabic/i.test(lang)) {
+		if (display.hijri?.checkin && display.hijri?.checkout) {
+			return {
+				primary: `${display.hijri.checkin} to ${display.hijri.checkout}`,
+				secondary: `Gregorian: ${gregorianLine}`,
+			};
+		}
+		return { primary: gregorianLine, secondary: "" };
+	}
+	if (display.hijri?.checkin || display.hijri?.checkinHijri) {
+		return {
+			primary: `${arabicHijriDate(
+				display.hijri.checkinHijri,
+				display.hijri.checkin
+			)} \u2013 ${arabicHijriDate(
+				display.hijri.checkoutHijri,
+				display.hijri.checkout
+			)}`,
+			secondary: `\u0627\u0644\u0645\u064a\u0644\u0627\u062f\u064a: ${gregorianLine}`,
+		};
+	}
+	return { primary: gregorianLine, secondary: "" };
+}
 function slugifyHotelName(name = "") {
 	return String(name || "")
 		.trim()
@@ -508,7 +629,9 @@ function guestCountNumber(text = "") {
 }
 
 function applyGuestCountsFromText(st, text = "") {
+	if (!st?.slots) return;
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const { arabic, latinCompact } = normalizeControlText(text);
 	const adultMatch = normalized.match(
 		/(\d{1,2})\s*(?:adult|adults|adulto|adultos|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
 	);
@@ -531,15 +654,29 @@ function applyGuestCountsFromText(st, text = "") {
 		st.slots.children = Math.max(0, Number(childCount));
 		st.slots.childrenProvided = true;
 	}
-	if (
-		/\b(no|none|zero|sin|cero)\s+(?:child|children|kid|kids|nino|ninos|niño|niños)\b|\u0628\u062f\u0648\u0646\s+\u0623?\u0637\u0641\u0627\u0644|\u0644\u0627\s+\u064a\u0648\u062c\u062f\s+\u0623?\u0637\u0641\u0627\u0644|\u0645\u0627\s+\u0641\u064a\s+\u0623?\u0637\u0641\u0627\u0644/i.test(
+	const noChildrenText =
+		/\b(no|none|zero|sin|cero)\s+(?:child|children|kid|kids|nino|ninos|ni\u00f1o|ni\u00f1os)\b/i.test(
 			normalized
-		)
-	) {
+		) ||
+		/(?:\u0628\u062f\u0648\u0646|\u0628\u0644\u0627|\u0645\u0646\s+\u063a\u064a\u0631)\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0644\u0627\s*(?:\u064a\u0648\u062c\u062f|\u0641\u064a|\u0641\u064a\u0647)?\s*(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0627\s*\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0627\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0635\u0641\u0631\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0634\s+(?:\u0645\u0639\u0627\u064a\u0627|\u0639\u0646\u062f\u064a|\u0641\u064a|\u0641\u064a\u0647)\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)/i.test(
+			arabic
+		) ||
+		/(?:mafish|mafeesh|mfeesh|mafihsh)(?:atfal|children|kids)/i.test(
+			latinCompact
+		);
+	if (noChildrenText) {
 		st.slots.children = 0;
 		st.slots.childrenProvided = true;
 	}
+	if (!childCount && !st.slots.childrenProvided) {
+		const onlyNumber = normalized.match(/^\s*(\d{1,2})\s*$/);
+		if (onlyNumber && reservationDetailsNeedOnlyChildren(st)) {
+			st.slots.children = Math.max(0, Number(onlyNumber[1]));
+			st.slots.childrenProvided = true;
+		}
+	}
 	if (
+		!noChildrenText &&
 		!childCount &&
 		/\b(child|kid|nino|niño)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
 	) {
@@ -1101,8 +1238,22 @@ function simpleQuoteText({ sc, st, quote }) {
 	const name = firstNameForAddress(
 		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
 	);
-	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
-	const roomName = roomTypeLabel(st.slots?.roomTypeKey || quote.room?.roomType);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomName = localizedRoomName(sc, st, quote);
+	if (/arabic/i.test(lang)) {
+		if (!quote.available) {
+			return `\u0623\u0633\u062a\u0627\u0630 ${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${roomName} \u0641\u064a ${hotelName} \u0644\u0647\u0630\u0647 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u062e\u0631\u0649 \u0623\u0648 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631.`;
+		}
+		return `\u0623\u0633\u062a\u0627\u0630 ${name}\u060c ${roomName} \u0641\u064a ${hotelName} \u0628\u0625\u062c\u0645\u0627\u0644\u064a ${localizedMoney(
+			quote.totals.totalPriceWithCommission,
+			quote.currency,
+			"Arabic"
+		)} \u0644\u0645\u062f\u0629 ${localizedNumber(
+			quote.nights,
+			"Arabic"
+		)} \u0644\u064a\u0627\u0644\u064a. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f`;
+	}
 	if (!quote.available) {
 		return `${name}, I do not see priced availability for ${roomName} at ${hotelName} on those dates. I can check another date range or another room type at ${hotelName}.`;
 	}
@@ -2506,6 +2657,11 @@ function missingMandatoryReservationFields(st = {}) {
 	return missing;
 }
 
+function reservationDetailsNeedOnlyChildren(st = {}) {
+	const missing = missingMandatoryReservationFields(st);
+	return missing.length === 1 && missing[0] === "children";
+}
+
 function hasMandatoryReservationDetails(st = {}) {
 	return missingMandatoryReservationFields(st).length === 0;
 }
@@ -3372,13 +3528,16 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 						gregorian.checkout || usDate(st.slots?.checkoutISO)
 				  }`;
 		if (isArabic) {
+			const dates = localizedStayDateLines(sc, st);
+			const localizedTotal = total ? localizedMoney(total, currency, "Arabic") : "";
 			return [
-				`${respectfulAddress}، هذه مراجعة سريعة قبل الإتمام:`,
-				`الفندق: ${hotel}`,
-				`الغرفة: ${room}`,
-				`التواريخ: ${dateLine}`,
-				total ? `الإجمالي: ${total} ${currency}` : "",
-				`اكتب confirm للإتمام، أو أخبرني بما تريد تغييره.`,
+				`${respectfulAddress}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+				`\u0627\u0644\u0641\u0646\u062f\u0642: ${context.hotelLocalized || hotel}`,
+				`\u0627\u0644\u063a\u0631\u0641\u0629: ${context.roomLocalized || room}`,
+				`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary || dateLine}`,
+				dates.secondary || "",
+				localizedTotal ? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${localizedTotal}` : "",
+				`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
 			]
 				.filter(Boolean)
 				.join("\n");
@@ -3563,6 +3722,9 @@ async function write(io, sc, st, instruction, context = {}) {
 			: `Represent Jannat Booking directly.`,
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
+		/arabic/i.test(targetLanguage)
+			? `Arabic output rule: use natural Arabic hospitality wording. Do not write English commands such as "confirm" or "skip"; use "\u062a\u0623\u0643\u064a\u062f" and "\u062a\u062e\u0637\u064a". Write SAR as "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a" in customer-facing Arabic. Prefer Arabic hotel and room names from context when available.`
+			: "",
 		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
@@ -3884,6 +4046,10 @@ function activeQuoteMatchesSlots(st = {}) {
 function hijriGregorianDateLine(sc = {}, st = {}) {
 	const display = stayDateDisplay(st);
 	if (!display.hijri?.checkin || !display.hijri?.checkout) return "";
+	if (/arabic/i.test(languageOf(sc, st))) {
+		const dates = localizedStayDateLines(sc, st);
+		return `\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary} (${dates.secondary})`;
+	}
 	const gregorianLine = `${display.gregorian.checkin || display.gregorian.checkinISO} to ${
 		display.gregorian.checkout || display.gregorian.checkoutISO
 	}`;
@@ -3911,7 +4077,9 @@ function ensureHijriGregorianDatesVisible(text = "", sc = {}, st = {}) {
 function buildReservationReviewPayload(st = {}, quote = {}) {
 	return {
 		hotel: toTitle(st.hotel?.hotelName || "Hotel"),
+		hotelLocalized: localizedHotelName({}, st),
 		room: quote.room?.displayName || quote.room?.roomType || st.slots.roomTypeKey,
+		roomLocalized: localizedRoomName({}, st, quote),
 		roomsCount: st.slots.rooms || 1,
 		currency: quote.currency,
 		nights: quote.nights,
@@ -3929,6 +4097,75 @@ function buildReservationReviewPayload(st = {}, quote = {}) {
 	};
 }
 
+function reservationReviewPrompt(sc = {}, st = {}) {
+	if (/arabic/i.test(languageOf(sc, st))) {
+		return [
+			"Present a brief reservation review entirely in Arabic before finalizing.",
+			"Use the localized hotel and room names from context when available.",
+			"If raw dates were Hijri, show the Hijri range and the matching Gregorian range.",
+			"Use Arabic wording for money, e.g. \"\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a\", not SAR.",
+			"End with Arabic only: \"\u0627\u0643\u062a\u0628 \\\"\u062a\u0623\u0643\u064a\u062f\\\" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.\"",
+			"Do not use the English word confirm.",
+		].join(" ");
+	}
+	return "Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.";
+}
+
+function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
+	if (!/arabic/i.test(languageOf(sc, st)) || !quote?.available) return "";
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote.totals?.totalPriceWithCommission;
+	const perNight =
+		quote.nights && total
+			? Math.round((total / Math.max(1, quote.nights)) * 100) / 100
+			: null;
+	const lines = [
+		`${respectfulGuestName(
+			sc,
+			st
+		)}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+		`\u0627\u0644\u0641\u0646\u062f\u0642: ${localizedHotelName(sc, st)}`,
+		`\u0627\u0644\u063a\u0631\u0641\u0629: ${localizedRoomName(sc, st, quote)}`,
+		`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}`,
+		dates.secondary ? dates.secondary : "",
+		quote.nights
+			? `\u0639\u062f\u062f \u0627\u0644\u0644\u064a\u0627\u0644\u064a: ${localizedNumber(
+					quote.nights,
+					"Arabic"
+			  )}`
+			: "",
+		perNight
+			? `\u0627\u0644\u0633\u0639\u0631: ${localizedMoney(
+					perNight,
+					quote.currency,
+					"Arabic"
+			  )} \u0644\u0644\u064a\u0644\u0629`
+			: "",
+		total
+			? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${localizedMoney(
+					total,
+					quote.currency,
+					"Arabic"
+			  )}`
+			: "",
+		`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
+	];
+	return lines.filter(Boolean).join("\n");
+}
+
+async function composeReservationReviewText(io, sc, st, quote, reviewPayload) {
+	const deterministic = deterministicArabicReservationReview(sc, st, quote);
+	if (deterministic) return deterministic;
+	let reviewText = await write(
+		io,
+		sc,
+		st,
+		reservationReviewPrompt(sc, st),
+		reviewPayload || buildReservationReviewPayload(st, quote)
+	);
+	return ensureHijriGregorianDatesVisible(reviewText, sc, st);
+}
+
 async function sendReservationReview(io, sc, st, quote = null) {
 	const q = quote || st.quote?.data;
 	if (!q?.available) {
@@ -3937,14 +4174,7 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	}
 	const reviewPayload = buildReservationReviewPayload(st, q);
 	logStep(String(sc._id), "review.summaryBuilt", reviewPayload);
-	let reviewText = await write(
-		io,
-		sc,
-		st,
-		"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.",
-		reviewPayload
-	);
-	reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
+	const reviewText = await composeReservationReviewText(io, sc, st, q, reviewPayload);
 	const sent = await humanSend(io, sc, st, reviewText, {
 		quickReplies: confirmationQuickReplies(sc, st),
 	});
@@ -6220,33 +6450,15 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "proceed") {
 			if (confirmsText(userText)) {
 				const q = st.quote?.data || quote;
-				const reviewPayload = {
-					hotel: toTitle(st.hotel?.hotelName || "Hotel"),
-					room: q.room?.displayName || q.room?.roomType || st.slots.roomTypeKey,
-					roomsCount: st.slots.rooms || 1,
-					currency: q.currency,
-					nights: q.nights,
-					totals: q.totals,
-					perNightAvg:
-						Math.round(
-							(q.totals.totalPriceWithCommission / Math.max(1, q.nights)) * 100
-						) / 100,
-					gregorian: {
-						checkin: usDate(st.slots.checkinISO),
-						checkout: usDate(st.slots.checkoutISO),
-					},
-					dateDisplay: stayDateDisplay(st),
-					rawDates: st.dateRaw,
-				};
+				const reviewPayload = buildReservationReviewPayload(st, q);
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				let reviewText = await write(
+				const reviewText = await composeReservationReviewText(
 					io,
 					sc,
 					st,
-					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.'",
+					q,
 					reviewPayload
 				);
-				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
 				const sent = await humanSend(io, sc, st, reviewText, {
 					quickReplies: confirmationQuickReplies(sc, st),
 				});
@@ -6272,30 +6484,13 @@ async function planTurn(io, sc) {
 			) {
 				// Review
 				const q = st.quote?.data || quote;
-				const reviewPayload = {
-					hotel: toTitle(st.hotel?.hotelName || "Hotel"),
-					room: q.room?.displayName || q.room?.roomType || st.slots.roomTypeKey,
-					roomsCount: st.slots.rooms || 1,
-					currency: q.currency,
-					nights: q.nights,
-					totals: q.totals,
-					perNightAvg:
-						Math.round(
-							(q.totals.totalPriceWithCommission / Math.max(1, q.nights)) * 100
-						) / 100,
-					gregorian: {
-						checkin: usDate(st.slots.checkinISO),
-						checkout: usDate(st.slots.checkoutISO),
-					},
-					dateDisplay: stayDateDisplay(st),
-					rawDates: st.dateRaw,
-				};
+				const reviewPayload = buildReservationReviewPayload(st, q);
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				let reviewText = await write(
+				let reviewText = await composeReservationReviewText(
 					io,
 					sc,
 					st,
-					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type “confirm” to finalize, or tell me what to change.'",
+					q,
 					reviewPayload
 				);
 				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
