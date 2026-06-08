@@ -96,6 +96,17 @@ const stripAgentRoomOverrides = (hotel = {}) => {
 const PUBLIC_HOTEL_CACHE_TTL_MS = 60 * 1000;
 const PUBLIC_HOTEL_CACHE_MAX_KEYS = 80;
 const publicHotelResponseCache = new Map();
+const DEFAULT_PUBLIC_CURRENCY_RATES = { SAR_USD: 0.27, SAR_EUR: 0.25 };
+const PUBLIC_CURRENCY_RATES_CACHE_TTL_MS = Number(
+	process.env.PUBLIC_CURRENCY_RATES_CACHE_TTL_MS || 6 * 60 * 60 * 1000,
+);
+const PUBLIC_CURRENCY_RATES_TIMEOUT_MS = Number(
+	process.env.PUBLIC_CURRENCY_RATES_TIMEOUT_MS || 1500,
+);
+let publicCurrencyRatesCache = {
+	value: null,
+	fetchedAt: 0,
+};
 
 const PUBLIC_HOTEL_LIST_SELECT = [
 	"hotelName",
@@ -281,6 +292,17 @@ const sendCachedPublicJson = async (req, res, cacheKey, loader) => {
 	const value = await loader();
 	publicCacheSet(cacheKey, value);
 	return res.status(200).json(value);
+};
+
+const fetchJsonWithTimeout = async (url, timeoutMs) => {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const response = await fetch(url, { signal: controller.signal });
+		return response.json();
+	} finally {
+		clearTimeout(timeout);
+	}
 };
 
 const parseBooleanFlag = (value) =>
@@ -2207,35 +2229,54 @@ exports.gettingCurrencyConversion = (req, res) => {
 };
 
 exports.getCurrencyRates = async (req, res) => {
+	res.setHeader("Cache-Control", "public, max-age=300, s-maxage=900");
+
+	const cached = publicCurrencyRatesCache.value;
+	if (
+		cached &&
+		Date.now() - publicCurrencyRatesCache.fetchedAt <
+			PUBLIC_CURRENCY_RATES_CACHE_TTL_MS
+	) {
+		return res.json(cached);
+	}
+
 	try {
 		const baseUrl = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE}/pair/SAR/`;
 
 		// Fetch conversion rates for USD and EUR
 		const [usdResponse, eurResponse] = await Promise.all([
-			fetch(`${baseUrl}USD`),
-			fetch(`${baseUrl}EUR`),
+			fetchJsonWithTimeout(`${baseUrl}USD`, PUBLIC_CURRENCY_RATES_TIMEOUT_MS),
+			fetchJsonWithTimeout(`${baseUrl}EUR`, PUBLIC_CURRENCY_RATES_TIMEOUT_MS),
 		]);
 
-		// Parse JSON responses
-		const usdData = await usdResponse.json();
-		const eurData = await eurResponse.json();
-
 		// Check for successful responses
-		if (usdData.result !== "success" || eurData.result !== "success") {
-			return res.status(500).json({ error: "Failed to fetch currency rates" });
+		if (
+			usdResponse.result !== "success" ||
+			eurResponse.result !== "success"
+		) {
+			throw new Error("Currency provider returned a non-success response");
 		}
 
 		// Construct rates object
 		const rates = {
-			SAR_USD: usdData.conversion_rate,
-			SAR_EUR: eurData.conversion_rate,
+			SAR_USD: usdResponse.conversion_rate,
+			SAR_EUR: eurResponse.conversion_rate,
+		};
+
+		publicCurrencyRatesCache = {
+			value: rates,
+			fetchedAt: Date.now(),
 		};
 
 		// Respond with rates
 		res.json(rates);
 	} catch (error) {
-		console.error("Error fetching currency rates:", error);
-		res.status(500).json({ error: "An error occurred while fetching rates" });
+		console.warn("Currency rates fetch failed; using cached/fallback rates.", {
+			name: error?.name || "Error",
+			type: error?.type || null,
+			code: error?.code || error?.errno || null,
+		});
+		res.json(cached || DEFAULT_PUBLIC_CURRENCY_RATES);
 	}
 };
 
