@@ -2783,6 +2783,22 @@ function latestTurnDateRange(text = "", lu = {}) {
 	};
 }
 
+function deterministicReservationUpdateLu(text = "", sc = {}, lu = {}) {
+	const dates = latestTurnDateRange(text, lu);
+	const confirmation =
+		lu?.confirmation || confirmationFromText(text) || latestKnownConfirmation(sc, lu);
+	return {
+		...(lu || {}),
+		confirmation: confirmation || null,
+		dates: {
+			...(lu?.dates || {}),
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+			raw: dates.raw || lu?.dates?.raw || null,
+		},
+	};
+}
+
 function reservationUpdateChoiceQuickReplies(sc = {}, st = {}, options = []) {
 	const lang = languageOf(sc, st);
 	return options.slice(0, 3).map((_, index) => {
@@ -4756,6 +4772,28 @@ async function planTurn(io, sc) {
 					);
 					return;
 				}
+				const initialUpdateLu = deterministicReservationUpdateLu(
+					initialInquiry,
+					sc,
+					{}
+				);
+				if (
+					st.hotel &&
+					initialUpdateLu.confirmation &&
+					initialUpdateLu.dates?.checkinISO &&
+					initialUpdateLu.dates?.checkoutISO &&
+					looksLikeReservationDateUpdate(initialInquiry, initialUpdateLu)
+				) {
+					const handled = await handleReservationUpdateRequest(
+						io,
+						sc,
+						st,
+						initialInquiry,
+						initialUpdateLu,
+						{ forceDateUpdate: true }
+					);
+					if (handled) return;
+				}
 				const greeting = await write(
 					io,
 					sc,
@@ -4863,6 +4901,24 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText
+			);
+			if (handled) return;
+		}
+		const directUpdateLu = deterministicReservationUpdateLu(userText, sc, {});
+		if (
+			st.hotel &&
+			directUpdateLu.confirmation &&
+			directUpdateLu.dates?.checkinISO &&
+			directUpdateLu.dates?.checkoutISO &&
+			looksLikeReservationDateUpdate(userText, directUpdateLu)
+		) {
+			const handled = await handleReservationUpdateRequest(
+				io,
+				sc,
+				st,
+				userText,
+				directUpdateLu,
+				{ forceDateUpdate: true }
 			);
 			if (handled) return;
 		}
