@@ -2378,5 +2378,25 @@ Future TODO Backlog - Added 2026-05-26
   - controllers/whatsappsender.js exports waNotifyImmediateSupportEscalation and uses JANNAT_SUPPORT_ESCALATION_WHATSAPP / REACT_APP_JANNAT_SUPPORT_ESCALATION_WHATSAPP or default 9092223374.
 - Maintenance requirements:
   - Keep the strict hotel-only rule for real hotel support cases.
-  - Do not let Jannat Booking concierge support call createReservationForCase or updateReservationDatesForCase before connectJannatCaseToHotelSupport changes the case into hotel scope.
-  - Cross-hotel hotel recommendation links/options are allowed only while st.hotel is absent and the case is Jannat Booking support.
+ - Do not let Jannat Booking concierge support call createReservationForCase or updateReservationDatesForCase before connectJannatCaseToHotelSupport changes the case into hotel scope.
+ - Cross-hotel hotel recommendation links/options are allowed only while st.hotel is absent and the case is Jannat Booking support.
+
+2026-06-08 Jannat Concierge Handoff And Ramadan UX Hardening
+- Last-chat findings addressed:
+  - Jannat Booking concierge could previously advance to "choose one of the hotel options" even if an interrupted AI turn meant the guest never saw the options. aiagent/core/orchestrator.js now only advances platform_hotel_choice after humanSend succeeds, and retry prompts relist the actual hotel options.
+  - Platform concierge recommendation replies now have a deterministic fallback list. If the writer output does not visibly include the option hotel names, the backend sends a clear numbered list with room label, distance, and exact total when dates are known.
+  - Jannat-to-hotel transfer now sends a neutral system breaker message after the concierge note, then waits 5-8 seconds by default before the selected hotel assistant replies. The delay is controlled by AI_JANNAT_HANDOFF_DELAY_MIN_MS / AI_JANNAT_HANDOFF_DELAY_MAX_MS.
+  - If the guest types during the transfer pause, the hotel intro is cancelled and the queued guest message is handled in the new hotel scope, preventing robotic back-to-back replies.
+- Ramadan / Hijri handling:
+  - No-year Ramadan ranges now mean the upcoming Ramadan, not an arbitrary future year.
+  - aiagent/core/nlu.js accepts ordinal and typo-tolerant Hijri phrasing such as "1 Ramadan to 10th of Ramadan", "1 Ramadan to 10th or Ramadan", and separately supplied Hijri years.
+  - A later guest reply containing only the missing Hijri year is combined with the previous Ramadan range and then proceeds to availability/pricing instead of stalling.
+  - Quote and review messages are hardened to show both Hijri and Gregorian/Miladi dates when the guest supplied Hijri dates.
+- Button expectations:
+  - Reservation quote messages continue to include proceed/decline quickReplies.
+  - Reservation review confirmation continues to include Confirm / Something is wrong quickReplies in the active language.
+  - Optional email collection continues to include a localized Skip quickReply.
+- Verification:
+  - node --check passed for aiagent/core/orchestrator.js and aiagent/core/nlu.js.
+  - Node smoke tests confirmed "1 ramadan to 10th or ramadan" and "1 Ramadan to 10th of Ramadan" resolve to 1-10 Ramadan 1448 AH / 2027-02-08 to 2027-02-17 from the current production timeframe.
+  - git diff --check passed apart from normal Windows LF-to-CRLF warnings.

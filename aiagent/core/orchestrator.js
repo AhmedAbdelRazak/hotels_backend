@@ -108,6 +108,18 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
+const JANNAT_HANDOFF_DELAY_MIN_MS = intFromEnv(
+	"AI_JANNAT_HANDOFF_DELAY_MIN_MS",
+	5000,
+	{ min: 0, max: 20000 }
+);
+const JANNAT_HANDOFF_DELAY_MAX_MS = Math.max(
+	JANNAT_HANDOFF_DELAY_MIN_MS,
+	intFromEnv("AI_JANNAT_HANDOFF_DELAY_MAX_MS", 8000, {
+		min: 0,
+		max: 20000,
+	})
+);
 
 const SOFT_PIVOT_MS = 35000;
 const QUOTE_SUMMARY_COOLDOWN = 45000;
@@ -385,6 +397,13 @@ function activeHotelContextForCase(sc = {}, hotel = null) {
 
 async function sleep(ms) {
 	return new Promise((r) => setTimeout(r, ms));
+}
+async function sleepUnlessInterrupted(st, ms, stepMs = 150) {
+	for (let elapsed = 0; elapsed < ms; elapsed += stepMs) {
+		if (st?.interrupt) return false;
+		await sleep(Math.min(stepMs, ms - elapsed));
+	}
+	return !st?.interrupt;
 }
 async function humanPause() {
 	await sleep(randomBetween(HUMAN.betweenSendsMinMs, HUMAN.betweenSendsMaxMs));
@@ -1070,6 +1089,99 @@ function sameId(a, b) {
 	return Boolean(left && right && left === right);
 }
 
+function platformOptionLine(option = {}, index = 0, hasDates = false) {
+	const number = index + 1;
+	const room = option.roomLabel || roomTypeLabel(option.roomTypeKey || "");
+	const total =
+		hasDates && Number(option.total || 0) > 0
+			? ` - ${option.total} ${cleanCurrency(option.currency)} total for ${option.nights || "the stay"} nights`
+			: "";
+	const distance = [option.walking, option.driving].filter(Boolean).join(", ");
+	return `${number}. ${option.hotelName} - ${room}${total}${
+		distance ? ` - ${distance}` : ""
+	}`;
+}
+
+function platformHotelOptionsFallbackText(sc = {}, st = {}, options = [], hasDates = false) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (!options.length) {
+		if (/arabic/i.test(lang)) {
+			return `${name}، لا أرى خيارات مناسبة متاحة الآن حسب التفاصيل الحالية. أرسل تواريخ أو ميزانية مختلفة وسأراجع لك أقرب خيارات مناسبة.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `${name}, no veo opciones adecuadas disponibles ahora con esos detalles. Enviame otras fechas o presupuesto y reviso las mejores alternativas cercanas.`;
+		}
+		if (/french/i.test(lang)) {
+			return `${name}, je ne vois pas d'options adaptees disponibles avec ces details. Envoyez d'autres dates ou un budget different et je verifierai les meilleures options proches.`;
+		}
+		return `${name}, I do not see a suitable available option with the current details. Send different dates or budget and I will check the closest good options.`;
+	}
+	const lines = options
+		.slice(0, 4)
+		.map((option, index) => platformOptionLine(option, index, hasDates));
+	if (/arabic/i.test(lang)) {
+		return [
+			`${name}، هذه أفضل الخيارات التي وجدتها لك:`,
+			...lines,
+			"دعم جنة بوكينج يساعدك في المقارنة والأسعار، لكن تأكيد الحجز الرسمي وروابط التفاصيل/الدفع تتم من خلال دعم الفندق المختار.",
+			"أي فندق تحب أن أوصلك بدعمه؟",
+		].join("\n");
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			`${name}, estas son las mejores opciones que encontre para ti:`,
+			...lines,
+			"Jannat Booking puede ayudarte a comparar opciones y precios, pero la confirmacion oficial y los enlaces de detalles/pago los completa el soporte del hotel elegido.",
+			"Con que hotel te gustaria que te conecte?",
+		].join("\n");
+	}
+	if (/french/i.test(lang)) {
+		return [
+			`${name}, voici les meilleures options que j'ai trouvees pour vous :`,
+			...lines,
+			"Jannat Booking peut vous aider a comparer les options et les prix, mais la confirmation officielle et les liens details/paiement sont traites par le support de l'hotel choisi.",
+			"A quel hotel souhaitez-vous que je vous connecte ?",
+		].join("\n");
+	}
+	return [
+		`${name}, these are the best options I found for you:`,
+		...lines,
+		"Jannat Booking can help compare options and pricing, but the official reservation confirmation and details/payment links are completed by the selected hotel's support desk.",
+		"Which hotel would you like me to connect you with?",
+	].join("\n");
+}
+
+function ensurePlatformOptionsVisible(reply = "", sc = {}, st = {}, options = [], hasDates = false) {
+	const text = String(reply || "").trim();
+	if (!options.length) return text || platformHotelOptionsFallbackText(sc, st, options, hasDates);
+	const visibleNames = options.filter((option) =>
+		text.toLowerCase().includes(String(option.hotelName || "").toLowerCase())
+	);
+	if (visibleNames.length >= Math.min(2, options.length)) return text;
+	return platformHotelOptionsFallbackText(sc, st, options, hasDates);
+}
+
+function transferSystemNoticeText(sc = {}, st = {}, { hotelName = "", agentName = "" } = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `تم تحويل المحادثة إلى دعم ${hotelName}. ${agentName || "ممثل الفندق"} يراجع الطلب الآن، وسيعود لك بعد لحظات.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `La conversacion fue transferida al soporte de ${hotelName}. ${agentName || "El representante del hotel"} esta revisando tu solicitud y respondera en unos momentos.`;
+	}
+	if (/french/i.test(lang)) {
+		return `La conversation a ete transferee au support de ${hotelName}. ${agentName || "Le representant de l'hotel"} examine votre demande et repondra dans quelques instants.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+	}
+	return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+}
+
 function platformHotelOptionQuickReplies(sc = {}, st = {}) {
 	const options = Array.isArray(st.platformHotelOptions)
 		? st.platformHotelOptions
@@ -1199,8 +1311,9 @@ async function answerSelectedHotelRoomQuestion(
 		activeRoomOptions: matchingRooms.length ? [] : activeRooms,
 		slots: st.slots,
 	});
+	const sent = await humanSend(io, sc, st, reply);
+	if (!sent) return;
 	if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
-	await humanSend(io, sc, st, reply);
 	st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
 }
 
@@ -1367,7 +1480,7 @@ async function buildJannatBookingHotelOptions({
 	st.platformHotelOptions = options;
 	st.slots.roomTypeKey = selectedRoomTypeKey;
 
-	const reply = await write(
+	const draftedReply = await write(
 		null,
 		sc,
 		st,
@@ -1392,6 +1505,13 @@ async function buildJannatBookingHotelOptions({
 			})),
 		}
 	);
+	const reply = ensurePlatformOptionsVisible(
+		draftedReply,
+		sc,
+		st,
+		options,
+		hasDates
+	);
 	return {
 		reply,
 		options,
@@ -1412,11 +1532,12 @@ async function answerJannatBookingHotelOptions(
 		st,
 		requestedRoomTypeKey,
 	});
-	await humanSend(io, sc, st, result.reply, {
+	const sent = await humanSend(io, sc, st, result.reply, {
 		quickReplies: result.options.length
 			? platformHotelOptionQuickReplies(sc, st)
 			: [],
 	});
+	if (!sent) return false;
 	st.waitFor = result.options.length ? "platform_hotel_choice" : "dates";
 	return true;
 }
@@ -1436,6 +1557,7 @@ async function connectJannatCaseToHotelSupport(
 		: await getHotelById(targetHotelId);
 	if (!hotel) return false;
 	const hotelName = toTitle(hotel.hotelName || optionOrHotel.hotelName || "the hotel");
+	const conciergeAgentName = st.agentName;
 	const conciergeText = await write(
 		io,
 		sc,
@@ -1449,13 +1571,14 @@ async function connectJannatCaseToHotelSupport(
 			selectedOption: optionOrHotel,
 		}
 	);
-	await humanSend(
+	const conciergeSent = await humanSend(
 		io,
 		sc,
 		st,
 		conciergeText ||
 			`Great, I will connect you with ${hotelName} support now so their team can handle the official confirmation and links.`
 	);
+	if (!conciergeSent) return false;
 
 	const nextAgentName = chooseHotelHandoffAgentName(
 		caseId,
@@ -1493,6 +1616,30 @@ async function connectJannatCaseToHotelSupport(
 		io.emit("supportCaseUpdated", updatedCase);
 	}
 
+	await sendSystemNotice(
+		io,
+		sc,
+		transferSystemNoticeText(sc, st, {
+			hotelName,
+			agentName: nextAgentName,
+			fromAgentName: conciergeAgentName,
+		})
+	);
+	const handoffDelay = randomBetween(
+		JANNAT_HANDOFF_DELAY_MIN_MS,
+		JANNAT_HANDOFF_DELAY_MAX_MS
+	);
+	logStep(caseId, "jannat_handoff.delay", {
+		ms: handoffDelay,
+		hotelName,
+		nextAgentName,
+	});
+	const delayCompleted = await sleepUnlessInterrupted(st, handoffDelay);
+	if (!delayCompleted) {
+		logStep(caseId, "jannat_handoff.interrupted", { hotelName, nextAgentName });
+		return true;
+	}
+
 	const introInstruction =
 		reason === "reservation_update"
 			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
@@ -1510,12 +1657,13 @@ async function connectJannatCaseToHotelSupport(
 		confirmation,
 		requestedDates,
 	});
-	await humanSend(io, sc, st, hotelIntro, {
+	const introSent = await humanSend(io, sc, st, hotelIntro, {
 		quickReplies:
 			reason === "new_reservation" && optionOrHotel?.quote?.available
 				? proceedQuickReplies(sc, st)
 				: [],
 	});
+	if (!introSent) return true;
 	st.waitFor =
 		reason === "reservation_update"
 			? "reservation_update_clarify"
@@ -1536,14 +1684,19 @@ async function handlePlatformHotelChoice(io, sc, st, userText) {
 	if (!options.length) return false;
 	const index = parsePlatformHotelChoice(userText, options);
 	if (index < 0) {
-		await humanSend(
+		const sent = await humanSend(
 			io,
 			sc,
 			st,
-			"Of course. Please choose one of the hotel options, and I will connect you with that hotel's support desk for the official confirmation.",
+			platformHotelOptionsFallbackText(
+				sc,
+				st,
+				options,
+				Boolean(st.slots.checkinISO && st.slots.checkoutISO)
+			),
 			{ quickReplies: platformHotelOptionQuickReplies(sc, st) }
 		);
-		st.waitFor = "platform_hotel_choice";
+		if (sent) st.waitFor = "platform_hotel_choice";
 		return true;
 	}
 	return connectJannatCaseToHotelSupport(io, sc, st, options[index], {
@@ -1805,6 +1958,27 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
 	st.lastBotText = text;
+	return true;
+}
+
+async function sendSystemNotice(io, sc, text) {
+	if (!text) return false;
+	const caseId = String(sc._id || sc.id || "unknown");
+	const messageData = {
+		messageBy: {
+			customerName: "System",
+			customerEmail: AI_SUPPORT_EMAIL,
+			userId: "jannat-system",
+		},
+		message: text,
+		date: new Date(),
+		isSystem: true,
+	};
+	await updateSupportCaseAppend(caseId, {
+		conversation: messageData,
+		aiRelated: true,
+	});
+	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 	return true;
 }
 
@@ -2444,6 +2618,28 @@ function lastUserText(sc) {
 			);
 		});
 	return lastUser?.message || "";
+}
+
+function lastAssistantText(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const lastAssistant = [...conversation]
+		.reverse()
+		.find((message) => !message?.isSystem && isAiConversationMessage(message));
+	return String(lastAssistant?.message || "");
+}
+
+function hijriYearOnlyOrClarificationText(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	if (!/\b(?:1[34]\d{2}|15\d{2})\b/.test(normalized)) return false;
+	return !/\b(?:price|rate|availability|available|room|hotel|book|reserve|payment|confirmation)\b/i.test(
+		normalized
+	);
+}
+
+function assistantAskedForDateOrHijriYear(text = "") {
+	return /which\s+(?:ramadan|hijri|islamic)\s+year|which\s+year|ramadan\s+year|hijri\s+year|check\s*-?\s*in|check\s*-?\s*out|dates?|month\s+is\s+required|\u0631\u0645\u0636\u0627\u0646|\u0627\u0644\u0633\u0646\u0629|\u062a\u0627\u0631\u064a\u062e|\u062a\u0648\u0627\u0631\u064a\u062e/i.test(
+		String(text || "")
+	);
 }
 
 function recentConversationLines(sc = {}, st = {}) {
@@ -3303,17 +3499,20 @@ async function shareKnownStayQuote(io, sc, st) {
 		reason: quote.reason || null,
 		roomTypeKey: st.slots.roomTypeKey,
 	});
-	const quoteReply = await write(
+	let quoteReply = await write(
 		io,
 		sc,
 		st,
 		"Share the availability and price result from the quote context. If the guest provided Hijri dates, mention the Hijri range and the matching Gregorian range. If unavailable, offer another date range or room type. If available, ask one concise follow-up about whether to continue.",
 		{ quote, dates: stayDateDisplay(st) }
 	);
-	await humanSend(io, sc, st, quoteReply, {
+	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
+	const sent = await humanSend(io, sc, st, quoteReply, {
 		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
 	});
+	if (!sent) return false;
 	st.waitFor = "proceed";
+	return true;
 }
 
 function quoteKeyForSlots(st = {}) {
@@ -3326,6 +3525,33 @@ function quoteKeyForSlots(st = {}) {
 function activeQuoteMatchesSlots(st = {}) {
 	const key = quoteKeyForSlots(st);
 	return Boolean(key && st.quote?.key === key && st.quote?.data);
+}
+
+function hijriGregorianDateLine(sc = {}, st = {}) {
+	const display = stayDateDisplay(st);
+	if (!display.hijri?.checkin || !display.hijri?.checkout) return "";
+	const gregorianLine = `${display.gregorian.checkin || display.gregorian.checkinISO} to ${
+		display.gregorian.checkout || display.gregorian.checkoutISO
+	}`;
+	const hijriLine = `${display.hijri.checkin} to ${display.hijri.checkout}`;
+	if (/arabic/i.test(languageOf(sc, st))) {
+		return `التواريخ: ${hijriLine} (الميلادي: ${gregorianLine})`;
+	}
+	return `Dates: ${hijriLine} (Gregorian/Miladi: ${gregorianLine})`;
+}
+
+function ensureHijriGregorianDatesVisible(text = "", sc = {}, st = {}) {
+	const line = hijriGregorianDateLine(sc, st);
+	if (!line) return text;
+	const current = String(text || "").trim();
+	const haystack = current.toLowerCase();
+	const hasHijri = /hijri|ah|ramadan|\u0631\u0645\u0636\u0627\u0646/.test(haystack);
+	const hasGregorian =
+		/gregorian|miladi|\b20\d{2}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}\/20\d{2}\b|\u0645\u064a\u0644\u0627\u062f/i.test(
+			current
+		);
+	if (hasHijri && hasGregorian) return current;
+	return [current, line].filter(Boolean).join("\n");
 }
 
 function buildReservationReviewPayload(st = {}, quote = {}) {
@@ -3357,16 +3583,18 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	}
 	const reviewPayload = buildReservationReviewPayload(st, q);
 	logStep(String(sc._id), "review.summaryBuilt", reviewPayload);
-	const reviewText = await write(
+	let reviewText = await write(
 		io,
 		sc,
 		st,
 		"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.",
 		reviewPayload
 	);
-	await humanSend(io, sc, st, reviewText, {
+	reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
+	const sent = await humanSend(io, sc, st, reviewText, {
 		quickReplies: confirmationQuickReplies(sc, st),
 	});
+	if (!sent) return false;
 	st.reviewSent = true;
 	st.waitFor = "reviewConfirm";
 	stampAsk(st, "reviewConfirm");
@@ -3951,7 +4179,8 @@ async function askForReservationDetail(io, sc, st, step) {
 		quickReplies = emailQuickReplies(sc, st);
 	}
 	if (!prompt) return;
-	await humanSend(io, sc, st, prompt, { quickReplies });
+	const sent = await humanSend(io, sc, st, prompt, { quickReplies });
+	if (!sent) return;
 	stampAsk(st, step);
 }
 
@@ -4288,6 +4517,38 @@ async function planTurn(io, sc) {
 		}
 
 		hydrateKnownSlotsFromConversation(sc, st);
+		if (
+			st.slots.roomTypeKey &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			(st.waitFor === "dates" ||
+				(hijriYearOnlyOrClarificationText(userText) &&
+					assistantAskedForDateOrHijriYear(lastAssistantText(sc))) ||
+				(confirmsText(userText) &&
+					assistantAskedForDateOrHijriYear(lastAssistantText(sc))))
+		) {
+			logStep(caseId, "dates.completed_from_context", {
+				roomTypeKey: st.slots.roomTypeKey,
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+				waitFor: st.waitFor,
+			});
+			if (st.hotel) {
+				await shareKnownStayQuote(io, sc, st);
+			} else {
+				await answerJannatBookingHotelOptions(
+					io,
+					sc,
+					st,
+					userText,
+					st.slots.roomTypeKey
+				);
+			}
+			return;
+		}
 		if (!st.hotel && hotelComplaintText(userText)) {
 			await handoffToHuman(io, sc, st, "jannat_hotel_complaint");
 			return;
@@ -5152,16 +5413,18 @@ async function planTurn(io, sc) {
 				},
 				dateDisplay: stayDateDisplay(st),
 			};
-			const quoteMsg = await write(
+			let quoteMsg = await write(
 				io,
 				sc,
 				st,
 				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: proceed to confirm?",
 				display
 			);
-			await humanSend(io, sc, st, quoteMsg, {
+			quoteMsg = ensureHijriGregorianDatesVisible(quoteMsg, sc, st);
+			const sent = await humanSend(io, sc, st, quoteMsg, {
 				quickReplies: proceedQuickReplies(sc, st),
 			});
+			if (!sent) return;
 			st.quoteSummarizedAt = now();
 		}
 		st.waitFor = "proceed";
@@ -5189,16 +5452,18 @@ async function planTurn(io, sc) {
 					rawDates: st.dateRaw,
 				};
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				const reviewText = await write(
+				let reviewText = await write(
 					io,
 					sc,
 					st,
 					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.'",
 					reviewPayload
 				);
-				await humanSend(io, sc, st, reviewText, {
+				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
+				const sent = await humanSend(io, sc, st, reviewText, {
 					quickReplies: confirmationQuickReplies(sc, st),
 				});
+				if (!sent) return;
 				st.reviewSent = true;
 				st.waitFor = "reviewConfirm";
 				return;
@@ -5239,16 +5504,18 @@ async function planTurn(io, sc) {
 					rawDates: st.dateRaw,
 				};
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				const reviewText = await write(
+				let reviewText = await write(
 					io,
 					sc,
 					st,
 					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type “confirm” to finalize, or tell me what to change.'",
 					reviewPayload
 				);
-				await humanSend(io, sc, st, reviewText, {
+				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
+				const sent = await humanSend(io, sc, st, reviewText, {
 					quickReplies: confirmationQuickReplies(sc, st),
 				});
+				if (!sent) return;
 				st.reviewSent = true;
 				st.waitFor = "reviewConfirm";
 				return;
