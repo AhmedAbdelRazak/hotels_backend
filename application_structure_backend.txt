@@ -1197,6 +1197,14 @@ Future TODO Backlog - Added 2026-05-26
   - After final confirmation, st.waitFor="post_booking_followup". The AI waits for the guest's answer, closes warmly on no/thanks, asks for details on vague yes, or passes a concrete new request back into normal orchestration.
   - Nationality is required by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=false only if the business explicitly allows skipping it.
   - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
+  - 2026-06-08 chatbot reservation UX hardening:
+    - Default human-style pacing is faster: think 120-350ms, greet think 300ms, type char 2-5ms, type clamp 450-1800ms, and between-sends 150-350ms unless environment overrides are set.
+    - Review/confirmation detection accepts native Arabic confirmation words and common Arabizi/Franko spellings such as ta2keed, takeed, takid, and t2keed. "confirmation number" style existing-reservation references must not be treated as approval.
+    - AI review prompts can carry quickReplies persisted on SupportCase conversation turns. Confirmation prompts include Confirm / Something is wrong style buttons localized by language, and optional email prompts include a Skip button.
+    - After the guest confirms the review, the active flow asks once for mandatory reservation details in one message: full name as in passport, phone, nationality, adults count, and children count. Email is optional and is requested only after the mandatory details are captured.
+    - Guest names are preserved in native script, including Arabic, instead of being ASCII-stripped. Nationality is normalized to English for storage, and localized phone/adult/child digits are normalized to English digits.
+    - aiagent/core/actions.js rejects AI reservation creation if full name, phone, nationality, adults, or children are missing/invalid. It no longer falls back to Guest or blank ASCII output.
+    - Guest-facing final AI copy says the reservation is confirmed and includes the confirmation number, details link, and payment link. Internal pendingConfirmation.status remains pending with clientVisibleStatus="confirmed".
   - The chatbot model stack is configurable and must stay dynamic: use OPENAI_CHATBOT_MODEL, OPENAI_CHATBOT_WRITER_MODEL, OPENAI_CHATBOT_NLU_MODEL, and the central model picker instead of hardcoded model names. The current quality-first default is gpt-5.5 for more polished, human-like customer-facing support. Do not use invalid model slugs such as gpt-5.3; they force fallback text and make the bot feel less human.
   - GPT-5-style chatbot calls default to OPENAI_CHATBOT_REASONING_EFFORT=medium with gpt-5.5. Lower only if measured latency/cost becomes more important than conversational quality.
   - Detailed AI step logs are disabled unless AI_AGENT_DEBUG=true. Keep production default quiet so names, phones, slots, and QA transcript details are not written to PM2 logs during normal operation.
@@ -1262,16 +1270,16 @@ Future TODO Backlog - Added 2026-05-26
 - Backend behavior:
   - aiagent/core/orchestrator.js now makes human-like response timing configurable by environment variables instead of fixed constants.
   - Defaults keep the chat responsive while preserving a human visible typing cadence:
-    - AI_HUMAN_THINK_MIN_MS default 700.
-    - AI_HUMAN_THINK_MAX_MS default 1400.
-    - AI_HUMAN_GREET_THINK_MS default 1200.
-    - AI_HUMAN_TYPE_CHAR_MIN_MS default 12.
-    - AI_HUMAN_TYPE_CHAR_MAX_MS default 22.
-    - AI_HUMAN_TYPE_CLAMP_MIN_MS default 2200.
-    - AI_HUMAN_TYPE_CLAMP_MAX_MS default 6500.
-    - AI_HUMAN_BETWEEN_SENDS_MIN_MS default 800.
-    - AI_HUMAN_BETWEEN_SENDS_MAX_MS default 1600.
-  - Normal short replies should feel like a person is reviewing/typing for about 3 seconds, while longer replies can take longer without returning to 20-40 second silent waits.
+    - AI_HUMAN_THINK_MIN_MS default 120.
+    - AI_HUMAN_THINK_MAX_MS default 350.
+    - AI_HUMAN_GREET_THINK_MS default 300.
+    - AI_HUMAN_TYPE_CHAR_MIN_MS default 2.
+    - AI_HUMAN_TYPE_CHAR_MAX_MS default 5.
+    - AI_HUMAN_TYPE_CLAMP_MIN_MS default 450.
+    - AI_HUMAN_TYPE_CLAMP_MAX_MS default 1800.
+    - AI_HUMAN_BETWEEN_SENDS_MIN_MS default 150.
+    - AI_HUMAN_BETWEEN_SENDS_MAX_MS default 350.
+  - Normal short replies should feel responsive with a visible typing cadence, while longer replies should avoid returning to 20-40 second silent waits.
   - Frontend language selection should expose a single Arabic option. Dialect/tone such as Modern Standard Arabic, Egyptian, Algerian, or other regional Arabic is inferred by the orchestrator from the guest's messages, not chosen as separate frontend options.
   - AI_INSTANT_PROGRESS_ENABLED should default to false for production conversational quality. Prefer one thoughtful typed answer over extra "checking..." progress messages, unless a measured operation truly needs an interim acknowledgement.
 
@@ -1388,11 +1396,12 @@ Future TODO Backlog - Added 2026-05-26
   - Normal guest/support parentheses remain ordinary chat text.
   - controllers/aiagent_learning.js has the same rule for support-case learning analysis so manual and historical learning stay consistent.
 - AI reservation creation flow:
-  - aiagent/core/orchestrator.js fixed the post-review slot collection state machine. After the review confirmation, the bot asks once for full name, nationality, phone, and email/skip, then captures the next guest answer instead of repeatedly asking the same field.
+  - aiagent/core/orchestrator.js fixed the post-review slot collection state machine. After the review confirmation, the bot asks once for mandatory details in one message: full name as in passport, phone, nationality, adults count, and children count.
+  - Email is optional after mandatory details. The bot asks whether the guest wants confirmation/payment-link delivery by email and offers a Skip quick reply.
   - On finalize, the orchestrator creates the reservation through aiagent/core/actions.js instead of handing off by default.
   - aiagent/core/actions.js now accepts the current quote.pricingByDay shape, builds pickedRoomsType/pickedRoomsPricing daily rows, validates inventory with allowOverbook=false, captures availabilitySnapshot, and marks pendingConfirmation.status="pending".
   - Saved AI reservations use booking_source="AI Chat", payment="Not Paid", financeStatus="not paid", pendingConfirmation.clientVisibleStatus="confirmed", and availabilitySnapshot.source="ai_chat_reservation_create".
-  - Guests receive a friendly created confirmation with reservation details and payment links. Internal hotel staff still review the reservation through the normal pending-confirmation workflow.
+  - Guests receive a friendly confirmed message with reservation details and payment links. Internal hotel staff still review the reservation through the normal pending-confirmation workflow.
   - If creation or inventory validation fails, the bot escalates with aiHandoffReason="reservation_finalize_failed" and uses a booking-specific failure handoff message.
 - Validation completed locally:
   - node -c aiagent/core/nlu.js.
@@ -2182,3 +2191,74 @@ Future TODO Backlog - Added 2026-05-26
   - Pending OTA Platform Review reservations stay hidden from hotel-management until platform admins release them.
   - After release, the hotel sees the reservation as Pending Confirmation and sees only the hotel-visible/root amount.
   - Admin/SUPER ADMIN screens may show safe OTA financial summaries, with platformProfit included only for configured SUPER ADMIN users.
+
+2026-06-08 Hotel-Management Reservation History Visibility Cutoff
+- Rule:
+  - Any hotel-management or hotel-side API consumer that is not a configured SUPER ADMIN or platform employee/admin may only see reservations taken on or after 2026-04-01T00:00:00.000Z.
+  - "Taken" is resolved from booked_at. If booked_at is missing or null, createdAt is used as the fallback.
+  - The cutoff is inclusive: April 1, 2026 UTC and later are visible to hotel-side users.
+  - Configured SUPER_ADMIN_ID / REACT_APP_SUPER_ADMIN_ID users, role 1000 platform admins, and platform employee/admin role descriptions bypass this cutoff and retain full reservation history.
+- Shared helper:
+  - services/reservationVisibility.js owns HOTEL_MANAGEMENT_RESERVATION_VISIBILITY_START and the actor-aware Mongo filters.
+  - Use addHotelManagementReservationVisibilityToFilter, withHotelManagementReservationVisibility, or hotelManagementReservationVisibilityFilterForActor whenever a hotel-management route reads from the Reservations collection.
+- Backend coverage:
+  - controllers/reservations.js applies the cutoff to hotel reservation lists, searches, single-reservation reads by id, occupancy/current/range summaries, check-in feeds, checkout/general reports, pending/commission/collected finance lists, open finance notifications, legacy day/month/source/status charts, and owner aggregation reads.
+  - controllers/overall_dashboard.js applies it to overall reservations, executive reports, summaries, financial actions, commission reconciliation, and inventory report reservation rows.
+  - controllers/hotel_details.js applies it to hotel dashboard stats, executive summaries, open reservations, and incomplete reservation panels.
+  - controllers/adminreports.js applies it to shared hotel-admin reports, exports, payment summaries, occupancy/day reservation reports, paid breakdown, and the admin-dashboard report when the viewer is not a platform/SUPER actor.
+  - controllers/hotel_inventory.js applies it to calendar/day report reservation counts and rows. Do not apply this filter to public availability checks, because old bookings must still protect inventory availability.
+  - controllers/rooms.js applies it to legacy reserved-room and inventory-summary reports that count reservations for hotel-management charts.
+- Route/auth expectation:
+  - Legacy reservation/report GET routes that previously had no auth may now use optionalSignin so a platform/SUPER actor can be recognized for the full-history bypass.
+  - If no valid bearer token is supplied, the request is treated as non-platform and receives only on/after-April-1-2026 reservation history.
+- Maintenance rule:
+  - New /hotel-management/* reservation-derived screens must enforce this in the backend query, not only in React.
+  - /admin/* platform-admin endpoints may keep full history when they are protected by platform-admin auth, but shared controllers must still call the helper so the hotel-admin route variants remain restricted.
+
+2026-06-08 AI Chat Reservation Source Privacy
+- Stored data rule:
+  - AI-created reservations remain stored with booking_source="AI Chat" so platform audit/admin tools can identify the automation source.
+  - Do not rewrite the database source to "Jannat Employee"; masking is response-only.
+- Visibility rule:
+  - /admin/* platform-admin and configured SUPER ADMIN views may see booking_source="AI Chat" when they are not operating through a hotel-management route.
+  - /hotel-management/* views must always display AI-created reservations as booking_source="Jannat Employee", including when the signed-in viewer is a SUPER ADMIN previewing or working inside hotel-management.
+- Immutability rule:
+  - Existing reservation booking_source is locked for everyone except configured SUPER ADMIN users and role-1000 platform admins with AllReservations or HotelsReservations access.
+  - Hotel System Admin, hotel managers, reservation employees, finance users, order takers, agents, public/client flows, and hotel-management users must not change booking_source, even if they can edit other reservation details.
+  - Hotel-management masked source echoes such as an AI Chat reservation coming back as "Jannat Employee" are stripped server-side so normal edits can continue without rewriting the stored source.
+- Backend implementation:
+  - services/reservationVisibility.js owns HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL, the X-Reservation-Source-View route marker, AI-source detection, row masking, and booking-source summary merge helpers.
+  - services/reservationVisibility.js also owns canEditReservationSource. Keep source-edit permission stricter than source/history viewing.
+  - services/auditPrivacy.js masks booking_source, bookingSource, and financial_cycle.sourceName for hotel-management source-view responses while leaving authorized platform-admin responses unmasked.
+  - controllers/reservations.js masks single-hotel lists/details and legacy booking-source/owner aggregation summaries, and blocks unauthorized booking_source / bookingSource / financial_cycle source edits on PUT /reservation-update/:reservationId.
+ - controllers/janat.js strips source fields from public update-reservation-client payloads before saving.
+  - controllers/overall_dashboard.js, hotel_details.js, adminreports.js, hotel_inventory.js, and rooms.js pass the hotel-management source context to reservation sanitizers.
+- Frontend contract:
+  - Hotel-management API clients send X-Reservation-Source-View: hotel-management only while the browser path starts with /hotel-management.
+  - AdminModule API calls for /admin/all-reservations use the admin client and must not send this header, so platform admins can still identify AI Chat reservations.
+
+2026-06-08 SUPER ADMIN Pending-Confirmation Reversion Lock
+- Rule:
+  - Moving an existing reservation back to reservation_status/state = Pending Confirmation is a configured SUPER ADMIN-only action.
+  - Role-1000 platform admins, Hotel System Admins, hotel managers, reservation employees, finance users, order takers, agents, public clients, and hotel-management users must not directly revert a confirmed/accepted/closed workflow decision back to Pending Confirmation.
+  - Normal rejected-reservation correction still uses the existing edit/save flow; meaningful corrections can resubmit rejected rows to Pending Confirmation without exposing a direct revert button.
+- Backend implementation:
+  - controllers/reservations.js enforces this in both PUT /reservation-update/:reservationId and PUT /reservations/pending-confirmation/:reservationId/:userId.
+  - Unauthorized direct payloads that set reservation_status/state to Pending Confirmation or pendingConfirmation.status to pending return code reservation_pending_reversion_super_admin_only.
+  - Authorized SUPER ADMIN reversion resets reservation_status/state to Pending Confirmation, pendingConfirmation.status to pending, agentDecisionSnapshot.status to pending, and reopens the finance cycle review fields so the reservation re-enters the normal queue cleanly.
+  - If commissionAgentApproval was approved/rejected, the SUPER ADMIN reversion clears that terminal approval state so finance/commission review is not blocked by stale approval data.
+- Notification behavior:
+  - The existing reservation update and pending-confirmation workflow paths still call emitHotelNotificationRefresh after the reversion.
+  - Reverted reservations should therefore reappear in pending-confirmation notification feeds and queue counts as pending_confirmation items.
+
+2026-06-08 OTA Inbound Original Booking Source
+- Stored data rule:
+  - OTA inbound email reservations keep the editable top-level booking_source exactly as before.
+  - When an OTA email creates a reservation, services/otaReservationMapper.js also writes customer_details.booking_source with the detected provider/source label.
+  - customer_details.booking_source is the immutable original OTA/email source marker. It must not be changed when a platform admin later edits the main top-level booking_source.
+- Update behavior:
+  - OTA email reconciliation may populate customer_details.booking_source only when the field is missing.
+  - PUT /reservation-update/:reservationId strips or restores customer_details.booking_source during normal customer-details edits so existing immutable values survive full-object saves.
+- Admin filter behavior:
+  - /all-reservations-list-admin/:userId bookingSource filtering matches either top-level booking_source or customer_details.booking_source.
+  - /distinct-booking-sources/:userId returns values from both top-level booking_source and customer_details.booking_source so admins can filter by an original OTA source even after the main source was changed.

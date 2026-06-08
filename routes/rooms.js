@@ -4,6 +4,7 @@ const express = require("express");
 const router = express.Router();
 const {
 	requireSignin,
+	optionalSignin,
 	isAuth,
 	isHotelOwner,
 	isAdmin,
@@ -65,9 +66,14 @@ router.get("/room/:checkin/:checkout/:accoundId", listOfRoomsSummary);
 router.get("/room-admin", isAuth, isAdmin, listForAdmin);
 router.get(
 	"/room-inventory-reserved/:startdate/:enddate/:belongsTo/:accountId",
+	optionalSignin,
 	reservedRoomsSummary
 );
-router.get("/inventory-report/:belongsTo/:accountId", roomsInventorySummary);
+router.get(
+	"/inventory-report/:belongsTo/:accountId",
+	optionalSignin,
+	roomsInventorySummary
+);
 
 router.param("userId", userById);
 router.param("roomId", roomById);

@@ -4,6 +4,7 @@ const express = require("express");
 const router = express.Router();
 const {
 	requireSignin,
+	optionalSignin,
 	isAuth,
 	isAdmin,
 	isHotelOwner,
@@ -268,6 +269,6 @@ router.get(
 	hotelOccupancyDayReservations
 );
 
-router.get("/admin-dashboard-reports/:hotelId", adminDashboardReport);
+router.get("/admin-dashboard-reports/:hotelId", optionalSignin, adminDashboardReport);
 
 module.exports = router;

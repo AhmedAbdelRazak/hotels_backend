@@ -8,6 +8,11 @@ const User = require("../models/user");
 const {
 	hidePendingConfirmationForClient,
 } = require("./pendingConfirmationPolicy");
+const {
+	maskReservationSourceForHotelManagement,
+	shouldMaskHotelManagementReservationSource,
+	withHotelManagementSourceViewContext,
+} = require("./reservationVisibility");
 
 const ObjectId = mongoose.Types.ObjectId;
 
@@ -469,7 +474,12 @@ const sanitizeReservationAuditLogsForViewer = (
 	viewer = {},
 	options = {}
 ) => {
-	if (!reservation || isSuperAdminViewer(viewer)) return reservation;
+	if (!reservation) return reservation;
+	if (isSuperAdminViewer(viewer)) {
+		return shouldMaskHotelManagementReservationSource(viewer)
+			? maskReservationSourceForHotelManagement(reservation)
+			: reservation;
+	}
 
 	const plain = toPlain(reservation);
 	const sanitized = redactOtaEmailAuditFieldsForHotelViewer(plain);
@@ -562,14 +572,21 @@ const sanitizeReservationAuditLogsForViewer = (
 	);
 
 	if (isPublicClientViewer(viewer)) {
-		return sanitizeReservationPricingForClientViewer(
+		const clientReservation = sanitizeReservationPricingForClientViewer(
 			hidePendingConfirmationForClient(sanitized)
 		);
+		return shouldMaskHotelManagementReservationSource(viewer)
+			? maskReservationSourceForHotelManagement(clientReservation)
+			: clientReservation;
 	}
 
-	return !options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
+	const hotelReservation =
+		!options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
 		? sanitizeReservationPricingForHotelViewer(sanitized)
 		: sanitized;
+	return shouldMaskHotelManagementReservationSource(viewer)
+		? maskReservationSourceForHotelManagement(hotelReservation)
+		: hotelReservation;
 };
 
 const sanitizeReservationAdminWorkflowForPublicViewer = (reservation) =>
@@ -606,7 +623,7 @@ const resolveAuditViewerFromRequest = async (req = {}, fallbackViewer = null) =>
 		fallbackViewer &&
 		(isSuperAdminViewer(fallbackViewer) || roleValues(fallbackViewer).some(Boolean))
 	) {
-		return fallbackViewer;
+		return withHotelManagementSourceViewContext(fallbackViewer, req);
 	}
 
 	let actorId = normalizeId(fallbackViewer || req.auth?._id);
@@ -629,7 +646,7 @@ const resolveAuditViewerFromRequest = async (req = {}, fallbackViewer = null) =>
 		.lean()
 		.exec();
 
-	return user || fallbackViewer || null;
+	return withHotelManagementSourceViewContext(user || fallbackViewer || null, req);
 };
 
 module.exports = {

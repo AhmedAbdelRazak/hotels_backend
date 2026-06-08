@@ -55,6 +55,13 @@ const conversationSchema = new Schema({
 		type: String,
 		default: "",
 	},
+	quickReplies: [
+		{
+			label: { type: String, trim: true, maxlength: 80 },
+			value: { type: String, trim: true, maxlength: 240 },
+			action: { type: String, trim: true, maxlength: 60 },
+		},
+	],
 });
 
 const supportCaseSchema = new Schema({

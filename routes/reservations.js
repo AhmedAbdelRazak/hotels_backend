@@ -2,7 +2,12 @@
 
 const express = require("express");
 const router = express.Router();
-const { requireSignin, isAuth, isHotelOwner } = require("../controllers/auth");
+const {
+	requireSignin,
+	isAuth,
+	isHotelOwner,
+	optionalSignin,
+} = require("../controllers/auth");
 const { userById } = require("../controllers/user");
 const multer = require("multer");
 const upload = multer({ dest: "uploads/" });
@@ -92,16 +97,19 @@ router.get(
 
 router.get(
 	"/checkedout-reservations/list/:page/:records/:hotelId",
+	optionalSignin,
 	CheckedOutReservations
 );
 
 router.get(
 	"/collected-reservations/list/:status/:page/:records/:hotelId",
+	optionalSignin,
 	CollectedReservations
 );
 
 router.get(
 	"/aggregated-collected-reservations/list/:status/:page/:records/:hotelId",
+	optionalSignin,
 	aggregateCollectedReservations
 );
 
@@ -113,9 +121,14 @@ router.get(
 
 router.get(
 	"/reservations/search/all-list/:searchQuery/:accountId",
+	optionalSignin,
 	reservationSearchAllList
 );
-router.get("/reservations/search/:searchQuery/:accountId", reservationSearch);
+router.get(
+	"/reservations/search/:searchQuery/:accountId",
+	optionalSignin,
+	reservationSearch
+);
 
 router.get(
 	"/reservations/remove-duplicates",
@@ -128,16 +141,19 @@ router.post(
 
 router.get(
 	"/reservations/single-reservation/:reservationNumber/:hotelId/:belongsTo",
+	optionalSignin,
 	singleReservation
 );
 
 router.get(
 	"/reservations/single-reservation/:reservationId",
+	optionalSignin,
 	singleReservationById
 );
 
 router.get(
 	"/reservations/open-finance-cycles/:hotelId/:userId",
+	optionalSignin,
 	openFinanceCycleNotifications
 );
 
@@ -185,28 +201,34 @@ router.get(
 
 router.get(
 	"/reservations/checkins-today/:hotelId/:belongsTo",
+	optionalSignin,
 	todaysCheckins
 );
 
 router.get(
 	"/reservations/occupancy/current/:hotelId/:belongsTo",
+	optionalSignin,
 	reservationsOccupancyCurrent
 );
 router.get(
 	"/reservations/occupancy/summary/:hotelId/:belongsTo",
+	optionalSignin,
 	reservationsOccupancySummary
 );
 router.get(
 	"/reservations/occupancy/range/:startdate/:enddate/:hotelId/:belongsTo",
+	optionalSignin,
 	reservationsOccupancyRange
 );
 
 router.get(
 	"/reservations/:startdate/:enddate/:hotelId/:belongsTo",
+	optionalSignin,
 	reservationsList
 );
 router.get(
 	"/reservations/todate/ahowan/yaba/:date/:hotelId/:userMainId",
+	optionalSignin,
 	dateReport
 );
 
@@ -241,47 +263,65 @@ router.post(
 	janatDataDump
 );
 
-router.get("/reservations2/:accountId", reservationsList2);
+router.get("/reservations2/:accountId", optionalSignin, reservationsList2);
 router.put("/reservation-update/:reservationId", requireSignin, updateReservation);
 router.post("/send-reservation-email", sendReservationEmail);
 router.post("/send-payment-link-email", sendPaymentLinkEmail);
-router.get("/reservations-summary/:accountId/:date", reservationObjectSummary);
+router.get(
+	"/reservations-summary/:accountId/:date",
+	optionalSignin,
+	reservationObjectSummary
+);
 
 router.get(
 	"/reservations-summary-checkedout/:accountId/:channel/:startDate/:endDate",
+	optionalSignin,
 	totalCheckoutRecords
 );
 router.get(
 	"/reservations-checkedout/:page/:records/:accountId/:channel/:startDate/:endDate",
+	optionalSignin,
 	checkedoutReport
 );
 
 router.get(
 	"/reservations-pending/:page/:records/:hotelId",
+	optionalSignin,
 	pendingPaymentReservations
 );
 
 router.get(
 	"/reservations-paid-commission/:page/:records/:hotelId",
+	optionalSignin,
 	commissionPaidReservations
 );
 
 router.get(
 	"/general-report-reservations/list/:accountId/:channel/:startDate/:endDate/:dateBy/:noshow/:cancel/:inhouse/:checkedout/:payment",
+	optionalSignin,
 	totalGeneralReservationsRecords
 );
 router.get(
 	"/reservations-general-report/:page/:records/:accountId/:channel/:startDate/:endDate/:dateBy/:noshow/:cancel/:inhouse/:checkedout/:payment",
+	optionalSignin,
 	generalReservationsReport
 );
 
 //Reports
-router.get("/dayoverday/:hotelId/:userMainId", dayoverday);
-router.get("/monthovermonth/:hotelId/:userMainId", monthovermonth);
-router.get("/bookingsource/:hotelId/:userMainId", bookingSource);
-router.get("/reservationstatus/:hotelId/:userMainId", reservationstatus);
-router.get("/owner-aggregation/:month/:hotelIds", ownerReport);
-router.get("/owner-reservation-date/:hotelIds/:date", ownerReservationToDate);
+router.get("/dayoverday/:hotelId/:userMainId", optionalSignin, dayoverday);
+router.get("/monthovermonth/:hotelId/:userMainId", optionalSignin, monthovermonth);
+router.get("/bookingsource/:hotelId/:userMainId", optionalSignin, bookingSource);
+router.get(
+	"/reservationstatus/:hotelId/:userMainId",
+	optionalSignin,
+	reservationstatus
+);
+router.get("/owner-aggregation/:month/:hotelIds", optionalSignin, ownerReport);
+router.get(
+	"/owner-reservation-date/:hotelIds/:date",
+	optionalSignin,
+	ownerReservationToDate
+);
 
 router.param("userId", userById);
 router.param("reservationId", reservationById);

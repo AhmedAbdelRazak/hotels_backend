@@ -2,6 +2,7 @@ const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
 const HouseKeeping = require("../models/housekeeping");
 const Rooms = require("../models/rooms");
+const User = require("../models/user");
 const mongoose = require("mongoose");
 const moment = require("moment-timezone");
 const ObjectId = mongoose.Types.ObjectId;
@@ -15,6 +16,10 @@ const {
 const {
 	buildExcludePendingOtaReviewFilter,
 } = require("../services/otaReservationVisibility");
+const {
+	addHotelManagementReservationVisibilityToFilter,
+	withHotelManagementSourceViewContext,
+} = require("../services/reservationVisibility");
 
 const DEFAULT_TIMEZONE = "Asia/Riyadh";
 const PAGE_START_DATE_UTC = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
@@ -58,6 +63,19 @@ const withPlatformHotelScope = (req, filter = {}) => {
 	const scopeFilter = hotelScopeFilterForRequest(req);
 	if (!scopeFilter) return filter;
 	return { $and: [filter, scopeFilter] };
+};
+
+const resolveReservationVisibilityActorForRequest = async (req = {}) => {
+	if (req.profile) return withHotelManagementSourceViewContext(req.profile, req);
+	const authId = normalizeId(req.auth?._id || req.auth?.id);
+	if (!authId || !ObjectId.isValid(authId)) return null;
+	const actor = await User.findById(authId)
+		.select(
+			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelIdsOwner hotelsToSupport belongsToId accountScope platformEmployee platformEmployeeType activeUser"
+		)
+		.lean()
+		.exec();
+	return withHotelManagementSourceViewContext(actor, req);
 };
 
 const adminCanAccessHotel = (req, hotelId) => {
@@ -288,6 +306,8 @@ async function findFilteredReservations(req) {
 			baseFilter.hotelId = { $in: matchedIds };
 		}
 	}
+
+	addHotelManagementReservationVisibilityToFilter(baseFilter, req.profile);
 
 	// Now fetch reservations
 	const reservations = await Reservations.find(
@@ -910,6 +930,7 @@ exports.specificListOfReservations = async (req, res) => {
 			Object.keys(customFilter).length > 0
 				? { $and: [baseFilter, customFilter] }
 				: baseFilter;
+		addHotelManagementReservationVisibilityToFilter(finalFilter, req.profile);
 		const scopedFinalFilter = withPlatformHotelScope(req, finalFilter);
 
 		// 7) Pagination params (used only for metadata; data itself is full set)
@@ -1158,6 +1179,7 @@ exports.exportToExcel = async (req, res) => {
 		}
 
 		// 5) Fetch reservations
+		addHotelManagementReservationVisibilityToFilter(finalFilter, req.profile);
 		const reservations = await Reservations.find(
 			withPlatformHotelScope(req, finalFilter)
 		)
@@ -1480,6 +1502,9 @@ exports.adminDashboardReport = async (req, res) => {
 		});
 
 		const displayMode = "displayName";
+		const visibilityActor =
+			await resolveReservationVisibilityActorForRequest(req);
+		addHotelManagementReservationVisibilityToFilter(baseFilter, visibilityActor);
 		const scopedBaseFilter = withPlatformHotelScope(req, baseFilter);
 		const cancelledRegex = /cancelled|canceled/i;
 		const noShowRegex = /no[_\s]?show/i;
@@ -3156,6 +3181,8 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 		if (bookingSourceMatch) {
 			query.booking_source = bookingSourceMatch;
 		}
+		const actor = await resolveReservationVisibilityActorForRequest(req);
+		addHotelManagementReservationVisibilityToFilter(query, actor);
 		const scopedQuery = withPlatformHotelScope(req, query);
 
 		const reservations = await Reservations.find(scopedQuery)
@@ -3166,7 +3193,7 @@ exports.bookingSourcePaymentSummary = async (req, res) => {
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
 		const summary = buildBookingSourcePaymentSummary(
 			hotelVisibleReservations,
 			paymentStatusFilter
@@ -3266,6 +3293,8 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 		if (bookingSourceMatch) {
 			query.booking_source = bookingSourceMatch;
 		}
+		const actor = await resolveReservationVisibilityActorForRequest(req);
+		addHotelManagementReservationVisibilityToFilter(query, actor);
 		const scopedQuery = withPlatformHotelScope(req, query);
 
 		const reservations = await Reservations.find(scopedQuery)
@@ -3276,7 +3305,7 @@ exports.checkoutDatePaymentSummary = async (req, res) => {
 
 		const paymentStatusFilter = parsePaymentStatusFilter(paymentStatuses);
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
 		const summary = buildCheckoutDatePaymentSummary(
 			hotelVisibleReservations,
 			paymentStatusFilter,
@@ -3304,6 +3333,7 @@ function buildReservationBaseQuery({
 	endExclusive,
 	includeCancelled,
 	bookingSourceFilter = [],
+	reservationVisibilityActor = null,
 }) {
 	const q = {
 		hotelId: new ObjectId(hotelId),
@@ -3324,6 +3354,10 @@ function buildReservationBaseQuery({
 	if (bookingSourceMatch) {
 		q.booking_source = bookingSourceMatch;
 	}
+	addHotelManagementReservationVisibilityToFilter(
+		q,
+		reservationVisibilityActor
+	);
 	return q;
 }
 
@@ -3333,6 +3367,7 @@ function buildDayBaseQuery({
 	dayEnd,
 	includeCancelled,
 	bookingSourceFilter = [],
+	reservationVisibilityActor = null,
 }) {
 	const q = {
 		hotelId: new ObjectId(hotelId),
@@ -3353,6 +3388,10 @@ function buildDayBaseQuery({
 	if (bookingSourceMatch) {
 		q.booking_source = bookingSourceMatch;
 	}
+	addHotelManagementReservationVisibilityToFilter(
+		q,
+		reservationVisibilityActor
+	);
 	return q;
 }
 
@@ -3463,6 +3502,7 @@ async function computeOccupancy({
 	includeCancelled,
 	paymentStatusFilter,
 	bookingSourceFilter = [],
+	reservationVisibilityActor = null,
 }) {
 	const hotel = await HotelDetails.findById(hotelId)
 		.select("hotelName roomCountDetails")
@@ -3676,6 +3716,7 @@ async function computeOccupancy({
 		endExclusive,
 		includeCancelled,
 		bookingSourceFilter,
+		reservationVisibilityActor,
 	});
 
 	const reservations = await Reservations.find(baseQuery)
@@ -3684,7 +3725,10 @@ async function computeOccupancy({
 		)
 		.lean();
 	const hotelVisibleReservations =
-		sanitizeReservationAuditLogsCollectionForViewer(reservations);
+		sanitizeReservationAuditLogsCollectionForViewer(
+			reservations,
+			reservationVisibilityActor
+		);
 
 	let totalAmount = 0;
 	let checkoutGrossTotal = 0;
@@ -3991,15 +4035,16 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 			const result = await computeOccupancy({
 				hotelId,
 				start,
-			endExclusive,
-			daysInMonth,
-			label,
-			year,
+				endExclusive,
+				daysInMonth,
+				label,
+				year,
 				monthIndex,
 				displayMode,
 				includeCancelled,
 				paymentStatusFilter,
 				bookingSourceFilter,
+				reservationVisibilityActor: req.profile,
 			});
 
 		if (result?.error) {
@@ -4058,15 +4103,16 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 			const result = await computeOccupancy({
 				hotelId,
 				start,
-			endExclusive,
-			daysInMonth,
-			label,
-			year,
+				endExclusive,
+				daysInMonth,
+				label,
+				year,
 				monthIndex,
 				displayMode,
 				includeCancelled,
 				paymentStatusFilter,
 				bookingSourceFilter,
+				reservationVisibilityActor: req.profile,
 			});
 
 		if (result?.error) {
@@ -4290,6 +4336,7 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 				dayEnd,
 				includeCancelled,
 				bookingSourceFilter,
+				reservationVisibilityActor: req.profile,
 			});
 
 		const reservations = await Reservations.find(baseQuery)
@@ -4299,7 +4346,10 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 			.populate("hotelId", "hotelName")
 			.lean();
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(
+				reservations,
+				withHotelManagementSourceViewContext(req.profile, req)
+			);
 
 		const reservationsForDay = [];
 		let bookedForTarget = 0;
@@ -4437,7 +4487,7 @@ const parseReportPagination = (req) => {
 	return { page, limit, skip };
 };
 
-const buildPaidBreakdownFilter = ({ hotelId, searchQuery }) => {
+const buildPaidBreakdownFilter = ({ hotelId, searchQuery, actor }) => {
 	const filters = [];
 	if (hotelId) {
 		filters.push({ hotelId: new ObjectId(hotelId) });
@@ -4446,7 +4496,9 @@ const buildPaidBreakdownFilter = ({ hotelId, searchQuery }) => {
 	filters.push(buildPaidBreakdownNonZeroFilter());
 	const searchFilter = buildPaidBreakdownSearchFilter(searchQuery);
 	if (searchFilter) filters.push(searchFilter);
-	return filters.length > 1 ? { $and: filters } : filters[0];
+	const filter = filters.length > 1 ? { $and: filters } : filters[0];
+	addHotelManagementReservationVisibilityToFilter(filter, actor);
+	return filter;
 };
 
 const buildPaidBreakdownScorecards = async (
@@ -4505,8 +4557,12 @@ exports.paidBreakdownReportAdmin = async (req, res) => {
 
 		const { page, limit, skip } = parseReportPagination(req);
 		const searchQuery = req.query.searchQuery || "";
-		const baseFilter = buildPaidBreakdownFilter({ hotelId });
-		const finalFilter = buildPaidBreakdownFilter({ hotelId, searchQuery });
+		const baseFilter = buildPaidBreakdownFilter({ hotelId, actor: req.profile });
+		const finalFilter = buildPaidBreakdownFilter({
+			hotelId,
+			searchQuery,
+			actor: req.profile,
+		});
 
 		const totalDocuments = await Reservations.countDocuments(finalFilter);
 		const reservations = await Reservations.find(finalFilter)
@@ -4546,8 +4602,12 @@ exports.paidBreakdownReportHotel = async (req, res) => {
 
 		const { page, limit, skip } = parseReportPagination(req);
 		const searchQuery = req.query.searchQuery || "";
-		const baseFilter = buildPaidBreakdownFilter({ hotelId });
-		const finalFilter = buildPaidBreakdownFilter({ hotelId, searchQuery });
+		const baseFilter = buildPaidBreakdownFilter({ hotelId, actor: req.profile });
+		const finalFilter = buildPaidBreakdownFilter({
+			hotelId,
+			searchQuery,
+			actor: req.profile,
+		});
 
 		const totalDocuments = await Reservations.countDocuments(finalFilter);
 		const reservations = await Reservations.find(finalFilter)
@@ -4561,7 +4621,10 @@ exports.paidBreakdownReportHotel = async (req, res) => {
 			hotelVisible: true,
 		});
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(
+				reservations,
+				withHotelManagementSourceViewContext(req.profile, req)
+			);
 		const data = hotelVisibleReservations.map((reservation) => {
 			const breakdown = reservation.paid_amount_breakdown || {};
 			const paidTotal = computePaidBreakdownTotal(breakdown);

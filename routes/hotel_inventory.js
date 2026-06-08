@@ -10,8 +10,12 @@ const {
 	getHotelInventoryAvailability,
 } = require("../controllers/hotel_inventory");
 
-router.get("/hotel-inventory/:hotelId/calendar", getHotelInventoryCalendar);
-router.get("/hotel-inventory/:hotelId/day", getHotelInventoryDay);
+router.get(
+	"/hotel-inventory/:hotelId/calendar",
+	optionalSignin,
+	getHotelInventoryCalendar
+);
+router.get("/hotel-inventory/:hotelId/day", optionalSignin, getHotelInventoryDay);
 router.get(
 	"/hotel-inventory/:hotelId/availability",
 	optionalSignin,

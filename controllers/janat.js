@@ -2109,15 +2109,30 @@ exports.distinctBookingSources = async (req, res) => {
 			})
 		);
 
-		const raw = await Reservations.find(baseFilter).distinct("booking_source");
-		const cleaned = (raw || [])
-			.map((s) => (typeof s === "string" ? s.trim() : ""))
-			.filter(Boolean)
-			.map((s) => s.toLowerCase());
+		const raw = await Reservations.aggregate([
+			{ $match: baseFilter },
+			{
+				$project: {
+					sourceValues: [
+						{ $ifNull: ["$booking_source", ""] },
+						{ $ifNull: ["$customer_details.booking_source", ""] },
+					],
+				},
+			},
+			{ $unwind: "$sourceValues" },
+			{
+				$project: {
+					sourceLower: {
+						$toLower: { $trim: { input: "$sourceValues" } },
+					},
+				},
+			},
+			{ $match: { sourceLower: { $ne: "" } } },
+			{ $group: { _id: "$sourceLower" } },
+			{ $sort: { _id: 1 } },
+		]).allowDiskUse(true);
 
-		const unique = Array.from(new Set(cleaned)).sort((a, b) =>
-			a.localeCompare(b, undefined, { sensitivity: "base" }),
-		);
+		const unique = (raw || []).map((row) => row._id);
 
 		return res.status(200).json({ success: true, data: unique });
 	} catch (err) {
@@ -3279,10 +3294,12 @@ exports.paginatedReservationList = async (req, res) => {
 		// NEW: bookingSource (case-insensitive exact match)
 		const bsTrim = (bookingSource || "").trim();
 		if (bsTrim) {
+			const bookingSourceRegex = new RegExp(`^${escapeRegExp(bsTrim)}$`, "i");
 			andFilters.push({
-				booking_source: {
-					$regex: new RegExp(`^${escapeRegExp(bsTrim)}$`, "i"),
-				},
+				$or: [
+					{ booking_source: { $regex: bookingSourceRegex } },
+					{ "customer_details.booking_source": { $regex: bookingSourceRegex } },
+				],
 			});
 		}
 
@@ -3431,6 +3448,7 @@ exports.paginatedReservationList = async (req, res) => {
 				customer_name: customer_details.name || "N/A",
 				customer_nick: nickName,
 				customer_phone: customer_details.phone || "N/A",
+				customer_booking_source: customer_details.booking_source || "",
 				confirmation_number2: confirmationNumber2,
 				hotel_name: hotelName,
 				createdAt: doc.createdAt || null,
@@ -3521,6 +3539,10 @@ exports.paginatedReservationList = async (req, res) => {
 				const name = String(r.customer_name || "").toLowerCase();
 				const nick = String(r.customer_nick || "").toLowerCase();
 				const hname = String(r.hotel_name || "").toLowerCase();
+				const source = String(r.booking_source || "").toLowerCase();
+				const originalSource = String(
+					r.customer_booking_source || r.customer_details?.booking_source || "",
+				).toLowerCase();
 
 				return (
 					cnum.includes(searchQ) ||
@@ -3528,7 +3550,9 @@ exports.paginatedReservationList = async (req, res) => {
 					phone.includes(searchQ) ||
 					name.includes(searchQ) ||
 					nick.includes(searchQ) ||
-					hname.includes(searchQ)
+					hname.includes(searchQ) ||
+					source.includes(searchQ) ||
+					originalSource.includes(searchQ)
 				);
 			});
 		}
@@ -5217,6 +5241,15 @@ exports.updateReservationDetails = async (req, res) => {
 		const reservation = await Reservations.findById(reservationId).exec();
 		if (!reservation) {
 			return res.status(404).send({ error: "Reservation not found" });
+		}
+		delete updateData.booking_source;
+		delete updateData.bookingSource;
+		if (
+			updateData.financial_cycle &&
+			typeof updateData.financial_cycle === "object"
+		) {
+			delete updateData.financial_cycle.sourceName;
+			delete updateData.financial_cycle.bookingSource;
 		}
 
 		if (updateData.paymentDetails) {

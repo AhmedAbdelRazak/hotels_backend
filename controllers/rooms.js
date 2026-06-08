@@ -3,10 +3,15 @@ const mongoose = require("mongoose");
 const fetch = require("node-fetch");
 const Reservations = require("../models/reservations");
 const HotelDetails = require("../models/hotel_details");
+const User = require("../models/user");
 const moment = require("moment");
 const {
 	buildPendingConfirmationExclusionFilter,
 } = require("../services/reservationStatus");
+const {
+	addHotelManagementReservationVisibilityToFilter,
+	withHotelManagementSourceViewContext,
+} = require("../services/reservationVisibility");
 
 const HOUSED_EXCLUDED_STATUS =
 	/cancelled|canceled|no[_\s-]?show|checked[_\s-]?out|checkedout|closed|early[_\s-]?checked[_\s-]?out/i;
@@ -17,6 +22,18 @@ const normalizeId = (value) => {
 		return String(value._id || value.id || value.roomId || "");
 	}
 	return String(value);
+};
+
+const resolveReservationVisibilityActor = async (req, fallbackId = "") => {
+	const actorId = normalizeId(req?.auth?._id || fallbackId);
+	if (!actorId || !mongoose.Types.ObjectId.isValid(actorId)) return null;
+	const actor = await User.findById(actorId)
+		.select(
+			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accountScope platformEmployee platformEmployeeType activeUser"
+		)
+		.lean()
+		.exec();
+	return withHotelManagementSourceViewContext(actor, req);
 };
 
 const extractReservationRoomIds = (roomIdField) =>
@@ -536,17 +553,30 @@ exports.reservedRoomsSummary = async (req, res) => {
 	const accound_id = mongoose.Types.ObjectId(accountId);
 
 	try {
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
+		const reservedMatch = {
+			belongsTo: belongsToId,
+			hotelId: accound_id,
+			$or: [{ roomId: { $eq: [] } }, { roomId: { $eq: [null] } }],
+			...buildPendingConfirmationExclusionFilter(),
+			checkin_date: { $gte: new Date(startdate) },
+			checkout_date: { $lte: new Date(enddate) },
+		};
+		const occupiedMatch = {
+			belongsTo: belongsToId,
+			hotelId: accound_id,
+			roomId: { $not: { $size: 0 } },
+			...buildPendingConfirmationExclusionFilter(),
+			checkin_date: { $gte: new Date(startdate) },
+			checkout_date: { $lte: new Date(enddate) },
+		};
+		addHotelManagementReservationVisibilityToFilter(reservedMatch, actor);
+		addHotelManagementReservationVisibilityToFilter(occupiedMatch, actor);
+
 		// Aggregate to count the reserved rooms within the specified date range
 		const reservedRooms = await Reservations.aggregate([
 			{
-				$match: {
-					belongsTo: belongsToId,
-					hotelId: accound_id,
-					$or: [{ roomId: { $eq: [] } }, { roomId: { $eq: [null] } }],
-					...buildPendingConfirmationExclusionFilter(),
-					checkin_date: { $gte: new Date(startdate) },
-					checkout_date: { $lte: new Date(enddate) },
-				},
+				$match: reservedMatch,
 			},
 			{ $unwind: "$pickedRoomsType" },
 			{
@@ -574,14 +604,7 @@ exports.reservedRoomsSummary = async (req, res) => {
 
 		const occupiedRooms = await Reservations.aggregate([
 			{
-				$match: {
-					belongsTo: belongsToId,
-					hotelId: accound_id,
-					roomId: { $not: { $size: 0 } },
-					...buildPendingConfirmationExclusionFilter(),
-					checkin_date: { $gte: new Date(startdate) },
-					checkout_date: { $lte: new Date(enddate) },
-				},
+				$match: occupiedMatch,
 			},
 			{ $unwind: "$pickedRoomsType" },
 			{
@@ -672,6 +695,7 @@ exports.roomsInventorySummary = async (req, res) => {
 	const dateRange = generateDateRange(startDate, 40);
 
 	try {
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
 		const totalRoomsByType = await getTotalRoomsByType(belongsToId, account_Id);
 
 		let inventorySummary = [];
@@ -681,7 +705,8 @@ exports.roomsInventorySummary = async (req, res) => {
 				date,
 				belongsToId,
 				account_Id,
-				totalRoomsByType
+				totalRoomsByType,
+				actor
 			);
 			inventorySummary.push(...dailyInventory);
 		}
@@ -718,19 +743,22 @@ async function calculateDailyInventory(
 	date,
 	belongsToId,
 	accountId,
-	totalRoomsByType
+	totalRoomsByType,
+	actor = null
 ) {
 	const inventoryForDate = await Promise.all(
 		totalRoomsByType.map(async (roomType) => {
 			// Fetch reservations that are active for 'date' and not cancelled
-			const overlappingReservations = await Reservations.find({
+			const reservationQuery = {
 				belongsTo: belongsToId,
 				hotelId: accountId,
 				reservation_status: { $nin: ["cancelled", "no_show"] }, // Exclude both cancelled and no_show statuses
 				...buildPendingConfirmationExclusionFilter(),
 				checkin_date: { $lte: date },
 				checkout_date: { $gt: date },
-			});
+			};
+			addHotelManagementReservationVisibilityToFilter(reservationQuery, actor);
+			const overlappingReservations = await Reservations.find(reservationQuery);
 
 			let totalReserved = 0;
 			let totalOccupied = 0;

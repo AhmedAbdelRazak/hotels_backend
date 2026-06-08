@@ -21,6 +21,65 @@ function onlyDigits(s = "") {
 	return digitsToEnglish(String(s)).replace(/\D+/g, "");
 }
 
+function cleanText(value = "", max = 120) {
+	return digitsToEnglish(String(value || ""))
+		.replace(/\s+/g, " ")
+		.trim()
+		.slice(0, max);
+}
+
+function usableFullName(value = "") {
+	const name = cleanText(value, 120);
+	if (!name || name.length < 4) return "";
+	if (onlyDigits(name) || /^(?:guest|unknown|test|n\/a|na|null|none)$/i.test(name)) {
+		return "";
+	}
+	if (
+		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
+			name
+		)
+	) {
+		return "";
+	}
+	const tokens = name
+		.split(/\s+/)
+		.filter((token) => /[A-Za-z\u0590-\u08FF\u0900-\u097F]{2,}/.test(token));
+	const letterCount = (name.match(/[A-Za-z\u0590-\u08FF\u0900-\u097F]/g) || []).length;
+	return tokens.length >= 2 || letterCount >= 8 ? name : "";
+}
+
+function normalizedGuestCount(value, fallback = null) {
+	const normalized = digitsToEnglish(String(value ?? "")).replace(/[^\d.-]/g, "");
+	const number = Number(normalized);
+	return Number.isFinite(number) ? number : fallback;
+}
+
+function validateRequiredGuestDetails(slots = {}) {
+	const name = usableFullName(slots.fullName || slots.name || "");
+	const phone = onlyDigits(slots.phone || "");
+	const nationality = cleanText(slots.nationality || "", 80);
+	const adults = normalizedGuestCount(slots.adults, null);
+	const children = normalizedGuestCount(slots.children, null);
+	const missing = [];
+	if (!name) missing.push("full name");
+	if (!phone || phone.length < 5) missing.push("phone");
+	if (!nationality) missing.push("nationality");
+	if (!Number.isFinite(adults) || adults < 1) missing.push("adults count");
+	if (!Number.isFinite(children) || children < 0) missing.push("children count");
+	if (missing.length) {
+		throw new Error(`AI reservation is missing required guest details: ${missing.join(", ")}.`);
+	}
+	return {
+		name,
+		phone,
+		email: asciiize(slots.email || "").trim().toLowerCase(),
+		nationality: asciiize(nationality).trim() || nationality,
+		adults,
+		children,
+		rooms: Math.max(1, normalizedGuestCount(slots.rooms, 1)),
+	};
+}
+
 function generateReservationConfirmationCandidate() {
 	return String(Math.floor(1000000000 + Math.random() * 9000000000));
 }
@@ -107,12 +166,13 @@ async function createReservationForCase({
 	if (!dailyRows.length) {
 		throw new Error("AI reservation quote is missing daily pricing rows.");
 	}
+	const guest = validateRequiredGuestDetails(slots);
 	const confirmation_number = await uniqueConfirmation();
 
 	const pickedRoomsType = buildPickedRoomsType({
 		room,
 		dailyRows,
-		count: Number(slots.rooms || 1),
+		count: guest.rooms,
 	});
 	const totals = sumPickedRooms(pickedRoomsType);
 
@@ -126,10 +186,10 @@ async function createReservationForCase({
 		checkout_date: slots.checkoutISO,
 		days_of_residence: quoteData.nights,
 
-		total_rooms: Number(slots.rooms || 1),
-		total_guests: Number(slots.adults || 2) + Number(slots.children || 0),
-		adults: Number(slots.adults || 2),
-		children: Number(slots.children || 0),
+		total_rooms: guest.rooms,
+		total_guests: guest.adults + guest.children,
+		adults: guest.adults,
+		children: guest.children,
 
 		total_amount: totals.total_amount, // Grand total with commission
 		commission: totals.commission, // Commission portion
@@ -142,10 +202,10 @@ async function createReservationForCase({
 		pickedRoomsPricing: pickedRoomsType,
 
 		customer_details: {
-			name: asciiize(slots.name || "Guest"),
-			phone: onlyDigits(slots.phone || ""),
-			email: asciiize(slots.email || ""),
-			nationality: asciiize(slots.nationality || ""),
+			name: guest.name,
+			phone: guest.phone,
+			email: guest.email,
+			nationality: guest.nationality,
 		},
 
 		confirmation_number,
@@ -199,7 +259,7 @@ async function postReservationLinks(io, sc, reservation) {
 	const link2 = `${publicBase}/client-payment/${rid}/${conf}`;
 
 	const messages = [
-		`Your reservation has been created. [Please click here to find more details](${link1})`,
+		`Your reservation is confirmed. [Please click here to find more details](${link1})`,
 		`For serious confirmation, you may pay a small deposit here (optional):\n${link2}`,
 	];
 

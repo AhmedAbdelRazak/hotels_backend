@@ -56,6 +56,16 @@ const {
 	canManageOtaReservations,
 	isOtaPlatformReviewPending,
 } = require("../services/otaReservationVisibility");
+const {
+	addHotelManagementReservationVisibilityToFilter,
+	canEditReservationSource,
+	hotelManagementBookingSourceLabel,
+	hotelManagementReservationVisibilityFilterForActor,
+	maskBookingSourceSummaryRowsForHotelManagement,
+	shouldMaskHotelManagementReservationSource,
+	withHotelManagementSourceViewContext,
+	withHotelManagementReservationVisibility,
+} = require("../services/reservationVisibility");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -1981,6 +1991,146 @@ const reservationActorDescriptions = (actor = {}) => [
 		: []),
 ];
 
+const reservationSourceKey = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[\s_-]+/g, "")
+		.trim();
+
+const reservationSourcePlainObject = (value = {}) =>
+	value && typeof value.toObject === "function" ? value.toObject() : value || {};
+
+const sourceValueMatchesExisting = (value, existingSource = "") => {
+	const requestedKey = reservationSourceKey(value);
+	if (!requestedKey) return true;
+	return [
+		existingSource,
+		hotelManagementBookingSourceLabel(existingSource),
+	]
+		.map(reservationSourceKey)
+		.filter(Boolean)
+		.includes(requestedKey);
+};
+
+const protectReservationSourceUpdate = (
+	update = {},
+	existingReservation = {},
+	actor = {}
+) => {
+	const canEditSource = canEditReservationSource(actor);
+	const existingPlain = reservationSourcePlainObject(existingReservation);
+	const existingSource = existingPlain.booking_source || "";
+	const sourceFields = ["booking_source", "bookingSource"];
+	let rejectedField = "";
+
+	sourceFields.forEach((field) => {
+		if (!Object.prototype.hasOwnProperty.call(update, field)) return;
+		const requestedSource = String(update[field] || "").trim();
+		if (!canEditSource) {
+			if (!sourceValueMatchesExisting(requestedSource, existingSource)) {
+				rejectedField = rejectedField || field;
+			}
+			delete update[field];
+			return;
+		}
+
+		if (field === "bookingSource") {
+			if (
+				requestedSource &&
+				!Object.prototype.hasOwnProperty.call(update, "booking_source")
+			) {
+				update.booking_source = requestedSource;
+			}
+			delete update.bookingSource;
+			return;
+		}
+
+		update.booking_source = requestedSource;
+	});
+
+	const sourceChanged =
+		canEditSource &&
+		Object.prototype.hasOwnProperty.call(update, "booking_source") &&
+		reservationSourceKey(update.booking_source) !==
+			reservationSourceKey(existingSource);
+
+	if (
+		update.financial_cycle &&
+		typeof update.financial_cycle === "object" &&
+		!Array.isArray(update.financial_cycle)
+	) {
+		const existingCycle = reservationSourcePlainObject(existingPlain.financial_cycle);
+		["sourceName", "bookingSource"].forEach((field) => {
+			if (!Object.prototype.hasOwnProperty.call(update.financial_cycle, field)) {
+				return;
+			}
+			if (!canEditSource) {
+				const existingCycleSource = existingCycle[field] || existingSource;
+				if (
+					!sourceValueMatchesExisting(
+						update.financial_cycle[field],
+						existingCycleSource
+					)
+				) {
+					rejectedField = rejectedField || `financial_cycle.${field}`;
+				}
+				delete update.financial_cycle[field];
+			}
+		});
+	}
+
+	if (rejectedField) {
+		return {
+			allowed: false,
+			field: rejectedField,
+			code: "reservation_source_locked",
+			error:
+				"Only authorized platform admins or super admins can change a reservation source.",
+		};
+	}
+
+	if (canEditSource && sourceChanged) {
+		const nextSource = String(update.booking_source || "").trim();
+		const existingCycle = reservationSourcePlainObject(existingPlain.financial_cycle);
+		update.financial_cycle = {
+			...existingCycle,
+			...(update.financial_cycle && typeof update.financial_cycle === "object"
+				? update.financial_cycle
+				: {}),
+			bookingSource: nextSource,
+			sourceName: nextSource,
+		};
+	}
+
+	return { allowed: true };
+};
+
+const protectCustomerDetailsBookingSourceUpdate = (
+	customerDetails = {},
+	existingReservation = {}
+) => {
+	const next =
+		customerDetails && typeof customerDetails === "object"
+			? { ...customerDetails }
+			: {};
+	const existingCustomerDetails =
+		typeof existingReservation.customer_details?.toObject === "function"
+			? existingReservation.customer_details.toObject()
+			: existingReservation.customer_details || {};
+	const existingOriginalSource = String(
+		existingCustomerDetails.booking_source || ""
+	).trim();
+
+	delete next.bookingSource;
+	if (existingOriginalSource) {
+		next.booking_source = existingOriginalSource;
+	} else {
+		delete next.booking_source;
+	}
+
+	return next;
+};
+
 const isSuperAdminReservationActor = (actor = {}) =>
 	isConfiguredSuperAdmin(actor) ||
 	reservationActorRoles(actor).includes(1000) ||
@@ -2076,6 +2226,124 @@ const isOperationalStatusJumpFromUnconfirmed = (
 			normalizedTo
 		)
 	);
+};
+
+const reservationLifecycleStatusKey = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+
+const isPendingConfirmationLifecycleStatus = (value = "") =>
+	reservationLifecycleStatusKey(value) === "pendingconfirmation";
+
+const isPendingConfirmationReversionRequest = (
+	reservation = {},
+	update = {},
+	requestedLifecycleStatus = ""
+) => {
+	const currentLifecycleStatus = String(
+		reservation.reservation_status || reservation.state || ""
+	).trim();
+	const currentPendingStatus = String(
+		reservation?.pendingConfirmation?.status || ""
+	)
+		.trim()
+		.toLowerCase();
+	const requestedPendingStatus =
+		update?.pendingConfirmation && typeof update.pendingConfirmation === "object"
+			? String(update.pendingConfirmation.status || "")
+					.trim()
+					.toLowerCase()
+			: "";
+	const requestsPending =
+		isPendingConfirmationLifecycleStatus(requestedLifecycleStatus) ||
+		requestedPendingStatus === "pending";
+	const alreadyPending =
+		isPendingConfirmationLifecycleStatus(currentLifecycleStatus) &&
+		currentPendingStatus === "pending";
+
+	return requestsPending && !alreadyPending;
+};
+
+const buildSuperAdminPendingReversionUpdate = ({
+	reservation = {},
+	auditActor = {},
+	actorId = "",
+	reason = "",
+}) => {
+	const existingPending = reservationSourcePlainObject(
+		reservation.pendingConfirmation
+	);
+	const existingCycle = reservationSourcePlainObject(reservation.financial_cycle);
+	const existingApproval = reservationSourcePlainObject(
+		reservation.commissionAgentApproval
+	);
+	const approvalStatus = String(existingApproval.status || "")
+		.trim()
+		.toLowerCase();
+	const now = new Date();
+	const actorReference = actorId || null;
+	const reversionReason =
+		String(reason || "").trim() ||
+		"Super admin reverted the reservation to pending confirmation.";
+	const update = {
+		reservation_status: STATUS_PENDING_CONFIRMATION,
+		state: STATUS_PENDING_CONFIRMATION,
+		pendingConfirmation: {
+			...existingPending,
+			status: "pending",
+			rejectionReason: "",
+			confirmationReason: "",
+			confirmedAt: null,
+			rejectedAt: null,
+			revertedAt: now,
+			resubmittedAt: now,
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor,
+		},
+		agentDecisionSnapshot: {
+			status: "pending",
+			reason: reversionReason,
+			decidedAt: now,
+			decidedBy: auditActor,
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor,
+		},
+		financial_cycle: {
+			...existingCycle,
+			status: "open",
+			totalReviewStatus: "pending",
+			totalRejectionReason: "",
+			financeRejectionType: "",
+			financeRejectionLabel: "",
+			financeRejectionComment: "",
+			amountReviewStatus: "pending",
+			commissionReviewStatus: "pending",
+			commissionRejectionReason: "",
+			totalReviewedAt: null,
+			totalReviewedBy: null,
+			closedAt: null,
+			closedBy: null,
+			lastUpdatedAt: now,
+			lastUpdatedBy: actorReference,
+		},
+	};
+
+	if (["approved", "rejected"].includes(approvalStatus)) {
+		update.commissionAgentApproval = {
+			...existingApproval,
+			status: existingApproval.required === true ? "pending" : "not_required",
+			approvedAt: null,
+			approvedBy: null,
+			rejectedAt: null,
+			rejectedBy: null,
+			rejectionReason: "",
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor,
+		};
+	}
+
+	return update;
 };
 
 const canViewReservationHotel = async (actor, hotelId) => {
@@ -3180,12 +3448,25 @@ const sendAgentFinanceRejectionEmail = async ({
 const resolveReservationListActor = async (req) => {
 	const actorId = req.auth?._id;
 	if (!actorId || !ObjectId.isValid(actorId)) return null;
-	return User.findById(actorId)
+	const actor = await User.findById(actorId)
 		.select(
-			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner"
+			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork belongsToId hotelsToSupport hotelIdsOwner accountScope platformEmployee platformEmployeeType"
 		)
 		.lean()
 		.exec();
+	return withHotelManagementSourceViewContext(actor, req);
+};
+
+const resolveReservationVisibilityActor = async (req, fallbackId = "") => {
+	const actorId = normalizeId(req?.auth?._id || fallbackId);
+	if (!actorId || !ObjectId.isValid(actorId)) return null;
+	const actor = await User.findById(actorId)
+		.select(
+			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner accountScope platformEmployee platformEmployeeType activeUser"
+		)
+		.lean()
+		.exec();
+	return withHotelManagementSourceViewContext(actor, req);
 };
 
 const applyOwnReservationFilter = (dynamicFilter, parsedFilters = {}, actor = null) => {
@@ -3831,6 +4112,12 @@ exports.reservationSearchAllList = async (req, res) => {
 	try {
 		const { searchQuery, accountId } = req.params;
 		const hotelId = mongoose.Types.ObjectId(accountId);
+		const actor = await resolveReservationVisibilityActor(req);
+		const baseMatch = {
+			hotelId: hotelId,
+			...buildExcludePendingOtaReviewFilter(),
+		};
+		addHotelManagementReservationVisibilityToFilter(baseMatch, actor);
 
 		// Check if search query starts with 'r' followed by digits
 		const isRoomSearch = /^r\d+$/i.test(searchQuery);
@@ -3845,10 +4132,7 @@ exports.reservationSearchAllList = async (req, res) => {
 
 		let pipeline = [
 			{
-				$match: {
-					hotelId: hotelId,
-					...buildExcludePendingOtaReviewFilter(),
-				},
+				$match: baseMatch,
 			},
 			// Lookup (populate) roomId details
 			{
@@ -3913,7 +4197,7 @@ exports.reservationSearchAllList = async (req, res) => {
 			});
 		}
 
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error("Error in reservationSearchAllList:", error);
 		res.status(500).send("Server error");
@@ -3924,6 +4208,7 @@ exports.reservationSearch = async (req, res) => {
 	try {
 		const { searchQuery, accountId } = req.params;
 		const hotelId = mongoose.Types.ObjectId(accountId);
+		const actor = await resolveReservationVisibilityActor(req);
 		// Create a regex pattern to match the search query in a case-insensitive manner
 		const searchPattern = new RegExp(searchQuery, "i");
 
@@ -3942,6 +4227,7 @@ exports.reservationSearch = async (req, res) => {
 				{ provider_number: searchPattern },
 			],
 		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
 
 		// Fetch the first matching document
 		const reservation = await Reservations.findOne(query).populate("belongsTo");
@@ -3952,7 +4238,7 @@ exports.reservationSearch = async (req, res) => {
 			});
 		}
 
-		res.json(sanitizeReservationAuditLogsForViewer(reservation));
+		res.json(sanitizeReservationAuditLogsForViewer(reservation, actor));
 	} catch (error) {
 		res.status(500).send("Server error");
 	}
@@ -4057,6 +4343,7 @@ exports.getListOfReservations = async (req, res) => {
 			hotelId,
 			dateStr: date,
 		});
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 		applyOwnReservationFilter(dynamicFilter, parsedFilters, actor);
 		const searchMatch = buildReservationSearchMatch(parsedFilters.searchQuery);
 
@@ -4126,6 +4413,7 @@ exports.totalRecordsReservations = async (req, res) => {
 			hotelId,
 			dateStr: date,
 		});
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 		applyOwnReservationFilter(dynamicFilter, parsedFilters, actor);
 		const searchMatch = buildReservationSearchMatch(parsedFilters.searchQuery);
 
@@ -4167,6 +4455,7 @@ exports.totalCheckoutRecords = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
+		const actor = await resolveReservationVisibilityActor(req);
 
 		let dynamicFilter = {
 			hotelId: ObjectId(accountId),
@@ -4185,6 +4474,7 @@ exports.totalCheckoutRecords = async (req, res) => {
 			],
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		if (channel && channel !== "undefined") {
 			const channelFilter = {
@@ -4260,6 +4550,7 @@ exports.checkedoutReport = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
+		const actor = await resolveReservationVisibilityActor(req);
 
 		let dynamicFilter = {
 			hotelId: ObjectId(accountId),
@@ -4278,6 +4569,7 @@ exports.checkedoutReport = async (req, res) => {
 			],
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		if (channel && channel !== "undefined") {
 			const channelFilter = {
@@ -4305,7 +4597,7 @@ exports.checkedoutReport = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -4338,6 +4630,7 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
+		const actor = await resolveReservationVisibilityActor(req);
 
 		let dateField =
 			dateBy === "checkin"
@@ -4351,6 +4644,7 @@ exports.totalGeneralReservationsRecords = async (req, res) => {
 			[dateField]: { $gte: formattedStartDate, $lte: formattedEndDate },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		if (channel && channel !== "undefined") {
 			dynamicFilter.booking_source = { $regex: new RegExp(channel, "i") };
@@ -4461,6 +4755,7 @@ exports.generalReservationsReport = async (req, res) => {
 
 		const formattedStartDate = new Date(`${startDate}T00:00:00+00:00`);
 		const formattedEndDate = new Date(`${endDate}T23:59:59+00:00`);
+		const actor = await resolveReservationVisibilityActor(req);
 
 		let dateField =
 			dateBy === "checkin"
@@ -4474,6 +4769,7 @@ exports.generalReservationsReport = async (req, res) => {
 			[dateField]: { $gte: formattedStartDate, $lte: formattedEndDate },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		if (channel && channel !== "undefined") {
 			dynamicFilter.booking_source = { $regex: new RegExp(channel, "i") };
@@ -4534,7 +4830,7 @@ exports.generalReservationsReport = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -4546,8 +4842,10 @@ exports.reservationObjectSummary = async (req, res) => {
 		const { accountId, date } = req.params;
 		const { createdByUserId = "" } = req.query || {};
 		const formattedDate = new Date(`${date}T00:00:00+03:00`); // Use Saudi Arabia time zone
+		const actor = await resolveReservationVisibilityActor(req, createdByUserId);
 		const matchStage = { hotelId: mongoose.Types.ObjectId(accountId) };
 		addExcludePendingOtaReviewToMutableFilter(matchStage);
+		addHotelManagementReservationVisibilityToFilter(matchStage, actor);
 
 		if (createdByUserId && ObjectId.isValid(createdByUserId)) {
 			const actorId = String(createdByUserId);
@@ -4946,8 +5244,12 @@ exports.singleReservationById = async (req, res) => {
 			roleDescription: "client",
 		};
 
-		// Find the reservation by its ID and populate related fields
-		const reservation = await Reservations.findById(reservationId)
+		// Find the reservation by its ID and apply hotel-management history visibility.
+		const reservationQuery = withHotelManagementReservationVisibility(
+			{ _id: reservationId },
+			auditViewer
+		);
+		const reservation = await Reservations.findOne(reservationQuery)
 			.populate({
 				path: "hotelId",
 				model: "HotelDetails", // Ensure this matches the name of your HotelDetails model
@@ -5024,23 +5326,26 @@ exports.singleReservationById = async (req, res) => {
 
 exports.openFinanceCycleNotifications = async (req, res) => {
 	try {
-		const { hotelId } = req.params;
+		const { hotelId, userId } = req.params;
 		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 			return res.status(400).json({ error: "Invalid hotel id" });
 		}
+		const actor = await resolveReservationVisibilityActor(req, userId);
 
 		const today = moment().tz("Asia/Riyadh").startOf("day").toDate();
-		const openRows = await Reservations.find(
-			{
-				hotelId,
-				checkin_date: { $gte: today },
-				reservation_status: {
-					$not: new RegExp(
-						`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}`,
-						"i"
-					),
-				},
+		const query = {
+			hotelId,
+			checkin_date: { $gte: today },
+			reservation_status: {
+				$not: new RegExp(
+					`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}`,
+					"i"
+				),
 			},
+		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
+		const openRows = await Reservations.find(
+			query,
 			{
 				confirmation_number: 1,
 				customer_details: 1,
@@ -5077,9 +5382,10 @@ exports.openFinanceCycleNotifications = async (req, res) => {
 	}
 };
 
-exports.reservationsList = (req, res) => {
+exports.reservationsList = async (req, res) => {
 	const hotelId = mongoose.Types.ObjectId(req.params.hotelId);
 	const userId = mongoose.Types.ObjectId(req.params.belongsTo);
+	const actor = await resolveReservationVisibilityActor(req, req.params.belongsTo);
 
 	// Start date at the beginning of the day in UTC
 	const startDate = new Date(req.params.startdate);
@@ -5110,19 +5416,18 @@ exports.reservationsList = (req, res) => {
 		...buildPendingConfirmationExclusionFilter(),
 		...buildExcludePendingOtaReviewFilter(),
 	};
+	addHotelManagementReservationVisibilityToFilter(queryConditions, actor);
 
-	Reservations.find(queryConditions)
-		.populate("belongsTo")
-		.populate("roomId")
-		.exec((err, data) => {
-			if (err) {
-				console.log(err, "err");
-				return res.status(400).json({
-					error: err,
-				});
-			}
-			res.json(sanitizeReservationAuditLogsCollectionForViewer(data));
-		});
+	try {
+		const data = await Reservations.find(queryConditions)
+			.populate("belongsTo")
+			.populate("roomId")
+			.exec();
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(data, actor));
+	} catch (err) {
+		console.log(err, "err");
+		return res.status(400).json({ error: err });
+	}
 };
 
 exports.reservationsOccupancyRange = async (req, res) => {
@@ -5142,6 +5447,7 @@ exports.reservationsOccupancyRange = async (req, res) => {
 		if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
 			return res.status(400).json({ error: "Invalid date range" });
 		}
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
 		startDate.setUTCHours(0, 0, 0, 0);
 		endDate.setUTCHours(23, 59, 59, 999);
 
@@ -5171,12 +5477,13 @@ exports.reservationsOccupancyRange = async (req, res) => {
 			...buildPendingConfirmationExclusionFilter(),
 			...buildExcludePendingOtaReviewFilter(),
 		};
+		addHotelManagementReservationVisibilityToFilter(queryConditions, actor);
 
 		const reservations = await Reservations.find(queryConditions)
 			.populate("belongsTo")
 			.populate("roomId");
 
-		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error("Error fetching occupancy range:", error);
 		return res.status(500).json({ error: "Internal server error" });
@@ -5192,6 +5499,7 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 
 		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
 		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
 
 		const overdueInhouseFilter = {
 			reservation_status: IN_HOUSE_REGEX,
@@ -5214,12 +5522,13 @@ exports.reservationsOccupancyCurrent = async (req, res) => {
 				overdueInhouseFilter,
 			],
 		};
+		addHotelManagementReservationVisibilityToFilter(queryConditions, actor);
 
 		const reservations = await Reservations.find(queryConditions)
 			.populate("belongsTo")
 			.populate("roomId");
 
-		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error("Error fetching current occupancy:", error);
 		return res.status(500).json({ error: "Internal server error" });
@@ -5235,6 +5544,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 
 		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
 		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
 
 		const overdueInhouseFilter = {
 			reservation_status: IN_HOUSE_REGEX,
@@ -5257,6 +5567,7 @@ exports.reservationsOccupancySummary = async (req, res) => {
 				overdueInhouseFilter,
 			],
 		};
+		addHotelManagementReservationVisibilityToFilter(queryConditions, actor);
 
 		const [rooms, reservations, cleaningTasks] = await Promise.all([
 			Rooms.find({ hotelId: ObjectId(hotelId) })
@@ -5504,8 +5815,9 @@ exports.todaysCheckins = async (req, res) => {
 
 		const startOfDay = moment.tz("Asia/Riyadh").startOf("day").toDate();
 		const endOfDay = moment.tz("Asia/Riyadh").endOf("day").toDate();
+		const actor = await resolveReservationVisibilityActor(req, belongsTo);
 
-		const reservations = await Reservations.find({
+		const query = {
 			hotelId: ObjectId(hotelId),
 			belongsTo: ObjectId(belongsTo),
 			checkin_date: { $gte: startOfDay, $lte: endOfDay },
@@ -5520,28 +5832,34 @@ exports.todaysCheckins = async (req, res) => {
 					"no_show",
 				],
 			},
-		}).sort({ checkin_date: 1 });
+		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
+		const reservations = await Reservations.find(query).sort({ checkin_date: 1 });
 
-		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error("Error fetching today's check-ins:", error);
 		return res.status(500).json({ error: "Internal Server Error" });
 	}
 };
 
-exports.reservationsList2 = (req, res) => {
+exports.reservationsList2 = async (req, res) => {
 	const userId = mongoose.Types.ObjectId(req.params.accountId);
 	const today = new Date();
 	const thirtyDaysAgo = new Date(today);
 	thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+	const actor = await resolveReservationVisibilityActor(req);
 
-	Reservations.find({
+	const query = {
 		hotelId: userId,
 		checkin_date: {
 			$gte: thirtyDaysAgo, // Greater than or equal to 30 days ago
 		},
 		...buildExcludePendingOtaReviewFilter(),
-	})
+	};
+	addHotelManagementReservationVisibilityToFilter(query, actor);
+
+	Reservations.find(query)
 		.populate("belongsTo")
 		.populate(
 			"roomId",
@@ -5555,7 +5873,7 @@ exports.reservationsList2 = (req, res) => {
 					error: err,
 				});
 			}
-			res.json(sanitizeReservationAuditLogsCollectionForViewer(data));
+			res.json(sanitizeReservationAuditLogsCollectionForViewer(data, actor));
 		});
 };
 
@@ -5734,13 +6052,22 @@ exports.updateReservation = async (req, res) => {
 						.exec()
 				: null;
 		let adminCorrectionResubmitted = false;
+		let superAdminPendingReversionApplied = false;
+		const sourceUpdatePermission = protectReservationSourceUpdate(
+			normalizedUpdateData,
+			existingReservation,
+			requestingActor || {}
+		);
+		if (!sourceUpdatePermission.allowed) {
+			return res.status(403).json(sourceUpdatePermission);
+		}
 		if (
 			isOtaPlatformReviewPending(existingReservation) &&
 			!canManageOtaReservations(requestingActor)
 		) {
 			return res.status(404).json({ error: "Reservation not found" });
 		}
-		const requestedLifecycleStatus = String(
+		let requestedLifecycleStatus = String(
 			normalizedUpdateData.reservation_status ||
 				normalizedUpdateData.state ||
 				""
@@ -5754,6 +6081,45 @@ exports.updateReservation = async (req, res) => {
 			isAdminAllReservationsStatusUpdate &&
 			isAdminAllReservationsSuperAdminForceStatus &&
 			isConfiguredSuperAdminReservationActor(requestingActor);
+		const requestsPendingConfirmationReversion =
+			isPendingConfirmationReversionRequest(
+				existingReservation,
+				normalizedUpdateData,
+				requestedLifecycleStatus
+			);
+		if (
+			requestsPendingConfirmationReversion &&
+			!isConfiguredSuperAdminReservationActor(requestingActor)
+		) {
+			return res.status(403).json({
+				error:
+					"Only a configured super admin can revert a reservation to pending confirmation.",
+				code: "reservation_pending_reversion_super_admin_only",
+			});
+		}
+		if (requestsPendingConfirmationReversion) {
+			const pendingReversionUpdate = buildSuperAdminPendingReversionUpdate({
+				reservation: existingReservation,
+				auditActor,
+				actorId: requestingUserId,
+				reason:
+					normalizedUpdateData.confirmationReason ||
+					normalizedUpdateData.reason ||
+					normalizedUpdateData.pendingConfirmation?.confirmationReason ||
+					normalizedUpdateData.pendingConfirmation?.rejectionReason ||
+					"",
+			});
+			normalizedUpdateData = {
+				...normalizedUpdateData,
+				...pendingReversionUpdate,
+				financial_cycle: {
+					...(normalizedUpdateData.financial_cycle || {}),
+					...pendingReversionUpdate.financial_cycle,
+				},
+			};
+			requestedLifecycleStatus = STATUS_PENDING_CONFIRMATION;
+			superAdminPendingReversionApplied = true;
+		}
 		if (
 			requestedLifecycleStatus &&
 			requestedLifecycleStatus.toLowerCase() !==
@@ -6095,6 +6461,22 @@ exports.updateReservation = async (req, res) => {
 			normalizedUpdateData.customer_details ||
 			normalizedUpdateData.customerDetails ||
 			null;
+		const protectedCustomerDetails = customerDetails
+			? protectCustomerDetailsBookingSourceUpdate(
+					customerDetails,
+					existingReservation
+			  )
+			: null;
+		[
+			"customer_details.booking_source",
+			"customer_details.bookingSource",
+			"customerDetails.booking_source",
+			"customerDetails.bookingSource",
+		].forEach((field) => {
+			if (Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)) {
+				delete normalizedUpdateData[field];
+			}
+		});
 
 		if (normalizedUpdateData.customer_details) {
 			delete normalizedUpdateData.customer_details;
@@ -6149,10 +6531,10 @@ exports.updateReservation = async (req, res) => {
 				...existingPlain,
 				...normalizedUpdateData,
 			};
-			if (customerDetails) {
+			if (protectedCustomerDetails) {
 				mergedReservationForCalendar.customer_details = {
 					...(existingPlain.customer_details || {}),
-					...customerDetails,
+					...protectedCustomerDetails,
 				};
 			}
 
@@ -6251,7 +6633,7 @@ exports.updateReservation = async (req, res) => {
 			"financial_cycle",
 		].some(updateFieldChanged);
 
-		if (touchesFinancialCycle) {
+		if (touchesFinancialCycle && !superAdminPendingReversionApplied) {
 			normalizedUpdateData.financial_cycle = buildFinancialCycleSnapshot(
 				existingReservation,
 				normalizedUpdateData,
@@ -6279,7 +6661,7 @@ exports.updateReservation = async (req, res) => {
 			...normalizedUpdateData,
 		};
 
-		if (customerDetails) {
+		if (protectedCustomerDetails) {
 			const existingCustomerDetails =
 				typeof existingReservation.customer_details?.toObject === "function"
 					? existingReservation.customer_details.toObject()
@@ -6287,7 +6669,7 @@ exports.updateReservation = async (req, res) => {
 
 			updatePayload.customer_details = {
 				...existingCustomerDetails,
-				...customerDetails,
+				...protectedCustomerDetails,
 			};
 		}
 
@@ -6538,7 +6920,7 @@ exports.deleteByHotelId = async (req, res) => {
 	}
 };
 
-exports.summaryBySource = async () => {
+exports.summaryBySource = async (req, res) => {
 	try {
 		const summary = await Reservations.aggregate([
 			{
@@ -6560,9 +6942,18 @@ exports.summaryBySource = async () => {
 			},
 		]);
 
-		return summary;
+		const actor = await resolveReservationVisibilityActor(req);
+		const visibleSummary = shouldMaskHotelManagementReservationSource(actor)
+			? maskBookingSourceSummaryRowsForHotelManagement(summary)
+			: summary;
+
+		if (res && typeof res.json === "function") return res.json(visibleSummary);
+		return visibleSummary;
 	} catch (error) {
 		console.error("Error in summaryBySource:", error);
+		if (res && typeof res.status === "function") {
+			return res.status(500).json({ error: "Internal Server Error" });
+		}
 		throw error;
 	}
 };
@@ -7551,7 +7942,8 @@ exports.dateReport = async (req, res) => {
 	const endOfDay = new Date(`${date}T23:59:59Z`);
 
 	try {
-		const reservations = await Reservations.find({
+		const actor = await resolveReservationVisibilityActor(req, userMainId);
+		const query = {
 			belongsTo: mongoose.Types.ObjectId(userMainId),
 			hotelId: mongoose.Types.ObjectId(hotelId),
 			...buildExcludePendingOtaReviewFilter(),
@@ -7569,9 +7961,14 @@ exports.dateReport = async (req, res) => {
 					],
 				},
 			],
-		});
+		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
 
-		return res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		const reservations = await Reservations.find(query);
+
+		return res.json(
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor)
+		);
 	} catch (error) {
 		console.error(error);
 		return res
@@ -7605,6 +8002,8 @@ exports.dayoverday = async (req, res) => {
 			},
 		};
 		addExcludePendingOtaReviewToMutableFilter(matchCondition);
+		const actor = await resolveReservationVisibilityActor(req, userMainId);
+		addHotelManagementReservationVisibilityToFilter(matchCondition, actor);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7675,6 +8074,8 @@ exports.monthovermonth = async (req, res) => {
 			belongsTo: ObjectId(userMainId),
 		};
 		addExcludePendingOtaReviewToMutableFilter(matchCondition);
+		const actor = await resolveReservationVisibilityActor(req, userMainId);
+		addHotelManagementReservationVisibilityToFilter(matchCondition, actor);
 
 		// Get the current month and year
 		const currentMonth = new Date().getMonth() + 3; // +1 because getMonth() returns 0-11
@@ -7795,6 +8196,8 @@ exports.bookingSource = async (req, res) => {
 			belongsTo: ObjectId(userMainId),
 		};
 		addExcludePendingOtaReviewToMutableFilter(matchCondition);
+		const actor = await resolveReservationVisibilityActor(req, userMainId);
+		addHotelManagementReservationVisibilityToFilter(matchCondition, actor);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7848,7 +8251,11 @@ exports.bookingSource = async (req, res) => {
 			{ $sort: { _id: 1 } },
 		]);
 
-		res.json(aggregation);
+		res.json(
+			shouldMaskHotelManagementReservationSource(actor)
+				? maskBookingSourceSummaryRowsForHotelManagement(aggregation)
+				: aggregation
+		);
 	} catch (error) {
 		res.status(500).send(error);
 	}
@@ -7863,6 +8270,8 @@ exports.reservationstatus = async (req, res) => {
 			belongsTo: ObjectId(userMainId),
 		};
 		addExcludePendingOtaReviewToMutableFilter(matchCondition);
+		const actor = await resolveReservationVisibilityActor(req, userMainId);
+		addHotelManagementReservationVisibilityToFilter(matchCondition, actor);
 
 		const aggregation = await Reservations.aggregate([
 			{ $match: matchCondition },
@@ -7949,6 +8358,8 @@ exports.CheckedOutReservations = async (req, res) => {
 			"roomId.0": { $exists: true }, // Ensure at least one roomId exists
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		const actor = await resolveReservationVisibilityActor(req);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -7979,7 +8390,7 @@ exports.CheckedOutReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -8007,6 +8418,8 @@ exports.pendingPaymentReservations = async (req, res) => {
 			financeStatus: { $in: ["not moved", "not paid", "", undefined] },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		const actor = await resolveReservationVisibilityActor(req);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -8031,7 +8444,7 @@ exports.pendingPaymentReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -8059,6 +8472,8 @@ exports.commissionPaidReservations = async (req, res) => {
 			financeStatus: { $in: ["paid"] },
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		const actor = await resolveReservationVisibilityActor(req);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Calculate dates for the filter: 2 days ago to 2 days in advance
 		const today = new Date();
@@ -8083,7 +8498,7 @@ exports.commissionPaidReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -8129,6 +8544,7 @@ exports.pendingConfirmationReservations = async (req, res) => {
 
 		const workflowScope = getPendingWorkflowScopeForActor(actor);
 		const dynamicFilter = buildPendingConfirmationFilter(hotelId, workflowScope);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 		if (search) {
 			const searchMatch = buildReservationSearchMatch(search);
 			if (searchMatch) {
@@ -8419,10 +8835,13 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					{ createdByUserId: ObjectId(normalizeId(actor._id)) },
 				],
 			};
+			const visibilityFilter =
+				hotelManagementReservationVisibilityFilterForActor(actor);
 			const agentDecisionQuery = {
 				hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
 				$and: [
 					buildExcludePendingOtaReviewFilter(),
+					...(visibilityFilter ? [visibilityFilter] : []),
 					agentOwnReservationClause,
 					{
 						$or: [
@@ -8667,9 +9086,12 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 
 		const workflowScope = getPendingWorkflowScopeForActor(actor);
 		const filters = hotelIds.map((id) =>
-			buildPendingConfirmationFilter(id, workflowScope, {
+			addHotelManagementReservationVisibilityToFilter(
+				buildPendingConfirmationFilter(id, workflowScope, {
 				includeLegacyPendingStatus: true,
-			})
+				}),
+				actor
+			)
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
 		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
@@ -8872,6 +9294,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 		}
 		const updatePayload = {};
 		let financeRejectionNotice = null;
+		let superAdminPendingReversionApplied = false;
 		const statusDecisionAction = [
 			"confirm",
 			"reject",
@@ -8880,6 +9303,26 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"revert",
 			"revert_to_pending",
 		].includes(action);
+		const pendingReversionAction = [
+			"pending",
+			"revert",
+			"revert_to_pending",
+		].includes(action);
+		if (
+			pendingReversionAction &&
+			isPendingConfirmationReversionRequest(
+				reservation,
+				{ pendingConfirmation: { status: "pending" } },
+				STATUS_PENDING_CONFIRMATION
+			) &&
+			!isConfiguredSuperAdminReservationActor(actor)
+		) {
+			return res.status(403).json({
+				error:
+					"Only a configured super admin can revert a reservation to pending confirmation.",
+				code: "reservation_pending_reversion_super_admin_only",
+			});
+		}
 		const statusDecisionLocked = ["confirmed", "rejected"].includes(
 			String(existingPending.status || "").toLowerCase()
 		);
@@ -9199,26 +9642,17 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			};
 		}
 
-		if (["pending", "revert", "revert_to_pending"].includes(action)) {
-			updatePayload.reservation_status = STATUS_PENDING_CONFIRMATION;
-			updatePayload.state = STATUS_PENDING_CONFIRMATION;
-			updatePayload.pendingConfirmation = {
-				...existingPending,
-				status: "pending",
-				rejectionReason: "",
-				confirmationReason: "",
-				confirmedAt: null,
-				rejectedAt: null,
-				revertedAt: now,
-				lastUpdatedAt: now,
-				lastUpdatedBy: auditActor,
-			};
-			updatePayload.agentDecisionSnapshot = {
-				status: "pending",
-				reason: confirmationReason,
-				decidedAt: now,
-				decidedBy: auditActor,
-			};
+		if (pendingReversionAction) {
+			Object.assign(
+				updatePayload,
+				buildSuperAdminPendingReversionUpdate({
+					reservation,
+					auditActor,
+					actorId,
+					reason: confirmationReason,
+				})
+			);
+			superAdminPendingReversionApplied = true;
 		}
 
 		if (action === "cancel") {
@@ -9292,7 +9726,7 @@ exports.updatePendingConfirmationReservation = async (req, res) => {
 			"financial_cycle",
 		].some((key) => Object.prototype.hasOwnProperty.call(updatePayload, key));
 
-		if (touchesFinancialCycle) {
+		if (touchesFinancialCycle && !superAdminPendingReversionApplied) {
 			updatePayload.financial_cycle = buildFinancialCycleSnapshot(
 				reservation,
 				updatePayload,
@@ -9810,15 +10244,18 @@ exports.ownerReport = async (req, res) => {
 		const hotelIdsArray = hotelIds
 			.split("-")
 			.map((id) => mongoose.Types.ObjectId(id));
+		const actor = await resolveReservationVisibilityActor(req);
+		const matchStage = {
+			hotelId: { $in: hotelIdsArray },
+			checkout_date: { $gte: startDate, $lte: endDate },
+			...buildExcludePendingOtaReviewFilter(),
+			reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
+		};
+		addHotelManagementReservationVisibilityToFilter(matchStage, actor);
 
 		const aggregateResult = await Reservations.aggregate([
 			{
-				$match: {
-					hotelId: { $in: hotelIdsArray },
-					checkout_date: { $gte: startDate, $lte: endDate },
-					...buildExcludePendingOtaReviewFilter(),
-					reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
-				},
+				$match: matchStage,
 			},
 			{
 				$lookup: {
@@ -9893,7 +10330,11 @@ exports.ownerReport = async (req, res) => {
 			},
 		]);
 
-		res.json(aggregateResult);
+		res.json(
+			shouldMaskHotelManagementReservationSource(actor)
+				? maskBookingSourceSummaryRowsForHotelManagement(aggregateResult)
+				: aggregateResult
+		);
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -9911,8 +10352,8 @@ exports.ownerReservationToDate = async (req, res) => {
 
 		// Convert date string to Date object and adjust for Saudi Arabia timezone
 		const checkinDate = new Date(date + "T00:00:00+03:00"); // Assuming 'date' is in 'yyyy-mm-dd' format
-
-		const reservations = await Reservations.find({
+		const actor = await resolveReservationVisibilityActor(req);
+		const query = {
 			hotelId: { $in: hotelIdsArray },
 			checkin_date: {
 				$gte: checkinDate,
@@ -9920,9 +10361,15 @@ exports.ownerReservationToDate = async (req, res) => {
 			},
 			...buildExcludePendingOtaReviewFilter(),
 			reservation_status: { $nin: ["cancelled", "canceled", "no_show"] },
-		}).populate("hotelId", "hotelName"); // Assuming you want to include the hotel name in the response
+		};
+		addHotelManagementReservationVisibilityToFilter(query, actor);
 
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		const reservations = await Reservations.find(query).populate(
+			"hotelId",
+			"hotelName"
+		); // Assuming you want to include the hotel name in the response
+
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -9948,6 +10395,8 @@ exports.CollectedReservations = async (req, res) => {
 			payment: "collected", // Filter for payment field to be "collected"
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		const actor = await resolveReservationVisibilityActor(req);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Add reservation_status to the filter if the status is not "all"
 		if (status !== "all") {
@@ -9970,7 +10419,7 @@ exports.CollectedReservations = async (req, res) => {
 		];
 
 		const reservations = await Reservations.aggregate(pipeline);
-		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations));
+		res.json(sanitizeReservationAuditLogsCollectionForViewer(reservations, actor));
 	} catch (error) {
 		console.error(error);
 		res.status(500).send("Server error: " + error.message);
@@ -9996,6 +10445,8 @@ exports.aggregateCollectedReservations = async (req, res) => {
 			payment: "collected", // Filter for payment field to be "collected"
 		};
 		addExcludePendingOtaReviewToMutableFilter(dynamicFilter);
+		const actor = await resolveReservationVisibilityActor(req);
+		addHotelManagementReservationVisibilityToFilter(dynamicFilter, actor);
 
 		// Add reservation_status to the filter if the status is not "all"
 		if (status !== "all") {

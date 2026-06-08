@@ -11,7 +11,7 @@
 - Tone is official, concise, warm, and useful. Brand must remain exactly `Jannat Booking`.
 - The assistant may help with hotels near Al Haram, date-range pricing, payment troubleshooting, and reservation triage.
 - Cancellation, refunds, and existing-reservation mutation are human handoff paths.
-- New-reservation finalization can be completed by the AI only after the guest explicitly confirms the review summary and provides full name, nationality, phone, and email/skip. The AI-created reservation must use inventory validation, save an availability snapshot, and enter the internal hotel pending-confirmation workflow.
+- New-reservation finalization can be completed by the AI only after the guest explicitly confirms the review summary and provides mandatory full name, phone, nationality, adults count, and children count. Email is optional after those required details. The AI-created reservation must use inventory validation, save an availability snapshot, and enter the internal hotel pending-confirmation workflow while the guest-facing copy says the reservation is confirmed.
 - Human handoff paths are real escalations: the support case is saved with
   `escalationStatus=active`, `escalationSource=ai`, and an escalation reason.
 - If the orchestrator decides the request is outside available context or should
@@ -52,21 +52,20 @@
   - Missing calendar day ⇒ `basePrice`.
   - `basePrice` blank/0 ⇒ `defaultCost`.
   - Commission = `room.roomCommission || hotel.commission || 10`.
-- **Flow** (one question each step):
+- **Flow**:
   1. Understand and answer the guest's latest question first
   2. Room type/capacity if the guest asks about it first
   3. Check-in and check-out dates after the guest is ready for availability/price
-  4. Review quote and ask the guest to confirm
-  5. Full name in English
-  6. Nationality
-  7. Phone
-  8. Email, or `skip` if the guest does not want to provide one
+  4. Review quote and ask the guest to confirm, with localized Confirm / Something is wrong quick replies when the public widget can render them
+  5. Ask once, in one message, for full name as in passport, phone, nationality, adults count, and children count
+  6. Ask optional email for confirmation/payment-link delivery, with a localized Skip quick reply
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
 - On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.
   - The saved reservation uses `booking_source="AI Chat"`, `payment="Not Paid"`, `pendingConfirmation.status="pending"`, `pendingConfirmation.clientVisibleStatus="confirmed"`, and `availabilitySnapshot.source="ai_chat_reservation_create"`.
+  - Keep `booking_source="AI Chat"` in storage for platform auditing. Hotel-management responses mask this source to `Jannat Employee`; only platform /admin views and configured SUPER ADMIN/platform admin users outside hotel-management should see the real AI source.
   - The confirmation number follows the normal PMS reservation pattern: a unique 10-digit value checked against saved and pending/uncompleted reservations. Do not use AI-only 6-digit numbers.
-  - The guest receives a friendly created/confirmation response with the confirmation number, details link, and payment link. Internally the hotel team still reviews the pending-confirmation reservation.
+  - The guest receives a friendly confirmed response with the confirmation number, details link, and payment link. Internally the hotel team still reviews the pending-confirmation reservation.
   - If inventory is no longer available or creation fails, the AI escalates to human support with `aiHandoffReason=reservation_finalize_failed`.
 - **Dates**:
   - The chatbot accepts Gregorian/Miladi and Hijri date ranges.

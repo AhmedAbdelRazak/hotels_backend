@@ -2205,6 +2205,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 			confirmation_number: normalized.confirmationNumber,
 			booking_source: providerLabel,
 			customer_details: {
+				booking_source: providerLabel,
 				name: normalized.guestName || "",
 				phone: normalized.guestPhone || "0000",
 				email: normalized.guestEmail || "no-email@jannatbooking.com",
@@ -2477,6 +2478,9 @@ function buildExistingReservationUpdateSet({
 	setIfOtaValue(set, "reservation_id", normalized.reservationId || confirmationNumber);
 	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
 		setIfOtaValue(set, "booking_source", providerLabel);
+		if (!String(existing?.customer_details?.booking_source || "").trim()) {
+			setIfOtaValue(set, "customer_details.booking_source", providerLabel);
+		}
 	}
 	setIfOtaValue(set, "customer_details.name", normalized.guestName);
 	setIfOtaValue(set, "customer_details.email", normalized.guestEmail);

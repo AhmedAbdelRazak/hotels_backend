@@ -47,45 +47,45 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 700, {
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 120, {
 	min: 0,
 	max: 5000,
 });
 const HUMAN_THINK_MAX_MS = Math.max(
 	HUMAN_THINK_MIN_MS,
-	intFromEnv("AI_HUMAN_THINK_MAX_MS", 1400, { min: 0, max: 5000 })
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 350, { min: 0, max: 5000 })
 );
-const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 12, {
+const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 2, {
 	min: 1,
 	max: 300,
 });
 const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
 	HUMAN_TYPE_CHAR_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 22, { min: 1, max: 300 })
+	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 5, { min: 1, max: 300 })
 );
-const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 2200, {
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 450, {
 	min: 250,
 	max: 10000,
 });
 const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
 	HUMAN_TYPE_CLAMP_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 6500, { min: 250, max: 15000 })
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 1800, { min: 250, max: 15000 })
 );
 const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
 	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
-	800,
+	150,
 	{ min: 0, max: 10000 }
 );
 const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
 	HUMAN_BETWEEN_SENDS_MIN_MS,
-	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 1600, {
+	intFromEnv("AI_HUMAN_BETWEEN_SENDS_MAX_MS", 350, {
 		min: 0,
 		max: 10000,
 	})
 );
 
 const HUMAN = {
-	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 1200, {
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 300, {
 		min: 0,
 		max: 7000,
 	}),
@@ -402,7 +402,7 @@ function latestEmailFromText(text = "") {
 }
 
 function latestPhoneFromText(text = "") {
-	const matches = String(text || "").match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9\s().-]{4,}/g);
+	const matches = String(text || "").match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9 \t().-]{4,}/g);
 	if (!matches?.length) return "";
 	for (let i = matches.length - 1; i >= 0; i -= 1) {
 		const phone = cleanPhoneCandidate(matches[i]);
@@ -434,13 +434,28 @@ function applyGuestCountsFromText(st, text = "") {
 	const childMatch = normalized.match(
 		/(\d{1,2})\s*(?:child|children|kid|kids|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
 	);
-	if (adultMatch) st.slots.adults = Math.max(1, Number(adultMatch[1]));
-	if (childMatch) st.slots.children = Math.max(0, Number(childMatch[1]));
+	if (adultMatch) {
+		st.slots.adults = Math.max(1, Number(adultMatch[1]));
+		st.slots.adultsProvided = true;
+	}
+	if (childMatch) {
+		st.slots.children = Math.max(0, Number(childMatch[1]));
+		st.slots.childrenProvided = true;
+	}
+	if (
+		/\b(no|none|zero)\s+(?:child|children|kid|kids)\b|\u0628\u062f\u0648\u0646\s+\u0623?\u0637\u0641\u0627\u0644|\u0644\u0627\s+\u064a\u0648\u062c\u062f\s+\u0623?\u0637\u0641\u0627\u0644|\u0645\u0627\s+\u0641\u064a\s+\u0623?\u0637\u0641\u0627\u0644/i.test(
+			normalized
+		)
+	) {
+		st.slots.children = 0;
+		st.slots.childrenProvided = true;
+	}
 	if (
 		!childMatch &&
 		/\b(child|kid)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
 	) {
 		st.slots.children = Math.max(1, Number(st.slots.children || 0));
+		st.slots.childrenProvided = true;
 	}
 	if (!adultMatch && !childMatch) {
 		const total =
@@ -449,7 +464,10 @@ function applyGuestCountsFromText(st, text = "") {
 			)
 				? guestCountNumber(normalized)
 				: null;
-		if (total) st.slots.adults = total;
+		if (total) {
+			st.slots.adults = total;
+			st.slots.adultsProvided = true;
+		}
 	}
 }
 
@@ -484,6 +502,14 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	const phone = latestPhoneFromText(guestText);
 	if (phone && !st.slots.phone) st.slots.phone = phone;
 	for (const message of conversation) {
+		if (!isGuestConversationMessage(message)) continue;
+		const contact = String(message?.messageBy?.customerEmail || "");
+		const contactEmail = latestEmailFromText(contact);
+		const contactPhone = cleanPhoneCandidate(contact);
+		if (contactEmail && !st.slots.email) st.slots.email = contactEmail;
+		if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
+	}
+	for (const message of conversation) {
 		if (isGuestConversationMessage(message)) {
 			applyGuestCountsFromText(st, message.message);
 		}
@@ -505,8 +531,11 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		}
 		if (!isGuestConversationMessage(message)) continue;
 		if (lastAsk === "name" && !st.slots.fullName && looksLikeNameCandidate(text)) {
-			st.slots.fullName = asciiize(text).trim() || text.trim();
-			st.slots.name = st.slots.fullName;
+			const candidate = cleanFullNameCandidate(text);
+			if (candidate) {
+				st.slots.fullName = candidate;
+				st.slots.name = candidate;
+			}
 		} else if (lastAsk === "phone" && !st.slots.phone) {
 			const candidate = latestPhoneFromText(text);
 			if (candidate) st.slots.phone = candidate;
@@ -536,6 +565,7 @@ function isNewReservationFlowActive(st = {}) {
 				"room",
 				"proceed",
 				"reviewConfirm",
+				"reservation_details",
 				"fullname",
 				"nationality",
 				"phone",
@@ -554,6 +584,7 @@ function explicitlyExistingReservationIntent(text = "") {
 function isReservationDetailStep(st = {}) {
 	return [
 		"reviewConfirm",
+		"reservation_details",
 		"fullname",
 		"nationality",
 		"phone",
@@ -1060,6 +1091,9 @@ function ensureState(sc, hotel) {
 	let st = memo.get(id);
 	if (!st) {
 		const agentPool = configuredAgentPool();
+		const initialFullName = cleanFullNameCandidate(
+			sc.displayName1 || sc.customerName || ""
+		);
 		st = {
 			hotel,
 			agentName:
@@ -1089,13 +1123,18 @@ function ensureState(sc, hotel) {
 				checkinISO: null,
 				checkoutISO: null,
 				roomTypeKey: null,
-				name: firstNameOf(sc.displayName1 || sc.customerName || "Guest"),
-				fullName: null,
+				name:
+					initialFullName ||
+					firstNameOf(sc.displayName1 || sc.customerName || "Guest"),
+				fullName: initialFullName || null,
 				nationality: null,
 				phone: null,
 				email: null,
+				emailSkipped: false,
 				adults: 2,
 				children: 0,
+				adultsProvided: false,
+				childrenProvided: false,
 				rooms: 1,
 			},
 		};
@@ -1120,10 +1159,11 @@ function emitTyping(io, caseId, st, on = true) {
 }
 
 /* --------- humanSend with pre‑emption (cancellable) --------- */
-async function humanSend(io, sc, st, text, { first = false } = {}) {
+async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } = {}) {
 	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
 	const expectedTurnUserText = st.activeTurnUserText || "";
+	const normalizedQuickReplies = sanitizeQuickReplies(quickReplies);
 
 	const token = Math.random().toString(36).slice(2);
 	st.sendingToken = token;
@@ -1222,6 +1262,9 @@ async function humanSend(io, sc, st, text, { first = false } = {}) {
 		date: new Date(),
 		isAi: true,
 	};
+	if (normalizedQuickReplies.length) {
+		messageData.quickReplies = normalizedQuickReplies;
+	}
 	await updateSupportCaseAppend(caseId, {
 		conversation: messageData,
 		aiRelated: true,
@@ -1281,20 +1324,443 @@ function stampAsk(st, key) {
 	st.lastAskAt[key] = now();
 }
 
+function normalizeControlText(text = "") {
+	const raw = digitsToEnglish(String(text || "")).trim();
+	const lower = raw.toLowerCase();
+	const arabic = lower
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647")
+		.replace(/\s+/g, " ")
+		.trim();
+	const latinCompact = lower
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/[^a-z0-9]+/g, "");
+	return { raw, lower, arabic, latinCompact };
+}
+
+function correctionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(something\s+is\s+wrong|wrong|incorrect|not\s+correct|mistake|change|edit|modify|fix|correction|correct\s+it)\b/i.test(
+			lower
+		) ||
+		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\s+\u0635\u062d|\u0645\u0634\s+\u0635\u062d\u064a\u062d|\u063a\u064a\u0631\s+\u0635\u062d\u064a\u062d|\u062a\u0639\u062f\u064a\u0644|\u0639\u062f\u0644|\u0627\u0635\u0644\u062d|\u0635\u062d\u062d)/i.test(
+			arabic
+		) ||
+		/(?:somethingwrong|wrong|incorrect|notcorrect|mistake|change|edit|modify|fix|correction)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function skipEmailText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(no|skip|don'?t\s+have|do\s+not\s+have|later|none|no\s+email|without\s+email)\b/i.test(
+			lower
+		) ||
+		/(?:\u0644\u0627|\u062a\u062e\u0637\u064a|\u0628\u062f\u0648\u0646\s+\u0627\u064a\u0645\u064a\u0644|\u0628\u062f\u0648\u0646\s+\u0628\u0631\u064a\u062f|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0627\s+\u0639\u0646\u062f\u064a|\u0645\u0634\s+\u0645\u0648\u062c\u0648\u062f)/i.test(
+			arabic
+		) ||
+		/(?:skip|noemail|withoutemail|later|none)/i.test(latinCompact)
+	);
+}
+
+function hasUsableFullName(value = "") {
+	const name = String(value || "").replace(/\s+/g, " ").trim();
+	if (!name || name.length < 4 || name.length > 90) return false;
+	if (latestEmailFromText(name) || cleanPhoneCandidate(name)) return false;
+	if (
+		/\b(?:guest|unknown|test|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
+			name
+		) ||
+		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
+			name
+		)
+	) {
+		return false;
+	}
+	if (
+		/confirm|confirmation|book|reserve|price|date|room|\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641/i.test(
+			name
+		)
+	) {
+		return false;
+	}
+	const nameTokens = name
+		.split(/\s+/)
+		.filter((token) => /[A-Za-z\u0590-\u08FF\u0900-\u097F]{2,}/.test(token));
+	const letterCount = (name.match(/[A-Za-z\u0590-\u08FF\u0900-\u097F]/g) || [])
+		.length;
+	return nameTokens.length >= 2 || letterCount >= 8;
+}
+
+function cleanFullNameCandidate(value = "") {
+	const cleaned = digitsToEnglish(String(value || ""))
+		.replace(/[<>]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return hasUsableFullName(cleaned) ? cleaned : "";
+}
+
+function stripFieldTail(value = "") {
+	return String(value || "")
+		.replace(
+			/(?:\b(?:phone|mobile|whatsapp|nationality|country|adults?|children|kids?|email)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)).*$/i,
+			""
+		)
+		.replace(/^[\s:：,\-–—|]+|[\s:：,\-–—|]+$/g, "")
+		.trim();
+}
+
+function explicitNameCandidateFromText(text = "") {
+	const value = String(text || "");
+	const patterns = [
+		/(?:^|[\s,;|])(?:full\s*name|guest\s*name|passport\s*name|name)\s*[:：-]?\s*([^\n,;|]+)/i,
+		/(?:^|[\s,;،|])(?:\u0648?\u0627\u0633\u0645\u064a|\u0648?\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645(?:\s+\u0627\u0644\u0643\u0627\u0645\u0644)?|\u0627\u0633\u0645)\s*[:：-]?\s+([^\n,;،|]+)/i,
+	];
+	for (const pattern of patterns) {
+		const match = value.match(pattern);
+		const candidate = match ? cleanFullNameCandidate(stripFieldTail(match[1])) : "";
+		if (candidate) return candidate;
+	}
+	return "";
+}
+
+function lineNameCandidateFromText(text = "") {
+	const lines = String(text || "")
+		.split(/[\n\r;|]+/)
+		.map((line) => stripFieldTail(line))
+		.filter(Boolean);
+	for (const line of lines) {
+		if (
+			/\b(?:phone|mobile|nationality|country|adult|children|child|email)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/i.test(
+				line
+			)
+		) {
+			continue;
+		}
+		const candidate = cleanFullNameCandidate(line);
+		if (candidate) return candidate;
+	}
+	return "";
+}
+
+const NATIONALITY_HINTS = [
+	[/\b(?:egyptian|egypt)\b|\u0645\u0635\u0631\u064a|\u0645\u0635\u0631\u064a\u0629|\u0645\u0635\u0631/i, "Egyptian"],
+	[/\b(?:saudi|saudi\s+arabian)\b|\u0633\u0639\u0648\u062f\u064a|\u0633\u0639\u0648\u062f\u064a\u0629/i, "Saudi"],
+	[/\b(?:pakistani|pakistan)\b|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a\u0629/i, "Pakistani"],
+	[/\b(?:indian|india)\b|\u0647\u0646\u062f\u064a|\u0647\u0646\u062f\u064a\u0629/i, "Indian"],
+	[/\b(?:bangladeshi|bangladesh)\b|\u0628\u0646\u063a\u0644\u0627\u062f\u0634/i, "Bangladeshi"],
+	[/\b(?:indonesian|indonesia)\b|\u0627\u0646\u062f\u0648\u0646\u064a\u0633\u064a|\u0627\u0646\u062f\u0648\u0646\u064a\u0633\u064a\u0629/i, "Indonesian"],
+	[/\b(?:malaysian|malaysia)\b|\u0645\u0627\u0644\u064a\u0632\u064a|\u0645\u0627\u0644\u064a\u0632\u064a\u0629/i, "Malaysian"],
+	[/\b(?:moroccan|morocco)\b|\u0645\u063a\u0631\u0628\u064a|\u0645\u063a\u0631\u0628\u064a\u0629/i, "Moroccan"],
+	[/\b(?:algerian|algeria)\b|\u062c\u0632\u0627\u0626\u0631\u064a|\u062c\u0632\u0627\u0626\u0631\u064a\u0629/i, "Algerian"],
+	[/\b(?:tunisian|tunisia)\b|\u062a\u0648\u0646\u0633\u064a|\u062a\u0648\u0646\u0633\u064a\u0629/i, "Tunisian"],
+	[/\b(?:sudanese|sudan)\b|\u0633\u0648\u062f\u0627\u0646\u064a|\u0633\u0648\u062f\u0627\u0646\u064a\u0629/i, "Sudanese"],
+	[/\b(?:iraqi|iraq)\b|\u0639\u0631\u0627\u0642\u064a|\u0639\u0631\u0627\u0642\u064a\u0629/i, "Iraqi"],
+	[/\b(?:syrian|syria)\b|\u0633\u0648\u0631\u064a|\u0633\u0648\u0631\u064a\u0629/i, "Syrian"],
+	[/\b(?:jordanian|jordan)\b|\u0627\u0631\u062f\u0646\u064a|\u0623\u0631\u062f\u0646\u064a|\u0627\u0631\u062f\u0646\u064a\u0629|\u0623\u0631\u062f\u0646\u064a\u0629/i, "Jordanian"],
+	[/\b(?:palestinian|palestine)\b|\u0641\u0644\u0633\u0637\u064a\u0646\u064a|\u0641\u0644\u0633\u0637\u064a\u0646\u064a\u0629/i, "Palestinian"],
+	[/\b(?:emirati|uae|united\s+arab\s+emirates)\b|\u0627\u0645\u0627\u0631\u0627\u062a\u064a|\u0625\u0645\u0627\u0631\u0627\u062a\u064a/i, "Emirati"],
+	[/\b(?:kuwaiti|kuwait)\b|\u0643\u0648\u064a\u062a\u064a|\u0643\u0648\u064a\u062a\u064a\u0629/i, "Kuwaiti"],
+	[/\b(?:qatari|qatar)\b|\u0642\u0637\u0631\u064a|\u0642\u0637\u0631\u064a\u0629/i, "Qatari"],
+	[/\b(?:bahraini|bahrain)\b|\u0628\u062d\u0631\u064a\u0646\u064a|\u0628\u062d\u0631\u064a\u0646\u064a\u0629/i, "Bahraini"],
+	[/\b(?:omani|oman)\b|\u0639\u0645\u0627\u0646\u064a|\u0639\u0645\u0627\u0646\u064a\u0629/i, "Omani"],
+	[/\b(?:yemeni|yemen)\b|\u064a\u0645\u0646\u064a|\u064a\u0645\u0646\u064a\u0629/i, "Yemeni"],
+	[/\b(?:turkish|turkey)\b|\u062a\u0631\u0643\u064a|\u062a\u0631\u0643\u064a\u0629/i, "Turkish"],
+	[/\b(?:nigerian|nigeria)\b|\u0646\u064a\u062c\u064a\u0631\u064a|\u0646\u064a\u062c\u064a\u0631\u064a\u0629/i, "Nigerian"],
+];
+
+function nationalityHintFromText(text = "") {
+	const value = String(text || "");
+	const found = NATIONALITY_HINTS.find(([pattern]) => pattern.test(value));
+	return found ? found[1] : "";
+}
+
+function explicitNationalityText(text = "") {
+	const value = String(text || "");
+	const patterns = [
+		/(?:^|[\s,;|])(?:nationality|country)\s*[:：-]?\s*([^\n,;|]+)/i,
+		/(?:^|[\s,;،|])(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u0628\u0644\u062f\u064a)\s*[:：-]?\s*([^\n,;،|]+)/i,
+	];
+	for (const pattern of patterns) {
+		const match = value.match(pattern);
+		if (match?.[1]) return stripFieldTail(match[1]);
+	}
+	return "";
+}
+
+async function normalizeNationalityFromText(text = "", language = "English") {
+	const explicit = explicitNationalityText(text);
+	const hint = nationalityHintFromText(explicit || text);
+	if (hint) return hint;
+	const candidate = explicit || String(text || "").trim();
+	if (!candidate || candidate.length > 80) return "";
+	const asciiCandidate = asciiize(candidate).trim();
+	if (/^[A-Za-z][A-Za-z\s-]{2,40}$/.test(asciiCandidate)) {
+		const nat = await validateNationalityLLM(asciiCandidate, language);
+		if (nat?.valid && nat.normalized) return nat.normalized;
+	}
+	const nat = await validateNationalityLLM(candidate, language);
+	return nat?.valid && nat.normalized ? nat.normalized : "";
+}
+
+function countProvided(value) {
+	return value !== null && value !== undefined && value !== "" && Number(value) >= 0;
+}
+
+function missingMandatoryReservationFields(st = {}) {
+	const slots = st.slots || {};
+	const missing = [];
+	if (!hasUsableFullName(slots.fullName || slots.name || "")) missing.push("fullName");
+	if (AI_REQUIRE_NATIONALITY && !slots.nationality) missing.push("nationality");
+	if (!cleanPhoneCandidate(slots.phone || "")) missing.push("phone");
+	if (!slots.adultsProvided || !countProvided(slots.adults) || Number(slots.adults) < 1) {
+		missing.push("adults");
+	}
+	if (!slots.childrenProvided || !countProvided(slots.children)) {
+		missing.push("children");
+	}
+	return missing;
+}
+
+function hasMandatoryReservationDetails(st = {}) {
+	return missingMandatoryReservationFields(st).length === 0;
+}
+
+function localizedMissingLabels(sc = {}, st = {}) {
+	const missing = missingMandatoryReservationFields(st);
+	const lang = languageOf(sc, st);
+	const labels = /arabic/i.test(lang)
+		? {
+				fullName: "\u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644",
+				nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629",
+				phone: "\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641",
+				adults: "\u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646",
+				children: "\u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644",
+		  }
+		: {
+				fullName: "full name",
+				nationality: "nationality",
+				phone: "phone",
+				adults: "adults count",
+				children: "children count",
+		  };
+	return missing.map((key) => labels[key] || key);
+}
+
+function mandatoryDetailsPrompt(sc = {}, st = {}, { retry = false } = {}) {
+	const lang = languageOf(sc, st);
+	const missing = localizedMissingLabels(sc, st).join(", ");
+	if (/arabic/i.test(lang)) {
+		return retry
+			? `\u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0645\u0627 \u0632\u0644\u062a \u0623\u062d\u062a\u0627\u062c: ${missing}. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644\u0647\u0627 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062d\u062f\u0629. \u0627\u0644\u0627\u0633\u0645 \u064a\u0645\u0643\u0646 \u0623\u0646 \u064a\u0643\u0648\u0646 \u0643\u0645\u0627 \u0641\u064a \u0627\u0644\u062c\u0648\u0627\u0632 \u0648\u0644\u0648 \u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629\u060c \u0648\u0627\u0643\u062a\u0628 \u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644 0 \u0625\u0630\u0627 \u0644\u0627 \u064a\u0648\u062c\u062f.`
+			: "\u062a\u0645\u0627\u0645. \u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062d\u062f\u0629: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644 \u0643\u0645\u0627 \u0641\u064a \u0627\u0644\u062c\u0648\u0627\u0632\u060c \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641\u060c \u0627\u0644\u062c\u0646\u0633\u064a\u0629\u060c \u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646\u060c \u0648\u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644. \u064a\u0645\u0643\u0646 \u0643\u062a\u0627\u0628\u0629 \u0627\u0644\u0627\u0633\u0645 \u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629\u060c \u0648\u0627\u0643\u062a\u0628 0 \u0644\u0644\u0623\u0637\u0641\u0627\u0644 \u0625\u0630\u0627 \u0644\u0627 \u064a\u0648\u062c\u062f.";
+	}
+	if (/spanish/i.test(lang)) {
+		return retry
+			? `Para completar la reserva, todavia necesito: ${missing}. Enviamelo en un solo mensaje; escribe 0 ninos si no hay ninos.`
+			: "Perfecto. Para completar la reserva, enviame en un solo mensaje: nombre completo como en el pasaporte, telefono, nacionalidad, numero de adultos y numero de ninos. Escribe 0 ninos si no hay ninos.";
+	}
+	if (/french/i.test(lang)) {
+		return retry
+			? `Pour finaliser la reservation, il me manque encore : ${missing}. Envoyez-les en un seul message; indiquez 0 enfant s'il n'y en a pas.`
+			: "Parfait. Pour finaliser la reservation, envoyez en un seul message : nom complet comme sur le passeport, telephone, nationalite, nombre d'adultes et nombre d'enfants. Indiquez 0 enfant s'il n'y en a pas.";
+	}
+	if (/urdu/i.test(lang)) {
+		return retry
+			? `To complete the reservation, I still need: ${missing}. Please send them in one message, and write 0 children if there are no children.`
+			: "Perfect. To complete the reservation, please send in one message: full name as in the passport, phone number, nationality, adults count, and children count. The name may be written as it appears in the passport; write 0 children if there are no children.";
+	}
+	if (/hindi/i.test(lang)) {
+		return retry
+			? `To complete the reservation, I still need: ${missing}. Please send them in one message, and write 0 children if there are no children.`
+			: "Perfect. To complete the reservation, please send in one message: full name as in the passport, phone number, nationality, adults count, and children count. The name may be written as it appears in the passport; write 0 children if there are no children.";
+	}
+	return retry
+		? `To complete the reservation, I still need: ${missing}. Please send them in one message, and write 0 children if there are no children.`
+		: "Perfect. To complete the reservation, please send in one message: full name as in the passport, phone number, nationality, adults count, and children count. The name may be written exactly as it appears in the passport; write 0 children if there are no children.";
+}
+
+function optionalEmailPrompt(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0634\u0643\u0631\u0627\u060c \u0633\u062c\u0644\u062a \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0629. \u0625\u0630\u0627 \u062a\u0631\u063a\u0628\u060c \u0623\u0631\u0633\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0644\u0625\u0631\u0633\u0627\u0644 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0648\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639\u060c \u0623\u0648 \u0627\u0636\u063a\u0637 \u062a\u062e\u0637\u064a.";
+	}
+	if (/spanish/i.test(lang)) {
+		return "Gracias, ya tengo los datos obligatorios. Si quieres recibir la confirmacion y el enlace de pago por email, enviame tu correo, o pulsa Omitir.";
+	}
+	if (/french/i.test(lang)) {
+		return "Merci, j'ai bien note les informations obligatoires. Si vous souhaitez recevoir la confirmation et le lien de paiement par email, envoyez votre adresse, ou cliquez sur Ignorer.";
+	}
+	return "Thank you, I have the required details. If you would like to receive the confirmation and payment link by email, please share your email address, or choose Skip.";
+}
+
+function sanitizeQuickReplies(quickReplies = []) {
+	if (!Array.isArray(quickReplies)) return [];
+	return quickReplies
+		.map((reply) => ({
+			label: String(reply?.label || "").trim().slice(0, 80),
+			value: String(reply?.value || reply?.label || "").trim().slice(0, 240),
+			action: String(reply?.action || "").trim().slice(0, 60),
+		}))
+		.filter((reply) => reply.label && reply.value)
+		.slice(0, 4);
+}
+
+function confirmationQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			{ label: "\u062a\u0623\u0643\u064a\u062f", value: "\u062a\u0623\u0643\u064a\u062f", action: "confirm" },
+			{
+				label: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				value: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				action: "correction",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{ label: "Confirmar", value: "Confirmar", action: "confirm" },
+			{ label: "Algo esta mal", value: "Algo esta mal", action: "correction" },
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{ label: "Confirmer", value: "Confirmer", action: "confirm" },
+			{
+				label: "Quelque chose ne va pas",
+				value: "Quelque chose ne va pas",
+				action: "correction",
+			},
+		];
+	}
+	if (/urdu/i.test(lang)) {
+		return [
+			{ label: "\u062a\u0635\u062f\u064a\u0642", value: "\u062a\u0635\u062f\u064a\u0642", action: "confirm" },
+			{
+				label: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				value: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				action: "correction",
+			},
+		];
+	}
+	if (/hindi/i.test(lang)) {
+		return [
+			{ label: "\u092a\u0941\u0937\u094d\u091f\u093f", value: "\u092a\u0941\u0937\u094d\u091f\u093f", action: "confirm" },
+			{
+				label: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				value: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				action: "correction",
+			},
+		];
+	}
+	return [
+		{ label: "Confirm", value: "Confirm", action: "confirm" },
+		{ label: "Something is wrong", value: "Something is wrong", action: "correction" },
+	];
+}
+
+function emailQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [{ label: "\u062a\u062e\u0637\u064a", value: "\u062a\u062e\u0637\u064a \u0627\u0644\u0628\u0631\u064a\u062f", action: "skip_email" }];
+	}
+	if (/spanish/i.test(lang)) return [{ label: "Omitir", value: "Omitir email", action: "skip_email" }];
+	if (/french/i.test(lang)) return [{ label: "Ignorer", value: "Ignorer email", action: "skip_email" }];
+	if (/urdu/i.test(lang)) return [{ label: "\u0646\u0638\u0631 \u0627\u0646\u062f\u0627\u0632", value: "Skip email", action: "skip_email" }];
+	if (/hindi/i.test(lang)) return [{ label: "\u091b\u094b\u0921\u0947\u0902", value: "Skip email", action: "skip_email" }];
+	return [{ label: "Skip", value: "Skip email", action: "skip_email" }];
+}
+
+function proceedQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			{ label: "\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639", value: "\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639", action: "proceed" },
+			{ label: "\u0644\u0627 \u0627\u0644\u0622\u0646", value: "\u0644\u0627 \u0627\u0644\u0622\u0646", action: "decline" },
+		];
+	}
+	return [
+		{ label: "Yes, proceed", value: "Yes, proceed", action: "proceed" },
+		{ label: "Not now", value: "Not now", action: "decline" },
+	];
+}
+
+async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", caseId = "") {
+	if (!st?.slots) return;
+	const before = JSON.stringify(st.slots || {});
+	const fullText = String(text || "");
+	applyGuestCountsFromText(st, fullText);
+	const phone = latestPhoneFromText(fullText);
+	if (phone) st.slots.phone = phone;
+	const email = latestEmailFromText(fullText);
+	if (email) {
+		st.slots.email = email;
+		st.slots.emailSkipped = false;
+	} else if (skipEmailText(fullText)) {
+		st.slots.email = "";
+		st.slots.emailSkipped = true;
+	}
+	const explicitName = explicitNameCandidateFromText(fullText);
+	const lineName = !explicitName ? lineNameCandidateFromText(fullText) : "";
+	const wholeName =
+		!explicitName && !lineName && st.waitFor === "fullname"
+			? cleanFullNameCandidate(fullText)
+			: "";
+	const name = explicitName || lineName || wholeName;
+	if (name) {
+		st.slots.fullName = name;
+		st.slots.name = name;
+	}
+	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) {
+		const nationality = await normalizeNationalityFromText(fullText, languageOf(sc, st));
+		if (nationality) st.slots.nationality = nationality;
+	}
+	if (st.slots.fullName && !st.slots.name) st.slots.name = st.slots.fullName;
+	if (before !== JSON.stringify(st.slots || {})) {
+		logStep(caseId || String(sc._id || ""), "reservation_details.captured", {
+			slots: st.slots,
+		});
+	}
+}
+
 function nextPivot(st) {
 	if (st.waitFor === "intentConfirm") return "intentConfirm";
 	if (!st.slots.checkinISO || !st.slots.checkoutISO) return "dates";
 	if (!st.slots.roomTypeKey) return "room";
 	if (!st.reviewSent) return "proceed";
-	if (!st.slots.fullName) return "fullname";
-	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) return "nationality";
-	if (!st.slots.phone) return "phone";
-	if (!st.slots.email) return "email_or_skip";
+	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
+	if (!st.slots.email && !st.slots.emailSkipped) return "email_or_skip";
 	return "finalize";
 }
 
 function confirmsText(text = "") {
 	const raw = String(text || "");
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	if (
+		/\bconfirmation\s*(?:number|no|#|reference)\b/i.test(lower) ||
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f)/i.test(
+			arabic
+		)
+	) {
+		return false;
+	}
+	if (
+		/(?:\u062a\u0645\u0627\u0645|\u0646\u0639\u0645|\u0627\u064a\u0648\u0647|\u0623\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0645\u0648\u0627\u0641\u0642|\u0635\u062d\u064a\u062d)/i.test(
+			arabic
+		) ||
+		/(?:confirm|confirmed|confirmation|yes|yep|yeah|ok|okay|proceed|goahead|bookit|reserveit|takeed|ta2keed|taakid|takid|t2keed|ta2kid|a2ked|aked|akid|tamam|naam|aywa|aiwa|ewa|oui|confirmer|daccord|si|sí|vale)/i.test(
+			latinCompact
+		)
+	) {
+		return true;
+	}
 	if (
 		/(?:\u062a\u0645\u0627\u0645|\u0646\u0639\u0645|\u0627\u064a\u0648\u0647|\u0623\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f)/i.test(raw)
 	) {
@@ -1721,11 +2187,11 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 	}
 	if (/full name|passport/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك اكتب الاسم الكامل للحجز باللغة الإنجليزية كما في جواز السفر.`;
-		return `${respectfulAddress}, please type the full name for the reservation in English as in the passport.`;
+		return `${respectfulAddress}, please type the full name for the reservation as it appears in the passport.`;
 	}
 	if (/nationality/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، ما جنسية الضيف؟ من فضلك اكتب اسم الدولة/الجنسية باللغة الإنجليزية.`;
-		return `${respectfulAddress}, what is the guest's nationality? Please type the country/nationality name in English.`;
+		return `${respectfulAddress}, what is the guest's nationality or country name?`;
 	}
 	if (/phone|whatsapp|reachable/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك أرسل رقم جوال يمكننا التواصل عليه. واتساب مفضل لكنه ليس إلزاميًا.`;
@@ -2174,7 +2640,9 @@ async function shareKnownStayQuote(io, sc, st) {
 		"Share the availability and price result from the quote context. If the guest provided Hijri dates, mention the Hijri range and the matching Gregorian range. If unavailable, offer another date range or room type. If available, ask one concise follow-up about whether to continue.",
 		{ quote, dates: stayDateDisplay(st) }
 	);
-	await humanSend(io, sc, st, quoteReply);
+	await humanSend(io, sc, st, quoteReply, {
+		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
+	});
 	st.waitFor = "proceed";
 }
 
@@ -2226,7 +2694,9 @@ async function sendReservationReview(io, sc, st, quote = null) {
 		"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.",
 		reviewPayload
 	);
-	await humanSend(io, sc, st, reviewText);
+	await humanSend(io, sc, st, reviewText, {
+		quickReplies: confirmationQuickReplies(sc, st),
+	});
 	st.reviewSent = true;
 	st.waitFor = "reviewConfirm";
 	stampAsk(st, "reviewConfirm");
@@ -2292,7 +2762,9 @@ async function handleProceedStageInput(
 		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue to the review step for this reservation?",
 		{ quoteReady: true, nextStep: "proceed_to_review" }
 	);
-	await humanSend(io, sc, st, msg);
+	await humanSend(io, sc, st, msg, {
+		quickReplies: proceedQuickReplies(sc, st),
+	});
 	return true;
 }
 
@@ -2321,7 +2793,7 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	const total = reservation.total_amount;
 	if (/arabic/i.test(lang)) {
 		return [
-			`\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
+			`\u062a\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
 			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${total} ${currency}**.`,
 			`[\u0627\u0636\u063a\u0637 \u0647\u0646\u0627 \u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u0632\u064a\u062f \u0645\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644](${links.reservationDetails})`,
 			`[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`,
@@ -2330,7 +2802,7 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	}
 	if (/spanish/i.test(lang)) {
 		return [
-			`La reserva se ha creado correctamente. Numero de confirmacion: **${confirmation}**.`,
+			`La reserva esta confirmada correctamente. Numero de confirmacion: **${confirmation}**.`,
 			`Total: **${total} ${currency}**.`,
 			`[Please click here to find more details](${links.reservationDetails})`,
 			`[Payment link](${links.payment})`,
@@ -2339,7 +2811,7 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	}
 	if (/french/i.test(lang)) {
 		return [
-			`La reservation a ete creee avec succes. Numero de confirmation : **${confirmation}**.`,
+			`La reservation est confirmee avec succes. Numero de confirmation : **${confirmation}**.`,
 			`Total : **${total} ${currency}**.`,
 			`[Please click here to find more details](${links.reservationDetails})`,
 			`[Payment link](${links.payment})`,
@@ -2347,7 +2819,7 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 		].join("\n");
 	}
 	return [
-		`Your reservation has been created. Confirmation number: **${confirmation}**.`,
+		`Your reservation is confirmed. Confirmation number: **${confirmation}**.`,
 		`Total: **${total} ${currency}**.`,
 		`[Please click here to find more details](${links.reservationDetails})`,
 		`[Payment link](${links.payment})`,
@@ -2356,6 +2828,16 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 }
 
 async function finalizeReservationForGuest(io, sc, st, caseId) {
+	if (!hasMandatoryReservationDetails(st)) {
+		st.waitFor = "reservation_details";
+		await askForReservationDetail(io, sc, st, st.waitFor);
+		return true;
+	}
+	if (!st.slots.email && !st.slots.emailSkipped) {
+		st.waitFor = "email_or_skip";
+		await askForReservationDetail(io, sc, st, st.waitFor);
+		return true;
+	}
 	await sendProgressMessage(io, sc, st, "finalizing");
 	const quoteForCreate =
 		st.quote?.data ||
@@ -2520,35 +3002,41 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 }
 
 function nextReservationDetailStep(st = {}) {
-	if (!st.slots?.fullName) return "fullname";
-	if (AI_REQUIRE_NATIONALITY && !st.slots?.nationality) return "nationality";
-	if (!st.slots?.phone) return "phone";
-	if (!st.slots?.email) return "email_or_skip";
+	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
+	if (!st.slots?.email && !st.slots?.emailSkipped) return "email_or_skip";
 	return "finalize";
 }
 
 async function askForReservationDetail(io, sc, st, step) {
-	const instructions = {
-		fullname:
-			"Ask naturally for the guest's full name in English as it should appear on the reservation/passport. Keep it warm and ask only this one question.",
-		nationality:
-			"Ask naturally for the guest's nationality/country name in English. Keep it warm and ask only this one question.",
-		phone:
-			"Ask naturally for a reachable phone number. Mention WhatsApp is helpful/preferred, but do not make it sound mandatory. Ask only this one question.",
-		email_or_skip:
-			"Ask naturally for an email address for reservation details. Let the guest know they can type skip if they prefer not to share one. Ask only this one question.",
-	};
-	const instruction = instructions[step];
-	if (!instruction) return;
-	const prompt = await write(io, sc, st, instruction);
-	await humanSend(io, sc, st, prompt);
+	let prompt = "";
+	let quickReplies = [];
+	if (step === "reservation_details" || step === "fullname" || step === "nationality" || step === "phone") {
+		prompt = mandatoryDetailsPrompt(sc, st, {
+			retry: step !== "reservation_details",
+		});
+	} else if (step === "email_or_skip") {
+		prompt = optionalEmailPrompt(sc, st);
+		quickReplies = emailQuickReplies(sc, st);
+	}
+	if (!prompt) return;
+	await humanSend(io, sc, st, prompt, { quickReplies });
 	stampAsk(st, step);
 }
 
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
-	for (let guard = 0; guard < 6; guard += 1) {
+	await captureReservationDetailsFromText(sc, st, userText, caseId);
+	for (let guard = 0; guard < 4; guard += 1) {
 		if (st.waitFor === "reviewConfirm") {
+			if (correctionText(userText)) {
+				st.waitFor = "clarify";
+				st.reviewSent = false;
+				const ask = /arabic/i.test(languageOf(sc, st))
+					? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u0634\u064a\u0621 \u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644\u0647\u061f"
+					: "Of course. What would you like me to correct?";
+				await humanSend(io, sc, st, ask);
+				return true;
+			}
 			if (!confirmsText(userText)) return true;
 			st.waitFor = nextReservationDetailStep(st);
 			if (st.waitFor !== "finalize") {
@@ -2557,8 +3045,8 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			}
 		}
 
-		if (st.waitFor === "fullname") {
-			if (st.slots.fullName) {
+		if (["reservation_details", "fullname", "nationality", "phone"].includes(st.waitFor)) {
+			if (hasMandatoryReservationDetails(st)) {
 				st.waitFor = nextReservationDetailStep(st);
 				if (st.waitFor !== "finalize") {
 					await askForReservationDetail(io, sc, st, st.waitFor);
@@ -2566,101 +3054,13 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				}
 				continue;
 			}
-			const norm = await normalizeNameLLM(userText, st.language);
-			if (norm?.valid && norm.fullNameAscii) {
-				st.slots.fullName = asciiize(norm.fullNameAscii).trim();
-			} else if (looksLikeNameCandidate(userText)) {
-				st.slots.fullName = asciiize(userText).trim() || String(userText).trim();
-			}
-			if (st.slots.fullName) {
-				st.slots.name = st.slots.fullName;
-				logStep(caseId, "fullname.captured", {
-					fullName: st.slots.fullName,
-				});
-				st.waitFor = nextReservationDetailStep(st);
-				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
-					return true;
-				}
-				continue;
-			}
-			const askAgain = await write(
-				io,
-				sc,
-				st,
-				"Kindly ask for a valid full name in English letters. Keep it polite and brief."
-			);
-			await humanSend(io, sc, st, askAgain);
-			stampAsk(st, "fullname");
-			return true;
-		}
-
-		if (st.waitFor === "nationality") {
-			if (st.slots.nationality || !AI_REQUIRE_NATIONALITY) {
-				st.waitFor = nextReservationDetailStep(st);
-				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
-					return true;
-				}
-				continue;
-			}
-			const nat = await validateNationalityLLM(userText, st.language);
-			if (nat?.valid && nat.normalized) {
-				st.slots.nationality = nat.normalized;
-				logStep(caseId, "nationality.captured", {
-					nationality: st.slots.nationality,
-				});
-				st.waitFor = nextReservationDetailStep(st);
-				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
-					return true;
-				}
-				continue;
-			}
-			const again = await write(
-				io,
-				sc,
-				st,
-				"Politely say the nationality was not recognized and ask again for the nationality/country name in English."
-			);
-			await humanSend(io, sc, st, again);
-			stampAsk(st, "nationality");
-			return true;
-		}
-
-		if (st.waitFor === "phone") {
-			if (st.slots.phone) {
-				st.waitFor = nextReservationDetailStep(st);
-				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
-					return true;
-				}
-				continue;
-			}
-			const clean = cleanPhoneCandidate(userText);
-			if (clean) {
-				st.slots.phone = clean;
-				logStep(caseId, "phone.captured", { phone: st.slots.phone });
-				st.waitFor = nextReservationDetailStep(st);
-				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
-					return true;
-				}
-				continue;
-			}
-			const again = await write(
-				io,
-				sc,
-				st,
-				"Kindly ask for a reachable phone number using digits. Keep it polite."
-			);
-			await humanSend(io, sc, st, again);
-			stampAsk(st, "phone");
+			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }));
+			stampAsk(st, "reservation_details");
 			return true;
 		}
 
 		if (st.waitFor === "email_or_skip") {
-			if (st.slots.email) {
+			if (st.slots.email || st.slots.emailSkipped) {
 				st.waitFor = "finalize";
 				continue;
 			}
@@ -2672,23 +3072,16 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.waitFor = "finalize";
 				continue;
 			}
-			if (
-				/\b(no|skip|don'?t have|later|none)\b|\u0644\u0627|\u062a\u062e\u0637\u064a|\u0645\u0634 \u0645\u0648\u062c\u0648\u062f/i.test(
-					txt
-				)
-			) {
+			if (skipEmailText(txt)) {
 				st.slots.email = "";
+				st.slots.emailSkipped = true;
 				logStep(caseId, "email.skipped", {});
 				st.waitFor = "finalize";
 				continue;
 			}
-			const ask = await write(
-				io,
-				sc,
-				st,
-				"If that does not look like an email, ask once more briefly and say they can type 'skip' if they prefer."
-			);
-			await humanSend(io, sc, st, ask);
+			await humanSend(io, sc, st, optionalEmailPrompt(sc, st), {
+				quickReplies: emailQuickReplies(sc, st),
+			});
 			stampAsk(st, "email_or_skip");
 			return true;
 		}
@@ -3629,7 +4022,9 @@ async function planTurn(io, sc) {
 				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: proceed to confirm?",
 				display
 			);
-			await humanSend(io, sc, st, quoteMsg);
+			await humanSend(io, sc, st, quoteMsg, {
+				quickReplies: proceedQuickReplies(sc, st),
+			});
 			st.quoteSummarizedAt = now();
 		}
 		st.waitFor = "proceed";
@@ -3664,7 +4059,9 @@ async function planTurn(io, sc) {
 					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.'",
 					reviewPayload
 				);
-				await humanSend(io, sc, st, reviewText);
+				await humanSend(io, sc, st, reviewText, {
+					quickReplies: confirmationQuickReplies(sc, st),
+				});
 				st.reviewSent = true;
 				st.waitFor = "reviewConfirm";
 				return;
@@ -3712,7 +4109,9 @@ async function planTurn(io, sc) {
 					"Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type “confirm” to finalize, or tell me what to change.'",
 					reviewPayload
 				);
-				await humanSend(io, sc, st, reviewText);
+				await humanSend(io, sc, st, reviewText, {
+					quickReplies: confirmationQuickReplies(sc, st),
+				});
 				st.reviewSent = true;
 				st.waitFor = "reviewConfirm";
 				return;
@@ -3733,7 +4132,9 @@ async function planTurn(io, sc) {
 						st,
 						"Ask a single yes/no: would you like to proceed to confirm?"
 					);
-					await humanSend(io, sc, st, poke);
+					await humanSend(io, sc, st, poke, {
+						quickReplies: proceedQuickReplies(sc, st),
+					});
 					stampAsk(st, "proceed");
 				}
 				return;
@@ -3744,6 +4145,7 @@ async function planTurn(io, sc) {
 		if (
 			[
 				"reviewConfirm",
+				"reservation_details",
 				"fullname",
 				"nationality",
 				"phone",
@@ -3751,6 +4153,15 @@ async function planTurn(io, sc) {
 				"finalize",
 			].includes(st.waitFor)
 		) {
+			const handledDetailStep = await handleReservationDetailStep(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledDetailStep) return;
+
 			if (st.waitFor === "reviewConfirm") {
 				if (!confirmsText(userText)) return;
 				st.waitFor = "fullname";

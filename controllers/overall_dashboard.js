@@ -50,6 +50,12 @@ const {
 const {
 	sanitizeReservationAuditLogsCollectionForViewer,
 } = require("../services/auditPrivacy");
+const {
+	hotelManagementReservationVisibilityFilterForActor,
+	maskBookingSourceSummaryRowsForHotelManagement,
+	shouldMaskHotelManagementReservationSource,
+	withHotelManagementSourceViewContext,
+} = require("../services/reservationVisibility");
 
 const ObjectId = mongoose.Types.ObjectId;
 const SYSTEM_ADMIN_ROLE = 10000;
@@ -403,7 +409,8 @@ const sanitizeAccountForOverallResponse = (user = {}, allowedHotelIds = []) => {
 	return plain;
 };
 
-const getActor = (req) => req.profile || null;
+const getActor = (req) =>
+	withHotelManagementSourceViewContext(req.profile || null, req);
 
 const getRequestedOwnerHotelFilter = async (ownerId = "", actor = {}) => {
 	if (!ownerId || !ObjectId.isValid(ownerId)) return {};
@@ -887,6 +894,9 @@ const buildReservationMatch = ({
 	}
 
 	const clauses = [buildExcludePendingOtaReviewFilter()];
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) clauses.push(visibilityFilter);
 	const includeCancelled =
 		String(query.includeCancelled || "").toLowerCase() === "true";
 	const excludeCancelled =
@@ -1019,7 +1029,7 @@ const sortFromQuery = (query = {}) => {
 	return { [field]: direction, _id: -1 };
 };
 
-const bookingSourceOptionsFromMatch = async (match) => {
+const bookingSourceOptionsFromMatch = async (match, actor = {}) => {
 	if (!match) return [];
 	const rows = await Reservations.aggregate([
 		{ $match: match },
@@ -1036,10 +1046,13 @@ const bookingSourceOptionsFromMatch = async (match) => {
 		{ $match: { _id: { $ne: "" } } },
 		{ $sort: { _id: 1 } },
 	]);
-	return rows.map((row) => ({
+	const options = rows.map((row) => ({
 		source: row._id,
 		count: row.count || 0,
 	}));
+	return shouldMaskHotelManagementReservationSource(actor)
+		? maskBookingSourceSummaryRowsForHotelManagement(options)
+		: options;
 };
 
 const reservationFilterHotelsForResponse = (hotels = []) =>
@@ -1397,7 +1410,7 @@ const listReservations = async ({
 			},
 		]),
 		pendingOnly || rejectedOnly
-			? bookingSourceOptionsFromMatch(bookingSourceMatch)
+			? bookingSourceOptionsFromMatch(bookingSourceMatch, actor)
 			: [],
 		buildReservationScorecards({
 			actor,
@@ -1408,7 +1421,10 @@ const listReservations = async ({
 		}),
 	]);
 	const total = countResult?.[0]?.total || 0;
-	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(
+		rows,
+		actor
+	);
 	return {
 		page: exportAll ? 1 : page,
 		limit: exportAll ? total : limit,
@@ -1416,7 +1432,9 @@ const listReservations = async ({
 		pages: exportAll ? 1 : Math.ceil(total / limit),
 		reservations: hotelVisibleRows,
 		hotels: reservationFilterHotelsForResponse(hotels),
-		bookingSources,
+		bookingSources: shouldMaskHotelManagementReservationSource(actor)
+			? maskBookingSourceSummaryRowsForHotelManagement(bookingSources)
+			: bookingSources,
 		scorecards,
 	};
 };
@@ -1588,6 +1606,9 @@ const buildExecutiveReservationMatch = ({ actor, hotels, query = {} }) => {
 	}
 
 	const clauses = [buildExcludePendingOtaReviewFilter()];
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) clauses.push(visibilityFilter);
 	const includeCancelled =
 		String(query.includeCancelled || "").toLowerCase() === "true";
 	const excludeCancelled =
@@ -1952,7 +1973,7 @@ const executivePaidSearchFilter = (searchQuery = "", hotels = []) => {
 	};
 };
 
-const buildExecutivePaidMatch = ({ hotels, query = {} }) => {
+const buildExecutivePaidMatch = ({ actor, hotels, query = {} }) => {
 	const hotelIds = filterHotelIdsForQuery(hotels, query.hotelId);
 	if (!hotelIds.length) return null;
 
@@ -1960,6 +1981,9 @@ const buildExecutivePaidMatch = ({ hotels, query = {} }) => {
 		hotelId: { $in: hotelIds.map((id) => ObjectId(id)) },
 		$and: [executivePaidNonZeroFilter(), buildExcludePendingOtaReviewFilter()],
 	};
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) match.$and.push(visibilityFilter);
 	const { dateField, period } = applyDateFilter(match, query);
 	if (!match[dateField]) {
 		match.createdAt = { $gte: EXECUTIVE_REPORT_START_DATE };
@@ -2188,6 +2212,9 @@ const buildFinancialActionsMatch = ({
 		financialActionFilter(query.actionType),
 		buildExcludePendingOtaReviewFilter(),
 	];
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) clauses.push(visibilityFilter);
 	if (includeBookingSource && query.bookingSource) {
 		clauses.push({
 			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
@@ -2485,6 +2512,9 @@ const listCommissionReconciliationActions = async ({
 			},
 		],
 	};
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) match.$and.push(visibilityFilter);
 	if (query.bookingSource) {
 		match.$and.push({
 			booking_source: new RegExp(escapeRegex(query.bookingSource), "i"),
@@ -2528,7 +2558,10 @@ const listCommissionReconciliationActions = async ({
 				.lean()
 				.exec()
 		: [];
-	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(
+		rows,
+		actor
+	);
 	const agentMap = agents.reduce((map, agent) => {
 		map[normalizeId(agent._id)] = agent;
 		return map;
@@ -2623,11 +2656,14 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 			{ $limit: limit },
 			{ $project: { hotelDetails: 0 } },
 		]),
-		bookingSourceOptionsFromMatch(bookingSourceMatch),
+		bookingSourceOptionsFromMatch(bookingSourceMatch, actor),
 	]);
 
 	const total = countResult?.[0]?.total || 0;
-	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(rows);
+	const hotelVisibleRows = sanitizeReservationAuditLogsCollectionForViewer(
+		rows,
+		actor
+	);
 	const agentMap = agentOptions.reduce((map, agent) => {
 		map[normalizeId(agent._id)] = agent;
 		return map;
@@ -2638,7 +2674,9 @@ const listFinancialActions = async ({ actor, hotels, query = {} }) => {
 		total,
 		pages: Math.ceil(total / limit),
 		hotels,
-		bookingSources,
+		bookingSources: shouldMaskHotelManagementReservationSource(actor)
+			? maskBookingSourceSummaryRowsForHotelManagement(bookingSources)
+			: bookingSources,
 		agentOptions,
 		walletClaims,
 		commissionReconciliation,
@@ -2724,6 +2762,9 @@ exports.overallSummary = async (req, res) => {
 			String(req.query?.includeCancelled || "").toLowerCase() === "true";
 		const summaryClauses = [];
 		summaryClauses.push(buildExcludePendingOtaReviewFilter());
+		const visibilityFilter =
+			hotelManagementReservationVisibilityFilterForActor(actor);
+		if (visibilityFilter) summaryClauses.push(visibilityFilter);
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (hasExplicitStatus && statusFilter) {
 			summaryClauses.push(statusFilter);
@@ -2771,6 +2812,7 @@ exports.overallSummary = async (req, res) => {
 			buildExcludePendingOtaReviewFilter(),
 			{ $or: occupancyDateClauses },
 		];
+		if (visibilityFilter) occupancyClauses.push(visibilityFilter);
 		if (hasExplicitStatus && statusFilter) {
 			occupancyClauses.push(statusFilter);
 		} else {
@@ -2795,6 +2837,7 @@ exports.overallSummary = async (req, res) => {
 			hotelId: { $in: hotelIds },
 			$and: [
 				buildExcludePendingOtaReviewFilter(),
+				...(visibilityFilter ? [visibilityFilter] : []),
 				{
 					$or: [
 						{ reservation_status: PENDING_CONFIRMATION_STATUS },
@@ -3142,11 +3185,19 @@ exports.overallSummary = async (req, res) => {
 			stats: totals,
 			hotels: visibleHotelSummaries,
 			allHotels: executiveHotelOptions(hotels),
-			bookingSources: bookingSources.map((source) => ({
-				source: source._id || "Unknown",
-				count: source.count || 0,
-				totalAmount: source.totalAmount || 0,
-			})),
+			bookingSources: shouldMaskHotelManagementReservationSource(actor)
+				? maskBookingSourceSummaryRowsForHotelManagement(
+						bookingSources.map((source) => ({
+							source: source._id || "Unknown",
+							count: source.count || 0,
+							totalAmount: source.totalAmount || 0,
+						}))
+				  )
+				: bookingSources.map((source) => ({
+						source: source._id || "Unknown",
+						count: source.count || 0,
+						totalAmount: source.totalAmount || 0,
+				  })),
 		});
 	} catch (error) {
 		console.error("overallSummary error:", error);
@@ -3225,7 +3276,9 @@ exports.overallExecutiveReservationsReport = async (req, res) => {
 			reservationsByBookingStatus,
 			reservationsByHotelNames,
 			topHotels,
-			bookingSources,
+			bookingSources: shouldMaskHotelManagementReservationSource(context.actor)
+				? maskBookingSourceSummaryRowsForHotelManagement(bookingSources)
+				: bookingSources,
 		});
 	} catch (error) {
 		console.error("overallExecutiveReservationsReport error:", error);
@@ -3286,6 +3339,9 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 			];
 		}
 		const reservationClauses = [buildExcludePendingOtaReviewFilter()];
+		const visibilityFilter =
+			hotelManagementReservationVisibilityFilterForActor(context.actor);
+		if (visibilityFilter) reservationClauses.push(visibilityFilter);
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (statusFilter) reservationClauses.push(statusFilter);
 		const bookingSources = parseQueryList(req.query?.bookingSource);
@@ -3441,6 +3497,7 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 					end: ymdFromDate(range.end),
 					includeCancelled,
 					paymentStatuses: req.query?.paymentStatuses,
+					reservationVisibilityActor: context.actor,
 				});
 			} catch (calendarBuildError) {
 				calendarError = calendarBuildError?.message || "Could not load inventory calendar";
@@ -3493,6 +3550,7 @@ exports.overallExecutiveInventoryDayReport = async (req, res) => {
 			includeCancelled:
 				String(req.query?.includeCancelled || "").toLowerCase() === "true",
 			paymentStatuses: req.query?.paymentStatuses,
+			reservationVisibilityActor: context.actor,
 		});
 
 		return res.json(payload);
@@ -3510,6 +3568,7 @@ exports.overallExecutivePaidReport = async (req, res) => {
 		if (!context) return;
 
 		const built = buildExecutivePaidMatch({
+			actor: context.actor,
 			hotels: context.hotels,
 			query: req.query || {},
 		});
@@ -3578,7 +3637,10 @@ exports.overallExecutivePaidReport = async (req, res) => {
 				aggregateExecutiveByBookingSource(built.match),
 			]);
 
-		const data = sanitizeReservationAuditLogsCollectionForViewer(reservations).map((reservation) => {
+		const data = sanitizeReservationAuditLogsCollectionForViewer(
+			reservations,
+			context.actor
+		).map((reservation) => {
 			const paidTotal = paidBreakdownTotal(reservation.paid_amount_breakdown);
 			const fallbackPaid = paidTotal || moneyNumber(reservation.paid_amount);
 			return {
@@ -3619,7 +3681,9 @@ exports.overallExecutivePaidReport = async (req, res) => {
 				breakdownTotals,
 			},
 			byHotel,
-			byBookingSource,
+			byBookingSource: shouldMaskHotelManagementReservationSource(context.actor)
+				? maskBookingSourceSummaryRowsForHotelManagement(byBookingSource)
+				: byBookingSource,
 		});
 	} catch (error) {
 		console.error("overallExecutivePaidReport error:", error);

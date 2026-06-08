@@ -13,6 +13,12 @@ const {
 	buildExcludePendingOtaReviewFilter,
 } = require("../services/otaReservationVisibility");
 const {
+	addHotelManagementReservationVisibilityToFilter,
+	maskBookingSourceSummaryRowsForHotelManagement,
+	shouldMaskHotelManagementReservationSource,
+	withHotelManagementSourceViewContext,
+} = require("../services/reservationVisibility");
+const {
 	sanitizeReservationAuditLogsCollectionForViewer,
 } = require("../services/auditPrivacy");
 
@@ -1019,15 +1025,40 @@ exports.hotelGeneralStats = async (req, res) => {
 		endOfDay.setHours(23, 59, 59, 999);
 		const period = executiveDateRange(req.query?.range || "all");
 		const dateBy = normalizeExecutiveDateField(req.query?.dateBy || "createdAt");
+		const actor = withHotelManagementSourceViewContext(req.profile, req);
 		const reservationStatsFilter = buildExecutiveReservationFilterForHotels(
 			[hotelObjectId],
 			{ range: period.range, dateBy }
+		);
+		addHotelManagementReservationVisibilityToFilter(
+			reservationStatsFilter,
+			actor
 		);
 
 		const dashboardOpenFilter =
 			buildDashboardOpenReservationFilter(hotelObjectId);
 		const dashboardIncompleteFilter =
 			buildDashboardIncompleteReservationFilter(hotelObjectId);
+		addHotelManagementReservationVisibilityToFilter(
+			dashboardOpenFilter,
+			actor
+		);
+		addHotelManagementReservationVisibilityToFilter(
+			dashboardIncompleteFilter,
+			actor
+		);
+		const todayReservationFilter = {
+			hotelId: hotelObjectId,
+			checkin_date: { $lte: endOfDay },
+			checkout_date: { $gte: startOfDay },
+			reservation_status: { $not: DONE_RESERVATION_STATUS },
+			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
+		};
+		addHotelManagementReservationVisibilityToFilter(
+			todayReservationFilter,
+			actor
+		);
 		const [rooms, totalReservations, openReservations, uncompleted, sources] =
 			await Promise.all([
 				Rooms.find({ hotelId: hotelObjectId })
@@ -1052,14 +1083,7 @@ exports.hotelGeneralStats = async (req, res) => {
 				]),
 			]);
 
-		const todayReservations = await Reservations.find({
-			hotelId: hotelObjectId,
-			checkin_date: { $lte: endOfDay },
-			checkout_date: { $gte: startOfDay },
-			reservation_status: { $not: DONE_RESERVATION_STATUS },
-			...buildPendingConfirmationExclusionFilter(),
-			...buildExcludePendingOtaReviewFilter(),
-		})
+		const todayReservations = await Reservations.find(todayReservationFilter)
 			.select("roomId reservation_status")
 			.lean()
 			.exec();
@@ -1134,10 +1158,17 @@ exports.hotelGeneralStats = async (req, res) => {
 				nonDoneReservations: openReservations,
 				openReservations,
 				uncompletedReservations: uncompleted,
-				bookingSources: sources.map((source) => ({
-					source: source._id || "Unknown",
-					count: source.count || 0,
-				})),
+				bookingSources: shouldMaskHotelManagementReservationSource(actor)
+					? maskBookingSourceSummaryRowsForHotelManagement(
+							sources.map((source) => ({
+								source: source._id || "Unknown",
+								count: source.count || 0,
+							}))
+					  )
+					: sources.map((source) => ({
+							source: source._id || "Unknown",
+							count: source.count || 0,
+					  })),
 			},
 		});
 	} catch (err) {
@@ -1180,32 +1211,47 @@ exports.managerExecutiveSummary = async (req, res) => {
 		startOfDay.setHours(0, 0, 0, 0);
 		const endOfDay = new Date(now);
 		endOfDay.setHours(23, 59, 59, 999);
+		const todayReservationFilter = {
+			hotelId: { $in: hotelObjectIds },
+			checkin_date: { $lte: endOfDay },
+			checkout_date: { $gte: startOfDay },
+			reservation_status: { $not: DONE_RESERVATION_STATUS },
+			...buildPendingConfirmationExclusionFilter(),
+			...buildExcludePendingOtaReviewFilter(),
+		};
+		const recentReservationFilter = buildExecutiveReservationFilterForHotels(
+			hotelObjectIds,
+			{
+				range: period.range,
+				dateBy,
+			}
+		);
+		const incompleteReservationFilter =
+			buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds);
+		addHotelManagementReservationVisibilityToFilter(
+			todayReservationFilter,
+			req.profile
+		);
+		addHotelManagementReservationVisibilityToFilter(
+			recentReservationFilter,
+			req.profile
+		);
+		addHotelManagementReservationVisibilityToFilter(
+			incompleteReservationFilter,
+			req.profile
+		);
 		const [rooms, todayReservations, recentReservations, incompleteReservations] =
 			await Promise.all([
 				Rooms.find({ hotelId: { $in: hotelObjectIds } })
 					.select("_id hotelId active activeRoom")
 					.lean()
 					.exec(),
-				Reservations.find({
-					hotelId: { $in: hotelObjectIds },
-					checkin_date: { $lte: endOfDay },
-					checkout_date: { $gte: startOfDay },
-					reservation_status: { $not: DONE_RESERVATION_STATUS },
-					...buildPendingConfirmationExclusionFilter(),
-					...buildExcludePendingOtaReviewFilter(),
-				})
+				Reservations.find(todayReservationFilter)
 					.select("hotelId roomId reservation_status")
 					.lean()
 					.exec(),
-				Reservations.countDocuments(
-					buildExecutiveReservationFilterForHotels(hotelObjectIds, {
-						range: period.range,
-						dateBy,
-					})
-				),
-				Reservations.countDocuments(
-					buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds)
-				),
+				Reservations.countDocuments(recentReservationFilter),
+				Reservations.countDocuments(incompleteReservationFilter),
 			]);
 
 		const roomsByHotel = new Map();
@@ -1277,6 +1323,7 @@ exports.managerExecutiveSummary = async (req, res) => {
 
 exports.managerIncompleteReservations = async (req, res) => {
 	try {
+		const actor = withHotelManagementSourceViewContext(req.profile, req);
 		const hotels = await getDashboardAccessibleHotels(req.profile);
 		const hotelObjectIds = hotels
 			.map((hotel) => hotel._id)
@@ -1322,9 +1369,13 @@ exports.managerIncompleteReservations = async (req, res) => {
 		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
 		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
 
-		const filters = [
-			buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds),
-		];
+		const baseIncompleteFilter =
+			buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds);
+		addHotelManagementReservationVisibilityToFilter(
+			baseIncompleteFilter,
+			req.profile
+		);
+		const filters = [baseIncompleteFilter];
 		const trimmedSearch = String(search || "").trim();
 
 		if (trimmedSearch) {
@@ -1384,7 +1435,7 @@ exports.managerIncompleteReservations = async (req, res) => {
 		]);
 
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
 
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,
@@ -1416,6 +1467,7 @@ exports.managerIncompleteReservations = async (req, res) => {
 
 exports.hotelOpenReservations = async (req, res) => {
 	try {
+		const actor = withHotelManagementSourceViewContext(req.profile, req);
 		const { hotelId } = req.params;
 		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 			return res.status(400).json({ error: "Invalid hotel ID" });
@@ -1455,7 +1507,9 @@ exports.hotelOpenReservations = async (req, res) => {
 		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
 		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
 
-		const filters = [buildDashboardOpenReservationFilter(hotelObjectId)];
+		const baseOpenFilter = buildDashboardOpenReservationFilter(hotelObjectId);
+		addHotelManagementReservationVisibilityToFilter(baseOpenFilter, req.profile);
+		const filters = [baseOpenFilter];
 		const trimmedSearch = String(search || "").trim();
 
 		if (trimmedSearch) {
@@ -1505,7 +1559,7 @@ exports.hotelOpenReservations = async (req, res) => {
 		]);
 
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
 
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,
@@ -1524,6 +1578,7 @@ exports.hotelOpenReservations = async (req, res) => {
 
 exports.hotelIncompleteReservations = async (req, res) => {
 	try {
+		const actor = withHotelManagementSourceViewContext(req.profile, req);
 		const { hotelId } = req.params;
 		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 			return res.status(400).json({ error: "Invalid hotel ID" });
@@ -1563,7 +1618,13 @@ exports.hotelIncompleteReservations = async (req, res) => {
 		const dateField = allowedSorts.includes(dateBy) ? dateBy : "booked_at";
 		const direction = String(sortOrder).toLowerCase() === "desc" ? -1 : 1;
 
-		const filters = [buildDashboardIncompleteReservationFilter(hotelObjectId)];
+		const baseIncompleteFilter =
+			buildDashboardIncompleteReservationFilter(hotelObjectId);
+		addHotelManagementReservationVisibilityToFilter(
+			baseIncompleteFilter,
+			req.profile
+		);
+		const filters = [baseIncompleteFilter];
 		const trimmedSearch = String(search || "").trim();
 
 		if (trimmedSearch) {
@@ -1613,7 +1674,7 @@ exports.hotelIncompleteReservations = async (req, res) => {
 		]);
 
 		const hotelVisibleReservations =
-			sanitizeReservationAuditLogsCollectionForViewer(reservations);
+			sanitizeReservationAuditLogsCollectionForViewer(reservations, actor);
 
 		return res.json({
 			page: shouldExportAll ? 1 : currentPage,

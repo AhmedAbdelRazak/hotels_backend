@@ -8,6 +8,10 @@ const {
 	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
 const {
+	addHotelManagementReservationVisibilityToFilter,
+	withHotelManagementSourceViewContext,
+} = require("../services/reservationVisibility");
+const {
 	agentIdFromReservation,
 	canUseAgentOverrides,
 	getAgentAssignedStock,
@@ -24,6 +28,18 @@ const normalizeKey = (value) =>
 		.toLowerCase();
 
 const normalizeLower = (value) => String(value || "").trim().toLowerCase();
+
+const resolveReservationVisibilityActorForRequest = async (req = {}) => {
+	const actorId = normalizeId(req.profile?._id || req.auth?._id || req.auth?.id);
+	if (!actorId || !mongoose.Types.ObjectId.isValid(actorId)) return null;
+	const actor = await User.findById(actorId)
+		.select(
+			"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork hotelIdsOwner hotelsToSupport belongsToId accountScope platformEmployee platformEmployeeType activeUser"
+		)
+		.lean()
+		.exec();
+	return withHotelManagementSourceViewContext(actor, req);
+};
 
 const dateOnlyKey = (value) => {
 	if (!value) return "";
@@ -494,7 +510,7 @@ const inventoryHttpError = (status, message) => {
 
 const buildHotelInventoryCalendarPayload = async (
 	hotelId,
-	{ start, end, includeCancelled, paymentStatuses } = {}
+	{ start, end, includeCancelled, paymentStatuses, reservationVisibilityActor } = {}
 ) => {
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		throw inventoryHttpError(400, "Invalid hotelId");
@@ -530,11 +546,17 @@ const buildHotelInventoryCalendarPayload = async (
 	const startDate = range.start.toDate();
 	const endDate = range.end.clone().add(1, "day").toDate();
 
-	const reservations = await Reservations.find({
+	const reservationQuery = {
 		hotelId,
 		checkin_date: { $lt: endDate },
 		checkout_date: { $gt: startDate },
-	})
+	};
+	addHotelManagementReservationVisibilityToFilter(
+		reservationQuery,
+		reservationVisibilityActor
+	);
+
+	const reservations = await Reservations.find(reservationQuery)
 		.populate("roomId", "display_name room_type individualBeds")
 		.lean();
 
@@ -709,7 +731,7 @@ const buildHotelInventoryCalendarPayload = async (
 
 const buildHotelInventoryDayPayload = async (
 	hotelId,
-	{ date, roomKey, includeCancelled, paymentStatuses } = {}
+	{ date, roomKey, includeCancelled, paymentStatuses, reservationVisibilityActor } = {}
 ) => {
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		throw inventoryHttpError(400, "Invalid hotelId");
@@ -740,11 +762,17 @@ const buildHotelInventoryDayPayload = async (
 	const dayStart = day.toDate();
 	const dayEnd = day.clone().add(1, "day").toDate();
 
-	const reservations = await Reservations.find({
+	const reservationQuery = {
 		hotelId,
 		checkin_date: { $lt: dayEnd },
 		checkout_date: { $gt: dayStart },
-	})
+	};
+	addHotelManagementReservationVisibilityToFilter(
+		reservationQuery,
+		reservationVisibilityActor
+	);
+
+	const reservations = await Reservations.find(reservationQuery)
 		.populate("roomId", "display_name room_type individualBeds")
 		.lean();
 
@@ -848,12 +876,20 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 
 		const startDate = range.start.toDate();
 		const endDate = range.end.clone().add(1, "day").toDate();
+		const visibilityActor =
+			await resolveReservationVisibilityActorForRequest(req);
 
-		const reservations = await Reservations.find({
+		const reservationQuery = {
 			hotelId,
 			checkin_date: { $lt: endDate },
 			checkout_date: { $gt: startDate },
-		})
+		};
+		addHotelManagementReservationVisibilityToFilter(
+			reservationQuery,
+			visibilityActor
+		);
+
+		const reservations = await Reservations.find(reservationQuery)
 			.populate("roomId", "display_name room_type individualBeds")
 			.lean();
 
@@ -1061,12 +1097,20 @@ exports.getHotelInventoryDay = async (req, res) => {
 
 		const dayStart = day.toDate();
 		const dayEnd = day.clone().add(1, "day").toDate();
+		const visibilityActor =
+			await resolveReservationVisibilityActorForRequest(req);
 
-		const reservations = await Reservations.find({
+		const reservationQuery = {
 			hotelId,
 			checkin_date: { $lt: dayEnd },
 			checkout_date: { $gt: dayStart },
-		})
+		};
+		addHotelManagementReservationVisibilityToFilter(
+			reservationQuery,
+			visibilityActor
+		);
+
+		const reservations = await Reservations.find(reservationQuery)
 			.populate("roomId", "display_name room_type individualBeds")
 			.lean();
 
