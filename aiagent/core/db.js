@@ -56,10 +56,70 @@ async function setCaseStatus(caseId, fields) {
 		.exec();
 }
 
+function compactRoomForAi(room = {}) {
+	if (!room || typeof room !== "object") return room;
+	return {
+		_id: room._id,
+		roomType: room.roomType,
+		displayName: room.displayName,
+		displayName_OtherLanguage: room.displayName_OtherLanguage,
+		description: room.description,
+		description_OtherLanguage: room.description_OtherLanguage,
+		amenities: room.amenities,
+		views: room.views,
+		extraAmenities: room.extraAmenities,
+		pricedExtras: room.pricedExtras,
+		price: room.price,
+		pricingRate: room.pricingRate,
+		monthly: room.monthly,
+		offers: room.offers,
+		count: room.count,
+		activeRoom: room.activeRoom,
+		commisionIncluded: room.commisionIncluded,
+		refundPolicyDays: room.refundPolicyDays,
+		roomSize: room.roomSize,
+		defaultCost: room.defaultCost,
+		roomCommission: room.roomCommission,
+		bedsCount: room.bedsCount,
+		roomForGender: room.roomForGender,
+		roomColor: room.roomColor,
+	};
+}
+
+function compactHotelForAi(hotel = null) {
+	if (!hotel) return null;
+	return {
+		...hotel,
+		roomCountDetails: Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails.map(compactRoomForAi)
+			: [],
+	};
+}
+
 async function getHotelById(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
-	return HotelDetails.findById(_id).lean().exec();
+	const hotel = await HotelDetails.findById(_id)
+		.select(
+			[
+				"_id",
+				"hotelName",
+				"hotelName_OtherLanguage",
+				"hotelCity",
+				"hotelState",
+				"hotelCountry",
+				"distances",
+				"currency",
+				"aiToRespond",
+				"activateHotel",
+				"xHotelProActive",
+				"belongsTo",
+				"roomCountDetails",
+			].join(" ")
+		)
+		.lean()
+		.exec();
+	return compactHotelForAi(hotel);
 }
 
 async function getJanatAiSettings() {
@@ -74,7 +134,7 @@ async function getJanatAiSettings() {
 }
 
 async function listActivePublicHotels() {
-	return HotelDetails.find({
+	const hotels = await HotelDetails.find({
 		activateHotel: true,
 		xHotelProActive: { $ne: false },
 		roomCountDetails: {
@@ -85,10 +145,11 @@ async function listActivePublicHotels() {
 		},
 	})
 		.select(
-			"_id hotelName hotelName_OtherLanguage hotelCity distances roomCountDetails currency aiToRespond"
+			"_id hotelName hotelName_OtherLanguage hotelCity hotelState hotelCountry distances roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
 		)
 		.lean()
 		.exec();
+	return hotels.map(compactHotelForAi).filter(Boolean);
 }
 
 async function getReservationByConfirmation(cn) {

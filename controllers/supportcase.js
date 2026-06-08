@@ -523,9 +523,10 @@ const localizedClientHoldMessage = (language = "", languageCode = "") => {
 
 const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
 	if (!conversation || typeof conversation !== "object") return null;
-	const firstMessage = Array.isArray(supportCase.conversation)
-		? supportCase.conversation[0] || {}
-		: {};
+	const conversationEntries = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const firstGuestMessage = conversationEntries.find(isGuestConversationEntry) || {};
 	const rawMessageBy = conversation.messageBy || {};
 	const message = cleanText(conversation.message, 8000);
 	if (!message) return null;
@@ -536,21 +537,23 @@ const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
 				cleanChatDisplayName(
 					rawMessageBy.customerName ||
 						supportCase.displayName1 ||
-						firstMessage.messageBy?.customerName
+						firstGuestMessage.messageBy?.customerName
 				) || "Guest",
 			customerEmail:
 				normalizeEmailOrPhone(
-					rawMessageBy.customerEmail || firstMessage.messageBy?.customerEmail
+					rawMessageBy.customerEmail ||
+						supportCase.clientContact ||
+						firstGuestMessage.messageBy?.customerEmail
 				) || "guest@jannatbooking.com",
-			userId: cleanText(rawMessageBy.userId || firstMessage.messageBy?.userId, 180),
+			userId: cleanText(rawMessageBy.userId, 180),
 		},
 		message,
 		date: new Date(),
 		inquiryAbout:
-			cleanText(conversation.inquiryAbout || firstMessage.inquiryAbout, 120) ||
+			cleanText(conversation.inquiryAbout || firstGuestMessage.inquiryAbout, 120) ||
 			"support",
 		inquiryDetails: cleanText(
-			conversation.inquiryDetails || firstMessage.inquiryDetails,
+			conversation.inquiryDetails || firstGuestMessage.inquiryDetails,
 			1200
 		),
 		clientTag: cleanText(conversation.clientTag, 120),

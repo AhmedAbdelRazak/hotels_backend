@@ -57,13 +57,13 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 120, {
+const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 500, {
 	min: 0,
 	max: 5000,
 });
 const HUMAN_THINK_MAX_MS = Math.max(
 	HUMAN_THINK_MIN_MS,
-	intFromEnv("AI_HUMAN_THINK_MAX_MS", 350, { min: 0, max: 5000 })
+	intFromEnv("AI_HUMAN_THINK_MAX_MS", 900, { min: 0, max: 5000 })
 );
 const HUMAN_TYPE_CHAR_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CHAR_MIN_MS", 2, {
 	min: 1,
@@ -73,13 +73,13 @@ const HUMAN_TYPE_CHAR_MAX_MS = Math.max(
 	HUMAN_TYPE_CHAR_MIN_MS,
 	intFromEnv("AI_HUMAN_TYPE_CHAR_MAX_MS", 5, { min: 1, max: 300 })
 );
-const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 450, {
+const HUMAN_TYPE_CLAMP_MIN_MS = intFromEnv("AI_HUMAN_TYPE_CLAMP_MIN_MS", 1200, {
 	min: 250,
 	max: 10000,
 });
 const HUMAN_TYPE_CLAMP_MAX_MS = Math.max(
 	HUMAN_TYPE_CLAMP_MIN_MS,
-	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 1800, { min: 250, max: 15000 })
+	intFromEnv("AI_HUMAN_TYPE_CLAMP_MAX_MS", 2800, { min: 250, max: 15000 })
 );
 const HUMAN_BETWEEN_SENDS_MIN_MS = intFromEnv(
 	"AI_HUMAN_BETWEEN_SENDS_MIN_MS",
@@ -95,7 +95,7 @@ const HUMAN_BETWEEN_SENDS_MAX_MS = Math.max(
 );
 
 const HUMAN = {
-	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 300, {
+	greetThinkMs: intFromEnv("AI_HUMAN_GREET_THINK_MS", 700, {
 		min: 0,
 		max: 7000,
 	}),
