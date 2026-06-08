@@ -2838,8 +2838,44 @@ exports.listForAdmin = async (req, res) => {
 		};
 
 		/* 7️⃣  Final aggregation with facet */
+		const compactHotelListProject = {
+			_id: 1,
+			hotelName: 1,
+			hotelName_OtherLanguage: 1,
+			hotelCountry: 1,
+			hotelState: 1,
+			hotelCity: 1,
+			hotelAddress: 1,
+			phone: 1,
+			activateHotel: 1,
+			xHotelProActive: 1,
+			aiToRespond: 1,
+			belongsTo: 1,
+			createdAt: 1,
+			updatedAt: 1,
+			overallRoomsCount: 1,
+			aboutHotel: 1,
+			aboutHotelArabic: 1,
+			location: 1,
+			roomsDone: 1,
+			photosDone: 1,
+			locationDone: 1,
+			dataDone: 1,
+			bankDone: 1,
+			activationReady: 1,
+			fullyComplete: 1,
+			roomsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
+			photosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
+			owner: {
+				_id: "$owner._id",
+				name: "$owner.name",
+				email: "$owner.email",
+			},
+		};
+
 		const pipeline = [
 			...pipelineCore,
+			{ $project: compactHotelListProject },
 			{ $sort: { createdAt: -1 } },
 			{
 				$facet: {
