@@ -2417,6 +2417,8 @@ Future TODO Backlog - Added 2026-05-26
   - Public client support-case GET/PUT responses populate hotelId with identity/display fields only, not full room/pricing inventory, to keep chat polling small and reduce Cloudflare timeout risk.
   - Existing-reservation date updates deterministically extract confirmation numbers from phrases such as "reservation 9550176494" / "booking 9550176494" / Arabic "reservation number" variants, so a complete request with confirmation plus check-in/check-out dates proceeds to the availability-checked update path instead of asking for the same details again.
   - Complete existing-reservation date-change requests are handled before the LLM NLU/support-decision path, including complete initial ticket context, to reduce latency and avoid model prompts repeating already supplied confirmation/date details.
+  - aiagent/core/nlu.js also short-circuits obvious reservation date-update messages with a confirmation number and two parsed dates, so those turns do not need an LLM classifier before the backend update tool.
+  - NLU smalltalk greeting detection must not swallow operational messages such as "Hello, I need to change reservation..."; room/date/reservation signals are checked before greeting-only classification.
 - Jannat Booking concierge recommendations:
   - If the guest asks for Makkah, Mecca, Al Haram, Kaaba, or Umrah options and does not explicitly ask for Madinah, platform hotel recommendations are scoped to Makkah hotels before distance/price sorting.
   - This prevents Madinah hotels with short local-distance values from outranking Makkah near-Al-Haram options in Jannat Booking concierge chat.

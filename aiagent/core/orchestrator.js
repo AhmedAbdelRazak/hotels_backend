@@ -2988,6 +2988,13 @@ function cleanConfirmationCandidate(candidate = "") {
 
 function confirmationFromText(text = "") {
 	const raw = String(text || "");
+	const loose = raw.match(
+		/\b(?:reservation|booking|confirmation|reference)\s*(?:number|no\.?|#|id)?\s*[:#-]?\s*(\d{5,12})\b/i
+	);
+	if (loose) {
+		const candidate = cleanConfirmationCandidate(loose[1]);
+		if (candidate) return candidate;
+	}
 	const patterns = [
 		/(?:confirmation|confirm(?:ation)?|reference|booking|reservation|reserva|r[eé]servation)\s*(?:number|no\.?|#|id|ref|num(?:ero)?|n[uú]mero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{4,21})/gi,
 		/(?:\u0631\u0642\u0645\s*(?:\u0627\u0644)?(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639)|\u0627\u0644?\u062d\u062c\u0632\s*\u0631\u0642\u0645|\u062a\u0623\u0643\u064a\u062f\s*\u0631\u0642\u0645|\u062a\u0627\u0643\u064a\u062f\s*\u0631\u0642\u0645)\s*[:#-]?\s*([\d\u0660-\u0669\u06f0-\u06f9A-Z-]{5,22})/gi,

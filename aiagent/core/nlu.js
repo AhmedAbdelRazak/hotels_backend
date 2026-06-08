@@ -957,6 +957,34 @@ function detectAmenityQuestion(text = "") {
 	return amenity && isQuestion ? amenity : null;
 }
 
+function quickReservationConfirmation(text = "") {
+	const raw = digitsToEnglish(String(text || ""));
+	const match = raw.match(
+		/\b(?:reservation|booking|confirmation|reference|reserva|r[eé]servation)\s*(?:number|no\.?|#|id|ref|num(?:ero)?|n[uú]mero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{4,21})\b/i
+	);
+	const value = String(match?.[1] || "").replace(/[^\w-]+$/g, "").toUpperCase();
+	if (!value || !/\d/.test(value)) return null;
+	if (/^20\d{2}(?:-\d{2}-\d{2})?$/.test(value)) return null;
+	if (/^(?:1[34]\d{2}|15\d{2})$/.test(value)) return null;
+	return value;
+}
+
+function quickReservationDateUpdate(text = "", quickDates = {}) {
+	const normalized = digitsToEnglish(String(text || "")).toLowerCase();
+	const confirmation = quickReservationConfirmation(normalized);
+	if (!confirmation || !quickDates.checkinISO || !quickDates.checkoutISO) {
+		return null;
+	}
+	const hasUpdateWord =
+		/\b(update|change|modify|amend|edit|move|adjust|switch|correct|cambiar|modifier|changer)\b/i.test(
+			normalized
+		) ||
+		/(?:ØªØ¹Ø¯ÙŠÙ„|Ø¹Ø¯Ù„|ØºÙŠØ±|ØªØºÙŠÙŠØ±|ØªØµØ­ÙŠØ­|ta3deel|taghyeer|ghayar|adel)/i.test(
+			normalized
+		);
+	return hasUpdateWord ? confirmation : null;
+}
+
 /* ---------------- LLM classification fallback ---------------- */
 async function detectIntentLLM({
 	text,
@@ -1126,10 +1154,41 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 	const preferredLanguage = sc?.preferredLanguage || "English";
 	const inquiryAbout = sc?.inquiryAbout || null;
 	const text = String(lastUserMessage || "");
+	const quickRoomTypeKey = mapRoomToKey(text);
+	const quickDates = quickDateRange(text);
+	const quickUpdateConfirmation = quickReservationDateUpdate(text, quickDates);
+	if (quickUpdateConfirmation) {
+		return {
+			intent: "reservation_lookup",
+			smalltalkType: null,
+			roomTypeKey: null,
+			dates: {
+				checkinISO: quickDates.checkinISO,
+				checkoutISO: quickDates.checkoutISO,
+				reason: null,
+				checkinPast: isPastISO(quickDates.checkinISO),
+				checkoutPast: isPastISO(quickDates.checkoutISO),
+				raw: {
+					checkin: quickDates.raw?.checkin || quickDates.checkinISO,
+					checkout: quickDates.raw?.checkout || quickDates.checkoutISO,
+					calendar: quickDates.raw?.calendar || "gregorian",
+				},
+			},
+			confirmation: quickUpdateConfirmation,
+			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
+			amenity: detectAmenityQuestion(text),
+		};
+	}
+	const hasOperationalSignal =
+		Boolean(quickRoomTypeKey) ||
+		Boolean(quickDates.checkinISO && quickDates.checkoutISO) ||
+		/\b(reservation|booking|confirmation|reference|price|rate|availability|available|room|stay|check[\s-]?in|check[\s-]?out)\b/i.test(
+			text
+		);
 
 	// smalltalk fast‑path
 	const hint = quickSmalltalkType(text);
-	if (hint) {
+	if (hint && !hasOperationalSignal) {
 		return {
 			intent: "smalltalk",
 			smalltalkType: hint,
@@ -1146,9 +1205,6 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			amenity: detectAmenityQuestion(text), // allow amenity while in smalltalk
 		};
 	}
-
-	const quickRoomTypeKey = mapRoomToKey(text);
-	const quickDates = quickDateRange(text);
 	const looksLikeBooking =
 		/\b(book|reserve|reservation|price|rate|availability|available|room|stay)\b/i.test(
 			text
