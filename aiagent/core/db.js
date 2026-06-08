@@ -9,7 +9,9 @@ const AiAgentTrainingChat = require("../../models/aiagent_training_chat");
 
 function safeId(id) {
 	try {
-		return new mongoose.Types.ObjectId(id);
+		const value = id && typeof id === "object" && id._id ? id._id : id;
+		if (!value) return null;
+		return new mongoose.Types.ObjectId(value);
 	} catch {
 		return null;
 	}
@@ -157,10 +159,10 @@ async function listPreviousGuestSupportChats({ supportCase, limit = 4 } = {}) {
 		conversation: { $exists: true, $ne: [] },
 	};
 	if (currentId) filter._id = { $ne: currentId };
+	if (hotelId) filter.hotelId = hotelId;
 	if (stableMatches.length) {
 		filter.$or = stableMatches;
 	} else if (names.length && hotelId) {
-		filter.hotelId = hotelId;
 		filter.displayName1 = { $in: names };
 	} else {
 		return [];
@@ -235,15 +237,24 @@ async function findTrainingDocs(Model, filter) {
 	}
 }
 
-async function listRelevantTrainingChats({ hotelId, text, limit = 4 } = {}) {
+async function listRelevantTrainingChats({
+	hotelId,
+	text,
+	limit = 4,
+	includeGlobal = true,
+} = {}) {
 	const safeHotelId = safeId(hotelId);
 	const scopedFilter = { status: "active" };
 	if (safeHotelId) {
-		scopedFilter.$or = [
-			{ hotelId: safeHotelId },
-			{ hotelId: null },
-			{ hotelId: { $exists: false } },
-		];
+		if (includeGlobal) {
+			scopedFilter.$or = [
+				{ hotelId: safeHotelId },
+				{ hotelId: null },
+				{ hotelId: { $exists: false } },
+			];
+		} else {
+			scopedFilter.hotelId = safeHotelId;
+		}
 	}
 	const [learningDocs, legacyTrainingDocs] = await Promise.all([
 		findTrainingDocs(AiAgentLearning, scopedFilter),

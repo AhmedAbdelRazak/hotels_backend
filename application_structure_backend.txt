@@ -2333,8 +2333,8 @@ Future TODO Backlog - Added 2026-05-26
   - The action emits hotelNotificationsUpdated for hotel, owner, and platform notification rooms so reservation employees see the pending-confirmation update in their queue.
 - Availability alternatives:
   - If the requested same-room date update is unavailable, the AI checks logical close-date options only within a three-day window around the requested check-in/checkout/stay shift.
-  - If no close same-room option is available, the AI checks active alternative room types for the requested dates and offers those as selectable options.
-  - The AI stores suggested update options in case state and supports quick-reply option buttons; choosing an option re-runs the same availability-checked update action.
+ - If no close same-room option is available, the AI checks active alternative room types for the requested dates and offers those as selectable options.
+ - The AI stores suggested update options in case state and supports quick-reply option buttons; choosing an option re-runs the same availability-checked update action.
 - Support seen-status behavior:
   - controllers/supportcase.js makes /support-cases/:id/seen-by-admin idempotent after access is verified. If no unseen messages remain, it returns 200 with alreadySeen=true instead of 404.
   - This prevents repeated admin mark-seen calls from looking like an infinite production error loop after the case is already fully seen.
@@ -2342,3 +2342,21 @@ Future TODO Backlog - Added 2026-05-26
   - node --check passed for aiagent/core/nlu.js, aiagent/core/actions.js, aiagent/core/orchestrator.js, and controllers/supportcase.js.
   - NLU smoke tests confirmed English, French, and Arabic month/date examples resolve to 2026-09-30 through 2026-10-20.
   - Dry-run action test for confirmation 9550176494 confirmed the update path can recalculate the Sep 30-Oct 20 stay to Pending Confirmation without saving, while preserving guest-visible confirmed behavior.
+
+2026-06-08 Strict Hotel-Scoped B2C AI Chat
+- Rule:
+  - A public B2C support chatbot attached to a hotel represents that hotel only.
+  - Example: a Zad Al Safa support case must not recommend, link, compare, name, summarize, or imply knowledge of any other hotel.
+  - If a guest asks for other hotels, nearby hotel alternatives, comparisons, or platform-wide choices while an active hotel context exists, the bot must politely say it can help with the current hotel only and offer same-hotel room/date help.
+- Backend enforcement:
+  - aiagent/core/orchestrator.js now has a deterministic cross-hotel request guard before the LLM support-decision path.
+  - hotel_recommendation cannot fall through to public hotel recommendations when st.hotel is present; the defensive buildHotelRecommendations guard returns the selected-hotel-only reply instead.
+  - Room-question, unavailable-quote, writer, and support-decision prompts now state that active hotel chats are exclusively scoped to the selected hotel.
+  - Unavailable same-room booking/update replies may offer only same-hotel date or room-type alternatives.
+- Context isolation:
+  - aiagent/core/db.js now scopes previous guest support chats by the active hotel when a hotelId exists, even when the guest email/user id matches cases from other hotels.
+  - listRelevantTrainingChats supports includeGlobal=false; active hotel chats pass includeGlobal=false so employee-learning examples come only from that same hotel. Platform/global recommendation chats without an active hotel may still use global learning.
+- Maintenance requirements:
+  - Do not add new chatbot branches that call listActivePublicHotels, publicHotelUrl, or platform recommendation copy while st.hotel is present.
+  - Do not pass cross-hotel previous chats or other-hotel learning examples into active hotel prompts.
+  - Hotel-scoped AI can still help dynamically with availability, pricing, same-hotel room alternatives, date changes, payment links, and reservation triage for the active hotel.

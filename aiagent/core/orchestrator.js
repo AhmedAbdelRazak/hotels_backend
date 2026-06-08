@@ -970,11 +970,51 @@ function simpleQuoteText({ sc, st, quote }) {
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const roomName = roomTypeLabel(st.slots?.roomTypeKey || quote.room?.roomType);
 	if (!quote.available) {
-		return `${name}, I do not see priced availability for ${roomName} at ${hotelName} on those dates. I can check another hotel or date range.`;
+		return `${name}, I do not see priced availability for ${roomName} at ${hotelName} on those dates. I can check another date range or another room type at ${hotelName}.`;
 	}
 	return `${name}, ${roomName} at ${hotelName} is ${quote.totals.totalPriceWithCommission} ${cleanCurrency(
 		quote.currency
 	)} total for ${quote.nights} nights. Would you like me to continue to the review step?`;
+}
+
+function crossHotelRequestText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(other|another|different|alternative|nearby|compare|recommend|suggest|best|cheaper)\s+(?:hotel|hotels|property|properties)\b/i.test(
+			lower
+		) ||
+		/\b(?:hotel|hotels|property|properties)\s+(?:nearby|alternative|alternatives|recommendation|recommendations|suggestion|suggestions|comparison)\b/i.test(
+			lower
+		) ||
+		/(?:فنادق\s+(?:اخرى|أخرى|قريبه|قريبة|بديله|بديلة)|فندق\s+(?:اخر|آخر|ثاني|تاني|بديل)|رشح\s+فندق|اقترح\s+فندق|قارن\s+الفنادق)/i.test(
+			arabic
+		) ||
+		/(?:otherhotel|otherhotels|anotherhotel|nearbyhotel|nearbyhotels|alternativehotel|alternativehotels|recommendhotel|suggesthotel|comparehotels|fondo2tany|fonde2tany|fandokakhar|fanadokokhra)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function selectedHotelOnlyReply(sc = {}, st = {}, userText = "") {
+	const hotelName = toTitle(st.hotel?.hotelName || "this hotel");
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، أقدر أساعدك هنا بخصوص ${hotelName} فقط. إذا تحب، أراجع لك التوفر أو نوع غرفة أو تواريخ مختلفة في ${hotelName}.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, en este chat solo puedo ayudarte con ${hotelName}. Puedo revisar disponibilidad, otro tipo de habitacion o fechas diferentes en ${hotelName}.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}. Je peux verifier la disponibilite, un autre type de chambre ou d'autres dates pour ${hotelName}.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}، اس چیٹ میں میں صرف ${hotelName} کے بارے میں مدد کر سکتا ہوں۔ چاہیں تو میں ${hotelName} میں دستیابی، دوسرے کمرے کی قسم، یا مختلف تاریخیں چیک کر سکتا ہوں۔`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, इस चैट में मैं सिर्फ ${hotelName} के लिए मदद कर सकता हूं। चाहें तो मैं ${hotelName} में उपलब्धता, दूसरे कमरे का प्रकार, या अलग तारीखें देख सकता हूं।`;
+	}
+	return `${name}, I can help with ${hotelName} only in this chat. I can check availability, another room type, or different dates at ${hotelName}.`;
 }
 
 function roomMatches(room = {}, roomTypeKey = "doubleRooms") {
@@ -1004,11 +1044,6 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 		}));
 }
 
-function decisionWantsAlternativeHotels(decision = {}) {
-	const scope = String(decision?.scope || "").toLowerCase();
-	return ["alternative_hotels", "platform", "cross_hotel"].includes(scope);
-}
-
 async function answerSelectedHotelRoomQuestion(
 	io,
 	sc,
@@ -1033,9 +1068,9 @@ async function answerSelectedHotelRoomQuestion(
 	}
 	const instruction = roomTypeKey
 		? matchingRooms.length
-			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other room types or alternatives unless the guest asks. If dates are missing, add one soft next-step invitation to share dates so availability and price can be checked.`
-			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or whether they want nearby alternatives. Do not list other hotels yet.`
-		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Do not mention or link other hotels unless the guest explicitly asks for alternatives.`;
+			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, add one soft next-step invitation to share dates so availability and price can be checked.`
+			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or different dates at this hotel. Do not mention, recommend, link, compare, or imply knowledge of any other hotel.`
+		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Never mention, recommend, link, compare, or imply knowledge of any other hotel, even if the guest asks for alternatives.`;
 	const reply = await write(io, sc, st, instruction, {
 		latestUserMessage: userText,
 		selectedHotel: hotelName,
@@ -1055,6 +1090,9 @@ async function buildHotelRecommendations({
 	st,
 	requestedRoomTypeKey = null,
 }) {
+	if (st.hotel) {
+		return selectedHotelOnlyReply(sc, st, text);
+	}
 	const roomTypeKey = /triple|ثلاث|triple/i.test(text)
 		? "tripleRooms"
 		: /quad|رباع|quad/i.test(text)
@@ -2270,8 +2308,10 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 				context,
 			}).slice(0, 2000),
 		].join("\n");
+		const activeHotelId = sc.hotelId?._id || sc.hotelId || st.hotel?._id || null;
 		const chats = await listRelevantTrainingChats({
-			hotelId: sc.hotelId || st.hotel?._id || null,
+			hotelId: activeHotelId,
+			includeGlobal: !activeHotelId,
 			text: lookupText,
 			limit: 6,
 		});
@@ -2534,12 +2574,16 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity.`,
 		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
 		hotelName
-			? `When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Do not recommend or link other hotels unless the guest explicitly asks for alternatives.`
+			? `This chat is exclusively for "${hotelName}". When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Never recommend, link, name, compare, summarize, or imply knowledge of other hotels, even if the guest explicitly asks for alternatives. If the guest asks about other hotels, say this chat can only help with "${hotelName}" and offer to check dates or room types at "${hotelName}".`
 			: `When no active hotel context exists, you may recommend Jannat Booking hotel options using provided facts.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
-		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
+		hotelName
+			? `Help with date-range pricing, room options, payment questions, and reservation triage for "${hotelName}" only.`
+			: `Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
 		`Do not mention discounts, coupons, promos, offers, or before-discount prices unless the latest guest message explicitly asks about them.`,
-		`Use only known Jannat Booking routes or URLs supplied in context. For hotel recommendations, prefer concise markdown links using the hotel name as the link text. Never invent routes, payment links, reservation links, or admin/PMS links.`,
+		hotelName
+			? `Use only URLs supplied in context for "${hotelName}", its reservation, or its payment flow. Never use public hotel recommendation links or links for another hotel in this active hotel chat. Never invent routes, payment links, reservation links, or admin/PMS links.`
+			: `Use only known Jannat Booking routes or URLs supplied in context. For hotel recommendations, prefer concise markdown links using the hotel name as the link text. Never invent routes, payment links, reservation links, or admin/PMS links.`,
 		`Do not cancel or refund existing reservations. Date changes may be completed only by the system update tool after availability is checked; never claim a reservation was changed unless tool context says it was completed. Name, phone, email, nationality, payment, cancellation, and refund changes still go to a human team member.`,
 		`Avoid repeating the same question if just asked; prefer a soft pivot.`,
 	].join(" ");
@@ -2717,8 +2761,9 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
-		"If an active hotel is present and the guest asks whether you/this hotel has rooms, room types, amenities, availability, or pricing, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
-		"Choose hotel_recommendation only when the guest asks for other hotels, nearby alternatives, general platform options, or there is no active hotel context.",
+		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
+		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options, choose other with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
+		"Choose hotel_recommendation only when there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
@@ -3917,6 +3962,13 @@ async function planTurn(io, sc) {
 			return;
 		}
 
+		if (st.hotel && crossHotelRequestText(userText)) {
+			logStep(caseId, "hotel_scope.boundary", { source: "deterministic" });
+			await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+			st.waitFor = "clarify";
+			return;
+		}
+
 		const supportDecision = await decideSupportAction({
 			sc,
 			st,
@@ -3994,14 +4046,18 @@ async function planTurn(io, sc) {
 				decisionLu.roomTypeKey ||
 				st.slots.roomTypeKey ||
 				null;
-			if (st.hotel && !decisionWantsAlternativeHotels(supportDecision)) {
-				await answerSelectedHotelRoomQuestion(
-					io,
-					sc,
-					st,
-					userText,
-					roomTypeKey
-				);
+			if (st.hotel) {
+				logStep(caseId, "hotel_scope.boundary", {
+					source: "decision",
+					reason: supportDecision.reason,
+					scope: supportDecision.scope,
+				});
+				if (crossHotelRequestText(userText)) {
+					await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+					st.waitFor = "clarify";
+					return;
+				}
+				await answerSelectedHotelRoomQuestion(io, sc, st, userText, roomTypeKey);
 				return;
 			}
 			const recommendationRoomTypeKey = roomTypeKey || "doubleRooms";
@@ -4118,6 +4174,12 @@ async function planTurn(io, sc) {
 		}
 		if (wantsHotelRecommendation(userText)) {
 			if (st.hotel) {
+				if (crossHotelRequestText(userText)) {
+					logStep(caseId, "hotel_scope.boundary", { source: "keyword" });
+					await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+					st.waitFor = "clarify";
+					return;
+				}
 				await answerSelectedHotelRoomQuestion(
 					io,
 					sc,
@@ -4430,8 +4492,8 @@ async function planTurn(io, sc) {
 					sc,
 					st,
 					quote.reason === "blocked"
-						? "Explain that this room is blocked (zero price rule) for these dates. Offer up to 3 alternatives with totals."
-						: "Explain no priced inventory for these dates; offer up to 3 alternatives with totals.",
+						? "Explain that this room is blocked (zero price rule) for these dates at the selected hotel. Offer up to 3 same-hotel room-type alternatives with totals if provided."
+						: "Explain no priced inventory for these dates at the selected hotel; offer up to 3 same-hotel room-type alternatives with totals if provided.",
 					{ alternatives, reason: quote.reason || "no_price" }
 				);
 				await humanSend(io, sc, st, msg);
