@@ -652,8 +652,24 @@ const emitChatUpdate = async (req, chat, event = "updated") => {
 	target.emit("b2bChatUpdated", payload);
 };
 
-const ensureInactiveChatsClosed = () =>
-	B2BChat.closeInactiveChats({ inactiveMs: CHAT_TIMEOUT_MS });
+let inactiveChatCloseLastRunAt = 0;
+let inactiveChatClosePromise = null;
+const INACTIVE_CHAT_CLOSE_INTERVAL_MS = 10 * 60 * 1000;
+
+const ensureInactiveChatsClosed = () => {
+	const currentTime = Date.now();
+	if (inactiveChatClosePromise) return inactiveChatClosePromise;
+	if (currentTime - inactiveChatCloseLastRunAt < INACTIVE_CHAT_CLOSE_INTERVAL_MS) {
+		return Promise.resolve({ closed: 0, skipped: true });
+	}
+	inactiveChatCloseLastRunAt = currentTime;
+	inactiveChatClosePromise = B2BChat.closeInactiveChats({
+		inactiveMs: CHAT_TIMEOUT_MS,
+	}).finally(() => {
+		inactiveChatClosePromise = null;
+	});
+	return inactiveChatClosePromise;
+};
 
 exports.b2bChatRecipients = async (req, res) => {
 	try {
@@ -697,7 +713,9 @@ exports.b2bChatUnreadSummary = async (req, res) => {
 		const query = await visibleChatQueryForActor(actor, "active");
 
 		const chats = await B2BChat.find(query)
-			.select("participantIds participants messages status scope hotelIds lastActivityAt")
+			.select(
+				"participantIds participants messages.senderId messages.senderRole messages.seenBy status scope hotelIds lastActivityAt"
+			)
 			.lean()
 			.exec();
 
