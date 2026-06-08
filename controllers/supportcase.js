@@ -873,7 +873,10 @@ exports.getPublicClientSupportCaseById = async (req, res) => {
 			_id: req.params.id,
 			openedBy: "client",
 		})
-			.populate("hotelId")
+			.populate(
+				"hotelId",
+				"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances"
+			)
 			.lean()
 			.exec();
 
@@ -977,7 +980,10 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updateDoc,
 			{ new: true }
 		)
-			.populate("hotelId")
+			.populate(
+				"hotelId",
+				"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances"
+			)
 			.exec();
 
 		if (!updatedCase) {
