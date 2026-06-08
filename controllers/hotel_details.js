@@ -37,6 +37,36 @@ const canReassignPropertyOwner = (user) =>
 	Boolean(user) && isConfiguredSuperAdmin(user);
 
 const normalizeId = (value) => String(value?._id || value || "").trim();
+const HOTEL_DETAILS_SUMMARY_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelCountry",
+	"hotelState",
+	"hotelCity",
+	"phone",
+	"hotelAddress",
+	"hotelFloors",
+	"hotelRooms",
+	"overallRoomsCount",
+	"distances",
+	"hotelRating",
+	"parkingLot",
+	"subscribed",
+	"wholeSaleHotel",
+	"propertyType",
+	"activateHotel",
+	"xHotelProActive",
+	"aiToRespond",
+	"belongsTo",
+	"createdAt",
+	"updatedAt",
+].join(" ");
+
+const isHotelDetailsSummaryRequest = (req = {}) => {
+	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
+	return ["summary", "lite", "compact"].includes(view);
+};
 
 const includesId = (list = [], targetId) =>
 	Array.isArray(list) &&
@@ -958,13 +988,21 @@ exports.hotelDetailsById = (req, res, next, id) => {
 		return res.status(400).json({ error: "Invalid hotel ID" });
 	}
 
-	HotelDetails.findById(id).exec((err, hotelDetails) => {
+	const summaryRequest = isHotelDetailsSummaryRequest(req);
+	const query = HotelDetails.findById(id);
+	if (summaryRequest) {
+		query.select(HOTEL_DETAILS_SUMMARY_SELECT).lean();
+	}
+
+	query.exec((err, hotelDetails) => {
 		if (err || !hotelDetails) {
 			return res.status(400).json({
 				error: "Hotel details were not found",
 			});
 		}
-		req.hotelDetails = hotelDetails;
+		req.hotelDetails = summaryRequest
+			? { ...hotelDetails, isHotelDetailsSummary: true }
+			: hotelDetails;
 		next();
 	});
 };
