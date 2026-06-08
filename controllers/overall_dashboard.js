@@ -345,16 +345,29 @@ const extractReservationRoomIds = (roomId) => {
 };
 
 const setupSnapshot = (hotel = {}) => {
-	const roomsDone = !!hotel?.roomCountDetails?.length;
-	const photosDone = !!hotel?.hotelPhotos?.length;
+	const roomCountDetailsCount = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails.length
+		: Number(hotel?.roomCountDetailsCount || 0);
+	const hotelPhotosCount = Array.isArray(hotel?.hotelPhotos)
+		? hotel.hotelPhotos.length
+		: Number(hotel?.hotelPhotosCount || 0);
+	const paymentSettingsCount = Array.isArray(hotel?.paymentSettings)
+		? hotel.paymentSettings.length
+		: Number(hotel?.paymentSettingsCount || 0);
+	const roomsDone =
+		roomCountDetailsCount > 0 || Number(hotel?.overallRoomsCount || 0) > 0;
+	const photosDone = hotelPhotosCount > 0;
 	const locationDone =
 		Array.isArray(hotel?.location?.coordinates) &&
 		hotel.location.coordinates[0] !== 0 &&
 		hotel.location.coordinates[1] !== 0;
 	const dataDone = Boolean(
-		hotel?.aboutHotel || hotel?.aboutHotelArabic || hotel?.overallRoomsCount
+		hotel?.aboutHotel ||
+			hotel?.aboutHotelArabic ||
+			hotel?.hasAboutHotel ||
+			hotel?.overallRoomsCount
 	);
-	const bankDone = !!hotel?.paymentSettings?.length;
+	const bankDone = paymentSettingsCount > 0;
 	return {
 		roomsDone,
 		photosDone,
@@ -440,6 +453,8 @@ const OVERALL_HOTEL_FULL_SELECT =
 const OVERALL_HOTEL_COMPACT_SELECT =
 	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity activateHotel xHotelProActive createdAt updatedAt";
 const OVERALL_HOTEL_COMPACT_SECTIONS = new Set([
+	"summary",
+	"executive",
 	"reservations",
 	"pending",
 	"financials",
@@ -449,6 +464,65 @@ const overallHotelSelectForSection = (section = "") =>
 	OVERALL_HOTEL_COMPACT_SECTIONS.has(section)
 		? OVERALL_HOTEL_COMPACT_SELECT
 		: OVERALL_HOTEL_FULL_SELECT;
+
+const getCompactSummaryHotels = (hotelFilter = {}) =>
+	HotelDetails.aggregate([
+		{ $match: hotelFilter },
+		{
+			$lookup: {
+				from: "users",
+				let: { ownerId: "$belongsTo" },
+				pipeline: [
+					{ $match: { $expr: { $eq: ["$_id", "$$ownerId"] } } },
+					{ $project: { _id: 1, name: 1, email: 1, phone: 1 } },
+				],
+				as: "belongsTo",
+			},
+		},
+		{ $unwind: { path: "$belongsTo", preserveNullAndEmptyArrays: true } },
+		{
+			$project: {
+				_id: 1,
+				hotelName: 1,
+				belongsTo: 1,
+				hotelAddress: 1,
+				hotelCountry: 1,
+				hotelState: 1,
+				hotelCity: 1,
+				overallRoomsCount: 1,
+				activateHotel: 1,
+				xHotelProActive: 1,
+				createdAt: 1,
+				updatedAt: 1,
+				location: { coordinates: "$location.coordinates" },
+				roomCountDetailsCount: {
+					$size: { $ifNull: ["$roomCountDetails", []] },
+				},
+				hotelPhotosCount: {
+					$size: { $ifNull: ["$hotelPhotos", []] },
+				},
+				paymentSettingsCount: {
+					$size: { $ifNull: ["$paymentSettings", []] },
+				},
+				hasAboutHotel: {
+					$or: [
+						{
+							$gt: [
+								{ $strLenCP: { $ifNull: ["$aboutHotel", ""] } },
+								0,
+							],
+						},
+						{
+							$gt: [
+								{ $strLenCP: { $ifNull: ["$aboutHotelArabic", ""] } },
+								0,
+							],
+						},
+					],
+				},
+			},
+		},
+	]);
 
 const getAccessibleOverallHotels = async (actor = {}, query = {}, section = "") => {
 	if (!actor?._id || actor.activeUser === false) return [];
@@ -480,11 +554,14 @@ const getAccessibleOverallHotels = async (actor = {}, query = {}, section = "") 
 		hotelFilter = filters.length === 1 ? filters[0] : { $or: filters };
 	}
 
-	const hotels = await HotelDetails.find(hotelFilter)
-		.select(overallHotelSelectForSection(section))
-		.populate("belongsTo", "_id name email phone")
-		.lean()
-		.exec();
+	const hotels =
+		section === "summary"
+			? await getCompactSummaryHotels(hotelFilter)
+			: await HotelDetails.find(hotelFilter)
+					.select(overallHotelSelectForSection(section))
+					.populate("belongsTo", "_id name email phone")
+					.lean()
+					.exec();
 
 	if (isSuperAdmin(actor)) return hotels;
 
@@ -1856,6 +1933,141 @@ const aggregateExecutiveReservationStats = (match) =>
 			},
 		},
 	]);
+
+const executiveDateFacetStages = (field) => [
+	{ $match: { [field]: { $ne: null } } },
+	{
+		$group: {
+			_id: executiveDateString(field),
+			...executiveGroupTotals(),
+		},
+	},
+	{
+		$project: {
+			_id: 0,
+			groupKey: "$_id",
+			reservationsCount: 1,
+			total_amount: 1,
+			commission: 1,
+			paidAmount: 1,
+			capturedCount: 1,
+		},
+	},
+	{ $sort: { groupKey: 1 } },
+];
+
+const aggregateExecutiveReservationReport = (match) =>
+	Reservations.aggregate([
+		{ $match: match },
+		{ $addFields: { paidBreakdownTotal: executivePaidBreakdownTotalExpression() } },
+		{
+			$facet: {
+				stats: [
+					{
+						$group: {
+							_id: null,
+							...executiveGroupTotals(),
+							hotelsWithReservations: { $addToSet: "$hotelId" },
+							sourcesWithReservations: {
+								$addToSet: {
+									$trim: { input: { $ifNull: ["$booking_source", ""] } },
+								},
+							},
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							reservationsCount: 1,
+							total_amount: 1,
+							roomNights: 1,
+							commission: 1,
+							paidAmount: 1,
+							capturedCount: 1,
+							hotelsWithReservations: { $size: "$hotelsWithReservations" },
+							sourcesWithReservations: {
+								$size: {
+									$filter: {
+										input: "$sourcesWithReservations",
+										as: "source",
+										cond: { $ne: ["$$source", ""] },
+									},
+								},
+							},
+						},
+					},
+				],
+				reservationsByDay: executiveDateFacetStages("createdAt"),
+				checkinsByDay: executiveDateFacetStages("checkin_date"),
+				checkoutsByDay: executiveDateFacetStages("checkout_date"),
+				reservationsByBookingStatus: [
+					{
+						$group: {
+							_id: { $ifNull: ["$reservation_status", "unknown"] },
+							...executiveGroupTotals(),
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							reservation_status: {
+								$cond: [{ $eq: ["$_id", ""] }, "unknown", "$_id"],
+							},
+							reservationsCount: 1,
+							total_amount: 1,
+							commission: 1,
+							paidAmount: 1,
+							capturedCount: 1,
+						},
+					},
+					{ $sort: { reservationsCount: -1, reservation_status: 1 } },
+				],
+				reservationsByHotelNames: [
+					{
+						$group: {
+							_id: "$hotelId",
+							...executiveGroupTotals(),
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							hotelId: "$_id",
+							reservationsCount: 1,
+							total_amount: 1,
+							commission: 1,
+							paidAmount: 1,
+							capturedCount: 1,
+						},
+					},
+				],
+				bookingSources: [
+					{
+						$group: {
+							_id: {
+								$trim: {
+									input: { $ifNull: ["$booking_source", ""] },
+								},
+							},
+							...executiveGroupTotals(),
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							source: { $cond: [{ $eq: ["$_id", ""] }, "Unknown", "$_id"] },
+							reservationsCount: 1,
+							total_amount: 1,
+							commission: 1,
+							paidAmount: 1,
+							capturedCount: 1,
+						},
+					},
+					{ $sort: { reservationsCount: -1, total_amount: -1, source: 1 } },
+				],
+			},
+		},
+	]).allowDiskUse(true);
 
 const ymdFromDate = (date) => {
 	const parsed = date instanceof Date ? date : new Date(date);
@@ -3325,25 +3537,29 @@ exports.overallExecutiveReservationsReport = async (req, res) => {
 			Math.max(parseInt(req.query?.limit, 10) || 20, 1),
 			100
 		);
-		const [
-			statsRows,
-			reservationsByDay,
-			checkinsByDay,
-			checkoutsByDay,
-			reservationsByBookingStatus,
-			reservationsByHotelNames,
-			topHotels,
-			bookingSources,
-		] = await Promise.all([
-			aggregateExecutiveReservationStats(built.match),
-			aggregateExecutiveByDate(built.match, "createdAt"),
-			aggregateExecutiveByDate(built.match, "checkin_date"),
-			aggregateExecutiveByDate(built.match, "checkout_date"),
-			aggregateExecutiveByStatus(built.match),
-			aggregateExecutiveByHotel(built.match),
-			aggregateExecutiveByHotel(built.match, topLimit),
-			aggregateExecutiveByBookingSource(built.match),
-		]);
+		const [reportFacet = {}] = await aggregateExecutiveReservationReport(
+			built.match
+		);
+		const hotelOptions = executiveHotelOptions(context.hotels);
+		const hotelNameById = new Map(
+			hotelOptions.map((hotel) => [normalizeId(hotel._id), hotel.hotelName])
+		);
+		const reservationsByHotelNames = (reportFacet.reservationsByHotelNames || [])
+			.map((row) => ({
+				...row,
+				hotelId: row.hotelId,
+				hotelName:
+					hotelNameById.get(normalizeId(row.hotelId)) || "Unknown Hotel",
+			}))
+			.sort(
+				(a, b) =>
+					Number(b.reservationsCount || 0) -
+						Number(a.reservationsCount || 0) ||
+					Number(b.total_amount || 0) - Number(a.total_amount || 0) ||
+					String(a.hotelName || "").localeCompare(String(b.hotelName || ""))
+			);
+		const topHotels = reservationsByHotelNames.slice(0, topLimit);
+		const bookingSources = reportFacet.bookingSources || [];
 
 		return res.json({
 			asOf: new Date(),
@@ -3352,17 +3568,18 @@ exports.overallExecutiveReservationsReport = async (req, res) => {
 				dateBy: built.dateField,
 				reportStartDate: EXECUTIVE_REPORT_START_DATE,
 			},
-			hotels: executiveHotelOptions(context.hotels).filter((hotel) =>
+			hotels: hotelOptions.filter((hotel) =>
 				built.hotelIds.includes(hotel._id)
 			),
 			stats: {
 				totalHotels: built.hotelIds.length,
-				...(statsRows?.[0] || {}),
+				...(reportFacet.stats?.[0] || {}),
 			},
-			reservationsByDay,
-			checkinsByDay,
-			checkoutsByDay,
-			reservationsByBookingStatus,
+			reservationsByDay: reportFacet.reservationsByDay || [],
+			checkinsByDay: reportFacet.checkinsByDay || [],
+			checkoutsByDay: reportFacet.checkoutsByDay || [],
+			reservationsByBookingStatus:
+				reportFacet.reservationsByBookingStatus || [],
 			reservationsByHotelNames,
 			topHotels,
 			bookingSources: shouldMaskHotelManagementReservationSource(context.actor)
