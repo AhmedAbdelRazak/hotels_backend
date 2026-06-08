@@ -509,16 +509,16 @@ function guestCountNumber(text = "") {
 function applyGuestCountsFromText(st, text = "") {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
 	const adultMatch = normalized.match(
-		/(\d{1,2})\s*(?:adult|adults|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
+		/(\d{1,2})\s*(?:adult|adults|adulto|adultos|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
 	);
 	const adultLabelMatch = normalized.match(
-		/(?:adult|adults|number\s+of\s+adults|adults?\s+count|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
+		/(?:adult|adults|adulto|adultos|number\s+of\s+adults|adults?\s+count|numero\s+de\s+adultos|n[uú]mero\s+de\s+adultos|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
 	);
 	const childMatch = normalized.match(
-		/(\d{1,2})\s*(?:child|children|kid|kids|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
+		/(\d{1,2})\s*(?:child|children|kid|kids|nino|ninos|niño|niños|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
 	);
 	const childLabelMatch = normalized.match(
-		/(?:child|children|kid|kids|number\s+of\s+children|children\s+count|\u0639\u062f\u062f\s+\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0639\u062f\u062f\s+\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
+		/(?:child|children|kid|kids|nino|ninos|niño|niños|number\s+of\s+children|children\s+count|numero\s+de\s+ninos|n[uú]mero\s+de\s+ni[nñ]os|\u0639\u062f\u062f\s+\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0639\u062f\u062f\s+\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
 	);
 	const adultCount = adultMatch?.[1] || adultLabelMatch?.[1] || "";
 	const childCount = childMatch?.[1] || childLabelMatch?.[1] || "";
@@ -531,7 +531,7 @@ function applyGuestCountsFromText(st, text = "") {
 		st.slots.childrenProvided = true;
 	}
 	if (
-		/\b(no|none|zero)\s+(?:child|children|kid|kids)\b|\u0628\u062f\u0648\u0646\s+\u0623?\u0637\u0641\u0627\u0644|\u0644\u0627\s+\u064a\u0648\u062c\u062f\s+\u0623?\u0637\u0641\u0627\u0644|\u0645\u0627\s+\u0641\u064a\s+\u0623?\u0637\u0641\u0627\u0644/i.test(
+		/\b(no|none|zero|sin|cero)\s+(?:child|children|kid|kids|nino|ninos|niño|niños)\b|\u0628\u062f\u0648\u0646\s+\u0623?\u0637\u0641\u0627\u0644|\u0644\u0627\s+\u064a\u0648\u062c\u062f\s+\u0623?\u0637\u0641\u0627\u0644|\u0645\u0627\s+\u0641\u064a\s+\u0623?\u0637\u0641\u0627\u0644/i.test(
 			normalized
 		)
 	) {
@@ -540,7 +540,7 @@ function applyGuestCountsFromText(st, text = "") {
 	}
 	if (
 		!childCount &&
-		/\b(child|kid)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
+		/\b(child|kid|nino|niño)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
 	) {
 		st.slots.children = Math.max(1, Number(st.slots.children || 0));
 		st.slots.childrenProvided = true;
@@ -2267,7 +2267,7 @@ function cleanFullNameCandidate(value = "") {
 function stripFieldTail(value = "") {
 	return String(value || "")
 		.replace(
-			/(?:\b(?:phone|mobile|whatsapp|nationality|country|adults?|children|kids?|email)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)).*$/i,
+			/(?:\b(?:phone|mobile|whatsapp|nationality|country|adults?|children|kids?|email|telefono|tel[eé]fono|nacionalidad|pais|pa[ií]s|adultos?|ninos?|niños?|correo)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)).*$/i,
 			""
 		)
 		.replace(/^[\s:：,\-–—|]+|[\s:：,\-–—|]+$/g, "")
@@ -2278,6 +2278,7 @@ function explicitNameCandidateFromText(text = "") {
 	const value = String(text || "");
 	const patterns = [
 		/(?:^|[\s,;|])(?:full\s*name|guest\s*name|passport\s*name|name)\s*[:：-]?\s*([^\n,;|]+)/i,
+		/(?:^|[\s,;|])(?:nombre\s+completo|nombre\s+del\s+huesped|nombre\s+del\s+hu[eé]sped|nombre\s+en\s+pasaporte|nombre)\s*[:：-]?\s*([^\n,;|]+)/i,
 		/(?:^|[\s,;،|])(?:\u0648?\u0627\u0633\u0645\u064a|\u0648?\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645(?:\s+\u0627\u0644\u0643\u0627\u0645\u0644)?|\u0627\u0633\u0645)\s*[:：-]?\s+([^\n,;،|]+)/i,
 	];
 	for (const pattern of patterns) {
@@ -2295,7 +2296,7 @@ function lineNameCandidateFromText(text = "") {
 		.filter(Boolean);
 	for (const line of lines) {
 		if (
-			/\b(?:phone|mobile|nationality|country|adult|children|child|email)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/i.test(
+			/\b(?:phone|mobile|nationality|country|adult|children|child|email|telefono|tel[eé]fono|nacionalidad|pais|pa[ií]s|adultos?|ninos?|niños?|correo)\b|(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/i.test(
 				line
 			)
 		) {
@@ -2343,6 +2344,7 @@ function explicitNationalityText(text = "") {
 	const value = String(text || "");
 	const patterns = [
 		/(?:^|[\s,;|])(?:nationality|country)\s*[:：-]?\s*([^\n,;|]+)/i,
+		/(?:^|[\s,;|])(?:nacionalidad|pais|pa[ií]s)\s*[:：-]?\s*([^\n,;|]+)/i,
 		/(?:^|[\s,;،|])(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u0628\u0644\u062f\u064a)\s*[:：-]?\s*([^\n,;،|]+)/i,
 	];
 	for (const pattern of patterns) {
@@ -2393,21 +2395,38 @@ function hasMandatoryReservationDetails(st = {}) {
 function localizedMissingLabels(sc = {}, st = {}) {
 	const missing = missingMandatoryReservationFields(st);
 	const lang = languageOf(sc, st);
-	const labels = /arabic/i.test(lang)
-		? {
-				fullName: "\u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644",
-				nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629",
-				phone: "\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641",
-				adults: "\u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646",
-				children: "\u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644",
-		  }
-		: {
-				fullName: "full name",
-				nationality: "nationality",
-				phone: "phone",
-				adults: "adults count",
-				children: "children count",
-		  };
+	let labels = {
+		fullName: "full name",
+		nationality: "nationality",
+		phone: "phone",
+		adults: "adults count",
+		children: "children count",
+	};
+	if (/arabic/i.test(lang)) {
+		labels = {
+			fullName: "\u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644",
+			nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629",
+			phone: "\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641",
+			adults: "\u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646",
+			children: "\u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644",
+		};
+	} else if (/spanish/i.test(lang)) {
+		labels = {
+			fullName: "nombre completo",
+			nationality: "nacionalidad",
+			phone: "telefono",
+			adults: "numero de adultos",
+			children: "numero de ninos",
+		};
+	} else if (/french/i.test(lang)) {
+		labels = {
+			fullName: "nom complet",
+			nationality: "nationalite",
+			phone: "telephone",
+			adults: "nombre d'adultes",
+			children: "nombre d'enfants",
+		};
+	}
 	return missing.map((key) => labels[key] || key);
 }
 

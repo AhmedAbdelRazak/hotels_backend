@@ -2411,6 +2411,7 @@ Future TODO Backlog - Added 2026-05-26
   - Review-confirm turns no longer go silent when the guest sends an unclear reply; the bot asks whether to confirm or change details and re-sends Confirm / Something is wrong quick replies.
   - Date-completion shortcuts must not run when the latest assistant message already showed Proceed, Confirm, correction, or hotel-connect quick replies; those choices belong to the booking-stage handlers.
   - Required guest-detail parsing accepts both count-before-label and label-before-count formats, such as "2 adults / 0 children", "Adults: 2 / Children: 0", and the Arabic equivalents.
+  - Required guest-detail parsing accepts Spanish labels such as "Nombre completo", "Telefono", "Nacionalidad", "Adultos", and "Ninos/Niños"; Spanish retry prompts use Spanish missing-field names.
   - AI typing is emitted at the start of planning, before LLM/tool work finishes, so guests see that support is working during slower model/tool calls.
 - Jannat Booking concierge recommendations:
   - If the guest asks for Makkah, Mecca, Al Haram, Kaaba, or Umrah options and does not explicitly ask for Madinah, platform hotel recommendations are scoped to Makkah hotels before distance/price sorting.
