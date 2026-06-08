@@ -381,13 +381,40 @@ function isGuestConversationMessage(message = {}) {
 	);
 }
 
+function conversationEntryContextText(message = {}) {
+	return [
+		message?.message,
+		message?.inquiryAbout ? `Inquiry about: ${message.inquiryAbout}` : "",
+		message?.inquiryDetails ? `Inquiry details: ${message.inquiryDetails}` : "",
+	]
+		.filter(Boolean)
+		.map((value) => String(value || "").trim())
+		.filter(Boolean)
+		.join("\n");
+}
+
 function conversationText(sc = {}, { guestsOnly = false } = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	return conversation
 		.filter((message) =>
 			guestsOnly ? isGuestConversationMessage(message) : message?.message
 		)
-		.map((message) => String(message.message || ""))
+		.map((message) => conversationEntryContextText(message))
+		.filter(Boolean)
+		.join("\n");
+}
+
+function initialInquiryText(sc = {}) {
+	const firstMessage = Array.isArray(sc.conversation)
+		? sc.conversation[0] || {}
+		: {};
+	return [
+		sc.inquiryAbout || firstMessage.inquiryAbout || "",
+		sc.inquiryDetails || firstMessage.inquiryDetails || "",
+	]
+		.filter(Boolean)
+		.map((value) => String(value || "").trim())
+		.filter(Boolean)
 		.join("\n");
 }
 
@@ -1876,7 +1903,7 @@ function latestKnownConfirmation(sc = {}, lu = {}) {
 	if (lu?.confirmation) return lu.confirmation;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let i = conversation.length - 1; i >= 0; i -= 1) {
-		const text = String(conversation[i]?.message || "");
+		const text = conversationEntryContextText(conversation[i]);
 		if (
 			!/confirmation|confirm|reference|booking\s*(?:no|number|#)|reservation\s*(?:no|number|#)|\u062a\u0623\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639|\u0643\u0648\u0646\u0641\u064a\u0631\u0645\u064a\u0634\u0646/i.test(
 				text
@@ -3299,10 +3326,7 @@ async function planTurn(io, sc) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
 				st.greetScheduled = true;
 				st.greeted = true;
-				const initialInquiry = [sc.inquiryAbout, sc.inquiryDetails]
-					.filter(Boolean)
-					.join("\n")
-					.trim();
+				const initialInquiry = initialInquiryText(sc);
 				const greeting = await write(
 					io,
 					sc,
@@ -3614,12 +3638,15 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_lookup") {
+			const knownConfirmation = latestKnownConfirmation(sc, decisionLu);
 			const reply = await write(
 				io,
 				sc,
 				st,
-				"The guest is asking about an existing reservation. Ask for the confirmation number and one sentence about what they need. Keep it concise.",
-				{ latestUserMessage: userText }
+				knownConfirmation
+					? "The guest is asking about an existing reservation and the confirmation number is already known. Acknowledge the known confirmation number and ask only what they need help with. Do not ask for the confirmation number again."
+					: "The guest is asking about an existing reservation. Ask for the confirmation number and one sentence about what they need. Keep it concise.",
+				{ latestUserMessage: userText, knownConfirmation }
 			);
 			await humanSend(io, sc, st, reply);
 			st.waitFor = "reservation_reference";

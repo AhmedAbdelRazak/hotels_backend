@@ -1399,6 +1399,7 @@ Future TODO Backlog - Added 2026-05-26
 - AI reservation creation flow:
   - aiagent/core/orchestrator.js fixed the post-review slot collection state machine. After the review confirmation, the bot asks once for mandatory details in one message: full name as in passport, phone, nationality, adults count, and children count.
   - Email is optional after mandatory details. The bot asks whether the guest wants confirmation/payment-link delivery by email and offers a Skip quick reply.
+  - Support-case form metadata stored in conversation inquiryAbout/inquiryDetails is treated as private AI context. If the guest already supplied a confirmation number in the form, the AI must not ask for that same confirmation number again; it should acknowledge the known reference and ask only what help is needed.
   - On finalize, the orchestrator creates the reservation through aiagent/core/actions.js instead of handing off by default.
   - aiagent/core/actions.js now accepts the current quote.pricingByDay shape, builds pickedRoomsType/pickedRoomsPricing daily rows, validates inventory with allowOverbook=false, captures availabilitySnapshot, and marks the reservation operationally Pending Confirmation with pendingConfirmation.status="pending".
   - Saved AI reservations use booking_source="AI Chat", payment="Not Paid", financeStatus="not paid", reservation_status/state="Pending Confirmation", pendingConfirmation.clientVisibleStatus="confirmed", and availabilitySnapshot.source="ai_chat_reservation_create".
