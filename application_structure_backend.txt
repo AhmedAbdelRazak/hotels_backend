@@ -2395,6 +2395,7 @@ Future TODO Backlog - Added 2026-05-26
   - Quote and review messages are hardened to show both Hijri and Gregorian/Miladi dates when the guest supplied Hijri dates.
 - Button expectations:
   - Reservation quote messages continue to include proceed/decline quickReplies.
+  - Proceed/decline quickReplies are localized for Arabic, Spanish, and French instead of falling back to English.
   - Reservation review confirmation continues to include Confirm / Something is wrong quickReplies in the active language.
   - Optional email collection continues to include a localized Skip quickReply.
 - Verification:

@@ -2544,6 +2544,18 @@ function proceedQuickReplies(sc = {}, st = {}) {
 			{ label: "\u0644\u0627 \u0627\u0644\u0622\u0646", value: "\u0644\u0627 \u0627\u0644\u0622\u0646", action: "decline" },
 		];
 	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{ label: "Si, continuar", value: "Si, continuar", action: "proceed" },
+			{ label: "Ahora no", value: "Ahora no", action: "decline" },
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{ label: "Oui, continuer", value: "Oui, continuer", action: "proceed" },
+			{ label: "Pas maintenant", value: "Pas maintenant", action: "decline" },
+		];
+	}
 	return [
 		{ label: "Yes, proceed", value: "Yes, proceed", action: "proceed" },
 		{ label: "Not now", value: "Not now", action: "decline" },
