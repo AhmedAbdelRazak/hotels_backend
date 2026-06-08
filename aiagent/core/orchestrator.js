@@ -1257,6 +1257,52 @@ function transferSystemNoticeText(sc = {}, st = {}, { hotelName = "", agentName 
 	return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
 }
 
+function hotelHandoffQuoteIntroText(
+	sc = {},
+	st = {},
+	optionOrHotel = {},
+	{ hotelName = "", agentName = "" } = {}
+) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const quote = optionOrHotel?.quote || {};
+	const total =
+		optionOrHotel?.total || quote?.totals?.totalPriceWithCommission || "";
+	const currency = cleanCurrency(optionOrHotel?.currency || quote?.currency || "SAR");
+	const nights = optionOrHotel?.nights || quote?.nights || "";
+	const room =
+		optionOrHotel?.roomLabel ||
+		quote?.room?.displayName ||
+		quote?.room?.roomType ||
+		roomTypeLabel(optionOrHotel?.roomTypeKey || st.slots?.roomTypeKey);
+	const pricePart = total
+		? `${total} ${currency}${nights ? ` total for ${nights} nights` : ""}`
+		: "the selected priced option";
+	if (/arabic/i.test(lang)) {
+		return `${name}، معك ${agentName} من دعم ${hotelName}. وصلتني تفاصيل الخيار المختار: ${room} بسعر ${pricePart}. هل ترغب أن أتابع إلى مراجعة الحجز الرسمية؟`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `Hola ${name}, soy ${agentName} de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
+	}
+	if (/french/i.test(lang)) {
+		return `Bonjour ${name}, je suis ${agentName} du support ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
+	}
+	return `Hi ${name}, this is ${agentName} from ${hotelName} support. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
+}
+
+function stabilizeHotelHandoffIntro(text = "", sc = {}, st = {}, optionOrHotel = {}, meta = {}) {
+	if (!optionOrHotel?.quote?.available) return text;
+	const value = String(text || "").trim();
+	if (
+		/check-?\s*in|check-?\s*out|send.*dates|share.*dates|fechas|entrada|salida|dates?/i.test(
+			value
+		)
+	) {
+		return hotelHandoffQuoteIntroText(sc, st, optionOrHotel, meta);
+	}
+	return value || hotelHandoffQuoteIntroText(sc, st, optionOrHotel, meta);
+}
+
 function platformHotelOptionQuickReplies(sc = {}, st = {}) {
 	const options = Array.isArray(st.platformHotelOptions)
 		? st.platformHotelOptions
@@ -1741,12 +1787,16 @@ async function connectJannatCaseToHotelSupport(
 			: optionOrHotel?.quote?.available
 			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
 			: "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk and ask for check-in and checkout dates so you can confirm availability officially.";
-	const hotelIntro = await write(io, sc, st, introInstruction, {
+	let hotelIntro = await write(io, sc, st, introInstruction, {
 		hotelName,
 		agentName: nextAgentName,
 		selectedOption: optionOrHotel,
 		confirmation,
 		requestedDates,
+	});
+	hotelIntro = stabilizeHotelHandoffIntro(hotelIntro, sc, st, optionOrHotel, {
+		hotelName,
+		agentName: nextAgentName,
 	});
 
 	await sendSystemNotice(

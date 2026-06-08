@@ -2387,6 +2387,7 @@ Future TODO Backlog - Added 2026-05-26
   - Platform concierge recommendation replies now have a deterministic fallback list. If the writer output does not visibly include the option hotel names, the backend sends a clear numbered list with room label, distance, and exact total when dates are known.
   - Jannat-to-hotel transfer now sends a neutral system breaker message after the concierge note, then waits 5-8 seconds by default before the selected hotel assistant replies. The delay is controlled by AI_JANNAT_HANDOFF_DELAY_MIN_MS / AI_JANNAT_HANDOFF_DELAY_MAX_MS.
   - The selected hotel intro is generated before the visible transfer notice so model latency is not counted inside the guest-visible 5-8 second handoff pause.
+  - If a selected Jannat Booking hotel option already has a priced quote, the post-handoff hotel intro must acknowledge that option and ask to continue to official review; it must not ask for dates again.
   - If the guest types during the transfer pause, the hotel intro is cancelled and the queued guest message is handled in the new hotel scope, preventing robotic back-to-back replies.
 - Ramadan / Hijri handling:
   - No-year Ramadan ranges now mean the upcoming Ramadan, not an arbitrary future year.
