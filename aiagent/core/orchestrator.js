@@ -33,6 +33,7 @@ const { chat } = require("./openai");
 const {
 	createReservationForCase,
 	updateReservationDatesForCase,
+	getReservationCancellationPolicyForCase,
 } = require("./actions");
 const {
 	isJannatBookingSupportCase,
@@ -750,10 +751,7 @@ function isReservationDetailStep(st = {}) {
 
 function humanHandoffReason(text = "") {
 	const normalized = String(text || "").toLowerCase();
-	if (
-		/\b(cancel|cancellation|refund|void)\b/i.test(normalized) &&
-		/\b(reservation|booking|room|stay|payment|deposit|it)\b/i.test(normalized)
-	) {
+	if (looksLikeReservationCancellation(text)) {
 		return "reservation_cancellation";
 	}
 	if (
@@ -765,6 +763,34 @@ function humanHandoffReason(text = "") {
 		return "reservation_update";
 	}
 	return "";
+}
+
+function looksLikeReservationCancellation(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const hasCancel =
+		/\b(cancel|cancellation|cancelation|refund|void)\b/i.test(lower) ||
+		/(?:cancelar|cancelacion|cancelaci[oó]n|anular|annuler|annulation|remboursement|reembolso)/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0627\u0644\u0644\u063a\u064a|\u0643\u0646\u0633\u0644|\u0627\u0633\u062a\u0631\u062f\u0627\u062f)/i.test(
+			arabic
+		) ||
+		/(?:cancel|cancellation|refund|void|cancelar|anular|annuler|reembolso|remboursement|elgha|ilgha|alghi|kansel|cancelreservation|cancelbooking)/i.test(
+			latinCompact
+		);
+	if (!hasCancel) return false;
+	const hasReservationContext =
+		/\b(reservation|booking|room|stay|payment|deposit|confirmation|reference|it)\b/i.test(
+			lower
+		) ||
+		/(?:reserva|r[eé]servation|habitacion|chambre|sejour|s[eé]jour)/i.test(
+			lower
+		) ||
+		/(?:\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632|\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f|\u063a\u0631\u0641\u0647|\u0627\u0642\u0627\u0645\u0647|\u062f\u0641\u0639)/i.test(
+			arabic
+		) ||
+		Boolean(confirmationFromText(text));
+	return hasReservationContext;
 }
 
 function publicDiscountPercent() {
@@ -1740,7 +1766,9 @@ async function connectJannatCaseToHotelSupport(
 		io,
 		sc,
 		st,
-		"Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now. Reassure them that the selected hotel's team will handle the official confirmation and reservation/payment/details links. Keep it one warm sentence.",
+		reason === "reservation_cancellation"
+			? "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now for the cancellation review. Reassure them that the selected hotel's team will handle the official reservation action. Keep it one warm sentence."
+			: "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now. Reassure them that the selected hotel's team will handle the official confirmation and reservation/payment/details links. Keep it one warm sentence.",
 		{
 			hotelName,
 			reason,
@@ -1797,6 +1825,8 @@ async function connectJannatCaseToHotelSupport(
 	const introInstruction =
 		reason === "reservation_update"
 			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
+			: reason === "reservation_cancellation"
+			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for a cancellation review, and say you will check the reservation policy now. Keep it friendly and concise."
 			: reason === "payment_help"
 			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
 			: reason === "reservation_support"
@@ -1850,6 +1880,8 @@ async function connectJannatCaseToHotelSupport(
 	st.waitFor =
 		reason === "reservation_update"
 			? "reservation_update_clarify"
+			: reason === "reservation_cancellation"
+			? "reservation_cancellation_reference"
 			: reason === "payment_help"
 			? "payment_reference"
 			: reason === "reservation_support"
@@ -1962,7 +1994,10 @@ async function redirectJannatReservationToHotelSupport(
 		return true;
 	}
 	const requestedDates = latestTurnDateRange(userText, lu);
-	const reason = looksLikeReservationDateUpdate(userText, lu)
+	const cancellationRequested = looksLikeReservationCancellation(userText);
+	const reason = cancellationRequested
+		? "reservation_cancellation"
+		: looksLikeReservationDateUpdate(userText, lu)
 		? "reservation_update"
 		: wantsPaymentHelp(userText)
 		? "payment_help"
@@ -1982,6 +2017,9 @@ async function redirectJannatReservationToHotelSupport(
 			checkinISO: requestedDates.checkinISO,
 			checkoutISO: requestedDates.checkoutISO,
 		});
+	}
+	if (cancellationRequested) {
+		return handleReservationCancellationRequest(io, sc, st, userText, lu);
 	}
 	return true;
 }
@@ -4289,6 +4327,308 @@ async function handleReservationUpdateRequest(
 	});
 }
 
+function reservationPolicyConfirmationDisplay(result = {}) {
+	const date = result.confirmedAt ? new Date(result.confirmedAt) : null;
+	return date && !Number.isNaN(date.getTime())
+		? usDate(date.toISOString().slice(0, 10))
+		: "";
+}
+
+function reservationPolicyConfirmationLabel(result = {}, fallback = "") {
+	return String(
+		result.reservation?.confirmation_number || fallback || ""
+	)
+		.trim()
+		.toUpperCase();
+}
+
+function cancellationReviewQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			{
+				label: "\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0639 \u0645\u062e\u062a\u0635",
+				value: "\u0646\u0639\u0645\u060c \u0623\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0639 \u0645\u062e\u062a\u0635",
+				action: "reservation_cancellation_escalate",
+			},
+			{
+				label: "\u0644\u0627\u060c \u0634\u0643\u0631\u0627",
+				value: "\u0644\u0627\u060c \u0634\u0643\u0631\u0627",
+				action: "decline",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{
+				label: "Revisar con especialista",
+				value: "Si, conectame con un especialista",
+				action: "reservation_cancellation_escalate",
+			},
+			{ label: "No, gracias", value: "No, gracias", action: "decline" },
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{
+				label: "Revoir avec un specialiste",
+				value: "Oui, connectez-moi avec un specialiste",
+				action: "reservation_cancellation_escalate",
+			},
+			{ label: "Non merci", value: "Non merci", action: "decline" },
+		];
+	}
+	return [
+		{
+			label: "Review with specialist",
+			value: "Please connect me with a specialist",
+			action: "reservation_cancellation_escalate",
+		},
+		{ label: "No, thank you", value: "No, thank you", action: "decline" },
+	];
+}
+
+function cancellationReferenceMessage(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0644\u0623\u0631\u0627\u062c\u0639 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0642\u0628\u0644 \u062a\u0648\u0635\u064a\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, por favor enviame el numero de confirmacion para revisar la politica de cancelacion antes de conectarte con un especialista.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, veuillez m'envoyer le numero de confirmation afin que je verifie la politique d'annulation avant de vous connecter a un specialiste.`;
+	}
+	return `${name}, please send the reservation confirmation number so I can review the cancellation policy before connecting you with a specialist.`;
+}
+
+function cancellationNotFoundMessage(sc = {}, st = {}, confirmation = "") {
+	const name = respectfulGuestName(sc, st);
+	const label = String(confirmation || "").trim().toUpperCase();
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0644\u0645 \u0623\u062c\u062f \u062d\u062c\u0632\u0627 \u0628\u0631\u0642\u0645 ${label}. \u0645\u0646 \u0641\u0636\u0644\u0643 \u062a\u0623\u0643\u062f \u0645\u0646 \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u0623\u0631\u0633\u0644\u0647 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, no encontre una reserva con el numero ${label}. Por favor revisalo y enviamelo otra vez.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je n'ai pas trouve de reservation avec le numero ${label}. Veuillez le verifier et me le renvoyer.`;
+	}
+	return `${name}, I could not find a reservation with confirmation ${label}. Please recheck the number and send it again.`;
+}
+
+function cancellationTooOldMessage(sc = {}, st = {}, result = {}, confirmation = "") {
+	const name = respectfulGuestName(sc, st);
+	const label = reservationPolicyConfirmationLabel(result, confirmation);
+	const confirmedDate = reservationPolicyConfirmationDisplay(result);
+	const thresholdDays = Number(result.thresholdDays || 14);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		const dateLine = confirmedDate
+			? ` \u062a\u0645 \u062a\u0623\u0643\u064a\u062f\u0647 \u0641\u064a ${confirmedDate}.`
+			: "";
+		return `${name}\u060c \u0648\u062c\u062f\u062a \u0627\u0644\u062d\u062c\u0632 ${label}.${dateLine} \u0644\u0623\u0646\u0647 \u0645\u0624\u0643\u062f \u0645\u0646\u0630 ${thresholdDays} \u064a\u0648\u0645\u0627 \u0623\u0648 \u0623\u0643\u062b\u0631\u060c \u0644\u0627 \u064a\u0645\u0643\u0646\u0646\u064a \u0625\u0644\u063a\u0627\u0624\u0647 \u062a\u0644\u0642\u0627\u0626\u064a\u0627 \u0639\u0628\u0631 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u062d\u0633\u0628 \u0627\u0644\u0633\u064a\u0627\u0633\u0629. \u0625\u0630\u0627 \u0643\u0646\u062a \u0645\u0627 \u0632\u0644\u062a \u062a\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0633\u062a\u062b\u0646\u0627\u0621\u060c \u0623\u062e\u0628\u0631\u0646\u064a \u0648\u0633\u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+	}
+	if (/spanish/i.test(lang)) {
+		const dateLine = confirmedDate ? ` Fue confirmada el ${confirmedDate}.` : "";
+		return `${name}, encontre la reserva ${label}.${dateLine} Como lleva confirmada ${thresholdDays} dias o mas, no puedo cancelarla automaticamente por chat segun la politica. Si aun quieres que el equipo revise una excepcion, dimelo y te conecto con un especialista.`;
+	}
+	if (/french/i.test(lang)) {
+		const dateLine = confirmedDate ? ` Elle a ete confirmee le ${confirmedDate}.` : "";
+		return `${name}, j'ai trouve la reservation ${label}.${dateLine} Comme elle est confirmee depuis ${thresholdDays} jours ou plus, je ne peux pas l'annuler automatiquement par chat selon la politique. Si vous souhaitez quand meme une revue d'exception, dites-le-moi et je vous connecte a un specialiste.`;
+	}
+	const dateLine = confirmedDate ? ` It was confirmed on ${confirmedDate}.` : "";
+	return `${name}, I found reservation ${label}.${dateLine} Because it has been confirmed for ${thresholdDays} days or more, I cannot cancel it automatically through chat under policy. If you still want the team to review an exception, tell me and I will connect you with a specialist.`;
+}
+
+function cancellationAlreadyClosedMessage(sc = {}, st = {}, result = {}, confirmation = "") {
+	const name = respectfulGuestName(sc, st);
+	const label = reservationPolicyConfirmationLabel(result, confirmation);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0631\u0649 \u0623\u0646 \u0627\u0644\u062d\u062c\u0632 ${label} \u0645\u063a\u0644\u0642 \u0623\u0648 \u0645\u0644\u063a\u0649 \u0628\u0627\u0644\u0641\u0639\u0644. \u0625\u0630\u0627 \u0643\u0627\u0646 \u0627\u0644\u0645\u0648\u0636\u0648\u0639 \u064a\u062d\u062a\u0627\u062c \u0645\u0631\u0627\u062c\u0639\u0629 \u062f\u0641\u0639 \u0623\u0648 \u0627\u0633\u062a\u062b\u0646\u0627\u0621\u060c \u0623\u0642\u062f\u0631 \u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, veo que la reserva ${label} ya esta cerrada o cancelada. Si necesitas revision de pago o una excepcion, puedo conectarte con un especialista.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je vois que la reservation ${label} est deja fermee ou annulee. Si vous avez besoin d'une revue de paiement ou d'une exception, je peux vous connecter a un specialiste.`;
+	}
+	return `${name}, I can see reservation ${label} is already closed or cancelled. If you need a payment review or an exception, I can connect you with a specialist.`;
+}
+
+function cancellationPolicyClarifyMessage(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0647\u0644 \u062a\u0631\u064a\u062f \u0623\u0646 \u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0637\u0644\u0628\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, quieres que te conecte con un especialista para revisar la solicitud?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, souhaitez-vous que je vous connecte a un specialiste pour revoir cette demande ?`;
+	}
+	return `${name}, would you like me to connect you with a specialist to review this request?`;
+}
+
+function cancellationPolicyCloseMessage(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062a\u0645\u0627\u0645. \u0623\u0646\u0627 \u0645\u0648\u062c\u0648\u062f \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u0645\u0633\u0627\u0639\u062f\u0629 \u0623\u062e\u0631\u0649 \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u0632.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perfecto. Estoy aqui si necesitas cualquier otra ayuda con la reserva.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tres bien. Je reste disponible si vous avez besoin d'aide pour la reservation.`;
+	}
+	return `${name}, understood. I am here if you need anything else with the reservation.`;
+}
+
+function cancellationInsistenceText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		confirmsText(text) ||
+		looksLikeReservationCancellation(text) ||
+		/\b(still|anyway|insist|exception|review|specialist|human|manager|agent|escalate|connect|please proceed|go ahead|refund|payment review)\b/i.test(
+			lower
+		) ||
+		/(?:\u0644\u0627\u0632\u0645|\u0645\u0635\u0631|\u0628\u0631\u0636\u0647|\u0645\u0627\s*\u0632\u0644\u062a|\u062d\u0648\u0644|\u0648\u0635\u0644|\u0645\u062e\u062a\u0635|\u0627\u0633\u062a\u062b\u0646\u0627\u0621|\u0645\u0631\u0627\u062c\u0639\u0647|\u0627\u0633\u062a\u0631\u062f\u0627\u062f)/i.test(
+			arabic
+		) ||
+		/(?:still|anyway|insist|exception|review|specialist|human|manager|agent|escalate|connect|goahead|refund|reembolso|remboursement|especialista|specialiste|excepcion|exception)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function declinesCancellationReviewText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const explicitlyKeepReservation =
+		/\b(?:do not|don't|dont|no need to|never mind|nevermind|keep|leave)\b.*\bcancel|\bcancel\b.*\b(?:do not|don't|dont|no need|never mind|nevermind)\b/i.test(
+			lower
+		) ||
+		/(?:\u0644\u0627\s+\u062a\u0644\u063a\u064a|\u0644\u0627\s+\u0627\u0644\u063a\u064a|\u062e\u0644\u0627\u0635|\u0645\u0634\s+\u0645\u062d\u062a\u0627\u062c|\u062e\u0644\u064a\s+\u0627\u0644\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:dontcancel|donotcancel|noneed|nevermind|keepreservation|leaveit)/i.test(
+			latinCompact
+		);
+	if (explicitlyKeepReservation) return true;
+	const wantsReview =
+		/\b(still|anyway|insist|exception|review|specialist|human|manager|agent|escalate|connect|go ahead|refund|payment)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u062e\u062a\u0635|\u0627\u0633\u062a\u062b\u0646\u0627\u0621|\u0645\u0631\u0627\u062c\u0639\u0647|\u0627\u0633\u062a\u0631\u062f\u0627\u062f)/i.test(
+			arabic
+		);
+	return declinesText(text) && !looksLikeReservationCancellation(text) && !wantsReview;
+}
+
+async function handleReservationCancellationPolicyAck(io, sc, st, userText) {
+	if (st.waitFor !== "reservation_cancellation_policy_ack") return false;
+	if (declinesCancellationReviewText(userText)) {
+		st.pendingReservationCancellation = null;
+		st.waitFor = null;
+		await humanSend(io, sc, st, cancellationPolicyCloseMessage(sc, st));
+		return true;
+	}
+	if (cancellationInsistenceText(userText) || wantsPaymentHelp(userText)) {
+		st.pendingReservationCancellation = null;
+		st.waitFor = null;
+		await handoffToHuman(io, sc, st, "reservation_cancellation");
+		return true;
+	}
+	if (looksLikeReservationDateUpdate(userText, {})) return false;
+	await humanSend(io, sc, st, cancellationPolicyClarifyMessage(sc, st), {
+		quickReplies: cancellationReviewQuickReplies(sc, st),
+	});
+	return true;
+}
+
+async function handleReservationCancellationRequest(
+	io,
+	sc,
+	st,
+	userText,
+	lu = {},
+	{ forceCancellation = false } = {}
+) {
+	if (
+		!forceCancellation &&
+		st.waitFor !== "reservation_cancellation_reference" &&
+		!looksLikeReservationCancellation(userText)
+	) {
+		return false;
+	}
+	if (!st.hotel) {
+		await redirectJannatReservationToHotelSupport(io, sc, st, userText, lu);
+		return true;
+	}
+	const confirmation =
+		lu?.confirmation || confirmationFromText(userText) || latestKnownConfirmation(sc, lu);
+	if (!confirmation) {
+		st.waitFor = "reservation_cancellation_reference";
+		await humanSend(io, sc, st, cancellationReferenceMessage(sc, st));
+		return true;
+	}
+	const result = await getReservationCancellationPolicyForCase({
+		confirmation,
+		hotel: st.hotel,
+	});
+	if (result.code === "missing_confirmation") {
+		st.waitFor = "reservation_cancellation_reference";
+		await humanSend(io, sc, st, cancellationReferenceMessage(sc, st));
+		return true;
+	}
+	if (result.code === "not_found") {
+		st.waitFor = "reservation_cancellation_reference";
+		await humanSend(
+			io,
+			sc,
+			st,
+			cancellationNotFoundMessage(sc, st, confirmation)
+		);
+		return true;
+	}
+	if (result.code === "confirmed_too_old") {
+		st.pendingReservationCancellation = {
+			confirmation: reservationPolicyConfirmationLabel(result, confirmation),
+			policyCode: result.code,
+			confirmedAt: result.confirmedAt,
+			ageDays: result.ageDays,
+		};
+		st.waitFor = "reservation_cancellation_policy_ack";
+		await humanSend(io, sc, st, cancellationTooOldMessage(sc, st, result, confirmation), {
+			quickReplies: cancellationReviewQuickReplies(sc, st),
+		});
+		return true;
+	}
+	if (["already_cancelled", "locked_status"].includes(result.code)) {
+		st.pendingReservationCancellation = {
+			confirmation: reservationPolicyConfirmationLabel(result, confirmation),
+			policyCode: result.code,
+		};
+		st.waitFor = "reservation_cancellation_policy_ack";
+		await humanSend(
+			io,
+			sc,
+			st,
+			cancellationAlreadyClosedMessage(sc, st, result, confirmation),
+			{ quickReplies: cancellationReviewQuickReplies(sc, st) }
+		);
+		return true;
+	}
+	st.pendingReservationCancellation = null;
+	st.waitFor = null;
+	await handoffToHuman(io, sc, st, "reservation_cancellation");
+	return true;
+}
+
 async function finalizeReservationForGuest(io, sc, st, caseId) {
 	if (!st.hotel) {
 		if (Array.isArray(st.platformHotelOptions) && st.platformHotelOptions.length) {
@@ -4936,6 +5276,25 @@ async function planTurn(io, sc) {
 			await redirectJannatReservationToHotelSupport(io, sc, st, userText, {});
 			return;
 		}
+		if (st.waitFor === "reservation_cancellation_policy_ack") {
+			const handled = await handleReservationCancellationPolicyAck(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handled) return;
+		}
+		if (st.waitFor === "reservation_cancellation_reference") {
+			const handled = await handleReservationCancellationRequest(
+				io,
+				sc,
+				st,
+				userText,
+				{}
+			);
+			if (handled) return;
+		}
 		if (st.waitFor === "reservation_update_option") {
 			const handled = await handlePendingReservationUpdateChoice(
 				io,
@@ -5183,6 +5542,25 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_cancellation") {
+			if (!st.hotel) {
+				await redirectJannatReservationToHotelSupport(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				return;
+			}
+			const handled = await handleReservationCancellationRequest(
+				io,
+				sc,
+				st,
+				userText,
+				decisionLu,
+				{ forceCancellation: true }
+			);
+			if (handled) return;
 			await handoffToHuman(io, sc, st, "reservation_cancellation");
 			return;
 		}
@@ -5383,6 +5761,26 @@ async function planTurn(io, sc) {
 		// Interpret latest user turn
 		const handoffReason = humanHandoffReason(userText);
 		if (handoffReason) {
+			if (handoffReason === "reservation_cancellation") {
+				if (!st.hotel) {
+					await redirectJannatReservationToHotelSupport(
+						io,
+						sc,
+						st,
+						userText,
+						decisionLu
+					);
+					return;
+				}
+				const handled = await handleReservationCancellationRequest(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				if (handled) return;
+			}
 			if (handoffReason === "reservation_update") {
 				if (!st.hotel) {
 					await redirectJannatReservationToHotelSupport(

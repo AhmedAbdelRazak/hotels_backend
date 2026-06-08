@@ -208,6 +208,149 @@ function reservationLifecycleBlocksAiUpdate(reservation = {}) {
 	);
 }
 
+function reservationLifecycleStatus(reservation = {}) {
+	return String(reservation.reservation_status || reservation.state || "")
+		.toLowerCase()
+		.replace(/[_-]+/g, " ")
+		.trim();
+}
+
+function asValidDate(value) {
+	if (!value) return null;
+	const date = value instanceof Date ? value : new Date(value);
+	return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function reservationConfirmationAge(reservation = {}, now = new Date()) {
+	const pendingStatus = String(reservation.pendingConfirmation?.status || "")
+		.toLowerCase()
+		.trim();
+	const decisionStatus = String(reservation.agentDecisionSnapshot?.status || "")
+		.toLowerCase()
+		.trim();
+	const lifecycleStatus = reservationLifecycleStatus(reservation);
+	const looksConfirmed =
+		pendingStatus === "confirmed" ||
+		decisionStatus === "confirmed" ||
+		/\bconfirmed\b/.test(lifecycleStatus);
+	const candidates = [
+		{
+			value: reservation.pendingConfirmation?.confirmedAt,
+			source: "pendingConfirmation.confirmedAt",
+			requiresConfirmed: false,
+		},
+		{
+			value: reservation.agentDecisionSnapshot?.decidedAt,
+			source: "agentDecisionSnapshot.decidedAt",
+			requiresConfirmed: true,
+		},
+		{
+			value: reservation.booked_at,
+			source: "booked_at",
+			requiresConfirmed: true,
+		},
+		{
+			value: reservation.createdAt,
+			source: "createdAt",
+			requiresConfirmed: true,
+		},
+	];
+	const nowDate = asValidDate(now) || new Date();
+	for (const candidate of candidates) {
+		if (candidate.requiresConfirmed && !looksConfirmed) continue;
+		const date = asValidDate(candidate.value);
+		if (!date) continue;
+		const ageDays = Math.max(
+			0,
+			Math.floor((nowDate.getTime() - date.getTime()) / DAY_MS)
+		);
+		return {
+			confirmedAt: date,
+			confirmedAtSource: candidate.source,
+			ageDays,
+			looksConfirmed,
+		};
+	}
+	return {
+		confirmedAt: null,
+		confirmedAtSource: "",
+		ageDays: null,
+		looksConfirmed,
+	};
+}
+
+function reservationCancellationTerminalStatus(reservation = {}) {
+	const status = reservationLifecycleStatus(reservation);
+	if (/\b(cancelled|canceled)\b/.test(status)) return "already_cancelled";
+	if (/\b(no show|checked out|inhouse|in house|rejected)\b/.test(status)) {
+		return "locked_status";
+	}
+	const pendingStatus = String(reservation.pendingConfirmation?.status || "")
+		.toLowerCase()
+		.trim();
+	if (/^(cancelled|canceled)$/.test(pendingStatus)) return "already_cancelled";
+	if (/^(rejected)$/.test(pendingStatus)) return "locked_status";
+	return "";
+}
+
+async function getReservationCancellationPolicyForCase({
+	confirmation,
+	hotel = null,
+	now = new Date(),
+} = {}) {
+	const normalizedConfirmation = String(confirmation || "").trim().toLowerCase();
+	if (!normalizedConfirmation) return { ok: false, code: "missing_confirmation" };
+	const reservation = await Reservations.findOne({
+		confirmation_number: normalizedConfirmation,
+	})
+		.select(
+			"_id confirmation_number hotelId belongsTo reservation_status state pendingConfirmation agentDecisionSnapshot booked_at createdAt checkin_date checkout_date customer_details total_amount financial_cycle commissionAgentApproval"
+		)
+		.lean()
+		.exec();
+	if (!reservation) return { ok: false, code: "not_found" };
+
+	const reservationHotelId = normalizeId(reservation.hotelId);
+	const activeHotelId = normalizeId(hotel?._id);
+	if (activeHotelId && reservationHotelId && activeHotelId !== reservationHotelId) {
+		return { ok: false, code: "hotel_mismatch", reservation };
+	}
+
+	const terminalCode = reservationCancellationTerminalStatus(reservation);
+	if (terminalCode) {
+		return { ok: false, code: terminalCode, reservation };
+	}
+
+	const thresholdDays = 14;
+	const confirmationAge = reservationConfirmationAge(reservation, now);
+	if (
+		confirmationAge.looksConfirmed &&
+		Number.isFinite(confirmationAge.ageDays) &&
+		confirmationAge.ageDays >= thresholdDays
+	) {
+		return {
+			ok: false,
+			code: "confirmed_too_old",
+			reservation,
+			thresholdDays,
+			...confirmationAge,
+		};
+	}
+
+	const financeLocked =
+		String(reservation.financial_cycle?.status || "").toLowerCase() === "closed" ||
+		String(reservation.commissionAgentApproval?.status || "").toLowerCase() ===
+			"approved";
+	return {
+		ok: true,
+		code: financeLocked ? "finance_review_required" : "specialist_required",
+		reservation,
+		thresholdDays,
+		financeLocked,
+		...confirmationAge,
+	};
+}
+
 function reservationRoomSelection(reservation = {}) {
 	const picked = Array.isArray(reservation.pickedRoomsType)
 		? reservation.pickedRoomsType
@@ -878,6 +1021,7 @@ async function pushReservationLinks(io, caseId, _st, payload = {}) {
 module.exports = {
 	createReservationForCase,
 	updateReservationDatesForCase,
+	getReservationCancellationPolicyForCase,
 	postReservationLinks,
 	pushReservationLinks,
 };
