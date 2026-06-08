@@ -29,7 +29,10 @@ const {
 } = require("./nlu");
 
 const { chat } = require("./openai");
-const { createReservationForCase } = require("./actions");
+const {
+	createReservationForCase,
+	updateReservationDatesForCase,
+} = require("./actions");
 
 const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
@@ -322,9 +325,26 @@ function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
 	st.languageOverrideAt = now();
 }
 
+function firstNameForAddress(value = "") {
+	const cleaned = String(value || "")
+		.trim()
+		.replace(
+			/^(?:mr|mrs|ms|miss|dr|sir|madam|mister|السيد|السيدة|استاذ|أستاذ|استاذة|أستاذة|الاستاذ|الأستاذ|الاستاذة|الأستاذة)\s+/i,
+			""
+		)
+		.trim();
+	return firstNameOf(cleaned || value || "Guest");
+}
+
 function respectfulGuestName(sc = {}, st = {}) {
 	const rawName = String(
-		st.slots?.name || firstNameOf(sc.displayName1 || sc.customerName || "")
+		firstNameForAddress(
+			st.slots?.name ||
+				st.slots?.fullName ||
+				sc.displayName1 ||
+				sc.customerName ||
+				""
+		)
 	).trim();
 	const language = languageOf(sc, st);
 	if (/arabic/i.test(language)) {
@@ -688,7 +708,9 @@ function looksLikeGreetingOnly(text = "") {
 }
 
 function greetingText(sc = {}, st = {}) {
-	const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
+	const name = firstNameForAddress(
+		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
+	);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) return `أهلاً ${name}، كيف أقدر أساعدك اليوم؟`;
 	if (/spanish/i.test(lang)) return `Hola ${name}, ¿cómo puedo ayudarte hoy?`;
@@ -942,7 +964,9 @@ function safePriceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 }
 
 function simpleQuoteText({ sc, st, quote }) {
-	const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
+	const name = firstNameForAddress(
+		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
+	);
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const roomName = roomTypeLabel(st.slots?.roomTypeKey || quote.room?.roomType);
 	if (!quote.available) {
@@ -1075,7 +1099,9 @@ async function buildHotelRecommendations({
 		}
 	);
 
-	const name = st.slots?.name || firstNameOf(sc.displayName1 || "Guest");
+	const name = firstNameForAddress(
+		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
+	);
 	const lang = languageOf(sc, st);
 	if (!matches.length) {
 		if (/arabic/i.test(lang)) {
@@ -1150,9 +1176,9 @@ function ensureState(sc, hotel) {
 				checkinISO: null,
 				checkoutISO: null,
 				roomTypeKey: null,
-				name:
-					initialFullName ||
-					firstNameOf(sc.displayName1 || sc.customerName || "Guest"),
+				name: firstNameForAddress(
+					initialFullName || sc.displayName1 || sc.customerName || "Guest"
+				),
 				fullName: initialFullName || null,
 				nationality: null,
 				phone: null,
@@ -1820,6 +1846,106 @@ function botExperienceComplaintText(text = "") {
 	);
 }
 
+function abusiveGuestText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(fuck|fucking|shit|bullshit|bitch|bastard|asshole|idiot|stupid|moron|damn you|go to hell)\b/i.test(
+			lower
+		) ||
+		/(?:كس\s*امك|كسمك|شرموط|شرموطة|عرص|وسخ|حقير|حمار|غبي|زباله|زبالة|يلعن|لعنة)/i.test(
+			arabic
+		) ||
+		/(?:fuck|fucking|bullshit|asshole|bitch|bastard|damnyou|gotohell|kosomak|kosomek|sharmout|sharmota|ghaby|zebala)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function looksLikeReservationDateUpdate(text = "", lu = {}) {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const quickDates = quickDateRange(text);
+	const hasDateWords =
+		/\b(date|dates|check\s*in|checkin|check-in|checkout|check\s*out|check-out|arrival|departure|extend|extension|shorten|night|nights|stay)\b/i.test(
+			lower
+		) ||
+		/(?:تاريخ|تواريخ|الدخول|الخروج|الوصول|المغادره|المغادرة|تمديد|مدد|ليله|ليلة|اقامه|إقامة)/i.test(
+			arabic
+		) ||
+		/(?:fecha|fechas|entrada|salida|arrivee|arrivée|depart|départ|sejour|séjour)/i.test(
+			lower
+		);
+	const hasUpdateWords =
+		/\b(update|change|modify|amend|edit|move|adjust|switch|correct)\b/i.test(
+			lower
+		) ||
+		/(?:تعديل|عدل|غير|تغيير|غيّر|تصحيح|بدل|نقل)/i.test(arabic) ||
+		/(?:update|change|modify|amend|edit|move|adjust|switch|ta3deel|taghyeer|ghayar|adel|badal|cambiar|modifier|changer)/i.test(
+			latinCompact
+		);
+	return Boolean(
+		(hasDateWords && hasUpdateWords) ||
+			((lu?.dates?.checkinISO || quickDates.checkinISO) && hasUpdateWords)
+	);
+}
+
+function latestTurnDateRange(text = "", lu = {}) {
+	const quickDates = quickDateRange(text);
+	return {
+		checkinISO: lu?.dates?.checkinISO || quickDates.checkinISO || null,
+		checkoutISO: lu?.dates?.checkoutISO || quickDates.checkoutISO || null,
+		raw: lu?.dates?.raw || quickDates.raw || null,
+	};
+}
+
+function reservationUpdateChoiceQuickReplies(sc = {}, st = {}, options = []) {
+	const lang = languageOf(sc, st);
+	return options.slice(0, 3).map((_, index) => {
+		const number = index + 1;
+		let label = `Option ${number}`;
+		if (/arabic/i.test(lang)) label = `الخيار ${number}`;
+		if (/spanish/i.test(lang)) label = `Opcion ${number}`;
+		if (/french/i.test(lang)) label = `Option ${number}`;
+		return {
+			label,
+			value: label,
+			action: `reservation_update_option_${number}`,
+		};
+	});
+}
+
+function parseReservationUpdateOptionChoice(text = "", options = []) {
+	if (!options.length) return -1;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const digit = lower.match(/\b([1-3])\b/);
+	if (digit) {
+		const index = Number(digit[1]) - 1;
+		return options[index] ? index : -1;
+	}
+	if (/\b(first|option one|option 1|one|uno|premier|premiere)\b/i.test(lower)) {
+		return options[0] ? 0 : -1;
+	}
+	if (/\b(second|option two|option 2|two|dos|deux)\b/i.test(lower)) {
+		return options[1] ? 1 : -1;
+	}
+	if (/\b(third|option three|option 3|three|tres|trois)\b/i.test(lower)) {
+		return options[2] ? 2 : -1;
+	}
+	if (/(?:الاول|الأول|اول|واحد|١)/i.test(arabic)) return options[0] ? 0 : -1;
+	if (/(?:الثاني|تاني|اتنين|اثنين|٢)/i.test(arabic)) return options[1] ? 1 : -1;
+	if (/(?:الثالث|تالت|ثلاثه|ثلاثة|٣)/i.test(arabic)) return options[2] ? 2 : -1;
+	if (confirmsText(text) && options.length === 1) return 0;
+	if (/(?:optionone|first|one|uno|premier)/i.test(latinCompact)) {
+		return options[0] ? 0 : -1;
+	}
+	if (/(?:optiontwo|second|two|dos|deux)/i.test(latinCompact)) {
+		return options[1] ? 1 : -1;
+	}
+	if (/(?:optionthree|third|three|tres|trois)/i.test(latinCompact)) {
+		return options[2] ? 2 : -1;
+	}
+	return -1;
+}
+
 function asksAiIdentity(text = "") {
 	return /\b(are you (?:a )?(?:human|bot|robot|ai)|you are (?:a )?(?:bot|robot|ai)|real person)\b|انتي\s+انسان|انت\s+انسان|روبوت|بوت|ذكاء\s+اصطناعي/i.test(
 		String(text || "")
@@ -1933,6 +2059,8 @@ async function handoffToHuman(io, sc, st, reason) {
 	let text =
 		reason === "reservation_cancellation"
 			? `I understand you want to cancel a reservation. ${humanTeam} will take over from here, because cancellations must be handled by a human specialist.`
+			: reason === "abusive_guest"
+			? `${humanTeam} will continue this conversation from here.`
 			: reason === "reservation_finalize_failed"
 			? `I could not finalize this reservation automatically. ${humanTeam} will take over from here and review it right away.`
 			: reason === "reservation_finalize"
@@ -1942,6 +2070,8 @@ async function handoffToHuman(io, sc, st, reason) {
 		text =
 			reason === "reservation_cancellation"
 				? "Entiendo que quieres cancelar una reserva. Un especialista de soporte tomara el chat desde aqui."
+				: reason === "abusive_guest"
+				? "Un especialista de soporte continuara esta conversacion desde aqui."
 				: reason === "reservation_finalize_failed"
 				? "No pude finalizar esta reserva automaticamente. Un especialista de soporte tomara el chat para revisarla enseguida."
 				: "Entiendo tu solicitud de reserva. Un especialista de soporte tomara el chat para revisarla correctamente.";
@@ -1949,6 +2079,8 @@ async function handoffToHuman(io, sc, st, reason) {
 		text =
 			reason === "reservation_cancellation"
 				? "Je comprends que vous voulez annuler une reservation. Un specialiste du support va prendre le relais ici."
+				: reason === "abusive_guest"
+				? "Un specialiste du support va poursuivre cette conversation ici."
 				: reason === "reservation_finalize_failed"
 				? "Je n'ai pas pu finaliser cette reservation automatiquement. Un specialiste du support va la verifier tout de suite."
 				: "Je comprends votre demande de reservation. Un specialiste du support va prendre le relais pour la verifier correctement.";
@@ -1966,7 +2098,9 @@ async function handoffToHuman(io, sc, st, reason) {
 			io,
 			sc,
 			st,
-			"Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel support voice when hotel context exists, and do not ask another question.",
+			reason === "abusive_guest"
+				? "The latest guest message is abusive or extremely rude. Do not argue, lecture, or mirror the language. Calmly state that a human support specialist will continue the conversation. Keep it one short sentence and do not ask another question."
+				: "Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel support voice when hotel context exists, and do not ask another question.",
 			{ handoffReason: reason, fallbackText: text }
 		);
 		if (learnedText) text = learnedText;
@@ -2388,6 +2522,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
 		`If the guest complains about repetition, speed, or not being answered, apologize briefly, correct course, and avoid defending yourself.`,
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
+		`This is a respectful Umrah/hospitality platform. Keep the service tone modest, patient, and supportive for Muslim guests and families without lecturing or using casual profanity.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, and Spanish guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
 		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
@@ -2405,7 +2540,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Help with date-range hotel pricing, hotel options near Al Haram, payment questions, and reservation triage.`,
 		`Do not mention discounts, coupons, promos, offers, or before-discount prices unless the latest guest message explicitly asks about them.`,
 		`Use only known Jannat Booking routes or URLs supplied in context. For hotel recommendations, prefer concise markdown links using the hotel name as the link text. Never invent routes, payment links, reservation links, or admin/PMS links.`,
-		`Do not cancel, refund, or mutate existing reservations; send those requests to a human team member.`,
+		`Do not cancel or refund existing reservations. Date changes may be completed only by the system update tool after availability is checked; never claim a reservation was changed unless tool context says it was completed. Name, phone, email, nationality, payment, cancellation, and refund changes still go to a human team member.`,
 		`Avoid repeating the same question if just asked; prefer a soft pivot.`,
 	].join(" ");
 
@@ -2852,6 +2987,253 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 		`[Payment link](${links.payment})`,
 		"Is there anything else I can help you with?",
 	].join("\n");
+}
+
+function reservationUpdateOptionLine(option = {}, index = 0) {
+	const room = option.roomName || roomTypeLabel(option.roomType || "");
+	const total = option.total ? `${option.total} ${cleanCurrency(option.currency)}` : "";
+	return `${index + 1}. ${room}: ${usDate(option.checkinISO)} - ${usDate(
+		option.checkoutISO
+	)}${total ? `, ${total}` : ""}`;
+}
+
+function reservationUpdateSuccessMessage(sc, st, result = {}) {
+	const lang = languageOf(sc, st);
+	const reservation = result.reservation || {};
+	const links = reservationLinks(reservation);
+	const name = respectfulGuestName(sc, st);
+	const confirmation = reservation.confirmation_number || result.confirmation || "";
+	const room =
+		result.quote?.room?.displayName ||
+		result.quote?.room?.roomType ||
+		roomTypeLabel(result.selection?.roomType || "");
+	const total = reservation.total_amount || result.quote?.totals?.totalPriceWithCommission || 0;
+	const currency = cleanCurrency(result.quote?.currency || reservation.currency || "SAR");
+	const dateLine = `${usDate(result.checkinISO)} - ${usDate(result.checkoutISO)}`;
+	if (/arabic/i.test(lang)) {
+		return [
+			`${name}، تم تحديث الحجز **${confirmation}** إلى **${dateLine}** بعد مراجعة التوفر.`,
+			`الغرفة: **${room}**. الإجمالي الحالي: **${total} ${currency}**.`,
+			"الحجز ظاهر للضيف كمؤكد، وتم إرساله لفريق الفندق لمراجعة التحديث.",
+			`[تفاصيل الحجز](${links.reservationDetails})`,
+			`[رابط الدفع](${links.payment})`,
+		].join("\n");
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			`Listo, ${name}. Actualice la reserva **${confirmation}** a **${dateLine}** despues de revisar disponibilidad.`,
+			`Habitacion: **${room}**. Total actual: **${total} ${currency}**.`,
+			"La reserva sigue confirmada para ti y el equipo del hotel recibio el cambio para revision.",
+			`[Reservation details](${links.reservationDetails})`,
+			`[Payment link](${links.payment})`,
+		].join("\n");
+	}
+	if (/french/i.test(lang)) {
+		return [
+			`C'est fait, ${name}. J'ai mis a jour la reservation **${confirmation}** pour **${dateLine}** apres verification de la disponibilite.`,
+			`Chambre : **${room}**. Total actuel : **${total} ${currency}**.`,
+			"La reservation reste confirmee pour vous et l'equipe de l'hotel a recu la mise a jour pour verification.",
+			`[Reservation details](${links.reservationDetails})`,
+			`[Payment link](${links.payment})`,
+		].join("\n");
+	}
+	return [
+		`Done, ${name}. I updated reservation **${confirmation}** to **${dateLine}** after checking availability.`,
+		`Room: **${room}**. Current total: **${total} ${currency}**.`,
+		"The reservation remains confirmed for you, and the hotel team has been notified to review the updated dates.",
+		`[Reservation details](${links.reservationDetails})`,
+		`[Payment link](${links.payment})`,
+	].join("\n");
+}
+
+function reservationUpdateUnavailableMessage(sc, st, result = {}, options = []) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const requested = result.requested || {};
+	const requestedLine = `${usDate(requested.checkinISO)} - ${usDate(
+		requested.checkoutISO
+	)}`;
+	const optionLines = options.map(reservationUpdateOptionLine).join("\n");
+	if (options.length) {
+		if (/arabic/i.test(lang)) {
+			return [
+				`${name}، لا يظهر توفر لنفس الطلب في **${requestedLine}**.`,
+				"هذه أقرب الخيارات المتاحة التي وجدتها:",
+				optionLines,
+				"اختر رقم الخيار المناسب، أو أرسل تواريخ أخرى.",
+			].join("\n");
+		}
+		if (/spanish/i.test(lang)) {
+			return [
+				`${name}, no veo disponibilidad para la misma solicitud en **${requestedLine}**.`,
+				"Estas son las opciones cercanas disponibles que encontre:",
+				optionLines,
+				"Elige el numero de opcion que prefieres, o enviame otras fechas.",
+			].join("\n");
+		}
+		if (/french/i.test(lang)) {
+			return [
+				`${name}, je ne vois pas de disponibilite pour la meme demande sur **${requestedLine}**.`,
+				"Voici les options proches disponibles que j'ai trouvees :",
+				optionLines,
+				"Choisissez le numero de l'option souhaitee, ou envoyez d'autres dates.",
+			].join("\n");
+		}
+		return [
+			`${name}, I do not see availability for the same request on **${requestedLine}**.`,
+			"These are the closest available options I found:",
+			optionLines,
+			"Choose the option number you prefer, or send me different dates.",
+		].join("\n");
+	}
+	if (/arabic/i.test(lang)) {
+		return `${name}، لا يظهر توفر لنفس الغرفة في **${requestedLine}** ولا أرى خيارا قريبا خلال 3 أيام. أقدر أراجع نوع غرفة آخر أو تواريخ مختلفة إذا أرسلت ما يناسبك.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, no veo disponibilidad para la misma habitacion en **${requestedLine}** ni una opcion cercana dentro de 3 dias. Puedo revisar otro tipo de habitacion u otras fechas si me las envias.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je ne vois pas de disponibilite pour la meme chambre sur **${requestedLine}** ni d'option proche dans les 3 jours. Je peux verifier un autre type de chambre ou d'autres dates.`;
+	}
+	return `${name}, I do not see same-room availability for **${requestedLine}** or a close option within 3 days. I can check another room type or different dates if you send what works for you.`;
+}
+
+async function finishReservationDateUpdate(
+	io,
+	sc,
+	st,
+	{ confirmation, checkinISO, checkoutISO, roomTypeOverride = "" }
+) {
+	const caseId = String(sc._id);
+	await sendProgressMessage(io, sc, st, "checking");
+	const result = await updateReservationDatesForCase({
+		caseId,
+		hotel: st.hotel,
+		confirmation,
+		checkinISO,
+		checkoutISO,
+		roomTypeOverride,
+		io,
+	});
+	if (result.ok) {
+		st.pendingReservationUpdateOptions = null;
+		st.waitFor = "post_booking_followup";
+		await humanSend(io, sc, st, reservationUpdateSuccessMessage(sc, st, result));
+		return true;
+	}
+	if (result.code === "unavailable") {
+		const sameRoomOptions = result.recommendations?.sameRoomCloseDates || [];
+		const alternativeOptions = result.recommendations?.alternativeRooms || [];
+		const options = sameRoomOptions.length ? sameRoomOptions : alternativeOptions;
+		st.pendingReservationUpdateOptions = {
+			confirmation,
+			options,
+		};
+		st.waitFor = options.length ? "reservation_update_option" : "reservation_update_clarify";
+		await humanSend(io, sc, st, reservationUpdateUnavailableMessage(sc, st, result, options), {
+			quickReplies: reservationUpdateChoiceQuickReplies(sc, st, options),
+		});
+		return true;
+	}
+	if (result.code === "not_found") {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest asked to update reservation dates, but the confirmation number was not found. Ask them to recheck the confirmation number and send the new check-in/check-out dates again. Do not escalate yet.",
+			{ confirmation, requestedDates: { checkinISO, checkoutISO } }
+		);
+		await humanSend(io, sc, st, reply);
+		st.waitFor = "reservation_reference";
+		return true;
+	}
+	if (["unsupported_status", "unsupported_room_selection", "multiple_room_types", "hotel_mismatch", "hotel_inventory_missing"].includes(result.code)) {
+		await handoffToHuman(io, sc, st, "reservation_update");
+		return true;
+	}
+	await handoffToHuman(io, sc, st, "reservation_update");
+	return true;
+}
+
+async function handlePendingReservationUpdateChoice(io, sc, st, userText) {
+	if (st.waitFor !== "reservation_update_option") return false;
+	const pending = st.pendingReservationUpdateOptions || {};
+	const options = Array.isArray(pending.options) ? pending.options : [];
+	if (!options.length) {
+		st.waitFor = null;
+		st.pendingReservationUpdateOptions = null;
+		return false;
+	}
+	if (declinesText(userText) || correctionText(userText)) {
+		st.waitFor = "reservation_update_clarify";
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest did not choose one of the suggested reservation update options. Ask them to send the dates or room type they prefer, and reassure them you will check availability again.",
+			{ options }
+		);
+		await humanSend(io, sc, st, reply);
+		return true;
+	}
+	const index = parseReservationUpdateOptionChoice(userText, options);
+	if (index < 0) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest replied but did not clearly choose one of the suggested reservation update options. Ask them to choose an option number or send different dates. Keep it short and helpful.",
+			{ options, latestUserMessage: userText }
+		);
+		await humanSend(io, sc, st, reply, {
+			quickReplies: reservationUpdateChoiceQuickReplies(sc, st, options),
+		});
+		return true;
+	}
+	const chosen = options[index];
+	return finishReservationDateUpdate(io, sc, st, {
+		confirmation: pending.confirmation,
+		checkinISO: chosen.checkinISO,
+		checkoutISO: chosen.checkoutISO,
+		roomTypeOverride:
+			chosen.kind === "alternative_room_same_dates" ? chosen.roomType : "",
+	});
+}
+
+async function handleReservationUpdateRequest(
+	io,
+	sc,
+	st,
+	userText,
+	lu = {},
+	{ forceDateUpdate = false } = {}
+) {
+	if (!forceDateUpdate && !looksLikeReservationDateUpdate(userText, lu)) return false;
+	const knownConfirmation = latestKnownConfirmation(sc, lu);
+	const requestedDates = latestTurnDateRange(userText, lu);
+	if (!knownConfirmation || !requestedDates.checkinISO || !requestedDates.checkoutISO) {
+		const reply = await write(
+			io,
+			sc,
+			st,
+			knownConfirmation
+				? "The guest wants to update reservation dates and the confirmation number is known, but the new check-in/check-out dates are missing or unclear. Ask for both dates in one short sentence and say you will check availability."
+				: "The guest wants to update reservation dates, but the confirmation number or the new check-in/check-out dates are missing. Ask for the missing confirmation number and both new dates in one concise message. Do not escalate.",
+			{
+				knownConfirmation,
+				requestedDates,
+				latestUserMessage: userText,
+			}
+		);
+		await humanSend(io, sc, st, reply);
+		st.waitFor = "reservation_update_clarify";
+		return true;
+	}
+	return finishReservationDateUpdate(io, sc, st, {
+		confirmation: knownConfirmation,
+		checkinISO: requestedDates.checkinISO,
+		checkoutISO: requestedDates.checkoutISO,
+	});
 }
 
 async function finalizeReservationForGuest(io, sc, st, caseId) {
@@ -3359,8 +3741,21 @@ async function planTurn(io, sc) {
 				return;
 			}
 		}
+		if (abusiveGuestText(userText)) {
+			await handoffToHuman(io, sc, st, "abusive_guest");
+			return;
+		}
 
 		hydrateKnownSlotsFromConversation(sc, st);
+		if (st.waitFor === "reservation_update_option") {
+			const handled = await handlePendingReservationUpdateChoice(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handled) return;
+		}
 		if (st.waitFor === "post_booking_followup") {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
@@ -3454,6 +3849,21 @@ async function planTurn(io, sc) {
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
 
 		if (
+			looksLikeReservationDateUpdate(userText, decisionLu) ||
+			st.waitFor === "reservation_update_clarify"
+		) {
+			const handled = await handleReservationUpdateRequest(
+				io,
+				sc,
+				st,
+				userText,
+				decisionLu,
+				{ forceDateUpdate: st.waitFor === "reservation_update_clarify" }
+			);
+			if (handled) return;
+		}
+
+		if (
 			st.hotel &&
 			selectedHotelRoomQuestionText(userText) &&
 			!humanHandoffReason(userText) &&
@@ -3540,6 +3950,14 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_update") {
+			const handled = await handleReservationUpdateRequest(
+				io,
+				sc,
+				st,
+				userText,
+				decisionLu
+			);
+			if (handled) return;
 			await handoffToHuman(io, sc, st, "reservation_update");
 			return;
 		}
@@ -3685,6 +4103,16 @@ async function planTurn(io, sc) {
 		// Interpret latest user turn
 		const handoffReason = humanHandoffReason(userText);
 		if (handoffReason) {
+			if (handoffReason === "reservation_update") {
+				const handled = await handleReservationUpdateRequest(
+					io,
+					sc,
+					st,
+					userText,
+					decisionLu
+				);
+				if (handled) return;
+			}
 			await handoffToHuman(io, sc, st, handoffReason);
 			return;
 		}

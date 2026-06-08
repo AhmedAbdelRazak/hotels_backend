@@ -2312,5 +2312,33 @@ Future TODO Backlog - Added 2026-05-26
   - AI_INSTANT_PROGRESS_ENABLED remains false and OPENAI_CHATBOT_REASONING_EFFORT remains medium, preserving one thoughtful human-like answer instead of noisy progress spam.
 - Production verification:
   - PM2 showed hotels-backend and hotels-frontend online after restart.
-  - Backend logs showed aiagent initialized, socket-driven AI planner active, DB watcher enabled, server listening on port 8080, and MongoDB Atlas connected.
-  - Public checks returned 200 for https://xhotelpro.com, /admin/all-reservations, /api/currency-rates, and /socket.io/?EIO=4&transport=polling.
+ - Backend logs showed aiagent initialized, socket-driven AI planner active, DB watcher enabled, server listening on port 8080, and MongoDB Atlas connected.
+ - Public checks returned 200 for https://xhotelpro.com, /admin/all-reservations, /api/currency-rates, and /socket.io/?EIO=4&transport=polling.
+
+2026-06-08 B2C AI Reservation Date-Update Automation
+- Customer-facing AI behavior:
+  - The B2C chatbot should address guests by first name only in conversation, while still preserving the full passport/guest name for reservation storage.
+  - Existing reservation date changes are no longer automatic human handoff when the request includes or later supplies a confirmation number and new check-in/check-out dates.
+  - The AI may update reservation dates only through aiagent/core/actions.js after it checks hotel pricing, blocked calendar rows, and overlapping reservation inventory with validateReservationInventoryForCreate.
+  - Cancellations, refunds, payment mutations, guest identity/contact changes, terminal/closed reservation changes, missing/ambiguous inventory, and multi-room-type reservations still escalate to a human specialist.
+  - Extremely rude/abusive guest messages pause AI and escalate to a human without arguing, lecturing, or mirroring the language.
+- Date/language handling:
+  - aiagent/core/nlu.js now parses natural Gregorian month ranges without explicit years, such as "30th of Sep to 20th of October", Spanish "30 septiembre al 20 octubre", French "du 30 septembre au 20 octobre", and Arabic native month names/digits.
+  - Missing years are inferred to the nearest future valid stay range. Checkout is bumped to the next year only when needed to keep checkout after check-in.
+- Reservation update persistence:
+  - aiagent/core/actions.js exports updateReservationDatesForCase.
+  - The action loads the reservation by confirmation number, falls back to the reservation hotel when support-case hotel context is missing, maps the saved room selection to active hotel inventory, recalculates pickedRoomsType/pickedRoomsPricing/total_amount/commission/adminPricing, captures availabilitySnapshot.source="ai_chat_reservation_update", and saves audit/admin change entries.
+  - Successful AI date updates set reservation_status/state="Pending Confirmation", pendingConfirmation.status="pending", pendingConfirmation.clientVisibleStatus="confirmed", pendingConfirmation.inventoryBlocks=true, and agentDecisionSnapshot.status="pending".
+  - Guest-facing copy must say the reservation remains confirmed/submitted for the guest, include the reservation details link and payment link, and mention that the hotel team was notified to review the updated dates. It must not expose scary internal workflow language as if the guest lost the booking.
+  - The action emits hotelNotificationsUpdated for hotel, owner, and platform notification rooms so reservation employees see the pending-confirmation update in their queue.
+- Availability alternatives:
+  - If the requested same-room date update is unavailable, the AI checks logical close-date options only within a three-day window around the requested check-in/checkout/stay shift.
+  - If no close same-room option is available, the AI checks active alternative room types for the requested dates and offers those as selectable options.
+  - The AI stores suggested update options in case state and supports quick-reply option buttons; choosing an option re-runs the same availability-checked update action.
+- Support seen-status behavior:
+  - controllers/supportcase.js makes /support-cases/:id/seen-by-admin idempotent after access is verified. If no unseen messages remain, it returns 200 with alreadySeen=true instead of 404.
+  - This prevents repeated admin mark-seen calls from looking like an infinite production error loop after the case is already fully seen.
+- Verification notes:
+  - node --check passed for aiagent/core/nlu.js, aiagent/core/actions.js, aiagent/core/orchestrator.js, and controllers/supportcase.js.
+  - NLU smoke tests confirmed English, French, and Arabic month/date examples resolve to 2026-09-30 through 2026-10-20.
+  - Dry-run action test for confirmation 9550176494 confirmed the update path can recalculate the Sep 30-Oct 20 stay to Pending Confirmation without saving, while preserving guest-visible confirmed behavior.

@@ -159,6 +159,37 @@ const MONTHS = {
 	november: 11,
 	dec: 12,
 	december: 12,
+	ene: 1,
+	enero: 1,
+	febrero: 2,
+	marzo: 3,
+	abr: 4,
+	abril: 4,
+	mayo: 5,
+	junio: 6,
+	julio: 7,
+	agosto: 8,
+	septiembre: 9,
+	setiembre: 9,
+	octubre: 10,
+	noviembre: 11,
+	diciembre: 12,
+	janv: 1,
+	janvier: 1,
+	fev: 2,
+	fevr: 2,
+	fevrier: 2,
+	mars: 3,
+	avril: 4,
+	mai: 5,
+	juin: 6,
+	juillet: 7,
+	aout: 8,
+	sept: 9,
+	septembre: 9,
+	octobre: 10,
+	novembre: 11,
+	decembre: 12,
 	"\u064a\u0646\u0627\u064a\u0631": 1,
 	"\u0641\u0628\u0631\u0627\u064a\u0631": 2,
 	"\u0645\u0627\u0631\u0633": 3,
@@ -564,6 +595,151 @@ function isoFromParts(year, month, day) {
 	return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
+function escapeDateRegex(value = "") {
+	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeDateSearchText(value = "") {
+	return digitsToEnglish(String(value || ""))
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/\u00a0/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function todayISO() {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function isoYear(iso = "") {
+	const match = String(iso || "").match(/^(\d{4})-/);
+	return match ? Number(match[1]) : new Date().getUTCFullYear();
+}
+
+function inferFutureISO({ day, month, year = null }, anchorYear = null) {
+	const explicitYear = Number(year || 0);
+	if (explicitYear) return isoFromParts(explicitYear, month, day);
+	const currentYear = Number(anchorYear || new Date().getUTCFullYear());
+	let iso = isoFromParts(currentYear, month, day);
+	if (!iso) return null;
+	if (iso < todayISO()) {
+		iso = isoFromParts(currentYear + 1, month, day);
+	}
+	return iso;
+}
+
+function normalizeGregorianMonthRange(parts = []) {
+	if (!Array.isArray(parts) || parts.length < 2) return null;
+	const first = parts[0];
+	const second = parts[1];
+	const checkinISO = inferFutureISO(first);
+	if (!checkinISO) return null;
+	const checkoutAnchorYear = second.year ? null : isoYear(checkinISO);
+	let checkoutISO = inferFutureISO(second, checkoutAnchorYear);
+	if (!checkoutISO) return null;
+	while (checkoutISO <= checkinISO) {
+		const nextYear = isoYear(checkoutISO) + 1;
+		checkoutISO = isoFromParts(nextYear, second.month, second.day);
+		if (!checkoutISO) return null;
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: checkinISO,
+			checkout: checkoutISO,
+			calendar: "gregorian",
+		},
+	};
+}
+
+function quickGregorianMonthDateRange(text = "") {
+	const raw = normalizeDateSearchText(text);
+	const monthNames = Object.keys(MONTHS)
+		.sort((a, b) => b.length - a.length)
+		.map(escapeDateRegex)
+		.join("|");
+	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF]";
+	const matches = [];
+	const pushMatch = (index, day, monthName, year) => {
+		const normalizedMonth = normalizeDateSearchText(monthName).toLowerCase();
+		const month = MONTHS[normalizedMonth];
+		const dayNumber = Number(day);
+		if (!month || !dayNumber) return;
+		matches.push({
+			index,
+			day: dayNumber,
+			month,
+			year: year ? Number(year) : null,
+		});
+	};
+
+	const dayMonth = new RegExp(
+		`(^|${boundary})(?:from\\s+|du\\s+|de\\s+|del\\s+|al\\s+|au\\s+|le\\s+|el\\s+|\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+|\\u0625\\u0644\\u0649\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+|de\\s+|du\\s+)?(${monthNames})(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
+		"gi"
+	);
+	let match = null;
+	while ((match = dayMonth.exec(raw))) {
+		pushMatch(match.index, match[2], match[3], match[4]);
+	}
+
+	const monthDay = new RegExp(
+		`(^|${boundary})(${monthNames})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
+		"gi"
+	);
+	while ((match = monthDay.exec(raw))) {
+		pushMatch(match.index, match[3], match[2], match[4]);
+	}
+
+	const ordered = matches
+		.sort((a, b) => a.index - b.index)
+		.filter((item, index, list) => {
+			const prev = list[index - 1];
+			return (
+				!prev ||
+				prev.index !== item.index ||
+				prev.day !== item.day ||
+				prev.month !== item.month
+			);
+		});
+
+	return normalizeGregorianMonthRange(ordered);
+}
+
+function quickArabicGregorianMonthDateRange(text = "") {
+	const raw = normalizeArabicSearchText(text);
+	if (!/[\u0600-\u06FF]/.test(raw)) return null;
+	const monthLookup = new Map(
+		Object.keys(MONTHS)
+			.filter((key) => /[\u0600-\u06FF]/.test(key))
+			.map((key) => [normalizeArabicSearchText(key), MONTHS[key]])
+	);
+	const monthNames = [...monthLookup.keys()]
+		.sort((a, b) => b.length - a.length)
+		.map(escapeDateRegex)
+		.join("|");
+	if (!monthNames) return null;
+	const matches = [];
+	const re = new RegExp(
+		`(?:^|\\s)(?:\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+)?(\\d{1,2})\\s+(${monthNames})(?:\\s+(20\\d{2}))?`,
+		"g"
+	);
+	let match = null;
+	while ((match = re.exec(raw))) {
+		const month = monthLookup.get(match[2]);
+		const day = Number(match[1]);
+		if (!month || !day) continue;
+		matches.push({
+			index: match.index,
+			day,
+			month,
+			year: match[3] ? Number(match[3]) : null,
+		});
+	}
+	return normalizeGregorianMonthRange(matches);
+}
+
 function quickDateRange(text = "") {
 	const raw = digitsToEnglish(String(text || ""));
 	const hijri = quickHijriDateRange(raw);
@@ -580,38 +756,11 @@ function quickDateRange(text = "") {
 			},
 		};
 	}
-	const monthNames = Object.keys(MONTHS).join("|");
-	const matches = [];
-	const pushMatch = (day, monthName, year) => {
-		const month = MONTHS[String(monthName || "").toLowerCase()];
-		const iso = isoFromParts(year, month, day);
-		if (iso) matches.push(iso);
-	};
-	const dayMonth = new RegExp(
-		`\\b(\\d{1,2})\\s+(${monthNames})\\s*,?\\s*(20\\d{2})\\b`,
-		"gi"
-	);
-	let match = null;
-	while ((match = dayMonth.exec(raw))) {
-		pushMatch(match[1], match[2], match[3]);
-	}
-	const monthDay = new RegExp(
-		`\\b(${monthNames})\\s+(\\d{1,2})\\s*,?\\s*(20\\d{2})\\b`,
-		"gi"
-	);
-	while ((match = monthDay.exec(raw))) {
-		pushMatch(match[2], match[1], match[3]);
-	}
-	if (matches.length >= 2) {
-		return {
-			checkinISO: matches[0],
-			checkoutISO: matches[1],
-			raw: {
-				checkin: matches[0],
-				checkout: matches[1],
-				calendar: "gregorian",
-			},
-		};
+	const monthRange = quickGregorianMonthDateRange(raw);
+	if (monthRange?.checkinISO && monthRange?.checkoutISO) return monthRange;
+	const arabicMonthRange = quickArabicGregorianMonthDateRange(raw);
+	if (arabicMonthRange?.checkinISO && arabicMonthRange?.checkoutISO) {
+		return arabicMonthRange;
 	}
 	return { checkinISO: null, checkoutISO: null, raw: null };
 }

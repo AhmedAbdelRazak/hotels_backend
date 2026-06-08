@@ -1675,11 +1675,12 @@ exports.markAllMessagesAsSeenByAdmin = async (req, res) => {
 			}
 		);
 
-		// If no messages were updated, return a 404 response
-		if (result.matchedCount === 0) {
-			return res
-				.status(404)
-				.json({ error: "No unseen messages found or already updated" });
+		const modifiedCount = result.modifiedCount || result.nModified || 0;
+		if (modifiedCount === 0) {
+			return res.status(200).json({
+				message: "No unseen messages pending for Admin",
+				alreadySeen: true,
+			});
 		}
 
 		// Emit the real-time socket event to the specific room (support case ID)
