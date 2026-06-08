@@ -3234,7 +3234,24 @@ exports.paginatedReservationList = async (req, res) => {
 		const normalizeRef = (ref) => {
 			if (!ref) return null;
 			if (typeof ref === "object" && ref._id) {
-				return { ...ref, _id: String(ref._id) };
+				const compact = { _id: String(ref._id) };
+				[
+					"hotelName",
+					"hotelName_OtherLanguage",
+					"name",
+					"email",
+					"phone",
+					"role",
+					"roleDescription",
+				].forEach((key) => {
+					if (ref[key] !== undefined && ref[key] !== null) {
+						compact[key] = ref[key];
+					}
+				});
+				if (ref.belongsTo) {
+					compact.belongsTo = String(ref.belongsTo?._id || ref.belongsTo);
+				}
+				return compact;
 			}
 			return { _id: String(ref) };
 		};
@@ -3334,8 +3351,8 @@ exports.paginatedReservationList = async (req, res) => {
 		// 3) Fetch ALL matching docs (no skip/limit) for scorecards integrity
 		const allDocs = await Reservations.find(mongoFilter)
 			.sort({ createdAt: -1 })
-			.populate("belongsTo")
-			.populate("hotelId")
+			.populate("belongsTo", "_id name email phone role roleDescription")
+			.populate("hotelId", "_id hotelName hotelName_OtherLanguage belongsTo")
 			.lean();
 
 		// 4) Format each doc to compute payment_status (PayPal-aware)
@@ -3781,13 +3798,142 @@ exports.paginatedReservationList = async (req, res) => {
 			overallCommission,
 		};
 
+		const compactMoneyObject = (source = {}) =>
+			Object.entries(source || {}).reduce((acc, [key, value]) => {
+				if (key === "payment_comments") return acc;
+				if (value === null || value === undefined || value === "") return acc;
+				if (typeof value === "number" || typeof value === "string") {
+					acc[key] = value;
+				}
+				return acc;
+			}, {});
+		const compactRoomSelection = (rooms = []) =>
+			(Array.isArray(rooms) ? rooms : []).map((room = {}) => ({
+				room_type: room.room_type || room.roomType || "",
+				roomType: room.roomType || room.room_type || "",
+				displayName: room.displayName || room.display_name || "",
+				chosenPrice: room.chosenPrice || room.price || "",
+				count: room.count || 1,
+				totalPriceWithCommission: room.totalPriceWithCommission || 0,
+				totalPriceWithoutCommission: room.totalPriceWithoutCommission || 0,
+				hotelShouldGet: room.hotelShouldGet || 0,
+			}));
+		const compactPaypalCollection = (rows = []) =>
+			(Array.isArray(rows) ? rows : []).slice(-5).map((row = {}) => ({
+				capture_status: row.capture_status || "",
+				status: row.status || "",
+				amount: row.amount || row.amount_sar || row.amount_usd || "",
+				createdAt: row.createdAt || row.created_at || row.time || "",
+			}));
+		const compactAdminReservationRow = (reservation = {}) => {
+			const paymentDetails = reservation.payment_details || {};
+			const paypalDetails = reservation.paypal_details || {};
+			const customerDetails = reservation.customer_details || {};
+			const adminPricing = reservation.adminPricing || {};
+			return {
+				_id: reservation._id,
+				confirmation_number: reservation.confirmation_number || "",
+				confirmation_number2: reservation.confirmation_number2 || "",
+				hotelId: normalizeRef(reservation.hotelId) || reservation.hotelId,
+				belongsTo: normalizeRef(reservation.belongsTo) || reservation.belongsTo,
+				hotel_name: reservation.hotel_name || "",
+				customer_name: reservation.customer_name || "",
+				customer_nick: reservation.customer_nick || "",
+				customer_phone: reservation.customer_phone || "",
+				customer_booking_source: reservation.customer_booking_source || "",
+				customer_details: {
+					name: customerDetails.name || reservation.customer_name || "",
+					phone: customerDetails.phone || reservation.customer_phone || "",
+					email: customerDetails.email || "",
+					nationality: customerDetails.nationality || "",
+					nickName: customerDetails.nickName || reservation.customer_nick || "",
+					booking_source:
+						customerDetails.booking_source ||
+						reservation.customer_booking_source ||
+						"",
+					reservedBy: customerDetails.reservedBy || "",
+					confirmation_number2:
+						customerDetails.confirmation_number2 ||
+						reservation.confirmation_number2 ||
+						"",
+				},
+				booking_source: reservation.booking_source || "",
+				reservation_status: reservation.reservation_status || "",
+				state: reservation.state || "",
+				payment: reservation.payment || "",
+				payment_status: reservation.payment_status || "",
+				payment_status_hint: reservation.payment_status_hint || "",
+				checkin_date: reservation.checkin_date || null,
+				checkout_date: reservation.checkout_date || null,
+				booked_at: reservation.booked_at || null,
+				createdAt: reservation.createdAt || null,
+				updatedAt: reservation.updatedAt || null,
+				days_of_residence: reservation.days_of_residence || 0,
+				total_rooms: reservation.total_rooms || 0,
+				total_amount: reservation.total_amount || 0,
+				paid_amount: reservation.paid_amount || 0,
+				commission: reservation.commission || 0,
+				paid_amount_breakdown: compactMoneyObject(
+					reservation.paid_amount_breakdown
+				),
+				payment_details: {
+					captured: Boolean(paymentDetails.captured),
+					capturing: Boolean(paymentDetails.capturing),
+					onsite_paid_amount: paymentDetails.onsite_paid_amount || 0,
+					authorizationId: paymentDetails.authorizationId || "",
+				},
+				paypal_details: {
+					captured_total_sar: paypalDetails.captured_total_sar || 0,
+					captured_total_usd: paypalDetails.captured_total_usd || 0,
+					captured_total: paypalDetails.captured_total || 0,
+					pending_total_usd: paypalDetails.pending_total_usd || 0,
+					bounds: {
+						limit_usd: paypalDetails.bounds?.limit_usd || 0,
+					},
+					initial: paypalDetails.initial
+						? {
+								capture_status:
+									paypalDetails.initial.capture_status || "",
+								status: paypalDetails.initial.status || "",
+						  }
+						: null,
+					mit: compactPaypalCollection(paypalDetails.mit),
+					captures: compactPaypalCollection(paypalDetails.captures),
+				},
+				adminPricing: {
+					mode: adminPricing.mode || "",
+					clientTotal: adminPricing.clientTotal || 0,
+					rootTotal: adminPricing.rootTotal || 0,
+					platformMarginTotal: adminPricing.platformMarginTotal || 0,
+					otaExpenseTotal: adminPricing.otaExpenseTotal || 0,
+					netAfterExpensesTotal: adminPricing.netAfterExpensesTotal || 0,
+				},
+				pendingConfirmation: reservation.pendingConfirmation
+					? {
+							status: reservation.pendingConfirmation.status || "",
+							clientVisibleStatus:
+								reservation.pendingConfirmation.clientVisibleStatus || "",
+					  }
+					: undefined,
+				pickedRoomsType: compactRoomSelection(reservation.pickedRoomsType),
+				pickedRoomsPricing: compactRoomSelection(
+					reservation.pickedRoomsPricing || reservation.pickedRoomsType
+				),
+				hotel_visible_amount: reservation.hotel_visible_amount || 0,
+				ota_financial_summary: reservation.ota_financial_summary || undefined,
+				isCheckinToday: Boolean(reservation.isCheckinToday),
+				isCheckoutToday: Boolean(reservation.isCheckoutToday),
+				isPaymentTriggered: Boolean(reservation.isPaymentTriggered),
+			};
+		};
+
 		// Return response
 		return res.status(200).json({
 			success: true,
 			data: sanitizeReservationAuditLogsCollectionForViewer(
 				finalDocs,
 				req.profile
-			), // after filter+search + skip/limit
+			).map(compactAdminReservationRow), // after filter+search + skip/limit
 			totalDocuments,
 			currentPage: pageNumber,
 			totalPages: Math.ceil(totalDocuments / pageSize),
