@@ -511,15 +511,23 @@ function applyGuestCountsFromText(st, text = "") {
 	const adultMatch = normalized.match(
 		/(\d{1,2})\s*(?:adult|adults|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
 	);
+	const adultLabelMatch = normalized.match(
+		/(?:adult|adults|number\s+of\s+adults|adults?\s+count|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
+	);
 	const childMatch = normalized.match(
 		/(\d{1,2})\s*(?:child|children|kid|kids|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
 	);
-	if (adultMatch) {
-		st.slots.adults = Math.max(1, Number(adultMatch[1]));
+	const childLabelMatch = normalized.match(
+		/(?:child|children|kid|kids|number\s+of\s+children|children\s+count|\u0639\u062f\u062f\s+\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0639\u062f\u062f\s+\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
+	);
+	const adultCount = adultMatch?.[1] || adultLabelMatch?.[1] || "";
+	const childCount = childMatch?.[1] || childLabelMatch?.[1] || "";
+	if (adultCount) {
+		st.slots.adults = Math.max(1, Number(adultCount));
 		st.slots.adultsProvided = true;
 	}
-	if (childMatch) {
-		st.slots.children = Math.max(0, Number(childMatch[1]));
+	if (childCount) {
+		st.slots.children = Math.max(0, Number(childCount));
 		st.slots.childrenProvided = true;
 	}
 	if (
@@ -531,13 +539,13 @@ function applyGuestCountsFromText(st, text = "") {
 		st.slots.childrenProvided = true;
 	}
 	if (
-		!childMatch &&
+		!childCount &&
 		/\b(child|kid)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
 	) {
 		st.slots.children = Math.max(1, Number(st.slots.children || 0));
 		st.slots.childrenProvided = true;
 	}
-	if (!adultMatch && !childMatch) {
+	if (!adultCount && !childCount) {
 		const total =
 			/(?:guest|guests|people|persons|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u062a\u0646\u0641\u0627\u0631)/i.test(
 				normalized
