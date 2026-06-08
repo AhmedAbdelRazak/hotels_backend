@@ -1400,8 +1400,8 @@ Future TODO Backlog - Added 2026-05-26
   - aiagent/core/orchestrator.js fixed the post-review slot collection state machine. After the review confirmation, the bot asks once for mandatory details in one message: full name as in passport, phone, nationality, adults count, and children count.
   - Email is optional after mandatory details. The bot asks whether the guest wants confirmation/payment-link delivery by email and offers a Skip quick reply.
   - On finalize, the orchestrator creates the reservation through aiagent/core/actions.js instead of handing off by default.
-  - aiagent/core/actions.js now accepts the current quote.pricingByDay shape, builds pickedRoomsType/pickedRoomsPricing daily rows, validates inventory with allowOverbook=false, captures availabilitySnapshot, and marks pendingConfirmation.status="pending".
-  - Saved AI reservations use booking_source="AI Chat", payment="Not Paid", financeStatus="not paid", pendingConfirmation.clientVisibleStatus="confirmed", and availabilitySnapshot.source="ai_chat_reservation_create".
+  - aiagent/core/actions.js now accepts the current quote.pricingByDay shape, builds pickedRoomsType/pickedRoomsPricing daily rows, validates inventory with allowOverbook=false, captures availabilitySnapshot, and marks the reservation operationally Pending Confirmation with pendingConfirmation.status="pending".
+  - Saved AI reservations use booking_source="AI Chat", payment="Not Paid", financeStatus="not paid", reservation_status/state="Pending Confirmation", pendingConfirmation.clientVisibleStatus="confirmed", and availabilitySnapshot.source="ai_chat_reservation_create".
   - Guests receive a friendly confirmed message with reservation details and payment links. Internal hotel staff still review the reservation through the normal pending-confirmation workflow.
   - If creation or inventory validation fails, the bot escalates with aiHandoffReason="reservation_finalize_failed" and uses a booking-specific failure handoff message.
 - Validation completed locally:
@@ -2280,7 +2280,7 @@ Future TODO Backlog - Added 2026-05-26
   - controllers/janat.js owns /admin all-reservations list filters, distinct booking-source options, public client update source stripping, and customer_booking_source response projection.
   - services/otaReservationMapper.js stamps customer_details.booking_source for OTA-created reservations and only backfills it during OTA reconciliation when missing.
   - aiagent/core/orchestrator.js owns the active socket-driven chatbot flow, quickReplies persistence, confirmation/correction/skip detection, mandatory one-message guest-detail capture, optional email prompt, and final guest confirmation copy.
-  - aiagent/core/actions.js rejects AI reservation creation unless full name, phone, nationality, adults count, and children count are valid, then validates inventory and stamps pendingConfirmation.clientVisibleStatus="confirmed".
+  - aiagent/core/actions.js rejects AI reservation creation unless full name, phone, nationality, adults count, and children count are valid, then validates inventory, saves reservation_status/state="Pending Confirmation", and stamps pendingConfirmation.clientVisibleStatus="confirmed" for guest-facing responses.
   - models/supportcase.js allows AI conversation turns to store quickReplies for audit/display.
 - Maintenance requirements:
   - Do not implement the April 1, 2026 hotel-management cutoff only in React. Backend queries must call the shared helper when reading reservation history for hotel-side routes.

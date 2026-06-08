@@ -230,7 +230,7 @@ async function createReservationForCase({
 	);
 	markReservationPendingConfirmation(reservationPayload, {
 		source: "ai_chat_reservation_create",
-		operationalStatus: false,
+		operationalStatus: true,
 		clientVisibleStatus: "confirmed",
 		inventoryBlocks: true,
 	});
