@@ -3074,6 +3074,9 @@ exports.listForAdminAll = async (req, res) => {
 		);
 		const viewKey = String(view || payload || "").toLowerCase();
 		const orderTakerView = ["order-taker", "ordertaker"].includes(viewKey);
+		const calculatorView = ["calculator", "reservation-calculator"].includes(
+			viewKey
+		);
 
 		/* 2️⃣  Base filter (status) */
 		const baseMatch = applyAdminHotelScope(req, {});
@@ -3110,49 +3113,60 @@ exports.listForAdminAll = async (req, res) => {
 		}
 
 		/* 4️⃣  Build aggregation pipeline (same join as listForAdmin) */
-		const pipeline = [
-			{ $match: baseMatch },
-			{
-				$lookup: {
-					from: "users", // collection name
-					localField: "belongsTo",
-					foreignField: "_id",
-					as: "owner",
+		const needsOwnerLookup = !calculatorView || Boolean(search);
+		const pipeline = [{ $match: baseMatch }];
+		if (needsOwnerLookup) {
+			pipeline.push(
+				{
+					$lookup: {
+						from: "users", // collection name
+						localField: "belongsTo",
+						foreignField: "_id",
+						as: "owner",
+					},
 				},
-			},
-			{ $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
-		];
+				{ $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } }
+			);
+		}
 
 		if (search) pipeline.push({ $match: searchMatch });
 
-		if (summaryOnly || orderTakerView) {
-			const compactProject = {
-				_id: 1,
-				hotelName: 1,
-				hotelName_OtherLanguage: 1,
-				hotelCountry: 1,
-				hotelState: 1,
-				hotelCity: 1,
-				hotelAddress: 1,
-				phone: 1,
-				activateHotel: 1,
-				xHotelProActive: 1,
-				aiToRespond: 1,
-				belongsTo: 1,
-				createdAt: 1,
-				updatedAt: 1,
-				overallRoomsCount: 1,
-				location: 1,
-				roomsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
-				photosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
-				owner: {
-					_id: "$owner._id",
-					name: "$owner.name",
-					email: "$owner.email",
-				},
-			};
-			if (orderTakerView) {
-				compactProject.commission = 1;
+		if (summaryOnly || orderTakerView || calculatorView) {
+			const compactProject = calculatorView
+				? {
+						_id: 1,
+						hotelName: 1,
+						activateHotel: 1,
+						xHotelProActive: 1,
+						commission: 1,
+				  }
+				: {
+						_id: 1,
+						hotelName: 1,
+						hotelName_OtherLanguage: 1,
+						hotelCountry: 1,
+						hotelState: 1,
+						hotelCity: 1,
+						hotelAddress: 1,
+						phone: 1,
+						activateHotel: 1,
+						xHotelProActive: 1,
+						aiToRespond: 1,
+						belongsTo: 1,
+						createdAt: 1,
+						updatedAt: 1,
+						overallRoomsCount: 1,
+						location: 1,
+						roomsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
+						photosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
+						owner: {
+							_id: "$owner._id",
+							name: "$owner.name",
+							email: "$owner.email",
+						},
+				  };
+			if (orderTakerView || calculatorView) {
+				if (!calculatorView) compactProject.commission = 1;
 				compactProject.roomCountDetails = {
 					$map: {
 						input: { $ifNull: ["$roomCountDetails", []] },
@@ -3167,11 +3181,13 @@ exports.listForAdminAll = async (req, res) => {
 							defaultCost: "$$room.defaultCost",
 							roomCommission: "$$room.roomCommission",
 							pricingRate: "$$room.pricingRate",
-							offers: "$$room.offers",
-							monthly: "$$room.monthly",
 						},
 					},
 				};
+			}
+			if (orderTakerView) {
+				compactProject.roomCountDetails.$map.in.offers = "$$room.offers";
+				compactProject.roomCountDetails.$map.in.monthly = "$$room.monthly";
 			}
 			pipeline.push({
 				$project: compactProject,
