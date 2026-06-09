@@ -57,12 +57,15 @@ const {
 	isOtaPlatformReviewPending,
 } = require("../services/otaReservationVisibility");
 const {
+	HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL,
 	addHotelManagementReservationVisibilityToFilter,
 	canEditReservationSource,
 	hotelManagementBookingSourceLabel,
 	hotelManagementReservationVisibilityFilterForActor,
+	maskHotelManagementInternalText,
 	maskBookingSourceSummaryRowsForHotelManagement,
 	shouldMaskHotelManagementReservationSource,
+	shouldMaskHotelManagementInternalText,
 	withHotelManagementSourceViewContext,
 	withHotelManagementReservationVisibility,
 } = require("../services/reservationVisibility");
@@ -2600,6 +2603,17 @@ const filterAcknowledgedNotifications = (
 	items = [],
 	acknowledgedKeys = new Set()
 ) => items.filter((item) => !item.ackKey || !acknowledgedKeys.has(item.ackKey));
+
+const sanitizeHotelManagementNotificationReason = (value = "") =>
+	maskHotelManagementInternalText(value);
+
+const sanitizeHotelManagementNotificationSource = (value = "") => {
+	const text = String(value || "").trim();
+	if (!text) return "";
+	return shouldMaskHotelManagementInternalText(text)
+		? HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL
+		: hotelManagementBookingSourceLabel(text);
+};
 
 const getAgentAccountNotificationFeed = async ({
 	actor,
@@ -9031,7 +9045,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
 						confirmation_number: reservation.confirmation_number,
 						guestName: reservation.customer_details?.name || "",
-						booking_source: reservation.booking_source || "",
+						booking_source: sanitizeHotelManagementNotificationSource(
+							reservation.booking_source || ""
+						),
 						booked_at: reservation.booked_at || reservation.createdAt,
 						checkin_date: reservation.checkin_date,
 						checkout_date: reservation.checkout_date,
@@ -9047,13 +9063,15 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							? "rejected"
 							: decision.status || "",
 						decisionReason:
-							(financeRejected &&
-								(financialCycle.financeRejectionComment ||
-									financialCycle.totalRejectionReason)) ||
-							decision.reason ||
-							decision.rejectionReason ||
-							decision.confirmationReason ||
-							"",
+							sanitizeHotelManagementNotificationReason(
+								(financeRejected &&
+									(financialCycle.financeRejectionComment ||
+										financialCycle.totalRejectionReason)) ||
+									decision.reason ||
+									decision.rejectionReason ||
+									decision.confirmationReason ||
+									""
+							),
 						financeRejectionType: financeRejected
 							? financeRejectionType
 							: "",
@@ -9201,7 +9219,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				confirmation_number: reservation.confirmation_number,
 				guestName: reservation.customer_details?.name || "",
 				guestPhone: reservation.customer_details?.phone || "",
-				booking_source: reservation.booking_source || "",
+				booking_source: sanitizeHotelManagementNotificationSource(
+					reservation.booking_source || ""
+				),
 				booked_at: reservation.booked_at || reservation.createdAt,
 				checkin_date: reservation.checkin_date,
 				checkout_date: reservation.checkout_date,
@@ -9211,12 +9231,14 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				pendingReasons,
 				decisionStatus: decision.status || "",
 				decisionReason:
-					decision.reason ||
-					decision.rejectionReason ||
-					decision.cancelReason ||
-					financialCycle.financeRejectionComment ||
-					financialCycle.totalRejectionReason ||
-					"",
+					sanitizeHotelManagementNotificationReason(
+						decision.reason ||
+							decision.rejectionReason ||
+							decision.cancelReason ||
+							financialCycle.financeRejectionComment ||
+							financialCycle.totalRejectionReason ||
+							""
+					),
 			};
 		});
 

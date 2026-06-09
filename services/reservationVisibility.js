@@ -3,6 +3,8 @@ const HOTEL_MANAGEMENT_RESERVATION_VISIBILITY_START = new Date(
 );
 const HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL = "Jannat Employee";
 const HOTEL_MANAGEMENT_SOURCE_VIEW_HEADER = "x-reservation-source-view";
+const HOTEL_MANAGEMENT_INTERNAL_TEXT_REGEX =
+	/\b(?:admin|administrator|super\s*admin|system|system\s*admin|root|internal|ai|chatbot|lifecycle)\b|[\u0623\u0627]\u062f\u0645\u0646|\u0645\u0634\u0631\u0641|\u0646\u0638\u0627\u0645|\u062f\u0627\u062e\u0644\u064a|\u0630\u0643\u0627\u0621|\u0631\u0648\u0628\u0648\u062a/i;
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 
@@ -112,6 +114,17 @@ const hotelManagementBookingSourceLabel = (value = "") =>
 	isAiChatReservationSource(value)
 		? HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL
 		: value;
+
+const shouldMaskHotelManagementInternalText = (value = "") =>
+	HOTEL_MANAGEMENT_INTERNAL_TEXT_REGEX.test(String(value || ""));
+
+const maskHotelManagementInternalText = (value = "") => {
+	const text = String(value || "").trim();
+	if (!text) return "";
+	return shouldMaskHotelManagementInternalText(text)
+		? HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL
+		: text;
+};
 
 const hasHotelManagementSourceViewHeader = (req = {}) => {
 	const headers = req.headers || {};
@@ -261,6 +274,7 @@ module.exports = {
 	hasHotelManagementSourceViewHeader,
 	hotelManagementBookingSourceLabel,
 	hotelManagementReservationVisibilityFilterForActor,
+	maskHotelManagementInternalText,
 	canEditReservationSource,
 	isAiChatReservationSource,
 	isPlatformReservationHistoryViewer,
@@ -270,6 +284,7 @@ module.exports = {
 	maskReservationSourcesForHotelManagement,
 	reservationTakenOnOrAfterHotelManagementCutoffFilter,
 	shouldMaskHotelManagementReservationSource,
+	shouldMaskHotelManagementInternalText,
 	withHotelManagementSourceViewContext,
 	withHotelManagementReservationVisibility,
 };

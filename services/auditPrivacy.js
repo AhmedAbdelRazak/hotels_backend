@@ -9,8 +9,10 @@ const {
 	hidePendingConfirmationForClient,
 } = require("./pendingConfirmationPolicy");
 const {
+	maskHotelManagementInternalText,
 	maskReservationSourceForHotelManagement,
 	shouldMaskHotelManagementReservationSource,
+	shouldMaskHotelManagementInternalText,
 	withHotelManagementSourceViewContext,
 } = require("./reservationVisibility");
 
@@ -469,6 +471,60 @@ const toPlain = (value) => {
 	return value;
 };
 
+const HOTEL_MANAGEMENT_INTERNAL_TEXT_PATHS = [
+	"pendingConfirmation.rejectionReason",
+	"pendingConfirmation.confirmationReason",
+	"pendingConfirmation.cancelReason",
+	"agentDecisionSnapshot.reason",
+	"agentDecisionSnapshot.rejectionReason",
+	"agentDecisionSnapshot.confirmationReason",
+	"financial_cycle.financeRejectionComment",
+	"financial_cycle.totalRejectionReason",
+	"financial_cycle.commissionRejectionReason",
+	"commissionAgentApproval.rejectionReason",
+];
+
+const sanitizeHotelManagementInternalWorkflowText = (reservation = {}) => {
+	const plain = toPlain(reservation);
+	if (!plain || typeof plain !== "object") return reservation;
+	const sanitized = { ...plain };
+
+	const maskTextAtPath = (path = "") => {
+		const parts = path.split(".");
+		const last = parts.pop();
+		let sourceParent = plain;
+		let targetParent = sanitized;
+
+		for (const part of parts) {
+			if (!sourceParent?.[part] || typeof sourceParent[part] !== "object") {
+				return;
+			}
+			if (!targetParent?.[part] || typeof targetParent[part] !== "object") {
+				targetParent[part] = Array.isArray(sourceParent[part])
+					? [...sourceParent[part]]
+					: { ...sourceParent[part] };
+			} else if (targetParent[part] === sourceParent[part]) {
+				targetParent[part] = Array.isArray(sourceParent[part])
+					? [...sourceParent[part]]
+					: { ...sourceParent[part] };
+			}
+			sourceParent = sourceParent[part];
+			targetParent = targetParent[part];
+		}
+
+		const value = sourceParent?.[last];
+		if (
+			typeof value === "string" &&
+			shouldMaskHotelManagementInternalText(value)
+		) {
+			targetParent[last] = maskHotelManagementInternalText(value);
+		}
+	};
+
+	HOTEL_MANAGEMENT_INTERNAL_TEXT_PATHS.forEach(maskTextAtPath);
+	return sanitized;
+};
+
 const sanitizeReservationAuditLogsForViewer = (
 	reservation,
 	viewer = {},
@@ -476,9 +532,10 @@ const sanitizeReservationAuditLogsForViewer = (
 ) => {
 	if (!reservation) return reservation;
 	if (isSuperAdminViewer(viewer)) {
-		return shouldMaskHotelManagementReservationSource(viewer)
-			? maskReservationSourceForHotelManagement(reservation)
-			: reservation;
+		if (!shouldMaskHotelManagementReservationSource(viewer)) return reservation;
+		return sanitizeHotelManagementInternalWorkflowText(
+			maskReservationSourceForHotelManagement(reservation)
+		);
 	}
 
 	const plain = toPlain(reservation);
@@ -575,18 +632,22 @@ const sanitizeReservationAuditLogsForViewer = (
 		const clientReservation = sanitizeReservationPricingForClientViewer(
 			hidePendingConfirmationForClient(sanitized)
 		);
-		return shouldMaskHotelManagementReservationSource(viewer)
-			? maskReservationSourceForHotelManagement(clientReservation)
-			: clientReservation;
+		if (!shouldMaskHotelManagementReservationSource(viewer)) {
+			return clientReservation;
+		}
+		return sanitizeHotelManagementInternalWorkflowText(
+			maskReservationSourceForHotelManagement(clientReservation)
+		);
 	}
 
 	const hotelReservation =
 		!options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
 		? sanitizeReservationPricingForHotelViewer(sanitized)
 		: sanitized;
-	return shouldMaskHotelManagementReservationSource(viewer)
-		? maskReservationSourceForHotelManagement(hotelReservation)
-		: hotelReservation;
+	if (!shouldMaskHotelManagementReservationSource(viewer)) return hotelReservation;
+	return sanitizeHotelManagementInternalWorkflowText(
+		maskReservationSourceForHotelManagement(hotelReservation)
+	);
 };
 
 const sanitizeReservationAdminWorkflowForPublicViewer = (reservation) =>
