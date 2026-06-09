@@ -613,90 +613,6 @@ function latestPhoneFromText(text = "") {
 	return "";
 }
 
-function guestCountNumber(text = "") {
-	const normalized = digitsToEnglish(String(text || "").toLowerCase());
-	const digit = normalized.match(/\b([1-9]|10)\b/);
-	if (digit) return Number(digit[1]);
-	const words = [
-		[/\b(one|single)\b|\u0648\u0627\u062d\u062f|\u0648\u0627\u062d\u062f\u0629/i, 1],
-		[/\b(two)\b|\u0627\u062b\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646/i, 2],
-		[/\b(three)\b|\u062b\u0644\u0627\u062b\u0629|\u062a\u0644\u0627\u062a\u0629|\u062a\u0644\u062a/i, 3],
-		[/\b(four)\b|\u0627\u0631\u0628\u0639\u0629|\u0623\u0631\u0628\u0639\u0629/i, 4],
-		[/\b(five)\b|\u062e\u0645\u0633\u0629/i, 5],
-	];
-	const found = words.find(([pattern]) => pattern.test(normalized));
-	return found ? found[1] : null;
-}
-
-function applyGuestCountsFromText(st, text = "") {
-	if (!st?.slots) return;
-	const normalized = digitsToEnglish(String(text || "").toLowerCase());
-	const { arabic, latinCompact } = normalizeControlText(text);
-	const adultMatch = normalized.match(
-		/(\d{1,2})\s*(?:adult|adults|adulto|adultos|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)/
-	);
-	const adultLabelMatch = normalized.match(
-		/(?:adult|adults|adulto|adultos|number\s+of\s+adults|adults?\s+count|numero\s+de\s+adultos|n[uú]mero\s+de\s+adultos|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a\u064a\u0646|\u0643\u0628\u0627\u0631)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
-	);
-	const childMatch = normalized.match(
-		/(\d{1,2})\s*(?:child|children|kid|kids|nino|ninos|niño|niños|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/
-	);
-	const childLabelMatch = normalized.match(
-		/(?:child|children|kid|kids|nino|ninos|niño|niños|number\s+of\s+children|children\s+count|numero\s+de\s+ninos|n[uú]mero\s+de\s+ni[nñ]os|\u0639\u062f\u062f\s+\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0639\u062f\u062f\s+\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)\s*[:\-\u2013\u2014]?\s*(\d{1,2})/
-	);
-	const adultCount = adultMatch?.[1] || adultLabelMatch?.[1] || "";
-	const childCount = childMatch?.[1] || childLabelMatch?.[1] || "";
-	if (adultCount) {
-		st.slots.adults = Math.max(1, Number(adultCount));
-		st.slots.adultsProvided = true;
-	}
-	if (childCount) {
-		st.slots.children = Math.max(0, Number(childCount));
-		st.slots.childrenProvided = true;
-	}
-	const noChildrenText =
-		/\b(no|none|zero|sin|cero)\s+(?:child|children|kid|kids|nino|ninos|ni\u00f1o|ni\u00f1os)\b/i.test(
-			normalized
-		) ||
-		/(?:\u0628\u062f\u0648\u0646|\u0628\u0644\u0627|\u0645\u0646\s+\u063a\u064a\u0631)\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0644\u0627\s*(?:\u064a\u0648\u062c\u062f|\u0641\u064a|\u0641\u064a\u0647)?\s*(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0627\s*\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0627\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0641\u064a\u0634\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0635\u0641\u0631\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)|\u0645\u0634\s+(?:\u0645\u0639\u0627\u064a\u0627|\u0639\u0646\u062f\u064a|\u0641\u064a|\u0641\u064a\u0647)\s+(?:\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647)/i.test(
-			arabic
-		) ||
-		/(?:mafish|mafeesh|mfeesh|mafihsh)(?:atfal|children|kids)/i.test(
-			latinCompact
-		);
-	if (noChildrenText) {
-		st.slots.children = 0;
-		st.slots.childrenProvided = true;
-	}
-	if (!childCount && !st.slots.childrenProvided) {
-		const onlyNumber = normalized.match(/^\s*(\d{1,2})\s*$/);
-		if (onlyNumber && reservationDetailsNeedOnlyChildren(st)) {
-			st.slots.children = Math.max(0, Number(onlyNumber[1]));
-			st.slots.childrenProvided = true;
-		}
-	}
-	if (
-		!noChildrenText &&
-		!childCount &&
-		/\b(child|kid|nino|niño)\b|\u0637\u0641\u0644|\u0637\u0641\u0644\u0629/i.test(normalized)
-	) {
-		st.slots.children = Math.max(1, Number(st.slots.children || 0));
-		st.slots.childrenProvided = true;
-	}
-	if (!adultCount && !childCount) {
-		const total =
-			/(?:guest|guests|people|persons|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u062a\u0646\u0641\u0627\u0631)/i.test(
-				normalized
-			)
-				? guestCountNumber(normalized)
-				: null;
-		if (total) {
-			st.slots.adults = total;
-			st.slots.adultsProvided = true;
-		}
-	}
-}
-
 function looksLikeNameCandidate(text = "") {
 	const value = String(text || "").trim();
 	if (!value || value.length > 80) return false;
@@ -734,11 +650,6 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		const contactPhone = cleanPhoneCandidate(contact);
 		if (contactEmail && !st.slots.email) st.slots.email = contactEmail;
 		if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
-	}
-	for (const message of conversation) {
-		if (isGuestConversationMessage(message)) {
-			applyGuestCountsFromText(st, message.message);
-		}
 	}
 	let lastAsk = "";
 	for (const message of conversation) {
@@ -2483,19 +2394,6 @@ function correctionText(text = "") {
 	);
 }
 
-function skipEmailText(text = "") {
-	const { lower, arabic, latinCompact } = normalizeControlText(text);
-	return (
-		/\b(no|skip|don'?t\s+have|do\s+not\s+have|later|none|no\s+email|without\s+email)\b/i.test(
-			lower
-		) ||
-		/(?:\u0644\u0627|\u062a\u062e\u0637\u064a|\u0628\u062f\u0648\u0646\s+\u0627\u064a\u0645\u064a\u0644|\u0628\u062f\u0648\u0646\s+\u0628\u0631\u064a\u062f|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0627\s+\u0639\u0646\u062f\u064a|\u0645\u0634\s+\u0645\u0648\u062c\u0648\u062f)/i.test(
-			arabic
-		) ||
-		/(?:skip|noemail|withoutemail|later|none)/i.test(latinCompact)
-	);
-}
-
 function hasUsableFullName(value = "") {
 	const name = String(value || "").replace(/\s+/g, " ").trim();
 	if (!name || name.length < 4 || name.length > 90) return false;
@@ -2655,11 +2553,6 @@ function missingMandatoryReservationFields(st = {}) {
 		missing.push("children");
 	}
 	return missing;
-}
-
-function reservationDetailsNeedOnlyChildren(st = {}) {
-	const missing = missingMandatoryReservationFields(st);
-	return missing.length === 1 && missing[0] === "children";
 }
 
 function hasMandatoryReservationDetails(st = {}) {
@@ -2855,20 +2748,192 @@ function proceedQuickReplies(sc = {}, st = {}) {
 	];
 }
 
+function parseJsonObject(raw = "", fallback = null) {
+	const text = String(raw || "").trim();
+	if (!text) return fallback;
+	try {
+		return JSON.parse(text);
+	} catch {
+		const match = text.match(/\{[\s\S]*\}/);
+		if (!match) return fallback;
+		try {
+			return JSON.parse(match[0]);
+		} catch {
+			return fallback;
+		}
+	}
+}
+
+function reservationDetailCount(value, { allowZero = false } = {}) {
+	if (value === null || value === undefined || value === "") return null;
+	const cleaned = digitsToEnglish(String(value)).replace(/[^\d.-]/g, "");
+	if (!cleaned) return null;
+	const number = Number(cleaned);
+	if (!Number.isFinite(number)) return null;
+	const count = Math.round(number);
+	const minimum = allowZero ? 0 : 1;
+	if (count < minimum || count > 30) return null;
+	return count;
+}
+
+function applyFocusedNumericCountAnswer(st = {}, text = "") {
+	if (!st?.slots) return false;
+	const missing = missingMandatoryReservationFields(st);
+	const field = missing.length === 1 ? missing[0] : "";
+	if (!["adults", "children"].includes(field)) return false;
+	const normalized = digitsToEnglish(String(text || "")).trim();
+	if (!/^\d{1,2}$/.test(normalized)) return false;
+	const count = reservationDetailCount(normalized, { allowZero: field === "children" });
+	if (count === null) return false;
+	st.slots[field] = count;
+	st.slots[`${field}Provided`] = true;
+	return true;
+}
+
+function compactReservationSlotsForInference(st = {}) {
+	const slots = st.slots || {};
+	return {
+		fullName: slots.fullName || slots.name || "",
+		nationality: slots.nationality || "",
+		phone: slots.phone || "",
+		email: slots.email || "",
+		emailSkipped: Boolean(slots.emailSkipped),
+		adults: slots.adultsProvided ? slots.adults : null,
+		adultsProvided: Boolean(slots.adultsProvided),
+		children: slots.childrenProvided ? slots.children : null,
+		childrenProvided: Boolean(slots.childrenProvided),
+	};
+}
+
+function applyReservationDetailsInference(st = {}, inferred = {}) {
+	if (!st?.slots || !inferred || typeof inferred !== "object") return false;
+	const before = JSON.stringify(st.slots || {});
+	const fullName = cleanFullNameCandidate(inferred.fullName || inferred.name || "");
+	if (fullName) {
+		st.slots.fullName = fullName;
+		st.slots.name = fullName;
+	}
+	const phone = cleanPhoneCandidate(inferred.phone || "");
+	if (phone) st.slots.phone = phone;
+	const email = latestEmailFromText(inferred.email || "");
+	if (email) {
+		st.slots.email = email;
+		st.slots.emailSkipped = false;
+	} else if (inferred.emailSkipped === true) {
+		st.slots.email = "";
+		st.slots.emailSkipped = true;
+	}
+	const nationality = String(inferred.nationality || "").trim();
+	if (AI_REQUIRE_NATIONALITY && nationality && nationality.length <= 60) {
+		st.slots.nationality = nationality;
+	}
+	const adults = reservationDetailCount(inferred.adults, { allowZero: false });
+	if (inferred.adultsProvided === true && adults !== null) {
+		st.slots.adults = adults;
+		st.slots.adultsProvided = true;
+	}
+	const children = reservationDetailCount(inferred.children, { allowZero: true });
+	if (inferred.childrenProvided === true && children !== null) {
+		st.slots.children = children;
+		st.slots.childrenProvided = true;
+	}
+	if (st.slots.fullName && !st.slots.name) st.slots.name = st.slots.fullName;
+	return before !== JSON.stringify(st.slots || {});
+}
+
+async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText = "", caseId = "") {
+	if (!st?.slots) return null;
+	const missing = missingMandatoryReservationFields(st);
+	const fieldFocus = missing.length === 1 ? missing[0] : st.waitFor || "";
+	const sys = [
+		"Hotel reservation NLU.",
+		"Interpret dialectal Arabic, Arabizi, and informal multilingual guest writing into intended meaning before extraction.",
+		"Use latestGuestMessage, lastAssistantMessage, fieldFocus, currentSlots, missingMandatoryFields, and fullConversation.",
+		"Do not use a keyword list or exact phrase matching; infer semantic intent from context.",
+		"When fieldFocus is present, a short latest reply answers that field unless the conversation clearly contradicts it.",
+		"For count fields, absence or zero meaning is value 0 with provided=true.",
+		"If latestGuestMessageDigitsNormalized is a number and fieldFocus is a count field, use that number as the provided count.",
+		"For fieldFocus=email_or_skip, if the guest semantically declines or omits optional email, set emailSkipped=true.",
+		"Do not infer adults or children from room type alone.",
+		"Only fill slots provided by the guest or clearly answered by the latest reply.",
+		"Output compact JSON only, with all requested keys present.",
+	].join(" ");
+	const user = JSON.stringify(
+		{
+			fieldFocus,
+			latestGuestMessage: String(latestText || ""),
+			latestGuestMessageDigitsNormalized: digitsToEnglish(String(latestText || "")),
+			lastAssistantMessage: lastAssistantText(sc),
+			missingMandatoryFields: missing,
+			waitFor: st.waitFor || "",
+			language: languageOf(sc, st),
+			currentSlots: compactReservationSlotsForInference(st),
+			fullConversation: recentConversationLines(sc, st),
+			returnKeys: [
+				"fullName",
+				"nationality",
+				"phone",
+				"email",
+				"emailSkipped",
+				"adults",
+				"adultsProvided",
+				"children",
+				"childrenProvided",
+				"confidence",
+			],
+		},
+		null,
+		2
+	);
+	let raw = "";
+	try {
+		raw = await chat(
+			[
+				{ role: "system", content: sys },
+				{ role: "user", content: user },
+			],
+			{ kind: "nlu", temperature: 0, max_tokens: 180, reasoning_effort: "none" }
+		);
+		const inferred = parseJsonObject(raw, null);
+		if (!inferred || typeof inferred !== "object") {
+			logStep(caseId || String(sc._id || ""), "reservation_details.context_parse_failed", {
+				raw: String(raw || "").slice(0, 500),
+				rawLength: String(raw || "").length,
+			});
+			return null;
+		}
+		const confidence = Number(inferred.confidence ?? 0.75);
+		if (Number.isFinite(confidence) && confidence < 0.45) {
+			logStep(caseId || String(sc._id || ""), "reservation_details.context_low_confidence", {
+				inferred,
+			});
+			return inferred;
+		}
+		if (applyReservationDetailsInference(st, inferred)) {
+			logStep(caseId || String(sc._id || ""), "reservation_details.context_inferred", {
+				inferred,
+				slots: st.slots,
+			});
+		}
+		return inferred;
+	} catch (error) {
+		logStep(caseId || String(sc._id || ""), "reservation_details.context_inference_failed", {
+			message: error?.message || error,
+		});
+		return null;
+	}
+}
+
 async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", caseId = "") {
 	if (!st?.slots) return;
 	const before = JSON.stringify(st.slots || {});
 	const fullText = String(text || "");
-	applyGuestCountsFromText(st, fullText);
 	const phone = latestPhoneFromText(fullText);
 	if (phone) st.slots.phone = phone;
 	const email = latestEmailFromText(fullText);
 	if (email) {
 		st.slots.email = email;
 		st.slots.emailSkipped = false;
-	} else if (skipEmailText(fullText)) {
-		st.slots.email = "";
-		st.slots.emailSkipped = true;
 	}
 	const explicitName = explicitNameCandidateFromText(fullText);
 	const lineName = !explicitName ? lineNameCandidateFromText(fullText) : "";
@@ -2880,6 +2945,13 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	if (name) {
 		st.slots.fullName = name;
 		st.slots.name = name;
+	}
+	const numericCountCaptured = applyFocusedNumericCountAnswer(st, fullText);
+	if (
+		!numericCountCaptured &&
+		["reservation_details", "fullname", "nationality", "phone", "email_or_skip"].includes(st.waitFor)
+	) {
+		await inferReservationDetailsFromContext(sc, st, fullText, caseId);
 	}
 	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) {
 		const nationality = await normalizeNationalityFromText(fullText, languageOf(sc, st));
@@ -5128,13 +5200,6 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.waitFor = "finalize";
 				continue;
 			}
-			if (skipEmailText(txt)) {
-				st.slots.email = "";
-				st.slots.emailSkipped = true;
-				logStep(caseId, "email.skipped", {});
-				st.waitFor = "finalize";
-				continue;
-			}
 			await humanSend(io, sc, st, optionalEmailPrompt(sc, st), {
 				quickReplies: emailQuickReplies(sc, st),
 			});
@@ -6649,26 +6714,27 @@ async function planTurn(io, sc) {
 				return;
 			}
 
-			if (st.waitFor === "email_or_skip" && !st.slots.email) {
+			if (st.waitFor === "email_or_skip" && !st.slots.email && !st.slots.emailSkipped) {
 				const txt = String(userText).trim();
-				if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(txt)) {
-					st.slots.email = txt;
+				const email = latestEmailFromText(txt);
+				if (email) {
+					st.slots.email = email;
 					logStep(caseId, "email.captured", { email: st.slots.email });
-				} else if (
-					/\b(no|skip|don'?t have|later|none|لا|تخطي|مش موجود)\b/i.test(txt)
-				) {
-					st.slots.email = "";
-					logStep(caseId, "email.skipped", {});
 				} else {
-					const ask = await write(
-						io,
-						sc,
-						st,
-						"If that does not look like an email, ask once more briefly and say they can type 'skip' if they prefer."
-					);
-					await humanSend(io, sc, st, ask);
-					stampAsk(st, "email_or_skip");
-					return;
+					await inferReservationDetailsFromContext(sc, st, txt, caseId);
+					if (st.slots.emailSkipped) {
+						logStep(caseId, "email.skipped", { source: "context" });
+					} else if (!st.slots.email) {
+						const ask = await write(
+							io,
+							sc,
+							st,
+							"If that does not look like an email, ask once more briefly and say they can continue without sharing one if they prefer."
+						);
+						await humanSend(io, sc, st, ask);
+						stampAsk(st, "email_or_skip");
+						return;
+					}
 				}
 				st.waitFor = "finalize";
 			}
@@ -6781,32 +6847,27 @@ async function planTurn(io, sc) {
 			}
 		}
 
-		if (st.waitFor === "email_or_skip" && !st.slots.email) {
-			const askEmail = await write(
-				io,
-				sc,
-				st,
-				"Ask naturally for an email address for reservation details. Let the guest know they can continue without one if they prefer. Ask only this one question."
-			);
-			await humanSend(io, sc, st, askEmail);
-			return;
-		}
-		if (!st.slots.email && st.waitFor === "email_or_skip") {
+		if (st.waitFor === "email_or_skip" && !st.slots.email && !st.slots.emailSkipped) {
 			const txt = String(userText).trim();
-			if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(txt)) {
-				st.slots.email = txt;
+			const email = latestEmailFromText(txt);
+			if (email) {
+				st.slots.email = email;
 				logStep(caseId, "email.captured", { email: st.slots.email });
-			} else if (/\b(no|skip|don'?t have|later)\b/i.test(txt)) {
-				st.slots.email = null;
 			} else {
-				const ask = await write(
-					io,
-					sc,
-					st,
-					"If that doesn't look like an email, ask once more briefly; accept 'skip' if they prefer."
-				);
-				await humanSend(io, sc, st, ask);
-				return;
+				await inferReservationDetailsFromContext(sc, st, txt, caseId);
+				if (st.slots.emailSkipped) {
+					logStep(caseId, "email.skipped", { source: "context" });
+				} else if (!st.slots.email) {
+					const ask = await write(
+						io,
+						sc,
+						st,
+						"Ask naturally for an email address for reservation details. Let the guest know they can continue without one if they prefer. Ask only this one question."
+					);
+					await humanSend(io, sc, st, ask);
+					stampAsk(st, "email_or_skip");
+					return;
+				}
 			}
 			st.waitFor = "finalize";
 		}

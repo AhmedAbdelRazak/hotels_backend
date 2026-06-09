@@ -54,7 +54,7 @@ function pickReasoningEffort() {
 
 async function chat(
 	messages,
-	{ kind = "nlu", temperature = 0, max_tokens = 350 } = {}
+	{ kind = "nlu", temperature = 0, max_tokens = 350, reasoning_effort = "" } = {}
 ) {
 	if (!client) {
 		throw new Error("OPENAI_API_KEY is not configured.");
@@ -69,7 +69,7 @@ async function chat(
 		messages,
 		temperature,
 		maxTokens: tokenLimit,
-		reasoning_effort: gpt5Style ? pickReasoningEffort() : "",
+		reasoning_effort: gpt5Style ? reasoning_effort || pickReasoningEffort() : "",
 	});
 	const res = await withDeadline(
 		(signal) =>
