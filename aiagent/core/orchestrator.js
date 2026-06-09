@@ -3291,9 +3291,8 @@ function confirmationFromText(text = "") {
 		if (candidate) return candidate;
 	}
 	const patterns = [
-		/(?:confirmation|confirm(?:ation)?|reference|booking|reservation|reserva|r[eé]servation)\s*(?:number|no\.?|#|id|ref|num(?:ero)?|n[uú]mero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{4,21})/gi,
+		/(?:confirmation|confirm(?:ation)?|reference|booking|reservation|reserva|r[e\u00e9]servation)\s*(?:number|no\.?|#|id|ref|num(?:ero|\u00e9ro)?|n[u\u00fa]mero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{4,21})/gi,
 		/(?:\u0631\u0642\u0645\s*(?:\u0627\u0644)?(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639)|\u0627\u0644?\u062d\u062c\u0632\s*\u0631\u0642\u0645|\u062a\u0623\u0643\u064a\u062f\s*\u0631\u0642\u0645|\u062a\u0627\u0643\u064a\u062f\s*\u0631\u0642\u0645)\s*[:#-]?\s*([\d\u0660-\u0669\u06f0-\u06f9A-Z-]{5,22})/gi,
-		/(?:Ø±Ù‚Ù…\s*(?:Ø§Ù„ØªØ£ÙƒÙŠØ¯|Ø§Ù„ØªØ§ÙƒÙŠØ¯|Ø§Ù„Ø­Ø¬Ø²|Ø§Ù„Ù…Ø±Ø¬Ø¹)|Ø§Ù„Ø­Ø¬Ø²\s*Ø±Ù‚Ù…)\s*[:#-]?\s*([0-9A-Z-]{5,22})/gi,
 	];
 	for (const pattern of patterns) {
 		let match = null;
@@ -5070,7 +5069,7 @@ function isPostBookingClosure(text = "") {
 	) {
 		return true;
 	}
-	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|شكرا|شكرًا|لا|لا شكرا|خلاص|تمام شكرا|كده تمام|مافيش|مش محتاج|بس كده|merci|non merci|gracias|no gracias)\.?$/i.test(
+	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627|\u0644\u0627|\u0644\u0627\s+\u0634\u0643\u0631\u0627|\u062e\u0644\u0627\u0635|\u062a\u0645\u0627\u0645\s+\u0634\u0643\u0631\u0627|\u0643\u062f\u0647\s+\u062a\u0645\u0627\u0645|\u0645\u0627\u0641\u064a\u0634|\u0645\u0634\s+\u0645\u062d\u062a\u0627\u062c|\u0628\u0633\s+\u0643\u062f\u0647|merci|non merci|gracias|no gracias)\.?$/i.test(
 		normalized
 	);
 }
@@ -5092,7 +5091,7 @@ function isPostBookingConcreteRequest(text = "") {
 
 function isVaguePositive(text = "") {
 	const normalized = String(text || "").trim().toLowerCase();
-	return /^(yes|yes please|yeah|yep|sure|ok|okay|ايوه|أيوه|نعم|تمام|اه|آه|oui|si|sí)\.?$/i.test(
+	return /^(yes|yes please|yeah|yep|sure|ok|okay|\u0627\u064a\u0648\u0647|\u0623\u064a\u0648\u0647|\u0646\u0639\u0645|\u062a\u0645\u0627\u0645|\u0627\u0647|\u0622\u0647|oui|si|s\u00ed)\.?$/i.test(
 		normalized
 	);
 }
