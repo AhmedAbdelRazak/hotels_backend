@@ -87,6 +87,28 @@ const MAP_DIRTY_ROOM_REASONS = new Set([
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const PENDING_NOTIFICATION_CACHE_TTL_MS = 5000;
 const PENDING_NOTIFICATION_CACHE_MAX = 500;
+const RESERVATION_DETAILS_HOTEL_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"belongsTo",
+	"commission",
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.room_type",
+	"roomCountDetails.displayName",
+	"roomCountDetails.display_name",
+	"roomCountDetails.displayName_OtherLanguage",
+	"roomCountDetails.price",
+	"roomCountDetails.defaultCost",
+	"roomCountDetails.roomCommission",
+	"roomCountDetails.pricingRate",
+	"roomCountDetails.roomColor",
+	"roomCountDetails.count",
+	"roomCountDetails.activeRoom",
+	"roomCountDetails.offers",
+	"roomCountDetails.monthly",
+].join(" ");
 const pendingNotificationFeedCache = new Map();
 const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
@@ -5345,6 +5367,14 @@ exports.singleReservationById = async (req, res) => {
 	try {
 		// Extract reservationId from request parameters
 		const { reservationId } = req.params;
+		const viewKey = String(req.query?.view || req.query?.payload || "")
+			.toLowerCase()
+			.trim();
+		const detailsView = [
+			"details",
+			"reservation-details",
+			"details-modal",
+		].includes(viewKey);
 		const auditViewer = (await resolveAuditViewerFromRequest(req)) || {
 			role: "client",
 			roleDescription: "client",
@@ -5359,6 +5389,7 @@ exports.singleReservationById = async (req, res) => {
 			.populate({
 				path: "hotelId",
 				model: "HotelDetails", // Ensure this matches the name of your HotelDetails model
+				...(detailsView ? { select: RESERVATION_DETAILS_HOTEL_SELECT } : {}),
 			})
 			.populate("belongsTo") // Optionally populate other referenced fields
 			.exec();

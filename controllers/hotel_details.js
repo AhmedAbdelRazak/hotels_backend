@@ -63,9 +63,39 @@ const HOTEL_DETAILS_SUMMARY_SELECT = [
 	"updatedAt",
 ].join(" ");
 
+const HOTEL_DETAILS_RESERVATION_DETAILS_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"belongsTo",
+	"commission",
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.room_type",
+	"roomCountDetails.displayName",
+	"roomCountDetails.display_name",
+	"roomCountDetails.displayName_OtherLanguage",
+	"roomCountDetails.price",
+	"roomCountDetails.defaultCost",
+	"roomCountDetails.roomCommission",
+	"roomCountDetails.pricingRate",
+	"roomCountDetails.roomColor",
+	"roomCountDetails.count",
+	"roomCountDetails.activeRoom",
+	"roomCountDetails.offers",
+	"roomCountDetails.monthly",
+].join(" ");
+
 const isHotelDetailsSummaryRequest = (req = {}) => {
 	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
 	return ["summary", "lite", "compact"].includes(view);
+};
+
+const isHotelDetailsReservationDetailsRequest = (req = {}) => {
+	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
+	return ["reservation-details", "reservation-detail", "details-modal"].includes(
+		view
+	);
 };
 
 const includesId = (list = [], targetId) =>
@@ -1017,9 +1047,13 @@ exports.hotelDetailsById = (req, res, next, id) => {
 	}
 
 	const summaryRequest = isHotelDetailsSummaryRequest(req);
+	const reservationDetailsRequest = isHotelDetailsReservationDetailsRequest(req);
 	const query = HotelDetails.findById(id);
 	if (summaryRequest) {
 		query.select(HOTEL_DETAILS_SUMMARY_SELECT).lean();
+	}
+	if (reservationDetailsRequest) {
+		query.select(HOTEL_DETAILS_RESERVATION_DETAILS_SELECT).lean();
 	}
 
 	query.exec((err, hotelDetails) => {
@@ -1028,8 +1062,12 @@ exports.hotelDetailsById = (req, res, next, id) => {
 				error: "Hotel details were not found",
 			});
 		}
-		req.hotelDetails = summaryRequest
-			? { ...hotelDetails, isHotelDetailsSummary: true }
+		req.hotelDetails = summaryRequest || reservationDetailsRequest
+			? {
+					...hotelDetails,
+					isHotelDetailsSummary: summaryRequest,
+					isReservationDetailsHotel: reservationDetailsRequest,
+			  }
 			: hotelDetails;
 		next();
 	});
