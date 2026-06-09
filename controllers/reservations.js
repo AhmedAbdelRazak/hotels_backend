@@ -2585,6 +2585,14 @@ const withNotificationAcknowledgement = (
 	{ entityType = "", entityId = "", status = "", eventDate = "" } = {}
 ) => {
 	const notificationType = String(item.notificationType || "").trim();
+	const notificationDate =
+		item.notificationDate ||
+		eventDate ||
+		item.updatedAt ||
+		item.booked_at ||
+		item.createdAt ||
+		item.checkin_date ||
+		"";
 	const ackKey = buildNotificationAckKey({
 		notificationType,
 		entityType,
@@ -2594,6 +2602,7 @@ const withNotificationAcknowledgement = (
 	});
 	return {
 		...item,
+		notificationDate,
 		ackable: !!ackKey,
 		ackKey,
 	};
@@ -2603,6 +2612,33 @@ const filterAcknowledgedNotifications = (
 	items = [],
 	acknowledgedKeys = new Set()
 ) => items.filter((item) => !item.ackKey || !acknowledgedKeys.has(item.ackKey));
+
+const notificationEventDate = (item = {}) =>
+	item.notificationDate ||
+	item.eventDate ||
+	item.lastAt ||
+	item.updatedAt ||
+	item.booked_at ||
+	item.createdAt ||
+	item.taskDate ||
+	item.checkin_date ||
+	"";
+
+const notificationEventTime = (item = {}) => {
+	const value = notificationEventDate(item);
+	const date = value ? new Date(value) : null;
+	return date && !Number.isNaN(date.getTime()) ? date.getTime() : 0;
+};
+
+const sortNotificationsNewestFirst = (items = []) =>
+	(Array.isArray(items) ? [...items] : []).sort((a, b) => {
+		const timeDiff = notificationEventTime(b) - notificationEventTime(a);
+		if (timeDiff) return timeDiff;
+		return String(b?._id || "").localeCompare(String(a?._id || ""));
+	});
+
+const limitNotificationsNewestFirst = (items = [], limit = 8) =>
+	sortNotificationsNewestFirst(items).slice(0, limit);
 
 const sanitizeHotelManagementNotificationReason = (value = "", actor = {}) => {
 	const text = String(value || "").trim();
@@ -2785,6 +2821,7 @@ const getAgentAccountNotificationFeed = async ({
 					? "Staff application"
 					: "Agent account",
 				booking_source: hotel.hotelName || "Hotel",
+				notificationDate: eventDate,
 				booked_at: eventDate,
 				checkin_date: eventDate,
 				total_amount: 0,
@@ -2819,7 +2856,7 @@ const getAgentAccountNotificationFeed = async ({
 
 	return {
 		total: filteredNotifications.length,
-		data: filteredNotifications.slice(0, limit),
+		data: limitNotificationsNewestFirst(filteredNotifications, limit),
 	};
 };
 
@@ -2989,6 +3026,7 @@ const getAgentWalletClaimNotificationFeed = async ({
 			guestName: agentName,
 			booking_source: transaction.reference || hotel.hotelName || "Wallet",
 			confirmation_number: "Wallet claim",
+			notificationDate: eventDate,
 			booked_at: eventDate,
 			checkin_date: transaction.transactionDate || eventDate,
 			checkout_date: "",
@@ -3022,7 +3060,7 @@ const getAgentWalletClaimNotificationFeed = async ({
 
 	return {
 		total: isAgent ? filteredNotifications.length : total,
-		data: filteredNotifications.slice(0, limit),
+		data: limitNotificationsNewestFirst(filteredNotifications, limit),
 	};
 };
 
@@ -8805,33 +8843,42 @@ const getOtaPlatformReviewNotificationFeed = async ({
 			.exec(),
 		Reservations.countDocuments(query),
 	]);
+	const notifications = rows.map((reservation) => {
+		const hotel = reservation.hotelId || {};
+		const notificationDate =
+			reservation.otaPlatformReview?.updatedAt ||
+			reservation.otaPlatformReview?.createdAt ||
+			reservation.updatedAt ||
+			reservation.booked_at ||
+			reservation.createdAt;
+		return {
+			_id: reservation._id,
+			reservationId: reservation._id,
+			notificationType: "ota_platform_review",
+			hotelId: normalizeId(hotel._id || reservation.hotelId),
+			hotelName: hotel.hotelName || "",
+			hotelOwnerId: normalizeId(hotel.belongsTo || reservation.belongsTo),
+			confirmation_number: reservation.confirmation_number,
+			guestName: reservation.customer_details?.name || "",
+			guestPhone: reservation.customer_details?.phone || "",
+			booking_source: reservation.booking_source || "",
+			notificationDate,
+			booked_at: reservation.booked_at || reservation.createdAt,
+			checkin_date: reservation.checkin_date,
+			checkout_date: reservation.checkout_date,
+			reservation_status:
+				reservation.reservation_status || reservation.state || "",
+			total_amount: reservation.total_amount || 0,
+			hotel_visible_amount:
+				otaHotelVisibleAmountForNotification(reservation),
+			pendingReasons: ["ota_platform_review"],
+			ackable: false,
+		};
+	});
+
 	return {
 		total,
-		data: rows.map((reservation) => {
-			const hotel = reservation.hotelId || {};
-			return {
-				_id: reservation._id,
-				reservationId: reservation._id,
-				notificationType: "ota_platform_review",
-				hotelId: normalizeId(hotel._id || reservation.hotelId),
-				hotelName: hotel.hotelName || "",
-				hotelOwnerId: normalizeId(hotel.belongsTo || reservation.belongsTo),
-				confirmation_number: reservation.confirmation_number,
-				guestName: reservation.customer_details?.name || "",
-				guestPhone: reservation.customer_details?.phone || "",
-				booking_source: reservation.booking_source || "",
-				booked_at: reservation.booked_at || reservation.createdAt,
-				checkin_date: reservation.checkin_date,
-				checkout_date: reservation.checkout_date,
-				reservation_status:
-					reservation.reservation_status || reservation.state || "",
-				total_amount: reservation.total_amount || 0,
-				hotel_visible_amount:
-					otaHotelVisibleAmountForNotification(reservation),
-				pendingReasons: ["ota_platform_review"],
-				ackable: false,
-			};
-		}),
+		data: limitNotificationsNewestFirst(notifications, limit),
 	};
 };
 
@@ -9075,6 +9122,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							reservation,
 							actor
 						),
+						notificationDate: eventDate,
 						booked_at: reservation.booked_at || reservation.createdAt,
 						checkin_date: reservation.checkin_date,
 						checkout_date: reservation.checkout_date,
@@ -9123,14 +9171,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			const visibleReservationNotifications = filterAcknowledgedNotifications(
 				reservationNotifications,
 				acknowledgedKeys
-			).slice(0, limit);
-
-			return sendCached({
-				total:
-					Number(agentAccountFeed.total || 0) +
-					visibleReservationNotifications.length +
-					Number(walletClaimFeed.total || 0),
-				data: [
+			);
+			const mergedNotifications = limitNotificationsNewestFirst(
+				[
 					...(Array.isArray(agentAccountFeed.data)
 						? agentAccountFeed.data
 						: []),
@@ -9138,7 +9181,16 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						? walletClaimFeed.data
 						: []),
 					...visibleReservationNotifications,
-				].slice(0, limit),
+				],
+				limit
+			);
+
+			return sendCached({
+				total:
+					Number(agentAccountFeed.total || 0) +
+					visibleReservationNotifications.length +
+					Number(walletClaimFeed.total || 0),
+				data: mergedNotifications,
 			});
 		}
 		if (!canUsePendingConfirmationWorkflow(actor)) {
@@ -9192,14 +9244,15 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			)
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
+		const notificationQueryLimit = Math.min(Math.max(limit * 4, limit), 50);
 		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
 			await Promise.all([
 			Reservations.find(query)
 				.select(
-					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
+					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
 				)
-				.sort({ booked_at: 1, createdAt: 1 })
-				.limit(limit)
+				.sort({ updatedAt: -1, booked_at: -1, createdAt: -1 })
+				.limit(notificationQueryLimit)
 				.lean()
 				.exec(),
 			Reservations.countDocuments(query),
@@ -9235,6 +9288,14 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				reservation.pendingConfirmation ||
 				{};
 			const financialCycle = reservation.financial_cycle || {};
+			const notificationDate =
+				decision.decidedAt ||
+				decision.lastUpdatedAt ||
+				financialCycle.totalReviewedAt ||
+				financialCycle.lastUpdatedAt ||
+				reservation.updatedAt ||
+				reservation.booked_at ||
+				reservation.createdAt;
 			return {
 				_id: reservation._id,
 				notificationType: getReservationNotificationTypeForActor(
@@ -9248,6 +9309,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				guestName: reservation.customer_details?.name || "",
 				guestPhone: reservation.customer_details?.phone || "",
 				booking_source: notificationBookingSourceForViewer(reservation, actor),
+				notificationDate,
 				booked_at: reservation.booked_at || reservation.createdAt,
 				checkin_date: reservation.checkin_date,
 				checkout_date: reservation.checkout_date,
@@ -9268,14 +9330,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					),
 			};
 		});
-
-		return sendCached({
-			total:
-				total +
-				Number(agentAccountFeed.total || 0) +
-				Number(walletClaimFeed.total || 0) +
-				Number(otaReviewFeed.total || 0),
-			data: [
+		const mergedNotifications = limitNotificationsNewestFirst(
+			[
 				...(Array.isArray(otaReviewFeed.data) ? otaReviewFeed.data : []),
 				...(Array.isArray(walletClaimFeed.data)
 					? walletClaimFeed.data
@@ -9284,7 +9340,17 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 					? agentAccountFeed.data
 					: []),
 				...reservationNotifications,
-			].slice(0, limit),
+			],
+			limit
+		);
+
+		return sendCached({
+			total:
+				total +
+				Number(agentAccountFeed.total || 0) +
+				Number(walletClaimFeed.total || 0) +
+				Number(otaReviewFeed.total || 0),
+			data: mergedNotifications,
 		});
 	} catch (error) {
 		console.error("Error fetching pending confirmation notifications:", error);

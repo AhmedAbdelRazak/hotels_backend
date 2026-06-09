@@ -1101,7 +1101,13 @@ exports.listOfTasksForEmployee = async (req, res) => {
 		toDate = "",
 		status = "",
 		includeFinished = "true",
+		limit = "",
 	} = req.query || {};
+	const requestedLimit = parseInt(limit, 10);
+	const resultLimit =
+		Number.isFinite(requestedLimit) && requestedLimit > 0
+			? Math.min(requestedLimit, 50)
+			: 0;
 	const match = {
 		assignedTo: userId,
 	};
@@ -1131,9 +1137,14 @@ exports.listOfTasksForEmployee = async (req, res) => {
 			});
 		}
 
-		const tasks = await populateTask(HouseKeeping.find(match))
-			.sort({ taskDate: -1, createdAt: -1 })
-			.lean();
+		let query = populateTask(HouseKeeping.find(match)).sort({
+			taskDate: -1,
+			createdAt: -1,
+		});
+		if (resultLimit) {
+			query = query.limit(resultLimit);
+		}
+		const tasks = await query.lean();
 		const housedRoomIds = await getCurrentlyHousedRoomIds(hotelId);
 
 		res.json(
