@@ -52,14 +52,32 @@ const getAgentPricingRows = (room = {}, agentId = "") => {
 	return agentPricingRows(room).filter((row) => normalizeId(row.agentId) === target);
 };
 
-const getAgentPricingForDate = (room = {}, agentId = "", date = "") => {
+const getAgentPricingForDate = (
+	room = {},
+	agentId = "",
+	date = "",
+	priceVariantSelection = {}
+) => {
 	const targetDate = dateOnlyKey(date);
 	if (!targetDate) return null;
-	return (
-		getAgentPricingRows(room, agentId).find(
-			(row) => dateOnlyKey(row.calendarDate) === targetDate
-		) || null
+	const rows = getAgentPricingRows(room, agentId).filter(
+		(row) => dateOnlyKey(row.calendarDate) === targetDate
 	);
+	const priceVariantDataId = normalizeId(priceVariantSelection.priceVariantDataId);
+	const priceVariantItemId = normalizeId(priceVariantSelection.priceVariantItemId);
+	if (priceVariantDataId || priceVariantItemId) {
+		return (
+			rows.find((row) => {
+				const rowDataId = normalizeId(row.priceVariantDataId);
+				const rowItemId = normalizeId(row.priceVariantItemId);
+				return (
+					(!priceVariantDataId || rowDataId === priceVariantDataId) &&
+					(!priceVariantItemId || rowItemId === priceVariantItemId)
+				);
+			}) || null
+		);
+	}
+	return rows[0] || null;
 };
 
 const canUseAgentOverrides = (actor = {}, hotel = {}, agentId = "") => {

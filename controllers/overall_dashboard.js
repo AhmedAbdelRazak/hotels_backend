@@ -5458,7 +5458,10 @@ exports.saveOverallRoomManagerRoom = async (req, res) => {
 		if (!context) return;
 		const action = String(req.body?.action || "add").toLowerCase();
 		const hotelIds = requestedRoomHotelIds(req.body, action);
-		if (!hotelIds.length || hotelIds.some((hotelId) => !ObjectId.isValid(hotelId))) {
+		if (
+			(!variantAssignmentMode && !hotelIds.length) ||
+			hotelIds.some((hotelId) => !ObjectId.isValid(hotelId))
+		) {
 			return res.status(400).json({ error: "Valid hotel selection is required" });
 		}
 		const allowedHotelIds = new Set(context.hotels.map((hotel) => normalizeId(hotel._id)));
@@ -5718,18 +5721,21 @@ const buildCalendarAgentQuery = (hotelIds = [], agentIds = []) => {
 	};
 };
 
+const calendarAgentHotelIds = (agent = {}) =>
+	uniqueValidIds([
+		agent.hotelIdWork,
+		...(Array.isArray(agent.hotelIdsWork) ? agent.hotelIdsWork : []),
+		...(Array.isArray(agent.hotelsToSupport) ? agent.hotelsToSupport : []),
+		...(Array.isArray(agent.hotelIdsOwner) ? agent.hotelIdsOwner : []),
+	]);
+
 const serializeCalendarAgent = (agent = {}) => ({
 	_id: normalizeId(agent._id),
 	name: agent.name || agent.email || "Agent",
 	email: agent.email || "",
 	companyName: agent.companyName || agent.companyOfficialName || "",
 	agentCommercialModel: agent.agentCommercialModel || "",
-	hotelIds: uniqueValidIds([
-		agent.hotelIdWork,
-		...(Array.isArray(agent.hotelIdsWork) ? agent.hotelIdsWork : []),
-		...(Array.isArray(agent.hotelsToSupport) ? agent.hotelsToSupport : []),
-		...(Array.isArray(agent.hotelIdsOwner) ? agent.hotelIdsOwner : []),
-	]),
+	hotelIds: calendarAgentHotelIds(agent),
 });
 
 const requestedCalendarHotelIds = (body = {}) =>
@@ -7112,6 +7118,7 @@ const mergePriceVariantItemAssignments = ({
 	existingAssignments = [],
 	agentDocs = [],
 	hotelIds = [],
+	agentHotelIdsById = new Map(),
 	actor = {},
 }) => {
 	const byAgentId = new Map(
@@ -7131,12 +7138,17 @@ const mergePriceVariantItemAssignments = ({
 	agentDocs.forEach((agent) => {
 		const agentId = normalizeId(agent._id);
 		if (!agentId || !ObjectId.isValid(agentId)) return;
+		const scopedHotelIds =
+			agentHotelIdsById instanceof Map && agentHotelIdsById.has(agentId)
+				? agentHotelIdsById.get(agentId)
+				: hotelIds;
+		if (!uniqueValidIds(scopedHotelIds).length) return;
 		byAgentId.set(agentId, {
 			agentId: ObjectId(agentId),
 			agentName: agent.name || agent.email || "",
 			agentEmail: agent.email || "",
 			companyName: agent.companyName || agent.companyOfficialName || "",
-			hotelIds: uniqueValidIds(hotelIds).map((hotelId) => ObjectId(hotelId)),
+			hotelIds: uniqueValidIds(scopedHotelIds).map((hotelId) => ObjectId(hotelId)),
 			assignedAt: new Date(),
 			assignedBy: actor?._id || null,
 		});
@@ -7148,6 +7160,7 @@ const recordPriceVariantAssignments = async ({
 	selection = null,
 	agentDocs = [],
 	hotelIds = [],
+	agentHotelIdsById = new Map(),
 	actor = {},
 }) => {
 	if (!selection || !agentDocs.length) return null;
@@ -7159,6 +7172,7 @@ const recordPriceVariantAssignments = async ({
 		existingAssignments: item.assignedAgents,
 		agentDocs,
 		hotelIds,
+		agentHotelIdsById,
 		actor,
 	});
 	doc.markModified("pricingItems");
@@ -7179,22 +7193,33 @@ const recordPriceVariantAssignments = async ({
 				},
 			}
 		).exec();
-		await User.updateMany(
-			{ _id: { $in: agentIds.map((id) => ObjectId(id)) } },
-			{
-				$push: {
-					priceVariantAssignments: {
-						priceVariantDataId,
-						priceVariantItemId,
-						pricingName: selection.item?.name || "",
-						pricingNameOtherLanguage: selection.item?.nameOtherLanguage || "",
-						hotelIds: uniqueValidIds(hotelIds).map((hotelId) => ObjectId(hotelId)),
-						assignedAt: new Date(),
-						assignedBy: actor?._id || null,
-					},
-				},
-			}
-		).exec();
+		await Promise.all(
+			agentIds.map((agentId) => {
+				const scopedHotelIds =
+					agentHotelIdsById instanceof Map && agentHotelIdsById.has(agentId)
+						? agentHotelIdsById.get(agentId)
+						: hotelIds;
+				const validScopedHotelIds = uniqueValidIds(scopedHotelIds);
+				if (!validScopedHotelIds.length) return null;
+				return User.updateOne(
+					{ _id: ObjectId(agentId) },
+					{
+						$push: {
+							priceVariantAssignments: {
+								priceVariantDataId,
+								priceVariantItemId,
+								pricingName: selection.item?.name || "",
+								pricingNameOtherLanguage:
+									selection.item?.nameOtherLanguage || "",
+								hotelIds: validScopedHotelIds.map((hotelId) => ObjectId(hotelId)),
+								assignedAt: new Date(),
+								assignedBy: actor?._id || null,
+							},
+						},
+					}
+				).exec();
+			})
+		);
 	}
 	return doc;
 };
@@ -7221,18 +7246,24 @@ const saveAgentPriceVariantAssignments = async ({
 			error: "Please assign 100 price variants or fewer at once",
 		};
 	}
-	const selectedHotelIds = uniqueValidIds(hotelIds);
-	const selectedHotelSet = new Set(selectedHotelIds);
 	const allowedHotelIds = new Set(
 		(context?.hotels || []).map((hotel) => normalizeId(hotel._id))
 	);
+	const requestedHotelIds = uniqueValidIds(hotelIds).filter((hotelId) =>
+		allowedHotelIds.has(hotelId)
+	);
+	const requestedHotelSet = new Set(requestedHotelIds);
+	const candidateHotelIds = requestedHotelIds.length
+		? requestedHotelIds
+		: [...allowedHotelIds];
+	const targetHotelIds = new Set();
 	const dataIds = uniqueValidIds(
 		requestedSelections.map((selection) => selection.priceVariantDataId)
 	);
 	const docs = await PriceVariant.find({
 		_id: { $in: dataIds.map((id) => ObjectId(id)) },
 		active: { $ne: false },
-		hotelIds: { $in: selectedHotelIds.map((id) => ObjectId(id)) },
+		hotelIds: { $in: candidateHotelIds.map((id) => ObjectId(id)) },
 	}).exec();
 	const docsById = new Map(docs.map((doc) => [normalizeId(doc._id), doc]));
 	const hotelMap = new Map(
@@ -7267,17 +7298,42 @@ const saveAgentPriceVariantAssignments = async ({
 			};
 		}
 		const docHotelIds = uniqueValidIds(doc.hotelIds);
-		const scopedHotelIds = selectedHotelIds.filter(
-			(hotelId) =>
-				selectedHotelSet.has(hotelId) &&
-				allowedHotelIds.has(hotelId) &&
-				docHotelIds.includes(hotelId)
+		const variantHotelIds = candidateHotelIds.filter(
+			(hotelId) => allowedHotelIds.has(hotelId) && docHotelIds.includes(hotelId)
 		);
-		if (!scopedHotelIds.length) {
+		if (!variantHotelIds.length) {
 			return {
 				ok: false,
 				status: 400,
 				error: `${item.name || "Selected price variant"} does not match the selected hotels`,
+			};
+		}
+		const agentsByHotelId = new Map();
+		const agentHotelIdsById = new Map();
+		agentDocs.forEach((agent) => {
+			const agentId = normalizeId(agent._id);
+			if (!agentId) return;
+			const agentScopedHotelIds = calendarAgentHotelIds(agent).filter(
+				(hotelId) =>
+					allowedHotelIds.has(hotelId) &&
+					docHotelIds.includes(hotelId) &&
+					(!requestedHotelSet.size || requestedHotelSet.has(hotelId))
+			);
+			if (!agentScopedHotelIds.length) return;
+			agentHotelIdsById.set(agentId, agentScopedHotelIds);
+			agentScopedHotelIds.forEach((hotelId) => {
+				const list = agentsByHotelId.get(hotelId) || [];
+				list.push(agent);
+				agentsByHotelId.set(hotelId, list);
+				targetHotelIds.add(hotelId);
+			});
+		});
+		const scopedHotelIds = [...agentsByHotelId.keys()];
+		if (!scopedHotelIds.length) {
+			return {
+				ok: false,
+				status: 400,
+				error: `${item.name || "Selected price variant"} does not match the selected agents' assigned hotels`,
 			};
 		}
 		const selection = {
@@ -7286,12 +7342,14 @@ const saveAgentPriceVariantAssignments = async ({
 			priceVariantDataId: normalizeId(doc._id),
 			priceVariantItemId: normalizeId(item._id),
 		};
-		resolvedSelections.push({ selection, scopedHotelIds });
+		resolvedSelections.push({ selection, scopedHotelIds, agentHotelIdsById });
 
 		(Array.isArray(doc.roomPricing) ? doc.roomPricing : []).forEach(
 			(roomPricing) => {
 				const hotelId = normalizeId(roomPricing.hotelId);
 				if (!scopedHotelIds.includes(hotelId)) return;
+				const agentsForHotel = agentsByHotelId.get(hotelId) || [];
+				if (!agentsForHotel.length) return;
 				const hotel = hotelMap.get(hotelId);
 				const rooms = Array.isArray(hotel?.roomCountDetails)
 					? hotel.roomCountDetails
@@ -7333,7 +7391,7 @@ const saveAgentPriceVariantAssignments = async ({
 					if (!rowPlan.ok) return;
 					const decoratedPlan = decoratePlanWithPriceVariant(rowPlan, selection);
 					if (!decoratedPlan.ok) return;
-					agentDocs.forEach((agent) => {
+					agentsForHotel.forEach((agent) => {
 						roomRows.push(
 							buildAgentRow(decoratedPlan, room, calendarDate, agent)
 						);
@@ -7354,11 +7412,12 @@ const saveAgentPriceVariantAssignments = async ({
 		};
 	}
 
-	for (const { selection, scopedHotelIds } of resolvedSelections) {
+	for (const { selection, scopedHotelIds, agentHotelIdsById } of resolvedSelections) {
 		const savedDoc = await recordPriceVariantAssignments({
 			selection,
 			agentDocs,
 			hotelIds: scopedHotelIds,
+			agentHotelIdsById,
 			actor: context.actor,
 		});
 		if (savedDoc) savedDocsById.set(normalizeId(savedDoc._id), savedDoc);
@@ -7368,7 +7427,7 @@ const saveAgentPriceVariantAssignments = async ({
 	let updatedRows = 0;
 	for (const hotel of hotelDocs) {
 		const hotelId = normalizeId(hotel._id);
-		if (!selectedHotelSet.has(hotelId)) continue;
+		if (!targetHotelIds.has(hotelId)) continue;
 		const rooms = Array.isArray(hotel.roomCountDetails)
 			? hotel.roomCountDetails
 			: [];
@@ -7414,6 +7473,7 @@ const saveAgentPriceVariantAssignments = async ({
 		priceVariantData: [...savedDocsById.values()],
 		assignedPriceVariants: requestedSelections.length,
 		assignedAgents: agentDocs.length,
+		assignedHotels: targetHotelIds.size,
 	};
 };
 
@@ -8314,12 +8374,21 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 		}
 
 		if (variantAssignmentMode) {
-			const hotelDocs = await HotelDetails.find({ _id: { $in: hotelIds } }).exec();
-			if (hotelDocs.length !== hotelIds.length) {
+			const variantScopeHotelIds = hotelIds.length
+				? hotelIds
+				: (context.hotels || []).map((hotel) => normalizeId(hotel._id));
+			const hotelDocs = await HotelDetails.find({
+				_id: { $in: variantScopeHotelIds.map((id) => ObjectId(id)) },
+			}).exec();
+			if (hotelDocs.length !== variantScopeHotelIds.length) {
 				return res.status(404).json({ error: "One or more hotels were not found" });
 			}
-			const agentDocs = await User.find(buildCalendarAgentQuery(hotelIds, agentIds))
-				.select("_id name email companyName companyOfficialName")
+			const agentDocs = await User.find(
+				buildCalendarAgentQuery(variantScopeHotelIds, agentIds)
+			)
+				.select(
+					"_id name email companyName companyOfficialName hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner"
+				)
 				.lean()
 				.exec();
 			if (agentDocs.length !== agentIds.length) {
@@ -8352,7 +8421,7 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 					(doc) => serializePriceVariant(doc, hotelMap)
 				),
 				summary: {
-					hotels: hotelIds.length,
+					hotels: assignmentResult.assignedHotels || 0,
 					agents: agentIds.length,
 					priceVariants: assignmentResult.assignedPriceVariants || 0,
 					rows: assignmentResult.updatedRows,

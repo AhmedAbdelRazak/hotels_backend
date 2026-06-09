@@ -569,7 +569,28 @@ const buildCanonicalRoomPricing = ({
 	const firstProvidedRow = providedRows[0] || {};
 	const roomNightlyPrice = getRoomNightlyPrice(room);
 	const pricingByDay = stayDates.map((date, index) => {
-		const agentRate = getAgentPricingForDate(detail, agentOverrideId, date);
+		const providedDay =
+			findPricingDayForDate(providedRows, date) ||
+			providedRows[index] ||
+			firstProvidedRow;
+		const priceVariantSelection = {
+			priceVariantDataId:
+				providedDay.priceVariantDataId ||
+				room.priceVariantDataId ||
+				firstProvidedRow.priceVariantDataId ||
+				"",
+			priceVariantItemId:
+				providedDay.priceVariantItemId ||
+				room.priceVariantItemId ||
+				firstProvidedRow.priceVariantItemId ||
+				"",
+		};
+		const agentRate = getAgentPricingForDate(
+			detail,
+			agentOverrideId,
+			date,
+			priceVariantSelection
+		);
 		const hotelRate = rates.find((item) => item?.calendarDate === date);
 		if (requireAgentAssignedPricing && !agentOverrideId) {
 			throw new ReservationPricingError(
@@ -638,10 +659,6 @@ const buildCanonicalRoomPricing = ({
 			calendarTotalPriceWithCommission > 0
 				? calendarTotalPriceWithCommission
 				: 0;
-		const providedDay =
-			findPricingDayForDate(providedRows, date) ||
-			providedRows[index] ||
-			firstProvidedRow;
 		const trustedDay = requireAgentAssignedPricing
 			? effectiveRate || {}
 			: providedDay;
