@@ -3077,6 +3077,11 @@ exports.listForAdminAll = async (req, res) => {
 		const calculatorView = ["calculator", "reservation-calculator"].includes(
 			viewKey
 		);
+		const calculatorOptionsView = [
+			"calculator-options",
+			"calculator-lite",
+			"reservation-calculator-options",
+		].includes(viewKey);
 
 		/* 2️⃣  Base filter (status) */
 		const baseMatch = applyAdminHotelScope(req, {});
@@ -3113,7 +3118,8 @@ exports.listForAdminAll = async (req, res) => {
 		}
 
 		/* 4️⃣  Build aggregation pipeline (same join as listForAdmin) */
-		const needsOwnerLookup = !calculatorView || Boolean(search);
+		const calculatorOnlyView = calculatorView || calculatorOptionsView;
+		const needsOwnerLookup = !calculatorOnlyView || Boolean(search);
 		const pipeline = [{ $match: baseMatch }];
 		if (needsOwnerLookup) {
 			pipeline.push(
@@ -3131,8 +3137,8 @@ exports.listForAdminAll = async (req, res) => {
 
 		if (search) pipeline.push({ $match: searchMatch });
 
-		if (summaryOnly || orderTakerView || calculatorView) {
-			const compactProject = calculatorView
+		if (summaryOnly || orderTakerView || calculatorView || calculatorOptionsView) {
+			const compactProject = calculatorOnlyView
 				? {
 						_id: 1,
 						hotelName: 1,
@@ -3165,23 +3171,26 @@ exports.listForAdminAll = async (req, res) => {
 							email: "$owner.email",
 						},
 				  };
-			if (orderTakerView || calculatorView) {
-				if (!calculatorView) compactProject.commission = 1;
+			if (orderTakerView || calculatorOnlyView) {
+				if (!calculatorOnlyView) compactProject.commission = 1;
+				const roomProjection = {
+					_id: "$$room._id",
+					roomType: "$$room.roomType",
+					room_type: "$$room.room_type",
+					displayName: "$$room.displayName",
+					display_name: "$$room.display_name",
+				};
+				if (orderTakerView || calculatorView) {
+					roomProjection.price = "$$room.price";
+					roomProjection.defaultCost = "$$room.defaultCost";
+					roomProjection.roomCommission = "$$room.roomCommission";
+					roomProjection.pricingRate = "$$room.pricingRate";
+				}
 				compactProject.roomCountDetails = {
 					$map: {
 						input: { $ifNull: ["$roomCountDetails", []] },
 						as: "room",
-						in: {
-							_id: "$$room._id",
-							roomType: "$$room.roomType",
-							room_type: "$$room.room_type",
-							displayName: "$$room.displayName",
-							display_name: "$$room.display_name",
-							price: "$$room.price",
-							defaultCost: "$$room.defaultCost",
-							roomCommission: "$$room.roomCommission",
-							pricingRate: "$$room.pricingRate",
-						},
+						in: roomProjection,
 					},
 				};
 			}
