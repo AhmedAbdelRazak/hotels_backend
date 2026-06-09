@@ -21,6 +21,7 @@ const HOTEL_ROLE_BY_DESCRIPTION = {
 	finance: 6000,
 	ordertaker: 7000,
 	reservationemployee: 8000,
+	humanresource: 9000,
 };
 
 const DESCRIPTION_BY_HOTEL_ROLE = Object.entries(HOTEL_ROLE_BY_DESCRIPTION).reduce(
@@ -294,9 +295,11 @@ const normalizeHotelAccess = (roleDescriptions = [], accessTo = []) => {
 			"reports",
 			"finance",
 			"housekeeping",
+			"hotelAccounts",
 			"settings"
 		);
 	}
+	if (roleDescriptions.includes("humanresource")) merged.push("hotelAccounts");
 	if (roleDescriptions.includes("reservationemployee")) merged.push("settings");
 	if (roleDescriptions.includes("ordertaker")) {
 		merged.push("newReservation", "ownReservations");

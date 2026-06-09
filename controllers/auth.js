@@ -153,6 +153,7 @@ const PUBLIC_APPLICATION_ROLE_BY_DESCRIPTION = {
 	finance: 6000,
 	ordertaker: 7000,
 	reservationemployee: 8000,
+	humanresource: 9000,
 };
 
 const PUBLIC_JOB_ROLE_DESCRIPTIONS = new Set([
@@ -162,6 +163,7 @@ const PUBLIC_JOB_ROLE_DESCRIPTIONS = new Set([
 	"housekeeping",
 	"finance",
 	"reservationemployee",
+	"humanresource",
 ]);
 
 const normalizePublicRoleDescription = (value = "") => {
@@ -182,11 +184,13 @@ const defaultAccessForPublicRole = (roleDescription = "") => {
 			"reports",
 			"finance",
 			"housekeeping",
+			"hotelAccounts",
 			"settings",
 		];
 	}
 	if (role === "finance") return ["dashboard", "reservations", "reports", "finance"];
 	if (role === "reservationemployee") return ["reservations", "newReservation", "settings"];
+	if (role === "humanresource") return ["hotelAccounts"];
 	if (role === "housekeepingmanager") return ["dashboard", "housekeeping"];
 	if (role === "housekeeping") return ["housekeeping"];
 	if (role === "ordertaker") return ["newReservation", "ownReservations"];
@@ -1385,6 +1389,7 @@ exports.createHotelStaffUser = async (req, res) => {
 			finance: 6000,
 			ordertaker: 7000,
 			reservationemployee: 8000,
+			humanresource: 9000,
 		};
 		const descriptionByRole = Object.entries(roleByDescription).reduce(
 			(acc, [description, roleNumber]) => {
@@ -1466,13 +1471,26 @@ exports.createHotelStaffUser = async (req, res) => {
 			Number(creator.role),
 			...(Array.isArray(creator.roles) ? creator.roles.map(Number) : []),
 		];
+		const creatorCanManageHotelAccounts =
+			(creatorRoleNumbers.includes(9000) ||
+				creatorRoleDescriptions.includes("humanresource") ||
+				creatorRoleDescriptions.includes("human resource") ||
+				(Array.isArray(creator.accessTo) &&
+					creator.accessTo.includes("hotelAccounts"))) &&
+			String(creator.belongsToId || ownerId) === ownerId &&
+			(String(creator.hotelIdWork || "") === hotelId ||
+				supportIds.includes(hotelId));
 		const creatorIsAgentAccountRequester =
 			creatorRoleNumbers.includes(6000) ||
 			creatorRoleNumbers.includes(8000) ||
 			creatorRoleDescriptions.includes("finance") ||
 			creatorRoleDescriptions.includes("reservationemployee");
 
-		if (creatorIsAgentAccountRequester && !isAgentOnlyAccount) {
+		if (
+			creatorIsAgentAccountRequester &&
+			!creatorCanManageHotelAccounts &&
+			!isAgentOnlyAccount
+		) {
 			return res.status(403).json({
 				error:
 					"Finance and reservation users can create external agent accounts only.",
@@ -1498,6 +1516,15 @@ exports.createHotelStaffUser = async (req, res) => {
 				String(creator.belongsToId || currentOwnerId) === currentOwnerId &&
 				(String(creator.hotelIdWork || "") === currentHotelId ||
 					supportIds.includes(currentHotelId));
+			const creatorIsAssignedAccountManager =
+				(creatorRoleNumbers.includes(9000) ||
+					creatorRoleDescriptions.includes("humanresource") ||
+					creatorRoleDescriptions.includes("human resource") ||
+					(Array.isArray(creator.accessTo) &&
+						creator.accessTo.includes("hotelAccounts"))) &&
+				String(creator.belongsToId || currentOwnerId) === currentOwnerId &&
+				(String(creator.hotelIdWork || "") === currentHotelId ||
+					supportIds.includes(currentHotelId));
 			const adminCanSupportHotel = isPlatformSuperAdmin(creator);
 			const canCreateAgentForThisHotel =
 				isAgentOnlyAccount &&
@@ -1506,6 +1533,7 @@ exports.createHotelStaffUser = async (req, res) => {
 			return (
 				creatorOwnsHotel ||
 				creatorIsAssignedHotelManager ||
+				creatorIsAssignedAccountManager ||
 				adminCanSupportHotel ||
 				canCreateAgentForThisHotel
 			);
@@ -1545,11 +1573,15 @@ exports.createHotelStaffUser = async (req, res) => {
 							"reports",
 							"finance",
 							"housekeeping",
+							"hotelAccounts",
 							"settings",
 					  ]
 					: []),
 				...(normalizedRoleDescriptions.includes("reservationemployee")
 					? ["settings"]
+					: []),
+				...(normalizedRoleDescriptions.includes("humanresource")
+					? ["hotelAccounts"]
 					: []),
 			]),
 		];

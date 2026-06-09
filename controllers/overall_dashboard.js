@@ -59,6 +59,8 @@ const {
 
 const ObjectId = mongoose.Types.ObjectId;
 const SYSTEM_ADMIN_ROLE = 10000;
+const HUMAN_RESOURCE_ROLE = 9000;
+const HOTEL_ACCOUNTS_ACCESS_KEY = "hotelAccounts";
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const SIGNUP_INVITATION_PURPOSE = "public-signup-invitation";
 const SIGNUP_INVITATION_DAYS = 30;
@@ -148,6 +150,7 @@ const publicSignupRoleOptions = new Set([
 	"reception",
 	"reservationemployee",
 	"finance",
+	"humanresource",
 	"housekeeping",
 	"housekeepingmanager",
 	"hotelmanager",
@@ -237,6 +240,19 @@ const isOrderTakingScope = (user = {}) => {
 		accessTo.includes("ownReservations")
 	);
 };
+
+const hasHotelAccountsAccess = (user = {}) =>
+	Array.isArray(user.accessTo) &&
+	user.accessTo.includes(HOTEL_ACCOUNTS_ACCESS_KEY);
+
+const canManageOverallAccounts = (user = {}) =>
+	isOwnerLike(user) ||
+	hasRole(user, 2000) ||
+	hasRole(user, HUMAN_RESOURCE_ROLE) ||
+	hasRoleDescription(user, "hotelmanager") ||
+	hasRoleDescription(user, "humanresource") ||
+	hasRoleDescription(user, "human resource") ||
+	hasHotelAccountsAccess(user);
 
 const includesId = (list = [], targetId = "") =>
 	Array.isArray(list) &&
@@ -657,6 +673,10 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 			hasAnyRole([2000, 8000]) ||
 			hasAnyDescription(["hotelmanager", "reservationemployee"])
 		);
+	}
+
+	if (section === "accounts") {
+		return canManageOverallAccounts(actor);
 	}
 
 	return true;
@@ -4503,6 +4523,7 @@ const accountRoleFilter = (role = "") => {
 		finance: 6000,
 		ordertaker: 7000,
 		reservationemployee: 8000,
+		humanresource: HUMAN_RESOURCE_ROLE,
 	};
 	if (roleMap[normalized]) {
 		return {
@@ -4600,7 +4621,7 @@ exports.overallAccounts = async (req, res) => {
 	try {
 		const context = await requireOverallSection(req, res, "accounts");
 		if (!context) return;
-		if (!isOwnerLike(context.actor) && !hasRoleDescription(context.actor, "hotelmanager")) {
+		if (!canManageOverallAccounts(context.actor)) {
 			return res.status(403).json({ error: "You cannot view overall accounts" });
 		}
 
@@ -4693,7 +4714,7 @@ exports.createSignupInvitation = async (req, res) => {
 	try {
 		const context = await requireOverallSection(req, res, "accounts");
 		if (!context) return;
-		if (!isOwnerLike(context.actor) && !hasRoleDescription(context.actor, "hotelmanager")) {
+		if (!canManageOverallAccounts(context.actor)) {
 			return res.status(403).json({ error: "You cannot create signup invitations" });
 		}
 
@@ -4949,7 +4970,7 @@ exports.createOverallSystemAdmin = async (req, res) => {
 								.filter(Boolean)
 						),
 				  ]
-				: ["overall"],
+				: ["overall", HOTEL_ACCOUNTS_ACCESS_KEY],
 			acceptedTermsAndConditions: true,
 		});
 

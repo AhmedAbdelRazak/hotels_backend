@@ -118,7 +118,7 @@ const cleanPhoneNumber = (rawPhone) => {
 	return cleaned;
 };
 
-const HOTEL_STAFF_ROLES = [2000, 3000, 4000, 5000, 6000, 7000, 8000, 10000];
+const HOTEL_STAFF_ROLES = [2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000];
 const ROLE_BY_DESCRIPTION = {
 	systemadmin: 10000,
 	hotelmanager: 2000,
@@ -128,6 +128,7 @@ const ROLE_BY_DESCRIPTION = {
 	finance: 6000,
 	ordertaker: 7000,
 	reservationemployee: 8000,
+	humanresource: 9000,
 };
 
 const USER_AUTH_SELECT =
@@ -366,6 +367,15 @@ const canManageHotelStaff = async (creator, hotelId) => {
 		(String(creator.hotelIdWork || "") === normalizedHotelId ||
 			supportIds.includes(normalizedHotelId));
 	const adminCanSupportHotel = creatorIsPlatformSuperAdmin;
+	const creatorIsAssignedAccountManager =
+		(roleNumbers.includes(9000) ||
+			roleDescriptions.includes("humanresource") ||
+			roleDescriptions.includes("human resource") ||
+			(Array.isArray(creator.accessTo) &&
+				creator.accessTo.includes("hotelAccounts"))) &&
+		String(creator.belongsToId || ownerId) === ownerId &&
+		(String(creator.hotelIdWork || "") === normalizedHotelId ||
+			supportIds.includes(normalizedHotelId));
 	const creatorIsAgentAccountManager =
 		(roleNumbers.includes(6000) ||
 			roleNumbers.includes(8000) ||
@@ -380,6 +390,7 @@ const canManageHotelStaff = async (creator, hotelId) => {
 			creatorOwnsHotel ||
 			creatorIsAssignedHotelManager ||
 			adminCanSupportHotel ||
+			creatorIsAssignedAccountManager ||
 			creatorIsAgentAccountManager,
 		error: "You cannot manage users for this hotel",
 		hotel,
@@ -388,7 +399,12 @@ const canManageHotelStaff = async (creator, hotelId) => {
 		creatorOwnsHotel,
 		creatorIsAssignedHotelManager,
 		adminCanSupportHotel,
-		agentOnlyManager: creatorIsAgentAccountManager,
+		agentOnlyManager:
+			creatorIsAgentAccountManager &&
+			!creatorIsAssignedAccountManager &&
+			!creatorOwnsHotel &&
+			!creatorIsAssignedHotelManager &&
+			!adminCanSupportHotel,
 	};
 };
 
@@ -1432,6 +1448,14 @@ exports.updateHotelStaffUser = async (req, res) => {
 				]),
 			];
 		}
+		if (staffRoleDescriptions.includes("humanresource")) {
+			staffUser.accessTo = [
+				...new Set([
+					...(Array.isArray(staffUser.accessTo) ? staffUser.accessTo : []),
+					"hotelAccounts",
+				]),
+			];
+		}
 		const staffIsSystemAdmin = staffRoleDescriptions.includes("systemadmin");
 		if (staffIsSystemAdmin) {
 			staffUser.accessTo = [
@@ -1444,6 +1468,7 @@ exports.updateHotelStaffUser = async (req, res) => {
 					"reports",
 					"finance",
 					"housekeeping",
+					"hotelAccounts",
 					"settings",
 				]),
 			];
