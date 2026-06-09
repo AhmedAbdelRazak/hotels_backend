@@ -172,7 +172,9 @@ const adminRootOnlyPricingEnabled = (reservation = {}) =>
 
 const shouldApplyRootOnlyPricing = (reservation = {}, viewer = {}) =>
 	adminRootOnlyPricingEnabled(reservation) &&
-	(!hasViewerIdentity(viewer) || !canViewAdminPricing(viewer));
+	(shouldMaskHotelManagementReservationSource(viewer) ||
+		!hasViewerIdentity(viewer) ||
+		!canViewAdminPricing(viewer));
 
 const OTA_EMAIL_AUDIT_SUPPLIER_FIELDS = [
 	"otaCreatedFromEmail",
@@ -533,8 +535,13 @@ const sanitizeReservationAuditLogsForViewer = (
 	if (!reservation) return reservation;
 	if (isSuperAdminViewer(viewer)) {
 		if (!shouldMaskHotelManagementReservationSource(viewer)) return reservation;
+		const plain = toPlain(reservation);
+		const hotelManagementReservation =
+			!options.preservePricing && shouldApplyRootOnlyPricing(plain, viewer)
+				? sanitizeReservationPricingForHotelViewer(plain)
+				: plain;
 		return sanitizeHotelManagementInternalWorkflowText(
-			maskReservationSourceForHotelManagement(reservation)
+			maskReservationSourceForHotelManagement(hotelManagementReservation)
 		);
 	}
 

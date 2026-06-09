@@ -182,6 +182,99 @@ const PAID_BREAKDOWN_QUERY_KEYS = PAID_BREAKDOWN_TOTAL_KEYS.map(
 	(key) => `paid_amount_breakdown.${key}`,
 );
 
+const paidBreakdownTotalExpression = () => ({
+	$add: PAID_BREAKDOWN_TOTAL_KEYS.map((key) => ({
+		$ifNull: [`$paid_amount_breakdown.${key}`, 0],
+	})),
+});
+
+const hotelVisiblePaidAmountExpression = () => ({
+	$let: {
+		vars: {
+			breakdownTotal: paidBreakdownTotalExpression(),
+			paidAmount: numberExpression("$paid_amount"),
+			visibleTotal: hotelVisibleAmountExpression(),
+		},
+		in: {
+			$let: {
+				vars: {
+					rawPaid: {
+						$cond: [
+							{ $gt: ["$$breakdownTotal", 0] },
+							"$$breakdownTotal",
+							"$$paidAmount",
+						],
+					},
+				},
+				in: {
+					$cond: [
+						{
+							$eq: [
+								"$adminPricingVisibility.rootOnlyForHotelManagement",
+								true,
+							],
+						},
+						{
+							$cond: [
+								{ $gt: ["$$visibleTotal", 0] },
+								{ $min: ["$$rawPaid", "$$visibleTotal"] },
+								0,
+							],
+						},
+						"$$rawPaid",
+					],
+				},
+			},
+		},
+	},
+});
+
+const hotelVisiblePaidBreakdownKeyExpression = (key) => ({
+	$let: {
+		vars: {
+			keyAmount: numberExpression(`$paid_amount_breakdown.${key}`),
+			breakdownTotal: paidBreakdownTotalExpression(),
+			visibleTotal: hotelVisibleAmountExpression(),
+		},
+		in: {
+			$cond: [
+				{
+					$eq: [
+						"$adminPricingVisibility.rootOnlyForHotelManagement",
+						true,
+					],
+				},
+				{
+					$cond: [
+						{
+							$gt: ["$$visibleTotal", 0],
+						},
+						{
+							$cond: [
+								{
+									$and: [
+										{ $gt: ["$$keyAmount", 0] },
+										{ $gt: ["$$breakdownTotal", "$$visibleTotal"] },
+									],
+								},
+								{
+									$multiply: [
+										"$$keyAmount",
+										{ $divide: ["$$visibleTotal", "$$breakdownTotal"] },
+									],
+								},
+								"$$keyAmount",
+							],
+						},
+						0,
+					],
+				},
+				"$$keyAmount",
+			],
+		},
+	},
+});
+
 const escapeRegex = (value) =>
 	String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -4505,13 +4598,13 @@ const buildPaidBreakdownScorecards = async (
 	filter,
 	{ hotelVisible = false } = {}
 ) => {
-	const breakdownSum = {
-		$add: PAID_BREAKDOWN_TOTAL_KEYS.map((key) => ({
-			$ifNull: [`$paid_amount_breakdown.${key}`, 0],
-		})),
-	};
+	const breakdownSum = paidBreakdownTotalExpression();
 	const breakdownTotalsGroup = PAID_BREAKDOWN_TOTAL_KEYS.reduce((acc, key) => {
-		acc[key] = { $sum: { $ifNull: [`$paid_amount_breakdown.${key}`, 0] } };
+		acc[key] = {
+			$sum: hotelVisible
+				? hotelVisiblePaidBreakdownKeyExpression(key)
+				: { $ifNull: [`$paid_amount_breakdown.${key}`, 0] },
+		};
 		return acc;
 	}, {});
 	const result = await Reservations.aggregate([
@@ -4519,6 +4612,9 @@ const buildPaidBreakdownScorecards = async (
 		{
 			$addFields: {
 				paid_breakdown_total: breakdownSum,
+				paid_amount_safe: hotelVisible
+					? hotelVisiblePaidAmountExpression()
+					: breakdownSum,
 				total_amount_safe: hotelVisible
 					? hotelVisibleAmountExpression()
 					: { $ifNull: ["$total_amount", 0] },
@@ -4528,7 +4624,7 @@ const buildPaidBreakdownScorecards = async (
 			$group: {
 				_id: null,
 				totalAmount: { $sum: "$total_amount_safe" },
-				paidAmount: { $sum: "$paid_breakdown_total" },
+				paidAmount: { $sum: "$paid_amount_safe" },
 				...breakdownTotalsGroup,
 			},
 		},

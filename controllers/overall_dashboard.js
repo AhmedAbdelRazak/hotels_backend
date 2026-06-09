@@ -1100,7 +1100,9 @@ const reservationComputedFieldsStage = () => ({
 	$addFields: {
 		bookingSortDate: { $ifNull: ["$booked_at", "$createdAt"] },
 		hotelVisibleTotalAmount: hotelVisibleReservationAmountExpression(),
+		hotelVisiblePaidAmount: hotelVisiblePaidAmountExpression(),
 		total_amount: hotelVisibleReservationAmountExpression(),
+		paid_amount: hotelVisiblePaidAmountExpression(),
 	},
 });
 
@@ -1282,6 +1284,12 @@ const reservationNumberExpression = (field) => ({
 	},
 });
 
+const paidBreakdownTotalExpression = () => ({
+	$add: EXECUTIVE_PAID_BREAKDOWN_KEYS.map((key) => ({
+		$ifNull: [`$paid_amount_breakdown.${key}`, 0],
+	})),
+});
+
 const hotelVisibleReservationAmountExpression = () => ({
 	$cond: [
 		{ $eq: ["$adminPricingVisibility.rootOnlyForHotelManagement", true] },
@@ -1309,6 +1317,104 @@ const hotelVisibleReservationAmountExpression = () => ({
 		},
 		reservationNumberExpression("$total_amount"),
 	],
+});
+
+const hotelVisiblePaidAmountExpression = ({ preferBreakdown = false } = {}) => ({
+	$let: {
+		vars: {
+			breakdownTotal: paidBreakdownTotalExpression(),
+			paidAmount: reservationNumberExpression("$paid_amount"),
+			visibleTotal: hotelVisibleReservationAmountExpression(),
+			rootOnly: {
+				$eq: [
+					"$adminPricingVisibility.rootOnlyForHotelManagement",
+					true,
+				],
+			},
+		},
+		in: {
+			$let: {
+				vars: {
+					rawPaid: {
+						$cond: [
+							{
+								$and: [
+									{ $gt: ["$$breakdownTotal", 0] },
+									{
+										$or: [
+											"$$rootOnly",
+											preferBreakdown,
+										],
+									},
+								],
+							},
+							"$$breakdownTotal",
+							"$$paidAmount",
+						],
+					},
+				},
+				in: {
+					$cond: [
+						"$$rootOnly",
+						{
+							$cond: [
+								{ $gt: ["$$visibleTotal", 0] },
+								{ $min: ["$$rawPaid", "$$visibleTotal"] },
+								0,
+							],
+						},
+						"$$rawPaid",
+					],
+				},
+			},
+		},
+	},
+});
+
+const hotelVisiblePaidBreakdownKeyExpression = (key) => ({
+	$let: {
+		vars: {
+			keyAmount: reservationNumberExpression(`$paid_amount_breakdown.${key}`),
+			breakdownTotal: paidBreakdownTotalExpression(),
+			visibleTotal: hotelVisibleReservationAmountExpression(),
+		},
+		in: {
+			$cond: [
+				{
+					$eq: [
+						"$adminPricingVisibility.rootOnlyForHotelManagement",
+						true,
+					],
+				},
+				{
+					$cond: [
+						{
+							$gt: ["$$visibleTotal", 0],
+						},
+						{
+							$cond: [
+								{
+									$and: [
+										{ $gt: ["$$keyAmount", 0] },
+										{ $gt: ["$$breakdownTotal", "$$visibleTotal"] },
+									],
+								},
+								{
+									$multiply: [
+										"$$keyAmount",
+										{ $divide: ["$$visibleTotal", "$$breakdownTotal"] },
+									],
+								},
+								"$$keyAmount",
+							],
+						},
+						0,
+					],
+				},
+				"$$keyAmount",
+			],
+		},
+	},
 });
 
 const hotelVisibleReservationAmount = (reservation = {}) => {
@@ -1594,11 +1700,7 @@ const moneyNumber = (value) => {
 	return Number.isFinite(parsed) ? parsed : 0;
 };
 
-const executivePaidBreakdownTotalExpression = () => ({
-	$add: EXECUTIVE_PAID_BREAKDOWN_KEYS.map((key) => ({
-		$ifNull: [`$paid_amount_breakdown.${key}`, 0],
-	})),
-});
+const executivePaidBreakdownTotalExpression = () => paidBreakdownTotalExpression();
 
 const executiveStoredCommissionExpression = () => ({
 	$cond: [
@@ -1644,13 +1746,7 @@ const executiveGroupTotals = () => ({
 	roomNights: { $sum: executiveRoomNightsExpression() },
 	commission: { $sum: executiveStoredCommissionExpression() },
 	paidAmount: {
-		$sum: {
-			$cond: [
-				{ $gt: ["$paidBreakdownTotal", 0] },
-				"$paidBreakdownTotal",
-				{ $ifNull: ["$paid_amount", 0] },
-			],
-		},
+		$sum: hotelVisiblePaidAmountExpression({ preferBreakdown: true }),
 	},
 	capturedCount: {
 		$sum: { $cond: [{ $gt: ["$paidBreakdownTotal", 0] }, 1, 0] },
@@ -3918,7 +4014,7 @@ exports.overallExecutivePaidReport = async (req, res) => {
 		const breakdownTotalsProjection = EXECUTIVE_PAID_BREAKDOWN_KEYS.reduce(
 			(acc, key) => ({
 				...acc,
-				[key]: { $sum: { $ifNull: [`$paid_amount_breakdown.${key}`, 0] } },
+				[key]: { $sum: hotelVisiblePaidBreakdownKeyExpression(key) },
 			}),
 			{}
 		);
@@ -3946,13 +4042,9 @@ exports.overallExecutivePaidReport = async (req, res) => {
 							reservationsCount: { $sum: 1 },
 							totalAmount: { $sum: hotelVisibleReservationAmountExpression() },
 							paidAmount: {
-								$sum: {
-									$cond: [
-										{ $gt: ["$paidBreakdownTotal", 0] },
-										"$paidBreakdownTotal",
-										{ $ifNull: ["$paid_amount", 0] },
-									],
-								},
+								$sum: hotelVisiblePaidAmountExpression({
+									preferBreakdown: true,
+								}),
 							},
 							commission: { $sum: executiveStoredCommissionExpression() },
 							...breakdownTotalsProjection,
