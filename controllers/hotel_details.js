@@ -3068,10 +3068,12 @@ exports.listForAdmin = async (req, res) => {
 exports.listForAdminAll = async (req, res) => {
 	try {
 		/* 1️⃣  Parse & sanitise query params (optional filters) */
-		let { status, q = "", summary = "" } = req.query;
+		let { status, q = "", summary = "", view = "", payload = "" } = req.query;
 		const summaryOnly = ["1", "true", "yes", "summary"].includes(
 			String(summary || "").toLowerCase()
 		);
+		const viewKey = String(view || payload || "").toLowerCase();
+		const orderTakerView = ["order-taker", "ordertaker"].includes(viewKey);
 
 		/* 2️⃣  Base filter (status) */
 		const baseMatch = applyAdminHotelScope(req, {});
@@ -3123,33 +3125,56 @@ exports.listForAdminAll = async (req, res) => {
 
 		if (search) pipeline.push({ $match: searchMatch });
 
-		if (summaryOnly) {
-			pipeline.push({
-				$project: {
-					_id: 1,
-					hotelName: 1,
-					hotelName_OtherLanguage: 1,
-					hotelCountry: 1,
-					hotelState: 1,
-					hotelCity: 1,
-					hotelAddress: 1,
-					phone: 1,
-					activateHotel: 1,
-					xHotelProActive: 1,
-					aiToRespond: 1,
-					belongsTo: 1,
-					createdAt: 1,
-					updatedAt: 1,
-					overallRoomsCount: 1,
-					location: 1,
-					roomsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
-					photosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
-					owner: {
-						_id: "$owner._id",
-						name: "$owner.name",
-						email: "$owner.email",
-					},
+		if (summaryOnly || orderTakerView) {
+			const compactProject = {
+				_id: 1,
+				hotelName: 1,
+				hotelName_OtherLanguage: 1,
+				hotelCountry: 1,
+				hotelState: 1,
+				hotelCity: 1,
+				hotelAddress: 1,
+				phone: 1,
+				activateHotel: 1,
+				xHotelProActive: 1,
+				aiToRespond: 1,
+				belongsTo: 1,
+				createdAt: 1,
+				updatedAt: 1,
+				overallRoomsCount: 1,
+				location: 1,
+				roomsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
+				photosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
+				owner: {
+					_id: "$owner._id",
+					name: "$owner.name",
+					email: "$owner.email",
 				},
+			};
+			if (orderTakerView) {
+				compactProject.commission = 1;
+				compactProject.roomCountDetails = {
+					$map: {
+						input: { $ifNull: ["$roomCountDetails", []] },
+						as: "room",
+						in: {
+							_id: "$$room._id",
+							roomType: "$$room.roomType",
+							room_type: "$$room.room_type",
+							displayName: "$$room.displayName",
+							display_name: "$$room.display_name",
+							price: "$$room.price",
+							defaultCost: "$$room.defaultCost",
+							roomCommission: "$$room.roomCommission",
+							pricingRate: "$$room.pricingRate",
+							offers: "$$room.offers",
+							monthly: "$$room.monthly",
+						},
+					},
+				};
+			}
+			pipeline.push({
+				$project: compactProject,
 			});
 		}
 
