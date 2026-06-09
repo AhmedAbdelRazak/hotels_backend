@@ -2604,12 +2604,18 @@ const filterAcknowledgedNotifications = (
 	acknowledgedKeys = new Set()
 ) => items.filter((item) => !item.ackKey || !acknowledgedKeys.has(item.ackKey));
 
-const sanitizeHotelManagementNotificationReason = (value = "") =>
-	maskHotelManagementInternalText(value);
-
-const sanitizeHotelManagementNotificationSource = (value = "") => {
+const sanitizeHotelManagementNotificationReason = (value = "", actor = {}) => {
 	const text = String(value || "").trim();
 	if (!text) return "";
+	return shouldMaskHotelManagementReservationSource(actor)
+		? maskHotelManagementInternalText(text)
+		: text;
+};
+
+const sanitizeHotelManagementNotificationSource = (value = "", actor = {}) => {
+	const text = String(value || "").trim();
+	if (!text) return "";
+	if (!shouldMaskHotelManagementReservationSource(actor)) return text;
 	return shouldMaskHotelManagementInternalText(text)
 		? HOTEL_MANAGEMENT_AI_CHAT_SOURCE_LABEL
 		: hotelManagementBookingSourceLabel(text);
@@ -8828,12 +8834,13 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			return res.status(401).json({ error: "Valid user is required" });
 		}
 
-		const actor = await User.findById(actorId)
+		const rawActor = await User.findById(actorId)
 			.select(
 				"_id role roleDescription roles roleDescriptions accessTo hotelIdWork hotelIdsWork belongsToId hotelsToSupport hotelIdsOwner activeUser notificationAcknowledgements"
 			)
 			.lean()
 			.exec();
+		const actor = withHotelManagementSourceViewContext(rawActor, req);
 
 		if (!actor || actor.activeUser === false) {
 			return res.status(401).json({ error: "Valid active user is required" });
@@ -8843,6 +8850,9 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			hotelId || "",
 			ownerId || "",
 			limit,
+			shouldMaskHotelManagementReservationSource(actor)
+				? "hotel-management"
+				: "standard",
 			notificationAcknowledgementSignature(actor),
 		].join("|");
 		const cached = getShortCache(pendingNotificationFeedCache, cacheKey);
@@ -9046,7 +9056,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						confirmation_number: reservation.confirmation_number,
 						guestName: reservation.customer_details?.name || "",
 						booking_source: sanitizeHotelManagementNotificationSource(
-							reservation.booking_source || ""
+							reservation.booking_source || "",
+							actor
 						),
 						booked_at: reservation.booked_at || reservation.createdAt,
 						checkin_date: reservation.checkin_date,
@@ -9070,7 +9081,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 									decision.reason ||
 									decision.rejectionReason ||
 									decision.confirmationReason ||
-									""
+									"",
+								actor
 							),
 						financeRejectionType: financeRejected
 							? financeRejectionType
@@ -9220,7 +9232,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				guestName: reservation.customer_details?.name || "",
 				guestPhone: reservation.customer_details?.phone || "",
 				booking_source: sanitizeHotelManagementNotificationSource(
-					reservation.booking_source || ""
+					reservation.booking_source || "",
+					actor
 				),
 				booked_at: reservation.booked_at || reservation.createdAt,
 				checkin_date: reservation.checkin_date,
@@ -9237,7 +9250,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 							decision.cancelReason ||
 							financialCycle.financeRejectionComment ||
 							financialCycle.totalRejectionReason ||
-							""
+							"",
+						actor
 					),
 			};
 		});

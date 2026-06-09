@@ -149,8 +149,7 @@ const withHotelManagementSourceViewContext = (actor = null, req = {}) => {
 };
 
 const shouldMaskHotelManagementReservationSource = (actor = {}) =>
-	Boolean(actor?.__hotelManagementSourceView) ||
-	!isPlatformReservationSourceViewer(actor);
+	Boolean(actor?.__hotelManagementSourceView);
 
 const maskReservationSourceForHotelManagement = (reservation = {}) => {
 	if (!reservation || typeof reservation !== "object") return reservation;
