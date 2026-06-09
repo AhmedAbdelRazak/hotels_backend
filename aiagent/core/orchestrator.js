@@ -3100,7 +3100,7 @@ function reservationUpdateChoiceQuickReplies(sc = {}, st = {}, options = []) {
 	return options.slice(0, 3).map((_, index) => {
 		const number = index + 1;
 		let label = `Option ${number}`;
-		if (/arabic/i.test(lang)) label = `الخيار ${number}`;
+		if (/arabic/i.test(lang)) label = `\u0627\u0644\u062e\u064a\u0627\u0631 ${arabicDigits(number)}`;
 		if (/spanish/i.test(lang)) label = `Opcion ${number}`;
 		if (/french/i.test(lang)) label = `Option ${number}`;
 		return {
@@ -3110,7 +3110,6 @@ function reservationUpdateChoiceQuickReplies(sc = {}, st = {}, options = []) {
 		};
 	});
 }
-
 function parseReservationUpdateOptionChoice(text = "", options = []) {
 	if (!options.length) return -1;
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
@@ -3128,9 +3127,9 @@ function parseReservationUpdateOptionChoice(text = "", options = []) {
 	if (/\b(third|option three|option 3|three|tres|trois)\b/i.test(lower)) {
 		return options[2] ? 2 : -1;
 	}
-	if (/(?:الاول|الأول|اول|واحد|١)/i.test(arabic)) return options[0] ? 0 : -1;
-	if (/(?:الثاني|تاني|اتنين|اثنين|٢)/i.test(arabic)) return options[1] ? 1 : -1;
-	if (/(?:الثالث|تالت|ثلاثه|ثلاثة|٣)/i.test(arabic)) return options[2] ? 2 : -1;
+	if (/(?:\u0627\u0644\u0627\u0648\u0644|\u0627\u0644\u0623\u0648\u0644|\u0627\u0648\u0644|\u0623\u0648\u0644|\u0648\u0627\u062d\u062f|\u0661|\u06f1)/i.test(arabic)) return options[0] ? 0 : -1;
+	if (/(?:\u0627\u0644\u062b\u0627\u0646\u064a|\u062b\u0627\u0646\u064a|\u062a\u0627\u0646\u064a|\u0627\u062a\u0646\u064a\u0646|\u0627\u062b\u0646\u064a\u0646|\u0662|\u06f2)/i.test(arabic)) return options[1] ? 1 : -1;
+	if (/(?:\u0627\u0644\u062b\u0627\u0644\u062b|\u062b\u0627\u0644\u062b|\u062a\u0627\u0644\u062a|\u062b\u0644\u0627\u062b\u0647|\u062b\u0644\u0627\u062b\u0629|\u0663|\u06f3)/i.test(arabic)) return options[2] ? 2 : -1;
 	if (confirmsText(text) && options.length === 1) return 0;
 	if (/(?:optionone|first|one|uno|premier)/i.test(latinCompact)) {
 		return options[0] ? 0 : -1;
@@ -3145,7 +3144,7 @@ function parseReservationUpdateOptionChoice(text = "", options = []) {
 }
 
 function asksAiIdentity(text = "") {
-	return /\b(are you (?:a )?(?:human|bot|robot|ai)|you are (?:a )?(?:bot|robot|ai)|real person)\b|انتي\s+انسان|انت\s+انسان|روبوت|بوت|ذكاء\s+اصطناعي/i.test(
+	return /\b(are you (?:a )?(?:human|bot|robot|ai)|you are (?:a )?(?:bot|robot|ai)|real person)\b|\u0627\u0646\u062a\u064a\s+\u0627\u0646\u0633\u0627\u0646|\u0627\u0646\u062a\s+\u0627\u0646\u0633\u0627\u0646|\u0631\u0648\u0628\u0648\u062a|\u0628\u0648\u062a|\u0630\u0643\u0627\u0621\s+\u0627\u0635\u0637\u0646\u0627\u0639\u064a/i.test(
 		String(text || "")
 	);
 }
@@ -4381,16 +4380,30 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	].join("\n");
 }
 
-function reservationUpdateOptionLine(option = {}, index = 0) {
+function reservationUpdateOptionLine(option = {}, index = 0, lang = "English") {
+	const isArabic = /arabic/i.test(lang);
 	const room = option.roomName || roomTypeLabel(option.roomType || "");
-	const total = option.total ? `${option.total} ${cleanCurrency(option.currency)}` : "";
-	return `${index + 1}. ${room}: ${usDate(option.checkinISO)} - ${usDate(
-		option.checkoutISO
-	)}${total ? `, ${total}` : ""}`;
+	const checkin = isArabic
+		? localizedGregorianDate(option.checkinISO, lang)
+		: usDate(option.checkinISO);
+	const checkout = isArabic
+		? localizedGregorianDate(option.checkoutISO, lang)
+		: usDate(option.checkoutISO);
+	const currency = cleanCurrency(option.currency || "SAR");
+	const total = option.total
+		? isArabic
+			? localizedMoney(option.total, currency, lang)
+			: `${option.total} ${currency}`
+		: "";
+	if (isArabic) {
+		return `\u0627\u0644\u062e\u064a\u0627\u0631 ${arabicDigits(index + 1)}: ${room} - ${checkin} \u0625\u0644\u0649 ${checkout}${total ? ` \u2014 ${total}` : ""}`;
+	}
+	return `${index + 1}. ${room}: ${checkin} - ${checkout}${total ? `, ${total}` : ""}`;
 }
 
 function reservationUpdateSuccessMessage(sc, st, result = {}) {
 	const lang = languageOf(sc, st);
+	const isArabic = /arabic/i.test(lang);
 	const reservation = result.reservation || {};
 	const links = reservationLinks(reservation);
 	const name = respectfulGuestName(sc, st);
@@ -4401,20 +4414,23 @@ function reservationUpdateSuccessMessage(sc, st, result = {}) {
 		roomTypeLabel(result.selection?.roomType || "");
 	const total = reservation.total_amount || result.quote?.totals?.totalPriceWithCommission || 0;
 	const currency = cleanCurrency(result.quote?.currency || reservation.currency || "SAR");
-	const dateLine = `${usDate(result.checkinISO)} - ${usDate(result.checkoutISO)}`;
-	if (/arabic/i.test(lang)) {
+	const dateLine = isArabic
+		? `${localizedGregorianDate(result.checkinISO, lang)} - ${localizedGregorianDate(result.checkoutISO, lang)}`
+		: `${usDate(result.checkinISO)} - ${usDate(result.checkoutISO)}`;
+	const totalDisplay = isArabic ? localizedMoney(total, currency, lang) : `${total} ${currency}`;
+	if (isArabic) {
 		return [
-			`${name}، تم تحديث الحجز **${confirmation}** إلى **${dateLine}** بعد مراجعة التوفر.`,
-			`الغرفة: **${room}**. الإجمالي الحالي: **${total} ${currency}**.`,
-			"الحجز ظاهر للضيف كمؤكد، وتم إرساله لفريق الفندق لمراجعة التحديث.",
-			`[تفاصيل الحجز](${links.reservationDetails})`,
-			`[رابط الدفع](${links.payment})`,
+			`${name}\u060c \u062a\u0645 \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u062d\u062c\u0632 **${confirmation}** \u0625\u0644\u0649 **${dateLine}** \u0628\u0639\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062a\u0648\u0641\u0631.`,
+			`\u0627\u0644\u063a\u0631\u0641\u0629: **${room}**. \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062d\u0627\u0644\u064a: **${totalDisplay}**.`,
+			"\u0627\u0644\u062d\u062c\u0632 \u0644\u0627 \u064a\u0632\u0627\u0644 \u0645\u0624\u0643\u062f\u0627 \u0644\u0643\u060c \u0648\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062a\u062d\u062f\u064a\u062b \u0644\u0641\u0631\u064a\u0642 \u0627\u0644\u0641\u0646\u062f\u0642 \u0644\u0644\u0645\u0631\u0627\u062c\u0639\u0629.",
+			`[\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632](${links.reservationDetails})`,
+			`[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`,
 		].join("\n");
 	}
 	if (/spanish/i.test(lang)) {
 		return [
 			`Listo, ${name}. Actualice la reserva **${confirmation}** a **${dateLine}** despues de revisar disponibilidad.`,
-			`Habitacion: **${room}**. Total actual: **${total} ${currency}**.`,
+			`Habitacion: **${room}**. Total actual: **${totalDisplay}**.`,
 			"La reserva sigue confirmada para ti y el equipo del hotel recibio el cambio para revision.",
 			`[Reservation details](${links.reservationDetails})`,
 			`[Payment link](${links.payment})`,
@@ -4423,7 +4439,7 @@ function reservationUpdateSuccessMessage(sc, st, result = {}) {
 	if (/french/i.test(lang)) {
 		return [
 			`C'est fait, ${name}. J'ai mis a jour la reservation **${confirmation}** pour **${dateLine}** apres verification de la disponibilite.`,
-			`Chambre : **${room}**. Total actuel : **${total} ${currency}**.`,
+			`Chambre : **${room}**. Total actuel : **${totalDisplay}**.`,
 			"La reservation reste confirmee pour vous et l'equipe de l'hotel a recu la mise a jour pour verification.",
 			`[Reservation details](${links.reservationDetails})`,
 			`[Payment link](${links.payment})`,
@@ -4431,7 +4447,7 @@ function reservationUpdateSuccessMessage(sc, st, result = {}) {
 	}
 	return [
 		`Done, ${name}. I updated reservation **${confirmation}** to **${dateLine}** after checking availability.`,
-		`Room: **${room}**. Current total: **${total} ${currency}**.`,
+		`Room: **${room}**. Current total: **${totalDisplay}**.`,
 		"The reservation remains confirmed for you, and the hotel team has been notified to review the updated dates.",
 		`[Reservation details](${links.reservationDetails})`,
 		`[Payment link](${links.payment})`,
@@ -4440,19 +4456,22 @@ function reservationUpdateSuccessMessage(sc, st, result = {}) {
 
 function reservationUpdateUnavailableMessage(sc, st, result = {}, options = []) {
 	const lang = languageOf(sc, st);
+	const isArabic = /arabic/i.test(lang);
 	const name = respectfulGuestName(sc, st);
 	const requested = result.requested || {};
-	const requestedLine = `${usDate(requested.checkinISO)} - ${usDate(
-		requested.checkoutISO
-	)}`;
-	const optionLines = options.map(reservationUpdateOptionLine).join("\n");
+	const requestedLine = isArabic
+		? `${localizedGregorianDate(requested.checkinISO, lang)} - ${localizedGregorianDate(requested.checkoutISO, lang)}`
+		: `${usDate(requested.checkinISO)} - ${usDate(requested.checkoutISO)}`;
+	const optionLines = options
+		.map((option, index) => reservationUpdateOptionLine(option, index, lang))
+		.join("\n");
 	if (options.length) {
-		if (/arabic/i.test(lang)) {
+		if (isArabic) {
 			return [
-				`${name}، لا يظهر توفر لنفس الطلب في **${requestedLine}**.`,
-				"هذه أقرب الخيارات المتاحة التي وجدتها:",
+				`${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u062a\u0648\u0641\u0631 \u0644\u0646\u0641\u0633 \u0627\u0644\u0637\u0644\u0628 \u0641\u064a **${requestedLine}**.`,
+				"\u0647\u0630\u0647 \u0623\u0642\u0631\u0628 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0627\u0644\u062a\u064a \u0648\u062c\u062f\u062a\u0647\u0627:",
 				optionLines,
-				"اختر رقم الخيار المناسب، أو أرسل تواريخ أخرى.",
+				"\u0627\u062e\u062a\u0631 \u0631\u0642\u0645 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u0646\u0627\u0633\u0628\u060c \u0623\u0648 \u0623\u0631\u0633\u0644 \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u062e\u0631\u0649.",
 			].join("\n");
 		}
 		if (/spanish/i.test(lang)) {
@@ -4478,8 +4497,8 @@ function reservationUpdateUnavailableMessage(sc, st, result = {}, options = []) 
 			"Choose the option number you prefer, or send me different dates.",
 		].join("\n");
 	}
-	if (/arabic/i.test(lang)) {
-		return `${name}، لا يظهر توفر لنفس الغرفة في **${requestedLine}** ولا أرى خيارا قريبا خلال 3 أيام. أقدر أراجع نوع غرفة آخر أو تواريخ مختلفة إذا أرسلت ما يناسبك.`;
+	if (isArabic) {
+		return `${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u062a\u0648\u0641\u0631 \u0644\u0646\u0641\u0633 \u0627\u0644\u063a\u0631\u0641\u0629 \u0641\u064a **${requestedLine}**\u060c \u0648\u0644\u0627 \u0623\u0631\u0649 \u062e\u064a\u0627\u0631\u0627 \u0642\u0631\u064a\u0628\u0627 \u062e\u0644\u0627\u0644 3 \u0623\u064a\u0627\u0645. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631 \u0623\u0648 \u062a\u0648\u0627\u0631\u064a\u062e \u0645\u062e\u062a\u0644\u0641\u0629 \u0625\u0630\u0627 \u0623\u0631\u0633\u0644\u062a \u0645\u0627 \u064a\u0646\u0627\u0633\u0628\u0643.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, no veo disponibilidad para la misma habitacion en **${requestedLine}** ni una opcion cercana dentro de 3 dias. Puedo revisar otro tipo de habitacion u otras fechas si me las envias.`;
@@ -4489,7 +4508,6 @@ function reservationUpdateUnavailableMessage(sc, st, result = {}, options = []) 
 	}
 	return `${name}, I do not see same-room availability for **${requestedLine}** or a close option within 3 days. I can check another room type or different dates if you send what works for you.`;
 }
-
 async function finishReservationDateUpdate(
 	io,
 	sc,
