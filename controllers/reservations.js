@@ -2621,6 +2621,22 @@ const sanitizeHotelManagementNotificationSource = (value = "", actor = {}) => {
 		: hotelManagementBookingSourceLabel(text);
 };
 
+const notificationWorkflowSource = (reservation = {}) =>
+	String(
+		reservation?.pendingConfirmation?.source ||
+			reservation?.agentDecisionSnapshot?.source ||
+			reservation?.financial_cycle?.sourceName ||
+			reservation?.financial_cycle?.bookingSource ||
+			""
+	).trim();
+
+const notificationBookingSourceForViewer = (reservation = {}, actor = {}) => {
+	const source = shouldMaskHotelManagementReservationSource(actor)
+		? reservation.booking_source || ""
+		: notificationWorkflowSource(reservation) || reservation.booking_source || "";
+	return sanitizeHotelManagementNotificationSource(source, actor);
+};
+
 const getAgentAccountNotificationFeed = async ({
 	actor,
 	hotels = [],
@@ -9055,8 +9071,8 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 						hotelOwnerId: hotel.hotelOwnerId || ownerId || "",
 						confirmation_number: reservation.confirmation_number,
 						guestName: reservation.customer_details?.name || "",
-						booking_source: sanitizeHotelManagementNotificationSource(
-							reservation.booking_source || "",
+						booking_source: notificationBookingSourceForViewer(
+							reservation,
 							actor
 						),
 						booked_at: reservation.booked_at || reservation.createdAt,
@@ -9231,10 +9247,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				confirmation_number: reservation.confirmation_number,
 				guestName: reservation.customer_details?.name || "",
 				guestPhone: reservation.customer_details?.phone || "",
-				booking_source: sanitizeHotelManagementNotificationSource(
-					reservation.booking_source || "",
-					actor
-				),
+				booking_source: notificationBookingSourceForViewer(reservation, actor),
 				booked_at: reservation.booked_at || reservation.createdAt,
 				checkin_date: reservation.checkin_date,
 				checkout_date: reservation.checkout_date,
