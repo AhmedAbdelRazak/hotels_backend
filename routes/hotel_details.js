@@ -19,6 +19,7 @@ const {
 	list,
 	listForAdmin,
 	updateHotelDetails,
+	updateAdminHotelActivation,
 	updateRoomAgentOverrides,
 	listOfHotelUser,
 	listForAdminAll,
@@ -93,6 +94,14 @@ router.get(
 	requireSignin,
 	requireAdminAccess("AdminDashboard"),
 	listForAdminAll
+);
+
+router.put(
+	"/admin/hotel-details/:hotelId/activation/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("AdminDashboard"),
+	updateAdminHotelActivation
 );
 
 router.put(

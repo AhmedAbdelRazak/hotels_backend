@@ -233,6 +233,34 @@ const getDeclaredRoomsTotal = (hotel = {}) => {
 	}, 0);
 };
 
+const getHotelActivationChecklist = (hotel = {}) => {
+	const coords = hotel?.location?.coordinates;
+	const roomsDone =
+		Array.isArray(hotel?.roomCountDetails) && hotel.roomCountDetails.length > 0;
+	const photosDone =
+		Array.isArray(hotel?.hotelPhotos) && hotel.hotelPhotos.length > 0;
+	const locationDone =
+		Array.isArray(coords) &&
+		coords.length >= 2 &&
+		coords[0] !== 0 &&
+		coords[1] !== 0;
+	const dataDone = Boolean(
+		hotel?.aboutHotel || hotel?.aboutHotelArabic || hotel?.overallRoomsCount
+	);
+	const bankDone =
+		Array.isArray(hotel?.paymentSettings) && hotel.paymentSettings.length > 0;
+
+	return {
+		roomsDone,
+		photosDone,
+		locationDone,
+		dataDone,
+		bankDone,
+		activationReady: roomsDone && photosDone && locationDone && dataDone,
+		fullyComplete: roomsDone && photosDone && locationDone && dataDone && bankDone,
+	};
+};
+
 const extractReservationRoomIds = (roomId) => {
 	if (!roomId) return [];
 	if (Array.isArray(roomId)) return roomId.map(normalizeId).filter(Boolean);
@@ -2432,6 +2460,73 @@ exports.updateHotelDetails = async (req, res) => {
 		return res.json(newDoc);
 	} catch (err) {
 		console.error("updateHotelDetails error:", err);
+		return res.status(500).json({ error: "Internal server error" });
+	}
+};
+
+exports.updateAdminHotelActivation = async (req, res) => {
+	try {
+		const hotelDetailsId = req.params.hotelId;
+		if (!mongoose.Types.ObjectId.isValid(hotelDetailsId)) {
+			return res.status(400).json({ error: "Invalid hotel id" });
+		}
+
+		const hotelObjectId = mongoose.Types.ObjectId(hotelDetailsId);
+		const scopedMatch = applyAdminHotelScope(req, { _id: hotelObjectId });
+		const hotelDetails = await HotelDetails.findOne(scopedMatch).exec();
+		if (!hotelDetails) {
+			return res.status(404).json({ error: "Hotel details not found" });
+		}
+
+		const hasOwnerActivation = Object.prototype.hasOwnProperty.call(
+			req.body,
+			"activateHotel"
+		);
+		const hasPlatformActivation = Object.prototype.hasOwnProperty.call(
+			req.body,
+			"xHotelProActive"
+		);
+
+		if (!hasOwnerActivation && !hasPlatformActivation) {
+			return res.status(400).json({ error: "No activation change was provided" });
+		}
+
+		const updates = {};
+		if (hasOwnerActivation) {
+			updates.activateHotel = toBoolean(req.body.activateHotel);
+		}
+		if (hasPlatformActivation) {
+			updates.xHotelProActive = toBoolean(req.body.xHotelProActive);
+		}
+
+		const activatingPublicHotel =
+			updates.activateHotel === true || updates.xHotelProActive === true;
+		if (activatingPublicHotel) {
+			const checklist = getHotelActivationChecklist(hotelDetails);
+			if (!checklist.activationReady) {
+				return res.status(400).json({
+					error: "Finish rooms, photos, location, and hotel data before activation.",
+					checklist,
+				});
+			}
+		}
+
+		updates.fromPage = req.body.fromPage || "AdminHotelActivation";
+		updates.updatedAt = new Date();
+
+		const newDoc = await HotelDetails.findByIdAndUpdate(
+			hotelObjectId,
+			{ $set: updates },
+			{ new: true, runValidators: true }
+		).exec();
+
+		if (!newDoc) {
+			return res.status(500).json({ error: "Failed to update hotel activation" });
+		}
+
+		return res.json(newDoc);
+	} catch (err) {
+		console.error("updateAdminHotelActivation error:", err);
 		return res.status(500).json({ error: "Internal server error" });
 	}
 };
