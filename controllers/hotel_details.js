@@ -2473,7 +2473,11 @@ exports.updateAdminHotelActivation = async (req, res) => {
 
 		const hotelObjectId = mongoose.Types.ObjectId(hotelDetailsId);
 		const scopedMatch = applyAdminHotelScope(req, { _id: hotelObjectId });
-		const hotelDetails = await HotelDetails.findOne(scopedMatch).exec();
+		const hotelDetails = await HotelDetails.findOne(scopedMatch)
+			.select(
+				"_id roomCountDetails hotelPhotos location aboutHotel aboutHotelArabic overallRoomsCount activateHotel xHotelProActive"
+			)
+			.exec();
 		if (!hotelDetails) {
 			return res.status(404).json({ error: "Hotel details not found" });
 		}
@@ -2518,7 +2522,10 @@ exports.updateAdminHotelActivation = async (req, res) => {
 			hotelObjectId,
 			{ $set: updates },
 			{ new: true, runValidators: true }
-		).exec();
+		)
+			.select("_id hotelName activateHotel xHotelProActive fromPage updatedAt")
+			.lean()
+			.exec();
 
 		if (!newDoc) {
 			return res.status(500).json({ error: "Failed to update hotel activation" });
