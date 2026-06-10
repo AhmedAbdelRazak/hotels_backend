@@ -6508,10 +6508,7 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		if (
-			supportDecision.action === "other" &&
-			broadGeneralSupportQuestionText(userText, st, decisionLu)
-		) {
+		if (broadGeneralSupportQuestionText(userText, st, decisionLu)) {
 			await answerSupportEmailInquiry(
 				io,
 				sc,
