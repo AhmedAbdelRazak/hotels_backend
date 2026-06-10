@@ -329,6 +329,87 @@ function hijriMonthFromText(value = "") {
 	return null;
 }
 
+function compactMonthToken(value = "") {
+	return normalizeHijriLabel(value).replace(/\s+/g, "");
+}
+
+function editDistance(a = "", b = "") {
+	const left = String(a || "");
+	const right = String(b || "");
+	if (left === right) return 0;
+	if (!left) return right.length;
+	if (!right) return left.length;
+	const prev = Array.from({ length: right.length + 1 }, (_, index) => index);
+	const curr = Array(right.length + 1).fill(0);
+	for (let i = 1; i <= left.length; i += 1) {
+		curr[0] = i;
+		for (let j = 1; j <= right.length; j += 1) {
+			const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+			curr[j] = Math.min(
+				curr[j - 1] + 1,
+				prev[j] + 1,
+				prev[j - 1] + cost
+			);
+		}
+		for (let j = 0; j <= right.length; j += 1) prev[j] = curr[j];
+	}
+	return prev[right.length];
+}
+
+function fuzzyHijriMonthFromText(value = "") {
+	const exact = hijriMonthFromText(value);
+	if (exact) return exact;
+	const compact = compactMonthToken(value);
+	if (compact.length < 3) return null;
+	let best = { month: null, distance: Number.POSITIVE_INFINITY, length: 0 };
+	for (const entry of HIJRI_MONTHS) {
+		const label = compactMonthToken(entry.label);
+		if (label.length < 3) continue;
+		const distance = editDistance(compact, label);
+		const maxLength = Math.max(compact.length, label.length);
+		const allowed = maxLength <= 5 ? 1 : 2;
+		if (
+			distance <= allowed &&
+			(distance < best.distance ||
+				(distance === best.distance && label.length > best.length))
+		) {
+			best = { month: entry.month, distance, length: label.length };
+		}
+	}
+	return best.month || null;
+}
+
+function isDateConnectorToken(value = "") {
+	return /^(?:-|to|until|through|till|from|of|or|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
+		String(value || "").trim()
+	);
+}
+
+function looseHijriDayMonthMentions(raw = "") {
+	const text = normalizeArabicSearchText(raw);
+	const found = [];
+	const dayRegex = /\d{1,2}/g;
+	let match = null;
+	while ((match = dayRegex.exec(text))) {
+		const day = Number(match[0]);
+		if (!day || day < 1 || day > 30) continue;
+		const after = text.slice(match.index + match[0].length);
+		const tokens = (after.match(/[a-z\u0600-\u06ff]+/gi) || [])
+			.map((token) => normalizeHijriLabel(token))
+			.filter((token) => token && !isDateConnectorToken(token))
+			.slice(0, 4);
+		for (let size = 1; size <= Math.min(3, tokens.length); size += 1) {
+			const candidate = tokens.slice(0, size).join(" ");
+			const month = fuzzyHijriMonthFromText(candidate);
+			if (month) {
+				found.push({ day, month });
+				break;
+			}
+		}
+	}
+	return found;
+}
+
 function hijriDisplay(month, day, year) {
 	const label = HIJRI_MONTH_LABELS[Number(month) - 1]?.[0] || `month ${month}`;
 	return `${Number(day)} ${label} ${Number(year)} AH`;
@@ -479,6 +560,19 @@ function quickHijriDateRangeNoYear(text = "") {
 			month = found[0].month;
 			checkinDay = found[0].day;
 			checkoutDay = found[1].day;
+		}
+	}
+	if (!month || !checkinDay || !checkoutDay) {
+		const found = looseHijriDayMonthMentions(raw);
+		for (let index = 0; index < found.length - 1; index += 1) {
+			const current = found[index];
+			const next = found[index + 1];
+			if (current.month === next.month && next.day > current.day) {
+				month = current.month;
+				checkinDay = current.day;
+				checkoutDay = next.day;
+				break;
+			}
 		}
 	}
 	if (!month || !checkinDay || !checkoutDay) {
