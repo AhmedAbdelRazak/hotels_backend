@@ -109,6 +109,17 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3200, {
+	min: 500,
+	max: 15000,
+});
+const AI_REPLY_TARGET_MAX_MS = Math.max(
+	AI_REPLY_TARGET_MIN_MS,
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4800, {
+		min: 500,
+		max: 15000,
+	})
+);
 const JANNAT_HANDOFF_DELAY_MIN_MS = intFromEnv(
 	"AI_JANNAT_HANDOFF_DELAY_MIN_MS",
 	5000,
@@ -722,6 +733,15 @@ function quickReplyActions(message = {}) {
 
 function recoverBookingStageFromConversation(sc = {}, st = {}) {
 	if (!st || isReservationDetailStep(st)) return;
+	if (
+		sc.aiReservation?.status === "created" ||
+		sc.aiReservation?.confirmationNumber ||
+		sc.aiReservation?.reservationId
+	) {
+		st.waitFor = "post_booking_followup";
+		st.reviewSent = false;
+		return;
+	}
 	const lastAssistant = lastAssistantMessageBeforeLatestGuest(sc);
 	if (!lastAssistant) return;
 	const text = String(lastAssistant.message || "");
@@ -774,6 +794,7 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 }
 
 function isNewReservationFlowActive(st = {}) {
+	if (st.waitFor === "post_booking_followup") return false;
 	return Boolean(
 		st.quote ||
 			st.reviewSent ||
@@ -948,6 +969,7 @@ function wantsPriceButMissingDates(text = "", st = {}) {
 function selectedHotelRoomQuestionText(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
+	if (roomCapacityOrTypeInquiryText(text)) return true;
 	const mentionsRoom =
 		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
 			normalized
@@ -990,6 +1012,56 @@ function wantsReservationHelp(text = "") {
 	return /reservation|booking|confirmation|تأكيد|حجز|reserva|réservation|بکنگ|आरक्षण/i.test(
 		String(text || "")
 	);
+}
+
+function vagueHajjInquiryText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const mentionsHajj =
+		/\b(?:hajj|haj|hadj|pilgrimage)\b/i.test(lower) ||
+		/(?:^|[^\u0621-\u064a])(?:[\u0628\u0644\u0643\u0641\u0633\u0648]{0,3}\u0627\u0644\u062d\u062c|[\u0628\u0644\u0643\u0641\u0633\u0648]{0,3}\u062d\u062c)(?:$|[^\u0621-\u064a])/i.test(
+			arabic
+		) ||
+		/(?:hajj|haj|hadj|pilgrimage)/i.test(latinCompact);
+	if (!mentionsHajj) return false;
+	const onlyHijriMonth =
+		/(?:\u0630\u0648\s*\u0627\u0644\u062d\u062c\u0629|dhul\s*hijj|dhu\s*al\s*hijj)/i.test(
+			lower
+		) &&
+		!/\b(?:package|organize|organisation|organization|category|program|permit|visa|support|work|serve|available|offer)\b/i.test(
+			lower
+		) &&
+		!/(?:\u0628\u0627\u0643\u062c|\u0628\u0631\u0646\u0627\u0645\u062c|\u062a\u0646\u0638\u064a\u0645|\u062a\u0635\u0631\u064a\u062d|\u062a\u0623\u0634\u064a\u0631\u0629|\u0641\u0626\u0629|\u0634\u063a\u0627\u0644\u064a\u0646|\u0645\u062a\u0627\u062d)/i.test(
+			arabic
+		);
+	return !onlyHijriMonth;
+}
+
+function roomCapacityOrTypeInquiryText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const hasRoomWord =
+		/\b(?:room|rooms|bed|beds|suite|suites)\b/i.test(lower) ||
+		/(?:\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u063a\u0631\u0641|\u0623\u0648\u0636\u0629|\u0627\u0648\u0636\u0629|\u0633\u0631\u064a\u0631|\u0623\u0633\u0631\u0629|\u0627\u0633\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:ghorfa|ghurfa|oda|room|bed)/i.test(latinCompact);
+	const hasCapacityOrType =
+		Boolean(mapRoomToKey(raw)) ||
+		/\b(?:2|two|3|three|4|four|5|five)\s*(?:people|persons|guests|adults|beds?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u062a\u0644\u062a|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u0631\u0628\u0627\u0639|\u062e\u0645\u0633|\u062e\u0645\u0627\u0633)/i.test(
+			arabic
+		);
+	const hasBookingIntent =
+		/\b(?:need|want|looking|book|reserve|help|available|availability|have|has)\b/i.test(
+			lower
+		) ||
+		/(?:\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0623\u0628\u063a\u0649|\u0627\u0628\u063a\u0649|\u0623\u0631\u064a\u062f|\u0627\u0631\u064a\u062f|\u0627\u062d\u062a\u0627\u062c|\u0645\u0645\u0643\u0646|\u0633\u0627\u0639\u062f|\u0645\u062a\u0627\u062d|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632)/i.test(
+			arabic
+		);
+	return hasRoomWord && (hasCapacityOrType || hasBookingIntent);
 }
 
 function wantsNewReservationIntent(text = "", lu = {}) {
@@ -2270,39 +2342,29 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 		return false;
 	}
 
-	const think = first
-		? HUMAN.greetThinkMs
-		: randomBetween(HUMAN.thinkMinMs, HUMAN.thinkMaxMs);
-	logStep(caseId, "human.delay.think", { ms: think, first });
+	const turnStartedAt =
+		Number(st.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
+	const targetElapsedMs =
+		Number(st.activeTurnReplyTargetMs || 0) > 0
+			? Number(st.activeTurnReplyTargetMs)
+			: randomBetween(AI_REPLY_TARGET_MIN_MS, AI_REPLY_TARGET_MAX_MS);
+	const waitMs = Math.max(0, targetElapsedMs - (now() - turnStartedAt));
+	logStep(caseId, "human.delay.target", {
+		ms: waitMs,
+		targetElapsedMs,
+		elapsedMs: now() - turnStartedAt,
+		first,
+		chars: (text || "").length,
+	});
 	while (st.guestTypingUntil > now()) await sleep(300);
 	emitTyping(io, caseId, st, true);
-	for (let t = 0; t < think; t += 150) {
+	for (let t = 0; t < waitMs; t += 120) {
 		if (st.interrupt || st.sendingToken !== token) {
 			emitTyping(io, caseId, st, false);
-			logStep(caseId, "human.cancelled", { stage: "think", token });
+			logStep(caseId, "human.cancelled", { stage: "target-wait", token });
 			return false;
 		}
 		while (st.guestTypingUntil > now()) await sleep(300);
-		await sleep(150);
-	}
-
-	const charMs = randomBetween(HUMAN.typeCharMinMs, HUMAN.typeCharMaxMs);
-	let typeMs = Math.min(
-		HUMAN.typeClampMaxMs,
-		Math.max(HUMAN.typeClampMinMs, (text || "").length * charMs)
-	);
-	logStep(caseId, "human.delay.type", {
-		chars: (text || "").length,
-		charMs,
-		typeMs,
-	});
-	while (st.guestTypingUntil > now()) await sleep(300);
-	for (let t = 0; t < typeMs; t += 120) {
-		if (st.interrupt || st.sendingToken !== token) {
-			emitTyping(io, caseId, st, false);
-			logStep(caseId, "human.cancelled", { stage: "typing", token });
-			return false;
-		}
 		await sleep(120);
 	}
 	emitTyping(io, caseId, st, false);
@@ -3399,17 +3461,28 @@ function asksAiIdentity(text = "") {
 	);
 }
 
-function lastUserText(sc) {
+function isAutomatedSupportNoticeText(text = "") {
+	const value = String(text || "").trim();
+	if (!value) return false;
+	return /support specialist is reviewing|representative will be with you|support team is reviewing|team is reviewing/i.test(
+		value
+	) || /\u0641\u0631\u064a\u0642\s+Jannat Booking\s+\u064a\u0631\u0627\u062c\u0639\s+\u0631\u0633\u0627\u0644\u062a\u0643/i.test(
+		value
+	);
+}
+
+function lastGuestMessage(sc = {}) {
 	const convo = Array.isArray(sc.conversation) ? sc.conversation : [];
-	const lastUser = [...convo]
+	return [...convo]
 		.reverse()
 		.find((m) => {
 			if (!m?.message || !m?.messageBy || isAiConversationMessage(m)) return false;
-			const text = String(m.message || "");
-			return !/support specialist is reviewing|representative will be with you/i.test(
-				text
-			);
+			return !isAutomatedSupportNoticeText(m.message);
 		});
+}
+
+function lastUserText(sc) {
+	const lastUser = lastGuestMessage(sc);
 	return lastUser?.message || "";
 }
 
@@ -4334,6 +4407,47 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 	}
 }
 
+async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
+	const fallback = simpleQuoteText({ sc, st, quote });
+	if (!quote?.available) return fallback;
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote.totals?.totalPriceWithCommission;
+	const perNight =
+		quote.nights && total
+			? Math.round((total / Math.max(1, quote.nights)) * 100) / 100
+			: null;
+	const room = quote.room || {};
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue to the review step. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
+		{
+			quote,
+			roomFacts: {
+				roomType: room.roomType || "",
+				displayName: localizedRoomName(sc, st, quote),
+				baseDisplayName: room.displayName || "",
+			},
+			hotelName: localizedHotelName(sc, st),
+			priceFacts: {
+				total,
+				perNight,
+				nights: quote.nights,
+				currency: quote.currency,
+			},
+			dateFacts: dates,
+			requestedGuests: {
+				adults: st.slots?.adults,
+				children: st.slots?.children,
+				adultsProvided: st.slots?.adultsProvided,
+				childrenProvided: st.slots?.childrenProvided,
+			},
+		}
+	);
+	return reply || fallback;
+}
+
 async function shareKnownStayQuote(io, sc, st) {
 	logStep(String(sc._id), "quote.start", {
 		roomTypeKey: st.slots.roomTypeKey,
@@ -4358,7 +4472,7 @@ async function shareKnownStayQuote(io, sc, st) {
 		reason: quote.reason || null,
 		roomTypeKey: st.slots.roomTypeKey,
 	});
-	let quoteReply = simpleQuoteText({ sc, st, quote });
+	let quoteReply = await composeAvailabilityQuoteText(io, sc, st, quote);
 	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
 	const sent = await humanSend(io, sc, st, quoteReply, {
 		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
@@ -5378,6 +5492,44 @@ function isVaguePositive(text = "") {
 	);
 }
 
+function hajjInquiryFallbackText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0639\u062a\u0630\u0631 \u0644\u0644\u062e\u0644\u0637. \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u060c \u0644\u0627 \u062a\u062a\u0648\u0641\u0631 \u0644\u062f\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627 \u0639\u0646 \u0627\u0644\u062a\u0646\u0638\u064a\u0645 \u0623\u0648 \u0627\u0644\u0641\u0626\u0627\u062a. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perdona la confusion. Sobre Hajj, no tengo ahora datos verificados sobre organizacion o categorias. Escribenos a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, desole pour la confusion. Pour le Hajj, je n'ai pas actuellement d'informations verifiees sur l'organisation ou les categories. Ecrivez a ${AI_SUPPORT_EMAIL} et l'equipe vous guidera avec les bons details.`;
+	}
+	return `${name}, sorry for the confusion. For Hajj, I do not currently have verified details about organization or categories. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+}
+
+async function answerVagueHajjInquiry(io, sc, st, userText = "") {
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest asked a broad Hajj/Haj-related question, not a room price/payment/reservation-number question. Study the full conversation and answer the latest question directly. Be honest that this chat currently has verified hotel reservation and room data only, and you do not have enough verified information about Hajj organization, packages, permits, or categories at the moment. Apologize briefly for any confusion, direct them to support@jannatbooking.com for detailed support, and optionally say you can still help with hotel room availability for the selected hotel. Do not repeat any previous quote, reservation review, confirmation number, payment link, or booking details. Do not ask for a payment reference or reservation number.",
+		{
+			latestUserMessage: userText,
+			supportEmail: AI_SUPPORT_EMAIL,
+			hotelName: localizedHotelName(sc, st),
+			reservationAlreadyCreated:
+				sc.aiReservation?.status === "created" ||
+				Boolean(sc.aiReservation?.confirmationNumber),
+		}
+	);
+	await humanSend(io, sc, st, reply || hajjInquiryFallbackText(sc, st));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	return true;
+}
+
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
 	if (isPostBookingClosure(userText)) {
@@ -5385,6 +5537,9 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		await humanSend(io, sc, st, closeReply);
 		st.waitFor = null;
 		return true;
+	}
+	if (vagueHajjInquiryText(userText)) {
+		return answerVagueHajjInquiry(io, sc, st, userText);
 	}
 	if (botExperienceComplaintText(userText) && !isPostBookingConcreteRequest(userText)) {
 		const reply = await write(
@@ -5715,8 +5870,17 @@ async function planTurn(io, sc) {
 			slots: st.slots,
 		});
 
-		const userText = lastUserText(sc);
+		const latestGuestMessage = lastGuestMessage(sc);
+		const userText = latestGuestMessage?.message || "";
 		st.activeTurnUserText = userText || "";
+		st.activeTurnGuestAt = latestGuestMessage?.date
+			? new Date(latestGuestMessage.date).getTime()
+			: now();
+		if (!Number.isFinite(st.activeTurnGuestAt)) st.activeTurnGuestAt = now();
+		st.activeTurnReplyTargetMs = randomBetween(
+			AI_REPLY_TARGET_MIN_MS,
+			AI_REPLY_TARGET_MAX_MS
+		);
 		if (userText || !hasAiAssistantReply(sc)) {
 			emitTyping(io, caseId, st, true);
 			planningTyping = true;
@@ -5920,6 +6084,10 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "post_booking_followup") {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
+		}
+		if (vagueHajjInquiryText(userText)) {
+			await answerVagueHajjInquiry(io, sc, st, userText);
+			return;
 		}
 		if (isReservationDetailStep(st)) {
 			const handled = await handleReservationDetailStep(
