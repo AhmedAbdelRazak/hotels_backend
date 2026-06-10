@@ -4424,7 +4424,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
-		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'support_email'|'human_escalation'|'other',",
+		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
@@ -4433,6 +4433,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
+		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
 		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
 		"Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, cancellation/refund/change requests, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
 	].join(" ");
@@ -5624,6 +5625,70 @@ function supportEmailFallbackText(sc = {}, st = {}) {
 	return `${name}, I do not have a verified answer for that question in this chat. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
 }
 
+function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
+	const normalized = String(text || "").trim();
+	if (!normalized) return false;
+	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
+	if (
+		wantsNewReservationIntent(normalized, lu) ||
+		wantsPriceButMissingDates(normalized, st) ||
+		wantsPaymentHelp(normalized) ||
+		wantsReservationHelp(normalized) ||
+		wantsDiscountQuestion(normalized) ||
+		humanHandoffReason(normalized) ||
+		selectedHotelRoomQuestionText(normalized) ||
+		Boolean(findAmenityMatch(normalized))
+	) {
+		return false;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const asksQuestion =
+		/[?؟]/.test(normalized) ||
+		/^(can|could|do|does|did|is|are|will|would|what|how|where|when|who|which|tell me|i want to know)\b/i.test(
+			lower
+		) ||
+		/(?:هل|ممكن|ينفع|تقدر|اقدر|عندكم|بتوفروا|توفروا|فيه|هل\s+يوجد)/.test(
+			arabic
+		);
+	if (!asksQuestion) return false;
+	return (
+		/\b(?:jannat\s*booking|jannat|platform|company|agency|program|programs|package|packages|visa|insurance|medical|flight|flights|ticket|tickets|airport|transport|transfer|shuttle|tour|permit|hajj|haj|umrah|organize|organisation|organization|arrange)\b/i.test(
+			lower
+		) ||
+		/(?:تأمين|تامين|فيزا|تأشيرة|تاشيرة|طيران|تذاكر|مطار|نقل|مواصلات|باص|جولة|برنامج|برامج|باقة|باقات|تصريح|الحج|حج|العمرة|عمرة|تنظيم|ترتيب)/.test(
+			arabic
+		) ||
+		/(?:jannatbooking|visapackage|medicalinsurance|travelinsurance|airporttransfer|hajjpackage|umrahpackage)/i.test(
+			latinCompact
+		)
+	);
+}
+
+async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = "") {
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, previous guest context, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly and direct the guest to support@jannatbooking.com. Do not invent facts. Do not ask for check-in/check-out dates, phone, email, confirmation number, room type, or booking details unless the guest explicitly asked to reserve in the latest message. Do not add a booking pivot after an unsupported general answer.",
+		{
+			latestUserMessage: userText,
+			supportEmail: AI_SUPPORT_EMAIL,
+			hotelName: localizedHotelName(sc, st),
+			reason,
+		}
+	);
+	await humanSend(io, sc, st, reply || supportEmailFallbackText(sc, st));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	logStep(String(sc._id), "general_answer.reply", {
+		reason,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
+}
+
 async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
 	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
 	st.waitFor =
@@ -6405,7 +6470,32 @@ async function planTurn(io, sc) {
 			st.slots.roomTypeKey = supportDecision.roomTypeKey;
 		}
 
+		if (supportDecision.action === "general_answer") {
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "verified_general_answer"
+			);
+			return;
+		}
+
 		if (supportDecision.action === "support_email") {
+			await answerSupportEmailInquiry(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "unsupported_general_question"
+			);
+			return;
+		}
+
+		if (
+			supportDecision.action === "other" &&
+			broadGeneralSupportQuestionText(userText, st, decisionLu)
+		) {
 			await answerSupportEmailInquiry(
 				io,
 				sc,
