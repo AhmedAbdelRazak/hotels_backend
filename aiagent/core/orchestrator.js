@@ -1632,14 +1632,22 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 		.map((room) => ({
 			roomType: room.roomType,
 			displayName: room.displayName || room.roomType,
+			displayNameOther: room.displayName_OtherLanguage || "",
 			basePrice: room.price?.basePrice || 0,
 			currency: hotel?.currency || "SAR",
 		}));
 }
 
-function inlineRoomOptions(options = []) {
+function inlineRoomOptions(options = [], lang = "") {
+	const useArabic = /arabic/i.test(lang);
 	return options
-		.map((option) => String(option?.displayName || option?.roomType || "").trim())
+		.map((option) =>
+			String(
+				useArabic && hasArabicScript(option?.displayNameOther)
+					? option.displayNameOther
+					: option?.displayName || option?.roomType || ""
+			).trim()
+		)
 		.filter(Boolean)
 		.slice(0, 5)
 		.join(" / ");
@@ -1648,8 +1656,11 @@ function inlineRoomOptions(options = []) {
 function roomPreferenceSalesText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
-	const options = inlineRoomOptions(activeHotelRoomSummaries(st.hotel).slice(0, 5));
 	const lang = languageOf(sc, st);
+	const options = inlineRoomOptions(
+		activeHotelRoomSummaries(st.hotel).slice(0, 5),
+		lang
+	);
 	if (/arabic/i.test(lang)) {
 		return options
 			? `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0641\u064a ${hotelName} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u062a\u0634\u0645\u0644: ${options}. \u0623\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u062a\u0641\u0636\u0644 \u0644\u0644\u062d\u062c\u0632\u061f`
@@ -1685,7 +1696,7 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	const hotelName = localizedHotelName(sc, st);
-	const roomNames = inlineRoomOptions(rooms) || roomTypeLabel(roomTypeKey);
+	const roomNames = inlineRoomOptions(rooms, lang) || roomTypeLabel(roomTypeKey);
 	const capacity = roomCapacityLabel(roomTypeKey, lang);
 	if (/arabic/i.test(lang)) {
 		const fit = capacity
