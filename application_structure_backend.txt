@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-06-06
+Audited: 2026-06-10
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -2429,3 +2429,50 @@ Future TODO Backlog - Added 2026-05-26
   - In the Jannat Booking concierge test, ask for hotels near Al Haram and verify the recommended options are Makkah/Mecca options, not Madinah options.
   - Regression test existing-reservation date updates for confirmation 9550176494 in Arabic and English, then restore the reservation to its pre-test snapshot.
   - Always delete QA SupportCase documents and any chatbot-created QA reservations after production testing.
+
+2026-06-10 B2C AI Chat Latency, Sales UX, And Reservation Safety
+- Deployment scope:
+  - Backend master was pushed and deployed through commit d257a26.
+  - Production host ssh jannat pulled /home/ahmedadmin/Hotels/hotels_backend, syntax checks passed for aiagent/core/nlu.js and aiagent/core/orchestrator.js, and PM2 restarted hotels-backend successfully.
+- Human-feeling response pacing:
+  - aiagent/core/orchestrator.js now targets a total guest-visible AI reply window controlled by AI_REPLY_TARGET_MIN_MS / AI_REPLY_TARGET_MAX_MS, defaulting to about 3.2-4.8 seconds.
+  - Typing is emitted at the start of planning, before slow LLM/tool work finishes, so the guest sees that the assistant is working during the delay. The intended UX is visible "agent is typing" time, not silent waiting followed by typing.
+  - Jannat Booking concierge-to-hotel transfers remain intentionally slower than normal AI replies, controlled by AI_JANNAT_HANDOFF_DELAY_MIN_MS / AI_JANNAT_HANDOFF_DELAY_MAX_MS, because that handoff needs to feel like a real transfer.
+  - Quote wording uses a soft writer timeout controlled by AI_QUOTE_WRITE_SOFT_TIMEOUT_MS. If the LLM writer is slow, the backend sends a deterministic availability quote instead of leaving the guest waiting.
+- Conversation quality and sales behavior:
+  - The orchestrator must read the full SupportCase conversation before deciding the next action and must avoid asking for details already provided.
+  - New reservation openings should feel like a hotel reservation/sales assistant, not a cold form. When the guest asks to reserve without a room type, ask warmly about room preference first instead of opening with check-in/check-out dates.
+  - Room/quote copy should be dynamic and based on actual hotel/room/price facts. Do not invent amenities, discounts, urgency, or "best room" claims.
+  - General questions are handled before booking fallback. If aiagentlearning / platform knowledge can answer safely, answer without forcing a reservation flow. If the AI cannot answer from allowed hotel/platform knowledge, politely direct the guest to support@jannatbooking.com.
+  - Do not add topic-specific hardcoded unsupported-question branches such as "Hajj only". Unsupported-question routing is generic and must respect hotel scope, aiagentlearning, and support email fallback.
+- Reservation detail collection:
+  - Mandatory reservation details are now asked as separate readable rows instead of telling the guest to type everything in one line.
+  - If the guest supplies only some fields, the assistant should ask only for the missing field(s), not restart the full form.
+  - Children count is optional for the guest. If the guest gives only a total people/person/guest count, the backend treats that count as adults and defaults children to 0.
+  - Optional email collection supports localized Skip/omit/no-email replies. Skipping email must proceed to the reservation confirmation/review step instead of stalling or ending the conversation.
+  - These behaviors are implemented across supported languages where the chatbot already has localized prompts/quick replies, especially Arabic.
+- Duplicate reservation protection:
+  - models/supportcase.js now stores aiReservation status, reservationId, confirmationNumber, fingerprint, lock timestamps, createdAt, and lastError.
+  - models/reservations.js stores aiSupportCaseId and aiReservationFingerprint. aiSupportCaseId has a unique sparse/partial index so one support case cannot create multiple AI reservations.
+  - aiagent/core/actions.js acquires an AI reservation lock before creating a reservation, returns an existing reservation if one already exists, waits briefly for racing creations, handles duplicate-key races, and marks support-case reservation state created/failed.
+  - AI-created reservations still go through inventory validation, availabilitySnapshot capture, and Pending Confirmation internal workflow with clientVisibleStatus="confirmed".
+- Timeout and silent-stall recovery:
+  - The top-level orchestrator catches planning failures before a reply is sent and sends a short localized recovery message instead of leaving the guest with no response.
+  - Booking state can be rehydrated from the saved SupportCase transcript after PM2 restart/socket reconnect so proceed/confirm/skip actions do not send the guest backward.
+  - Support-case API population was kept compact for public/client and staff list reads so polling does not load full hotel room/pricing inventory and trigger slow responses.
+- Typo-tolerant date interpretation:
+  - aiagent/core/nlu.js exact parsers run first. Fuzzy parsing is only a fallback when exact parsing fails.
+  - Hijri month typo handling is generic and no longer depends on one hardcoded typo. It supports near-miss Hijri month spellings in Arabic and Latin transliteration while still requiring a valid date/range shape.
+  - Gregorian month typo handling is also generic across configured month names, including English, Arabic, Spanish, and French month labels.
+  - Ambiguous fuzzy matches must not be guessed. If a typo is equally close to multiple months, the deterministic parser returns no date so the orchestrator can clarify.
+  - Non-date messages must continue returning no deterministic date parse.
+- Maintenance requirements:
+  - Keep deterministic parsers/guards separate from assistant wording. Deterministic code may extract dates, slots, locks, and safety state; guest-facing replies should remain dynamic through the orchestrator/writer path.
+  - Do not remove duplicate-reservation locks or the aiSupportCaseId unique index.
+  - Do not make the chatbot fully free-form for reservation creation. Inventory, pricing, pending-confirmation state, and duplicate prevention remain backend-owned.
+  - For new typo support, prefer reusable normalization/fuzzy parsing utilities with ambiguity checks over one-off typo aliases.
+  - Regression-test Arabic plus at least one Latin-language path when changing NLU, reservation detail capture, or quick-reply flow.
+- Verification performed:
+  - Local and production parser checks passed for Hijri typo dates, Gregorian English typo dates, Gregorian Arabic typo dates, shared-month ranges, ambiguous short typos, and non-date Arabic text.
+  - node -c passed for aiagent/core/nlu.js and aiagent/core/orchestrator.js before production restart.
+  - PM2 showed hotels-backend online after deployment.
