@@ -5664,6 +5664,21 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	);
 }
 
+function stripGeneralBookingPivot(text = "", fallback = "") {
+	const cleaned = String(text || "")
+		.replace(
+			/\s*(?:what|which|could|can|please|kindly|send|share|provide|tell)\b[^.!?؟\n]*(?:check[\s-]*in|check[\s-]*out|dates?|room\s+type|phone|email\s+address|your\s+email|confirmation\s+number|booking\s+details)[^.!?؟\n]*[.!?؟]?/gi,
+			""
+		)
+		.replace(
+			/\s*(?:ما|متى|هل|ممكن|من فضلك|ارسل|أرسل|ابعث|اكتب)[^.!?؟\n]*(?:الوصول|المغادرة|التواريخ|نوع الغرفة|رقم الهاتف|البريد|رقم التأكيد|بيانات الحجز)[^.!?؟\n]*[.!?؟]?/g,
+			""
+		)
+		.replace(/\s{2,}/g, " ")
+		.trim();
+	return cleaned || String(fallback || "").trim();
+}
+
 async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = "") {
 	const reply = await write(
 		io,
@@ -5677,7 +5692,8 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 			reason,
 		}
 	);
-	await humanSend(io, sc, st, reply || supportEmailFallbackText(sc, st));
+	const fallback = supportEmailFallbackText(sc, st);
+	await humanSend(io, sc, st, stripGeneralBookingPivot(reply || fallback, fallback));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
