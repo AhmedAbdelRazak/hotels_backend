@@ -251,7 +251,6 @@ const HIJRI_MONTH_LABELS = [
 		"shaban",
 		"shaban",
 		"\u0634\u0639\u0628\u0627\u0646",
-		"\u0634\u0628\u0639\u0628\u0627\u0646",
 	],
 	["ramadan", "ramadhan", "\u0631\u0645\u0636\u0627\u0646"],
 	["shawwal", "\u0634\u0648\u0627\u0644"],
@@ -362,21 +361,24 @@ function fuzzyHijriMonthFromText(value = "") {
 	const compact = compactMonthToken(value);
 	if (compact.length < 3) return null;
 	let best = { month: null, distance: Number.POSITIVE_INFINITY, length: 0 };
+	let ambiguous = false;
 	for (const entry of HIJRI_MONTHS) {
 		const label = compactMonthToken(entry.label);
 		if (label.length < 3) continue;
 		const distance = editDistance(compact, label);
 		const maxLength = Math.max(compact.length, label.length);
 		const allowed = maxLength <= 5 ? 1 : 2;
-		if (
-			distance <= allowed &&
-			(distance < best.distance ||
-				(distance === best.distance && label.length > best.length))
-		) {
+		if (distance > allowed) continue;
+		if (distance < best.distance) {
+			best = { month: entry.month, distance, length: label.length };
+			ambiguous = false;
+		} else if (distance === best.distance && entry.month !== best.month) {
+			ambiguous = true;
+		} else if (distance === best.distance && label.length > best.length) {
 			best = { month: entry.month, distance, length: label.length };
 		}
 	}
-	return best.month || null;
+	return ambiguous ? null : best.month || null;
 }
 
 function isDateConnectorToken(value = "") {
@@ -797,6 +799,197 @@ function normalizeDateSearchText(value = "") {
 		.trim();
 }
 
+function normalizeGregorianMonthLabel(value = "") {
+	return normalizeArabicSearchText(value)
+		.replace(/[-_/]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function gregorianMonthEntries() {
+	if (!gregorianMonthEntries.cache) {
+		gregorianMonthEntries.cache = Object.keys(MONTHS)
+			.map((label) => ({
+				label: normalizeGregorianMonthLabel(label),
+				month: MONTHS[label],
+			}))
+			.filter((entry) => entry.label && entry.month);
+	}
+	return gregorianMonthEntries.cache;
+}
+
+function compactGregorianMonthToken(value = "") {
+	return normalizeGregorianMonthLabel(value).replace(/\s+/g, "");
+}
+
+function gregorianMonthFromText(value = "", { fuzzy = false } = {}) {
+	const normalized = normalizeGregorianMonthLabel(value);
+	if (!normalized) return null;
+	for (const entry of gregorianMonthEntries()) {
+		if (normalized === entry.label) return entry.month;
+	}
+	if (!fuzzy) return null;
+
+	const compact = compactGregorianMonthToken(value);
+	if (compact.length < 4) return null;
+	let best = { month: null, distance: Number.POSITIVE_INFINITY, length: 0 };
+	let ambiguous = false;
+	for (const entry of gregorianMonthEntries()) {
+		const label = compactGregorianMonthToken(entry.label);
+		if (label.length < 4) continue;
+		const distance = editDistance(compact, label);
+		const maxLength = Math.max(compact.length, label.length);
+		const allowed = maxLength <= 5 ? 1 : 2;
+		if (distance > allowed) continue;
+		if (distance < best.distance) {
+			best = { month: entry.month, distance, length: label.length };
+			ambiguous = false;
+		} else if (distance === best.distance && entry.month !== best.month) {
+			ambiguous = true;
+		} else if (distance === best.distance && label.length > best.length) {
+			best = { month: entry.month, distance, length: label.length };
+		}
+	}
+	return ambiguous ? null : best.month || null;
+}
+
+function isGregorianDateParticle(value = "") {
+	return /^(?:from|to|until|through|till|of|de|du|del|al|au|le|el|la|a|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
+		normalizeGregorianMonthLabel(value)
+	);
+}
+
+function isGregorianMonthJoiner(value = "") {
+	return /^(?:of|de|du|del)$/i.test(normalizeGregorianMonthLabel(value));
+}
+
+function gregorianDateTokens(text = "") {
+	const raw = normalizeArabicSearchText(text);
+	return Array.from(raw.matchAll(/\d{1,4}|[a-z\u0600-\u06ff]+/gi)).map(
+		(match) => ({
+			value: match[0],
+			index: match.index,
+			end: match.index + match[0].length,
+			isNumber: /^\d+$/.test(match[0]),
+		})
+	);
+}
+
+function dayFromToken(token) {
+	const day = Number(token?.value || 0);
+	return day >= 1 && day <= 31 ? day : null;
+}
+
+function yearFromToken(token) {
+	const year = Number(token?.value || 0);
+	return year >= 2000 && year <= 2099 ? year : null;
+}
+
+function nextMeaningfulToken(tokens, startIndex) {
+	let index = startIndex;
+	while (index < tokens.length && isGregorianDateParticle(tokens[index].value)) {
+		index += 1;
+	}
+	return index;
+}
+
+function nextGregorianMonthToken(tokens, startIndex) {
+	let index = startIndex;
+	while (index < tokens.length && isGregorianMonthJoiner(tokens[index].value)) {
+		index += 1;
+	}
+	return index;
+}
+
+function readGregorianYearAfter(tokens, startIndex) {
+	const index = nextMeaningfulToken(tokens, startIndex);
+	return yearFromToken(tokens[index]);
+}
+
+function readGregorianMonthAt(tokens, index, { fuzzy = true } = {}) {
+	const token = tokens[index];
+	if (!token || token.isNumber) return null;
+	const month = gregorianMonthFromText(token.value, { fuzzy });
+	return month ? { month, token } : null;
+}
+
+function hasRangeConnectorBetween(raw, leftToken, rightToken) {
+	const between = raw.slice(leftToken.end, rightToken.index);
+	if (/[-\u2013\u2014]/.test(between)) return true;
+	const words = normalizeArabicSearchText(between).match(/[a-z\u0600-\u06ff]+/gi) || [];
+	return words.some(isGregorianDateParticle);
+}
+
+function quickFuzzyGregorianMonthDateRange(text = "") {
+	const raw = normalizeArabicSearchText(text);
+	const tokens = gregorianDateTokens(raw);
+	const matches = [];
+	const push = (index, day, month, year = null) => {
+		if (!day || !month) return;
+		matches.push({ index, day, month, year: year || null });
+	};
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (!token.isNumber) continue;
+		const firstDay = dayFromToken(token);
+		if (!firstDay) continue;
+
+		let cursor = nextGregorianMonthToken(tokens, index + 1);
+		const directMonth = readGregorianMonthAt(tokens, cursor, { fuzzy: true });
+		if (directMonth) {
+			push(
+				token.index,
+				firstDay,
+				directMonth.month,
+				readGregorianYearAfter(tokens, cursor + 1)
+			);
+			continue;
+		}
+
+		cursor = nextMeaningfulToken(tokens, index + 1);
+		const secondToken = tokens[cursor];
+		const secondDay = dayFromToken(secondToken);
+		if (!secondDay || !hasRangeConnectorBetween(raw, token, secondToken)) {
+			continue;
+		}
+		cursor = nextMeaningfulToken(tokens, cursor + 1);
+		const sharedMonth = readGregorianMonthAt(tokens, cursor, { fuzzy: true });
+		if (!sharedMonth) continue;
+		const year = readGregorianYearAfter(tokens, cursor + 1);
+		push(token.index, firstDay, sharedMonth.month, year);
+		push(secondToken.index, secondDay, sharedMonth.month, year);
+	}
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const monthMatch = readGregorianMonthAt(tokens, index, { fuzzy: true });
+		if (!monthMatch) continue;
+		const dayIndex = nextMeaningfulToken(tokens, index + 1);
+		const day = dayFromToken(tokens[dayIndex]);
+		if (!day) continue;
+		push(
+			tokens[index].index,
+			day,
+			monthMatch.month,
+			readGregorianYearAfter(tokens, dayIndex + 1)
+		);
+	}
+
+	const ordered = matches
+		.sort((a, b) => a.index - b.index)
+		.filter((item, index, list) => {
+			const prev = list[index - 1];
+			return (
+				!prev ||
+				prev.day !== item.day ||
+				prev.month !== item.month ||
+				prev.year !== item.year
+			);
+		});
+
+	return normalizeGregorianMonthRange(ordered);
+}
+
 function todayISO() {
 	return new Date().toISOString().slice(0, 10);
 }
@@ -950,6 +1143,10 @@ function quickDateRange(text = "") {
 	const arabicMonthRange = quickArabicGregorianMonthDateRange(raw);
 	if (arabicMonthRange?.checkinISO && arabicMonthRange?.checkoutISO) {
 		return arabicMonthRange;
+	}
+	const fuzzyMonthRange = quickFuzzyGregorianMonthDateRange(raw);
+	if (fuzzyMonthRange?.checkinISO && fuzzyMonthRange?.checkoutISO) {
+		return fuzzyMonthRange;
 	}
 	return { checkinISO: null, checkoutISO: null, raw: null };
 }
