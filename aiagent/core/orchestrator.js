@@ -1318,6 +1318,22 @@ function selectedHotelOnlyReply(sc = {}, st = {}, userText = "") {
 	return `${name}, I can help with ${hotelName} only in this chat. I can check availability, another room type, or different dates at ${hotelName}.`;
 }
 
+function selectedHotelSupportBoundaryReply(sc = {}, st = {}) {
+	const hotelName = localizedHotelName(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u062e\u0635\u0648\u0635 ${hotelName} \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u0623\u0645\u0644\u0643 \u062a\u0641\u0627\u0635\u064a\u0644\u0627 \u0645\u0624\u0643\u062f\u0629 \u0639\u0646 \u0641\u0646\u0627\u062f\u0642 \u0623\u062e\u0631\u0649 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629. \u0644\u0623\u064a \u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0639\u0627\u0645 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL}\u060c \u0648\u064a\u0633\u0639\u062f\u0646\u064a \u0647\u0646\u0627 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 ${hotelName} \u0641\u0642\u0637.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, en este chat solo puedo ayudarte con ${hotelName}; no tengo detalles verificados sobre otros hoteles desde este soporte. Para una consulta general, escribe a ${AI_SUPPORT_EMAIL}. Aqui puedo revisar ${hotelName} solamente.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}; je n'ai pas d'informations verifiees sur d'autres hotels ici. Pour une question generale, ecrivez a ${AI_SUPPORT_EMAIL}. Ici, je peux verifier ${hotelName} uniquement.`;
+	}
+	return `${name}, I can help with ${hotelName} only in this chat, and I do not have verified details about other hotels from here. For general Jannat Booking questions, please email ${AI_SUPPORT_EMAIL}. I can still check ${hotelName} only in this chat.`;
+}
+
 function initialHotelGreetingText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
@@ -1800,7 +1816,7 @@ async function buildHotelRecommendations({
 	requestedRoomTypeKey = null,
 }) {
 	if (st.hotel) {
-		return selectedHotelOnlyReply(sc, st, text);
+		return selectedHotelSupportBoundaryReply(sc, st);
 	}
 	const roomTypeKey = /triple|ثلاث|triple/i.test(text)
 		? "tripleRooms"
@@ -4301,7 +4317,7 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	}
 	if (st.hotel && crossHotelRequestText(userText)) {
 		return {
-			action: "other",
+			action: "support_email",
 			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
 			scope: "selected_hotel",
 			reason: "hotel_scope_boundary",
@@ -4408,16 +4424,17 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
-		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'human_escalation'|'other',",
+		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'support_email'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
-		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options, choose other with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
+		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
 		"Choose hotel_recommendation only when there is no active hotel context.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
-		"Choose human_escalation only when the request is outside hotel/platform support scope, needs facts/tools not available in context or learning examples, asks to cancel/refund/mutate an existing reservation, or should be reviewed by a person before answering.",
+		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
+		"Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, cancellation/refund/change requests, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
 	].join(" ");
 	const user = JSON.stringify(
 		{
@@ -5567,11 +5584,56 @@ function hajjInquiryFallbackText(sc = {}, st = {}) {
 }
 
 async function answerVagueHajjInquiry(io, sc, st, userText = "") {
-	await humanSend(io, sc, st, hajjInquiryFallbackText(sc, st));
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest asked a broad Hajj/Haj-related question, not a payment/reference question. First check the provided hotel facts, platform context, previous guest context, and employee learning examples. If those contexts contain a verified answer to this exact Hajj question, answer it directly and briefly using only that verified context. If they do not contain a verified answer, apologize briefly, say you do not currently have confirmed details about Hajj organization/packages/categories, and direct the guest to support@jannatbooking.com. Do not invent facts. Do not repeat reservation details, quotes, confirmation numbers, or payment links. Do not ask for a payment reference or reservation number.",
+		{
+			latestUserMessage: userText,
+			supportEmail: AI_SUPPORT_EMAIL,
+			hotelName: localizedHotelName(sc, st),
+			reservationAlreadyCreated:
+				sc.aiReservation?.status === "created" ||
+				Boolean(sc.aiReservation?.confirmationNumber),
+		}
+	);
+	await humanSend(io, sc, st, reply || hajjInquiryFallbackText(sc, st));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
+	return true;
+}
+
+function supportEmailFallbackText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = st.hotel ? localizedHotelName(sc, st) : "";
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return hotelName
+			? `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u062f\u0631\u062f\u0634\u0629 ${hotelName}. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`
+			: `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u062d\u0627\u0644\u064a\u0627. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, no tengo una respuesta verificada para esa consulta en este chat. Por favor escribe a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je n'ai pas de reponse verifiee pour cette question dans ce chat. Veuillez ecrire a ${AI_SUPPORT_EMAIL}, et l'equipe vous guidera avec les bons details.`;
+	}
+	return `${name}, I do not have a verified answer for that question in this chat. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+}
+
+async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
+	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	logStep(String(sc._id), "support_email.reply", {
+		reason,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
 	return true;
 }
 
@@ -6317,7 +6379,7 @@ async function planTurn(io, sc) {
 
 		if (st.hotel && crossHotelRequestText(userText)) {
 			logStep(caseId, "hotel_scope.boundary", { source: "deterministic" });
-			await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+			await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
 			st.waitFor = "clarify";
 			return;
 		}
@@ -6341,6 +6403,17 @@ async function planTurn(io, sc) {
 
 		if (supportDecision.roomTypeKey) {
 			st.slots.roomTypeKey = supportDecision.roomTypeKey;
+		}
+
+		if (supportDecision.action === "support_email") {
+			await answerSupportEmailInquiry(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "unsupported_general_question"
+			);
+			return;
 		}
 
 		if (shouldAskRoomPreferenceFirst(userText, st, decisionLu, supportDecision)) {
@@ -6440,7 +6513,7 @@ async function planTurn(io, sc) {
 					scope: supportDecision.scope,
 				});
 				if (crossHotelRequestText(userText)) {
-					await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+					await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
 					st.waitFor = "clarify";
 					return;
 				}
@@ -6621,7 +6694,7 @@ async function planTurn(io, sc) {
 			if (st.hotel) {
 				if (crossHotelRequestText(userText)) {
 					logStep(caseId, "hotel_scope.boundary", { source: "keyword" });
-					await humanSend(io, sc, st, selectedHotelOnlyReply(sc, st, userText));
+					await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
 					st.waitFor = "clarify";
 					return;
 				}
