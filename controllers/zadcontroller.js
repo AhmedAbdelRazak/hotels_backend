@@ -12,12 +12,15 @@ const ZAD_OWNER_EMAIL = String(
 	.toLowerCase();
 
 const DEFAULT_ZAD_LOGO =
-	"https://assets.zyrosite.com/cdn-cgi/image/format=auto,w=375,fit=crop,q=95/mp8vK46zW5uZ3yrv/explore-the-world-2-mP42DVDyWaCRJJ7b.png";
+	"https://res.cloudinary.com/infiniteapps/image/upload/v1781132268/zad/defaults/logo.png";
+
+const DEFAULT_ZAD_FOOTER_IMAGE =
+	"https://res.cloudinary.com/infiniteapps/image/upload/v1781132271/zad/defaults/footer-pattern.jpg";
 
 const DEFAULT_ZAD_BANNERS = [
 	{
-		public_id: "zad-default-carousel-1",
-		url: "https://assets.zyrosite.com/cdn-cgi/image/format=auto,w=1920,fit=crop/mp8vK46zW5uZ3yrv/5-WzMIMeu4V5oAMwan.jpg",
+		public_id: "zad/defaults/home-carousel-1",
+		url: "https://res.cloudinary.com/infiniteapps/image/upload/v1781132268/zad/defaults/home-carousel-1.jpg",
 		title: "ZAD Hotels",
 		subTitle: "Classy stays, thoughtful service, and hotels selected for comfort.",
 		buttonTitle: "Explore Hotels",
@@ -25,8 +28,8 @@ const DEFAULT_ZAD_BANNERS = [
 		btnBackgroundColor: "#0a8f82",
 	},
 	{
-		public_id: "zad-default-carousel-2",
-		url: "https://assets.zyrosite.com/cdn-cgi/image/format=auto,w=1920,fit=crop/mp8vK46zW5uZ3yrv/4-Wuc7ZGASK3870AYu.jpg",
+		public_id: "zad/defaults/home-carousel-2",
+		url: "https://res.cloudinary.com/infiniteapps/image/upload/v1781132269/zad/defaults/home-carousel-2.jpg",
 		title: "Stay With Confidence",
 		subTitle: "Browse available rooms and book your next stay with ease.",
 		buttonTitle: "Book Now",
@@ -34,12 +37,12 @@ const DEFAULT_ZAD_BANNERS = [
 		btnBackgroundColor: "#2557c7",
 	},
 	{
-		public_id: "zad-default-carousel-3",
-		url: "https://assets.zyrosite.com/cdn-cgi/image/format=auto,w=1920,fit=crop/mp8vK46zW5uZ3yrv/1-h2dMfVDIl5zXa555.jpg",
+		public_id: "zad/defaults/home-carousel-3",
+		url: "https://res.cloudinary.com/infiniteapps/image/upload/v1781132270/zad/defaults/home-carousel-3.jpg",
 		title: "Designed Around Your Trip",
 		subTitle: "Find the room type and hotel setting that fits your plans.",
 		buttonTitle: "View Rooms",
-		pageRedirectURL: "/our-hotels-rooms",
+		pageRedirectURL: "/rooms",
 		btnBackgroundColor: "#7b3fb3",
 	},
 ];
@@ -48,7 +51,7 @@ const DEFAULT_ZAD_WEBSITE_DOCUMENT = {
 	siteName: "ZAD Hotels",
 	siteKey: "zad",
 	janatLogo: {
-		public_id: "zad-default-logo",
+		public_id: "zad/defaults/logo",
 		url: DEFAULT_ZAD_LOGO,
 	},
 	homeMainBanners: DEFAULT_ZAD_BANNERS,
@@ -76,9 +79,14 @@ const DEFAULT_ZAD_WEBSITE_DOCUMENT = {
 		public_id: "zad-default-hotel-page",
 		url: DEFAULT_ZAD_BANNERS[2].url,
 	},
+	footerBanner: {
+		public_id: "zad/defaults/footer-pattern",
+		url: DEFAULT_ZAD_FOOTER_IMAGE,
+	},
 	aboutUsEnglish:
 		"<h1>ZAD Hotels</h1><p>ZAD Hotels brings together a carefully selected hotel collection with a focus on comfort, service, and smooth booking experiences.</p>",
-	aboutUsArabic: "",
+	aboutUsArabic:
+		"<h1>زاد للفنادق</h1><p>تجمع زاد للفنادق مجموعة مختارة بعناية مع تركيز على الراحة والخدمة وتجربة حجز واضحة وسلسة.</p>",
 	termsAndConditionEnglish: "",
 	termsAndConditionArabic: "",
 	termsAndConditionEnglish_B2B: "",
@@ -367,6 +375,9 @@ const mergeWebsiteDefaults = (doc = {}) => {
 		hotelPageBanner: source.hotelPageBanner?.url
 			? source.hotelPageBanner
 			: DEFAULT_ZAD_WEBSITE_DOCUMENT.hotelPageBanner,
+		footerBanner: source.footerBanner?.url
+			? source.footerBanner
+			: DEFAULT_ZAD_WEBSITE_DOCUMENT.footerBanner,
 	};
 	return merged;
 };
@@ -383,6 +394,7 @@ const sanitizeZadWebsiteUpdate = (body = {}) => {
 		"aboutUsBanner",
 		"aboutUsPhoto",
 		"hotelPageBanner",
+		"footerBanner",
 		"termsAndConditionEnglish",
 		"termsAndConditionArabic",
 		"termsAndConditionEnglish_B2B",
@@ -836,4 +848,3 @@ exports.getZadScopeHealth = async (_req, res) => {
 		});
 	}
 };
-
