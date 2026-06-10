@@ -176,6 +176,38 @@ const supportCaseSchema = new Schema({
 		type: String,
 		default: "",
 	},
+	aiReservation: {
+		status: {
+			type: String,
+			enum: ["", "creating", "created", "failed"],
+			default: "",
+		},
+		reservationId: {
+			type: Schema.Types.ObjectId,
+			ref: "Reservations",
+			default: null,
+		},
+		confirmationNumber: {
+			type: String,
+			default: "",
+		},
+		fingerprint: {
+			type: String,
+			default: "",
+		},
+		lockedAt: {
+			type: Date,
+			default: null,
+		},
+		createdAt: {
+			type: Date,
+			default: null,
+		},
+		lastError: {
+			type: String,
+			default: "",
+		},
+	},
 	escalationStatus: {
 		type: String,
 		enum: ["none", "active", "addressed"],
@@ -233,6 +265,7 @@ const supportCaseSchema = new Schema({
 });
 
 supportCaseSchema.index({ openedBy: 1, caseStatus: 1, updatedAt: 1 });
+supportCaseSchema.index({ "aiReservation.reservationId": 1 });
 supportCaseSchema.index({ openedBy: 1, clientContact: 1, updatedAt: -1 });
 supportCaseSchema.index({
 	openedBy: 1,

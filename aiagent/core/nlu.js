@@ -1157,6 +1157,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 	const quickRoomTypeKey = mapRoomToKey(text);
 	const quickDates = quickDateRange(text);
 	const quickUpdateConfirmation = quickReservationDateUpdate(text, quickDates);
+	const quickAmenity = detectAmenityQuestion(text);
 	if (quickUpdateConfirmation) {
 		return {
 			intent: "reservation_lookup",
@@ -1176,12 +1177,13 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			},
 			confirmation: quickUpdateConfirmation,
 			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
-			amenity: detectAmenityQuestion(text),
+			amenity: quickAmenity,
 		};
 	}
 	const hasOperationalSignal =
 		Boolean(quickRoomTypeKey) ||
 		Boolean(quickDates.checkinISO && quickDates.checkoutISO) ||
+		Boolean(quickAmenity) ||
 		/\b(reservation|booking|confirmation|reference|price|rate|availability|available|room|stay|check[\s-]?in|check[\s-]?out)\b/i.test(
 			text
 		);
@@ -1202,7 +1204,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			},
 			confirmation: null,
 			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
-			amenity: detectAmenityQuestion(text), // allow amenity while in smalltalk
+			amenity: quickAmenity, // allow amenity while in smalltalk
 		};
 	}
 	const looksLikeBooking =
@@ -1240,7 +1242,53 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			},
 			confirmation: null,
 			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
-			amenity: detectAmenityQuestion(text),
+			amenity: quickAmenity,
+		};
+	}
+
+	const looksLikeNewReservation =
+		/\b(book|reserve|make\s+(?:a\s+)?reservation|new\s+(?:booking|reservation)|book\s+a\s*room|reserve\s+a\s*room|need\s+a\s*room|want\s+a\s*room)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u062d\u062c\u0632\s+\u063a\u0631\u0641|\u0627\u0628\u063a\u0649\s+\u063a\u0631\u0641|\u0623\u0628\u063a\u0649\s+\u063a\u0631\u0641|\u0627\u0631\u064a\u062f\s+\u063a\u0631\u0641|\u0623\u0631\u064a\u062f\s+\u063a\u0631\u0641)/i.test(
+			text
+		) ||
+		/\b(reservar|reserva|reservacion|r[e\u00e9]server|r[e\u00e9]servation)\b/i.test(
+			text
+		);
+	if (
+		looksLikeNewReservation ||
+		quickRoomTypeKey ||
+		quickDates.checkinISO ||
+		quickDates.checkoutISO
+	) {
+		return {
+			intent: "reserve_room",
+			smalltalkType: null,
+			roomTypeKey: quickRoomTypeKey,
+			dates: {
+				checkinISO: quickDates.checkinISO || null,
+				checkoutISO: quickDates.checkoutISO || null,
+				reason: null,
+				checkinPast: isPastISO(quickDates.checkinISO),
+				checkoutPast: isPastISO(quickDates.checkoutISO),
+				raw: {
+					checkin: quickDates.raw?.checkin || quickDates.checkinISO || null,
+					checkout: quickDates.raw?.checkout || quickDates.checkoutISO || null,
+					calendar:
+						quickDates.raw?.calendar ||
+						(quickDates.checkinISO || quickDates.checkoutISO ? "gregorian" : null),
+					...(quickDates.raw?.checkinHijri
+						? { checkinHijri: quickDates.raw.checkinHijri }
+						: {}),
+					...(quickDates.raw?.checkoutHijri
+						? { checkoutHijri: quickDates.raw.checkoutHijri }
+						: {}),
+				},
+			},
+			confirmation: null,
+			firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
+			amenity: quickAmenity,
 		};
 	}
 
@@ -1256,7 +1304,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 			smalltalkType: null,
 			dates: null,
 			roomText: null,
-			amenity: detectAmenityQuestion(text),
+			amenity: quickAmenity,
 			confirmation: null,
 		};
 	}
@@ -1306,7 +1354,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 		dates,
 		confirmation: lu.confirmation || null,
 		firstName: firstNameOf(sc?.displayName1 || sc?.customerName || "Guest"),
-		amenity: lu.amenity || detectAmenityQuestion(text),
+		amenity: lu.amenity || quickAmenity,
 	};
 }
 

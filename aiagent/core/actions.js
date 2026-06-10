@@ -1,7 +1,9 @@
 // aiagent/core/actions.js
+const crypto = require("crypto");
 const Reservations = require("../../models/reservations");
 const UncompleteReservations = require("../../models/Uncompleted");
 const HotelDetails = require("../../models/hotel_details");
+const SupportCase = require("../../models/supportcase");
 const {
 	validateReservationInventoryForCreate,
 	captureReservationAvailabilitySnapshot,
@@ -21,12 +23,16 @@ const AI_RESERVATION_ACTOR = {
 	role: "aiagent",
 	roleDescription: "AI Chat",
 };
+const AI_RESERVATION_LOCK_TTL_MS = 2 * 60 * 1000;
 
 function log(caseId, msg, payload = {}) {
 	if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() !== "true") {
 		return;
 	}
 	console.log(`[aiagent] case=${caseId} ${msg}`, payload);
+}
+function sleep(ms = 0) {
+	return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 function onlyDigits(s = "") {
 	return digitsToEnglish(String(s)).replace(/\D+/g, "");
@@ -872,6 +878,137 @@ async function updateReservationDatesForCase({
 	};
 }
 
+function cleanCaseId(value = "") {
+	return String(value || "").trim();
+}
+
+function aiReservationFingerprint({ caseId, hotel, slots, quoteData, room, guest }) {
+	const parts = [
+		cleanCaseId(caseId),
+		String(hotel?._id || ""),
+		String(slots?.checkinISO || ""),
+		String(slots?.checkoutISO || ""),
+		String(slots?.roomTypeKey || room?.roomType || room?._id || ""),
+		String(guest?.name || slots?.fullName || slots?.name || ""),
+		String(guest?.phone || slots?.phone || ""),
+		String(guest?.nationality || slots?.nationality || ""),
+		String(guest?.adults ?? slots?.adults ?? ""),
+		String(guest?.children ?? slots?.children ?? ""),
+		String(guest?.rooms ?? slots?.rooms ?? ""),
+		String(quoteData?.nights || ""),
+		String(quoteData?.total || quoteData?.total_amount || ""),
+	];
+	return crypto.createHash("sha1").update(parts.join("|")).digest("hex");
+}
+
+async function findAiReservationForCase(caseId) {
+	const caseKey = cleanCaseId(caseId);
+	if (!caseKey) return null;
+	const direct = await Reservations.findOne({ aiSupportCaseId: caseKey })
+		.sort({ createdAt: -1, _id: -1 })
+		.catch(() => null);
+	if (direct) return direct;
+	const sc = await SupportCase.findById(caseKey)
+		.select("aiReservation")
+		.lean()
+		.catch(() => null);
+	const confirmation = String(sc?.aiReservation?.confirmationNumber || "")
+		.trim()
+		.toLowerCase();
+	const reservationId = sc?.aiReservation?.reservationId || null;
+	const clauses = [];
+	if (reservationId) clauses.push({ _id: reservationId });
+	if (confirmation) clauses.push({ confirmation_number: confirmation });
+	if (!clauses.length) return null;
+	return Reservations.findOne({ $or: clauses }).catch(() => null);
+}
+
+async function acquireAiReservationLock(caseId, fingerprint) {
+	const caseKey = cleanCaseId(caseId);
+	if (!caseKey) return { locked: false, existing: null };
+	const existing = await findAiReservationForCase(caseKey);
+	if (existing) return { locked: false, existing };
+	const lockedAt = new Date();
+	const staleBefore = new Date(lockedAt.getTime() - AI_RESERVATION_LOCK_TTL_MS);
+	const lock = await SupportCase.findOneAndUpdate(
+		{
+			_id: caseKey,
+			$or: [
+				{ "aiReservation.status": { $exists: false } },
+				{ "aiReservation.status": "" },
+				{ "aiReservation.status": "failed" },
+				{
+					"aiReservation.status": "creating",
+					"aiReservation.lockedAt": { $lt: staleBefore },
+				},
+			],
+		},
+		{
+			$set: {
+				"aiReservation.status": "creating",
+				"aiReservation.reservationId": null,
+				"aiReservation.confirmationNumber": "",
+				"aiReservation.fingerprint": fingerprint,
+				"aiReservation.lockedAt": lockedAt,
+				"aiReservation.createdAt": null,
+				"aiReservation.lastError": "",
+			},
+		},
+		{ new: true }
+	)
+		.select("_id aiReservation")
+		.lean()
+		.catch(() => null);
+	if (lock) return { locked: true, existing: null };
+	const racedExisting = await findAiReservationForCase(caseKey);
+	return { locked: false, existing: racedExisting || null };
+}
+
+async function waitForAiReservationForCase(caseId, attempts = 8) {
+	for (let i = 0; i < attempts; i += 1) {
+		await sleep(500);
+		const existing = await findAiReservationForCase(caseId);
+		if (existing) return existing;
+	}
+	return null;
+}
+
+async function markAiReservationCreated(caseId, fingerprint, reservation) {
+	const caseKey = cleanCaseId(caseId);
+	if (!caseKey || !reservation?._id) return;
+	await SupportCase.updateOne(
+		{ _id: caseKey, "aiReservation.fingerprint": fingerprint },
+		{
+			$set: {
+				"aiReservation.status": "created",
+				"aiReservation.reservationId": reservation._id,
+				"aiReservation.confirmationNumber": reservation.confirmation_number || "",
+				"aiReservation.lockedAt": null,
+				"aiReservation.createdAt": new Date(),
+				"aiReservation.lastError": "",
+			},
+		}
+	).catch(() => {});
+}
+
+async function markAiReservationFailed(caseId, fingerprint, error) {
+	const caseKey = cleanCaseId(caseId);
+	if (!caseKey) return;
+	await SupportCase.updateOne(
+		{ _id: caseKey, "aiReservation.fingerprint": fingerprint },
+		{
+			$set: {
+				"aiReservation.status": "failed",
+				"aiReservation.lockedAt": null,
+				"aiReservation.lastError": String(error?.message || error || "").slice(
+					0,
+					240
+				),
+			},
+		}
+	).catch(() => {});
+}
+
 async function createReservationForCase({
 	caseId,
 	hotel,
@@ -888,6 +1025,34 @@ async function createReservationForCase({
 		throw new Error("AI reservation quote is missing daily pricing rows.");
 	}
 	const guest = validateRequiredGuestDetails(slots);
+	const caseKey = cleanCaseId(caseId);
+	const fingerprint = aiReservationFingerprint({
+		caseId: caseKey,
+		hotel,
+		slots,
+		quoteData,
+		room,
+		guest,
+	});
+	const lock = await acquireAiReservationLock(caseKey, fingerprint);
+	if (lock.existing) {
+		log(caseId, "reservation.duplicate_returned", {
+			reservationId: String(lock.existing._id),
+			confirmation: lock.existing.confirmation_number,
+		});
+		return lock.existing;
+	}
+	if (caseKey && !lock.locked) {
+		const existing = await waitForAiReservationForCase(caseKey);
+		if (existing) {
+			log(caseId, "reservation.race_existing_returned", {
+				reservationId: String(existing._id),
+				confirmation: existing.confirmation_number,
+			});
+			return existing;
+		}
+		throw new Error("AI reservation creation is already in progress for this support case.");
+	}
 	const confirmation_number = await uniqueConfirmation();
 
 	const pickedRoomsType = buildPickedRoomsType({
@@ -919,6 +1084,8 @@ async function createReservationForCase({
 		paid_amount: 0,
 		commissionPaid: 0,
 		booking_source: "AI Chat",
+		aiSupportCaseId: caseKey,
+		aiReservationFingerprint: fingerprint,
 		pickedRoomsType,
 		pickedRoomsPricing: pickedRoomsType,
 
@@ -927,35 +1094,53 @@ async function createReservationForCase({
 			phone: guest.phone,
 			email: guest.email,
 			nationality: guest.nationality,
+			aiSupportCaseId: caseKey,
 		},
 
 		confirmation_number,
 		advancePayment: 0,
 	};
 
-	const inventoryValidation = await validateReservationInventoryForCreate(
-		reservationPayload,
-		{ allowOverbook: false }
-	);
-	if (!inventoryValidation.allowed) {
-		const message =
-			inventoryValidation.message ||
-			inventoryValidation.issues?.[0]?.message ||
-			"Selected room is no longer available.";
-		throw new Error(message);
+	let saved = null;
+	try {
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			reservationPayload,
+			{ allowOverbook: false }
+		);
+		if (!inventoryValidation.allowed) {
+			const message =
+				inventoryValidation.message ||
+				inventoryValidation.issues?.[0]?.message ||
+				"Selected room is no longer available.";
+			throw new Error(message);
+		}
+		captureReservationAvailabilitySnapshot(
+			reservationPayload,
+			inventoryValidation,
+			"ai_chat_reservation_create"
+		);
+		markReservationPendingConfirmation(reservationPayload, {
+			source: "ai_chat_reservation_create",
+			operationalStatus: true,
+			clientVisibleStatus: "confirmed",
+			inventoryBlocks: true,
+		});
+		saved = await Reservations.create(reservationPayload);
+		await markAiReservationCreated(caseKey, fingerprint, saved);
+	} catch (error) {
+		if (error?.code === 11000 && caseKey) {
+			const existing = await findAiReservationForCase(caseKey);
+			if (existing) {
+				log(caseId, "reservation.duplicate_key_existing_returned", {
+					reservationId: String(existing._id),
+					confirmation: existing.confirmation_number,
+				});
+				return existing;
+			}
+		}
+		await markAiReservationFailed(caseKey, fingerprint, error);
+		throw error;
 	}
-	captureReservationAvailabilitySnapshot(
-		reservationPayload,
-		inventoryValidation,
-		"ai_chat_reservation_create"
-	);
-	markReservationPendingConfirmation(reservationPayload, {
-		source: "ai_chat_reservation_create",
-		operationalStatus: true,
-		clientVisibleStatus: "confirmed",
-		inventoryBlocks: true,
-	});
-	const saved = await Reservations.create(reservationPayload);
 
 	log(caseId, "reservation.created", {
 		reservationId: String(saved._id),

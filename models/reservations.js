@@ -38,6 +38,16 @@ const reservationsSchema = new mongoose.Schema(
 			lowercase: true,
 			default: "",
 		},
+		aiSupportCaseId: {
+			type: String,
+			trim: true,
+			default: "",
+		},
+		aiReservationFingerprint: {
+			type: String,
+			trim: true,
+			default: "",
+		},
 		customer_details: {
 			type: Object, //This is based on the mapping you did in the 3 files, whatever doesn't exist, then leave blank
 			trim: true,
@@ -622,6 +632,14 @@ reservationsSchema.index(
 reservationsSchema.index(
 	{ "supplierData.platformConfirmationNumber": 1 },
 	{ sparse: true },
+);
+reservationsSchema.index(
+	{ aiSupportCaseId: 1 },
+	{
+		unique: true,
+		partialFilterExpression: { aiSupportCaseId: { $type: "string", $gt: "" } },
+		name: "uniq_ai_support_case_id",
+	}
 );
 reservationsSchema.index({ "otaPlatformReview.status": 1, createdAt: -1 });
 reservationsSchema.index({ hotelId: 1, createdAt: -1, _id: -1 });

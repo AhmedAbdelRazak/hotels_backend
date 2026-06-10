@@ -11,7 +11,10 @@ function intFromEnv(name, fallback) {
 	return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const OPENAI_TIMEOUT_MS = intFromEnv("OPENAI_TIMEOUT_MS", 12000);
+const OPENAI_TIMEOUT_MS = intFromEnv(
+	"OPENAI_CHATBOT_TIMEOUT_MS",
+	intFromEnv("OPENAI_TIMEOUT_MS", 6000)
+);
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
 
 const client = process.env.OPENAI_API_KEY
