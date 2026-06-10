@@ -5630,6 +5630,16 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	if (!normalized) return false;
 	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const broadServiceSignal =
+		/\b(?:insurance|medical|visa|flight|flights|ticket|tickets|airport|transport|transfer|shuttle|tour|permit|hajj|haj|umrah|organize|organisation|organization|arrange)\b/i.test(
+			lower
+		) ||
+		/(?:تأمين|تامين|فيزا|تأشيرة|تاشيرة|طيران|تذاكر|مطار|نقل|مواصلات|باص|جولة|تصريح|الحج|حج|العمرة|عمرة|تنظيم|ترتيب)/.test(
+			arabic
+		) ||
+		/(?:visapackage|medicalinsurance|travelinsurance|airporttransfer|hajjpackage|umrahpackage)/i.test(
+			latinCompact
+		);
 	const brandBookingOnly =
 		/\bjannat\s*booking\b/i.test(lower) &&
 		!/\b(?:my|existing|old|current|previous)\s+(?:booking|reservation)\b/i.test(
@@ -5642,8 +5652,10 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 			lower
 		);
 	const reservationHelp = wantsReservationHelp(normalized) && !brandBookingOnly;
+	const newReservationIntent =
+		wantsNewReservationIntent(normalized, lu) && !broadServiceSignal;
 	if (
-		wantsNewReservationIntent(normalized, lu) ||
+		newReservationIntent ||
 		wantsPriceButMissingDates(normalized, st) ||
 		wantsPaymentHelp(normalized) ||
 		reservationHelp ||
@@ -5664,6 +5676,7 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 		);
 	if (!asksQuestion) return false;
 	return (
+		broadServiceSignal ||
 		/\b(?:jannat\s*booking|jannat|platform|company|agency|program|programs|package|packages|visa|insurance|medical|flight|flights|ticket|tickets|airport|transport|transfer|shuttle|tour|permit|hajj|haj|umrah|organize|organisation|organization|arrange)\b/i.test(
 			lower
 		) ||
