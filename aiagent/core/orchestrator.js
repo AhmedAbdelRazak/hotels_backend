@@ -5629,11 +5629,24 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	const normalized = String(text || "").trim();
 	if (!normalized) return false;
 	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const brandBookingOnly =
+		/\bjannat\s*booking\b/i.test(lower) &&
+		!/\b(?:my|existing|old|current|previous)\s+(?:booking|reservation)\b/i.test(
+			lower
+		) &&
+		!/\b(?:booking|reservation)\s+(?:number|reference|id|status|confirmation|details)\b/i.test(
+			lower
+		) &&
+		!/\b(?:confirmation|cancel|cancellation|refund|update|change|modify|amend)\b/i.test(
+			lower
+		);
+	const reservationHelp = wantsReservationHelp(normalized) && !brandBookingOnly;
 	if (
 		wantsNewReservationIntent(normalized, lu) ||
 		wantsPriceButMissingDates(normalized, st) ||
 		wantsPaymentHelp(normalized) ||
-		wantsReservationHelp(normalized) ||
+		reservationHelp ||
 		wantsDiscountQuestion(normalized) ||
 		humanHandoffReason(normalized) ||
 		selectedHotelRoomQuestionText(normalized) ||
@@ -5641,7 +5654,6 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	) {
 		return false;
 	}
-	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
 	const asksQuestion =
 		/[?؟]/.test(normalized) ||
 		/^(can|could|do|does|did|is|are|will|would|what|how|where|when|who|which|tell me|i want to know)\b/i.test(
