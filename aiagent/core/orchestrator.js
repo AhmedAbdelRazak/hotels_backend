@@ -1670,6 +1670,41 @@ function roomPreferenceSalesText(sc = {}, st = {}) {
 		: `${name}, of course. I can help you choose the right room. Which room type or guest count should I prepare for you?`;
 }
 
+function roomCapacityLabel(roomTypeKey = "", lang = "English") {
+	const isArabic = /arabic/i.test(lang);
+	const labels = {
+		doubleRooms: isArabic ? "\u0636\u064a\u0641\u064a\u0646" : "2 guests",
+		tripleRooms: isArabic ? "\u062b\u0644\u0627\u062b\u0629 \u0636\u064a\u0648\u0641" : "3 guests",
+		quadRooms: isArabic ? "\u0623\u0631\u0628\u0639\u0629 \u0636\u064a\u0648\u0641" : "4 guests",
+		familyRooms: isArabic ? "\u062e\u0645\u0633\u0629 \u0636\u064a\u0648\u0641" : "5 guests",
+	};
+	return labels[roomTypeKey] || "";
+}
+
+function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomNames = inlineRoomOptions(rooms) || roomTypeLabel(roomTypeKey);
+	const capacity = roomCapacityLabel(roomTypeKey, lang);
+	if (/arabic/i.test(lang)) {
+		const fit = capacity
+			? ` \u0648\u0647\u0648 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628 \u0644\u0640${capacity}`
+			: "";
+		return `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643. \u0641\u064a ${hotelName} \u0639\u0646\u062f\u0646\u0627 ${roomNames}${fit}. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0644\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		const fit = capacity ? ` y encaja bien para ${capacity}` : "";
+		return `${name}, claro que puedo ayudarte. En ${hotelName} tenemos ${roomNames}${fit}. Enviame la fecha de llegada y salida para revisar disponibilidad y precio exactos.`;
+	}
+	if (/french/i.test(lang)) {
+		const fit = capacity ? ` et cela convient pour ${capacity}` : "";
+		return `${name}, bien sur, je peux vous aider. A ${hotelName}, nous avons ${roomNames}${fit}. Envoyez-moi les dates d'arrivee et de depart pour verifier la disponibilite et le prix exact.`;
+	}
+	const fit = capacity ? `, which is a suitable fit for ${capacity}` : "";
+	return `${name}, of course. At ${hotelName}, we have ${roomNames}${fit}. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
+}
+
 function shouldAskRoomPreferenceFirst(userText = "", st = {}, lu = {}, decision = {}) {
 	if (st.slots?.roomTypeKey) return false;
 	if (explicitlyExistingReservationIntent(userText)) return false;
@@ -1713,6 +1748,19 @@ async function answerSelectedHotelRoomQuestion(
 	) {
 		st.slots.roomTypeKey = roomTypeKey;
 		await shareKnownStayQuote(io, sc, st);
+		return;
+	}
+	if (roomTypeKey && matchingRooms.length) {
+		st.slots.roomTypeKey = roomTypeKey;
+		const sent = await humanSend(
+			io,
+			sc,
+			st,
+			roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms)
+		);
+		if (!sent) return;
+		st.waitFor = "dates";
+		stampAsk(st, "dates");
 		return;
 	}
 	const instruction = roomTypeKey
@@ -5508,21 +5556,7 @@ function hajjInquiryFallbackText(sc = {}, st = {}) {
 }
 
 async function answerVagueHajjInquiry(io, sc, st, userText = "") {
-	const reply = await write(
-		io,
-		sc,
-		st,
-		"The guest asked a broad Hajj/Haj-related question, not a room price/payment/reservation-number question. Study the full conversation and answer the latest question directly. Be honest that this chat currently has verified hotel reservation and room data only, and you do not have enough verified information about Hajj organization, packages, permits, or categories at the moment. Apologize briefly for any confusion, direct them to support@jannatbooking.com for detailed support, and optionally say you can still help with hotel room availability for the selected hotel. Do not repeat any previous quote, reservation review, confirmation number, payment link, or booking details. Do not ask for a payment reference or reservation number.",
-		{
-			latestUserMessage: userText,
-			supportEmail: AI_SUPPORT_EMAIL,
-			hotelName: localizedHotelName(sc, st),
-			reservationAlreadyCreated:
-				sc.aiReservation?.status === "created" ||
-				Boolean(sc.aiReservation?.confirmationNumber),
-		}
-	);
-	await humanSend(io, sc, st, reply || hajjInquiryFallbackText(sc, st));
+	await humanSend(io, sc, st, hajjInquiryFallbackText(sc, st));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
