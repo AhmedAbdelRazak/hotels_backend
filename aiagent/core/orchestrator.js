@@ -3571,7 +3571,15 @@ function lastAssistantText(sc = {}) {
 
 function hijriYearOnlyOrClarificationText(text = "") {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
-	if (!/\b(?:1[34]\d{2}|15\d{2})\b/.test(normalized)) return false;
+	const hasExplicitYear = /\b(?:1[34]\d{2}|15\d{2})\b/.test(normalized);
+	const confirmsNearestFuture =
+		/\b(?:not\s+(?:another\s+)?(?:10|ten)\s+years?|not\s+in\s+(?:10|ten)\s+years?|nearest|closest|coming|upcoming|next\s+(?:one|hijri|islamic)|this\s+year|of\s+course\s+not)\b/i.test(
+			normalized
+		) ||
+		/(?:مش\s+(?:كمان|بعد)?\s*(?:10)?\s*سن(?:ين|وات)?|اكيد\s+مش|أكيد\s+مش|اقرب|أقرب|القريب|القريبه|القريبة|السنه\s+دي|السنة\s+دي|الجاي|القادم)/i.test(
+			normalized
+		);
+	if (!hasExplicitYear && !confirmsNearestFuture) return false;
 	return !/\b(?:price|rate|availability|available|room|hotel|book|reserve|payment|confirmation)\b/i.test(
 		normalized
 	);
@@ -5625,6 +5633,21 @@ function supportEmailFallbackText(sc = {}, st = {}) {
 	return `${name}, I do not have a verified answer for that question in this chat. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
 }
 
+function technicalRecoveryText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0622\u0633\u0641 \u062d\u0635\u0644 \u062a\u0623\u062e\u064a\u0631 \u062a\u0642\u0646\u064a \u0628\u0633\u064a\u0637 \u0648\u0623\u0646\u0627 \u0628\u0631\u0627\u062c\u0639 \u0637\u0644\u0628\u0643. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u0622\u062e\u0631 \u0646\u0642\u0637\u0629 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649 \u0648\u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0641\u0648\u0631\u0627.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perdona, hubo una pequena demora tecnica mientras revisaba tu solicitud. Enviame el ultimo punto otra vez y continuo enseguida.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, desole, il y a eu un petit retard technique pendant la verification. Renvoyez-moi le dernier point et je continue tout de suite.`;
+	}
+	return `${name}, sorry, I had a small technical delay while checking your request. Please send the last point once more and I will continue right away.`;
+}
+
 function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	const normalized = String(text || "").trim();
 	if (!normalized) return false;
@@ -6073,6 +6096,7 @@ async function planTurn(io, sc) {
 	st.turnInFlight = true;
 	st.interrupt = false;
 	let planningTyping = false;
+	let recoveryUserText = "";
 
 	try {
 		logStep(caseId, "context.loaded", {
@@ -6085,6 +6109,7 @@ async function planTurn(io, sc) {
 
 		const latestGuestMessage = lastGuestMessage(sc);
 		const userText = latestGuestMessage?.message || "";
+		recoveryUserText = userText;
 		st.activeTurnUserText = userText || "";
 		st.activeTurnGuestAt = latestGuestMessage?.date
 			? new Date(latestGuestMessage.date).getTime()
@@ -7606,6 +7631,32 @@ async function planTurn(io, sc) {
 		}
 	} catch (e) {
 		logStep(caseId, "error", { message: e?.message || e });
+		try {
+			const latestCase = await getSupportCaseById(caseId);
+			const conversation = Array.isArray(latestCase?.conversation)
+				? latestCase.conversation
+				: [];
+			const latestAiAfterGuest = conversation.some((message) => {
+				if (!isAiConversationMessage(message)) return false;
+				const messageAt = new Date(message.date || 0).getTime();
+				return (
+					Number.isFinite(messageAt) &&
+					messageAt > Number(st.activeTurnGuestAt || 0)
+				);
+			});
+			if (recoveryUserText && !st.interrupt && !latestAiAfterGuest) {
+				await humanSend(
+					io,
+					latestCase || sc,
+					st,
+					technicalRecoveryText(latestCase || sc, st)
+				);
+			}
+		} catch (recoveryError) {
+			logStep(caseId, "error.recovery_failed", {
+				message: recoveryError?.message || recoveryError,
+			});
+		}
 	} finally {
 		const st2 = memo.get(caseId);
 		if (planningTyping) {

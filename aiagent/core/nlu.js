@@ -246,7 +246,13 @@ const HIJRI_MONTH_LABELS = [
 		"\u062c\u0645\u0627\u062f\u0649 \u0627\u0644\u0627\u062e\u0631\u0629",
 	],
 	["rajab", "\u0631\u062c\u0628"],
-	["shaaban", "shaban", "shaban", "\u0634\u0639\u0628\u0627\u0646"],
+	[
+		"shaaban",
+		"shaban",
+		"shaban",
+		"\u0634\u0639\u0628\u0627\u0646",
+		"\u0634\u0628\u0639\u0628\u0627\u0646",
+	],
 	["ramadan", "ramadhan", "\u0631\u0645\u0636\u0627\u0646"],
 	["shawwal", "\u0634\u0648\u0627\u0644"],
 	[
