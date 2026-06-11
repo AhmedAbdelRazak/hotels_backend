@@ -125,6 +125,7 @@ const PUBLIC_HOTEL_LIST_SELECT = [
 	"hotelRating",
 	"location",
 	"commission",
+	"guestPaymentAcceptance",
 	"belongsTo",
 	"roomCountDetails._id",
 	"roomCountDetails.roomType",
@@ -275,6 +276,7 @@ const compactPublicHotel = (
 	hotelRating: hotel.hotelRating,
 	location: hotel.location,
 	commission: hotel.commission,
+	guestPaymentAcceptance: hotel.guestPaymentAcceptance,
 	belongsTo: hotel.belongsTo,
 	roomCountDetails: compactArray(hotel.roomCountDetails, 80)
 		.filter((room) => isPublicRoomVisible(room, roomType))

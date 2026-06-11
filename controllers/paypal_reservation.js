@@ -1573,6 +1573,7 @@ exports.generateClientToken = async (req, res) => {
 		if (cachedClientToken && Date.now() < cachedClientTokenExp) {
 			return res.json({
 				clientToken: cachedClientToken,
+				clientId,
 				env: IS_PROD ? "live" : "sandbox",
 				cached: true,
 				diag: dbg
@@ -1597,6 +1598,7 @@ exports.generateClientToken = async (req, res) => {
 
 		return res.json({
 			clientToken: cachedClientToken,
+			clientId,
 			env: IS_PROD ? "live" : "sandbox",
 			diag: dbg
 				? {

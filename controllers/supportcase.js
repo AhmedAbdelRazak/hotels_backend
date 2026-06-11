@@ -1148,6 +1148,9 @@ exports.createNewSupportCase = async (req, res) => {
 			preferredLanguage,
 			preferredLanguageCode,
 			supportScope,
+			sourceWebsite,
+			sourcePage,
+			sourceUrl,
 		} = req.body;
 
 		console.log(req.body.displayName1, "displayName1");
@@ -1290,6 +1293,9 @@ exports.createNewSupportCase = async (req, res) => {
 			preferredLanguage: preferredLanguage || "English",
 			preferredLanguageCode: preferredLanguageCode || "en",
 			supportScope: isJannatSupportCase ? "jannat_booking" : "hotel",
+			sourceWebsite: cleanText(sourceWebsite || req.body.supportOrigin || "", 80),
+			sourcePage: cleanText(sourcePage || "", 240),
+			sourceUrl: cleanText(sourceUrl || "", 500),
 			aiToRespond: aiEnabledForClient,
 			aiResponderName,
 			aiRelated: aiEnabledForClient,

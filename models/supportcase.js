@@ -134,6 +134,24 @@ const supportCaseSchema = new Schema({
 		enum: ["", "jannat_booking", "hotel"],
 		default: "",
 	},
+	sourceWebsite: {
+		type: String,
+		default: "",
+		trim: true,
+		maxlength: 80,
+	},
+	sourcePage: {
+		type: String,
+		default: "",
+		trim: true,
+		maxlength: 240,
+	},
+	sourceUrl: {
+		type: String,
+		default: "",
+		trim: true,
+		maxlength: 500,
+	},
 	clientName: {
 		type: String,
 		default: "",
