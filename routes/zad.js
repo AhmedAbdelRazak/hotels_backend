@@ -15,6 +15,9 @@ const {
 	gettingZadRoomListFromQuery,
 	listOfAllActiveZadHotelsMonthlyAndOffers,
 	getZadScopeHealth,
+	zadClientSignup,
+	zadClientSignin,
+	zadClientGoogleLogin,
 } = require("../controllers/zadcontroller");
 
 router.get("/zad-website-document", listZadWebsiteDocuments);
@@ -26,6 +29,9 @@ router.post(
 );
 
 router.get("/zad/scope-health", getZadScopeHealth);
+router.post("/zad/auth/signup", zadClientSignup);
+router.post("/zad/auth/signin", zadClientSignin);
+router.post("/zad/auth/google-login", zadClientGoogleLogin);
 router.get("/zad/active-hotels", listOfAllActiveZadHotels);
 router.get("/zad/active-hotel-list", getZadListOfHotels);
 router.get("/zad/distinct-rooms", distinctZadRoomTypes);
@@ -39,4 +45,3 @@ router.get(
 router.param("userId", userById);
 
 module.exports = router;
-

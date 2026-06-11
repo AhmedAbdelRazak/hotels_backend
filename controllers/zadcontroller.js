@@ -1,6 +1,8 @@
 /** @format */
 
 const mongoose = require("mongoose");
+const jwt = require("jsonwebtoken");
+const { OAuth2Client } = require("google-auth-library");
 const ZadWebsite = require("../models/zad_website");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
@@ -10,6 +12,8 @@ const ZAD_OWNER_EMAIL = String(
 )
 	.trim()
 	.toLowerCase();
+
+const zadGoogleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const DEFAULT_ZAD_LOGO =
 	"https://res.cloudinary.com/infiniteapps/image/upload/v1781132268/zad/defaults/logo.png";
@@ -157,6 +161,53 @@ const normalizeId = (value) => String(value?._id || value?.id || value || "").tr
 const validObjectId = (value) => mongoose.Types.ObjectId.isValid(normalizeId(value));
 
 const toObjectId = (value) => mongoose.Types.ObjectId(normalizeId(value));
+
+const normalizeEmail = (value = "") => String(value || "").trim().toLowerCase();
+
+const normalizePhone = (value = "") =>
+	String(value || "")
+		.trim()
+		.replace(/\s+/g, "");
+
+const isValidEmail = (value = "") => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+
+const publicClientUser = (user = {}) => ({
+	_id: user._id,
+	name: user.name || "",
+	email: user.email || "",
+	phone: user.phone || "",
+	role: Number.isFinite(Number(user.role)) ? Number(user.role) : 0,
+	roleDescription: user.roleDescription || "client",
+	activeUser: user.activeUser !== false,
+});
+
+const issueZadClientSession = (res, req, user) => {
+	const token = jwt.sign({ _id: user._id }, process.env.JWT_SECRET, {
+		expiresIn: "7d",
+	});
+	res.cookie("t", token, {
+		expires: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+		httpOnly: true,
+		sameSite: "lax",
+		secure:
+			req.secure ||
+			String(req.get("x-forwarded-proto") || "").split(",")[0].trim() ===
+				"https",
+	});
+	return { token, user: publicClientUser(user) };
+};
+
+const findUserByEmailOrPhone = (emailOrPhone = "") => {
+	const raw = String(emailOrPhone || "").trim();
+	const email = normalizeEmail(raw);
+	const phone = normalizePhone(raw);
+	const checks = [];
+	if (email) checks.push({ email });
+	if (phone) checks.push({ phone });
+	if (raw && raw !== phone) checks.push({ phone: raw });
+	if (!checks.length) return null;
+	return User.findOne({ $or: checks }).exec();
+};
 
 const uniqueIds = (values = []) => [
 	...new Set(
@@ -491,6 +542,146 @@ const withDestinationFilter = (baseFilter = {}, destination = "") => {
 			{ hotelAddress: { $regex: destinationRegex } },
 		],
 	};
+};
+
+exports.zadClientSignup = async (req, res) => {
+	try {
+		const name = String(req.body?.name || "").trim().slice(0, 32);
+		const email = normalizeEmail(req.body?.email);
+		const phone = normalizePhone(req.body?.phone);
+		const password = String(req.body?.password || "");
+
+		if (!name) return res.status(400).json({ error: "Please fill in your name." });
+		if (!email || !isValidEmail(email)) {
+			return res.status(400).json({ error: "Please provide a valid email." });
+		}
+		if (!phone) return res.status(400).json({ error: "Please fill in your phone." });
+		if (!password || password.length < 6) {
+			return res
+				.status(400)
+				.json({ error: "Passwords should be 6 characters or more." });
+		}
+
+		const duplicate = await User.findOne({
+			$or: [{ email }, { phone }],
+		})
+			.select("_id")
+			.lean()
+			.exec();
+
+		if (duplicate) {
+			return res.status(400).json({
+				error: "An account already exists with this email or phone.",
+			});
+		}
+
+		const user = new User({
+			name,
+			email,
+			phone,
+			password,
+			role: 0,
+			roleDescription: "client",
+			roles: [0],
+			roleDescriptions: ["client"],
+			activeUser: true,
+			acceptedTermsAndConditions: Boolean(
+				req.body?.acceptedTermsAndConditions ?? true
+			),
+		});
+		await user.save();
+
+		return res.status(201).json(issueZadClientSession(res, req, user));
+	} catch (error) {
+		console.error("Zad client signup error:", error);
+		return res.status(500).json({ error: "Could not create the account." });
+	}
+};
+
+exports.zadClientSignin = async (req, res) => {
+	try {
+		const emailOrPhone = String(
+			req.body?.emailOrPhone || req.body?.email || req.body?.phone || ""
+		).trim();
+		const password = String(req.body?.password || "");
+
+		if (!emailOrPhone || !password) {
+			return res
+				.status(400)
+				.json({ error: "Please provide your email or phone and password." });
+		}
+
+		const user = await findUserByEmailOrPhone(emailOrPhone);
+		if (!user) {
+			return res.status(400).json({ error: "Account was not found." });
+		}
+		if (user.activeUser === false) {
+			return res
+				.status(403)
+				.json({ error: "This account is inactive. Please contact support." });
+		}
+		if (!user.authenticate(password)) {
+			return res.status(401).json({ error: "Email/phone or password is incorrect." });
+		}
+
+		return res.status(200).json(issueZadClientSession(res, req, user));
+	} catch (error) {
+		console.error("Zad client signin error:", error);
+		return res.status(500).json({ error: "Could not sign in." });
+	}
+};
+
+exports.zadClientGoogleLogin = async (req, res) => {
+	try {
+		const idToken = String(req.body?.idToken || req.body?.credential || "").trim();
+		if (!process.env.GOOGLE_CLIENT_ID) {
+			return res.status(503).json({ error: "Google sign-in is not configured." });
+		}
+		if (!idToken) {
+			return res.status(400).json({ error: "Missing Google credential." });
+		}
+
+		const ticket = await zadGoogleClient.verifyIdToken({
+			idToken,
+			audience: process.env.GOOGLE_CLIENT_ID,
+		});
+		const payload = ticket.getPayload() || {};
+		const email = normalizeEmail(payload.email);
+		const name = String(payload.name || email.split("@")[0] || "Zad Guest")
+			.trim()
+			.slice(0, 32);
+
+		if (!payload.email_verified || !email || !isValidEmail(email)) {
+			return res.status(400).json({ error: "Google email could not be verified." });
+		}
+
+		let user = await User.findOne({ email }).exec();
+		if (!user) {
+			user = new User({
+				name,
+				email,
+				password: `${email}:${process.env.JWT_SECRET || "zad"}`,
+				role: 0,
+				roleDescription: "client",
+				roles: [0],
+				roleDescriptions: ["client"],
+				activeUser: true,
+				acceptedTermsAndConditions: true,
+			});
+			await user.save();
+		}
+
+		if (user.activeUser === false) {
+			return res
+				.status(403)
+				.json({ error: "This account is inactive. Please contact support." });
+		}
+
+		return res.status(200).json(issueZadClientSession(res, req, user));
+	} catch (error) {
+		console.error("Zad Google login error:", error);
+		return res.status(400).json({ error: "Google sign-in failed. Please try again." });
+	}
 };
 
 exports.listZadWebsiteDocuments = async (_req, res) => {
