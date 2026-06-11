@@ -6418,6 +6418,10 @@ async function planTurn(io, sc) {
 			lastUserMessage: userText,
 		});
 		logStep(caseId, "nlu.decision", decisionLu);
+		const bookingFlowWasActiveBeforeNlu =
+			isNewReservationFlowActive(st) ||
+			Boolean(st.quote) ||
+			["dates", "room", "proceed", "clarify", "intentConfirm"].includes(st.waitFor);
 
 		if (
 			!st.hotel &&
@@ -6500,13 +6504,17 @@ async function planTurn(io, sc) {
 		);
 		if (proceedHandled) return;
 
+		const hasFreshNluDateRange = Boolean(
+			decisionLu?.dates?.checkinISO && decisionLu?.dates?.checkoutISO
+		);
 		const readyToQuoteFromNlu =
 			st.slots.checkinISO &&
 			st.slots.checkoutISO &&
 			st.slots.roomTypeKey &&
-			/\b(book|reserve|price|rate|availability|available|room|stay|double|triple|quad)\b/i.test(
+			(/\b(book|reserve|price|rate|availability|available|room|stay|double|triple|quad)\b/i.test(
 				userText
-			) &&
+			) ||
+				(bookingFlowWasActiveBeforeNlu && hasFreshNluDateRange && st.hotel)) &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!wantsReservationHelp(userText);

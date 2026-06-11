@@ -2504,3 +2504,34 @@ Zad Client Auth Endpoints - 2026-06-10
   - POST https://xhotelpro.com/api/zad/auth/signin with an empty body returned 400 validation.
   - POST https://xhotelpro.com/api/zad/auth/signup with an empty body returned 400 validation.
   - hotels-backend PM2 status was online after restart.
+
+2026-06-10 Zad/Jannat Shared AI Chat Hiccup Follow-up Fix
+- Production cases inspected:
+  - 6a2a30e133447bb7b4253508
+  - 6a2a322d33447bb7b425366a
+- Findings:
+  - Case 6a2a322d33447bb7b425366a did not show a true backend stall. The backend sent an optional email prompt with a localized Skip quickReply, but Zad SSR did not render quickReplies yet. The frontend fix is documented in:
+    D:\JannatBooking\zad_ssr\application_structure_zad_frontend.txt
+  - Case 6a2a30e133447bb7b4253508 showed a real shared backend risk. After the AI replied that the requested triple room had no priced availability, the guest sent a new date-only Arabic range. The support case stayed open with aiToRespond=true and no AI reply was appended.
+- Backend files updated:
+  - D:\JannatBooking\hotels_backend\aiagent\core\nlu.js
+    - Added common Arabic Gregorian month variants used by guests, including يونيه/يونية and يوليه/يولية.
+    - Added support for the normalized Arabic connector الي, so text written as الى/إلى remains parseable after normalization.
+    - Verified examples:
+      - ١٥ اكتوبر الى ١٧ اكتوبر
+      - ١٥ يونيه الى ١٨ يونيه
+      - 15 October to 17 October
+  - D:\JannatBooking\hotels_backend\aiagent\core\orchestrator.js
+    - Captures whether the booking flow was already active before NLU updates the slots.
+    - If a hotel, room type, and a fresh NLU date range are known during an active booking/quote flow, the orchestrator now proceeds directly to availability/price checking even if the latest guest message is only dates and contains no English booking keywords.
+    - The guard still refuses direct quote handling for human handoff, payment-help, and clear existing-reservation requests.
+- Why this matters:
+  - Guests often respond naturally with only new dates after a no-availability answer.
+  - This must work across Arabic, English, Arabizi, and mixed writing without hardcoding one exact sentence.
+  - The AI should not go silent when the backend already has the hotel and room type and the guest just changed dates.
+- Local verification:
+  - node -c passed for:
+    - aiagent/core/nlu.js
+    - aiagent/core/orchestrator.js
+  - Node parser checks confirmed the Arabic October and Egyptian Arabic June ranges parse into valid 2026 Gregorian ranges.
+  - zad_ssr browser tests also confirmed the frontend now exposes quickReplies, reducing the chance a guest misses a required Skip/Confirm action.

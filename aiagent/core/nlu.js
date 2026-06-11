@@ -197,7 +197,11 @@ const MONTHS = {
 	"\u0623\u0628\u0631\u064a\u0644": 4,
 	"\u0645\u0627\u064a\u0648": 5,
 	"\u064a\u0648\u0646\u064a\u0648": 6,
+	"\u064a\u0648\u0646\u064a\u0647": 6,
+	"\u064a\u0648\u0646\u064a\u0629": 6,
 	"\u064a\u0648\u0644\u064a\u0648": 7,
+	"\u064a\u0648\u0644\u064a\u0647": 7,
+	"\u064a\u0648\u0644\u064a\u0629": 7,
 	"\u0627\u063a\u0633\u0637\u0633": 8,
 	"\u0623\u063a\u0633\u0637\u0633": 8,
 	"\u0633\u0628\u062a\u0645\u0628\u0631": 9,
@@ -1058,7 +1062,7 @@ function quickGregorianMonthDateRange(text = "") {
 	};
 
 	const dayMonth = new RegExp(
-		`(^|${boundary})(?:from\\s+|du\\s+|de\\s+|del\\s+|al\\s+|au\\s+|le\\s+|el\\s+|\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+|\\u0625\\u0644\\u0649\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+|de\\s+|du\\s+)?(${monthNames})(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
+		`(^|${boundary})(?:from\\s+|du\\s+|de\\s+|del\\s+|al\\s+|au\\s+|le\\s+|el\\s+|\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+|\\u0625\\u0644\\u0649\\s+|\\u0627\\u0644\\u064a\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+|de\\s+|du\\s+)?(${monthNames})(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
 		"gi"
 	);
 	let match = null;
@@ -1104,7 +1108,7 @@ function quickArabicGregorianMonthDateRange(text = "") {
 	if (!monthNames) return null;
 	const matches = [];
 	const re = new RegExp(
-		`(?:^|\\s)(?:\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+)?(\\d{1,2})\\s+(${monthNames})(?:\\s+(20\\d{2}))?`,
+		`(?:^|\\s)(?:\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+|\\u0627\\u0644\\u064a\\s+)?(\\d{1,2})\\s+(${monthNames})(?:\\s+(20\\d{2}))?`,
 		"g"
 	);
 	let match = null;
