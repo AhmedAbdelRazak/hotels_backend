@@ -2535,3 +2535,24 @@ Zad Client Auth Endpoints - 2026-06-10
     - aiagent/core/orchestrator.js
   - Node parser checks confirmed the Arabic October and Egyptian Arabic June ranges parse into valid 2026 Gregorian ranges.
   - zad_ssr browser tests also confirmed the frontend now exposes quickReplies, reducing the chance a guest misses a required Skip/Confirm action.
+
+Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 2026-06-10
+- GitHub push completed:
+  - hotels_backend master commit:
+    b9f50ff - Fix AI date follow-up handling
+- Production server pull/restart completed on ssh jannat:
+  - /home/ahmedadmin/Hotels/hotels_backend fast-forwarded from 1d73a86 to b9f50ff.
+  - node -c passed for:
+    - aiagent/core/nlu.js
+    - aiagent/core/orchestrator.js
+  - hotels-backend restarted through PM2 and stayed online.
+  - PM2 process list was saved during the combined frontend/backend deployment.
+- Live HTTP verification:
+  - https://xhotelpro.com/api/aiagent/health returned 200.
+- Production parser verification:
+  - On ssh jannat, node parser checks confirmed:
+    - ١٥ اكتوبر الى ١٧ اكتوبر -> 2026-10-15 to 2026-10-17.
+    - ١٥ يونيه الى ١٨ يونيه -> 2026-06-15 to 2026-06-18.
+- PM2/log health:
+  - hotels-backend PM2 status was online.
+  - Backend log showed aiagent initialized, socket-driven AI planner active, DB watcher enabled, server on port 8080, and MongoDB Atlas connected.
