@@ -88,6 +88,9 @@ const IN_HOUSE_STATUS = /house|in[-_\s]?house|checked[-_\s]?in/i;
 const PENDING_CONFIRMATION_STATUS =
 	/pending[-_\s]?confirmation|pending[-_\s]?finance[-_\s]?review|pending[-_\s]?agent[-_\s]?commission[-_\s]?approval|finance[-_\s]?rejected|rejected/i;
 const PENDING_CONFIRMATION_ONLY_STATUS = /pending[-_\s]?confirmation/i;
+const PROFIT_REPORT_OTA_SOURCE =
+	/(booking\.?com|booking com|expedia|agoda|airbnb|hotel\.?com|hotels\.?com|trivago|ota)/i;
+const PROFIT_REPORT_ORDER_TAKER_ROLE = /order[\s_-]?taker|ordertaker/i;
 const FINISHED_HOUSEKEEPING_STATUS = /^(finished|done|completed|clean)$/i;
 const SUMMARY_DIRTY_ROOM_REASONS = new Set([
 	"guest_checked_out",
@@ -2150,7 +2153,85 @@ const profitReportQueryDefaults = (query = {}) => {
 	return next;
 };
 
-const buildProfitReportMatch = ({ actor, hotels, query = {} }) => {
+const nonEmptyProfitField = (field) => ({
+	[field]: { $exists: true, $nin: [null, ""] },
+});
+
+const profitOtaReservationFilter = () => ({
+	$or: [
+		{ booking_source: PROFIT_REPORT_OTA_SOURCE },
+		{ "customer_details.booking_source": PROFIT_REPORT_OTA_SOURCE },
+		nonEmptyProfitField("supplierData.otaConfirmationNumber"),
+		nonEmptyProfitField("supplierData.otaProvider"),
+		nonEmptyProfitField("supplierData.otaInboundEmailId"),
+		nonEmptyProfitField("supplierData.otaLastInboundEmailId"),
+		{ "supplierData.otaAutomationPipeline": PROFIT_REPORT_OTA_SOURCE },
+		{ "supplierData.otaCreatedFromEmail": true },
+		{ "otaPlatformReview.source": PROFIT_REPORT_OTA_SOURCE },
+		nonEmptyProfitField("otaPlatformReview.provider"),
+	],
+});
+
+const profitOrderTakerUserIds = async () => {
+	const users = await User.find({
+		activeUser: { $ne: false },
+		$or: [
+			{ role: 7000 },
+			{ roles: 7000 },
+			{ roleDescription: PROFIT_REPORT_ORDER_TAKER_ROLE },
+			{ roleDescriptions: PROFIT_REPORT_ORDER_TAKER_ROLE },
+			{ accessTo: "ownReservations" },
+		],
+	})
+		.select("_id")
+		.lean()
+		.exec();
+
+	return users.map((user) => normalizeId(user._id)).filter(Boolean);
+};
+
+const profitOrderTakerReservationFilter = (orderTakerIds = []) => {
+	const ids = [...new Set(orderTakerIds.map(normalizeId).filter(Boolean))];
+	const validObjectIds = ids
+		.filter((id) => ObjectId.isValid(id))
+		.map((id) => ObjectId(id));
+	const mixedIds = [...ids, ...validObjectIds];
+	const clauses = [
+		{ "orderTaker.role": 7000 },
+		{ "createdBy.role": 7000 },
+		{ "orderTaker.roleDescription": PROFIT_REPORT_ORDER_TAKER_ROLE },
+		{ "createdBy.roleDescription": PROFIT_REPORT_ORDER_TAKER_ROLE },
+		{ "orderTaker.roleDescriptions": PROFIT_REPORT_ORDER_TAKER_ROLE },
+		{ "createdBy.roleDescriptions": PROFIT_REPORT_ORDER_TAKER_ROLE },
+		{ "orderTaker.accessTo": "ownReservations" },
+		{ "createdBy.accessTo": "ownReservations" },
+	];
+
+	if (mixedIds.length) {
+		clauses.push(
+			{ orderTakeId: { $in: mixedIds } },
+			{ createdByUserId: { $in: mixedIds } },
+			{ "orderTaker._id": { $in: mixedIds } },
+			{ "createdBy._id": { $in: mixedIds } }
+		);
+	}
+
+	return { $or: clauses };
+};
+
+const profitEligibleReservationFilter = (orderTakerIds = []) => ({
+	$or: [
+		profitOtaReservationFilter(),
+		profitOrderTakerReservationFilter(orderTakerIds),
+	],
+});
+
+const buildProfitReportMatch = ({
+	actor,
+	hotels,
+	query = {},
+	orderTakerIds = [],
+}) => {
 	const normalizedQuery = profitReportQueryDefaults(query);
 	const hotelIds = filterHotelIdsForQuery(hotels, normalizedQuery.hotelId);
 	if (!hotelIds.length) return null;
@@ -2168,7 +2249,10 @@ const buildProfitReportMatch = ({ actor, hotels, query = {} }) => {
 		match.createdAt = { $gte: PROFIT_REPORT_START_DATE };
 	}
 
-	const clauses = [buildExcludePendingOtaReviewFilter()];
+	const clauses = [
+		buildExcludePendingOtaReviewFilter(),
+		profitEligibleReservationFilter(orderTakerIds),
+	];
 	const visibilityFilter =
 		hotelManagementReservationVisibilityFilterForActor(actor);
 	if (visibilityFilter) clauses.push(visibilityFilter);
@@ -2310,6 +2394,7 @@ const emptyProfitReportPayload = (hotels = [], query = {}) => ({
 		from: "",
 		to: "",
 		range: "custom",
+		scope: "ota_and_order_taker",
 	},
 	page: 1,
 	limit: 0,
@@ -2419,7 +2504,8 @@ const normalizeProfitRow = (reservation = {}) => ({
 });
 
 const listProfitReport = async ({ actor, hotels, query = {} }) => {
-	const built = buildProfitReportMatch({ actor, hotels, query });
+	const orderTakerIds = await profitOrderTakerUserIds();
+	const built = buildProfitReportMatch({ actor, hotels, query, orderTakerIds });
 	if (!built) return emptyProfitReportPayload(hotels, query);
 
 	const exportAll = ["1", "true", "yes", "all"].includes(
@@ -2537,6 +2623,7 @@ const listProfitReport = async ({ actor, hotels, query = {} }) => {
 			...built.period,
 			dateBy: built.dateField,
 			reportStartDate: PROFIT_REPORT_START_DATE,
+			scope: "ota_and_order_taker",
 		},
 		page: exportAll ? 1 : page,
 		limit: exportAll ? total : limit,

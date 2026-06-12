@@ -225,6 +225,7 @@ Access is restricted to platform admins/super admins. Owner-like and hotel-manag
 
 Default report scope:
 
+- Dataset: OTA reservations and reservations taken by Jannat Order Taker accounts only. Ordinary manual/admin reservations are intentionally excluded.
 - Date dimension: `createdAt`
 - Start date: `2026-05-01`
 - End date: open-ended unless the admin sets one
@@ -251,7 +252,9 @@ profitRate = profitMargin / clientTotal
 
 Explicit saved commission is read from `adminPricing.commissionAmount`, `commissionData.amount`, `commissionData.commissionAmount`, `commissionData.commissionValue`, `financial_cycle.commissionAmount`, or `commission`.
 
-For admin-priced OTA reservations where the older `commission` field only mirrors `clientTotal - hotelTotal`, the report does not double-count it as a separate commission unless a clear commission assignment marker exists. This keeps the Profit tab aligned with MoreDetails: platform margin stays separate from a true general commission, and the displayed total profit is `platform margin + commission`.
+For admin-priced OTA reservations where the older `commission` field only mirrors `clientTotal - hotelTotal`, the report does not double-count it as a separate commission unless a clear commission assignment marker exists. The UI does not expose `platformMargin` as its own scorecard or export column; it is kept as an internal component of total `profitMargin`.
+
+Visible scorecards are reservation count, client total, amount to hotel, commission, total profit, and profit rate. The table keeps Total Profit pinned next to the Show Details action column so admins can open `MoreDetails` while keeping the profit value visible.
 
 The endpoint returns the paginated table rows, scorecards, day/week/month timelines, and booking-source breakdown from the same filtered dataset so the UI cards, charts, table, and Excel export reconcile.
 
