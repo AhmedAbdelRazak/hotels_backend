@@ -6622,10 +6622,51 @@ exports.updateReservation = async (req, res) => {
 			delete normalizedUpdateData.customerDetails;
 		}
 
+		const hasExplicitSuperAdminCommission =
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commission") &&
+			isConfiguredSuperAdminReservationActor(requestingActor || {});
+		const explicitSuperAdminCommission = hasExplicitSuperAdminCommission
+			? n2(normalizedUpdateData.commission)
+			: null;
+
 		normalizedUpdateData = await normalizeReservationStayPricing(
 			existingReservation,
 			normalizedUpdateData
 		);
+		if (hasExplicitSuperAdminCommission) {
+			const existingCommissionData =
+				existingReservation.commissionData &&
+				typeof existingReservation.commissionData.toObject === "function"
+					? existingReservation.commissionData.toObject()
+					: existingReservation.commissionData || {};
+			const normalizedCommissionData =
+				normalizedUpdateData.commissionData &&
+				typeof normalizedUpdateData.commissionData === "object"
+					? normalizedUpdateData.commissionData
+					: {};
+			const commissionStatus =
+				explicitSuperAdminCommission > 0
+					? String(
+							normalizedUpdateData.commissionStatus ||
+								existingReservation.commissionStatus ||
+								"commission due"
+					  ).trim() || "commission due"
+					: "no commission due";
+
+			normalizedUpdateData.commission = explicitSuperAdminCommission;
+			normalizedUpdateData.commissionStatus = commissionStatus;
+			normalizedUpdateData.commissionData = {
+				...existingCommissionData,
+				...normalizedCommissionData,
+				assigned: true,
+				amount: explicitSuperAdminCommission,
+				status: commissionStatus,
+				assignedAt: new Date(),
+				assignedBy: requestingUserId || null,
+				proposedByAgent: false,
+			};
+			delete normalizedUpdateData.__commissionAssignmentReset;
+		}
 		applyAdminPricingVisibilityForActor(
 			normalizedUpdateData,
 			requestingActor || {},

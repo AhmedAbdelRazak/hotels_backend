@@ -10,10 +10,12 @@ Frontend commits:
 
 - `43e487a Smooth reservation edit modals`
 - `26541a4 Add commission field to pricing modal`
+- `2348c3a Stabilize pricing distribution modals`
 
 Backend commit:
 
 - `c58e62b Persist OTA pricing commission`
+- `<latest>` Preserve explicit SUPER Admin commission during reservation pricing normalization
 
 ## User-facing symptoms
 
@@ -57,12 +59,30 @@ Backend commit:
   - Replaced three per-row distribute buttons with one `Distribute totals` action.
   - Adds optional `showCommissionAmount`, `commissionAmount`, and `onCommissionChange` props.
   - Admin reservation edit passes these props only for SUPER Admins.
+  - Keeps nightly pricing edits as local draft state while the modal is open.
+  - Syncs edited rows back to the parent reservation only when the user clicks Apply/Save.
+  - This prevents Distribute from being reset by parent rerenders while the user is still editing.
+
+- Shared pricing modal callers hardened for stale state:
+  - `hotels_frontend/src/AdminModule/AllReservation/EditReservationMain.js`
+  - `hotels_frontend/src/HotelModule/HotelReports/EditReservationMain.js`
+  - `hotels_frontend/src/AdminModule/CustomerService/HelperSideDrawer.js`
+  - `hotels_frontend/src/AdminModule/JannatTools/OrderTaker.js`
+
+- `hotels_frontend/src/AdminModule/OtaReservations/OtaReservationsMain.js`
+  - The OTA pricing modal initializes draft state once per opened reservation.
+  - Parent rerenders for the same reservation should not reset distributed totals while the user is editing.
 
 ## Important backend files
 
 - `hotels_backend/controllers/janat.js`
   - `updateOtaReservationPricing` now allows `commission`.
   - OTA pricing audit entries include commission `from` and `to` values.
+
+- `hotels_backend/controllers/reservations.js`
+  - `normalizeReservationStayPricing` can reset commission when pricing changes.
+  - `updateReservation` now preserves an explicitly submitted commission only for configured SUPER Admin actors after pricing normalization.
+  - This covers the admin edit modal case where SUPER Admin changes pricing and commission together, or changes only commission while room rows are also present in the payload.
 
 ## Data fields to inspect
 
@@ -96,6 +116,8 @@ Nightly pricing rows:
 - OTA pricing edit has a separate general commission input.
 - Pricing distribution has one button that distributes all editable totals together.
 - In Arabic, the single distribute button appears on the left side of the input group. In English, it appears on the right side.
+- Clicking Distribute updates the modal table draft immediately, but the parent reservation is updated only after Apply/Save.
+- SUPER Admin commission from the admin edit modal should persist even when pricing rows are redistributed in the same save.
 
 ## Home server deployment steps
 
