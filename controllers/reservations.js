@@ -1114,6 +1114,124 @@ const buildStayDateKeys = (checkinDate, checkoutDate) => {
 	return days;
 };
 
+const ADMIN_MANAGED_PRICING_UPDATE_FIELDS = [
+	"checkin_date",
+	"checkout_date",
+	"hotelId",
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"total_rooms",
+	"days_of_residence",
+	"total_amount",
+	"sub_total",
+	"commission",
+	"adminPricing",
+	"adminPricingVisibility",
+];
+
+const ADMIN_MANAGED_DERIVED_PRICING_FIELDS = [
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"total_rooms",
+	"days_of_residence",
+	"total_amount",
+	"sub_total",
+	"adminPricing",
+	"adminPricingVisibility",
+];
+
+const adminManagedPricingEnabled = (reservation = {}) =>
+	reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true;
+
+const roomSelectionSignature = (rooms = []) => {
+	const counts = new Map();
+	(Array.isArray(rooms) ? rooms : []).forEach((room = {}) => {
+		const roomType = String(room.room_type || room.roomType || "")
+			.trim()
+			.toLowerCase();
+		const displayName = String(room.displayName || room.display_name || "")
+			.trim()
+			.toLowerCase();
+		if (!roomType && !displayName) return;
+		const count = Math.max(1, Number(room.count || room.totalRooms || 1) || 1);
+		const key = `${roomType}|${displayName}`;
+		counts.set(key, (counts.get(key) || 0) + count);
+	});
+	return JSON.stringify(Array.from(counts.entries()).sort());
+};
+
+const adminManagedRoomSelectionChanged = (updates = {}, reservation = {}) => {
+	const hasRooms = Object.prototype.hasOwnProperty.call(updates, "pickedRoomsType");
+	const hasPricingRooms = Object.prototype.hasOwnProperty.call(
+		updates,
+		"pickedRoomsPricing"
+	);
+	if (!hasRooms && !hasPricingRooms) return false;
+	const incomingRooms = hasPricingRooms
+		? updates.pickedRoomsPricing
+		: updates.pickedRoomsType;
+	const existingRooms =
+		Array.isArray(reservation.pickedRoomsPricing) &&
+		reservation.pickedRoomsPricing.length
+			? reservation.pickedRoomsPricing
+			: reservation.pickedRoomsType;
+	return roomSelectionSignature(incomingRooms) !== roomSelectionSignature(existingRooms);
+};
+
+const stripAdminManagedPricingUpdateFields = (
+	updates = {},
+	{ keepCommission = false } = {}
+) => {
+	ADMIN_MANAGED_DERIVED_PRICING_FIELDS.forEach((field) => {
+		delete updates[field];
+	});
+	if (!keepCommission) delete updates.commission;
+	return updates;
+};
+
+const protectAdminManagedPricingUpdate = ({
+	updates = {},
+	reservation = {},
+	actor = {},
+	hasExplicitSuperAdminCommission = false,
+} = {}) => {
+	if (!adminManagedPricingEnabled(reservation)) return { allowed: true };
+
+	const touched = ADMIN_MANAGED_PRICING_UPDATE_FIELDS.some((field) =>
+		Object.prototype.hasOwnProperty.call(updates, field)
+	);
+	if (!touched) return { allowed: true };
+
+	const hasCompletePricingPayload =
+		Object.prototype.hasOwnProperty.call(updates, "pickedRoomsPricing") &&
+		Array.isArray(updates.pickedRoomsPricing) &&
+		updates.pickedRoomsPricing.length > 0;
+	if (isPlatformAdminPricingActor(actor || {}) && hasCompletePricingPayload) {
+		return { allowed: true };
+	}
+
+	const materialSelectionChange = adminManagedRoomSelectionChanged(
+		updates,
+		reservation
+	);
+
+	if (materialSelectionChange) {
+		return {
+			allowed: false,
+			status: isPlatformAdminPricingActor(actor || {}) ? 409 : 403,
+			error: isPlatformAdminPricingActor(actor || {})
+				? "Admin-managed OTA pricing requires the pricing modal so daily hotel-visible pricing is saved with the date/room change."
+				: "This reservation has admin-managed pricing. Only platform admins can change its dates, rooms, or pricing.",
+			code: "admin_managed_pricing_locked",
+		};
+	}
+
+	stripAdminManagedPricingUpdateFields(updates, {
+		keepCommission: hasExplicitSuperAdminCommission,
+	});
+	return { allowed: true, stripped: true };
+};
+
 const normalizeCalendarText = (value) =>
 	String(value || "")
 		.trim()
@@ -6449,30 +6567,22 @@ exports.updateReservation = async (req, res) => {
 				});
 			}
 		}
-		const adminManagedPricingLocked =
-			existingReservation?.adminPricingVisibility
-				?.rootOnlyForHotelManagement === true &&
-			!isPlatformAdminPricingActor(requestingActor || {});
-		const adminManagedPricingFieldsTouched = [
-			"checkin_date",
-			"checkout_date",
-			"hotelId",
-			"pickedRoomsType",
-			"pickedRoomsPricing",
-			"total_amount",
-			"sub_total",
-			"commission",
-			"adminPricing",
-			"adminPricingVisibility",
-		].some((field) =>
-			Object.prototype.hasOwnProperty.call(normalizedUpdateData, field)
-		);
-		if (adminManagedPricingLocked && adminManagedPricingFieldsTouched) {
-			return res.status(403).json({
-				error:
-					"This reservation has admin-managed pricing. Only platform admins can change its dates, rooms, or pricing.",
-				code: "admin_managed_pricing_locked",
-			});
+		const hasExplicitSuperAdminCommission =
+			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commission") &&
+			isConfiguredSuperAdminReservationActor(requestingActor || {});
+		const explicitSuperAdminCommission = hasExplicitSuperAdminCommission
+			? n2(normalizedUpdateData.commission)
+			: null;
+		const adminManagedPricingProtection = protectAdminManagedPricingUpdate({
+			updates: normalizedUpdateData,
+			reservation: existingReservation,
+			actor: requestingActor || {},
+			hasExplicitSuperAdminCommission,
+		});
+		if (!adminManagedPricingProtection.allowed) {
+			return res
+				.status(adminManagedPricingProtection.status || 403)
+				.json(adminManagedPricingProtection);
 		}
 		const financeSensitiveUpdateRequested = [
 			"commission",
@@ -6621,13 +6731,6 @@ exports.updateReservation = async (req, res) => {
 		if (normalizedUpdateData.customerDetails) {
 			delete normalizedUpdateData.customerDetails;
 		}
-
-		const hasExplicitSuperAdminCommission =
-			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commission") &&
-			isConfiguredSuperAdminReservationActor(requestingActor || {});
-		const explicitSuperAdminCommission = hasExplicitSuperAdminCommission
-			? n2(normalizedUpdateData.commission)
-			: null;
 
 		normalizedUpdateData = await normalizeReservationStayPricing(
 			existingReservation,
@@ -8868,7 +8971,7 @@ const otaHotelVisibleAmountForNotification = (reservation = {}) => {
 	const pricingRooms = Array.isArray(reservation.pickedRoomsPricing)
 		? reservation.pickedRoomsPricing
 		: [];
-	const sourceRooms = rooms.length ? rooms : pricingRooms;
+	const sourceRooms = pricingRooms.length ? pricingRooms : rooms;
 	const rootTotal = sourceRooms.reduce((reservationSum, room = {}) => {
 		const count = Number(room.count || 1) > 0 ? Number(room.count || 1) : 1;
 		const pricingByDay = Array.isArray(room.pricingByDay)

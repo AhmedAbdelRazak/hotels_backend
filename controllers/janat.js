@@ -2412,7 +2412,7 @@ const computeOtaHotelVisibleAmount = (reservation = {}) => {
 	const roomsPricing = Array.isArray(reservation.pickedRoomsPricing)
 		? reservation.pickedRoomsPricing
 		: [];
-	const sourceRooms = rooms.length ? rooms : roomsPricing;
+	const sourceRooms = roomsPricing.length ? roomsPricing : rooms;
 	const rootTotal = sourceRooms.reduce((reservationSum, room) => {
 		const count = roomCountValue(room);
 		const pricingByDay = Array.isArray(room?.pricingByDay)
@@ -2557,7 +2557,7 @@ const validateOtaReleaseHotelBasePrice = (reservation = {}) => {
 	const pricingRooms = Array.isArray(reservation.pickedRoomsPricing)
 		? reservation.pickedRoomsPricing
 		: [];
-	const rooms = sourceRooms.length ? sourceRooms : pricingRooms;
+	const rooms = pricingRooms.length ? pricingRooms : sourceRooms;
 	if (!rooms.length) {
 		return {
 			ready: false,
@@ -5631,6 +5631,24 @@ exports.updateReservationDetails = async (req, res) => {
 		}
 		delete updateData.booking_source;
 		delete updateData.bookingSource;
+		if (reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true) {
+			[
+				"pickedRoomsType",
+				"pickedRoomsPricing",
+				"total_rooms",
+				"days_of_residence",
+				"total_amount",
+				"sub_total",
+				"commission",
+				"adminPricing",
+				"adminPricingVisibility",
+				"checkin_date",
+				"checkout_date",
+				"hotelId",
+			].forEach((field) => {
+				delete updateData[field];
+			});
+		}
 		if (
 			updateData.financial_cycle &&
 			typeof updateData.financial_cycle === "object"

@@ -456,6 +456,59 @@ const projectRoomPricingToNightlyPrice = (room = {}, stayDates = []) => {
 	};
 };
 
+const sortedPricingRows = (rows = []) =>
+	(Array.isArray(rows) ? rows : [])
+		.filter((row) => row && typeof row === "object")
+		.map((row, index) => ({
+			row,
+			index,
+			date: dateOnlyKey(row.date || row.calendarDate),
+		}))
+		.sort((left, right) => {
+			if (!left.date && !right.date) return left.index - right.index;
+			if (!left.date) return 1;
+			if (!right.date) return -1;
+			return left.date.localeCompare(right.date);
+		});
+
+const findNearestPricingTemplate = (sortedRows = [], date, index = 0) => {
+	if (!sortedRows.length) return {};
+	const exact = sortedRows.find((entry) => entry.date === date);
+	if (exact) return exact.row;
+
+	const previous = sortedRows
+		.filter((entry) => entry.date && entry.date < date)
+		.pop();
+	if (previous) return previous.row;
+
+	const next = sortedRows.find((entry) => entry.date && entry.date > date);
+	if (next) return next.row;
+
+	return sortedRows[index % sortedRows.length]?.row || sortedRows[0].row || {};
+};
+
+const projectAdminManagedPricingRowsToStay = (rows = [], stayDates = []) => {
+	const sortedRows = sortedPricingRows(rows);
+	return stayDates.map((date, index) => {
+		const template = findNearestPricingTemplate(sortedRows, date, index);
+		return normalizeProvidedPricingDay({ ...template, date });
+	});
+};
+
+const projectAdminManagedRoomsToStayDates = (rooms = [], stayDates = []) =>
+	(Array.isArray(rooms) ? rooms : []).map((room) => {
+		const rows = Array.isArray(room.pricingByDay) ? room.pricingByDay : [];
+		if (!rows.length) {
+			return normalizeProvidedRoomPricing(
+				projectRoomPricingToNightlyPrice(room, stayDates)
+			);
+		}
+		return normalizeProvidedRoomPricing({
+			...room,
+			pricingByDay: projectAdminManagedPricingRowsToStay(rows, stayDates),
+		});
+	});
+
 const comparableRoomDay = (day = {}) => ({
 	date: dateOnlyKey(day.date || day.calendarDate),
 	price: n2(day.totalPriceWithCommission ?? day.price),
@@ -489,6 +542,28 @@ const comparableRoom = (room = {}) => ({
 const roomsAreSame = (left = [], right = []) =>
 	JSON.stringify((Array.isArray(left) ? left : []).map(comparableRoom)) ===
 	JSON.stringify((Array.isArray(right) ? right : []).map(comparableRoom));
+
+const adminManagedPricingEnabled = (reservation = {}) =>
+	reservation?.adminPricingVisibility?.rootOnlyForHotelManagement === true;
+
+const stripCalculatedPricingFields = (updates = {}, { keepCommission = false } = {}) => {
+	[
+		"pickedRoomsType",
+		"pickedRoomsPricing",
+		"total_rooms",
+		"days_of_residence",
+		"total_amount",
+		"sub_total",
+		"adminPricing",
+		"adminPricingVisibility",
+	].forEach((field) => {
+		delete updates[field];
+	});
+	if (!keepCommission) {
+		delete updates.commission;
+	}
+	return updates;
+};
 
 const roomIdentity = (room = {}) =>
 	`${normalizeText(getRoomType(room))}|${normalizeText(getRoomDisplayName(room))}`;
@@ -967,15 +1042,27 @@ const normalizeReservationStayPricing = async (
 		? sourceRoomsPricing
 		: [];
 	const hasRooms = rooms.length > 0 || pricingRooms.length > 0;
-	const primaryRooms = rooms.length > 0 ? rooms : pricingRooms;
 	const existingRooms = Array.isArray(existing.pickedRoomsType)
 		? existing.pickedRoomsType
 		: [];
 	const existingPricingRooms = Array.isArray(existing.pickedRoomsPricing)
 		? existing.pickedRoomsPricing
 		: [];
-	const existingPrimaryRooms =
-		rooms.length > 0 ? existingRooms : existingPricingRooms;
+	const existingAdminManagedPricing = adminManagedPricingEnabled(existing);
+	const pricingRoomsWereSent = hasOwn(updates, "pickedRoomsPricing");
+	const preferPricingRooms =
+		pricingRooms.length > 0 &&
+		(pricingRoomsWereSent || existingAdminManagedPricing);
+	const primaryRooms = preferPricingRooms
+		? pricingRooms
+		: rooms.length > 0
+		? rooms
+		: pricingRooms;
+	const existingPrimaryRooms = preferPricingRooms
+		? existingPricingRooms
+		: rooms.length > 0
+		? existingRooms
+		: existingPricingRooms;
 	const roomsChanged =
 		hasOwn(updates, "pickedRoomsType") && !roomsAreSame(rooms, existingRooms);
 	const pricingRoomsChanged =
@@ -991,6 +1078,60 @@ const normalizeReservationStayPricing = async (
 		primaryRooms,
 		stayDates
 	);
+
+	if (
+		existingAdminManagedPricing &&
+		hasOwn(updates, "pickedRoomsType") &&
+		!pricingRoomsWereSent
+	) {
+		const selectionChanged = !roomIdentitiesAreSame(rooms, existingRooms);
+		if (selectionChanged) {
+			throw new ReservationPricingError(
+				"Admin-managed OTA pricing is locked. Update pricing through the pricing modal so pickedRoomsPricing and adminPricing are saved together.",
+				409,
+				"admin_managed_pricing_requires_pricing_payload"
+			);
+		}
+		if (!dateChanged && !hotelChanged) {
+			return stripCalculatedPricingFields(updates, {
+				keepCommission: hasOwn(updates, "commission"),
+			});
+		}
+	}
+
+	if (
+		existingAdminManagedPricing &&
+		!pricingRoomsWereSent &&
+		(dateChanged || hotelChanged)
+	) {
+		const sourceAdminRooms = existingPricingRooms.length
+			? existingPricingRooms
+			: existingRooms;
+		const nextRooms = projectAdminManagedRoomsToStayDates(
+			sourceAdminRooms,
+			stayDates
+		);
+		const totals = summarizeRooms(nextRooms);
+		const existingAdminPricing = toPlainObject(existing.adminPricing);
+
+		updates.pickedRoomsType = nextRooms;
+		updates.pickedRoomsPricing = nextRooms;
+		updates.total_rooms = nextRooms.reduce(
+			(sum, room) => sum + normalizeRoomCount(room.count),
+			0
+		);
+		updates.days_of_residence = stayDates.length;
+		updates.total_amount = totals.total_amount;
+		updates.sub_total = totals.sub_total;
+		updates.adminPricing = {
+			...existingAdminPricing,
+			...totals.adminPricing,
+			mode: existingAdminPricing.mode || totals.adminPricing.mode,
+		};
+		resetCommissionAssignmentForPricingChange(updates, existing);
+		return updates;
+	}
+
 	const mustReprice =
 		hasRooms &&
 		(hotelChanged ||

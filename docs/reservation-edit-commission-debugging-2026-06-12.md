@@ -199,6 +199,18 @@ The SUPER Admin-only OTA cards in `src/AdminModule/AllReservation/MoreDetails.js
 
 This is a display-only composition for MoreDetails. It should not mutate nightly pricing rows, OTA expense totals, hotel-visible totals, or the backend reservation payload.
 
+## Admin-managed OTA pricing invariant
+
+For reservations with `adminPricingVisibility.rootOnlyForHotelManagement === true`, the saved admin pricing is authoritative. Normal reservation edits must not replace those rows with hotel calendar prices, OTA original prices, or stale client payload rows.
+
+Important behavior:
+
+- Hotel-facing views prefer `pickedRoomsPricing` before `pickedRoomsType` when showing root-only pricing.
+- Source/customer/status/payment edits drop stale pricing fields and keep the saved admin pricing intact.
+- Date or hotel changes project the existing saved nightly admin rates onto the new stay dates. Existing overlapping dates keep their saved rows; added dates inherit the nearest saved nightly row.
+- Real room-selection changes without a full `pickedRoomsPricing` payload are rejected instead of guessed.
+- Admin pricing modal saves should send `pickedRoomsType`, `pickedRoomsPricing`, and `adminPricing` together.
+
 ## SSH and Tailscale debugging
 
 Symptom:

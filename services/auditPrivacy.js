@@ -291,11 +291,18 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	const sourcePricingRooms = Array.isArray(sanitized.pickedRoomsPricing)
 		? sanitized.pickedRoomsPricing
 		: [];
-	const sanitizedRooms = sanitizeRoomsToRootOnly(sourceRooms);
-	const sanitizedPricingRooms = sanitizeRoomsToRootOnly(sourcePricingRooms);
-	const roomRootTotal = rootTotalForRooms(
-		sourceRooms.length ? sourceRooms : sourcePricingRooms
+	const preferAdminPricingRooms =
+		adminRootOnlyPricingEnabled(sanitized) && sourcePricingRooms.length > 0;
+	const rootSourceRooms = preferAdminPricingRooms
+		? sourcePricingRooms
+		: sourceRooms.length
+		? sourceRooms
+		: sourcePricingRooms;
+	const sanitizedRooms = sanitizeRoomsToRootOnly(rootSourceRooms);
+	const sanitizedPricingRooms = sanitizeRoomsToRootOnly(
+		sourcePricingRooms.length ? sourcePricingRooms : rootSourceRooms
 	);
+	const roomRootTotal = rootTotalForRooms(rootSourceRooms);
 	const adminRootTotal = moneyNumber(sanitized?.adminPricing?.rootTotal);
 	const fallbackSubTotal = moneyNumber(sanitized.sub_total);
 	const rootTotal = n2(
@@ -309,7 +316,7 @@ const sanitizeReservationPricingForHotelViewer = (reservation = {}) => {
 	);
 
 	sanitized.pickedRoomsType = sanitizedRooms;
-	if (sourcePricingRooms.length) {
+	if (sourcePricingRooms.length || preferAdminPricingRooms) {
 		sanitized.pickedRoomsPricing = sanitizedPricingRooms;
 	}
 	sanitized.total_amount = rootTotal;
