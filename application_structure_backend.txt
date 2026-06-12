@@ -2217,6 +2217,19 @@ Future TODO Backlog - Added 2026-05-26
   - New /hotel-management/* reservation-derived screens must enforce this in the backend query, not only in React.
   - /admin/* platform-admin endpoints may keep full history when they are protected by platform-admin auth, but shared controllers must still call the helper so the hotel-admin route variants remain restricted.
 
+2026-06-12 Hotel-Management Inventory Occupancy Accuracy
+- Affected routes:
+  - /api/overall-dashboard/executive-report/inventory/:userId
+  - /api/overall-dashboard/executive-report/inventory-day/:userId
+  - /api/hotel-inventory/:hotelId/calendar
+  - /api/hotel-inventory/:hotelId/day
+- Backend contract:
+  - controllers/hotel_inventory.js buildHotelInventoryCalendarPayload is the effective shared calendar source for hotel-management overall inventory and single-hotel inventory reports.
+  - Booked room-nights and occupied room-nights are intentionally separate. booked is raw reservation demand; occupied is capped at physical/sellable capacity for true occupancy percentage.
+  - Overbooked days and room types are still flagged through overbooked/overage, but averageOccupancyRate must use occupiedRoomNights / capacityRoomNights and should not exceed 100% because of overbooking.
+  - Response payloads include bookedRoomNights, occupiedRoomNights, remainingRoomNights, averageBookingRate, averageOccupancyRate, peakDay, per-cell booked/occupied/available, and warnings.
+  - overall_dashboard.js inventoryRangeFromQuery allows up to 185 days so normal multi-month Hijri summary windows do not truncate to 62 days.
+
 2026-06-08 AI Chat Reservation Source Privacy
 - Stored data rule:
   - AI-created reservations remain stored with booking_source="AI Chat" so platform audit/admin tools can identify the automation source.

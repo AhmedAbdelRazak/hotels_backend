@@ -2987,7 +2987,7 @@ const inventoryRangeFromQuery = (query = {}) => {
 		end = swap;
 	}
 
-	const maxDays = 62;
+	const maxDays = 185;
 	const days = [];
 	let cursor = new Date(start);
 	while (cursor <= end && days.length < maxDays) {

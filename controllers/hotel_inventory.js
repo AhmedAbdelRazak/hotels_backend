@@ -532,12 +532,6 @@ const buildHotelInventoryCalendarPayload = async (
 	}
 
 	const roomTypeMap = buildRoomTypeMap(hotel.roomCountDetails || []);
-	const baseKeys = new Set(
-		Array.from(roomTypeMap.values())
-			.filter((rt) => !rt.derived)
-			.map((rt) => rt.key)
-	);
-
 	const rooms = await Rooms.find({ hotelId })
 		.select("_id display_name room_type individualBeds")
 		.lean();
@@ -586,15 +580,29 @@ const buildHotelInventoryCalendarPayload = async (
 			key: rt.key,
 			label: rt.label,
 			roomType: rt.roomType,
+			color: rt.color || null,
+			totalRooms: Number(rt.count) || 0,
 			capacityNights: 0,
+			bookedNights: 0,
 			occupiedNights: 0,
+			availableNights: 0,
 			occupancyRate: 0,
+			bookingRate: 0,
 			derived: rt.derived,
 		};
 	});
 
 	let capacityRoomNights = 0;
+	let bookedRoomNights = 0;
 	let occupiedRoomNights = 0;
+	let remainingRoomNights = 0;
+	let peakDay = {
+		date: null,
+		occupancyRate: 0,
+		booked: 0,
+		occupied: 0,
+		capacity: 0,
+	};
 
 	range.days.forEach((dayMoment) => {
 		const dayKey = dayMoment.format("YYYY-MM-DD");
@@ -603,8 +611,11 @@ const buildHotelInventoryCalendarPayload = async (
 		roomTypeMap.forEach((rt) => {
 			dayRooms[rt.key] = {
 				capacity: rt.count,
+				booked: 0,
 				occupied: 0,
+				available: Number(rt.count) || 0,
 				occupancyRate: 0,
+				bookingRate: 0,
 				overbooked: false,
 				overage: 0,
 			};
@@ -618,67 +629,114 @@ const buildHotelInventoryCalendarPayload = async (
 				if (!dayRooms[line.key]) {
 					dayRooms[line.key] = {
 						capacity: 0,
+						booked: 0,
 						occupied: 0,
+						available: 0,
 						occupancyRate: 0,
+						bookingRate: 0,
 						overbooked: false,
 						overage: 0,
 					};
 				}
-				dayRooms[line.key].occupied += Number(line.count) || 0;
+				dayRooms[line.key].booked += Number(line.count) || 0;
 			});
 		});
 
 		let dayCapacity = 0;
+		let dayBooked = 0;
 		let dayOccupied = 0;
+		let dayAvailable = 0;
 
 		Object.keys(dayRooms).forEach((key) => {
 			const cell = dayRooms[key];
-			const capacity = Number(cell.capacity) || 0;
-			const occupied = Number(cell.occupied) || 0;
-			const derivedCapacity = capacity === 0 && occupied > 0 ? occupied : capacity;
-			cell.capacity = derivedCapacity;
-			cell.occupancyRate = derivedCapacity > 0 ? occupied / derivedCapacity : 0;
+			const roomTypeMeta = roomTypeMap.get(key) || {};
+			const rawCapacity =
+				Number(cell.capacity) || Number(roomTypeMeta.count) || 0;
+			const booked = Number(cell.booked ?? cell.occupied) || 0;
+			const capacity = rawCapacity === 0 && booked > 0 ? booked : rawCapacity;
+			const occupied = Math.min(booked, capacity);
+			const available = Math.max(capacity - occupied, 0);
+
+			cell.capacity = capacity;
+			cell.booked = booked;
+			cell.occupied = occupied;
+			cell.available = available;
+			cell.occupancyRate = capacity > 0 ? occupied / capacity : 0;
+			cell.bookingRate = capacity > 0 ? booked / capacity : 0;
 			cell.overbooked =
-				capacity > 0 && occupied > capacity && derivedCapacity === capacity;
-			cell.overage = cell.overbooked ? occupied - capacity : 0;
+				!roomTypeMeta.derived && rawCapacity > 0 && booked > rawCapacity;
+			cell.overage = cell.overbooked ? Math.max(booked - rawCapacity, 0) : 0;
+
+			dayCapacity += capacity;
+			dayBooked += booked;
 			dayOccupied += occupied;
-			if (baseKeys.has(key)) {
-				dayCapacity += derivedCapacity;
-			}
+			dayAvailable += available;
 
 			if (!occupancyByType[key]) {
 				occupancyByType[key] = {
 					key,
-					label: key,
-					roomType: "",
+					label: roomTypeMeta.label || key,
+					roomType: roomTypeMeta.roomType || "",
+					color: roomTypeMeta.color || null,
+					totalRooms: Number(roomTypeMeta.count) || 0,
 					capacityNights: 0,
+					bookedNights: 0,
 					occupiedNights: 0,
+					availableNights: 0,
 					occupancyRate: 0,
+					bookingRate: 0,
 					derived: true,
 				};
 			}
-			occupancyByType[key].capacityNights += derivedCapacity;
+			occupancyByType[key].capacityNights += capacity;
+			occupancyByType[key].bookedNights += booked;
 			occupancyByType[key].occupiedNights += occupied;
+
+			if (cell.overbooked) {
+				warnings.push({
+					date: dayKey,
+					roomType: roomTypeMeta.label || key,
+					roomKey: key,
+					booked,
+					occupied,
+					capacity,
+					overage: cell.overage,
+				});
+			}
 		});
 
-		if (dayCapacity > 0 && dayOccupied > dayCapacity) {
-			warnings.push({
+		capacityRoomNights += dayCapacity;
+		bookedRoomNights += dayBooked;
+		occupiedRoomNights += dayOccupied;
+		remainingRoomNights += dayAvailable;
+
+		const dayOccupancyRate =
+			dayCapacity > 0 ? dayOccupied / dayCapacity : 0;
+		const dayBookingRate = dayCapacity > 0 ? dayBooked / dayCapacity : 0;
+		const dayOverbooked = dayCapacity > 0 && dayBooked > dayCapacity;
+		const dayOverage = dayOverbooked ? Math.max(dayBooked - dayCapacity, 0) : 0;
+
+		if (dayOccupancyRate > peakDay.occupancyRate) {
+			peakDay = {
 				date: dayKey,
+				occupancyRate: dayOccupancyRate,
+				booked: dayBooked,
 				occupied: dayOccupied,
 				capacity: dayCapacity,
-				overage: dayOccupied - dayCapacity,
-			});
+			};
 		}
-
-		capacityRoomNights += dayCapacity;
-		occupiedRoomNights += dayOccupied;
 
 		days.push({
 			date: dayKey,
 			totals: {
 				capacity: dayCapacity,
+				booked: dayBooked,
 				occupied: dayOccupied,
-				occupancyRate: dayCapacity > 0 ? dayOccupied / dayCapacity : 0,
+				available: dayAvailable,
+				occupancyRate: dayOccupancyRate,
+				bookingRate: dayBookingRate,
+				overbooked: dayOverbooked,
+				overage: dayOverage,
 			},
 			rooms: dayRooms,
 		});
@@ -689,6 +747,14 @@ const buildHotelInventoryCalendarPayload = async (
 			entry.capacityNights > 0
 				? entry.occupiedNights / entry.capacityNights
 				: 0;
+		entry.bookingRate =
+			entry.capacityNights > 0
+				? entry.bookedNights / entry.capacityNights
+				: 0;
+		entry.availableNights = Math.max(
+			entry.capacityNights - entry.occupiedNights,
+			0
+		);
 	});
 
 	const baseRoomTypes = Array.from(roomTypeMap.values()).filter(
@@ -708,11 +774,18 @@ const buildHotelInventoryCalendarPayload = async (
 		totalPhysicalRooms: totalRooms,
 		totalUnits,
 		totalRooms,
+		soldRoomNights: occupiedRoomNights,
+		availableRoomNights: capacityRoomNights,
 		capacityRoomNights,
+		bookedRoomNights,
 		occupiedRoomNights,
-		remainingRoomNights: Math.max(capacityRoomNights - occupiedRoomNights, 0),
+		remainingRoomNights:
+			remainingRoomNights || Math.max(capacityRoomNights - occupiedRoomNights, 0),
 		averageOccupancyRate:
 			capacityRoomNights > 0 ? occupiedRoomNights / capacityRoomNights : 0,
+		averageBookingRate:
+			capacityRoomNights > 0 ? bookedRoomNights / capacityRoomNights : 0,
+		peakDay,
 		occupancyByType: Object.values(occupancyByType),
 		warnings,
 	};
@@ -780,7 +853,7 @@ const buildHotelInventoryDayPayload = async (
 	const includeCancelledFlag =
 		includeCancelled === true || String(includeCancelled || "") === "true";
 	const filteredReservations = [];
-	let occupied = 0;
+	let booked = 0;
 
 	reservations.forEach((reservation) => {
 		if (!isReservationActive(reservation, includeCancelledFlag)) return;
@@ -802,7 +875,7 @@ const buildHotelInventoryDayPayload = async (
 			if (roomKey && line.key !== roomKey) return sum;
 			return sum + (Number(line.count) || 0);
 		}, 0);
-		occupied += roomCount;
+		booked += roomCount;
 		filteredReservations.push({
 			...reservation,
 			payment_status: meta.label,
@@ -817,9 +890,12 @@ const buildHotelInventoryDayPayload = async (
 				(sum, rt) => sum + (Number(rt.count) || 0),
 				0
 		  );
-	if (capacity === 0 && occupied > 0) {
-		capacity = occupied;
+	if (capacity === 0 && booked > 0) {
+		capacity = booked;
 	}
+	const occupied = Math.min(booked, capacity);
+	const available = Math.max(capacity - occupied, 0);
+	const overbooked = capacity > 0 && booked > capacity;
 
 	return {
 		hotel: { _id: hotel._id, hotelName: hotel.hotelName },
@@ -827,9 +903,13 @@ const buildHotelInventoryDayPayload = async (
 		roomKey: roomKey || null,
 		roomLabel: roomLabel || null,
 		capacity,
+		booked,
 		occupied,
-		overbooked: capacity > 0 && occupied > capacity,
-		overage: capacity > 0 && occupied > capacity ? occupied - capacity : 0,
+		available,
+		occupancyRate: capacity > 0 ? occupied / capacity : 0,
+		bookingRate: capacity > 0 ? booked / capacity : 0,
+		overbooked,
+		overage: overbooked ? booked - capacity : 0,
 		reservations: filteredReservations,
 	};
 };
@@ -853,6 +933,17 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 	}
 
 	try {
+		const calendarVisibilityActor =
+			await resolveReservationVisibilityActorForRequest(req);
+		const payload = await buildHotelInventoryCalendarPayload(hotelId, {
+			start,
+			end,
+			includeCancelled: includeCancelled === "true",
+			paymentStatuses,
+			reservationVisibilityActor: calendarVisibilityActor,
+		});
+		return res.json(payload);
+
 		const hotel = await HotelDetails.findById(hotelId).select(
 			"hotelName belongsTo roomCountDetails commission"
 		);
@@ -1058,7 +1149,9 @@ exports.getHotelInventoryCalendar = async (req, res) => {
 		});
 	} catch (err) {
 		console.error("Error in getHotelInventoryCalendar:", err);
-		res.status(500).json({ error: "Failed to load hotel inventory calendar" });
+		res.status(err?.status || 500).json({
+			error: err?.message || "Failed to load hotel inventory calendar",
+		});
 	}
 };
 
@@ -1079,6 +1172,17 @@ exports.getHotelInventoryDay = async (req, res) => {
 	}
 
 	try {
+		const dayVisibilityActor =
+			await resolveReservationVisibilityActorForRequest(req);
+		const payload = await buildHotelInventoryDayPayload(hotelId, {
+			date,
+			roomKey,
+			includeCancelled: includeCancelled === "true",
+			paymentStatuses,
+			reservationVisibilityActor: dayVisibilityActor,
+		});
+		return res.json(payload);
+
 		const hotel = await HotelDetails.findById(hotelId).select(
 			"hotelName roomCountDetails commission"
 		);
@@ -1173,7 +1277,9 @@ exports.getHotelInventoryDay = async (req, res) => {
 		});
 	} catch (err) {
 		console.error("Error in getHotelInventoryDay:", err);
-		res.status(500).json({ error: "Failed to load day reservations" });
+		res.status(err?.status || 500).json({
+			error: err?.message || "Failed to load day reservations",
+		});
 	}
 };
 
