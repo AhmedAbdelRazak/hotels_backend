@@ -3204,6 +3204,7 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			"pickedRoomsPricing",
 			"total_amount",
 			"sub_total",
+			"commission",
 			"total_rooms",
 			"days_of_residence",
 			"adminPricing",
@@ -3254,10 +3255,12 @@ exports.updateOtaReservationPricing = async (req, res) => {
 						from: {
 							total_amount: reservation.total_amount,
 							sub_total: reservation.sub_total,
+							commission: reservation.commission,
 						},
 						to: {
 							total_amount: set.total_amount,
 							sub_total: set.sub_total,
+							commission: set.commission,
 							hotel_visible_amount: computeOtaHotelVisibleAmount(set),
 						},
 					},
