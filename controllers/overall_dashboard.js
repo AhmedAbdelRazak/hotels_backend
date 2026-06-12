@@ -2176,7 +2176,7 @@ const buildProfitReportMatch = ({ actor, hotels, query = {} }) => {
 	const includeCancelled =
 		String(normalizedQuery.includeCancelled || "").toLowerCase() === "true";
 	const excludeCancelled =
-		String(normalizedQuery.excludeCancelled || "").toLowerCase() === "true";
+		String(normalizedQuery.excludeCancelled ?? "true").toLowerCase() !== "false";
 	if (excludeCancelled && !includeCancelled) {
 		clauses.push({
 			$nor: [

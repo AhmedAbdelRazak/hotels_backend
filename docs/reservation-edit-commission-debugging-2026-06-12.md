@@ -229,6 +229,7 @@ Default report scope:
 - Start date: `2026-05-01`
 - End date: open-ended unless the admin sets one
 - Default frontend chart granularity: week over week
+- Cancelled and no-show reservations are excluded by default unless the request explicitly sets `includeCancelled=true` or `excludeCancelled=false`.
 
 Supported filters:
 
