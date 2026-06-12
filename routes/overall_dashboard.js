@@ -12,6 +12,7 @@ const {
 	overallExecutiveInventoryReport,
 	overallExecutiveInventoryDayReport,
 	overallExecutivePaidReport,
+	overallProfitReport,
 	overallReservations,
 	exportOverallReservations,
 	trackOverallReservationSummaryExport,
@@ -68,6 +69,13 @@ router.get(
 	requireSignin,
 	isAuth,
 	overallExecutivePaidReport
+);
+
+router.get(
+	"/overall-dashboard/profit-report/:userId",
+	requireSignin,
+	isAuth,
+	overallProfitReport
 );
 
 router.get(

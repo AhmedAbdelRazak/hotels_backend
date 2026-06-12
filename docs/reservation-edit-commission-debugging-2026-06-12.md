@@ -211,6 +211,49 @@ Important behavior:
 - Real room-selection changes without a full `pickedRoomsPricing` payload are rejected instead of guessed.
 - Admin pricing modal saves should send `pickedRoomsType`, `pickedRoomsPricing`, and `adminPricing` together.
 
+## Admin Profit report
+
+The admin-only Profit tab lives on `/admin/overall-hotel-reports?tab=Profit`. It is intentionally not added to any `/hotel-management/*` route or overall hotel-management shell.
+
+Backend endpoint:
+
+```text
+GET /overall-dashboard/profit-report/:userId
+```
+
+Access is restricted to platform admins/super admins. Owner-like and hotel-management users are rejected even if they can access other overall dashboard sections.
+
+Default report scope:
+
+- Date dimension: `createdAt`
+- Start date: `2026-05-01`
+- End date: open-ended unless the admin sets one
+- Default frontend chart granularity: week over week
+
+Supported filters:
+
+- `dateBy`: `createdAt`, `checkin_date`, `checkout_date`
+- `dateFrom` / `dateTo`
+- `hotelId`
+- `search`
+
+Profit formula:
+
+```text
+clientTotal = adminPricing.clientTotal || total_amount
+hotelTotal = adminPricing.rootTotal || sub_total || clientTotal - savedCommission || clientTotal
+platformMargin = adminPricing.platformMarginTotal when admin pricing exists
+commission = explicit saved commission only
+profitMargin = platformMargin + commission
+profitRate = profitMargin / clientTotal
+```
+
+Explicit saved commission is read from `adminPricing.commissionAmount`, `commissionData.amount`, `commissionData.commissionAmount`, `commissionData.commissionValue`, `financial_cycle.commissionAmount`, or `commission`.
+
+For admin-priced OTA reservations where the older `commission` field only mirrors `clientTotal - hotelTotal`, the report does not double-count it as a separate commission unless a clear commission assignment marker exists. This keeps the Profit tab aligned with MoreDetails: platform margin stays separate from a true general commission, and the displayed total profit is `platform margin + commission`.
+
+The endpoint returns the paginated table rows, scorecards, day/week/month timelines, and booking-source breakdown from the same filtered dataset so the UI cards, charts, table, and Excel export reconcile.
+
 ## SSH and Tailscale debugging
 
 Symptom:

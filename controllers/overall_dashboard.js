@@ -65,6 +65,7 @@ const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const SIGNUP_INVITATION_PURPOSE = "public-signup-invitation";
 const SIGNUP_INVITATION_DAYS = 30;
 const EXECUTIVE_REPORT_START_DATE = new Date(Date.UTC(2025, 4, 1, 0, 0, 0, 0));
+const PROFIT_REPORT_START_DATE = new Date(Date.UTC(2026, 4, 1, 0, 0, 0, 0));
 const EXECUTIVE_REPORT_TIMEZONE = "Asia/Riyadh";
 const EXECUTIVE_PAID_BREAKDOWN_KEYS = [
 	"paid_online_via_link",
@@ -1710,6 +1711,220 @@ const executiveStoredCommissionExpression = () => ({
 	],
 });
 
+const firstPositiveMoneyExpression = (expressions = [], fallback = 0) =>
+	expressions.reduceRight(
+		(acc, expression) => ({
+			$cond: [{ $gt: [expression, 0] }, expression, acc],
+		}),
+		fallback
+	);
+
+const profitStoredCommissionExpression = () =>
+	firstPositiveMoneyExpression([
+		reservationNumberExpression("$adminPricing.commissionAmount"),
+		reservationNumberExpression("$commissionData.amount"),
+		reservationNumberExpression("$commissionData.commissionAmount"),
+		reservationNumberExpression("$commissionData.commissionValue"),
+		reservationNumberExpression("$financial_cycle.commissionAmount"),
+		reservationNumberExpression("$commission"),
+	]);
+
+const profitHasAdminPricingExpression = () => ({
+	$or: [
+		{ $eq: ["$adminPricingVisibility.rootOnlyForHotelManagement", true] },
+		{ $ne: [{ $ifNull: ["$adminPricing.mode", ""] }, ""] },
+		{ $gt: [reservationNumberExpression("$adminPricing.clientTotal"), 0] },
+		{ $gt: [reservationNumberExpression("$adminPricing.rootTotal"), 0] },
+		{ $gt: [reservationNumberExpression("$adminPricing.netAfterExpensesTotal"), 0] },
+		{ $gt: [reservationNumberExpression("$adminPricing.otaExpenseTotal"), 0] },
+		{
+			$gt: [
+				{ $abs: reservationNumberExpression("$adminPricing.platformMarginTotal") },
+				0,
+			],
+		},
+	],
+});
+
+const profitCommissionExplicitMarkerExpression = () => ({
+	$or: [
+		{ $gt: [reservationNumberExpression("$adminPricing.commissionAmount"), 0] },
+		{ $eq: ["$commissionData.assigned", true] },
+		{ $eq: ["$financial_cycle.commissionAssigned", true] },
+		{
+			$in: [
+				{
+					$toLower: {
+						$trim: {
+							input: { $ifNull: ["$commissionStatus", ""] },
+						},
+					},
+				},
+				[...ASSIGNED_COMMISSION_STATUSES],
+			],
+		},
+	],
+});
+
+const profitComputedFieldsStages = (dateField = "createdAt") => [
+	{
+		$addFields: {
+			profitReportDate: `$${dateField}`,
+			profitClientTotal: firstPositiveMoneyExpression([
+				reservationNumberExpression("$adminPricing.clientTotal"),
+				reservationNumberExpression("$total_amount"),
+			]),
+			profitStoredCommission: profitStoredCommissionExpression(),
+			profitHasAdminPricing: profitHasAdminPricingExpression(),
+			profitExplicitCommissionMarker: profitCommissionExplicitMarkerExpression(),
+		},
+	},
+	{
+		$addFields: {
+			profitHotelTotal: firstPositiveMoneyExpression(
+				[
+					reservationNumberExpression("$adminPricing.rootTotal"),
+					reservationNumberExpression("$sub_total"),
+					{
+						$subtract: ["$profitClientTotal", "$profitStoredCommission"],
+					},
+				],
+				"$profitClientTotal"
+			),
+			profitNetAfterExpenses: firstPositiveMoneyExpression(
+				[
+					reservationNumberExpression("$adminPricing.netAfterExpensesTotal"),
+					{
+						$subtract: [
+							"$profitClientTotal",
+							reservationNumberExpression("$adminPricing.otaExpenseTotal"),
+						],
+					},
+				],
+				"$profitClientTotal"
+			),
+			profitOtaExpense: reservationNumberExpression("$adminPricing.otaExpenseTotal"),
+			profitAdminPlatformMargin: reservationNumberExpression(
+				"$adminPricing.platformMarginTotal"
+			),
+		},
+	},
+	{
+		$addFields: {
+			profitSpreadAmount: {
+				$subtract: ["$profitClientTotal", "$profitHotelTotal"],
+			},
+		},
+	},
+	{
+		$addFields: {
+			profitCommission: {
+				$cond: [
+					{
+						$and: [
+							"$profitHasAdminPricing",
+							{ $eq: ["$profitExplicitCommissionMarker", false] },
+							{
+								$lte: [
+									{
+										$abs: {
+											$subtract: [
+												"$profitStoredCommission",
+												"$profitSpreadAmount",
+											],
+										},
+									},
+									0.02,
+								],
+							},
+						],
+					},
+					0,
+					"$profitStoredCommission",
+				],
+			},
+		},
+	},
+	{
+		$addFields: {
+			profitPlatformMargin: {
+				$cond: [
+					"$profitHasAdminPricing",
+					{
+						$cond: [
+							{
+								$or: [
+									{
+										$gt: [
+											{ $abs: "$profitAdminPlatformMargin" },
+											0,
+										],
+									},
+									{
+										$gt: [
+											reservationNumberExpression(
+												"$adminPricing.netAfterExpensesTotal"
+											),
+											0,
+										],
+									},
+									{
+										$gt: [
+											reservationNumberExpression(
+												"$adminPricing.otaExpenseTotal"
+											),
+											0,
+										],
+									},
+								],
+							},
+							"$profitAdminPlatformMargin",
+							{
+								$subtract: [
+									"$profitNetAfterExpenses",
+									"$profitHotelTotal",
+								],
+							},
+						],
+					},
+					{
+						$max: [
+							0,
+							{
+								$subtract: ["$profitSpreadAmount", "$profitCommission"],
+							},
+						],
+					},
+				],
+			},
+		},
+	},
+	{
+		$addFields: {
+			profitMargin: {
+				$add: ["$profitPlatformMargin", "$profitCommission"],
+			},
+			profitRate: {
+				$cond: [
+					{ $gt: ["$profitClientTotal", 0] },
+					{
+						$multiply: [
+							{
+								$divide: [
+									{ $add: ["$profitPlatformMargin", "$profitCommission"] },
+									"$profitClientTotal",
+								],
+							},
+							100,
+						],
+					},
+					0,
+				],
+			},
+		},
+	},
+];
+
 const executiveRoomNightsExpression = () => ({
 	$cond: [
 		{ $gt: [{ $ifNull: ["$days_of_residence", 0] }, 0] },
@@ -1903,6 +2118,459 @@ const buildExecutiveReservationMatch = ({ actor, hotels, query = {} }) => {
 
 	if (clauses.length) match.$and = clauses;
 	return { match, hotelIds, dateField, period };
+};
+
+const canViewOverallProfitReport = (actor = {}) => {
+	const accessTo = Array.isArray(actor.accessTo) ? actor.accessTo : [];
+	return (
+		isConfiguredSuperAdmin(actor) ||
+		hasRoleDescription(actor, "superadmin") ||
+		hasRoleDescription(actor, "super admin") ||
+		(hasRole(actor, 1000) &&
+			["HotelReports", "AdminDashboard", "Financials"].some((key) =>
+				accessTo.includes(key)
+			))
+	);
+};
+
+const profitReportQueryDefaults = (query = {}) => {
+	const next = { ...(query || {}) };
+	if (!next.dateBy) next.dateBy = "createdAt";
+	const hasExplicitDateRange =
+		next.dateFrom ||
+		next.dateTo ||
+		next.fromDate ||
+		next.toDate ||
+		next.start ||
+		next.end ||
+		next.range;
+	if (!hasExplicitDateRange) {
+		next.dateFrom = ymdFromDate(PROFIT_REPORT_START_DATE);
+	}
+	return next;
+};
+
+const buildProfitReportMatch = ({ actor, hotels, query = {} }) => {
+	const normalizedQuery = profitReportQueryDefaults(query);
+	const hotelIds = filterHotelIdsForQuery(hotels, normalizedQuery.hotelId);
+	if (!hotelIds.length) return null;
+
+	const match = { hotelId: { $in: hotelIds.map((id) => ObjectId(id)) } };
+	const dateField = normalizeDateField(normalizedQuery.dateBy || "createdAt");
+	const period = cleanDateRange(normalizedQuery);
+	const dateFilter = {};
+
+	if (period.from) dateFilter.$gte = period.from;
+	if (period.to) dateFilter.$lte = period.to;
+	if (Object.keys(dateFilter).length) {
+		match[dateField] = dateFilter;
+	} else {
+		match.createdAt = { $gte: PROFIT_REPORT_START_DATE };
+	}
+
+	const clauses = [buildExcludePendingOtaReviewFilter()];
+	const visibilityFilter =
+		hotelManagementReservationVisibilityFilterForActor(actor);
+	if (visibilityFilter) clauses.push(visibilityFilter);
+
+	const includeCancelled =
+		String(normalizedQuery.includeCancelled || "").toLowerCase() === "true";
+	const excludeCancelled =
+		String(normalizedQuery.excludeCancelled || "").toLowerCase() === "true";
+	if (excludeCancelled && !includeCancelled) {
+		clauses.push({
+			$nor: [
+				{ reservation_status: CANCELLED_STATUS },
+				{ state: CANCELLED_STATUS },
+				{ reservation_status: NO_SHOW_STATUS },
+				{ state: NO_SHOW_STATUS },
+			],
+		});
+	}
+
+	const statusFilter = reservationStatusFilter(normalizedQuery.status);
+	if (statusFilter) clauses.push(statusFilter);
+
+	const bookingSources = parseQueryList(normalizedQuery.bookingSource);
+	if (bookingSources.length) {
+		clauses.push({
+			$or: bookingSources.map((source) => ({
+				booking_source: new RegExp(escapeRegex(source), "i"),
+			})),
+		});
+	}
+
+	const searchFilter = executiveReservationSearchFilter(
+		normalizedQuery.search,
+		hotels
+	);
+	if (searchFilter) clauses.push(searchFilter);
+
+	if (clauses.length) match.$and = clauses;
+	return { match, hotelIds, dateField, period, query: normalizedQuery };
+};
+
+const profitGroupAccumulators = () => ({
+	reservationsCount: { $sum: 1 },
+	clientTotal: { $sum: "$profitClientTotal" },
+	hotelTotal: { $sum: "$profitHotelTotal" },
+	commission: { $sum: "$profitCommission" },
+	platformMargin: { $sum: "$profitPlatformMargin" },
+	otaExpense: { $sum: "$profitOtaExpense" },
+	profitMargin: { $sum: "$profitMargin" },
+});
+
+const profitSummaryProjectStage = (extraFields = {}) => ({
+	$project: {
+		_id: 0,
+		...extraFields,
+		reservationsCount: 1,
+		clientTotal: 1,
+		hotelTotal: 1,
+		commission: 1,
+		platformMargin: 1,
+		otaExpense: 1,
+		profitMargin: 1,
+		profitRate: {
+			$cond: [
+				{ $gt: ["$clientTotal", 0] },
+				{ $multiply: [{ $divide: ["$profitMargin", "$clientTotal"] }, 100] },
+				0,
+			],
+		},
+	},
+});
+
+const profitDateStringExpression = () => ({
+	$dateToString: {
+		format: "%Y-%m-%d",
+		date: "$profitReportDate",
+		timezone: EXECUTIVE_REPORT_TIMEZONE,
+	},
+});
+
+const profitHotelLookupStages = () => [
+	{
+		$lookup: {
+			from: "hoteldetails",
+			let: { lookupHotelId: "$hotelId" },
+			pipeline: [
+				{ $match: { $expr: { $eq: ["$_id", "$$lookupHotelId"] } } },
+				{ $project: { _id: 1, hotelName: 1, belongsTo: 1 } },
+			],
+			as: "hotelDetails",
+		},
+	},
+	{ $unwind: { path: "$hotelDetails", preserveNullAndEmptyArrays: true } },
+	{
+		$addFields: {
+			hotelName: { $ifNull: ["$hotelDetails.hotelName", ""] },
+			hotelOwnerId: "$hotelDetails.belongsTo",
+		},
+	},
+];
+
+const profitSortFromQuery = (query = {}, dateField = "createdAt") => {
+	const allowed = new Set([
+		"createdAt",
+		"checkin_date",
+		"checkout_date",
+		"profitReportDate",
+		"hotelName",
+		"profitClientTotal",
+		"profitHotelTotal",
+		"profitCommission",
+		"profitPlatformMargin",
+		"profitMargin",
+		"profitRate",
+	]);
+	const requested = String(query.sortBy || "").trim();
+	const field = allowed.has(requested) ? requested : dateField || "createdAt";
+	const direction =
+		String(query.sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
+	return { [field]: direction, _id: -1 };
+};
+
+const profitRowProjectStage = () => ({
+	$project: {
+		hotelDetails: 0,
+		profitStoredCommission: 0,
+		profitHasAdminPricing: 0,
+		profitExplicitCommissionMarker: 0,
+		profitSpreadAmount: 0,
+		profitAdminPlatformMargin: 0,
+	},
+});
+
+const emptyProfitReportPayload = (hotels = [], query = {}) => ({
+	asOf: new Date(),
+	period: {
+		dateBy: normalizeDateField(query.dateBy || "createdAt"),
+		reportStartDate: PROFIT_REPORT_START_DATE,
+		from: "",
+		to: "",
+		range: "custom",
+	},
+	page: 1,
+	limit: 0,
+	total: 0,
+	pages: 0,
+	hotels: [],
+	allHotels: executiveHotelOptions(hotels),
+	scorecards: {
+		reservationsCount: 0,
+		clientTotal: 0,
+		hotelTotal: 0,
+		commission: 0,
+		platformMargin: 0,
+		otaExpense: 0,
+		profitMargin: 0,
+		profitRate: 0,
+		hotelsCount: 0,
+		sourcesCount: 0,
+	},
+	timeline: { day: [], week: [], month: [] },
+	bookingSources: [],
+	reservations: [],
+});
+
+const emptyProfitSummary = () => ({
+	reservationsCount: 0,
+	clientTotal: 0,
+	hotelTotal: 0,
+	commission: 0,
+	platformMargin: 0,
+	otaExpense: 0,
+	profitMargin: 0,
+	profitRate: 0,
+});
+
+const weekStartKeyFromDayKey = (dayKey = "") => {
+	const parsed = new Date(`${dayKey}T00:00:00.000Z`);
+	if (Number.isNaN(parsed.getTime())) return dayKey || "";
+	const day = parsed.getUTCDay();
+	const distanceFromMonday = (day + 6) % 7;
+	parsed.setUTCDate(parsed.getUTCDate() - distanceFromMonday);
+	return ymdFromDate(parsed);
+};
+
+const monthKeyFromDayKey = (dayKey = "") => String(dayKey || "").slice(0, 7);
+
+const normalizeProfitTimelineRow = (row = {}) => {
+	const clientTotal = moneyNumber(row.clientTotal);
+	const profitMargin = moneyNumber(row.profitMargin);
+	return {
+		groupKey: row.groupKey || "",
+		reservationsCount: Number(row.reservationsCount || 0),
+		clientTotal,
+		hotelTotal: moneyNumber(row.hotelTotal),
+		commission: moneyNumber(row.commission),
+		platformMargin: moneyNumber(row.platformMargin),
+		otaExpense: moneyNumber(row.otaExpense),
+		profitMargin,
+		profitRate: clientTotal > 0 ? (profitMargin / clientTotal) * 100 : 0,
+	};
+};
+
+const bucketProfitTimeline = (rows = [], granularity = "week") => {
+	const keyFor =
+		granularity === "month" ? monthKeyFromDayKey : weekStartKeyFromDayKey;
+	const buckets = new Map();
+	(Array.isArray(rows) ? rows : []).forEach((row) => {
+		const source = normalizeProfitTimelineRow(row);
+		const key = keyFor(source.groupKey);
+		if (!key) return;
+		const bucket = buckets.get(key) || {
+			groupKey: key,
+			reservationsCount: 0,
+			clientTotal: 0,
+			hotelTotal: 0,
+			commission: 0,
+			platformMargin: 0,
+			otaExpense: 0,
+			profitMargin: 0,
+		};
+		bucket.reservationsCount += source.reservationsCount;
+		bucket.clientTotal += source.clientTotal;
+		bucket.hotelTotal += source.hotelTotal;
+		bucket.commission += source.commission;
+		bucket.platformMargin += source.platformMargin;
+		bucket.otaExpense += source.otaExpense;
+		bucket.profitMargin += source.profitMargin;
+		buckets.set(key, bucket);
+	});
+	return Array.from(buckets.values())
+		.map(normalizeProfitTimelineRow)
+		.sort((a, b) => String(a.groupKey).localeCompare(String(b.groupKey)));
+};
+
+const normalizeProfitRow = (reservation = {}) => ({
+	...reservation,
+	profitMetrics: {
+		reportDate: reservation.profitReportDate || null,
+		clientTotal: moneyNumber(reservation.profitClientTotal),
+		hotelTotal: moneyNumber(reservation.profitHotelTotal),
+		commission: moneyNumber(reservation.profitCommission),
+		platformMargin: moneyNumber(reservation.profitPlatformMargin),
+		otaExpense: moneyNumber(reservation.profitOtaExpense),
+		profitMargin: moneyNumber(reservation.profitMargin),
+		profitRate: moneyNumber(reservation.profitRate),
+	},
+});
+
+const listProfitReport = async ({ actor, hotels, query = {} }) => {
+	const built = buildProfitReportMatch({ actor, hotels, query });
+	if (!built) return emptyProfitReportPayload(hotels, query);
+
+	const exportAll = ["1", "true", "yes", "all"].includes(
+		String(built.query.exportAll || "").toLowerCase()
+	);
+	const page = Math.max(parseInt(built.query.page, 10) || 1, 1);
+	const limit = exportAll
+		? Math.min(Math.max(parseInt(built.query.limit, 10) || 5000, 1), 20000)
+		: Math.min(Math.max(parseInt(built.query.limit, 10) || 25, 1), 100);
+	const pageStages = exportAll
+		? []
+		: [{ $skip: (page - 1) * limit }, { $limit: limit }];
+
+	const [facet = {}] = await Reservations.aggregate([
+		{ $match: built.match },
+		...profitComputedFieldsStages(built.dateField),
+		{
+			$facet: {
+				rows: [
+					...profitHotelLookupStages(),
+					{ $sort: profitSortFromQuery(built.query, built.dateField) },
+					...pageStages,
+					profitRowProjectStage(),
+				],
+				total: [{ $count: "total" }],
+				scorecards: [
+					{
+						$group: {
+							_id: null,
+							...profitGroupAccumulators(),
+							hotels: { $addToSet: "$hotelId" },
+							sources: {
+								$addToSet: {
+									$trim: { input: { $ifNull: ["$booking_source", ""] } },
+								},
+							},
+						},
+					},
+					{
+						$project: {
+							_id: 0,
+							reservationsCount: 1,
+							clientTotal: 1,
+							hotelTotal: 1,
+							commission: 1,
+							platformMargin: 1,
+							otaExpense: 1,
+							profitMargin: 1,
+							profitRate: {
+								$cond: [
+									{ $gt: ["$clientTotal", 0] },
+									{
+										$multiply: [
+											{ $divide: ["$profitMargin", "$clientTotal"] },
+											100,
+										],
+									},
+									0,
+								],
+							},
+							hotelsCount: { $size: "$hotels" },
+							sourcesCount: {
+								$size: {
+									$filter: {
+										input: "$sources",
+										as: "source",
+										cond: { $ne: ["$$source", ""] },
+									},
+								},
+							},
+						},
+					},
+				],
+				dayTimeline: [
+					{ $match: { profitReportDate: { $ne: null } } },
+					{
+						$group: {
+							_id: profitDateStringExpression(),
+							...profitGroupAccumulators(),
+						},
+					},
+					profitSummaryProjectStage({ groupKey: "$_id" }),
+					{ $sort: { groupKey: 1 } },
+				],
+				bookingSources: [
+					{
+						$group: {
+							_id: {
+								$trim: { input: { $ifNull: ["$booking_source", ""] } },
+							},
+							...profitGroupAccumulators(),
+						},
+					},
+					profitSummaryProjectStage({
+						source: { $cond: [{ $eq: ["$_id", ""] }, "Unknown", "$_id"] },
+					}),
+					{ $sort: { profitMargin: -1, clientTotal: -1, source: 1 } },
+				],
+			},
+		},
+	]).allowDiskUse(true);
+
+	const rawDayTimeline = Array.isArray(facet.dayTimeline)
+		? facet.dayTimeline.map(normalizeProfitTimelineRow)
+		: [];
+	const scorecards = {
+		...emptyProfitSummary(),
+		...(facet.scorecards?.[0] || {}),
+	};
+	const total = Number(facet.total?.[0]?.total || 0);
+
+	return {
+		asOf: new Date(),
+		period: {
+			...built.period,
+			dateBy: built.dateField,
+			reportStartDate: PROFIT_REPORT_START_DATE,
+		},
+		page: exportAll ? 1 : page,
+		limit: exportAll ? total : limit,
+		total,
+		pages: exportAll ? 1 : Math.ceil(total / limit),
+		hotels: executiveHotelOptions(hotels).filter((hotel) =>
+			built.hotelIds.includes(hotel._id)
+		),
+		allHotels: executiveHotelOptions(hotels),
+		scorecards: {
+			...scorecards,
+			reservationsCount: Number(scorecards.reservationsCount || 0),
+			clientTotal: moneyNumber(scorecards.clientTotal),
+			hotelTotal: moneyNumber(scorecards.hotelTotal),
+			commission: moneyNumber(scorecards.commission),
+			platformMargin: moneyNumber(scorecards.platformMargin),
+			otaExpense: moneyNumber(scorecards.otaExpense),
+			profitMargin: moneyNumber(scorecards.profitMargin),
+			profitRate: moneyNumber(scorecards.profitRate),
+			hotelsCount: Number(scorecards.hotelsCount || 0),
+			sourcesCount: Number(scorecards.sourcesCount || 0),
+		},
+		timeline: {
+			day: rawDayTimeline,
+			week: bucketProfitTimeline(rawDayTimeline, "week"),
+			month: bucketProfitTimeline(rawDayTimeline, "month"),
+		},
+		bookingSources: shouldMaskHotelManagementReservationSource(actor)
+			? maskBookingSourceSummaryRowsForHotelManagement(
+					facet.bookingSources || []
+			  )
+			: facet.bookingSources || [],
+		reservations: (facet.rows || []).map(normalizeProfitRow),
+	};
 };
 
 const aggregateExecutiveByDate = (match, field) =>
@@ -4107,6 +4775,29 @@ exports.overallExecutivePaidReport = async (req, res) => {
 		console.error("overallExecutivePaidReport error:", error);
 		return res.status(500).json({
 			error: "Could not load executive paid report",
+		});
+	}
+};
+
+exports.overallProfitReport = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "financials");
+		if (!context) return;
+		if (!canViewOverallProfitReport(context.actor)) {
+			return res.status(403).json({
+				error: "You cannot view the profit report",
+			});
+		}
+		const data = await listProfitReport({
+			actor: context.actor,
+			hotels: context.hotels,
+			query: req.query || {},
+		});
+		return res.json(data);
+	} catch (error) {
+		console.error("overallProfitReport error:", error);
+		return res.status(500).json({
+			error: "Could not load overall profit report",
 		});
 	}
 };
