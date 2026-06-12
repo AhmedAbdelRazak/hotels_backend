@@ -193,6 +193,12 @@ Invoke-WebRequest "https://xhotelpro.com/admin/all-reservations?page=1" -UseBasi
 - In `/admin/ota-reservations`, edit pricing, set general commission, distribute totals once, save, and confirm values persist.
 - Repeat one pricing-modal check with Arabic selected and verify the distribute button is on the left.
 
+## MoreDetails platform profit display
+
+The SUPER Admin-only OTA cards in `src/AdminModule/AllReservation/MoreDetails.js` keep the raw OTA platform margin separate from the saved commission. When an explicit commission exists on `reservation.commission`, `financial_cycle.commissionAmount`, or `commissionData`, the displayed profit card changes from `Platform Profit` / `ربح المنصة` to `Platform Profit + Commission` / `ربح المنصة + العمولة` and shows `platform margin + saved commission`.
+
+This is a display-only composition for MoreDetails. It should not mutate nightly pricing rows, OTA expense totals, hotel-visible totals, or the backend reservation payload.
+
 ## SSH and Tailscale debugging
 
 Symptom:
