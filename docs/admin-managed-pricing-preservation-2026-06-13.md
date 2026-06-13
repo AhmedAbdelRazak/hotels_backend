@@ -86,6 +86,27 @@ For an admin-managed reservation:
 
 ## Production correction
 
-After deploying this guard, restore confirmation `7183544960` directly from the
-audit trail values above and add a reservation audit log entry named
-`pricing_restore` so the manual correction is traceable.
+Applied after deploying backend commit `b4fa381` and frontend commit `55af358`.
+
+Production read-back after correction:
+
+- Reservation id: `6a2af2c06f49b37157452ab4`
+- Confirmation: `7183544960`
+- Check-in/check-out kept as the user's latest date change: `2026-06-12` to
+  `2026-06-19`
+- Booking source kept as the user's latest source change: `jannat employee`
+- `total_amount`: `766.08`
+- `sub_total`: `490.00`
+- `commission`: `70.00`
+- `adminPricing.clientTotal`: `766.08`
+- `adminPricing.rootTotal`: `490.00`
+- `adminPricing.netAfterExpensesTotal`: `563.00`
+- `adminPricing.otaExpenseTotal`: `203.08`
+- `adminPricing.platformMarginTotal`: `73.00`
+
+The latest `reservationAuditLog` entry was written with:
+
+- `action`: `pricing_restore`
+- `field`: `admin_managed_pricing`
+- `reason`: restored from the reservation audit after an accidental non-pricing
+  edit overwrote the admin-managed pricing split.
