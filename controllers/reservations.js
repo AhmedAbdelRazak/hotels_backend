@@ -6306,6 +6306,11 @@ exports.updateReservation = async (req, res) => {
 						.lean()
 						.exec()
 				: null;
+		const superAdminUpdateActor = isSuperAdminReservationActor(
+			requestingActor || {}
+		);
+		const configuredSuperAdminUpdateActor =
+			isConfiguredSuperAdminReservationActor(requestingActor || {});
 		let adminCorrectionResubmitted = false;
 		let superAdminPendingReversionApplied = false;
 		const sourceUpdatePermission = protectReservationSourceUpdate(
@@ -6335,7 +6340,7 @@ exports.updateReservation = async (req, res) => {
 		const isConfiguredSuperAdminPlatformStatusOverride =
 			isAdminAllReservationsStatusUpdate &&
 			isAdminAllReservationsSuperAdminForceStatus &&
-			isConfiguredSuperAdminReservationActor(requestingActor);
+			configuredSuperAdminUpdateActor;
 		const requestsPendingConfirmationReversion =
 			isPendingConfirmationReversionRequest(
 				existingReservation,
@@ -6344,7 +6349,7 @@ exports.updateReservation = async (req, res) => {
 			);
 		if (
 			requestsPendingConfirmationReversion &&
-			!isConfiguredSuperAdminReservationActor(requestingActor)
+			!configuredSuperAdminUpdateActor
 		) {
 			return res.status(403).json({
 				error:
@@ -6409,7 +6414,8 @@ exports.updateReservation = async (req, res) => {
 				code: "reservation_status_reversion_locked",
 			});
 		}
-		const orderTakerBasicEditOnly = isOrderTakingAccount(requestingActor || {});
+		const orderTakerBasicEditOnly =
+			!superAdminUpdateActor && isOrderTakingAccount(requestingActor || {});
 		if (orderTakerBasicEditOnly) {
 			const reservationOwnerIds = [
 				existingReservation.createdByUserId,
@@ -6569,7 +6575,7 @@ exports.updateReservation = async (req, res) => {
 		}
 		const hasExplicitSuperAdminCommission =
 			Object.prototype.hasOwnProperty.call(normalizedUpdateData, "commission") &&
-			isConfiguredSuperAdminReservationActor(requestingActor || {});
+			configuredSuperAdminUpdateActor;
 		const explicitSuperAdminCommission = hasExplicitSuperAdminCommission
 			? n2(normalizedUpdateData.commission)
 			: null;
@@ -6734,7 +6740,8 @@ exports.updateReservation = async (req, res) => {
 
 		normalizedUpdateData = await normalizeReservationStayPricing(
 			existingReservation,
-			normalizedUpdateData
+			normalizedUpdateData,
+			{ allowBlockedCalendar: superAdminUpdateActor }
 		);
 		if (hasExplicitSuperAdminCommission) {
 			const existingCommissionData =

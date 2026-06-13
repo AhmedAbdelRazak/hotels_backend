@@ -740,12 +740,13 @@ const buildCanonicalRoomPricing = ({
 		const providedFinal = requireAgentAssignedPricing
 			? 0
 			: getPricingDayFinal(providedDay);
+		const shouldPreferCalendarPrice = preferCalendarPrice && !blockedOnCalendar;
 		const totalPriceWithCommission =
 			requireAgentAssignedPricing && canonicalDailyPrice > 0
 				? canonicalDailyPrice
 				: preferChosenPrice && roomNightlyPrice > 0
 				? roomNightlyPrice
-				: preferCalendarPrice && canonicalDailyPrice > 0
+				: shouldPreferCalendarPrice && canonicalDailyPrice > 0
 				  ? canonicalDailyPrice
 				: providedFinal > 0
 				  ? n2(providedFinal)
@@ -984,10 +985,13 @@ const getRoomSource = (existingReservation, updatePayload, field) => {
 
 const normalizeReservationStayPricing = async (
 	existingReservation,
-	updatePayload = {}
+	updatePayload = {},
+	options = {}
 ) => {
 	const existing = toPlainObject(existingReservation);
 	const updates = { ...updatePayload };
+	const warnings = Array.isArray(options.warnings) ? options.warnings : [];
+	const allowBlockedCalendar = Boolean(options.allowBlockedCalendar);
 	const checkinTouched = hasOwn(updates, "checkin_date");
 	const checkoutTouched = hasOwn(updates, "checkout_date");
 	const dateTouched = checkinTouched || checkoutTouched;
@@ -1190,6 +1194,8 @@ const normalizeReservationStayPricing = async (
 					!roomIdentityChanged &&
 					shouldPreferChosenNightlyPrice(room, existingRoom),
 				preferCalendarPrice: roomIdentityChanged,
+				allowBlockedCalendar,
+				warnings,
 				agentId,
 			});
 		});

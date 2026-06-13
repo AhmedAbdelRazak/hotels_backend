@@ -78,6 +78,15 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 });
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+const JANNAT_EMPLOYEE_BOOKING_SOURCE = "Jannat Employee";
+const normalizeEmployeeBookingSource = (value) => {
+	const source = String(value || "").trim();
+	const key = source.toLowerCase();
+	if (!source || key === "manual" || key === "manual reservation") {
+		return JANNAT_EMPLOYEE_BOOKING_SOURCE;
+	}
+	return source;
+};
 
 const stripAgentRoomOverrides = (hotel = {}) => {
 	const plain =
@@ -4914,6 +4923,8 @@ exports.createNewReservationClient2 = async (req, res) => {
 			orderTaker,
 			orderTakenAt,
 		} = req.body;
+		const resolvedBookingSource =
+			normalizeEmployeeBookingSource(booking_source);
 
 		/** -------------------- DUPLICATE GUARD (helpers) -------------------- */
 		const escapeRegExp = (s) =>
@@ -5148,7 +5159,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 				payment,
 				paid_amount,
 				commissionPaid,
-				booking_source,
+				booking_source: resolvedBookingSource,
 				hotelName: hotel_name,
 				pickedRoomsType,
 				advancePayment,
@@ -5186,7 +5197,7 @@ exports.createNewReservationClient2 = async (req, res) => {
 						to: {
 							confirmation_number: confirmationNumber,
 							hotelId,
-							booking_source,
+							booking_source: resolvedBookingSource,
 							total_amount,
 							reservation_status: "Pending Confirmation",
 							orderTakeId: orderTakeId || "",

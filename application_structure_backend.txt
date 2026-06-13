@@ -2617,3 +2617,15 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Treat the screenshot as written support approval evidence for web scraping jobs to synchronize with Expedia Partner Central.
   - Keep the original email/headers separately for escalation.
   - Any Expedia scraper should stay conservative: authorized credentials only, rate limits/backoff, no CAPTCHA/security bypass, scoped to approved PMS synchronization, and clear audit logs.
+
+2026-06-13 Super Admin Reservation Update And Jannat Tools Source Guard
+- Details:
+  - See docs/super-admin-reservation-update-and-jannat-source-2026-06-13.md.
+- Reservation update behavior:
+  - controllers/reservations.js resolves superAdminUpdateActor and prevents super admins from being treated as orderTakerBasicEditOnly.
+  - services/reservationPricing.js normalizeReservationStayPricing accepts an optional allowBlockedCalendar flag.
+  - updateReservation passes allowBlockedCalendar for super-admin actors so admin reservation edits can save even when the selected room/date is blocked on the hotel calendar.
+  - Regular order takers keep the strict blocked-calendar and inventory restrictions.
+- Jannat Tools source behavior:
+  - controllers/janat.js normalizes blank/manual/Manual Reservation booking_source values to Jannat Employee for /new-reservation-client-employee.
+  - The normalized value is saved in both the reservation document and reservationAuditLog.
