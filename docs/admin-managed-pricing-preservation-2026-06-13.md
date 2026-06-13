@@ -87,13 +87,16 @@ For an admin-managed reservation:
 ## Production correction
 
 Applied after deploying backend commit `b4fa381` and frontend commit `55af358`.
+Backend commit `560d4e5` then tightened same-night-count date shifts so the
+existing pricing rows are projected by row order, preserving the adjusted final
+night instead of cloning the nearest date and introducing one-halala drift.
 
 Production read-back after correction:
 
 - Reservation id: `6a2af2c06f49b37157452ab4`
 - Confirmation: `7183544960`
-- Check-in/check-out kept as the user's latest date change: `2026-06-12` to
-  `2026-06-19`
+- Check-in/check-out kept as the user's latest date change: `2026-06-10` to
+  `2026-06-17`
 - Booking source kept as the user's latest source change: `jannat employee`
 - `total_amount`: `766.08`
 - `sub_total`: `490.00`
@@ -108,5 +111,9 @@ The latest `reservationAuditLog` entry was written with:
 
 - `action`: `pricing_restore`
 - `field`: `admin_managed_pricing`
-- `reason`: restored from the reservation audit after an accidental non-pricing
-  edit overwrote the admin-managed pricing split.
+- `reason`: restored the exact audited pricing split after same-length date
+  shift rounding drift.
+
+Final read-back confirmed the nightly rows cover `2026-06-10` through
+`2026-06-16`, with the final row keeping `netAfterExpenses: 80.42`,
+`otaExpenseAmount: 29.02`, and `platformMargin: 10.42` so totals remain exact.
