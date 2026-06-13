@@ -489,6 +489,11 @@ const findNearestPricingTemplate = (sortedRows = [], date, index = 0) => {
 
 const projectAdminManagedPricingRowsToStay = (rows = [], stayDates = []) => {
 	const sortedRows = sortedPricingRows(rows);
+	if (sortedRows.length === stayDates.length) {
+		return stayDates.map((date, index) =>
+			normalizeProvidedPricingDay({ ...sortedRows[index].row, date })
+		);
+	}
 	return stayDates.map((date, index) => {
 		const template = findNearestPricingTemplate(sortedRows, date, index);
 		return normalizeProvidedPricingDay({ ...template, date });
