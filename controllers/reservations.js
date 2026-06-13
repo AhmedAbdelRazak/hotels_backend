@@ -1129,6 +1129,12 @@ const ADMIN_MANAGED_PRICING_UPDATE_FIELDS = [
 	"adminPricingVisibility",
 ];
 
+const ADMIN_MANAGED_PRICING_INTENT_FIELDS = [
+	"__adminPricingUpdateIntent",
+	"__pricingUpdateIntent",
+	"pricingUpdateIntent",
+];
+
 const ADMIN_MANAGED_DERIVED_PRICING_FIELDS = [
 	"pickedRoomsType",
 	"pickedRoomsPricing",
@@ -1194,6 +1200,7 @@ const protectAdminManagedPricingUpdate = ({
 	reservation = {},
 	actor = {},
 	hasExplicitSuperAdminCommission = false,
+	hasExplicitPricingIntent = false,
 } = {}) => {
 	if (!adminManagedPricingEnabled(reservation)) return { allowed: true };
 
@@ -1206,7 +1213,11 @@ const protectAdminManagedPricingUpdate = ({
 		Object.prototype.hasOwnProperty.call(updates, "pickedRoomsPricing") &&
 		Array.isArray(updates.pickedRoomsPricing) &&
 		updates.pickedRoomsPricing.length > 0;
-	if (isPlatformAdminPricingActor(actor || {}) && hasCompletePricingPayload) {
+	if (
+		hasExplicitPricingIntent &&
+		isPlatformAdminPricingActor(actor || {}) &&
+		hasCompletePricingPayload
+	) {
 		return { allowed: true };
 	}
 
@@ -1229,7 +1240,11 @@ const protectAdminManagedPricingUpdate = ({
 	stripAdminManagedPricingUpdateFields(updates, {
 		keepCommission: hasExplicitSuperAdminCommission,
 	});
-	return { allowed: true, stripped: true };
+	return {
+		allowed: true,
+		stripped: true,
+		code: "admin_managed_pricing_preserved",
+	};
 };
 
 const normalizeCalendarText = (value) =>
@@ -6206,6 +6221,14 @@ exports.updateReservation = async (req, res) => {
 				: null;
 		delete normalizedUpdateData.__previewAudit;
 		delete normalizedUpdateData.__previewAuditActorId;
+		const hasExplicitAdminPricingIntent =
+			ADMIN_MANAGED_PRICING_INTENT_FIELDS.some((field) => {
+				const value = normalizedUpdateData[field];
+				return value === true || value === "true";
+			});
+		ADMIN_MANAGED_PRICING_INTENT_FIELDS.forEach((field) => {
+			delete normalizedUpdateData[field];
+		});
 		const authenticatedActorId = normalizeId(req.auth?._id || "");
 		const payloadPreviewActorId = normalizeId(
 			previewAuditFromPayload?.previewActorId
@@ -6584,6 +6607,7 @@ exports.updateReservation = async (req, res) => {
 			reservation: existingReservation,
 			actor: requestingActor || {},
 			hasExplicitSuperAdminCommission,
+			hasExplicitPricingIntent: hasExplicitAdminPricingIntent,
 		});
 		if (!adminManagedPricingProtection.allowed) {
 			return res
