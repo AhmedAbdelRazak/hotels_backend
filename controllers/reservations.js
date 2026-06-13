@@ -1135,6 +1135,12 @@ const ADMIN_MANAGED_PRICING_INTENT_FIELDS = [
 	"pricingUpdateIntent",
 ];
 
+const RESERVATION_DATE_UPDATE_INTENT_FIELDS = [
+	"__reservationDateUpdateIntent",
+	"__dateUpdateIntent",
+	"dateUpdateIntent",
+];
+
 const ADMIN_MANAGED_DERIVED_PRICING_FIELDS = [
 	"pickedRoomsType",
 	"pickedRoomsPricing",
@@ -1193,6 +1199,70 @@ const stripAdminManagedPricingUpdateFields = (
 	});
 	if (!keepCommission) delete updates.commission;
 	return updates;
+};
+
+const protectReservationDateUpdate = ({
+	updates = {},
+	reservation = {},
+	hasExplicitDateIntent = false,
+} = {}) => {
+	const touchedCheckin = Object.prototype.hasOwnProperty.call(
+		updates,
+		"checkin_date"
+	);
+	const touchedCheckout = Object.prototype.hasOwnProperty.call(
+		updates,
+		"checkout_date"
+	);
+	if (!touchedCheckin && !touchedCheckout) return { allowed: true };
+
+	const changedFields = [];
+	if (
+		touchedCheckin &&
+		dateOnlyKey(updates.checkin_date) !== dateOnlyKey(reservation.checkin_date)
+	) {
+		changedFields.push("checkin_date");
+	}
+	if (
+		touchedCheckout &&
+		dateOnlyKey(updates.checkout_date) !== dateOnlyKey(reservation.checkout_date)
+	) {
+		changedFields.push("checkout_date");
+	}
+
+	if (changedFields.length && !hasExplicitDateIntent) {
+		return {
+			allowed: false,
+			status: 409,
+			error:
+				"Check-in/check-out date changes require an explicit date edit from the reservation form.",
+			errorArabic:
+				"\u062a\u063a\u064a\u064a\u0631 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0623\u0648 \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u064a\u062a\u0637\u0644\u0628 \u062a\u0639\u062f\u064a\u0644\u0627\u064b \u0635\u0631\u064a\u062d\u0627\u064b \u0645\u0646 \u0646\u0645\u0648\u0630\u062c \u0627\u0644\u062d\u062c\u0632.",
+			code: "reservation_date_change_requires_intent",
+			fields: changedFields,
+		};
+	}
+
+	if (touchedCheckin) {
+		if (changedFields.includes("checkin_date")) {
+			updates.checkin_date = dateOnlyKey(updates.checkin_date);
+		} else {
+			delete updates.checkin_date;
+		}
+	}
+	if (touchedCheckout) {
+		if (changedFields.includes("checkout_date")) {
+			updates.checkout_date = dateOnlyKey(updates.checkout_date);
+		} else {
+			delete updates.checkout_date;
+		}
+	}
+
+	if (!changedFields.length) {
+		delete updates.days_of_residence;
+	}
+
+	return { allowed: true, changedFields };
 };
 
 const protectAdminManagedPricingUpdate = ({
@@ -6229,6 +6299,14 @@ exports.updateReservation = async (req, res) => {
 		ADMIN_MANAGED_PRICING_INTENT_FIELDS.forEach((field) => {
 			delete normalizedUpdateData[field];
 		});
+		const hasExplicitReservationDateIntent =
+			RESERVATION_DATE_UPDATE_INTENT_FIELDS.some((field) => {
+				const value = normalizedUpdateData[field];
+				return value === true || value === "true";
+			});
+		RESERVATION_DATE_UPDATE_INTENT_FIELDS.forEach((field) => {
+			delete normalizedUpdateData[field];
+		});
 		const authenticatedActorId = normalizeId(req.auth?._id || "");
 		const payloadPreviewActorId = normalizeId(
 			previewAuditFromPayload?.previewActorId
@@ -6314,6 +6392,16 @@ exports.updateReservation = async (req, res) => {
 		const existingReservation = await Reservations.findById(reservationId);
 		if (!existingReservation) {
 			return res.status(404).json({ error: "Reservation not found" });
+		}
+		const dateUpdateProtection = protectReservationDateUpdate({
+			updates: normalizedUpdateData,
+			reservation: existingReservation,
+			hasExplicitDateIntent: hasExplicitReservationDateIntent,
+		});
+		if (!dateUpdateProtection.allowed) {
+			return res
+				.status(dateUpdateProtection.status || 409)
+				.json(dateUpdateProtection);
 		}
 		const auditActor = await resolveReservationAuditActor(
 			requestingUserId,

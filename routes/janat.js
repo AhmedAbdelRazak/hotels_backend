@@ -31,6 +31,7 @@ const {
 	exportAdminRejectedReservationList,
 	updateOtaReservationPricing,
 	releaseOtaReservationToHotel,
+	revertOtaReservationToPlatformReview,
 	sendingEmailForPaymentLink,
 	verifyReservationToken,
 	updatingTokenizedId,
@@ -120,6 +121,14 @@ router.put(
 	isAuth,
 	requireAdminAccess("OTAReservations"),
 	releaseOtaReservationToHotel
+);
+
+router.put(
+	"/admin/ota-reservations/:reservationId/revert-platform-review/:userId",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("OTAReservations"),
+	revertOtaReservationToPlatformReview
 );
 
 router.get(

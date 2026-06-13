@@ -58,6 +58,7 @@ const {
 const {
 	OTA_PLATFORM_REVIEW_PENDING,
 	OTA_PLATFORM_REVIEW_RELEASED,
+	OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
 	OTA_RELEASED_RESERVATION_STATUS,
 	appendExcludePendingOtaReviewFilter,
 	applyPlatformOtaScope,
@@ -3419,6 +3420,132 @@ exports.releaseOtaReservationToHotel = async (req, res) => {
 		return res.status(500).json({
 			success: false,
 			message: "Failed to release OTA reservation",
+			error: error.message,
+		});
+	}
+};
+
+exports.revertOtaReservationToPlatformReview = async (req, res) => {
+	try {
+		const actor = req.profile || {};
+		const { reservationId } = req.params;
+		const reason = String(req.body?.reason || "").trim();
+		if (!isConfiguredSuperAdmin(actor)) {
+			return res.status(403).json({
+				success: false,
+				message:
+					"Only the configured SUPER ADMIN can return a reservation to platform review.",
+			});
+		}
+		if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({
+				success: false,
+				message: "Invalid reservation ID",
+			});
+		}
+
+		const reservation = await Reservations.findById(reservationId);
+		if (!reservation) {
+			return res.status(404).json({
+				success: false,
+				message: "Reservation not found",
+			});
+		}
+		if (!reservation.otaPlatformReview) {
+			return res.status(409).json({
+				success: false,
+				message:
+					"This reservation does not have OTA platform review metadata.",
+			});
+		}
+		if (isOtaPlatformReviewPending(reservation)) {
+			return res.status(409).json({
+				success: false,
+				message:
+					"This reservation is already not released to the hotel.",
+			});
+		}
+
+		const now = new Date();
+		const auditActor = buildOtaReviewAuditActor(actor);
+		const existingPending = reservation.pendingConfirmation || {};
+		const updatePayload = {
+			state: OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+			reservation_status: OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+			pendingConfirmation: {
+				...existingPending,
+				status: "pending",
+				source: "ota_platform_reverted",
+				rejectionReason: "",
+				confirmationReason: reason,
+				confirmedAt: null,
+				rejectedAt: null,
+				releasedToHotelAt: null,
+				revertedToPlatformReviewAt: now,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			},
+			otaPlatformReview: {
+				...(reservation.otaPlatformReview || {}),
+				status: OTA_PLATFORM_REVIEW_PENDING,
+				releasedAt: null,
+				releasedBy: null,
+				revertedAt: now,
+				revertedBy: auditActor,
+				reversionReason:
+					reason ||
+					"SUPER Admin returned the reservation to platform review before hotel release.",
+				lastUpdatedAt: now,
+			},
+			adminLastUpdatedAt: now,
+			adminLastUpdatedBy: auditActor,
+		};
+
+		const updated = await Reservations.findByIdAndUpdate(
+			reservationId,
+			{
+				$set: updatePayload,
+				$push: {
+					reservationAuditLog: {
+						at: now,
+						source: "ota-review",
+						action: "returned-to-platform-review",
+						by: auditActor,
+						from: {
+							reservation_status:
+								reservation.reservation_status || reservation.state || "",
+							otaPlatformReviewStatus:
+								reservation.otaPlatformReview?.status || "",
+						},
+						to: {
+							reservation_status: OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+							otaPlatformReviewStatus: OTA_PLATFORM_REVIEW_PENDING,
+						},
+						reason,
+					},
+				},
+			},
+			{ new: true }
+		)
+			.populate("belongsTo")
+			.populate("hotelId")
+			.lean();
+
+		await emitHotelNotificationRefresh(req, updated.hotelId?._id || updated.hotelId, {
+			type: "pending_confirmation",
+			reservationId: updated._id,
+			ownerId: updated.belongsTo?._id || updated.belongsTo,
+		});
+
+		return res.status(200).json({
+			success: true,
+			data: formatOtaAdminReservation(updated),
+		});
+	} catch (error) {
+		console.error("Error returning OTA reservation to platform review:", error);
+		return res.status(500).json({
+			success: false,
+			message: "Failed to return reservation to platform review",
 			error: error.message,
 		});
 	}
