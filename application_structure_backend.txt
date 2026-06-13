@@ -2587,3 +2587,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - total profit = commission + platform margin.
   - platform margin = stored adminPricing.platformMarginTotal when non-zero, otherwise netAfterExpenses - hotelTotal.
   - This keeps rows such as confirmation 7183544960 included when taken by the platform Management account and calculates its profit from commission plus the post-OTA/hotel spread.
+- Source reporting:
+  - Profit report source grouping/display must use the preserved original reservation source from customer_details.booking_source when present, falling back to the current top-level booking_source only when the original is missing.
+  - Source filters should match both customer_details.booking_source and booking_source so legacy rows and edited-source rows remain discoverable.

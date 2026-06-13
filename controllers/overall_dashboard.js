@@ -1785,6 +1785,29 @@ const profitComputedFieldsStages = (dateField = "createdAt") => [
 	{
 		$addFields: {
 			profitReportDate: `$${dateField}`,
+			profitOriginalBookingSource: {
+				$let: {
+					vars: {
+						originalSource: {
+							$trim: {
+								input: {
+									$ifNull: ["$customer_details.booking_source", ""],
+								},
+							},
+						},
+						currentSource: {
+							$trim: { input: { $ifNull: ["$booking_source", ""] } },
+						},
+					},
+					in: {
+						$cond: [
+							{ $ne: ["$$originalSource", ""] },
+							"$$originalSource",
+							"$$currentSource",
+						],
+					},
+				},
+			},
 			profitClientTotal: firstPositiveMoneyExpression([
 				reservationNumberExpression("$adminPricing.clientTotal"),
 				reservationNumberExpression("$total_amount"),
@@ -2295,9 +2318,13 @@ const buildProfitReportMatch = ({
 	const bookingSources = parseQueryList(normalizedQuery.bookingSource);
 	if (bookingSources.length) {
 		clauses.push({
-			$or: bookingSources.map((source) => ({
-				booking_source: new RegExp(escapeRegex(source), "i"),
-			})),
+			$or: bookingSources.flatMap((source) => {
+				const regex = new RegExp(escapeRegex(source), "i");
+				return [
+					{ booking_source: regex },
+					{ "customer_details.booking_source": regex },
+				];
+			}),
 		});
 	}
 
@@ -2506,19 +2533,32 @@ const bucketProfitTimeline = (rows = [], granularity = "week") => {
 		.sort((a, b) => String(a.groupKey).localeCompare(String(b.groupKey)));
 };
 
-const normalizeProfitRow = (reservation = {}) => ({
-	...reservation,
-	profitMetrics: {
-		reportDate: reservation.profitReportDate || null,
-		clientTotal: moneyNumber(reservation.profitClientTotal),
-		hotelTotal: moneyNumber(reservation.profitHotelTotal),
-		commission: moneyNumber(reservation.profitCommission),
-		platformMargin: moneyNumber(reservation.profitPlatformMargin),
-		otaExpense: moneyNumber(reservation.profitOtaExpense),
-		profitMargin: moneyNumber(reservation.profitMargin),
-		profitRate: moneyNumber(reservation.profitRate),
-	},
-});
+const normalizeProfitRow = (reservation = {}) => {
+	const originalBookingSource =
+		String(
+			reservation.profitOriginalBookingSource ||
+				reservation?.customer_details?.booking_source ||
+				reservation.booking_source ||
+				""
+		).trim() || "Unknown";
+
+	return {
+		...reservation,
+		booking_source: originalBookingSource,
+		originalBookingSource,
+		currentBookingSource: reservation.booking_source || "",
+		profitMetrics: {
+			reportDate: reservation.profitReportDate || null,
+			clientTotal: moneyNumber(reservation.profitClientTotal),
+			hotelTotal: moneyNumber(reservation.profitHotelTotal),
+			commission: moneyNumber(reservation.profitCommission),
+			platformMargin: moneyNumber(reservation.profitPlatformMargin),
+			otaExpense: moneyNumber(reservation.profitOtaExpense),
+			profitMargin: moneyNumber(reservation.profitMargin),
+			profitRate: moneyNumber(reservation.profitRate),
+		},
+	};
+};
 
 const listProfitReport = async ({ actor, hotels, query = {} }) => {
 	const platformEmployeeIds = await profitPlatformEmployeeUserIds();
@@ -2561,7 +2601,11 @@ const listProfitReport = async ({ actor, hotels, query = {} }) => {
 							hotels: { $addToSet: "$hotelId" },
 							sources: {
 								$addToSet: {
-									$trim: { input: { $ifNull: ["$booking_source", ""] } },
+									$trim: {
+										input: {
+											$ifNull: ["$profitOriginalBookingSource", ""],
+										},
+									},
 								},
 							},
 						},
@@ -2616,7 +2660,11 @@ const listProfitReport = async ({ actor, hotels, query = {} }) => {
 					{
 						$group: {
 							_id: {
-								$trim: { input: { $ifNull: ["$booking_source", ""] } },
+								$trim: {
+									input: {
+										$ifNull: ["$profitOriginalBookingSource", ""],
+									},
+								},
 							},
 							...profitGroupAccumulators(),
 						},
