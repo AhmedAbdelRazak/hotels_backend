@@ -2569,3 +2569,21 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - PM2/log health:
   - hotels-backend PM2 status was online.
   - Backend log showed aiagent initialized, socket-driven AI planner active, DB watcher enabled, server on port 8080, and MongoDB Atlas connected.
+
+2026-06-12 Admin Profit Report Scope And Formula
+- Route:
+  - GET /api/overall-dashboard/profit-report/:userId powers /admin/overall-hotel-reports?tab=Profit.
+- Scope:
+  - The report is admin-only and starts at createdAt >= 2026-05-01 by default unless the user chooses another date range/date dimension.
+  - Included reservations are only:
+    - OTA reservations detected from booking_source, customer_details.booking_source, supplierData OTA fields, or otaPlatformReview fields.
+    - Reservations taken/created by internal platform employees, matched from orderTaker/createdBy snapshots or platform user ids.
+  - Do not include generic role-7000 external/order-taker agent reservations just because they have roleDescription=ordertaker or accessTo=ownReservations. Those are not platform-employee reservations unless the platform scope markers/id match.
+  - Blank orderTaker snapshots are not enough by themselves; fallback matching must come from createdBy/orderTakeId/createdByUserId pointing to a platform employee or configured SUPER_ADMIN_ID.
+- Profit math:
+  - clientTotal = adminPricing.clientTotal, falling back to total_amount.
+  - hotelTotal = adminPricing.rootTotal, falling back to sub_total, then clientTotal minus stored commission.
+  - netAfterExpenses = adminPricing.netAfterExpensesTotal, falling back to clientTotal minus adminPricing.otaExpenseTotal.
+  - total profit = commission + platform margin.
+  - platform margin = stored adminPricing.platformMarginTotal when non-zero, otherwise netAfterExpenses - hotelTotal.
+  - This keeps rows such as confirmation 7183544960 included when taken by the platform Management account and calculates its profit from commission plus the post-OTA/hotel spread.

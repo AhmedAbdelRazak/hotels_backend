@@ -90,7 +90,19 @@ const PENDING_CONFIRMATION_STATUS =
 const PENDING_CONFIRMATION_ONLY_STATUS = /pending[-_\s]?confirmation/i;
 const PROFIT_REPORT_OTA_SOURCE =
 	/(booking\.?com|booking com|expedia|agoda|airbnb|hotel\.?com|hotels\.?com|trivago|ota)/i;
-const PROFIT_REPORT_ORDER_TAKER_ROLE = /order[\s_-]?taker|ordertaker/i;
+const PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS = [
+	"platformadmin",
+	"platformstaff",
+	"customerservice",
+	"integrator",
+	"reservations",
+	"reports",
+	"finance",
+	"content",
+	"tools",
+	"payouts",
+	"support",
+];
 const FINISHED_HOUSEKEEPING_STATUS = /^(finished|done|completed|clean)$/i;
 const SUMMARY_DIRTY_ROOM_REASONS = new Set([
 	"guest_checked_out",
@@ -1856,30 +1868,7 @@ const profitComputedFieldsStages = (dateField = "createdAt") => [
 					{
 						$cond: [
 							{
-								$or: [
-									{
-										$gt: [
-											{ $abs: "$profitAdminPlatformMargin" },
-											0,
-										],
-									},
-									{
-										$gt: [
-											reservationNumberExpression(
-												"$adminPricing.netAfterExpensesTotal"
-											),
-											0,
-										],
-									},
-									{
-										$gt: [
-											reservationNumberExpression(
-												"$adminPricing.otaExpenseTotal"
-											),
-											0,
-										],
-									},
-								],
+								$gt: [{ $abs: "$profitAdminPlatformMargin" }, 0],
 							},
 							"$profitAdminPlatformMargin",
 							{
@@ -2172,39 +2161,67 @@ const profitOtaReservationFilter = () => ({
 	],
 });
 
-const profitOrderTakerUserIds = async () => {
+const profitPlatformEmployeeUserIds = async () => {
 	const users = await User.find({
 		activeUser: { $ne: false },
 		$or: [
-			{ role: 7000 },
-			{ roles: 7000 },
-			{ roleDescription: PROFIT_REPORT_ORDER_TAKER_ROLE },
-			{ roleDescriptions: PROFIT_REPORT_ORDER_TAKER_ROLE },
-			{ accessTo: "ownReservations" },
+			{ accountScope: "platform" },
+			{ platformEmployee: true },
+			{ role: 1000 },
+			{ roles: 1000 },
+			{ roleDescription: { $in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS } },
+			{ roleDescriptions: { $in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS } },
 		],
 	})
 		.select("_id")
 		.lean()
 		.exec();
 
-	return users.map((user) => normalizeId(user._id)).filter(Boolean);
+	return [
+		...new Set([
+			...configuredSuperAdminIds(),
+			...users.map((user) => normalizeId(user._id)).filter(Boolean),
+		]),
+	];
 };
 
-const profitOrderTakerReservationFilter = (orderTakerIds = []) => {
-	const ids = [...new Set(orderTakerIds.map(normalizeId).filter(Boolean))];
+const profitPlatformEmployeeReservationFilter = (platformEmployeeIds = []) => {
+	const ids = [
+		...new Set(platformEmployeeIds.map(normalizeId).filter(Boolean)),
+	];
 	const validObjectIds = ids
 		.filter((id) => ObjectId.isValid(id))
 		.map((id) => ObjectId(id));
 	const mixedIds = [...ids, ...validObjectIds];
 	const clauses = [
-		{ "orderTaker.role": 7000 },
-		{ "createdBy.role": 7000 },
-		{ "orderTaker.roleDescription": PROFIT_REPORT_ORDER_TAKER_ROLE },
-		{ "createdBy.roleDescription": PROFIT_REPORT_ORDER_TAKER_ROLE },
-		{ "orderTaker.roleDescriptions": PROFIT_REPORT_ORDER_TAKER_ROLE },
-		{ "createdBy.roleDescriptions": PROFIT_REPORT_ORDER_TAKER_ROLE },
-		{ "orderTaker.accessTo": "ownReservations" },
-		{ "createdBy.accessTo": "ownReservations" },
+		{ "orderTaker.role": 1000 },
+		{ "createdBy.role": 1000 },
+		{ "orderTaker.roles": 1000 },
+		{ "createdBy.roles": 1000 },
+		{ "orderTaker.accountScope": "platform" },
+		{ "createdBy.accountScope": "platform" },
+		{ "orderTaker.platformEmployee": true },
+		{ "createdBy.platformEmployee": true },
+		{
+			"orderTaker.roleDescription": {
+				$in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS,
+			},
+		},
+		{
+			"createdBy.roleDescription": {
+				$in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS,
+			},
+		},
+		{
+			"orderTaker.roleDescriptions": {
+				$in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS,
+			},
+		},
+		{
+			"createdBy.roleDescriptions": {
+				$in: PROFIT_REPORT_PLATFORM_ROLE_DESCRIPTIONS,
+			},
+		},
 	];
 
 	if (mixedIds.length) {
@@ -2219,10 +2236,10 @@ const profitOrderTakerReservationFilter = (orderTakerIds = []) => {
 	return { $or: clauses };
 };
 
-const profitEligibleReservationFilter = (orderTakerIds = []) => ({
+const profitEligibleReservationFilter = (platformEmployeeIds = []) => ({
 	$or: [
 		profitOtaReservationFilter(),
-		profitOrderTakerReservationFilter(orderTakerIds),
+		profitPlatformEmployeeReservationFilter(platformEmployeeIds),
 	],
 });
 
@@ -2230,7 +2247,7 @@ const buildProfitReportMatch = ({
 	actor,
 	hotels,
 	query = {},
-	orderTakerIds = [],
+	platformEmployeeIds = [],
 }) => {
 	const normalizedQuery = profitReportQueryDefaults(query);
 	const hotelIds = filterHotelIdsForQuery(hotels, normalizedQuery.hotelId);
@@ -2251,7 +2268,7 @@ const buildProfitReportMatch = ({
 
 	const clauses = [
 		buildExcludePendingOtaReviewFilter(),
-		profitEligibleReservationFilter(orderTakerIds),
+		profitEligibleReservationFilter(platformEmployeeIds),
 	];
 	const visibilityFilter =
 		hotelManagementReservationVisibilityFilterForActor(actor);
@@ -2504,8 +2521,13 @@ const normalizeProfitRow = (reservation = {}) => ({
 });
 
 const listProfitReport = async ({ actor, hotels, query = {} }) => {
-	const orderTakerIds = await profitOrderTakerUserIds();
-	const built = buildProfitReportMatch({ actor, hotels, query, orderTakerIds });
+	const platformEmployeeIds = await profitPlatformEmployeeUserIds();
+	const built = buildProfitReportMatch({
+		actor,
+		hotels,
+		query,
+		platformEmployeeIds,
+	});
 	if (!built) return emptyProfitReportPayload(hotels, query);
 
 	const exportAll = ["1", "true", "yes", "all"].includes(
