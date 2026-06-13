@@ -101,12 +101,14 @@ const getDateRange = (startStr, endStr) => {
 const isReservationActive = (
 	reservation,
 	includeCancelled,
-	includePendingConfirmation = false
+	includePendingConfirmation = false,
+	{ includeCompleted = false } = {}
 ) => {
 	if (
 		!shouldCountReservationForInventory(reservation, {
 			includeCancelled,
 			includePendingConfirmation,
+			includeCompleted,
 		})
 	) {
 		return false;
@@ -510,7 +512,15 @@ const inventoryHttpError = (status, message) => {
 
 const buildHotelInventoryCalendarPayload = async (
 	hotelId,
-	{ start, end, includeCancelled, paymentStatuses, reservationVisibilityActor } = {}
+	{
+		start,
+		end,
+		includeCancelled,
+		paymentStatuses,
+		reservationVisibilityActor,
+		includeCompletedStays = false,
+		includeHistoricalReservations = false,
+	} = {}
 ) => {
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		throw inventoryHttpError(400, "Invalid hotelId");
@@ -545,10 +555,12 @@ const buildHotelInventoryCalendarPayload = async (
 		checkin_date: { $lt: endDate },
 		checkout_date: { $gt: startDate },
 	};
-	addHotelManagementReservationVisibilityToFilter(
-		reservationQuery,
-		reservationVisibilityActor
-	);
+	if (!includeHistoricalReservations) {
+		addHotelManagementReservationVisibilityToFilter(
+			reservationQuery,
+			reservationVisibilityActor
+		);
+	}
 
 	const reservations = await Reservations.find(reservationQuery)
 		.populate("roomId", "display_name room_type individualBeds")
@@ -559,7 +571,9 @@ const buildHotelInventoryCalendarPayload = async (
 		includeCancelled === true || String(includeCancelled || "") === "true";
 	const reservationPayloads = reservations
 		.filter((reservation) =>
-			isReservationActive(reservation, includeCancelledFlag)
+			isReservationActive(reservation, includeCancelledFlag, false, {
+				includeCompleted: includeCompletedStays,
+			})
 		)
 		.filter((reservation) => {
 			if (paymentStatusFilter.size === 0) return true;
@@ -804,7 +818,15 @@ const buildHotelInventoryCalendarPayload = async (
 
 const buildHotelInventoryDayPayload = async (
 	hotelId,
-	{ date, roomKey, includeCancelled, paymentStatuses, reservationVisibilityActor } = {}
+	{
+		date,
+		roomKey,
+		includeCancelled,
+		paymentStatuses,
+		reservationVisibilityActor,
+		includeCompletedStays = false,
+		includeHistoricalReservations = false,
+	} = {}
 ) => {
 	if (!mongoose.Types.ObjectId.isValid(hotelId)) {
 		throw inventoryHttpError(400, "Invalid hotelId");
@@ -840,10 +862,12 @@ const buildHotelInventoryDayPayload = async (
 		checkin_date: { $lt: dayEnd },
 		checkout_date: { $gt: dayStart },
 	};
-	addHotelManagementReservationVisibilityToFilter(
-		reservationQuery,
-		reservationVisibilityActor
-	);
+	if (!includeHistoricalReservations) {
+		addHotelManagementReservationVisibilityToFilter(
+			reservationQuery,
+			reservationVisibilityActor
+		);
+	}
 
 	const reservations = await Reservations.find(reservationQuery)
 		.populate("roomId", "display_name room_type individualBeds")
@@ -856,7 +880,11 @@ const buildHotelInventoryDayPayload = async (
 	let booked = 0;
 
 	reservations.forEach((reservation) => {
-		if (!isReservationActive(reservation, includeCancelledFlag)) return;
+		if (
+			!isReservationActive(reservation, includeCancelledFlag, false, {
+				includeCompleted: includeCompletedStays,
+			})
+		) return;
 		if (!reservationCoversDay(reservation, day)) return;
 		const meta = paymentMeta(reservation);
 		if (

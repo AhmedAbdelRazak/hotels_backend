@@ -1,6 +1,8 @@
 const PENDING_CONFIRMATION_STATUS_REGEX =
 	/(?:pending[\s_-]?confirmation|pending[\s_-]?finance[\s_-]?review|pending[\s_-]?agent[\s_-]?commission[\s_-]?approval|^pending$)/i;
 const PENDING_DECISION_STATUS_REGEX = /^pending$/i;
+const INVENTORY_EXCLUDED_STATUS_REGEX = /cancel|reject|void|no[_\s-]?show/i;
+const INVENTORY_COMPLETED_STATUS_REGEX = /checked[_\s-]?out|checkedout/i;
 const INVENTORY_NON_BLOCKING_STATUS_REGEX =
 	/cancel|reject|void|no[_\s-]?show|checked[_\s-]?out|checkedout/i;
 
@@ -25,7 +27,11 @@ const isPendingConfirmationReservation = (reservation = {}) => {
 
 const shouldCountReservationForInventory = (
 	reservation = {},
-	{ includeCancelled = false, includePendingConfirmation = false } = {}
+	{
+		includeCancelled = false,
+		includePendingConfirmation = false,
+		includeCompleted = false,
+	} = {}
 ) => {
 	if (
 		!includePendingConfirmation &&
@@ -40,6 +46,10 @@ const shouldCountReservationForInventory = (
 		reservation.reservation_status || reservation.state || ""
 	);
 	if (!status) return true;
+
+	if (includeCompleted && INVENTORY_COMPLETED_STATUS_REGEX.test(status)) {
+		return !INVENTORY_EXCLUDED_STATUS_REGEX.test(status);
+	}
 
 	return !INVENTORY_NON_BLOCKING_STATUS_REGEX.test(status);
 };

@@ -19,6 +19,7 @@ const {
 } = require("./hotel_inventory");
 const {
 	buildPendingConfirmationExclusionFilter,
+	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
 const {
 	buildExcludePendingOtaReviewFilter,
@@ -4002,10 +4003,15 @@ exports.overallSummary = async (req, res) => {
 		const hasExplicitStatus = statusValues.length > 0;
 		const includeCancelled =
 			String(req.query?.includeCancelled || "").toLowerCase() === "true";
+		const isInventorySummaryTab =
+			String(req.query?.summaryTab || "").toLowerCase() === "inventory";
 		const summaryClauses = [];
 		summaryClauses.push(buildExcludePendingOtaReviewFilter());
 		const visibilityFilter =
 			hotelManagementReservationVisibilityFilterForActor(actor);
+		const occupancyVisibilityFilter = isInventorySummaryTab
+			? null
+			: visibilityFilter;
 		if (visibilityFilter) summaryClauses.push(visibilityFilter);
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (hasExplicitStatus && statusFilter) {
@@ -4054,7 +4060,9 @@ exports.overallSummary = async (req, res) => {
 			buildExcludePendingOtaReviewFilter(),
 			{ $or: occupancyDateClauses },
 		];
-		if (visibilityFilter) occupancyClauses.push(visibilityFilter);
+		if (occupancyVisibilityFilter) {
+			occupancyClauses.push(occupancyVisibilityFilter);
+		}
 		if (hasExplicitStatus && statusFilter) {
 			occupancyClauses.push(statusFilter);
 		} else {
@@ -4586,9 +4594,6 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 			];
 		}
 		const reservationClauses = [buildExcludePendingOtaReviewFilter()];
-		const visibilityFilter =
-			hotelManagementReservationVisibilityFilterForActor(context.actor);
-		if (visibilityFilter) reservationClauses.push(visibilityFilter);
 		const statusFilter = reservationStatusFilter(req.query?.status);
 		if (statusFilter) reservationClauses.push(statusFilter);
 		const bookingSources = parseQueryList(req.query?.bookingSource);
@@ -4620,7 +4625,7 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 				.exec(),
 			Reservations.find(reservationMatch)
 				.select(
-					"hotelId roomId total_rooms pickedRoomsType pickedRoomsPricing checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility reservation_status state"
+					"hotelId roomId total_rooms pickedRoomsType pickedRoomsPricing checkin_date checkout_date total_amount sub_total adminPricing adminPricingVisibility reservation_status state pendingConfirmation agentDecisionSnapshot"
 				)
 				.lean()
 				.exec(),
@@ -4672,6 +4677,12 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 			const hotelId = normalizeId(reservation.hotelId);
 			const hotelRow = hotelRowMap.get(hotelId);
 			if (!hotelRow) return;
+			if (
+				!shouldCountReservationForInventory(reservation, {
+					includeCancelled,
+					includeCompleted: true,
+				})
+			) return;
 			const units = reservationUnitCount(reservation);
 			const checkin = startOfUtcDate(reservation.checkin_date);
 			const checkout = startOfUtcDate(reservation.checkout_date);
@@ -4745,6 +4756,8 @@ exports.overallExecutiveInventoryReport = async (req, res) => {
 					includeCancelled,
 					paymentStatuses: req.query?.paymentStatuses,
 					reservationVisibilityActor: context.actor,
+					includeCompletedStays: true,
+					includeHistoricalReservations: true,
 				});
 			} catch (calendarBuildError) {
 				calendarError = calendarBuildError?.message || "Could not load inventory calendar";
@@ -4798,6 +4811,8 @@ exports.overallExecutiveInventoryDayReport = async (req, res) => {
 				String(req.query?.includeCancelled || "").toLowerCase() === "true",
 			paymentStatuses: req.query?.paymentStatuses,
 			reservationVisibilityActor: context.actor,
+			includeCompletedStays: true,
+			includeHistoricalReservations: true,
 		});
 
 		return res.json(payload);

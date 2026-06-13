@@ -2590,3 +2590,17 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Source reporting:
   - Profit report source grouping/display must use the preserved original reservation source from customer_details.booking_source when present, falling back to the current top-level booking_source only when the original is missing.
   - Source filters should match both customer_details.booking_source and booking_source so legacy rows and edited-source rows remain discoverable.
+
+2026-06-13 Hotel-Management Inventory Occupancy Report
+- Route:
+  - GET /api/overall-dashboard/executive-report/inventory/:userId powers the hotel-management summary inventory tab.
+  - GET /api/overall-dashboard/executive-report/inventory-day/:userId powers the day drill-down modal.
+- Historical occupancy rule:
+  - Live availability validation still treats checked_out and early_checked_out reservations as non-blocking.
+  - The hotel-management inventory occupancy report opts into completed stays, so historical checked-out stays count for the dates they occupied.
+  - The report also bypasses the hotel-management historical visibility cutoff for occupancy calculations after access is already scoped to the requested hotel.
+- Date-range rule:
+  - The inventory tab must use invStart/invEnd derived from the selected inventory Hijri/Gregorian month.
+  - A broad parent summary dateTo must not stretch a single selected Hijri month.
+- Debug note:
+  - See docs/hotel-management-inventory-occupancy-debugging-2026-06-13.md for the Zad Al Safa Ramadan 1447 data audit and regression checks.
