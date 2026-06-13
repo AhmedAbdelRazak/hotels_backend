@@ -2604,3 +2604,16 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - A broad parent summary dateTo must not stretch a single selected Hijri month.
 - Debug note:
   - See docs/hotel-management-inventory-occupancy-debugging-2026-06-13.md for the Zad Al Safa Ramadan 1447 data audit and regression checks.
+
+2026-06-13 Expedia Web Scraping Approval Evidence
+- Evidence files:
+  - docs/expedia-web-scraping-approval-evidence-2026-06-11.md
+  - docs/evidence/expedia-web-scraping-approval-2026-06-11.png
+- Visible email metadata:
+  - Expedia Group Partner Central support case 153773315.
+  - Account: Al-Rehab Hotel 120233940.
+  - Visible received time: 2026-06-11 7:10 AM.
+- Engineering contract:
+  - Treat the screenshot as written support approval evidence for web scraping jobs to synchronize with Expedia Partner Central.
+  - Keep the original email/headers separately for escalation.
+  - Any Expedia scraper should stay conservative: authorized credentials only, rate limits/backoff, no CAPTCHA/security bypass, scoped to approved PMS synchronization, and clear audit logs.
