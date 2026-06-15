@@ -6,6 +6,9 @@ const OtaReservationSyncJob = require("../models/ota_reservation_sync_job");
 const {
 	prepareOtaReservationSyncJob,
 } = require("../services/expediaReservationSync");
+const {
+	startExpediaReservationCollectorJob,
+} = require("../services/expediaReservationCollector");
 
 const { ObjectId } = mongoose.Types;
 
@@ -101,7 +104,43 @@ const readOtaReservationSyncJob = async (req, res) => {
 	}
 };
 
+const runOtaReservationSyncCollector = async (req, res) => {
+	try {
+		const actor = await loadActor(req);
+		if (!actor || actor.activeUser === false || !canPrepareOtaSync(actor)) {
+			return res.status(403).json({
+				error: "Only Super Admins can run OTA reservation sync collectors.",
+			});
+		}
+		const { jobId } = req.params;
+		if (!ObjectId.isValid(jobId)) {
+			return res.status(400).json({ error: "Invalid OTA sync job id." });
+		}
+		const result = await startExpediaReservationCollectorJob({
+			jobId,
+			actor,
+			selectedHotelIds:
+				req.body?.selectedHotelIds || req.body?.hotelIds || req.body?.targetHotelIds || [],
+		});
+		if (!result.ok) {
+			return res.status(result.statusCode || 400).json({ error: result.error });
+		}
+		return res.status(result.statusCode || 202).json({
+			ok: true,
+			job: result.job,
+			alreadyRunning: result.alreadyRunning || false,
+		});
+	} catch (error) {
+		console.error("[ota-reservation-sync] collector run failed:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not start OTA reservation sync collector." });
+	}
+};
+
 exports.prepareOtaReservationSync = prepareOtaReservationSync;
 exports.readOtaReservationSyncJob = readOtaReservationSyncJob;
+exports.runOtaReservationSyncCollector = runOtaReservationSyncCollector;
 exports.prepareExpediaReservationSync = prepareOtaReservationSync;
 exports.readExpediaReservationSyncJob = readOtaReservationSyncJob;
+exports.runExpediaReservationSyncCollector = runOtaReservationSyncCollector;

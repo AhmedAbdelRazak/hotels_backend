@@ -1,0 +1,823 @@
+/** @format */
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const puppeteer = require("puppeteer");
+const OtaReservationSyncJob = require("../models/ota_reservation_sync_job");
+const {
+	normalizeComparable,
+	normalizeWhitespace,
+	redactSensitive,
+	safeSnippet,
+	findReservationByOtaConfirmation,
+	detectConfirmationMatchFields,
+} = require("./otaReservationMapper");
+
+const DEFAULT_LOGIN_URL =
+	"https://expediapartnercentral.com/Account/Logon?returnUrl=https%3A%2F%2Fapps.expediapartnercentral.com%2Fmanageproperty%2FManageProperty";
+const DEFAULT_MANAGE_PROPERTY_URL =
+	"https://apps.expediapartnercentral.com/manageproperty/ManageProperty";
+const DEFAULT_OUTPUT_DIR = path.join(
+	process.cwd(),
+	"audits",
+	"expedia-reservation-sync"
+);
+const DEFAULT_PROFILE_DIR = path.join(
+	os.homedir(),
+	".jannatbooking",
+	"expedia-reservation-sync-profile"
+);
+const MAX_RUN_MS = Number(process.env.OTA_EXPEDIA_SYNC_MAX_RUN_MS || 55_000);
+const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
+	process.env.OTA_EXPEDIA_SYNC_MAX_CANDIDATES_PER_HOTEL || 80
+);
+const NAVIGATION_TIMEOUT_MS = Number(
+	process.env.OTA_EXPEDIA_SYNC_NAVIGATION_TIMEOUT_MS || 15_000
+);
+const activeCollectors = new Map();
+
+const normalizeLine = (value) => String(value || "").replace(/\s+/g, " ").trim();
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const ensureDirectory = (dir) => {
+	fs.mkdirSync(dir, { recursive: true });
+	return dir;
+};
+
+const collectorOutputDir = () =>
+	ensureDirectory(process.env.OTA_EXPEDIA_SYNC_OUTPUT_DIR || DEFAULT_OUTPUT_DIR);
+
+const collectorProfileDir = () =>
+	ensureDirectory(
+		process.env.OTA_EXPEDIA_BROWSER_PROFILE_DIR || DEFAULT_PROFILE_DIR
+	);
+
+const isLikelyPropertyName = (value) => {
+	const line = normalizeLine(value);
+	if (!line || line.length < 3) return false;
+	return !/^(home|search|your properties|property id|terms of use)$/i.test(line);
+};
+
+const parsePropertiesFromText = (rawText) => {
+	const allLines = String(rawText || "")
+		.split(/\r?\n/)
+		.map(normalizeLine)
+		.filter(Boolean);
+	const markerIndex = allLines.findIndex((line) =>
+		/^your properties$/i.test(line)
+	);
+	const lines = markerIndex >= 0 ? allLines.slice(markerIndex + 1) : allLines;
+	const properties = [];
+	const seen = new Set();
+
+	for (let index = 0; index < lines.length - 1; index += 1) {
+		const name = lines[index];
+		const idMatch = lines[index + 1].match(/^Property ID\s+([A-Za-z0-9-]+)/i);
+		if (!idMatch || !isLikelyPropertyName(name)) continue;
+
+		const expediaPropertyId = idMatch[1];
+		const key = `${expediaPropertyId}:${name.toLowerCase()}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		properties.push({ name, expediaPropertyId, url: "" });
+	}
+
+	return properties;
+};
+
+const hasPropertyListText = (value) =>
+	/Your Properties|Property ID|Manage a property/i.test(value || "");
+
+const isLoginOrVerificationPage = ({ url = "", text = "" } = {}) =>
+	/\/Account\/Logon|signin|login/i.test(url) ||
+	(/(sign in|email|password|verification|captcha|multi-factor|mfa)/i.test(text) &&
+		!/Your Properties|Property ID/i.test(text));
+
+const safePageSnapshot = async (page) => {
+	try {
+		return page.evaluate(() => ({
+			text: document.body.innerText || "",
+			title: document.title || "",
+			url: window.location.href || "",
+		}));
+	} catch (error) {
+		return {
+			text: "",
+			title: "",
+			url: page.url(),
+			error: error && error.message ? error.message : String(error),
+		};
+	}
+};
+
+const findPageByContent = async (browser, matcher, timeoutMs) => {
+	const deadline = Date.now() + timeoutMs;
+	let lastSeen = [];
+
+	while (Date.now() < deadline) {
+		const pages = await browser.pages();
+		lastSeen = [];
+		for (const candidate of pages) {
+			const snapshot = await safePageSnapshot(candidate);
+			lastSeen.push({
+				title: snapshot.title,
+				url: snapshot.url || candidate.url(),
+				hasBodyText: Boolean(snapshot.text),
+			});
+			if (matcher(snapshot, candidate)) return candidate;
+		}
+		await delay(750);
+	}
+
+	const detail = lastSeen
+		.map((page) => `${page.title || "Untitled"} <${page.url}>`)
+		.join("; ");
+	throw new Error(`Timed out waiting for Expedia page. Last tabs: ${detail}`);
+};
+
+const scrollToLoadVisibleContent = async (page) => {
+	await page.evaluate(async () => {
+		await new Promise((resolve) => {
+			let stableRounds = 0;
+			let previousHeight = 0;
+			const interval = setInterval(() => {
+				window.scrollBy(0, 700);
+				const currentHeight = document.body.scrollHeight;
+				if (currentHeight === previousHeight) {
+					stableRounds += 1;
+				} else {
+					stableRounds = 0;
+					previousHeight = currentHeight;
+				}
+				if (stableRounds >= 4) {
+					clearInterval(interval);
+					window.scrollTo(0, 0);
+					resolve();
+				}
+			}, 180);
+		});
+	});
+};
+
+const extractProperties = async (page) => {
+	const snapshot = await page.evaluate(() => {
+		const links = Array.from(document.querySelectorAll("a"))
+			.map((link) => ({
+				text: (link.innerText || link.textContent || "").replace(/\s+/g, " ").trim(),
+				href: link.href || "",
+			}))
+			.filter((link) => link.text && link.href);
+		return { text: document.body.innerText || "", links };
+	});
+
+	const parsed = parsePropertiesFromText(snapshot.text);
+	return parsed.map((property) => {
+		const propertyKey = normalizeComparable(property.name);
+		const match = snapshot.links.find((link) => {
+			const linkKey = normalizeComparable(link.text);
+			return linkKey === propertyKey || linkKey.includes(propertyKey);
+		});
+		return { ...property, url: match ? match.href : "" };
+	});
+};
+
+const scorePropertyForHotel = (property = {}, hotel = {}) => {
+	const propertyKey = normalizeComparable(property.name);
+	if (!propertyKey) return 0;
+	const keys = Array.from(
+		new Set([
+			...(hotel.matchKeys || []),
+			...(hotel.aliases || []).map((alias) => normalizeComparable(alias.name)),
+			normalizeComparable(hotel.hotelName),
+			normalizeComparable(hotel.hotelNameOtherLanguage),
+		].filter(Boolean))
+	);
+	let best = 0;
+	for (const key of keys) {
+		if (!key) continue;
+		if (propertyKey === key) best = Math.max(best, 100);
+		else if (propertyKey.includes(key) || key.includes(propertyKey)) {
+			best = Math.max(best, 92);
+		} else {
+			const propertyTokens = new Set(propertyKey.split(" ").filter(Boolean));
+			const keyTokens = new Set(key.split(" ").filter(Boolean));
+			const intersection = [...keyTokens].filter((token) =>
+				propertyTokens.has(token)
+			).length;
+			const score = Math.round(
+				(intersection / Math.max(keyTokens.size, propertyTokens.size, 1)) * 100
+			);
+			best = Math.max(best, score);
+		}
+	}
+	return best;
+};
+
+const matchPropertiesToHotels = (properties = [], hotels = []) =>
+	hotels.map((hotel) => {
+		const ranked = properties
+			.map((property) => ({
+				property,
+				score: scorePropertyForHotel(property, hotel),
+			}))
+			.sort((left, right) => right.score - left.score);
+		const best = ranked[0];
+		return {
+			hotel,
+			property: best && best.score >= 72 ? best.property : null,
+			matchScore: best ? best.score : 0,
+		};
+	});
+
+const findReservationsLink = async (page) => {
+	const links = await page.evaluate(() =>
+		Array.from(document.querySelectorAll("a"))
+			.map((link) => ({
+				text: (link.innerText || link.textContent || "").replace(/\s+/g, " ").trim(),
+				href: link.href || "",
+			}))
+			.filter((link) => link.href)
+	);
+	const candidates = links
+		.map((link) => ({
+			...link,
+			score:
+				/reservations?/i.test(link.text) || /reservations?/i.test(link.href)
+					? 100
+					: /bookings?/i.test(link.text) || /bookings?/i.test(link.href)
+					? 80
+					: /guests?/i.test(link.text)
+					? 55
+					: 0,
+		}))
+		.filter((link) => link.score > 0 && !/help|review|message|support/i.test(link.href));
+	candidates.sort((left, right) => right.score - left.score);
+	return candidates[0] || null;
+};
+
+const confirmationCandidatesFromText = (text = "") => {
+	const source = normalizeWhitespace(text);
+	const values = [];
+	const patterns = [
+		/(?:reservation|booking|itinerary|confirmation)\s*(?:id|number|#|no\.?)?\s*[:#-]?\s*([A-Z0-9-]{6,24})/gi,
+		/\b([0-9]{8,16})\b/g,
+	];
+	for (const pattern of patterns) {
+		let match;
+		while ((match = pattern.exec(source))) {
+			const value = String(match[1] || "")
+				.replace(/[^A-Z0-9-]/gi, "")
+				.trim();
+			if (value && !values.includes(value)) values.push(value);
+		}
+	}
+	return values.filter((value) => !/^20\d{2}$/.test(value)).slice(0, 5);
+};
+
+const extractRows = async (page) =>
+	page.evaluate(() => {
+		const selectors = [
+			"tr",
+			"[role='row']",
+			"[data-testid*='reservation' i]",
+			"[class*='reservation' i]",
+			"[class*='booking' i]",
+		];
+		const nodes = Array.from(document.querySelectorAll(selectors.join(",")));
+		const seen = new Set();
+		return nodes
+			.map((node) => {
+				const text = (node.innerText || node.textContent || "")
+					.replace(/\s+/g, " ")
+					.trim();
+				const link = node.querySelector("a[href]");
+				const href = link ? link.href : "";
+				return { text, href };
+			})
+			.filter((row) => {
+				if (!row.text || row.text.length < 12) return false;
+				if (seen.has(row.text)) return false;
+				seen.add(row.text);
+				return true;
+			})
+			.slice(0, 250);
+	});
+
+const parseLightReservationDetails = (text = "") => {
+	const snippet = normalizeWhitespace(redactSensitive(text));
+	const dates = Array.from(
+		new Set(
+			(snippet.match(
+				/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b/gi
+			) || []).slice(0, 4)
+		)
+	);
+	const amountMatch = snippet.match(
+		/\b(?:SAR|USD|US\$|\$|ريال|ر\.س)\s*[0-9,]+(?:\.[0-9]{1,2})?|\b[0-9,]+(?:\.[0-9]{1,2})?\s*(?:SAR|USD|US\$|\$|ريال|ر\.س)\b/i
+	);
+	const guestMatch = snippet.match(
+		/(?:guest|traveler|customer)\s*(?:name)?\s*[:#-]?\s*([A-Z][A-Za-z .'-]{2,80})/i
+	);
+	return {
+		guestName: guestMatch ? normalizeWhitespace(guestMatch[1]) : "",
+		dateHints: dates,
+		amountHint: amountMatch ? normalizeWhitespace(amountMatch[0]) : "",
+	};
+};
+
+const extractReservationCandidates = async (page, hotel, property) => {
+	const rows = await extractRows(page);
+	const candidates = [];
+	const seen = new Set();
+
+	for (const row of rows) {
+		const ids = confirmationCandidatesFromText(row.text);
+		for (const confirmationNumber of ids) {
+			const key = `${hotel.hotelId}:${confirmationNumber}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const details = parseLightReservationDetails(row.text);
+			candidates.push({
+				provider: "expedia",
+				hotelId: hotel.hotelId,
+				hotelName: hotel.hotelName,
+				expediaPropertyId: property.expediaPropertyId || "",
+				expediaPropertyName: property.name || "",
+				confirmationNumber,
+				sourceUrl: row.href || page.url(),
+				...details,
+				sourceSnippet: safeSnippet(row.text, 500),
+			});
+			if (candidates.length >= MAX_RESERVATION_CANDIDATES_PER_HOTEL) {
+				return candidates;
+			}
+		}
+	}
+
+	return candidates;
+};
+
+const emptyBuckets = () => ({
+	newReservations: [],
+	matchedExisting: [],
+	statusChanged: [],
+	conflicts: [],
+	needsReview: [],
+	paymentOrVccAvailable: [],
+});
+
+const summarizeBuckets = (buckets = emptyBuckets()) => ({
+	newReservations: buckets.newReservations.length,
+	matchedExisting: buckets.matchedExisting.length,
+	statusChanged: buckets.statusChanged.length,
+	conflicts: buckets.conflicts.length,
+	needsReview: buckets.needsReview.length,
+	paymentOrVccAvailable: buckets.paymentOrVccAvailable.length,
+	appliedWrites: 0,
+});
+
+const appendAudit = async (jobId, entry = {}) =>
+	OtaReservationSyncJob.updateOne(
+		{ _id: jobId },
+		{
+			$push: {
+				auditLog: {
+					at: new Date(),
+					...entry,
+				},
+			},
+		}
+	);
+
+const updateJob = (jobId, update) =>
+	OtaReservationSyncJob.findByIdAndUpdate(jobId, update, { new: true }).lean().exec();
+
+const normalizeHotelId = (value) =>
+	String(value?._id || value?.hotelId || value || "").trim();
+
+const resolveSelectedTargets = (job, selectedHotelIds = []) => {
+	const targets = Array.isArray(job?.targetHotels) ? job.targetHotels : [];
+	const availableIds = new Set(targets.map((hotel) => normalizeHotelId(hotel.hotelId)));
+	const selected = Array.from(
+		new Set((Array.isArray(selectedHotelIds) ? selectedHotelIds : [])
+			.map(normalizeHotelId)
+			.filter(Boolean))
+	);
+
+	if (!selected.length) {
+		return {
+			ok: false,
+			statusCode: 400,
+			error: "Select at least one OTA-mapped hotel before running the collector.",
+		};
+	}
+
+	const invalid = selected.filter((hotelId) => !availableIds.has(hotelId));
+	if (invalid.length) {
+		return {
+			ok: false,
+			statusCode: 400,
+			error: "One or more selected hotels are not part of this OTA sync job.",
+		};
+	}
+
+	const selectedSet = new Set(selected);
+	return {
+		ok: true,
+		selectedHotelIds: selected,
+		targetHotels: targets.filter((hotel) => selectedSet.has(normalizeHotelId(hotel.hotelId))),
+	};
+};
+
+const classifyCandidate = async (candidate) => {
+	const existing = await findReservationByOtaConfirmation(
+		candidate.confirmationNumber,
+		"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state"
+	);
+	if (!existing) {
+		return {
+			bucket: "newReservations",
+			item: {
+				...candidate,
+				actionPreview: "candidate_new_reservation_needs_detail_review",
+			},
+		};
+	}
+	return {
+		bucket: "matchedExisting",
+		item: {
+			...candidate,
+			actionPreview: "matched_existing_no_write",
+			reservationId: String(existing._id),
+			pmsConfirmationNumber: existing.confirmation_number || "",
+			currentStatus: existing.reservation_status || existing.state || "",
+			matchedReservationBy: detectConfirmationMatchFields(
+				existing,
+				candidate.confirmationNumber
+			),
+		},
+	};
+};
+
+const launchBrowser = async () => {
+	const headlessEnv = String(process.env.OTA_EXPEDIA_HEADLESS || "true").toLowerCase();
+	const headless = !["0", "false", "no"].includes(headlessEnv);
+	const launchArgs = ["--window-size=1440,950"];
+	const noSandbox =
+		process.platform === "linux" ||
+		/^(1|true|yes)$/i.test(process.env.EXPEDIA_BROWSER_NO_SANDBOX || "");
+	if (noSandbox) launchArgs.push("--no-sandbox", "--disable-setuid-sandbox");
+
+	const options = {
+		headless,
+		userDataDir: collectorProfileDir(),
+		defaultViewport: headless ? { width: 1440, height: 950 } : null,
+		args: launchArgs,
+	};
+	if (process.env.EXPEDIA_BROWSER_PATH) {
+		options.executablePath = process.env.EXPEDIA_BROWSER_PATH;
+	}
+	return puppeteer.launch(options);
+};
+
+const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
+	const startedAt = Date.now();
+	let browser = null;
+	const buckets = emptyBuckets();
+	const artifacts = {
+		outputDir: collectorOutputDir(),
+		screenshots: [],
+		propertyCount: 0,
+		matchedPropertyCount: 0,
+		selectedHotelCount: selectedHotelIds.length,
+	};
+
+	try {
+		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+		if (!job) return;
+		if (job.credentialSummary?.missing?.length) {
+			await updateJob(jobId, {
+				$set: {
+					status: "needs_credentials",
+					"collectorState.finishedAt": new Date(),
+					"collectorState.error": "missing_credentials",
+				},
+			});
+			return;
+		}
+
+		await updateJob(jobId, {
+			$set: {
+				status: "running",
+				collectorState: {
+					status: "running",
+					startedAt: new Date(),
+					currentHotelIndex: 0,
+					currentHotelName: "",
+					mode: "single_browser_sequential",
+					readOnly: true,
+					selectedHotelIds,
+					selectedHotelCount: selectedHotelIds.length,
+				},
+				previewBuckets: buckets,
+				collectorArtifacts: artifacts,
+			},
+		});
+		await appendAudit(jobId, {
+			action: "collector_started",
+			by: actorId,
+			readOnly: true,
+			mode: "single_browser_sequential",
+		});
+
+		browser = await launchBrowser();
+		let page = await browser.newPage();
+		page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
+		page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+		const managePropertyUrl =
+			process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL ||
+			DEFAULT_MANAGE_PROPERTY_URL;
+		await page.goto(managePropertyUrl, { waitUntil: "domcontentloaded" });
+		await delay(1500);
+
+		let snapshot = await safePageSnapshot(page);
+		if (isLoginOrVerificationPage(snapshot)) {
+			const screenshotPath = path.join(
+				artifacts.outputDir,
+				`needs-login-${job.jobNumber}.png`
+			);
+			await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+			artifacts.screenshots.push(screenshotPath);
+			await updateJob(jobId, {
+				$set: {
+					status: "needs_login",
+					previewBuckets: buckets,
+					collectorArtifacts: artifacts,
+					collectorState: {
+						status: "needs_login",
+						finishedAt: new Date(),
+						readOnly: true,
+						message:
+							"Expedia session is not logged in or requires verification. Log in once with the persistent browser profile, then run again.",
+					},
+					resultSummary: summarizeBuckets(buckets),
+				},
+			});
+			await appendAudit(jobId, {
+				action: "collector_needs_login",
+				by: actorId,
+				readOnly: true,
+			});
+			return;
+		}
+
+		if (!hasPropertyListText(snapshot.text)) {
+			await page.goto(process.env.OTA_EXPEDIA_LOGIN_URL || DEFAULT_LOGIN_URL, {
+				waitUntil: "domcontentloaded",
+			});
+			const propertyPage = await findPageByContent(
+				browser,
+				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
+				Math.min(20_000, MAX_RUN_MS)
+			);
+			await propertyPage.bringToFront();
+			page = propertyPage;
+		}
+
+		await scrollToLoadVisibleContent(page);
+		let properties = await extractProperties(page);
+		if (!properties.length) {
+			const propertyPage = await findPageByContent(
+				browser,
+				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
+				10_000
+			);
+			await propertyPage.bringToFront();
+			await scrollToLoadVisibleContent(propertyPage);
+			page = propertyPage;
+			properties = await extractProperties(propertyPage);
+		}
+		artifacts.propertyCount = properties.length;
+
+		const selectedSet = new Set(selectedHotelIds.map(normalizeHotelId));
+		const targetHotels = (job.targetHotels || []).filter((hotel) =>
+			selectedSet.has(normalizeHotelId(hotel.hotelId))
+		);
+		const matches = matchPropertiesToHotels(properties, targetHotels);
+		artifacts.matchedPropertyCount = matches.filter((match) => match.property).length;
+
+		for (let index = 0; index < matches.length; index += 1) {
+			if (Date.now() - startedAt > MAX_RUN_MS - 5000) {
+				buckets.needsReview.push({
+					actionPreview: "time_budget_reached",
+					message:
+						"Collector stopped before all hotels to stay inside the configured run budget.",
+					remainingHotels: matches.length - index,
+				});
+				break;
+			}
+
+			const match = matches[index];
+			const hotel = match.hotel;
+			await updateJob(jobId, {
+				$set: {
+					"collectorState.currentHotelIndex": index + 1,
+					"collectorState.currentHotelName": hotel.hotelName,
+					"collectorState.selectedHotelCount": matches.length,
+					"collectorState.lastProgressAt": new Date(),
+					previewBuckets: buckets,
+					collectorArtifacts: artifacts,
+					resultSummary: summarizeBuckets(buckets),
+				},
+			});
+
+			if (!match.property || !match.property.url) {
+				buckets.needsReview.push({
+					hotelId: hotel.hotelId,
+					hotelName: hotel.hotelName,
+					actionPreview: "property_not_matched",
+					matchScore: match.matchScore,
+				});
+				continue;
+			}
+
+			await page.goto(match.property.url, { waitUntil: "domcontentloaded" });
+			await delay(700);
+			const reservationLink = await findReservationsLink(page).catch(() => null);
+			if (reservationLink?.href) {
+				await page.goto(reservationLink.href, { waitUntil: "domcontentloaded" });
+				await delay(900);
+			}
+			await scrollToLoadVisibleContent(page).catch(() => {});
+			const candidates = await extractReservationCandidates(
+				page,
+				hotel,
+				match.property
+			);
+			if (!candidates.length) {
+				const pageSnapshot = await safePageSnapshot(page);
+				buckets.needsReview.push({
+					hotelId: hotel.hotelId,
+					hotelName: hotel.hotelName,
+					expediaPropertyId: match.property.expediaPropertyId || "",
+					expediaPropertyName: match.property.name || "",
+					actionPreview: "no_reservation_candidates_detected",
+					sourceUrl: page.url(),
+					sourceSnippet: safeSnippet(pageSnapshot.text, 500),
+				});
+			}
+			for (const candidate of candidates) {
+				const classification = await classifyCandidate(candidate);
+				buckets[classification.bucket].push(classification.item);
+			}
+
+			await updateJob(jobId, {
+				$set: {
+					previewBuckets: buckets,
+					collectorArtifacts: artifacts,
+					resultSummary: summarizeBuckets(buckets),
+				},
+			});
+
+			await page.goto(managePropertyUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+			await delay(450);
+		}
+
+		const finalStatus = "preview_ready";
+		await updateJob(jobId, {
+			$set: {
+				status: finalStatus,
+				previewBuckets: buckets,
+				collectorArtifacts: artifacts,
+				resultSummary: summarizeBuckets(buckets),
+				collectorState: {
+					status: finalStatus,
+					startedAt: new Date(startedAt),
+					finishedAt: new Date(),
+					durationMs: Date.now() - startedAt,
+					mode: "single_browser_sequential",
+					readOnly: true,
+					selectedHotelIds,
+					selectedHotelCount: matches.length,
+				},
+			},
+		});
+		await appendAudit(jobId, {
+			action: "collector_finished",
+			by: actorId,
+			readOnly: true,
+			summary: summarizeBuckets(buckets),
+		});
+	} catch (error) {
+		await updateJob(jobId, {
+			$set: {
+				status: "collector_failed",
+				previewBuckets: buckets,
+				collectorArtifacts: artifacts,
+				resultSummary: summarizeBuckets(buckets),
+				collectorState: {
+					status: "collector_failed",
+					finishedAt: new Date(),
+					durationMs: Date.now() - startedAt,
+					readOnly: true,
+					error: error?.message || String(error),
+				},
+			},
+		}).catch(() => {});
+		await appendAudit(jobId, {
+			action: "collector_failed",
+			by: actorId,
+			readOnly: true,
+			error: error?.message || String(error),
+		}).catch(() => {});
+	} finally {
+		activeCollectors.delete(String(jobId));
+		if (browser && !/^(1|true|yes)$/i.test(process.env.OTA_EXPEDIA_KEEP_BROWSER_OPEN || "")) {
+			await browser.close().catch(() => {});
+		}
+	}
+};
+
+const startExpediaReservationCollectorJob = async ({
+	jobId,
+	actor,
+	selectedHotelIds = [],
+}) => {
+	const key = String(jobId || "");
+	if (activeCollectors.has(key)) {
+		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+		return { ok: true, statusCode: 202, job, alreadyRunning: true };
+	}
+	if (activeCollectors.size > 0) {
+		return {
+			ok: false,
+			statusCode: 409,
+			error: "Another OTA reservation collector is already running.",
+		};
+	}
+	const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+	if (!job) {
+		return { ok: false, statusCode: 404, error: "OTA reservation sync job not found." };
+	}
+	if (job.provider !== "expedia") {
+		return {
+			ok: false,
+			statusCode: 400,
+			error: "The browser collector currently supports Expedia only.",
+		};
+	}
+	if (job.credentialSummary?.missing?.length) {
+		return {
+			ok: false,
+			statusCode: 409,
+			error: `Missing server env: ${job.credentialSummary.missing.join(", ")}`,
+		};
+	}
+	const selection = resolveSelectedTargets(job, selectedHotelIds);
+	if (!selection.ok) {
+		return selection;
+	}
+
+	activeCollectors.set(key, true);
+	setImmediate(() =>
+		runCollector({
+			jobId,
+			actorId: actor?._id || actor?.id || "",
+			selectedHotelIds: selection.selectedHotelIds,
+		})
+	);
+	const updated = await updateJob(jobId, {
+		$set: {
+			status: "queued",
+			collectorState: {
+				status: "queued",
+				queuedAt: new Date(),
+				mode: "single_browser_sequential",
+				readOnly: true,
+				selectedHotelIds: selection.selectedHotelIds,
+				selectedHotelCount: selection.targetHotels.length,
+			},
+			"collectorArtifacts.selectedHotelCount": selection.targetHotels.length,
+		},
+		$push: {
+			auditLog: {
+				at: new Date(),
+				action: "collector_queued",
+				by: actor?._id || actor?.id || "",
+				readOnly: true,
+				selectedHotelIds: selection.selectedHotelIds,
+				selectedHotelCount: selection.targetHotels.length,
+			},
+		},
+	});
+	return { ok: true, statusCode: 202, job: updated };
+};
+
+module.exports = {
+	startExpediaReservationCollectorJob,
+	parsePropertiesFromText,
+	matchPropertiesToHotels,
+	confirmationCandidatesFromText,
+};

@@ -6,6 +6,7 @@ const { requireSignin, isAuth, requireAdminAccess } = require("../controllers/au
 const {
 	prepareOtaReservationSync,
 	readOtaReservationSyncJob,
+	runOtaReservationSyncCollector,
 } = require("../controllers/expedia_reservation_sync");
 
 router.post(
@@ -25,6 +26,14 @@ router.get(
 );
 
 router.post(
+	"/admin/ota-reservation-sync/jobs/:userId/:jobId/run",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	runOtaReservationSyncCollector
+);
+
+router.post(
 	"/admin/expedia-reservation-sync/jobs/:userId/prepare",
 	requireSignin,
 	isAuth,
@@ -38,6 +47,14 @@ router.get(
 	isAuth,
 	requireAdminAccess("HotelsReservations", "AllReservations"),
 	readOtaReservationSyncJob
+);
+
+router.post(
+	"/admin/expedia-reservation-sync/jobs/:userId/:jobId/run",
+	requireSignin,
+	isAuth,
+	requireAdminAccess("HotelsReservations", "AllReservations"),
+	runOtaReservationSyncCollector
 );
 
 module.exports = router;
