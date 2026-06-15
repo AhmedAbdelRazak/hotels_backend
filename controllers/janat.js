@@ -2672,6 +2672,39 @@ const formatOtaAdminReservation = (doc = {}) => {
 	};
 };
 
+const OTA_ADMIN_LIST_SELECT = [
+	"_id",
+	"reservation_id",
+	"pms_number",
+	"confirmation_number",
+	"booking_source",
+	"customer_details.name",
+	"customer_details.phone",
+	"customer_details.email",
+	"customer_details.nickName",
+	"customer_details.confirmation_number2",
+	"state",
+	"reservation_status",
+	"pickedRoomsType",
+	"pickedRoomsPricing",
+	"total_rooms",
+	"booked_at",
+	"sub_total",
+	"total_amount",
+	"currency",
+	"checkin_date",
+	"checkout_date",
+	"days_of_residence",
+	"payment",
+	"supplierData",
+	"otaPlatformReview",
+	"adminPricing",
+	"createdAt",
+	"updatedAt",
+	"hotelId",
+	"belongsTo",
+].join(" ");
+
 const buildOtaAdminDateClause = (field, from, to) => {
 	const dayRange = (dateLike, isEnd = false) => {
 		const ymd = String(dateLike || "").slice(0, 10);
@@ -2688,6 +2721,47 @@ const buildOtaAdminDateClause = (field, from, to) => {
 		if (end && !Number.isNaN(end.getTime())) clause.$lte = end;
 	}
 	return Object.keys(clause).length ? { [field]: clause } : null;
+};
+
+const escapeOtaAdminRegex = (value = "") =>
+	String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const objectIdFromString = (value = "") => {
+	const id = normalizeId(value);
+	return id && mongoose.Types.ObjectId.isValid(id)
+		? new mongoose.Types.ObjectId(id)
+		: null;
+};
+
+const buildOtaAdminSearchClause = async (searchQuery = "") => {
+	const search = String(searchQuery || "").trim();
+	if (!search) return null;
+	const regex = new RegExp(escapeOtaAdminRegex(search), "i");
+	const hotelMatches = await HotelDetails.find({
+		$or: [{ hotelName: regex }, { hotelName_OtherLanguage: regex }],
+	})
+		.select("_id")
+		.limit(200)
+		.lean();
+	const hotelIds = hotelMatches.map((hotel) => hotel._id).filter(Boolean);
+	const directObjectId = objectIdFromString(search);
+	const or = [
+		{ confirmation_number: regex },
+		{ reservation_id: regex },
+		{ pms_number: regex },
+		{ booking_source: regex },
+		{ "customer_details.name": regex },
+		{ "customer_details.phone": regex },
+		{ "customer_details.email": regex },
+		{ "customer_details.nickName": regex },
+		{ "customer_details.confirmation_number2": regex },
+		{ "supplierData.suppliedBookingNo": regex },
+		{ "supplierData.otaConfirmationNumber": regex },
+		{ "supplierData.platformConfirmationNumber": regex },
+	];
+	if (hotelIds.length) or.push({ hotelId: { $in: hotelIds } });
+	if (directObjectId) or.push({ _id: directObjectId });
+	return { $or: or };
 };
 
 exports.paginatedOtaReservationList = async (req, res) => {
@@ -2733,56 +2807,56 @@ exports.paginatedOtaReservationList = async (req, res) => {
 		]
 			.filter(Boolean)
 			.forEach((clause) => andFilters.push(clause));
+		const searchClause = await buildOtaAdminSearchClause(searchQuery);
+		if (searchClause) andFilters.push(searchClause);
 
 		const mongoFilter = andFilters.length > 1 ? { $and: andFilters } : andFilters[0];
-		const allDocs = await Reservations.find(mongoFilter)
-			.sort({ createdAt: -1 })
-			.populate("belongsTo")
-			.populate("hotelId")
-			.lean();
+		const virtualCardFilter = {
+			$and: [
+				mongoFilter,
+				{
+					$or: [
+						{ "supplierData.otaPaymentCollectionModel": /virtual|vcc/i },
+						{ "supplierData.paymentCollectionModel": /virtual|vcc/i },
+						{ payment: /virtual|vcc/i },
+						{ paymentCollectionModel: /virtual|vcc/i },
+					],
+				},
+			],
+		};
 
-		let formattedDocs = allDocs.map(formatOtaAdminReservation);
-		const search = String(searchQuery || "").trim().toLowerCase();
-		if (search) {
-			formattedDocs = formattedDocs.filter((reservation) => {
-				const fields = [
-					reservation.confirmation_number,
-					reservation.confirmation_number2,
-					reservation.customer_name,
-					reservation.customer_phone,
-					reservation.hotel_name,
-					reservation.booking_source,
-				].map((value) => String(value || "").toLowerCase());
-				return fields.some((value) => value.includes(search));
-			});
-		}
+		const [pageDocs, totalDocuments, totalsAgg, virtualCards] = await Promise.all([
+			Reservations.find(mongoFilter)
+				.sort({ createdAt: -1 })
+				.skip((pageNumber - 1) * pageSize)
+				.limit(pageSize)
+				.select(OTA_ADMIN_LIST_SELECT)
+				.populate("belongsTo", "_id name email phone role roleDescription")
+				.populate("hotelId", "_id hotelName hotelName_OtherLanguage belongsTo")
+				.lean(),
+			Reservations.countDocuments(mongoFilter),
+			Reservations.aggregate([
+				{ $match: mongoFilter },
+				{
+					$group: {
+						_id: null,
+						totalClientAmount: { $sum: { $ifNull: ["$total_amount", 0] } },
+						totalHotelAmount: {
+							$sum: { $ifNull: ["$adminPricing.rootTotal", 0] },
+						},
+					},
+				},
+			]),
+			Reservations.countDocuments(virtualCardFilter),
+		]);
 
-		const totalDocuments = formattedDocs.length;
-		const data = formattedDocs.slice(
-			(pageNumber - 1) * pageSize,
-			(pageNumber - 1) * pageSize + pageSize
-		);
+		const data = pageDocs.map(formatOtaAdminReservation);
+		const totals = totalsAgg[0] || {};
 		const scorecards = {
 			pendingOta: totalDocuments,
-			totalClientAmount: round2(
-				formattedDocs.reduce((sum, item) => sum + moneyNumber(item.total_amount), 0)
-			),
-			totalHotelAmount: round2(
-				formattedDocs.reduce(
-					(sum, item) => sum + moneyNumber(item.hotel_visible_amount),
-					0
-				)
-			),
-			virtualCards: formattedDocs.filter((item) =>
-				/virtual|vcc/i.test(
-					String(
-						item?.supplierData?.otaPaymentCollectionModel ||
-							item?.payment ||
-							item?.paymentCollectionModel ||
-							""
-					)
-				)
-			).length,
+			totalClientAmount: round2(totals.totalClientAmount || 0),
+			totalHotelAmount: round2(totals.totalHotelAmount || 0),
+			virtualCards,
 		};
 
 		return res.status(200).json({

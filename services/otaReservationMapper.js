@@ -22,6 +22,13 @@ dayjs.extend(customParseFormat);
 const USD_TO_SAR = Number(
 	process.env.OTA_USD_TO_SAR_RATE || process.env.USD_TO_SAR_RATE || 3.75
 );
+const DEFAULT_OTA_REVIEW_DEDUCTION_RATE = Math.min(
+	0.9,
+	Math.max(
+		0,
+		Number(process.env.OTA_REVIEW_DEFAULT_DEDUCTION_RATE || 0.1)
+	)
+);
 
 const DEFAULT_SAR_EXCHANGE_RATES = {
 	SAR: 1,
@@ -382,6 +389,30 @@ function roomTypeLabel(roomType = "") {
 			.replace(/([a-z])([A-Z])/g, "$1 $2")
 			.replace(/\brooms\b/i, "rooms")
 	);
+}
+
+function roomComparableVariants(value = "") {
+	const variants = new Set(comparableVariants(value));
+	Array.from(variants).forEach((variant) => {
+		if (/\bquadruple\b/.test(variant)) {
+			variants.add(variant.replace(/\bquadruple\b/g, "quad"));
+		}
+		if (/\bquad\b/.test(variant)) {
+			variants.add(variant.replace(/\bquad\b/g, "quadruple"));
+		}
+	});
+	return Array.from(variants).filter(Boolean);
+}
+
+function roomTypeKey(value = "") {
+	return normalizeComparable(roomTypeLabel(value)).replace(/\s+/g, "");
+}
+
+function roomTypeMatches(roomType = "", mappedRoomType = "") {
+	if (!roomType || !mappedRoomType) return false;
+	const left = roomTypeKey(roomType);
+	const right = roomTypeKey(mappedRoomType);
+	return left === right;
 }
 
 function round2(value) {
@@ -1026,6 +1057,13 @@ function isOtaHotelBoilerplateLine(value = "") {
 	);
 }
 
+function defaultOtaReviewNetTotal(clientTotal = 0) {
+	const total = round2(clientTotal);
+	if (total <= 0) return 0;
+	const deduction = round2(total * DEFAULT_OTA_REVIEW_DEDUCTION_RATE);
+	return round2(total - deduction);
+}
+
 function cleanHotelNameCandidate(value = "") {
 	const candidate = cleanOtaDisplayValue(value);
 	if (!candidate || isOtaHotelBoilerplateLine(candidate)) return "";
@@ -1454,6 +1492,36 @@ function emptyPaymentBreakdown(comment = "") {
 		paid_no_show: 0,
 		payment_comments: comment,
 	};
+}
+
+function safeOtaPaymentSummary(summary = {}) {
+	if (!summary || typeof summary !== "object") return {};
+	const allowedFields = [
+		"sourceCurrency",
+		"sourceNightlyRateAmount",
+		"sourceTaxesAmount",
+		"sourceTotalGuestPaymentAmount",
+		"sourceExpediaCompensationAmount",
+		"sourceAcceleratorAmount",
+		"sourceTotalPayoutAmount",
+		"nightlyRateAmount",
+		"taxesAmount",
+		"totalGuestPaymentAmount",
+		"expediaCompensationAmount",
+		"acceleratorAmount",
+		"totalPayoutAmount",
+		"currency",
+		"exchangeRateToSar",
+		"exchangeRateSource",
+		"amountConvertedAt",
+	];
+	return allowedFields.reduce((out, field) => {
+		const value = summary[field];
+		if (value === undefined || value === null || value === "") return out;
+		if (typeof value === "number") out[field] = round2(value);
+		else out[field] = value;
+		return out;
+	}, {});
 }
 
 function resolvePaymentMapping(normalized = {}, totalAmountSar = 0, subTotalSar = 0, commissionAmountSar = 0) {
@@ -1920,8 +1988,8 @@ function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 		.map(String);
 
 	const displayScore = labels.reduce((best, label) => {
-		const labelVariants = comparableVariants(label);
-		const roomVariants = comparableVariants(roomName);
+		const labelVariants = roomComparableVariants(label);
+		const roomVariants = roomComparableVariants(roomName);
 		let score = 0;
 		for (const left of roomVariants) {
 			for (const right of labelVariants) {
@@ -1930,7 +1998,7 @@ function scoreRoomCandidate(room = {}, roomName = "", mappedRoomType = null) {
 		}
 		return Math.max(best, score);
 	}, 0);
-	const typeMatches = !!mappedRoomType && room.roomType === mappedRoomType;
+	const typeMatches = !!mappedRoomType && roomTypeMatches(room.roomType, mappedRoomType);
 	const typeScore = typeMatches ? 0.76 : 0;
 	const boostedTypeScore = typeMatches
 		? Math.min(0.96, 0.76 + Math.min(displayScore, 0.7) * 0.22)
@@ -2120,32 +2188,82 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 		totalAmountSar,
 		daysOfResidence * roomCount
 	);
+	const paymentSummary = normalized.paymentSummary || {};
+	const totalPayoutSar = round2(
+		normalized.totalPayoutSar ||
+			normalized.netAfterExpensesTotal ||
+			paymentSummary.totalPayoutAmount ||
+			0
+	);
+	const hasExplicitPayoutTotal = totalPayoutSar > 0;
+	const fallbackNetTotalSar = defaultOtaReviewNetTotal(totalAmountSar);
+	const effectiveNetAfterExpensesTotal = hasExplicitPayoutTotal
+		? round2(Math.min(totalPayoutSar, totalAmountSar || totalPayoutSar))
+		: fallbackNetTotalSar;
+	const netAfterExpensesSlots = allocateAmountAcrossSlots(
+		effectiveNetAfterExpensesTotal > 0
+			? effectiveNetAfterExpensesTotal
+			: totalAmountSar,
+		daysOfResidence * roomCount
+	);
+	const fallbackRootSlots = allocateAmountAcrossSlots(
+		hasExplicitPayoutTotal
+			? effectiveNetAfterExpensesTotal
+			: fallbackNetTotalSar || totalAmountSar,
+		daysOfResidence * roomCount
+	);
 	let slotIndex = 0;
 	let sumRootPriceAllRooms = 0;
 	let sumTotalPriceAllRooms = 0;
+	let sumNetAfterExpensesAllRooms = 0;
+	let sumOtaExpenseAllRooms = 0;
+	let sumPlatformMarginAllRooms = 0;
 
 	const pickedRoomsType = Array.from({ length: roomCount }, () => {
 		const pricingByDay = dateRange.map((ymd) => {
-			const finalPrice = round2(slotPrices[slotIndex] || 0);
+			const currentSlot = slotIndex;
+			const finalPrice = round2(slotPrices[currentSlot] || 0);
+			const netAfterExpenses = round2(
+				netAfterExpensesSlots[currentSlot] || finalPrice
+			);
 			slotIndex += 1;
 			const configuredRootPrice = round2(resolveRootPriceForDate(roomDetails, ymd));
-			const rootPrice = configuredRootPrice > 0 ? configuredRootPrice : finalPrice;
+			const fallbackRootPrice = round2(
+				fallbackRootSlots[currentSlot] || netAfterExpenses || finalPrice
+			);
+			const rootPrice =
+				configuredRootPrice > 0 ? configuredRootPrice : fallbackRootPrice;
 			const commissionAmount = Math.max(0, round2(finalPrice - rootPrice));
 			const commissionRate =
 				rootPrice > 0 && commissionAmount > 0
 					? round2((commissionAmount / rootPrice) * 100)
 					: 0;
+			const otaExpenseAmount = Math.max(0, round2(finalPrice - netAfterExpenses));
+			const platformMargin = round2(netAfterExpenses - rootPrice);
 
 			sumRootPriceAllRooms = round2(sumRootPriceAllRooms + rootPrice);
 			sumTotalPriceAllRooms = round2(sumTotalPriceAllRooms + finalPrice);
+			sumNetAfterExpensesAllRooms = round2(
+				sumNetAfterExpensesAllRooms + netAfterExpenses
+			);
+			sumOtaExpenseAllRooms = round2(sumOtaExpenseAllRooms + otaExpenseAmount);
+			sumPlatformMarginAllRooms = round2(
+				sumPlatformMarginAllRooms + platformMargin
+			);
 
 			return {
 				date: ymd,
 				price: finalPrice,
+				clientPrice: finalPrice,
+				mainPrice: finalPrice,
 				rootPrice,
 				commissionRate,
 				totalPriceWithCommission: finalPrice,
 				totalPriceWithoutCommission: rootPrice,
+				netAfterExpenses,
+				netAfterOtaExpenses: netAfterExpenses,
+				otaExpenseAmount,
+				platformMargin,
 			};
 		});
 		const roomTotal = round2(
@@ -2188,7 +2306,21 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 		sumRootPriceAllRooms: round2(sumRootPriceAllRooms),
 		subTotalSar,
 		sumTotalPriceAllRooms: round2(sumTotalPriceAllRooms),
+		netAfterExpensesTotal: round2(sumNetAfterExpensesAllRooms),
+		otaExpenseTotal: round2(sumOtaExpenseAllRooms),
+		platformMarginTotal: round2(sumPlatformMarginAllRooms),
 		commissionAmountSar,
+		adminPricingTotals: {
+			mode: "ota_platform_sync",
+			clientTotal: round2(sumTotalPriceAllRooms),
+			rootTotal: subTotalSar,
+			netAfterExpensesTotal: round2(sumNetAfterExpensesAllRooms),
+			otaExpenseTotal: round2(sumOtaExpenseAllRooms),
+			platformMarginTotal: round2(sumPlatformMarginAllRooms),
+			commissionAmount: commissionAmountSar,
+			defaultDeductionRate: DEFAULT_OTA_REVIEW_DEDUCTION_RATE,
+			defaultDeductionApplied: !hasExplicitPayoutTotal,
+		},
 	};
 }
 
@@ -2229,6 +2361,50 @@ function buildReservationDocument(normalized, hotelDetails) {
 		pricing.commissionAmountSar
 	);
 	const requiresPlatformReview = !isCancelled;
+	const automationSource =
+		normalized.source?.from === "expedia-sync" ? "ota_sync_create" : "ota_email_create";
+	const automationPipeline =
+		normalized.source?.from === "expedia-sync"
+			? "ota-reservation-sync-orchestrator"
+			: "ota-email-orchestrator";
+	const safePaymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const sourceCurrency =
+		normalized.sourceCurrency ||
+		safePaymentSummary.sourceCurrency ||
+		normalized.currency ||
+		"";
+	const sourceAmount = Number(
+		normalized.sourceAmount ||
+			safePaymentSummary.sourceTotalGuestPaymentAmount ||
+			normalized.amount ||
+			0
+	);
+	const sourceExchangeRateToSar = Number(
+		normalized.sourceExchangeRateToSar ||
+			safePaymentSummary.exchangeRateToSar ||
+			(String(sourceCurrency || "").toUpperCase() === "SAR"
+				? normalized.exchangeRateToSar || 1
+				: 0)
+	);
+	const sourceExchangeRateSource =
+		normalized.sourceExchangeRateSource ||
+		safePaymentSummary.exchangeRateSource ||
+		normalized.exchangeRateSource ||
+		"";
+	const adminPricingTotals = pricing.adminPricingTotals || {
+		mode: "ota_platform_sync",
+		clientTotal: totalAmountSar,
+		rootTotal: pricing.subTotalSar,
+		netAfterExpensesTotal: defaultOtaReviewNetTotal(totalAmountSar),
+		otaExpenseTotal: round2(totalAmountSar - defaultOtaReviewNetTotal(totalAmountSar)),
+		platformMarginTotal: Math.max(
+			0,
+			round2(defaultOtaReviewNetTotal(totalAmountSar) - pricing.subTotalSar)
+		),
+		commissionAmount: pricing.commissionAmountSar,
+		defaultDeductionRate: DEFAULT_OTA_REVIEW_DEDUCTION_RATE,
+		defaultDeductionApplied: true,
+	};
 
 	return {
 		ok: true,
@@ -2283,17 +2459,51 @@ function buildReservationDocument(normalized, hotelDetails) {
 			financial_cycle: paymentMapping.financialCycle,
 			pickedRoomsType: pricing.pickedRoomsType,
 			pickedRoomsPricing: pricing.pickedRoomsType,
+			adminPricing: {
+				...adminPricingTotals,
+				source: automationSource,
+				provider: normalized.provider,
+				providerLabel,
+				sourceCurrency,
+				sourceAmount: round2(sourceAmount),
+				sourceExchangeRateToSar,
+				sourceExchangeRateSource,
+				exchangeRateToSar:
+					sourceExchangeRateToSar || normalized.exchangeRateToSar || 0,
+				exchangeRateSource:
+					sourceExchangeRateSource || normalized.exchangeRateSource || "",
+				amountConvertedAt: normalized.amountConvertedAt || "",
+			},
 			adminPricingVisibility: requiresPlatformReview
 				? {
 						rootOnlyForHotelManagement: true,
-						source: "ota_email_create",
+						source: automationSource,
 						appliedAt: new Date(),
 						appliedBy: null,
 				  }
 				: undefined,
+			ota_financial_summary: {
+				show: true,
+				source: automationSource,
+				provider: normalized.provider,
+				providerLabel,
+				currency: "SAR",
+				clientTotal: adminPricingTotals.clientTotal,
+				hotelVisibleAmount: adminPricingTotals.rootTotal,
+				netAfterExpenses: adminPricingTotals.netAfterExpensesTotal,
+				netAfterOtaExpenses: adminPricingTotals.netAfterExpensesTotal,
+				otaExpenseTotal: adminPricingTotals.otaExpenseTotal,
+				platformProfit: adminPricingTotals.platformMarginTotal,
+				commissionAmount: pricing.commissionAmountSar,
+				sourceCurrency,
+				sourceAmount: round2(sourceAmount),
+				sourceExchangeRateToSar,
+				sourceExchangeRateSource,
+				paymentSummary: safePaymentSummary,
+			},
 			otaPlatformReview: requiresPlatformReview
 				? buildOtaReviewSnapshot({
-						source: "ota_email_create",
+						source: automationSource,
 						inboundEmailId: normalized.inboundEmailId,
 						provider: normalized.provider,
 						providerLabel,
@@ -2307,7 +2517,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 				suppliedBookingNo: normalized.reservationId,
 				otaConfirmationNumber: normalized.confirmationNumber,
 				platformConfirmationNumber: normalized.confirmationNumber,
-				otaAutomationPipeline: "ota-email-orchestrator",
+				otaAutomationPipeline: automationPipeline,
 				otaProvider: normalized.provider,
 				otaHotelName: normalized.hotelName || "",
 				otaRoomName: normalized.roomName || "",
@@ -2317,6 +2527,15 @@ function buildReservationDocument(normalized, hotelDetails) {
 				otaCurrency: normalized.currency || "",
 				otaAmount: normalized.amount || 0,
 				otaAmountSar: totalAmountSar,
+				otaSourceCurrency: sourceCurrency,
+				otaSourceAmount: round2(sourceAmount),
+				otaSourceAmountHint: normalized.sourceAmountHint || normalized.amountHint || "",
+				otaSourceExchangeRateToSar: sourceExchangeRateToSar,
+				otaSourceExchangeRateSource: sourceExchangeRateSource,
+				otaPaymentSummary: safePaymentSummary,
+				otaTotalPayoutSar: adminPricingTotals.netAfterExpensesTotal,
+				otaExpenseTotalSar: adminPricingTotals.otaExpenseTotal,
+				otaPlatformMarginSar: adminPricingTotals.platformMarginTotal,
 				otaExchangeRateToSar: normalized.exchangeRateToSar || 0,
 				otaExchangeRateSource: normalized.exchangeRateSource || "",
 				otaAmountConvertedAt: normalized.amountConvertedAt || "",
@@ -2648,9 +2867,65 @@ function buildExistingReservationUpdateSet({
 		set["supplierData.otaTotalGuests"] = Number(normalized.totalGuests);
 	}
 	if (incomingAmount) {
+		const safePaymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+		const sourceCurrency =
+			normalized.sourceCurrency ||
+			safePaymentSummary.sourceCurrency ||
+			normalized.currency ||
+			"";
+		const sourceAmount = Number(
+			normalized.sourceAmount ||
+				safePaymentSummary.sourceTotalGuestPaymentAmount ||
+				normalized.amount ||
+				0
+		);
+		const sourceExchangeRateToSar = Number(
+			normalized.sourceExchangeRateToSar ||
+				safePaymentSummary.exchangeRateToSar ||
+				(String(sourceCurrency || "").toUpperCase() === "SAR"
+					? normalized.exchangeRateToSar || 1
+					: 0)
+		);
+		const sourceExchangeRateSource =
+			normalized.sourceExchangeRateSource ||
+			safePaymentSummary.exchangeRateSource ||
+			normalized.exchangeRateSource ||
+			"";
 		setIfOtaValue(set, "supplierData.otaCurrency", normalized.currency);
 		set["supplierData.otaAmount"] = Number(normalized.amount);
 		set["supplierData.otaAmountSar"] = Number(normalized.totalAmountSar);
+		setIfOtaValue(set, "supplierData.otaSourceCurrency", sourceCurrency);
+		if (sourceAmount > 0) {
+			set["supplierData.otaSourceAmount"] = round2(sourceAmount);
+		}
+		setIfOtaValue(
+			set,
+			"supplierData.otaSourceAmountHint",
+			normalized.sourceAmountHint || normalized.amountHint || ""
+		);
+		if (sourceExchangeRateToSar > 0) {
+			set["supplierData.otaSourceExchangeRateToSar"] = sourceExchangeRateToSar;
+		}
+		setIfOtaValue(
+			set,
+			"supplierData.otaSourceExchangeRateSource",
+			sourceExchangeRateSource
+		);
+		if (Object.keys(safePaymentSummary).length) {
+			set["supplierData.otaPaymentSummary"] = safePaymentSummary;
+		}
+		if (Number(safePaymentSummary.totalPayoutAmount || 0) > 0) {
+			set["supplierData.otaTotalPayoutSar"] = Number(
+				safePaymentSummary.totalPayoutAmount
+			);
+			set["supplierData.otaExpenseTotalSar"] = Math.max(
+				0,
+				round2(
+					Number(normalized.totalAmountSar || normalized.amount || 0) -
+						Number(safePaymentSummary.totalPayoutAmount || 0)
+				)
+			);
+		}
 		if (Number(normalized.exchangeRateToSar || 0) > 0) {
 			set["supplierData.otaExchangeRateToSar"] = Number(
 				normalized.exchangeRateToSar
@@ -2765,7 +3040,7 @@ async function applyExistingReservationEmailUpdate({
 function buildAuditEntry(normalized, action, warnings = []) {
 	return {
 		at: new Date(),
-		source: "ota-email",
+		source: normalized.source?.from || "ota-email",
 		action,
 		provider: normalized.provider,
 		eventType: normalized.eventType,
@@ -3714,7 +3989,13 @@ async function reconcileOtaReservation(inputNormalized) {
 	}
 
 	document.reservationAuditLog = [
-		buildAuditEntry(normalized, "created-from-email", warnings),
+		buildAuditEntry(
+			normalized,
+			normalized.source?.from === "expedia-sync"
+				? "created-from-expedia-sync"
+				: "created-from-email",
+			warnings
+		),
 	];
 	applyVccSafeFieldsToDocument(document, normalized);
 	document.confirmation_number = await generateUniquePmsConfirmationNumber();
@@ -3728,7 +4009,8 @@ async function reconcileOtaReservation(inputNormalized) {
 		otaConfirmationNumber: confirmationNumber,
 		platformConfirmationNumber: confirmationNumber,
 		pmsConfirmationNumber: document.confirmation_number,
-		otaCreatedFromEmail: true,
+		otaCreatedFromEmail: normalized.source?.from !== "expedia-sync",
+		otaCreatedFromSync: normalized.source?.from === "expedia-sync",
 		otaInboundEmailId: normalized.inboundEmailId || "",
 		otaCreatedAt: new Date(),
 	};
@@ -3748,7 +4030,9 @@ async function reconcileOtaReservation(inputNormalized) {
 			});
 			created = await createReservationWithAvailabilitySnapshot(
 				document,
-				"ota_email_create"
+				normalized.source?.from === "expedia-sync"
+					? "ota_sync_create"
+					: "ota_email_create"
 			);
 			break;
 		} catch (error) {

@@ -44,6 +44,7 @@ const otaReservationSyncJobSchema = new mongoose.Schema(
 		collectorState: { type: Object, default: {} },
 		previewBuckets: { type: Object, default: {} },
 		collectorArtifacts: { type: Object, default: {} },
+		applyResults: { type: Object, default: {} },
 		payloadSnapshot: { type: Object, default: {} },
 		resultSummary: { type: Object, default: {} },
 		notes: { type: String, trim: true, default: "" },

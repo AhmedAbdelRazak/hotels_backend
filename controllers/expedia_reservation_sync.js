@@ -10,6 +10,9 @@ const {
 	startExpediaReservationCollectorJob,
 	submitExpediaReservationMfaCode,
 } = require("../services/expediaReservationCollector");
+const {
+	applyExpediaReservationSyncJob,
+} = require("../services/expediaReservationApply");
 
 const { ObjectId } = mongoose.Types;
 
@@ -173,11 +176,44 @@ const submitOtaReservationSyncMfa = async (req, res) => {
 	}
 };
 
+const applyOtaReservationSyncJob = async (req, res) => {
+	try {
+		const actor = await loadActor(req);
+		if (!actor || actor.activeUser === false || !canPrepareOtaSync(actor)) {
+			return res.status(403).json({
+				error: "Only Super Admins can apply OTA reservation sync jobs.",
+			});
+		}
+		const { jobId } = req.params;
+		if (!ObjectId.isValid(jobId)) {
+			return res.status(400).json({ error: "Invalid OTA sync job id." });
+		}
+		const result = await applyExpediaReservationSyncJob({ jobId, actor });
+		if (!result.ok) {
+			return res
+				.status(result.statusCode || 400)
+				.json({ error: result.error, job: result.job });
+		}
+		return res.status(result.statusCode || 200).json({
+			ok: true,
+			job: result.job,
+			summary: result.summary,
+		});
+	} catch (error) {
+		console.error("[ota-reservation-sync] apply failed:", error);
+		return res
+			.status(500)
+			.json({ error: "Could not apply OTA reservation sync job." });
+	}
+};
+
 exports.prepareOtaReservationSync = prepareOtaReservationSync;
 exports.readOtaReservationSyncJob = readOtaReservationSyncJob;
 exports.runOtaReservationSyncCollector = runOtaReservationSyncCollector;
 exports.submitOtaReservationSyncMfa = submitOtaReservationSyncMfa;
+exports.applyOtaReservationSyncJob = applyOtaReservationSyncJob;
 exports.prepareExpediaReservationSync = prepareOtaReservationSync;
 exports.readExpediaReservationSyncJob = readOtaReservationSyncJob;
 exports.runExpediaReservationSyncCollector = runOtaReservationSyncCollector;
 exports.submitExpediaReservationSyncMfa = submitOtaReservationSyncMfa;
+exports.applyExpediaReservationSyncJob = applyOtaReservationSyncJob;
