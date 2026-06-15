@@ -35,7 +35,34 @@ const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
 const NAVIGATION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_SYNC_NAVIGATION_TIMEOUT_MS || 15_000
 );
+const MFA_SESSION_TIMEOUT_MS = Number(
+	process.env.OTA_EXPEDIA_MFA_TIMEOUT_MS || 10 * 60 * 1000
+);
 const activeCollectors = new Map();
+const activeMfaSessions = new Map();
+
+const EMAIL_INPUT_SELECTORS = [
+	"input[type='email']",
+	"input[name*='email' i]",
+	"input[id*='email' i]",
+	"input[autocomplete='username']",
+	"input[type='text']",
+];
+const PASSWORD_INPUT_SELECTORS = [
+	"input[type='password']",
+	"input[name*='password' i]",
+	"input[id*='password' i]",
+	"input[autocomplete='current-password']",
+];
+const MFA_INPUT_SELECTORS = [
+	"input[autocomplete='one-time-code']",
+	"input[name*='code' i]",
+	"input[id*='code' i]",
+	"input[name*='otp' i]",
+	"input[id*='otp' i]",
+	"input[type='tel']",
+	"input[type='text']",
+];
 
 const normalizeLine = (value) => String(value || "").replace(/\s+/g, " ").trim();
 
@@ -95,6 +122,16 @@ const isLoginOrVerificationPage = ({ url = "", text = "" } = {}) =>
 	(/(sign in|email|password|verification|captcha|multi-factor|mfa)/i.test(text) &&
 		!/Your Properties|Property ID/i.test(text));
 
+const isMfaChallengePage = ({ text = "" } = {}) =>
+	/(verification code|security code|one[-\s]?time|authentication code|login code|enter\s+(?:the\s+)?code|two[-\s]?step|two[-\s]?factor|multi[-\s]?factor|mfa|authenticator|resend code)/i.test(
+		text || ""
+	);
+
+const isCaptchaOrRobotChallenge = ({ text = "" } = {}) =>
+	/(captcha|robot|automated access|unusual traffic|verify you are human)/i.test(
+		text || ""
+	);
+
 const safePageSnapshot = async (page) => {
 	try {
 		return page.evaluate(() => ({
@@ -110,6 +147,119 @@ const safePageSnapshot = async (page) => {
 			error: error && error.message ? error.message : String(error),
 		};
 	}
+};
+
+const isElementVisible = (element) =>
+	element.evaluate((node) => {
+		const style = window.getComputedStyle(node);
+		const rect = node.getBoundingClientRect();
+		return (
+			style &&
+			style.visibility !== "hidden" &&
+			style.display !== "none" &&
+			rect.width > 0 &&
+			rect.height > 0 &&
+			!node.disabled &&
+			node.getAttribute("aria-disabled") !== "true"
+		);
+	});
+
+const typeIntoFirstVisibleInput = async (page, selectors, value) => {
+	for (const selector of selectors) {
+		const elements = await page.$$(selector).catch(() => []);
+		for (const element of elements) {
+			if (!(await isElementVisible(element).catch(() => false))) continue;
+			await element.click({ clickCount: 3 }).catch(() => {});
+			await page.keyboard.press("Backspace").catch(() => {});
+			await element.type(String(value || ""), { delay: 20 });
+			return true;
+		}
+	}
+	return false;
+};
+
+const clickButtonByText = async (page, patterns = []) =>
+	page.evaluate((rawPatterns) => {
+		const regexes = rawPatterns.map((pattern) => new RegExp(pattern, "i"));
+		const nodes = Array.from(
+			document.querySelectorAll(
+				"button, input[type='button'], input[type='submit'], a, [role='button']"
+			)
+		);
+		const visible = (node) => {
+			const style = window.getComputedStyle(node);
+			const rect = node.getBoundingClientRect();
+			return (
+				style &&
+				style.visibility !== "hidden" &&
+				style.display !== "none" &&
+				rect.width > 0 &&
+				rect.height > 0 &&
+				!node.disabled &&
+				node.getAttribute("aria-disabled") !== "true"
+			);
+		};
+		const candidate = nodes.find((node) => {
+			if (!visible(node)) return false;
+			const text = [
+				node.innerText,
+				node.textContent,
+				node.value,
+				node.getAttribute("aria-label"),
+			]
+				.filter(Boolean)
+				.join(" ");
+			return regexes.some((regex) => regex.test(text));
+		});
+		if (!candidate) return false;
+		candidate.click();
+		return true;
+	}, patterns);
+
+const clickOrPressEnter = async (page, patterns = []) => {
+	const clicked = await clickButtonByText(page, patterns).catch(() => false);
+	if (!clicked) await page.keyboard.press("Enter").catch(() => {});
+	await Promise.race([
+		page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => null),
+		delay(2500),
+	]);
+	await delay(900);
+};
+
+const expediaCredentials = () => ({
+	username: normalizeLine(process.env.OTA_EXPEDIA_USERNAME || ""),
+	password: String(process.env.OTA_PASSWORD || ""),
+});
+
+const waitForMfaCode = ({ jobId, attempt }) =>
+	new Promise((resolve, reject) => {
+		const key = String(jobId);
+		const expiresAt = new Date(Date.now() + MFA_SESSION_TIMEOUT_MS);
+		const timer = setTimeout(() => {
+			activeMfaSessions.delete(key);
+			reject(new Error("mfa_timeout"));
+		}, MFA_SESSION_TIMEOUT_MS);
+		activeMfaSessions.set(key, {
+			attempt,
+			expiresAt,
+			resolve: (code) => {
+				clearTimeout(timer);
+				activeMfaSessions.delete(key);
+				resolve(code);
+			},
+			reject: (error) => {
+				clearTimeout(timer);
+				activeMfaSessions.delete(key);
+				reject(error);
+			},
+		});
+	});
+
+const clearMfaSession = (jobId) => {
+	const key = String(jobId || "");
+	const session = activeMfaSessions.get(key);
+	if (session?.reject) session.reject(new Error("mfa_session_closed"));
+	activeMfaSessions.delete(key);
 };
 
 const findPageByContent = async (browser, matcher, timeoutMs) => {
@@ -487,6 +637,221 @@ const launchBrowser = async () => {
 	return puppeteer.launch(options);
 };
 
+const updateLoginBlockedJob = async ({
+	jobId,
+	job,
+	status,
+	message,
+	buckets,
+	artifacts,
+	prefix,
+	page,
+}) => {
+	const screenshotPath = path.join(
+		artifacts.outputDir,
+		`${prefix}-${job.jobNumber}.png`
+	);
+	await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+	artifacts.screenshots.push(screenshotPath);
+	await updateJob(jobId, {
+		$set: {
+			status,
+			previewBuckets: buckets,
+			collectorArtifacts: artifacts,
+			collectorState: {
+				status,
+				finishedAt: new Date(),
+				readOnly: true,
+				message,
+			},
+			resultSummary: summarizeBuckets(buckets),
+		},
+	});
+};
+
+const handleMfaChallenge = async ({
+	jobId,
+	job,
+	page,
+	buckets,
+	artifacts,
+	actorId,
+}) => {
+	for (let attempt = 1; attempt <= 3; attempt += 1) {
+		const screenshotPath = path.join(
+			artifacts.outputDir,
+			`needs-mfa-${job.jobNumber}-attempt-${attempt}.png`
+		);
+		await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+		artifacts.screenshots.push(screenshotPath);
+		const expiresAt = new Date(Date.now() + MFA_SESSION_TIMEOUT_MS);
+		await updateJob(jobId, {
+			$set: {
+				status: "needs_mfa",
+				previewBuckets: buckets,
+				collectorArtifacts: artifacts,
+				collectorState: {
+					status: "needs_mfa",
+					readOnly: true,
+					attempt,
+					expiresAt,
+					message:
+						attempt === 1
+							? "Expedia accepted the password step and is requesting a verification code."
+							: "Expedia still requires verification. Enter the newest code.",
+				},
+				resultSummary: summarizeBuckets(buckets),
+			},
+		});
+		await appendAudit(jobId, {
+			action: "collector_needs_mfa",
+			by: actorId,
+			readOnly: true,
+			attempt,
+		});
+
+		let code = "";
+		try {
+			code = await waitForMfaCode({ jobId, attempt });
+		} catch (error) {
+			return {
+				ok: false,
+				status: "needs_mfa",
+				message:
+					error?.message === "mfa_timeout"
+						? "Expedia MFA timed out. Run the collector again when you have the code ready."
+						: "Expedia MFA session was closed. Run the collector again.",
+			};
+		}
+
+		await updateJob(jobId, {
+			$set: {
+				status: "running",
+				"collectorState.status": "submitting_mfa",
+				"collectorState.lastProgressAt": new Date(),
+				"collectorState.message": "Submitting Expedia verification code.",
+			},
+		});
+
+		const typed = await typeIntoFirstVisibleInput(
+			page,
+			MFA_INPUT_SELECTORS,
+			code
+		);
+		if (!typed) {
+			continue;
+		}
+		await clickOrPressEnter(page, ["verify", "continue", "submit", "next", "sign in"]);
+		let snapshot = await safePageSnapshot(page);
+		if (hasPropertyListText(snapshot.text)) {
+			return { ok: true, page };
+		}
+		if (!isMfaChallengePage(snapshot) && !isLoginOrVerificationPage(snapshot)) {
+			await page
+				.goto(process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL || DEFAULT_MANAGE_PROPERTY_URL, {
+					waitUntil: "domcontentloaded",
+				})
+				.catch(() => {});
+			await delay(1200);
+			snapshot = await safePageSnapshot(page);
+			if (hasPropertyListText(snapshot.text)) {
+				return { ok: true, page };
+			}
+		}
+	}
+	return {
+		ok: false,
+		status: "needs_mfa",
+		message:
+			"Expedia did not accept the submitted verification code after three attempts.",
+	};
+};
+
+const attemptExpediaLogin = async ({
+	jobId,
+	job,
+	page,
+	buckets,
+	artifacts,
+	actorId,
+}) => {
+	const credentials = expediaCredentials();
+	if (!credentials.username || !credentials.password) {
+		return {
+			ok: false,
+			status: "needs_credentials",
+			message: "Configure OTA_EXPEDIA_USERNAME and OTA_PASSWORD on the server.",
+		};
+	}
+
+	await updateJob(jobId, {
+		$set: {
+			"collectorState.status": "submitting_login",
+			"collectorState.lastProgressAt": new Date(),
+			"collectorState.message": "Submitting Expedia credentials from server env.",
+		},
+	});
+	await appendAudit(jobId, {
+		action: "collector_submitting_login",
+		by: actorId,
+		readOnly: true,
+		usernameEnvKey: "OTA_EXPEDIA_USERNAME",
+		passwordEnvKey: "OTA_PASSWORD",
+	});
+
+	if (await typeIntoFirstVisibleInput(page, EMAIL_INPUT_SELECTORS, credentials.username)) {
+		await clickOrPressEnter(page, ["next", "continue", "sign in"]);
+	}
+
+	let snapshot = await safePageSnapshot(page);
+	if (hasPropertyListText(snapshot.text)) return { ok: true, page };
+	if (isCaptchaOrRobotChallenge(snapshot)) {
+		return {
+			ok: false,
+			status: "needs_manual_verification",
+			message:
+				"Expedia displayed a human verification challenge. The collector will not bypass CAPTCHA or bot checks.",
+		};
+	}
+	if (isMfaChallengePage(snapshot)) {
+		return handleMfaChallenge({ jobId, job, page, buckets, artifacts, actorId });
+	}
+
+	if (await typeIntoFirstVisibleInput(page, PASSWORD_INPUT_SELECTORS, credentials.password)) {
+		await clickOrPressEnter(page, ["sign in", "continue", "next", "log in", "login"]);
+	}
+
+	snapshot = await safePageSnapshot(page);
+	if (hasPropertyListText(snapshot.text)) return { ok: true, page };
+	if (isCaptchaOrRobotChallenge(snapshot)) {
+		return {
+			ok: false,
+			status: "needs_manual_verification",
+			message:
+				"Expedia displayed a human verification challenge. The collector will not bypass CAPTCHA or bot checks.",
+		};
+	}
+	if (isMfaChallengePage(snapshot)) {
+		return handleMfaChallenge({ jobId, job, page, buckets, artifacts, actorId });
+	}
+
+	await page
+		.goto(process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL || DEFAULT_MANAGE_PROPERTY_URL, {
+			waitUntil: "domcontentloaded",
+		})
+		.catch(() => {});
+	await delay(1200);
+	snapshot = await safePageSnapshot(page);
+	if (hasPropertyListText(snapshot.text)) return { ok: true, page };
+
+	return {
+		ok: false,
+		status: "needs_login",
+		message:
+			"Expedia login could not be completed with the stored credentials. Manual sign-in may be required.",
+	};
+};
+
 const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 	const startedAt = Date.now();
 	let browser = null;
@@ -549,33 +914,36 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 
 		let snapshot = await safePageSnapshot(page);
 		if (isLoginOrVerificationPage(snapshot)) {
-			const screenshotPath = path.join(
-				artifacts.outputDir,
-				`needs-login-${job.jobNumber}.png`
-			);
-			await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-			artifacts.screenshots.push(screenshotPath);
-			await updateJob(jobId, {
-				$set: {
-					status: "needs_login",
-					previewBuckets: buckets,
-					collectorArtifacts: artifacts,
-					collectorState: {
-						status: "needs_login",
-						finishedAt: new Date(),
-						readOnly: true,
-						message:
-							"Expedia session is not logged in or requires verification. Log in once with the persistent browser profile, then run again.",
-					},
-					resultSummary: summarizeBuckets(buckets),
-				},
+			const loginResult = await attemptExpediaLogin({
+				jobId,
+				job,
+				page,
+				buckets,
+				artifacts,
+				actorId,
 			});
-			await appendAudit(jobId, {
-				action: "collector_needs_login",
-				by: actorId,
-				readOnly: true,
-			});
-			return;
+			if (!loginResult.ok) {
+				await updateLoginBlockedJob({
+					jobId,
+					job,
+					status: loginResult.status || "needs_login",
+					message:
+						loginResult.message ||
+						"Expedia session is not logged in or requires verification.",
+					buckets,
+					artifacts,
+					prefix: loginResult.status || "needs-login",
+					page,
+				});
+				await appendAudit(jobId, {
+					action: loginResult.status || "collector_needs_login",
+					by: actorId,
+					readOnly: true,
+				});
+				return;
+			}
+			page = loginResult.page || page;
+			snapshot = await safePageSnapshot(page);
 		}
 
 		if (!hasPropertyListText(snapshot.text)) {
@@ -738,6 +1106,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			error: error?.message || String(error),
 		}).catch(() => {});
 	} finally {
+		clearMfaSession(jobId);
 		activeCollectors.delete(String(jobId));
 		if (browser && !/^(1|true|yes)$/i.test(process.env.OTA_EXPEDIA_KEEP_BROWSER_OPEN || "")) {
 			await browser.close().catch(() => {});
@@ -820,8 +1189,51 @@ const startExpediaReservationCollectorJob = async ({
 	return { ok: true, statusCode: 202, job: updated };
 };
 
+const submitExpediaReservationMfaCode = async ({ jobId, actor, code }) => {
+	const key = String(jobId || "");
+	const normalizedCode = normalizeLine(code).replace(/\s+/g, "");
+	if (!normalizedCode || !/^[0-9A-Za-z-]{3,16}$/.test(normalizedCode)) {
+		return {
+			ok: false,
+			statusCode: 400,
+			error: "Enter a valid Expedia verification code.",
+		};
+	}
+	const session = activeMfaSessions.get(key);
+	if (!session) {
+		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+		return {
+			ok: false,
+			statusCode: 409,
+			job,
+			error:
+				"No active Expedia MFA session is waiting for a code. Run the collector again if needed.",
+		};
+	}
+	await appendAudit(jobId, {
+		action: "collector_mfa_code_submitted",
+		by: actor?._id || actor?.id || "",
+		readOnly: true,
+		attempt: session.attempt,
+		codeReceived: true,
+		codeStored: false,
+	});
+	await updateJob(jobId, {
+		$set: {
+			status: "running",
+			"collectorState.status": "mfa_code_received",
+			"collectorState.lastProgressAt": new Date(),
+			"collectorState.message": "Expedia verification code received.",
+		},
+	});
+	session.resolve(normalizedCode);
+	const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
+	return { ok: true, statusCode: 202, job };
+};
+
 module.exports = {
 	startExpediaReservationCollectorJob,
+	submitExpediaReservationMfaCode,
 	parsePropertiesFromText,
 	matchPropertiesToHotels,
 	confirmationCandidatesFromText,

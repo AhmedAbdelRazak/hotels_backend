@@ -290,8 +290,9 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 			noPasswordInPayload: true,
 			usernameEnvKey: providerConfig.usernameEnvKey,
 			passwordEnvKey: providerConfig.passwordEnvKey,
+			serverCredentialLogin: true,
 			noCaptchaBypass: true,
-			humanLoginRequired: true,
+			humanLoginRequiredOnChallenge: true,
 			manualMfaRequired: true,
 			officialApiPreferredWhenAvailable: true,
 			reconcileContract:
@@ -313,7 +314,8 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 			totalDays,
 			steps: [
 				`Open a supervised ${providerConfig.partnerPortalLabel} browser session.`,
-				`Human owner completes login, MFA, and any ${providerConfig.label} verification.`,
+				`Submit ${providerConfig.label} credentials from server environment if the saved session is not already authenticated.`,
+				`Human owner supplies MFA or completes any ${providerConfig.label} human verification challenge when requested.`,
 				"Read reservation list/details for every target PMS hotel in this job.",
 				`Normalize ${providerConfig.label} property names through the same OTA inbound alias candidates.`,
 				`Match existing PMS reservations by ${providerConfig.label} confirmation/supplier fields before considering any create.`,
