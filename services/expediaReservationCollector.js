@@ -10,6 +10,7 @@ const {
 	normalizeWhitespace,
 	redactSensitive,
 	safeSnippet,
+	expandHotelNameCandidates,
 	findReservationByOtaConfirmation,
 	detectConfirmationMatchFields,
 } = require("./otaReservationMapper");
@@ -340,6 +341,10 @@ const scorePropertyForHotel = (property = {}, hotel = {}) => {
 		new Set([
 			...(hotel.matchKeys || []),
 			...(hotel.aliases || []).map((alias) => normalizeComparable(alias.name)),
+			...expandHotelNameCandidates([
+				hotel.hotelName,
+				hotel.hotelNameOtherLanguage,
+			]).map(normalizeComparable),
 			normalizeComparable(hotel.hotelName),
 			normalizeComparable(hotel.hotelNameOtherLanguage),
 		].filter(Boolean))
