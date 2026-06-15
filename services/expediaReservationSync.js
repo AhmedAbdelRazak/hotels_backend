@@ -2,6 +2,7 @@
 
 const HotelDetails = require("../models/hotel_details");
 const OtaReservationSyncJob = require("../models/ota_reservation_sync_job");
+const { Types } = require("mongoose");
 const {
 	expandHotelNameCandidates,
 	normalizeComparable,
@@ -10,6 +11,7 @@ const {
 
 const DEFAULT_PROVIDER = "expedia";
 const MAX_SYNC_DAYS = 430;
+const { ObjectId } = Types;
 
 const normalizeText = (value = "") => String(value || "").trim();
 
@@ -115,6 +117,9 @@ const buildTargetHotel = (hotel = {}, allowedHotelIds = []) => {
 		hotelName: normalizeWhitespace(hotel.hotelName || ""),
 		hotelNameOtherLanguage: normalizeWhitespace(hotel.hotelName_OtherLanguage || ""),
 		ownerId: hotel.belongsTo ? String(hotel.belongsTo) : "",
+		activateHotel: hotel.activateHotel === true,
+		xHotelProActive: hotel.xHotelProActive !== false,
+		activeForPms: hotel.activateHotel === true && hotel.xHotelProActive !== false,
 		aliases,
 		matchKeys: Array.from(new Set(aliases.map((alias) => alias.matchKey))).filter(Boolean),
 		activeRoomTypes: activeRooms.length,
@@ -157,6 +162,17 @@ const loadActiveHotels = async () =>
 		.lean()
 		.exec();
 
+const loadAllowlistedHotels = async (hotelIds = []) => {
+	if (!hotelIds.length) return [];
+	return HotelDetails.find({ _id: { $in: hotelIds } })
+		.select(
+			"_id hotelName hotelName_OtherLanguage belongsTo activateHotel xHotelProActive roomCountDetails"
+		)
+		.sort({ hotelName: 1 })
+		.lean()
+		.exec();
+};
+
 const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 	if (containsCredentialKey(payload)) {
 		return {
@@ -196,37 +212,54 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 		};
 	}
 
-	const hotels = await loadActiveHotels();
+	const allowedHotelIds = configuredHotelAllowlist();
+	const validAllowlistIds = allowedHotelIds.filter((hotelId) =>
+		ObjectId.isValid(hotelId)
+	);
+	const invalidAllowlistIds = allowedHotelIds.filter(
+		(hotelId) => !ObjectId.isValid(hotelId)
+	);
+	const activeHotels = await loadActiveHotels();
+	const hotels = allowedHotelIds.length
+		? await loadAllowlistedHotels(validAllowlistIds)
+		: activeHotels;
 	if (!hotels.length) {
 		return {
 			ok: false,
 			statusCode: 409,
-			error: "No active hotels are available for OTA reservation sync.",
+			error: allowedHotelIds.length
+				? "No OTA allowlisted hotels were found for reservation sync."
+				: "No active hotels are available for OTA reservation sync.",
 		};
 	}
 
-	const allowedHotelIds = configuredHotelAllowlist();
-	const allActiveTargetHotels = hotels.map((hotel) =>
+	const allActiveTargetHotels = activeHotels.map((hotel) =>
 		buildTargetHotel(hotel, allowedHotelIds)
 	);
-	const targetHotels = allowedHotelIds.length
-		? allActiveTargetHotels.filter((hotel) => hotel.otaInboundAllowed)
-		: allActiveTargetHotels;
+	const targetHotels = hotels.map((hotel) =>
+		buildTargetHotel(hotel, allowedHotelIds)
+	);
+	const targetHotelIds = new Set(
+		targetHotels.map((hotel) => hotel.hotelId).filter(Boolean)
+	);
 	const skippedActiveHotels = allowedHotelIds.length
-		? allActiveTargetHotels.filter((hotel) => !hotel.otaInboundAllowed)
+		? allActiveTargetHotels.filter((hotel) => !targetHotelIds.has(hotel.hotelId))
 		: [];
 	const activeHotelIds = new Set(
 		allActiveTargetHotels.map((hotel) => hotel.hotelId).filter(Boolean)
 	);
-	const unmatchedAllowlistIds = allowedHotelIds.filter(
-		(hotelId) => !activeHotelIds.has(hotelId)
+	const inactiveAllowlistedHotels = allowedHotelIds.length
+		? targetHotels.filter((hotel) => !activeHotelIds.has(hotel.hotelId))
+		: [];
+	const unmatchedAllowlistIds = validAllowlistIds.filter(
+		(hotelId) => !targetHotelIds.has(hotelId)
 	);
 	if (!targetHotels.length) {
 		return {
 			ok: false,
 			statusCode: 409,
 			error:
-				"OTA reservation sync allowlist is configured, but none of the allowed hotels are active.",
+				"OTA reservation sync allowlist is configured, but none of the allowed hotels were found.",
 		};
 	}
 	const credentialSummary = buildCredentialSummary(provider);
@@ -274,12 +307,14 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 				: "all_active_hotels",
 			activeHotelCount: allActiveTargetHotels.length,
 			configuredAllowlistCount: allowedHotelIds.length,
+			inactiveAllowlistedHotelCount: inactiveAllowlistedHotels.length,
 			skippedActiveHotelCount: skippedActiveHotels.length,
+			invalidAllowlistCount: invalidAllowlistIds.length,
 			totalDays,
 			steps: [
 				`Open a supervised ${providerConfig.partnerPortalLabel} browser session.`,
 				`Human owner completes login, MFA, and any ${providerConfig.label} verification.`,
-				"Read reservation list/details for every active PMS hotel in this job.",
+				"Read reservation list/details for every target PMS hotel in this job.",
 				`Normalize ${providerConfig.label} property names through the same OTA inbound alias candidates.`,
 				`Match existing PMS reservations by ${providerConfig.label} confirmation/supplier fields before considering any create.`,
 				"Return preview buckets only: new, matched existing, status changed, conflicts, needs review.",
@@ -297,9 +332,22 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 								.join(", ")}.`,
 					  ]
 					: []),
+				...(inactiveAllowlistedHotels.length
+					? [
+							`${inactiveAllowlistedHotels.length} allowlisted hotel(s) are inactive in PMS but included for OTA sync: ${inactiveAllowlistedHotels
+								.map((hotel) => hotel.hotelName)
+								.filter(Boolean)
+								.join(", ")}.`,
+					  ]
+					: []),
 				...(unmatchedAllowlistIds.length
 					? [
-							`${unmatchedAllowlistIds.length} OTA_INBOUND_EMAIL_HOTEL_IDS value(s) do not currently match an active hotel.`,
+							`${unmatchedAllowlistIds.length} OTA_INBOUND_EMAIL_HOTEL_IDS value(s) do not currently match a hotel.`,
+					  ]
+					: []),
+				...(invalidAllowlistIds.length
+					? [
+							`${invalidAllowlistIds.length} OTA_INBOUND_EMAIL_HOTEL_IDS value(s) are not valid hotel IDs.`,
 					  ]
 					: []),
 			],
@@ -314,7 +362,9 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 			otaInboundAllowlistApplied: allowedHotelIds.length > 0,
 			activeHotelCount: allActiveTargetHotels.length,
 			configuredAllowlistCount: allowedHotelIds.length,
+			inactiveAllowlistedHotelCount: inactiveAllowlistedHotels.length,
 			skippedActiveHotelCount: skippedActiveHotels.length,
+			invalidAllowlistCount: invalidAllowlistIds.length,
 		},
 		resultSummary: {
 			newReservations: 0,
@@ -334,6 +384,7 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 				provider,
 				hotelCount: targetHotels.length,
 				activeHotelCount: allActiveTargetHotels.length,
+				inactiveAllowlistedHotelCount: inactiveAllowlistedHotels.length,
 				otaInboundAllowlistApplied: allowedHotelIds.length > 0,
 				dateFrom,
 				dateTo,
