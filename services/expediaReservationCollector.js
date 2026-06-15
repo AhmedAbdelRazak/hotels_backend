@@ -13,12 +13,17 @@ const {
 	expandHotelNameCandidates,
 	findReservationByOtaConfirmation,
 	detectConfirmationMatchFields,
+	normalizeConfirmation,
 } = require("./otaReservationMapper");
 
 const DEFAULT_LOGIN_URL =
 	"https://expediapartnercentral.com/Account/Logon?returnUrl=https%3A%2F%2Fapps.expediapartnercentral.com%2Fmanageproperty%2FManageProperty";
 const DEFAULT_MANAGE_PROPERTY_URL =
 	"https://apps.expediapartnercentral.com/manageproperty/ManageProperty";
+const DEFAULT_BOOKINGS_URL =
+	"https://apps.expediapartnercentral.com/lodging/bookings";
+const DEFAULT_RESERVATION_DETAIL_URL =
+	"https://apps.expediapartnercentral.com/lodging/reservations/legacyReservationDetails.html";
 const DEFAULT_OUTPUT_DIR = path.join(
 	process.cwd(),
 	"audits",
@@ -32,6 +37,9 @@ const DEFAULT_PROFILE_DIR = path.join(
 const MAX_RUN_MS = Number(process.env.OTA_EXPEDIA_SYNC_MAX_RUN_MS || 55_000);
 const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
 	process.env.OTA_EXPEDIA_SYNC_MAX_CANDIDATES_PER_HOTEL || 80
+);
+const MAX_DETAIL_PAGES_PER_HOTEL = Number(
+	process.env.OTA_EXPEDIA_SYNC_MAX_DETAIL_PAGES_PER_HOTEL || 30
 );
 const NAVIGATION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_SYNC_NAVIGATION_TIMEOUT_MS || 15_000
@@ -68,6 +76,42 @@ const MFA_INPUT_SELECTORS = [
 const normalizeLine = (value) => String(value || "").replace(/\s+/g, " ").trim();
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const expediaAppBaseUrl = () =>
+	String(process.env.OTA_EXPEDIA_APP_BASE_URL || "https://apps.expediapartnercentral.com")
+		.replace(/\/+$/, "");
+
+const buildExpediaBookingsUrl = (propertyId = "") => {
+	const url = new URL(
+		process.env.OTA_EXPEDIA_BOOKINGS_URL || DEFAULT_BOOKINGS_URL,
+		expediaAppBaseUrl()
+	);
+	if (propertyId) url.searchParams.set("htid", String(propertyId));
+	return url.toString();
+};
+
+const buildExpediaReservationDetailUrl = (propertyId = "", reservationId = "") => {
+	const url = new URL(
+		process.env.OTA_EXPEDIA_RESERVATION_DETAIL_URL ||
+			DEFAULT_RESERVATION_DETAIL_URL,
+		expediaAppBaseUrl()
+	);
+	if (propertyId) url.searchParams.set("htid", String(propertyId));
+	if (reservationId) url.searchParams.set("reservationIds", String(reservationId));
+	return url.toString();
+};
+
+const toUsDateInput = (value = "") => {
+	const raw = normalizeLine(value);
+	if (!raw) return "";
+	const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	if (iso) return `${iso[2]}/${iso[3]}/${iso[1]}`;
+	const parsed = new Date(raw);
+	if (Number.isNaN(parsed.getTime())) return raw;
+	return `${String(parsed.getMonth() + 1).padStart(2, "0")}/${String(
+		parsed.getDate()
+	).padStart(2, "0")}/${parsed.getFullYear()}`;
+};
 
 const ensureDirectory = (dir) => {
 	fs.mkdirSync(dir, { recursive: true });
@@ -550,16 +594,124 @@ const waitForReservationsSurface = async (page) => {
 	await delay(900);
 };
 
-const openReservationsPage = async (page) => {
+const applyBookingsDateFilter = async (page, { dateFrom = "", dateTo = "" } = {}) => {
+	const from = toUsDateInput(dateFrom);
+	const to = toUsDateInput(dateTo);
+	if (!from || !to) {
+		return { applied: false, reason: "missing_range" };
+	}
+
+	const fieldResult = await page
+		.evaluate(({ fromValue, toValue }) => {
+			const visible = (node) => {
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					rect.width > 0 &&
+					rect.height > 0 &&
+					!node.disabled &&
+					node.getAttribute("aria-disabled") !== "true"
+				);
+			};
+			const descriptor =
+				Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value") ||
+				{};
+			const setValue = (input, value) => {
+				if (!input || !value) return false;
+				if (descriptor.set) descriptor.set.call(input, value);
+				else input.value = value;
+				input.dispatchEvent(new Event("input", { bubbles: true }));
+				input.dispatchEvent(new Event("change", { bubbles: true }));
+				input.dispatchEvent(new Event("blur", { bubbles: true }));
+				return true;
+			};
+			const inputs = Array.from(document.querySelectorAll("input")).filter(
+				(input) => {
+					if (!visible(input)) return false;
+					const hint = [
+						input.placeholder,
+						input.name,
+						input.id,
+						input.getAttribute("aria-label"),
+						input.getAttribute("data-testid"),
+						input.closest("label")?.innerText,
+						input.parentElement?.innerText,
+					]
+						.filter(Boolean)
+						.join(" ");
+					return /mm\/dd\/yyyy|date|from|to|check/i.test(hint);
+				}
+			);
+			return {
+				inputCount: inputs.length,
+				fromSet: setValue(inputs[0], fromValue),
+				toSet: setValue(inputs[1], toValue),
+			};
+		}, { fromValue: from, toValue: to })
+		.catch((error) => ({
+			inputCount: 0,
+			fromSet: false,
+			toSet: false,
+			error: error && error.message ? error.message : String(error),
+		}));
+
+	const clickedApply =
+		fieldResult.fromSet && fieldResult.toSet
+			? await clickButtonByText(page, ["^apply$"]).catch(() => false)
+			: false;
+	if (clickedApply) {
+		await waitForReservationsSurface(page);
+	}
+	return {
+		applied: Boolean(fieldResult.fromSet && fieldResult.toSet && clickedApply),
+		from,
+		to,
+		...fieldResult,
+		clickedApply,
+	};
+};
+
+const openReservationsPage = async (
+	page,
+	property = {},
+	{ dateFrom = "", dateTo = "" } = {}
+) => {
+	if (property.expediaPropertyId) {
+		const directUrl = buildExpediaBookingsUrl(property.expediaPropertyId);
+		await page.goto(directUrl, { waitUntil: "domcontentloaded" });
+		await waitForReservationsSurface(page);
+		const snapshot = await safePageSnapshot(page);
+		if (/reservations?|bookings?/i.test(`${snapshot.title} ${snapshot.text}`)) {
+			const dateFilter = await applyBookingsDateFilter(page, {
+				dateFrom,
+				dateTo,
+			});
+			return {
+				opened: true,
+				method: "direct_bookings_url",
+				href: directUrl,
+				dateFilter,
+			};
+		}
+	}
+
 	const reservationLink = await findReservationsLink(page).catch(() => null);
 	if (reservationLink?.href) {
 		await page.goto(reservationLink.href, { waitUntil: "domcontentloaded" });
 		await delay(900);
+		const dateFilter = await applyBookingsDateFilter(page, {
+			dateFrom,
+			dateTo,
+		});
 		return {
 			opened: true,
 			method: "href",
 			href: reservationLink.href,
 			text: reservationLink.text || "",
+			dateFilter,
 		};
 	}
 
@@ -571,9 +723,14 @@ const openReservationsPage = async (page) => {
 		};
 	}
 	await waitForReservationsSurface(page);
+	const dateFilter = await applyBookingsDateFilter(page, {
+		dateFrom,
+		dateTo,
+	});
 	return {
 		opened: true,
 		method: "click",
+		dateFilter,
 	};
 };
 
@@ -596,6 +753,111 @@ const confirmationCandidatesFromText = (text = "") => {
 	return values.filter((value) => !/^20\d{2}$/.test(value)).slice(0, 5);
 };
 
+const monthIndex = (value = "") => {
+	const key = String(value || "").slice(0, 3).toLowerCase();
+	return {
+		jan: 0,
+		feb: 1,
+		mar: 2,
+		apr: 3,
+		may: 4,
+		jun: 5,
+		jul: 6,
+		aug: 7,
+		sep: 8,
+		oct: 9,
+		nov: 10,
+		dec: 11,
+	}[key];
+};
+
+const toIsoDate = (year, month, day) => {
+	const yyyy = Number(year);
+	const mm = Number(month);
+	const dd = Number(day);
+	if (!yyyy || !mm || !dd) return "";
+	return `${String(yyyy).padStart(4, "0")}-${String(mm).padStart(2, "0")}-${String(
+		dd
+	).padStart(2, "0")}`;
+};
+
+const parseExpediaDate = (value = "") => {
+	const raw = normalizeLine(value);
+	if (!raw) return "";
+	const monthMatch = raw.match(
+		/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\b/i
+	);
+	if (monthMatch) {
+		const month = monthIndex(monthMatch[1]);
+		if (month >= 0) return toIsoDate(monthMatch[3], month + 1, monthMatch[2]);
+	}
+	const slashMatch = raw.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+	if (slashMatch) {
+		const year =
+			slashMatch[3].length === 2 ? `20${slashMatch[3]}` : slashMatch[3];
+		return toIsoDate(year, slashMatch[1], slashMatch[2]);
+	}
+	const isoMatch = raw.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+	return isoMatch ? `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}` : "";
+};
+
+const extractExpediaDates = (value = "") => {
+	const source = String(value || "");
+	const matches = [
+		...(source.match(
+			/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b/gi
+		) || []),
+		...(source.match(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/g) || []),
+		...(source.match(/\b\d{4}-\d{2}-\d{2}\b/g) || []),
+	];
+	return matches
+		.map((text) => ({ text: normalizeLine(text), iso: parseExpediaDate(text) }))
+		.filter((date) => date.iso);
+};
+
+const parseMoneyValue = (value = "", fallbackCurrency = "") => {
+	const raw = normalizeLine(value);
+	if (!raw) return null;
+	const currencyFirst = raw.match(
+		/\b([A-Z]{3})\s*([+-]?\d[\d,]*(?:\.\d{1,2})?)\b/
+	);
+	const amountFirst = raw.match(
+		/\b([+-]?\d[\d,]*(?:\.\d{1,2})?)\s*([A-Z]{3})\b/
+	);
+	const amountOnly = raw.match(/(^|[^\d])([+-]?\d[\d,]*(?:\.\d{1,2}))/);
+	const currency = currencyFirst?.[1] || amountFirst?.[2] || fallbackCurrency || "";
+	const amountText = currencyFirst?.[2] || amountFirst?.[1] || amountOnly?.[2] || "";
+	const amount = Number(String(amountText).replace(/,/g, ""));
+	if (!Number.isFinite(amount)) return null;
+	return {
+		currency,
+		amount,
+		raw,
+	};
+};
+
+const parseExpediaStatusToApply = (value = "") => {
+	const text = normalizeLine(value).toLowerCase();
+	if (/cancelled|canceled/.test(text)) return "cancelled";
+	if (/no[-\s]?show/.test(text)) return "no_show";
+	if (/booked|confirmed|recent/.test(text)) return "confirmed";
+	return "";
+};
+
+const detectExpediaPaymentCollectionModel = (value = "") => {
+	const text = normalizeWhitespace(value).toLowerCase();
+	if (/expedia\s+(collects|collect)/.test(text)) return "expedia_collect";
+	if (/hotel\s+(collects|collect)|property\s+(collects|collect)/.test(text)) {
+		return "hotel_collect";
+	}
+	return "unknown";
+};
+
+const hasSensitivePaymentSignal = (value = "") =>
+	/(virtual\s+card|card\s+number|cvv|cvc|security\s+code|payment\s+details|expedia\s+collects?\s+payment|expedia\s+collect)/i.test(
+		value || ""
+	);
+
 const extractRows = async (page) =>
 	page.evaluate(() => {
 		const selectors = [
@@ -609,15 +871,31 @@ const extractRows = async (page) =>
 		const seen = new Set();
 		return nodes
 			.map((node) => {
-				const text = (node.innerText || node.textContent || "")
-					.replace(/\s+/g, " ")
-					.trim();
+				const rawText = node.innerText || node.textContent || "";
+				const text = rawText.replace(/\s+/g, " ").trim();
+				const lines = rawText
+					.split(/\r?\n/)
+					.map((line) => line.replace(/\s+/g, " ").trim())
+					.filter(Boolean);
+				const cells = Array.from(
+					node.querySelectorAll("td, th, [role='cell'], [role='gridcell']")
+				)
+					.map((cell) =>
+						(cell.innerText || cell.textContent || "")
+							.replace(/\s+/g, " ")
+							.trim()
+					)
+					.filter(Boolean);
 				const link = node.querySelector("a[href]");
 				const href = link ? link.href : "";
-				return { text, href };
+				return { text, lines, cells, href };
 			})
 			.filter((row) => {
 				if (!row.text || row.text.length < 12) return false;
+				if (row.text.length > 1600) return false;
+				if (/^(guest|reservation|confirmation|check[-\s]?in|check[-\s]?out|room|booked on|booking amount)\b/i.test(row.text)) {
+					return false;
+				}
 				if (seen.has(row.text)) return false;
 				seen.add(row.text);
 				return true;
@@ -647,36 +925,331 @@ const parseLightReservationDetails = (text = "") => {
 	};
 };
 
+const detectCurrency = (value = "") => {
+	const match = String(value || "").match(
+		/\b(USD|SAR|AED|EUR|GBP|KWD|QAR|BHD|OMR|EGP)\b/i
+	);
+	return match ? match[1].toUpperCase() : "";
+};
+
+const lineValueAfter = (lines = [], pattern, maxLookahead = 4) => {
+	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = normalizeLine(lines[index]);
+		if (!regex.test(line)) continue;
+		for (
+			let valueIndex = index + 1;
+			valueIndex < Math.min(lines.length, index + 1 + maxLookahead);
+			valueIndex += 1
+		) {
+			const value = normalizeLine(lines[valueIndex]);
+			if (!value || regex.test(value) || /^edit$/i.test(value)) continue;
+			return value;
+		}
+	}
+	return "";
+};
+
+const moneyAfterLine = (lines = [], pattern, fallbackCurrency = "", maxLookahead = 5) => {
+	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
+	for (let index = 0; index < lines.length; index += 1) {
+		if (!regex.test(normalizeLine(lines[index]))) continue;
+		for (
+			let valueIndex = index + 1;
+			valueIndex < Math.min(lines.length, index + 1 + maxLookahead);
+			valueIndex += 1
+		) {
+			const money = parseMoneyValue(lines[valueIndex], fallbackCurrency);
+			if (money) return money;
+		}
+	}
+	return null;
+};
+
+const parseGuestCount = (value = "") => {
+	const text = normalizeWhitespace(value).toLowerCase();
+	const adultsMatch = text.match(/(\d+)\s*adult/);
+	const childrenMatch = text.match(/(\d+)\s*(?:child|children)/);
+	const guestsMatch = text.match(/(\d+)\s*(?:guest|people|person|persons)/);
+	const adults = adultsMatch ? Number(adultsMatch[1]) : 0;
+	const children = childrenMatch ? Number(childrenMatch[1]) : 0;
+	const totalGuests = guestsMatch
+		? Number(guestsMatch[1])
+		: adults || children
+		? adults + children
+		: 0;
+	return { adults, children, totalGuests };
+};
+
+const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
+	const safeText = normalizeWhitespace(redactSensitive(rawText));
+	const lines = String(rawText || "")
+		.split(/\r?\n/)
+		.map(normalizeLine)
+		.filter(Boolean);
+	const fallbackCurrency =
+		candidate.currency || detectCurrency(rawText) || detectCurrency(candidate.amountHint);
+	const reservationId =
+		normalizeConfirmation(
+			String(rawText || "").match(/Reservation\s*#\s*([A-Z0-9-]+)/i)?.[1] ||
+				candidate.reservationId ||
+				candidate.confirmationNumber
+		) || "";
+	const hotelConfirmationRaw = lineValueAfter(
+		lines,
+		/^Hotel confirmation code$/i,
+		3
+	);
+	const hotelConfirmationNumber =
+		normalizeConfirmation(confirmationCandidatesFromText(hotelConfirmationRaw)[0]) ||
+		candidate.hotelConfirmationNumber ||
+		"";
+	const itineraryNumber = normalizeConfirmation(
+		lineValueAfter(lines, /^Itinerary number$/i, 2)
+	);
+	const paymentRequestId = lineValueAfter(lines, /^Payment request ID$/i, 2);
+	const statusRaw = lineValueAfter(lines, /^Status$/i, 2);
+	const reservationMadeRaw = lineValueAfter(lines, /^Reservation made$/i, 2);
+	const pricingModel = lineValueAfter(lines, /^Pricing model$/i, 2);
+	const beddingRequest = lineValueAfter(lines, /^Bedding request$/i, 3);
+	const ratePlanCode = lineValueAfter(lines, /^Rate plan code$/i, 2);
+	const ratePlanName = lineValueAfter(lines, /^Rate plan name$/i, 2);
+	const arrivalTime = lineValueAfter(lines, /^Estimated arrival time$/i, 3);
+	const roomName =
+		lineValueAfter(lines, /^Room Type$/i, 3) || candidate.roomName || "";
+	const guestCount = parseGuestCount(lineValueAfter(lines, /^Guest count$/i, 3));
+
+	const dateRangeMatch = String(rawText || "").match(
+		/\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\s*(?:[\u2013\u2014-]|to)\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})(?:\s*\((\d+)\s*nights?\))?/i
+	);
+	const allDates = extractExpediaDates(rawText);
+	const checkinDate =
+		parseExpediaDate(dateRangeMatch?.[1]) || candidate.checkinDate || allDates[0]?.iso || "";
+	const checkoutDate =
+		parseExpediaDate(dateRangeMatch?.[2]) || candidate.checkoutDate || allDates[1]?.iso || "";
+	const nights = Number(dateRangeMatch?.[3] || 0) || candidate.nights || 0;
+	const bookedAt =
+		parseExpediaDate(reservationMadeRaw) ||
+		candidate.bookedAt ||
+		(allDates.length > 2 ? allDates[2].iso : "");
+
+	const nightlyRate = moneyAfterLine(lines, /^Nightly rates?/i, fallbackCurrency);
+	const taxes = moneyAfterLine(lines, /^Taxes$/i, fallbackCurrency);
+	const totalGuestPayment = moneyAfterLine(
+		lines,
+		/^Total guest payment$/i,
+		fallbackCurrency
+	);
+	const expediaCompensation = moneyAfterLine(
+		lines,
+		/^Expedia Group'?s compensation$/i,
+		fallbackCurrency
+	);
+	const accelerator = moneyAfterLine(lines, /^Accelerator/i, fallbackCurrency);
+	const totalPayout = moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 6);
+	const amount = totalGuestPayment || parseMoneyValue(candidate.amountHint, fallbackCurrency);
+	const detectedPaymentCollectionModel =
+		detectExpediaPaymentCollectionModel(rawText);
+	const paymentCollectionModel =
+		detectedPaymentCollectionModel !== "unknown"
+			? detectedPaymentCollectionModel
+			: candidate.paymentCollectionModel || "unknown";
+
+	return {
+		detailsFetched: true,
+		reservationId,
+		confirmationNumber: reservationId || candidate.confirmationNumber,
+		hotelConfirmationNumber,
+		alternateConfirmationNumbers: [
+			hotelConfirmationNumber,
+			candidate.hotelConfirmationNumber,
+			itineraryNumber,
+		].filter(Boolean),
+		itineraryNumber,
+		paymentRequestId,
+		statusRaw,
+		statusToApply: parseExpediaStatusToApply(statusRaw || candidate.statusRaw),
+		bookedAt,
+		checkinDate,
+		checkoutDate,
+		nights,
+		roomName,
+		arrivalTime,
+		pricingModel,
+		beddingRequest,
+		ratePlanCode,
+		ratePlanName,
+		adults: guestCount.adults || candidate.adults || 0,
+		children: guestCount.children || candidate.children || 0,
+		totalGuests: guestCount.totalGuests || candidate.totalGuests || 0,
+		currency: amount?.currency || fallbackCurrency || candidate.currency || "",
+		amount: amount?.amount || candidate.amount || 0,
+		amountHint: amount?.raw || candidate.amountHint || "",
+		paymentCollectionModel,
+		paymentSummary: {
+			nightlyRateAmount: nightlyRate?.amount || 0,
+			taxesAmount: taxes?.amount || 0,
+			totalGuestPaymentAmount: totalGuestPayment?.amount || 0,
+			expediaCompensationAmount: expediaCompensation?.amount || 0,
+			acceleratorAmount: accelerator?.amount || 0,
+			totalPayoutAmount: totalPayout?.amount || 0,
+			currency: totalPayout?.currency || amount?.currency || fallbackCurrency || "",
+		},
+		paymentSignals: {
+			hasPaymentDetails: hasSensitivePaymentSignal(rawText),
+			hasVirtualCardSignal: /virtual\s+card|card\s+number|cvv|cvc/i.test(
+				rawText || ""
+			),
+			rawCardStored: false,
+		},
+		sourceSnippet: safeSnippet(safeText, 900),
+	};
+};
+
+const isLikelyGuestName = (value = "") => {
+	const text = normalizeLine(value);
+	if (!text || text.length > 90 || /\d/.test(text)) return false;
+	if (
+		/(recent|reservation|confirmation|check[-\s]?in|check[-\s]?out|booked|booking|amount|room|view|expedia|collect|usd|sar|date|status|payment)/i.test(
+			text
+		)
+	) {
+		return false;
+	}
+	return /[A-Za-z]/.test(text);
+};
+
+const parseReservationRowCandidate = (row, hotel, property) => {
+	const text = normalizeWhitespace(row.text || "");
+	if (!text || !/\b\d{8,16}\b/.test(text)) return null;
+	const ids = Array.from(
+		new Set(confirmationCandidatesFromText(text).map(normalizeConfirmation))
+	).filter((value) => value && /^\d{8,16}$/.test(value));
+	const hrefReservationId = normalizeConfirmation(
+		String(row.href || "").match(/[?&]reservationIds=([A-Z0-9-]+)/i)?.[1] || ""
+	);
+	const reservationId = hrefReservationId || ids[0] || "";
+	if (!reservationId) return null;
+	const hotelConfirmationNumber =
+		ids.find((value) => value !== reservationId) || "";
+	const cells = Array.isArray(row.cells) ? row.cells.map(normalizeLine).filter(Boolean) : [];
+	const lines = Array.isArray(row.lines) ? row.lines.map(normalizeLine).filter(Boolean) : [];
+	const reservationCellIndex = cells.findIndex((cell) =>
+		cell.includes(reservationId)
+	);
+	const guestName =
+		(reservationCellIndex > 0
+			? cells.slice(0, reservationCellIndex).reverse().find(isLikelyGuestName)
+			: "") ||
+		lines.slice(0, 4).find(isLikelyGuestName) ||
+		"";
+	const dates = extractExpediaDates(text);
+	const amountCell = cells.find((cell) => parseMoneyValue(cell));
+	const amount = parseMoneyValue(amountCell || text);
+	const roomName =
+		cells.find(
+			(cell) =>
+				/(room|suite|studio|apartment|bed|view)/i.test(cell) &&
+				!/(booking amount|room$|rooms and rates)/i.test(cell)
+		) || "";
+	const detailUrl =
+		row.href && /reservation|booking|legacy/i.test(row.href)
+			? row.href
+			: buildExpediaReservationDetailUrl(
+					property.expediaPropertyId,
+					reservationId
+			  );
+	const details = parseLightReservationDetails(text);
+	const statusRaw = /recent/i.test(text) ? "Recent" : "";
+
+	return {
+		provider: "expedia",
+		hotelId: hotel.hotelId,
+		hotelName: hotel.hotelName,
+		expediaPropertyId: property.expediaPropertyId || "",
+		expediaPropertyName: property.name || "",
+		confirmationNumber: reservationId,
+		reservationId,
+		hotelConfirmationNumber,
+		alternateConfirmationNumbers: [hotelConfirmationNumber].filter(Boolean),
+		guestName: guestName || details.guestName || "",
+		checkinDate: dates[0]?.iso || "",
+		checkoutDate: dates[1]?.iso || "",
+		bookedAt: dates[2]?.iso || "",
+		roomName,
+		statusRaw,
+		statusToApply: parseExpediaStatusToApply(statusRaw),
+		currency: amount?.currency || detectCurrency(text),
+		amount: amount?.amount || 0,
+		amountHint: amount?.raw || details.amountHint || "",
+		paymentCollectionModel: detectExpediaPaymentCollectionModel(text),
+		detailUrl,
+		sourceUrl: detailUrl || row.href || "",
+		sourceSnippet: safeSnippet(text, 700),
+	};
+};
+
+const enrichCandidateFromDetailPage = async (page, candidate) => {
+	if (!candidate.detailUrl) return candidate;
+	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
+	await delay(900);
+	await scrollToLoadVisibleContent(page).catch(() => {});
+	const snapshot = await safePageSnapshot(page);
+	const detail = parseExpediaReservationDetailText(snapshot.text, candidate);
+	return {
+		...candidate,
+		...Object.fromEntries(
+			Object.entries(detail).filter(([, value]) => {
+				if (Array.isArray(value)) return value.length > 0;
+				if (value && typeof value === "object") return true;
+				return value !== undefined && value !== null && value !== "";
+			})
+		),
+		sourceUrl: snapshot.url || candidate.detailUrl,
+		detailUrl: candidate.detailUrl,
+	};
+};
+
 const extractReservationCandidates = async (page, hotel, property) => {
 	const rows = await extractRows(page);
 	const candidates = [];
 	const seen = new Set();
 
 	for (const row of rows) {
-		const ids = confirmationCandidatesFromText(row.text);
-		for (const confirmationNumber of ids) {
-			const key = `${hotel.hotelId}:${confirmationNumber}`;
-			if (seen.has(key)) continue;
-			seen.add(key);
-			const details = parseLightReservationDetails(row.text);
-			candidates.push({
-				provider: "expedia",
-				hotelId: hotel.hotelId,
-				hotelName: hotel.hotelName,
-				expediaPropertyId: property.expediaPropertyId || "",
-				expediaPropertyName: property.name || "",
-				confirmationNumber,
-				sourceUrl: row.href || page.url(),
-				...details,
-				sourceSnippet: safeSnippet(row.text, 500),
-			});
-			if (candidates.length >= MAX_RESERVATION_CANDIDATES_PER_HOTEL) {
-				return candidates;
-			}
+		const candidate = parseReservationRowCandidate(row, hotel, property);
+		if (!candidate) continue;
+		const key = `${hotel.hotelId}:${candidate.reservationId || candidate.confirmationNumber}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		candidates.push(candidate);
+		if (candidates.length >= MAX_RESERVATION_CANDIDATES_PER_HOTEL) {
+			break;
 		}
 	}
 
-	return candidates;
+	const enriched = [];
+	for (let index = 0; index < candidates.length; index += 1) {
+		const candidate = candidates[index];
+		if (index >= MAX_DETAIL_PAGES_PER_HOTEL) {
+			enriched.push({
+				...candidate,
+				detailsFetched: false,
+				detailsSkippedReason: "detail_page_cap_reached",
+			});
+			continue;
+		}
+		try {
+			enriched.push(await enrichCandidateFromDetailPage(page, candidate));
+		} catch (error) {
+			enriched.push({
+				...candidate,
+				detailsFetched: false,
+				detailsError: error && error.message ? error.message : String(error),
+			});
+		}
+	}
+
+	return enriched;
 };
 
 const emptyBuckets = () => ({
@@ -752,10 +1325,33 @@ const resolveSelectedTargets = (job, selectedHotelIds = []) => {
 };
 
 const classifyCandidate = async (candidate) => {
-	const existing = await findReservationByOtaConfirmation(
-		candidate.confirmationNumber,
-		"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state"
+	const lookupValues = Array.from(
+		new Set(
+			[
+				candidate.confirmationNumber,
+				candidate.reservationId,
+				candidate.hotelConfirmationNumber,
+				candidate.itineraryNumber,
+				...(Array.isArray(candidate.alternateConfirmationNumbers)
+					? candidate.alternateConfirmationNumbers
+					: []),
+			]
+				.map(normalizeConfirmation)
+				.filter(Boolean)
+		)
 	);
+	let existing = null;
+	let matchedLookupValue = "";
+	for (const lookupValue of lookupValues) {
+		existing = await findReservationByOtaConfirmation(
+			lookupValue,
+			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state"
+		);
+		if (existing) {
+			matchedLookupValue = lookupValue;
+			break;
+		}
+	}
 	if (!existing) {
 		return {
 			bucket: "newReservations",
@@ -765,17 +1361,29 @@ const classifyCandidate = async (candidate) => {
 			},
 		};
 	}
+	const currentStatus = normalizeLine(
+		existing.reservation_status || existing.state || ""
+	).toLowerCase();
+	const statusToApply = normalizeLine(candidate.statusToApply || "").toLowerCase();
+	const isMeaningfulStatusChange =
+		statusToApply &&
+		["cancelled", "no_show"].includes(statusToApply) &&
+		statusToApply !== currentStatus;
 	return {
-		bucket: "matchedExisting",
+		bucket: isMeaningfulStatusChange ? "statusChanged" : "matchedExisting",
 		item: {
 			...candidate,
-			actionPreview: "matched_existing_no_write",
+			actionPreview: isMeaningfulStatusChange
+				? "matched_existing_status_change_no_write"
+				: "matched_existing_no_write",
 			reservationId: String(existing._id),
 			pmsConfirmationNumber: existing.confirmation_number || "",
 			currentStatus: existing.reservation_status || existing.state || "",
+			incomingStatus: candidate.statusRaw || candidate.statusToApply || "",
+			matchedLookupValue,
 			matchedReservationBy: detectConfirmationMatchFields(
 				existing,
-				candidate.confirmationNumber
+				matchedLookupValue || candidate.confirmationNumber
 			),
 		},
 	};
@@ -1192,25 +1800,41 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				continue;
 			}
 
-			const propertyOpened = await openPropertyPage(page, match.property).catch(
-				() => false
-			);
-			if (!propertyOpened) {
+			let reservationNavigation = await openReservationsPage(page, match.property, {
+				dateFrom: job.dateFrom,
+				dateTo: job.dateTo,
+			}).catch((error) => ({
+				opened: false,
+				method: "direct_error",
+				error: error && error.message ? error.message : String(error),
+			}));
+			if (!reservationNavigation.opened) {
+				const propertyOpened = await openPropertyPage(page, match.property).catch(
+					() => false
+				);
+				if (propertyOpened) {
+					reservationNavigation = await openReservationsPage(page, match.property, {
+						dateFrom: job.dateFrom,
+						dateTo: job.dateTo,
+					}).catch((error) => ({
+						opened: false,
+						method: "fallback_error",
+						error: error && error.message ? error.message : String(error),
+					}));
+				}
+			}
+			if (!reservationNavigation.opened) {
 				buckets.needsReview.push({
 					hotelId: hotel.hotelId,
 					hotelName: hotel.hotelName,
-					actionPreview: "property_matched_but_could_not_open",
+					actionPreview: "property_matched_but_reservations_not_opened",
 					matchScore: match.matchScore,
 					expediaPropertyName: match.property?.name || "",
 					expediaPropertyId: match.property?.expediaPropertyId || "",
+					reservationNavigation,
 				});
 				continue;
 			}
-			const reservationNavigation = await openReservationsPage(page).catch((error) => ({
-				opened: false,
-				method: "error",
-				error: error && error.message ? error.message : String(error),
-			}));
 			await scrollToLoadVisibleContent(page).catch(() => {});
 			const candidates = await extractReservationCandidates(
 				page,
@@ -1231,6 +1855,35 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				});
 			}
 			for (const candidate of candidates) {
+				const hasPaymentSignal =
+					candidate.paymentSignals?.hasPaymentDetails ||
+					candidate.paymentSignals?.hasVirtualCardSignal ||
+					(candidate.paymentCollectionModel &&
+						candidate.paymentCollectionModel !== "unknown") ||
+					Number(candidate.paymentSummary?.totalPayoutAmount || 0) > 0 ||
+					Number(candidate.paymentSummary?.totalGuestPaymentAmount || 0) > 0;
+				if (hasPaymentSignal) {
+					buckets.paymentOrVccAvailable.push({
+						hotelId: candidate.hotelId,
+						hotelName: candidate.hotelName,
+						expediaPropertyId: candidate.expediaPropertyId,
+						expediaPropertyName: candidate.expediaPropertyName,
+						confirmationNumber: candidate.confirmationNumber,
+						reservationId: candidate.reservationId,
+						hotelConfirmationNumber: candidate.hotelConfirmationNumber,
+						paymentCollectionModel: candidate.paymentCollectionModel || "unknown",
+						currency: candidate.currency || candidate.paymentSummary?.currency || "",
+						totalGuestPaymentAmount:
+							candidate.paymentSummary?.totalGuestPaymentAmount ||
+							candidate.amount ||
+							0,
+						totalPayoutAmount: candidate.paymentSummary?.totalPayoutAmount || 0,
+						hasVirtualCardSignal:
+							candidate.paymentSignals?.hasVirtualCardSignal || false,
+						rawCardStored: false,
+						actionPreview: "payment_signal_no_card_data_stored",
+					});
+				}
 				const classification = await classifyCandidate(candidate);
 				buckets[classification.bucket].push(classification.item);
 			}
