@@ -202,15 +202,32 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 	}
 
 	const allowedHotelIds = configuredHotelAllowlist();
-	const targetHotels = hotels.map((hotel) =>
+	const allActiveTargetHotels = hotels.map((hotel) =>
 		buildTargetHotel(hotel, allowedHotelIds)
 	);
+	const targetHotels = allowedHotelIds.length
+		? allActiveTargetHotels.filter((hotel) => hotel.otaInboundAllowed)
+		: allActiveTargetHotels;
+	const skippedActiveHotels = allowedHotelIds.length
+		? allActiveTargetHotels.filter((hotel) => !hotel.otaInboundAllowed)
+		: [];
+	const activeHotelIds = new Set(
+		allActiveTargetHotels.map((hotel) => hotel.hotelId).filter(Boolean)
+	);
+	const unmatchedAllowlistIds = allowedHotelIds.filter(
+		(hotelId) => !activeHotelIds.has(hotelId)
+	);
+	if (!targetHotels.length) {
+		return {
+			ok: false,
+			statusCode: 409,
+			error:
+				"OTA reservation sync allowlist is configured, but none of the allowed hotels are active.",
+		};
+	}
 	const credentialSummary = buildCredentialSummary(provider);
 	const missingCredentials = credentialSummary.missing.length > 0;
 	const missingEnvText = credentialSummary.missing.join(" and ");
-	const blockedByInboundAllowlist = targetHotels.filter(
-		(hotel) => !hotel.otaInboundAllowed
-	);
 	const notes = normalizeText(payload.notes || "").slice(0, 1000);
 
 	const job = await OtaReservationSyncJob.create({
@@ -244,10 +261,16 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 				"Collector output must pass through the OTA reconciliation layer; existing reservations preserve PMS pricing and finance fields.",
 		},
 		collectorPlan: {
-			summary: `Prepare read-only OTA reservation sync preview for ${targetHotels.length} active hotel(s), ${dateFrom} to ${dateTo}. Provider: ${providerConfig.label}.`,
+			summary: `Prepare read-only OTA reservation sync preview for ${targetHotels.length} target hotel(s), ${dateFrom} to ${dateTo}. Provider: ${providerConfig.label}.`,
 			provider: providerConfig.partnerPortalLabel,
 			providerKey: provider,
 			providerLabel: providerConfig.label,
+			scope: allowedHotelIds.length
+				? "ota_inbound_allowlist"
+				: "all_active_hotels",
+			activeHotelCount: allActiveTargetHotels.length,
+			configuredAllowlistCount: allowedHotelIds.length,
+			skippedActiveHotelCount: skippedActiveHotels.length,
 			totalDays,
 			steps: [
 				`Open a supervised ${providerConfig.partnerPortalLabel} browser session.`,
@@ -262,9 +285,17 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 				? `Configure ${missingEnvText} on the server for ${providerConfig.label}, then prepare or run the supervised read-only collector.`
 				: "Run the supervised read-only collector, then review the preview buckets before any apply step exists.",
 			warnings: [
-				...(blockedByInboundAllowlist.length
+				...(skippedActiveHotels.length
 					? [
-							`${blockedByInboundAllowlist.length} active hotel(s) are outside OTA_INBOUND_EMAIL_HOTEL_IDS; future apply steps should either expand the allowlist or keep those hotels preview-only.`,
+							`${skippedActiveHotels.length} active hotel(s) were skipped because they are outside OTA_INBOUND_EMAIL_HOTEL_IDS: ${skippedActiveHotels
+								.map((hotel) => hotel.hotelName)
+								.filter(Boolean)
+								.join(", ")}.`,
+					  ]
+					: []),
+				...(unmatchedAllowlistIds.length
+					? [
+							`${unmatchedAllowlistIds.length} OTA_INBOUND_EMAIL_HOTEL_IDS value(s) do not currently match an active hotel.`,
 					  ]
 					: []),
 			],
@@ -275,7 +306,11 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 			dateTo,
 			timezone: normalizeText(payload.timezone || "Asia/Riyadh"),
 			provider,
-			allActiveHotels: true,
+			allActiveHotels: allowedHotelIds.length === 0,
+			otaInboundAllowlistApplied: allowedHotelIds.length > 0,
+			activeHotelCount: allActiveTargetHotels.length,
+			configuredAllowlistCount: allowedHotelIds.length,
+			skippedActiveHotelCount: skippedActiveHotels.length,
 		},
 		resultSummary: {
 			newReservations: 0,
@@ -294,6 +329,8 @@ const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 				readOnly: true,
 				provider,
 				hotelCount: targetHotels.length,
+				activeHotelCount: allActiveTargetHotels.length,
+				otaInboundAllowlistApplied: allowedHotelIds.length > 0,
 				dateFrom,
 				dateTo,
 			},
