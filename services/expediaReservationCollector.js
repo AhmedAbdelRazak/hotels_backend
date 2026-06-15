@@ -463,7 +463,12 @@ const classifyCandidate = async (candidate) => {
 
 const launchBrowser = async () => {
 	const headlessEnv = String(process.env.OTA_EXPEDIA_HEADLESS || "true").toLowerCase();
-	const headless = !["0", "false", "no"].includes(headlessEnv);
+	const headless = ["0", "false", "no"].includes(headlessEnv)
+		? false
+		: ["new", "shell"].includes(headlessEnv)
+		  ? headlessEnv
+		  : "new";
+	const isHeadless = headless !== false;
 	const launchArgs = ["--window-size=1440,950"];
 	const noSandbox =
 		process.platform === "linux" ||
@@ -473,7 +478,7 @@ const launchBrowser = async () => {
 	const options = {
 		headless,
 		userDataDir: collectorProfileDir(),
-		defaultViewport: headless ? { width: 1440, height: 950 } : null,
+		defaultViewport: isHeadless ? { width: 1440, height: 950 } : null,
 		args: launchArgs,
 	};
 	if (process.env.EXPEDIA_BROWSER_PATH) {
