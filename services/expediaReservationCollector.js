@@ -1398,7 +1398,15 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 					reservationId
 			  );
 	const details = parseLightReservationDetails(text);
-	const statusRaw = /recent/i.test(text) ? "Recent" : "";
+	const statusRaw = /cancelled|canceled/i.test(text)
+		? "Cancelled"
+		: /no[-\s]?show/i.test(text)
+		? "No Show"
+		: /booked|confirmed/i.test(text)
+		? "Booked"
+		: /recent/i.test(text)
+		? "Recent"
+		: "";
 
 	return {
 		provider: "expedia",
@@ -1590,29 +1598,13 @@ const extractReservationCandidates = async (page, hotel, property) => {
 		}
 	}
 
-	const enriched = [];
-	for (let index = 0; index < candidates.length; index += 1) {
-		const candidate = candidates[index];
-		if (index >= MAX_DETAIL_PAGES_PER_HOTEL) {
-			enriched.push(normalizeCandidateMoneyToSar({
-				...candidate,
-				detailsFetched: false,
-				detailsSkippedReason: "detail_page_cap_reached",
-			}));
-			continue;
-		}
-		try {
-			enriched.push(await enrichCandidateFromDetailPage(page, candidate));
-		} catch (error) {
-			enriched.push(normalizeCandidateMoneyToSar({
-				...candidate,
-				detailsFetched: false,
-				detailsError: error && error.message ? error.message : String(error),
-			}));
-		}
-	}
-
-	return enriched;
+	return candidates.map((candidate) =>
+		normalizeCandidateMoneyToSar({
+			...candidate,
+			detailsFetched: false,
+			detailsSkippedReason: "row_scan_pending_classification",
+		})
+	);
 };
 
 const emptyBuckets = () => ({
@@ -2228,7 +2220,59 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					sourceSnippet: safeSnippet(pageSnapshot.text, 500),
 				});
 			}
-			for (const candidate of candidates) {
+			let detailPagesFetched = 0;
+			for (const rowCandidate of candidates) {
+				let candidate = rowCandidate;
+				let classification = await classifyCandidate(candidate);
+				const shouldFetchDetails =
+					classification.bucket === "newReservations" ||
+					classification.bucket === "statusChanged";
+				if (shouldFetchDetails) {
+					if (detailPagesFetched >= MAX_DETAIL_PAGES_PER_HOTEL) {
+						candidate = normalizeCandidateMoneyToSar({
+							...candidate,
+							detailsFetched: false,
+							detailsSkippedReason: "detail_page_cap_reached",
+						});
+						classification = await classifyCandidate(candidate);
+					} else {
+						detailPagesFetched += 1;
+						try {
+							candidate = await enrichCandidateFromDetailPage(page, candidate);
+						} catch (error) {
+							candidate = normalizeCandidateMoneyToSar({
+								...candidate,
+								detailsFetched: false,
+								detailsError:
+									error && error.message ? error.message : String(error),
+							});
+						}
+						classification = await classifyCandidate(candidate);
+					}
+				} else {
+					candidate = normalizeCandidateMoneyToSar({
+						...candidate,
+						detailsFetched: false,
+						detailsSkippedReason: "matched_existing_no_write_fast_path",
+					});
+					classification = {
+						...classification,
+						item: {
+							...classification.item,
+							...candidate,
+							actionPreview: classification.item?.actionPreview,
+							reservationId: classification.item?.reservationId,
+							pmsConfirmationNumber:
+								classification.item?.pmsConfirmationNumber || "",
+							currentStatus: classification.item?.currentStatus || "",
+							incomingStatus: classification.item?.incomingStatus || "",
+							matchedLookupValue:
+								classification.item?.matchedLookupValue || "",
+							matchedReservationBy:
+								classification.item?.matchedReservationBy || [],
+						},
+					};
+				}
 				const hasPaymentSignal =
 					candidate.paymentSignals?.hasPaymentDetails ||
 					candidate.paymentSignals?.hasVirtualCardSignal ||
@@ -2280,7 +2324,6 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 						actionPreview: "payment_signal_no_card_data_stored",
 					});
 				}
-				const classification = await classifyCandidate(candidate);
 				buckets[classification.bucket].push(classification.item);
 			}
 
