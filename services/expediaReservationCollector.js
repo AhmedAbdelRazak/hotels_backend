@@ -824,7 +824,9 @@ const parseMoneyValue = (value = "", fallbackCurrency = "") => {
 	const amountFirst = raw.match(
 		/\b([+-]?\d[\d,]*(?:\.\d{1,2})?)\s*([A-Z]{3})\b/
 	);
-	const amountOnly = raw.match(/(^|[^\d])([+-]?\d[\d,]*(?:\.\d{1,2}))/);
+	const amountOnly = fallbackCurrency
+		? raw.match(/(^|[^\d])([+-]?\d[\d,]*\.\d{1,2})(?!\d)/)
+		: null;
 	const currency = currencyFirst?.[1] || amountFirst?.[2] || fallbackCurrency || "";
 	const amountText = currencyFirst?.[2] || amountFirst?.[1] || amountOnly?.[2] || "";
 	const amount = Number(String(amountText).replace(/,/g, ""));
@@ -953,7 +955,10 @@ const lineValueAfter = (lines = [], pattern, maxLookahead = 4) => {
 const moneyAfterLine = (lines = [], pattern, fallbackCurrency = "", maxLookahead = 5) => {
 	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
 	for (let index = 0; index < lines.length; index += 1) {
-		if (!regex.test(normalizeLine(lines[index]))) continue;
+		const currentLine = normalizeLine(lines[index]);
+		if (!regex.test(currentLine)) continue;
+		const sameLineMoney = parseMoneyValue(currentLine, fallbackCurrency);
+		if (sameLineMoney) return sameLineMoney;
 		for (
 			let valueIndex = index + 1;
 			valueIndex < Math.min(lines.length, index + 1 + maxLookahead);
