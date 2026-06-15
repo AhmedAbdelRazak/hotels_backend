@@ -33,10 +33,14 @@ const providerConfigFor = (provider = DEFAULT_PROVIDER) =>
 	PROVIDER_CONFIG[normalizeProvider(provider)] || PROVIDER_CONFIG[DEFAULT_PROVIDER];
 
 const configuredHotelAllowlist = () =>
-	String(process.env.OTA_INBOUND_EMAIL_HOTEL_IDS || "")
-		.split(",")
-		.map((item) => item.trim())
-		.filter(Boolean);
+	Array.from(
+		new Set(
+			String(process.env.OTA_INBOUND_EMAIL_HOTEL_IDS || "")
+				.split(",")
+				.map((item) => item.trim())
+				.filter(Boolean)
+		)
+	);
 
 const dateOnly = (value = "") => {
 	const raw = normalizeText(value);
