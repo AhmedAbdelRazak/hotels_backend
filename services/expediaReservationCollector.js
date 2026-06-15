@@ -1259,6 +1259,7 @@ const extractReservationCandidates = async (page, hotel, property) => {
 
 const emptyBuckets = () => ({
 	newReservations: [],
+	skippedCancelled: [],
 	matchedExisting: [],
 	statusChanged: [],
 	conflicts: [],
@@ -1268,6 +1269,7 @@ const emptyBuckets = () => ({
 
 const summarizeBuckets = (buckets = emptyBuckets()) => ({
 	newReservations: buckets.newReservations.length,
+	skippedCancelled: buckets.skippedCancelled.length,
 	matchedExisting: buckets.matchedExisting.length,
 	statusChanged: buckets.statusChanged.length,
 	conflicts: buckets.conflicts.length,
@@ -1357,7 +1359,19 @@ const classifyCandidate = async (candidate) => {
 			break;
 		}
 	}
+	const statusToApply = normalizeLine(candidate.statusToApply || "").toLowerCase();
 	if (!existing) {
+		if (["cancelled", "no_show"].includes(statusToApply)) {
+			return {
+				bucket: "skippedCancelled",
+				item: {
+					...candidate,
+					actionPreview: "missing_cancelled_reservation_skipped_no_write",
+					skipReason:
+						"Expedia reservation is cancelled/no-show and no PMS document exists.",
+				},
+			};
+		}
 		return {
 			bucket: "newReservations",
 			item: {
@@ -1369,7 +1383,6 @@ const classifyCandidate = async (candidate) => {
 	const currentStatus = normalizeLine(
 		existing.reservation_status || existing.state || ""
 	).toLowerCase();
-	const statusToApply = normalizeLine(candidate.statusToApply || "").toLowerCase();
 	const isMeaningfulStatusChange =
 		statusToApply &&
 		["cancelled", "no_show"].includes(statusToApply) &&
