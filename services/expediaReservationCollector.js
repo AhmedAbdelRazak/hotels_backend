@@ -829,6 +829,7 @@ const parseMoneyValue = (value = "", fallbackCurrency = "") => {
 		: null;
 	const currency = currencyFirst?.[1] || amountFirst?.[2] || fallbackCurrency || "";
 	const amountText = currencyFirst?.[2] || amountFirst?.[1] || amountOnly?.[2] || "";
+	if (!amountText) return null;
 	const amount = Number(String(amountText).replace(/,/g, ""));
 	if (!Number.isFinite(amount)) return null;
 	return {
@@ -1094,6 +1095,7 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 6) ||
 		moneyNearLabel(rawText, /Your total payout/i, fallbackCurrency);
 	const amount = totalGuestPayment || parseMoneyValue(candidate.amountHint, fallbackCurrency);
+	const bookingTableAmount = candidate.amount || 0;
 	const detectedPaymentCollectionModel =
 		detectExpediaPaymentCollectionModel(rawText);
 	const paymentCollectionModel =
@@ -1135,11 +1137,20 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		paymentSummary: {
 			nightlyRateAmount: nightlyRate?.amount || 0,
 			taxesAmount: taxes?.amount || 0,
-			totalGuestPaymentAmount: totalGuestPayment?.amount || 0,
+			totalGuestPaymentAmount:
+				totalGuestPayment?.amount ||
+				candidate.paymentSummary?.totalGuestPaymentAmount ||
+				bookingTableAmount ||
+				0,
 			expediaCompensationAmount: expediaCompensation?.amount || 0,
 			acceleratorAmount: accelerator?.amount || 0,
 			totalPayoutAmount: totalPayout?.amount || 0,
-			currency: totalPayout?.currency || amount?.currency || fallbackCurrency || "",
+			currency:
+				totalPayout?.currency ||
+				amount?.currency ||
+				candidate.currency ||
+				fallbackCurrency ||
+				"",
 		},
 		paymentSignals: {
 			hasPaymentDetails: hasSensitivePaymentSignal(rawText),
