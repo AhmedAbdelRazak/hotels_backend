@@ -14,6 +14,7 @@ const {
 	findReservationByOtaConfirmation,
 	detectConfirmationMatchFields,
 	normalizeConfirmation,
+	getSarConversionMeta,
 } = require("./otaReservationMapper");
 
 const DEFAULT_LOGIN_URL =
@@ -839,6 +840,108 @@ const parseMoneyValue = (value = "", fallbackCurrency = "") => {
 	};
 };
 
+const moneyNumber = (value) => {
+	const numeric = Number(value || 0);
+	return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const toSarMoneyMeta = (amount, currency) =>
+	getSarConversionMeta(moneyNumber(amount), currency || "SAR");
+
+const convertSummaryAmountToSar = (amount, currency) => {
+	const numeric = moneyNumber(amount);
+	if (!numeric) return 0;
+	return toSarMoneyMeta(numeric, currency).totalAmountSar;
+};
+
+const normalizeCandidateMoneyToSar = (candidate = {}) => {
+	const summary = candidate.paymentSummary || {};
+	const sourceCurrency =
+		candidate.sourceCurrency ||
+		candidate.currency ||
+		summary.sourceCurrency ||
+		summary.currency ||
+		"SAR";
+	const sourceAmount = moneyNumber(
+		candidate.sourceAmount ||
+			candidate.amount ||
+			summary.sourceTotalGuestPaymentAmount ||
+			summary.totalGuestPaymentAmount
+	);
+	const conversion = toSarMoneyMeta(sourceAmount, sourceCurrency);
+	const summaryCurrency = summary.sourceCurrency || summary.currency || sourceCurrency;
+	const sourceNightlyRateAmount = moneyNumber(
+		summary.sourceNightlyRateAmount || summary.nightlyRateAmount
+	);
+	const sourceTaxesAmount = moneyNumber(
+		summary.sourceTaxesAmount || summary.taxesAmount
+	);
+	const sourceTotalGuestPaymentAmount = moneyNumber(
+		summary.sourceTotalGuestPaymentAmount ||
+			summary.totalGuestPaymentAmount ||
+			sourceAmount
+	);
+	const sourceExpediaCompensationAmount = moneyNumber(
+		summary.sourceExpediaCompensationAmount || summary.expediaCompensationAmount
+	);
+	const sourceAcceleratorAmount = moneyNumber(
+		summary.sourceAcceleratorAmount || summary.acceleratorAmount
+	);
+	const sourceTotalPayoutAmount = moneyNumber(
+		summary.sourceTotalPayoutAmount || summary.totalPayoutAmount
+	);
+
+	return {
+		...candidate,
+		sourceAmount,
+		sourceCurrency: conversion.sourceCurrency || sourceCurrency,
+		sourceAmountHint: candidate.sourceAmountHint || candidate.amountHint || "",
+		amountHint: conversion.totalAmountSar
+			? `SAR ${conversion.totalAmountSar.toFixed(2)}`
+			: "",
+		exchangeRateToSar: conversion.exchangeRateToSar,
+		exchangeRateSource: conversion.exchangeRateSource,
+		totalAmountSar: conversion.totalAmountSar,
+		amountConvertedAt: conversion.convertedAt,
+		amount: conversion.totalAmountSar,
+		currency: "SAR",
+		paymentSummary: {
+			...summary,
+			sourceCurrency: summaryCurrency,
+			sourceNightlyRateAmount,
+			sourceTaxesAmount,
+			sourceTotalGuestPaymentAmount,
+			sourceExpediaCompensationAmount,
+			sourceAcceleratorAmount,
+			sourceTotalPayoutAmount,
+			nightlyRateAmount: convertSummaryAmountToSar(
+				sourceNightlyRateAmount,
+				summaryCurrency
+			),
+			taxesAmount: convertSummaryAmountToSar(sourceTaxesAmount, summaryCurrency),
+			totalGuestPaymentAmount:
+				convertSummaryAmountToSar(sourceTotalGuestPaymentAmount, summaryCurrency) ||
+				conversion.totalAmountSar,
+			expediaCompensationAmount: convertSummaryAmountToSar(
+				sourceExpediaCompensationAmount,
+				summaryCurrency
+			),
+			acceleratorAmount: convertSummaryAmountToSar(
+				sourceAcceleratorAmount,
+				summaryCurrency
+			),
+			totalPayoutAmount: convertSummaryAmountToSar(
+				sourceTotalPayoutAmount,
+				summaryCurrency
+			),
+			currency: "SAR",
+			exchangeRateToSar: conversion.exchangeRateToSar,
+			exchangeRateSource: conversion.exchangeRateSource,
+			amountConvertedAt: conversion.convertedAt,
+		},
+	};
+};
+
 const parseExpediaStatusToApply = (value = "") => {
 	const text = normalizeLine(value).toLowerCase();
 	if (/cancelled|canceled/.test(text)) return "cancelled";
@@ -1379,7 +1482,7 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	const paymentDisplayText = await extractReservationPaymentDisplayText(page);
 	const detailText = [snapshot.text, paymentDisplayText].filter(Boolean).join("\n");
 	const detail = parseExpediaReservationDetailText(detailText, candidate);
-	return {
+	return normalizeCandidateMoneyToSar({
 		...candidate,
 		...Object.fromEntries(
 			Object.entries(detail).filter(([, value]) => {
@@ -1390,7 +1493,7 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 		),
 		sourceUrl: snapshot.url || candidate.detailUrl,
 		detailUrl: candidate.detailUrl,
-	};
+	});
 };
 
 const extractReservationCandidates = async (page, hotel, property) => {
@@ -1414,21 +1517,21 @@ const extractReservationCandidates = async (page, hotel, property) => {
 	for (let index = 0; index < candidates.length; index += 1) {
 		const candidate = candidates[index];
 		if (index >= MAX_DETAIL_PAGES_PER_HOTEL) {
-			enriched.push({
+			enriched.push(normalizeCandidateMoneyToSar({
 				...candidate,
 				detailsFetched: false,
 				detailsSkippedReason: "detail_page_cap_reached",
-			});
+			}));
 			continue;
 		}
 		try {
 			enriched.push(await enrichCandidateFromDetailPage(page, candidate));
 		} catch (error) {
-			enriched.push({
+			enriched.push(normalizeCandidateMoneyToSar({
 				...candidate,
 				detailsFetched: false,
 				detailsError: error && error.message ? error.message : String(error),
-			});
+			}));
 		}
 	}
 
@@ -2069,11 +2172,33 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 						hotelConfirmationNumber: candidate.hotelConfirmationNumber,
 						paymentCollectionModel: candidate.paymentCollectionModel || "unknown",
 						currency: candidate.currency || candidate.paymentSummary?.currency || "",
+						sourceCurrency:
+							candidate.sourceCurrency ||
+							candidate.paymentSummary?.sourceCurrency ||
+							"",
+						sourceAmount:
+							candidate.sourceAmount ||
+							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ||
+							0,
+						exchangeRateToSar:
+							candidate.exchangeRateToSar ||
+							candidate.paymentSummary?.exchangeRateToSar ||
+							0,
+						exchangeRateSource:
+							candidate.exchangeRateSource ||
+							candidate.paymentSummary?.exchangeRateSource ||
+							"",
 						totalGuestPaymentAmount:
 							candidate.paymentSummary?.totalGuestPaymentAmount ||
 							candidate.amount ||
 							0,
+						sourceTotalGuestPaymentAmount:
+							candidate.paymentSummary?.sourceTotalGuestPaymentAmount ||
+							candidate.sourceAmount ||
+							0,
 						totalPayoutAmount: candidate.paymentSummary?.totalPayoutAmount || 0,
+						sourceTotalPayoutAmount:
+							candidate.paymentSummary?.sourceTotalPayoutAmount || 0,
 						hasVirtualCardSignal:
 							candidate.paymentSignals?.hasVirtualCardSignal || false,
 						rawCardStored: false,

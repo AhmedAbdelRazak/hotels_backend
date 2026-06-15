@@ -3850,4 +3850,5 @@ module.exports = {
 	generateUniquePmsConfirmationNumber,
 	getOtaInboundAllowedHotelIds,
 	isHotelAllowedForOtaInbound,
+	getSarConversionMeta,
 };
