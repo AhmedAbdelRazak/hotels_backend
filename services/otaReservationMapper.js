@@ -126,6 +126,39 @@ const EXPLICIT_HOTEL_ALIAS_GROUPS = [
 		"ZAD AL SAD",
 		"Zad Al Sad",
 	],
+	[
+		"Al-Magd Hotel",
+		"Al Magd Hotel",
+		"Al Majd Hotel",
+		"Zad Al Majd",
+		"ZAD AL MAJD",
+	],
+	[
+		"Al-Qemma Hotel",
+		"Al Qemma Hotel",
+		"Al Qimma Hotel",
+		"Al-Qimma Hotel",
+		"Zad Al Qimma",
+		"ZAD AL QIMMA",
+	],
+	[
+		"Taj Al Zahabiya Hotel",
+		"Taj Alzahabiya Hotel",
+		"Taaj Al Zahabiya Hotel",
+		"Taaj Alzahabiya",
+		"Taj Al Zahabiya",
+	],
+	[
+		"Zad Al-Mashaer Hotel",
+		"Zad Al Mashaer Hotel",
+		"Zad Al Mashaer",
+		"ZAD AL MASHAER",
+	],
+	[
+		"Zad Al Safa Hotel",
+		"Zad Al Safa",
+		"ZAD AL SAFA",
+	],
 ];
 
 const EXPLICIT_HOTEL_ALIAS_INDEX = EXPLICIT_HOTEL_ALIAS_GROUPS.map((group) => ({

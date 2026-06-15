@@ -377,6 +377,7 @@ const matchPropertiesToHotels = (properties = [], hotels = []) =>
 		return {
 			hotel,
 			property: best && best.score >= 72 ? best.property : null,
+			bestProperty: best ? best.property : null,
 			matchScore: best ? best.score : 0,
 		};
 	});
@@ -973,6 +974,10 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			properties = await extractProperties(propertyPage);
 		}
 		artifacts.propertyCount = properties.length;
+		artifacts.properties = properties.map((property) => ({
+			name: property.name || "",
+			expediaPropertyId: property.expediaPropertyId || "",
+		}));
 
 		const selectedSet = new Set(selectedHotelIds.map(normalizeHotelId));
 		const targetHotels = (job.targetHotels || []).filter((hotel) =>
@@ -1012,6 +1017,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					hotelName: hotel.hotelName,
 					actionPreview: "property_not_matched",
 					matchScore: match.matchScore,
+					bestExpediaPropertyName: match.bestProperty?.name || "",
+					bestExpediaPropertyId: match.bestProperty?.expediaPropertyId || "",
 				});
 				continue;
 			}
