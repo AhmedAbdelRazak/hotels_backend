@@ -8,10 +8,29 @@ const {
 	normalizeWhitespace,
 } = require("./otaReservationMapper");
 
-const PROVIDER = "expedia";
+const DEFAULT_PROVIDER = "expedia";
 const MAX_SYNC_DAYS = 430;
 
 const normalizeText = (value = "") => String(value || "").trim();
+
+const PROVIDER_CONFIG = {
+	expedia: {
+		value: "expedia",
+		label: "Expedia",
+		partnerPortalLabel: "Expedia Partner Central",
+		usernameEnvKey: "OTA_EXPEDIA_USERNAME",
+		passwordEnvKey: "OTA_PASSWORD",
+		jobPrefix: "OTA-RES-SYNC",
+	},
+};
+
+const normalizeProvider = (value = DEFAULT_PROVIDER) => {
+	const provider = normalizeText(value || DEFAULT_PROVIDER).toLowerCase();
+	return PROVIDER_CONFIG[provider] ? provider : "";
+};
+
+const providerConfigFor = (provider = DEFAULT_PROVIDER) =>
+	PROVIDER_CONFIG[normalizeProvider(provider)] || PROVIDER_CONFIG[DEFAULT_PROVIDER];
 
 const configuredHotelAllowlist = () =>
 	String(process.env.OTA_INBOUND_EMAIL_HOTEL_IDS || "")
@@ -62,10 +81,11 @@ const containsCredentialKey = (value, path = "") => {
 	});
 };
 
-const buildJobNumber = () => {
+const buildJobNumber = (provider = DEFAULT_PROVIDER) => {
+	const providerConfig = providerConfigFor(provider);
 	const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 	const random = Math.random().toString(36).slice(2, 7).toUpperCase();
-	return `EXP-RES-SYNC-${stamp}-${random}`;
+	return `${providerConfig.jobPrefix}-${stamp}-${random}`;
 };
 
 const safeAliasCandidatesForHotel = (hotel = {}) => {
@@ -99,17 +119,23 @@ const buildTargetHotel = (hotel = {}, allowedHotelIds = []) => {
 	};
 };
 
-const buildCredentialSummary = () => {
-	const username = normalizeText(process.env.OTA_EXPEDIA_USERNAME || "");
-	const passwordConfigured = Boolean(process.env.OTA_PASSWORD);
+const buildCredentialSummary = (provider = DEFAULT_PROVIDER) => {
+	const providerConfig = providerConfigFor(provider);
+	const username = normalizeText(
+		process.env[providerConfig.usernameEnvKey] || ""
+	);
+	const passwordConfigured = Boolean(
+		normalizeText(process.env[providerConfig.passwordEnvKey] || "")
+	);
 	const missing = [];
-	if (!username) missing.push("OTA_EXPEDIA_USERNAME");
-	if (!passwordConfigured) missing.push("OTA_PASSWORD");
+	if (!username) missing.push(providerConfig.usernameEnvKey);
+	if (!passwordConfigured) missing.push(providerConfig.passwordEnvKey);
 	return {
-		provider: PROVIDER,
+		provider: providerConfig.value,
+		providerLabel: providerConfig.label,
 		usernameConfigured: Boolean(username),
-		usernameSource: username ? "OTA_EXPEDIA_USERNAME" : "",
-		passwordEnvKey: "OTA_PASSWORD",
+		usernameSource: username ? providerConfig.usernameEnvKey : "",
+		passwordEnvKey: providerConfig.passwordEnvKey,
 		passwordConfigured,
 		missing,
 	};
@@ -127,7 +153,7 @@ const loadActiveHotels = async () =>
 		.lean()
 		.exec();
 
-const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
+const prepareOtaReservationSyncJob = async ({ actor, payload = {} }) => {
 	if (containsCredentialKey(payload)) {
 		return {
 			ok: false,
@@ -136,6 +162,16 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 				"Do not send passwords, tokens, cookies, or session data to this endpoint. Use server environment credentials only.",
 		};
 	}
+
+	const provider = normalizeProvider(payload.provider || DEFAULT_PROVIDER);
+	if (!provider) {
+		return {
+			ok: false,
+			statusCode: 400,
+			error: "Unsupported OTA reservation sync provider.",
+		};
+	}
+	const providerConfig = providerConfigFor(provider);
 
 	const defaults = defaultDateRange();
 	const dateFrom = dateOnly(payload.dateFrom) || defaults.dateFrom;
@@ -152,7 +188,7 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 		return {
 			ok: false,
 			statusCode: 400,
-			error: `Expedia reservation sync preview is limited to ${MAX_SYNC_DAYS} days per job.`,
+			error: `OTA reservation sync preview is limited to ${MAX_SYNC_DAYS} days per job.`,
 		};
 	}
 
@@ -161,7 +197,7 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 		return {
 			ok: false,
 			statusCode: 409,
-			error: "No active hotels are available for Expedia reservation sync.",
+			error: "No active hotels are available for OTA reservation sync.",
 		};
 	}
 
@@ -169,17 +205,18 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 	const targetHotels = hotels.map((hotel) =>
 		buildTargetHotel(hotel, allowedHotelIds)
 	);
-	const credentialSummary = buildCredentialSummary();
+	const credentialSummary = buildCredentialSummary(provider);
 	const missingCredentials = credentialSummary.missing.length > 0;
+	const missingEnvText = credentialSummary.missing.join(" and ");
 	const blockedByInboundAllowlist = targetHotels.filter(
 		(hotel) => !hotel.otaInboundAllowed
 	);
 	const notes = normalizeText(payload.notes || "").slice(0, 1000);
 
 	const job = await OtaReservationSyncJob.create({
-		jobNumber: buildJobNumber(),
+		jobNumber: buildJobNumber(provider),
 		status: missingCredentials ? "needs_credentials" : "prepared",
-		provider: PROVIDER,
+		provider,
 		operation: "reservation_sync_preview",
 		executionMode: "supervised_read_only",
 		createdBy: actor._id,
@@ -197,7 +234,8 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 			noFinanceOverwrite: true,
 			noHotelAssignmentOverwrite: true,
 			noPasswordInPayload: true,
-			passwordEnvKey: "OTA_PASSWORD",
+			usernameEnvKey: providerConfig.usernameEnvKey,
+			passwordEnvKey: providerConfig.passwordEnvKey,
 			noCaptchaBypass: true,
 			humanLoginRequired: true,
 			manualMfaRequired: true,
@@ -206,20 +244,22 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 				"Collector output must pass through the OTA reconciliation layer; existing reservations preserve PMS pricing and finance fields.",
 		},
 		collectorPlan: {
-			summary: `Prepare read-only Expedia reservation sync preview for ${targetHotels.length} active hotel(s), ${dateFrom} to ${dateTo}.`,
-			provider: "Expedia Partner Central",
+			summary: `Prepare read-only OTA reservation sync preview for ${targetHotels.length} active hotel(s), ${dateFrom} to ${dateTo}. Provider: ${providerConfig.label}.`,
+			provider: providerConfig.partnerPortalLabel,
+			providerKey: provider,
+			providerLabel: providerConfig.label,
 			totalDays,
 			steps: [
-				"Open a supervised Expedia Partner Central browser session.",
-				"Human owner completes login, MFA, and any Expedia verification.",
+				`Open a supervised ${providerConfig.partnerPortalLabel} browser session.`,
+				`Human owner completes login, MFA, and any ${providerConfig.label} verification.`,
 				"Read reservation list/details for every active PMS hotel in this job.",
-				"Normalize Expedia property names through the same OTA inbound alias candidates.",
-				"Match existing PMS reservations by Expedia confirmation/supplier fields before considering any create.",
+				`Normalize ${providerConfig.label} property names through the same OTA inbound alias candidates.`,
+				`Match existing PMS reservations by ${providerConfig.label} confirmation/supplier fields before considering any create.`,
 				"Return preview buckets only: new, matched existing, status changed, conflicts, needs review.",
 				"Do not write reservations, pricing, finance cycle, hotel assignment, cookies, or credentials in this job.",
 			],
 			nextStep: missingCredentials
-				? "Configure OTA_EXPEDIA_USERNAME and OTA_PASSWORD on the server, then prepare or run the supervised read-only collector."
+				? `Configure ${missingEnvText} on the server for ${providerConfig.label}, then prepare or run the supervised read-only collector.`
 				: "Run the supervised read-only collector, then review the preview buckets before any apply step exists.",
 			warnings: [
 				...(blockedByInboundAllowlist.length
@@ -234,7 +274,7 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 			dateFrom,
 			dateTo,
 			timezone: normalizeText(payload.timezone || "Asia/Riyadh"),
-			provider: PROVIDER,
+			provider,
 			allActiveHotels: true,
 		},
 		resultSummary: {
@@ -252,6 +292,7 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 				action: "prepared",
 				by: actor._id,
 				readOnly: true,
+				provider,
 				hotelCount: targetHotels.length,
 				dateFrom,
 				dateTo,
@@ -263,6 +304,8 @@ const prepareExpediaReservationSyncJob = async ({ actor, payload = {} }) => {
 };
 
 module.exports = {
-	prepareExpediaReservationSyncJob,
+	prepareOtaReservationSyncJob,
+	prepareExpediaReservationSyncJob: prepareOtaReservationSyncJob,
+	SUPPORTED_OTA_SYNC_PROVIDERS: Object.keys(PROVIDER_CONFIG),
 	MAX_SYNC_DAYS,
 };
