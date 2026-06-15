@@ -35,6 +35,9 @@ const DEFAULT_PROFILE_DIR = path.join(
 	".jannatbooking",
 	"expedia-reservation-sync-profile"
 );
+const KEEP_AUDIT_SCREENSHOTS = /^(1|true|yes)$/i.test(
+	process.env.OTA_EXPEDIA_KEEP_AUDIT_SCREENSHOTS || ""
+);
 const MAX_RUN_MS = Number(process.env.OTA_EXPEDIA_SYNC_MAX_RUN_MS || 55_000);
 const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
 	process.env.OTA_EXPEDIA_SYNC_MAX_CANDIDATES_PER_HOTEL || 80
@@ -120,12 +123,23 @@ const ensureDirectory = (dir) => {
 };
 
 const collectorOutputDir = () =>
-	ensureDirectory(process.env.OTA_EXPEDIA_SYNC_OUTPUT_DIR || DEFAULT_OUTPUT_DIR);
+	process.env.OTA_EXPEDIA_SYNC_OUTPUT_DIR || DEFAULT_OUTPUT_DIR;
 
 const collectorProfileDir = () =>
 	ensureDirectory(
 		process.env.OTA_EXPEDIA_BROWSER_PROFILE_DIR || DEFAULT_PROFILE_DIR
 	);
+
+const captureAuditScreenshot = async ({ page, artifacts, fileName }) => {
+	if (!KEEP_AUDIT_SCREENSHOTS || !page || !artifacts || !fileName) return;
+	const outputDir = ensureDirectory(artifacts.outputDir || collectorOutputDir());
+	const screenshotPath = path.join(outputDir, fileName);
+	await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+	artifacts.screenshots = Array.isArray(artifacts.screenshots)
+		? artifacts.screenshots
+		: [];
+	artifacts.screenshots.push(screenshotPath);
+};
 
 const isLikelyPropertyName = (value) => {
 	const line = normalizeLine(value);
@@ -1724,12 +1738,11 @@ const updateLoginBlockedJob = async ({
 	prefix,
 	page,
 }) => {
-	const screenshotPath = path.join(
-		artifacts.outputDir,
-		`${prefix}-${job.jobNumber}.png`
-	);
-	await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-	artifacts.screenshots.push(screenshotPath);
+	await captureAuditScreenshot({
+		page,
+		artifacts,
+		fileName: `${prefix}-${job.jobNumber}.png`,
+	});
 	await updateJob(jobId, {
 		$set: {
 			status,
@@ -1755,12 +1768,11 @@ const handleMfaChallenge = async ({
 	actorId,
 }) => {
 	for (let attempt = 1; attempt <= 3; attempt += 1) {
-		const screenshotPath = path.join(
-			artifacts.outputDir,
-			`needs-mfa-${job.jobNumber}-attempt-${attempt}.png`
-		);
-		await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-		artifacts.screenshots.push(screenshotPath);
+		await captureAuditScreenshot({
+			page,
+			artifacts,
+			fileName: `needs-mfa-${job.jobNumber}-attempt-${attempt}.png`,
+		});
 		const expiresAt = new Date(Date.now() + MFA_SESSION_TIMEOUT_MS);
 		await updateJob(jobId, {
 			$set: {
