@@ -1317,6 +1317,57 @@ const expandReservationPaymentSections = async (page) => {
 	return true;
 };
 
+const extractReservationPaymentDisplayText = async (page) =>
+	page
+		.evaluate(() => {
+			const normalize = (value) =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const rootSelectors = [
+				"#page-template-supply-paymentdisplay",
+				"[id*='supply-paymentdisplay' i]",
+				"[id*='paymentdisplay' i]",
+				"[class*='payment-display' i]",
+				"[class*='paymentdisplay' i]",
+			];
+			const roots = Array.from(
+				new Set(
+					rootSelectors.flatMap((selector) =>
+						Array.from(document.querySelectorAll(selector))
+					)
+				)
+			);
+			if (!roots.length) {
+				const candidate = Array.from(document.querySelectorAll("section, div, article"))
+					.filter((node) => {
+						const text = normalize(node.innerText || node.textContent || "");
+						return (
+							/payment details/i.test(text) &&
+							/(nightly rates|taxes|total guest payment|your total payout)/i.test(
+								text
+							)
+						);
+					})
+					.sort(
+						(left, right) =>
+							normalize(left.innerText || left.textContent || "").length -
+							normalize(right.innerText || right.textContent || "").length
+					)[0];
+				if (candidate) roots.push(candidate);
+			}
+			const texts = roots
+				.map((node) => node.innerText || node.textContent || "")
+				.map((text) => text.trim())
+				.filter((text) =>
+					/(payment details|nightly rates|taxes|total guest payment|your total payout)/i.test(
+						text
+					)
+				);
+			return Array.from(new Set(texts)).join("\n");
+		})
+		.catch(() => "");
+
 const enrichCandidateFromDetailPage = async (page, candidate) => {
 	if (!candidate.detailUrl) return candidate;
 	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
@@ -1325,7 +1376,9 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	await expandReservationPaymentSections(page).catch(() => false);
 	await scrollToLoadVisibleContent(page).catch(() => {});
 	const snapshot = await safePageSnapshot(page);
-	const detail = parseExpediaReservationDetailText(snapshot.text, candidate);
+	const paymentDisplayText = await extractReservationPaymentDisplayText(page);
+	const detailText = [snapshot.text, paymentDisplayText].filter(Boolean).join("\n");
+	const detail = parseExpediaReservationDetailText(detailText, candidate);
 	return {
 		...candidate,
 		...Object.fromEntries(
