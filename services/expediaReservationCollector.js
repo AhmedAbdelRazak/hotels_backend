@@ -227,6 +227,65 @@ const clickOrPressEnter = async (page, patterns = []) => {
 	await delay(900);
 };
 
+const clickPropertyByName = async (page, propertyName = "") =>
+	page.evaluate((name) => {
+		const normalize = (value) =>
+			String(value || "")
+				.toLowerCase()
+				.replace(/&/g, "and")
+				.replace(/[^a-z0-9]+/g, " ")
+				.replace(/\s+/g, " ")
+				.trim();
+		const target = normalize(name);
+		if (!target) return false;
+		const candidates = Array.from(
+			document.querySelectorAll(
+				"a, button, [role='button'], [tabindex], li, article, section, div"
+			)
+		);
+		const visible = (node) => {
+			const style = window.getComputedStyle(node);
+			const rect = node.getBoundingClientRect();
+			return (
+				style &&
+				style.visibility !== "hidden" &&
+				style.display !== "none" &&
+				rect.width > 0 &&
+				rect.height > 0
+			);
+		};
+		const direct = candidates.find((node) => {
+			if (!visible(node)) return false;
+			const text = normalize(node.innerText || node.textContent || "");
+			return text === target;
+		});
+		const containing = direct || candidates.find((node) => {
+			if (!visible(node)) return false;
+			const text = normalize(node.innerText || node.textContent || "");
+			return text.includes(target) && text.length <= target.length + 120;
+		});
+		if (!containing) return false;
+		const clickable = containing.closest("a, button, [role='button'], [tabindex]") || containing;
+		clickable.click();
+		return true;
+	}, propertyName);
+
+const openPropertyPage = async (page, property = {}) => {
+	if (property.href || property.url) {
+		await page.goto(property.href || property.url, { waitUntil: "domcontentloaded" });
+		await delay(700);
+		return true;
+	}
+	const clicked = await clickPropertyByName(page, property.name).catch(() => false);
+	if (!clicked) return false;
+	await Promise.race([
+		page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10_000 }).catch(() => null),
+		delay(2500),
+	]);
+	await delay(900);
+	return true;
+};
+
 const expediaCredentials = () => ({
 	username: normalizeLine(process.env.OTA_EXPEDIA_USERNAME || ""),
 	password: String(process.env.OTA_PASSWORD || ""),
@@ -1016,7 +1075,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				},
 			});
 
-			if (!match.property || !match.property.url) {
+			if (!match.property) {
 				buckets.needsReview.push({
 					hotelId: hotel.hotelId,
 					hotelName: hotel.hotelName,
@@ -1028,8 +1087,20 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				continue;
 			}
 
-			await page.goto(match.property.url, { waitUntil: "domcontentloaded" });
-			await delay(700);
+			const propertyOpened = await openPropertyPage(page, match.property).catch(
+				() => false
+			);
+			if (!propertyOpened) {
+				buckets.needsReview.push({
+					hotelId: hotel.hotelId,
+					hotelName: hotel.hotelName,
+					actionPreview: "property_matched_but_could_not_open",
+					matchScore: match.matchScore,
+					expediaPropertyName: match.property?.name || "",
+					expediaPropertyId: match.property?.expediaPropertyId || "",
+				});
+				continue;
+			}
 			const reservationLink = await findReservationsLink(page).catch(() => null);
 			if (reservationLink?.href) {
 				await page.goto(reservationLink.href, { waitUntil: "domcontentloaded" });
