@@ -1060,8 +1060,13 @@ function isOtaHotelBoilerplateLine(value = "") {
 function defaultOtaReviewNetTotal(clientTotal = 0) {
 	const total = round2(clientTotal);
 	if (total <= 0) return 0;
-	const deduction = round2(total * DEFAULT_OTA_REVIEW_DEDUCTION_RATE);
-	return round2(total - deduction);
+	return round2(total - defaultOtaReviewDeductionAmount(total));
+}
+
+function defaultOtaReviewDeductionAmount(clientTotal = 0) {
+	const total = round2(clientTotal);
+	if (total <= 0) return 0;
+	return round2(total * DEFAULT_OTA_REVIEW_DEDUCTION_RATE);
 }
 
 function cleanHotelNameCandidate(value = "") {
@@ -2072,6 +2077,47 @@ function resolveRoomByOccupancy(rooms = [], totalGuests = 0) {
 	return candidates[0] || null;
 }
 
+const SEMANTIC_OTA_ROOM_TYPES = new Set([
+	"singleRooms",
+	"doubleRooms",
+	"twinRooms",
+	"tripleRooms",
+	"quadRooms",
+	"familyRooms",
+	"kingRooms",
+	"queenRooms",
+	"studioRooms",
+	"suite",
+	"masterSuite",
+	"standardRooms",
+	"individualBed",
+]);
+
+function buildSemanticOtaRoomFallback(normalized = {}, mappedRoomType = "") {
+	if (normalized.source?.from !== "expedia-sync") return null;
+	if (!mappedRoomType || !SEMANTIC_OTA_ROOM_TYPES.has(mappedRoomType)) return null;
+	const roomName = normalizeWhitespace(normalized.roomName || "");
+	if (!roomName) return null;
+	return {
+		roomDetails: {
+			roomType: mappedRoomType,
+			displayName: roomName,
+			displayName_OtherLanguage: "",
+			activeRoom: true,
+			price: {},
+			pricingRate: [],
+		},
+		score: 0.74,
+		displayScore: 0,
+		matchType: "semantic_ota_room_type_fallback",
+		threshold: 0.75,
+		mappedRoomType,
+		warnings: [
+			`Room "${roomName}" was saved as OTA semantic room type "${mappedRoomType}" because this hotel has no confident PMS room mapping; review before release.`,
+		],
+	};
+}
+
 function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 	const rooms = (hotelDetails?.roomCountDetails || []).filter(
 		(room) => room && room.roomType
@@ -2121,6 +2167,11 @@ function resolveRoomMatch(hotelDetails, roomName, options = {}) {
 				],
 			};
 		}
+		const semanticFallback = buildSemanticOtaRoomFallback(
+			options.normalized,
+			mappedRoomType
+		);
+		if (semanticFallback) return semanticFallback;
 		return {
 			roomDetails: null,
 			score: 0,
@@ -2166,7 +2217,12 @@ function resolveRootPriceForDate(roomDetails, ymd) {
 	const pricingRate = (roomDetails.pricingRate || []).find(
 		(rate) => dayjs(rate.calendarDate).format("YYYY-MM-DD") === ymd
 	);
-	if (pricingRate) return n(pricingRate.rootPrice || pricingRate.price);
+	if (pricingRate) {
+		const calendarRoot = n(pricingRate.rootPrice);
+		if (calendarRoot > 0) return calendarRoot;
+		const calendarPrice = n(pricingRate.price);
+		if (calendarPrice > 0) return calendarPrice;
+	}
 	if (roomDetails.defaultCost) return n(roomDetails.defaultCost);
 	if (roomDetails.price?.basePrice) return n(roomDetails.price.basePrice);
 	return 0;
@@ -2207,9 +2263,7 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 		daysOfResidence * roomCount
 	);
 	const fallbackRootSlots = allocateAmountAcrossSlots(
-		hasExplicitPayoutTotal
-			? effectiveNetAfterExpensesTotal
-			: fallbackNetTotalSar || totalAmountSar,
+		fallbackNetTotalSar || totalAmountSar,
 		daysOfResidence * roomCount
 	);
 	let slotIndex = 0;
@@ -2233,11 +2287,8 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 			);
 			const rootPrice =
 				configuredRootPrice > 0 ? configuredRootPrice : fallbackRootPrice;
-			const commissionAmount = Math.max(0, round2(finalPrice - rootPrice));
 			const commissionRate =
-				rootPrice > 0 && commissionAmount > 0
-					? round2((commissionAmount / rootPrice) * 100)
-					: 0;
+				rootPrice > 0 ? round2(DEFAULT_OTA_REVIEW_DEDUCTION_RATE * 100) : 0;
 			const otaExpenseAmount = Math.max(0, round2(finalPrice - netAfterExpenses));
 			const platformMargin = round2(netAfterExpenses - rootPrice);
 
@@ -2293,10 +2344,7 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 	const subTotalSar = round2(
 		Math.min(sumRootPriceAllRooms, sumTotalPriceAllRooms || totalAmountSar)
 	);
-	const commissionAmountSar = Math.max(
-		0,
-		round2(sumTotalPriceAllRooms - subTotalSar)
-	);
+	const commissionAmountSar = defaultOtaReviewDeductionAmount(subTotalSar);
 
 	return {
 		ok: true,
@@ -2328,6 +2376,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 	if (!hotelDetails) return { ok: false, error: "Hotel could not be resolved." };
 	const roomMatch = resolveRoomMatch(hotelDetails, normalized.roomName, {
 		totalGuests: normalized.totalGuests,
+		normalized,
 	});
 	const roomDetails = roomMatch.roomDetails;
 	if (!roomDetails) {

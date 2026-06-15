@@ -443,7 +443,7 @@ const applyExpediaReservationSyncJob = async ({ jobId, actor }) => {
 	const startedAt = new Date();
 	try {
 		const job = await OtaReservationSyncJob.findOneAndUpdate(
-			{ _id: key, status: "preview_ready" },
+			{ _id: key, status: { $in: ["preview_ready", "apply_needs_review"] } },
 			{
 				$set: {
 					status: "applying",
@@ -476,7 +476,7 @@ const applyExpediaReservationSyncJob = async ({ jobId, actor }) => {
 				error:
 					existingJob?.status === "applied"
 						? "This OTA sync job was already applied."
-						: "Only preview_ready OTA sync jobs can be applied.",
+						: "Only preview_ready or apply_needs_review OTA sync jobs can be applied.",
 				job: existingJob,
 			};
 		}

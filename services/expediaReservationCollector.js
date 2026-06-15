@@ -408,6 +408,29 @@ const findPageByContent = async (browser, matcher, timeoutMs) => {
 
 const scrollToLoadVisibleContent = async (page) => {
 	await page.evaluate(async () => {
+		const scrollElement = (element) =>
+			new Promise((resolve) => {
+				let stableRounds = 0;
+				let previousHeight = 0;
+				const interval = setInterval(() => {
+					element.scrollTop += 700;
+					const currentHeight = element.scrollHeight;
+					const atBottom =
+						element.scrollTop + element.clientHeight >= element.scrollHeight - 5;
+					if (currentHeight === previousHeight || atBottom) {
+						stableRounds += 1;
+					} else {
+						stableRounds = 0;
+						previousHeight = currentHeight;
+					}
+					if (stableRounds >= 3) {
+						clearInterval(interval);
+						element.scrollTop = 0;
+						resolve();
+					}
+				}, 180);
+			});
+
 		await new Promise((resolve) => {
 			let stableRounds = 0;
 			let previousHeight = 0;
@@ -427,6 +450,28 @@ const scrollToLoadVisibleContent = async (page) => {
 				}
 			}, 180);
 		});
+
+		const scrollables = Array.from(document.querySelectorAll("*"))
+			.filter((node) => {
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					node.scrollHeight > node.clientHeight + 120 &&
+					rect.width > 0 &&
+					rect.height > 0 &&
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					/(auto|scroll)/i.test(
+						`${style.overflowY || ""} ${style.overflow || ""}`
+					)
+				);
+			})
+			.slice(0, 20);
+		for (const element of scrollables) {
+			// eslint-disable-next-line no-await-in-loop
+			await scrollElement(element);
+		}
 	});
 };
 
@@ -1089,7 +1134,12 @@ const moneyAfterLine = (lines = [], pattern, fallbackCurrency = "", maxLookahead
 	return null;
 };
 
-const moneyNearLabel = (text = "", labelPattern, fallbackCurrency = "") => {
+const moneyNearLabel = (
+	text = "",
+	labelPattern,
+	fallbackCurrency = "",
+	maxLookahead = 320
+) => {
 	const source = normalizeWhitespace(text);
 	if (!source) return null;
 	const regex =
@@ -1098,7 +1148,10 @@ const moneyNearLabel = (text = "", labelPattern, fallbackCurrency = "") => {
 			: new RegExp(labelPattern, "i");
 	const match = regex.exec(source);
 	if (!match) return null;
-	const after = source.slice(match.index + match[0].length, match.index + match[0].length + 220);
+	const after = source.slice(
+		match.index + match[0].length,
+		match.index + match[0].length + maxLookahead
+	);
 	return parseMoneyValue(after, fallbackCurrency);
 };
 
@@ -1112,14 +1165,17 @@ const paymentSectionSnippet = (text = "") => {
 		/expedia collects payment/i,
 	];
 	const marker = markers
-		.map((regex) => {
+		.map((regex, priority) => {
 			const match = regex.exec(safeText);
-			return match ? match.index : -1;
+			return match ? { index: match.index, priority } : null;
 		})
-		.filter((index) => index >= 0)
-		.sort((left, right) => left - right)[0];
-	if (marker === undefined) return "";
-	return safeText.slice(Math.max(0, marker - 120), marker + 1100);
+		.filter(Boolean)
+		.sort((left, right) => {
+			if (left.priority !== right.priority) return left.priority - right.priority;
+			return left.index - right.index;
+		})[0];
+	if (!marker) return "";
+	return safeText.slice(Math.max(0, marker.index - 120), marker.index + 1600);
 };
 
 const parseGuestCount = (value = "") => {
@@ -1144,7 +1200,7 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		.map(normalizeLine)
 		.filter(Boolean);
 	const fallbackCurrency =
-		candidate.currency || detectCurrency(rawText) || detectCurrency(candidate.amountHint);
+		detectCurrency(rawText) || detectCurrency(candidate.amountHint) || candidate.currency;
 	const reservationId =
 		normalizeConfirmation(
 			String(rawText || "").match(/Reservation\s*#\s*([A-Z0-9-]+)/i)?.[1] ||
@@ -1209,8 +1265,15 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		moneyAfterLine(lines, /^Accelerator/i, fallbackCurrency) ||
 		moneyNearLabel(rawText, /Accelerator(?:\s*\([^)]*\))?/i, fallbackCurrency);
 	const totalPayout =
-		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 6) ||
-		moneyNearLabel(rawText, /Your total payout/i, fallbackCurrency);
+		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 8) ||
+		moneyAfterLine(lines, /^Amount to charge Expedia Group$/i, fallbackCurrency, 6) ||
+		moneyNearLabel(
+			rawText,
+			/Your total payout(?:\s+Amount to charge Expedia Group)?/i,
+			fallbackCurrency,
+			420
+		) ||
+		moneyNearLabel(rawText, /Amount to charge Expedia Group/i, fallbackCurrency, 260);
 	const amount = totalGuestPayment || parseMoneyValue(candidate.amountHint, fallbackCurrency);
 	const bookingTableAmount = candidate.amount || 0;
 	const detectedPaymentCollectionModel =

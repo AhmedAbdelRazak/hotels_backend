@@ -3299,6 +3299,15 @@ exports.updateOtaReservationPricing = async (req, res) => {
 			}
 			return acc;
 		}, {});
+		const requestedAdminPricing = req.body?.adminPricing || {};
+		let requestedCommissionAmount = null;
+		if (hasExplicitMoneyField(req.body || {}, "commission")) {
+			requestedCommissionAmount = round2(req.body.commission);
+		} else if (
+			hasExplicitMoneyField(requestedAdminPricing, "commissionAmount")
+		) {
+			requestedCommissionAmount = round2(requestedAdminPricing.commissionAmount);
+		}
 		const normalizedUpdate = await normalizeReservationStayPricing(
 			reservation,
 			updatePayload
@@ -3307,6 +3316,32 @@ exports.updateOtaReservationPricing = async (req, res) => {
 
 		const now = new Date();
 		const auditActor = buildOtaReviewAuditActor(actor);
+		const defaultCommissionAmount = round2(
+			moneyNumber(normalizedUpdate.sub_total || reservation.sub_total) * 0.1
+		);
+		const nextCommissionAmount =
+			requestedCommissionAmount !== null
+				? requestedCommissionAmount
+				: round2(
+						normalizedUpdate.adminPricing?.commissionAmount ||
+							reservation.adminPricing?.commissionAmount ||
+							reservation.commission ||
+							defaultCommissionAmount
+				  );
+		normalizedUpdate.commission = nextCommissionAmount;
+		normalizedUpdate.adminPricing = {
+			...(normalizedUpdate.adminPricing || {}),
+			mode: requestedAdminPricing.mode || normalizedUpdate.adminPricing?.mode || "ota_review",
+			commissionAmount: nextCommissionAmount,
+		};
+		normalizedUpdate.financial_cycle = {
+			...(reservation.financial_cycle || {}),
+			commissionType: "amount",
+			commissionValue: nextCommissionAmount,
+			commissionAmount: nextCommissionAmount,
+			lastUpdatedAt: now,
+			lastUpdatedBy: auditActor._id || null,
+		};
 		const set = {
 			...normalizedUpdate,
 			adminPricingVisibility: {
