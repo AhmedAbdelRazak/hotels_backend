@@ -472,6 +472,111 @@ const findReservationsLink = async (page) => {
 	return candidates[0] || null;
 };
 
+const clickReservationsNavigation = async (page) =>
+	page.evaluate(() => {
+		const normalize = (value) =>
+			String(value || "")
+				.replace(/\s+/g, " ")
+				.trim();
+		const visible = (node) => {
+			const style = window.getComputedStyle(node);
+			const rect = node.getBoundingClientRect();
+			return (
+				style &&
+				style.visibility !== "hidden" &&
+				style.display !== "none" &&
+				rect.width > 0 &&
+				rect.height > 0 &&
+				node.getAttribute("aria-disabled") !== "true" &&
+				!node.disabled
+			);
+		};
+		const nodeText = (node) =>
+			[
+				node.innerText,
+				node.textContent,
+				node.getAttribute("aria-label"),
+				node.getAttribute("title"),
+			]
+				.filter(Boolean)
+				.map(normalize)
+				.join(" ");
+		const nodes = Array.from(
+			document.querySelectorAll(
+				"nav *, aside *, a, button, [role='button'], [role='link'], [tabindex]"
+			)
+		);
+		const exact = nodes.find((node) => {
+			if (!visible(node)) return false;
+			return /^reservations?$/i.test(nodeText(node));
+		});
+		const loose = exact || nodes.find((node) => {
+			if (!visible(node)) return false;
+			const text = nodeText(node);
+			return (
+				/reservations?/i.test(text) &&
+				text.length <= 80 &&
+				!/help|support|review/i.test(text)
+			);
+		});
+		if (!loose) return false;
+		const clickable =
+			loose.closest("a, button, [role='button'], [role='link'], [tabindex]") ||
+			loose;
+		clickable.click();
+		return true;
+	});
+
+const waitForReservationsSurface = async (page) => {
+	await Promise.race([
+		page
+			.waitForNavigation({
+				waitUntil: "domcontentloaded",
+				timeout: 8000,
+			})
+			.catch(() => null),
+		page
+			.waitForFunction(
+				() =>
+					/reservations?/i.test(window.location.href || "") ||
+					/(reservation\s*(?:id|number|#)|confirmation|guest\s+name|check[-\s]?in|check[-\s]?out|arrival|departure|booked|booking\s+date)/i.test(
+						document.body.innerText || ""
+					),
+				{ timeout: 8000 }
+			)
+			.catch(() => null),
+		delay(3500),
+	]);
+	await delay(900);
+};
+
+const openReservationsPage = async (page) => {
+	const reservationLink = await findReservationsLink(page).catch(() => null);
+	if (reservationLink?.href) {
+		await page.goto(reservationLink.href, { waitUntil: "domcontentloaded" });
+		await delay(900);
+		return {
+			opened: true,
+			method: "href",
+			href: reservationLink.href,
+			text: reservationLink.text || "",
+		};
+	}
+
+	const clicked = await clickReservationsNavigation(page).catch(() => false);
+	if (!clicked) {
+		return {
+			opened: false,
+			method: "not_found",
+		};
+	}
+	await waitForReservationsSurface(page);
+	return {
+		opened: true,
+		method: "click",
+	};
+};
+
 const confirmationCandidatesFromText = (text = "") => {
 	const source = normalizeWhitespace(text);
 	const values = [];
@@ -1101,11 +1206,11 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				});
 				continue;
 			}
-			const reservationLink = await findReservationsLink(page).catch(() => null);
-			if (reservationLink?.href) {
-				await page.goto(reservationLink.href, { waitUntil: "domcontentloaded" });
-				await delay(900);
-			}
+			const reservationNavigation = await openReservationsPage(page).catch((error) => ({
+				opened: false,
+				method: "error",
+				error: error && error.message ? error.message : String(error),
+			}));
 			await scrollToLoadVisibleContent(page).catch(() => {});
 			const candidates = await extractReservationCandidates(
 				page,
@@ -1120,6 +1225,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					expediaPropertyId: match.property.expediaPropertyId || "",
 					expediaPropertyName: match.property.name || "",
 					actionPreview: "no_reservation_candidates_detected",
+					reservationNavigation,
 					sourceUrl: page.url(),
 					sourceSnippet: safeSnippet(pageSnapshot.text, 500),
 				});
