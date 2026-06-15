@@ -2362,6 +2362,22 @@ function setIfOtaValue(target, path, value, options = {}) {
 	if (hasOtaValue(value, options)) target[path] = value;
 }
 
+function setIfMissingOrSameConfirmation(target, path, existingValue, confirmationNumber) {
+	if (!confirmationNumber) return;
+	if (
+		!normalizeWhitespace(existingValue) ||
+		valuesMatchConfirmation(existingValue, confirmationNumber)
+	) {
+		target[path] = confirmationNumber;
+	}
+}
+
+function addExistingUpdatePreservedWarning(warnings = [], message = "") {
+	if (message && Array.isArray(warnings) && !warnings.includes(message)) {
+		warnings.push(message);
+	}
+}
+
 function sourcePresence(normalized = {}) {
 	return normalized.sourcePresence && typeof normalized.sourcePresence === "object"
 		? normalized.sourcePresence
@@ -2410,6 +2426,7 @@ function buildExistingReservationUpdateSet({
 	existing = {},
 	document = null,
 	statusToApply = "",
+	warnings = [],
 } = {}) {
 	const set = {};
 	const confirmationNumber = normalizeConfirmation(
@@ -2422,34 +2439,17 @@ function buildExistingReservationUpdateSet({
 			: "");
 	const incomingStatus = resolveExistingUpdateStatus(statusToApply, normalized);
 	const incomingAmount = hasIncomingAmount(normalized);
-	const incomingPaymentModel =
-		hasSourceField(normalized, "paymentCollectionModel") &&
-		normalized.paymentCollectionModel !== "unknown";
+	const statusOnlyUpdate =
+		normalized.intent === "reservation_status" ||
+		["cancelled", "no_show", "status"].includes(normalized.eventType);
 
 	if (document) {
 		const docSet = compactUpdate(document);
 		if (incomingAmount) {
-			[
-				"sub_total",
-				"total_amount",
-				"currency",
-				"commission",
-				"pickedRoomsType",
-				"pickedRoomsPricing",
-			].forEach((field) => {
-				setIfOtaValue(set, field, docSet[field]);
-			});
-		}
-		if (incomingAmount && incomingPaymentModel) {
-			[
-				"financeStatus",
-				"payment",
-				"paid_amount",
-				"paid_amount_breakdown",
-				"financial_cycle",
-			].forEach((field) => {
-				setIfOtaValue(set, field, docSet[field]);
-			});
+			addExistingUpdatePreservedWarning(
+				warnings,
+				"Existing reservation pricing and finance fields were preserved; OTA amount was stored in supplier audit metadata only."
+			);
 		}
 
 		if (hasSourceField(normalized, "roomName")) {
@@ -2469,33 +2469,42 @@ function buildExistingReservationUpdateSet({
 				document.supplierData?.otaRoomMatchType
 			);
 		}
-		if (hasSourceField(normalized, "hotelName") || normalized.hotelId) {
-			setIfOtaValue(set, "hotelId", docSet.hotelId);
-			setIfOtaValue(set, "belongsTo", docSet.belongsTo);
+		if (docSet.hotelId || docSet.belongsTo) {
+			addExistingUpdatePreservedWarning(
+				warnings,
+				"Existing reservation hotel assignment was preserved; OTA hotel resolution was kept for audit only."
+			);
 		}
 	}
 
-	setIfOtaValue(set, "reservation_id", normalized.reservationId || confirmationNumber);
+	if (!normalizeWhitespace(existing?.reservation_id || "")) {
+		setIfOtaValue(set, "reservation_id", normalized.reservationId || confirmationNumber);
+	}
 	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
-		setIfOtaValue(set, "booking_source", providerLabel);
+		if (!String(existing?.booking_source || "").trim()) {
+			setIfOtaValue(set, "booking_source", providerLabel);
+		}
 		if (!String(existing?.customer_details?.booking_source || "").trim()) {
 			setIfOtaValue(set, "customer_details.booking_source", providerLabel);
 		}
 	}
-	setIfOtaValue(set, "customer_details.name", normalized.guestName);
-	setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
-	setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
-	setIfOtaValue(set, "customer_details.nationality", normalized.nationality);
-	setIfOtaValue(set, "checkin_date", normalized.checkinDate);
-	setIfOtaValue(set, "checkout_date", normalized.checkoutDate);
-	if (hasSourceField(normalized, "bookedAt")) {
-		setIfOtaValue(set, "booked_at", normalized.bookedAt);
+	if (!statusOnlyUpdate) {
+		setIfOtaValue(set, "customer_details.name", normalized.guestName);
+		setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
+		setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
+		setIfOtaValue(set, "customer_details.nationality", normalized.nationality);
+		setIfOtaValue(set, "checkin_date", normalized.checkinDate);
+		setIfOtaValue(set, "checkout_date", normalized.checkoutDate);
+		if (hasSourceField(normalized, "bookedAt")) {
+			setIfOtaValue(set, "booked_at", normalized.bookedAt);
+		}
 	}
 
 	const checkinForDays = normalized.checkinDate || existing.checkin_date;
 	const checkoutForDays = normalized.checkoutDate || existing.checkout_date;
 	const daysOfResidence = calculateDaysOfResidence(checkinForDays, checkoutForDays);
 	if (
+		!statusOnlyUpdate &&
 		daysOfResidence > 0 &&
 		(hasSourceField(normalized, "checkinDate") ||
 			hasSourceField(normalized, "checkoutDate"))
@@ -2503,16 +2512,22 @@ function buildExistingReservationUpdateSet({
 		set.days_of_residence = daysOfResidence;
 	}
 
-	if (hasSourceField(normalized, "adults") && Number(normalized.adults || 0) > 0) {
+	if (
+		!statusOnlyUpdate &&
+		hasSourceField(normalized, "adults") &&
+		Number(normalized.adults || 0) > 0
+	) {
 		set.adults = Number(normalized.adults);
 	}
 	if (
+		!statusOnlyUpdate &&
 		hasSourceField(normalized, "children") &&
 		Number(normalized.children || 0) >= 0
 	) {
 		set.children = Number(normalized.children);
 	}
 	if (
+		!statusOnlyUpdate &&
 		hasSourceField(normalized, "totalGuests") &&
 		Number(normalized.totalGuests || 0) > 0
 	) {
@@ -2522,12 +2537,14 @@ function buildExistingReservationUpdateSet({
 		hasSourceField(normalized, "roomCount") &&
 		Number(normalized.roomCount || 0) > 0
 	) {
-		set.total_rooms = Number(normalized.roomCount);
+		set["supplierData.otaRoomCount"] = Number(normalized.roomCount);
 	}
 
 	if (incomingAmount) {
-		set.total_amount = Number(normalized.totalAmountSar || 0);
-		set.currency = "SAR";
+		addExistingUpdatePreservedWarning(
+			warnings,
+			"Existing reservation total, room pricing, commission, payment, and financial cycle were not overwritten by OTA automation."
+		);
 	}
 
 	if (incomingStatus) {
@@ -2539,10 +2556,30 @@ function buildExistingReservationUpdateSet({
 	}
 
 	if (confirmationNumber) {
-		set["customer_details.confirmation_number2"] = confirmationNumber;
-		set["supplierData.suppliedBookingNo"] = confirmationNumber;
-		set["supplierData.otaConfirmationNumber"] = confirmationNumber;
-		set["supplierData.platformConfirmationNumber"] = confirmationNumber;
+		setIfMissingOrSameConfirmation(
+			set,
+			"customer_details.confirmation_number2",
+			existing?.customer_details?.confirmation_number2,
+			confirmationNumber
+		);
+		setIfMissingOrSameConfirmation(
+			set,
+			"supplierData.suppliedBookingNo",
+			existing?.supplierData?.suppliedBookingNo,
+			confirmationNumber
+		);
+		setIfMissingOrSameConfirmation(
+			set,
+			"supplierData.otaConfirmationNumber",
+			existing?.supplierData?.otaConfirmationNumber,
+			confirmationNumber
+		);
+		setIfMissingOrSameConfirmation(
+			set,
+			"supplierData.platformConfirmationNumber",
+			existing?.supplierData?.platformConfirmationNumber,
+			confirmationNumber
+		);
 	}
 	if (hasSourceField(normalized, "bookingSource") || hasKnownProvider(normalized)) {
 		setIfOtaValue(set, "supplierData.supplierName", providerLabel);
@@ -2555,6 +2592,27 @@ function buildExistingReservationUpdateSet({
 	}
 	if (hasSourceField(normalized, "roomName")) {
 		setIfOtaValue(set, "supplierData.otaRoomName", normalized.roomName);
+	}
+	if (hasSourceField(normalized, "checkinDate")) {
+		setIfOtaValue(set, "supplierData.otaCheckinDate", normalized.checkinDate);
+	}
+	if (hasSourceField(normalized, "checkoutDate")) {
+		setIfOtaValue(set, "supplierData.otaCheckoutDate", normalized.checkoutDate);
+	}
+	if (hasSourceField(normalized, "adults") && Number(normalized.adults || 0) > 0) {
+		set["supplierData.otaAdults"] = Number(normalized.adults);
+	}
+	if (
+		hasSourceField(normalized, "children") &&
+		Number(normalized.children || 0) >= 0
+	) {
+		set["supplierData.otaChildren"] = Number(normalized.children);
+	}
+	if (
+		hasSourceField(normalized, "totalGuests") &&
+		Number(normalized.totalGuests || 0) > 0
+	) {
+		set["supplierData.otaTotalGuests"] = Number(normalized.totalGuests);
 	}
 	if (incomingAmount) {
 		setIfOtaValue(set, "supplierData.otaCurrency", normalized.currency);
@@ -2657,6 +2715,7 @@ async function applyExistingReservationEmailUpdate({
 		existing,
 		document,
 		statusToApply,
+		warnings,
 	});
 	await Reservations.updateOne(
 		{ _id: existing._id },
