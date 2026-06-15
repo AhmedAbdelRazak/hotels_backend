@@ -41,3 +41,32 @@ They also state that the integration should not disrupt the account or connectio
 ## Future Work
 
 When building the Expedia sync scraper, start from this evidence and design the automation as a safe external synchronization job for PMS data only.
+
+## 2026-06-15 Implementation Follow-up
+
+The first supervised Expedia reservation sync was implemented as an on-demand
+SUPER Admin workflow from `/admin/all-reservations`.
+
+Implementation references:
+
+- `routes/expedia_reservation_sync.js`
+- `controllers/expedia_reservation_sync.js`
+- `models/ota_reservation_sync_job.js`
+- `services/expediaReservationSync.js`
+- `services/expediaReservationCollector.js`
+- `services/expediaReservationApply.js`
+- `services/otaReservationMapper.js`
+- Full runbook: `docs/ota-reservation-sync-expedia-2026-06-15.md`
+
+Operating policy:
+
+- Use one persistent browser profile/session and process hotels sequentially.
+- Keep the collector read-only until a SUPER Admin reviews preview buckets.
+- Apply only safe writes: new non-cancelled reservations and cancelled/no-show
+  status updates for already-saved reservations.
+- Preserve existing PMS pricing, commission, finance, payment, and nightly
+  admin-managed pricing rows.
+- Never store Expedia credentials, cookies, session tokens, or raw VCC data in a
+  sync job or reservation document.
+- Keep PMS-facing money in SAR while retaining source USD amounts only as safe
+  audit metadata where useful.

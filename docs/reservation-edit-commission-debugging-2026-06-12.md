@@ -211,6 +211,19 @@ Important behavior:
 - Real room-selection changes without a full `pickedRoomsPricing` payload are rejected instead of guessed.
 - Admin pricing modal saves should send `pickedRoomsType`, `pickedRoomsPricing`, and `adminPricing` together.
 
+2026-06-15 follow-up:
+
+- `src/AdminModule/JannatTools/EditPricingModal.js` must keep
+  `totalPriceWithoutCommission` tied to `rootPrice` when client/main price is
+  edited, distributed, or copied from the first row.
+- `src/AdminModule/AllReservation/EditReservationMain.js` must preserve the
+  saved explicit commission for admin-managed pricing during normal reservation
+  edits. A recalculated `clientTotal - rootTotal` value is not a replacement for
+  the saved General commission.
+- `controllers/reservations.js` mirrors an explicit SUPER Admin commission
+  update into `adminPricing.commissionAmount` so future admin/OTA pricing
+  screens reopen with the same commission source.
+
 ## Admin Profit report
 
 The admin-only Profit tab lives on `/admin/overall-hotel-reports?tab=Profit`. It is intentionally not added to any `/hotel-management/*` route or overall hotel-management shell.

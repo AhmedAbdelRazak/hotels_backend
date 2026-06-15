@@ -1,5 +1,5 @@
 JANNATBOOKING BACKEND APPLICATION STRUCTURE
-Audited: 2026-06-10
+Audited: 2026-06-15
 
 Purpose
 This file is a compact backend reference for future development. It documents the active Express/Mongo API structure, the important route files, the user-role model, hotel scoping rules, and the workflows that must be protected when changing the system.
@@ -152,7 +152,8 @@ Primary Route Files And API Areas
   - 2026-06-04 checkout account safety: controllers/paypal_reservation.js findOrCreateUserByEmail creates a client account during public checkout when no existing email/user is found. It must accept customerDetails.password, customerDetails.usePassword, or a phone-derived fallback so paid checkout does not fail after PayPal approval because the guest was not already signed in.
   - 2026-06-04 PayPal capture safety: controllers/paypal_reservation.js must treat the nested capture status as the source of truth. A PayPal order may be APPROVED or COMPLETED while purchase_units[].payments.captures[].status is DECLINED; that is not a paid reservation and must return 402 with a clear message that Jannat Booking did not receive a successful captured payment.
 - Integration route files
-  - otaInbound.js, integrator.js, and aiagent_learning.js.
+  - otaInbound.js, integrator.js, expedia_reservation_sync.js, and aiagent_learning.js.
+  - expedia_reservation_sync.js exposes the OTA-general reservation sync job endpoints under /api/admin/ota-reservation-sync/* plus Expedia compatibility aliases under /api/admin/expedia-reservation-sync/*. These endpoints prepare jobs, read job status, run the supervised collector, submit MFA codes, and apply reviewed safe writes.
 
 Core Models
 - models/user.js
@@ -185,7 +186,8 @@ Core Models
 - models/supportcase.js
   - Support cases, conversations, seen/unseen tracking, and case status.
 - Supporting models
-  - activity_tracker, housekeeping_supply, housekeeping_supply_request, Uncompleted, aiagent learning models, and integration/inbound data.
+  - activity_tracker, housekeeping_supply, housekeeping_supply_request, Uncompleted, ota_reservation_sync_job, aiagent learning models, and integration/inbound data.
+  - ota_reservation_sync_job stores supervised OTA sync jobs. It keeps provider, target hotels, credential summary, collector state, preview buckets, apply results, result summary, artifacts, and audit log entries. It must never store plaintext credentials, browser cookies, session tokens, or raw virtual-card data.
 
 Important Services
 - services/housekeepingMaintenance.js
@@ -221,6 +223,12 @@ Important Services
   - ActivityTracker records created by privileged actors are marked visibility=super_admin_only for future reporting surfaces.
 - services/otaEmailOrchestrator.js and services/otaReservationMapper.js
   - OTA email/reservation parsing and mapping support.
+- services/expediaReservationSync.js, services/expediaReservationCollector.js, and services/expediaReservationApply.js
+  - On-demand OTA reservation sync support for Expedia Partner Central.
+  - expediaReservationSync prepares OTA-general jobs, builds target hotel aliases from the same name-expansion logic used by OTA inbound email, and respects OTA_INBOUND_EMAIL_HOTEL_IDS while allowing inactive but existing PMS hotels when allowlisted.
+  - expediaReservationCollector runs a single supervised persistent-browser session, attempts server-env login with OTA_EXPEDIA_USERNAME and OTA_PASSWORD, pauses for MFA through the job/MFA endpoint, processes selected hotels sequentially, and writes read-only preview buckets.
+  - expediaReservationApply saves only safe writes after review: new non-cancelled reservations and cancelled/no-show status changes for existing matched reservations. Existing reservation pricing, payment breakdowns, commission, finance, hotel assignment, and admin-managed nightly rows must not be overwritten by sync.
+  - Full runbook: docs/ota-reservation-sync-expedia-2026-06-15.md.
 
 Critical Workflows To Protect
 - Reservation creation
@@ -241,6 +249,18 @@ Critical Workflows To Protect
   - 2026-06-04 admin reservation scorecards/filter: /api/admin/all-reservations pendingConfirmation counts and filters use operational pending status, meaning reservation_status/state is "Pending Confirmation" or pendingConfirmation.status is "pending". This keeps the card, clicked table rows, and hotel notification badge aligned for public-paid/internal-pending bookings.
   - 2026-06-04 overall pending queue: /hotel-management/main-dashboard?overall=pending-reservations uses the same explicit pending-confirmation bypass for pre-2026-05-08 rows, so notification clicks do not land on a queue that hides the reservation. Finance/commission backlog items still require the workflow cutoff.
   - Historical/import creation can allow overbook for compatibility, but should still capture the snapshot with overrideAllowed/overbooked metadata so reservation staff can audit what inventory looked like when the row was written.
+- OTA reservation sync
+  - The /admin/all-reservations OTA Reservation Sync button is an on-demand workflow, not a cron. SUPER Admins prepare a job, select hotels with checkboxes, run the read-only collector, review preview buckets, then choose Save Safe Writes.
+  - The first provider is Expedia, but route naming and job storage are OTA-general so Booking/Agoda/etc. can be added later behind the same safety model.
+  - Expedia property counts come from the Partner Central manage-property page after login; do not hardcode hotel/provider counts in code or docs.
+  - The collector should use one browser/session and process hotels sequentially to reduce OTA skepticism and keep HomeServer CPU/RAM load predictable.
+  - New cancelled/no-show rows are skipped. If an already-saved PMS reservation later becomes cancelled/no-show in OTA, only the terminal status should update and the document should remain.
+  - Existing matched reservations must preserve employee-managed pricing fields: total_amount, sub_total, commission, financial_cycle, pickedRoomsType, pickedRoomsPricing, adminPricing, payment fields, and hotel assignment. Incoming OTA amounts may be kept only as safe audit/supplier metadata where explicitly supported.
+  - New Expedia-created reservations store PMS-facing amounts in SAR. Client total comes from Expedia Total guest payment; net after OTA expenses comes from Expedia Your total payout / Amount to charge Expedia Group; OTA expense is the difference. Source USD values may be retained in safe metadata for audit.
+  - Hotel base total for new OTA sync reservations is built from PMS room pricing per night: calendar rootPrice, then calendar price, then room defaultCost, then room price.basePrice. General commission defaults to 10% of that hotel base total.
+  - Nightly pricing rows must keep client/main, root/base, net-after-expenses, OTA expense, platform margin, and commission-rate fields separate. totalPriceWithoutCommission must stay aligned with rootPrice, not clientPrice.
+  - Expedia VCC/payment signals may be detected, but raw virtual-card numbers, CVV, browser cookies, tokens, and credentials must never be persisted.
+  - HomeServer sync runs should clean up collector-owned browser/page handles and temporary artifacts unless audit screenshots are explicitly enabled. PM2 services should remain online after each run.
 - Public signup applications
   - Direct public signup is for hotel manager/owner registration only.
   - Agent and job applicants require a valid backend invitation generated from the overall create-account flow. New invitations use a short /signup?invite=<code> URL backed by models/signup_invitation.js; legacy invitationToken links are still accepted for compatibility.

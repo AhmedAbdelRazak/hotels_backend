@@ -6876,6 +6876,17 @@ exports.updateReservation = async (req, res) => {
 					: "no commission due";
 
 			normalizedUpdateData.commission = explicitSuperAdminCommission;
+			normalizedUpdateData.adminPricing = {
+				...(existingReservation.adminPricing &&
+				typeof existingReservation.adminPricing.toObject === "function"
+					? existingReservation.adminPricing.toObject()
+					: existingReservation.adminPricing || {}),
+				...(normalizedUpdateData.adminPricing &&
+				typeof normalizedUpdateData.adminPricing === "object"
+					? normalizedUpdateData.adminPricing
+					: {}),
+				commissionAmount: explicitSuperAdminCommission,
+			};
 			normalizedUpdateData.commissionStatus = commissionStatus;
 			normalizedUpdateData.commissionData = {
 				...existingCommissionData,

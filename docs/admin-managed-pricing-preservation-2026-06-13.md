@@ -117,3 +117,50 @@ The latest `reservationAuditLog` entry was written with:
 Final read-back confirmed the nightly rows cover `2026-06-10` through
 `2026-06-16`, with the final row keeping `netAfterExpenses: 80.42`,
 `otaExpenseAmount: 29.02`, and `platformMargin: 10.42` so totals remain exact.
+
+## 2026-06-15 OTA sync and edit-pricing hardening
+
+The Expedia reservation sync work tightened this same invariant for both new
+OTA-created reservations and existing admin-managed reservations opened from
+`/admin/all-reservations`.
+
+New OTA sync reservations:
+
+- Store PMS-facing values in SAR.
+- Use Expedia `Total guest payment` as the client/main total.
+- Use Expedia `Your total payout` / `Amount to charge Expedia Group` as net
+  after OTA expenses when available.
+- Build hotel/root total from PMS room pricing: calendar `rootPrice`, then
+  calendar `price`, then room `defaultCost`, then room `price.basePrice`.
+- Default General commission to 10% of the hotel/root total, not the Expedia
+  client total.
+
+Existing admin-managed reservations:
+
+- OTA sync must not overwrite `total_amount`, `sub_total`, `commission`,
+  `financial_cycle`, `pickedRoomsType`, `pickedRoomsPricing`, `adminPricing`,
+  payment fields, or hotel assignment.
+- Sync may apply only terminal status changes such as cancelled/no-show when the
+  PMS document already exists.
+- Non-pricing edits in `EditReservationMain` preserve the saved explicit
+  commission for admin-managed pricing unless a SUPER Admin intentionally edits
+  commission.
+- The shared `EditPricingModal` keeps `totalPriceWithoutCommission` aligned with
+  `rootPrice` during client-price edits, distribution, and inherit-first-row
+  actions. It must never silently copy client/main price into the hotel/root
+  bucket.
+
+Reference example still protected by this invariant:
+
+- Reservation id: `6a2af2c06f49b37157452ab4`
+- Confirmation: `7183544960`
+- Client total: `766.08`
+- Hotel/root total: `490.00`
+- Net after OTA expenses: `563.00`
+- OTA expense total: `203.08`
+- Platform margin: `73.00`
+- General commission: `70.00`
+
+The MoreDetails summary for that reservation is the source of truth. Opening
+Edit Pricing must prefill the same split and saving unrelated fields must not
+mutate any nightly money row.
