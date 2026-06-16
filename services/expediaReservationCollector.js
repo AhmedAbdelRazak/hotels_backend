@@ -2053,6 +2053,7 @@ const clickPaymentDetailsTrigger = async (page) => {
 				`[data-jannat-payment-trigger="${token}"]`
 			);
 			if (!node) return;
+			if (typeof node.focus === "function") node.focus();
 			for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
 				node.dispatchEvent(
 					new MouseEvent(eventName, {
@@ -2065,6 +2066,9 @@ const clickPaymentDetailsTrigger = async (page) => {
 			if (typeof node.click === "function") node.click();
 		}, target.token)
 		.catch(() => {});
+	await page.keyboard.press("Enter").catch(() => {});
+	await delay(250);
+	await page.keyboard.press("Space").catch(() => {});
 	return { clicked: true, text: target.text };
 };
 
@@ -2151,6 +2155,7 @@ const clickSeeAllReservationDetails = async (page) => {
 				`[data-jannat-full-details-trigger="${token}"]`
 			);
 			if (!node) return;
+			if (typeof node.focus === "function") node.focus();
 			for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
 				node.dispatchEvent(
 					new MouseEvent(eventName, {
@@ -2163,6 +2168,9 @@ const clickSeeAllReservationDetails = async (page) => {
 			if (typeof node.click === "function") node.click();
 		}, target.token)
 		.catch(() => {});
+	await page.keyboard.press("Enter").catch(() => {});
+	await delay(250);
+	await page.keyboard.press("Space").catch(() => {});
 	await navigation;
 	return { clicked: true, text: target.text };
 };
@@ -2221,10 +2229,21 @@ const collectPaymentExpansionDiagnostics = async (page) =>
 						return null;
 					}
 					const rect = node.getBoundingClientRect();
+					const style = window.getComputedStyle(node);
+					const attributes = Array.from(node.attributes || [])
+						.map((attribute) => [attribute.name, attribute.value])
+						.filter(([name]) => /^(aria-|data-|role$|type$|href$|formaction$|id$|class$)/i.test(name))
+						.slice(0, 30);
 					return {
 						tag: node.tagName,
 						role: node.getAttribute("role") || "",
+						attributes: Object.fromEntries(attributes),
+						disabled: Boolean(node.disabled),
+						pointerEvents: style.pointerEvents || "",
 						text: text.slice(0, 180),
+						html: String(node.outerHTML || "")
+							.replace(/\s+/g, " ")
+							.slice(0, 700),
 						rect: {
 							x: Math.round(rect.x),
 							y: Math.round(rect.y),
