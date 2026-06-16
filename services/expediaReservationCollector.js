@@ -2441,17 +2441,14 @@ const mergeDetailCandidate = ({ candidate = {}, detail = {}, snapshot = {}, deta
 	});
 };
 
-const enrichCandidateFromDetailPage = async (page, candidate) => {
-	if (!candidate.detailUrl) return candidate;
-	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
-	await delay(900);
+const readReservationDetailFromCurrentPage = async (page) => {
 	await page
 		.waitForFunction(
 			() =>
 				/(payment details|expedia collects payment|total guest payment|your total payout|amount to charge expedia group)/i.test(
 					document.body?.innerText || ""
 				),
-			{ timeout: 5000 }
+			{ timeout: 9000 }
 		)
 		.catch(() => null);
 	await scrollToLoadVisibleContent(page).catch(() => {});
@@ -2460,13 +2457,47 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	const snapshot = await safePageSnapshot(page);
 	const paymentDisplayText = await extractReservationPaymentDisplayText(page);
 	const detailText = [snapshot.text, paymentDisplayText].filter(Boolean).join("\n");
-	const detail = parseExpediaReservationDetailText(detailText, candidate);
+	return {
+		snapshot,
+		detailText,
+	};
+};
+
+const enrichCandidateFromDetailPage = async (page, candidate) => {
+	if (!candidate.detailUrl) return candidate;
+	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
+	await delay(1200);
+	let detailRead = await readReservationDetailFromCurrentPage(page);
+	let detail = parseExpediaReservationDetailText(detailRead.detailText, candidate);
 	let enriched = mergeDetailCandidate({
 		candidate,
 		detail,
-		snapshot,
+		snapshot: detailRead.snapshot,
 		detailUrl: candidate.detailUrl,
 	});
+	const loadedLegacyDetailUrl = /legacyReservationDetails\.html/i.test(
+		detailRead.snapshot.url || candidate.detailUrl || ""
+	);
+	const legacyDetailHadPaymentSurface =
+		/(payment details|expedia collects payment|total guest payment|your total payout|amount to charge expedia group)/i.test(
+			detailRead.detailText || ""
+		);
+	const shouldRetryLegacyDetail =
+		candidate.detailUrl &&
+		!hasPaymentSummaryPayout(enriched.paymentSummary) &&
+		(!loadedLegacyDetailUrl || !legacyDetailHadPaymentSurface);
+	if (shouldRetryLegacyDetail) {
+		await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
+		await delay(1800);
+		detailRead = await readReservationDetailFromCurrentPage(page);
+		detail = parseExpediaReservationDetailText(detailRead.detailText, enriched);
+		enriched = mergeDetailCandidate({
+			candidate: enriched,
+			detail,
+			snapshot: detailRead.snapshot,
+			detailUrl: candidate.detailUrl,
+		});
+	}
 
 	const shouldTryModernDrawer =
 		candidate.modernDetailUrl &&
@@ -2476,22 +2507,15 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	if (shouldTryModernDrawer) {
 		await page.goto(candidate.modernDetailUrl, { waitUntil: "domcontentloaded" });
 		await delay(1200);
-		await scrollToLoadVisibleContent(page).catch(() => {});
-		await expandReservationPaymentSections(page).catch(() => false);
-		await scrollToLoadVisibleContent(page).catch(() => {});
-		const modernSnapshot = await safePageSnapshot(page);
-		const modernPaymentDisplayText = await extractReservationPaymentDisplayText(page);
-		const modernDetailText = [modernSnapshot.text, modernPaymentDisplayText]
-			.filter(Boolean)
-			.join("\n");
+		const modernRead = await readReservationDetailFromCurrentPage(page);
 		const modernDetail = parseExpediaReservationDetailText(
-			modernDetailText,
+			modernRead.detailText,
 			enriched
 		);
 		enriched = mergeDetailCandidate({
 			candidate: enriched,
 			detail: modernDetail,
-			snapshot: modernSnapshot,
+			snapshot: modernRead.snapshot,
 			detailUrl: candidate.modernDetailUrl,
 		});
 	}
@@ -2504,23 +2528,16 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 		}));
 		if (fullDetailsClick.clicked) {
 			await delay(1500);
-			await scrollToLoadVisibleContent(page).catch(() => {});
-			await expandReservationPaymentSections(page).catch(() => false);
-			await scrollToLoadVisibleContent(page).catch(() => {});
-			const fullSnapshot = await safePageSnapshot(page);
-			const fullPaymentDisplayText = await extractReservationPaymentDisplayText(page);
-			const fullDetailText = [fullSnapshot.text, fullPaymentDisplayText]
-				.filter(Boolean)
-				.join("\n");
+			const fullRead = await readReservationDetailFromCurrentPage(page);
 			const fullDetail = parseExpediaReservationDetailText(
-				fullDetailText,
+				fullRead.detailText,
 				enriched
 			);
 			enriched = mergeDetailCandidate({
 				candidate: enriched,
 				detail: fullDetail,
-				snapshot: fullSnapshot,
-				detailUrl: fullSnapshot.url || candidate.detailUrl,
+				snapshot: fullRead.snapshot,
+				detailUrl: fullRead.snapshot.url || candidate.detailUrl,
 			});
 		}
 	}

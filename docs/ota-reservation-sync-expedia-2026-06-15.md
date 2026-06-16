@@ -253,9 +253,12 @@ admin three-price mode:
 
 ## Collector Reliability Notes
 
-- The Expedia collector must prefer the actual `See all reservation details`
-  button in the modern drawer before parsing payout. Full-screen drawer/backdrop
-  nodes can contain the same text but must not be clicked as the target.
+- The Expedia collector must prefer the legacy reservation detail URL
+  (`legacyReservationDetails.html?...reservationIds=...`) for payout/pricing.
+  The modern drawer is only a fallback. If the drawer fallback is needed, the
+  collector must prefer the actual `See all reservation details` button;
+  full-screen drawer/backdrop nodes can contain the same text but must not be
+  clicked as the target.
 - Browser/login reads are bounded with short timeouts so a stuck Expedia login
   renderer returns `needs_login` or `collector_failed` instead of leaving the job
   in `running` forever.
