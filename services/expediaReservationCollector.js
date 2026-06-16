@@ -390,6 +390,12 @@ const typeIntoFirstVisibleInput = async (page, selectors, value) => {
 const clickButtonByText = async (page, patterns = []) =>
 	page.evaluate((rawPatterns) => {
 		const regexes = rawPatterns.map((pattern) => new RegExp(pattern, "i"));
+		const normalize = (value) =>
+			String(value || "")
+				.replace(/\s+/g, " ")
+				.trim();
+		const joinedText = (values) =>
+			Array.from(new Set(values.map(normalize).filter(Boolean))).join(" ");
 		const nodes = Array.from(
 			document.querySelectorAll(
 				"button, input[type='button'], input[type='submit'], a, [role='button']"
@@ -410,14 +416,12 @@ const clickButtonByText = async (page, patterns = []) =>
 		};
 		const candidate = nodes.find((node) => {
 			if (!visible(node)) return false;
-			const text = [
+			const text = joinedText([
 				node.innerText,
 				node.textContent,
 				node.value,
 				node.getAttribute("aria-label"),
-			]
-				.filter(Boolean)
-				.join(" ");
+			]);
 			return regexes.some((regex) => regex.test(text));
 		});
 		if (!candidate) return false;
