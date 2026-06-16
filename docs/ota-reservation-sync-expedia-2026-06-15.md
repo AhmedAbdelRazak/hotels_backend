@@ -314,10 +314,34 @@ The collector was hardened without changing apply/write policy:
   fit the job range. This catches Partner Central rows such as reservation
   `2485791085` that are visible in the default list/detail drawer but absent
   from the broad filtered result.
+- limit date entry automation to editable date text inputs. Expedia names the
+  radio group `dateTypeFilter`; the old generic selector could treat those
+  radio buttons as date fields and leave the real From/To inputs empty.
+- de-duplicate button text before matching commands such as `Apply`, because
+  Partner Central can expose a button as `Apply Apply` when `innerText` and
+  `textContent` are joined.
+- scope booking parsing around the reservation number before extracting dates
+  or status. This prevents filter/header text such as `Cancelled on` or the
+  selected date range from being mistaken for the row's reservation status and
+  stay dates.
+- retry the full login-to-property-discovery segment when Expedia destroys a
+  page execution context during redirects.
 
 This fix is intentionally read-only until the normal apply step. It should make
 the Zad Al Qimma run reach `preview_ready` and show `2485791085` as a new
 candidate if Expedia still exposes the row with enough required data.
+
+Final read-only verification on the home server:
+
+- Job: `OTA-RES-SYNC-20260616060923-1QTHA`
+- Status: `preview_ready`
+- Expedia property match: `Al-Qemma Hotel` / `120208625`
+- Preview result: `newReservations: 1`, `matchedExisting: 1`,
+  `paymentOrVccAvailable: 2`, `appliedWrites: 0`
+- Captured new candidate: `2485791085`, guest `Rowena Indasan`, stay
+  `2026-06-17` to `2026-06-23`, booked `2026-06-16`, room
+  `Comfort Triple Room, City View`, source amount `132.62 USD`
+- No Save Safe Writes/apply call was run during this verification.
 
 ## Production correction reference
 
