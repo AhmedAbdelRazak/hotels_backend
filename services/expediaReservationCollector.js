@@ -1124,6 +1124,19 @@ const parseExpediaDate = (value = "") => {
 	return isoMatch ? `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}` : "";
 };
 
+const stayNightsBetween = (checkinDate = "", checkoutDate = "") => {
+	if (
+		!/^\d{4}-\d{2}-\d{2}$/.test(checkinDate) ||
+		!/^\d{4}-\d{2}-\d{2}$/.test(checkoutDate)
+	) {
+		return 0;
+	}
+	const checkin = new Date(`${checkinDate}T00:00:00.000Z`);
+	const checkout = new Date(`${checkoutDate}T00:00:00.000Z`);
+	const nights = Math.round((checkout - checkin) / (24 * 60 * 60 * 1000));
+	return Number.isFinite(nights) && nights > 0 ? nights : 0;
+};
+
 const extractExpediaDates = (value = "") => {
 	const source = String(value || "");
 	const matches = [
@@ -1665,11 +1678,25 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		/\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\s*(?:[\u2013\u2014-]|to)\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})(?:\s*\((\d+)\s*nights?\))?/i
 	);
 	const allDates = extractExpediaDates(rawText);
-	const checkinDate =
-		parseExpediaDate(dateRangeMatch?.[1]) || candidate.checkinDate || allDates[0]?.iso || "";
-	const checkoutDate =
-		parseExpediaDate(dateRangeMatch?.[2]) || candidate.checkoutDate || allDates[1]?.iso || "";
-	const nights = Number(dateRangeMatch?.[3] || 0) || candidate.nights || 0;
+	const parsedCheckinDate = parseExpediaDate(dateRangeMatch?.[1]);
+	const parsedCheckoutDate = parseExpediaDate(dateRangeMatch?.[2]);
+	let checkinDate = parsedCheckinDate || candidate.checkinDate || allDates[0]?.iso || "";
+	let checkoutDate =
+		parsedCheckoutDate || candidate.checkoutDate || allDates[1]?.iso || "";
+	if (!stayNightsBetween(checkinDate, checkoutDate)) {
+		if (stayNightsBetween(candidate.checkinDate, candidate.checkoutDate)) {
+			checkinDate = candidate.checkinDate;
+			checkoutDate = candidate.checkoutDate;
+		} else if (stayNightsBetween(allDates[0]?.iso, allDates[1]?.iso)) {
+			checkinDate = allDates[0].iso;
+			checkoutDate = allDates[1].iso;
+		}
+	}
+	const nights =
+		stayNightsBetween(checkinDate, checkoutDate) ||
+		Number(dateRangeMatch?.[3] || 0) ||
+		candidate.nights ||
+		0;
 	const bookedAt =
 		parseExpediaDate(reservationMadeRaw) ||
 		candidate.bookedAt ||
