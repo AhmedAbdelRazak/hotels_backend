@@ -105,6 +105,27 @@ const buildExpediaReservationDetailUrl = (propertyId = "", reservationId = "") =
 	return url.toString();
 };
 
+const reservationIdFromExpediaUrl = (href = "") =>
+	normalizeConfirmation(
+		String(href || "").match(
+			/[?&](?:reservationIds|reservationId|bookingItemId|bookingId)=([A-Z0-9-]+)/i
+		)?.[1] || ""
+	);
+
+const isExpediaReservationDetailUrl = (href = "") => {
+	const raw = String(href || "");
+	if (!reservationIdFromExpediaUrl(raw)) return false;
+	try {
+		const url = new URL(raw, expediaAppBaseUrl());
+		if (!/expediapartnercentral\.com$/i.test(url.hostname)) return false;
+		return /\/lodging\/(?:bookings|reservations)\b|legacyReservationDetails\.html/i.test(
+			url.pathname
+		);
+	} catch (_) {
+		return false;
+	}
+};
+
 const toUsDateInput = (value = "") => {
 	const raw = normalizeLine(value);
 	if (!raw) return "";
@@ -886,6 +907,23 @@ const applyBookingsDateFilter = async (
 			const inputs = Array.from(document.querySelectorAll("input")).filter(
 				(input) => {
 					if (!visible(input)) return false;
+					const type = String(input.type || input.getAttribute("type") || "")
+						.toLowerCase()
+						.trim();
+					if (
+						[
+							"hidden",
+							"radio",
+							"checkbox",
+							"button",
+							"submit",
+							"reset",
+							"file",
+							"image",
+						].includes(type)
+					) {
+						return false;
+					}
 					const hint = [
 						input.placeholder,
 						input.name,
@@ -897,7 +935,9 @@ const applyBookingsDateFilter = async (
 					]
 						.filter(Boolean)
 						.join(" ");
-					return /mm\/dd\/yyyy|date|from|to|check/i.test(hint);
+					return /mm\/dd\/yyyy|\bdate\b|\bfrom\b|\bto\b|check[-\s]?(?:in|out)|arrival|departure/i.test(
+						hint
+					);
 				}
 			);
 			return {
@@ -1257,9 +1297,23 @@ const extractRows = async (page) =>
 							.trim()
 					)
 					.filter(Boolean);
-				const link =
-					node.matches?.("a[href]") ? node : node.querySelector("a[href]");
-				const href = link ? link.href : "";
+				const links = [
+					...(node.matches?.("a[href]") ? [node] : []),
+					...Array.from(node.querySelectorAll("a[href]")),
+				];
+				const reservationLink = links.find((link) => {
+					const href = String(link.href || "");
+					return (
+						/[?&](?:reservationIds|reservationId|bookingItemId|bookingId)=/i.test(
+							href
+						) &&
+						/expediapartnercentral\.com/i.test(href) &&
+						/\/lodging\/(?:bookings|reservations)\b|legacyReservationDetails\.html/i.test(
+							href
+						)
+					);
+				});
+				const href = reservationLink ? reservationLink.href : "";
 				return { text, lines, cells, href };
 			})
 			.filter((row) => {
@@ -1633,13 +1687,10 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 				line.length <= 140
 		) ||
 		"";
+	const rowDetailUrl = isExpediaReservationDetailUrl(row.href) ? row.href : "";
 	const detailUrl =
-		row.href && /reservation|booking|legacy/i.test(row.href)
-			? row.href
-			: buildExpediaReservationDetailUrl(
-					property.expediaPropertyId,
-					reservationId
-			  );
+		rowDetailUrl ||
+		buildExpediaReservationDetailUrl(property.expediaPropertyId, reservationId);
 	const details = parseLightReservationDetails(text);
 	const statusRaw = /cancelled|canceled/i.test(text)
 		? "Cancelled"
