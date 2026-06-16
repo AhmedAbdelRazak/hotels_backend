@@ -77,6 +77,23 @@ const money = (...values) => {
 	return 0;
 };
 
+const hasCapturedOtaPayout = (candidate = {}) => {
+	const paymentSummary = candidate.paymentSummary || {};
+	return money(
+		paymentSummary.totalPayoutAmount,
+		paymentSummary.sourceTotalPayoutAmount,
+		candidate.totalPayoutSar,
+		candidate.netAfterExpensesTotal
+	) > 0;
+};
+
+const requiresCapturedOtaPayout = (candidate = {}) => {
+	const collectionModel = normalizePaymentCollectionModel(
+		candidate.paymentCollectionModel
+	);
+	return collectionModel === "ota_collect";
+};
+
 const requiredNewCandidateFields = (candidate = {}, amountSar = 0) => {
 	const missing = [];
 	if (!candidateLookupValues(candidate).length) missing.push("confirmation number");
@@ -264,6 +281,18 @@ const applyNewCandidate = async ({ candidate, job }) => {
 			status: "needs_review",
 			extra: {
 				errors: [`Missing required field(s): ${missing.join(", ")}.`],
+			},
+		});
+	}
+	if (requiresCapturedOtaPayout(candidate) && !hasCapturedOtaPayout(candidate)) {
+		return resultEntry({
+			candidate,
+			action: "needs_review_missing_ota_payout",
+			status: "needs_review",
+			extra: {
+				errors: [
+					"Expedia Collect payout was not captured; review payment details before creating with OTA net pricing.",
+				],
 			},
 		});
 	}

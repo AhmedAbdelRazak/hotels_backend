@@ -2142,6 +2142,15 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	if (!candidate.detailUrl) return candidate;
 	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
 	await delay(900);
+	await page
+		.waitForFunction(
+			() =>
+				/(payment details|expedia collects payment|total guest payment|your total payout|amount to charge expedia group)/i.test(
+					document.body?.innerText || ""
+				),
+			{ timeout: 5000 }
+		)
+		.catch(() => null);
 	await scrollToLoadVisibleContent(page).catch(() => {});
 	await expandReservationPaymentSections(page).catch(() => false);
 	await scrollToLoadVisibleContent(page).catch(() => {});
