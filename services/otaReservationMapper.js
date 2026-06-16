@@ -1400,6 +1400,95 @@ function cleanFieldValue(value = "") {
 	return cleanOtaDisplayValue(value).replace(/^\*+\s*/, "");
 }
 
+const OTA_GUEST_NOTE_LABELS = [
+	"Guest notes",
+	"Guest note",
+	"Guest comments",
+	"Guest comment",
+	"Guest requests",
+	"Guest request",
+	"Guest message",
+	"Message from guest",
+	"Special requests",
+	"Special request",
+	"Customer notes",
+	"Customer note",
+	"Booking note",
+	"Reservation note",
+	"Remarks",
+	"Remark",
+	"Comments",
+	"Comment",
+	"Notes",
+	"Note",
+];
+
+const OTA_GUEST_NOTE_DIRECT_LABELS = OTA_GUEST_NOTE_LABELS.filter(
+	(label) => !/^(?:comments?|notes?|remarks?)$/i.test(label)
+);
+
+const OTA_GUEST_NOTE_STOP_LABEL_PATTERN =
+	/^(?:reservation|confirmation|booking|itinerary|hotel|property|room|check[-\s]?in|check[-\s]?out|arrival|departure|booked|status|guest name|guest email|guest phone|phone|email|nationality|country|adults?|children|guests?|payment|pricing|rate|tax|taxes|total|amount|currency|card|virtual card|expiration|activation|cancellation|policy|source|supplier)\b/i;
+
+function cleanOtaGuestNote(value = "") {
+	const cleaned = cleanOtaDisplayValue(redactSensitive(value))
+		.replace(
+			/^(?:guest|customer)?\s*(?:notes?|comments?|requests?|message|remarks?|booking note|reservation note|special requests?)\s*(?:[:#-]|is)?\s*/i,
+			""
+		)
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!cleaned) return "";
+	if (/^(?:n\/?a|na|none|null|nil|-+|not provided|not applicable)$/i.test(cleaned)) {
+		return "";
+	}
+	if (/^(?:no\s+)?(?:special\s+)?(?:requests?|comments?|notes?)$/i.test(cleaned)) {
+		return "";
+	}
+	if (isOtaHotelBoilerplateLine(cleaned)) return "";
+	if (
+		/(?:privacy policy|do not reply|terms of use|payment details|total guest payment|amount to charge|card number|validation code|cvv|cvc)/i.test(
+			cleaned
+		)
+	) {
+		return "";
+	}
+	if (OTA_GUEST_NOTE_STOP_LABEL_PATTERN.test(cleaned)) return "";
+	return safeSnippet(cleaned, 700);
+}
+
+function findGuestNoteField(text = "") {
+	const direct = cleanOtaGuestNote(findField(text, OTA_GUEST_NOTE_DIRECT_LABELS));
+	if (direct) return direct;
+
+	const source = String(text || "").replace(/\r/g, "");
+	const labelPattern = OTA_GUEST_NOTE_LABELS.map((label) =>
+		escapeRegExp(label).replace(/\\ /g, "\\s+")
+	).join("|");
+	const blockMatch = source.match(
+		new RegExp(
+			`(?:^|\\n)\\s*(?:${labelPattern})\\s*(?:[:#\\-]|is)?\\s*([\\s\\S]{1,700})`,
+			"i"
+		)
+	);
+	if (!blockMatch) return "";
+
+	const collected = [];
+	for (const rawLine of blockMatch[1].split(/\n/)) {
+		const line = normalizeWhitespace(rawLine);
+		if (!line) {
+			if (collected.length) break;
+			continue;
+		}
+		if (OTA_GUEST_NOTE_STOP_LABEL_PATTERN.test(line)) break;
+		const noteLine = cleanOtaGuestNote(line);
+		if (noteLine) collected.push(noteLine);
+		if (collected.join(" ").length >= 650) break;
+	}
+
+	return cleanOtaGuestNote(collected.join(" "));
+}
+
 function detectProvider({ from = "", to = "", subject = "", text = "" } = {}) {
 	const haystack = `${from} ${to} ${subject} ${text}`.toLowerCase();
 	if (haystack.includes("expedia") || haystack.includes("expediapartnercentral")) {
@@ -1895,6 +1984,7 @@ function extractNormalizedReservation(email) {
 		"Guest country",
 		"Residence country",
 	]);
+	const guestNotes = findGuestNoteField(text);
 	const guestPhone = findField(text, [
 		"Guest phone",
 		"Phone",
@@ -1980,6 +2070,8 @@ function extractNormalizedReservation(email) {
 		guestEmail,
 		guestPhone,
 		nationality,
+		comment: guestNotes,
+		guestNotes,
 		paidOnline,
 		paymentCollectionModel,
 		paymentInstructions: safeSnippet(
@@ -2004,6 +2096,8 @@ function extractNormalizedReservation(email) {
 			guestEmail: !!guestEmail,
 			guestPhone: !!guestPhone,
 			nationality: !!nationality,
+			comment: !!guestNotes,
+			guestNotes: !!guestNotes,
 			paymentInstructions: !!paymentInstructionField,
 			paymentCollectionModel: paymentCollectionModel !== "unknown",
 			vccCardLast4: !!cardLast4,
@@ -2551,6 +2645,9 @@ function buildReservationDocument(normalized, hotelDetails) {
 		defaultDeductionRate,
 		defaultDeductionApplied: true,
 	};
+	const guestComment = cleanOtaGuestNote(
+		normalized.comment || normalized.guestNotes || ""
+	);
 
 	return {
 		ok: true,
@@ -2592,7 +2689,8 @@ function buildReservationDocument(normalized, hotelDetails) {
 			checkin_date: normalized.checkinDate,
 			checkout_date: normalized.checkoutDate,
 			days_of_residence: pricing.daysOfResidence,
-			comment: "",
+			comment: guestComment,
+			booking_comment: guestComment,
 			financeStatus: paymentMapping.financeStatus,
 			payment: paymentMapping.payment,
 			payment_details: {
@@ -2669,6 +2767,8 @@ function buildReservationDocument(normalized, hotelDetails) {
 				otaProvider: normalized.provider,
 				otaHotelName: normalized.hotelName || "",
 				otaRoomName: normalized.roomName || "",
+				otaGuestNotes: guestComment,
+				otaNationality: normalized.nationality || "",
 				otaMatchedRoomName: roomDetails.displayName || "",
 				otaRoomMatchScore: roomMatch.score || 0,
 				otaRoomMatchType: roomMatch.matchType || "",
@@ -2718,6 +2818,7 @@ function compactUpdate(document) {
 		"checkout_date",
 		"days_of_residence",
 		"comment",
+		"booking_comment",
 		"financeStatus",
 		"payment",
 		"payment_details",
@@ -2843,6 +2944,9 @@ function buildExistingReservationUpdateSet({
 	const statusOnlyUpdate =
 		normalized.intent === "reservation_status" ||
 		["cancelled", "no_show", "status"].includes(normalized.eventType);
+	const normalizedGuestComment = cleanOtaGuestNote(
+		normalized.comment || normalized.guestNotes || ""
+	);
 
 	if (document) {
 		const docSet = compactUpdate(document);
@@ -2894,6 +2998,16 @@ function buildExistingReservationUpdateSet({
 		setIfOtaValue(set, "customer_details.email", normalized.guestEmail);
 		setIfOtaValue(set, "customer_details.phone", normalized.guestPhone);
 		setIfOtaValue(set, "customer_details.nationality", normalized.nationality);
+		if (normalizedGuestComment) {
+			if (!normalizeWhitespace(existing?.comment || "")) {
+				setIfOtaValue(set, "comment", normalizedGuestComment);
+			}
+			if (!normalizeWhitespace(existing?.booking_comment || "")) {
+				setIfOtaValue(set, "booking_comment", normalizedGuestComment);
+			}
+			setIfOtaValue(set, "supplierData.otaGuestNotes", normalizedGuestComment);
+		}
+		setIfOtaValue(set, "supplierData.otaNationality", normalized.nationality);
 		setIfOtaValue(set, "checkin_date", normalized.checkinDate);
 		setIfOtaValue(set, "checkout_date", normalized.checkoutDate);
 		if (hasSourceField(normalized, "bookedAt")) {

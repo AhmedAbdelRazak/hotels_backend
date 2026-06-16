@@ -60,7 +60,7 @@ const findExistingForCandidate = async (candidate = {}) => {
 		// eslint-disable-next-line no-await-in-loop
 		const existing = await findReservationByOtaConfirmation(
 			lookupValue,
-			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state"
+			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment"
 		);
 		if (existing) {
 			return { existing, matchedLookupValue: lookupValue };
@@ -190,6 +190,8 @@ const candidateToNormalized = ({ candidate = {}, job = {}, intent, eventType, st
 		guestEmail: candidate.guestEmail || "no-email@jannatbooking.com",
 		guestPhone: candidate.guestPhone || "0000",
 		nationality: candidate.nationality || "",
+		comment: candidate.comment || candidate.guestNotes || "",
+		guestNotes: candidate.guestNotes || candidate.comment || "",
 		paidOnline: paymentCollectionModel === "ota_collect",
 		paymentCollectionModel,
 		paymentInstructions: [
@@ -221,6 +223,8 @@ const candidateToNormalized = ({ candidate = {}, job = {}, intent, eventType, st
 			guestEmail: Boolean(candidate.guestEmail),
 			guestPhone: Boolean(candidate.guestPhone),
 			nationality: Boolean(candidate.nationality),
+			comment: Boolean(candidate.comment || candidate.guestNotes),
+			guestNotes: Boolean(candidate.guestNotes || candidate.comment),
 			paymentCollectionModel: paymentCollectionModel !== "unknown",
 			paymentInstructions: true,
 		},

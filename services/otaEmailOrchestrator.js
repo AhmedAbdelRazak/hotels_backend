@@ -448,7 +448,7 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 					{
 						role: "system",
 						content:
-							"Return strict JSON only. You are a very strict PMS reservation email classifier and extractor. Never invent a field. If a field is not clearly present, return an empty string. Status changes must only be applied when a confirmation number is present. For hotel names, preserve the exact hotel text from the email and optionally return hotelNameAliases containing only spelling/transliteration variants that can be derived from that same text, such as removing generic brand/location words, el/al spelling, apostrophes, Arabizi digits, or extra OTA/location descriptors. Do not guess a PMS hotel that is not present in the email.",
+							"Return strict JSON only. You are a very strict PMS reservation email classifier and extractor. Never invent a field. If a field is not clearly present, return an empty string. Extract guestNotes/comment only from explicit guest notes, comments, remarks, or special-request text in the email. Status changes must only be applied when a confirmation number is present. For hotel names, preserve the exact hotel text from the email and optionally return hotelNameAliases containing only spelling/transliteration variants that can be derived from that same text, such as removing generic brand/location words, el/al spelling, apostrophes, Arabizi digits, or extra OTA/location descriptors. Do not guess a PMS hotel that is not present in the email.",
 					},
 					{
 						role: "user",
@@ -494,6 +494,8 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 								guestEmail: "",
 								guestPhone: "",
 								nationality: "",
+								guestNotes: "",
+								comment: "",
 								hotelName: "",
 								hotelNameAliases: [],
 								roomName: "",
@@ -620,6 +622,16 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	fillString("guestEmail", "guestEmail", true);
 	fillString("guestPhone", "guestPhone");
 	fillString("nationality", "nationality");
+	fillString("guestNotes", "guestNotes", true);
+	fillString("comment", "comment", true);
+	if (!merged.comment && merged.guestNotes) {
+		merged.comment = merged.guestNotes;
+		markPresent("comment");
+	}
+	if (!merged.guestNotes && merged.comment) {
+		merged.guestNotes = merged.comment;
+		markPresent("guestNotes");
+	}
 	fillString("hotelName", "hotelName");
 	fillString("roomName", "roomName");
 	if (Array.isArray(decision.hotelNameAliases)) {

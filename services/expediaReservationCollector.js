@@ -1745,6 +1745,98 @@ const parseGuestCount = (value = "") => {
 	return { adults, children, totalGuests };
 };
 
+const escapeRegex = (value = "") =>
+	String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const EXPEDIA_NATIONALITY_LABELS = [
+	"Nationality",
+	"Guest nationality",
+	"Guest country",
+	"Residence country",
+	"Country/region",
+];
+
+const EXPEDIA_GUEST_NOTE_LABELS = [
+	"Guest notes",
+	"Guest note",
+	"Guest comments",
+	"Guest comment",
+	"Guest requests",
+	"Guest request",
+	"Guest message",
+	"Message from guest",
+	"Special requests",
+	"Special request",
+	"Booking note",
+	"Reservation note",
+	"Comments",
+	"Comment",
+	"Remarks",
+	"Remark",
+	"Notes",
+	"Note",
+];
+
+const EXPEDIA_DETAIL_VALUE_STOP_PATTERN =
+	/^(?:reservation|confirmation|hotel confirmation|itinerary|payment request|status|reservation made|pricing model|bedding request|rate plan|estimated arrival|room type|guest count|payment details|nightly rates?|promotion|taxes|total guest payment|expedia group|accelerator|your total payout|amount to charge|quick tasks|arrival information|cancellation policy|print this reservation|modify reservation|request to cancel|change stay dates)\b/i;
+
+const cleanExpediaGuestMetadataValue = (value = "") => {
+	const cleaned = normalizeLine(redactSensitive(value))
+		.replace(
+			/^(?:guest|customer)?\s*(?:nationality|country|country\/region|notes?|comments?|requests?|message|remarks?|booking note|reservation note|special requests?)\s*(?:[:#-]|is)?\s*/i,
+			""
+		)
+		.trim();
+	if (!cleaned) return "";
+	if (/^(?:n\/?a|na|none|null|nil|-+|not provided|not applicable)$/i.test(cleaned)) {
+		return "";
+	}
+	if (/^(?:no\s+)?(?:special\s+)?(?:requests?|comments?|notes?)$/i.test(cleaned)) {
+		return "";
+	}
+	if (
+		/(?:privacy policy|terms of use|payment details|total guest payment|amount to charge|card number|validation code|cvv|cvc)/i.test(
+			cleaned
+		)
+	) {
+		return "";
+	}
+	if (EXPEDIA_DETAIL_VALUE_STOP_PATTERN.test(cleaned)) return "";
+	return safeSnippet(cleaned, 700);
+};
+
+const lineValueAfterAnyLabel = (lines = [], labels = [], maxLookahead = 4) => {
+	const patterns = labels.map(
+		(label) =>
+			new RegExp(
+				`^${escapeRegex(label).replace(/\\ /g, "\\s+")}\\b\\s*(?:[:#-]|is)?\\s*(.*)$`,
+				"i"
+			)
+	);
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = normalizeLine(lines[index]);
+		const match = patterns.map((pattern) => line.match(pattern)).find(Boolean);
+		if (!match) continue;
+		if (match[1]) return match[1];
+		for (
+			let valueIndex = index + 1;
+			valueIndex < Math.min(lines.length, index + 1 + maxLookahead);
+			valueIndex += 1
+		) {
+			const value = normalizeLine(lines[valueIndex]);
+			if (!value || patterns.some((pattern) => pattern.test(value))) continue;
+			if (EXPEDIA_DETAIL_VALUE_STOP_PATTERN.test(value)) break;
+			return value;
+		}
+	}
+	return "";
+};
+
+const extractExpediaGuestNotesFromLines = (lines = []) =>
+	cleanExpediaGuestMetadataValue(
+		lineValueAfterAnyLabel(lines, EXPEDIA_GUEST_NOTE_LABELS, 5)
+	);
+
 const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const safeText = normalizeWhitespace(redactSensitive(rawText));
 	const lines = String(rawText || "")
@@ -1782,6 +1874,17 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const roomName =
 		lineValueAfter(lines, /^Room Type$/i, 3) || candidate.roomName || "";
 	const guestCount = parseGuestCount(lineValueAfter(lines, /^Guest count$/i, 3));
+	const nationality =
+		cleanExpediaGuestMetadataValue(
+			lineValueAfterAnyLabel(lines, EXPEDIA_NATIONALITY_LABELS, 4)
+		) ||
+		candidate.nationality ||
+		"";
+	const guestNotes =
+		extractExpediaGuestNotesFromLines(lines) ||
+		candidate.guestNotes ||
+		candidate.comment ||
+		"";
 	const paymentDetails = parseExpediaPaymentDetailsFromLines(
 		lines,
 		fallbackCurrency
@@ -1886,6 +1989,9 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		adults: guestCount.adults || candidate.adults || 0,
 		children: guestCount.children || candidate.children || 0,
 		totalGuests: guestCount.totalGuests || candidate.totalGuests || 0,
+		nationality,
+		guestNotes,
+		comment: guestNotes,
 		currency: amount?.currency || fallbackCurrency || candidate.currency || "",
 		amount: amount?.amount || candidate.amount || 0,
 		amountHint: amount?.raw || candidate.amountHint || "",
@@ -2501,6 +2607,95 @@ const extractExpediaEmbeddedPaymentText = async (page) =>
 				if (!match) return 0;
 				return numberValue(String(match[0]).replace(/,/g, ""));
 			};
+			const cleanText = (value = "") =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const firstText = (...values) => {
+				for (const value of values.flat()) {
+					const text =
+						typeof value === "string" || typeof value === "number"
+							? cleanText(value)
+							: "";
+					if (
+						text &&
+						!/^(?:n\/?a|na|none|null|not provided|not applicable)$/i.test(text)
+					) {
+						return text;
+					}
+				}
+				return "";
+			};
+			const findNestedString = (root, keyPattern, depth = 0, seen = new Set()) => {
+				if (!root || typeof root !== "object" || depth > 5 || seen.has(root)) {
+					return "";
+				}
+				seen.add(root);
+				if (Array.isArray(root)) {
+					for (const item of root) {
+						const found = findNestedString(item, keyPattern, depth + 1, seen);
+						if (found) return found;
+					}
+					return "";
+				}
+				for (const [key, value] of Object.entries(root)) {
+					if (keyPattern.test(key)) {
+						const direct = firstText(value);
+						if (direct) return direct;
+					}
+					if (value && typeof value === "object") {
+						const nested = findNestedString(value, keyPattern, depth + 1, seen);
+						if (nested) return nested;
+					}
+				}
+				return "";
+			};
+			const bookingGuestMetadata = (booking = {}) => {
+				const guestContainers = [
+					booking?.customer,
+					booking?.guest,
+					booking?.guestInfo,
+					booking?.traveler,
+					booking?.travelerInfo,
+					booking?.primaryGuest,
+					booking?.bookingTraveler,
+				].filter(Boolean);
+				const noteContainers = [
+					booking?.bookingInfo,
+					booking?.reservationInfo,
+					booking?.specialRequests,
+					booking?.guestRequests,
+					booking?.customer,
+				].filter(Boolean);
+				const nationality = firstText(
+					guestContainers.map((container) =>
+						findNestedString(
+							container,
+							/^(?:country|countryName|countryCode|nationality|guestNationality|residenceCountry)$/i
+						)
+					)
+				);
+				const guestNotes = firstText(
+					booking?.guestNote,
+					booking?.guestNotes,
+					booking?.guestMessage,
+					booking?.bookingNote,
+					booking?.bookingNotes,
+					booking?.bookingComment,
+					booking?.specialRequest,
+					booking?.specialRequests,
+					booking?.bookingInfo?.guestMessage,
+					booking?.bookingInfo?.bookingNote,
+					booking?.bookingInfo?.specialRequest,
+					noteContainers.map((container) =>
+						findNestedString(
+							container,
+							/(?:note|notes|comment|comments|request|requests|remark|remarks)$/i
+						)
+					)
+				);
+				return { nationality, guestNotes };
+			};
 			const parseJsonAssignment = (text = "", variableName = "jsonPayload") => {
 				const marker = new RegExp(
 					`(?:var|let|const)\\s+${variableName}\\s*=`
@@ -2614,8 +2809,13 @@ const extractExpediaEmbeddedPaymentText = async (page) =>
 						booking?.bookingItemIdLong ||
 						booking?.internalBookingItemId ||
 						"";
+					const guestMetadata = bookingGuestMetadata(booking);
 					const lines = [
 						reservationId ? `Reservation #${reservationId}` : "",
+						guestMetadata.nationality ? "Nationality" : "",
+						guestMetadata.nationality,
+						guestMetadata.guestNotes ? "Guest notes" : "",
+						guestMetadata.guestNotes,
 						"Payment details",
 						"Total guest payment",
 						formatMoney(currency, totalGuestPayment),
@@ -2633,7 +2833,7 @@ const extractExpediaEmbeddedPaymentText = async (page) =>
 					return lines.join("\n");
 				})
 				.filter((text) =>
-					/(total guest payment|your total payout|amount to charge expedia group)/i.test(
+					/(total guest payment|your total payout|amount to charge expedia group|nationality|guest notes)/i.test(
 						text
 					)
 				);
@@ -3031,7 +3231,7 @@ const classifyCandidate = async (candidate) => {
 	for (const lookupValue of lookupValues) {
 		existing = await findReservationByOtaConfirmation(
 			lookupValue,
-			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state"
+			"_id hotelId confirmation_number reservation_id customer_details supplierData reservation_status state comment booking_comment"
 		);
 		if (existing) {
 			matchedLookupValue = lookupValue;

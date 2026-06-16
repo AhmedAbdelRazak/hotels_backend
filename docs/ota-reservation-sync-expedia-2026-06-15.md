@@ -135,6 +135,34 @@ The payment parser specifically looks for labels such as:
 
 `Your total payout` is the preferred source for PMS net-after-OTA-expenses.
 
+## Guest metadata capture
+
+OTA-created reservations should preserve guest metadata when the OTA source
+actually provides it:
+
+- Guest nationality/country is saved to `customer_details.nationality`.
+- Guest notes, comments, remarks, messages, or special requests are saved to
+  `comment` and mirrored to `booking_comment`, matching the OrderTaker/import
+  reservation shape.
+- The same values are preserved under `supplierData.otaNationality` and
+  `supplierData.otaGuestNotes` for audit/debugging.
+
+For general OTA inbound emails, the deterministic parser reads common labels
+such as `Nationality`, `Guest nationality`, `Guest notes`, `Special request`,
+`Booking note`, `Comments`, and `Remarks`. The AI fallback may also return
+`guestNotes` / `comment`, but those values are accepted only when the text
+appears in the email body.
+
+For Expedia dashboard sync, the collector reads the visible detail-page labels
+and the embedded Expedia `jsonPayload` when available. Expedia placeholder
+values such as `N/A`, `Not provided`, `None`, or empty booking notes are ignored
+so they do not overwrite meaningful PMS data.
+
+Existing PMS reservations keep employee-managed comments authoritative. OTA
+updates fill `comment` / `booking_comment` only when those fields are empty; if
+an OTA note arrives later for an existing reservation, it is still retained in
+`supplierData.otaGuestNotes`.
+
 ## Preview buckets
 
 Preview buckets exist so the user can inspect what will happen before any write:

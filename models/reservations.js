@@ -176,6 +176,12 @@ const reservationsSchema = new mongoose.Schema(
 			lowercase: true,
 			default: "",
 		},
+		booking_comment: {
+			type: String, // Mirrors guest/special request comments used by OrderTaker/import flows
+			trim: true,
+			lowercase: true,
+			default: "",
+		},
 
 		financeStatus: {
 			type: String,
