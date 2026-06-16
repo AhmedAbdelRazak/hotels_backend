@@ -299,6 +299,8 @@ The collector was hardened without changing apply/write policy:
   target-closed, detached-frame, or main-frame lifecycle errors;
 - make page snapshots and property extraction tolerant of pages that are still
   settling after Expedia redirects;
+- scan modern Expedia row/card containers, not only table rows, so newer
+  Partner Central booking-list layouts remain visible to the parser;
 - recognize modern Expedia booking URLs that expose `bookingItemId=...`, in
   addition to legacy `reservationIds=...`;
 - treat Expedia `Unconfirmed` rows as active, non-terminal booking candidates so

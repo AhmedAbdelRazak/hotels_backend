@@ -1124,6 +1124,15 @@ const extractRows = async (page) =>
 		const selectors = [
 			"tr",
 			"[role='row']",
+			"a[href*='bookingItemId']",
+			"a[href*='reservationIds']",
+			"a[href*='reservationId']",
+			"[data-testid]",
+			"[data-stid]",
+			"li",
+			"article",
+			"section",
+			"div",
 			"[data-testid*='reservation' i]",
 			"[class*='reservation' i]",
 			"[class*='booking' i]",
@@ -1147,19 +1156,45 @@ const extractRows = async (page) =>
 							.trim()
 					)
 					.filter(Boolean);
-				const link = node.querySelector("a[href]");
+				const link =
+					node.matches?.("a[href]") ? node : node.querySelector("a[href]");
 				const href = link ? link.href : "";
 				return { text, lines, cells, href };
 			})
 			.filter((row) => {
 				if (!row.text || row.text.length < 12) return false;
 				if (row.text.length > 1600) return false;
+				if (!/\b\d{8,16}\b/.test(row.text) && !/\b(?:bookingItemId|reservationIds)=/i.test(row.href || "")) {
+					return false;
+				}
+				if (
+					!/(recent|unconfirmed|confirmed|cancelled|canceled|no[-\s]?show|check[-\s]?in|check[-\s]?out|room|suite|bed|view|booked|booking|guest|expedia|collect|usd|sar|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b)/i.test(
+						row.text
+					)
+				) {
+					return false;
+				}
 				if (/^(guest|reservation|confirmation|check[-\s]?in|check[-\s]?out|room|booked on|booking amount)\b/i.test(row.text)) {
 					return false;
 				}
 				if (seen.has(row.text)) return false;
 				seen.add(row.text);
 				return true;
+			})
+			.sort((left, right) => {
+				const score = (row) => {
+					const text = row.text || "";
+					return (
+						(row.cells?.length || 0) * 10 +
+						(row.lines?.length || 0) * 4 +
+						(/\b\d{8,16}\b/.test(text) ? 20 : 0) +
+						(/\b\d{1,2}\/\d{1,2}\/\d{2,4}\b|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/i.test(text) ? 20 : 0) +
+						(/room|suite|bed|view/i.test(text) ? 10 : 0) +
+						(/USD|SAR|Expedia Collect|Hotel Collect/i.test(text) ? 10 : 0) +
+						Math.min(text.length / 80, 12)
+					);
+				};
+				return score(right) - score(left);
 			})
 			.slice(0, 250);
 	});
@@ -1487,7 +1522,16 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 			(cell) =>
 				/(room|suite|studio|apartment|bed|view)/i.test(cell) &&
 				!/(booking amount|room$|rooms and rates)/i.test(cell)
-		) || "";
+		) ||
+		lines.find(
+			(line) =>
+				/(room|suite|studio|apartment|bed|view)/i.test(line) &&
+				!/(booking amount|rooms and rates|^room$|modify reservation|cancellation policy|payment summary)/i.test(
+					line
+				) &&
+				line.length <= 140
+		) ||
+		"";
 	const detailUrl =
 		row.href && /reservation|booking|legacy/i.test(row.href)
 			? row.href
