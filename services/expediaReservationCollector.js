@@ -346,6 +346,18 @@ const safePageSnapshot = async (page) => {
 	}
 };
 
+const stablePageSnapshot = async (page, attempts = 6) => {
+	let snapshot = await safePageSnapshot(page);
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
+		if (!snapshot.error || !isRecoverablePageLifecycleError(snapshot.error)) {
+			return snapshot;
+		}
+		await delay(250 + attempt * 150);
+		snapshot = await safePageSnapshot(page);
+	}
+	return snapshot;
+};
+
 const isElementVisible = (element) =>
 	element.evaluate((node) => {
 		const style = window.getComputedStyle(node);
@@ -2415,7 +2427,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		});
 		await delay(1500);
 
-		let snapshot = await safePageSnapshot(page);
+		let snapshot = await stablePageSnapshot(page);
 		if (isLoginOrVerificationPage(snapshot)) {
 			const loginResult = await attemptExpediaLogin({
 				jobId,
@@ -2446,15 +2458,30 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				return;
 			}
 			page = loginResult.page || page;
-			snapshot = await safePageSnapshot(page);
+			await Promise.race([
+				page
+					.waitForNavigation({
+						waitUntil: "domcontentloaded",
+						timeout: 5000,
+					})
+					.catch(() => null),
+				delay(1800),
+			]);
+			snapshot = await stablePageSnapshot(page);
 		}
 
 		if (!hasPropertyListText(snapshot.text)) {
 			page = await gotoCollectorPage({
 				browser,
 				page,
-				url: process.env.OTA_EXPEDIA_LOGIN_URL || DEFAULT_LOGIN_URL,
+				url: managePropertyUrl,
+				retries: 3,
 			});
+			await delay(1500);
+			snapshot = await stablePageSnapshot(page);
+		}
+
+		if (!hasPropertyListText(snapshot.text)) {
 			const propertyPage = await findPageByContent(
 				browser,
 				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
