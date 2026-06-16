@@ -117,6 +117,29 @@ const toUsDateInput = (value = "") => {
 	).padStart(2, "0")}/${parsed.getFullYear()}`;
 };
 
+const isoDateOnly = (date) => date.toISOString().slice(0, 10);
+
+const addUtcDays = (date, days) => {
+	const next = new Date(date);
+	next.setUTCDate(next.getUTCDate() + days);
+	return next;
+};
+
+const clampIsoDate = (value, min, max) => {
+	if (min && value < min) return min;
+	if (max && value > max) return max;
+	return value;
+};
+
+const recentBookedDateRangeForJob = (job = {}) => {
+	const today = isoDateOnly(new Date());
+	const recentFrom = isoDateOnly(addUtcDays(new Date(`${today}T00:00:00.000Z`), -2));
+	const from = clampIsoDate(recentFrom, job.dateFrom || "", job.dateTo || "");
+	const to = clampIsoDate(today, job.dateFrom || "", job.dateTo || "");
+	if (!from || !to || from > to) return null;
+	return { dateFrom: from, dateTo: to };
+};
+
 const ensureDirectory = (dir) => {
 	fs.mkdirSync(dir, { recursive: true });
 	return dir;
@@ -750,11 +773,87 @@ const waitForReservationsSurface = async (page) => {
 	await delay(900);
 };
 
-const applyBookingsDateFilter = async (page, { dateFrom = "", dateTo = "" } = {}) => {
+const selectBookingsDateMode = async (page, mode = "") => {
+	const normalizedMode = normalizeLine(mode).toLowerCase();
+	if (!normalizedMode) return false;
+	return page
+		.evaluate((modeKey) => {
+			const patterns =
+				modeKey === "booked_on"
+					? [/booked\s+on/i, /booking\s+date/i, /^booked$/i]
+					: modeKey === "checking_in"
+					? [/checking\s+in/i, /check[-\s]?in/i, /arrival/i]
+					: modeKey === "checking_out"
+					? [/checking\s+out/i, /check[-\s]?out/i, /departure/i]
+					: [];
+			if (!patterns.length) return false;
+			const normalize = (value) =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const visible = (node) => {
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					rect.width > 0 &&
+					rect.height > 0 &&
+					node.getAttribute("aria-disabled") !== "true" &&
+					!node.disabled
+				);
+			};
+			const nodes = Array.from(
+				document.querySelectorAll(
+					"label, button, [role='radio'], [role='button'], input[type='radio']"
+				)
+			);
+			const candidate = nodes.find((node) => {
+				if (!visible(node)) return false;
+				const labelFor = node.getAttribute("for");
+				const labelledInput = labelFor
+					? document.getElementById(labelFor)
+					: null;
+				const text = normalize(
+					[
+						node.innerText,
+						node.textContent,
+						node.value,
+						node.getAttribute("aria-label"),
+						node.getAttribute("title"),
+						labelledInput?.getAttribute("aria-label"),
+					]
+						.filter(Boolean)
+						.join(" ")
+				);
+				return patterns.some((pattern) => pattern.test(text));
+			});
+			if (!candidate) return false;
+			const clickable =
+				candidate.closest("label, button, [role='radio'], [role='button']") ||
+				candidate;
+			clickable.click();
+			return true;
+		}, normalizedMode)
+		.catch(() => false);
+};
+
+const applyBookingsDateFilter = async (
+	page,
+	{ dateFrom = "", dateTo = "", dateMode = "" } = {}
+) => {
 	const from = toUsDateInput(dateFrom);
 	const to = toUsDateInput(dateTo);
 	if (!from || !to) {
 		return { applied: false, reason: "missing_range" };
+	}
+
+	const modeSelected = dateMode
+		? await selectBookingsDateMode(page, dateMode)
+		: false;
+	if (modeSelected) {
+		await delay(350);
 	}
 
 	const fieldResult = await page
@@ -825,6 +924,8 @@ const applyBookingsDateFilter = async (page, { dateFrom = "", dateTo = "" } = {}
 		applied: Boolean(fieldResult.fromSet && fieldResult.toSet && clickedApply),
 		from,
 		to,
+		dateMode,
+		modeSelected,
 		...fieldResult,
 		clickedApply,
 	};
@@ -1751,6 +1852,43 @@ const extractReservationCandidates = async (page, hotel, property) => {
 	);
 };
 
+const reservationCandidateKey = (candidate = {}) =>
+	`${candidate.hotelId || ""}:${
+		normalizeConfirmation(candidate.confirmationNumber || candidate.reservationId) ||
+		normalizeConfirmation(candidate.hotelConfirmationNumber) ||
+		normalizeWhitespace(candidate.sourceSnippet || "").slice(0, 120)
+	}`;
+
+const scoreReservationCandidate = (candidate = {}) => {
+	const fields = [
+		candidate.confirmationNumber,
+		candidate.reservationId,
+		candidate.guestName,
+		candidate.checkinDate,
+		candidate.checkoutDate,
+		candidate.roomName,
+		candidate.amount,
+		candidate.amountHint,
+		candidate.statusRaw,
+		candidate.sourceUrl,
+	].filter(Boolean).length;
+	return fields * 10 + Math.min(String(candidate.sourceSnippet || "").length / 80, 12);
+};
+
+const mergeReservationCandidates = (...candidateGroups) => {
+	const byKey = new Map();
+	for (const group of candidateGroups) {
+		for (const candidate of Array.isArray(group) ? group : []) {
+			const key = reservationCandidateKey(candidate);
+			const existing = byKey.get(key);
+			if (!existing || scoreReservationCandidate(candidate) > scoreReservationCandidate(existing)) {
+				byKey.set(key, candidate);
+			}
+		}
+	}
+	return Array.from(byKey.values());
+};
+
 const emptyBuckets = () => ({
 	newReservations: [],
 	skippedCancelled: [],
@@ -2351,11 +2489,35 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				continue;
 			}
 			await scrollToLoadVisibleContent(page).catch(() => {});
-			const candidates = await extractReservationCandidates(
+			let candidates = await extractReservationCandidates(
 				page,
 				hotel,
 				match.property
 			);
+			const recentBookedRange = recentBookedDateRangeForJob(job);
+			if (recentBookedRange) {
+				const recentBookedDateFilter = await applyBookingsDateFilter(page, {
+					...recentBookedRange,
+					dateMode: "booked_on",
+				}).catch((error) => ({
+					applied: false,
+					dateMode: "booked_on",
+					error: error && error.message ? error.message : String(error),
+				}));
+				if (recentBookedDateFilter.applied) {
+					await scrollToLoadVisibleContent(page).catch(() => {});
+					const recentBookedCandidates = await extractReservationCandidates(
+						page,
+						hotel,
+						match.property
+					).catch(() => []);
+					candidates = mergeReservationCandidates(
+						candidates,
+						recentBookedCandidates
+					);
+				}
+				reservationNavigation.recentBookedDateFilter = recentBookedDateFilter;
+			}
 			if (!candidates.length) {
 				const pageSnapshot = await safePageSnapshot(page);
 				buckets.needsReview.push({

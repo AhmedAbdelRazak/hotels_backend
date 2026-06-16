@@ -306,6 +306,9 @@ The collector was hardened without changing apply/write policy:
 - treat Expedia `Unconfirmed` rows as active, non-terminal booking candidates so
   they remain eligible for new-reservation preview and human-reviewed Save Safe
   Writes.
+- add a narrow `Booked on` recent-date pass after the normal stay-date scan so
+  same-day new bookings are not hidden behind Expedia pagination or broad-range
+  list slicing.
 
 This fix is intentionally read-only until the normal apply step. It should make
 the Zad Al Qimma run reach `preview_ready` and show `2485791085` as a new
