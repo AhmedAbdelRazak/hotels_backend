@@ -1889,6 +1889,29 @@ const mergeReservationCandidates = (...candidateGroups) => {
 	return Array.from(byKey.values());
 };
 
+const isDateInRange = (value = "", dateFrom = "", dateTo = "") => {
+	const date = parseExpediaDate(value) || normalizeLine(value);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+	if (dateFrom && date < dateFrom) return false;
+	if (dateTo && date > dateTo) return false;
+	return true;
+};
+
+const filterCandidatesForJobRange = (candidates = [], job = {}) => {
+	const dateFrom = normalizeLine(job.dateFrom || "");
+	const dateTo = normalizeLine(job.dateTo || "");
+	if (!dateFrom && !dateTo) return candidates;
+	return candidates.filter((candidate) => {
+		const dates = [
+			candidate.checkinDate,
+			candidate.checkoutDate,
+			candidate.bookedAt,
+		].filter(Boolean);
+		if (!dates.length) return true;
+		return dates.some((date) => isDateInRange(date, dateFrom, dateTo));
+	});
+};
+
 const emptyBuckets = () => ({
 	newReservations: [],
 	skippedCancelled: [],
@@ -2494,6 +2517,39 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				hotel,
 				match.property
 			);
+			const defaultBookingsUrl = buildExpediaBookingsUrl(
+				match.property.expediaPropertyId
+			);
+			const defaultBookingsPass = await gotoCollectorPage({
+				browser,
+				page,
+				url: defaultBookingsUrl,
+			})
+				.then(async (defaultPage) => {
+					page = defaultPage;
+					await waitForReservationsSurface(page);
+					await scrollToLoadVisibleContent(page).catch(() => {});
+					const defaultCandidates = filterCandidatesForJobRange(
+						await extractReservationCandidates(page, hotel, match.property).catch(
+							() => []
+						),
+						job
+					);
+					candidates = mergeReservationCandidates(candidates, defaultCandidates);
+					return {
+						opened: true,
+						method: "default_next_reservations",
+						href: defaultBookingsUrl,
+						candidateCount: defaultCandidates.length,
+					};
+				})
+				.catch((error) => ({
+					opened: false,
+					method: "default_next_reservations_error",
+					href: defaultBookingsUrl,
+					error: error && error.message ? error.message : String(error),
+				}));
+			reservationNavigation.defaultBookingsPass = defaultBookingsPass;
 			const recentBookedRange = recentBookedDateRangeForJob(job);
 			if (recentBookedRange) {
 				const recentBookedDateFilter = await applyBookingsDateFilter(page, {

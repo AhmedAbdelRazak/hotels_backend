@@ -309,6 +309,11 @@ The collector was hardened without changing apply/write policy:
 - add a narrow `Booked on` recent-date pass after the normal stay-date scan so
   same-day new bookings are not hidden behind Expedia pagination or broad-range
   list slicing.
+- read Expedia's default `Showing your next reservations` list before the
+  date-filtered passes, then keep only candidates whose stay/booked dates still
+  fit the job range. This catches Partner Central rows such as reservation
+  `2485791085` that are visible in the default list/detail drawer but absent
+  from the broad filtered result.
 
 This fix is intentionally read-only until the normal apply step. It should make
 the Zad Al Qimma run reach `preview_ready` and show `2485791085` as a new
