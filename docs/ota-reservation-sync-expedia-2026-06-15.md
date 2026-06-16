@@ -199,9 +199,9 @@ generalCommission = 10% of hotelBaseTotal
 platformMargin = netAfterOtaExpenses - hotelBaseTotal
 ```
 
-When Expedia payout is missing for an Expedia Collect sync candidate, the apply
-step must keep the candidate in review instead of auto-creating with a generic
-fallback. When payout is present, payout wins.
+When Expedia payout is missing for an Expedia Collect dashboard-sync candidate,
+the apply step must keep the candidate in review instead of auto-creating with a
+generic fallback. When payout is present, payout wins.
 
 Hotel base/root fallback for each night follows the PMS checkout idea:
 
@@ -229,9 +229,11 @@ Nightly rows must preserve these fields:
 The generic OTA inbound email mapper shares the same admin pricing buckets, but
 its fallback is provider-aware:
 
-- Expedia Collect inbound emails must have an explicit SAR payout/net amount
-  before a new reservation is auto-created. If the email parser cannot capture
-  that payout, reconciliation returns `needs_review`.
+- Expedia Collect inbound emails may auto-create when the rest of the
+  reservation payload is complete. If Partner Central payout lookup is
+  unavailable and no explicit payout is captured, the fallback sets
+  `netAfterExpensesTotal = clientTotal`, making OTA expense zero for that
+  email-created reservation.
 - Non-Expedia OTA inbound emails may still auto-create when the rest of the
   reservation payload is complete. If no explicit OTA payout is captured, the
   default `netAfterExpensesTotal` is `clientTotal - 20%`, configurable through

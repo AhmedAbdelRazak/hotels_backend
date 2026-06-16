@@ -1144,12 +1144,13 @@ function isOtaCollectPayment(normalized = {}) {
 	);
 }
 
-function requiresCapturedExpediaInboundPayout(normalized = {}) {
+function shouldUseExpediaInboundClientTotalFallback(normalized = {}) {
 	return (
 		isOtaInboundEmail(normalized) &&
 		isExpediaProvider(normalized) &&
 		isOtaCollectPayment(normalized) &&
-		!hasExplicitOtaPayoutSar(normalized)
+		!hasExplicitOtaPayoutSar(normalized) &&
+		Number(normalized.totalAmountSar || normalized.amount || 0) > 0
 	);
 }
 
@@ -2618,6 +2619,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 				exchangeRateSource:
 					sourceExchangeRateSource || normalized.exchangeRateSource || "",
 				amountConvertedAt: normalized.amountConvertedAt || "",
+				payoutFallbackReason: normalized.otaPayoutFallbackReason || "",
 			},
 			adminPricingVisibility: requiresPlatformReview
 				? {
@@ -2645,6 +2647,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 				sourceExchangeRateToSar,
 				sourceExchangeRateSource,
 				paymentSummary: safePaymentSummary,
+				payoutFallbackReason: normalized.otaPayoutFallbackReason || "",
 			},
 			otaPlatformReview: requiresPlatformReview
 				? buildOtaReviewSnapshot({
@@ -2678,6 +2681,7 @@ function buildReservationDocument(normalized, hotelDetails) {
 				otaSourceExchangeRateToSar: sourceExchangeRateToSar,
 				otaSourceExchangeRateSource: sourceExchangeRateSource,
 				otaPaymentSummary: safePaymentSummary,
+				otaPayoutFallbackReason: normalized.otaPayoutFallbackReason || "",
 				otaTotalPayoutSar: adminPricingTotals.netAfterExpensesTotal,
 				otaExpenseTotalSar: adminPricingTotals.otaExpenseTotal,
 				otaPlatformMarginSar: adminPricingTotals.platformMarginTotal,
@@ -3914,24 +3918,29 @@ async function reconcileOtaReservation(inputNormalized) {
 	if (
 		!existing &&
 		hasCompleteCreatePayload &&
-		requiresCapturedExpediaInboundPayout(normalized)
+		shouldUseExpediaInboundClientTotalFallback(normalized)
 	) {
-		logReconcile("needs_review.missing_expedia_inbound_payout", {
+		const fallbackNetTotal = round2(
+			normalized.totalAmountSar || normalized.amount || 0
+		);
+		const fallbackWarning =
+			"Expedia inbound email did not include a captured payout; using the client total as net-after-OTA because Partner Central payout lookup was unavailable.";
+		if (!warnings.includes(fallbackWarning)) warnings.push(fallbackWarning);
+		normalized.warnings = Array.from(
+			new Set([...(normalized.warnings || []), fallbackWarning])
+		);
+		normalized.totalPayoutSar = fallbackNetTotal;
+		normalized.netAfterExpensesTotal = fallbackNetTotal;
+		normalized.otaPayoutFallbackReason =
+			"expedia_inbound_email_partner_central_unavailable";
+		logReconcile("pricing.expedia_inbound_client_total_fallback", {
 			confirmationNumber,
 			provider: normalized.provider || "",
 			paymentCollectionModel: normalized.paymentCollectionModel || "",
-			totalAmountSar: normalized.totalAmountSar || 0,
+			totalAmountSar: fallbackNetTotal,
 			sourceFrom: normalized.source?.from || "",
 			inboundEmailId: normalized.inboundEmailId || "",
 		});
-		return {
-			status: "needs_review",
-			warnings,
-			errors: [
-				...errors,
-				"Expedia Collect inbound email did not include a captured SAR payout/net amount; review payment details before creating the reservation.",
-			],
-		};
 	}
 
 	const hotelDetails = await resolveHotel(normalized, existing);
