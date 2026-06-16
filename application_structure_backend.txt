@@ -2653,3 +2653,24 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Jannat Tools source behavior:
   - controllers/janat.js normalizes blank/manual/Manual Reservation booking_source values to Jannat Employee for /new-reservation-client-employee.
   - The normalized value is saved in both the reservation document and reservationAuditLog.
+
+2026-06-16 Expedia OTA Full Details Tab Capture
+- File:
+  - services/expediaReservationCollector.js
+- Context:
+  - Expedia Partner Central may open the legacy reservation details page from
+    the modern drawer's "See all reservation details" button in a new tab/window.
+  - Job OTA-RES-SYNC-20260616175543-5QYO4 found Zad Al Qimma reservation
+    2485791085 but kept reading the modern drawer, so "Your total payout" stayed
+    missing and the apply guard correctly left the candidate in review.
+- Fix:
+  - The collector now waits for a legacyReservationDetails.html page matching
+    the same reservation ID, brings that page forward, and parses payment details
+    from it before deciding payout is missing.
+  - The full-details click helper marks only the selected button as the click
+    target, not every visible ancestor that contains the same text.
+- Safety:
+  - Apply/write policy is unchanged. Expedia dashboard sync still refuses to
+    create a new Expedia Collect reservation when payout is not captured.
+  - Existing preview jobs are not rewritten; a fresh frontend sync is required
+    to re-read Expedia with the tab-switching collector.

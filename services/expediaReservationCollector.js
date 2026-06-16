@@ -253,6 +253,64 @@ const waitForUsablePage = async (page) => {
 	return false;
 };
 
+const candidateReservationDetailId = (candidate = {}) =>
+	normalizeConfirmation(candidate.reservationId || candidate.confirmationNumber || "");
+
+const isLegacyReservationDetailUrl = (href = "") => {
+	const raw = String(href || "");
+	if (!/legacyReservationDetails\.html/i.test(raw)) return false;
+	try {
+		const url = new URL(raw, expediaAppBaseUrl());
+		return (
+			/expediapartnercentral\.com$/i.test(url.hostname) &&
+			/legacyReservationDetails\.html/i.test(url.pathname)
+		);
+	} catch (_error) {
+		return false;
+	}
+};
+
+const isLegacyDetailPageForCandidate = (href = "", candidate = {}) => {
+	if (!isLegacyReservationDetailUrl(href)) return false;
+	const expectedId = candidateReservationDetailId(candidate);
+	if (!expectedId) return true;
+	const urlId = reservationIdFromExpediaUrl(href);
+	return !urlId || urlId === expectedId || String(href || "").includes(expectedId);
+};
+
+const pageFromTarget = async (target) => {
+	if (!target || target.type?.() !== "page") return null;
+	const page = await target.page().catch(() => null);
+	if (!page || page.isClosed?.()) return null;
+	configureCollectorPage(page);
+	await waitForUsablePage(page);
+	return page;
+};
+
+const findOpenLegacyDetailPage = async (
+	browser,
+	candidate = {},
+	timeoutMs = 0
+) => {
+	const deadline = Date.now() + Math.max(Number(timeoutMs || 0), 0);
+	for (;;) {
+		const pages = browser?.pages
+			? await browser.pages().catch(() => [])
+			: [];
+		const matches = pages.filter((openPage) =>
+			isLegacyDetailPageForCandidate(safePageUrl(openPage), candidate)
+		);
+		const page = matches[matches.length - 1];
+		if (page && !page.isClosed?.()) {
+			configureCollectorPage(page);
+			await waitForUsablePage(page);
+			return page;
+		}
+		if (!timeoutMs || Date.now() >= deadline) return null;
+		await delay(250);
+	}
+};
+
 const closeRestoredPages = async (browser) => {
 	const pages = await browser.pages().catch(() => []);
 	for (const page of pages) {
@@ -2127,7 +2185,7 @@ const clickPaymentDetailsTrigger = async (page) => {
 	return { clicked: true, text: target.text };
 };
 
-const clickSeeAllReservationDetails = async (page) => {
+const clickSeeAllReservationDetails = async (page, candidate = {}) => {
 	const target = await page
 		.evaluate(() => {
 			const normalize = (value) =>
@@ -2170,12 +2228,8 @@ const clickSeeAllReservationDetails = async (page) => {
 					const isNativeButton = /^(BUTTON|A|INPUT)$/i.test(node.tagName);
 					const huge =
 						rect.width > window.innerWidth * 0.7 || rect.height > 180;
-					const token = `jannat_full_details_${Date.now()}_${Math.random()
-						.toString(36)
-						.slice(2)}`;
-					node.setAttribute("data-jannat-full-details-trigger", token);
 					return {
-						token,
+						node,
 						text,
 						x: rect.left + rect.width / 2,
 						y: rect.top + rect.height / 2,
@@ -2190,11 +2244,40 @@ const clickSeeAllReservationDetails = async (page) => {
 				})
 				.filter(Boolean)
 				.sort((left, right) => left.score - right.score);
-			return candidates[0] || null;
+			const best = candidates[0];
+			if (!best) return null;
+			const token = `jannat_full_details_${Date.now()}_${Math.random()
+				.toString(36)
+				.slice(2)}`;
+			best.node.setAttribute("data-jannat-full-details-trigger", token);
+			return {
+				token,
+				text: best.text,
+				x: best.x,
+				y: best.y,
+			};
 		})
 		.catch(() => null);
 	if (!target) return { clicked: false };
 
+	const browser = page.browser?.();
+	const legacyTargetPromise = browser?.waitForTarget
+		? browser
+				.waitForTarget(
+					(target) => {
+						try {
+							return (
+								target.type?.() === "page" &&
+								isLegacyDetailPageForCandidate(target.url(), candidate)
+							);
+						} catch (_error) {
+							return false;
+						}
+					},
+					{ timeout: 10000 }
+				)
+				.catch(() => null)
+		: Promise.resolve(null);
 	const navigation = Promise.race([
 		page
 			.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 9000 })
@@ -2211,30 +2294,58 @@ const clickSeeAllReservationDetails = async (page) => {
 	]);
 	await page.mouse.click(target.x, target.y).catch(() => {});
 	await delay(300);
-	await page
-		.evaluate((token) => {
-			const node = document.querySelector(
-				`[data-jannat-full-details-trigger="${token}"]`
-			);
-			if (!node) return;
-			if (typeof node.focus === "function") node.focus();
-			for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
-				node.dispatchEvent(
-					new MouseEvent(eventName, {
-						bubbles: true,
-						cancelable: true,
-						view: window,
-					})
+	let legacyTarget = await Promise.race([
+		legacyTargetPromise,
+		delay(700).then(() => null),
+	]);
+	if (!legacyTarget) {
+		await page
+			.evaluate((token) => {
+				const node = document.querySelector(
+					`[data-jannat-full-details-trigger="${token}"]`
 				);
-			}
-			if (typeof node.click === "function") node.click();
-		}, target.token)
-		.catch(() => {});
-	await page.keyboard.press("Enter").catch(() => {});
-	await delay(250);
-	await page.keyboard.press("Space").catch(() => {});
+				if (!node) return;
+				if (typeof node.focus === "function") node.focus();
+				for (const eventName of [
+					"pointerdown",
+					"mousedown",
+					"mouseup",
+					"click",
+				]) {
+					node.dispatchEvent(
+						new MouseEvent(eventName, {
+							bubbles: true,
+							cancelable: true,
+							view: window,
+						})
+					);
+				}
+				if (typeof node.click === "function") node.click();
+			}, target.token)
+			.catch(() => {});
+		await page.keyboard.press("Enter").catch(() => {});
+		await delay(250);
+		await page.keyboard.press("Space").catch(() => {});
+		legacyTarget = await Promise.race([
+			legacyTargetPromise,
+			navigation,
+			delay(10000).then(() => null),
+		]);
+	}
+	const openedPage =
+		(await pageFromTarget(legacyTarget)) ||
+		(await findOpenLegacyDetailPage(browser, candidate, 1200));
+	if (openedPage) {
+		await openedPage.bringToFront().catch(() => {});
+		return {
+			clicked: true,
+			text: target.text,
+			page: openedPage,
+			openedNewPage: openedPage !== page,
+		};
+	}
 	await navigation;
-	return { clicked: true, text: target.text };
+	return { clicked: true, text: target.text, page };
 };
 
 const expandReservationPaymentSections = async (page) => {
@@ -2465,9 +2576,10 @@ const readReservationDetailFromCurrentPage = async (page) => {
 
 const enrichCandidateFromDetailPage = async (page, candidate) => {
 	if (!candidate.detailUrl) return candidate;
-	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
+	let detailPage = page;
+	await detailPage.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
 	await delay(1200);
-	let detailRead = await readReservationDetailFromCurrentPage(page);
+	let detailRead = await readReservationDetailFromCurrentPage(detailPage);
 	let detail = parseExpediaReservationDetailText(detailRead.detailText, candidate);
 	let enriched = mergeDetailCandidate({
 		candidate,
@@ -2487,9 +2599,9 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 		!hasPaymentSummaryPayout(enriched.paymentSummary) &&
 		(!loadedLegacyDetailUrl || !legacyDetailHadPaymentSurface);
 	if (shouldRetryLegacyDetail) {
-		await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
+		await detailPage.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
 		await delay(1800);
-		detailRead = await readReservationDetailFromCurrentPage(page);
+		detailRead = await readReservationDetailFromCurrentPage(detailPage);
 		detail = parseExpediaReservationDetailText(detailRead.detailText, enriched);
 		enriched = mergeDetailCandidate({
 			candidate: enriched,
@@ -2499,15 +2611,35 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 		});
 	}
 
+	if (!hasPaymentSummaryPayout(enriched.paymentSummary)) {
+		const openLegacyPage = await findOpenLegacyDetailPage(
+			detailPage.browser?.(),
+			enriched,
+			900
+		);
+		if (openLegacyPage && openLegacyPage !== detailPage) {
+			detailPage = openLegacyPage;
+			await detailPage.bringToFront().catch(() => {});
+			detailRead = await readReservationDetailFromCurrentPage(detailPage);
+			detail = parseExpediaReservationDetailText(detailRead.detailText, enriched);
+			enriched = mergeDetailCandidate({
+				candidate: enriched,
+				detail,
+				snapshot: detailRead.snapshot,
+				detailUrl: detailRead.snapshot.url || candidate.detailUrl,
+			});
+		}
+	}
+
 	const shouldTryModernDrawer =
 		candidate.modernDetailUrl &&
 		candidate.modernDetailUrl !== candidate.detailUrl &&
 		(!hasPaymentSummaryPayout(enriched.paymentSummary) ||
 			!hasPaymentSummaryGuestTotal(enriched.paymentSummary));
 	if (shouldTryModernDrawer) {
-		await page.goto(candidate.modernDetailUrl, { waitUntil: "domcontentloaded" });
+		await detailPage.goto(candidate.modernDetailUrl, { waitUntil: "domcontentloaded" });
 		await delay(1200);
-		const modernRead = await readReservationDetailFromCurrentPage(page);
+		const modernRead = await readReservationDetailFromCurrentPage(detailPage);
 		const modernDetail = parseExpediaReservationDetailText(
 			modernRead.detailText,
 			enriched
@@ -2523,12 +2655,17 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	const shouldTryFullDetailsFromDrawer =
 		candidate.modernDetailUrl && !hasPaymentSummaryPayout(enriched.paymentSummary);
 	if (shouldTryFullDetailsFromDrawer) {
-		const fullDetailsClick = await clickSeeAllReservationDetails(page).catch(() => ({
+		const fullDetailsClick = await clickSeeAllReservationDetails(
+			detailPage,
+			enriched
+		).catch(() => ({
 			clicked: false,
 		}));
 		if (fullDetailsClick.clicked) {
+			detailPage = fullDetailsClick.page || detailPage;
+			await detailPage.bringToFront().catch(() => {});
 			await delay(1500);
-			const fullRead = await readReservationDetailFromCurrentPage(page);
+			const fullRead = await readReservationDetailFromCurrentPage(detailPage);
 			const fullDetail = parseExpediaReservationDetailText(
 				fullRead.detailText,
 				enriched
@@ -2544,7 +2681,7 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 
 	if (!hasPaymentSummaryPayout(enriched.paymentSummary)) {
 		enriched.paymentExpansionDiagnostics =
-			await collectPaymentExpansionDiagnostics(page);
+			await collectPaymentExpansionDiagnostics(detailPage);
 	}
 
 	return enriched;

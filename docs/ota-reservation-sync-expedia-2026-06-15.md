@@ -390,6 +390,10 @@ Follow-up payout capture hardening:
   drawer still does not expose payout, it clicks `See all reservation details`
   and parses the full legacy details page before allowing the apply guard to
   create anything.
+- Expedia can open `See all reservation details` in a new browser tab/window.
+  The collector now watches for a legacy detail page matching the same
+  reservation ID, switches scraping to that page, and parses payout from there
+  instead of continuing to read the old modern drawer.
 
 ## Production correction reference
 
