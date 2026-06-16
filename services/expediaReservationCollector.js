@@ -2481,6 +2481,166 @@ const extractReservationPaymentDisplayText = async (page) =>
 		})
 		.catch(() => "");
 
+const extractExpediaEmbeddedPaymentText = async (page) =>
+	page
+		.evaluate(() => {
+			const numberValue = (value) => {
+				const number = Number(value);
+				return Number.isFinite(number) ? number : 0;
+			};
+			const positiveAmount = (value) => Math.abs(numberValue(value));
+			const formatMoney = (currency, amount) => {
+				const number = Number(amount);
+				if (!Number.isFinite(number) || number === 0) return "";
+				return `${currency || "USD"} ${number.toFixed(2)}`;
+			};
+			const parseMoneyAmount = (value = "") => {
+				const match = String(value || "").match(
+					/[-+]?\d[\d,]*(?:\.\d{1,2})?/
+				);
+				if (!match) return 0;
+				return numberValue(String(match[0]).replace(/,/g, ""));
+			};
+			const parseJsonAssignment = (text = "", variableName = "jsonPayload") => {
+				const marker = new RegExp(
+					`(?:var|let|const)\\s+${variableName}\\s*=`
+				).exec(text);
+				if (!marker) return null;
+				const start = text.indexOf("{", marker.index + marker[0].length);
+				if (start < 0) return null;
+				let depth = 0;
+				let inString = false;
+				let quote = "";
+				let escaped = false;
+				for (let index = start; index < text.length; index += 1) {
+					const char = text[index];
+					if (inString) {
+						if (escaped) {
+							escaped = false;
+						} else if (char === "\\") {
+							escaped = true;
+						} else if (char === quote) {
+							inString = false;
+							quote = "";
+						}
+						continue;
+					}
+					if (char === '"' || char === "'") {
+						inString = true;
+						quote = char;
+						continue;
+					}
+					if (char === "{") depth += 1;
+					if (char === "}") {
+						depth -= 1;
+						if (depth === 0) {
+							return JSON.parse(text.slice(start, index + 1));
+						}
+					}
+				}
+				return null;
+			};
+			const getJsonPayload = () => {
+				if (window.jsonPayload && Array.isArray(window.jsonPayload.value)) {
+					return window.jsonPayload;
+				}
+				const scripts = Array.from(document.scripts || [])
+					.map((script) => script.textContent || "")
+					.filter((text) => /jsonPayload|bookingAmounts|totalAmount/i.test(text));
+				for (const scriptText of scripts) {
+					const payload = parseJsonAssignment(scriptText);
+					if (payload && Array.isArray(payload.value)) return payload;
+				}
+				return null;
+			};
+			const payload = getJsonPayload();
+			const bookings = Array.isArray(payload?.value) ? payload.value : [];
+			const paymentTexts = bookings
+				.map((booking) => {
+					const lineItems = Array.isArray(booking?.bookingAmounts?.lineItems)
+						? booking.bookingAmounts.lineItems
+						: [];
+					const findLineItem = (type = "", description = "") =>
+						lineItems.find((item) => {
+							const typeMatches = !type || item?.type === type;
+							const descriptionMatches =
+								!description ||
+								String(item?.description || "").includes(description);
+							return typeMatches && descriptionMatches;
+						}) || null;
+					const totalLine =
+						findLineItem("TOTAL", "TOTAL_BOOKING_AMOUNT") || {};
+					const taxLine = findLineItem("TAX", "taxes") || {};
+					const ecChargeLine =
+						findLineItem("EC_CHARGE", "AMOUNT_TO_CHARGE_EXPEDIA_GROUP") ||
+						findLineItem("", "AMOUNT_TO_CHARGE_EXPEDIA_GROUP") ||
+						{};
+					const ecCommissionLine =
+						findLineItem(
+							"EC_COMMISSION",
+							"EXPEDIA_GROUP_COMPENSATION_WITH_ACCELERATOR"
+						) ||
+						findLineItem("", "EXPEDIA_GROUP_COMPENSATION") ||
+						{};
+					const totalBookingAmount =
+						booking?.totalAmounts?.totalBookingAmount || {};
+					const currency =
+						totalBookingAmount.currency ||
+						totalLine.priceCurrency ||
+						totalLine.costCurrency ||
+						ecChargeLine.costCurrency ||
+						ecChargeLine.priceCurrency ||
+						"USD";
+					const totalGuestPayment =
+						numberValue(totalBookingAmount.amount) ||
+						numberValue(totalLine.priceAmount) ||
+						numberValue(totalLine.costAmount);
+					const payout =
+						numberValue(ecChargeLine.costAmount) ||
+						numberValue(ecChargeLine.priceAmount) ||
+						parseMoneyAmount(booking?.totalAmount);
+					const accelerator = positiveAmount(
+						ecCommissionLine.acceleratorCostAmount
+					);
+					const commissionWithAccelerator = positiveAmount(
+						ecCommissionLine.costAmount
+					);
+					const expediaCompensation =
+						commissionWithAccelerator && accelerator
+							? Math.max(commissionWithAccelerator - accelerator, 0)
+							: commissionWithAccelerator;
+					const reservationId =
+						booking?.bookingItemId ||
+						booking?.bookingItemIdLong ||
+						booking?.internalBookingItemId ||
+						"";
+					const lines = [
+						reservationId ? `Reservation #${reservationId}` : "",
+						"Payment details",
+						"Total guest payment",
+						formatMoney(currency, totalGuestPayment),
+						"Taxes",
+						formatMoney(currency, taxLine.costAmount),
+						"Expedia Group's compensation",
+						formatMoney(currency, -expediaCompensation),
+						"Accelerator",
+						formatMoney(currency, -accelerator),
+						"Your total payout",
+						formatMoney(currency, payout),
+						"Amount to charge Expedia Group",
+						formatMoney(currency, payout),
+					].filter(Boolean);
+					return lines.join("\n");
+				})
+				.filter((text) =>
+					/(total guest payment|your total payout|amount to charge expedia group)/i.test(
+						text
+					)
+				);
+			return Array.from(new Set(paymentTexts)).join("\n");
+		})
+		.catch(() => "");
+
 const hasPaymentSummaryPayout = (summary = {}) =>
 	Number(summary.totalPayoutAmount || 0) > 0 ||
 	Number(summary.sourceTotalPayoutAmount || 0) > 0;
@@ -2567,7 +2727,10 @@ const readReservationDetailFromCurrentPage = async (page) => {
 	await scrollToLoadVisibleContent(page).catch(() => {});
 	const snapshot = await safePageSnapshot(page);
 	const paymentDisplayText = await extractReservationPaymentDisplayText(page);
-	const detailText = [snapshot.text, paymentDisplayText].filter(Boolean).join("\n");
+	const embeddedPaymentText = await extractExpediaEmbeddedPaymentText(page);
+	const detailText = [snapshot.text, paymentDisplayText, embeddedPaymentText]
+		.filter(Boolean)
+		.join("\n");
 	return {
 		snapshot,
 		detailText,

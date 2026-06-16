@@ -394,6 +394,13 @@ Follow-up payout capture hardening:
   The collector now watches for a legacy detail page matching the same
   reservation ID, switches scraping to that page, and parses payout from there
   instead of continuing to read the old modern drawer.
+- On the legacy details page, Expedia may render the payout card visually while
+  omitting those labels from `document.body.innerText`. The collector now also
+  reads Expedia's embedded `jsonPayload.bookingAmounts` data and formats the
+  structured `TOTAL_BOOKING_AMOUNT`, `EC_COMMISSION`, accelerator, tax, and
+  `AMOUNT_TO_CHARGE_EXPEDIA_GROUP` values into the same payment parser. For
+  reservation `2485791085`, that payload exposed `Total guest payment`
+  `132.62 USD` and `Your total payout` `101.12 USD`.
 
 ## Production correction reference
 

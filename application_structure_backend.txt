@@ -2674,3 +2674,21 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     create a new Expedia Collect reservation when payout is not captured.
   - Existing preview jobs are not rewritten; a fresh frontend sync is required
     to re-read Expedia with the tab-switching collector.
+
+2026-06-16 Expedia OTA Embedded Payment Payload Capture
+- File:
+  - services/expediaReservationCollector.js
+- Context:
+  - Fresh job OTA-RES-SYNC-20260616180711-LJM08 reached `preview_ready` for
+    Zad Al Qimma reservation 2485791085, but the visible Expedia payout card was
+    absent from `document.body.innerText`, leaving payout at zero.
+  - A read-only server screenshot confirmed the page visibly showed
+    `Total guest payment 132.62 USD` and `Your total payout 101.12 USD`.
+  - The same page's script contained Expedia's structured `jsonPayload` with
+    `bookingAmounts.lineItems` and `totalAmounts.totalBookingAmount`.
+- Fix:
+  - The detail reader now extracts `jsonPayload` from the page/window or script
+    text, maps the structured payment fields into payment-detail lines, and
+    lets the existing parser/SAR conversion consume those lines.
+  - The apply guard is unchanged; payout still must be captured before a new
+    Expedia Collect dashboard-sync reservation can be saved.
