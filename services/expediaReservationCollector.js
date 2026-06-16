@@ -2068,6 +2068,105 @@ const clickPaymentDetailsTrigger = async (page) => {
 	return { clicked: true, text: target.text };
 };
 
+const clickSeeAllReservationDetails = async (page) => {
+	const target = await page
+		.evaluate(() => {
+			const normalize = (value) =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const visible = (node) => {
+				if (!node || !(node instanceof HTMLElement)) return false;
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					rect.width > 0 &&
+					rect.height > 0 &&
+					!node.disabled &&
+					node.getAttribute("aria-disabled") !== "true"
+				);
+			};
+			const selector =
+				"button, input[type='button'], input[type='submit'], a, [role='button'], [tabindex]";
+			const candidates = Array.from(document.querySelectorAll("body *"))
+				.map((rawNode) => {
+					const node = rawNode.closest(selector) || rawNode;
+					if (!visible(node)) return null;
+					const text = normalize(
+						[
+							rawNode.innerText,
+							rawNode.textContent,
+							node.innerText,
+							node.textContent,
+							node.value,
+							node.getAttribute("aria-label"),
+							node.getAttribute("title"),
+						]
+							.filter(Boolean)
+							.join(" ")
+					);
+					if (!/see all reservation details/i.test(text)) return null;
+					const rect = node.getBoundingClientRect();
+					const token = `jannat_full_details_${Date.now()}_${Math.random()
+						.toString(36)
+						.slice(2)}`;
+					node.setAttribute("data-jannat-full-details-trigger", token);
+					return {
+						token,
+						text,
+						x: rect.left + rect.width / 2,
+						y: rect.top + rect.height / 2,
+						score: text.length + rect.width / 100 + rect.height / 100,
+					};
+				})
+				.filter(Boolean)
+				.sort((left, right) => left.score - right.score);
+			return candidates[0] || null;
+		})
+		.catch(() => null);
+	if (!target) return { clicked: false };
+
+	const navigation = Promise.race([
+		page
+			.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 9000 })
+			.catch(() => null),
+		page
+			.waitForFunction(
+				() =>
+					/(expedia collects payment|your total payout|amount to charge expedia group|nightly rates)/i.test(
+						document.body?.innerText || ""
+					),
+				{ timeout: 9000 }
+			)
+			.catch(() => null),
+	]);
+	await page.mouse.click(target.x, target.y).catch(() => {});
+	await delay(300);
+	await page
+		.evaluate((token) => {
+			const node = document.querySelector(
+				`[data-jannat-full-details-trigger="${token}"]`
+			);
+			if (!node) return;
+			for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
+				node.dispatchEvent(
+					new MouseEvent(eventName, {
+						bubbles: true,
+						cancelable: true,
+						view: window,
+					})
+				);
+			}
+			if (typeof node.click === "function") node.click();
+		}, target.token)
+		.catch(() => {});
+	await navigation;
+	return { clicked: true, text: target.text };
+};
+
 const expandReservationPaymentSections = async (page) => {
 	if (await isPaymentDetailsPanelOpen(page)) return true;
 	for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -2078,6 +2177,66 @@ const expandReservationPaymentSections = async (page) => {
 	}
 	return await isPaymentDetailsPanelOpen(page, 1200);
 };
+
+const collectPaymentExpansionDiagnostics = async (page) =>
+	page
+		.evaluate(() => {
+			const normalize = (value) =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const visible = (node) => {
+				if (!node || !(node instanceof HTMLElement)) return false;
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					rect.width > 0 &&
+					rect.height > 0
+				);
+			};
+			return Array.from(
+				document.querySelectorAll(
+					"button, a, summary, [role='button'], [tabindex], input[type='button'], input[type='submit']"
+				)
+			)
+				.map((node) => {
+					if (!visible(node)) return null;
+					const text = normalize(
+						[
+							node.innerText,
+							node.textContent,
+							node.value,
+							node.getAttribute("aria-label"),
+							node.getAttribute("title"),
+							node.getAttribute("data-testid"),
+							node.getAttribute("data-stid"),
+						]
+							.filter(Boolean)
+							.join(" ")
+					);
+					if (!/(payment|payout|charge expedia|reservation details)/i.test(text)) {
+						return null;
+					}
+					const rect = node.getBoundingClientRect();
+					return {
+						tag: node.tagName,
+						role: node.getAttribute("role") || "",
+						text: text.slice(0, 180),
+						rect: {
+							x: Math.round(rect.x),
+							y: Math.round(rect.y),
+							width: Math.round(rect.width),
+							height: Math.round(rect.height),
+						},
+					};
+				})
+				.filter(Boolean)
+				.slice(0, 30);
+		})
+		.catch(() => []);
 
 const extractReservationPaymentDisplayText = async (page) =>
 	page
@@ -2254,6 +2413,40 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 			snapshot: modernSnapshot,
 			detailUrl: candidate.modernDetailUrl,
 		});
+	}
+
+	const shouldTryFullDetailsFromDrawer =
+		candidate.modernDetailUrl && !hasPaymentSummaryPayout(enriched.paymentSummary);
+	if (shouldTryFullDetailsFromDrawer) {
+		const fullDetailsClick = await clickSeeAllReservationDetails(page).catch(() => ({
+			clicked: false,
+		}));
+		if (fullDetailsClick.clicked) {
+			await delay(1500);
+			await scrollToLoadVisibleContent(page).catch(() => {});
+			await expandReservationPaymentSections(page).catch(() => false);
+			await scrollToLoadVisibleContent(page).catch(() => {});
+			const fullSnapshot = await safePageSnapshot(page);
+			const fullPaymentDisplayText = await extractReservationPaymentDisplayText(page);
+			const fullDetailText = [fullSnapshot.text, fullPaymentDisplayText]
+				.filter(Boolean)
+				.join("\n");
+			const fullDetail = parseExpediaReservationDetailText(
+				fullDetailText,
+				enriched
+			);
+			enriched = mergeDetailCandidate({
+				candidate: enriched,
+				detail: fullDetail,
+				snapshot: fullSnapshot,
+				detailUrl: fullSnapshot.url || candidate.detailUrl,
+			});
+		}
+	}
+
+	if (!hasPaymentSummaryPayout(enriched.paymentSummary)) {
+		enriched.paymentExpansionDiagnostics =
+			await collectPaymentExpansionDiagnostics(page);
 	}
 
 	return enriched;

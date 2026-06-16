@@ -369,7 +369,10 @@ Follow-up payout capture hardening:
   control, clicks it with real mouse events plus a DOM fallback, and waits only
   for detailed payout labels such as `Your total payout`,
   `Amount to charge Expedia Group`, Expedia compensation, accelerator, or
-  nightly-rate rows before treating the payment panel as open.
+  nightly-rate rows before treating the payment panel as open. If the modern
+  drawer still does not expose payout, it clicks `See all reservation details`
+  and parses the full legacy details page before allowing the apply guard to
+  create anything.
 
 ## Production correction reference
 
