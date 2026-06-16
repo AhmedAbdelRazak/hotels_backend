@@ -1659,6 +1659,28 @@ const isLikelyGuestName = (value = "") => {
 	return /[A-Za-z]/.test(text);
 };
 
+const scopedReservationText = (text = "", reservationId = "") => {
+	const source = normalizeWhitespace(text);
+	const id = normalizeConfirmation(reservationId);
+	if (!source || !id) return source;
+	const index = source.indexOf(id);
+	if (index < 0) return source;
+	const before = source.slice(Math.max(0, index - 90), index);
+	const after = source.slice(index, index + 520);
+	return normalizeWhitespace(`${before} ${after}`);
+};
+
+const guestNameBeforeReservationId = (text = "", reservationId = "") => {
+	const id = normalizeConfirmation(reservationId);
+	const index = id ? text.indexOf(id) : -1;
+	if (index < 0) return "";
+	const before = normalizeWhitespace(text.slice(0, index));
+	const match = before.match(
+		/([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,4})$/
+	);
+	return isLikelyGuestName(match?.[1]) ? normalizeLine(match[1]) : "";
+};
+
 const parseReservationRowCandidate = (row, hotel, property) => {
 	const text = normalizeWhitespace(row.text || "");
 	if (!text || !/\b\d{8,16}\b/.test(text)) return null;
@@ -1672,6 +1694,7 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 	);
 	const reservationId = hrefReservationId || ids[0] || "";
 	if (!reservationId) return null;
+	const scopedText = scopedReservationText(text, reservationId);
 	const hotelConfirmationNumber =
 		ids.find((value) => value !== reservationId) || "";
 	const cells = Array.isArray(row.cells) ? row.cells.map(normalizeLine).filter(Boolean) : [];
@@ -1683,11 +1706,12 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		(reservationCellIndex > 0
 			? cells.slice(0, reservationCellIndex).reverse().find(isLikelyGuestName)
 			: "") ||
+		guestNameBeforeReservationId(scopedText, reservationId) ||
 		lines.slice(0, 4).find(isLikelyGuestName) ||
 		"";
-	const dates = extractExpediaDates(text);
+	const dates = extractExpediaDates(scopedText);
 	const amountCell = cells.find((cell) => parseMoneyValue(cell));
-	const amount = parseMoneyValue(amountCell || text);
+	const amount = parseMoneyValue(amountCell || scopedText);
 	const roomName =
 		cells.find(
 			(cell) =>
@@ -1707,16 +1731,16 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 	const detailUrl =
 		rowDetailUrl ||
 		buildExpediaReservationDetailUrl(property.expediaPropertyId, reservationId);
-	const details = parseLightReservationDetails(text);
-	const statusRaw = /cancelled|canceled/i.test(text)
+	const details = parseLightReservationDetails(scopedText);
+	const statusRaw = /cancelled|canceled/i.test(scopedText)
 		? "Cancelled"
-		: /no[-\s]?show/i.test(text)
+		: /no[-\s]?show/i.test(scopedText)
 		? "No Show"
-		: /unconfirmed/i.test(text)
+		: /unconfirmed/i.test(scopedText)
 		? "Unconfirmed"
-		: /booked|confirmed/i.test(text)
+		: /booked|confirmed/i.test(scopedText)
 		? "Booked"
-		: /recent/i.test(text)
+		: /recent/i.test(scopedText)
 		? "Recent"
 		: "";
 
@@ -1737,13 +1761,13 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		roomName,
 		statusRaw,
 		statusToApply: parseExpediaStatusToApply(statusRaw),
-		currency: amount?.currency || detectCurrency(text),
+		currency: amount?.currency || detectCurrency(scopedText),
 		amount: amount?.amount || 0,
 		amountHint: amount?.raw || details.amountHint || "",
-		paymentCollectionModel: detectExpediaPaymentCollectionModel(text),
+		paymentCollectionModel: detectExpediaPaymentCollectionModel(scopedText),
 		detailUrl,
 		sourceUrl: detailUrl || row.href || "",
-		sourceSnippet: safeSnippet(text, 700),
+		sourceSnippet: safeSnippet(scopedText, 700),
 	};
 };
 
