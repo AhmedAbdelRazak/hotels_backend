@@ -22,12 +22,14 @@ dayjs.extend(customParseFormat);
 const USD_TO_SAR = Number(
 	process.env.OTA_USD_TO_SAR_RATE || process.env.USD_TO_SAR_RATE || 3.75
 );
-const DEFAULT_OTA_REVIEW_DEDUCTION_RATE = Math.min(
-	0.9,
-	Math.max(
-		0,
-		Number(process.env.OTA_REVIEW_DEFAULT_DEDUCTION_RATE || 0.1)
-	)
+const DEFAULT_OTA_REVIEW_DEDUCTION_RATE = clampDeductionRate(
+	process.env.OTA_REVIEW_DEFAULT_DEDUCTION_RATE,
+	0.1
+);
+const DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE = clampDeductionRate(
+	process.env.OTA_INBOUND_EMAIL_DEFAULT_DEDUCTION_RATE ||
+		process.env.OTA_EMAIL_DEFAULT_DEDUCTION_RATE,
+	0.2
 );
 
 const DEFAULT_SAR_EXCHANGE_RATES = {
@@ -418,6 +420,12 @@ function roomTypeMatches(roomType = "", mappedRoomType = "") {
 function round2(value) {
 	const parsed = Number(value || 0);
 	return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : 0;
+}
+
+function clampDeductionRate(value, fallback = 0) {
+	const parsed = Number(value);
+	const rate = Number.isFinite(parsed) ? parsed : Number(fallback || 0);
+	return Math.min(0.9, Math.max(0, rate));
 }
 
 function allocateAmountAcrossSlots(totalAmount, slots) {
@@ -1057,16 +1065,92 @@ function isOtaHotelBoilerplateLine(value = "") {
 	);
 }
 
-function defaultOtaReviewNetTotal(clientTotal = 0) {
+function defaultOtaReviewNetTotal(
+	clientTotal = 0,
+	deductionRate = DEFAULT_OTA_REVIEW_DEDUCTION_RATE
+) {
 	const total = round2(clientTotal);
 	if (total <= 0) return 0;
-	return round2(total - defaultOtaReviewDeductionAmount(total));
+	return round2(total - defaultOtaReviewDeductionAmount(total, deductionRate));
 }
 
-function defaultOtaReviewDeductionAmount(clientTotal = 0) {
+function defaultOtaReviewDeductionAmount(
+	clientTotal = 0,
+	deductionRate = DEFAULT_OTA_REVIEW_DEDUCTION_RATE
+) {
 	const total = round2(clientTotal);
 	if (total <= 0) return 0;
-	return round2(total * DEFAULT_OTA_REVIEW_DEDUCTION_RATE);
+	return round2(total * clampDeductionRate(deductionRate));
+}
+
+function isExpediaSyncSource(normalized = {}) {
+	return normalizeComparable(normalized.source?.from || "") === "expedia sync";
+}
+
+function isOtaInboundEmail(normalized = {}) {
+	const inboundEmailId = normalizeWhitespace(normalized.inboundEmailId || "");
+	if (isExpediaSyncSource(normalized) || inboundEmailId.startsWith("ota-sync:")) {
+		return false;
+	}
+	if (inboundEmailId) return true;
+	const source = normalized.source || {};
+	return Boolean(
+		source.messageId ||
+			source.textHash ||
+			source.safeSnippet ||
+			(source.subject && source.from)
+	);
+}
+
+function otaProviderKey(normalized = {}) {
+	return normalizeComparable(
+		normalized.provider ||
+			normalized.providerLabel ||
+			normalized.bookingSource ||
+			""
+	);
+}
+
+function isExpediaProvider(normalized = {}) {
+	return otaProviderKey(normalized).includes("expedia");
+}
+
+function resolveOtaReviewDeductionRate(normalized = {}) {
+	if (isOtaInboundEmail(normalized) && !isExpediaProvider(normalized)) {
+		return DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE;
+	}
+	return DEFAULT_OTA_REVIEW_DEDUCTION_RATE;
+}
+
+function hasExplicitOtaPayoutSar(normalized = {}) {
+	const paymentSummary = normalized.paymentSummary || {};
+	return [
+		normalized.totalPayoutSar,
+		normalized.netAfterExpensesTotal,
+		paymentSummary.totalPayoutAmount,
+	].some((value) => Number(value || 0) > 0);
+}
+
+function isOtaCollectPayment(normalized = {}) {
+	const collectionModel = normalizeComparable(
+		normalized.paymentCollectionModel || normalized.paymentInstructions || ""
+	);
+	return (
+		normalized.paidOnline === true ||
+		collectionModel.includes("ota collect") ||
+		collectionModel.includes("expedia collect") ||
+		collectionModel.includes("paid online") ||
+		collectionModel.includes("prepaid")
+	);
+}
+
+function requiresCapturedExpediaInboundPayout(normalized = {}) {
+	return (
+		isOtaInboundEmail(normalized) &&
+		isExpediaProvider(normalized) &&
+		isOtaCollectPayment(normalized) &&
+		!hasExplicitOtaPayoutSar(normalized)
+	);
 }
 
 function cleanHotelNameCandidate(value = "") {
@@ -2252,7 +2336,11 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 			0
 	);
 	const hasExplicitPayoutTotal = totalPayoutSar > 0;
-	const fallbackNetTotalSar = defaultOtaReviewNetTotal(totalAmountSar);
+	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
+	const fallbackNetTotalSar = defaultOtaReviewNetTotal(
+		totalAmountSar,
+		defaultDeductionRate
+	);
 	const effectiveNetAfterExpensesTotal = hasExplicitPayoutTotal
 		? round2(Math.min(totalPayoutSar, totalAmountSar || totalPayoutSar))
 		: fallbackNetTotalSar;
@@ -2288,7 +2376,7 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 			const rootPrice =
 				configuredRootPrice > 0 ? configuredRootPrice : fallbackRootPrice;
 			const commissionRate =
-				rootPrice > 0 ? round2(DEFAULT_OTA_REVIEW_DEDUCTION_RATE * 100) : 0;
+				rootPrice > 0 ? round2(defaultDeductionRate * 100) : 0;
 			const otaExpenseAmount = Math.max(0, round2(finalPrice - netAfterExpenses));
 			const platformMargin = round2(netAfterExpenses - rootPrice);
 
@@ -2344,7 +2432,10 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 	const subTotalSar = round2(
 		Math.min(sumRootPriceAllRooms, sumTotalPriceAllRooms || totalAmountSar)
 	);
-	const commissionAmountSar = defaultOtaReviewDeductionAmount(subTotalSar);
+	const commissionAmountSar = defaultOtaReviewDeductionAmount(
+		subTotalSar,
+		defaultDeductionRate
+	);
 
 	return {
 		ok: true,
@@ -2366,7 +2457,7 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 			otaExpenseTotal: round2(sumOtaExpenseAllRooms),
 			platformMarginTotal: round2(sumPlatformMarginAllRooms),
 			commissionAmount: commissionAmountSar,
-			defaultDeductionRate: DEFAULT_OTA_REVIEW_DEDUCTION_RATE,
+			defaultDeductionRate,
 			defaultDeductionApplied: !hasExplicitPayoutTotal,
 		},
 	};
@@ -2440,18 +2531,23 @@ function buildReservationDocument(normalized, hotelDetails) {
 		safePaymentSummary.exchangeRateSource ||
 		normalized.exchangeRateSource ||
 		"";
+	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
+	const fallbackNetAfterExpensesTotal = defaultOtaReviewNetTotal(
+		totalAmountSar,
+		defaultDeductionRate
+	);
 	const adminPricingTotals = pricing.adminPricingTotals || {
 		mode: "ota_platform_sync",
 		clientTotal: totalAmountSar,
 		rootTotal: pricing.subTotalSar,
-		netAfterExpensesTotal: defaultOtaReviewNetTotal(totalAmountSar),
-		otaExpenseTotal: round2(totalAmountSar - defaultOtaReviewNetTotal(totalAmountSar)),
+		netAfterExpensesTotal: fallbackNetAfterExpensesTotal,
+		otaExpenseTotal: round2(totalAmountSar - fallbackNetAfterExpensesTotal),
 		platformMarginTotal: Math.max(
 			0,
-			round2(defaultOtaReviewNetTotal(totalAmountSar) - pricing.subTotalSar)
+			round2(fallbackNetAfterExpensesTotal - pricing.subTotalSar)
 		),
 		commissionAmount: pricing.commissionAmountSar,
-		defaultDeductionRate: DEFAULT_OTA_REVIEW_DEDUCTION_RATE,
+		defaultDeductionRate,
 		defaultDeductionApplied: true,
 	};
 
@@ -3811,6 +3907,29 @@ async function reconcileOtaReservation(inputNormalized) {
 			errors: [
 				...errors,
 				`Missing required reservation field(s): ${missing.join(", ")}.`,
+			],
+		};
+	}
+
+	if (
+		!existing &&
+		hasCompleteCreatePayload &&
+		requiresCapturedExpediaInboundPayout(normalized)
+	) {
+		logReconcile("needs_review.missing_expedia_inbound_payout", {
+			confirmationNumber,
+			provider: normalized.provider || "",
+			paymentCollectionModel: normalized.paymentCollectionModel || "",
+			totalAmountSar: normalized.totalAmountSar || 0,
+			sourceFrom: normalized.source?.from || "",
+			inboundEmailId: normalized.inboundEmailId || "",
+		});
+		return {
+			status: "needs_review",
+			warnings,
+			errors: [
+				...errors,
+				"Expedia Collect inbound email did not include a captured SAR payout/net amount; review payment details before creating the reservation.",
 			],
 		};
 	}

@@ -199,8 +199,9 @@ generalCommission = 10% of hotelBaseTotal
 platformMargin = netAfterOtaExpenses - hotelBaseTotal
 ```
 
-When Expedia payout is missing, the mapper may use the configured default OTA
-review deduction fallback. When payout is present, payout wins.
+When Expedia payout is missing for an Expedia Collect sync candidate, the apply
+step must keep the candidate in review instead of auto-creating with a generic
+fallback. When payout is present, payout wins.
 
 Hotel base/root fallback for each night follows the PMS checkout idea:
 
@@ -222,6 +223,21 @@ Nightly rows must preserve these fields:
 - `otaExpenseAmount`
 - `platformMargin`
 - `commissionRate`
+
+## OTA inbound email pricing fallback
+
+The generic OTA inbound email mapper shares the same admin pricing buckets, but
+its fallback is provider-aware:
+
+- Expedia Collect inbound emails must have an explicit SAR payout/net amount
+  before a new reservation is auto-created. If the email parser cannot capture
+  that payout, reconciliation returns `needs_review`.
+- Non-Expedia OTA inbound emails may still auto-create when the rest of the
+  reservation payload is complete. If no explicit OTA payout is captured, the
+  default `netAfterExpensesTotal` is `clientTotal - 20%`, configurable through
+  `OTA_INBOUND_EMAIL_DEFAULT_DEDUCTION_RATE` or `OTA_EMAIL_DEFAULT_DEDUCTION_RATE`.
+- Non-email and non-inbound fallback pricing keeps the older
+  `OTA_REVIEW_DEFAULT_DEDUCTION_RATE` behavior, defaulting to 10%.
 
 `Quadruple`/`Quad` Expedia room labels can map safely to the PMS quad room type.
 The mapper still prefers a confident PMS room match; semantic room fallback is
