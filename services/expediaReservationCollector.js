@@ -105,6 +105,16 @@ const buildExpediaReservationDetailUrl = (propertyId = "", reservationId = "") =
 	return url.toString();
 };
 
+const buildExpediaBookingItemDetailUrl = (propertyId = "", reservationId = "") => {
+	const url = new URL(
+		process.env.OTA_EXPEDIA_BOOKINGS_URL || DEFAULT_BOOKINGS_URL,
+		expediaAppBaseUrl()
+	);
+	if (propertyId) url.searchParams.set("htid", String(propertyId));
+	if (reservationId) url.searchParams.set("bookingItemId", String(reservationId));
+	return url.toString();
+};
+
 const reservationIdFromExpediaUrl = (href = "") =>
 	normalizeConfirmation(
 		String(href || "").match(
@@ -1457,6 +1467,120 @@ const moneyNearLabel = (
 	return parseMoneyValue(after, fallbackCurrency);
 };
 
+const paymentDetailLabels = [
+	{ key: "nightlyRateAmount", pattern: /^Nightly rates?/i },
+	{ key: "promotionAmount", pattern: /^Promotion\b/i },
+	{ key: "taxesAmount", pattern: /^Taxes\b/i },
+	{ key: "totalGuestPaymentAmount", pattern: /^Total guest payment\b/i },
+	{
+		key: "expediaCompensationAmount",
+		pattern: /^Expedia Group'?s compensation\b/i,
+	},
+	{ key: "acceleratorAmount", pattern: /^Accelerator\b/i },
+	{ key: "totalPayoutAmount", pattern: /^Your total payout\b/i },
+	{
+		key: "totalPayoutAmount",
+		pattern: /^Amount to charge Expedia Group\b/i,
+		auxiliary: true,
+	},
+];
+
+const matchPaymentDetailLabel = (line = "") => {
+	const text = normalizeLine(line);
+	return (
+		paymentDetailLabels.find((label) => label.pattern.test(text)) || null
+	);
+};
+
+const parsePaymentMoneyAtLine = (lines = [], index = 0, fallbackCurrency = "") => {
+	const line = normalizeLine(lines[index]);
+	const sameLine = parseMoneyValue(line, fallbackCurrency);
+	if (sameLine) return { money: sameLine, consumedNext: false };
+	if (/^[A-Z]{3}$/i.test(line)) {
+		const nextLine = normalizeLine(lines[index + 1]);
+		const combined = parseMoneyValue(`${line.toUpperCase()} ${nextLine}`, "");
+		if (combined) return { money: combined, consumedNext: true };
+	}
+	return { money: null, consumedNext: false };
+};
+
+const parseExpediaPaymentDetailsFromLines = (lines = [], fallbackCurrency = "") => {
+	const startIndex = lines.findIndex((line) =>
+		/payment details|expedia collects payment/i.test(line)
+	);
+	const section =
+		startIndex >= 0 ? lines.slice(startIndex, startIndex + 90) : lines.slice(0, 90);
+	const labelEvents = [];
+	const amountEvents = [];
+	for (let index = 0; index < section.length; index += 1) {
+		const line = normalizeLine(section[index]);
+		const label = matchPaymentDetailLabel(line);
+		if (label) {
+			const previous = labelEvents[labelEvents.length - 1];
+			if (
+				!(
+					label.auxiliary &&
+					previous &&
+					previous.key === label.key &&
+					previous.value === undefined
+				)
+			) {
+				labelEvents.push({ key: label.key, index });
+			}
+		}
+		const { money, consumedNext } = parsePaymentMoneyAtLine(
+			section,
+			index,
+			fallbackCurrency
+		);
+		if (money) {
+			amountEvents.push({ index, money });
+			if (label && labelEvents.length) {
+				labelEvents[labelEvents.length - 1].value = money;
+			}
+		}
+		if (consumedNext) index += 1;
+	}
+	const output = {};
+	for (const label of labelEvents) {
+		if (label.value && output[label.key] === undefined) {
+			output[label.key] = label.value;
+		}
+	}
+	const firstAmountIndex = amountEvents[0]?.index ?? -1;
+	const lastLabelIndex = labelEvents[labelEvents.length - 1]?.index ?? -1;
+	const columnarAmounts =
+		labelEvents.length >= 3 &&
+		amountEvents.length >= labelEvents.length - 1 &&
+		firstAmountIndex > lastLabelIndex;
+
+	if (columnarAmounts) {
+		labelEvents.forEach((label, index) => {
+			if (output[label.key] !== undefined) return;
+			const money = amountEvents[index]?.money;
+			if (money) output[label.key] = money;
+		});
+		return output;
+	}
+
+	labelEvents.forEach((label, index) => {
+		if (output[label.key] !== undefined) return;
+		const nextLabelIndex = labelEvents[index + 1]?.index ?? Number.POSITIVE_INFINITY;
+		const money = amountEvents.find(
+			(entry) => entry.index > label.index && entry.index < nextLabelIndex
+		)?.money;
+		if (money) output[label.key] = money;
+	});
+
+	labelEvents.forEach((label, index) => {
+		if (output[label.key] !== undefined) return;
+		const money = amountEvents[index]?.money;
+		if (money) output[label.key] = money;
+	});
+
+	return output;
+};
+
 const paymentSectionSnippet = (text = "") => {
 	const safeText = normalizeWhitespace(redactSensitive(text));
 	const markers = [
@@ -1532,6 +1656,10 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 	const roomName =
 		lineValueAfter(lines, /^Room Type$/i, 3) || candidate.roomName || "";
 	const guestCount = parseGuestCount(lineValueAfter(lines, /^Guest count$/i, 3));
+	const paymentDetails = parseExpediaPaymentDetailsFromLines(
+		lines,
+		fallbackCurrency
+	);
 
 	const dateRangeMatch = String(rawText || "").match(
 		/\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\s*(?:[\u2013\u2014-]|to)\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})(?:\s*\((\d+)\s*nights?\))?/i
@@ -1548,25 +1676,31 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		(allDates.length > 2 ? allDates[2].iso : "");
 
 	const nightlyRate =
+		paymentDetails.nightlyRateAmount ||
 		moneyAfterLine(lines, /^Nightly rates?/i, fallbackCurrency) ||
 		moneyNearLabel(rawText, /Nightly rates?(?:\s*\([^)]*\))?/i, fallbackCurrency);
 	const taxes =
+		paymentDetails.taxesAmount ||
 		moneyAfterLine(lines, /^Taxes$/i, fallbackCurrency) ||
 		moneyNearLabel(rawText, /\bTaxes\b/i, fallbackCurrency);
-	const totalGuestPayment = moneyAfterLine(
-		lines,
-		/^Total guest payment$/i,
-		fallbackCurrency
-	) || moneyNearLabel(rawText, /Total guest payment/i, fallbackCurrency);
-	const expediaCompensation = moneyAfterLine(
-		lines,
-		/^Expedia Group'?s compensation$/i,
-		fallbackCurrency
-	) || moneyNearLabel(rawText, /Expedia Group'?s compensation/i, fallbackCurrency);
+	const totalGuestPayment =
+		paymentDetails.totalGuestPaymentAmount ||
+		moneyAfterLine(lines, /^Total guest payment$/i, fallbackCurrency) ||
+		moneyNearLabel(rawText, /Total guest payment/i, fallbackCurrency);
+	const expediaCompensation =
+		paymentDetails.expediaCompensationAmount ||
+		moneyAfterLine(
+			lines,
+			/^Expedia Group'?s compensation$/i,
+			fallbackCurrency
+		) ||
+		moneyNearLabel(rawText, /Expedia Group'?s compensation/i, fallbackCurrency);
 	const accelerator =
+		paymentDetails.acceleratorAmount ||
 		moneyAfterLine(lines, /^Accelerator/i, fallbackCurrency) ||
 		moneyNearLabel(rawText, /Accelerator(?:\s*\([^)]*\))?/i, fallbackCurrency);
 	const totalPayout =
+		paymentDetails.totalPayoutAmount ||
 		moneyAfterLine(lines, /^Your total payout$/i, fallbackCurrency, 8) ||
 		moneyAfterLine(lines, /^Amount to charge Expedia Group$/i, fallbackCurrency, 6) ||
 		moneyNearLabel(
@@ -1731,6 +1865,10 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 	const detailUrl =
 		rowDetailUrl ||
 		buildExpediaReservationDetailUrl(property.expediaPropertyId, reservationId);
+	const modernDetailUrl = buildExpediaBookingItemDetailUrl(
+		property.expediaPropertyId,
+		reservationId
+	);
 	const details = parseLightReservationDetails(scopedText);
 	const statusRaw = /cancelled|canceled/i.test(scopedText)
 		? "Cancelled"
@@ -1766,6 +1904,7 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		amountHint: amount?.raw || details.amountHint || "",
 		paymentCollectionModel: detectExpediaPaymentCollectionModel(scopedText),
 		detailUrl,
+		modernDetailUrl,
 		sourceUrl: detailUrl || row.href || "",
 		sourceSnippet: safeSnippet(scopedText, 700),
 	};
@@ -1779,6 +1918,8 @@ const expandReservationPaymentSections = async (page) => {
 					String(value || "")
 						.replace(/\s+/g, " ")
 						.trim();
+				const joinedText = (values) =>
+					Array.from(new Set(values.map(normalize).filter(Boolean))).join(" ");
 				const visible = (node) => {
 					const style = window.getComputedStyle(node);
 					const rect = node.getBoundingClientRect();
@@ -1797,25 +1938,32 @@ const expandReservationPaymentSections = async (page) => {
 						"button, input[type='button'], input[type='submit'], a, [role='button'], [tabindex]"
 					)
 				);
-				const candidate = nodes.find((node) => {
-					if (!visible(node)) return false;
-					const text = normalize(
-						[
+				const candidates = nodes
+					.map((node) => ({
+						node,
+						text: joinedText([
 							node.innerText,
 							node.textContent,
 							node.value,
 							node.getAttribute("aria-label"),
 							node.getAttribute("title"),
-						]
-							.filter(Boolean)
-							.join(" ")
-					);
-					if (!/payment details|nightly payment details/i.test(text)) {
-						return false;
-					}
-					if (/close|hide|collapse/i.test(text)) return false;
-					return /see|view|show|open|payment details/i.test(text);
-				});
+						]),
+					}))
+					.filter(({ node, text }) => {
+						if (!visible(node)) return false;
+						if (!/payment details|nightly payment details/i.test(text)) {
+							return false;
+						}
+						if (/close|hide|collapse/i.test(text)) return false;
+						return /see|view|show|open|payment details/i.test(text);
+					})
+					.sort((left, right) => {
+						const leftExact = /^see payment details$/i.test(left.text) ? 0 : 1;
+						const rightExact = /^see payment details$/i.test(right.text) ? 0 : 1;
+						if (leftExact !== rightExact) return leftExact - rightExact;
+						return left.text.length - right.text.length;
+					});
+				const candidate = candidates[0]?.node || null;
 				if (!candidate) return false;
 				candidate.click();
 				return true;
@@ -1892,6 +2040,77 @@ const extractReservationPaymentDisplayText = async (page) =>
 		})
 		.catch(() => "");
 
+const hasPaymentSummaryPayout = (summary = {}) =>
+	Number(summary.totalPayoutAmount || 0) > 0 ||
+	Number(summary.sourceTotalPayoutAmount || 0) > 0;
+
+const hasPaymentSummaryGuestTotal = (summary = {}) =>
+	Number(summary.totalGuestPaymentAmount || 0) > 0 ||
+	Number(summary.sourceTotalGuestPaymentAmount || 0) > 0;
+
+const mergePaymentSummaries = (
+	base = {},
+	incoming = {},
+	{ sourceCurrency = "" } = {}
+) => {
+	const merged = { ...(base || {}) };
+	for (const [field, value] of Object.entries(incoming || {})) {
+		if (value === undefined || value === null || value === "") continue;
+		if (
+			typeof value === "number" &&
+			value === 0 &&
+			Number(merged[field] || 0) > 0
+		) {
+			continue;
+		}
+		if (
+			field === "sourceCurrency" &&
+			merged.sourceCurrency &&
+			merged.sourceCurrency !== value
+		) {
+			continue;
+		}
+		if (
+			/^source/.test(field) &&
+			merged[field] !== undefined &&
+			merged[field] !== null &&
+			merged[field] !== "" &&
+			!(typeof merged[field] === "number" && merged[field] === 0)
+		) {
+			continue;
+		}
+		merged[field] = value;
+	}
+	if (sourceCurrency) merged.sourceCurrency = sourceCurrency;
+	return merged;
+};
+
+const detailValues = (detail = {}) =>
+	Object.fromEntries(
+		Object.entries(detail).filter(([field, value]) => {
+			if (field === "paymentSummary") return false;
+			if (Array.isArray(value)) return value.length > 0;
+			if (value && typeof value === "object") return true;
+			return value !== undefined && value !== null && value !== "";
+		})
+	);
+
+const mergeDetailCandidate = ({ candidate = {}, detail = {}, snapshot = {}, detailUrl = "" }) => {
+	const mergedPaymentSummary = mergePaymentSummaries(
+		candidate.paymentSummary,
+		detail.paymentSummary,
+		{ sourceCurrency: candidate.sourceCurrency || "" }
+	);
+	return normalizeCandidateMoneyToSar({
+		...candidate,
+		...detailValues(detail),
+		paymentSummary: mergedPaymentSummary,
+		sourceUrl: snapshot.url || detailUrl || candidate.sourceUrl,
+		detailUrl: candidate.detailUrl || detailUrl,
+		modernDetailUrl: candidate.modernDetailUrl || "",
+	});
+};
+
 const enrichCandidateFromDetailPage = async (page, candidate) => {
 	if (!candidate.detailUrl) return candidate;
 	await page.goto(candidate.detailUrl, { waitUntil: "domcontentloaded" });
@@ -1903,18 +2122,42 @@ const enrichCandidateFromDetailPage = async (page, candidate) => {
 	const paymentDisplayText = await extractReservationPaymentDisplayText(page);
 	const detailText = [snapshot.text, paymentDisplayText].filter(Boolean).join("\n");
 	const detail = parseExpediaReservationDetailText(detailText, candidate);
-	return normalizeCandidateMoneyToSar({
-		...candidate,
-		...Object.fromEntries(
-			Object.entries(detail).filter(([, value]) => {
-				if (Array.isArray(value)) return value.length > 0;
-				if (value && typeof value === "object") return true;
-				return value !== undefined && value !== null && value !== "";
-			})
-		),
-		sourceUrl: snapshot.url || candidate.detailUrl,
+	let enriched = mergeDetailCandidate({
+		candidate,
+		detail,
+		snapshot,
 		detailUrl: candidate.detailUrl,
 	});
+
+	const shouldTryModernDrawer =
+		candidate.modernDetailUrl &&
+		candidate.modernDetailUrl !== candidate.detailUrl &&
+		(!hasPaymentSummaryPayout(enriched.paymentSummary) ||
+			!hasPaymentSummaryGuestTotal(enriched.paymentSummary));
+	if (shouldTryModernDrawer) {
+		await page.goto(candidate.modernDetailUrl, { waitUntil: "domcontentloaded" });
+		await delay(1200);
+		await scrollToLoadVisibleContent(page).catch(() => {});
+		await expandReservationPaymentSections(page).catch(() => false);
+		await scrollToLoadVisibleContent(page).catch(() => {});
+		const modernSnapshot = await safePageSnapshot(page);
+		const modernPaymentDisplayText = await extractReservationPaymentDisplayText(page);
+		const modernDetailText = [modernSnapshot.text, modernPaymentDisplayText]
+			.filter(Boolean)
+			.join("\n");
+		const modernDetail = parseExpediaReservationDetailText(
+			modernDetailText,
+			enriched
+		);
+		enriched = mergeDetailCandidate({
+			candidate: enriched,
+			detail: modernDetail,
+			snapshot: modernSnapshot,
+			detailUrl: candidate.modernDetailUrl,
+		});
+	}
+
+	return enriched;
 };
 
 const extractReservationCandidates = async (page, hotel, property) => {
