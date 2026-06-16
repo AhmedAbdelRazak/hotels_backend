@@ -2690,5 +2690,7 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - The detail reader now extracts `jsonPayload` from the page/window or script
     text, maps the structured payment fields into payment-detail lines, and
     lets the existing parser/SAR conversion consume those lines.
+  - Collector progress now advances beyond stale login text after property
+    discovery, property matching, hotel scanning, and reservation-detail reads.
   - The apply guard is unchanged; payout still must be captured before a new
     Expedia Collect dashboard-sync reservation can be saved.

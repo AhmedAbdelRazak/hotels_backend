@@ -3564,6 +3564,14 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			name: property.name || "",
 			expediaPropertyId: property.expediaPropertyId || "",
 		}));
+		await updateJob(jobId, {
+			$set: {
+				"collectorState.status": "properties_discovered",
+				"collectorState.lastProgressAt": new Date(),
+				"collectorState.message": `Discovered ${properties.length} Expedia propert${properties.length === 1 ? "y" : "ies"}.`,
+				collectorArtifacts: artifacts,
+			},
+		});
 
 		const selectedSet = new Set(selectedHotelIds.map(normalizeHotelId));
 		const targetHotels = (job.targetHotels || []).filter((hotel) =>
@@ -3571,6 +3579,14 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		);
 		const matches = matchPropertiesToHotels(properties, targetHotels);
 		artifacts.matchedPropertyCount = matches.filter((match) => match.property).length;
+		await updateJob(jobId, {
+			$set: {
+				"collectorState.status": "properties_matched",
+				"collectorState.lastProgressAt": new Date(),
+				"collectorState.message": `Matched ${artifacts.matchedPropertyCount} Expedia propert${artifacts.matchedPropertyCount === 1 ? "y" : "ies"} for ${matches.length} selected hotel${matches.length === 1 ? "" : "s"}.`,
+				collectorArtifacts: artifacts,
+			},
+		});
 
 		for (let index = 0; index < matches.length; index += 1) {
 			if (Date.now() - startedAt > MAX_RUN_MS - 5000) {
@@ -3587,8 +3603,15 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			const hotel = match.hotel;
 			await updateJob(jobId, {
 				$set: {
+					"collectorState.status": match.property
+						? "scanning_hotel_reservations"
+						: "property_not_matched",
 					"collectorState.currentHotelIndex": index + 1,
 					"collectorState.currentHotelName": hotel.hotelName,
+					"collectorState.currentPropertyName": match.property?.name || "",
+					"collectorState.message": match.property
+						? `Scanning Expedia reservations for ${hotel.hotelName}.`
+						: `No Expedia property match for ${hotel.hotelName}.`,
 					"collectorState.selectedHotelCount": matches.length,
 					"collectorState.lastProgressAt": new Date(),
 					previewBuckets: buckets,
@@ -3738,6 +3761,21 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					} else {
 						detailPagesFetched += 1;
 						try {
+							await updateJob(jobId, {
+								$set: {
+									"collectorState.status": "reading_reservation_detail",
+									"collectorState.currentReservationId":
+										candidate.reservationId ||
+										candidate.confirmationNumber ||
+										"",
+									"collectorState.message": `Reading Expedia payment details for ${
+										candidate.reservationId ||
+										candidate.confirmationNumber ||
+										"reservation"
+									}.`,
+									"collectorState.lastProgressAt": new Date(),
+								},
+							});
 							candidate = await enrichCandidateFromDetailPage(page, candidate);
 						} catch (error) {
 							candidate = normalizeCandidateMoneyToSar({
