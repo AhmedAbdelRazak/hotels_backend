@@ -251,6 +251,18 @@ Admin-managed pricing remains authoritative after creation. For reservations
 with `adminPricingVisibility.rootOnlyForHotelManagement === true` or an OTA /
 admin three-price mode:
 
+## Collector Reliability Notes
+
+- The Expedia collector must prefer the actual `See all reservation details`
+  button in the modern drawer before parsing payout. Full-screen drawer/backdrop
+  nodes can contain the same text but must not be clicked as the target.
+- Browser/login reads are bounded with short timeouts so a stuck Expedia login
+  renderer returns `needs_login` or `collector_failed` instead of leaving the job
+  in `running` forever.
+- Existing preview jobs keep their captured payload. After collector click or
+  parsing fixes, prepare and run a fresh frontend sync so payout is re-read from
+  Expedia.
+
 - MoreDetails should show the saved PMS split.
 - Edit Pricing should prefill from saved nightly rows.
 - Changing client/main price must not rewrite root/base price.

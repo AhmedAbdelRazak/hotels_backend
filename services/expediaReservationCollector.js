@@ -48,6 +48,16 @@ const MAX_DETAIL_PAGES_PER_HOTEL = Number(
 const NAVIGATION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_SYNC_NAVIGATION_TIMEOUT_MS || 15_000
 );
+const PAGE_SNAPSHOT_TIMEOUT_MS = Number(
+	process.env.OTA_EXPEDIA_PAGE_SNAPSHOT_TIMEOUT_MS || 5_000
+);
+const LOGIN_STEP_TIMEOUT_MS = Number(
+	process.env.OTA_EXPEDIA_LOGIN_STEP_TIMEOUT_MS || 20_000
+);
+const COLLECTOR_HARD_TIMEOUT_MS = Number(
+	process.env.OTA_EXPEDIA_COLLECTOR_HARD_TIMEOUT_MS ||
+		Math.max(MAX_RUN_MS * 5, 12 * 60 * 1000)
+);
 const MFA_SESSION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_MFA_TIMEOUT_MS || 10 * 60 * 1000
 );
@@ -80,6 +90,19 @@ const MFA_INPUT_SELECTORS = [
 const normalizeLine = (value) => String(value || "").replace(/\s+/g, " ").trim();
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const withTimeout = (promise, timeoutMs, message) => {
+	let timer = null;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+	});
+	return Promise.race([
+		Promise.resolve(promise).finally(() => {
+			if (timer) clearTimeout(timer);
+		}),
+		timeout,
+	]);
+};
 
 const expediaAppBaseUrl = () =>
 	String(process.env.OTA_EXPEDIA_APP_BASE_URL || "https://apps.expediapartnercentral.com")
@@ -341,11 +364,15 @@ const safePageSnapshot = async (page) => {
 				error: "page_closed",
 			};
 		}
-		return page.evaluate(() => ({
-			text: document.body.innerText || "",
-			title: document.title || "",
-			url: window.location.href || "",
-		}));
+		return await withTimeout(
+			page.evaluate(() => ({
+				text: document.body.innerText || "",
+				title: document.title || "",
+				url: window.location.href || "",
+			})),
+			PAGE_SNAPSHOT_TIMEOUT_MS,
+			"page_snapshot_timeout"
+		);
 	} catch (error) {
 		return {
 			text: "",
@@ -385,12 +412,36 @@ const isElementVisible = (element) =>
 
 const typeIntoFirstVisibleInput = async (page, selectors, value) => {
 	for (const selector of selectors) {
-		const elements = await page.$$(selector).catch(() => []);
+		const elements = await withTimeout(
+			page.$$(selector),
+			LOGIN_STEP_TIMEOUT_MS,
+			`input_query_timeout:${selector}`
+		).catch(() => []);
 		for (const element of elements) {
-			if (!(await isElementVisible(element).catch(() => false))) continue;
-			await element.click({ clickCount: 3 }).catch(() => {});
-			await page.keyboard.press("Backspace").catch(() => {});
-			await element.type(String(value || ""), { delay: 20 });
+			if (
+				!(await withTimeout(
+					isElementVisible(element),
+					3_000,
+					"input_visibility_timeout"
+				).catch(() => false))
+			) {
+				continue;
+			}
+			await withTimeout(
+				element.click({ clickCount: 3 }),
+				5_000,
+				"input_click_timeout"
+			).catch(() => {});
+			await withTimeout(
+				page.keyboard.press("Backspace"),
+				3_000,
+				"input_clear_timeout"
+			).catch(() => {});
+			await withTimeout(
+				element.type(String(value || ""), { delay: 20 }),
+				LOGIN_STEP_TIMEOUT_MS,
+				"input_type_timeout"
+			);
 			return true;
 		}
 	}
@@ -440,7 +491,11 @@ const clickButtonByText = async (page, patterns = []) =>
 	}, patterns);
 
 const clickOrPressEnter = async (page, patterns = []) => {
-	const clicked = await clickButtonByText(page, patterns).catch(() => false);
+	const clicked = await withTimeout(
+		clickButtonByText(page, patterns),
+		LOGIN_STEP_TIMEOUT_MS,
+		"button_click_timeout"
+	).catch(() => false);
 	if (!clicked) await page.keyboard.press("Enter").catch(() => {});
 	await Promise.race([
 		page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 8000 }).catch(() => null),
@@ -2079,6 +2134,8 @@ const clickSeeAllReservationDetails = async (page) => {
 				String(value || "")
 					.replace(/\s+/g, " ")
 					.trim();
+			const joinedText = (values) =>
+				Array.from(new Set(values.map(normalize).filter(Boolean))).join(" ");
 			const visible = (node) => {
 				if (!node || !(node instanceof HTMLElement)) return false;
 				const style = window.getComputedStyle(node);
@@ -2095,25 +2152,24 @@ const clickSeeAllReservationDetails = async (page) => {
 			};
 			const selector =
 				"button, input[type='button'], input[type='submit'], a, [role='button'], [tabindex]";
-			const candidates = Array.from(document.querySelectorAll("body *"))
-				.map((rawNode) => {
-					const node = rawNode.closest(selector) || rawNode;
+			const candidates = Array.from(document.querySelectorAll(selector))
+				.map((node) => {
 					if (!visible(node)) return null;
-					const text = normalize(
+					const text = joinedText(
 						[
-							rawNode.innerText,
-							rawNode.textContent,
 							node.innerText,
 							node.textContent,
 							node.value,
 							node.getAttribute("aria-label"),
 							node.getAttribute("title"),
 						]
-							.filter(Boolean)
-							.join(" ")
 					);
 					if (!/see all reservation details/i.test(text)) return null;
 					const rect = node.getBoundingClientRect();
+					const exact = /^see all reservation details$/i.test(text);
+					const isNativeButton = /^(BUTTON|A|INPUT)$/i.test(node.tagName);
+					const huge =
+						rect.width > window.innerWidth * 0.7 || rect.height > 180;
 					const token = `jannat_full_details_${Date.now()}_${Math.random()
 						.toString(36)
 						.slice(2)}`;
@@ -2123,7 +2179,13 @@ const clickSeeAllReservationDetails = async (page) => {
 						text,
 						x: rect.left + rect.width / 2,
 						y: rect.top + rect.height / 2,
-						score: text.length + rect.width / 100 + rect.height / 100,
+						score:
+							(exact ? 0 : 30) +
+							(isNativeButton ? 0 : 12) +
+							(huge ? 120 : 0) +
+							Math.min(text.length, 180) / 20 +
+							rect.width / 1000 +
+							rect.height / 1000,
 					};
 				})
 				.filter(Boolean)
@@ -2893,7 +2955,21 @@ const attemptExpediaLogin = async ({
 		passwordEnvKey: "OTA_PASSWORD",
 	});
 
-	if (await typeIntoFirstVisibleInput(page, EMAIL_INPUT_SELECTORS, credentials.username)) {
+	let usernameTyped = false;
+	try {
+		usernameTyped = await withTimeout(
+			typeIntoFirstVisibleInput(page, EMAIL_INPUT_SELECTORS, credentials.username),
+			LOGIN_STEP_TIMEOUT_MS,
+			"expedia_username_step_timeout"
+		);
+	} catch (error) {
+		return {
+			ok: false,
+			status: "needs_login",
+			message: `Expedia login timed out while entering the username (${error.message || error}). Try the collector again from the frontend.`,
+		};
+	}
+	if (usernameTyped) {
 		await clickOrPressEnter(page, ["next", "continue", "sign in"]);
 	}
 
@@ -2911,7 +2987,21 @@ const attemptExpediaLogin = async ({
 		return handleMfaChallenge({ jobId, job, page, buckets, artifacts, actorId });
 	}
 
-	if (await typeIntoFirstVisibleInput(page, PASSWORD_INPUT_SELECTORS, credentials.password)) {
+	let passwordTyped = false;
+	try {
+		passwordTyped = await withTimeout(
+			typeIntoFirstVisibleInput(page, PASSWORD_INPUT_SELECTORS, credentials.password),
+			LOGIN_STEP_TIMEOUT_MS,
+			"expedia_password_step_timeout"
+		);
+	} catch (error) {
+		return {
+			ok: false,
+			status: "needs_login",
+			message: `Expedia login timed out while entering the password (${error.message || error}). Try the collector again from the frontend.`,
+		};
+	}
+	if (passwordTyped) {
 		await clickOrPressEnter(page, ["sign in", "continue", "next", "log in", "login"]);
 	}
 
@@ -2949,6 +3039,7 @@ const attemptExpediaLogin = async ({
 const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 	const startedAt = Date.now();
 	let browser = null;
+	let collectorTimedOut = false;
 	const buckets = emptyBuckets();
 	const artifacts = {
 		outputDir: collectorOutputDir(),
@@ -2957,6 +3048,40 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		matchedPropertyCount: 0,
 		selectedHotelCount: selectedHotelIds.length,
 	};
+	const hardTimeoutTimer = setTimeout(() => {
+		collectorTimedOut = true;
+		updateJob(jobId, {
+			$set: {
+				status: "collector_failed",
+				previewBuckets: buckets,
+				collectorArtifacts: artifacts,
+				resultSummary: summarizeBuckets(buckets),
+				collectorState: {
+					status: "collector_failed",
+					startedAt: new Date(startedAt),
+					finishedAt: new Date(),
+					durationMs: Date.now() - startedAt,
+					readOnly: true,
+					error: "collector_hard_timeout",
+					message:
+						"Expedia collector exceeded the hard browser timeout and was stopped. Run it again from the frontend.",
+				},
+			},
+			$push: {
+				auditLog: {
+					at: new Date(),
+					action: "collector_hard_timeout",
+					by: actorId,
+					readOnly: true,
+					timeoutMs: COLLECTOR_HARD_TIMEOUT_MS,
+				},
+			},
+		}).catch(() => {});
+		if (browser) {
+			browser.close().catch(() => {});
+		}
+	}, COLLECTOR_HARD_TIMEOUT_MS);
+	if (typeof hardTimeoutTimer.unref === "function") hardTimeoutTimer.unref();
 
 	try {
 		const job = await OtaReservationSyncJob.findById(jobId).lean().exec();
@@ -3427,6 +3552,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			summary: summarizeBuckets(buckets),
 		});
 	} catch (error) {
+		if (collectorTimedOut) return;
 		await updateJob(jobId, {
 			$set: {
 				status: "collector_failed",
@@ -3449,6 +3575,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			error: error?.message || String(error),
 		}).catch(() => {});
 	} finally {
+		clearTimeout(hardTimeoutTimer);
 		clearMfaSession(jobId);
 		activeCollectors.delete(String(jobId));
 		if (browser && !/^(1|true|yes)$/i.test(process.env.OTA_EXPEDIA_KEEP_BROWSER_OPEN || "")) {
