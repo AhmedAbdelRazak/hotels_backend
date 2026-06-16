@@ -359,6 +359,18 @@ Final read-only verification on the home server:
   `Comfort Triple Room, City View`, source amount `132.62 USD`
 - No Save Safe Writes/apply call was run during this verification.
 
+Follow-up payout capture hardening:
+
+- A later run `OTA-RES-SYNC-20260616171552-ZCRC3` reached the modern Expedia
+  drawer for `2485791085` but stopped at the `Payment summary` card; the apply
+  guard correctly returned `apply_needs_review` with `appliedWrites: 0` because
+  `Your total payout` was still missing.
+- The collector payment expander now prefers the visible `See payment details`
+  control, clicks it with real mouse events plus a DOM fallback, and waits only
+  for detailed payout labels such as `Your total payout`,
+  `Amount to charge Expedia Group`, Expedia compensation, accelerator, or
+  nightly-rate rows before treating the payment panel as open.
+
 ## Production correction reference
 
 Two Expedia reservations previously saved before payout parsing was tightened

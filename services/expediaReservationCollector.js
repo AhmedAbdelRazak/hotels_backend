@@ -1937,83 +1937,146 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 	};
 };
 
-const expandReservationPaymentSections = async (page) => {
-	for (let attempt = 0; attempt < 3; attempt += 1) {
-		const clicked = await page
-			.evaluate(() => {
-				const normalize = (value) =>
-					String(value || "")
-						.replace(/\s+/g, " ")
-						.trim();
-				const joinedText = (values) =>
-					Array.from(new Set(values.map(normalize).filter(Boolean))).join(" ");
-				const visible = (node) => {
-					const style = window.getComputedStyle(node);
-					const rect = node.getBoundingClientRect();
-					return (
-						style &&
-						style.visibility !== "hidden" &&
-						style.display !== "none" &&
-						rect.width > 0 &&
-						rect.height > 0 &&
-						!node.disabled &&
-						node.getAttribute("aria-disabled") !== "true"
-					);
-				};
-				const nodes = Array.from(
-					document.querySelectorAll(
-						"button, input[type='button'], input[type='submit'], a, [role='button'], [tabindex]"
-					)
+const paymentDetailsPanelReadyPattern =
+	/(your total payout|amount to charge expedia group|expedia group'?s compensation|nightly rates?\s*\(|accelerator|promotion\.)/i;
+
+const isPaymentDetailsPanelOpen = async (page, timeout = 700) =>
+	Boolean(
+		await page
+			.waitForFunction(
+				(patternSource) =>
+					new RegExp(patternSource, "i").test(document.body?.innerText || ""),
+				{ timeout },
+				paymentDetailsPanelReadyPattern.source
+			)
+			.catch(() => false)
+	);
+
+const clickPaymentDetailsTrigger = async (page) => {
+	const target = await page
+		.evaluate(() => {
+			const normalize = (value) =>
+				String(value || "")
+					.replace(/\s+/g, " ")
+					.trim();
+			const joinedText = (values) =>
+				Array.from(new Set(values.map(normalize).filter(Boolean))).join(" ");
+			const visible = (node) => {
+				if (!node || !(node instanceof HTMLElement)) return false;
+				const style = window.getComputedStyle(node);
+				const rect = node.getBoundingClientRect();
+				return (
+					style &&
+					style.visibility !== "hidden" &&
+					style.display !== "none" &&
+					rect.width > 0 &&
+					rect.height > 0 &&
+					!node.disabled &&
+					node.getAttribute("aria-disabled") !== "true"
 				);
-				const candidates = nodes
-					.map((node) => ({
+			};
+			const clickableSelector =
+				"button, input[type='button'], input[type='submit'], a, summary, [role='button'], [tabindex]";
+			const clickableFor = (node) =>
+				node?.closest?.(clickableSelector) || node;
+			const allNodes = Array.from(document.querySelectorAll("body *"));
+			const candidates = allNodes
+				.map((rawNode) => {
+					const node = clickableFor(rawNode);
+					if (!visible(node)) return null;
+					const text = joinedText([
+						rawNode.innerText,
+						rawNode.textContent,
+						node.innerText,
+						node.textContent,
+						node.value,
+						node.getAttribute("aria-label"),
+						node.getAttribute("title"),
+						node.getAttribute("data-testid"),
+						node.getAttribute("data-stid"),
+					]);
+					if (!/payment details|nightly payment details/i.test(text)) {
+						return null;
+					}
+					if (/close|hide|collapse/i.test(text)) return null;
+					if (!/see|view|show|open|payment details/i.test(text)) return null;
+					const rect = node.getBoundingClientRect();
+					const ancestorText = normalize(
+						node.closest("section, article, aside, div")?.innerText || ""
+					);
+					const exact = /^see payment details$/i.test(text);
+					const isButton = /^(BUTTON|A|SUMMARY)$/i.test(node.tagName);
+					const inPaymentSummary = /payment summary/i.test(ancestorText);
+					const huge = rect.width > window.innerWidth * 0.75 || rect.height > 220;
+					return {
 						node,
-						text: joinedText([
-							node.innerText,
-							node.textContent,
-							node.value,
-							node.getAttribute("aria-label"),
-							node.getAttribute("title"),
-						]),
-					}))
-					.filter(({ node, text }) => {
-						if (!visible(node)) return false;
-						if (!/payment details|nightly payment details/i.test(text)) {
-							return false;
-						}
-						if (/close|hide|collapse/i.test(text)) return false;
-						return /see|view|show|open|payment details/i.test(text);
+						text,
+						rect,
+						score:
+							(exact ? 0 : 30) +
+							(isButton ? 0 : 10) +
+							(inPaymentSummary ? 0 : 8) +
+							(huge ? 25 : 0) +
+							Math.min(text.length, 140) / 20 +
+							rect.width / 1000 +
+							rect.height / 1000,
+					};
+				})
+				.filter(Boolean)
+				.sort((left, right) => left.score - right.score);
+			const best = candidates[0];
+			if (!best) return null;
+			best.node.scrollIntoView({ block: "center", inline: "center" });
+			const rect = best.node.getBoundingClientRect();
+			const token = `jannat_payment_${Date.now()}_${Math.random()
+				.toString(36)
+				.slice(2)}`;
+			best.node.setAttribute("data-jannat-payment-trigger", token);
+			return {
+				token,
+				text: best.text,
+				x: rect.left + rect.width / 2,
+				y: rect.top + rect.height / 2,
+			};
+		})
+		.catch(() => null);
+	if (!target) return { clicked: false };
+
+	await page.mouse.move(target.x, target.y).catch(() => {});
+	await page.mouse.down().catch(() => {});
+	await delay(80);
+	await page.mouse.up().catch(() => {});
+	await delay(300);
+	await page
+		.evaluate((token) => {
+			const node = document.querySelector(
+				`[data-jannat-payment-trigger="${token}"]`
+			);
+			if (!node) return;
+			for (const eventName of ["pointerdown", "mousedown", "mouseup", "click"]) {
+				node.dispatchEvent(
+					new MouseEvent(eventName, {
+						bubbles: true,
+						cancelable: true,
+						view: window,
 					})
-					.sort((left, right) => {
-						const leftExact = /^see payment details$/i.test(left.text) ? 0 : 1;
-						const rightExact = /^see payment details$/i.test(right.text) ? 0 : 1;
-						if (leftExact !== rightExact) return leftExact - rightExact;
-						return left.text.length - right.text.length;
-					});
-				const candidate = candidates[0]?.node || null;
-				if (!candidate) return false;
-				candidate.click();
-				return true;
-			})
-			.catch(() => false);
-		if (clicked) {
-			await Promise.race([
-				page
-					.waitForFunction(
-						() =>
-							/(total guest payment|your total payout|expedia group'?s compensation|nightly rates)/i.test(
-								document.body.innerText || ""
-							),
-						{ timeout: 5000 }
-					)
-					.catch(() => null),
-				delay(1200),
-			]);
-		} else {
-			return attempt > 0;
-		}
+				);
+			}
+			if (typeof node.click === "function") node.click();
+		}, target.token)
+		.catch(() => {});
+	return { clicked: true, text: target.text };
+};
+
+const expandReservationPaymentSections = async (page) => {
+	if (await isPaymentDetailsPanelOpen(page)) return true;
+	for (let attempt = 0; attempt < 5; attempt += 1) {
+		const clickResult = await clickPaymentDetailsTrigger(page);
+		if (!clickResult.clicked) return false;
+		if (await isPaymentDetailsPanelOpen(page, 6500)) return true;
+		await delay(500 + attempt * 250);
 	}
-	return true;
+	return await isPaymentDetailsPanelOpen(page, 1200);
 };
 
 const extractReservationPaymentDisplayText = async (page) =>
