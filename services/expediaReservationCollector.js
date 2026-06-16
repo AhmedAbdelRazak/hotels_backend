@@ -141,6 +141,91 @@ const captureAuditScreenshot = async ({ page, artifacts, fileName }) => {
 	artifacts.screenshots.push(screenshotPath);
 };
 
+const recoverablePageErrorPattern =
+	/(target closed|session closed|target page, context or browser has been closed|requesting main frame too early|frame was detached|execution context was destroyed|cannot find context with specified id|protocol error \(page\.navigate\))/i;
+
+const isRecoverablePageLifecycleError = (error) =>
+	recoverablePageErrorPattern.test(error?.message || String(error || ""));
+
+const safePageUrl = (page) => {
+	try {
+		return page && !page.isClosed?.() ? page.url() : "";
+	} catch (_error) {
+		return "";
+	}
+};
+
+const configureCollectorPage = (page) => {
+	if (!page) return page;
+	page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
+	page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+	return page;
+};
+
+const waitForUsablePage = async (page) => {
+	if (!page || page.isClosed?.()) return false;
+	for (let attempt = 0; attempt < 8; attempt += 1) {
+		try {
+			await page.evaluate(() => true);
+			return true;
+		} catch (error) {
+			if (!isRecoverablePageLifecycleError(error)) return true;
+			await delay(180);
+		}
+	}
+	return false;
+};
+
+const closeRestoredPages = async (browser) => {
+	const pages = await browser.pages().catch(() => []);
+	for (const page of pages) {
+		await page.close({ runBeforeUnload: false }).catch(() => {});
+	}
+};
+
+const createCollectorPage = async (browser, { closeExisting = false } = {}) => {
+	if (closeExisting) {
+		await closeRestoredPages(browser);
+	}
+	const page = configureCollectorPage(await browser.newPage());
+	await delay(120);
+	await waitForUsablePage(page);
+	return page;
+};
+
+const gotoCollectorPage = async ({
+	browser,
+	page,
+	url,
+	options = {},
+	retries = 2,
+}) => {
+	let currentPage = page;
+	for (let attempt = 0; attempt <= retries; attempt += 1) {
+		try {
+			if (!currentPage || currentPage.isClosed?.()) {
+				currentPage = await createCollectorPage(browser);
+			}
+			await currentPage.goto(url, {
+				waitUntil: "domcontentloaded",
+				...options,
+			});
+			await delay(250);
+			return currentPage;
+		} catch (error) {
+			if (!isRecoverablePageLifecycleError(error) || attempt >= retries) {
+				throw error;
+			}
+			if (currentPage?.close) {
+				await currentPage.close({ runBeforeUnload: false }).catch(() => {});
+			}
+			await delay(450 + attempt * 300);
+			currentPage = await createCollectorPage(browser);
+		}
+	}
+	return currentPage;
+};
+
 const isLikelyPropertyName = (value) => {
 	const line = normalizeLine(value);
 	if (!line || line.length < 3) return false;
@@ -194,6 +279,14 @@ const isCaptchaOrRobotChallenge = ({ text = "" } = {}) =>
 
 const safePageSnapshot = async (page) => {
 	try {
+		if (!page || page.isClosed?.()) {
+			return {
+				text: "",
+				title: "",
+				url: "",
+				error: "page_closed",
+			};
+		}
 		return page.evaluate(() => ({
 			text: document.body.innerText || "",
 			title: document.title || "",
@@ -203,7 +296,7 @@ const safePageSnapshot = async (page) => {
 		return {
 			text: "",
 			title: "",
-			url: page.url(),
+			url: safePageUrl(page),
 			error: error && error.message ? error.message : String(error),
 		};
 	}
@@ -392,7 +485,7 @@ const findPageByContent = async (browser, matcher, timeoutMs) => {
 			const snapshot = await safePageSnapshot(candidate);
 			lastSeen.push({
 				title: snapshot.title,
-				url: snapshot.url || candidate.url(),
+				url: snapshot.url || safePageUrl(candidate),
 				hasBodyText: Boolean(snapshot.text),
 			});
 			if (matcher(snapshot, candidate)) return candidate;
@@ -484,6 +577,9 @@ const extractProperties = async (page) => {
 			}))
 			.filter((link) => link.text && link.href);
 		return { text: document.body.innerText || "", links };
+	}).catch(async () => {
+		const fallback = await safePageSnapshot(page);
+		return { text: fallback.text || "", links: [] };
 	});
 
 	const parsed = parsePropertiesFromText(snapshot.text);
@@ -1005,7 +1101,7 @@ const parseExpediaStatusToApply = (value = "") => {
 	const text = normalizeLine(value).toLowerCase();
 	if (/cancelled|canceled/.test(text)) return "cancelled";
 	if (/no[-\s]?show/.test(text)) return "no_show";
-	if (/booked|confirmed|recent/.test(text)) return "confirmed";
+	if (/booked|confirmed|recent|unconfirmed/.test(text)) return "confirmed";
 	return "";
 };
 
@@ -1364,7 +1460,9 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		new Set(confirmationCandidatesFromText(text).map(normalizeConfirmation))
 	).filter((value) => value && /^\d{8,16}$/.test(value));
 	const hrefReservationId = normalizeConfirmation(
-		String(row.href || "").match(/[?&]reservationIds=([A-Z0-9-]+)/i)?.[1] || ""
+		String(row.href || "").match(
+			/[?&](?:reservationIds|reservationId|bookingItemId|bookingId)=([A-Z0-9-]+)/i
+		)?.[1] || ""
 	);
 	const reservationId = hrefReservationId || ids[0] || "";
 	if (!reservationId) return null;
@@ -1402,6 +1500,8 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		? "Cancelled"
 		: /no[-\s]?show/i.test(text)
 		? "No Show"
+		: /unconfirmed/i.test(text)
+		? "Unconfirmed"
 		: /booked|confirmed/i.test(text)
 		? "Booked"
 		: /recent/i.test(text)
@@ -1979,11 +2079,11 @@ const attemptExpediaLogin = async ({
 		return handleMfaChallenge({ jobId, job, page, buckets, artifacts, actorId });
 	}
 
-	await page
-		.goto(process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL || DEFAULT_MANAGE_PROPERTY_URL, {
-			waitUntil: "domcontentloaded",
-		})
-		.catch(() => {});
+	page = await gotoCollectorPage({
+		browser: page.browser(),
+		page,
+		url: process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL || DEFAULT_MANAGE_PROPERTY_URL,
+	}).catch(() => page);
 	await delay(1200);
 	snapshot = await safePageSnapshot(page);
 	if (hasPropertyListText(snapshot.text)) return { ok: true, page };
@@ -2047,13 +2147,16 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		});
 
 		browser = await launchBrowser();
-		let page = await browser.newPage();
-		page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
-		page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
+		let page = await createCollectorPage(browser, { closeExisting: true });
 		const managePropertyUrl =
 			process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL ||
 			DEFAULT_MANAGE_PROPERTY_URL;
-		await page.goto(managePropertyUrl, { waitUntil: "domcontentloaded" });
+		page = await gotoCollectorPage({
+			browser,
+			page,
+			url: managePropertyUrl,
+			retries: 3,
+		});
 		await delay(1500);
 
 		let snapshot = await safePageSnapshot(page);
@@ -2091,19 +2194,21 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		}
 
 		if (!hasPropertyListText(snapshot.text)) {
-			await page.goto(process.env.OTA_EXPEDIA_LOGIN_URL || DEFAULT_LOGIN_URL, {
-				waitUntil: "domcontentloaded",
+			page = await gotoCollectorPage({
+				browser,
+				page,
+				url: process.env.OTA_EXPEDIA_LOGIN_URL || DEFAULT_LOGIN_URL,
 			});
 			const propertyPage = await findPageByContent(
 				browser,
 				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
 				Math.min(20_000, MAX_RUN_MS)
 			);
-			await propertyPage.bringToFront();
+			await propertyPage.bringToFront().catch(() => {});
 			page = propertyPage;
 		}
 
-		await scrollToLoadVisibleContent(page);
+		await scrollToLoadVisibleContent(page).catch(() => {});
 		let properties = await extractProperties(page);
 		if (!properties.length) {
 			const propertyPage = await findPageByContent(
@@ -2111,8 +2216,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
 				10_000
 			);
-			await propertyPage.bringToFront();
-			await scrollToLoadVisibleContent(propertyPage);
+			await propertyPage.bringToFront().catch(() => {});
+			await scrollToLoadVisibleContent(propertyPage).catch(() => {});
 			page = propertyPage;
 			properties = await extractProperties(propertyPage);
 		}
@@ -2335,7 +2440,11 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				},
 			});
 
-			await page.goto(managePropertyUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+			page = await gotoCollectorPage({
+				browser,
+				page,
+				url: managePropertyUrl,
+			}).catch(() => page);
 			await delay(450);
 		}
 

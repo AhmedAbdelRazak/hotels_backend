@@ -276,6 +276,39 @@ If Git ownership blocks server updates under `.git/objects`, fix ownership for
 the repo user and then pull/deploy normally. Prefer normal commits and pulls over
 force resets.
 
+## 2026-06-16 Zad Al Qimma collector hardening
+
+Production job `OTA-RES-SYNC-20260616053001-9ZOCY` failed before property
+discovery for Zad Al Qimma with Puppeteer lifecycle errors:
+
+```text
+Protocol error (Page.navigate): Target closed
+Requesting main frame too early!
+```
+
+The previous read-only Zad Al Qimma preview had successfully matched Expedia
+property `Al-Qemma Hotel` / `120208625`, but it only saw the already-saved
+reservation `2480268687`. PMS did not yet contain Expedia reservation
+`2485791085`, and the next collector run failed before scanning the property
+again, so that new Expedia booking never reached the preview buckets.
+
+The collector was hardened without changing apply/write policy:
+
+- close restored/stale Expedia tabs before starting a new supervised page;
+- retry initial Partner Central navigation in a fresh page when Puppeteer reports
+  target-closed, detached-frame, or main-frame lifecycle errors;
+- make page snapshots and property extraction tolerant of pages that are still
+  settling after Expedia redirects;
+- recognize modern Expedia booking URLs that expose `bookingItemId=...`, in
+  addition to legacy `reservationIds=...`;
+- treat Expedia `Unconfirmed` rows as active, non-terminal booking candidates so
+  they remain eligible for new-reservation preview and human-reviewed Save Safe
+  Writes.
+
+This fix is intentionally read-only until the normal apply step. It should make
+the Zad Al Qimma run reach `preview_ready` and show `2485791085` as a new
+candidate if Expedia still exposes the row with enough required data.
+
 ## Production correction reference
 
 Two Expedia reservations previously saved before payout parsing was tightened
