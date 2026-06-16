@@ -2423,77 +2423,108 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		const managePropertyUrl =
 			process.env.OTA_EXPEDIA_MANAGE_PROPERTY_URL ||
 			DEFAULT_MANAGE_PROPERTY_URL;
-		page = await gotoCollectorPage({
-			browser,
-			page,
-			url: managePropertyUrl,
-			retries: 3,
-		});
-		await delay(1500);
-
-		let snapshot = await stablePageSnapshot(page);
-		if (isLoginOrVerificationPage(snapshot)) {
-			const loginResult = await attemptExpediaLogin({
-				jobId,
-				job,
-				page,
-				buckets,
-				artifacts,
-				actorId,
-			});
-			if (!loginResult.ok) {
-				await updateLoginBlockedJob({
-					jobId,
-					job,
-					status: loginResult.status || "needs_login",
-					message:
-						loginResult.message ||
-						"Expedia session is not logged in or requires verification.",
-					buckets,
-					artifacts,
-					prefix: loginResult.status || "needs-login",
-					page,
-				});
-				await appendAudit(jobId, {
-					action: loginResult.status || "collector_needs_login",
-					by: actorId,
-					readOnly: true,
-				});
-				return;
-			}
-			page = loginResult.page || page;
-			await Promise.race([
-				page
-					.waitForNavigation({
-						waitUntil: "domcontentloaded",
-						timeout: 5000,
-					})
-					.catch(() => null),
-				delay(1800),
-			]);
-			snapshot = await stablePageSnapshot(page);
-		}
-
-		if (!hasPropertyListText(snapshot.text)) {
-			page = await gotoCollectorPage({
+		const openLoggedInPropertyPage = async (currentPage) => {
+			let workingPage = await gotoCollectorPage({
 				browser,
-				page,
+				page: currentPage,
 				url: managePropertyUrl,
 				retries: 3,
 			});
 			await delay(1500);
-			snapshot = await stablePageSnapshot(page);
-		}
 
-		if (!hasPropertyListText(snapshot.text)) {
-			const propertyPage = await findPageByContent(
-				browser,
-				(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
-				Math.min(20_000, MAX_RUN_MS)
-			);
-			await propertyPage.bringToFront().catch(() => {});
-			page = propertyPage;
+			let workingSnapshot = await stablePageSnapshot(workingPage);
+			if (isLoginOrVerificationPage(workingSnapshot)) {
+				const loginResult = await attemptExpediaLogin({
+					jobId,
+					job,
+					page: workingPage,
+					buckets,
+					artifacts,
+					actorId,
+				});
+				if (!loginResult.ok) {
+					await updateLoginBlockedJob({
+						jobId,
+						job,
+						status: loginResult.status || "needs_login",
+						message:
+							loginResult.message ||
+							"Expedia session is not logged in or requires verification.",
+						buckets,
+						artifacts,
+						prefix: loginResult.status || "needs-login",
+						page: workingPage,
+					});
+					await appendAudit(jobId, {
+						action: loginResult.status || "collector_needs_login",
+						by: actorId,
+						readOnly: true,
+					});
+					return { blocked: true, page: workingPage, snapshot: workingSnapshot };
+				}
+				workingPage = loginResult.page || workingPage;
+				await Promise.race([
+					workingPage
+						.waitForNavigation({
+							waitUntil: "domcontentloaded",
+							timeout: 5000,
+						})
+						.catch(() => null),
+					delay(1800),
+				]);
+				workingSnapshot = await stablePageSnapshot(workingPage);
+			}
+
+			if (!hasPropertyListText(workingSnapshot.text)) {
+				workingPage = await gotoCollectorPage({
+					browser,
+					page: workingPage,
+					url: managePropertyUrl,
+					retries: 3,
+				});
+				await delay(1500);
+				workingSnapshot = await stablePageSnapshot(workingPage);
+			}
+
+			if (!hasPropertyListText(workingSnapshot.text)) {
+				const propertyPage = await findPageByContent(
+					browser,
+					(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
+					Math.min(20_000, MAX_RUN_MS)
+				);
+				await propertyPage.bringToFront().catch(() => {});
+				workingPage = propertyPage;
+				workingSnapshot = await stablePageSnapshot(workingPage);
+			}
+
+			return { page: workingPage, snapshot: workingSnapshot };
+		};
+
+		let propertyPageResult = null;
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			try {
+				propertyPageResult = await openLoggedInPropertyPage(page);
+				break;
+			} catch (error) {
+				if (!isRecoverablePageLifecycleError(error) || attempt >= 2) {
+					throw error;
+				}
+				await appendAudit(jobId, {
+					action: "collector_recoverable_property_discovery_retry",
+					by: actorId,
+					readOnly: true,
+					attempt: attempt + 1,
+					error: error && error.message ? error.message : String(error),
+				});
+				if (page?.close) {
+					await page.close({ runBeforeUnload: false }).catch(() => {});
+				}
+				await delay(600 + attempt * 350);
+				page = await createCollectorPage(browser, { closeExisting: true });
+			}
 		}
+		if (propertyPageResult?.blocked) return;
+		page = propertyPageResult?.page || page;
 
 		await scrollToLoadVisibleContent(page).catch(() => {});
 		let properties = await extractProperties(page);
