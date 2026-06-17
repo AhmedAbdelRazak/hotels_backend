@@ -77,9 +77,27 @@ frontend must never send passwords, cookies, tokens, or session data.
 - `OTA_INBOUND_EMAIL_HOTEL_IDS`
 - Optional timing/cap controls:
   - `OTA_EXPEDIA_SYNC_MAX_RUN_MS`
+  - `OTA_EXPEDIA_SYNC_BASE_RUN_MS`
+  - `OTA_EXPEDIA_SYNC_RUN_MS_PER_HOTEL`
+  - `OTA_EXPEDIA_SYNC_MIN_RUN_MS`
+  - `OTA_EXPEDIA_SYNC_MAX_DYNAMIC_RUN_MS`
+  - `OTA_EXPEDIA_COLLECTOR_HARD_TIMEOUT_MS`
   - `OTA_EXPEDIA_SYNC_MAX_RESERVATIONS_PER_HOTEL`
   - `OTA_EXPEDIA_SYNC_MAX_DETAIL_PAGES_PER_HOTEL`
   - `OTA_EXPEDIA_SYNC_KEEP_AUDIT_SCREENSHOTS`
+
+If `OTA_EXPEDIA_SYNC_MAX_RUN_MS` is set, it remains a fixed override for the
+collector's soft run budget. Otherwise the collector computes a dynamic budget
+from the selected hotel count:
+
+```text
+soft run budget = OTA_EXPEDIA_SYNC_BASE_RUN_MS + selected hotels * OTA_EXPEDIA_SYNC_RUN_MS_PER_HOTEL
+```
+
+The defaults are 30 seconds base plus 90 seconds per selected hotel, with a
+minimum of 55 seconds and a default dynamic cap of 20 minutes. The hard browser
+timeout defaults to the larger of 12 minutes or the soft run budget plus 2
+minutes, unless `OTA_EXPEDIA_COLLECTOR_HARD_TIMEOUT_MS` is set.
 
 `OTA_INBOUND_EMAIL_HOTEL_IDS` is reused for Expedia sync hotel allowlisting so
 the same PMS-to-OTA mapping behavior used by inbound OTA email is respected.

@@ -38,7 +38,45 @@ const DEFAULT_PROFILE_DIR = path.join(
 const KEEP_AUDIT_SCREENSHOTS = /^(1|true|yes)$/i.test(
 	process.env.OTA_EXPEDIA_KEEP_AUDIT_SCREENSHOTS || ""
 );
-const MAX_RUN_MS = Number(process.env.OTA_EXPEDIA_SYNC_MAX_RUN_MS || 55_000);
+const readPositiveMs = (value, fallback) => {
+	const parsed = Number(value);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+const STATIC_MAX_RUN_MS = readPositiveMs(
+	process.env.OTA_EXPEDIA_SYNC_MAX_RUN_MS,
+	0
+);
+const MIN_RUN_MS = readPositiveMs(
+	process.env.OTA_EXPEDIA_SYNC_MIN_RUN_MS,
+	55_000
+);
+const BASE_RUN_MS = readPositiveMs(
+	process.env.OTA_EXPEDIA_SYNC_BASE_RUN_MS,
+	30_000
+);
+const RUN_MS_PER_HOTEL = readPositiveMs(
+	process.env.OTA_EXPEDIA_SYNC_RUN_MS_PER_HOTEL,
+	90_000
+);
+const MAX_DYNAMIC_RUN_MS = readPositiveMs(
+	process.env.OTA_EXPEDIA_SYNC_MAX_DYNAMIC_RUN_MS,
+	20 * 60 * 1000
+);
+const resolveCollectorMaxRunMs = (selectedHotelCount = 0) => {
+	if (STATIC_MAX_RUN_MS > 0) return STATIC_MAX_RUN_MS;
+	const parsedHotelCount = Number(selectedHotelCount || 0);
+	const hotelCount =
+		Number.isFinite(parsedHotelCount) && parsedHotelCount > 0
+			? parsedHotelCount
+			: 1;
+	const dynamicRunMs = BASE_RUN_MS + hotelCount * RUN_MS_PER_HOTEL;
+	return Math.min(Math.max(dynamicRunMs, MIN_RUN_MS), MAX_DYNAMIC_RUN_MS);
+};
+const resolveCollectorHardTimeoutMs = (maxRunMs) =>
+	readPositiveMs(
+		process.env.OTA_EXPEDIA_COLLECTOR_HARD_TIMEOUT_MS,
+		Math.max(maxRunMs + 2 * 60 * 1000, 12 * 60 * 1000)
+	);
 const MAX_RESERVATION_CANDIDATES_PER_HOTEL = Number(
 	process.env.OTA_EXPEDIA_SYNC_MAX_CANDIDATES_PER_HOTEL || 80
 );
@@ -53,10 +91,6 @@ const PAGE_SNAPSHOT_TIMEOUT_MS = Number(
 );
 const LOGIN_STEP_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_LOGIN_STEP_TIMEOUT_MS || 20_000
-);
-const COLLECTOR_HARD_TIMEOUT_MS = Number(
-	process.env.OTA_EXPEDIA_COLLECTOR_HARD_TIMEOUT_MS ||
-		Math.max(MAX_RUN_MS * 5, 12 * 60 * 1000)
 );
 const MFA_SESSION_TIMEOUT_MS = Number(
 	process.env.OTA_EXPEDIA_MFA_TIMEOUT_MS || 10 * 60 * 1000
@@ -3555,6 +3589,8 @@ const attemptExpediaLogin = async ({
 
 const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 	const startedAt = Date.now();
+	const maxRunMs = resolveCollectorMaxRunMs(selectedHotelIds.length);
+	const hardTimeoutMs = resolveCollectorHardTimeoutMs(maxRunMs);
 	let browser = null;
 	let collectorTimedOut = false;
 	const buckets = emptyBuckets();
@@ -3582,6 +3618,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					error: "collector_hard_timeout",
 					message:
 						"Expedia collector exceeded the hard browser timeout and was stopped. Run it again from the frontend.",
+					runBudgetMs: maxRunMs,
+					hardTimeoutMs,
 				},
 			},
 			$push: {
@@ -3590,14 +3628,15 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					action: "collector_hard_timeout",
 					by: actorId,
 					readOnly: true,
-					timeoutMs: COLLECTOR_HARD_TIMEOUT_MS,
+					timeoutMs: hardTimeoutMs,
+					runBudgetMs: maxRunMs,
 				},
 			},
 		}).catch(() => {});
 		if (browser) {
 			browser.close().catch(() => {});
 		}
-	}, COLLECTOR_HARD_TIMEOUT_MS);
+	}, hardTimeoutMs);
 	if (typeof hardTimeoutTimer.unref === "function") hardTimeoutTimer.unref();
 
 	try {
@@ -3626,6 +3665,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					readOnly: true,
 					selectedHotelIds,
 					selectedHotelCount: selectedHotelIds.length,
+					runBudgetMs: maxRunMs,
+					hardTimeoutMs,
 				},
 				previewBuckets: buckets,
 				collectorArtifacts: artifacts,
@@ -3636,6 +3677,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 			by: actorId,
 			readOnly: true,
 			mode: "single_browser_sequential",
+			runBudgetMs: maxRunMs,
+			hardTimeoutMs,
 		});
 
 		browser = await launchBrowser();
@@ -3710,7 +3753,7 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 				const propertyPage = await findPageByContent(
 					browser,
 					(pageSnapshot) => hasPropertyListText(pageSnapshot.text),
-					Math.min(20_000, MAX_RUN_MS)
+					Math.min(20_000, maxRunMs)
 				);
 				await propertyPage.bringToFront().catch(() => {});
 				workingPage = propertyPage;
@@ -3789,12 +3832,13 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 		});
 
 		for (let index = 0; index < matches.length; index += 1) {
-			if (Date.now() - startedAt > MAX_RUN_MS - 5000) {
+			if (Date.now() - startedAt > maxRunMs - 5000) {
 				buckets.needsReview.push({
 					actionPreview: "time_budget_reached",
 					message:
 						"Collector stopped before all hotels to stay inside the configured run budget.",
 					remainingHotels: matches.length - index,
+					runBudgetMs: maxRunMs,
 				});
 				break;
 			}
@@ -4097,6 +4141,8 @@ const runCollector = async ({ jobId, actorId, selectedHotelIds = [] }) => {
 					readOnly: true,
 					selectedHotelIds,
 					selectedHotelCount: matches.length,
+					runBudgetMs: maxRunMs,
+					hardTimeoutMs,
 				},
 			},
 		});
@@ -4178,6 +4224,8 @@ const startExpediaReservationCollectorJob = async ({
 	if (!selection.ok) {
 		return selection;
 	}
+	const maxRunMs = resolveCollectorMaxRunMs(selection.targetHotels.length);
+	const hardTimeoutMs = resolveCollectorHardTimeoutMs(maxRunMs);
 
 	activeCollectors.set(key, true);
 	setImmediate(() =>
@@ -4197,6 +4245,8 @@ const startExpediaReservationCollectorJob = async ({
 				readOnly: true,
 				selectedHotelIds: selection.selectedHotelIds,
 				selectedHotelCount: selection.targetHotels.length,
+				runBudgetMs: maxRunMs,
+				hardTimeoutMs,
 			},
 			"collectorArtifacts.selectedHotelCount": selection.targetHotels.length,
 		},
@@ -4208,6 +4258,8 @@ const startExpediaReservationCollectorJob = async ({
 				readOnly: true,
 				selectedHotelIds: selection.selectedHotelIds,
 				selectedHotelCount: selection.targetHotels.length,
+				runBudgetMs: maxRunMs,
+				hardTimeoutMs,
 			},
 		},
 	});
