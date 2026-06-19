@@ -1,0 +1,298 @@
+JANNATBOOKING SSR BACKEND REFERENCE
+Updated: 2026-06-19
+Backend path: D:\JannatBooking\hotels_backend
+SSR consumer path: D:\JannatBooking\jannatbooking_ssr
+Admin/PMS consumer path: D:\JannatBooking\hotels_frontend
+Legacy public SPA path: D:\JannatBooking\jannatbooking_frontend
+
+Purpose
+This document summarizes the backend pieces used by the Jannat Booking SSR public site. It is not a full backend replacement for application_structure_backend.txt; it is the focused reference for public SSR, support chat/contact, reservation count transparency, active hotels, property listing, payments, and SEO-safe data.
+
+Runtime Entry Point
+- server.js
+  - Express app, HTTP server, Socket.IO server, MongoDB connection, middleware, static uploads, route loading, and scheduled maintenance.
+  - Routes in routes/ are mounted under /api.
+  - Socket.IO is used by customer support cases and hotel/admin notifications.
+
+Primary SSR-Used Route Files
+- routes/janat.js
+  - Public Jannat website, hotel, room, reservation, currency, invoice, and payment-support endpoints.
+- routes/supportcase.js
+  - Public support chat/contact endpoints and admin customer-service endpoints.
+- routes/auth.js
+  - Signup, signin, Google login, password reset, and property listing.
+- routes/paypal_reservation.js
+  - PayPal public checkout/reservation payment support.
+- routes/reservations.js
+  - Reservation creation, pending reservation creation/cancel, verification, and related reservation workflows.
+- routes/braintree.js
+  - Legacy/current currency conversion endpoint used by some public payment flows.
+
+Primary SSR-Used Controllers
+- controllers/janat.js
+  - Public website document.
+  - Active hotel lists.
+  - Single hotel lookup by slug.
+  - Room search.
+  - Currency rates/conversion.
+  - Public reservation stats.
+  - Client reservation and invoice flows.
+- controllers/supportcase.js
+  - Public contact form case creation.
+  - Public chat case creation.
+  - Public client read/update.
+  - Admin/customer-service case management.
+- controllers/auth.js
+  - Public auth, property listing, password reset, Google login.
+- controllers/paypal_reservation.js
+  - PayPal token/order/capture and reservation creation safety.
+- controllers/reservations.js
+  - Public pending reservation support and core reservation lifecycle.
+
+Public Website And Hotel Endpoints
+Base prefix: /api
+
+- GET /janat-website-document
+  - Used by SSR getWebsite().
+  - Supplies logo, banners, legal content, about/contact content, and site customization.
+  - SSR fallback defaults live in jannatbooking_ssr/lib/api.js.
+
+- GET /public-reservation-stats
+  - Used by SSR about page reservation count.
+  - Implemented in controllers/janat.js as publicReservationStats.
+  - Uses Reservations.estimatedDocumentCount().
+  - Response fields include:
+    - success
+    - reservationsCount
+    - count
+    - totalReservations
+    - generatedAt
+  - Cache-Control: public, max-age=300, s-maxage=600.
+  - If Mongo is not connected, returns 503 and no-store.
+  - SSR behavior:
+    - About page loads the count once on mount/direct load.
+    - It is not live polling.
+    - The frontend should display the number as +17,539 style, not 17,539+.
+
+- GET /active-hotels
+  - Used by SSR featured/home hotel cards.
+  - Implemented in controllers/janat.js as listOfAllActiveHotels.
+  - Public filter expects activateHotel true, xHotelProActive not false, real hotel photos, coordinates, active room types with positive base price, and room photos.
+
+- GET /active-hotel-list
+  - Used by SSR layout/footer/header/support widget and listing contexts.
+  - Implemented in controllers/janat.js as getListOfHotels.
+
+- GET /single-hotel/:hotelSlug
+  - Used by SSR /single-hotel/[slug].
+  - Implemented in controllers/janat.js as getHotelFromSlug.
+  - Must remain public-safe. Do not expose private agentInventory, private agentPricingRate, internal owner-only fields, or PII.
+
+- GET /distinct-rooms
+  - Used by SSR room filters/search support.
+  - Implemented in controllers/janat.js as distinctRoomTypes.
+
+- GET /room-query-list/:query
+  - Used by SSR rooms search.
+  - Implemented in controllers/janat.js as gettingRoomListFromQuery.
+
+- GET /hotels/active-with-deals
+  - Used by SSR offers/deals and promotional hotel sections.
+  - Implemented in controllers/janat.js as listOfAllActiveHotelsMonthlyAndOffers.
+
+- GET /currency-rates
+  - Used by SSR app provider for SAR to selected display currency.
+  - Implemented in controllers/janat.js as getCurrencyRates.
+
+- GET /currencyapi-amounts/:saudimoney
+  - Used by SSR checkout/currency conversion helpers.
+  - Implemented in controllers/janat.js as gettingCurrencyConversion.
+
+Support Chat And Contact Endpoints
+Base prefix: /api
+
+- POST /support-cases/contact
+  - Used by jannatbooking_ssr/components/ContactForm.js.
+  - Implemented in controllers/supportcase.js as createContactSupportCase.
+  - Should create a customer-service-visible support case from fullName, email/phone, inquiryAbout, message, language, languageCode, and sourceUrl.
+  - Must remain public-safe with validation and sanitization.
+
+- POST /support-cases/new
+  - Used by jannatbooking_ssr/components/SupportWidget.js.
+  - Implemented in controllers/supportcase.js as createNewSupportCase.
+  - Creates B2C public chat support cases.
+  - Important SSR payload fields:
+    - customerName
+    - displayName1
+    - displayName2
+    - role: 0
+    - customerEmail/contact
+    - hotelId
+    - inquiryAbout
+    - inquiryDetails
+    - supportScope
+    - supporterId
+    - ownerId
+    - preferredLanguage
+    - preferredLanguageCode
+    - sourceWebsite: jannatbooking_ssr
+    - sourcePage
+    - sourceUrl
+  - Socket.IO is attached through attachIo middleware.
+
+- GET /support-cases/client/:id
+  - Used by public support widget to fetch case messages/status.
+  - Implemented as getPublicClientSupportCaseById.
+  - Must not expose admin-only fields.
+
+- PUT /support-cases/client/:id
+  - Used by public support widget to add client messages or close the case.
+  - Implemented as updatePublicClientSupportCase.
+  - Socket.IO is attached for real-time updates.
+
+- Admin/customer-service routes in routes/supportcase.js
+  - Used by hotels_frontend admin/customer-service surfaces.
+  - Most require requireSignin + requireAdminAccess("CustomerService").
+  - Public SSR must not call admin-only endpoints.
+
+Support Case Socket Events
+- joinRoom / leaveRoom
+  - Client joins a support-case room.
+- receiveMessage
+  - New message broadcast.
+- typing / stopTyping
+  - Typing indicator.
+- closeCase
+  - Case closed broadcast.
+
+Property Listing
+- POST /property-listing
+  - Route file: routes/auth.js.
+  - Controller: controllers/auth.js propertySignup.
+  - Used by jannatbooking_ssr/components/ListPropertyClient.js.
+  - Public property form should stay standardized to Makkah/Madinah current scope.
+  - The admin/operator review flow remains on backend/admin/PMS side.
+
+Authentication And Password Flows
+- POST /signup
+- POST /signin
+- POST /google-login
+- PUT /forgot-password
+- PUT /reset-password
+- GET/POST signup invitation routes where applicable
+  - Route file: routes/auth.js.
+  - SSR client components: AuthPageClient.js, PasswordForgotClient.js, PasswordResetClient.js.
+
+Checkout And Payment Support
+- GET /paypal/token-generated
+  - Used to initialize PayPal client token.
+- POST /paypal/order/create
+  - Creates PayPal order.
+- POST /reservations/paypal/pending
+  - Creates a pending reservation before PayPal capture.
+- POST /reservations/paypal/pending-cancel
+  - Cancels/cleans pending reservation when payment flow is abandoned.
+- POST /reservations/paypal/create
+  - Creates final reservation after PayPal success.
+- POST /create-uncomplete-reservation-document
+  - Saves incomplete checkout/reservation context.
+- POST /paypal/reservation-verification
+  - Reservation verification token support.
+- POST /paypal/client-payment-link/create
+  - Creates a PayPal order for private SSR client-payment links.
+  - The reservation ledger amount remains SAR.
+  - The PayPal order amount is converted dynamically and charged in USD.
+- POST /paypal/client-payment-link/capture
+  - Captures private SSR client-payment link payments.
+  - Verifies the paid USD amount against the reservation SAR ledger amount converted dynamically.
+  - On successful capture, can create/reuse a guest account session so the guest can continue to confirmation/dashboard/invoice surfaces.
+
+Payment Safety Rules
+- PayPal capture status is the source of truth for paid reservation finalization.
+- A PayPal order status alone must not mark a reservation paid if the nested capture failed or was declined.
+- Public checkout and private payment-link captures can create/reuse a client account if needed, but password/guest details must be handled safely.
+- SAR is the hotel/reservation ledger currency; PayPal charge amounts are USD; guest display currency is presentation only.
+- Exchange conversion must remain dynamic through the backend/API path and must not be hard-coded in SSR.
+- Payment pages and reservation internals should not be crawled or exposed in sitemap/llms.
+- Public SSR should never expose payment credentials, card data, full PayPal internals, or private reservation/admin fields.
+
+Reservation Model Dependency
+- models/reservations.js
+  - Used by /public-reservation-stats through estimatedDocumentCount().
+  - Used by checkout/payment/reservation flows.
+  - Do not alter reservation status/pending-confirmation logic casually; it affects hotel operations, finance, public checkout, and admin queues.
+
+Hotel Model Dependency
+- models/hotel_details.js
+  - Used by active hotel lists, single hotel pages, room types, photos, distances, payment settings, city/location, activation state, and public listing filters.
+  - Public Jannat scope should stay standardized to Makkah and Madinah for current inventory.
+  - Public responses must not expose private agent inventory/pricing overrides.
+
+Website Model Dependency
+- models/janat.js
+  - Stores public Jannat website document.
+  - Used for banners, legal content, about/contact content, logo, footer assets, and website settings.
+
+Support Model Dependency
+- models/supportcase.js
+  - Stores public and admin support cases, conversations, seen/unseen tracking, status, hotel/owner scope, and customer details.
+  - Public APIs must preserve conversation history and avoid exposing admin-only controls.
+
+Backend Caching Notes
+- Public hotel endpoints may use cached JSON helpers in controllers/janat.js.
+- /public-reservation-stats intentionally caches for a short period and is not live/polled by SSR.
+- Booking-critical checkout/availability/payment flows should remain no-store or freshly validated.
+
+Admin Visibility
+- Public contact form and support widget cases must appear in hotels_frontend admin customer-service surfaces.
+- Relevant backend admin routes are in routes/supportcase.js.
+- Access is controlled by requireSignin and requireAdminAccess("CustomerService") for customer-service admin routes.
+
+Security And Privacy Rules For SSR Consumers
+- Public SSR may call only public-safe endpoints unless a secure auth/session design exists.
+- Never expose:
+  - backend secrets
+  - raw tokens/cookies
+  - private reservation PII
+  - admin-only support case fields
+  - private agent inventory/pricing overrides
+  - payment/capture internals
+- Validate public form inputs server-side.
+- Keep payment/reservation private pages out of sitemap and llms.txt.
+
+Files To Check When SSR Behavior Changes
+- D:\JannatBooking\jannatbooking_ssr\lib\api.js
+- D:\JannatBooking\jannatbooking_ssr\components\SupportWidget.js
+- D:\JannatBooking\jannatbooking_ssr\components\ContactForm.js
+- D:\JannatBooking\jannatbooking_ssr\components\ListPropertyClient.js
+- D:\JannatBooking\jannatbooking_ssr\components\CheckoutClient.js
+- D:\JannatBooking\jannatbooking_ssr\components\AboutContent.js
+- D:\JannatBooking\hotels_backend\routes\janat.js
+- D:\JannatBooking\hotels_backend\controllers\janat.js
+- D:\JannatBooking\hotels_backend\routes\supportcase.js
+- D:\JannatBooking\hotels_backend\controllers\supportcase.js
+- D:\JannatBooking\hotels_backend\routes\auth.js
+- D:\JannatBooking\hotels_backend\controllers\auth.js
+- D:\JannatBooking\hotels_backend\controllers\paypal_reservation.js
+- D:\JannatBooking\hotels_backend\models\reservations.js
+- D:\JannatBooking\hotels_backend\models\hotel_details.js
+- D:\JannatBooking\hotels_backend\models\supportcase.js
+
+Verification Checklist
+- Start backend dev server on port 8080 when local SSR needs local data.
+- Start SSR dev server on port 3104.
+- Verify:
+  - GET /api/public-reservation-stats returns reservationsCount.
+  - GET /api/active-hotels returns only public active hotels.
+  - GET /api/single-hotel/:slug returns a public-safe hotel document.
+  - POST /api/support-cases/contact creates a case visible to admin customer service.
+  - POST /api/support-cases/new creates a public chat case.
+  - GET/PUT /api/support-cases/client/:id work without admin auth and do not expose admin controls.
+  - POST /api/property-listing accepts Jannat public listing payloads.
+  - PayPal pending/create/cancel endpoints work in sandbox before production.
+
+Cleanup Notes
+- Keep backend docs and source files only.
+- Do not keep temporary screenshots, Playwright output, local request dumps, or generated debug artifacts in backend directories.
+- Existing long-form backend reference remains:
+  - D:\JannatBooking\hotels_backend\application_structure_backend.txt

@@ -79,6 +79,58 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 });
 
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
+const JANNAT_LOCATION_ALIASES = {
+	makkah: [
+		"makkah",
+		"mecca",
+		"mekkah",
+		"makkah province",
+		"makkah al mukarramah",
+		"مكة",
+		"مكه",
+		"مكة المكرمة",
+		"مكه المكرمه",
+	],
+	madinah: [
+		"madinah",
+		"madina",
+		"medina",
+		"al madinah",
+		"al madina",
+		"al medina",
+		"al madinah province",
+		"المدينة",
+		"المدينه",
+		"المدينة المنورة",
+		"المدينه المنوره",
+	],
+};
+const cleanJannatLocationValue = (value = "") =>
+	String(value || "")
+		.normalize("NFKC")
+		.replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+		.trim()
+		.toLowerCase();
+const normalizeJannatDestination = (value = "") => {
+	const normalized = cleanJannatLocationValue(value);
+	if (!normalized) return "";
+	if (/(^|\s)(makkah|mecca|mekkah)(\s|$)/.test(normalized) || /مك[هة]/.test(normalized)) return "makkah";
+	if (/(^|\s)(madinah|madina|medina)(\s|$)/.test(normalized) || /المدين[هة]/.test(normalized)) return "madinah";
+	if (JANNAT_LOCATION_ALIASES.makkah.includes(normalized)) return "makkah";
+	if (JANNAT_LOCATION_ALIASES.madinah.includes(normalized)) return "madinah";
+	return "";
+};
+const buildJannatDestinationFilter = (destination = "") => {
+	const canonical = normalizeJannatDestination(destination);
+	if (!canonical) return null;
+	const aliases = JANNAT_LOCATION_ALIASES[canonical] || [canonical];
+	return {
+		$or: [
+			{ hotelState: { $in: aliases } },
+			{ hotelCity: { $in: aliases } },
+		],
+	};
+};
 const JANNAT_EMPLOYEE_BOOKING_SOURCE = "Jannat Employee";
 const normalizeEmployeeBookingSource = (value) => {
 	const source = String(value || "").trim();
@@ -106,7 +158,30 @@ const stripAgentRoomOverrides = (hotel = {}) => {
 const PUBLIC_HOTEL_CACHE_TTL_MS = 60 * 1000;
 const PUBLIC_HOTEL_CACHE_MAX_KEYS = 80;
 const publicHotelResponseCache = new Map();
-const DEFAULT_PUBLIC_CURRENCY_RATES = { SAR_USD: 0.27, SAR_EUR: 0.25 };
+const PUBLIC_CURRENCY_CODES = [
+	"USD",
+	"EUR",
+	"GBP",
+	"JOD",
+	"DZD",
+	"EGP",
+	"PKR",
+	"INR",
+	"MYR",
+	"IDR",
+];
+const DEFAULT_PUBLIC_CURRENCY_RATES = {
+	SAR_USD: 0.2667,
+	SAR_EUR: 0.245,
+	SAR_GBP: 0.207,
+	SAR_JOD: 0.189,
+	SAR_DZD: 35.8,
+	SAR_EGP: 12.8,
+	SAR_PKR: 74.4,
+	SAR_INR: 22.3,
+	SAR_MYR: 1.13,
+	SAR_IDR: 4350,
+};
 const PUBLIC_CURRENCY_RATES_CACHE_TTL_MS = Number(
 	process.env.PUBLIC_CURRENCY_RATES_CACHE_TTL_MS || 6 * 60 * 60 * 1000,
 );
@@ -316,6 +391,21 @@ const fetchJsonWithTimeout = async (url, timeoutMs) => {
 	}
 };
 
+const fetchPublicCurrencyRate = async (baseUrl, code) => {
+	const data = await fetchJsonWithTimeout(
+		`${baseUrl}${encodeURIComponent(code)}`,
+		PUBLIC_CURRENCY_RATES_TIMEOUT_MS,
+	);
+	if (data?.result !== "success") {
+		throw new Error(`Currency provider returned ${data?.result || "unknown"} for ${code}`);
+	}
+	const rate = Number(data.conversion_rate);
+	if (!Number.isFinite(rate) || rate <= 0) {
+		throw new Error(`Currency provider returned an invalid rate for ${code}`);
+	}
+	return rate;
+};
+
 const parseBooleanFlag = (value) =>
 	value === true || value === "true" || value === 1 || value === "1";
 
@@ -448,6 +538,34 @@ exports.list = (req, res) => {
 		}
 		res.json(documents);
 	});
+};
+
+exports.publicReservationStats = async (req, res) => {
+	try {
+		if (mongoose.connection.readyState !== 1) {
+			res.setHeader("Cache-Control", "no-store");
+			return res.status(503).json({
+				success: false,
+				message: "Reservation statistics are temporarily unavailable.",
+			});
+		}
+
+		res.setHeader("Cache-Control", "public, max-age=300, s-maxage=600");
+		const reservationsCount = await Reservations.estimatedDocumentCount();
+		return res.status(200).json({
+			success: true,
+			reservationsCount,
+			count: reservationsCount,
+			totalReservations: reservationsCount,
+			generatedAt: new Date().toISOString(),
+		});
+	} catch (err) {
+		console.error("publicReservationStats error:", err);
+		return res.status(500).json({
+			success: false,
+			message: "Failed to fetch public reservation statistics.",
+		});
+	}
 };
 
 exports.listOfAllActiveHotels = async (req, res) => {
@@ -965,21 +1083,8 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 				"location.coordinates": { $ne: [0, 0] },
 			};
 
-			if (destination) {
-				const standardizedDestination = destination.toLowerCase();
-				hotelQuery.$or = [
-					{
-						hotelState: {
-							$regex: new RegExp(standardizedDestination, "i"),
-						},
-					},
-					{
-						hotelCity: {
-							$regex: new RegExp(standardizedDestination, "i"),
-						},
-					},
-				];
-			}
+			const destinationFilter = buildJannatDestinationFilter(destination);
+			if (destinationFilter) Object.assign(hotelQuery, destinationFilter);
 
 			const roomFilterConditions = [
 				{ $eq: ["$$room.activeRoom", true] },
@@ -2256,27 +2361,37 @@ exports.getCurrencyRates = async (req, res) => {
 	}
 
 	try {
+		if (!process.env.EXCHANGE_RATE) {
+			throw new Error("EXCHANGE_RATE key is not configured");
+		}
 		const baseUrl = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE}/pair/SAR/`;
+		const results = await Promise.allSettled(
+			PUBLIC_CURRENCY_CODES.map((code) => fetchPublicCurrencyRate(baseUrl, code)),
+		);
+		const rates = { ...DEFAULT_PUBLIC_CURRENCY_RATES };
+		const failedCurrencies = [];
+		let liveRateCount = 0;
 
-		// Fetch conversion rates for USD and EUR
-		const [usdResponse, eurResponse] = await Promise.all([
-			fetchJsonWithTimeout(`${baseUrl}USD`, PUBLIC_CURRENCY_RATES_TIMEOUT_MS),
-			fetchJsonWithTimeout(`${baseUrl}EUR`, PUBLIC_CURRENCY_RATES_TIMEOUT_MS),
-		]);
+		results.forEach((result, index) => {
+			const code = PUBLIC_CURRENCY_CODES[index];
+			const key = `SAR_${code}`;
+			if (result.status === "fulfilled") {
+				rates[key] = result.value;
+				liveRateCount += 1;
+				return;
+			}
+			failedCurrencies.push(code);
+		});
 
-		// Check for successful responses
-		if (
-			usdResponse.result !== "success" ||
-			eurResponse.result !== "success"
-		) {
-			throw new Error("Currency provider returned a non-success response");
+		if (!liveRateCount) {
+			throw new Error("Currency provider returned no live rates");
 		}
 
-		// Construct rates object
-		const rates = {
-			SAR_USD: usdResponse.conversion_rate,
-			SAR_EUR: eurResponse.conversion_rate,
-		};
+		if (failedCurrencies.length) {
+			console.warn("Some public currency rates fell back to defaults.", {
+				failedCurrencies,
+			});
+		}
 
 		publicCurrencyRatesCache = {
 			value: rates,

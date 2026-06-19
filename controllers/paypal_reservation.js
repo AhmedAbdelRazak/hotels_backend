@@ -133,6 +133,7 @@ const getConfiguredWebhookIds = () => {
 /* ─────────────── 2) Helpers ─────────────── */
 const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
+const PAYPAL_USD_TOLERANCE = 0.05;
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
 const almostEq = (a, b) => Math.abs(toNum2(a) - toNum2(b)) < 1e-9;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,6 +143,54 @@ const truncate = (value, max = 127) => {
 	if (str.length <= max) return str;
 	const suffix = "...";
 	return `${str.slice(0, Math.max(0, max - suffix.length))}${suffix}`;
+};
+const usdAlmostEq = (a, b, tolerance = PAYPAL_USD_TOLERANCE) =>
+	Math.abs(toNum2(a) - toNum2(b)) <= tolerance;
+const paypalCurrency = (value) => String(value || "").trim().toUpperCase();
+const convertSarToUsdForPayPal = async (sarAmount) => {
+	const amount = toNum2(sarAmount);
+	if (!(amount > 0)) {
+		throw new Error("A positive SAR amount is required for PayPal conversion.");
+	}
+	if (!process.env.EXCHANGE_RATE) {
+		throw new Error("EXCHANGE_RATE key is required for PayPal SAR to USD conversion.");
+	}
+	const url = `https://v6.exchangerate-api.com/v6/${process.env.EXCHANGE_RATE}/pair/SAR/USD/${encodeURIComponent(
+		toCCY(amount),
+	)}`;
+	const { data } = await ax.get(url);
+	const converted = Number(data?.conversion_result);
+	if (data?.result !== "success" || !(converted > 0)) {
+		throw new Error("Exchange-rate API did not return a valid SAR to USD conversion.");
+	}
+	return toCCY(converted);
+};
+const validatePayPalPurchaseUnitsUSD = (purchaseUnits = []) => {
+	if (!Array.isArray(purchaseUnits) || !purchaseUnits.length) {
+		return "At least one PayPal purchase unit is required.";
+	}
+	for (const [index, unit] of purchaseUnits.entries()) {
+		const amount = unit?.amount || {};
+		if (paypalCurrency(amount.currency_code) !== "USD") {
+			return `PayPal purchase unit ${index + 1} must use USD currency.`;
+		}
+		if (!(Number(amount.value) > 0)) {
+			return `PayPal purchase unit ${index + 1} must include a positive USD amount.`;
+		}
+		const itemTotalCurrency = amount?.breakdown?.item_total?.currency_code;
+		if (itemTotalCurrency && paypalCurrency(itemTotalCurrency) !== "USD") {
+			return `PayPal purchase unit ${index + 1} item total must use USD currency.`;
+		}
+		if (Array.isArray(unit.items)) {
+			for (const [itemIndex, item] of unit.items.entries()) {
+				const itemCurrency = item?.unit_amount?.currency_code;
+				if (itemCurrency && paypalCurrency(itemCurrency) !== "USD") {
+					return `PayPal item ${itemIndex + 1} in purchase unit ${index + 1} must use USD currency.`;
+				}
+			}
+		}
+	}
+	return null;
 };
 const INTERNAL_NOTIFICATION_EMAILS = [
 	"morazzakhamouda@gmail.com",
@@ -1368,13 +1417,46 @@ async function paypalVccDirectCharge({
 	};
 }
 
+const normalizeGuestAccountEmail = (value = "") =>
+	String(value || "").trim().toLowerCase();
+
+const normalizeGuestAccountName = (customerDetails = {}) => {
+	const fromName = String(customerDetails?.name || "").trim();
+	const fromEmail = normalizeGuestAccountEmail(customerDetails?.email).split("@")[0];
+	const fromPhone = String(customerDetails?.phone || "").trim();
+	return (fromName || fromEmail || fromPhone || "Jannat Guest")
+		.replace(/\s+/g, " ")
+		.slice(0, 32);
+};
+
+const buildClientAccountSession = (user) => {
+	if (!user?._id) return null;
+	const token = jwt.sign({ _id: user._id }, process.env.JWT_SECRET, {
+		expiresIn: "7d",
+	});
+	return {
+		token,
+		user: {
+			_id: user._id,
+			name: user.name,
+			email: user.email,
+			phone: user.phone,
+			role: user.role,
+		},
+	};
+};
+
 async function findOrCreateUserByEmail(customerDetails, explicitUserId) {
 	let user = null;
-	if (customerDetails?.email) {
-		user = await User.findOne({ email: customerDetails.email });
+	const normalizedEmail = normalizeGuestAccountEmail(customerDetails?.email);
+	if (normalizedEmail) {
+		user = await User.findOne({ email: normalizedEmail });
 	}
 	if (!user && explicitUserId) {
 		user = await User.findById(explicitUserId);
+	}
+	if (!user && !normalizedEmail) {
+		return null;
 	}
 	if (!user) {
 		const checkoutPassword =
@@ -1383,14 +1465,52 @@ async function findOrCreateUserByEmail(customerDetails, explicitUserId) {
 			String(customerDetails?.phone || "").replace(/\s+/g, "") ||
 			crypto.randomBytes(8).toString("hex");
 		user = new User({
-			name: customerDetails?.name,
-			email: customerDetails?.email,
-			phone: customerDetails?.phone,
+			name: normalizeGuestAccountName(customerDetails),
+			email: normalizedEmail,
+			phone: String(customerDetails?.phone || "").trim(),
 			password: checkoutPassword, // hashed by model
 		});
 		await user.save();
 	}
 	return user;
+}
+
+async function ensureReservationGuestAccountSession(reservation, logPrefix = "") {
+	try {
+		const customerDetails = reservation?.customer_details || {};
+		const confirmationNumber = String(
+			reservation?.confirmation_number || "",
+		).trim();
+		const email = normalizeGuestAccountEmail(customerDetails?.email);
+		if (!email || !confirmationNumber) return null;
+
+		const existing = await User.findOne({ email });
+		const user = await findOrCreateUserByEmail(
+			{
+				...customerDetails,
+				email,
+			},
+			null,
+		);
+		if (!user) return null;
+
+		user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+		if (!user.confirmationNumbersBooked.includes(confirmationNumber)) {
+			user.confirmationNumbersBooked.push(confirmationNumber);
+			await user.save();
+		}
+
+		return {
+			...buildClientAccountSession(user),
+			accountCreated: !existing,
+			confirmation_number: confirmationNumber,
+		};
+	} catch (error) {
+		console.warn(`${logPrefix || "[PP]"} guest account session warning`, {
+			message: error?.message || error,
+		});
+		return null;
+	}
 }
 
 async function buildAndSaveReservation({
@@ -1430,10 +1550,9 @@ async function buildAndSaveReservation({
 	);
 
 	const bounds =
-		(paypalDetailsToPersist && paypalDetailsToPersist.bounds) ||
-		(convertedAmounts?.totalUSD
-			? { base: "USD", limit_usd: toNum2(convertedAmounts.totalUSD) }
-			: undefined);
+		paypalDetailsToPersist && paypalDetailsToPersist.bounds
+			? paypalDetailsToPersist.bounds
+			: undefined;
 
 	const reservationPayload = {
 		hotelId,
@@ -2107,10 +2226,23 @@ exports.createReservationAndProcess = async (req, res) => {
 					.json({ message: "Unable to save card with PayPal." });
 			}
 
-			if (convertedAmounts?.totalUSD) {
+			if (Number(body?.total_amount || 0) > 0) {
+				let liveLimitUsd;
+				try {
+					liveLimitUsd = await convertSarToUsdForPayPal(body.total_amount);
+				} catch (conversionError) {
+					console.error("[PP][vault] SAR to USD conversion failed", {
+						message: conversionError?.message || conversionError,
+						totalAmountSar: body?.total_amount,
+					});
+					return res.status(503).json({
+						message:
+							"Could not refresh the live SAR to USD exchange rate for PayPal. Please try again in a moment.",
+					});
+				}
 				persist.bounds = {
 					base: "USD",
-					limit_usd: toNum2(convertedAmounts.totalUSD),
+					limit_usd: toNum2(liveLimitUsd),
 				};
 				persist.captured_total_usd = 0;
 				persist.pending_total_usd = 0;
@@ -2266,20 +2398,52 @@ exports.createReservationAndProcess = async (req, res) => {
 				});
 			}
 
-			// Calculate the expected amount (USD) based on the label (deposit vs full)
-			const expectedUsdAmount =
+			// SAR is the source of truth; PayPal must charge the live SAR -> USD conversion.
+			const expectedSarAmount =
 				pmtLower === "deposit paid"
-					? toCCY(body?.convertedAmounts?.depositUSD || 0)
-					: toCCY(body?.convertedAmounts?.totalUSD || 0);
+					? toNum2(
+							Number(body?.paid_amount ?? 0) ||
+								Number(body?.sarAmount ?? 0) ||
+								Number(body?.total_amount || 0) * 0.15,
+					  )
+					: toNum2(
+							Number(body?.paid_amount ?? 0) ||
+								Number(body?.sarAmount ?? 0) ||
+								Number(body?.total_amount || 0),
+					  );
+			let expectedUsdAmount;
+			let reservationLimitUsd;
+			try {
+				expectedUsdAmount = await convertSarToUsdForPayPal(expectedSarAmount);
+				reservationLimitUsd = await convertSarToUsdForPayPal(body?.total_amount);
+			} catch (conversionError) {
+				console.error("[PP][checkout] SAR to USD conversion failed", {
+					message: conversionError?.message || conversionError,
+					expectedSarAmount,
+					totalAmountSar: body?.total_amount,
+				});
+				return await fail(503, {
+					message:
+						"Could not refresh the live SAR to USD exchange rate for PayPal. Please try again in a moment.",
+				});
+			}
 
-			// Check client-supplied expectedUsdAmount (when provided)
-			if (
-				pp.expectedUsdAmount &&
-				toCCY(pp.expectedUsdAmount) !== expectedUsdAmount
-			) {
+			const clientConvertedUsd =
+				pmtLower === "deposit paid"
+					? body?.convertedAmounts?.depositUSD
+					: body?.convertedAmounts?.totalUSD;
+			if (clientConvertedUsd && !usdAlmostEq(clientConvertedUsd, expectedUsdAmount)) {
 				return await fail(400, {
 					message:
-						"Mismatch between expectedUsdAmount and convertedAmounts supplied by the frontend. If a temporary reservation was created, it has been removed.",
+						"The checkout exchange rate changed before payment. Please refresh checkout and try again. If a temporary reservation was created, it has been removed.",
+				});
+			}
+
+			// Check client-supplied expectedUsdAmount (when provided)
+			if (pp.expectedUsdAmount && !usdAlmostEq(pp.expectedUsdAmount, expectedUsdAmount)) {
+				return await fail(400, {
+					message:
+						"The PayPal USD amount does not match the live SAR to USD exchange rate. If a temporary reservation was created, it has been removed.",
 				});
 			}
 
@@ -2306,8 +2470,14 @@ exports.createReservationAndProcess = async (req, res) => {
 			});
 			const order = getRes.data;
 			const pu = order?.purchase_units?.[0];
+			const orderCurrency = paypalCurrency(pu?.amount?.currency_code);
+			if (orderCurrency !== "USD") {
+				return await fail(400, {
+					message: `The PayPal order currency (${orderCurrency || "unknown"}) is invalid. Jannat Booking checkout only charges PayPal in USD. If a temporary reservation was created, it has been removed.`,
+				});
+			}
 			const orderAmount = pu?.amount?.value;
-			if (toCCY(orderAmount) !== expectedUsdAmount) {
+			if (!usdAlmostEq(orderAmount, expectedUsdAmount)) {
 				return await fail(400, {
 					message: `The PayPal order amount (${orderAmount}) does not match the expected amount (${expectedUsdAmount}). If a temporary reservation was created, it has been removed.`,
 				});
@@ -2360,11 +2530,17 @@ exports.createReservationAndProcess = async (req, res) => {
 						pendingReservationRemoved: true,
 					});
 				}
+				const captureCurrency = paypalCurrency(cap?.amount?.currency_code);
+				if (captureCurrency !== "USD") {
+					return await fail(500, {
+						message:
+							"PayPal returned a captured payment in an unexpected currency. Please contact Jannat Booking support before retrying.",
+						captureCurrency: captureCurrency || "unknown",
+					});
+				}
 
 				const capturedUsd = toNum2(cap?.amount?.value || expectedUsdAmount);
-				const limitUsd = toNum2(
-					body?.convertedAmounts?.totalUSD || capturedUsd,
-				);
+				const limitUsd = toNum2(reservationLimitUsd || capturedUsd);
 
 				// Normalize label from option/amounts
 				const finalPayment = decidePaymentLabel({
@@ -2519,6 +2695,14 @@ exports.createReservationAndProcess = async (req, res) => {
 					details: { status: auth?.status || null, id: auth?.id || null },
 				});
 			}
+			const authCurrency = paypalCurrency(auth?.amount?.currency_code);
+			if (authCurrency !== "USD") {
+				return await fail(500, {
+					message:
+						"PayPal returned an authorization in an unexpected currency. Please contact Jannat Booking support before retrying.",
+					authCurrency: authCurrency || "unknown",
+				});
+			}
 
 			const srcCard = authResult?.payment_source?.card || {};
 			let vaultId =
@@ -2579,9 +2763,7 @@ exports.createReservationAndProcess = async (req, res) => {
 			const paypalDetails = {
 				bounds: {
 					base: "USD",
-					limit_usd: toNum2(
-						body?.convertedAmounts?.totalUSD || auth?.amount?.value || 0,
-					),
+					limit_usd: toNum2(reservationLimitUsd || auth?.amount?.value || 0),
 				},
 				captured_total_usd: 0,
 				pending_total_usd: 0,
@@ -3539,19 +3721,56 @@ exports.linkPayReservation = async (req, res) => {
 			return res.status(404).json({ message: "Reservation not found." });
 		}
 
-		// Amount chosen by guest (deposit or full)
-		const usdAmount =
-			String(option).toLowerCase() === "deposit"
-				? Number(convertedAmounts?.depositUSD || 0)
-				: Number(convertedAmounts?.totalUSD || 0);
-
-		if (!(usdAmount > 0)) {
-			console.warn(`${logPrefix} bad usdAmount`, {
-				usdAmount,
-				option,
-				convertedAmounts,
+		// Amount chosen by guest: SAR is the source of truth; PayPal must charge live USD conversion.
+		const sarAmountNumber = toNum2(sarAmount);
+		if (!(sarAmountNumber > 0)) {
+			console.warn(`${logPrefix} bad sarAmount`, { sarAmount, option });
+			return res.status(400).json({ message: "Valid SAR amount is required." });
+		}
+		let usdAmount;
+		let reservationLimitUsd;
+		try {
+			usdAmount = Number(await convertSarToUsdForPayPal(sarAmountNumber));
+			reservationLimitUsd = Number(
+				await convertSarToUsdForPayPal(
+					Number(reservation?.total_amount || 0) || sarAmountNumber,
+				),
+			);
+		} catch (conversionError) {
+			console.error(`${logPrefix} SAR to USD conversion failed`, {
+				message: conversionError?.message || conversionError,
+				sarAmount: sarAmountNumber,
 			});
-			return res.status(400).json({ message: "Converted USD amount missing." });
+			return res.status(503).json({
+				message:
+					"Could not refresh the live SAR to USD exchange rate for PayPal. Please try again in a moment.",
+			});
+		}
+		const clientConvertedUsd =
+			String(option).toLowerCase() === "deposit"
+				? convertedAmounts?.depositUSD
+				: convertedAmounts?.totalUSD;
+		if (clientConvertedUsd && !usdAlmostEq(clientConvertedUsd, usdAmount)) {
+			console.warn(`${logPrefix} client conversion mismatch`, {
+				clientConvertedUsd,
+				serverUsd: usdAmount,
+				sarAmount: sarAmountNumber,
+			});
+			return res.status(400).json({
+				message:
+					"The payment exchange rate changed. Please refresh the payment page and try again.",
+			});
+		}
+		if (!usdAlmostEq(pp.expectedUsdAmount, usdAmount)) {
+			console.warn(`${logPrefix} expectedUsd mismatch`, {
+				expectedUsdAmount: pp.expectedUsdAmount,
+				serverUsd: usdAmount,
+				sarAmount: sarAmountNumber,
+			});
+			return res.status(400).json({
+				message:
+					"The PayPal USD amount does not match the live SAR to USD exchange rate.",
+			});
 		}
 
 		// PayPal REST auth for REST endpoints
@@ -3573,23 +3792,31 @@ exports.linkPayReservation = async (req, res) => {
 			const debugGetId = pickDebug(getRes);
 			const order = getRes.data;
 			const pu = order?.purchase_units?.[0];
+			const orderCurrency = paypalCurrency(pu?.amount?.currency_code);
 			const orderAmount = pu?.amount?.value;
 			console.log(`${logPrefix} order.get ok`, {
 				order_id: pp.order_id,
 				debugId: debugGetId,
+				orderCurrency,
 				orderAmount,
 				expectedUsdAmount: pp.expectedUsdAmount,
 			});
-			if (
-				Number(orderAmount).toFixed(2) !==
-				Number(pp.expectedUsdAmount).toFixed(2)
-			) {
-				console.warn(`${logPrefix} amount mismatch`, {
-					orderAmount,
-					expectedUsdAmount: pp.expectedUsdAmount,
+			if (orderCurrency !== "USD") {
+				console.warn(`${logPrefix} currency mismatch`, {
+					orderCurrency,
+					expectedCurrency: "USD",
 				});
 				return res.status(400).json({
-					message: `PayPal order amount (${orderAmount}) does not match expected (${pp.expectedUsdAmount}).`,
+					message: `PayPal order currency (${orderCurrency || "unknown"}) is invalid. Jannat Booking only charges PayPal in USD.`,
+				});
+			}
+			if (!usdAlmostEq(orderAmount, usdAmount)) {
+				console.warn(`${logPrefix} amount mismatch`, {
+					orderAmount,
+					expectedUsdAmount: usdAmount,
+				});
+				return res.status(400).json({
+					message: `PayPal order amount (${orderAmount}) does not match expected (${toCCY(usdAmount)}).`,
 				});
 			}
 		} catch (e) {
@@ -3726,6 +3953,14 @@ exports.linkPayReservation = async (req, res) => {
 					message: "Authorization was not created.",
 				});
 			}
+			const authCurrency = paypalCurrency(auth?.amount?.currency_code);
+			if (authCurrency !== "USD") {
+				return res.status(500).json({
+					message:
+						"PayPal returned an authorization in an unexpected currency. Please contact Jannat Booking support before retrying.",
+					authCurrency: authCurrency || "unknown",
+				});
+			}
 
 			const srcCard = authResult?.payment_source?.card || {};
 			const vaultId =
@@ -3743,7 +3978,7 @@ exports.linkPayReservation = async (req, res) => {
 			const setOps = {
 				"paypal_details.bounds.base": "USD",
 				"paypal_details.bounds.limit_usd": toNumber2(
-					convertedAmounts?.totalUSD || usdAmount,
+					reservationLimitUsd || usdAmount,
 				),
 				"paypal_details.captured_total_usd":
 					reservation?.paypal_details?.captured_total_usd || 0,
@@ -3802,11 +4037,16 @@ exports.linkPayReservation = async (req, res) => {
 				reservationId: String(reservation._id),
 				authId: auth.id,
 			});
+			const accountSession = await ensureReservationGuestAccountSession(
+				updated,
+				logPrefix,
+			);
 
 			return res.status(200).json({
 				message: "Payment authorized (no funds captured).",
 				reservation: updated,
 				authorizationId: auth.id,
+				accountSession,
 			});
 		}
 
@@ -3816,9 +4056,7 @@ exports.linkPayReservation = async (req, res) => {
 		const computedLimit =
 			typeof reservation?.paypal_details?.bounds?.limit_usd === "number"
 				? toNumber2(reservation.paypal_details.bounds.limit_usd)
-				: convertedAmounts?.totalUSD
-				? toNumber2(convertedAmounts.totalUSD)
-				: toNumber2(pp.expectedUsdAmount); // final fallback
+				: toNumber2(reservationLimitUsd || usdAmount);
 
 		// **CRITICAL FIX**: pre‑seed bounds in DB BEFORE pending guard
 		if (
@@ -4014,6 +4252,20 @@ exports.linkPayReservation = async (req, res) => {
 				);
 		}
 
+		const captureCurrency = paypalCurrency(cap?.amount?.currency_code);
+		if (captureCurrency !== "USD") {
+			await finalizePendingCaptureUSD({
+				reservationId: reservation._id,
+				usdAmount: newCapture,
+				success: false,
+			});
+			return res.status(500).json({
+				message:
+					"PayPal returned a captured payment in an unexpected currency. Please contact Jannat Booking support before retrying.",
+				captureCurrency: captureCurrency || "unknown",
+			});
+		}
+
 		const capAmount = toNumber2(cap?.amount?.value || newCapture);
 		console.log(`${logPrefix} capture ok`, {
 			orderId: capResult?.id,
@@ -4111,6 +4363,10 @@ exports.linkPayReservation = async (req, res) => {
 			limit,
 			fullyPaid,
 		});
+		const accountSession = await ensureReservationGuestAccountSession(
+			updated,
+			logPrefix,
+		);
 
 		// Best-effort receipts
 		try {
@@ -4137,6 +4393,7 @@ exports.linkPayReservation = async (req, res) => {
 			message: "Payment captured and reservation updated.",
 			reservation: updated,
 			transactionId: cap.id,
+			accountSession,
 		});
 	} catch (error) {
 		console.error(`${logPrefix} fatal`, {
@@ -5064,6 +5321,14 @@ exports.createPayPalOrder = async (req, res) => {
 				},
 			];
 		}
+		const purchaseUnitCurrencyError =
+			validatePayPalPurchaseUnitsUSD(purchase_units);
+		if (purchaseUnitCurrencyError) {
+			log("validation failed: non-USD purchase unit", {
+				message: purchaseUnitCurrencyError,
+			});
+			return res.status(400).json({ message: purchaseUnitCurrencyError });
+		}
 
 		const request = new paypal.orders.OrdersCreateRequest();
 		request.prefer("return=representation");
@@ -5249,6 +5514,18 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		reservationData.payment = "not paid";
 		reservationData.commission = 0;
 		reservationData.commissionPaid = false;
+
+		const user = await findOrCreateUserByEmail(
+			reservationData.customerDetails,
+			reservationData.userId
+		);
+		if (user) {
+			user.confirmationNumbersBooked = user.confirmationNumbersBooked || [];
+			if (!user.confirmationNumbersBooked.includes(confirmationNumber)) {
+				user.confirmationNumbersBooked.push(confirmationNumber);
+				await user.save();
+			}
+		}
 
 		const saved = await buildAndSaveReservation({
 			reqBody: {

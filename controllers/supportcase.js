@@ -6,6 +6,7 @@ const { newSupportCaseEmail } = require("./assets");
 const HotelDetails = require("../models/hotel_details");
 const User = require("../models/user");
 const {
+	DEFAULT_JANNAT_SUPPORT_HOTEL_ID,
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
 const { schedulePlanTurn } = require("../aiagent/core/orchestrator");
@@ -237,6 +238,68 @@ const SYSTEM_SUPPORT_CONTACTS = new Set([
 	"noreply@jannatbooking.com",
 	"guest@jannatbooking.com",
 ]);
+
+const DEFAULT_JANNAT_SUPPORTER_ID = "6553f1c6d06c5cea2f98a838";
+const contactFormRateLimit = new Map();
+const CONTACT_FORM_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const CONTACT_FORM_RATE_LIMIT_MAX = 6;
+
+const configuredJannatSupporterId = () =>
+	String(
+		process.env.JANNAT_BOOKING_SUPPORTER_ID ||
+			process.env.JANNAT_SUPPORTER_ID ||
+			process.env.REACT_APP_JANNAT_BOOKING_SUPPORTER_ID ||
+			DEFAULT_JANNAT_SUPPORTER_ID
+	).trim();
+
+const requestIpKey = (req = {}) =>
+	String(req.headers?.["x-forwarded-for"] || req.ip || req.connection?.remoteAddress || "")
+		.split(",")[0]
+		.trim()
+		.slice(0, 80);
+
+const consumeContactFormRateLimit = (req = {}) => {
+	const key = requestIpKey(req);
+	if (!key) return true;
+	const now = Date.now();
+	const record = contactFormRateLimit.get(key) || { count: 0, resetAt: now + CONTACT_FORM_RATE_LIMIT_WINDOW_MS };
+	if (record.resetAt <= now) {
+		contactFormRateLimit.set(key, { count: 1, resetAt: now + CONTACT_FORM_RATE_LIMIT_WINDOW_MS });
+		return true;
+	}
+	if (record.count >= CONTACT_FORM_RATE_LIMIT_MAX) return false;
+	record.count += 1;
+	contactFormRateLimit.set(key, record);
+	return true;
+};
+
+const formatContactInquiryDetails = ({
+	message,
+	email,
+	phone,
+	preferredContact,
+	reservationReference,
+	hotelName,
+	sourceUrl,
+	languageName,
+	languageCode,
+}) =>
+	[
+		`[Source: Jannat Booking contact page]`,
+		languageName || languageCode
+			? `[Preferred Language: ${languageName || ""}${languageCode ? ` (${languageCode})` : ""}]`
+			: "",
+		email ? `[Email: ${email}]` : "",
+		phone ? `[Phone: ${phone}]` : "",
+		preferredContact ? `[Preferred Contact: ${preferredContact}]` : "",
+		reservationReference ? `[Reservation Reference: ${reservationReference}]` : "",
+		hotelName ? `[Hotel / Destination: ${hotelName}]` : "",
+		sourceUrl ? `[Page URL: ${sourceUrl}]` : "",
+		"",
+		message,
+	]
+		.filter((line) => line !== "")
+		.join("\n");
 
 const clientContactType = (contact = "") => {
 	const normalized = normalizeEmailOrPhone(contact);
@@ -1151,16 +1214,17 @@ exports.createNewSupportCase = async (req, res) => {
 			sourceWebsite,
 			sourcePage,
 			sourceUrl,
+			initialClientMessage,
+			initialClientTag,
 		} = req.body;
 
-		console.log(req.body.displayName1, "displayName1");
-		console.log("Received Payload:", req.body);
 		if (
 			!validateReadableTextFields(res, {
 				customerName,
 				customerEmail,
 				inquiryAbout,
 				inquiryDetails,
+				initialClientMessage,
 				displayName1,
 				displayName2,
 				supporterName,
@@ -1271,6 +1335,27 @@ exports.createNewSupportCase = async (req, res) => {
 			},
 		];
 
+		const cleanInitialClientMessage = cleanText(initialClientMessage, 8000);
+		if (openedBy === "client" && cleanInitialClientMessage) {
+			conversation.push({
+				messageBy: {
+					customerName: cleanChatDisplayName(customerName) || "Guest",
+					customerEmail:
+						normalizedCustomerEmail || customerEmail || "guest@jannatbooking.com",
+					userId: normalizedCustomerEmail || customerEmail || "",
+				},
+				message: cleanInitialClientMessage,
+				inquiryAbout,
+				inquiryDetails,
+				seenByAdmin: false,
+				seenByHotel: false,
+				seenByCustomer: true,
+				clientTag: cleanText(initialClientTag, 120),
+				preferredLanguage: preferredLanguage || "English",
+				preferredLanguageCode: preferredLanguageCode || "en",
+			});
+		}
+
 		// Build the support case doc
 		const newCase = new SupportCase({
 			supporterId,
@@ -1338,6 +1423,121 @@ exports.createNewSupportCase = async (req, res) => {
 		return res.status(201).json(newCase);
 	} catch (error) {
 		console.error("Error creating support case:", error);
+		return res.status(400).json({ error: error.message });
+	}
+};
+
+exports.createContactSupportCase = async (req, res) => {
+	try {
+		const {
+			fullName,
+			name,
+			email,
+			phone,
+			preferredContact,
+			inquiryAbout,
+			message,
+			reservationReference,
+			hotelName,
+			language,
+			languageCode,
+			sourceUrl,
+			website,
+		} = req.body || {};
+
+		if (cleanText(website, 240)) {
+			return res.status(200).json({ success: true });
+		}
+
+		if (!consumeContactFormRateLimit(req)) {
+			return res.status(429).json({
+				error: "Too many contact requests. Please wait a few minutes and try again.",
+			});
+		}
+
+		const customerName = cleanChatDisplayName(fullName || name);
+		const cleanEmail = cleanText(email, 180).toLowerCase();
+		const cleanPhone = normalizeEmailOrPhone(phone);
+		const contactValue = cleanEmail || cleanPhone;
+		const cleanMessage = cleanText(message, 5000);
+		const topic = cleanText(inquiryAbout || "general_support", 80);
+		const preferredLanguageCode = cleanText(languageCode, 10) || "en";
+		const preferredLanguage =
+			cleanText(language, 40) || (preferredLanguageCode === "ar" ? "Arabic" : "English");
+
+		if (!validateReadableTextFields(res, {
+			customerName,
+			cleanEmail,
+			cleanPhone,
+			topic,
+			cleanMessage,
+			reservationReference,
+			hotelName,
+		})) {
+			return;
+		}
+
+		if (!customerName || !contactValue || !cleanMessage) {
+			return res.status(400).json({
+				error: "Please add your name, email or phone, and message.",
+			});
+		}
+
+		if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+			return res.status(400).json({ error: "Please add a valid email address." });
+		}
+
+		if (!cleanEmail && cleanPhone.replace(/[^\d]/g, "").length < 7) {
+			return res.status(400).json({ error: "Please add a valid phone number." });
+		}
+
+		const supportId = configuredJannatSupporterId();
+		const supportHotelId =
+			cleanText(process.env.JANNAT_BOOKING_SUPPORT_HOTEL_ID, 80) ||
+			DEFAULT_JANNAT_SUPPORT_HOTEL_ID;
+		const cleanReservationReference = cleanText(reservationReference, 80);
+		const cleanHotelName = cleanText(hotelName, 160);
+		const cleanPreferredContact = cleanText(preferredContact, 40);
+		const details = formatContactInquiryDetails({
+			message: cleanMessage,
+			email: cleanEmail,
+			phone: cleanPhone,
+			preferredContact: cleanPreferredContact,
+			reservationReference: cleanReservationReference,
+			hotelName: cleanHotelName,
+			sourceUrl: cleanText(sourceUrl, 500),
+			languageName: preferredLanguage,
+			languageCode: preferredLanguageCode,
+		});
+
+		req.body = {
+			customerName,
+			customerEmail: contactValue,
+			inquiryAbout: topic,
+			inquiryDetails: details,
+			initialClientMessage: cleanMessage,
+			initialClientTag: `contact-form-${Date.now()}`,
+			supporterId: supportId,
+			ownerId: supportId,
+			hotelId: supportHotelId,
+			role: 0,
+			displayName1: customerName,
+			displayName2: "Jannat Booking",
+			supporterName: "Jannat Booking Support",
+			targetUserId: supportId,
+			targetUserName: "Jannat Booking Support",
+			targetUserRole: "CustomerService",
+			preferredLanguage,
+			preferredLanguageCode,
+			supportScope: "jannat_booking",
+			sourceWebsite: "jannatbooking_ssr",
+			sourcePage: "contact_page",
+			sourceUrl: cleanText(sourceUrl, 500),
+		};
+
+		return exports.createNewSupportCase(req, res);
+	} catch (error) {
+		console.error("Error creating contact support case:", error);
 		return res.status(400).json({ error: error.message });
 	}
 };

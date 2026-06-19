@@ -30,6 +30,57 @@ const RESET_TOKEN_MINUTES = parseInt(
 	process.env.RESET_TOKEN_MINUTES || "60",
 	10
 );
+const JANNAT_LOCATION_ALIASES = {
+	makkah: [
+		"makkah",
+		"mecca",
+		"mekkah",
+		"makkah province",
+		"makkah al mukarramah",
+		"مكة",
+		"مكه",
+		"مكة المكرمة",
+		"مكه المكرمه",
+	],
+	madinah: [
+		"madinah",
+		"madina",
+		"medina",
+		"al madinah",
+		"al madina",
+		"al medina",
+		"al madinah province",
+		"المدينة",
+		"المدينه",
+		"المدينة المنورة",
+		"المدينه المنوره",
+	],
+};
+
+const cleanJannatLocationValue = (value = "") =>
+	String(value || "")
+		.normalize("NFKC")
+		.replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+		.trim()
+		.toLowerCase();
+
+const normalizeJannatHotelLocation = (value = "") => {
+	const normalized = cleanJannatLocationValue(value);
+	if (!normalized) return "";
+	if (/(^|\s)(makkah|mecca|mekkah)(\s|$)/.test(normalized) || /مك[هة]/.test(normalized)) return "Makkah";
+	if (/(^|\s)(madinah|madina|medina)(\s|$)/.test(normalized) || /المدين[هة]/.test(normalized)) return "Madinah";
+	if (JANNAT_LOCATION_ALIASES.makkah.includes(normalized)) return "Makkah";
+	if (JANNAT_LOCATION_ALIASES.madinah.includes(normalized)) return "Madinah";
+	return "";
+};
+
+const normalizeJannatHotelCountry = (value = "") => {
+	const normalized = cleanJannatLocationValue(value);
+	if (["ksa", "saudi arabia", "saudi", "kingdom of saudi arabia", "السعودية", "المملكة العربية السعودية"].includes(normalized)) {
+		return "KSA";
+	}
+	return "";
+};
 
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
@@ -794,16 +845,22 @@ exports.propertySignup = async (req, res) => {
 		// --- Branch A: existing user adds a hotel (unchanged logic) ---
 		if (existingUser) {
 			console.log("Handling existing user:", existingUser);
+			const normalizedHotelCountry = normalizeJannatHotelCountry(hotelCountry);
+			const normalizedHotelState = normalizeJannatHotelLocation(hotelState);
+			const normalizedHotelCity = normalizeJannatHotelLocation(hotelCity);
 
 			if (
 				!hotelName ||
 				!hotelAddress ||
-				!hotelCountry ||
-				!hotelState ||
-				!hotelCity ||
+				!normalizedHotelCountry ||
+				!normalizedHotelState ||
+				!normalizedHotelCity ||
+				normalizedHotelState !== normalizedHotelCity ||
 				!propertyType
 			) {
-				return res.status(400).json({ error: "Please fill all the fields" });
+				return res.status(400).json({
+					error: "Please choose a supported KSA hotel location: Makkah or Madinah",
+				});
 			}
 
 			// Duplicate hotel name guard
@@ -822,9 +879,9 @@ exports.propertySignup = async (req, res) => {
 			const hotelDetails = new HotelDetails({
 				hotelName,
 				hotelAddress,
-				hotelCountry,
-				hotelState,
-				hotelCity,
+				hotelCountry: normalizedHotelCountry,
+				hotelState: normalizedHotelState,
+				hotelCity: normalizedHotelCity,
 				propertyType,
 				hotelFloors: hotelFloors ? Number(hotelFloors) : 1,
 				hotelRooms: hotelRooms ? Number(hotelRooms) : 1,
@@ -1224,6 +1281,9 @@ exports.propertySignup = async (req, res) => {
 
 		// --- Branch C: NEW HOTEL OWNER signup (role 2000: unchanged behavior) ---
 		console.log("Handling new user signup");
+		const normalizedHotelCountry = normalizeJannatHotelCountry(hotelCountry);
+		const normalizedHotelState = normalizeJannatHotelLocation(hotelState);
+		const normalizedHotelCity = normalizeJannatHotelLocation(hotelCity);
 		if (
 			!name ||
 			!email ||
@@ -1231,9 +1291,10 @@ exports.propertySignup = async (req, res) => {
 			!cleanedPhone ||
 			!hotelName ||
 			!hotelAddress ||
-			!hotelCountry ||
-			!hotelState ||
-			!hotelCity ||
+			!normalizedHotelCountry ||
+			!normalizedHotelState ||
+			!normalizedHotelCity ||
+			normalizedHotelState !== normalizedHotelCity ||
 			!propertyType
 		) {
 			console.log("Missing fields (owner):", {
@@ -1249,7 +1310,9 @@ exports.propertySignup = async (req, res) => {
 				propertyType,
 				hotelFloors,
 			});
-			return res.status(400).json({ error: "Please fill all the fields" });
+			return res.status(400).json({
+				error: "Please choose a supported KSA hotel location: Makkah or Madinah",
+			});
 		}
 
 		let userExist = await User.findOne({ email }).exec();
@@ -1273,7 +1336,9 @@ exports.propertySignup = async (req, res) => {
 			phone: cleanedPhone,
 			hotelName,
 			hotelAddress,
-			hotelCountry,
+			hotelCountry: normalizedHotelCountry,
+			hotelState: normalizedHotelState,
+			hotelCity: normalizedHotelCity,
 			propertyType,
 			role: 2000,
 			acceptedTermsAndConditions: accepted,
@@ -1284,9 +1349,9 @@ exports.propertySignup = async (req, res) => {
 		const hotelDetails = new HotelDetails({
 			hotelName,
 			hotelAddress,
-			hotelCountry,
-			hotelState,
-			hotelCity,
+			hotelCountry: normalizedHotelCountry,
+			hotelState: normalizedHotelState,
+			hotelCity: normalizedHotelCity,
 			propertyType,
 			hotelFloors: hotelFloors ? Number(hotelFloors) : 1,
 			hotelRooms: hotelRooms ? Number(hotelRooms) : 1,

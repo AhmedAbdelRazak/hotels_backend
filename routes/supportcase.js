@@ -14,6 +14,12 @@ const attachIo = (req, res, next) => {
 
 // Create a new support case
 router.post(
+	"/support-cases/contact",
+	attachIo,
+	supportCaseController.createContactSupportCase
+);
+
+router.post(
 	"/support-cases/new",
 	attachIo,
 	supportCaseController.createNewSupportCase

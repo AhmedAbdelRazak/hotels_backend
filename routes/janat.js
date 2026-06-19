@@ -24,6 +24,7 @@ const {
 	getHotelDistancesFromElHaram,
 	gettingCurrencyConversion,
 	getCurrencyRates,
+	publicReservationStats,
 	gettingByReservationId,
 	paginatedReservationList,
 	paginatedOtaReservationList,
@@ -57,6 +58,7 @@ const { createPayment } = require("../controllers/authorizenet");
 
 router.post("/janat-website/:documentId", createUpdateDocument);
 router.get("/janat-website-document", list);
+router.get("/public-reservation-stats", publicReservationStats);
 router.get("/active-hotels", listOfAllActiveHotels);
 router.get("/single-hotel/:hotelSlug", getHotelFromSlug);
 router.get("/active-hotel-list", getListOfHotels);
