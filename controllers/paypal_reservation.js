@@ -2068,9 +2068,18 @@ exports.createReservationAndProcess = async (req, res) => {
 				await waNotifyNewReservation(saved);
 			} catch (_) {}
 
+			const accountSession = await ensureReservationGuestAccountSession(
+				saved,
+				"[PP][checkout][vault]"
+			);
+
 			return res
 				.status(201)
-				.json({ message: "Reservation created successfully", data: saved });
+				.json({
+					message: "Reservation created successfully",
+					data: saved,
+					accountSession,
+				});
 		}
 
 		// Client details validation (unchanged)
@@ -2641,10 +2650,15 @@ exports.createReservationAndProcess = async (req, res) => {
 				} catch (_) {}
 
 				await cleanupPending("captured");
+				const accountSession = await ensureReservationGuestAccountSession(
+					saved,
+					"[PP][checkout][capture]"
+				);
 
 				return res.status(201).json({
 					message: "Reservation created successfully (captured).",
 					data: saved,
+					accountSession,
 				});
 			}
 
@@ -2844,11 +2858,16 @@ exports.createReservationAndProcess = async (req, res) => {
 			} catch (_) {}
 
 			await cleanupPending("authorized");
+			const accountSession = await ensureReservationGuestAccountSession(
+				saved,
+				"[PP][checkout][authorize]"
+			);
 
 			return res.status(201).json({
 				message:
 					"Reservation created successfully (authorized; no funds captured).",
 				data: saved,
+				accountSession,
 			});
 		}
 
@@ -5404,10 +5423,15 @@ exports.verifyReservationAndCreate = async (req, res) => {
 			if (exObj.customer_details) delete exObj.customer_details.password;
 			const data2 = { ...exObj, customerDetails: exObj.customer_details };
 			delete data2.customer_details;
+			const accountSession = await ensureReservationGuestAccountSession(
+				existing,
+				"[PP][verify][existing]"
+			);
 			return res.status(200).json({
 				message: "Reservation already verified.",
 				data: existing,
 				data2,
+				accountSession,
 			});
 		}
 
@@ -5561,11 +5585,16 @@ exports.verifyReservationAndCreate = async (req, res) => {
 		if (savedObj.customer_details) delete savedObj.customer_details.password;
 		const data2 = { ...savedObj, customerDetails: savedObj.customer_details };
 		delete data2.customer_details;
+		const accountSession = await ensureReservationGuestAccountSession(
+			saved,
+			"[PP][verify]"
+		);
 
 		return res.status(201).json({
 			message: "Reservation verified and created.",
 			data: saved,
 			data2,
+			accountSession,
 		});
 	} catch (err) {
 		console.error(
