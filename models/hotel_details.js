@@ -194,6 +194,15 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: true,
 		},
+		hasBusService: {
+			type: Boolean,
+			default: false,
+		},
+		busDetails: {
+			type: String,
+			trim: true,
+			default: "",
+		},
 		subscribed: {
 			type: Boolean,
 			default: false,

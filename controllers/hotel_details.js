@@ -52,6 +52,8 @@ const HOTEL_DETAILS_SUMMARY_SELECT = [
 	"distances",
 	"hotelRating",
 	"parkingLot",
+	"hasBusService",
+	"busDetails",
 	"subscribed",
 	"wholeSaleHotel",
 	"propertyType",
@@ -2456,6 +2458,13 @@ exports.updateHotelDetails = async (req, res) => {
 		}
 		if (Object.prototype.hasOwnProperty.call(updateData, "xHotelProActive")) {
 			updatedFields.xHotelProActive = toBoolean(updateData.xHotelProActive);
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "busDetails")) {
+			updatedFields.busDetails = String(updateData.busDetails || "").trim();
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "hasBusService")) {
+			updatedFields.hasBusService = toBoolean(updateData.hasBusService);
+			if (!updatedFields.hasBusService) updatedFields.busDetails = "";
 		}
 
 		/* 3. Detect coordinate change */

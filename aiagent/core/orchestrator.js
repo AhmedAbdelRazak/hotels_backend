@@ -58,34 +58,6 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-function idSetFromEnv(name) {
-	return new Set(
-		String(process.env[name] || "")
-			.split(/[,\s]+/)
-			.map((value) => value.trim().replace(/^["']|["']$/g, "").toLowerCase())
-			.filter(Boolean)
-	);
-}
-
-function hotelIdCandidates(hotel = {}, st = {}) {
-	return [
-		hotel?._id,
-		hotel?.id,
-		hotel?.hotelId,
-		st?.hotelId,
-		st?.hotel?._id,
-		st?.hotel?.id,
-	]
-		.map((value) => String(value || "").trim().toLowerCase())
-		.filter(Boolean);
-}
-
-function hotelHasConfiguredBus(hotel = {}, st = {}) {
-	const configured = idSetFromEnv("HOTELS_WITH_BUS");
-	if (!configured.size) return false;
-	return hotelIdCandidates(hotel, st).some((id) => configured.has(id));
-}
-
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
 	max: 5000,
@@ -2333,6 +2305,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 	const hotel = st.hotel || null;
 	if (!hotel) return null;
 	const distances = hotel.distances || {};
+	const busDetails = cleanHotelFactText(hotel.busDetails);
 	return {
 		displayName: localizedHotelName(sc, st),
 		hotelName: hotel.hotelName || "",
@@ -2349,7 +2322,8 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		},
 		location: hotel.location || null,
 		parkingLot: hotel.parkingLot === true,
-		hasBusToHaram: hotelHasConfiguredBus(hotel, st),
+		hasBusService: hotel.hasBusService === true,
+		busDetails,
 		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 12),
 	};
 }
@@ -2639,6 +2613,76 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 	return "Is there anything else I can help with for the reservation?";
 }
 
+function hotelBusServiceYesText(lang, name, details, next) {
+	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	if (/arabic/i.test(lang)) {
+		return detailText
+			? `${name}\u060c \u0646\u0639\u0645\u060c \u064a\u0648\u0641\u0631 \u0627\u0644\u0641\u0646\u062f\u0642 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635. \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642: ${detailText}. ${next}`
+			: `${name}\u060c \u0646\u0639\u0645\u060c \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062a\u0634\u064a\u0631 \u0625\u0644\u0649 \u062a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635\u060c \u0644\u0643\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062f\u0642\u064a\u0642\u0629 \u0644\u0645 \u062a\u0636\u0641 \u0628\u0639\u062f. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return detailText
+			? `${name}, si, el hotel ofrece servicio de bus. Los detalles confirmados por el hotel: ${detailText}. ${next}`
+			: `${name}, si, el hotel indica que ofrece servicio de bus, pero el horario y los detalles exactos aun no estan agregados. ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return detailText
+			? `${name}, oui, l'hotel propose un service de bus. Les details confirmes par l'hotel : ${detailText}. ${next}`
+			: `${name}, oui, l'hotel indique proposer un service de bus, mais les horaires et details exacts ne sont pas encore ajoutes. ${next}`;
+	}
+	if (/urdu/i.test(lang)) {
+		return detailText
+			? `${name}, ji haan, hotel bus service provide karta hai. Hotel ki confirmed details: ${detailText}. ${next}`
+			: `${name}, ji haan, hotel bus service listed hai, lekin exact schedule/details abhi add nahi kiye gaye. ${next}`;
+	}
+	if (/hindi/i.test(lang)) {
+		return detailText
+			? `${name}, ji haan, hotel bus service provide karta hai. Hotel ki confirmed details: ${detailText}. ${next}`
+			: `${name}, ji haan, hotel bus service listed hai, lekin exact schedule/details abhi add nahi kiye gaye hain. ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return detailText
+			? `${name}, ya, hotel menyediakan layanan bus. Detail yang dikonfirmasi hotel: ${detailText}. ${next}`
+			: `${name}, ya, hotel mencantumkan layanan bus, tetapi jadwal dan detail pastinya belum ditambahkan. ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return detailText
+			? `${name}, ya, hotel menyediakan perkhidmatan bus. Butiran yang disahkan oleh hotel: ${detailText}. ${next}`
+			: `${name}, ya, hotel menyenaraikan perkhidmatan bus, tetapi jadual dan butiran tepat belum ditambah. ${next}`;
+	}
+	return detailText
+		? `${name}, yes, the hotel provides bus service. The hotel details say: ${detailText}. ${next}`
+		: `${name}, yes, the hotel lists a bus service, but the exact schedule and details have not been added yet. ${next}`;
+}
+
+function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
+	if (/arabic/i.test(lang)) {
+		const walkingLine = walking
+			? ` ${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${walking} \u0645\u0634\u064a\u0627\u060c`
+			: "";
+		return `${name}\u060c \u0644\u0627\u060c \u0644\u0627 \u062a\u0638\u0647\u0631 \u0641\u064a \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u062e\u0627\u0635\u0629 \u062d\u0627\u0644\u064a\u0627.${walkingLine} \u0644\u0643\u0646 \u062a\u0648\u062c\u062f \u0628\u0627\u0635\u0627\u062a \u0639\u0627\u0645\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642 \u0648\u064a\u0645\u0643\u0646\u0647\u0627 \u0625\u064a\u0635\u0627\u0644 \u0627\u0644\u0636\u064a\u0648\u0641 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, no, el hotel no tiene actualmente un bus privado registrado.${walking ? ` ${hotelName} esta a unos ${walking} caminando de Al Haram,` : ""} pero hay buses publicos cerca del hotel que pueden llevar a los huespedes a Al Haram. ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, non, l'hotel n'a pas de bus prive indique actuellement.${walking ? ` ${hotelName} se trouve a environ ${walking} a pied d'Al Haram,` : ""} mais des bus publics sont disponibles pres de l'hotel et peuvent deposer les clients a Al Haram. ${next}`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, nahi, hotel ki private bus service abhi listed nahi hai.${walking ? ` ${hotelName} Al Haram se taqriban ${walking} paidal hai,` : ""} lekin public buses hotel ke qareeb available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, nahi, hotel ki private bus service abhi listed nahi hai.${walking ? ` ${hotelName} Al Haram se lagbhag ${walking} paidal hai,` : ""} lekin public buses hotel ke paas available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, tidak, hotel belum mencantumkan layanan bus pribadi saat ini.${walking ? ` ${hotelName} sekitar ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus umum tersedia dekat hotel dan dapat mengantar tamu ke Al Haram. ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, tidak, hotel belum menyenaraikan perkhidmatan bus khas buat masa ini.${walking ? ` ${hotelName} kira-kira ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus awam tersedia berhampiran hotel dan boleh menghantar tetamu ke Al Haram. ${next}`;
+	}
+	return `${name}, no, the hotel does not currently list a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
+}
+
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const hotel = st.hotel || {};
 	const lang = languageOf(sc, st);
@@ -2651,45 +2695,12 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const asksBus = selectedHotelBusQuestionText(userText);
 	const asksDistance = selectedHotelDistanceQuestionText(userText);
 	const asksAddress = selectedHotelAddressQuestionText(userText);
-	const hasBusToHaram = hotelHasConfiguredBus(hotel, st);
+	const hasBusService = hotel.hasBusService === true;
+	const busDetails = cleanHotelFactText(hotel.busDetails);
 	if (asksBus) {
-		if (/arabic/i.test(lang)) {
-			if (hasBusToHaram) {
-				return `${name}\u060c \u0646\u0639\u0645\u060c \u064a\u062a\u0648\u0641\u0631 \u062f\u0627\u0626\u0645\u0627 \u0628\u0627\u0635 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645 \u0645\u0628\u0627\u0634\u0631\u0629. \u0639\u0627\u062f\u0629 \u064a\u0633\u062a\u063a\u0631\u0642 \u0645\u0646 ${arabicDigits("10")} \u0625\u0644\u0649 ${arabicDigits("20")} \u062f\u0642\u064a\u0642\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645\u060c \u0628\u0627\u062a\u062c\u0627\u0647 \u0645\u062d\u0637\u0629 \u0627\u0644\u0634\u0647\u062f\u0627\u0621 \u0648\u0645\u062d\u0637\u0629 \u0623\u062c\u064a\u0627\u062f. \u0647\u0630\u0627 \u062e\u064a\u0627\u0631 \u0645\u0631\u064a\u062d \u062c\u062f\u0627 \u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0639\u0645\u0631\u0629. ${next}`;
-			}
-			const walkingLine = walking
-				? ` ${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${walking} \u0645\u0634\u064a\u0627\u060c`
-				: "";
-			return `${name}\u060c \u0644\u0627\u060c \u0644\u0627 \u0646\u0648\u0641\u0631 \u0628\u0627\u0635\u0627 \u062e\u0627\u0635\u0627 \u0628\u0627\u0644\u0641\u0646\u062f\u0642 \u062d\u0627\u0644\u064a\u0627.${walkingLine} \u0648\u062a\u062a\u0648\u0641\u0631 \u0623\u064a\u0636\u0627 \u0628\u0627\u0635\u0627\u062a \u0639\u0627\u0645\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645. ${next}`;
-		}
-		if (/spanish/i.test(lang)) {
-			if (hasBusToHaram) return `${name}, si, siempre hay bus hacia Al Haram. Normalmente tarda entre 10 y 20 minutos hasta Al Haram, con servicio hacia Al Shohada Station y Ajyad Station. Es una opcion muy comoda para huespedes de Umrah. ${next}`;
-			return `${name}, no, el hotel no ofrece bus propio actualmente.${walking ? ` ${hotelName} esta a unos ${walking} caminando de Al Haram,` : ""} y tambien hay buses publicos disponibles hacia Al Haram. ${next}`;
-		}
-		if (/french/i.test(lang)) {
-			if (hasBusToHaram) return `${name}, oui, il y a toujours un bus vers Al Haram. Le trajet prend generalement entre 10 et 20 minutes jusqu'a Al Haram, avec service vers Al Shohada Station et Ajyad Station. C'est une option tres pratique pour les voyageurs Omra. ${next}`;
-			return `${name}, non, l'hotel ne propose pas de bus prive actuellement.${walking ? ` ${hotelName} se trouve a environ ${walking} a pied d'Al Haram,` : ""} et des bus publics sont aussi disponibles vers Al Haram. ${next}`;
-		}
-		if (/urdu/i.test(lang)) {
-			if (hasBusToHaram) return `${name}، جی ہاں، Al Haram تک ہمیشہ bus service available ہوتی ہے۔ عام طور پر Al Haram تک 10 سے 20 منٹ لگتے ہیں، Al Shohada Station اور Ajyad Station کی طرف service ہوتی ہے۔ Umrah guests کے لیے یہ بہت convenient option ہے۔ ${next}`;
-			return `${name}، نہیں، hotel کی اپنی bus service فی الحال available نہیں ہے۔${walking ? ` ${hotelName} Al Haram سے تقریباً ${walking} پیدل ہے،` : ""} اور Al Haram کے لیے public buses بھی available ہیں۔ ${next}`;
-		}
-		if (/hindi/i.test(lang)) {
-			if (hasBusToHaram) return `${name}, जी हां, Al Haram के लिए हमेशा bus service available रहती है। आम तौर पर Al Haram तक 10 से 20 मिनट लगते हैं, Al Shohada Station और Ajyad Station की तरफ service होती है। Umrah guests के लिए यह बहुत convenient option है। ${next}`;
-			return `${name}, नहीं, hotel की अपनी bus service अभी available नहीं है।${walking ? ` ${hotelName} Al Haram से लगभग ${walking} पैदल है,` : ""} और Al Haram के लिए public buses भी available हैं। ${next}`;
-		}
-		if (/indonesian/i.test(lang)) {
-			if (hasBusToHaram) return `${name}, ya, selalu ada bus menuju Al Haram. Biasanya perjalanan memakan waktu 10 sampai 20 menit ke Al Haram, dengan layanan menuju Al Shohada Station dan Ajyad Station. Ini pilihan yang sangat nyaman untuk tamu Umrah. ${next}`;
-			return `${name}, tidak, hotel tidak menyediakan bus khusus saat ini.${walking ? ` ${hotelName} berjarak sekitar ${walking} berjalan kaki dari Al Haram,` : ""} dan bus umum juga tersedia menuju Al Haram. ${next}`;
-		}
-		if (/malay|malaysia/i.test(lang)) {
-			if (hasBusToHaram) return `${name}, ya, sentiasa ada bus ke Al Haram. Biasanya perjalanan mengambil masa 10 hingga 20 minit ke Al Haram, dengan perkhidmatan ke Al Shohada Station dan Ajyad Station. Ini pilihan yang sangat selesa untuk tetamu Umrah. ${next}`;
-			return `${name}, tidak, hotel tidak menawarkan bus khas buat masa ini.${walking ? ` ${hotelName} kira-kira ${walking} berjalan kaki dari Al Haram,` : ""} dan bus awam juga tersedia ke Al Haram. ${next}`;
-		}
-		if (hasBusToHaram) {
-			return `${name}, yes, there is always a bus service to Al Haram. It usually takes between 10 and 20 minutes to Al Haram, with service toward Al Shohada Station and Ajyad Station. It is a very convenient option for Umrah guests. ${next}`;
-		}
-		return `${name}, no, we do not offer a hotel bus at the moment.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} and public buses are available as well to Al Haram. ${next}`;
+		return hasBusService
+			? hotelBusServiceYesText(lang, name, busDetails, next)
+			: hotelBusServiceNoText(lang, name, hotelName, walking, next);
 	}
 	if (/arabic/i.test(lang)) {
 		if (asksDistance) {
@@ -5331,13 +5342,13 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusToHaram, and activeRooms there as verified facts for "${hotelName}". If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified facts for "${hotelName}". If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
 			: "",
 		activeHotelFacts
 			? `If activeHotelFacts.distances has walkingToElHaram or drivingToElHaram and the guest asks how far the hotel is from Al Haram, say the walking/driving minutes directly and naturally. Do not deflect to review, dates, phone, email, or confirmation before answering the distance.`
 			: "",
 		activeHotelFacts
-			? `If the guest asks about bus/shuttle service to Al Haram, use activeHotelFacts.hasBusToHaram only. If true, say there is always a bus to Al Haram and it usually takes 10 to 20 minutes to Al Haram toward Al Shohada Station and Ajyad Station. If false, say the hotel does not offer a hotel bus, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses to Al Haram are available.`
+			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes and use busDetails as the hotel-owned details without inventing schedules, stations, or timing. If hasBusService is false or missing, say the hotel does not currently list a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
 			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
