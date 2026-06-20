@@ -105,10 +105,15 @@ async function getHotelById(id) {
 				"_id",
 				"hotelName",
 				"hotelName_OtherLanguage",
+				"hotelAddress",
 				"hotelCity",
 				"hotelState",
 				"hotelCountry",
+				"aboutHotel",
+				"aboutHotelArabic",
 				"distances",
+				"location",
+				"parkingLot",
 				"currency",
 				"aiToRespond",
 				"activateHotel",
@@ -145,7 +150,7 @@ async function listActivePublicHotels() {
 		},
 	})
 		.select(
-			"_id hotelName hotelName_OtherLanguage hotelCity hotelState hotelCountry distances roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
+			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
 		)
 		.lean()
 		.exec();

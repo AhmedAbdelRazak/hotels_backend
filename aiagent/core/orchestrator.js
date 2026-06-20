@@ -58,6 +58,34 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
+function idSetFromEnv(name) {
+	return new Set(
+		String(process.env[name] || "")
+			.split(/[,\s]+/)
+			.map((value) => value.trim().replace(/^["']|["']$/g, "").toLowerCase())
+			.filter(Boolean)
+	);
+}
+
+function hotelIdCandidates(hotel = {}, st = {}) {
+	return [
+		hotel?._id,
+		hotel?.id,
+		hotel?.hotelId,
+		st?.hotelId,
+		st?.hotel?._id,
+		st?.hotel?.id,
+	]
+		.map((value) => String(value || "").trim().toLowerCase())
+		.filter(Boolean);
+}
+
+function hotelHasConfiguredBus(hotel = {}, st = {}) {
+	const configured = idSetFromEnv("HOTELS_WITH_BUS");
+	if (!configured.size) return false;
+	return hotelIdCandidates(hotel, st).some((id) => configured.has(id));
+}
+
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
 	max: 5000,
@@ -145,13 +173,6 @@ const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
 	false
-);
-const PUBLIC_RECEPTION_PHONE_DISPLAY =
-	process.env.AI_PUBLIC_RECEPTION_PHONE_DISPLAY || "+1 (909) 222-3374";
-const HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD = intFromEnv(
-	"AI_HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD",
-	3,
-	{ min: 3, max: 10 }
 );
 
 function randomBetween(a, b) {
@@ -557,35 +578,244 @@ function firstNameForAddress(value = "") {
 			/^(?:mr|mrs|ms|miss|dr|sir|madam|mister|السيد|السيدة|استاذ|أستاذ|استاذة|أستاذة|الاستاذ|الأستاذ|الاستاذة|الأستاذة)\s+/i,
 			""
 		)
+		.replace(
+			/^(?:\u0627\u0644\u0633\u064a\u062f\u0629|\u0627\u0644\u0633\u064a\u062f|\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0633\u062a\u0627\u0630\u0629|\u0623\u0633\u062a\u0627\u0630|\u0627\u0633\u062a\u0627\u0630|\u0627\u0644\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0627\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0623\u0633\u062a\u0627\u0630|\u0627\u0644\u0627\u0633\u062a\u0627\u0630)\s+/i,
+			""
+		)
 		.trim();
 	return firstNameOf(cleaned || value || "Guest");
 }
 
-function respectfulGuestName(sc = {}, st = {}) {
-	const rawName = String(
-		firstNameForAddress(
-			st.slots?.name ||
-				st.slots?.fullName ||
-				sc.displayName1 ||
-				sc.customerName ||
-				""
+const GUEST_FEMALE_NAMES_LATIN = new Set([
+	"marwa",
+	"aisha",
+	"aysha",
+	"ayesha",
+	"mona",
+	"muna",
+	"maryam",
+	"mariam",
+	"zainab",
+	"zaynab",
+	"fatima",
+	"fatimah",
+	"sara",
+	"sarah",
+	"yasmin",
+	"yasmine",
+	"noura",
+	"nora",
+	"noora",
+	"huda",
+	"hoda",
+	"hajar",
+	"amina",
+	"ameena",
+	"asma",
+	"aya",
+	"eman",
+	"iman",
+	"salma",
+	"khadija",
+	"khadijah",
+	"leila",
+	"layla",
+	"lina",
+	"reem",
+	"dina",
+	"maha",
+	"amal",
+	"rawan",
+	"manar",
+]);
+const GUEST_MALE_NAMES_LATIN = new Set([
+	"ahmed",
+	"mohamed",
+	"muhammad",
+	"mahmoud",
+	"ali",
+	"omar",
+	"umer",
+	"yusuf",
+	"youssef",
+	"ibrahim",
+	"abdullah",
+	"abdallah",
+	"nasser",
+	"naser",
+	"khaled",
+	"waleed",
+	"hassan",
+	"hussein",
+	"mustafa",
+	"mostafa",
+	"karim",
+	"ehab",
+	"shady",
+	"gamal",
+]);
+const GUEST_FEMALE_NAMES_ARABIC = new Set([
+	"\u0645\u0631\u0648\u0629",
+	"\u0639\u0627\u0626\u0634\u0629",
+	"\u0639\u0627\u064a\u0634\u0629",
+	"\u0645\u0646\u0649",
+	"\u0645\u0631\u064a\u0645",
+	"\u0632\u064a\u0646\u0628",
+	"\u0641\u0627\u0637\u0645\u0629",
+	"\u0633\u0627\u0631\u0629",
+	"\u064a\u0627\u0633\u0645\u064a\u0646",
+	"\u0646\u0648\u0631\u0629",
+	"\u0646\u0648\u0631\u0627",
+	"\u0647\u062f\u0649",
+	"\u0647\u062f\u0627",
+	"\u0647\u0627\u062c\u0631",
+	"\u0622\u0645\u0646\u0629",
+	"\u0627\u0645\u0646\u0629",
+	"\u0623\u0633\u0645\u0627\u0621",
+	"\u0627\u0633\u0645\u0627\u0621",
+	"\u0622\u064a\u0629",
+	"\u0627\u064a\u0629",
+	"\u0625\u064a\u0645\u0627\u0646",
+	"\u0627\u064a\u0645\u0627\u0646",
+	"\u0633\u0644\u0645\u0649",
+	"\u062e\u062f\u064a\u062c\u0629",
+	"\u0644\u064a\u0644\u0649",
+	"\u0644\u064a\u0646\u0627",
+	"\u0631\u064a\u0645",
+	"\u062f\u064a\u0646\u0627",
+	"\u0645\u0647\u0627",
+	"\u0623\u0645\u0644",
+	"\u0627\u0645\u0644",
+	"\u0631\u0648\u0627\u0646",
+	"\u0645\u0646\u0627\u0631",
+]);
+const GUEST_MALE_NAMES_ARABIC = new Set([
+	"\u0623\u062d\u0645\u062f",
+	"\u0627\u062d\u0645\u062f",
+	"\u0645\u062d\u0645\u062f",
+	"\u0645\u062d\u0645\u0648\u062f",
+	"\u0639\u0644\u064a",
+	"\u0639\u0645\u0631",
+	"\u064a\u0648\u0633\u0641",
+	"\u0625\u0628\u0631\u0627\u0647\u064a\u0645",
+	"\u0627\u0628\u0631\u0627\u0647\u064a\u0645",
+	"\u0639\u0628\u062f\u0627\u0644\u0644\u0647",
+	"\u0639\u0628\u062f\u0627\u0644\u0647",
+	"\u0646\u0627\u0635\u0631",
+	"\u062e\u0627\u0644\u062f",
+	"\u0648\u0644\u064a\u062f",
+	"\u062d\u0633\u0646",
+	"\u062d\u0633\u064a\u0646",
+	"\u0645\u0635\u0637\u0641\u0649",
+	"\u0643\u0631\u064a\u0645",
+	"\u0625\u064a\u0647\u0627\u0628",
+	"\u0627\u064a\u0647\u0627\u0628",
+	"\u0634\u0627\u062f\u064a",
+	"\u062c\u0645\u0627\u0644",
+]);
+
+function compactArabicName(value = "") {
+	return String(value || "")
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/\u0640/g, "")
+		.replace(/\s+/g, "")
+		.trim();
+}
+
+function inferGuestGenderFromName(value = "") {
+	const raw = String(value || "").trim();
+	if (!raw) return "unknown";
+	if (/\b(?:mrs|ms|miss|madam|ma'am|mme|madame|sra|senora|se\u00f1ora)\b/i.test(raw)) {
+		return "female";
+	}
+	if (
+		/(?:\u0627\u0644\u0633\u064a\u062f\u0629|\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0627\u0633\u062a\u0627\u0630\u0629)/.test(
+			raw
 		)
+	) {
+		return "female";
+	}
+	if (/\b(?:mr|sir|mister|monsieur|sr|senor|se\u00f1or)\b/i.test(raw)) {
+		return "male";
+	}
+	if (
+		/(?:\u0627\u0644\u0633\u064a\u062f|\u0623\u0633\u062a\u0627\u0630|\u0627\u0633\u062a\u0627\u0630|\u0627\u0644\u0623\u0633\u062a\u0627\u0630|\u0627\u0644\u0627\u0633\u062a\u0627\u0630)/.test(
+			raw
+		)
+	) {
+		return "male";
+	}
+	const firstName = firstNameForAddress(raw);
+	const latinName = asciiize(firstName)
+		.toLowerCase()
+		.replace(/[^a-z]/g, "");
+	const arabicName = compactArabicName(firstName);
+	if (
+		GUEST_FEMALE_NAMES_LATIN.has(latinName) ||
+		GUEST_FEMALE_NAMES_ARABIC.has(arabicName)
+	) {
+		return "female";
+	}
+	if (
+		GUEST_MALE_NAMES_LATIN.has(latinName) ||
+		GUEST_MALE_NAMES_ARABIC.has(arabicName)
+	) {
+		return "male";
+	}
+	return "unknown";
+}
+
+function guestNameSource(sc = {}, st = {}) {
+	return String(
+		st.slots?.name ||
+			st.slots?.fullName ||
+			sc.displayName1 ||
+			sc.customerName ||
+			""
 	).trim();
+}
+
+function respectfulGuestProfile(sc = {}, st = {}) {
+	const sourceName = guestNameSource(sc, st);
+	const rawName = String(firstNameForAddress(sourceName)).trim();
+	const gender = inferGuestGenderFromName(sourceName || rawName);
 	const language = languageOf(sc, st);
 	if (/arabic/i.test(language)) {
 		if (!rawName || /^guest$/i.test(rawName)) {
-			return "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645";
+			return {
+				firstName: "",
+				gender,
+				address: "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645",
+			};
 		}
 		if (
 			/^(?:\u0623\u0633\u062a\u0627\u0630|\u0627\u0633\u062a\u0627\u0630|\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0623\u0633\u062a\u0627\u0630|\u0627\u0644\u0623\u0633\u062a\u0627\u0630\u0629|\u0627\u0644\u0633\u064a\u062f|\u0627\u0644\u0633\u064a\u062f\u0629)\b/i.test(
 				rawName
 			)
 		) {
-			return rawName;
+			return { firstName: rawName, gender, address: rawName };
 		}
-		return `\u0623\u0633\u062a\u0627\u0630 ${rawName}`;
+		if (gender === "female") {
+			return {
+				firstName: rawName,
+				gender,
+				address: `\u0623\u0633\u062a\u0627\u0630\u0629 ${rawName}`,
+			};
+		}
+		if (gender === "male") {
+			return {
+				firstName: rawName,
+				gender,
+				address: `\u0623\u0633\u062a\u0627\u0630 ${rawName}`,
+			};
+		}
+		return { firstName: rawName, gender, address: rawName };
 	}
-	return rawName || "Guest";
+	return { firstName: rawName || "", gender, address: rawName || "Guest" };
+}
+
+function respectfulGuestName(sc = {}, st = {}) {
+	return respectfulGuestProfile(sc, st).address;
 }
 
 function logStep(caseId, message, payload = {}) {
@@ -1078,10 +1308,97 @@ function selectedHotelRoomQuestionText(text = "") {
 	);
 }
 
+function selectedHotelDistanceQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	const asksDistance =
+		/\b(?:how\s+far|far\s+from|distance|distancia|lejos|cerca|near|close|walking|walk|a\s+pie|caminando|drive|driving|en\s+voiture|a\s+pied|minutes?|mins?|berapa\s+jauh|jarak|dekat|jalan\s+kaki|menit|minit)\b/i.test(
+			lower
+		) ||
+		/(?:\u0643\u0645\s+\u064a\u0628\u0639\u062f|\u064a\u0628\u0639\u062f|\u0628\u0639\u064a\u062f|\u0642\u0631\u064a\u0628|\u0627\u0644\u0645\u0633\u0627\u0641\u0647|\u0645\u0633\u0627\u0641\u0647|\u062f\u0642\u064a\u0642\u0647|\u062f\u0642\u0627\u064a\u0642|\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u0633\u064a\u0627\u0631\u0647|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0647|\u06a9\u062a\u0646\u0627\s+\u062f\u0648\u0631|\u06a9\u06cc\u062a\u0646\u0627\s+\u062f\u0648\u0631|\u0641\u0627\u0635\u0644\u06c1|\u0645\u0646\u0679)/i.test(
+			arabic
+		) ||
+		/(?:howfar|farfrom|distance|nearharam|closeharam|walking|driving|jarak|berapajauh|kitnadoor|kitnidur)/i.test(
+			latinCompact
+		);
+	if (!asksDistance) return false;
+	const mentionsHaramOrHotel =
+		/\b(?:haram|al\s*haram|el\s*haram|masjid|kaaba|kabah|kaba|hotel|your\s+hotel|the\s+hotel)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u062d\u0631\u0645|\u0627\u0644\u0645\u0633\u062c\u062f\s+\u0627\u0644\u062d\u0631\u0627\u0645|\u0627\u0644\u0643\u0639\u0628\u0647|\u0627\u0644\u0643\u0639\u0628\u0629|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642)/i.test(
+			arabic
+		) ||
+		/(?:haram|masjidilharam|kaaba|kabah|kaba|hotel|funduq)/i.test(
+			latinCompact
+		);
+	return mentionsHaramOrHotel;
+}
+
+function selectedHotelAddressQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	const asksLocation =
+		/\b(?:where\s+is|where's|located|location|address|area|district|map|ubicacion|ubicaci[oó]n|direccion|direcci[oó]n|adresse|emplacement|alamat|lokasi|peta)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u064a\u0646|\u0641\u064a\u0646|\u0648\u064a\u0646|\u0645\u0648\u0642\u0639|\u0645\u0643\u0627\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0646\u0637\u0642\u0647|\u062d\u064a|\u06a9\u06c1\u0627\u06ba|\u06a9\u062f\u06be\u0631|\u067e\u062a\u06c1|\u092a\u0924\u093e|\u0915\u0939\u093e\u0902)/i.test(
+			arabic
+		) ||
+		/(?:whereis|location|address|map|ubicacion|direccion|adresse|alamat|lokasi|kahan|kidhar|pata)/i.test(
+			latinCompact
+		);
+	if (!asksLocation) return false;
+	const mentionsHotel =
+		/\b(?:hotel|your\s+hotel|the\s+hotel|it|there)\b/i.test(lower) ||
+		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0647\u0648|\u0647\u0646\u0627\u0643)/i.test(
+			arabic
+		) ||
+		/(?:hotel|funduq)/i.test(latinCompact);
+	return mentionsHotel;
+}
+
+function selectedHotelBusQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	const directBus =
+		/\b(?:bus|buses|shuttle|coach|haram\s+bus|bus\s+to\s+haram)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0627\u0635|\u0628\u0627\u0635\u0627\u062a|\u062d\u0627\u0641\u0644\u0647|\u062d\u0627\u0641\u0644\u0627\u062a|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0634\u0627\u062a\u0644|\u0628\u0633|\u0628\u0633\u06cc\u06ba|\u092c\u0938|\u0628\u0627\u0633)/i.test(
+			arabic
+		) ||
+		/(?:bus|buses|shuttle|coach|bas|bis|buskeharam|bustoharam)/i.test(
+			latinCompact
+		);
+	const haramOrStation =
+		/\b(?:haram|al\s*haram|el\s*haram|station|agyad|ajyad|shohada|shuhada)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u062d\u0631\u0645|\u0645\u062d\u0637\u0647|\u0627\u0644\u0634\u0647\u062f\u0627\u0621|\u0634\u0647\u062f\u0627\u0621|\u0627\u062c\u064a\u0627\u062f|\u0623\u062c\u064a\u0627\u062f)/i.test(
+			arabic
+		) ||
+		/(?:haram|station|agyad|ajyad|shohada|shuhada)/i.test(latinCompact);
+	const transportToHaram =
+		/\b(?:transport|transportation|transfer)\b/i.test(lower) ||
+		/(?:\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a)/i.test(arabic) ||
+		/(?:transport|transfer|mowaslat|naql)/i.test(latinCompact);
+	return directBus || (transportToHaram && haramOrStation);
+}
+
+function selectedHotelFactQuestionText(text = "") {
+	return (
+		selectedHotelBusQuestionText(text) ||
+		selectedHotelDistanceQuestionText(text) ||
+		selectedHotelAddressQuestionText(text)
+	);
+}
+
 function hasOperationalBookingSignal(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
 	return (
+		selectedHotelFactQuestionText(normalized) ||
 		selectedHotelRoomQuestionText(normalized) ||
 		Boolean(mapRoomToKey(normalized)) ||
 		Boolean(extractDateRange(normalized)?.checkinISO) ||
@@ -1243,10 +1560,6 @@ function hotelContactInsistenceText(text = "") {
 	);
 }
 
-function shouldSharePublicReceptionPhone(sc = {}, userText = "") {
-	return hotelContactRequestCount(sc, userText) >= HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD;
-}
-
 function contactReplyLanguageKey(sc = {}, st = {}) {
 	const target = `${languageOf(sc, st)} ${activeLanguageCodeOf(sc, st)}`.toLowerCase();
 	if (/arabic|\bar\b/.test(target)) return "ar";
@@ -1265,50 +1578,51 @@ function hotelContactReplyText(sc = {}, st = {}, options = {}) {
 	const requestCount = Number(options.requestCount || 1);
 	const firm = requestCount >= 2;
 	const key = contactReplyLanguageKey(sc, st);
+	const hotelName = st.hotel ? localizedHotelName(sc, st) || toTitle(st.hotel.hotelName) : "";
+	const hotelEn = hotelName || "the hotel";
 	const templates = {
 		en: {
-			first: `${name}, you are already with reception and reservations here. This live chat is the safest way for me to confirm availability and keep every reservation detail clear. Send me what you need and I will handle it with you directly here.`,
-			firm: `${name}, I understand you want the number. The safest and smoothest way is to continue here because reception can track the live availability and reservation details in one place. Tell me what you need and I will take care of it step by step.`,
+			first: `${name}, this is ${st.agentName}; I work directly with the reception of ${hotelEn}. This live chat is the safest and most credible way to reserve because reception can check live availability and keep every detail clear in one place. Send me what you need and I will handle it with you here.`,
+			firm: `${name}, I understand you want the number. I am working directly with the reception of ${hotelEn}, and continuing here is the safest and most credible way to complete the reservation with live availability and clear details. Tell me what you need and I will take care of it step by step.`,
 			share: `${name}, the phone/WhatsApp line I can share is ${phone}. For the smoothest reservation, please keep the details here too so reception can track availability and your request without losing context.`,
 		},
 		ar: {
-			first: `${name}\u060c \u062d\u0636\u0631\u062a\u0643 \u0628\u0627\u0644\u0641\u0639\u0644 \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a \u0647\u0646\u0627. \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629 \u0647\u064a \u0627\u0644\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0623\u0636\u0645\u0646 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u062d\u0641\u0638 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0628\u0648\u0636\u0648\u062d. \u0627\u0643\u062a\u0628 \u0644\u064a \u0637\u0644\u0628\u0643 \u0648\u0633\u0623\u062a\u0627\u0628\u0639\u0647 \u0645\u0639\u0643 \u0645\u0628\u0627\u0634\u0631\u0629.`,
-			firm: `${name}\u060c \u0623\u0641\u0647\u0645 \u0623\u0646\u0643 \u062a\u0631\u064a\u062f \u0627\u0644\u0631\u0642\u0645. \u0627\u0644\u0623\u0641\u0636\u0644 \u0648\u0627\u0644\u0623\u0636\u0645\u0646 \u0623\u0646 \u0646\u0643\u0645\u0644 \u0647\u0646\u0627 \u0644\u0623\u0646 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u062a\u0627\u0628\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0645\u0643\u0627\u0646 \u0648\u0627\u062d\u062f. \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0648\u0633\u0623\u062e\u062f\u0645\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629.`,
+			first: `${name}\u060c \u0645\u0639\u0643 ${st.agentName}\u060c \u0623\u0639\u0645\u0644 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0639 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 ${hotelEn}. \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629 \u0647\u064a \u0627\u0644\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0623\u0636\u0645\u0646 \u0648\u0627\u0644\u0623\u0643\u062b\u0631 \u0645\u0635\u062f\u0627\u0642\u064a\u0629 \u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632 \u0644\u0623\u0646 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0645\u0628\u0627\u0634\u0631\u0629 \u0648\u064a\u062d\u0641\u0638 \u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0641\u064a \u0645\u0643\u0627\u0646 \u0648\u0627\u062d\u062f. \u0627\u0643\u062a\u0628 \u0644\u064a \u0637\u0644\u0628\u0643 \u0648\u0633\u0623\u062a\u0627\u0628\u0639\u0647 \u0645\u0639\u0643 \u0647\u0646\u0627.`,
+			firm: `${name}\u060c \u0623\u0641\u0647\u0645 \u0623\u0646\u0643 \u062a\u0631\u064a\u062f \u0627\u0644\u0631\u0642\u0645. \u0623\u0646\u0627 \u0623\u0639\u0645\u0644 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0639 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 ${hotelEn}\u060c \u0648\u0625\u0643\u0645\u0627\u0644 \u0627\u0644\u062d\u062c\u0632 \u0647\u0646\u0627 \u0647\u0648 \u0627\u0644\u0623\u0636\u0645\u0646 \u0648\u0627\u0644\u0623\u0643\u062b\u0631 \u0645\u0635\u062f\u0627\u0642\u064a\u0629 \u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0628\u0648\u0636\u0648\u062d. \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0648\u0633\u0623\u062e\u062f\u0645\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629.`,
 			share: `${name}\u060c \u062e\u0637 \u0627\u0644\u0647\u0627\u062a\u0641/\u0648\u0627\u062a\u0633\u0627\u0628 \u0627\u0644\u0645\u062a\u0627\u062d \u0647\u0648 ${phone}. \u0648\u0645\u0639 \u0630\u0644\u0643 \u0623\u0646\u0635\u062d\u0643 \u0623\u0646 \u062a\u0628\u0642\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0647\u0646\u0627 \u0623\u064a\u0636\u0627 \u062d\u062a\u0649 \u064a\u0631\u0627\u062c\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0637\u0644\u0628\u0643 \u0628\u062f\u0648\u0646 \u0641\u0642\u062f\u0627\u0646 \u0627\u0644\u0633\u064a\u0627\u0642.`,
 		},
 		es: {
-			first: `${name}, ya estas con recepcion y reservas aqui. Este chat en vivo es la forma mas segura para revisar disponibilidad y mantener claros los datos de la reserva. Escribeme lo que necesitas y lo gestiono contigo directamente aqui.`,
-			firm: `${name}, entiendo que quieres el numero. Lo mas seguro y fluido es continuar aqui, porque recepcion puede seguir la disponibilidad en vivo y los datos de la reserva en un solo lugar. Dime que necesitas y lo llevo paso a paso.`,
+			first: `${name}, soy ${st.agentName} y trabajo directamente con la recepcion de ${hotelEn}. Este chat en vivo es la forma mas segura y creible de reservar, porque recepcion puede revisar disponibilidad en vivo y mantener todos los datos claros en un solo lugar. Escribeme lo que necesitas y lo gestiono contigo aqui.`,
+			firm: `${name}, entiendo que quieres el numero. Trabajo directamente con la recepcion de ${hotelEn}, y continuar aqui es la forma mas segura y creible de completar la reserva con disponibilidad en vivo y datos claros. Dime que necesitas y lo llevo paso a paso.`,
 			share: `${name}, la linea de telefono/WhatsApp que puedo compartir es ${phone}. Para que la reserva sea mas fluida, mantengamos tambien los detalles aqui para que recepcion pueda seguir la disponibilidad y tu solicitud sin perder contexto.`,
 		},
 		fr: {
-			first: `${name}, vous etes deja avec la reception et les reservations ici. Ce chat en direct est le moyen le plus sur pour verifier la disponibilite et garder les details de reservation clairs. Envoyez-moi votre demande et je la traite avec vous directement ici.`,
-			firm: `${name}, je comprends que vous souhaitez le numero. Le plus sur et le plus fluide est de continuer ici, car la reception peut suivre la disponibilite en direct et les details de reservation au meme endroit. Dites-moi ce dont vous avez besoin et je m'en occupe etape par etape.`,
+			first: `${name}, je suis ${st.agentName} et je travaille directement avec la reception de ${hotelEn}. Ce chat en direct est le moyen le plus sur et le plus credible pour reserver, car la reception peut verifier la disponibilite en direct et garder les details clairs au meme endroit. Envoyez-moi votre demande et je la traite avec vous ici.`,
+			firm: `${name}, je comprends que vous souhaitez le numero. Je travaille directement avec la reception de ${hotelEn}, et continuer ici est le moyen le plus sur et le plus credible de finaliser la reservation avec disponibilite en direct et details clairs. Dites-moi ce dont vous avez besoin et je m'en occupe etape par etape.`,
 			share: `${name}, la ligne telephone/WhatsApp que je peux partager est ${phone}. Pour une reservation plus fluide, gardons aussi les details ici afin que la reception suive la disponibilite et votre demande sans perdre le contexte.`,
 		},
 		ur: {
-			first: `${name}، آپ یہاں براہ راست ریسیپشن اور ریزرویشنز کے ساتھ ہیں۔ یہ لائیو چیٹ دستیابی چیک کرنے اور بکنگ کی تفصیلات واضح رکھنے کا سب سے محفوظ طریقہ ہے۔ آپ اپنی ضرورت لکھ دیں، میں یہیں آپ کے ساتھ براہ راست دیکھ لیتا/لیتی ہوں۔`,
-			firm: `${name}، میں سمجھتا/سمجھتی ہوں کہ آپ نمبر چاہتے ہیں۔ سب سے محفوظ اور آسان طریقہ یہ ہے کہ ہم یہیں جاری رکھیں، کیونکہ ریسیپشن دستیابی اور بکنگ کی تفصیلات ایک ہی جگہ دیکھ سکتی ہے۔ آپ بتائیں کیا چاہیے، میں قدم بہ قدم مدد کرتا/کرتی ہوں۔`,
+			first: `${name}، میں ${st.agentName} ہوں اور ${hotelEn} کی ریسیپشن کے ساتھ براہ راست کام کر رہا/رہی ہوں۔ یہ لائیو چیٹ بکنگ کا سب سے محفوظ اور معتبر طریقہ ہے، کیونکہ ریسیپشن دستیابی براہ راست چیک کرتی ہے اور تمام تفصیلات ایک ہی جگہ واضح رہتی ہیں۔ آپ اپنی ضرورت لکھ دیں، میں یہیں مدد کرتا/کرتی ہوں۔`,
+			firm: `${name}، میں سمجھتا/سمجھتی ہوں کہ آپ نمبر چاہتے ہیں۔ میں ${hotelEn} کی ریسیپشن کے ساتھ براہ راست کام کر رہا/رہی ہوں، اور یہاں جاری رکھنا بکنگ مکمل کرنے کا سب سے محفوظ اور معتبر طریقہ ہے کیونکہ دستیابی اور تفصیلات براہ راست واضح رہتی ہیں۔ آپ بتائیں کیا چاہیے، میں قدم بہ قدم مدد کرتا/کرتی ہوں۔`,
 			share: `${name}، فون/WhatsApp لائن جو میں شیئر کر سکتا/سکتی ہوں یہ ہے: ${phone}. بہتر ریزرویشن کے لیے تفصیلات یہاں بھی رکھیں تاکہ ریسیپشن دستیابی اور درخواست کا مکمل سیاق دیکھ سکے۔`,
 		},
 		hi: {
-			first: `${name}, आप यहां सीधे reception और reservations से जुड़े हैं। Availability confirm करने और reservation details साफ रखने के लिए यह live chat सबसे सुरक्षित तरीका है। आप अपनी जरूरत लिख दीजिए, मैं यहीं सीधे संभालता/संभालती हूं।`,
-			firm: `${name}, मैं समझ रहा/रही हूं कि आपको number चाहिए। सबसे सुरक्षित और smooth तरीका यही है कि हम यहां continue करें, क्योंकि reception live availability और reservation details एक जगह track कर सकती है। बताइए आपको क्या चाहिए, मैं step by step handle कर दूंगा/दूंगी।`,
+			first: `${name}, मैं ${st.agentName} हूं और ${hotelEn} की reception के साथ directly काम कर रहा/रही हूं। यह live chat reservation के लिए सबसे सुरक्षित और credible तरीका है, क्योंकि reception live availability check करती है और सभी details एक जगह साफ रहती हैं। आप अपनी जरूरत लिख दीजिए, मैं यहीं help करता/करती हूं।`,
+			firm: `${name}, मैं समझ रहा/रही हूं कि आपको number चाहिए। मैं ${hotelEn} की reception के साथ directly काम कर रहा/रही हूं, और यहां continue करना reservation complete करने का सबसे सुरक्षित और credible तरीका है क्योंकि live availability और details साफ रहती हैं। बताइए आपको क्या चाहिए, मैं step by step handle कर दूंगा/दूंगी।`,
 			share: `${name}, जो phone/WhatsApp line मैं share कर सकता/सकती हूं वह है ${phone}. Smooth reservation के लिए details यहां भी रखें ताकि reception availability और आपकी request का context न खोए।`,
 		},
 		id: {
-			first: `${name}, Anda sudah terhubung langsung dengan reception dan reservasi di sini. Live chat ini adalah cara paling aman untuk mengecek ketersediaan dan menjaga detail reservasi tetap jelas. Tulis kebutuhan Anda, saya bantu langsung di sini.`,
-			firm: `${name}, saya mengerti Anda ingin nomor telepon. Cara paling aman dan lancar adalah lanjut di sini, karena reception bisa melacak ketersediaan live dan detail reservasi di satu tempat. Beri tahu saya kebutuhan Anda, saya bantu langkah demi langkah.`,
+			first: `${name}, saya ${st.agentName} dan bekerja langsung dengan reception ${hotelEn}. Live chat ini adalah cara paling aman dan paling terpercaya untuk reservasi, karena reception bisa mengecek ketersediaan live dan menjaga semua detail tetap jelas di satu tempat. Tulis kebutuhan Anda, saya bantu di sini.`,
+			firm: `${name}, saya mengerti Anda ingin nomor telepon. Saya bekerja langsung dengan reception ${hotelEn}, dan melanjutkan di sini adalah cara paling aman dan terpercaya untuk menyelesaikan reservasi dengan ketersediaan live dan detail yang jelas. Beri tahu saya kebutuhan Anda, saya bantu langkah demi langkah.`,
 			share: `${name}, nomor telepon/WhatsApp yang bisa saya bagikan adalah ${phone}. Untuk reservasi yang paling lancar, simpan juga detailnya di sini agar reception bisa melacak ketersediaan dan permintaan Anda tanpa kehilangan konteks.`,
 		},
 		ms: {
-			first: `${name}, anda sudah berhubung terus dengan reception dan reservations di sini. Live chat ini cara paling selamat untuk semak availability dan pastikan butiran tempahan jelas. Tulis apa yang anda perlukan, saya bantu terus di sini.`,
-			firm: `${name}, saya faham anda mahu nombor telefon. Cara paling selamat dan lancar ialah teruskan di sini, kerana reception boleh semak availability live dan butiran tempahan di satu tempat. Beritahu saya apa yang diperlukan, saya bantu langkah demi langkah.`,
+			first: `${name}, saya ${st.agentName} dan bekerja terus dengan reception ${hotelEn}. Live chat ini cara paling selamat dan paling dipercayai untuk tempahan, kerana reception boleh semak availability secara live dan simpan semua butiran dengan jelas di satu tempat. Tulis apa yang anda perlukan, saya bantu di sini.`,
+			firm: `${name}, saya faham anda mahu nombor telefon. Saya bekerja terus dengan reception ${hotelEn}, dan meneruskan di sini ialah cara paling selamat dan dipercayai untuk lengkapkan tempahan dengan availability live dan butiran yang jelas. Beritahu saya apa yang diperlukan, saya bantu langkah demi langkah.`,
 			share: `${name}, talian telefon/WhatsApp yang boleh saya kongsi ialah ${phone}. Untuk tempahan yang paling lancar, kekalkan juga butiran di sini supaya reception boleh ikut availability dan permintaan anda tanpa hilang konteks.`,
 		},
 	};
 	const chosen = templates[key] || templates.en;
-	if (phone) return chosen.share;
 	return firm ? chosen.firm : chosen.first;
 }
 
@@ -2009,6 +2323,37 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 		}));
 }
 
+function cleanHotelFactText(value = "") {
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function buildActiveHotelFacts(sc = {}, st = {}) {
+	const hotel = st.hotel || null;
+	if (!hotel) return null;
+	const distances = hotel.distances || {};
+	return {
+		displayName: localizedHotelName(sc, st),
+		hotelName: hotel.hotelName || "",
+		hotelNameOtherLanguage: hotel.hotelName_OtherLanguage || "",
+		address: cleanHotelFactText(hotel.hotelAddress),
+		city: cleanHotelFactText(hotel.hotelCity),
+		state: cleanHotelFactText(hotel.hotelState),
+		country: cleanHotelFactText(hotel.hotelCountry),
+		aboutHotel: cleanHotelFactText(hotel.aboutHotel),
+		aboutHotelArabic: cleanHotelFactText(hotel.aboutHotelArabic),
+		distances: {
+			walkingToElHaram: distances.walkingToElHaram || "",
+			drivingToElHaram: distances.drivingToElHaram || "",
+		},
+		location: hotel.location || null,
+		parkingLot: hotel.parkingLot === true,
+		hasBusToHaram: hotelHasConfiguredBus(hotel, st),
+		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 12),
+	};
+}
+
 function inlineRoomOptions(options = [], lang = "") {
 	const useArabic = /arabic/i.test(lang);
 	return options
@@ -2162,6 +2507,287 @@ async function answerSelectedHotelRoomQuestion(
 	if (!sent) return;
 	if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
 	st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
+}
+
+function cleanHotelFactValue(value) {
+	if (value === null || value === undefined) return "";
+	if (typeof value === "number") {
+		return Number.isFinite(value) && value > 0 ? String(value) : "";
+	}
+	const text = cleanHotelFactText(value);
+	if (!text || text === "0") return "";
+	return text;
+}
+
+function formatHotelFactText(value, lang = "English") {
+	const text = cleanHotelFactValue(value);
+	if (!text) return "";
+	if (/arabic/i.test(lang)) return arabicDigits(text);
+	if (hasArabicScript(text)) return text;
+	return toTitle(text);
+}
+
+function formatHotelDistanceValue(value, lang = "English") {
+	const text = cleanHotelFactValue(value);
+	if (!text) return "";
+	const numberMatch = text.match(/^\d+(?:\.\d+)?$/);
+	if (numberMatch) {
+		const numericAmount = Number(numberMatch[0]);
+		const amount = localizedNumber(numericAmount, lang);
+		if (/arabic/i.test(lang)) {
+			if (numericAmount === 1) return "\u062f\u0642\u064a\u0642\u0629 \u0648\u0627\u062d\u062f\u0629";
+			if (numericAmount === 2) return "\u062f\u0642\u064a\u0642\u062a\u064a\u0646";
+			if (numericAmount >= 3 && numericAmount <= 10) {
+				return `${amount} \u062f\u0642\u0627\u0626\u0642`;
+			}
+			return `${amount} \u062f\u0642\u064a\u0642\u0629`;
+		}
+		if (/spanish/i.test(lang)) return `${amount} minutos`;
+		if (/french/i.test(lang)) return `${amount} minutes`;
+		if (/urdu/i.test(lang)) return `${amount} منٹ`;
+		if (/hindi/i.test(lang)) return `${amount} मिनट`;
+		if (/indonesian/i.test(lang)) return `${amount} menit`;
+		if (/malay|malaysia/i.test(lang)) return `${amount} minit`;
+		return `${amount} minutes`;
+	}
+	return /arabic/i.test(lang) ? arabicDigits(text) : text;
+}
+
+function localizedJoin(parts = [], lang = "English") {
+	const values = parts.map((part) => String(part || "").trim()).filter(Boolean);
+	if (!values.length) return "";
+	if (values.length === 1) return values[0];
+	const last = values[values.length - 1];
+	if (/arabic/i.test(lang)) {
+		const head = values.slice(0, -1).join("\u060c ");
+		return `${head} \u0648${last}`;
+	}
+	const head = values.slice(0, -1).join(", ");
+	let conjunction = "and";
+	if (/spanish/i.test(lang)) conjunction = "y";
+	else if (/french/i.test(lang)) conjunction = "et";
+	else if (/urdu/i.test(lang)) conjunction = "اور";
+	else if (/hindi/i.test(lang)) conjunction = "और";
+	else if (/indonesian|malay|malaysia/i.test(lang)) conjunction = "dan";
+	return `${head} ${conjunction} ${last}`;
+}
+
+function hotelFactAddressLine(hotel = {}, lang = "English") {
+	const parts = [
+		formatHotelFactText(hotel.hotelAddress, lang),
+		formatHotelFactText(hotel.hotelCity, lang),
+		formatHotelFactText(hotel.hotelState, lang),
+		formatHotelFactText(hotel.hotelCountry, lang),
+	].filter(Boolean);
+	return parts.join(/arabic/i.test(lang) ? "\u060c " : ", ");
+}
+
+function hotelFactNextStepText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const pivot = nextPivot(st);
+	if (/arabic/i.test(lang)) {
+		if (pivot === "proceed") {
+			return "\u0648\u0625\u0630\u0627 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0646\u0627\u0633\u0628 \u0644\u0643\u060c \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f";
+		}
+		if (pivot === "dates") {
+			return "\u0625\u0630\u0627 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0646\u0627\u0633\u0628 \u0644\u0643\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629.";
+		}
+		if (pivot === "room") {
+			return "\u0625\u0630\u0627 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0646\u0627\u0633\u0628 \u0644\u0643\u060c \u0645\u0627 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0630\u064a \u062a\u0641\u0636\u0644\u0647\u061f";
+		}
+		return "\u0647\u0644 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0623\u064a \u062a\u0641\u0635\u064a\u0644 \u0622\u062e\u0631 \u0644\u0644\u062d\u062c\u0632\u061f";
+	}
+	if (/spanish/i.test(lang)) {
+		if (pivot === "proceed") return "Si la ubicacion te va bien, continuo a la revision de la reserva?";
+		if (pivot === "dates") return "Si la ubicacion te va bien, enviame la fecha de llegada y salida para revisar disponibilidad y precio exactos.";
+		if (pivot === "room") return "Si la ubicacion te va bien, que tipo de habitacion o cuantos huespedes necesitas?";
+		return "Hay algun otro detalle de la reserva en el que pueda ayudarte?";
+	}
+	if (/french/i.test(lang)) {
+		if (pivot === "proceed") return "Si l'emplacement vous convient, je passe a la revision de la reservation ?";
+		if (pivot === "dates") return "Si l'emplacement vous convient, envoyez-moi les dates d'arrivee et de depart pour verifier la disponibilite et le prix exact.";
+		if (pivot === "room") return "Si l'emplacement vous convient, quel type de chambre ou combien de personnes faut-il prevoir ?";
+		return "Puis-je vous aider avec un autre detail de la reservation ?";
+	}
+	if (/urdu/i.test(lang)) {
+		if (pivot === "proceed") return "اگر مقام آپ کے لیے مناسب ہے تو کیا میں بکنگ ریویو کے مرحلے پر آگے بڑھوں؟";
+		if (pivot === "dates") return "اگر مقام مناسب ہے تو arrival اور departure dates بھیج دیں، میں availability اور exact price چیک کر دیتا/دیتی ہوں۔";
+		if (pivot === "room") return "اگر مقام مناسب ہے تو آپ کس room type یا کتنے guests کے لیے بکنگ چاہتے ہیں؟";
+		return "کیا بکنگ کے بارے میں کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟";
+	}
+	if (/hindi/i.test(lang)) {
+		if (pivot === "proceed") return "अगर location आपके लिए ठीक है, तो क्या मैं reservation review step पर आगे बढ़ूं?";
+		if (pivot === "dates") return "अगर location ठीक है, तो check-in और check-out dates भेज दीजिए, मैं exact availability और price check कर दूंगा/दूंगी।";
+		if (pivot === "room") return "अगर location ठीक है, तो आप कौन सा room type या कितने guests के लिए booking चाहते हैं?";
+		return "क्या reservation में किसी और चीज़ में help करूं?";
+	}
+	if (/indonesian/i.test(lang)) {
+		if (pivot === "proceed") return "Jika lokasinya cocok, saya lanjutkan ke tahap review reservasi?";
+		if (pivot === "dates") return "Jika lokasinya cocok, kirim tanggal check-in dan check-out agar saya cek ketersediaan dan harga pastinya.";
+		if (pivot === "room") return "Jika lokasinya cocok, tipe kamar atau jumlah tamu berapa yang Anda butuhkan?";
+		return "Ada detail reservasi lain yang bisa saya bantu?";
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		if (pivot === "proceed") return "Jika lokasi ini sesuai, saya teruskan ke langkah semakan tempahan?";
+		if (pivot === "dates") return "Jika lokasi ini sesuai, hantar tarikh check-in dan check-out supaya saya boleh semak availability dan harga tepat.";
+		if (pivot === "room") return "Jika lokasi ini sesuai, jenis bilik atau berapa tetamu yang anda perlukan?";
+		return "Ada butiran tempahan lain yang boleh saya bantu?";
+	}
+	if (pivot === "proceed") return "If the location works for you, shall I continue to the reservation review?";
+	if (pivot === "dates") return "If the location works for you, send me the check-in and check-out dates and I will check the exact availability and price.";
+	if (pivot === "room") return "If the location works for you, which room type or guest count should I prepare for you?";
+	return "Is there anything else I can help with for the reservation?";
+}
+
+function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
+	const hotel = st.hotel || {};
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const walking = formatHotelDistanceValue(hotel.distances?.walkingToElHaram, lang);
+	const driving = formatHotelDistanceValue(hotel.distances?.drivingToElHaram, lang);
+	const address = hotelFactAddressLine(hotel, lang);
+	const next = hotelFactNextStepText(sc, st);
+	const asksBus = selectedHotelBusQuestionText(userText);
+	const asksDistance = selectedHotelDistanceQuestionText(userText);
+	const asksAddress = selectedHotelAddressQuestionText(userText);
+	const hasBusToHaram = hotelHasConfiguredBus(hotel, st);
+	if (asksBus) {
+		if (/arabic/i.test(lang)) {
+			if (hasBusToHaram) {
+				return `${name}\u060c \u0646\u0639\u0645\u060c \u064a\u062a\u0648\u0641\u0631 \u062f\u0627\u0626\u0645\u0627 \u0628\u0627\u0635 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645 \u0645\u0628\u0627\u0634\u0631\u0629. \u0639\u0627\u062f\u0629 \u064a\u0633\u062a\u063a\u0631\u0642 \u0645\u0646 ${arabicDigits("10")} \u0625\u0644\u0649 ${arabicDigits("20")} \u062f\u0642\u064a\u0642\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645\u060c \u0628\u0627\u062a\u062c\u0627\u0647 \u0645\u062d\u0637\u0629 \u0627\u0644\u0634\u0647\u062f\u0627\u0621 \u0648\u0645\u062d\u0637\u0629 \u0623\u062c\u064a\u0627\u062f. \u0647\u0630\u0627 \u062e\u064a\u0627\u0631 \u0645\u0631\u064a\u062d \u062c\u062f\u0627 \u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0639\u0645\u0631\u0629. ${next}`;
+			}
+			const walkingLine = walking
+				? ` ${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${walking} \u0645\u0634\u064a\u0627\u060c`
+				: "";
+			return `${name}\u060c \u0644\u0627\u060c \u0644\u0627 \u0646\u0648\u0641\u0631 \u0628\u0627\u0635\u0627 \u062e\u0627\u0635\u0627 \u0628\u0627\u0644\u0641\u0646\u062f\u0642 \u062d\u0627\u0644\u064a\u0627.${walkingLine} \u0648\u062a\u062a\u0648\u0641\u0631 \u0623\u064a\u0636\u0627 \u0628\u0627\u0635\u0627\u062a \u0639\u0627\u0645\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645. ${next}`;
+		}
+		if (/spanish/i.test(lang)) {
+			if (hasBusToHaram) return `${name}, si, siempre hay bus hacia Al Haram. Normalmente tarda entre 10 y 20 minutos hasta Al Haram, con servicio hacia Al Shohada Station y Ajyad Station. Es una opcion muy comoda para huespedes de Umrah. ${next}`;
+			return `${name}, no, el hotel no ofrece bus propio actualmente.${walking ? ` ${hotelName} esta a unos ${walking} caminando de Al Haram,` : ""} y tambien hay buses publicos disponibles hacia Al Haram. ${next}`;
+		}
+		if (/french/i.test(lang)) {
+			if (hasBusToHaram) return `${name}, oui, il y a toujours un bus vers Al Haram. Le trajet prend generalement entre 10 et 20 minutes jusqu'a Al Haram, avec service vers Al Shohada Station et Ajyad Station. C'est une option tres pratique pour les voyageurs Omra. ${next}`;
+			return `${name}, non, l'hotel ne propose pas de bus prive actuellement.${walking ? ` ${hotelName} se trouve a environ ${walking} a pied d'Al Haram,` : ""} et des bus publics sont aussi disponibles vers Al Haram. ${next}`;
+		}
+		if (/urdu/i.test(lang)) {
+			if (hasBusToHaram) return `${name}، جی ہاں، Al Haram تک ہمیشہ bus service available ہوتی ہے۔ عام طور پر Al Haram تک 10 سے 20 منٹ لگتے ہیں، Al Shohada Station اور Ajyad Station کی طرف service ہوتی ہے۔ Umrah guests کے لیے یہ بہت convenient option ہے۔ ${next}`;
+			return `${name}، نہیں، hotel کی اپنی bus service فی الحال available نہیں ہے۔${walking ? ` ${hotelName} Al Haram سے تقریباً ${walking} پیدل ہے،` : ""} اور Al Haram کے لیے public buses بھی available ہیں۔ ${next}`;
+		}
+		if (/hindi/i.test(lang)) {
+			if (hasBusToHaram) return `${name}, जी हां, Al Haram के लिए हमेशा bus service available रहती है। आम तौर पर Al Haram तक 10 से 20 मिनट लगते हैं, Al Shohada Station और Ajyad Station की तरफ service होती है। Umrah guests के लिए यह बहुत convenient option है। ${next}`;
+			return `${name}, नहीं, hotel की अपनी bus service अभी available नहीं है।${walking ? ` ${hotelName} Al Haram से लगभग ${walking} पैदल है,` : ""} और Al Haram के लिए public buses भी available हैं। ${next}`;
+		}
+		if (/indonesian/i.test(lang)) {
+			if (hasBusToHaram) return `${name}, ya, selalu ada bus menuju Al Haram. Biasanya perjalanan memakan waktu 10 sampai 20 menit ke Al Haram, dengan layanan menuju Al Shohada Station dan Ajyad Station. Ini pilihan yang sangat nyaman untuk tamu Umrah. ${next}`;
+			return `${name}, tidak, hotel tidak menyediakan bus khusus saat ini.${walking ? ` ${hotelName} berjarak sekitar ${walking} berjalan kaki dari Al Haram,` : ""} dan bus umum juga tersedia menuju Al Haram. ${next}`;
+		}
+		if (/malay|malaysia/i.test(lang)) {
+			if (hasBusToHaram) return `${name}, ya, sentiasa ada bus ke Al Haram. Biasanya perjalanan mengambil masa 10 hingga 20 minit ke Al Haram, dengan perkhidmatan ke Al Shohada Station dan Ajyad Station. Ini pilihan yang sangat selesa untuk tetamu Umrah. ${next}`;
+			return `${name}, tidak, hotel tidak menawarkan bus khas buat masa ini.${walking ? ` ${hotelName} kira-kira ${walking} berjalan kaki dari Al Haram,` : ""} dan bus awam juga tersedia ke Al Haram. ${next}`;
+		}
+		if (hasBusToHaram) {
+			return `${name}, yes, there is always a bus service to Al Haram. It usually takes between 10 and 20 minutes to Al Haram, with service toward Al Shohada Station and Ajyad Station. It is a very convenient option for Umrah guests. ${next}`;
+		}
+		return `${name}, no, we do not offer a hotel bus at the moment.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} and public buses are available as well to Al Haram. ${next}`;
+	}
+	if (/arabic/i.test(lang)) {
+		if (asksDistance) {
+			if (walking || driving) {
+				const distance = localizedJoin(
+					[
+						walking ? `${walking} \u0645\u0634\u064a\u0627` : "",
+						driving ? `${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629` : "",
+					],
+					lang
+				);
+				return `${name}\u060c ${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${distance} \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645. \u0645\u0648\u0642\u0639\u0647 \u0639\u0645\u0644\u064a \u062c\u062f\u0627 \u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0639\u0645\u0631\u0629. ${next}`;
+			}
+			return `${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0631\u0642\u0645 \u062f\u0642\u064a\u0642 \u0644\u0644\u0645\u0633\u0627\u0641\u0629 \u0641\u064a \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName} \u062d\u0627\u0644\u064a\u0627. ${next}`;
+		}
+		if (asksAddress) {
+			if (address) {
+				const distanceNote = walking || driving ? ` \u0648\u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${localizedJoin([walking ? `${walking} \u0645\u0634\u064a\u0627` : "", driving ? `${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629` : ""], lang)}.` : "";
+				return `${name}\u060c \u0639\u0646\u0648\u0627\u0646 ${hotelName}: ${address}.${distanceNote} ${next}`;
+			}
+			return `${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0639\u0646\u0648\u0627\u0646 \u062f\u0642\u064a\u0642 \u0645\u0643\u062a\u0648\u0628 \u0644\u0640 ${hotelName} \u062d\u0627\u0644\u064a\u0627. ${next}`;
+		}
+	}
+	if (/spanish/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} esta a unos ${localizedJoin([walking ? `${walking} caminando` : "", driving ? `${driving} en coche` : ""], lang)} del Haram, segun el trafico. Es una ubicacion muy practica para huespedes de Umrah. ${next}`;
+		if (asksAddress && address) return `${name}, la direccion de ${hotelName} es: ${address}.${walking || driving ? ` Esta a unos ${localizedJoin([walking ? `${walking} caminando` : "", driving ? `${driving} en coche` : ""], lang)} del Haram.` : ""} ${next}`;
+		return `${name}, no veo ese dato exacto confirmado en los detalles de ${hotelName} ahora mismo. ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} se trouve a environ ${localizedJoin([walking ? `${walking} a pied` : "", driving ? `${driving} en voiture` : ""], lang)} du Haram, selon la circulation. C'est un emplacement tres pratique pour les voyageurs Omra. ${next}`;
+		if (asksAddress && address) return `${name}, l'adresse de ${hotelName} est : ${address}.${walking || driving ? ` Il se trouve a environ ${localizedJoin([walking ? `${walking} a pied` : "", driving ? `${driving} en voiture` : ""], lang)} du Haram.` : ""} ${next}`;
+		return `${name}, je ne vois pas ce detail exact confirme dans les informations de ${hotelName} pour le moment. ${next}`;
+	}
+	if (/urdu/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}، ${hotelName} حرم سے تقریباً ${localizedJoin([walking ? `${walking} پیدل` : "", driving ? `${driving} گاڑی سے` : ""], lang)} دور ہے، ٹریفک کے حساب سے۔ عمرہ guests کے لیے location بہت practical ہے۔ ${next}`;
+		if (asksAddress && address) return `${name}، ${hotelName} کا address: ${address}.${walking || driving ? ` حرم سے تقریباً ${localizedJoin([walking ? `${walking} پیدل` : "", driving ? `${driving} گاڑی سے` : ""], lang)} ہے۔` : ""} ${next}`;
+		return `${name}، اس وقت ${hotelName} کی details میں یہ exact معلومات confirmed نظر نہیں آ رہیں۔ ${next}`;
+	}
+	if (/hindi/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} Haram से लगभग ${localizedJoin([walking ? `${walking} पैदल` : "", driving ? `${driving} गाड़ी से` : ""], lang)} दूर है, traffic के अनुसार। Umrah guests के लिए location बहुत practical है। ${next}`;
+		if (asksAddress && address) return `${name}, ${hotelName} का address: ${address}.${walking || driving ? ` Haram से लगभग ${localizedJoin([walking ? `${walking} पैदल` : "", driving ? `${driving} गाड़ी से` : ""], lang)} है।` : ""} ${next}`;
+		return `${name}, अभी ${hotelName} की details में यह exact जानकारी confirmed नहीं दिख रही है। ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} berjarak sekitar ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan mobil` : ""], lang)} dari Haram, tergantung lalu lintas. Lokasinya sangat praktis untuk tamu Umrah. ${next}`;
+		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya sekitar ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan mobil` : ""], lang)} dari Haram.` : ""} ${next}`;
+		return `${name}, saya belum melihat detail pasti itu di data ${hotelName} saat ini. ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} kira-kira ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan kereta` : ""], lang)} dari Haram, bergantung pada trafik. Lokasinya sangat praktikal untuk tetamu Umrah. ${next}`;
+		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya kira-kira ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan kereta` : ""], lang)} dari Haram.` : ""} ${next}`;
+		return `${name}, saya belum nampak butiran tepat itu dalam data ${hotelName} sekarang. ${next}`;
+	}
+	if (asksDistance) {
+		if (walking || driving) {
+			return `${name}, ${hotelName} is about ${localizedJoin([walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""], lang)} from Al Haram, depending on traffic. It is a very practical location for Umrah guests. ${next}`;
+		}
+		return `${name}, I do not see an exact distance confirmed in ${hotelName}'s details right now. ${next}`;
+	}
+	if (asksAddress) {
+		if (address) {
+			const distanceNote = walking || driving ? ` It is about ${localizedJoin([walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""], lang)} from Al Haram.` : "";
+			return `${name}, the address for ${hotelName} is: ${address}.${distanceNote} ${next}`;
+		}
+		return `${name}, I do not see a precise written address in ${hotelName}'s details right now. ${next}`;
+	}
+	return "";
+}
+
+async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
+	const previousWaitFor = st.waitFor || null;
+	let reply = selectedHotelFactAnswerText(sc, st, userText);
+	if (!reply) {
+		reply = await write(
+			io,
+			sc,
+			st,
+			"The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts only, then add one warm sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel.",
+			{
+				latestUserMessage: userText,
+				selectedHotelFacts: buildActiveHotelFacts(sc, st),
+				nextStep: nextPivot(st),
+			}
+		);
+	}
+	const sent = await humanSend(io, sc, st, reply);
+	if (!sent) return false;
+	st.waitFor = previousWaitFor || nextPivot(st);
+	logStep(String(sc._id), "selected_hotel.fact_reply", {
+		latestUserMessage: String(userText || "").slice(0, 160),
+		waitFor: st.waitFor,
+		hasDistance: Boolean(
+			st.hotel?.distances?.walkingToElHaram ||
+				st.hotel?.distances?.drivingToElHaram
+		),
+		hasAddress: Boolean(st.hotel?.hotelAddress),
+	});
+	return true;
 }
 
 async function buildHotelRecommendations({
@@ -4653,8 +5279,10 @@ function languageMismatchLikely(answer = "", targetLanguage = "") {
 
 /* LLM writer */
 async function write(io, sc, st, instruction, context = {}) {
-	const respectfulAddress = respectfulGuestName(sc, st);
+	const guestProfile = respectfulGuestProfile(sc, st);
+	const respectfulAddress = guestProfile.address;
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
+	const activeHotelFacts = buildActiveHotelFacts(sc, st);
 	const targetLanguage = languageOf(sc, st) || "English";
 	const targetLanguageCode = activeLanguageCodeOf(sc, st);
 	const targetLanguageText = targetLanguageCode
@@ -4701,7 +5329,16 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Accuracy and answering the guest's exact question matter more than speed; it is acceptable to take a few extra seconds to use verified context and employee learning examples properly.`,
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
-		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first using verified context or employee learning examples. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, or account records. If no approved public fallback number is provided by the contact handler, do not invent one and do not say "no official number"; explain that the guest is already with reception/reservations in this live chat and that continuing here is the safest way to keep availability and reservation details clear.`,
+		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
+		activeHotelFacts
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusToHaram, and activeRooms there as verified facts for "${hotelName}". If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			: "",
+		activeHotelFacts
+			? `If activeHotelFacts.distances has walkingToElHaram or drivingToElHaram and the guest asks how far the hotel is from Al Haram, say the walking/driving minutes directly and naturally. Do not deflect to review, dates, phone, email, or confirmation before answering the distance.`
+			: "",
+		activeHotelFacts
+			? `If the guest asks about bus/shuttle service to Al Haram, use activeHotelFacts.hasBusToHaram only. If true, say there is always a bus to Al Haram and it usually takes 10 to 20 minutes to Al Haram toward Al Shohada Station and Ajyad Station. If false, say the hotel does not offer a hotel bus, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses to Al Haram are available.`
+			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
@@ -4711,7 +5348,9 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, Spanish, Indonesian, and Malaysian guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
 		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
-		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
+		`Guest address guidance: inferred guest gender is "${guestProfile.gender}" from the available name/title, and the recommended address is "${respectfulAddress}". Use gendered honorifics only when confident; otherwise use the guest's name or a neutral respectful address.`,
+		`For Arabic conversations, use "\u0623\u0633\u062a\u0627\u0630\u0629 {first name}" for a confidently female guest and "\u0623\u0633\u062a\u0627\u0630 {first name}" for a confidently male guest. If gender is unknown, avoid a gendered Arabic title and use the name or "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645". Never call a female guest "\u0623\u0633\u062a\u0627\u0630".`,
+		`For Spanish, French, Hindi, Urdu, Indonesian, Malay, and other languages, use gendered forms only when the guest's gender is clear from name/title or context; otherwise stay polite and neutral.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
 		`Avoid repeated openings such as "Hello {name}" or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
@@ -4737,7 +5376,9 @@ async function write(io, sc, st, instruction, context = {}) {
 		{
 			...context,
 			targetResponseLanguage: targetLanguageText,
+			guestProfile,
 			respectfulAddress,
+			activeHotelFacts,
 			alreadyIntroduced,
 			latestGuestLanguageStyle: languageStyle,
 			privatePreviousGuestChats: previousGuestContext,
@@ -4817,6 +5458,14 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	}
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
+	}
+	if (st.hotel && selectedHotelFactQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: "selected_hotel",
+			reason: "selected_hotel_fact_question",
+		};
 	}
 	if (st.hotel && crossHotelRequestText(userText)) {
 		return {
@@ -4905,19 +5554,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 			{ latestUserMessage: userText, nlu: lu || null }
 		),
 	]);
-	const hotelSummary = st.hotel
-		? {
-				hotelName: st.hotel.hotelName,
-				activeRooms: (st.hotel.roomCountDetails || [])
-					.filter((room) => room.activeRoom)
-					.map((room) => ({
-						roomType: room.roomType,
-						displayName: room.displayName || room.roomType,
-						basePrice: room.price?.basePrice || 0,
-					}))
-					.slice(0, 12),
-		  }
-		: null;
+	const hotelSummary = buildActiveHotelFacts(sc, st);
 	const sys = [
 		"You are the hotel reception and reservations chat orchestrator.",
 		"Read the whole conversation and decide the next support action before any answer is written.",
@@ -4933,6 +5570,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
 		"Choose hotel_recommendation only when there is no active hotel context.",
+		"If an active hotel is present and the guest asks about the selected hotel's address, location, distance from Al Haram, bus/shuttle to Al Haram, parking, hotel facts, or active room facts, choose general_answer with scope:'selected_hotel' unless a deterministic handler has already handled it.",
 		"If check-in and checkout dates are already present in currentSlots or nlu, never choose ask_dates_for_price; choose continue_booking for price or availability.",
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
@@ -5247,6 +5885,7 @@ async function handleProceedStageInput(
 		wantsPaymentHelp(userText) ||
 		hotelContactDetailsQuestionText(userText) ||
 		hotelContactFollowupQuestionText(sc, userText) ||
+		selectedHotelFactQuestionText(userText) ||
 		lu.amenity ||
 		detectAmenityQuestion(userText)
 	) {
@@ -6154,6 +6793,7 @@ function isPostBookingConcreteRequest(text = "") {
 	return (
 		wantsPaymentHelp(normalized) ||
 		wantsReservationHelp(normalized) ||
+		selectedHotelFactQuestionText(normalized) ||
 		selectedHotelRoomQuestionText(normalized) ||
 		Boolean(findAmenityMatch(normalized)) ||
 		/\b(can you|could you|please tell|tell me|i need|i want|where|when|how much|how do|what is|what time|is there|do you)\b/i.test(
@@ -6276,6 +6916,7 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 		reservationHelp ||
 		wantsDiscountQuestion(normalized) ||
 		humanHandoffReason(normalized) ||
+		selectedHotelFactQuestionText(normalized) ||
 		selectedHotelRoomQuestionText(normalized) ||
 		Boolean(findAmenityMatch(normalized))
 	) {
@@ -6347,9 +6988,7 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 
 async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
 	const requestCount = hotelContactRequestCount(sc, userText);
-	const phoneToShare = shouldSharePublicReceptionPhone(sc, userText)
-		? PUBLIC_RECEPTION_PHONE_DISPLAY
-		: "";
+	const phoneToShare = "";
 	const reply = hotelContactReplyText(sc, st, {
 		publicPhone: phoneToShare,
 		requestCount,
@@ -6418,6 +7057,9 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		hotelContactFollowupQuestionText(sc, userText)
 	) {
 		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+	}
+	if (st.hotel && selectedHotelFactQuestionText(userText)) {
+		return answerSelectedHotelFactQuestion(io, sc, st, userText);
 	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
@@ -6995,6 +7637,16 @@ async function planTurn(io, sc) {
 			await answerHotelContactDetailsInquiry(io, sc, st, userText);
 			return;
 		}
+		if (
+			st.hotel &&
+			selectedHotelFactQuestionText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
 		if (isReservationDetailStep(st)) {
 			const handled = await handleReservationDetailStep(
 				io,
@@ -7127,6 +7779,17 @@ async function planTurn(io, sc) {
 
 		if (
 			st.hotel &&
+			selectedHotelFactQuestionText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
+
+		if (
+			st.hotel &&
 			selectedHotelRoomQuestionText(userText) &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
@@ -7222,6 +7885,10 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "general_answer") {
+			if (st.hotel && selectedHotelFactQuestionText(userText)) {
+				await answerSelectedHotelFactQuestion(io, sc, st, userText);
+				return;
+			}
 			await answerGeneralContextQuestion(
 				io,
 				sc,
