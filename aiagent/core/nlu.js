@@ -790,10 +790,17 @@ function isoFromParts(year, month, day) {
 	return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
+function normalizeNumericGregorianYear(year) {
+	const raw = String(year || "").trim();
+	if (/^20\d{2}$/.test(raw)) return Number(raw);
+	if (/^\d{2}$/.test(raw)) return 2000 + Number(raw);
+	return null;
+}
+
 function numericGregorianDateParts(left, right, year) {
 	const a = Number(left);
 	const b = Number(right);
-	const y = Number(year);
+	const y = normalizeNumericGregorianYear(year);
 	if (!a || !b || !y) return null;
 	let day = null;
 	let month = null;
@@ -813,19 +820,33 @@ function numericGregorianDateParts(left, right, year) {
 function quickNumericGregorianDateRange(text = "") {
 	const raw = digitsToEnglish(String(text || ""));
 	const matches = [];
-	const re = /\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2})\b/g;
-	let match = null;
-	while ((match = re.exec(raw))) {
-		const parts = numericGregorianDateParts(match[1], match[2], match[3]);
-		if (!parts) continue;
+	const pushMatch = (index, source, left, right, year) => {
+		const parts = numericGregorianDateParts(left, right, year);
+		if (!parts) return;
 		matches.push({
-			index: match.index,
-			source: match[0],
+			index,
+			source,
 			...parts,
 		});
+	};
+	const re = /\b(\d{1,2})[\/.-](\d{1,2})[\/.-]((?:20\d{2})|(?:\d{2}))\b/g;
+	let match = null;
+	while ((match = re.exec(raw))) {
+		pushMatch(match.index, match[0], match[1], match[2], match[3]);
+	}
+	const sharedYearRe =
+		/\b(\d{1,2})[\/.-](\d{1,2})\s*(?:-|\u2013|\u2014|to|until|till|through|\u0627\u0644\u0649|\u0625\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649)\s*(\d{1,2})[\/.-](\d{1,2})[\/.-]((?:20\d{2})|(?:\d{2}))\b/gi;
+	while ((match = sharedYearRe.exec(raw))) {
+		pushMatch(match.index, match[0], match[1], match[2], match[5]);
+		pushMatch(match.index + match[0].lastIndexOf(match[3]), match[0], match[3], match[4], match[5]);
 	}
 	if (matches.length < 2) return null;
-	const ordered = matches.sort((a, b) => a.index - b.index);
+	const ordered = matches
+		.sort((a, b) => a.index - b.index)
+		.filter((item, index, list) => {
+			const prev = list[index - 1];
+			return !prev || prev.iso !== item.iso || prev.index !== item.index;
+		});
 	const checkin = ordered[0];
 	const checkout = ordered[1];
 	if (!checkin.iso || !checkout.iso || checkout.iso <= checkin.iso) return null;
@@ -1413,7 +1434,9 @@ async function normalizeDatesLLM({
 
 	const today = new Date().toISOString().slice(0, 10);
 	const rawDateText = digitsToEnglish(`${checkin || ""} ${checkout || ""}`);
-	const hasExplicitGregorianYear = /\b20\d{2}\b/.test(rawDateText);
+	const hasExplicitGregorianYear =
+		/\b20\d{2}\b/.test(rawDateText) ||
+		/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2}\b/.test(rawDateText);
 	const sys = [
 		"Convert input dates to Gregorian ISO (YYYY-MM-DD). Input may be Hijri or Gregorian, any language.",
 		"IMPORTANT: If the month is missing for either date, DO NOT infer—return null and set reason:'month_missing'.",

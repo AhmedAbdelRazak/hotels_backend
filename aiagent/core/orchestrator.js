@@ -146,6 +146,13 @@ const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
 	false
 );
+const PUBLIC_RECEPTION_PHONE_DISPLAY =
+	process.env.AI_PUBLIC_RECEPTION_PHONE_DISPLAY || "+1 (909) 222-3374";
+const HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD = intFromEnv(
+	"AI_HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD",
+	3,
+	{ min: 3, max: 10 }
+);
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
@@ -1117,6 +1124,9 @@ function hotelContactDetailsQuestionText(text = "") {
 		/\b(?:hotel|reception|front\s*desk|desk|manager|responsible|staff|support|official)\b/i.test(
 			lower
 		) ||
+		/\b(?:your|you)\s+(?:phone|telephone|mobile|number|no\.?|whatsapp|whats\s*app|contact)\b/i.test(
+			lower
+		) ||
 		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0645\u0633\u0624\u0648\u0644|\u0627\u0644\u0645\u0633\u0626\u0648\u0644|\u0645\u0633\u0624\u0648\u0644|\u0645\u0633\u0626\u0648\u0644|\u0627\u0644\u0645\u062f\u064a\u0631|\u0627\u0644\u062f\u0639\u0645)/i.test(
 			arabic
 		) ||
@@ -1131,6 +1141,175 @@ function hotelContactDetailsQuestionText(text = "") {
 			arabic
 		);
 	return asksHotelOrStaff || directHotelContact;
+}
+
+function genericContactNumberRequestText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	if (/\b(?:my|mine)\s+(?:phone|telephone|mobile|number|whatsapp|contact)\b/i.test(lower)) {
+		return false;
+	}
+	const asksContact =
+		/\b(?:phone|telephone|mobile|number|no\.?|whatsapp|whats\s*app|contact|call)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0642\u0645|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062a\u0644\u064a\u0641\u0648\u0646|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0627\u062a\u0635\u0644)/i.test(
+			arabic
+		);
+	if (!asksContact) return false;
+	return (
+		/\b(?:give|send|share|need|want|have|provide|please|pls|plz|again|still|just|only)\b/i.test(
+			lower
+		) ||
+		/\b(?:phone|number|whatsapp|contact)\s+(?:please|pls|plz)\b/i.test(lower) ||
+		/(?:\u0644\u0648\s*\u0633\u0645\u062d\u062a|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0627\u062f\u064a\u0646\u064a|\u0623\u0639\u0637\u064a\u0646\u064a|\u0645\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649|\u0628\u0631\u0636\u0647|\u0645\u0631\u0629\s*\u062b\u0627\u0646\u064a\u0629)/i.test(
+			arabic
+		) ||
+		/(?:giveme|sendme|share|numberplease|phoneplease|whatsappplease)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function hotelContactRequestLikeText(text = "") {
+	return hotelContactDetailsQuestionText(text) || genericContactNumberRequestText(text);
+}
+
+function normalizedContactRequestText(text = "") {
+	return normalizeControlText(text).lower.replace(/\s+/g, " ").trim();
+}
+
+function hotelContactConversationRequestCount(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	return conversation.filter((message) => {
+		if (!isGuestConversationMessage(message)) return false;
+		return hotelContactRequestLikeText(conversationEntryContextText(message));
+	}).length;
+}
+
+function hotelContactRequestCount(sc = {}, userText = "") {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestText = normalizedContactRequestText(userText);
+	let count = 0;
+	let latestAlreadyCounted = false;
+	const lastGuestIndex = conversation.reduce(
+		(lastIndex, message, index) =>
+			isGuestConversationMessage(message) ? index : lastIndex,
+		-1
+	);
+	for (let index = 0; index < conversation.length; index += 1) {
+		const message = conversation[index];
+		if (!isGuestConversationMessage(message)) continue;
+		const text = conversationEntryContextText(message);
+		if (!hotelContactRequestLikeText(text)) continue;
+		count += 1;
+		if (
+			latestText &&
+			normalizedContactRequestText(text) === latestText &&
+			index === lastGuestIndex
+		) {
+			latestAlreadyCounted = true;
+		}
+	}
+	if (hotelContactRequestLikeText(userText) && !latestAlreadyCounted) count += 1;
+	return count;
+}
+
+function previousHotelContactRequestCount(sc = {}, userText = "") {
+	const count = hotelContactRequestCount(sc, userText);
+	return Math.max(0, count - (hotelContactRequestLikeText(userText) ? 1 : 0));
+}
+
+function hotelContactFollowupQuestionText(sc = {}, userText = "") {
+	return (
+		genericContactNumberRequestText(userText) &&
+		previousHotelContactRequestCount(sc, userText) >= 1
+	);
+}
+
+function hotelContactInsistenceText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:again|still|just|only|insist|must|need\s+the\s+number|give\s+me\s+the\s+number|send\s+the\s+number|phone\s+please|number\s+please)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0631\u0636\u0647|\u0644\u0627\u0632\u0645|\u0645\u0635\u0631|\u0645\u0631\u0629\s*\u062b\u0627\u0646\u064a\u0629|\u0627\u062f\u064a\u0646\u064a\s+\u0627\u0644\u0631\u0642\u0645|\u0627\u0628\u0639\u062a\s+\u0627\u0644\u0631\u0642\u0645|\u0627\u0631\u0633\u0644\s+\u0627\u0644\u0631\u0642\u0645)/i.test(
+			arabic
+		) ||
+		/(?:again|still|justgiveme|numberplease|phoneplease|sendnumber)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function shouldSharePublicReceptionPhone(sc = {}, userText = "") {
+	return hotelContactRequestCount(sc, userText) >= HOTEL_CONTACT_PUBLIC_PHONE_THRESHOLD;
+}
+
+function contactReplyLanguageKey(sc = {}, st = {}) {
+	const target = `${languageOf(sc, st)} ${activeLanguageCodeOf(sc, st)}`.toLowerCase();
+	if (/arabic|\bar\b/.test(target)) return "ar";
+	if (/spanish|\bes\b/.test(target)) return "es";
+	if (/french|\bfr\b/.test(target)) return "fr";
+	if (/urdu|\bur\b/.test(target)) return "ur";
+	if (/hindi|\bhi\b/.test(target)) return "hi";
+	if (/indonesian|\bid\b/.test(target)) return "id";
+	if (/malay|malaysia|\bms\b/.test(target)) return "ms";
+	return "en";
+}
+
+function hotelContactReplyText(sc = {}, st = {}, options = {}) {
+	const name = respectfulGuestName(sc, st);
+	const phone = String(options.publicPhone || "").trim();
+	const requestCount = Number(options.requestCount || 1);
+	const firm = requestCount >= 2;
+	const key = contactReplyLanguageKey(sc, st);
+	const templates = {
+		en: {
+			first: `${name}, you are already with reception and reservations here. This live chat is the safest way for me to confirm availability and keep every reservation detail clear. Send me what you need and I will handle it with you directly here.`,
+			firm: `${name}, I understand you want the number. The safest and smoothest way is to continue here because reception can track the live availability and reservation details in one place. Tell me what you need and I will take care of it step by step.`,
+			share: `${name}, the phone/WhatsApp line I can share is ${phone}. For the smoothest reservation, please keep the details here too so reception can track availability and your request without losing context.`,
+		},
+		ar: {
+			first: `${name}\u060c \u062d\u0636\u0631\u062a\u0643 \u0628\u0627\u0644\u0641\u0639\u0644 \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a \u0647\u0646\u0627. \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629 \u0647\u064a \u0627\u0644\u0637\u0631\u064a\u0642\u0629 \u0627\u0644\u0623\u0636\u0645\u0646 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u062d\u0641\u0638 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0628\u0648\u0636\u0648\u062d. \u0627\u0643\u062a\u0628 \u0644\u064a \u0637\u0644\u0628\u0643 \u0648\u0633\u0623\u062a\u0627\u0628\u0639\u0647 \u0645\u0639\u0643 \u0645\u0628\u0627\u0634\u0631\u0629.`,
+			firm: `${name}\u060c \u0623\u0641\u0647\u0645 \u0623\u0646\u0643 \u062a\u0631\u064a\u062f \u0627\u0644\u0631\u0642\u0645. \u0627\u0644\u0623\u0641\u0636\u0644 \u0648\u0627\u0644\u0623\u0636\u0645\u0646 \u0623\u0646 \u0646\u0643\u0645\u0644 \u0647\u0646\u0627 \u0644\u0623\u0646 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u062a\u0627\u0628\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0645\u0643\u0627\u0646 \u0648\u0627\u062d\u062f. \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0648\u0633\u0623\u062e\u062f\u0645\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629.`,
+			share: `${name}\u060c \u062e\u0637 \u0627\u0644\u0647\u0627\u062a\u0641/\u0648\u0627\u062a\u0633\u0627\u0628 \u0627\u0644\u0645\u062a\u0627\u062d \u0647\u0648 ${phone}. \u0648\u0645\u0639 \u0630\u0644\u0643 \u0623\u0646\u0635\u062d\u0643 \u0623\u0646 \u062a\u0628\u0642\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0647\u0646\u0627 \u0623\u064a\u0636\u0627 \u062d\u062a\u0649 \u064a\u0631\u0627\u062c\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0637\u0644\u0628\u0643 \u0628\u062f\u0648\u0646 \u0641\u0642\u062f\u0627\u0646 \u0627\u0644\u0633\u064a\u0627\u0642.`,
+		},
+		es: {
+			first: `${name}, ya estas con recepcion y reservas aqui. Este chat en vivo es la forma mas segura para revisar disponibilidad y mantener claros los datos de la reserva. Escribeme lo que necesitas y lo gestiono contigo directamente aqui.`,
+			firm: `${name}, entiendo que quieres el numero. Lo mas seguro y fluido es continuar aqui, porque recepcion puede seguir la disponibilidad en vivo y los datos de la reserva en un solo lugar. Dime que necesitas y lo llevo paso a paso.`,
+			share: `${name}, la linea de telefono/WhatsApp que puedo compartir es ${phone}. Para que la reserva sea mas fluida, mantengamos tambien los detalles aqui para que recepcion pueda seguir la disponibilidad y tu solicitud sin perder contexto.`,
+		},
+		fr: {
+			first: `${name}, vous etes deja avec la reception et les reservations ici. Ce chat en direct est le moyen le plus sur pour verifier la disponibilite et garder les details de reservation clairs. Envoyez-moi votre demande et je la traite avec vous directement ici.`,
+			firm: `${name}, je comprends que vous souhaitez le numero. Le plus sur et le plus fluide est de continuer ici, car la reception peut suivre la disponibilite en direct et les details de reservation au meme endroit. Dites-moi ce dont vous avez besoin et je m'en occupe etape par etape.`,
+			share: `${name}, la ligne telephone/WhatsApp que je peux partager est ${phone}. Pour une reservation plus fluide, gardons aussi les details ici afin que la reception suive la disponibilite et votre demande sans perdre le contexte.`,
+		},
+		ur: {
+			first: `${name}، آپ یہاں براہ راست ریسیپشن اور ریزرویشنز کے ساتھ ہیں۔ یہ لائیو چیٹ دستیابی چیک کرنے اور بکنگ کی تفصیلات واضح رکھنے کا سب سے محفوظ طریقہ ہے۔ آپ اپنی ضرورت لکھ دیں، میں یہیں آپ کے ساتھ براہ راست دیکھ لیتا/لیتی ہوں۔`,
+			firm: `${name}، میں سمجھتا/سمجھتی ہوں کہ آپ نمبر چاہتے ہیں۔ سب سے محفوظ اور آسان طریقہ یہ ہے کہ ہم یہیں جاری رکھیں، کیونکہ ریسیپشن دستیابی اور بکنگ کی تفصیلات ایک ہی جگہ دیکھ سکتی ہے۔ آپ بتائیں کیا چاہیے، میں قدم بہ قدم مدد کرتا/کرتی ہوں۔`,
+			share: `${name}، فون/WhatsApp لائن جو میں شیئر کر سکتا/سکتی ہوں یہ ہے: ${phone}. بہتر ریزرویشن کے لیے تفصیلات یہاں بھی رکھیں تاکہ ریسیپشن دستیابی اور درخواست کا مکمل سیاق دیکھ سکے۔`,
+		},
+		hi: {
+			first: `${name}, आप यहां सीधे reception और reservations से जुड़े हैं। Availability confirm करने और reservation details साफ रखने के लिए यह live chat सबसे सुरक्षित तरीका है। आप अपनी जरूरत लिख दीजिए, मैं यहीं सीधे संभालता/संभालती हूं।`,
+			firm: `${name}, मैं समझ रहा/रही हूं कि आपको number चाहिए। सबसे सुरक्षित और smooth तरीका यही है कि हम यहां continue करें, क्योंकि reception live availability और reservation details एक जगह track कर सकती है। बताइए आपको क्या चाहिए, मैं step by step handle कर दूंगा/दूंगी।`,
+			share: `${name}, जो phone/WhatsApp line मैं share कर सकता/सकती हूं वह है ${phone}. Smooth reservation के लिए details यहां भी रखें ताकि reception availability और आपकी request का context न खोए।`,
+		},
+		id: {
+			first: `${name}, Anda sudah terhubung langsung dengan reception dan reservasi di sini. Live chat ini adalah cara paling aman untuk mengecek ketersediaan dan menjaga detail reservasi tetap jelas. Tulis kebutuhan Anda, saya bantu langsung di sini.`,
+			firm: `${name}, saya mengerti Anda ingin nomor telepon. Cara paling aman dan lancar adalah lanjut di sini, karena reception bisa melacak ketersediaan live dan detail reservasi di satu tempat. Beri tahu saya kebutuhan Anda, saya bantu langkah demi langkah.`,
+			share: `${name}, nomor telepon/WhatsApp yang bisa saya bagikan adalah ${phone}. Untuk reservasi yang paling lancar, simpan juga detailnya di sini agar reception bisa melacak ketersediaan dan permintaan Anda tanpa kehilangan konteks.`,
+		},
+		ms: {
+			first: `${name}, anda sudah berhubung terus dengan reception dan reservations di sini. Live chat ini cara paling selamat untuk semak availability dan pastikan butiran tempahan jelas. Tulis apa yang anda perlukan, saya bantu terus di sini.`,
+			firm: `${name}, saya faham anda mahu nombor telefon. Cara paling selamat dan lancar ialah teruskan di sini, kerana reception boleh semak availability live dan butiran tempahan di satu tempat. Beritahu saya apa yang diperlukan, saya bantu langkah demi langkah.`,
+			share: `${name}, talian telefon/WhatsApp yang boleh saya kongsi ialah ${phone}. Untuk tempahan yang paling lancar, kekalkan juga butiran di sini supaya reception boleh ikut availability dan permintaan anda tanpa hilang konteks.`,
+		},
+	};
+	const chosen = templates[key] || templates.en;
+	if (phone) return chosen.share;
+	return firm ? chosen.firm : chosen.first;
 }
 
 function vagueHajjInquiryText(text = "") {
@@ -4175,7 +4354,7 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 		const activeHotelId = st.hotel?._id || null;
 		const chats = await listRelevantTrainingChats({
 			hotelId: activeHotelId,
-			includeGlobal: !activeHotelId,
+			includeGlobal: true,
 			language: targetLanguageLabel(sc, st),
 			text: lookupText,
 			limit: 6,
@@ -4502,10 +4681,12 @@ async function write(io, sc, st, instruction, context = {}) {
 			? `You are ${st.agentName}, the reception and reservations representative for "${hotelName}".`
 			: `You are ${st.agentName} from Jannat Booking support.`,
 		introRule,
-		`If Jannat Booking must be named, write the brand exactly as "Jannat Booking"; do not translate or shorten it.`,
+		hotelName
+			? `In active hotel reception replies, do not mention Jannat Booking unless a supplied platform, payment, or final verification context explicitly requires it. If it must be named, write the brand exactly as "Jannat Booking"; do not translate or shorten it.`
+			: `If Jannat Booking must be named, write the brand exactly as "Jannat Booking"; do not translate or shorten it.`,
 		aiIdentityRule,
 		hotelName
-			? `Speak as the hotel's own reception and reservations desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
+			? `Speak as the hotel's own reception and reservations desk. The guest should feel they are speaking directly with reception, not a separate middleman.`
 			: `Represent Jannat Booking directly.`,
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
@@ -4520,7 +4701,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Accuracy and answering the guest's exact question matter more than speed; it is acceptable to take a few extra seconds to use verified context and employee learning examples properly.`,
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
-		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first using verified context or employee learning examples. If no verified number is provided, do not invent one; explain briefly that the official number is not available in this chat and reassure them that reception/reservations coordination continues here.`,
+		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first using verified context or employee learning examples. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, or account records. If no approved public fallback number is provided by the contact handler, do not invent one and do not say "no official number"; explain that the guest is already with reception/reservations in this live chat and that continuing here is the safest way to keep availability and reservation details clear.`,
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
@@ -4859,7 +5040,6 @@ async function shareKnownStayQuote(io, sc, st) {
 		checkoutISO: st.slots.checkoutISO,
 		hasHotel: Boolean(st.hotel),
 	});
-	await sendProgressMessage(io, sc, st, "checking");
 	const quote = safePriceRoomForStay(
 		st.hotel,
 		{ roomType: st.slots.roomTypeKey },
@@ -5066,6 +5246,7 @@ async function handleProceedStageInput(
 	if (
 		wantsPaymentHelp(userText) ||
 		hotelContactDetailsQuestionText(userText) ||
+		hotelContactFollowupQuestionText(sc, userText) ||
 		lu.amenity ||
 		detectAmenityQuestion(userText)
 	) {
@@ -6078,33 +6259,24 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 }
 
 async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
-	const officialHotelPhone =
-		String(
-			st.hotel?.phone ||
-				st.hotel?.hotelPhone ||
-				st.hotel?.contactPhone ||
-				st.hotel?.whatsapp ||
-				""
-		).trim();
-	const reply = await write(
-		io,
-		sc,
-		st,
-		"The guest is asking for the hotel's phone, WhatsApp, reception contact, manager/responsible person number, or direct hotel contact. Answer as the hotel reception and reservations representative, and answer this direct question first. Use employee learning examples if provided. Do not repeat the quote, price, dates, room type, or proceed/review prompt. If an official verified hotel phone/WhatsApp is provided in context, share it. If not, do not invent a number; politely say there is no official phone/WhatsApp number available in this chat. Reassure the guest that Jannat Booking coordinates directly with the hotel's reservation department and confirmed bookings are handled through the official reservation process. Keep it concise and warm.",
-		{
-			latestUserMessage: userText,
-			hotelName: localizedHotelName(sc, st),
-			officialHotelPhone,
-			supportEmail: AI_SUPPORT_EMAIL,
-		}
-	);
-	await humanSend(io, sc, st, stripGeneralBookingPivot(reply, supportEmailFallbackText(sc, st)));
+	const requestCount = hotelContactRequestCount(sc, userText);
+	const phoneToShare = shouldSharePublicReceptionPhone(sc, userText)
+		? PUBLIC_RECEPTION_PHONE_DISPLAY
+		: "";
+	const reply = hotelContactReplyText(sc, st, {
+		publicPhone: phoneToShare,
+		requestCount,
+		userText,
+	});
+	await humanSend(io, sc, st, reply);
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
 	logStep(String(sc._id), "hotel_contact.reply", {
-		hasOfficialHotelPhone: Boolean(officialHotelPhone),
+		sharedPhone: Boolean(phoneToShare),
+		sharedPublicPhone: Boolean(phoneToShare),
+		requestCount,
 		latestUserMessage: String(userText || "").slice(0, 160),
 	});
 	return true;
@@ -6154,7 +6326,10 @@ async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "")
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
-	if (hotelContactDetailsQuestionText(userText)) {
+	if (
+		hotelContactDetailsQuestionText(userText) ||
+		hotelContactFollowupQuestionText(sc, userText)
+	) {
 		return answerHotelContactDetailsInquiry(io, sc, st, userText);
 	}
 	if (isPostBookingClosure(userText)) {
@@ -6726,7 +6901,10 @@ async function planTurn(io, sc) {
 			await answerVagueHajjInquiry(io, sc, st, userText);
 			return;
 		}
-		if (hotelContactDetailsQuestionText(userText)) {
+		if (
+			hotelContactDetailsQuestionText(userText) ||
+			hotelContactFollowupQuestionText(sc, userText)
+		) {
 			await answerHotelContactDetailsInquiry(io, sc, st, userText);
 			return;
 		}
