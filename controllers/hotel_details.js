@@ -88,6 +88,106 @@ const HOTEL_DETAILS_RESERVATION_DETAILS_SELECT = [
 	"roomCountDetails.monthly",
 ].join(" ");
 
+const HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS = [
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.room_type",
+	"roomCountDetails.count",
+	"roomCountDetails.price",
+	"roomCountDetails.photos",
+	"roomCountDetails.displayName",
+	"roomCountDetails.display_name",
+	"roomCountDetails.displayName_OtherLanguage",
+	"roomCountDetails.description",
+	"roomCountDetails.description_OtherLanguage",
+	"roomCountDetails.amenities",
+	"roomCountDetails.views",
+	"roomCountDetails.extraAmenities",
+	"roomCountDetails.pricedExtras",
+	"roomCountDetails.pricingRate",
+	"roomCountDetails.roomColor",
+	"roomCountDetails.activeRoom",
+	"roomCountDetails.commisionIncluded",
+	"roomCountDetails.refundPolicyDays",
+	"roomCountDetails.roomSize",
+	"roomCountDetails.defaultCost",
+	"roomCountDetails.roomCommission",
+	"roomCountDetails.bedsCount",
+	"roomCountDetails.roomForGender",
+	"roomCountDetails.offers",
+	"roomCountDetails.monthly",
+];
+
+const HOTEL_DETAILS_MANAGEMENT_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelCountry",
+	"hotelState",
+	"hotelCity",
+	"aboutHotel",
+	"aboutHotelArabic",
+	"phone",
+	"hotelAddress",
+	"hotelFloors",
+	"hotelRooms",
+	"overallRoomsCount",
+	"distances",
+	"hotelPhotos",
+	"hotelRating",
+	"parkingLot",
+	"hasBusService",
+	"busDetails",
+	"subscribed",
+	"acceptedTermsAndConditions",
+	"wholeSaleHotel",
+	"propertyType",
+	"pictures_testing",
+	"location_testing",
+	"rooms_pricing_testing",
+	"activateHotel",
+	"xHotelProActive",
+	"aiToRespond",
+	"currency",
+	"location",
+	"commission",
+	"guestPaymentAcceptance",
+	"paymentSettings",
+	"ownerPaymentMethods",
+	"belongsTo",
+	...HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS,
+	"createdAt",
+	"updatedAt",
+].join(" ");
+
+const HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelCountry",
+	"hotelState",
+	"hotelCity",
+	"hotelAddress",
+	"overallRoomsCount",
+	"distances",
+	"hotelRating",
+	"parkingLot",
+	"hasBusService",
+	"busDetails",
+	"wholeSaleHotel",
+	"propertyType",
+	"activateHotel",
+	"xHotelProActive",
+	"currency",
+	"commission",
+	"guestPaymentAcceptance",
+	"paymentSettings",
+	"belongsTo",
+	...HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS,
+	"createdAt",
+	"updatedAt",
+].join(" ");
+
 const isHotelDetailsSummaryRequest = (req = {}) => {
 	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
 	return ["summary", "lite", "compact"].includes(view);
@@ -96,6 +196,18 @@ const isHotelDetailsSummaryRequest = (req = {}) => {
 const isHotelDetailsReservationDetailsRequest = (req = {}) => {
 	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
 	return ["reservation-details", "reservation-detail", "details-modal"].includes(
+		view
+	);
+};
+
+const isHotelDetailsManagementRequest = (req = {}) => {
+	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
+	return ["management", "settings", "pms-management"].includes(view);
+};
+
+const isHotelDetailsReservationWorkspaceRequest = (req = {}) => {
+	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
+	return ["reservation-workspace", "new-reservation", "reservation"].includes(
 		view
 	);
 };
@@ -254,6 +366,9 @@ const getDeclaredRoomsTotal = (hotel = {}) => {
 	const directTotal = Number(hotel.overallRoomsCount || 0);
 	if (directTotal > 0) return directTotal;
 
+	const projectedTotal = Number(hotel.roomCountDetailsDeclaredCount || 0);
+	if (projectedTotal > 0) return projectedTotal;
+
 	return (hotel.roomCountDetails || []).reduce((total, room) => {
 		const possibleCount =
 			Number(room.count) ||
@@ -263,6 +378,37 @@ const getDeclaredRoomsTotal = (hotel = {}) => {
 			0;
 		return total + possibleCount;
 	}, 0);
+};
+
+const DASHBOARD_HOTEL_STATS_PROJECT = {
+	_id: 1,
+	hotelName: 1,
+	belongsTo: 1,
+	overallRoomsCount: 1,
+	activateHotel: 1,
+	xHotelProActive: 1,
+	location: 1,
+	aboutHotel: 1,
+	aboutHotelArabic: 1,
+	roomCountDetailsCount: { $size: { $ifNull: ["$roomCountDetails", []] } },
+	hotelPhotosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
+	paymentSettingsCount: { $size: { $ifNull: ["$paymentSettings", []] } },
+	roomCountDetailsDeclaredCount: {
+		$sum: {
+			$map: {
+				input: { $ifNull: ["$roomCountDetails", []] },
+				as: "room",
+				in: {
+					$convert: {
+						input: "$$room.count",
+						to: "double",
+						onError: 0,
+						onNull: 0,
+					},
+				},
+			},
+		},
+	},
 };
 
 const getHotelActivationChecklist = (hotel = {}) => {
@@ -327,6 +473,13 @@ const buildFinancialCycleRequiredDateFilter = () => ({
 });
 
 const buildDashboardOpenReservationFilter = buildOperationalOpenReservationFilter;
+
+const buildDashboardOpenReservationFilterForHotels = (hotelObjectIds = []) => ({
+	hotelId: { $in: hotelObjectIds },
+	checkout_date: { $lte: getTodayEnd() },
+	reservation_status: { $not: DONE_RESERVATION_STATUS },
+	...buildExcludePendingOtaReviewFilter(),
+});
 
 const buildDashboardFinancialReconciliationBranch = () => ({
 	$and: [
@@ -409,6 +562,11 @@ const executiveDateRange = (range = "all") => {
 	if (normalized === "last7") {
 		start.setDate(start.getDate() - 6);
 		return { range: "last7", from: start, to: end };
+	}
+
+	if (["last90", "last3months", "past3months"].includes(normalized)) {
+		start.setDate(start.getDate() - 89);
+		return { range: "last90", from: start, to: end };
 	}
 
 	return { range: "today", from: start, to: end };
@@ -1010,10 +1168,10 @@ const getDashboardAccessibleHotels = async (user = {}) => {
 	if (!user?._id) return [];
 
 	if (Number(user.role) === 1000 || isConfiguredSuperAdmin(user)) {
-		return HotelDetails.find({})
-			.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive")
-			.lean()
-			.exec();
+		return HotelDetails.aggregate([
+			{ $match: {} },
+			{ $project: DASHBOARD_HOTEL_STATS_PROJECT },
+		]).exec();
 	}
 
 	const scopedHotelIds = toValidObjectIds([
@@ -1033,12 +1191,10 @@ const getDashboardAccessibleHotels = async (user = {}) => {
 
 	if (!filters.length) return [];
 
-	const hotels = await HotelDetails.find(
-		filters.length === 1 ? filters[0] : { $or: filters }
-	)
-		.select("_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive")
-		.lean()
-		.exec();
+	const hotels = await HotelDetails.aggregate([
+		{ $match: filters.length === 1 ? filters[0] : { $or: filters } },
+		{ $project: DASHBOARD_HOTEL_STATS_PROJECT },
+	]).exec();
 
 	return hotels.filter((hotel) => canViewHotelStats(user, hotel));
 };
@@ -1050,12 +1206,21 @@ exports.hotelDetailsById = (req, res, next, id) => {
 
 	const summaryRequest = isHotelDetailsSummaryRequest(req);
 	const reservationDetailsRequest = isHotelDetailsReservationDetailsRequest(req);
+	const managementRequest = isHotelDetailsManagementRequest(req);
+	const reservationWorkspaceRequest =
+		isHotelDetailsReservationWorkspaceRequest(req);
 	const query = HotelDetails.findById(id);
 	if (summaryRequest) {
 		query.select(HOTEL_DETAILS_SUMMARY_SELECT).lean();
 	}
 	if (reservationDetailsRequest) {
 		query.select(HOTEL_DETAILS_RESERVATION_DETAILS_SELECT).lean();
+	}
+	if (managementRequest) {
+		query.select(HOTEL_DETAILS_MANAGEMENT_SELECT).lean();
+	}
+	if (reservationWorkspaceRequest) {
+		query.select(HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT).lean();
 	}
 
 	query.exec((err, hotelDetails) => {
@@ -1064,11 +1229,18 @@ exports.hotelDetailsById = (req, res, next, id) => {
 				error: "Hotel details were not found",
 			});
 		}
-		req.hotelDetails = summaryRequest || reservationDetailsRequest
+		const isLeanPayload =
+			summaryRequest ||
+			reservationDetailsRequest ||
+			managementRequest ||
+			reservationWorkspaceRequest;
+		req.hotelDetails = isLeanPayload
 			? {
 					...hotelDetails,
 					isHotelDetailsSummary: summaryRequest,
 					isReservationDetailsHotel: reservationDetailsRequest,
+					isHotelDetailsManagement: managementRequest,
+					isReservationWorkspaceHotel: reservationWorkspaceRequest,
 			  }
 			: hotelDetails;
 		next();
@@ -1218,8 +1390,11 @@ exports.hotelGeneralStats = async (req, res) => {
 		const availableRooms = Math.max(activeRooms - occupiedRooms, 0);
 		const inactiveRooms = Math.max(totalRooms - activeRooms, 0);
 
-		const photosDone = !!hotel?.hotelPhotos?.length;
-		const roomsDone = !!hotel?.roomCountDetails?.length;
+		const photosDone =
+			Number(hotel?.hotelPhotosCount || 0) > 0 || !!hotel?.hotelPhotos?.length;
+		const roomsDone =
+			Number(hotel?.roomCountDetailsCount || 0) > 0 ||
+			!!hotel?.roomCountDetails?.length;
 		const locationDone =
 			Array.isArray(hotel?.location?.coordinates) &&
 			hotel.location.coordinates[0] !== 0 &&
@@ -1227,7 +1402,9 @@ exports.hotelGeneralStats = async (req, res) => {
 		const dataDone = Boolean(
 			hotel?.aboutHotel || hotel?.aboutHotelArabic || hotel?.overallRoomsCount
 		);
-		const bankDone = !!hotel?.paymentSettings?.length;
+		const bankDone =
+			Number(hotel?.paymentSettingsCount || 0) > 0 ||
+			!!hotel?.paymentSettings?.length;
 		const settingsDone = roomsDone && photosDone && locationDone && dataDone;
 		const activationReady = roomsDone && photosDone && locationDone && dataDone;
 
@@ -1283,144 +1460,322 @@ exports.hotelGeneralStats = async (req, res) => {
 	}
 };
 
-exports.managerExecutiveSummary = async (req, res) => {
-	try {
-		const period = executiveDateRange(req.query?.range || "all");
-		const dateBy = normalizeExecutiveDateField(req.query?.dateBy || "createdAt");
-		const hotels = await getDashboardAccessibleHotels(req.profile);
-		const hotelObjectIds = hotels
-			.map((hotel) => hotel._id)
-			.filter(Boolean)
-			.map((id) => mongoose.Types.ObjectId(id));
+const groupedCountMap = (rows = []) => {
+	const map = new Map();
+	rows.forEach((row) => {
+		map.set(normalizeId(row._id), Number(row.count || 0));
+	});
+	return map;
+};
 
-		if (!hotelObjectIds.length) {
-			return res.json({
-				asOf: new Date(),
-				period: {
-					reservationsFrom: null,
-					reservationsTo: new Date(),
-					range: period.range,
-					dateBy,
-				},
-				stats: {
-					totalHotels: 0,
-					totalRooms: 0,
-					availableRooms: 0,
-					reservationsPastThreeMonths: 0,
-					incompleteReservations: 0,
-				},
-			});
-		}
+const groupedSourceMap = (rows = []) => {
+	const map = new Map();
+	rows.forEach((row) => {
+		const hotelId = normalizeId(row._id?.hotelId);
+		if (!hotelId) return;
+		if (!map.has(hotelId)) map.set(hotelId, []);
+		map.get(hotelId).push({
+			source: row._id?.source || "Unknown",
+			count: Number(row.count || 0),
+		});
+	});
+	map.forEach((sources, hotelId) => {
+		sources.sort((left, right) => {
+			if (right.count !== left.count) return right.count - left.count;
+			return String(left.source).localeCompare(String(right.source));
+		});
+		map.set(hotelId, sources.slice(0, 5));
+	});
+	return map;
+};
 
-		const now = new Date();
-		const startOfDay = new Date(now);
-		startOfDay.setHours(0, 0, 0, 0);
-		const endOfDay = new Date(now);
-		endOfDay.setHours(23, 59, 59, 999);
-		const todayReservationFilter = {
-			hotelId: { $in: hotelObjectIds },
-			checkin_date: { $lte: endOfDay },
-			checkout_date: { $gte: startOfDay },
-			reservation_status: { $not: DONE_RESERVATION_STATUS },
-			...buildPendingConfirmationExclusionFilter(),
-			...buildExcludePendingOtaReviewFilter(),
-		};
-		const recentReservationFilter = buildExecutiveReservationFilterForHotels(
-			hotelObjectIds,
-			{
+const getManagerDashboardStatsBulkPayload = async ({
+	actor,
+	range = "all",
+	dateBy = "createdAt",
+} = {}) => {
+	const period = executiveDateRange(range);
+	const normalizedDateBy = normalizeExecutiveDateField(dateBy);
+	const hotels = await getDashboardAccessibleHotels(actor);
+	const hotelObjectIds = hotels
+		.map((hotel) => hotel._id)
+		.filter(Boolean)
+		.map((id) => mongoose.Types.ObjectId(id));
+	const now = new Date();
+
+	if (!hotelObjectIds.length) {
+		const emptySummary = {
+			asOf: now,
+			period: {
+				reservationsFrom: null,
+				reservationsTo: now,
 				range: period.range,
-				dateBy,
-			}
-		);
-		const incompleteReservationFilter =
-			buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds);
-		addHotelManagementReservationVisibilityToFilter(
-			todayReservationFilter,
-			req.profile
-		);
-		addHotelManagementReservationVisibilityToFilter(
-			recentReservationFilter,
-			req.profile
-		);
-		addHotelManagementReservationVisibilityToFilter(
-			incompleteReservationFilter,
-			req.profile
-		);
-		const [rooms, todayReservations, recentReservations, incompleteReservations] =
-			await Promise.all([
-				Rooms.find({ hotelId: { $in: hotelObjectIds } })
-					.select("_id hotelId active activeRoom")
-					.lean()
-					.exec(),
-				Reservations.find(todayReservationFilter)
-					.select("hotelId roomId reservation_status")
-					.lean()
-					.exec(),
-				Reservations.countDocuments(recentReservationFilter),
-				Reservations.countDocuments(incompleteReservationFilter),
-			]);
-
-		const roomsByHotel = new Map();
-		rooms.forEach((room) => {
-			const hotelId = normalizeId(room.hotelId);
-			if (!roomsByHotel.has(hotelId)) roomsByHotel.set(hotelId, []);
-			roomsByHotel.get(hotelId).push(room);
-		});
-
-		const occupiedByHotel = new Map();
-		todayReservations.forEach((reservation) => {
-			const hotelId = normalizeId(reservation.hotelId);
-			if (!occupiedByHotel.has(hotelId)) occupiedByHotel.set(hotelId, new Set());
-			const occupiedSet = occupiedByHotel.get(hotelId);
-			extractReservationRoomIds(reservation.roomId).forEach((roomId) => {
-				if (roomId) occupiedSet.add(roomId);
-			});
-		});
-
-		const totals = hotels.reduce(
-			(acc, hotel) => {
-				const hotelId = normalizeId(hotel._id);
-				const hotelRooms = roomsByHotel.get(hotelId) || [];
-				const physicalRoomsTotal = hotelRooms.length;
-				const declaredRoomsTotal = getDeclaredRoomsTotal(hotel);
-				const totalRooms = physicalRoomsTotal || declaredRoomsTotal;
-				const activeRoomsList = hotelRooms.filter(
-					(room) => room.active !== false && room.activeRoom !== false
-				);
-				const activeRooms = physicalRoomsTotal
-					? activeRoomsList.length
-					: declaredRoomsTotal;
-				const activeRoomIds = new Set(
-					activeRoomsList.map((room) => normalizeId(room._id))
-				);
-				const rawOccupied = occupiedByHotel.get(hotelId) || new Set();
-				const occupiedRooms = activeRoomIds.size
-					? [...rawOccupied].filter((roomId) => activeRoomIds.has(roomId)).length
-					: Math.min(rawOccupied.size, activeRooms);
-
-				acc.totalRooms += totalRooms;
-				acc.availableRooms += Math.max(activeRooms - occupiedRooms, 0);
-				return acc;
+				dateBy: normalizedDateBy,
 			},
-			{ totalRooms: 0, availableRooms: 0 }
-		);
+			stats: {
+				totalHotels: 0,
+				totalRooms: 0,
+				availableRooms: 0,
+				reservationsPastThreeMonths: 0,
+				incompleteReservations: 0,
+			},
+		};
+		return {
+			...emptySummary,
+			summary: emptySummary,
+			hotelStatsById: {},
+			hotels: [],
+		};
+	}
 
-		return res.json({
+	const startOfDay = new Date(now);
+	startOfDay.setHours(0, 0, 0, 0);
+	const endOfDay = new Date(now);
+	endOfDay.setHours(23, 59, 59, 999);
+
+	const todayReservationFilter = {
+		hotelId: { $in: hotelObjectIds },
+		checkin_date: { $lte: endOfDay },
+		checkout_date: { $gte: startOfDay },
+		reservation_status: { $not: DONE_RESERVATION_STATUS },
+		...buildPendingConfirmationExclusionFilter(),
+		...buildExcludePendingOtaReviewFilter(),
+	};
+	const recentReservationFilter = buildExecutiveReservationFilterForHotels(
+		hotelObjectIds,
+		{
+			range: period.range,
+			dateBy: normalizedDateBy,
+		}
+	);
+	const openReservationFilter =
+		buildDashboardOpenReservationFilterForHotels(hotelObjectIds);
+	const incompleteReservationFilter =
+		buildDashboardIncompleteReservationFilterForHotels(hotelObjectIds);
+
+	addHotelManagementReservationVisibilityToFilter(
+		todayReservationFilter,
+		actor
+	);
+	addHotelManagementReservationVisibilityToFilter(
+		recentReservationFilter,
+		actor
+	);
+	addHotelManagementReservationVisibilityToFilter(
+		openReservationFilter,
+		actor
+	);
+	addHotelManagementReservationVisibilityToFilter(
+		incompleteReservationFilter,
+		actor
+	);
+
+	const [
+		rooms,
+		todayReservations,
+		recentCounts,
+		openCounts,
+		incompleteCounts,
+		sourceCounts,
+	] = await Promise.all([
+		Rooms.find({ hotelId: { $in: hotelObjectIds } })
+			.select("_id hotelId active activeRoom cleanRoom room_type display_name")
+			.lean()
+			.exec(),
+		Reservations.find(todayReservationFilter)
+			.select("hotelId roomId reservation_status")
+			.lean()
+			.exec(),
+		Reservations.aggregate([
+			{ $match: recentReservationFilter },
+			{ $group: { _id: "$hotelId", count: { $sum: 1 } } },
+		]),
+		Reservations.aggregate([
+			{ $match: openReservationFilter },
+			{ $group: { _id: "$hotelId", count: { $sum: 1 } } },
+		]),
+		Reservations.aggregate([
+			{ $match: incompleteReservationFilter },
+			{ $group: { _id: "$hotelId", count: { $sum: 1 } } },
+		]),
+		Reservations.aggregate([
+			{ $match: recentReservationFilter },
+			{
+				$group: {
+					_id: {
+						hotelId: "$hotelId",
+						source: { $ifNull: ["$booking_source", "Unknown"] },
+					},
+					count: { $sum: 1 },
+				},
+			},
+		]),
+	]);
+
+	const roomsByHotel = new Map();
+	rooms.forEach((room) => {
+		const hotelId = normalizeId(room.hotelId);
+		if (!roomsByHotel.has(hotelId)) roomsByHotel.set(hotelId, []);
+		roomsByHotel.get(hotelId).push(room);
+	});
+
+	const activeReservationsByHotel = new Map();
+	const occupiedByHotel = new Map();
+	todayReservations.forEach((reservation) => {
+		const hotelId = normalizeId(reservation.hotelId);
+		activeReservationsByHotel.set(
+			hotelId,
+			Number(activeReservationsByHotel.get(hotelId) || 0) + 1
+		);
+		if (!occupiedByHotel.has(hotelId)) occupiedByHotel.set(hotelId, new Set());
+		const occupiedSet = occupiedByHotel.get(hotelId);
+		extractReservationRoomIds(reservation.roomId).forEach((roomId) => {
+			if (roomId) occupiedSet.add(roomId);
+		});
+	});
+
+	const recentByHotel = groupedCountMap(recentCounts);
+	const openByHotel = groupedCountMap(openCounts);
+	const incompleteByHotel = groupedCountMap(incompleteCounts);
+	const sourcesByHotel = groupedSourceMap(sourceCounts);
+	const hotelStatsById = {};
+	let totalRoomsAll = 0;
+	let availableRoomsAll = 0;
+	let totalReservationsAll = 0;
+	let incompleteReservationsAll = 0;
+
+	hotels.forEach((hotel) => {
+		const hotelId = normalizeId(hotel._id);
+		const hotelRooms = roomsByHotel.get(hotelId) || [];
+		const physicalRoomsTotal = hotelRooms.length;
+		const declaredRoomsTotal = getDeclaredRoomsTotal(hotel);
+		const totalRooms = physicalRoomsTotal || declaredRoomsTotal;
+		const activeRoomsList = hotelRooms.filter(
+			(room) => room.active !== false && room.activeRoom !== false
+		);
+		const activeRooms = physicalRoomsTotal
+			? activeRoomsList.length
+			: declaredRoomsTotal;
+		const activeRoomIds = new Set(
+			activeRoomsList.map((room) => normalizeId(room._id))
+		);
+		const rawOccupied = occupiedByHotel.get(hotelId) || new Set();
+		const occupiedRooms = activeRoomIds.size
+			? [...rawOccupied].filter((roomId) => activeRoomIds.has(roomId)).length
+			: Math.min(rawOccupied.size, activeRooms);
+		const availableRooms = Math.max(activeRooms - occupiedRooms, 0);
+		const inactiveRooms = Math.max(totalRooms - activeRooms, 0);
+		const totalReservations = Number(recentByHotel.get(hotelId) || 0);
+		const openReservations = Number(openByHotel.get(hotelId) || 0);
+		const uncompleted = Number(incompleteByHotel.get(hotelId) || 0);
+		const photosDone =
+			Number(hotel?.hotelPhotosCount || 0) > 0 || !!hotel?.hotelPhotos?.length;
+		const roomsDone =
+			Number(hotel?.roomCountDetailsCount || 0) > 0 ||
+			!!hotel?.roomCountDetails?.length;
+		const locationDone =
+			Array.isArray(hotel?.location?.coordinates) &&
+			hotel.location.coordinates[0] !== 0 &&
+			hotel.location.coordinates[1] !== 0;
+		const dataDone = Boolean(
+			hotel?.aboutHotel || hotel?.aboutHotelArabic || hotel?.overallRoomsCount
+		);
+		const bankDone =
+			Number(hotel?.paymentSettingsCount || 0) > 0 ||
+			!!hotel?.paymentSettings?.length;
+		const bookingSources = sourcesByHotel.get(hotelId) || [];
+		const statsPayload = {
+			hotelId,
 			asOf: now,
 			period: {
 				reservationsFrom: period.from,
 				reservationsTo: period.to || now,
 				range: period.range,
-				dateBy,
+				dateBy: normalizedDateBy,
+			},
+			setup: {
+				roomsDone,
+				photosDone,
+				locationDone,
+				dataDone,
+				bankDone,
+				settingsDone: roomsDone && photosDone && locationDone && dataDone,
+				activationReady: roomsDone && photosDone && locationDone && dataDone,
+				activeHotel:
+					hotel.activateHotel === true && hotel.xHotelProActive !== false,
+				ownerActivatedHotel: hotel.activateHotel === true,
+				xHotelProActive: hotel.xHotelProActive !== false,
 			},
 			stats: {
-				totalHotels: hotels.length,
-				totalRooms: totals.totalRooms,
-				availableRooms: totals.availableRooms,
-				reservationsPastThreeMonths: recentReservations,
-				incompleteReservations,
+				totalRooms,
+				activeRooms,
+				availableRooms,
+				occupiedRooms,
+				inactiveRooms,
+				totalReservations,
+				activeReservations: Number(activeReservationsByHotel.get(hotelId) || 0),
+				nonDoneReservations: openReservations,
+				openReservations,
+				uncompletedReservations: uncompleted,
+				bookingSources: shouldMaskHotelManagementReservationSource(actor)
+					? maskBookingSourceSummaryRowsForHotelManagement(bookingSources)
+					: bookingSources,
 			},
+		};
+		hotelStatsById[hotelId] = statsPayload;
+		totalRoomsAll += totalRooms;
+		availableRoomsAll += availableRooms;
+		totalReservationsAll += totalReservations;
+		incompleteReservationsAll += uncompleted;
+	});
+
+	const summary = {
+		asOf: now,
+		period: {
+			reservationsFrom: period.from,
+			reservationsTo: period.to || now,
+			range: period.range,
+			dateBy: normalizedDateBy,
+		},
+		stats: {
+			totalHotels: hotels.length,
+			totalRooms: totalRoomsAll,
+			availableRooms: availableRoomsAll,
+			reservationsPastThreeMonths: totalReservationsAll,
+			incompleteReservations: incompleteReservationsAll,
+		},
+	};
+
+	return {
+		...summary,
+		summary,
+		hotelStatsById,
+		hotels: Object.values(hotelStatsById),
+	};
+};
+
+exports.managerDashboardStatsBulk = async (req, res) => {
+	try {
+		const payload = await getManagerDashboardStatsBulkPayload({
+			actor: req.profile,
+			range: req.query?.range || "all",
+			dateBy: req.query?.dateBy || "createdAt",
 		});
+		return res.json(payload);
+	} catch (err) {
+		console.error("managerDashboardStatsBulk error:", err);
+		return res.status(500).json({ error: "Could not load dashboard stats" });
+	}
+};
+
+exports.managerExecutiveSummary = async (req, res) => {
+	try {
+		const payload = await getManagerDashboardStatsBulkPayload({
+			actor: req.profile,
+			range: req.query?.range || "all",
+			dateBy: req.query?.dateBy || "createdAt",
+		});
+		return res.json(payload.summary || payload);
 	} catch (err) {
 		console.error("managerExecutiveSummary error:", err);
 		return res.status(500).json({ error: "Could not load executive summary" });

@@ -134,6 +134,96 @@ const ROLE_BY_DESCRIPTION = {
 const USER_AUTH_SELECT =
 	"_id name email emailIsPlaceholder phone companyName agentCommercialModel agentOpeningWalletCredit agentWalletOpeningBalances priceVariantAssignments agentPayoutDetails role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo agentApproval applicationReview";
 
+const USER_ACCOUNT_DASHBOARD_SELECT =
+	"_id name email emailIsPlaceholder phone companyName role roleDescription roles roleDescriptions activePoints activeUser employeeImage userRole userBranch userStore hotelIdWork belongsToId hotelIdsWork hotelIdsOwner hotelsToSupport accessTo";
+
+const isDashboardAccountRequest = (req = {}) => {
+	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
+	return [
+		"dashboard",
+		"dashboard-hotels",
+		"hotel-list",
+		"hotels-list",
+		"calendar-hotels",
+		"management-list",
+	].includes(view);
+};
+
+const uniqueObjectIds = (values = []) => {
+	const ids = [
+		...new Set(
+			(Array.isArray(values) ? values : [values])
+				.map((value) =>
+					typeof value === "object" ? value?._id || value?.id : value
+				)
+				.map((value) => String(value || "").trim())
+				.filter((value) => mongoose.Types.ObjectId.isValid(value))
+		),
+	];
+	return ids.map((id) => mongoose.Types.ObjectId(id));
+};
+
+const loadCompactOwnerHotels = async (accountId, ownerHotelIds = []) => {
+	const accountObjectId = mongoose.Types.ObjectId(accountId);
+	const ownerObjectIds = uniqueObjectIds(ownerHotelIds);
+	const match =
+		ownerObjectIds.length > 0
+			? {
+					$or: [
+						{ _id: { $in: ownerObjectIds } },
+						{ belongsTo: accountObjectId },
+					],
+			  }
+			: { belongsTo: accountObjectId };
+	const preferredOrder = new Map(
+		ownerObjectIds.map((id, index) => [String(id), index])
+	);
+
+	const hotels = await HotelDetails.aggregate([
+		{ $match: match },
+		{
+			$project: {
+				hotelName: 1,
+				hotelName_OtherLanguage: 1,
+				hotelCountry: 1,
+				hotelState: 1,
+				hotelCity: 1,
+				hotelAddress: 1,
+				hotelFloors: 1,
+				propertyType: 1,
+				phone: 1,
+				belongsTo: 1,
+				overallRoomsCount: 1,
+				aboutHotel: 1,
+				aboutHotelArabic: 1,
+				location: 1,
+				activateHotel: 1,
+				xHotelProActive: 1,
+				createdAt: 1,
+				updatedAt: 1,
+				roomCountDetailsCount: {
+					$size: { $ifNull: ["$roomCountDetails", []] },
+				},
+				hotelPhotosCount: { $size: { $ifNull: ["$hotelPhotos", []] } },
+				paymentSettingsCount: {
+					$size: { $ifNull: ["$paymentSettings", []] },
+				},
+			},
+		},
+	]);
+
+	return hotels.sort((left, right) => {
+		const leftOrder = preferredOrder.has(String(left._id))
+			? preferredOrder.get(String(left._id))
+			: Number.MAX_SAFE_INTEGER;
+		const rightOrder = preferredOrder.has(String(right._id))
+			? preferredOrder.get(String(right._id))
+			: Number.MAX_SAFE_INTEGER;
+		if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+		return String(left.hotelName || "").localeCompare(String(right.hotelName || ""));
+	});
+};
+
 const buildAuthUserPayload = (user = {}) => ({
 	_id: user._id,
 	email: user.email,
@@ -728,21 +818,41 @@ exports.updateUserByAdmin = async (req, res) => {
 
 /* ───────────────────── Extra endpoints you already have ───────────────────── */
 
-exports.getSingleUser = (req, res) => {
+exports.getSingleUser = async (req, res) => {
 	const { accountId } = req.params;
 	if (!isValidObjectId(accountId)) {
 		return res.status(400).json({ error: "Invalid account id" });
 	}
 	const belongsTo = mongoose.Types.ObjectId(accountId);
 
-	User.findOne({ _id: belongsTo })
-		.populate("hotelIdsOwner")
-		.exec((err, user) => {
-			if (err || !user) {
+	try {
+		if (isDashboardAccountRequest(req)) {
+			const user = await User.findOne({ _id: belongsTo })
+				.select(USER_ACCOUNT_DASHBOARD_SELECT)
+				.lean()
+				.exec();
+			if (!user) {
 				return res.status(400).json({ error: "User not found" });
 			}
-			res.json(sanitizeUserForResponse(user));
-		});
+			user.hotelIdsOwner = await loadCompactOwnerHotels(
+				accountId,
+				user.hotelIdsOwner || []
+			);
+			return res.json(sanitizeUserForResponse(user));
+		}
+
+		User.findOne({ _id: belongsTo })
+			.populate("hotelIdsOwner")
+			.exec((err, user) => {
+				if (err || !user) {
+					return res.status(400).json({ error: "User not found" });
+				}
+				res.json(sanitizeUserForResponse(user));
+			});
+	} catch (err) {
+		console.error("getSingleUser error:", err);
+		return res.status(500).json({ error: "Could not load account data" });
+	}
 };
 
 exports.houseKeepingStaff = async (req, res) => {

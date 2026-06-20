@@ -25,6 +25,7 @@ const {
 	listForAdminAll,
 	reassignHotelOwner,
 	hotelGeneralStats,
+	managerDashboardStatsBulk,
 	managerExecutiveSummary,
 	managerIncompleteReservations,
 	hotelOpenReservations,
@@ -34,6 +35,13 @@ const {
 	setOwnerDefaultPaymentMethod,
 	removeOwnerPaymentMethod,
 } = require("../controllers/hotel_details");
+
+router.get(
+	"/hotel-details/stats/bulk/:userId",
+	requireSignin,
+	isAuth,
+	managerDashboardStatsBulk
+);
 
 router.get(
 	"/hotel-details/stats/:hotelId/:userId",
