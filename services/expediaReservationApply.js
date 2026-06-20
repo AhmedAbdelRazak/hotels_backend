@@ -9,6 +9,9 @@ const {
 	normalizeConfirmation,
 	normalizeStatusToApply,
 } = require("./otaReservationMapper");
+const {
+	getExpediaCandidateLookupValues,
+} = require("./expediaReservationIdentity");
 
 const activeApplyJobs = new Set();
 const WRITTEN_STATUSES = new Set([
@@ -38,21 +41,7 @@ const normalizePaymentCollectionModel = (value = "") => {
 };
 
 const candidateLookupValues = (candidate = {}) =>
-	Array.from(
-		new Set(
-			[
-				candidate.confirmationNumber,
-				candidate.reservationId,
-				candidate.hotelConfirmationNumber,
-				candidate.itineraryNumber,
-				...(Array.isArray(candidate.alternateConfirmationNumbers)
-					? candidate.alternateConfirmationNumbers
-					: []),
-			]
-				.map(normalizeConfirmation)
-				.filter(Boolean)
-		)
-	);
+	getExpediaCandidateLookupValues(candidate);
 
 const findExistingForCandidate = async (candidate = {}) => {
 	const lookups = candidateLookupValues(candidate);

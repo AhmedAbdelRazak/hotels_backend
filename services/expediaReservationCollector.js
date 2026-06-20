@@ -16,6 +16,10 @@ const {
 	normalizeConfirmation,
 	getSarConversionMeta,
 } = require("./otaReservationMapper");
+const {
+	getExpediaCandidateLookupValues,
+	isReliableExpediaHotelConfirmation,
+} = require("./expediaReservationIdentity");
 
 const DEFAULT_LOGIN_URL =
 	"https://expediapartnercentral.com/Account/Logon?returnUrl=https%3A%2F%2Fapps.expediapartnercentral.com%2Fmanageproperty%2FManageProperty";
@@ -1587,6 +1591,33 @@ const lineValueAfter = (lines = [], pattern, maxLookahead = 4) => {
 	return "";
 };
 
+const lineConfirmationValueAfter = (lines = [], pattern, maxLookahead = 4) => {
+	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = normalizeLine(lines[index]);
+		if (!regex.test(line)) continue;
+		const sameLineCandidates = confirmationCandidatesFromText(line).filter(
+			(value) => !regex.test(value)
+		);
+		if (sameLineCandidates.length) return sameLineCandidates[0];
+		for (
+			let valueIndex = index + 1;
+			valueIndex < Math.min(lines.length, index + 1 + maxLookahead);
+			valueIndex += 1
+		) {
+			const value = normalizeLine(lines[valueIndex]);
+			if (!value || regex.test(value)) continue;
+			if (/^(?:submit|edit|not provided|n\/?a|none|null|-+)$/i.test(value)) {
+				continue;
+			}
+			if (EXPEDIA_DETAIL_VALUE_STOP_PATTERN.test(value)) break;
+			const candidates = confirmationCandidatesFromText(value);
+			if (candidates.length) return candidates[0];
+		}
+	}
+	return "";
+};
+
 const moneyAfterLine = (lines = [], pattern, fallbackCurrency = "", maxLookahead = 5) => {
 	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern, "i");
 	for (let index = 0; index < lines.length; index += 1) {
@@ -1885,14 +1916,20 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 				candidate.reservationId ||
 				candidate.confirmationNumber
 		) || "";
-	const hotelConfirmationRaw = lineValueAfter(
+	const hotelConfirmationRaw = lineConfirmationValueAfter(
 		lines,
 		/^Hotel confirmation code$/i,
-		3
+		4
 	);
+	const candidateHotelConfirmationNumber = isReliableExpediaHotelConfirmation(
+		candidate,
+		candidate.hotelConfirmationNumber
+	)
+		? normalizeConfirmation(candidate.hotelConfirmationNumber)
+		: "";
 	const hotelConfirmationNumber =
 		normalizeConfirmation(confirmationCandidatesFromText(hotelConfirmationRaw)[0]) ||
-		candidate.hotelConfirmationNumber ||
+		candidateHotelConfirmationNumber ||
 		"";
 	const itineraryNumber = normalizeConfirmation(
 		lineValueAfter(lines, /^Itinerary number$/i, 2)
@@ -2001,12 +2038,17 @@ const parseExpediaReservationDetailText = (rawText = "", candidate = {}) => {
 		reservationId,
 		confirmationNumber: reservationId || candidate.confirmationNumber,
 		hotelConfirmationNumber,
+		hotelConfirmationNumberSource: hotelConfirmationRaw
+			? "detail_hotel_confirmation_code"
+			: candidate.hotelConfirmationNumberSource || "",
 		alternateConfirmationNumbers: [
 			hotelConfirmationNumber,
-			candidate.hotelConfirmationNumber,
 			itineraryNumber,
 		].filter(Boolean),
 		itineraryNumber,
+		itineraryNumberSource: itineraryNumber
+			? "detail_itinerary_number"
+			: candidate.itineraryNumberSource || "",
 		paymentRequestId,
 		statusRaw,
 		statusToApply: parseExpediaStatusToApply(statusRaw || candidate.statusRaw),
@@ -2095,6 +2137,34 @@ const guestNameBeforeReservationId = (text = "", reservationId = "") => {
 	return isLikelyGuestName(match?.[1]) ? normalizeLine(match[1]) : "";
 };
 
+const confirmationValueFromTableCell = (cell = "", reservationId = "") => {
+	const text = normalizeLine(cell);
+	if (!text) return "";
+	if (
+		/(recent|unconfirmed|confirmed|cancelled|canceled|no[-\s]?show|check[-\s]?in|check[-\s]?out|booked|booking|room|suite|bed|view|expedia|collect|usd|sar|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b|\b\d{1,2}\/\d{1,2}\/\d{2,4}\b)/i.test(
+			text
+		)
+	) {
+		return "";
+	}
+	const values = confirmationCandidatesFromText(text)
+		.map(normalizeConfirmation)
+		.filter((value) => value && value !== normalizeConfirmation(reservationId));
+	return values.length === 1 ? values[0] : "";
+};
+
+const hotelConfirmationFromRowCells = (cells = [], reservationCellIndex = -1, reservationId = "") => {
+	if (reservationCellIndex < 0) return { value: "", source: "" };
+	const nearbyCells = cells.slice(reservationCellIndex + 1, reservationCellIndex + 3);
+	for (const cell of nearbyCells) {
+		const value = confirmationValueFromTableCell(cell, reservationId);
+		if (value) {
+			return { value, source: "row_confirmation_cell" };
+		}
+	}
+	return { value: "", source: "" };
+};
+
 const parseReservationRowCandidate = (row, hotel, property) => {
 	const text = normalizeWhitespace(row.text || "");
 	if (!text || !/\b\d{8,16}\b/.test(text)) return null;
@@ -2109,12 +2179,15 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 	const reservationId = hrefReservationId || ids[0] || "";
 	if (!reservationId) return null;
 	const scopedText = scopedReservationText(text, reservationId);
-	const hotelConfirmationNumber =
-		ids.find((value) => value !== reservationId) || "";
 	const cells = Array.isArray(row.cells) ? row.cells.map(normalizeLine).filter(Boolean) : [];
 	const lines = Array.isArray(row.lines) ? row.lines.map(normalizeLine).filter(Boolean) : [];
 	const reservationCellIndex = cells.findIndex((cell) =>
 		cell.includes(reservationId)
+	);
+	const rowHotelConfirmation = hotelConfirmationFromRowCells(
+		cells,
+		reservationCellIndex,
+		reservationId
 	);
 	const guestName =
 		(reservationCellIndex > 0
@@ -2170,8 +2243,9 @@ const parseReservationRowCandidate = (row, hotel, property) => {
 		expediaPropertyName: property.name || "",
 		confirmationNumber: reservationId,
 		reservationId,
-		hotelConfirmationNumber,
-		alternateConfirmationNumbers: [hotelConfirmationNumber].filter(Boolean),
+		hotelConfirmationNumber: rowHotelConfirmation.value,
+		hotelConfirmationNumberSource: rowHotelConfirmation.source,
+		alternateConfirmationNumbers: [rowHotelConfirmation.value].filter(Boolean),
 		guestName: guestName || details.guestName || "",
 		checkinDate: dates[0]?.iso || "",
 		checkoutDate: dates[1]?.iso || "",
@@ -3245,21 +3319,7 @@ const resolveSelectedTargets = (job, selectedHotelIds = []) => {
 };
 
 const classifyCandidate = async (candidate) => {
-	const lookupValues = Array.from(
-		new Set(
-			[
-				candidate.confirmationNumber,
-				candidate.reservationId,
-				candidate.hotelConfirmationNumber,
-				candidate.itineraryNumber,
-				...(Array.isArray(candidate.alternateConfirmationNumbers)
-					? candidate.alternateConfirmationNumbers
-					: []),
-			]
-				.map(normalizeConfirmation)
-				.filter(Boolean)
-		)
-	);
+	const lookupValues = getExpediaCandidateLookupValues(candidate);
 	let existing = null;
 	let matchedLookupValue = "";
 	for (const lookupValue of lookupValues) {
@@ -4314,4 +4374,9 @@ module.exports = {
 	parsePropertiesFromText,
 	matchPropertiesToHotels,
 	confirmationCandidatesFromText,
+	__private: {
+		parseReservationRowCandidate,
+		parseExpediaReservationDetailText,
+		lineConfirmationValueAfter,
+	},
 };

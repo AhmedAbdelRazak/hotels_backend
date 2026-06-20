@@ -448,6 +448,31 @@ Follow-up payout capture hardening:
   reservation `2485791085`, that payload exposed `Total guest payment`
   `132.62 USD` and `Your total payout` `101.12 USD`.
 
+## 2026-06-20 AlSukareya row identity hardening
+
+Production preview job `OTA-RES-SYNC-20260620062847-KG5LQ` did read Expedia
+reservation `2487038094` for guest `JAMIU MAJOLAGBE` under `AlSukareya HOTEL`,
+but the preview incorrectly placed it in `matchedExisting`. The row/detail
+candidate carried an unrelated neighboring reservation number, `2474052067`, as
+`hotelConfirmationNumber`; duplicate protection then matched the wrong PMS
+reservation before the new candidate could appear.
+
+The collector and apply guard now share stricter Expedia identity rules:
+
+- Expedia reservation ID remains the primary identity.
+- Hotel confirmation numbers are accepted only from a clear table confirmation
+  cell or a labeled detail value such as `Hotel confirmation code`.
+- Detail values such as `Submit`, `Edit`, or empty placeholders are ignored.
+- Itinerary numbers are accepted only when they are labeled as `Itinerary
+  number`.
+- Unlabeled alternate numbers from broad DOM containers are ignored during both
+  preview classification and Save Safe Writes.
+
+Read-only verification against the old preview payload showed the bad lookup
+`2474052067` is no longer used; with the new rules JAMIU is checked by
+`2487038094` and labeled itinerary `72075643558909`, neither of which exists in
+PMS at the time of the audit.
+
 ## Production correction reference
 
 Two Expedia reservations previously saved before payout parsing was tightened
