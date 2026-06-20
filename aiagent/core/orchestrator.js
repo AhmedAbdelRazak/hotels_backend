@@ -5323,15 +5323,31 @@ function reservationLinks(reservation) {
 	};
 }
 
+function reservationArrivalDateText(sc, st, reservation = {}) {
+	const source = st.slots?.checkinISO || reservation.checkin_date || "";
+	const iso =
+		typeof source === "string" && /^\d{4}-\d{2}-\d{2}/.test(source)
+			? source.slice(0, 10)
+			: isoDate(source);
+	return iso ? localizedGregorianDate(iso, languageOf(sc, st)) : "";
+}
+
 function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	const lang = languageOf(sc, st);
 	const confirmation = reservation.confirmation_number;
 	const currency = cleanCurrency(quoteData?.currency || "SAR");
 	const total = reservation.total_amount;
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const arrivalDate = reservationArrivalDateText(sc, st, reservation);
+	const totalDisplay = /arabic/i.test(lang)
+		? localizedMoney(total, currency, lang)
+		: `${total} ${currency}`;
 	if (/arabic/i.test(lang)) {
 		return [
-			`\u062a\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
-			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${total} ${currency}**.`,
+			`${name}\u060c \u062a\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
+			`\u0634\u0643\u0631\u0627 \u0644\u0627\u062e\u062a\u064a\u0627\u0631\u0643 **${hotelName}** \ud83c\udf38 ${arrivalDate ? `\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u064a\u0648\u0645 **${arrivalDate}**.` : "\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u0642\u0631\u064a\u0628\u0627."}`,
+			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${totalDisplay}**.`,
 			`[\u0627\u0636\u063a\u0637 \u0647\u0646\u0627 \u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u0632\u064a\u062f \u0645\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644](${links.reservationDetails})`,
 			`[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`,
 			"\u0647\u0644 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0623\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f",
@@ -5339,25 +5355,96 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	}
 	if (/spanish/i.test(lang)) {
 		return [
-			`La reserva esta confirmada correctamente. Numero de confirmacion: **${confirmation}**.`,
-			`Total: **${total} ${currency}**.`,
-			`[Please click here to find more details](${links.reservationDetails})`,
-			`[Payment link](${links.payment})`,
-			"Is there anything else I can help you with?",
+			`${name}, la reserva esta confirmada correctamente. Numero de confirmacion: **${confirmation}**.`,
+			`Gracias por elegir **${hotelName}** \ud83c\udf38 ${
+				arrivalDate
+					? `Esperamos recibirte el **${arrivalDate}**.`
+					: "Esperamos recibirte pronto."
+			}`,
+			`Total: **${totalDisplay}**.`,
+			`[Ver detalles de la reserva](${links.reservationDetails})`,
+			`[Enlace de pago](${links.payment})`,
+			"Hay algo mas en lo que pueda ayudarte?",
 		].join("\n");
 	}
 	if (/french/i.test(lang)) {
 		return [
-			`La reservation est confirmee avec succes. Numero de confirmation : **${confirmation}**.`,
-			`Total : **${total} ${currency}**.`,
-			`[Please click here to find more details](${links.reservationDetails})`,
-			`[Payment link](${links.payment})`,
-			"Is there anything else I can help you with?",
+			`${name}, la reservation est confirmee avec succes. Numero de confirmation : **${confirmation}**.`,
+			`Merci d'avoir choisi **${hotelName}** \ud83c\udf38 ${
+				arrivalDate
+					? `Nous avons hate de vous accueillir le **${arrivalDate}**.`
+					: "Nous avons hate de vous accueillir bientot."
+			}`,
+			`Total : **${totalDisplay}**.`,
+			`[Voir les details de la reservation](${links.reservationDetails})`,
+			`[Lien de paiement](${links.payment})`,
+			"Puis-je vous aider avec autre chose ?",
+		].join("\n");
+	}
+	if (/urdu/i.test(lang)) {
+		return [
+			`${name}، آپ کی بکنگ کامیابی سے تصدیق ہو گئی ہے۔ تصدیقی نمبر: **${confirmation}**.`,
+			`**${hotelName}** منتخب کرنے کا شکریہ 🌸 ${
+				arrivalDate
+					? `ہم **${arrivalDate}** کو آپ کا استقبال کرنے کے منتظر ہیں۔`
+					: "ہم جلد آپ کا استقبال کرنے کے منتظر ہیں۔"
+			}`,
+			`کل رقم: **${totalDisplay}**.`,
+			`[ریزرویشن کی تفصیلات](${links.reservationDetails})`,
+			`[ادائیگی کا لنک](${links.payment})`,
+			"کیا میں آپ کی کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟",
+		].join("\n");
+	}
+	if (/hindi/i.test(lang)) {
+		return [
+			`${name}, आपकी बुकिंग सफलतापूर्वक पुष्टि हो गई है। पुष्टि संख्या: **${confirmation}**.`,
+			`**${hotelName}** चुनने के लिए धन्यवाद 🌸 ${
+				arrivalDate
+					? `हम **${arrivalDate}** को आपका स्वागत करने के लिए उत्सुक हैं।`
+					: "हम जल्द आपका स्वागत करने के लिए उत्सुक हैं।"
+			}`,
+			`कुल राशि: **${totalDisplay}**.`,
+			`[बुकिंग विवरण](${links.reservationDetails})`,
+			`[भुगतान लिंक](${links.payment})`,
+			"क्या मैं आपकी किसी और चीज़ में मदद कर सकता/सकती हूं?",
+		].join("\n");
+	}
+	if (/indonesian/i.test(lang)) {
+		return [
+			`${name}, reservasi Anda sudah berhasil dikonfirmasi. Nomor konfirmasi: **${confirmation}**.`,
+			`Terima kasih sudah memilih **${hotelName}** \ud83c\udf38 ${
+				arrivalDate
+					? `Kami menantikan kedatangan Anda pada **${arrivalDate}**.`
+					: "Kami menantikan kedatangan Anda segera."
+			}`,
+			`Total: **${totalDisplay}**.`,
+			`[Detail reservasi](${links.reservationDetails})`,
+			`[Link pembayaran](${links.payment})`,
+			"Ada hal lain yang bisa saya bantu?",
+		].join("\n");
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return [
+			`${name}, tempahan anda telah berjaya disahkan. Nombor pengesahan: **${confirmation}**.`,
+			`Terima kasih kerana memilih **${hotelName}** \ud83c\udf38 ${
+				arrivalDate
+					? `Kami menantikan ketibaan anda pada **${arrivalDate}**.`
+					: "Kami menantikan ketibaan anda tidak lama lagi."
+			}`,
+			`Total: **${totalDisplay}**.`,
+			`[Butiran tempahan](${links.reservationDetails})`,
+			`[Pautan pembayaran](${links.payment})`,
+			"Ada apa-apa lagi yang boleh saya bantu?",
 		].join("\n");
 	}
 	return [
-		`Your reservation is confirmed. Confirmation number: **${confirmation}**.`,
-		`Total: **${total} ${currency}**.`,
+		`${name}, your reservation is confirmed. Confirmation number: **${confirmation}**.`,
+		`Thank you for choosing **${hotelName}** \ud83c\udf38 ${
+			arrivalDate
+				? `We look forward to welcoming you on **${arrivalDate}**.`
+				: "We look forward to welcoming you soon."
+		}`,
+		`Total: **${totalDisplay}**.`,
 		`[Please click here to find more details](${links.reservationDetails})`,
 		`[Payment link](${links.payment})`,
 		"Is there anything else I can help you with?",
