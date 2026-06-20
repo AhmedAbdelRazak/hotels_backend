@@ -2617,42 +2617,42 @@ function hotelBusServiceYesText(lang, name, details, next) {
 	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
 	if (/arabic/i.test(lang)) {
 		return detailText
-			? `${name}\u060c \u0646\u0639\u0645\u060c \u064a\u0648\u0641\u0631 \u0627\u0644\u0641\u0646\u062f\u0642 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635. \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642: ${detailText}. ${next}`
-			: `${name}\u060c \u0646\u0639\u0645\u060c \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062a\u0634\u064a\u0631 \u0625\u0644\u0649 \u062a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635\u060c \u0644\u0643\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062f\u0642\u064a\u0642\u0629 \u0644\u0645 \u062a\u0636\u0641 \u0628\u0639\u062f. ${next}`;
+			? `${name}\u060c \u0646\u0639\u0645\u060c \u0644\u062f\u064a\u0646\u0627 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u0644\u0644\u0636\u064a\u0648\u0641. ${detailText}. ${next}`
+			: `${name}\u060c \u0646\u0639\u0645\u060c \u0644\u062f\u064a\u0646\u0627 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u0644\u0644\u0636\u064a\u0648\u0641\u060c \u0648\u0633\u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u0623\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u062a\u062d\u062a\u0627\u062c\u0647\u0627 \u0644\u0644\u062d\u062c\u0632. ${next}`;
 	}
 	if (/spanish/i.test(lang)) {
 		return detailText
-			? `${name}, si, el hotel ofrece servicio de bus. Los detalles confirmados por el hotel: ${detailText}. ${next}`
-			: `${name}, si, el hotel indica que ofrece servicio de bus, pero el horario y los detalles exactos aun no estan agregados. ${next}`;
+			? `${name}, si, tenemos servicio de bus para los huespedes. ${detailText}. ${next}`
+			: `${name}, si, tenemos servicio de bus para los huespedes y puedo ayudarte aqui con los detalles de la reserva. ${next}`;
 	}
 	if (/french/i.test(lang)) {
 		return detailText
-			? `${name}, oui, l'hotel propose un service de bus. Les details confirmes par l'hotel : ${detailText}. ${next}`
-			: `${name}, oui, l'hotel indique proposer un service de bus, mais les horaires et details exacts ne sont pas encore ajoutes. ${next}`;
+			? `${name}, oui, nous avons un service de bus pour les clients. ${detailText}. ${next}`
+			: `${name}, oui, nous avons un service de bus pour les clients et je peux vous aider ici avec les details de la reservation. ${next}`;
 	}
 	if (/urdu/i.test(lang)) {
 		return detailText
-			? `${name}, ji haan, hotel bus service provide karta hai. Hotel ki confirmed details: ${detailText}. ${next}`
-			: `${name}, ji haan, hotel bus service listed hai, lekin exact schedule/details abhi add nahi kiye gaye. ${next}`;
+			? `${name}, ji haan, ham guests ke liye bus service provide karte hain. ${detailText}. ${next}`
+			: `${name}, ji haan, ham guests ke liye bus service provide karte hain aur reservation details mein yahin help kar sakte hain. ${next}`;
 	}
 	if (/hindi/i.test(lang)) {
 		return detailText
-			? `${name}, ji haan, hotel bus service provide karta hai. Hotel ki confirmed details: ${detailText}. ${next}`
-			: `${name}, ji haan, hotel bus service listed hai, lekin exact schedule/details abhi add nahi kiye gaye hain. ${next}`;
+			? `${name}, ji haan, hum guests ke liye bus service provide karte hain. ${detailText}. ${next}`
+			: `${name}, ji haan, hum guests ke liye bus service provide karte hain aur reservation details mein yahin help kar sakte hain. ${next}`;
 	}
 	if (/indonesian/i.test(lang)) {
 		return detailText
-			? `${name}, ya, hotel menyediakan layanan bus. Detail yang dikonfirmasi hotel: ${detailText}. ${next}`
-			: `${name}, ya, hotel mencantumkan layanan bus, tetapi jadwal dan detail pastinya belum ditambahkan. ${next}`;
+			? `${name}, ya, kami menyediakan layanan bus untuk tamu. ${detailText}. ${next}`
+			: `${name}, ya, kami menyediakan layanan bus untuk tamu dan saya bisa membantu detail reservasinya di sini. ${next}`;
 	}
 	if (/malay|malaysia/i.test(lang)) {
 		return detailText
-			? `${name}, ya, hotel menyediakan perkhidmatan bus. Butiran yang disahkan oleh hotel: ${detailText}. ${next}`
-			: `${name}, ya, hotel menyenaraikan perkhidmatan bus, tetapi jadual dan butiran tepat belum ditambah. ${next}`;
+			? `${name}, ya, kami menyediakan perkhidmatan bus untuk tetamu. ${detailText}. ${next}`
+			: `${name}, ya, kami menyediakan perkhidmatan bus untuk tetamu dan saya boleh bantu butiran tempahan di sini. ${next}`;
 	}
 	return detailText
-		? `${name}, yes, the hotel provides bus service. The hotel details say: ${detailText}. ${next}`
-		: `${name}, yes, the hotel lists a bus service, but the exact schedule and details have not been added yet. ${next}`;
+		? `${name}, yes, we provide bus service for guests. ${detailText}. ${next}`
+		: `${name}, yes, we provide bus service for guests, and I can help with the reservation details here. ${next}`;
 }
 
 function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
@@ -2660,27 +2660,27 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 		const walkingLine = walking
 			? ` ${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${walking} \u0645\u0634\u064a\u0627\u060c`
 			: "";
-		return `${name}\u060c \u0644\u0627\u060c \u0644\u0627 \u062a\u0638\u0647\u0631 \u0641\u064a \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u062e\u0627\u0635\u0629 \u062d\u0627\u0644\u064a\u0627.${walkingLine} \u0644\u0643\u0646 \u062a\u0648\u062c\u062f \u0628\u0627\u0635\u0627\u062a \u0639\u0627\u0645\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642 \u0648\u064a\u0645\u0643\u0646\u0647\u0627 \u0625\u064a\u0635\u0627\u0644 \u0627\u0644\u0636\u064a\u0648\u0641 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645. ${next}`;
+		return `${name}\u060c \u0644\u0627\u060c \u0644\u0627 \u0646\u0648\u0641\u0631 \u062d\u0627\u0644\u064a\u0627 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u062e\u0627\u0635\u0629.${walkingLine} \u0644\u0643\u0646 \u062a\u0648\u062c\u062f \u0628\u0627\u0635\u0627\u062a \u0639\u0627\u0645\u0629 \u0642\u0631\u064a\u0628\u0629 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642 \u0648\u064a\u0645\u0643\u0646\u0647\u0627 \u0625\u064a\u0635\u0627\u0644 \u0627\u0644\u0636\u064a\u0648\u0641 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645. ${next}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, no, el hotel no tiene actualmente un bus privado registrado.${walking ? ` ${hotelName} esta a unos ${walking} caminando de Al Haram,` : ""} pero hay buses publicos cerca del hotel que pueden llevar a los huespedes a Al Haram. ${next}`;
+		return `${name}, no, actualmente no ofrecemos un bus privado.${walking ? ` ${hotelName} esta a unos ${walking} caminando de Al Haram,` : ""} pero hay buses publicos cerca del hotel que pueden llevar a los huespedes a Al Haram. ${next}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, non, l'hotel n'a pas de bus prive indique actuellement.${walking ? ` ${hotelName} se trouve a environ ${walking} a pied d'Al Haram,` : ""} mais des bus publics sont disponibles pres de l'hotel et peuvent deposer les clients a Al Haram. ${next}`;
+		return `${name}, non, nous ne proposons pas actuellement de bus prive.${walking ? ` ${hotelName} se trouve a environ ${walking} a pied d'Al Haram,` : ""} mais des bus publics sont disponibles pres de l'hotel et peuvent deposer les clients a Al Haram. ${next}`;
 	}
 	if (/urdu/i.test(lang)) {
-		return `${name}, nahi, hotel ki private bus service abhi listed nahi hai.${walking ? ` ${hotelName} Al Haram se taqriban ${walking} paidal hai,` : ""} lekin public buses hotel ke qareeb available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
+		return `${name}, nahi, ham filhal private bus service provide nahi karte.${walking ? ` ${hotelName} Al Haram se taqriban ${walking} paidal hai,` : ""} lekin public buses hotel ke qareeb available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
 	}
 	if (/hindi/i.test(lang)) {
-		return `${name}, nahi, hotel ki private bus service abhi listed nahi hai.${walking ? ` ${hotelName} Al Haram se lagbhag ${walking} paidal hai,` : ""} lekin public buses hotel ke paas available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
+		return `${name}, nahi, hum filhal private bus service provide nahi karte.${walking ? ` ${hotelName} Al Haram se lagbhag ${walking} paidal hai,` : ""} lekin public buses hotel ke paas available hain aur guests ko Al Haram tak drop kar sakti hain. ${next}`;
 	}
 	if (/indonesian/i.test(lang)) {
-		return `${name}, tidak, hotel belum mencantumkan layanan bus pribadi saat ini.${walking ? ` ${hotelName} sekitar ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus umum tersedia dekat hotel dan dapat mengantar tamu ke Al Haram. ${next}`;
+		return `${name}, tidak, saat ini kami belum menyediakan layanan bus pribadi.${walking ? ` ${hotelName} sekitar ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus umum tersedia dekat hotel dan dapat mengantar tamu ke Al Haram. ${next}`;
 	}
 	if (/malay|malaysia/i.test(lang)) {
-		return `${name}, tidak, hotel belum menyenaraikan perkhidmatan bus khas buat masa ini.${walking ? ` ${hotelName} kira-kira ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus awam tersedia berhampiran hotel dan boleh menghantar tetamu ke Al Haram. ${next}`;
+		return `${name}, tidak, buat masa ini kami belum menyediakan perkhidmatan bus khas.${walking ? ` ${hotelName} kira-kira ${walking} berjalan kaki dari Al Haram,` : ""} tetapi bus awam tersedia berhampiran hotel dan boleh menghantar tetamu ke Al Haram. ${next}`;
 	}
-	return `${name}, no, the hotel does not currently list a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
+	return `${name}, no, we do not currently offer a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
 }
 
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
@@ -2772,7 +2772,27 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 
 async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	const previousWaitFor = st.waitFor || null;
-	let reply = selectedHotelFactAnswerText(sc, st, userText);
+	const shouldPolishBusDetails =
+		selectedHotelBusQuestionText(userText) &&
+		st.hotel?.hasBusService === true &&
+		Boolean(cleanHotelFactText(st.hotel?.busDetails));
+	let reply = "";
+	if (shouldPolishBusDetails) {
+		reply = await write(
+			io,
+			sc,
+			st,
+			"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with one natural booking next step. Do not mention Jannat Booking or any other hotel.",
+			{
+				latestUserMessage: userText,
+				selectedHotelFacts: buildActiveHotelFacts(sc, st),
+				rawBusDetails: cleanHotelFactText(st.hotel?.busDetails),
+				nextStep: nextPivot(st),
+			}
+		);
+	} else {
+		reply = selectedHotelFactAnswerText(sc, st, userText);
+	}
 	if (!reply) {
 		reply = await write(
 			io,
@@ -5342,13 +5362,16 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified facts for "${hotelName}". If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			: "",
+		activeHotelFacts
+			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
 			: "",
 		activeHotelFacts
 			? `If activeHotelFacts.distances has walkingToElHaram or drivingToElHaram and the guest asks how far the hotel is from Al Haram, say the walking/driving minutes directly and naturally. Do not deflect to review, dates, phone, email, or confirmation before answering the distance.`
 			: "",
 		activeHotelFacts
-			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes and use busDetails as the hotel-owned details without inventing schedules, stations, or timing. If hasBusService is false or missing, say the hotel does not currently list a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
+			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
 			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
