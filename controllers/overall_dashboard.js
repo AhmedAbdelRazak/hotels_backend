@@ -485,6 +485,8 @@ const OVERALL_HOTEL_FULL_SELECT =
 	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel xHotelProActive createdAt updatedAt";
 const OVERALL_HOTEL_COMPACT_SELECT =
 	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity activateHotel xHotelProActive createdAt updatedAt";
+const OVERALL_HOTEL_SETTINGS_OPTIONS_SELECT =
+	"_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive createdAt updatedAt";
 const OVERALL_HOTEL_COMPACT_SECTIONS = new Set([
 	"summary",
 	"executive",
@@ -494,7 +496,9 @@ const OVERALL_HOTEL_COMPACT_SECTIONS = new Set([
 ]);
 
 const overallHotelSelectForSection = (section = "") =>
-	OVERALL_HOTEL_COMPACT_SECTIONS.has(section)
+	section === "settings-options"
+		? OVERALL_HOTEL_SETTINGS_OPTIONS_SELECT
+		: OVERALL_HOTEL_COMPACT_SECTIONS.has(section)
 		? OVERALL_HOTEL_COMPACT_SELECT
 		: OVERALL_HOTEL_FULL_SELECT;
 
@@ -685,7 +689,7 @@ const canAccessOverallSection = (actor = {}, section = "summary") => {
 		);
 	}
 
-	if (section === "settings") {
+	if (section === "settings" || section === "settings-options") {
 		return (
 			hasAnyRole([2000, 8000]) ||
 			hasAnyDescription(["hotelmanager", "reservationemployee"])
@@ -6415,7 +6419,7 @@ const buildRoomFieldsFromBody = async (body = {}, existingRoom = {}) => {
 
 exports.overallRoomManagerOptions = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		return res.json({
 			hotels: context.hotels.map(serializeOverallRoomHotel),
@@ -6430,12 +6434,12 @@ exports.overallRoomManagerOptions = async (req, res) => {
 
 exports.saveOverallRoomManagerRoom = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		const action = String(req.body?.action || "add").toLowerCase();
 		const hotelIds = requestedRoomHotelIds(req.body, action);
 		if (
-			(!variantAssignmentMode && !hotelIds.length) ||
+			!hotelIds.length ||
 			hotelIds.some((hotelId) => !ObjectId.isValid(hotelId))
 		) {
 			return res.status(400).json({ error: "Valid hotel selection is required" });
@@ -8644,6 +8648,27 @@ const propagatePriceVariantUpdates = async (
 	return { updatedRows, updatedHotels };
 };
 
+const savePriceVariantCalendarMutation = async (doc = {}, updates = {}) => {
+	const docId = normalizeCalendarId(doc?._id);
+	if (!docId || !ObjectId.isValid(docId)) {
+		throw new Error("Valid price variant id is required");
+	}
+	const saved = await PriceVariant.findOneAndUpdate(
+		{ _id: ObjectId(docId), active: { $ne: false } },
+		{
+			$set: {
+				...updates,
+				updatedAt: new Date(),
+			},
+		},
+		{ new: true, runValidators: true }
+	).exec();
+	if (!saved) {
+		throw new Error("Price variants were not found while refreshing calendar prices");
+	}
+	return saved;
+};
+
 const rebuildCalendarBasedPriceVariantOnce = async (doc = {}) => {
 	const hotelIds = uniqueValidIds(doc?.hotelIds);
 	if (!hotelIds.length) {
@@ -8739,10 +8764,19 @@ const rebuildCalendarBasedPriceVariantOnce = async (doc = {}) => {
 	doc.gregorianMonths = [];
 	doc.startDate = "";
 	doc.endDate = "";
-	doc.markModified("roomSelections");
-	doc.markModified("roomPricing");
-	doc.markModified("pricingItems");
-	const saved = await doc.save();
+	const saved = await savePriceVariantCalendarMutation(doc, {
+		roomSelections: doc.roomSelections,
+		roomPricing: doc.roomPricing,
+		pricingItems: doc.pricingItems,
+		dataType: doc.dataType,
+		basePriceSource: doc.basePriceSource,
+		periodMode: doc.periodMode,
+		dates: doc.dates,
+		hijriMonths: doc.hijriMonths,
+		gregorianMonths: doc.gregorianMonths,
+		startDate: doc.startDate,
+		endDate: doc.endDate,
+	});
 	const propagation = await propagatePriceVariantUpdates(saved);
 	return {
 		rebuilt: true,
@@ -8974,9 +9008,10 @@ const refreshCalendarBasedPriceVariantDatesOnce = async (doc = {}, touchedRows =
 		item.color = representativePeriod.color || "";
 	});
 
-	doc.markModified("roomPricing");
-	doc.markModified("pricingItems");
-	const saved = await doc.save();
+	const saved = await savePriceVariantCalendarMutation(doc, {
+		roomPricing: doc.roomPricing,
+		pricingItems: doc.pricingItems,
+	});
 	const propagation = await propagatePriceVariantUpdates(saved, [...touchedItemIds], {
 		touchedRows: propagatedRows,
 	});
@@ -9105,7 +9140,7 @@ const propagateCalendarBasePricingVariants = async ({
 
 exports.overallCalendarPricingOptions = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		const hotelIds = context.hotels.map((hotel) => normalizeId(hotel._id));
 		const agents = hotelIds.length
@@ -9147,7 +9182,7 @@ exports.overallCalendarPricingOptions = async (req, res) => {
 
 exports.overallPriceVariantOptions = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		const hotelIds = context.hotels.map((hotel) => normalizeId(hotel._id));
 		const hotelMap = new Map(
@@ -9179,7 +9214,7 @@ exports.overallPriceVariantOptions = async (req, res) => {
 
 exports.saveOverallPriceVariant = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		const body = req.body || {};
 		const variantMode = isPricingVariantRequest(body);
@@ -9419,7 +9454,7 @@ exports.saveOverallPriceVariant = async (req, res) => {
 
 exports.saveOverallCalendarPricing = async (req, res) => {
 	try {
-		const context = await requireOverallSection(req, res, "settings");
+		const context = await requireOverallSection(req, res, "settings-options");
 		if (!context) return;
 		const body = req.body || {};
 		const scope = String(body.scope || "general").toLowerCase() === "agents"
