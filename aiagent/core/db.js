@@ -245,22 +245,101 @@ async function listPreviousGuestSupportChats({ supportCase, limit = 4 } = {}) {
 	}
 }
 
-const learningTokens = (text = "") =>
-	String(text || "")
-		.toLowerCase()
-		.replace(/https?:\/\/\S+/g, " ")
-		.replace(/[^a-z0-9\u00C0-\u024F\u0600-\u06FF\u0900-\u097F\s]/gi, " ")
-		.split(/\s+/)
-		.map((word) => word.trim())
-		.filter((word) => word.length >= 4);
+const LEARNING_STOPWORDS = new Set([
+	"about",
+	"active",
+	"agent",
+	"arabic",
+	"booking",
+	"case",
+	"chat",
+	"client",
+	"context",
+	"customer",
+	"details",
+	"english",
+	"guest",
+	"hotel",
+	"hotels",
+	"inquiry",
+	"jannat",
+	"language",
+	"message",
+	"preferred",
+	"reservation",
+	"room",
+	"rooms",
+	"slots",
+	"support",
+	"\u0641\u0646\u062f\u0642",
+	"\u0627\u0644\u0641\u0646\u062f\u0642",
+	"\u062d\u062c\u0632",
+	"\u0627\u0644\u062d\u062c\u0632",
+	"\u063a\u0631\u0641\u0629",
+	"\u0627\u0644\u063a\u0631\u0641\u0629",
+	"\u062f\u0639\u0645",
+	"ÙÙ†Ø¯Ù‚",
+	"Ø§Ù„ÙÙ†Ø¯Ù‚",
+	"Ø­Ø¬Ø²",
+	"Ø§Ù„Ø­Ø¬Ø²",
+	"ØºØ±ÙØ©",
+	"Ø§Ù„ØºØ±ÙØ©",
+	"Ø¯Ø¹Ù…",
+]);
 
-function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "") {
+const normalizeTrainingLanguage = (value = "") => {
+	const text = String(value || "").trim().toLowerCase();
+	if (!text) return "";
+	if (/arabic|\bar\b|\u0639\u0631\u0628/.test(text)) return "arabic";
+	if (/arabic|\bar\b|Ø¹Ø±Ø¨/.test(text)) return "arabic";
+	if (/urdu|\bur\b/.test(text)) return "urdu";
+	if (/hindi|\bhi\b/.test(text)) return "hindi";
+	if (/spanish|\bes\b|espa/.test(text)) return "spanish";
+	if (/french|\bfr\b|fran/.test(text)) return "french";
+	if (/indonesian|\bindonesia\b|\bid\b/.test(text)) return "indonesian";
+	if (/malay|malaysia|malaysian|\bms\b/.test(text)) return "malay";
+	if (/english|\ben\b/.test(text)) return "english";
+	return text.replace(/[^a-z]+/g, " ").trim();
+};
+
+const languageMatchesLearning = (docLanguage = "", targetLanguage = "") => {
+	const doc = normalizeTrainingLanguage(docLanguage);
+	const target = normalizeTrainingLanguage(targetLanguage);
+	if (!doc || !target) return false;
+	if (doc === target) return true;
+	if (target === "arabic" && doc.startsWith("arabic")) return true;
+	if (target === "malay" && /malay/.test(doc)) return true;
+	return false;
+};
+
+const learningTokens = (text = "") =>
+	Array.from(
+		new Set(
+			String(text || "")
+				.toLowerCase()
+				.replace(/https?:\/\/\S+/g, " ")
+				.replace(/[^a-z0-9\u00C0-\u024F\u0600-\u06FF\u0900-\u097F\s]/gi, " ")
+				.split(/\s+/)
+				.map((word) => word.trim())
+				.filter((word) => word.length >= 4 && !LEARNING_STOPWORDS.has(word))
+		)
+	);
+
+function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "", language = "") {
 	let score = 0;
+	let keywordMatches = 0;
+	let contentMatches = 0;
 	const docHotelId = doc.hotelId ? String(doc.hotelId) : "";
 	if (hotelId && docHotelId === hotelId) score += 8;
+	if (languageMatchesLearning(doc.language, language)) score += 2;
 	const keywords = Array.isArray(doc.chatKeywords) ? doc.chatKeywords : [];
 	keywords.forEach((keyword) => {
-		if (queryTokens.has(String(keyword || "").toLowerCase())) score += 3;
+		learningTokens(keyword).forEach((token) => {
+			if (queryTokens.has(token)) {
+				keywordMatches += 1;
+				score += 5;
+			}
+		});
 	});
 	const haystack = [
 		doc.sourceType,
@@ -270,23 +349,33 @@ function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "") {
 		doc.supportResolution,
 		...(doc.learningNotes || []),
 		...(doc.responseGuidance || []),
-		...(Array.isArray(doc.conversation)
-			? doc.conversation.map((turn) => turn?.message || "")
-			: []),
+		...(doc.decisionRules || []),
+		...(doc.recommendedResponses || []),
+		...(doc.commonQuestions || []),
+		...(doc.tags || []),
 	]
 		.join(" ")
 		.toLowerCase();
 	queryTokens.forEach((token) => {
-		if (haystack.includes(token)) score += 1;
+		if (haystack.includes(token)) {
+			contentMatches += 1;
+			score += 1;
+		}
 	});
-	return score;
+	if (Number(doc.qualityScore || doc.confidenceScore || 0) >= 0.75) score += 1;
+	return {
+		score,
+		keywordMatches,
+		contentMatches,
+		languageMatched: languageMatchesLearning(doc.language, language),
+	};
 }
 
 async function findTrainingDocs(Model, filter) {
 	try {
 		return await Model.find(filter)
 			.select(
-				"sourceType chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance hotelId hotelName updatedAt createdAt"
+				"sourceType chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance decisionRules recommendedResponses commonQuestions qualityScore confidenceScore tags messageCount hotelId hotelName updatedAt createdAt"
 			)
 			.sort({ updatedAt: -1, createdAt: -1 })
 			.limit(80)
@@ -301,6 +390,7 @@ async function findTrainingDocs(Model, filter) {
 async function listRelevantTrainingChats({
 	hotelId,
 	text,
+	language,
 	limit = 4,
 	includeGlobal = true,
 } = {}) {
@@ -324,12 +414,24 @@ async function listRelevantTrainingChats({
 	const docs = [...learningDocs, ...legacyTrainingDocs];
 
 	const tokens = new Set(learningTokens(text));
+	if (!tokens.size) return [];
 	const hotelIdString = safeHotelId ? String(safeHotelId) : "";
 	const sortedDocs = docs
-		.map((doc) => ({
-			...doc,
-			_relevanceScore: scoreTrainingChat(doc, tokens, hotelIdString),
-		}))
+		.map((doc) => {
+			const relevance = scoreTrainingChat(doc, tokens, hotelIdString, language);
+			return {
+				...doc,
+				_relevanceScore: relevance.score,
+				_learningSignalMatches:
+					relevance.keywordMatches + relevance.contentMatches,
+				_learningLanguageMatched: relevance.languageMatched,
+			};
+		})
+		.filter(
+			(doc) =>
+				doc._learningSignalMatches > 0 &&
+				doc._relevanceScore >= (hotelIdString ? 3 : 4)
+		)
 		.sort(
 			(a, b) =>
 				b._relevanceScore - a._relevanceScore ||
@@ -342,10 +444,8 @@ async function listRelevantTrainingChats({
 	const topRelevantSlots = Math.max(1, Math.floor(max / 2));
 	for (const doc of sortedDocs) {
 		if (picked.length >= topRelevantSlots) break;
-		if (doc._relevanceScore > 0 || picked.length < 2) {
-			picked.push(doc);
-			seenLanguages.add(String(doc.language || "unknown").toLowerCase());
-		}
+		picked.push(doc);
+		seenLanguages.add(String(doc.language || "unknown").toLowerCase());
 	}
 	for (const doc of sortedDocs) {
 		if (picked.length >= max) break;

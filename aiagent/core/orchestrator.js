@@ -413,7 +413,11 @@ function detectGuestLanguageFromText(text = "") {
 			"combien",
 			"confirmer",
 		]) + (/\bs[' ]?il vous plait\b|\bje voudrais\b|\bje veux\b/.test(lower) ? 2 : 0);
-	if (frenchScore >= 2) {
+	const hasFrenchSignature =
+		/\b(bonjour|salut|merci|chambre|arrivee|depart|prix|nuit|nuits|disponible|voudrais|veux|combien|confirmer)\b|\bs[' ]?il vous plait\b|\bje voudrais\b|\bje veux\b/.test(
+			lower
+		);
+	if (frenchScore >= 2 && hasFrenchSignature) {
 		return { language: "French", code: "fr", confidence: Math.min(0.95, 0.6 + frenchScore * 0.1) };
 	}
 
@@ -436,6 +440,48 @@ function detectGuestLanguageFromText(text = "") {
 		]) + (/\bpor favor\b|\bme gustaria\b/.test(lower) ? 2 : 0);
 	if (spanishScore >= 2) {
 		return { language: "Spanish", code: "es", confidence: Math.min(0.95, 0.6 + spanishScore * 0.1) };
+	}
+
+	const indonesianScore =
+		scoreWords([
+			"halo",
+			"terima",
+			"kasih",
+			"kamar",
+			"reservasi",
+			"harga",
+			"tanggal",
+			"tersedia",
+			"saya",
+			"ingin",
+			"berapa",
+			"bayar",
+			"pembayaran",
+			"tolong",
+		]) + (/\bsaya ingin\b|\bterima kasih\b/.test(lower) ? 2 : 0);
+	const malayScore =
+		scoreWords([
+			"hai",
+			"terima",
+			"kasih",
+			"bilik",
+			"tempahan",
+			"harga",
+			"tarikh",
+			"tersedia",
+			"saya",
+			"mahu",
+			"berapa",
+			"bayar",
+			"pembayaran",
+			"tolong",
+			"invois",
+		]) + (/\bsaya mahu\b|\bterima kasih\b/.test(lower) ? 2 : 0);
+	if (indonesianScore >= 2 || malayScore >= 2) {
+		if (malayScore > indonesianScore) {
+			return { language: "Malay (Malaysia)", code: "ms", confidence: Math.min(0.95, 0.6 + malayScore * 0.1) };
+		}
+		return { language: "Indonesian", code: "id", confidence: Math.min(0.95, 0.6 + indonesianScore * 0.1) };
 	}
 
 	const englishScore =
@@ -469,6 +515,21 @@ function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
 	const detected = detectGuestLanguageFromText(text);
 	if (!detected || detected.confidence < 0.75) return;
 	const current = String(languageOf(sc, st) || "").toLowerCase();
+	const currentCode = String(activeLanguageCodeOf(sc, st) || "").toLowerCase();
+	if (
+		detected.language === "Arabic" &&
+		(/urdu/.test(current) || currentCode === "ur")
+	) {
+		return;
+	}
+	if (
+		(detected.language === "Indonesian" &&
+			(/malay/.test(current) || currentCode === "ms")) ||
+		(/malay/i.test(detected.language) &&
+			(/indonesian/.test(current) || currentCode === "id"))
+	) {
+		return;
+	}
 	if (current !== detected.language.toLowerCase()) {
 		logStep(String(sc._id || ""), "language.override", {
 			from: languageOf(sc, st),
@@ -1021,12 +1082,16 @@ function hasOperationalBookingSignal(text = "") {
 }
 
 function wantsPaymentHelp(text = "") {
+	const raw = String(text || "");
+	if (/\b(pembayaran|bayar|pautan|invois|invoice)\b/i.test(raw)) return true;
 	return /payment|pay|card|link|declined|not going through|failed|دفع|بطاقة|رابط|pago|paiement|ادائیگی/i.test(
 		String(text || "")
 	);
 }
 
 function wantsReservationHelp(text = "") {
+	const raw = String(text || "");
+	if (/\b(reservasi|tempahan|pengesahan)\b/i.test(raw)) return true;
 	return /reservation|booking|confirmation|تأكيد|حجز|reserva|réservation|بکنگ|आरक्षण/i.test(
 		String(text || "")
 	);
@@ -1087,6 +1152,9 @@ function wantsNewReservationIntent(text = "", lu = {}) {
 	const raw = String(text || "");
 	if (latestKnownConfirmation({}, lu) || explicitlyExistingReservationIntent(raw)) {
 		return false;
+	}
+	if (/\b(reservasi|tempahan|pesan\s+kamar|tempah\s+bilik)\b/i.test(raw)) {
+		return true;
 	}
 	return (
 		/\b(book|reserve|make\s+(?:a\s+)?reservation|new\s+(?:booking|reservation)|book\s+a\s*room|reserve\s+a\s*room|need\s+a\s*room|want\s+a\s*room)\b/i.test(
@@ -3863,19 +3931,20 @@ function looksLikeClosureAck(s = "") {
 }
 
 function compactLearningChat(chat = {}) {
-	const turns = Array.isArray(chat.conversation)
-		? chat.conversation.slice(0, 8).map((turn) => ({
-				role: turn.role || "unknown",
-				speakerName: turn.speakerName || "",
-				message: String(turn.message || "").slice(0, 260),
-		  }))
-		: [];
-	return {
+	const includeExamples =
+		String(process.env.AI_LEARNING_INCLUDE_EXAMPLE_TURNS || "")
+			.trim()
+			.toLowerCase() === "true";
+	const result = {
+		sourceType: chat.sourceType || chat.source || "",
 		title: chat.chatTitle || "",
+		hotelName: chat.hotelName || "",
 		language: chat.language || "",
 		keywords: Array.isArray(chat.chatKeywords)
 			? chat.chatKeywords.slice(0, 10)
 			: [],
+		relevanceScore: chat._relevanceScore || 0,
+		signalMatches: chat._learningSignalMatches || 0,
 		summary: chat.summary || "",
 		customerIntent: chat.customerIntent || "",
 		supportResolution: chat.supportResolution || "",
@@ -3885,8 +3954,27 @@ function compactLearningChat(chat = {}) {
 		responseGuidance: Array.isArray(chat.responseGuidance)
 			? chat.responseGuidance.slice(0, 6)
 			: [],
-		exampleTurns: turns,
+		decisionRules: Array.isArray(chat.decisionRules)
+			? chat.decisionRules.slice(0, 6)
+			: [],
+		recommendedResponses: Array.isArray(chat.recommendedResponses)
+			? chat.recommendedResponses.slice(0, 4)
+			: [],
+		commonQuestions: Array.isArray(chat.commonQuestions)
+			? chat.commonQuestions.slice(0, 6)
+			: [],
+		tags: Array.isArray(chat.tags) ? chat.tags.slice(0, 8) : [],
+		qualityScore: chat.qualityScore || chat.confidenceScore || 0,
 	};
+	if (includeExamples) {
+		result.exampleTurns = Array.isArray(chat.conversation)
+			? chat.conversation.slice(0, 4).map((turn) => ({
+					role: turn.role || "unknown",
+					message: String(turn.message || "").slice(0, 180),
+			  }))
+			: [];
+	}
+	return result;
 }
 
 function compactPreviousGuestChat(supportCase = {}, st = {}) {
@@ -3974,6 +4062,7 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 		const chats = await listRelevantTrainingChats({
 			hotelId: activeHotelId,
 			includeGlobal: !activeHotelId,
+			language: targetLanguageLabel(sc, st),
 			text: lookupText,
 			limit: 6,
 		});
@@ -3996,9 +4085,19 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 	const isHindi = /hindi/i.test(lang);
 	const isFrench = /french/i.test(lang);
 	const isUrdu = /urdu/i.test(lang);
+	const isIndonesian = /indonesian/i.test(lang);
+	const isMalay = /malay|malaysia/i.test(lang);
 	if (context.fallbackText) {
 		const fallbackText = String(context.fallbackText);
-		if (!isArabic && !isSpanish && !isHindi && !isFrench && !isUrdu) {
+		if (
+			!isArabic &&
+			!isSpanish &&
+			!isHindi &&
+			!isFrench &&
+			!isUrdu &&
+			!isIndonesian &&
+			!isMalay
+		) {
 			return fallbackText;
 		}
 		if (!/human|handoff|specialist|escalat|handled by/i.test(text)) {
@@ -4036,6 +4135,30 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 				.filter(Boolean)
 				.join("\n");
 		}
+		if (isIndonesian) {
+			return [
+				"Tinjauan sebelum kami finalkan:",
+				`Hotel: ${hotel}`,
+				`Kamar: ${room}`,
+				`Tanggal: ${dateLine}`,
+				total ? `Total: ${total} ${currency}` : "",
+				"Ketik konfirmasi untuk finalisasi, atau beritahu saya apa yang perlu diubah.",
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		if (isMalay) {
+			return [
+				"Semakan sebelum kami muktamadkan:",
+				`Hotel: ${hotel}`,
+				`Bilik: ${room}`,
+				`Tarikh: ${dateLine}`,
+				total ? `Jumlah: ${total} ${currency}` : "",
+				"Taip pengesahan untuk muktamadkan, atau beritahu saya apa yang perlu diubah.",
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
 		return [
 			"Review before we finalize:",
 			`Hotel: ${hotel}`,
@@ -4049,22 +4172,32 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 	}
 	if (/how about you|doing well/.test(text)) {
 		if (isArabic) return `أنا بخير، شكرًا ${respectfulAddress}. وأنت كيف حالك؟`;
+		if (isIndonesian) return `Saya baik, terima kasih ${respectfulAddress}. Bagaimana kabar Anda?`;
+		if (isMalay) return `Saya baik, terima kasih ${respectfulAddress}. Apa khabar?`;
 		return `I'm doing well, thank you ${respectfulAddress}. How about you?`;
 	}
 	if (/full name|passport/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك اكتب الاسم الكامل للحجز باللغة الإنجليزية كما في جواز السفر.`;
+		if (isIndonesian) return `${respectfulAddress}, mohon tulis nama lengkap untuk reservasi sesuai paspor.`;
+		if (isMalay) return `${respectfulAddress}, sila tulis nama penuh untuk tempahan seperti dalam pasport.`;
 		return `${respectfulAddress}, please type the full name for the reservation as it appears in the passport.`;
 	}
 	if (/nationality/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، ما جنسية الضيف؟ من فضلك اكتب اسم الدولة/الجنسية باللغة الإنجليزية.`;
+		if (isIndonesian) return `${respectfulAddress}, apa kewarganegaraan atau negara tamu?`;
+		if (isMalay) return `${respectfulAddress}, apakah kewarganegaraan atau negara tetamu?`;
 		return `${respectfulAddress}, what is the guest's nationality or country name?`;
 	}
 	if (/phone|whatsapp|reachable/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك أرسل رقم جوال يمكننا التواصل عليه. واتساب مفضل لكنه ليس إلزاميًا.`;
+		if (isIndonesian) return `${respectfulAddress}, mohon kirim nomor telepon yang bisa dihubungi. WhatsApp lebih baik, tetapi tidak wajib.`;
+		if (isMalay) return `${respectfulAddress}, sila hantarkan nombor telefon yang boleh dihubungi. WhatsApp digalakkan, tetapi tidak wajib.`;
 		return `${respectfulAddress}, please share a reachable phone number. WhatsApp is preferred, but not mandatory.`;
 	}
 	if (/email address|type 'skip'|type skip|email/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك أرسل البريد الإلكتروني لتفاصيل الحجز، أو اكتب skip إذا تفضل المتابعة بدونه.`;
+		if (isIndonesian) return `${respectfulAddress}, mohon kirim alamat email untuk detail reservasi, atau ketik skip jika ingin lanjut tanpa email.`;
+		if (isMalay) return `${respectfulAddress}, sila hantarkan alamat email untuk butiran tempahan, atau taip skip jika mahu teruskan tanpa email.`;
 		return `${respectfulAddress}, please share an email address for the reservation details, or type skip if you prefer to continue without one.`;
 	}
 	if (/greet/.test(text)) {
@@ -4073,6 +4206,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		if (isHindi) return `नमस्ते ${respectfulAddress}, मैं ${supportDesk} से ${st.agentName} हूं। मैं आपकी कैसे मदद कर सकता हूं?`;
 		if (isFrench) return `Bonjour ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
 		if (isUrdu) return `السلام علیکم ${respectfulAddress}، میں ${supportDesk} سے ${st.agentName} ہوں۔ میں آپ کی کیسے مدد کر سکتا ہوں؟`;
+		if (isIndonesian) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya bisa membantu hari ini?`;
+		if (isMalay) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya boleh membantu hari ini?`;
 		return `Hi ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
 	}
 	if (/date|check-in|check.?in|checkout|check-out/.test(text)) {
@@ -4081,6 +4216,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		if (isHindi) return `${respectfulAddress}, कृपया चेक-इन और चेक-आउट की तारीखें भेजें ताकि मैं उपलब्धता देख सकूं।`;
 		if (isFrench) return `${respectfulAddress}, veuillez envoyer les dates d'arrivee et de depart pour que je verifie la disponibilite.`;
 		if (isUrdu) return `${respectfulAddress}، براہ کرم چیک اِن اور چیک آؤٹ کی تاریخیں بھیجیں تاکہ میں دستیابی چیک کر سکوں۔`;
+		if (isIndonesian) return `${respectfulAddress}, mohon kirim tanggal check-in dan check-out agar saya bisa cek ketersediaan.`;
+		if (isMalay) return `${respectfulAddress}, sila hantarkan tarikh check-in dan check-out supaya saya boleh semak ketersediaan.`;
 		return `${respectfulAddress}, please send your check-in and checkout dates and I can check availability.`;
 	}
 	if (/room type/.test(text)) {
@@ -4112,6 +4249,16 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 				? `${respectfulAddress}، آپ کو کون سا کمرہ چاہیے؟ مثال کے طور پر: ${examples.join(" / ")}.`
 				: `${respectfulAddress}، آپ کو کون سا کمرہ چاہیے؟`;
 		}
+		if (isIndonesian) {
+			return examples.length
+				? `${respectfulAddress}, jenis kamar mana yang paling sesuai? Contoh: ${examples.join(" / ")}.`
+				: `${respectfulAddress}, jenis kamar mana yang Anda inginkan?`;
+		}
+		if (isMalay) {
+			return examples.length
+				? `${respectfulAddress}, jenis bilik mana yang paling sesuai? Contoh: ${examples.join(" / ")}.`
+				: `${respectfulAddress}, jenis bilik mana yang anda mahukan?`;
+		}
 		return examples.length
 			? `${respectfulAddress}, which room type suits you best? For example: ${examples.join(" / ")}.`
 			: `${respectfulAddress}, which room type would you like?`;
@@ -4122,6 +4269,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		if (isHindi) return `${respectfulAddress}, मैं भुगतान की समस्या में मदद कर सकता हूं। कृपया कन्फर्मेशन नंबर या पेमेंट लिंक भेजें, कार्ड की जानकारी नहीं।`;
 		if (isFrench) return `${respectfulAddress}, je peux vous aider pour le paiement. Envoyez le numero de confirmation ou le lien de paiement, mais pas de donnees de carte.`;
 		if (isUrdu) return `${respectfulAddress}، میں ادائیگی کے مسئلے میں مدد کر سکتا ہوں۔ براہ کرم کنفرمیشن نمبر یا پیمنٹ لنک بھیجیں، کارڈ کی معلومات نہیں۔`;
+		if (isIndonesian) return `${respectfulAddress}, saya bisa membantu masalah pembayaran. Mohon kirim nomor konfirmasi atau link pembayaran, tetapi jangan kirim detail kartu.`;
+		if (isMalay) return `${respectfulAddress}, saya boleh membantu isu pembayaran. Sila hantar nombor pengesahan atau pautan pembayaran, tetapi jangan hantar butiran kad.`;
 		return `${respectfulAddress}, I can help with the payment issue. Please send the confirmation number or payment link, but not card details.`;
 	}
 	if (/reservation|confirmation/.test(text)) {
@@ -4130,6 +4279,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		if (isHindi) return `${respectfulAddress}, कृपया कन्फर्मेशन नंबर और बताएं कि आप क्या बदलना चाहते हैं।`;
 		if (isFrench) return `${respectfulAddress}, veuillez envoyer le numero de confirmation et le changement souhaite.`;
 		if (isUrdu) return `${respectfulAddress}، براہ کرم کنفرمیشن نمبر اور مطلوبہ تبدیلی بھیجیں۔`;
+		if (isIndonesian) return `${respectfulAddress}, mohon kirim nomor konfirmasi dan perubahan yang Anda inginkan.`;
+		if (isMalay) return `${respectfulAddress}, sila hantarkan nombor pengesahan dan perubahan yang anda mahukan.`;
 		return `${respectfulAddress}, please send the confirmation number and what you would like to update.`;
 	}
 	if (/human|handoff|specialist|escalat/.test(text)) {
@@ -4138,6 +4289,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		if (isHindi) return `${respectfulAddress}, अब हमारी सपोर्ट टीम का विशेषज्ञ आपकी मदद जारी रखेगा।`;
 		if (isFrench) return `${respectfulAddress}, un specialiste du support va poursuivre avec vous ici.`;
 		if (isUrdu) return `${respectfulAddress}، اب سپورٹ ٹیم کا ایک ماہر آپ کے ساتھ بات جاری رکھے گا۔`;
+		if (isIndonesian) return `${respectfulAddress}, spesialis dukungan akan melanjutkan bantuan dari sini.`;
+		if (isMalay) return `${respectfulAddress}, pakar sokongan akan meneruskan bantuan dari sini.`;
 		return `${respectfulAddress}, a support specialist will continue with you from here.`;
 	}
 	if (isArabic) return `${respectfulAddress}، أقدر أساعدك. هل يمكنك إرسال تفاصيل أكثر؟`;
@@ -4145,6 +4298,8 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 	if (isHindi) return `${respectfulAddress}, मैं इसमें मदद कर सकता हूं। कृपया थोड़ा और विवरण भेजें।`;
 	if (isFrench) return `${respectfulAddress}, je peux vous aider. Pouvez-vous envoyer un peu plus de details ?`;
 	if (isUrdu) return `${respectfulAddress}، میں مدد کر سکتا ہوں۔ براہ کرم تھوڑی مزید تفصیل بھیجیں۔`;
+	if (isIndonesian) return `${respectfulAddress}, saya bisa membantu. Mohon kirim sedikit detail tambahan.`;
+	if (isMalay) return `${respectfulAddress}, saya boleh membantu. Sila hantarkan sedikit butiran tambahan.`;
 	return `${respectfulAddress}, I can help with that. Could you share a little more detail?`;
 }
 
@@ -4175,6 +4330,28 @@ function languageMismatchLikely(answer = "", targetLanguage = "") {
 				text
 			);
 		return looksEnglish && !looksFrench;
+	}
+	if (/indonesian/.test(lang)) {
+		const looksEnglish =
+			/\b(the|please|could|would|check-in|checkout|reservation|support|payment|confirm)\b/i.test(
+				text
+			);
+		const looksIndonesian =
+			/\b(halo|terima kasih|kamar|tanggal|reservasi|pembayaran|mohon|bisa|silakan|konfirmasi)\b/i.test(
+				text
+			);
+		return looksEnglish && !looksIndonesian;
+	}
+	if (/malay|malaysia/.test(lang)) {
+		const looksEnglish =
+			/\b(the|please|could|would|check-in|checkout|reservation|support|payment|confirm)\b/i.test(
+				text
+			);
+		const looksMalay =
+			/\b(halo|terima kasih|bilik|tarikh|tempahan|pembayaran|sila|boleh|pengesahan|pautan)\b/i.test(
+				text
+			);
+		return looksEnglish && !looksMalay;
 	}
 	return false;
 }
@@ -4219,7 +4396,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		/arabic/i.test(targetLanguage)
 			? `Arabic output rule: use natural Arabic hospitality wording. Do not write English commands such as "confirm" or "skip"; use "\u062a\u0623\u0643\u064a\u062f" and "\u062a\u062e\u0637\u064a". Write SAR as "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a" in customer-facing Arabic. Prefer Arabic hotel and room names from context when available.`
 			: "",
-		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
+		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, Indonesian, Malay, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`For every reply, first understand what the guest just asked or felt, then answer that directly before moving the booking forward.`,
@@ -4232,7 +4409,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
 		`This is a respectful Umrah/hospitality platform. Keep the service tone modest, patient, and supportive for Muslim guests and families without lecturing or using casual profanity.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
-		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, and Spanish guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
+		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, Spanish, Indonesian, and Malaysian guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
 		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
 		`For Arabic conversations, address the guest professionally as "\u0623\u0633\u062a\u0627\u0630 {first name}" when the name is known, such as "\u0623\u0633\u062a\u0627\u0630 \u0646\u0627\u0635\u0631"; keep it warm, not stiff.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
