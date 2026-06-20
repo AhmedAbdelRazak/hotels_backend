@@ -790,6 +790,56 @@ function isoFromParts(year, month, day) {
 	return `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
 }
 
+function numericGregorianDateParts(left, right, year) {
+	const a = Number(left);
+	const b = Number(right);
+	const y = Number(year);
+	if (!a || !b || !y) return null;
+	let day = null;
+	let month = null;
+	if (a > 12 && b <= 12) {
+		day = a;
+		month = b;
+	} else if (b > 12 && a <= 12) {
+		month = a;
+		day = b;
+	} else {
+		return null;
+	}
+	const iso = isoFromParts(y, month, day);
+	return iso ? { iso, year: y, month, day } : null;
+}
+
+function quickNumericGregorianDateRange(text = "") {
+	const raw = digitsToEnglish(String(text || ""));
+	const matches = [];
+	const re = /\b(\d{1,2})[\/.-](\d{1,2})[\/.-](20\d{2})\b/g;
+	let match = null;
+	while ((match = re.exec(raw))) {
+		const parts = numericGregorianDateParts(match[1], match[2], match[3]);
+		if (!parts) continue;
+		matches.push({
+			index: match.index,
+			source: match[0],
+			...parts,
+		});
+	}
+	if (matches.length < 2) return null;
+	const ordered = matches.sort((a, b) => a.index - b.index);
+	const checkin = ordered[0];
+	const checkout = ordered[1];
+	if (!checkin.iso || !checkout.iso || checkout.iso <= checkin.iso) return null;
+	return {
+		checkinISO: checkin.iso,
+		checkoutISO: checkout.iso,
+		raw: {
+			checkin: checkin.source,
+			checkout: checkout.source,
+			calendar: "gregorian",
+		},
+	};
+}
+
 function escapeDateRegex(value = "") {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1142,6 +1192,8 @@ function quickDateRange(text = "") {
 			},
 		};
 	}
+	const numericRange = quickNumericGregorianDateRange(raw);
+	if (numericRange?.checkinISO && numericRange?.checkoutISO) return numericRange;
 	const monthRange = quickGregorianMonthDateRange(raw);
 	if (monthRange?.checkinISO && monthRange?.checkoutISO) return monthRange;
 	const arabicMonthRange = quickArabicGregorianMonthDateRange(raw);
@@ -1307,6 +1359,7 @@ async function detectIntentLLM({
 		"Classify hotel chat messages.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics, language hint, ticket context, and hotel context instead of exact spellings.",
 		"Examples of writing styles include Franko Arabic/Arabizi, Algerian/Moroccan/Tunisian/Egyptian/Gulf Arabic dialects, Hinglish, Urdu or Hindi in Latin characters, Spanish or French without accents, and mixed English with another language.",
+		"Text inside parentheses in the guest message is meaningful and must be classified as part of the message.",
 		"Do not classify a message as other just because the language is dialectal, romanized, or mixed-script; infer the hotel-support intent when possible.",
 		"Return ONLY JSON:",
 		"{ intent:'reserve_room'|'reservation_lookup'|'smalltalk'|'confirm_check'|'other',",
@@ -1359,12 +1412,15 @@ async function normalizeDatesLLM({
 		return { checkinISO: null, checkoutISO: null, reason: null };
 
 	const today = new Date().toISOString().slice(0, 10);
+	const rawDateText = digitsToEnglish(`${checkin || ""} ${checkout || ""}`);
+	const hasExplicitGregorianYear = /\b20\d{2}\b/.test(rawDateText);
 	const sys = [
 		"Convert input dates to Gregorian ISO (YYYY-MM-DD). Input may be Hijri or Gregorian, any language.",
 		"IMPORTANT: If the month is missing for either date, DO NOT infer—return null and set reason:'month_missing'.",
 		"If year is missing but month exists, prefer the nearest FUTURE year.",
+		"If the guest supplied an explicit Gregorian year and that date is before todayISO, do not silently change the year; return the typed year and set reason:'past_explicit_year'.",
 		"Ensure check-in < check-out; else leave null.",
-		"Return ONLY JSON: { checkinISO:string|null, checkoutISO:string|null, reason:null|'month_missing' }",
+		"Return ONLY JSON: { checkinISO:string|null, checkoutISO:string|null, reason:null|'month_missing'|'past_explicit_year' }",
 	].join(" ");
 
 	const user = [
@@ -1390,8 +1446,13 @@ async function normalizeDatesLLM({
 	}
 	if (!data) return { checkinISO: null, checkoutISO: null, reason: null };
 
-	if (!data.reason && isPastISO(data.checkinISO))
-		data = { ...data, ...bumpDatesToFuture(data) };
+	if (!data.reason && isPastISO(data.checkinISO)) {
+		if (hasExplicitGregorianYear) {
+			data = { ...data, reason: "past_explicit_year" };
+		} else {
+			data = { ...data, ...bumpDatesToFuture(data) };
+		}
+	}
 	return data;
 }
 

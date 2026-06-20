@@ -720,7 +720,11 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	const allText = conversationText(sc);
 	const guestText = conversationText(sc, { guestsOnly: true });
 	const dates = quickDateRange(allText);
-	if (dates.checkinISO && dates.checkoutISO) {
+	if (
+		dates.checkinISO &&
+		dates.checkoutISO &&
+		!needsExplicitPastDateClarification(allText, dates)
+	) {
 		st.slots.checkinISO = st.slots.checkinISO || dates.checkinISO;
 		st.slots.checkoutISO = st.slots.checkoutISO || dates.checkoutISO;
 		if (dates.raw) {
@@ -1097,6 +1101,38 @@ function wantsReservationHelp(text = "") {
 	);
 }
 
+function hotelContactDetailsQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const asksContact =
+		/\b(?:phone|telephone|mobile|number|no\.?|whatsapp|whats\s*app|contact|call|reach)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0642\u0645|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062a\u0644\u064a\u0641\u0648\u0646|\u062a\u0644\u064a\u0641\u0648\u0646|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0627\u062a\u0635\u0644|\u0627\u062a\u0648\u0627\u0635\u0644)/i.test(
+			arabic
+		);
+	if (!asksContact) return false;
+	const asksHotelOrStaff =
+		/\b(?:hotel|reception|front\s*desk|desk|manager|responsible|staff|support|official)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0645\u0633\u0624\u0648\u0644|\u0627\u0644\u0645\u0633\u0626\u0648\u0644|\u0645\u0633\u0624\u0648\u0644|\u0645\u0633\u0626\u0648\u0644|\u0627\u0644\u0645\u062f\u064a\u0631|\u0627\u0644\u062f\u0639\u0645)/i.test(
+			arabic
+		) ||
+		/(?:hotelphone|hotelwhatsapp|callhotel|contacthotel|managernumber|receptionnumber|responsiblenumber)/i.test(
+			latinCompact
+		);
+	const directHotelContact =
+		/\b(?:call|contact|reach|speak\s+to|talk\s+to)\s+(?:the\s+)?hotel\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0643\u0644\u0645|\u0627\u0643\u0644\u0645|\u0627\u062a\u0648\u0627\u0635\u0644|\u0627\u062a\u0635\u0644).*?(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642)/i.test(
+			arabic
+		);
+	return asksHotelOrStaff || directHotelContact;
+}
+
 function vagueHajjInquiryText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	const mentionsHajj =
@@ -1193,6 +1229,52 @@ function extractDateRange(text = "") {
 		};
 	}
 	return { checkinISO: null, checkoutISO: null };
+}
+
+function todayISODate() {
+	return new Date().toISOString().slice(0, 10);
+}
+
+function isPastDateISO(iso = "") {
+	return /^\d{4}-\d{2}-\d{2}$/.test(String(iso || "")) && iso < todayISODate();
+}
+
+function explicitGregorianYearInDateInput(text = "", dates = {}) {
+	const raw = [
+		text,
+		dates?.raw?.checkin || "",
+		dates?.raw?.checkout || "",
+		dates?.checkinISO || "",
+		dates?.checkoutISO || "",
+	]
+		.filter(Boolean)
+		.join(" ");
+	const normalized = digitsToEnglish(raw);
+	return /\b20\d{2}\b/.test(normalized);
+}
+
+function futureSameMonthDayRange(dates = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return null;
+	let checkin = new Date(`${dates.checkinISO}T00:00:00Z`);
+	let checkout = new Date(`${dates.checkoutISO}T00:00:00Z`);
+	if (Number.isNaN(checkin.getTime()) || Number.isNaN(checkout.getTime())) {
+		return null;
+	}
+	for (let guard = 0; guard < 8 && checkin.toISOString().slice(0, 10) < todayISODate(); guard += 1) {
+		checkin.setUTCFullYear(checkin.getUTCFullYear() + 1);
+		checkout.setUTCFullYear(checkout.getUTCFullYear() + 1);
+	}
+	return {
+		checkinISO: checkin.toISOString().slice(0, 10),
+		checkoutISO: checkout.toISOString().slice(0, 10),
+	};
+}
+
+function needsExplicitPastDateClarification(text = "", dates = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return false;
+	if (dates?.raw?.calendar === "hijri" || dates?.raw?.checkinHijri) return false;
+	if (!explicitGregorianYearInDateInput(text, dates)) return false;
+	return dates?.reason === "past_explicit_year" || isPastDateISO(dates.checkinISO);
 }
 
 function roomTypeLabel(roomTypeKey = "") {
@@ -1426,15 +1508,15 @@ function initialHotelGreetingText(sc = {}, st = {}) {
 	const agentName = st.agentName || "Sara";
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `\u0623\u0647\u0644\u0627\u064b ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u062f\u0639\u0645 ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+		return `\u0623\u0647\u0644\u0627\u064b ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} del equipo de ${hotelName}. Como puedo ayudarte hoy?`;
+		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName} de l'equipe de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
+		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
 	}
-	return `Hello ${name}, this is ${agentName} from ${hotelName} support. How can I help you today?`;
+	return `Hello ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
 }
 
 function hotelComplaintText(text = "") {
@@ -1509,6 +1591,14 @@ function platformHotelOptionsFallbackText(sc = {}, st = {}, options = [], hasDat
 		.map((option, index) => platformOptionLine(option, index, hasDates));
 	if (/arabic/i.test(lang)) {
 		return [
+			`${name}\u060c \u0647\u0630\u0647 \u0623\u0641\u0636\u0644 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u062a\u064a \u0648\u062c\u062f\u062a\u0647\u0627 \u0644\u0643:`,
+			...lines,
+			"\u062f\u0639\u0645 Jannat Booking \u064a\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0627\u0644\u0645\u0642\u0627\u0631\u0646\u0629 \u0648\u0627\u0644\u0623\u0633\u0639\u0627\u0631\u060c \u0644\u0643\u0646 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a \u0648\u0631\u0648\u0627\u0628\u0637 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644/\u0627\u0644\u062f\u0641\u0639 \u062a\u062a\u0645 \u0645\u0646 \u062e\u0644\u0627\u0644 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u0645\u062e\u062a\u0627\u0631.",
+			"\u0623\u064a \u0641\u0646\u062f\u0642 \u062a\u062d\u0628 \u0623\u0646 \u0623\u0648\u0635\u0644\u0643 \u0628\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0647 \u0648\u062d\u062c\u0648\u0632\u0627\u062a\u0647\u061f",
+		].join("\n");
+	}
+	if (/arabic/i.test(lang)) {
+		return [
 			`${name}، هذه أفضل الخيارات التي وجدتها لك:`,
 			...lines,
 			"دعم جنة بوكينج يساعدك في المقارنة والأسعار، لكن تأكيد الحجز الرسمي وروابط التفاصيل/الدفع تتم من خلال دعم الفندق المختار.",
@@ -1519,7 +1609,7 @@ function platformHotelOptionsFallbackText(sc = {}, st = {}, options = [], hasDat
 		return [
 			`${name}, estas son las mejores opciones que encontre para ti:`,
 			...lines,
-			"Jannat Booking puede ayudarte a comparar opciones y precios, pero la confirmacion oficial y los enlaces de detalles/pago los completa el soporte del hotel elegido.",
+			"Jannat Booking puede ayudarte a comparar opciones y precios, pero la confirmacion oficial y los enlaces de detalles/pago los completa la recepcion y reservas del hotel elegido.",
 			"Con que hotel te gustaria que te conecte?",
 		].join("\n");
 	}
@@ -1527,14 +1617,14 @@ function platformHotelOptionsFallbackText(sc = {}, st = {}, options = [], hasDat
 		return [
 			`${name}, voici les meilleures options que j'ai trouvees pour vous :`,
 			...lines,
-			"Jannat Booking peut vous aider a comparer les options et les prix, mais la confirmation officielle et les liens details/paiement sont traites par le support de l'hotel choisi.",
+			"Jannat Booking peut vous aider a comparer les options et les prix, mais la confirmation officielle et les liens details/paiement sont traites par la reception et les reservations de l'hotel choisi.",
 			"A quel hotel souhaitez-vous que je vous connecte ?",
 		].join("\n");
 	}
 	return [
 		`${name}, these are the best options I found for you:`,
 		...lines,
-		"Jannat Booking can help compare options and pricing, but the official reservation confirmation and details/payment links are completed by the selected hotel's support desk.",
+		"Jannat Booking can help compare options and pricing, but the official reservation confirmation and details/payment links are completed by the selected hotel's reception and reservations desk.",
 		"Which hotel would you like me to connect you with?",
 	].join("\n");
 }
@@ -1552,21 +1642,21 @@ function ensurePlatformOptionsVisible(reply = "", sc = {}, st = {}, options = []
 function transferSystemNoticeText(sc = {}, st = {}, { hotelName = "", agentName = "" } = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `تم تحويل المحادثة إلى دعم ${hotelName}. ${agentName || "ممثل الفندق"} يراجع الطلب الآن، وسيعود لك بعد لحظات.`;
+		return `\u062a\u0645 \u062a\u062d\u0648\u064a\u0644 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0625\u0644\u0649 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. ${agentName || "\u0645\u0645\u062b\u0644 \u0627\u0644\u0641\u0646\u062f\u0642"} \u064a\u0631\u0627\u062c\u0639 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u0622\u0646\u060c \u0648\u0633\u064a\u0639\u0648\u062f \u0644\u0643 \u0628\u0639\u062f \u0644\u062d\u0638\u0627\u062a.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `La conversacion fue transferida al soporte de ${hotelName}. ${agentName || "El representante del hotel"} esta revisando tu solicitud y respondera en unos momentos.`;
+		return `La conversacion fue transferida a recepcion y reservas de ${hotelName}. ${agentName || "El representante del hotel"} esta revisando tu solicitud y respondera en unos momentos.`;
 	}
 	if (/french/i.test(lang)) {
-		return `La conversation a ete transferee au support de ${hotelName}. ${agentName || "Le representant de l'hotel"} examine votre demande et repondra dans quelques instants.`;
+		return `La conversation a ete transferee a la reception et aux reservations de ${hotelName}. ${agentName || "Le representant de l'hotel"} examine votre demande et repondra dans quelques instants.`;
 	}
 	if (/urdu/i.test(lang)) {
-		return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+		return `This chat has been transferred to ${hotelName} reception and reservations. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
 	}
 	if (/hindi/i.test(lang)) {
-		return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+		return `This chat has been transferred to ${hotelName} reception and reservations. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
 	}
-	return `This chat has been transferred to ${hotelName} support. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
+	return `This chat has been transferred to ${hotelName} reception and reservations. ${agentName || "The hotel representative"} is reviewing your request and will reply shortly.`;
 }
 
 function hotelHandoffQuoteIntroText(
@@ -1591,15 +1681,15 @@ function hotelHandoffQuoteIntroText(
 		? `${total} ${currency}${nights ? ` total for ${nights} nights` : ""}`
 		: "the selected priced option";
 	if (/arabic/i.test(lang)) {
-		return `${name}، معك ${agentName} من دعم ${hotelName}. وصلتني تفاصيل الخيار المختار: ${room} بسعر ${pricePart}. هل ترغب أن أتابع إلى مراجعة الحجز الرسمية؟`;
+		return `${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0648\u0635\u0644\u062a\u0646\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u062e\u062a\u0627\u0631: ${room} \u0628\u0633\u0639\u0631 ${pricePart}. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a\u0629\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
+		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName} du support ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
+		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
 	}
-	return `Hi ${name}, this is ${agentName} from ${hotelName} support. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
+	return `Hi ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
 }
 
 function stabilizeHotelHandoffIntro(text = "", sc = {}, st = {}, optionOrHotel = {}, meta = {}) {
@@ -2072,8 +2162,8 @@ async function buildJannatBookingHotelOptions({
 		sc,
 		st,
 		hasDates
-			? "You are Jannat Booking concierge support. Recommend the best available hotel options from activeHotelOptions only, using totals/prices exactly as provided. Mention budget fit if budget is present. Be warm and helpful. Important: say Jannat Booking support can help compare options and pricing, but the official reservation confirmation and payment/details link must be completed by the selected hotel's support desk. End by asking which hotel they would like to connect with."
-			: "You are Jannat Booking concierge support. Recommend the active hotel options from activeHotelOptions only, focusing on fit and distance if available. Do not invent prices because stay dates are missing. Ask for check-in/check-out dates and approximate budget so you can compare properly. Mention that once they choose a hotel, that hotel's support desk will confirm the reservation and links.",
+			? "You are Jannat Booking concierge support. Recommend the best available hotel options from activeHotelOptions only, using totals/prices exactly as provided. Mention budget fit if budget is present. Be warm and helpful. Important: say Jannat Booking support can help compare options and pricing, but the official reservation confirmation and payment/details link must be completed by the selected hotel's reception and reservations desk. End by asking which hotel they would like to connect with."
+			: "You are Jannat Booking concierge support. Recommend the active hotel options from activeHotelOptions only, focusing on fit and distance if available. Do not invent prices because stay dates are missing. Ask for check-in/check-out dates and approximate budget so you can compare properly. Mention that once they choose a hotel, that hotel's reception and reservations desk will confirm the reservation and links.",
 		{
 			latestUserMessage: text,
 			requestedRoomType: selectedRoomTypeKey,
@@ -2151,8 +2241,8 @@ async function connectJannatCaseToHotelSupport(
 		sc,
 		st,
 		reason === "reservation_cancellation"
-			? "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now for the cancellation review. Reassure them that the selected hotel's team will handle the official reservation action. Keep it one warm sentence."
-			: "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel support desk and will connect them now. Reassure them that the selected hotel's team will handle the official confirmation and reservation/payment/details links. Keep it one warm sentence.",
+			? "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel reception and reservations desk and will connect them now for the cancellation review. Reassure them that the selected hotel's team will handle the official reservation action. Keep it one warm sentence."
+			: "Speak as Jannat Booking concierge support. Tell the guest you found the right hotel reception and reservations desk and will connect them now. Reassure them that the selected hotel's team will handle the official confirmation and reservation/payment/details links. Keep it one warm sentence.",
 		{
 			hotelName,
 			reason,
@@ -2166,7 +2256,7 @@ async function connectJannatCaseToHotelSupport(
 		sc,
 		st,
 		conciergeText ||
-			`Great, I will connect you with ${hotelName} support now so their team can handle the official confirmation and links.`
+			`Great, I will connect you with ${hotelName} reception and reservations now so their team can handle the official confirmation and links.`
 	);
 	if (!conciergeSent) return false;
 
@@ -2208,16 +2298,16 @@ async function connectJannatCaseToHotelSupport(
 
 	const introInstruction =
 		reason === "reservation_update"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for this reservation update, and say you will check the requested change with availability now. Keep it friendly and concise."
 			: reason === "reservation_cancellation"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for a cancellation review, and say you will check the reservation policy now. Keep it friendly and concise."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for a cancellation review, and say you will check the reservation policy now. Keep it friendly and concise."
 			: reason === "payment_help"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for payment/reservation link help, and reassure them you will help with the official hotel link or payment question. Keep it friendly and concise."
 			: reason === "reservation_support"
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
 			: optionOrHotel?.quote?.available
-			? "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
-			: "You are now the selected hotel's support assistant. Introduce yourself by first name from the hotel support desk and ask for check-in and checkout dates so you can confirm availability officially.";
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
+			: "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk and ask for check-in and checkout dates so you can confirm availability officially.";
 	let hotelIntro = await write(io, sc, st, introInstruction, {
 		hotelName,
 		agentName: nextAgentName,
@@ -2351,7 +2441,7 @@ async function redirectJannatReservationToHotelSupport(
 			io,
 			sc,
 			st,
-			"The guest is asking Jannat Booking support about an existing reservation. Jannat Booking must connect them to the reservation hotel's support desk before updates, payment links, or reservation actions. Ask for the reservation confirmation number in one reassuring sentence.",
+			"The guest is asking Jannat Booking support about an existing reservation. Jannat Booking must connect them to the reservation hotel's reception and reservations desk before updates, payment links, or reservation actions. Ask for the reservation confirmation number in one reassuring sentence.",
 			{ latestUserMessage: userText }
 		);
 		await humanSend(io, sc, st, reply);
@@ -2706,10 +2796,34 @@ function correctionText(text = "") {
 	);
 }
 
+function rejectsFullNameCandidate(value = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(value);
+	if (!lower) return true;
+	if (/[?؟]/.test(lower)) return true;
+	if (
+		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you)\b/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644)/i.test(
+			arabic
+		)
+	) {
+		return true;
+	}
+	return /(?:somethingwrong|notcorrect|wrong|incorrect|problem|issue|mistake|phone|whatsapp|hotelphone|callhotel|manager|reservation|booking|confirmation|room|date|email|nationality)/i.test(
+		latinCompact
+	);
+}
+
 function hasUsableFullName(value = "") {
 	const name = String(value || "").replace(/\s+/g, " ").trim();
 	if (!name || name.length < 4 || name.length > 90) return false;
 	if (latestEmailFromText(name) || cleanPhoneCandidate(name)) return false;
+	if (rejectsFullNameCandidate(name)) return false;
 	if (
 		/\b(?:guest|unknown|test|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
 			name
@@ -3680,7 +3794,7 @@ function assistantAskedForDateOrHijriYear(text = "") {
 function recentConversationLines(sc = {}, st = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	const aiSender = st?.hotel?.hotelName
-		? `${toTitle(st.hotel.hotelName)} support`
+		? `${toTitle(st.hotel.hotelName)} reception and reservations`
 		: "Jannat Booking support";
 	return conversation
 		.map((message) => {
@@ -3801,7 +3915,7 @@ async function handoffToHuman(io, sc, st, reason) {
 	const lang = languageOf(sc, st);
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
 	const humanTeam = hotelName
-		? `the ${hotelName} support team`
+		? `the ${hotelName} reception and reservations team`
 		: "the Jannat Booking support team";
 	let text =
 		reason === "jannat_hotel_complaint"
@@ -3855,7 +3969,7 @@ async function handoffToHuman(io, sc, st, reason) {
 				? "The latest guest message is abusive or extremely rude. Do not argue, lecture, or mirror the language. Calmly state that a human support specialist will continue the conversation. Keep it one short sentence and do not ask another question."
 				: reason === "jannat_hotel_complaint"
 				? "The guest is making a complaint about a hotel or hotel experience through Jannat Booking support. Show sincere empathy, reassure them that Jannat Booking management has been urgently alerted, and say action will be taken with the hotel team as needed. Keep it professional, warm, and concise. Do not ask another question."
-				: "Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel support voice when hotel context exists, and do not ask another question.",
+				: "Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel reception and reservations voice when hotel context exists, and do not ask another question.",
 			{ handoffReason: reason, fallbackText: text }
 		);
 		if (learnedText) text = learnedText;
@@ -4077,7 +4191,9 @@ async function loadLearningContext(sc, st, instruction, context = {}) {
 
 function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAddress = "Guest") {
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
-	const supportDesk = hotelName ? `${hotelName} support` : "Jannat Booking support";
+	const supportDesk = hotelName
+		? `${hotelName} reception and reservations`
+		: "Jannat Booking support";
 	const text = String(instruction || "").toLowerCase();
 	const lang = languageOf(sc, st);
 	const isArabic = /arabic/i.test(lang);
@@ -4374,22 +4490,22 @@ async function write(io, sc, st, instruction, context = {}) {
 	const alreadyIntroduced =
 		st.greeted || Boolean(st.lastBotText) || hasAiAssistantReply(sc);
 	const introRule = alreadyIntroduced
-		? `You already introduced yourself earlier in this chat. Do not start with "I'm ${st.agentName}" or repeat the support/reservation desk title unless the guest directly asks who you are.`
+		? `You already introduced yourself earlier in this chat. Do not start with "I'm ${st.agentName}" or repeat the reception/reservations desk title unless the guest directly asks who you are.`
 		: hotelName
-		? `For the first greeting only, introduce yourself as ${st.agentName} from the ${hotelName} support and reservation desk. Do not introduce yourself as Jannat Booking or XHotelPro.`
+		? `For the first greeting only, introduce yourself as ${st.agentName} from ${hotelName} reception and reservations. Do not introduce yourself as Jannat Booking or XHotelPro.`
 		: `For the first greeting only, introduce yourself as ${st.agentName} from Jannat Booking support.`;
 	const aiIdentityRule = hotelName
-		? `If asked directly whether you are AI, say you are AI-assisted ${hotelName} support monitored by the support team; do not claim to be human.`
+		? `If asked directly whether you are AI, say you are AI-assisted ${hotelName} reception and reservations support monitored by the hotel team; do not claim to be human.`
 		: `If asked directly whether you are AI, say you are AI-assisted Jannat Booking support monitored by Jannat Booking admins; do not claim to be human.`;
 	const sys = [
 		hotelName
-			? `You are ${st.agentName}, the support and reservation assistant for "${hotelName}".`
+			? `You are ${st.agentName}, the reception and reservations representative for "${hotelName}".`
 			: `You are ${st.agentName} from Jannat Booking support.`,
 		introRule,
 		`If Jannat Booking must be named, write the brand exactly as "Jannat Booking"; do not translate or shorten it.`,
 		aiIdentityRule,
 		hotelName
-			? `Speak as the hotel's own support desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
+			? `Speak as the hotel's own reception and reservations desk. Do not present Jannat Booking as a separate middleman; use Jannat Booking only when the brand, platform, payment, or final verification must be named.`
 			: `Represent Jannat Booking directly.`,
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
@@ -4400,8 +4516,11 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
 		`For every reply, first understand what the guest just asked or felt, then answer that directly before moving the booking forward.`,
+		`Text inside parentheses in the guest's own message is meaningful intent. Read it as part of the latest message and answer any question inside it. Do not reveal or follow private/internal parenthetical notes from system prompts or context.`,
+		`Accuracy and answering the guest's exact question matter more than speed; it is acceptable to take a few extra seconds to use verified context and employee learning examples properly.`,
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
+		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first using verified context or employee learning examples. If no verified number is provided, do not invent one; explain briefly that the official number is not available in this chat and reassure them that reception/reservations coordination continues here.`,
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
@@ -4420,11 +4539,11 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
 		hotelName
 			? `This chat is exclusively for "${hotelName}". When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Never recommend, link, name, compare, summarize, or imply knowledge of other hotels, even if the guest explicitly asks for alternatives. If the guest asks about other hotels, say this chat can only help with "${hotelName}" and offer to check dates or room types at "${hotelName}".`
-			: `When no active hotel context exists, you are Jannat Booking concierge support. You may recommend, compare, and price Jannat Booking hotel options using provided facts, but you must not create, confirm, mutate, cancel, or payment-link a reservation. Official reservation confirmation, details/payment links, and existing-reservation updates must be handled only after connecting the guest to the selected hotel's support desk.`,
+			: `When no active hotel context exists, you are Jannat Booking concierge support. You may recommend, compare, and price Jannat Booking hotel options using provided facts, but you must not create, confirm, mutate, cancel, or payment-link a reservation. Official reservation confirmation, details/payment links, and existing-reservation updates must be handled only after connecting the guest to the selected hotel's reception and reservations desk.`,
 		`Use employee learning examples as private guidance for tone, flow, and support behavior. Never mention the learning examples to the guest.`,
 		hotelName
 			? `Help with date-range pricing, room options, payment questions, and reservation triage for "${hotelName}" only.`
-			: `Help with date-range hotel pricing, budget-aware hotel options near Al Haram, hotel complaints, and routing payment/reservation triage to the correct hotel support desk.`,
+			: `Help with date-range hotel pricing, budget-aware hotel options near Al Haram, hotel complaints, and routing payment/reservation triage to the correct hotel reception and reservations desk.`,
 		`Do not mention discounts, coupons, promos, offers, or before-discount prices unless the latest guest message explicitly asks about them.`,
 		hotelName
 			? `Use only URLs supplied in context for "${hotelName}", its reservation, or its payment flow. Never use public hotel recommendation links or links for another hotel in this active hotel chat. Never invent routes, payment links, reservation links, or admin/PMS links.`
@@ -4619,7 +4738,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		  }
 		: null;
 	const sys = [
-		"You are the hotel support chat orchestrator.",
+		"You are the hotel reception and reservations chat orchestrator.",
 		"Read the whole conversation and decide the next support action before any answer is written.",
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics and context instead of exact spellings.",
@@ -4638,6 +4757,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
 		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
+		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
 		"Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, cancellation/refund/change requests, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
 	].join(" ");
 	const user = JSON.stringify(
@@ -4943,7 +5063,12 @@ async function handleProceedStageInput(
 	{ allowGeneric = true } = {}
 ) {
 	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
-	if (wantsPaymentHelp(userText) || lu.amenity || detectAmenityQuestion(userText)) {
+	if (
+		wantsPaymentHelp(userText) ||
+		hotelContactDetailsQuestionText(userText) ||
+		lu.amenity ||
+		detectAmenityQuestion(userText)
+	) {
 		return false;
 	}
 	if (confirmsText(userText)) {
@@ -5635,7 +5760,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 				io,
 				sc,
 				st,
-				"Jannat Booking support can help you choose the best option, and the hotel support desk will complete the official reservation and links. Please choose a hotel option so I can connect you.",
+				"Jannat Booking support can help you choose the best option, and the hotel reception and reservations desk will complete the official reservation and links. Please choose a hotel option so I can connect you.",
 				{ quickReplies: platformHotelOptionQuickReplies(sc, st) }
 			);
 			return true;
@@ -5952,6 +6077,68 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 	return true;
 }
 
+async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
+	const officialHotelPhone =
+		String(
+			st.hotel?.phone ||
+				st.hotel?.hotelPhone ||
+				st.hotel?.contactPhone ||
+				st.hotel?.whatsapp ||
+				""
+		).trim();
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest is asking for the hotel's phone, WhatsApp, reception contact, manager/responsible person number, or direct hotel contact. Answer as the hotel reception and reservations representative, and answer this direct question first. Use employee learning examples if provided. Do not repeat the quote, price, dates, room type, or proceed/review prompt. If an official verified hotel phone/WhatsApp is provided in context, share it. If not, do not invent a number; politely say there is no official phone/WhatsApp number available in this chat. Reassure the guest that Jannat Booking coordinates directly with the hotel's reservation department and confirmed bookings are handled through the official reservation process. Keep it concise and warm.",
+		{
+			latestUserMessage: userText,
+			hotelName: localizedHotelName(sc, st),
+			officialHotelPhone,
+			supportEmail: AI_SUPPORT_EMAIL,
+		}
+	);
+	await humanSend(io, sc, st, stripGeneralBookingPivot(reply, supportEmailFallbackText(sc, st)));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	logStep(String(sc._id), "hotel_contact.reply", {
+		hasOfficialHotelPhone: Boolean(officialHotelPhone),
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
+}
+
+async function askExplicitPastDateClarification(io, sc, st, userText = "", dates = {}) {
+	const suggestedDates = futureSameMonthDayRange(dates);
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest provided an explicit Gregorian date range that is before today. Do not change the year silently and do not quote availability yet. Answer naturally that the typed dates appear to be in the past, then ask one short clarification whether they meant the same day/month in the next future year. Keep it warm and direct.",
+		{
+			latestUserMessage: userText,
+			todayISO: todayISODate(),
+			providedDates: {
+				checkinISO: dates?.checkinISO || null,
+				checkoutISO: dates?.checkoutISO || null,
+				raw: dates?.raw || null,
+			},
+			suggestedDates,
+		}
+	);
+	await humanSend(io, sc, st, reply);
+	st.waitFor = "dates";
+	stampAsk(st, "dates");
+	logStep(String(sc._id), "dates.past_explicit_clarify", {
+		checkinISO: dates?.checkinISO || null,
+		checkoutISO: dates?.checkoutISO || null,
+		suggestedDates,
+	});
+	return true;
+}
+
 async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
 	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
 	st.waitFor =
@@ -5967,6 +6154,9 @@ async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "")
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
+	if (hotelContactDetailsQuestionText(userText)) {
+		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
 		await humanSend(io, sc, st, closeReply);
@@ -6374,8 +6564,8 @@ async function planTurn(io, sc) {
 							sc,
 							st,
 							initialInquiry
-								? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active support assistant, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-								: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active support assistant, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+								? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+								: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ initialInquiry }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -6395,7 +6585,7 @@ async function planTurn(io, sc) {
 							io,
 							sc,
 							st,
-							"Greet the guest by first name, introduce yourself as the active support assistant, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+							"Greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ latestUserMessage: userText }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -6508,6 +6698,16 @@ async function planTurn(io, sc) {
 			directUpdateLu.dates?.checkoutISO &&
 			looksLikeReservationDateUpdate(userText, directUpdateLu)
 		) {
+			if (needsExplicitPastDateClarification(userText, directUpdateLu.dates)) {
+				await askExplicitPastDateClarification(
+					io,
+					sc,
+					st,
+					userText,
+					directUpdateLu.dates
+				);
+				return;
+			}
 			const handled = await handleReservationUpdateRequest(
 				io,
 				sc,
@@ -6524,6 +6724,10 @@ async function planTurn(io, sc) {
 		}
 		if (vagueHajjInquiryText(userText)) {
 			await answerVagueHajjInquiry(io, sc, st, userText);
+			return;
+		}
+		if (hotelContactDetailsQuestionText(userText)) {
+			await answerHotelContactDetailsInquiry(io, sc, st, userText);
 			return;
 		}
 		if (isReservationDetailStep(st)) {
@@ -6547,6 +6751,10 @@ async function planTurn(io, sc) {
 		if (preNluProceedHandled) return;
 
 		const quickTurnDates = quickDateRange(userText);
+		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
+			return;
+		}
 		if (
 			st.hotel &&
 			st.slots.roomTypeKey &&
@@ -6575,7 +6783,7 @@ async function planTurn(io, sc) {
 			st.greetScheduled = true;
 			st.waitFor = "intentConfirm";
 			const greetOwner = st.hotel?.hotelName
-				? `the ${toTitle(st.hotel.hotelName)} support desk`
+				? `the ${toTitle(st.hotel.hotelName)} reception and reservations desk`
 				: "Jannat Booking support";
 			const greetText = await write(
 				io,
@@ -6611,6 +6819,11 @@ async function planTurn(io, sc) {
 				userText,
 				decisionLu
 			);
+			return;
+		}
+
+		if (needsExplicitPastDateClarification(userText, decisionLu?.dates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, decisionLu.dates);
 			return;
 		}
 
@@ -7138,6 +7351,10 @@ async function planTurn(io, sc) {
 			return;
 		}
 		const dateRange = extractDateRange(userText);
+		if (needsExplicitPastDateClarification(userText, dateRange)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, dateRange);
+			return;
+		}
 		if (
 			dateRange.checkinISO &&
 			dateRange.checkoutISO &&
