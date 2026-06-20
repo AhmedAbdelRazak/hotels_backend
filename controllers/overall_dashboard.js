@@ -6656,6 +6656,65 @@ const serializeCalendarHotel = (hotel = {}) => {
 	};
 };
 
+const serializeCalendarPricingRow = (row = {}) => {
+	const calendarDate = toCalendarDateKey(row?.calendarDate);
+	const blocked =
+		row?.blocked === true ||
+		String(row?.status || "").toLowerCase() === "blocked" ||
+		String(row?.color || "").toLowerCase() === "black";
+	return {
+		calendarDate,
+		status: blocked ? "blocked" : "open",
+		blocked,
+		sellingPrice: blocked ? 0 : Number(row?.sellingPrice ?? row?.price ?? 0),
+		price: blocked ? 0 : Number(row?.price ?? row?.sellingPrice ?? 0),
+		rootPrice: Number(row?.rootPrice || 0),
+		commissionPercent: blocked ? 0 : Number(row?.commissionPercent || 0),
+		color: row?.color || "",
+		...(row?.agentId
+			? {
+					agentId: normalizeCalendarId(row.agentId),
+					agentName: row.agentName || "",
+					agentEmail: row.agentEmail || "",
+					companyName: row.companyName || "",
+			  }
+			: {}),
+		...(row?.priceVariantDataId
+			? { priceVariantDataId: normalizeCalendarId(row.priceVariantDataId) }
+			: {}),
+		...(row?.priceVariantItemId
+			? { priceVariantItemId: normalizeCalendarId(row.priceVariantItemId) }
+			: {}),
+		...(row?.priceVariantName ? { priceVariantName: row.priceVariantName } : {}),
+		...(row?.priceVariantNameOtherLanguage
+			? { priceVariantNameOtherLanguage: row.priceVariantNameOtherLanguage }
+			: {}),
+	};
+};
+
+const buildCalendarPricingUpdatePayload = ({
+	scope = "general",
+	hotelId = "",
+	roomId = "",
+	replaceDates = [],
+	agentIds = [],
+	rows = [],
+} = {}) => ({
+	scope,
+	field: scope === "agents" ? "agentPricingRate" : "pricingRate",
+	hotelId: normalizeCalendarId(hotelId),
+	roomId: normalizeCalendarId(roomId),
+	replaceDates: [
+		...new Set(
+			(Array.isArray(replaceDates) ? replaceDates : []).map(toCalendarDateKey)
+		),
+	].filter(Boolean),
+	agentIds: uniqueValidIds(agentIds),
+	rows: (Array.isArray(rows) ? rows : [])
+		.map(serializeCalendarPricingRow)
+		.filter((row) => row.calendarDate),
+});
+
 const buildCalendarAgentQuery = (hotelIds = [], agentIds = []) => {
 	const ids = uniqueValidIds(hotelIds);
 	const objectIds = ids.map((id) => ObjectId(id));
@@ -8585,7 +8644,7 @@ const propagatePriceVariantUpdates = async (
 	return { updatedRows, updatedHotels };
 };
 
-const rebuildCalendarBasedPriceVariant = async (doc = {}) => {
+const rebuildCalendarBasedPriceVariantOnce = async (doc = {}) => {
 	const hotelIds = uniqueValidIds(doc?.hotelIds);
 	if (!hotelIds.length) {
 		return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
@@ -8755,7 +8814,7 @@ const buildCalendarBasedVariantPeriodPayload = ({
 	};
 };
 
-const refreshCalendarBasedPriceVariantDates = async (doc = {}, touchedRows = []) => {
+const refreshCalendarBasedPriceVariantDatesOnce = async (doc = {}, touchedRows = []) => {
 	const docHotelIds = uniqueValidIds(doc?.hotelIds);
 	const docHotelIdSet = new Set(docHotelIds);
 	const variantDateSet = new Set(nextPricingVariantDateKeys());
@@ -8929,6 +8988,66 @@ const refreshCalendarBasedPriceVariantDates = async (doc = {}, touchedRows = [])
 	};
 };
 
+const PRICE_VARIANT_MUTATION_RETRY_LIMIT = 3;
+const priceVariantMutationLocks = new Map();
+
+const isMongooseVersionError = (error = {}) =>
+	error?.name === "VersionError" ||
+	/No matching document found for id .* version/i.test(error?.message || "");
+
+const withPriceVariantMutationLock = (docId = "", task = async () => {}) => {
+	const key = normalizeCalendarId(docId);
+	if (!key) return task();
+	const previous = priceVariantMutationLocks.get(key) || Promise.resolve();
+	const current = previous.catch(() => undefined).then(task);
+	const cleanup = () => {
+		if (priceVariantMutationLocks.get(key) === current) {
+			priceVariantMutationLocks.delete(key);
+		}
+	};
+	priceVariantMutationLocks.set(key, current);
+	current.then(cleanup, cleanup);
+	return current;
+};
+
+const runPriceVariantMutationWithRetry = async (
+	doc = {},
+	mutation = async () => ({ rebuilt: false, updatedRows: 0, updatedHotels: 0 })
+) => {
+	const docId = normalizeCalendarId(doc?._id);
+	let currentDoc = doc;
+	for (let attempt = 1; attempt <= PRICE_VARIANT_MUTATION_RETRY_LIMIT; attempt += 1) {
+		try {
+			return await mutation(currentDoc);
+		} catch (error) {
+			if (
+				!isMongooseVersionError(error) ||
+				!docId ||
+				attempt >= PRICE_VARIANT_MUTATION_RETRY_LIMIT
+			) {
+				throw error;
+			}
+			console.warn("Retrying price variant calendar refresh after version conflict", {
+				priceVariantDataId: docId,
+				attempt,
+			});
+			currentDoc = await PriceVariant.findById(docId).exec();
+			if (!currentDoc || currentDoc.active === false) {
+				return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+			}
+		}
+	}
+	return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+};
+
+const rebuildCalendarBasedPriceVariant = (doc = {}) =>
+	runPriceVariantMutationWithRetry(doc, rebuildCalendarBasedPriceVariantOnce);
+
+const refreshCalendarBasedPriceVariantDates = (doc = {}, touchedRows = []) =>
+	runPriceVariantMutationWithRetry(doc, (freshDoc) =>
+		refreshCalendarBasedPriceVariantDatesOnce(freshDoc, touchedRows)
+	);
+
 const propagateCalendarBasePricingVariants = async ({
 	hotelIds = [],
 	touchedRows = [],
@@ -8950,7 +9069,10 @@ const propagateCalendarBasePricingVariants = async ({
 			{ basePriceSource: "calendar_main_price" },
 			{ "pricingItems.pricingBasis.mode": "calendar_base" },
 		],
-	}).exec();
+	})
+		.select("_id")
+		.lean()
+		.exec();
 	const summary = {
 		variantDocs: docs.length,
 		rebuiltVariantDocs: 0,
@@ -8958,10 +9080,22 @@ const propagateCalendarBasePricingVariants = async ({
 		updatedHotels: 0,
 	};
 	const normalizedTouchedRows = normalizeTouchedCalendarRows(touchedRows);
-	for (const doc of docs) {
-		const result = normalizedTouchedRows.length
-			? await refreshCalendarBasedPriceVariantDates(doc, normalizedTouchedRows)
-			: await rebuildCalendarBasedPriceVariant(doc);
+	for (const docRef of docs) {
+		const docId = normalizeCalendarId(docRef?._id);
+		if (!docId || !ObjectId.isValid(docId)) continue;
+		const result = await withPriceVariantMutationLock(docId, async () => {
+			const doc = await PriceVariant.findById(docId).exec();
+			if (!doc || doc.active === false) {
+				return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+			}
+			const docHotelIds = new Set(uniqueValidIds(doc.hotelIds));
+			if (!ids.some((hotelId) => docHotelIds.has(hotelId))) {
+				return { rebuilt: false, updatedRows: 0, updatedHotels: 0 };
+			}
+			return normalizedTouchedRows.length
+				? await refreshCalendarBasedPriceVariantDates(doc, normalizedTouchedRows)
+				: await rebuildCalendarBasedPriceVariant(doc);
+		});
 		if (result.rebuilt) summary.rebuiltVariantDocs += 1;
 		summary.updatedRows += result.updatedRows || 0;
 		summary.updatedHotels += result.updatedHotels || 0;
@@ -9536,6 +9670,7 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 		const agentMap = new Map(agentDocs.map((agent) => [normalizeId(agent._id), agent]));
 		let updatedRows = 0;
 		const updatedHotels = [];
+		const calendarPricingUpdates = [];
 		const touchedGeneralCalendarRows = [];
 		const calendarType = body.calendarType === "gregorian" ? "gregorian" : "hijri";
 
@@ -9634,6 +9769,16 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 						agentSet
 					);
 					rooms[roomIndex].agentPricingRate = nextAgentPricingRate;
+					calendarPricingUpdates.push(
+						buildCalendarPricingUpdatePayload({
+							scope,
+							hotelId: selection.hotelId,
+							roomId: selection.roomId,
+							replaceDates: [...roomDateSet],
+							agentIds,
+							rows: nextRows,
+						})
+					);
 					roomUpdateOps.push(
 						HotelDetails.updateOne(
 							{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
@@ -9672,6 +9817,15 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 						roomDateSet
 					);
 					rooms[roomIndex].pricingRate = nextPricingRate;
+					calendarPricingUpdates.push(
+						buildCalendarPricingUpdatePayload({
+							scope,
+							hotelId: selection.hotelId,
+							roomId: selection.roomId,
+							replaceDates: [...roomDateSet],
+							rows: nextRows,
+						})
+					);
 					roomUpdateOps.push(
 						HotelDetails.updateOne(
 							{ _id: hotel._id, "roomCountDetails._id": rooms[roomIndex]._id },
@@ -9695,7 +9849,9 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 			});
 			if (roomUpdateOps.length) {
 				await Promise.all(roomUpdateOps);
-				updatedHotels.push(serializeCalendarHotel(hotelMap.get(hotelId) || hotel));
+				if (scope !== "general") {
+					updatedHotels.push(serializeCalendarHotel(hotelMap.get(hotelId) || hotel));
+				}
 			}
 		}
 
@@ -9723,6 +9879,7 @@ exports.saveOverallCalendarPricing = async (req, res) => {
 			operation: pricingOperation,
 			updatedRows,
 			updatedHotels,
+			calendarPricingUpdates,
 			priceVariant: variantSelection
 				? {
 						priceVariantDataId: variantSelection.priceVariantDataId,
