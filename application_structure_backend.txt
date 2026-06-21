@@ -2746,9 +2746,12 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Exact duplicate AI text is still protected by the database append guard and
     frontend clientTag/message merge logic from the previous polish pass.
 - Idle follow-up and close timing:
-  - First unanswered-guest follow-up remains 10 seconds after an AI prompt.
-  - Final friendly reminder remains 30 seconds after the AI prompt and may use
-    one tasteful emoji.
+  - First unanswered-guest follow-up waits for 10 seconds of no guest activity
+    after an AI prompt.
+  - Guest typing counts as activity. If the guest is still composing after 10
+    seconds, the reminder is deferred until the guest has been quiet again.
+  - Final friendly reminder waits for 30 more seconds of no guest activity and
+    may use one tasteful emoji.
   - Fully inactive AI support cases are marked read and closed after 5 minutes,
     not 2 minutes. The code-level minimum is also 5 minutes.
 - Fresh-chat privacy:

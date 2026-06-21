@@ -4258,6 +4258,32 @@ function setAiIdleTimer(caseId, callback, delayMs) {
 	aiIdleTimers.set(key, timer);
 }
 
+function markGuestActivity(caseId, { activityAt = now(), typingHoldMs = 0 } = {}) {
+	const st = memo.get(String(caseId || ""));
+	if (!st) return;
+	const at = Number(activityAt || now());
+	const safeAt = Number.isFinite(at) ? at : now();
+	st.lastGuestActivityAt = Math.max(Number(st.lastGuestActivityAt || 0), safeAt);
+	if (typingHoldMs > 0) {
+		st.guestTypingUntil = Math.max(
+			Number(st.guestTypingUntil || 0),
+			safeAt + Number(typingHoldMs || 0)
+		);
+	}
+}
+
+function idleQuietRemainingMs(st = {}, anchor = {}, quietMs = 0) {
+	const requiredQuietMs = Math.max(0, Number(quietMs) || 0);
+	const referenceAt = Math.max(
+		Number(anchor.idleSinceAt || 0),
+		Number(anchor.at || 0),
+		Number(st.lastGuestActivityAt || 0),
+		Number(st.guestTypingUntil || 0)
+	);
+	const deadline = referenceAt + requiredQuietMs;
+	return Math.max(0, deadline - now());
+}
+
 async function getIdleReadyCase(caseId, anchor) {
 	const latestCase = await getSupportCaseById(caseId);
 	if (!latestCase) return null;
@@ -4282,12 +4308,32 @@ async function runAiIdleFollowupStep(io, caseId, anchor, stage) {
 			ready.latestCase,
 			activeHotelContextForCase(ready.latestCase, ready.hotel)
 		);
-		const text = idleFollowupText(ready.latestCase, st, stage);
-		await humanSend(io, ready.latestCase, st, text, { scheduleIdle: false });
-		if (stage === "first") {
+		const quietMs =
+			stage === "first" ? AI_IDLE_FIRST_FOLLOWUP_MS : AI_IDLE_FINAL_FOLLOWUP_MS;
+		const remainingMs = idleQuietRemainingMs(st, anchor, quietMs);
+		if (remainingMs > 0) {
 			setAiIdleTimer(
 				caseId,
-				() => runAiIdleFollowupStep(io, caseId, anchor, "final"),
+				() => runAiIdleFollowupStep(io, caseId, anchor, stage),
+				remainingMs
+			);
+			logStep(caseId, "idle.defer", {
+				stage,
+				remainingMs,
+				reason: "guest_activity",
+			});
+			return;
+		}
+		const text = idleFollowupText(ready.latestCase, st, stage);
+		const sent = await humanSend(io, ready.latestCase, st, text, {
+			scheduleIdle: false,
+		});
+		if (!sent) return;
+		if (stage === "first") {
+			const nextAnchor = { ...anchor, idleSinceAt: now() };
+			setAiIdleTimer(
+				caseId,
+				() => runAiIdleFollowupStep(io, caseId, nextAnchor, "final"),
 				AI_IDLE_FINAL_FOLLOWUP_MS
 			);
 		} else if (stage === "final") {
@@ -4311,6 +4357,23 @@ async function runAiIdleCloseStep(io, caseId, anchor) {
 	try {
 		const ready = await getIdleReadyCase(caseId, anchor);
 		if (!ready) return;
+		const st = ensureState(
+			ready.latestCase,
+			activeHotelContextForCase(ready.latestCase, ready.hotel)
+		);
+		const remainingMs = idleQuietRemainingMs(st, anchor, AI_IDLE_CLOSE_MS);
+		if (remainingMs > 0) {
+			setAiIdleTimer(
+				caseId,
+				() => runAiIdleCloseStep(io, caseId, anchor),
+				remainingMs
+			);
+			logStep(caseId, "idle.close_defer", {
+				remainingMs,
+				reason: "guest_activity",
+			});
+			return;
+		}
 		const closedCase = await closeSupportCaseForAiIdle(caseId, {
 			now: new Date(),
 		});
@@ -4346,6 +4409,7 @@ function scheduleAiIdleFollowups(io, sc, st, messageData = {}) {
 		clientTag: messageData.clientTag || "",
 		text: String(messageData.message || "").trim(),
 		at: messageTime(messageData) || now(),
+		idleSinceAt: messageTime(messageData) || now(),
 	};
 	setAiIdleTimer(
 		caseId,
@@ -4380,6 +4444,7 @@ function ensureState(sc, hotel) {
 			greeted: alreadyGreeted,
 			greetScheduled: alreadyGreeted,
 			guestTypingUntil: 0,
+			lastGuestActivityAt: 0,
 			turnInFlight: false,
 			activeTurnHadReply: false,
 			interrupt: false,
@@ -9350,6 +9415,9 @@ async function planTurn(io, sc) {
 			? new Date(latestGuestMessage.date).getTime()
 			: now();
 		if (!Number.isFinite(st.activeTurnGuestAt)) st.activeTurnGuestAt = now();
+		if (userText) {
+			markGuestActivity(caseId, { activityAt: st.activeTurnGuestAt });
+		}
 		st.activeTurnReplyTargetMs = randomBetween(
 			AI_REPLY_TARGET_MIN_MS,
 			AI_REPLY_TARGET_MAX_MS
@@ -11156,14 +11224,14 @@ function wireSocket(io) {
 		});
 
 		socket.on("typing", ({ caseId }) => {
-			const st = memo.get(String(caseId));
-			if (st) st.guestTypingUntil = now() + 1500;
+			markGuestActivity(caseId, { typingHoldMs: 2500 });
 		});
 
 		socket.on("sendMessage", async (message) => {
 			try {
 				const caseId = String(message?.caseId || "");
 				if (!caseId) return;
+				markGuestActivity(caseId);
 				const st = memo.get(caseId);
 				if (st && st.turnInFlight) {
 					st.queue.push(now());

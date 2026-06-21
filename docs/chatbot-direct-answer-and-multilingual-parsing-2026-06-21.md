@@ -276,9 +276,11 @@ Additional tightening added:
 - Queued turns are now consumed only when the latest customer message is newer
   or the current turn is still genuinely unanswered. Otherwise the stale queue
   is dropped after the successful reply.
-- Idle chat handling remains lightweight: first follow-up after 10 seconds,
-  final friendly reminder after 30 seconds, and automatic read/close only after
-  5 minutes of inactivity. The reminders include one soft emoji when appropriate.
+- Idle chat handling remains lightweight and guest-friendly: first follow-up
+  after 10 seconds of no guest activity, final friendly reminder after 30 more
+  seconds of no guest activity, and automatic read/close only after 5 minutes of
+  inactivity. Guest typing counts as activity, so reminders defer while the
+  guest is composing. The reminders include one soft emoji when appropriate.
 - Each support case is treated as self-contained by default. If a guest asks to
   resume or complete an old chat, the bot explains the security/privacy boundary
   warmly, thanks the guest for patience, reassures them it is fine to start
