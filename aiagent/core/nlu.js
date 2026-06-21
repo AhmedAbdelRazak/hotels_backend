@@ -1,5 +1,6 @@
 // aiagent/core/nlu.js
 const { chat } = require("./openai");
+const { normalizeNumberWordsForParsing } = require("./numberWords");
 
 /* ---------------- helpers ---------------- */
 function firstNameOf(name = "") {
@@ -127,12 +128,38 @@ function roomTermMatches(text = "", term = "") {
 	return low.includes(raw);
 }
 
-function mapRoomToKey(text = "") {
-	const low = text.toLowerCase();
-	for (const r of ROOM_SYNONYMS) {
-		if (r.terms.some((t) => roomTermMatches(low, t))) return r.key;
+function capacityRoomKeyFromText(text = "") {
+	const low = normalizeNumberWordsForParsing(text);
+	const roomWords =
+		"room|rooms|bed|beds|suite|suites|habitacion(?:es)?|chambre?s?|kamar|bilik|\\u063a\\u0631\\u0641(?:\\u0647|\\u0629)?|\\u0627\\u0648\\u0636\\u0647|\\u0627\\u0648\\u0636\\u0629|\\u0633\\u0631\\u064a\\u0631|\\u0627\\u0633\\u0631\\u0647|\\u0627\\u0633\\u0631\\u0629";
+	const guestWords =
+		"people|persons?|guests?|adults?|pax|travell?ers?|personas?|huespedes|hu\\u00e9spedes|adultos?|personnes?|voyageurs?|adultes?|tamu|orang|tetamu|mehman|mehmaan|\\u092e\\u0947\\u0939\\u092e\\u093e\\u0928|\\u0645\\u06c1\\u0645\\u0627\\u0646|\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646|\\u0648\\u0646)?|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0641\\u0631\\u0627\\u062f|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0636\\u064a\\u0648\\u0641|\\u0646\\u0641\\u0631|\\u0632\\u0648\\u0627\\u0631";
+	const contextWords = `(?:${roomWords}|${guestWords})`;
+	const keys = {
+		2: "doubleRooms",
+		3: "tripleRooms",
+		4: "quadRooms",
+		5: "familyRooms",
+	};
+	for (const count of [5, 4, 3, 2]) {
+		const pattern = new RegExp(
+			`(?:\\b${count}\\b.{0,32}${contextWords}|${contextWords}.{0,32}\\b${count}\\b)`,
+			"i"
+		);
+		if (pattern.test(low)) return keys[count];
 	}
 	return null;
+}
+
+function mapRoomToKey(text = "") {
+	const low = String(text || "").toLowerCase();
+	const normalized = normalizeNumberWordsForParsing(text).toLowerCase();
+	for (const r of ROOM_SYNONYMS) {
+		if (r.terms.some((t) => roomTermMatches(low, t) || roomTermMatches(normalized, t))) {
+			return r.key;
+		}
+	}
+	return capacityRoomKeyFromText(text);
 }
 
 const MONTHS = {
@@ -190,6 +217,27 @@ const MONTHS = {
 	octobre: 10,
 	novembre: 11,
 	decembre: 12,
+	januari: 1,
+	februari: 2,
+	maret: 3,
+	mac: 3,
+	mei: 5,
+	juli: 7,
+	julai: 7,
+	agustus: 8,
+	ogos: 8,
+	desember: 12,
+	disember: 12,
+	janwari: 1,
+	janvari: 1,
+	farwari: 2,
+	farvari: 2,
+	aprail: 4,
+	agast: 8,
+	sitambar: 9,
+	aktubar: 10,
+	navambar: 11,
+	disambar: 12,
 	"\u064a\u0646\u0627\u064a\u0631": 1,
 	"\u0641\u0628\u0631\u0627\u064a\u0631": 2,
 	"\u0645\u0627\u0631\u0633": 3,
@@ -209,6 +257,26 @@ const MONTHS = {
 	"\u0623\u0643\u062a\u0648\u0628\u0631": 10,
 	"\u0646\u0648\u0641\u0645\u0628\u0631": 11,
 	"\u062f\u064a\u0633\u0645\u0628\u0631": 12,
+	"\u062c\u0646\u0648\u0631\u064a": 1,
+	"\u0641\u0631\u0648\u0631\u064a": 2,
+	"\u0645\u0626\u064a": 5,
+	"\u062c\u0648\u0646": 6,
+	"\u062c\u0648\u0644\u0627\u0626\u064a": 7,
+	"\u0627\u06af\u0633\u062a": 8,
+	"\u0633\u062a\u0645\u0628\u0631": 9,
+	"\u0646\u0648\u0645\u0628\u0631": 11,
+	"\u092c\u0928\u0935\u0930\u0940": 1,
+	"\u092b\u0930\u0935\u0930\u0940": 2,
+	"\u092e\u093e\u0930\u094d\u091a": 3,
+	"\u0905\u092a\u094d\u0930\u0948\u0932": 4,
+	"\u092e\u0908": 5,
+	"\u091c\u0942\u0928": 6,
+	"\u091c\u0941\u0932\u093e\u0908": 7,
+	"\u0905\u0917\u0938\u094d\u0924": 8,
+	"\u0938\u093f\u0924\u0902\u092c\u0930": 9,
+	"\u0905\u0915\u094d\u091f\u0942\u092c\u0930": 10,
+	"\u0928\u0935\u0902\u092c\u0930": 11,
+	"\u0926\u093f\u0938\u0902\u092c\u0930": 12,
 };
 
 const HIJRI_MONTH_LABELS = [
@@ -285,7 +353,7 @@ const HIJRI_MONTHS = HIJRI_MONTH_LABELS.flatMap((labels, index) =>
 );
 
 function normalizeArabicSearchText(value = "") {
-	return digitsToEnglish(String(value || ""))
+	return normalizeNumberWordsForParsing(value)
 		.toLowerCase()
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f\u064b-\u065f\u0670]/g, "")
@@ -866,7 +934,7 @@ function escapeDateRegex(value = "") {
 }
 
 function normalizeDateSearchText(value = "") {
-	return digitsToEnglish(String(value || ""))
+	return normalizeNumberWordsForParsing(value)
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f]/g, "")
 		.replace(/\u00a0/g, " ")
@@ -940,7 +1008,7 @@ function isGregorianMonthJoiner(value = "") {
 
 function gregorianDateTokens(text = "") {
 	const raw = normalizeArabicSearchText(text);
-	return Array.from(raw.matchAll(/\d{1,4}|[a-z\u0600-\u06ff]+/gi)).map(
+	return Array.from(raw.matchAll(/\d{1,4}|[a-z\u0600-\u06ff\u0900-\u097f]+/gi)).map(
 		(match) => ({
 			value: match[0],
 			index: match.index,
@@ -991,7 +1059,7 @@ function readGregorianMonthAt(tokens, index, { fuzzy = true } = {}) {
 function hasRangeConnectorBetween(raw, leftToken, rightToken) {
 	const between = raw.slice(leftToken.end, rightToken.index);
 	if (/[-\u2013\u2014]/.test(between)) return true;
-	const words = normalizeArabicSearchText(between).match(/[a-z\u0600-\u06ff]+/gi) || [];
+	const words = normalizeArabicSearchText(between).match(/[a-z\u0600-\u06ff\u0900-\u097f]+/gi) || [];
 	return words.some(isGregorianDateParticle);
 }
 
@@ -1117,7 +1185,7 @@ function quickGregorianMonthDateRange(text = "") {
 		.sort((a, b) => b.length - a.length)
 		.map(escapeDateRegex)
 		.join("|");
-	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF]";
+	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF\\u0900-\\u097F]";
 	const matches = [];
 	const pushMatch = (index, day, monthName, year) => {
 		const normalizedMonth = normalizeDateSearchText(monthName).toLowerCase();
@@ -1198,7 +1266,7 @@ function quickArabicGregorianMonthDateRange(text = "") {
 }
 
 function quickDateRange(text = "") {
-	const raw = digitsToEnglish(String(text || ""));
+	const raw = normalizeNumberWordsForParsing(text);
 	const hijri = quickHijriDateRange(raw);
 	if (hijri.checkinISO && hijri.checkoutISO) return hijri;
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);

@@ -28,6 +28,8 @@ const {
 	digitsToEnglish,
 	detectAmenityQuestion,
 } = require("./nlu");
+const { hasSemanticSignal } = require("./scriptSignals");
+const { normalizeNumberWordsForParsing, numberFromWords } = require("./numberWords");
 
 const { chat } = require("./openai");
 const {
@@ -942,6 +944,7 @@ function confirmationLooksLikePhoneInText(text = "", confirmation = "") {
 		.toLowerCase();
 	const { lower, arabic, latinCompact } = normalizeControlText(nearby);
 	return (
+		hasSemanticSignal(nearby, ["phone", "whatsapp", "contact"]) ||
 		/\b(?:phone|mobile|whatsapp|whats\s*app|contact|call|tel|my\s+number)\b/i.test(
 			lower
 		) ||
@@ -1342,6 +1345,7 @@ function selectedHotelDistanceQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
 	const asksDistance =
+		hasSemanticSignal(text, "distance") ||
 		/\b(?:how\s+far|far\s+from|distance|distancia|lejos|cerca|near|close|walking|walk|a\s+pie|caminando|drive|driving|en\s+voiture|a\s+pied|minutes?|mins?|berapa\s+jauh|jarak|dekat|jalan\s+kaki|menit|minit)\b/i.test(
 			lower
 		) ||
@@ -1369,6 +1373,7 @@ function selectedHotelAddressQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
 	const asksLocation =
+		hasSemanticSignal(text, "location") ||
 		/\b(?:where\s+is|where's|located|location|address|area|district|map|ubicacion|ubicaci[oó]n|direccion|direcci[oó]n|adresse|emplacement|alamat|lokasi|peta)\b/i.test(
 			lower
 		) ||
@@ -1385,13 +1390,19 @@ function selectedHotelAddressQuestionText(text = "") {
 			arabic
 		) ||
 		/(?:hotel|funduq)/i.test(latinCompact);
-	return mentionsHotel;
+	const conciseLocationRequest =
+		hasSemanticSignal(text, "location") &&
+		lower.replace(/[^\w\s\u0600-\u06ff\u0900-\u097f]/g, " ").trim().split(/\s+/).filter(Boolean)
+			.length <= 6 &&
+		!hasSemanticSignal(text, ["payment", "confirmation", "reservation", "contact"]);
+	return mentionsHotel || conciseLocationRequest;
 }
 
 function selectedHotelBusQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
 	const directBus =
+		hasSemanticSignal(text, "bus") ||
 		/\b(?:bus|buses|shuttle|coach|haram\s+bus|bus\s+to\s+haram)\b/i.test(
 			lower
 		) ||
@@ -1428,6 +1439,7 @@ function hasOperationalBookingSignal(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
 	return (
+		hasSemanticSignal(text, ["reservation", "confirmation", "payment"]) ||
 		selectedHotelFactQuestionText(normalized) ||
 		selectedHotelRoomQuestionText(normalized) ||
 		Boolean(mapRoomToKey(normalized)) ||
@@ -1441,6 +1453,7 @@ function hasOperationalBookingSignal(text = "") {
 
 function wantsPaymentHelp(text = "") {
 	const raw = String(text || "");
+	if (hasSemanticSignal(raw, "payment")) return true;
 	if (/\b(pembayaran|bayar|pautan|invois|invoice)\b/i.test(raw)) return true;
 	return /payment|pay|card|link|declined|not going through|failed|دفع|بطاقة|رابط|pago|paiement|ادائیگی/i.test(
 		String(text || "")
@@ -1449,6 +1462,7 @@ function wantsPaymentHelp(text = "") {
 
 function wantsReservationHelp(text = "") {
 	const raw = String(text || "");
+	if (hasSemanticSignal(raw, ["reservation", "confirmation"])) return true;
 	if (/\b(reservasi|tempahan|pengesahan)\b/i.test(raw)) return true;
 	return /reservation|booking|confirmation|تأكيد|حجز|reserva|réservation|بکنگ|आरक्षण/i.test(
 		String(text || "")
@@ -1460,6 +1474,7 @@ function hotelContactDetailsQuestionText(text = "") {
 	if (!raw) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	const asksContact =
+		hasSemanticSignal(raw, ["phone", "whatsapp", "contact"]) ||
 		/\b(?:phone|telephone|mobile|number|no\.?|whatsapp|whats\s*app|contact|call|reach)\b/i.test(
 			lower
 		) ||
@@ -1468,6 +1483,7 @@ function hotelContactDetailsQuestionText(text = "") {
 		);
 	if (!asksContact) return false;
 	const asksHotelOrStaff =
+		hasSemanticSignal(raw, ["hotel", "reception"]) ||
 		/\b(?:hotel|reception|front\s*desk|desk|manager|responsible|staff|support|official)\b/i.test(
 			lower
 		) ||
@@ -1481,6 +1497,8 @@ function hotelContactDetailsQuestionText(text = "") {
 			latinCompact
 		);
 	const directHotelContact =
+		(hasSemanticSignal(raw, ["contact", "phone", "whatsapp"]) &&
+			hasSemanticSignal(raw, "hotel")) ||
 		/\b(?:call|contact|reach|speak\s+to|talk\s+to)\s+(?:the\s+)?hotel\b/i.test(
 			lower
 		) ||
@@ -1498,6 +1516,7 @@ function genericContactNumberRequestText(text = "") {
 		return false;
 	}
 	const asksContact =
+		hasSemanticSignal(raw, ["phone", "whatsapp", "contact"]) ||
 		/\b(?:phone|telephone|mobile|number|no\.?|whatsapp|whats\s*app|contact|call)\b/i.test(
 			lower
 		) ||
@@ -1527,7 +1546,11 @@ function directHotelRelationshipQuestionText(text = "") {
 	const raw = String(text || "").trim();
 	if (!raw) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const semanticDirect =
+		hasSemanticSignal(raw, ["direct", "workWith"]) &&
+		hasSemanticSignal(raw, ["hotel", "reception", "reservation"]);
 	const english =
+		semanticDirect ||
 		/\b(?:are|do|does|is)\b.{0,80}\b(?:you|jannat|this\s+chat|your\s+team)\b.{0,80}\b(?:direct|directly|official|authorized|authorised|working\s+with|work\s+with|deal\s+with|connected\s+to)\b.{0,80}\b(?:hotel|reception|reservation|reservations|team)\b/i.test(
 			lower
 		) ||
@@ -1757,6 +1780,7 @@ function wantsNewReservationIntent(text = "", lu = {}) {
 	if (lu?.intent === "reserve_room") return true;
 	const raw = String(text || "");
 	const hasNewReservationLanguage =
+		hasSemanticSignal(raw, "newBooking") ||
 		/\b(book|reserve|make\s+(?:a\s+)?reservation|new\s+(?:booking|reservation)|book\s+a\s*room|reserve\s+a\s*room|need\s+a\s*room|want\s+a\s*room)\b/i.test(
 			raw
 		) ||
@@ -1767,6 +1791,7 @@ function wantsNewReservationIntent(text = "", lu = {}) {
 	const includesStayDetails =
 		Boolean(mapRoomToKey(raw)) ||
 		Boolean(quickDateRange(raw)?.checkinISO) ||
+		hasSemanticSignal(raw, "room") ||
 		/\b(?:check[\s-]?in|check[\s-]?out|adults?|guests?|pax|room|rooms?)\b/i.test(
 			raw
 		) ||
@@ -1792,6 +1817,10 @@ function isoDate(value = "") {
 }
 
 function extractDateRange(text = "") {
+	const quick = quickDateRange(text);
+	if (quick?.checkinISO && quick?.checkoutISO) {
+		return { checkinISO: quick.checkinISO, checkoutISO: quick.checkoutISO };
+	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
 	if (isoMatches && isoMatches.length >= 2) {
@@ -4206,7 +4235,9 @@ function parseJsonObject(raw = "", fallback = null) {
 
 function reservationDetailCount(value, { allowZero = false } = {}) {
 	if (value === null || value === undefined || value === "") return null;
-	const cleaned = digitsToEnglish(String(value)).replace(/[^\d.-]/g, "");
+	const wordNumber = numberFromWords(value, { min: allowZero ? 0 : 1, max: 30 });
+	if (wordNumber !== null) return wordNumber;
+	const cleaned = normalizeNumberWordsForParsing(value).replace(/[^\d.-]/g, "");
 	if (!cleaned) return null;
 	const number = Number(cleaned);
 	if (!Number.isFinite(number)) return null;
@@ -4220,6 +4251,14 @@ const ADULT_COUNT_TERMS = [
 	"adults?",
 	"adultos?",
 	"adultes?",
+	"dewasa",
+	"orang\\s+dewasa",
+	"baligh",
+	"bade",
+	"bare",
+	"baaligh",
+	"\\u092c\\u0921\\u093c\\u0947",
+	"\\u0628\\u0627\\u0644\\u063a",
 	"\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646|\\u0648\\u0646)?",
 	"\\u0643\\u0628\\u0627\\u0631",
 	"\\u0631\\u0627\\u0634\\u062f(?:\\u064a\\u0646|\\u0648\\u0646)?",
@@ -4231,6 +4270,12 @@ const CHILD_COUNT_TERMS = [
 	"kids?",
 	"ni[n\\u00f1]os?",
 	"enfants?",
+	"anak(?:\\s+anak)?",
+	"kanak(?:\\s+kanak)?",
+	"bachche?",
+	"bache?",
+	"\\u092c\\u091a\\u094d\\u091a(?:\\u0947|\\u093e)?",
+	"\\u0628\\u0686(?:\\u06d2|\\u0647)?",
 	"[\\u0623\\u0627]\\u0637\\u0641\\u0627\\u0644",
 	"\\u0637\\u0641\\u0644(?:\\u064a\\u0646|\\u0627\\u0646)?",
 	"[\\u0623\\u0627]\\u0648\\u0644\\u0627\\u062f",
@@ -4248,6 +4293,13 @@ const GUEST_COUNT_TERMS = [
 	"hu\\u00e9spedes",
 	"voyageurs?",
 	"personnes?",
+	"tamu",
+	"orang",
+	"tetamu",
+	"mehman",
+	"mehmaan",
+	"\\u092e\\u0947\\u0939\\u092e\\u093e\\u0928",
+	"\\u0645\\u06c1\\u0645\\u0627\\u0646",
 	"[\\u0623\\u0627]\\u0634\\u062e\\u0627\\u0635",
 	"[\\u0623\\u0627]\\u0641\\u0631\\u0627\\u062f",
 	"\\u0636\\u064a\\u0648\\u0641",
@@ -4256,12 +4308,12 @@ const GUEST_COUNT_TERMS = [
 ];
 
 function countNearTerms(text = "", terms = [], { allowZero = false } = {}) {
-	const normalized = digitsToEnglish(String(text || ""))
+	const normalized = normalizeNumberWordsForParsing(text)
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!normalized || !terms.length) return null;
 	const source = terms.join("|");
-	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF]";
+	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF\\u0900-\\u097F]";
 	const patterns = [
 		new RegExp(`(?:^|${boundary})(?:${source})[\\s:：=\\-]*([0-9]{1,2})(?=$|${boundary})`, "i"),
 		new RegExp(`(?:^|${boundary})([0-9]{1,2})\\s*(?:${source})(?=$|${boundary})`, "i"),
@@ -4275,13 +4327,17 @@ function countNearTerms(text = "", terms = [], { allowZero = false } = {}) {
 }
 
 function noChildrenText(text = "") {
-	const raw = digitsToEnglish(String(text || "")).trim();
+	const raw = normalizeNumberWordsForParsing(text).trim();
 	if (!raw) return false;
 	const asciiLower = asciiize(raw).toLowerCase().replace(/\s+/g, " ").trim();
-	if (/\b(?:no|zero|0|without|none)\s+(?:children|child|kids?|ninos?|ni[n\u00f1]os?)\b/i.test(asciiLower)) {
+	if (
+		/\b(?:no|zero|0|without|none|sin|sans|tanpa|tiada|tidak\s+ada|tak\s+ada)\s+(?:children|child|kids?|ninos?|ninos?|enfants?|anak(?:\s+anak)?|kanak(?:\s+kanak)?|bachche?|bache?)\b/i.test(
+			asciiLower
+		)
+	) {
 		return true;
 	}
-	return /(?:\u0628\u062f\u0648\u0646|\u0644\u0627\s+\u064a\u0648\u062c\u062f|\u0645\u0627\s+\u0641\u064a|\u0645\u0641\u064a\u0634|\u0645\u0627\u0641\u064a\u0634)\s+(?:[\u0623\u0627]\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0635\u063a\u0627\u0631)/i.test(
+	return /(?:\u0628\u062f\u0648\u0646|\u0644\u0627\s+\u064a\u0648\u062c\u062f|\u0645\u0627\s+\u0641\u064a|\u0645\u0641\u064a\u0634|\u0645\u0627\u0641\u064a\u0634|\u0646\u0647\u064a\u06ba)\s+(?:[\u0623\u0627]\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0635\u063a\u0627\u0631|\u0628\u062c\u0647|\u0628\u0686\u06d2|\u092c\u091a\u094d\u091a(?:\u0947|\u093e)?)/i.test(
 		raw
 	);
 }
@@ -4322,7 +4378,7 @@ function applyFocusedNumericCountAnswer(st = {}, text = "") {
 	const missing = missingMandatoryReservationFields(st);
 	const field = missing.length === 1 ? missing[0] : "";
 	if (!["adults", "children"].includes(field)) return false;
-	const normalized = digitsToEnglish(String(text || "")).trim();
+	const normalized = normalizeNumberWordsForParsing(text).trim();
 	if (!/^\d{1,2}$/.test(normalized)) return false;
 	const count = reservationDetailCount(normalized, { allowZero: field === "children" });
 	if (count === null) return false;
@@ -4408,7 +4464,7 @@ async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText =
 		{
 			fieldFocus,
 			latestGuestMessage: String(latestText || ""),
-			latestGuestMessageDigitsNormalized: digitsToEnglish(String(latestText || "")),
+			latestGuestMessageDigitsNormalized: normalizeNumberWordsForParsing(latestText),
 			lastAssistantMessage: lastAssistantText(sc),
 			missingMandatoryFields: missing,
 			waitFor: st.waitFor || "",
@@ -4825,9 +4881,8 @@ function latestKnownConfirmation(sc = {}, lu = {}) {
 		const directMatch = confirmationFromText(text);
 		if (directMatch) return directMatch;
 		if (
-			!/confirmation|confirm|reference|booking\s*(?:no|number|#)|reservation\s*(?:no|number|#)|\u062a\u0623\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639|\u0643\u0648\u0646\u0641\u064a\u0631\u0645\u064a\u0634\u0646/i.test(
-				text
-			)
+			!/confirmation|confirm|reference|booking\s*(?:no|number|#)|reservation\s*(?:no|number|#)|\u062a\u0623\u0643\u064a\u062f|\u062d\u062c\u0632|\u0645\u0631\u062c\u0639|\u0643\u0648\u0646\u0641\u064a\u0631\u0645\u064a\u0634\u0646/i.test(text) &&
+			!hasSemanticSignal(text, ["confirmation", "reservation"])
 		) {
 			continue;
 		}
@@ -4836,7 +4891,8 @@ function latestKnownConfirmation(sc = {}, lu = {}) {
 		const match = candidates.find(
 			(candidate) =>
 				/\d/.test(candidate) &&
-				!/^(?:20\d{2}|1[34]\d{2}|15\d{2})$/.test(candidate)
+				!/^(?:20\d{2}|1[34]\d{2}|15\d{2})$/.test(candidate) &&
+				!confirmationLooksLikePhoneInText(text, candidate)
 		);
 		if (match) return match.toUpperCase();
 	}
@@ -4861,7 +4917,7 @@ function confirmationFromText(text = "") {
 	);
 	if (loose) {
 		const candidate = cleanConfirmationCandidate(loose[1]);
-		if (candidate) return candidate;
+		if (candidate && !confirmationLooksLikePhoneInText(raw, candidate)) return candidate;
 	}
 	const patterns = [
 		/(?:confirmation|confirm(?:ation)?|reference|booking|reservation|reserva|r[e\u00e9]servation)\s*(?:number|no\.?|#|id|ref|num(?:ero|\u00e9ro)?|n[u\u00fa]mero)?\s*[:#-]?\s*([A-Z0-9][A-Z0-9-]{4,21})/gi,
@@ -4871,8 +4927,16 @@ function confirmationFromText(text = "") {
 		let match = null;
 		while ((match = pattern.exec(raw))) {
 			const candidate = cleanConfirmationCandidate(match[1]);
-			if (candidate) return candidate;
+			if (candidate && !confirmationLooksLikePhoneInText(raw, candidate)) return candidate;
 		}
+	}
+	if (hasSemanticSignal(raw, ["confirmation", "reservation"])) {
+		const candidates = raw.match(/\b(?:[A-Z]{1,6}[A-Z0-9-]{3,20}|\d{5,12})\b/gi) || [];
+		const match = candidates.find((candidate) => {
+			const cleaned = cleanConfirmationCandidate(candidate);
+			return cleaned && !confirmationLooksLikePhoneInText(raw, cleaned);
+		});
+		if (match) return cleanConfirmationCandidate(match);
 	}
 	return null;
 }
@@ -6153,6 +6217,11 @@ function aiReservationReference(sc = {}, reservation = {}) {
 
 function confirmationRequestSignals(text = "") {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const hasConfirmationContext = hasSemanticSignal(text, ["confirmation", "reservation"]);
+	const asksToSend = hasSemanticSignal(text, "send");
+	const emailSignal = hasSemanticSignal(text, "email");
+	const whatsappSignal = hasSemanticSignal(text, "whatsapp");
+	const linkSignal = hasSemanticSignal(text, "link");
 	const emailWords = "(?:email|e-mail|mail|inbox|\\u0627\\u064a\\u0645\\u064a\\u0644|\\u0625\\u064a\\u0645\\u064a\\u0644|\\u0628\\u0631\\u064a\\u062f)";
 	const confirmationWords =
 		"(?:confirmation|confirm|reservation|booking|invoice|receipt|voucher|\\u062a\\u0623\\u0643\\u064a\\u062f|\\u062a\\u0627\\u0643\\u064a\\u062f|\\u062d\\u062c\\u0632|\\u0641\\u0627\\u062a\\u0648\\u0631\\u0629)";
@@ -6163,15 +6232,15 @@ function confirmationRequestSignals(text = "") {
 	const email = new RegExp(
 		`${confirmationWords}.{0,80}${emailWords}|${emailWords}.{0,80}${confirmationWords}|\\b(?:send|resend|share|forward).{0,40}${emailWords}\\b`,
 		"i"
-	).test(normalized);
+	).test(normalized) || (emailSignal && (hasConfirmationContext || asksToSend));
 	const whatsapp = new RegExp(
 		`${confirmationWords}.{0,80}${whatsappWords}|${whatsappWords}.{0,80}${confirmationWords}|\\b(?:send|resend|share|forward).{0,50}${whatsappWords}\\b`,
 		"i"
-	).test(normalized);
+	).test(normalized) || (whatsappSignal && (hasConfirmationContext || asksToSend));
 	const link = new RegExp(
 		`${confirmationWords}.{0,80}${linkWords}|${linkWords}.{0,80}${confirmationWords}|\\b(?:send|share|show|give).{0,40}${linkWords}\\b`,
 		"i"
-	).test(normalized);
+	).test(normalized) || (linkSignal && (hasConfirmationContext || asksToSend));
 	return { email, whatsapp, link };
 }
 
