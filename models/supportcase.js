@@ -225,6 +225,40 @@ const supportCaseSchema = new Schema({
 			type: String,
 			default: "",
 		},
+		confirmationDelivery: {
+			lastAttemptAt: {
+				type: Date,
+				default: null,
+			},
+			lastMode: {
+				type: String,
+				default: "",
+			},
+			emailStatus: {
+				type: String,
+				default: "",
+			},
+			emailSentAt: {
+				type: Date,
+				default: null,
+			},
+			emailLastError: {
+				type: String,
+				default: "",
+			},
+			whatsappStatus: {
+				type: String,
+				default: "",
+			},
+			whatsappSentAt: {
+				type: Date,
+				default: null,
+			},
+			whatsappLastError: {
+				type: String,
+				default: "",
+			},
+		},
 	},
 	escalationStatus: {
 		type: String,

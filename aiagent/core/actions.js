@@ -14,6 +14,10 @@ const { priceRoomForStay } = require("./selectors");
 const {
 	markReservationPendingConfirmation,
 } = require("../../services/pendingConfirmationPolicy");
+const {
+	dispatchReservationConfirmation,
+	reservationPublicLinks,
+} = require("../../services/reservationConfirmationDispatcher");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AI_RESERVATION_ACTOR = {
@@ -1151,6 +1155,108 @@ async function createReservationForCase({
 	return saved;
 }
 
+function deliveryStatusFromResult(result = {}, channels = {}) {
+	const guestEmail = result?.email?.guest || null;
+	const guestWhatsApp = result?.whatsapp?.guest || null;
+	const emailRequested = channels.email !== false;
+	const whatsappRequested = channels.whatsapp !== false;
+	const emailStatus = !emailRequested
+		? "not_requested"
+		: guestEmail?.ok
+		? "sent"
+		: guestEmail?.skipped
+		? "skipped"
+		: guestEmail
+		? "failed"
+		: "not_attempted";
+	const whatsappStatus = !whatsappRequested
+		? "not_requested"
+		: guestWhatsApp?.sid || guestWhatsApp?.ok
+		? "sent"
+		: guestWhatsApp?.skipped
+		? "skipped"
+		: guestWhatsApp
+		? "failed"
+		: "not_attempted";
+	return {
+		emailStatus,
+		emailError: guestEmail?.error || guestEmail?.reason || "",
+		whatsappStatus,
+		whatsappError: guestWhatsApp?.error || guestWhatsApp?.reason || "",
+	};
+}
+
+async function markAiConfirmationDelivery(caseId, result = {}, options = {}) {
+	const caseKey = cleanCaseId(caseId);
+	if (!caseKey) return;
+	const nowDate = new Date();
+	const status = deliveryStatusFromResult(result, {
+		email: options.includeGuestEmail !== false,
+		whatsapp: options.includeGuestWhatsApp !== false,
+	});
+	const set = {
+		"aiReservation.confirmationDelivery.lastAttemptAt": nowDate,
+		"aiReservation.confirmationDelivery.lastMode": options.mode || "initial",
+		"aiReservation.confirmationDelivery.emailStatus": status.emailStatus,
+		"aiReservation.confirmationDelivery.emailLastError": status.emailError,
+		"aiReservation.confirmationDelivery.whatsappStatus": status.whatsappStatus,
+		"aiReservation.confirmationDelivery.whatsappLastError": status.whatsappError,
+	};
+	if (status.emailStatus === "sent") {
+		set["aiReservation.confirmationDelivery.emailSentAt"] = nowDate;
+	}
+	if (status.whatsappStatus === "sent") {
+		set["aiReservation.confirmationDelivery.whatsappSentAt"] = nowDate;
+	}
+	await SupportCase.updateOne({ _id: caseKey }, { $set: set }).catch(() => {});
+}
+
+async function dispatchAiReservationConfirmation({
+	caseId,
+	reservation,
+	mode = "initial",
+	includeGuestEmail = true,
+	includeInternalEmail = true,
+	includeOwnerEmail = true,
+	includeGuestWhatsApp = true,
+	includeAdminWhatsApp = true,
+	guestEmail = "",
+} = {}) {
+	const caseKey = cleanCaseId(caseId);
+	const reservationId = reservation?._id || reservation?.id || null;
+	const hydrated = reservationId
+		? await Reservations.findById(reservationId).lean().exec()
+		: reservation;
+	if (!hydrated) {
+		const links = reservationPublicLinks(reservation || {});
+		return {
+			ok: false,
+			links,
+			email: {
+				guest: {
+					ok: false,
+					error: "reservation_not_found",
+				},
+			},
+			whatsapp: {},
+		};
+	}
+	const result = await dispatchReservationConfirmation(hydrated, {
+		guestEmail,
+		includeGuestEmail,
+		includeInternalEmail,
+		includeOwnerEmail,
+		includeGuestWhatsApp,
+		includeAdminWhatsApp,
+	});
+	await markAiConfirmationDelivery(caseKey, result, {
+		mode,
+		includeGuestEmail,
+		includeGuestWhatsApp,
+	});
+	return result;
+}
+
 async function postReservationLinks(io, sc, reservation) {
 	const caseId = String(sc._id);
 	const conf = reservation.confirmation_number;
@@ -1207,6 +1313,7 @@ module.exports = {
 	createReservationForCase,
 	updateReservationDatesForCase,
 	getReservationCancellationPolicyForCase,
+	dispatchAiReservationConfirmation,
 	postReservationLinks,
 	pushReservationLinks,
 };

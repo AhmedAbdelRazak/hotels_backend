@@ -34,6 +34,7 @@ const {
 	createReservationForCase,
 	updateReservationDatesForCase,
 	getReservationCancellationPolicyForCase,
+	dispatchAiReservationConfirmation,
 } = require("./actions");
 const {
 	isJannatBookingSupportCase,
@@ -118,6 +119,18 @@ const AI_REPLY_TARGET_MAX_MS = Math.max(
 	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4800, {
 		min: 500,
 		max: 15000,
+	})
+);
+const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
+	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
+	1800,
+	{ min: 0, max: 7000 }
+);
+const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
+	AI_TYPING_INDICATOR_DELAY_MIN_MS,
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 2600, {
+		min: 0,
+		max: 9000,
 	})
 );
 const JANNAT_HANDOFF_DELAY_MIN_MS = intFromEnv(
@@ -3443,18 +3456,32 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 		first,
 		chars: (text || "").length,
 	});
+	const waitStartedAt = now();
+	const typingVisibleAfter =
+		waitStartedAt +
+		Math.min(
+			waitMs,
+			randomBetween(
+				AI_TYPING_INDICATOR_DELAY_MIN_MS,
+				AI_TYPING_INDICATOR_DELAY_MAX_MS
+			)
+		);
+	let typingVisible = false;
 	while (st.guestTypingUntil > now()) await sleep(300);
-	emitTyping(io, caseId, st, true);
-	for (let t = 0; t < waitMs; t += 120) {
+	while (now() - waitStartedAt < waitMs) {
 		if (st.interrupt || st.sendingToken !== token) {
-			emitTyping(io, caseId, st, false);
+			if (typingVisible) emitTyping(io, caseId, st, false);
 			logStep(caseId, "human.cancelled", { stage: "target-wait", token });
 			return false;
 		}
 		while (st.guestTypingUntil > now()) await sleep(300);
+		if (!typingVisible && now() >= typingVisibleAfter) {
+			emitTyping(io, caseId, st, true);
+			typingVisible = true;
+		}
 		await sleep(120);
 	}
-	emitTyping(io, caseId, st, false);
+	if (typingVisible) emitTyping(io, caseId, st, false);
 	if (st.interrupt || st.sendingToken !== token) {
 		logStep(caseId, "human.cancelled", { stage: "post-type", token });
 		return false;
@@ -5988,12 +6015,128 @@ function publicBaseUrl() {
 
 function reservationLinks(reservation) {
 	const publicBase = publicBaseUrl();
-	const confirmation = reservation.confirmation_number;
-	const id = String(reservation._id);
+	const confirmation = String(reservation?.confirmation_number || "").trim();
+	const id = String(reservation?._id || reservation?.id || "").trim();
 	return {
-		reservationDetails: `${publicBase}/single-reservation/${confirmation}`,
-		payment: `${publicBase}/client-payment/${id}/${confirmation}`,
+		reservationDetails: confirmation
+			? `${publicBase}/single-reservation/${confirmation}`
+			: "",
+		payment: id && confirmation ? `${publicBase}/client-payment/${id}/${confirmation}` : "",
 	};
+}
+
+function aiReservationReference(sc = {}, reservation = {}) {
+	const ai = sc.aiReservation || {};
+	const id =
+		reservation?._id ||
+		reservation?.id ||
+		ai.reservationId ||
+		ai.reservation?._id ||
+		ai.reservation?.id ||
+		"";
+	const confirmation =
+		reservation?.confirmation_number ||
+		reservation?.confirmationNumber ||
+		ai.confirmationNumber ||
+		ai.confirmation_number ||
+		"";
+	if (!id && !confirmation) return null;
+	return {
+		...(id ? { _id: id } : {}),
+		...(confirmation ? { confirmation_number: confirmation } : {}),
+	};
+}
+
+function confirmationRequestSignals(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const emailWords = "(?:email|e-mail|mail|inbox|\\u0627\\u064a\\u0645\\u064a\\u0644|\\u0625\\u064a\\u0645\\u064a\\u0644|\\u0628\\u0631\\u064a\\u062f)";
+	const confirmationWords =
+		"(?:confirmation|confirm|reservation|booking|invoice|receipt|voucher|\\u062a\\u0623\\u0643\\u064a\\u062f|\\u062a\\u0627\\u0643\\u064a\\u062f|\\u062d\\u062c\\u0632|\\u0641\\u0627\\u062a\\u0648\\u0631\\u0629)";
+	const linkWords =
+		"(?:link|url|details link|confirmation link|reservation link|\\u0631\\u0627\\u0628\\u0637)";
+	const whatsappWords =
+		"(?:whatsapp|whats app|wa|\\u0648\\u0627\\u062a\\u0633|\\u0648\\u0627\\u062a\\u0633\\u0627\\u0628)";
+	const email = new RegExp(
+		`${confirmationWords}.{0,80}${emailWords}|${emailWords}.{0,80}${confirmationWords}|\\b(?:send|resend|share|forward).{0,40}${emailWords}\\b`,
+		"i"
+	).test(normalized);
+	const whatsapp = new RegExp(
+		`${confirmationWords}.{0,80}${whatsappWords}|${whatsappWords}.{0,80}${confirmationWords}|\\b(?:send|resend|share|forward).{0,50}${whatsappWords}\\b`,
+		"i"
+	).test(normalized);
+	const link = new RegExp(
+		`${confirmationWords}.{0,80}${linkWords}|${linkWords}.{0,80}${confirmationWords}|\\b(?:send|share|show|give).{0,40}${linkWords}\\b`,
+		"i"
+	).test(normalized);
+	return { email, whatsapp, link };
+}
+
+function confirmationDeliverySummary(result = {}) {
+	const guestEmail = result?.email?.guest || {};
+	const guestWhatsApp = result?.whatsapp?.guest || {};
+	return {
+		email: guestEmail?.ok
+			? "sent"
+			: guestEmail?.skipped
+			? "skipped"
+			: guestEmail?.attempted === false
+			? "skipped"
+			: guestEmail?.error
+			? "failed"
+			: result?.email?.attempted
+			? "not_attempted"
+			: "not_requested",
+		emailError: guestEmail?.error || guestEmail?.reason || "",
+		whatsapp: guestWhatsApp?.sid || guestWhatsApp?.ok
+			? "sent"
+			: guestWhatsApp?.skipped
+			? "skipped"
+			: guestWhatsApp?.attempted === false
+			? "skipped"
+			: guestWhatsApp?.error
+			? "failed"
+			: result?.whatsapp?.attempted
+			? "not_attempted"
+			: "not_requested",
+		whatsappError: guestWhatsApp?.error || guestWhatsApp?.reason || "",
+	};
+}
+
+function confirmationDeliveryFallbackText(sc = {}, st = {}, details = {}) {
+	const lang = languageOf(sc, st);
+	const confirmation = details.confirmation || "";
+	const links = details.links || {};
+	const delivery = details.delivery || {};
+	const label = "[Reservation Confirmation]";
+	const linkLine = links.reservationDetails
+		? `${label}(${links.reservationDetails})`
+		: "";
+	if (/arabic/i.test(lang)) {
+		if (details.channel === "link") {
+			return `\u0623\u0643\u064a\u062f. \u0631\u0627\u0628\u0637 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632: ${linkLine}${confirmation ? `\n\u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.` : ""}`;
+		}
+		if (details.channel === "whatsapp") {
+			return delivery.whatsapp === "sent"
+				? "\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0639\u0644\u0649 \u0648\u0627\u062a\u0633\u0627\u0628."
+				: `\u062d\u0627\u0648\u0644\u062a \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0639\u0644\u0649 \u0648\u0627\u062a\u0633\u0627\u0628\u060c \u0648\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: ${linkLine}`;
+		}
+		return delivery.email === "sent"
+			? "\u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0625\u0644\u0649 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0645\u0633\u062c\u0644. \u0645\u0646 \u0641\u0636\u0644\u0643 \u062a\u062d\u0642\u0642 \u0623\u064a\u0636\u0627 \u0645\u0646 \u0627\u0644\u0628\u0631\u064a\u062f \u063a\u064a\u0631 \u0627\u0644\u0647\u0627\u0645."
+			: `\u062d\u0627\u0648\u0644\u062a \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0628\u0627\u0644\u0628\u0631\u064a\u062f\u060c \u0648\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: ${linkLine}`;
+	}
+	if (details.channel === "link") {
+		return `Of course. Here is your ${label}(${links.reservationDetails})${
+			confirmation ? ` for confirmation **${confirmation}**.` : "."
+		}`;
+	}
+	if (details.channel === "whatsapp") {
+		return delivery.whatsapp === "sent"
+			? "I sent the reservation confirmation on WhatsApp."
+			: `I tried to send it on WhatsApp. Here is the ${label}(${links.reservationDetails}) as well.`;
+	}
+	return delivery.email === "sent"
+		? "I sent the reservation confirmation to the email on the booking. Please also check spam or junk just in case."
+		: `I tried to send the confirmation email. Here is the ${label}(${links.reservationDetails}) as well.`;
 }
 
 function reservationArrivalDateText(sc, st, reservation = {}) {
@@ -6743,6 +6886,36 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		quoteData: quoteForCreate,
 		room: quoteForCreate.room,
 	});
+	let delivery = null;
+	try {
+		delivery = await dispatchAiReservationConfirmation({
+			caseId,
+			reservation,
+			mode: "initial",
+			includeGuestEmail: Boolean(st.slots.email),
+			includeInternalEmail: true,
+			includeOwnerEmail: true,
+			includeGuestWhatsApp: true,
+			includeAdminWhatsApp: true,
+			guestEmail: st.slots.email || "",
+		});
+		logStep(caseId, "reservation.confirmation_dispatched", {
+			confirmation: reservation.confirmation_number,
+			status: confirmationDeliverySummary(delivery),
+		});
+	} catch (error) {
+		logStep(caseId, "reservation.confirmation_dispatch_failed", {
+			confirmation: reservation.confirmation_number,
+			error: String(error?.message || error || "").slice(0, 200),
+		});
+	}
+	sc.aiReservation = {
+		...(sc.aiReservation || {}),
+		status: "created",
+		reservationId: reservation._id,
+		confirmationNumber: reservation.confirmation_number || "",
+		...(delivery ? { confirmationDelivery: confirmationDeliverySummary(delivery) } : {}),
+	};
 	const links = reservationLinks(reservation);
 	const finalText = reservationCreatedMessage(
 		sc,
@@ -6834,6 +7007,92 @@ function isPostBookingConcreteRequest(text = "") {
 			normalized
 		)
 	);
+}
+
+async function handlePostBookingDeliveryRequest(io, sc, st, userText = "") {
+	const request = confirmationRequestSignals(userText);
+	if (!request.email && !request.whatsapp && !request.link) return false;
+	const ref = aiReservationReference(sc);
+	if (!ref) return false;
+	const links = reservationLinks(ref);
+	const confirmation = ref.confirmation_number || "";
+
+	let delivery = null;
+	let channel = request.link ? "link" : request.email ? "email" : "whatsapp";
+	if (request.email || request.whatsapp) {
+		try {
+			delivery = await dispatchAiReservationConfirmation({
+				caseId: String(sc._id || ""),
+				reservation: ref,
+				mode: request.email && request.whatsapp ? "resend" : `${channel}_resend`,
+				includeGuestEmail: request.email,
+				includeInternalEmail: false,
+				includeOwnerEmail: false,
+				includeGuestWhatsApp: request.whatsapp,
+				includeAdminWhatsApp: false,
+				guestEmail: st.slots?.email || "",
+			});
+			logStep(String(sc._id), "post_booking.confirmation_delivery", {
+				confirmation,
+				request,
+				status: confirmationDeliverySummary(delivery),
+			});
+		} catch (error) {
+			delivery = {
+				ok: false,
+				links: {
+					reservationConfirmation: links.reservationDetails,
+					payment: links.payment,
+				},
+				email: request.email
+					? { attempted: true, guest: { ok: false, error: "send_failed" } }
+					: {},
+				whatsapp: request.whatsapp
+					? { attempted: true, guest: { ok: false, error: "send_failed" } }
+					: {},
+			};
+			logStep(String(sc._id), "post_booking.confirmation_delivery_failed", {
+				confirmation,
+				request,
+				error: String(error?.message || error || "").slice(0, 200),
+			});
+		}
+	}
+
+	const deliveryStatus = confirmationDeliverySummary(delivery || {});
+	const linkContext = {
+		reservationDetails:
+			delivery?.links?.reservationConfirmation || links.reservationDetails,
+		payment: delivery?.links?.payment || links.payment,
+	};
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest asked after a completed AI-created reservation for the confirmation email, WhatsApp confirmation, or confirmation link. Use the real deliveryStatus and links provided here. Do not ask for details already in the booking. Do not claim an email or WhatsApp was sent unless that channel status is exactly 'sent'. If sharing a link, use markdown with the label [Reservation Confirmation] and never show the raw full URL. Keep it concise and stay on the guest's request.",
+		{
+			latestUserMessage: userText,
+			request,
+			deliveryStatus,
+			confirmation,
+			links: linkContext,
+			reservationAlreadyCreated: true,
+		}
+	);
+	await humanSend(
+		io,
+		sc,
+		st,
+		reply ||
+			confirmationDeliveryFallbackText(sc, st, {
+				channel,
+				confirmation,
+				links: linkContext,
+				delivery: deliveryStatus,
+			})
+	);
+	st.waitFor = "post_booking_followup";
+	return true;
 }
 
 function isVaguePositive(text = "") {
@@ -7086,6 +7345,13 @@ async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "")
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
+	const handledDeliveryRequest = await handlePostBookingDeliveryRequest(
+		io,
+		sc,
+		st,
+		userText
+	);
+	if (handledDeliveryRequest) return true;
 	if (
 		hotelContactDetailsQuestionText(userText) ||
 		hotelContactFollowupQuestionText(sc, userText)
@@ -7423,7 +7689,29 @@ async function planTurn(io, sc) {
 	st.turnInFlight = true;
 	st.interrupt = false;
 	let planningTyping = false;
+	let planningTypingTimer = null;
 	let recoveryUserText = "";
+	const schedulePlanningTyping = () => {
+		const delay = randomBetween(
+			AI_TYPING_INDICATOR_DELAY_MIN_MS,
+			AI_TYPING_INDICATOR_DELAY_MAX_MS
+		);
+		planningTypingTimer = setTimeout(() => {
+			const currentState = memo.get(caseId) || st;
+			if (
+				!currentState.turnInFlight ||
+				currentState.interrupt ||
+				currentState.guestTypingUntil > now()
+			) {
+				return;
+			}
+			emitTyping(io, caseId, currentState, true);
+			planningTyping = true;
+		}, delay);
+		if (typeof planningTypingTimer.unref === "function") {
+			planningTypingTimer.unref();
+		}
+	};
 
 	try {
 		logStep(caseId, "context.loaded", {
@@ -7447,8 +7735,7 @@ async function planTurn(io, sc) {
 			AI_REPLY_TARGET_MAX_MS
 		);
 		if (userText || !hasAiAssistantReply(sc)) {
-			emitTyping(io, caseId, st, true);
-			planningTyping = true;
+			schedulePlanningTyping();
 		}
 		updateActiveLanguageFromText(sc, st, userText);
 		if (!userText) {
@@ -9049,6 +9336,9 @@ async function planTurn(io, sc) {
 		}
 	} finally {
 		const st2 = memo.get(caseId);
+		if (planningTypingTimer) {
+			clearTimeout(planningTypingTimer);
+		}
 		if (planningTyping) {
 			emitTyping(io, caseId, st2 || st, false);
 		}
