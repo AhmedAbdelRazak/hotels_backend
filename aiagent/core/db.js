@@ -450,14 +450,49 @@ function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "", lang
 	};
 }
 
+function shouldIncludeLearningExampleTurns() {
+	return (
+		String(process.env.AI_LEARNING_INCLUDE_EXAMPLE_TURNS || "")
+			.trim()
+			.toLowerCase() === "true"
+	);
+}
+
+function trainingLookupLimit() {
+	const parsed = parseInt(process.env.AI_LEARNING_LOOKUP_LIMIT || "", 10);
+	if (!Number.isFinite(parsed)) return 30;
+	return Math.max(10, Math.min(parsed, 40));
+}
+
 async function findTrainingDocs(Model, filter) {
 	try {
+		const fields = [
+			"sourceType",
+			"chatTitle",
+			"chatKeywords",
+			"summary",
+			"language",
+			"customerIntent",
+			"supportResolution",
+			"learningNotes",
+			"responseGuidance",
+			"decisionRules",
+			"recommendedResponses",
+			"commonQuestions",
+			"qualityScore",
+			"confidenceScore",
+			"tags",
+			"messageCount",
+			"hotelId",
+			"hotelName",
+			"updatedAt",
+			"createdAt",
+		];
+		if (shouldIncludeLearningExampleTurns()) fields.push("conversation");
 		return await Model.find(filter)
-			.select(
-				"sourceType chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance decisionRules recommendedResponses commonQuestions qualityScore confidenceScore tags messageCount hotelId hotelName updatedAt createdAt"
-			)
+			.select(fields.join(" "))
 			.sort({ updatedAt: -1, createdAt: -1 })
-			.limit(80)
+			.limit(trainingLookupLimit())
 			.lean()
 			.exec();
 	} catch (error) {

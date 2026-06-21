@@ -16,6 +16,10 @@ const OPENAI_TIMEOUT_MS = intFromEnv(
 	intFromEnv("OPENAI_TIMEOUT_MS", 6000)
 );
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
+const OPENAI_MAX_PROMPT_CHARS = intFromEnv(
+	"OPENAI_CHATBOT_MAX_PROMPT_CHARS",
+	28000
+);
 
 const client = process.env.OPENAI_API_KEY
 	? new OpenAI({
@@ -55,6 +59,47 @@ function pickReasoningEffort() {
 		.toLowerCase();
 }
 
+function clipMiddle(text = "", maxChars = 0) {
+	const raw = String(text || "");
+	const limit = Number(maxChars) || 0;
+	if (!limit || raw.length <= limit) return raw;
+	if (limit <= 200) return raw.slice(0, limit);
+	const head = Math.floor(limit * 0.6);
+	const tail = limit - head - 80;
+	return `${raw.slice(0, head)}\n\n[...context trimmed for stability...]\n\n${raw.slice(
+		Math.max(0, raw.length - tail)
+	)}`;
+}
+
+function trimMessagesForOpenAI(messages = []) {
+	const maxChars = Math.max(4000, OPENAI_MAX_PROMPT_CHARS);
+	const input = Array.isArray(messages) ? messages : [];
+	const total = input.reduce(
+		(sum, message) => sum + String(message?.content || "").length,
+		0
+	);
+	if (total <= maxChars) return input;
+
+	const systemBudget = Math.floor(maxChars * 0.45);
+	const otherBudget = Math.max(1200, maxChars - systemBudget);
+	const systemMessages = input.filter((message) => message?.role === "system");
+	const nonSystemMessages = input.filter((message) => message?.role !== "system");
+	const systemCount = Math.max(1, systemMessages.length);
+	const otherCount = Math.max(1, nonSystemMessages.length);
+
+	return input.map((message) => {
+		const isSystem = message?.role === "system";
+		const budget = Math.floor(
+			(isSystem ? systemBudget : otherBudget) /
+				(isSystem ? systemCount : otherCount)
+		);
+		return {
+			...message,
+			content: clipMiddle(message?.content || "", budget),
+		};
+	});
+}
+
 async function chat(
 	messages,
 	{ kind = "nlu", temperature = 0, max_tokens = 350, reasoning_effort = "" } = {}
@@ -69,7 +114,7 @@ async function chat(
 		: max_tokens;
 	const body = buildChatCompletionBody({
 		model,
-		messages,
+		messages: trimMessagesForOpenAI(messages),
 		temperature,
 		maxTokens: tokenLimit,
 		reasoning_effort: gpt5Style ? reasoning_effort || pickReasoningEffort() : "",

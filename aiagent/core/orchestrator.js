@@ -2422,6 +2422,53 @@ function parseSameMonthDateRange(text = "") {
 	};
 }
 
+function adjustCheckoutAfterCheckin(checkoutISO = "", checkinISO = "") {
+	if (!checkoutISO || !checkinISO || checkoutISO > checkinISO) return checkoutISO;
+	const checkout = new Date(`${checkoutISO}T00:00:00Z`);
+	if (Number.isNaN(checkout.getTime())) return checkoutISO;
+	for (let guard = 0; guard < 8 && checkout.toISOString().slice(0, 10) <= checkinISO; guard += 1) {
+		checkout.setUTCFullYear(checkout.getUTCFullYear() + 1);
+	}
+	return checkout.toISOString().slice(0, 10);
+}
+
+function extractSingleStayDate(text = "", st = {}) {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const monthToken =
+		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const singleDateRegex = new RegExp(
+		`(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631\\u0629)?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
+		"i"
+	);
+	const match = normalized.match(singleDateRegex);
+	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
+	const day = match[1];
+	const month = monthNumberFromText(match[2]);
+	const year = match[3] || null;
+	if (!month) return { checkinISO: null, checkoutISO: null, raw: null };
+	const iso = buildFutureIsoDateFromParts(day, month, year);
+	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
+	const matchedText = String(match[0] || "");
+	const isCheckout =
+		/\b(?:checkout|check\s*-?out|departure)\b/i.test(matchedText) ||
+		/(?:\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629)/i.test(
+			matchedText
+		) ||
+		(Boolean(st?.slots?.checkinISO) && !st?.slots?.checkoutISO);
+	if (isCheckout) {
+		return {
+			checkinISO: null,
+			checkoutISO: adjustCheckoutAfterCheckin(iso, st?.slots?.checkinISO || ""),
+			raw: { checkout: `${day} ${match[2]}`, calendar: "gregorian" },
+		};
+	}
+	return {
+		checkinISO: iso,
+		checkoutISO: null,
+		raw: { checkin: `${day} ${match[2]}`, calendar: "gregorian" },
+	};
+}
+
 function extractDateRange(text = "") {
 	const sameMonthRange = parseSameMonthDateRange(text);
 	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
@@ -3424,6 +3471,60 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	return `${name}, of course. At ${hotelName}, we have ${roomNames}${fit}. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
 }
 
+function stayDateRequestText(sc = {}, st = {}, { missing = "both" } = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const checkin = localizedGregorianDate(st.slots?.checkinISO, lang);
+	const checkout = localizedGregorianDate(st.slots?.checkoutISO, lang);
+	if (/arabic/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}\u060c \u062a\u0645\u0627\u0645\u060c \u0648\u0635\u0644\u0646\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 ${checkin}. \u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629\u061f`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}\u060c \u0648\u0635\u0644\u0646\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 ${checkout}. \u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644\u061f`;
+		}
+		return `${name}\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0645\u0639\u0627\u064b \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}, perfecto, tengo la llegada para ${checkin}. Cual seria la fecha de salida?`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}, tengo la salida para ${checkout}. Cual seria la fecha de llegada?`;
+		}
+		return `${name}, por favor enviame la fecha de llegada y la fecha de salida juntas para revisar disponibilidad y precio exacto.`;
+	}
+	if (/french/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}, parfait, j'ai la date d'arrivee: ${checkin}. Quelle est la date de depart ?`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}, j'ai la date de depart: ${checkout}. Quelle est la date d'arrivee ?`;
+		}
+		return `${name}, veuillez m'envoyer la date d'arrivee et la date de depart ensemble afin que je verifie la disponibilite et le prix exact.`;
+	}
+	if (missing === "checkout" && checkin) {
+		return `${name}, perfect, I have the check-in date as ${checkin}. What is the checkout date?`;
+	}
+	if (missing === "checkin" && checkout) {
+		return `${name}, I have the checkout date as ${checkout}. What is the check-in date?`;
+	}
+	return `${name}, please send both the check-in and checkout dates together so I can check exact availability and pricing.`;
+}
+
+async function askForMissingStayDates(io, sc, st) {
+	const missing =
+		st.slots?.checkinISO && !st.slots?.checkoutISO
+			? "checkout"
+			: !st.slots?.checkinISO && st.slots?.checkoutISO
+			? "checkin"
+			: "both";
+	const sent = await humanSend(io, sc, st, stayDateRequestText(sc, st, { missing }));
+	if (sent) stampAsk(st, "dates");
+	st.waitFor = "dates";
+	return sent;
+}
+
 function shouldAskRoomPreferenceFirst(userText = "", st = {}, lu = {}, decision = {}) {
 	if (st.slots?.roomTypeKey) return false;
 	if (explicitlyExistingReservationIntent(userText)) return false;
@@ -3492,7 +3593,7 @@ async function answerSelectedHotelRoomQuestion(
 	}
 	const instruction = roomTypeKey
 		? matchingRooms.length
-			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, add one soft next-step invitation to share dates so availability and price can be checked.`
+			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, ask for both arrival/check-in and departure/checkout dates together in the same sentence so availability and price can be checked. Never ask only for check-in.`
 			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or different dates at this hotel. Do not mention, recommend, link, compare, or imply knowledge of any other hotel.`
 		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Never mention, recommend, link, compare, or imply knowledge of any other hotel, even if the guest asks for alternatives.`;
 	const reply = await write(io, sc, st, instruction, {
@@ -6843,6 +6944,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
 			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
+		`Pricing requires both arrival/check-in and departure/checkout dates. If both are missing, always ask for both together in one sentence; never ask only for check-in. If one date is already supplied, ask only for the missing date.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
 		`If the guest complains about repetition, speed, or not being answered, apologize briefly, correct course, and avoid defending yourself.`,
@@ -9635,7 +9737,7 @@ function markPendingPlanRequest(caseId, reason = "locked") {
 	pendingPlanRequests.set(key, { at: now(), reason });
 	const st = memo.get(key);
 	if (st?.turnInFlight) {
-		st.queue.push(now());
+		if (st.queue.length < 1) st.queue.push(now());
 		st.interrupt = true;
 	}
 }
@@ -10088,6 +10190,28 @@ async function planTurn(io, sc) {
 			await shareKnownStayQuote(io, sc, st);
 			return;
 		}
+		const singleTurnDate = extractSingleStayDate(userText, st);
+		if (singleTurnDate?.raw) {
+			if (singleTurnDate.raw.checkin) st.dateRaw.checkin = singleTurnDate.raw.checkin;
+			if (singleTurnDate.raw.checkout) st.dateRaw.checkout = singleTurnDate.raw.checkout;
+			if (singleTurnDate.raw.calendar) st.dateRaw.calendar = singleTurnDate.raw.calendar;
+			if (singleTurnDate.checkinISO) st.slots.checkinISO = singleTurnDate.checkinISO;
+			if (singleTurnDate.checkoutISO) st.slots.checkoutISO = singleTurnDate.checkoutISO;
+			if (
+				st.hotel &&
+				st.slots.roomTypeKey &&
+				st.slots.checkinISO &&
+				st.slots.checkoutISO &&
+				!humanHandoffReason(userText) &&
+				!wantsPaymentHelp(userText) &&
+				!explicitlyExistingReservationIntent(userText)
+			) {
+				await shareKnownStayQuote(io, sc, st);
+				return;
+			}
+			await askForMissingStayDates(io, sc, st);
+			return;
+		}
 
 		// Legacy greeting branch is skipped after the first real customer turn.
 		if (!st.greeted && !st.greetScheduled) {
@@ -10491,15 +10615,7 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "ask_dates_for_price") {
-			const reply = await write(
-				io,
-				sc,
-				st,
-				"The guest is asking about price but dates are missing. Ask for check-in and checkout dates in one short question. Do not invent prices.",
-				{ latestUserMessage: userText, slots: st.slots }
-			);
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+			await askForMissingStayDates(io, sc, st);
 			return;
 		}
 
@@ -10659,15 +10775,7 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (wantsPriceButMissingDates(userText, st)) {
-			const reply = await write(
-				io,
-				sc,
-				st,
-				"The guest is asking about price but the stay dates are missing. Ask for check-in and checkout dates in one short, professional question. Do not invent prices.",
-				{ latestUserMessage: userText, slots: st.slots }
-			);
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+			await askForMissingStayDates(io, sc, st);
 			return;
 		}
 		if (wantsPaymentHelp(userText)) {
@@ -10748,6 +10856,30 @@ async function planTurn(io, sc) {
 			}
 			return;
 		}
+		const singleDateFallback = extractSingleStayDate(userText, st);
+		if (singleDateFallback?.raw) {
+			if (singleDateFallback.raw.checkin)
+				st.dateRaw.checkin = singleDateFallback.raw.checkin;
+			if (singleDateFallback.raw.checkout)
+				st.dateRaw.checkout = singleDateFallback.raw.checkout;
+			if (singleDateFallback.raw.calendar)
+				st.dateRaw.calendar = singleDateFallback.raw.calendar;
+			if (singleDateFallback.checkinISO)
+				st.slots.checkinISO = singleDateFallback.checkinISO;
+			if (singleDateFallback.checkoutISO)
+				st.slots.checkoutISO = singleDateFallback.checkoutISO;
+			if (
+				st.hotel &&
+				st.slots.roomTypeKey &&
+				st.slots.checkinISO &&
+				st.slots.checkoutISO
+			) {
+				await shareKnownStayQuote(io, sc, st);
+				return;
+			}
+			await askForMissingStayDates(io, sc, st);
+			return;
+		}
 		const lu = decisionLu;
 		logStep(caseId, "nlu.reused", lu);
 
@@ -10808,6 +10940,7 @@ async function planTurn(io, sc) {
 				st.waitFor = "intentConfirm";
 			} else if (pivot === "dates" && !askedRecently(st, "dates")) {
 				ask = "Could you share your preferred check‑in and check‑out dates?";
+				ask = stayDateRequestText(sc, st);
 				stampAsk(st, "dates");
 				st.waitFor = "dates";
 			} else if (pivot === "room" && !askedRecently(st, "room")) {
@@ -10875,6 +11008,10 @@ async function planTurn(io, sc) {
 
 		// intent confirmation step
 		if (st.waitFor === "intentConfirm") {
+			if (confirmsText(userText)) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 			if (/\b(yes|yep|yeah|correct|sure|تمام|نعم|ايه|أجل)\b/i.test(userText)) {
 				if (!askedRecently(st, "dates")) {
 					const ask = await write(
@@ -10904,6 +11041,8 @@ async function planTurn(io, sc) {
 
 		// need dates?
 		if (!st.slots.checkinISO || !st.slots.checkoutISO) {
+			await askForMissingStayDates(io, sc, st);
+			return;
 			const slotPromptBotTextBefore = st.lastBotText;
 			if (!askedRecently(st, "dates")) {
 				const ask = await write(
@@ -11591,6 +11730,14 @@ async function runUnansweredTurnRecovery(io, caseId) {
 	}
 	const attempts = Number(unansweredTurnRecoveryAttempts.get(caseId) || 0) + 1;
 	unansweredTurnRecoveryAttempts.set(caseId, attempts);
+	const activeState = memo.get(caseId);
+	if (activeState?.turnInFlight) {
+		logStep(caseId, "turn_recovery.defer", { attempts, reason: "turn_in_flight" });
+		if (attempts < 3) {
+			scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
+		}
+		return false;
+	}
 	logStep(caseId, "turn_recovery.run", { attempts });
 	await planTurn(io, latestCase);
 	const afterCase = await getSupportCaseById(caseId);
@@ -11669,7 +11816,7 @@ function wireSocket(io) {
 				markGuestActivity(caseId);
 				const st = memo.get(caseId);
 				if (st && st.turnInFlight) {
-					st.queue.push(now());
+					if (st.queue.length < 1) st.queue.push(now());
 					st.interrupt = true;
 					logStep(caseId, "turn.enqueue", {
 						reason: "in_flight",
