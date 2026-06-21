@@ -32,6 +32,10 @@ If the guest asks for one of these, the chatbot must answer it first:
 - Whether the agent is working directly with the hotel or hotel reception.
 - Hotel distance from Al Haram.
 - Hotel address, location, or map/location wording.
+  - If selected hotel coordinates are valid, include a labeled Google Maps link
+    generated from `hotel.location.coordinates` as `[Google Maps Location](...)`.
+  - The coordinates use the database GeoJSON order `[longitude, latitude]`; the
+    Google Maps query must be sent as `latitude,longitude`.
 - Hotel bus/shuttle/transport to Al Haram.
 - Hotel room facts, room capacity, room type, or whether a room exists.
 - Hotel amenities.
@@ -51,6 +55,11 @@ These guest questions and their close derivatives are expected to answer first:
 
 - "How far is the hotel from Al Haram?"
   - Answer from verified selected hotel distance facts.
+- "Can you send me the hotel location?"
+  - Answer with the written address when available.
+  - Include the exact Google Maps pin link when valid hotel coordinates exist.
+  - Do not invent map links from a text address when coordinates are missing or
+    still the default `[0, 0]`.
 - "Do you guys have a bus?"
   - Answer from `hasBusService` and `busDetails`.
 - "Can I get a phone number to talk directly to the hotel?"
@@ -215,3 +224,5 @@ Checks used:
   link, summarize, or search confidential partner/company documents.
 - Do not create production support-case or reservation test documents unless the
   owner explicitly asks for live testing.
+- Google Maps location links should be rendered as readable chat links, not as
+  full raw URLs. In SSR this is handled by the support widget link renderer.

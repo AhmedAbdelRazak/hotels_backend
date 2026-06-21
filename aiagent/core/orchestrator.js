@@ -2514,11 +2514,46 @@ function cleanHotelFactText(value = "") {
 		.trim();
 }
 
+function hotelCoordinates(hotel = {}) {
+	const coordinates = Array.isArray(hotel?.location?.coordinates)
+		? hotel.location.coordinates
+		: [];
+	const longitude = Number(coordinates[0]);
+	const latitude = Number(coordinates[1]);
+	const valid =
+		Number.isFinite(latitude) &&
+		Number.isFinite(longitude) &&
+		Math.abs(latitude) <= 90 &&
+		Math.abs(longitude) <= 180 &&
+		!(latitude === 0 && longitude === 0);
+	return valid ? { latitude, longitude } : null;
+}
+
+function hotelGoogleMapsUrl(hotel = {}) {
+	const coords = hotelCoordinates(hotel);
+	if (!coords) return "";
+	const query = encodeURIComponent(`${coords.latitude},${coords.longitude}`);
+	return `https://www.google.com/maps/search/?api=1&query=${query}`;
+}
+
+function hotelGoogleMapsMarkdownLink(hotel = {}, lang = "English") {
+	const url = hotelGoogleMapsUrl(hotel);
+	if (!url) return "";
+	let label = "Google Maps Location";
+	if (/arabic/i.test(lang)) label = "\u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps";
+	else if (/spanish/i.test(lang)) label = "Ubicacion en Google Maps";
+	else if (/french/i.test(lang)) label = "Emplacement Google Maps";
+	else if (/indonesian/i.test(lang)) label = "Lokasi Google Maps";
+	else if (/malay|malaysia/i.test(lang)) label = "Lokasi Google Maps";
+	return `[${label}](${url})`;
+}
+
 function buildActiveHotelFacts(sc = {}, st = {}) {
 	const hotel = st.hotel || null;
 	if (!hotel) return null;
 	const distances = hotel.distances || {};
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	const mapsUrl = hotelGoogleMapsUrl(hotel);
 	return {
 		displayName: localizedHotelName(sc, st),
 		hotelName: hotel.hotelName || "",
@@ -2534,6 +2569,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 			drivingToElHaram: distances.drivingToElHaram || "",
 		},
 		location: hotel.location || null,
+		googleMapsLocationUrl: mapsUrl || "",
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
@@ -2896,6 +2932,19 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 	return `${name}, no, we do not currently offer a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
 }
 
+function hotelLocationMapLine(lang = "English", mapLink = "") {
+	if (!mapLink) return "";
+	if (/arabic/i.test(lang)) {
+		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0627\u0644\u0645\u0648\u0642\u0639 \u0627\u0644\u062f\u0642\u064a\u0642 \u0639\u0644\u0649 \u0627\u0644\u062e\u0631\u064a\u0637\u0629: ${mapLink}.`;
+	}
+	if (/spanish/i.test(lang)) return `Aqui tienes el pin exacto en Google Maps: ${mapLink}.`;
+	if (/french/i.test(lang)) return `Voici l'emplacement exact sur Google Maps : ${mapLink}.`;
+	if (/urdu|hindi/i.test(lang)) return `Exact Google Maps location yahan hai: ${mapLink}.`;
+	if (/indonesian/i.test(lang)) return `Ini pin lokasi tepat di Google Maps: ${mapLink}.`;
+	if (/malay|malaysia/i.test(lang)) return `Ini pin lokasi tepat di Google Maps: ${mapLink}.`;
+	return `Here is the exact Google Maps pin: ${mapLink}.`;
+}
+
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const hotel = st.hotel || {};
 	const lang = languageOf(sc, st);
@@ -2904,6 +2953,8 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const walking = formatHotelDistanceValue(hotel.distances?.walkingToElHaram, lang);
 	const driving = formatHotelDistanceValue(hotel.distances?.drivingToElHaram, lang);
 	const address = hotelFactAddressLine(hotel, lang);
+	const mapLink = hotelGoogleMapsMarkdownLink(hotel, lang);
+	const mapLine = hotelLocationMapLine(lang, mapLink);
 	const next = hotelFactNextStepText(sc, st);
 	const asksBus = selectedHotelBusQuestionText(userText);
 	const asksDistance = selectedHotelDistanceQuestionText(userText);
@@ -2932,20 +2983,31 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 		if (asksAddress) {
 			if (address) {
 				const distanceNote = walking || driving ? ` \u0648\u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${localizedJoin([walking ? `${walking} \u0645\u0634\u064a\u0627` : "", driving ? `${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629` : ""], lang)}.` : "";
-				return `${name}\u060c \u0639\u0646\u0648\u0627\u0646 ${hotelName}: ${address}.${distanceNote} ${next}`;
+				return `${name}\u060c \u0639\u0646\u0648\u0627\u0646 ${hotelName}: ${address}.${distanceNote}${mapLine ? ` ${mapLine}` : ""} ${next}`;
 			}
+			if (mapLine) return `${name}\u060c ${mapLine} ${next}`;
 			return `${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0639\u0646\u0648\u0627\u0646 \u062f\u0642\u064a\u0642 \u0645\u0643\u062a\u0648\u0628 \u0644\u0640 ${hotelName} \u062d\u0627\u0644\u064a\u0627. ${next}`;
 		}
 	}
 	if (/spanish/i.test(lang)) {
 		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} esta a unos ${localizedJoin([walking ? `${walking} caminando` : "", driving ? `${driving} en coche` : ""], lang)} del Haram, segun el trafico. Es una ubicacion muy practica para huespedes de Umrah. ${next}`;
-		if (asksAddress && address) return `${name}, la direccion de ${hotelName} es: ${address}.${walking || driving ? ` Esta a unos ${localizedJoin([walking ? `${walking} caminando` : "", driving ? `${driving} en coche` : ""], lang)} del Haram.` : ""} ${next}`;
+		if (asksAddress && address) return `${name}, la direccion de ${hotelName} es: ${address}.${walking || driving ? ` Esta a unos ${localizedJoin([walking ? `${walking} caminando` : "", driving ? `${driving} en coche` : ""], lang)} del Haram.` : ""}${mapLine ? ` ${mapLine}` : ""} ${next}`;
+		if (asksAddress && mapLine) return `${name}, ${mapLine} ${next}`;
 		return `${name}, no veo ese dato exacto confirmado en los detalles de ${hotelName} ahora mismo. ${next}`;
 	}
 	if (/french/i.test(lang)) {
 		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} se trouve a environ ${localizedJoin([walking ? `${walking} a pied` : "", driving ? `${driving} en voiture` : ""], lang)} du Haram, selon la circulation. C'est un emplacement tres pratique pour les voyageurs Omra. ${next}`;
-		if (asksAddress && address) return `${name}, l'adresse de ${hotelName} est : ${address}.${walking || driving ? ` Il se trouve a environ ${localizedJoin([walking ? `${walking} a pied` : "", driving ? `${driving} en voiture` : ""], lang)} du Haram.` : ""} ${next}`;
+		if (asksAddress && address) return `${name}, l'adresse de ${hotelName} est : ${address}.${walking || driving ? ` Il se trouve a environ ${localizedJoin([walking ? `${walking} a pied` : "", driving ? `${driving} en voiture` : ""], lang)} du Haram.` : ""}${mapLine ? ` ${mapLine}` : ""} ${next}`;
+		if (asksAddress && mapLine) return `${name}, ${mapLine} ${next}`;
 		return `${name}, je ne vois pas ce detail exact confirme dans les informations de ${hotelName} pour le moment. ${next}`;
+	}
+	if (/urdu/i.test(lang) && asksAddress && mapLine) {
+		const addressLine = address ? `${hotelName} address: ${address}. ` : "";
+		return `${name}, ${addressLine}${mapLine} ${next}`;
+	}
+	if (/hindi/i.test(lang) && asksAddress && mapLine) {
+		const addressLine = address ? `${hotelName} address: ${address}. ` : "";
+		return `${name}, ${addressLine}${mapLine} ${next}`;
 	}
 	if (/urdu/i.test(lang)) {
 		if (asksDistance && (walking || driving)) return `${name}، ${hotelName} حرم سے تقریباً ${localizedJoin([walking ? `${walking} پیدل` : "", driving ? `${driving} گاڑی سے` : ""], lang)} دور ہے، ٹریفک کے حساب سے۔ عمرہ guests کے لیے location بہت practical ہے۔ ${next}`;
@@ -2959,12 +3021,14 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	}
 	if (/indonesian/i.test(lang)) {
 		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} berjarak sekitar ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan mobil` : ""], lang)} dari Haram, tergantung lalu lintas. Lokasinya sangat praktis untuk tamu Umrah. ${next}`;
-		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya sekitar ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan mobil` : ""], lang)} dari Haram.` : ""} ${next}`;
+		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya sekitar ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan mobil` : ""], lang)} dari Haram.` : ""}${mapLine ? ` ${mapLine}` : ""} ${next}`;
+		if (asksAddress && mapLine) return `${name}, ${mapLine} ${next}`;
 		return `${name}, saya belum melihat detail pasti itu di data ${hotelName} saat ini. ${next}`;
 	}
 	if (/malay|malaysia/i.test(lang)) {
 		if (asksDistance && (walking || driving)) return `${name}, ${hotelName} kira-kira ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan kereta` : ""], lang)} dari Haram, bergantung pada trafik. Lokasinya sangat praktikal untuk tetamu Umrah. ${next}`;
-		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya kira-kira ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan kereta` : ""], lang)} dari Haram.` : ""} ${next}`;
+		if (asksAddress && address) return `${name}, alamat ${hotelName}: ${address}.${walking || driving ? ` Jaraknya kira-kira ${localizedJoin([walking ? `${walking} berjalan kaki` : "", driving ? `${driving} dengan kereta` : ""], lang)} dari Haram.` : ""}${mapLine ? ` ${mapLine}` : ""} ${next}`;
+		if (asksAddress && mapLine) return `${name}, ${mapLine} ${next}`;
 		return `${name}, saya belum nampak butiran tepat itu dalam data ${hotelName} sekarang. ${next}`;
 	}
 	if (asksDistance) {
@@ -2976,8 +3040,9 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	if (asksAddress) {
 		if (address) {
 			const distanceNote = walking || driving ? ` It is about ${localizedJoin([walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""], lang)} from Al Haram.` : "";
-			return `${name}, the address for ${hotelName} is: ${address}.${distanceNote} ${next}`;
+			return `${name}, the address for ${hotelName} is: ${address}.${distanceNote}${mapLine ? ` ${mapLine}` : ""} ${next}`;
 		}
+		if (mapLine) return `${name}, ${mapLine} ${next}`;
 		return `${name}, I do not see a precise written address in ${hotelName}'s details right now. ${next}`;
 	}
 	return "";
@@ -3030,6 +3095,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 				st.hotel?.distances?.drivingToElHaram
 		),
 		hasAddress: Boolean(st.hotel?.hotelAddress),
+		hasGoogleMapsLink: Boolean(hotelGoogleMapsUrl(st.hotel)),
 	});
 	return true;
 }
@@ -5628,6 +5694,9 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
 			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			: "",
+		activeHotelFacts?.googleMapsLocationUrl
+			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Location](${activeHotelFacts.googleMapsLocationUrl}). Use this exact URL from activeHotelFacts.googleMapsLocationUrl; do not invent or rewrite map coordinates.`
 			: "",
 		activeHotelFacts
 			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
