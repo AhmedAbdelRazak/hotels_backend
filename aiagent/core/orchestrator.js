@@ -925,6 +925,51 @@ function latestPhoneFromText(text = "") {
 	return "";
 }
 
+function digitsOnly(value = "") {
+	return digitsToEnglish(String(value || "")).replace(/\D/g, "");
+}
+
+function confirmationLooksLikePhoneInText(text = "", confirmation = "") {
+	const candidateDigits = digitsOnly(confirmation);
+	if (!candidateDigits) return false;
+	const phoneDigits = digitsOnly(latestPhoneFromText(text));
+	if (!phoneDigits || phoneDigits !== candidateDigits) return false;
+	const normalized = digitsToEnglish(String(text || ""));
+	const index = normalized.indexOf(candidateDigits);
+	if (index < 0) return false;
+	const nearby = normalized
+		.slice(Math.max(0, index - 55), index + candidateDigits.length + 35)
+		.toLowerCase();
+	const { lower, arabic, latinCompact } = normalizeControlText(nearby);
+	return (
+		/\b(?:phone|mobile|whatsapp|whats\s*app|contact|call|tel|my\s+number)\b/i.test(
+			lower
+		) ||
+		/(?:\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062a\u0644\u064a\u0641\u0648\u0646|\u0631\u0642\u0645\u064a|\u0627\u062a\u0635\u0627\u0644)/i.test(
+			arabic
+		) ||
+		/(?:whatsapp|mobile|phone|mynumber|contactnumber)/i.test(latinCompact)
+	);
+}
+
+function shouldTreatLatestAsNewBooking(text = "", st = {}, lu = {}) {
+	if (explicitlyExistingReservationIntent(text)) return false;
+	const luWithoutPhoneConfirmation = { ...(lu || {}) };
+	if (
+		luWithoutPhoneConfirmation.confirmation &&
+		confirmationLooksLikePhoneInText(text, luWithoutPhoneConfirmation.confirmation)
+	) {
+		luWithoutPhoneConfirmation.confirmation = null;
+	}
+	return (
+		wantsNewReservationIntent(text, luWithoutPhoneConfirmation) ||
+		roomCapacityOrTypeInquiryText(text) ||
+		Boolean(mapRoomToKey(text)) ||
+		Boolean(quickDateRange(text)?.checkinISO) ||
+		isNewReservationFlowActive(st)
+	);
+}
+
 function looksLikeNameCandidate(text = "") {
 	const value = String(text || "").trim();
 	if (!value || value.length > 80) return false;
@@ -8119,6 +8164,16 @@ async function planTurn(io, sc) {
 			hotel: st.hotel,
 			lastUserMessage: userText,
 		});
+		if (
+			decisionLu?.confirmation &&
+			confirmationLooksLikePhoneInText(userText, decisionLu.confirmation) &&
+			shouldTreatLatestAsNewBooking(userText, st, decisionLu)
+		) {
+			logStep(caseId, "nlu.confirmation_ignored_phone_context", {
+				confirmation: decisionLu.confirmation,
+			});
+			decisionLu.confirmation = null;
+		}
 		logStep(caseId, "nlu.decision", decisionLu);
 		const bookingFlowWasActiveBeforeNlu =
 			isNewReservationFlowActive(st) ||
@@ -8271,12 +8326,18 @@ async function planTurn(io, sc) {
 		});
 		if (
 			supportDecision.action === "reservation_lookup" &&
-			isNewReservationFlowActive(st) &&
-			!decisionLu?.confirmation &&
+			(isNewReservationFlowActive(st) ||
+				shouldTreatLatestAsNewBooking(userText, st, decisionLu)) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
 			supportDecision.action = "continue_booking";
-			supportDecision.reason = "new_reservation_flow_active";
+			supportDecision.reason = "new_reservation_details_not_lookup";
+			supportDecision.roomTypeKey =
+				supportDecision.roomTypeKey ||
+				decisionLu?.roomTypeKey ||
+				mapRoomToKey(userText) ||
+				st.slots?.roomTypeKey ||
+				null;
 		}
 		logStep(caseId, "orchestrator.decision", supportDecision);
 
