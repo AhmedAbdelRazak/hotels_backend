@@ -2746,14 +2746,22 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Exact duplicate AI text is still protected by the database append guard and
     frontend clientTag/message merge logic from the previous polish pass.
 - Idle follow-up and close timing:
-  - First unanswered-guest follow-up waits for 10 seconds of no guest activity
-    after an AI prompt.
-  - Guest typing counts as activity. If the guest is still composing after 10
+  - Only one unanswered-guest follow-up is allowed.
+  - That follow-up waits for 15 seconds of no guest activity after an AI prompt.
+  - Guest typing counts as activity. If the guest is still composing after 15
     seconds, the reminder is deferred until the guest has been quiet again.
-  - Final friendly reminder waits for 30 more seconds of no guest activity and
-    may use one tasteful emoji.
+  - There is no second reminder/final heads-up message.
+  - The one reminder should say there is no rush and, when possible, reference
+    the active booking context instead of asking a generic "are you there"
+    question.
+  - Contact/boundary replies such as hotel-phone answers do not schedule idle
+    nudges and should preserve the active booking wait state.
   - Fully inactive AI support cases are marked read and closed after 5 minutes,
     not 2 minutes. The code-level minimum is also 5 minutes.
+- Conversation recovery:
+  - If the guest complains that the agent is rushing, lost, repeating itself, or
+    ignoring already-shared details, the bot apologizes briefly, keeps the active
+    request, and asks only for the true missing next detail.
 - Fresh-chat privacy:
   - Previous guest chat context is disabled by default.
   - If a guest asks to continue, resume, remember, or complete an older chat, the

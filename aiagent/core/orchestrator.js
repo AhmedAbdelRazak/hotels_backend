@@ -178,13 +178,8 @@ const AI_IDLE_FOLLOWUPS_ENABLED = boolFromEnv(
 );
 const AI_IDLE_FIRST_FOLLOWUP_MS = intFromEnv(
 	"AI_IDLE_FIRST_FOLLOWUP_MS",
-	10000,
-	{ min: 10000, max: 10 * 60 * 1000 }
-);
-const AI_IDLE_FINAL_FOLLOWUP_MS = intFromEnv(
-	"AI_IDLE_FINAL_FOLLOWUP_MS",
-	30000,
-	{ min: 30000, max: 30 * 60 * 1000 }
+	15000,
+	{ min: 15000, max: 10 * 60 * 1000 }
 );
 const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * 60 * 1000, {
 	min: 5 * 60 * 1000,
@@ -1108,27 +1103,118 @@ function shouldScheduleIdleFollowups(text = "", quickReplies = []) {
 	);
 }
 
-function idleFollowupText(sc = {}, st = {}, stage = "first") {
+function bookingWaitState(st = {}) {
+	if (!st) return "";
+	if (
+		[
+			"dates",
+			"room",
+			"proceed",
+			"intentConfirm",
+			"reviewConfirm",
+			"fullname",
+			"nationality",
+			"phone",
+			"email_or_skip",
+		].includes(st.waitFor)
+	) {
+		return st.waitFor;
+	}
+	if (st.slots?.roomTypeKey && !st.slots?.checkinISO && !st.slots?.checkoutISO) {
+		return "dates";
+	}
+	if (!st.slots?.roomTypeKey && (st.hotel || st.waitFor === "clarify")) {
+		return "";
+	}
+	return "";
+}
+
+function activeBookingContinuationText(
+	sc = {},
+	st = {},
+	{ apology = false, contactBoundary = false, idle = false, omitName = false } = {}
+) {
+	const waitState = bookingWaitState(st);
+	if (!waitState) return "";
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = st.hotel ? localizedHotelName(sc, st) || toTitle(st.hotel.hotelName) : "";
+	const room = st.slots?.roomTypeKey
+		? localizedRoomTypeLabel(st.slots.roomTypeKey, lang)
+		: "";
+	if (/arabic/i.test(lang)) {
+		const prefix = omitName
+			? ""
+			: apology
+			? `${name}، حقك عليّ. `
+			: idle
+			? `${name}، خذ وقتك 🙂 `
+			: `${name}، `;
+		const contact = contactBoundary
+			? "وبخصوص رقم الهاتف، لا أشارك الرقم من هنا، لكن أتابع معك مباشرة من خلال استقبال الفندق في هذه المحادثة. "
+			: "";
+		if (waitState === "dates") {
+			return `${prefix}${contact}طلبك واضح معي${room ? `: ${room}` : ""}${
+				hotelName ? ` في ${hotelName}` : ""
+			}. عندما تكون جاهزا أرسل تاريخ الوصول والمغادرة وسأراجع لك التوفر والسعر.`;
+		}
+		if (waitState === "room") {
+			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تكون جاهزا، وسأرشح لك الأنسب مباشرة.`;
+		}
+		if (waitState === "proceed" || waitState === "reviewConfirm") {
+			return `${prefix}${contact}العرض معي وجاهز. عندما تحب نكمل، أخبرني وسأتابع خطوة بخطوة بدون استعجال.`;
+		}
+		return `${prefix}${contact}أنا متابع معك. أرسل التفصيلة التالية عندما تكون جاهزا وسأكمل معك بدون استعجال.`;
+	}
+	const prefix = omitName
+		? ""
+		: apology
+		? `${name}, you are right, sorry about that. `
+		: idle
+		? `${name}, no rush 🙂 `
+		: `${name}, `;
+	const contact = contactBoundary
+		? "About the phone number, I cannot share it here, but I can continue with you directly through the hotel reception in this chat. "
+		: "";
+	if (waitState === "dates") {
+		return `${prefix}${contact}I have your request${room ? ` for a ${room}` : ""}${
+			hotelName ? ` at ${hotelName}` : ""
+		}. When you are ready, send the arrival and departure dates and I will check availability and price.`;
+	}
+	if (waitState === "room") {
+		return `${prefix}${contact}Send the room type or number of guests whenever you are ready, and I will suggest the right option.`;
+	}
+	if (waitState === "proceed" || waitState === "reviewConfirm") {
+		return `${prefix}${contact}I have the offer ready. When you want to continue, tell me and I will take it step by step without rushing you.`;
+	}
+	return `${prefix}${contact}I am following with you. Send the next detail whenever you are ready and I will continue without rushing you.`;
+}
+
+function preserveBookingWaitState(st = {}, previousWaitFor = "") {
+	if (!st) return;
+	if (previousWaitFor && bookingWaitState({ ...st, waitFor: previousWaitFor })) {
+		st.waitFor = previousWaitFor;
+		return;
+	}
+	const recovered = bookingWaitState(st);
+	if (recovered) st.waitFor = recovered;
+}
+
+function idleFollowupText(sc = {}, st = {}) {
+	const contextual = activeBookingContinuationText(sc, st, { idle: true });
+	if (contextual) return contextual;
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return stage === "final"
-			? `${name}\u060c \u062a\u0630\u0643\u064a\u0631 \u0623\u062e\u064a\u0631 \u0648\u062f\u0648\u062f \u{1F642} \u0623\u0646\u0627 \u0645\u0627 \u0632\u0644\u062a \u0647\u0646\u0627 \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u0645\u0633\u0627\u0639\u062f\u0629. \u0625\u0630\u0627 \u0644\u0645 \u0623\u0633\u0645\u0639 \u0645\u0646\u0643\u060c \u0633\u0623\u063a\u0644\u0642 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0628\u0639\u062f \u0628\u0636\u0639 \u062f\u0642\u0627\u0626\u0642 \u0644\u062a\u0628\u0642\u0649 \u0645\u0631\u062a\u0628\u0629.`
-			: `${name}\u060c \u0623\u0646\u0627 \u0645\u0627 \u0632\u0644\u062a \u0647\u0646\u0627 \u0645\u0639\u0643 \u{1F642} \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0639\u0646\u062f\u0645\u0627 \u062a\u0643\u0648\u0646 \u062c\u0627\u0647\u0632\u0627 \u0648\u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0645\u0628\u0627\u0634\u0631\u0629.`;
+		return `${name}، خذ وقتك 🙂 أنا هنا عندما تحتاجني.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return stage === "final"
-			? `${name}, ultimo recordatorio amable \u{1F642}: sigo aqui si necesitas ayuda. Si no recibo respuesta, cerrare el chat en unos minutos para mantenerlo ordenado.`
-			: `${name}, sigo aqui contigo \u{1F642}. Enviame el siguiente detalle cuando estes listo y continuo enseguida.`;
+		return `${name}, sin prisa 🙂 Sigo aqui cuando me necesites.`;
 	}
 	if (/french/i.test(lang)) {
-		return stage === "final"
-			? `${name}, dernier petit rappel \u{1F642} : je suis toujours la si vous avez besoin d'aide. Sans reponse, je fermerai le chat dans quelques minutes pour le garder bien range.`
-			: `${name}, je suis toujours la avec vous \u{1F642}. Envoyez-moi le prochain detail quand vous etes pret et je continue tout de suite.`;
+		return `${name}, aucune urgence 🙂 Je reste la si vous avez besoin de moi.`;
 	}
-	return stage === "final"
-		? `${name}, just a friendly final heads up \u{1F642} I am still here if you need me. If I do not hear back, I will close this chat in a few minutes to keep everything tidy.`
-		: `${name}, I am still here with you \u{1F642} Send me the next detail whenever you are ready and I will continue right away.`;
+	return `${name}, no rush 🙂 I am here when you need me.`;
 }
 
 function conversationEntryContextText(message = {}) {
@@ -4299,7 +4385,7 @@ async function getIdleReadyCase(caseId, anchor) {
 	return { latestCase, hotel: policy.hotel };
 }
 
-async function runAiIdleFollowupStep(io, caseId, anchor, stage) {
+async function runAiIdleFollowupStep(io, caseId, anchor) {
 	aiIdleTimers.delete(caseId);
 	try {
 		const ready = await getIdleReadyCase(caseId, anchor);
@@ -4308,46 +4394,34 @@ async function runAiIdleFollowupStep(io, caseId, anchor, stage) {
 			ready.latestCase,
 			activeHotelContextForCase(ready.latestCase, ready.hotel)
 		);
-		const quietMs =
-			stage === "first" ? AI_IDLE_FIRST_FOLLOWUP_MS : AI_IDLE_FINAL_FOLLOWUP_MS;
+		const quietMs = AI_IDLE_FIRST_FOLLOWUP_MS;
 		const remainingMs = idleQuietRemainingMs(st, anchor, quietMs);
 		if (remainingMs > 0) {
 			setAiIdleTimer(
 				caseId,
-				() => runAiIdleFollowupStep(io, caseId, anchor, stage),
+				() => runAiIdleFollowupStep(io, caseId, anchor),
 				remainingMs
 			);
 			logStep(caseId, "idle.defer", {
-				stage,
 				remainingMs,
 				reason: "guest_activity",
 			});
 			return;
 		}
-		const text = idleFollowupText(ready.latestCase, st, stage);
+		const text = idleFollowupText(ready.latestCase, st);
 		const sent = await humanSend(io, ready.latestCase, st, text, {
 			scheduleIdle: false,
 		});
 		if (!sent) return;
-		if (stage === "first") {
-			const nextAnchor = { ...anchor, idleSinceAt: now() };
-			setAiIdleTimer(
-				caseId,
-				() => runAiIdleFollowupStep(io, caseId, nextAnchor, "final"),
-				AI_IDLE_FINAL_FOLLOWUP_MS
-			);
-		} else if (stage === "final") {
-			const elapsed = now() - Number(anchor.at || now());
-			setAiIdleTimer(
-				caseId,
-				() => runAiIdleCloseStep(io, caseId, anchor),
-				Math.max(1000, AI_IDLE_CLOSE_MS - elapsed)
-			);
-		}
+		const elapsed = now() - Number(anchor.at || now());
+		setAiIdleTimer(
+			caseId,
+			() => runAiIdleCloseStep(io, caseId, anchor),
+			Math.max(1000, AI_IDLE_CLOSE_MS - elapsed)
+		);
 	} catch (error) {
 		logStep(caseId, "idle.followup_failed", {
 			message: error?.message || error,
-			stage,
 		});
 	}
 }
@@ -4413,12 +4487,12 @@ function scheduleAiIdleFollowups(io, sc, st, messageData = {}) {
 	};
 	setAiIdleTimer(
 		caseId,
-		() => runAiIdleFollowupStep(io, caseId, anchor, "first"),
+		() => runAiIdleFollowupStep(io, caseId, anchor),
 		AI_IDLE_FIRST_FOLLOWUP_MS
 	);
 	logStep(caseId, "idle.scheduled", {
 		firstMs: AI_IDLE_FIRST_FOLLOWUP_MS,
-		finalMs: AI_IDLE_FINAL_FOLLOWUP_MS,
+		finalMs: null,
 		closeMs: AI_IDLE_CLOSE_MS,
 	});
 }
@@ -5630,9 +5704,51 @@ function patienceText(text = "") {
 }
 
 function botExperienceComplaintText(text = "") {
-	return /\b(repeat|repeating|again|too fast|typing so fast|bot|robot|worst|bad cs|bad support|wrong with you|omg|lol)\b|تكرر|بتكرر|بسرعة|سريعة|روبوت|بوت|وحش|سيئ|غلط/i.test(
-		String(text || "")
+	const raw = String(text || "");
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(repeat|repeating|again|too fast|typing so fast|rushing|rush|lost|confused|pay attention|i am here|i'm here|still here|already told you|i told you|you forgot|bot|robot|worst|bad cs|bad support|wrong with you|what is going on|omg|lol)\b/i.test(
+			lower
+		) ||
+		/(?:تكرر|بتكرر|بسرعة|سريعة|مستعجل|مستعجلة|مستعجله|تايه|تايهة|تايهه|مش\s+فاهم|مش\s+فاهمة|مش\s+فاهمه|ركزي|ركز|انا\s+موجود|أنا\s+موجود|موجود\s+اهو|ايه\s+فيه|ايه\s+ده|قولتلك|قلتلك|لسه\s+قايل|روبوت|بوت|وحش|سيئ|غلط)/i.test(
+			arabic
+		) ||
+		/(?:toofast|rushing|rush|lost|confused|payattention|iamhere|imhere|stillhere|alreadytoldyou|itoldyou|youforgot|entahtayeh|tayha|tayeh|ana mawgood|anamawgoud|mawgood|ehfeeh|ehda|oltlek|ultlek|bot|robot|badcs|badsupport|wrongwithyou)/i.test(
+			latinCompact
+		)
 	);
+}
+
+function conversationRecoveryFallbackText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، حقك عليّ. أنا معك ومتابع المحادثة، ولن أستعجلك. أرسل لي النقطة التالية عندما تكون جاهزا وسأكمل معك بوضوح.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, tienes razon, disculpa. Estoy contigo y sigo el contexto; no quiero apresurarte. Enviame el siguiente detalle cuando estes listo y continuo con claridad.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, vous avez raison, desole. Je suis avec vous et je garde le contexte; je ne veux pas vous presser. Envoyez-moi le prochain detail quand vous etes pret et je continue clairement.`;
+	}
+	return `${name}, you are right, sorry about that. I am with you and following the context; I do not want to rush you. Send the next detail whenever you are ready and I will continue clearly.`;
+}
+
+async function answerConversationRecovery(io, sc, st, userText = "") {
+	const hadContactRequest = hotelContactConversationRequestCount(sc) > 0;
+	const contextual = activeBookingContinuationText(sc, st, {
+		apology: true,
+		contactBoundary: hadContactRequest,
+	});
+	const reply = contextual || conversationRecoveryFallbackText(sc, st);
+	await humanSend(io, sc, st, reply, { scheduleIdle: false });
+	preserveBookingWaitState(st, st.waitFor);
+	logStep(String(sc._id), "conversation_recovery.reply", {
+		latestUserMessage: String(userText || "").slice(0, 160),
+		waitFor: st.waitFor,
+		hadContactRequest,
+	});
+	return true;
 }
 
 function abusiveGuestText(text = "") {
@@ -8716,18 +8832,27 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 }
 
 async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
+	const previousWaitFor = st.waitFor || "";
 	const requestCount = hotelContactRequestCount(sc, userText);
 	const phoneToShare = "";
-	const reply = hotelContactReplyText(sc, st, {
+	let reply = hotelContactReplyText(sc, st, {
 		publicPhone: phoneToShare,
 		requestCount,
 		userText,
 	});
-	await humanSend(io, sc, st, reply);
+	const continuation = activeBookingContinuationText(sc, st, {
+		contactBoundary: false,
+		omitName: true,
+	});
+	if (continuation && !reply.includes(continuation)) {
+		reply = `${reply} ${continuation}`;
+	}
+	await humanSend(io, sc, st, reply, { scheduleIdle: false });
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
+	preserveBookingWaitState(st, previousWaitFor);
 	logStep(String(sc._id), "hotel_contact.reply", {
 		sharedPhone: Boolean(phoneToShare),
 		sharedPublicPhone: Boolean(phoneToShare),
@@ -8738,11 +8863,15 @@ async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
 }
 
 async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
-	await humanSend(io, sc, st, directHotelRelationshipReplyText(sc, st));
+	const previousWaitFor = st.waitFor || "";
+	await humanSend(io, sc, st, directHotelRelationshipReplyText(sc, st), {
+		scheduleIdle: false,
+	});
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
+	preserveBookingWaitState(st, previousWaitFor);
 	logStep(String(sc._id), "hotel_direct_relationship.reply", {
 		latestUserMessage: String(userText || "").slice(0, 160),
 		hotelName: localizedHotelName(sc, st),
@@ -8751,11 +8880,15 @@ async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
 }
 
 async function answerConfidentialCompanyDocumentInquiry(io, sc, st, userText = "") {
-	await humanSend(io, sc, st, confidentialCompanyDocumentReplyText(sc, st));
+	const previousWaitFor = st.waitFor || "";
+	await humanSend(io, sc, st, confidentialCompanyDocumentReplyText(sc, st), {
+		scheduleIdle: false,
+	});
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
+	preserveBookingWaitState(st, previousWaitFor);
 	logStep(String(sc._id), "confidential_company_document.reply", {
 		latestUserMessage: String(userText || "").slice(0, 160),
 		hotelName: localizedHotelName(sc, st),
@@ -8898,8 +9031,12 @@ async function tryAnswerDirectGuestRequest(io, sc, st, userText = "", lu = {}) {
 		return answerVagueHajjInquiry(io, sc, st, userText);
 	}
 	if (kind === "hotel_scope_boundary") {
-		await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
+		const previousWaitFor = st.waitFor || "";
+		await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st), {
+			scheduleIdle: false,
+		});
 		st.waitFor = "clarify";
+		preserveBookingWaitState(st, previousWaitFor);
 		return true;
 	}
 	if (kind === "selected_hotel_fact") {
@@ -9536,6 +9673,10 @@ async function planTurn(io, sc) {
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
+		if (botExperienceComplaintText(userText)) {
+			await answerConversationRecovery(io, sc, st, userText);
+			return;
+		}
 		const assistantBeforeLatestGuest = lastAssistantMessageBeforeLatestGuest(sc);
 		const assistantBeforeLatestGuestActions = quickReplyActions(
 			assistantBeforeLatestGuest
