@@ -185,6 +185,20 @@ const SIGNAL_GROUPS = {
 			/(?:\u0628\u0627\u064a\u0645\u0646\u062a|\u0628\u064a\u0645\u0646\u062a|\u0628\u0627\u064a\u064a\u0645\u0646\u062a|\u0628\u064a\u0645\u0646\u062a|\u0643\u0631\u064a\u062f\u062a\u0643\u0627\u0631\u062f|\u0643\u0627\u0631\u062f)/i,
 		],
 	},
+	confidentialDocument: {
+		lower: [
+			/\b(?:ein|e\.?\s*i\.?\s*n\.?|tax\s*(?:id|identification|number|no\.?)|vat\s*(?:id|number|no\.?)?|company\s+(?:documents?|papers?|paperwork|registration|license|licence|certificate|certificates?)|business\s+(?:registration|license|licence|papers?|documents?)|commercial\s+registration|trade\s+license|legal\s+documents?|official\s+documents?|registration\s+(?:papers?|documents?|certificate|number|no\.?)|certificate\s+of\s+incorporation|incorporation\s+(?:papers?|documents?)|papers?|paperwork|documents?|licen[cs]e|certificates?|permits?)\b/i,
+		],
+		latinCompact: [
+			/(?:ein|taxid|taxidentification|taxnumber|vatid|vatnumber|companydocument|companydocuments|companypaper|companypapers|companypaperwork|companyregistration|companylicense|companylicence|companycertificate|businessregistration|businesslicense|businesslicence|commercialregistration|tradlicense|tradelicense|legaldocument|legaldocuments|officialdocument|officialdocuments|registrationpaper|registrationpapers|registrationdocument|registrationdocuments|registrationcertificate|certificatesofincorporation|certificateofincorporation|incorporationdocuments|incorporationpapers|documentos|papeles|registrocomercial|licencia|numerofiscal|nif|rfc|documents|papiers|numerofiscal|registre|licence|certificat|dokumen|surat|nomorpajak|nomborcukai|nomborpajak|lesen|izin|pendaftaran)/i,
+		],
+		arabic: [
+			/(?:\u0648\u062b\u0627\u0626\u0642|\u0645\u0633\u062a\u0646\u062f\u0627\u062a|\u0627\u0648\u0631\u0627\u0642|\u0627\u0644\u0627\u0648\u0631\u0627\u0642|\u0627\u0648\u0631\u0627\u0642\s+\u0627\u0644\u0634\u0631\u0643\u0647|\u0645\u0633\u062a\u0646\u062f\u0627\u062a\s+\u0627\u0644\u0634\u0631\u0643\u0647|\u0633\u062c\u0644\s+\u062a\u062c\u0627\u0631\u064a|\u0631\u0642\u0645\s+\u0636\u0631\u064a\u0628\u064a|\u0627\u0644\u0631\u0642\u0645\s+\u0627\u0644\u0636\u0631\u064a\u0628\u064a|\u0636\u0631\u064a\u0628\u0647|\u0636\u0631\u064a\u0628\u064a|\u0631\u062e\u0635\u0647|\u062a\u0631\u062e\u064a\u0635|\u0634\u0647\u0627\u062f\u0647|\u062a\u0635\u0631\u064a\u062d|\u0648\u0631\u0642|\u062f\u0648\u0643\u064a\u0648\u0645\u0646\u062a|\u062f\u0648\u0643\u064a\u0645\u0646\u062a|\u0644\u0627\u064a\u0633\u0646\u0633|\u062a\u0627\u0643\u0633)/i,
+		],
+		arabicCompact: [
+			/(?:\u062f\u0648\u0643\u064a\u0648?\u0645\u0646\u062a|\u062f\u0627\u0643\u064a\u0648?\u0645\u0646\u062a|\u0644\u0627\u064a\u0633\u0646\u0633|\u062a\u0627\u0643\u0633|\u062a\u0627\u0643\u0633\u0627\u064a\u062f|\u0627\u064a\u0627\u064a\u0627\u0646|\u0627\u064a\u0646)/i,
+		],
+	},
 	direct: {
 		lower: [/\b(?:direct|directly|official|officially|authorized|authorised|connected\s+to)\b/i],
 		latinCompact: [

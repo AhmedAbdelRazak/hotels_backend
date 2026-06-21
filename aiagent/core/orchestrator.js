@@ -1577,6 +1577,51 @@ function directHotelRelationshipQuestionText(text = "") {
 	return english || spanish || arabicMatch;
 }
 
+function confidentialCompanyDocumentQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	if (!hasSemanticSignal(raw, "confidentialDocument")) return false;
+
+	const organizationContext =
+		/\b(?:ein|e\.?\s*i\.?\s*n\.?|tax|vat|company|business|commercial|legal|official|registration|registered|license|licence|certificate|incorporation)\b/i.test(
+			lower
+		) ||
+		/(?:taxid|taxnumber|vatid|vatnumber|companydocument|companydocuments|companypaper|companypapers|companypaperwork|companyregistration|businessregistration|commercialregistration|tradelicense|legaldocument|officialdocument|certificateofincorporation|numerofiscal|nif|rfc|nomorpajak|nomborcukai)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0634\u0631\u0643\u0647|\u0627\u0644\u0634\u0631\u0643\u0647|\u0633\u062c\u0644\s+\u062a\u062c\u0627\u0631\u064a|\u0631\u0642\u0645\s+\u0636\u0631\u064a\u0628\u064a|\u0627\u0644\u0631\u0642\u0645\s+\u0627\u0644\u0636\u0631\u064a\u0628\u064a|\u0636\u0631\u064a\u0628|\u0631\u062e\u0635\u0647|\u062a\u0631\u062e\u064a\u0635|\u062a\u0635\u0631\u064a\u062d|\u0631\u0633\u0645\u064a|\u0642\u0627\u0646\u0648\u0646\u064a)/i.test(
+			arabic
+		);
+	const genericPaperwork =
+		/\b(?:documents?|documentations?|papers?|paperwork)\b/i.test(lower) ||
+		/(?:\u0648\u062b\u0627\u0626\u0642|\u0645\u0633\u062a\u0646\u062f\u0627\u062a|\u0627\u0648\u0631\u0627\u0642|\u062f\u0648\u0643\u064a\u0648\u0645\u0646\u062a|\u062f\u0648\u0643\u064a\u0645\u0646\u062a)/i.test(
+			arabic
+		);
+	const bookingDocumentContext =
+		hasSemanticSignal(raw, ["reservation", "confirmation"]) ||
+		/\b(?:voucher|receipt|invoice|booking\s+details|reservation\s+details|confirmation\s+email|confirmation\s+link)\b/i.test(
+			lower
+		);
+	if (bookingDocumentContext && !organizationContext) return false;
+
+	const protectedPaperwork = organizationContext || genericPaperwork;
+	if (!protectedPaperwork) return false;
+
+	const requestish =
+		hasSemanticSignal(raw, "send") ||
+		/\b(?:can|could|would|may|please|give|send|show|share|provide|need|want|require|have|what\s+is|do\s+you\s+have|where\s+can|let\s+me\s+see)\b/i.test(
+			lower
+		) ||
+		/(?:canyou|couldyou|give|send|show|share|provide|need|want|require|doyouhave|whatisthe|letmesee|enviar|mostrar|compartir|proporcionar|necesito|quiero|envoyer|montrer|partager|fournir|besoin|veux|kirim|hantar|tunjukkan|butuh|perlu)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0645\u0645\u0643\u0646|\u0627\u0639\u0637\u064a|\u0627\u0639\u0637\u064a\u0646\u064a|\u0627\u062f\u064a\u0646\u064a|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0648\u0631\u064a|\u0639\u0627\u064a\u0632|\u0627\u0628\u063a\u0649|\u0627\u0631\u064a\u062f|\u0647\u0644|\u0641\u064a|\u0639\u0646\u062f\u0643|\u0645\u0627\s+\u0647\u0648|\u0627\u064a\u0647\s+\u0647\u0648)/i.test(
+			arabic
+		);
+	return requestish || /[?\u061f]/.test(raw);
+}
+
 function directHotelRelationshipReplyText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st) || toTitle(st.hotel?.hotelName || "the hotel");
@@ -1591,6 +1636,28 @@ function directHotelRelationshipReplyText(sc = {}, st = {}) {
 		return `Oui monsieur, je travaille directement avec l'equipe reception et reservations de ${hotelName}. Je peux verifier la disponibilite et les details de reservation avec l'equipe de l'hotel ici.`;
 	}
 	return `Yes sir, I work directly with the ${hotelName} reception and reservations team. I can check availability and reservation details with the hotel team here.`;
+}
+
+function confidentialCompanyDocumentReplyText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st) || toTitle(st.hotel?.hotelName || "the hotel");
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0641\u0647\u0645 \u0637\u0644\u0628\u0643. \u0623\u0646\u0627 \u0647\u0646\u0627 \u0644\u0644\u0645\u0633\u0627\u0639\u062f\u0629 \u0643\u062f\u0639\u0645 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a \u0644\u0640 ${hotelName}\u060c \u0644\u0643\u0646 \u0623\u0631\u0642\u0627\u0645 \u0627\u0644\u0636\u0631\u0627\u0626\u0628 \u0623\u0648 \u0627\u0644\u0645\u0633\u062a\u0646\u062f\u0627\u062a \u0627\u0644\u0631\u0633\u0645\u064a\u0629 \u0623\u0648 \u0623\u0648\u0631\u0627\u0642 \u0627\u0644\u062a\u0633\u062c\u064a\u0644 \u0648\u0627\u0644\u062a\u0631\u0627\u062e\u064a\u0635 \u0645\u0639\u0644\u0648\u0645\u0627\u062a \u0633\u0631\u064a\u0629 \u0648\u0644\u0627 \u064a\u062a\u0645 \u062a\u0648\u0641\u064a\u0631\u0647\u0627 \u0645\u0646 \u062e\u0644\u0627\u0644 \u062f\u0631\u062f\u0634\u0629 \u0627\u0644\u062f\u0639\u0645. \u0628\u0639\u062f \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632 \u0648\u0627\u0644\u0648\u0635\u0648\u0644 \u0644\u0644\u0641\u0646\u062f\u0642\u060c \u064a\u0645\u0643\u0646\u0643 \u0637\u0644\u0628 \u0627\u0644\u0645\u062f\u064a\u0631 \u0634\u062e\u0635\u064a\u0627\u060c \u0648\u0627\u0644\u0625\u062f\u0627\u0631\u0629 \u0633\u062a\u0631\u0627\u062c\u0639 \u0645\u0627 \u064a\u0645\u0643\u0646 \u0639\u0631\u0636\u0647 \u0639\u0628\u0631 \u0627\u0644\u0642\u0646\u0627\u0629 \u0627\u0644\u0631\u0633\u0645\u064a\u0629 \u0627\u0644\u0645\u0646\u0627\u0633\u0628\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, entiendo su solicitud. Aqui puedo ayudar como soporte de recepcion y reservas de ${hotelName}, pero los EIN, numeros fiscales, documentos de registro, licencias y papeles internos de la empresa son confidenciales y no se comparten por el chat de soporte. Despues de reservar y llegar al hotel, puede pedir hablar con el gerente en persona, y la administracion revisara que se puede mostrar por el canal oficial adecuado.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je comprends votre demande. Ici, je peux vous aider comme support reception et reservations de ${hotelName}, mais les numeros fiscaux, documents d'enregistrement, licences et documents internes de l'entreprise sont confidentiels et ne sont pas fournis par le chat de support. Apres votre reservation et votre arrivee a l'hotel, vous pourrez demander a voir le responsable en personne, et la direction verifiera ce qui peut etre presente par le canal officiel approprie.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, saya memahami permintaannya. Di sini saya membantu sebagai dukungan resepsionis dan reservasi ${hotelName}, tetapi nomor pajak, dokumen pendaftaran, lisensi, sertifikat, dan dokumen internal perusahaan bersifat rahasia dan tidak dibagikan melalui chat dukungan. Setelah reservasi selesai dan Anda tiba di hotel, Anda dapat meminta bertemu manajer secara langsung, lalu manajemen akan meninjau apa yang dapat ditunjukkan melalui jalur resmi yang tepat.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, saya faham permintaan tuan. Di sini saya membantu sebagai sokongan penyambut tetamu dan tempahan ${hotelName}, tetapi nombor cukai, dokumen pendaftaran, lesen, sijil, dan dokumen dalaman syarikat adalah sulit dan tidak dikongsi melalui chat sokongan. Selepas tempahan dibuat dan tuan tiba di hotel, tuan boleh minta berjumpa pengurus secara langsung, dan pihak pengurusan akan menyemak apa yang boleh ditunjukkan melalui saluran rasmi yang sesuai.`;
+	}
+	return `${name}, I understand why you are asking. I can help here as ${hotelName} reception and reservations support, but company EIN/tax IDs, registration papers, licenses, certificates, and internal documents are confidential and are not provided through support chat. After you reserve and arrive at the hotel, you may ask the hotel manager in person; management can review what can be shown through the proper official channel.`;
 }
 
 function normalizedContactRequestText(text = "") {
@@ -5558,6 +5625,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
+		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
 			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
 			: "",
@@ -5686,6 +5754,14 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	}
 	if (wantsDiscountQuestion(userText)) {
 		return { action: "discount_question", roomTypeKey: null, reason: "discount_keyword" };
+	}
+	if (confidentialCompanyDocumentQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : "platform",
+			reason: "confidential_company_document_question",
+		};
 	}
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
@@ -5823,7 +5899,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
-		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
+		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks for EIN/tax ID/company/legal paperwork, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
 		"Choose hotel_recommendation only when there is no active hotel context.",
@@ -7515,9 +7591,25 @@ async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
 	return true;
 }
 
+async function answerConfidentialCompanyDocumentInquiry(io, sc, st, userText = "") {
+	await humanSend(io, sc, st, confidentialCompanyDocumentReplyText(sc, st));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	logStep(String(sc._id), "confidential_company_document.reply", {
+		latestUserMessage: String(userText || "").slice(0, 160),
+		hotelName: localizedHotelName(sc, st),
+	});
+	return true;
+}
+
 function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	const text = String(userText || "").trim();
 	if (!text) return "";
+	if (confidentialCompanyDocumentQuestionText(text)) {
+		return "confidential_company_document";
+	}
 	if (wantsPaymentHelp(text)) return "payment_help";
 	if (wantsDiscountQuestion(text)) return "discount_question";
 	if (st.hotel && directHotelRelationshipQuestionText(text)) {
@@ -7613,6 +7705,9 @@ async function tryAnswerDirectGuestRequest(io, sc, st, userText = "", lu = {}) {
 		waitFor: st.waitFor,
 		latestUserMessage: String(userText || "").slice(0, 160),
 	});
+	if (kind === "confidential_company_document") {
+		return answerConfidentialCompanyDocumentInquiry(io, sc, st, userText);
+	}
 	if (kind === "payment_help") {
 		if (!st.hotel) {
 			await redirectJannatReservationToHotelSupport(io, sc, st, userText, lu);
@@ -8621,6 +8716,10 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "general_answer") {
+			if (confidentialCompanyDocumentQuestionText(userText)) {
+				await answerConfidentialCompanyDocumentInquiry(io, sc, st, userText);
+				return;
+			}
 			if (st.hotel && selectedHotelFactQuestionText(userText)) {
 				await answerSelectedHotelFactQuestion(io, sc, st, userText);
 				return;

@@ -35,6 +35,8 @@ If the guest asks for one of these, the chatbot must answer it first:
 - Hotel bus/shuttle/transport to Al Haram.
 - Hotel room facts, room capacity, room type, or whether a room exists.
 - Hotel amenities.
+- Company EIN, tax ID, VAT number, legal paperwork, registration papers,
+  licenses, certificates, or other confidential company/partner documents.
 - Payment or payment-link help.
 - Discount or offer questions.
 - Broad support questions that can be answered from verified context.
@@ -58,6 +60,14 @@ These guest questions and their close derivatives are expected to answer first:
 - "Are you working directly with Hotel X?"
   - Answer yes in the guest language, using the meaning:
     "Yes sir, I work directly with the Hotel X reception and reservations team."
+- "Can you give me your company EIN or official documents?"
+  - Answer professionally that support/reception chat cannot provide confidential
+    company paperwork, tax IDs, registration papers, licenses, or internal
+    documents.
+  - Explain that after a reservation and arrival at the hotel, the guest may ask
+    the manager in person, and management can review what can be shown through
+    the proper official channel.
+  - Do not search stored/uploaded documents or expose partner paperwork.
 
 The same behavior applies to derivatives such as:
 
@@ -98,6 +108,7 @@ hardcoded replies. It recognizes intent families such as:
 - `confirmation`
 - `reservation`
 - `payment`
+- `confidentialDocument`
 - `direct`
 - `workWith`
 - `hotel`
@@ -115,6 +126,9 @@ Examples:
   `\u0643\u0648\u0646\u0641\u0631\u0645\u064a\u0634\u0646`.
 - Spanish/French/Indonesian/Malay/Hindi/Urdu and romanized variants for direct,
   reservation, payment, contact, and hotel terms.
+- Company paperwork variants such as EIN, tax ID, VAT, legal documents,
+  registration papers, licenses, certificates, Spanish/French/Indonesian/Malay
+  equivalents, and Arabic-script loanwords for documents/tax/license.
 
 ## Phone Versus Confirmation Safety
 
@@ -196,5 +210,8 @@ Checks used:
 - Keep new wording variants in `scriptSignals.js` or `numberWords.js` when they
   are reusable semantic patterns.
 - Avoid one-off response hardcoding unless the behavior is a true fixed policy.
+- Company EIN/tax/legal-document requests are a fixed confidentiality policy.
+  The chatbot may explain the support boundary, but must not reveal, quote,
+  link, summarize, or search confidential partner/company documents.
 - Do not create production support-case or reservation test documents unless the
   owner explicitly asks for live testing.
