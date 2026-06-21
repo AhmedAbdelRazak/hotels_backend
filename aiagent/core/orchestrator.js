@@ -1780,7 +1780,10 @@ function selectedHotelRoomQuestionText(text = "") {
 	if (!mentionsRoom) return false;
 	const hasRoomTypeOrCapacity =
 		Boolean(mapRoomToKey(normalized)) ||
-		/\b(?:for\s*)?(?:2|two|3|three|4|four|5|five)\b/i.test(normalized);
+		Boolean(requestedGuestCountFromText(text)) ||
+		/\b(?:for\s*)?(?:2|two|3|three|4|four|5|five|6|six|7|seven|8|eight|9|nine|10|ten)\b/i.test(
+			normalized
+		);
 	if (!hasRoomTypeOrCapacity) return false;
 	return (
 		/[?]/.test(normalized) ||
@@ -2275,12 +2278,19 @@ function roomCapacityOrTypeInquiryText(text = "") {
 			arabic
 		) ||
 		/(?:ghorfa|ghurfa|oda|room|bed)/i.test(latinCompact);
+	const hasOccupancyWord =
+		/\b(?:people|persons?|guests?|adults?|pax)\b/i.test(lower) ||
+		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0628\u0627\u0644\u063a)/i.test(
+			arabic
+		);
+	const requestedGuestCount = requestedGuestCountFromText(raw);
 	const hasCapacityOrType =
 		Boolean(mapRoomToKey(raw)) ||
-		/\b(?:2|two|3|three|4|four|5|five)\s*(?:people|persons|guests|adults|beds?)\b/i.test(
+		Boolean(requestedGuestCount) ||
+		/\b(?:2|two|3|three|4|four|5|five|6|six|7|seven|8|eight|9|nine|10|ten)\s*(?:people|persons|guests|adults|beds?)\b/i.test(
 			lower
 		) ||
-		/(?:\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u062a\u0644\u062a|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u0631\u0628\u0627\u0639|\u062e\u0645\u0633|\u062e\u0645\u0627\u0633)/i.test(
+		/(?:\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u062a\u0644\u062a|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u0631\u0628\u0627\u0639|\u062e\u0645\u0633|\u062e\u0645\u0627\u0633|\u0633\u062a|\u0633\u062a\u0629|\u0633\u062a\u0647|\u0633\u0628\u0639|\u0633\u0628\u0639\u0629|\u0633\u0628\u0639\u0647|\u062b\u0645\u0627\u0646|\u062a\u0645\u0627\u0646|\u062a\u0633\u0639|\u0639\u0634\u0631)/i.test(
 			arabic
 		);
 	const hasBookingIntent =
@@ -2290,7 +2300,7 @@ function roomCapacityOrTypeInquiryText(text = "") {
 		/(?:\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0623\u0628\u063a\u0649|\u0627\u0628\u063a\u0649|\u0623\u0631\u064a\u062f|\u0627\u0631\u064a\u062f|\u0627\u062d\u062a\u0627\u062c|\u0645\u0645\u0643\u0646|\u0633\u0627\u0639\u062f|\u0645\u062a\u0627\u062d|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632)/i.test(
 			arabic
 		);
-	return hasRoomWord && (hasCapacityOrType || hasBookingIntent);
+	return (hasRoomWord || (hasOccupancyWord && hasCapacityOrType)) && (hasCapacityOrType || hasBookingIntent);
 }
 
 function wantsNewReservationIntent(text = "", lu = {}) {
@@ -3471,6 +3481,368 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	return `${name}, of course. At ${hotelName}, we have ${roomNames}${fit}. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
 }
 
+function requestedGuestCountFromText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return null;
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const counts = [];
+	const addCount = (value) => {
+		const count = reservationDetailCount(value, { allowZero: false });
+		if (count !== null && count <= 30) counts.push(count);
+	};
+	addCount(countNearTerms(normalized, GUEST_COUNT_TERMS, { allowZero: false }));
+	addCount(
+		countNearTerms(
+			normalized,
+			[
+				"beds?",
+				"bed",
+				"\\u0633\\u0631\\u064a\\u0631",
+				"\\u0627\\u0633\\u0631\\u0647",
+				"\\u0627\\u0633\\u0631\\u0629",
+				"\\u0623\\u0633\\u0631\\u0629",
+			],
+			{ allowZero: false }
+		)
+	);
+	const patterns = [
+		/\b(?:for|fits?|fit|accommodates?|accommodate|we\s+are|we're)\s+([0-9]{1,2})\b/i,
+		/\b(?:room|rooms|suite|suites|booking|reservation|stay)\s+(?:for|to\s+fit|fits?)\s+([0-9]{1,2})\b/i,
+		/\b([0-9]{1,2})\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i,
+		/\b(?:people|persons?|guests?|adults?|pax|beds?)\s*[:= -]*([0-9]{1,2})\b/i,
+		/(?:\u0627\u062d\u0646\u0627|\u0646\u062d\u0646|\u0639\u062f\u062f\u0646\u0627)\s*([0-9]{1,2})/i,
+		/([0-9]{1,2})\s*(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)/i,
+		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)\s*[:= -]*([0-9]{1,2})/i,
+	];
+	for (const pattern of patterns) {
+		const match = lower.match(pattern) || arabic.match(pattern);
+		if (match?.[1]) addCount(match[1]);
+	}
+	if (
+		/\b(?:more\s+than|over|above)\s*5\b/i.test(lower) ||
+		/(?:\u0627\u0643\u062b\u0631|\u0627\u0643\u062a\u0631|\u0627\u0632\u064a\u062f|\u0641\u0648\u0642)\s*(?:\u0645\u0646\s*)?5/i.test(
+			arabic
+		) ||
+		/(?:morethan|over|above)5/i.test(latinCompact)
+	) {
+		addCount(6);
+	}
+	if (counts.length) return Math.max(...counts);
+	return mapRoomToKey(raw) === "familyRooms" ? 5 : null;
+}
+
+function extraBedBeyondFiveRequestText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const wantsExtraBed =
+		/\b(?:add|adding|extra|additional|rollaway|spare)\s+(?:bed|beds)\b/i.test(
+			lower
+		) ||
+		/\b(?:bed|beds)\s+(?:extra|additional|rollaway)\b/i.test(lower) ||
+		/(?:\u0633\u0631\u064a\u0631\s+(?:\u0632\u064a\u0627\u062f\u0629|\u0627\u0636\u0627\u0641\u064a|\u0625\u0636\u0627\u0641\u064a)|\u0627\u0636\u0627\u0641(?:\u0629)?\s+\u0633\u0631\u064a\u0631|\u0646\u0636\u064a\u0641\s+\u0633\u0631\u064a\u0631|\u0627\u0636\u064a\u0641\s+\u0633\u0631\u064a\u0631)/i.test(
+			arabic
+		) ||
+		/(?:extrabed|additionalbed|rollawaybed|addbed)/i.test(latinCompact);
+	if (!wantsExtraBed) return false;
+	const count = requestedGuestCountFromText(raw);
+	return (
+		count > 5 ||
+		mapRoomToKey(raw) === "familyRooms" ||
+		/\b(?:5|five)\s*(?:bed|beds|people|persons?|guests?)\b/i.test(lower) ||
+		/(?:\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644\u064a|\u063a\u0631\u0641\u0629\s*5|5\s*(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629))/i.test(
+			arabic
+		)
+	);
+}
+
+function largeGroupDateAskText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const checkin = localizedGregorianDate(st.slots?.checkinISO, lang);
+	const checkout = localizedGregorianDate(st.slots?.checkoutISO, lang);
+	if (/arabic/i.test(lang)) {
+		if (checkin && !checkout) {
+			return `ما تاريخ المغادرة حتى أراجع التوفر والسعر للتجهيز بالكامل؟`;
+		}
+		if (!checkin && checkout) {
+			return `ما تاريخ الوصول حتى أراجع التوفر والسعر للتجهيز بالكامل؟`;
+		}
+		return `أرسل لي تاريخ الوصول وتاريخ المغادرة معاً، وسأراجع لك التوفر والسعر للتجهيز بالكامل.`;
+	}
+	if (checkin && !checkout) {
+		return `What checkout date should I check for the full room setup?`;
+	}
+	if (!checkin && checkout) {
+		return `What check-in date should I check for the full room setup?`;
+	}
+	return `${name}, please send both the check-in and checkout dates together and I will check the full room setup for you.`;
+}
+
+function priceLargeGroupRoomCombination(hotel = {}, checkinISO = "", checkoutISO = "") {
+	const familyQuote = safePriceRoomForStay(
+		hotel,
+		{ roomType: "familyRooms" },
+		checkinISO,
+		checkoutISO
+	);
+	const doubleQuote = safePriceRoomForStay(
+		hotel,
+		{ roomType: "doubleRooms" },
+		checkinISO,
+		checkoutISO
+	);
+	const available = Boolean(familyQuote?.available && doubleQuote?.available);
+	const total = available
+		? Number(
+				(
+					safeNum(familyQuote.totals?.totalPriceWithCommission, 0) +
+					safeNum(doubleQuote.totals?.totalPriceWithCommission, 0)
+				).toFixed(2)
+		  )
+		: 0;
+	return {
+		available,
+		familyQuote,
+		doubleQuote,
+		nights: familyQuote?.nights || doubleQuote?.nights || 0,
+		currency:
+			familyQuote?.currency || doubleQuote?.currency || hotel?.currency || "SAR",
+		total,
+	};
+}
+
+function largeGroupRoomRecommendationText(sc = {}, st = {}, details = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const isArabic = /arabic/i.test(lang);
+	const hotelName = localizedHotelName(sc, st);
+	const guestCount = Math.max(6, Number(details.guestCount || 6));
+	const guestText = localizedNumber(guestCount, lang);
+	const familyRooms = Array.isArray(details.familyRooms) ? details.familyRooms : [];
+	const doubleRooms = Array.isArray(details.doubleRooms) ? details.doubleRooms : [];
+	const hasCoreRooms = Boolean(familyRooms.length && doubleRooms.length);
+	const optionLabel = (options, fallback) => {
+		if (isArabic) {
+			const arabicName = options
+				.map((option) => String(option?.displayNameOther || "").trim())
+				.find((value) => value && hasArabicScript(value));
+			return arabicName || fallback;
+		}
+		return inlineRoomOptions(options.slice(0, 1), lang) || fallback;
+	};
+	const familyLabel = optionLabel(
+		familyRooms,
+		isArabic
+			? "\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629 / \u0639\u0627\u0626\u0644\u064a\u0629"
+			: "quintuple/family room"
+	);
+	const doubleLabel = optionLabel(
+		doubleRooms,
+		isArabic ? "\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629" : "double room"
+	);
+	const quote = details.combinationQuote || null;
+	const datesKnown = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	const extraRoomNote =
+		guestCount > 7
+			? isArabic
+				? ` ولأن العدد ${guestText}، قد نضيف غرفة مناسبة أخرى بعد مراجعة العدد النهائي حتى يكون الجميع مرتاحاً.`
+				: ` Since the party is ${guestText}, reception may add another suitable room after checking the exact adults and children so everyone is comfortable.`
+			: "";
+	const compliance = isArabic
+		? `ولا يمكن إضافة سرير سادس داخل غرفة واحدة؛ حسب تعليمات الفنادق في السعودية ابتداءً من 2026 لا يسمح بتجاوز 5 أسرّة في غرفة واحدة.`
+		: `We also cannot add a sixth bed inside one room; under Saudi hotel compliance rules starting in 2026, a single hotel room cannot go above 5 beds.`;
+	if (isArabic) {
+		const setup = `${name}، لـ${guestText} ضيوف أفضل ترتيب مريح ومناسب هو ${familyLabel} لـ5 ضيوف + ${doubleLabel} إضافية. هذا يعطيكم مساحة وخصوصية أفضل بدل ضغط الجميع في غرفة واحدة. ${compliance}${extraRoomNote}`;
+		if (!hasCoreRooms) {
+			const review = `لا أرى حالياً الغرفة الخماسية والغرفة المزدوجة معاً مفعلة للتأكيد التلقائي في ${hotelName}، لذلك الأفضل أن يراجع الاستقبال أقرب ترتيب آمن ومريح لكم.`;
+			return datesKnown
+				? `${setup} ${review} سأطلب مراجعة هذا التجهيز للتواريخ المطلوبة.`
+				: `${setup} ${review} ${largeGroupDateAskText(sc, st)}`;
+		}
+		if (datesKnown && quote?.available) {
+			const totalText = localizedMoney(quote.total, quote.currency, lang);
+			const nightsText = localizedNumber(quote.nights || 0, lang);
+			return `${setup} للتواريخ المطلوبة في ${hotelName}، أرى هذا التجهيز بسعر إجمالي ${totalText} لمدة ${nightsText} ليلة. إذا يناسبك هذا الترتيب، سأجعل فريق الاستقبال يراجعه ويكمل الحجز لك.`;
+		}
+		if (datesKnown && quote && !quote.available) {
+			return `${setup} للتواريخ المطلوبة لا أستطيع تأكيد الغرفتين معاً تلقائياً الآن، لكن أقدر أراجع لك أقرب ترتيب مناسب مع الاستقبال. هل عندك مرونة في التواريخ أو تفضل أن أطلب مراجعة الفريق؟`;
+		}
+		return `${setup} ${largeGroupDateAskText(sc, st)}`;
+	}
+	const setup = `${name}, for ${guestText} guests, the most comfortable professional setup is 1 ${familyLabel} for 5 guests + 1 additional ${doubleLabel}. This gives the group better space and privacy instead of squeezing everyone into one room. ${compliance}${extraRoomNote}`;
+	if (!hasCoreRooms) {
+		const review = `I do not currently see both the quintuple/family room and the double room active for automatic confirmation at ${hotelName}, so reception should review the closest safe and comfortable setup for you.`;
+		return datesKnown
+			? `${setup} ${review} I will ask reception to review this setup for the requested dates.`
+			: `${setup} ${review} ${largeGroupDateAskText(sc, st)}`;
+	}
+	if (datesKnown && quote?.available) {
+		const totalText = localizedMoney(quote.total, quote.currency, lang);
+		const nightsText = localizedNumber(quote.nights || 0, lang);
+		return `${setup} For the requested dates at ${hotelName}, I see this setup at ${totalText} total for ${nightsText} night${quote.nights === 1 ? "" : "s"}. If this works for you, I will have reception review and complete this two-room reservation for you.`;
+	}
+	if (datesKnown && quote && !quote.available) {
+		return `${setup} For the requested dates, I cannot automatically confirm both rooms together right now, but I can help reception review the closest suitable setup. Do you have date flexibility, or should I ask the team to review it?`;
+	}
+	return `${setup} ${largeGroupDateAskText(sc, st)}`;
+}
+
+async function answerLargeGroupRoomRecommendation(
+	io,
+	sc,
+	st,
+	userText = "",
+	guestCount = null
+) {
+	if (st.activeTurnHadReply) {
+		logStep(String(sc._id), "large_group.skip_after_reply", {
+			waitFor: st.waitFor,
+		});
+		return true;
+	}
+	const count =
+		guestCount ||
+		requestedGuestCountFromText(userText) ||
+		st.pendingRoomCombination?.guestCount ||
+		6;
+	const familyRooms = activeHotelRoomSummaries(st.hotel, "familyRooms");
+	const doubleRooms = activeHotelRoomSummaries(st.hotel, "doubleRooms");
+	if (count > 0 && !st.slots.adultsProvided) {
+		st.slots.adults = count;
+		st.slots.adultsProvided = true;
+		st.slots.children = 0;
+		st.slots.childrenProvided = true;
+	}
+	st.slots.roomTypeKey = null;
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	const hasDates = Boolean(st.slots.checkinISO && st.slots.checkoutISO);
+	const combinationQuote =
+		hasDates && familyRooms.length && doubleRooms.length
+			? priceLargeGroupRoomCombination(
+					st.hotel,
+					st.slots.checkinISO,
+					st.slots.checkoutISO
+			  )
+			: null;
+	st.pendingRoomCombination = {
+		guestCount: count,
+		primaryRoomTypeKey: "familyRooms",
+		secondaryRoomTypeKey: "doubleRooms",
+		checkinISO: st.slots.checkinISO || null,
+		checkoutISO: st.slots.checkoutISO || null,
+		quotedAt: combinationQuote?.available ? now() : 0,
+		total: combinationQuote?.available ? combinationQuote.total : null,
+		currency: combinationQuote?.currency || st.hotel?.currency || "SAR",
+	};
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		largeGroupRoomRecommendationText(sc, st, {
+			guestCount: count,
+			familyRooms,
+			doubleRooms,
+			combinationQuote,
+		})
+	);
+	if (!sent) return true;
+	if (combinationQuote?.available) {
+		st.waitFor = "large_group_confirm";
+		stampAsk(st, "large_group_confirm");
+	} else if (hasDates) {
+		st.waitFor = "clarify";
+	} else {
+		st.waitFor = "dates";
+		stampAsk(st, "dates");
+	}
+	logStep(String(sc._id), "large_group.recommendation", {
+		guestCount: count,
+		hasFamilyRoom: Boolean(familyRooms.length),
+		hasDoubleRoom: Boolean(doubleRooms.length),
+		hasDates,
+		combinationAvailable: Boolean(combinationQuote?.available),
+		waitFor: st.waitFor,
+	});
+	return true;
+}
+
+function largeGroupConfirmPromptText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${respectfulGuestName(sc, st)}، هل يناسبك ترتيب الغرفة الخماسية مع الغرفة المزدوجة حتى أطلب من الاستقبال مراجعته وإكماله لك؟`;
+	}
+	return `${respectfulGuestName(sc, st)}, does the quintuple/family room plus double room setup work for you so I can have reception review and complete it?`;
+}
+
+async function handlePendingLargeGroupCombination(io, sc, st, userText = "") {
+	if (!st.pendingRoomCombination) return false;
+	const dateRange = extractDateRange(userText);
+	if (dateRange.checkinISO && dateRange.checkoutISO) {
+		st.slots.checkinISO = dateRange.checkinISO;
+		st.slots.checkoutISO = dateRange.checkoutISO;
+		if (dateRange.raw) st.dateRaw = { ...st.dateRaw, ...dateRange.raw };
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			st.pendingRoomCombination.guestCount
+		);
+		return true;
+	}
+	const updatedGuestCount = requestedGuestCountFromText(userText);
+	if (updatedGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) {
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			updatedGuestCount > 5 ? updatedGuestCount : st.pendingRoomCombination.guestCount || 6
+		);
+		return true;
+	}
+	const singleDate = extractSingleStayDate(userText, st);
+	if (singleDate?.raw) {
+		if (singleDate.raw.checkin) st.dateRaw.checkin = singleDate.raw.checkin;
+		if (singleDate.raw.checkout) st.dateRaw.checkout = singleDate.raw.checkout;
+		if (singleDate.raw.calendar) st.dateRaw.calendar = singleDate.raw.calendar;
+		if (singleDate.checkinISO) st.slots.checkinISO = singleDate.checkinISO;
+		if (singleDate.checkoutISO) st.slots.checkoutISO = singleDate.checkoutISO;
+		await askForMissingStayDates(io, sc, st);
+		return true;
+	}
+	if (confirmsText(userText)) {
+		await handoffToHuman(io, sc, st, "reservation_finalize");
+		return true;
+	}
+	if (declinesText(userText)) {
+		st.pendingRoomCombination = null;
+		await askRoomPreferenceForReservation(io, sc, st);
+		return true;
+	}
+	if (st.waitFor === "large_group_confirm") {
+		if (
+			selectedHotelFactQuestionText(userText) ||
+			wantsDiscountQuestion(userText) ||
+			wantsPaymentHelp(userText) ||
+			hotelContactDetailsQuestionText(userText) ||
+			hotelContactFollowupQuestionText(sc, userText) ||
+			(/[?\u061f]/.test(String(userText || "")) &&
+				!selectedHotelRoomQuestionText(userText))
+		) {
+			return false;
+		}
+		await humanSend(io, sc, st, largeGroupConfirmPromptText(sc, st));
+		stampAsk(st, "large_group_confirm");
+		return true;
+	}
+	return false;
+}
+
 function stayDateRequestText(sc = {}, st = {}, { missing = "both" } = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
@@ -3561,6 +3933,16 @@ async function answerSelectedHotelRoomQuestion(
 			waitFor: st.waitFor,
 		});
 		return true;
+	}
+	const requestedGuestCount = requestedGuestCountFromText(userText);
+	if (requestedGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) {
+		return answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			requestedGuestCount > 5 ? requestedGuestCount : 6
+		);
 	}
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const matchingRooms = roomTypeKey
@@ -4757,6 +5139,7 @@ function ensureState(sc, hotel) {
 			progressSentAt: {},
 			hydratedConversationLength: 0,
 			pendingRoomAlternative: null,
+			pendingRoomCombination: null,
 			repeatedQuestionEscalatedKey: "",
 			dateRaw: { calendar: null, checkin: null, checkout: null },
 			smalltalkThread: { topic: null, waitingForGuest: false, lastAt: 0 },
@@ -6944,6 +7327,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
 			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
+		`A quintuple/family room fits 5 guests. If the guest asks for more than 5 guests, or asks to add another bed to a 5-bed room, do not imply one room can fit them. Explain warmly that Saudi hotel compliance rules starting in 2026 do not allow a single room to exceed 5 beds, then recommend a comfortable combination such as one quintuple/family room plus one double room, with another room if the exact party size requires it.`,
 		`Pricing requires both arrival/check-in and departure/checkout dates. If both are missing, always ask for both together in one sentence; never ask only for check-in. If one date is already supplied, ask only for the missing date.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
@@ -10110,6 +10494,15 @@ async function planTurn(io, sc) {
 			);
 			if (handled) return;
 		}
+		if (st.pendingRoomCombination) {
+			const handled = await handlePendingLargeGroupCombination(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handled) return;
+		}
 		const directRequestHandled = await tryAnswerDirectGuestRequest(
 			io,
 			sc,
@@ -10166,6 +10559,29 @@ async function planTurn(io, sc) {
 		const quickTurnDates = extractDateRange(userText);
 		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
 			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
+			return;
+		}
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			quickTurnDates.checkinISO &&
+			quickTurnDates.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			st.slots.checkinISO = quickTurnDates.checkinISO;
+			st.slots.checkoutISO = quickTurnDates.checkoutISO;
+			if (quickTurnDates.raw) {
+				st.dateRaw = { ...st.dateRaw, ...quickTurnDates.raw };
+			}
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
 			return;
 		}
 		if (
@@ -10307,6 +10723,21 @@ async function planTurn(io, sc) {
 			st.slots.checkinISO = decisionLu.dates.checkinISO;
 		if (decisionLu.dates?.checkoutISO)
 			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
+			return;
+		}
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
 
 		if (
@@ -10432,6 +10863,24 @@ async function planTurn(io, sc) {
 				null;
 		}
 		logStep(caseId, "orchestrator.decision", supportDecision);
+
+		const largeGroupGuestCount = requestedGuestCountFromText(userText);
+		if (
+			st.hotel &&
+			(largeGroupGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				largeGroupGuestCount > 5 ? largeGroupGuestCount : 6
+			);
+			return;
+		}
 
 		if (supportDecision.roomTypeKey) {
 			st.slots.roomTypeKey = supportDecision.roomTypeKey;
@@ -10837,6 +11286,26 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			dateRange.checkinISO &&
+			dateRange.checkoutISO
+		) {
+			st.slots.checkinISO = dateRange.checkinISO;
+			st.slots.checkoutISO = dateRange.checkoutISO;
+			if (dateRange.raw) {
+				st.dateRaw = { ...st.dateRaw, ...dateRange.raw };
+			}
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
+			return;
+		}
+		if (
 			dateRange.checkinISO &&
 			dateRange.checkoutISO &&
 			st.slots.roomTypeKey
@@ -11073,6 +11542,22 @@ async function planTurn(io, sc) {
 			return;
 		}
 
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
+			return;
+		}
+
 		// need room?
 		if (!st.slots.roomTypeKey) {
 			const slotPromptBotTextBefore = st.lastBotText;
@@ -11117,6 +11602,21 @@ async function planTurn(io, sc) {
 				st,
 				userText,
 				st.slots.roomTypeKey
+			);
+			return;
+		}
+
+		if (
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
 			);
 			return;
 		}

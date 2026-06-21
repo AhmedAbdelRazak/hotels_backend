@@ -73,6 +73,20 @@ const ROOM_SYNONYMS = [
 		terms: [
 			"family",
 			"quintuple",
+			"quintuple room",
+			"quintible",
+			"quantible",
+			"quintiple",
+			"5omasy",
+			"5omasi",
+			"khomasy",
+			"khomasi",
+			"khamasy",
+			"khamasi",
+			"khomasy room",
+			"khomasi room",
+			"khamasy room",
+			"khamasi room",
 			"5 bed",
 			"5 beds",
 			"five bed",
@@ -109,7 +123,14 @@ ROOM_SYNONYMS.push(
 	},
 	{
 		key: "familyRooms",
-		terms: ["\u0639\u0627\u0626\u0644\u064a\u0629", "\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629"],
+		terms: [
+			"\u0639\u0627\u0626\u0644\u064a\u0629",
+			"\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629",
+			"\u062e\u0645\u0627\u0633\u064a",
+			"\u062e\u0645\u0627\u0633\u064a\u0629",
+			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a",
+			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629",
+		],
 	}
 );
 
