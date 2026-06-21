@@ -1449,8 +1449,25 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 			st.dateRaw = { ...st.dateRaw, ...dates.raw };
 		}
 	}
-	const roomKey = mapRoomToKey(guestText) || mapRoomToKey(allText);
-	if (roomKey && !st.slots.roomTypeKey) st.slots.roomTypeKey = roomKey;
+	let latestGuestRoomKey = null;
+	for (const message of conversation) {
+		if (!isGuestConversationMessage(message)) continue;
+		const messageRoomKey = mapRoomToKey(conversationEntryContextText(message));
+		if (messageRoomKey) latestGuestRoomKey = messageRoomKey;
+	}
+	if (latestGuestRoomKey && st.slots.roomTypeKey !== latestGuestRoomKey) {
+		const previousRoomTypeKey = st.slots.roomTypeKey || null;
+		st.slots.roomTypeKey = latestGuestRoomKey;
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		st.pendingRoomAlternative = null;
+		st.pendingRoomCombination = null;
+		logStep(String(sc._id || ""), "slots.room_changed_from_guest", {
+			previousRoomTypeKey,
+			roomTypeKey: latestGuestRoomKey,
+		});
+	}
 	const email = latestEmailFromText(guestText);
 	if (email && !st.slots.email) st.slots.email = email;
 	const phone = latestPhoneFromText(guestText);
