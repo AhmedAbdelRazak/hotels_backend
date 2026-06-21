@@ -196,6 +196,14 @@ try {
 				Array.isArray(doc.conversation) &&
 				doc.conversation[doc.conversation.length - 1];
 			if (last) {
+				const alreadyEmittedDirectly =
+					last.clientTag &&
+					(last.isAi ||
+						last.isSystem ||
+						/jannat-(?:ai-support|system)/i.test(
+							String(last.messageBy?.userId || "")
+						));
+				if (alreadyEmittedDirectly) return;
 				io.to(caseId).emit("receiveMessage", { ...last, caseId });
 				io.to(caseId).emit("stopTyping", { caseId });
 			}

@@ -23,10 +23,7 @@ async function getSupportCaseById(id) {
 	return SupportCase.findById(_id).lean().exec();
 }
 
-async function updateSupportCaseAppend(caseId, messageOrFields) {
-	const _id = safeId(caseId);
-	if (!_id) return null;
-
+function buildSupportCaseAppendUpdate(messageOrFields = {}) {
 	const update = {};
 	if (messageOrFields && messageOrFields.conversation) {
 		update.$push = { conversation: messageOrFields.conversation };
@@ -38,10 +35,55 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 		update.$set = other;
 	}
 	update.$set = { ...(update.$set || {}), updatedAt: new Date() };
+	return update;
+}
+
+async function updateSupportCaseAppend(caseId, messageOrFields) {
+	const _id = safeId(caseId);
+	if (!_id) return null;
+
+	const update = buildSupportCaseAppendUpdate(messageOrFields);
 
 	return SupportCase.findByIdAndUpdate(_id, update, { new: true })
 		.lean()
 		.exec();
+}
+
+async function updateSupportCaseAppendIfNoRecentAiDuplicate(
+	caseId,
+	messageOrFields,
+	{ duplicateWindowMs = 2 * 60 * 1000 } = {}
+) {
+	const _id = safeId(caseId);
+	if (!_id) return { updatedCase: null, skipped: true };
+
+	const message = messageOrFields?.conversation || {};
+	const update = buildSupportCaseAppendUpdate(messageOrFields);
+	const filter = { _id };
+	const text = String(message.message || "").trim();
+	const userId = String(message.messageBy?.userId || "").trim();
+	if ((message.isAi === true || message.isSystem === true) && text) {
+		const cutoff = new Date(Date.now() - Math.max(1000, Number(duplicateWindowMs) || 0));
+		const duplicateMatch = {
+			message: text,
+			date: { $gte: cutoff },
+		};
+		if (message.isAi === true) duplicateMatch.isAi = true;
+		if (message.isSystem === true) duplicateMatch.isSystem = true;
+		if (userId) duplicateMatch["messageBy.userId"] = userId;
+		filter.$nor = [{ conversation: { $elemMatch: duplicateMatch } }];
+	}
+
+	const updatedCase = await SupportCase.findOneAndUpdate(filter, update, {
+		new: true,
+	})
+		.lean()
+		.exec();
+	if (updatedCase) return { updatedCase, skipped: false };
+	return {
+		updatedCase: await SupportCase.findById(_id).lean().exec(),
+		skipped: true,
+	};
 }
 
 async function setCaseStatus(caseId, fields) {
@@ -50,6 +92,36 @@ async function setCaseStatus(caseId, fields) {
 	return SupportCase.findByIdAndUpdate(
 		_id,
 		{ $set: { ...fields, updatedAt: new Date() } },
+		{ new: true }
+	)
+		.lean()
+		.exec();
+}
+
+async function closeSupportCaseForAiIdle(caseId, { now = new Date() } = {}) {
+	const _id = safeId(caseId);
+	if (!_id) return null;
+	return SupportCase.findOneAndUpdate(
+		{
+			_id,
+			openedBy: "client",
+			caseStatus: "open",
+			aiToRespond: true,
+		},
+		{
+			$set: {
+				caseStatus: "closed",
+				closedAt: now,
+				closedBy: "csr",
+				updatedAt: now,
+				aiToRespond: false,
+				aiPausedAt: now,
+				aiHandoffReason: "ai_idle_timeout",
+				"conversation.$[].seenByAdmin": true,
+				"conversation.$[].seenByHotel": true,
+				"conversation.$[].seenByCustomer": true,
+			},
+		},
 		{ new: true }
 	)
 		.lean()
@@ -477,6 +549,8 @@ async function listRelevantTrainingChats({
 module.exports = {
 	getSupportCaseById,
 	updateSupportCaseAppend,
+	updateSupportCaseAppendIfNoRecentAiDuplicate,
+	closeSupportCaseForAiIdle,
 	setCaseStatus,
 	getHotelById,
 	getJanatAiSettings,

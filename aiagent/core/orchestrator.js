@@ -2,6 +2,8 @@
 const {
 	getSupportCaseById,
 	updateSupportCaseAppend,
+	updateSupportCaseAppendIfNoRecentAiDuplicate,
+	closeSupportCaseForAiIdle,
 	getHotelById,
 	getReservationByConfirmation,
 	listActivePublicHotels,
@@ -165,6 +167,29 @@ const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
 	false
 );
+const AI_MESSAGE_DEDUPE_WINDOW_MS = intFromEnv(
+	"AI_MESSAGE_DEDUPE_WINDOW_MS",
+	2 * 60 * 1000,
+	{ min: 30000, max: 10 * 60 * 1000 }
+);
+const AI_IDLE_FOLLOWUPS_ENABLED = boolFromEnv(
+	"AI_IDLE_FOLLOWUPS_ENABLED",
+	true
+);
+const AI_IDLE_FIRST_FOLLOWUP_MS = intFromEnv(
+	"AI_IDLE_FIRST_FOLLOWUP_MS",
+	10000,
+	{ min: 10000, max: 10 * 60 * 1000 }
+);
+const AI_IDLE_FINAL_FOLLOWUP_MS = intFromEnv(
+	"AI_IDLE_FINAL_FOLLOWUP_MS",
+	30000,
+	{ min: 30000, max: 30 * 60 * 1000 }
+);
+const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 2 * 60 * 1000, {
+	min: 2 * 60 * 1000,
+	max: 60 * 60 * 1000,
+});
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
@@ -998,6 +1023,88 @@ function isGuestConversationMessage(message = {}) {
 		!message?.isSystem &&
 		!isAiConversationMessage(message)
 	);
+}
+
+function aiMessageClientTag(caseId, prefix = "ai") {
+	return `${prefix}:${caseId}:${Date.now()}:${Math.random()
+		.toString(36)
+		.slice(2, 10)}`;
+}
+
+function messageTime(message = {}) {
+	const time = new Date(message.date || 0).getTime();
+	return Number.isFinite(time) ? time : 0;
+}
+
+function anchorMessageIndex(conversation = [], anchor = {}) {
+	if (!Array.isArray(conversation) || !conversation.length) return -1;
+	const clientTag = String(anchor.clientTag || "").trim();
+	if (clientTag) {
+		const byTag = conversation.findIndex(
+			(message) => String(message?.clientTag || "") === clientTag
+		);
+		if (byTag >= 0) return byTag;
+	}
+	const text = String(anchor.text || "").trim();
+	const at = Number(anchor.at || 0);
+	if (!text || !at) return -1;
+	let bestIndex = -1;
+	let bestDelta = Number.POSITIVE_INFINITY;
+	conversation.forEach((message, index) => {
+		if (!isAiConversationMessage(message)) return;
+		if (String(message.message || "").trim() !== text) return;
+		const delta = Math.abs(messageTime(message) - at);
+		if (delta < bestDelta) {
+			bestDelta = delta;
+			bestIndex = index;
+		}
+	});
+	return bestDelta <= 3000 ? bestIndex : -1;
+}
+
+function guestRespondedAfterAnchor(supportCase = {}, anchor = {}) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const index = anchorMessageIndex(conversation, anchor);
+	if (index < 0) return true;
+	return conversation.slice(index + 1).some(isGuestConversationMessage);
+}
+
+function shouldScheduleIdleFollowups(text = "", quickReplies = []) {
+	if (!AI_IDLE_FOLLOWUPS_ENABLED) return false;
+	const value = String(text || "").trim();
+	if (!value || isAutomatedSupportNoticeText(value)) return false;
+	if (Array.isArray(quickReplies) && quickReplies.length > 0) return true;
+	if (/[?؟]/.test(value)) return true;
+	return /\b(?:please\s+(?:share|send|provide|confirm|choose|select|tell)|could\s+you|would\s+you|can\s+you|let\s+me\s+know|send\s+me|share\s+your|confirm|choose|select)\b/i.test(
+		value
+	) || /(?:هل|ممكن|اختر|اختار|أكد|أرسل|ارسل|شارك|ابعث|ما\s+هو|كم|متى|أين)/i.test(
+		value
+	);
+}
+
+function idleFollowupText(sc = {}, st = {}, stage = "first") {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return stage === "final"
+			? `${name}، تذكير أخير بلطف: أنا هنا إذا احتجت أي مساعدة. إذا لم أسمع منك خلال قليل سأغلق المحادثة حتى تبقى مرتبة.`
+			: `${name}، أنا ما زلت هنا معك. أرسل لي التفاصيل عندما تكون جاهزا وسأكمل معك مباشرة.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return stage === "final"
+			? `${name}, ultimo aviso amable: sigo aqui si necesitas ayuda. Si no recibo respuesta pronto, cerrare el chat para mantenerlo ordenado.`
+			: `${name}, sigo aqui contigo. Enviame el siguiente detalle cuando estes listo y continuo enseguida.`;
+	}
+	if (/french/i.test(lang)) {
+		return stage === "final"
+			? `${name}, dernier petit rappel : je suis toujours la si vous avez besoin d'aide. Sans reponse bientot, je fermerai le chat pour le garder bien range.`
+			: `${name}, je suis toujours la avec vous. Envoyez-moi le prochain detail quand vous etes pret et je continue tout de suite.`;
+	}
+	return stage === "final"
+		? `${name}, just a final friendly heads up: I am still here if you need support. If I do not hear back shortly, I will close the chat to keep everything tidy.`
+		: `${name}, I am still here with you. Send me the next detail whenever you are ready and I will continue right away.`;
 }
 
 function conversationEntryContextText(message = {}) {
@@ -4110,6 +4217,123 @@ async function redirectJannatReservationToHotelSupport(
 }
 
 const memo = new Map();
+const aiIdleTimers = new Map();
+
+function clearAiIdleFollowups(caseId) {
+	const key = String(caseId || "");
+	const timer = aiIdleTimers.get(key);
+	if (timer) clearTimeout(timer);
+	aiIdleTimers.delete(key);
+}
+
+function setAiIdleTimer(caseId, callback, delayMs) {
+	const key = String(caseId || "");
+	clearAiIdleFollowups(key);
+	const timer = setTimeout(callback, Math.max(0, Number(delayMs) || 0));
+	if (typeof timer.unref === "function") timer.unref();
+	aiIdleTimers.set(key, timer);
+}
+
+async function getIdleReadyCase(caseId, anchor) {
+	const latestCase = await getSupportCaseById(caseId);
+	if (!latestCase) return null;
+	if (latestCase.caseStatus === "closed" || latestCase.aiToRespond === false) {
+		return null;
+	}
+	if (guestRespondedAfterAnchor(latestCase, anchor)) return null;
+	const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+	if (!policy.allowed) {
+		logStep(caseId, "idle.skip", { reason: policy.reason });
+		return null;
+	}
+	return { latestCase, hotel: policy.hotel };
+}
+
+async function runAiIdleFollowupStep(io, caseId, anchor, stage) {
+	aiIdleTimers.delete(caseId);
+	try {
+		const ready = await getIdleReadyCase(caseId, anchor);
+		if (!ready) return;
+		const st = ensureState(
+			ready.latestCase,
+			activeHotelContextForCase(ready.latestCase, ready.hotel)
+		);
+		const text = idleFollowupText(ready.latestCase, st, stage);
+		await humanSend(io, ready.latestCase, st, text, { scheduleIdle: false });
+		if (stage === "first") {
+			setAiIdleTimer(
+				caseId,
+				() => runAiIdleFollowupStep(io, caseId, anchor, "final"),
+				AI_IDLE_FINAL_FOLLOWUP_MS
+			);
+		} else if (stage === "final") {
+			const elapsed = now() - Number(anchor.at || now());
+			setAiIdleTimer(
+				caseId,
+				() => runAiIdleCloseStep(io, caseId, anchor),
+				Math.max(1000, AI_IDLE_CLOSE_MS - elapsed)
+			);
+		}
+	} catch (error) {
+		logStep(caseId, "idle.followup_failed", {
+			message: error?.message || error,
+			stage,
+		});
+	}
+}
+
+async function runAiIdleCloseStep(io, caseId, anchor) {
+	aiIdleTimers.delete(caseId);
+	try {
+		const ready = await getIdleReadyCase(caseId, anchor);
+		if (!ready) return;
+		const closedCase = await closeSupportCaseForAiIdle(caseId, {
+			now: new Date(),
+		});
+		if (!closedCase) return;
+		io.to(caseId).emit("supportCaseUpdated", closedCase);
+		io.emit("supportCaseUpdated", closedCase);
+		io.emit("closeCase", {
+			case: closedCase,
+			closedBy: "csr",
+			reason: "ai_idle_timeout",
+		});
+		io.to(caseId).emit("aiPaused", { caseId, reason: "ai_idle_timeout" });
+		memo.delete(caseId);
+		logStep(caseId, "idle.closed", {});
+	} catch (error) {
+		logStep(caseId, "idle.close_failed", { message: error?.message || error });
+	}
+}
+
+function scheduleAiIdleFollowups(io, sc, st, messageData = {}) {
+	const caseId = String(sc._id || sc.id || "");
+	if (!io || !caseId) return;
+	if (
+		!shouldScheduleIdleFollowups(
+			messageData.message,
+			messageData.quickReplies || []
+		)
+	) {
+		clearAiIdleFollowups(caseId);
+		return;
+	}
+	const anchor = {
+		clientTag: messageData.clientTag || "",
+		text: String(messageData.message || "").trim(),
+		at: messageTime(messageData) || now(),
+	};
+	setAiIdleTimer(
+		caseId,
+		() => runAiIdleFollowupStep(io, caseId, anchor, "first"),
+		AI_IDLE_FIRST_FOLLOWUP_MS
+	);
+	logStep(caseId, "idle.scheduled", {
+		firstMs: AI_IDLE_FIRST_FOLLOWUP_MS,
+		finalMs: AI_IDLE_FINAL_FOLLOWUP_MS,
+		closeMs: AI_IDLE_CLOSE_MS,
+	});
+}
 
 /* per case state incl. queue & preemption */
 function ensureState(sc, hotel) {
@@ -4195,7 +4419,13 @@ function emitTyping(io, caseId, st, on = true) {
 }
 
 /* --------- humanSend with pre‑emption (cancellable) --------- */
-async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } = {}) {
+async function humanSend(
+	io,
+	sc,
+	st,
+	text,
+	{ first = false, quickReplies = [], scheduleIdle = true } = {}
+) {
 	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
 	const expectedTurnUserText = st.activeTurnUserText || "";
@@ -4309,18 +4539,30 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 		message: text,
 		date: new Date(),
 		isAi: true,
+		clientTag: aiMessageClientTag(caseId, "ai"),
 	};
 	if (normalizedQuickReplies.length) {
 		messageData.quickReplies = normalizedQuickReplies;
 	}
-	await updateSupportCaseAppend(caseId, {
-		conversation: messageData,
-		aiRelated: true,
-	});
+	const saved = await updateSupportCaseAppendIfNoRecentAiDuplicate(
+		caseId,
+		{
+			conversation: messageData,
+			aiRelated: true,
+		},
+		{ duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS }
+	);
+	if (saved?.skipped) {
+		logStep(caseId, "dedupe.skip", { reason: "recent_duplicate" });
+		st.lastBotText = text;
+		st.activeTurnHadReply = true;
+		return false;
+	}
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
 	st.lastBotText = text;
 	st.activeTurnHadReply = true;
+	if (scheduleIdle) scheduleAiIdleFollowups(io, sc, st, messageData);
 	return true;
 }
 
@@ -4336,11 +4578,17 @@ async function sendSystemNotice(io, sc, text) {
 		message: text,
 		date: new Date(),
 		isSystem: true,
+		clientTag: aiMessageClientTag(caseId, "system"),
 	};
-	await updateSupportCaseAppend(caseId, {
-		conversation: messageData,
-		aiRelated: true,
-	});
+	const saved = await updateSupportCaseAppendIfNoRecentAiDuplicate(
+		caseId,
+		{
+			conversation: messageData,
+			aiRelated: true,
+		},
+		{ duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS }
+	);
+	if (saved?.skipped) return false;
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 	return true;
 }
@@ -5678,6 +5926,7 @@ async function handoffToHuman(io, sc, st, reason) {
 		message: text,
 		date: new Date(),
 		isAi: true,
+		clientTag: aiMessageClientTag(caseId, "ai-handoff"),
 	};
 	const updatedCase = await updateSupportCaseAppend(caseId, {
 		conversation: messageData,
@@ -8962,6 +9211,7 @@ async function planTurn(io, sc) {
 		const latestGuestMessage = lastGuestMessage(sc);
 		const userText = latestGuestMessage?.message || "";
 		recoveryUserText = userText;
+		if (userText) clearAiIdleFollowups(caseId);
 		st.activeTurnUserText = userText || "";
 		st.activeTurnHadReply = false;
 		st.activeTurnGuestAt = latestGuestMessage?.date
