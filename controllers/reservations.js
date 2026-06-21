@@ -2516,6 +2516,110 @@ const isPendingConfirmationReversionRequest = (
 	return requestsPending && !alreadyPending;
 };
 
+const buildAdminStatusWorkflowSyncUpdate = ({
+	reservation = {},
+	requestedLifecycleStatus = "",
+	auditActor = {},
+} = {}) => {
+	const statusKey = reservationLifecycleStatusKey(requestedLifecycleStatus);
+	if (!statusKey) return {};
+
+	const existingPending = reservationSourcePlainObject(
+		reservation.pendingConfirmation
+	);
+	const now = new Date();
+	const statusLabel = String(requestedLifecycleStatus || "").trim();
+	const reason = `Admin status update: ${statusLabel || statusKey}`;
+	const basePending = {
+		...existingPending,
+		lastUpdatedAt: now,
+		lastUpdatedBy: auditActor,
+	};
+
+	if (statusKey === "pendingconfirmation") {
+		return {
+			pendingConfirmation: {
+				...basePending,
+				status: "pending",
+				rejectionReason: "",
+				confirmationReason:
+					existingPending.confirmationReason ||
+					"Returned to pending confirmation by admin status update.",
+				confirmedAt: null,
+				rejectedAt: null,
+				resubmittedAt: now,
+			},
+			agentDecisionSnapshot: {
+				status: "pending",
+				reason,
+				decidedAt: now,
+				decidedBy: auditActor,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			},
+		};
+	}
+
+	if (
+		[
+			"confirmed",
+			"ok",
+			"reserved",
+			"inhouse",
+			"checkedin",
+			"checkin",
+			"checkedout",
+			"checkout",
+			"earlycheckedout",
+			"pendingfinancereview",
+			"pendingagentcommissionapproval",
+			"financerejected",
+		].includes(statusKey)
+	) {
+		return {
+			pendingConfirmation: {
+				...basePending,
+				status: "confirmed",
+				rejectionReason: "",
+				confirmationReason: existingPending.confirmationReason || reason,
+				confirmedAt: existingPending.confirmedAt || now,
+				rejectedAt: null,
+			},
+			agentDecisionSnapshot: {
+				status: "confirmed",
+				reason,
+				decidedAt: now,
+				decidedBy: auditActor,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			},
+		};
+	}
+
+	if (["cancelled", "canceled", "noshow"].includes(statusKey)) {
+		const closedStatus = statusKey === "noshow" ? "no_show" : STATUS_CANCELLED;
+		return {
+			pendingConfirmation: {
+				...basePending,
+				status: closedStatus,
+				rejectionReason: existingPending.rejectionReason || reason,
+				confirmationReason: "",
+				rejectedAt: existingPending.rejectedAt || now,
+			},
+			agentDecisionSnapshot: {
+				status: closedStatus,
+				reason,
+				decidedAt: now,
+				decidedBy: auditActor,
+				lastUpdatedAt: now,
+				lastUpdatedBy: auditActor,
+			},
+		};
+	}
+
+	return {};
+};
+
 const buildSuperAdminPendingReversionUpdate = ({
 	reservation = {},
 	auditActor = {},
@@ -6527,6 +6631,39 @@ exports.updateReservation = async (req, res) => {
 				code: "reservation_status_reversion_locked",
 			});
 		}
+		if (
+			isAdminAllReservationsStatusUpdate &&
+			requestedLifecycleStatus &&
+			!superAdminPendingReversionApplied
+		) {
+			normalizedUpdateData.reservation_status = requestedLifecycleStatus;
+			normalizedUpdateData.state = requestedLifecycleStatus;
+			const workflowSyncUpdate = buildAdminStatusWorkflowSyncUpdate({
+				reservation: existingReservation,
+				requestedLifecycleStatus,
+				auditActor,
+			});
+			if (
+				workflowSyncUpdate.pendingConfirmation &&
+				!Object.prototype.hasOwnProperty.call(
+					normalizedUpdateData,
+					"pendingConfirmation"
+				)
+			) {
+				normalizedUpdateData.pendingConfirmation =
+					workflowSyncUpdate.pendingConfirmation;
+			}
+			if (
+				workflowSyncUpdate.agentDecisionSnapshot &&
+				!Object.prototype.hasOwnProperty.call(
+					normalizedUpdateData,
+					"agentDecisionSnapshot"
+				)
+			) {
+				normalizedUpdateData.agentDecisionSnapshot =
+					workflowSyncUpdate.agentDecisionSnapshot;
+			}
+		}
 		const orderTakerBasicEditOnly =
 			!superAdminUpdateActor && isOrderTakingAccount(requestingActor || {});
 		if (orderTakerBasicEditOnly) {
@@ -6855,7 +6992,10 @@ exports.updateReservation = async (req, res) => {
 		normalizedUpdateData = await normalizeReservationStayPricing(
 			existingReservation,
 			normalizedUpdateData,
-			{ allowBlockedCalendar: superAdminUpdateActor }
+			{
+				allowBlockedCalendar: superAdminUpdateActor,
+				hasExplicitAdminPricingIntent,
+			}
 		);
 		if (hasExplicitSuperAdminCommission) {
 			const existingCommissionData =

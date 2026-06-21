@@ -997,6 +997,11 @@ const normalizeReservationStayPricing = async (
 	const updates = { ...updatePayload };
 	const warnings = Array.isArray(options.warnings) ? options.warnings : [];
 	const allowBlockedCalendar = Boolean(options.allowBlockedCalendar);
+	const hasExplicitAdminPricingIntent = Boolean(
+		options.hasExplicitAdminPricingIntent ||
+			options.hasExplicitPricingIntent ||
+			options.adminPricingUpdateIntent
+	);
 	const checkinTouched = hasOwn(updates, "checkin_date");
 	const checkoutTouched = hasOwn(updates, "checkout_date");
 	const dateTouched = checkinTouched || checkoutTouched;
@@ -1077,7 +1082,7 @@ const normalizeReservationStayPricing = async (
 	const pricingRoomsChanged =
 		hasOwn(updates, "pickedRoomsPricing") &&
 		!roomsAreSame(pricingRooms, existingPricingRooms);
-	const roomsTouched = roomsChanged || pricingRoomsChanged;
+	let roomsTouched = roomsChanged || pricingRoomsChanged;
 	const roomIdentityChanged =
 		(hasOwn(updates, "pickedRoomsType") &&
 			!roomIdentitiesAreSame(rooms, existingRooms)) ||
@@ -1087,6 +1092,13 @@ const normalizeReservationStayPricing = async (
 		primaryRooms,
 		stayDates
 	);
+	if (
+		hasExplicitAdminPricingIntent &&
+		pricingRoomsWereSent &&
+		primaryRoomsComplete
+	) {
+		roomsTouched = true;
+	}
 
 	if (
 		existingAdminManagedPricing &&
