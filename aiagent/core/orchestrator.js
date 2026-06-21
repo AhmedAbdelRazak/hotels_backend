@@ -2514,6 +2514,11 @@ function cleanHotelFactText(value = "") {
 		.trim();
 }
 
+const AL_HARAM_LOCATION = {
+	latitude: 21.422487,
+	longitude: 39.826206,
+};
+
 function hotelCoordinates(hotel = {}) {
 	const coordinates = Array.isArray(hotel?.location?.coordinates)
 		? hotel.location.coordinates
@@ -2529,22 +2534,29 @@ function hotelCoordinates(hotel = {}) {
 	return valid ? { latitude, longitude } : null;
 }
 
-function hotelGoogleMapsUrl(hotel = {}) {
+function hotelGoogleMapsDirectionsUrl(hotel = {}) {
 	const coords = hotelCoordinates(hotel);
 	if (!coords) return "";
-	const query = encodeURIComponent(`${coords.latitude},${coords.longitude}`);
-	return `https://www.google.com/maps/search/?api=1&query=${query}`;
+	const origin = encodeURIComponent(`${coords.latitude},${coords.longitude}`);
+	const destination = encodeURIComponent(
+		`${AL_HARAM_LOCATION.latitude},${AL_HARAM_LOCATION.longitude}`
+	);
+	return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`;
+}
+
+function hotelGoogleMapsUrl(hotel = {}) {
+	return hotelGoogleMapsDirectionsUrl(hotel);
 }
 
 function hotelGoogleMapsMarkdownLink(hotel = {}, lang = "English") {
 	const url = hotelGoogleMapsUrl(hotel);
 	if (!url) return "";
-	let label = "Google Maps Location";
-	if (/arabic/i.test(lang)) label = "\u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps";
-	else if (/spanish/i.test(lang)) label = "Ubicacion en Google Maps";
-	else if (/french/i.test(lang)) label = "Emplacement Google Maps";
-	else if (/indonesian/i.test(lang)) label = "Lokasi Google Maps";
-	else if (/malay|malaysia/i.test(lang)) label = "Lokasi Google Maps";
+	let label = "Google Maps Driving Route to Al Haram";
+	if (/arabic/i.test(lang)) label = "\u0637\u0631\u064a\u0642 Google Maps \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645";
+	else if (/spanish/i.test(lang)) label = "Ruta en Google Maps al Haram";
+	else if (/french/i.test(lang)) label = "Itineraire Google Maps vers Al Haram";
+	else if (/indonesian/i.test(lang)) label = "Rute Google Maps ke Al Haram";
+	else if (/malay|malaysia/i.test(lang)) label = "Laluan Google Maps ke Al Haram";
 	return `[${label}](${url})`;
 }
 
@@ -2570,6 +2582,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		},
 		location: hotel.location || null,
 		googleMapsLocationUrl: mapsUrl || "",
+		googleMapsDrivingDirectionsUrl: mapsUrl || "",
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
@@ -2935,14 +2948,14 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 function hotelLocationMapLine(lang = "English", mapLink = "") {
 	if (!mapLink) return "";
 	if (/arabic/i.test(lang)) {
-		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0627\u0644\u0645\u0648\u0642\u0639 \u0627\u0644\u062f\u0642\u064a\u0642 \u0639\u0644\u0649 \u0627\u0644\u062e\u0631\u064a\u0637\u0629: ${mapLink}.`;
+		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 Google Maps \u0644\u0644\u0637\u0631\u064a\u0642 \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u062f\u0642\u064a\u0642 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645: ${mapLink}.`;
 	}
-	if (/spanish/i.test(lang)) return `Aqui tienes el pin exacto en Google Maps: ${mapLink}.`;
-	if (/french/i.test(lang)) return `Voici l'emplacement exact sur Google Maps : ${mapLink}.`;
-	if (/urdu|hindi/i.test(lang)) return `Exact Google Maps location yahan hai: ${mapLink}.`;
-	if (/indonesian/i.test(lang)) return `Ini pin lokasi tepat di Google Maps: ${mapLink}.`;
-	if (/malay|malaysia/i.test(lang)) return `Ini pin lokasi tepat di Google Maps: ${mapLink}.`;
-	return `Here is the exact Google Maps pin: ${mapLink}.`;
+	if (/spanish/i.test(lang)) return `Aqui tienes la ruta en Google Maps desde la ubicacion exacta del hotel hasta Al Haram en coche: ${mapLink}.`;
+	if (/french/i.test(lang)) return `Voici l'itineraire Google Maps en voiture depuis l'emplacement exact de l'hotel vers Al Haram : ${mapLink}.`;
+	if (/urdu|hindi/i.test(lang)) return `Hotel ki exact location se Al Haram tak driving route yahan hai: ${mapLink}.`;
+	if (/indonesian/i.test(lang)) return `Ini rute Google Maps dari lokasi tepat hotel ke Al Haram dengan mobil: ${mapLink}.`;
+	if (/malay|malaysia/i.test(lang)) return `Ini laluan Google Maps dari lokasi tepat hotel ke Al Haram dengan kereta: ${mapLink}.`;
+	return `Here is the Google Maps driving route from the hotel's exact location to Al Haram: ${mapLink}.`;
 }
 
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
@@ -5695,8 +5708,8 @@ async function write(io, sc, st, instruction, context = {}) {
 		activeHotelFacts
 			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
 			: "",
-		activeHotelFacts?.googleMapsLocationUrl
-			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Location](${activeHotelFacts.googleMapsLocationUrl}). Use this exact URL from activeHotelFacts.googleMapsLocationUrl; do not invent or rewrite map coordinates.`
+		activeHotelFacts?.googleMapsDrivingDirectionsUrl
+			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Driving Route to Al Haram](${activeHotelFacts.googleMapsDrivingDirectionsUrl}). This URL uses the hotel's exact stored coordinates as the origin, Al Haram as the destination, and driving mode. Do not invent or rewrite map coordinates.`
 			: "",
 		activeHotelFacts
 			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
