@@ -186,10 +186,14 @@ const AI_IDLE_FINAL_FOLLOWUP_MS = intFromEnv(
 	30000,
 	{ min: 30000, max: 30 * 60 * 1000 }
 );
-const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 2 * 60 * 1000, {
-	min: 2 * 60 * 1000,
+const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * 60 * 1000, {
+	min: 5 * 60 * 1000,
 	max: 60 * 60 * 1000,
 });
+const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
+	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
+	false
+);
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
@@ -1025,6 +1029,26 @@ function isGuestConversationMessage(message = {}) {
 	);
 }
 
+function latestGuestMessageIndex(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const message = conversation[index];
+		if (!isGuestConversationMessage(message)) continue;
+		if (isAutomatedSupportNoticeText(message.message)) continue;
+		return index;
+	}
+	return -1;
+}
+
+function hasAiAssistantReplyAfterLatestGuest(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestGuestIndex = latestGuestMessageIndex(sc);
+	if (latestGuestIndex < 0) return false;
+	return conversation
+		.slice(latestGuestIndex + 1)
+		.some((message) => !message?.isSystem && isAiConversationMessage(message));
+}
+
 function aiMessageClientTag(caseId, prefix = "ai") {
 	return `${prefix}:${caseId}:${Date.now()}:${Math.random()
 		.toString(36)
@@ -1089,22 +1113,22 @@ function idleFollowupText(sc = {}, st = {}, stage = "first") {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
 		return stage === "final"
-			? `${name}، تذكير أخير بلطف: أنا هنا إذا احتجت أي مساعدة. إذا لم أسمع منك خلال قليل سأغلق المحادثة حتى تبقى مرتبة.`
-			: `${name}، أنا ما زلت هنا معك. أرسل لي التفاصيل عندما تكون جاهزا وسأكمل معك مباشرة.`;
+			? `${name}\u060c \u062a\u0630\u0643\u064a\u0631 \u0623\u062e\u064a\u0631 \u0648\u062f\u0648\u062f \u{1F642} \u0623\u0646\u0627 \u0645\u0627 \u0632\u0644\u062a \u0647\u0646\u0627 \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u0645\u0633\u0627\u0639\u062f\u0629. \u0625\u0630\u0627 \u0644\u0645 \u0623\u0633\u0645\u0639 \u0645\u0646\u0643\u060c \u0633\u0623\u063a\u0644\u0642 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0628\u0639\u062f \u0628\u0636\u0639 \u062f\u0642\u0627\u0626\u0642 \u0644\u062a\u0628\u0642\u0649 \u0645\u0631\u062a\u0628\u0629.`
+			: `${name}\u060c \u0623\u0646\u0627 \u0645\u0627 \u0632\u0644\u062a \u0647\u0646\u0627 \u0645\u0639\u0643 \u{1F642} \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0639\u0646\u062f\u0645\u0627 \u062a\u0643\u0648\u0646 \u062c\u0627\u0647\u0632\u0627 \u0648\u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0645\u0628\u0627\u0634\u0631\u0629.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return stage === "final"
-			? `${name}, ultimo aviso amable: sigo aqui si necesitas ayuda. Si no recibo respuesta pronto, cerrare el chat para mantenerlo ordenado.`
-			: `${name}, sigo aqui contigo. Enviame el siguiente detalle cuando estes listo y continuo enseguida.`;
+			? `${name}, ultimo recordatorio amable \u{1F642}: sigo aqui si necesitas ayuda. Si no recibo respuesta, cerrare el chat en unos minutos para mantenerlo ordenado.`
+			: `${name}, sigo aqui contigo \u{1F642}. Enviame el siguiente detalle cuando estes listo y continuo enseguida.`;
 	}
 	if (/french/i.test(lang)) {
 		return stage === "final"
-			? `${name}, dernier petit rappel : je suis toujours la si vous avez besoin d'aide. Sans reponse bientot, je fermerai le chat pour le garder bien range.`
-			: `${name}, je suis toujours la avec vous. Envoyez-moi le prochain detail quand vous etes pret et je continue tout de suite.`;
+			? `${name}, dernier petit rappel \u{1F642} : je suis toujours la si vous avez besoin d'aide. Sans reponse, je fermerai le chat dans quelques minutes pour le garder bien range.`
+			: `${name}, je suis toujours la avec vous \u{1F642}. Envoyez-moi le prochain detail quand vous etes pret et je continue tout de suite.`;
 	}
 	return stage === "final"
-		? `${name}, just a final friendly heads up: I am still here if you need support. If I do not hear back shortly, I will close the chat to keep everything tidy.`
-		: `${name}, I am still here with you. Send me the next detail whenever you are ready and I will continue right away.`;
+		? `${name}, just a friendly final heads up \u{1F642} I am still here if you need me. If I do not hear back, I will close this chat in a few minutes to keep everything tidy.`
+		: `${name}, I am still here with you \u{1F642} Send me the next detail whenever you are ready and I will continue right away.`;
 }
 
 function conversationEntryContextText(message = {}) {
@@ -4522,6 +4546,19 @@ async function humanSend(
 			});
 			return false;
 		}
+		if (
+			expectedTurnUserText &&
+			!st.activeTurnHadReply &&
+			hasAiAssistantReplyAfterLatestGuest(latestCase)
+		) {
+			logStep(caseId, "human.cancelled", {
+				stage: "latest-guest-already-answered",
+				token,
+				expectedTurnUserText,
+			});
+			st.activeTurnHadReply = true;
+			return false;
+		}
 	} catch (error) {
 		logStep(caseId, "human.cancelled", {
 			stage: "policy-check-failed",
@@ -6063,6 +6100,9 @@ function compactPreviousGuestChat(supportCase = {}, st = {}) {
 }
 
 async function loadPreviousGuestContext(sc, st) {
+	if (!AI_PREVIOUS_GUEST_CONTEXT_ENABLED) {
+		return [];
+	}
 	const cacheKey = `${String(sc._id || "")}|${(sc.conversation || []).length}`;
 	if (
 		st.previousGuestContext &&
@@ -6499,8 +6539,9 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
 		`Avoid repeated openings such as "Hello {name}" or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
-		`Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity.`,
-		`Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`,
+		AI_PREVIOUS_GUEST_CONTEXT_ENABLED
+			? `Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity. Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`
+			: `Treat this support case as self-contained. Do not imply access to previous chats; if the guest asks to continue an old conversation, reassure them that for security and privacy this chat starts fresh and ask for the needed details here.`,
 		hotelName
 			? `This chat is exclusively for "${hotelName}". When the guest asks whether "you", "your hotel", or the selected hotel has something, answer only for "${hotelName}". Never recommend, link, name, compare, summarize, or imply knowledge of other hotels, even if the guest explicitly asks for alternatives. If the guest asks about other hotels, say this chat can only help with "${hotelName}" and offer to check dates or room types at "${hotelName}".`
 			: `When no active hotel context exists, you are Jannat Booking concierge support. You may recommend, compare, and price Jannat Booking hotel options using provided facts, but you must not create, confirm, mutate, cancel, or payment-link a reservation. Official reservation confirmation, details/payment links, and existing-reservation updates must be handled only after connecting the guest to the selected hotel's reception and reservations desk.`,
@@ -6738,7 +6779,9 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Use all available context to avoid redundancy and to keep the chat natural in any language.",
 		"Guest text may be native script, romanized/transliterated, code-switched, misspelled, or informal. Infer the intended meaning from phonetics and context instead of exact spellings.",
 		"Arabic may appear as Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, Franko Arabic, or Arabizi. Indian and Pakistani guests may use Hinglish, Urdu/Hindi in Latin characters, or mixed scripts. Do not escalate only because the writing style is unusual.",
-		"Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest.",
+		AI_PREVIOUS_GUEST_CONTEXT_ENABLED
+			? "Private previous guest chats may be provided. Use them only to prepare the next action; never choose an action that would disclose that history to the guest."
+			: "This support case is self-contained. Do not infer facts from previous chats. If the guest asks to continue an old chat, keep the action as general_answer so the writer can explain the fresh-chat privacy boundary.",
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
@@ -8412,6 +8455,95 @@ function technicalRecoveryText(sc = {}, st = {}) {
 	return `${name}, sorry, I had a small technical delay while checking your request. Please send the last point once more and I will continue right away.`;
 }
 
+function previousChatContinuationRequestText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const mentionsPreviousContext =
+		/\b(?:previous|prev|last|old|earlier|past|prior|yesterday|before|already|again|same)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0633\u0627\u0628\u0642|\u0633\u0627\u0628\u0642|\u0627\u0644\u0645\u0627\u0636\u064a|\u0627\u062e\u0631|\u0622\u062e\u0631|\u0642\u0628\u0644|\u0645\u0646\s+\u0642\u0628\u0644|\u0627\u0645\u0628\u0627\u0631\u062d|\u0627\u0644\u0644\u064a\s+\u0642\u0644\u062a\u0647|\u0642\u0644\u062a\u0647\s+\u0642\u0628\u0644)/i.test(
+			arabic
+		) ||
+		/(?:previous|prev|last|old|earlier|past|prior|yesterday|before|already|same|anteriores|anterior|previo|precedente|sebelumnya|sebelum|pehle|pichli|purani)/i.test(
+			latinCompact
+		);
+	const mentionsChat =
+		/\b(?:chat|conversation|case|thread|session|ticket|message|discussion|talk|request|booking|reservation)\b/i.test(
+			lower
+		) ||
+		/(?:\u0634\u0627\u062a|\u0645\u062d\u0627\u062f\u062b\u0647|\u0645\u062d\u0627\u062f\u062b\u0629|\u0645\u0643\u0627\u0644\u0645\u0647|\u0645\u0643\u0627\u0644\u0645\u0629|\u0631\u0633\u0627\u0644\u0647|\u0631\u0633\u0627\u0644\u0629|\u0637\u0644\u0628|\u062d\u062c\u0632|\u062a\u0630\u0643\u0631\u0647|\u062a\u0630\u0643\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:chat|conversation|case|thread|session|ticket|message|discussion|request|booking|reservation|conversacion|conversa|conversation|percakapan|perbualan|tempahan|reservasi)/i.test(
+			latinCompact
+		);
+	const asksToContinue =
+		/\b(?:continue|resume|complete|finish|carry\s+on|pick\s+up|start\s+from|go\s+on|proceed\s+from)\b/i.test(
+			lower
+		) ||
+		/(?:\u0646\u0643\u0645\u0644|\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0646\u062a\u0627\u0628\u0639|\u062a\u0627\u0628\u0639|\u0627\u062e\u0644\u0635|\u0643\u0645\u0644\u0647|\u0643\u0645\u0644\u0647\u0627)/i.test(
+			arabic
+		) ||
+		/(?:continue|resume|complete|finish|carryon|pickup|startfrom|continuar|retomar|reprendre|continuer|sambung|lanjut|teruskan|jari|rakho)/i.test(
+			latinCompact
+		);
+	const asksIfRemember =
+		/\b(?:remember|recall|you\s+know|as\s+i\s+said|as\s+we\s+discussed|we\s+talked|i\s+told\s+you|sent\s+you)\b/i.test(
+			lower
+		) ||
+		/(?:\u0641\u0627\u0643\u0631|\u062a\u0641\u062a\u0643\u0631|\u0632\u064a\s+\u0645\u0627\s+\u0642\u0644\u062a|\u0632\u064a\s+\u0645\u0627\s+\u0627\u062a\u0643\u0644\u0645\u0646\u0627|\u0643\u0646\u0627\s+\u0627\u062a\u0643\u0644\u0645\u0646\u0627|\u0628\u0639\u062a\u0644\u0643|\u0627\u0631\u0633\u0644\u062a\s+\u0644\u0643)/i.test(
+			arabic
+		) ||
+		/(?:remember|recall|youknow|asisaid|aswediscussed|wetalked|itoldyou|sentyou|teacuerdas|recuerdas|souviens|ingat)/i.test(
+			latinCompact
+		);
+	return (
+		(mentionsPreviousContext && mentionsChat) ||
+		(asksToContinue && mentionsPreviousContext) ||
+		(asksIfRemember && (mentionsChat || mentionsPreviousContext))
+	);
+}
+
+function previousChatBoundaryFallbackText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0644\u062d\u0645\u0627\u064a\u0629 \u062e\u0635\u0648\u0635\u064a\u062a\u0643 \u0647\u0630\u0647 \u0645\u062d\u0627\u062f\u062b\u0629 \u062c\u062f\u064a\u062f\u0629 \u0648\u0623\u062a\u0639\u0627\u0645\u0644 \u0645\u0639 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062a\u064a \u062a\u0631\u0633\u0644\u0647\u0627 \u0647\u0646\u0627 \u0641\u0642\u0637. \u0634\u0643\u0631\u0627 \u0644\u0635\u0628\u0631\u0643\u060c \u0648\u0644\u0646 \u064a\u0633\u062a\u063a\u0631\u0642 \u0627\u0644\u0623\u0645\u0631 \u0648\u0642\u062a\u0627 \u0637\u0648\u064a\u0644\u0627. \u0623\u0631\u0633\u0644 \u0644\u064a \u0628\u0627\u062e\u062a\u0635\u0627\u0631 \u0645\u0627 \u062a\u0631\u064a\u062f \u0625\u0643\u0645\u0627\u0644\u0647${st.hotel ? ` \u0641\u064a ${hotelName}` : ""}\u060c \u0648\u0633\u0623\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, por tu seguridad y privacidad, trato este chat como una conversacion nueva y solo uso los detalles que compartas aqui. Gracias por tu paciencia; no tomara mucho tiempo. Enviame brevemente lo que deseas completar${st.hotel ? ` para ${hotelName}` : ""} y continuo contigo paso a paso.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, pour votre securite et votre confidentialite, je traite ce chat comme une nouvelle conversation et j'utilise uniquement les details que vous partagez ici. Merci pour votre patience; cela ne prendra pas longtemps. Envoyez-moi brievement ce que vous souhaitez finaliser${st.hotel ? ` pour ${hotelName}` : ""} et je continue avec vous etape par etape.`;
+	}
+	return `${name}, for your security and privacy, I treat this as a fresh chat and only use the details you share here. Thank you for your patience; it will not take long. Send me a quick summary of what you would like to complete${st.hotel ? ` for ${hotelName}` : ""}, and I will continue with you step by step.`;
+}
+
+async function answerPreviousChatContinuationRequest(io, sc, st, userText = "") {
+	const fallback = previousChatBoundaryFallbackText(sc, st);
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"The guest is asking to continue, resume, remember, or complete a previous chat/conversation. Reply as a professional hospitality sales/support agent. Do not claim or imply access to previous chats. Do not quote, summarize, or use previous-chat details. Say that for the guest's security and privacy this chat is handled fresh using only details shared here. Thank them warmly for patience, reassure them it is completely okay and should not take long to restart, and keep the sale/support moving. Ask for one concise current-chat summary or the next needed detail, not a long form. Use the active response language and sound warm, confident, and valuable.",
+		{
+			latestUserMessage: userText,
+			previousChatBoundary: true,
+			selectedHotel: st.hotel ? localizedHotelName(sc, st) : "",
+			fallbackText: fallback,
+		}
+	);
+	await humanSend(io, sc, st, stripGeneralBookingPivot(reply || fallback, fallback));
+	st.waitFor = "clarify";
+	logStep(String(sc._id), "previous_chat_boundary.reply", {
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
+}
+
 function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	const normalized = String(text || "").trim();
 	if (!normalized) return false;
@@ -8497,7 +8629,7 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 		io,
 		sc,
 		st,
-		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, previous guest context, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly and direct the guest to support@jannatbooking.com. Do not invent facts. Do not ask for check-in/check-out dates, phone, email, confirmation number, room type, or booking details unless the guest explicitly asked to reserve in the latest message. Do not add a booking pivot after an unsupported general answer.",
+		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly and direct the guest to support@jannatbooking.com. Do not invent facts. Do not ask for check-in/check-out dates, phone, email, confirmation number, room type, or booking details unless the guest explicitly asked to reserve in the latest message. Do not add a booking pivot after an unsupported general answer.",
 		{
 			latestUserMessage: userText,
 			supportEmail: AI_SUPPORT_EMAIL,
@@ -9222,6 +9354,13 @@ async function planTurn(io, sc) {
 			AI_REPLY_TARGET_MIN_MS,
 			AI_REPLY_TARGET_MAX_MS
 		);
+		if (userText && hasAiAssistantReplyAfterLatestGuest(sc)) {
+			st.activeTurnHadReply = true;
+			logStep(caseId, "turn.skip", {
+				reason: "latest_guest_already_answered",
+			});
+			return;
+		}
 		if (userText || !hasAiAssistantReply(sc)) {
 			schedulePlanningTyping();
 		}
@@ -9232,6 +9371,10 @@ async function planTurn(io, sc) {
 				st.greetScheduled = true;
 				st.greeted = true;
 				const initialInquiry = initialInquiryText(sc);
+				if (previousChatContinuationRequestText(initialInquiry)) {
+					await answerPreviousChatContinuationRequest(io, sc, st, initialInquiry);
+					return;
+				}
 				if (!st.hotel && hotelComplaintText(initialInquiry)) {
 					await handoffToHuman(io, sc, st, "jannat_hotel_complaint");
 					return;
@@ -9316,6 +9459,10 @@ async function planTurn(io, sc) {
 		}
 		if (explicitLanguageSwitch?.requestOnly) {
 			await answerLanguageSwitchRequest(io, sc, st, userText);
+			return;
+		}
+		if (previousChatContinuationRequestText(userText)) {
+			await answerPreviousChatContinuationRequest(io, sc, st, userText);
 			return;
 		}
 
@@ -10921,10 +11068,35 @@ async function planTurn(io, sc) {
 		if (st2) {
 			st2.turnInFlight = false;
 			if (st2.queue.length > 0) {
+				const queuedCount = st2.queue.length;
 				st2.queue = [];
-				logStep(caseId, "turn.consume_queue", {});
 				getSupportCaseById(caseId)
-					.then((sc2) => sc2 && planTurn(io, sc2))
+					.then((sc2) => {
+						if (!sc2) return;
+						const latestText = lastUserText(sc2);
+						if (latestText && latestText !== st2.activeTurnUserText) {
+							logStep(caseId, "turn.consume_queue", {
+								queued: queuedCount,
+								reason: "newer_customer_message",
+							});
+							return planTurn(io, sc2);
+						}
+						if (
+							!st2.activeTurnHadReply &&
+							!hasAiAssistantReplyAfterLatestGuest(sc2)
+						) {
+							logStep(caseId, "turn.consume_queue", {
+								queued: queuedCount,
+								reason: "current_turn_unanswered",
+							});
+							return planTurn(io, sc2);
+						}
+						logStep(caseId, "turn.drop_queue", {
+							queued: queuedCount,
+							reason: "current_turn_answered",
+						});
+						return undefined;
+					})
 					.catch(() => {});
 			}
 		}

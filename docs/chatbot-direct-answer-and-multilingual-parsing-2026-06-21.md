@@ -267,6 +267,23 @@ Checks used:
 
 Additional tightening added:
 
+- The orchestrator refuses to run a new planner pass for a guest turn that
+  already has an AI reply after it in the conversation. This prevents queued or
+  delayed turns from re-answering the same guest message with different wording.
+- AI message saving has a second guard for stale planners: if the latest guest
+  turn was already answered by another pass, the save is cancelled before it can
+  append another assistant bubble.
+- Queued turns are now consumed only when the latest customer message is newer
+  or the current turn is still genuinely unanswered. Otherwise the stale queue
+  is dropped after the successful reply.
+- Idle chat handling remains lightweight: first follow-up after 10 seconds,
+  final friendly reminder after 30 seconds, and automatic read/close only after
+  5 minutes of inactivity. The reminders include one soft emoji when appropriate.
+- Each support case is treated as self-contained by default. If a guest asks to
+  resume or complete an old chat, the bot explains the security/privacy boundary
+  warmly, thanks the guest for patience, reassures them it is fine to start
+  fresh, and asks for a short current-chat summary so the sale/support can keep
+  moving.
 - Each guest turn records whether an AI reply was actually saved. If a cooldown
   branch would leave the guest without an answer, the orchestrator sends one
   short contextual follow-up in the active language.

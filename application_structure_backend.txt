@@ -2728,3 +2728,35 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Verification expectation:
   - Before production deployment, run node --check for aiagent/core/orchestrator.js
     and confirm PM2/health checks after pull and restart.
+
+2026-06-21 Chatbot Duplicate-Reply And Idle-Case Hardening
+- Files:
+  - aiagent/core/orchestrator.js
+  - aiagent/core/db.js
+  - server.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Duplicate-reply prevention:
+  - The AI planner must not answer a latest guest message when any non-system AI
+    assistant reply already appears after that guest message in the conversation.
+  - humanSend also checks the latest database case before appending a reply, so a
+    stale planner cannot save a second answer after another planner has already
+    answered the same guest turn.
+  - Queued planner ticks are dropped after a successful current-turn reply unless
+    the database shows a newer customer message or a genuinely unanswered turn.
+  - Exact duplicate AI text is still protected by the database append guard and
+    frontend clientTag/message merge logic from the previous polish pass.
+- Idle follow-up and close timing:
+  - First unanswered-guest follow-up remains 10 seconds after an AI prompt.
+  - Final friendly reminder remains 30 seconds after the AI prompt and may use
+    one tasteful emoji.
+  - Fully inactive AI support cases are marked read and closed after 5 minutes,
+    not 2 minutes. The code-level minimum is also 5 minutes.
+- Fresh-chat privacy:
+  - Previous guest chat context is disabled by default.
+  - If a guest asks to continue, resume, remember, or complete an older chat, the
+    bot must warmly explain that this chat is handled fresh for security/privacy,
+    thank the guest for patience, reassure them it will not take long, and ask
+    for a concise current-chat summary or next needed detail.
+- Verification expectation:
+  - Run node --check for aiagent/core/orchestrator.js before deployment.
+  - After production pull/restart, confirm aiagent health and PM2 status.
