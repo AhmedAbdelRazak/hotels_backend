@@ -422,6 +422,73 @@ const buildPaymentLinkReservationPayload = (reservation) => {
 	});
 };
 
+const sanitizeReceiptCustomerDetails = (customerDetails = {}) => {
+	const sanitized = { ...(customerDetails || {}) };
+	delete sanitized.password;
+	delete sanitized.confirmPassword;
+	delete sanitized.cardNumber;
+	delete sanitized.cardExpiryDate;
+	delete sanitized.cardCVV;
+	delete sanitized.cardHolderName;
+	delete sanitized.transId;
+	delete sanitized.tokenId;
+	return sanitized;
+};
+
+const buildPaymentLinkReceiptPayload = (reservation) => {
+	const doc =
+		typeof reservation?.toObject === "function"
+			? reservation.toObject()
+			: { ...(reservation || {}) };
+	const paymentDetails = doc.payment_details || {};
+	const paypalDetails = doc.paypal_details || {};
+	return {
+		...doc,
+		customer_details: sanitizeReceiptCustomerDetails(doc.customer_details),
+		payment_details: compactPaymentPayloadObject({
+			captured: !!paymentDetails.captured,
+			triggeredAmountUSD: toPaymentPayloadNumber(
+				paymentDetails.triggeredAmountUSD,
+			),
+			triggeredAmountSAR: toPaymentPayloadNumber(
+				paymentDetails.triggeredAmountSAR,
+			),
+			finalCaptureTransactionId: paymentDetails.finalCaptureTransactionId,
+			lastChargeVia: paymentDetails.lastChargeVia,
+			lastChargeAt: paymentDetails.lastChargeAt,
+			authorizationId: paymentDetails.authorizationId,
+			authorizationAmountUSD: toPaymentPayloadNumber(
+				paymentDetails.authorizationAmountUSD,
+			),
+			authorizationAmountSAR: toPaymentPayloadNumber(
+				paymentDetails.authorizationAmountSAR,
+			),
+			onsite_paid_amount: toPaymentPayloadNumber(
+				paymentDetails.onsite_paid_amount,
+			),
+		}),
+		paypal_details: compactPaymentPayloadObject({
+			captured_total_usd: toPaymentPayloadNumber(
+				paypalDetails.captured_total_usd,
+			),
+			pending_total_usd: toPaymentPayloadNumber(
+				paypalDetails.pending_total_usd,
+			),
+			bounds: paypalDetails.bounds
+				? {
+						base: paypalDetails.bounds.base,
+						limit_usd: toPaymentPayloadNumber(
+							paypalDetails.bounds.limit_usd,
+						),
+				  }
+				: undefined,
+			vault_status: paypalDetails.vault_status,
+			card_brand: paypalDetails.card_brand,
+			card_last4: paypalDetails.card_last4,
+		}),
+	};
+};
+
 async function getHotelAndOwner(hotelId) {
 	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
 		return { hotel: null, owner: null };
@@ -475,24 +542,27 @@ async function generateUniqueConfirmationNumberAcross() {
 }
 
 const createPdfBuffer = async (html) => {
-	const browser = await puppeteer.launch({
-		headless: "new",
-		args: [
-			"--no-sandbox",
-			"--disable-setuid-sandbox",
-			"--disable-dev-shm-usage",
-			"--disable-accelerated-2d-canvas",
-			"--no-first-run",
-			"--no-zygote",
-			"--single-process",
-			"--disable-gpu",
-		],
-	});
-	const page = await browser.newPage();
-	await page.setContent(html, { waitUntil: "networkidle0" });
-	const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
-	await browser.close();
-	return pdfBuffer;
+	let browser = null;
+	try {
+		browser = await puppeteer.launch({
+			headless: "new",
+			args: [
+				"--no-sandbox",
+				"--disable-setuid-sandbox",
+				"--disable-dev-shm-usage",
+				"--disable-accelerated-2d-canvas",
+				"--no-first-run",
+				"--no-zygote",
+				"--single-process",
+				"--disable-gpu",
+			],
+		});
+		const page = await browser.newPage();
+		await page.setContent(html, { waitUntil: "networkidle0" });
+		return page.pdf({ format: "A4", printBackground: true });
+	} finally {
+		if (browser) await browser.close().catch(() => {});
+	}
 };
 
 async function sendEmailWithInvoice(
@@ -1659,23 +1729,23 @@ const scheduleLinkPaymentReceiptDispatch = (reservation, logPrefix = "[PP]") => 
 	if (!reservation) return;
 	const run = async () => {
 		try {
-			const hotelDoc = reservation.hotelId || {};
+			const receiptReservation = buildPaymentLinkReceiptPayload(reservation);
+			const hotelDoc = receiptReservation.hotelId || {};
 			const invoiceModel = {
-				...(typeof reservation.toObject === "function"
-					? reservation.toObject()
-					: { ...reservation }),
-				hotelName: reservation.hotelName || hotelDoc.hotelName || "Hotel",
+				...receiptReservation,
+				hotelName:
+					receiptReservation.hotelName || hotelDoc.hotelName || "Hotel",
 				hotelAddress: hotelDoc.hotelAddress || "",
 				hotelCity: hotelDoc.hotelCity || "",
 				hotelPhone: hotelDoc.phone || "",
 			};
 			await sendEmailWithInvoice(
 				invoiceModel,
-				reservation.customer_details?.email,
-				reservation.belongsTo,
+				receiptReservation.customer_details?.email,
+				receiptReservation.belongsTo,
 			);
-			await waSendReservationConfirmation(reservation);
-			await waNotifyNewReservation(reservation);
+			await waSendReservationConfirmation(receiptReservation);
+			await waNotifyNewReservation(receiptReservation);
 		} catch (e) {
 			console.warn(`${logPrefix} receipt dispatch warning`, e?.message || e);
 		}
