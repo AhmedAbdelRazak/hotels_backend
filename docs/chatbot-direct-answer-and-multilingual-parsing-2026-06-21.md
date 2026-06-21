@@ -262,3 +262,28 @@ Checks used:
 - Google Maps location/directions links should be rendered as readable chat
   links, not as full raw URLs. In SSR this is handled by the support widget link
   renderer.
+
+## Responsive Follow-Up and SSR Chat Polish
+
+Additional tightening added:
+
+- Each guest turn records whether an AI reply was actually saved. If a cooldown
+  branch would leave the guest without an answer, the orchestrator sends one
+  short contextual follow-up in the active language.
+- Missing-date, missing-room, and unclear-proceed states now use contextual
+  follow-ups instead of silent returns when the same question was asked recently.
+- "Not now", "later", and similar decline turns pause quote/proceed nudges for a
+  short window, so later factual questions are answered without sales pressure.
+- Stored hotel distance values such as `56 min` are normalized before display,
+  so Arabic, Spanish, French, Indonesian, Malay, English, Urdu, and Hindi chats
+  do not show mixed raw `min` units.
+- Explicit language-only turns such as "arabic", "Spanish please", or
+  script-based equivalents switch the active response language and acknowledge
+  the change. Mixed language plus service questions can still be answered in the
+  newly requested language.
+- SSR chat UI keeps links as readable underlined labels, wraps long textarea
+  content on desktop and mobile, supports emoji text input, localizes the rating
+  panel labels, and uses a visible red end-chat button with the existing
+  post-reservation heartbeat state.
+- Hotel, room, single-hotel, and deal CTAs use "Chat With Reception" in English
+  and "تحدث مع الاستقبال" in Arabic.

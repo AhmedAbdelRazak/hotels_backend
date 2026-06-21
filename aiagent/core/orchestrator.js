@@ -135,6 +135,10 @@ const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 		max: 9000,
 	})
 );
+const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
+	min: 30000,
+	max: 60 * 60 * 1000,
+});
 const JANNAT_HANDOFF_DELAY_MIN_MS = intFromEnv(
 	"AI_JANNAT_HANDOFF_DELAY_MIN_MS",
 	5000,
@@ -526,8 +530,97 @@ function detectGuestLanguageFromText(text = "") {
 	return null;
 }
 
+function explicitLanguageSwitchRequest(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower && !arabic && !latinCompact) return null;
+	const compact = latinCompact;
+	const wordCount = (lower.match(/[a-z\u0600-\u06ff\u0900-\u097f]+/gi) || []).length;
+	const languageOptions = [
+		{
+			language: "Arabic",
+			code: "ar",
+			exact: /^(arabic|arabi|speakarabic|replyinarabic|writeinarabic|talkarabic|inarabic|bilarabi)$/i,
+			phrase: /\b(?:arabic|arabi)\b/i,
+			local: /(?:\u0639\u0631\u0628\u064a|\u0627\u0644\u0639\u0631\u0628\u064a\u0629|\u0628\u0627\u0644\u0639\u0631\u0628\u064a|\u0639\u0631\u0628\u0649)/i,
+		},
+		{
+			language: "English",
+			code: "en",
+			exact: /^(english|speakenglish|replyinenglish|writeinenglish|talkenglish|inenglish)$/i,
+			phrase: /\b(?:english|inglish)\b/i,
+			local: /(?:\u0627\u0646\u062c\u0644\u064a\u0632\u064a|\u0627\u0646\u0643\u0644\u064a\u0632\u064a|\u0627\u0646\u0642\u0644\u0634)/i,
+		},
+		{
+			language: "Spanish",
+			code: "es",
+			exact: /^(spanish|espanol|espanola|speakspanish|replyinspanish|writeinspanish|inspanish)$/i,
+			phrase: /\b(?:spanish|espanol|espa[ñn]ol|espa[ñn]ola)\b/i,
+			local: /(?:\u0627\u0633\u0628\u0627\u0646\u064a|\u0627\u0633\u0628\u0627\u0646\u064a\u0629|\u0633\u0628\u0627\u0646\u0634)/i,
+		},
+		{
+			language: "French",
+			code: "fr",
+			exact: /^(french|francais|speakfrench|replyinfrench|writeinfrench|infrench)$/i,
+			phrase: /\b(?:french|fran[çc]ais)\b/i,
+			local: /(?:\u0641\u0631\u0646\u0633\u064a|\u0641\u0631\u0646\u0633\u064a\u0629)/i,
+		},
+		{
+			language: "Urdu",
+			code: "ur",
+			exact: /^(urdu|speakurdu|replyinurdu|writeinurdu|inurdu)$/i,
+			phrase: /\burdu\b/i,
+			local: /(?:\u0627\u0631\u062f\u0648|\u0627\u0631\u062f\u0648\u06ba)/i,
+		},
+		{
+			language: "Hindi",
+			code: "hi",
+			exact: /^(hindi|speakhindi|replyinhindi|writeinhindi|inhindi)$/i,
+			phrase: /\bhindi\b/i,
+			local: /(?:\u0939\u093f\u0902\u0926\u0940|\u0939\u093f\u0928\u094d\u0926\u0940|\u0647\u0646\u062f\u064a)/i,
+		},
+		{
+			language: "Indonesian",
+			code: "id",
+			exact: /^(indonesian|bahasaindonesia|speakindonesian|replyinindonesian|inindonesian)$/i,
+			phrase: /\b(?:indonesian|bahasa\s+indonesia)\b/i,
+			local: /(?:\u0627\u0646\u062f\u0648\u0646\u064a\u0633\u064a|\u0627\u0646\u062f\u0648\u0646\u064a\u0633\u064a\u0629)/i,
+		},
+		{
+			language: "Malay (Malaysia)",
+			code: "ms",
+			exact: /^(malay|bahasamelayu|malaysia|speakmalay|replyinmalay|inmalay)$/i,
+			phrase: /\b(?:malay|bahasa\s+melayu|malaysia)\b/i,
+			local: /(?:\u0645\u0627\u0644\u0627\u064a|\u0645\u0627\u0644\u064a\u0632\u064a)/i,
+		},
+	];
+	const switchCue =
+		wordCount <= 4 ||
+		/\b(?:speak|talk|write|reply|respond|answer|switch|change|language|lang|in)\b/i.test(
+			lower
+		) ||
+		/(?:\u062a\u0643\u0644\u0645|\u062a\u062d\u062f\u062b|\u0627\u0631\u062f|\u0631\u062f|\u0628\u0644\u063a\u0629|\u0644\u063a\u0629|\u0628\u0627\u0644)/i.test(
+			arabic
+		);
+	for (const option of languageOptions) {
+		const matched =
+			option.exact.test(compact) ||
+			(option.phrase.test(lower) && switchCue) ||
+			(option.local.test(arabic) && switchCue);
+		if (!matched) continue;
+		const requestOnly =
+			option.exact.test(compact) ||
+			(wordCount <= 5 &&
+				!/\b(?:price|availability|available|book|reserve|reservation|room|date|check|location|address|phone|payment|bus|shuttle|haram|map|directions|distance)\b/i.test(
+					lower
+				));
+		return { language: option.language, code: option.code, confidence: 1, requestOnly };
+	}
+	return null;
+}
+
 function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
-	const detected = detectGuestLanguageFromText(text);
+	const explicit = explicitLanguageSwitchRequest(text);
+	const detected = explicit || detectGuestLanguageFromText(text);
 	if (!detected || detected.confidence < 0.75) return;
 	const current = String(languageOf(sc, st) || "").toLowerCase();
 	const currentCode = String(activeLanguageCodeOf(sc, st) || "").toLowerCase();
@@ -556,6 +649,43 @@ function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
 	st.language = detected.language;
 	st.languageCode = detected.code;
 	st.languageOverrideAt = now();
+}
+
+function languageSwitchAcknowledgementText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0643\u064a\u062f\u060c \u0633\u0623\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u0628\u0627\u0644\u0639\u0631\u0628\u064a\u0629. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, claro, continuo contigo en espanol. Como puedo ayudarte?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, bien sur, je continue avec vous en francais. Comment puis-je vous aider ?`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, zaroor, main Urdu mein continue karta/karti hoon. Aap ki kya help kar sakta/sakti hoon?`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, bilkul, main Hindi mein continue karta/karti hoon. Main kaise help kar sakta/sakti hoon?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, tentu, saya lanjutkan dalam bahasa Indonesia. Ada yang bisa saya bantu?`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, baik, saya teruskan dalam Bahasa Melayu. Apa yang boleh saya bantu?`;
+	}
+	return `${name}, absolutely, I will continue in English. How can I help?`;
+}
+
+async function answerLanguageSwitchRequest(io, sc, st, userText = "") {
+	await humanSend(io, sc, st, languageSwitchAcknowledgementText(sc, st));
+	logStep(String(sc._id), "language.switch_ack", {
+		language: languageOf(sc, st),
+		code: activeLanguageCodeOf(sc, st),
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
 }
 
 function firstNameForAddress(value = "") {
@@ -3061,9 +3191,52 @@ function formatHotelFactText(value, lang = "English") {
 	return toTitle(text);
 }
 
+function localizedMinuteDuration(numericAmount, lang = "English") {
+	const amount = localizedNumber(numericAmount, lang);
+	if (/arabic/i.test(lang)) {
+		if (numericAmount === 1) return "\u062f\u0642\u064a\u0642\u0629 \u0648\u0627\u062d\u062f\u0629";
+		if (numericAmount === 2) return "\u062f\u0642\u064a\u0642\u062a\u064a\u0646";
+		if (Number.isInteger(numericAmount) && numericAmount >= 3 && numericAmount <= 10) {
+			return `${amount} \u062f\u0642\u0627\u0626\u0642`;
+		}
+		return `${amount} \u062f\u0642\u064a\u0642\u0629`;
+	}
+	if (/spanish/i.test(lang)) return `${amount} ${numericAmount === 1 ? "minuto" : "minutos"}`;
+	if (/french/i.test(lang)) return `${amount} ${numericAmount === 1 ? "minute" : "minutes"}`;
+	if (/urdu/i.test(lang)) return `${amount} minutes`;
+	if (/hindi/i.test(lang)) return `${amount} minutes`;
+	if (/indonesian/i.test(lang)) return `${amount} menit`;
+	if (/malay|malaysia/i.test(lang)) return `${amount} minit`;
+	return `${amount} ${numericAmount === 1 ? "minute" : "minutes"}`;
+}
+
+function parseMinuteDuration(value = "") {
+	const normalized = digitsToEnglish(String(value || ""))
+		.replace(/\s+/g, " ")
+		.trim();
+	const minuteMatch = normalized.match(
+		/^(?:about|around|approx\.?|approximately|nearly|\u062a\u0642\u0631\u064a\u0628\u0627|\u062d\u0648\u0627\u0644\u064a)?\s*(\d+(?:\.\d+)?)\s*(?:min|mins|minute|minutes|mns?|دقيقة|دقيقه|دقائق|دقايق)\.?\s*$/i
+	);
+	if (!minuteMatch) return null;
+	const numericAmount = Number(minuteMatch[1]);
+	if (!Number.isFinite(numericAmount) || numericAmount <= 0) return null;
+	return numericAmount;
+}
+
 function formatHotelDistanceValue(value, lang = "English") {
 	const text = cleanHotelFactValue(value);
 	if (!text) return "";
+	const normalized = digitsToEnglish(text);
+	const parsedMinutes = parseMinuteDuration(text);
+	const numericMinutes =
+		parsedMinutes !== null
+			? parsedMinutes
+			: /^\d+(?:\.\d+)?$/.test(normalized)
+			? Number(normalized)
+			: null;
+	if (Number.isFinite(numericMinutes) && numericMinutes > 0) {
+		return localizedMinuteDuration(numericMinutes, lang);
+	}
 	const numberMatch = text.match(/^\d+(?:\.\d+)?$/);
 	if (numberMatch) {
 		const numericAmount = Number(numberMatch[0]);
@@ -3119,6 +3292,16 @@ function hotelFactAddressLine(hotel = {}, lang = "English") {
 function hotelFactNextStepText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	const pivot = nextPivot(st);
+	if (pivot === "proceed" && bookingNudgePaused(st)) {
+		if (/arabic/i.test(lang)) return "\u0623\u0646\u0627 \u0647\u0646\u0627 \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0623\u062e\u0631\u0649.";
+		if (/spanish/i.test(lang)) return "Estoy aqui si necesitas cualquier otro detalle.";
+		if (/french/i.test(lang)) return "Je reste disponible si vous avez besoin d'un autre detail.";
+		if (/urdu/i.test(lang)) return "Aap ko koi aur detail chahiye ho to main yahin hoon.";
+		if (/hindi/i.test(lang)) return "Aapko koi aur detail chahiye ho to main yahin hoon.";
+		if (/indonesian/i.test(lang)) return "Saya tetap di sini jika Anda membutuhkan detail lain.";
+		if (/malay|malaysia/i.test(lang)) return "Saya masih di sini jika anda perlukan butiran lain.";
+		return "I am here if you need any other details.";
+	}
 	if (/arabic/i.test(lang)) {
 		if (pivot === "proceed") {
 			return "\u0648\u0625\u0630\u0627 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0646\u0627\u0633\u0628 \u0644\u0643\u060c \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f";
@@ -3371,12 +3554,14 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 			io,
 			sc,
 			st,
-			"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with one natural booking next step. Do not mention Jannat Booking or any other hotel.",
+			"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with nextStepText naturally. If bookingNudgePaused is true, do not ask to proceed or ask for dates; just close with the short availability/support line. Do not mention Jannat Booking or any other hotel.",
 			{
 				latestUserMessage: userText,
 				selectedHotelFacts: buildActiveHotelFacts(sc, st),
 				rawBusDetails: cleanHotelFactText(st.hotel?.busDetails),
 				nextStep: nextPivot(st),
+				nextStepText: hotelFactNextStepText(sc, st),
+				bookingNudgePaused: bookingNudgePaused(st),
 			}
 		);
 	} else {
@@ -3948,6 +4133,7 @@ function ensureState(sc, hotel) {
 			greetScheduled: alreadyGreeted,
 			guestTypingUntil: 0,
 			turnInFlight: false,
+			activeTurnHadReply: false,
 			interrupt: false,
 			queue: [],
 			sendingToken: null,
@@ -3957,6 +4143,7 @@ function ensureState(sc, hotel) {
 			quote: null,
 			reviewSent: false,
 			quoteSummarizedAt: 0,
+			bookingNudgePausedAt: 0,
 			progressSentAt: {},
 			hydratedConversationLength: 0,
 			pendingRoomAlternative: null,
@@ -4133,6 +4320,7 @@ async function humanSend(io, sc, st, text, { first = false, quickReplies = [] } 
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
 	st.lastBotText = text;
+	st.activeTurnHadReply = true;
 	return true;
 }
 
@@ -4204,6 +4392,19 @@ function askedRecently(st, key, ms = SOFT_PIVOT_MS) {
 }
 function stampAsk(st, key) {
 	st.lastAskAt[key] = now();
+}
+
+function pauseBookingNudge(st = {}) {
+	st.bookingNudgePausedAt = now();
+}
+
+function resumeBookingNudge(st = {}) {
+	st.bookingNudgePausedAt = 0;
+}
+
+function bookingNudgePaused(st = {}) {
+	const pausedAt = Number(st.bookingNudgePausedAt || 0);
+	return Boolean(pausedAt && now() - pausedAt < QUOTE_NUDGE_PAUSE_MS);
 }
 
 function normalizeControlText(text = "") {
@@ -5494,6 +5695,7 @@ async function handoffToHuman(io, sc, st, reason) {
 		escalationAddressedNote: "",
 	});
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
+	st.activeTurnHadReply = true;
 	io.to(caseId).emit("aiPaused", { caseId, reason });
 	if (updatedCase) {
 		const escalationPayload = {
@@ -6733,20 +6935,23 @@ async function handleProceedStageInput(
 		return false;
 	}
 	if (confirmsText(userText)) {
+		resumeBookingNudge(st);
 		return sendReservationReview(io, sc, st, st.quote.data);
 	}
 	if (declinesText(userText)) {
+		pauseBookingNudge(st);
 		const msg = await write(
 			io,
 			sc,
 			st,
-			"Acknowledge politely and offer to help with different dates or another room type. Do not repeat the quote.",
+			"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step.",
 			{ quote: st.quote.data, slots: st.slots }
 		);
 		await humanSend(io, sc, st, msg);
 		return true;
 	}
 	if (patienceText(userText)) {
+		pauseBookingNudge(st);
 		const msg = await write(
 			io,
 			sc,
@@ -8648,6 +8853,56 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	return true;
 }
 
+async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", caseId = "") {
+	if (!io || !st || !String(userText || "").trim()) return false;
+	if (st.activeTurnHadReply || st.interrupt) return false;
+	const targetCaseId = caseId || String(sc?._id || sc?.id || "");
+	if (!targetCaseId) return false;
+	try {
+		const latestCase = (await getSupportCaseById(targetCaseId)) || sc;
+		const conversation = Array.isArray(latestCase?.conversation)
+			? latestCase.conversation
+			: [];
+		const latestAiAfterGuest = conversation.some((message) => {
+			if (!isAiConversationMessage(message)) return false;
+			const messageAt = new Date(message.date || 0).getTime();
+			return (
+				Number.isFinite(messageAt) &&
+				messageAt > Number(st.activeTurnGuestAt || 0)
+			);
+		});
+		if (latestAiAfterGuest) return false;
+		const waitFor = st.waitFor || nextPivot(st);
+		const prompt = await write(
+			io,
+			latestCase,
+			st,
+			"The guest's latest turn has not received a support reply yet. Review the conversation context and send one concise, professional follow-up in the guest's active language. Answer any direct question in latestUserMessage first using available hotel/reservation context. If there is no direct question, continue the current wait state by asking only for the missing item. Never ask for unrelated dates, room type, or confirmation if the guest asked a factual question. Do not mention delays or internal systems. Keep it short and natural.",
+			{
+				latestUserMessage: userText,
+				waitFor,
+				slots: st.slots,
+				quoteReady: activeQuoteMatchesSlots(st),
+				bookingNudgePaused: bookingNudgePaused(st),
+				selectedHotelFacts: st.hotel ? buildActiveHotelFacts(latestCase, st) : null,
+			}
+		);
+		const sent = await humanSend(io, latestCase, st, prompt);
+		if (sent) {
+			logStep(targetCaseId, "responsive_silence.followup", {
+				waitFor,
+				language: languageOf(latestCase, st),
+			});
+		}
+		return sent;
+	} catch (error) {
+		logStep(targetCaseId, "responsive_silence.failed", {
+			message: error?.message || error,
+		});
+		return false;
+	}
+}
+
 /* ------------------- TURN PLANNER ------------------- */
 async function planTurn(io, sc) {
 	const caseId = String(sc._id);
@@ -8708,6 +8963,7 @@ async function planTurn(io, sc) {
 		const userText = latestGuestMessage?.message || "";
 		recoveryUserText = userText;
 		st.activeTurnUserText = userText || "";
+		st.activeTurnHadReply = false;
 		st.activeTurnGuestAt = latestGuestMessage?.date
 			? new Date(latestGuestMessage.date).getTime()
 			: now();
@@ -8719,6 +8975,7 @@ async function planTurn(io, sc) {
 		if (userText || !hasAiAssistantReply(sc)) {
 			schedulePlanningTyping();
 		}
+		const explicitLanguageSwitch = explicitLanguageSwitchRequest(userText);
 		updateActiveLanguageFromText(sc, st, userText);
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
@@ -8805,6 +9062,10 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (await maybeEscalateRepeatedGuestQuestion(io, sc, st, userText, {})) {
+			return;
+		}
+		if (explicitLanguageSwitch?.requestOnly) {
+			await answerLanguageSwitchRequest(io, sc, st, userText);
 			return;
 		}
 
@@ -9826,6 +10087,7 @@ async function planTurn(io, sc) {
 
 		// need dates?
 		if (!st.slots.checkinISO || !st.slots.checkoutISO) {
+			const slotPromptBotTextBefore = st.lastBotText;
 			if (!askedRecently(st, "dates")) {
 				const ask = await write(
 					io,
@@ -9836,12 +10098,28 @@ async function planTurn(io, sc) {
 				await humanSend(io, sc, st, ask);
 				stampAsk(st, "dates");
 			}
+			if (st.lastBotText === slotPromptBotTextBefore) {
+				const followup = await write(
+					io,
+					sc,
+					st,
+					"The guest replied while the check-in/check-out dates are still missing. Respond to the latest message in context, acknowledge any room type they mentioned, and ask for check-in and check-out in one short question. Do not stay silent. Use the guest's active language.",
+					{
+						latestUserMessage: userText,
+						knownRoomType: st.slots.roomTypeKey ? roomTypeLabel(st.slots.roomTypeKey) : "",
+						slots: st.slots,
+					}
+				);
+				await humanSend(io, sc, st, followup);
+				stampAsk(st, "dates");
+			}
 			st.waitFor = "dates";
 			return;
 		}
 
 		// need room?
 		if (!st.slots.roomTypeKey) {
+			const slotPromptBotTextBefore = st.lastBotText;
 			if (!askedRecently(st, "room")) {
 				const options = (st.hotel?.roomCountDetails || [])
 					.filter((r) => r.activeRoom)
@@ -9855,6 +10133,21 @@ async function planTurn(io, sc) {
 					{ roomExamples: options }
 				);
 				await humanSend(io, sc, st, ask);
+				stampAsk(st, "room");
+			}
+			if (st.lastBotText === slotPromptBotTextBefore) {
+				const options = (st.hotel?.roomCountDetails || [])
+					.filter((r) => r.activeRoom)
+					.map((r) => r.displayName || r.roomType)
+					.slice(0, 4);
+				const followup = await write(
+					io,
+					sc,
+					st,
+					"The guest replied but the room type is still missing. Acknowledge the latest message briefly, then ask which room type they prefer in one question. Offer the provided examples if helpful. Do not stay silent. Use the guest's active language.",
+					{ latestUserMessage: userText, roomExamples: options, slots: st.slots }
+				);
+				await humanSend(io, sc, st, followup);
 				stampAsk(st, "room");
 			}
 			st.waitFor = "room";
@@ -9943,6 +10236,7 @@ async function planTurn(io, sc) {
 		// proceed?
 		if (st.waitFor === "proceed") {
 			if (confirmsText(userText)) {
+				resumeBookingNudge(st);
 				const q = st.quote?.data || quote;
 				const reviewPayload = buildReservationReviewPayload(st, q);
 				logStep(caseId, "review.summaryBuilt", reviewPayload);
@@ -9962,11 +10256,12 @@ async function planTurn(io, sc) {
 				return;
 			}
 			if (declinesText(userText)) {
+				pauseBookingNudge(st);
 				const msg = await write(
 					io,
 					sc,
 					st,
-					"Acknowledge politely and offer to notify when availability changes, or help with other dates."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
@@ -9976,6 +10271,7 @@ async function planTurn(io, sc) {
 					userText
 				)
 			) {
+				resumeBookingNudge(st);
 				// Review
 				const q = st.quote?.data || quote;
 				const reviewPayload = buildReservationReviewPayload(st, q);
@@ -10000,17 +10296,31 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Acknowledge politely and offer to notify when availability changes, or help with other dates."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
 			} else {
+				const proceedPromptBotTextBefore = st.lastBotText;
 				if (!askedRecently(st, "proceed")) {
 					const poke = await write(
 						io,
 						sc,
 						st,
 						"Ask a single yes/no: would you like to proceed to confirm?"
+					);
+					await humanSend(io, sc, st, poke, {
+						quickReplies: proceedQuickReplies(sc, st),
+					});
+					stampAsk(st, "proceed");
+				}
+				if (st.lastBotText === proceedPromptBotTextBefore) {
+					const poke = await write(
+						io,
+						sc,
+						st,
+						"The quote is ready, but the guest did not clearly accept or decline. Acknowledge the latest message briefly and ask one short yes/no question: should you continue to the reservation review? Do not repeat the price. Do not stay silent. Use the guest's active language.",
+						{ latestUserMessage: userText, quoteReady: true, slots: st.slots }
 					);
 					await humanSend(io, sc, st, poke, {
 						quickReplies: proceedQuickReplies(sc, st),
@@ -10348,6 +10658,15 @@ async function planTurn(io, sc) {
 		}
 		if (planningTyping) {
 			emitTyping(io, caseId, st2 || st, false);
+		}
+		if (st2 && recoveryUserText && !st2.activeTurnHadReply && !st2.interrupt) {
+			await maybeSendResponsiveSilenceFollowup(
+				io,
+				sc,
+				st2,
+				recoveryUserText,
+				caseId
+			);
 		}
 		if (st2) {
 			st2.turnInFlight = false;
