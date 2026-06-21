@@ -280,6 +280,148 @@ function sanitizeCustomerDetails(cd) {
 	return o;
 }
 
+const compactPaymentPayloadObject = (input = {}) =>
+	Object.fromEntries(
+		Object.entries(input).filter(
+			([, value]) => value !== undefined && value !== null && value !== "",
+		),
+	);
+
+const toPaymentPayloadNumber = (value) => {
+	const number = Number(value);
+	return Number.isFinite(number) ? number : value;
+};
+
+const sanitizePaymentLinkPricingRow = (row = {}) =>
+	compactPaymentPayloadObject({
+		date: row.date || row.calendarDate,
+		calendarDate: row.calendarDate || row.date,
+		price: toPaymentPayloadNumber(row.price),
+		rootPrice: toPaymentPayloadNumber(row.rootPrice),
+		totalPrice: toPaymentPayloadNumber(row.totalPrice),
+		totalPriceWithCommission: toPaymentPayloadNumber(
+			row.totalPriceWithCommission,
+		),
+		totalPriceWithoutCommission: toPaymentPayloadNumber(
+			row.totalPriceWithoutCommission,
+		),
+	});
+
+const sanitizePaymentLinkRoom = (room = {}) =>
+	compactPaymentPayloadObject({
+		id: room.id || room._id,
+		_id: room._id,
+		room_type: room.room_type || room.roomType,
+		roomType: room.roomType || room.room_type,
+		displayName: room.displayName || room.name,
+		displayName_OtherLanguage: room.displayName_OtherLanguage,
+		name: room.name || room.displayName,
+		count: toPaymentPayloadNumber(room.count || room.quantity || 1),
+		quantity: toPaymentPayloadNumber(room.quantity || room.count || 1),
+		chosenPrice: toPaymentPayloadNumber(room.chosenPrice),
+		price: toPaymentPayloadNumber(room.price),
+		rootPrice: toPaymentPayloadNumber(room.rootPrice),
+		totalPrice: toPaymentPayloadNumber(room.totalPrice),
+		totalPriceWithCommission: toPaymentPayloadNumber(
+			room.totalPriceWithCommission,
+		),
+		totalPriceWithoutCommission: toPaymentPayloadNumber(
+			room.totalPriceWithoutCommission,
+		),
+		pricingByDay: Array.isArray(room.pricingByDay)
+			? room.pricingByDay.map(sanitizePaymentLinkPricingRow)
+			: undefined,
+		pricingByDayWithCommission: Array.isArray(room.pricingByDayWithCommission)
+			? room.pricingByDayWithCommission.map(sanitizePaymentLinkPricingRow)
+			: undefined,
+	});
+
+const sanitizePaymentLinkHotel = (hotel = {}) =>
+	compactPaymentPayloadObject({
+		_id: hotel._id,
+		hotelName: hotel.hotelName,
+		hotelName_OtherLanguage: hotel.hotelName_OtherLanguage,
+		hotelCity: hotel.hotelCity,
+		hotelState: hotel.hotelState,
+		hotelCountry: hotel.hotelCountry,
+		hotelAddress: hotel.hotelAddress,
+		distances: hotel.distances,
+	});
+
+const buildPaymentLinkReservationPayload = (reservation) => {
+	if (!reservation) return null;
+	const doc =
+		typeof reservation.toObject === "function"
+			? reservation.toObject()
+			: { ...reservation };
+	const customer = doc.customer_details || {};
+	const onsitePaid = doc.payment_details?.onsite_paid_amount;
+	return compactPaymentPayloadObject({
+		_id: doc._id,
+		confirmation_number: doc.confirmation_number,
+		hotelName: doc.hotelName || doc.hotelId?.hotelName,
+		hotelId: sanitizePaymentLinkHotel(doc.hotelId || {}),
+		customer_details: compactPaymentPayloadObject({
+			name: customer.name || customer.fullName,
+		}),
+		checkin_date: doc.checkin_date,
+		checkout_date: doc.checkout_date,
+		days_of_residence: toPaymentPayloadNumber(doc.days_of_residence),
+		total_amount: toPaymentPayloadNumber(doc.total_amount),
+		paid_amount: toPaymentPayloadNumber(doc.paid_amount),
+		total_rooms: toPaymentPayloadNumber(doc.total_rooms),
+		total_guests: toPaymentPayloadNumber(doc.total_guests),
+		adults: toPaymentPayloadNumber(doc.adults),
+		children: toPaymentPayloadNumber(doc.children),
+		reservation_status: doc.reservation_status,
+		payment: doc.payment,
+		financeStatus: doc.financeStatus,
+		advancePayment: compactPaymentPayloadObject({
+			enabled: doc.advancePayment?.enabled,
+			amount: toPaymentPayloadNumber(doc.advancePayment?.amount),
+			amountSAR: toPaymentPayloadNumber(doc.advancePayment?.amountSAR),
+			percentage: toPaymentPayloadNumber(doc.advancePayment?.percentage),
+			paymentPercentage: toPaymentPayloadNumber(
+				doc.advancePayment?.paymentPercentage,
+			),
+			finalAdvancePayment: toPaymentPayloadNumber(
+				doc.advancePayment?.finalAdvancePayment,
+			),
+		}),
+		payment_details: compactPaymentPayloadObject({
+			onsite_paid_amount:
+				onsitePaid === undefined ? undefined : toPaymentPayloadNumber(onsitePaid),
+			captured: !!doc.payment_details?.captured,
+			finalCaptureTransactionId:
+				doc.payment_details?.finalCaptureTransactionId,
+			lastChargeVia: doc.payment_details?.lastChargeVia,
+			lastChargeAt: doc.payment_details?.lastChargeAt,
+		}),
+		paypal_details: compactPaymentPayloadObject({
+			captured_total_usd: toPaymentPayloadNumber(
+				doc.paypal_details?.captured_total_usd,
+			),
+			pending_total_usd: toPaymentPayloadNumber(
+				doc.paypal_details?.pending_total_usd,
+			),
+			bounds: doc.paypal_details?.bounds
+				? {
+						base: doc.paypal_details.bounds.base,
+						limit_usd: toPaymentPayloadNumber(
+							doc.paypal_details.bounds.limit_usd,
+						),
+				  }
+				: undefined,
+		}),
+		pickedRoomsType: Array.isArray(doc.pickedRoomsType)
+			? doc.pickedRoomsType.map(sanitizePaymentLinkRoom)
+			: undefined,
+		pickedRoomsPricing: Array.isArray(doc.pickedRoomsPricing)
+			? doc.pickedRoomsPricing.map(sanitizePaymentLinkRoom)
+			: undefined,
+	});
+};
+
 async function getHotelAndOwner(hotelId) {
 	if (!hotelId || !mongoose.Types.ObjectId.isValid(hotelId)) {
 		return { hotel: null, owner: null };
@@ -1512,6 +1654,125 @@ async function ensureReservationGuestAccountSession(reservation, logPrefix = "")
 		return null;
 	}
 }
+
+const scheduleLinkPaymentReceiptDispatch = (reservation, logPrefix = "[PP]") => {
+	if (!reservation) return;
+	const run = async () => {
+		try {
+			const hotelDoc = reservation.hotelId || {};
+			const invoiceModel = {
+				...(typeof reservation.toObject === "function"
+					? reservation.toObject()
+					: { ...reservation }),
+				hotelName: reservation.hotelName || hotelDoc.hotelName || "Hotel",
+				hotelAddress: hotelDoc.hotelAddress || "",
+				hotelCity: hotelDoc.hotelCity || "",
+				hotelPhone: hotelDoc.phone || "",
+			};
+			await sendEmailWithInvoice(
+				invoiceModel,
+				reservation.customer_details?.email,
+				reservation.belongsTo,
+			);
+			await waSendReservationConfirmation(reservation);
+			await waNotifyNewReservation(reservation);
+		} catch (e) {
+			console.warn(`${logPrefix} receipt dispatch warning`, e?.message || e);
+		}
+	};
+
+	if (typeof setImmediate === "function") {
+		setImmediate(run);
+		return;
+	}
+	Promise.resolve().then(run);
+};
+
+exports.getPaymentLinkReservation = async (req, res) => {
+	try {
+		const { reservationId } = req.params;
+		if (!reservationId || !mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ message: "Invalid reservation id." });
+		}
+
+		const reservation = await Reservations.findById(reservationId)
+			.populate({
+				path: "hotelId",
+				select:
+					"hotelName hotelName_OtherLanguage hotelCity hotelState hotelCountry hotelAddress distances phone",
+			})
+			.exec();
+
+		if (!reservation) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		return res.status(200).json(buildPaymentLinkReservationPayload(reservation));
+	} catch (error) {
+		console.error("[PP][link-payment] fetch failed", error?.message || error);
+		return res.status(500).json({ message: "Failed to fetch reservation." });
+	}
+};
+
+exports.recoverLinkPaymentAccountSession = async (req, res) => {
+	const logPrefix = "[PP][link-pay-session]";
+	try {
+		const { reservationId, confirmation } = req.body || {};
+		if (!reservationId || !mongoose.Types.ObjectId.isValid(reservationId)) {
+			return res.status(400).json({ message: "Invalid reservation id." });
+		}
+		if (!confirmation) {
+			return res.status(400).json({ message: "Missing confirmation number." });
+		}
+
+		const reservation = await Reservations.findById(reservationId)
+			.populate({
+				path: "hotelId",
+				select:
+					"hotelName hotelName_OtherLanguage hotelCity hotelState hotelCountry hotelAddress distances phone",
+			})
+			.exec();
+
+		if (
+			!reservation ||
+			String(reservation.confirmation_number || "").toLowerCase() !==
+				String(confirmation || "").toLowerCase()
+		) {
+			return res.status(404).json({ message: "Reservation not found." });
+		}
+
+		const paidAmount = toNum2(reservation.paid_amount || 0);
+		const capturedUsd = toNum2(
+			reservation.paypal_details?.captured_total_usd || 0,
+		);
+		const hasSuccessfulPayment =
+			paidAmount > 0 || capturedUsd > 0 || !!reservation.payment_details?.captured;
+		if (!hasSuccessfulPayment) {
+			return res.status(409).json({
+				message: "This reservation does not have a completed payment yet.",
+			});
+		}
+
+		const accountSession = await ensureReservationGuestAccountSession(
+			reservation,
+			logPrefix,
+		);
+		if (!accountSession?.token || !accountSession?.user?._id) {
+			return res.status(409).json({
+				message:
+					"We could not prepare the guest account automatically. Please contact Jannat Booking support.",
+			});
+		}
+
+		return res.status(200).json({
+			accountSession,
+			reservation: buildPaymentLinkReservationPayload(reservation),
+		});
+	} catch (error) {
+		console.error(`${logPrefix} failed`, error?.message || error);
+		return res.status(500).json({ message: "Failed to prepare guest account." });
+	}
+};
 
 async function buildAndSaveReservation({
 	reqBody,
@@ -4063,7 +4324,7 @@ exports.linkPayReservation = async (req, res) => {
 
 			return res.status(200).json({
 				message: "Payment authorized (no funds captured).",
-				reservation: updated,
+				reservation: buildPaymentLinkReservationPayload(updated),
 				authorizationId: auth.id,
 				accountSession,
 			});
@@ -4386,31 +4647,11 @@ exports.linkPayReservation = async (req, res) => {
 			updated,
 			logPrefix,
 		);
-
-		// Best-effort receipts
-		try {
-			const hotelDoc = updated.hotelId || {};
-			const invoiceModel = {
-				...updated.toObject(),
-				hotelName: updated.hotelName || hotelDoc.hotelName || "Hotel",
-				hotelAddress: hotelDoc.hotelAddress || "",
-				hotelCity: hotelDoc.hotelCity || "",
-				hotelPhone: hotelDoc.phone || "",
-			};
-			await sendEmailWithInvoice(
-				invoiceModel,
-				updated.customer_details?.email,
-				updated.belongsTo,
-			);
-			await waSendReservationConfirmation(updated);
-			await waNotifyNewReservation(updated);
-		} catch (e) {
-			console.warn(`${logPrefix} receipt dispatch warning`, e?.message || e);
-		}
+		scheduleLinkPaymentReceiptDispatch(updated, logPrefix);
 
 		return res.status(200).json({
 			message: "Payment captured and reservation updated.",
-			reservation: updated,
+			reservation: buildPaymentLinkReservationPayload(updated),
 			transactionId: cap.id,
 			accountSession,
 		});

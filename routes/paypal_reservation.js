@@ -9,6 +9,14 @@ const { requireSignin } = require("../controllers/auth");
 router.get("/paypal/token-generated", Ctrl.generateClientToken);
 router.post("/paypal/token-generated", Ctrl.generateClientToken);
 router.post("/paypal/order/create", Ctrl.createPayPalOrder);
+router.get(
+	"/reservations/paypal/link-payment/:reservationId",
+	Ctrl.getPaymentLinkReservation
+);
+router.post(
+	"/reservations/paypal/link-payment/session",
+	Ctrl.recoverLinkPaymentAccountSession
+);
 router.post("/reservations/paypal/pending", Ctrl.preparePendingReservation);
 router.post("/reservations/paypal/pending-cancel", Ctrl.cancelPendingReservation);
 
