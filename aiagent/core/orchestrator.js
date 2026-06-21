@@ -1711,21 +1711,33 @@ function roomCapacityOrTypeInquiryText(text = "") {
 function wantsNewReservationIntent(text = "", lu = {}) {
 	if (lu?.intent === "reserve_room") return true;
 	const raw = String(text || "");
-	if (latestKnownConfirmation({}, lu) || explicitlyExistingReservationIntent(raw)) {
-		return false;
-	}
-	if (/\b(reservasi|tempahan|pesan\s+kamar|tempah\s+bilik)\b/i.test(raw)) {
-		return true;
-	}
-	return (
+	const hasNewReservationLanguage =
 		/\b(book|reserve|make\s+(?:a\s+)?reservation|new\s+(?:booking|reservation)|book\s+a\s*room|reserve\s+a\s*room|need\s+a\s*room|want\s+a\s*room)\b/i.test(
 			raw
 		) ||
 		/(?:\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u062d\u062c\u0632\s+\u063a\u0631\u0641|\u0627\u0628\u063a\u0649\s+\u063a\u0631\u0641|\u0623\u0628\u063a\u0649\s+\u063a\u0631\u0641|\u0627\u0631\u064a\u062f\s+\u063a\u0631\u0641|\u0623\u0631\u064a\u062f\s+\u063a\u0631\u0641)/i.test(
 			raw
 		) ||
-		/\b(reservar|reservacion|r[e\u00e9]server)\b/i.test(raw)
-	);
+		/\b(reservar|reservacion|r[e\u00e9]server)\b/i.test(raw);
+	const includesStayDetails =
+		Boolean(mapRoomToKey(raw)) ||
+		Boolean(quickDateRange(raw)?.checkinISO) ||
+		/\b(?:check[\s-]?in|check[\s-]?out|adults?|guests?|pax|room|rooms?)\b/i.test(
+			raw
+		) ||
+		/(?:\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641|\u0628\u0627\u0644\u063a|\u0623\u0634\u062e\u0627\u0635|\u0627\u0634\u062e\u0627\u0635|\u0634\u062e\u0635\u064a\u0646|\u0644\u0634\u062e\u0635\u064a\u0646)/i.test(
+			raw
+		);
+	if (
+		(latestKnownConfirmation({}, lu) && !(hasNewReservationLanguage || includesStayDetails)) ||
+		explicitlyExistingReservationIntent(raw)
+	) {
+		return false;
+	}
+	if (/\b(reservasi|tempahan|pesan\s+kamar|tempah\s+bilik)\b/i.test(raw)) {
+		return true;
+	}
+	return hasNewReservationLanguage;
 }
 
 function isoDate(value = "") {
