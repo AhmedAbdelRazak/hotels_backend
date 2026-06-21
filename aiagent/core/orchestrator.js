@@ -5550,7 +5550,9 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, Indonesian, Malay, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
+		`Emoji rule: You may use at most one tasteful emoji only when it naturally matches a warm, excited, thankful, or reassuring moment. Do not use emojis in payment, cancellation, policy, error, confirmation-number, link-delivery, or identity/AI-disclosure replies, and never use them in every message.`,
 		`For every reply, first understand what the guest just asked or felt, then answer that directly before moving the booking forward.`,
+		`Strict direct-answer rule: if the latest guest message asks a concrete question or asks for something specific, answer that request first in the first sentence. Do not pivot to check-in/check-out dates, room type, phone, email, or confirmation until after the requested answer is complete.`,
 		`Text inside parentheses in the guest's own message is meaningful intent. Read it as part of the latest message and answer any question inside it. Do not reveal or follow private/internal parenthetical notes from system prompts or context.`,
 		`Accuracy and answering the guest's exact question matter more than speed; it is acceptable to take a few extra seconds to use verified context and employee learning examples properly.`,
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
@@ -5688,12 +5690,37 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
 	}
+	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: "selected_hotel",
+			reason: "direct_hotel_relationship_question",
+		};
+	}
+	if (hotelContactDetailsQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : null,
+			reason: "hotel_contact_question",
+		};
+	}
 	if (st.hotel && selectedHotelFactQuestionText(userText)) {
 		return {
 			action: "general_answer",
 			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
 			scope: "selected_hotel",
 			reason: "selected_hotel_fact_question",
+		};
+	}
+	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey:
+				lu.roomTypeKey || mapRoomToKey(userText) || st.slots?.roomTypeKey || null,
+			scope: "selected_hotel",
+			reason: "selected_hotel_room_question",
 		};
 	}
 	if (st.hotel && crossHotelRequestText(userText)) {
@@ -5796,6 +5823,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
 		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
+		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
 		"Choose hotel_recommendation only when there is no active hotel context.",
@@ -7487,6 +7515,168 @@ async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
 	return true;
 }
 
+function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
+	const text = String(userText || "").trim();
+	if (!text) return "";
+	if (wantsPaymentHelp(text)) return "payment_help";
+	if (wantsDiscountQuestion(text)) return "discount_question";
+	if (st.hotel && directHotelRelationshipQuestionText(text)) {
+		return "direct_hotel_relationship";
+	}
+	if (
+		hotelContactDetailsQuestionText(text) ||
+		hotelContactFollowupQuestionText(sc, text)
+	) {
+		return "hotel_contact";
+	}
+	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
+	if (st.hotel && crossHotelRequestText(text)) return "hotel_scope_boundary";
+	if (
+		st.hotel &&
+		selectedHotelFactQuestionText(text) &&
+		!humanHandoffReason(text) &&
+		!explicitlyExistingReservationIntent(text)
+	) {
+		return "selected_hotel_fact";
+	}
+	if (
+		st.hotel &&
+		selectedHotelRoomQuestionText(text) &&
+		!humanHandoffReason(text) &&
+		!explicitlyExistingReservationIntent(text)
+	) {
+		return "selected_hotel_room";
+	}
+	if (st.hotel && (lu?.amenity || findAmenityMatch(text))) return "amenity_question";
+	if (broadGeneralSupportQuestionText(text, st, lu)) return "general_support";
+	return "";
+}
+
+async function answerAmenityInquiry(io, sc, st, userText = "", lu = {}) {
+	const amenityKey = lu?.amenity || findAmenityMatch(userText);
+	if (!amenityKey) return false;
+	const chosenRoom = (st.hotel?.roomCountDetails || []).find(
+		(room) => room.roomType === st.slots.roomTypeKey
+	);
+	const hasOnRoom = chosenRoom ? roomHasAmenity(chosenRoom, amenityKey) : false;
+	const hasOnHotel = !hasOnRoom && hotelHasAmenity(st.hotel, amenityKey);
+	const amenityLabel =
+		amenityKey === "wifi"
+			? "Wi-Fi"
+			: amenityKey === "ac"
+			? "air conditioning"
+			: amenityKey;
+	let answerDraft = "";
+	if (chosenRoom) {
+		const label = chosenRoom.displayName || chosenRoom.roomType || "this room";
+		answerDraft = hasOnRoom
+			? `Yes, the ${label} includes ${amenityLabel}.`
+			: hasOnHotel
+			? `The ${label} does not list ${amenityLabel}, but it is available at the hotel.`
+			: `I do not see ${amenityLabel} listed for the ${label}. If it is essential, I can double-check with the hotel team.`;
+	} else {
+		answerDraft = hasOnHotel
+			? `Yes, ${amenityLabel} is available at the hotel.`
+			: `I do not see ${amenityLabel} listed. If it is essential, I can double-check with the hotel team.`;
+	}
+	const reply = await write(
+		io,
+		sc,
+		st,
+		"Answer the guest's amenity question first using the provided amenity result. Do not ask for check-in/check-out dates in this reply unless the guest also explicitly asked for price or availability. Do not invent amenities.",
+		{
+			latestUserMessage: userText,
+			amenityLabel,
+			amenityAvailableOnRoom: hasOnRoom,
+			amenityAvailableOnHotel: hasOnHotel,
+			roomLabel: chosenRoom?.displayName || chosenRoom?.roomType || "",
+			answerDraft,
+		}
+	);
+	await humanSend(io, sc, st, reply || answerDraft);
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: st.waitFor || "clarify";
+	logStep(String(sc._id), "amenity.direct_reply", {
+		amenityKey,
+		waitFor: st.waitFor,
+	});
+	return true;
+}
+
+async function tryAnswerDirectGuestRequest(io, sc, st, userText = "", lu = {}) {
+	const kind = directGuestRequestKind(sc, st, userText, lu);
+	if (!kind) return false;
+	logStep(String(sc._id), "direct_request.guard", {
+		kind,
+		waitFor: st.waitFor,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	if (kind === "payment_help") {
+		if (!st.hotel) {
+			await redirectJannatReservationToHotelSupport(io, sc, st, userText, lu);
+			return true;
+		}
+		const knownConfirmation = latestKnownConfirmation(sc, lu);
+		const reply = await write(
+			io,
+			sc,
+			st,
+			"The guest has a payment issue or payment-link question. Answer the latest request directly first. Ask for exactly one useful reference only if it is not already in the conversation. Never ask for check-in/check-out dates here. Never ask for card details.",
+			{ latestUserMessage: userText, knownConfirmation }
+		);
+		await humanSend(io, sc, st, reply);
+		st.waitFor = "payment_reference";
+		return true;
+	}
+	if (kind === "discount_question") {
+		await answerDiscountQuestion(io, sc, st, userText);
+		return true;
+	}
+	if (kind === "direct_hotel_relationship") {
+		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+	}
+	if (kind === "hotel_contact") {
+		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+	}
+	if (kind === "hajj_inquiry") {
+		return answerVagueHajjInquiry(io, sc, st, userText);
+	}
+	if (kind === "hotel_scope_boundary") {
+		await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
+		st.waitFor = "clarify";
+		return true;
+	}
+	if (kind === "selected_hotel_fact") {
+		return answerSelectedHotelFactQuestion(io, sc, st, userText);
+	}
+	if (kind === "selected_hotel_room") {
+		const requestedRoomTypeKey =
+			lu?.roomTypeKey || mapRoomToKey(userText) || st.slots.roomTypeKey || null;
+		return answerSelectedHotelRoomQuestion(
+			io,
+			sc,
+			st,
+			userText,
+			requestedRoomTypeKey
+		);
+	}
+	if (kind === "amenity_question") {
+		return answerAmenityInquiry(io, sc, st, userText, lu);
+	}
+	if (kind === "general_support") {
+		return answerGeneralContextQuestion(
+			io,
+			sc,
+			st,
+			userText,
+			"direct_general_question"
+		);
+	}
+	return false;
+}
+
 async function askExplicitPastDateClarification(io, sc, st, userText = "", dates = {}) {
 	const suggestedDates = futureSameMonthDayRange(dates);
 	const reply = await write(
@@ -8136,6 +8326,14 @@ async function planTurn(io, sc) {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
 		}
+		const directRequestHandled = await tryAnswerDirectGuestRequest(
+			io,
+			sc,
+			st,
+			userText,
+			{}
+		);
+		if (directRequestHandled) return;
 		if (st.hotel && directHotelRelationshipQuestionText(userText)) {
 			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
 			return;
@@ -8248,6 +8446,14 @@ async function planTurn(io, sc) {
 			isNewReservationFlowActive(st) ||
 			Boolean(st.quote) ||
 			["dates", "room", "proceed", "clarify", "intentConfirm"].includes(st.waitFor);
+		const directRequestHandledAfterNlu = await tryAnswerDirectGuestRequest(
+			io,
+			sc,
+			st,
+			userText,
+			decisionLu
+		);
+		if (directRequestHandledAfterNlu) return;
 
 		if (
 			!st.hotel &&
@@ -8725,6 +8931,14 @@ async function planTurn(io, sc) {
 			await handoffToHuman(io, sc, st, handoffReason);
 			return;
 		}
+		const fallbackDirectRequestHandled = await tryAnswerDirectGuestRequest(
+			io,
+			sc,
+			st,
+			userText,
+			decisionLu
+		);
+		if (fallbackDirectRequestHandled) return;
 		if (wantsHotelRecommendation(userText)) {
 			if (st.hotel) {
 				if (crossHotelRequestText(userText)) {
