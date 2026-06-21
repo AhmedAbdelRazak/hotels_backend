@@ -2736,6 +2736,9 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - server.js
   - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
 - Duplicate-reply prevention:
+  - planTurn uses a top-level per-case async lock before any policy, hotel, or
+    LLM work. Concurrent scheduled turns for the same support case are queued
+    and replayed only if the latest guest text is newer or still unanswered.
   - The AI planner must not answer a latest guest message when any non-system AI
     assistant reply already appears after that guest message in the conversation.
   - humanSend also checks the latest database case before appending a reply, so a

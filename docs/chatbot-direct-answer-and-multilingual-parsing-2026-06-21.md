@@ -270,6 +270,9 @@ Additional tightening added:
 - The orchestrator refuses to run a new planner pass for a guest turn that
   already has an AI reply after it in the conversation. This prevents queued or
   delayed turns from re-answering the same guest message with different wording.
+- The planner also has a top-level per-case async lock, acquired before policy
+  checks or hotel lookup, so concurrent socket/HTTP scheduled turns cannot enter
+  the same support case together before the in-memory turn state is ready.
 - AI message saving has a second guard for stale planners: if the latest guest
   turn was already answered by another pass, the save is cancelled before it can
   append another assistant bubble.

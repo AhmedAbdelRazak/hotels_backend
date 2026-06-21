@@ -5710,10 +5710,10 @@ function botExperienceComplaintText(text = "") {
 		/\b(repeat|repeating|again|too fast|typing so fast|rushing|rush|lost|confused|pay attention|i am here|i'm here|still here|already told you|i told you|you forgot|bot|robot|worst|bad cs|bad support|wrong with you|what is going on|omg|lol)\b/i.test(
 			lower
 		) ||
-		/(?:تكرر|بتكرر|بسرعة|سريعة|مستعجل|مستعجلة|مستعجله|تايه|تايهة|تايهه|مش\s+فاهم|مش\s+فاهمة|مش\s+فاهمه|ركزي|ركز|انا\s+موجود|أنا\s+موجود|موجود\s+اهو|ايه\s+فيه|ايه\s+ده|قولتلك|قلتلك|لسه\s+قايل|روبوت|بوت|وحش|سيئ|غلط)/i.test(
+		/(?:تكرر|بتكرر|بسرعة|سريعة|مستعجل|مستعجلة|مستعجله|تايه|تايهة|تايهه|مش\s+فاهم|مش\s+فاهمة|مش\s+فاهمه|ركزي|ركز|انا\s+موجود|أنا\s+موجود|موجود\s+اهو|ايه\s+فيه|ايه\s+ده|قولتلك|قلتلك|لسه\s+قايل|شايفني\s+غبي|شايفاني\s+غبي|شايفانى\s+غبي|بتعاملني\s+كأني\s+غبي|بتعامليني\s+كأني\s+غبي|روبوت|بوت|وحش|سيئ|غلط)/i.test(
 			arabic
 		) ||
-		/(?:toofast|rushing|rush|lost|confused|payattention|iamhere|imhere|stillhere|alreadytoldyou|itoldyou|youforgot|entahtayeh|tayha|tayeh|ana mawgood|anamawgoud|mawgood|ehfeeh|ehda|oltlek|ultlek|bot|robot|badcs|badsupport|wrongwithyou)/i.test(
+		/(?:toofast|rushing|rush|lost|confused|payattention|iamhere|imhere|stillhere|alreadytoldyou|itoldyou|youforgot|doyouthinkimstupid|thinkimstupid|treatingmelikestupid|entahtayeh|tayha|tayeh|ana mawgood|anamawgoud|mawgood|ehfeeh|ehda|oltlek|ultlek|bot|robot|badcs|badsupport|wrongwithyou)/i.test(
 			latinCompact
 		)
 	);
@@ -5761,6 +5761,21 @@ function abusiveGuestText(text = "") {
 			arabic
 		) ||
 		/(?:fuck|fucking|bullshit|asshole|bitch|bastard|damnyou|gotohell|kosomak|kosomek|sharmout|sharmota|ghaby|zebala)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function severeAbusiveGuestText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(fuck|fucking|shit|bullshit|bitch|bastard|asshole|damn you|go to hell)\b/i.test(
+			lower
+		) ||
+		/(?:كس\s*امك|كسمك|شرموط|شرموطة|عرص|وسخ|حقير|زباله|زبالة|يلعن|لعنة)/i.test(
+			arabic
+		) ||
+		/(?:fuck|fucking|bullshit|asshole|bitch|bastard|damnyou|gotohell|kosomak|kosomek|sharmout|sharmota|zebala)/i.test(
 			latinCompact
 		)
 	);
@@ -9487,30 +9502,74 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 }
 
 /* ------------------- TURN PLANNER ------------------- */
+const activePlanLocks = new Map();
+const pendingPlanRequests = new Map();
+
+function markPendingPlanRequest(caseId, reason = "locked") {
+	const key = String(caseId || "");
+	if (!key) return;
+	pendingPlanRequests.set(key, { at: now(), reason });
+	const st = memo.get(key);
+	if (st?.turnInFlight) {
+		st.queue.push(now());
+		st.interrupt = true;
+	}
+}
+
+async function shouldRunQueuedPlan(caseId, st = {}) {
+	const sc2 = await getSupportCaseById(caseId).catch(() => null);
+	if (!sc2) return { run: false, supportCase: null, reason: "missing_case" };
+	const latestText = lastUserText(sc2);
+	if (latestText && latestText !== st.activeTurnUserText) {
+		return { run: true, supportCase: sc2, reason: "newer_customer_message" };
+	}
+	if (!st.activeTurnHadReply && !hasAiAssistantReplyAfterLatestGuest(sc2)) {
+		return { run: true, supportCase: sc2, reason: "current_turn_unanswered" };
+	}
+	return { run: false, supportCase: sc2, reason: "current_turn_answered" };
+}
+
 async function planTurn(io, sc) {
 	const caseId = String(sc._id);
-	const policy = await ensureAIAllowed(sc.hotelId, sc);
-	if (!policy.allowed) {
-		logStep(caseId, "policy.skip", { reason: policy.reason });
+	if (activePlanLocks.has(caseId)) {
+		markPendingPlanRequest(caseId, "active_plan_lock");
+		logStep(caseId, "turn.enqueue", {
+			reason: "active_plan_lock",
+		});
 		return;
 	}
-	const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
-	const hotel = activeHotelContextForCase(sc, policyHotel);
-	const st = ensureState(sc, hotel);
+	const planLock = Symbol(caseId);
+	activePlanLocks.set(caseId, planLock);
+	let st = null;
+	let queuedFollowupCase = null;
+	let queuedFollowupReason = "";
+	let planningTyping = false;
+	let planningTypingTimer = null;
+	let recoveryUserText = "";
+	let ownsTurn = false;
+	let policy = null;
+	let policyHotel = null;
+	let hotel = null;
+	try {
+		policy = await ensureAIAllowed(sc.hotelId, sc);
+		if (!policy.allowed) {
+			logStep(caseId, "policy.skip", { reason: policy.reason });
+			return;
+		}
+		policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+		hotel = activeHotelContextForCase(sc, policyHotel);
+		st = ensureState(sc, hotel);
 	if (st.turnInFlight) {
 		logStep(caseId, "turn.enqueue", {
 			reason: "in_flight",
 			queued: st.queue.length + 1,
 		});
-		st.queue.push(now());
-		st.interrupt = true;
+		markPendingPlanRequest(caseId, "state_in_flight");
 		return;
 	}
 	st.turnInFlight = true;
+	ownsTurn = true;
 	st.interrupt = false;
-	let planningTyping = false;
-	let planningTypingTimer = null;
-	let recoveryUserText = "";
 	const schedulePlanningTyping = () => {
 		const delay = randomBetween(
 			AI_TYPING_INDICATOR_DELAY_MIN_MS,
@@ -9533,7 +9592,6 @@ async function planTurn(io, sc) {
 		}
 	};
 
-	try {
 		logStep(caseId, "context.loaded", {
 			hotelId: sc.hotelId,
 			hotelName: st.hotel?.hotelName || null,
@@ -9655,13 +9713,6 @@ async function planTurn(io, sc) {
 				return;
 			}
 		}
-		if (abusiveGuestText(userText)) {
-			await handoffToHuman(io, sc, st, "abusive_guest");
-			return;
-		}
-		if (await maybeEscalateRepeatedGuestQuestion(io, sc, st, userText, {})) {
-			return;
-		}
 		if (explicitLanguageSwitch?.requestOnly) {
 			await answerLanguageSwitchRequest(io, sc, st, userText);
 			return;
@@ -9673,6 +9724,17 @@ async function planTurn(io, sc) {
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
+		if (botExperienceComplaintText(userText) && !severeAbusiveGuestText(userText)) {
+			await answerConversationRecovery(io, sc, st, userText);
+			return;
+		}
+		if (abusiveGuestText(userText)) {
+			await handoffToHuman(io, sc, st, "abusive_guest");
+			return;
+		}
+		if (await maybeEscalateRepeatedGuestQuestion(io, sc, st, userText, {})) {
+			return;
+		}
 		if (botExperienceComplaintText(userText)) {
 			await answerConversationRecovery(io, sc, st, userText);
 			return;
@@ -11274,40 +11336,59 @@ async function planTurn(io, sc) {
 				caseId
 			);
 		}
-		if (st2) {
+		if (st2 && ownsTurn) {
 			st2.turnInFlight = false;
 			if (st2.queue.length > 0) {
 				const queuedCount = st2.queue.length;
 				st2.queue = [];
-				getSupportCaseById(caseId)
-					.then((sc2) => {
-						if (!sc2) return;
-						const latestText = lastUserText(sc2);
-						if (latestText && latestText !== st2.activeTurnUserText) {
-							logStep(caseId, "turn.consume_queue", {
-								queued: queuedCount,
-								reason: "newer_customer_message",
-							});
-							return planTurn(io, sc2);
-						}
-						if (
-							!st2.activeTurnHadReply &&
-							!hasAiAssistantReplyAfterLatestGuest(sc2)
-						) {
-							logStep(caseId, "turn.consume_queue", {
-								queued: queuedCount,
-								reason: "current_turn_unanswered",
-							});
-							return planTurn(io, sc2);
-						}
-						logStep(caseId, "turn.drop_queue", {
-							queued: queuedCount,
-							reason: "current_turn_answered",
-						});
-						return undefined;
-					})
-					.catch(() => {});
+				const queued = await shouldRunQueuedPlan(caseId, st2);
+				if (queued.run) {
+					queuedFollowupCase = queued.supportCase;
+					queuedFollowupReason = queued.reason;
+					logStep(caseId, "turn.consume_queue", {
+						queued: queuedCount,
+						reason: queued.reason,
+					});
+				} else {
+					logStep(caseId, "turn.drop_queue", {
+						queued: queuedCount,
+						reason: queued.reason,
+					});
+				}
 			}
+		}
+		const pending = pendingPlanRequests.get(caseId);
+		if (pending) {
+			pendingPlanRequests.delete(caseId);
+			if (!queuedFollowupCase) {
+				const queued = await shouldRunQueuedPlan(caseId, st2 || st || {});
+				if (queued.run) {
+					queuedFollowupCase = queued.supportCase;
+					queuedFollowupReason = queued.reason || pending.reason;
+					logStep(caseId, "turn.consume_pending", {
+						reason: queuedFollowupReason,
+						pendingReason: pending.reason,
+					});
+				} else {
+					logStep(caseId, "turn.drop_pending", {
+						reason: queued.reason,
+						pendingReason: pending.reason,
+					});
+				}
+			}
+		}
+		if (activePlanLocks.get(caseId) === planLock) {
+			activePlanLocks.delete(caseId);
+		}
+		if (queuedFollowupCase) {
+			setTimeout(() => {
+				planTurn(io, queuedFollowupCase).catch((error) => {
+					console.error("[aiagent] queued plan error:", error?.message || error);
+				});
+			}, 0);
+			logStep(caseId, "turn.schedule_followup", {
+				reason: queuedFollowupReason,
+			});
 		}
 	}
 }
