@@ -1283,6 +1283,7 @@ function repeatedSemanticQuestionKey(sc = {}, st = {}, text = "", lu = {}) {
 		return "direct:hotel_contact";
 	}
 	if (vagueHajjInquiryText(raw)) return "direct:hajj";
+	if (st.hotel && selectedHotelNusukQuestionText(raw)) return "fact:nusuk";
 	if (st.hotel && selectedHotelBusQuestionText(raw)) return "fact:bus";
 	if (st.hotel && selectedHotelDistanceQuestionText(raw)) return "fact:distance";
 	if (st.hotel && selectedHotelAddressQuestionText(raw)) return "fact:location";
@@ -1897,8 +1898,30 @@ function selectedHotelBusQuestionText(text = "") {
 	return directBus || (transportToHaram && haramOrStation);
 }
 
+function selectedHotelNusukQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	const mentionsNusuk =
+		/\b(?:nusuk|nusk)\b/i.test(lower) ||
+		/(?:\u0646\u0633\u0643)/i.test(arabic) ||
+		/(?:nusuk|nusk)/i.test(latinCompact);
+	if (!mentionsNusuk) return false;
+	const asksListing =
+		/\b(?:listed|registered|included|available|official|platform|app|on\s+nusuk|in\s+nusuk)\b/i.test(
+			lower
+		) ||
+		/(?:\u0647\u0644|\u0645\u062f\u0631\u062c|\u0645\u062f\u0631\u062c\u0629|\u0645\u0633\u062c\u0644|\u0645\u0633\u062c\u0644\u0629|\u0645\u0648\u062c\u0648\u062f|\u0645\u062a\u0627\u062d|\u0645\u0646\u0635\u0629|\u062a\u0637\u0628\u064a\u0642|\u0631\u0633\u0645\u064a)/i.test(
+			arabic
+		) ||
+		/(?:listed|registered|included|available|official|platform|app|madraj|musajal)/i.test(
+			latinCompact
+		);
+	return asksListing || /[?\u061f]/.test(String(text || ""));
+}
+
 function selectedHotelFactQuestionText(text = "") {
 	return (
+		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
 		selectedHotelAddressQuestionText(text)
@@ -3392,6 +3415,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 	if (!hotel) return null;
 	const distances = hotel.distances || {};
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const mapsUrl = hotelGoogleMapsUrl(hotel);
 	return {
 		displayName: localizedHotelName(sc, st),
@@ -3413,6 +3437,8 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
+		isNusuk: hotel.isNusuk === true,
+		isNusukText: nusukDetails,
 		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 12),
 	};
 }
@@ -4265,6 +4291,53 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 	return `${name}, no, we do not currently offer a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
 }
 
+function hotelNusukYesText(lang, name, details, next) {
+	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	if (/arabic/i.test(lang)) {
+		return detailText
+			? `${name}\u060c \u0646\u0639\u0645\u060c \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. ${detailText}. ${next}`
+			: `${name}\u060c \u0646\u0639\u0645\u060c \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, si, el hotel esta listado en Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, oui, l'hotel est liste sur Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/urdu|hindi/i.test(lang)) {
+		return `${name}, ji haan, hotel Nusuk par listed hai.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, ya, hotel ini terdaftar di Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, ya, hotel ini tersenarai di Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	return `${name}, yes, the hotel is listed on Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+}
+
+function hotelNusukNoText(lang, name, next) {
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062d\u0627\u0644\u064a\u0627 \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0646\u0627 \u0623\u0646 \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. \u0648\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u0627\u0644\u062d\u062c\u0632 \u0628\u062e\u0637\u0648\u0627\u062a \u0648\u0627\u0636\u062d\u0629 \u0648\u0633\u0631\u064a\u0639\u0629. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, por el momento no veo que el hotel este listado en Nusuk. Aun asi, puedo ayudarte aqui con la reserva de forma clara y rapida. ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, pour le moment, je ne vois pas l'hotel comme liste sur Nusuk. Je peux quand meme vous aider ici avec la reservation clairement et rapidement. ${next}`;
+	}
+	if (/urdu|hindi/i.test(lang)) {
+		return `${name}, filhal hotel Nusuk par listed nazar nahi aa raha. Main yahin reservation mein clear aur quick help kar sakta hun. ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, saat ini hotel belum terlihat terdaftar di Nusuk. Saya tetap bisa membantu reservasinya di sini dengan jelas dan cepat. ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, buat masa ini hotel belum kelihatan tersenarai di Nusuk. Saya masih boleh bantu tempahan di sini dengan jelas dan cepat. ${next}`;
+	}
+	return `${name}, at the moment I do not see the hotel marked as listed on Nusuk. I can still help you here with the reservation clearly and quickly. ${next}`;
+}
+
 function hotelLocationMapLine(lang = "English", mapLink = "") {
 	if (!mapLink) return "";
 	if (/arabic/i.test(lang)) {
@@ -4289,11 +4362,19 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const mapLink = hotelGoogleMapsMarkdownLink(hotel, lang);
 	const mapLine = hotelLocationMapLine(lang, mapLink);
 	const next = hotelFactNextStepText(sc, st);
+	const asksNusuk = selectedHotelNusukQuestionText(userText);
 	const asksBus = selectedHotelBusQuestionText(userText);
 	const asksDistance = selectedHotelDistanceQuestionText(userText);
 	const asksAddress = selectedHotelAddressQuestionText(userText);
+	const isNusuk = hotel.isNusuk === true;
+	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const hasBusService = hotel.hasBusService === true;
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	if (asksNusuk) {
+		return isNusuk
+			? hotelNusukYesText(lang, name, nusukDetails, next)
+			: hotelNusukNoText(lang, name, next);
+	}
 	if (asksBus) {
 		return hasBusService
 			? hotelBusServiceYesText(lang, name, busDetails, next)
@@ -4431,6 +4512,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		),
 		hasAddress: Boolean(st.hotel?.hotelAddress),
 		hasGoogleMapsLink: Boolean(hotelGoogleMapsUrl(st.hotel)),
+		isNusuk: st.hotel?.isNusuk === true,
 	});
 	return true;
 }
@@ -7329,7 +7411,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
 			: "",
 		activeHotelFacts?.googleMapsDrivingDirectionsUrl
 			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Driving Route to Al Haram](${activeHotelFacts.googleMapsDrivingDirectionsUrl}). This URL uses the hotel's exact stored coordinates as the origin, Al Haram as the destination, and driving mode. Do not invent or rewrite map coordinates.`
@@ -7342,6 +7424,9 @@ async function write(io, sc, st, instruction, context = {}) {
 			: "",
 		activeHotelFacts
 			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
+			: "",
+		activeHotelFacts
+			? `If the guest asks whether the selected hotel is listed, registered, or available on Nusuk, use only activeHotelFacts.isNusuk and activeHotelFacts.isNusukText. If isNusuk is true, answer yes directly as hotel reception and translate/adapt isNusukText naturally when present. If isNusuk is false or missing, say we do not currently show the hotel as listed on Nusuk, then keep the guest comfortable and continue the reservation help.`
 			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
 		`A quintuple/family room fits 5 guests. If the guest asks for more than 5 guests, or asks to add another bed to a 5-bed room, do not imply one room can fit them. Explain warmly that Saudi hotel compliance rules starting in 2026 do not allow a single room to exceed 5 beds, then recommend a comfortable combination such as one quintuple/family room plus one double room, with another room if the exact party size requires it.`,

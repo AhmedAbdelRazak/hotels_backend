@@ -54,6 +54,8 @@ const HOTEL_DETAILS_SUMMARY_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"isNusuk",
+	"isNusukText",
 	"subscribed",
 	"wholeSaleHotel",
 	"propertyType",
@@ -138,6 +140,8 @@ const HOTEL_DETAILS_MANAGEMENT_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"isNusuk",
+	"isNusukText",
 	"subscribed",
 	"acceptedTermsAndConditions",
 	"wholeSaleHotel",
@@ -174,6 +178,8 @@ const HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"isNusuk",
+	"isNusukText",
 	"wholeSaleHotel",
 	"propertyType",
 	"activateHotel",
@@ -2820,6 +2826,13 @@ exports.updateHotelDetails = async (req, res) => {
 		if (Object.prototype.hasOwnProperty.call(updateData, "hasBusService")) {
 			updatedFields.hasBusService = toBoolean(updateData.hasBusService);
 			if (!updatedFields.hasBusService) updatedFields.busDetails = "";
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "isNusukText")) {
+			updatedFields.isNusukText = String(updateData.isNusukText || "").trim();
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "isNusuk")) {
+			updatedFields.isNusuk = toBoolean(updateData.isNusuk);
+			if (!updatedFields.isNusuk) updatedFields.isNusukText = "";
 		}
 
 		/* 3. Detect coordinate change */

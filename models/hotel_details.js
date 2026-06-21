@@ -203,6 +203,15 @@ const hotel_detailsSchema = new mongoose.Schema(
 			trim: true,
 			default: "",
 		},
+		isNusuk: {
+			type: Boolean,
+			default: false,
+		},
+		isNusukText: {
+			type: String,
+			trim: true,
+			default: "",
+		},
 		subscribed: {
 			type: Boolean,
 			default: false,
