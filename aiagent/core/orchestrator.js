@@ -162,6 +162,11 @@ const QUOTE_WRITE_SOFT_TIMEOUT_MS = intFromEnv(
 	1800,
 	{ min: 500, max: 5000 }
 );
+const AI_NLU_STEP_SOFT_TIMEOUT_MS = intFromEnv(
+	"AI_NLU_STEP_SOFT_TIMEOUT_MS",
+	6500,
+	{ min: 1500, max: 20000 }
+);
 const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
@@ -178,13 +183,18 @@ const AI_IDLE_FOLLOWUPS_ENABLED = boolFromEnv(
 );
 const AI_IDLE_FIRST_FOLLOWUP_MS = intFromEnv(
 	"AI_IDLE_FIRST_FOLLOWUP_MS",
-	15000,
-	{ min: 15000, max: 10 * 60 * 1000 }
+	60 * 1000,
+	{ min: 60 * 1000, max: 10 * 60 * 1000 }
 );
 const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * 60 * 1000, {
 	min: 5 * 60 * 1000,
 	max: 60 * 60 * 1000,
 });
+const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
+	"AI_TURN_STALL_RECOVERY_MS",
+	25 * 1000,
+	{ min: 10 * 1000, max: 2 * 60 * 1000 }
+);
 const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
 	false
@@ -1148,15 +1158,20 @@ function activeBookingContinuationText(
 			: apology
 			? `${name}، حقك عليّ. `
 			: idle
-			? `${name}، خذ وقتك 🙂 `
+			? `${name}، أنا هنا معك 🙂 `
 			: `${name}، `;
 		const contact = contactBoundary
 			? "وبخصوص رقم الهاتف، لا أشارك الرقم من هنا، لكن أتابع معك مباشرة من خلال استقبال الفندق في هذه المحادثة. "
 			: "";
 		if (waitState === "dates") {
+			if (apology) {
+				return `${prefix}${contact}أقصد فقط أن الخطوة التالية هي تاريخ الوصول والمغادرة، بدون أي استعجال. طلبك واضح معي${room ? `: ${room}` : ""}${
+					hotelName ? ` في ${hotelName}` : ""
+				}. أرسلهما لي وسأراجع لك التوفر والسعر النهائي مباشرة.`;
+			}
 			return `${prefix}${contact}طلبك واضح معي${room ? `: ${room}` : ""}${
 				hotelName ? ` في ${hotelName}` : ""
-			}. عندما تكون جاهزا أرسل تاريخ الوصول والمغادرة وسأراجع لك التوفر والسعر.`;
+			}. أرسل تاريخ الوصول والمغادرة عندما تحب، وسأراجع لك التوفر والسعر.`;
 		}
 		if (waitState === "room") {
 			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تكون جاهزا، وسأرشح لك الأنسب مباشرة.`;
@@ -1206,7 +1221,7 @@ function idleFollowupText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، خذ وقتك 🙂 أنا هنا عندما تحتاجني.`;
+		return `${name}، أنا هنا معك 🙂 عندما تحتاج أي مساعدة أرسل رسالتك وسأتابع فورًا.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, sin prisa 🙂 Sigo aqui cuando me necesites.`;
@@ -2318,10 +2333,103 @@ function isoDate(value = "") {
 	return date.toISOString().slice(0, 10);
 }
 
+function monthNumberFromText(value = "") {
+	const token = String(value || "")
+		.toLowerCase()
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.trim();
+	const normalizedArabic = token
+		.replace(/\u0623|\u0625|\u0622/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647");
+	const months = [
+		["jan", "january", "\u064a\u0646\u0627\u064a\u0631", "\u064a\u0646\u0627\u064a\u0631\u0648"],
+		["feb", "february", "\u0641\u0628\u0631\u0627\u064a\u0631"],
+		["mar", "march", "\u0645\u0627\u0631\u0633"],
+		["apr", "april", "\u0627\u0628\u0631\u064a\u0644"],
+		["may", "\u0645\u0627\u064a\u0648"],
+		["jun", "june", "\u064a\u0648\u0646\u064a\u0648", "\u064a\u0648\u0646\u064a\u0647"],
+		["jul", "july", "\u064a\u0648\u0644\u064a\u0648", "\u064a\u0648\u0644\u064a\u0647"],
+		["aug", "august", "\u0627\u063a\u0633\u0637\u0633", "\u0627\u0648\u063a\u0633\u0637\u0633"],
+		["sep", "sept", "september", "\u0633\u0628\u062a\u0645\u0628\u0631"],
+		["oct", "october", "\u0627\u0643\u062a\u0648\u0628\u0631"],
+		["nov", "november", "\u0646\u0648\u0641\u0645\u0628\u0631"],
+		["dec", "december", "\u062f\u064a\u0633\u0645\u0628\u0631"],
+	];
+	for (let index = 0; index < months.length; index += 1) {
+		if (months[index].includes(token) || months[index].includes(normalizedArabic)) {
+			return index + 1;
+		}
+	}
+	return 0;
+}
+
+function buildFutureIsoDateFromParts(day, month, year = null) {
+	const parsedDay = Number(day);
+	const parsedMonth = Number(month);
+	if (!parsedDay || !parsedMonth) return null;
+	const baseYear = Number(year) || new Date().getFullYear();
+	const date = new Date(Date.UTC(baseYear, parsedMonth - 1, parsedDay));
+	if (
+		date.getUTCDate() !== parsedDay ||
+		date.getUTCMonth() !== parsedMonth - 1 ||
+		date.getUTCFullYear() !== baseYear
+	) {
+		return null;
+	}
+	for (
+		let guard = 0;
+		guard < 8 && date.toISOString().slice(0, 10) < todayISODate();
+		guard += 1
+	) {
+		date.setUTCFullYear(date.getUTCFullYear() + 1);
+	}
+	return date.toISOString().slice(0, 10);
+}
+
+function parseSameMonthDateRange(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const monthToken =
+		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const rangeRegex = new RegExp(
+		`(?:\\b(?:from|arrival|check\\s*-?in|date|dates|تاريخ|الوصول|من)\\b\\s*)?(\\d{1,2})\\s+${monthToken}\\s*(?:\\b(?:to|until|till|through|checkout|check\\s*-?out|departure)\\b|\\-|–|—|الى|إلى|ل|حتي|حتى|الي)\\s*(\\d{1,2})(?:\\s+${monthToken})?(?:\\s*,?\\s*(20\\d{2}))?`,
+		"i"
+	);
+	const match = normalized.match(rangeRegex);
+	if (!match) return null;
+	const startDay = match[1];
+	const startMonth = monthNumberFromText(match[2]);
+	const endDay = match[3];
+	const endMonth = monthNumberFromText(match[4]) || startMonth;
+	const year = match[5] || null;
+	if (!startMonth || !endMonth) return null;
+	const checkinISO = buildFutureIsoDateFromParts(startDay, startMonth, year);
+	let checkoutISO = buildFutureIsoDateFromParts(endDay, endMonth, year);
+	if (!checkinISO || !checkoutISO) return null;
+	if (checkoutISO <= checkinISO) {
+		const checkout = new Date(`${checkoutISO}T00:00:00Z`);
+		checkout.setUTCMonth(checkout.getUTCMonth() + 1);
+		checkoutISO = checkout.toISOString().slice(0, 10);
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: `${startDay} ${match[2]}`,
+			checkout: `${endDay} ${match[4] || match[2]}`,
+			calendar: "gregorian",
+		},
+	};
+}
+
 function extractDateRange(text = "") {
 	const quick = quickDateRange(text);
 	if (quick?.checkinISO && quick?.checkoutISO) {
-		return { checkinISO: quick.checkinISO, checkoutISO: quick.checkoutISO };
+		return quick;
+	}
+	const sameMonthRange = parseSameMonthDateRange(text);
+	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
+		return sameMonthRange;
 	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
@@ -3293,7 +3401,10 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	const hotelName = localizedHotelName(sc, st);
-	const roomNames = inlineRoomOptions(rooms, lang) || roomTypeLabel(roomTypeKey);
+	const roomNames =
+		/arabic/i.test(lang) && roomTypeKey
+			? localizedRoomTypeLabel(roomTypeKey, lang)
+			: inlineRoomOptions(rooms, lang) || localizedRoomTypeLabel(roomTypeKey, lang);
 	const capacity = roomCapacityLabel(roomTypeKey, lang);
 	if (/arabic/i.test(lang)) {
 		const fit = capacity
@@ -4749,6 +4860,7 @@ async function humanSend(
 
 	st.lastBotText = text;
 	st.activeTurnHadReply = true;
+	clearUnansweredTurnRecovery(caseId);
 	if (scheduleIdle) scheduleAiIdleFollowups(io, sc, st, messageData);
 	return true;
 }
@@ -9514,6 +9626,7 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 
 /* ------------------- TURN PLANNER ------------------- */
 const activePlanLocks = new Map();
+const activePlanLockAts = new Map();
 const pendingPlanRequests = new Map();
 
 function markPendingPlanRequest(caseId, reason = "locked") {
@@ -9543,14 +9656,28 @@ async function shouldRunQueuedPlan(caseId, st = {}) {
 async function planTurn(io, sc) {
 	const caseId = String(sc._id);
 	if (activePlanLocks.has(caseId)) {
-		markPendingPlanRequest(caseId, "active_plan_lock");
-		logStep(caseId, "turn.enqueue", {
-			reason: "active_plan_lock",
-		});
-		return;
+		const lockedAt = Number(activePlanLockAts.get(caseId) || 0);
+		if (lockedAt && now() - lockedAt > AI_TURN_STALL_RECOVERY_MS * 2) {
+			logStep(caseId, "turn.stale_lock_reset", { lockedForMs: now() - lockedAt });
+			activePlanLocks.delete(caseId);
+			activePlanLockAts.delete(caseId);
+			const staleState = memo.get(caseId);
+			if (staleState) {
+				staleState.turnInFlight = false;
+				staleState.interrupt = true;
+				staleState.queue = [];
+			}
+		} else {
+			markPendingPlanRequest(caseId, "active_plan_lock");
+			logStep(caseId, "turn.enqueue", {
+				reason: "active_plan_lock",
+			});
+			return;
+		}
 	}
 	const planLock = Symbol(caseId);
 	activePlanLocks.set(caseId, planLock);
+	activePlanLockAts.set(caseId, now());
 	let st = null;
 	let queuedFollowupCase = null;
 	let queuedFollowupReason = "";
@@ -9570,18 +9697,18 @@ async function planTurn(io, sc) {
 		policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		hotel = activeHotelContextForCase(sc, policyHotel);
 		st = ensureState(sc, hotel);
-	if (st.turnInFlight) {
-		logStep(caseId, "turn.enqueue", {
-			reason: "in_flight",
-			queued: st.queue.length + 1,
-		});
-		markPendingPlanRequest(caseId, "state_in_flight");
-		return;
-	}
-	st.turnInFlight = true;
-	ownsTurn = true;
-	st.interrupt = false;
-	const schedulePlanningTyping = () => {
+		if (st.turnInFlight) {
+			logStep(caseId, "turn.enqueue", {
+				reason: "in_flight",
+				queued: st.queue.length + 1,
+			});
+			markPendingPlanRequest(caseId, "state_in_flight");
+			return;
+		}
+		st.turnInFlight = true;
+		ownsTurn = true;
+		st.interrupt = false;
+		const schedulePlanningTyping = () => {
 		const delay = randomBetween(
 			AI_TYPING_INDICATOR_DELAY_MIN_MS,
 			AI_TYPING_INDICATOR_DELAY_MAX_MS
@@ -9934,7 +10061,7 @@ async function planTurn(io, sc) {
 		);
 		if (preNluProceedHandled) return;
 
-		const quickTurnDates = quickDateRange(userText);
+		const quickTurnDates = extractDateRange(userText);
 		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
 			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
 			return;
@@ -9981,11 +10108,22 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		const decisionLu = await nluStep({
-			sc,
-			hotel: st.hotel,
-			lastUserMessage: userText,
-		});
+		const decisionLu =
+			(await withSoftTimeout(
+				nluStep({
+					sc,
+					hotel: st.hotel,
+					lastUserMessage: userText,
+				}),
+				AI_NLU_STEP_SOFT_TIMEOUT_MS,
+				{
+					intent: "unknown",
+					dates: quickTurnDates || {},
+					roomTypeKey: mapRoomToKey(userText) || st.slots.roomTypeKey || null,
+					amenity: findAmenityMatch(userText) || null,
+					reason: "nlu_soft_timeout",
+				}
+			)) || {};
 		if (
 			decisionLu?.confirmation &&
 			confirmationLooksLikePhoneInText(userText, decisionLu.confirmation) &&
@@ -11390,6 +11528,7 @@ async function planTurn(io, sc) {
 		}
 		if (activePlanLocks.get(caseId) === planLock) {
 			activePlanLocks.delete(caseId);
+			activePlanLockAts.delete(caseId);
 		}
 		if (queuedFollowupCase) {
 			setTimeout(() => {
@@ -11405,6 +11544,63 @@ async function planTurn(io, sc) {
 }
 
 const scheduledTurns = new Map();
+const unansweredTurnRecoveryTimers = new Map();
+const unansweredTurnRecoveryAttempts = new Map();
+
+function latestGuestNeedsAiReply(sc = {}) {
+	if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return false;
+	if (latestGuestMessageIndex(sc) < 0) return false;
+	return !hasAiAssistantReplyAfterLatestGuest(sc);
+}
+
+function clearUnansweredTurnRecovery(caseId) {
+	const key = String(caseId || "");
+	if (!key) return;
+	const timer = unansweredTurnRecoveryTimers.get(key);
+	if (timer) clearTimeout(timer);
+	unansweredTurnRecoveryTimers.delete(key);
+	unansweredTurnRecoveryAttempts.delete(key);
+}
+
+function scheduleUnansweredTurnRecovery(io, caseId, delayMs = AI_TURN_STALL_RECOVERY_MS) {
+	const key = String(caseId || "");
+	if (!io || !key) return false;
+	const existing = unansweredTurnRecoveryTimers.get(key);
+	if (existing) clearTimeout(existing);
+	const timer = setTimeout(() => {
+		runUnansweredTurnRecovery(io, key).catch((error) => {
+			console.error("[aiagent] unanswered-turn recovery error:", error?.message || error);
+		});
+	}, Math.max(1000, Number(delayMs) || AI_TURN_STALL_RECOVERY_MS));
+	if (typeof timer.unref === "function") timer.unref();
+	unansweredTurnRecoveryTimers.set(key, timer);
+	return true;
+}
+
+async function runUnansweredTurnRecovery(io, caseId) {
+	unansweredTurnRecoveryTimers.delete(caseId);
+	const latestCase = await getSupportCaseById(caseId);
+	if (!latestGuestNeedsAiReply(latestCase)) {
+		unansweredTurnRecoveryAttempts.delete(caseId);
+		return false;
+	}
+	const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+	if (!policy.allowed) {
+		logStep(caseId, "turn_recovery.skip", { reason: policy.reason });
+		return false;
+	}
+	const attempts = Number(unansweredTurnRecoveryAttempts.get(caseId) || 0) + 1;
+	unansweredTurnRecoveryAttempts.set(caseId, attempts);
+	logStep(caseId, "turn_recovery.run", { attempts });
+	await planTurn(io, latestCase);
+	const afterCase = await getSupportCaseById(caseId);
+	if (attempts < 3 && latestGuestNeedsAiReply(afterCase)) {
+		scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
+	} else if (!latestGuestNeedsAiReply(afterCase)) {
+		unansweredTurnRecoveryAttempts.delete(caseId);
+	}
+	return true;
+}
 
 function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const caseId = idText(caseOrId);
@@ -11422,6 +11618,12 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	}, Math.max(0, Number(delayMs) || 0));
 	if (typeof timer.unref === "function") timer.unref();
 	scheduledTurns.set(caseId, timer);
+	unansweredTurnRecoveryAttempts.set(caseId, 0);
+	scheduleUnansweredTurnRecovery(
+		io,
+		caseId,
+		Math.max(AI_TURN_STALL_RECOVERY_MS, Number(delayMs) || 0)
+	);
 	return true;
 }
 

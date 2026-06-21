@@ -2751,10 +2751,12 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     the same guest turn cannot fall through into another direct/planner branch.
   - Exact duplicate AI text is still protected by the database append guard and
     frontend clientTag/message merge logic from the previous polish pass.
+  - If an in-memory planner lock becomes stale, the next recovery pass resets the
+    stale lock and retries only if the latest guest turn is still unanswered.
 - Idle follow-up and close timing:
   - Only one unanswered-guest follow-up is allowed.
-  - That follow-up waits for 15 seconds of no guest activity after an AI prompt.
-  - Guest typing counts as activity. If the guest is still composing after 15
+  - That follow-up waits for 60 seconds of no guest activity after an AI prompt.
+  - Guest typing counts as activity. If the guest is still composing after 60
     seconds, the reminder is deferred until the guest has been quiet again.
   - There is no second reminder/final heads-up message.
   - The one reminder should say there is no rush and, when possible, reference
@@ -2768,6 +2770,15 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - If the guest complains that the agent is rushing, lost, repeating itself, or
     ignoring already-shared details, the bot apologizes briefly, keeps the active
     request, and asks only for the true missing next detail.
+  - Date-bearing messages take priority over pacing/patience wording. A message
+    that asks the agent to slow down but also provides arrival/departure dates
+    must continue to quote availability instead of pausing the booking flow.
+  - Arabic same-month date ranges with Arabic digits and Arabic/English month
+    names are parsed deterministically before the heavier NLU path.
+  - The NLU step has a soft-timeout fallback so deterministic dates, room type,
+    and amenity facts can keep the agent responsive if the model call is slow.
+  - SSR guest and support chat bubbles use distinct backgrounds, borders, and
+    shadows for easier scanning in the production chat widget.
 - Fresh-chat privacy:
   - Previous guest chat context is disabled by default.
   - If a guest asks to continue, resume, remember, or complete an older chat, the

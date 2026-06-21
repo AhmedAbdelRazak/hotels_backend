@@ -284,11 +284,25 @@ Additional tightening added:
   or the current turn is still genuinely unanswered. Otherwise the stale queue
   is dropped after the successful reply.
 - Idle chat handling remains lightweight and guest-friendly: one follow-up only
-  after 15 seconds of true silence, then automatic read/close only after 5
+  after 60 seconds of true silence, then automatic read/close only after 5
   minutes of inactivity. There is no second reminder. Guest typing counts as
   activity, so the reminder and close both defer while the guest is composing.
   The reminder says there is no rush and, when possible, references the active
   booking context instead of asking a generic "are you there" question.
+- Date-bearing turns must win over pacing/patience wording. If the guest says
+  something like "go easy on me" while also sending arrival/departure dates, the
+  deterministic date parser handles the dates before conversational patience
+  branches can pause the sale.
+- Guest turns have a bounded unanswered-turn recovery timer. If the newest guest
+  message still has no AI reply after the safety window, the planner re-checks
+  the latest database case and retries only when the latest turn is genuinely
+  unanswered.
+- Arabic same-month date ranges such as "20 August to 25 August" are parsed
+  deterministically, including Arabic digits and Arabic/English month names, so
+  availability quotes do not depend only on the heavier NLU step.
+- The NLU decision step has a soft timeout fallback. If NLU is slow, the planner
+  continues with deterministic dates, room type, and amenity facts instead of
+  leaving the guest without a response.
 - Boundary/contact replies such as hotel-phone requests do not schedule idle
   nudges. They preserve the active booking wait state so the agent does not feel
   lost after answering a direct request.
@@ -319,5 +333,7 @@ Additional tightening added:
   content on desktop and mobile, supports emoji text input, localizes the rating
   panel labels, and uses a visible red end-chat button with the existing
   post-reservation heartbeat state.
+- SSR support chat bubbles use distinct guest and support backgrounds, borders,
+  and shadows so the conversation is easier to scan.
 - Hotel, room, single-hotel, and deal CTAs use "Chat With Reception" in English
   and "تحدث مع الاستقبال" in Arabic.
