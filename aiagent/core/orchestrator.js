@@ -1478,6 +1478,53 @@ function hotelContactRequestLikeText(text = "") {
 	return hotelContactDetailsQuestionText(text) || genericContactNumberRequestText(text);
 }
 
+function directHotelRelationshipQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const english =
+		/\b(?:are|do|does|is)\b.{0,80}\b(?:you|jannat|this\s+chat|your\s+team)\b.{0,80}\b(?:direct|directly|official|authorized|authorised|working\s+with|work\s+with|deal\s+with|connected\s+to)\b.{0,80}\b(?:hotel|reception|reservation|reservations|team)\b/i.test(
+			lower
+		) ||
+		/\b(?:directly\s+with|working\s+directly\s+with|officially\s+with|authorized\s+by|authorised\s+by)\s+(?:the\s+)?hotel\b/i.test(
+			lower
+		) ||
+		/(?:directhotel|workdirectlywithhotel|workingdirectlywithhotel|officialhotel|authorizedhotel|authorisedhotel)/i.test(
+			latinCompact
+		);
+	const spanish =
+		/(?:trabaja|trabajan|trabajas|trabajando|directamente|oficial|autorizado|autorizada).{0,80}(?:hotel|recepcion|reservas|equipo)/i.test(
+			lower
+		) ||
+		/(?:hotel|recepcion|reservas|equipo).{0,80}(?:directamente|oficial|autorizado|autorizada)/i.test(
+			lower
+		);
+	const arabicMatch =
+		/(?:\u0645\u0628\u0627\u0634\u0631|\u0645\u0628\u0627\u0634\u0631\u0629|\u0631\u0633\u0645\u064a|\u0631\u0633\u0645\u064a\u0627|\u062a\u062a\u0639\u0627\u0645\u0644|\u062a\u0639\u0645\u0644|\u062a\u0634\u062a\u063a\u0644|\u0645\u062a\u0648\u0627\u0635\u0644).{0,80}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a).{0,80}(?:\u0645\u0628\u0627\u0634\u0631|\u0645\u0628\u0627\u0634\u0631\u0629|\u0631\u0633\u0645\u064a|\u0631\u0633\u0645\u064a\u0627|\u062a\u062a\u0639\u0627\u0645\u0644|\u062a\u0639\u0645\u0644|\u062a\u0634\u062a\u063a\u0644|\u0645\u062a\u0648\u0627\u0635\u0644)/i.test(
+			arabic
+		);
+	return english || spanish || arabicMatch;
+}
+
+function directHotelRelationshipReplyText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st) || toTitle(st.hotel?.hotelName || "the hotel");
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0646\u0639\u0645 \u0633\u064a\u062f\u064a\u060c \u0623\u0646\u0627 \u0623\u0639\u0645\u0644 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0639 \u0641\u0631\u064a\u0642 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0623\u064a \u062a\u0648\u0641\u0631 \u0623\u0648 \u062a\u0641\u0627\u0635\u064a\u0644 \u062d\u062c\u0632 \u0623\u0631\u0627\u062c\u0639\u0647\u0627 \u0645\u0639 \u0641\u0631\u064a\u0642 \u0627\u0644\u0641\u0646\u062f\u0642 \u0647\u0646\u0627 \u0645\u0628\u0627\u0634\u0631\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `Si senor, trabajo directamente con el equipo de recepcion y reservas de ${hotelName}. Puedo revisar disponibilidad y detalles de la reserva con el equipo del hotel aqui mismo.`;
+	}
+	if (/french/i.test(lang)) {
+		return `Oui monsieur, je travaille directement avec l'equipe reception et reservations de ${hotelName}. Je peux verifier la disponibilite et les details de reservation avec l'equipe de l'hotel ici.`;
+	}
+	return `Yes sir, I work directly with the ${hotelName} reception and reservations team. I can check availability and reservation details with the hotel team here.`;
+}
+
 function normalizedContactRequestText(text = "") {
 	return normalizeControlText(text).lower.replace(/\s+/g, " ").trim();
 }
@@ -7301,6 +7348,19 @@ async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
 	return true;
 }
 
+async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
+	await humanSend(io, sc, st, directHotelRelationshipReplyText(sc, st));
+	st.waitFor =
+		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
+			? "post_booking_followup"
+			: "clarify";
+	logStep(String(sc._id), "hotel_direct_relationship.reply", {
+		latestUserMessage: String(userText || "").slice(0, 160),
+		hotelName: localizedHotelName(sc, st),
+	});
+	return true;
+}
+
 async function askExplicitPastDateClarification(io, sc, st, userText = "", dates = {}) {
 	const suggestedDates = futureSameMonthDayRange(dates);
 	const reply = await write(
@@ -7352,6 +7412,9 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		userText
 	);
 	if (handledDeliveryRequest) return true;
+	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
+		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+	}
 	if (
 		hotelContactDetailsQuestionText(userText) ||
 		hotelContactFollowupQuestionText(sc, userText)
@@ -7946,6 +8009,10 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "post_booking_followup") {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
+		}
+		if (st.hotel && directHotelRelationshipQuestionText(userText)) {
+			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+			return;
 		}
 		if (vagueHajjInquiryText(userText)) {
 			await answerVagueHajjInquiry(io, sc, st, userText);
