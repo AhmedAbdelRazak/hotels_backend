@@ -2695,3 +2695,36 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     discovery, property matching, hotel scanning, and reservation-detail reads.
   - The apply guard is unchanged; payout still must be captured before a new
     Expedia Collect dashboard-sync reservation can be saved.
+
+2026-06-21 Chatbot Patient Escalation And Availability Recovery
+- Documentation:
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md is the
+    current compact contract for direct answers, multilingual parsing,
+    confidential-document handling, Google Maps links, repeated-question
+    escalation, and unavailable-room recovery.
+- Patient escalation:
+  - aiagent/core/orchestrator.js now normalizes repeatable guest questions into
+    semantic keys for contact, location, distance, bus, direct-hotel
+    relationship, confidential documents, payment, discounts, amenities, rooms,
+    and broad support questions.
+  - Ordinary repeated questions escalate only when the same unresolved question
+    is asked three or more times in the same support case.
+  - Greetings, yes/no confirmations, patience messages, phone/email-only
+    answers, normal booking details, and cancellation/update handoff flows are
+    not counted as repeated questions.
+  - Rude/abusive messages still escalate immediately through the existing
+    abusive_guest path.
+- Availability recovery:
+  - When a requested room type has no priced availability for the selected
+    dates, the bot no longer offers a broad list of options.
+  - First it offers one best active alternative room type for the same hotel and
+    same dates, preferring a natural upsell path such as double to triple/quad.
+  - If no other room type is open for those dates, it offers one nearby-date
+    option for the same requested room type.
+  - The suggested recovery is stored in case state as pendingRoomAlternative and
+    only changes room/date slots after the guest accepts.
+  - If the guest declines, sends another room type, or sends a new date range,
+    the bot checks that path instead of repeating the unavailable answer.
+- Verification expectation:
+  - Before production deployment, run node --check for aiagent/core/orchestrator.js
+    and confirm PM2/health checks after pull and restart.

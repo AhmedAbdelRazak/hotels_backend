@@ -104,6 +104,36 @@ It is called:
 This layered placement protects against both deterministic and LLM planner
 misclassification.
 
+## Patient Escalation Rule
+
+The chatbot should not escalate ordinary guest confusion immediately.
+
+- Rude/abusive messages still pause AI and escalate immediately.
+- Ordinary repeated questions escalate only after the same unresolved question is
+  asked three or more times in the same support case.
+- Repeat detection uses normalized semantic keys for contact, location,
+  distance, bus, direct-hotel relationship, confidential-document, payment,
+  discount, amenity, room, and broad support questions.
+- Confirmation replies, phone/email-only answers, greetings, patient "take your
+  time" replies, and normal booking details are not counted as repeated
+  questions.
+
+## Availability Recovery
+
+When a requested room type has no priced availability for the chosen dates, the
+chatbot should try to solve the booking before asking the guest to start over.
+
+- First offer one best active alternative room type for the same hotel and same
+  date range.
+- Prefer a natural upsell path, such as double room to triple or quad, and sell
+  the benefit briefly without flooding options.
+- If no other room type is open for the same dates, offer one nearby date option
+  for the same requested room type.
+- Store the pending option in case state and only switch room/date slots after
+  the guest accepts.
+- If the guest declines, types a different room type, or sends new dates, check
+  that new path instead of repeating the unavailable answer.
+
 ## Multilingual and Mixed-Script Signals
 
 `scriptSignals.js` provides reusable semantic categories instead of one-off
@@ -220,6 +250,10 @@ Checks used:
 - Keep new wording variants in `scriptSignals.js` or `numberWords.js` when they
   are reusable semantic patterns.
 - Avoid one-off response hardcoding unless the behavior is a true fixed policy.
+- Keep availability recovery deterministic: one best same-date room alternative
+  first, then one close-date fallback only if no same-date room type is open.
+- Keep repeated-question escalation deterministic at the three-repeat threshold;
+  do not replace it with prompt-only instructions.
 - Company EIN/tax/legal-document requests are a fixed confidentiality policy.
   The chatbot may explain the support boundary, but must not reveal, quote,
   link, summarize, or search confidential partner/company documents.

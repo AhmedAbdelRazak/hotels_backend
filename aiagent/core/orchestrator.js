@@ -893,6 +893,92 @@ function conversationText(sc = {}, { guestsOnly = false } = {}) {
 		.join("\n");
 }
 
+function normalizedRepeatedQuestionText(text = "") {
+	const { arabic, lower } = normalizeControlText(text);
+	return digitsToEnglish(arabic || lower)
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.replace(/https?:\/\/\S+/gi, " ")
+		.replace(
+			/\b(?:please|pls|kindly|sir|madam|dear|bro|thanks|thank|you|me|my|your|the|a|an|can|could|would|may|please)\b/gi,
+			" "
+		)
+		.replace(/[^\p{L}\p{N}\u0600-\u06ff]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function repeatedSemanticQuestionKey(sc = {}, st = {}, text = "", lu = {}) {
+	const raw = String(text || "").trim();
+	if (!raw) return "";
+	if (confidentialCompanyDocumentQuestionText(raw)) return "direct:confidential_document";
+	if (wantsPaymentHelp(raw)) return "direct:payment_help";
+	if (wantsDiscountQuestion(raw)) return "direct:discount";
+	if (st.hotel && directHotelRelationshipQuestionText(raw)) {
+		return "direct:hotel_relationship";
+	}
+	if (hotelContactDetailsQuestionText(raw) || hotelContactFollowupQuestionText(sc, raw)) {
+		return "direct:hotel_contact";
+	}
+	if (vagueHajjInquiryText(raw)) return "direct:hajj";
+	if (st.hotel && selectedHotelBusQuestionText(raw)) return "fact:bus";
+	if (st.hotel && selectedHotelDistanceQuestionText(raw)) return "fact:distance";
+	if (st.hotel && selectedHotelAddressQuestionText(raw)) return "fact:location";
+	if (st.hotel && selectedHotelRoomQuestionText(raw)) {
+		return `room:${mapRoomToKey(raw) || "general"}`;
+	}
+	const amenityKey = lu?.amenity || findAmenityMatch(raw);
+	if (st.hotel && amenityKey) return `amenity:${amenityKey}`;
+	if (broadGeneralSupportQuestionText(raw, st, lu)) {
+		return `general:${normalizedRepeatedQuestionText(raw).slice(0, 80)}`;
+	}
+	const normalized = normalizedRepeatedQuestionText(raw);
+	return normalized.length >= 8 ? `text:${normalized.slice(0, 120)}` : "";
+}
+
+function isRepeatableGuestQuestion(sc = {}, st = {}, text = "", lu = {}) {
+	const raw = String(text || "").trim();
+	if (!raw || looksLikeGreetingOnly(raw)) return false;
+	if (abusiveGuestText(raw) || humanHandoffReason(raw)) return false;
+	if (confirmsText(raw) || declinesText(raw) || patienceText(raw)) return false;
+	if (latestEmailFromText(raw)) return false;
+	if (/^\s*\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9\s().-]{4,}\s*$/.test(raw)) {
+		return false;
+	}
+	const semanticKey = repeatedSemanticQuestionKey(sc, st, raw, lu);
+	if (semanticKey && !semanticKey.startsWith("text:")) return true;
+	if (wantsNewReservationIntent(raw, lu) && !/[?\u061f]/.test(raw)) return false;
+	return /[?\u061f]/.test(raw) && Boolean(semanticKey);
+}
+
+function repeatedGuestQuestionStats(sc = {}, st = {}, text = "", lu = {}) {
+	if (!isRepeatableGuestQuestion(sc, st, text, lu)) {
+		return { key: "", count: 0 };
+	}
+	const key = repeatedSemanticQuestionKey(sc, st, text, lu);
+	if (!key) return { key: "", count: 0 };
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const guestMessages = conversation.filter(isGuestConversationMessage).slice(-40);
+	let count = 0;
+	for (const message of guestMessages) {
+		const messageText = conversationEntryContextText(message);
+		if (!isRepeatableGuestQuestion(sc, st, messageText, lu)) continue;
+		if (repeatedSemanticQuestionKey(sc, st, messageText, lu) === key) {
+			count += 1;
+		}
+	}
+	return { key, count };
+}
+
+async function maybeEscalateRepeatedGuestQuestion(io, sc, st, userText = "", lu = {}) {
+	const { key, count } = repeatedGuestQuestionStats(sc, st, userText, lu);
+	if (!key || count < 3 || st.repeatedQuestionEscalatedKey === key) return false;
+	st.repeatedQuestionEscalatedKey = key;
+	logStep(String(sc._id || ""), "repeated_question.escalate", { key, count });
+	await handoffToHuman(io, sc, st, "repeated_question");
+	return true;
+}
+
 function initialInquiryText(sc = {}) {
 	const firstMessage = Array.isArray(sc.conversation)
 		? sc.conversation[0] || {}
@@ -1150,6 +1236,7 @@ function isNewReservationFlowActive(st = {}) {
 	if (st.waitFor === "post_booking_followup") return false;
 	return Boolean(
 		st.quote ||
+			st.pendingRoomAlternative ||
 			st.reviewSent ||
 			st.slots?.checkinISO ||
 			st.slots?.checkoutISO ||
@@ -1157,6 +1244,7 @@ function isNewReservationFlowActive(st = {}) {
 			[
 				"dates",
 				"room",
+				"room_alternative_confirm",
 				"proceed",
 				"reviewConfirm",
 				"reservation_details",
@@ -1964,6 +2052,34 @@ function roomTypeLabel(roomTypeKey = "") {
 	return "selected room";
 }
 
+function localizedRoomTypeLabel(roomTypeKey = "", lang = "English") {
+	if (/arabic/i.test(lang)) {
+		if (roomTypeKey === "singleRooms") return "\u063a\u0631\u0641\u0629 \u0641\u0631\u062f\u064a\u0629";
+		if (roomTypeKey === "doubleRooms") return "\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629";
+		if (roomTypeKey === "tripleRooms") return "\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a\u0629";
+		if (roomTypeKey === "quadRooms") return "\u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629";
+		if (roomTypeKey === "familyRooms") return "\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629";
+		return "\u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629";
+	}
+	if (/spanish/i.test(lang)) {
+		if (roomTypeKey === "singleRooms") return "habitacion individual";
+		if (roomTypeKey === "doubleRooms") return "habitacion doble";
+		if (roomTypeKey === "tripleRooms") return "habitacion triple";
+		if (roomTypeKey === "quadRooms") return "habitacion cuadruple";
+		if (roomTypeKey === "familyRooms") return "habitacion familiar";
+		return "habitacion solicitada";
+	}
+	if (/french/i.test(lang)) {
+		if (roomTypeKey === "singleRooms") return "chambre simple";
+		if (roomTypeKey === "doubleRooms") return "chambre double";
+		if (roomTypeKey === "tripleRooms") return "chambre triple";
+		if (roomTypeKey === "quadRooms") return "chambre quadruple";
+		if (roomTypeKey === "familyRooms") return "chambre familiale";
+		return "chambre demandee";
+	}
+	return roomTypeLabel(roomTypeKey);
+}
+
 function cleanCurrency(value) {
 	return String(value || "SAR").toUpperCase();
 }
@@ -2094,6 +2210,188 @@ function safePriceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 			totalCommission,
 		},
 	};
+}
+
+const ROOM_TYPE_RECOVERY_ORDER = {
+	singleRooms: ["doubleRooms", "tripleRooms", "quadRooms", "familyRooms"],
+	doubleRooms: ["tripleRooms", "quadRooms", "familyRooms", "singleRooms"],
+	tripleRooms: ["quadRooms", "familyRooms", "doubleRooms", "singleRooms"],
+	quadRooms: ["familyRooms", "tripleRooms", "doubleRooms", "singleRooms"],
+	familyRooms: ["quadRooms", "tripleRooms", "doubleRooms", "singleRooms"],
+};
+
+function roomRecoveryRank(requestedRoomType = "", candidateRoomType = "") {
+	const preferred = ROOM_TYPE_RECOVERY_ORDER[requestedRoomType] || [];
+	const index = preferred.indexOf(candidateRoomType);
+	return index >= 0 ? index : 99;
+}
+
+function bestSameStayRoomRecoveryOption(st = {}) {
+	if (!st.hotel || !st.slots?.checkinISO || !st.slots?.checkoutISO) return null;
+	const requestedRoomType = st.slots.roomTypeKey || "";
+	const options = listAvailableRoomsForStay(
+		st.hotel,
+		st.slots.checkinISO,
+		st.slots.checkoutISO
+	)
+		.filter((option) => option.available && option.room?.roomType !== requestedRoomType)
+		.map((option) => ({
+			kind: "same_dates_room_type",
+			roomTypeKey: option.room?.roomType || "",
+			checkinISO: st.slots.checkinISO,
+			checkoutISO: st.slots.checkoutISO,
+			quote: {
+				available: true,
+				reason: null,
+				room: option.room,
+				nights: option.nights,
+				currency: option.currency,
+				totals: option.totals,
+			},
+			rank: roomRecoveryRank(requestedRoomType, option.room?.roomType || ""),
+			total: safeNum(option?.totals?.totalPriceWithCommission, Number.MAX_SAFE_INTEGER),
+		}))
+		.filter((option) => option.roomTypeKey);
+	options.sort((a, b) => a.rank - b.rank || a.total - b.total);
+	return options[0] || null;
+}
+
+function bestCloseDateRoomRecoveryOption(st = {}) {
+	if (!st.hotel || !st.slots?.roomTypeKey || !st.slots?.checkinISO || !st.slots?.checkoutISO) {
+		return null;
+	}
+	const stayDates = safeStayDates(st.slots.checkinISO, st.slots.checkoutISO);
+	if (!stayDates?.length) return null;
+	const offsets = [];
+	for (let days = 1; days <= 7; days += 1) {
+		offsets.push(days, -days);
+	}
+	for (const offset of offsets) {
+		const checkinISO = safeAddDays(st.slots.checkinISO, offset);
+		const checkoutISO = safeAddDays(st.slots.checkoutISO, offset);
+		if (!checkinISO || !checkoutISO || checkinISO < todayISODate()) continue;
+		const quote = safePriceRoomForStay(
+			st.hotel,
+			{ roomType: st.slots.roomTypeKey },
+			checkinISO,
+			checkoutISO
+		);
+		if (quote.available) {
+			return {
+				kind: "same_room_close_dates",
+				roomTypeKey: st.slots.roomTypeKey,
+				checkinISO,
+				checkoutISO,
+				quote,
+				offset,
+			};
+		}
+	}
+	return null;
+}
+
+function bestRoomRecoveryOption(st = {}) {
+	return bestSameStayRoomRecoveryOption(st) || bestCloseDateRoomRecoveryOption(st);
+}
+
+function localizedDateRangeText(checkinISO = "", checkoutISO = "", lang = "English") {
+	const checkin = localizedGregorianDate(checkinISO, lang);
+	const checkout = localizedGregorianDate(checkoutISO, lang);
+	if (!checkin || !checkout) return "";
+	if (/arabic/i.test(lang)) return `${checkin} \u2013 ${checkout}`;
+	if (/spanish/i.test(lang)) return `${checkin} al ${checkout}`;
+	if (/french/i.test(lang)) return `du ${checkin} au ${checkout}`;
+	return `${checkin} to ${checkout}`;
+}
+
+function roomRecoveryPendingPayload(option = {}) {
+	if (!option?.roomTypeKey || !option?.checkinISO || !option?.checkoutISO) {
+		return null;
+	}
+	return {
+		kind: option.kind || "room_recovery",
+		roomTypeKey: option.roomTypeKey,
+		checkinISO: option.checkinISO,
+		checkoutISO: option.checkoutISO,
+		offeredAt: now(),
+	};
+}
+
+function clearPendingRoomAlternative(st = {}) {
+	st.pendingRoomAlternative = null;
+}
+
+function roomRecoveryOfferText(sc = {}, st = {}, quote = {}, option = null) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const requestedRoom = localizedRoomTypeLabel(st.slots?.roomTypeKey, lang);
+	const requestedDates = localizedDateRangeText(
+		st.slots?.checkinISO,
+		st.slots?.checkoutISO,
+		lang
+	);
+	if (!option) {
+		if (/arabic/i.test(lang)) {
+			return `${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${requestedRoom} \u0641\u064a ${hotelName} \u0644\u0644\u062a\u0648\u0627\u0631\u064a\u062e ${requestedDates}\u060c \u0648\u0644\u0627 \u0623\u0631\u0649 \u062e\u064a\u0627\u0631\u0627 \u0642\u0631\u064a\u0628\u0627 \u0645\u062a\u0627\u062d\u0627 \u0627\u0644\u0622\u0646. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0648\u0627\u0631\u064a\u062e \u0642\u0631\u064a\u0628\u0629 \u0623\u0648 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631 \u0648\u0633\u0623\u0631\u0627\u062c\u0639\u0647 \u0644\u0643 \u0641\u0648\u0631\u0627.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `${name}, no veo disponibilidad con precio confirmado para la ${requestedRoom} en ${hotelName} para ${requestedDates}, y no veo ahora una opcion cercana disponible. Enviame fechas cercanas u otro tipo de habitacion y lo reviso enseguida.`;
+		}
+		if (/french/i.test(lang)) {
+			return `${name}, je ne vois pas de disponibilite avec prix confirme pour la ${requestedRoom} a ${hotelName} pour ${requestedDates}, et je ne vois pas d'option proche disponible maintenant. Envoyez-moi des dates proches ou un autre type de chambre et je verifierai tout de suite.`;
+		}
+		return `${name}, I do not see priced availability for the ${requestedRoom} at ${hotelName} for ${requestedDates}, and I do not see a close available recovery option right now. Send me one nearby date range or another room type and I will check it right away.`;
+	}
+	const optionRoomName = localizedRoomName(sc, st, option.quote);
+	const optionDates = localizedDateRangeText(option.checkinISO, option.checkoutISO, lang);
+	const total = option.quote?.totals?.totalPriceWithCommission;
+	const totalText = total ? localizedMoney(total, option.quote.currency, lang) : "";
+	if (option.kind === "same_dates_room_type") {
+		if (/arabic/i.test(lang)) {
+			const price = totalText ? ` \u0628\u0625\u062c\u0645\u0627\u0644\u064a ${totalText}` : "";
+			return `${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${requestedRoom} \u0641\u064a ${hotelName} \u0644\u0644\u062a\u0648\u0627\u0631\u064a\u062e ${requestedDates}. \u0627\u0644\u062e\u0628\u0631 \u0627\u0644\u062c\u064a\u062f \u0623\u0646 ${optionRoomName} \u0645\u062a\u0627\u062d\u0629 \u0644\u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e${price}\u060c \u0648\u062a\u0645\u0646\u062d\u0643 \u0645\u0633\u0627\u062d\u0629 \u0623\u0648\u0633\u0639 \u0645\u0639 \u0646\u0641\u0633 \u0627\u0644\u0625\u0642\u0627\u0645\u0629. \u0647\u0644 \u0623\u062d\u0636\u0631 \u0644\u0643 \u0647\u0630\u0627 \u0627\u0644\u062e\u064a\u0627\u0631\u061f`;
+		}
+		if (/spanish/i.test(lang)) {
+			const price = totalText ? ` por un total de ${totalText}` : "";
+			return `${name}, no veo disponibilidad con precio confirmado para la ${requestedRoom} en ${hotelName} para ${requestedDates}. La buena noticia es que ${optionRoomName} esta disponible para las mismas fechas${price}; te da mas espacio y mantiene la misma estancia. Quieres que prepare esta opcion?`;
+		}
+		if (/french/i.test(lang)) {
+			const price = totalText ? ` pour un total de ${totalText}` : "";
+			return `${name}, je ne vois pas de disponibilite avec prix confirme pour la ${requestedRoom} a ${hotelName} pour ${requestedDates}. La bonne nouvelle: ${optionRoomName} est disponible aux memes dates${price}; cela vous donne plus d'espace tout en gardant le meme sejour. Souhaitez-vous que je prepare cette option ?`;
+		}
+		const price = totalText ? ` at ${totalText} total` : "";
+		return `${name}, I do not see priced availability for the ${requestedRoom} at ${hotelName} for ${requestedDates}. The good news is ${optionRoomName} is available for the same dates${price}; it gives you more space and keeps your stay dates unchanged. Would you like me to prepare this option instead?`;
+	}
+	if (/arabic/i.test(lang)) {
+		const price = totalText ? ` \u0628\u0625\u062c\u0645\u0627\u0644\u064a ${totalText}` : "";
+		return `${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${requestedRoom} \u0641\u064a ${hotelName} \u0644\u0644\u062a\u0648\u0627\u0631\u064a\u062e ${requestedDates}\u060c \u0648\u0644\u0627 \u0623\u0631\u0649 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631 \u0645\u062a\u0627\u062d\u0627 \u0644\u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e. \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0648\u062c\u062f\u062a\u0647 \u0647\u0648 ${optionRoomName} \u0645\u0646 ${optionDates}${price}. \u0647\u0644 \u0623\u0631\u0627\u062c\u0639 \u0647\u0630\u0647 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0644\u0643\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		const price = totalText ? ` por un total de ${totalText}` : "";
+		return `${name}, no veo disponibilidad con precio confirmado para la ${requestedRoom} en ${hotelName} para ${requestedDates}, y no veo otro tipo de habitacion abierto para esas mismas fechas. La opcion cercana que encontre es ${optionRoomName} del ${optionDates}${price}. Quieres que revise esta fecha?`;
+	}
+	if (/french/i.test(lang)) {
+		const price = totalText ? ` pour un total de ${totalText}` : "";
+		return `${name}, je ne vois pas de disponibilite avec prix confirme pour la ${requestedRoom} a ${hotelName} pour ${requestedDates}, et je ne vois pas d'autre type de chambre disponible aux memes dates. L'option proche que j'ai trouvee est ${optionRoomName} ${optionDates}${price}. Souhaitez-vous que je verifie cette date ?`;
+	}
+	const price = totalText ? ` at ${totalText} total` : "";
+	return `${name}, I do not see priced availability for the ${requestedRoom} at ${hotelName} for ${requestedDates}, and I do not see another room type open for those same dates. The closest option I found is ${optionRoomName} from ${optionDates}${price}. Would you like me to check this date instead?`;
+}
+
+function roomRecoveryDeclineText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062a\u0645\u0627\u0645. \u0623\u0631\u0633\u0644 \u0644\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631 \u0623\u0648 \u062a\u0648\u0627\u0631\u064a\u062e \u0642\u0631\u064a\u0628\u0629 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0623\u0641\u0636\u0644 \u062d\u0644 \u0644\u0643.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perfecto. Enviame otro tipo de habitacion o fechas cercanas y reviso la mejor solucion para ti.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tres bien. Envoyez-moi un autre type de chambre ou des dates proches et je verifierai la meilleure solution pour vous.`;
+	}
+	return `${name}, no problem. Send me another room type or nearby dates and I will check the best solution for you.`;
 }
 
 function simpleQuoteText({ sc, st, quote }) {
@@ -3661,6 +3959,8 @@ function ensureState(sc, hotel) {
 			quoteSummarizedAt: 0,
 			progressSentAt: {},
 			hydratedConversationLength: 0,
+			pendingRoomAlternative: null,
+			repeatedQuestionEscalatedKey: "",
 			dateRaw: { calendar: null, checkin: null, checkout: null },
 			smalltalkThread: { topic: null, waitingForGuest: false, lastAt: 0 },
 			slots: {
@@ -5105,6 +5405,8 @@ async function handoffToHuman(io, sc, st, reason) {
 			? `I could not finalize this reservation automatically. ${humanTeam} will take over from here and review it right away.`
 			: reason === "reservation_finalize"
 			? `I have the booking details needed to continue. ${humanTeam} will take over from here to verify the reservation and payment details before final confirmation.`
+			: reason === "repeated_question"
+			? `I want to make sure this is handled correctly, so ${humanTeam} will continue from here.`
 			: `I understand you want to update an existing reservation. ${humanTeam} will take over from here so the change is reviewed correctly.`;
 	if (/spanish/i.test(lang)) {
 		text =
@@ -5116,6 +5418,8 @@ async function handoffToHuman(io, sc, st, reason) {
 				? "Un especialista de soporte continuara esta conversacion desde aqui."
 				: reason === "reservation_finalize_failed"
 				? "No pude finalizar esta reserva automaticamente. Un especialista de soporte tomara el chat para revisarla enseguida."
+				: reason === "repeated_question"
+				? "Quiero asegurarme de que esto se maneje correctamente, asi que un especialista de soporte continuara desde aqui."
 				: "Entiendo tu solicitud de reserva. Un especialista de soporte tomara el chat para revisarla correctamente.";
 	} else if (/french/i.test(lang)) {
 		text =
@@ -5127,6 +5431,8 @@ async function handoffToHuman(io, sc, st, reason) {
 				? "Un specialiste du support va poursuivre cette conversation ici."
 				: reason === "reservation_finalize_failed"
 				? "Je n'ai pas pu finaliser cette reservation automatiquement. Un specialiste du support va la verifier tout de suite."
+				: reason === "repeated_question"
+				? "Je veux m'assurer que cela soit traite correctement, donc un specialiste du support va prendre le relais ici."
 				: "Je comprends votre demande de reservation. Un specialiste du support va prendre le relais pour la verifier correctement.";
 	} else if (/arabic/i.test(lang) && reason === "reservation_finalize_failed") {
 		text =
@@ -5137,6 +5443,10 @@ async function handoffToHuman(io, sc, st, reason) {
 				? "فهمت أنك تريد إلغاء حجز. سيتابع معك أحد مختصي الدعم من هنا."
 				: "فهمت طلبك. سيتابع معك أحد مختصي الدعم من هنا.";
 	}
+	if (/arabic/i.test(lang) && reason === "repeated_question") {
+		text =
+			"\u0623\u0631\u064a\u062f \u0627\u0644\u062a\u0623\u0643\u062f \u0623\u0646 \u0637\u0644\u0628\u0643 \u064a\u062a\u0645 \u062a\u0648\u0644\u064a\u0647 \u0628\u0634\u0643\u0644 \u0635\u062d\u064a\u062d\u060c \u0644\u0630\u0644\u0643 \u0633\u064a\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u0623\u062d\u062f \u0645\u062e\u062a\u0635\u064a \u0627\u0644\u062f\u0639\u0645 \u0645\u0646 \u0647\u0646\u0627.";
+	}
 	try {
 		const learnedText = await write(
 			io,
@@ -5146,6 +5456,8 @@ async function handoffToHuman(io, sc, st, reason) {
 				? "The latest guest message is abusive or extremely rude. Do not argue, lecture, or mirror the language. Calmly state that a human support specialist will continue the conversation. Keep it one short sentence and do not ask another question."
 				: reason === "jannat_hotel_complaint"
 				? "The guest is making a complaint about a hotel or hotel experience through Jannat Booking support. Show sincere empathy, reassure them that Jannat Booking management has been urgently alerted, and say action will be taken with the hotel team as needed. Keep it professional, warm, and concise. Do not ask another question."
+				: reason === "repeated_question"
+				? "The guest has asked the same unresolved question three or more times. Apologize briefly if needed, say a human support specialist will continue so it is handled correctly, and do not ask another question. Keep it one short sentence."
 				: "Tell the guest their request will be handled by a human support specialist. Keep it one short sentence, use the active hotel reception and reservations voice when hotel context exists, and do not ask another question.",
 			{ handoffReason: reason, fallbackText: text }
 		);
@@ -5992,6 +6304,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
 		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
 		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
+		"Do not choose human_escalation only because a normal question was repeated once or twice; keep answering safely and patiently. The deterministic three-repeat guard handles unresolved repeated questions.",
 		"Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, cancellation/refund/change requests, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
 	].join(" ");
 	const user = JSON.stringify(
@@ -6086,6 +6399,27 @@ async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
 	return reply || fallback;
 }
 
+async function sendUnavailableRoomRecovery(io, sc, st, quote = {}) {
+	const option = bestRoomRecoveryOption(st);
+	const message = roomRecoveryOfferText(sc, st, quote, option);
+	st.pendingRoomAlternative = roomRecoveryPendingPayload(option);
+	const sent = await humanSend(io, sc, st, message, {
+		quickReplies: st.pendingRoomAlternative ? proceedQuickReplies(sc, st) : [],
+	});
+	if (!sent) return false;
+	st.reviewSent = false;
+	st.quoteSummarizedAt = 0;
+	st.waitFor = st.pendingRoomAlternative ? "room_alternative_confirm" : "room";
+	stampAsk(st, st.pendingRoomAlternative ? "room_alternative" : "room");
+	logStep(String(sc._id || ""), "room_recovery.offered", {
+		kind: st.pendingRoomAlternative?.kind || "none",
+		roomTypeKey: st.pendingRoomAlternative?.roomTypeKey || null,
+		checkinISO: st.pendingRoomAlternative?.checkinISO || null,
+		checkoutISO: st.pendingRoomAlternative?.checkoutISO || null,
+	});
+	return true;
+}
+
 async function shareKnownStayQuote(io, sc, st) {
 	logStep(String(sc._id), "quote.start", {
 		roomTypeKey: st.slots.roomTypeKey,
@@ -6109,6 +6443,10 @@ async function shareKnownStayQuote(io, sc, st) {
 		reason: quote.reason || null,
 		roomTypeKey: st.slots.roomTypeKey,
 	});
+	if (!quote.available) {
+		return sendUnavailableRoomRecovery(io, sc, st, quote);
+	}
+	clearPendingRoomAlternative(st);
 	let quoteReply = await composeAvailabilityQuoteText(io, sc, st, quote);
 	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
 	const sent = await humanSend(io, sc, st, quoteReply, {
@@ -6117,6 +6455,94 @@ async function shareKnownStayQuote(io, sc, st) {
 	if (!sent) return false;
 	st.reviewSent = false;
 	st.waitFor = quote?.available ? "proceed" : "room";
+	return true;
+}
+
+async function acceptPendingRoomAlternative(io, sc, st, pending = {}) {
+	if (!pending?.roomTypeKey || !pending?.checkinISO || !pending?.checkoutISO) {
+		clearPendingRoomAlternative(st);
+		return false;
+	}
+	const datesChanged =
+		pending.checkinISO !== st.slots?.checkinISO ||
+		pending.checkoutISO !== st.slots?.checkoutISO;
+	st.slots.roomTypeKey = pending.roomTypeKey;
+	st.slots.checkinISO = pending.checkinISO;
+	st.slots.checkoutISO = pending.checkoutISO;
+	if (datesChanged) {
+		st.dateRaw = { calendar: null, checkin: null, checkout: null };
+	}
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	clearPendingRoomAlternative(st);
+	return shareKnownStayQuote(io, sc, st);
+}
+
+async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
+	const pending = st.pendingRoomAlternative || null;
+	if (!pending) return false;
+	const directKind = directGuestRequestKind(sc, st, userText, {});
+	if (directKind) return false;
+	const selectedRoomType = mapRoomToKey(userText);
+	const dates = quickDateRange(userText);
+	if (confirmsText(userText) || selectedRoomType === pending.roomTypeKey) {
+		return acceptPendingRoomAlternative(io, sc, st, pending);
+	}
+	if (selectedRoomType && selectedRoomType !== pending.roomTypeKey) {
+		clearPendingRoomAlternative(st);
+		st.slots.roomTypeKey = selectedRoomType;
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		if (st.slots.checkinISO && st.slots.checkoutISO) {
+			return shareKnownStayQuote(io, sc, st);
+		}
+		const sent = await humanSend(io, sc, st, roomFitSalesIntroText(sc, st, selectedRoomType));
+		if (!sent) return false;
+		st.waitFor = "dates";
+		stampAsk(st, "dates");
+		return true;
+	}
+	if (dates?.checkinISO && dates?.checkoutISO) {
+		clearPendingRoomAlternative(st);
+		st.slots.checkinISO = dates.checkinISO;
+		st.slots.checkoutISO = dates.checkoutISO;
+		if (dates.raw) st.dateRaw = { ...st.dateRaw, ...dates.raw };
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		return shareKnownStayQuote(io, sc, st);
+	}
+	if (declinesText(userText) || correctionText(userText)) {
+		clearPendingRoomAlternative(st);
+		const sent = await humanSend(io, sc, st, roomRecoveryDeclineText(sc, st));
+		if (!sent) return false;
+		st.waitFor = "room";
+		stampAsk(st, "room");
+		return true;
+	}
+	if (patienceText(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Thank the guest naturally and say there is no rush. Mention that the alternative option is ready if they want it. Do not repeat every price detail.",
+			{ pendingRoomAlternative: pending }
+		);
+		await humanSend(io, sc, st, msg);
+		st.waitFor = "room_alternative_confirm";
+		return true;
+	}
+	if (st.waitFor !== "room_alternative_confirm") return false;
+	const msg = await write(
+		io,
+		sc,
+		st,
+		"The guest replied after an alternative room/date option was offered, but did not clearly accept or reject it. Ask one short yes/no question asking whether to prepare the offered option, and mention they can send another room type or nearby dates instead.",
+		{ pendingRoomAlternative: pending, latestUserMessage: userText }
+	);
+	await humanSend(io, sc, st, msg, { quickReplies: proceedQuickReplies(sc, st) });
 	return true;
 }
 
@@ -8378,6 +8804,9 @@ async function planTurn(io, sc) {
 			await handoffToHuman(io, sc, st, "abusive_guest");
 			return;
 		}
+		if (await maybeEscalateRepeatedGuestQuestion(io, sc, st, userText, {})) {
+			return;
+		}
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
@@ -8501,6 +8930,15 @@ async function planTurn(io, sc) {
 		}
 		if (st.waitFor === "post_booking_followup") {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
+			if (handled) return;
+		}
+		if (st.pendingRoomAlternative) {
+			const handled = await handlePendingRoomAlternativeChoice(
+				io,
+				sc,
+				st,
+				userText
+			);
 			if (handled) return;
 		}
 		const directRequestHandled = await tryAnswerDirectGuestRequest(
@@ -9461,42 +9899,7 @@ async function planTurn(io, sc) {
 		}
 
 		if (!quote.available) {
-			const alternatives = listAvailableRoomsForStay(
-				st.hotel,
-				st.slots.checkinISO,
-				st.slots.checkoutISO
-			)
-				.filter((r) => r.available)
-				.map((r) => ({
-					roomType: r.room?.roomType,
-					displayName: r.room?.displayName || r.room?.roomType,
-					total: r?.totals?.totalPriceWithCommission,
-					currency: r.currency,
-				}))
-				.slice(0, 3);
-
-			if (!askedRecently(st, "alt")) {
-				const msg = await write(
-					io,
-					sc,
-					st,
-					quote.reason === "blocked"
-						? "Explain that this room is blocked (zero price rule) for these dates at the selected hotel. Offer up to 3 same-hotel room-type alternatives with totals if provided."
-						: "Explain no priced inventory for these dates at the selected hotel; offer up to 3 same-hotel room-type alternatives with totals if provided.",
-					{ alternatives, reason: quote.reason || "no_price" }
-				);
-				await humanSend(io, sc, st, msg);
-				await humanPause();
-				const askAlt = await write(
-					io,
-					sc,
-					st,
-					"Ask ONE question only: change dates or choose a different room type?"
-				);
-				await humanSend(io, sc, st, askAlt);
-				stampAsk(st, "room");
-			}
-			st.waitFor = "room";
+			await sendUnavailableRoomRecovery(io, sc, st, quote);
 			return;
 		}
 
