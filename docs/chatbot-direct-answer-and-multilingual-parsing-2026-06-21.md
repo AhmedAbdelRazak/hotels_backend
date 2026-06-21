@@ -273,6 +273,10 @@ Additional tightening added:
 - The planner also has a top-level per-case async lock, acquired before policy
   checks or hotel lookup, so concurrent socket/HTTP scheduled turns cannot enter
   the same support case together before the in-memory turn state is ready.
+- Direct selected-room answers are terminal actions. After the hotel-room helper
+  sends a room-fit/date-request answer, it returns a handled result immediately
+  so the same guest turn cannot fall through into another planner branch and
+  produce a second differently worded room answer.
 - AI message saving has a second guard for stale planners: if the latest guest
   turn was already answered by another pass, the save is cancelled before it can
   append another assistant bubble.

@@ -2746,6 +2746,9 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     answered the same guest turn.
   - Queued planner ticks are dropped after a successful current-turn reply unless
     the database shows a newer customer message or a genuinely unanswered turn.
+  - Selected-hotel room answers are terminal actions. After the room helper sends
+    a fit/availability/date-request answer, it must return a handled result so
+    the same guest turn cannot fall through into another direct/planner branch.
   - Exact duplicate AI text is still protected by the database append guard and
     frontend clientTag/message merge logic from the previous polish pass.
 - Idle follow-up and close timing:

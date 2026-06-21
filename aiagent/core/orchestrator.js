@@ -3343,6 +3343,13 @@ async function answerSelectedHotelRoomQuestion(
 	userText,
 	roomTypeKey = null
 ) {
+	if (st.activeTurnHadReply) {
+		logStep(String(sc._id), "room_question.skip_after_reply", {
+			roomTypeKey,
+			waitFor: st.waitFor,
+		});
+		return true;
+	}
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const matchingRooms = roomTypeKey
 		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
@@ -3356,7 +3363,7 @@ async function answerSelectedHotelRoomQuestion(
 	) {
 		st.slots.roomTypeKey = roomTypeKey;
 		await shareKnownStayQuote(io, sc, st);
-		return;
+		return true;
 	}
 	if (roomTypeKey && matchingRooms.length) {
 		st.slots.roomTypeKey = roomTypeKey;
@@ -3366,10 +3373,11 @@ async function answerSelectedHotelRoomQuestion(
 			st,
 			roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms)
 		);
-		if (!sent) return;
-		st.waitFor = "dates";
-		stampAsk(st, "dates");
-		return;
+		if (sent) {
+			st.waitFor = "dates";
+			stampAsk(st, "dates");
+		}
+		return true;
 	}
 	const instruction = roomTypeKey
 		? matchingRooms.length
@@ -3385,9 +3393,12 @@ async function answerSelectedHotelRoomQuestion(
 		slots: st.slots,
 	});
 	const sent = await humanSend(io, sc, st, reply);
-	if (!sent) return;
-	if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
-	st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
+	if (sent) {
+		if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
+		st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
+		if (st.waitFor) stampAsk(st, st.waitFor);
+	}
+	return true;
 }
 
 function cleanHotelFactValue(value) {
