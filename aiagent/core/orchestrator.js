@@ -2423,13 +2423,13 @@ function parseSameMonthDateRange(text = "") {
 }
 
 function extractDateRange(text = "") {
-	const quick = quickDateRange(text);
-	if (quick?.checkinISO && quick?.checkoutISO) {
-		return quick;
-	}
 	const sameMonthRange = parseSameMonthDateRange(text);
 	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
 		return sameMonthRange;
+	}
+	const quick = quickDateRange(text);
+	if (quick?.checkinISO && quick?.checkoutISO) {
+		return quick;
 	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
