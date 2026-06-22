@@ -318,6 +318,12 @@ Additional tightening added:
 - Each guest turn records whether an AI reply was actually saved. If a cooldown
   branch would leave the guest without an answer, the orchestrator sends one
   short contextual follow-up in the active language.
+- A lightweight support-case maintenance sweep now backs up the in-memory
+  scheduler. If the backend restarts after a guest turn, the sweep schedules the
+  normal AI planner for genuinely unanswered AI cases. If the latest AI prompt
+  has already been answered and remains idle past the configured close window,
+  the same sweep closes the case with `ai_idle_timeout`. This keeps the
+  one-minute no-rush follow-up and five-minute close behavior restart-safe.
 - Missing-date, missing-room, and unclear-proceed states now use contextual
   follow-ups instead of silent returns when the same question was asked recently.
 - "Not now", "later", and similar decline turns pause quote/proceed nudges for a

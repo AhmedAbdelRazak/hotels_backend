@@ -31,7 +31,10 @@ mongoose
 		console.log("MongoDB Atlas is connected");
 		startHousekeepingMaintenanceJob();
 		startB2BChatMaintenanceJob();
-		startSupportCaseMaintenanceJob({ getIo: () => app.get("io") });
+		startSupportCaseMaintenanceJob({
+			getIo: () => app.get("io"),
+			getScheduleAiTurn: () => app.get("scheduleAiPlanTurn"),
+		});
 	})
 	.catch((err) => console.log("DB Connection Error: ", err));
 

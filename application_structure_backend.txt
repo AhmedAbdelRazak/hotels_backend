@@ -2788,3 +2788,33 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Verification expectation:
   - Run node --check for aiagent/core/orchestrator.js before deployment.
   - After production pull/restart, confirm aiagent health and PM2 status.
+
+2026-06-21 Production Chatbot Restart Recovery And Idle Close Durability
+- Files:
+  - aiagent/index.js
+  - server.js
+  - services/supportCaseMaintenance.js
+  - services/reservationConfirmationDispatcher.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Support-case maintenance:
+  - The existing once-per-minute maintenance job now has access to the AI
+    planner scheduler after aiagent initialization.
+  - It schedules the normal AI planner for open client AI cases where the latest
+    guest message is genuinely unanswered and older than the stalled-turn
+    recovery window. This protects cases after a backend restart or crash, when
+    in-memory recovery timers are lost.
+  - It also closes already-answered idle AI cases after the configured
+    AI_IDLE_CLOSE_MS window, with the code-level minimum still 5 minutes, so the
+    five-minute close rule is durable across restarts.
+  - It does not close a case whose latest guest turn has no AI answer after it;
+    those cases are recovered through the planner instead.
+- Confirmation PDF safety:
+  - services/reservationConfirmationDispatcher.js now awaits page.pdf before
+    closing Chromium and closes the page explicitly, avoiding printToPDF races
+    during AI-created reservation confirmation dispatch.
+- Production cleanup note:
+  - The stale Ahmed/Nadia support-case document 6a38754bb3b79d0ffca275b0 was
+    backed up under /home/ahmedadmin/Hotels/supportcase-delete-backups/ and
+    removed from MongoDB.
+  - The untracked Node core dump left by the out-of-memory restart was removed
+    from /home/ahmedadmin/Hotels/hotels_backend/core.

@@ -77,8 +77,12 @@ async function createPdfBuffer(html) {
 	});
 	try {
 		const page = await browser.newPage();
-		await page.setContent(html, { waitUntil: "networkidle0" });
-		return page.pdf({ format: "A4", printBackground: true });
+		try {
+			await page.setContent(html, { waitUntil: "networkidle0" });
+			return await page.pdf({ format: "A4", printBackground: true });
+		} finally {
+			await page.close().catch(() => {});
+		}
 	} finally {
 		await browser.close().catch(() => {});
 	}

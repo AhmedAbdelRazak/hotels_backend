@@ -1,7 +1,7 @@
 /** @format */
 // aiagent/index.js
 const { attachRoutes } = require("./routes");
-const { wireSocket } = require("./core/orchestrator");
+const { wireSocket, schedulePlanTurn } = require("./core/orchestrator");
 
 let initialized = false;
 
@@ -11,6 +11,9 @@ function initAIAgent({ app, io }) {
 		return;
 	}
 	initialized = true;
+	if (app && typeof app.set === "function" && typeof schedulePlanTurn === "function") {
+		app.set("scheduleAiPlanTurn", schedulePlanTurn);
+	}
 	attachRoutes(app, io);
 	if (typeof wireSocket === "function") wireSocket(io);
 	console.log("[aiagent] initialized.");
