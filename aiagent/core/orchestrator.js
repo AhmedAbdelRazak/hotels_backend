@@ -11119,6 +11119,26 @@ async function planTurn(io, sc) {
 			);
 			if (handled) return;
 		}
+		const quickTurnDates = extractDateRange(userText);
+		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
+			return;
+		}
+		const canUseLatestTurnDatesForBooking =
+			quickTurnDates.checkinISO &&
+			quickTurnDates.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText);
+		if (canUseLatestTurnDatesForBooking) {
+			mergeDateRangeIntoState(st, quickTurnDates);
+			logStep(caseId, "dates.merged_before_direct_request", {
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+				waitFor: st.waitFor || "",
+				roomTypeKey: st.slots.roomTypeKey || null,
+			});
+		}
 		const directRequestHandled = await tryAnswerDirectGuestRequest(
 			io,
 			sc,
@@ -11171,12 +11191,6 @@ async function planTurn(io, sc) {
 			{ allowGeneric: false }
 		);
 		if (preNluProceedHandled) return;
-
-		const quickTurnDates = extractDateRange(userText);
-		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
-			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
-			return;
-		}
 		if (
 			st.hotel &&
 			st.pendingRoomCombination &&
@@ -11283,6 +11297,19 @@ async function planTurn(io, sc) {
 			decisionLu.confirmation = null;
 		}
 		logStep(caseId, "nlu.decision", decisionLu);
+		if (needsExplicitPastDateClarification(userText, decisionLu?.dates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, decisionLu.dates);
+			return;
+		}
+		if (
+			decisionLu.dates?.checkinISO &&
+			decisionLu.dates?.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			mergeDateRangeIntoState(st, decisionLu.dates);
+		}
 		const bookingFlowWasActiveBeforeNlu =
 			isNewReservationFlowActive(st) ||
 			Boolean(st.quote) ||
