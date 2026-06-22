@@ -2,6 +2,9 @@
 
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Schema;
+const {
+	makeDefaultHotelPolicyQA,
+} = require("../services/hotelPolicyQa");
 
 const WalletSchema = new mongoose.Schema(
 	{
@@ -211,6 +214,45 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: String,
 			trim: true,
 			default: "",
+		},
+		hotelPolicyQA: {
+			type: [
+				{
+					key: {
+						type: String,
+						trim: true,
+						default: "",
+					},
+					category: {
+						type: String,
+						trim: true,
+						default: "",
+					},
+					question: {
+						type: String,
+						trim: true,
+						default: "",
+					},
+					answer: {
+						type: String,
+						trim: true,
+						default: "",
+					},
+					mandatory: {
+						type: Boolean,
+						default: false,
+					},
+					active: {
+						type: Boolean,
+						default: false,
+					},
+					sortOrder: {
+						type: Number,
+						default: 999,
+					},
+				},
+			],
+			default: makeDefaultHotelPolicyQA,
 		},
 		subscribed: {
 			type: Boolean,

@@ -289,6 +289,32 @@ function reservationConfirmationAge(reservation = {}, now = new Date()) {
 	};
 }
 
+function reservationDaysBeforeCheckin(reservation = {}, now = new Date()) {
+	const checkinISO = dateOnlyISO(reservation.checkin_date);
+	const today = dateOnlyISO(now);
+	if (!checkinISO || !today) return { checkinISO, daysBeforeCheckin: null };
+	const checkinMs = Date.parse(`${checkinISO}T00:00:00.000Z`);
+	const todayMs = Date.parse(`${today}T00:00:00.000Z`);
+	if (!Number.isFinite(checkinMs) || !Number.isFinite(todayMs)) {
+		return { checkinISO, daysBeforeCheckin: null };
+	}
+	return {
+		checkinISO,
+		daysBeforeCheckin: Math.ceil((checkinMs - todayMs) / DAY_MS),
+	};
+}
+
+function reservationOneNightAmount(reservation = {}) {
+	const total = Number(reservation.total_amount || 0);
+	if (!Number.isFinite(total) || total <= 0) return null;
+	const nights = nightsBetweenISO(
+		dateOnlyISO(reservation.checkin_date),
+		dateOnlyISO(reservation.checkout_date)
+	);
+	if (!Number.isFinite(nights) || nights <= 0) return null;
+	return Number((total / nights).toFixed(2));
+}
+
 function reservationCancellationTerminalStatus(reservation = {}) {
 	const status = reservationLifecycleStatus(reservation);
 	if (/\b(cancelled|canceled)\b/.test(status)) return "already_cancelled";
@@ -333,31 +359,56 @@ async function getReservationCancellationPolicyForCase({
 
 	const thresholdDays = 14;
 	const confirmationAge = reservationConfirmationAge(reservation, now);
-	if (
-		confirmationAge.looksConfirmed &&
-		Number.isFinite(confirmationAge.ageDays) &&
-		confirmationAge.ageDays >= thresholdDays
-	) {
-		return {
-			ok: false,
-			code: "confirmed_too_old",
-			reservation,
-			thresholdDays,
-			...confirmationAge,
-		};
-	}
-
+	const checkinTiming = reservationDaysBeforeCheckin(reservation, now);
 	const financeLocked =
 		String(reservation.financial_cycle?.status || "").toLowerCase() === "closed" ||
 		String(reservation.commissionAgentApproval?.status || "").toLowerCase() ===
 			"approved";
-	return {
-		ok: true,
-		code: financeLocked ? "finance_review_required" : "specialist_required",
+	const base = {
 		reservation,
 		thresholdDays,
 		financeLocked,
+		oneNightAmount: reservationOneNightAmount(reservation),
 		...confirmationAge,
+		...checkinTiming,
+	};
+
+	if (!Number.isFinite(checkinTiming.daysBeforeCheckin)) {
+		return {
+			ok: true,
+			code: "missing_checkin_date",
+			eligibleForCancellation: false,
+			refundPolicy: "needs_review",
+			...base,
+		};
+	}
+
+	if (checkinTiming.daysBeforeCheckin >= thresholdDays) {
+		return {
+			ok: true,
+			code: "full_refund",
+			eligibleForCancellation: true,
+			refundPolicy: "full_refund",
+			...base,
+		};
+	}
+
+	if (checkinTiming.daysBeforeCheckin > 3) {
+		return {
+			ok: true,
+			code: "one_night_fee",
+			eligibleForCancellation: true,
+			refundPolicy: "one_night_fee",
+			...base,
+		};
+	}
+
+	return {
+		ok: true,
+		code: "non_refundable",
+		eligibleForCancellation: false,
+		refundPolicy: "non_refundable",
+		...base,
 	};
 }
 

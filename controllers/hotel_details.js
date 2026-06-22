@@ -21,6 +21,9 @@ const {
 const {
 	sanitizeReservationAuditLogsCollectionForViewer,
 } = require("../services/auditPrivacy");
+const {
+	sanitizeHotelPolicyQA,
+} = require("../services/hotelPolicyQa");
 
 const isConfiguredSuperAdmin = (user) => {
 	const configuredIds = [
@@ -56,6 +59,7 @@ const HOTEL_DETAILS_SUMMARY_SELECT = [
 	"busDetails",
 	"isNusuk",
 	"isNusukText",
+	"hotelPolicyQA",
 	"subscribed",
 	"wholeSaleHotel",
 	"propertyType",
@@ -142,6 +146,7 @@ const HOTEL_DETAILS_MANAGEMENT_SELECT = [
 	"busDetails",
 	"isNusuk",
 	"isNusukText",
+	"hotelPolicyQA",
 	"subscribed",
 	"acceptedTermsAndConditions",
 	"wholeSaleHotel",
@@ -180,6 +185,7 @@ const HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT = [
 	"busDetails",
 	"isNusuk",
 	"isNusukText",
+	"hotelPolicyQA",
 	"wholeSaleHotel",
 	"propertyType",
 	"activateHotel",
@@ -1254,7 +1260,10 @@ exports.hotelDetailsById = (req, res, next, id) => {
 };
 
 exports.create = (req, res) => {
-	const hotelDetails = new HotelDetails(req.body);
+	const hotelDetails = new HotelDetails({
+		...req.body,
+		hotelPolicyQA: sanitizeHotelPolicyQA(req.body?.hotelPolicyQA),
+	});
 	hotelDetails.save((err, data) => {
 		if (err) {
 			console.log(err, "err");
@@ -2582,9 +2591,17 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 		);
 	}
 
+	if (Object.prototype.hasOwnProperty.call(updateData, "hotelPolicyQA")) {
+		updatedFields.hotelPolicyQA = sanitizeHotelPolicyQA(updateData.hotelPolicyQA);
+	}
+
 	// Process other fields (excluding roomCountDetails and paymentSettings)
 	Object.keys(updateData).forEach((key) => {
-		if (key !== "roomCountDetails" && key !== "paymentSettings") {
+		if (
+			key !== "roomCountDetails" &&
+			key !== "paymentSettings" &&
+			key !== "hotelPolicyQA"
+		) {
 			updatedFields[key] = updateData[key];
 			console.log(`Updated field ${key}: ${updateData[key]}`);
 		}

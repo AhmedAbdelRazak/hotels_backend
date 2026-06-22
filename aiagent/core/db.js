@@ -193,6 +193,7 @@ async function getHotelById(id) {
 				"busDetails",
 				"isNusuk",
 				"isNusukText",
+				"hotelPolicyQA",
 				"currency",
 				"aiToRespond",
 				"activateHotel",
@@ -229,7 +230,7 @@ async function listActivePublicHotels() {
 		},
 	})
 		.select(
-			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot hasBusService busDetails isNusuk isNusukText roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
+			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot hasBusService busDetails isNusuk isNusukText hotelPolicyQA roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
 		)
 		.lean()
 		.exec();
