@@ -61,6 +61,26 @@ const reservationPublicLinks = (reservation = {}) => {
 	};
 };
 
+const rawPdfTimeoutMs = parseInt(process.env.PDF_GENERATION_TIMEOUT_MS || "12000", 10);
+const PDF_GENERATION_TIMEOUT_MS = Math.min(
+	30000,
+	Math.max(3000, Number.isFinite(rawPdfTimeoutMs) ? rawPdfTimeoutMs : 12000)
+);
+
+const withTimeout = (task, timeoutMs, label = "operation") => {
+	let timer = null;
+	return Promise.race([
+		Promise.resolve().then(task),
+		new Promise((_, reject) => {
+			timer = setTimeout(() => {
+				reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+			}, timeoutMs);
+		}),
+	]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
+};
+
 async function createPdfBuffer(html) {
 	const browser = await puppeteer.launch({
 		headless: "new",
@@ -71,15 +91,23 @@ async function createPdfBuffer(html) {
 			"--disable-accelerated-2d-canvas",
 			"--no-first-run",
 			"--no-zygote",
-			"--single-process",
 			"--disable-gpu",
 		],
 	});
 	try {
 		const page = await browser.newPage();
 		try {
-			await page.setContent(html, { waitUntil: "networkidle0" });
-			return await page.pdf({ format: "A4", printBackground: true });
+			return await withTimeout(
+				async () => {
+					await page.setContent(html, {
+						waitUntil: "domcontentloaded",
+						timeout: PDF_GENERATION_TIMEOUT_MS,
+					});
+					return page.pdf({ format: "A4", printBackground: true });
+				},
+				PDF_GENERATION_TIMEOUT_MS,
+				"PDF generation"
+			);
 		} finally {
 			await page.close().catch(() => {});
 		}
@@ -165,7 +193,7 @@ async function sendOwnerEmailIfAvailable(baseEmail, reservationData = {}) {
 	);
 }
 
-async function buildConfirmationEmail(reservationData = {}) {
+async function buildConfirmationEmail(reservationData = {}, { includePdf = true } = {}) {
 	const html = ClientConfirmationEmail(reservationData);
 	const hotelForPdf =
 		reservationData?.hotelId && typeof reservationData.hotelId === "object"
@@ -174,17 +202,19 @@ async function buildConfirmationEmail(reservationData = {}) {
 					hotelName: reservationData?.hotelName || "",
 					suppliedBy: reservationData?.belongsTo?.name || "",
 			  };
-	const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
 	let pdfBuffer = null;
 	let pdfError = "";
-	try {
-		pdfBuffer = await createPdfBuffer(pdfHtml);
-	} catch (error) {
-		pdfError = String(error?.message || error || "").slice(0, 240);
-		console.error(
-			"[reservation-confirmation] PDF generation failed:",
-			error?.message || error
-		);
+	if (includePdf) {
+		const pdfHtml = receiptPdfTemplate(reservationData, hotelForPdf);
+		try {
+			pdfBuffer = await createPdfBuffer(pdfHtml);
+		} catch (error) {
+			pdfError = String(error?.message || error || "").slice(0, 240);
+			console.error(
+				"[reservation-confirmation] PDF generation failed:",
+				error?.message || error
+			);
+		}
 	}
 	const attachments = pdfBuffer
 		? [
@@ -205,7 +235,9 @@ async function buildConfirmationEmail(reservationData = {}) {
 		},
 		pdf: pdfBuffer
 			? { ok: true, attached: true }
-			: { ok: false, attached: false, error: pdfError },
+			: includePdf
+			? { ok: false, attached: false, error: pdfError }
+			: { ok: true, attached: false, skipped: true, reason: "pdf_not_requested" },
 	};
 }
 
@@ -217,6 +249,7 @@ async function dispatchReservationConfirmation(reservation, options = {}) {
 		includeOwnerEmail = true,
 		includeGuestWhatsApp = true,
 		includeAdminWhatsApp = true,
+		includePdf = true,
 	} = options;
 	const reservationData = await hydrateReservationForConfirmation(reservation);
 	const links = reservationPublicLinks(reservationData);
@@ -239,7 +272,9 @@ async function dispatchReservationConfirmation(reservation, options = {}) {
 
 	if (includeGuestEmail || includeInternalEmail || includeOwnerEmail) {
 		result.email.attempted = true;
-		const { baseEmail, pdf } = await buildConfirmationEmail(reservationData);
+		const { baseEmail, pdf } = await buildConfirmationEmail(reservationData, {
+			includePdf,
+		});
 		result.email.pdf = pdf;
 
 		if (includeGuestEmail) {

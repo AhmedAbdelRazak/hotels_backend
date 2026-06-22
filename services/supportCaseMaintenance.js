@@ -26,6 +26,18 @@ const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	25 * 1000,
 	{ min: 10 * 1000, max: 2 * ONE_MINUTE }
 );
+const AI_TURN_RECOVERY_LOOKBACK_MS = intFromEnv(
+	"AI_TURN_RECOVERY_LOOKBACK_MS",
+	3 * ONE_MINUTE,
+	{ min: ONE_MINUTE, max: 15 * ONE_MINUTE }
+);
+const AI_TURN_RECOVERY_LIMIT = intFromEnv("AI_TURN_RECOVERY_LIMIT", 10, {
+	min: 1,
+	max: 25,
+});
+const AI_TURN_STALL_RECOVERY_ENABLED =
+	String(process.env.AI_TURN_STALL_RECOVERY_ENABLED || "true").toLowerCase() !==
+	"false";
 
 const asTime = (value) => {
 	const date = value ? new Date(value) : null;
@@ -279,17 +291,21 @@ const closeIdleAiSupportCases = async ({
 const recoverUnansweredAiSupportCases = async ({
 	now = new Date(),
 	staleMs = AI_TURN_STALL_RECOVERY_MS,
-	limit = 100,
+	limit = AI_TURN_RECOVERY_LIMIT,
 	io = null,
 	scheduleAiTurn = null,
 } = {}) => {
+	if (!AI_TURN_STALL_RECOVERY_ENABLED) {
+		return { scheduled: 0, cutoff: new Date(now.getTime() - staleMs) };
+	}
 	if (!io || typeof scheduleAiTurn !== "function") {
 		return { scheduled: 0, cutoff: new Date(now.getTime() - staleMs) };
 	}
 	const cutoff = new Date(now.getTime() - staleMs);
+	const oldestRecoverableGuestAt = now.getTime() - AI_TURN_RECOVERY_LOOKBACK_MS;
 	const candidates = await SupportCase.find(aiCaseFilter(cutoff))
 		.select(
-			"_id hotelId caseStatus openedBy aiToRespond aiRelated aiResponderName createdAt updatedAt conversation"
+			"_id hotelId caseStatus openedBy aiToRespond aiRelated aiResponderName aiRecoveryScheduledAt createdAt updatedAt conversation"
 		)
 		.sort({ updatedAt: 1, createdAt: 1, _id: 1 })
 		.limit(limit)
@@ -301,7 +317,23 @@ const recoverUnansweredAiSupportCases = async ({
 		if (!latestGuestNeedsAiReply(supportCase)) continue;
 		const guestAt = latestGuestMessageAt(supportCase);
 		if (!guestAt || guestAt > cutoff.getTime()) continue;
+		if (guestAt < oldestRecoverableGuestAt) continue;
 		if (!hasAiActivity(supportCase)) continue;
+		const claimed = await SupportCase.updateOne(
+			{
+				_id: supportCase._id,
+				caseStatus: "open",
+				openedBy: "client",
+				aiToRespond: true,
+				$or: [
+					{ aiRecoveryScheduledAt: { $exists: false } },
+					{ aiRecoveryScheduledAt: null },
+					{ aiRecoveryScheduledAt: { $lte: cutoff } },
+				],
+			},
+			{ $set: { aiRecoveryScheduledAt: now } }
+		).exec();
+		if (!claimed?.modifiedCount) continue;
 		const didSchedule = scheduleAiTurn(io, supportCase._id, { delayMs: 150 });
 		if (didSchedule) scheduled += 1;
 	}

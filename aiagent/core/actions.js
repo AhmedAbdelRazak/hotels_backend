@@ -1248,6 +1248,7 @@ async function dispatchAiReservationConfirmation({
 		includeOwnerEmail,
 		includeGuestWhatsApp,
 		includeAdminWhatsApp,
+		includePdf: false,
 	});
 	await markAiConfirmationDelivery(caseKey, result, {
 		mode,

@@ -9672,35 +9672,11 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		quoteData: quoteForCreate,
 		room: quoteForCreate.room,
 	});
-	let delivery = null;
-	try {
-		delivery = await dispatchAiReservationConfirmation({
-			caseId,
-			reservation,
-			mode: "initial",
-			includeGuestEmail: Boolean(st.slots.email),
-			includeInternalEmail: true,
-			includeOwnerEmail: true,
-			includeGuestWhatsApp: true,
-			includeAdminWhatsApp: true,
-			guestEmail: st.slots.email || "",
-		});
-		logStep(caseId, "reservation.confirmation_dispatched", {
-			confirmation: reservation.confirmation_number,
-			status: confirmationDeliverySummary(delivery),
-		});
-	} catch (error) {
-		logStep(caseId, "reservation.confirmation_dispatch_failed", {
-			confirmation: reservation.confirmation_number,
-			error: String(error?.message || error || "").slice(0, 200),
-		});
-	}
 	sc.aiReservation = {
 		...(sc.aiReservation || {}),
 		status: "created",
 		reservationId: reservation._id,
 		confirmationNumber: reservation.confirmation_number || "",
-		...(delivery ? { confirmationDelivery: confirmationDeliverySummary(delivery) } : {}),
 	};
 	const links = reservationLinks(reservation);
 	const finalText = reservationCreatedMessage(
@@ -9711,6 +9687,29 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		links
 	);
 	await humanSend(io, sc, st, finalText);
+	dispatchAiReservationConfirmation({
+		caseId,
+		reservation,
+		mode: "initial",
+		includeGuestEmail: Boolean(st.slots.email),
+		includeInternalEmail: true,
+		includeOwnerEmail: true,
+		includeGuestWhatsApp: true,
+		includeAdminWhatsApp: true,
+		guestEmail: st.slots.email || "",
+	})
+		.then((delivery) => {
+			logStep(caseId, "reservation.confirmation_dispatched", {
+				confirmation: reservation.confirmation_number,
+				status: confirmationDeliverySummary(delivery),
+			});
+		})
+		.catch((error) => {
+			logStep(caseId, "reservation.confirmation_dispatch_failed", {
+				confirmation: reservation.confirmation_number,
+				error: String(error?.message || error || "").slice(0, 200),
+			});
+		});
 	st.waitFor = "post_booking_followup";
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;

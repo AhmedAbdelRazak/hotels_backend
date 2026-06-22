@@ -990,7 +990,11 @@ exports.updateSupportCase = async (req, res) => {
 		}
 
 		const updateDoc = safeConversation
-			? { $set: setFields, $push: { conversation: safeConversation } }
+			? {
+					$set: setFields,
+					$unset: { aiRecoveryScheduledAt: "" },
+					$push: { conversation: safeConversation },
+			  }
 			: { $set: setFields };
 
 		const updatedCase = await SupportCase.findByIdAndUpdate(req.params.id, updateDoc, {

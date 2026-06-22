@@ -198,6 +198,10 @@ const supportCaseSchema = new Schema({
 		type: String,
 		default: "",
 	},
+	aiRecoveryScheduledAt: {
+		type: Date,
+		default: null,
+	},
 	aiReservation: {
 		status: {
 			type: String,
