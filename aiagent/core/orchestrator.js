@@ -137,6 +137,11 @@ const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 		max: 9000,
 	})
 );
+const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
+	"AI_PLANNING_TYPING_DELAY_MS",
+	1100,
+	{ min: 0, max: 5000 }
+);
 const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
 	min: 30000,
 	max: 60 * 60 * 1000,
@@ -1816,9 +1821,35 @@ function discountDisplayContext(st = {}) {
 }
 
 function looksLikeGreetingOnly(text = "") {
-	return /^(hi|hello|hey|hi there|hello there|good morning|good evening|assalamu alaikum|assalamu alaykum|assalamualaikum|assalamo|as-salamu|al salamo|al salam|salaam|salam|assalamu|السلام|مرحبا|اهلا|أهلا|hola|bonjour|salut|ہیلو|ہیلو there|नमस्ते|अस्सलामु)\b/i.test(
-		String(text || "").trim()
-	);
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const stableGreeting = raw
+		.replace(/^[\s"'`]+|[\s"'`!?.\u061f\u060c,\u061b]+$/g, "")
+		.trim();
+	if (
+		/^(?:\u0627\u0644\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0648\u0639\u0644\u064a\u0643\u0645\s+\u0627\u0644\u0633\u0644\u0627\u0645|\u0645\u0631\u062d\u0628\u0627|\u0627\u0647\u0644\u0627|\u0623\u0647\u0644\u0627|\u0623\u0647\u0644\u064a\u0646|\u0647\u0644\u0627|\u0647\u0627\u0644\u0648|\u0627\u0644\u0648|\u0623\u0644\u0648|\u0647\u0627\u064a|\u0635\u0628\u0627\u062d\s+\u0627\u0644\u062e\u064a\u0631|\u0645\u0633\u0627\u0621\s+\u0627\u0644\u062e\u064a\u0631|\u06c1\u06cc\u0644\u0648|\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u06cc\u06a9\u0645|\u0928\u092e\u0938\u094d\u0924\u0947|\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941\s+\u0905\u0932\u0948\u0915\u0941\u092e)$/i.test(
+			stableGreeting
+		)
+	) {
+		return true;
+	}
+	const cleaned = raw.replace(/^[\s"'`]+|[\s"'`!?.؟،,؛]+$/g, "").trim();
+	if (!cleaned) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(cleaned);
+	const latinGreeting =
+		/^(?:hi|hello|hey|hi there|hello there|good morning|good evening|salaam|salam|assalamu alaikum|assalamu alaykum|assalamualaikum|assalamo alaikum|as-salamu alaikum|al salamo alaikum|al salam alaikum|hola|bonjour|salut)$/i.test(
+			lower
+		) ||
+		/^(?:hi|hello|hey|salam|salaam|assalamualaikum|assalamualaykum|assalamualaikumwarahmatullah|hola|bonjour|salut)$/i.test(
+			latinCompact
+		);
+	const arabicGreeting =
+		/^(?:السلام(?:\s+عليكم)?|سلام(?:\s+عليكم)?|وعليكم\s+السلام|مرحبا|اهلا|أهلا|أهلين|هلا|هالو|الو|ألو|هاي|صباح\s+الخير|مساء\s+الخير)$/i.test(
+			arabic
+		);
+	const urduHindiGreeting =
+		/^(?:ہیلو|السلام\s+علیکم|नमस्ते|अस्सलामु\s+अलैकुम)$/i.test(cleaned);
+	return latinGreeting || arabicGreeting || urduHindiGreeting;
 }
 
 function islamicGreetingForLanguage(sc = {}, st = {}) {
@@ -1979,10 +2010,10 @@ function selectedHotelAddressQuestionText(text = "") {
 		/\b(?:where\s+is|where's|located|location|address|area|district|map|ubicacion|ubicaci[oó]n|direccion|direcci[oó]n|adresse|emplacement|alamat|lokasi|peta)\b/i.test(
 			lower
 		) ||
-		/(?:\u0627\u064a\u0646|\u0641\u064a\u0646|\u0648\u064a\u0646|\u0645\u0648\u0642\u0639|\u0645\u0643\u0627\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0646\u0637\u0642\u0647|\u062d\u064a|\u06a9\u06c1\u0627\u06ba|\u06a9\u062f\u06be\u0631|\u067e\u062a\u06c1|\u092a\u0924\u093e|\u0915\u0939\u093e\u0902)/i.test(
+		/(?:\u0627\u064a\u0646|\u0641\u064a\u0646|\u0648\u064a\u0646|\u0645\u0648\u0642\u0639|\u0645\u0643\u0627\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0646\u0637\u0642\u0647|\u062d\u064a|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u062e\u0631\u0627\u064a\u0637|\u062c\u0648\u062c\u0644\s*ماب|\u062c\u0648\u062c\u0644\s*مابس|\u06a9\u06c1\u0627\u06ba|\u06a9\u062f\u06be\u0631|\u067e\u062a\u06c1|\u092a\u0924\u093e|\u0915\u0939\u093e\u0902)/i.test(
 			arabic
 		) ||
-		/(?:whereis|location|address|map|ubicacion|direccion|adresse|alamat|lokasi|kahan|kidhar|pata)/i.test(
+		/(?:whereis|location|address|map|googlemaps|googlemap|ubicacion|direccion|adresse|alamat|lokasi|kahan|kidhar|pata)/i.test(
 			latinCompact
 		);
 	if (!asksLocation) return false;
@@ -1993,7 +2024,9 @@ function selectedHotelAddressQuestionText(text = "") {
 		) ||
 		/(?:hotel|funduq)/i.test(latinCompact);
 	const conciseLocationRequest =
-		hasSemanticSignal(text, "location") &&
+		(hasSemanticSignal(text, "location") ||
+			/(?:\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u062e\u0631\u0627\u064a\u0637|\u062c\u0648\u062c\u0644\s*ماب|\u062c\u0648\u062c\u0644\s*مابس)/i.test(arabic) ||
+			/(?:map|googlemaps|googlemap)/i.test(latinCompact)) &&
 		lower.replace(/[^\w\s\u0600-\u06ff\u0900-\u097f]/g, " ").trim().split(/\s+/).filter(Boolean)
 			.length <= 6 &&
 		!hasSemanticSignal(text, ["payment", "confirmation", "reservation", "contact"]);
@@ -3551,19 +3584,26 @@ function hotelGoogleMapsDirectionsUrl(hotel = {}) {
 	return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`;
 }
 
+function hotelGoogleMapsLocationUrl(hotel = {}) {
+	const coords = hotelCoordinates(hotel);
+	if (!coords) return "";
+	const query = encodeURIComponent(`${coords.latitude},${coords.longitude}`);
+	return `https://www.google.com/maps/search/?api=1&query=${query}`;
+}
+
 function hotelGoogleMapsUrl(hotel = {}) {
-	return hotelGoogleMapsDirectionsUrl(hotel);
+	return hotelGoogleMapsLocationUrl(hotel);
 }
 
 function hotelGoogleMapsMarkdownLink(hotel = {}, lang = "English") {
 	const url = hotelGoogleMapsUrl(hotel);
 	if (!url) return "";
-	let label = "Google Maps Driving Route to Al Haram";
-	if (/arabic/i.test(lang)) label = "\u0637\u0631\u064a\u0642 Google Maps \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645";
-	else if (/spanish/i.test(lang)) label = "Ruta en Google Maps al Haram";
-	else if (/french/i.test(lang)) label = "Itineraire Google Maps vers Al Haram";
-	else if (/indonesian/i.test(lang)) label = "Rute Google Maps ke Al Haram";
-	else if (/malay|malaysia/i.test(lang)) label = "Laluan Google Maps ke Al Haram";
+	let label = "Hotel location on Google Maps";
+	if (/arabic/i.test(lang)) label = "\u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps";
+	else if (/spanish/i.test(lang)) label = "Ubicacion del hotel en Google Maps";
+	else if (/french/i.test(lang)) label = "Emplacement de l'hotel sur Google Maps";
+	else if (/indonesian/i.test(lang)) label = "Lokasi hotel di Google Maps";
+	else if (/malay|malaysia/i.test(lang)) label = "Lokasi hotel di Google Maps";
 	return `[${label}](${url})`;
 }
 
@@ -3574,6 +3614,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 	const busDetails = cleanHotelFactText(hotel.busDetails);
 	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const mapsUrl = hotelGoogleMapsUrl(hotel);
+	const directionsUrl = hotelGoogleMapsDirectionsUrl(hotel);
 	return {
 		displayName: localizedHotelName(sc, st),
 		hotelName: hotel.hotelName || "",
@@ -3590,7 +3631,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		},
 		location: hotel.location || null,
 		googleMapsLocationUrl: mapsUrl || "",
-		googleMapsDrivingDirectionsUrl: mapsUrl || "",
+		googleMapsDrivingDirectionsUrl: directionsUrl || "",
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
@@ -4609,14 +4650,14 @@ function hotelNusukNoText(lang, name, next) {
 function hotelLocationMapLine(lang = "English", mapLink = "") {
 	if (!mapLink) return "";
 	if (/arabic/i.test(lang)) {
-		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 Google Maps \u0644\u0644\u0637\u0631\u064a\u0642 \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u062f\u0642\u064a\u0642 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645: ${mapLink}.`;
+		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps: ${mapLink}.`;
 	}
-	if (/spanish/i.test(lang)) return `Aqui tienes la ruta en Google Maps desde la ubicacion exacta del hotel hasta Al Haram en coche: ${mapLink}.`;
-	if (/french/i.test(lang)) return `Voici l'itineraire Google Maps en voiture depuis l'emplacement exact de l'hotel vers Al Haram : ${mapLink}.`;
-	if (/urdu|hindi/i.test(lang)) return `Hotel ki exact location se Al Haram tak driving route yahan hai: ${mapLink}.`;
-	if (/indonesian/i.test(lang)) return `Ini rute Google Maps dari lokasi tepat hotel ke Al Haram dengan mobil: ${mapLink}.`;
-	if (/malay|malaysia/i.test(lang)) return `Ini laluan Google Maps dari lokasi tepat hotel ke Al Haram dengan kereta: ${mapLink}.`;
-	return `Here is the Google Maps driving route from the hotel's exact location to Al Haram: ${mapLink}.`;
+	if (/spanish/i.test(lang)) return `Aqui tienes la ubicacion exacta del hotel en Google Maps: ${mapLink}.`;
+	if (/french/i.test(lang)) return `Voici l'emplacement exact de l'hotel sur Google Maps : ${mapLink}.`;
+	if (/urdu|hindi/i.test(lang)) return `Hotel ki exact Google Maps location yahan hai: ${mapLink}.`;
+	if (/indonesian/i.test(lang)) return `Ini lokasi tepat hotel di Google Maps: ${mapLink}.`;
+	if (/malay|malaysia/i.test(lang)) return `Ini lokasi tepat hotel di Google Maps: ${mapLink}.`;
+	return `Here is the hotel's exact Google Maps location: ${mapLink}.`;
 }
 
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
@@ -5918,7 +5959,7 @@ function hasUsableFullName(value = "") {
 	if (latestEmailFromText(name) || cleanPhoneCandidate(name)) return false;
 	if (rejectsFullNameCandidate(name)) return false;
 	if (
-		/\b(?:guest|unknown|test|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
+		/\b(?:guest|unknown|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
 			name
 		) ||
 		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
@@ -5927,6 +5968,7 @@ function hasUsableFullName(value = "") {
 	) {
 		return false;
 	}
+	if (/^(?:test|testing)$/i.test(name)) return false;
 	if (
 		/confirm|confirmation|book|reserve|price|date|room|\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641/i.test(
 			name
@@ -5996,6 +6038,7 @@ function lineNameCandidateFromText(text = "") {
 }
 
 const NATIONALITY_HINTS = [
+	[/\b(?:american|usa|u\.s\.a\.|united\s+states|united\s+states\s+of\s+america)\b/i, "American"],
 	[/\b(?:egyptian|egypt)\b|\u0645\u0635\u0631\u064a|\u0645\u0635\u0631\u064a\u0629|\u0645\u0635\u0631/i, "Egyptian"],
 	[/\b(?:saudi|saudi\s+arabian)\b|\u0633\u0639\u0648\u062f\u064a|\u0633\u0639\u0648\u062f\u064a\u0629/i, "Saudi"],
 	[/\b(?:pakistani|pakistan)\b|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a\u0629/i, "Pakistani"],
@@ -6047,6 +6090,12 @@ async function normalizeNationalityFromText(text = "", language = "English") {
 	if (hint) return hint;
 	const candidate = explicit || String(text || "").trim();
 	if (!candidate || candidate.length > 80) return "";
+	const compactCandidate = asciiize(candidate)
+		.toLowerCase()
+		.replace(/[.\s_-]+/g, "");
+	if (["us", "usa", "unitedstates", "unitedstatesofamerica"].includes(compactCandidate)) {
+		return "American";
+	}
 	const asciiCandidate = asciiize(candidate).trim();
 	if (/^[A-Za-z][A-Za-z\s-]{2,40}$/.test(asciiCandidate)) {
 		const nat = await validateNationalityLLM(asciiCandidate, language);
@@ -6596,7 +6645,18 @@ function applyReservationGuestCountsFromText(st = {}, text = "") {
 	const before = JSON.stringify(st.slots || {});
 	const adults = countNearTerms(text, ADULT_COUNT_TERMS, { allowZero: false });
 	const children = countNearTerms(text, CHILD_COUNT_TERMS, { allowZero: true });
-	const guests = countNearTerms(text, GUEST_COUNT_TERMS, { allowZero: false });
+	let guests = countNearTerms(text, GUEST_COUNT_TERMS, { allowZero: false });
+	if (guests === null) {
+		const normalized = normalizeNumberWordsForParsing(text)
+			.replace(/\s+/g, " ")
+			.trim();
+		const genericGuestMatch = normalized.match(
+			/(?:^|[^\p{L}\p{N}])(?:guests?|people|persons?|pax|افراد|أفراد|اشخاص|أشخاص|ضيوف|نفر)\s*[:：=-]?\s*([0-9]{1,2})(?=$|[^\p{L}\p{N}])/iu
+		);
+		guests = reservationDetailCount(genericGuestMatch?.[1], {
+			allowZero: false,
+		});
+	}
 	const hasAdultCount = adults !== null;
 	let hasChildrenCount = children !== null;
 	if (hasAdultCount) {
@@ -7952,8 +8012,8 @@ async function write(io, sc, st, instruction, context = {}) {
 		activeHotelFacts
 			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
 			: "",
-		activeHotelFacts?.googleMapsDrivingDirectionsUrl
-			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Driving Route to Al Haram](${activeHotelFacts.googleMapsDrivingDirectionsUrl}). This URL uses the hotel's exact stored coordinates as the origin, Al Haram as the destination, and driving mode. Do not invent or rewrite map coordinates.`
+		activeHotelFacts?.googleMapsLocationUrl
+			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
 			: "",
 		activeHotelFacts
 			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
@@ -10600,6 +10660,20 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 		waitingForGuest: thread.waitingForGuest,
 	});
 
+	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Reply warmly to the guest's greeting in the active language. Use a natural short hospitality tone and ask an open 'how can I help you?' style question. Do not ask for check-in/check-out dates, room type, phone, nationality, or any booking detail in this reply.",
+			{ latestUserMessage: userText, currentWaitFor: st.waitFor || "" }
+		);
+		await humanSend(io, sc, st, msg || greetingText(sc, st));
+		thread.topic = null;
+		thread.waitingForGuest = false;
+		return true;
+	}
+
 	if (subtype === "how_are_you") {
 		if (!thread.waitingForGuest || thread.topic !== "howru") {
 			const msg = await write(
@@ -10904,7 +10978,10 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (userText || !hasAiAssistantReply(sc)) {
-			schedulePlanningTyping();
+			planningTypingTimer = setTimeout(
+				schedulePlanningTyping,
+				AI_PLANNING_TYPING_DELAY_MS
+			);
 		}
 		const explicitLanguageSwitch = explicitLanguageSwitchRequest(userText);
 		updateActiveLanguageFromText(sc, st, userText);

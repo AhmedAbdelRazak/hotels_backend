@@ -1157,6 +1157,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				"hotelId",
 				"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances isNusuk isNusukText"
 			)
+			.lean()
 			.exec();
 
 		if (!updatedCase) {

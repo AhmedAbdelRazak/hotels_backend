@@ -175,40 +175,82 @@ io.on("connection", (socket) => {
 	});
 });
 
+const conversationIndexFromPath = (path = "") => {
+	const match = String(path || "").match(/^conversation\.(\d+)$/);
+	if (!match) return -1;
+	const index = Number(match[1]);
+	return Number.isFinite(index) ? index : -1;
+};
+
+const latestConversationFromUpdate = async (change, caseId) => {
+	const updatedFields = change.updateDescription?.updatedFields || {};
+	const directConversationUpdates = Object.entries(updatedFields)
+		.map(([path, value]) => ({
+			index: conversationIndexFromPath(path),
+			value,
+		}))
+		.filter(
+			(item) =>
+				item.index >= 0 &&
+				item.value &&
+				typeof item.value === "object" &&
+				!Array.isArray(item.value)
+		)
+		.sort((a, b) => a.index - b.index);
+
+	if (directConversationUpdates.length) {
+		return directConversationUpdates[directConversationUpdates.length - 1].value;
+	}
+
+	if (Array.isArray(updatedFields.conversation)) {
+		return updatedFields.conversation[updatedFields.conversation.length - 1] || null;
+	}
+
+	const touchedConversation = Object.keys(updatedFields).some(
+		(path) => path === "conversation" || path.startsWith("conversation.")
+	);
+	if (!touchedConversation || !caseId) return null;
+
+	const latest = await SupportCase.findById(caseId)
+		.select({ conversation: { $slice: -1 } })
+		.lean()
+		.exec();
+	return Array.isArray(latest?.conversation) ? latest.conversation[0] : null;
+};
+
+const conversationAlreadyEmittedDirectly = (message = {}) =>
+	Boolean(
+		message.clientTag &&
+			(message.isAi ||
+				message.isSystem ||
+				/jannat-(?:ai-support|system)/i.test(
+					String(message.messageBy?.userId || "")
+				))
+	);
+
 // Re-broadcast last conversation line whenever a case is updated
 try {
 	if (typeof SupportCase.watch === "function") {
-		const stream = SupportCase.watch(
-			[{ $match: { operationType: { $in: ["update", "insert"] } } }],
-			{ fullDocument: "updateLookup" }
-		);
-		stream.on("change", (ch) => {
+		const stream = SupportCase.watch([
+			{ $match: { operationType: { $in: ["update", "insert"] } } },
+		]);
+		stream.on("change", async (ch) => {
 			const doc = ch.fullDocument;
-			const caseId = doc?._id && String(doc._id);
+			const caseId =
+				(ch.documentKey?._id && String(ch.documentKey._id)) ||
+				(doc?._id && String(doc._id));
 			if (!caseId) return;
-			if (ch.operationType === "insert") {
+			if (ch.operationType === "insert" && doc) {
 				io.to(caseId).emit("newChat", { caseId, case: doc });
 				return;
 			}
-			const updated = ch.updateDescription?.updatedFields || {};
-			const touched = Object.keys(updated).some((k) =>
-				k.startsWith("conversation.")
-			);
-			if (!touched) return;
-			const last =
-				Array.isArray(doc.conversation) &&
-				doc.conversation[doc.conversation.length - 1];
-			if (last) {
-				const alreadyEmittedDirectly =
-					last.clientTag &&
-					(last.isAi ||
-						last.isSystem ||
-						/jannat-(?:ai-support|system)/i.test(
-							String(last.messageBy?.userId || "")
-						));
-				if (alreadyEmittedDirectly) return;
+			try {
+				const last = await latestConversationFromUpdate(ch, caseId);
+				if (!last || conversationAlreadyEmittedDirectly(last)) return;
 				io.to(caseId).emit("receiveMessage", { ...last, caseId });
 				io.to(caseId).emit("stopTyping", { caseId });
+			} catch (error) {
+				console.error("[socket] change stream update error:", error?.message || error);
 			}
 		});
 		stream.on("error", (e) =>

@@ -9234,6 +9234,90 @@ const otaNotificationMoney = (value) => {
 	return Number.isFinite(number) ? Number(number.toFixed(2)) : 0;
 };
 
+const PENDING_NOTIFICATION_RESERVATION_SELECT = [
+	"_id",
+	"hotelId",
+	"confirmation_number",
+	"customer_details.name",
+	"customer_details.phone",
+	"booking_source",
+	"booked_at",
+	"createdAt",
+	"updatedAt",
+	"checkin_date",
+	"checkout_date",
+	"reservation_status",
+	"state",
+	"total_amount",
+	"commission",
+	"commissionStatus",
+	"commissionData.assigned",
+	"commissionData.proposedByAgent",
+	"commissionAgentApproval.status",
+	"financial_cycle.commissionAmount",
+	"financial_cycle.commissionAssigned",
+	"financial_cycle.proposedByAgent",
+	"financial_cycle.totalReviewStatus",
+	"financial_cycle.financeRejectionType",
+	"financial_cycle.financeRejectionComment",
+	"financial_cycle.totalRejectionReason",
+	"financial_cycle.totalReviewedAt",
+	"financial_cycle.lastUpdatedAt",
+	"financial_cycle.sourceName",
+	"financial_cycle.bookingSource",
+	"agentDecisionSnapshot.status",
+	"agentDecisionSnapshot.reason",
+	"agentDecisionSnapshot.rejectionReason",
+	"agentDecisionSnapshot.confirmationReason",
+	"agentDecisionSnapshot.decidedAt",
+	"agentDecisionSnapshot.lastUpdatedAt",
+	"agentDecisionSnapshot.rejectionType",
+	"agentDecisionSnapshot.source",
+	"pendingConfirmation.status",
+	"pendingConfirmation.reason",
+	"pendingConfirmation.rejectionReason",
+	"pendingConfirmation.confirmationReason",
+	"pendingConfirmation.cancelReason",
+	"pendingConfirmation.decidedAt",
+	"pendingConfirmation.lastUpdatedAt",
+	"pendingConfirmation.rejectionType",
+	"pendingConfirmation.source",
+].join(" ");
+
+const OTA_REVIEW_NOTIFICATION_SELECT = [
+	"_id",
+	"hotelId",
+	"belongsTo",
+	"confirmation_number",
+	"customer_details.name",
+	"customer_details.phone",
+	"booking_source",
+	"booked_at",
+	"createdAt",
+	"updatedAt",
+	"checkin_date",
+	"checkout_date",
+	"reservation_status",
+	"state",
+	"total_amount",
+	"sub_total",
+	"adminPricing.rootTotal",
+	"pickedRoomsType.count",
+	"pickedRoomsType.hotelShouldGet",
+	"pickedRoomsType.subTotal",
+	"pickedRoomsType.pricingByDay.rootPrice",
+	"pickedRoomsType.pricingByDay.totalPriceWithoutCommission",
+	"pickedRoomsType.pricingByDay.price",
+	"pickedRoomsPricing.count",
+	"pickedRoomsPricing.hotelShouldGet",
+	"pickedRoomsPricing.subTotal",
+	"pickedRoomsPricing.pricingByDay.rootPrice",
+	"pickedRoomsPricing.pricingByDay.totalPriceWithoutCommission",
+	"pickedRoomsPricing.pricingByDay.price",
+	"otaPlatformReview.updatedAt",
+	"otaPlatformReview.createdAt",
+].join(" ");
+
 const otaHotelVisibleAmountForNotification = (reservation = {}) => {
 	const adminRoot = Number(reservation?.adminPricing?.rootTotal || 0);
 	if (Number.isFinite(adminRoot) && adminRoot > 0) return otaNotificationMoney(adminRoot);
@@ -9280,9 +9364,7 @@ const getOtaPlatformReviewNotificationFeed = async ({
 	const query = applyPlatformOtaScope(actor, buildPendingOtaReviewFilter());
 	const [rows, total] = await Promise.all([
 		Reservations.find(query)
-			.select(
-				"_id hotelId belongsTo confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount sub_total adminPricing pickedRoomsType pickedRoomsPricing otaPlatformReview supplierData"
-			)
+			.select(OTA_REVIEW_NOTIFICATION_SELECT)
 			.populate({ path: "hotelId", select: "_id hotelName belongsTo" })
 			.sort({ createdAt: -1 })
 			.limit(limit)
@@ -9459,9 +9541,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			};
 			const [rows, walletClaimFeed, agentAccountFeed] = await Promise.all([
 				Reservations.find(agentDecisionQuery)
-					.select(
-						"_id hotelId confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
-					)
+					.select(PENDING_NOTIFICATION_RESERVATION_SELECT)
 					.sort({ updatedAt: -1, createdAt: -1 })
 					.limit(Math.max(limit * 4, 50))
 					.lean()
@@ -9695,9 +9775,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
 			await Promise.all([
 			Reservations.find(query)
-				.select(
-					"_id hotelId confirmation_number customer_details booking_source booked_at createdAt updatedAt checkin_date checkout_date reservation_status state total_amount commission commissionData commissionStatus commissionAgentApproval financial_cycle agentDecisionSnapshot pendingConfirmation"
-				)
+				.select(PENDING_NOTIFICATION_RESERVATION_SELECT)
 				.sort({ updatedAt: -1, booked_at: -1, createdAt: -1 })
 				.limit(notificationQueryLimit)
 				.lean()
