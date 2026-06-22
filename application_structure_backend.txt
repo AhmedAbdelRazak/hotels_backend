@@ -2813,8 +2813,31 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     closing Chromium and closes the page explicitly, avoiding printToPDF races
     during AI-created reservation confirmation dispatch.
 - Production cleanup note:
-  - The stale Ahmed/Nadia support-case document 6a38754bb3b79d0ffca275b0 was
+ - The stale Ahmed/Nadia support-case document 6a38754bb3b79d0ffca275b0 was
     backed up under /home/ahmedadmin/Hotels/supportcase-delete-backups/ and
     removed from MongoDB.
   - The untracked Node core dump left by the out-of-memory restart was removed
     from /home/ahmedadmin/Hotels/hotels_backend/core.
+
+2026-06-21 AI Chat Islamic Opening Greeting Tightening
+- Files:
+  - aiagent/core/orchestrator.js
+  - aiagent/core/nlu.js
+  - aiagent/core/brain.js
+  - aiagent/core/llm.js
+  - aiagent/i18n/strings.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Opening greeting contract:
+  - First AI openings now use a readable Islamic greeting before the guest name
+    instead of generic Hi/Hello/Hola/Bonjour/Halo wording.
+  - Arabic, Urdu, Hindi, Indonesian, Malay, and other Latin-script languages use
+    a shared helper so deterministic greetings, selected-hotel handoff intros,
+    and writer fallback greetings stay consistent.
+  - Latin-script languages use "Assalamu alaikum"; Indonesian and Malay use
+    "Assalamualaikum"; Arabic/Urdu/Hindi use readable native-script greetings.
+  - Common guest greeting inputs such as salam, salaam, assalamu alaikum,
+    assalamualaikum, al salam, and al salamo are treated as greeting-only input.
+  - Legacy watcher/fallback templates were normalized from hard-to-read
+    diacritic transliteration to the same plain Latin spelling.
+  - Writer rules explicitly prevent repeating the Islamic salutation after the
+    first greeting unless the guest naturally restarts with a fresh greeting.

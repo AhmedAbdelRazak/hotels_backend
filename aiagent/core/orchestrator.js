@@ -1742,9 +1742,24 @@ function discountDisplayContext(st = {}) {
 }
 
 function looksLikeGreetingOnly(text = "") {
-	return /^(hi|hello|hey|hi there|hello there|good morning|good evening|السلام|مرحبا|اهلا|أهلا|hola|bonjour|salut|ہیلو|ہیلو there|नमस्ते)\b/i.test(
+	return /^(hi|hello|hey|hi there|hello there|good morning|good evening|assalamu alaikum|assalamu alaykum|assalamualaikum|assalamo|as-salamu|al salamo|al salam|salaam|salam|assalamu|السلام|مرحبا|اهلا|أهلا|hola|bonjour|salut|ہیلو|ہیلو there|नमस्ते|अस्सलामु)\b/i.test(
 		String(text || "").trim()
 	);
+}
+
+function islamicGreetingForLanguage(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645";
+	}
+	if (/urdu/i.test(lang)) {
+		return "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645";
+	}
+	if (/hindi/i.test(lang)) {
+		return "\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e";
+	}
+	if (/indonesian|malay/i.test(lang)) return "Assalamualaikum";
+	return "Assalamu alaikum";
 }
 
 function greetingText(sc = {}, st = {}) {
@@ -1752,12 +1767,29 @@ function greetingText(sc = {}, st = {}) {
 		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
 	);
 	const lang = languageOf(sc, st);
-	if (/arabic/i.test(lang)) return `أهلاً ${name}، كيف أقدر أساعدك اليوم؟`;
-	if (/spanish/i.test(lang)) return `Hola ${name}, ¿cómo puedo ayudarte hoy?`;
-	if (/french/i.test(lang)) return `Bonjour ${name}, comment puis-je vous aider aujourd'hui ?`;
-	if (/urdu/i.test(lang)) return `${name}، میں آپ کی کیسے مدد کر سکتا ہوں؟`;
-	if (/hindi/i.test(lang)) return `नमस्ते ${name}, मैं आपकी कैसे मदद कर सकता हूँ?`;
-	return `Hi ${name}, how can I help you today?`;
+	const opening = islamicGreetingForLanguage(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${opening} ${name}, como puedo ayudarte hoy?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${opening} ${name}, comment puis-je vous aider aujourd'hui ?`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, bagaimana saya bisa membantu hari ini?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, bagaimana saya boleh membantu hari ini?`;
+	}
+	return `${opening} ${name}, how can I help you today?`;
 }
 
 function wantsHotelRecommendation(text = "") {
@@ -3035,16 +3067,29 @@ function initialHotelGreetingText(sc = {}, st = {}) {
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
 	const agentName = st.agentName || "Sara";
 	const lang = languageOf(sc, st);
+	const opening = islamicGreetingForLanguage(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `\u0623\u0647\u0644\u0627\u064b ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+		return `${opening} ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
+		return `${opening} ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
+		return `${opening} ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
 	}
-	return `Hello ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba ${agentName}\u060c ${hotelName} reception and reservations \u0633\u06d2 \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 ${agentName}, ${hotelName} \u0930\u093f\u0938\u0947\u092a\u094d\u0936\u0928 \u0914\u0930 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928\u094d\u0938 \u0938\u0947 \u0939\u0942\u0902\u0964 \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari resepsionis dan reservasi ${hotelName}. Bagaimana saya bisa membantu hari ini?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari penerimaan dan tempahan ${hotelName}. Bagaimana saya boleh membantu hari ini?`;
+	}
+	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
 }
 
 function hotelComplaintText(text = "") {
@@ -3208,16 +3253,29 @@ function hotelHandoffQuoteIntroText(
 	const pricePart = total
 		? `${total} ${currency}${nights ? ` total for ${nights} nights` : ""}`
 		: "the selected priced option";
+	const opening = islamicGreetingForLanguage(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0648\u0635\u0644\u062a\u0646\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u062e\u062a\u0627\u0631: ${room} \u0628\u0633\u0639\u0631 ${pricePart}. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a\u0629\u061f`;
+		return `${opening} ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0648\u0635\u0644\u062a\u0646\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u062e\u062a\u0627\u0631: ${room} \u0628\u0633\u0639\u0631 ${pricePart}. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a\u0629\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
+		return `${opening} ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
+		return `${opening} ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
 	}
-	return `Hi ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba ${agentName}\u060c ${hotelName} reception and reservations \u0633\u06d2 \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u0631\u06d2 \u067e\u0627\u0633 \u0622\u067e \u06a9\u0627 \u0645\u0646\u062a\u062e\u0628 \u0622\u067e\u0634\u0646 \u062a\u06cc\u0627\u0631 \u06c1\u06d2: ${room}, ${pricePart}. \u06a9\u06cc\u0627 \u0645\u06cc\u06ba \u0633\u0631\u06a9\u0627\u0631\u06cc \u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0631\u06cc\u0648\u06cc\u0648 \u06a9\u06d2 \u0644\u06cc\u06d2 \u0622\u06af\u06d2 \u0628\u0691\u06be\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 ${agentName}, ${hotelName} \u0930\u093f\u0938\u0947\u092a\u094d\u0936\u0928 \u0914\u0930 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928\u094d\u0938 \u0938\u0947 \u0939\u0942\u0902\u0964 \u0906\u092a\u0915\u093e \u091a\u0941\u0928\u093e \u0939\u0941\u0906 \u0935\u093f\u0915\u0932\u094d\u092a \u0924\u0948\u092f\u093e\u0930 \u0939\u0948: ${room}, ${pricePart}. \u0915\u094d\u092f\u093e \u092e\u0948\u0902 \u0906\u0927\u093f\u0915\u093e\u0930\u093f\u0915 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u0930\u093f\u0935\u094d\u092f\u0942 \u0915\u0947 \u0932\u093f\u090f \u0906\u0917\u0947 \u092c\u0922\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari resepsionis dan reservasi ${hotelName}. Opsi pilihan Anda sudah siap: ${room}, ${pricePart}. Apakah Anda ingin lanjut ke pemeriksaan reservasi resmi?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari penerimaan dan tempahan ${hotelName}. Pilihan anda sudah sedia: ${room}, ${pricePart}. Adakah anda mahu teruskan ke semakan tempahan rasmi?`;
+	}
+	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
 }
 
 function stabilizeHotelHandoffIntro(text = "", sc = {}, st = {}, optionOrHotel = {}, meta = {}) {
@@ -7199,14 +7257,15 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		return `${respectfulAddress}, please share an email address for the reservation details, or type skip if you prefer to continue without one.`;
 	}
 	if (/greet/.test(text)) {
-		if (isArabic) return `أهلاً ${respectfulAddress}، معك ${st.agentName} من ${supportDesk}. كيف أقدر أساعدك اليوم؟`;
-		if (isSpanish) return `Hola ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
-		if (isHindi) return `नमस्ते ${respectfulAddress}, मैं ${supportDesk} से ${st.agentName} हूं। मैं आपकी कैसे मदद कर सकता हूं?`;
-		if (isFrench) return `Bonjour ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
-		if (isUrdu) return `السلام علیکم ${respectfulAddress}، میں ${supportDesk} سے ${st.agentName} ہوں۔ میں آپ کی کیسے مدد کر سکتا ہوں؟`;
-		if (isIndonesian) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya bisa membantu hari ini?`;
-		if (isMalay) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya boleh membantu hari ini?`;
-		return `Hi ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
+		const opening = islamicGreetingForLanguage(sc, st);
+		if (isArabic) return `${opening} ${respectfulAddress}\u060c \u0645\u0639\u0643 ${st.agentName} \u0645\u0646 ${supportDesk}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+		if (isSpanish) return `${opening} ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
+		if (isHindi) return `${opening} ${respectfulAddress}, \u092e\u0948\u0902 ${supportDesk} \u0938\u0947 ${st.agentName} \u0939\u0942\u0902\u0964 \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+		if (isFrench) return `${opening} ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
+		if (isUrdu) return `${opening} ${respectfulAddress}\u060c \u0645\u06cc\u06ba ${supportDesk} \u0633\u06d2 ${st.agentName} \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+		if (isIndonesian) return `${opening} ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya bisa membantu hari ini?`;
+		if (isMalay) return `${opening} ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya boleh membantu hari ini?`;
+		return `${opening} ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
 	}
 	if (/date|check-in|check.?in|checkout|check-out/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك أرسل تاريخ الدخول وتاريخ الخروج لأراجع التوفر.`;
@@ -7395,6 +7454,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			: `Represent Jannat Booking directly.`,
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
+		`For the first message in a new chat, start with a readable Islamic greeting before the guest name: Arabic "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", Urdu "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645", Hindi "\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e", Indonesian/Malay "Assalamualaikum", and other Latin-script languages "Assalamu alaikum". Treat this as the approved platform salutation, then keep the rest of the reply in ${targetLanguage}. Do not use Arabizi numerals like "3" for ayn.`,
 		/arabic/i.test(targetLanguage)
 			? `Arabic output rule: use natural Arabic hospitality wording. Do not write English commands such as "confirm" or "skip"; use "\u062a\u0623\u0643\u064a\u062f" and "\u062a\u062e\u0637\u064a". Write SAR as "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a" in customer-facing Arabic. Prefer Arabic hotel and room names from context when available.`
 			: "",
@@ -7444,7 +7504,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`For Spanish, French, Hindi, Urdu, Indonesian, Malay, and other languages, use gendered forms only when the guest's gender is clear from name/title or context; otherwise stay polite and neutral.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
-		`Avoid repeated openings such as "Hello {name}" or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
+		`Avoid repeated openings such as "Hello {name}", "Assalamu alaikum {name}", or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
 		AI_PREVIOUS_GUEST_CONTEXT_ENABLED
 			? `Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity. Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`
@@ -10410,8 +10470,8 @@ async function planTurn(io, sc) {
 							sc,
 							st,
 							initialInquiry
-								? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-								: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+								? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+								: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ initialInquiry }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -10431,7 +10491,7 @@ async function planTurn(io, sc) {
 							io,
 							sc,
 							st,
-							"Greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+							"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ latestUserMessage: userText }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -10742,7 +10802,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				`Start: "As‑salāmu ʿalaykum, ${st.slots.name}." Introduce as ${st.agentName} from ${greetOwner}. Then ask: "I see you'd like to make a new reservation — is that correct?" (ONE yes/no).`
+				`Start: "${islamicGreetingForLanguage(sc, st)} ${st.slots.name}." Introduce as ${st.agentName} from ${greetOwner}. Then ask: "I see you'd like to make a new reservation - is that correct?" (ONE yes/no).`
 			);
 			await humanSend(io, sc, st, greetText, { first: true });
 			st.greeted = true;

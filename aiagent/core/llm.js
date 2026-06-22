@@ -45,10 +45,10 @@ function fallbackTemplateGreet({
 	intent,
 	extra,
 }) {
-	const hiEn = `As-salāmu ʿalaykum ${firstName}, I’m ${agentName} from ${hotelName}.`;
+	const hiEn = `Assalamu alaikum ${firstName}, I'm ${agentName} from ${hotelName}.`;
 	const hiAr = `السلام عليكم ${firstName}، أنا ${agentName} من ${hotelName}.`;
-	const hiEs = `As-salamu alaykum ${firstName}, soy ${agentName} de ${hotelName}.`;
-	const hiFr = `As-salām ʿalaykum ${firstName}, je suis ${agentName} de ${hotelName}.`;
+	const hiEs = `Assalamu alaikum ${firstName}, soy ${agentName} de ${hotelName}.`;
+	const hiFr = `Assalamu alaikum ${firstName}, je suis ${agentName} de ${hotelName}.`;
 	const hiUr = `السلام علیکم ${firstName}، میں ${agentName}، ${hotelName} سے۔`;
 	const hiHi = `अस्सलामु अलेकुम ${firstName}, मैं ${agentName} ${hotelName} से बोल रहा/रही हूँ।`;
 

@@ -13,11 +13,11 @@ const en = {
 				how_are_you_reply: "I'm great, thanks! Shall we continue your booking?",
 				welcome_reply: "You're most welcome! 🙏",
 				greet_new_reservation:
-					"As-salāmu ʿalaykum {{name}}! I see you’d like a new reservation at {{hotel}}.",
+					"Assalamu alaikum {{name}}! I see you’d like a new reservation at {{hotel}}.",
 				greet_update_reservation:
-					"As-salāmu ʿalaykum {{name}}! I see you’d like to update reservation **{{cn}}** at {{hotel}}.",
+					"Assalamu alaikum {{name}}! I see you’d like to update reservation **{{cn}}** at {{hotel}}.",
 				greet_update_reservation_missing:
-					"As-salāmu ʿalaykum {{name}}! I see you’d like a reservation update at {{hotel}}. Please share the confirmation number.",
+					"Assalamu alaikum {{name}}! I see you’d like a reservation update at {{hotel}}. Please share the confirmation number.",
 				update_intro:
 					"No problem. You can change dates, room type, or guest details.",
 				ask_checkin: "What’s your check‑in date? (YYYY‑MM‑DD)",
@@ -140,11 +140,11 @@ const es = {
 				how_are_you_reply: "¡Estoy muy bien! ¿Seguimos con tu reserva?",
 				welcome_reply: "¡De nada! 🙏",
 				greet_new_reservation:
-					"¡As-salāmu ʿalaykum {{name}}! Veo que deseas una nueva reserva en {{hotel}}.",
+					"¡Assalamu alaikum {{name}}! Veo que deseas una nueva reserva en {{hotel}}.",
 				greet_update_reservation:
-					"¡As-salāmu ʿalaykum {{name}}! Veo que deseas actualizar la reserva **{{cn}}** en {{hotel}}.",
+					"¡Assalamu alaikum {{name}}! Veo que deseas actualizar la reserva **{{cn}}** en {{hotel}}.",
 				greet_update_reservation_missing:
-					"¡As-salāmu ʿalaykum {{name}}! Para actualizar la reserva en {{hotel}}, comparte el número de confirmación.",
+					"¡Assalamu alaikum {{name}}! Para actualizar la reserva en {{hotel}}, comparte el número de confirmación.",
 				update_intro:
 					"Puedes cambiar fechas, tipo de habitación o datos del huésped.",
 				ask_checkin: "¿Fecha de check‑in? (YYYY‑MM‑DD)",
@@ -193,11 +193,11 @@ const fr = {
 					"Je vais très bien, merci ! On continue la réservation ?",
 				welcome_reply: "Avec plaisir ! 🙏",
 				greet_new_reservation:
-					"As-salāmu ʿalaykum {{name}} ! Je vois que vous souhaitez une nouvelle réservation à {{hotel}}.",
+					"Assalamu alaikum {{name}} ! Je vois que vous souhaitez une nouvelle réservation à {{hotel}}.",
 				greet_update_reservation:
-					"As-salāmu ʿalaykum {{name}} ! Vous souhaitez modifier la réservation **{{cn}}** à {{hotel}}.",
+					"Assalamu alaikum {{name}} ! Vous souhaitez modifier la réservation **{{cn}}** à {{hotel}}.",
 				greet_update_reservation_missing:
-					"As-salāmu ʿalaykum {{name}} ! Pour modifier la réservation, veuillez partager le numéro de confirmation.",
+					"Assalamu alaikum {{name}} ! Pour modifier la réservation, veuillez partager le numéro de confirmation.",
 				update_intro:
 					"Vous pouvez changer les dates, le type de chambre ou les informations du client.",
 				ask_checkin: "Date d’arrivée ? (YYYY‑MM‑DD)",

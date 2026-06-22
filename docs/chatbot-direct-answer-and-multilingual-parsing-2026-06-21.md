@@ -9,6 +9,24 @@ parsing, and light emoji behavior.
 The goal is simple: when the guest asks a concrete question, the chatbot must
 answer that request first before moving the reservation flow forward.
 
+## Islamic Opening Greeting
+
+The first AI opening in a new chat uses a readable Islamic greeting before the
+guest name instead of generic "Hi", "Hello", "Hola", "Bonjour", or "Halo".
+
+- Arabic uses `\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645`.
+- Urdu uses `\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645`.
+- Hindi uses `\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e`.
+- Indonesian and Malay use `Assalamualaikum`.
+- Other Latin-script languages use `Assalamu alaikum`.
+
+The deterministic greeting helpers, selected-hotel handoff greeting, writer
+fallback, and quick NLU greeting classifier all understand the same greeting
+family. The greeting is only for the opening; later turns must continue as an
+already-present support agent and must not repeat the salutation unless the
+guest naturally sends a fresh greeting. Legacy watcher/LLM/i18n fallback
+templates use the same plain Latin spelling instead of scholarly diacritics.
+
 ## Primary Code Paths
 
 - `aiagent/core/orchestrator.js`

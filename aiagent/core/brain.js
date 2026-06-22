@@ -61,8 +61,8 @@ function makeGreeting(st, sc, hotel) {
 			: `السلام عليكم ${fn}. أنا ${st.agentName} من Jannat Booking.`;
 	}
 	return hotelName
-		? `As-salāmu ʿalaykum, ${fn}. I’m ${st.agentName} from ${hotelName}.`
-		: `As-salāmu ʿalaykum, ${fn}. I’m ${st.agentName} from Jannat Booking.`;
+		? `Assalamu alaikum ${fn}. I'm ${st.agentName} from ${hotelName}.`
+		: `Assalamu alaikum ${fn}. I'm ${st.agentName} from Jannat Booking.`;
 }
 
 // pricing + blocked/zero guard
