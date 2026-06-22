@@ -1543,6 +1543,7 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	const needsSlotRecovery =
 		!st.slots?.checkinISO ||
 		!st.slots?.checkoutISO ||
+		!st.slots?.roomTypeKey ||
 		!st.slots?.phone ||
 		(AI_REQUIRE_NATIONALITY && !st.slots?.nationality) ||
 		!st.slots?.adultsProvided ||
@@ -1578,14 +1579,24 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
 	}
 	let latestGuestRoomKey = null;
+	let latestAssistantQuotedRoomKey = null;
 	for (const message of conversation) {
-		if (!isGuestConversationMessage(message)) continue;
-		const messageRoomKey = mapRoomToKey(conversationEntryContextText(message));
-		if (messageRoomKey) latestGuestRoomKey = messageRoomKey;
+		const messageText = conversationEntryContextText(message);
+		const messageRoomKey = mapRoomToKey(messageText);
+		if (!messageRoomKey) continue;
+		if (isGuestConversationMessage(message)) {
+			latestGuestRoomKey = messageRoomKey;
+		} else if (
+			isAiConversationMessage(message) &&
+			assistantMessageCanRecoverRoomType(message)
+		) {
+			latestAssistantQuotedRoomKey = messageRoomKey;
+		}
 	}
-	if (latestGuestRoomKey && st.slots.roomTypeKey !== latestGuestRoomKey) {
+	const latestRoomKey = latestGuestRoomKey || latestAssistantQuotedRoomKey;
+	if (latestRoomKey && st.slots.roomTypeKey !== latestRoomKey) {
 		const previousRoomTypeKey = st.slots.roomTypeKey || null;
-		st.slots.roomTypeKey = latestGuestRoomKey;
+		st.slots.roomTypeKey = latestRoomKey;
 		st.quote = null;
 		st.quoteSummarizedAt = 0;
 		st.reviewSent = false;
@@ -1593,7 +1604,8 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		st.pendingRoomCombination = null;
 		logStep(String(sc._id || ""), "slots.room_changed_from_guest", {
 			previousRoomTypeKey,
-			roomTypeKey: latestGuestRoomKey,
+			roomTypeKey: latestRoomKey,
+			source: latestGuestRoomKey ? "guest" : "assistant_quote",
 		});
 	}
 	const email = latestEmailFromText(guestText);
@@ -1688,6 +1700,100 @@ function quickReplyActions(message = {}) {
 		: [];
 }
 
+function assistantMessageSuggestsProceed(message = {}) {
+	const actions = quickReplyActions(message);
+	if (actions.includes("proceed")) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	return (
+		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
+			lower
+		) ||
+		/(?:\u0647\u0644\s+\u062a\u0631\u063a\u0628\s+\u0627\u0646\s+\u0627\u062a\u0627\u0628\u0639|\u0647\u0644\s+\u062a\u0631\u064a\u062f\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0647|\u0647\u0644\s+\u0646\u062a\u0627\u0628\u0639|\u0627\u062a\u0627\u0628\u0639\s+\u0644\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:wouldyoulikemetocontinue|shallicontinue|continuetothereview|continuewiththereservationdetails|proceedtoconfirm|wanttocontinue)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function assistantMessageSuggestsReview(message = {}) {
+	const actions = quickReplyActions(message);
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	const hasConfirmAction = actions.includes("confirm");
+	const looksLikeReview =
+		/reservation review|review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change|everything looks correct/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0633\u0631\u064a\u0639\u0647\s+\u0644\u062a\u0641\u0627\u0635\u064a\u0644\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0630\u0627\s+\u0643\u0644\s+\u0634\u064a\u0621\s+\u0635\u062d\u064a\u062d|\u0627\u062e\u062a\u0631\s+\"\u062a\u0627\u0643\u064a\u062f\"|\u0647\u0646\u0627\u0643\s+\u0634\u064a\u0621\s+\u063a\u064a\u0631\s+\u0635\u062d\u064a\u062d)/i.test(
+			arabic
+		) ||
+		/(?:reservationreview|confirmtofinalize|everythinglookscorrect|chooseconfirm|somethingiswrong)/i.test(
+			latinCompact
+		);
+	return hasConfirmAction || (actions.includes("correction") && looksLikeReview) || looksLikeReview;
+}
+
+function assistantMessageSuggestsEmailOrSkip(message = {}) {
+	const actions = quickReplyActions(message);
+	const text = String(message?.message || "");
+	return (
+		actions.includes("skip_email") ||
+		/required details.*payment link by email|receive the confirmation and payment link by email|choose skip|pulsa omitir|cliquez sur ignorer|\u0623\u0648\s+\u0627\u0636\u063a\u0637\s+\u062a\u062e\u0637\u064a/i.test(
+			text
+		)
+	);
+}
+
+function assistantMessageSuggestsReservationDetails(message = {}) {
+	const { lower, arabic } = normalizeControlText(message?.message || "");
+	return (
+		/full name[\s\S]{0,160}(?:phone|mobile)[\s\S]{0,160}nationality/i.test(
+			lower
+		) ||
+		/(?:to complete|complete the reservation|i still need|still need)[\s\S]{0,220}(?:full name|phone|nationality|guests)/i.test(
+			lower
+		) ||
+		/(?:\u0644\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0627\s+\u0632\u0644\u062a\s+\u0627\u062d\u062a\u0627\u062c|\u0644\u0627\u0632\u0645\s+\u0627\u062d\u062a\u0627\u062c)[\s\S]{0,220}(?:\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641)/i.test(
+			arabic
+		)
+	);
+}
+
+function assistantMessageCanRecoverRoomType(message = {}) {
+	const actions = quickReplyActions(message);
+	if (
+		actions.some((action) =>
+			["proceed", "confirm", "correction", "place_reservation"].includes(action)
+		)
+	) {
+		return true;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	return (
+		assistantMessageSuggestsProceed(message) ||
+		assistantMessageSuggestsReview(message) ||
+		/total|night|nights|reservation|booking|quote/i.test(lower) ||
+		/(?:\u0627\u0644\u063a\u0631\u0641\u0647|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:total|night|nights|reservation|booking|quote)/i.test(latinCompact)
+	);
+}
+
+function assistantBookingStageFromMessage(message = {}) {
+	const actions = quickReplyActions(message);
+	if (actions.some((action) => action.startsWith("connect_hotel_"))) {
+		return "platform_hotel_choice";
+	}
+	if (actions.includes("place_reservation")) return "finalize";
+	if (assistantMessageSuggestsEmailOrSkip(message)) return "email_or_skip";
+	if (assistantMessageSuggestsReservationDetails(message)) return "reservation_details";
+	if (assistantMessageSuggestsReview(message)) return "reviewConfirm";
+	if (assistantMessageSuggestsProceed(message)) return "proceed";
+	return "";
+}
+
 function recoverBookingStageFromConversation(sc = {}, st = {}) {
 	if (!st || isReservationDetailStep(st)) return;
 	if (
@@ -1702,45 +1808,34 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 	const assistantHistory = assistantMessagesBeforeLatestGuest(sc).reverse();
 	const lastAssistant = assistantHistory[0] || null;
 	if (!lastAssistant) return;
-	const text = String(lastAssistant.message || "");
-	const actions = quickReplyActions(lastAssistant);
-	if (actions.some((action) => action.startsWith("connect_hotel_"))) {
+	const stage = assistantBookingStageFromMessage(
+		assistantHistory.find((assistant) => assistantBookingStageFromMessage(assistant)) ||
+			lastAssistant
+	);
+	if (stage === "platform_hotel_choice") {
 		st.waitFor = "platform_hotel_choice";
 		return;
 	}
-	if (actions.includes("place_reservation")) {
+	if (stage === "finalize") {
 		st.reviewSent = true;
 		st.waitFor = "finalize";
 		return;
 	}
-	const hasConfirmAction =
-		actions.includes("confirm");
-	const looksLikeReview =
-		/reservation review|review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change|everything looks correct/i.test(
-			text
-		);
-	if (hasConfirmAction || (actions.includes("correction") && looksLikeReview) || looksLikeReview) {
+	if (stage === "email_or_skip") {
+		st.waitFor = "email_or_skip";
+		return;
+	}
+	if (stage === "reservation_details") {
+		st.reviewSent = true;
+		st.waitFor = "reservation_details";
+		return;
+	}
+	if (stage === "reviewConfirm") {
 		st.reviewSent = true;
 		st.waitFor = "reviewConfirm";
 		return;
 	}
-
-	if (
-		actions.includes("skip_email") ||
-		/required details.*payment link by email|receive the confirmation and payment link by email|choose skip|pulsa omitir|cliquez sur ignorer|\u0623\u0648\s+\u0627\u0636\u063a\u0637\s+\u062a\u062e\u0637\u064a/i.test(
-			text
-		)
-	) {
-		st.waitFor = "email_or_skip";
-		return;
-	}
-
-	const hasProceedAction = actions.includes("proceed");
-	const looksLikeProceed =
-		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
-			text
-		);
-	if ((hasProceedAction || looksLikeProceed) && st.hotel && quoteKeyForSlots(st)) {
+	if (stage === "proceed" && st.hotel && quoteKeyForSlots(st)) {
 		if (!st.quote || st.quote.key !== quoteKeyForSlots(st)) {
 			const quote = safePriceRoomForStay(
 				st.hotel,
@@ -7037,6 +7132,45 @@ function confirmsText(text = "") {
 	);
 }
 
+function currentQuoteTotalMentioned(text = "", st = {}) {
+	const total = Number(st.quote?.data?.totals?.totalPriceWithCommission);
+	if (!Number.isFinite(total) || total <= 0) return false;
+	const normalized = digitsToEnglish(String(text || "")).replace(/[,\u066c]/g, "");
+	const roundedTotal = String(Math.round(total));
+	return new RegExp(`(^|[^0-9])${roundedTotal}([^0-9]|$)`).test(normalized);
+}
+
+function quoteConfirmationText(text = "", st = {}) {
+	const hasQuoteContext =
+		st.waitFor === "proceed" || activeQuoteMatchesSlots(st) || st.quote?.data?.available;
+	if (!hasQuoteContext) return false;
+	if (confirmsText(text)) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const directArabic =
+		/(?:\u0627\u0643\u062f|\u0627\u0643\u062f\u064a|\u0627\u0643\u062f\u0648\u0627|\u0646\u0627\u0643\u062f|\u0646\u0624\u0643\u062f|\u0646\u0648\u0643\u062f|\u062b\u0628\u062a|\u062b\u0628\u062a\u064a|\u0627\u062d\u062c\u0632|\u0627\u062d\u062c\u0632\u064a|\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u062a\u0627\u0628\u0639|\u062a\u0627\u0628\u0639\u064a).{0,32}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632).{0,50}(?:\u0627\u0639\u0644\u0627\u0647|\u0627\u0639\u0644\u0627|\u0641\u0648\u0642|\u0627\u0644\u0633\u0627\u0628\u0642|\u0627\u0644\u0645\u0630\u0643\u0648\u0631|\u0647\u0630\u0627|\u062f\u0647)/i.test(
+			arabic
+		);
+	const directLatin =
+		/\b(?:confirm|proceed|continue|go ahead|book|reserve|finalize)\b.{0,40}\b(?:booking|reservation|quote|above|this)\b/i.test(
+			lower
+		) ||
+		/(?:confirmbooking|confirmreservation|proceedbooking|continuebooking|bookabove|reservethis|finalizethis)/i.test(
+			latinCompact
+		);
+	const repeatsQuotedTotal =
+		currentQuoteTotalMentioned(text, st) &&
+		((/(?:\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632).{0,80}(?:\u0627\u062c\u0645\u0627\u0644\u064a|\u0628\u0627\u062c\u0645\u0627\u0644\u064a|\u0628\u0627\u062c\u0645\u0627\u0644\u0649|\u0645\u062c\u0645\u0648\u0639|\u0631\u064a\u0627\u0644)/i.test(
+			arabic
+		) ||
+			/\b(?:booking|reservation|quote|total)\b.{0,80}\b(?:total|sar|riyal|price)\b/i.test(
+				lower
+			)));
+	return directArabic || directLatin || repeatsQuotedTotal;
+}
+
 function declinesText(text = "") {
 	const raw = String(text || "");
 	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627|\u0628\u0639\u062f\u064a\u0646)/i.test(raw)) {
@@ -8832,6 +8966,10 @@ async function handleProceedStageInput(
 	{ allowGeneric = true } = {}
 ) {
 	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
+	if (quoteConfirmationText(userText, st)) {
+		resumeBookingNudge(st);
+		return sendReservationReview(io, sc, st, st.quote.data);
+	}
 	if (
 		wantsPaymentHelp(userText) ||
 		hotelContactDetailsQuestionText(userText) ||
@@ -8841,10 +8979,6 @@ async function handleProceedStageInput(
 		detectAmenityQuestion(userText)
 	) {
 		return false;
-	}
-	if (confirmsText(userText)) {
-		resumeBookingNudge(st);
-		return sendReservationReview(io, sc, st, st.quote.data);
 	}
 	if (declinesText(userText)) {
 		pauseBookingNudge(st);
@@ -10336,6 +10470,7 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	if (confidentialCompanyDocumentQuestionText(text)) {
 		return "confidential_company_document";
 	}
+	if (quoteConfirmationText(text, st)) return "";
 	if (wantsPaymentHelp(text)) return "payment_help";
 	if (wantsDiscountQuestion(text)) return "discount_question";
 	if (st.hotel && directHotelRelationshipQuestionText(text)) {
@@ -11202,6 +11337,15 @@ async function planTurn(io, sc) {
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
+		const earlyProceedHandled = await handleProceedStageInput(
+			io,
+			sc,
+			st,
+			userText,
+			{},
+			{ allowGeneric: false }
+		);
+		if (earlyProceedHandled) return;
 		if (!severeAbusiveGuestText(userText)) {
 			const earlyDirectRequestHandled = await tryAnswerDirectGuestRequest(
 				io,

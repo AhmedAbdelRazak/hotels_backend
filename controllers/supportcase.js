@@ -1148,9 +1148,20 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				.json({ error: "No valid fields provided for update" });
 		}
 
+		const unsetFields = {};
+		if (safeConversation || req.body.caseStatus === "closed") {
+			unsetFields.aiRecoveryScheduledAt = "";
+		}
 		const updateDoc = safeConversation
-			? { $set: setFields, $push: { conversation: safeConversation } }
-			: { $set: setFields };
+			? {
+					$set: setFields,
+					...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
+					$push: { conversation: safeConversation },
+			  }
+			: {
+					$set: setFields,
+					...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
+			  };
 
 		const updatedCase = await SupportCase.findByIdAndUpdate(
 			req.params.id,
