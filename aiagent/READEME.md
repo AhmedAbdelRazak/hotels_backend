@@ -1,5 +1,20 @@
 # AI Agent (Hotels – Makkah/Madinah)
 
+## Production Stabilization Runbooks
+
+- `../docs/chatbot-production-stabilization-2026-06-22.md` documents the June 21/22
+  production chatbot stabilization: memory pressure, restart recovery,
+  repeated date/nationality prompts, nationality-vs-language routing, bad
+  numeric/date names, idle close, typing/sending UX, verification, and future
+  guardrails.
+- `../docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md` documents
+  direct-answer priority, multilingual parsing, Islamic greeting, pause intent,
+  final reservation action, and date memory contracts.
+- `../docs/chatbot-price-date-guard-2026-06-22.md` documents the price/date prompt
+  loop guard.
+- `../docs/chatbot-post-booking-close-and-typing-2026-06-22.md` documents
+  post-booking close, rating UX, and typing behavior.
+
 ## Current Production Contract - 2026-06-06
 
 - The AI agent is B2C support only. B2B/internal chats must never trigger it.

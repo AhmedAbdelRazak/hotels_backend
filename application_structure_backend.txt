@@ -2946,3 +2946,26 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     hotel options under the OTAReservations permission.
   - PUT /api/admin/ota-reservations/:reservationId/hotel/:userId assigns the
     hotel, owner, audit metadata, and clears the assignment-required flags.
+
+2026-06-22 Chatbot Production Stabilization Runbook
+- Documentation:
+  - docs/chatbot-production-stabilization-2026-06-22.md is the future-us
+    runbook for the June 21/22 production chatbot incident and stabilization.
+- Covered challenges:
+  - Support-case watcher memory pressure and old Node.js OOM logs.
+  - Restart recovery after PM2/backend crashes.
+  - Repeated date prompts after the guest already supplied a full date range.
+  - Repeated nationality prompts and French nationality being misread as a
+    language switch.
+  - Date/numeric text becoming a bad guest display name such as "30".
+  - Guest pause/later turns being followed by unwanted quote nudges.
+  - SSR support-widget send/typing UX during slow AI replies.
+- Key production commits referenced:
+  - f8fa57d Fix support chat memory pressure.
+  - 41ea7af Stabilize AI chat recovery delivery.
+  - 4256ea5 Fix AI booking detail state recovery.
+  - SSR 0ca22e8 Smooth support chat sending.
+- Future expectation:
+  - Before chatbot changes, read the runbook and run the verification checklist
+    there, especially transcript-style slot recovery, nationality-vs-language,
+    final Place Reservation action, PM2 health, and error-log timestamp checks.
