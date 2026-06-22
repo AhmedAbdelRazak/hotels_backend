@@ -1162,6 +1162,13 @@ Future TODO Backlog - Added 2026-05-26
   - node --check models/inbound_email.js.
   - Dry-run classification confirmed verification emails forward, normal created booking emails do not, and needs_mapping OTA emails forward for human review.
 
+2026-06-22 Airbnb OTA Inbound Email Hardening
+- services/otaReservationMapper.js now handles Airbnb "Reservation confirmed" / "New booking confirmed" emails with provider-specific extraction for confirmation code, guest name, host greeting, listing/room title, check-in/check-out month/day dates, guest count, guest total, host payout, and guest note.
+- Airbnb cancellation-policy boilerplate no longer turns confirmed reservations into cancellation status emails. The cancellation classifier now requires actionable cancellation language, and services/otaEmailOrchestrator.js treats "reservation confirmed" as a strong new-reservation subject.
+- Redacted Airbnb listing URLs such as [CARD-9735] are not treated as virtual-card details unless the email also includes explicit VCC/card labels.
+- `OTA_AIRBNB_EMAIL_HOTEL_MAP` supports explicit Airbnb email hotel mapping, for example `host:Salaam Marwa=68da202900a070e8123c27c4`. Supported source prefixes are host, listing, title, to, and from. Unknown Airbnb hosts/listings remain saved as inbound audits and routed to review instead of creating a reservation against an uncertain hotel.
+- Arabic/Eastern Arabic digits are normalized for OTA parsing, and Arabic room labels such as "غرفة 3 افراد" can map to the correct semantic room type before the existing occupancy fallback runs.
+
 2026-05-28 Manual AI Chat Teaching For B2C Support
 - Storage model:
   - models/aiagent_learning.js.

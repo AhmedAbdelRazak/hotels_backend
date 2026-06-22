@@ -78,8 +78,14 @@ const PROVIDER_LABELS = {
 	ota: "OTA Email",
 };
 
-function normalizeWhitespace(value) {
+function normalizeUnicodeDigits(value) {
 	return String(value || "")
+		.replace(/[٠-٩]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+		.replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0));
+}
+
+function normalizeWhitespace(value) {
+	return normalizeUnicodeDigits(value)
 		.replace(/^\uFEFF/, "")
 		.replace(/[\u200B-\u200D\u2060]/g, "")
 		.replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, "")
@@ -94,6 +100,15 @@ function normalizeComparable(value) {
 		.toLowerCase()
 		.replace(/&/g, "and")
 		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function normalizeIntlComparable(value) {
+	return normalizeWhitespace(value)
+		.toLowerCase()
+		.normalize("NFKC")
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
 		.replace(/\s+/g, " ")
 		.trim();
 }
@@ -1059,6 +1074,350 @@ function findDateValue(text, labels, patterns = []) {
 	return parseDate(findFirstPattern(text, patterns));
 }
 
+function normalizedLines(text = "") {
+	return String(text || "")
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => normalizeWhitespace(line))
+		.filter(Boolean);
+}
+
+function findNextLineAfterExactLabel(text = "", labels = [], lookahead = 5) {
+	const lines = normalizedLines(text);
+	const wantedLabels = (Array.isArray(labels) ? labels : [labels]).map(
+		normalizeIntlComparable
+	);
+	for (let index = 0; index < lines.length; index += 1) {
+		if (!wantedLabels.includes(normalizeIntlComparable(lines[index]))) continue;
+		for (
+			let nextIndex = index + 1;
+			nextIndex < Math.min(lines.length, index + 1 + lookahead);
+			nextIndex += 1
+		) {
+			const candidate = cleanOtaDisplayValue(lines[nextIndex]).replace(
+				/^<https?:\/\/[^>]+>$/i,
+				""
+			);
+			if (candidate) return candidate;
+		}
+	}
+	return "";
+}
+
+function extractAirbnbConfirmationNumber(text = "") {
+	const fromUrl = findFirstPattern(text, [
+		/airbnb\.com\/hosting\/reservations\/details\/([A-Z0-9]{6,24})\b/i,
+	]);
+	const fromLabel = findNextLineAfterExactLabel(text, "Confirmation code", 4);
+	const candidate = firstNonEmpty(fromUrl, fromLabel);
+	return /^[A-Z0-9]{6,24}$/i.test(candidate)
+		? normalizeWhitespace(candidate).toUpperCase()
+		: "";
+}
+
+function extractAirbnbGuestName(email = {}, text = "") {
+	const source = `${email.subject || ""}\n${text || ""}`;
+	const fromSubject = findFirstPattern(source, [
+		/\bReservation confirmed\s*-\s*([^\n-]{2,120}?)\s+arrives\s+/i,
+		/\bNew booking confirmed!?\s*([^\n.]{2,120}?)\s+arrives\s+/i,
+	]);
+	if (fromSubject) return cleanOtaDisplayValue(fromSubject);
+
+	const lines = normalizedLines(text);
+	for (let index = 0; index < lines.length; index += 1) {
+		if (/identity verified/i.test(lines[index + 1] || "")) {
+			const candidate = cleanOtaDisplayValue(lines[index]);
+			if (candidate && !/airbnb|reservation|message|booking/i.test(candidate)) {
+				return candidate;
+			}
+		}
+	}
+	return "";
+}
+
+function extractAirbnbHostLabels(text = "") {
+	const labels = [];
+	const source = String(text || "");
+	const greeting = source.match(
+		/(?:^|\n)\s*(?:Salaam|Hello|Hi|Dear)\s+([^,\n]{2,80}),/i
+	);
+	const hostName = cleanOtaDisplayValue(greeting?.[1] || "");
+	if (hostName) {
+		labels.push(hostName);
+		labels.push(`Salaam ${hostName}`);
+	}
+	return Array.from(new Set(labels.filter(Boolean)));
+}
+
+function extractAirbnbGuestMessage(text = "") {
+	const source = String(text || "");
+	const match = source.match(
+		/(?:^|\n)\s*(?:Salaam|Hello|Hi|Dear)\s+[^,\n]{2,80},\s*\n([\s\S]{1,500}?)(?:\n\s*Send\s+[^\n]*\s+a\s+Message|\n\s*\[image:|\n\s*<https:\/\/www\.airbnb\.com\/hosting\/thread)/i
+	);
+	return cleanOtaGuestNote(match?.[1] || "");
+}
+
+function extractAirbnbListingTitle(text = "") {
+	const imageTitle = findFirstPattern(text, [
+		/\[image:\s*([^\]]{3,180})\]\s*\n\s*<https:\/\/www\.airbnb\.com\/rooms/i,
+	]);
+	if (imageTitle) return cleanOtaDisplayValue(imageTitle);
+
+	const lines = normalizedLines(text);
+	for (let index = 1; index < lines.length; index += 1) {
+		if (normalizeIntlComparable(lines[index]) !== "room") continue;
+		for (let previous = index - 1; previous >= Math.max(0, index - 4); previous -= 1) {
+			const candidate = cleanOtaDisplayValue(lines[previous]);
+			if (
+				candidate &&
+				!/^<https?:\/\//i.test(candidate) &&
+				!/airbnb|message|identity verified/i.test(candidate)
+			) {
+				return candidate;
+			}
+		}
+	}
+	return "";
+}
+
+function extractAirbnbListingId(text = "") {
+	return findFirstPattern(text, [
+		/airbnb\.com\/rooms\/(\d{6,24})\b/i,
+		/airbnb\.com\/hosting\/listings\/(\d{6,24})\b/i,
+	]);
+}
+
+function parseAirbnbMonthDay(value = "", year) {
+	const cleaned = normalizeWhitespace(value)
+		.replace(/\b(mon|tue|wed|thu|fri|sat|sun)(day)?\b,?\s*/gi, "")
+		.replace(/\s+\d{1,2}:\d{2}.*$/i, "")
+		.trim();
+	if (!cleaned || !year) return null;
+	for (const format of ["MMM D YYYY", "MMMM D YYYY"]) {
+		const parsed = dayjs(`${cleaned} ${year}`, format, true);
+		if (parsed.isValid()) return parsed;
+	}
+	return null;
+}
+
+function airbnbReferenceDate(email = {}, text = "") {
+	const forwardedDate = findFirstPattern(text, [
+		/(?:^|\n)\s*Date:\s*([^\n]{5,160})/i,
+	]);
+	const parsed = parseDate(
+		firstNonEmpty(email.date, email.receivedAt, forwardedDate)
+	);
+	return parsed && dayjs(parsed).isValid() ? dayjs(parsed) : dayjs();
+}
+
+function extractAirbnbStayDates(email = {}, text = "") {
+	const checkinRaw = findNextLineAfterExactLabel(text, "Check-in", 5);
+	const checkoutRaw = findNextLineAfterExactLabel(text, "Checkout", 5);
+	const reference = airbnbReferenceDate(email, text);
+	let checkin = /\b\d{4}\b/.test(checkinRaw) ? parseDate(checkinRaw) : null;
+	let checkout = /\b\d{4}\b/.test(checkoutRaw) ? parseDate(checkoutRaw) : null;
+
+	if (!checkin || !checkout) {
+		const year = reference.year();
+		let checkinDay = parseAirbnbMonthDay(checkinRaw, year);
+		let checkoutDay = parseAirbnbMonthDay(checkoutRaw, year);
+		if (checkinDay && reference.isValid() && checkinDay.isBefore(reference.subtract(2, "day"), "day")) {
+			checkinDay = checkinDay.add(1, "year");
+		}
+		if (checkinDay && checkoutDay && !checkoutDay.isAfter(checkinDay, "day")) {
+			checkoutDay = checkoutDay.add(1, "year");
+		}
+		checkin = checkinDay?.isValid() ? checkinDay.format("YYYY-MM-DD") : checkin;
+		checkout = checkoutDay?.isValid() ? checkoutDay.format("YYYY-MM-DD") : checkout;
+	}
+
+	return { checkinDate: checkin || null, checkoutDate: checkout || null };
+}
+
+function extractAirbnbOccupancy(text = "") {
+	const guestsLine = findNextLineAfterExactLabel(text, "Guests", 4);
+	const adultMatch = guestsLine.match(/\b(\d+)\s+adults?\b/i);
+	const childMatch = guestsLine.match(/\b(\d+)\s+children?\b/i);
+	const infantMatch = guestsLine.match(/\b(\d+)\s+infants?\b/i);
+	const adults = adultMatch ? Number(adultMatch[1]) : 0;
+	const children = childMatch ? Number(childMatch[1]) : 0;
+	const infants = infantMatch ? Number(infantMatch[1]) : 0;
+	const totalGuests = adults + children + infants || countNumber(guestsLine);
+	return { adults, children, totalGuests };
+}
+
+function extractAirbnbMoneyAfterLabel(text = "", label = "") {
+	const labelValue = findNextLineAfterExactLabel(text, label, 4);
+	const parsed = parseMoney(labelValue);
+	if (parsed.amount) return parsed;
+	const patternLabel = escapeRegExp(label).replace(/\\ /g, "\\s+");
+	const match = String(text || "").match(
+		new RegExp(`${patternLabel}\\s*\\n\\s*((?:SR|SAR|USD|US\\$|\\$)\\s*[0-9][0-9,.]*)`, "i")
+	);
+	return parseMoney(match?.[1] || "");
+}
+
+function normalizeMappingKey(value = "") {
+	return normalizeIntlComparable(value);
+}
+
+function parseAirbnbHotelMapEntries() {
+	const raw = String(
+		process.env.OTA_AIRBNB_EMAIL_HOTEL_MAP ||
+			process.env.OTA_AIRBNB_HOTEL_MAP ||
+			""
+	).trim();
+	if (!raw) return [];
+
+	if (/^\s*[\[{]/.test(raw)) {
+		try {
+			const parsed = JSON.parse(raw);
+			const entries = Array.isArray(parsed)
+				? parsed
+				: Object.entries(parsed || {}).map(([source, target]) => ({
+						source,
+						target,
+				  }));
+			return entries
+				.map((entry) => ({
+					source: normalizeWhitespace(entry.source || entry.key || entry.host || entry.listing || entry.title || ""),
+					target: normalizeWhitespace(entry.target || entry.hotelId || entry.hotelName || ""),
+					type: normalizeWhitespace(entry.type || ""),
+				}))
+				.filter((entry) => entry.source && entry.target);
+		} catch (_error) {
+			return [];
+		}
+	}
+
+	return raw
+		.split(/\r?\n|;/)
+		.map((part) => part.trim())
+		.filter(Boolean)
+		.map((part) => {
+			const [left, ...rightParts] = part.split("=");
+			const target = normalizeWhitespace(rightParts.join("="));
+			const sourceRaw = normalizeWhitespace(left);
+			const typed = sourceRaw.match(/^(host|listing|title|to|from)\s*:\s*(.+)$/i);
+			return {
+				type: normalizeWhitespace(typed?.[1] || ""),
+				source: normalizeWhitespace(typed?.[2] || sourceRaw),
+				target,
+			};
+		})
+		.filter((entry) => entry.source && entry.target);
+}
+
+function mappingTargetToHotel(target = "") {
+	const value = normalizeWhitespace(target);
+	if (/^[a-f0-9]{24}$/i.test(value)) return { hotelId: value };
+	return { hotelName: value };
+}
+
+function resolveConfiguredAirbnbHotelMapping(context = {}) {
+	const entries = parseAirbnbHotelMapEntries();
+	if (!entries.length) return {};
+
+	const candidates = [
+		...(context.hostLabels || []).map((value) => ({ type: "host", value })),
+		context.listingId ? { type: "listing", value: context.listingId } : null,
+		context.listingTitle ? { type: "title", value: context.listingTitle } : null,
+		context.to ? { type: "to", value: context.to } : null,
+		context.from ? { type: "from", value: context.from } : null,
+	].filter(Boolean);
+
+	for (const entry of entries) {
+		const entryType = normalizeMappingKey(entry.type);
+		const entrySource = normalizeMappingKey(entry.source);
+		if (!entrySource) continue;
+		const match = candidates.find((candidate) => {
+			if (entryType && normalizeMappingKey(candidate.type) !== entryType) return false;
+			const candidateValue = normalizeMappingKey(candidate.value);
+			return candidateValue === entrySource || candidateValue.includes(entrySource);
+		});
+		if (!match) continue;
+		return {
+			...mappingTargetToHotel(entry.target),
+			matchedBy: entry.type || match.type,
+			matchedValue: match.value,
+		};
+	}
+	return {};
+}
+
+function extractAirbnbFields(email = {}, text = "", provider = "") {
+	if (provider !== "airbnb" && !/airbnb/i.test(`${email.from || ""} ${email.subject || ""} ${text}`)) {
+		return {};
+	}
+
+	const confirmationNumber = extractAirbnbConfirmationNumber(text);
+	const guestName = extractAirbnbGuestName(email, text);
+	const guestNotes = extractAirbnbGuestMessage(text);
+	const hostLabels = extractAirbnbHostLabels(text);
+	const listingTitle = extractAirbnbListingTitle(text);
+	const listingId = extractAirbnbListingId(text);
+	const stayDates = extractAirbnbStayDates(email, text);
+	const occupancy = extractAirbnbOccupancy(text);
+	const guestTotal = extractAirbnbMoneyAfterLabel(text, "Total (SAR)");
+	const payout = extractAirbnbMoneyAfterLabel(text, "You earn");
+	const guestTotalCurrency = guestTotal.currency || "SAR";
+	const payoutCurrency = payout.currency || guestTotalCurrency || "SAR";
+	const guestTotalConversion = getSarConversionMeta(
+		guestTotal.amount,
+		guestTotalCurrency
+	);
+	const payoutConversion = getSarConversionMeta(payout.amount, payoutCurrency);
+	const hotelMapping = resolveConfiguredAirbnbHotelMapping({
+		hostLabels,
+		listingId,
+		listingTitle,
+		to: email.to || "",
+		from: email.from || "",
+	});
+
+	return {
+		confirmationNumber,
+		guestName,
+		guestNotes,
+		hostLabels,
+		listingTitle,
+		listingId,
+		roomName: listingTitle,
+		...stayDates,
+		...occupancy,
+		amount: guestTotal.amount || 0,
+		currency: guestTotalCurrency,
+		totalAmountSar: guestTotalConversion.totalAmountSar,
+		exchangeRateToSar: guestTotalConversion.exchangeRateToSar,
+		exchangeRateSource: guestTotalConversion.exchangeRateSource,
+		amountConvertedAt: guestTotalConversion.convertedAt,
+		totalPayoutSar: payoutConversion.totalAmountSar,
+		netAfterExpensesTotal: payoutConversion.totalAmountSar,
+		paymentSummary:
+			guestTotal.amount || payout.amount
+				? {
+						sourceCurrency: guestTotalCurrency,
+						sourceTotalGuestPaymentAmount: guestTotal.amount || 0,
+						sourceTotalPayoutAmount: payout.amount || 0,
+						totalGuestPaymentAmount: guestTotalConversion.totalAmountSar,
+						totalPayoutAmount: payoutConversion.totalAmountSar,
+						currency: "SAR",
+						exchangeRateToSar: guestTotalConversion.exchangeRateToSar,
+						exchangeRateSource: guestTotalConversion.exchangeRateSource,
+						amountConvertedAt: guestTotalConversion.convertedAt,
+				  }
+				: {},
+		paymentCollectionModel: guestTotal.amount ? "ota_collect" : "unknown",
+		paymentInstructions: guestTotal.amount
+			? "Airbnb collected guest payment; host payout is provided by Airbnb."
+			: "",
+		hotelId: hotelMapping.hotelId || "",
+		hotelName: hotelMapping.hotelName || "",
+		hotelNameAliases: hostLabels,
+		airbnbMapping: hotelMapping,
+	};
+}
+
 function isOtaHotelBoilerplateLine(value = "") {
 	return /(tax invoice|official tax|enumerated|identified bookings|expedia partner central|lodging partner services|unless properly|total transaction amounts|supersede any other tax invoices|for suppliers in us only|do not reply|privacy policy)/i.test(
 		String(value || "")
@@ -1553,16 +1912,37 @@ function resolveBookingSource({ provider = "", providerLabel = "", from = "", su
 	return cleanBookingSourceCandidate(domainRoot) || "OTA Email";
 }
 
+function hasStrongNewReservationSignal(value = "") {
+	const subjectOnly = String(value || "").toLowerCase();
+	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking)/i.test(
+		subjectOnly
+	);
+}
+
+function hasActionableCancellationSignal(subject = "", text = "") {
+	const subjectOnly = String(subject || "").toLowerCase();
+	const body = String(text || "").toLowerCase();
+	if (/(cancelled|canceled|cancelation|no[- ]?show)/i.test(subjectOnly)) {
+		return true;
+	}
+	if (
+		/(reservation|booking)[^\n.]{0,90}(cancelled|canceled|cancelled by|canceled by)|(?:cancelled|canceled)[^\n.]{0,90}(reservation|booking)|(?:has been|was|is)\s+(?:cancelled|canceled)|guest\s+(?:cancelled|canceled)/i.test(
+			body
+		)
+	) {
+		return true;
+	}
+	return false;
+}
+
 function detectEventType({ subject = "", text = "" } = {}) {
 	const haystack = `${subject} ${text}`.toLowerCase();
 	const subjectOnly = String(subject || "").toLowerCase();
-	if (/(cancelled|canceled|cancellation|cancelation)/i.test(haystack)) {
-		return "cancelled";
-	}
-	if (/(no[- ]?show)/i.test(haystack)) return "no_show";
-	if (/(new booking|new reservation|reservation confirmation|booking confirmation|confirmed reservation|booking confirmed)/i.test(subjectOnly)) {
+	if (hasStrongNewReservationSignal(subjectOnly)) {
 		return "new";
 	}
+	if (hasActionableCancellationSignal(subject, text)) return "cancelled";
+	if (/(no[- ]?show)/i.test(subjectOnly)) return "no_show";
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(haystack)) {
 		return "modified";
 	}
@@ -1580,10 +1960,10 @@ function detectEventType({ subject = "", text = "" } = {}) {
 
 function detectStatusToApply({ subject = "", text = "" } = {}) {
 	const haystack = `${subject} ${text}`.toLowerCase();
-	if (/(cancelled|canceled|cancellation|cancelation)/i.test(haystack)) {
-		return "cancelled";
-	}
-	if (/(no[- ]?show)/i.test(haystack)) return "no_show";
+	const subjectOnly = String(subject || "").toLowerCase();
+	if (hasStrongNewReservationSignal(subjectOnly)) return "confirmed";
+	if (hasActionableCancellationSignal(subject, text)) return "cancelled";
+	if (/(no[- ]?show)/i.test(subjectOnly)) return "no_show";
 	if (/(checked\s*out|checkedout|early\s*checked\s*out)/i.test(haystack)) {
 		return "checked_out";
 	}
@@ -1798,6 +2178,7 @@ function extractNormalizedReservation(email) {
 		subject: email.subject,
 		text,
 	});
+	const airbnbFields = extractAirbnbFields(email, text, provider);
 	const tableStayDates = extractTableStayDates(text);
 	const tableOccupancy = extractTableOccupancy(text);
 	const providerLabel = PROVIDER_LABELS[provider] || provider;
@@ -1825,31 +2206,36 @@ function extractNormalizedReservation(email) {
 			subject: email.subject,
 		});
 
-	const reservationId = cleanConfirmationCandidate(firstNonEmpty(
-		findField(text, [
-			"Reservation ID",
-			"Reservation number",
-			"Reservation No",
-			"Confirmation number",
-			"Confirmation #",
-			"Confirmation code",
-			"Booking ID",
-			"Booking number",
-			"Itinerary number",
-		]),
-		findFirstPattern(text, [
-			/\bReservation\s*(?:ID|No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
-			/\bConfirmation\s*(?:Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
-			/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
-		])
-	));
+	const reservationId = cleanConfirmationCandidate(
+		firstNonEmpty(
+			airbnbFields.confirmationNumber,
+			findField(text, [
+				"Reservation ID",
+				"Reservation number",
+				"Reservation No",
+				"Confirmation number",
+				"Confirmation #",
+				"Confirmation code",
+				"Booking ID",
+				"Booking number",
+				"Itinerary number",
+			]),
+			findFirstPattern(text, [
+				/\bReservation\s*(?:ID|No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\bConfirmation\s*(?:Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+			])
+		)
+	);
 
 	const hotelName = firstNonEmpty(
-		extractProviderLogoHotelName(text, provider),
-		findHotelNameField(text),
-		findStandaloneHotelName(text)
+		airbnbFields.hotelName,
+		provider === "airbnb" ? "" : extractProviderLogoHotelName(text, provider),
+		provider === "airbnb" ? "" : findHotelNameField(text),
+		provider === "airbnb" ? "" : findStandaloneHotelName(text)
 	);
-	const roomName = cleanFieldValue(findField(text, [
+	const hotelId = airbnbFields.hotelId || "";
+	const genericRoomName = cleanFieldValue(findField(text, [
 		"Room type name",
 		"Room name",
 		"Room type code/name",
@@ -1858,7 +2244,11 @@ function extractNormalizedReservation(email) {
 		"Room",
 		"Unit type",
 	]));
-	const checkinDate = tableStayDates.checkinDate || findDateValue(
+	const roomName = firstNonEmpty(
+		airbnbFields.roomName,
+		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
+	);
+	const checkinDate = airbnbFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -1877,7 +2267,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = tableStayDates.checkoutDate || findDateValue(
+	const checkoutDate = airbnbFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -1919,11 +2309,20 @@ function extractNormalizedReservation(email) {
 			/(\$\s*[0-9][0-9,.]*)/,
 		])
 	);
-	const parsedMoney = parseMoney(amountText);
+	const parsedMoney = airbnbFields.amount
+		? { amount: airbnbFields.amount, currency: airbnbFields.currency || "SAR" }
+		: parseMoney(amountText);
 	const amountCurrency =
 		parsedMoney.currency ||
 		(/\$\s*\d/.test(amountText) ? "USD" : process.env.OTA_DEFAULT_CURRENCY || "SAR");
-	const conversion = getSarConversionMeta(parsedMoney.amount, amountCurrency);
+	const conversion = airbnbFields.amount
+		? {
+				totalAmountSar: airbnbFields.totalAmountSar || 0,
+				exchangeRateToSar: airbnbFields.exchangeRateToSar || 0,
+				exchangeRateSource: airbnbFields.exchangeRateSource || "",
+				convertedAt: airbnbFields.amountConvertedAt || new Date().toISOString(),
+		  }
+		: getSarConversionMeta(parsedMoney.amount, amountCurrency);
 	const adultsField = findField(text, ["Adults", "Adult guests", "Adult"]);
 	const childrenField = findField(text, [
 		"Children",
@@ -1943,9 +2342,10 @@ function extractNormalizedReservation(email) {
 		"Number of rooms",
 		"Rooms",
 	]);
-	const adults = tableOccupancy.adults || countNumber(adultsField);
-	const children = tableOccupancy.children || countNumber(childrenField);
+	const adults = airbnbFields.adults || tableOccupancy.adults || countNumber(adultsField);
+	const children = airbnbFields.children || tableOccupancy.children || countNumber(childrenField);
 	const totalGuests =
+		airbnbFields.totalGuests ||
 		countNumber(totalGuestsField) ||
 		tableOccupancy.totalGuests ||
 		adults + children ||
@@ -1959,10 +2359,14 @@ function extractNormalizedReservation(email) {
 	const guestEmailPattern = findFirstPattern(text, [
 		/\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i,
 	]);
-	const guestEmail = cleanEmailValue(firstNonEmpty(
+	const detectedGuestEmail = cleanEmailValue(firstNonEmpty(
 		guestEmailField,
 		guestEmailPattern
 	));
+	const guestEmail =
+		provider === "airbnb" && /@(?:[\w.-]+\.)?airbnb\.com$/i.test(detectedGuestEmail)
+			? ""
+			: detectedGuestEmail;
 	const guestNameField = findField(text, [
 		"Guest name",
 		"Primary guest",
@@ -1973,6 +2377,7 @@ function extractNormalizedReservation(email) {
 		/(?:^|\n)\s*Name\s*[:#-]\s*([^\n]{1,180})/i,
 	]);
 	const guestName = firstNonEmpty(
+		airbnbFields.guestName,
 		extractProviderGuestName(text),
 		guestNameField,
 		guestNamePattern
@@ -1984,7 +2389,7 @@ function extractNormalizedReservation(email) {
 		"Guest country",
 		"Residence country",
 	]);
-	const guestNotes = findGuestNoteField(text);
+	const guestNotes = firstNonEmpty(airbnbFields.guestNotes, findGuestNoteField(text));
 	const guestPhone = findField(text, [
 		"Guest phone",
 		"Phone",
@@ -1992,13 +2397,20 @@ function extractNormalizedReservation(email) {
 		"Mobile",
 	]);
 
-	const paymentInstructionField = findField(text, [
-		"Payment instructions",
-		"Payment model",
-		"Payment type",
-		"Payment",
-	]);
+	const paymentInstructionField = firstNonEmpty(
+		airbnbFields.paymentInstructions,
+		findField(text, [
+			"Payment instructions",
+			"Payment model",
+			"Payment type",
+			"Payment",
+		])
+	);
 	const paymentText = `${paymentInstructionField} ${text}`.toLowerCase();
+	const hasExplicitCardContext =
+		/\b(virtual\s+card|\bvcc\b|card\s+number|validation\s+code|security\s+code|cvv|cvc|amount\s+to\s+charge|charge\s+amount)\b/i.test(
+			text
+		);
 
 	const activationDateField = findField(text, [
 		"Activation date",
@@ -2014,16 +2426,27 @@ function extractNormalizedReservation(email) {
 		"Charge amount",
 		"VCC amount",
 	]);
-	const activationDate = parseDate(activationDateField);
-	const expirationDate = parseCardExpirationDate(expirationDateField);
-	const cardLast4 = extractCardLast4(text);
+	const activationDate =
+		provider === "airbnb" && !hasExplicitCardContext
+			? null
+			: parseDate(activationDateField);
+	const expirationDate =
+		provider === "airbnb" && !hasExplicitCardContext
+			? null
+			: parseCardExpirationDate(expirationDateField);
+	const cardLast4 =
+		provider === "airbnb" && !hasExplicitCardContext ? "" : extractCardLast4(text);
 	const vccAmountDetails = resolveVccAmountDetails(
 		amountToChargeField,
 		amountCurrency
 	);
-	const paymentCollectionModel = detectPaymentCollectionModel(paymentText, {
-		cardLast4,
-	});
+	const paymentCollectionModel =
+		airbnbFields.paymentCollectionModel &&
+		airbnbFields.paymentCollectionModel !== "unknown"
+			? airbnbFields.paymentCollectionModel
+			: detectPaymentCollectionModel(paymentText, {
+					cardLast4,
+			  });
 	const paidOnline = paymentCollectionModel === "ota_collect";
 
 	const intent = detectReservationIntent({
@@ -2039,7 +2462,7 @@ function extractNormalizedReservation(email) {
 	if (provider === "unknown") warnings.push("Could not detect OTA provider.");
 	if (!reservationId) warnings.push("Missing reservation/confirmation id.");
 	if (!checkinDate || !checkoutDate) warnings.push("Missing or invalid stay dates.");
-	if (!hotelName) warnings.push("Missing hotel/property name.");
+	if (!hotelName && !hotelId) warnings.push("Missing hotel/property name.");
 	if (!roomName) warnings.push("Missing room type/name.");
 
 	return {
@@ -2051,7 +2474,9 @@ function extractNormalizedReservation(email) {
 		statusToApply,
 		reservationId: normalizeConfirmation(reservationId),
 		confirmationNumber: normalizeConfirmation(reservationId),
+		hotelId,
 		hotelName,
+		hotelNameAliases: airbnbFields.hotelNameAliases || [],
 		roomName,
 		checkinDate,
 		checkoutDate,
@@ -2062,6 +2487,9 @@ function extractNormalizedReservation(email) {
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
+		totalPayoutSar: airbnbFields.totalPayoutSar || 0,
+		netAfterExpensesTotal: airbnbFields.netAfterExpensesTotal || 0,
+		paymentSummary: airbnbFields.paymentSummary || {},
 		adults,
 		children,
 		totalGuests,
@@ -2082,12 +2510,14 @@ function extractNormalizedReservation(email) {
 			reservationId: !!reservationId,
 			confirmationNumber: !!reservationId,
 			bookingSource: !!sourceField,
-			hotelName: !!hotelName,
+			hotelName: !!hotelName || !!hotelId,
 			roomName: !!roomName,
 			checkinDate: !!checkinDate || !!tableStayDates.checkinDate,
 			checkoutDate: !!checkoutDate || !!tableStayDates.checkoutDate,
 			bookedAt: !!parseDate(bookedAtField),
-			amount: !!amountText && Number(parsedMoney.amount || 0) > 0,
+			amount:
+				(!!amountText || !!airbnbFields.amount) &&
+				Number(parsedMoney.amount || 0) > 0,
 			adults: !!adultsField || tableOccupancy.adults > 0,
 			children: !!childrenField || tableOccupancy.children > 0,
 			totalGuests: !!totalGuestsField || tableOccupancy.totalGuests > 0,
@@ -2132,8 +2562,34 @@ function extractNormalizedReservation(email) {
 	};
 }
 
+function mapArabicRoomType(roomNameRaw) {
+	const s = normalizeIntlComparable(roomNameRaw);
+	if (!s) return null;
+	if (/(مشترك|مشتركة|سرير|اسرة مشتركة|أسرّة مشتركة)/.test(s)) {
+		return "individualBed";
+	}
+	if (/(جناح بثلاث|ثلاث غرف|3 غرف)/.test(s)) return "masterSuite";
+	if (/(جناح بغرفتين|غرفتين|2 غرف)/.test(s)) return "suite";
+	if (/(استوديو|studio)/.test(s)) return "studioRooms";
+	if (/(فردية|فردي|شخص واحد|\b1\b)/.test(s)) return "singleRooms";
+	if (/(ثنائية|ثنائي|زوجية|زوجي|دبل|شخصين|فردين|\b2\b)/.test(s)) {
+		return "doubleRooms";
+	}
+	if (/(ثلاثية|ثلاثي|ثلاث|3 افراد|\b3\b)/.test(s)) return "tripleRooms";
+	if (/(رباعية|رباعي|اربع|أربع|4 افراد|\b4\b)/.test(s)) return "quadRooms";
+	if (/(خماسية|خماسي|خمسة|5 افراد|\b5\b)/.test(s)) return "familyRooms";
+	if (/(سداسية|سداسي|ستة|6 افراد|\b6\b|سباعية|سباعي|سبعة|7 افراد|\b7\b|عائلية|عائلي)/.test(
+		s
+	)) {
+		return "familyRooms";
+	}
+	return null;
+}
+
 function mapRoomType(roomNameRaw) {
 	if (!roomNameRaw) return null;
+	const arabicMapped = mapArabicRoomType(roomNameRaw);
+	if (arabicMapped) return arabicMapped;
 	const s = normalizeComparable(roomNameRaw);
 	const hasKeyword = (keyword) =>
 		s.split(" ").some(
@@ -3533,7 +3989,7 @@ function requiredNewReservationMissing(normalized = {}) {
 	if (!normalized.guestName) missing.push("guest name");
 	if (!normalized.checkinDate) missing.push("check-in date");
 	if (!normalized.checkoutDate) missing.push("check-out date");
-	if (!normalized.hotelName) missing.push("hotel name");
+	if (!normalized.hotelName && !normalized.hotelId) missing.push("hotel name");
 	return missing;
 }
 

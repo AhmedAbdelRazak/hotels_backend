@@ -118,9 +118,15 @@ const hasStrongNewReservationSubject = (subject = "") => {
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(value)) {
 		return false;
 	}
-	return /(new reservation|new booking|reservation confirmation|booking confirmation|confirmed reservation|booking confirmed)/i.test(
+	return /(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking)/i.test(
 		value
 	);
+};
+
+const hasReliableOtaConfirmation = (value = "") => {
+	const normalized = normalizeWhitespace(value).replace(/[^a-z0-9-]/gi, "");
+	if (normalized.length < 6) return false;
+	return /[a-z]/i.test(normalized) || /\d{6,}/.test(normalized);
 };
 
 const cleanResolvedFieldWarnings = (warnings = [], normalized = {}) => {
@@ -168,8 +174,10 @@ const getDeterministicStatusSkipReason = (heuristic = {}, emailContext = {}) => 
 		emailContext.senderLooksLikeOta ||
 		(emailContext.forwarded && emailContext.subjectHasStrongReservationSignal);
 
+	if (hasStrongNewReservationSubject(emailContext.subjectForClassification)) return "";
 	if (!hasStatusIntent) return "";
 	if (!confirmationNumber) return "";
+	if (!hasReliableOtaConfirmation(confirmationNumber)) return "";
 	if (!CLEAR_STATUS_VALUES.has(statusToApply)) return "";
 	if (!hasTrustedContext) return "";
 
@@ -282,7 +290,7 @@ const buildEmailContext = (email = {}) => {
 		text: emailText,
 	});
 	const subjectHasStrongReservationSignal =
-		/(new reservation|new booking|reservation confirmation|booking confirmation|confirmation\s*(#|number)?|modified|modification|updated|cancelled|canceled|cancellation|cancelation|reservation status|booking status|no[-\s]?show)/i.test(
+		/(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|confirmation\s*(#|number)?|modified|modification|updated|cancelled|canceled|cancellation|cancelation|reservation status|booking status|no[-\s]?show)/i.test(
 			subjectForClassification
 		);
 	const subjectHasWeakReservationSignal =
