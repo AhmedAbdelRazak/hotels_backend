@@ -2966,6 +2966,37 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - 4256ea5 Fix AI booking detail state recovery.
   - SSR 0ca22e8 Smooth support chat sending.
 - Future expectation:
-  - Before chatbot changes, read the runbook and run the verification checklist
-    there, especially transcript-style slot recovery, nationality-vs-language,
-    final Place Reservation action, PM2 health, and error-log timestamp checks.
+ - Before chatbot changes, read the runbook and run the verification checklist
+   there, especially transcript-style slot recovery, nationality-vs-language,
+   final Place Reservation action, PM2 health, and error-log timestamp checks.
+
+2026-06-22 Hotel Policy QA And Cancellation/Refund Answers
+- Files:
+  - services/hotelPolicyQa.js
+  - models/hotel_details.js
+  - controllers/hotel_details.js
+  - controllers/janat.js
+  - controllers/zadcontroller.js
+  - controllers/supportcase.js
+  - aiagent/core/db.js
+  - aiagent/core/actions.js
+  - aiagent/core/orchestrator.js
+- Hotel policy data:
+  - HotelDetails now supports `hotelPolicyQA`, a compact Q&A list for hotel
+    policies, terms, and house rules.
+  - `cancellation_refund` is mandatory. If a hotel has not saved its own policy
+    row, the sanitizer/AI helpers inject the default policy at answer time:
+    14+ days before check-in is full refund, 4-13 days keeps one night and
+    refunds the remainder, and 3 days or less is non-refundable/non-cancellable.
+  - Optional policy Q&A rows are ignored by the AI unless active and answered.
+- AI behavior:
+  - Cancellation/refund/policy questions are answered directly from
+    `hotelPolicyQA` or the mandatory default. They should not link to public
+    terms pages and should not escalate to a specialist merely for policy.
+  - The AI wording must sound like hotel reception. Prefer "Based on the
+    hotel's terms and conditions..." or a direct reception answer. Do not say
+    "I checked a document", "the record says", "hotel details say", or anything
+    that implies the assistant is reading an external/admin source.
+  - Reservation-specific cancellation review uses check-in date timing, not
+    confirmation age. Missing check-in date is explained professionally without
+    inventing refund eligibility.

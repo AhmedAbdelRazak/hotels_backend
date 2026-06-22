@@ -5298,10 +5298,10 @@ function hotelPolicyAnswerText(sc = {}, st = {}, userText = "", row = null) {
 	const answer = cleanHotelFactText(policyRow.answer);
 	if (!answer) return "";
 	if (/arabic/i.test(lang) && hasArabicScript(answer)) {
-		return `${name}\u060c ${answer}`;
+		return `${name}\u060c \u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 \u0648\u0634\u0631\u0648\u0637 \u0627\u0644\u0641\u0646\u062f\u0642: ${answer}`;
 	}
 	if (!/arabic/i.test(lang) && !hasArabicScript(answer)) {
-		return `${name}, ${answer}`;
+		return `${name}, based on the hotel's terms and conditions: ${answer}`;
 	}
 	return "";
 }
@@ -5440,7 +5440,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 				io,
 				sc,
 				st,
-				"The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Do not add a link. Do not invent exceptions, deadlines, prices, or legal wording beyond the saved answer. If the saved answer does not fully answer the latest question, say exactly what is known from the saved policy and then ask one relevant follow-up.",
+				"The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Use hotel-native wording such as 'Based on the hotel's terms and conditions' or a direct reception answer when a source phrase is useful. Never say 'I checked', 'I found in the document', 'the record says', 'the hotel details say', or imply the answer came from an external/admin document. Do not add a link. Do not invent exceptions, deadlines, prices, or legal wording beyond the saved answer. If the saved answer does not fully answer the latest question, say exactly what is known from the saved policy and then ask one relevant follow-up.",
 				{
 					latestUserMessage: userText,
 					selectedHotelPolicy: policyRow,
@@ -8755,7 +8755,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
 			: "",
 		activeHotelFacts
-			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. For hotelPolicyQA, answer from the saved question/answer text only, without adding links or unsupported exceptions. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
+			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. For hotelPolicyQA, answer from the saved question/answer text only, without adding links or unsupported exceptions. If source wording is needed, prefer "Based on the hotel's terms and conditions" or equivalent in ${targetLanguage}. Do not say or imply "I checked", "I found", "document", "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
 			: "",
 		activeHotelFacts
 			? `If activeHotelFacts.distances has walkingToElHaram or drivingToElHaram and the guest asks how far the hotel is from Al Haram, say the walking/driving minutes directly and naturally. Do not deflect to review, dates, phone, email, or confirmation before answering the distance.`
@@ -10154,12 +10154,12 @@ function generalCancellationPolicyMessage(sc = {}, st = {}, result = {}, confirm
 		return `${name}، سياسة الإلغاء والاسترداد العامة هي:\n- قبل موعد الوصول بـ 14 يومًا أو أكثر: إلغاء مجاني واسترداد كامل.\n- قبل موعد الوصول بأقل من 14 يومًا وأكثر من 3 أيام: يمكن إلغاء الحجز، ويحتفظ الفندق بقيمة ليلة واحدة فقط ويتم رد المبلغ المتبقي.\n- قبل موعد الوصول بـ 3 أيام أو أقل: لا يكون الحجز قابلًا للإلغاء أو الاسترداد حسب السياسة العامة.${reservationLine}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, la politica general de cancelacion y reembolso es:\n- 14 dias o mas antes del check-in: cancelacion gratuita con reembolso completo.\n- Menos de 14 dias y mas de 3 dias antes del check-in: la cancelacion aun puede procesarse; el hotel conserva solo una noche y se reembolsa el importe restante.\n- 3 dias o menos antes del check-in: la reserva no es cancelable ni reembolsable bajo la politica general.${reservationLine}`;
+		return `${name}, segun los terminos y condiciones del hotel, la politica general de cancelacion y reembolso es:\n- 14 dias o mas antes del check-in: cancelacion gratuita con reembolso completo.\n- Menos de 14 dias y mas de 3 dias antes del check-in: la cancelacion aun puede procesarse; el hotel conserva solo una noche y se reembolsa el importe restante.\n- 3 dias o menos antes del check-in: la reserva no es cancelable ni reembolsable bajo la politica general.${reservationLine}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, la politique generale d'annulation et de remboursement est:\n- 14 jours ou plus avant l'arrivee: annulation gratuite avec remboursement complet.\n- Moins de 14 jours et plus de 3 jours avant l'arrivee: l'annulation peut encore etre traitee; l'hotel conserve seulement une nuit et le montant restant est rembourse.\n- 3 jours ou moins avant l'arrivee: la reservation n'est ni annulable ni remboursable selon la politique generale.${reservationLine}`;
+		return `${name}, selon les conditions de l'hotel, la politique generale d'annulation et de remboursement est:\n- 14 jours ou plus avant l'arrivee: annulation gratuite avec remboursement complet.\n- Moins de 14 jours et plus de 3 jours avant l'arrivee: l'annulation peut encore etre traitee; l'hotel conserve seulement une nuit et le montant restant est rembourse.\n- 3 jours ou moins avant l'arrivee: la reservation n'est ni annulable ni remboursable selon la politique generale.${reservationLine}`;
 	}
-	return `${name}, the general cancellation and refund policy is:\n- 14 days or more before check-in: free cancellation with a full refund.\n- Less than 14 days and more than 3 days before check-in: cancellation can still be processed; the hotel keeps one night only and the remaining amount is refunded.\n- 3 days or less before check-in: the reservation is non-cancellable and non-refundable under the general policy.${reservationLine}`;
+	return `${name}, based on the hotel's terms and conditions, the general cancellation and refund policy is:\n- 14 days or more before check-in: free cancellation with a full refund.\n- Less than 14 days and more than 3 days before check-in: cancellation can still be processed; the hotel keeps one night only and the remaining amount is refunded.\n- 3 days or less before check-in: the reservation is non-cancellable and non-refundable under the general policy.${reservationLine}`;
 }
 
 function cancellationPolicySpecificLine(sc = {}, st = {}, result = {}, confirmation = "") {
@@ -10302,7 +10302,7 @@ async function answerCancellationRefundPolicyInquiry(
 			io,
 			sc,
 			st,
-			"The guest asked about cancellation or refund policy. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Do not add a link. Do not invent exceptions, deadlines, fees, or legal wording beyond the saved answer.",
+			"The guest asked about cancellation or refund policy. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Use hotel-native wording such as 'Based on the hotel's terms and conditions' or a direct reception answer when a source phrase is useful. Never say 'I checked', 'I found in the document', 'the record says', 'the hotel details say', or imply the answer came from an external/admin document. Do not add a link. Do not invent exceptions, deadlines, fees, or legal wording beyond the saved answer.",
 			{
 				latestUserMessage: userText,
 				selectedHotelPolicy: cancellationPolicyRow,
