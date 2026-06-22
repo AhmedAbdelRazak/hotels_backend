@@ -67,6 +67,23 @@ The chatbot must not ask for check-in/check-out dates, room type, phone, email,
 or confirmation number before answering the concrete request, unless the direct
 request itself cannot be answered without that missing information.
 
+## Selected-Hotel Room Type Answers
+
+When the guest asks which room types are available at the selected hotel, the
+chatbot answers deterministically from active hotel room summaries before using
+the heavier LLM writer path.
+
+- Arabic questions such as "ايه انواع الغرف" and "عندكم غرف ايه" are treated as
+  direct room-options questions even if the guest did not specify a capacity.
+- English "what rooms do you have", "room types", and close romanized or
+  mixed-script equivalents are handled the same way.
+- If active room options exist, the reply uses a short multiline bullet list
+  instead of a slash-separated inline list, so mobile chat bubbles stay readable.
+- If the guest complaint text also contains a concrete room question, the direct
+  room answer wins before the conversation-recovery apology path.
+- After listing room types, the active wait state is `room`; pricing still asks
+  only for the truly missing stay dates.
+
 ## Miscellaneous Question Examples
 
 These guest questions and their close derivatives are expected to answer first:

@@ -1822,12 +1822,37 @@ function wantsPriceButMissingDates(text = "", st = {}) {
 function selectedHotelRoomQuestionText(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (roomCapacityOrTypeInquiryText(text)) return true;
 	const mentionsRoom =
 		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
 			normalized
-		) || /غرف|غرفة|سرير|أسرة|اشخاص|أشخاص|افراد|أفراد/.test(normalized);
+		) ||
+		/غرف|غرفة|غرفه|سرير|أسرة|اسرة|اشخاص|أشخاص|افراد|أفراد/.test(normalized) ||
+		/(?:ghoraf|ghuraf|odah|oda|owda|awda)/i.test(latinCompact);
 	if (!mentionsRoom) return false;
+	const asksRoomOptions =
+		/\b(?:what|which|list|show|tell|send|share)\b[^.!?\u061f\n]*(?:room|rooms|room\s+types|options)\b/i.test(
+			lower
+		) ||
+		/\b(?:what|which)\s+(?:kind|type|types)\s+of\s+rooms?\b/i.test(lower) ||
+		/\b(?:rooms?|room\s+types?|options)\b[^.!?\u061f\n]*(?:have|offer|available|there|provide)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u064a\u0647|\u0625\u064a\u0647|\u0627\u064a|\u0623\u064a|\u0645\u0627|\u0645\u0627\u0647\u064a|\u0634\u0648|\u0634\u0646\u0648)[^؟\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641|\u0627\u0648\u0636|\u0623\u0648\u0636)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0646\u0648\u0627\u0639|\u0623\u0646\u0648\u0627\u0639|\u0646\u0648\u0639|\u0627\u0644\u0627\u0646\u0648\u0627\u0639)[^؟\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+			arabic
+		) ||
+		/(?:\u0639\u0646\u062f\u0643\u0645|\u0639\u0646\u062f\u0643|\u0641\u064a\u0647|\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631)[^؟\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:\u0628\u062a\u0642\u062f\u0645|\u0628\u062a\u0642\u062f\u0645\u0648|\u062a\u0642\u062f\u0645|\u062a\u0648\u0641\u0631)[^؟\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:eh|eih|ayh|anwa3|anwaa|whatrooms|whichrooms|roomtypes?|typesofrooms?|typesrooms?|ghoraf|ghuraf|odah|oda|owda|awda)/i.test(latinCompact);
+	if (asksRoomOptions) return true;
 	const hasRoomTypeOrCapacity =
 		Boolean(mapRoomToKey(normalized)) ||
 		Boolean(requestedGuestCountFromText(text)) ||
@@ -3502,45 +3527,102 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 }
 
 function inlineRoomOptions(options = [], lang = "") {
-	const useArabic = /arabic/i.test(lang);
 	return options
 		.map((option) =>
-			String(
-				useArabic && hasArabicScript(option?.displayNameOther)
-					? option.displayNameOther
-					: option?.displayName || option?.roomType || ""
-			).trim()
+			roomOptionDisplayName(option, lang)
 		)
 		.filter(Boolean)
 		.slice(0, 5)
 		.join(" / ");
 }
 
+function roomOptionDisplayName(option = {}, lang = "") {
+	const useArabic = /arabic/i.test(lang);
+	return String(
+		useArabic && hasArabicScript(option?.displayNameOther)
+			? option.displayNameOther
+			: option?.displayName || option?.roomType || ""
+	).trim();
+}
+
+function roomOptionsList(options = [], lang = "", limit = 6) {
+	const seen = new Set();
+	return (Array.isArray(options) ? options : [])
+		.map((option) => roomOptionDisplayName(option, lang))
+		.filter(Boolean)
+		.filter((name) => {
+			const key = name.toLowerCase();
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		})
+		.slice(0, limit);
+}
+
+function roomOptionsBullets(options = [], lang = "") {
+	return roomOptionsList(options, lang)
+		.map((name) => `- ${name}`)
+		.join("\n");
+}
+
+function roomOptionsListText(sc = {}, st = {}, options = []) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const lang = languageOf(sc, st);
+	const bullets = roomOptionsBullets(options, lang);
+	if (!bullets) {
+		if (/arabic/i.test(lang)) {
+			return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0644\u0627 \u0623\u0631\u0649 \u0642\u0627\u0626\u0645\u0629 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. \u0623\u0631\u0633\u0644 \u0639\u062f\u062f \u0627\u0644\u0623\u0634\u062e\u0627\u0635 \u0623\u0648 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628.`;
+		}
+		return `${name}, you are right. I do not currently see active room options listed for ${hotelName}. Send the guest count or dates and I will check the closest suitable option.`;
+	}
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644\u061f \u0648\u0625\u0630\u0627 \u062a\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631\u060c \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, claro. Las habitaciones disponibles en ${hotelName} son:\n${bullets}\n\nCual prefieres? Si quieres precio, enviame las fechas de entrada y salida.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, bien sur. Les types de chambres disponibles a ${hotelName} sont :\n${bullets}\n\nLequel preferez-vous ? Si vous souhaitez le prix, envoyez les dates d'arrivee et de depart.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}\u060c \u062c\u06cc \u0628\u0627\u0644\u06a9\u0644\u06d4 ${hotelName} \u0645\u06cc\u06ba \u062f\u0633\u062a\u06cc\u0627\u0628 \u06a9\u0645\u0631\u0648\u06ba \u06a9\u06cc \u0627\u0642\u0633\u0627\u0645:\n${bullets}\n\n\u0622\u067e \u06a9\u0648 \u06a9\u0648\u0646 \u0633\u0627 \u06a9\u0645\u0631\u06c1 \u067e\u0633\u0646\u062f \u06c1\u06d2\u061f \u0642\u06cc\u0645\u062a \u06a9\u06d2 \u0644\u06cc\u06d2 \u0686\u06cc\u06a9 \u0627\u0646 \u0627\u0648\u0631 \u0686\u06cc\u06a9 \u0622\u0624\u0679 \u06a9\u06cc \u062a\u0627\u0631\u06cc\u062e\u06cc\u06ba \u0628\u06be\u06cc\u062c \u062f\u06cc\u06ba\u06d4`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, bilkul. ${hotelName} \u092e\u0947\u0902 \u0909\u092a\u0932\u092c\u094d\u0927 \u0930\u0942\u092e \u091f\u093e\u0907\u092a:\n${bullets}\n\n\u0906\u092a \u0915\u094c\u0928 \u0938\u093e \u092a\u0938\u0902\u0926 \u0915\u0930\u0947\u0902\u0917\u0947? \u0915\u0940\u092e\u0924 \u091a\u093e\u0939\u093f\u090f \u0924\u094b \u091a\u0947\u0915-\u0907\u0928 \u0914\u0930 \u091a\u0947\u0915-\u0906\u0909\u091f \u0924\u093e\u0930\u0940\u0916 \u092d\u0947\u091c\u0947\u0902.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, tentu. Tipe kamar yang tersedia di ${hotelName}:\n${bullets}\n\nMana yang Anda pilih? Untuk harga, kirim tanggal check-in dan check-out.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, tentu. Jenis bilik yang tersedia di ${hotelName}:\n${bullets}\n\nYang mana anda pilih? Untuk harga, hantarkan tarikh check-in dan check-out.`;
+	}
+	return `${name}, of course. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer? If you want the price, send the check-in and checkout dates.`;
+}
+
 function roomPreferenceSalesText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
 	const lang = languageOf(sc, st);
-	const options = inlineRoomOptions(
-		activeHotelRoomSummaries(st.hotel).slice(0, 5),
-		lang
-	);
+	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 6);
+	const options = roomOptionsBullets(activeRooms, lang);
 	if (/arabic/i.test(lang)) {
 		return options
-			? `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0641\u064a ${hotelName} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u062a\u0634\u0645\u0644: ${options}. \u0623\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u062a\u0641\u0636\u0644 \u0644\u0644\u062d\u062c\u0632\u061f`
+			? `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0641\u064a ${hotelName} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629:\n${options}\n\n\u0623\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u062a\u0641\u0636\u0644 \u0644\u0644\u062d\u062c\u0632\u061f`
 			: `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0645\u0627 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
 		return options
-			? `${name}, claro. En ${hotelName} puedo ayudarte a elegir la habitacion adecuada. Tenemos opciones como: ${options}. Que tipo de habitacion quieres reservar?`
+			? `${name}, claro. En ${hotelName} puedo ayudarte a elegir la habitacion adecuada. Tenemos estas opciones:\n${options}\n\nQue tipo de habitacion quieres reservar?`
 			: `${name}, claro. Puedo ayudarte a elegir la habitacion adecuada. Que tipo de habitacion o cuantos huespedes necesitas?`;
 	}
 	if (/french/i.test(lang)) {
 		return options
-			? `${name}, bien sur. A ${hotelName}, je peux vous aider a choisir la chambre qui convient. Nous avons notamment : ${options}. Quel type de chambre souhaitez-vous reserver ?`
+			? `${name}, bien sur. A ${hotelName}, je peux vous aider a choisir la chambre qui convient. Nous avons notamment :\n${options}\n\nQuel type de chambre souhaitez-vous reserver ?`
 			: `${name}, bien sur. Je peux vous aider a choisir la chambre qui convient. Quel type de chambre ou combien de personnes faut-il prevoir ?`;
 	}
 	return options
-		? `${name}, of course. At ${hotelName}, I can help you choose the right room. We currently have ${options}; which room type would you like to book?`
+		? `${name}, of course. At ${hotelName}, I can help you choose the right room. We currently have:\n${options}\n\nWhich room type would you like to book?`
 		: `${name}, of course. I can help you choose the right room. Which room type or guest count should I prepare for you?`;
 }
 
@@ -4050,6 +4132,19 @@ async function answerSelectedHotelRoomQuestion(
 		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
 		: [];
 	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+	if (!roomTypeKey && activeRooms.length) {
+		const sent = await humanSend(
+			io,
+			sc,
+			st,
+			roomOptionsListText(sc, st, activeRooms)
+		);
+		if (sent) {
+			st.waitFor = "room";
+			stampAsk(st, "room");
+		}
+		return true;
+	}
 	if (
 		roomTypeKey &&
 		matchingRooms.length &&
@@ -10510,6 +10605,16 @@ async function planTurn(io, sc) {
 
 		hydrateKnownSlotsFromConversation(sc, st);
 		recoverBookingStageFromConversation(sc, st);
+		if (!severeAbusiveGuestText(userText)) {
+			const earlyDirectRequestHandled = await tryAnswerDirectGuestRequest(
+				io,
+				sc,
+				st,
+				userText,
+				{}
+			);
+			if (earlyDirectRequestHandled) return;
+		}
 		if (botExperienceComplaintText(userText) && !severeAbusiveGuestText(userText)) {
 			await answerConversationRecovery(io, sc, st, userText);
 			return;

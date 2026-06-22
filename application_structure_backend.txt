@@ -2841,3 +2841,24 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     diacritic transliteration to the same plain Latin spelling.
   - Writer rules explicitly prevent repeating the Islamic salutation after the
     first greeting unless the guest naturally restarts with a fresh greeting.
+
+2026-06-21 AI Chat Room Options Readability And Recovery Priority
+- Files:
+  - aiagent/core/orchestrator.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Root-cause fix:
+  - Selected-hotel room-options questions no longer require a specific room type
+    or guest capacity before being recognized.
+  - Arabic room-list phrasing such as "ايه انواع الغرف" and "عندكم غرف ايه",
+    English room-list phrasing, and common romanized forms are treated as direct
+    room questions.
+  - Direct concrete room questions are attempted before ordinary bot-experience
+    complaint recovery, so a frustrated guest who repeats a clear room question
+    receives the room answer instead of another generic clarification prompt.
+- Response format:
+  - General room-type answers are generated from active hotel room summaries
+    deterministically, not by a slower freeform writer call.
+  - Room options are sent as a short multiline bullet list instead of a
+    slash-separated inline sentence for better readability on mobile.
+  - The bot then waits for the guest's preferred room type; exact pricing still
+    asks only for check-in and checkout dates when those are missing.
