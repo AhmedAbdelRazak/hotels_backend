@@ -259,6 +259,33 @@ function stayDateDisplay(st = {}) {
 		shouldShowBoth: Boolean(hijri),
 	};
 }
+
+function mergeDateRangeIntoState(st = {}, dates = {}, { onlyIfMissing = false } = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return false;
+	if (!st.slots) st.slots = {};
+	if (onlyIfMissing && st.slots.checkinISO && st.slots.checkoutISO) {
+		return false;
+	}
+	st.slots.checkinISO = onlyIfMissing
+		? st.slots.checkinISO || dates.checkinISO
+		: dates.checkinISO;
+	st.slots.checkoutISO = onlyIfMissing
+		? st.slots.checkoutISO || dates.checkoutISO
+		: dates.checkoutISO;
+
+	const raw = dates.raw || {};
+	const calendar = raw.calendar || "gregorian";
+	st.dateRaw = {
+		calendar,
+		checkin: raw.checkin || dates.checkinISO,
+		checkout: raw.checkout || dates.checkoutISO,
+	};
+	if (String(calendar).toLowerCase() === "hijri") {
+		if (raw.checkinHijri) st.dateRaw.checkinHijri = raw.checkinHijri;
+		if (raw.checkoutHijri) st.dateRaw.checkoutHijri = raw.checkoutHijri;
+	}
+	return true;
+}
 const ARABIC_HIJRI_MONTHS = [
 	"\u0645\u062d\u0631\u0645",
 	"\u0635\u0641\u0631",
@@ -1438,19 +1465,22 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		return;
 	}
 	const before = JSON.stringify(st.slots || {});
-	const allText = conversationText(sc);
 	const guestText = conversationText(sc, { guestsOnly: true });
-	const dates = quickDateRange(allText);
-	if (
-		dates.checkinISO &&
-		dates.checkoutISO &&
-		!needsExplicitPastDateClarification(allText, dates)
-	) {
-		st.slots.checkinISO = st.slots.checkinISO || dates.checkinISO;
-		st.slots.checkoutISO = st.slots.checkoutISO || dates.checkoutISO;
-		if (dates.raw) {
-			st.dateRaw = { ...st.dateRaw, ...dates.raw };
+	let latestGuestDateRange = null;
+	for (const message of conversation) {
+		if (!isGuestConversationMessage(message)) continue;
+		const messageText = conversationEntryContextText(message);
+		const messageDates = quickDateRange(messageText);
+		if (
+			messageDates.checkinISO &&
+			messageDates.checkoutISO &&
+			!needsExplicitPastDateClarification(messageText, messageDates)
+		) {
+			latestGuestDateRange = messageDates;
 		}
+	}
+	if (latestGuestDateRange) {
+		mergeDateRangeIntoState(st, latestGuestDateRange);
 	}
 	let latestGuestRoomKey = null;
 	for (const message of conversation) {
@@ -3605,32 +3635,67 @@ function roomOptionsListText(sc = {}, st = {}, options = []) {
 	const hotelName = localizedHotelName(sc, st);
 	const lang = languageOf(sc, st);
 	const bullets = roomOptionsBullets(options, lang);
+	const hasStayDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	const dateLines = hasStayDates ? localizedStayDateLines(sc, st) : {};
+	const dateText = [dateLines.primary, dateLines.secondary ? `(${dateLines.secondary})` : ""]
+		.filter(Boolean)
+		.join(" ");
 	if (!bullets) {
 		if (/arabic/i.test(lang)) {
+			if (hasStayDates) {
+				return `${name}\u060c \u0648\u0635\u0644\u062a\u0646\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}. \u0644\u0627 \u0623\u0631\u0649 \u0642\u0627\u0626\u0645\u0629 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. \u0623\u0631\u0633\u0644 \u0639\u062f\u062f \u0627\u0644\u0623\u0634\u062e\u0627\u0635 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628.`;
+			}
 			return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0644\u0627 \u0623\u0631\u0649 \u0642\u0627\u0626\u0645\u0629 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. \u0623\u0631\u0633\u0644 \u0639\u062f\u062f \u0627\u0644\u0623\u0634\u062e\u0627\u0635 \u0623\u0648 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628.`;
+		}
+		if (hasStayDates) {
+			return `${name}, I have the dates: ${dateText}. I do not currently see active room options listed for ${hotelName}. Send the guest count and I will check the closest suitable option.`;
 		}
 		return `${name}, you are right. I do not currently see active room options listed for ${hotelName}. Send the guest count or dates and I will check the closest suitable option.`;
 	}
 	if (/arabic/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}\u060c \u0648\u0635\u0644\u062a\u0646\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}. \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644 \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631\u061f`;
+		}
 		return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644\u061f \u0648\u0625\u0630\u0627 \u062a\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631\u060c \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629.`;
 	}
 	if (/spanish/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, perfecto, ya tengo las fechas: ${dateText}. Las habitaciones disponibles en ${hotelName} son:\n${bullets}\n\nCual prefieres para revisar precio y disponibilidad?`;
+		}
 		return `${name}, claro. Las habitaciones disponibles en ${hotelName} son:\n${bullets}\n\nCual prefieres? Si quieres precio, enviame las fechas de entrada y salida.`;
 	}
 	if (/french/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, parfait, j'ai bien les dates : ${dateText}. Les types de chambres disponibles a ${hotelName} sont :\n${bullets}\n\nLequel preferez-vous afin que je verifie le prix et la disponibilite ?`;
+		}
 		return `${name}, bien sur. Les types de chambres disponibles a ${hotelName} sont :\n${bullets}\n\nLequel preferez-vous ? Si vous souhaitez le prix, envoyez les dates d'arrivee et de depart.`;
 	}
 	if (/urdu/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}\u060c \u062c\u06cc \u0628\u0627\u0644\u06a9\u0644\u060c \u062a\u0627\u0631\u06cc\u062e\u06cc\u06ba \u0645\u0648\u0635\u0648\u0644 \u06c1\u0648 \u06af\u0626\u06cc \u06c1\u06cc\u06ba: ${dateText}. ${hotelName} \u0645\u06cc\u06ba \u062f\u0633\u062a\u06cc\u0627\u0628 \u06a9\u0645\u0631\u0648\u06ba \u06a9\u06cc \u0627\u0642\u0633\u0627\u0645:\n${bullets}\n\n\u0622\u067e \u06a9\u0648 \u06a9\u0648\u0646 \u0633\u0627 \u06a9\u0645\u0631\u06c1 \u067e\u0633\u0646\u062f \u06c1\u06d2 \u062a\u0627\u06a9\u06c1 \u0645\u06cc\u06ba \u0642\u06cc\u0645\u062a \u0627\u0648\u0631 \u062f\u0633\u062a\u06cc\u0627\u0628\u06cc \u0686\u06cc\u06a9 \u06a9\u0631 \u0633\u06a9\u0648\u06ba\u061f`;
+		}
 		return `${name}\u060c \u062c\u06cc \u0628\u0627\u0644\u06a9\u0644\u06d4 ${hotelName} \u0645\u06cc\u06ba \u062f\u0633\u062a\u06cc\u0627\u0628 \u06a9\u0645\u0631\u0648\u06ba \u06a9\u06cc \u0627\u0642\u0633\u0627\u0645:\n${bullets}\n\n\u0622\u067e \u06a9\u0648 \u06a9\u0648\u0646 \u0633\u0627 \u06a9\u0645\u0631\u06c1 \u067e\u0633\u0646\u062f \u06c1\u06d2\u061f \u0642\u06cc\u0645\u062a \u06a9\u06d2 \u0644\u06cc\u06d2 \u0686\u06cc\u06a9 \u0627\u0646 \u0627\u0648\u0631 \u0686\u06cc\u06a9 \u0622\u0624\u0679 \u06a9\u06cc \u062a\u0627\u0631\u06cc\u062e\u06cc\u06ba \u0628\u06be\u06cc\u062c \u062f\u06cc\u06ba\u06d4`;
 	}
 	if (/hindi/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, bilkul, dates mil gayi hain: ${dateText}. ${hotelName} \u092e\u0947\u0902 \u0909\u092a\u0932\u092c\u094d\u0927 \u0930\u0942\u092e \u091f\u093e\u0907\u092a:\n${bullets}\n\n\u0906\u092a \u0915\u094c\u0928 \u0938\u093e \u092a\u0938\u0902\u0926 \u0915\u0930\u0947\u0902\u0917\u0947 \u0924\u093e\u0915\u093f \u092e\u0948\u0902 price aur availability check kar sakun?`;
+		}
 		return `${name}, bilkul. ${hotelName} \u092e\u0947\u0902 \u0909\u092a\u0932\u092c\u094d\u0927 \u0930\u0942\u092e \u091f\u093e\u0907\u092a:\n${bullets}\n\n\u0906\u092a \u0915\u094c\u0928 \u0938\u093e \u092a\u0938\u0902\u0926 \u0915\u0930\u0947\u0902\u0917\u0947? \u0915\u0940\u092e\u0924 \u091a\u093e\u0939\u093f\u090f \u0924\u094b \u091a\u0947\u0915-\u0907\u0928 \u0914\u0930 \u091a\u0947\u0915-\u0906\u0909\u091f \u0924\u093e\u0930\u0940\u0916 \u092d\u0947\u091c\u0947\u0902.`;
 	}
 	if (/indonesian/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, baik, tanggalnya sudah saya terima: ${dateText}. Tipe kamar yang tersedia di ${hotelName}:\n${bullets}\n\nMana yang Anda pilih agar saya cek harga dan ketersediaannya?`;
+		}
 		return `${name}, tentu. Tipe kamar yang tersedia di ${hotelName}:\n${bullets}\n\nMana yang Anda pilih? Untuk harga, kirim tanggal check-in dan check-out.`;
 	}
 	if (/malay/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, baik, tarikh sudah saya terima: ${dateText}. Jenis bilik yang tersedia di ${hotelName}:\n${bullets}\n\nYang mana anda pilih supaya saya semak harga dan ketersediaan?`;
+		}
 		return `${name}, tentu. Jenis bilik yang tersedia di ${hotelName}:\n${bullets}\n\nYang mana anda pilih? Untuk harga, hantarkan tarikh check-in dan check-out.`;
+	}
+	if (hasStayDates) {
+		return `${name}, perfect, I have the dates: ${dateText}. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer so I can check price and availability?`;
 	}
 	return `${name}, of course. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer? If you want the price, send the check-in and checkout dates.`;
 }
@@ -4000,9 +4065,7 @@ async function handlePendingLargeGroupCombination(io, sc, st, userText = "") {
 	if (!st.pendingRoomCombination) return false;
 	const dateRange = extractDateRange(userText);
 	if (dateRange.checkinISO && dateRange.checkoutISO) {
-		st.slots.checkinISO = dateRange.checkinISO;
-		st.slots.checkoutISO = dateRange.checkoutISO;
-		if (dateRange.raw) st.dateRaw = { ...st.dateRaw, ...dateRange.raw };
+		mergeDateRangeIntoState(st, dateRange);
 		await answerLargeGroupRoomRecommendation(
 			io,
 			sc,
@@ -4145,6 +4208,14 @@ async function answerSelectedHotelRoomQuestion(
 	userText,
 	roomTypeKey = null
 ) {
+	const latestDates = extractDateRange(userText);
+	if (
+		latestDates.checkinISO &&
+		latestDates.checkoutISO &&
+		!needsExplicitPastDateClarification(userText, latestDates)
+	) {
+		mergeDateRangeIntoState(st, latestDates);
+	}
 	if (st.activeTurnHadReply) {
 		logStep(String(sc._id), "room_question.skip_after_reply", {
 			roomTypeKey,
@@ -8314,9 +8385,7 @@ async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
 	}
 	if (dates?.checkinISO && dates?.checkoutISO) {
 		clearPendingRoomAlternative(st);
-		st.slots.checkinISO = dates.checkinISO;
-		st.slots.checkoutISO = dates.checkoutISO;
-		if (dates.raw) st.dateRaw = { ...st.dateRaw, ...dates.raw };
+		mergeDateRangeIntoState(st, dates);
 		st.quote = null;
 		st.quoteSummarizedAt = 0;
 		st.reviewSent = false;
@@ -10046,7 +10115,6 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	) {
 		return "hotel_contact";
 	}
-	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
 	if (st.hotel && crossHotelRequestText(text)) return "hotel_scope_boundary";
 	if (
 		st.hotel &&
@@ -10064,6 +10132,7 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	) {
 		return "selected_hotel_room";
 	}
+	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
 	if (st.hotel && (lu?.amenity || findAmenityMatch(text))) return "amenity_question";
 	if (broadGeneralSupportQuestionText(text, st, lu)) return "general_support";
 	return "";
@@ -11062,10 +11131,6 @@ async function planTurn(io, sc) {
 			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
 			return;
 		}
-		if (vagueHajjInquiryText(userText)) {
-			await answerVagueHajjInquiry(io, sc, st, userText);
-			return;
-		}
 		if (
 			hotelContactDetailsQuestionText(userText) ||
 			hotelContactFollowupQuestionText(sc, userText)
@@ -11081,6 +11146,10 @@ async function planTurn(io, sc) {
 			!explicitlyExistingReservationIntent(userText)
 		) {
 			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
+		if (vagueHajjInquiryText(userText)) {
+			await answerVagueHajjInquiry(io, sc, st, userText);
 			return;
 		}
 		if (isReservationDetailStep(st)) {
@@ -11117,11 +11186,7 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			st.slots.checkinISO = quickTurnDates.checkinISO;
-			st.slots.checkoutISO = quickTurnDates.checkoutISO;
-			if (quickTurnDates.raw) {
-				st.dateRaw = { ...st.dateRaw, ...quickTurnDates.raw };
-			}
+			mergeDateRangeIntoState(st, quickTurnDates);
 			await answerLargeGroupRoomRecommendation(
 				io,
 				sc,
@@ -11140,11 +11205,7 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			st.slots.checkinISO = quickTurnDates.checkinISO;
-			st.slots.checkoutISO = quickTurnDates.checkoutISO;
-			if (quickTurnDates.raw) {
-				st.dateRaw = { ...st.dateRaw, ...quickTurnDates.raw };
-			}
+			mergeDateRangeIntoState(st, quickTurnDates);
 			logStep(caseId, "quick_dates.direct_quote", {
 				roomTypeKey: st.slots.roomTypeKey,
 				checkinISO: st.slots.checkinISO,
@@ -11254,22 +11315,26 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		if (decisionLu?.dates?.raw) {
-			if (decisionLu.dates.raw.checkin)
-				st.dateRaw.checkin = decisionLu.dates.raw.checkin;
-			if (decisionLu.dates.raw.checkout)
-				st.dateRaw.checkout = decisionLu.dates.raw.checkout;
-			if (decisionLu.dates.raw.calendar)
-				st.dateRaw.calendar = decisionLu.dates.raw.calendar;
-			if (decisionLu.dates.raw.checkinHijri)
-				st.dateRaw.checkinHijri = decisionLu.dates.raw.checkinHijri;
-			if (decisionLu.dates.raw.checkoutHijri)
-				st.dateRaw.checkoutHijri = decisionLu.dates.raw.checkoutHijri;
+		if (decisionLu.dates?.checkinISO && decisionLu.dates?.checkoutISO) {
+			mergeDateRangeIntoState(st, decisionLu.dates);
+		} else {
+			if (decisionLu?.dates?.raw) {
+				if (decisionLu.dates.raw.checkin)
+					st.dateRaw.checkin = decisionLu.dates.raw.checkin;
+				if (decisionLu.dates.raw.checkout)
+					st.dateRaw.checkout = decisionLu.dates.raw.checkout;
+				if (decisionLu.dates.raw.calendar)
+					st.dateRaw.calendar = decisionLu.dates.raw.calendar;
+				if (decisionLu.dates.raw.checkinHijri)
+					st.dateRaw.checkinHijri = decisionLu.dates.raw.checkinHijri;
+				if (decisionLu.dates.raw.checkoutHijri)
+					st.dateRaw.checkoutHijri = decisionLu.dates.raw.checkoutHijri;
+			}
+			if (decisionLu.dates?.checkinISO)
+				st.slots.checkinISO = decisionLu.dates.checkinISO;
+			if (decisionLu.dates?.checkoutISO)
+				st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		}
-		if (decisionLu.dates?.checkinISO)
-			st.slots.checkinISO = decisionLu.dates.checkinISO;
-		if (decisionLu.dates?.checkoutISO)
-			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		if (
 			st.hotel &&
 			st.pendingRoomCombination &&
@@ -11838,11 +11903,7 @@ async function planTurn(io, sc) {
 			dateRange.checkinISO &&
 			dateRange.checkoutISO
 		) {
-			st.slots.checkinISO = dateRange.checkinISO;
-			st.slots.checkoutISO = dateRange.checkoutISO;
-			if (dateRange.raw) {
-				st.dateRaw = { ...st.dateRaw, ...dateRange.raw };
-			}
+			mergeDateRangeIntoState(st, dateRange);
 			await answerLargeGroupRoomRecommendation(
 				io,
 				sc,
@@ -11857,8 +11918,7 @@ async function planTurn(io, sc) {
 			dateRange.checkoutISO &&
 			st.slots.roomTypeKey
 		) {
-			st.slots.checkinISO = dateRange.checkinISO;
-			st.slots.checkoutISO = dateRange.checkoutISO;
+			mergeDateRangeIntoState(st, dateRange);
 			if (st.hotel) {
 				await shareKnownStayQuote(io, sc, st);
 			} else {
@@ -11899,20 +11959,22 @@ async function planTurn(io, sc) {
 		const lu = decisionLu;
 		logStep(caseId, "nlu.reused", lu);
 
-		// raw dates (for hijri display)
-		if (lu?.dates?.raw) {
-			if (lu.dates.raw.checkin) st.dateRaw.checkin = lu.dates.raw.checkin;
-			if (lu.dates.raw.checkout) st.dateRaw.checkout = lu.dates.raw.checkout;
-			if (lu.dates.raw.calendar) st.dateRaw.calendar = lu.dates.raw.calendar;
-			if (lu.dates.raw.checkinHijri)
-				st.dateRaw.checkinHijri = lu.dates.raw.checkinHijri;
-			if (lu.dates.raw.checkoutHijri)
-				st.dateRaw.checkoutHijri = lu.dates.raw.checkoutHijri;
+		// raw dates (for hijri display) and slots
+		if (lu.dates?.checkinISO && lu.dates?.checkoutISO) {
+			mergeDateRangeIntoState(st, lu.dates);
+		} else {
+			if (lu?.dates?.raw) {
+				if (lu.dates.raw.checkin) st.dateRaw.checkin = lu.dates.raw.checkin;
+				if (lu.dates.raw.checkout) st.dateRaw.checkout = lu.dates.raw.checkout;
+				if (lu.dates.raw.calendar) st.dateRaw.calendar = lu.dates.raw.calendar;
+				if (lu.dates.raw.checkinHijri)
+					st.dateRaw.checkinHijri = lu.dates.raw.checkinHijri;
+				if (lu.dates.raw.checkoutHijri)
+					st.dateRaw.checkoutHijri = lu.dates.raw.checkoutHijri;
+			}
+			if (lu.dates?.checkinISO) st.slots.checkinISO = lu.dates.checkinISO;
+			if (lu.dates?.checkoutISO) st.slots.checkoutISO = lu.dates.checkoutISO;
 		}
-
-		// merge slots
-		if (lu.dates?.checkinISO) st.slots.checkinISO = lu.dates.checkinISO;
-		if (lu.dates?.checkoutISO) st.slots.checkoutISO = lu.dates.checkoutISO;
 		if (lu.roomTypeKey) st.slots.roomTypeKey = lu.roomTypeKey;
 
 		// ===== Amenity interception (e.g., "does it have WiFi?")

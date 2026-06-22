@@ -2897,6 +2897,26 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     `place_reservation` action, keeping the last booking step transparent and
     user-driven.
 
+2026-06-21 AI Chat Date Memory And Hotel Fact Priority
+- Files:
+  - aiagent/core/orchestrator.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Date memory:
+  - Support-case hydration now reads guest messages in order and keeps the
+    latest complete guest-provided date range, rather than scanning the whole
+    transcript and keeping the first range.
+  - Full date-range updates replace dateRaw as one unit, so older Hijri display
+    metadata cannot be shown with newer Gregorian slot dates after the guest
+    corrects dates.
+- Room flow:
+  - Selected-hotel room-list replies acknowledge known dates and ask only for
+    the missing room choice or guest fit. They ask for dates only when check-in
+    or checkout is truly missing.
+- Direct facts:
+  - Selected-hotel location, bus/shuttle, and distance-from-Al-Haram questions
+    are prioritized before broad Hajj/travel fallback handling, so factual
+    hotel questions do not collapse back into booking prompts.
+
 2026-06-21 OTA Inbound Unmapped Hotel Assignment Queue
 - Files:
   - services/otaReservationMapper.js

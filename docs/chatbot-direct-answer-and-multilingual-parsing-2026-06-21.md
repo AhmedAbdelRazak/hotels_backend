@@ -404,6 +404,25 @@ Additional production tightening after the Ahmed/Aisha single-hotel chat:
   prompt with `Place Reservation` / `There's Something Wrong` style quick
   replies. `createReservationForCase` should run only after the
   `place_reservation` quick-reply action is received.
+
+## Date Memory And Hotel Fact Priority
+
+Additional production tightening after the Mohammed/Hana single-hotel chat:
+
+- Support-case slot hydration now reads guest messages in order and lets the
+  latest complete guest-provided date range win. It no longer scans the whole
+  transcript and latches onto the first date range it sees.
+- Full date-range updates replace the date display metadata atomically. This
+  prevents an older Hijri range from being shown beside a newer Gregorian date
+  range after the guest corrects or changes dates.
+- Selected-hotel room-list replies are aware of known dates. If check-in and
+  checkout are already known, the room-list answer acknowledges the dates and
+  asks only for the room choice or guest fit. It must not ask the guest to send
+  dates again.
+- Selected-hotel facts such as location, bus/shuttle, and distance from Al Haram
+  are prioritized before broad Hajj/travel fallback handling. A message that
+  asks "موقع الفندق", "اتوبيس", or "كم يبعد عن الحرم" in a selected-hotel chat
+  must answer those facts before any booking prompt.
 - Public client messages can now preserve `clientAction` so the backend can
   distinguish a real final button click from ordinary typed confirmation text.
 - Hotel, room, single-hotel, and deal CTAs use "Chat With Reception" in English
