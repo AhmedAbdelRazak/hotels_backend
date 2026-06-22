@@ -2893,6 +2893,36 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Completing guest details no longer creates the reservation automatically.
     The bot sends a final localized prompt with `Place Reservation` /
     `There's Something Wrong` style buttons.
-  - `createReservationForCase` is called only after the final
+ - `createReservationForCase` is called only after the final
     `place_reservation` action, keeping the last booking step transparent and
     user-driven.
+
+2026-06-21 OTA Inbound Unmapped Hotel Assignment Queue
+- Files:
+  - services/otaReservationMapper.js
+  - services/otaReservationVisibility.js
+  - controllers/janat.js
+  - routes/janat.js
+  - docs/ota-reservation-sync-expedia-2026-06-15.md
+- Behavior:
+  - Complete OTA inbound emails no longer fail solely because the hotel cannot
+    be resolved. If confirmation number, guest name, check-in, and checkout are
+    present and no duplicate reservation exists, the backend saves a pending
+    OTA Platform Review reservation with no hotelId/belongsTo.
+  - Duplicate protection still runs before every create, including unmapped
+    creates, through findReservationByOtaConfirmation across PMS, reservation,
+    customer_details.confirmation_number2, and supplier OTA confirmation fields.
+  - Expedia/Booking/Agoda structured hotel extraction remains preferred. The
+    explicit subject/body hotel-name scan is only a fallback; Airbnb uses
+    configured listing/title mapping or explicit known hotel names, never host
+    greeting identity.
+  - Role-1000 OTA queue scoping includes unassigned OTA review rows so platform
+    OTA staff can assign them. Hotel dropdown choices remain scoped when the
+    actor has assigned hotel ids.
+  - Release to hotel is blocked server-side with ota_hotel_assignment_required
+    until a valid hotel is assigned, and normal OTA pricing review is still
+    required before release.
+  - GET /api/admin/ota-reservations/hotels/:userId returns searchable assignment
+    hotel options under the OTAReservations permission.
+  - PUT /api/admin/ota-reservations/:reservationId/hotel/:userId assigns the
+    hotel, owner, audit metadata, and clears the assignment-required flags.

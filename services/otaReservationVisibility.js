@@ -94,9 +94,15 @@ const platformOtaScopeFilter = (actor = {}) => {
 	);
 	if (!hotelIds.length) return null;
 	return {
-		hotelId: {
-			$in: hotelIds.map((id) => mongoose.Types.ObjectId(id)),
-		},
+		$or: [
+			{
+				hotelId: {
+					$in: hotelIds.map((id) => mongoose.Types.ObjectId(id)),
+				},
+			},
+			{ hotelId: { $exists: false } },
+			{ hotelId: null },
+		],
 	};
 };
 

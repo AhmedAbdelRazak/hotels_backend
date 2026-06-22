@@ -213,6 +213,21 @@ function expandHotelNameCandidates(candidates = []) {
 	);
 }
 
+function explicitHotelAliasFromText(value = "") {
+	const source = normalizeIntlComparable(value);
+	if (!source) return "";
+	for (const group of EXPLICIT_HOTEL_ALIAS_GROUPS) {
+		const sortedLabels = [...group].sort((left, right) => right.length - left.length);
+		for (const label of sortedLabels) {
+			const key = normalizeIntlComparable(label);
+			if (key && key.length >= 5 && source.includes(key)) {
+				return normalizeWhitespace(label);
+			}
+		}
+	}
+	return "";
+}
+
 const HOTEL_NAME_STOPWORDS = new Set([
 	"hotel",
 	"hotels",
@@ -2251,10 +2266,16 @@ function extractNormalizedReservation(email) {
 		)
 	);
 
+	const explicitHotelName = firstNonEmpty(
+		explicitHotelAliasFromText(email.subject || ""),
+		explicitHotelAliasFromText(text)
+	);
 	const hotelName = firstNonEmpty(
 		airbnbFields.hotelName,
+		provider === "airbnb" ? explicitHotelName : "",
 		provider === "airbnb" ? "" : extractProviderLogoHotelName(text, provider),
 		provider === "airbnb" ? "" : findHotelNameField(text),
+		provider === "airbnb" ? "" : explicitHotelName,
 		provider === "airbnb" ? "" : findStandaloneHotelName(text)
 	);
 	const hotelId = airbnbFields.hotelId || "";
@@ -3797,6 +3818,43 @@ function buildAuditEntry(normalized, action, warnings = []) {
 	};
 }
 
+function findHotelMentionedInSourceText(hotels = [], normalized = {}) {
+	const sourceText = normalizeIntlComparable(
+		[
+			normalized.source?.subject || "",
+			normalized.source?.safeSnippet || "",
+			normalized.hotelName || "",
+		].join(" ")
+	);
+	if (!sourceText) return null;
+
+	let best = null;
+	let bestScore = 0;
+	let ties = 0;
+	for (const hotel of hotels || []) {
+		const labels = expandHotelNameCandidates([
+			hotel.hotelName,
+			hotel.hotelName_OtherLanguage,
+		]);
+		let hotelScore = 0;
+		for (const label of labels) {
+			const key = normalizeIntlComparable(label);
+			if (key && key.length >= 5 && sourceText.includes(key)) {
+				hotelScore = Math.max(hotelScore, key.length);
+			}
+		}
+		if (hotelScore > bestScore) {
+			best = hotel;
+			bestScore = hotelScore;
+			ties = 1;
+		} else if (hotelScore > 0 && hotelScore === bestScore) {
+			ties += 1;
+		}
+	}
+
+	return bestScore > 0 && ties === 1 ? best : null;
+}
+
 async function resolveHotel(normalized, existingReservation = null) {
 	if (existingReservation?.hotelId) {
 		return HotelDetails.findById(existingReservation.hotelId)
@@ -3819,10 +3877,22 @@ async function resolveHotel(normalized, existingReservation = null) {
 			? normalized.hotelNameAliases
 			: []),
 	]);
-	if (!wanted || !hotelNameCandidates.length) return null;
-
 	const selectFields =
 		"_id hotelName hotelName_OtherLanguage belongsTo roomCountDetails currency";
+	const loadCandidateHotels = async () => {
+		const allowedIds = getOtaInboundAllowedHotelIds();
+		if (allowedIds.length) {
+			return HotelDetails.find({ _id: { $in: allowedIds } })
+				.select(selectFields)
+				.lean();
+		}
+		return HotelDetails.find({}).select(selectFields).lean();
+	};
+	if (!wanted || !hotelNameCandidates.length) {
+		const hotels = await loadCandidateHotels();
+		return findHotelMentionedInSourceText(hotels, normalized);
+	}
+
 	const scoreHotels = (hotels = []) => {
 		let best = null;
 		let bestScore = 0;
@@ -3850,6 +3920,11 @@ async function resolveHotel(normalized, existingReservation = null) {
 			.lean();
 		const allowedMatch = scoreHotels(allowedHotels);
 		if (allowedMatch.bestScore >= 72) return allowedMatch.best;
+		const mentionedAllowedHotel = findHotelMentionedInSourceText(
+			allowedHotels,
+			normalized
+		);
+		if (mentionedAllowedHotel) return mentionedAllowedHotel;
 	}
 
 	const hotels = await HotelDetails.find({})
@@ -3857,7 +3932,8 @@ async function resolveHotel(normalized, existingReservation = null) {
 		.lean();
 	const { best, bestScore } = scoreHotels(hotels);
 
-	return bestScore >= 72 ? best : null;
+	if (bestScore >= 72) return best;
+	return findHotelMentionedInSourceText(hotels, normalized);
 }
 
 function applyVccSafeFields(target, normalized) {
@@ -4016,7 +4092,6 @@ function requiredNewReservationMissing(normalized = {}) {
 	if (!normalized.guestName) missing.push("guest name");
 	if (!normalized.checkinDate) missing.push("check-in date");
 	if (!normalized.checkoutDate) missing.push("check-out date");
-	if (!normalized.hotelName && !normalized.hotelId) missing.push("hotel name");
 	return missing;
 }
 
@@ -4286,6 +4361,128 @@ async function generateUniquePmsConfirmationNumber(maxAttempts = 25) {
 	const exists = await Reservations.exists({ confirmation_number: fallback });
 	if (!exists) return fallback;
 	throw new Error("Could not generate a unique PMS confirmation number.");
+}
+
+async function createUnmappedOtaReviewReservation({
+	normalized,
+	confirmationNumber,
+	warnings = [],
+	errors = [],
+} = {}) {
+	const existingBeforeCreate = await findReservationByOtaConfirmation(
+		confirmationNumber,
+		"_id hotelId confirmation_number reservation_id customer_details supplierData"
+	);
+	if (existingBeforeCreate) {
+		const matchedBy = detectConfirmationMatchFields(
+			existingBeforeCreate,
+			confirmationNumber
+		);
+		return {
+			status: "duplicate_reservation",
+			warnings,
+			errors: [
+				...errors,
+				"Existing reservation matched during pre-create duplicate check; no unmapped OTA reservation was created.",
+			],
+			reservationId: existingBeforeCreate._id,
+			hotelId: existingBeforeCreate.hotelId,
+			pmsConfirmationNumber: existingBeforeCreate.confirmation_number,
+			matchedReservationBy: matchedBy,
+		};
+	}
+
+	const missingHotelWarning =
+		"Hotel was not resolved from inbound OTA email; saved to OTA review queue for manual hotel assignment.";
+	if (!warnings.includes(missingHotelWarning)) warnings.push(missingHotelWarning);
+
+	const document = buildUnmappedOtaReviewReservationDocument({
+		...normalized,
+		confirmationNumber,
+	});
+	document.reservationAuditLog = [
+		buildAuditEntry(normalized, "created-unmapped-from-email", warnings),
+	];
+	applyVccSafeFieldsToDocument(document, normalized);
+	document.confirmation_number = await generateUniquePmsConfirmationNumber();
+	document.customer_details = {
+		...(document.customer_details || {}),
+		confirmation_number2: confirmationNumber,
+	};
+	document.supplierData = {
+		...(document.supplierData || {}),
+		suppliedBookingNo: confirmationNumber,
+		otaConfirmationNumber: confirmationNumber,
+		platformConfirmationNumber: confirmationNumber,
+		pmsConfirmationNumber: document.confirmation_number,
+		otaCreatedFromEmail: normalized.source?.from !== "expedia-sync",
+		otaCreatedFromSync: normalized.source?.from === "expedia-sync",
+		otaInboundEmailId: normalized.inboundEmailId || "",
+		otaCreatedAt: new Date(),
+	};
+
+	let created;
+	for (let createAttempt = 0; createAttempt < 2; createAttempt += 1) {
+		try {
+			logReconcile("create_unmapped.start", {
+				platformConfirmationNumber: confirmationNumber,
+				pmsConfirmationNumber: document.confirmation_number,
+				provider: normalized.provider || "",
+				hotelName: normalized.hotelName || "",
+			});
+			created = await Reservations.create(document);
+			break;
+		} catch (error) {
+			if (error?.code === 11000) {
+				const duplicate = await findReservationByOtaConfirmation(
+					confirmationNumber,
+					"_id hotelId confirmation_number reservation_id customer_details supplierData"
+				);
+				if (duplicate) {
+					return {
+						status: "duplicate_reservation",
+						warnings,
+						errors: [
+							...errors,
+							"Existing reservation matched during duplicate-key recovery; no unmapped OTA reservation was created.",
+						],
+						reservationId: duplicate._id,
+						hotelId: duplicate.hotelId,
+						pmsConfirmationNumber: duplicate.confirmation_number,
+						matchedReservationBy: detectConfirmationMatchFields(
+							duplicate,
+							confirmationNumber
+						),
+					};
+				}
+				if (createAttempt === 0) {
+					document.confirmation_number = await generateUniquePmsConfirmationNumber();
+					document.supplierData.pmsConfirmationNumber = document.confirmation_number;
+					continue;
+				}
+			}
+			throw error;
+		}
+	}
+
+	logReconcile("create_unmapped.done", {
+		platformConfirmationNumber: confirmationNumber,
+		pmsConfirmationNumber: created.confirmation_number,
+		reservationId: String(created._id),
+	});
+	return {
+		status: "created",
+		actionTaken: "created_unmapped_ota_review",
+		automationComment:
+			"OTA reservation was saved to the review queue without a hotel assignment; assign a hotel before release.",
+		warnings,
+		errors,
+		reservationId: created._id,
+		hotelId: null,
+		pmsConfirmationNumber: created.confirmation_number,
+		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
+		matchedReservationBy: [],
+	};
 }
 
 async function reconcileOtaReservation(inputNormalized) {
@@ -4574,11 +4771,12 @@ async function reconcileOtaReservation(inputNormalized) {
 				matchedReservationBy,
 			};
 		}
-		return {
-			status: "needs_mapping",
+		return createUnmappedOtaReviewReservation({
+			normalized,
+			confirmationNumber,
 			warnings,
-			errors: [...errors, "Could not resolve hotel from inbound email."],
-		};
+			errors,
+		});
 	}
 	if (!isHotelAllowedForOtaInbound(hotelDetails._id)) {
 		logReconcile("skipped.hotel_not_allowed", {
@@ -4861,6 +5059,286 @@ async function reconcileOtaReservation(inputNormalized) {
 		pmsConfirmationNumber: created.confirmation_number,
 		otaPlatformReviewStatus: created?.otaPlatformReview?.status || "",
 		matchedReservationBy: [],
+	};
+}
+
+function buildUnmappedOtaReviewReservationDocument(normalized = {}) {
+	const totalAmountSar = round2(
+		normalized.totalAmountSar || normalized.amount || 0
+	);
+	const providerLabel =
+		normalized.bookingSource ||
+		(normalized.providerLabel && normalized.providerLabel !== "unknown"
+			? normalized.providerLabel
+			: "OTA Email");
+	const paymentSummary = safeOtaPaymentSummary(normalized.paymentSummary);
+	const sourceCurrency =
+		normalized.sourceCurrency ||
+		paymentSummary.sourceCurrency ||
+		normalized.currency ||
+		"";
+	const sourceAmount = Number(
+		normalized.sourceAmount ||
+			paymentSummary.sourceTotalGuestPaymentAmount ||
+			normalized.amount ||
+			0
+	);
+	const sourceExchangeRateToSar = Number(
+		normalized.sourceExchangeRateToSar ||
+			paymentSummary.exchangeRateToSar ||
+			(String(sourceCurrency || "").toUpperCase() === "SAR"
+				? normalized.exchangeRateToSar || 1
+				: 0)
+	);
+	const sourceExchangeRateSource =
+		normalized.sourceExchangeRateSource ||
+		paymentSummary.exchangeRateSource ||
+		normalized.exchangeRateSource ||
+		"";
+	const defaultDeductionRate = resolveOtaReviewDeductionRate(normalized);
+	const explicitNetAfterExpenses = round2(
+		normalized.totalPayoutSar ||
+			normalized.netAfterExpensesTotal ||
+			paymentSummary.totalPayoutAmount ||
+			0
+	);
+	const netAfterExpensesTotal =
+		explicitNetAfterExpenses > 0
+			? round2(Math.min(explicitNetAfterExpenses, totalAmountSar || explicitNetAfterExpenses))
+			: defaultOtaReviewNetTotal(totalAmountSar, defaultDeductionRate);
+	const otaExpenseTotal = Math.max(0, round2(totalAmountSar - netAfterExpensesTotal));
+	const roomCount = Math.max(1, Math.floor(Number(normalized.roomCount || 1)));
+	const dateRange = generateDateRange(
+		normalized.checkinDate,
+		normalized.checkoutDate
+	);
+	const daysOfResidence =
+		dateRange.length ||
+		calculateDaysOfResidence(normalized.checkinDate, normalized.checkoutDate);
+	const slots = Math.max(1, dateRange.length * roomCount);
+	const clientSlots = allocateAmountAcrossSlots(totalAmountSar, slots);
+	const netSlots = allocateAmountAcrossSlots(
+		netAfterExpensesTotal || totalAmountSar,
+		slots
+	);
+	let slotIndex = 0;
+	const roomDisplayName =
+		normalizeWhitespace(normalized.roomName || "") || "Unmapped OTA room";
+	const mappedRoomType = mapRoomType(roomDisplayName) || "";
+	const pickedRoomsType = Array.from({ length: roomCount }, () => {
+		const pricingByDay = dateRange.map((ymd) => {
+			const currentSlot = slotIndex;
+			slotIndex += 1;
+			const clientPrice = round2(clientSlots[currentSlot] || 0);
+			const netAfterExpenses = round2(netSlots[currentSlot] || clientPrice);
+			return {
+				date: ymd,
+				price: clientPrice,
+				clientPrice,
+				mainPrice: clientPrice,
+				rootPrice: 0,
+				commissionRate: 0,
+				totalPriceWithCommission: clientPrice,
+				totalPriceWithoutCommission: 0,
+				netAfterExpenses,
+				netAfterOtaExpenses: netAfterExpenses,
+				otaExpenseAmount: Math.max(0, round2(clientPrice - netAfterExpenses)),
+				platformMargin: 0,
+				platformMarginRate: 0,
+			};
+		});
+		return {
+			room_type: mappedRoomType,
+			displayName: roomDisplayName,
+			chosenPrice:
+				daysOfResidence > 0
+					? round2(totalAmountSar / Math.max(1, daysOfResidence * roomCount))
+					: totalAmountSar,
+			count: 1,
+			pricingByDay,
+			totalPriceWithCommission: round2(
+				pricingByDay.reduce(
+					(sum, day) => sum + Number(day.totalPriceWithCommission || 0),
+					0
+				)
+			),
+			hotelShouldGet: 0,
+		};
+	});
+	const paymentMapping = resolvePaymentMapping(
+		normalized,
+		totalAmountSar,
+		0,
+		0
+	);
+	const guestComment = cleanOtaGuestNote(
+		normalized.comment || normalized.guestNotes || ""
+	);
+	const now = new Date();
+	const automationSource =
+		normalized.source?.from === "expedia-sync" ? "ota_sync_create" : "ota_email_create";
+	const automationPipeline =
+		normalized.source?.from === "expedia-sync"
+			? "ota-reservation-sync-orchestrator"
+			: "ota-email-orchestrator";
+
+	return {
+		reservation_id: normalized.reservationId,
+		booking_source: providerLabel,
+		customer_details: {
+			booking_source: providerLabel,
+			name: normalized.guestName || "",
+			phone: normalized.guestPhone || "0000",
+			email: normalized.guestEmail || "no-email@jannatbooking.com",
+			passport: "Not Provided",
+			passportExpiry: "1/1/2027",
+			nationality: normalized.nationality || "",
+			postalCode: "00000",
+			confirmation_number2: normalized.confirmationNumber,
+		},
+		state: OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+		reservation_status: OTA_PLATFORM_REVIEW_RESERVATION_STATUS,
+		total_guests: Number(normalized.totalGuests || 1),
+		adults: Number(normalized.adults || 0),
+		children: Number(normalized.children || 0),
+		cancel_reason: "",
+		booked_at: normalized.bookedAt || now,
+		sub_total: 0,
+		total_rooms: roomCount,
+		total_amount: totalAmountSar,
+		currency: "SAR",
+		checkin_date: normalized.checkinDate,
+		checkout_date: normalized.checkoutDate,
+		days_of_residence: daysOfResidence,
+		comment: guestComment,
+		booking_comment: guestComment,
+		financeStatus: paymentMapping.financeStatus,
+		payment: paymentMapping.payment,
+		payment_details: {
+			captured: false,
+			onsite_paid_amount: 0,
+		},
+		paid_amount: paymentMapping.paidAmount,
+		paid_amount_breakdown: paymentMapping.paidAmountBreakdown,
+		commission: 0,
+		financial_cycle: paymentMapping.financialCycle,
+		pickedRoomsType,
+		pickedRoomsPricing: pickedRoomsType,
+		adminPricing: {
+			mode: "ota_platform_unmapped",
+			clientTotal: totalAmountSar,
+			rootTotal: 0,
+			netAfterExpensesTotal,
+			otaExpenseTotal,
+			platformMarginTotal: 0,
+			commissionAmount: 0,
+			defaultDeductionRate,
+			defaultDeductionApplied: explicitNetAfterExpenses <= 0,
+			source: automationSource,
+			provider: normalized.provider,
+			providerLabel,
+			sourceCurrency,
+			sourceAmount: round2(sourceAmount),
+			sourceExchangeRateToSar,
+			sourceExchangeRateSource,
+			exchangeRateToSar:
+				sourceExchangeRateToSar || normalized.exchangeRateToSar || 0,
+			exchangeRateSource:
+				sourceExchangeRateSource || normalized.exchangeRateSource || "",
+			amountConvertedAt: normalized.amountConvertedAt || "",
+			payoutFallbackReason: normalized.otaPayoutFallbackReason || "",
+			hotelAssignmentRequired: true,
+		},
+		adminPricingVisibility: {
+			rootOnlyForHotelManagement: true,
+			source: automationSource,
+			appliedAt: now,
+			appliedBy: null,
+		},
+		ota_financial_summary: {
+			show: true,
+			source: automationSource,
+			provider: normalized.provider,
+			providerLabel,
+			currency: "SAR",
+			clientTotal: totalAmountSar,
+			hotelVisibleAmount: 0,
+			netAfterExpenses: netAfterExpensesTotal,
+			netAfterOtaExpenses: netAfterExpensesTotal,
+			otaExpenseTotal,
+			platformProfit: 0,
+			commissionAmount: 0,
+			sourceCurrency,
+			sourceAmount: round2(sourceAmount),
+			sourceExchangeRateToSar,
+			sourceExchangeRateSource,
+			paymentSummary,
+			payoutFallbackReason: normalized.otaPayoutFallbackReason || "",
+		},
+		otaPlatformReview: {
+			...buildOtaReviewSnapshot({
+				source: automationSource,
+				inboundEmailId: normalized.inboundEmailId,
+				provider: normalized.provider,
+				providerLabel,
+				confirmationNumber: normalized.confirmationNumber,
+			}),
+			hotelAssignmentRequired: true,
+			hotelAssignmentStatus: "missing",
+			originalHotelName: normalized.hotelName || "",
+			otaRoomName: normalized.roomName || "",
+			lastUpdatedAt: now,
+		},
+		supplierData: {
+			supplierName: providerLabel,
+			suppliedBookingNo: normalized.confirmationNumber,
+			otaConfirmationNumber: normalized.confirmationNumber,
+			platformConfirmationNumber: normalized.confirmationNumber,
+			otaAutomationPipeline: automationPipeline,
+			otaProvider: normalized.provider,
+			otaHotelName: normalized.hotelName || "",
+			otaHotelMappingRequired: true,
+			otaRoomName: normalized.roomName || "",
+			otaGuestNotes: guestComment,
+			otaNationality: normalized.nationality || "",
+			otaCurrency: normalized.currency || "",
+			otaAmount: normalized.amount || 0,
+			otaAmountSar: totalAmountSar,
+			otaSourceCurrency: sourceCurrency,
+			otaSourceAmount: round2(sourceAmount),
+			otaSourceAmountHint: normalized.sourceAmountHint || normalized.amountHint || "",
+			otaSourceExchangeRateToSar: sourceExchangeRateToSar,
+			otaSourceExchangeRateSource: sourceExchangeRateSource,
+			otaPaymentSummary: paymentSummary,
+			otaPayoutFallbackReason: normalized.otaPayoutFallbackReason || "",
+			otaTotalPayoutSar: netAfterExpensesTotal,
+			otaExpenseTotalSar: otaExpenseTotal,
+			otaPlatformMarginSar: 0,
+			otaExchangeRateToSar: normalized.exchangeRateToSar || 0,
+			otaExchangeRateSource: normalized.exchangeRateSource || "",
+			otaAmountConvertedAt: normalized.amountConvertedAt || "",
+			otaPaymentCollectionModel: normalized.paymentCollectionModel || "",
+			otaPaymentInstructions: normalized.paymentInstructions || "",
+			otaLastInboundEmailId: normalized.inboundEmailId || "",
+			otaLastEmailAt: now,
+			otaLastEventType: normalized.eventType,
+			otaAirbnbListingId: normalized.airbnbListingId || "",
+			otaAirbnbListingTitle: normalized.airbnbListingTitle || "",
+			otaNormalizedSnapshot: {
+				provider: normalized.provider || "",
+				confirmationNumber: normalized.confirmationNumber || "",
+				hotelName: normalized.hotelName || "",
+				roomName: normalized.roomName || "",
+				checkinDate: normalized.checkinDate || "",
+				checkoutDate: normalized.checkoutDate || "",
+				totalAmountSar,
+				totalGuests: normalized.totalGuests || 0,
+				adults: normalized.adults || 0,
+				children: normalized.children || 0,
+				airbnbListingId: normalized.airbnbListingId || "",
+				airbnbListingTitle: normalized.airbnbListingTitle || "",
+			},
+		},
 	};
 }
 

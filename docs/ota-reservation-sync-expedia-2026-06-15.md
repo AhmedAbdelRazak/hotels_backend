@@ -81,9 +81,9 @@ frontend must never send passwords, cookies, tokens, or session data.
   prefixes are `listing:` and `title:`. Listing id is preferred; title is only
   a fallback when the id is unavailable. Do not map by Airbnb host greeting
   because one host/account can manage multiple PMS hotels. Values may be a PMS
-  hotel `_id` or a hotel name. Unknown Airbnb listings remain saved as inbound
-  audits and routed to review instead of creating a reservation in an uncertain
-  hotel.
+  hotel `_id` or a hotel name. Unknown Airbnb listings with complete booking
+  details are saved to `/admin/ota-reservations` without a hotel assignment
+  instead of being guessed into an uncertain hotel.
 - Optional timing/cap controls:
   - `OTA_EXPEDIA_SYNC_MAX_RUN_MS`
   - `OTA_EXPEDIA_SYNC_BASE_RUN_MS`
@@ -237,6 +237,30 @@ owned by the PMS after employees have adjusted it.
 Duplicate protection checks Expedia reservation ID, hotel confirmation number,
 itinerary number, PMS confirmation number, and normalized alternate confirmation
 values through `findReservationByOtaConfirmation`.
+
+## OTA review hotel assignment
+
+The `/admin/ota-reservations` queue is also the manual safety net for complete
+OTA inbound emails where the hotel cannot be resolved. This applies across OTA
+providers, not only Airbnb:
+
+- Duplicate protection still runs first against the OTA confirmation number in
+  `confirmation_number`, `reservation_id`,
+  `customer_details.confirmation_number2`, and supplier OTA confirmation fields.
+- If no existing reservation matches and the email has the required booking
+  fields, the backend creates a pending `OTA Platform Review` reservation with
+  no `hotelId` / `belongsTo`.
+- The table should show the OTA confirmation number as the visible confirmation
+  code. The generated PMS confirmation remains internal for uniqueness.
+- Release to hotel is blocked server-side until a valid hotel is assigned and
+  OTA pricing review is saved.
+- `GET /api/admin/ota-reservations/hotels/:userId` returns the searchable hotel
+  dropdown for OTA assignment.
+- `PUT /api/admin/ota-reservations/:reservationId/hotel/:userId` assigns the
+  hotel, owner, audit metadata, and clears the hotel-assignment-required flag.
+- Existing structured hotel mapping remains preferred. For Airbnb, trusted
+  mapping comes from configured listing/title entries or explicit known hotel
+  names in subject/body; host greetings are not hotel identity.
 
 ## New-reservation pricing policy
 
