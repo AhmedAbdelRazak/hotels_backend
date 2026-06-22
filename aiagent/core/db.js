@@ -98,7 +98,10 @@ async function setCaseStatus(caseId, fields) {
 		.exec();
 }
 
-async function closeSupportCaseForAiIdle(caseId, { now = new Date() } = {}) {
+async function closeSupportCaseForAiIdle(
+	caseId,
+	{ now = new Date(), reason = "ai_idle_timeout" } = {}
+) {
 	const _id = safeId(caseId);
 	if (!_id) return null;
 	return SupportCase.findOneAndUpdate(
@@ -116,7 +119,7 @@ async function closeSupportCaseForAiIdle(caseId, { now = new Date() } = {}) {
 				updatedAt: now,
 				aiToRespond: false,
 				aiPausedAt: now,
-				aiHandoffReason: "ai_idle_timeout",
+				aiHandoffReason: reason,
 				"conversation.$[].seenByAdmin": true,
 				"conversation.$[].seenByHotel": true,
 				"conversation.$[].seenByCustomer": true,

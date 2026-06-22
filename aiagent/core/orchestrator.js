@@ -190,6 +190,11 @@ const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * 60 * 1000, {
 	min: 5 * 60 * 1000,
 	max: 60 * 60 * 1000,
 });
+const AI_POST_BOOKING_CLOSE_MS = intFromEnv(
+	"AI_POST_BOOKING_CLOSE_MS",
+	5000,
+	{ min: 1000, max: 30000 }
+);
 const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	"AI_TURN_STALL_RECOVERY_MS",
 	25 * 1000,
@@ -1465,11 +1470,12 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		return;
 	}
 	const before = JSON.stringify(st.slots || {});
-	const guestText = conversationText(sc, { guestsOnly: true });
+	const guestMessages = [];
 	let latestGuestDateRange = null;
 	for (const message of conversation) {
 		if (!isGuestConversationMessage(message)) continue;
 		const messageText = conversationEntryContextText(message);
+		if (messageText) guestMessages.push(messageText);
 		const messageDates = quickDateRange(messageText);
 		if (
 			messageDates.checkinISO &&
@@ -1479,6 +1485,7 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 			latestGuestDateRange = messageDates;
 		}
 	}
+	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
 	if (latestGuestDateRange) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
 	}
@@ -1505,6 +1512,8 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	if (email && !st.slots.email) st.slots.email = email;
 	const phone = latestPhoneFromText(guestText);
 	if (phone && !st.slots.phone) st.slots.phone = phone;
+	const nationality = nationalityHintFromText(guestText);
+	if (nationality && !st.slots.nationality) st.slots.nationality = nationality;
 	for (const message of conversation) {
 		if (!isGuestConversationMessage(message)) continue;
 		const contact = String(message?.messageBy?.customerEmail || "");
@@ -1530,8 +1539,8 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		}
 		if (!isGuestConversationMessage(message)) continue;
 		applyReservationGuestCountsFromText(st, text);
-		if (lastAsk === "name" && !st.slots.fullName && looksLikeNameCandidate(text)) {
-			const candidate = cleanFullNameCandidate(text);
+		if (lastAsk === "name" && !st.slots.fullName) {
+			const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
 			if (candidate) {
 				st.slots.fullName = candidate;
 				st.slots.name = candidate;
@@ -5318,6 +5327,8 @@ function markGuestActivity(caseId, { activityAt = now(), typingHoldMs = 0 } = {}
 			Number(st.guestTypingUntil || 0),
 			safeAt + Number(typingHoldMs || 0)
 		);
+	} else {
+		st.guestTypingUntil = Math.min(Number(st.guestTypingUntil || 0), safeAt);
 	}
 }
 
@@ -5415,19 +5426,69 @@ async function runAiIdleCloseStep(io, caseId, anchor) {
 			now: new Date(),
 		});
 		if (!closedCase) return;
-		io.to(caseId).emit("supportCaseUpdated", closedCase);
-		io.emit("supportCaseUpdated", closedCase);
-		io.emit("closeCase", {
-			case: closedCase,
-			closedBy: "csr",
-			reason: "ai_idle_timeout",
-		});
-		io.to(caseId).emit("aiPaused", { caseId, reason: "ai_idle_timeout" });
+		emitAiClosedCase(io, caseId, closedCase, "ai_idle_timeout");
 		memo.delete(caseId);
 		logStep(caseId, "idle.closed", {});
 	} catch (error) {
 		logStep(caseId, "idle.close_failed", { message: error?.message || error });
 	}
+}
+
+function emitAiClosedCase(io, caseId, closedCase, reason) {
+	if (!io || !closedCase) return;
+	io.to(caseId).emit("supportCaseUpdated", closedCase);
+	io.emit("supportCaseUpdated", closedCase);
+	io.emit("closeCase", {
+		case: closedCase,
+		closedBy: "csr",
+		reason,
+	});
+	io.to(caseId).emit("aiPaused", { caseId, reason });
+}
+
+async function runPostBookingCloseStep(io, caseId, anchor) {
+	aiIdleTimers.delete(caseId);
+	try {
+		const latestCase = await getSupportCaseById(caseId);
+		if (
+			!latestCase ||
+			latestCase.caseStatus === "closed" ||
+			latestCase.aiToRespond === false ||
+			guestRespondedAfterAnchor(latestCase, anchor)
+		) {
+			return;
+		}
+		const closedCase = await closeSupportCaseForAiIdle(caseId, {
+			now: new Date(),
+			reason: "post_booking_closed",
+		});
+		if (!closedCase) return;
+		emitAiClosedCase(io, caseId, closedCase, "post_booking_closed");
+		memo.delete(caseId);
+		logStep(caseId, "post_booking.closed", {});
+	} catch (error) {
+		logStep(caseId, "post_booking.close_failed", {
+			message: error?.message || error,
+		});
+	}
+}
+
+function schedulePostBookingAutoClose(io, sc, st) {
+	const caseId = String(sc?._id || sc?.id || "");
+	if (!io || !caseId) return;
+	const anchor = {
+		at: now(),
+		idleSinceAt: now(),
+		text: st?.lastBotText || "",
+	};
+	setAiIdleTimer(
+		caseId,
+		() => runPostBookingCloseStep(io, caseId, anchor),
+		AI_POST_BOOKING_CLOSE_MS
+	);
+	logStep(caseId, "post_booking.close_scheduled", {
+		delayMs: AI_POST_BOOKING_CLOSE_MS,
+	});
 }
 
 function scheduleAiIdleFollowups(io, sc, st, messageData = {}) {
@@ -10335,7 +10396,8 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
-		await humanSend(io, sc, st, closeReply);
+		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
+		if (sent) schedulePostBookingAutoClose(io, sc, st);
 		st.waitFor = null;
 		return true;
 	}
@@ -10797,26 +10859,17 @@ async function planTurn(io, sc) {
 		ownsTurn = true;
 		st.interrupt = false;
 		const schedulePlanningTyping = () => {
-		const delay = randomBetween(
-			AI_TYPING_INDICATOR_DELAY_MIN_MS,
-			AI_TYPING_INDICATOR_DELAY_MAX_MS
-		);
-		planningTypingTimer = setTimeout(() => {
 			const currentState = memo.get(caseId) || st;
 			if (
+				planningTyping ||
 				!currentState.turnInFlight ||
-				currentState.interrupt ||
-				currentState.guestTypingUntil > now()
+				currentState.interrupt
 			) {
 				return;
 			}
 			emitTyping(io, caseId, currentState, true);
 			planningTyping = true;
-		}, delay);
-		if (typeof planningTypingTimer.unref === "function") {
-			planningTypingTimer.unref();
-		}
-	};
+		};
 
 		logStep(caseId, "context.loaded", {
 			hotelId: sc.hotelId,
