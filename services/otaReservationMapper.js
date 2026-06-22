@@ -1319,19 +1319,40 @@ function resolveConfiguredAirbnbHotelMapping(context = {}) {
 	if (!entries.length) return {};
 
 	const candidates = [
-		...(context.hostLabels || []).map((value) => ({ type: "host", value })),
 		context.listingId ? { type: "listing", value: context.listingId } : null,
 		context.listingTitle ? { type: "title", value: context.listingTitle } : null,
-		context.to ? { type: "to", value: context.to } : null,
-		context.from ? { type: "from", value: context.from } : null,
 	].filter(Boolean);
+	const allowedTypes = new Set([
+		"",
+		"listing",
+		"listing id",
+		"airbnb listing",
+		"title",
+		"listing title",
+		"room",
+		"room title",
+	]);
 
 	for (const entry of entries) {
 		const entryType = normalizeMappingKey(entry.type);
+		if (!allowedTypes.has(entryType)) continue;
 		const entrySource = normalizeMappingKey(entry.source);
 		if (!entrySource) continue;
 		const match = candidates.find((candidate) => {
-			if (entryType && normalizeMappingKey(candidate.type) !== entryType) return false;
+			if (
+				entryType &&
+				(entryType.includes("listing") || entryType === "airbnb listing") &&
+				candidate.type !== "listing"
+			) {
+				return false;
+			}
+			if (
+				entryType &&
+				(entryType.includes("title") || entryType.includes("room")) &&
+				candidate.type !== "title"
+			) {
+				return false;
+			}
 			const candidateValue = normalizeMappingKey(candidate.value);
 			return candidateValue === entrySource || candidateValue.includes(entrySource);
 		});
@@ -1382,6 +1403,8 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		hostLabels,
 		listingTitle,
 		listingId,
+		airbnbListingId: listingId,
+		airbnbListingTitle: listingTitle,
 		roomName: listingTitle,
 		...stayDates,
 		...occupancy,
@@ -2477,6 +2500,8 @@ function extractNormalizedReservation(email) {
 		hotelId,
 		hotelName,
 		hotelNameAliases: airbnbFields.hotelNameAliases || [],
+		airbnbListingId: airbnbFields.airbnbListingId || "",
+		airbnbListingTitle: airbnbFields.airbnbListingTitle || "",
 		roomName,
 		checkinDate,
 		checkoutDate,
@@ -2511,6 +2536,8 @@ function extractNormalizedReservation(email) {
 			confirmationNumber: !!reservationId,
 			bookingSource: !!sourceField,
 			hotelName: !!hotelName || !!hotelId,
+			airbnbListingId: !!airbnbFields.airbnbListingId,
+			airbnbListingTitle: !!airbnbFields.airbnbListingTitle,
 			roomName: !!roomName,
 			checkinDate: !!checkinDate || !!tableStayDates.checkinDate,
 			checkoutDate: !!checkoutDate || !!tableStayDates.checkoutDate,

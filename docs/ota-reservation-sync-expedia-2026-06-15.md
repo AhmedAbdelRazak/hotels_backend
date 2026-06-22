@@ -77,11 +77,13 @@ frontend must never send passwords, cookies, tokens, or session data.
 - `OTA_INBOUND_EMAIL_HOTEL_IDS`
 - `OTA_AIRBNB_EMAIL_HOTEL_MAP` for Airbnb inbound email hotel mapping.
   Use semicolon-separated entries such as
-  `host:Salaam Marwa=68da202900a070e8123c27c4`. Supported source prefixes
-  are `host:`, `listing:`, `title:`, `to:`, and `from:`. Values may be a PMS
-  hotel `_id` or a hotel name. Unknown Airbnb hosts/listings remain saved as
-  inbound audits and routed to review instead of creating a reservation in an
-  uncertain hotel.
+  `listing:1712336446581959735=68da202900a070e8123c27c4`. Supported source
+  prefixes are `listing:` and `title:`. Listing id is preferred; title is only
+  a fallback when the id is unavailable. Do not map by Airbnb host greeting
+  because one host/account can manage multiple PMS hotels. Values may be a PMS
+  hotel `_id` or a hotel name. Unknown Airbnb listings remain saved as inbound
+  audits and routed to review instead of creating a reservation in an uncertain
+  hotel.
 - Optional timing/cap controls:
   - `OTA_EXPEDIA_SYNC_MAX_RUN_MS`
   - `OTA_EXPEDIA_SYNC_BASE_RUN_MS`
