@@ -519,6 +519,7 @@ const compactConversationEntryForList = (entry = {}) => ({
 	isAi: entry.isAi,
 	isSystem: entry.isSystem,
 	clientTag: cleanText(entry.clientTag, 120),
+	clientAction: cleanText(entry.clientAction, 60),
 	preferredLanguage: cleanText(entry.preferredLanguage, 80),
 	preferredLanguageCode: cleanText(entry.preferredLanguageCode, 20),
 	quickReplies: Array.isArray(entry.quickReplies)
@@ -631,6 +632,7 @@ const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
 			1200
 		),
 		clientTag: cleanText(conversation.clientTag, 120),
+		clientAction: cleanText(conversation.clientAction, 60),
 		preferredLanguage:
 			cleanText(conversation.preferredLanguage || supportCase.preferredLanguage, 80) ||
 			"English",

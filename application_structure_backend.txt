@@ -2858,7 +2858,34 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Response format:
   - General room-type answers are generated from active hotel room summaries
     deterministically, not by a slower freeform writer call.
-  - Room options are sent as a short multiline bullet list instead of a
-    slash-separated inline sentence for better readability on mobile.
-  - The bot then waits for the guest's preferred room type; exact pricing still
-    asks only for check-in and checkout dates when those are missing.
+ - Room options are sent as a short multiline bullet list instead of a
+   slash-separated inline sentence for better readability on mobile.
+ - The bot then waits for the guest's preferred room type; exact pricing still
+   asks only for check-in and checkout dates when those are missing.
+
+2026-06-21 AI Chat Pause Intent And Final Reservation Action
+- Files:
+  - aiagent/core/orchestrator.js
+  - controllers/supportcase.js
+  - models/supportcase.js
+  - docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md
+- Conversation-state fixes:
+  - Guest pause/later language such as "talk later", "not now", and Arabic
+    "حكلمك بعدين / شكرا على اى حال" is recognized before quote/proceed
+    nudges. The bot now replies warmly, does not repeat the quote, and does
+    not schedule another idle nudge for that pause reply.
+  - Booking detail states now preserve `reservation_details` and `finalize`
+    across direct side questions, so an answer such as "I work with reception"
+    does not reset the flow back to the quote step.
+  - Conversation recovery can rebuild `reservation_details` from earlier
+    mandatory-detail prompts even when the latest assistant message was a
+    factual side-question answer.
+- Final reservation safety:
+  - Public client messages can now carry `clientAction` from quick-reply
+    buttons.
+  - Completing guest details no longer creates the reservation automatically.
+    The bot sends a final localized prompt with `Place Reservation` /
+    `There's Something Wrong` style buttons.
+  - `createReservationForCase` is called only after the final
+    `place_reservation` action, keeping the last booking step transparent and
+    user-driven.

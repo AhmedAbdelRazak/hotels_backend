@@ -1122,10 +1122,12 @@ function bookingWaitState(st = {}) {
 			"proceed",
 			"intentConfirm",
 			"reviewConfirm",
+			"reservation_details",
 			"fullname",
 			"nationality",
 			"phone",
 			"email_or_skip",
+			"finalize",
 		].includes(st.waitFor)
 	) {
 		return st.waitFor;
@@ -1541,6 +1543,15 @@ function lastAssistantMessageBeforeLatestGuest(sc = {}) {
 	return null;
 }
 
+function assistantMessagesBeforeLatestGuest(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestGuestIndex = latestGuestMessageIndex(sc);
+	if (latestGuestIndex < 0) return [];
+	return conversation
+		.slice(0, latestGuestIndex)
+		.filter((message) => !message?.isSystem && isAiConversationMessage(message));
+}
+
 function quickReplyActions(message = {}) {
 	if (!message || typeof message !== "object") return [];
 	return Array.isArray(message.quickReplies)
@@ -1561,7 +1572,8 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		st.reviewSent = false;
 		return;
 	}
-	const lastAssistant = lastAssistantMessageBeforeLatestGuest(sc);
+	const assistantHistory = assistantMessagesBeforeLatestGuest(sc).reverse();
+	const lastAssistant = assistantHistory[0] || null;
 	if (!lastAssistant) return;
 	const text = String(lastAssistant.message || "");
 	const actions = quickReplyActions(lastAssistant);
@@ -1569,13 +1581,18 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		st.waitFor = "platform_hotel_choice";
 		return;
 	}
+	if (actions.includes("place_reservation")) {
+		st.reviewSent = true;
+		st.waitFor = "finalize";
+		return;
+	}
 	const hasConfirmAction =
-		actions.includes("confirm") || actions.includes("correction");
+		actions.includes("confirm");
 	const looksLikeReview =
-		/review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change/i.test(
+		/reservation review|review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change|everything looks correct/i.test(
 			text
 		);
-	if (hasConfirmAction || looksLikeReview) {
+	if (hasConfirmAction || (actions.includes("correction") && looksLikeReview) || looksLikeReview) {
 		st.reviewSent = true;
 		st.waitFor = "reviewConfirm";
 		return;
@@ -1608,6 +1625,24 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		}
 		if (st.quote?.data?.available) {
 			st.waitFor = "proceed";
+			return;
+		}
+	}
+
+	for (const assistant of assistantHistory) {
+		const text = String(assistant.message || "");
+		if (
+			/full name[\s\S]{0,120}(?:phone|mobile)[\s\S]{0,120}nationality/i.test(
+				text
+			) ||
+			/الاسم\s+الكامل[\s\S]{0,120}رقم\s+الهاتف[\s\S]{0,120}الجنسية/i.test(
+				text
+			) ||
+			/لإتمام\s+الحجز[\s\S]{0,160}(?:رقم\s+الهاتف|الجنسية)/i.test(text)
+		) {
+			st.reviewSent = true;
+			st.waitFor = "reservation_details";
+			return;
 		}
 	}
 }
@@ -6083,6 +6118,158 @@ function confirmationQuickReplies(sc = {}, st = {}) {
 	];
 }
 
+function finalReservationQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			{
+				label: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+				value: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+				action: "place_reservation",
+			},
+			{
+				label: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				value: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				action: "correction",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{ label: "Crear reserva", value: "Crear reserva", action: "place_reservation" },
+			{ label: "Algo esta mal", value: "Algo esta mal", action: "correction" },
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{
+				label: "Creer la reservation",
+				value: "Creer la reservation",
+				action: "place_reservation",
+			},
+			{
+				label: "Quelque chose ne va pas",
+				value: "Quelque chose ne va pas",
+				action: "correction",
+			},
+		];
+	}
+	if (/urdu/i.test(lang)) {
+		return [
+			{
+				label: "\u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0628\u0646\u0627\u0626\u06cc\u06ba",
+				value: "\u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0628\u0646\u0627\u0626\u06cc\u06ba",
+				action: "place_reservation",
+			},
+			{
+				label: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				value: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				action: "correction",
+			},
+		];
+	}
+	if (/hindi/i.test(lang)) {
+		return [
+			{
+				label: "\u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u092c\u0928\u093e\u090f\u0902",
+				value: "\u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u092c\u0928\u093e\u090f\u0902",
+				action: "place_reservation",
+			},
+			{
+				label: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				value: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				action: "correction",
+			},
+		];
+	}
+	if (/indonesian/i.test(lang)) {
+		return [
+			{
+				label: "Buat reservasi",
+				value: "Buat reservasi",
+				action: "place_reservation",
+			},
+			{
+				label: "Ada yang salah",
+				value: "Ada yang salah",
+				action: "correction",
+			},
+		];
+	}
+	if (/malay/i.test(lang)) {
+		return [
+			{
+				label: "Buat tempahan",
+				value: "Buat tempahan",
+				action: "place_reservation",
+			},
+			{
+				label: "Ada yang salah",
+				value: "Ada yang salah",
+				action: "correction",
+			},
+		];
+	}
+	return [
+		{
+			label: "Place Reservation",
+			value: "Place Reservation",
+			action: "place_reservation",
+		},
+		{
+			label: "There's Something Wrong",
+			value: "There's Something Wrong",
+			action: "correction",
+		},
+	];
+}
+
+function finalReservationPrompt(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u062c\u0627\u0647\u0632\u0629 \u0627\u0644\u0622\u0646. \u0644\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0627\u0644\u0646\u0638\u0627\u0645\u060c \u0627\u0636\u063a\u0637 \u00ab\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u00bb. \u0648\u0625\u0630\u0627 \u0643\u0627\u0646 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0641\u0635\u064a\u0644 \u064a\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u0636\u063a\u0637 \u00ab\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d\u00bb.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, todo esta listo. Para crear la reserva en el sistema, elige Crear reserva. Si algun detalle necesita correccion, elige Algo esta mal.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tout est pret. Pour creer la reservation dans le systeme, choisissez Creer la reservation. Si un detail doit etre corrige, choisissez Quelque chose ne va pas.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}، سب تفصیلات تیار ہیں۔ سسٹم میں ریزرویشن بنانے کے لیے ریزرویشن بنائیں منتخب کریں۔ اگر کوئی تفصیل درست نہیں تو کچھ غلط ہے منتخب کریں۔`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, sab details tayyar hain. System mein reservation banane ke liye Reservation banaen chunein. Agar koi detail sahi nahi hai to Kuch galat hai chunein.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, semua detail sudah siap. Untuk membuat reservasi di sistem, pilih Buat reservasi. Jika ada detail yang perlu diperbaiki, pilih Ada yang salah.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, semua butiran sudah sedia. Untuk membuat tempahan dalam sistem, pilih Buat tempahan. Jika ada butiran perlu diperbetulkan, pilih Ada yang salah.`;
+	}
+	return `${name}, everything is ready. To create the booking in the system, choose Place Reservation. If anything needs fixing, choose There's Something Wrong.`;
+}
+
+function placeReservationActionSelected(sc = {}, userText = "") {
+	if (lastGuestAction(sc) === "place_reservation") return true;
+	const assistant = lastAssistantMessageBeforeLatestGuest(sc);
+	const assistantActions = quickReplyActions(assistant);
+	if (!assistantActions.includes("place_reservation")) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	return (
+		/\b(?:place|create|make|book)\s+(?:the\s+)?(?:reservation|booking)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621).{0,20}(?:\u0627\u0644\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:placereservation|createreservation|makereservation|booknow|buatreservasi|buattempahan)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function emailQuickReplies(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
@@ -6548,7 +6735,7 @@ function confirmsText(text = "") {
 
 function declinesText(text = "") {
 	const raw = String(text || "");
-	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627)/i.test(raw)) {
+	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627|\u0628\u0639\u062f\u064a\u0646)/i.test(raw)) {
 		return true;
 	}
 	return /\b(no|nope|not now|later|cancel|لا|مش دلوقتي|لاحقا|non|pas maintenant|no gracias)\b/i.test(
@@ -6560,6 +6747,67 @@ function patienceText(text = "") {
 	return /\b(take your time|no rush|whenever|slow down|wait|one moment|moment|براحتك|براحتك|خد وقتك|خدي وقتك|استنى|انتظر)\b/i.test(
 		String(text || "")
 	);
+}
+
+function guestPauseOrLaterText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:talk|chat|call|continue|come\s+back)\s+later\b/i.test(lower) ||
+		/^(?:later|not\s+now|maybe\s+later|another\s+time|thanks\s+anyway|thank\s+you\s+anyway|no\s+thanks)\.?$/i.test(
+			lower
+		) ||
+		/(?:ه?كلمك|حكلمك|اكلمك|اتكلم|نتكلم|نكمل|ارجعلك|ارجع لك).{0,30}(?:بعدين|لاحقا|بعد كده|بعدها)/i.test(
+			arabic
+		) ||
+		/(?:بعدين|لاحقا|بعد كده|مش دلوقتي|مش الان|لا الان|لا الآن|ليس الان|وقت تاني|وقت ثاني|شكرا علي اي حال|شكرا على اي حال|شكرا على اى حال|خلاص كده)/i.test(
+			arabic
+		) ||
+		/(?:talklater|chatlater|calllater|continuelater|comebacklater|notnow|maybelater|anothertime|thanksanyway|thankyouanyway|nothanks|ba3den|baadain|meshdelwa2ty|mshdelwa2ty)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function bookingPauseReplyText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، ولا يهمك. أنا موجود معك وقت ما تحب ترجع، وأكمل معك بهدوء بدون أي استعجال.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, claro, no hay prisa. Estare aqui cuando quieras volver y seguimos con calma.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, bien sur, aucun souci. Je reste disponible quand vous souhaitez revenir, et nous reprendrons tranquillement.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}، کوئی مسئلہ نہیں۔ جب آپ دوبارہ تیار ہوں، میں یہیں ہوں اور آرام سے مدد جاری رکھوں گا/گی۔`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, koi baat nahi. Jab aap wapas tayyar hon, main yahin hoon aur aaram se madad jaari rakhunga/rakhungi.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, tidak apa-apa. Saya tetap di sini saat Anda ingin kembali, dan kita lanjutkan dengan tenang.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, tidak mengapa. Saya sedia apabila anda mahu kembali, dan kita sambung dengan tenang.`;
+	}
+	return `${name}, no problem. I will be here whenever you want to come back, and we can continue calmly with no rush.`;
+}
+
+async function answerBookingPause(io, sc, st, userText = "") {
+	pauseBookingNudge(st);
+	await humanSend(io, sc, st, bookingPauseReplyText(sc, st), {
+		scheduleIdle: false,
+	});
+	st.waitFor = st.waitFor || "clarify";
+	logStep(String(sc._id), "booking_pause.reply", {
+		waitFor: st.waitFor,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
 }
 
 function botExperienceComplaintText(text = "") {
@@ -6769,6 +7017,10 @@ function lastGuestMessage(sc = {}) {
 function lastUserText(sc) {
 	const lastUser = lastGuestMessage(sc);
 	return lastUser?.message || "";
+}
+
+function lastGuestAction(sc = {}) {
+	return String(lastGuestMessage(sc)?.clientAction || "").trim();
 }
 
 function lastAssistantText(sc = {}) {
@@ -7256,7 +7508,7 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		}
 	}
 	if (context.quote) return simpleQuoteText({ sc, st, quote: context.quote });
-	if (/review before we finalize|type confirm to finalize/.test(text)) {
+	if (/reservation review|review before we finalize|type confirm to finalize/.test(text)) {
 		const total = context.totals?.totalPriceWithCommission || context.total || "";
 		const currency = cleanCurrency(context.currency || st.quote?.data?.currency || "SAR");
 		const room = context.room || roomTypeLabel(st.slots?.roomTypeKey);
@@ -7275,48 +7527,48 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 			const dates = localizedStayDateLines(sc, st);
 			const localizedTotal = total ? localizedMoney(total, currency, "Arabic") : "";
 			return [
-				`${respectfulAddress}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+				`${respectfulAddress}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632:`,
 				`\u0627\u0644\u0641\u0646\u062f\u0642: ${context.hotelLocalized || hotel}`,
 				`\u0627\u0644\u063a\u0631\u0641\u0629: ${context.roomLocalized || room}`,
 				`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary || dateLine}`,
 				dates.secondary || "",
 				localizedTotal ? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${localizedTotal}` : "",
-				`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
+				`\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "\u062a\u0623\u0643\u064a\u062f". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d".`,
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		if (isIndonesian) {
 			return [
-				"Tinjauan sebelum kami finalkan:",
+				"Ringkasan reservasi:",
 				`Hotel: ${hotel}`,
 				`Kamar: ${room}`,
 				`Tanggal: ${dateLine}`,
 				total ? `Total: ${total} ${currency}` : "",
-				"Ketik konfirmasi untuk finalisasi, atau beritahu saya apa yang perlu diubah.",
+				"Pilih Konfirmasi jika sudah benar, atau Ada yang salah jika perlu diperbaiki.",
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		if (isMalay) {
 			return [
-				"Semakan sebelum kami muktamadkan:",
+				"Ringkasan tempahan:",
 				`Hotel: ${hotel}`,
 				`Bilik: ${room}`,
 				`Tarikh: ${dateLine}`,
 				total ? `Jumlah: ${total} ${currency}` : "",
-				"Taip pengesahan untuk muktamadkan, atau beritahu saya apa yang perlu diubah.",
+				"Pilih Sahkan jika semuanya betul, atau Ada yang salah jika perlu diperbetulkan.",
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		return [
-			"Review before we finalize:",
+			"Reservation review:",
 			`Hotel: ${hotel}`,
 			`Room: ${room}`,
 			`Dates: ${dateLine}`,
 			total ? `Total: ${total} ${currency}` : "",
-			"Type confirm to finalize, or tell me what to change.",
+			"Choose Confirm if everything looks correct, or Something is wrong if we need to fix anything.",
 		]
 			.filter(Boolean)
 			.join("\n");
@@ -8171,15 +8423,15 @@ function buildReservationReviewPayload(st = {}, quote = {}) {
 function reservationReviewPrompt(sc = {}, st = {}) {
 	if (/arabic/i.test(languageOf(sc, st))) {
 		return [
-			"Present a brief reservation review entirely in Arabic before finalizing.",
+			"Present a brief reservation review entirely in Arabic.",
 			"Use the localized hotel and room names from context when available.",
 			"If raw dates were Hijri, show the Hijri range and the matching Gregorian range.",
 			"Use Arabic wording for money, e.g. \"\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a\", not SAR.",
-			"End with Arabic only: \"\u0627\u0643\u062a\u0628 \\\"\u062a\u0623\u0643\u064a\u062f\\\" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.\"",
+			"End with Arabic only: \"\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 \\\"\u062a\u0623\u0643\u064a\u062f\\\". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 \\\"\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d\\\".\"",
 			"Do not use the English word confirm.",
 		].join(" ");
 	}
-	return "Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.";
+	return "Present a brief 'Reservation review'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Choose Confirm if everything looks correct, or Something is wrong if we need to fix anything.' Do not repeat the earlier availability message.";
 }
 
 function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
@@ -8194,7 +8446,7 @@ function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
 		`${respectfulGuestName(
 			sc,
 			st
-		)}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+		)}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632:`,
 		`\u0627\u0644\u0641\u0646\u062f\u0642: ${localizedHotelName(sc, st)}`,
 		`\u0627\u0644\u063a\u0631\u0641\u0629: ${localizedRoomName(sc, st, quote)}`,
 		`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}`,
@@ -8219,7 +8471,7 @@ function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
 					"Arabic"
 			  )}`
 			: "",
-		`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
+		`\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "\u062a\u0623\u0643\u064a\u062f". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d".`,
 	];
 	return lines.filter(Boolean).join("\n");
 }
@@ -10080,10 +10332,11 @@ async function askForReservationDetail(io, sc, st, step) {
 
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
+	const guestAction = lastGuestAction(sc);
 	await captureReservationDetailsFromText(sc, st, userText, caseId);
 	for (let guard = 0; guard < 4; guard += 1) {
 		if (st.waitFor === "reviewConfirm") {
-			if (correctionText(userText)) {
+			if (guestAction === "correction" || correctionText(userText)) {
 				st.waitFor = "clarify";
 				st.reviewSent = false;
 				const ask = /arabic/i.test(languageOf(sc, st))
@@ -10135,6 +10388,13 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.waitFor = "finalize";
 				continue;
 			}
+			if (guestAction === "skip_email") {
+				st.slots.email = "";
+				st.slots.emailSkipped = true;
+				logStep(caseId, "email.skipped", { source: "quick_reply" });
+				st.waitFor = "finalize";
+				continue;
+			}
 			await humanSend(io, sc, st, optionalEmailPrompt(sc, st), {
 				quickReplies: emailQuickReplies(sc, st),
 			});
@@ -10143,6 +10403,22 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		}
 
 		if (st.waitFor === "finalize") {
+			if (!placeReservationActionSelected(sc, userText)) {
+				if (guestAction === "correction" || correctionText(userText)) {
+					st.waitFor = "clarify";
+					st.reviewSent = false;
+					const ask = /arabic/i.test(languageOf(sc, st))
+						? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u0646\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u0647 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u061f"
+						: "Of course. What should we fix before I create the reservation?";
+					await humanSend(io, sc, st, ask);
+					return true;
+				}
+				await humanSend(io, sc, st, finalReservationPrompt(sc, st), {
+					quickReplies: finalReservationQuickReplies(sc, st),
+				});
+				stampAsk(st, "finalize");
+				return true;
+			}
 			try {
 				return await finalizeReservationForGuest(io, sc, st, caseId);
 			} catch (error) {
@@ -10614,6 +10890,10 @@ async function planTurn(io, sc) {
 				{}
 			);
 			if (earlyDirectRequestHandled) return;
+		}
+		if (guestPauseOrLaterText(userText)) {
+			await answerBookingPause(io, sc, st, userText);
+			return;
 		}
 		if (botExperienceComplaintText(userText) && !severeAbusiveGuestText(userText)) {
 			await answerConversationRecovery(io, sc, st, userText);

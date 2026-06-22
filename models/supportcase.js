@@ -47,6 +47,10 @@ const conversationSchema = new Schema({
 		type: String,
 		default: "",
 	},
+	clientAction: {
+		type: String,
+		default: "",
+	},
 	preferredLanguage: {
 		type: String,
 		default: "",

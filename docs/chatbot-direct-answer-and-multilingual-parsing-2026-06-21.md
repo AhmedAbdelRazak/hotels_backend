@@ -376,5 +376,35 @@ Additional tightening added:
   post-reservation heartbeat state.
 - SSR support chat bubbles use distinct guest and support backgrounds, borders,
   and shadows so the conversation is easier to scan.
+
+## Pause Intent, Private Prefill, and Final Reservation Action
+
+Additional production tightening after the Ahmed/Aisha single-hotel chat:
+
+- Single-hotel generated prefill text must be treated as private inquiry
+  context, not as the guest's first conversational turn. If the guest only opens
+  a hotel chat using the generated "chat with reception" starter text, the AI
+  should greet and ask how it can help instead of interpreting that starter as a
+  request for a phone/contact handoff.
+- Guest pause/later language such as "talk later", "not now", and Arabic
+  "حكلمك بعدين / شكرا على اى حال" is recognized before quote/proceed nudges.
+  The correct response is a short warm pause acknowledgement without repeating
+  the offer, without asking a new sales question, and without scheduling another
+  idle reminder from that pause reply.
+- Booking wait-state recovery preserves `reservation_details` and `finalize`.
+  If the guest asks a side question after the mandatory-detail prompt, the bot
+  should answer the side question and then keep the booking detail state; it
+  must not fall back to the earlier quote/proceed prompt.
+- The reservation flow has three distinct decisions:
+  - proceed from quote to review,
+  - confirm that the reviewed details look correct,
+  - place the reservation in the system.
+- The final create step is user-driven. Completing full name, phone,
+  nationality, guest count, and optional email should send a localized final
+  prompt with `Place Reservation` / `There's Something Wrong` style quick
+  replies. `createReservationForCase` should run only after the
+  `place_reservation` quick-reply action is received.
+- Public client messages can now preserve `clientAction` so the backend can
+  distinguish a real final button click from ordinary typed confirmation text.
 - Hotel, room, single-hotel, and deal CTAs use "Chat With Reception" in English
   and "تحدث مع الاستقبال" in Arabic.
