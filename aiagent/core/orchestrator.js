@@ -296,6 +296,277 @@ function mergeDateRangeIntoState(st = {}, dates = {}, { onlyIfMissing = false } 
 	}
 	return true;
 }
+
+function dateRangeKey(dates = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return "";
+	return `${dates.checkinISO}|${dates.checkoutISO}`;
+}
+
+function currentDateRange(st = {}) {
+	if (!st.slots?.checkinISO || !st.slots?.checkoutISO) return null;
+	return {
+		checkinISO: st.slots.checkinISO,
+		checkoutISO: st.slots.checkoutISO,
+		raw: st.dateRaw || null,
+	};
+}
+
+function dateRangeConflictsWithState(st = {}, dates = {}) {
+	const current = currentDateRange(st);
+	if (!current || !dates?.checkinISO || !dates?.checkoutISO) return false;
+	return dateRangeKey(current) !== dateRangeKey(dates);
+}
+
+function rememberPendingDateChange(st = {}, dates = {}, { source = "", userText = "" } = {}) {
+	if (!dateRangeConflictsWithState(st, dates)) return null;
+	const current = currentDateRange(st);
+	const existing = st.pendingDateChange || {};
+	if (
+		dateRangeKey(existing.proposed || {}) === dateRangeKey(dates) &&
+		dateRangeKey(existing.previous || {}) === dateRangeKey(current || {})
+	) {
+		return existing;
+	}
+	st.pendingDateChange = {
+		previous: current,
+		proposed: dates,
+		previousWaitFor: st.waitFor || "",
+		previousReviewSent: Boolean(st.reviewSent),
+		previousQuoteKey: st.quote?.key || "",
+		source,
+		userText: String(userText || "").slice(0, 240),
+		createdAt: now(),
+		askedAt: 0,
+	};
+	return st.pendingDateChange;
+}
+
+function clearPendingDateChange(st = {}) {
+	st.pendingDateChange = null;
+}
+
+function activeDateSensitiveBookingState(st = {}) {
+	const waitFor = String(st.waitFor || "");
+	return Boolean(
+			st.quote ||
+			st.reviewSent ||
+			st.quoteSummarizedAt ||
+			st.pendingRoomAlternative ||
+			st.pendingRoomCombination ||
+			[
+				"proceed",
+				"reviewConfirm",
+				"reservation_details",
+				"fullname",
+				"nationality",
+				"phone",
+				"email_or_skip",
+				"finalize",
+				"large_group_confirm",
+			].includes(waitFor)
+	);
+}
+
+function shouldConfirmDateRangeChange(st = {}, dates = {}) {
+	return (
+		dateRangeConflictsWithState(st, dates) &&
+		activeDateSensitiveBookingState(st)
+	);
+}
+
+function resetBookingAfterDateRangeChange(st = {}) {
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	st.bookingNudgePausedAt = 0;
+	st.pendingRoomAlternative = null;
+}
+
+function applyDateRangeToState(st = {}, dates = {}, { resetQuote = true } = {}) {
+	const changed = dateRangeConflictsWithState(st, dates);
+	const applied = mergeDateRangeIntoState(st, dates);
+	if (applied && changed && resetQuote) resetBookingAfterDateRangeChange(st);
+	if (applied) clearPendingDateChange(st);
+	return applied;
+}
+
+function combinedDateRangeFromPartial(st = {}, partial = {}) {
+	const current = currentDateRange(st);
+	if (!current) return null;
+	const proposed = {
+		checkinISO: partial.checkinISO || current.checkinISO,
+		checkoutISO: partial.checkoutISO || current.checkoutISO,
+		raw: {
+			...(st.dateRaw || {}),
+			...(partial.raw || {}),
+		},
+	};
+	if (!proposed.checkinISO || !proposed.checkoutISO) return null;
+	if (proposed.checkoutISO <= proposed.checkinISO) return null;
+	if (!dateRangeConflictsWithState(st, proposed)) return null;
+	return proposed;
+}
+
+function applyPartialDateToState(st = {}, partial = {}) {
+	if (!partial || (!partial.raw && !partial.checkinISO && !partial.checkoutISO)) {
+		return false;
+	}
+	if (!st.slots) st.slots = {};
+	const raw = partial.raw || {};
+	if (raw.checkin || raw.checkout || raw.calendar || raw.checkinHijri || raw.checkoutHijri) {
+		st.dateRaw = {
+			...(st.dateRaw || {}),
+			...(raw.calendar ? { calendar: raw.calendar } : {}),
+			...(raw.checkin ? { checkin: raw.checkin } : {}),
+			...(raw.checkout ? { checkout: raw.checkout } : {}),
+			...(raw.checkinHijri ? { checkinHijri: raw.checkinHijri } : {}),
+			...(raw.checkoutHijri ? { checkoutHijri: raw.checkoutHijri } : {}),
+		};
+	}
+	if (partial.checkinISO) st.slots.checkinISO = partial.checkinISO;
+	if (partial.checkoutISO) st.slots.checkoutISO = partial.checkoutISO;
+	return true;
+}
+
+function localizedDateRangeFromDates(dates = {}, lang = "English") {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return "";
+	const checkin = localizedGregorianDate(dates.checkinISO, lang);
+	const checkout = localizedGregorianDate(dates.checkoutISO, lang);
+	return `${checkin} - ${checkout}`;
+}
+
+function pendingDateChangeQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const proposed = st.pendingDateChange?.proposed || {};
+	const proposedText =
+		proposed.checkinISO && proposed.checkoutISO
+			? `${proposed.checkinISO} to ${proposed.checkoutISO}`
+			: "";
+	if (/arabic/i.test(lang)) {
+		return [
+			{
+				label: "\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629",
+				value: proposedText
+					? `\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629 ${proposedText}`
+					: "\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629",
+				action: "confirm_date_change",
+			},
+			{
+				label: "\u0627\u0628\u0642 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629",
+				value: "\u0627\u0628\u0642 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{
+				label: "Usar nuevas fechas",
+				value: proposedText ? `Usar nuevas fechas ${proposedText}` : "Usar nuevas fechas",
+				action: "confirm_date_change",
+			},
+			{
+				label: "Mantener fechas actuales",
+				value: "Mantener fechas actuales",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{
+				label: "Utiliser ces dates",
+				value: proposedText ? `Utiliser ces dates ${proposedText}` : "Utiliser ces dates",
+				action: "confirm_date_change",
+			},
+			{
+				label: "Garder les dates actuelles",
+				value: "Garder les dates actuelles",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	return [
+		{
+			label: "Use New Dates",
+			value: proposedText ? `Use new dates ${proposedText}` : "Use new dates",
+			action: "confirm_date_change",
+		},
+		{
+			label: "Keep Current Dates",
+			value: "Keep current dates",
+			action: "keep_existing_dates",
+		},
+	];
+}
+
+function pendingDateChangePromptText(sc = {}, st = {}, pending = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const current = localizedDateRangeFromDates(pending.previous, lang);
+	const proposed = localizedDateRangeFromDates(pending.proposed, lang);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0644\u062f\u064a \u062d\u0627\u0644\u064a\u0627\u064b \u062a\u0648\u0627\u0631\u064a\u062e ${current}. \u0648\u0635\u0644\u0646\u064a \u0623\u064a\u0636\u0627\u064b \u062a\u0648\u0627\u0631\u064a\u062e \u062c\u062f\u064a\u062f\u0629 ${proposed}. \u0647\u0644 \u0623\u062d\u062f\u062b \u0627\u0644\u062d\u062c\u0632 \u0625\u0644\u0649 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629\u060c \u0623\u0645 \u0623\u0628\u0642\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, ahora tengo las fechas ${current}. Tambien recibi nuevas fechas: ${proposed}. Quieres que actualice esta reserva a las nuevas fechas, o mantengo las actuales?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, j'ai actuellement les dates ${current}. Je viens aussi de recevoir de nouvelles dates: ${proposed}. Voulez-vous que je mette cette reservation sur les nouvelles dates, ou dois-je garder les dates actuelles ?`;
+	}
+	return `${name}, I currently have ${current}. I also saw new dates: ${proposed}. Should I update this booking to the new dates, or keep the current dates?`;
+}
+
+function pendingDateKeptText(sc = {}, st = {}, pending = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const current = localizedDateRangeFromDates(pending.previous || currentDateRange(st), lang);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062a\u0645\u0627\u0645\u060c \u0633\u0623\u0628\u0642\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629 ${current}.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perfecto, mantendre las fechas actuales: ${current}.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tres bien, je garde les dates actuelles: ${current}.`;
+	}
+	return `${name}, no problem. I will keep the current dates: ${current}.`;
+}
+
+function pendingDateChoiceFromGuest(sc = {}, userText = "") {
+	const action = lastGuestAction(sc).toLowerCase();
+	if (action === "confirm_date_change") return "confirm";
+	if (action === "keep_existing_dates") return "keep";
+	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	if (
+		/\b(?:use|apply|update|change|switch)\b.{0,40}\b(?:new|these|dates?)\b/i.test(lower) ||
+		/(?:usenewdates|applynewdates|updatetonewdates|change_dates|changedates|switchdates)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0633\u062a\u062e\u062f\u0645|\u063a\u064a\u0631|\u063a\u064a\u0631\u064a|\u062d\u062f\u062b|\u062d\u062f\u062b\u064a).{0,30}(?:\u0627\u0644\u062c\u062f\u064a\u062f|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e)/i.test(
+			arabic
+		)
+	) {
+		return "confirm";
+	}
+	if (
+		/\b(?:keep|same|current|old|previous|do not change|dont change|no change)\b/i.test(
+			lower
+		) ||
+		/(?:keepcurrent|samecurrent|dontchange|donotchange|keepdates)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0628\u0642|\u062e\u0644\u064a|\u0646\u0641\u0633|\u0627\u0644\u062d\u0627\u0644\u064a|\u0627\u0644\u0642\u062f\u064a\u0645|\u0628\u062f\u0648\u0646\s+\u062a\u063a\u064a\u064a\u0631)/i.test(
+			arabic
+		)
+	) {
+		return "keep";
+	}
+	if (confirmsText(userText)) return "confirm";
+	if (declinesText(userText) || correctionText(userText)) return "keep";
+	return "";
+}
+
 const ARABIC_HIJRI_MONTHS = [
 	"\u0645\u062d\u0631\u0645",
 	"\u0635\u0641\u0631",
@@ -1203,6 +1474,7 @@ function bookingWaitState(st = {}) {
 			"dates",
 			"room",
 			"proceed",
+			"date_change_confirm",
 			"intentConfirm",
 			"reviewConfirm",
 			"reservation_details",
@@ -1535,7 +1807,11 @@ function looksLikeNameCandidate(text = "") {
 	return /[A-Za-z\u0600-\u06FF]{2,}/.test(value);
 }
 
-function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
+function hydrateKnownSlotsFromConversation(
+	sc = {},
+	st = {},
+	{ protectLatestGuestDateChange = false } = {}
+) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	if (!conversation.length) {
 		return;
@@ -1555,7 +1831,12 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 	const guestMessages = [];
 	let latestGuestDateRange = null;
 	let latestConversationDateRange = null;
-	for (const message of conversation) {
+	let protectedLatestGuestDateRange = null;
+	const latestGuestIndex = protectLatestGuestDateChange
+		? latestGuestMessageIndex(sc)
+		: -1;
+	for (let index = 0; index < conversation.length; index += 1) {
+		const message = conversation[index];
 		const messageText = conversationEntryContextText(message);
 		if (!messageText || message?.isSystem) continue;
 		const messageDates = extractDateRange(messageText);
@@ -1564,9 +1845,16 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 			messageDates.checkoutISO &&
 			!needsExplicitPastDateClarification(messageText, messageDates)
 		) {
-			latestConversationDateRange = messageDates;
-			if (isGuestConversationMessage(message)) {
-				latestGuestDateRange = messageDates;
+			if (
+				index === latestGuestIndex &&
+				shouldConfirmDateRangeChange(st, messageDates)
+			) {
+				protectedLatestGuestDateRange = messageDates;
+			} else {
+				latestConversationDateRange = messageDates;
+				if (isGuestConversationMessage(message)) {
+					latestGuestDateRange = messageDates;
+				}
 			}
 		}
 		if (!isGuestConversationMessage(message)) continue;
@@ -1577,6 +1865,16 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
 	} else if (latestConversationDateRange) {
 		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
+	}
+	if (protectedLatestGuestDateRange) {
+		logStep(String(sc._id || ""), "slots.latest_date_change_protected", {
+			current: currentDateRange(st),
+			proposed: {
+				checkinISO: protectedLatestGuestDateRange.checkinISO,
+				checkoutISO: protectedLatestGuestDateRange.checkoutISO,
+			},
+			waitFor: st.waitFor || "",
+		});
 	}
 	let latestGuestRoomKey = null;
 	let latestAssistantQuotedRoomKey = null;
@@ -4302,7 +4600,11 @@ async function handlePendingLargeGroupCombination(io, sc, st, userText = "") {
 	if (!st.pendingRoomCombination) return false;
 	const dateRange = extractDateRange(userText);
 	if (dateRange.checkinISO && dateRange.checkoutISO) {
-		mergeDateRangeIntoState(st, dateRange);
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+			source: "large_group_combination",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
 		await answerLargeGroupRoomRecommendation(
 			io,
 			sc,
@@ -4325,11 +4627,18 @@ async function handlePendingLargeGroupCombination(io, sc, st, userText = "") {
 	}
 	const singleDate = extractSingleStayDate(userText, st);
 	if (singleDate?.raw) {
-		if (singleDate.raw.checkin) st.dateRaw.checkin = singleDate.raw.checkin;
-		if (singleDate.raw.checkout) st.dateRaw.checkout = singleDate.raw.checkout;
-		if (singleDate.raw.calendar) st.dateRaw.calendar = singleDate.raw.calendar;
-		if (singleDate.checkinISO) st.slots.checkinISO = singleDate.checkinISO;
-		if (singleDate.checkoutISO) st.slots.checkoutISO = singleDate.checkoutISO;
+		const dateMerge = await mergePartialDateRangeWithChangeGuard(
+			io,
+			sc,
+			st,
+			singleDate,
+			{ source: "large_group_single_date", userText }
+		);
+		if (dateMerge.prompted) return true;
+		if (dateMerge.invalid) {
+			await askForMissingStayDates(io, sc, st);
+			return true;
+		}
 		await askForMissingStayDates(io, sc, st);
 		return true;
 	}
@@ -4451,7 +4760,11 @@ async function answerSelectedHotelRoomQuestion(
 		latestDates.checkoutISO &&
 		!needsExplicitPastDateClarification(userText, latestDates)
 	) {
-		mergeDateRangeIntoState(st, latestDates);
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, latestDates, {
+			source: "selected_room_question",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
 	}
 	if (st.activeTurnHadReply) {
 		logStep(String(sc._id), "room_question.skip_after_reply", {
@@ -5785,6 +6098,7 @@ function ensureState(sc, hotel) {
 			bookingNudgePausedAt: 0,
 			progressSentAt: {},
 			hydratedConversationLength: 0,
+			pendingDateChange: null,
 			pendingRoomAlternative: null,
 			pendingRoomCombination: null,
 			repeatedQuestionEscalatedKey: "",
@@ -8751,8 +9065,12 @@ async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
 		return true;
 	}
 	if (dates?.checkinISO && dates?.checkoutISO) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
+			source: "room_alternative_dates",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
 		clearPendingRoomAlternative(st);
-		mergeDateRangeIntoState(st, dates);
 		st.quote = null;
 		st.quoteSummarizedAt = 0;
 		st.reviewSent = false;
@@ -10666,6 +10984,221 @@ async function askExplicitPastDateClarification(io, sc, st, userText = "", dates
 	return true;
 }
 
+async function askPendingDateChangeConfirmation(
+	io,
+	sc,
+	st,
+	dates = {},
+	{ source = "", userText = "" } = {}
+) {
+	const pending = rememberPendingDateChange(st, dates, { source, userText });
+	if (!pending) return false;
+	st.waitFor = "date_change_confirm";
+	stampAsk(st, "date_change_confirm");
+	pending.askedAt = now();
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		pendingDateChangePromptText(sc, st, pending),
+		{ quickReplies: pendingDateChangeQuickReplies(sc, st) }
+	);
+	logStep(String(sc._id), "dates.change_confirmation_requested", {
+		source,
+		current: pending.previous,
+		proposed: {
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+		},
+		sent,
+	});
+	return true;
+}
+
+async function mergeDateRangeWithChangeGuard(
+	io,
+	sc,
+	st,
+	dates = {},
+	{ source = "", userText = "", force = false, resetQuote = true } = {}
+) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) {
+		return { applied: false, prompted: false, changed: false };
+	}
+	if (!force && shouldConfirmDateRangeChange(st, dates)) {
+		await askPendingDateChangeConfirmation(io, sc, st, dates, {
+			source,
+			userText,
+		});
+		return { applied: false, prompted: true, changed: true };
+	}
+	const changed = dateRangeConflictsWithState(st, dates);
+	const applied = applyDateRangeToState(st, dates, { resetQuote });
+	if (applied && changed) {
+		logStep(String(sc._id), "dates.changed", {
+			source,
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+			waitFor: st.waitFor || "",
+			roomTypeKey: st.slots?.roomTypeKey || null,
+		});
+	}
+	return { applied, prompted: false, changed };
+}
+
+async function mergePartialDateRangeWithChangeGuard(
+	io,
+	sc,
+	st,
+	partial = {},
+	{ source = "", userText = "", force = false, resetQuote = true } = {}
+) {
+	const before = currentDateRange(st);
+	const proposed = combinedDateRangeFromPartial(st, partial);
+	const wouldChangeCompleteRange = Boolean(
+		before &&
+			((partial?.checkinISO && partial.checkinISO !== before.checkinISO) ||
+				(partial?.checkoutISO && partial.checkoutISO !== before.checkoutISO))
+	);
+	if (!proposed && wouldChangeCompleteRange) {
+		logStep(String(sc._id), "dates.partial_invalid_ignored", {
+			source,
+			current: before,
+			partial: {
+				checkinISO: partial?.checkinISO || null,
+				checkoutISO: partial?.checkoutISO || null,
+			},
+			waitFor: st.waitFor || "",
+		});
+		return { applied: false, prompted: false, changed: false, invalid: true };
+	}
+	if (!force && proposed && shouldConfirmDateRangeChange(st, proposed)) {
+		await askPendingDateChangeConfirmation(io, sc, st, proposed, {
+			source,
+			userText,
+		});
+		return { applied: false, prompted: true, changed: true };
+	}
+	const applied = applyPartialDateToState(st, partial);
+	const after = currentDateRange(st);
+	const changed = Boolean(
+		applied &&
+			before &&
+			after &&
+			dateRangeKey(before) !== dateRangeKey(after)
+	);
+	if (applied && changed && resetQuote && activeDateSensitiveBookingState(st)) {
+		resetBookingAfterDateRangeChange(st);
+	}
+	if (applied && changed) {
+		logStep(String(sc._id), "dates.partial_changed", {
+			source,
+			current: after,
+			waitFor: st.waitFor || "",
+			roomTypeKey: st.slots?.roomTypeKey || null,
+		});
+	}
+	return { applied, prompted: false, changed };
+}
+
+async function continueAfterConfirmedDateChange(io, sc, st, userText = "") {
+	if (st.hotel && st.pendingRoomCombination) {
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			st.pendingRoomCombination.guestCount
+		);
+		return true;
+	}
+	if (st.hotel && st.slots?.roomTypeKey && st.slots?.checkinISO && st.slots?.checkoutISO) {
+		await shareKnownStayQuote(io, sc, st);
+		return true;
+	}
+	if (!st.slots?.roomTypeKey) {
+		await askRoomPreferenceForReservation(io, sc, st);
+		return true;
+	}
+	if (!st.hotel && st.slots?.roomTypeKey && st.slots?.checkinISO && st.slots?.checkoutISO) {
+		await answerJannatBookingHotelOptions(io, sc, st, userText, st.slots.roomTypeKey);
+		return true;
+	}
+	await askForMissingStayDates(io, sc, st);
+	return true;
+}
+
+async function handlePendingDateChangeChoice(io, sc, st, userText = "") {
+	const pending = st.pendingDateChange || null;
+	if (!pending) return false;
+	if (!String(userText || "").trim()) return false;
+	const choice = pendingDateChoiceFromGuest(sc, userText);
+	const newDates = extractDateRange(userText);
+	if (choice === "confirm") {
+		const proposed =
+			pending.proposed?.checkinISO && pending.proposed?.checkoutISO
+				? pending.proposed
+				: newDates;
+		if (!proposed?.checkinISO || !proposed?.checkoutISO) {
+			clearPendingDateChange(st);
+			return false;
+		}
+		applyDateRangeToState(st, proposed);
+		logStep(String(sc._id), "dates.change_confirmed", {
+			checkinISO: proposed.checkinISO,
+			checkoutISO: proposed.checkoutISO,
+			waitFor: st.waitFor || "",
+		});
+		return continueAfterConfirmedDateChange(io, sc, st, userText);
+	}
+	if (choice === "keep") {
+		const previousWaitFor = pending.previousWaitFor || "";
+		const previousReviewSent = Boolean(pending.previousReviewSent);
+		clearPendingDateChange(st);
+		st.reviewSent = previousReviewSent;
+		st.waitFor =
+			previousWaitFor && previousWaitFor !== "date_change_confirm"
+				? previousWaitFor
+				: nextPivot(st);
+		const quickReplies =
+			st.waitFor === "proceed" && activeQuoteMatchesSlots(st)
+				? proceedQuickReplies(sc, st)
+				: st.waitFor === "reviewConfirm"
+				? confirmationQuickReplies(sc, st)
+				: [];
+		await humanSend(io, sc, st, pendingDateKeptText(sc, st, pending), {
+			quickReplies,
+		});
+		logStep(String(sc._id), "dates.change_kept_current", {
+			waitFor: st.waitFor || "",
+			current: currentDateRange(st),
+		});
+		return true;
+	}
+	if (
+		newDates?.checkinISO &&
+		newDates?.checkoutISO &&
+		shouldConfirmDateRangeChange(st, newDates)
+	) {
+		await askPendingDateChangeConfirmation(io, sc, st, newDates, {
+			source: "pending_followup",
+			userText,
+		});
+		return true;
+	}
+	if (directGuestRequestKind(sc, st, userText, {})) return false;
+	await humanSend(
+		io,
+		sc,
+		st,
+		pendingDateChangePromptText(sc, st, pending),
+		{ quickReplies: pendingDateChangeQuickReplies(sc, st) }
+	);
+	st.waitFor = "date_change_confirm";
+	stampAsk(st, "date_change_confirm");
+	return true;
+}
+
 async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
 	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
 	st.waitFor =
@@ -11229,7 +11762,10 @@ async function planTurn(io, sc) {
 				AI_PLANNING_TYPING_DELAY_MS
 			);
 		}
-		hydrateKnownSlotsFromConversation(sc, st);
+		if (await handlePendingDateChangeChoice(io, sc, st, userText)) return;
+		hydrateKnownSlotsFromConversation(sc, st, {
+			protectLatestGuestDateChange: Boolean(userText),
+		});
 		recoverBookingStageFromConversation(sc, st);
 		const protectReservationDetailLanguage = shouldProtectReservationDetailLanguage(
 			sc,
@@ -11335,7 +11871,9 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		hydrateKnownSlotsFromConversation(sc, st);
+		hydrateKnownSlotsFromConversation(sc, st, {
+			protectLatestGuestDateChange: Boolean(userText),
+		});
 		recoverBookingStageFromConversation(sc, st);
 		const earlyProceedHandled = await handleProceedStageInput(
 			io,
@@ -11527,7 +12065,14 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText);
 		if (canUseLatestTurnDatesForBooking) {
-			mergeDateRangeIntoState(st, quickTurnDates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "latest_turn_before_direct_request", userText }
+			);
+			if (dateMerge.prompted) return;
 			logStep(caseId, "dates.merged_before_direct_request", {
 				checkinISO: st.slots.checkinISO,
 				checkoutISO: st.slots.checkoutISO,
@@ -11596,7 +12141,14 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			mergeDateRangeIntoState(st, quickTurnDates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "pending_combination_quick_dates", userText }
+			);
+			if (dateMerge.prompted) return;
 			await answerLargeGroupRoomRecommendation(
 				io,
 				sc,
@@ -11615,7 +12167,14 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			mergeDateRangeIntoState(st, quickTurnDates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "quick_dates_direct_quote", userText }
+			);
+			if (dateMerge.prompted) return;
 			logStep(caseId, "quick_dates.direct_quote", {
 				roomTypeKey: st.slots.roomTypeKey,
 				checkinISO: st.slots.checkinISO,
@@ -11626,11 +12185,18 @@ async function planTurn(io, sc) {
 		}
 		const singleTurnDate = extractSingleStayDate(userText, st);
 		if (singleTurnDate?.raw) {
-			if (singleTurnDate.raw.checkin) st.dateRaw.checkin = singleTurnDate.raw.checkin;
-			if (singleTurnDate.raw.checkout) st.dateRaw.checkout = singleTurnDate.raw.checkout;
-			if (singleTurnDate.raw.calendar) st.dateRaw.calendar = singleTurnDate.raw.calendar;
-			if (singleTurnDate.checkinISO) st.slots.checkinISO = singleTurnDate.checkinISO;
-			if (singleTurnDate.checkoutISO) st.slots.checkoutISO = singleTurnDate.checkoutISO;
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				singleTurnDate,
+				{ source: "quick_single_date", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 			if (
 				st.hotel &&
 				st.slots.roomTypeKey &&
@@ -11704,7 +12270,18 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			mergeDateRangeIntoState(st, decisionLu.dates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_pre_direct", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 		}
 		const bookingFlowWasActiveBeforeNlu =
 			isNewReservationFlowActive(st) ||
@@ -11739,24 +12316,27 @@ async function planTurn(io, sc) {
 		}
 
 		if (decisionLu.dates?.checkinISO && decisionLu.dates?.checkoutISO) {
-			mergeDateRangeIntoState(st, decisionLu.dates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_post_direct", userText }
+			);
+			if (dateMerge.prompted) return;
 		} else {
-			if (decisionLu?.dates?.raw) {
-				if (decisionLu.dates.raw.checkin)
-					st.dateRaw.checkin = decisionLu.dates.raw.checkin;
-				if (decisionLu.dates.raw.checkout)
-					st.dateRaw.checkout = decisionLu.dates.raw.checkout;
-				if (decisionLu.dates.raw.calendar)
-					st.dateRaw.calendar = decisionLu.dates.raw.calendar;
-				if (decisionLu.dates.raw.checkinHijri)
-					st.dateRaw.checkinHijri = decisionLu.dates.raw.checkinHijri;
-				if (decisionLu.dates.raw.checkoutHijri)
-					st.dateRaw.checkoutHijri = decisionLu.dates.raw.checkoutHijri;
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_post_direct_partial", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
 			}
-			if (decisionLu.dates?.checkinISO)
-				st.slots.checkinISO = decisionLu.dates.checkinISO;
-			if (decisionLu.dates?.checkoutISO)
-				st.slots.checkoutISO = decisionLu.dates.checkoutISO;
 		}
 		if (
 			st.hotel &&
@@ -12326,7 +12906,11 @@ async function planTurn(io, sc) {
 			dateRange.checkinISO &&
 			dateRange.checkoutISO
 		) {
-			mergeDateRangeIntoState(st, dateRange);
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+				source: "fallback_combination_dates",
+				userText,
+			});
+			if (dateMerge.prompted) return;
 			await answerLargeGroupRoomRecommendation(
 				io,
 				sc,
@@ -12341,7 +12925,11 @@ async function planTurn(io, sc) {
 			dateRange.checkoutISO &&
 			st.slots.roomTypeKey
 		) {
-			mergeDateRangeIntoState(st, dateRange);
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+				source: "fallback_direct_quote_dates",
+				userText,
+			});
+			if (dateMerge.prompted) return;
 			if (st.hotel) {
 				await shareKnownStayQuote(io, sc, st);
 			} else {
@@ -12357,16 +12945,18 @@ async function planTurn(io, sc) {
 		}
 		const singleDateFallback = extractSingleStayDate(userText, st);
 		if (singleDateFallback?.raw) {
-			if (singleDateFallback.raw.checkin)
-				st.dateRaw.checkin = singleDateFallback.raw.checkin;
-			if (singleDateFallback.raw.checkout)
-				st.dateRaw.checkout = singleDateFallback.raw.checkout;
-			if (singleDateFallback.raw.calendar)
-				st.dateRaw.calendar = singleDateFallback.raw.calendar;
-			if (singleDateFallback.checkinISO)
-				st.slots.checkinISO = singleDateFallback.checkinISO;
-			if (singleDateFallback.checkoutISO)
-				st.slots.checkoutISO = singleDateFallback.checkoutISO;
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				singleDateFallback,
+				{ source: "fallback_single_date", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 			if (
 				st.hotel &&
 				st.slots.roomTypeKey &&
@@ -12384,19 +12974,24 @@ async function planTurn(io, sc) {
 
 		// raw dates (for hijri display) and slots
 		if (lu.dates?.checkinISO && lu.dates?.checkoutISO) {
-			mergeDateRangeIntoState(st, lu.dates);
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, lu.dates, {
+				source: "nlu_reused",
+				userText,
+			});
+			if (dateMerge.prompted) return;
 		} else {
-			if (lu?.dates?.raw) {
-				if (lu.dates.raw.checkin) st.dateRaw.checkin = lu.dates.raw.checkin;
-				if (lu.dates.raw.checkout) st.dateRaw.checkout = lu.dates.raw.checkout;
-				if (lu.dates.raw.calendar) st.dateRaw.calendar = lu.dates.raw.calendar;
-				if (lu.dates.raw.checkinHijri)
-					st.dateRaw.checkinHijri = lu.dates.raw.checkinHijri;
-				if (lu.dates.raw.checkoutHijri)
-					st.dateRaw.checkoutHijri = lu.dates.raw.checkoutHijri;
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				lu.dates,
+				{ source: "nlu_reused_partial", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
 			}
-			if (lu.dates?.checkinISO) st.slots.checkinISO = lu.dates.checkinISO;
-			if (lu.dates?.checkoutISO) st.slots.checkoutISO = lu.dates.checkoutISO;
 		}
 		if (lu.roomTypeKey) st.slots.roomTypeKey = lu.roomTypeKey;
 
