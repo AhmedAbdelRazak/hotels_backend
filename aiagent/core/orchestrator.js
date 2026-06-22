@@ -3691,15 +3691,15 @@ function selectedHotelSupportBoundaryReply(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u062e\u0635\u0648\u0635 ${hotelName} \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u0623\u0645\u0644\u0643 \u062a\u0641\u0627\u0635\u064a\u0644\u0627 \u0645\u0624\u0643\u062f\u0629 \u0639\u0646 \u0641\u0646\u0627\u062f\u0642 \u0623\u062e\u0631\u0649 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629. \u0644\u0623\u064a \u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0639\u0627\u0645 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL}\u060c \u0648\u064a\u0633\u0639\u062f\u0646\u064a \u0647\u0646\u0627 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 ${hotelName} \u0641\u0642\u0637.`;
+		return `${name}\u060c \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u062e\u0635\u0648\u0635 ${hotelName} \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u0623\u0645\u0644\u0643 \u062a\u0641\u0627\u0635\u064a\u0644\u0627 \u0645\u0624\u0643\u062f\u0629 \u0639\u0646 \u0641\u0646\u0627\u062f\u0642 \u0623\u062e\u0631\u0649 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, en este chat solo puedo ayudarte con ${hotelName}; no tengo detalles verificados sobre otros hoteles desde este soporte. Para una consulta general, escribe a ${AI_SUPPORT_EMAIL}. Aqui puedo revisar ${hotelName} solamente.`;
+		return `${name}, en este chat solo puedo ayudarte con ${hotelName}; no tengo detalles verificados sobre otros hoteles desde este soporte. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}; je n'ai pas d'informations verifiees sur d'autres hotels ici. Pour une question generale, ecrivez a ${AI_SUPPORT_EMAIL}. Ici, je peux verifier ${hotelName} uniquement.`;
+		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}; je n'ai pas d'informations verifiees sur d'autres hotels ici. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, I can help with ${hotelName} only in this chat, and I do not have verified details about other hotels from here. For general Jannat Booking questions, please email ${AI_SUPPORT_EMAIL}. I can still check ${hotelName} only in this chat.`;
+	return `${name}, I can help with ${hotelName} only in this chat, and I do not have verified details about other hotels from here. ${unsupportedAnswerNextStepText(sc, st)}`;
 }
 
 function initialHotelGreetingText(sc = {}, st = {}) {
@@ -4051,9 +4051,58 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 			roomType: room.roomType,
 			displayName: room.displayName || room.roomType,
 			displayNameOther: room.displayName_OtherLanguage || "",
+			description: compactRoomFactText(room.description, 260),
+			descriptionOther: compactRoomFactText(
+				room.description_OtherLanguage,
+				260
+			),
+			amenities: compactRoomFactList(room.amenities, 12),
+			views: compactRoomFactList(room.views, 6),
+			extraAmenities: compactRoomFactList(room.extraAmenities, 8),
+			roomSize: compactRoomFactText(room.roomSize, 80),
+			bedsCount: safePositiveRoomNumber(room.bedsCount),
+			roomForGender: compactRoomFactText(room.roomForGender, 80),
 			basePrice: room.price?.basePrice || 0,
 			currency: hotel?.currency || "SAR",
 		}));
+}
+
+function compactRoomFactText(value = "", maxLength = 260) {
+	const text = cleanHotelFactText(value);
+	if (!text) return "";
+	if (text.length <= maxLength) return text;
+	return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function compactRoomFactList(values = [], limit = 12) {
+	const source = Array.isArray(values) ? values : [values];
+	const seen = new Set();
+	const result = [];
+	for (const item of source) {
+		const raw =
+			typeof item === "object" && item !== null
+				? item.name ||
+				  item.label ||
+				  item.title ||
+				  item.value ||
+				  item.en ||
+				  item.ar ||
+				  item.amenity ||
+				  ""
+				: item;
+		const text = compactRoomFactText(raw, 90);
+		const key = text.toLowerCase();
+		if (!text || seen.has(key)) continue;
+		seen.add(key);
+		result.push(text);
+		if (result.length >= limit) break;
+	}
+	return result;
+}
+
+function safePositiveRoomNumber(value) {
+	const number = Number(value);
+	return Number.isFinite(number) && number > 0 ? number : "";
 }
 
 function cleanHotelFactText(value = "") {
@@ -4147,7 +4196,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		isNusuk: hotel.isNusuk === true,
 		isNusukText: nusukDetails,
 		hotelPolicyQA: hotelPolicies,
-		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 12),
+		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 8),
 	};
 }
 
@@ -8749,7 +8798,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it.`
 			: "",
 		activeHotelFacts?.googleMapsLocationUrl
 			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
@@ -9041,7 +9090,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
-		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
+		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. The support_email action name means unsupported-answer fallback: the customer-facing reply should professionally say the detail is not confirmed and then move back to the relevant hotel/reservation topic, not invent facts or send the guest away.",
 		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
 		"Do not choose human_escalation only because a normal question was repeated once or twice; keep answering safely and patiently. The deterministic three-repeat guard handles unresolved repeated questions.",
 		"Choose reservation_cancellation for cancellation/refund policy questions or cancellation requests so the deterministic policy handler can answer directly from verified hotel policy. Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
@@ -10820,38 +10869,91 @@ function hajjInquiryFallbackText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0623\u0639\u062a\u0630\u0631 \u0644\u0644\u062e\u0644\u0637. \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u060c \u0644\u0627 \u062a\u062a\u0648\u0641\u0631 \u0644\u062f\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627 \u0639\u0646 \u0627\u0644\u062a\u0646\u0638\u064a\u0645 \u0623\u0648 \u0627\u0644\u0641\u0626\u0627\u062a. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+		return `${name}\u060c \u0623\u0639\u062a\u0630\u0631 \u0644\u0644\u062e\u0644\u0637. \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u060c \u0644\u0627 \u062a\u062a\u0648\u0641\u0631 \u0644\u062f\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627 \u0639\u0646 \u0627\u0644\u062a\u0646\u0638\u064a\u0645 \u0623\u0648 \u0627\u0644\u0641\u0626\u0627\u062a. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, perdona la confusion. Sobre Hajj, no tengo ahora datos verificados sobre organizacion o categorias. Escribenos a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+		return `${name}, perdona la confusion. Sobre Hajj, no tengo ahora datos verificados sobre organizacion o categorias. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, desole pour la confusion. Pour le Hajj, je n'ai pas actuellement d'informations verifiees sur l'organisation ou les categories. Ecrivez a ${AI_SUPPORT_EMAIL} et l'equipe vous guidera avec les bons details.`;
+		return `${name}, desole pour la confusion. Pour le Hajj, je n'ai pas actuellement d'informations verifiees sur l'organisation ou les categories. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, sorry for the confusion. For Hajj, I do not currently have verified details about organization or categories. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+	return `${name}, sorry for the confusion. For Hajj, I do not currently have verified details about organization or categories. ${unsupportedAnswerNextStepText(sc, st)}`;
 }
 
 async function answerVagueHajjInquiry(io, sc, st, userText = "") {
+	const fallback = hajjInquiryFallbackText(sc, st);
 	const reply = await write(
 		io,
 		sc,
 		st,
-		"The guest asked a broad Hajj/Haj-related question, not a payment/reference question. First check the provided hotel facts, platform context, previous guest context, and employee learning examples. If those contexts contain a verified answer to this exact Hajj question, answer it directly and briefly using only that verified context. If they do not contain a verified answer, apologize briefly, say you do not currently have confirmed details about Hajj organization/packages/categories, and direct the guest to support@jannatbooking.com. Do not invent facts. Do not repeat reservation details, quotes, confirmation numbers, or payment links. Do not ask for a payment reference or reservation number.",
+		"The guest asked a broad Hajj/Haj-related question, not a payment/reference question. First check the provided hotel facts, platform context, previous guest context, and employee learning examples. If those contexts contain a verified answer to this exact Hajj question, answer it directly and briefly using only that verified context. If they do not contain a verified answer, apologize briefly, say you do not currently have confirmed details about Hajj organization/packages/categories, then use unknownAnswerNextStep to move back to the relevant hotel/reservation topic. Do not invent facts. Do not direct the guest to email or escalation. Do not repeat reservation details, quotes, confirmation numbers, or payment links. Do not ask for a payment reference or reservation number.",
 		{
 			latestUserMessage: userText,
-			supportEmail: AI_SUPPORT_EMAIL,
 			hotelName: localizedHotelName(sc, st),
+			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 			reservationAlreadyCreated:
 				sc.aiReservation?.status === "created" ||
 				Boolean(sc.aiReservation?.confirmationNumber),
 		}
 	);
-	await humanSend(io, sc, st, reply || hajjInquiryFallbackText(sc, st));
+	await humanSend(io, sc, st, stripUnsupportedEscalationText(reply, fallback));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
 	return true;
+}
+
+function unsupportedAnswerNextStepText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const hotelName = st.hotel ? localizedHotelName(sc, st) : "";
+	const pivot = st?.slots ? nextPivot(st) : "dates";
+	if (/arabic/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}: \u0645\u0627 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0630\u064a \u062a\u0641\u0636\u0644\u0647\u061f`;
+			}
+			if (pivot === "proceed") {
+				return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}. \u0647\u0644 \u0623\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f`;
+			}
+			return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}: \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0641\u0636\u0644 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631 \u0645\u062a\u0627\u062d.`;
+		}
+		return "\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628: \u0623\u0631\u0633\u0644 \u0627\u0644\u0645\u062f\u064a\u0646\u0629 \u0648\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0641\u0636\u0644 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a.";
+	}
+	if (/spanish/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `Con gusto puedo seguir con ${hotelName}: que tipo de habitacion o cuantos huespedes necesitas?`;
+			}
+			if (pivot === "proceed") {
+				return `Con gusto puedo seguir con ${hotelName}. Quieres que pase a la revision de la reserva?`;
+			}
+			return `Con gusto puedo seguir con ${hotelName}: enviame llegada, salida o el tipo de habitacion preferido y reviso la mejor opcion disponible.`;
+		}
+		return "Con gusto puedo ayudarte a encontrar una buena opcion: enviame ciudad, fechas y numero de huespedes y reviso las mejores opciones.";
+	}
+	if (/french/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `Je peux continuer a vous aider pour ${hotelName}: quel type de chambre ou combien de personnes faut-il prevoir ?`;
+			}
+			if (pivot === "proceed") {
+				return `Je peux continuer a vous aider pour ${hotelName}. Souhaitez-vous que je passe a la revision de la reservation ?`;
+			}
+			return `Je peux continuer a vous aider pour ${hotelName}: envoyez-moi l'arrivee, le depart ou le type de chambre prefere, et je verifierai la meilleure option disponible.`;
+		}
+		return "Je peux vous aider a trouver une bonne option: envoyez-moi la ville, les dates et le nombre de personnes, et je verifierai les meilleures options.";
+	}
+	if (hotelName) {
+		if (pivot === "room") {
+			return `I can still help with ${hotelName}: which room type or guest count should I prepare for you?`;
+		}
+		if (pivot === "proceed") {
+			return `I can still help with ${hotelName}. Would you like me to continue to the reservation review?`;
+		}
+		return `I can still help with ${hotelName}: send your check-in and checkout dates or preferred room type, and I will check the best available option.`;
+	}
+	return "I can still help you find a suitable hotel option: send the city, dates, and guest count, and I will check the best matches.";
 }
 
 function supportEmailFallbackText(sc = {}, st = {}) {
@@ -10860,16 +10962,44 @@ function supportEmailFallbackText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
 		return hotelName
-			? `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u062f\u0631\u062f\u0634\u0629 ${hotelName}. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`
-			: `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u062d\u0627\u0644\u064a\u0627. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+			? `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u062f\u0631\u062f\u0634\u0629 ${hotelName} \u062d\u0627\u0644\u064a\u0627. ${unsupportedAnswerNextStepText(sc, st)}`
+			: `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u062d\u0627\u0644\u064a\u0627. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, no tengo una respuesta verificada para esa consulta en este chat. Por favor escribe a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+		return `${name}, no tengo una respuesta verificada para esa consulta en este chat ahora mismo. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, je n'ai pas de reponse verifiee pour cette question dans ce chat. Veuillez ecrire a ${AI_SUPPORT_EMAIL}, et l'equipe vous guidera avec les bons details.`;
+		return `${name}, je n'ai pas de reponse verifiee pour cette question dans ce chat pour le moment. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, I do not have a verified answer for that question in this chat. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+	return `${name}, I do not have a verified answer for that question in this chat right now. ${unsupportedAnswerNextStepText(sc, st)}`;
+}
+
+function stripUnsupportedEscalationText(text = "", fallback = "") {
+	const raw = String(text || "").trim();
+	const safeFallback = String(fallback || "").trim();
+	if (!raw) return safeFallback;
+	const sentences = raw
+		.split(/(?<=[.!?\u061f])\s+|\n+/)
+		.map((sentence) => sentence.trim())
+		.filter(Boolean);
+	const kept = sentences.filter((sentence) => {
+		const lower = sentence.toLowerCase();
+		const arabic = sentence;
+		return !(
+			/\b(?:support@jannatbooking\.com|management@xhotelpro\.com)\b/i.test(
+				lower
+			) ||
+			/\b(?:email|e-mail|contact|reach out to|write to)\s+(?:support|us|the team)\b/i.test(
+				lower
+			) ||
+			/\b(?:support team|customer support)\b/i.test(lower) ||
+			/(?:\u0631\u0627\u0633\u0644|\u062a\u0648\u0627\u0635\u0644).*(?:\u0627\u0644\u062f\u0639\u0645|\u0627\u0644\u0641\u0631\u064a\u0642)/i.test(
+				arabic
+			)
+		);
+	});
+	const cleaned = kept.join(" ").trim();
+	return cleaned || safeFallback;
 }
 
 function technicalRecoveryText(sc = {}, st = {}) {
@@ -11061,16 +11191,17 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 		io,
 		sc,
 		st,
-		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly and direct the guest to support@jannatbooking.com. Do not invent facts. Do not ask for check-in/check-out dates, phone, email, confirmation number, room type, or booking details unless the guest explicitly asked to reserve in the latest message. Do not add a booking pivot after an unsupported general answer.",
+		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly, say you do not currently have confirmed details, then use unknownAnswerDraft or unknownAnswerNextStep to move back to the relevant hotel/reservation topic. Do not invent facts. Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, or booking details unless the guest explicitly asked to reserve in the latest message. Keep the follow-up as one natural helpful sales/support step.",
 		{
 			latestUserMessage: userText,
-			supportEmail: AI_SUPPORT_EMAIL,
 			hotelName: localizedHotelName(sc, st),
 			reason,
+			unknownAnswerDraft: supportEmailFallbackText(sc, st),
+			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 		}
 	);
 	const fallback = supportEmailFallbackText(sc, st);
-	await humanSend(io, sc, st, stripGeneralBookingPivot(reply || fallback, fallback));
+	await humanSend(io, sc, st, stripUnsupportedEscalationText(reply, fallback));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"

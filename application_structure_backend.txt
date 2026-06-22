@@ -2488,8 +2488,8 @@ Future TODO Backlog - Added 2026-05-26
   - The orchestrator must read the full SupportCase conversation before deciding the next action and must avoid asking for details already provided.
   - New reservation openings should feel like a hotel reservation/sales assistant, not a cold form. When the guest asks to reserve without a room type, ask warmly about room preference first instead of opening with check-in/check-out dates.
   - Room/quote copy should be dynamic and based on actual hotel/room/price facts. Do not invent amenities, discounts, urgency, or "best room" claims.
-  - General questions are handled before booking fallback. If aiagentlearning / platform knowledge can answer safely, answer without forcing a reservation flow. If the AI cannot answer from allowed hotel/platform knowledge, politely direct the guest to support@jannatbooking.com.
-  - Do not add topic-specific hardcoded unsupported-question branches such as "Hajj only". Unsupported-question routing is generic and must respect hotel scope, aiagentlearning, and support email fallback.
+  - General questions are handled before booking fallback. If aiagentlearning / platform knowledge can answer safely, answer without forcing a reservation flow. If the AI cannot answer from allowed hotel/platform knowledge, say the detail is not currently confirmed and pivot back to the relevant hotel/reservation topic without inventing facts.
+  - Do not add topic-specific hardcoded unsupported-question branches such as "Hajj only". Unsupported-question routing is generic and must respect hotel scope, aiagentlearning, and the professional unknown-answer fallback.
 - Reservation detail collection:
   - Mandatory reservation details are now asked as separate readable rows instead of telling the guest to type everything in one line.
   - If the guest supplies only some fields, the assistant should ask only for the missing field(s), not restart the full form.
@@ -3000,3 +3000,33 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Reservation-specific cancellation review uses check-in date timing, not
     confirmation age. Missing check-in date is explained professionally without
     inventing refund eligibility.
+
+2026-06-22 Chatbot Room Facts And Unknown Answer Tightening
+- File:
+  - aiagent/core/orchestrator.js
+- Room facts:
+  - `activeHotelFacts.activeRooms` now carries compact room-setting details
+    from `HotelDetails.roomCountDetails`, including room name, Arabic/other
+    language name, description, translated description, amenities, views, extra
+    amenities, room size, beds count, gender suitability, base price, and
+    currency.
+  - The room fact summary is capped so general replies stay fast and the agent
+    does not bloat prompts for hotels with many room rows.
+  - Writer instructions require the AI to answer room-description and amenity
+    questions only from these verified room facts, translating/adapting them
+    professionally. If a detail is missing, the AI should say it is not
+    currently shown instead of inventing an amenity or feature.
+- Unsupported questions:
+  - The internal `support_email` action still exists for state-machine
+    stability, but customer-facing fallback text no longer sends the guest away
+    to email for ordinary unsupported questions.
+  - Unsupported broad questions should be answered professionally as "I do not
+    currently have confirmed/verified details" and then pivot back to the
+    relevant selected-hotel or reservation topic, such as dates, room type,
+    availability, or reservation review.
+  - LLM-written broad unknown/Hajj fallback replies pass through a small
+    sanitizer that removes support-email/contact-support sentences if they
+    appear despite the prompt, falling back to the deterministic in-chat answer
+    when needed.
+  - This preserves the sales/reception tone while avoiding guesses, deflection,
+    infinite loops, or unnecessary escalation.

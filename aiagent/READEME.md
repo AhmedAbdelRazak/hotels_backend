@@ -62,6 +62,15 @@
   capacity or room type, the answer should first confirm the fit using real
   `roomCountDetails` facts in a natural hospitality/sales tone, then invite dates
   only as the next step for availability and price.
+- **Room descriptions and amenities**: The writer context includes compact room
+  descriptions, translated descriptions, amenities, views, extra amenities, room
+  size, beds count, and gender suitability from hotel settings. Use those facts
+  directly, translate/adapt them professionally, and say a detail is not
+  currently shown instead of inventing missing amenities.
+- **Unsupported answers**: For ordinary unsupported broad questions, say the
+  detail is not confirmed/verified in this chat and pivot back to the relevant
+  hotel or reservation topic. Do not turn this into an email deflection unless a
+  separate sensitive/safety path explicitly requires it.
 - **Pricing**:
   - Middle-day `price = 0` ⇒ **blocked**.
   - Missing calendar day ⇒ `basePrice`.
