@@ -3016,6 +3016,9 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     questions only from these verified room facts, translating/adapting them
     professionally. If a detail is missing, the AI should say it is not
     currently shown instead of inventing an amenity or feature.
+  - Room descriptions should be summarized in 1-2 short natural lines unless
+    the guest explicitly asks for full details. Do not paste the saved
+    description verbatim or list every amenity by default.
 - Unsupported questions:
   - The internal `support_email` action still exists for state-machine
     stability, but customer-facing fallback text no longer sends the guest away

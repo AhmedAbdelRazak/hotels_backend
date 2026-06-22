@@ -65,8 +65,9 @@
 - **Room descriptions and amenities**: The writer context includes compact room
   descriptions, translated descriptions, amenities, views, extra amenities, room
   size, beds count, and gender suitability from hotel settings. Use those facts
-  directly, translate/adapt them professionally, and say a detail is not
-  currently shown instead of inventing missing amenities.
+  directly, translate/adapt them professionally, and keep room descriptions to
+  1-2 short natural lines unless the guest asks for full details. Say a detail
+  is not currently shown instead of inventing missing amenities.
 - **Unsupported answers**: For ordinary unsupported broad questions, say the
   detail is not confirmed/verified in this chat and pivot back to the relevant
   hotel or reservation topic. Do not turn this into an email deflection unless a
