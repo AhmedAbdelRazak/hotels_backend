@@ -269,6 +269,8 @@ Use this checklist before pushing chatbot changes to production:
    - bus/shuttle
    - distance
    - invoice/confirmation question
+   - after the direct fact answer, confirm the earlier quote still advances to
+     reservation review instead of payment help.
 6. Test pause/later:
    - guest says they will talk later
    - bot acknowledges warmly
@@ -299,6 +301,48 @@ After the final deployment:
 - The scary OOM lines still visible in the PM2 error tail were old. The error
   log timestamp stayed before the final deployment and did not move afterward.
 
+### Follow-up: Quote Confirmation After Side Questions
+
+Issue seen in production:
+
+- Guest received a valid quote, then asked a side question such as the Google
+  Maps location.
+- The assistant answered the side question correctly.
+- When the guest later wrote a confirmation phrase such as "confirm the booking
+  above" or repeated the hotel/total, recovery looked only at the last assistant
+  message. Because that last message was the map answer, the quote/proceed stage
+  could be lost and broad payment/reservation keyword routing could hijack the
+  turn.
+- Bad symptom: the assistant asked for a payment receipt/reference instead of
+  continuing to the reservation review.
+
+Fix deployed:
+
+- Recover booking stage from the latest meaningful stage-bearing assistant
+  message, not merely the last assistant message.
+- Rehydrate room type from assistant quote/review messages when the guest did
+  not explicitly type the room name.
+- Treat active-quote confirmation phrases and repeated quote totals as proceed
+  confirmations before direct payment/help routing.
+- Keep genuine payment questions outside the quote-confirmation path.
+- Public guest updates and client-close updates now clear stale
+  `aiRecoveryScheduledAt` so unanswered-turn recovery is not blocked by an old
+  marker.
+- The SSR widget now waits for the backend close response before clearing local
+  chat state, preventing a UI-only close when the server did not close yet.
+
+Verification added for this case:
+
+- Transcript harness: quote -> map question -> map answer -> Arabic total
+  confirmation.
+- Expected recovery: room `quadRooms`, dates `2026-07-22` to `2026-07-30`,
+  total `600 SAR`, stage `proceed`.
+- Expected action: confirmation sends reservation review with
+  `confirm/correction` quick replies and does not ask for receipt/payment
+  reference.
+- Server check after deployment: the old Yasmin case was closed and no longer
+  waiting for an AI reply.
+
 ## Future-Us Rules
 
 - Do not fix chatbot behavior only by adding prompt instructions when the issue
@@ -308,6 +352,9 @@ After the final deployment:
   valuable when guarded properly.
 - Do not let delayed planner turns append replies when a newer guest message or
   an existing AI reply already exists.
+- Do not let direct fact answers, like maps or distance, erase the active quote
+  stage.
+- Do not let active-quote confirmation text fall through into payment help.
 - Do not close an AI chat whose latest guest message is still unanswered.
 - Do not let the language detector outrank reservation-detail collection.
 - Do not let previous support cases leak into selected-hotel support scope.
