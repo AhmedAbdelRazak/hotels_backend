@@ -13079,6 +13079,21 @@ async function planTurn(io, sc) {
 			});
 			return;
 		}
+		if (
+			st.hotel &&
+			selectedHotelFactQuestionText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "selected_hotel.fact_immediate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
 		if (userText || !hasAiAssistantReply(sc)) {
 			planningTypingTimer = setTimeout(
 				schedulePlanningTyping,
