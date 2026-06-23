@@ -585,15 +585,83 @@ const compactClientSupportCasesForList = (cases = [], req = {}) =>
 const isAiForceRespondEnabled = () =>
 	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
 
-const localizedClientHoldMessage = (language = "", languageCode = "") => {
+const localizedClientHoldMessage = ({
+	language = "",
+	languageCode = "",
+	hotelName = "",
+	isJannatSupport = false,
+} = {}) => {
 	const lang = `${language} ${languageCode}`.toLowerCase();
+	const target = cleanChatDisplayName(hotelName) || "the hotel";
+	const englishTarget = isJannatSupport
+		? "Jannat Booking support"
+		: `${target} reception`;
 	if (lang.includes("arabic") || /\bar\b/.test(lang)) {
-		return "\u0641\u0631\u064a\u0642 Jannat Booking \u064a\u0631\u0627\u062c\u0639 \u0631\u0633\u0627\u0644\u062a\u0643 \u0627\u0644\u0622\u0646.";
+		return isJannatSupport
+			? "\u0633\u064a\u0643\u0648\u0646 \u0645\u0645\u062b\u0644 \u0645\u0646 \u062f\u0639\u0645 Jannat Booking \u0645\u0639\u0643 \u0628\u0639\u062f \u0642\u0644\u064a\u0644. \u0623\u0646\u062a \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0646 \u0627\u0644\u0635\u062d\u064a\u062d \u0648\u0633\u0646\u0633\u0627\u0639\u062f\u0643 \u0645\u0646 \u0647\u0646\u0627."
+			: `\u0633\u064a\u0643\u0648\u0646 \u0645\u0645\u062b\u0644 \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 ${target} \u0645\u0639\u0643 \u0628\u0639\u062f \u0642\u0644\u064a\u0644. \u0623\u0646\u062a \u0641\u064a \u0627\u0644\u0645\u0643\u0627\u0646 \u0627\u0644\u0635\u062d\u064a\u062d \u0648\u0633\u0646\u0633\u0627\u0639\u062f\u0643 \u0645\u0646 \u0647\u0646\u0627.`;
 	}
 	if (lang.includes("hindi") || /\bhi\b/.test(lang)) {
-		return "\u091c\u0928\u094d\u0928\u0924 \u092c\u0941\u0915\u093f\u0902\u0917 \u0938\u092a\u094b\u0930\u094d\u091f \u0906\u092a\u0915\u093e \u0938\u0902\u0926\u0947\u0936 \u0905\u092d\u0940 \u0926\u0947\u0916 \u0930\u0939\u093e \u0939\u0948.";
+		const hindiTarget = isJannatSupport ? "Jannat Booking support" : `${target} रिसेप्शन`;
+		return `${hindiTarget} का एक प्रतिनिधि जल्द ही आपसे जुड़ जाएगा। आप सही जगह पर हैं, और हम यहीं से आपकी मदद करेंगे।`;
 	}
-	return "Jannat Booking support is reviewing your message now.";
+	if (lang.includes("urdu") || /\bur\b/.test(lang)) {
+		const urduTarget = isJannatSupport ? "Jannat Booking support" : `${target} کے استقبال`;
+		return `${urduTarget} کا نمائندہ جلد آپ کے ساتھ ہوگا۔ آپ صحیح جگہ پر ہیں، اور ہم یہیں سے آپ کی مدد کریں گے۔`;
+	}
+	if (lang.includes("spanish") || /\bes\b/.test(lang)) {
+		const spanishTarget = isJannatSupport
+			? "Jannat Booking support"
+			: `la recepcion de ${target}`;
+		return `Un representante de ${spanishTarget} te atendera en breve. Estas en el lugar correcto y te ayudaremos desde aqui.`;
+	}
+	if (lang.includes("french") || /\bfr\b/.test(lang)) {
+		const frenchTarget = isJannatSupport
+			? "Jannat Booking support"
+			: `la reception de ${target}`;
+		return `Un representant de ${frenchTarget} sera avec vous sous peu. Vous etes au bon endroit, et nous allons vous aider ici.`;
+	}
+	if (lang.includes("indonesian") || /\bid\b/.test(lang)) {
+		const indonesianTarget = isJannatSupport
+			? "Jannat Booking support"
+			: `resepsionis ${target}`;
+		return `Perwakilan dari ${indonesianTarget} akan segera membantu Anda. Anda berada di tempat yang tepat, dan kami akan membantu dari sini.`;
+	}
+	if (lang.includes("malay") || /\bms\b/.test(lang)) {
+		const malayTarget = isJannatSupport
+			? "Jannat Booking support"
+			: `resepsi ${target}`;
+		return `Wakil daripada ${malayTarget} akan bersama anda sebentar lagi. Anda berada di tempat yang betul, dan kami akan bantu dari sini.`;
+	}
+	return `A representative from ${englishTarget} will be with you shortly. You are in the right place, and we will help from here.`;
+};
+
+const GENERATED_INITIAL_MESSAGE_PREFIXES = [
+	"Assalamu alaikum Jannat Booking, I would like to ask about",
+	"Assalamu alaikum, I would like to chat with reception about",
+	"Assalamu alaikum Jannat Booking, me gustaria consultar sobre",
+	"Assalamu alaikum, me gustaria hablar con recepcion sobre",
+	"Assalamu alaikum Jannat Booking, je souhaite me renseigner sur",
+	"Assalamu alaikum, je souhaite parler avec la reception au sujet de",
+	"Assalamualaikum Jannat Booking, saya ingin bertanya tentang",
+	"Assalamualaikum, saya ingin berbicara dengan resepsionis tentang",
+	"Assalamualaikum, saya ingin bercakap dengan resepsi tentang",
+	"\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u062c\u0646\u0627\u062a \u0628\u0648\u0643\u064a\u0646\u062c\u060c \u0623\u0631\u063a\u0628 \u0628\u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0639\u0646",
+	"\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645\u060c \u0623\u0631\u063a\u0628 \u0628\u0627\u0644\u062a\u062d\u062f\u062b \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0628\u062e\u0635\u0648\u0635",
+	"\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e Jannat Booking",
+	"\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e, \u092e\u0948\u0902",
+	"Ø§Ù„Ø³Ù„Ø§Ù… Ø¹Ù„ÛŒÚ©Ù… Jannat BookingØŒ Ù…ÛŒÚº",
+	"Ø§Ù„Ø³Ù„Ø§Ù… Ø¹Ù„ÛŒÚ©Ù…ØŒ Ù…ÛŒÚº",
+];
+
+const isGeneratedInitialClientMessage = (value = "") => {
+	const text = cleanText(value, 8000);
+	return Boolean(
+		text &&
+			GENERATED_INITIAL_MESSAGE_PREFIXES.some((prefix) =>
+				text.toLowerCase().startsWith(prefix.toLowerCase())
+			)
+	);
 };
 
 const initialClientMessageFromRequest = ({
@@ -601,10 +669,11 @@ const initialClientMessageFromRequest = ({
 	inquiryDetails,
 } = {}) => {
 	const direct = cleanText(initialClientMessage, 8000);
-	if (direct) return direct;
-	return cleanText(inquiryDetails, 8000)
+	if (direct) return isGeneratedInitialClientMessage(direct) ? "" : direct;
+	const fallback = cleanText(inquiryDetails, 8000)
 		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
 		.trim();
+	return isGeneratedInitialClientMessage(fallback) ? "" : fallback;
 };
 
 const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
@@ -1354,10 +1423,12 @@ exports.createNewSupportCase = async (req, res) => {
 						  },
 				message:
 					openedBy === "client"
-						? localizedClientHoldMessage(
-								preferredLanguage,
-								preferredLanguageCode
-						  )
+						? localizedClientHoldMessage({
+								language: preferredLanguage,
+								languageCode: preferredLanguageCode,
+								hotelName,
+								isJannatSupport: isJannatSupportCase,
+						  })
 						: `New support case created by ${
 								openedBy === "super admin"
 									? "Xhotelpro Administration"

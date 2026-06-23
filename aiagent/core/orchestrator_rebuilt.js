@@ -2,6 +2,8 @@ const { chat } = require("./openai");
 const { ensureAIAllowed } = require("./policy");
 const {
 	getSupportCaseById,
+	getReservationByConfirmation,
+	getReservationById,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 } = require("./db");
 const { mapRoomToKey, quickDateRange, digitsToEnglish } = require("./nlu");
@@ -21,6 +23,7 @@ const SUPPORT_USER_ID = "jannat-ai-support";
 const AI_TURN_TIMER_MS = 100;
 const MAX_TRANSCRIPT_CHARS = 18000;
 const MAX_FACT_CHARS = 12000;
+const MAX_RESERVATION_FACT_CHARS = 5000;
 
 const timers = new Map();
 const inFlight = new Set();
@@ -83,6 +86,12 @@ function isAiMessage(message = {}) {
 	return Boolean(message?.isAi || isSupportIdentity(message));
 }
 
+function privateInquiryText(supportCase = {}) {
+	return cleanText(supportCase.inquiryDetails || "", 2200)
+		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
+		.trim();
+}
+
 function latestGuestTurn(supportCase = {}) {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
@@ -94,6 +103,24 @@ function latestGuestTurn(supportCase = {}) {
 			.slice(index + 1)
 			.some((row) => isAiMessage(row) || row?.isSystem);
 		return { message, index, hasAiAfter };
+	}
+	const privateText = privateInquiryText(supportCase);
+	if (privateText) {
+		return {
+			message: {
+				messageBy: {
+					customerName: supportCase.displayName1 || supportCase.clientName || "Guest",
+					customerEmail: supportCase.clientContact || "guest@jannatbooking.com",
+				},
+				message: privateText,
+				date: supportCase.createdAt || "",
+				preferredLanguage: supportCase.preferredLanguage || "",
+				preferredLanguageCode: supportCase.preferredLanguageCode || "",
+			},
+			index: -1,
+			hasAiAfter: conversation.some((row) => row?.isAi === true),
+			privateContext: true,
+		};
 	}
 	return null;
 }
@@ -156,12 +183,31 @@ function isArabicText(value = "") {
 	return /[\u0600-\u06FF]/.test(String(value || ""));
 }
 
+function isHindiText(value = "") {
+	return /[\u0900-\u097F]/.test(String(value || ""));
+}
+
+function isUrduText(value = "") {
+	const text = String(value || "");
+	if (!/[\u0600-\u06FF]/.test(text)) return false;
+	return (
+		/[\u0679\u0688\u0691\u06BA\u06BE\u06C1\u06CC\u06D2]/.test(text) ||
+		/(?:آپ|اپ|ہے|ہیں|میں|کیا|کمرہ|ہوٹل|بکنگ|سے|کے|کی|کا|اور|کریں|چاہتا|چاہتی|چاہیے|شکریہ)/u.test(text)
+	);
+}
+
+function detectedGuestLanguage(text = "", supportCase = {}) {
+	const value = String(text || "");
+	if (isHindiText(value)) return "Hindi";
+	if (isUrduText(value)) return "Urdu";
+	if (isArabicText(value)) return "Arabic";
+	return supportCase.preferredLanguage || "English";
+}
+
 function responseLanguage(supportCase = {}, latestMessage = {}, decision = {}) {
 	const explicit = cleanText(decision.language || "", 60);
 	if (explicit) return explicit;
-	const message = latestMessage.message || "";
-	if (isArabicText(message)) return "Arabic";
-	return supportCase.preferredLanguage || "English";
+	return detectedGuestLanguage(latestMessage.message || "", supportCase);
 }
 
 function languageCode(language = "", supportCase = {}) {
@@ -174,6 +220,77 @@ function languageCode(language = "", supportCase = {}) {
 	if (text.includes("indonesian")) return "id";
 	if (text.includes("malay")) return "ms";
 	return supportCase.preferredLanguageCode || "en";
+}
+
+function isEnglishLanguage(value = "") {
+	const text = String(value || "").toLowerCase();
+	return !text || text.includes("english") || /\ben\b/.test(text);
+}
+
+function needsOpenAiLocalization(language = "") {
+	const text = cleanText(language, 80);
+	return Boolean(text && !isArabicLanguage(text) && !isEnglishLanguage(text));
+}
+
+async function localizeResultForLanguage({
+	result = {},
+	supportCase = {},
+	hotel = {},
+	latest = {},
+} = {}) {
+	const targetLanguage = cleanText(
+		result.language || supportCase.preferredLanguage || "",
+		80
+	);
+	if (!needsOpenAiLocalization(targetLanguage)) return result;
+	const sourceText = cleanText(result.text || "", 4000);
+	if (!sourceText) return result;
+	try {
+		const localized = await chat(
+			[
+				{
+					role: "system",
+					content: [
+						"You are a hotel reception localization layer.",
+						"Translate the assistant reply into the requested target language only when needed.",
+						"If it is already in the target language, return it unchanged.",
+						"Preserve hotel names, room names, dates, prices, currencies, confirmation numbers, URLs, and facts exactly.",
+						"Do not add new information, do not remove required details, and do not use markdown.",
+					].join(" "),
+				},
+				{
+					role: "user",
+					content: JSON.stringify(
+						{
+							targetLanguage,
+							targetLanguageCode: languageCode(targetLanguage, supportCase),
+							hotelName: hotelName(hotel, targetLanguage),
+							latestGuestMessage: cleanText(latest?.message?.message || "", 500),
+							assistantReply: sourceText,
+						},
+						null,
+						2
+					),
+				},
+			],
+			{
+				kind: "writer",
+				temperature: 0,
+				max_tokens: Math.min(
+					700,
+					Math.max(180, Math.ceil(sourceText.length / 3) + 80)
+				),
+			}
+		);
+		const text = cleanText(localized, 4000);
+		return text ? { ...result, text, language: targetLanguage } : result;
+	} catch (error) {
+		console.warn(
+			"[aiagent] localization fallback:",
+			error?.message || error
+		);
+		return result;
+	}
 }
 
 function activeRooms(hotel = {}) {
@@ -267,6 +384,114 @@ function buildHotelFacts(hotel = {}) {
 			extraAmenities: room.extraAmenities.slice(0, 4),
 		})),
 	};
+}
+
+function conversationText(supportCase = {}) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	return [
+		supportCase.inquiryAbout,
+		supportCase.inquiryDetails,
+		...conversation.map((message) => message?.message || ""),
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+function latestKnownConfirmation(text = "") {
+	const normalized = digitsToEnglish(String(text || ""));
+	const matches = normalized.match(/\b\d{6,12}\b/g) || [];
+	return matches.find((value) => value.length >= 8) || matches[0] || "";
+}
+
+function reservationIssueLikely({ supportCase = {}, latestText = "" } = {}) {
+	const haystack = `${supportCase.inquiryAbout || ""}\n${supportCase.inquiryDetails || ""}\n${latestText || ""}`;
+	return /reservation|booking|confirmation|payment|invoice|receipt|voucher|modify|change|cancel|refund|حجز|تأكيد|تاكيد|دفع|فاتورة|ايصال|إيصال|تعديل|الغاء|إلغاء/i.test(
+		haystack
+	);
+}
+
+function compactDate(value) {
+	if (!value) return "";
+	const date = new Date(value);
+	return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+}
+
+function compactReservationForPrompt(reservation = null) {
+	if (!reservation) return null;
+	const customer = reservation.customer_details || {};
+	const rooms = Array.isArray(reservation.pickedRoomsType)
+		? reservation.pickedRoomsType
+				.map((room) => ({
+					roomType: cleanText(room.room_type || room.roomType || room.displayName || "", 120),
+					count: room.count || 1,
+					total: room.chosenPrice || room.total || room.price || "",
+				}))
+				.slice(0, 8)
+		: [];
+	const context = {
+		id: asId(reservation._id),
+		confirmationNumber: cleanText(reservation.confirmation_number || "", 40),
+		hotelId: asId(reservation.hotelId),
+		status: cleanText(reservation.reservation_status || reservation.state || "", 80),
+		pendingConfirmation: {
+			status: cleanText(reservation.pendingConfirmation?.status || "", 80),
+			clientVisibleStatus: cleanText(
+				reservation.pendingConfirmation?.clientVisibleStatus || "",
+				80
+			),
+		},
+		stay: {
+			checkinISO: compactDate(reservation.checkin_date),
+			checkoutISO: compactDate(reservation.checkout_date),
+			nights: reservation.days_of_residence || "",
+		},
+		guest: {
+			name: cleanText(customer.name || "", 120),
+			nationality: cleanText(customer.nationality || "", 80),
+			emailPresent: Boolean(customer.email),
+			phoneLast4: String(customer.phone || "").replace(/\D/g, "").slice(-4),
+			adults: reservation.adults || "",
+			children: reservation.children || 0,
+			totalGuests: reservation.total_guests || "",
+		},
+		rooms,
+		payment: {
+			payment: cleanText(reservation.payment || "", 80),
+			financeStatus: cleanText(reservation.financeStatus || "", 80),
+			currency: cleanText(reservation.currency || "SAR", 10).toUpperCase(),
+			totalAmount: reservation.total_amount || 0,
+			paidAmount: reservation.paid_amount || 0,
+		},
+		linksAvailable: Boolean(reservation._id && reservation.confirmation_number),
+	};
+	const json = JSON.stringify(context);
+	if (json.length <= MAX_RESERVATION_FACT_CHARS) return context;
+	return {
+		...context,
+		rooms: rooms.slice(0, 4),
+	};
+}
+
+async function reservationContextForPrompt({ supportCase = {}, latestText = "" } = {}) {
+	if (!reservationIssueLikely({ supportCase, latestText })) return null;
+	let reservation = null;
+	if (supportCase.aiReservation?.reservationId) {
+		reservation = await getReservationById(supportCase.aiReservation.reservationId);
+	}
+	if (!reservation && supportCase.aiReservation?.confirmationNumber) {
+		reservation = await getReservationByConfirmation(
+			supportCase.aiReservation.confirmationNumber
+		);
+	}
+	if (!reservation) {
+		const confirmation =
+			latestKnownConfirmation(latestText) ||
+			latestKnownConfirmation(conversationText(supportCase));
+		if (confirmation) reservation = await getReservationByConfirmation(confirmation);
+	}
+	return compactReservationForPrompt(reservation);
 }
 
 function transcriptForPrompt(supportCase = {}) {
@@ -400,7 +625,12 @@ function normalizeDecision(raw = {}, supportCase = {}) {
 async function analyzeConversation({ supportCase, hotel, latest }) {
 	const latestText = cleanText(latest?.message?.message || "", 2000);
 	const languageHint = supportCase.preferredLanguage || "English";
+	const latestDetectedLanguage = detectedGuestLanguage(latestText, supportCase);
 	const facts = buildHotelFacts(hotel);
+	const reservationContext = await reservationContextForPrompt({
+		supportCase,
+		latestText,
+	});
 	const transcript = transcriptForPrompt(supportCase);
 	const todayISO = new Date().toISOString().slice(0, 10);
 	const agentName = supportCase.aiResponderName || "Amira";
@@ -410,6 +640,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 		`Visible CSR name: ${agentName}. In Arabic, the CSR voice is female or neutral; never write masculine self-reference such as ana mawgood if the CSR is female.`,
 		"Review the entire saved transcript every turn. Do not rely only on the latest line.",
 		"Answer the guest's newest direct question first from verified hotel facts, policies, room descriptions, amenities, reservation state, or pricing tools.",
+		"If reservationContext is present, use it as the current reservation source of truth. Do not ask for the confirmation number again unless reservationContext is null and the confirmation is needed.",
 		"Do not answer a different question from the one the guest asked. If the newest guest line is booking details, continue the booking workflow instead of restarting room discovery.",
 		"Do not ask again for information already supplied anywhere in the transcript.",
 		"Do not add many confirmations. Quote price and request any missing mandatory guest details in the same turn. Send only one full final review before reservation creation.",
@@ -420,6 +651,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 		"Room descriptions must be brief, natural, and based only on room settings; 1-2 short lines unless the guest asks for full details.",
 		"For unknown safe questions, say professionally that the detail is not currently confirmed, then ask one relevant hotel/reservation follow-up. Do not escalate and do not deflect to links.",
 		"For policy wording, sound like hotel reception. Do not say you checked a document, database, record, admin panel, or hotel details.",
+		"Treat latestGuest.detectedLanguage as stronger than the stored preferredLanguage when the guest switches language mid-chat.",
 		"Use the latest guest language naturally, including dialect or mixed language. Keep the voice warm, capable, and concise, like hotel reception, not robotic.",
 		"When the latest guest line is only a greeting, opening, or smalltalk, reply with a warm reception greeting and one open-ended help question. Do not ask for dates, room type, phone, nationality, or booking details until the guest asks for booking help or provides booking details.",
 		"Use the guest name or respectful address sparingly, not every message. In Egyptian Arabic, use respectful address such as Ostaz/Ustaza only when it feels natural and gender is clear.",
@@ -430,7 +662,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 				"greet|answer_fact|quote_room|ask_booking_missing|ask_guest_details|final_review|create_reservation|correct_details|close|unknown",
 			intent: "short intent",
 			answerKind:
-				"room_options|room_description|amenity|bus|location|distance|policy|payment|reservation_details|email_receipt|smalltalk|unknown|null",
+				"room_options|room_description|amenity|bus|location|distance|nusuk|policy|payment|reservation_details|email_receipt|smalltalk|unknown|null",
 			guestAddress: "optional respectful short address or empty",
 			booking: {
 				wantsToBook: true,
@@ -470,9 +702,11 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 			},
 			latestGuest: {
 				text: latestText,
+				detectedLanguage: latestDetectedLanguage,
 				clientAction: latest?.message?.clientAction || "",
 			},
 			hotelFacts: facts,
+			reservationContext,
 			transcript,
 		},
 		null,
@@ -524,6 +758,7 @@ function fallbackDecision({ supportCase, latest }) {
 
 function detectDirectKind(text = "") {
 	const value = String(text || "").toLowerCase();
+	if (/\bnusuk\b|نسك|نُسك/i.test(value)) return "nusuk";
 	if (/(cancel|refund|policy|terms|condition|استرجاع|الغاء|إلغاء|سياس|شروط|استرداد)/i.test(value)) {
 		return "policy";
 	}
@@ -551,6 +786,12 @@ function detectDirectKind(text = "") {
 	return "";
 }
 
+function isStageBearingAssistantText(text = "") {
+	return /final reservation review|here is the final|selected option|is available from|stay:|total:|مراجعة الحجز|الإقامة:|الاقامة:|الإجمالي:|الاجمالي:|متاحة من/i.test(
+		String(text || "")
+	);
+}
+
 function recoverFastBooking(supportCase = {}, latestMessage = {}) {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
@@ -564,18 +805,22 @@ function recoverFastBooking(supportCase = {}, latestMessage = {}) {
 		children: 0,
 		finalReviewAlreadyShown: hasFinalReviewPrompt(supportCase),
 	};
-	const updateFromText = (text = "", { guest = false } = {}) => {
+	const updateFromText = (text = "", { guest = false, stageBearing = false } = {}) => {
 		const roomKey = mapRoomToKey(text);
-		if (roomKey) booking.roomTypeKey = roomKey;
+		if (roomKey && (guest || stageBearing)) booking.roomTypeKey = roomKey;
 		const dates = quickDateRange(text);
-		if (dates?.checkinISO && dates?.checkoutISO) {
+		if ((guest || stageBearing) && dates?.checkinISO && dates?.checkoutISO) {
 			booking.checkinISO = dates.checkinISO;
 			booking.checkoutISO = dates.checkoutISO;
 		}
 		if (guest) applyGuestDetailsFromText(booking, text);
 	};
 	for (const message of conversation) {
-		updateFromText(message?.message || "", { guest: isGuestMessage(message) });
+		const text = message?.message || "";
+		updateFromText(text, {
+			guest: isGuestMessage(message),
+			stageBearing: isAiMessage(message) && isStageBearingAssistantText(text),
+		});
 	}
 	updateFromText(latestMessage.message || "", { guest: true });
 	return booking;
@@ -749,6 +994,13 @@ function latestHasBookingSignal(text = "") {
 	);
 }
 
+function isAcknowledgementOnly(text = "") {
+	const value = cleanText(text, 120).toLowerCase();
+	return /^(?:ok|okay|k|yes|yeah|yep|sure|alright|all right|تمام|حاضر|اوكي|أوكي|نعم|طيب|ماشي|حسنًا|حسنا)[.!؟?\s]*$/i.test(
+		value
+	);
+}
+
 function isDelayChaseText(text = "") {
 	return /(asleep|there|waiting|slow|late|hello\?|where are you|are you there|فين|نايم|موجود|اتأخرت|تاخير|تأخير|مستني|مستنية|وينك|انت فين|انتي فين)/i.test(
 		String(text || "")
@@ -764,9 +1016,7 @@ function delayChasePrefix(language = "English") {
 function buildFastDecision({ supportCase, latest }) {
 	const latestText = latest?.message?.message || "";
 	const directKind = detectDirectKind(latestText);
-	const language = isArabicText(latestText)
-		? "Arabic"
-		: supportCase.preferredLanguage || "English";
+	const language = responseLanguage(supportCase, latest?.message || {}, {});
 	const booking = recoverFastBooking(supportCase, latest?.message || {});
 	const afterQuote = hasDates(booking);
 	if (
@@ -775,6 +1025,7 @@ function buildFastDecision({ supportCase, latest }) {
 			"bus",
 			"location",
 			"distance",
+			"nusuk",
 			"room_options",
 			"room_description",
 			"amenity",
@@ -831,6 +1082,36 @@ function buildFastDecision({ supportCase, latest }) {
 		);
 	}
 	return null;
+}
+
+function buildVerifiedDirectDecision({ supportCase, latest }) {
+	const latestText = latest?.message?.message || "";
+	const directKind = detectDirectKind(latestText);
+	if (
+		![
+			"policy",
+			"bus",
+			"location",
+			"distance",
+			"nusuk",
+			"room_options",
+			"room_description",
+			"amenity",
+		].includes(directKind)
+	) {
+		return null;
+	}
+	const language = responseLanguage(supportCase, latest?.message || {}, {});
+	return normalizeDecision(
+		{
+			language,
+			action: "answer_fact",
+			answerKind: directKind,
+			booking: recoverFastBooking(supportCase, latest?.message || {}),
+			confidence: 1,
+		},
+		supportCase
+	);
 }
 
 function roomToken(value = "") {
@@ -931,6 +1212,30 @@ function quickReplies(language = "English") {
 		return [
 			{ label: "Finaliser la reservation", value: "Finaliser la reservation", action: "place_reservation" },
 			{ label: "Quelque chose a corriger", value: "Quelque chose a corriger", action: "correct_reservation" },
+		];
+	}
+	if (/hindi|\bhi\b/i.test(language)) {
+		return [
+			{ label: "आरक्षण पूरा करें", value: "आरक्षण पूरा करें", action: "place_reservation" },
+			{ label: "कुछ सुधारना है", value: "कुछ सुधारना है", action: "correct_reservation" },
+		];
+	}
+	if (/urdu|\bur\b/i.test(language)) {
+		return [
+			{ label: "ریزرویشن مکمل کریں", value: "ریزرویشن مکمل کریں", action: "place_reservation" },
+			{ label: "کچھ درست کرنا ہے", value: "کچھ درست کرنا ہے", action: "correct_reservation" },
+		];
+	}
+	if (/indonesian|\bid\b/i.test(language)) {
+		return [
+			{ label: "Selesaikan reservasi", value: "Selesaikan reservasi", action: "place_reservation" },
+			{ label: "Ada yang perlu diperbaiki", value: "Ada yang perlu diperbaiki", action: "correct_reservation" },
+		];
+	}
+	if (/malay|\bms\b/i.test(language)) {
+		return [
+			{ label: "Lengkapkan tempahan", value: "Lengkapkan tempahan", action: "place_reservation" },
+			{ label: "Ada yang perlu dibetulkan", value: "Ada yang perlu dibetulkan", action: "correct_reservation" },
 		];
 	}
 	return [
@@ -1103,6 +1408,37 @@ function policyReply(language = "English") {
 	return "Based on the hotel's terms and conditions, cancellation is free with a full refund when requested 14 days or more before check-in. From 4 to 13 days before check-in, cancellation can still be processed; the hotel keeps one night only and refunds the remaining amount. Within 3 days or less before check-in, the reservation is non-cancellable and non-refundable under the general policy.";
 }
 
+function nusukReply({ hotel, language }) {
+	const note = cleanText(hotel.isNusukText || "", 360);
+	const name = hotelName(hotel, language);
+	if (hotel.isNusuk === true) {
+		if (isArabicLanguage(language)) {
+			return note
+				? `نعم، ${name} مذكور لدينا كفندق مرتبط بنسك. ${note}`
+				: `نعم، ${name} مذكور لدينا كفندق مرتبط بنسك. يمكنني مساعدتك هنا في الغرف والتوفر وتفاصيل الحجز.`;
+		}
+		return note
+			? `Yes, ${name} is marked with Nusuk in our hotel information. ${note}`
+			: `Yes, ${name} is marked with Nusuk in our hotel information. I can still help you here with rooms, availability, and reservation details.`;
+	}
+	if (isArabicLanguage(language)) {
+		return `حاليًا لا يوجد لدي تأكيد موثق داخل هذه المحادثة أن ${name} مدرج في نسك. أستطيع مساعدتك هنا في الغرف والتوفر والموقع وخدمة الحافلة وتفاصيل الحجز.`;
+	}
+	return `I do not have a confirmed Nusuk listing status for ${name} in this chat yet. I can still help you here with rooms, availability, location, bus service, and reservation details.`;
+}
+
+function polishedBusDetails(details = "", language = "English") {
+	const text = cleanText(details, 360);
+	if (!text) return "";
+	if (/al\s*gamarat|jamarat|5 daily prayers|five daily prayers/i.test(text)) {
+		if (isArabicLanguage(language)) {
+			return "تنطلق الحافلة عبر محطة الجمرات، وهي على بعد حوالي 500 متر من الفندق، وتعمل حول أوقات الصلوات الخمس.";
+		}
+		return "The shuttle goes via Al Jamarat station, about 500 meters from the hotel, and runs around the five daily prayers.";
+	}
+	return text;
+}
+
 function locationReply({ hotel, language }) {
 	const address = cleanText(hotel.hotelAddress || "", 240);
 	const coords = Array.isArray(hotel.location?.coordinates)
@@ -1147,7 +1483,7 @@ function distanceReply({ hotel, language }) {
 }
 
 function busReply({ hotel, language }) {
-	const details = cleanText(hotel.busDetails || "", 360);
+	const details = polishedBusDetails(hotel.busDetails || "", language);
 	if (hotel.hasBusService === true) {
 		if (isArabicLanguage(language)) {
 			return details
@@ -1370,8 +1706,9 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	);
 	const language = responseLanguage(supportCase, latest.message, decision);
 	const booking = { ...(decision.booking || {}) };
-	const directKind = decision.answerKind || detectDirectKind(latest.message.message || "");
 	const latestText = latest.message.message || "";
+	const deterministicDirectKind = detectDirectKind(latestText);
+	const directKind = deterministicDirectKind || decision.answerKind || "";
 	const latestAction = cleanText(latest.message.clientAction || "", 80);
 	const room = findRoom(hotel, booking);
 	const latestRoomKey = mapRoomToKey(latestText);
@@ -1389,6 +1726,7 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	if (directKind === "location") return { text: locationReply({ hotel, language }), language };
 	if (directKind === "distance") return { text: distanceReply({ hotel, language }), language };
 	if (directKind === "bus") return { text: busReply({ hotel, language }), language };
+	if (directKind === "nusuk") return { text: nusukReply({ hotel, language }), language };
 	if (directKind === "reservation_details" || directKind === "payment") {
 		if (created) return { text: reservationDetailsReply({ supportCase, language }), language };
 	}
@@ -1406,6 +1744,20 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 
 	if (created && decision.reply) {
 		return { text: sanitizeReply(decision.reply, language), language };
+	}
+
+	if (
+		isAcknowledgementOnly(latestText) &&
+		!latestBookingSignal &&
+		!room &&
+		!hasDates(booking)
+	) {
+		return {
+			text: isArabicLanguage(language)
+				? `تمام، أنا معك من استقبال ${hotelName(hotel, language)}. اسألني عن الغرف أو التوفر أو الموقع أو خدمة الحافلة في أي وقت.`
+				: `Of course. I am here with you from ${hotelName(hotel, language)} reception. Ask me anytime about rooms, availability, location, bus service, or reservation details.`,
+			language,
+		};
 	}
 
 	if (
@@ -1575,13 +1927,43 @@ async function planCase(io, caseOrId) {
 		io?.to(caseId).emit("typing", { caseId, name: agentName, isAi: true });
 		const latestFingerprint = messageFingerprint(latest.message);
 		const startedAt = Date.now();
-		const fastDecision = shouldUseFastDecision()
-			? buildFastDecision({ supportCase, hotel, latest })
-			: null;
-		const decisionSource = fastDecision ? "fast" : "openai";
+		const verifiedDirectDecision = buildVerifiedDirectDecision({
+			supportCase,
+			latest,
+		});
+		const fastDecision =
+			verifiedDirectDecision ||
+			(shouldUseFastDecision()
+				? buildFastDecision({ supportCase, hotel, latest })
+				: null);
+		const decisionSource = verifiedDirectDecision
+			? "verified"
+			: fastDecision
+			? "fast"
+			: "openai";
 		const decision =
 			fastDecision || (await analyzeConversation({ supportCase, hotel, latest }));
-		const result = await buildTurnResult({ supportCase, hotel, decision, latest });
+		const rawResult = await buildTurnResult({ supportCase, hotel, decision, latest });
+		const usedModelReply =
+			decisionSource === "openai" &&
+			Boolean(cleanText(decision.reply || "", 4000)) &&
+			cleanText(rawResult.text || "", 4000) ===
+				cleanText(
+					sanitizeReply(
+						decision.reply || "",
+						rawResult.language || decision.language || ""
+					),
+					4000
+				);
+		let result = rawResult;
+		if (!usedModelReply) {
+			result = await localizeResultForLanguage({
+				result: rawResult,
+				supportCase,
+				hotel,
+				latest,
+			});
+		}
 		const sendResult = await sendAiMessage(io, supportCase, result.text, {
 			language: result.language,
 			quickReplies: result.quickReplies,

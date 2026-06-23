@@ -244,6 +244,12 @@ async function getReservationByConfirmation(cn) {
 		.exec();
 }
 
+async function getReservationById(id) {
+	const _id = safeId(id);
+	if (!_id) return null;
+	return Reservations.findById(_id).lean().exec();
+}
+
 const AI_SUPPORT_EMAILS = new Set([
 	"support@jannatbooking.com",
 	"management@xhotelpro.com",
@@ -597,6 +603,7 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
+	getReservationById,
 	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
 };
