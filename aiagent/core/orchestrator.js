@@ -2662,6 +2662,20 @@ function hasOperationalBookingSignal(text = "") {
 	);
 }
 
+function hasConcreteFirstTurnBookingSignal(text = "") {
+	const normalized = String(text || "").toLowerCase();
+	if (!normalized.trim()) return false;
+	return (
+		hasSemanticSignal(text, ["reservation", "confirmation", "payment"]) ||
+		selectedHotelFactQuestionText(normalized) ||
+		Boolean(mapRoomToKey(normalized)) ||
+		Boolean(extractDateRange(normalized)?.checkinISO) ||
+		/\b(?:book|reserve|reservation|availability|available|room|rooms|bed|beds|price|rate|cost|stay|check[\s-]?in\b|check[\s-]?out\b|dates?)\b/i.test(
+			normalized
+		)
+	);
+}
+
 function wantsPaymentHelp(text = "") {
 	const raw = String(text || "");
 	if (hasSemanticSignal(raw, "payment")) return true;
@@ -13115,7 +13129,7 @@ async function planTurn(io, sc) {
 			if (
 				looksLikeGreetingOnly(userText) ||
 				(looksLikeFirstTurnGreetingSmalltalk(userText) &&
-					!hasOperationalBookingSignal(userText))
+					!hasConcreteFirstTurnBookingSignal(userText))
 			) {
 				const greeting = st.hotel
 					? initialHotelGreetingText(sc, st)
