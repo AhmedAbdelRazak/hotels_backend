@@ -2564,7 +2564,14 @@ function selectedHotelAddressQuestionText(text = "") {
 		lower.replace(/[^\w\s\u0600-\u06ff\u0900-\u097f]/g, " ").trim().split(/\s+/).filter(Boolean)
 			.length <= 6 &&
 		!hasSemanticSignal(text, ["payment", "confirmation", "reservation", "contact"]);
-	return mentionsHotel || conciseLocationRequest;
+	const selectedPlaceLocationRequest =
+		/\b(?:where\s+(?:exactly\s+)?is|where's|located|location|address|map|directions?)\b/i.test(
+			lower
+		) &&
+		!/\b(?:restaurant|restaurants|food|meal|market|mall|shop|shops|pharmacy|station)\b/i.test(
+			lower
+		);
+	return mentionsHotel || conciseLocationRequest || selectedPlaceLocationRequest;
 }
 
 function selectedHotelBusQuestionText(text = "") {
