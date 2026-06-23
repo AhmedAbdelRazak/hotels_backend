@@ -87,7 +87,13 @@ function isAiMessage(message = {}) {
 }
 
 function privateInquiryText(supportCase = {}) {
-	return cleanText(supportCase.inquiryDetails || "", 2200)
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const conversationInquiry =
+		conversation.find((row) => cleanText(row?.inquiryDetails || "", 2200))
+			?.inquiryDetails || "";
+	return cleanText(supportCase.inquiryDetails || conversationInquiry || "", 2200)
 		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
 		.trim();
 }
