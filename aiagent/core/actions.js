@@ -49,12 +49,48 @@ function cleanText(value = "", max = 120) {
 		.slice(0, max);
 }
 
+function compactArabic(value = "") {
+	return String(value || "")
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/\u0640/g, "")
+		.replace(/\s+/g, "")
+		.trim();
+}
+
+function rejectedAiGuestName(value = "") {
+	const name = cleanText(value, 120);
+	const lower = name.toLowerCase();
+	const compact = compactArabic(name);
+	if (
+		/\b(?:please|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent|reservation|booking|confirmation|nationality|country)\b/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:\u0645\u0645\u0643\u0646|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645|\u062d\u062c\u0632|\u062c\u0646\u0633\u064a|\u0627\u0644\u062c\u0646\u0633\u064a\u0629)/i.test(
+			name
+		)
+	) {
+		return true;
+	}
+	return [
+		"\u0628\u0648\u0631\u0643\u064a\u0646\u0627\u0641\u0627\u0633\u0648",
+		"\u0627\u0631\u062f\u0646\u064a",
+		"\u0627\u0631\u062f\u0646\u0649",
+		"\u0623\u0631\u062f\u0646\u064a",
+		"\u0623\u0631\u062f\u0646\u0649",
+	].includes(compact);
+}
+
 function usableFullName(value = "") {
 	const name = cleanText(value, 120);
 	if (!name || name.length < 4) return "";
 	if (onlyDigits(name) || /^(?:guest|unknown|test|n\/a|na|null|none)$/i.test(name)) {
 		return "";
 	}
+	if (rejectedAiGuestName(name)) return "";
 	if (
 		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
 			name

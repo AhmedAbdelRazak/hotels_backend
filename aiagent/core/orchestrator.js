@@ -1158,6 +1158,7 @@ const GUEST_MALE_NAMES_LATIN = new Set([
 	"goma",
 	"gomaa",
 	"gomaah",
+	"ayman",
 	"farouk",
 	"farouq",
 	"yakoot",
@@ -1227,6 +1228,8 @@ const GUEST_MALE_NAMES_ARABIC = new Set([
 	"\u062c\u0645\u0627\u0644",
 	"\u062c\u0645\u0639\u0629",
 	"\u062c\u0645\u0639\u0647",
+	"\u0623\u064a\u0645\u0646",
+	"\u0627\u064a\u0645\u0646",
 	"\u0641\u0627\u0631\u0648\u0642",
 	"\u064a\u0627\u0642\u0648\u062a",
 	"\u062e\u0645\u064a\u0633",
@@ -1296,6 +1299,7 @@ function guestNameSource(sc = {}, st = {}) {
 			if (!value) return false;
 			if (/^\d+$/.test(digitsToEnglish(value))) return false;
 			if (looksLikeStayDateCandidate(value)) return false;
+			if (rejectsFullNameCandidate(value)) return false;
 			return true;
 		}) || ""
 	).trim();
@@ -6739,20 +6743,20 @@ function rejectsFullNameCandidate(value = "") {
 	if (!lower) return true;
 	if (/[?؟]/.test(lower)) return true;
 	if (
-		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you)\b/i.test(
+		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you|please|pls|could|would|can|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent)\b/i.test(
 			lower
 		)
 	) {
 		return true;
 	}
 	if (
-		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644)/i.test(
+		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644|\u0645\u0645\u0643\u0646|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0637\u0628|\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0627\u0644\u0633\u0631\u0639\u0647|\u0627\u0644\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u0645\u0633\u062a\u0639\u062c\u0644\u0647|\u0627\u062f\u064a\u0646\u064a|\u0627\u062f\u064a\u0646\u0649|\u0647\u0627\u062a|\u0627\u0631\u0633\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645)/i.test(
 			arabic
 		)
 	) {
 		return true;
 	}
-	return /(?:somethingwrong|notcorrect|wrong|incorrect|problem|issue|mistake|phone|whatsapp|hotelphone|callhotel|manager|reservation|booking|confirmation|room|date|email|nationality)/i.test(
+	return /(?:somethingwrong|notcorrect|wrong|incorrect|problem|issue|mistake|phone|whatsapp|hotelphone|callhotel|manager|reservation|booking|confirmation|room|date|email|nationality|please|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent|momken|mumkin|momkin|sora|sor3a|bsor3a|bser3a)/i.test(
 		latinCompact
 	);
 }
@@ -6762,6 +6766,7 @@ function hasUsableFullName(value = "") {
 	if (!name || name.length < 4 || name.length > 90) return false;
 	if (latestEmailFromText(name) || cleanPhoneCandidate(name)) return false;
 	if (rejectsFullNameCandidate(name)) return false;
+	if (nameCandidateLooksLikeNationality(name)) return false;
 	if (
 		/\b(?:guest|unknown|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
 			name
@@ -6794,6 +6799,38 @@ function cleanFullNameCandidate(value = "") {
 		.replace(/\s+/g, " ")
 		.trim();
 	return hasUsableFullName(cleaned) ? cleaned : "";
+}
+
+function nameTokenCount(value = "") {
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.split(/\s+/)
+		.filter((token) => /[A-Za-z\u0590-\u08FF\u0900-\u097F]{2,}/.test(token))
+		.length;
+}
+
+function nameCandidateLooksLikeNationality(value = "") {
+	const raw = String(value || "").replace(/\s+/g, " ").trim();
+	if (!raw) return false;
+	if (nationalityHintFromText(raw)) return true;
+	const normalized = compactArabicName(raw);
+	return [
+		"\u0628\u0648\u0631\u0643\u064a\u0646\u0627\u0641\u0627\u0633\u0648",
+		"\u0627\u0631\u062f\u0646\u064a",
+		"\u0627\u0631\u062f\u0646\u0649",
+		"\u0623\u0631\u062f\u0646\u064a",
+		"\u0623\u0631\u062f\u0646\u0649",
+	].includes(normalized);
+}
+
+function shouldReplaceCapturedGuestName(st = {}, candidate = "", { explicit = false } = {}) {
+	if (!candidate || !st?.slots) return false;
+	if (nameCandidateLooksLikeNationality(candidate)) return false;
+	const current = st.slots.fullName || st.slots.name || "";
+	if (!hasUsableFullName(current)) return true;
+	if (st.waitFor === "fullname" || explicit) return true;
+	return nameTokenCount(candidate) > nameTokenCount(current);
 }
 
 function stripFieldTail(value = "") {
@@ -6858,6 +6895,7 @@ const NATIONALITY_HINTS = [
 	[/\b(?:iraqi|iraq)\b|\u0639\u0631\u0627\u0642\u064a|\u0639\u0631\u0627\u0642\u064a\u0629/i, "Iraqi"],
 	[/\b(?:syrian|syria)\b|\u0633\u0648\u0631\u064a|\u0633\u0648\u0631\u064a\u0629/i, "Syrian"],
 	[/\b(?:jordanian|jordan)\b|\u0627\u0631\u062f\u0646\u064a|\u0623\u0631\u062f\u0646\u064a|\u0627\u0631\u062f\u0646\u064a\u0629|\u0623\u0631\u062f\u0646\u064a\u0629/i, "Jordanian"],
+	[/\b(?:burkinabe|burkina\s+faso)\b|\u0628\u0648\u0631\u0643\u064a\u0646\u0627\s*\u0641\u0627\u0633\u0648/i, "Burkinabe"],
 	[/\b(?:palestinian|palestine)\b|\u0641\u0644\u0633\u0637\u064a\u0646\u064a|\u0641\u0644\u0633\u0637\u064a\u0646\u064a\u0629/i, "Palestinian"],
 	[/\b(?:emirati|uae|united\s+arab\s+emirates)\b|\u0627\u0645\u0627\u0631\u0627\u062a\u064a|\u0625\u0645\u0627\u0631\u0627\u062a\u064a/i, "Emirati"],
 	[/\b(?:kuwaiti|kuwait)\b|\u0643\u0648\u064a\u062a\u064a|\u0643\u0648\u064a\u062a\u064a\u0629/i, "Kuwaiti"],
@@ -7520,7 +7558,7 @@ function applyReservationDetailsInference(st = {}, inferred = {}) {
 	if (!st?.slots || !inferred || typeof inferred !== "object") return false;
 	const before = JSON.stringify(st.slots || {});
 	const fullName = cleanFullNameCandidate(inferred.fullName || inferred.name || "");
-	if (fullName) {
+	if (shouldReplaceCapturedGuestName(st, fullName)) {
 		st.slots.fullName = fullName;
 		st.slots.name = fullName;
 	}
@@ -7571,6 +7609,7 @@ async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText =
 		"Children count is optional for the guest. If the guest gives only a total people/person/guest count and no child count, set adults to that count and children to 0 with childrenProvided=true.",
 		"For fieldFocus=email_or_skip, if the guest semantically declines or omits optional email, set emailSkipped=true.",
 		"Do not infer adults or children from room type alone.",
+		"Never treat polite filler, hurry/chase messages, or requests like please hurry / mumkin / details / booking number as a full name.",
 		"Only fill slots provided by the guest or clearly answered by the latest reply.",
 		"Output compact JSON only, with all requested keys present.",
 	].join(" ");
@@ -7663,7 +7702,7 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 			? cleanFullNameCandidate(fullText)
 			: "";
 	const name = explicitName || lineName || wholeName;
-	if (name) {
+	if (shouldReplaceCapturedGuestName(st, name, { explicit: Boolean(explicitName) })) {
 		st.slots.fullName = name;
 		st.slots.name = name;
 	}
@@ -7782,6 +7821,21 @@ function declinesText(text = "") {
 function patienceText(text = "") {
 	return /\b(take your time|no rush|whenever|slow down|wait|one moment|moment|براحتك|براحتك|خد وقتك|خدي وقتك|استنى|انتظر)\b/i.test(
 		String(text || "")
+	);
+}
+
+function guestHurryOrChaseText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:hurry|quick|quickly|faster|speed|urgent|asap|can you hurry|please hurry)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0627\u0644\u0633\u0631\u0639\u0647|\u0627\u0644\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u0645\u0633\u062a\u0639\u062c\u0644\u0647)/i.test(
+			arabic
+		) ||
+		/(?:hurry|quickly|faster|speed|urgent|asap|sora|sor3a|bsor3a|bser3a|mosta3gel)/i.test(
+			latinCompact
+		)
 	);
 }
 
@@ -9452,6 +9506,8 @@ function repeatPriceQuestionText(text = "") {
 
 function reservationDetailsSummaryQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const arabicBookingWords =
+		"(?:\\u062d\\u062c\\u0632(?:\\u064a|\\u0643|\\u0643\\u0645|\\u0646\\u0627)?|\\u0627\\u0644\\u062d\\u062c\\u0632|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0647|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0629|\\u0627\\u0644\\u0625\\u0642\\u0627\\u0645\\u0629)";
 	return (
 		/\b(?:booking|reservation|stay|quote)\s+(?:details|summary|recap)\b/i.test(
 			lower
@@ -9459,12 +9515,44 @@ function reservationDetailsSummaryQuestionText(text = "") {
 		/\b(?:details|summary|recap)\s+(?:of|for)?\s*(?:the\s+)?(?:booking|reservation|stay|quote)\b/i.test(
 			lower
 		) ||
-		/(?:\u062a\u0641\u0627\u0635\u064a\u0644|\u0645\u0644\u062e\u0635|\u0645\u0631\u0627\u062c\u0639\u0629).{0,30}(?:\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0642\u0627\u0645\u0629|\u0627\u0644\u0625\u0642\u0627\u0645\u0629|\u0627\u0644\u0633\u0639\u0631)|(?:\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0642\u0627\u0645\u0629|\u0627\u0644\u0625\u0642\u0627\u0645\u0629).{0,30}(?:\u062a\u0641\u0627\u0635\u064a\u0644|\u0645\u0644\u062e\u0635)/i.test(
+		new RegExp(
+			`(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647).{0,30}${arabicBookingWords}|${arabicBookingWords}.{0,30}(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635)`,
+			"i"
+		).test(
 			arabic
 		) ||
 		/(?:bookingdetails|reservationdetails|staydetails|bookingrecap|reservationsummary|tafaseelelhagz|tfaseelelhagz|molakhaselhagz)/i.test(
 			latinCompact
 		)
+	);
+}
+
+function confirmationNumberQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:confirmation|booking|reservation|reference)\s*(?:number|no\.?|#|id|ref)\b/i.test(
+			lower
+		) ||
+		/\b(?:number|no\.?|#|id|ref)\s+(?:for\s+)?(?:my\s+)?(?:confirmation|booking|reservation|reference)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0642\u0645|\u0646\u0645\u0631\u0647|\u0646\u0645\u0631\u0629).{0,24}(?:\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f).{0,24}(?:\u0631\u0642\u0645|\u0646\u0645\u0631\u0647|\u0646\u0645\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:confirmationnumber|bookingnumber|reservationnumber|bookingno|reservationno|raqmaltakid|raqmelhagz|raqmhagzy|bookingref|reservationref)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function bookingStateQuestionText(text = "") {
+	return (
+		repeatPriceQuestionText(text) ||
+		reservationDetailsSummaryQuestionText(text) ||
+		confirmationNumberQuestionText(text)
 	);
 }
 
@@ -9629,6 +9717,96 @@ function currentReservationSummaryText(sc = {}, st = {}, quote = {}) {
 	]
 		.filter(Boolean)
 		.join("\n");
+}
+
+function postBookingReservationSummaryText(sc = {}, st = {}, quote = {}, ref = null) {
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomName = localizedRoomName(sc, st, quote || {});
+	const dates =
+		st.slots?.checkinISO && st.slots?.checkoutISO
+			? localizedStayDateLines(sc, st)
+			: { primary: "", secondary: "" };
+	const total = Number(
+		quote?.totals?.totalPriceWithCommission || quote?.total || quote?.totalPrice || 0
+	);
+	const currency = cleanCurrency(quote?.currency || "SAR");
+	const nights = localizedNightCount(quote?.nights || 0, lang);
+	const totalText =
+		Number.isFinite(total) && total > 0 ? localizedMoney(total, currency, lang) : "";
+	const links = ref ? reservationLinks(ref) : {};
+	const confirmation =
+		ref?.confirmation_number || sc.aiReservation?.confirmationNumber || "";
+	const guestCount = bookingGuestCountText(sc, st);
+	const guestName = st.slots?.fullName || "";
+
+	if (/arabic/i.test(lang)) {
+		return [
+			"\u0623\u0643\u064a\u062f\u060c \u0647\u0630\u0647 \u062a\u0641\u0627\u0635\u064a\u0644 \u062d\u062c\u0632\u0643:",
+			confirmation ? `\u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.` : "",
+			`\u0627\u0644\u0641\u0646\u062f\u0642: ${hotelName}.`,
+			roomName ? `\u0627\u0644\u063a\u0631\u0641\u0629: ${roomName}.` : "",
+			dates.primary
+				? `\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}${
+						dates.secondary ? ` (${dates.secondary})` : ""
+				  }.`
+				: "",
+			totalText
+				? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${totalText}**${
+						nights ? ` \u0644\u0645\u062f\u0629 ${nights}` : ""
+				  }.`
+				: "",
+			guestName || guestCount
+				? `\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0636\u064a\u0641: ${[
+						guestName,
+						guestCount,
+				  ]
+						.filter(Boolean)
+						.join(" - ")}.`
+				: "",
+			links.reservationDetails
+				? `[\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632](${links.reservationDetails})`
+				: "",
+			links.payment ? `[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+
+	return [
+		"Of course. Here are your booking details:",
+		confirmation ? `Confirmation number: **${confirmation}**.` : "",
+		`Hotel: ${hotelName}.`,
+		roomName ? `Room: ${roomName}.` : "",
+		dates.primary
+			? `Dates: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}.`
+			: "",
+		totalText ? `Total: **${totalText}**${nights ? ` for ${nights}` : ""}.` : "",
+		guestName || guestCount
+			? `Guest details: ${[guestName, guestCount].filter(Boolean).join(" - ")}.`
+			: "",
+		links.reservationDetails
+			? `[Reservation details](${links.reservationDetails})`
+			: "",
+		links.payment ? `[Payment link](${links.payment})` : "",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
+	if (!bookingStateQuestionText(userText)) return false;
+	const ref = aiReservationReference(sc);
+	if (!ref) return false;
+	const quote = ensureCurrentQuoteForSlots(st) || {};
+	await humanSend(io, sc, st, postBookingReservationSummaryText(sc, st, quote, ref));
+	st.waitFor = "post_booking_followup";
+	logStep(String(sc._id || ""), "post_booking.state_reply", {
+		confirmation: ref.confirmation_number || "",
+		hasQuote: Boolean(quote?.available),
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
 }
 
 async function answerFastBookingStateQuestion(io, sc, st, userText = "", caseId = "") {
@@ -11084,6 +11262,7 @@ function isPostBookingConcreteRequest(text = "") {
 	if (!normalized) return false;
 	if (botExperienceComplaintText(normalized)) return false;
 	return (
+		bookingStateQuestionText(normalized) ||
 		wantsPaymentHelp(normalized) ||
 		wantsReservationHelp(normalized) ||
 		selectedHotelFactQuestionText(normalized) ||
@@ -12046,6 +12225,8 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		userText
 	);
 	if (handledDeliveryRequest) return true;
+	const handledStateQuestion = await answerPostBookingStateQuestion(io, sc, st, userText);
+	if (handledStateQuestion) return true;
 	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
 		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
 	}
@@ -12127,7 +12308,11 @@ async function askForReservationDetail(io, sc, st, step) {
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
 	const guestAction = lastGuestAction(sc);
-	await captureReservationDetailsFromText(sc, st, userText, caseId);
+	const chaseOnlyWithCompleteDetails =
+		guestHurryOrChaseText(userText) && hasMandatoryReservationDetails(st);
+	if (!chaseOnlyWithCompleteDetails) {
+		await captureReservationDetailsFromText(sc, st, userText, caseId);
+	}
 	for (let guard = 0; guard < 4; guard += 1) {
 		if (st.waitFor === "reviewConfirm") {
 			if (guestAction === "correction" || correctionText(userText)) {

@@ -96,6 +96,33 @@ Preserve these rules when changing this area again:
 - Avoid long copy-paste room or policy descriptions. Summaries should be short
   unless the guest asks for full details.
 
+## Live Ayman Incident - Guest Name Protection
+
+During the `Ayman / zad al qimma` live tests on 2026-06-23, two reservations
+were created successfully but with incorrect guest names:
+
+- `6915160582` saved `ممكن السرعة` as the guest name after a slow finalization
+  prompt caused the guest to chase the bot.
+- `8939348710` saved `بوركينا فاسو` as the guest name because a nationality
+  answer was accepted as a name.
+
+Production data was corrected immediately:
+
+- `6915160582` -> `ايمن شوقى عبد العظيم`
+- `8939348710` -> `ايمن شوقى`
+
+Follow-up guardrails added:
+
+- Polite filler, hurry/chase messages, booking-detail requests, and
+  confirmation-number requests are rejected as guest names.
+- Nationality-only values, including Burkina Faso, are rejected as guest names.
+- A fuller real name may replace a shorter support-case name, but ambiguous
+  later text cannot overwrite a valid name.
+- The reservation creation action now rejects bad AI guest names as a final
+  database safety gate.
+- Post-booking price/details/confirmation-number questions are answered from
+  the completed reservation state instead of falling back into a new quote flow.
+
 ## Verification Used
 
 - `node --check aiagent/core/openai.js`
