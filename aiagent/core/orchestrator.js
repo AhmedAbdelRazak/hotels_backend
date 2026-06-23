@@ -4566,6 +4566,52 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	return `${name}, of course. At ${hotelName}, we have ${roomNames}${fit}. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
 }
 
+function recommendedRoomTypeKeyForGuestCount(count = null) {
+	const guests = Number(count);
+	if (!Number.isFinite(guests)) return "";
+	if (guests === 2) return "doubleRooms";
+	if (guests === 3) return "tripleRooms";
+	if (guests === 4) return "quadRooms";
+	if (guests === 5) return "familyRooms";
+	return "";
+}
+
+function roomGuestCountRecommendationText(
+	sc = {},
+	st = {},
+	count = null,
+	roomTypeKey = "",
+	rooms = []
+) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomNames = inlineRoomOptions(rooms, lang) || localizedRoomTypeLabel(roomTypeKey, lang);
+	const capacity = roomCapacityLabel(roomTypeKey, lang) || `${localizedNumber(count, lang)} guests`;
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0644\u0640${capacity} \u0623\u0631\u0634\u062d ${roomNames} \u0641\u064a ${hotelName}\u060c \u0644\u0623\u0646\u0647 \u0623\u0646\u0633\u0628 \u062e\u064a\u0627\u0631 \u0644\u0647\u0630\u0627 \u0627\u0644\u0639\u062f\u062f. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, para ${capacity}, recomiendo ${roomNames} en ${hotelName}; es la opcion mas adecuada para ese numero de huespedes. Enviame la fecha de llegada y salida para revisar disponibilidad y precio exactos.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, pour ${capacity}, je recommande ${roomNames} a ${hotelName}; c'est l'option la plus adaptee pour ce nombre de personnes. Envoyez-moi les dates d'arrivee et de depart pour verifier la disponibilite et le prix exact.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, ${capacity} ke liye ${hotelName} mein ${roomNames} recommend karta hoon. Yeh is guest count ke liye suitable option hai. Check-in aur checkout dates bhej dein, main exact availability aur price check kar dunga.`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, ${capacity} ke liye ${hotelName} mein ${roomNames} recommend karta hoon. Yeh is guest count ke liye suitable option hai. Check-in aur checkout dates bhej dijiye, main exact availability aur price check kar dunga.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, untuk ${capacity}, saya merekomendasikan ${roomNames} di ${hotelName}; ini pilihan yang paling sesuai untuk jumlah tamu tersebut. Kirim tanggal check-in dan check-out agar saya cek ketersediaan dan harga pastinya.`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, untuk ${capacity}, saya cadangkan ${roomNames} di ${hotelName}; ini pilihan yang paling sesuai untuk jumlah tetamu tersebut. Hantar tarikh check-in dan check-out supaya saya boleh semak availability dan harga tepat.`;
+	}
+	return `${name}, for ${capacity}, I recommend ${roomNames} at ${hotelName}; it is the best fit for that guest count. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
+}
+
 function requestedGuestCountFromText(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return null;
@@ -5055,6 +5101,34 @@ async function answerSelectedHotelRoomQuestion(
 		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
 		: [];
 	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+	const recommendedRoomTypeKey = recommendedRoomTypeKeyForGuestCount(requestedGuestCount);
+	if (!roomTypeKey && recommendedRoomTypeKey) {
+		const recommendedRooms = activeHotelRoomSummaries(
+			st.hotel,
+			recommendedRoomTypeKey
+		);
+		if (recommendedRooms.length) {
+			st.slots.roomTypeKey = recommendedRoomTypeKey;
+			const sent = await humanSend(
+				io,
+				sc,
+				st,
+				roomGuestCountRecommendationText(
+					sc,
+					st,
+					requestedGuestCount,
+					recommendedRoomTypeKey,
+					recommendedRooms
+				),
+				{ fast: true }
+			);
+			if (sent) {
+				st.waitFor = "dates";
+				stampAsk(st, "dates");
+			}
+			return true;
+		}
+	}
 	if (!roomTypeKey && activeRooms.length) {
 		const sent = await humanSend(
 			io,
@@ -13514,6 +13588,27 @@ async function planTurn(io, sc) {
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
 			await humanSend(io, sc, st, fastSmalltalk, { fast: true });
+			return;
+		}
+		if (
+			st.hotel &&
+			selectedHotelRoomQuestionText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "selected_hotel.room_immediate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelRoomQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				mapRoomToKey(userText) || null
+			);
 			return;
 		}
 		if (
