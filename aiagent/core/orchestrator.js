@@ -133,6 +133,10 @@ const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 3400
 	min: 500,
 	max: 8000,
 });
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3000, {
+	min: 500,
+	max: 8000,
+});
 const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 	min: 5000,
 	max: 5 * 60 * 1000,
@@ -5091,14 +5095,22 @@ function stayDateRequestText(sc = {}, st = {}, { missing = "both" } = {}) {
 	return `${name}, please send both the check-in and checkout dates together so I can check exact availability and pricing.`;
 }
 
-async function askForMissingStayDates(io, sc, st) {
+async function askForMissingStayDates(
+	io,
+	sc,
+	st,
+	{ fast = false, targetReplyMs = null } = {}
+) {
 	const missing =
 		st.slots?.checkinISO && !st.slots?.checkoutISO
 			? "checkout"
 			: !st.slots?.checkinISO && st.slots?.checkoutISO
 			? "checkin"
 			: "both";
-	const sent = await humanSend(io, sc, st, stayDateRequestText(sc, st, { missing }));
+	const sent = await humanSend(io, sc, st, stayDateRequestText(sc, st, { missing }), {
+		fast,
+		targetReplyMs,
+	});
 	if (sent) stampAsk(st, "dates");
 	st.waitFor = "dates";
 	return sent;
@@ -5119,8 +5131,16 @@ function shouldAskRoomPreferenceFirst(userText = "", st = {}, lu = {}, decision 
 	return false;
 }
 
-async function askRoomPreferenceForReservation(io, sc, st) {
-	const sent = await humanSend(io, sc, st, roomPreferenceSalesText(sc, st));
+async function askRoomPreferenceForReservation(
+	io,
+	sc,
+	st,
+	{ fast = false, targetReplyMs = null } = {}
+) {
+	const sent = await humanSend(io, sc, st, roomPreferenceSalesText(sc, st), {
+		fast,
+		targetReplyMs,
+	});
 	if (!sent) return false;
 	st.waitFor = "room";
 	stampAsk(st, "room");
@@ -10014,6 +10034,64 @@ async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
 	return true;
 }
 
+async function tryStartDirectReservationFlow(io, sc, st, userText = "", caseId = "") {
+	if (
+		!st.hotel ||
+		humanHandoffReason(userText) ||
+		wantsPaymentHelp(userText) ||
+		explicitlyExistingReservationIntent(userText) ||
+		selectedHotelFactQuestionText(userText) ||
+		!wantsNewReservationIntent(userText, {})
+	) {
+		return false;
+	}
+	updateActiveLanguageFromText(sc, st, userText);
+	const dates = extractDateRange(userText);
+	if (
+		dates?.checkinISO &&
+		dates?.checkoutISO &&
+		!needsExplicitPastDateClarification(userText, dates)
+	) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
+			source: "direct_reservation_start",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
+	}
+	const roomTypeKey = mapRoomToKey(userText);
+	if (roomTypeKey && st.slots.roomTypeKey !== roomTypeKey) {
+		st.slots.roomTypeKey = roomTypeKey;
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		clearPendingRoomAlternative(st);
+	}
+	applyReservationGuestCountsFromText(st, userText);
+	logStep(caseId || String(sc._id || ""), "reservation.direct_start", {
+		waitFor: st.waitFor || "",
+		roomTypeKey: st.slots.roomTypeKey || null,
+		checkinISO: st.slots.checkinISO || null,
+		checkoutISO: st.slots.checkoutISO || null,
+	});
+	if (st.slots.checkinISO && st.slots.checkoutISO && st.slots.roomTypeKey) {
+		await shareKnownStayQuote(io, sc, st);
+		return true;
+	}
+	if (!st.slots.checkinISO || !st.slots.checkoutISO) {
+		await askForMissingStayDates(io, sc, st, {
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		return true;
+	}
+	if (!st.slots.roomTypeKey) {
+		await askRoomPreferenceForReservation(io, sc, st, {
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		return true;
+	}
+	return false;
+}
+
 async function acceptPendingRoomAlternative(io, sc, st, pending = {}) {
 	if (!pending?.roomTypeKey || !pending?.checkinISO || !pending?.checkoutISO) {
 		clearPendingRoomAlternative(st);
@@ -13679,6 +13757,16 @@ async function planTurn(io, sc) {
 				caseId
 			);
 			if (directStayQuoteHandled) return;
+		}
+		if (userText) {
+			const directReservationStartHandled = await tryStartDirectReservationFlow(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (directReservationStartHandled) return;
 		}
 		const fastSmalltalk = st.hotel
 			? fastEnglishSmalltalkText(sc, st, userText)
