@@ -61,7 +61,7 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	caseId,
 	messageOrFields,
-	{ duplicateWindowMs = 2 * 60 * 1000 } = {}
+	{ duplicateWindowMs = 2 * 60 * 1000, duplicateAfter = null } = {}
 ) {
 	const _id = safeId(caseId);
 	if (!_id) return { updatedCase: null, skipped: true };
@@ -73,9 +73,19 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	const userId = String(message.messageBy?.userId || "").trim();
 	if ((message.isAi === true || message.isSystem === true) && text) {
 		const cutoff = new Date(Date.now() - Math.max(1000, Number(duplicateWindowMs) || 0));
+		const duplicateAfterDate =
+			duplicateAfter instanceof Date
+				? duplicateAfter
+				: Number.isFinite(Number(duplicateAfter))
+				? new Date(Number(duplicateAfter))
+				: null;
+		const duplicateDate = { $gte: cutoff };
+		if (duplicateAfterDate && Number.isFinite(duplicateAfterDate.getTime())) {
+			duplicateDate.$gt = duplicateAfterDate;
+		}
 		const duplicateMatch = {
 			message: text,
-			date: { $gte: cutoff },
+			date: duplicateDate,
 		};
 		if (message.isAi === true) duplicateMatch.isAi = true;
 		if (message.isSystem === true) duplicateMatch.isSystem = true;

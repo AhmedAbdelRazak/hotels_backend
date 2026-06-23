@@ -6409,6 +6409,7 @@ function ensureState(sc, hotel) {
 			sendingToken: null,
 			waitFor: null, // 'intentConfirm' -> 'dates' -> 'room' -> 'proceed' -> 'reviewConfirm' -> 'fullname' -> 'nationality' -> 'phone' -> 'email_or_skip' -> 'finalize'
 			lastBotText: "",
+			lastBotTurnUserText: "",
 			lastAskAt: {},
 			quote: null,
 			reviewSent: false,
@@ -6562,13 +6563,19 @@ async function humanSend(
 		return false;
 	}
 
-	if (st.lastBotText && st.lastBotText.trim() === String(text).trim()) {
+	if (
+		st.lastBotText &&
+		st.lastBotText.trim() === String(text).trim() &&
+		(!expectedTurnUserText || st.lastBotTurnUserText === expectedTurnUserText)
+	) {
 		logStep(caseId, "dedupe.skip", { reason: "same_as_last" });
 		return false;
 	}
 
+	let sendGateCase = null;
 	try {
 		const latestCase = await getSupportCaseById(caseId);
+		sendGateCase = latestCase;
 		const policy =
 			fast && latestCase
 				? {
@@ -6651,17 +6658,29 @@ async function humanSend(
 			conversation: messageData,
 			aiRelated: true,
 		},
-		{ duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS }
+		{
+			duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS,
+			duplicateAfter: expectedTurnUserText ? turnStartedAt : null,
+		}
 	);
 	if (saved?.skipped) {
 		logStep(caseId, "dedupe.skip", { reason: "recent_duplicate" });
-		st.lastBotText = text;
-		st.activeTurnHadReply = true;
+		const duplicateCase = saved.updatedCase || sendGateCase;
+		if (
+			expectedTurnUserText &&
+			duplicateCase &&
+			hasAiAssistantReplyAfterLatestGuest(duplicateCase)
+		) {
+			st.lastBotText = text;
+			st.lastBotTurnUserText = expectedTurnUserText;
+			st.activeTurnHadReply = true;
+		}
 		return false;
 	}
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
 	st.lastBotText = text;
+	st.lastBotTurnUserText = expectedTurnUserText || "";
 	st.activeTurnHadReply = true;
 	clearUnansweredTurnRecovery(caseId);
 	if (scheduleIdle) scheduleAiIdleFollowups(io, sc, st, messageData);
