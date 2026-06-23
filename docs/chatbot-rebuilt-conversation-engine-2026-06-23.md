@@ -104,14 +104,23 @@ visibly different.
 
 Live PM2/database timing showed the backend process was healthy, but basic
 guest questions could still spend 9-30 seconds in the full OpenAI planner path.
-`aiagent/core/orchestrator_rebuilt.js` now has a deterministic fast path before
-the model for common hotel facts and simple booking continuation:
+The production quality setting is now OpenAI-first again: the planner reviews
+the saved transcript on every guest turn, then the backend validates and renders
+structured hotel/reservation behavior. Deterministic code must be used as a
+guardrail only:
 
-- room options, room descriptions, amenities, bus, location, distance, payment,
-  reservation details, and policy questions;
-- room-fit messages such as asking for a room for three guests;
-- the next room/date quote step after the conversation already contains room
-  type and stay dates.
+- recover obvious structured slots from the transcript when the JSON omits them
+  (room, dates, phone, email, nationality, adult count);
+- protect against stale replies, duplicate client messages, and duplicate AI
+  turns;
+- render pricing, final review, reservation creation, and created-reservation
+  links from backend state;
+- answer policy/fact output only after the planner selects the answer kind, or
+  as a timeout/fallback path.
+
+`AI_AGENT_FAST_PATH_ENABLED=true` can opt back into the pre-model fast path for
+emergencies, but it is not the default production behavior. The fast path must
+never treat guest details after a quote as a new room-fit question.
 
 Every planned AI turn now logs a compact non-PII timing row:
 `[aiagent] rebuilt turn { caseId, source, action, kind, sent, elapsedMs }`.
@@ -122,6 +131,18 @@ The active low-cost model trial is `gpt-5.4-mini` for chatbot analysis/NLU,
 with low reasoning effort. Keep the override in chatbot-specific env keys
 (`OPENAI_CHATBOT_ANALYSIS_MODEL`, `OPENAI_CHATBOT_NLU_MODEL`) so broader
 OpenAI jobs can keep their existing model quality.
+
+The 2026-06-23 live Arabic receipt/email flow also added guardrails for the
+common details line shape:
+
+- optional email is mentioned in the details request and shown in the final
+  review when supplied;
+- receipt/confirmation-by-email questions answer directly and continue the
+  reservation flow;
+- Arabic guest-count words such as `شخصين` are recovered as adult count while
+  still allowing OpenAI to decide intent;
+- nationality recovery strips emails first and does not overwrite a valid
+  nationality from unrelated email/receipt wording.
 
 `controllers/supportcase.js` also treats public `clientTag` values as
 idempotency keys. If a browser retries the same guest message, the backend

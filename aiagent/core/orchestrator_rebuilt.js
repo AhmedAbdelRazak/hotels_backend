@@ -5,6 +5,7 @@ const {
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 } = require("./db");
 const { mapRoomToKey, quickDateRange, digitsToEnglish } = require("./nlu");
+const { normalizeNumberWordsForParsing } = require("./numberWords");
 const { priceRoomForStay, listAvailableRoomsForStay } = require("./selectors");
 const {
 	createReservationForCase,
@@ -24,6 +25,16 @@ const MAX_FACT_CHARS = 12000;
 const timers = new Map();
 const inFlight = new Set();
 const queued = new Set();
+
+function envFlag(name, fallback = false) {
+	const value = String(process.env[name] || "").trim().toLowerCase();
+	if (!value) return fallback;
+	return ["1", "true", "yes", "on"].includes(value);
+}
+
+function shouldUseFastDecision() {
+	return envFlag("AI_AGENT_FAST_PATH_ENABLED", false);
+}
 
 const AR = {
 	completeReservation: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
@@ -399,15 +410,18 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 		`Visible CSR name: ${agentName}. In Arabic, the CSR voice is female or neutral; never write masculine self-reference such as ana mawgood if the CSR is female.`,
 		"Review the entire saved transcript every turn. Do not rely only on the latest line.",
 		"Answer the guest's newest direct question first from verified hotel facts, policies, room descriptions, amenities, reservation state, or pricing tools.",
+		"Do not answer a different question from the one the guest asked. If the newest guest line is booking details, continue the booking workflow instead of restarting room discovery.",
 		"Do not ask again for information already supplied anywhere in the transcript.",
 		"Do not add many confirmations. Quote price and request any missing mandatory guest details in the same turn. Send only one full final review before reservation creation.",
-		"Mandatory reservation details are: full guest name, phone, nationality as ISO-3166 alpha-2 country code, adult count. Children default to 0 when not supplied. Email is optional and must not be a separate required step.",
+		"Mandatory reservation details are: full guest name, phone, nationality as ISO-3166 alpha-2 country code, adult count. Children default to 0 when not supplied. Email is optional; when asking for details, mention it briefly as optional for confirmation or receipt.",
+		"If the guest asks about sending receipt, confirmation, voucher, or reservation details by email, answer yes when an email can be added, capture the email if supplied, and continue the booking flow without restarting.",
 		"Create a reservation only when the transcript already contains the final review prompt and the newest guest clearly confirms it, or clientAction is place_reservation.",
 		"After a reservation exists, answer follow-up hotel or reservation questions without restarting the booking flow.",
 		"Room descriptions must be brief, natural, and based only on room settings; 1-2 short lines unless the guest asks for full details.",
 		"For unknown safe questions, say professionally that the detail is not currently confirmed, then ask one relevant hotel/reservation follow-up. Do not escalate and do not deflect to links.",
 		"For policy wording, sound like hotel reception. Do not say you checked a document, database, record, admin panel, or hotel details.",
-		"Use the latest guest language naturally, including dialect or mixed language. If Arabic and the guest gender is clear, use respectful address sparingly, not every message.",
+		"Use the latest guest language naturally, including dialect or mixed language. Keep the voice warm, capable, and concise, like hotel reception, not robotic.",
+		"Use the guest name or respectful address sparingly, not every message. In Egyptian Arabic, use respectful address such as Ostaz/Ustaza only when it feels natural and gender is clear.",
 		"Return ONLY valid JSON with this shape:",
 		JSON.stringify({
 			language: "Arabic|English|Spanish|French|Urdu|Hindi|Indonesian|Malay",
@@ -415,7 +429,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 				"greet|answer_fact|quote_room|ask_booking_missing|ask_guest_details|final_review|create_reservation|correct_details|close|unknown",
 			intent: "short intent",
 			answerKind:
-				"room_options|room_description|amenity|bus|location|distance|policy|payment|reservation_details|smalltalk|unknown|null",
+				"room_options|room_description|amenity|bus|location|distance|policy|payment|reservation_details|email_receipt|smalltalk|unknown|null",
 			guestAddress: "optional respectful short address or empty",
 			booking: {
 				wantsToBook: true,
@@ -473,7 +487,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 			{
 				kind: "analysis",
 				temperature: 0,
-				max_tokens: 850,
+				max_tokens: 650,
 				reasoning_effort: "low",
 			}
 		);
@@ -518,6 +532,11 @@ function detectDirectKind(text = "") {
 	if (/(reservation|booking|confirmation|حجز|تأكيد|تاكيد).*(details|number|link|تفاصيل|رقم)|(?:details|تفاصيل).*(reservation|booking|حجز)/i.test(value)) {
 		return "reservation_details";
 	}
+	if (
+		/(?:email|e-mail|mail|send|receipt|voucher|confirmation).*(?:email|e-mail|mail|receipt|voucher|confirmation)|(?:بريد|ايميل|إيميل|ريست|ريسيت|إيصال|ايصال).*(?:بريد|ايميل|إيميل|ريست|ريسيت|إيصال|ايصال|متاح|ارسل|ابعت)/i.test(value)
+	) {
+		return "email_receipt";
+	}
 	if (/(amenit|facility|wifi|wi-fi|breakfast|parking|مرافق|واي|افطار|فطور|موقف)/i.test(value)) {
 		return "amenity";
 	}
@@ -544,7 +563,7 @@ function recoverFastBooking(supportCase = {}, latestMessage = {}) {
 		children: 0,
 		finalReviewAlreadyShown: hasFinalReviewPrompt(supportCase),
 	};
-	const updateFromText = (text = "") => {
+	const updateFromText = (text = "", { guest = false } = {}) => {
 		const roomKey = mapRoomToKey(text);
 		if (roomKey) booking.roomTypeKey = roomKey;
 		const dates = quickDateRange(text);
@@ -552,12 +571,162 @@ function recoverFastBooking(supportCase = {}, latestMessage = {}) {
 			booking.checkinISO = dates.checkinISO;
 			booking.checkoutISO = dates.checkoutISO;
 		}
+		if (guest) applyGuestDetailsFromText(booking, text);
 	};
 	for (const message of conversation) {
-		updateFromText(message?.message || "");
+		updateFromText(message?.message || "", { guest: isGuestMessage(message) });
 	}
-	updateFromText(latestMessage.message || "");
+	updateFromText(latestMessage.message || "", { guest: true });
 	return booking;
+}
+
+function extractEmail(text = "") {
+	const match = String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+	return cleanText(match?.[0] || "", 180).toLowerCase();
+}
+
+function extractPhone(text = "") {
+	const withoutEmail = String(text || "").replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, " ");
+	const match = digitsToEnglish(withoutEmail).match(/(?:\+?\d[\d\s().-]{6,}\d)/);
+	if (!match) return "";
+	const phone = match[0].replace(/[^\d+]/g, "");
+	const digits = phone.replace(/\D/g, "");
+	if (digits.length < 7 || digits.length > 16) return "";
+	return phone;
+}
+
+function tokenWindows(tokens = [], maxSize = 3) {
+	const windows = [];
+	for (let index = 0; index < tokens.length; index += 1) {
+		for (let size = Math.min(maxSize, tokens.length - index); size >= 1; size -= 1) {
+			windows.push(tokens.slice(index, index + size).join(" "));
+		}
+	}
+	return windows;
+}
+
+function extractNationality(text = "") {
+	const withoutEmail = String(text || "").replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, " ");
+	const normalized = cleanText(normalizeNumberWordsForParsing(withoutEmail), 600);
+	const tokens = normalized
+		.replace(/[^\p{L}\s-]/gu, " ")
+		.split(/\s+/)
+		.map((token) => token.trim())
+		.filter(Boolean);
+	for (const candidate of tokenWindows(tokens, 3)) {
+		const code = normalizeCountryCode("", candidate);
+		if (code) return { code, name: countryNameFromCode(code) || candidate, match: candidate };
+	}
+	return { code: "", name: "", match: "" };
+}
+
+function extractAdultCount(text = "") {
+	const raw = String(text || "").toLowerCase();
+	const normalized = normalizeNumberWordsForParsing(text).toLowerCase();
+	const rawGuestWord =
+		/(?:adult|guest|person|people|pax|\u0628\u0627\u0644\u063a|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641)/u.test(raw);
+	const patterns = [
+		/\b(\d{1,2})\s*(?:adult|adults|guest|guests|person|persons|people|pax)\b/i,
+		/\b(?:adult|adults|guest|guests|person|persons|people|pax)\s*(\d{1,2})\b/i,
+		/\b(\d{1,2})\s*(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641)\b/u,
+		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641)\s*(\d{1,2})\b/u,
+	];
+	for (const pattern of patterns) {
+		const match = normalized.match(pattern);
+		const count = Number(match?.[1] || 0);
+		if (count > 0 && count < 20) return count;
+	}
+	const standalone = normalized.match(/\b([1-9]|1\d)\b/);
+	if (
+		standalone &&
+		(rawGuestWord || /(?:adult|guest|person|people|pax|\u0628\u0627\u0644\u063a|\u0634\u062e\u0635|\u0641\u0631\u062f|\u0636\u064a\u0641)/u.test(normalized))
+	) {
+		return Number(standalone[1]);
+	}
+	return null;
+}
+
+function stripGuestDetailNoise(text = "", { phone = "", email = "", nationality = "" } = {}) {
+	let value = normalizeNumberWordsForParsing(text);
+	if (email) value = value.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), " ");
+	if (phone) value = value.replace(phone, " ");
+	value = value.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, " ");
+	value = value.replace(/(?:\+?\d[\d\s().-]{6,}\d)/g, " ");
+	if (nationality) {
+		for (const token of nationality.split(/\s+/).filter(Boolean)) {
+			value = value.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), " ");
+		}
+	}
+	return cleanText(
+		value
+			.replace(/\b(?:adult|adults|guest|guests|person|persons|people|pax|children|child|kid|kids)\b/gi, " ")
+			.replace(/(?:\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641)/gu, " ")
+			.replace(/\b\d{1,2}\b/g, " ")
+			.replace(/[,:;|/\\()[\]{}]+/g, " ")
+			.replace(/\s+/g, " "),
+		140
+	);
+}
+
+function applyGuestDetailsFromText(booking = {}, text = "") {
+	const email = extractEmail(text);
+	if (email) booking.email = email;
+	const phone = extractPhone(text);
+	if (phone) booking.phone = phone;
+	const adults = extractAdultCount(text);
+	const compactText = cleanText(text, 240);
+	const wordCount = compactText.split(/\s+/).filter(Boolean).length;
+	const nationalityCue =
+		Boolean(phone) ||
+		Number.isFinite(adults) ||
+		/\b(?:nationality|national|country|citizenship|passport)\b/i.test(compactText) ||
+		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u062c\u0646\u0633\u064a\u0629|\u0628\u0644\u062f|\u062f\u0648\u0644\u0629|\u062f\u0648\u0644\u0647)/u.test(compactText) ||
+		(wordCount <= 3 && !/[?؟]/.test(compactText));
+	const nationality = nationalityCue ? extractNationality(text) : { code: "", name: "", match: "" };
+	if (nationality.code) {
+		booking.nationalityCode = nationality.code;
+		booking.nationalityName = nationality.name;
+	}
+	if (Number.isFinite(adults) && adults > 0) booking.adults = adults;
+	if (!Number.isFinite(numberOrNull(booking.children))) booking.children = 0;
+	if (!booking.fullName && (phone || nationality.code || email)) {
+		const possibleName = stripGuestDetailNoise(text, {
+			phone,
+			email,
+			nationality: nationality.match || nationality.name || nationality.code,
+		});
+		if (possibleName && possibleName.length >= 3 && !/\b(?:said|told|already|قلت|قولت|ذكرت)\b/i.test(possibleName)) {
+			booking.fullName = possibleName;
+		}
+	}
+	return booking;
+}
+
+function hasGuestDetailSignal(text = "", { afterQuote = false } = {}) {
+	if (extractEmail(text) || extractPhone(text) || extractNationality(text).code) return true;
+	return afterQuote && Number.isFinite(extractAdultCount(text));
+}
+
+function valuePresent(value) {
+	if (value === null || value === undefined) return false;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value === "boolean") return true;
+	return cleanText(value, 20) !== "";
+}
+
+function mergeRecoveredBooking(decisionBooking = {}, recoveredBooking = {}) {
+	const merged = { ...(decisionBooking || {}) };
+	for (const [key, value] of Object.entries(recoveredBooking || {})) {
+		if (!valuePresent(value)) continue;
+		if (key === "children" && Number(value) === 0 && valuePresent(merged.children)) continue;
+		if (key === "rooms" && Number(value) === 1 && valuePresent(merged.rooms)) continue;
+		merged[key] = value;
+	}
+	merged.finalReviewAlreadyShown =
+		merged.finalReviewAlreadyShown === true ||
+		recoveredBooking.finalReviewAlreadyShown === true ||
+		decisionBooking.finalReviewAlreadyShown === true;
+	return merged;
 }
 
 function latestHasBookingSignal(text = "") {
@@ -575,6 +744,8 @@ function buildFastDecision({ supportCase, latest }) {
 	const language = isArabicText(latestText)
 		? "Arabic"
 		: supportCase.preferredLanguage || "English";
+	const booking = recoverFastBooking(supportCase, latest?.message || {});
+	const afterQuote = hasDates(booking);
 	if (
 		[
 			"policy",
@@ -585,6 +756,7 @@ function buildFastDecision({ supportCase, latest }) {
 			"room_description",
 			"amenity",
 			"reservation_details",
+			"email_receipt",
 			"payment",
 		].includes(directKind)
 	) {
@@ -593,17 +765,21 @@ function buildFastDecision({ supportCase, latest }) {
 				language,
 				action: "answer_fact",
 				answerKind: directKind,
-				booking: recoverFastBooking(supportCase, latest?.message || {}),
+				booking,
 				confidence: 1,
 			},
 			supportCase
 		);
 	}
 
-	const booking = recoverFastBooking(supportCase, latest?.message || {});
 	const latestRoomKey = mapRoomToKey(latestText);
 	const latestDates = quickDateRange(latestText);
-	if (latestRoomKey && !(latestDates?.checkinISO && latestDates?.checkoutISO)) {
+	if (
+		latestRoomKey &&
+		!afterQuote &&
+		!hasGuestDetailSignal(latestText, { afterQuote }) &&
+		!(latestDates?.checkinISO && latestDates?.checkoutISO)
+	) {
 		return normalizeDecision(
 			{
 				language,
@@ -616,7 +792,7 @@ function buildFastDecision({ supportCase, latest }) {
 		);
 	}
 	if (
-		latestHasBookingSignal(latestText) &&
+		(latestHasBookingSignal(latestText) || hasGuestDetailSignal(latestText, { afterQuote })) &&
 		(booking.roomTypeKey || booking.roomDisplayName) &&
 		(booking.checkinISO || booking.checkoutISO)
 	) {
@@ -779,13 +955,13 @@ function askDetailsReply({ booking, quote, room, language }) {
 		return [
 			`${roomName(room, language)} \u0645\u062a\u0627\u062d\u0629 \u0645\u0646 ${booking.checkinISO} \u0625\u0644\u0649 ${booking.checkoutISO} \u0644\u0645\u062f\u0629 ${nightsText(quote.nights, language)}.`,
 			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a ${total} ${currency}.`,
-			`\u0644\u062a\u062c\u0647\u064a\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u060c \u0623\u0631\u0633\u0644 ${parts.join("\u060c ")}. \u0625\u0630\u0627 \u064a\u0648\u062c\u062f \u0623\u0637\u0641\u0627\u0644 \u0627\u0630\u0643\u0631 \u0639\u062f\u062f\u0647\u0645\u060c \u0648\u0625\u0644\u0627 \u0633\u0623\u0639\u062a\u0628\u0631\u0647\u0645 0.`,
+			`\u0644\u062a\u062c\u0647\u064a\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u060c \u0623\u0631\u0633\u0644 ${parts.join("\u060c ")}. \u0625\u0630\u0627 \u064a\u0648\u062c\u062f \u0623\u0637\u0641\u0627\u0644 \u0627\u0630\u0643\u0631 \u0639\u062f\u062f\u0647\u0645\u060c \u0648\u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0627\u062e\u062a\u064a\u0627\u0631\u064a \u0625\u0630\u0627 \u062a\u062d\u0628 \u0646\u0631\u0633\u0644 \u0639\u0644\u064a\u0647 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0623\u0648 \u0627\u0644\u0625\u064a\u0635\u0627\u0644.`,
 		].join("\n");
 	}
 	return [
 		`${roomName(room, language)} is available for ${stay} (${nightsText(quote.nights, language)}).`,
 		`Total: ${total} ${currency}.`,
-		`To prepare the final reservation review, please send ${parts.join(", ")}. If there are children, include their count; otherwise I will keep children as 0.`,
+		`To prepare the final reservation review, please send ${parts.join(", ")}. Include children if any, and email is optional if you would like the confirmation or receipt sent there.`,
 	].join("\n");
 }
 
@@ -801,6 +977,7 @@ function finalReviewReply({ booking, quote, room, hotel, language }) {
 			`\u0627\u0644\u0625\u0642\u0627\u0645\u0629: ${booking.checkinISO} \u0625\u0644\u0649 ${booking.checkoutISO} (${nightsText(quote.nights, language)})`,
 			`\u0627\u0644\u0636\u064a\u0641: ${booking.fullName}`,
 			`\u0627\u0644\u062c\u0648\u0627\u0644: ${booking.phone}`,
+			`\u0627\u0644\u0628\u0631\u064a\u062f: ${booking.email || "\u063a\u064a\u0631 \u0645\u0636\u0627\u0641 (\u0627\u062e\u062a\u064a\u0627\u0631\u064a)"}`,
 			`\u0627\u0644\u062c\u0646\u0633\u064a\u0629: ${nationality}`,
 			`\u0627\u0644\u0636\u064a\u0648\u0641: ${booking.adults || 1} \u0628\u0627\u0644\u063a\u060c ${booking.children || 0} \u0623\u0637\u0641\u0627\u0644`,
 			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${total} ${currency}`,
@@ -814,6 +991,7 @@ function finalReviewReply({ booking, quote, room, hotel, language }) {
 		`Stay: ${booking.checkinISO} to ${booking.checkoutISO} (${nightsText(quote.nights, language)})`,
 		`Guest: ${booking.fullName}`,
 		`Phone: ${booking.phone}`,
+		`Email: ${booking.email || "Not added (optional)"}`,
 		`Nationality: ${nationality}`,
 		`Guests: ${booking.adults || 1} adults, ${booking.children || 0} children`,
 		`Total: ${total} ${currency}`,
@@ -863,6 +1041,17 @@ function reservationDetailsReply({ supportCase, language }) {
 		`[Reservation details](${links.details})`,
 		`[Payment link](${links.payment})`,
 	].join("\n");
+}
+
+function emailReceiptReply({ booking, language }) {
+	if (booking.email) {
+		return isArabicLanguage(language)
+			? `\u062a\u0645\u0627\u0645\u060c \u0633\u0623\u0636\u064a\u0641 ${booking.email} \u0644\u0644\u062d\u062c\u0632 \u0644\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0623\u0648 \u0627\u0644\u0625\u064a\u0635\u0627\u0644 \u0639\u0644\u064a\u0647.`
+			: `Yes, I can add ${booking.email} to the booking for the confirmation or receipt.`;
+	}
+	return isArabicLanguage(language)
+		? "\u0646\u0639\u0645\u060c \u064a\u0645\u0643\u0646 \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0628\u0631\u064a\u062f \u0644\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0623\u0648 \u0627\u0644\u0625\u064a\u0635\u0627\u0644. \u0623\u0631\u0633\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0648\u0633\u0623\u0636\u064a\u0641\u0647 \u0644\u0644\u062d\u062c\u0632."
+		: "Yes, an email can be added for the confirmation or receipt. Send the email address and I will include it with the booking.";
 }
 
 function createdReply({ reservation, language }) {
@@ -1145,6 +1334,14 @@ function unavailableReply({ hotel, booking, room, quote, language }) {
 }
 
 async function buildTurnResult({ supportCase, hotel, decision, latest }) {
+	const recoveredBooking = recoverFastBooking(supportCase, latest.message || {});
+	decision = normalizeDecision(
+		{
+			...decision,
+			booking: mergeRecoveredBooking(decision.booking || {}, recoveredBooking),
+		},
+		supportCase
+	);
 	const language = responseLanguage(supportCase, latest.message, decision);
 	const booking = { ...(decision.booking || {}) };
 	const directKind = decision.answerKind || detectDirectKind(latest.message.message || "");
@@ -1162,6 +1359,9 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	if (directKind === "bus") return { text: busReply({ hotel, language }), language };
 	if (directKind === "reservation_details" || directKind === "payment") {
 		if (created) return { text: reservationDetailsReply({ supportCase, language }), language };
+	}
+	if (directKind === "email_receipt" && (!booking.email || created || !room || !hasDates(booking))) {
+		return { text: emailReceiptReply({ booking, language }), language };
 	}
 	if (directKind === "room_options") return { text: roomOptionsReply({ hotel, language }), language };
 	if (directKind === "room_fit") return { text: roomFitReply({ hotel, room, language }), language };
@@ -1313,7 +1513,9 @@ async function planCase(io, caseOrId) {
 		io?.to(caseId).emit("typing", { caseId, name: agentName, isAi: true });
 		const latestFingerprint = messageFingerprint(latest.message);
 		const startedAt = Date.now();
-		const fastDecision = buildFastDecision({ supportCase, hotel, latest });
+		const fastDecision = shouldUseFastDecision()
+			? buildFastDecision({ supportCase, hotel, latest })
+			: null;
 		const decisionSource = fastDecision ? "fast" : "openai";
 		const decision =
 			fastDecision || (await analyzeConversation({ supportCase, hotel, latest }));

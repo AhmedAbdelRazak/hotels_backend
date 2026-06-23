@@ -65,9 +65,14 @@
   used.
 - **Model latency**:
   - Default heavy OpenAI model is `gpt-5.5`, but chatbot analysis/NLU uses the
-    fast model path. The current production trial pins chatbot analysis/NLU to
-    `gpt-5.4-mini` with `OPENAI_CHATBOT_REASONING_EFFORT=low` for lower
+    fast model family. The current production trial pins chatbot analysis/NLU
+    to `gpt-5.4-mini` with `OPENAI_CHATBOT_REASONING_EFFORT=low` for lower
     latency and cost.
+  - The rebuilt orchestrator is OpenAI-first by default: the model reviews the
+    saved transcript every guest turn, then backend guardrails recover obvious
+    structured slots and render pricing/final-review/reservation actions.
+    `AI_AGENT_FAST_PATH_ENABLED=true` is an emergency opt-in only; do not enable
+    it as normal production behavior without live latency/quality monitoring.
   - Keep model overrides chatbot-specific when possible
     (`OPENAI_CHATBOT_ANALYSIS_MODEL`, `OPENAI_CHATBOT_NLU_MODEL`) so OTA,
     writer, and heavier reasoning jobs are not accidentally downgraded.
@@ -102,8 +107,8 @@
   2. Room type/capacity if the guest asks about it first
   3. Check-in and check-out dates after the guest is ready for availability/price
   4. Review quote and ask the guest to confirm, with localized Confirm / Something is wrong quick replies when the public widget can render them
-  5. Ask once, in one message, for full name as in passport, phone, nationality, adults count, and children count
-  6. Move to the final create prompt once mandatory details are present. Optional email can still be captured if the guest sends it, but it should not create an automatic extra stop in the normal flow.
+  5. Ask once, in one message, for full name as in passport, phone, nationality, adults count, and children count. Mention email only as optional for confirmation/receipt.
+  6. Move to the final create prompt once mandatory details are present. Optional email can still be captured if the guest sends it, shown in the final review, and used for confirmation/receipt, but it should not create an automatic extra stop in the normal flow.
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
 - On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.

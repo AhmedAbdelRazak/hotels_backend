@@ -650,6 +650,12 @@ Future TODO Backlog - Added 2026-05-26
     aiagent/index.js.
   - The previous large aiagent/core/orchestrator.js remains only as legacy
     reference unless it is deliberately wired again.
+  - The rebuilt planner is OpenAI-first by default: every guest turn should be
+    reviewed from the saved support-case transcript, with deterministic code
+    limited to safety, slot recovery, pricing, final review, reservation writes,
+    duplicate/stale prevention, and timeout/fallback behavior. Do not re-enable
+    pre-model fast paths in production unless AI_AGENT_FAST_PATH_ENABLED=true is
+    intentionally set and monitored.
   - The current behavior contract, safety rules, nationality ISO storage, shorter
     reservation flow, and SSR dedupe rules are documented in:
     docs/chatbot-rebuilt-conversation-engine-2026-06-23.md
