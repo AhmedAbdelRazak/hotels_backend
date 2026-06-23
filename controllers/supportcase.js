@@ -1510,31 +1510,29 @@ exports.createNewSupportCase = async (req, res) => {
 			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 150 });
 		}
 
-		// 2) Generate the HTML from your email template
-		const emailHtml = newSupportCaseEmail(newCase, hotelName);
+		// Email is best-effort and must not hold the public chat open.
+		setImmediate(async () => {
+			try {
+				const emailHtml = newSupportCaseEmail(newCase, hotelName);
+				await sgMail.send({
+					from: "noreply@jannatbooking.com",
+					to: [
+						"morazzakhamouda@gmail.com",
+						"xhoteleg@gmail.com",
+						"ahmed.abdelrazak@jannatbooking.com",
+						"support@jannatbooking.com",
+					],
+					subject: `New Support Case | ${hotelName}`,
+					html: emailHtml,
+				});
+			} catch (emailError) {
+				console.error(
+					"Support case email notification failed:",
+					emailError?.message || emailError
+				);
+			}
+		});
 
-		// 3) Send email as a best-effort notification only. The chat case is
-		// already saved, so provider/network issues must not make clients retry.
-		try {
-			await sgMail.send({
-				from: "noreply@jannatbooking.com",
-				to: [
-					"morazzakhamouda@gmail.com",
-					"xhoteleg@gmail.com",
-					"ahmed.abdelrazak@jannatbooking.com",
-					"support@jannatbooking.com",
-				],
-				subject: `New Support Case | ${hotelName}`,
-				html: emailHtml,
-			});
-		} catch (emailError) {
-			console.error(
-				"Support case email notification failed:",
-				emailError?.message || emailError
-			);
-		}
-
-		// Finally, respond with the new case
 		return res.status(201).json(newCase);
 	} catch (error) {
 		console.error("Error creating support case:", error);

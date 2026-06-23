@@ -2367,6 +2367,25 @@ function looksLikeGreetingOnly(text = "") {
 	return latinGreeting || arabicGreeting || urduHindiGreeting;
 }
 
+function looksLikeFirstTurnGreetingSmalltalk(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	if (looksLikeGreetingOnly(raw)) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:hi|hello|hey|salaam|salam|assalamu\s+alaikum|assalamu\s+alaykum|assalamualaikum|good\s+morning|good\s+evening)\b/i.test(
+			lower
+		) ||
+		/\bhow\s*(?:are|r)\s*(?:you|u)\b/i.test(lower) ||
+		/(?:\u0643\u064a\u0641\s+\u062d\u0627\u0644\u0643|\u0627\u062e\u0628\u0627\u0631\u0643|\u0623\u062e\u0628\u0627\u0631\u0643|\u0643\u064a\u0641\u0643|\u0627\u0632\u064a\u0643|\u0625\u0632\u064a\u0643|\u0627\u0644\u0633\u0644\u0627\u0645|\u0645\u0631\u062d\u0628\u0627|\u0627\u0647\u0644\u0627|\u0623\u0647\u0644\u0627)/i.test(
+			arabic
+		) ||
+		/(?:hi|hello|hey|salam|salaam|assalamualaikum|assalamualaykum|howareyou|howru)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function islamicGreetingForLanguage(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
@@ -13083,7 +13102,7 @@ async function planTurn(io, sc) {
 								: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ initialInquiry }
 					  );
-				await humanSend(io, sc, st, greeting, { first: true });
+				await humanSend(io, sc, st, greeting, { first: true, fast: true });
 				st.waitFor = "clarify";
 				return;
 			}
@@ -13093,7 +13112,11 @@ async function planTurn(io, sc) {
 		if (!st.greeted && !st.greetScheduled) {
 			st.greetScheduled = true;
 			st.greeted = true;
-			if (looksLikeGreetingOnly(userText)) {
+			if (
+				looksLikeGreetingOnly(userText) ||
+				(looksLikeFirstTurnGreetingSmalltalk(userText) &&
+					!hasOperationalBookingSignal(userText))
+			) {
 				const greeting = st.hotel
 					? initialHotelGreetingText(sc, st)
 					: await write(
@@ -13103,7 +13126,7 @@ async function planTurn(io, sc) {
 							"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ latestUserMessage: userText }
 					  );
-				await humanSend(io, sc, st, greeting, { first: true });
+				await humanSend(io, sc, st, greeting, { first: true, fast: true });
 				st.waitFor = "clarify";
 				return;
 			}
