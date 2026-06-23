@@ -129,6 +129,10 @@ const AI_REPLY_TARGET_MAX_MS = Math.max(
 		max: 15000,
 	})
 );
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 3400, {
+	min: 500,
+	max: 8000,
+});
 const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 	min: 5000,
 	max: 5 * 60 * 1000,
@@ -9960,6 +9964,7 @@ async function shareKnownStayQuote(io, sc, st) {
 	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
 	const sent = await humanSend(io, sc, st, quoteReply, {
 		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
+		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
 	if (!sent) return false;
 	st.reviewSent = false;
@@ -15306,6 +15311,7 @@ async function planTurn(io, sc) {
 			quoteMsg = ensureHijriGregorianDatesVisible(quoteMsg, sc, st);
 			const sent = await humanSend(io, sc, st, quoteMsg, {
 				quickReplies: proceedQuickReplies(sc, st),
+				targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 			});
 			if (!sent) return;
 			st.quoteSummarizedAt = now();
