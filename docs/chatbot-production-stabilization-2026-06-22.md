@@ -362,3 +362,52 @@ Verification added for this case:
 - Keep UI sends optimistic and visible; never make guests feel their message
   disappeared while the backend is thinking.
 - Always check PM2 error-log timestamps before assuming old OOM lines are new.
+
+## Follow-up: Gom3a Arabic CSR Polish
+
+Issue seen in the `Gom3a khamiss` live test:
+
+- The chat was good overall, but not a true 9+ because the bot repeated the
+  guest name too often, addressed a clearly male guest as plain `Gom3a` instead
+  of `أستاذ Gom3a`, and one Arabic pause fallback used masculine assistant
+  wording (`أنا موجود`) even though the visible CSR name was Amira.
+- A date-only correction such as `وصول ٣ يوليو خروج ٤ يوليو` could be mistaken
+  for a hotel policy/check-in-policy question because Arabic arrival/departure
+  words also appear in policy detection.
+- One-night quote wording could drift into bad Arabic grammar such as
+  `١ ليالي`.
+- The recovery/silence path could append a second missing-details prompt shortly
+  after the normal confirmation path already replied.
+
+Tightening added:
+
+- Guest gender inference now recognizes tester-style names and variants such as
+  Gom3a/Gomaa, Farouk, Yakoot, Khamis, and the Marwa typo case. Arabic chats
+  should use `أستاذ {first name}` for confidently male guests and `أستاذة
+  {first name}` for confidently female guests; unknown gender should stay
+  neutral.
+- Writer guidance now says to use the respectful address naturally, but not at
+  the beginning of every reply. Use it for greetings, apologies, confirmations,
+  reservation reviews, or re-engagement after a pause.
+- Agent voice guidance now separates CSR gender from guest gender. Female CSR
+  names such as Amira must use feminine or neutral Arabic self-reference:
+  `أنا معك`, `أتابع معك`, or `أنا موجودة معك`; never masculine `أنا موجود`.
+- A final outgoing-text sanitizer also fixes the narrow Arabic slips `أنا موجود`
+  / `أنا متابع` for female CSR names and `١ ليالي` / `لمدة ١ ليالي`, so a model
+  wording drift cannot leak those obvious quality issues into the chat.
+- Policy detection now ignores messages that contain a complete stay date range,
+  so arrival/departure dates continue through the booking/quote flow instead of
+  jumping to terms and conditions.
+- Quote writer guidance now pins Arabic one-night grammar to `ليلة واحدة`.
+- Responsive silence recovery now also checks by transcript order that the
+  latest guest turn has no assistant reply after it before sending a follow-up.
+
+Future checks for this class of issue:
+
+- Run `node --check aiagent/core/orchestrator.js`.
+- Search outgoing Arabic fallback text for masculine assistant self-reference
+  when the visible agent pool is female.
+- Replay the shape of the Gom3a chat mentally: room-price question, guest count,
+  date correction, distance side question, review confirmation, missing detail
+  prompt, guest pause. It should not repeat the same question, duplicate a
+  prompt, misclassify date text as policy, or overuse the guest name.

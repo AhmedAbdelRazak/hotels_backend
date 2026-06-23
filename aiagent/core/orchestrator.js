@@ -1089,6 +1089,7 @@ function firstNameForAddress(value = "") {
 
 const GUEST_FEMALE_NAMES_LATIN = new Set([
 	"marwa",
+	"marwat",
 	"aisha",
 	"aysha",
 	"ayesha",
@@ -1154,9 +1155,20 @@ const GUEST_MALE_NAMES_LATIN = new Set([
 	"ehab",
 	"shady",
 	"gamal",
+	"goma",
+	"gomaa",
+	"gomaah",
+	"farouk",
+	"farouq",
+	"yakoot",
+	"yakout",
+	"amr",
+	"khamis",
+	"khamiss",
 ]);
 const GUEST_FEMALE_NAMES_ARABIC = new Set([
 	"\u0645\u0631\u0648\u0629",
+	"\u0645\u0631\u0648\u0629\u062a",
 	"\u0639\u0627\u0626\u0634\u0629",
 	"\u0639\u0627\u064a\u0634\u0629",
 	"\u0645\u0646\u0649",
@@ -1213,6 +1225,11 @@ const GUEST_MALE_NAMES_ARABIC = new Set([
 	"\u0627\u064a\u0647\u0627\u0628",
 	"\u0634\u0627\u062f\u064a",
 	"\u062c\u0645\u0627\u0644",
+	"\u062c\u0645\u0639\u0629",
+	"\u062c\u0645\u0639\u0647",
+	"\u0641\u0627\u0631\u0648\u0642",
+	"\u064a\u0627\u0642\u0648\u062a",
+	"\u062e\u0645\u064a\u0633",
 ]);
 
 function compactArabicName(value = "") {
@@ -1535,7 +1552,7 @@ function activeBookingContinuationText(
 			}. أرسل تاريخ الوصول والمغادرة عندما تحب، وسأراجع لك التوفر والسعر.`;
 		}
 		if (waitState === "room") {
-			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تكون جاهزا، وسأرشح لك الأنسب مباشرة.`;
+			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تحب، وسأرشح لك الأنسب مباشرة.`;
 		}
 		if (["reservation_details", "fullname", "nationality", "phone"].includes(waitState)) {
 			const rows = reservationDetailPromptRows(sc, st, { retry: true });
@@ -1550,7 +1567,7 @@ function activeBookingContinuationText(
 		if (waitState === "proceed" || waitState === "reviewConfirm") {
 			return `${prefix}${contact}العرض معي وجاهز. عندما تحب نكمل، أخبرني وسأتابع خطوة بخطوة بدون استعجال.`;
 		}
-		return `${prefix}${contact}أنا متابع معك. أرسل التفصيلة التالية عندما تكون جاهزا وسأكمل معك بدون استعجال.`;
+		return `${prefix}${contact}أنا معك وأتابع المحادثة. أرسل التفصيلة التالية عندما تحب وسأكمل معك بدون استعجال.`;
 	}
 	const prefix = omitName
 		? ""
@@ -2577,6 +2594,8 @@ function selectedHotelPolicyQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
 	if (cancellationRefundPolicyQuestionText(text)) return true;
+	const stayDates = extractDateRange(text);
+	if (stayDates?.checkinISO && stayDates?.checkoutISO) return false;
 	return (
 		/\b(?:policy|policies|terms|conditions|rules|house rules|check[\s-]?in|check[\s-]?out|checkout|early check|late check|children|child|extra bed|breakfast|meal|deposit|no[\s-]?show|passport|id card|identification|smoking|pet|damage)\b/i.test(
 			lower
@@ -6371,6 +6390,26 @@ function emitTyping(io, caseId, st, on = true) {
 	});
 }
 
+function sanitizeAssistantVoiceText(text = "", sc = {}, st = {}) {
+	let out = String(text || "");
+	if (!out) return out;
+	const agentName = String(st?.agentName || sc?.aiResponderName || "")
+		.trim()
+		.toLowerCase();
+	const femaleAgentNames = new Set(["hana", "aisha", "sara", "amira", "yasmin", "nadia"]);
+	const femaleAgent = !agentName || femaleAgentNames.has(agentName);
+	if (femaleAgent) {
+		out = out
+			.replace(/(?:أنا|انا)\s+موجود\s+معك/g, "أنا موجودة معك")
+			.replace(/(?:أنا|انا)\s+موجود(?!ة)/g, "أنا موجودة")
+			.replace(/(?:أنا|انا)\s+متابع\s+معك/g, "أنا أتابع معك")
+			.replace(/(?:أنا|انا)\s+متابع(?!ة)\s+المحادثة/g, "أنا أتابع المحادثة");
+	}
+	return out
+		.replace(/لمدة\s*[١۱1]\s+ليال[يى]/g, "لمدة ليلة واحدة")
+		.replace(/[١۱1]\s+ليال[يى]/g, "ليلة واحدة");
+}
+
 /* --------- humanSend with pre‑emption (cancellable) --------- */
 async function humanSend(
 	io,
@@ -6379,6 +6418,7 @@ async function humanSend(
 	text,
 	{ first = false, quickReplies = [], scheduleIdle = true } = {}
 ) {
+	text = sanitizeAssistantVoiceText(text, sc, st);
 	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
 	const expectedTurnUserText = st.activeTurnUserText || "";
@@ -7749,7 +7789,7 @@ function bookingPauseReplyText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، ولا يهمك. أنا موجود معك وقت ما تحب ترجع، وأكمل معك بهدوء بدون أي استعجال.`;
+		return `${name}، ولا يهمك. أنا معك وقت ما تحب ترجع، وأكمل معك بهدوء بدون أي استعجال.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, claro, no hay prisa. Estare aqui cuando quieras volver y seguimos con calma.`;
@@ -7805,7 +7845,7 @@ function conversationRecoveryFallbackText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، حقك عليّ. أنا معك ومتابع المحادثة، ولن أستعجلك. أرسل لي النقطة التالية عندما تكون جاهزا وسأكمل معك بوضوح.`;
+		return `${name}، حقك عليّ. أنا معك وأتابع المحادثة، ولن أستعجلك. أرسل لي النقطة التالية عندما تحب وسأكمل معك بوضوح.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, tienes razon, disculpa. Estoy contigo y sigo el contexto; no quiero apresurarte. Enviame el siguiente detalle cuando estes listo y continuo con claridad.`;
@@ -8821,13 +8861,15 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
 		`If the guest complains about repetition, speed, or not being answered, apologize briefly, correct course, and avoid defending yourself.`,
-		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
+		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}. Use it in greetings, apologies, confirmations, reservation reviews, or after a few turns without addressing the guest; do not start every reply with the guest's name/address.`,
 		`This is a respectful Umrah/hospitality platform. Keep the service tone modest, patient, and supportive for Muslim guests and families without lecturing or using casual profanity.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, Spanish, Indonesian, and Malaysian guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
 		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
-		`Guest address guidance: inferred guest gender is "${guestProfile.gender}" from the available name/title, and the recommended address is "${respectfulAddress}". Use gendered honorifics only when confident; otherwise use the guest's name or a neutral respectful address.`,
+		`Agent voice and grammar: ${st.agentName} is a female reception/CSR agent. In Arabic, when referring to yourself, use feminine or neutral wording such as "أنا معك", "أتابع معك", or "أنا موجودة معك"; never say "أنا موجود" for the assistant. In other gendered languages, keep the assistant's self-reference feminine when needed. Keep guest titles separate from agent gender.`,
+		`Guest address guidance: inferred guest gender is "${guestProfile.gender}" from the available name/title, and the recommended address is "${respectfulAddress}". Use gendered honorifics only when confident; otherwise use the guest's name or a neutral respectful address. Do not repeat the same address at the beginning of consecutive replies unless apologizing, confirming an important step, or re-engaging after a pause.`,
 		`For Arabic conversations, use "\u0623\u0633\u062a\u0627\u0630\u0629 {first name}" for a confidently female guest and "\u0623\u0633\u062a\u0627\u0630 {first name}" for a confidently male guest. If gender is unknown, avoid a gendered Arabic title and use the name or "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645". Never call a female guest "\u0623\u0633\u062a\u0627\u0630".`,
+		`For Arabic one-night stays, say "\u0644\u064a\u0644\u0629 \u0648\u0627\u062d\u062f\u0629"; never write "\u0661 \u0644\u064a\u0627\u0644\u064a" or "\u0644\u0645\u062f\u0629 \u0661 \u0644\u064a\u0627\u0644\u064a".`,
 		`For Spanish, French, Hindi, Urdu, Indonesian, Malay, and other languages, use gendered forms only when the guest's gender is clear from name/title or context; otherwise stay polite and neutral.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
@@ -9157,7 +9199,7 @@ async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
 			io,
 			sc,
 			st,
-			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue to the review step. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
+			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue to the review step. For Arabic, use correct night grammar: one night is ليلة واحدة, never ١ ليالي. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
 			{
 				quote,
 				roomFacts: {
@@ -12098,6 +12140,13 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 			);
 		});
 		if (latestAiAfterGuest) return false;
+		const latestGuestIndex = latestGuestMessageIndex(latestCase);
+		if (
+			latestGuestIndex >= 0 &&
+			conversation.slice(latestGuestIndex + 1).some(isAiConversationMessage)
+		) {
+			return false;
+		}
 		const waitFor = st.waitFor || nextPivot(st);
 		const prompt = await write(
 			io,
