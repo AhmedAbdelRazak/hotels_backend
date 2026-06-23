@@ -165,6 +165,9 @@ Current contract:
   the delay briefly and continue the booking step from recovered state;
 - when the latest text contains a room capacity such as "room for 3 persons",
   room-fit rendering wins over a generic room-options answer.
+- greeting-only or smalltalk-only openings must receive a warm reception
+  greeting and one open-ended help question. They must not immediately ask for
+  check-in dates, room type, phone, nationality, or booking details.
 
 `controllers/supportcase.js` also treats public `clientTag` values as
 idempotency keys. If a browser retries the same guest message, the backend
@@ -207,3 +210,15 @@ Before deployment:
   `/admin/customer-service?tab=active-client-cases&caseId=...`
 
 Do not create a new admin monitoring route for this behavior.
+
+## SSR Rating Close Flow
+
+`jannatbooking_ssr/components/SupportWidget.js` now treats `ratingVisible` as a
+full chat-window state. After the guest ends/closes the support case, the
+message transcript and composer are hidden and the rating view occupies the
+chat body until the guest submits or skips feedback.
+
+Keep this behavior aligned with the old `jannatbooking_frontend` flow, but keep
+the SSR visual styling in the SSR component. The rating screen should remain
+localized, compact on mobile, and should not remount the reply composer while a
+case is awaiting feedback.

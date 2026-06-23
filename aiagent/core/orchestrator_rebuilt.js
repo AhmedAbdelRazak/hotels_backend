@@ -421,6 +421,7 @@ async function analyzeConversation({ supportCase, hotel, latest }) {
 		"For unknown safe questions, say professionally that the detail is not currently confirmed, then ask one relevant hotel/reservation follow-up. Do not escalate and do not deflect to links.",
 		"For policy wording, sound like hotel reception. Do not say you checked a document, database, record, admin panel, or hotel details.",
 		"Use the latest guest language naturally, including dialect or mixed language. Keep the voice warm, capable, and concise, like hotel reception, not robotic.",
+		"When the latest guest line is only a greeting, opening, or smalltalk, reply with a warm reception greeting and one open-ended help question. Do not ask for dates, room type, phone, nationality, or booking details until the guest asks for booking help or provides booking details.",
 		"Use the guest name or respectful address sparingly, not every message. In Egyptian Arabic, use respectful address such as Ostaz/Ustaza only when it feels natural and gender is clear.",
 		"Return ONLY valid JSON with this shape:",
 		JSON.stringify({
