@@ -2845,6 +2845,24 @@ function hasConcreteFirstTurnBookingSignal(text = "") {
 
 function wantsPaymentHelp(text = "") {
 	const raw = String(text || "");
+	const { lower, latinCompact } = normalizeControlText(raw);
+	const locationOrMapLink =
+		selectedHotelCoordinatesQuestionText(raw) ||
+		selectedHotelAddressQuestionText(raw) ||
+		/\b(?:google\s*maps?|maps?|map|coordinates?|coords?|gps|pin|directions?|location|address)\b/i.test(
+			lower
+		) ||
+		/(?:googlemaps|googlemap|maps|map|coordinates|coords|gps|pin|directions|location|address)/i.test(
+			latinCompact
+		);
+	const actualPaymentWords =
+		/\b(?:payment|pay|paid|card|credit\s*card|debit\s*card|mada|checkout|invoice|receipt|deposit|charge|charged|refund|bank\s*transfer|pago|pagar|paiement|payer|pembayaran|bayar|bayaran|kad|invois)\b/i.test(
+			lower
+		) ||
+		/(?:payment|pay|paid|card|creditcard|debitcard|mada|checkout|invoice|receipt|deposit|charge|charged|refund|banktransfer|pago|pagar|paiement|payer|pembayaran|bayar|bayaran|kad|invois|adaigi)/i.test(
+			latinCompact
+		);
+	if (locationOrMapLink && !actualPaymentWords) return false;
 	if (hasSemanticSignal(raw, "payment")) return true;
 	if (/\b(pembayaran|bayar|pautan|invois|invoice)\b/i.test(raw)) return true;
 	return /payment|pay|card|link|declined|not going through|failed|دفع|بطاقة|رابط|pago|paiement|ادائیگی/i.test(
