@@ -2641,6 +2641,19 @@ function selectedHotelDistanceQuestionText(text = "") {
 function selectedHotelAddressQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
+	if (
+		/\b(?:google\s*maps?|maps?|coordinates?|coords?|gps|pin|directions?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u0625\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u062e\u0631\u0627\u064a\u0637|\u062f\u0628\u0648\u0633|\u0628\u0646)/i.test(
+			arabic
+		) ||
+		/(?:googlemaps|googlemap|maps|map|coordinates|coords|gps|pin|directions)/i.test(
+			latinCompact
+		)
+	) {
+		return true;
+	}
 	const asksLocation =
 		hasSemanticSignal(text, "location") ||
 		/\b(?:where\s+is|where's|located|location|address|area|district|map|ubicacion|ubicaci[oó]n|direccion|direcci[oó]n|adresse|emplacement|alamat|lokasi|peta)\b/i.test(
@@ -2751,8 +2764,25 @@ function selectedHotelFactQuestionText(text = "") {
 		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
+		selectedHotelCoordinatesQuestionText(text) ||
 		selectedHotelAddressQuestionText(text) ||
 		selectedHotelLocalAreaQuestionText(text)
+	);
+}
+
+function selectedHotelCoordinatesQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	return (
+		/\b(?:coordinates?|coords?|gps|pin|exact\s+(?:map|location)|google\s*maps?\s+link)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u0625\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u062f\u0628\u0648\u0633|\u0628\u0646|\u0645\u0648\u0642\u0639\s+\u062f\u0642\u064a\u0642)/i.test(
+			arabic
+		) ||
+		/(?:coordinates|coords|gps|pin|exactmap|exactlocation|googlemapslink)/i.test(
+			latinCompact
+		)
 	);
 }
 
@@ -5934,6 +5964,7 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const asksAddress = selectedHotelAddressQuestionText(userText);
 	const asksPolicy = selectedHotelPolicyQuestionText(userText);
 	const asksLocalArea = selectedHotelLocalAreaQuestionText(userText);
+	const asksCoordinates = selectedHotelCoordinatesQuestionText(userText);
 	const isNusuk = hotel.isNusuk === true;
 	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const hasBusService = hotel.hasBusService === true;
@@ -5941,6 +5972,17 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	if (asksPolicy) {
 		const answer = hotelPolicyAnswerText(sc, st, userText);
 		if (answer) return answer;
+	}
+	if (asksCoordinates && mapLine) {
+		if (/arabic/i.test(lang)) {
+			return `${name}\u060c \u0646\u0639\u0645\u060c \u0631\u0627\u0628\u0637 Google Maps \u064a\u0633\u062a\u062e\u062f\u0645 \u0625\u062d\u062f\u0627\u062b\u064a\u0627\u062a ${hotelName} \u0627\u0644\u0645\u062d\u0641\u0648\u0638\u0629 \u0644\u062f\u064a\u0646\u0627. ${mapLine} ${next}`;
+		}
+		if (/spanish/i.test(lang)) return `${name}, si, el enlace de Google Maps usa las coordenadas guardadas de ${hotelName}. ${mapLine} ${next}`;
+		if (/french/i.test(lang)) return `${name}, oui, le lien Google Maps utilise les coordonnees enregistrees de ${hotelName}. ${mapLine} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return `${name}, ji haan, Google Maps link ${hotelName} ki saved coordinates use karta hai. ${mapLine} ${next}`;
+		if (/indonesian/i.test(lang)) return `${name}, ya, tautan Google Maps memakai koordinat tersimpan untuk ${hotelName}. ${mapLine} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return `${name}, ya, pautan Google Maps menggunakan koordinat tersimpan untuk ${hotelName}. ${mapLine} ${next}`;
+		return `${name}, yes, the Google Maps link uses the saved coordinates for ${hotelName}. ${mapLine} ${next}`;
 	}
 	if (asksNusuk) {
 		return isNusuk
