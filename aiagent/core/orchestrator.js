@@ -1072,7 +1072,7 @@ function languageSwitchAcknowledgementText(sc = {}, st = {}) {
 
 function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	const raw = String(text || "").trim();
-	if (!raw || raw.length > 140 || hasOperationalBookingSignal(raw)) return "";
+	if (!raw || raw.length > 140) return "";
 	const lower = raw.toLowerCase();
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st);
@@ -1086,6 +1086,7 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	if (asksHowAreYou) {
 		return `${name}, I am doing well, thank you for asking. How can I help you with ${hotelName} today?`;
 	}
+	if (hasOperationalBookingSignal(raw)) return "";
 	if (looksLikeGreetingOnly(raw)) {
 		return `${name}, assalamu alaikum. How can I help you with ${hotelName} today?`;
 	}
