@@ -1664,7 +1664,7 @@ async function nluStep({ sc, hotel, lastUserMessage }) {
 		Boolean(quickRoomTypeKey) ||
 		Boolean(quickDates.checkinISO && quickDates.checkoutISO) ||
 		Boolean(quickAmenity) ||
-		/\b(reservation|booking|confirmation|reference|price|rate|availability|available|room|stay|check[\s-]?in|check[\s-]?out)\b/i.test(
+		/\b(reservation|booking|confirmation|reference|price|rate|availability|available|room|stay|check[\s-]?in\b|check[\s-]?out\b)\b/i.test(
 			text
 		);
 
