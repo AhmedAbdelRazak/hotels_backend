@@ -2543,7 +2543,7 @@ function selectedHotelDistanceQuestionText(text = "") {
 	if (!lower.trim()) return false;
 	const asksDistance =
 		hasSemanticSignal(text, "distance") ||
-		/\b(?:how\s+far|far\s+from|distance|distancia|lejos|cerca|near|close|walking|walk|a\s+pie|caminando|drive|driving|en\s+voiture|a\s+pied|minutes?|mins?|berapa\s+jauh|jarak|dekat|jalan\s+kaki|menit|minit)\b/i.test(
+		/\b(?:how\s+far|far\s+from|distance|distancia|lejos|cerca|near|close|walking|walk|a\s+pie|caminando|car|traffic|drive|driving|en\s+voiture|a\s+pied|minutes?|mins?|berapa\s+jauh|jarak|dekat|jalan\s+kaki|menit|minit)\b/i.test(
 			lower
 		) ||
 		/(?:\u0643\u0645\s+\u064a\u0628\u0639\u062f|\u064a\u0628\u0639\u062f|\u0628\u0639\u064a\u062f|\u0642\u0631\u064a\u0628|\u0627\u0644\u0645\u0633\u0627\u0641\u0647|\u0645\u0633\u0627\u0641\u0647|\u062f\u0642\u064a\u0642\u0647|\u062f\u0642\u0627\u064a\u0642|\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u0633\u064a\u0627\u0631\u0647|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0647|\u06a9\u062a\u0646\u0627\s+\u062f\u0648\u0631|\u06a9\u06cc\u062a\u0646\u0627\s+\u062f\u0648\u0631|\u0641\u0627\u0635\u0644\u06c1|\u0645\u0646\u0679)/i.test(
@@ -2554,7 +2554,7 @@ function selectedHotelDistanceQuestionText(text = "") {
 		);
 	if (!asksDistance) return false;
 	const mentionsHaramOrHotel =
-		/\b(?:haram|al\s*haram|el\s*haram|masjid|kaaba|kabah|kaba|hotel|your\s+hotel|the\s+hotel)\b/i.test(
+		/\b(?:haram|al\s*haram|el\s*haram|masjid|kaaba|kabah|kaba|hotel|your\s+hotel|the\s+hotel|it|there)\b/i.test(
 			lower
 		) ||
 		/(?:\u0627\u0644\u062d\u0631\u0645|\u0627\u0644\u0645\u0633\u062c\u062f\s+\u0627\u0644\u062d\u0631\u0627\u0645|\u0627\u0644\u0643\u0639\u0628\u0647|\u0627\u0644\u0643\u0639\u0628\u0629|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642)/i.test(
