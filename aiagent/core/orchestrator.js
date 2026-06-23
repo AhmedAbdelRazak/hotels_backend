@@ -9904,46 +9904,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
 	const fallback = simpleQuoteText({ sc, st, quote });
 	if (!quote?.available) return fallback;
-	const dates = localizedStayDateLines(sc, st);
-	const total = quote.totals?.totalPriceWithCommission;
-	const perNight =
-		quote.nights && total
-			? Math.round((total / Math.max(1, quote.nights)) * 100) / 100
-			: null;
-	const room = quote.room || {};
-	const reply = await withSoftTimeout(
-		write(
-			io,
-			sc,
-			st,
-			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue with the reservation details. For Arabic, use correct night grammar: one night is ليلة واحدة, never ١ ليالي. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
-			{
-				quote,
-				roomFacts: {
-					roomType: room.roomType || "",
-					displayName: localizedRoomName(sc, st, quote),
-					baseDisplayName: room.displayName || "",
-				},
-				hotelName: localizedHotelName(sc, st),
-				priceFacts: {
-					total,
-					perNight,
-					nights: quote.nights,
-					currency: quote.currency,
-				},
-				dateFacts: dates,
-				requestedGuests: {
-					adults: st.slots?.adults,
-					children: st.slots?.children,
-					adultsProvided: st.slots?.adultsProvided,
-					childrenProvided: st.slots?.childrenProvided,
-				},
-			}
-		),
-		QUOTE_WRITE_SOFT_TIMEOUT_MS,
-		fallback
-	);
-	return reply || fallback;
+	return currentQuoteSummaryText(sc, st, quote) || fallback;
 }
 
 async function sendUnavailableRoomRecovery(io, sc, st, quote = {}) {
@@ -9994,6 +9955,7 @@ async function shareKnownStayQuote(io, sc, st) {
 		return sendUnavailableRoomRecovery(io, sc, st, quote);
 	}
 	clearPendingRoomAlternative(st);
+	st.waitFor = "proceed";
 	let quoteReply = await composeAvailabilityQuoteText(io, sc, st, quote);
 	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
 	const sent = await humanSend(io, sc, st, quoteReply, {
@@ -10001,7 +9963,6 @@ async function shareKnownStayQuote(io, sc, st) {
 	});
 	if (!sent) return false;
 	st.reviewSent = false;
-	st.waitFor = quote?.available ? "proceed" : "room";
 	return true;
 }
 
@@ -10855,7 +10816,7 @@ async function handleProceedStageInput(
 	if (acceptedProceed || quoteConfirmationText(userText, st)) {
 		resumeBookingNudge(st);
 		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""), {
-			fast: acceptedProceed,
+			fast: true,
 		});
 	}
 	if (
