@@ -5619,6 +5619,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	}
 	const sent = await humanSend(io, sc, st, reply, {
 		scheduleIdle: policyRow ? false : true,
+		fast: true,
 	});
 	if (!sent) return false;
 	st.waitFor = previousWaitFor || nextPivot(st);
