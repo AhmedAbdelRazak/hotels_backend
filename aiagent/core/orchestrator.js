@@ -213,6 +213,10 @@ const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	15 * 1000,
 	{ min: 10 * 1000, max: 2 * 60 * 1000 }
 );
+const AI_TURN_LOCK_RETRY_MS = intFromEnv("AI_TURN_LOCK_RETRY_MS", 350, {
+	min: 100,
+	max: 3000,
+});
 const AI_TURN_SLOW_LOG_MS = intFromEnv("AI_TURN_SLOW_LOG_MS", 5000, {
 	min: 1000,
 	max: 60 * 1000,
@@ -13510,6 +13514,7 @@ async function planTurn(io, sc) {
 			}
 		} else {
 			markPendingPlanRequest(caseId, "active_plan_lock");
+			schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 			logStep(caseId, "turn.enqueue", {
 				reason: "active_plan_lock",
 			});
@@ -13565,6 +13570,7 @@ async function planTurn(io, sc) {
 				queued: st.queue.length + 1,
 			});
 			markPendingPlanRequest(caseId, "state_in_flight");
+			schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 			return;
 		}
 		st.turnInFlight = true;
