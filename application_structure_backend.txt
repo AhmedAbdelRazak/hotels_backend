@@ -646,21 +646,13 @@ Future TODO Backlog - Added 2026-05-26
     - Any discrepancy is traced to either filter state, room-map state, reservation status, or backend aggregation logic before changing display code.
 
 - CURRENT CHATBOT NOTE - 2026-06-23:
-  - The active chatbot planner is aiagent/core/orchestrator_rebuilt.js, wired by
-    aiagent/index.js.
-  - The previous large aiagent/core/orchestrator.js remains only as legacy
-    reference unless it is deliberately wired again.
-  - The rebuilt planner is OpenAI-first by default: every guest turn should be
-    reviewed from the saved support-case transcript, with deterministic code
-    limited to safety, slot recovery, pricing, final review, reservation writes,
-    duplicate/stale prevention, and timeout/fallback behavior. Do not re-enable
-    pre-model fast paths in production unless AI_AGENT_FAST_PATH_ENABLED=true is
-    intentionally set and monitored.
-  - The current behavior contract, safety rules, nationality ISO storage, shorter
-    reservation flow, and SSR dedupe rules are documented in:
-    docs/chatbot-rebuilt-conversation-engine-2026-06-23.md
-  - Older chatbot notes below are historical context. Do not use them as the
-    active implementation contract when changing the current chatbot.
+  - The active chatbot planner was restored to the June 20 legacy engine:
+    aiagent/core/orchestrator.js, wired by aiagent/index.js.
+  - Public support-case creation still schedules AI turns through
+    controllers/supportcase.js so the SSR support widget can open a case and get
+    an answer from the legacy planner.
+  - The June 23 experimental planner and its documentation were removed from
+    the active codebase at the owner's request.
 
 - TODO 2: Historical chatbot / AI agent restructure notes
   - Existing backend AI references:

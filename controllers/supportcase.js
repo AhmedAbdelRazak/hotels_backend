@@ -9,7 +9,7 @@ const {
 	DEFAULT_JANNAT_SUPPORT_HOTEL_ID,
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
-const { schedulePlanTurn } = require("../aiagent/core/orchestrator_rebuilt");
+const { schedulePlanTurn } = require("../aiagent/core/orchestrator");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 

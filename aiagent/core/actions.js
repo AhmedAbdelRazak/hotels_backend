@@ -11,7 +11,6 @@ const {
 const { updateSupportCaseAppend } = require("./db");
 const { asciiize, digitsToEnglish } = require("./nlu");
 const { priceRoomForStay } = require("./selectors");
-const { normalizeCountryCode } = require("./countryCodes");
 const {
 	markReservationPendingConfirmation,
 } = require("../../services/pendingConfirmationPolicy");
@@ -50,48 +49,12 @@ function cleanText(value = "", max = 120) {
 		.slice(0, max);
 }
 
-function compactArabic(value = "") {
-	return String(value || "")
-		.replace(/[\u064b-\u065f\u0670]/g, "")
-		.replace(/\u0640/g, "")
-		.replace(/\s+/g, "")
-		.trim();
-}
-
-function rejectedAiGuestName(value = "") {
-	const name = cleanText(value, 120);
-	const lower = name.toLowerCase();
-	const compact = compactArabic(name);
-	if (
-		/\b(?:please|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent|reservation|booking|confirmation|nationality|country)\b/i.test(
-			lower
-		)
-	) {
-		return true;
-	}
-	if (
-		/(?:\u0645\u0645\u0643\u0646|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645|\u062d\u062c\u0632|\u062c\u0646\u0633\u064a|\u0627\u0644\u062c\u0646\u0633\u064a\u0629)/i.test(
-			name
-		)
-	) {
-		return true;
-	}
-	return [
-		"\u0628\u0648\u0631\u0643\u064a\u0646\u0627\u0641\u0627\u0633\u0648",
-		"\u0627\u0631\u062f\u0646\u064a",
-		"\u0627\u0631\u062f\u0646\u0649",
-		"\u0623\u0631\u062f\u0646\u064a",
-		"\u0623\u0631\u062f\u0646\u0649",
-	].includes(compact);
-}
-
 function usableFullName(value = "") {
 	const name = cleanText(value, 120);
 	if (!name || name.length < 4) return "";
 	if (onlyDigits(name) || /^(?:guest|unknown|test|n\/a|na|null|none)$/i.test(name)) {
 		return "";
 	}
-	if (rejectedAiGuestName(name)) return "";
 	if (
 		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
 			name
@@ -115,25 +78,13 @@ function normalizedGuestCount(value, fallback = null) {
 function validateRequiredGuestDetails(slots = {}) {
 	const name = usableFullName(slots.fullName || slots.name || "");
 	const phone = onlyDigits(slots.phone || "");
-	const nationality = cleanText(
-		slots.nationalityCode ||
-			slots.nationalityCountryCode ||
-			slots.countryCode ||
-			slots.nationality ||
-			slots.country ||
-			"",
-		80
-	);
-	const nationalityCode = normalizeCountryCode(
-		nationality,
-		slots.nationality || slots.country || slots.nationalityName || ""
-	);
+	const nationality = cleanText(slots.nationality || "", 80);
 	const adults = normalizedGuestCount(slots.adults, null);
 	const children = normalizedGuestCount(slots.children, null);
 	const missing = [];
 	if (!name) missing.push("full name");
 	if (!phone || phone.length < 5) missing.push("phone");
-	if (!nationalityCode) missing.push("nationality");
+	if (!nationality) missing.push("nationality");
 	if (!Number.isFinite(adults) || adults < 1) missing.push("adults count");
 	if (!Number.isFinite(children) || children < 0) missing.push("children count");
 	if (missing.length) {
@@ -143,7 +94,7 @@ function validateRequiredGuestDetails(slots = {}) {
 		name,
 		phone,
 		email: asciiize(slots.email || "").trim().toLowerCase(),
-		nationality: nationalityCode,
+		nationality: asciiize(nationality).trim() || nationality,
 		adults,
 		children,
 		rooms: Math.max(1, normalizedGuestCount(slots.rooms, 1)),
@@ -338,32 +289,6 @@ function reservationConfirmationAge(reservation = {}, now = new Date()) {
 	};
 }
 
-function reservationDaysBeforeCheckin(reservation = {}, now = new Date()) {
-	const checkinISO = dateOnlyISO(reservation.checkin_date);
-	const today = dateOnlyISO(now);
-	if (!checkinISO || !today) return { checkinISO, daysBeforeCheckin: null };
-	const checkinMs = Date.parse(`${checkinISO}T00:00:00.000Z`);
-	const todayMs = Date.parse(`${today}T00:00:00.000Z`);
-	if (!Number.isFinite(checkinMs) || !Number.isFinite(todayMs)) {
-		return { checkinISO, daysBeforeCheckin: null };
-	}
-	return {
-		checkinISO,
-		daysBeforeCheckin: Math.ceil((checkinMs - todayMs) / DAY_MS),
-	};
-}
-
-function reservationOneNightAmount(reservation = {}) {
-	const total = Number(reservation.total_amount || 0);
-	if (!Number.isFinite(total) || total <= 0) return null;
-	const nights = nightsBetweenISO(
-		dateOnlyISO(reservation.checkin_date),
-		dateOnlyISO(reservation.checkout_date)
-	);
-	if (!Number.isFinite(nights) || nights <= 0) return null;
-	return Number((total / nights).toFixed(2));
-}
-
 function reservationCancellationTerminalStatus(reservation = {}) {
 	const status = reservationLifecycleStatus(reservation);
 	if (/\b(cancelled|canceled)\b/.test(status)) return "already_cancelled";
@@ -408,56 +333,31 @@ async function getReservationCancellationPolicyForCase({
 
 	const thresholdDays = 14;
 	const confirmationAge = reservationConfirmationAge(reservation, now);
-	const checkinTiming = reservationDaysBeforeCheckin(reservation, now);
+	if (
+		confirmationAge.looksConfirmed &&
+		Number.isFinite(confirmationAge.ageDays) &&
+		confirmationAge.ageDays >= thresholdDays
+	) {
+		return {
+			ok: false,
+			code: "confirmed_too_old",
+			reservation,
+			thresholdDays,
+			...confirmationAge,
+		};
+	}
+
 	const financeLocked =
 		String(reservation.financial_cycle?.status || "").toLowerCase() === "closed" ||
 		String(reservation.commissionAgentApproval?.status || "").toLowerCase() ===
 			"approved";
-	const base = {
+	return {
+		ok: true,
+		code: financeLocked ? "finance_review_required" : "specialist_required",
 		reservation,
 		thresholdDays,
 		financeLocked,
-		oneNightAmount: reservationOneNightAmount(reservation),
 		...confirmationAge,
-		...checkinTiming,
-	};
-
-	if (!Number.isFinite(checkinTiming.daysBeforeCheckin)) {
-		return {
-			ok: true,
-			code: "missing_checkin_date",
-			eligibleForCancellation: false,
-			refundPolicy: "needs_review",
-			...base,
-		};
-	}
-
-	if (checkinTiming.daysBeforeCheckin >= thresholdDays) {
-		return {
-			ok: true,
-			code: "full_refund",
-			eligibleForCancellation: true,
-			refundPolicy: "full_refund",
-			...base,
-		};
-	}
-
-	if (checkinTiming.daysBeforeCheckin > 3) {
-		return {
-			ok: true,
-			code: "one_night_fee",
-			eligibleForCancellation: true,
-			refundPolicy: "one_night_fee",
-			...base,
-		};
-	}
-
-	return {
-		ok: true,
-		code: "non_refundable",
-		eligibleForCancellation: false,
-		refundPolicy: "non_refundable",
-		...base,
 	};
 }
 
@@ -1348,7 +1248,6 @@ async function dispatchAiReservationConfirmation({
 		includeOwnerEmail,
 		includeGuestWhatsApp,
 		includeAdminWhatsApp,
-		includePdf: false,
 	});
 	await markAiConfirmationDelivery(caseKey, result, {
 		mode,

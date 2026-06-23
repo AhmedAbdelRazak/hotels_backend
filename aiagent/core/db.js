@@ -98,10 +98,7 @@ async function setCaseStatus(caseId, fields) {
 		.exec();
 }
 
-async function closeSupportCaseForAiIdle(
-	caseId,
-	{ now = new Date(), reason = "ai_idle_timeout" } = {}
-) {
+async function closeSupportCaseForAiIdle(caseId, { now = new Date() } = {}) {
 	const _id = safeId(caseId);
 	if (!_id) return null;
 	return SupportCase.findOneAndUpdate(
@@ -119,7 +116,7 @@ async function closeSupportCaseForAiIdle(
 				updatedAt: now,
 				aiToRespond: false,
 				aiPausedAt: now,
-				aiHandoffReason: reason,
+				aiHandoffReason: "ai_idle_timeout",
 				"conversation.$[].seenByAdmin": true,
 				"conversation.$[].seenByHotel": true,
 				"conversation.$[].seenByCustomer": true,
@@ -191,9 +188,6 @@ async function getHotelById(id) {
 				"parkingLot",
 				"hasBusService",
 				"busDetails",
-				"isNusuk",
-				"isNusukText",
-				"hotelPolicyQA",
 				"currency",
 				"aiToRespond",
 				"activateHotel",
@@ -230,7 +224,7 @@ async function listActivePublicHotels() {
 		},
 	})
 		.select(
-			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot hasBusService busDetails isNusuk isNusukText hotelPolicyQA roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
+			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot hasBusService busDetails roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
 		)
 		.lean()
 		.exec();
@@ -242,12 +236,6 @@ async function getReservationByConfirmation(cn) {
 	return Reservations.findOne({ confirmation_number: String(cn) })
 		.lean()
 		.exec();
-}
-
-async function getReservationById(id) {
-	const _id = safeId(id);
-	if (!_id) return null;
-	return Reservations.findById(_id).lean().exec();
 }
 
 const AI_SUPPORT_EMAILS = new Set([
@@ -462,49 +450,14 @@ function scoreTrainingChat(doc = {}, queryTokens = new Set(), hotelId = "", lang
 	};
 }
 
-function shouldIncludeLearningExampleTurns() {
-	return (
-		String(process.env.AI_LEARNING_INCLUDE_EXAMPLE_TURNS || "")
-			.trim()
-			.toLowerCase() === "true"
-	);
-}
-
-function trainingLookupLimit() {
-	const parsed = parseInt(process.env.AI_LEARNING_LOOKUP_LIMIT || "", 10);
-	if (!Number.isFinite(parsed)) return 30;
-	return Math.max(10, Math.min(parsed, 40));
-}
-
 async function findTrainingDocs(Model, filter) {
 	try {
-		const fields = [
-			"sourceType",
-			"chatTitle",
-			"chatKeywords",
-			"summary",
-			"language",
-			"customerIntent",
-			"supportResolution",
-			"learningNotes",
-			"responseGuidance",
-			"decisionRules",
-			"recommendedResponses",
-			"commonQuestions",
-			"qualityScore",
-			"confidenceScore",
-			"tags",
-			"messageCount",
-			"hotelId",
-			"hotelName",
-			"updatedAt",
-			"createdAt",
-		];
-		if (shouldIncludeLearningExampleTurns()) fields.push("conversation");
 		return await Model.find(filter)
-			.select(fields.join(" "))
+			.select(
+				"sourceType chatTitle chatKeywords conversation summary language customerIntent supportResolution learningNotes responseGuidance decisionRules recommendedResponses commonQuestions qualityScore confidenceScore tags messageCount hotelId hotelName updatedAt createdAt"
+			)
 			.sort({ updatedAt: -1, createdAt: -1 })
-			.limit(trainingLookupLimit())
+			.limit(80)
 			.lean()
 			.exec();
 	} catch (error) {
@@ -603,7 +556,6 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
-	getReservationById,
 	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
 };
