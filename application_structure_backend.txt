@@ -646,7 +646,8 @@ Future TODO Backlog - Added 2026-05-26
     - Any discrepancy is traced to either filter state, room-map state, reservation status, or backend aggregation logic before changing display code.
 
 - CURRENT CHATBOT NOTE - 2026-06-23:
-  - The active chatbot planner was restored to the June 20 legacy engine:
+  - The active chatbot planner was restored to the latest June 22 pre-rebuild
+    legacy engine, commit cb7b2d2:
     aiagent/core/orchestrator.js, wired by aiagent/index.js.
   - Public support-case creation still schedules AI turns through
     controllers/supportcase.js so the SSR support widget can open a case and get

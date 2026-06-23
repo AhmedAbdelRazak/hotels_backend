@@ -55,7 +55,7 @@ function pickReasoningEffort() {
 	return String(
 		process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
 			process.env.OPENAI_REASONING_EFFORT ||
-			"low"
+			"medium"
 	)
 		.trim()
 		.toLowerCase();

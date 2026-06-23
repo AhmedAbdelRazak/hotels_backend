@@ -1,5 +1,23 @@
 # AI Agent (Hotels – Makkah/Madinah)
 
+## Production Stabilization Runbooks
+
+- `../docs/chatbot-production-stabilization-2026-06-22.md` documents the June 21/22
+  production chatbot stabilization: memory pressure, restart recovery,
+  repeated date/nationality prompts, nationality-vs-language routing, bad
+  numeric/date names, idle close, typing/sending UX, verification, and future
+  guardrails.
+- `../docs/chatbot-direct-answer-and-multilingual-parsing-2026-06-21.md` documents
+  direct-answer priority, multilingual parsing, Islamic greeting, pause intent,
+  final reservation action, and date memory contracts.
+- `../docs/chatbot-price-date-guard-2026-06-22.md` documents the price/date prompt
+  loop guard.
+- `../docs/chatbot-post-booking-close-and-typing-2026-06-22.md` documents
+  post-booking close, rating UX, and typing behavior.
+- `../docs/chatbot-admin-monitor-and-latency-2026-06-23.md` documents the
+  admin support-case AI monitor, repeat-price/details fast paths, shorter
+  chatbot timeouts, and the optional-email flow reduction.
+
 ## Current Production Contract - 2026-06-06
 
 - The AI agent is B2C support only. B2B/internal chats must never trigger it.
@@ -8,6 +26,14 @@
 - `AI_FORCE_RESPOND=true` is local QA-only and should not be used as production behavior.
 - The writer reads the full support-case conversation before replying and should not ask again for information already supplied.
 - Arabic customer-facing replies should address known clients respectfully as `أستاذ {first name}`, for example `أستاذ ناصر`.
+- Respectful addressing should not be repeated at the start of every message.
+  Use it for greetings, apologies, confirmations, reservation reviews, and
+  re-engagement after pauses. Known female guests use `أستاذة {first name}`;
+  known male guests use `أستاذ {first name}`; unknown gender should stay neutral.
+- Visible CSR names in the default pool are female. In Arabic, the assistant's
+  self-reference must be feminine or neutral (`أنا معك`, `أتابع معك`,
+  `أنا موجودة معك`) and must not use masculine `أنا موجود`. Keep CSR gender
+  separate from guest honorific gender in every language with gendered forms.
 - Tone is official, concise, warm, and useful. Brand must remain exactly `Jannat Booking`.
 - The assistant may help with hotels near Al Haram, date-range pricing, payment troubleshooting, and reservation triage.
 - Cancellation, refunds, and existing-reservation mutation are human handoff paths.
@@ -24,7 +50,7 @@
 
 - **Delays**:
   - Greeting and replies use configurable human-style pacing.
-  - Normal short replies should show the AI responder typing and land around 3 seconds after the reply is ready; longer replies can take longer based on length.
+  - Normal short replies should show the AI responder typing and land around 2-4 seconds after the guest message when deterministic context is enough; longer replies can take longer based on length and verified-context lookups.
   - Progress acknowledgements must go through the same humanized send path, not instant direct database appends.
   - If guest is typing (or typed within 800ms), agent **waits** and reschedules
     (max 30s).
@@ -47,6 +73,16 @@
   capacity or room type, the answer should first confirm the fit using real
   `roomCountDetails` facts in a natural hospitality/sales tone, then invite dates
   only as the next step for availability and price.
+- **Room descriptions and amenities**: The writer context includes compact room
+  descriptions, translated descriptions, amenities, views, extra amenities, room
+  size, beds count, and gender suitability from hotel settings. Use those facts
+  directly, translate/adapt them professionally, and keep room descriptions to
+  1-2 short natural lines unless the guest asks for full details. Say a detail
+  is not currently shown instead of inventing missing amenities.
+- **Unsupported answers**: For ordinary unsupported broad questions, say the
+  detail is not confirmed/verified in this chat and pivot back to the relevant
+  hotel or reservation topic. Do not turn this into an email deflection unless a
+  separate sensitive/safety path explicitly requires it.
 - **Pricing**:
   - Middle-day `price = 0` ⇒ **blocked**.
   - Missing calendar day ⇒ `basePrice`.
@@ -58,7 +94,7 @@
   3. Check-in and check-out dates after the guest is ready for availability/price
   4. Review quote and ask the guest to confirm, with localized Confirm / Something is wrong quick replies when the public widget can render them
   5. Ask once, in one message, for full name as in passport, phone, nationality, adults count, and children count
-  6. Ask optional email for confirmation/payment-link delivery, with a localized Skip quick reply
+  6. Move to the final create prompt once mandatory details are present. Optional email can still be captured if the guest sends it, but it should not create an automatic extra stop in the normal flow.
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
 - On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.

@@ -44,6 +44,10 @@ const {
 	isJannatBookingSupportCase,
 } = require("../../services/jannatBookingSupportScope");
 const {
+	activeHotelPolicyQA,
+	DEFAULT_CANCELLATION_REFUND_ANSWER,
+} = require("../../services/hotelPolicyQa");
+const {
 	waNotifyImmediateSupportEscalation,
 } = require("../../controllers/whatsappsender");
 
@@ -114,13 +118,13 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3200, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 2200, {
 	min: 500,
 	max: 15000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4800, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 3600, {
 		min: 500,
 		max: 15000,
 	})
@@ -136,6 +140,11 @@ const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 		min: 0,
 		max: 9000,
 	})
+);
+const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
+	"AI_PLANNING_TYPING_DELAY_MS",
+	700,
+	{ min: 0, max: 5000 }
 );
 const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
 	min: 30000,
@@ -162,6 +171,11 @@ const QUOTE_WRITE_SOFT_TIMEOUT_MS = intFromEnv(
 	1800,
 	{ min: 500, max: 5000 }
 );
+const AI_NLU_STEP_SOFT_TIMEOUT_MS = intFromEnv(
+	"AI_NLU_STEP_SOFT_TIMEOUT_MS",
+	4000,
+	{ min: 1500, max: 20000 }
+);
 const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
@@ -178,13 +192,23 @@ const AI_IDLE_FOLLOWUPS_ENABLED = boolFromEnv(
 );
 const AI_IDLE_FIRST_FOLLOWUP_MS = intFromEnv(
 	"AI_IDLE_FIRST_FOLLOWUP_MS",
-	15000,
-	{ min: 15000, max: 10 * 60 * 1000 }
+	60 * 1000,
+	{ min: 60 * 1000, max: 10 * 60 * 1000 }
 );
 const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * 60 * 1000, {
 	min: 5 * 60 * 1000,
 	max: 60 * 60 * 1000,
 });
+const AI_POST_BOOKING_CLOSE_MS = intFromEnv(
+	"AI_POST_BOOKING_CLOSE_MS",
+	5000,
+	{ min: 1000, max: 30000 }
+);
+const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
+	"AI_TURN_STALL_RECOVERY_MS",
+	15 * 1000,
+	{ min: 10 * 1000, max: 2 * 60 * 1000 }
+);
 const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
 	false
@@ -249,6 +273,304 @@ function stayDateDisplay(st = {}) {
 		shouldShowBoth: Boolean(hijri),
 	};
 }
+
+function mergeDateRangeIntoState(st = {}, dates = {}, { onlyIfMissing = false } = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return false;
+	if (!st.slots) st.slots = {};
+	if (onlyIfMissing && st.slots.checkinISO && st.slots.checkoutISO) {
+		return false;
+	}
+	st.slots.checkinISO = onlyIfMissing
+		? st.slots.checkinISO || dates.checkinISO
+		: dates.checkinISO;
+	st.slots.checkoutISO = onlyIfMissing
+		? st.slots.checkoutISO || dates.checkoutISO
+		: dates.checkoutISO;
+
+	const raw = dates.raw || {};
+	const calendar = raw.calendar || "gregorian";
+	st.dateRaw = {
+		calendar,
+		checkin: raw.checkin || dates.checkinISO,
+		checkout: raw.checkout || dates.checkoutISO,
+	};
+	if (String(calendar).toLowerCase() === "hijri") {
+		if (raw.checkinHijri) st.dateRaw.checkinHijri = raw.checkinHijri;
+		if (raw.checkoutHijri) st.dateRaw.checkoutHijri = raw.checkoutHijri;
+	}
+	return true;
+}
+
+function dateRangeKey(dates = {}) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return "";
+	return `${dates.checkinISO}|${dates.checkoutISO}`;
+}
+
+function currentDateRange(st = {}) {
+	if (!st.slots?.checkinISO || !st.slots?.checkoutISO) return null;
+	return {
+		checkinISO: st.slots.checkinISO,
+		checkoutISO: st.slots.checkoutISO,
+		raw: st.dateRaw || null,
+	};
+}
+
+function dateRangeConflictsWithState(st = {}, dates = {}) {
+	const current = currentDateRange(st);
+	if (!current || !dates?.checkinISO || !dates?.checkoutISO) return false;
+	return dateRangeKey(current) !== dateRangeKey(dates);
+}
+
+function rememberPendingDateChange(st = {}, dates = {}, { source = "", userText = "" } = {}) {
+	if (!dateRangeConflictsWithState(st, dates)) return null;
+	const current = currentDateRange(st);
+	const existing = st.pendingDateChange || {};
+	if (
+		dateRangeKey(existing.proposed || {}) === dateRangeKey(dates) &&
+		dateRangeKey(existing.previous || {}) === dateRangeKey(current || {})
+	) {
+		return existing;
+	}
+	st.pendingDateChange = {
+		previous: current,
+		proposed: dates,
+		previousWaitFor: st.waitFor || "",
+		previousReviewSent: Boolean(st.reviewSent),
+		previousQuoteKey: st.quote?.key || "",
+		source,
+		userText: String(userText || "").slice(0, 240),
+		createdAt: now(),
+		askedAt: 0,
+	};
+	return st.pendingDateChange;
+}
+
+function clearPendingDateChange(st = {}) {
+	st.pendingDateChange = null;
+}
+
+function activeDateSensitiveBookingState(st = {}) {
+	const waitFor = String(st.waitFor || "");
+	return Boolean(
+			st.quote ||
+			st.reviewSent ||
+			st.quoteSummarizedAt ||
+			st.pendingRoomAlternative ||
+			st.pendingRoomCombination ||
+			[
+				"proceed",
+				"reviewConfirm",
+				"reservation_details",
+				"fullname",
+				"nationality",
+				"phone",
+				"email_or_skip",
+				"finalize",
+				"large_group_confirm",
+			].includes(waitFor)
+	);
+}
+
+function shouldConfirmDateRangeChange(st = {}, dates = {}) {
+	return (
+		dateRangeConflictsWithState(st, dates) &&
+		activeDateSensitiveBookingState(st)
+	);
+}
+
+function resetBookingAfterDateRangeChange(st = {}) {
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	st.bookingNudgePausedAt = 0;
+	st.pendingRoomAlternative = null;
+}
+
+function applyDateRangeToState(st = {}, dates = {}, { resetQuote = true } = {}) {
+	const changed = dateRangeConflictsWithState(st, dates);
+	const applied = mergeDateRangeIntoState(st, dates);
+	if (applied && changed && resetQuote) resetBookingAfterDateRangeChange(st);
+	if (applied) clearPendingDateChange(st);
+	return applied;
+}
+
+function combinedDateRangeFromPartial(st = {}, partial = {}) {
+	const current = currentDateRange(st);
+	if (!current) return null;
+	const proposed = {
+		checkinISO: partial.checkinISO || current.checkinISO,
+		checkoutISO: partial.checkoutISO || current.checkoutISO,
+		raw: {
+			...(st.dateRaw || {}),
+			...(partial.raw || {}),
+		},
+	};
+	if (!proposed.checkinISO || !proposed.checkoutISO) return null;
+	if (proposed.checkoutISO <= proposed.checkinISO) return null;
+	if (!dateRangeConflictsWithState(st, proposed)) return null;
+	return proposed;
+}
+
+function applyPartialDateToState(st = {}, partial = {}) {
+	if (!partial || (!partial.raw && !partial.checkinISO && !partial.checkoutISO)) {
+		return false;
+	}
+	if (!st.slots) st.slots = {};
+	const raw = partial.raw || {};
+	if (raw.checkin || raw.checkout || raw.calendar || raw.checkinHijri || raw.checkoutHijri) {
+		st.dateRaw = {
+			...(st.dateRaw || {}),
+			...(raw.calendar ? { calendar: raw.calendar } : {}),
+			...(raw.checkin ? { checkin: raw.checkin } : {}),
+			...(raw.checkout ? { checkout: raw.checkout } : {}),
+			...(raw.checkinHijri ? { checkinHijri: raw.checkinHijri } : {}),
+			...(raw.checkoutHijri ? { checkoutHijri: raw.checkoutHijri } : {}),
+		};
+	}
+	if (partial.checkinISO) st.slots.checkinISO = partial.checkinISO;
+	if (partial.checkoutISO) st.slots.checkoutISO = partial.checkoutISO;
+	return true;
+}
+
+function localizedDateRangeFromDates(dates = {}, lang = "English") {
+	if (!dates?.checkinISO || !dates?.checkoutISO) return "";
+	const checkin = localizedGregorianDate(dates.checkinISO, lang);
+	const checkout = localizedGregorianDate(dates.checkoutISO, lang);
+	return `${checkin} - ${checkout}`;
+}
+
+function pendingDateChangeQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const proposed = st.pendingDateChange?.proposed || {};
+	const proposedText =
+		proposed.checkinISO && proposed.checkoutISO
+			? `${proposed.checkinISO} to ${proposed.checkoutISO}`
+			: "";
+	if (/arabic/i.test(lang)) {
+		return [
+			{
+				label: "\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629",
+				value: proposedText
+					? `\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629 ${proposedText}`
+					: "\u0627\u0633\u062a\u062e\u062f\u0645 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629",
+				action: "confirm_date_change",
+			},
+			{
+				label: "\u0627\u0628\u0642 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629",
+				value: "\u0627\u0628\u0642 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{
+				label: "Usar nuevas fechas",
+				value: proposedText ? `Usar nuevas fechas ${proposedText}` : "Usar nuevas fechas",
+				action: "confirm_date_change",
+			},
+			{
+				label: "Mantener fechas actuales",
+				value: "Mantener fechas actuales",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{
+				label: "Utiliser ces dates",
+				value: proposedText ? `Utiliser ces dates ${proposedText}` : "Utiliser ces dates",
+				action: "confirm_date_change",
+			},
+			{
+				label: "Garder les dates actuelles",
+				value: "Garder les dates actuelles",
+				action: "keep_existing_dates",
+			},
+		];
+	}
+	return [
+		{
+			label: "Use New Dates",
+			value: proposedText ? `Use new dates ${proposedText}` : "Use new dates",
+			action: "confirm_date_change",
+		},
+		{
+			label: "Keep Current Dates",
+			value: "Keep current dates",
+			action: "keep_existing_dates",
+		},
+	];
+}
+
+function pendingDateChangePromptText(sc = {}, st = {}, pending = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const current = localizedDateRangeFromDates(pending.previous, lang);
+	const proposed = localizedDateRangeFromDates(pending.proposed, lang);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0644\u062f\u064a \u062d\u0627\u0644\u064a\u0627\u064b \u062a\u0648\u0627\u0631\u064a\u062e ${current}. \u0648\u0635\u0644\u0646\u064a \u0623\u064a\u0636\u0627\u064b \u062a\u0648\u0627\u0631\u064a\u062e \u062c\u062f\u064a\u062f\u0629 ${proposed}. \u0647\u0644 \u0623\u062d\u062f\u062b \u0627\u0644\u062d\u062c\u0632 \u0625\u0644\u0649 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629\u060c \u0623\u0645 \u0623\u0628\u0642\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, ahora tengo las fechas ${current}. Tambien recibi nuevas fechas: ${proposed}. Quieres que actualice esta reserva a las nuevas fechas, o mantengo las actuales?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, j'ai actuellement les dates ${current}. Je viens aussi de recevoir de nouvelles dates: ${proposed}. Voulez-vous que je mette cette reservation sur les nouvelles dates, ou dois-je garder les dates actuelles ?`;
+	}
+	return `${name}, I currently have ${current}. I also saw new dates: ${proposed}. Should I update this booking to the new dates, or keep the current dates?`;
+}
+
+function pendingDateKeptText(sc = {}, st = {}, pending = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const current = localizedDateRangeFromDates(pending.previous || currentDateRange(st), lang);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062a\u0645\u0627\u0645\u060c \u0633\u0623\u0628\u0642\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062d\u0627\u0644\u064a\u0629 ${current}.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, perfecto, mantendre las fechas actuales: ${current}.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tres bien, je garde les dates actuelles: ${current}.`;
+	}
+	return `${name}, no problem. I will keep the current dates: ${current}.`;
+}
+
+function pendingDateChoiceFromGuest(sc = {}, userText = "") {
+	const action = lastGuestAction(sc).toLowerCase();
+	if (action === "confirm_date_change") return "confirm";
+	if (action === "keep_existing_dates") return "keep";
+	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	if (
+		/\b(?:use|apply|update|change|switch)\b.{0,40}\b(?:new|these|dates?)\b/i.test(lower) ||
+		/(?:usenewdates|applynewdates|updatetonewdates|change_dates|changedates|switchdates)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0633\u062a\u062e\u062f\u0645|\u063a\u064a\u0631|\u063a\u064a\u0631\u064a|\u062d\u062f\u062b|\u062d\u062f\u062b\u064a).{0,30}(?:\u0627\u0644\u062c\u062f\u064a\u062f|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e)/i.test(
+			arabic
+		)
+	) {
+		return "confirm";
+	}
+	if (
+		/\b(?:keep|same|current|old|previous|do not change|dont change|no change)\b/i.test(
+			lower
+		) ||
+		/(?:keepcurrent|samecurrent|dontchange|donotchange|keepdates)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0628\u0642|\u062e\u0644\u064a|\u0646\u0641\u0633|\u0627\u0644\u062d\u0627\u0644\u064a|\u0627\u0644\u0642\u062f\u064a\u0645|\u0628\u062f\u0648\u0646\s+\u062a\u063a\u064a\u064a\u0631)/i.test(
+			arabic
+		)
+	) {
+		return "keep";
+	}
+	if (confirmsText(userText)) return "confirm";
+	if (declinesText(userText) || correctionText(userText)) return "keep";
+	return "";
+}
+
 const ARABIC_HIJRI_MONTHS = [
 	"\u0645\u062d\u0631\u0645",
 	"\u0635\u0641\u0631",
@@ -642,6 +964,44 @@ function explicitLanguageSwitchRequest(text = "") {
 	return null;
 }
 
+function reservationDetailCollectionContext(sc = {}, st = {}) {
+	if (
+		[
+			"reviewConfirm",
+			"reservation_details",
+			"fullname",
+			"nationality",
+			"phone",
+			"email_or_skip",
+			"finalize",
+		].includes(st.waitFor)
+	) {
+		return true;
+	}
+	const text = lastAssistantText(sc);
+	return (
+		/full name[\s\S]{0,120}(?:phone|mobile)[\s\S]{0,120}nationality/i.test(
+			text
+		) ||
+		/\u0644\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632[\s\S]{0,200}(?:\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0629)/i.test(
+			text
+		)
+	);
+}
+
+function looksLikeNationalityDetailAnswer(text = "") {
+	const value = String(text || "").trim();
+	if (!value || value.length > 80) return false;
+	return Boolean(explicitNationalityText(value) || nationalityHintFromText(value));
+}
+
+function shouldProtectReservationDetailLanguage(sc = {}, st = {}, text = "") {
+	return (
+		reservationDetailCollectionContext(sc, st) &&
+		looksLikeNationalityDetailAnswer(text)
+	);
+}
+
 function updateActiveLanguageFromText(sc = {}, st = {}, text = "") {
 	const explicit = explicitLanguageSwitchRequest(text);
 	const detected = explicit || detectGuestLanguageFromText(text);
@@ -729,6 +1089,7 @@ function firstNameForAddress(value = "") {
 
 const GUEST_FEMALE_NAMES_LATIN = new Set([
 	"marwa",
+	"marwat",
 	"aisha",
 	"aysha",
 	"ayesha",
@@ -794,9 +1155,21 @@ const GUEST_MALE_NAMES_LATIN = new Set([
 	"ehab",
 	"shady",
 	"gamal",
+	"goma",
+	"gomaa",
+	"gomaah",
+	"ayman",
+	"farouk",
+	"farouq",
+	"yakoot",
+	"yakout",
+	"amr",
+	"khamis",
+	"khamiss",
 ]);
 const GUEST_FEMALE_NAMES_ARABIC = new Set([
 	"\u0645\u0631\u0648\u0629",
+	"\u0645\u0631\u0648\u0629\u062a",
 	"\u0639\u0627\u0626\u0634\u0629",
 	"\u0639\u0627\u064a\u0634\u0629",
 	"\u0645\u0646\u0649",
@@ -853,6 +1226,13 @@ const GUEST_MALE_NAMES_ARABIC = new Set([
 	"\u0627\u064a\u0647\u0627\u0628",
 	"\u0634\u0627\u062f\u064a",
 	"\u062c\u0645\u0627\u0644",
+	"\u062c\u0645\u0639\u0629",
+	"\u062c\u0645\u0639\u0647",
+	"\u0623\u064a\u0645\u0646",
+	"\u0627\u064a\u0645\u0646",
+	"\u0641\u0627\u0631\u0648\u0642",
+	"\u064a\u0627\u0642\u0648\u062a",
+	"\u062e\u0645\u064a\u0633",
 ]);
 
 function compactArabicName(value = "") {
@@ -907,12 +1287,21 @@ function inferGuestGenderFromName(value = "") {
 }
 
 function guestNameSource(sc = {}, st = {}) {
+	const candidates = [
+		st.slots?.name,
+		st.slots?.fullName,
+		sc.displayName1,
+		sc.customerName,
+	];
 	return String(
-		st.slots?.name ||
-			st.slots?.fullName ||
-			sc.displayName1 ||
-			sc.customerName ||
-			""
+		candidates.find((candidate) => {
+			const value = String(candidate || "").trim();
+			if (!value) return false;
+			if (/^\d+$/.test(digitsToEnglish(value))) return false;
+			if (looksLikeStayDateCandidate(value)) return false;
+			if (rejectsFullNameCandidate(value)) return false;
+			return true;
+		}) || ""
 	).trim();
 }
 
@@ -1110,12 +1499,15 @@ function bookingWaitState(st = {}) {
 			"dates",
 			"room",
 			"proceed",
+			"date_change_confirm",
 			"intentConfirm",
 			"reviewConfirm",
+			"reservation_details",
 			"fullname",
 			"nationality",
 			"phone",
 			"email_or_skip",
+			"finalize",
 		].includes(st.waitFor)
 	) {
 		return st.waitFor;
@@ -1148,23 +1540,38 @@ function activeBookingContinuationText(
 			: apology
 			? `${name}، حقك عليّ. `
 			: idle
-			? `${name}، خذ وقتك 🙂 `
+			? `${name}، أنا هنا معك 🙂 `
 			: `${name}، `;
 		const contact = contactBoundary
 			? "وبخصوص رقم الهاتف، لا أشارك الرقم من هنا، لكن أتابع معك مباشرة من خلال استقبال الفندق في هذه المحادثة. "
 			: "";
 		if (waitState === "dates") {
+			if (apology) {
+				return `${prefix}${contact}أقصد فقط أن الخطوة التالية هي تاريخ الوصول والمغادرة، بدون أي استعجال. طلبك واضح معي${room ? `: ${room}` : ""}${
+					hotelName ? ` في ${hotelName}` : ""
+				}. أرسلهما لي وسأراجع لك التوفر والسعر النهائي مباشرة.`;
+			}
 			return `${prefix}${contact}طلبك واضح معي${room ? `: ${room}` : ""}${
 				hotelName ? ` في ${hotelName}` : ""
-			}. عندما تكون جاهزا أرسل تاريخ الوصول والمغادرة وسأراجع لك التوفر والسعر.`;
+			}. أرسل تاريخ الوصول والمغادرة عندما تحب، وسأراجع لك التوفر والسعر.`;
 		}
 		if (waitState === "room") {
-			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تكون جاهزا، وسأرشح لك الأنسب مباشرة.`;
+			return `${prefix}${contact}أرسل نوع الغرفة أو عدد الأشخاص عندما تحب، وسأرشح لك الأنسب مباشرة.`;
+		}
+		if (["reservation_details", "fullname", "nationality", "phone"].includes(waitState)) {
+			const rows = reservationDetailPromptRows(sc, st, { retry: true });
+			return `${prefix}${contact}\u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0623\u0631\u0633\u0644 \u0641\u0642\u0637 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0646\u0627\u0642\u0635\u0629:\n${rows}`;
+		}
+		if (waitState === "email_or_skip") {
+			return `${prefix}${contact}${optionalEmailPrompt(sc, st)}`;
+		}
+		if (waitState === "finalize") {
+			return `${prefix}${contact}${finalReservationPrompt(sc, st)}`;
 		}
 		if (waitState === "proceed" || waitState === "reviewConfirm") {
 			return `${prefix}${contact}العرض معي وجاهز. عندما تحب نكمل، أخبرني وسأتابع خطوة بخطوة بدون استعجال.`;
 		}
-		return `${prefix}${contact}أنا متابع معك. أرسل التفصيلة التالية عندما تكون جاهزا وسأكمل معك بدون استعجال.`;
+		return `${prefix}${contact}أنا معك وأتابع المحادثة. أرسل التفصيلة التالية عندما تحب وسأكمل معك بدون استعجال.`;
 	}
 	const prefix = omitName
 		? ""
@@ -1183,6 +1590,16 @@ function activeBookingContinuationText(
 	}
 	if (waitState === "room") {
 		return `${prefix}${contact}Send the room type or number of guests whenever you are ready, and I will suggest the right option.`;
+	}
+	if (["reservation_details", "fullname", "nationality", "phone"].includes(waitState)) {
+		const rows = reservationDetailPromptRows(sc, st, { retry: true });
+		return `${prefix}${contact}To complete the reservation, please send only the missing detail(s):\n${rows}`;
+	}
+	if (waitState === "email_or_skip") {
+		return `${prefix}${contact}${optionalEmailPrompt(sc, st)}`;
+	}
+	if (waitState === "finalize") {
+		return `${prefix}${contact}${finalReservationPrompt(sc, st)}`;
 	}
 	if (waitState === "proceed" || waitState === "reviewConfirm") {
 		return `${prefix}${contact}I have the offer ready. When you want to continue, tell me and I will take it step by step without rushing you.`;
@@ -1206,7 +1623,7 @@ function idleFollowupText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، خذ وقتك 🙂 أنا هنا عندما تحتاجني.`;
+		return `${name}، أنا هنا معك 🙂 عندما تحتاج أي مساعدة أرسل رسالتك وسأتابع فورًا.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, sin prisa 🙂 Sigo aqui cuando me necesites.`;
@@ -1268,6 +1685,8 @@ function repeatedSemanticQuestionKey(sc = {}, st = {}, text = "", lu = {}) {
 		return "direct:hotel_contact";
 	}
 	if (vagueHajjInquiryText(raw)) return "direct:hajj";
+	if (st.hotel && selectedHotelPolicyQuestionText(raw)) return "fact:policy";
+	if (st.hotel && selectedHotelNusukQuestionText(raw)) return "fact:nusuk";
 	if (st.hotel && selectedHotelBusQuestionText(raw)) return "fact:bus";
 	if (st.hotel && selectedHotelDistanceQuestionText(raw)) return "fact:distance";
 	if (st.hotel && selectedHotelAddressQuestionText(raw)) return "fact:location";
@@ -1414,32 +1833,111 @@ function looksLikeNameCandidate(text = "") {
 	return /[A-Za-z\u0600-\u06FF]{2,}/.test(value);
 }
 
-function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
+function hydrateKnownSlotsFromConversation(
+	sc = {},
+	st = {},
+	{ protectLatestGuestDateChange = false } = {}
+) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
-	if (!conversation.length || st.hydratedConversationLength === conversation.length) {
+	if (!conversation.length) {
+		return;
+	}
+	const needsSlotRecovery =
+		!st.slots?.checkinISO ||
+		!st.slots?.checkoutISO ||
+		!st.slots?.roomTypeKey ||
+		!st.slots?.phone ||
+		(AI_REQUIRE_NATIONALITY && !st.slots?.nationality) ||
+		!st.slots?.adultsProvided ||
+		!hasUsableFullName(st.slots?.fullName || st.slots?.name || "");
+	if (st.hydratedConversationLength === conversation.length && !needsSlotRecovery) {
 		return;
 	}
 	const before = JSON.stringify(st.slots || {});
-	const allText = conversationText(sc);
-	const guestText = conversationText(sc, { guestsOnly: true });
-	const dates = quickDateRange(allText);
-	if (
-		dates.checkinISO &&
-		dates.checkoutISO &&
-		!needsExplicitPastDateClarification(allText, dates)
-	) {
-		st.slots.checkinISO = st.slots.checkinISO || dates.checkinISO;
-		st.slots.checkoutISO = st.slots.checkoutISO || dates.checkoutISO;
-		if (dates.raw) {
-			st.dateRaw = { ...st.dateRaw, ...dates.raw };
+	const guestMessages = [];
+	let latestGuestDateRange = null;
+	let latestConversationDateRange = null;
+	let protectedLatestGuestDateRange = null;
+	const latestGuestIndex = protectLatestGuestDateChange
+		? latestGuestMessageIndex(sc)
+		: -1;
+	for (let index = 0; index < conversation.length; index += 1) {
+		const message = conversation[index];
+		const messageText = conversationEntryContextText(message);
+		if (!messageText || message?.isSystem) continue;
+		const messageDates = extractDateRange(messageText);
+		if (
+			messageDates.checkinISO &&
+			messageDates.checkoutISO &&
+			!needsExplicitPastDateClarification(messageText, messageDates)
+		) {
+			if (
+				index === latestGuestIndex &&
+				shouldConfirmDateRangeChange(st, messageDates)
+			) {
+				protectedLatestGuestDateRange = messageDates;
+			} else {
+				latestConversationDateRange = messageDates;
+				if (isGuestConversationMessage(message)) {
+					latestGuestDateRange = messageDates;
+				}
+			}
+		}
+		if (!isGuestConversationMessage(message)) continue;
+		if (messageText) guestMessages.push(messageText);
+	}
+	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
+	if (latestGuestDateRange) {
+		mergeDateRangeIntoState(st, latestGuestDateRange);
+	} else if (latestConversationDateRange) {
+		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
+	}
+	if (protectedLatestGuestDateRange) {
+		logStep(String(sc._id || ""), "slots.latest_date_change_protected", {
+			current: currentDateRange(st),
+			proposed: {
+				checkinISO: protectedLatestGuestDateRange.checkinISO,
+				checkoutISO: protectedLatestGuestDateRange.checkoutISO,
+			},
+			waitFor: st.waitFor || "",
+		});
+	}
+	let latestGuestRoomKey = null;
+	let latestAssistantQuotedRoomKey = null;
+	for (const message of conversation) {
+		const messageText = conversationEntryContextText(message);
+		const messageRoomKey = mapRoomToKey(messageText);
+		if (!messageRoomKey) continue;
+		if (isGuestConversationMessage(message)) {
+			latestGuestRoomKey = messageRoomKey;
+		} else if (
+			isAiConversationMessage(message) &&
+			assistantMessageCanRecoverRoomType(message)
+		) {
+			latestAssistantQuotedRoomKey = messageRoomKey;
 		}
 	}
-	const roomKey = mapRoomToKey(guestText) || mapRoomToKey(allText);
-	if (roomKey && !st.slots.roomTypeKey) st.slots.roomTypeKey = roomKey;
+	const latestRoomKey = latestGuestRoomKey || latestAssistantQuotedRoomKey;
+	if (latestRoomKey && st.slots.roomTypeKey !== latestRoomKey) {
+		const previousRoomTypeKey = st.slots.roomTypeKey || null;
+		st.slots.roomTypeKey = latestRoomKey;
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		st.pendingRoomAlternative = null;
+		st.pendingRoomCombination = null;
+		logStep(String(sc._id || ""), "slots.room_changed_from_guest", {
+			previousRoomTypeKey,
+			roomTypeKey: latestRoomKey,
+			source: latestGuestRoomKey ? "guest" : "assistant_quote",
+		});
+	}
 	const email = latestEmailFromText(guestText);
 	if (email && !st.slots.email) st.slots.email = email;
 	const phone = latestPhoneFromText(guestText);
 	if (phone && !st.slots.phone) st.slots.phone = phone;
+	const nationality = nationalityHintFromText(guestText);
+	if (nationality && !st.slots.nationality) st.slots.nationality = nationality;
 	for (const message of conversation) {
 		if (!isGuestConversationMessage(message)) continue;
 		const contact = String(message?.messageBy?.customerEmail || "");
@@ -1465,8 +1963,8 @@ function hydrateKnownSlotsFromConversation(sc = {}, st = {}) {
 		}
 		if (!isGuestConversationMessage(message)) continue;
 		applyReservationGuestCountsFromText(st, text);
-		if (lastAsk === "name" && !st.slots.fullName && looksLikeNameCandidate(text)) {
-			const candidate = cleanFullNameCandidate(text);
+		if (lastAsk === "name" && !st.slots.fullName) {
+			const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
 			if (candidate) {
 				st.slots.fullName = candidate;
 				st.slots.name = candidate;
@@ -1508,6 +2006,15 @@ function lastAssistantMessageBeforeLatestGuest(sc = {}) {
 	return null;
 }
 
+function assistantMessagesBeforeLatestGuest(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestGuestIndex = latestGuestMessageIndex(sc);
+	if (latestGuestIndex < 0) return [];
+	return conversation
+		.slice(0, latestGuestIndex)
+		.filter((message) => !message?.isSystem && isAiConversationMessage(message));
+}
+
 function quickReplyActions(message = {}) {
 	if (!message || typeof message !== "object") return [];
 	return Array.isArray(message.quickReplies)
@@ -1515,6 +2022,100 @@ function quickReplyActions(message = {}) {
 				.map((reply) => String(reply?.action || "").trim().toLowerCase())
 				.filter(Boolean)
 		: [];
+}
+
+function assistantMessageSuggestsProceed(message = {}) {
+	const actions = quickReplyActions(message);
+	if (actions.includes("proceed")) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	return (
+		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
+			lower
+		) ||
+		/(?:\u0647\u0644\s+\u062a\u0631\u063a\u0628\s+\u0627\u0646\s+\u0627\u062a\u0627\u0628\u0639|\u0647\u0644\s+\u062a\u0631\u064a\u062f\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0647|\u0647\u0644\s+\u0646\u062a\u0627\u0628\u0639|\u0627\u062a\u0627\u0628\u0639\s+\u0644\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:wouldyoulikemetocontinue|shallicontinue|continuetothereview|continuewiththereservationdetails|proceedtoconfirm|wanttocontinue)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function assistantMessageSuggestsReview(message = {}) {
+	const actions = quickReplyActions(message);
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	const hasConfirmAction = actions.includes("confirm");
+	const looksLikeReview =
+		/reservation review|review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change|everything looks correct/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0633\u0631\u064a\u0639\u0647\s+\u0644\u062a\u0641\u0627\u0635\u064a\u0644\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0630\u0627\s+\u0643\u0644\s+\u0634\u064a\u0621\s+\u0635\u062d\u064a\u062d|\u0627\u062e\u062a\u0631\s+\"\u062a\u0627\u0643\u064a\u062f\"|\u0647\u0646\u0627\u0643\s+\u0634\u064a\u0621\s+\u063a\u064a\u0631\s+\u0635\u062d\u064a\u062d)/i.test(
+			arabic
+		) ||
+		/(?:reservationreview|confirmtofinalize|everythinglookscorrect|chooseconfirm|somethingiswrong)/i.test(
+			latinCompact
+		);
+	return hasConfirmAction || (actions.includes("correction") && looksLikeReview) || looksLikeReview;
+}
+
+function assistantMessageSuggestsEmailOrSkip(message = {}) {
+	const actions = quickReplyActions(message);
+	const text = String(message?.message || "");
+	return (
+		actions.includes("skip_email") ||
+		/required details.*payment link by email|receive the confirmation and payment link by email|choose skip|pulsa omitir|cliquez sur ignorer|\u0623\u0648\s+\u0627\u0636\u063a\u0637\s+\u062a\u062e\u0637\u064a/i.test(
+			text
+		)
+	);
+}
+
+function assistantMessageSuggestsReservationDetails(message = {}) {
+	const { lower, arabic } = normalizeControlText(message?.message || "");
+	return (
+		/full name[\s\S]{0,160}(?:phone|mobile)[\s\S]{0,160}nationality/i.test(
+			lower
+		) ||
+		/(?:to complete|complete the reservation|i still need|still need)[\s\S]{0,220}(?:full name|phone|nationality|guests)/i.test(
+			lower
+		) ||
+		/(?:\u0644\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0627\s+\u0632\u0644\u062a\s+\u0627\u062d\u062a\u0627\u062c|\u0644\u0627\u0632\u0645\s+\u0627\u062d\u062a\u0627\u062c)[\s\S]{0,220}(?:\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641)/i.test(
+			arabic
+		)
+	);
+}
+
+function assistantMessageCanRecoverRoomType(message = {}) {
+	const actions = quickReplyActions(message);
+	if (
+		actions.some((action) =>
+			["proceed", "confirm", "correction", "place_reservation"].includes(action)
+		)
+	) {
+		return true;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
+	return (
+		assistantMessageSuggestsProceed(message) ||
+		assistantMessageSuggestsReview(message) ||
+		/total|night|nights|reservation|booking|quote/i.test(lower) ||
+		/(?:\u0627\u0644\u063a\u0631\u0641\u0647|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:total|night|nights|reservation|booking|quote)/i.test(latinCompact)
+	);
+}
+
+function assistantBookingStageFromMessage(message = {}) {
+	const actions = quickReplyActions(message);
+	if (actions.some((action) => action.startsWith("connect_hotel_"))) {
+		return "platform_hotel_choice";
+	}
+	if (actions.includes("place_reservation")) return "finalize";
+	if (assistantMessageSuggestsEmailOrSkip(message)) return "email_or_skip";
+	if (assistantMessageSuggestsReservationDetails(message)) return "reservation_details";
+	if (assistantMessageSuggestsReview(message)) return "reviewConfirm";
+	if (assistantMessageSuggestsProceed(message)) return "proceed";
+	return "";
 }
 
 function recoverBookingStageFromConversation(sc = {}, st = {}) {
@@ -1528,42 +2129,37 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		st.reviewSent = false;
 		return;
 	}
-	const lastAssistant = lastAssistantMessageBeforeLatestGuest(sc);
+	const assistantHistory = assistantMessagesBeforeLatestGuest(sc).reverse();
+	const lastAssistant = assistantHistory[0] || null;
 	if (!lastAssistant) return;
-	const text = String(lastAssistant.message || "");
-	const actions = quickReplyActions(lastAssistant);
-	if (actions.some((action) => action.startsWith("connect_hotel_"))) {
+	const stage = assistantBookingStageFromMessage(
+		assistantHistory.find((assistant) => assistantBookingStageFromMessage(assistant)) ||
+			lastAssistant
+	);
+	if (stage === "platform_hotel_choice") {
 		st.waitFor = "platform_hotel_choice";
 		return;
 	}
-	const hasConfirmAction =
-		actions.includes("confirm") || actions.includes("correction");
-	const looksLikeReview =
-		/review before we finalize|type confirm to finalize|confirm to finalize|tell me what to change/i.test(
-			text
-		);
-	if (hasConfirmAction || looksLikeReview) {
+	if (stage === "finalize") {
+		st.reviewSent = true;
+		st.waitFor = "finalize";
+		return;
+	}
+	if (stage === "email_or_skip") {
+		st.waitFor = "email_or_skip";
+		return;
+	}
+	if (stage === "reservation_details") {
+		st.reviewSent = true;
+		st.waitFor = "reservation_details";
+		return;
+	}
+	if (stage === "reviewConfirm") {
 		st.reviewSent = true;
 		st.waitFor = "reviewConfirm";
 		return;
 	}
-
-	if (
-		actions.includes("skip_email") ||
-		/required details.*payment link by email|receive the confirmation and payment link by email|choose skip|pulsa omitir|cliquez sur ignorer|\u0623\u0648\s+\u0627\u0636\u063a\u0637\s+\u062a\u062e\u0637\u064a/i.test(
-			text
-		)
-	) {
-		st.waitFor = "email_or_skip";
-		return;
-	}
-
-	const hasProceedAction = actions.includes("proceed");
-	const looksLikeProceed =
-		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
-			text
-		);
-	if ((hasProceedAction || looksLikeProceed) && st.hotel && quoteKeyForSlots(st)) {
+	if (stage === "proceed" && st.hotel && quoteKeyForSlots(st)) {
 		if (!st.quote || st.quote.key !== quoteKeyForSlots(st)) {
 			const quote = safePriceRoomForStay(
 				st.hotel,
@@ -1575,6 +2171,33 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		}
 		if (st.quote?.data?.available) {
 			st.waitFor = "proceed";
+			return;
+		}
+	}
+
+	for (const assistant of assistantHistory) {
+		const text = String(assistant.message || "");
+		if (
+			/\u0644\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632[\s\S]{0,200}(?:\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0629)/i.test(
+				text
+			)
+		) {
+			st.reviewSent = true;
+			st.waitFor = "reservation_details";
+			return;
+		}
+		if (
+			/full name[\s\S]{0,120}(?:phone|mobile)[\s\S]{0,120}nationality/i.test(
+				text
+			) ||
+			/الاسم\s+الكامل[\s\S]{0,120}رقم\s+الهاتف[\s\S]{0,120}الجنسية/i.test(
+				text
+			) ||
+			/لإتمام\s+الحجز[\s\S]{0,160}(?:رقم\s+الهاتف|الجنسية)/i.test(text)
+		) {
+			st.reviewSent = true;
+			st.waitFor = "reservation_details";
+			return;
 		}
 	}
 }
@@ -1709,9 +2332,50 @@ function discountDisplayContext(st = {}) {
 }
 
 function looksLikeGreetingOnly(text = "") {
-	return /^(hi|hello|hey|hi there|hello there|good morning|good evening|السلام|مرحبا|اهلا|أهلا|hola|bonjour|salut|ہیلو|ہیلو there|नमस्ते)\b/i.test(
-		String(text || "").trim()
-	);
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const stableGreeting = raw
+		.replace(/^[\s"'`]+|[\s"'`!?.\u061f\u060c,\u061b]+$/g, "")
+		.trim();
+	if (
+		/^(?:\u0627\u0644\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0648\u0639\u0644\u064a\u0643\u0645\s+\u0627\u0644\u0633\u0644\u0627\u0645|\u0645\u0631\u062d\u0628\u0627|\u0627\u0647\u0644\u0627|\u0623\u0647\u0644\u0627|\u0623\u0647\u0644\u064a\u0646|\u0647\u0644\u0627|\u0647\u0627\u0644\u0648|\u0627\u0644\u0648|\u0623\u0644\u0648|\u0647\u0627\u064a|\u0635\u0628\u0627\u062d\s+\u0627\u0644\u062e\u064a\u0631|\u0645\u0633\u0627\u0621\s+\u0627\u0644\u062e\u064a\u0631|\u06c1\u06cc\u0644\u0648|\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u06cc\u06a9\u0645|\u0928\u092e\u0938\u094d\u0924\u0947|\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941\s+\u0905\u0932\u0948\u0915\u0941\u092e)$/i.test(
+			stableGreeting
+		)
+	) {
+		return true;
+	}
+	const cleaned = raw.replace(/^[\s"'`]+|[\s"'`!?.؟،,؛]+$/g, "").trim();
+	if (!cleaned) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(cleaned);
+	const latinGreeting =
+		/^(?:hi|hello|hey|hi there|hello there|good morning|good evening|salaam|salam|assalamu alaikum|assalamu alaykum|assalamualaikum|assalamo alaikum|as-salamu alaikum|al salamo alaikum|al salam alaikum|hola|bonjour|salut)$/i.test(
+			lower
+		) ||
+		/^(?:hi|hello|hey|salam|salaam|assalamualaikum|assalamualaykum|assalamualaikumwarahmatullah|hola|bonjour|salut)$/i.test(
+			latinCompact
+		);
+	const arabicGreeting =
+		/^(?:السلام(?:\s+عليكم)?|سلام(?:\s+عليكم)?|وعليكم\s+السلام|مرحبا|اهلا|أهلا|أهلين|هلا|هالو|الو|ألو|هاي|صباح\s+الخير|مساء\s+الخير)$/i.test(
+			arabic
+		);
+	const urduHindiGreeting =
+		/^(?:ہیلو|السلام\s+علیکم|नमस्ते|अस्सलामु\s+अलैकुम)$/i.test(cleaned);
+	return latinGreeting || arabicGreeting || urduHindiGreeting;
+}
+
+function islamicGreetingForLanguage(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645";
+	}
+	if (/urdu/i.test(lang)) {
+		return "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645";
+	}
+	if (/hindi/i.test(lang)) {
+		return "\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e";
+	}
+	if (/indonesian|malay/i.test(lang)) return "Assalamualaikum";
+	return "Assalamu alaikum";
 }
 
 function greetingText(sc = {}, st = {}) {
@@ -1719,12 +2383,29 @@ function greetingText(sc = {}, st = {}) {
 		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
 	);
 	const lang = languageOf(sc, st);
-	if (/arabic/i.test(lang)) return `أهلاً ${name}، كيف أقدر أساعدك اليوم؟`;
-	if (/spanish/i.test(lang)) return `Hola ${name}, ¿cómo puedo ayudarte hoy?`;
-	if (/french/i.test(lang)) return `Bonjour ${name}, comment puis-je vous aider aujourd'hui ?`;
-	if (/urdu/i.test(lang)) return `${name}، میں آپ کی کیسے مدد کر سکتا ہوں؟`;
-	if (/hindi/i.test(lang)) return `नमस्ते ${name}, मैं आपकी कैसे मदद कर सकता हूँ?`;
-	return `Hi ${name}, how can I help you today?`;
+	const opening = islamicGreetingForLanguage(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${opening} ${name}, como puedo ayudarte hoy?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${opening} ${name}, comment puis-je vous aider aujourd'hui ?`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, bagaimana saya bisa membantu hari ini?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, bagaimana saya boleh membantu hari ini?`;
+	}
+	return `${opening} ${name}, how can I help you today?`;
 }
 
 function wantsHotelRecommendation(text = "") {
@@ -1757,15 +2438,43 @@ function wantsPriceButMissingDates(text = "", st = {}) {
 function selectedHotelRoomQuestionText(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (roomCapacityOrTypeInquiryText(text)) return true;
 	const mentionsRoom =
 		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
 			normalized
-		) || /غرف|غرفة|سرير|أسرة|اشخاص|أشخاص|افراد|أفراد/.test(normalized);
+		) ||
+		/غرف|غرفة|غرفه|سرير|أسرة|اسرة|اشخاص|أشخاص|افراد|أفراد/.test(normalized) ||
+		/(?:ghoraf|ghuraf|odah|oda|owda|awda)/i.test(latinCompact);
 	if (!mentionsRoom) return false;
+	const asksRoomOptions =
+		/\b(?:what|which|list|show|tell|send|share)\b[^.!?\u061f\n]*(?:room|rooms|room\s+types|options)\b/i.test(
+			lower
+		) ||
+		/\b(?:what|which)\s+(?:kind|type|types)\s+of\s+rooms?\b/i.test(lower) ||
+		/\b(?:rooms?|room\s+types?|options)\b[^.!?\u061f\n]*(?:have|offer|available|there|provide)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u064a\u0647|\u0625\u064a\u0647|\u0627\u064a|\u0623\u064a|\u0645\u0627|\u0645\u0627\u0647\u064a|\u0634\u0648|\u0634\u0646\u0648)[^؟\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641|\u0627\u0648\u0636|\u0623\u0648\u0636)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0646\u0648\u0627\u0639|\u0623\u0646\u0648\u0627\u0639|\u0646\u0648\u0639|\u0627\u0644\u0627\u0646\u0648\u0627\u0639)[^؟\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+			arabic
+		) ||
+		/(?:\u0639\u0646\u062f\u0643\u0645|\u0639\u0646\u062f\u0643|\u0641\u064a\u0647|\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631)[^؟\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:\u0628\u062a\u0642\u062f\u0645|\u0628\u062a\u0642\u062f\u0645\u0648|\u062a\u0642\u062f\u0645|\u062a\u0648\u0641\u0631)[^؟\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:eh|eih|ayh|anwa3|anwaa|whatrooms|whichrooms|roomtypes?|typesofrooms?|typesrooms?|ghoraf|ghuraf|odah|oda|owda|awda)/i.test(latinCompact);
+	if (asksRoomOptions) return true;
 	const hasRoomTypeOrCapacity =
 		Boolean(mapRoomToKey(normalized)) ||
-		/\b(?:for\s*)?(?:2|two|3|three|4|four|5|five)\b/i.test(normalized);
+		Boolean(requestedGuestCountFromText(text)) ||
+		/\b(?:for\s*)?(?:2|two|3|three|4|four|5|five|6|six|7|seven|8|eight|9|nine|10|ten)\b/i.test(
+			normalized
+		);
 	if (!hasRoomTypeOrCapacity) return false;
 	return (
 		/[?]/.test(normalized) ||
@@ -1812,10 +2521,10 @@ function selectedHotelAddressQuestionText(text = "") {
 		/\b(?:where\s+is|where's|located|location|address|area|district|map|ubicacion|ubicaci[oó]n|direccion|direcci[oó]n|adresse|emplacement|alamat|lokasi|peta)\b/i.test(
 			lower
 		) ||
-		/(?:\u0627\u064a\u0646|\u0641\u064a\u0646|\u0648\u064a\u0646|\u0645\u0648\u0642\u0639|\u0645\u0643\u0627\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0646\u0637\u0642\u0647|\u062d\u064a|\u06a9\u06c1\u0627\u06ba|\u06a9\u062f\u06be\u0631|\u067e\u062a\u06c1|\u092a\u0924\u093e|\u0915\u0939\u093e\u0902)/i.test(
+		/(?:\u0627\u064a\u0646|\u0641\u064a\u0646|\u0648\u064a\u0646|\u0645\u0648\u0642\u0639|\u0645\u0643\u0627\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0646\u0637\u0642\u0647|\u062d\u064a|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u062e\u0631\u0627\u064a\u0637|\u062c\u0648\u062c\u0644\s*ماب|\u062c\u0648\u062c\u0644\s*مابس|\u06a9\u06c1\u0627\u06ba|\u06a9\u062f\u06be\u0631|\u067e\u062a\u06c1|\u092a\u0924\u093e|\u0915\u0939\u093e\u0902)/i.test(
 			arabic
 		) ||
-		/(?:whereis|location|address|map|ubicacion|direccion|adresse|alamat|lokasi|kahan|kidhar|pata)/i.test(
+		/(?:whereis|location|address|map|googlemaps|googlemap|ubicacion|direccion|adresse|alamat|lokasi|kahan|kidhar|pata)/i.test(
 			latinCompact
 		);
 	if (!asksLocation) return false;
@@ -1826,7 +2535,9 @@ function selectedHotelAddressQuestionText(text = "") {
 		) ||
 		/(?:hotel|funduq)/i.test(latinCompact);
 	const conciseLocationRequest =
-		hasSemanticSignal(text, "location") &&
+		(hasSemanticSignal(text, "location") ||
+			/(?:\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u062e\u0631\u0627\u064a\u0637|\u062c\u0648\u062c\u0644\s*ماب|\u062c\u0648\u062c\u0644\s*مابس)/i.test(arabic) ||
+			/(?:map|googlemaps|googlemap)/i.test(latinCompact)) &&
 		lower.replace(/[^\w\s\u0600-\u06ff\u0900-\u097f]/g, " ").trim().split(/\s+/).filter(Boolean)
 			.length <= 6 &&
 		!hasSemanticSignal(text, ["payment", "confirmation", "reservation", "contact"]);
@@ -1862,8 +2573,50 @@ function selectedHotelBusQuestionText(text = "") {
 	return directBus || (transportToHaram && haramOrStation);
 }
 
+function selectedHotelNusukQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	const mentionsNusuk =
+		/\b(?:nusuk|nusk)\b/i.test(lower) ||
+		/(?:\u0646\u0633\u0643)/i.test(arabic) ||
+		/(?:nusuk|nusk)/i.test(latinCompact);
+	if (!mentionsNusuk) return false;
+	const asksListing =
+		/\b(?:listed|registered|included|available|official|platform|app|on\s+nusuk|in\s+nusuk)\b/i.test(
+			lower
+		) ||
+		/(?:\u0647\u0644|\u0645\u062f\u0631\u062c|\u0645\u062f\u0631\u062c\u0629|\u0645\u0633\u062c\u0644|\u0645\u0633\u062c\u0644\u0629|\u0645\u0648\u062c\u0648\u062f|\u0645\u062a\u0627\u062d|\u0645\u0646\u0635\u0629|\u062a\u0637\u0628\u064a\u0642|\u0631\u0633\u0645\u064a)/i.test(
+			arabic
+		) ||
+		/(?:listed|registered|included|available|official|platform|app|madraj|musajal)/i.test(
+			latinCompact
+		);
+	return asksListing || /[?\u061f]/.test(String(text || ""));
+}
+
+function selectedHotelPolicyQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim()) return false;
+	if (cancellationRefundPolicyQuestionText(text)) return true;
+	const stayDates = extractDateRange(text);
+	if (stayDates?.checkinISO && stayDates?.checkoutISO) return false;
+	return (
+		/\b(?:policy|policies|terms|conditions|rules|house rules|check[\s-]?in|check[\s-]?out|checkout|early check|late check|children|child|extra bed|breakfast|meal|deposit|no[\s-]?show|passport|id card|identification|smoking|pet|damage)\b/i.test(
+			lower
+		) ||
+		/(?:\u0633\u064a\u0627\u0633\u0629|\u0633\u064a\u0627\u0633\u0627\u062a|\u0634\u0631\u0648\u0637|\u0623\u062d\u0643\u0627\u0645|\u0627\u062d\u0643\u0627\u0645|\u0642\u0648\u0627\u0639\u062f|\u062a\u0639\u0644\u064a\u0645\u0627\u062a|\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u062a\u0634\u064a\u0643\s*ا?ن|\u0625\u0641\u0637\u0627\u0631|\u0627\u0641\u0637\u0627\u0631|\u0648\u062c\u0628\u0627\u062a|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0633\u0631\u064a\u0631\s+\u0625\u0636\u0627\u0641\u064a|\u0633\u0631\u064a\u0631\s+\u0627\u0636\u0627\u0641\u064a|\u0639\u0631\u0628\u0648\u0646|\u062a\u0623\u0645\u064a\u0646|\u062a\u0627\u0645\u064a\u0646|\u062c\u0648\u0627\u0632|\u0647\u0648\u064a\u0629|\u0647\u0648\u064a\u0647|\u062a\u062f\u062e\u064a\u0646|\u062d\u064a\u0648\u0627\u0646\u0627\u062a|\u0623\u0636\u0631\u0627\u0631|\u0627\u0636\u0631\u0627\u0631|\u0644\u0627\s*\u064a\u062d\u0636\u0631)/i.test(
+			arabic
+		) ||
+		/(?:policy|policies|terms|conditions|houserules|checkin|checkout|earlycheckin|latecheckout|children|extrabed|breakfast|meal|deposit|noshow|passport|idcard|smoking|pets|damage)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function selectedHotelFactQuestionText(text = "") {
 	return (
+		selectedHotelPolicyQuestionText(text) ||
+		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
 		selectedHotelAddressQuestionText(text)
@@ -2260,12 +3013,19 @@ function roomCapacityOrTypeInquiryText(text = "") {
 			arabic
 		) ||
 		/(?:ghorfa|ghurfa|oda|room|bed)/i.test(latinCompact);
+	const hasOccupancyWord =
+		/\b(?:people|persons?|guests?|adults?|pax)\b/i.test(lower) ||
+		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0628\u0627\u0644\u063a)/i.test(
+			arabic
+		);
+	const requestedGuestCount = requestedGuestCountFromText(raw);
 	const hasCapacityOrType =
 		Boolean(mapRoomToKey(raw)) ||
-		/\b(?:2|two|3|three|4|four|5|five)\s*(?:people|persons|guests|adults|beds?)\b/i.test(
+		Boolean(requestedGuestCount) ||
+		/\b(?:2|two|3|three|4|four|5|five|6|six|7|seven|8|eight|9|nine|10|ten)\s*(?:people|persons|guests|adults|beds?)\b/i.test(
 			lower
 		) ||
-		/(?:\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u062a\u0644\u062a|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u0631\u0628\u0627\u0639|\u062e\u0645\u0633|\u062e\u0645\u0627\u0633)/i.test(
+		/(?:\u0641\u0631\u062f|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u062a\u0644\u062a|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u0631\u0628\u0627\u0639|\u062e\u0645\u0633|\u062e\u0645\u0627\u0633|\u0633\u062a|\u0633\u062a\u0629|\u0633\u062a\u0647|\u0633\u0628\u0639|\u0633\u0628\u0639\u0629|\u0633\u0628\u0639\u0647|\u062b\u0645\u0627\u0646|\u062a\u0645\u0627\u0646|\u062a\u0633\u0639|\u0639\u0634\u0631)/i.test(
 			arabic
 		);
 	const hasBookingIntent =
@@ -2275,7 +3035,7 @@ function roomCapacityOrTypeInquiryText(text = "") {
 		/(?:\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0623\u0628\u063a\u0649|\u0627\u0628\u063a\u0649|\u0623\u0631\u064a\u062f|\u0627\u0631\u064a\u062f|\u0627\u062d\u062a\u0627\u062c|\u0645\u0645\u0643\u0646|\u0633\u0627\u0639\u062f|\u0645\u062a\u0627\u062d|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632)/i.test(
 			arabic
 		);
-	return hasRoomWord && (hasCapacityOrType || hasBookingIntent);
+	return (hasRoomWord || (hasOccupancyWord && hasCapacityOrType)) && (hasCapacityOrType || hasBookingIntent);
 }
 
 function wantsNewReservationIntent(text = "", lu = {}) {
@@ -2318,10 +3078,150 @@ function isoDate(value = "") {
 	return date.toISOString().slice(0, 10);
 }
 
+function monthNumberFromText(value = "") {
+	const token = String(value || "")
+		.toLowerCase()
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.trim();
+	const normalizedArabic = token
+		.replace(/\u0623|\u0625|\u0622/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647");
+	const months = [
+		["jan", "january", "\u064a\u0646\u0627\u064a\u0631", "\u064a\u0646\u0627\u064a\u0631\u0648"],
+		["feb", "february", "\u0641\u0628\u0631\u0627\u064a\u0631"],
+		["mar", "march", "\u0645\u0627\u0631\u0633"],
+		["apr", "april", "\u0627\u0628\u0631\u064a\u0644"],
+		["may", "\u0645\u0627\u064a\u0648"],
+		["jun", "june", "\u064a\u0648\u0646\u064a\u0648", "\u064a\u0648\u0646\u064a\u0647"],
+		["jul", "july", "\u064a\u0648\u0644\u064a\u0648", "\u064a\u0648\u0644\u064a\u0647"],
+		["aug", "august", "\u0627\u063a\u0633\u0637\u0633", "\u0627\u0648\u063a\u0633\u0637\u0633"],
+		["sep", "sept", "september", "\u0633\u0628\u062a\u0645\u0628\u0631"],
+		["oct", "october", "\u0627\u0643\u062a\u0648\u0628\u0631"],
+		["nov", "november", "\u0646\u0648\u0641\u0645\u0628\u0631"],
+		["dec", "december", "\u062f\u064a\u0633\u0645\u0628\u0631"],
+	];
+	for (let index = 0; index < months.length; index += 1) {
+		if (months[index].includes(token) || months[index].includes(normalizedArabic)) {
+			return index + 1;
+		}
+	}
+	return 0;
+}
+
+function buildFutureIsoDateFromParts(day, month, year = null) {
+	const parsedDay = Number(day);
+	const parsedMonth = Number(month);
+	if (!parsedDay || !parsedMonth) return null;
+	const baseYear = Number(year) || new Date().getFullYear();
+	const date = new Date(Date.UTC(baseYear, parsedMonth - 1, parsedDay));
+	if (
+		date.getUTCDate() !== parsedDay ||
+		date.getUTCMonth() !== parsedMonth - 1 ||
+		date.getUTCFullYear() !== baseYear
+	) {
+		return null;
+	}
+	for (
+		let guard = 0;
+		guard < 8 && date.toISOString().slice(0, 10) < todayISODate();
+		guard += 1
+	) {
+		date.setUTCFullYear(date.getUTCFullYear() + 1);
+	}
+	return date.toISOString().slice(0, 10);
+}
+
+function parseSameMonthDateRange(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const monthToken =
+		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const rangeRegex = new RegExp(
+		`(?:\\b(?:from|arrival|check\\s*-?in|date|dates|تاريخ|الوصول|من)\\b\\s*)?(\\d{1,2})\\s+${monthToken}\\s*(?:\\b(?:to|until|till|through|checkout|check\\s*-?out|departure)\\b|\\-|–|—|الى|إلى|ل|حتي|حتى|الي)\\s*(\\d{1,2})(?:\\s+${monthToken})?(?:\\s*,?\\s*(20\\d{2}))?`,
+		"i"
+	);
+	const match = normalized.match(rangeRegex);
+	if (!match) return null;
+	const startDay = match[1];
+	const startMonth = monthNumberFromText(match[2]);
+	const endDay = match[3];
+	const endMonth = monthNumberFromText(match[4]) || startMonth;
+	const year = match[5] || null;
+	if (!startMonth || !endMonth) return null;
+	const checkinISO = buildFutureIsoDateFromParts(startDay, startMonth, year);
+	let checkoutISO = buildFutureIsoDateFromParts(endDay, endMonth, year);
+	if (!checkinISO || !checkoutISO) return null;
+	if (checkoutISO <= checkinISO) {
+		const checkout = new Date(`${checkoutISO}T00:00:00Z`);
+		checkout.setUTCMonth(checkout.getUTCMonth() + 1);
+		checkoutISO = checkout.toISOString().slice(0, 10);
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: `${startDay} ${match[2]}`,
+			checkout: `${endDay} ${match[4] || match[2]}`,
+			calendar: "gregorian",
+		},
+	};
+}
+
+function adjustCheckoutAfterCheckin(checkoutISO = "", checkinISO = "") {
+	if (!checkoutISO || !checkinISO || checkoutISO > checkinISO) return checkoutISO;
+	const checkout = new Date(`${checkoutISO}T00:00:00Z`);
+	if (Number.isNaN(checkout.getTime())) return checkoutISO;
+	for (let guard = 0; guard < 8 && checkout.toISOString().slice(0, 10) <= checkinISO; guard += 1) {
+		checkout.setUTCFullYear(checkout.getUTCFullYear() + 1);
+	}
+	return checkout.toISOString().slice(0, 10);
+}
+
+function extractSingleStayDate(text = "", st = {}) {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const monthToken =
+		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const singleDateRegex = new RegExp(
+		`(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631\\u0629)?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
+		"i"
+	);
+	const match = normalized.match(singleDateRegex);
+	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
+	const day = match[1];
+	const month = monthNumberFromText(match[2]);
+	const year = match[3] || null;
+	if (!month) return { checkinISO: null, checkoutISO: null, raw: null };
+	const iso = buildFutureIsoDateFromParts(day, month, year);
+	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
+	const matchedText = String(match[0] || "");
+	const isCheckout =
+		/\b(?:checkout|check\s*-?out|departure)\b/i.test(matchedText) ||
+		/(?:\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629)/i.test(
+			matchedText
+		) ||
+		(Boolean(st?.slots?.checkinISO) && !st?.slots?.checkoutISO);
+	if (isCheckout) {
+		return {
+			checkinISO: null,
+			checkoutISO: adjustCheckoutAfterCheckin(iso, st?.slots?.checkinISO || ""),
+			raw: { checkout: `${day} ${match[2]}`, calendar: "gregorian" },
+		};
+	}
+	return {
+		checkinISO: iso,
+		checkoutISO: null,
+		raw: { checkin: `${day} ${match[2]}`, calendar: "gregorian" },
+	};
+}
+
 function extractDateRange(text = "") {
+	const sameMonthRange = parseSameMonthDateRange(text);
+	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
+		return sameMonthRange;
+	}
 	const quick = quickDateRange(text);
 	if (quick?.checkinISO && quick?.checkoutISO) {
-		return { checkinISO: quick.checkinISO, checkoutISO: quick.checkoutISO };
+		return quick;
 	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
@@ -2766,7 +3666,7 @@ function simpleQuoteText({ sc, st, quote }) {
 	}
 	return `${name}, ${roomName} at ${hotelName} is ${quote.totals.totalPriceWithCommission} ${cleanCurrency(
 		quote.currency
-	)} total for ${quote.nights} nights. Would you like me to continue to the review step?`;
+	)} total for ${quote.nights} nights. Would you like me to continue with the reservation details?`;
 }
 
 function crossHotelRequestText(text = "") {
@@ -2814,15 +3714,15 @@ function selectedHotelSupportBoundaryReply(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u062e\u0635\u0648\u0635 ${hotelName} \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u0623\u0645\u0644\u0643 \u062a\u0641\u0627\u0635\u064a\u0644\u0627 \u0645\u0624\u0643\u062f\u0629 \u0639\u0646 \u0641\u0646\u0627\u062f\u0642 \u0623\u062e\u0631\u0649 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629. \u0644\u0623\u064a \u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0639\u0627\u0645 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL}\u060c \u0648\u064a\u0633\u0639\u062f\u0646\u064a \u0647\u0646\u0627 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 ${hotelName} \u0641\u0642\u0637.`;
+		return `${name}\u060c \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u062e\u0635\u0648\u0635 ${hotelName} \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u0623\u0645\u0644\u0643 \u062a\u0641\u0627\u0635\u064a\u0644\u0627 \u0645\u0624\u0643\u062f\u0629 \u0639\u0646 \u0641\u0646\u0627\u062f\u0642 \u0623\u062e\u0631\u0649 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u062f\u0631\u062f\u0634\u0629. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, en este chat solo puedo ayudarte con ${hotelName}; no tengo detalles verificados sobre otros hoteles desde este soporte. Para una consulta general, escribe a ${AI_SUPPORT_EMAIL}. Aqui puedo revisar ${hotelName} solamente.`;
+		return `${name}, en este chat solo puedo ayudarte con ${hotelName}; no tengo detalles verificados sobre otros hoteles desde este soporte. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}; je n'ai pas d'informations verifiees sur d'autres hotels ici. Pour une question generale, ecrivez a ${AI_SUPPORT_EMAIL}. Ici, je peux verifier ${hotelName} uniquement.`;
+		return `${name}, dans ce chat je peux uniquement vous aider pour ${hotelName}; je n'ai pas d'informations verifiees sur d'autres hotels ici. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, I can help with ${hotelName} only in this chat, and I do not have verified details about other hotels from here. For general Jannat Booking questions, please email ${AI_SUPPORT_EMAIL}. I can still check ${hotelName} only in this chat.`;
+	return `${name}, I can help with ${hotelName} only in this chat, and I do not have verified details about other hotels from here. ${unsupportedAnswerNextStepText(sc, st)}`;
 }
 
 function initialHotelGreetingText(sc = {}, st = {}) {
@@ -2830,16 +3730,29 @@ function initialHotelGreetingText(sc = {}, st = {}) {
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
 	const agentName = st.agentName || "Sara";
 	const lang = languageOf(sc, st);
+	const opening = islamicGreetingForLanguage(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `\u0623\u0647\u0644\u0627\u064b ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+		return `${opening} ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
+		return `${opening} ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
+		return `${opening} ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui ?`;
 	}
-	return `Hello ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba ${agentName}\u060c ${hotelName} reception and reservations \u0633\u06d2 \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 ${agentName}, ${hotelName} \u0930\u093f\u0938\u0947\u092a\u094d\u0936\u0928 \u0914\u0930 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928\u094d\u0938 \u0938\u0947 \u0939\u0942\u0902\u0964 \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari resepsionis dan reservasi ${hotelName}. Bagaimana saya bisa membantu hari ini?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari penerimaan dan tempahan ${hotelName}. Bagaimana saya boleh membantu hari ini?`;
+	}
+	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
 }
 
 function hotelComplaintText(text = "") {
@@ -3003,16 +3916,29 @@ function hotelHandoffQuoteIntroText(
 	const pricePart = total
 		? `${total} ${currency}${nights ? ` total for ${nights} nights` : ""}`
 		: "the selected priced option";
+	const opening = islamicGreetingForLanguage(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0648\u0635\u0644\u062a\u0646\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u062e\u062a\u0627\u0631: ${room} \u0628\u0633\u0639\u0631 ${pricePart}. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a\u0629\u061f`;
+		return `${opening} ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0648\u0635\u0644\u062a\u0646\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u062e\u062a\u0627\u0631: ${room} \u0628\u0633\u0639\u0631 ${pricePart}. \u0647\u0644 \u062a\u0631\u063a\u0628 \u0623\u0646 \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0631\u0633\u0645\u064a\u0629\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `Hola ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
+		return `${opening} ${name}, soy ${agentName} de recepcion y reservas de ${hotelName}. Ya tengo la opcion seleccionada: ${room}, ${pricePart}. Quieres continuar a la revision oficial de la reserva?`;
 	}
 	if (/french/i.test(lang)) {
-		return `Bonjour ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
+		return `${opening} ${name}, je suis ${agentName}, reception et reservations de ${hotelName}. J'ai bien l'option selectionnee: ${room}, ${pricePart}. Souhaitez-vous continuer vers la verification officielle de la reservation ?`;
 	}
-	return `Hi ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
+	if (/urdu/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u06cc\u06ba ${agentName}\u060c ${hotelName} reception and reservations \u0633\u06d2 \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u0631\u06d2 \u067e\u0627\u0633 \u0622\u067e \u06a9\u0627 \u0645\u0646\u062a\u062e\u0628 \u0622\u067e\u0634\u0646 \u062a\u06cc\u0627\u0631 \u06c1\u06d2: ${room}, ${pricePart}. \u06a9\u06cc\u0627 \u0645\u06cc\u06ba \u0633\u0631\u06a9\u0627\u0631\u06cc \u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0631\u06cc\u0648\u06cc\u0648 \u06a9\u06d2 \u0644\u06cc\u06d2 \u0622\u06af\u06d2 \u0628\u0691\u06be\u0648\u06ba\u061f`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${opening} ${name}, \u092e\u0948\u0902 ${agentName}, ${hotelName} \u0930\u093f\u0938\u0947\u092a\u094d\u0936\u0928 \u0914\u0930 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928\u094d\u0938 \u0938\u0947 \u0939\u0942\u0902\u0964 \u0906\u092a\u0915\u093e \u091a\u0941\u0928\u093e \u0939\u0941\u0906 \u0935\u093f\u0915\u0932\u094d\u092a \u0924\u0948\u092f\u093e\u0930 \u0939\u0948: ${room}, ${pricePart}. \u0915\u094d\u092f\u093e \u092e\u0948\u0902 \u0906\u0927\u093f\u0915\u093e\u0930\u093f\u0915 \u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u0930\u093f\u0935\u094d\u092f\u0942 \u0915\u0947 \u0932\u093f\u090f \u0906\u0917\u0947 \u092c\u0922\u0942\u0902?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari resepsionis dan reservasi ${hotelName}. Opsi pilihan Anda sudah siap: ${room}, ${pricePart}. Apakah Anda ingin lanjut ke pemeriksaan reservasi resmi?`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${opening} ${name}, saya ${agentName} dari penerimaan dan tempahan ${hotelName}. Pilihan anda sudah sedia: ${room}, ${pricePart}. Adakah anda mahu teruskan ke semakan tempahan rasmi?`;
+	}
+	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue with the reservation details?`;
 }
 
 function stabilizeHotelHandoffIntro(text = "", sc = {}, st = {}, optionOrHotel = {}, meta = {}) {
@@ -3148,9 +4074,58 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 			roomType: room.roomType,
 			displayName: room.displayName || room.roomType,
 			displayNameOther: room.displayName_OtherLanguage || "",
+			description: compactRoomFactText(room.description, 260),
+			descriptionOther: compactRoomFactText(
+				room.description_OtherLanguage,
+				260
+			),
+			amenities: compactRoomFactList(room.amenities, 12),
+			views: compactRoomFactList(room.views, 6),
+			extraAmenities: compactRoomFactList(room.extraAmenities, 8),
+			roomSize: compactRoomFactText(room.roomSize, 80),
+			bedsCount: safePositiveRoomNumber(room.bedsCount),
+			roomForGender: compactRoomFactText(room.roomForGender, 80),
 			basePrice: room.price?.basePrice || 0,
 			currency: hotel?.currency || "SAR",
 		}));
+}
+
+function compactRoomFactText(value = "", maxLength = 260) {
+	const text = cleanHotelFactText(value);
+	if (!text) return "";
+	if (text.length <= maxLength) return text;
+	return `${text.slice(0, Math.max(0, maxLength - 3)).trim()}...`;
+}
+
+function compactRoomFactList(values = [], limit = 12) {
+	const source = Array.isArray(values) ? values : [values];
+	const seen = new Set();
+	const result = [];
+	for (const item of source) {
+		const raw =
+			typeof item === "object" && item !== null
+				? item.name ||
+				  item.label ||
+				  item.title ||
+				  item.value ||
+				  item.en ||
+				  item.ar ||
+				  item.amenity ||
+				  ""
+				: item;
+		const text = compactRoomFactText(raw, 90);
+		const key = text.toLowerCase();
+		if (!text || seen.has(key)) continue;
+		seen.add(key);
+		result.push(text);
+		if (result.length >= limit) break;
+	}
+	return result;
+}
+
+function safePositiveRoomNumber(value) {
+	const number = Number(value);
+	return Number.isFinite(number) && number > 0 ? number : "";
 }
 
 function cleanHotelFactText(value = "") {
@@ -3189,19 +4164,26 @@ function hotelGoogleMapsDirectionsUrl(hotel = {}) {
 	return `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}&travelmode=driving`;
 }
 
+function hotelGoogleMapsLocationUrl(hotel = {}) {
+	const coords = hotelCoordinates(hotel);
+	if (!coords) return "";
+	const query = encodeURIComponent(`${coords.latitude},${coords.longitude}`);
+	return `https://www.google.com/maps/search/?api=1&query=${query}`;
+}
+
 function hotelGoogleMapsUrl(hotel = {}) {
-	return hotelGoogleMapsDirectionsUrl(hotel);
+	return hotelGoogleMapsLocationUrl(hotel);
 }
 
 function hotelGoogleMapsMarkdownLink(hotel = {}, lang = "English") {
 	const url = hotelGoogleMapsUrl(hotel);
 	if (!url) return "";
-	let label = "Google Maps Driving Route to Al Haram";
-	if (/arabic/i.test(lang)) label = "\u0637\u0631\u064a\u0642 Google Maps \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645";
-	else if (/spanish/i.test(lang)) label = "Ruta en Google Maps al Haram";
-	else if (/french/i.test(lang)) label = "Itineraire Google Maps vers Al Haram";
-	else if (/indonesian/i.test(lang)) label = "Rute Google Maps ke Al Haram";
-	else if (/malay|malaysia/i.test(lang)) label = "Laluan Google Maps ke Al Haram";
+	let label = "Hotel location on Google Maps";
+	if (/arabic/i.test(lang)) label = "\u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps";
+	else if (/spanish/i.test(lang)) label = "Ubicacion del hotel en Google Maps";
+	else if (/french/i.test(lang)) label = "Emplacement de l'hotel sur Google Maps";
+	else if (/indonesian/i.test(lang)) label = "Lokasi hotel di Google Maps";
+	else if (/malay|malaysia/i.test(lang)) label = "Lokasi hotel di Google Maps";
 	return `[${label}](${url})`;
 }
 
@@ -3210,7 +4192,10 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 	if (!hotel) return null;
 	const distances = hotel.distances || {};
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
+	const hotelPolicies = activeHotelPolicyQA(hotel.hotelPolicyQA);
 	const mapsUrl = hotelGoogleMapsUrl(hotel);
+	const directionsUrl = hotelGoogleMapsDirectionsUrl(hotel);
 	return {
 		displayName: localizedHotelName(sc, st),
 		hotelName: hotel.hotelName || "",
@@ -3227,54 +4212,149 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		},
 		location: hotel.location || null,
 		googleMapsLocationUrl: mapsUrl || "",
-		googleMapsDrivingDirectionsUrl: mapsUrl || "",
+		googleMapsDrivingDirectionsUrl: directionsUrl || "",
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
-		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 12),
+		isNusuk: hotel.isNusuk === true,
+		isNusukText: nusukDetails,
+		hotelPolicyQA: hotelPolicies,
+		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 8),
 	};
 }
 
 function inlineRoomOptions(options = [], lang = "") {
-	const useArabic = /arabic/i.test(lang);
 	return options
 		.map((option) =>
-			String(
-				useArabic && hasArabicScript(option?.displayNameOther)
-					? option.displayNameOther
-					: option?.displayName || option?.roomType || ""
-			).trim()
+			roomOptionDisplayName(option, lang)
 		)
 		.filter(Boolean)
 		.slice(0, 5)
 		.join(" / ");
 }
 
+function roomOptionDisplayName(option = {}, lang = "") {
+	const useArabic = /arabic/i.test(lang);
+	return String(
+		useArabic && hasArabicScript(option?.displayNameOther)
+			? option.displayNameOther
+			: option?.displayName || option?.roomType || ""
+	).trim();
+}
+
+function roomOptionsList(options = [], lang = "", limit = 6) {
+	const seen = new Set();
+	return (Array.isArray(options) ? options : [])
+		.map((option) => roomOptionDisplayName(option, lang))
+		.filter(Boolean)
+		.filter((name) => {
+			const key = name.toLowerCase();
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		})
+		.slice(0, limit);
+}
+
+function roomOptionsBullets(options = [], lang = "") {
+	return roomOptionsList(options, lang)
+		.map((name) => `- ${name}`)
+		.join("\n");
+}
+
+function roomOptionsListText(sc = {}, st = {}, options = []) {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const lang = languageOf(sc, st);
+	const bullets = roomOptionsBullets(options, lang);
+	const hasStayDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	const dateLines = hasStayDates ? localizedStayDateLines(sc, st) : {};
+	const dateText = [dateLines.primary, dateLines.secondary ? `(${dateLines.secondary})` : ""]
+		.filter(Boolean)
+		.join(" ");
+	if (!bullets) {
+		if (/arabic/i.test(lang)) {
+			if (hasStayDates) {
+				return `${name}\u060c \u0648\u0635\u0644\u062a\u0646\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}. \u0644\u0627 \u0623\u0631\u0649 \u0642\u0627\u0626\u0645\u0629 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. \u0623\u0631\u0633\u0644 \u0639\u062f\u062f \u0627\u0644\u0623\u0634\u062e\u0627\u0635 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628.`;
+			}
+			return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0644\u0627 \u0623\u0631\u0649 \u0642\u0627\u0626\u0645\u0629 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. \u0623\u0631\u0633\u0644 \u0639\u062f\u062f \u0627\u0644\u0623\u0634\u062e\u0627\u0635 \u0623\u0648 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0642\u0631\u0628 \u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628.`;
+		}
+		if (hasStayDates) {
+			return `${name}, I have the dates: ${dateText}. I do not currently see active room options listed for ${hotelName}. Send the guest count and I will check the closest suitable option.`;
+		}
+		return `${name}, you are right. I do not currently see active room options listed for ${hotelName}. Send the guest count or dates and I will check the closest suitable option.`;
+	}
+	if (/arabic/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}\u060c \u0648\u0635\u0644\u062a\u0646\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}. \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644 \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631\u061f`;
+		}
+		return `${name}\u060c \u062d\u0642\u0643 \u0639\u0644\u064a. \u0623\u0646\u0648\u0627\u0639 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644\u061f \u0648\u0625\u0630\u0627 \u062a\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631\u060c \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, perfecto, ya tengo las fechas: ${dateText}. Las habitaciones disponibles en ${hotelName} son:\n${bullets}\n\nCual prefieres para revisar precio y disponibilidad?`;
+		}
+		return `${name}, claro. Las habitaciones disponibles en ${hotelName} son:\n${bullets}\n\nCual prefieres? Si quieres precio, enviame las fechas de entrada y salida.`;
+	}
+	if (/french/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, parfait, j'ai bien les dates : ${dateText}. Les types de chambres disponibles a ${hotelName} sont :\n${bullets}\n\nLequel preferez-vous afin que je verifie le prix et la disponibilite ?`;
+		}
+		return `${name}, bien sur. Les types de chambres disponibles a ${hotelName} sont :\n${bullets}\n\nLequel preferez-vous ? Si vous souhaitez le prix, envoyez les dates d'arrivee et de depart.`;
+	}
+	if (/urdu/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}\u060c \u062c\u06cc \u0628\u0627\u0644\u06a9\u0644\u060c \u062a\u0627\u0631\u06cc\u062e\u06cc\u06ba \u0645\u0648\u0635\u0648\u0644 \u06c1\u0648 \u06af\u0626\u06cc \u06c1\u06cc\u06ba: ${dateText}. ${hotelName} \u0645\u06cc\u06ba \u062f\u0633\u062a\u06cc\u0627\u0628 \u06a9\u0645\u0631\u0648\u06ba \u06a9\u06cc \u0627\u0642\u0633\u0627\u0645:\n${bullets}\n\n\u0622\u067e \u06a9\u0648 \u06a9\u0648\u0646 \u0633\u0627 \u06a9\u0645\u0631\u06c1 \u067e\u0633\u0646\u062f \u06c1\u06d2 \u062a\u0627\u06a9\u06c1 \u0645\u06cc\u06ba \u0642\u06cc\u0645\u062a \u0627\u0648\u0631 \u062f\u0633\u062a\u06cc\u0627\u0628\u06cc \u0686\u06cc\u06a9 \u06a9\u0631 \u0633\u06a9\u0648\u06ba\u061f`;
+		}
+		return `${name}\u060c \u062c\u06cc \u0628\u0627\u0644\u06a9\u0644\u06d4 ${hotelName} \u0645\u06cc\u06ba \u062f\u0633\u062a\u06cc\u0627\u0628 \u06a9\u0645\u0631\u0648\u06ba \u06a9\u06cc \u0627\u0642\u0633\u0627\u0645:\n${bullets}\n\n\u0622\u067e \u06a9\u0648 \u06a9\u0648\u0646 \u0633\u0627 \u06a9\u0645\u0631\u06c1 \u067e\u0633\u0646\u062f \u06c1\u06d2\u061f \u0642\u06cc\u0645\u062a \u06a9\u06d2 \u0644\u06cc\u06d2 \u0686\u06cc\u06a9 \u0627\u0646 \u0627\u0648\u0631 \u0686\u06cc\u06a9 \u0622\u0624\u0679 \u06a9\u06cc \u062a\u0627\u0631\u06cc\u062e\u06cc\u06ba \u0628\u06be\u06cc\u062c \u062f\u06cc\u06ba\u06d4`;
+	}
+	if (/hindi/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, bilkul, dates mil gayi hain: ${dateText}. ${hotelName} \u092e\u0947\u0902 \u0909\u092a\u0932\u092c\u094d\u0927 \u0930\u0942\u092e \u091f\u093e\u0907\u092a:\n${bullets}\n\n\u0906\u092a \u0915\u094c\u0928 \u0938\u093e \u092a\u0938\u0902\u0926 \u0915\u0930\u0947\u0902\u0917\u0947 \u0924\u093e\u0915\u093f \u092e\u0948\u0902 price aur availability check kar sakun?`;
+		}
+		return `${name}, bilkul. ${hotelName} \u092e\u0947\u0902 \u0909\u092a\u0932\u092c\u094d\u0927 \u0930\u0942\u092e \u091f\u093e\u0907\u092a:\n${bullets}\n\n\u0906\u092a \u0915\u094c\u0928 \u0938\u093e \u092a\u0938\u0902\u0926 \u0915\u0930\u0947\u0902\u0917\u0947? \u0915\u0940\u092e\u0924 \u091a\u093e\u0939\u093f\u090f \u0924\u094b \u091a\u0947\u0915-\u0907\u0928 \u0914\u0930 \u091a\u0947\u0915-\u0906\u0909\u091f \u0924\u093e\u0930\u0940\u0916 \u092d\u0947\u091c\u0947\u0902.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, baik, tanggalnya sudah saya terima: ${dateText}. Tipe kamar yang tersedia di ${hotelName}:\n${bullets}\n\nMana yang Anda pilih agar saya cek harga dan ketersediaannya?`;
+		}
+		return `${name}, tentu. Tipe kamar yang tersedia di ${hotelName}:\n${bullets}\n\nMana yang Anda pilih? Untuk harga, kirim tanggal check-in dan check-out.`;
+	}
+	if (/malay/i.test(lang)) {
+		if (hasStayDates) {
+			return `${name}, baik, tarikh sudah saya terima: ${dateText}. Jenis bilik yang tersedia di ${hotelName}:\n${bullets}\n\nYang mana anda pilih supaya saya semak harga dan ketersediaan?`;
+		}
+		return `${name}, tentu. Jenis bilik yang tersedia di ${hotelName}:\n${bullets}\n\nYang mana anda pilih? Untuk harga, hantarkan tarikh check-in dan check-out.`;
+	}
+	if (hasStayDates) {
+		return `${name}, perfect, I have the dates: ${dateText}. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer so I can check price and availability?`;
+	}
+	return `${name}, of course. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer? If you want the price, send the check-in and checkout dates.`;
+}
+
 function roomPreferenceSalesText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
 	const lang = languageOf(sc, st);
-	const options = inlineRoomOptions(
-		activeHotelRoomSummaries(st.hotel).slice(0, 5),
-		lang
-	);
+	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 6);
+	const options = roomOptionsBullets(activeRooms, lang);
 	if (/arabic/i.test(lang)) {
 		return options
-			? `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0641\u064a ${hotelName} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u062a\u0634\u0645\u0644: ${options}. \u0623\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u062a\u0641\u0636\u0644 \u0644\u0644\u062d\u062c\u0632\u061f`
+			? `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0641\u064a ${hotelName} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629:\n${options}\n\n\u0623\u064a \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u062a\u0641\u0636\u0644 \u0644\u0644\u062d\u062c\u0632\u061f`
 			: `${name}\u060c \u0628\u0627\u0644\u062a\u0623\u0643\u064a\u062f. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u062a\u062e\u062a\u0627\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628. \u0645\u0627 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
 		return options
-			? `${name}, claro. En ${hotelName} puedo ayudarte a elegir la habitacion adecuada. Tenemos opciones como: ${options}. Que tipo de habitacion quieres reservar?`
+			? `${name}, claro. En ${hotelName} puedo ayudarte a elegir la habitacion adecuada. Tenemos estas opciones:\n${options}\n\nQue tipo de habitacion quieres reservar?`
 			: `${name}, claro. Puedo ayudarte a elegir la habitacion adecuada. Que tipo de habitacion o cuantos huespedes necesitas?`;
 	}
 	if (/french/i.test(lang)) {
 		return options
-			? `${name}, bien sur. A ${hotelName}, je peux vous aider a choisir la chambre qui convient. Nous avons notamment : ${options}. Quel type de chambre souhaitez-vous reserver ?`
+			? `${name}, bien sur. A ${hotelName}, je peux vous aider a choisir la chambre qui convient. Nous avons notamment :\n${options}\n\nQuel type de chambre souhaitez-vous reserver ?`
 			: `${name}, bien sur. Je peux vous aider a choisir la chambre qui convient. Quel type de chambre ou combien de personnes faut-il prevoir ?`;
 	}
 	return options
-		? `${name}, of course. At ${hotelName}, I can help you choose the right room. We currently have ${options}; which room type would you like to book?`
+		? `${name}, of course. At ${hotelName}, I can help you choose the right room. We currently have:\n${options}\n\nWhich room type would you like to book?`
 		: `${name}, of course. I can help you choose the right room. Which room type or guest count should I prepare for you?`;
 }
 
@@ -3293,7 +4373,10 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	const hotelName = localizedHotelName(sc, st);
-	const roomNames = inlineRoomOptions(rooms, lang) || roomTypeLabel(roomTypeKey);
+	const roomNames =
+		/arabic/i.test(lang) && roomTypeKey
+			? localizedRoomTypeLabel(roomTypeKey, lang)
+			: inlineRoomOptions(rooms, lang) || localizedRoomTypeLabel(roomTypeKey, lang);
 	const capacity = roomCapacityLabel(roomTypeKey, lang);
 	if (/arabic/i.test(lang)) {
 		const fit = capacity
@@ -3311,6 +4394,431 @@ function roomFitSalesIntroText(sc = {}, st = {}, roomTypeKey = "", rooms = []) {
 	}
 	const fit = capacity ? `, which is a suitable fit for ${capacity}` : "";
 	return `${name}, of course. At ${hotelName}, we have ${roomNames}${fit}. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
+}
+
+function requestedGuestCountFromText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return null;
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const counts = [];
+	const addCount = (value) => {
+		const count = reservationDetailCount(value, { allowZero: false });
+		if (count !== null && count <= 30) counts.push(count);
+	};
+	addCount(countNearTerms(normalized, GUEST_COUNT_TERMS, { allowZero: false }));
+	addCount(
+		countNearTerms(
+			normalized,
+			[
+				"beds?",
+				"bed",
+				"\\u0633\\u0631\\u064a\\u0631",
+				"\\u0627\\u0633\\u0631\\u0647",
+				"\\u0627\\u0633\\u0631\\u0629",
+				"\\u0623\\u0633\\u0631\\u0629",
+			],
+			{ allowZero: false }
+		)
+	);
+	const patterns = [
+		/\b(?:for|fits?|fit|accommodates?|accommodate|we\s+are|we're)\s+([0-9]{1,2})\b/i,
+		/\b(?:room|rooms|suite|suites|booking|reservation|stay)\s+(?:for|to\s+fit|fits?)\s+([0-9]{1,2})\b/i,
+		/\b([0-9]{1,2})\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i,
+		/\b(?:people|persons?|guests?|adults?|pax|beds?)\s*[:= -]*([0-9]{1,2})\b/i,
+		/(?:\u0627\u062d\u0646\u0627|\u0646\u062d\u0646|\u0639\u062f\u062f\u0646\u0627)\s*([0-9]{1,2})/i,
+		/([0-9]{1,2})\s*(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)/i,
+		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)\s*[:= -]*([0-9]{1,2})/i,
+	];
+	for (const pattern of patterns) {
+		const match = lower.match(pattern) || arabic.match(pattern);
+		if (match?.[1]) addCount(match[1]);
+	}
+	if (
+		/\b(?:more\s+than|over|above)\s*5\b/i.test(lower) ||
+		/(?:\u0627\u0643\u062b\u0631|\u0627\u0643\u062a\u0631|\u0627\u0632\u064a\u062f|\u0641\u0648\u0642)\s*(?:\u0645\u0646\s*)?5/i.test(
+			arabic
+		) ||
+		/(?:morethan|over|above)5/i.test(latinCompact)
+	) {
+		addCount(6);
+	}
+	if (counts.length) return Math.max(...counts);
+	return mapRoomToKey(raw) === "familyRooms" ? 5 : null;
+}
+
+function extraBedBeyondFiveRequestText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const wantsExtraBed =
+		/\b(?:add|adding|extra|additional|rollaway|spare)\s+(?:bed|beds)\b/i.test(
+			lower
+		) ||
+		/\b(?:bed|beds)\s+(?:extra|additional|rollaway)\b/i.test(lower) ||
+		/(?:\u0633\u0631\u064a\u0631\s+(?:\u0632\u064a\u0627\u062f\u0629|\u0627\u0636\u0627\u0641\u064a|\u0625\u0636\u0627\u0641\u064a)|\u0627\u0636\u0627\u0641(?:\u0629)?\s+\u0633\u0631\u064a\u0631|\u0646\u0636\u064a\u0641\s+\u0633\u0631\u064a\u0631|\u0627\u0636\u064a\u0641\s+\u0633\u0631\u064a\u0631)/i.test(
+			arabic
+		) ||
+		/(?:extrabed|additionalbed|rollawaybed|addbed)/i.test(latinCompact);
+	if (!wantsExtraBed) return false;
+	const count = requestedGuestCountFromText(raw);
+	return (
+		count > 5 ||
+		mapRoomToKey(raw) === "familyRooms" ||
+		/\b(?:5|five)\s*(?:bed|beds|people|persons?|guests?)\b/i.test(lower) ||
+		/(?:\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644\u064a|\u063a\u0631\u0641\u0629\s*5|5\s*(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629))/i.test(
+			arabic
+		)
+	);
+}
+
+function largeGroupDateAskText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const checkin = localizedGregorianDate(st.slots?.checkinISO, lang);
+	const checkout = localizedGregorianDate(st.slots?.checkoutISO, lang);
+	if (/arabic/i.test(lang)) {
+		if (checkin && !checkout) {
+			return `ما تاريخ المغادرة حتى أراجع التوفر والسعر للتجهيز بالكامل؟`;
+		}
+		if (!checkin && checkout) {
+			return `ما تاريخ الوصول حتى أراجع التوفر والسعر للتجهيز بالكامل؟`;
+		}
+		return `أرسل لي تاريخ الوصول وتاريخ المغادرة معاً، وسأراجع لك التوفر والسعر للتجهيز بالكامل.`;
+	}
+	if (checkin && !checkout) {
+		return `What checkout date should I check for the full room setup?`;
+	}
+	if (!checkin && checkout) {
+		return `What check-in date should I check for the full room setup?`;
+	}
+	return `${name}, please send both the check-in and checkout dates together and I will check the full room setup for you.`;
+}
+
+function priceLargeGroupRoomCombination(hotel = {}, checkinISO = "", checkoutISO = "") {
+	const familyQuote = safePriceRoomForStay(
+		hotel,
+		{ roomType: "familyRooms" },
+		checkinISO,
+		checkoutISO
+	);
+	const doubleQuote = safePriceRoomForStay(
+		hotel,
+		{ roomType: "doubleRooms" },
+		checkinISO,
+		checkoutISO
+	);
+	const available = Boolean(familyQuote?.available && doubleQuote?.available);
+	const total = available
+		? Number(
+				(
+					safeNum(familyQuote.totals?.totalPriceWithCommission, 0) +
+					safeNum(doubleQuote.totals?.totalPriceWithCommission, 0)
+				).toFixed(2)
+		  )
+		: 0;
+	return {
+		available,
+		familyQuote,
+		doubleQuote,
+		nights: familyQuote?.nights || doubleQuote?.nights || 0,
+		currency:
+			familyQuote?.currency || doubleQuote?.currency || hotel?.currency || "SAR",
+		total,
+	};
+}
+
+function largeGroupRoomRecommendationText(sc = {}, st = {}, details = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const isArabic = /arabic/i.test(lang);
+	const hotelName = localizedHotelName(sc, st);
+	const guestCount = Math.max(6, Number(details.guestCount || 6));
+	const guestText = localizedNumber(guestCount, lang);
+	const familyRooms = Array.isArray(details.familyRooms) ? details.familyRooms : [];
+	const doubleRooms = Array.isArray(details.doubleRooms) ? details.doubleRooms : [];
+	const hasCoreRooms = Boolean(familyRooms.length && doubleRooms.length);
+	const optionLabel = (options, fallback) => {
+		if (isArabic) {
+			const arabicName = options
+				.map((option) => String(option?.displayNameOther || "").trim())
+				.find((value) => value && hasArabicScript(value));
+			return arabicName || fallback;
+		}
+		return inlineRoomOptions(options.slice(0, 1), lang) || fallback;
+	};
+	const familyLabel = optionLabel(
+		familyRooms,
+		isArabic
+			? "\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629 / \u0639\u0627\u0626\u0644\u064a\u0629"
+			: "quintuple/family room"
+	);
+	const doubleLabel = optionLabel(
+		doubleRooms,
+		isArabic ? "\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629" : "double room"
+	);
+	const quote = details.combinationQuote || null;
+	const datesKnown = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	const extraRoomNote =
+		guestCount > 7
+			? isArabic
+				? ` ولأن العدد ${guestText}، قد نضيف غرفة مناسبة أخرى بعد مراجعة العدد النهائي حتى يكون الجميع مرتاحاً.`
+				: ` Since the party is ${guestText}, reception may add another suitable room after checking the exact adults and children so everyone is comfortable.`
+			: "";
+	const compliance = isArabic
+		? `ولا يمكن إضافة سرير سادس داخل غرفة واحدة؛ حسب تعليمات الفنادق في السعودية ابتداءً من 2026 لا يسمح بتجاوز 5 أسرّة في غرفة واحدة.`
+		: `We also cannot add a sixth bed inside one room; under Saudi hotel compliance rules starting in 2026, a single hotel room cannot go above 5 beds.`;
+	if (isArabic) {
+		const setup = `${name}، لـ${guestText} ضيوف أفضل ترتيب مريح ومناسب هو ${familyLabel} لـ5 ضيوف + ${doubleLabel} إضافية. هذا يعطيكم مساحة وخصوصية أفضل بدل ضغط الجميع في غرفة واحدة. ${compliance}${extraRoomNote}`;
+		if (!hasCoreRooms) {
+			const review = `لا أرى حالياً الغرفة الخماسية والغرفة المزدوجة معاً مفعلة للتأكيد التلقائي في ${hotelName}، لذلك الأفضل أن يراجع الاستقبال أقرب ترتيب آمن ومريح لكم.`;
+			return datesKnown
+				? `${setup} ${review} سأطلب مراجعة هذا التجهيز للتواريخ المطلوبة.`
+				: `${setup} ${review} ${largeGroupDateAskText(sc, st)}`;
+		}
+		if (datesKnown && quote?.available) {
+			const totalText = localizedMoney(quote.total, quote.currency, lang);
+			const nightsText = localizedNumber(quote.nights || 0, lang);
+			return `${setup} للتواريخ المطلوبة في ${hotelName}، أرى هذا التجهيز بسعر إجمالي ${totalText} لمدة ${nightsText} ليلة. إذا يناسبك هذا الترتيب، سأجعل فريق الاستقبال يراجعه ويكمل الحجز لك.`;
+		}
+		if (datesKnown && quote && !quote.available) {
+			return `${setup} للتواريخ المطلوبة لا أستطيع تأكيد الغرفتين معاً تلقائياً الآن، لكن أقدر أراجع لك أقرب ترتيب مناسب مع الاستقبال. هل عندك مرونة في التواريخ أو تفضل أن أطلب مراجعة الفريق؟`;
+		}
+		return `${setup} ${largeGroupDateAskText(sc, st)}`;
+	}
+	const setup = `${name}, for ${guestText} guests, the most comfortable professional setup is 1 ${familyLabel} for 5 guests + 1 additional ${doubleLabel}. This gives the group better space and privacy instead of squeezing everyone into one room. ${compliance}${extraRoomNote}`;
+	if (!hasCoreRooms) {
+		const review = `I do not currently see both the quintuple/family room and the double room active for automatic confirmation at ${hotelName}, so reception should review the closest safe and comfortable setup for you.`;
+		return datesKnown
+			? `${setup} ${review} I will ask reception to review this setup for the requested dates.`
+			: `${setup} ${review} ${largeGroupDateAskText(sc, st)}`;
+	}
+	if (datesKnown && quote?.available) {
+		const totalText = localizedMoney(quote.total, quote.currency, lang);
+		const nightsText = localizedNumber(quote.nights || 0, lang);
+		return `${setup} For the requested dates at ${hotelName}, I see this setup at ${totalText} total for ${nightsText} night${quote.nights === 1 ? "" : "s"}. If this works for you, I will have reception review and complete this two-room reservation for you.`;
+	}
+	if (datesKnown && quote && !quote.available) {
+		return `${setup} For the requested dates, I cannot automatically confirm both rooms together right now, but I can help reception review the closest suitable setup. Do you have date flexibility, or should I ask the team to review it?`;
+	}
+	return `${setup} ${largeGroupDateAskText(sc, st)}`;
+}
+
+async function answerLargeGroupRoomRecommendation(
+	io,
+	sc,
+	st,
+	userText = "",
+	guestCount = null
+) {
+	if (st.activeTurnHadReply) {
+		logStep(String(sc._id), "large_group.skip_after_reply", {
+			waitFor: st.waitFor,
+		});
+		return true;
+	}
+	const count =
+		guestCount ||
+		requestedGuestCountFromText(userText) ||
+		st.pendingRoomCombination?.guestCount ||
+		6;
+	const familyRooms = activeHotelRoomSummaries(st.hotel, "familyRooms");
+	const doubleRooms = activeHotelRoomSummaries(st.hotel, "doubleRooms");
+	if (count > 0 && !st.slots.adultsProvided) {
+		st.slots.adults = count;
+		st.slots.adultsProvided = true;
+		st.slots.children = 0;
+		st.slots.childrenProvided = true;
+	}
+	st.slots.roomTypeKey = null;
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	const hasDates = Boolean(st.slots.checkinISO && st.slots.checkoutISO);
+	const combinationQuote =
+		hasDates && familyRooms.length && doubleRooms.length
+			? priceLargeGroupRoomCombination(
+					st.hotel,
+					st.slots.checkinISO,
+					st.slots.checkoutISO
+			  )
+			: null;
+	st.pendingRoomCombination = {
+		guestCount: count,
+		primaryRoomTypeKey: "familyRooms",
+		secondaryRoomTypeKey: "doubleRooms",
+		checkinISO: st.slots.checkinISO || null,
+		checkoutISO: st.slots.checkoutISO || null,
+		quotedAt: combinationQuote?.available ? now() : 0,
+		total: combinationQuote?.available ? combinationQuote.total : null,
+		currency: combinationQuote?.currency || st.hotel?.currency || "SAR",
+	};
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		largeGroupRoomRecommendationText(sc, st, {
+			guestCount: count,
+			familyRooms,
+			doubleRooms,
+			combinationQuote,
+		})
+	);
+	if (!sent) return true;
+	if (combinationQuote?.available) {
+		st.waitFor = "large_group_confirm";
+		stampAsk(st, "large_group_confirm");
+	} else if (hasDates) {
+		st.waitFor = "clarify";
+	} else {
+		st.waitFor = "dates";
+		stampAsk(st, "dates");
+	}
+	logStep(String(sc._id), "large_group.recommendation", {
+		guestCount: count,
+		hasFamilyRoom: Boolean(familyRooms.length),
+		hasDoubleRoom: Boolean(doubleRooms.length),
+		hasDates,
+		combinationAvailable: Boolean(combinationQuote?.available),
+		waitFor: st.waitFor,
+	});
+	return true;
+}
+
+function largeGroupConfirmPromptText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${respectfulGuestName(sc, st)}، هل يناسبك ترتيب الغرفة الخماسية مع الغرفة المزدوجة حتى أطلب من الاستقبال مراجعته وإكماله لك؟`;
+	}
+	return `${respectfulGuestName(sc, st)}, does the quintuple/family room plus double room setup work for you so I can have reception review and complete it?`;
+}
+
+async function handlePendingLargeGroupCombination(io, sc, st, userText = "") {
+	if (!st.pendingRoomCombination) return false;
+	const dateRange = extractDateRange(userText);
+	if (dateRange.checkinISO && dateRange.checkoutISO) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+			source: "large_group_combination",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			st.pendingRoomCombination.guestCount
+		);
+		return true;
+	}
+	const updatedGuestCount = requestedGuestCountFromText(userText);
+	if (updatedGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) {
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			updatedGuestCount > 5 ? updatedGuestCount : st.pendingRoomCombination.guestCount || 6
+		);
+		return true;
+	}
+	const singleDate = extractSingleStayDate(userText, st);
+	if (singleDate?.raw) {
+		const dateMerge = await mergePartialDateRangeWithChangeGuard(
+			io,
+			sc,
+			st,
+			singleDate,
+			{ source: "large_group_single_date", userText }
+		);
+		if (dateMerge.prompted) return true;
+		if (dateMerge.invalid) {
+			await askForMissingStayDates(io, sc, st);
+			return true;
+		}
+		await askForMissingStayDates(io, sc, st);
+		return true;
+	}
+	if (confirmsText(userText)) {
+		await handoffToHuman(io, sc, st, "reservation_finalize");
+		return true;
+	}
+	if (declinesText(userText)) {
+		st.pendingRoomCombination = null;
+		await askRoomPreferenceForReservation(io, sc, st);
+		return true;
+	}
+	if (st.waitFor === "large_group_confirm") {
+		if (
+			selectedHotelFactQuestionText(userText) ||
+			wantsDiscountQuestion(userText) ||
+			wantsPaymentHelp(userText) ||
+			hotelContactDetailsQuestionText(userText) ||
+			hotelContactFollowupQuestionText(sc, userText) ||
+			(/[?\u061f]/.test(String(userText || "")) &&
+				!selectedHotelRoomQuestionText(userText))
+		) {
+			return false;
+		}
+		await humanSend(io, sc, st, largeGroupConfirmPromptText(sc, st));
+		stampAsk(st, "large_group_confirm");
+		return true;
+	}
+	return false;
+}
+
+function stayDateRequestText(sc = {}, st = {}, { missing = "both" } = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const checkin = localizedGregorianDate(st.slots?.checkinISO, lang);
+	const checkout = localizedGregorianDate(st.slots?.checkoutISO, lang);
+	if (/arabic/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}\u060c \u062a\u0645\u0627\u0645\u060c \u0648\u0635\u0644\u0646\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 ${checkin}. \u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629\u061f`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}\u060c \u0648\u0635\u0644\u0646\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 ${checkout}. \u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644\u061f`;
+		}
+		return `${name}\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0645\u0639\u0627\u064b \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629.`;
+	}
+	if (/spanish/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}, perfecto, tengo la llegada para ${checkin}. Cual seria la fecha de salida?`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}, tengo la salida para ${checkout}. Cual seria la fecha de llegada?`;
+		}
+		return `${name}, por favor enviame la fecha de llegada y la fecha de salida juntas para revisar disponibilidad y precio exacto.`;
+	}
+	if (/french/i.test(lang)) {
+		if (missing === "checkout" && checkin) {
+			return `${name}, parfait, j'ai la date d'arrivee: ${checkin}. Quelle est la date de depart ?`;
+		}
+		if (missing === "checkin" && checkout) {
+			return `${name}, j'ai la date de depart: ${checkout}. Quelle est la date d'arrivee ?`;
+		}
+		return `${name}, veuillez m'envoyer la date d'arrivee et la date de depart ensemble afin que je verifie la disponibilite et le prix exact.`;
+	}
+	if (missing === "checkout" && checkin) {
+		return `${name}, perfect, I have the check-in date as ${checkin}. What is the checkout date?`;
+	}
+	if (missing === "checkin" && checkout) {
+		return `${name}, I have the checkout date as ${checkout}. What is the check-in date?`;
+	}
+	return `${name}, please send both the check-in and checkout dates together so I can check exact availability and pricing.`;
+}
+
+async function askForMissingStayDates(io, sc, st) {
+	const missing =
+		st.slots?.checkinISO && !st.slots?.checkoutISO
+			? "checkout"
+			: !st.slots?.checkinISO && st.slots?.checkoutISO
+			? "checkin"
+			: "both";
+	const sent = await humanSend(io, sc, st, stayDateRequestText(sc, st, { missing }));
+	if (sent) stampAsk(st, "dates");
+	st.waitFor = "dates";
+	return sent;
 }
 
 function shouldAskRoomPreferenceFirst(userText = "", st = {}, lu = {}, decision = {}) {
@@ -3343,6 +4851,18 @@ async function answerSelectedHotelRoomQuestion(
 	userText,
 	roomTypeKey = null
 ) {
+	const latestDates = extractDateRange(userText);
+	if (
+		latestDates.checkinISO &&
+		latestDates.checkoutISO &&
+		!needsExplicitPastDateClarification(userText, latestDates)
+	) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, latestDates, {
+			source: "selected_room_question",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
+	}
 	if (st.activeTurnHadReply) {
 		logStep(String(sc._id), "room_question.skip_after_reply", {
 			roomTypeKey,
@@ -3350,11 +4870,34 @@ async function answerSelectedHotelRoomQuestion(
 		});
 		return true;
 	}
+	const requestedGuestCount = requestedGuestCountFromText(userText);
+	if (requestedGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) {
+		return answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			requestedGuestCount > 5 ? requestedGuestCount : 6
+		);
+	}
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const matchingRooms = roomTypeKey
 		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
 		: [];
 	const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+	if (!roomTypeKey && activeRooms.length) {
+		const sent = await humanSend(
+			io,
+			sc,
+			st,
+			roomOptionsListText(sc, st, activeRooms)
+		);
+		if (sent) {
+			st.waitFor = "room";
+			stampAsk(st, "room");
+		}
+		return true;
+	}
 	if (
 		roomTypeKey &&
 		matchingRooms.length &&
@@ -3381,7 +4924,7 @@ async function answerSelectedHotelRoomQuestion(
 	}
 	const instruction = roomTypeKey
 		? matchingRooms.length
-			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, add one soft next-step invitation to share dates so availability and price can be checked.`
+			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, ask for both arrival/check-in and departure/checkout dates together in the same sentence so availability and price can be checked. Never ask only for check-in.`
 			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or different dates at this hotel. Do not mention, recommend, link, compare, or imply knowledge of any other hotel.`
 		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Never mention, recommend, link, compare, or imply knowledge of any other hotel, even if the guest asks for alternatives.`;
 	const reply = await write(io, sc, st, instruction, {
@@ -3561,7 +5104,7 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		return "کیا بکنگ کے بارے میں کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟";
 	}
 	if (/hindi/i.test(lang)) {
-		if (pivot === "proceed") return "अगर location आपके लिए ठीक है, तो क्या मैं reservation review step पर आगे बढ़ूं?";
+		if (pivot === "proceed") return "अगर location आपके लिए ठीक है, तो क्या मैं reservation details के साथ आगे बढ़ूं?";
 		if (pivot === "dates") return "अगर location ठीक है, तो check-in और check-out dates भेज दीजिए, मैं exact availability और price check कर दूंगा/दूंगी।";
 		if (pivot === "room") return "अगर location ठीक है, तो आप कौन सा room type या कितने guests के लिए booking चाहते हैं?";
 		return "क्या reservation में किसी और चीज़ में help करूं?";
@@ -3578,14 +5121,19 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		if (pivot === "room") return "Jika lokasi ini sesuai, jenis bilik atau berapa tetamu yang anda perlukan?";
 		return "Ada butiran tempahan lain yang boleh saya bantu?";
 	}
-	if (pivot === "proceed") return "If the location works for you, shall I continue to the reservation review?";
+	if (pivot === "proceed") return "If the location works for you, shall I continue with the reservation details?";
 	if (pivot === "dates") return "If the location works for you, send me the check-in and check-out dates and I will check the exact availability and price.";
 	if (pivot === "room") return "If the location works for you, which room type or guest count should I prepare for you?";
 	return "Is there anything else I can help with for the reservation?";
 }
 
 function hotelBusServiceYesText(lang, name, details, next) {
-	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	const rawDetailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	const detailText =
+		(/arabic/i.test(lang) && rawDetailText && !hasArabicScript(rawDetailText)) ||
+		(!/arabic/i.test(lang) && hasArabicScript(rawDetailText))
+			? ""
+			: rawDetailText;
 	if (/arabic/i.test(lang)) {
 		return detailText
 			? `${name}\u060c \u0646\u0639\u0645\u060c \u0644\u062f\u064a\u0646\u0627 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u0644\u0644\u0636\u064a\u0648\u0641. ${detailText}. ${next}`
@@ -3654,17 +5202,185 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 	return `${name}, no, we do not currently offer a private bus service.${walking ? ` ${hotelName} is about ${walking} walking from Al Haram,` : ""} but public buses are available close to the hotel and can drop guests at Al Haram. ${next}`;
 }
 
+function hotelNusukYesText(lang, name, details, next) {
+	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	if (/arabic/i.test(lang)) {
+		return detailText
+			? `${name}\u060c \u0646\u0639\u0645\u060c \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. ${detailText}. ${next}`
+			: `${name}\u060c \u0646\u0639\u0645\u060c \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, si, el hotel esta listado en Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, oui, l'hotel est liste sur Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/urdu|hindi/i.test(lang)) {
+		return `${name}, ji haan, hotel Nusuk par listed hai.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, ya, hotel ini terdaftar di Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, ya, hotel ini tersenarai di Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+	}
+	return `${name}, yes, the hotel is listed on Nusuk.${detailText ? ` ${detailText}.` : ""} ${next}`;
+}
+
+function hotelNusukNoText(lang, name, next) {
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u062d\u0627\u0644\u064a\u0627 \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0646\u0627 \u0623\u0646 \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. \u0648\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0628\u0627\u0644\u062d\u062c\u0632 \u0628\u062e\u0637\u0648\u0627\u062a \u0648\u0627\u0636\u062d\u0629 \u0648\u0633\u0631\u064a\u0639\u0629. ${next}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, por el momento no veo que el hotel este listado en Nusuk. Aun asi, puedo ayudarte aqui con la reserva de forma clara y rapida. ${next}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, pour le moment, je ne vois pas l'hotel comme liste sur Nusuk. Je peux quand meme vous aider ici avec la reservation clairement et rapidement. ${next}`;
+	}
+	if (/urdu|hindi/i.test(lang)) {
+		return `${name}, filhal hotel Nusuk par listed nazar nahi aa raha. Main yahin reservation mein clear aur quick help kar sakta hun. ${next}`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, saat ini hotel belum terlihat terdaftar di Nusuk. Saya tetap bisa membantu reservasinya di sini dengan jelas dan cepat. ${next}`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, buat masa ini hotel belum kelihatan tersenarai di Nusuk. Saya masih boleh bantu tempahan di sini dengan jelas dan cepat. ${next}`;
+	}
+	return `${name}, at the moment I do not see the hotel marked as listed on Nusuk. I can still help you here with the reservation clearly and quickly. ${next}`;
+}
+
 function hotelLocationMapLine(lang = "English", mapLink = "") {
 	if (!mapLink) return "";
 	if (/arabic/i.test(lang)) {
-		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 Google Maps \u0644\u0644\u0637\u0631\u064a\u0642 \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0645\u0646 \u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u062f\u0642\u064a\u0642 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645: ${mapLink}.`;
+		return `\u0647\u0630\u0627 \u0631\u0627\u0628\u0637 \u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 Google Maps: ${mapLink}.`;
 	}
-	if (/spanish/i.test(lang)) return `Aqui tienes la ruta en Google Maps desde la ubicacion exacta del hotel hasta Al Haram en coche: ${mapLink}.`;
-	if (/french/i.test(lang)) return `Voici l'itineraire Google Maps en voiture depuis l'emplacement exact de l'hotel vers Al Haram : ${mapLink}.`;
-	if (/urdu|hindi/i.test(lang)) return `Hotel ki exact location se Al Haram tak driving route yahan hai: ${mapLink}.`;
-	if (/indonesian/i.test(lang)) return `Ini rute Google Maps dari lokasi tepat hotel ke Al Haram dengan mobil: ${mapLink}.`;
-	if (/malay|malaysia/i.test(lang)) return `Ini laluan Google Maps dari lokasi tepat hotel ke Al Haram dengan kereta: ${mapLink}.`;
-	return `Here is the Google Maps driving route from the hotel's exact location to Al Haram: ${mapLink}.`;
+	if (/spanish/i.test(lang)) return `Aqui tienes la ubicacion exacta del hotel en Google Maps: ${mapLink}.`;
+	if (/french/i.test(lang)) return `Voici l'emplacement exact de l'hotel sur Google Maps : ${mapLink}.`;
+	if (/urdu|hindi/i.test(lang)) return `Hotel ki exact Google Maps location yahan hai: ${mapLink}.`;
+	if (/indonesian/i.test(lang)) return `Ini lokasi tepat hotel di Google Maps: ${mapLink}.`;
+	if (/malay|malaysia/i.test(lang)) return `Ini lokasi tepat hotel di Google Maps: ${mapLink}.`;
+	return `Here is the hotel's exact Google Maps location: ${mapLink}.`;
+}
+
+function hotelPolicyRows(st = {}) {
+	return activeHotelPolicyQA(st.hotel?.hotelPolicyQA);
+}
+
+function hotelPolicyRowScore(row = {}, text = "") {
+	const key = String(row.key || "").toLowerCase();
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (key === "cancellation_refund" && cancellationRefundPolicyQuestionText(text)) {
+		return 100;
+	}
+	const checks = {
+		checkin_checkout:
+			/\b(check[\s-]?in|check[\s-]?out|checkout|arrival|departure)\b/i.test(lower) ||
+			/(?:\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u062a\u0634\u064a\u0643)/i.test(arabic) ||
+			/(?:checkin|checkout|arrival|departure)/i.test(latinCompact),
+		early_late:
+			/\b(early\s+check|late\s+check|late\s+checkout|early\s+arrival)\b/i.test(lower) ||
+			/(?:\u0648\u0635\u0648\u0644\s+\u0645\u0628\u0643\u0631|\u062f\u062e\u0648\u0644\s+\u0645\u0628\u0643\u0631|\u062e\u0631\u0648\u062c\s+\u0645\u062a\u0623\u062e\u0631|\u0645\u063a\u0627\u062f\u0631\u0629\s+\u0645\u062a\u0623\u062e\u0631)/i.test(arabic) ||
+			/(?:earlycheckin|latecheckout|earlyarrival)/i.test(latinCompact),
+		children_extra_beds:
+			/\b(children|child|kids|extra\s+bed|crib|cot)\b/i.test(lower) ||
+			/(?:\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0637\u0641\u0644|\u0633\u0631\u064a\u0631\s+\u0625\u0636\u0627\u0641\u064a|\u0633\u0631\u064a\u0631\s+\u0627\u0636\u0627\u0641\u064a)/i.test(arabic) ||
+			/(?:children|child|kids|extrabed|crib|cot)/i.test(latinCompact),
+		payment_deposit:
+			/\b(payment|deposit|prepay|pay\s+at\s+hotel|card|cash)\b/i.test(lower) ||
+			/(?:\u062f\u0641\u0639|\u0639\u0631\u0628\u0648\u0646|\u062a\u0623\u0645\u064a\u0646|\u062a\u0627\u0645\u064a\u0646|\u0643\u0627\u0634|\u0643\u0627\u0631\u062a|\u0628\u0637\u0627\u0642\u0629|\u0628\u0637\u0627\u0642\u0647)/i.test(arabic) ||
+			/(?:payment|deposit|prepay|card|cash)/i.test(latinCompact),
+		no_show:
+			/\b(no[\s-]?show|not\s+show|do\s+not\s+arrive|miss\s+my\s+booking)\b/i.test(lower) ||
+			/(?:\u0644\u0627\s*\u064a\u062d\u0636\u0631|\u0639\u062f\u0645\s+\u0627\u0644\u062d\u0636\u0648\u0631|\u0645\u0627\s+\u062c\u064a\u062a|\u0645\u0627\s+\u062d\u0636\u0631)/i.test(arabic) ||
+			/(?:noshow|notshow|missbooking)/i.test(latinCompact),
+		id_documents:
+			/\b(passport|id card|identification|document|visa)\b/i.test(lower) ||
+			/(?:\u062c\u0648\u0627\u0632|\u0647\u0648\u064a\u0629|\u0647\u0648\u064a\u0647|\u0625\u0642\u0627\u0645\u0629|\u0627\u0642\u0627\u0645\u0629|\u0645\u0633\u062a\u0646\u062f|\u062a\u0623\u0634\u064a\u0631\u0629|\u062a\u0627\u0634\u064a\u0631\u0629)/i.test(arabic) ||
+			/(?:passport|idcard|identification|document|visa)/i.test(latinCompact),
+		smoking:
+			/\b(smoking|smoke|cigarette)\b/i.test(lower) ||
+			/(?:\u062a\u062f\u062e\u064a\u0646|\u0633\u062c\u0627\u0626\u0631|\u062f\u062e\u0627\u0646)/i.test(arabic) ||
+			/(?:smoking|smoke|cigarette)/i.test(latinCompact),
+		parking:
+			/\b(parking|park\s+my\s+car|car\s+park)\b/i.test(lower) ||
+			/(?:\u0645\u0648\u0642\u0641|\u0645\u0648\u0627\u0642\u0641|\u0628\u0627\u0631\u0643\u064a\u0646\u062c)/i.test(arabic) ||
+			/(?:parking|carpark)/i.test(latinCompact),
+		meals_breakfast:
+			/\b(breakfast|meal|meals|restaurant|food)\b/i.test(lower) ||
+			/(?:\u0625\u0641\u0637\u0627\u0631|\u0627\u0641\u0637\u0627\u0631|\u0648\u062c\u0628\u0629|\u0648\u062c\u0628\u0627\u062a|\u0645\u0637\u0639\u0645|\u0623\u0643\u0644|\u0627\u0643\u0644)/i.test(arabic) ||
+			/(?:breakfast|meal|restaurant|food)/i.test(latinCompact),
+		pets:
+			/\b(pet|pets|cat|dog)\b/i.test(lower) ||
+			/(?:\u062d\u064a\u0648\u0627\u0646|\u062d\u064a\u0648\u0627\u0646\u0627\u062a|\u0642\u0637|\u0643\u0644\u0628)/i.test(arabic) ||
+			/(?:pet|pets|cat|dog)/i.test(latinCompact),
+		damage_deposit:
+			/\b(damage|breakage|security\s+deposit)\b/i.test(lower) ||
+			/(?:\u0623\u0636\u0631\u0627\u0631|\u0627\u0636\u0631\u0627\u0631|\u062a\u0644\u0641|\u0643\u0633\u0631|\u062a\u0623\u0645\u064a\u0646|\u062a\u0627\u0645\u064a\u0646)/i.test(arabic) ||
+			/(?:damage|breakage|securitydeposit)/i.test(latinCompact),
+	};
+	if (checks[key]) return 80;
+	const normalizedText = normalizedRepeatedQuestionText(text);
+	const normalizedQuestion = normalizedRepeatedQuestionText(row.question || "");
+	const normalizedCategory = normalizedRepeatedQuestionText(row.category || "");
+	let score = 0;
+	for (const token of normalizedQuestion.split(/\s+/).filter((item) => item.length >= 4)) {
+		if (normalizedText.includes(token)) score += 4;
+	}
+	for (const token of normalizedCategory.split(/\s+/).filter((item) => item.length >= 4)) {
+		if (normalizedText.includes(token)) score += 2;
+	}
+	if (/\b(policy|terms|conditions|rules)\b/i.test(lower)) score += 3;
+	if (/(?:\u0633\u064a\u0627\u0633\u0629|\u0634\u0631\u0648\u0637|\u0623\u062d\u0643\u0627\u0645|\u0627\u062d\u0643\u0627\u0645|\u0642\u0648\u0627\u0639\u062f)/i.test(arabic)) score += 3;
+	return score;
+}
+
+function bestHotelPolicyRow(st = {}, text = "") {
+	const rows = hotelPolicyRows(st);
+	if (!rows.length) return null;
+	if (cancellationRefundPolicyQuestionText(text)) {
+		return rows.find((row) => row.key === "cancellation_refund") || rows[0];
+	}
+	const scored = rows
+		.map((row) => ({ row, score: hotelPolicyRowScore(row, text) }))
+		.filter((item) => item.score > 0)
+		.sort((a, b) => b.score - a.score);
+	if (scored.length) return scored[0].row;
+	if (selectedHotelPolicyQuestionText(text)) {
+		return rows.find((row) => row.key === "cancellation_refund") || rows[0];
+	}
+	return null;
+}
+
+function defaultCancellationPolicyAnswerText(sc = {}, st = {}) {
+	return generalCancellationPolicyMessage(sc, st, {}, "");
+}
+
+function hotelPolicyAnswerText(sc = {}, st = {}, userText = "", row = null) {
+	const policyRow = row || bestHotelPolicyRow(st, userText);
+	if (!policyRow?.answer) return "";
+	if (policyRow.key === "cancellation_refund") {
+		if (
+			cleanHotelFactText(policyRow.answer) ===
+			cleanHotelFactText(DEFAULT_CANCELLATION_REFUND_ANSWER)
+		) {
+			const lang = languageOf(sc, st);
+			if (/english|arabic/i.test(lang)) {
+				return defaultCancellationPolicyAnswerText(sc, st);
+			}
+			return "";
+		}
+	}
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const answer = cleanHotelFactText(policyRow.answer);
+	if (!answer) return "";
+	if (/arabic/i.test(lang) && hasArabicScript(answer)) {
+		return `${name}\u060c \u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 \u0648\u0634\u0631\u0648\u0637 \u0627\u0644\u0641\u0646\u062f\u0642: ${answer}`;
+	}
+	if (!/arabic/i.test(lang) && !hasArabicScript(answer)) {
+		return `${name}, based on the hotel's terms and conditions: ${answer}`;
+	}
+	return "";
 }
 
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
@@ -3678,11 +5394,24 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const mapLink = hotelGoogleMapsMarkdownLink(hotel, lang);
 	const mapLine = hotelLocationMapLine(lang, mapLink);
 	const next = hotelFactNextStepText(sc, st);
+	const asksNusuk = selectedHotelNusukQuestionText(userText);
 	const asksBus = selectedHotelBusQuestionText(userText);
 	const asksDistance = selectedHotelDistanceQuestionText(userText);
 	const asksAddress = selectedHotelAddressQuestionText(userText);
+	const asksPolicy = selectedHotelPolicyQuestionText(userText);
+	const isNusuk = hotel.isNusuk === true;
+	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const hasBusService = hotel.hasBusService === true;
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	if (asksPolicy) {
+		const answer = hotelPolicyAnswerText(sc, st, userText);
+		if (answer) return answer;
+	}
+	if (asksNusuk) {
+		return isNusuk
+			? hotelNusukYesText(lang, name, nusukDetails, next)
+			: hotelNusukNoText(lang, name, next);
+	}
 	if (asksBus) {
 		return hasBusService
 			? hotelBusServiceYesText(lang, name, busDetails, next)
@@ -3772,43 +5501,81 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 
 async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	const previousWaitFor = st.waitFor || null;
+	const policyRow = selectedHotelPolicyQuestionText(userText)
+		? bestHotelPolicyRow(st, userText)
+		: null;
 	const shouldPolishBusDetails =
+		!policyRow &&
 		selectedHotelBusQuestionText(userText) &&
 		st.hotel?.hasBusService === true &&
 		Boolean(cleanHotelFactText(st.hotel?.busDetails));
 	let reply = "";
-	if (shouldPolishBusDetails) {
-		reply = await write(
-			io,
-			sc,
-			st,
-			"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with nextStepText naturally. If bookingNudgePaused is true, do not ask to proceed or ask for dates; just close with the short availability/support line. Do not mention Jannat Booking or any other hotel.",
-			{
-				latestUserMessage: userText,
-				selectedHotelFacts: buildActiveHotelFacts(sc, st),
-				rawBusDetails: cleanHotelFactText(st.hotel?.busDetails),
-				nextStep: nextPivot(st),
-				nextStepText: hotelFactNextStepText(sc, st),
-				bookingNudgePaused: bookingNudgePaused(st),
-			}
+	if (policyRow) {
+		reply = hotelPolicyAnswerText(sc, st, userText, policyRow);
+		if (!reply) {
+			reply = await withSoftTimeout(
+				write(
+					io,
+					sc,
+					st,
+					"The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Use hotel-native wording such as 'Based on the hotel's terms and conditions' or a direct reception answer when a source phrase is useful. Never say 'I checked', 'I found in the document', 'the record says', 'the hotel details say', or imply the answer came from an external/admin document. Do not add a link. Do not invent exceptions, deadlines, prices, or legal wording beyond the saved answer. If the saved answer does not fully answer the latest question, say exactly what is known from the saved policy and then ask one relevant follow-up.",
+					{
+						latestUserMessage: userText,
+						selectedHotelPolicy: policyRow,
+						defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
+						nextStep: nextPivot(st),
+					}
+				),
+				QUOTE_WRITE_SOFT_TIMEOUT_MS,
+				selectedHotelFactAnswerText(sc, st, userText)
+			);
+		}
+	} else if (shouldPolishBusDetails) {
+		reply = await withSoftTimeout(
+			write(
+				io,
+				sc,
+				st,
+				"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with nextStepText naturally. If bookingNudgePaused is true, do not ask to proceed or ask for dates; just close with the short availability/support line. Do not mention Jannat Booking or any other hotel.",
+				{
+					latestUserMessage: userText,
+					selectedHotelFacts: buildActiveHotelFacts(sc, st),
+					rawBusDetails: cleanHotelFactText(st.hotel?.busDetails),
+					nextStep: nextPivot(st),
+					nextStepText: hotelFactNextStepText(sc, st),
+					bookingNudgePaused: bookingNudgePaused(st),
+				}
+			),
+			QUOTE_WRITE_SOFT_TIMEOUT_MS,
+			selectedHotelFactAnswerText(sc, st, userText)
 		);
 	} else {
 		reply = selectedHotelFactAnswerText(sc, st, userText);
 	}
 	if (!reply) {
-		reply = await write(
-			io,
-			sc,
-			st,
-			"The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts only, then add one warm sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel.",
-			{
-				latestUserMessage: userText,
-				selectedHotelFacts: buildActiveHotelFacts(sc, st),
-				nextStep: nextPivot(st),
-			}
+		const lang = languageOf(sc, st);
+		const fallback = /arabic/i.test(lang)
+			? `${respectfulGuestName(sc, st)}، لا يظهر لدي هذا التفصيل مؤكدا في بيانات ${localizedHotelName(sc, st)} حاليا. ${hotelFactNextStepText(sc, st)}`
+			: `${respectfulGuestName(sc, st)}, I do not see that exact detail confirmed for ${localizedHotelName(sc, st)} right now. ${hotelFactNextStepText(sc, st)}`;
+		reply = await withSoftTimeout(
+			write(
+				io,
+				sc,
+				st,
+				"The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts only, then add one warm sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel.",
+				{
+					latestUserMessage: userText,
+					selectedHotelFacts: buildActiveHotelFacts(sc, st),
+					nextStep: nextPivot(st),
+				}
+			),
+			QUOTE_WRITE_SOFT_TIMEOUT_MS,
+			fallback
 		);
 	}
-	const sent = await humanSend(io, sc, st, reply);
+	const sent = await humanSend(io, sc, st, reply, {
+		scheduleIdle: policyRow ? false : true,
+	});
 	if (!sent) return false;
 	st.waitFor = previousWaitFor || nextPivot(st);
 	logStep(String(sc._id), "selected_hotel.fact_reply", {
@@ -3820,6 +5587,8 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		),
 		hasAddress: Boolean(st.hotel?.hotelAddress),
 		hasGoogleMapsLink: Boolean(hotelGoogleMapsUrl(st.hotel)),
+		isNusuk: st.hotel?.isNusuk === true,
+		policyKey: policyRow?.key || "",
 	});
 	return true;
 }
@@ -4145,7 +5914,7 @@ async function connectJannatCaseToHotelSupport(
 			: reason === "reservation_support"
 			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
 			: optionOrHotel?.quote?.available
-			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue with the reservation details. Do not ask for dates again."
 			: "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk and ask for check-in and checkout dates so you can confirm availability officially.";
 	let hotelIntro = await write(io, sc, st, introInstruction, {
 		hotelName,
@@ -4366,6 +6135,8 @@ function markGuestActivity(caseId, { activityAt = now(), typingHoldMs = 0 } = {}
 			Number(st.guestTypingUntil || 0),
 			safeAt + Number(typingHoldMs || 0)
 		);
+	} else {
+		st.guestTypingUntil = Math.min(Number(st.guestTypingUntil || 0), safeAt);
 	}
 }
 
@@ -4463,19 +6234,69 @@ async function runAiIdleCloseStep(io, caseId, anchor) {
 			now: new Date(),
 		});
 		if (!closedCase) return;
-		io.to(caseId).emit("supportCaseUpdated", closedCase);
-		io.emit("supportCaseUpdated", closedCase);
-		io.emit("closeCase", {
-			case: closedCase,
-			closedBy: "csr",
-			reason: "ai_idle_timeout",
-		});
-		io.to(caseId).emit("aiPaused", { caseId, reason: "ai_idle_timeout" });
+		emitAiClosedCase(io, caseId, closedCase, "ai_idle_timeout");
 		memo.delete(caseId);
 		logStep(caseId, "idle.closed", {});
 	} catch (error) {
 		logStep(caseId, "idle.close_failed", { message: error?.message || error });
 	}
+}
+
+function emitAiClosedCase(io, caseId, closedCase, reason) {
+	if (!io || !closedCase) return;
+	io.to(caseId).emit("supportCaseUpdated", closedCase);
+	io.emit("supportCaseUpdated", closedCase);
+	io.emit("closeCase", {
+		case: closedCase,
+		closedBy: "csr",
+		reason,
+	});
+	io.to(caseId).emit("aiPaused", { caseId, reason });
+}
+
+async function runPostBookingCloseStep(io, caseId, anchor) {
+	aiIdleTimers.delete(caseId);
+	try {
+		const latestCase = await getSupportCaseById(caseId);
+		if (
+			!latestCase ||
+			latestCase.caseStatus === "closed" ||
+			latestCase.aiToRespond === false ||
+			guestRespondedAfterAnchor(latestCase, anchor)
+		) {
+			return;
+		}
+		const closedCase = await closeSupportCaseForAiIdle(caseId, {
+			now: new Date(),
+			reason: "post_booking_closed",
+		});
+		if (!closedCase) return;
+		emitAiClosedCase(io, caseId, closedCase, "post_booking_closed");
+		memo.delete(caseId);
+		logStep(caseId, "post_booking.closed", {});
+	} catch (error) {
+		logStep(caseId, "post_booking.close_failed", {
+			message: error?.message || error,
+		});
+	}
+}
+
+function schedulePostBookingAutoClose(io, sc, st) {
+	const caseId = String(sc?._id || sc?.id || "");
+	if (!io || !caseId) return;
+	const anchor = {
+		at: now(),
+		idleSinceAt: now(),
+		text: st?.lastBotText || "",
+	};
+	setAiIdleTimer(
+		caseId,
+		() => runPostBookingCloseStep(io, caseId, anchor),
+		AI_POST_BOOKING_CLOSE_MS
+	);
+	logStep(caseId, "post_booking.close_scheduled", {
+		delayMs: AI_POST_BOOKING_CLOSE_MS,
+	});
 }
 
 function scheduleAiIdleFollowups(io, sc, st, messageData = {}) {
@@ -4544,7 +6365,9 @@ function ensureState(sc, hotel) {
 			bookingNudgePausedAt: 0,
 			progressSentAt: {},
 			hydratedConversationLength: 0,
+			pendingDateChange: null,
 			pendingRoomAlternative: null,
+			pendingRoomCombination: null,
 			repeatedQuestionEscalatedKey: "",
 			dateRaw: { calendar: null, checkin: null, checkout: null },
 			smalltalkThread: { topic: null, waitingForGuest: false, lastAt: 0 },
@@ -4592,6 +6415,26 @@ function emitTyping(io, caseId, st, on = true) {
 	});
 }
 
+function sanitizeAssistantVoiceText(text = "", sc = {}, st = {}) {
+	let out = String(text || "");
+	if (!out) return out;
+	const agentName = String(st?.agentName || sc?.aiResponderName || "")
+		.trim()
+		.toLowerCase();
+	const femaleAgentNames = new Set(["hana", "aisha", "sara", "amira", "yasmin", "nadia"]);
+	const femaleAgent = !agentName || femaleAgentNames.has(agentName);
+	if (femaleAgent) {
+		out = out
+			.replace(/(?:أنا|انا)\s+موجود\s+معك/g, "أنا موجودة معك")
+			.replace(/(?:أنا|انا)\s+موجود(?!ة)/g, "أنا موجودة")
+			.replace(/(?:أنا|انا)\s+متابع\s+معك/g, "أنا أتابع معك")
+			.replace(/(?:أنا|انا)\s+متابع(?!ة)\s+المحادثة/g, "أنا أتابع المحادثة");
+	}
+	return out
+		.replace(/لمدة\s*[١۱1]\s+ليال[يى]/g, "لمدة ليلة واحدة")
+		.replace(/[١۱1]\s+ليال[يى]/g, "ليلة واحدة");
+}
+
 /* --------- humanSend with pre‑emption (cancellable) --------- */
 async function humanSend(
 	io,
@@ -4600,6 +6443,7 @@ async function humanSend(
 	text,
 	{ first = false, quickReplies = [], scheduleIdle = true } = {}
 ) {
+	text = sanitizeAssistantVoiceText(text, sc, st);
 	if (!text) return false;
 	const caseId = String(sc._id || sc.id || "unknown");
 	const expectedTurnUserText = st.activeTurnUserText || "";
@@ -4749,6 +6593,7 @@ async function humanSend(
 
 	st.lastBotText = text;
 	st.activeTurnHadReply = true;
+	clearUnansweredTurnRecovery(caseId);
 	if (scheduleIdle) scheduleAiIdleFollowups(io, sc, st, messageData);
 	return true;
 }
@@ -4874,25 +6719,44 @@ function correctionText(text = "") {
 	);
 }
 
+function looksLikeStayDateCandidate(value = "") {
+	const raw = digitsToEnglish(String(value || "")).replace(/\s+/g, " ").trim();
+	if (!raw) return false;
+	const dates = quickDateRange(raw);
+	if (dates?.checkinISO && dates?.checkoutISO) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	if (!/\d/.test(raw)) return false;
+	return (
+		/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|ramadan|hijri|gregorian|check\s*-?\s*in|check\s*-?\s*out)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0645\u0636\u0627\u0646|\u0645\u062d\u0631\u0645|\u0635\u0641\u0631|\u0631\u0628\u064a\u0639|\u062c\u0645\u0627\u062f\u0649|\u0631\u062c\u0628|\u0634\u0639\u0628\u0627\u0646|\u0634\u0648\u0627\u0644|\u0630\u0648\s+\u0627\u0644\u0642\u0639\u062f\u0629|\u0630\u0648\s+\u0627\u0644\u062d\u062c\u0629|\u064a\u0648\u0646\u064a\u0648|\u064a\u0648\u0644\u064a\u0648|\u062a\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c)/i.test(
+			arabic
+		) ||
+		/(?:ramadan|hijri|checkin|checkout|arrival|departure)/i.test(latinCompact)
+	);
+}
+
 function rejectsFullNameCandidate(value = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(value);
+	if (looksLikeStayDateCandidate(value)) return true;
 	if (!lower) return true;
 	if (/[?؟]/.test(lower)) return true;
 	if (
-		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you)\b/i.test(
+		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you|please|pls|could|would|can|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent)\b/i.test(
 			lower
 		)
 	) {
 		return true;
 	}
 	if (
-		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644)/i.test(
+		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644|\u0645\u0645\u0643\u0646|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0637\u0628|\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0627\u0644\u0633\u0631\u0639\u0647|\u0627\u0644\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u0645\u0633\u062a\u0639\u062c\u0644\u0647|\u0627\u062f\u064a\u0646\u064a|\u0627\u062f\u064a\u0646\u0649|\u0647\u0627\u062a|\u0627\u0631\u0633\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645)/i.test(
 			arabic
 		)
 	) {
 		return true;
 	}
-	return /(?:somethingwrong|notcorrect|wrong|incorrect|problem|issue|mistake|phone|whatsapp|hotelphone|callhotel|manager|reservation|booking|confirmation|room|date|email|nationality)/i.test(
+	return /(?:somethingwrong|notcorrect|wrong|incorrect|problem|issue|mistake|phone|whatsapp|hotelphone|callhotel|manager|reservation|booking|confirmation|room|date|email|nationality|please|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent|momken|mumkin|momkin|sora|sor3a|bsor3a|bser3a)/i.test(
 		latinCompact
 	);
 }
@@ -4902,8 +6766,9 @@ function hasUsableFullName(value = "") {
 	if (!name || name.length < 4 || name.length > 90) return false;
 	if (latestEmailFromText(name) || cleanPhoneCandidate(name)) return false;
 	if (rejectsFullNameCandidate(name)) return false;
+	if (nameCandidateLooksLikeNationality(name)) return false;
 	if (
-		/\b(?:guest|unknown|test|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
+		/\b(?:guest|unknown|na|n\/a|none|null|dont\s+know|don't\s+know|not\s+sure)\b/i.test(
 			name
 		) ||
 		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
@@ -4912,6 +6777,7 @@ function hasUsableFullName(value = "") {
 	) {
 		return false;
 	}
+	if (/^(?:test|testing)$/i.test(name)) return false;
 	if (
 		/confirm|confirmation|book|reserve|price|date|room|\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641/i.test(
 			name
@@ -4933,6 +6799,38 @@ function cleanFullNameCandidate(value = "") {
 		.replace(/\s+/g, " ")
 		.trim();
 	return hasUsableFullName(cleaned) ? cleaned : "";
+}
+
+function nameTokenCount(value = "") {
+	return String(value || "")
+		.replace(/\s+/g, " ")
+		.trim()
+		.split(/\s+/)
+		.filter((token) => /[A-Za-z\u0590-\u08FF\u0900-\u097F]{2,}/.test(token))
+		.length;
+}
+
+function nameCandidateLooksLikeNationality(value = "") {
+	const raw = String(value || "").replace(/\s+/g, " ").trim();
+	if (!raw) return false;
+	if (nationalityHintFromText(raw)) return true;
+	const normalized = compactArabicName(raw);
+	return [
+		"\u0628\u0648\u0631\u0643\u064a\u0646\u0627\u0641\u0627\u0633\u0648",
+		"\u0627\u0631\u062f\u0646\u064a",
+		"\u0627\u0631\u062f\u0646\u0649",
+		"\u0623\u0631\u062f\u0646\u064a",
+		"\u0623\u0631\u062f\u0646\u0649",
+	].includes(normalized);
+}
+
+function shouldReplaceCapturedGuestName(st = {}, candidate = "", { explicit = false } = {}) {
+	if (!candidate || !st?.slots) return false;
+	if (nameCandidateLooksLikeNationality(candidate)) return false;
+	const current = st.slots.fullName || st.slots.name || "";
+	if (!hasUsableFullName(current)) return true;
+	if (st.waitFor === "fullname" || explicit) return true;
+	return nameTokenCount(candidate) > nameTokenCount(current);
 }
 
 function stripFieldTail(value = "") {
@@ -4981,6 +6879,8 @@ function lineNameCandidateFromText(text = "") {
 }
 
 const NATIONALITY_HINTS = [
+	[/\b(?:american|usa|u\.s\.a\.|united\s+states|united\s+states\s+of\s+america)\b/i, "American"],
+	[/\b(?:french|france)\b|\u0641\u0631\u0646\u0633\u064a|\u0641\u0631\u0646\u0633\u0649|\u0641\u0631\u0646\u0633\u064a\u0629|\u0641\u0631\u0646\u0633\u0627/i, "French"],
 	[/\b(?:egyptian|egypt)\b|\u0645\u0635\u0631\u064a|\u0645\u0635\u0631\u064a\u0629|\u0645\u0635\u0631/i, "Egyptian"],
 	[/\b(?:saudi|saudi\s+arabian)\b|\u0633\u0639\u0648\u062f\u064a|\u0633\u0639\u0648\u062f\u064a\u0629/i, "Saudi"],
 	[/\b(?:pakistani|pakistan)\b|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a|\u0628\u0627\u0643\u0633\u062a\u0627\u0646\u064a\u0629/i, "Pakistani"],
@@ -4995,6 +6895,7 @@ const NATIONALITY_HINTS = [
 	[/\b(?:iraqi|iraq)\b|\u0639\u0631\u0627\u0642\u064a|\u0639\u0631\u0627\u0642\u064a\u0629/i, "Iraqi"],
 	[/\b(?:syrian|syria)\b|\u0633\u0648\u0631\u064a|\u0633\u0648\u0631\u064a\u0629/i, "Syrian"],
 	[/\b(?:jordanian|jordan)\b|\u0627\u0631\u062f\u0646\u064a|\u0623\u0631\u062f\u0646\u064a|\u0627\u0631\u062f\u0646\u064a\u0629|\u0623\u0631\u062f\u0646\u064a\u0629/i, "Jordanian"],
+	[/\b(?:burkinabe|burkina\s+faso)\b|\u0628\u0648\u0631\u0643\u064a\u0646\u0627\s*\u0641\u0627\u0633\u0648/i, "Burkinabe"],
 	[/\b(?:palestinian|palestine)\b|\u0641\u0644\u0633\u0637\u064a\u0646\u064a|\u0641\u0644\u0633\u0637\u064a\u0646\u064a\u0629/i, "Palestinian"],
 	[/\b(?:emirati|uae|united\s+arab\s+emirates)\b|\u0627\u0645\u0627\u0631\u0627\u062a\u064a|\u0625\u0645\u0627\u0631\u0627\u062a\u064a/i, "Emirati"],
 	[/\b(?:kuwaiti|kuwait)\b|\u0643\u0648\u064a\u062a\u064a|\u0643\u0648\u064a\u062a\u064a\u0629/i, "Kuwaiti"],
@@ -5032,6 +6933,12 @@ async function normalizeNationalityFromText(text = "", language = "English") {
 	if (hint) return hint;
 	const candidate = explicit || String(text || "").trim();
 	if (!candidate || candidate.length > 80) return "";
+	const compactCandidate = asciiize(candidate)
+		.toLowerCase()
+		.replace(/[.\s_-]+/g, "");
+	if (["us", "usa", "unitedstates", "unitedstatesofamerica"].includes(compactCandidate)) {
+		return "American";
+	}
 	const asciiCandidate = asciiize(candidate).trim();
 	if (/^[A-Za-z][A-Za-z\s-]{2,40}$/.test(asciiCandidate)) {
 		const nat = await validateNationalityLLM(asciiCandidate, language);
@@ -5235,6 +7142,159 @@ function confirmationQuickReplies(sc = {}, st = {}) {
 	];
 }
 
+function finalReservationQuickReplies(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			{
+				label: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+				value: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+				action: "place_reservation",
+			},
+			{
+				label: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				value: "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d",
+				action: "correction",
+			},
+		];
+	}
+	if (/spanish/i.test(lang)) {
+		return [
+			{ label: "Completar reserva", value: "Completar reserva", action: "place_reservation" },
+			{ label: "Algo esta mal", value: "Algo esta mal", action: "correction" },
+		];
+	}
+	if (/french/i.test(lang)) {
+		return [
+			{
+				label: "Finaliser la reservation",
+				value: "Finaliser la reservation",
+				action: "place_reservation",
+			},
+			{
+				label: "Quelque chose ne va pas",
+				value: "Quelque chose ne va pas",
+				action: "correction",
+			},
+		];
+	}
+	if (/urdu/i.test(lang)) {
+		return [
+			{
+				label: "\u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0628\u0646\u0627\u0626\u06cc\u06ba",
+				value: "\u0631\u06cc\u0632\u0631\u0648\u06cc\u0634\u0646 \u0628\u0646\u0627\u0626\u06cc\u06ba",
+				action: "place_reservation",
+			},
+			{
+				label: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				value: "\u06a9\u0686\u06be \u063a\u0644\u0637 \u06c1\u06d2",
+				action: "correction",
+			},
+		];
+	}
+	if (/hindi/i.test(lang)) {
+		return [
+			{
+				label: "\u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u092c\u0928\u093e\u090f\u0902",
+				value: "\u0930\u093f\u091c\u0930\u094d\u0935\u0947\u0936\u0928 \u092c\u0928\u093e\u090f\u0902",
+				action: "place_reservation",
+			},
+			{
+				label: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				value: "\u0915\u0941\u091b \u0917\u0932\u0924 \u0939\u0948",
+				action: "correction",
+			},
+		];
+	}
+	if (/indonesian/i.test(lang)) {
+		return [
+			{
+				label: "Selesaikan reservasi",
+				value: "Selesaikan reservasi",
+				action: "place_reservation",
+			},
+			{
+				label: "Ada yang salah",
+				value: "Ada yang salah",
+				action: "correction",
+			},
+		];
+	}
+	if (/malay/i.test(lang)) {
+		return [
+			{
+				label: "Lengkapkan tempahan",
+				value: "Lengkapkan tempahan",
+				action: "place_reservation",
+			},
+			{
+				label: "Ada yang salah",
+				value: "Ada yang salah",
+				action: "correction",
+			},
+		];
+	}
+	return [
+		{
+			label: "Complete Reservation",
+			value: "Complete Reservation",
+			action: "place_reservation",
+		},
+		{
+			label: "There's Something Wrong",
+			value: "There's Something Wrong",
+			action: "correction",
+		},
+	];
+}
+
+function finalReservationPrompt(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u062c\u0627\u0647\u0632\u0629 \u0627\u0644\u0622\u0646. \u0644\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0627\u0644\u0646\u0638\u0627\u0645\u060c \u0627\u0636\u063a\u0637 \u00ab\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u00bb. \u0648\u0625\u0630\u0627 \u0643\u0627\u0646 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0641\u0635\u064a\u0644 \u064a\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u0636\u063a\u0637 \u00ab\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d\u00bb.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, todo esta listo. Para completar la reserva en el sistema, elige Completar reserva. Si algun detalle necesita correccion, elige Algo esta mal.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, tout est pret. Pour finaliser la reservation dans le systeme, choisissez Finaliser la reservation. Si un detail doit etre corrige, choisissez Quelque chose ne va pas.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}، سب تفصیلات تیار ہیں۔ سسٹم میں ریزرویشن بنانے کے لیے ریزرویشن بنائیں منتخب کریں۔ اگر کوئی تفصیل درست نہیں تو کچھ غلط ہے منتخب کریں۔`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, sab details tayyar hain. System mein reservation banane ke liye Reservation banaen chunein. Agar koi detail sahi nahi hai to Kuch galat hai chunein.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, semua detail sudah siap. Untuk menyelesaikan reservasi di sistem, pilih Selesaikan reservasi. Jika ada detail yang perlu diperbaiki, pilih Ada yang salah.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, semua butiran sudah sedia. Untuk melengkapkan tempahan dalam sistem, pilih Lengkapkan tempahan. Jika ada butiran perlu diperbetulkan, pilih Ada yang salah.`;
+	}
+	return `${name}, everything is ready. To complete the booking in the system, choose Complete Reservation. If anything needs fixing, choose There's Something Wrong.`;
+}
+
+function placeReservationActionSelected(sc = {}, userText = "") {
+	if (lastGuestAction(sc) === "place_reservation") return true;
+	const assistant = lastAssistantMessageBeforeLatestGuest(sc);
+	const assistantActions = quickReplyActions(assistant);
+	if (!assistantActions.includes("place_reservation")) return false;
+	if (confirmsText(userText)) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	return (
+		/\b(?:complete|finalize|finalise|confirm|place|create|make|book)\s+(?:the\s+)?(?:reservation|booking)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621).{0,20}(?:\u0627\u0644\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:completereservation|completebooking|finalizereservation|finalisereservation|confirmreservation|placereservation|createreservation|makereservation|booknow|completarreserva|finaliserlareservation|selesaikanreservasi|lengkapkantempahan|buatreservasi|buattempahan)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function emailQuickReplies(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
@@ -5429,7 +7489,18 @@ function applyReservationGuestCountsFromText(st = {}, text = "") {
 	const before = JSON.stringify(st.slots || {});
 	const adults = countNearTerms(text, ADULT_COUNT_TERMS, { allowZero: false });
 	const children = countNearTerms(text, CHILD_COUNT_TERMS, { allowZero: true });
-	const guests = countNearTerms(text, GUEST_COUNT_TERMS, { allowZero: false });
+	let guests = countNearTerms(text, GUEST_COUNT_TERMS, { allowZero: false });
+	if (guests === null) {
+		const normalized = normalizeNumberWordsForParsing(text)
+			.replace(/\s+/g, " ")
+			.trim();
+		const genericGuestMatch = normalized.match(
+			/(?:^|[^\p{L}\p{N}])(?:guests?|people|persons?|pax|افراد|أفراد|اشخاص|أشخاص|ضيوف|نفر)\s*[:：=-]?\s*([0-9]{1,2})(?=$|[^\p{L}\p{N}])/iu
+		);
+		guests = reservationDetailCount(genericGuestMatch?.[1], {
+			allowZero: false,
+		});
+	}
 	const hasAdultCount = adults !== null;
 	let hasChildrenCount = children !== null;
 	if (hasAdultCount) {
@@ -5488,7 +7559,7 @@ function applyReservationDetailsInference(st = {}, inferred = {}) {
 	if (!st?.slots || !inferred || typeof inferred !== "object") return false;
 	const before = JSON.stringify(st.slots || {});
 	const fullName = cleanFullNameCandidate(inferred.fullName || inferred.name || "");
-	if (fullName) {
+	if (shouldReplaceCapturedGuestName(st, fullName)) {
 		st.slots.fullName = fullName;
 		st.slots.name = fullName;
 	}
@@ -5538,7 +7609,9 @@ async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText =
 		"If latestGuestMessageDigitsNormalized is a number and fieldFocus is a count field, use that number as the provided count.",
 		"Children count is optional for the guest. If the guest gives only a total people/person/guest count and no child count, set adults to that count and children to 0 with childrenProvided=true.",
 		"For fieldFocus=email_or_skip, if the guest semantically declines or omits optional email, set emailSkipped=true.",
+		"For fieldFocus=fullName, use semantic judgment across any language. Return a fullName only when the latest message is actually a person's name; return empty for requests, hurry/chase messages, booking details requests, countries, or nationalities.",
 		"Do not infer adults or children from room type alone.",
+		"Never treat polite filler, hurry/chase messages, or requests like please hurry / mumkin / details / booking number as a full name.",
 		"Only fill slots provided by the guest or clearly answered by the latest reply.",
 		"Output compact JSON only, with all requested keys present.",
 	].join(" ");
@@ -5625,13 +7698,10 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		emailSkipCaptured = true;
 	}
 	const explicitName = explicitNameCandidateFromText(fullText);
-	const lineName = !explicitName ? lineNameCandidateFromText(fullText) : "";
-	const wholeName =
-		!explicitName && !lineName && st.waitFor === "fullname"
-			? cleanFullNameCandidate(fullText)
-			: "";
-	const name = explicitName || lineName || wholeName;
-	if (name) {
+	const lineName =
+		!explicitName && st.waitFor !== "fullname" ? lineNameCandidateFromText(fullText) : "";
+	const name = explicitName || lineName;
+	if (shouldReplaceCapturedGuestName(st, name, { explicit: Boolean(explicitName) })) {
 		st.slots.fullName = name;
 		st.slots.name = name;
 	}
@@ -5661,6 +7731,18 @@ function nextPivot(st) {
 	if (st.waitFor === "intentConfirm") return "intentConfirm";
 	if (!st.slots.checkinISO || !st.slots.checkoutISO) return "dates";
 	if (!st.slots.roomTypeKey) return "room";
+	if (
+		[
+			"reservation_details",
+			"fullname",
+			"nationality",
+			"phone",
+			"email_or_skip",
+			"finalize",
+		].includes(st.waitFor)
+	) {
+		return st.waitFor;
+	}
 	if (!st.reviewSent) return "proceed";
 	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
 	if (!st.slots.email && !st.slots.emailSkipped) return "email_or_skip";
@@ -5698,9 +7780,48 @@ function confirmsText(text = "") {
 	);
 }
 
+function currentQuoteTotalMentioned(text = "", st = {}) {
+	const total = Number(st.quote?.data?.totals?.totalPriceWithCommission);
+	if (!Number.isFinite(total) || total <= 0) return false;
+	const normalized = digitsToEnglish(String(text || "")).replace(/[,\u066c]/g, "");
+	const roundedTotal = String(Math.round(total));
+	return new RegExp(`(^|[^0-9])${roundedTotal}([^0-9]|$)`).test(normalized);
+}
+
+function quoteConfirmationText(text = "", st = {}) {
+	const hasQuoteContext =
+		st.waitFor === "proceed" || activeQuoteMatchesSlots(st) || st.quote?.data?.available;
+	if (!hasQuoteContext) return false;
+	if (confirmsText(text)) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const directArabic =
+		/(?:\u0627\u0643\u062f|\u0627\u0643\u062f\u064a|\u0627\u0643\u062f\u0648\u0627|\u0646\u0627\u0643\u062f|\u0646\u0624\u0643\u062f|\u0646\u0648\u0643\u062f|\u062b\u0628\u062a|\u062b\u0628\u062a\u064a|\u0627\u062d\u062c\u0632|\u0627\u062d\u062c\u0632\u064a|\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u062a\u0627\u0628\u0639|\u062a\u0627\u0628\u0639\u064a).{0,32}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632).{0,50}(?:\u0627\u0639\u0644\u0627\u0647|\u0627\u0639\u0644\u0627|\u0641\u0648\u0642|\u0627\u0644\u0633\u0627\u0628\u0642|\u0627\u0644\u0645\u0630\u0643\u0648\u0631|\u0647\u0630\u0627|\u062f\u0647)/i.test(
+			arabic
+		);
+	const directLatin =
+		/\b(?:confirm|proceed|continue|go ahead|book|reserve|finalize)\b.{0,40}\b(?:booking|reservation|quote|above|this)\b/i.test(
+			lower
+		) ||
+		/(?:confirmbooking|confirmreservation|proceedbooking|continuebooking|bookabove|reservethis|finalizethis)/i.test(
+			latinCompact
+		);
+	const repeatsQuotedTotal =
+		currentQuoteTotalMentioned(text, st) &&
+		((/(?:\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632).{0,80}(?:\u0627\u062c\u0645\u0627\u0644\u064a|\u0628\u0627\u062c\u0645\u0627\u0644\u064a|\u0628\u0627\u062c\u0645\u0627\u0644\u0649|\u0645\u062c\u0645\u0648\u0639|\u0631\u064a\u0627\u0644)/i.test(
+			arabic
+		) ||
+			/\b(?:booking|reservation|quote|total)\b.{0,80}\b(?:total|sar|riyal|price)\b/i.test(
+				lower
+			)));
+	return directArabic || directLatin || repeatsQuotedTotal;
+}
+
 function declinesText(text = "") {
 	const raw = String(text || "");
-	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627)/i.test(raw)) {
+	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627|\u0628\u0639\u062f\u064a\u0646)/i.test(raw)) {
 		return true;
 	}
 	return /\b(no|nope|not now|later|cancel|لا|مش دلوقتي|لاحقا|non|pas maintenant|no gracias)\b/i.test(
@@ -5712,6 +7833,82 @@ function patienceText(text = "") {
 	return /\b(take your time|no rush|whenever|slow down|wait|one moment|moment|براحتك|براحتك|خد وقتك|خدي وقتك|استنى|انتظر)\b/i.test(
 		String(text || "")
 	);
+}
+
+function guestHurryOrChaseText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:hurry|quick|quickly|faster|speed|urgent|asap|can you hurry|please hurry)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0627\u0644\u0633\u0631\u0639\u0647|\u0627\u0644\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u0645\u0633\u062a\u0639\u062c\u0644\u0647)/i.test(
+			arabic
+		) ||
+		/(?:hurry|quickly|faster|speed|urgent|asap|sora|sor3a|bsor3a|bser3a|mosta3gel)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function guestPauseOrLaterText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:talk|chat|call|continue|come\s+back)\s+later\b/i.test(lower) ||
+		/^(?:later|not\s+now|maybe\s+later|another\s+time|thanks\s+anyway|thank\s+you\s+anyway|no\s+thanks)\.?$/i.test(
+			lower
+		) ||
+		/(?:ه?كلمك|حكلمك|اكلمك|اتكلم|نتكلم|نكمل|ارجعلك|ارجع لك).{0,30}(?:بعدين|لاحقا|بعد كده|بعدها)/i.test(
+			arabic
+		) ||
+		/(?:بعدين|لاحقا|بعد كده|مش دلوقتي|مش الان|لا الان|لا الآن|ليس الان|وقت تاني|وقت ثاني|شكرا علي اي حال|شكرا على اي حال|شكرا على اى حال|خلاص كده)/i.test(
+			arabic
+		) ||
+		/(?:talklater|chatlater|calllater|continuelater|comebacklater|notnow|maybelater|anothertime|thanksanyway|thankyouanyway|nothanks|ba3den|baadain|meshdelwa2ty|mshdelwa2ty)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function bookingPauseReplyText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، ولا يهمك. أنا معك وقت ما تحب ترجع، وأكمل معك بهدوء بدون أي استعجال.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, claro, no hay prisa. Estare aqui cuando quieras volver y seguimos con calma.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, bien sur, aucun souci. Je reste disponible quand vous souhaitez revenir, et nous reprendrons tranquillement.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}، کوئی مسئلہ نہیں۔ جب آپ دوبارہ تیار ہوں، میں یہیں ہوں اور آرام سے مدد جاری رکھوں گا/گی۔`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, koi baat nahi. Jab aap wapas tayyar hon, main yahin hoon aur aaram se madad jaari rakhunga/rakhungi.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, tidak apa-apa. Saya tetap di sini saat Anda ingin kembali, dan kita lanjutkan dengan tenang.`;
+	}
+	if (/malay/i.test(lang)) {
+		return `${name}, tidak mengapa. Saya sedia apabila anda mahu kembali, dan kita sambung dengan tenang.`;
+	}
+	return `${name}, no problem. I will be here whenever you want to come back, and we can continue calmly with no rush.`;
+}
+
+async function answerBookingPause(io, sc, st, userText = "") {
+	pauseBookingNudge(st);
+	await humanSend(io, sc, st, bookingPauseReplyText(sc, st), {
+		scheduleIdle: false,
+	});
+	st.waitFor = st.waitFor || "clarify";
+	logStep(String(sc._id), "booking_pause.reply", {
+		waitFor: st.waitFor,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
 }
 
 function botExperienceComplaintText(text = "") {
@@ -5734,7 +7931,7 @@ function conversationRecoveryFallbackText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، حقك عليّ. أنا معك ومتابع المحادثة، ولن أستعجلك. أرسل لي النقطة التالية عندما تكون جاهزا وسأكمل معك بوضوح.`;
+		return `${name}، حقك عليّ. أنا معك وأتابع المحادثة، ولن أستعجلك. أرسل لي النقطة التالية عندما تحب وسأكمل معك بوضوح.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, tienes razon, disculpa. Estoy contigo y sigo el contexto; no quiero apresurarte. Enviame el siguiente detalle cuando estes listo y continuo con claridad.`;
@@ -5923,6 +8120,10 @@ function lastUserText(sc) {
 	return lastUser?.message || "";
 }
 
+function lastGuestAction(sc = {}) {
+	return String(lastGuestMessage(sc)?.clientAction || "").trim();
+}
+
 function lastAssistantText(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	const lastAssistant = [...conversation]
@@ -6081,6 +8282,11 @@ function confirmationFromText(text = "") {
 }
 
 async function handoffToHuman(io, sc, st, reason) {
+	if (reason === "reservation_cancellation") {
+		return answerCancellationRefundPolicyInquiry(io, sc, st, "", {}, {
+			forceCancellation: true,
+		});
+	}
 	const caseId = String(sc._id);
 	const lang = languageOf(sc, st);
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
@@ -6091,7 +8297,7 @@ async function handoffToHuman(io, sc, st, reason) {
 		reason === "jannat_hotel_complaint"
 			? `I am truly sorry this happened. Jannat Booking management will review this immediately, and action will be taken with the hotel team as needed.`
 			: reason === "reservation_cancellation"
-			? `I understand you want to cancel a reservation. ${humanTeam} will take over from here, because cancellations must be handled by a human specialist.`
+			? `I understand you want to review cancellation or refund policy. I will answer from the hotel policy directly here.`
 			: reason === "abusive_guest"
 			? `${humanTeam} will continue this conversation from here.`
 			: reason === "reservation_finalize_failed"
@@ -6106,7 +8312,7 @@ async function handoffToHuman(io, sc, st, reason) {
 			reason === "jannat_hotel_complaint"
 				? "Lamento mucho lo ocurrido. La administracion de Jannat Booking revisara esto de inmediato y tomara accion con el hotel si es necesario."
 				: reason === "reservation_cancellation"
-				? "Entiendo que quieres cancelar una reserva. Un especialista de soporte tomara el chat desde aqui."
+				? "Entiendo que quieres revisar la politica de cancelacion o reembolso. Te respondere directamente desde la politica del hotel."
 				: reason === "abusive_guest"
 				? "Un especialista de soporte continuara esta conversacion desde aqui."
 				: reason === "reservation_finalize_failed"
@@ -6119,7 +8325,7 @@ async function handoffToHuman(io, sc, st, reason) {
 			reason === "jannat_hotel_complaint"
 				? "Je suis vraiment desole pour cette situation. La direction de Jannat Booking va l'examiner immediatement et prendre les mesures necessaires avec l'hotel."
 				: reason === "reservation_cancellation"
-				? "Je comprends que vous voulez annuler une reservation. Un specialiste du support va prendre le relais ici."
+				? "Je comprends que vous voulez verifier la politique d'annulation ou de remboursement. Je vais repondre directement a partir de la politique de l'hotel."
 				: reason === "abusive_guest"
 				? "Un specialiste du support va poursuivre cette conversation ici."
 				: reason === "reservation_finalize_failed"
@@ -6133,7 +8339,7 @@ async function handoffToHuman(io, sc, st, reason) {
 	} else if (/arabic/i.test(lang)) {
 		text =
 			reason === "reservation_cancellation"
-				? "فهمت أنك تريد إلغاء حجز. سيتابع معك أحد مختصي الدعم من هنا."
+				? "\u0641\u0647\u0645\u062a \u0623\u0646\u0643 \u062a\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0623\u0648 \u0627\u0644\u0627\u0633\u062a\u0631\u062f\u0627\u062f. \u0633\u0623\u062c\u064a\u0628\u0643 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0646 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0641\u0646\u062f\u0642."
 				: "فهمت طلبك. سيتابع معك أحد مختصي الدعم من هنا.";
 	}
 	if (/arabic/i.test(lang) && reason === "repeated_question") {
@@ -6408,7 +8614,7 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		}
 	}
 	if (context.quote) return simpleQuoteText({ sc, st, quote: context.quote });
-	if (/review before we finalize|type confirm to finalize/.test(text)) {
+	if (/reservation review|review before we finalize|type confirm to finalize/.test(text)) {
 		const total = context.totals?.totalPriceWithCommission || context.total || "";
 		const currency = cleanCurrency(context.currency || st.quote?.data?.currency || "SAR");
 		const room = context.room || roomTypeLabel(st.slots?.roomTypeKey);
@@ -6427,48 +8633,48 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 			const dates = localizedStayDateLines(sc, st);
 			const localizedTotal = total ? localizedMoney(total, currency, "Arabic") : "";
 			return [
-				`${respectfulAddress}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+				`${respectfulAddress}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632:`,
 				`\u0627\u0644\u0641\u0646\u062f\u0642: ${context.hotelLocalized || hotel}`,
 				`\u0627\u0644\u063a\u0631\u0641\u0629: ${context.roomLocalized || room}`,
 				`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary || dateLine}`,
 				dates.secondary || "",
 				localizedTotal ? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${localizedTotal}` : "",
-				`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
+				`\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "\u062a\u0623\u0643\u064a\u062f". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d".`,
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		if (isIndonesian) {
 			return [
-				"Tinjauan sebelum kami finalkan:",
+				"Ringkasan reservasi:",
 				`Hotel: ${hotel}`,
 				`Kamar: ${room}`,
 				`Tanggal: ${dateLine}`,
 				total ? `Total: ${total} ${currency}` : "",
-				"Ketik konfirmasi untuk finalisasi, atau beritahu saya apa yang perlu diubah.",
+				"Pilih Konfirmasi jika sudah benar, atau Ada yang salah jika perlu diperbaiki.",
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		if (isMalay) {
 			return [
-				"Semakan sebelum kami muktamadkan:",
+				"Ringkasan tempahan:",
 				`Hotel: ${hotel}`,
 				`Bilik: ${room}`,
 				`Tarikh: ${dateLine}`,
 				total ? `Jumlah: ${total} ${currency}` : "",
-				"Taip pengesahan untuk muktamadkan, atau beritahu saya apa yang perlu diubah.",
+				"Pilih Sahkan jika semuanya betul, atau Ada yang salah jika perlu diperbetulkan.",
 			]
 				.filter(Boolean)
 				.join("\n");
 		}
 		return [
-			"Review before we finalize:",
+			"Reservation review:",
 			`Hotel: ${hotel}`,
 			`Room: ${room}`,
 			`Dates: ${dateLine}`,
 			total ? `Total: ${total} ${currency}` : "",
-			"Type confirm to finalize, or tell me what to change.",
+			"Choose Confirm if everything looks correct, or Something is wrong if we need to fix anything.",
 		]
 			.filter(Boolean)
 			.join("\n");
@@ -6504,14 +8710,15 @@ function fallbackWriterText(sc, st, instruction = "", context = {}, respectfulAd
 		return `${respectfulAddress}, please share an email address for the reservation details, or type skip if you prefer to continue without one.`;
 	}
 	if (/greet/.test(text)) {
-		if (isArabic) return `أهلاً ${respectfulAddress}، معك ${st.agentName} من ${supportDesk}. كيف أقدر أساعدك اليوم؟`;
-		if (isSpanish) return `Hola ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
-		if (isHindi) return `नमस्ते ${respectfulAddress}, मैं ${supportDesk} से ${st.agentName} हूं। मैं आपकी कैसे मदद कर सकता हूं?`;
-		if (isFrench) return `Bonjour ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
-		if (isUrdu) return `السلام علیکم ${respectfulAddress}، میں ${supportDesk} سے ${st.agentName} ہوں۔ میں آپ کی کیسے مدد کر سکتا ہوں؟`;
-		if (isIndonesian) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya bisa membantu hari ini?`;
-		if (isMalay) return `Halo ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya boleh membantu hari ini?`;
-		return `Hi ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
+		const opening = islamicGreetingForLanguage(sc, st);
+		if (isArabic) return `${opening} ${respectfulAddress}\u060c \u0645\u0639\u0643 ${st.agentName} \u0645\u0646 ${supportDesk}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+		if (isSpanish) return `${opening} ${respectfulAddress}, soy ${st.agentName} de ${supportDesk}. Como puedo ayudarte hoy?`;
+		if (isHindi) return `${opening} ${respectfulAddress}, \u092e\u0948\u0902 ${supportDesk} \u0938\u0947 ${st.agentName} \u0939\u0942\u0902\u0964 \u092e\u0948\u0902 \u0906\u092a\u0915\u0940 \u0915\u093f\u0938 \u0924\u0930\u0939 \u092e\u0926\u0926 \u0915\u0930\u0942\u0902?`;
+		if (isFrench) return `${opening} ${respectfulAddress}, je suis ${st.agentName} de ${supportDesk}. Comment puis-je vous aider aujourd'hui ?`;
+		if (isUrdu) return `${opening} ${respectfulAddress}\u060c \u0645\u06cc\u06ba ${supportDesk} \u0633\u06d2 ${st.agentName} \u06c1\u0648\u06ba\u06d4 \u0645\u06cc\u06ba \u0622\u067e \u06a9\u06cc \u06a9\u06cc\u0633\u06d2 \u0645\u062f\u062f \u06a9\u0631 \u0633\u06a9\u062a\u0627 \u06c1\u0648\u06ba\u061f`;
+		if (isIndonesian) return `${opening} ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya bisa membantu hari ini?`;
+		if (isMalay) return `${opening} ${respectfulAddress}, saya ${st.agentName} dari ${supportDesk}. Bagaimana saya boleh membantu hari ini?`;
+		return `${opening} ${respectfulAddress}, this is ${st.agentName} from ${supportDesk}. How can I help you today?`;
 	}
 	if (/date|check-in|check.?in|checkout|check-out/.test(text)) {
 		if (isArabic) return `${respectfulAddress}، من فضلك أرسل تاريخ الدخول وتاريخ الخروج لأراجع التوفر.`;
@@ -6700,6 +8907,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			: `Represent Jannat Booking directly.`,
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
+		`For the first message in a new chat, start with a readable Islamic greeting before the guest name: Arabic "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", Urdu "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645", Hindi "\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e", Indonesian/Malay "Assalamualaikum", and other Latin-script languages "Assalamu alaikum". Treat this as the approved platform salutation, then keep the rest of the reply in ${targetLanguage}. Do not use Arabizi numerals like "3" for ayn.`,
 		/arabic/i.test(targetLanguage)
 			? `Arabic output rule: use natural Arabic hospitality wording. Do not write English commands such as "confirm" or "skip"; use "\u062a\u0623\u0643\u064a\u062f" and "\u062a\u062e\u0637\u064a". Write SAR as "\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a" in customer-facing Arabic. Prefer Arabic hotel and room names from context when available.`
 			: "",
@@ -6716,13 +8924,13 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
 			: "",
-		activeHotelFacts?.googleMapsDrivingDirectionsUrl
-			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Google Maps Driving Route to Al Haram](${activeHotelFacts.googleMapsDrivingDirectionsUrl}). This URL uses the hotel's exact stored coordinates as the origin, Al Haram as the destination, and driving mode. Do not invent or rewrite map coordinates.`
+		activeHotelFacts?.googleMapsLocationUrl
+			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
 			: "",
 		activeHotelFacts
-			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. Do not say or imply "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
+			? `When using activeHotelFacts, write as "${hotelName}" reception. Translate and adapt raw hotel-detail text into ${targetLanguage}; clean grammar, remove duplicate yes/no wording, and make it sound like professional hotel customer service. For hotelPolicyQA, answer from the saved question/answer text only, without adding links or unsupported exceptions. If source wording is needed, prefer "Based on the hotel's terms and conditions" or equivalent in ${targetLanguage}. Do not say or imply "I checked", "I found", "document", "the schema", "records", "owner added", "registered from the hotel", "hotel details say", or any similar database/source label.`
 			: "",
 		activeHotelFacts
 			? `If activeHotelFacts.distances has walkingToElHaram or drivingToElHaram and the guest asks how far the hotel is from Al Haram, say the walking/driving minutes directly and naturally. Do not deflect to review, dates, phone, email, or confirmation before answering the distance.`
@@ -6730,21 +8938,28 @@ async function write(io, sc, st, instruction, context = {}) {
 		activeHotelFacts
 			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
 			: "",
+		activeHotelFacts
+			? `If the guest asks whether the selected hotel is listed, registered, or available on Nusuk, use only activeHotelFacts.isNusuk and activeHotelFacts.isNusukText. If isNusuk is true, answer yes directly as hotel reception and translate/adapt isNusukText naturally when present. If isNusuk is false or missing, say we do not currently show the hotel as listed on Nusuk, then keep the guest comfortable and continue the reservation help.`
+			: "",
 		`When the guest asks whether a room exists or whether a room fits a number of guests, answer like a helpful hospitality sales agent: confirm the fit using the provided room facts before asking for dates.`,
+		`A quintuple/family room fits 5 guests. If the guest asks for more than 5 guests, or asks to add another bed to a 5-bed room, do not imply one room can fit them. Explain warmly that Saudi hotel compliance rules starting in 2026 do not allow a single room to exceed 5 beds, then recommend a comfortable combination such as one quintuple/family room plus one double room, with another room if the exact party size requires it.`,
+		`Pricing requires both arrival/check-in and departure/checkout dates. If both are missing, always ask for both together in one sentence; never ask only for check-in. If one date is already supplied, ask only for the missing date.`,
 		`Never make check-in/check-out dates the opening question of a conversation unless the guest's latest message is specifically a price/date-availability request and there is no warmer/direct question to answer first.`,
 		`If the guest is excited, worried, annoyed, or joking, acknowledge that briefly and naturally before the operational next step.`,
 		`If the guest complains about repetition, speed, or not being answered, apologize briefly, correct course, and avoid defending yourself.`,
-		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}.`,
+		`Use this respectful customer address naturally when speaking to the guest: ${respectfulAddress}. Use it in greetings, apologies, confirmations, reservation reviews, or after a few turns without addressing the guest; do not start every reply with the guest's name/address.`,
 		`This is a respectful Umrah/hospitality platform. Keep the service tone modest, patient, and supportive for Muslim guests and families without lecturing or using casual profanity.`,
 		`Guest messages may be native script, romanized/transliterated, code-switched, misspelled, or informal. Interpret the intended meaning from the full conversation before replying.`,
 		`Arabic guests may write in Egyptian, Gulf, Levantine, Iraqi, Sudanese, Moroccan, Algerian, Tunisian, or other dialects, including Franko Arabic/Arabizi in Latin characters. Indian, Pakistani, French, Spanish, Indonesian, and Malaysian guests may also code-switch or write phonetically. Understand the meaning without treating the writing style as a reason to escalate.`,
 		`If the latest guest message is clearly in a different language, the active response language already reflects that switch; answer naturally in ${targetLanguage} without asking permission to switch.`,
-		`Guest address guidance: inferred guest gender is "${guestProfile.gender}" from the available name/title, and the recommended address is "${respectfulAddress}". Use gendered honorifics only when confident; otherwise use the guest's name or a neutral respectful address.`,
+		`Agent voice and grammar: ${st.agentName} is a female reception/CSR agent. In Arabic, when referring to yourself, use feminine or neutral wording such as "أنا معك", "أتابع معك", or "أنا موجودة معك"; never say "أنا موجود" for the assistant. In other gendered languages, keep the assistant's self-reference feminine when needed. Keep guest titles separate from agent gender.`,
+		`Guest address guidance: inferred guest gender is "${guestProfile.gender}" from the available name/title, and the recommended address is "${respectfulAddress}". Use gendered honorifics only when confident; otherwise use the guest's name or a neutral respectful address. Do not repeat the same address at the beginning of consecutive replies unless apologizing, confirming an important step, or re-engaging after a pause.`,
 		`For Arabic conversations, use "\u0623\u0633\u062a\u0627\u0630\u0629 {first name}" for a confidently female guest and "\u0623\u0633\u062a\u0627\u0630 {first name}" for a confidently male guest. If gender is unknown, avoid a gendered Arabic title and use the name or "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645". Never call a female guest "\u0623\u0633\u062a\u0627\u0630".`,
+		`For Arabic one-night stays, say "\u0644\u064a\u0644\u0629 \u0648\u0627\u062d\u062f\u0629"; never write "\u0661 \u0644\u064a\u0627\u0644\u064a" or "\u0644\u0645\u062f\u0629 \u0661 \u0644\u064a\u0627\u0644\u064a".`,
 		`For Spanish, French, Hindi, Urdu, Indonesian, Malay, and other languages, use gendered forms only when the guest's gender is clear from name/title or context; otherwise stay polite and neutral.`,
 		`Before replying, study the full conversation transcript and avoid repeating questions, links, or details already covered.`,
 		`Do not ask for information the guest has already supplied; move the conversation forward naturally.`,
-		`Avoid repeated openings such as "Hello {name}" or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
+		`Avoid repeated openings such as "Hello {name}", "Assalamu alaikum {name}", or "I'm ${st.agentName}" after the first greeting. Continue the conversation as an already-present support agent.`,
 		hotelName ? `Your hotel is "${hotelName}".` : `You represent Jannat Booking.`,
 		AI_PREVIOUS_GUEST_CONTEXT_ENABLED
 			? `Private previous guest chats may be provided as operational context. Use them silently to be prepared for recurring preferences, unresolved issues, language style, and continuity. Never tell the guest that old chats are visible, never quote old chats, and never reveal private previous-chat details unless the guest explicitly brings that detail into the current conversation.`
@@ -7003,10 +9218,10 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
-		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. For selected-hotel chats, questions about a different hotel or broad Jannat Booking programs should use support_email, not guesses.",
+		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. The support_email action name means unsupported-answer fallback: the customer-facing reply should professionally say the detail is not confirmed and then move back to the relevant hotel/reservation topic, not invent facts or send the guest away.",
 		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
 		"Do not choose human_escalation only because a normal question was repeated once or twice; keep answering safely and patiently. The deterministic three-repeat guard handles unresolved repeated questions.",
-		"Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, cancellation/refund/change requests, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
+		"Choose reservation_cancellation for cancellation/refund policy questions or cancellation requests so the deterministic policy handler can answer directly from verified hotel policy. Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
 	].join(" ");
 	const user = JSON.stringify(
 		{
@@ -7070,7 +9285,7 @@ async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
 			io,
 			sc,
 			st,
-			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue to the review step. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
+			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue with the reservation details. For Arabic, use correct night grammar: one night is ليلة واحدة, never ١ ليالي. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
 			{
 				quote,
 				roomFacts: {
@@ -7206,10 +9421,12 @@ async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
 		return true;
 	}
 	if (dates?.checkinISO && dates?.checkoutISO) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
+			source: "room_alternative_dates",
+			userText,
+		});
+		if (dateMerge.prompted) return true;
 		clearPendingRoomAlternative(st);
-		st.slots.checkinISO = dates.checkinISO;
-		st.slots.checkoutISO = dates.checkoutISO;
-		if (dates.raw) st.dateRaw = { ...st.dateRaw, ...dates.raw };
 		st.quote = null;
 		st.quoteSummarizedAt = 0;
 		st.reviewSent = false;
@@ -7257,6 +9474,390 @@ function quoteKeyForSlots(st = {}) {
 function activeQuoteMatchesSlots(st = {}) {
 	const key = quoteKeyForSlots(st);
 	return Boolean(key && st.quote?.key === key && st.quote?.data?.available);
+}
+
+function ensureCurrentQuoteForSlots(st = {}) {
+	if (activeQuoteMatchesSlots(st)) return st.quote.data;
+	if (
+		!st.hotel ||
+		!st.slots?.roomTypeKey ||
+		!st.slots?.checkinISO ||
+		!st.slots?.checkoutISO
+	) {
+		return null;
+	}
+	const quote = safePriceRoomForStay(
+		st.hotel,
+		{ roomType: st.slots.roomTypeKey },
+		st.slots.checkinISO,
+		st.slots.checkoutISO
+	);
+	st.quote = {
+		key: quoteKeyForSlots(st),
+		at: now(),
+		data: quote,
+	};
+	return quote;
+}
+
+function repeatPriceQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:price|cost|rate|total|amount|how\s+much|how\s+many\s+riyal|sar|riyals?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0633\u0639\u0631|\u0633\u0639\u0631|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0645\u062c\u0645\u0648\u0639|\u0627\u0644\u062a\u0643\u0644\u0641\u0629|\u062a\u0643\u0644\u0641\u0647|\u0628\u0643\u0627\u0645|\u0628\u0643\u0645|\u0643\u0627\u0645\s+\u0627\u0644\u0633\u0639\u0631|\u0643\u0645\s+\u0627\u0644\u0633\u0639\u0631)/i.test(
+			arabic
+		) ||
+		/(?:priceagain|totalagain|costagain|howmuch|els3r|als3r|elsa3r|kamels3r|bkam)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function reservationDetailsSummaryQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const arabicBookingWords =
+		"(?:\\u062d\\u062c\\u0632(?:\\u064a|\\u0643|\\u0643\\u0645|\\u0646\\u0627)?|\\u0627\\u0644\\u062d\\u062c\\u0632|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0647|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0629|\\u0627\\u0644\\u0625\\u0642\\u0627\\u0645\\u0629)";
+	return (
+		/\b(?:booking|reservation|stay|quote)\s+(?:details|summary|recap)\b/i.test(
+			lower
+		) ||
+		/\b(?:details|summary|recap)\s+(?:of|for)?\s*(?:the\s+)?(?:booking|reservation|stay|quote)\b/i.test(
+			lower
+		) ||
+		new RegExp(
+			`(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647).{0,30}${arabicBookingWords}|${arabicBookingWords}.{0,30}(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635)`,
+			"i"
+		).test(
+			arabic
+		) ||
+		/(?:bookingdetails|reservationdetails|staydetails|bookingrecap|reservationsummary|tafaseelelhagz|tfaseelelhagz|molakhaselhagz)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function confirmationNumberQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:confirmation|booking|reservation|reference)\s*(?:number|no\.?|#|id|ref)\b/i.test(
+			lower
+		) ||
+		/\b(?:number|no\.?|#|id|ref)\s+(?:for\s+)?(?:my\s+)?(?:confirmation|booking|reservation|reference)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0642\u0645|\u0646\u0645\u0631\u0647|\u0646\u0645\u0631\u0629).{0,24}(?:\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f).{0,24}(?:\u0631\u0642\u0645|\u0646\u0645\u0631\u0647|\u0646\u0645\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:confirmationnumber|bookingnumber|reservationnumber|bookingno|reservationno|raqmaltakid|raqmelhagz|raqmhagzy|bookingref|reservationref)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function bookingStateQuestionText(text = "") {
+	return (
+		repeatPriceQuestionText(text) ||
+		reservationDetailsSummaryQuestionText(text) ||
+		confirmationNumberQuestionText(text)
+	);
+}
+
+function localizedNightCount(nights, lang = "English") {
+	const count = Number(nights || 0);
+	if (!Number.isFinite(count) || count <= 0) return "";
+	if (/arabic/i.test(lang)) {
+		if (count === 1) return "\u0644\u064a\u0644\u0629 \u0648\u0627\u062d\u062f\u0629";
+		if (count === 2) return "\u0644\u064a\u0644\u062a\u064a\u0646";
+		if (Number.isInteger(count) && count >= 3 && count <= 10) {
+			return `${localizedNumber(count, lang)} \u0644\u064a\u0627\u0644\u064d`;
+		}
+		return `${localizedNumber(count, lang)} \u0644\u064a\u0644\u0629`;
+	}
+	return `${localizedNumber(count, lang)} night${count === 1 ? "" : "s"}`;
+}
+
+function bookingGuestCountText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const adults = Number(st.slots?.adults || 0);
+	const children = Number(st.slots?.children || 0);
+	const hasAdults = st.slots?.adultsProvided && adults > 0;
+	const hasChildren = st.slots?.childrenProvided && children > 0;
+	if (!hasAdults && !hasChildren) return "";
+	if (/arabic/i.test(lang)) {
+		const parts = [];
+		if (hasAdults) {
+			parts.push(`${localizedNumber(adults, lang)} \u0628\u0627\u0644\u063a`);
+		}
+		if (hasChildren) {
+			parts.push(`${localizedNumber(children, lang)} \u0637\u0641\u0644`);
+		}
+		return parts.join(" \u0648");
+	}
+	const parts = [];
+	if (hasAdults) parts.push(`${localizedNumber(adults, lang)} adult${adults === 1 ? "" : "s"}`);
+	if (hasChildren) parts.push(`${localizedNumber(children, lang)} child${children === 1 ? "" : "ren"}`);
+	return parts.join(" and ");
+}
+
+function bookingNextActionText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const waitFor = st.waitFor || nextPivot(st);
+	if (/arabic/i.test(lang)) {
+		if (waitFor === "proceed") {
+			return '\u0625\u0630\u0627 \u064a\u0646\u0627\u0633\u0628\u0643\u060c \u0627\u062e\u062a\u0631 "\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639" \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632.';
+		}
+		if (waitFor === "reviewConfirm") {
+			return '\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "\u062a\u0623\u0643\u064a\u062f".';
+		}
+		if (waitFor === "finalize" || (isReservationDetailStep(st) && hasMandatoryReservationDetails(st))) {
+			return '\u0644\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0627\u0644\u0646\u0638\u0627\u0645\u060c \u0627\u062e\u062a\u0631 "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632".';
+		}
+		if (isReservationDetailStep(st)) {
+			return "\u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0623\u0631\u0633\u0644 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u062a\u0628\u0642\u064a\u0629 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062d\u062f\u0629.";
+		}
+		return "\u0647\u0644 \u0623\u062a\u0627\u0628\u0639 \u0644\u0643 \u0627\u0644\u062d\u062c\u0632\u061f";
+	}
+	if (waitFor === "proceed") {
+		return 'If this works for you, choose "Yes, proceed" and I will review the booking.';
+	}
+	if (waitFor === "reviewConfirm") {
+		return 'If everything is correct, choose "Confirm".';
+	}
+	if (waitFor === "finalize" || (isReservationDetailStep(st) && hasMandatoryReservationDetails(st))) {
+		return 'To complete the booking in the system, choose "Complete Reservation".';
+	}
+	if (isReservationDetailStep(st)) {
+		return "To complete the booking, send the remaining guest details in one message.";
+	}
+	return "Would you like me to continue the booking?";
+}
+
+function bookingSummaryQuickReplies(sc = {}, st = {}) {
+	if (st.waitFor === "proceed" && activeQuoteMatchesSlots(st)) {
+		return proceedQuickReplies(sc, st);
+	}
+	if (st.waitFor === "reviewConfirm") {
+		return confirmationQuickReplies(sc, st);
+	}
+	if (st.waitFor === "finalize" || (isReservationDetailStep(st) && hasMandatoryReservationDetails(st))) {
+		return finalReservationQuickReplies(sc, st);
+	}
+	return [];
+}
+
+function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomName = localizedRoomName(sc, st, quote);
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote?.totals?.totalPriceWithCommission;
+	const nights = Number(quote?.nights || 0);
+	const perNight =
+		nights && total
+			? Math.round((Number(total) / Math.max(1, nights)) * 100) / 100
+			: null;
+	const totalText = total ? localizedMoney(total, quote.currency, lang) : "";
+	const nightText = localizedNightCount(nights, lang);
+	const dateText = [dates.primary, dates.secondary].filter(Boolean).join(" (") +
+		(dates.secondary ? ")" : "");
+	const next = bookingNextActionText(sc, st);
+	if (/arabic/i.test(lang)) {
+		const perNightText = perNight
+			? ` \u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${localizedMoney(perNight, quote.currency, lang)}.`
+			: "";
+		return `${name}\u060c \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0644\u0640 ${roomName} \u0641\u064a ${hotelName}: ${totalText} \u0625\u062c\u0645\u0627\u0644\u064a\u0627 \u0644\u0645\u062f\u0629 ${nightText} (${dateText}).${perNightText} ${next}`;
+	}
+	const perNightText = perNight
+		? ` The average is ${localizedMoney(perNight, quote.currency, lang)} per night.`
+		: "";
+	return `${name}, the current price for ${roomName} at ${hotelName} is ${totalText} total for ${nightText} (${dateText}).${perNightText} ${next}`;
+}
+
+function currentReservationSummaryText(sc = {}, st = {}, quote = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomName = localizedRoomName(sc, st, quote);
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote?.totals?.totalPriceWithCommission;
+	const nights = localizedNightCount(quote?.nights || 0, lang);
+	const totalText = total ? localizedMoney(total, quote.currency, lang) : "";
+	const guestName = st.slots?.fullName || st.slots?.name || "";
+	const guestCount = bookingGuestCountText(sc, st);
+	const guestDetails = [
+		guestName,
+		st.slots?.nationality,
+		st.slots?.phone,
+		guestCount,
+	].filter(Boolean);
+	const missing = localizedMissingLabels(sc, st)
+		.map((label) => String(label || "").replace(/:$/, ""))
+		.filter(Boolean);
+	const next = bookingNextActionText(sc, st);
+	if (/arabic/i.test(lang)) {
+		return [
+			`${name}\u060c \u0645\u0644\u062e\u0635 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u062d\u0627\u0644\u064a:`,
+			`\u0627\u0644\u0641\u0646\u062f\u0642: ${hotelName}`,
+			`\u0627\u0644\u063a\u0631\u0641\u0629: ${roomName}`,
+			`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}`,
+			nights && totalText ? `\u0627\u0644\u0633\u0639\u0631: ${totalText} \u0644\u0645\u062f\u0629 ${nights}` : "",
+			guestDetails.length
+				? `\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0636\u064a\u0641: ${guestDetails.join(" - ")}`
+				: "",
+			missing.length ? `\u0627\u0644\u0645\u062a\u0628\u0642\u064a: ${missing.join("\u060c ")}` : "",
+			next,
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	return [
+		`${name}, here is the current booking summary:`,
+		`Hotel: ${hotelName}`,
+		`Room: ${roomName}`,
+		`Dates: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}`,
+		nights && totalText ? `Price: ${totalText} for ${nights}` : "",
+		guestDetails.length ? `Guest details: ${guestDetails.join(" - ")}` : "",
+		missing.length ? `Still needed: ${missing.join(", ")}` : "",
+		next,
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+function postBookingReservationSummaryText(sc = {}, st = {}, quote = {}, ref = null) {
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomName = localizedRoomName(sc, st, quote || {});
+	const dates =
+		st.slots?.checkinISO && st.slots?.checkoutISO
+			? localizedStayDateLines(sc, st)
+			: { primary: "", secondary: "" };
+	const total = Number(
+		quote?.totals?.totalPriceWithCommission || quote?.total || quote?.totalPrice || 0
+	);
+	const currency = cleanCurrency(quote?.currency || "SAR");
+	const nights = localizedNightCount(quote?.nights || 0, lang);
+	const totalText =
+		Number.isFinite(total) && total > 0 ? localizedMoney(total, currency, lang) : "";
+	const links = ref ? reservationLinks(ref) : {};
+	const confirmation =
+		ref?.confirmation_number || sc.aiReservation?.confirmationNumber || "";
+	const guestCount = bookingGuestCountText(sc, st);
+	const guestName = st.slots?.fullName || "";
+
+	if (/arabic/i.test(lang)) {
+		return [
+			"\u0623\u0643\u064a\u062f\u060c \u0647\u0630\u0647 \u062a\u0641\u0627\u0635\u064a\u0644 \u062d\u062c\u0632\u0643:",
+			confirmation ? `\u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.` : "",
+			`\u0627\u0644\u0641\u0646\u062f\u0642: ${hotelName}.`,
+			roomName ? `\u0627\u0644\u063a\u0631\u0641\u0629: ${roomName}.` : "",
+			dates.primary
+				? `\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}${
+						dates.secondary ? ` (${dates.secondary})` : ""
+				  }.`
+				: "",
+			totalText
+				? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${totalText}**${
+						nights ? ` \u0644\u0645\u062f\u0629 ${nights}` : ""
+				  }.`
+				: "",
+			guestName || guestCount
+				? `\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0636\u064a\u0641: ${[
+						guestName,
+						guestCount,
+				  ]
+						.filter(Boolean)
+						.join(" - ")}.`
+				: "",
+			links.reservationDetails
+				? `[\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632](${links.reservationDetails})`
+				: "",
+			links.payment ? `[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+
+	return [
+		"Of course. Here are your booking details:",
+		confirmation ? `Confirmation number: **${confirmation}**.` : "",
+		`Hotel: ${hotelName}.`,
+		roomName ? `Room: ${roomName}.` : "",
+		dates.primary
+			? `Dates: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}.`
+			: "",
+		totalText ? `Total: **${totalText}**${nights ? ` for ${nights}` : ""}.` : "",
+		guestName || guestCount
+			? `Guest details: ${[guestName, guestCount].filter(Boolean).join(" - ")}.`
+			: "",
+		links.reservationDetails
+			? `[Reservation details](${links.reservationDetails})`
+			: "",
+		links.payment ? `[Payment link](${links.payment})` : "",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
+	if (!bookingStateQuestionText(userText)) return false;
+	const ref = aiReservationReference(sc);
+	if (!ref) return false;
+	const quote = ensureCurrentQuoteForSlots(st) || {};
+	await humanSend(io, sc, st, postBookingReservationSummaryText(sc, st, quote, ref));
+	st.waitFor = "post_booking_followup";
+	logStep(String(sc._id || ""), "post_booking.state_reply", {
+		confirmation: ref.confirmation_number || "",
+		hasQuote: Boolean(quote?.available),
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
+}
+
+async function answerFastBookingStateQuestion(io, sc, st, userText = "", caseId = "") {
+	if (
+		!st.hotel ||
+		st.waitFor === "post_booking_followup" ||
+		sc.aiReservation?.reservationId ||
+		sc.aiReservation?.confirmationNumber
+	) {
+		return false;
+	}
+	const wantsPrice = repeatPriceQuestionText(userText);
+	const wantsDetails = reservationDetailsSummaryQuestionText(userText);
+	if (!wantsPrice && !wantsDetails) return false;
+	if (wantsDiscountQuestion(userText) || wantsPaymentHelp(userText)) return false;
+	const quote = ensureCurrentQuoteForSlots(st);
+	if (!quote?.available) return false;
+	const previousWaitFor = st.waitFor || null;
+	const shouldAdvanceToProceed =
+		!["proceed", "reviewConfirm", "finalize"].includes(previousWaitFor || "") &&
+		!isReservationDetailStep(st);
+	if (shouldAdvanceToProceed) st.waitFor = "proceed";
+	const reply = wantsDetails
+		? currentReservationSummaryText(sc, st, quote)
+		: currentQuoteSummaryText(sc, st, quote);
+	const sent = await humanSend(io, sc, st, reply, {
+		quickReplies: bookingSummaryQuickReplies(sc, st),
+	});
+	if (!sent) {
+		st.waitFor = previousWaitFor || st.waitFor;
+		return false;
+	}
+	if (!shouldAdvanceToProceed) {
+		st.waitFor = previousWaitFor || st.waitFor || nextPivot(st);
+	}
+	logStep(caseId || String(sc._id || ""), "booking.fast_state_reply", {
+		kind: wantsDetails ? "details" : "price",
+		waitFor: st.waitFor || "",
+	});
+	return true;
 }
 
 function hijriGregorianDateLine(sc = {}, st = {}) {
@@ -7316,15 +9917,15 @@ function buildReservationReviewPayload(st = {}, quote = {}) {
 function reservationReviewPrompt(sc = {}, st = {}) {
 	if (/arabic/i.test(languageOf(sc, st))) {
 		return [
-			"Present a brief reservation review entirely in Arabic before finalizing.",
+			"Present a brief reservation review entirely in Arabic.",
 			"Use the localized hotel and room names from context when available.",
 			"If raw dates were Hijri, show the Hijri range and the matching Gregorian range.",
 			"Use Arabic wording for money, e.g. \"\u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a\", not SAR.",
-			"End with Arabic only: \"\u0627\u0643\u062a\u0628 \\\"\u062a\u0623\u0643\u064a\u062f\\\" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.\"",
+			"End with Arabic only: \"\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 \\\"\u062a\u0623\u0643\u064a\u062f\\\". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 \\\"\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d\\\".\"",
 			"Do not use the English word confirm.",
 		].join(" ");
 	}
-	return "Present a brief 'Review before we finalize'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Type confirm to finalize, or tell me what to change.' Do not repeat the earlier availability message.";
+	return "Present a brief 'Reservation review'. If raw dates were Hijri, show them alongside Gregorian. End with: 'Choose Confirm if everything looks correct, or Something is wrong if we need to fix anything.' Do not repeat the earlier availability message.";
 }
 
 function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
@@ -7339,7 +9940,7 @@ function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
 		`${respectfulGuestName(
 			sc,
 			st
-		)}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:`,
+		)}\u060c \u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u0631\u064a\u0639\u0629 \u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632:`,
 		`\u0627\u0644\u0641\u0646\u062f\u0642: ${localizedHotelName(sc, st)}`,
 		`\u0627\u0644\u063a\u0631\u0641\u0629: ${localizedRoomName(sc, st, quote)}`,
 		`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}`,
@@ -7364,12 +9965,170 @@ function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
 					"Arabic"
 			  )}`
 			: "",
-		`\u0627\u0643\u062a\u0628 "\u062a\u0623\u0643\u064a\u062f" \u0644\u0644\u0625\u062a\u0645\u0627\u0645\u060c \u0623\u0648 \u0623\u062e\u0628\u0631\u0646\u064a \u0628\u0645\u0627 \u062a\u0631\u064a\u062f \u062a\u063a\u064a\u064a\u0631\u0647.`,
+		`\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "\u062a\u0623\u0643\u064a\u062f". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d".`,
+	];
+	return lines.filter(Boolean).join("\n");
+}
+
+function finalReviewActionLabels(sc = {}, st = {}) {
+	const replies = finalReservationQuickReplies(sc, st);
+	return {
+		create: replies?.[0]?.label || "Complete Reservation",
+		correct: replies?.[1]?.label || "There's Something Wrong",
+	};
+}
+
+function finalReservationReviewLabels(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const actions = finalReviewActionLabels(sc, st);
+	if (/arabic/i.test(lang)) {
+		return {
+			title: "\u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0646\u0647\u0627\u0626\u064a\u0629 \u0645\u062e\u062a\u0635\u0631\u0629 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632:",
+			hotel: "\u0627\u0644\u0641\u0646\u062f\u0642:",
+			room: "\u0627\u0644\u063a\u0631\u0641\u0629:",
+			dates: "\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e:",
+			nights: "\u0639\u062f\u062f \u0627\u0644\u0644\u064a\u0627\u0644\u064a:",
+			guestCount: "\u0627\u0644\u0636\u064a\u0648\u0641:",
+			guestName: "\u0627\u0633\u0645 \u0627\u0644\u0636\u064a\u0641:",
+			nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629:",
+			phone: "\u0627\u0644\u0647\u0627\u062a\u0641:",
+			email: "\u0627\u0644\u0628\u0631\u064a\u062f:",
+			perNight: "\u0627\u0644\u0633\u0639\u0631 \u0644\u0644\u064a\u0644\u0629:",
+			total: "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a:",
+			notProvided: "\u063a\u064a\u0631 \u0645\u0636\u0627\u0641",
+			cta: `\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "${actions.create}". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "${actions.correct}".`,
+		};
+	}
+	if (/spanish/i.test(lang)) {
+		return {
+			title: "aqui tienes la revision final antes de crear la reserva:",
+			hotel: "Hotel:",
+			room: "Habitacion:",
+			dates: "Fechas:",
+			nights: "Noches:",
+			guestCount: "Huespedes:",
+			guestName: "Nombre del huesped:",
+			nationality: "Nacionalidad:",
+			phone: "Telefono:",
+			email: "Email:",
+			perNight: "Precio por noche:",
+			total: "Total:",
+			notProvided: "no agregado",
+			cta: `Si todo esta correcto, elige "${actions.create}". Si hay algo que corregir, elige "${actions.correct}".`,
+		};
+	}
+	if (/french/i.test(lang)) {
+		return {
+			title: "voici la verification finale avant de creer la reservation :",
+			hotel: "Hotel :",
+			room: "Chambre :",
+			dates: "Dates :",
+			nights: "Nuits :",
+			guestCount: "Voyageurs :",
+			guestName: "Nom du client :",
+			nationality: "Nationalite :",
+			phone: "Telephone :",
+			email: "Email :",
+			perNight: "Prix par nuit :",
+			total: "Total :",
+			notProvided: "non ajoute",
+			cta: `Si tout est correct, choisissez "${actions.create}". Si un detail doit etre corrige, choisissez "${actions.correct}".`,
+		};
+	}
+	if (/indonesian/i.test(lang)) {
+		return {
+			title: "berikut ringkasan akhir sebelum reservasi dibuat:",
+			hotel: "Hotel:",
+			room: "Kamar:",
+			dates: "Tanggal:",
+			nights: "Malam:",
+			guestCount: "Tamu:",
+			guestName: "Nama tamu:",
+			nationality: "Kewarganegaraan:",
+			phone: "Telepon:",
+			email: "Email:",
+			perNight: "Harga per malam:",
+			total: "Total:",
+			notProvided: "tidak ditambahkan",
+			cta: `Jika semuanya benar, pilih "${actions.create}". Jika ada yang perlu diperbaiki, pilih "${actions.correct}".`,
+		};
+	}
+	if (/malay/i.test(lang)) {
+		return {
+			title: "ini semakan akhir sebelum tempahan dibuat:",
+			hotel: "Hotel:",
+			room: "Bilik:",
+			dates: "Tarikh:",
+			nights: "Malam:",
+			guestCount: "Tetamu:",
+			guestName: "Nama tetamu:",
+			nationality: "Kewarganegaraan:",
+			phone: "Telefon:",
+			email: "Email:",
+			perNight: "Harga setiap malam:",
+			total: "Jumlah:",
+			notProvided: "tidak ditambah",
+			cta: `Jika semuanya betul, pilih "${actions.create}". Jika ada butiran perlu dibetulkan, pilih "${actions.correct}".`,
+		};
+	}
+	return {
+		title: "here is the final review before I create the reservation:",
+		hotel: "Hotel:",
+		room: "Room:",
+		dates: "Dates:",
+		nights: "Nights:",
+		guestCount: "Guests:",
+		guestName: "Guest name:",
+		nationality: "Nationality:",
+		phone: "Phone:",
+		email: "Email:",
+		perNight: "Price per night:",
+		total: "Total:",
+		notProvided: "not added",
+		cta: `If everything looks correct, choose "${actions.create}". If anything needs fixing, choose "${actions.correct}".`,
+	};
+}
+
+function deterministicFinalReservationReview(sc = {}, st = {}, quote = {}) {
+	if (!quote?.available) return "";
+	const lang = languageOf(sc, st);
+	const labels = finalReservationReviewLabels(sc, st);
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote.totals?.totalPriceWithCommission;
+	const perNight =
+		quote.nights && total
+			? Math.round((total / Math.max(1, quote.nights)) * 100) / 100
+			: null;
+	const fullName = String(st.slots?.fullName || st.slots?.name || "").trim();
+	const nationality = String(st.slots?.nationality || "").trim();
+	const phone = String(st.slots?.phone || "").trim();
+	const email = String(st.slots?.email || "").trim();
+	const guestCount = bookingGuestCountText(sc, st);
+	const prefix = /arabic/i.test(lang)
+		? `${respectfulGuestName(sc, st)}\u060c ${labels.title}`
+		: `${respectfulGuestName(sc, st)}, ${labels.title}`;
+	const lines = [
+		prefix,
+		`${labels.hotel} ${localizedHotelName(sc, st)}`,
+		`${labels.room} ${localizedRoomName(sc, st, quote)}`,
+		`${labels.dates} ${dates.primary}`,
+		dates.secondary ? dates.secondary : "",
+		quote.nights ? `${labels.nights} ${localizedNightCount(quote.nights, lang)}` : "",
+		guestCount ? `${labels.guestCount} ${guestCount}` : "",
+		fullName ? `${labels.guestName} ${fullName}` : "",
+		nationality ? `${labels.nationality} ${nationality}` : "",
+		phone ? `${labels.phone} ${phone}` : "",
+		`${labels.email} ${email || labels.notProvided}`,
+		perNight ? `${labels.perNight} ${localizedMoney(perNight, quote.currency, lang)}` : "",
+		total ? `${labels.total} ${localizedMoney(total, quote.currency, lang)}` : "",
+		labels.cta,
 	];
 	return lines.filter(Boolean).join("\n");
 }
 
 async function composeReservationReviewText(io, sc, st, quote, reviewPayload) {
+	const finalReview = deterministicFinalReservationReview(sc, st, quote);
+	if (finalReview) return finalReview;
 	const deterministic = deterministicArabicReservationReview(sc, st, quote);
 	if (deterministic) return deterministic;
 	if (/english/i.test(languageOf(sc, st))) {
@@ -7405,12 +10164,28 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	logStep(String(sc._id), "review.summaryBuilt", reviewPayload);
 	const reviewText = await composeReservationReviewText(io, sc, st, q, reviewPayload);
 	const sent = await humanSend(io, sc, st, reviewText, {
-		quickReplies: confirmationQuickReplies(sc, st),
+		quickReplies: finalReservationQuickReplies(sc, st),
 	});
 	if (!sent) return false;
 	st.reviewSent = true;
-	st.waitFor = "reviewConfirm";
-	stampAsk(st, "reviewConfirm");
+	st.waitFor = "finalize";
+	st.finalReviewSentAt = now();
+	stampAsk(st, "finalize");
+	return true;
+}
+
+async function beginReservationDetailsAfterQuote(io, sc, st, caseId = "") {
+	st.reviewSent = false;
+	st.finalReviewSentAt = 0;
+	st.waitFor = nextReservationDetailStep(st);
+	logStep(caseId || String(sc._id || ""), "reservation_details.started_after_quote", {
+		waitFor: st.waitFor,
+		missing: missingMandatoryReservationFields(st),
+	});
+	if (st.waitFor === "finalize") {
+		return sendReservationReview(io, sc, st, st.quote?.data);
+	}
+	await askForReservationDetail(io, sc, st, st.waitFor);
 	return true;
 }
 
@@ -7423,6 +10198,10 @@ async function handleProceedStageInput(
 	{ allowGeneric = true } = {}
 ) {
 	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
+	if (quoteConfirmationText(userText, st)) {
+		resumeBookingNudge(st);
+		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""));
+	}
 	if (
 		wantsPaymentHelp(userText) ||
 		hotelContactDetailsQuestionText(userText) ||
@@ -7433,17 +10212,13 @@ async function handleProceedStageInput(
 	) {
 		return false;
 	}
-	if (confirmsText(userText)) {
-		resumeBookingNudge(st);
-		return sendReservationReview(io, sc, st, st.quote.data);
-	}
 	if (declinesText(userText)) {
 		pauseBookingNudge(st);
 		const msg = await write(
 			io,
 			sc,
 			st,
-			"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step.",
+			"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step.",
 			{ quote: st.quote.data, slots: st.slots }
 		);
 		await humanSend(io, sc, st, msg);
@@ -7456,7 +10231,7 @@ async function handleProceedStageInput(
 			sc,
 			st,
 			"Thank the guest naturally and say there is no rush. Mention that the quote is ready and they can say yes when they want to continue. Do not repeat the price.",
-			{ quoteReady: true, nextStep: "proceed_to_review" }
+			{ quoteReady: true, nextStep: "collect_reservation_details" }
 		);
 		await humanSend(io, sc, st, msg);
 		return true;
@@ -7466,8 +10241,8 @@ async function handleProceedStageInput(
 			io,
 			sc,
 			st,
-			"Answer the guest's concern transparently and warmly. If they ask whether you are human or AI, say you are AI-assisted support monitored by the team; do not claim to be human. Apologize briefly if the speed or repetition felt unnatural. Say the quote is ready and ask whether to continue to the review step. Do not repeat the full quote.",
-			{ quoteReady: true, nextStep: "proceed_to_review" }
+			"Answer the guest's concern transparently and warmly. If they ask whether you are human or AI, say you are AI-assisted support monitored by the team; do not claim to be human. Apologize briefly if the speed or repetition felt unnatural. Say the quote is ready and ask whether to continue with the reservation details. Do not repeat the full quote.",
+			{ quoteReady: true, nextStep: "collect_reservation_details" }
 		);
 		await humanSend(io, sc, st, msg);
 		return true;
@@ -7480,8 +10255,8 @@ async function handleProceedStageInput(
 		io,
 		sc,
 		st,
-		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue to the review step for this reservation?",
-		{ quoteReady: true, nextStep: "proceed_to_review" }
+		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue with the reservation details?",
+		{ quoteReady: true, nextStep: "collect_reservation_details" }
 	);
 	await humanSend(io, sc, st, msg, {
 		quickReplies: proceedQuickReplies(sc, st),
@@ -8039,64 +10814,291 @@ function reservationPolicyConfirmationLabel(result = {}, fallback = "") {
 }
 
 function cancellationReviewQuickReplies(sc = {}, st = {}) {
+	return [];
+}
+
+function cancellationRefundPolicyQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:refund|refundable|return policy|cancellation policy|cancelation policy|cancellation terms|cancelation terms|can i cancel|could i cancel|is cancellation|free cancellation|money back|terms and conditions|terms)\b/i.test(
+			lower
+		) ||
+		/(?:\u0633\u064a\u0627\u0633\u0629\s*(?:\u0627\u0644)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639)|\u0647\u0644.{0,18}(?:\u0627\u0633\u062a\u0631\u062f|\u0627\u0633\u062a\u0631\u062c\u0639|\u0627\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639|\u0631\u062f\s+\u0627\u0644\u0645\u0628\u0644\u063a|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0623\u062d\u0643\u0627\u0645|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0627\u062d\u0643\u0627\u0645)/i.test(
+			arabic
+		) ||
+		/(?:refundpolicy|returnpolicy|cancellationpolicy|cancelpolicy|canicancel|couldicancel|moneyback|termsandconditions)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function cancellationActionRequestText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (cancellationRefundPolicyQuestionText(text)) return false;
+	return (
+		/\b(?:cancel|void)\s+(?:my|the|this)?\s*(?:reservation|booking|room|stay)|\b(?:i want|i need|please|kindly)\s+to\s+cancel\b|\bplease\s+cancel\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0639\u0627\u064a\u0632|\u0628\u062f\u064a|\u0645\u0645\u0643\u0646).{0,18}(?:\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|(?:\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a).{0,18}(?:\u0627\u0644)?\u062d\u062c\u0632/i.test(
+			arabic
+		) ||
+		/(?:cancelmybooking|cancelmyreservation|pleasecancel|iwanttocancel|ineedtocancel)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function cancellationPolicyQuickReplies(sc = {}, st = {}, previousWaitFor = "") {
+	if (previousWaitFor === "reviewConfirm") return confirmationQuickReplies(sc, st);
+	if (previousWaitFor === "proceed" || previousWaitFor === "room_alternative_confirm") {
+		return proceedQuickReplies(sc, st);
+	}
+	if (previousWaitFor === "email_or_skip") return emailQuickReplies(sc, st);
+	return [];
+}
+
+function generalCancellationPolicyMessage(sc = {}, st = {}, result = {}, confirmation = "") {
+	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
+	const label = reservationPolicyConfirmationLabel(result, confirmation);
+	const checkin = result.checkinISO ? usDate(result.checkinISO) : "";
+	const days = Number.isFinite(result.daysBeforeCheckin)
+		? Number(result.daysBeforeCheckin)
+		: null;
+	let reservationLine = "";
+	if (label && result.code && result.code !== "not_found") {
+		if (/arabic/i.test(lang)) {
+			reservationLine = checkin
+				? `\n\nبالنسبة للحجز ${label}: تاريخ الوصول ${checkin} (${days} يوم قبل الوصول).`
+				: `\n\nبالنسبة للحجز ${label}: لا أرى تاريخ وصول مؤكدًا يكفي لحساب بند الاسترداد بدقة من المحادثة.`;
+		} else if (/spanish/i.test(lang)) {
+			reservationLine = checkin
+				? `\n\nPara la reserva ${label}: la fecha de llegada es ${checkin} (${days} dia(s) antes de la llegada).`
+				: `\n\nPara la reserva ${label}: no veo una fecha de llegada confiable para calcular con exactitud la ventana de reembolso desde el chat.`;
+		} else if (/french/i.test(lang)) {
+			reservationLine = checkin
+				? `\n\nPour la reservation ${label}: l'arrivee est le ${checkin} (${days} jour(s) avant l'arrivee).`
+				: `\n\nPour la reservation ${label}: je ne vois pas de date d'arrivee fiable pour calculer exactement la fenetre de remboursement depuis le chat.`;
+		} else {
+			reservationLine = checkin
+				? `\n\nFor reservation ${label}: check-in is ${checkin} (${days} day(s) before arrival).`
+				: `\n\nFor reservation ${label}: I do not see a reliable check-in date to calculate the exact refund window from chat.`;
+		}
+	}
 	if (/arabic/i.test(lang)) {
-		return [
-			{
-				label: "\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0639 \u0645\u062e\u062a\u0635",
-				value: "\u0646\u0639\u0645\u060c \u0623\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0639 \u0645\u062e\u062a\u0635",
-				action: "reservation_cancellation_escalate",
-			},
-			{
-				label: "\u0644\u0627\u060c \u0634\u0643\u0631\u0627",
-				value: "\u0644\u0627\u060c \u0634\u0643\u0631\u0627",
-				action: "decline",
-			},
-		];
+		return `${name}، سياسة الإلغاء والاسترداد العامة هي:\n- قبل موعد الوصول بـ 14 يومًا أو أكثر: إلغاء مجاني واسترداد كامل.\n- قبل موعد الوصول بأقل من 14 يومًا وأكثر من 3 أيام: يمكن إلغاء الحجز، ويحتفظ الفندق بقيمة ليلة واحدة فقط ويتم رد المبلغ المتبقي.\n- قبل موعد الوصول بـ 3 أيام أو أقل: لا يكون الحجز قابلًا للإلغاء أو الاسترداد حسب السياسة العامة.${reservationLine}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return [
-			{
-				label: "Revisar con especialista",
-				value: "Si, conectame con un especialista",
-				action: "reservation_cancellation_escalate",
-			},
-			{ label: "No, gracias", value: "No, gracias", action: "decline" },
-		];
+		return `${name}, segun los terminos y condiciones del hotel, la politica general de cancelacion y reembolso es:\n- 14 dias o mas antes del check-in: cancelacion gratuita con reembolso completo.\n- Menos de 14 dias y mas de 3 dias antes del check-in: la cancelacion aun puede procesarse; el hotel conserva solo una noche y se reembolsa el importe restante.\n- 3 dias o menos antes del check-in: la reserva no es cancelable ni reembolsable bajo la politica general.${reservationLine}`;
 	}
 	if (/french/i.test(lang)) {
-		return [
-			{
-				label: "Revoir avec un specialiste",
-				value: "Oui, connectez-moi avec un specialiste",
-				action: "reservation_cancellation_escalate",
-			},
-			{ label: "Non merci", value: "Non merci", action: "decline" },
-		];
+		return `${name}, selon les conditions de l'hotel, la politique generale d'annulation et de remboursement est:\n- 14 jours ou plus avant l'arrivee: annulation gratuite avec remboursement complet.\n- Moins de 14 jours et plus de 3 jours avant l'arrivee: l'annulation peut encore etre traitee; l'hotel conserve seulement une nuit et le montant restant est rembourse.\n- 3 jours ou moins avant l'arrivee: la reservation n'est ni annulable ni remboursable selon la politique generale.${reservationLine}`;
 	}
-	return [
-		{
-			label: "Review with specialist",
-			value: "Please connect me with a specialist",
-			action: "reservation_cancellation_escalate",
-		},
-		{ label: "No, thank you", value: "No, thank you", action: "decline" },
+	return `${name}, based on the hotel's terms and conditions, the general cancellation and refund policy is:\n- 14 days or more before check-in: free cancellation with a full refund.\n- Less than 14 days and more than 3 days before check-in: cancellation can still be processed; the hotel keeps one night only and the remaining amount is refunded.\n- 3 days or less before check-in: the reservation is non-cancellable and non-refundable under the general policy.${reservationLine}`;
+}
+
+function cancellationPolicySpecificLine(sc = {}, st = {}, result = {}, confirmation = "") {
+	const lang = languageOf(sc, st);
+	const label = reservationPolicyConfirmationLabel(result, confirmation);
+	if (!label) return "";
+	if (result.code === "not_found") return cancellationNotFoundMessage(sc, st, confirmation);
+	if (["already_cancelled", "locked_status"].includes(result.code)) {
+		return cancellationAlreadyClosedMessage(sc, st, result, confirmation);
+	}
+	if (result.code === "full_refund") {
+		if (/arabic/i.test(lang)) {
+			return `ينطبق على الحجز ${label} بند الإلغاء المجاني والاسترداد الكامل لأنه قبل الوصول بـ 14 يومًا أو أكثر.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `La reserva ${label} esta dentro de la ventana de cancelacion gratuita, por lo que es elegible para cancelacion con reembolso completo.`;
+		}
+		if (/french/i.test(lang)) {
+			return `La reservation ${label} est dans la periode d'annulation gratuite, elle est donc eligible a une annulation avec remboursement complet.`;
+		}
+		return `Reservation ${label} falls under the free-cancellation window, so it is eligible for cancellation with a full refund.`;
+	}
+	if (result.code === "one_night_fee") {
+		if (/arabic/i.test(lang)) {
+			return `ينطبق على الحجز ${label} بند الاسترداد الجزئي: يمكن الإلغاء، ويحتفظ الفندق بقيمة ليلة واحدة فقط ويتم رد المبلغ المتبقي.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `La reserva ${label} esta dentro de la ventana de reembolso parcial: la cancelacion puede procesarse, el hotel conserva solo una noche y se reembolsa el importe restante.`;
+		}
+		if (/french/i.test(lang)) {
+			return `La reservation ${label} est dans la periode de remboursement partiel: l'annulation peut etre traitee, l'hotel conserve seulement une nuit et le montant restant est rembourse.`;
+		}
+		return `Reservation ${label} falls under the partial-refund window: cancellation can be processed, the hotel keeps one night only, and the remaining amount is refunded.`;
+	}
+	if (result.code === "non_refundable") {
+		if (/arabic/i.test(lang)) {
+			return `الحجز ${label} داخل فترة 3 أيام أو أقل قبل الوصول، لذلك لا يكون قابلًا للإلغاء أو الاسترداد حسب السياسة العامة.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `La reserva ${label} esta dentro de 3 dias o menos antes del check-in, por lo que no es cancelable ni reembolsable bajo la politica general.`;
+		}
+		if (/french/i.test(lang)) {
+			return `La reservation ${label} est a 3 jours ou moins de l'arrivee, elle n'est donc ni annulable ni remboursable selon la politique generale.`;
+		}
+		return `Reservation ${label} is within 3 days or less of check-in, so it is non-cancellable and non-refundable under the general policy.`;
+	}
+	if (result.code === "missing_checkin_date") {
+		if (/arabic/i.test(lang)) {
+			return `أرى الحجز ${label}، لكن لا أرى تاريخ وصول موثوقًا يكفي لحساب بند الاسترداد بدقة من المحادثة.`;
+		}
+		if (/spanish/i.test(lang)) {
+			return `Puedo ver la reserva ${label}, pero no tengo una fecha de llegada confiable para calcular con exactitud la ventana de reembolso desde el chat.`;
+		}
+		if (/french/i.test(lang)) {
+			return `Je vois la reservation ${label}, mais je n'ai pas de date d'arrivee fiable pour calculer exactement la fenetre de remboursement depuis le chat.`;
+		}
+		return `I can see reservation ${label}, but I do not have a reliable check-in date to calculate the exact refund window from chat.`;
+	}
+	return "";
+}
+
+function cancellationPolicyFollowup(sc = {}, st = {}, options = {}) {
+	const { hasConfirmation = false, previousWaitFor = "", actualCancellation = false } =
+		options || {};
+	const lang = languageOf(sc, st);
+	if (!hasConfirmation && actualCancellation) {
+		if (/arabic/i.test(lang)) {
+			return "إذا كنت تقصد حجزًا محددًا، أرسل رقم تأكيد الحجز وسأوضح لك أي بند ينطبق عليه.";
+		}
+		if (/spanish/i.test(lang)) {
+			return "Si te refieres a una reserva especifica, envia el numero de confirmacion y te dire que ventana de la politica aplica.";
+		}
+		if (/french/i.test(lang)) {
+			return "Si vous parlez d'une reservation precise, envoyez le numero de confirmation et je vous dirai quelle periode de la politique s'applique.";
+		}
+		return "If you mean a specific reservation, send the confirmation number and I will tell you which policy window applies.";
+	}
+	if (
+		["proceed", "reviewConfirm", "reservation_details", "fullname", "nationality", "phone", "email_or_skip", "finalize"].includes(
+			previousWaitFor
+		)
+	) {
+		if (/arabic/i.test(lang)) {
+			return "سأُبقي تفاصيل الحجز الحالية كما هي، وعندما تكون مستعدًا نكمل من نفس الخطوة.";
+		}
+		if (/spanish/i.test(lang)) {
+			return "Voy a mantener listos los detalles de la reserva actual y podemos continuar desde el mismo paso cuando estes listo.";
+		}
+		if (/french/i.test(lang)) {
+			return "Je garde les details de la reservation actuelle prets, et nous pouvons reprendre a la meme etape quand vous etes pret.";
+		}
+		return "I will keep the current booking details ready, and we can continue from the same step whenever you are ready.";
+	}
+	if (!hasConfirmation) {
+		if (/arabic/i.test(lang)) {
+			return "إذا كان لديك حجز محدد، أرسل رقم التأكيد وتاريخ الوصول وسأوضح لك البند المناسب.";
+		}
+		if (/spanish/i.test(lang)) {
+			return "Si tienes una reserva especifica, envia el numero de confirmacion y la fecha de llegada y aclarare la ventana aplicable.";
+		}
+		if (/french/i.test(lang)) {
+			return "Si vous avez une reservation precise, envoyez le numero de confirmation et la date d'arrivee, et je clarifierai la periode applicable.";
+		}
+		return "If you have a specific reservation, send the confirmation number and check-in date and I will clarify the applicable window.";
+	}
+	return "";
+}
+
+async function answerCancellationRefundPolicyInquiry(
+	io,
+	sc,
+	st,
+	userText = "",
+	lu = {},
+	{ forceCancellation = false } = {}
+) {
+	const previousWaitFor = st.waitFor || "";
+	const confirmation =
+		lu?.confirmation || confirmationFromText(userText) || latestKnownConfirmation(sc, lu);
+	const policyQuestion = cancellationRefundPolicyQuestionText(userText);
+	const actualCancellation =
+		cancellationActionRequestText(userText) || (forceCancellation && !policyQuestion);
+	let result = null;
+	if (confirmation) {
+		result = await getReservationCancellationPolicyForCase({
+			confirmation,
+			hotel: st.hotel || null,
+		});
+	}
+
+	const cancellationPolicyRow =
+		bestHotelPolicyRow(st, userText) ||
+		hotelPolicyRows(st).find((row) => row.key === "cancellation_refund") ||
+		null;
+	let policyMessage = cancellationPolicyRow
+		? hotelPolicyAnswerText(sc, st, userText, cancellationPolicyRow)
+		: "";
+	if (!policyMessage && cancellationPolicyRow?.answer) {
+		policyMessage = await write(
+			io,
+			sc,
+			st,
+			"The guest asked about cancellation or refund policy. Answer directly from selectedHotelPolicy only. Translate or adapt the saved answer into the guest's active response language in professional hotel-reception wording. Use hotel-native wording such as 'Based on the hotel's terms and conditions' or a direct reception answer when a source phrase is useful. Never say 'I checked', 'I found in the document', 'the record says', 'the hotel details say', or imply the answer came from an external/admin document. Do not add a link. Do not invent exceptions, deadlines, fees, or legal wording beyond the saved answer.",
+			{
+				latestUserMessage: userText,
+				selectedHotelPolicy: cancellationPolicyRow,
+				defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
+			}
+		);
+	}
+	const parts = [
+		policyMessage || generalCancellationPolicyMessage(sc, st, result || {}, confirmation),
 	];
+	if (result) {
+		const specific = cancellationPolicySpecificLine(sc, st, result, confirmation);
+		if (specific) parts.push(specific);
+	}
+	const followup = cancellationPolicyFollowup(sc, st, {
+		hasConfirmation: Boolean(confirmation),
+		previousWaitFor,
+		actualCancellation,
+	});
+	if (followup) parts.push(followup);
+
+	if (actualCancellation && !confirmation) {
+		st.waitFor = "reservation_cancellation_reference";
+	} else {
+		preserveBookingWaitState(st, previousWaitFor);
+	}
+	st.pendingReservationCancellation = confirmation
+		? {
+				confirmation: reservationPolicyConfirmationLabel(result || {}, confirmation),
+				policyCode: result?.code || "general_policy",
+				daysBeforeCheckin: result?.daysBeforeCheckin ?? null,
+				checkinISO: result?.checkinISO || "",
+		  }
+		: null;
+	await humanSend(io, sc, st, parts.filter(Boolean).join("\n\n"), {
+		quickReplies: cancellationPolicyQuickReplies(sc, st, previousWaitFor),
+		scheduleIdle: false,
+	});
+	logStep(String(sc._id), "cancellation_policy.direct_reply", {
+		waitFor: st.waitFor,
+		confirmation: Boolean(confirmation),
+		resultCode: result?.code || "",
+		actualCancellation,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return true;
 }
 
 function cancellationReferenceMessage(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0644\u0623\u0631\u0627\u062c\u0639 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0642\u0628\u0644 \u062a\u0648\u0635\u064a\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+		return `${name}\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0648\u0633\u0623\u0648\u0636\u062d \u0644\u0643 \u0623\u064a \u0628\u0646\u062f \u0645\u0646 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0648\u0627\u0644\u0627\u0633\u062a\u0631\u062f\u0627\u062f \u064a\u0646\u0637\u0628\u0642 \u0639\u0644\u064a\u0647.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, por favor enviame el numero de confirmacion para revisar la politica de cancelacion antes de conectarte con un especialista.`;
+		return `${name}, por favor enviame el numero de confirmacion y te dire que parte de la politica de cancelacion y reembolso aplica.`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, veuillez m'envoyer le numero de confirmation afin que je verifie la politique d'annulation avant de vous connecter a un specialiste.`;
+		return `${name}, veuillez m'envoyer le numero de confirmation et je vous dirai quelle partie de la politique d'annulation et de remboursement s'applique.`;
 	}
-	return `${name}, please send the reservation confirmation number so I can review the cancellation policy before connecting you with a specialist.`;
+	return `${name}, please send the reservation confirmation number and I will tell you which cancellation and refund policy window applies.`;
 }
 
 function cancellationNotFoundMessage(sc = {}, st = {}, confirmation = "") {
@@ -8125,18 +11127,18 @@ function cancellationTooOldMessage(sc = {}, st = {}, result = {}, confirmation =
 		const dateLine = confirmedDate
 			? ` \u062a\u0645 \u062a\u0623\u0643\u064a\u062f\u0647 \u0641\u064a ${confirmedDate}.`
 			: "";
-		return `${name}\u060c \u0648\u062c\u062f\u062a \u0627\u0644\u062d\u062c\u0632 ${label}.${dateLine} \u0644\u0623\u0646\u0647 \u0645\u0624\u0643\u062f \u0645\u0646\u0630 ${thresholdDays} \u064a\u0648\u0645\u0627 \u0623\u0648 \u0623\u0643\u062b\u0631\u060c \u0644\u0627 \u064a\u0645\u0643\u0646\u0646\u064a \u0625\u0644\u063a\u0627\u0624\u0647 \u062a\u0644\u0642\u0627\u0626\u064a\u0627 \u0639\u0628\u0631 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u062d\u0633\u0628 \u0627\u0644\u0633\u064a\u0627\u0633\u0629. \u0625\u0630\u0627 \u0643\u0646\u062a \u0645\u0627 \u0632\u0644\u062a \u062a\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0633\u062a\u062b\u0646\u0627\u0621\u060c \u0623\u062e\u0628\u0631\u0646\u064a \u0648\u0633\u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+		return `${name}\u060c \u0648\u062c\u062f\u062a \u0627\u0644\u062d\u062c\u0632 ${label}.${dateLine} \u0627\u0644\u0623\u0647\u0645 \u0644\u0644\u0625\u0644\u063a\u0627\u0621 \u0648\u0627\u0644\u0627\u0633\u062a\u0631\u062f\u0627\u062f \u0647\u0648 \u0639\u062f\u062f \u0627\u0644\u0623\u064a\u0627\u0645 \u0642\u0628\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644\u060c \u0648\u0633\u0623\u0637\u0628\u0642 \u0627\u0644\u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0645\u062d\u0641\u0648\u0638\u0629 \u0644\u0644\u0641\u0646\u062f\u0642.`;
 	}
 	if (/spanish/i.test(lang)) {
 		const dateLine = confirmedDate ? ` Fue confirmada el ${confirmedDate}.` : "";
-		return `${name}, encontre la reserva ${label}.${dateLine} Como lleva confirmada ${thresholdDays} dias o mas, no puedo cancelarla automaticamente por chat segun la politica. Si aun quieres que el equipo revise una excepcion, dimelo y te conecto con un especialista.`;
+		return `${name}, encontre la reserva ${label}.${dateLine} For cancellation and refund, the important timing is the number of days before check-in, and I will apply the hotel's saved policy.`;
 	}
 	if (/french/i.test(lang)) {
 		const dateLine = confirmedDate ? ` Elle a ete confirmee le ${confirmedDate}.` : "";
-		return `${name}, j'ai trouve la reservation ${label}.${dateLine} Comme elle est confirmee depuis ${thresholdDays} jours ou plus, je ne peux pas l'annuler automatiquement par chat selon la politique. Si vous souhaitez quand meme une revue d'exception, dites-le-moi et je vous connecte a un specialiste.`;
+		return `${name}, j'ai trouve la reservation ${label}.${dateLine} For cancellation and refund, the important timing is the number of days before check-in, and I will apply the hotel's saved policy.`;
 	}
 	const dateLine = confirmedDate ? ` It was confirmed on ${confirmedDate}.` : "";
-	return `${name}, I found reservation ${label}.${dateLine} Because it has been confirmed for ${thresholdDays} days or more, I cannot cancel it automatically through chat under policy. If you still want the team to review an exception, tell me and I will connect you with a specialist.`;
+	return `${name}, I found reservation ${label}.${dateLine} For cancellation and refund, the important timing is the number of days before check-in, and I will apply the hotel's saved policy.`;
 }
 
 function cancellationAlreadyClosedMessage(sc = {}, st = {}, result = {}, confirmation = "") {
@@ -8144,30 +11146,30 @@ function cancellationAlreadyClosedMessage(sc = {}, st = {}, result = {}, confirm
 	const label = reservationPolicyConfirmationLabel(result, confirmation);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0623\u0631\u0649 \u0623\u0646 \u0627\u0644\u062d\u062c\u0632 ${label} \u0645\u063a\u0644\u0642 \u0623\u0648 \u0645\u0644\u063a\u0649 \u0628\u0627\u0644\u0641\u0639\u0644. \u0625\u0630\u0627 \u0643\u0627\u0646 \u0627\u0644\u0645\u0648\u0636\u0648\u0639 \u064a\u062d\u062a\u0627\u062c \u0645\u0631\u0627\u062c\u0639\u0629 \u062f\u0641\u0639 \u0623\u0648 \u0627\u0633\u062a\u062b\u0646\u0627\u0621\u060c \u0623\u0642\u062f\u0631 \u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635.`;
+		return `${name}\u060c \u0623\u0631\u0649 \u0623\u0646 \u0627\u0644\u062d\u062c\u0632 ${label} \u0645\u063a\u0644\u0642 \u0623\u0648 \u0645\u0644\u063a\u0649 \u0628\u0627\u0644\u0641\u0639\u0644. \u0644\u0627 \u064a\u0645\u0643\u0646\u0646\u064a \u0627\u0639\u062a\u0628\u0627\u0631\u0647 \u062d\u062c\u0632\u0627 \u0646\u0634\u0637\u0627 \u0642\u0627\u0628\u0644\u0627 \u0644\u0644\u0625\u0644\u063a\u0627\u0621 \u0645\u0646 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629. \u0625\u0630\u0627 \u0643\u0627\u0646 \u0644\u062f\u064a\u0643 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0622\u062e\u0631 \u0623\u0648 \u062a\u0627\u0631\u064a\u062e \u0648\u0635\u0648\u0644\u060c \u0623\u0631\u0633\u0644\u0647 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0645\u0646\u0627\u0633\u0628\u0629.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, veo que la reserva ${label} ya esta cerrada o cancelada. Si necesitas revision de pago o una excepcion, puedo conectarte con un especialista.`;
+		return `${name}, veo que la reserva ${label} ya esta cerrada o cancelada. No puedo tratarla como una reserva activa cancelable desde el chat. Si tienes otro numero de confirmacion o fecha de llegada, enviamelo y reviso la politica aplicable.`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, je vois que la reservation ${label} est deja fermee ou annulee. Si vous avez besoin d'une revue de paiement ou d'une exception, je peux vous connecter a un specialiste.`;
+		return `${name}, je vois que la reservation ${label} est deja fermee ou annulee. Je ne peux pas la traiter comme une reservation active annulable depuis le chat. Si vous avez un autre numero de confirmation ou une date d'arrivee, envoyez-le et je verifierai la politique applicable.`;
 	}
-	return `${name}, I can see reservation ${label} is already closed or cancelled. If you need a payment review or an exception, I can connect you with a specialist.`;
+	return `${name}, I can see reservation ${label} is already closed or cancelled. I cannot treat it as an active cancellable reservation from chat. If you have another confirmation number or check-in date, send it and I will review the applicable policy.`;
 }
 
 function cancellationPolicyClarifyMessage(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0647\u0644 \u062a\u0631\u064a\u062f \u0623\u0646 \u0623\u0648\u0635\u0644\u0643 \u0628\u0645\u062e\u062a\u0635 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0637\u0644\u0628\u061f`;
+		return `${name}\u060c \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0625\u0630\u0627 \u0643\u0646\u062a \u062a\u0631\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0628\u0646\u062f \u0627\u0644\u0645\u0646\u0627\u0633\u0628.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, quieres que te conecte con un especialista para revisar la solicitud?`;
+		return `${name}, enviame el numero de confirmacion y la fecha de llegada si quieres que revise la parte aplicable de la politica.`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, souhaitez-vous que je vous connecte a un specialiste pour revoir cette demande ?`;
+		return `${name}, envoyez-moi le numero de confirmation et la date d'arrivee si vous voulez que je verifie la partie applicable de la politique.`;
 	}
-	return `${name}, would you like me to connect you with a specialist to review this request?`;
+	return `${name}, send the confirmation number and check-in date if you want me to review the applicable policy window.`;
 }
 
 function cancellationPolicyCloseMessage(sc = {}, st = {}) {
@@ -8236,14 +11238,16 @@ async function handleReservationCancellationPolicyAck(io, sc, st, userText) {
 	if (cancellationInsistenceText(userText) || wantsPaymentHelp(userText)) {
 		st.pendingReservationCancellation = null;
 		st.waitFor = null;
-		await handoffToHuman(io, sc, st, "reservation_cancellation");
-		return true;
+		return answerCancellationRefundPolicyInquiry(io, sc, st, userText, {}, {
+			forceCancellation: true,
+		});
 	}
 	if (looksLikeReservationDateUpdate(userText, {})) return false;
-	await humanSend(io, sc, st, cancellationPolicyClarifyMessage(sc, st), {
-		quickReplies: cancellationReviewQuickReplies(sc, st),
+	st.pendingReservationCancellation = null;
+	st.waitFor = null;
+	return answerCancellationRefundPolicyInquiry(io, sc, st, userText, {}, {
+		forceCancellation: true,
 	});
-	return true;
 }
 
 async function handleReservationCancellationRequest(
@@ -8261,68 +11265,25 @@ async function handleReservationCancellationRequest(
 	) {
 		return false;
 	}
-	if (!st.hotel) {
-		await redirectJannatReservationToHotelSupport(io, sc, st, userText, lu);
-		return true;
-	}
 	const confirmation =
 		lu?.confirmation || confirmationFromText(userText) || latestKnownConfirmation(sc, lu);
 	if (!confirmation) {
-		st.waitFor = "reservation_cancellation_reference";
-		await humanSend(io, sc, st, cancellationReferenceMessage(sc, st));
-		return true;
+		return answerCancellationRefundPolicyInquiry(io, sc, st, userText, lu, {
+			forceCancellation: true,
+		});
 	}
 	const result = await getReservationCancellationPolicyForCase({
 		confirmation,
-		hotel: st.hotel,
+		hotel: st.hotel || null,
 	});
 	if (result.code === "missing_confirmation") {
-		st.waitFor = "reservation_cancellation_reference";
-		await humanSend(io, sc, st, cancellationReferenceMessage(sc, st));
-		return true;
-	}
-	if (result.code === "not_found") {
-		st.waitFor = "reservation_cancellation_reference";
-		await humanSend(
-			io,
-			sc,
-			st,
-			cancellationNotFoundMessage(sc, st, confirmation)
-		);
-		return true;
-	}
-	if (result.code === "confirmed_too_old") {
-		st.pendingReservationCancellation = {
-			confirmation: reservationPolicyConfirmationLabel(result, confirmation),
-			policyCode: result.code,
-			confirmedAt: result.confirmedAt,
-			ageDays: result.ageDays,
-		};
-		st.waitFor = "reservation_cancellation_policy_ack";
-		await humanSend(io, sc, st, cancellationTooOldMessage(sc, st, result, confirmation), {
-			quickReplies: cancellationReviewQuickReplies(sc, st),
+		return answerCancellationRefundPolicyInquiry(io, sc, st, userText, lu, {
+			forceCancellation: true,
 		});
-		return true;
 	}
-	if (["already_cancelled", "locked_status"].includes(result.code)) {
-		st.pendingReservationCancellation = {
-			confirmation: reservationPolicyConfirmationLabel(result, confirmation),
-			policyCode: result.code,
-		};
-		st.waitFor = "reservation_cancellation_policy_ack";
-		await humanSend(
-			io,
-			sc,
-			st,
-			cancellationAlreadyClosedMessage(sc, st, result, confirmation),
-			{ quickReplies: cancellationReviewQuickReplies(sc, st) }
-		);
-		return true;
-	}
-	st.pendingReservationCancellation = null;
-	st.waitFor = null;
-	await handoffToHuman(io, sc, st, "reservation_cancellation");
-	return true;
+	return answerCancellationRefundPolicyInquiry(io, sc, st, userText, lu, {
+		forceCancellation: true,
+	});
 }
 
 async function finalizeReservationForGuest(io, sc, st, caseId) {
@@ -8375,35 +11336,11 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		quoteData: quoteForCreate,
 		room: quoteForCreate.room,
 	});
-	let delivery = null;
-	try {
-		delivery = await dispatchAiReservationConfirmation({
-			caseId,
-			reservation,
-			mode: "initial",
-			includeGuestEmail: Boolean(st.slots.email),
-			includeInternalEmail: true,
-			includeOwnerEmail: true,
-			includeGuestWhatsApp: true,
-			includeAdminWhatsApp: true,
-			guestEmail: st.slots.email || "",
-		});
-		logStep(caseId, "reservation.confirmation_dispatched", {
-			confirmation: reservation.confirmation_number,
-			status: confirmationDeliverySummary(delivery),
-		});
-	} catch (error) {
-		logStep(caseId, "reservation.confirmation_dispatch_failed", {
-			confirmation: reservation.confirmation_number,
-			error: String(error?.message || error || "").slice(0, 200),
-		});
-	}
 	sc.aiReservation = {
 		...(sc.aiReservation || {}),
 		status: "created",
 		reservationId: reservation._id,
 		confirmationNumber: reservation.confirmation_number || "",
-		...(delivery ? { confirmationDelivery: confirmationDeliverySummary(delivery) } : {}),
 	};
 	const links = reservationLinks(reservation);
 	const finalText = reservationCreatedMessage(
@@ -8414,6 +11351,29 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		links
 	);
 	await humanSend(io, sc, st, finalText);
+	dispatchAiReservationConfirmation({
+		caseId,
+		reservation,
+		mode: "initial",
+		includeGuestEmail: Boolean(st.slots.email),
+		includeInternalEmail: true,
+		includeOwnerEmail: true,
+		includeGuestWhatsApp: true,
+		includeAdminWhatsApp: true,
+		guestEmail: st.slots.email || "",
+	})
+		.then((delivery) => {
+			logStep(caseId, "reservation.confirmation_dispatched", {
+				confirmation: reservation.confirmation_number,
+				status: confirmationDeliverySummary(delivery),
+			});
+		})
+		.catch((error) => {
+			logStep(caseId, "reservation.confirmation_dispatch_failed", {
+				confirmation: reservation.confirmation_number,
+				error: String(error?.message || error || "").slice(0, 200),
+			});
+		});
 	st.waitFor = "post_booking_followup";
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;
@@ -8487,6 +11447,7 @@ function isPostBookingConcreteRequest(text = "") {
 	if (!normalized) return false;
 	if (botExperienceComplaintText(normalized)) return false;
 	return (
+		bookingStateQuestionText(normalized) ||
 		wantsPaymentHelp(normalized) ||
 		wantsReservationHelp(normalized) ||
 		selectedHotelFactQuestionText(normalized) ||
@@ -8595,38 +11556,91 @@ function hajjInquiryFallbackText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}\u060c \u0623\u0639\u062a\u0630\u0631 \u0644\u0644\u062e\u0644\u0637. \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u060c \u0644\u0627 \u062a\u062a\u0648\u0641\u0631 \u0644\u062f\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627 \u0639\u0646 \u0627\u0644\u062a\u0646\u0638\u064a\u0645 \u0623\u0648 \u0627\u0644\u0641\u0626\u0627\u062a. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+		return `${name}\u060c \u0623\u0639\u062a\u0630\u0631 \u0644\u0644\u062e\u0644\u0637. \u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u060c \u0644\u0627 \u062a\u062a\u0648\u0641\u0631 \u0644\u062f\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627 \u0639\u0646 \u0627\u0644\u062a\u0646\u0638\u064a\u0645 \u0623\u0648 \u0627\u0644\u0641\u0626\u0627\u062a. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, perdona la confusion. Sobre Hajj, no tengo ahora datos verificados sobre organizacion o categorias. Escribenos a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+		return `${name}, perdona la confusion. Sobre Hajj, no tengo ahora datos verificados sobre organizacion o categorias. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, desole pour la confusion. Pour le Hajj, je n'ai pas actuellement d'informations verifiees sur l'organisation ou les categories. Ecrivez a ${AI_SUPPORT_EMAIL} et l'equipe vous guidera avec les bons details.`;
+		return `${name}, desole pour la confusion. Pour le Hajj, je n'ai pas actuellement d'informations verifiees sur l'organisation ou les categories. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, sorry for the confusion. For Hajj, I do not currently have verified details about organization or categories. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+	return `${name}, sorry for the confusion. For Hajj, I do not currently have verified details about organization or categories. ${unsupportedAnswerNextStepText(sc, st)}`;
 }
 
 async function answerVagueHajjInquiry(io, sc, st, userText = "") {
+	const fallback = hajjInquiryFallbackText(sc, st);
 	const reply = await write(
 		io,
 		sc,
 		st,
-		"The guest asked a broad Hajj/Haj-related question, not a payment/reference question. First check the provided hotel facts, platform context, previous guest context, and employee learning examples. If those contexts contain a verified answer to this exact Hajj question, answer it directly and briefly using only that verified context. If they do not contain a verified answer, apologize briefly, say you do not currently have confirmed details about Hajj organization/packages/categories, and direct the guest to support@jannatbooking.com. Do not invent facts. Do not repeat reservation details, quotes, confirmation numbers, or payment links. Do not ask for a payment reference or reservation number.",
+		"The guest asked a broad Hajj/Haj-related question, not a payment/reference question. First check the provided hotel facts, platform context, previous guest context, and employee learning examples. If those contexts contain a verified answer to this exact Hajj question, answer it directly and briefly using only that verified context. If they do not contain a verified answer, apologize briefly, say you do not currently have confirmed details about Hajj organization/packages/categories, then use unknownAnswerNextStep to move back to the relevant hotel/reservation topic. Do not invent facts. Do not direct the guest to email or escalation. Do not repeat reservation details, quotes, confirmation numbers, or payment links. Do not ask for a payment reference or reservation number.",
 		{
 			latestUserMessage: userText,
-			supportEmail: AI_SUPPORT_EMAIL,
 			hotelName: localizedHotelName(sc, st),
+			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 			reservationAlreadyCreated:
 				sc.aiReservation?.status === "created" ||
 				Boolean(sc.aiReservation?.confirmationNumber),
 		}
 	);
-	await humanSend(io, sc, st, reply || hajjInquiryFallbackText(sc, st));
+	await humanSend(io, sc, st, stripUnsupportedEscalationText(reply, fallback));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
 	return true;
+}
+
+function unsupportedAnswerNextStepText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const hotelName = st.hotel ? localizedHotelName(sc, st) : "";
+	const pivot = st?.slots ? nextPivot(st) : "dates";
+	if (/arabic/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}: \u0645\u0627 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0630\u064a \u062a\u0641\u0636\u0644\u0647\u061f`;
+			}
+			if (pivot === "proceed") {
+				return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}. \u0647\u0644 \u0623\u062a\u0627\u0628\u0639 \u0645\u0639\u0643 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f`;
+			}
+			return `\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName}: \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0641\u0636\u0644 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631 \u0645\u062a\u0627\u062d.`;
+		}
+		return "\u064a\u0633\u0639\u062f\u0646\u064a \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u062e\u064a\u0627\u0631 \u0645\u0646\u0627\u0633\u0628: \u0623\u0631\u0633\u0644 \u0627\u0644\u0645\u062f\u064a\u0646\u0629 \u0648\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0641\u0636\u0644 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a.";
+	}
+	if (/spanish/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `Con gusto puedo seguir con ${hotelName}: que tipo de habitacion o cuantos huespedes necesitas?`;
+			}
+			if (pivot === "proceed") {
+				return `Con gusto puedo seguir con ${hotelName}. Quieres que pase a la revision de la reserva?`;
+			}
+			return `Con gusto puedo seguir con ${hotelName}: enviame llegada, salida o el tipo de habitacion preferido y reviso la mejor opcion disponible.`;
+		}
+		return "Con gusto puedo ayudarte a encontrar una buena opcion: enviame ciudad, fechas y numero de huespedes y reviso las mejores opciones.";
+	}
+	if (/french/i.test(lang)) {
+		if (hotelName) {
+			if (pivot === "room") {
+				return `Je peux continuer a vous aider pour ${hotelName}: quel type de chambre ou combien de personnes faut-il prevoir ?`;
+			}
+			if (pivot === "proceed") {
+				return `Je peux continuer a vous aider pour ${hotelName}. Souhaitez-vous que je passe a la revision de la reservation ?`;
+			}
+			return `Je peux continuer a vous aider pour ${hotelName}: envoyez-moi l'arrivee, le depart ou le type de chambre prefere, et je verifierai la meilleure option disponible.`;
+		}
+		return "Je peux vous aider a trouver une bonne option: envoyez-moi la ville, les dates et le nombre de personnes, et je verifierai les meilleures options.";
+	}
+	if (hotelName) {
+		if (pivot === "room") {
+			return `I can still help with ${hotelName}: which room type or guest count should I prepare for you?`;
+		}
+		if (pivot === "proceed") {
+			return `I can still help with ${hotelName}. Would you like me to continue with the reservation details?`;
+		}
+		return `I can still help with ${hotelName}: send your check-in and checkout dates or preferred room type, and I will check the best available option.`;
+	}
+	return "I can still help you find a suitable hotel option: send the city, dates, and guest count, and I will check the best matches.";
 }
 
 function supportEmailFallbackText(sc = {}, st = {}) {
@@ -8635,16 +11649,44 @@ function supportEmailFallbackText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
 		return hotelName
-			? `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u062f\u0631\u062f\u0634\u0629 ${hotelName}. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`
-			: `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u062d\u0627\u0644\u064a\u0627. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0631\u0627\u0633\u0644 ${AI_SUPPORT_EMAIL} \u0648\u0633\u064a\u0648\u062c\u0647\u0643 \u0627\u0644\u0641\u0631\u064a\u0642 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u0629.`;
+			? `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u062f\u0631\u062f\u0634\u0629 ${hotelName} \u062d\u0627\u0644\u064a\u0627. ${unsupportedAnswerNextStepText(sc, st)}`
+			: `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u062d\u0627\u0644\u064a\u0627. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, no tengo una respuesta verificada para esa consulta en este chat. Por favor escribe a ${AI_SUPPORT_EMAIL} y el equipo te orientara con los detalles correctos.`;
+		return `${name}, no tengo una respuesta verificada para esa consulta en este chat ahora mismo. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, je n'ai pas de reponse verifiee pour cette question dans ce chat. Veuillez ecrire a ${AI_SUPPORT_EMAIL}, et l'equipe vous guidera avec les bons details.`;
+		return `${name}, je n'ai pas de reponse verifiee pour cette question dans ce chat pour le moment. ${unsupportedAnswerNextStepText(sc, st)}`;
 	}
-	return `${name}, I do not have a verified answer for that question in this chat. Please email ${AI_SUPPORT_EMAIL}, and the support team will guide you with the right details.`;
+	return `${name}, I do not have a verified answer for that question in this chat right now. ${unsupportedAnswerNextStepText(sc, st)}`;
+}
+
+function stripUnsupportedEscalationText(text = "", fallback = "") {
+	const raw = String(text || "").trim();
+	const safeFallback = String(fallback || "").trim();
+	if (!raw) return safeFallback;
+	const sentences = raw
+		.split(/(?<=[.!?\u061f])\s+|\n+/)
+		.map((sentence) => sentence.trim())
+		.filter(Boolean);
+	const kept = sentences.filter((sentence) => {
+		const lower = sentence.toLowerCase();
+		const arabic = sentence;
+		return !(
+			/\b(?:support@jannatbooking\.com|management@xhotelpro\.com)\b/i.test(
+				lower
+			) ||
+			/\b(?:email|e-mail|contact|reach out to|write to)\s+(?:support|us|the team)\b/i.test(
+				lower
+			) ||
+			/\b(?:support team|customer support)\b/i.test(lower) ||
+			/(?:\u0631\u0627\u0633\u0644|\u062a\u0648\u0627\u0635\u0644).*(?:\u0627\u0644\u062f\u0639\u0645|\u0627\u0644\u0641\u0631\u064a\u0642)/i.test(
+				arabic
+			)
+		);
+	});
+	const cleaned = kept.join(" ").trim();
+	return cleaned || safeFallback;
 }
 
 function technicalRecoveryText(sc = {}, st = {}) {
@@ -8836,16 +11878,17 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 		io,
 		sc,
 		st,
-		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly and direct the guest to support@jannatbooking.com. Do not invent facts. Do not ask for check-in/check-out dates, phone, email, confirmation number, room type, or booking details unless the guest explicitly asked to reserve in the latest message. Do not add a booking pivot after an unsupported general answer.",
+		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly, say you do not currently have confirmed details, then use unknownAnswerDraft or unknownAnswerNextStep to move back to the relevant hotel/reservation topic. Do not invent facts. Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, or booking details unless the guest explicitly asked to reserve in the latest message. Keep the follow-up as one natural helpful sales/support step.",
 		{
 			latestUserMessage: userText,
-			supportEmail: AI_SUPPORT_EMAIL,
 			hotelName: localizedHotelName(sc, st),
 			reason,
+			unknownAnswerDraft: supportEmailFallbackText(sc, st),
+			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 		}
 	);
 	const fallback = supportEmailFallbackText(sc, st);
-	await humanSend(io, sc, st, stripGeneralBookingPivot(reply || fallback, fallback));
+	await humanSend(io, sc, st, stripUnsupportedEscalationText(reply, fallback));
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
@@ -8928,6 +11971,13 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	if (confidentialCompanyDocumentQuestionText(text)) {
 		return "confidential_company_document";
 	}
+	if (quoteConfirmationText(text, st)) return "";
+	if (st.hotel && selectedHotelPolicyQuestionText(text)) {
+		return "selected_hotel_fact";
+	}
+	if (cancellationRefundPolicyQuestionText(text)) {
+		return "selected_hotel_fact";
+	}
 	if (wantsPaymentHelp(text)) return "payment_help";
 	if (wantsDiscountQuestion(text)) return "discount_question";
 	if (st.hotel && directHotelRelationshipQuestionText(text)) {
@@ -8939,7 +11989,6 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	) {
 		return "hotel_contact";
 	}
-	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
 	if (st.hotel && crossHotelRequestText(text)) return "hotel_scope_boundary";
 	if (
 		st.hotel &&
@@ -8957,6 +12006,7 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	) {
 		return "selected_hotel_room";
 	}
+	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
 	if (st.hotel && (lu?.amenity || findAmenityMatch(text))) return "amenity_question";
 	if (broadGeneralSupportQuestionText(text, st, lu)) return "general_support";
 	return "";
@@ -9123,6 +12173,221 @@ async function askExplicitPastDateClarification(io, sc, st, userText = "", dates
 	return true;
 }
 
+async function askPendingDateChangeConfirmation(
+	io,
+	sc,
+	st,
+	dates = {},
+	{ source = "", userText = "" } = {}
+) {
+	const pending = rememberPendingDateChange(st, dates, { source, userText });
+	if (!pending) return false;
+	st.waitFor = "date_change_confirm";
+	stampAsk(st, "date_change_confirm");
+	pending.askedAt = now();
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		pendingDateChangePromptText(sc, st, pending),
+		{ quickReplies: pendingDateChangeQuickReplies(sc, st) }
+	);
+	logStep(String(sc._id), "dates.change_confirmation_requested", {
+		source,
+		current: pending.previous,
+		proposed: {
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+		},
+		sent,
+	});
+	return true;
+}
+
+async function mergeDateRangeWithChangeGuard(
+	io,
+	sc,
+	st,
+	dates = {},
+	{ source = "", userText = "", force = false, resetQuote = true } = {}
+) {
+	if (!dates?.checkinISO || !dates?.checkoutISO) {
+		return { applied: false, prompted: false, changed: false };
+	}
+	if (!force && shouldConfirmDateRangeChange(st, dates)) {
+		await askPendingDateChangeConfirmation(io, sc, st, dates, {
+			source,
+			userText,
+		});
+		return { applied: false, prompted: true, changed: true };
+	}
+	const changed = dateRangeConflictsWithState(st, dates);
+	const applied = applyDateRangeToState(st, dates, { resetQuote });
+	if (applied && changed) {
+		logStep(String(sc._id), "dates.changed", {
+			source,
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+			waitFor: st.waitFor || "",
+			roomTypeKey: st.slots?.roomTypeKey || null,
+		});
+	}
+	return { applied, prompted: false, changed };
+}
+
+async function mergePartialDateRangeWithChangeGuard(
+	io,
+	sc,
+	st,
+	partial = {},
+	{ source = "", userText = "", force = false, resetQuote = true } = {}
+) {
+	const before = currentDateRange(st);
+	const proposed = combinedDateRangeFromPartial(st, partial);
+	const wouldChangeCompleteRange = Boolean(
+		before &&
+			((partial?.checkinISO && partial.checkinISO !== before.checkinISO) ||
+				(partial?.checkoutISO && partial.checkoutISO !== before.checkoutISO))
+	);
+	if (!proposed && wouldChangeCompleteRange) {
+		logStep(String(sc._id), "dates.partial_invalid_ignored", {
+			source,
+			current: before,
+			partial: {
+				checkinISO: partial?.checkinISO || null,
+				checkoutISO: partial?.checkoutISO || null,
+			},
+			waitFor: st.waitFor || "",
+		});
+		return { applied: false, prompted: false, changed: false, invalid: true };
+	}
+	if (!force && proposed && shouldConfirmDateRangeChange(st, proposed)) {
+		await askPendingDateChangeConfirmation(io, sc, st, proposed, {
+			source,
+			userText,
+		});
+		return { applied: false, prompted: true, changed: true };
+	}
+	const applied = applyPartialDateToState(st, partial);
+	const after = currentDateRange(st);
+	const changed = Boolean(
+		applied &&
+			before &&
+			after &&
+			dateRangeKey(before) !== dateRangeKey(after)
+	);
+	if (applied && changed && resetQuote && activeDateSensitiveBookingState(st)) {
+		resetBookingAfterDateRangeChange(st);
+	}
+	if (applied && changed) {
+		logStep(String(sc._id), "dates.partial_changed", {
+			source,
+			current: after,
+			waitFor: st.waitFor || "",
+			roomTypeKey: st.slots?.roomTypeKey || null,
+		});
+	}
+	return { applied, prompted: false, changed };
+}
+
+async function continueAfterConfirmedDateChange(io, sc, st, userText = "") {
+	if (st.hotel && st.pendingRoomCombination) {
+		await answerLargeGroupRoomRecommendation(
+			io,
+			sc,
+			st,
+			userText,
+			st.pendingRoomCombination.guestCount
+		);
+		return true;
+	}
+	if (st.hotel && st.slots?.roomTypeKey && st.slots?.checkinISO && st.slots?.checkoutISO) {
+		await shareKnownStayQuote(io, sc, st);
+		return true;
+	}
+	if (!st.slots?.roomTypeKey) {
+		await askRoomPreferenceForReservation(io, sc, st);
+		return true;
+	}
+	if (!st.hotel && st.slots?.roomTypeKey && st.slots?.checkinISO && st.slots?.checkoutISO) {
+		await answerJannatBookingHotelOptions(io, sc, st, userText, st.slots.roomTypeKey);
+		return true;
+	}
+	await askForMissingStayDates(io, sc, st);
+	return true;
+}
+
+async function handlePendingDateChangeChoice(io, sc, st, userText = "") {
+	const pending = st.pendingDateChange || null;
+	if (!pending) return false;
+	if (!String(userText || "").trim()) return false;
+	const choice = pendingDateChoiceFromGuest(sc, userText);
+	const newDates = extractDateRange(userText);
+	if (choice === "confirm") {
+		const proposed =
+			pending.proposed?.checkinISO && pending.proposed?.checkoutISO
+				? pending.proposed
+				: newDates;
+		if (!proposed?.checkinISO || !proposed?.checkoutISO) {
+			clearPendingDateChange(st);
+			return false;
+		}
+		applyDateRangeToState(st, proposed);
+		logStep(String(sc._id), "dates.change_confirmed", {
+			checkinISO: proposed.checkinISO,
+			checkoutISO: proposed.checkoutISO,
+			waitFor: st.waitFor || "",
+		});
+		return continueAfterConfirmedDateChange(io, sc, st, userText);
+	}
+	if (choice === "keep") {
+		const previousWaitFor = pending.previousWaitFor || "";
+		const previousReviewSent = Boolean(pending.previousReviewSent);
+		clearPendingDateChange(st);
+		st.reviewSent = previousReviewSent;
+		st.waitFor =
+			previousWaitFor && previousWaitFor !== "date_change_confirm"
+				? previousWaitFor
+				: nextPivot(st);
+		const quickReplies =
+			st.waitFor === "proceed" && activeQuoteMatchesSlots(st)
+				? proceedQuickReplies(sc, st)
+				: st.waitFor === "reviewConfirm"
+				? confirmationQuickReplies(sc, st)
+				: [];
+		await humanSend(io, sc, st, pendingDateKeptText(sc, st, pending), {
+			quickReplies,
+		});
+		logStep(String(sc._id), "dates.change_kept_current", {
+			waitFor: st.waitFor || "",
+			current: currentDateRange(st),
+		});
+		return true;
+	}
+	if (
+		newDates?.checkinISO &&
+		newDates?.checkoutISO &&
+		shouldConfirmDateRangeChange(st, newDates)
+	) {
+		await askPendingDateChangeConfirmation(io, sc, st, newDates, {
+			source: "pending_followup",
+			userText,
+		});
+		return true;
+	}
+	if (directGuestRequestKind(sc, st, userText, {})) return false;
+	await humanSend(
+		io,
+		sc,
+		st,
+		pendingDateChangePromptText(sc, st, pending),
+		{ quickReplies: pendingDateChangeQuickReplies(sc, st) }
+	);
+	st.waitFor = "date_change_confirm";
+	stampAsk(st, "date_change_confirm");
+	return true;
+}
+
 async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
 	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
 	st.waitFor =
@@ -9145,6 +12410,8 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		userText
 	);
 	if (handledDeliveryRequest) return true;
+	const handledStateQuestion = await answerPostBookingStateQuestion(io, sc, st, userText);
+	if (handledStateQuestion) return true;
 	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
 		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
 	}
@@ -9159,7 +12426,8 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
-		await humanSend(io, sc, st, closeReply);
+		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
+		if (sent) schedulePostBookingAutoClose(io, sc, st);
 		st.waitFor = null;
 		return true;
 	}
@@ -9202,7 +12470,6 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 function nextReservationDetailStep(st = {}) {
 	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
 	ensureDefaultChildren(st);
-	if (!st.slots?.email && !st.slots?.emailSkipped) return "email_or_skip";
 	return "finalize";
 }
 
@@ -9225,10 +12492,15 @@ async function askForReservationDetail(io, sc, st, step) {
 
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
-	await captureReservationDetailsFromText(sc, st, userText, caseId);
+	const guestAction = lastGuestAction(sc);
+	const chaseOnlyWithCompleteDetails =
+		guestHurryOrChaseText(userText) && hasMandatoryReservationDetails(st);
+	if (!chaseOnlyWithCompleteDetails) {
+		await captureReservationDetailsFromText(sc, st, userText, caseId);
+	}
 	for (let guard = 0; guard < 4; guard += 1) {
 		if (st.waitFor === "reviewConfirm") {
-			if (correctionText(userText)) {
+			if (guestAction === "correction" || correctionText(userText)) {
 				st.waitFor = "clarify";
 				st.reviewSent = false;
 				const ask = /arabic/i.test(languageOf(sc, st))
@@ -9260,7 +12532,8 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 					await askForReservationDetail(io, sc, st, st.waitFor);
 					return true;
 				}
-				continue;
+				await sendReservationReview(io, sc, st, st.quote?.data);
+				return true;
 			}
 			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }));
 			stampAsk(st, "reservation_details");
@@ -9280,6 +12553,13 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.waitFor = "finalize";
 				continue;
 			}
+			if (guestAction === "skip_email") {
+				st.slots.email = "";
+				st.slots.emailSkipped = true;
+				logStep(caseId, "email.skipped", { source: "quick_reply" });
+				st.waitFor = "finalize";
+				continue;
+			}
 			await humanSend(io, sc, st, optionalEmailPrompt(sc, st), {
 				quickReplies: emailQuickReplies(sc, st),
 			});
@@ -9288,6 +12568,26 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		}
 
 		if (st.waitFor === "finalize") {
+			if (!placeReservationActionSelected(sc, userText)) {
+				if (guestAction === "correction" || correctionText(userText)) {
+					st.waitFor = "clarify";
+					st.reviewSent = false;
+					const ask = /arabic/i.test(languageOf(sc, st))
+						? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u0646\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u0647 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u061f"
+						: "Of course. What should we fix before I create the reservation?";
+					await humanSend(io, sc, st, ask);
+					return true;
+				}
+				if (!st.finalReviewSentAt && st.quote?.data?.available) {
+					await sendReservationReview(io, sc, st, st.quote.data);
+					return true;
+				}
+				await humanSend(io, sc, st, finalReservationPrompt(sc, st), {
+					quickReplies: finalReservationQuickReplies(sc, st),
+				});
+				stampAsk(st, "finalize");
+				return true;
+			}
 			try {
 				return await finalizeReservationForGuest(io, sc, st, caseId);
 			} catch (error) {
@@ -9337,6 +12637,20 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 		topic: thread.topic,
 		waitingForGuest: thread.waitingForGuest,
 	});
+
+	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
+		const msg = await write(
+			io,
+			sc,
+			st,
+			"Reply warmly to the guest's greeting in the active language. Use a natural short hospitality tone and ask an open 'how can I help you?' style question. Do not ask for check-in/check-out dates, room type, phone, nationality, or any booking detail in this reply.",
+			{ latestUserMessage: userText, currentWaitFor: st.waitFor || "" }
+		);
+		await humanSend(io, sc, st, msg || greetingText(sc, st));
+		thread.topic = null;
+		thread.waitingForGuest = false;
+		return true;
+	}
 
 	if (subtype === "how_are_you") {
 		if (!thread.waitingForGuest || thread.topic !== "howru") {
@@ -9481,6 +12795,13 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 			);
 		});
 		if (latestAiAfterGuest) return false;
+		const latestGuestIndex = latestGuestMessageIndex(latestCase);
+		if (
+			latestGuestIndex >= 0 &&
+			conversation.slice(latestGuestIndex + 1).some(isAiConversationMessage)
+		) {
+			return false;
+		}
 		const waitFor = st.waitFor || nextPivot(st);
 		const prompt = await write(
 			io,
@@ -9514,6 +12835,7 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 
 /* ------------------- TURN PLANNER ------------------- */
 const activePlanLocks = new Map();
+const activePlanLockAts = new Map();
 const pendingPlanRequests = new Map();
 
 function markPendingPlanRequest(caseId, reason = "locked") {
@@ -9522,7 +12844,7 @@ function markPendingPlanRequest(caseId, reason = "locked") {
 	pendingPlanRequests.set(key, { at: now(), reason });
 	const st = memo.get(key);
 	if (st?.turnInFlight) {
-		st.queue.push(now());
+		if (st.queue.length < 1) st.queue.push(now());
 		st.interrupt = true;
 	}
 }
@@ -9543,14 +12865,28 @@ async function shouldRunQueuedPlan(caseId, st = {}) {
 async function planTurn(io, sc) {
 	const caseId = String(sc._id);
 	if (activePlanLocks.has(caseId)) {
-		markPendingPlanRequest(caseId, "active_plan_lock");
-		logStep(caseId, "turn.enqueue", {
-			reason: "active_plan_lock",
-		});
-		return;
+		const lockedAt = Number(activePlanLockAts.get(caseId) || 0);
+		if (lockedAt && now() - lockedAt > AI_TURN_STALL_RECOVERY_MS * 2) {
+			logStep(caseId, "turn.stale_lock_reset", { lockedForMs: now() - lockedAt });
+			activePlanLocks.delete(caseId);
+			activePlanLockAts.delete(caseId);
+			const staleState = memo.get(caseId);
+			if (staleState) {
+				staleState.turnInFlight = false;
+				staleState.interrupt = true;
+				staleState.queue = [];
+			}
+		} else {
+			markPendingPlanRequest(caseId, "active_plan_lock");
+			logStep(caseId, "turn.enqueue", {
+				reason: "active_plan_lock",
+			});
+			return;
+		}
 	}
 	const planLock = Symbol(caseId);
 	activePlanLocks.set(caseId, planLock);
+	activePlanLockAts.set(caseId, now());
 	let st = null;
 	let queuedFollowupCase = null;
 	let queuedFollowupReason = "";
@@ -9570,38 +12906,29 @@ async function planTurn(io, sc) {
 		policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		hotel = activeHotelContextForCase(sc, policyHotel);
 		st = ensureState(sc, hotel);
-	if (st.turnInFlight) {
-		logStep(caseId, "turn.enqueue", {
-			reason: "in_flight",
-			queued: st.queue.length + 1,
-		});
-		markPendingPlanRequest(caseId, "state_in_flight");
-		return;
-	}
-	st.turnInFlight = true;
-	ownsTurn = true;
-	st.interrupt = false;
-	const schedulePlanningTyping = () => {
-		const delay = randomBetween(
-			AI_TYPING_INDICATOR_DELAY_MIN_MS,
-			AI_TYPING_INDICATOR_DELAY_MAX_MS
-		);
-		planningTypingTimer = setTimeout(() => {
+		if (st.turnInFlight) {
+			logStep(caseId, "turn.enqueue", {
+				reason: "in_flight",
+				queued: st.queue.length + 1,
+			});
+			markPendingPlanRequest(caseId, "state_in_flight");
+			return;
+		}
+		st.turnInFlight = true;
+		ownsTurn = true;
+		st.interrupt = false;
+		const schedulePlanningTyping = () => {
 			const currentState = memo.get(caseId) || st;
 			if (
+				planningTyping ||
 				!currentState.turnInFlight ||
-				currentState.interrupt ||
-				currentState.guestTypingUntil > now()
+				currentState.interrupt
 			) {
 				return;
 			}
 			emitTyping(io, caseId, currentState, true);
 			planningTyping = true;
-		}, delay);
-		if (typeof planningTypingTimer.unref === "function") {
-			planningTypingTimer.unref();
-		}
-	};
+		};
 
 		logStep(caseId, "context.loaded", {
 			hotelId: sc.hotelId,
@@ -9636,10 +12963,27 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (userText || !hasAiAssistantReply(sc)) {
-			schedulePlanningTyping();
+			planningTypingTimer = setTimeout(
+				schedulePlanningTyping,
+				AI_PLANNING_TYPING_DELAY_MS
+			);
 		}
-		const explicitLanguageSwitch = explicitLanguageSwitchRequest(userText);
-		updateActiveLanguageFromText(sc, st, userText);
+		if (await handlePendingDateChangeChoice(io, sc, st, userText)) return;
+		hydrateKnownSlotsFromConversation(sc, st, {
+			protectLatestGuestDateChange: Boolean(userText),
+		});
+		recoverBookingStageFromConversation(sc, st);
+		const protectReservationDetailLanguage = shouldProtectReservationDetailLanguage(
+			sc,
+			st,
+			userText
+		);
+		const explicitLanguageSwitch = protectReservationDetailLanguage
+			? null
+			: explicitLanguageSwitchRequest(userText);
+		if (!protectReservationDetailLanguage) {
+			updateActiveLanguageFromText(sc, st, userText);
+		}
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
 				st.greetScheduled = true;
@@ -9695,8 +13039,8 @@ async function planTurn(io, sc) {
 							sc,
 							st,
 							initialInquiry
-								? "The guest has just opened chat. Use the initial inquiry details only as private context, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-								: "The guest has just opened chat but has not typed a message yet. Greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+								? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+								: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ initialInquiry }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -9716,7 +13060,7 @@ async function planTurn(io, sc) {
 							io,
 							sc,
 							st,
-							"Greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+							"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ latestUserMessage: userText }
 					  );
 				await humanSend(io, sc, st, greeting, { first: true });
@@ -9733,8 +13077,41 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		hydrateKnownSlotsFromConversation(sc, st);
+		hydrateKnownSlotsFromConversation(sc, st, {
+			protectLatestGuestDateChange: Boolean(userText),
+		});
 		recoverBookingStageFromConversation(sc, st);
+		const fastBookingStateHandled = await answerFastBookingStateQuestion(
+			io,
+			sc,
+			st,
+			userText,
+			caseId
+		);
+		if (fastBookingStateHandled) return;
+		const earlyProceedHandled = await handleProceedStageInput(
+			io,
+			sc,
+			st,
+			userText,
+			{},
+			{ allowGeneric: false }
+		);
+		if (earlyProceedHandled) return;
+		if (!severeAbusiveGuestText(userText)) {
+			const earlyDirectRequestHandled = await tryAnswerDirectGuestRequest(
+				io,
+				sc,
+				st,
+				userText,
+				{}
+			);
+			if (earlyDirectRequestHandled) return;
+		}
+		if (guestPauseOrLaterText(userText)) {
+			await answerBookingPause(io, sc, st, userText);
+			return;
+		}
 		if (botExperienceComplaintText(userText) && !severeAbusiveGuestText(userText)) {
 			await answerConversationRecovery(io, sc, st, userText);
 			return;
@@ -9881,6 +13258,42 @@ async function planTurn(io, sc) {
 			);
 			if (handled) return;
 		}
+		if (st.pendingRoomCombination) {
+			const handled = await handlePendingLargeGroupCombination(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handled) return;
+		}
+		const quickTurnDates = extractDateRange(userText);
+		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
+			return;
+		}
+		const canUseLatestTurnDatesForBooking =
+			quickTurnDates.checkinISO &&
+			quickTurnDates.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText);
+		if (canUseLatestTurnDatesForBooking) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "latest_turn_before_direct_request", userText }
+			);
+			if (dateMerge.prompted) return;
+			logStep(caseId, "dates.merged_before_direct_request", {
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+				waitFor: st.waitFor || "",
+				roomTypeKey: st.slots.roomTypeKey || null,
+			});
+		}
 		const directRequestHandled = await tryAnswerDirectGuestRequest(
 			io,
 			sc,
@@ -9891,10 +13304,6 @@ async function planTurn(io, sc) {
 		if (directRequestHandled) return;
 		if (st.hotel && directHotelRelationshipQuestionText(userText)) {
 			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
-			return;
-		}
-		if (vagueHajjInquiryText(userText)) {
-			await answerVagueHajjInquiry(io, sc, st, userText);
 			return;
 		}
 		if (
@@ -9912,6 +13321,10 @@ async function planTurn(io, sc) {
 			!explicitlyExistingReservationIntent(userText)
 		) {
 			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
+		if (vagueHajjInquiryText(userText)) {
+			await answerVagueHajjInquiry(io, sc, st, userText);
 			return;
 		}
 		if (isReservationDetailStep(st)) {
@@ -9933,10 +13346,30 @@ async function planTurn(io, sc) {
 			{ allowGeneric: false }
 		);
 		if (preNluProceedHandled) return;
-
-		const quickTurnDates = quickDateRange(userText);
-		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
-			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			quickTurnDates.checkinISO &&
+			quickTurnDates.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "pending_combination_quick_dates", userText }
+			);
+			if (dateMerge.prompted) return;
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
 			return;
 		}
 		if (
@@ -9948,17 +13381,49 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
 		) {
-			st.slots.checkinISO = quickTurnDates.checkinISO;
-			st.slots.checkoutISO = quickTurnDates.checkoutISO;
-			if (quickTurnDates.raw) {
-				st.dateRaw = { ...st.dateRaw, ...quickTurnDates.raw };
-			}
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				quickTurnDates,
+				{ source: "quick_dates_direct_quote", userText }
+			);
+			if (dateMerge.prompted) return;
 			logStep(caseId, "quick_dates.direct_quote", {
 				roomTypeKey: st.slots.roomTypeKey,
 				checkinISO: st.slots.checkinISO,
 				checkoutISO: st.slots.checkoutISO,
 			});
 			await shareKnownStayQuote(io, sc, st);
+			return;
+		}
+		const singleTurnDate = extractSingleStayDate(userText, st);
+		if (singleTurnDate?.raw) {
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				singleTurnDate,
+				{ source: "quick_single_date", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
+			if (
+				st.hotel &&
+				st.slots.roomTypeKey &&
+				st.slots.checkinISO &&
+				st.slots.checkoutISO &&
+				!humanHandoffReason(userText) &&
+				!wantsPaymentHelp(userText) &&
+				!explicitlyExistingReservationIntent(userText)
+			) {
+				await shareKnownStayQuote(io, sc, st);
+				return;
+			}
+			await askForMissingStayDates(io, sc, st);
 			return;
 		}
 
@@ -9973,7 +13438,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				`Start: "As‑salāmu ʿalaykum, ${st.slots.name}." Introduce as ${st.agentName} from ${greetOwner}. Then ask: "I see you'd like to make a new reservation — is that correct?" (ONE yes/no).`
+				`Start: "${islamicGreetingForLanguage(sc, st)} ${st.slots.name}." Introduce as ${st.agentName} from ${greetOwner}. Then ask: "I see you'd like to make a new reservation - is that correct?" (ONE yes/no).`
 			);
 			await humanSend(io, sc, st, greetText, { first: true });
 			st.greeted = true;
@@ -9981,11 +13446,22 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		const decisionLu = await nluStep({
-			sc,
-			hotel: st.hotel,
-			lastUserMessage: userText,
-		});
+		const decisionLu =
+			(await withSoftTimeout(
+				nluStep({
+					sc,
+					hotel: st.hotel,
+					lastUserMessage: userText,
+				}),
+				AI_NLU_STEP_SOFT_TIMEOUT_MS,
+				{
+					intent: "unknown",
+					dates: quickTurnDates || {},
+					roomTypeKey: mapRoomToKey(userText) || st.slots.roomTypeKey || null,
+					amenity: findAmenityMatch(userText) || null,
+					reason: "nlu_soft_timeout",
+				}
+			)) || {};
 		if (
 			decisionLu?.confirmation &&
 			confirmationLooksLikePhoneInText(userText, decisionLu.confirmation) &&
@@ -9997,6 +13473,30 @@ async function planTurn(io, sc) {
 			decisionLu.confirmation = null;
 		}
 		logStep(caseId, "nlu.decision", decisionLu);
+		if (needsExplicitPastDateClarification(userText, decisionLu?.dates)) {
+			await askExplicitPastDateClarification(io, sc, st, userText, decisionLu.dates);
+			return;
+		}
+		if (
+			decisionLu.dates?.checkinISO &&
+			decisionLu.dates?.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_pre_direct", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
+		}
 		const bookingFlowWasActiveBeforeNlu =
 			isNewReservationFlowActive(st) ||
 			Boolean(st.quote) ||
@@ -10029,22 +13529,44 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		if (decisionLu?.dates?.raw) {
-			if (decisionLu.dates.raw.checkin)
-				st.dateRaw.checkin = decisionLu.dates.raw.checkin;
-			if (decisionLu.dates.raw.checkout)
-				st.dateRaw.checkout = decisionLu.dates.raw.checkout;
-			if (decisionLu.dates.raw.calendar)
-				st.dateRaw.calendar = decisionLu.dates.raw.calendar;
-			if (decisionLu.dates.raw.checkinHijri)
-				st.dateRaw.checkinHijri = decisionLu.dates.raw.checkinHijri;
-			if (decisionLu.dates.raw.checkoutHijri)
-				st.dateRaw.checkoutHijri = decisionLu.dates.raw.checkoutHijri;
+		if (decisionLu.dates?.checkinISO && decisionLu.dates?.checkoutISO) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_post_direct", userText }
+			);
+			if (dateMerge.prompted) return;
+		} else {
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				decisionLu.dates,
+				{ source: "nlu_post_direct_partial", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 		}
-		if (decisionLu.dates?.checkinISO)
-			st.slots.checkinISO = decisionLu.dates.checkinISO;
-		if (decisionLu.dates?.checkoutISO)
-			st.slots.checkoutISO = decisionLu.dates.checkoutISO;
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
+			return;
+		}
 		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
 
 		if (
@@ -10171,6 +13693,24 @@ async function planTurn(io, sc) {
 		}
 		logStep(caseId, "orchestrator.decision", supportDecision);
 
+		const largeGroupGuestCount = requestedGuestCountFromText(userText);
+		if (
+			st.hotel &&
+			(largeGroupGuestCount > 5 || extraBedBeyondFiveRequestText(userText)) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				largeGroupGuestCount > 5 ? largeGroupGuestCount : 6
+			);
+			return;
+		}
+
 		if (supportDecision.roomTypeKey) {
 			st.slots.roomTypeKey = supportDecision.roomTypeKey;
 		}
@@ -10228,16 +13768,6 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "reservation_cancellation") {
-			if (!st.hotel) {
-				await redirectJannatReservationToHotelSupport(
-					io,
-					sc,
-					st,
-					userText,
-					decisionLu
-				);
-				return;
-			}
 			const handled = await handleReservationCancellationRequest(
 				io,
 				sc,
@@ -10247,7 +13777,9 @@ async function planTurn(io, sc) {
 				{ forceCancellation: true }
 			);
 			if (handled) return;
-			await handoffToHuman(io, sc, st, "reservation_cancellation");
+			await answerCancellationRefundPolicyInquiry(io, sc, st, userText, decisionLu, {
+				forceCancellation: true,
+			});
 			return;
 		}
 
@@ -10275,6 +13807,18 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "human_escalation") {
+			if (
+				looksLikeReservationCancellation(userText) ||
+				cancellationRefundPolicyQuestionText(userText) ||
+				/\b(?:cancellation|cancelation|cancel|refund)\b/i.test(
+					String(supportDecision.reason || "")
+				)
+			) {
+				await answerCancellationRefundPolicyInquiry(io, sc, st, userText, decisionLu, {
+					forceCancellation: true,
+				});
+				return;
+			}
 			await handoffToHuman(
 				io,
 				sc,
@@ -10353,15 +13897,7 @@ async function planTurn(io, sc) {
 		}
 
 		if (supportDecision.action === "ask_dates_for_price") {
-			const reply = await write(
-				io,
-				sc,
-				st,
-				"The guest is asking about price but dates are missing. Ask for check-in and checkout dates in one short question. Do not invent prices.",
-				{ latestUserMessage: userText, slots: st.slots }
-			);
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+			await askForMissingStayDates(io, sc, st);
 			return;
 		}
 
@@ -10448,16 +13984,6 @@ async function planTurn(io, sc) {
 		const handoffReason = humanHandoffReason(userText);
 		if (handoffReason) {
 			if (handoffReason === "reservation_cancellation") {
-				if (!st.hotel) {
-					await redirectJannatReservationToHotelSupport(
-						io,
-						sc,
-						st,
-						userText,
-						decisionLu
-					);
-					return;
-				}
 				const handled = await handleReservationCancellationRequest(
 					io,
 					sc,
@@ -10466,6 +13992,10 @@ async function planTurn(io, sc) {
 					decisionLu
 				);
 				if (handled) return;
+				await answerCancellationRefundPolicyInquiry(io, sc, st, userText, decisionLu, {
+					forceCancellation: true,
+				});
+				return;
 			}
 			if (handoffReason === "reservation_update") {
 				if (!st.hotel) {
@@ -10521,15 +14051,7 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (wantsPriceButMissingDates(userText, st)) {
-			const reply = await write(
-				io,
-				sc,
-				st,
-				"The guest is asking about price but the stay dates are missing. Ask for check-in and checkout dates in one short, professional question. Do not invent prices.",
-				{ latestUserMessage: userText, slots: st.slots }
-			);
-			await humanSend(io, sc, st, reply);
-			st.waitFor = "dates";
+			await askForMissingStayDates(io, sc, st);
 			return;
 		}
 		if (wantsPaymentHelp(userText)) {
@@ -10591,12 +14113,35 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			dateRange.checkinISO &&
+			dateRange.checkoutISO
+		) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+				source: "fallback_combination_dates",
+				userText,
+			});
+			if (dateMerge.prompted) return;
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
+			return;
+		}
+		if (
 			dateRange.checkinISO &&
 			dateRange.checkoutISO &&
 			st.slots.roomTypeKey
 		) {
-			st.slots.checkinISO = dateRange.checkinISO;
-			st.slots.checkoutISO = dateRange.checkoutISO;
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dateRange, {
+				source: "fallback_direct_quote_dates",
+				userText,
+			});
+			if (dateMerge.prompted) return;
 			if (st.hotel) {
 				await shareKnownStayQuote(io, sc, st);
 			} else {
@@ -10610,23 +14155,56 @@ async function planTurn(io, sc) {
 			}
 			return;
 		}
+		const singleDateFallback = extractSingleStayDate(userText, st);
+		if (singleDateFallback?.raw) {
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				singleDateFallback,
+				{ source: "fallback_single_date", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
+			if (
+				st.hotel &&
+				st.slots.roomTypeKey &&
+				st.slots.checkinISO &&
+				st.slots.checkoutISO
+			) {
+				await shareKnownStayQuote(io, sc, st);
+				return;
+			}
+			await askForMissingStayDates(io, sc, st);
+			return;
+		}
 		const lu = decisionLu;
 		logStep(caseId, "nlu.reused", lu);
 
-		// raw dates (for hijri display)
-		if (lu?.dates?.raw) {
-			if (lu.dates.raw.checkin) st.dateRaw.checkin = lu.dates.raw.checkin;
-			if (lu.dates.raw.checkout) st.dateRaw.checkout = lu.dates.raw.checkout;
-			if (lu.dates.raw.calendar) st.dateRaw.calendar = lu.dates.raw.calendar;
-			if (lu.dates.raw.checkinHijri)
-				st.dateRaw.checkinHijri = lu.dates.raw.checkinHijri;
-			if (lu.dates.raw.checkoutHijri)
-				st.dateRaw.checkoutHijri = lu.dates.raw.checkoutHijri;
+		// raw dates (for hijri display) and slots
+		if (lu.dates?.checkinISO && lu.dates?.checkoutISO) {
+			const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, lu.dates, {
+				source: "nlu_reused",
+				userText,
+			});
+			if (dateMerge.prompted) return;
+		} else {
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				lu.dates,
+				{ source: "nlu_reused_partial", userText }
+			);
+			if (dateMerge.prompted) return;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 		}
-
-		// merge slots
-		if (lu.dates?.checkinISO) st.slots.checkinISO = lu.dates.checkinISO;
-		if (lu.dates?.checkoutISO) st.slots.checkoutISO = lu.dates.checkoutISO;
 		if (lu.roomTypeKey) st.slots.roomTypeKey = lu.roomTypeKey;
 
 		// ===== Amenity interception (e.g., "does it have WiFi?")
@@ -10670,6 +14248,7 @@ async function planTurn(io, sc) {
 				st.waitFor = "intentConfirm";
 			} else if (pivot === "dates" && !askedRecently(st, "dates")) {
 				ask = "Could you share your preferred check‑in and check‑out dates?";
+				ask = stayDateRequestText(sc, st);
 				stampAsk(st, "dates");
 				st.waitFor = "dates";
 			} else if (pivot === "room" && !askedRecently(st, "room")) {
@@ -10737,6 +14316,10 @@ async function planTurn(io, sc) {
 
 		// intent confirmation step
 		if (st.waitFor === "intentConfirm") {
+			if (confirmsText(userText)) {
+				await askForMissingStayDates(io, sc, st);
+				return;
+			}
 			if (/\b(yes|yep|yeah|correct|sure|تمام|نعم|ايه|أجل)\b/i.test(userText)) {
 				if (!askedRecently(st, "dates")) {
 					const ask = await write(
@@ -10766,6 +14349,8 @@ async function planTurn(io, sc) {
 
 		// need dates?
 		if (!st.slots.checkinISO || !st.slots.checkoutISO) {
+			await askForMissingStayDates(io, sc, st);
+			return;
 			const slotPromptBotTextBefore = st.lastBotText;
 			if (!askedRecently(st, "dates")) {
 				const ask = await write(
@@ -10793,6 +14378,22 @@ async function planTurn(io, sc) {
 				stampAsk(st, "dates");
 			}
 			st.waitFor = "dates";
+			return;
+		}
+
+		if (
+			st.hotel &&
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
+			);
 			return;
 		}
 
@@ -10840,6 +14441,21 @@ async function planTurn(io, sc) {
 				st,
 				userText,
 				st.slots.roomTypeKey
+			);
+			return;
+		}
+
+		if (
+			st.pendingRoomCombination &&
+			st.slots.checkinISO &&
+			st.slots.checkoutISO
+		) {
+			await answerLargeGroupRoomRecommendation(
+				io,
+				sc,
+				st,
+				userText,
+				st.pendingRoomCombination.guestCount
 			);
 			return;
 		}
@@ -10900,7 +14516,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: proceed to confirm?",
+				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: should I continue with the reservation details?",
 				display
 			);
 			quoteMsg = ensureHijriGregorianDatesVisible(quoteMsg, sc, st);
@@ -10916,22 +14532,7 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "proceed") {
 			if (confirmsText(userText)) {
 				resumeBookingNudge(st);
-				const q = st.quote?.data || quote;
-				const reviewPayload = buildReservationReviewPayload(st, q);
-				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				const reviewText = await composeReservationReviewText(
-					io,
-					sc,
-					st,
-					q,
-					reviewPayload
-				);
-				const sent = await humanSend(io, sc, st, reviewText, {
-					quickReplies: confirmationQuickReplies(sc, st),
-				});
-				if (!sent) return;
-				st.reviewSent = true;
-				st.waitFor = "reviewConfirm";
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
 				return;
 			}
 			if (declinesText(userText)) {
@@ -10940,7 +14541,7 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
@@ -10951,31 +14552,14 @@ async function planTurn(io, sc) {
 				)
 			) {
 				resumeBookingNudge(st);
-				// Review
-				const q = st.quote?.data || quote;
-				const reviewPayload = buildReservationReviewPayload(st, q);
-				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				let reviewText = await composeReservationReviewText(
-					io,
-					sc,
-					st,
-					q,
-					reviewPayload
-				);
-				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
-				const sent = await humanSend(io, sc, st, reviewText, {
-					quickReplies: confirmationQuickReplies(sc, st),
-				});
-				if (!sent) return;
-				st.reviewSent = true;
-				st.waitFor = "reviewConfirm";
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
 				return;
 			} else if (/\b(no|nope|not now|later|cancel|لا)\b/i.test(userText)) {
 				const msg = await write(
 					io,
 					sc,
 					st,
-					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
@@ -10986,7 +14570,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"Ask a single yes/no: would you like to proceed to confirm?"
+						"Ask a single yes/no: should I continue with the reservation details?"
 					);
 					await humanSend(io, sc, st, poke, {
 						quickReplies: proceedQuickReplies(sc, st),
@@ -10998,7 +14582,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"The quote is ready, but the guest did not clearly accept or decline. Acknowledge the latest message briefly and ask one short yes/no question: should you continue to the reservation review? Do not repeat the price. Do not stay silent. Use the guest's active language.",
+						"The quote is ready, but the guest did not clearly accept or decline. Acknowledge the latest message briefly and ask one short yes/no question: should you continue with the reservation details? Do not repeat the price. Do not stay silent. Use the guest's active language.",
 						{ latestUserMessage: userText, quoteReady: true, slots: st.slots }
 					);
 					await humanSend(io, sc, st, poke, {
@@ -11390,6 +14974,7 @@ async function planTurn(io, sc) {
 		}
 		if (activePlanLocks.get(caseId) === planLock) {
 			activePlanLocks.delete(caseId);
+			activePlanLockAts.delete(caseId);
 		}
 		if (queuedFollowupCase) {
 			setTimeout(() => {
@@ -11405,6 +14990,71 @@ async function planTurn(io, sc) {
 }
 
 const scheduledTurns = new Map();
+const unansweredTurnRecoveryTimers = new Map();
+const unansweredTurnRecoveryAttempts = new Map();
+
+function latestGuestNeedsAiReply(sc = {}) {
+	if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return false;
+	if (latestGuestMessageIndex(sc) < 0) return false;
+	return !hasAiAssistantReplyAfterLatestGuest(sc);
+}
+
+function clearUnansweredTurnRecovery(caseId) {
+	const key = String(caseId || "");
+	if (!key) return;
+	const timer = unansweredTurnRecoveryTimers.get(key);
+	if (timer) clearTimeout(timer);
+	unansweredTurnRecoveryTimers.delete(key);
+	unansweredTurnRecoveryAttempts.delete(key);
+}
+
+function scheduleUnansweredTurnRecovery(io, caseId, delayMs = AI_TURN_STALL_RECOVERY_MS) {
+	const key = String(caseId || "");
+	if (!io || !key) return false;
+	const existing = unansweredTurnRecoveryTimers.get(key);
+	if (existing) clearTimeout(existing);
+	const timer = setTimeout(() => {
+		runUnansweredTurnRecovery(io, key).catch((error) => {
+			console.error("[aiagent] unanswered-turn recovery error:", error?.message || error);
+		});
+	}, Math.max(1000, Number(delayMs) || AI_TURN_STALL_RECOVERY_MS));
+	if (typeof timer.unref === "function") timer.unref();
+	unansweredTurnRecoveryTimers.set(key, timer);
+	return true;
+}
+
+async function runUnansweredTurnRecovery(io, caseId) {
+	unansweredTurnRecoveryTimers.delete(caseId);
+	const latestCase = await getSupportCaseById(caseId);
+	if (!latestGuestNeedsAiReply(latestCase)) {
+		unansweredTurnRecoveryAttempts.delete(caseId);
+		return false;
+	}
+	const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+	if (!policy.allowed) {
+		logStep(caseId, "turn_recovery.skip", { reason: policy.reason });
+		return false;
+	}
+	const attempts = Number(unansweredTurnRecoveryAttempts.get(caseId) || 0) + 1;
+	unansweredTurnRecoveryAttempts.set(caseId, attempts);
+	const activeState = memo.get(caseId);
+	if (activeState?.turnInFlight) {
+		logStep(caseId, "turn_recovery.defer", { attempts, reason: "turn_in_flight" });
+		if (attempts < 3) {
+			scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
+		}
+		return false;
+	}
+	logStep(caseId, "turn_recovery.run", { attempts });
+	await planTurn(io, latestCase);
+	const afterCase = await getSupportCaseById(caseId);
+	if (attempts < 3 && latestGuestNeedsAiReply(afterCase)) {
+		scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
+	} else if (!latestGuestNeedsAiReply(afterCase)) {
+		unansweredTurnRecoveryAttempts.delete(caseId);
+	}
+	return true;
+}
 
 function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const caseId = idText(caseOrId);
@@ -11422,6 +15072,12 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	}, Math.max(0, Number(delayMs) || 0));
 	if (typeof timer.unref === "function") timer.unref();
 	scheduledTurns.set(caseId, timer);
+	unansweredTurnRecoveryAttempts.set(caseId, 0);
+	scheduleUnansweredTurnRecovery(
+		io,
+		caseId,
+		Math.max(AI_TURN_STALL_RECOVERY_MS, Number(delayMs) || 0)
+	);
 	return true;
 }
 
@@ -11467,7 +15123,7 @@ function wireSocket(io) {
 				markGuestActivity(caseId);
 				const st = memo.get(caseId);
 				if (st && st.turnInFlight) {
-					st.queue.push(now());
+					if (st.queue.length < 1) st.queue.push(now());
 					st.interrupt = true;
 					logStep(caseId, "turn.enqueue", {
 						reason: "in_flight",

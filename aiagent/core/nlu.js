@@ -24,6 +24,12 @@ const ROOM_SYNONYMS = [
 			"\u062f\u0628\u0644",
 			"غرفة مزدوجة",
 			"ثنائية",
+			"\u0634\u062e\u0635\u064a\u0646",
+			"\u0644\u0634\u062e\u0635\u064a\u0646",
+			"\u0641\u0631\u062f\u064a\u0646",
+			"\u0644\u0641\u0631\u062f\u064a\u0646",
+			"\u0636\u064a\u0641\u064a\u0646",
+			"\u0644\u0636\u064a\u0641\u064a\u0646",
 		],
 	},
 	{
@@ -73,6 +79,20 @@ const ROOM_SYNONYMS = [
 		terms: [
 			"family",
 			"quintuple",
+			"quintuple room",
+			"quintible",
+			"quantible",
+			"quintiple",
+			"5omasy",
+			"5omasi",
+			"khomasy",
+			"khomasi",
+			"khamasy",
+			"khamasi",
+			"khomasy room",
+			"khomasi room",
+			"khamasy room",
+			"khamasi room",
 			"5 bed",
 			"5 beds",
 			"five bed",
@@ -109,7 +129,14 @@ ROOM_SYNONYMS.push(
 	},
 	{
 		key: "familyRooms",
-		terms: ["\u0639\u0627\u0626\u0644\u064a\u0629", "\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629"],
+		terms: [
+			"\u0639\u0627\u0626\u0644\u064a\u0629",
+			"\u063a\u0631\u0641\u0629 \u0639\u0627\u0626\u0644\u064a\u0629",
+			"\u062e\u0645\u0627\u0633\u064a",
+			"\u062e\u0645\u0627\u0633\u064a\u0629",
+			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a",
+			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629",
+		],
 	}
 );
 
@@ -1363,7 +1390,7 @@ function quickSmalltalkType(text = "") {
 	const t = text.trim().toLowerCase();
 	if (/(how\s*(are|r)\s*(you|u))(?:\s*today)?/.test(t)) return "how_are_you";
 	if (/(?:\u0643\u064a\u0641\s+\u062d\u0627\u0644\u0643|\u0627\u062e\u0628\u0627\u0631\u0643|\u0623\u062e\u0628\u0627\u0631\u0643|\u0639\u0627\u0645\u0644\s+\u0627\u064a\u0647|\u0639\u0627\u0645\u0644\u0629\s+\u0627\u064a\u0647|\u0643\u064a\u0641\u0643|\u0627\u0632\u064a\u0643|\u0625\u0632\u064a\u0643)/.test(t)) return "how_are_you";
-	if (/^(hi|hello|hey|السلام|مرحبا|اهلا|أهلاً)\b/.test(t)) return "greet";
+	if (/^(hi|hello|hey|assalamu alaikum|assalamu alaykum|assalamualaikum|assalamo|as-salamu|al salamo|al salam|salaam|salam|assalamu|السلام|مرحبا|اهلا|أهلاً)\b/.test(t)) return "greet";
 	if (
 		/(how\s*(are|r)\s*(you|u))(?:\s*today)?|كيف حالك|اخبارك|عامل ايه|كيفك/.test(
 			t

@@ -1,13 +1,21 @@
 /** @format */
 // aiagent/index.js
 const { attachRoutes } = require("./routes");
-const { attachCaseWatcher } = require("./core/watcher");
-const { wireSocket } = require("./core/orchestrator");
+const { wireSocket, schedulePlanTurn } = require("./core/orchestrator");
+
+let initialized = false;
 
 function initAIAgent({ app, io }) {
+	if (initialized) {
+		console.log("[aiagent] already initialized; skipping duplicate wiring.");
+		return;
+	}
+	initialized = true;
+	if (app && typeof app.set === "function" && typeof schedulePlanTurn === "function") {
+		app.set("scheduleAiPlanTurn", schedulePlanTurn);
+	}
 	attachRoutes(app, io);
 	if (typeof wireSocket === "function") wireSocket(io);
-	attachCaseWatcher(io);
 	console.log("[aiagent] initialized.");
 }
 
