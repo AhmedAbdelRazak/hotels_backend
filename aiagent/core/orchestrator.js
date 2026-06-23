@@ -129,6 +129,10 @@ const AI_REPLY_TARGET_MAX_MS = Math.max(
 		max: 15000,
 	})
 );
+const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
+	min: 5000,
+	max: 5 * 60 * 1000,
+});
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
 	1800,
@@ -6396,6 +6400,8 @@ function ensureState(sc, hotel) {
 			greetScheduled: alreadyGreeted,
 			guestTypingUntil: 0,
 			lastGuestActivityAt: 0,
+			policyAllowedAt: 0,
+			policyHotelId: "",
 			turnInFlight: false,
 			activeTurnHadReply: false,
 			interrupt: false,
@@ -12988,7 +12994,26 @@ async function planTurn(io, sc) {
 	let policyHotel = null;
 	let hotel = null;
 	try {
-		policy = await ensureAIAllowed(sc.hotelId, sc);
+		const memoState = memo.get(caseId);
+		const memoPolicyFresh =
+			memoState?.hotel &&
+			Number(memoState.policyAllowedAt || 0) > 0 &&
+			now() - Number(memoState.policyAllowedAt || 0) <= AI_POLICY_MEMO_TTL_MS &&
+			memoState.policyHotelId === idText(sc.hotelId) &&
+			sc.openedBy === "client" &&
+			sc.caseStatus === "open" &&
+			sc.aiToRespond === true;
+		const policyStartedAt = now();
+		policy = memoPolicyFresh
+			? { allowed: true, hotel: memoState.hotel, reason: "memo_policy" }
+			: await ensureAIAllowed(sc.hotelId, sc);
+		const policyElapsedMs = now() - policyStartedAt;
+		if (policyElapsedMs >= 1000 || memoPolicyFresh) {
+			logStep(caseId, "policy.checked", {
+				source: memoPolicyFresh ? "memo" : "db",
+				elapsedMs: policyElapsedMs,
+			});
+		}
 		if (!policy.allowed) {
 			logStep(caseId, "policy.skip", { reason: policy.reason });
 			return;
@@ -12996,6 +13021,8 @@ async function planTurn(io, sc) {
 		policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		hotel = activeHotelContextForCase(sc, policyHotel);
 		st = ensureState(sc, hotel);
+		st.policyAllowedAt = now();
+		st.policyHotelId = idText(sc.hotelId);
 		if (st.turnInFlight) {
 			logStep(caseId, "turn.enqueue", {
 				reason: "in_flight",
