@@ -675,13 +675,7 @@ function applyGuestDetailsFromText(booking = {}, text = "") {
 	if (phone) booking.phone = phone;
 	const adults = extractAdultCount(text);
 	const compactText = cleanText(text, 240);
-	const wordCount = compactText.split(/\s+/).filter(Boolean).length;
-	const nationalityCue =
-		Boolean(phone) ||
-		Number.isFinite(adults) ||
-		/\b(?:nationality|national|country|citizenship|passport)\b/i.test(compactText) ||
-		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u062c\u0646\u0633\u064a\u0629|\u0628\u0644\u062f|\u062f\u0648\u0644\u0629|\u062f\u0648\u0644\u0647)/u.test(compactText) ||
-		(wordCount <= 3 && !/[?؟]/.test(compactText));
+	const nationalityCue = hasNationalityCue(compactText, { phone, adults });
 	const nationality = nationalityCue ? extractNationality(text) : { code: "", name: "", match: "" };
 	if (nationality.code) {
 		booking.nationalityCode = nationality.code;
@@ -703,8 +697,24 @@ function applyGuestDetailsFromText(booking = {}, text = "") {
 }
 
 function hasGuestDetailSignal(text = "", { afterQuote = false } = {}) {
-	if (extractEmail(text) || extractPhone(text) || extractNationality(text).code) return true;
-	return afterQuote && Number.isFinite(extractAdultCount(text));
+	const email = extractEmail(text);
+	const phone = extractPhone(text);
+	const adults = extractAdultCount(text);
+	if (email || phone) return true;
+	if (hasNationalityCue(text, { phone, adults }) && extractNationality(text).code) return true;
+	return afterQuote && Number.isFinite(adults);
+}
+
+function hasNationalityCue(text = "", { phone = "", adults = null } = {}) {
+	const compactText = cleanText(text, 240);
+	const wordCount = compactText.split(/\s+/).filter(Boolean).length;
+	return (
+		Boolean(phone) ||
+		Number.isFinite(adults) ||
+		/\b(?:nationality|national|country|citizenship|passport)\b/i.test(compactText) ||
+		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u062c\u0646\u0633\u064a\u0629|\u0628\u0644\u062f|\u062f\u0648\u0644\u0629|\u062f\u0648\u0644\u0647)/u.test(compactText) ||
+		(wordCount <= 3 && !/[?؟]/.test(compactText))
+	);
 }
 
 function valuePresent(value) {
@@ -736,6 +746,18 @@ function latestHasBookingSignal(text = "") {
 			quickDateRange(value)?.checkinISO ||
 			/(book|reserve|reservation|price|rate|availability|available|how much|total|stay|room|individual|person|guest|حجز|سعر|متاح|توفر|غرفة|افراد|أفراد|اشخاص|أشخاص)/i.test(value)
 	);
+}
+
+function isDelayChaseText(text = "") {
+	return /(asleep|there|waiting|slow|late|hello\?|where are you|are you there|فين|نايم|موجود|اتأخرت|تاخير|تأخير|مستني|مستنية|وينك|انت فين|انتي فين)/i.test(
+		String(text || "")
+	);
+}
+
+function delayChasePrefix(language = "English") {
+	return isArabicLanguage(language)
+		? "\u0623\u0646\u0627 \u0645\u0639\u0643\u060c \u0623\u0639\u062a\u0630\u0631 \u0639\u0646 \u0627\u0644\u062a\u0623\u062e\u064a\u0631."
+		: "I am here with you, sorry for the delay.";
 }
 
 function buildFastDecision({ supportCase, latest }) {
@@ -1245,7 +1267,10 @@ async function sendAiMessage(io, supportCase, text, options = {}) {
 	if (options.latestFingerprint) {
 		const still = await latestStillUnanswered(caseId, options.latestFingerprint);
 		if (!still.ok) {
-			if (still.supportCase) schedulePlanTurn(io, caseId, { delayMs: 80 });
+			if (still.supportCase) {
+				queued.add(caseId);
+				schedulePlanTurn(io, caseId, { delayMs: 250 });
+			}
 			return { sent: false, skipped: true, stale: true };
 		}
 	}
@@ -1274,7 +1299,7 @@ async function sendAiMessage(io, supportCase, text, options = {}) {
 			aiRelated: true,
 			aiResponderName: agentName,
 		},
-		{ duplicateWindowMs: 3 * 60 * 1000 }
+		{ duplicateWindowMs: 15 * 1000 }
 	);
 	if (!skipped) {
 		io?.to(caseId).emit("receiveMessage", { ...messageData, caseId });
@@ -1345,8 +1370,14 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	const language = responseLanguage(supportCase, latest.message, decision);
 	const booking = { ...(decision.booking || {}) };
 	const directKind = decision.answerKind || detectDirectKind(latest.message.message || "");
+	const latestText = latest.message.message || "";
 	const latestAction = cleanText(latest.message.clientAction || "", 80);
 	const room = findRoom(hotel, booking);
+	const latestRoomKey = mapRoomToKey(latestText);
+	const latestBookingSignal =
+		latestHasBookingSignal(latestText) ||
+		hasGuestDetailSignal(latestText, { afterQuote: hasDates(booking) }) ||
+		Boolean(latestAction);
 	const created = reservationAlreadyCreated(supportCase);
 
 	if (latestAction === "correct_reservation" || decision.action === "correct_details") {
@@ -1363,7 +1394,10 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	if (directKind === "email_receipt" && (!booking.email || created || !room || !hasDates(booking))) {
 		return { text: emailReceiptReply({ booking, language }), language };
 	}
-	if (directKind === "room_options") return { text: roomOptionsReply({ hotel, language }), language };
+	if (directKind === "room_options") {
+		if (room && latestRoomKey) return { text: roomFitReply({ hotel, room, language }), language };
+		return { text: roomOptionsReply({ hotel, language }), language };
+	}
 	if (directKind === "room_fit") return { text: roomFitReply({ hotel, room, language }), language };
 	if (directKind === "room_description" || directKind === "amenity") {
 		return { text: roomDescriptionReply({ hotel, room, language }), language };
@@ -1371,6 +1405,33 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 
 	if (created && decision.reply) {
 		return { text: sanitizeReply(decision.reply, language), language };
+	}
+
+	if (
+		(decision.action === "greet" || directKind === "smalltalk") &&
+		!latestBookingSignal
+	) {
+		if (isDelayChaseText(latestText) && (booking.roomTypeKey || booking.roomDisplayName || booking.checkinISO || booking.checkoutISO)) {
+			const next = !room || !hasDates(booking)
+				? askMissingBookingReply({ booking, hotel, language })
+				: sanitizeReply(decision.reply || "", language);
+			return {
+				text: [delayChasePrefix(language), next].filter(Boolean).join(" "),
+				language,
+			};
+		}
+		if (!booking.roomTypeKey && !booking.roomDisplayName && !booking.checkinISO && !booking.checkoutISO) {
+			return {
+				text: sanitizeReply(
+					decision.reply ||
+						(isArabicLanguage(language)
+							? `${AR.hello}\u060c \u0623\u0646\u0627 \u0645\u0639\u0643 \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 ${hotelName(hotel, language)}. \u0643\u064a\u0641 \u0623\u0633\u0627\u0639\u062f\u0643\u061f`
+							: `Hello, I am with ${hotelName(hotel, language)} reception. How can I help you today?`),
+					language
+				),
+				language,
+			};
+		}
 	}
 
 	const wantsBooking =
@@ -1531,6 +1592,8 @@ async function planCase(io, caseOrId) {
 			action: decision.action,
 			kind: decision.answerKind || null,
 			sent: Boolean(sendResult?.sent),
+			skipped: Boolean(sendResult?.skipped),
+			stale: Boolean(sendResult?.stale),
 			elapsedMs: Date.now() - startedAt,
 		});
 	} catch (error) {

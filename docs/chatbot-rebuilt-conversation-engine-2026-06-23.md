@@ -144,6 +144,28 @@ common details line shape:
 - nationality recovery strips emails first and does not overwrite a valid
   nationality from unrelated email/receipt wording.
 
+## 2026-06-23 Live Stale Reply Follow-Up
+
+A live Zad Al Safa test showed two related edge cases:
+
+- if the guest sent another message while OpenAI was still planning, the stale
+  reply could be skipped without a reliable immediate retry;
+- if a reserve-room case started with smalltalk, the booking context could make
+  the bot ask for dates before answering the greeting naturally.
+
+Current contract:
+
+- stale sends mark the case queued and schedule a retry after the active planner
+  clears;
+- exact duplicate AI suppression uses a short window so legitimate repeated
+  booking prompts are not hidden for minutes;
+- smalltalk/greetings answer first unless the latest guest line itself contains
+  booking details;
+- if the guest chases the assistant after giving a booking detail, acknowledge
+  the delay briefly and continue the booking step from recovered state;
+- when the latest text contains a room capacity such as "room for 3 persons",
+  room-fit rendering wins over a generic room-options answer.
+
 `controllers/supportcase.js` also treats public `clientTag` values as
 idempotency keys. If a browser retries the same guest message, the backend
 returns the case without appending or scheduling that same client-tagged
