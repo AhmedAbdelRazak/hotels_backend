@@ -128,6 +128,13 @@ idempotency keys. If a browser retries the same guest message, the backend
 returns the case without appending or scheduling that same client-tagged
 message again.
 
+Follow-up production monitoring found one remaining legacy scheduling path:
+`controllers/supportcase.js` was still importing `aiagent/core/orchestrator.js`
+for public client-message scheduling while `aiagent/index.js` used the rebuilt
+engine. That could run the legacy planner alongside the rebuilt planner and pin
+the Node process. Active support-case scheduling must import only
+`aiagent/core/orchestrator_rebuilt.js`.
+
 ## Policy
 
 Cancellation/refund defaults remain:
