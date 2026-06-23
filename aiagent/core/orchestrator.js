@@ -6563,9 +6563,18 @@ async function humanSend(
 
 	try {
 		const latestCase = await getSupportCaseById(caseId);
-		const policy = latestCase
-			? await ensureAIAllowed(latestCase.hotelId, latestCase)
-			: { allowed: false, reason: "support case missing" };
+		const policy =
+			fast && latestCase
+				? {
+						allowed:
+							latestCase.openedBy === "client" &&
+							latestCase.caseStatus === "open" &&
+							latestCase.aiToRespond === true,
+						reason: "fast send case gate",
+				  }
+				: latestCase
+				? await ensureAIAllowed(latestCase.hotelId, latestCase)
+				: { allowed: false, reason: "support case missing" };
 		if (!policy.allowed) {
 			logStep(caseId, "human.cancelled", {
 				stage: "policy-before-save",

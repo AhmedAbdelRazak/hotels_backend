@@ -7,6 +7,15 @@ const Janat = require("../../models/janat");
 const AiAgentLearning = require("../../models/aiagent_learning");
 const AiAgentTrainingChat = require("../../models/aiagent_training_chat");
 
+const AI_HOTEL_CONTEXT_CACHE_TTL_MS = Number(
+	process.env.AI_HOTEL_CONTEXT_CACHE_TTL_MS || 60000
+);
+const AI_SETTINGS_CACHE_TTL_MS = Number(
+	process.env.AI_SETTINGS_CACHE_TTL_MS || 10000
+);
+const hotelContextCache = new Map();
+let janatAiSettingsCache = null;
+
 function safeId(id) {
 	try {
 		const value = id && typeof id === "object" && id._id ? id._id : id;
@@ -171,9 +180,45 @@ function compactHotelForAi(hotel = null) {
 	};
 }
 
+function cloneCompactHotelForAi(hotel = null) {
+	if (!hotel) return null;
+	return {
+		...hotel,
+		distances: hotel.distances ? { ...hotel.distances } : hotel.distances,
+		location: hotel.location ? { ...hotel.location } : hotel.location,
+		hotelPolicyQA: Array.isArray(hotel.hotelPolicyQA)
+			? hotel.hotelPolicyQA.map((row) => ({ ...row }))
+			: hotel.hotelPolicyQA,
+		roomCountDetails: Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails.map((room) => ({
+					...room,
+					amenities: Array.isArray(room.amenities) ? [...room.amenities] : room.amenities,
+					views: Array.isArray(room.views) ? [...room.views] : room.views,
+					extraAmenities: Array.isArray(room.extraAmenities)
+						? [...room.extraAmenities]
+						: room.extraAmenities,
+					pricedExtras: Array.isArray(room.pricedExtras)
+						? room.pricedExtras.map((extra) => ({ ...extra }))
+						: room.pricedExtras,
+					monthly: Array.isArray(room.monthly)
+						? room.monthly.map((month) => ({ ...month }))
+						: room.monthly,
+					offers: Array.isArray(room.offers)
+						? room.offers.map((offer) => ({ ...offer }))
+						: room.offers,
+			  }))
+			: [],
+	};
+}
+
 async function getHotelById(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
+	const cacheKey = String(_id);
+	const cached = hotelContextCache.get(cacheKey);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cloneCompactHotelForAi(cached.hotel);
+	}
 	const hotel = await HotelDetails.findById(_id)
 		.select(
 			[
@@ -204,18 +249,37 @@ async function getHotelById(id) {
 		)
 		.lean()
 		.exec();
-	return compactHotelForAi(hotel);
+	const compactHotel = compactHotelForAi(hotel);
+	if (compactHotel) {
+		hotelContextCache.set(cacheKey, {
+			hotel: compactHotel,
+			expiresAt: Date.now() + AI_HOTEL_CONTEXT_CACHE_TTL_MS,
+		});
+		if (hotelContextCache.size > 200) {
+			const firstKey = hotelContextCache.keys().next().value;
+			if (firstKey) hotelContextCache.delete(firstKey);
+		}
+	}
+	return cloneCompactHotelForAi(compactHotel);
 }
 
 async function getJanatAiSettings() {
+	if (janatAiSettingsCache && janatAiSettingsCache.expiresAt > Date.now()) {
+		return { ...janatAiSettingsCache.settings };
+	}
 	const doc = await Janat.findOne({})
 		.sort({ updatedAt: -1, createdAt: -1, _id: -1 })
 		.select("aiToRespond")
 		.lean()
 		.exec();
-	return {
+	const settings = {
 		aiToRespond: !doc || doc.aiToRespond !== false,
 	};
+	janatAiSettingsCache = {
+		settings,
+		expiresAt: Date.now() + AI_SETTINGS_CACHE_TTL_MS,
+	};
+	return { ...settings };
 }
 
 async function listActivePublicHotels() {
