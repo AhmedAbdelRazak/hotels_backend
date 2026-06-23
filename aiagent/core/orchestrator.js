@@ -1070,28 +1070,100 @@ function languageSwitchAcknowledgementText(sc = {}, st = {}) {
 	return `${name}, absolutely, I will continue in English. How can I help?`;
 }
 
+function localizedHowAreYouReplyText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، أنا بخير والحمد لله، شكرا لسؤالك. كيف أقدر أساعدك في ${hotelName} اليوم؟`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, estoy muy bien, gracias por preguntar. Como puedo ayudarte con ${hotelName} hoy?`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je vais tres bien, merci de demander. Comment puis-je vous aider avec ${hotelName} aujourd'hui ?`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, main theek hoon, poochne ka shukriya. Aaj ${hotelName} ke liye main kaise help kar sakta hoon?`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, main theek hoon, poochne ke liye dhanyavaad. Aaj ${hotelName} ke liye main kaise help kar sakta hoon?`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, saya baik, terima kasih sudah bertanya. Bagaimana saya bisa membantu dengan ${hotelName} hari ini?`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, saya baik, terima kasih kerana bertanya. Bagaimana saya boleh bantu dengan ${hotelName} hari ini?`;
+	}
+	return `${name}, I am doing well, thank you for asking. How can I help you with ${hotelName} today?`;
+}
+
+function localizedThanksReplyText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، العفو. أنا هنا إذا احتجت أي مساعدة بخصوص ${hotelName}.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, con mucho gusto. Estoy aqui si necesitas ayuda con ${hotelName}.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, avec plaisir. Je reste ici si vous avez besoin d'aide avec ${hotelName}.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, aap ka khair maqdam hai. ${hotelName} ke liye koi help chahiye ho to main yahin hoon.`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, aapka swagat hai. ${hotelName} ke liye koi help chahiye ho to main yahin hoon.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, sama-sama. Saya tetap di sini jika Anda membutuhkan bantuan dengan ${hotelName}.`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, sama-sama. Saya masih di sini jika anda perlukan bantuan dengan ${hotelName}.`;
+	}
+	return `${name}, you are most welcome. I am here whenever you need help with ${hotelName}.`;
+}
+
 function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	const raw = String(text || "").trim();
 	if (!raw || raw.length > 140) return "";
-	const lower = raw.toLowerCase();
-	const name = respectfulGuestName(sc, st);
-	const hotelName = localizedHotelName(sc, st);
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	const asksHowAreYou =
 		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day)\b/i.test(
 			raw
-		) &&
+		) ||
+		/(?:كيف\s+حالك|كيفك|اخبارك|أخبارك|ازيك|إزيك|عامل\s+ايه|عاملة\s+ايه)/i.test(
+			arabic
+		) ||
+		/(?:howareyou|howru|keefak|kefak|keefhalak|akhbarak|ezayak)/i.test(
+			latinCompact
+		);
+	const clearHowAreYou =
+		asksHowAreYou &&
 		!/\b(?:far|distance|price|rate|available|availability|book|reserve|reservation|room|date|check\s*-?\s*in|check\s*-?\s*out|map|location|address|nusuk|bus|shuttle|payment|confirmation)\b/i.test(
 			lower
+		) &&
+		!/(?:سعر|أسعار|اسعار|حجز|غرفة|غرف|تاريخ|دخول|خروج|خريطة|موقع|نسك|باص|تأكيد|دفع)/i.test(
+			arabic
 		);
-	if (asksHowAreYou) {
-		return `${name}, I am doing well, thank you for asking. How can I help you with ${hotelName} today?`;
+	if (clearHowAreYou) {
+		return localizedHowAreYouReplyText(sc, st);
 	}
 	if (hasOperationalBookingSignal(raw)) return "";
 	if (looksLikeGreetingOnly(raw)) {
-		return `${name}, assalamu alaikum. How can I help you with ${hotelName} today?`;
+		return greetingText(sc, st);
 	}
-	if (/^(?:thanks?|thank\s+you|thank\s+you\s+so\s+much|appreciate\s+it)\.?$/i.test(raw)) {
-		return `${name}, you are most welcome. I am here whenever you need help with ${hotelName}.`;
+	if (
+		/^(?:thanks?|thank\s+you|thank\s+you\s+so\s+much|appreciate\s+it)\.?$/i.test(
+			raw
+		) ||
+		/^(?:شكرا|شكرًا|متشكر|متشكرة|يعطيك\s+العافية|تسلم|تسلمي|جزاك\s+الله\s+خير)$/i.test(
+			arabic
+		)
+	) {
+		return localizedThanksReplyText(sc, st);
 	}
 	return "";
 }
@@ -13074,6 +13146,13 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	});
 
 	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
+		const fastGreeting = fastEnglishSmalltalkText(sc, st, userText);
+		if (fastGreeting) {
+			await humanSend(io, sc, st, fastGreeting, { fast: true });
+			thread.topic = null;
+			thread.waitingForGuest = false;
+			return true;
+		}
 		const msg = await write(
 			io,
 			sc,
@@ -13089,13 +13168,14 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 
 	if (subtype === "how_are_you") {
 		if (!thread.waitingForGuest || thread.topic !== "howru") {
-			const msg = await write(
+			const fastHowAreYou = fastEnglishSmalltalkText(sc, st, userText);
+			const msg = fastHowAreYou || (await write(
 				io,
 				sc,
 				st,
 				"Say you’re doing well (natural phrasing), then ask “How about you?”. Keep it short; no booking question yet."
-			);
-			await humanSend(io, sc, st, msg);
+			));
+			await humanSend(io, sc, st, msg, fastHowAreYou ? { fast: true } : {});
 			thread.topic = "howru";
 			thread.waitingForGuest = true;
 			logStep(caseId, "smalltalk.thread.update", {
