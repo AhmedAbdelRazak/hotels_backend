@@ -28,6 +28,7 @@ const MAX_RESERVATION_FACT_CHARS = 5000;
 const timers = new Map();
 const inFlight = new Set();
 const queued = new Set();
+const guestTypingUntil = new Map();
 
 function envFlag(name, fallback = false) {
 	const value = String(process.env[name] || "").trim().toLowerCase();
@@ -37,6 +38,37 @@ function envFlag(name, fallback = false) {
 
 function shouldUseFastDecision() {
 	return envFlag("AI_AGENT_FAST_PATH_ENABLED", false);
+}
+
+function markGuestTyping(caseId) {
+	const id = asId(caseId);
+	if (!id) return;
+	guestTypingUntil.set(id, Date.now() + 3800);
+}
+
+function clearGuestTyping(caseId) {
+	const id = asId(caseId);
+	if (!id) return;
+	guestTypingUntil.delete(id);
+}
+
+function guestTypingRemainingMs(caseId) {
+	const id = asId(caseId);
+	if (!id) return 0;
+	const until = Number(guestTypingUntil.get(id) || 0);
+	const remaining = until - Date.now();
+	if (remaining <= 0) {
+		guestTypingUntil.delete(id);
+		return 0;
+	}
+	return remaining;
+}
+
+function deferIfGuestTyping(io, caseId) {
+	const remaining = guestTypingRemainingMs(caseId);
+	if (remaining <= 0) return false;
+	schedulePlanTurn(io, caseId, { delayMs: Math.min(5000, remaining + 450) });
+	return true;
 }
 
 const AR = {
@@ -86,6 +118,23 @@ function isAiMessage(message = {}) {
 	return Boolean(message?.isAi || isSupportIdentity(message));
 }
 
+function visibleGuestMessages(supportCase = {}) {
+	return (Array.isArray(supportCase.conversation) ? supportCase.conversation : []).filter(
+		isGuestMessage
+	);
+}
+
+function stripGeneratedOpening(value = "") {
+	return cleanText(value, 2200)
+		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
+		.replace(
+			/^(?:assalamu alaikum|assalamualaikum)[\s,]+(?:jannat booking[\s,]+)?/i,
+			""
+		)
+		.replace(/^i would like to (?:ask|chat with reception) about\s*/i, "Help with ")
+		.trim();
+}
+
 function privateInquiryText(supportCase = {}) {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
@@ -93,9 +142,7 @@ function privateInquiryText(supportCase = {}) {
 	const conversationInquiry =
 		conversation.find((row) => cleanText(row?.inquiryDetails || "", 2200))
 			?.inquiryDetails || "";
-	return cleanText(supportCase.inquiryDetails || conversationInquiry || "", 2200)
-		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
-		.trim();
+	return stripGeneratedOpening(supportCase.inquiryDetails || conversationInquiry || "");
 }
 
 function latestGuestTurn(supportCase = {}) {
@@ -820,8 +867,16 @@ function fallbackDecision({ supportCase, latest }) {
 	);
 }
 
+function isRoomOptionsQuestion(text = "") {
+	const value = String(text || "").toLowerCase();
+	return /(?:room types|what (?:kind|type)s? of rooms|what rooms|rooms do you have|rooms? available|only have .*rooms?|(?:do|don'?t|you|u|guys|hotel|there).{0,36}have.{0,36}(?:double|triple|quad|family|single|shared|quintuple).{0,20}rooms?|(?:double|triple|quad|family|single|shared|quintuple).{0,36}rooms?.{0,36}(?:available|have|there)|(?:any|other|more).{0,24}rooms?)/i.test(
+		value
+	);
+}
+
 function detectDirectKind(text = "") {
 	const value = String(text || "").toLowerCase();
+	if (isRoomOptionsQuestion(value)) return "room_options";
 	if (/\bnusuk\b|نسك|نُسك/i.test(value)) return "nusuk";
 	if (/(cancel|refund|policy|terms|condition|استرجاع|الغاء|إلغاء|سياس|شروط|استرداد)/i.test(value)) {
 		return "policy";
@@ -1060,9 +1115,21 @@ function latestHasBookingSignal(text = "") {
 
 function isAcknowledgementOnly(text = "") {
 	const value = cleanText(text, 120).toLowerCase();
-	return /^(?:ok|okay|k|yes|yeah|yep|sure|alright|all right|تمام|حاضر|اوكي|أوكي|نعم|طيب|ماشي|حسنًا|حسنا)[.!؟?\s]*$/i.test(
+	return /^(?:ok|okay|k|yes|yeah|yep|sure|alright|all right|no worries|no problem|thanks|thank you|thx|lol|haha|تمام|حاضر|اوكي|أوكي|نعم|طيب|ماشي|حسنًا|حسنا|شكرا|شكرًا)[.!؟?\s]*$/i.test(
 		value
 	);
+}
+
+function isBotChallengeText(text = "") {
+	return /(are you lost|you lost|are you new|you new|confused|you confused|not reading|read the chat|whole chat|context|wrong answer|that'?s wrong|you already|why.*ask|poor|bad answer|مش فاهم|مش فاهمة|تايه|تايهة|غلط|اقرأ|السياق)/i.test(
+		String(text || "")
+	);
+}
+
+function recentGuestAskedRoomOptions(supportCase = {}) {
+	return visibleGuestMessages(supportCase)
+		.slice(-8)
+		.some((message) => isRoomOptionsQuestion(message?.message || ""));
 }
 
 function isDelayChaseText(text = "") {
@@ -1178,6 +1245,24 @@ function buildVerifiedDirectDecision({ supportCase, latest }) {
 	);
 }
 
+function buildInitialPrivateGreetingDecision({ supportCase, hotel, latest }) {
+	if (!latest?.privateContext || visibleGuestMessages(supportCase).length) return null;
+	const language = responseLanguage(supportCase, latest?.message || {}, {});
+	const name = hotelName(hotel, language);
+	return normalizeDecision(
+		{
+			language,
+			action: "greet",
+			answerKind: "smalltalk",
+			reply: isArabicLanguage(language)
+				? `أهلًا بك في ${name}. أنا معك من الاستقبال، كيف أساعدك اليوم؟`
+				: `Hello, welcome to ${name}. I am with reception; how can I help you today?`,
+			confidence: 1,
+		},
+		supportCase
+	);
+}
+
 function roomToken(value = "") {
 	return String(value || "")
 		.toLowerCase()
@@ -1250,6 +1335,15 @@ function roomName(room = {}, language = "English") {
 		return room.displayName_OtherLanguage;
 	}
 	return room.displayName || room.roomType || "room";
+}
+
+function roomListName(room = {}, language = "English") {
+	return cleanText(roomName(room, language), 140)
+		.replace(/[\uFE0F\u200D]/g, "")
+		.replace(/[^\p{L}\p{N}\s&()./-]+/gu, "")
+		.replace(/^\p{M}+/gu, "")
+		.replace(/\s{2,}/g, " ")
+		.trim();
 }
 
 function hotelName(hotel = {}, language = "English") {
@@ -1573,13 +1667,13 @@ function roomOptionsReply({ hotel, language }) {
 	if (isArabicLanguage(language)) {
 		return [
 			`\u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName(hotel, language)}:`,
-			...rooms.map((room) => `- ${room.displayNameOther || room.displayName || room.roomType}`),
+			...rooms.map((room) => `- ${roomListName(room, language)}`),
 			"\u0644\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631\u060c \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641.",
 		].join("\n");
 	}
 	return [
 		`Available room types at ${hotelName(hotel, language)}:`,
-		...rooms.map((room) => `- ${room.displayName || room.roomType}`),
+		...rooms.map((room) => `- ${roomListName(room, language)}`),
 		"For price and availability, send check-in, check-out, and guest count.",
 	].join("\n");
 }
@@ -1775,7 +1869,6 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	const directKind = deterministicDirectKind || decision.answerKind || "";
 	const latestAction = cleanText(latest.message.clientAction || "", 80);
 	const room = findRoom(hotel, booking);
-	const latestRoomKey = mapRoomToKey(latestText);
 	const latestBookingSignal =
 		latestHasBookingSignal(latestText) ||
 		hasGuestDetailSignal(latestText, { afterQuote: hasDates(booking) }) ||
@@ -1784,6 +1877,18 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 
 	if (latestAction === "correct_reservation" || decision.action === "correct_details") {
 		return { text: isArabicLanguage(language) ? AR.noProblem : "No problem. Tell me what needs to be corrected and I will review it before completing the reservation.", language };
+	}
+
+	if (isBotChallengeText(latestText)) {
+		const apology = isArabicLanguage(language)
+			? "معك حق، أعتذر عن اللخبطة. سأكمل على سياق المحادثة."
+			: "You are right, I am sorry for the confusion. I will stay with the chat context.";
+		const correction = recentGuestAskedRoomOptions(supportCase)
+			? roomOptionsReply({ hotel, language })
+			: isArabicLanguage(language)
+			? `كيف أساعدك الآن في ${hotelName(hotel, language)}؟`
+			: `How can I help you now with ${hotelName(hotel, language)}?`;
+		return { text: `${apology}\n\n${correction}`, language };
 	}
 
 	if (directKind === "policy") return { text: policyReply(language), language };
@@ -1798,7 +1903,6 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 		return { text: emailReceiptReply({ booking, language }), language };
 	}
 	if (directKind === "room_options") {
-		if (room && latestRoomKey) return { text: roomFitReply({ hotel, room, language }), language };
 		return { text: roomOptionsReply({ hotel, language }), language };
 	}
 	if (directKind === "room_fit") return { text: roomFitReply({ hotel, room, language }), language };
@@ -1813,7 +1917,8 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 	if (
 		isAcknowledgementOnly(latestText) &&
 		!latestBookingSignal &&
-		!room &&
+		!booking.roomTypeKey &&
+		!booking.roomDisplayName &&
 		!hasDates(booking)
 	) {
 		return {
@@ -1957,7 +2062,7 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 		};
 	}
 	return {
-		text: `Assalamu alaikum, I am with ${hotelName(hotel, language)} reception. How can I help with rooms, availability, or your reservation?`,
+		text: `Hello, I am with ${hotelName(hotel, language)} reception. How can I help with rooms, availability, or your reservation?`,
 		language,
 	};
 }
@@ -1975,6 +2080,7 @@ async function planCase(io, caseOrId) {
 		if (!supportCase) return;
 		const latest = latestGuestTurn(supportCase);
 		if (!latest || latest.hasAiAfter) return;
+		if (deferIfGuestTyping(io, caseId)) return;
 
 		const { allowed, hotel, reason } = await ensureAIAllowed(
 			supportCase.hotelId,
@@ -1991,16 +2097,24 @@ async function planCase(io, caseOrId) {
 		io?.to(caseId).emit("typing", { caseId, name: agentName, isAi: true });
 		const latestFingerprint = messageFingerprint(latest.message);
 		const startedAt = Date.now();
+		const initialPrivateDecision = buildInitialPrivateGreetingDecision({
+			supportCase,
+			hotel,
+			latest,
+		});
 		const verifiedDirectDecision = buildVerifiedDirectDecision({
 			supportCase,
 			latest,
 		});
 		const fastDecision =
+			initialPrivateDecision ||
 			verifiedDirectDecision ||
 			(shouldUseFastDecision()
 				? buildFastDecision({ supportCase, hotel, latest })
 				: null);
-		const decisionSource = verifiedDirectDecision
+		const decisionSource = initialPrivateDecision
+			? "initial"
+			: verifiedDirectDecision
 			? "verified"
 			: fastDecision
 			? "fast"
@@ -2028,6 +2142,7 @@ async function planCase(io, caseOrId) {
 				latest,
 			});
 		}
+		if (deferIfGuestTyping(io, caseId)) return;
 		const sendResult = await sendAiMessage(io, supportCase, result.text, {
 			language: result.language,
 			quickReplies: result.quickReplies,
@@ -2099,8 +2214,17 @@ function wireSocket(io) {
 		socket.on("joinRoom", ({ caseId } = {}) => {
 			if (caseId) schedulePlanTurn(io, caseId, { delayMs: 120 });
 		});
+		socket.on("typing", ({ caseId, isAi } = {}) => {
+			if (caseId && !isAi) markGuestTyping(caseId);
+		});
+		socket.on("stopTyping", ({ caseId, isAi } = {}) => {
+			if (caseId && !isAi) clearGuestTyping(caseId);
+		});
 		socket.on("sendMessage", (message = {}) => {
-			if (message.caseId) schedulePlanTurn(io, message.caseId, { delayMs: 120 });
+			if (message.caseId) {
+				clearGuestTyping(message.caseId);
+				schedulePlanTurn(io, message.caseId, { delayMs: 220 });
+			}
 		});
 	});
 	console.log("[aiagent] rebuilt socket-driven planner active.");

@@ -125,3 +125,27 @@ Known unrelated frontend build warnings remained:
 - The backend production path observed on 2026-06-23 was `/home/ahmedadmin/Hotels/hotels_backend`.
 - The chatbot planner is socket-driven through `aiagent/core/orchestrator_rebuilt.js`.
 - Do not remove the private inquiry fallback unless the SSR widget stops sending generated starter context or another private context channel replaces it.
+
+## Production Test Follow-Up - Same Day
+
+The first live test after the hidden-starter release exposed a no-reply issue. The generated starter was stored in the first system conversation entry's `inquiryDetails`, not on a top-level support-case field. The planner now reads private opener context from the system conversation entry as well.
+
+A second live test exposed quality issues:
+
+- The hidden generated opener made the bot reply "Wa alaikum assalam" even though the visible guest had not said it.
+- Room-list questions could be converted into a single room-fit answer such as only recommending Double Room.
+- The bot asked for dates after acknowledgement or feedback such as "No worries" and "Are you lost?"
+- The AI could send while the guest was actively typing.
+- SSR could suppress the visible "Nadia is typing..." state right after the guest sent or typed.
+- Longer chats routed too many deterministic room questions through OpenAI, causing 10-20 second responses.
+
+Follow-up fixes:
+
+- Initial hidden generated openers now become neutral private context and use a deterministic welcome.
+- Room-options questions always render the active room-type list.
+- Specific room existence questions such as "Do you have triple rooms?" are treated as room-options questions.
+- Bot-challenge text such as "Are you lost?" receives a concise apology and context-aware correction.
+- Common acknowledgements such as "No worries" do not trigger booking/date prompts.
+- The backend tracks guest typing and defers AI sending while the guest is actively composing.
+- The SSR widget now shows AI typing events even immediately after the guest sends a message.
+- Room-list display names are lightly cleaned so emoji or leading marks from admin room names do not leak into the guest answer.
