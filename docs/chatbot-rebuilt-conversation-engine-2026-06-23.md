@@ -100,6 +100,34 @@ sender role:
 This prevents duplicate visible guest messages and keeps guest/CSR backgrounds
 visibly different.
 
+## 2026-06-23 Latency And Duplicate Message Follow-Up
+
+Live PM2/database timing showed the backend process was healthy, but basic
+guest questions could still spend 9-30 seconds in the full OpenAI planner path.
+`aiagent/core/orchestrator_rebuilt.js` now has a deterministic fast path before
+the model for common hotel facts and simple booking continuation:
+
+- room options, room descriptions, amenities, bus, location, distance, payment,
+  reservation details, and policy questions;
+- room-fit messages such as asking for a room for three guests;
+- the next room/date quote step after the conversation already contains room
+  type and stay dates.
+
+Every planned AI turn now logs a compact non-PII timing row:
+`[aiagent] rebuilt turn { caseId, source, action, kind, sent, elapsedMs }`.
+Use this in `pm2 logs hotels-backend` to separate fast-path latency from true
+OpenAI latency.
+
+The active low-cost model trial is `gpt-5.4-mini` for chatbot analysis/NLU,
+with low reasoning effort. Keep the override in chatbot-specific env keys
+(`OPENAI_CHATBOT_ANALYSIS_MODEL`, `OPENAI_CHATBOT_NLU_MODEL`) so broader
+OpenAI jobs can keep their existing model quality.
+
+`controllers/supportcase.js` also treats public `clientTag` values as
+idempotency keys. If a browser retries the same guest message, the backend
+returns the case without appending or scheduling that same client-tagged
+message again.
+
 ## Policy
 
 Cancellation/refund defaults remain:

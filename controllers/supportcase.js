@@ -1099,6 +1099,16 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		const safeConversation = req.body.conversation
 			? buildPublicClientConversation(req.body.conversation, currentCase)
 			: null;
+		const duplicateClientConversation = Boolean(
+			safeConversation?.clientTag &&
+				(currentCase.conversation || []).some(
+					(entry) =>
+						cleanText(entry?.clientTag, 120) === safeConversation.clientTag
+				)
+		);
+		const shouldAppendConversation = Boolean(
+			safeConversation && !duplicateClientConversation
+		);
 		if (safeConversation?.preferredLanguage) {
 			setFields.preferredLanguage = safeConversation.preferredLanguage;
 		}
@@ -1149,10 +1159,10 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		}
 
 		const unsetFields = {};
-		if (safeConversation || req.body.caseStatus === "closed") {
+		if (shouldAppendConversation || req.body.caseStatus === "closed") {
 			unsetFields.aiRecoveryScheduledAt = "";
 		}
-		const updateDoc = safeConversation
+		const updateDoc = shouldAppendConversation
 			? {
 					$set: setFields,
 					...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
@@ -1181,7 +1191,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 
 		if (req.body.caseStatus === "closed") {
 			req.io.emit("closeCase", { case: updatedCase, closedBy: "client" });
-		} else if (safeConversation) {
+		} else if (shouldAppendConversation) {
 			req.io.to(String(updatedCase._id)).emit("receiveMessage", {
 				...safeConversation,
 				caseId: String(updatedCase._id),
@@ -1194,7 +1204,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			});
 		}
 		if (
-			safeConversation &&
+			shouldAppendConversation &&
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {

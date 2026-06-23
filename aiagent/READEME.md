@@ -64,8 +64,13 @@
   ambiguous inputs (typos, mixed languages). Otherwise local extractors are
   used.
 - **Model latency**:
-  - Default chatbot model is `gpt-5.5`, configurable through the central OpenAI model env keys.
-  - GPT-5-style chatbot calls use `OPENAI_CHATBOT_REASONING_EFFORT=medium` by default for quality-first live-chat behavior.
+  - Default heavy OpenAI model is `gpt-5.5`, but chatbot analysis/NLU uses the
+    fast model path. The current production trial pins chatbot analysis/NLU to
+    `gpt-5.4-mini` with `OPENAI_CHATBOT_REASONING_EFFORT=low` for lower
+    latency and cost.
+  - Keep model overrides chatbot-specific when possible
+    (`OPENAI_CHATBOT_ANALYSIS_MODEL`, `OPENAI_CHATBOT_NLU_MODEL`) so OTA,
+    writer, and heavier reasoning jobs are not accidentally downgraded.
   - `AI_INSTANT_PROGRESS_ENABLED=false` is preferred in production so guests receive one thoughtful typed answer instead of extra bot-like progress messages.
   - Detailed AI step logs are off unless `AI_AGENT_DEBUG=true`, so production PM2 logs do not include guest names, phones, or slot state during normal operation.
 - **Warm CS opening**: Agent reads `inquiryAbout` from SupportCase as private

@@ -1,5 +1,5 @@
 const DEFAULT_OPENAI_MODEL = "gpt-5.5";
-const DEFAULT_OPENAI_FAST_MODEL = "gpt-5.5";
+const DEFAULT_OPENAI_FAST_MODEL = "gpt-5.4-mini";
 
 const KIND_DEFAULT_MODELS = {
 	analysis: DEFAULT_OPENAI_FAST_MODEL,

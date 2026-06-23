@@ -522,13 +522,116 @@ function detectDirectKind(text = "") {
 		return "amenity";
 	}
 	if (/(room|غرفة|اوضة|أوضة|جناح).*(description|describe|details|وصف|تفاصيل)|(description|describe|وصف).*(room|غرفة|اوضة|أوضة|جناح)/i.test(value)) return "room_description";
-	if (/(room types|what rooms|rooms do you have|انواع الغرف|أنواع الغرف|غرف ايه|غرف إيه)/i.test(value)) {
+	if (/(room types|what (?:kind|type)s? of rooms|what rooms|rooms do you have|only have .*rooms?|انواع الغرف|أنواع الغرف|غرف ايه|غرف إيه)/i.test(value)) {
 		return "room_options";
 	}
 	if (/(payment|pay|invoice|receipt|دفع|فاتورة|ايصال|إيصال)/i.test(value)) {
 		return "payment";
 	}
 	return "";
+}
+
+function recoverFastBooking(supportCase = {}, latestMessage = {}) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const booking = {
+		roomTypeKey: "",
+		roomDisplayName: "",
+		checkinISO: "",
+		checkoutISO: "",
+		rooms: 1,
+		children: 0,
+		finalReviewAlreadyShown: hasFinalReviewPrompt(supportCase),
+	};
+	const updateFromText = (text = "") => {
+		const roomKey = mapRoomToKey(text);
+		if (roomKey) booking.roomTypeKey = roomKey;
+		const dates = quickDateRange(text);
+		if (dates?.checkinISO && dates?.checkoutISO) {
+			booking.checkinISO = dates.checkinISO;
+			booking.checkoutISO = dates.checkoutISO;
+		}
+	};
+	for (const message of conversation) {
+		updateFromText(message?.message || "");
+	}
+	updateFromText(latestMessage.message || "");
+	return booking;
+}
+
+function latestHasBookingSignal(text = "") {
+	const value = String(text || "").toLowerCase();
+	return Boolean(
+		mapRoomToKey(value) ||
+			quickDateRange(value)?.checkinISO ||
+			/(book|reserve|reservation|price|rate|availability|available|how much|total|stay|room|individual|person|guest|حجز|سعر|متاح|توفر|غرفة|افراد|أفراد|اشخاص|أشخاص)/i.test(value)
+	);
+}
+
+function buildFastDecision({ supportCase, latest }) {
+	const latestText = latest?.message?.message || "";
+	const directKind = detectDirectKind(latestText);
+	const language = isArabicText(latestText)
+		? "Arabic"
+		: supportCase.preferredLanguage || "English";
+	if (
+		[
+			"policy",
+			"bus",
+			"location",
+			"distance",
+			"room_options",
+			"room_description",
+			"amenity",
+			"reservation_details",
+			"payment",
+		].includes(directKind)
+	) {
+		return normalizeDecision(
+			{
+				language,
+				action: "answer_fact",
+				answerKind: directKind,
+				booking: recoverFastBooking(supportCase, latest?.message || {}),
+				confidence: 1,
+			},
+			supportCase
+		);
+	}
+
+	const booking = recoverFastBooking(supportCase, latest?.message || {});
+	const latestRoomKey = mapRoomToKey(latestText);
+	const latestDates = quickDateRange(latestText);
+	if (latestRoomKey && !(latestDates?.checkinISO && latestDates?.checkoutISO)) {
+		return normalizeDecision(
+			{
+				language,
+				action: "answer_fact",
+				answerKind: "room_fit",
+				booking,
+				confidence: 1,
+			},
+			supportCase
+		);
+	}
+	if (
+		latestHasBookingSignal(latestText) &&
+		(booking.roomTypeKey || booking.roomDisplayName) &&
+		(booking.checkinISO || booking.checkoutISO)
+	) {
+		return normalizeDecision(
+			{
+				language,
+				action: "quote_room",
+				answerKind: "",
+				booking,
+				confidence: 1,
+			},
+			supportCase
+		);
+	}
+	return null;
 }
 
 function roomToken(value = "") {
@@ -902,6 +1005,22 @@ function roomDescriptionReply({ hotel, room, language }) {
 		.join("\n");
 }
 
+function roomFitReply({ hotel, room, language }) {
+	if (!room) return askMissingBookingReply({ booking: {}, hotel, language });
+	const name = roomName(room, language);
+	const beds = room.bedsCount ? String(room.bedsCount) : "";
+	if (isArabicLanguage(language)) {
+		return [
+			`\u0646\u0639\u0645\u060c ${name} \u0645\u0646\u0627\u0633\u0628\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628${beds ? ` \u0648\u062a\u0638\u0647\u0631 \u0628\u0639\u062f\u062f \u0623\u0633\u0631\u0629 ${beds}` : ""}.`,
+			"\u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0645\u0628\u0627\u0634\u0631\u0629.",
+		].join("\n");
+	}
+	return [
+		`Yes, ${name} is a suitable option for this request${beds ? ` and is listed with ${beds} bed(s)` : ""}.`,
+		"Send the check-in and check-out dates and I will check the price and availability right away.",
+	].join("\n");
+}
+
 function sanitizeReply(reply = "", language = "English") {
 	let text = cleanText(reply, 1600);
 	if (!text) return text;
@@ -1045,6 +1164,7 @@ async function buildTurnResult({ supportCase, hotel, decision, latest }) {
 		if (created) return { text: reservationDetailsReply({ supportCase, language }), language };
 	}
 	if (directKind === "room_options") return { text: roomOptionsReply({ hotel, language }), language };
+	if (directKind === "room_fit") return { text: roomFitReply({ hotel, room, language }), language };
 	if (directKind === "room_description" || directKind === "amenity") {
 		return { text: roomDescriptionReply({ hotel, room, language }), language };
 	}
@@ -1192,12 +1312,24 @@ async function planCase(io, caseOrId) {
 		const agentName = supportCase.aiResponderName || "Amira";
 		io?.to(caseId).emit("typing", { caseId, name: agentName, isAi: true });
 		const latestFingerprint = messageFingerprint(latest.message);
-		const decision = await analyzeConversation({ supportCase, hotel, latest });
+		const startedAt = Date.now();
+		const fastDecision = buildFastDecision({ supportCase, hotel, latest });
+		const decisionSource = fastDecision ? "fast" : "openai";
+		const decision =
+			fastDecision || (await analyzeConversation({ supportCase, hotel, latest }));
 		const result = await buildTurnResult({ supportCase, hotel, decision, latest });
-		await sendAiMessage(io, supportCase, result.text, {
+		const sendResult = await sendAiMessage(io, supportCase, result.text, {
 			language: result.language,
 			quickReplies: result.quickReplies,
 			latestFingerprint,
+		});
+		console.log("[aiagent] rebuilt turn", {
+			caseId,
+			source: decisionSource,
+			action: decision.action,
+			kind: decision.answerKind || null,
+			sent: Boolean(sendResult?.sent),
+			elapsedMs: Date.now() - startedAt,
 		});
 	} catch (error) {
 		console.error("[aiagent] rebuilt plan error:", error?.message || error);
