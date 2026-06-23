@@ -56,6 +56,7 @@ Examples:
 - If the user selected English but writes in Hindi script, the turn is treated as Hindi.
 - If the user selected English but writes in Urdu script or common Urdu wording, the turn is treated as Urdu.
 - Arabic script still falls back to Arabic when it does not look like Urdu.
+- Supported Latin-script language switches are also detected for Spanish, French, Indonesian, and Malay using lightweight reception/chat vocabulary cues.
 - For OpenAI-planned turns, the prompt includes both `preferredLanguage` and `latestGuest.detectedLanguage`.
 - For deterministic/template replies in languages other than English or Arabic, OpenAI is used as a localization layer so the response can stay in the guest's latest language without hardcoding every sentence.
 

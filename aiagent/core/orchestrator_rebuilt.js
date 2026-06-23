@@ -196,11 +196,69 @@ function isUrduText(value = "") {
 	);
 }
 
+function normalizedLatinText(value = "") {
+	return String(value || "")
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f]/g, "");
+}
+
+function hasAnyTerm(text = "", terms = []) {
+	return terms.some((term) => {
+		if (term instanceof RegExp) return term.test(text);
+		return text.includes(term);
+	});
+}
+
+function detectedLatinLanguage(value = "") {
+	const text = normalizedLatinText(value);
+	if (!text) return "";
+	if (
+		hasAnyTerm(text, [
+			/\b(hola|gracias|habitacion|habitaciones|reserva|reservar|precio|cuanto|tiene|tienen|quiero|necesito|puedo|donde|esta|estoy|autobus)\b/,
+			"por favor",
+			"hay disponibilidad",
+		])
+	) {
+		return "Spanish";
+	}
+	if (
+		hasAnyTerm(text, [
+			/\b(bonjour|merci|chambre|chambres|reservation|reserver|prix|disponible|disponibilite|avez|vous|navette|puis|peux|ou|avec)\b/,
+			"est-ce",
+			"s'il vous plait",
+		])
+	) {
+		return "French";
+	}
+	if (
+		hasAnyTerm(text, [
+			/\b(apakah|kamar|tersedia|harga|pesan|reservasi|saya|ingin|mau|dengan|bisa|ada|berapa|dimana|antar-jemput)\b/,
+			"layanan bus",
+			"jemputan",
+		])
+	) {
+		return "Indonesian";
+	}
+	if (
+		hasAnyTerm(text, [
+			/\b(adakah|bilik|tempahan|harga|tersedia|saya|ingin|mahu|dengan|boleh|ada|berapa|dimana|bas)\b/,
+			"perkhidmatan bas",
+			"ulang-alik",
+		])
+	) {
+		return "Malay";
+	}
+	return "";
+}
+
 function detectedGuestLanguage(text = "", supportCase = {}) {
 	const value = String(text || "");
 	if (isHindiText(value)) return "Hindi";
 	if (isUrduText(value)) return "Urdu";
 	if (isArabicText(value)) return "Arabic";
+	const latinLanguage = detectedLatinLanguage(value);
+	if (latinLanguage) return latinLanguage;
 	return supportCase.preferredLanguage || "English";
 }
 
@@ -762,7 +820,7 @@ function detectDirectKind(text = "") {
 	if (/(cancel|refund|policy|terms|condition|استرجاع|الغاء|إلغاء|سياس|شروط|استرداد)/i.test(value)) {
 		return "policy";
 	}
-	if (/(bus|shuttle|transport|اتوبيس|باص|حافل|نقل)/i.test(value)) return "bus";
+	if (/(bus|shuttle|transport|autobus|navette|bas|antar-jemput|ulang-alik|jemputan|اتوبيس|باص|حافل|نقل)/i.test(value)) return "bus";
 	if (/(location|address|map|لوكيشن|موقع|عنوان|خريطة)/i.test(value)) return "location";
 	if (/(distance|far|haram|حرم|يبعد|بعد|المسافة)/i.test(value)) return "distance";
 	if (/(reservation|booking|confirmation|حجز|تأكيد|تاكيد).*(details|number|link|تفاصيل|رقم)|(?:details|تفاصيل).*(reservation|booking|حجز)/i.test(value)) {
