@@ -596,6 +596,17 @@ const localizedClientHoldMessage = (language = "", languageCode = "") => {
 	return "Jannat Booking support is reviewing your message now.";
 };
 
+const initialClientMessageFromRequest = ({
+	initialClientMessage,
+	inquiryDetails,
+} = {}) => {
+	const direct = cleanText(initialClientMessage, 8000);
+	if (direct) return direct;
+	return cleanText(inquiryDetails, 8000)
+		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
+		.trim();
+};
+
 const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
 	if (!conversation || typeof conversation !== "object") return null;
 	const conversationEntries = Array.isArray(supportCase.conversation)
@@ -1363,7 +1374,10 @@ exports.createNewSupportCase = async (req, res) => {
 			},
 		];
 
-		const cleanInitialClientMessage = cleanText(initialClientMessage, 8000);
+		const cleanInitialClientMessage = initialClientMessageFromRequest({
+			initialClientMessage,
+			inquiryDetails,
+		});
 		if (openedBy === "client" && cleanInitialClientMessage) {
 			conversation.push({
 				messageBy: {

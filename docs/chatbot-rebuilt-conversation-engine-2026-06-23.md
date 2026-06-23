@@ -168,6 +168,10 @@ Current contract:
 - greeting-only or smalltalk-only openings must receive a warm reception
   greeting and one open-ended help question. They must not immediately ask for
   check-in dates, room type, phone, nationality, or booking details.
+- public client support cases must always include a guest-visible first turn.
+  If SSR or another public client omits `initialClientMessage`, the backend
+  falls back to the cleaned `inquiryDetails` text so the AI is never scheduled
+  against a case that only contains the system hold message.
 
 `controllers/supportcase.js` also treats public `clientTag` values as
 idempotency keys. If a browser retries the same guest message, the backend
