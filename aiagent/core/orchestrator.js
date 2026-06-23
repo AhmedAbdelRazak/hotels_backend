@@ -2698,6 +2698,9 @@ function selectedHotelLocalAreaQuestionText(text = "") {
 		/\b(?:nearby|around|surrounding|area|district|landmark|restaurants?|shops?|markets?|pharmac(?:y|ies)|essential\s+services|first\s*time|umrah\s+guest|good\s+choice\s+for\s+famil(?:y|ies)|famil(?:y|ies)|parking|park\s+my\s+car|late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(
 			lower
 		) ||
+		/(?:قريب|قريبة|قرب|حول|حوالي|بجانب|منطقة|حي|معلم|مطاعم|محلات|أسواق|اسواق|صيدليات|خدمات|اول\s+مرة|أول\s+مرة|معتمر|عمرة|تنصح|ترشح|توصي|عائلات|عائلة|اسرة|أسرة|مناسب|مواقف|موقف|باركينج|ركن|سيارتي|سيارة|وصول\s+متأخر|متأخر|بالليل|ليلا|ليلًا|24\s*ساعة|استقبال)/i.test(
+			arabic
+		) ||
 		/(?:nearby|around|landmark|restaurants|shops|markets|pharmacy|firsttime|umrahguest|family|families|parking|latearrival|lateatnight|24hour|receptionhelp)/i.test(
 			latinCompact
 		)
@@ -5158,14 +5161,7 @@ function hotelFactAddressLine(hotel = {}, lang = "English") {
 function hotelBusDetailLine(details = "", lang = "English") {
 	const rawDetailText = cleanHotelFactText(details).replace(/[.!?\u061f\u06d4]+$/g, "");
 	if (!rawDetailText) return "";
-	if (
-		(/arabic/i.test(lang) && !hasArabicScript(rawDetailText)) ||
-		(!/arabic/i.test(lang) && hasArabicScript(rawDetailText))
-	) {
-		return "";
-	}
-	if (!/english/i.test(lang)) return rawDetailText;
-	return rawDetailText
+	const englishLine = rawDetailText
 		.replace(/\s*\n+\s*/g, ". ")
 		.replace(/\bfrom\s+hotels?\s+to\b/gi, "from the hotel to")
 		.replace(/\baway\s+from\s+the\s+hotels?\b/gi, "away from the hotel")
@@ -5175,6 +5171,36 @@ function hotelBusDetailLine(details = "", lang = "English") {
 		.replace(/\b5\s+daily\s+prayers\b/gi, "five daily prayers")
 		.replace(/\s{2,}/g, " ")
 		.trim();
+	const knownGamaratPrayerBus =
+		/(?:gamarat|jamarat|jamaraat)/i.test(rawDetailText) &&
+		/(?:5|five).{0,24}(?:daily\s+)?prayers?/i.test(rawDetailText);
+	if (knownGamaratPrayerBus) {
+		if (/arabic/i.test(lang)) {
+			return "خدمة الباص تكون من الفندق إلى محطة الجمرات، وهي تبعد حوالي 500 متر، ثم يتجه الباص إلى الحرم للصلوات الخمس اليومية";
+		}
+		if (/spanish/i.test(lang)) {
+			return "El servicio de bus sale del hotel hacia la estacion Al Gamarat, a unos 500 metros, y luego va a Al Haram para las cinco oraciones diarias";
+		}
+		if (/french/i.test(lang)) {
+			return "Le bus part de l'hotel vers la station Al Gamarat, a environ 500 metres, puis va a Al Haram pour les cinq prieres quotidiennes";
+		}
+		if (/urdu/i.test(lang)) {
+			return "Bus service hotel se Al Gamarat station tak hai, jo taqriban 500 meters door hai, phir bus five daily prayers ke liye Al Haram jati hai";
+		}
+		if (/hindi/i.test(lang)) {
+			return "Bus service hotel se Al Gamarat station tak hai, jo lagbhag 500 meters door hai, phir bus five daily prayers ke liye Al Haram jati hai";
+		}
+		if (/indonesian/i.test(lang)) {
+			return "Layanan bus berangkat dari hotel ke stasiun Al Gamarat, sekitar 500 meter dari hotel, lalu menuju Al Haram untuk lima waktu salat";
+		}
+		if (/malay|malaysia/i.test(lang)) {
+			return "Perkhidmatan bus bergerak dari hotel ke stesen Al Gamarat, kira-kira 500 meter dari hotel, kemudian ke Al Haram untuk lima waktu solat";
+		}
+	}
+	if (/english/i.test(lang)) return englishLine;
+	if (/arabic/i.test(lang) && hasArabicScript(rawDetailText)) return rawDetailText;
+	if (!/arabic/i.test(lang) && !hasArabicScript(rawDetailText)) return englishLine;
+	return "";
 }
 
 function hotelFactNextStepText(sc = {}, st = {}) {
@@ -5519,11 +5545,135 @@ function selectedHotelLocalAreaFacts(hotel = {}) {
 	};
 }
 
+function localizedLocalAreaServices(services = [], lang = "English") {
+	const names = {
+		restaurants: {
+			ar: "المطاعم",
+			es: "restaurantes",
+			fr: "restaurants",
+			ur: "restaurants",
+			hi: "restaurants",
+			id: "restoran",
+			ms: "restoran",
+			en: "restaurants",
+		},
+		markets: {
+			ar: "الأسواق",
+			es: "mercados",
+			fr: "marches",
+			ur: "markets",
+			hi: "markets",
+			id: "pasar",
+			ms: "pasar",
+			en: "markets",
+		},
+		pharmacies: {
+			ar: "الصيدليات",
+			es: "farmacias",
+			fr: "pharmacies",
+			ur: "pharmacies",
+			hi: "pharmacies",
+			id: "apotek",
+			ms: "farmasi",
+			en: "pharmacies",
+		},
+	};
+	const code = /arabic/i.test(lang)
+		? "ar"
+		: /spanish/i.test(lang)
+		? "es"
+		: /french/i.test(lang)
+		? "fr"
+		: /urdu/i.test(lang)
+		? "ur"
+		: /hindi/i.test(lang)
+		? "hi"
+		: /indonesian/i.test(lang)
+		? "id"
+		: /malay|malaysia/i.test(lang)
+		? "ms"
+		: "en";
+	return services.map((service) => names[service]?.[code] || service);
+}
+
+function localizedLocalAreaPlace(facts = {}, lang = "English") {
+	const knownAziziyah = /al\s+aziziyah\s+north/i.test(facts.area || "");
+	const knownUmmQura = /umm\s+al[-\s]?qura/i.test(facts.landmark || "");
+	let area = facts.area || "Makkah";
+	let landmark = facts.landmark || "";
+	if (/arabic/i.test(lang)) {
+		area = knownAziziyah ? "حي العزيزية الشمالية" : area;
+		landmark = knownUmmQura ? "خلف جامعة أم القرى" : landmark;
+	} else if (/spanish/i.test(lang)) {
+		area = knownAziziyah ? "el distrito norte de Al Aziziyah" : area;
+		landmark = knownUmmQura ? "detras de la Universidad Umm Al-Qura" : landmark;
+	} else if (/french/i.test(lang)) {
+		area = knownAziziyah ? "le quartier nord d'Al Aziziyah" : area;
+		landmark = knownUmmQura ? "derriere l'Universite Umm Al-Qura" : landmark;
+	} else if (/urdu/i.test(lang)) {
+		area = knownAziziyah ? "Al Aziziyah North district" : area;
+		landmark = knownUmmQura ? "Umm Al-Qura University ke peeche" : landmark;
+	} else if (/hindi/i.test(lang)) {
+		area = knownAziziyah ? "Al Aziziyah North district" : area;
+		landmark = knownUmmQura ? "Umm Al-Qura University ke peeche" : landmark;
+	} else if (/indonesian/i.test(lang)) {
+		area = knownAziziyah ? "distrik Al Aziziyah North" : area;
+		landmark = knownUmmQura ? "di belakang Universitas Umm Al-Qura" : landmark;
+	} else if (/malay|malaysia/i.test(lang)) {
+		area = knownAziziyah ? "daerah Al Aziziyah North" : area;
+		landmark = knownUmmQura ? "di belakang Universiti Umm Al-Qura" : landmark;
+	}
+	return [area, landmark].filter(Boolean).join(/arabic/i.test(lang) ? "، " : ", ");
+}
+
+function localizedLocalAreaMode(value = "", mode = "walking", lang = "English") {
+	if (!value) return "";
+	if (/arabic/i.test(lang)) return `${value} ${mode === "walking" ? "مشيا" : "بالسيارة"}`;
+	if (/spanish/i.test(lang)) return `${value} ${mode === "walking" ? "caminando" : "en coche"}`;
+	if (/french/i.test(lang)) return `${value} ${mode === "walking" ? "a pied" : "en voiture"}`;
+	if (/urdu/i.test(lang)) return `${value} ${mode === "walking" ? "paidal" : "gaari se"}`;
+	if (/hindi/i.test(lang)) return `${value} ${mode === "walking" ? "paidal" : "gaadi se"}`;
+	if (/indonesian/i.test(lang)) return `${value} ${mode === "walking" ? "berjalan kaki" : "dengan mobil"}`;
+	if (/malay|malaysia/i.test(lang)) return `${value} ${mode === "walking" ? "berjalan kaki" : "dengan kereta"}`;
+	return `${value} ${mode === "walking" ? "on foot" : "by car"}`;
+}
+
+function localizedLocalAreaDistanceLine(walking = "", driving = "", lang = "English") {
+	if (!walking && !driving) return "";
+	const joined = localizedJoin(
+		[
+			localizedLocalAreaMode(walking, "walking", lang),
+			localizedLocalAreaMode(driving, "driving", lang),
+		].filter(Boolean),
+		lang
+	);
+	if (/arabic/i.test(lang)) return ` وهو يبعد عن الحرم حوالي ${joined} حسب الزحام.`;
+	if (/spanish/i.test(lang)) return ` Esta a unos ${joined} de Al Haram, segun el trafico.`;
+	if (/french/i.test(lang)) return ` Il se trouve a environ ${joined} d'Al Haram, selon la circulation.`;
+	if (/urdu/i.test(lang)) return ` Al Haram se taqriban ${joined} hai, traffic ke hisaab se.`;
+	if (/hindi/i.test(lang)) return ` Al Haram se lagbhag ${joined} hai, traffic ke hisaab se.`;
+	if (/indonesian/i.test(lang)) return ` Jaraknya sekitar ${joined} dari Al Haram, tergantung lalu lintas.`;
+	if (/malay|malaysia/i.test(lang)) return ` Jaraknya kira-kira ${joined} dari Al Haram, bergantung pada trafik.`;
+	return ` It is about ${joined} from Al Haram, depending on traffic.`;
+}
+
+function localizedLocalAreaServiceLine(services = [], lang = "English") {
+	if (!services.length) return "";
+	const joined = localizedJoin(localizedLocalAreaServices(services, lang), lang);
+	if (/arabic/i.test(lang)) return ` توضح بيانات الفندق أنه قريب من الخدمات الأساسية مثل ${joined}.`;
+	if (/spanish/i.test(lang)) return ` El perfil del hotel indica que esta cerca de servicios esenciales como ${joined}.`;
+	if (/french/i.test(lang)) return ` Le profil de l'hotel indique qu'il est proche de services essentiels comme ${joined}.`;
+	if (/urdu/i.test(lang)) return ` Hotel profile ke mutabiq yeh ${joined} jaisi zaroori services ke qareeb hai.`;
+	if (/hindi/i.test(lang)) return ` Hotel profile ke mutabiq yeh ${joined} jaisi zaroori services ke paas hai.`;
+	if (/indonesian/i.test(lang)) return ` Profil hotel menyebutkan lokasinya dekat layanan penting seperti ${joined}.`;
+	if (/malay|malaysia/i.test(lang)) return ` Profil hotel menyatakan lokasinya dekat dengan perkhidmatan penting seperti ${joined}.`;
+	return ` The stored hotel profile says it is close to essential services such as ${joined}.`;
+}
+
 function selectedHotelLocalAreaAnswerText(sc = {}, st = {}, userText = "") {
 	const hotel = st.hotel || {};
 	const lang = languageOf(sc, st);
-	if (!/english/i.test(lang)) return "";
-	const { lower } = normalizeControlText(userText);
+	const { lower, arabic } = normalizeControlText(userText);
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st);
 	const facts = selectedHotelLocalAreaFacts(hotel);
@@ -5531,34 +5681,92 @@ function selectedHotelLocalAreaAnswerText(sc = {}, st = {}, userText = "") {
 	const driving = formatHotelDistanceValue(hotel.distances?.drivingToElHaram, lang);
 	const mapLink = hotelGoogleMapsMarkdownLink(hotel, lang);
 	const next = hotelFactNextStepText(sc, st);
-	const place = [facts.area, facts.landmark].filter(Boolean).join(", ");
-	const distance = walking || driving
-		? ` It is about ${localizedJoin([walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""], lang)} from Al Haram, depending on traffic.`
-		: "";
-	const serviceLine = facts.services.length
-		? ` The stored hotel profile says it is close to essential services such as ${localizedJoin(facts.services, lang)}.`
-		: "";
-	if (/\b(?:parking|park\s+my\s+car|car\s+park)\b/i.test(lower)) {
+	const place = localizedLocalAreaPlace(facts, lang) || "Makkah";
+	const distance = localizedLocalAreaDistanceLine(walking, driving, lang);
+	const serviceLine = localizedLocalAreaServiceLine(facts.services, lang);
+	const asksParking =
+		/\b(?:parking|park\s+my\s+car|car\s+park)\b/i.test(lower) ||
+		/(?:مواقف|موقف|باركينج|ركن|سيارتي|سيارة)/i.test(arabic);
+	const asksLateArrival =
+		/\b(?:late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(lower) ||
+		/(?:وصول\s+متأخر|متأخر|بالليل|ليلا|ليلًا|24\s*ساعة|استقبال)/i.test(arabic);
+	const asksFamily =
+		/\b(?:famil(?:y|ies)|good\s+choice)\b/i.test(lower) ||
+		/(?:عائلات|عائلة|اسرة|أسرة|مناسب)/i.test(arabic);
+	const asksFirstTime =
+		/\b(?:first\s*time|umrah\s+guest|recommend)\b/i.test(lower) ||
+		/(?:اول\s+مرة|أول\s+مرة|معتمر|عمرة|تنصح|ترشح|توصي)/i.test(arabic);
+	const asksLandmark =
+		/\b(?:landmark|area|district)\b/i.test(lower) ||
+		/(?:معلم|منطقة|حي|العزيزية|جامعة|ام\s+القرى|أم\s+القرى)/i.test(arabic);
+	const asksNearby =
+		/\b(?:restaurants?|shops?|markets?|pharmac(?:y|ies)|nearby|around|surrounding|essential\s+services)\b/i.test(lower) ||
+		/(?:قريب|قريبة|حول|حوالي|مطاعم|محلات|اسواق|أسواق|صيدليات|خدمات)/i.test(arabic);
+	if (asksParking) {
+		if (/arabic/i.test(lang)) {
+			return facts.parkingLot
+				? `${name}، نعم، ${hotelName} مسجل لديه مواقف سيارات متاحة.${distance} ${next}`
+				: `${name}، لا أرى تأكيدا لمواقف السيارات في ${hotelName} حاليا.${distance} ${next}`;
+		}
+		if (/spanish/i.test(lang)) return facts.parkingLot ? `${name}, si, ${hotelName} aparece con parking disponible.${distance} ${next}` : `${name}, no veo parking confirmado para ${hotelName} ahora mismo.${distance} ${next}`;
+		if (/french/i.test(lang)) return facts.parkingLot ? `${name}, oui, ${hotelName} indique un parking disponible.${distance} ${next}` : `${name}, je ne vois pas de parking confirme pour ${hotelName} pour le moment.${distance} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return facts.parkingLot ? `${name}, ji haan, ${hotelName} mein parking available listed hai.${distance} ${next}` : `${name}, filhal ${hotelName} ke liye parking confirmed nazar nahi aa rahi.${distance} ${next}`;
+		if (/indonesian/i.test(lang)) return facts.parkingLot ? `${name}, ya, ${hotelName} tercatat memiliki parkir tersedia.${distance} ${next}` : `${name}, saya belum melihat parkir terkonfirmasi untuk ${hotelName} saat ini.${distance} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return facts.parkingLot ? `${name}, ya, ${hotelName} disenaraikan dengan parking tersedia.${distance} ${next}` : `${name}, saya belum nampak parking disahkan untuk ${hotelName} sekarang.${distance} ${next}`;
 		return facts.parkingLot
 			? `${name}, yes, ${hotelName} is listed with parking available.${distance} ${next}`
 			: `${name}, I do not see parking confirmed for ${hotelName} right now.${distance} ${next}`;
 	}
-	if (/\b(?:late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(lower)) {
+	if (asksLateArrival) {
+		if (/arabic/i.test(lang)) {
+			return facts.reception24
+				? `${name}، نعم، ${hotelName} يوضح وجود استقبال على مدار 24 ساعة، لذلك يمكن للاستقبال مساعدتك عند الوصول المتأخر.${distance} ${next}`
+				: `${name}، لا أرى ملاحظة مؤكدة عن استقبال 24 ساعة في ${hotelName} حاليا.${distance} ${next}`;
+		}
+		if (/spanish/i.test(lang)) return facts.reception24 ? `${name}, si, ${hotelName} indica recepcion 24 horas, asi que recepcion deberia poder ayudar con una llegada tarde.${distance} ${next}` : `${name}, no veo una nota confirmada de recepcion 24 horas para ${hotelName} ahora mismo.${distance} ${next}`;
+		if (/french/i.test(lang)) return facts.reception24 ? `${name}, oui, ${hotelName} indique une reception 24h/24, donc la reception devrait pouvoir aider pour une arrivee tardive.${distance} ${next}` : `${name}, je ne vois pas de note confirmee de reception 24h/24 pour ${hotelName} pour le moment.${distance} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return facts.reception24 ? `${name}, ji haan, ${hotelName} 24-hour reception listed hai, is liye late arrival par reception help kar sakti hai.${distance} ${next}` : `${name}, filhal ${hotelName} ke liye 24-hour reception confirmed note nazar nahi aa rahi.${distance} ${next}`;
+		if (/indonesian/i.test(lang)) return facts.reception24 ? `${name}, ya, ${hotelName} mencantumkan resepsionis 24 jam, jadi resepsionis dapat membantu untuk kedatangan malam.${distance} ${next}` : `${name}, saya belum melihat catatan resepsionis 24 jam yang terkonfirmasi untuk ${hotelName} saat ini.${distance} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return facts.reception24 ? `${name}, ya, ${hotelName} menyenaraikan reception 24 jam, jadi reception boleh membantu untuk ketibaan lewat malam.${distance} ${next}` : `${name}, saya belum nampak nota reception 24 jam yang disahkan untuk ${hotelName} sekarang.${distance} ${next}`;
 		return facts.reception24
 			? `${name}, yes, ${hotelName} lists 24-hour reception, so reception support should be available for late arrival.${distance} ${next}`
 			: `${name}, I do not see a confirmed 24-hour reception note for ${hotelName} right now.${distance} ${next}`;
 	}
-	if (/\b(?:famil(?:y|ies)|good\s+choice)\b/i.test(lower)) {
-		return `${name}, ${hotelName} can be a practical family choice because it is in ${place || "Makkah"}${facts.quiet ? ", in a quiet area" : ""}.${serviceLine}${distance} ${next}`;
+	if (asksFamily) {
+		if (/arabic/i.test(lang)) return `${name}، ${hotelName} خيار عملي للعائلات لأنه يقع في ${place}${facts.quiet ? "، في منطقة هادئة" : ""}.${serviceLine}${distance} ${next}`;
+		if (/spanish/i.test(lang)) return `${name}, ${hotelName} puede ser una opcion practica para familias porque esta en ${place}${facts.quiet ? ", en una zona tranquila" : ""}.${serviceLine}${distance} ${next}`;
+		if (/french/i.test(lang)) return `${name}, ${hotelName} peut etre un choix pratique pour les familles car il se trouve dans ${place}${facts.quiet ? ", dans un quartier calme" : ""}.${serviceLine}${distance} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return `${name}, ${hotelName} families ke liye practical choice ho sakta hai kyunki yeh ${place} mein hai${facts.quiet ? ", quiet area mein" : ""}.${serviceLine}${distance} ${next}`;
+		if (/indonesian/i.test(lang)) return `${name}, ${hotelName} bisa menjadi pilihan praktis untuk keluarga karena berada di ${place}${facts.quiet ? ", di area yang tenang" : ""}.${serviceLine}${distance} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return `${name}, ${hotelName} boleh menjadi pilihan praktikal untuk keluarga kerana berada di ${place}${facts.quiet ? ", di kawasan yang tenang" : ""}.${serviceLine}${distance} ${next}`;
+		return `${name}, ${hotelName} can be a practical family choice because it is in ${place}${facts.quiet ? ", in a quiet area" : ""}.${serviceLine}${distance} ${next}`;
 	}
-	if (/\b(?:first\s*time|umrah\s+guest|recommend)\b/i.test(lower)) {
+	if (asksFirstTime) {
+		if (/arabic/i.test(lang)) return `${name}، لأول إقامة عمرة في ${hotelName} أنصحك بحفظ رابط الخريطة${mapLink ? `: ${mapLink}` : ""}، وترتيب الذهاب للحرم بالسيارة أو خدمة الباص المتاحة، واختيار نوع الغرفة بعد تحديد التواريخ.${serviceLine}${distance} ${next}`;
+		if (/spanish/i.test(lang)) return `${name}, para una primera estancia de Umrah en ${hotelName}, te recomiendo guardar el mapa${mapLink ? `: ${mapLink}` : ""}, planear los traslados al Haram en coche o con el bus disponible, y elegir el tipo de habitacion despues de confirmar las fechas.${serviceLine}${distance} ${next}`;
+		if (/french/i.test(lang)) return `${name}, pour un premier sejour Omra a ${hotelName}, je vous conseille de garder le plan${mapLink ? ` : ${mapLink}` : ""}, de prevoir les trajets vers le Haram en voiture ou avec le bus disponible, puis de choisir la chambre une fois les dates claires.${serviceLine}${distance} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return `${name}, first-time Umrah stay ke liye ${hotelName} mein map link save rakhna useful hai${mapLink ? `: ${mapLink}` : ""}, Haram trips car ya available bus service se plan karein, aur dates clear hone ke baad room type choose karein.${serviceLine}${distance} ${next}`;
+		if (/indonesian/i.test(lang)) return `${name}, untuk pengalaman Umrah pertama di ${hotelName}, sebaiknya simpan tautan peta${mapLink ? `: ${mapLink}` : ""}, rencanakan perjalanan ke Haram dengan mobil atau bus yang tersedia, lalu pilih tipe kamar setelah tanggal jelas.${serviceLine}${distance} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return `${name}, untuk pengalaman Umrah pertama di ${hotelName}, elok simpan pautan peta${mapLink ? `: ${mapLink}` : ""}, rancang perjalanan ke Haram dengan kereta atau bus yang tersedia, kemudian pilih jenis bilik selepas tarikh jelas.${serviceLine}${distance} ${next}`;
 		return `${name}, for a first-time Umrah stay at ${hotelName}, I would keep the map link handy${mapLink ? `: ${mapLink}` : ""}, plan Haram trips by car or the available bus service, and choose the room type after your dates are clear.${serviceLine}${distance} ${next}`;
 	}
-	if (/\b(?:landmark|area|district)\b/i.test(lower)) {
-		return `${name}, ${hotelName} is in ${place || "Makkah"}.${serviceLine}${distance}${mapLink ? ` Here is the map link: ${mapLink}.` : ""} ${next}`;
+	if (asksLandmark) {
+		if (/arabic/i.test(lang)) return `${name}، ${hotelName} يقع في ${place}.${serviceLine}${distance}${mapLink ? ` رابط الخريطة: ${mapLink}.` : ""} ${next}`;
+		if (/spanish/i.test(lang)) return `${name}, ${hotelName} esta en ${place}.${serviceLine}${distance}${mapLink ? ` Aqui esta el mapa: ${mapLink}.` : ""} ${next}`;
+		if (/french/i.test(lang)) return `${name}, ${hotelName} se trouve dans ${place}.${serviceLine}${distance}${mapLink ? ` Voici le plan : ${mapLink}.` : ""} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return `${name}, ${hotelName} ${place} mein hai.${serviceLine}${distance}${mapLink ? ` Map link: ${mapLink}.` : ""} ${next}`;
+		if (/indonesian/i.test(lang)) return `${name}, ${hotelName} berada di ${place}.${serviceLine}${distance}${mapLink ? ` Ini tautan peta: ${mapLink}.` : ""} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return `${name}, ${hotelName} berada di ${place}.${serviceLine}${distance}${mapLink ? ` Ini pautan peta: ${mapLink}.` : ""} ${next}`;
+		return `${name}, ${hotelName} is in ${place}.${serviceLine}${distance}${mapLink ? ` Here is the map link: ${mapLink}.` : ""} ${next}`;
 	}
-	if (/\b(?:restaurants?|shops?|markets?|pharmac(?:y|ies)|nearby|around|surrounding|essential\s+services)\b/i.test(lower)) {
-		return `${name}, ${hotelName} is in ${place || "Makkah"}.${serviceLine || " I do not see exact nearby shop or restaurant names confirmed right now."}${distance}${mapLink ? ` Here is the exact map link: ${mapLink}.` : ""} ${next}`;
+	if (asksNearby) {
+		if (/arabic/i.test(lang)) return `${name}، ${hotelName} يقع في ${place}.${serviceLine || " لا أرى أسماء مطاعم أو محلات محددة مؤكدة الآن."}${distance}${mapLink ? ` رابط الخريطة الدقيق: ${mapLink}.` : ""} ${next}`;
+		if (/spanish/i.test(lang)) return `${name}, ${hotelName} esta en ${place}.${serviceLine || " No veo nombres exactos de tiendas o restaurantes confirmados ahora mismo."}${distance}${mapLink ? ` Mapa exacto: ${mapLink}.` : ""} ${next}`;
+		if (/french/i.test(lang)) return `${name}, ${hotelName} se trouve dans ${place}.${serviceLine || " Je ne vois pas de noms exacts de restaurants ou boutiques confirmes pour le moment."}${distance}${mapLink ? ` Plan exact : ${mapLink}.` : ""} ${next}`;
+		if (/urdu|hindi/i.test(lang)) return `${name}, ${hotelName} ${place} mein hai.${serviceLine || " Filhal exact restaurant ya shop names confirmed nazar nahi aa rahe."}${distance}${mapLink ? ` Exact map link: ${mapLink}.` : ""} ${next}`;
+		if (/indonesian/i.test(lang)) return `${name}, ${hotelName} berada di ${place}.${serviceLine || " Saya belum melihat nama restoran atau toko tertentu yang terkonfirmasi saat ini."}${distance}${mapLink ? ` Tautan peta tepat: ${mapLink}.` : ""} ${next}`;
+		if (/malay|malaysia/i.test(lang)) return `${name}, ${hotelName} berada di ${place}.${serviceLine || " Saya belum nampak nama restoran atau kedai tertentu yang disahkan sekarang."}${distance}${mapLink ? ` Pautan peta tepat: ${mapLink}.` : ""} ${next}`;
+		return `${name}, ${hotelName} is in ${place}.${serviceLine || " I do not see exact nearby shop or restaurant names confirmed right now."}${distance}${mapLink ? ` Here is the exact map link: ${mapLink}.` : ""} ${next}`;
 	}
 	return "";
 }
