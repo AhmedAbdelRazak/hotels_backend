@@ -9966,6 +9966,48 @@ async function shareKnownStayQuote(io, sc, st) {
 	return true;
 }
 
+async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
+	if (
+		!st.hotel ||
+		humanHandoffReason(userText) ||
+		wantsPaymentHelp(userText) ||
+		explicitlyExistingReservationIntent(userText)
+	) {
+		return false;
+	}
+	const dates = extractDateRange(userText);
+	if (
+		!dates?.checkinISO ||
+		!dates?.checkoutISO ||
+		needsExplicitPastDateClarification(userText, dates)
+	) {
+		return false;
+	}
+	const roomTypeKey = mapRoomToKey(userText) || st.slots?.roomTypeKey || null;
+	if (!roomTypeKey) return false;
+	const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
+		source: "direct_stay_quote",
+		userText,
+	});
+	if (dateMerge.prompted) return true;
+	const roomChanged = st.slots.roomTypeKey !== roomTypeKey;
+	if (roomChanged) {
+		st.slots.roomTypeKey = roomTypeKey;
+		st.quote = null;
+		st.quoteSummarizedAt = 0;
+		st.reviewSent = false;
+		clearPendingRoomAlternative(st);
+	}
+	applyReservationGuestCountsFromText(st, userText);
+	logStep(caseId || String(sc._id || ""), "quote.direct_stay_request", {
+		roomTypeKey: st.slots.roomTypeKey,
+		checkinISO: st.slots.checkinISO,
+		checkoutISO: st.slots.checkoutISO,
+	});
+	await shareKnownStayQuote(io, sc, st);
+	return true;
+}
+
 async function acceptPendingRoomAlternative(io, sc, st, pending = {}) {
 	if (!pending?.roomTypeKey || !pending?.checkinISO || !pending?.checkoutISO) {
 		clearPendingRoomAlternative(st);
@@ -13696,6 +13738,16 @@ async function planTurn(io, sc) {
 			: explicitLanguageSwitchRequest(userText);
 		if (!protectReservationDetailLanguage) {
 			updateActiveLanguageFromText(sc, st, userText);
+		}
+		if (userText) {
+			const directStayQuoteHandled = await tryShareDirectStayQuote(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (directStayQuoteHandled) return;
 		}
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
