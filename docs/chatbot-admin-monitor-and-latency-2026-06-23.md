@@ -83,7 +83,7 @@ Preserve these rules when changing this area again:
 
 - Do not move the monitor to a new route. It belongs inside the existing
   `/admin/customer-service` selected case panel.
-- Do not remove the final `Place Reservation` action. Creating a reservation
+- Do not remove the final `Complete Reservation` action. Creating a reservation
   must still be deliberate and user-driven.
 - Do not reintroduce automatic optional-email collection as a required-feeling
   step after mandatory details.
@@ -122,6 +122,28 @@ Follow-up guardrails added:
   database safety gate.
 - Post-booking price/details/confirmation-number questions are answered from
   the completed reservation state instead of falling back into a new quote flow.
+
+## Reservation Flow Tightening - 2026-06-23
+
+The reservation flow was tightened again after live testing showed too many
+confirmation-style turns.
+
+Current contract:
+
+- Quote acceptance means "continue with reservation details"; it must not send
+  a second pre-details confirmation/review screen.
+- Mandatory details are collected in one concise prompt where possible: full
+  guest name, phone, nationality, and adult count. Children default to zero when
+  not provided.
+- After mandatory details are complete, the bot sends one structured final
+  review containing stay details, guest details, price, and total.
+- The final action button is `Complete Reservation` in English and localized
+  equivalents in other languages. Arabic remains `إتمام الحجز`.
+- The final review is rendered from structured booking state instead of another
+  OpenAI writing call, reducing latency at the most sensitive step.
+- While waiting for `fullName`, free-form text is no longer saved directly as a
+  name. The semantic extractor must identify an actual person name; database
+  validation remains as the final safety gate.
 
 ## Verification Used
 

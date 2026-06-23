@@ -3666,7 +3666,7 @@ function simpleQuoteText({ sc, st, quote }) {
 	}
 	return `${name}, ${roomName} at ${hotelName} is ${quote.totals.totalPriceWithCommission} ${cleanCurrency(
 		quote.currency
-	)} total for ${quote.nights} nights. Would you like me to continue to the review step?`;
+	)} total for ${quote.nights} nights. Would you like me to continue with the reservation details?`;
 }
 
 function crossHotelRequestText(text = "") {
@@ -3938,7 +3938,7 @@ function hotelHandoffQuoteIntroText(
 	if (/malay/i.test(lang)) {
 		return `${opening} ${name}, saya ${agentName} dari penerimaan dan tempahan ${hotelName}. Pilihan anda sudah sedia: ${room}, ${pricePart}. Adakah anda mahu teruskan ke semakan tempahan rasmi?`;
 	}
-	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue to the official reservation review?`;
+	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. I have the selected option ready: ${room}, ${pricePart}. Would you like to continue with the reservation details?`;
 }
 
 function stabilizeHotelHandoffIntro(text = "", sc = {}, st = {}, optionOrHotel = {}, meta = {}) {
@@ -5104,7 +5104,7 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		return "کیا بکنگ کے بارے میں کسی اور چیز میں مدد کر سکتا/سکتی ہوں؟";
 	}
 	if (/hindi/i.test(lang)) {
-		if (pivot === "proceed") return "अगर location आपके लिए ठीक है, तो क्या मैं reservation review step पर आगे बढ़ूं?";
+		if (pivot === "proceed") return "अगर location आपके लिए ठीक है, तो क्या मैं reservation details के साथ आगे बढ़ूं?";
 		if (pivot === "dates") return "अगर location ठीक है, तो check-in और check-out dates भेज दीजिए, मैं exact availability और price check कर दूंगा/दूंगी।";
 		if (pivot === "room") return "अगर location ठीक है, तो आप कौन सा room type या कितने guests के लिए booking चाहते हैं?";
 		return "क्या reservation में किसी और चीज़ में help करूं?";
@@ -5121,7 +5121,7 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		if (pivot === "room") return "Jika lokasi ini sesuai, jenis bilik atau berapa tetamu yang anda perlukan?";
 		return "Ada butiran tempahan lain yang boleh saya bantu?";
 	}
-	if (pivot === "proceed") return "If the location works for you, shall I continue to the reservation review?";
+	if (pivot === "proceed") return "If the location works for you, shall I continue with the reservation details?";
 	if (pivot === "dates") return "If the location works for you, send me the check-in and check-out dates and I will check the exact availability and price.";
 	if (pivot === "room") return "If the location works for you, which room type or guest count should I prepare for you?";
 	return "Is there anything else I can help with for the reservation?";
@@ -5914,7 +5914,7 @@ async function connectJannatCaseToHotelSupport(
 			: reason === "reservation_support"
 			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge that Jannat Booking connected the guest for their existing reservation, and ask one short question about what they need help with."
 			: optionOrHotel?.quote?.available
-			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue to the official reservation review. Do not ask for dates again."
+			? "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk, acknowledge the selected priced option, and ask one yes/no question: whether to continue with the reservation details. Do not ask for dates again."
 			: "You are now the selected hotel's reception and reservations representative. Introduce yourself by first name from the hotel reception and reservations desk and ask for check-in and checkout dates so you can confirm availability officially.";
 	let hotelIntro = await write(io, sc, st, introInstruction, {
 		hotelName,
@@ -7160,15 +7160,15 @@ function finalReservationQuickReplies(sc = {}, st = {}) {
 	}
 	if (/spanish/i.test(lang)) {
 		return [
-			{ label: "Crear reserva", value: "Crear reserva", action: "place_reservation" },
+			{ label: "Completar reserva", value: "Completar reserva", action: "place_reservation" },
 			{ label: "Algo esta mal", value: "Algo esta mal", action: "correction" },
 		];
 	}
 	if (/french/i.test(lang)) {
 		return [
 			{
-				label: "Creer la reservation",
-				value: "Creer la reservation",
+				label: "Finaliser la reservation",
+				value: "Finaliser la reservation",
 				action: "place_reservation",
 			},
 			{
@@ -7209,8 +7209,8 @@ function finalReservationQuickReplies(sc = {}, st = {}) {
 	if (/indonesian/i.test(lang)) {
 		return [
 			{
-				label: "Buat reservasi",
-				value: "Buat reservasi",
+				label: "Selesaikan reservasi",
+				value: "Selesaikan reservasi",
 				action: "place_reservation",
 			},
 			{
@@ -7223,8 +7223,8 @@ function finalReservationQuickReplies(sc = {}, st = {}) {
 	if (/malay/i.test(lang)) {
 		return [
 			{
-				label: "Buat tempahan",
-				value: "Buat tempahan",
+				label: "Lengkapkan tempahan",
+				value: "Lengkapkan tempahan",
 				action: "place_reservation",
 			},
 			{
@@ -7236,8 +7236,8 @@ function finalReservationQuickReplies(sc = {}, st = {}) {
 	}
 	return [
 		{
-			label: "Place Reservation",
-			value: "Place Reservation",
+			label: "Complete Reservation",
+			value: "Complete Reservation",
 			action: "place_reservation",
 		},
 		{
@@ -7255,10 +7255,10 @@ function finalReservationPrompt(sc = {}, st = {}) {
 		return `${name}\u060c \u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u062c\u0627\u0647\u0632\u0629 \u0627\u0644\u0622\u0646. \u0644\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0627\u0644\u0646\u0638\u0627\u0645\u060c \u0627\u0636\u063a\u0637 \u00ab\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u00bb. \u0648\u0625\u0630\u0627 \u0643\u0627\u0646 \u0647\u0646\u0627\u0643 \u0623\u064a \u062a\u0641\u0635\u064a\u0644 \u064a\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u0636\u063a\u0637 \u00ab\u0647\u0646\u0627\u0643 \u0634\u064a\u0621 \u063a\u064a\u0631 \u0635\u062d\u064a\u062d\u00bb.`;
 	}
 	if (/spanish/i.test(lang)) {
-		return `${name}, todo esta listo. Para crear la reserva en el sistema, elige Crear reserva. Si algun detalle necesita correccion, elige Algo esta mal.`;
+		return `${name}, todo esta listo. Para completar la reserva en el sistema, elige Completar reserva. Si algun detalle necesita correccion, elige Algo esta mal.`;
 	}
 	if (/french/i.test(lang)) {
-		return `${name}, tout est pret. Pour creer la reservation dans le systeme, choisissez Creer la reservation. Si un detail doit etre corrige, choisissez Quelque chose ne va pas.`;
+		return `${name}, tout est pret. Pour finaliser la reservation dans le systeme, choisissez Finaliser la reservation. Si un detail doit etre corrige, choisissez Quelque chose ne va pas.`;
 	}
 	if (/urdu/i.test(lang)) {
 		return `${name}، سب تفصیلات تیار ہیں۔ سسٹم میں ریزرویشن بنانے کے لیے ریزرویشن بنائیں منتخب کریں۔ اگر کوئی تفصیل درست نہیں تو کچھ غلط ہے منتخب کریں۔`;
@@ -7267,12 +7267,12 @@ function finalReservationPrompt(sc = {}, st = {}) {
 		return `${name}, sab details tayyar hain. System mein reservation banane ke liye Reservation banaen chunein. Agar koi detail sahi nahi hai to Kuch galat hai chunein.`;
 	}
 	if (/indonesian/i.test(lang)) {
-		return `${name}, semua detail sudah siap. Untuk membuat reservasi di sistem, pilih Buat reservasi. Jika ada detail yang perlu diperbaiki, pilih Ada yang salah.`;
+		return `${name}, semua detail sudah siap. Untuk menyelesaikan reservasi di sistem, pilih Selesaikan reservasi. Jika ada detail yang perlu diperbaiki, pilih Ada yang salah.`;
 	}
 	if (/malay/i.test(lang)) {
-		return `${name}, semua butiran sudah sedia. Untuk membuat tempahan dalam sistem, pilih Buat tempahan. Jika ada butiran perlu diperbetulkan, pilih Ada yang salah.`;
+		return `${name}, semua butiran sudah sedia. Untuk melengkapkan tempahan dalam sistem, pilih Lengkapkan tempahan. Jika ada butiran perlu diperbetulkan, pilih Ada yang salah.`;
 	}
-	return `${name}, everything is ready. To create the booking in the system, choose Place Reservation. If anything needs fixing, choose There's Something Wrong.`;
+	return `${name}, everything is ready. To complete the booking in the system, choose Complete Reservation. If anything needs fixing, choose There's Something Wrong.`;
 }
 
 function placeReservationActionSelected(sc = {}, userText = "") {
@@ -7280,15 +7280,16 @@ function placeReservationActionSelected(sc = {}, userText = "") {
 	const assistant = lastAssistantMessageBeforeLatestGuest(sc);
 	const assistantActions = quickReplyActions(assistant);
 	if (!assistantActions.includes("place_reservation")) return false;
+	if (confirmsText(userText)) return true;
 	const { lower, arabic, latinCompact } = normalizeControlText(userText);
 	return (
-		/\b(?:place|create|make|book)\s+(?:the\s+)?(?:reservation|booking)\b/i.test(
+		/\b(?:complete|finalize|finalise|confirm|place|create|make|book)\s+(?:the\s+)?(?:reservation|booking)\b/i.test(
 			lower
 		) ||
 		/(?:\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621).{0,20}(?:\u0627\u0644\u062d\u062c\u0632)/i.test(
 			arabic
 		) ||
-		/(?:placereservation|createreservation|makereservation|booknow|buatreservasi|buattempahan)/i.test(
+		/(?:completereservation|completebooking|finalizereservation|finalisereservation|confirmreservation|placereservation|createreservation|makereservation|booknow|completarreserva|finaliserlareservation|selesaikanreservasi|lengkapkantempahan|buatreservasi|buattempahan)/i.test(
 			latinCompact
 		)
 	);
@@ -7608,6 +7609,7 @@ async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText =
 		"If latestGuestMessageDigitsNormalized is a number and fieldFocus is a count field, use that number as the provided count.",
 		"Children count is optional for the guest. If the guest gives only a total people/person/guest count and no child count, set adults to that count and children to 0 with childrenProvided=true.",
 		"For fieldFocus=email_or_skip, if the guest semantically declines or omits optional email, set emailSkipped=true.",
+		"For fieldFocus=fullName, use semantic judgment across any language. Return a fullName only when the latest message is actually a person's name; return empty for requests, hurry/chase messages, booking details requests, countries, or nationalities.",
 		"Do not infer adults or children from room type alone.",
 		"Never treat polite filler, hurry/chase messages, or requests like please hurry / mumkin / details / booking number as a full name.",
 		"Only fill slots provided by the guest or clearly answered by the latest reply.",
@@ -7696,12 +7698,9 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		emailSkipCaptured = true;
 	}
 	const explicitName = explicitNameCandidateFromText(fullText);
-	const lineName = !explicitName ? lineNameCandidateFromText(fullText) : "";
-	const wholeName =
-		!explicitName && !lineName && st.waitFor === "fullname"
-			? cleanFullNameCandidate(fullText)
-			: "";
-	const name = explicitName || lineName || wholeName;
+	const lineName =
+		!explicitName && st.waitFor !== "fullname" ? lineNameCandidateFromText(fullText) : "";
+	const name = explicitName || lineName;
 	if (shouldReplaceCapturedGuestName(st, name, { explicit: Boolean(explicitName) })) {
 		st.slots.fullName = name;
 		st.slots.name = name;
@@ -7732,6 +7731,18 @@ function nextPivot(st) {
 	if (st.waitFor === "intentConfirm") return "intentConfirm";
 	if (!st.slots.checkinISO || !st.slots.checkoutISO) return "dates";
 	if (!st.slots.roomTypeKey) return "room";
+	if (
+		[
+			"reservation_details",
+			"fullname",
+			"nationality",
+			"phone",
+			"email_or_skip",
+			"finalize",
+		].includes(st.waitFor)
+	) {
+		return st.waitFor;
+	}
 	if (!st.reviewSent) return "proceed";
 	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
 	if (!st.slots.email && !st.slots.emailSkipped) return "email_or_skip";
@@ -9274,7 +9285,7 @@ async function composeAvailabilityQuoteText(io, sc, st, quote = {}) {
 			io,
 			sc,
 			st,
-			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue to the review step. For Arabic, use correct night grammar: one night is ليلة واحدة, never ١ ليالي. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
+			"The guest has provided enough dates and room type to check availability. Share the available option as a warm hotel reservation/sales assistant, not as a cold form. Use only the provided facts. Mention the room name, hotel name, total price, nights, and per-night price if available. If the requested room type clearly fits the guest count, acknowledge that fit naturally. Include the date range, including Hijri/Gregorian context when provided. End with one natural yes/no question asking whether to continue with the reservation details. For Arabic, use correct night grammar: one night is ليلة واحدة, never ١ ليالي. Do not invent amenities, discounts, urgency, or claim the hotel has the best rooms. Avoid repeating the exact wording of previous assistant messages.",
 			{
 				quote,
 				roomFacts: {
@@ -9618,7 +9629,7 @@ function bookingNextActionText(sc = {}, st = {}) {
 		return 'If everything is correct, choose "Confirm".';
 	}
 	if (waitFor === "finalize" || (isReservationDetailStep(st) && hasMandatoryReservationDetails(st))) {
-		return 'To create the booking in the system, choose "Place Reservation".';
+		return 'To complete the booking in the system, choose "Complete Reservation".';
 	}
 	if (isReservationDetailStep(st)) {
 		return "To complete the booking, send the remaining guest details in one message.";
@@ -9959,7 +9970,165 @@ function deterministicArabicReservationReview(sc = {}, st = {}, quote = {}) {
 	return lines.filter(Boolean).join("\n");
 }
 
+function finalReviewActionLabels(sc = {}, st = {}) {
+	const replies = finalReservationQuickReplies(sc, st);
+	return {
+		create: replies?.[0]?.label || "Complete Reservation",
+		correct: replies?.[1]?.label || "There's Something Wrong",
+	};
+}
+
+function finalReservationReviewLabels(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const actions = finalReviewActionLabels(sc, st);
+	if (/arabic/i.test(lang)) {
+		return {
+			title: "\u0647\u0630\u0647 \u0645\u0631\u0627\u062c\u0639\u0629 \u0646\u0647\u0627\u0626\u064a\u0629 \u0645\u062e\u062a\u0635\u0631\u0629 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632:",
+			hotel: "\u0627\u0644\u0641\u0646\u062f\u0642:",
+			room: "\u0627\u0644\u063a\u0631\u0641\u0629:",
+			dates: "\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e:",
+			nights: "\u0639\u062f\u062f \u0627\u0644\u0644\u064a\u0627\u0644\u064a:",
+			guestCount: "\u0627\u0644\u0636\u064a\u0648\u0641:",
+			guestName: "\u0627\u0633\u0645 \u0627\u0644\u0636\u064a\u0641:",
+			nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629:",
+			phone: "\u0627\u0644\u0647\u0627\u062a\u0641:",
+			email: "\u0627\u0644\u0628\u0631\u064a\u062f:",
+			perNight: "\u0627\u0644\u0633\u0639\u0631 \u0644\u0644\u064a\u0644\u0629:",
+			total: "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a:",
+			notProvided: "\u063a\u064a\u0631 \u0645\u0636\u0627\u0641",
+			cta: `\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0627\u062e\u062a\u0631 "${actions.create}". \u0648\u0625\u0630\u0627 \u0647\u0646\u0627\u0643 \u062a\u0639\u062f\u064a\u0644\u060c \u0627\u062e\u062a\u0631 "${actions.correct}".`,
+		};
+	}
+	if (/spanish/i.test(lang)) {
+		return {
+			title: "aqui tienes la revision final antes de crear la reserva:",
+			hotel: "Hotel:",
+			room: "Habitacion:",
+			dates: "Fechas:",
+			nights: "Noches:",
+			guestCount: "Huespedes:",
+			guestName: "Nombre del huesped:",
+			nationality: "Nacionalidad:",
+			phone: "Telefono:",
+			email: "Email:",
+			perNight: "Precio por noche:",
+			total: "Total:",
+			notProvided: "no agregado",
+			cta: `Si todo esta correcto, elige "${actions.create}". Si hay algo que corregir, elige "${actions.correct}".`,
+		};
+	}
+	if (/french/i.test(lang)) {
+		return {
+			title: "voici la verification finale avant de creer la reservation :",
+			hotel: "Hotel :",
+			room: "Chambre :",
+			dates: "Dates :",
+			nights: "Nuits :",
+			guestCount: "Voyageurs :",
+			guestName: "Nom du client :",
+			nationality: "Nationalite :",
+			phone: "Telephone :",
+			email: "Email :",
+			perNight: "Prix par nuit :",
+			total: "Total :",
+			notProvided: "non ajoute",
+			cta: `Si tout est correct, choisissez "${actions.create}". Si un detail doit etre corrige, choisissez "${actions.correct}".`,
+		};
+	}
+	if (/indonesian/i.test(lang)) {
+		return {
+			title: "berikut ringkasan akhir sebelum reservasi dibuat:",
+			hotel: "Hotel:",
+			room: "Kamar:",
+			dates: "Tanggal:",
+			nights: "Malam:",
+			guestCount: "Tamu:",
+			guestName: "Nama tamu:",
+			nationality: "Kewarganegaraan:",
+			phone: "Telepon:",
+			email: "Email:",
+			perNight: "Harga per malam:",
+			total: "Total:",
+			notProvided: "tidak ditambahkan",
+			cta: `Jika semuanya benar, pilih "${actions.create}". Jika ada yang perlu diperbaiki, pilih "${actions.correct}".`,
+		};
+	}
+	if (/malay/i.test(lang)) {
+		return {
+			title: "ini semakan akhir sebelum tempahan dibuat:",
+			hotel: "Hotel:",
+			room: "Bilik:",
+			dates: "Tarikh:",
+			nights: "Malam:",
+			guestCount: "Tetamu:",
+			guestName: "Nama tetamu:",
+			nationality: "Kewarganegaraan:",
+			phone: "Telefon:",
+			email: "Email:",
+			perNight: "Harga setiap malam:",
+			total: "Jumlah:",
+			notProvided: "tidak ditambah",
+			cta: `Jika semuanya betul, pilih "${actions.create}". Jika ada butiran perlu dibetulkan, pilih "${actions.correct}".`,
+		};
+	}
+	return {
+		title: "here is the final review before I create the reservation:",
+		hotel: "Hotel:",
+		room: "Room:",
+		dates: "Dates:",
+		nights: "Nights:",
+		guestCount: "Guests:",
+		guestName: "Guest name:",
+		nationality: "Nationality:",
+		phone: "Phone:",
+		email: "Email:",
+		perNight: "Price per night:",
+		total: "Total:",
+		notProvided: "not added",
+		cta: `If everything looks correct, choose "${actions.create}". If anything needs fixing, choose "${actions.correct}".`,
+	};
+}
+
+function deterministicFinalReservationReview(sc = {}, st = {}, quote = {}) {
+	if (!quote?.available) return "";
+	const lang = languageOf(sc, st);
+	const labels = finalReservationReviewLabels(sc, st);
+	const dates = localizedStayDateLines(sc, st);
+	const total = quote.totals?.totalPriceWithCommission;
+	const perNight =
+		quote.nights && total
+			? Math.round((total / Math.max(1, quote.nights)) * 100) / 100
+			: null;
+	const fullName = String(st.slots?.fullName || st.slots?.name || "").trim();
+	const nationality = String(st.slots?.nationality || "").trim();
+	const phone = String(st.slots?.phone || "").trim();
+	const email = String(st.slots?.email || "").trim();
+	const guestCount = bookingGuestCountText(sc, st);
+	const prefix = /arabic/i.test(lang)
+		? `${respectfulGuestName(sc, st)}\u060c ${labels.title}`
+		: `${respectfulGuestName(sc, st)}, ${labels.title}`;
+	const lines = [
+		prefix,
+		`${labels.hotel} ${localizedHotelName(sc, st)}`,
+		`${labels.room} ${localizedRoomName(sc, st, quote)}`,
+		`${labels.dates} ${dates.primary}`,
+		dates.secondary ? dates.secondary : "",
+		quote.nights ? `${labels.nights} ${localizedNightCount(quote.nights, lang)}` : "",
+		guestCount ? `${labels.guestCount} ${guestCount}` : "",
+		fullName ? `${labels.guestName} ${fullName}` : "",
+		nationality ? `${labels.nationality} ${nationality}` : "",
+		phone ? `${labels.phone} ${phone}` : "",
+		`${labels.email} ${email || labels.notProvided}`,
+		perNight ? `${labels.perNight} ${localizedMoney(perNight, quote.currency, lang)}` : "",
+		total ? `${labels.total} ${localizedMoney(total, quote.currency, lang)}` : "",
+		labels.cta,
+	];
+	return lines.filter(Boolean).join("\n");
+}
+
 async function composeReservationReviewText(io, sc, st, quote, reviewPayload) {
+	const finalReview = deterministicFinalReservationReview(sc, st, quote);
+	if (finalReview) return finalReview;
 	const deterministic = deterministicArabicReservationReview(sc, st, quote);
 	if (deterministic) return deterministic;
 	if (/english/i.test(languageOf(sc, st))) {
@@ -9995,12 +10164,28 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	logStep(String(sc._id), "review.summaryBuilt", reviewPayload);
 	const reviewText = await composeReservationReviewText(io, sc, st, q, reviewPayload);
 	const sent = await humanSend(io, sc, st, reviewText, {
-		quickReplies: confirmationQuickReplies(sc, st),
+		quickReplies: finalReservationQuickReplies(sc, st),
 	});
 	if (!sent) return false;
 	st.reviewSent = true;
-	st.waitFor = "reviewConfirm";
-	stampAsk(st, "reviewConfirm");
+	st.waitFor = "finalize";
+	st.finalReviewSentAt = now();
+	stampAsk(st, "finalize");
+	return true;
+}
+
+async function beginReservationDetailsAfterQuote(io, sc, st, caseId = "") {
+	st.reviewSent = false;
+	st.finalReviewSentAt = 0;
+	st.waitFor = nextReservationDetailStep(st);
+	logStep(caseId || String(sc._id || ""), "reservation_details.started_after_quote", {
+		waitFor: st.waitFor,
+		missing: missingMandatoryReservationFields(st),
+	});
+	if (st.waitFor === "finalize") {
+		return sendReservationReview(io, sc, st, st.quote?.data);
+	}
+	await askForReservationDetail(io, sc, st, st.waitFor);
 	return true;
 }
 
@@ -10015,7 +10200,7 @@ async function handleProceedStageInput(
 	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
 	if (quoteConfirmationText(userText, st)) {
 		resumeBookingNudge(st);
-		return sendReservationReview(io, sc, st, st.quote.data);
+		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""));
 	}
 	if (
 		wantsPaymentHelp(userText) ||
@@ -10033,7 +10218,7 @@ async function handleProceedStageInput(
 			io,
 			sc,
 			st,
-			"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step.",
+			"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step.",
 			{ quote: st.quote.data, slots: st.slots }
 		);
 		await humanSend(io, sc, st, msg);
@@ -10046,7 +10231,7 @@ async function handleProceedStageInput(
 			sc,
 			st,
 			"Thank the guest naturally and say there is no rush. Mention that the quote is ready and they can say yes when they want to continue. Do not repeat the price.",
-			{ quoteReady: true, nextStep: "proceed_to_review" }
+			{ quoteReady: true, nextStep: "collect_reservation_details" }
 		);
 		await humanSend(io, sc, st, msg);
 		return true;
@@ -10056,8 +10241,8 @@ async function handleProceedStageInput(
 			io,
 			sc,
 			st,
-			"Answer the guest's concern transparently and warmly. If they ask whether you are human or AI, say you are AI-assisted support monitored by the team; do not claim to be human. Apologize briefly if the speed or repetition felt unnatural. Say the quote is ready and ask whether to continue to the review step. Do not repeat the full quote.",
-			{ quoteReady: true, nextStep: "proceed_to_review" }
+			"Answer the guest's concern transparently and warmly. If they ask whether you are human or AI, say you are AI-assisted support monitored by the team; do not claim to be human. Apologize briefly if the speed or repetition felt unnatural. Say the quote is ready and ask whether to continue with the reservation details. Do not repeat the full quote.",
+			{ quoteReady: true, nextStep: "collect_reservation_details" }
 		);
 		await humanSend(io, sc, st, msg);
 		return true;
@@ -10070,8 +10255,8 @@ async function handleProceedStageInput(
 		io,
 		sc,
 		st,
-		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue to the review step for this reservation?",
-		{ quoteReady: true, nextStep: "proceed_to_review" }
+		"The quote is already ready. Do not repeat the availability or price. Ask one short question: should I continue with the reservation details?",
+		{ quoteReady: true, nextStep: "collect_reservation_details" }
 	);
 	await humanSend(io, sc, st, msg, {
 		quickReplies: proceedQuickReplies(sc, st),
@@ -11451,7 +11636,7 @@ function unsupportedAnswerNextStepText(sc = {}, st = {}) {
 			return `I can still help with ${hotelName}: which room type or guest count should I prepare for you?`;
 		}
 		if (pivot === "proceed") {
-			return `I can still help with ${hotelName}. Would you like me to continue to the reservation review?`;
+			return `I can still help with ${hotelName}. Would you like me to continue with the reservation details?`;
 		}
 		return `I can still help with ${hotelName}: send your check-in and checkout dates or preferred room type, and I will check the best available option.`;
 	}
@@ -12347,7 +12532,8 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 					await askForReservationDetail(io, sc, st, st.waitFor);
 					return true;
 				}
-				continue;
+				await sendReservationReview(io, sc, st, st.quote?.data);
+				return true;
 			}
 			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }));
 			stampAsk(st, "reservation_details");
@@ -12390,6 +12576,10 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 						? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u0646\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u0647 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u061f"
 						: "Of course. What should we fix before I create the reservation?";
 					await humanSend(io, sc, st, ask);
+					return true;
+				}
+				if (!st.finalReviewSentAt && st.quote?.data?.available) {
+					await sendReservationReview(io, sc, st, st.quote.data);
 					return true;
 				}
 				await humanSend(io, sc, st, finalReservationPrompt(sc, st), {
@@ -14326,7 +14516,7 @@ async function planTurn(io, sc) {
 				io,
 				sc,
 				st,
-				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: proceed to confirm?",
+				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: should I continue with the reservation details?",
 				display
 			);
 			quoteMsg = ensureHijriGregorianDatesVisible(quoteMsg, sc, st);
@@ -14342,22 +14532,7 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "proceed") {
 			if (confirmsText(userText)) {
 				resumeBookingNudge(st);
-				const q = st.quote?.data || quote;
-				const reviewPayload = buildReservationReviewPayload(st, q);
-				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				const reviewText = await composeReservationReviewText(
-					io,
-					sc,
-					st,
-					q,
-					reviewPayload
-				);
-				const sent = await humanSend(io, sc, st, reviewText, {
-					quickReplies: confirmationQuickReplies(sc, st),
-				});
-				if (!sent) return;
-				st.reviewSent = true;
-				st.waitFor = "reviewConfirm";
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
 				return;
 			}
 			if (declinesText(userText)) {
@@ -14366,7 +14541,7 @@ async function planTurn(io, sc) {
 					io,
 					sc,
 					st,
-					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
@@ -14377,31 +14552,14 @@ async function planTurn(io, sc) {
 				)
 			) {
 				resumeBookingNudge(st);
-				// Review
-				const q = st.quote?.data || quote;
-				const reviewPayload = buildReservationReviewPayload(st, q);
-				logStep(caseId, "review.summaryBuilt", reviewPayload);
-				let reviewText = await composeReservationReviewText(
-					io,
-					sc,
-					st,
-					q,
-					reviewPayload
-				);
-				reviewText = ensureHijriGregorianDatesVisible(reviewText, sc, st);
-				const sent = await humanSend(io, sc, st, reviewText, {
-					quickReplies: confirmationQuickReplies(sc, st),
-				});
-				if (!sent) return;
-				st.reviewSent = true;
-				st.waitFor = "reviewConfirm";
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
 				return;
 			} else if (/\b(no|nope|not now|later|cancel|لا)\b/i.test(userText)) {
 				const msg = await write(
 					io,
 					sc,
 					st,
-					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the review step."
+					"Acknowledge politely that there is no rush. Offer to help with different dates, another room type, or hotel details. Do not repeat the quote and do not push the reservation details step."
 				);
 				await humanSend(io, sc, st, msg);
 				return;
@@ -14412,7 +14570,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"Ask a single yes/no: would you like to proceed to confirm?"
+						"Ask a single yes/no: should I continue with the reservation details?"
 					);
 					await humanSend(io, sc, st, poke, {
 						quickReplies: proceedQuickReplies(sc, st),
@@ -14424,7 +14582,7 @@ async function planTurn(io, sc) {
 						io,
 						sc,
 						st,
-						"The quote is ready, but the guest did not clearly accept or decline. Acknowledge the latest message briefly and ask one short yes/no question: should you continue to the reservation review? Do not repeat the price. Do not stay silent. Use the guest's active language.",
+						"The quote is ready, but the guest did not clearly accept or decline. Acknowledge the latest message briefly and ask one short yes/no question: should you continue with the reservation details? Do not repeat the price. Do not stay silent. Use the guest's active language.",
 						{ latestUserMessage: userText, quoteReady: true, slots: st.slots }
 					);
 					await humanSend(io, sc, st, poke, {
