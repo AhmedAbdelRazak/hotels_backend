@@ -14,6 +14,9 @@
   loop guard.
 - `../docs/chatbot-post-booking-close-and-typing-2026-06-22.md` documents
   post-booking close, rating UX, and typing behavior.
+- `../docs/chatbot-admin-monitor-and-latency-2026-06-23.md` documents the
+  admin support-case AI monitor, repeat-price/details fast paths, shorter
+  chatbot timeouts, and the optional-email flow reduction.
 
 ## Current Production Contract - 2026-06-06
 
@@ -47,7 +50,7 @@
 
 - **Delays**:
   - Greeting and replies use configurable human-style pacing.
-  - Normal short replies should show the AI responder typing and land around 3 seconds after the reply is ready; longer replies can take longer based on length.
+  - Normal short replies should show the AI responder typing and land around 2-4 seconds after the guest message when deterministic context is enough; longer replies can take longer based on length and verified-context lookups.
   - Progress acknowledgements must go through the same humanized send path, not instant direct database appends.
   - If guest is typing (or typed within 800ms), agent **waits** and reschedules
     (max 30s).
@@ -91,7 +94,7 @@
   3. Check-in and check-out dates after the guest is ready for availability/price
   4. Review quote and ask the guest to confirm, with localized Confirm / Something is wrong quick replies when the public widget can render them
   5. Ask once, in one message, for full name as in passport, phone, nationality, adults count, and children count
-  6. Ask optional email for confirmation/payment-link delivery, with a localized Skip quick reply
+  6. Move to the final create prompt once mandatory details are present. Optional email can still be captured if the guest sends it, but it should not create an automatic extra stop in the normal flow.
 - **Review & Confirm**:
   - Agent summarizes and asks to proceed.
 - On **confirm** after the review, the AI collects missing guest details and creates the reservation through `aiagent/core/actions.js`.

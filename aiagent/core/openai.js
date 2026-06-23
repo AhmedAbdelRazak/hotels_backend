@@ -6,14 +6,16 @@ const {
 	usesCompletionTokens,
 } = require("../../services/openaiModelConfig");
 
-function intFromEnv(name, fallback) {
+function intFromEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
 	const value = parseInt(process.env[name] || "", 10);
-	return Number.isFinite(value) && value > 0 ? value : fallback;
+	const resolved = Number.isFinite(value) && value > 0 ? value : fallback;
+	return Math.min(max, Math.max(min, resolved));
 }
 
 const OPENAI_TIMEOUT_MS = intFromEnv(
 	"OPENAI_CHATBOT_TIMEOUT_MS",
-	intFromEnv("OPENAI_TIMEOUT_MS", 6000)
+	intFromEnv("OPENAI_TIMEOUT_MS", 6000),
+	{ min: 1500, max: 6000 }
 );
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
 const OPENAI_MAX_PROMPT_CHARS = intFromEnv(

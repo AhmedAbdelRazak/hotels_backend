@@ -200,7 +200,8 @@ Preserve this contract when improving the bot:
   - phone
   - nationality
   - guest count
-- Optional email comes after mandatory details.
+- Optional email can still be captured when the guest sends it, but the normal
+  flow should not add an automatic extra email prompt after mandatory details.
 - Creating the reservation must be user-driven by the final `Place Reservation`
   quick-reply action.
 - `There's Something Wrong` / correction must let the guest adjust details
@@ -362,6 +363,9 @@ Verification added for this case:
 - Keep UI sends optimistic and visible; never make guests feel their message
   disappeared while the backend is thinking.
 - Always check PM2 error-log timestamps before assuming old OOM lines are new.
+- For live admin monitoring, use the existing selected support case at
+  `/admin/customer-service?...&caseId=...`; do not create a separate route for
+  AI latency health unless explicitly requested.
 
 ## Follow-up: Gom3a Arabic CSR Polish
 

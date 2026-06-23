@@ -23,7 +23,7 @@ const AI_IDLE_CLOSE_MS = intFromEnv("AI_IDLE_CLOSE_MS", 5 * ONE_MINUTE, {
 
 const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	"AI_TURN_STALL_RECOVERY_MS",
-	25 * 1000,
+	15 * 1000,
 	{ min: 10 * 1000, max: 2 * ONE_MINUTE }
 );
 const AI_TURN_RECOVERY_LOOKBACK_MS = intFromEnv(
