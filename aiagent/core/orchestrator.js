@@ -13166,6 +13166,21 @@ async function planTurn(io, sc) {
 			protectLatestGuestDateChange: Boolean(userText),
 		});
 		recoverBookingStageFromConversation(sc, st);
+		if (
+			st.hotel &&
+			selectedHotelFactQuestionText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "selected_hotel.fact_early", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
 		const fastBookingStateHandled = await answerFastBookingStateQuestion(
 			io,
 			sc,

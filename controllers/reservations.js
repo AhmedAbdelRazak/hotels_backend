@@ -86,7 +86,10 @@ const MAP_DIRTY_ROOM_REASONS = new Set([
 ]);
 const NEW_RESERVATION_PROCESS_START = new Date("2026-05-08T00:00:00.000Z");
 const PENDING_NOTIFICATION_CACHE_TTL_MS = Number(
-	process.env.PENDING_NOTIFICATION_CACHE_TTL_MS || 20000
+	process.env.PENDING_NOTIFICATION_CACHE_TTL_MS || 60000
+);
+const PENDING_NOTIFICATION_COUNT_MAX_TIME_MS = Number(
+	process.env.PENDING_NOTIFICATION_COUNT_MAX_TIME_MS || 800
 );
 const PENDING_NOTIFICATION_CACHE_MAX = 500;
 const RESERVATION_DETAILS_HOTEL_SELECT = [
@@ -133,6 +136,23 @@ const setShortCache = (cache, key, value, ttlMs, maxEntries) => {
 		if (firstKey) cache.delete(firstKey);
 	}
 	cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+};
+
+const boundedCountDocuments = async (
+	model,
+	query,
+	{ fallback = 0, label = "countDocuments", maxTimeMS = PENDING_NOTIFICATION_COUNT_MAX_TIME_MS } = {}
+) => {
+	try {
+		const count = await model.countDocuments(query).maxTimeMS(maxTimeMS).exec();
+		return Number.isFinite(count) ? count : fallback;
+	} catch (error) {
+		console.warn(`[reservations] ${label} exceeded latency budget`, {
+			maxTimeMS,
+			message: error?.message || error,
+		});
+		return fallback;
+	}
 };
 
 const moneyNumber = (value) => {
@@ -9142,11 +9162,17 @@ exports.pendingConfirmationReservations = async (req, res) => {
 				{ $skip: (parsedPage - 1) * parsedRecords },
 				{ $limit: parsedRecords },
 			]),
-			Reservations.countDocuments(dynamicFilter),
+			boundedCountDocuments(Reservations, dynamicFilter, {
+				fallback: 0,
+				label: "pending_confirmation_list_count",
+				maxTimeMS: 1200,
+			}),
 		]);
+		const minimumVisibleTotal = (parsedPage - 1) * parsedRecords + rows.length;
+		const boundedTotal = Math.max(Number(total || 0), minimumVisibleTotal);
 
 		res.json({
-			total,
+			total: boundedTotal,
 			page: parsedPage,
 			records: parsedRecords,
 			data: sanitizeReservationAuditLogsCollectionForViewer(rows, actor).map(
@@ -9370,7 +9396,10 @@ const getOtaPlatformReviewNotificationFeed = async ({
 			.limit(limit)
 			.lean()
 			.exec(),
-		Reservations.countDocuments(query),
+		boundedCountDocuments(Reservations, query, {
+			fallback: 0,
+			label: "ota_platform_review_notification_count",
+		}),
 	]);
 	const notifications = rows.map((reservation) => {
 		const hotel = reservation.hotelId || {};
@@ -9406,7 +9435,7 @@ const getOtaPlatformReviewNotificationFeed = async ({
 	});
 
 	return {
-		total,
+		total: Math.max(Number(total || 0), notifications.length),
 		data: limitNotificationsNewestFirst(notifications, limit),
 	};
 };
@@ -9780,7 +9809,10 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				.limit(notificationQueryLimit)
 				.lean()
 				.exec(),
-			Reservations.countDocuments(query),
+			boundedCountDocuments(Reservations, query, {
+				fallback: 0,
+				label: "pending_confirmation_notification_count",
+			}),
 			getAgentAccountNotificationFeed({
 				actor,
 				hotels,
@@ -9871,7 +9903,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 
 		return sendCached({
 			total:
-				total +
+				Math.max(Number(total || 0), reservationNotifications.length) +
 				Number(agentAccountFeed.total || 0) +
 				Number(walletClaimFeed.total || 0) +
 				Number(otaReviewFeed.total || 0),

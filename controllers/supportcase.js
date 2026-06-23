@@ -352,25 +352,54 @@ const clientIdentityFromCase = (supportCase = {}) => {
 	};
 };
 
-const sameClientCaseFilter = (req, contact = "") => {
-	const normalizedContact = normalizeEmailOrPhone(contact);
-	if (!normalizedContact) return null;
-	return withSupportCaseScope(req, {
-		openedBy: "client",
-		$or: [
-			{ clientContact: normalizedContact },
-			{
-				conversation: {
-					$elemMatch: {
-						"messageBy.customerEmail": normalizedContact,
-						isSystem: { $ne: true },
-						isAi: { $ne: true },
-						seenByCustomer: true,
+const sameClientCaseCountMap = async (req, contacts = []) => {
+	const normalizedContacts = [
+		...new Set(contacts.map(normalizeEmailOrPhone).filter(Boolean)),
+	];
+	const counts = new Map(normalizedContacts.map((contact) => [contact, 0]));
+	if (!normalizedContacts.length) return counts;
+
+	const rows = await SupportCase.find(
+		withSupportCaseScope(req, {
+			openedBy: "client",
+			$or: [
+				{ clientContact: { $in: normalizedContacts } },
+				{
+					conversation: {
+						$elemMatch: {
+							"messageBy.customerEmail": { $in: normalizedContacts },
+							isSystem: { $ne: true },
+							isAi: { $ne: true },
+							seenByCustomer: true,
+						},
 					},
 				},
-			},
-		],
+			],
+		})
+	)
+		.select(
+			"clientContact conversation.messageBy.customerEmail conversation.isSystem conversation.isAi conversation.seenByCustomer"
+		)
+		.lean()
+		.exec();
+
+	const requestedContactSet = new Set(normalizedContacts);
+	rows.forEach((supportCase) => {
+		const matchedContacts = new Set();
+		const directContact = normalizeEmailOrPhone(supportCase.clientContact);
+		if (requestedContactSet.has(directContact)) matchedContacts.add(directContact);
+		(Array.isArray(supportCase.conversation) ? supportCase.conversation : []).forEach(
+			(entry) => {
+				if (entry?.isSystem || entry?.isAi || entry?.seenByCustomer !== true) return;
+				const contact = normalizeEmailOrPhone(entry?.messageBy?.customerEmail);
+				if (requestedContactSet.has(contact)) matchedContacts.add(contact);
+			}
+		);
+		matchedContacts.forEach((contact) => {
+			counts.set(contact, Number(counts.get(contact) || 0) + 1);
+		});
 	});
+	return counts;
 };
 
 const enrichClientSupportCases = async (cases = [], req = {}) => {
@@ -383,15 +412,7 @@ const enrichClientSupportCases = async (cases = [], req = {}) => {
 	const uniqueContacts = [
 		...new Set(identities.map((identity) => identity.contact).filter(Boolean)),
 	];
-	const contactCounts = new Map();
-
-	await Promise.all(
-		uniqueContacts.map(async (contact) => {
-			const filter = sameClientCaseFilter(req, contact);
-			const total = filter ? await SupportCase.countDocuments(filter) : 0;
-			contactCounts.set(contact, total);
-		})
-	);
+	const contactCounts = await sameClientCaseCountMap(req, uniqueContacts);
 
 	return plainCases.map((supportCase, index) => {
 		const identity = identities[index] || {};
