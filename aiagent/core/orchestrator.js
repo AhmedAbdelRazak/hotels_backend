@@ -2679,7 +2679,28 @@ function selectedHotelFactQuestionText(text = "") {
 		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
-		selectedHotelAddressQuestionText(text)
+		selectedHotelAddressQuestionText(text) ||
+		selectedHotelLocalAreaQuestionText(text)
+	);
+}
+
+function selectedHotelLocalAreaQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (!lower.trim() && !arabic.trim() && !latinCompact) return false;
+	if (
+		/\b(?:other|another|different|alternative|compare)\s+(?:hotel|hotels|property|properties)\b/i.test(
+			lower
+		)
+	) {
+		return false;
+	}
+	return (
+		/\b(?:nearby|around|surrounding|area|district|landmark|restaurants?|shops?|markets?|pharmac(?:y|ies)|essential\s+services|first\s*time|umrah\s+guest|good\s+choice\s+for\s+famil(?:y|ies)|famil(?:y|ies)|parking|park\s+my\s+car|late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(
+			lower
+		) ||
+		/(?:nearby|around|landmark|restaurants|shops|markets|pharmacy|firsttime|umrahguest|family|families|parking|latearrival|lateatnight|24hour|receptionhelp)/i.test(
+			latinCompact
+		)
 	);
 }
 
@@ -5457,6 +5478,74 @@ function hotelPolicyAnswerText(sc = {}, st = {}, userText = "", row = null) {
 	return "";
 }
 
+function selectedHotelLocalAreaFacts(hotel = {}) {
+	const about = cleanHotelFactText(hotel.aboutHotel);
+	const lower = about.toLowerCase();
+	const area = /al[-\s]?aziziyah\s+north/i.test(about)
+		? "Al Aziziyah North district"
+		: cleanHotelFactText(hotel.hotelState || hotel.hotelCity);
+	const landmark = /umm\s+al[-\s]?qura\s+university/i.test(about)
+		? "behind Umm Al-Qura University"
+		: "";
+	const services = [];
+	if (/restaurants?/i.test(about)) services.push("restaurants");
+	if (/markets?/i.test(about)) services.push("markets");
+	if (/pharmac(?:y|ies)/i.test(about)) services.push("pharmacies");
+	return {
+		about,
+		area,
+		landmark,
+		services,
+		quiet: /\bquiet\s+area\b/i.test(lower),
+		reception24: /\b24\s*[- ]?\s*hour\s+reception\b/i.test(lower),
+		parkingLot: hotel.parkingLot === true,
+	};
+}
+
+function selectedHotelLocalAreaAnswerText(sc = {}, st = {}, userText = "") {
+	const hotel = st.hotel || {};
+	const lang = languageOf(sc, st);
+	if (!/english/i.test(lang)) return "";
+	const { lower } = normalizeControlText(userText);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const facts = selectedHotelLocalAreaFacts(hotel);
+	const walking = formatHotelDistanceValue(hotel.distances?.walkingToElHaram, lang);
+	const driving = formatHotelDistanceValue(hotel.distances?.drivingToElHaram, lang);
+	const mapLink = hotelGoogleMapsMarkdownLink(hotel, lang);
+	const next = hotelFactNextStepText(sc, st);
+	const place = [facts.area, facts.landmark].filter(Boolean).join(", ");
+	const distance = walking || driving
+		? ` It is about ${localizedJoin([walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""], lang)} from Al Haram, depending on traffic.`
+		: "";
+	const serviceLine = facts.services.length
+		? ` The stored hotel profile says it is close to essential services such as ${localizedJoin(facts.services, lang)}.`
+		: "";
+	if (/\b(?:parking|park\s+my\s+car|car\s+park)\b/i.test(lower)) {
+		return facts.parkingLot
+			? `${name}, yes, ${hotelName} is listed with parking available.${distance} ${next}`
+			: `${name}, I do not see parking confirmed for ${hotelName} right now.${distance} ${next}`;
+	}
+	if (/\b(?:late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(lower)) {
+		return facts.reception24
+			? `${name}, yes, ${hotelName} lists 24-hour reception, so reception support should be available for late arrival.${distance} ${next}`
+			: `${name}, I do not see a confirmed 24-hour reception note for ${hotelName} right now.${distance} ${next}`;
+	}
+	if (/\b(?:famil(?:y|ies)|good\s+choice)\b/i.test(lower)) {
+		return `${name}, ${hotelName} can be a practical family choice because it is in ${place || "Makkah"}${facts.quiet ? ", in a quiet area" : ""}.${serviceLine}${distance} ${next}`;
+	}
+	if (/\b(?:first\s*time|umrah\s+guest|recommend)\b/i.test(lower)) {
+		return `${name}, for a first-time Umrah stay at ${hotelName}, I would keep the map link handy${mapLink ? `: ${mapLink}` : ""}, plan Haram trips by car or the available bus service, and choose the room type after your dates are clear.${serviceLine}${distance} ${next}`;
+	}
+	if (/\b(?:landmark|area|district)\b/i.test(lower)) {
+		return `${name}, ${hotelName} is in ${place || "Makkah"}.${serviceLine}${distance}${mapLink ? ` Here is the map link: ${mapLink}.` : ""} ${next}`;
+	}
+	if (/\b(?:restaurants?|shops?|markets?|pharmac(?:y|ies)|nearby|around|surrounding|essential\s+services)\b/i.test(lower)) {
+		return `${name}, ${hotelName} is in ${place || "Makkah"}.${serviceLine || " I do not see exact nearby shop or restaurant names confirmed right now."}${distance}${mapLink ? ` Here is the exact map link: ${mapLink}.` : ""} ${next}`;
+	}
+	return "";
+}
+
 function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const hotel = st.hotel || {};
 	const lang = languageOf(sc, st);
@@ -5473,6 +5562,7 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 	const asksDistance = selectedHotelDistanceQuestionText(userText);
 	const asksAddress = selectedHotelAddressQuestionText(userText);
 	const asksPolicy = selectedHotelPolicyQuestionText(userText);
+	const asksLocalArea = selectedHotelLocalAreaQuestionText(userText);
 	const isNusuk = hotel.isNusuk === true;
 	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const hasBusService = hotel.hasBusService === true;
@@ -5490,6 +5580,10 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 		return hasBusService
 			? hotelBusServiceYesText(lang, name, busDetails, next)
 			: hotelBusServiceNoText(lang, name, hotelName, walking, next);
+	}
+	if (asksLocalArea) {
+		const answer = selectedHotelLocalAreaAnswerText(sc, st, userText);
+		if (answer) return answer;
 	}
 	if (/arabic/i.test(lang)) {
 		if (asksDistance) {
