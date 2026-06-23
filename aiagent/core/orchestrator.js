@@ -2139,13 +2139,13 @@ function assistantMessageSuggestsProceed(message = {}) {
 	if (actions.includes("proceed")) return true;
 	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
 	return (
-		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm/i.test(
+		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm|yes,\s*proceed|choose\s+["']?yes|if this works for you/i.test(
 			lower
 		) ||
-		/(?:\u0647\u0644\s+\u062a\u0631\u063a\u0628\s+\u0627\u0646\s+\u0627\u062a\u0627\u0628\u0639|\u0647\u0644\s+\u062a\u0631\u064a\u062f\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0647|\u0647\u0644\s+\u0646\u062a\u0627\u0628\u0639|\u0627\u062a\u0627\u0628\u0639\s+\u0644\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632)/i.test(
+		/(?:\u0647\u0644\s+\u062a\u0631\u063a\u0628\s+\u0627\u0646\s+\u0627\u062a\u0627\u0628\u0639|\u0647\u0644\s+\u062a\u0631\u064a\u062f\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0647|\u0647\u0644\s+\u0646\u062a\u0627\u0628\u0639|\u0627\u062a\u0627\u0628\u0639\s+\u0644\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0631\u0627\u062c\u0639\u0647\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u062e\u062a\u0631\s+["']?\u0646\u0639\u0645|\u0646\u0639\u0645\s*[\u060c,]\s*\u062a\u0627\u0628\u0639|\u0625\u0630\u0627\s+\u064a\u0646\u0627\u0633\u0628\u0643)/i.test(
 			arabic
 		) ||
-		/(?:wouldyoulikemetocontinue|shallicontinue|continuetothereview|continuewiththereservationdetails|proceedtoconfirm|wanttocontinue)/i.test(
+		/(?:wouldyoulikemetocontinue|shallicontinue|continuetothereview|continuewiththereservationdetails|proceedtoconfirm|yesproceed|chooseyes|ifthisworksforyou|wanttocontinue)/i.test(
 			latinCompact
 		)
 	);
@@ -13610,6 +13610,17 @@ async function planTurn(io, sc) {
 				reason: "latest_guest_already_answered",
 			});
 			return;
+		}
+		if (userText && !severeAbusiveGuestText(userText)) {
+			const immediateProceedHandled = await handleProceedStageInput(
+				io,
+				sc,
+				st,
+				userText,
+				{},
+				{ allowGeneric: false }
+			);
+			if (immediateProceedHandled) return;
 		}
 		const fastSmalltalk = st.hotel
 			? fastEnglishSmalltalkText(sc, st, userText)
