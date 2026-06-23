@@ -5155,6 +5155,28 @@ function hotelFactAddressLine(hotel = {}, lang = "English") {
 	return parts.join(/arabic/i.test(lang) ? "\u060c " : ", ");
 }
 
+function hotelBusDetailLine(details = "", lang = "English") {
+	const rawDetailText = cleanHotelFactText(details).replace(/[.!?\u061f\u06d4]+$/g, "");
+	if (!rawDetailText) return "";
+	if (
+		(/arabic/i.test(lang) && !hasArabicScript(rawDetailText)) ||
+		(!/arabic/i.test(lang) && hasArabicScript(rawDetailText))
+	) {
+		return "";
+	}
+	if (!/english/i.test(lang)) return rawDetailText;
+	return rawDetailText
+		.replace(/\s*\n+\s*/g, ". ")
+		.replace(/\bfrom\s+hotels?\s+to\b/gi, "from the hotel to")
+		.replace(/\baway\s+from\s+the\s+hotels?\b/gi, "away from the hotel")
+		.replace(/\bthe\s+hotels?\b/gi, "the hotel")
+		.replace(/\bAl\s+gamarat\b/gi, "Al Gamarat")
+		.replace(/\bal\s+haram\b/gi, "Al Haram")
+		.replace(/\b5\s+daily\s+prayers\b/gi, "five daily prayers")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+}
+
 function hotelFactNextStepText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	const pivot = nextPivot(st);
@@ -5223,12 +5245,7 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 }
 
 function hotelBusServiceYesText(lang, name, details, next) {
-	const rawDetailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
-	const detailText =
-		(/arabic/i.test(lang) && rawDetailText && !hasArabicScript(rawDetailText)) ||
-		(!/arabic/i.test(lang) && hasArabicScript(rawDetailText))
-			? ""
-			: rawDetailText;
+	const detailText = hotelBusDetailLine(details, lang);
 	if (/arabic/i.test(lang)) {
 		return detailText
 			? `${name}\u060c \u0646\u0639\u0645\u060c \u0644\u062f\u064a\u0646\u0627 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u0644\u0644\u0636\u064a\u0648\u0641. ${detailText}. ${next}`
@@ -5672,11 +5689,6 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	const policyRow = selectedHotelPolicyQuestionText(userText)
 		? bestHotelPolicyRow(st, userText)
 		: null;
-	const shouldPolishBusDetails =
-		!policyRow &&
-		selectedHotelBusQuestionText(userText) &&
-		st.hotel?.hasBusService === true &&
-		Boolean(cleanHotelFactText(st.hotel?.busDetails));
 	let reply = "";
 	if (policyRow) {
 		reply = hotelPolicyAnswerText(sc, st, userText, policyRow);
@@ -5698,25 +5710,6 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 				selectedHotelFactAnswerText(sc, st, userText)
 			);
 		}
-	} else if (shouldPolishBusDetails) {
-		reply = await withSoftTimeout(
-			write(
-				io,
-				sc,
-				st,
-				"The guest asked about the selected hotel's bus/shuttle service. Answer as the selected hotel's own reception representative, not as a platform or third party. Answer yes directly. Treat busDetails as private owner-written source notes: understand the meaning, remove duplicate yes/no wording, clean the grammar, and translate/adapt it into the guest's active response language. Do not copy the raw field like a database note. Do not use phrases like 'details registered from the hotel', 'the hotel details say', 'owner says', 'schema', or 'record'. Prefer natural first-person reception wording such as 'we provide' in the target language. Do not invent schedules, stations, timing, destinations, or promises beyond busDetails. If busDetails mentions a drop-off point or 24-hour service, state that clearly and warmly. End with nextStepText naturally. If bookingNudgePaused is true, do not ask to proceed or ask for dates; just close with the short availability/support line. Do not mention Jannat Booking or any other hotel.",
-				{
-					latestUserMessage: userText,
-					selectedHotelFacts: buildActiveHotelFacts(sc, st),
-					rawBusDetails: cleanHotelFactText(st.hotel?.busDetails),
-					nextStep: nextPivot(st),
-					nextStepText: hotelFactNextStepText(sc, st),
-					bookingNudgePaused: bookingNudgePaused(st),
-				}
-			),
-			QUOTE_WRITE_SOFT_TIMEOUT_MS,
-			selectedHotelFactAnswerText(sc, st, userText)
-		);
 	} else {
 		reply = selectedHotelFactAnswerText(sc, st, userText);
 	}
