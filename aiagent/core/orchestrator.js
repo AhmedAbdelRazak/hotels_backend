@@ -2747,6 +2747,17 @@ function selectedHotelPolicyQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
 	if (cancellationRefundPolicyQuestionText(text)) return true;
+	const hasPolicySignalBeforeDateCheck =
+		/\b(?:policy|policies|terms|conditions|rules|house rules|check[\s-]?in\b|check[\s-]?out\b|checkout\b|early check\b|late check\b|children|child|extra bed|breakfast|meal|deposit|no[\s-]?show|passport|id card|identification|smoking|pet|damage)\b/i.test(
+			lower
+		) ||
+		/(?:\u0633\u064a\u0627\u0633\u0629|\u0633\u064a\u0627\u0633\u0627\u062a|\u0634\u0631\u0648\u0637|\u0623\u062d\u0643\u0627\u0645|\u0627\u062d\u0643\u0627\u0645|\u0642\u0648\u0627\u0639\u062f|\u062a\u0639\u0644\u064a\u0645\u0627\u062a|\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u0625\u0641\u0637\u0627\u0631|\u0627\u0641\u0637\u0627\u0631|\u0648\u062c\u0628\u0627\u062a|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0639\u0631\u0628\u0648\u0646|\u062a\u0623\u0645\u064a\u0646|\u062a\u0627\u0645\u064a\u0646|\u062c\u0648\u0627\u0632|\u0647\u0648\u064a\u0629|\u0647\u0648\u064a\u0647|\u062a\u062f\u062e\u064a\u0646|\u062d\u064a\u0648\u0627\u0646\u0627\u062a|\u0623\u0636\u0631\u0627\u0631|\u0627\u0636\u0631\u0627\u0631|\u0644\u0627\s*\u064a\u062d\u0636\u0631)/i.test(
+			arabic
+		) ||
+		/(?:policy|policies|terms|conditions|houserules|checkin(?!g)|checkout|earlycheckin|latecheckout|children|extrabed|breakfast|meal|deposit|noshow|passport|idcard|smoking|pets|damage)/i.test(
+			latinCompact
+		);
+	if (!hasPolicySignalBeforeDateCheck) return false;
 	const stayDates = extractDateRange(text);
 	if (stayDates?.checkinISO && stayDates?.checkoutISO) return false;
 	return (
