@@ -209,6 +209,10 @@ const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	15 * 1000,
 	{ min: 10 * 1000, max: 2 * 60 * 1000 }
 );
+const AI_TURN_SLOW_LOG_MS = intFromEnv("AI_TURN_SLOW_LOG_MS", 5000, {
+	min: 1000,
+	max: 60 * 1000,
+});
 const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
 	false
@@ -6441,7 +6445,13 @@ async function humanSend(
 	sc,
 	st,
 	text,
-	{ first = false, quickReplies = [], scheduleIdle = true } = {}
+	{
+		first = false,
+		quickReplies = [],
+		scheduleIdle = true,
+		fast = false,
+		targetReplyMs = null,
+	} = {}
 ) {
 	text = sanitizeAssistantVoiceText(text, sc, st);
 	if (!text) return false;
@@ -6458,10 +6468,14 @@ async function humanSend(
 
 	const turnStartedAt =
 		Number(st.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
-	const targetElapsedMs =
-		Number(st.activeTurnReplyTargetMs || 0) > 0
-			? Number(st.activeTurnReplyTargetMs)
-			: randomBetween(AI_REPLY_TARGET_MIN_MS, AI_REPLY_TARGET_MAX_MS);
+	const requestedTargetMs = Number(targetReplyMs);
+	const targetElapsedMs = fast
+		? 0
+		: Number.isFinite(requestedTargetMs) && requestedTargetMs >= 0
+		? requestedTargetMs
+		: Number(st.activeTurnReplyTargetMs || 0) > 0
+		? Number(st.activeTurnReplyTargetMs)
+		: randomBetween(AI_REPLY_TARGET_MIN_MS, AI_REPLY_TARGET_MAX_MS);
 	const waitMs = Math.max(0, targetElapsedMs - (now() - turnStartedAt));
 	logStep(caseId, "human.delay.target", {
 		ms: waitMs,
@@ -10174,7 +10188,13 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	return true;
 }
 
-async function beginReservationDetailsAfterQuote(io, sc, st, caseId = "") {
+async function beginReservationDetailsAfterQuote(
+	io,
+	sc,
+	st,
+	caseId = "",
+	{ fast = false } = {}
+) {
 	st.reviewSent = false;
 	st.finalReviewSentAt = 0;
 	st.waitFor = nextReservationDetailStep(st);
@@ -10185,8 +10205,15 @@ async function beginReservationDetailsAfterQuote(io, sc, st, caseId = "") {
 	if (st.waitFor === "finalize") {
 		return sendReservationReview(io, sc, st, st.quote?.data);
 	}
-	await askForReservationDetail(io, sc, st, st.waitFor);
+	await askForReservationDetail(io, sc, st, st.waitFor, { fast });
 	return true;
+}
+
+function latestGuestAcceptedProceedAction(sc = {}, userText = "") {
+	const action = lastGuestAction(sc).toLowerCase();
+	if (action === "proceed") return true;
+	const assistant = lastAssistantMessageBeforeLatestGuest(sc);
+	return Boolean(assistantMessageSuggestsProceed(assistant) && confirmsText(userText));
 }
 
 async function handleProceedStageInput(
@@ -10197,10 +10224,22 @@ async function handleProceedStageInput(
 	lu = {},
 	{ allowGeneric = true } = {}
 ) {
-	if (st.waitFor !== "proceed" || !activeQuoteMatchesSlots(st)) return false;
-	if (quoteConfirmationText(userText, st)) {
+	const acceptedProceed = latestGuestAcceptedProceedAction(sc, userText);
+	if (st.waitFor !== "proceed" && !acceptedProceed) return false;
+	const quote = ensureCurrentQuoteForSlots(st);
+	if (!quote) return false;
+	if (!quote.available) {
+		if (acceptedProceed || quoteConfirmationText(userText, st)) {
+			return sendUnavailableRoomRecovery(io, sc, st, quote);
+		}
+		return false;
+	}
+	st.waitFor = "proceed";
+	if (acceptedProceed || quoteConfirmationText(userText, st)) {
 		resumeBookingNudge(st);
-		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""));
+		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""), {
+			fast: acceptedProceed,
+		});
 	}
 	if (
 		wantsPaymentHelp(userText) ||
@@ -12473,7 +12512,7 @@ function nextReservationDetailStep(st = {}) {
 	return "finalize";
 }
 
-async function askForReservationDetail(io, sc, st, step) {
+async function askForReservationDetail(io, sc, st, step, { fast = false } = {}) {
 	let prompt = "";
 	let quickReplies = [];
 	if (step === "reservation_details" || step === "fullname" || step === "nationality" || step === "phone") {
@@ -12485,7 +12524,7 @@ async function askForReservationDetail(io, sc, st, step) {
 		quickReplies = emailQuickReplies(sc, st);
 	}
 	if (!prompt) return;
-	const sent = await humanSend(io, sc, st, prompt, { quickReplies });
+	const sent = await humanSend(io, sc, st, prompt, { quickReplies, fast });
 	if (!sent) return;
 	stampAsk(st, step);
 }
@@ -12864,6 +12903,7 @@ async function shouldRunQueuedPlan(caseId, st = {}) {
 
 async function planTurn(io, sc) {
 	const caseId = String(sc._id);
+	const turnLogStartedAt = now();
 	if (activePlanLocks.has(caseId)) {
 		const lockedAt = Number(activePlanLockAts.get(caseId) || 0);
 		if (lockedAt && now() - lockedAt > AI_TURN_STALL_RECOVERY_MS * 2) {
@@ -14532,7 +14572,9 @@ async function planTurn(io, sc) {
 		if (st.waitFor === "proceed") {
 			if (confirmsText(userText)) {
 				resumeBookingNudge(st);
-				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId, {
+					fast: true,
+				});
 				return;
 			}
 			if (declinesText(userText)) {
@@ -14552,7 +14594,9 @@ async function planTurn(io, sc) {
 				)
 			) {
 				resumeBookingNudge(st);
-				await beginReservationDetailsAfterQuote(io, sc, st, caseId);
+				await beginReservationDetailsAfterQuote(io, sc, st, caseId, {
+					fast: true,
+				});
 				return;
 			} else if (/\b(no|nope|not now|later|cancel|لا)\b/i.test(userText)) {
 				const msg = await write(
@@ -14916,6 +14960,16 @@ async function planTurn(io, sc) {
 		}
 	} finally {
 		const st2 = memo.get(caseId);
+		const turnElapsedMs = now() - turnLogStartedAt;
+		if (turnElapsedMs >= AI_TURN_SLOW_LOG_MS) {
+			console.log("[aiagent] slow turn", {
+				caseId,
+				elapsedMs: turnElapsedMs,
+				waitFor: st2?.waitFor || st?.waitFor || null,
+				hadReply: Boolean(st2?.activeTurnHadReply || st?.activeTurnHadReply),
+				interrupted: Boolean(st2?.interrupt || st?.interrupt),
+			});
+		}
 		if (planningTypingTimer) {
 			clearTimeout(planningTypingTimer);
 		}

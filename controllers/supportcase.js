@@ -23,6 +23,8 @@ const supportCaseEmail = twilio(
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances isNusuk isNusukText hotelPolicyQA";
+const PUBLIC_SUPPORT_CASE_HOTEL_POPULATE =
+	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 
 const isAiAgentEnabled = () =>
@@ -1132,7 +1134,7 @@ exports.getPublicClientSupportCaseById = async (req, res) => {
 		})
 			.populate(
 				"hotelId",
-				SUPPORT_CASE_HOTEL_POPULATE
+				PUBLIC_SUPPORT_CASE_HOTEL_POPULATE
 			)
 			.lean()
 			.exec();
@@ -1260,7 +1262,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		)
 			.populate(
 				"hotelId",
-				SUPPORT_CASE_HOTEL_POPULATE
+				PUBLIC_SUPPORT_CASE_HOTEL_POPULATE
 			)
 			.lean()
 			.exec();
