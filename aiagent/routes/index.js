@@ -11,6 +11,7 @@ const {
 	listAvailableRoomsForStay,
 	priceRoomForStay,
 } = require("./core/selectors");
+const { pickOpenAIModel } = require("../../services/openaiModelConfig");
 
 /**
  * GET /api/aiagent/health
@@ -26,7 +27,14 @@ function attachRoutes(app, io) {
 		return res.json({
 			ok: true,
 			openai: !!process.env.OPENAI_API_KEY,
-			model: process.env.OPENAI_MODEL || null,
+			model: pickOpenAIModel("default"),
+			analysisModel: pickOpenAIModel("analysis"),
+			nluModel: pickOpenAIModel("nlu"),
+			writerModel: pickOpenAIModel("writer"),
+			reasoningEffort:
+				process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
+				process.env.OPENAI_REASONING_EFFORT ||
+				"low",
 		});
 	});
 
