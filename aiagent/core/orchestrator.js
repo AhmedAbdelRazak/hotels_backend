@@ -9990,6 +9990,7 @@ async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
 	}
 	const roomTypeKey = mapRoomToKey(userText) || st.slots?.roomTypeKey || null;
 	if (!roomTypeKey) return false;
+	updateActiveLanguageFromText(sc, st, userText);
 	const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
 		source: "direct_stay_quote",
 		userText,
@@ -13669,6 +13670,16 @@ async function planTurn(io, sc) {
 			);
 			if (immediateProceedHandled) return;
 		}
+		if (userText) {
+			const directStayQuoteHandled = await tryShareDirectStayQuote(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (directStayQuoteHandled) return;
+		}
 		const fastSmalltalk = st.hotel
 			? fastEnglishSmalltalkText(sc, st, userText)
 			: "";
@@ -13743,16 +13754,6 @@ async function planTurn(io, sc) {
 			: explicitLanguageSwitchRequest(userText);
 		if (!protectReservationDetailLanguage) {
 			updateActiveLanguageFromText(sc, st, userText);
-		}
-		if (userText) {
-			const directStayQuoteHandled = await tryShareDirectStayQuote(
-				io,
-				sc,
-				st,
-				userText,
-				caseId
-			);
-			if (directStayQuoteHandled) return;
 		}
 		if (!userText) {
 			if (!hasAiAssistantReply(sc) && !st.greeted && !st.greetScheduled) {
