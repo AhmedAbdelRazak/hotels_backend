@@ -2,6 +2,10 @@
 
 ## Production Stabilization Runbooks
 
+- `../docs/chatbot-rebuilt-conversation-engine-2026-06-23.md` is the current
+  active chatbot source of truth. The active planner is
+  `core/orchestrator_rebuilt.js`; the older `core/orchestrator.js` is legacy
+  reference code unless deliberately wired again.
 - `../docs/chatbot-production-stabilization-2026-06-22.md` documents the June 21/22
   production chatbot stabilization: memory pressure, restart recovery,
   repeated date/nationality prompts, nationality-vs-language routing, bad

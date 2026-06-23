@@ -645,7 +645,18 @@ Future TODO Backlog - Added 2026-05-26
     - At least one real hotel, including Zad Al Safa, is manually reconciled against DB records and the UI output.
     - Any discrepancy is traced to either filter state, room-map state, reservation status, or backend aggregation logic before changing display code.
 
-- TODO 2: Restructure the chatbot / AI agent properly, using SereneJannat as the reference pattern
+- CURRENT CHATBOT NOTE - 2026-06-23:
+  - The active chatbot planner is aiagent/core/orchestrator_rebuilt.js, wired by
+    aiagent/index.js.
+  - The previous large aiagent/core/orchestrator.js remains only as legacy
+    reference unless it is deliberately wired again.
+  - The current behavior contract, safety rules, nationality ISO storage, shorter
+    reservation flow, and SSR dedupe rules are documented in:
+    docs/chatbot-rebuilt-conversation-engine-2026-06-23.md
+  - Older chatbot notes below are historical context. Do not use them as the
+    active implementation contract when changing the current chatbot.
+
+- TODO 2: Historical chatbot / AI agent restructure notes
   - Existing backend AI references:
     - aiagent/
     - aiagent/index.js

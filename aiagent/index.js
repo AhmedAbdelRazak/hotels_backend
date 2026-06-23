@@ -1,7 +1,7 @@
 /** @format */
 // aiagent/index.js
 const { attachRoutes } = require("./routes");
-const { wireSocket, schedulePlanTurn } = require("./core/orchestrator");
+const { wireSocket, schedulePlanTurn } = require("./core/orchestrator_rebuilt");
 
 let initialized = false;
 

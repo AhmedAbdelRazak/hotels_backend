@@ -11,6 +11,7 @@ const {
 const { updateSupportCaseAppend } = require("./db");
 const { asciiize, digitsToEnglish } = require("./nlu");
 const { priceRoomForStay } = require("./selectors");
+const { normalizeCountryCode } = require("./countryCodes");
 const {
 	markReservationPendingConfirmation,
 } = require("../../services/pendingConfirmationPolicy");
@@ -114,13 +115,25 @@ function normalizedGuestCount(value, fallback = null) {
 function validateRequiredGuestDetails(slots = {}) {
 	const name = usableFullName(slots.fullName || slots.name || "");
 	const phone = onlyDigits(slots.phone || "");
-	const nationality = cleanText(slots.nationality || "", 80);
+	const nationality = cleanText(
+		slots.nationalityCode ||
+			slots.nationalityCountryCode ||
+			slots.countryCode ||
+			slots.nationality ||
+			slots.country ||
+			"",
+		80
+	);
+	const nationalityCode = normalizeCountryCode(
+		nationality,
+		slots.nationality || slots.country || slots.nationalityName || ""
+	);
 	const adults = normalizedGuestCount(slots.adults, null);
 	const children = normalizedGuestCount(slots.children, null);
 	const missing = [];
 	if (!name) missing.push("full name");
 	if (!phone || phone.length < 5) missing.push("phone");
-	if (!nationality) missing.push("nationality");
+	if (!nationalityCode) missing.push("nationality");
 	if (!Number.isFinite(adults) || adults < 1) missing.push("adults count");
 	if (!Number.isFinite(children) || children < 0) missing.push("children count");
 	if (missing.length) {
@@ -130,7 +143,7 @@ function validateRequiredGuestDetails(slots = {}) {
 		name,
 		phone,
 		email: asciiize(slots.email || "").trim().toLowerCase(),
-		nationality: asciiize(nationality).trim() || nationality,
+		nationality: nationalityCode,
 		adults,
 		children,
 		rooms: Math.max(1, normalizedGuestCount(slots.rooms, 1)),
