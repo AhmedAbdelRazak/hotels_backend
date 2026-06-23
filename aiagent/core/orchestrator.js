@@ -1070,6 +1070,31 @@ function languageSwitchAcknowledgementText(sc = {}, st = {}) {
 	return `${name}, absolutely, I will continue in English. How can I help?`;
 }
 
+function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
+	const raw = String(text || "").trim();
+	if (!raw || raw.length > 140 || hasOperationalBookingSignal(raw)) return "";
+	const lower = raw.toLowerCase();
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const asksHowAreYou =
+		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day)\b/i.test(
+			raw
+		) &&
+		!/\b(?:far|distance|price|rate|available|availability|book|reserve|reservation|room|date|check\s*-?\s*in|check\s*-?\s*out|map|location|address|nusuk|bus|shuttle|payment|confirmation)\b/i.test(
+			lower
+		);
+	if (asksHowAreYou) {
+		return `${name}, I am doing well, thank you for asking. How can I help you with ${hotelName} today?`;
+	}
+	if (looksLikeGreetingOnly(raw)) {
+		return `${name}, assalamu alaikum. How can I help you with ${hotelName} today?`;
+	}
+	if (/^(?:thanks?|thank\s+you|thank\s+you\s+so\s+much|appreciate\s+it)\.?$/i.test(raw)) {
+		return `${name}, you are most welcome. I am here whenever you need help with ${hotelName}.`;
+	}
+	return "";
+}
+
 async function answerLanguageSwitchRequest(io, sc, st, userText = "") {
 	await humanSend(io, sc, st, languageSwitchAcknowledgementText(sc, st));
 	logStep(String(sc._id), "language.switch_ack", {
@@ -13096,6 +13121,23 @@ async function planTurn(io, sc) {
 			logStep(caseId, "turn.skip", {
 				reason: "latest_guest_already_answered",
 			});
+			return;
+		}
+		const fastSmalltalk = st.hotel
+			? fastEnglishSmalltalkText(sc, st, userText)
+			: "";
+		if (
+			fastSmalltalk &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "smalltalk.fast_reply", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, fastSmalltalk, { fast: true });
 			return;
 		}
 		if (
