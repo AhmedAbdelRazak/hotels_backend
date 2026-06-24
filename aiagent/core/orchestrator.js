@@ -2916,14 +2916,19 @@ function selectedHotelLocalAreaQuestionText(text = "") {
 	) {
 		return false;
 	}
+	const parentOrSeniorArabic =
+		/(?:\u0648\u0627\u0644\u062f\u064a\u0646|\u0648\u0627\u0644\u062f\u064a|\u0648\u0627\u0644\u062f\u062a\u064a|\u0627\u0644\u0648\u0627\u0644\u062f|\u0627\u0644\u0648\u0627\u0644\u062f\u0629|\u0643\u0628\u0627\u0631\s+\u0627\u0644\u0633\u0646|\u0643\u0628\u064a\u0631\s+\u0627\u0644\u0633\u0646|\u0643\u0628\u064a\u0631\u0629\s+\u0627\u0644\u0633\u0646|\u0645\u0633\u0646|\u0645\u0633\u0646\u064a\u0646)/i.test(
+			arabic
+		);
 	return (
-		/\b(?:nearby|around|surrounding|area|district|landmark|restaurants?|shops?|markets?|pharmac(?:y|ies)|essential\s+services|first\s*time|umrah\s+guest|good\s+choice\s+for\s+famil(?:y|ies)|famil(?:y|ies)|parking|park\s+my\s+car|late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(
+		/\b(?:nearby|around|surrounding|area|district|landmark|restaurants?|shops?|markets?|pharmac(?:y|ies)|essential\s+services|first\s*time|umrah\s+guest|good\s+choice\s+for\s+famil(?:y|ies)|famil(?:y|ies)|parents?|elderly|seniors?|senior\s+guests?|recommend(?:ation|ed|ing)?|suggest(?:ion|ed|ing)?|suitable|parking|park\s+my\s+car|late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(
 			lower
 		) ||
+		parentOrSeniorArabic ||
 		/(?:قريب|قريبة|قرب|حول|حوالي|بجانب|منطقة|حي|معلم|مطاعم|محلات|أسواق|اسواق|صيدليات|خدمات|اول\s+مرة|أول\s+مرة|معتمر|عمرة|تنصح|ترشح|توصي|عائلات|عائلة|اسرة|أسرة|مناسب|مواقف|موقف|باركينج|ركن|سيارتي|سيارة|وصول\s+متأخر|متأخر|بالليل|ليلا|ليلًا|24\s*ساعة|استقبال)/i.test(
 			arabic
 		) ||
-		/(?:nearby|around|landmark|restaurants|shops|markets|pharmacy|firsttime|umrahguest|family|families|parking|latearrival|lateatnight|24hour|receptionhelp)/i.test(
+		/(?:nearby|around|landmark|restaurants|shops|markets|pharmacy|firsttime|umrahguest|family|families|parents|elderly|senior|seniors|recommend|recommendation|suggest|suggestion|suitable|parking|latearrival|lateatnight|24hour|receptionhelp)/i.test(
 			latinCompact
 		)
 	);
@@ -6020,11 +6025,17 @@ function selectedHotelLocalAreaAnswerText(sc = {}, st = {}, userText = "") {
 	const asksLateArrival =
 		/\b(?:late\s+at\s+night|late\s+arrival|24\s*-?\s*hour|reception\s+help)\b/i.test(lower) ||
 		/(?:وصول\s+متأخر|متأخر|بالليل|ليلا|ليلًا|24\s*ساعة|استقبال)/i.test(arabic);
+	const asksParentOrSenior =
+		/\b(?:parents?|elderly|seniors?|senior\s+guests?)\b/i.test(lower) ||
+		/(?:\u0648\u0627\u0644\u062f\u064a\u0646|\u0648\u0627\u0644\u062f\u064a|\u0648\u0627\u0644\u062f\u062a\u064a|\u0627\u0644\u0648\u0627\u0644\u062f|\u0627\u0644\u0648\u0627\u0644\u062f\u0629|\u0643\u0628\u0627\u0631\s+\u0627\u0644\u0633\u0646|\u0643\u0628\u064a\u0631\s+\u0627\u0644\u0633\u0646|\u0643\u0628\u064a\u0631\u0629\s+\u0627\u0644\u0633\u0646|\u0645\u0633\u0646|\u0645\u0633\u0646\u064a\u0646)/i.test(
+			arabic
+		);
 	const asksFamily =
+		asksParentOrSenior ||
 		/\b(?:famil(?:y|ies)|good\s+choice)\b/i.test(lower) ||
 		/(?:عائلات|عائلة|اسرة|أسرة|مناسب)/i.test(arabic);
 	const asksFirstTime =
-		/\b(?:first\s*time|umrah\s+guest|recommend)\b/i.test(lower) ||
+		/\b(?:first\s*time|umrah\s+guest|recommend(?:ation|ed|ing)?|suggest(?:ion|ed|ing)?|suitable)\b/i.test(lower) ||
 		/(?:اول\s+مرة|أول\s+مرة|معتمر|عمرة|تنصح|ترشح|توصي)/i.test(arabic);
 	const asksLandmark =
 		/\b(?:landmark|area|district)\b/i.test(lower) ||
