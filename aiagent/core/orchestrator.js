@@ -11885,7 +11885,7 @@ function cancellationRefundPolicyQuestionText(text = "") {
 		/\b(?:refund|refundable|return policy|cancellation policy|cancelation policy|cancellation terms|cancelation terms|can i cancel|could i cancel|is cancellation|free cancellation|money back|terms and conditions|terms)\b/i.test(
 			lower
 		) ||
-		/\b(?:what happens if (?:i|we) cancel|if (?:i|we) (?:book|reserve|make a reservation).{0,70}\bcancel|if (?:i|we) need to cancel later|need to cancel later|cancel later|how does cancellation work)\b/i.test(
+		/\b(?:what happens if (?:i|we) cancel|if (?:i|we) (?:book|reserve|make a reservation).{0,70}\bcancel|if (?:i|we) cancel after (?:booking|reservation)|if (?:i|we) need to cancel later|need to cancel later|cancel later|refund work|refund works|how does (?:the )?refund work|how does cancellation work|cancel.{0,50}refund|refund.{0,50}cancel)\b/i.test(
 			lower
 		) ||
 		/(?:\u0633\u064a\u0627\u0633\u0629\s*(?:\u0627\u0644)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639)|\u0647\u0644.{0,18}(?:\u0627\u0633\u062a\u0631\u062f|\u0627\u0633\u062a\u0631\u062c\u0639|\u0627\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639|\u0631\u062f\s+\u0627\u0644\u0645\u0628\u0644\u063a|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0623\u062d\u0643\u0627\u0645|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0627\u062d\u0643\u0627\u0645)/i.test(
