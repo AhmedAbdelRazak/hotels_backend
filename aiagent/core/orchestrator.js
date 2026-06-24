@@ -10606,6 +10606,7 @@ async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
 	if (!ref) return false;
 	const quote = ensureCurrentQuoteForSlots(st) || {};
 	await humanSend(io, sc, st, postBookingReservationSummaryText(sc, st, quote, ref), {
+		fast: true,
 		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 	});
 	st.waitFor = "post_booking_followup";
