@@ -10572,7 +10572,9 @@ async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
 	const ref = aiReservationReference(sc);
 	if (!ref) return false;
 	const quote = ensureCurrentQuoteForSlots(st) || {};
-	await humanSend(io, sc, st, postBookingReservationSummaryText(sc, st, quote, ref));
+	await humanSend(io, sc, st, postBookingReservationSummaryText(sc, st, quote, ref), {
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
 	st.waitFor = "post_booking_followup";
 	logStep(String(sc._id || ""), "post_booking.state_reply", {
 		confirmation: ref.confirmation_number || "",
@@ -12198,17 +12200,19 @@ function postBookingCloseText(sc = {}, st = {}) {
 }
 
 async function postBookingCloseReply(io, sc, st, userText = "") {
-	const instruction = botExperienceComplaintText(userText) ||
+	if (
+		botExperienceComplaintText(userText) ||
 		/\b(answer\s+(?:the\s+)?questions?|can't\s+you\s+answer|can'?t\s+you\s+answer)\b/i.test(
 			String(userText || "")
 		)
-		? "The guest is closing the chat and gave feedback that the assistant should answer direct questions. Apologize briefly, acknowledge the feedback sincerely, confirm the reservation is already created, and close warmly. Do not ask another question and do not push payment."
-		: "The guest said no/thanks after the final reservation-created message. Close warmly in one short human sentence. Do not ask another question and do not push payment.";
-	const reply = await write(io, sc, st, instruction, {
-		latestUserMessage: userText,
-		slots: st.slots,
-	});
-	return reply || postBookingCloseText(sc, st);
+	) {
+		const lang = languageOf(sc, st);
+		if (/arabic/i.test(lang)) {
+			return "\u0623\u0639\u062a\u0630\u0631 \u0644\u0643\u060c \u0648\u0634\u0643\u0631\u0627 \u0644\u062a\u0646\u0628\u064a\u0647\u0643. \u062d\u062c\u0632\u0643 \u0645\u0624\u0643\u062f\u060c \u0648\u0623\u062a\u0645\u0646\u0649 \u0644\u0643 \u0625\u0642\u0627\u0645\u0629 \u0645\u0648\u0641\u0642\u0629.";
+		}
+		return "I am sorry about that, and thank you for the feedback. Your reservation is confirmed, and I hope you have a wonderful stay.";
+	}
+	return postBookingCloseText(sc, st);
 }
 
 function postBookingClarifyText(sc = {}, st = {}) {
@@ -12318,31 +12322,17 @@ async function handlePostBookingDeliveryRequest(io, sc, st, userText = "") {
 			delivery?.links?.reservationConfirmation || links.reservationDetails,
 		payment: delivery?.links?.payment || links.payment,
 	};
-	const reply = await write(
-		io,
-		sc,
-		st,
-		"The guest asked after a completed AI-created reservation for the confirmation email, WhatsApp confirmation, or confirmation link. Use the real deliveryStatus and links provided here. Do not ask for details already in the booking. Do not claim an email or WhatsApp was sent unless that channel status is exactly 'sent'. If sharing a link, use markdown with the label [Reservation Confirmation] and never show the raw full URL. Keep it concise and stay on the guest's request.",
-		{
-			latestUserMessage: userText,
-			request,
-			deliveryStatus,
-			confirmation,
-			links: linkContext,
-			reservationAlreadyCreated: true,
-		}
-	);
 	await humanSend(
 		io,
 		sc,
 		st,
-		reply ||
-			confirmationDeliveryFallbackText(sc, st, {
-				channel,
-				confirmation,
-				links: linkContext,
-				delivery: deliveryStatus,
-			})
+		confirmationDeliveryFallbackText(sc, st, {
+			channel,
+			confirmation,
+			links: linkContext,
+			delivery: deliveryStatus,
+		}),
+		{ targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 	);
 	st.waitFor = "post_booking_followup";
 	return true;
@@ -14045,6 +14035,10 @@ async function planTurn(io, sc) {
 			protectLatestGuestDateChange: Boolean(userText),
 		});
 		recoverBookingStageFromConversation(sc, st);
+		if (st.waitFor === "post_booking_followup") {
+			const handled = await handlePostBookingFollowup(io, sc, st, userText);
+			if (handled) return;
+		}
 		if (
 			st.hotel &&
 			selectedHotelFactQuestionText(userText) &&
@@ -14222,10 +14216,6 @@ async function planTurn(io, sc) {
 				directUpdateLu,
 				{ forceDateUpdate: true }
 			);
-			if (handled) return;
-		}
-		if (st.waitFor === "post_booking_followup") {
-			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
 		}
 		if (st.pendingRoomAlternative) {
