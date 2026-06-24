@@ -137,6 +137,11 @@ const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 30
 	min: 500,
 	max: 8000,
 });
+const AI_CONFIRMATION_DISPATCH_DELAY_MS = intFromEnv(
+	"AI_CONFIRMATION_DISPATCH_DELAY_MS",
+	12000,
+	{ min: 1000, max: 60000 }
+);
 const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 	min: 5000,
 	max: 5 * 60 * 1000,
@@ -1888,7 +1893,11 @@ function latestEmailFromText(text = "") {
 }
 
 function latestPhoneFromText(text = "") {
-	const matches = String(text || "").match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9 \t().-]{4,}/g);
+	const withoutEmails = String(text || "").replace(
+		/[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/g,
+		" "
+	);
+	const matches = withoutEmails.match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9 \t().-]{4,}/g);
 	if (!matches?.length) return "";
 	for (let i = matches.length - 1; i >= 0; i -= 1) {
 		const phone = cleanPhoneCandidate(matches[i]);
@@ -12182,7 +12191,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	await humanSend(io, sc, st, finalText, {
 		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
-	setTimeout(() => {
+	const dispatchTimer = setTimeout(() => {
 		dispatchAiReservationConfirmation({
 			caseId,
 			reservation,
@@ -12190,7 +12199,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 			includeGuestEmail: Boolean(st.slots.email),
 			includeInternalEmail: true,
 			includeOwnerEmail: true,
-			includeGuestWhatsApp: true,
+			includeGuestWhatsApp: false,
 			includeAdminWhatsApp: true,
 			guestEmail: st.slots.email || "",
 		})
@@ -12206,7 +12215,8 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 					error: String(error?.message || error || "").slice(0, 200),
 				});
 			});
-	}, 0);
+	}, AI_CONFIRMATION_DISPATCH_DELAY_MS);
+	if (typeof dispatchTimer?.unref === "function") dispatchTimer.unref();
 	return true;
 }
 
