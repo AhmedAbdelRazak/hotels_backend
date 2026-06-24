@@ -2403,6 +2403,14 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		assistantHistory.find((assistant) => assistantBookingStageFromMessage(assistant)) ||
 			lastAssistant
 	);
+	const hasRecoverableBookingContext = Boolean(
+		st.reviewSent ||
+			st.quote ||
+			(st.hotel &&
+				st.slots?.checkinISO &&
+				st.slots?.checkoutISO &&
+				st.slots?.roomTypeKey)
+	);
 	if (isReservationDetailStep(st)) {
 		if (stage === "finalize") {
 			st.reviewSent = true;
@@ -2415,20 +2423,24 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		return;
 	}
 	if (stage === "finalize") {
+		if (!hasRecoverableBookingContext) return;
 		st.reviewSent = true;
 		st.waitFor = "finalize";
 		return;
 	}
 	if (stage === "email_or_skip") {
+		if (!hasRecoverableBookingContext) return;
 		st.waitFor = "email_or_skip";
 		return;
 	}
 	if (stage === "reservation_details") {
+		if (!hasRecoverableBookingContext) return;
 		st.reviewSent = true;
 		st.waitFor = "reservation_details";
 		return;
 	}
 	if (stage === "reviewConfirm") {
+		if (!hasRecoverableBookingContext) return;
 		st.reviewSent = true;
 		st.waitFor = "reviewConfirm";
 		return;
@@ -8856,6 +8868,15 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 function reservationDetailFieldPayloadText(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
+	if (
+		selectedHotelRoomQuestionText(value) ||
+		selectedHotelFactQuestionText(value) ||
+		cancellationRefundPolicyQuestionText(value) ||
+		wantsDiscountQuestion(value) ||
+		wantsPaymentHelp(value)
+	) {
+		return false;
+	}
 	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
 	if (explicitNameCandidateFromText(value)) return true;
 	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
