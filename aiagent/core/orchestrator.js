@@ -118,22 +118,22 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 2200, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3600, {
 	min: 500,
 	max: 15000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 3600, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4800, {
 		min: 500,
 		max: 15000,
 	})
 );
-const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 3400, {
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4200, {
 	min: 500,
 	max: 8000,
 });
-const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3000, {
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3800, {
 	min: 500,
 	max: 8000,
 });
@@ -148,21 +148,29 @@ const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 });
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
-	1800,
+	3000,
 	{ min: 0, max: 7000 }
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 2600, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3900, {
 		min: 0,
 		max: 9000,
 	})
 );
 const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	"AI_PLANNING_TYPING_DELAY_MS",
-	700,
+	3200,
 	{ min: 0, max: 5000 }
 );
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2800, {
+	min: 0,
+	max: 5000,
+});
+const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 3500, {
+	min: 500,
+	max: 10000,
+});
 const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
 	min: 30000,
 	max: 60 * 60 * 1000,
@@ -7209,6 +7217,23 @@ function idleQuietRemainingMs(st = {}, anchor = {}, quietMs = 0) {
 	return Math.max(0, deadline - now());
 }
 
+function guestReplyQuietRemainingMs(st = {}, latestGuestAt = 0) {
+	const guestAt = Number(latestGuestAt || 0);
+	const activityAt = Math.max(
+		Number.isFinite(guestAt) ? guestAt : 0,
+		Number(st.lastGuestActivityAt || 0)
+	);
+	const quietDeadline = activityAt + AI_GUEST_REPLY_QUIET_MS;
+	const typingDeadline = Number(st.guestTypingUntil || 0);
+	return Math.max(0, quietDeadline - now(), typingDeadline - now());
+}
+
+function planningTypingDelayMs(st = {}) {
+	const guestAt =
+		Number(st.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
+	return Math.max(0, guestAt + AI_PLANNING_TYPING_DELAY_MS - now());
+}
+
 async function getIdleReadyCase(caseId, anchor) {
 	const latestCase = await getSupportCaseById(caseId);
 	if (!latestCase) return null;
@@ -7543,15 +7568,14 @@ async function humanSend(
 		chars: (text || "").length,
 	});
 	const waitStartedAt = now();
-	const typingVisibleAfter =
-		waitStartedAt +
-		Math.min(
-			waitMs,
+	const typingVisibleAfter = Math.max(
+		waitStartedAt,
+		turnStartedAt +
 			randomBetween(
 				AI_TYPING_INDICATOR_DELAY_MIN_MS,
 				AI_TYPING_INDICATOR_DELAY_MAX_MS
 			)
-		);
+	);
 	let typingVisible = false;
 	while (st.guestTypingUntil > now()) await sleep(300);
 	while (now() - waitStartedAt < waitMs) {
@@ -14720,6 +14744,17 @@ async function planTurn(io, sc) {
 			) {
 				return;
 			}
+			const typingRemainingMs = Number(currentState.guestTypingUntil || 0) - now();
+			if (typingRemainingMs > 0) {
+				planningTypingTimer = setTimeout(
+					schedulePlanningTyping,
+					Math.min(typingRemainingMs + 50, 750)
+				);
+				if (typeof planningTypingTimer?.unref === "function") {
+					planningTypingTimer.unref();
+				}
+				return;
+			}
 			emitTyping(io, caseId, currentState, true);
 			planningTyping = true;
 		};
@@ -14745,6 +14780,25 @@ async function planTurn(io, sc) {
 		if (userText) {
 			markGuestActivity(caseId, { activityAt: st.activeTurnGuestAt });
 		}
+		if (userText && hasAiAssistantReplyAfterLatestGuest(sc)) {
+			st.activeTurnHadReply = true;
+			logStep(caseId, "turn.skip", {
+				reason: "latest_guest_already_answered",
+			});
+			return;
+		}
+		if (userText) {
+			const quietRemainingMs = guestReplyQuietRemainingMs(st, st.activeTurnGuestAt);
+			if (quietRemainingMs > 25) {
+				logStep(caseId, "turn.wait_guest_quiet", {
+					remainingMs: quietRemainingMs,
+					guestTypingUntil: Number(st.guestTypingUntil || 0),
+					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
+				});
+				schedulePlanTurn(io, caseId, { delayMs: quietRemainingMs + 35 });
+				return;
+			}
+		}
 		if (userText) {
 			hydrateKnownSlotsFromConversation(sc, st, {
 				protectLatestGuestDateChange: Boolean(userText),
@@ -14755,13 +14809,6 @@ async function planTurn(io, sc) {
 			AI_REPLY_TARGET_MIN_MS,
 			AI_REPLY_TARGET_MAX_MS
 		);
-		if (userText && hasAiAssistantReplyAfterLatestGuest(sc)) {
-			st.activeTurnHadReply = true;
-			logStep(caseId, "turn.skip", {
-				reason: "latest_guest_already_answered",
-			});
-			return;
-		}
 		if (userText && aiReservationReference(sc)) {
 			if (!severeAbusiveGuestText(userText)) {
 				updateActiveLanguageFromText(sc, st, userText);
@@ -14957,8 +15004,11 @@ async function planTurn(io, sc) {
 		if (userText || !hasAiAssistantReply(sc)) {
 			planningTypingTimer = setTimeout(
 				schedulePlanningTyping,
-				AI_PLANNING_TYPING_DELAY_MS
+				planningTypingDelayMs(st)
 			);
+			if (typeof planningTypingTimer?.unref === "function") {
+				planningTypingTimer.unref();
+			}
 		}
 		if (await handlePendingDateChangeChoice(io, sc, st, userText)) return;
 		hydrateKnownSlotsFromConversation(sc, st, {
@@ -17159,7 +17209,7 @@ function wireSocket(io) {
 		});
 
 		socket.on("typing", ({ caseId }) => {
-			markGuestActivity(caseId, { typingHoldMs: 2500 });
+			markGuestActivity(caseId, { typingHoldMs: AI_GUEST_TYPING_HOLD_MS });
 		});
 
 		socket.on("sendMessage", async (message) => {
