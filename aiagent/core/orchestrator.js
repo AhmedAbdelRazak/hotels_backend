@@ -1562,6 +1562,20 @@ function aiMessageClientTag(caseId, prefix = "ai") {
 		.slice(2, 10)}`;
 }
 
+function isAiQaSupportCase(sc = {}) {
+	const markerText = [
+		sc.sourceWebsite,
+		sc.sourcePage,
+		sc.sourceUrl,
+		sc.clientName,
+		sc.displayName1,
+		sc.clientContact,
+	]
+		.filter(Boolean)
+		.join(" ");
+	return /\b(?:codex|jbqa|ai\s*qa|chatbot\s*qa)\b/i.test(markerText);
+}
+
 function messageTime(message = {}) {
 	const time = new Date(message.date || 0).getTime();
 	return Number.isFinite(time) ? time : 0;
@@ -12195,6 +12209,13 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	await humanSend(io, sc, st, finalText, {
 		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
+	if (isAiQaSupportCase(sc)) {
+		logStep(caseId, "reservation.confirmation_dispatch_skipped", {
+			reason: "qa_support_case",
+			confirmation: reservation.confirmation_number,
+		});
+		return true;
+	}
 	const dispatchTimer = setTimeout(() => {
 		dispatchAiReservationConfirmation({
 			caseId,
