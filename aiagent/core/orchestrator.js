@@ -14228,7 +14228,8 @@ async function planTurn(io, sc) {
 			selectedHotelFactQuestionText(userText) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
-			!explicitlyExistingReservationIntent(userText) &&
+			(!explicitlyExistingReservationIntent(userText) ||
+				cancellationRefundPolicyQuestionText(userText)) &&
 			!wantsPaymentHelp(userText)
 		) {
 			logStep(caseId, "selected_hotel.fact_immediate", {
@@ -14616,7 +14617,8 @@ async function planTurn(io, sc) {
 			selectedHotelFactQuestionText(userText) &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
-			!explicitlyExistingReservationIntent(userText)
+			(!explicitlyExistingReservationIntent(userText) ||
+				cancellationRefundPolicyQuestionText(userText))
 		) {
 			await answerSelectedHotelFactQuestion(io, sc, st, userText);
 			return;
