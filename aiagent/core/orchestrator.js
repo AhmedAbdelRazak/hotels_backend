@@ -14843,7 +14843,9 @@ async function planTurn(io, sc) {
 			const isReservationDetailPayload =
 				isReservationDetailStep(st) &&
 				!severeAbusiveGuestText(userText) &&
-				reservationDetailFieldPayloadText(userText);
+				(reservationDetailFieldPayloadText(userText) ||
+					(["reviewConfirm", "finalize"].includes(st.waitFor) &&
+						confirmsText(userText)));
 			const quietMs = isReservationDetailPayload
 				? AI_RESERVATION_DETAIL_QUIET_MS
 				: AI_GUEST_REPLY_QUIET_MS;
