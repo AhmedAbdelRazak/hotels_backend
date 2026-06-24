@@ -11028,6 +11028,39 @@ function latestGuestAcceptedProceedAction(sc = {}, userText = "") {
 	return Boolean(assistantMessageSuggestsProceed(assistant) && confirmsText(userText));
 }
 
+function explicitProceedCommandText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:proceed|continue|go ahead|book it|book this|book the room|reserve it|reserve this|reserve the room|make a reservation|make the reservation|create a reservation|start the reservation|finalize|complete booking|complete reservation|confirm booking|confirm reservation)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u062a\u0627\u0628\u0639|\u062b\u0628\u062a).{0,32}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0644\u063a\u0631\u0641\u0629|\u0627\u0644\u063a\u0631\u0641\u0647)/i.test(
+			arabic
+		) ||
+		/(?:goahead|bookit|bookthis|booktheroom|reserveit|reservethis|reservetheroom|makeareservation|makethereservation|createareservation|startthereservation|finalizethis|completebooking|completereservation|confirmbooking|confirmreservation|proceedbooking|continuebooking)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function proceedStageDirectInformationRequest(sc = {}, st = {}, userText = "", lu = {}) {
+	const text = String(userText || "").trim();
+	if (!text) return false;
+	return Boolean(
+		wantsPaymentHelp(text) ||
+			wantsDiscountQuestion(text) ||
+			hotelContactDetailsQuestionText(text) ||
+			hotelContactFollowupQuestionText(sc, text) ||
+			selectedHotelFactQuestionText(text) ||
+			selectedHotelRoomQuestionText(text) ||
+			lu?.amenity ||
+			detectAmenityQuestion(text) ||
+			(st.hotel && directHotelRelationshipQuestionText(text)) ||
+			(st.hotel && crossHotelRequestText(text)) ||
+			broadGeneralSupportQuestionText(text, st, lu)
+	);
+}
+
 async function handleProceedStageInput(
 	io,
 	sc,
@@ -11040,29 +11073,22 @@ async function handleProceedStageInput(
 	if (st.waitFor !== "proceed" && !acceptedProceed) return false;
 	const quote = ensureCurrentQuoteForSlots(st);
 	if (!quote) return false;
+	const directInfoRequest = proceedStageDirectInformationRequest(sc, st, userText, lu);
 	if (!quote.available) {
-		if (acceptedProceed || quoteConfirmationText(userText, st)) {
+		if (!directInfoRequest && (acceptedProceed || quoteConfirmationText(userText, st))) {
 			return sendUnavailableRoomRecovery(io, sc, st, quote);
 		}
 		return false;
 	}
 	st.waitFor = "proceed";
+	if (directInfoRequest && !explicitProceedCommandText(userText)) return false;
 	if (acceptedProceed || quoteConfirmationText(userText, st)) {
 		resumeBookingNudge(st);
 		return beginReservationDetailsAfterQuote(io, sc, st, String(sc._id || ""), {
 			fast: true,
 		});
 	}
-	if (
-		wantsPaymentHelp(userText) ||
-		hotelContactDetailsQuestionText(userText) ||
-		hotelContactFollowupQuestionText(sc, userText) ||
-		selectedHotelFactQuestionText(userText) ||
-		lu.amenity ||
-		detectAmenityQuestion(userText)
-	) {
-		return false;
-	}
+	if (directInfoRequest) return false;
 	if (declinesText(userText)) {
 		pauseBookingNudge(st);
 		const msg = await write(
