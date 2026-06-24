@@ -8554,6 +8554,68 @@ function nameCandidateLooksLikeNationality(value = "") {
 	].includes(normalized);
 }
 
+function directNationalityAlias(value = "") {
+	const compact = asciiize(value)
+		.toLowerCase()
+		.replace(/[.\s_-]+/g, "");
+	const aliases = {
+		us: "American",
+		usa: "American",
+		unitedstates: "American",
+		unitedstatesofamerica: "American",
+		uk: "British",
+		gb: "British",
+		greatbritain: "British",
+		unitedkingdom: "British",
+		uae: "Emirati",
+		unitedarabemirates: "Emirati",
+		ksa: "Saudi",
+		saudiarabia: "Saudi",
+	};
+	return aliases[compact] || "";
+}
+
+function rejectsNationalityCandidate(value = "") {
+	const raw = String(value || "").replace(/\s+/g, " ").trim();
+	if (!raw || raw.length > 60) return true;
+	if (latestEmailFromText(raw) || cleanPhoneCandidate(raw)) return true;
+	if (looksLikeStayDateCandidate(raw)) return true;
+	if (correctionText(raw) || guestHurryOrChaseText(raw) || reservationDetailChaseText(raw)) {
+		return true;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	if (/[?؟]/.test(raw)) return true;
+	if (
+		/\b(?:already|earlier|before|again|told|said|mentioned|asked|you|your|sara|agent|bot|robot|wrong|fix|check|above|chat|message|question|answer)\b/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:alreadytold|toldyou|saidbefore|saidit|mentionedit|checkabove|askagain|youasked|sara|agent|bot|robot|wrong|fix|message|chat)/i.test(
+			latinCompact
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:قلتلك|قولتلك|قلت\s+لك|قولت\s+لك|ذكرت|قلت\s+قبل|سالت|سألت|تاني|مرة\s+ثانية|فوق|غلط|صحح|شات|رسالة|البوت|سارة)/i.test(
+			arabic
+		)
+	) {
+		return true;
+	}
+	return false;
+}
+
+function hasUsableNationality(value = "") {
+	const raw = String(value || "").replace(/\s+/g, " ").trim();
+	if (!raw || rejectsNationalityCandidate(raw)) return false;
+	if (directNationalityAlias(raw) || nationalityHintFromText(raw)) return true;
+	return /^[A-Za-z][A-Za-z\s-]{2,40}$/.test(asciiize(raw));
+}
+
 function shouldReplaceCapturedGuestName(st = {}, candidate = "", { explicit = false } = {}) {
 	if (!candidate || !st?.slots) return false;
 	if (nameCandidateLooksLikeNationality(candidate)) return false;
@@ -8641,6 +8703,8 @@ const NATIONALITY_HINTS = [
 
 function nationalityHintFromText(text = "") {
 	const value = String(text || "");
+	const direct = directNationalityAlias(value);
+	if (direct) return direct;
 	const found = NATIONALITY_HINTS.find(([pattern]) => pattern.test(value));
 	return found ? found[1] : "";
 }
@@ -8659,18 +8723,36 @@ function explicitNationalityText(text = "") {
 	return "";
 }
 
+function nationalityCandidateFromText(text = "") {
+	const explicit = explicitNationalityText(text);
+	if (explicit) return explicit;
+	const lines = String(text || "")
+		.split(/[\n\r;|]+/)
+		.map((line) => stripFieldTail(line).replace(/^[\s:：,\-–—]+|[\s:：,\-–—]+$/g, ""))
+		.map((line) => line.trim())
+		.filter(Boolean);
+	for (const line of lines) {
+		if (line.length > 60) continue;
+		if (latestEmailFromText(line) || cleanPhoneCandidate(line)) continue;
+		if (looksLikeStayDateCandidate(line)) continue;
+		if (likelyGuestCountText(line)) continue;
+		if (nationalityHintFromText(line) || directNationalityAlias(line)) return line;
+	}
+	return "";
+}
+
 async function normalizeNationalityFromText(text = "", language = "English") {
 	const explicit = explicitNationalityText(text);
-	const hint = nationalityHintFromText(explicit || text);
+	const candidate = explicit || nationalityCandidateFromText(text) || String(text || "").trim();
+	if (rejectsNationalityCandidate(candidate)) return "";
+	const hint = nationalityHintFromText(candidate);
 	if (hint) return hint;
-	const candidate = explicit || String(text || "").trim();
 	if (!candidate || candidate.length > 80) return "";
 	const compactCandidate = asciiize(candidate)
 		.toLowerCase()
 		.replace(/[.\s_-]+/g, "");
-	if (["us", "usa", "unitedstates", "unitedstatesofamerica"].includes(compactCandidate)) {
-		return "American";
-	}
+	const direct = directNationalityAlias(compactCandidate);
+	if (direct) return direct;
 	const asciiCandidate = asciiize(candidate).trim();
 	if (/^[A-Za-z][A-Za-z\s-]{2,40}$/.test(asciiCandidate)) {
 		const nat = await validateNationalityLLM(asciiCandidate, language);
@@ -8688,7 +8770,9 @@ function missingMandatoryReservationFields(st = {}) {
 	const slots = st.slots || {};
 	const missing = [];
 	if (!hasUsableFullName(slots.fullName || slots.name || "")) missing.push("fullName");
-	if (AI_REQUIRE_NATIONALITY && !slots.nationality) missing.push("nationality");
+	if (AI_REQUIRE_NATIONALITY && !hasUsableNationality(slots.nationality)) {
+		missing.push("nationality");
+	}
 	if (!cleanPhoneCandidate(slots.phone || "")) missing.push("phone");
 	if (!slots.adultsProvided || !countProvided(slots.adults) || Number(slots.adults) < 1) {
 		missing.push("adults");
@@ -9396,7 +9480,7 @@ function applyReservationDetailsInference(st = {}, inferred = {}) {
 		st.slots.emailSkipped = true;
 	}
 	const nationality = String(inferred.nationality || "").trim();
-	if (AI_REQUIRE_NATIONALITY && nationality && nationality.length <= 60) {
+	if (AI_REQUIRE_NATIONALITY && hasUsableNationality(nationality)) {
 		st.slots.nationality = nationality;
 	}
 	const adults = reservationDetailCount(inferred.adults, { allowZero: false });
@@ -9534,7 +9618,8 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		st.slots.name = name;
 		directFieldCaptured = true;
 	}
-	const nationalityHint = nationalityHintFromText(explicitNationalityText(fullText) || fullText);
+	const nationalitySource = nationalityCandidateFromText(fullText);
+	const nationalityHint = nationalityHintFromText(nationalitySource || fullText);
 	if (AI_REQUIRE_NATIONALITY && nationalityHint) {
 		if (!st.slots.nationality) st.slots.nationality = nationalityHint;
 		directFieldCaptured = true;
@@ -9567,14 +9652,14 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		);
 	}
 	const hasExplicitNationalitySignal =
-		Boolean(explicitNationalityText(fullText)) || Boolean(nationalityHintFromText(fullText));
+		Boolean(nationalitySource) || Boolean(nationalityHintFromText(fullText));
 	if (
 		AI_REQUIRE_NATIONALITY &&
-		!st.slots.nationality &&
+		!hasUsableNationality(st.slots.nationality) &&
 		(!directFieldCaptured || hasExplicitNationalitySignal)
 	) {
 		const nationality = await withSoftTimeout(
-			normalizeNationalityFromText(fullText, languageOf(sc, st)),
+			normalizeNationalityFromText(nationalitySource || fullText, languageOf(sc, st)),
 			2000,
 			""
 		);
@@ -9593,7 +9678,7 @@ function reservationIdentityOrContactPayloadText(text = "") {
 	if (!value.trim()) return false;
 	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
 	if (explicitNameCandidateFromText(value)) return true;
-	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
+	if (nationalityHintFromText(nationalityCandidateFromText(value) || value)) return true;
 	return /\b(?:full\s*name|guest\s*name|passport\s*name|my\s+name|name\s+is|nationality|country|phone|mobile|whats\s*app|whatsapp|email|e-mail)\b/i.test(
 		value
 	);
