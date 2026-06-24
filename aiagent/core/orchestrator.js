@@ -10300,6 +10300,27 @@ function reservationDetailsSummaryQuestionText(text = "") {
 	);
 }
 
+function bookingStayFieldQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:confirmed\s+)?(?:check[\s-]?in|check[\s-]?out|checkout|arrival|departure|dates?)\b.{0,60}\b(?:again|confirmed|reserved|booked|booking|reservation|stay|we|my)\b/i.test(
+			lower
+		) ||
+		/\b(?:what|which|remind|repeat|tell)\b.{0,50}\b(?:room|room\s+type|check[\s-]?in|check[\s-]?out|checkout|dates?)\b/i.test(
+			lower
+		) ||
+		/\b(?:which|what)\s+(?:room|room\s+type)\s+(?:did\s+)?(?:we|i)\s+(?:reserve|book|choose|confirm)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u063a\u0631\u0641\u0629|\u0646\u0648\u0639\s+\u0627\u0644\u063a\u0631\u0641\u0629).{0,40}(?:\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u0627\u0644\u062d\u062c\u0632|\u0645\u0624\u0643\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f)|(?:\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u0627\u0644\u062d\u062c\u0632|\u0645\u0624\u0643\u062f).{0,40}(?:\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u063a\u0631\u0641\u0629|\u0646\u0648\u0639\s+\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+			arabic
+		) ||
+		/(?:checkindate|checkoutdate|bookingdates|reservationdates|reservedroom|bookedroom|roomtypeagain|whichroomdidwereserve|whichroomdidibook|confirmedroom)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function confirmationNumberQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	return (
@@ -10325,6 +10346,7 @@ function bookingStateQuestionText(text = "") {
 	return (
 		repeatPriceQuestionText(text) ||
 		reservationDetailsSummaryQuestionText(text) ||
+		bookingStayFieldQuestionText(text) ||
 		confirmationNumberQuestionText(text)
 	);
 }
@@ -12154,35 +12176,37 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		quoteForCreate,
 		links
 	);
-	await humanSend(io, sc, st, finalText, {
-		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
-	});
-	dispatchAiReservationConfirmation({
-		caseId,
-		reservation,
-		mode: "initial",
-		includeGuestEmail: Boolean(st.slots.email),
-		includeInternalEmail: true,
-		includeOwnerEmail: true,
-		includeGuestWhatsApp: true,
-		includeAdminWhatsApp: true,
-		guestEmail: st.slots.email || "",
-	})
-		.then((delivery) => {
-			logStep(caseId, "reservation.confirmation_dispatched", {
-				confirmation: reservation.confirmation_number,
-				status: confirmationDeliverySummary(delivery),
-			});
-		})
-		.catch((error) => {
-			logStep(caseId, "reservation.confirmation_dispatch_failed", {
-				confirmation: reservation.confirmation_number,
-				error: String(error?.message || error || "").slice(0, 200),
-			});
-		});
 	st.waitFor = "post_booking_followup";
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;
+	await humanSend(io, sc, st, finalText, {
+		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
+	});
+	setTimeout(() => {
+		dispatchAiReservationConfirmation({
+			caseId,
+			reservation,
+			mode: "initial",
+			includeGuestEmail: Boolean(st.slots.email),
+			includeInternalEmail: true,
+			includeOwnerEmail: true,
+			includeGuestWhatsApp: true,
+			includeAdminWhatsApp: true,
+			guestEmail: st.slots.email || "",
+		})
+			.then((delivery) => {
+				logStep(caseId, "reservation.confirmation_dispatched", {
+					confirmation: reservation.confirmation_number,
+					status: confirmationDeliverySummary(delivery),
+				});
+			})
+			.catch((error) => {
+				logStep(caseId, "reservation.confirmation_dispatch_failed", {
+					confirmation: reservation.confirmation_number,
+					error: String(error?.message || error || "").slice(0, 200),
+				});
+			});
+	}, 0);
 	return true;
 }
 
@@ -12233,6 +12257,14 @@ function postBookingClarifyText(sc = {}, st = {}) {
 function isPostBookingClosure(text = "") {
 	const normalized = String(text || "").trim().toLowerCase();
 	if (!normalized) return false;
+	if (
+		/[?؟]/.test(normalized) ||
+		/\b(?:how\s+are\s+you|can\s+you|could\s+you|please\s+(?:tell|send|share|repeat|remind)|tell\s+me|what|where|when|why|how\s+(?:far|much|many|do|can|is)|is\s+there|do\s+you|does\s+the|which|summarize|summary|recap|remind|repeat)\b/i.test(
+			normalized
+		)
+	) {
+		return false;
+	}
 	if (
 		/^(no|nope|no thanks|no thank you|nothing|that's all|that is all|all good|thanks|thank you)\b/i.test(
 			normalized
@@ -13197,15 +13229,22 @@ async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "")
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
-	const handledDeliveryRequest = await handlePostBookingDeliveryRequest(
-		io,
-		sc,
-		st,
-		userText
-	);
-	if (handledDeliveryRequest) return true;
-	const handledStateQuestion = await answerPostBookingStateQuestion(io, sc, st, userText);
+	const deliveryRequest = confirmationRequestSignals(userText);
+	const asksDelivery =
+		deliveryRequest.email || deliveryRequest.whatsapp || deliveryRequest.link;
+	const handledStateQuestion = !asksDelivery
+		? await answerPostBookingStateQuestion(io, sc, st, userText)
+		: false;
 	if (handledStateQuestion) return true;
+	if (asksDelivery) {
+		const handledDeliveryRequest = await handlePostBookingDeliveryRequest(
+			io,
+			sc,
+			st,
+			userText
+		);
+		if (handledDeliveryRequest) return true;
+	}
 	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
 		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
 	}
@@ -13214,6 +13253,15 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		hotelContactFollowupQuestionText(sc, userText)
 	) {
 		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+	}
+	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
+		return answerSelectedHotelRoomQuestion(
+			io,
+			sc,
+			st,
+			userText,
+			mapRoomToKey(userText) || null
+		);
 	}
 	if (st.hotel && selectedHotelFactQuestionText(userText)) {
 		return answerSelectedHotelFactQuestion(io, sc, st, userText);
@@ -13229,14 +13277,7 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		return answerVagueHajjInquiry(io, sc, st, userText);
 	}
 	if (botExperienceComplaintText(userText) && !isPostBookingConcreteRequest(userText)) {
-		const reply = await write(
-			io,
-			sc,
-			st,
-			"The guest gave feedback after the reservation was created. Apologize briefly, acknowledge that direct questions should be answered directly, and close warmly unless they ask for a specific new thing. Do not repeat booking details and do not push payment.",
-			{ latestUserMessage: userText, slots: st.slots }
-		);
-		await humanSend(io, sc, st, reply || postBookingCloseText(sc, st));
+		await humanSend(io, sc, st, await postBookingCloseReply(io, sc, st, userText));
 		st.waitFor = null;
 		return true;
 	}
@@ -13246,18 +13287,10 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		return true;
 	}
 	if (!isPostBookingConcreteRequest(userText)) {
-		const reply = await write(
-			io,
-			sc,
-			st,
-			"The guest sent a post-booking note without a clear new request. Reply naturally and briefly, acknowledging the message. Do not repeat reservation details and do not push payment.",
-			{ latestUserMessage: userText }
-		);
-		await humanSend(io, sc, st, reply || postBookingCloseText(sc, st));
-		st.waitFor = null;
+		await humanSend(io, sc, st, postBookingClarifyText(sc, st));
+		st.waitFor = "post_booking_followup";
 		return true;
 	}
-	st.waitFor = null;
 	return false;
 }
 
