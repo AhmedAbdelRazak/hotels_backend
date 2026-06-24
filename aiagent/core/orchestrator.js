@@ -14362,6 +14362,15 @@ async function planTurn(io, sc) {
 			protectLatestGuestDateChange: Boolean(userText),
 		});
 		recoverBookingStageFromConversation(sc, st);
+		if (aiReservationReference(sc) && bookingStateQuestionText(userText)) {
+			const handledReservationState = await answerPostBookingStateQuestion(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handledReservationState) return;
+		}
 		if (st.waitFor === "post_booking_followup") {
 			const handled = await handlePostBookingFollowup(io, sc, st, userText);
 			if (handled) return;
