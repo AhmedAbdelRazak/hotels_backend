@@ -63,7 +63,7 @@ const SIGNAL_GROUPS = {
 	bus: {
 		lower: [/\b(?:bus|buses|shuttle|coach|transport|transportation|transfer)\b/i],
 		latinCompact: [
-			/(?:bus|buses|shuttle|coach|transport|transportation|transfer|bas|bis|mowaslat|naql|buskeharam|bustoharam)/i,
+			/(?:buses|shuttle|coach|transport|transportation|transfer|mowaslat|naql|buskeharam|bustoharam)/i,
 		],
 		arabic: [
 			/(?:\u0628\u0627\u0635|\u0628\u0627\u0635\u0627\u062a|\u062d\u0627\u0641\u0644\u0647|\u062d\u0627\u0641\u0644\u0627\u062a|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0634\u0627\u062a\u0644|\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a|\u062a\u0631\u0627\u0646\u0633\u0641\u0631|\u0628\u0633\u06cc\u06ba|\u092c\u0938|\u0628\u0627\u0633)/i,

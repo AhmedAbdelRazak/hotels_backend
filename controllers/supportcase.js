@@ -30,7 +30,7 @@ const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 const isAiAgentEnabled = () =>
 	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
 
-function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 100 } = {}) {
+function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
 	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
 		return;
 	}
@@ -1305,7 +1305,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {
-			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 100 });
+			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
 		}
 
 		res.status(200).json(updatedCase);
@@ -1522,7 +1522,7 @@ exports.createNewSupportCase = async (req, res) => {
 		// Emit Socket.IO event for new chat
 		req.io.emit("newChat", newCase);
 		if (aiEnabledForClient) {
-			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 150 });
+			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 25 });
 		}
 
 		// Email is best-effort and must not hold the public chat open.

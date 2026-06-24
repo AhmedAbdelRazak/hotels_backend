@@ -1828,6 +1828,15 @@ function preserveBookingWaitState(st = {}, previousWaitFor = "") {
 	if (recovered) st.waitFor = recovered;
 }
 
+function preserveBookingWaitStateForCase(sc = {}, st = {}, previousWaitFor = "") {
+	if (aiReservationReference(sc)) {
+		st.waitFor = "post_booking_followup";
+		st.reviewSent = false;
+		return;
+	}
+	preserveBookingWaitState(st, previousWaitFor);
+}
+
 function idleFollowupText(sc = {}, st = {}) {
 	const contextual = activeBookingContinuationText(sc, st, { idle: true });
 	if (contextual) return contextual;
@@ -2809,7 +2818,7 @@ function selectedHotelBusQuestionText(text = "") {
 		/(?:\u0628\u0627\u0635|\u0628\u0627\u0635\u0627\u062a|\u062d\u0627\u0641\u0644\u0647|\u062d\u0627\u0641\u0644\u0627\u062a|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0634\u0627\u062a\u0644|\u0628\u0633|\u0628\u0633\u06cc\u06ba|\u092c\u0938|\u0628\u0627\u0633)/i.test(
 			arabic
 		) ||
-		/(?:bus|buses|shuttle|coach|bas|bis|buskeharam|bustoharam)/i.test(
+		/(?:buses|shuttle|coach|buskeharam|bustoharam|harambus)/i.test(
 			latinCompact
 		);
 	const haramOrStation =
@@ -6300,7 +6309,12 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		fast: true,
 	});
 	if (!sent) return false;
-	st.waitFor = previousWaitFor || nextPivot(st);
+	if (aiReservationReference(sc)) {
+		st.waitFor = "post_booking_followup";
+		st.reviewSent = false;
+	} else {
+		st.waitFor = previousWaitFor || nextPivot(st);
+	}
 	logStep(String(sc._id), "selected_hotel.fact_reply", {
 		latestUserMessage: String(userText || "").slice(0, 160),
 		waitFor: st.waitFor,
@@ -10438,6 +10452,21 @@ function reservationDetailsSummaryQuestionText(text = "") {
 	);
 }
 
+function postBookingGeneralSummaryQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:summary|summarize|summarise|recap|brief recap|final recap)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0644\u062e\u0635|\u062e\u0644\u0627\u0635\u0629|\u0627\u062e\u062a\u0635\u0627\u0631|\u0628\u0627\u062e\u062a\u0635\u0627\u0631|\u0631\u0627\u062c\u0639|\u0645\u0631\u0627\u062c\u0639\u0629)/i.test(
+			arabic
+		) ||
+		/(?:summary|summarize|summarise|recap|briefrecap|finalrecap|molakhas|mokhtasar)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function bookingStayFieldQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	return (
@@ -10728,7 +10757,12 @@ function postBookingReservationSummaryText(sc = {}, st = {}, quote = {}, ref = n
 }
 
 async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
-	if (!bookingStateQuestionText(userText)) return false;
+	if (
+		!bookingStateQuestionText(userText) &&
+		!postBookingGeneralSummaryQuestionText(userText)
+	) {
+		return false;
+	}
 	const ref = aiReservationReference(sc);
 	if (!ref) return false;
 	const quote = ensureCurrentQuoteForSlots(st) || {};
@@ -12127,7 +12161,7 @@ async function answerCancellationRefundPolicyInquiry(
 	if (actualCancellation && !confirmation) {
 		st.waitFor = "reservation_cancellation_reference";
 	} else {
-		preserveBookingWaitState(st, previousWaitFor);
+		preserveBookingWaitStateForCase(sc, st, previousWaitFor);
 	}
 	st.pendingReservationCancellation = confirmation
 		? {
@@ -12995,7 +13029,7 @@ async function answerHotelContactDetailsInquiry(io, sc, st, userText = "") {
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
-	preserveBookingWaitState(st, previousWaitFor);
+	preserveBookingWaitStateForCase(sc, st, previousWaitFor);
 	logStep(String(sc._id), "hotel_contact.reply", {
 		sharedPhone: Boolean(phoneToShare),
 		sharedPublicPhone: Boolean(phoneToShare),
@@ -13014,7 +13048,7 @@ async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
-	preserveBookingWaitState(st, previousWaitFor);
+	preserveBookingWaitStateForCase(sc, st, previousWaitFor);
 	logStep(String(sc._id), "hotel_direct_relationship.reply", {
 		latestUserMessage: String(userText || "").slice(0, 160),
 		hotelName: localizedHotelName(sc, st),
@@ -13031,7 +13065,7 @@ async function answerConfidentialCompanyDocumentInquiry(io, sc, st, userText = "
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
 			? "post_booking_followup"
 			: "clarify";
-	preserveBookingWaitState(st, previousWaitFor);
+	preserveBookingWaitStateForCase(sc, st, previousWaitFor);
 	logStep(String(sc._id), "confidential_company_document.reply", {
 		latestUserMessage: String(userText || "").slice(0, 160),
 		hotelName: localizedHotelName(sc, st),
@@ -13186,7 +13220,7 @@ async function tryAnswerDirectGuestRequest(io, sc, st, userText = "", lu = {}) {
 			scheduleIdle: false,
 		});
 		st.waitFor = "clarify";
-		preserveBookingWaitState(st, previousWaitFor);
+		preserveBookingWaitStateForCase(sc, st, previousWaitFor);
 		return true;
 	}
 	if (kind === "selected_hotel_fact") {
@@ -13502,15 +13536,6 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		);
 		if (handledDeliveryRequest) return true;
 	}
-	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
-		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
-	}
-	if (
-		hotelContactDetailsQuestionText(userText) ||
-		hotelContactFollowupQuestionText(sc, userText)
-	) {
-		return answerHotelContactDetailsInquiry(io, sc, st, userText);
-	}
 	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
 		return answerSelectedHotelRoomQuestion(
 			io,
@@ -13523,11 +13548,26 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.hotel && selectedHotelFactQuestionText(userText)) {
 		return answerSelectedHotelFactQuestion(io, sc, st, userText);
 	}
+	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
+		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+	}
+	if (
+		hotelContactDetailsQuestionText(userText) ||
+		hotelContactFollowupQuestionText(sc, userText)
+	) {
+		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
 		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
 		if (sent) schedulePostBookingAutoClose(io, sc, st);
 		st.waitFor = null;
+		return true;
+	}
+	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
+	if (fastSmalltalk) {
+		await humanSend(io, sc, st, fastSmalltalk, { fast: true });
+		st.waitFor = "post_booking_followup";
 		return true;
 	}
 	if (vagueHajjInquiryText(userText)) {
@@ -14122,6 +14162,21 @@ async function planTurn(io, sc) {
 				reason: "latest_guest_already_answered",
 			});
 			return;
+		}
+		if (userText && aiReservationReference(sc)) {
+			if (!severeAbusiveGuestText(userText)) {
+				updateActiveLanguageFromText(sc, st, userText);
+			}
+			st.waitFor = "post_booking_followup";
+			st.reviewSent = false;
+			st.allowPostBookingReentry = true;
+			const handledPostBookingFollowup = await handlePostBookingFollowup(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handledPostBookingFollowup) return;
 		}
 		if (userText && st.waitFor === "post_booking_followup") {
 			if (!severeAbusiveGuestText(userText)) {
