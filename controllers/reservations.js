@@ -91,6 +91,9 @@ const PENDING_NOTIFICATION_CACHE_TTL_MS = Number(
 const PENDING_NOTIFICATION_COUNT_MAX_TIME_MS = Number(
 	process.env.PENDING_NOTIFICATION_COUNT_MAX_TIME_MS || 800
 );
+const AI_RESERVATION_INVENTORY_MAX_TIME_MS = Number(
+	process.env.AI_RESERVATION_INVENTORY_MAX_TIME_MS || 2500
+);
 const PENDING_NOTIFICATION_CACHE_MAX = 500;
 const RESERVATION_DETAILS_HOTEL_SELECT = [
 	"_id",
@@ -1651,12 +1654,22 @@ const validateReservationInventoryForCreate = async (
 		checkout_date: { $gt: new Date(`${stayDates[0]}T00:00:00.000Z`) },
 	})
 		.select("_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing orderTakeId createdByUserId requestingUserId orderTaker createdBy")
+		.maxTimeMS(AI_RESERVATION_INVENTORY_MAX_TIME_MS)
 		.lean()
 		.exec();
 
 	const excludedId = normalizeId(excludeReservationId);
 	const candidateReservations = reservations.filter(
 		(reservation) => !excludedId || normalizeId(reservation._id) !== excludedId
+	);
+	const candidateReservationSelections = new Map();
+	await Promise.all(
+		candidateReservations.map(async (reservation) => {
+			candidateReservationSelections.set(
+				normalizeId(reservation._id),
+				await getReservationRoomSelections(reservation)
+			);
+		})
 	);
 	const issues = [];
 	const roomSnapshots = [];
@@ -1690,7 +1703,8 @@ const validateReservationInventoryForCreate = async (
 				) {
 					continue;
 				}
-				const reservationSelections = await getReservationRoomSelections(reservation);
+				const reservationSelections =
+					candidateReservationSelections.get(normalizeId(reservation._id)) || [];
 				reserved += reservationSelections.reduce((sum, existingSelection) => {
 					return roomSelectionMatches(selection, existingSelection)
 						? sum + Math.max(1, Number(existingSelection.count || 1))

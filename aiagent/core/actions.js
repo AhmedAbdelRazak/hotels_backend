@@ -28,12 +28,51 @@ const AI_RESERVATION_ACTOR = {
 	roleDescription: "AI Chat",
 };
 const AI_RESERVATION_LOCK_TTL_MS = 2 * 60 * 1000;
+const AI_RESERVATION_QUERY_MAX_TIME_MS = intFromEnv(
+	"AI_RESERVATION_QUERY_MAX_TIME_MS",
+	2500,
+	{ min: 500, max: 10000 }
+);
+const AI_RESERVATION_CREATE_SLOW_LOG_MS = intFromEnv(
+	"AI_RESERVATION_CREATE_SLOW_LOG_MS",
+	800,
+	{ min: 100, max: 10000 }
+);
+
+function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
+	const parsed = parseInt(process.env[name] || "", 10);
+	const value = Number.isFinite(parsed) ? parsed : fallback;
+	return Math.min(max, Math.max(min, value));
+}
 
 function log(caseId, msg, payload = {}) {
 	if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() !== "true") {
 		return;
 	}
 	console.log(`[aiagent] case=${caseId} ${msg}`, payload);
+}
+function logSlowReservationCreateStep(caseId, step, elapsedMs, payload = {}) {
+	if (elapsedMs < AI_RESERVATION_CREATE_SLOW_LOG_MS) return;
+	console.log("[aiagent] reservation create step slow", {
+		caseId: String(caseId || ""),
+		step,
+		elapsedMs,
+		...payload,
+	});
+}
+async function timedReservationCreateStep(caseId, step, fn, payload = {}) {
+	const startedAt = Date.now();
+	try {
+		const result = await fn();
+		logSlowReservationCreateStep(caseId, step, Date.now() - startedAt, payload);
+		return result;
+	} catch (error) {
+		logSlowReservationCreateStep(caseId, `${step}.failed`, Date.now() - startedAt, {
+			...payload,
+			error: String(error?.message || error || "").slice(0, 200),
+		});
+		throw error;
+	}
 }
 function sleep(ms = 0) {
 	return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -143,8 +182,12 @@ function generateReservationConfirmationCandidate() {
 
 async function confirmationNumberExists(candidate) {
 	const [existsInReservations, existsInPending] = await Promise.all([
-		Reservations.exists({ confirmation_number: candidate }),
-		UncompleteReservations.exists({ confirmation_number: candidate }),
+		Reservations.exists({ confirmation_number: candidate })
+			.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+			.exec(),
+		UncompleteReservations.exists({ confirmation_number: candidate })
+			.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+			.exec(),
 	]);
 	return Boolean(existsInReservations || existsInPending);
 }
@@ -997,11 +1040,16 @@ async function findAiReservationForCase(caseId) {
 	if (!caseKey) return null;
 	const direct = await Reservations.findOne({ aiSupportCaseId: caseKey })
 		.sort({ createdAt: -1, _id: -1 })
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+		.lean()
+		.exec()
 		.catch(() => null);
 	if (direct) return direct;
 	const sc = await SupportCase.findById(caseKey)
 		.select("aiReservation")
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
 		.lean()
+		.exec()
 		.catch(() => null);
 	const confirmation = String(sc?.aiReservation?.confirmationNumber || "")
 		.trim()
@@ -1011,7 +1059,11 @@ async function findAiReservationForCase(caseId) {
 	if (reservationId) clauses.push({ _id: reservationId });
 	if (confirmation) clauses.push({ confirmation_number: confirmation });
 	if (!clauses.length) return null;
-	return Reservations.findOne({ $or: clauses }).catch(() => null);
+	return Reservations.findOne({ $or: clauses })
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+		.lean()
+		.exec()
+		.catch(() => null);
 }
 
 async function acquireAiReservationLock(caseId, fingerprint) {
@@ -1048,7 +1100,9 @@ async function acquireAiReservationLock(caseId, fingerprint) {
 		{ new: true }
 	)
 		.select("_id aiReservation")
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
 		.lean()
+		.exec()
 		.catch(() => null);
 	if (lock) return { locked: true, existing: null };
 	const racedExisting = await findAiReservationForCase(caseKey);
@@ -1079,7 +1133,10 @@ async function markAiReservationCreated(caseId, fingerprint, reservation) {
 				"aiReservation.lastError": "",
 			},
 		}
-	).catch(() => {});
+	)
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+		.exec()
+		.catch(() => {});
 }
 
 async function markAiReservationFailed(caseId, fingerprint, error) {
@@ -1097,7 +1154,10 @@ async function markAiReservationFailed(caseId, fingerprint, error) {
 				),
 			},
 		}
-	).catch(() => {});
+	)
+		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
+		.exec()
+		.catch(() => {});
 }
 
 async function createReservationForCase({
@@ -1125,7 +1185,12 @@ async function createReservationForCase({
 		room,
 		guest,
 	});
-	const lock = await acquireAiReservationLock(caseKey, fingerprint);
+	const lock = await timedReservationCreateStep(
+		caseId,
+		"lock",
+		() => acquireAiReservationLock(caseKey, fingerprint),
+		{ caseKey: Boolean(caseKey) }
+	);
 	if (lock.existing) {
 		log(caseId, "reservation.duplicate_returned", {
 			reservationId: String(lock.existing._id),
@@ -1144,7 +1209,11 @@ async function createReservationForCase({
 		}
 		throw new Error("AI reservation creation is already in progress for this support case.");
 	}
-	const confirmation_number = await uniqueConfirmation();
+	const confirmation_number = await timedReservationCreateStep(
+		caseId,
+		"confirmation_number",
+		() => uniqueConfirmation()
+	);
 
 	const pickedRoomsType = buildPickedRoomsType({
 		room,
@@ -1194,9 +1263,18 @@ async function createReservationForCase({
 
 	let saved = null;
 	try {
-		const inventoryValidation = await validateReservationInventoryForCreate(
-			reservationPayload,
-			{ allowOverbook: false }
+		const inventoryValidation = await timedReservationCreateStep(
+			caseId,
+			"inventory_validation",
+			() =>
+				validateReservationInventoryForCreate(reservationPayload, {
+					allowOverbook: false,
+				}),
+			{
+				hotelId: String(hotel?._id || ""),
+				checkin: slots.checkinISO,
+				checkout: slots.checkoutISO,
+			}
 		);
 		if (!inventoryValidation.allowed) {
 			const message =
@@ -1216,8 +1294,16 @@ async function createReservationForCase({
 			clientVisibleStatus: "confirmed",
 			inventoryBlocks: true,
 		});
-		saved = await Reservations.create(reservationPayload);
-		await markAiReservationCreated(caseKey, fingerprint, saved);
+		saved = await timedReservationCreateStep(
+			caseId,
+			"reservation_insert",
+			() => Reservations.create(reservationPayload)
+		);
+		await timedReservationCreateStep(
+			caseId,
+			"support_case_mark_created",
+			() => markAiReservationCreated(caseKey, fingerprint, saved)
+		);
 	} catch (error) {
 		if (error?.code === 11000 && caseKey) {
 			const existing = await findAiReservationForCase(caseKey);

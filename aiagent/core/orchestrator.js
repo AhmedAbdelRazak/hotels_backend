@@ -2343,7 +2343,7 @@ function assistantBookingStageFromMessage(message = {}) {
 }
 
 function recoverBookingStageFromConversation(sc = {}, st = {}) {
-	if (!st || isReservationDetailStep(st)) return;
+	if (!st) return;
 	if (
 		sc.aiReservation?.status === "created" ||
 		sc.aiReservation?.confirmationNumber ||
@@ -2360,6 +2360,13 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		assistantHistory.find((assistant) => assistantBookingStageFromMessage(assistant)) ||
 			lastAssistant
 	);
+	if (isReservationDetailStep(st)) {
+		if (stage === "finalize") {
+			st.reviewSent = true;
+			st.waitFor = "finalize";
+		}
+		return;
+	}
 	if (stage === "platform_hotel_choice") {
 		st.waitFor = "platform_hotel_choice";
 		return;
@@ -14152,6 +14159,12 @@ async function planTurn(io, sc) {
 		if (!Number.isFinite(st.activeTurnGuestAt)) st.activeTurnGuestAt = now();
 		if (userText) {
 			markGuestActivity(caseId, { activityAt: st.activeTurnGuestAt });
+		}
+		if (userText) {
+			hydrateKnownSlotsFromConversation(sc, st, {
+				protectLatestGuestDateChange: Boolean(userText),
+			});
+			recoverBookingStageFromConversation(sc, st);
 		}
 		st.activeTurnReplyTargetMs = randomBetween(
 			AI_REPLY_TARGET_MIN_MS,
