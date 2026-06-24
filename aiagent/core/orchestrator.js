@@ -9059,6 +9059,26 @@ function reservationIdentityOrContactPayloadText(text = "") {
 	);
 }
 
+function reservationDetailChaseText(text = "") {
+	const value = String(text || "");
+	if (!value.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(value);
+	return (
+		/\b(?:please\s+)?(?:make|create|complete|finali[sz]e|finish|place|proceed\s+with)\b.{0,50}\b(?:reservation|booking)\b/i.test(
+			lower
+		) ||
+		/\b(?:make|create|complete|finali[sz]e|finish|place)\s+(?:it|this|the)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0643\u0645\u0644|\u0623\u0643\u062f|\u0627\u0643\u062f).{0,40}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0644\u0628\u0648\u0643\u064a\u0646\u062c)/i.test(
+			arabic
+		) ||
+		/(?:make|create|complete|finalize|finalise|finish|place|proceed).{0,40}(?:reservation|booking)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function reservationDetailFieldPayloadText(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
@@ -15002,6 +15022,7 @@ async function planTurn(io, sc) {
 				isReservationDetailStep(st) &&
 				!severeAbusiveGuestText(userText) &&
 				(reservationDetailFieldPayloadText(userText) ||
+					reservationDetailChaseText(userText) ||
 					(["reviewConfirm", "finalize"].includes(st.waitFor) &&
 						confirmsText(userText)));
 			const isPostBookingFastPayload =
@@ -15081,6 +15102,7 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			(reservationDetailFieldPayloadText(userText) ||
+				reservationDetailChaseText(userText) ||
 				!directGuestRequestKind(sc, st, userText, {}))
 		) {
 			updateActiveLanguageFromText(sc, st, userText);
