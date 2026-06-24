@@ -2529,8 +2529,18 @@ function isNewReservationFlowActive(st = {}) {
 }
 
 function explicitlyExistingReservationIntent(text = "") {
-	return /\b(existing|old|already have|my reservation|my booking|change my|update my)\b|\u0639\u0646\u062f\u064a \u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632 \u0642\u062f\u064a\u0645|\u062d\u062c\u0632 \u0633\u0627\u0628\u0642|\u062a\u0639\u062f\u064a\u0644 \u062d\u062c\u0632/i.test(
-		String(text || "")
+	const value = String(text || "");
+	return (
+		/\b(?:my reservation|my booking|change my|update my)\b/i.test(value) ||
+		/\b(?:existing|old|already have|already got|have an?|got an?)\b.{0,40}\b(?:reservation|booking)\b/i.test(
+			value
+		) ||
+		/\b(?:reservation|booking)\b.{0,40}\b(?:existing|old|already have|already got)\b/i.test(
+			value
+		) ||
+		/\u0639\u0646\u062f\u064a \u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632 \u0642\u062f\u064a\u0645|\u062d\u062c\u0632 \u0633\u0627\u0628\u0642|\u062a\u0639\u062f\u064a\u0644 \u062d\u062c\u0632/i.test(
+			value
+		)
 	);
 }
 
