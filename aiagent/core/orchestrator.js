@@ -8578,6 +8578,18 @@ function confirmsText(text = "") {
 	) {
 		return false;
 	}
+	const hasExplicitFinalVerb =
+		/\b(?:confirm|complete|finali[sz]e|finalise|place|create|make)\b/i.test(
+			lower
+		);
+	const detailOnlyCandidate =
+		latestEmailFromText(raw) ||
+		/\b(?:email|e-mail|mail|phone|mobile|whats\s*app|whatsapp|nationality|full\s+name|my\s+name|name\s+is)\b/i.test(
+			lower
+		);
+	if (detailOnlyCandidate && !hasExplicitFinalVerb) {
+		return false;
+	}
 	if (
 		/(?:\u062a\u0645\u0627\u0645|\u0646\u0639\u0645|\u0627\u064a\u0648\u0647|\u0623\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0645\u0648\u0627\u0641\u0642|\u0635\u062d\u064a\u062d)/i.test(
 			arabic
