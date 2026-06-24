@@ -8962,7 +8962,13 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 			null
 		);
 	}
-	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) {
+	const hasExplicitNationalitySignal =
+		Boolean(explicitNationalityText(fullText)) || Boolean(nationalityHintFromText(fullText));
+	if (
+		AI_REQUIRE_NATIONALITY &&
+		!st.slots.nationality &&
+		(!directFieldCaptured || hasExplicitNationalitySignal)
+	) {
 		const nationality = await withSoftTimeout(
 			normalizeNationalityFromText(fullText, languageOf(sc, st)),
 			2000,
