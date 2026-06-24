@@ -11101,6 +11101,7 @@ function aiReservationReference(sc = {}, reservation = {}) {
 		reservation?.confirmationNumber ||
 		ai.confirmationNumber ||
 		ai.confirmation_number ||
+		latestKnownConfirmation(sc, {}) ||
 		"";
 	if (!id && !confirmation) return null;
 	return {
