@@ -1510,12 +1510,9 @@ function assistantAddressedGuestRecently(sc = {}, st = {}) {
 	const candidates = guestAddressCandidates(sc, st);
 	if (!candidates.length) return false;
 	const aiMessages = (sc.conversation || []).filter(isAiConversationMessage);
-	return aiMessages.some((message) => {
-		const early = String(message?.message || "").slice(0, 140).toLocaleLowerCase();
-		return candidates.some((candidate) =>
-			early.includes(candidate.toLocaleLowerCase())
-		);
-	});
+	return aiMessages.slice(-2).some((message) =>
+		Boolean(leadingGuestAddressMatch(message?.message || "", sc, st))
+	);
 }
 
 function importantGuestAddressContext(text = "") {
