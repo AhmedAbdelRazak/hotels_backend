@@ -10733,6 +10733,51 @@ async function answerPostBookingStateQuestion(io, sc, st, userText = "") {
 	return true;
 }
 
+function preBookingConfirmationPendingText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0644\u0645 \u064a\u062a\u0645 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0628\u0639\u062f\u060c \u0644\u0630\u0644\u0643 \u0644\u0627 \u064a\u0648\u062c\u062f \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u062d\u062a\u0649 \u0627\u0644\u0622\u0646.";
+	}
+	if (/spanish/i.test(lang)) {
+		return "La reserva aun no esta creada, asi que todavia no hay numero de confirmacion.";
+	}
+	if (/french/i.test(lang)) {
+		return "La reservation n'est pas encore creee, donc il n'y a pas encore de numero de confirmation.";
+	}
+	if (/indonesian/i.test(lang)) {
+		return "Reservasi belum dibuat, jadi belum ada nomor konfirmasi.";
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return "Tempahan belum dibuat, jadi belum ada nombor pengesahan.";
+	}
+	return "The reservation is not created yet, so there is no confirmation number yet.";
+}
+
+async function answerPreBookingConfirmationQuestion(
+	io,
+	sc,
+	st,
+	userText = "",
+	caseId = ""
+) {
+	if (!confirmationNumberQuestionText(userText)) return false;
+	if (aiReservationReference(sc)) return false;
+	if (!isNewReservationFlowActive(st)) return false;
+	const hasAllDetails = hasMandatoryReservationDetails(st);
+	const followup = hasAllDetails
+		? finalReservationPrompt(sc, st)
+		: mandatoryDetailsPrompt(sc, st, { retry: true });
+	await humanSend(io, sc, st, `${preBookingConfirmationPendingText(sc, st)}\n${followup}`, {
+		fast: true,
+		quickReplies: hasAllDetails ? finalReservationQuickReplies(sc, st) : [],
+	});
+	logStep(caseId || String(sc._id || ""), "booking.pre_confirmation_state_reply", {
+		waitFor: st.waitFor || "",
+		missing: missingMandatoryReservationFields(st),
+	});
+	return true;
+}
+
 async function answerFastBookingStateQuestion(io, sc, st, userText = "", caseId = "") {
 	if (
 		!st.hotel ||
@@ -14322,6 +14367,9 @@ async function planTurn(io, sc) {
 			caseId
 		);
 		if (fastBookingStateHandled) return;
+		const preBookingConfirmationHandled =
+			await answerPreBookingConfirmationQuestion(io, sc, st, userText, caseId);
+		if (preBookingConfirmationHandled) return;
 		const earlyProceedHandled = await handleProceedStageInput(
 			io,
 			sc,
