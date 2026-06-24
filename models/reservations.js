@@ -652,5 +652,25 @@ reservationsSchema.index({ hotelId: 1, createdAt: -1, _id: -1 });
 reservationsSchema.index({ hotelId: 1, updatedAt: -1, _id: -1 });
 reservationsSchema.index({ hotelId: 1, checkin_date: -1, _id: -1 });
 reservationsSchema.index({ hotelId: 1, checkout_date: -1, _id: -1 });
+reservationsSchema.index(
+	{ hotelId: 1, checkin_date: 1, checkout_date: 1, _id: 1 },
+	{ name: "hotel_stay_overlap" }
+);
+reservationsSchema.index(
+	{ hotelId: 1, "pendingConfirmation.status": 1, updatedAt: -1, _id: -1 },
+	{ name: "hotel_pending_confirmation_updated" }
+);
+reservationsSchema.index(
+	{ hotelId: 1, "agentDecisionSnapshot.status": 1, updatedAt: -1, _id: -1 },
+	{ name: "hotel_agent_decision_updated" }
+);
+reservationsSchema.index(
+	{ hotelId: 1, reservation_status: 1, updatedAt: -1, _id: -1 },
+	{ name: "hotel_reservation_status_updated" }
+);
+reservationsSchema.index(
+	{ hotelId: 1, state: 1, updatedAt: -1, _id: -1 },
+	{ name: "hotel_state_updated" }
+);
 
 module.exports = mongoose.model("Reservations", reservationsSchema);

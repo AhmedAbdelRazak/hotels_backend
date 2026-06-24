@@ -12454,6 +12454,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	st.quoteSummarizedAt = 0;
 	st.allowPostBookingReentry = true;
 	await humanSend(io, sc, st, finalText, {
+		fast: true,
 		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
 	if (isAiQaSupportCase(sc)) {
