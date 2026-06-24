@@ -35,9 +35,29 @@ const AI_TURN_RECOVERY_LIMIT = intFromEnv("AI_TURN_RECOVERY_LIMIT", 10, {
 	min: 1,
 	max: 25,
 });
+const AI_MAINTENANCE_CONVERSATION_TAIL = intFromEnv(
+	"AI_MAINTENANCE_CONVERSATION_TAIL",
+	40,
+	{ min: 10, max: 120 }
+);
 const AI_TURN_STALL_RECOVERY_ENABLED =
 	String(process.env.AI_TURN_STALL_RECOVERY_ENABLED || "true").toLowerCase() !==
 	"false";
+
+const supportCaseMaintenanceProjection = (extra = {}) => ({
+	_id: 1,
+	hotelId: 1,
+	caseStatus: 1,
+	openedBy: 1,
+	aiToRespond: 1,
+	aiRelated: 1,
+	aiResponderName: 1,
+	escalationStatus: 1,
+	createdAt: 1,
+	updatedAt: 1,
+	conversation: { $slice: -AI_MAINTENANCE_CONVERSATION_TAIL },
+	...extra,
+});
 
 const asTime = (value) => {
 	const date = value ? new Date(value) : null;
@@ -174,14 +194,17 @@ const closeInactiveB2CClientSupportCases = async ({
 	io = null,
 } = {}) => {
 	const cutoff = new Date(now.getTime() - inactiveMs);
-	const candidates = await SupportCase.find({
-		caseStatus: "open",
-		openedBy: "client",
-		$or: [
-			{ updatedAt: { $lte: cutoff } },
-			{ updatedAt: { $exists: false } },
-		],
-	})
+	const candidates = await SupportCase.find(
+		{
+			caseStatus: "open",
+			openedBy: "client",
+			$or: [
+				{ updatedAt: { $lte: cutoff } },
+				{ updatedAt: { $exists: false } },
+			],
+		},
+		supportCaseMaintenanceProjection()
+	)
 		.sort({ updatedAt: 1, createdAt: 1, _id: 1 })
 		.limit(limit)
 		.lean()
@@ -235,10 +258,10 @@ const closeIdleAiSupportCases = async ({
 	io = null,
 } = {}) => {
 	const cutoff = new Date(now.getTime() - idleMs);
-	const candidates = await SupportCase.find(aiCaseFilter(cutoff))
-		.select(
-			"_id caseStatus openedBy aiToRespond aiRelated aiResponderName escalationStatus createdAt updatedAt conversation"
-		)
+	const candidates = await SupportCase.find(
+		aiCaseFilter(cutoff),
+		supportCaseMaintenanceProjection()
+	)
 		.sort({ updatedAt: 1, createdAt: 1, _id: 1 })
 		.limit(limit)
 		.lean()
@@ -303,10 +326,10 @@ const recoverUnansweredAiSupportCases = async ({
 	}
 	const cutoff = new Date(now.getTime() - staleMs);
 	const oldestRecoverableGuestAt = now.getTime() - AI_TURN_RECOVERY_LOOKBACK_MS;
-	const candidates = await SupportCase.find(aiCaseFilter(cutoff))
-		.select(
-			"_id hotelId caseStatus openedBy aiToRespond aiRelated aiResponderName aiRecoveryScheduledAt createdAt updatedAt conversation"
-		)
+	const candidates = await SupportCase.find(
+		aiCaseFilter(cutoff),
+		supportCaseMaintenanceProjection({ aiRecoveryScheduledAt: 1 })
+	)
 		.sort({ updatedAt: 1, createdAt: 1, _id: 1 })
 		.limit(limit)
 		.lean()

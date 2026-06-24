@@ -5407,10 +5407,10 @@ function negatedGuestCountCorrectionText(text = "") {
 	if (!raw.trim()) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	const mentionsCount =
-		/\b(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i.test(
+		/\b(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|individuals?|guests?|adults?|pax|beds?)\b/i.test(
 			lower
 		) ||
-		/\b(?:people|persons?|guests?|adults?|pax|beds?)\s*(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(
+		/\b(?:people|persons?|individuals?|guests?|adults?|pax|beds?)\s*(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(
 			lower
 		);
 	const challengesPriorClaim =
@@ -5426,10 +5426,10 @@ function negatedGuestCountCorrectionText(text = "") {
 		/\b(?:i|we)\s+(?:never|didn'?t|did\s+not|do\s+not|don't)\s+(?:say|said|tell|mention|have|need|want|ask\s+for)[^.!?\n]{0,80}\b(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)?\b/i.test(
 			lower
 		) ||
-		/\b(?:i|we)\s+(?:am|are|'m|'re)?\s*not\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax)?\b/i.test(
+		/\b(?:i|we)\s+(?:am|are|'m|'re)?\s*not\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|individuals?|guests?|adults?|pax)?\b/i.test(
 			lower
 		) ||
-		/\bnot\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i.test(
+		/\bnot\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|individuals?|guests?|adults?|pax|beds?)\b/i.test(
 			lower
 		) ||
 		/(?:neversaid|didntsay|didnotsay|dontsay|donotsay|notsix|not6|notfive|not5)/i.test(
@@ -5470,8 +5470,8 @@ function requestedGuestCountFromText(text = "") {
 	const patterns = [
 		/\b(?:for|fits?|fit|accommodates?|accommodate|we\s+are|we're)\s+([0-9]{1,2})\b/i,
 		/\b(?:room|rooms|suite|suites|booking|reservation|stay)\s+(?:for|to\s+fit|fits?)\s+([0-9]{1,2})\b/i,
-		/\b([0-9]{1,2})\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i,
-		/\b(?:people|persons?|guests?|adults?|pax|beds?)\s*[:= -]*([0-9]{1,2})\b/i,
+		/\b([0-9]{1,2})\s*(?:people|persons?|individuals?|guests?|adults?|pax|beds?)\b/i,
+		/\b(?:people|persons?|individuals?|guests?|adults?|pax|beds?)\s*[:= -]*([0-9]{1,2})\b/i,
 		/(?:\u0627\u062d\u0646\u0627|\u0646\u062d\u0646|\u0639\u062f\u062f\u0646\u0627)\s*([0-9]{1,2})/i,
 		/([0-9]{1,2})\s*(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)/i,
 		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0628\u0627\u0644\u063a)\s*[:= -]*([0-9]{1,2})/i,
@@ -6033,6 +6033,16 @@ async function answerSelectedHotelRoomQuestion(
 		);
 		if (recommendedRooms.length) {
 			st.slots.roomTypeKey = recommendedRoomTypeKey;
+			if (st.slots.checkinISO && st.slots.checkoutISO) {
+				logStep(String(sc._id), "selected_hotel.room_fit_quote", {
+					guestCount: requestedGuestCount,
+					roomTypeKey: recommendedRoomTypeKey,
+					checkinISO: st.slots.checkinISO,
+					checkoutISO: st.slots.checkoutISO,
+				});
+				await shareKnownStayQuote(io, sc, st);
+				return true;
+			}
 			const fallbackText = roomGuestCountRecommendationText(
 				sc,
 				st,
@@ -9090,6 +9100,7 @@ const CHILD_COUNT_TERMS = [
 const GUEST_COUNT_TERMS = [
 	"people",
 	"persons?",
+	"individuals?",
 	"guests?",
 	"pax",
 	"travell?ers?",
@@ -9126,7 +9137,7 @@ function likelyGuestCountText(text = "") {
 		);
 	if (!hasCount) return false;
 	return (
-		/\b(?:adult|adults|child|children|kid|kids|guest|guests|people|persons|pax|traveller|traveler|travelers|beds?)\b/i.test(
+		/\b(?:adult|adults|child|children|kid|kids|guest|guests|people|persons|individuals?|pax|traveller|traveler|travelers|beds?)\b/i.test(
 			lower
 		) ||
 		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0648\u0644\u0627\u062f|\u0623\u0648\u0644\u0627\u062f|\u0636\u064a\u0648\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0639\u0627\u0626\u0644\u0629|\u0639\u0627\u0626\u0644\u0647)/i.test(
@@ -17248,6 +17259,31 @@ async function planTurn(io, sc) {
 
 		// need room?
 		if (!st.slots.roomTypeKey) {
+			const guestCountForRoomFit = requestedGuestCountFromText(userText);
+			const recommendedRoomTypeKey =
+				recommendedRoomTypeKeyForGuestCount(guestCountForRoomFit);
+			if (
+				st.hotel &&
+				st.slots.checkinISO &&
+				st.slots.checkoutISO &&
+				recommendedRoomTypeKey
+			) {
+				const recommendedRooms = activeHotelRoomSummaries(
+					st.hotel,
+					recommendedRoomTypeKey
+				);
+				if (recommendedRooms.length) {
+					st.slots.roomTypeKey = recommendedRoomTypeKey;
+					logStep(caseId, "room.inferred_from_guest_count", {
+						guestCount: guestCountForRoomFit,
+						roomTypeKey: recommendedRoomTypeKey,
+						checkinISO: st.slots.checkinISO,
+						checkoutISO: st.slots.checkoutISO,
+					});
+					await shareKnownStayQuote(io, sc, st);
+					return;
+				}
+			}
 			const slotPromptBotTextBefore = st.lastBotText;
 			if (!askedRecently(st, "room")) {
 				const options = (st.hotel?.roomCountDetails || [])
