@@ -1509,7 +1509,7 @@ function leadingGuestAddressMatch(text = "", sc = {}, st = {}) {
 function assistantAddressedGuestRecently(sc = {}, st = {}) {
 	const candidates = guestAddressCandidates(sc, st);
 	if (!candidates.length) return false;
-	const aiMessages = (sc.conversation || []).filter(isAiConversationMessage).slice(-5);
+	const aiMessages = (sc.conversation || []).filter(isAiConversationMessage);
 	return aiMessages.some((message) => {
 		const early = String(message?.message || "").slice(0, 140).toLocaleLowerCase();
 		return candidates.some((candidate) =>

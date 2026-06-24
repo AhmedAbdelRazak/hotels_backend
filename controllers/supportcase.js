@@ -23,8 +23,8 @@ const supportCaseEmail = twilio(
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances isNusuk isNusukText hotelPolicyQA";
-const PUBLIC_SUPPORT_CASE_HOTEL_POPULATE =
-	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo";
+const PUBLIC_CLIENT_SUPPORT_CASE_SELECT =
+	"_id createdAt updatedAt closedAt rating closedBy supporterId ownerId hotelId targetUserId targetUserName targetUserRole caseStatus openedBy conversation displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiToRespond aiResponderName aiPausedAt aiHandoffReason aiReservation escalationStatus escalationReason";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 
 const isAiAgentEnabled = () =>
@@ -1153,10 +1153,7 @@ exports.getPublicClientSupportCaseById = async (req, res) => {
 			_id: req.params.id,
 			openedBy: "client",
 		})
-			.populate(
-				"hotelId",
-				PUBLIC_SUPPORT_CASE_HOTEL_POPULATE
-			)
+			.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
 			.lean()
 			.exec();
 
@@ -1281,10 +1278,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updateDoc,
 			{ new: true }
 		)
-			.populate(
-				"hotelId",
-				PUBLIC_SUPPORT_CASE_HOTEL_POPULATE
-			)
+			.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
 			.lean()
 			.exec();
 
