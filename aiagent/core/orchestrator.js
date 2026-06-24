@@ -7303,7 +7303,13 @@ function progressText(sc = {}, st = {}, purpose = "checking") {
 		: "Perfect, I am checking availability and price now. One moment please.";
 }
 
-async function sendProgressMessage(io, sc, st, purpose = "checking") {
+async function sendProgressMessage(
+	io,
+	sc,
+	st,
+	purpose = "checking",
+	{ fast = false, targetReplyMs = null } = {}
+) {
 	if (!AI_INSTANT_PROGRESS_ENABLED || !io || !st) return;
 	const caseId = String(sc._id || sc.id || "unknown");
 	const key = `${purpose}|${st.slots?.roomTypeKey || ""}|${
@@ -7315,7 +7321,11 @@ async function sendProgressMessage(io, sc, st, purpose = "checking") {
 	st.progressSentAt = st.progressSentAt || {};
 	st.progressSentAt[key] = now();
 	const text = progressText(sc, st, purpose);
-	await humanSend(io, sc, st, text);
+	await humanSend(io, sc, st, text, {
+		fast,
+		targetReplyMs,
+		scheduleIdle: false,
+	});
 }
 
 function askedRecently(st, key, ms = SOFT_PIVOT_MS) {
@@ -8395,6 +8405,25 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 			slots: st.slots,
 		});
 	}
+}
+
+function reservationDetailFieldPayloadText(text = "") {
+	const value = String(text || "");
+	if (!value.trim()) return false;
+	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
+	if (explicitNameCandidateFromText(value)) return true;
+	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
+	if (
+		/(?:\b(?:full\s*name|guest\s*name|passport\s*name|name|nationality|country|phone|mobile|whatsapp|email|adults?|children|kids?|guests?|people|persons?|pax)\b|(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u0628\u0644\u062f\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0636\u064a\u0648\u0641))/i.test(
+			value
+		)
+	) {
+		return true;
+	}
+	if (countNearTerms(value, ADULT_COUNT_TERMS, { allowZero: false }) !== null) return true;
+	if (countNearTerms(value, CHILD_COUNT_TERMS, { allowZero: true }) !== null) return true;
+	if (countNearTerms(value, GUEST_COUNT_TERMS, { allowZero: false }) !== null) return true;
+	return noChildrenText(value);
 }
 
 function nextPivot(st) {
@@ -10887,7 +10916,13 @@ async function composeReservationReviewText(io, sc, st, quote, reviewPayload) {
 	return ensureHijriGregorianDatesVisible(reviewText, sc, st);
 }
 
-async function sendReservationReview(io, sc, st, quote = null) {
+async function sendReservationReview(
+	io,
+	sc,
+	st,
+	quote = null,
+	{ fast = false, targetReplyMs = AI_BOOKING_PROMPT_TARGET_MS } = {}
+) {
 	const q = quote || st.quote?.data;
 	if (!q?.available) {
 		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
@@ -10898,6 +10933,8 @@ async function sendReservationReview(io, sc, st, quote = null) {
 	const reviewText = await composeReservationReviewText(io, sc, st, q, reviewPayload);
 	const sent = await humanSend(io, sc, st, reviewText, {
 		quickReplies: finalReservationQuickReplies(sc, st),
+		fast,
+		targetReplyMs,
 	});
 	if (!sent) return false;
 	st.reviewSent = true;
@@ -10922,9 +10959,15 @@ async function beginReservationDetailsAfterQuote(
 		missing: missingMandatoryReservationFields(st),
 	});
 	if (st.waitFor === "finalize") {
-		return sendReservationReview(io, sc, st, st.quote?.data);
+		return sendReservationReview(io, sc, st, st.quote?.data, {
+			fast,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
 	}
-	await askForReservationDetail(io, sc, st, st.waitFor, { fast });
+	await askForReservationDetail(io, sc, st, st.waitFor, {
+		fast,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
 	return true;
 }
 
@@ -12071,7 +12114,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		await askForReservationDetail(io, sc, st, st.waitFor);
 		return true;
 	}
-	await sendProgressMessage(io, sc, st, "finalizing");
+	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
 	const quoteForCreate =
 		st.quote?.data ||
 		safePriceRoomForStay(
@@ -12108,7 +12151,9 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		quoteForCreate,
 		links
 	);
-	await humanSend(io, sc, st, finalText);
+	await humanSend(io, sc, st, finalText, {
+		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
+	});
 	dispatchAiReservationConfirmation({
 		caseId,
 		reservation,
@@ -13231,7 +13276,13 @@ function nextReservationDetailStep(st = {}) {
 	return "finalize";
 }
 
-async function askForReservationDetail(io, sc, st, step, { fast = false } = {}) {
+async function askForReservationDetail(
+	io,
+	sc,
+	st,
+	step,
+	{ fast = false, targetReplyMs = AI_BOOKING_PROMPT_TARGET_MS } = {}
+) {
 	let prompt = "";
 	let quickReplies = [];
 	if (step === "reservation_details" || step === "fullname" || step === "nationality" || step === "phone") {
@@ -13243,7 +13294,11 @@ async function askForReservationDetail(io, sc, st, step, { fast = false } = {}) 
 		quickReplies = emailQuickReplies(sc, st);
 	}
 	if (!prompt) return;
-	const sent = await humanSend(io, sc, st, prompt, { quickReplies, fast });
+	const sent = await humanSend(io, sc, st, prompt, {
+		quickReplies,
+		fast,
+		targetReplyMs,
+	});
 	if (!sent) return;
 	stampAsk(st, step);
 }
@@ -13278,7 +13333,9 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			}
 			st.waitFor = nextReservationDetailStep(st);
 			if (st.waitFor !== "finalize") {
-				await askForReservationDetail(io, sc, st, st.waitFor);
+				await askForReservationDetail(io, sc, st, st.waitFor, {
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
 				return true;
 			}
 		}
@@ -13287,13 +13344,19 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			if (hasMandatoryReservationDetails(st)) {
 				st.waitFor = nextReservationDetailStep(st);
 				if (st.waitFor !== "finalize") {
-					await askForReservationDetail(io, sc, st, st.waitFor);
+					await askForReservationDetail(io, sc, st, st.waitFor, {
+						targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+					});
 					return true;
 				}
-				await sendReservationReview(io, sc, st, st.quote?.data);
+				await sendReservationReview(io, sc, st, st.quote?.data, {
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
 				return true;
 			}
-			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }));
+			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }), {
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
 			stampAsk(st, "reservation_details");
 			return true;
 		}
@@ -13320,6 +13383,7 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			}
 			await humanSend(io, sc, st, optionalEmailPrompt(sc, st), {
 				quickReplies: emailQuickReplies(sc, st),
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 			});
 			stampAsk(st, "email_or_skip");
 			return true;
@@ -13337,11 +13401,14 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 					return true;
 				}
 				if (!st.finalReviewSentAt && st.quote?.data?.available) {
-					await sendReservationReview(io, sc, st, st.quote.data);
+					await sendReservationReview(io, sc, st, st.quote.data, {
+						targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+					});
 					return true;
 				}
 				await humanSend(io, sc, st, finalReservationPrompt(sc, st), {
 					quickReplies: finalReservationQuickReplies(sc, st),
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 				});
 				stampAsk(st, "finalize");
 				return true;
@@ -13751,6 +13818,25 @@ async function planTurn(io, sc) {
 				reason: "latest_guest_already_answered",
 			});
 			return;
+		}
+		if (
+			userText &&
+			isReservationDetailStep(st) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			(reservationDetailFieldPayloadText(userText) ||
+				!directGuestRequestKind(sc, st, userText, {}))
+		) {
+			updateActiveLanguageFromText(sc, st, userText);
+			const handledReservationDetail = await handleReservationDetailStep(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledReservationDetail) return;
 		}
 		if (userText && !severeAbusiveGuestText(userText)) {
 			const immediateProceedHandled = await handleProceedStageInput(
