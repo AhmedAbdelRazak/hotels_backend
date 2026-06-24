@@ -3491,6 +3491,42 @@ function buildFutureIsoDateFromParts(day, month, year = null) {
 	return date.toISOString().slice(0, 10);
 }
 
+function likelyStayDateText(text = "") {
+	const raw = digitsToEnglish(String(text || "").toLowerCase());
+	if (!raw.trim()) return false;
+	if (/\b20\d{2}-\d{2}-\d{2}\b/.test(raw)) return true;
+	if (/\b\d{1,2}\s*[/-]\s*\d{1,2}(?:\s*[/-]\s*(?:20)?\d{2})?\b/.test(raw)) {
+		return true;
+	}
+	if (
+		/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i.test(
+			raw
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:\u0645\u062d\u0631\u0645|\u0635\u0641\u0631|\u0631\u0628\u064a\u0639|\u0631\u0628\u064a\u0639\s+\u0627\u0644\u0623\u0648\u0644|\u0631\u0628\u064a\u0639\s+\u0627\u0644\u062b\u0627\u0646\u064a|\u062c\u0645\u0627\u062f|\u0631\u062c\u0628|\u0634\u0639\u0628\u0627\u0646|\u0631\u0645\u0636\u0627\u0646|\u0634\u0648\u0627\u0644|\u0630\u0648\s+\u0627\u0644\u0642\u0639\u062f\u0629|\u0630\u0648\s+\u0627\u0644\u062d\u062c\u0629|\u064a\u0646\u0627\u064a\u0631|\u0641\u0628\u0631\u0627\u064a\u0631|\u0645\u0627\u0631\u0633|\u0627\u0628\u0631\u064a\u0644|\u0623\u0628\u0631\u064a\u0644|\u0645\u0627\u064a\u0648|\u064a\u0648\u0646\u064a\u0648|\u064a\u0648\u0644\u064a\u0648|\u0627\u063a\u0633\u0637\u0633|\u0623\u063a\u0633\u0637\u0633|\u0633\u0628\u062a\u0645\u0628\u0631|\u0627\u0643\u062a\u0648\u0628\u0631|\u0623\u0643\u062a\u0648\u0628\u0631|\u0646\u0648\u0641\u0645\u0628\u0631|\u062f\u064a\u0633\u0645\u0628\u0631)/i.test(
+			raw
+		)
+	) {
+		return true;
+	}
+	if (
+		/\b(?:check\s*-?\s*in|check\s*-?\s*out|checkout|arrival|departure|dates?|stay\s+dates?|nights?|hijri|gregorian|ramadan)\b/i.test(
+			raw
+		) &&
+		/\d/.test(raw)
+	) {
+		return true;
+	}
+	return (
+		/(?:\u062a\u0627\u0631\u064a\u062e|\u062a\u0648\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u0644\u064a\u0644\u0629|\u0644\u064a\u0627\u0644\u064a|\u0647\u062c\u0631\u064a|\u0645\u064a\u0644\u0627\u062f\u064a)/i.test(
+			raw
+		) && /\d/.test(raw)
+	);
+}
+
 function parseSameMonthDateRange(text = "") {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
 	const monthToken =
@@ -3574,6 +3610,9 @@ function extractSingleStayDate(text = "", st = {}) {
 }
 
 function extractDateRange(text = "") {
+	if (!likelyStayDateText(text)) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
 	const sameMonthRange = parseSameMonthDateRange(text);
 	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
 		return sameMonthRange;
