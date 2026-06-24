@@ -14723,6 +14723,7 @@ async function planTurn(io, sc) {
 	let planningTypingTimer = null;
 	let recoveryUserText = "";
 	let ownsTurn = false;
+	let deferredQuietDelayMs = null;
 	let policy = null;
 	let policyHotel = null;
 	let hotel = null;
@@ -14830,7 +14831,7 @@ async function planTurn(io, sc) {
 					guestTypingUntil: Number(st.guestTypingUntil || 0),
 					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
 				});
-				schedulePlanTurn(io, caseId, { delayMs: quietRemainingMs + 35 });
+				deferredQuietDelayMs = quietRemainingMs + 35;
 				return;
 			}
 		}
@@ -17046,7 +17047,13 @@ async function planTurn(io, sc) {
 		if (planningTyping) {
 			emitTyping(io, caseId, st2 || st, false);
 		}
-		if (st2 && recoveryUserText && !st2.activeTurnHadReply && !st2.interrupt) {
+		if (
+			deferredQuietDelayMs === null &&
+			st2 &&
+			recoveryUserText &&
+			!st2.activeTurnHadReply &&
+			!st2.interrupt
+		) {
 			await maybeSendResponsiveSilenceFollowup(
 				io,
 				sc,
@@ -17106,6 +17113,12 @@ async function planTurn(io, sc) {
 		if (activePlanLocks.get(caseId) === planLock) {
 			activePlanLocks.delete(caseId);
 			activePlanLockAts.delete(caseId);
+		}
+		if (deferredQuietDelayMs !== null && !queuedFollowupCase) {
+			schedulePlanTurn(io, caseId, { delayMs: deferredQuietDelayMs });
+			logStep(caseId, "turn.schedule_guest_quiet_followup", {
+				delayMs: deferredQuietDelayMs,
+			});
 		}
 		if (queuedFollowupCase) {
 			setTimeout(() => {
