@@ -668,9 +668,24 @@ function localizedHotelName(sc = {}, st = {}) {
 function localizedRoomName(sc = {}, st = {}, quote = {}) {
 	const lang = languageOf(sc, st);
 	const room = quote?.room || {};
-	const other = String(room.displayName_OtherLanguage || "").trim();
+	const roomType = room.roomType || st.slots?.roomTypeKey || "";
+	const hotelRoom = Array.isArray(st.hotel?.roomCountDetails)
+		? st.hotel.roomCountDetails.find((item) => item?.roomType === roomType)
+		: null;
+	const other = String(
+		room.displayName_OtherLanguage ||
+			room.displayNameOther ||
+			hotelRoom?.displayName_OtherLanguage ||
+			hotelRoom?.displayNameOther ||
+			""
+	).trim();
 	if (/arabic/i.test(lang) && other && hasArabicScript(other)) return other;
-	return room.displayName || room.roomType || roomTypeLabel(st.slots?.roomTypeKey);
+	return (
+		room.displayName ||
+		hotelRoom?.displayName ||
+		room.roomType ||
+		roomTypeLabel(st.slots?.roomTypeKey)
+	);
 }
 
 function localizedCurrencyLabel(currency = "SAR", lang = "English") {
@@ -5445,6 +5460,7 @@ function requestedGuestCountFromText(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return null;
 	if (negatedGuestCountCorrectionText(raw)) return null;
+	if (companionPairGuestCountText(raw)) return 2;
 	const normalized = normalizeNumberWordsForParsing(raw);
 	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
 	const counts = [];
@@ -5452,6 +5468,7 @@ function requestedGuestCountFromText(text = "") {
 		const count = reservationDetailCount(value, { allowZero: false });
 		if (count !== null && count <= 30) counts.push(count);
 	};
+	addCount(standaloneGuestCountFromText(raw));
 	addCount(countNearTerms(normalized, GUEST_COUNT_TERMS, { allowZero: false }));
 	addCount(
 		countNearTerms(
@@ -8421,7 +8438,21 @@ function rejectsFullNameCandidate(value = "") {
 		return true;
 	}
 	if (
+		/\b(?:i\s+(?:already\s+)?(?:said|told|mentioned)|i\s+told\s+you|already\s+(?:said|told|mentioned)|me\s+and\s+my\s+(?:friend|wife|husband|brother|sister)|my\s+(?:friend|wife|husband|brother|sister)|we\s+are|we're)\b/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	if (
 		/(?:\u063a\u0644\u0637|\u062e\u0637\u0627|\u062e\u0637\u0623|\u0645\u0634\u0643\u0644|\u0645\u0634\u0643\u0644\u0647|\u062a\u0639\u062f\u064a\u0644|\u062a\u063a\u064a\u064a\u0631|\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633|\u062d\u062c\u0632|\u0633\u0639\u0631|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641|\u062c\u0646\u0633\u064a|\u0627\u064a\u0645\u064a\u0644|\u0645\u0645\u0643\u0646|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0637\u0628|\u0628\u0633\u0631\u0639\u0647|\u0628\u0633\u0631\u0639\u0629|\u0633\u0631\u0639\u0647|\u0633\u0631\u0639\u0629|\u0627\u0644\u0633\u0631\u0639\u0647|\u0627\u0644\u0633\u0631\u0639\u0629|\u0645\u0633\u062a\u0639\u062c\u0644|\u0645\u0633\u062a\u0639\u062c\u0644\u0647|\u0627\u062f\u064a\u0646\u064a|\u0627\u062f\u064a\u0646\u0649|\u0647\u0627\u062a|\u0627\u0631\u0633\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645)/i.test(
+			arabic
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:\u0642\u0644\u062a\u0644\u0643|\u0642\u0648\u0644\u062a\u0644\u0643|\u0642\u0644\u062a\s+\u0644\u0643|\u0642\u0648\u0644\u062a\s+\u0644\u0643|\u0627\u0646\u0627\s+\u0648|\u0623\u0646\u0627\s+\u0648|\u0627\u0646\u0627\s+\u0648|\u0635\u062f\u064a\u0642\u064a|\u0635\u062f\u064a\u0642\u0649|\u0635\u0627\u062d\u0628\u064a|\u0635\u0627\u062d\u0628\u0649|\u0632\u0648\u062c\u062a\u064a|\u0632\u0648\u062c\u062a\u0649|\u0632\u0648\u062c\u064a|\u0632\u0648\u062c\u0649|\u064a\u0639\u0646\u064a|\u064a\u0639\u0646\u0649|\u0641\u0631\u062f\u064a\u0646|\u0634\u062e\u0635\u064a\u0646|\u0627\u062d\u0646\u0627|\u0646\u062d\u0646|\u0639\u062f\u062f\u0646\u0627)/i.test(
 			arabic
 		)
 	) {
@@ -9146,6 +9177,58 @@ function likelyGuestCountText(text = "") {
 	);
 }
 
+function companionPairGuestCountText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	return (
+		/\b(?:me|myself|i)\s+and\s+(?:my\s+)?(?:friend|wife|husband|brother|sister|mother|father)\b/i.test(
+			lower
+		) ||
+		/\b(?:for|room\s+for|reservation\s+for|booking\s+for)\s+(?:me|myself)\s+and\s+(?:my\s+)?(?:friend|wife|husband|brother|sister|mother|father)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0646\u0627|\u0623\u0646\u0627|\u0644\u064a\u0627|\u0644\u064a|\u0644\u064a\u0647|\u0644\u0649)\s+(?:\u0648|[+])\s*(?:\u0635\u062f\u064a\u0642\u064a|\u0635\u062f\u064a\u0642\u0649|\u0635\u0627\u062d\u0628\u064a|\u0635\u0627\u062d\u0628\u0649|\u0632\u0648\u062c\u062a\u064a|\u0632\u0648\u062c\u062a\u0649|\u0632\u0648\u062c\u064a|\u0632\u0648\u062c\u0649|\u0627\u062e\u064a|\u0623\u062e\u064a|\u0627\u062e\u0649|\u0623\u062e\u0649|\u0627\u062e\u062a\u064a|\u0623\u062e\u062a\u064a|\u0627\u062e\u062a\u0649|\u0623\u062e\u062a\u0649)/i.test(
+			arabic
+		) ||
+		/(?:meandmyfriend|meandfriend|myselfandfriend|ana[ow]sadiqi|ana[ow]sahbi|lia[ow]sadiqi|lia[ow]sahbi)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function standaloneGuestCountFromText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return null;
+	if (companionPairGuestCountText(raw)) return 2;
+	const rawParts = raw
+		.split(/[\n\r;|,،]+/)
+		.map((part) => part.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+	for (const rawPart of rawParts) {
+		if (rawPart.length > 40) continue;
+		if (latestEmailFromText(rawPart) || cleanPhoneCandidate(rawPart)) continue;
+		if (looksLikeStayDateCandidate(rawPart)) continue;
+		if (nameCandidateLooksLikeNationality(rawPart)) continue;
+		if (
+			/\b(?:room|hotel|date|check\s*-?\s*in|check\s*-?\s*out|nationality|country|phone|email)\b/i.test(
+				rawPart
+			) ||
+			/(?:\u063a\u0631\u0641\u0629|\u0641\u0646\u062f\u0642|\u062a\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u062c\u0646\u0633\u064a\u0629|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644)/i.test(
+				rawPart
+			)
+		) {
+			continue;
+		}
+		const hasLetters = /[A-Za-z\u0600-\u06FF\u0900-\u097F]/.test(rawPart);
+		if (!hasLetters && /^\d{1,2}$/.test(rawPart)) continue;
+		const count = reservationDetailCount(rawPart, { allowZero: false });
+		if (count !== null && count <= 30) return count;
+	}
+	return null;
+}
+
 function countNearTerms(text = "", terms = [], { allowZero = false } = {}) {
 	const normalized = normalizeNumberWordsForParsing(text)
 		.replace(/\s+/g, " ")
@@ -9197,6 +9280,9 @@ function applyReservationGuestCountsFromText(st = {}, text = "") {
 		guests = reservationDetailCount(genericGuestMatch?.[1], {
 			allowZero: false,
 		});
+	}
+	if (guests === null) {
+		guests = standaloneGuestCountFromText(text);
 	}
 	const hasAdultCount = adults !== null;
 	let hasChildrenCount = children !== null;
@@ -9418,7 +9504,8 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		/\b(?:adults?|children|kids?|guests?|people|persons?|pax)\b/i.test(fullText) ||
 		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0636\u064a\u0648\u0641|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0646\u0641\u0631)/i.test(
 			fullText
-		);
+		) ||
+		standaloneGuestCountFromText(fullText) !== null;
 	const shouldParseCounts = !directFieldCaptured || explicitCountFieldText;
 	const guestCountCaptured = shouldParseCounts
 		? applyReservationGuestCountsFromText(st, fullText)
@@ -13496,11 +13583,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		await askForReservationDetail(io, sc, st, st.waitFor);
 		return true;
 	}
-	if (!st.slots.email && !st.slots.emailSkipped) {
-		st.waitFor = "email_or_skip";
-		await askForReservationDetail(io, sc, st, st.waitFor);
-		return true;
-	}
+	if (!st.slots.email && !st.slots.emailSkipped) st.slots.emailSkipped = true;
 	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
 	const quoteForCreate =
 		st.quote?.data ||
