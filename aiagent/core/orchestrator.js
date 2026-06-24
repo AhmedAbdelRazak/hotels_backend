@@ -2062,6 +2062,7 @@ function hydrateKnownSlotsFromConversation(
 	st = {},
 	{ protectLatestGuestDateChange = false } = {}
 ) {
+	const hydrationStartedAt = now();
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	if (!conversation.length) {
 		return;
@@ -2130,14 +2131,19 @@ function hydrateKnownSlotsFromConversation(
 	let latestAssistantQuotedRoomKey = null;
 	for (const message of conversation) {
 		const messageText = conversationEntryContextText(message);
+		if (!messageText || message?.isSystem) continue;
+		const guestMessage = isGuestConversationMessage(message);
+		const recoverableAssistantMessage =
+			!guestMessage &&
+			isAiConversationMessage(message) &&
+			assistantMessageCanRecoverRoomType(message);
+		if (!guestMessage && !recoverableAssistantMessage) continue;
+		if (!likelyRoomTypeText(messageText)) continue;
 		const messageRoomKey = mapRoomToKey(messageText);
 		if (!messageRoomKey) continue;
-		if (isGuestConversationMessage(message)) {
+		if (guestMessage) {
 			latestGuestRoomKey = messageRoomKey;
-		} else if (
-			isAiConversationMessage(message) &&
-			assistantMessageCanRecoverRoomType(message)
-		) {
+		} else if (recoverableAssistantMessage) {
 			latestAssistantQuotedRoomKey = messageRoomKey;
 		}
 	}
@@ -2211,6 +2217,17 @@ function hydrateKnownSlotsFromConversation(
 	st.hydratedConversationLength = conversation.length;
 	if (before !== JSON.stringify(st.slots || {})) {
 		logStep(String(sc._id || ""), "slots.hydrated", { slots: st.slots });
+	}
+	const hydrationElapsedMs = now() - hydrationStartedAt;
+	if (hydrationElapsedMs >= 500) {
+		console.log("[aiagent] slow slots hydrate", {
+			caseId: String(sc._id || ""),
+			elapsedMs: hydrationElapsedMs,
+			conversationLength: conversation.length,
+			guestMessages: guestMessages.length,
+			waitFor: st.waitFor || null,
+			latestUserMessage: lastUserText(sc).slice(0, 160),
+		});
 	}
 }
 
@@ -3360,6 +3377,28 @@ function vagueHajjInquiryText(text = "") {
 			arabic
 		);
 	return !onlyHijriMonth;
+}
+
+function likelyRoomTypeText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const lower = raw.toLowerCase();
+	const roomOrCapacityWords =
+		/\b(?:room|rooms|bed|beds|suite|suites|double|twin|king|queen|standard|triple|quad|quadruple|family|quintuple|guest|guests|adult|adults|people|persons|pax|ghorfa|ghurfa|ghoraf|ghuraf|odah|oda|owda|awda)\b/i.test(
+			lower
+		) ||
+		/(?:\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u063a\u0631\u0641|\u0623\u0648\u0636\u0629|\u0627\u0648\u0636\u0629|\u0633\u0631\u064a\u0631|\u0623\u0633\u0631\u0629|\u0627\u0633\u0631\u0629|\u0634\u062e\u0635|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0636\u064a\u0648\u0641|\u0646\u0641\u0631|\u0628\u0627\u0644\u063a|\u062b\u0646\u0627\u0626|\u062f\u0628\u0644|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u064a|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644\u064a)/i.test(
+			raw
+		);
+	if (roomOrCapacityWords) return true;
+	return (
+		/\b(?:2|two|3|three|4|four|5|five|6|six|7|seven|8|eight|9|nine|10|ten)\b/i.test(
+			lower
+		) &&
+		/\b(?:guest|guests|adult|adults|people|persons|pax|bed|beds|room|rooms)\b/i.test(
+			lower
+		)
+	);
 }
 
 function roomCapacityOrTypeInquiryText(text = "") {
