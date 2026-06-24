@@ -2732,6 +2732,7 @@ function selectedHotelRoomQuestionText(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (selectedHotelRoomDetailsQuestionText(text)) return true;
 	if (roomCapacityOrTypeInquiryText(text)) return true;
 	const mentionsRoom =
 		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
@@ -2776,6 +2777,29 @@ function selectedHotelRoomQuestionText(text = "") {
 		) ||
 		/عندكم|فيه|هل|متاح|ابغى|أبغى|عايز|عاوز|احتاج/.test(normalized)
 	);
+}
+
+function selectedHotelRoomDetailsQuestionText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const mentionsRoom =
+		/\b(?:room|rooms|suite|suites|bed|beds)\b/i.test(lower) ||
+		/(?:\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u063a\u0631\u0641|\u0623\u0648\u0636\u0629|\u0627\u0648\u0636\u0629|\u0633\u0631\u064a\u0631|\u0623\u0633\u0631\u0629|\u0627\u0633\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:room|suite|bed|ghorfa|ghurfa|oda|odah)/i.test(latinCompact);
+	const asksDetails =
+		/\b(?:amenit(?:y|ies)|features?|facilities|views?|view|description|details?|include|included|inside|size|sqm|square\s*meter|balcony|window)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0631\u0627\u0641\u0642|\u0645\u0645\u064a\u0632\u0627\u062a|\u0645\u064a\u0632\u0627\u062a|\u0625\u0637\u0644\u0627\u0644\u0629|\u0627\u0637\u0644\u0627\u0644\u0629|\u0627\u0644\u0625\u0637\u0644\u0627\u0644\u0629|\u0627\u0644\u0627\u0637\u0644\u0627\u0644\u0629|\u0648\u0635\u0641|\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0634\u0645\u0644|\u062f\u0627\u062e\u0644|\u0645\u0633\u0627\u062d\u0629|\u0628\u0644\u0643\u0648\u0646\u0629|\u0634\u0628\u0627\u0643|\u0646\u0627\u0641\u0630\u0629)/i.test(
+			arabic
+		) ||
+		/(?:amenities|features|facilities|view|views|description|details|included|inside|roomsize|balcony|window)/i.test(
+			latinCompact
+		);
+	return mentionsRoom && asksDetails;
 }
 
 function selectedHotelDistanceQuestionText(text = "") {
@@ -4795,6 +4819,107 @@ function roomOptionsListText(sc = {}, st = {}, options = []) {
 	return `${name}, of course. The available room types at ${hotelName} are:\n${bullets}\n\nWhich one would you prefer? If you want the price, send the check-in and checkout dates.`;
 }
 
+function uniqueRoomFacts(values = [], limit = 5) {
+	const seen = new Set();
+	const facts = [];
+	for (const value of values || []) {
+		const text = cleanHotelFactText(value);
+		const key = text.toLowerCase();
+		if (!text || seen.has(key)) continue;
+		seen.add(key);
+		facts.push(text);
+		if (facts.length >= limit) break;
+	}
+	return facts;
+}
+
+function roomDetailsLabels(lang = "English") {
+	if (/arabic/i.test(lang)) {
+		return {
+			description: "\u0627\u0644\u0648\u0635\u0641",
+			amenities: "\u0627\u0644\u0645\u0631\u0627\u0641\u0642",
+			views: "\u0627\u0644\u0625\u0637\u0644\u0627\u0644\u0629",
+			beds: "\u0639\u062f\u062f \u0627\u0644\u0623\u0633\u0631\u0629",
+			size: "\u0627\u0644\u0645\u0633\u0627\u062d\u0629",
+			noDetails:
+				"\u0644\u0627 \u0623\u0631\u0649 \u062a\u0641\u0627\u0635\u064a\u0644 \u0625\u0636\u0627\u0641\u064a\u0629 \u0645\u0624\u0643\u062f\u0629 \u062d\u0627\u0644\u064a\u0627",
+		};
+	}
+	return {
+		description: "Description",
+		amenities: "Amenities",
+		views: "Views",
+		beds: "Beds",
+		size: "Size",
+		noDetails: "No extra room details are confirmed right now",
+	};
+}
+
+function roomDetailsBullet(room = {}, lang = "English") {
+	const labels = roomDetailsLabels(lang);
+	const name =
+		roomOptionDisplayName(room, lang) ||
+		localizedRoomTypeLabel(room.roomType, lang);
+	const description =
+		/arabic/i.test(lang) && hasArabicScript(room.descriptionOther)
+			? room.descriptionOther
+			: room.description;
+	const amenities = uniqueRoomFacts(
+		[...(room.amenities || []), ...(room.extraAmenities || [])],
+		5
+	).join(", ");
+	const views = uniqueRoomFacts(room.views || [], 3).join(", ");
+	const facts = [];
+	if (description) facts.push(`${labels.description}: ${description}`);
+	if (amenities) facts.push(`${labels.amenities}: ${amenities}`);
+	if (views) facts.push(`${labels.views}: ${views}`);
+	if (room.bedsCount) facts.push(`${labels.beds}: ${room.bedsCount}`);
+	if (room.roomSize) facts.push(`${labels.size}: ${room.roomSize}`);
+	return `- ${name}: ${facts.join("; ") || labels.noDetails}`;
+}
+
+function roomDetailsNextStepText(sc = {}, st = {}, roomTypeKey = "") {
+	const lang = languageOf(sc, st);
+	const hasDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	if (aiReservationReference(sc)) {
+		return /arabic/i.test(lang)
+			? "\u0648\u0628\u0639\u062f \u0627\u0644\u062d\u062c\u0632 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0623\u064a \u0633\u0624\u0627\u0644 \u0622\u062e\u0631 \u0639\u0646 \u0627\u0644\u062d\u062c\u0632\u060c \u0627\u0644\u062e\u0631\u0627\u0626\u0637\u060c Nusuk\u060c \u0623\u0648 \u0623\u064a \u062a\u0641\u0635\u064a\u0644 \u0644\u0644\u0641\u0646\u062f\u0642."
+			: "After the booking, I can still help with the confirmation, maps, Nusuk, cancellation questions, or any other hotel detail.";
+	}
+	if (/arabic/i.test(lang)) {
+		if (hasDates && roomTypeKey) {
+			return "\u0625\u0630\u0627 \u0647\u0630\u0647 \u0627\u0644\u063a\u0631\u0641\u0629 \u0645\u0646\u0627\u0633\u0628\u0629\u060c \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0639\u0644\u0649 \u062a\u0648\u0627\u0631\u064a\u062e\u0643.";
+		}
+		return roomTypeKey
+			? "\u0625\u0630\u0627 \u0647\u0630\u0647 \u0627\u0644\u063a\u0631\u0641\u0629 \u0645\u0646\u0627\u0633\u0628\u0629\u060c \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0644\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631."
+			: "\u0627\u062e\u062a\u0631 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0623\u0646\u0633\u0628\u060c \u0648\u0623\u0631\u0633\u0644 \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631.";
+	}
+	if (hasDates && roomTypeKey) {
+		return "If this room works for you, I can check the price and availability for your dates.";
+	}
+	return roomTypeKey
+		? "If this room works for you, send the check-in and checkout dates and I will check price and availability."
+		: "Choose the room type that fits you best, then send the check-in and checkout dates and I will check the price.";
+}
+
+function roomDetailsSummaryText(sc = {}, st = {}, options = [], roomTypeKey = "") {
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const lang = languageOf(sc, st);
+	const rooms = (Array.isArray(options) ? options : []).slice(0, roomTypeKey ? 3 : 6);
+	if (!rooms.length) {
+		if (/arabic/i.test(lang)) {
+			return `${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0641\u0627\u0635\u064a\u0644 \u063a\u0631\u0641 \u0645\u0641\u0639\u0644\u0629 \u062d\u0627\u0644\u064a\u0627 \u0641\u064a ${hotelName}. ${roomDetailsNextStepText(sc, st, roomTypeKey)}`;
+		}
+		return `${name}, I do not currently see active room details listed for ${hotelName}. ${roomDetailsNextStepText(sc, st, roomTypeKey)}`;
+	}
+	const bullets = rooms.map((room) => roomDetailsBullet(room, lang)).join("\n");
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0647\u0630\u0647 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName}:\n${bullets}\n\n${roomDetailsNextStepText(sc, st, roomTypeKey)}`;
+	}
+	return `${name}, here are the room details I can see for ${hotelName}:\n${bullets}\n\n${roomDetailsNextStepText(sc, st, roomTypeKey)}`;
+}
+
 function roomPreferenceSalesText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = toTitle(st.hotel?.hotelName || sc.displayName2 || "the hotel");
@@ -5376,6 +5501,7 @@ async function answerSelectedHotelRoomQuestion(
 	userText,
 	roomTypeKey = null
 ) {
+	const previousWaitFor = st.waitFor || null;
 	const latestDates = extractDateRange(userText);
 	if (
 		latestDates.checkinISO &&
@@ -5392,6 +5518,42 @@ async function answerSelectedHotelRoomQuestion(
 		logStep(String(sc._id), "room_question.skip_after_reply", {
 			roomTypeKey,
 			waitFor: st.waitFor,
+		});
+		return true;
+	}
+	if (selectedHotelRoomDetailsQuestionText(userText)) {
+		const selectedRoomTypeKey =
+			roomTypeKey || st.slots?.roomTypeKey || mapRoomToKey(userText) || null;
+		const detailRooms = selectedRoomTypeKey
+			? activeHotelRoomSummaries(st.hotel, selectedRoomTypeKey)
+			: activeHotelRoomSummaries(st.hotel).slice(0, 6);
+		const sent = await humanSend(
+			io,
+			sc,
+			st,
+			roomDetailsSummaryText(sc, st, detailRooms, selectedRoomTypeKey),
+			{ fast: true }
+		);
+		if (sent) {
+			if (selectedRoomTypeKey && detailRooms.length) {
+				st.slots.roomTypeKey = selectedRoomTypeKey;
+			}
+			if (aiReservationReference(sc)) {
+				st.waitFor = "post_booking_followup";
+				st.reviewSent = false;
+			} else {
+				st.waitFor =
+					previousWaitFor ||
+					(selectedRoomTypeKey ? "dates" : "room");
+				if (st.waitFor === "dates" || st.waitFor === "room") {
+					stampAsk(st, st.waitFor);
+				}
+			}
+		}
+		logStep(String(sc._id), "selected_hotel.room_details_reply", {
+			roomTypeKey: selectedRoomTypeKey || "",
+			roomCount: detailRooms.length,
+			waitFor: st.waitFor || "",
 		});
 		return true;
 	}
