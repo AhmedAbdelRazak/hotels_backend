@@ -3149,6 +3149,19 @@ function wantsPaymentHelp(text = "") {
 		/(?:payment|pay|paid|card|creditcard|debitcard|mada|checkout|invoice|receipt|deposit|charge|charged|refund|banktransfer|pago|pagar|paiement|payer|pembayaran|bayar|bayaran|kad|invois|adaigi)/i.test(
 			latinCompact
 		);
+	const roomOrStayRequest =
+		Boolean(mapRoomToKey(raw)) ||
+		(/\b(?:room|rooms|availability|available|price|rate|stay|dates?)\b/i.test(
+			lower
+		) &&
+			/\b(?:check|book|reserve|quote|price|rate|available|availability|stay)\b/i.test(
+				lower
+			)) ||
+		(likelyStayDateText(raw) &&
+			/\b(?:room|rooms|stay|check|book|reserve|availability|available)\b/i.test(
+				lower
+			));
+	if (roomOrStayRequest && !actualPaymentWords) return false;
 	if (locationOrMapLink && !actualPaymentWords) return false;
 	if (hasSemanticSignal(raw, "payment")) return true;
 	if (/\b(pembayaran|bayar|pautan|invois|invoice)\b/i.test(raw)) return true;
