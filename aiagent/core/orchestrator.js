@@ -14570,6 +14570,23 @@ async function planTurn(io, sc) {
 			);
 			if (immediateProceedHandled) return;
 		}
+		const earlyFastSmalltalk = st.hotel
+			? fastEnglishSmalltalkText(sc, st, userText)
+			: "";
+		if (
+			earlyFastSmalltalk &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "smalltalk.fast_reply_early", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, earlyFastSmalltalk, { fast: true });
+			return;
+		}
 		if (
 			st.hotel &&
 			userText &&
