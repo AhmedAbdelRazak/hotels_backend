@@ -8846,16 +8846,22 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	const before = JSON.stringify(st.slots || {});
 	const fullText = String(text || "");
 	const phone = latestPhoneFromText(fullText);
-	if (phone) st.slots.phone = phone;
+	let directFieldCaptured = false;
+	if (phone) {
+		st.slots.phone = phone;
+		directFieldCaptured = true;
+	}
 	const email = latestEmailFromText(fullText);
 	let emailSkipCaptured = false;
 	if (email) {
 		st.slots.email = email;
 		st.slots.emailSkipped = false;
+		directFieldCaptured = true;
 	} else if (st.waitFor === "email_or_skip" && emailSkipText(fullText)) {
 		st.slots.email = "";
 		st.slots.emailSkipped = true;
 		emailSkipCaptured = true;
+		directFieldCaptured = true;
 	}
 	const explicitName = explicitNameCandidateFromText(fullText);
 	const lineName =
@@ -8864,15 +8870,18 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	if (shouldReplaceCapturedGuestName(st, name, { explicit: Boolean(explicitName) })) {
 		st.slots.fullName = name;
 		st.slots.name = name;
+		directFieldCaptured = true;
 	}
 	const nationalityHint = nationalityHintFromText(explicitNationalityText(fullText) || fullText);
 	if (AI_REQUIRE_NATIONALITY && nationalityHint && !st.slots.nationality) {
 		st.slots.nationality = nationalityHint;
+		directFieldCaptured = true;
 	}
 	const guestCountCaptured = applyReservationGuestCountsFromText(st, fullText);
 	const numericCountCaptured = applyFocusedNumericCountAnswer(st, fullText);
 	if (
 		!hasMandatoryReservationDetails(st) &&
+		!directFieldCaptured &&
 		!guestCountCaptured &&
 		!numericCountCaptured &&
 		!emailSkipCaptured &&
@@ -13994,6 +14003,36 @@ async function askForReservationDetail(
 	stampAsk(st, step);
 }
 
+async function handleReservationDetailPayloadFallback(io, sc, st, userText, caseId) {
+	if (!reservationDetailContextReady(st)) return false;
+	if (
+		!reservationDetailFieldPayloadText(userText) ||
+		humanHandoffReason(userText) ||
+		wantsPaymentHelp(userText)
+	) {
+		return false;
+	}
+	const before = JSON.stringify(st.slots || {});
+	await captureReservationDetailsFromText(sc, st, userText, caseId);
+	const changed = before !== JSON.stringify(st.slots || {});
+	if (!changed) return false;
+	if (!hasMandatoryReservationDetails(st)) {
+		st.waitFor = "reservation_details";
+		await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }), {
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		stampAsk(st, "reservation_details");
+		return true;
+	}
+	st.waitFor = "finalize";
+	await sendReservationReview(io, sc, st, st.quote?.data, {
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
+	return true;
+}
+
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
 	const guestAction = lastGuestAction(sc);
@@ -14025,6 +14064,7 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			st.waitFor = nextReservationDetailStep(st);
 			if (st.waitFor !== "finalize") {
 				await askForReservationDetail(io, sc, st, st.waitFor, {
+					fast: true,
 					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 				});
 				return true;
@@ -14036,16 +14076,19 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.waitFor = nextReservationDetailStep(st);
 				if (st.waitFor !== "finalize") {
 					await askForReservationDetail(io, sc, st, st.waitFor, {
+						fast: true,
 						targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 					});
 					return true;
 				}
 				await sendReservationReview(io, sc, st, st.quote?.data, {
+					fast: true,
 					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 				});
 				return true;
 			}
 			await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }), {
+				fast: true,
 				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 			});
 			stampAsk(st, "reservation_details");
@@ -14584,6 +14627,11 @@ async function planTurn(io, sc) {
 				caseId
 			);
 			if (handledReservationDetail) return;
+		}
+		if (userText && !severeAbusiveGuestText(userText)) {
+			const handledReservationPayload =
+				await handleReservationDetailPayloadFallback(io, sc, st, userText, caseId);
+			if (handledReservationPayload) return;
 		}
 		if (userText && !severeAbusiveGuestText(userText)) {
 			const immediateProceedHandled = await handleProceedStageInput(
