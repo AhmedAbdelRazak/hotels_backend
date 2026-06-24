@@ -7508,7 +7508,9 @@ function explicitNameCandidateFromText(text = "") {
 	];
 	for (const pattern of patterns) {
 		const match = value.match(pattern);
-		const candidate = match ? cleanFullNameCandidate(stripFieldTail(match[1])) : "";
+		const candidate = match
+			? cleanFullNameCandidate(stripFieldTail(match[1]).replace(/^(?:is|es)\s+/i, ""))
+			: "";
 		if (candidate) return candidate;
 	}
 	return "";
@@ -8360,18 +8362,31 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		st.slots.fullName = name;
 		st.slots.name = name;
 	}
+	const nationalityHint = nationalityHintFromText(explicitNationalityText(fullText) || fullText);
+	if (AI_REQUIRE_NATIONALITY && nationalityHint && !st.slots.nationality) {
+		st.slots.nationality = nationalityHint;
+	}
 	const guestCountCaptured = applyReservationGuestCountsFromText(st, fullText);
 	const numericCountCaptured = applyFocusedNumericCountAnswer(st, fullText);
 	if (
+		!hasMandatoryReservationDetails(st) &&
 		!guestCountCaptured &&
 		!numericCountCaptured &&
 		!emailSkipCaptured &&
 		["reservation_details", "fullname", "nationality", "phone", "email_or_skip"].includes(st.waitFor)
 	) {
-		await inferReservationDetailsFromContext(sc, st, fullText, caseId);
+		await withSoftTimeout(
+			inferReservationDetailsFromContext(sc, st, fullText, caseId),
+			2500,
+			null
+		);
 	}
 	if (AI_REQUIRE_NATIONALITY && !st.slots.nationality) {
-		const nationality = await normalizeNationalityFromText(fullText, languageOf(sc, st));
+		const nationality = await withSoftTimeout(
+			normalizeNationalityFromText(fullText, languageOf(sc, st)),
+			2000,
+			""
+		);
 		if (nationality) st.slots.nationality = nationality;
 	}
 	if (st.slots.fullName && !st.slots.name) st.slots.name = st.slots.fullName;
