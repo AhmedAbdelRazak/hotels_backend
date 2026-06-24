@@ -61,7 +61,13 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	caseId,
 	messageOrFields,
-	{ duplicateWindowMs = 2 * 60 * 1000, duplicateAfter = null } = {}
+	{
+		duplicateWindowMs = 2 * 60 * 1000,
+		duplicateAfter = null,
+		requireOpenClientAi = false,
+		requireLatestGuestText = "",
+		skipDuplicateCheck = false,
+	} = {}
 ) {
 	const _id = safeId(caseId);
 	if (!_id) return { updatedCase: null, skipped: true };
@@ -69,9 +75,39 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	const message = messageOrFields?.conversation || {};
 	const update = buildSupportCaseAppendUpdate(messageOrFields);
 	const filter = { _id };
+	if (requireOpenClientAi) {
+		filter.openedBy = "client";
+		filter.caseStatus = "open";
+		filter.aiToRespond = true;
+	}
+	const latestGuestText = String(requireLatestGuestText || "").trim();
+	if (latestGuestText) {
+		filter.$expr = {
+			$eq: [
+				{
+					$let: {
+						vars: { latest: { $arrayElemAt: ["$conversation", -1] } },
+						in: {
+							$cond: [
+								{
+									$or: [
+										{ $eq: ["$$latest.isAi", true] },
+										{ $eq: ["$$latest.isSystem", true] },
+									],
+								},
+								"",
+								{ $trim: { input: "$$latest.message" } },
+							],
+						},
+					},
+				},
+				latestGuestText,
+			],
+		};
+	}
 	const text = String(message.message || "").trim();
 	const userId = String(message.messageBy?.userId || "").trim();
-	if ((message.isAi === true || message.isSystem === true) && text) {
+	if (!skipDuplicateCheck && (message.isAi === true || message.isSystem === true) && text) {
 		const cutoff = new Date(Date.now() - Math.max(1000, Number(duplicateWindowMs) || 0));
 		const duplicateAfterDate =
 			duplicateAfter instanceof Date

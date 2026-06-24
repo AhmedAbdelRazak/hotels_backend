@@ -7270,64 +7270,10 @@ async function humanSend(
 	}
 
 	let sendGateCase = null;
-	try {
-		const latestCase = await getSupportCaseById(caseId);
-		sendGateCase = latestCase;
-		const policy =
-			fast && latestCase
-				? {
-						allowed:
-							latestCase.openedBy === "client" &&
-							latestCase.caseStatus === "open" &&
-							latestCase.aiToRespond === true,
-						reason: "fast send case gate",
-				  }
-				: latestCase
-				? await ensureAIAllowed(latestCase.hotelId, latestCase)
-				: { allowed: false, reason: "support case missing" };
-		if (!policy.allowed) {
-			logStep(caseId, "human.cancelled", {
-				stage: "policy-before-save",
-				reason: policy.reason,
-			});
-			return false;
-		}
-		const latestCustomerText = latestCase ? lastUserText(latestCase) : "";
-		if (first && !expectedTurnUserText && latestCustomerText) {
-			logStep(caseId, "human.cancelled", {
-				stage: "stale-greeting",
-				token,
-				latestCustomerText,
-			});
-			return false;
-		}
-		if (
-			expectedTurnUserText &&
-			latestCustomerText &&
-			latestCustomerText !== expectedTurnUserText
-		) {
-			logStep(caseId, "human.cancelled", {
-				stage: "stale-turn",
-				token,
-				expectedTurnUserText,
-				latestCustomerText,
-			});
-			return false;
-		}
-		if (
-			expectedTurnUserText &&
-			!st.activeTurnHadReply &&
-			hasAiAssistantReplyAfterLatestGuest(latestCase)
-		) {
-			logStep(caseId, "human.cancelled", {
-				stage: "latest-guest-already-answered",
-				token,
-				expectedTurnUserText,
-			});
-			st.activeTurnHadReply = true;
-			return false;
-		}
-		text = applyGuestAddressCadence(text, latestCase, st, { first });
+	const fastAtomicAppend = Boolean(fast && expectedTurnUserText);
+	if (fastAtomicAppend) {
+		sendGateCase = sc;
+		text = applyGuestAddressCadence(text, sc, st, { first });
 		if (
 			st.lastBotText &&
 			st.lastBotText.trim() === String(text).trim() &&
@@ -7336,12 +7282,80 @@ async function humanSend(
 			logStep(caseId, "dedupe.skip", { reason: "same_as_last_after_name_polish" });
 			return false;
 		}
-	} catch (error) {
-		logStep(caseId, "human.cancelled", {
-			stage: "policy-check-failed",
-			message: error?.message || error,
-		});
-		return false;
+	} else {
+		try {
+			const latestCase = await getSupportCaseById(caseId);
+			sendGateCase = latestCase;
+			const policy =
+				fast && latestCase
+					? {
+							allowed:
+								latestCase.openedBy === "client" &&
+								latestCase.caseStatus === "open" &&
+								latestCase.aiToRespond === true,
+							reason: "fast send case gate",
+					  }
+					: latestCase
+					? await ensureAIAllowed(latestCase.hotelId, latestCase)
+					: { allowed: false, reason: "support case missing" };
+			if (!policy.allowed) {
+				logStep(caseId, "human.cancelled", {
+					stage: "policy-before-save",
+					reason: policy.reason,
+				});
+				return false;
+			}
+			const latestCustomerText = latestCase ? lastUserText(latestCase) : "";
+			if (first && !expectedTurnUserText && latestCustomerText) {
+				logStep(caseId, "human.cancelled", {
+					stage: "stale-greeting",
+					token,
+					latestCustomerText,
+				});
+				return false;
+			}
+			if (
+				expectedTurnUserText &&
+				latestCustomerText &&
+				latestCustomerText !== expectedTurnUserText
+			) {
+				logStep(caseId, "human.cancelled", {
+					stage: "stale-turn",
+					token,
+					expectedTurnUserText,
+					latestCustomerText,
+				});
+				return false;
+			}
+			if (
+				expectedTurnUserText &&
+				!st.activeTurnHadReply &&
+				hasAiAssistantReplyAfterLatestGuest(latestCase)
+			) {
+				logStep(caseId, "human.cancelled", {
+					stage: "latest-guest-already-answered",
+					token,
+					expectedTurnUserText,
+				});
+				st.activeTurnHadReply = true;
+				return false;
+			}
+			text = applyGuestAddressCadence(text, latestCase, st, { first });
+			if (
+				st.lastBotText &&
+				st.lastBotText.trim() === String(text).trim() &&
+				(!expectedTurnUserText || st.lastBotTurnUserText === expectedTurnUserText)
+			) {
+				logStep(caseId, "dedupe.skip", { reason: "same_as_last_after_name_polish" });
+				return false;
+			}
+		} catch (error) {
+			logStep(caseId, "human.cancelled", {
+				stage: "policy-check-failed",
+				message: error?.message || error,
+			});
+			return false;
+		}
 	}
 
 	const messageData = {
@@ -7367,6 +7381,9 @@ async function humanSend(
 		{
 			duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS,
 			duplicateAfter: expectedTurnUserText ? turnStartedAt : null,
+			requireOpenClientAi: fastAtomicAppend,
+			requireLatestGuestText: fastAtomicAppend ? expectedTurnUserText : "",
+			skipDuplicateCheck: fastAtomicAppend,
 		}
 	);
 	if (saved?.skipped) {
