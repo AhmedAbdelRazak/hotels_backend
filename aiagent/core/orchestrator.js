@@ -12320,6 +12320,9 @@ function cancellationRefundPolicyQuestionText(text = "") {
 		/\b(?:what happens if (?:i|we) cancel|if (?:i|we) (?:book|reserve|make a reservation).{0,70}\bcancel|if (?:i|we) cancel after (?:booking|reservation)|if (?:i|we) need to cancel later|need to cancel later|cancel later|refund work|refund works|how does (?:the )?refund work|how does cancellation work|cancel.{0,50}refund|refund.{0,50}cancel)\b/i.test(
 			lower
 		) ||
+		/\b(?:if|when)\s+(?:i|we)\s+(?:need|want|have)\s+to\s+cancel\b|\bhow\s+(?:can|do)\s+(?:i|we)\s+(?:ask\s+for|get|request)\s+(?:a\s+)?refund\b/i.test(
+			lower
+		) ||
 		/(?:\u0633\u064a\u0627\u0633\u0629\s*(?:\u0627\u0644)?(?:\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627\u0621|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639)|\u0647\u0644.{0,18}(?:\u0627\u0633\u062a\u0631\u062f|\u0627\u0633\u062a\u0631\u062c\u0639|\u0627\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0627\u0633\u062a\u0631\u062c\u0627\u0639|\u0631\u062f\s+\u0627\u0644\u0645\u0628\u0644\u063a|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0623\u062d\u0643\u0627\u0645|\u0627\u0644\u0634\u0631\u0648\u0637\s+\u0648\u0627\u0644\u0627\u062d\u0643\u0627\u0645)/i.test(
 			arabic
 		) ||
@@ -12572,6 +12575,8 @@ async function answerCancellationRefundPolicyInquiry(
 	await humanSend(io, sc, st, parts.filter(Boolean).join("\n\n"), {
 		quickReplies: cancellationPolicyQuickReplies(sc, st, previousWaitFor),
 		scheduleIdle: false,
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 	});
 	logStep(String(sc._id), "cancellation_policy.direct_reply", {
 		waitFor: st.waitFor,
@@ -12933,6 +12938,114 @@ function postBookingClarifyText(sc = {}, st = {}) {
 		return "Bien sur, je suis avec vous. Que puis-je faire d'autre pour vous?";
 	}
 	return "Of course, I am here. What else can I help you with?";
+}
+
+function postBookingLocalRecommendationQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:(?:recommend|suggest).{0,50}(?:nearby|around|close by|food|restaurant|restaurants|shop|shops|market|markets|souq|souks|souvenir|eat|meal|meals)|nearby|around|close by|food|restaurant|restaurants|shop|shops|market|markets|souq|souks|souvenir|eat|meal|meals)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0637\u0639\u0645|\u0645\u0637\u0627\u0639\u0645|\u0623\u0643\u0644|\u0627\u0643\u0644|\u0633\u0648\u0642|\u0623\u0633\u0648\u0627\u0642|\u0627\u0633\u0648\u0627\u0642|\u0645\u062d\u0644|\u0645\u062d\u0644\u0627\u062a|\u0642\u0631\u064a\u0628|(?:\u0631\u0634\u062d|\u062a\u0631\u0634\u062d).{0,30}(?:\u0645\u0637\u0639\u0645|\u0623\u0643\u0644|\u0633\u0648\u0642|\u0645\u062d\u0644|\u0642\u0631\u064a\u0628))/i.test(
+			arabic
+		) ||
+		/(?:(?:recommend|suggest).{0,50}(?:nearby|food|restaurant|shops|markets|souks|souq|eat)|nearby|food|restaurant|shops|markets|souks|souq|eat)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function postBookingHaramTimingQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:what time|when|best time|easiest time|recommend.{0,30}time|leave.{0,30}haram|go.{0,30}haram|daily prayers|prayer time|prayers)\b/i.test(
+			lower
+		) && /\b(?:haram|prayer|prayers|salah|masjid)\b/i.test(lower)
+	) ||
+		/(?:\u0645\u062a\u0649|\u0648\u0642\u062a|\u0623\u0641\u0636\u0644\s+\u0648\u0642\u062a|\u0627\u0641\u0636\u0644\s+\u0648\u0642\u062a|\u0623\u0633\u0647\u0644\s+\u0648\u0642\u062a|\u0627\u0633\u0647\u0644\s+\u0648\u0642\u062a).{0,50}(?:\u0627\u0644\u062d\u0631\u0645|\u0627\u0644\u0635\u0644\u0627\u0629|\u0627\u0644\u0635\u0644\u0627\u0647)/i.test(
+			arabic
+		) ||
+		/(?:whattime|besttime|easiesttime|recommendtime|leavetoharam|gotoharam|dailyprayers|prayertime)/i.test(
+			latinCompact
+		);
+}
+
+function postBookingHaramTimingText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const walking = formatHotelFactText(st.hotel?.distances?.walkingToElHaram, lang);
+	const driving = formatHotelFactText(st.hotel?.distances?.drivingToElHaram, lang);
+	const mapsUrl = hotelGoogleMapsDirectionsUrl(st.hotel || {}) || hotelGoogleMapsUrl(st.hotel || {});
+	const mapPart = mapsUrl ? ` [Hotel location on Google Maps](${mapsUrl})` : "";
+	const distance = [walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""]
+		.filter(Boolean)
+		.join(" and ");
+	if (/arabic/i.test(lang)) {
+		const distanceAr = distance ? ` \u0627\u0644\u0645\u0633\u0627\u0641\u0629 \u062a\u0642\u0631\u064a\u0628\u0627 ${distance}.` : "";
+		return `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0627\u0632\u062f\u062d\u0627\u0645\u0627 \u0645\u0628\u0627\u0634\u0631\u0627\u060c \u0644\u0643\u0646 \u0627\u0644\u0623\u0641\u0636\u0644 \u0627\u0644\u062e\u0631\u0648\u062c \u0645\u0628\u0643\u0631\u0627 \u0642\u0628\u0644 \u0645\u0648\u0639\u062f \u0627\u0644\u0635\u0644\u0627\u0629 \u062e\u0635\u0648\u0635\u0627 \u0641\u064a \u0623\u0648\u0642\u0627\u062a \u0627\u0644\u0630\u0631\u0648\u0629.${distanceAr}${mapPart ? ` ${mapPart}` : ""}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, I do not have live crowd or traffic data, so I recommend leaving early before prayer times, especially at busy periods.${distance ? ` The hotel is about ${distance}.` : ""}${mapPart}`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, I do not have live crowd or traffic data, so I recommend leaving early before prayer times, especially at busy periods.${distance ? ` The hotel is about ${distance}.` : ""}${mapPart}`;
+	}
+	return `${name}, I do not have live crowd or traffic data, so I recommend leaving early before prayer times, especially at busy periods.${distance ? ` The hotel is about ${distance}.` : ""}${mapPart}`;
+}
+
+function postBookingLocalRecommendationText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const mapsUrl = hotelGoogleMapsUrl(st.hotel || {});
+	const mapLink = mapsUrl ? `[Hotel location on Google Maps](${mapsUrl})` : "";
+	if (/arabic/i.test(lang)) {
+		const mapPart = mapLink
+			? ` \u0648\u0627\u0633\u062a\u062e\u062f\u0645 \u0647\u0630\u0627 \u0627\u0644\u0631\u0627\u0628\u0637 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0645\u0643\u0627\u0646: ${mapLink}.`
+			: "";
+		return `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0623\u0633\u0645\u0627\u0621 \u0645\u0637\u0627\u0639\u0645 \u0623\u0648 \u0645\u062d\u0644\u0627\u062a \u0645\u0624\u0643\u062f\u0629 \u062d\u0648\u0644 ${hotelName} \u0645\u0646 \u0633\u062c\u0644 \u0627\u0644\u0641\u0646\u062f\u0642 \u062d\u0627\u0644\u064a\u0627.${mapPart} \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644\u060c \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u0642\u062f\u0631 \u064a\u0631\u0634\u062f\u0643 \u0644\u0623\u0642\u0631\u0628 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a.`;
+	}
+	if (/spanish/i.test(lang)) {
+		const mapPart = mapLink ? ` You can use ${mapLink} to check the area.` : "";
+		return `${name}, I do not have verified restaurant or shop names around ${hotelName} in the hotel record right now.${mapPart} On arrival, reception can point you to the closest reliable options.`;
+	}
+	if (/french/i.test(lang)) {
+		const mapPart = mapLink ? ` You can use ${mapLink} to check the area.` : "";
+		return `${name}, I do not have verified restaurant or shop names around ${hotelName} in the hotel record right now.${mapPart} On arrival, reception can point you to the closest reliable options.`;
+	}
+	const mapPart = mapLink ? ` You can use ${mapLink} to check what is around the hotel.` : "";
+	return `${name}, I do not have verified restaurant or shop names around ${hotelName} in the hotel record right now.${mapPart} On arrival, reception can point you to the closest reliable options.`;
+}
+
+function postBookingPaymentHelpText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const ref = aiReservationReference(sc);
+	const links = ref ? reservationLinks(ref) : {};
+	const confirmation = ref?.confirmation_number || "";
+	if (/arabic/i.test(lang)) {
+		const linkPart = links.payment
+			? ` \u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639: ${links.payment}`
+			: "";
+		return `${name}\u060c \u062d\u062c\u0632\u0643 ${confirmation ? `\u0631\u0642\u0645 ${confirmation} ` : ""}\u0645\u0624\u0643\u062f.${linkPart} \u0645\u0646 \u0641\u0636\u0644\u0643 \u0644\u0627 \u062a\u0631\u0633\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0628\u0637\u0627\u0642\u0629 \u0641\u064a \u0627\u0644\u062f\u0631\u062f\u0634\u0629.`;
+	}
+	const linkPart = links.payment ? ` Payment link: ${links.payment}` : "";
+	return `${name}, your reservation ${confirmation ? `${confirmation} ` : ""}is confirmed.${linkPart} Please do not send card details in chat.`;
+}
+
+function postBookingUnsupportedText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const ref = aiReservationReference(sc);
+	const confirmation = ref?.confirmation_number || "";
+	if (/arabic/i.test(lang)) {
+		const booking = confirmation
+			? ` \u062d\u062c\u0632\u0643 \u0631\u0642\u0645 ${confirmation} \u0645\u0624\u0643\u062f.`
+			: "";
+		return `${name}\u060c \u0644\u0627 \u0623\u0645\u0644\u0643 \u0625\u062c\u0627\u0628\u0629 \u0645\u0624\u0643\u062f\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u0633\u062a\u0641\u0633\u0627\u0631 \u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062d\u0627\u0644\u064a\u0627.${booking} \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f\u060c \u0627\u0644\u062f\u0641\u0639\u060c \u0627\u0644\u062e\u0631\u064a\u0637\u0629\u060c \u0646\u0633\u0643\u060c \u0623\u0648 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621.`;
+	}
+	const booking = confirmation ? ` Your reservation ${confirmation} is confirmed.` : "";
+	return `${name}, I do not have a verified answer for that question from the hotel record right now.${booking} I can still help with the confirmation number, payment link, map, Nusuk, cancellation/refund policy, or hotel details.`;
 }
 
 function isPostBookingClosure(text = "") {
@@ -13935,6 +14048,38 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		);
 		if (handledDeliveryRequest) return true;
 	}
+	if (
+		cancellationRefundPolicyQuestionText(userText) ||
+		cancellationActionRequestText(userText)
+	) {
+		return answerCancellationRefundPolicyInquiry(io, sc, st, userText, {}, {
+			forceCancellation: cancellationActionRequestText(userText),
+		});
+	}
+	if (wantsPaymentHelp(userText)) {
+		await humanSend(io, sc, st, postBookingPaymentHelpText(sc, st), {
+			fast: true,
+			scheduleIdle: false,
+		});
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
+	if (postBookingHaramTimingQuestionText(userText)) {
+		await humanSend(io, sc, st, postBookingHaramTimingText(sc, st), {
+			fast: true,
+			scheduleIdle: false,
+		});
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
+	if (postBookingLocalRecommendationQuestionText(userText)) {
+		await humanSend(io, sc, st, postBookingLocalRecommendationText(sc, st), {
+			fast: true,
+			scheduleIdle: false,
+		});
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
 	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
 		return answerSelectedHotelRoomQuestion(
 			io,
@@ -13987,7 +14132,12 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		st.waitFor = "post_booking_followup";
 		return true;
 	}
-	return false;
+	await humanSend(io, sc, st, postBookingUnsupportedText(sc, st), {
+		fast: true,
+		scheduleIdle: false,
+	});
+	st.waitFor = "post_booking_followup";
+	return true;
 }
 
 function nextReservationDetailStep(st = {}) {
