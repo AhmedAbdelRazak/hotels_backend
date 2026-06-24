@@ -3142,13 +3142,15 @@ function wantsPaymentHelp(text = "") {
 		/(?:googlemaps|googlemap|maps|map|coordinates|coords|gps|pin|directions|location|address)/i.test(
 			latinCompact
 		);
-	const actualPaymentWords =
+	const actualPaymentWordsLower =
 		/\b(?:payment|pay|paid|card|credit\s*card|debit\s*card|mada|checkout|invoice|receipt|deposit|charge|charged|refund|bank\s*transfer|pago|pagar|paiement|payer|pembayaran|bayar|bayaran|kad|invois)\b/i.test(
 			lower
-		) ||
+		);
+	const actualPaymentWordsCompact =
 		/(?:payment|pay|paid|card|creditcard|debitcard|mada|checkout|invoice|receipt|deposit|charge|charged|refund|banktransfer|pago|pagar|paiement|payer|pembayaran|bayar|bayaran|kad|invois|adaigi)/i.test(
 			latinCompact
 		);
+	const actualPaymentWords = actualPaymentWordsLower || actualPaymentWordsCompact;
 	const roomOrStayRequest =
 		Boolean(mapRoomToKey(raw)) ||
 		(/\b(?:room|rooms|availability|available|price|rate|stay|dates?)\b/i.test(
@@ -3161,7 +3163,7 @@ function wantsPaymentHelp(text = "") {
 			/\b(?:room|rooms|stay|check|book|reserve|availability|available)\b/i.test(
 				lower
 			));
-	if (roomOrStayRequest && !actualPaymentWords) return false;
+	if (roomOrStayRequest && !actualPaymentWordsLower) return false;
 	if (locationOrMapLink && !actualPaymentWords) return false;
 	if (hasSemanticSignal(raw, "payment")) return true;
 	if (/\b(pembayaran|bayar|pautan|invois|invoice)\b/i.test(raw)) return true;
