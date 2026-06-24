@@ -2479,6 +2479,7 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		}
 	}
 
+	if (!hasRecoverableBookingContext) return;
 	for (const assistant of assistantHistory) {
 		const text = String(assistant.message || "");
 		if (
