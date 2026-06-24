@@ -6978,6 +6978,8 @@ function ensureState(sc, hotel) {
 			policyAllowedAt: 0,
 			policyHotelId: "",
 			turnInFlight: false,
+			turnOwner: null,
+			allowPostBookingReentry: false,
 			activeTurnHadReply: false,
 			interrupt: false,
 			queue: [],
@@ -12188,9 +12190,10 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	st.waitFor = "post_booking_followup";
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;
-	await humanSend(io, sc, st, finalText, {
+	const finalSent = await humanSend(io, sc, st, finalText, {
 		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
+	if (finalSent) st.allowPostBookingReentry = true;
 	const dispatchTimer = setTimeout(() => {
 		dispatchAiReservationConfirmation({
 			caseId,
@@ -13741,16 +13744,37 @@ async function planTurn(io, sc) {
 			const staleState = memo.get(caseId);
 			if (staleState) {
 				staleState.turnInFlight = false;
+				staleState.turnOwner = null;
+				staleState.allowPostBookingReentry = false;
 				staleState.interrupt = true;
 				staleState.queue = [];
 			}
 		} else {
-			markPendingPlanRequest(caseId, "active_plan_lock");
-			schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
-			logStep(caseId, "turn.enqueue", {
-				reason: "active_plan_lock",
-			});
-			return;
+			const lockedState = memo.get(caseId);
+			const canReenterPostBooking =
+				lockedState?.allowPostBookingReentry &&
+				lockedState.waitFor === "post_booking_followup" &&
+				lastUserText(sc) &&
+				!hasAiAssistantReplyAfterLatestGuest(sc);
+			if (canReenterPostBooking) {
+				logStep(caseId, "turn.post_booking_reentry", {
+					lockedForMs: now() - lockedAt,
+					waitFor: lockedState.waitFor,
+				});
+				activePlanLocks.delete(caseId);
+				activePlanLockAts.delete(caseId);
+				lockedState.turnInFlight = false;
+				lockedState.turnOwner = null;
+				lockedState.interrupt = false;
+				lockedState.queue = [];
+			} else {
+				markPendingPlanRequest(caseId, "active_plan_lock");
+				schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
+				logStep(caseId, "turn.enqueue", {
+					reason: "active_plan_lock",
+				});
+				return;
+			}
 		}
 	}
 	const planLock = Symbol(caseId);
@@ -13806,6 +13830,8 @@ async function planTurn(io, sc) {
 			return;
 		}
 		st.turnInFlight = true;
+		st.turnOwner = planLock;
+		st.allowPostBookingReentry = false;
 		ownsTurn = true;
 		st.interrupt = false;
 		const schedulePlanningTyping = () => {
@@ -15959,8 +15985,15 @@ async function planTurn(io, sc) {
 				caseId
 			);
 		}
-		if (st2 && ownsTurn) {
+		const stillOwnsTurn = Boolean(st2 && ownsTurn && st2.turnOwner === planLock);
+		if (st2 && ownsTurn && !stillOwnsTurn) {
+			logStep(caseId, "turn.owner_replaced", {
+				waitFor: st2.waitFor || st?.waitFor || null,
+			});
+		}
+		if (stillOwnsTurn) {
 			st2.turnInFlight = false;
+			st2.turnOwner = null;
 			if (st2.queue.length > 0) {
 				const queuedCount = st2.queue.length;
 				st2.queue = [];
@@ -15981,7 +16014,7 @@ async function planTurn(io, sc) {
 			}
 		}
 		const pending = pendingPlanRequests.get(caseId);
-		if (pending) {
+		if (pending && stillOwnsTurn) {
 			pendingPlanRequests.delete(caseId);
 			if (!queuedFollowupCase) {
 				const queued = await shouldRunQueuedPlan(caseId, st2 || st || {});
