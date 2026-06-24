@@ -8922,6 +8922,9 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 function reservationDetailFieldPayloadText(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
+	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
+	if (explicitNameCandidateFromText(value)) return true;
+	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
 	if (
 		selectedHotelRoomQuestionText(value) ||
 		selectedHotelFactQuestionText(value) ||
@@ -8931,9 +8934,6 @@ function reservationDetailFieldPayloadText(text = "") {
 	) {
 		return false;
 	}
-	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
-	if (explicitNameCandidateFromText(value)) return true;
-	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
 	if (
 		/(?:\b(?:full\s*name|guest\s*name|passport\s*name|name|nationality|country|phone|mobile|whatsapp|email|adults?|children|kids?|guests?|people|persons?|pax)\b|(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u0628\u0644\u062f\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0636\u064a\u0648\u0641))/i.test(
 			value
