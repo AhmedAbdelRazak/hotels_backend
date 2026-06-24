@@ -167,9 +167,13 @@ const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2800, {
 	min: 0,
 	max: 5000,
 });
-const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 3500, {
+const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2200, {
 	min: 500,
 	max: 10000,
+});
+const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 300, {
+	min: 0,
+	max: 2000,
 });
 const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
 	min: 30000,
@@ -7590,6 +7594,37 @@ async function humanSend(
 			typingVisible = true;
 		}
 		await sleep(120);
+	}
+	if (!typingVisible && now() >= typingVisibleAfter && AI_TYPING_MIN_VISIBLE_MS > 0) {
+		emitTyping(io, caseId, st, true);
+		typingVisible = true;
+		let visibleStartedAt = now();
+		while (now() - visibleStartedAt < AI_TYPING_MIN_VISIBLE_MS) {
+			if (st.interrupt || st.sendingToken !== token) {
+				emitTyping(io, caseId, st, false);
+				logStep(caseId, "human.cancelled", {
+					stage: "min-typing-visible",
+					token,
+				});
+				return false;
+			}
+			if (st.guestTypingUntil > now()) {
+				emitTyping(io, caseId, st, false);
+				typingVisible = false;
+				while (st.guestTypingUntil > now()) await sleep(120);
+				if (st.interrupt || st.sendingToken !== token) {
+					logStep(caseId, "human.cancelled", {
+						stage: "min-typing-visible-after-guest",
+						token,
+					});
+					return false;
+				}
+				emitTyping(io, caseId, st, true);
+				typingVisible = true;
+				visibleStartedAt = now();
+			}
+			await sleep(60);
+		}
 	}
 	if (typingVisible) emitTyping(io, caseId, st, false);
 	if (st.interrupt || st.sendingToken !== token) {
