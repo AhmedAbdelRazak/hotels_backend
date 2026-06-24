@@ -6182,11 +6182,7 @@ function hotelPolicyAnswerText(sc = {}, st = {}, userText = "", row = null) {
 			cleanHotelFactText(policyRow.answer) ===
 			cleanHotelFactText(DEFAULT_CANCELLATION_REFUND_ANSWER)
 		) {
-			const lang = languageOf(sc, st);
-			if (/english|arabic/i.test(lang)) {
-				return defaultCancellationPolicyAnswerText(sc, st);
-			}
-			return "";
+			return defaultCancellationPolicyAnswerText(sc, st);
 		}
 	}
 	const lang = languageOf(sc, st);
@@ -14846,7 +14842,19 @@ async function planTurn(io, sc) {
 				(reservationDetailFieldPayloadText(userText) ||
 					(["reviewConfirm", "finalize"].includes(st.waitFor) &&
 						confirmsText(userText)));
-			const quietMs = isReservationDetailPayload
+			const isPostBookingFastPayload =
+				(st.waitFor === "post_booking_followup" || aiReservationReference(sc)) &&
+				!severeAbusiveGuestText(userText) &&
+				(confirmationNumberQuestionText(userText) ||
+					cancellationRefundPolicyQuestionText(userText) ||
+					cancellationActionRequestText(userText) ||
+					wantsPaymentHelp(userText) ||
+					postBookingHaramTimingQuestionText(userText) ||
+					postBookingLocalRecommendationQuestionText(userText) ||
+					selectedHotelRoomQuestionText(userText) ||
+					selectedHotelFactQuestionText(userText) ||
+					isPostBookingClosure(userText));
+			const quietMs = isReservationDetailPayload || isPostBookingFastPayload
 				? AI_RESERVATION_DETAIL_QUIET_MS
 				: AI_GUEST_REPLY_QUIET_MS;
 			const quietRemainingMs = guestReplyQuietRemainingMs(
@@ -14859,6 +14867,7 @@ async function planTurn(io, sc) {
 					remainingMs: quietRemainingMs,
 					quietMs,
 					isReservationDetailPayload,
+					isPostBookingFastPayload,
 					guestTypingUntil: Number(st.guestTypingUntil || 0),
 					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
 				});
