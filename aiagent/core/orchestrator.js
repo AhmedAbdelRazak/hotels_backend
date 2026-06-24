@@ -1448,23 +1448,30 @@ function respectfulGuestProfile(sc = {}, st = {}) {
 		) {
 			return { firstName: rawName, gender, address: rawName };
 		}
-		if (gender === "female") {
-			return {
-				firstName: rawName,
-				gender,
-				address: `\u0623\u0633\u062a\u0627\u0630\u0629 ${rawName}`,
-			};
-		}
-		if (gender === "male") {
-			return {
-				firstName: rawName,
-				gender,
-				address: `\u0623\u0633\u062a\u0627\u0630 ${rawName}`,
-			};
-		}
+		return {
+			firstName: rawName,
+			gender,
+			address:
+				gender === "female"
+					? `\u0623\u0633\u062a\u0627\u0630\u0629 ${rawName}`
+					: gender === "male"
+					? `\u0623\u0633\u062a\u0627\u0630 ${rawName}`
+					: "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645",
+		};
+	}
+	if (!rawName || /^guest$/i.test(rawName)) {
+		return { firstName: "", gender, address: "Dear Guest" };
+	}
+	if (/^(?:mr\.?|mrs\.?|ms\.?|miss|sir|madam|mister)\b/i.test(rawName)) {
 		return { firstName: rawName, gender, address: rawName };
 	}
-	return { firstName: rawName || "", gender, address: rawName || "Guest" };
+	if (gender === "female") {
+		return { firstName: rawName, gender, address: `Ms. ${rawName}` };
+	}
+	if (gender === "male") {
+		return { firstName: rawName, gender, address: `Mr. ${rawName}` };
+	}
+	return { firstName: rawName || "", gender, address: "Dear Guest" };
 }
 
 function respectfulGuestName(sc = {}, st = {}) {
@@ -2085,7 +2092,8 @@ function hydrateKnownSlotsFromConversation(
 		: -1;
 	for (let index = 0; index < conversation.length; index += 1) {
 		const message = conversation[index];
-		const messageText = conversationEntryContextText(message);
+		const rawMessageText = String(message?.message || "").trim();
+		const messageText = rawMessageText || conversationEntryContextText(message);
 		if (!messageText || message?.isSystem) continue;
 		const messageDates = extractDateRange(messageText);
 		if (
@@ -2127,7 +2135,8 @@ function hydrateKnownSlotsFromConversation(
 	let latestGuestRoomKey = null;
 	let latestAssistantQuotedRoomKey = null;
 	for (const message of conversation) {
-		const messageText = conversationEntryContextText(message);
+		const messageText =
+			String(message?.message || "").trim() || conversationEntryContextText(message);
 		if (!messageText || message?.isSystem) continue;
 		const guestMessage = isGuestConversationMessage(message);
 		const recoverableAssistantMessage =
@@ -2189,7 +2198,7 @@ function hydrateKnownSlotsFromConversation(
 			continue;
 		}
 		if (!isGuestConversationMessage(message)) continue;
-		applyReservationGuestCountsFromText(st, text);
+		if (likelyGuestCountText(text)) applyReservationGuestCountsFromText(st, text);
 		if (lastAsk === "name" && !st.slots.fullName) {
 			const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
 			if (candidate) {
@@ -8347,6 +8356,29 @@ const GUEST_COUNT_TERMS = [
 	"\\u0646\\u0641\\u0631",
 	"\\u0632\\u0648\\u0627\\u0631",
 ];
+
+function likelyGuestCountText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const lower = raw.toLowerCase();
+	const hasCount =
+		/[\d\u0660-\u0669\u06f0-\u06f9]/.test(raw) ||
+		/\b(?:one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/i.test(
+			lower
+		) ||
+		/(?:\u0648\u0627\u062d\u062f|\u0627\u062b\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u0627\u062b\u0646\u0627\u0646|\u0627\u062a\u0646\u0627\u0646|\u0627\u062b\u0646\u062a\u064a\u0646|\u0627\u062a\u0646\u062a\u064a\u0646|\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u0629|\u062b\u0644\u0627\u062b\u0647|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u0627\u0631\u0628\u0639\u0629|\u062e\u0645\u0633|\u062e\u0645\u0633\u0629|\u0633\u062a|\u0633\u062a\u0629|\u0633\u0628\u0639|\u0633\u0628\u0639\u0629|\u062b\u0645\u0627\u0646|\u062a\u0645\u0627\u0646|\u062a\u0633\u0639|\u0639\u0634\u0631)/i.test(
+			raw
+		);
+	if (!hasCount) return false;
+	return (
+		/\b(?:adult|adults|child|children|kid|kids|guest|guests|people|persons|pax|traveller|traveler|travelers|beds?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0648\u0644\u0627\u062f|\u0623\u0648\u0644\u0627\u062f|\u0636\u064a\u0648\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0639\u0627\u0626\u0644\u0629|\u0639\u0627\u0626\u0644\u0647)/i.test(
+			raw
+		)
+	);
+}
 
 function countNearTerms(text = "", terms = [], { allowZero = false } = {}) {
 	const normalized = normalizeNumberWordsForParsing(text)
