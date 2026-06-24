@@ -13477,6 +13477,15 @@ async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "")
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
 	if (st.waitFor !== "post_booking_followup") return false;
+	if (confirmationNumberQuestionText(userText)) {
+		const handledConfirmationNumber = await answerPostBookingStateQuestion(
+			io,
+			sc,
+			st,
+			userText
+		);
+		if (handledConfirmationNumber) return true;
+	}
 	const deliveryRequest = confirmationRequestSignals(userText);
 	const asksDelivery =
 		deliveryRequest.email || deliveryRequest.whatsapp || deliveryRequest.link;
