@@ -13880,6 +13880,18 @@ async function planTurn(io, sc) {
 			});
 			return;
 		}
+		if (userText && st.waitFor === "post_booking_followup") {
+			if (!severeAbusiveGuestText(userText)) {
+				updateActiveLanguageFromText(sc, st, userText);
+			}
+			const handledPostBookingFollowup = await handlePostBookingFollowup(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (handledPostBookingFollowup) return;
+		}
 		if (
 			userText &&
 			isReservationDetailStep(st) &&
