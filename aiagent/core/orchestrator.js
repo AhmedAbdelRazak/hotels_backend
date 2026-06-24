@@ -5624,7 +5624,8 @@ async function answerSelectedHotelRoomQuestion(
 			io,
 			sc,
 			st,
-			roomOptionsListText(sc, st, activeRooms)
+			roomOptionsListText(sc, st, activeRooms),
+			{ fast: true }
 		);
 		if (sent) {
 			st.waitFor = "room";
@@ -5648,7 +5649,8 @@ async function answerSelectedHotelRoomQuestion(
 			io,
 			sc,
 			st,
-			roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms)
+			roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms),
+			{ fast: true }
 		);
 		if (sent) {
 			st.waitFor = "dates";
@@ -14567,6 +14569,45 @@ async function planTurn(io, sc) {
 				{ allowGeneric: false }
 			);
 			if (immediateProceedHandled) return;
+		}
+		if (
+			st.hotel &&
+			userText &&
+			selectedHotelRoomQuestionText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "selected_hotel.room_pre_reservation_start", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelRoomQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				mapRoomToKey(userText) || st.slots?.roomTypeKey || null
+			);
+			return;
+		}
+		if (
+			st.hotel &&
+			userText &&
+			selectedHotelFactQuestionText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			(!explicitlyExistingReservationIntent(userText) ||
+				cancellationRefundPolicyQuestionText(userText)) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "selected_hotel.fact_pre_reservation_start", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
 		}
 		if (userText) {
 			const directStayQuoteHandled = await tryShareDirectStayQuote(
