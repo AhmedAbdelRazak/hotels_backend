@@ -1707,8 +1707,33 @@ function shouldScheduleIdleFollowups(text = "", quickReplies = []) {
 	);
 }
 
+function reservationDetailContextReady(st = {}) {
+	return Boolean(
+		st?.quote ||
+			(st?.hotel &&
+				st?.slots?.roomTypeKey &&
+				st?.slots?.checkinISO &&
+				st?.slots?.checkoutISO)
+	);
+}
+
+function reservationDetailWaitState(waitFor = "") {
+	return [
+		"reviewConfirm",
+		"reservation_details",
+		"fullname",
+		"nationality",
+		"phone",
+		"email_or_skip",
+		"finalize",
+	].includes(waitFor);
+}
+
 function bookingWaitState(st = {}) {
 	if (!st) return "";
+	if (reservationDetailWaitState(st.waitFor)) {
+		return reservationDetailContextReady(st) ? st.waitFor : "";
+	}
 	if (
 		[
 			"dates",
@@ -1716,13 +1741,6 @@ function bookingWaitState(st = {}) {
 			"proceed",
 			"date_change_confirm",
 			"intentConfirm",
-			"reviewConfirm",
-			"reservation_details",
-			"fullname",
-			"nationality",
-			"phone",
-			"email_or_skip",
-			"finalize",
 		].includes(st.waitFor)
 	) {
 		return st.waitFor;
@@ -2490,6 +2508,8 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 
 function isNewReservationFlowActive(st = {}) {
 	if (st.waitFor === "post_booking_followup") return false;
+	const detailStageActive =
+		reservationDetailWaitState(st.waitFor) && reservationDetailContextReady(st);
 	return Boolean(
 		st.quote ||
 			st.pendingRoomAlternative ||
@@ -2502,14 +2522,8 @@ function isNewReservationFlowActive(st = {}) {
 				"room",
 				"room_alternative_confirm",
 				"proceed",
-				"reviewConfirm",
-				"reservation_details",
-				"fullname",
-				"nationality",
-				"phone",
-				"email_or_skip",
-				"finalize",
-			].includes(st.waitFor)
+			].includes(st.waitFor) ||
+			detailStageActive
 	);
 }
 
@@ -2520,15 +2534,7 @@ function explicitlyExistingReservationIntent(text = "") {
 }
 
 function isReservationDetailStep(st = {}) {
-	return [
-		"reviewConfirm",
-		"reservation_details",
-		"fullname",
-		"nationality",
-		"phone",
-		"email_or_skip",
-		"finalize",
-	].includes(st.waitFor);
+	return reservationDetailWaitState(st.waitFor) && reservationDetailContextReady(st);
 }
 
 function humanHandoffReason(text = "") {
