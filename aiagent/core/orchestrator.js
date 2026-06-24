@@ -167,6 +167,11 @@ const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2800, {
 	min: 0,
 	max: 5000,
 });
+const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
+	"AI_RESERVATION_DETAIL_QUIET_MS",
+	1800,
+	{ min: 0, max: 5000 }
+);
 const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2200, {
 	min: 500,
 	max: 10000,
@@ -7221,13 +7226,18 @@ function idleQuietRemainingMs(st = {}, anchor = {}, quietMs = 0) {
 	return Math.max(0, deadline - now());
 }
 
-function guestReplyQuietRemainingMs(st = {}, latestGuestAt = 0) {
+function guestReplyQuietRemainingMs(
+	st = {},
+	latestGuestAt = 0,
+	quietMs = AI_GUEST_REPLY_QUIET_MS
+) {
 	const guestAt = Number(latestGuestAt || 0);
+	const requiredQuietMs = Math.max(0, Number(quietMs) || 0);
 	const activityAt = Math.max(
 		Number.isFinite(guestAt) ? guestAt : 0,
 		Number(st.lastGuestActivityAt || 0)
 	);
-	const quietDeadline = activityAt + AI_GUEST_REPLY_QUIET_MS;
+	const quietDeadline = activityAt + requiredQuietMs;
 	const typingDeadline = Number(st.guestTypingUntil || 0);
 	return Math.max(0, quietDeadline - now(), typingDeadline - now());
 }
@@ -14830,10 +14840,23 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (userText) {
-			const quietRemainingMs = guestReplyQuietRemainingMs(st, st.activeTurnGuestAt);
+			const isReservationDetailPayload =
+				isReservationDetailStep(st) &&
+				!severeAbusiveGuestText(userText) &&
+				reservationDetailFieldPayloadText(userText);
+			const quietMs = isReservationDetailPayload
+				? AI_RESERVATION_DETAIL_QUIET_MS
+				: AI_GUEST_REPLY_QUIET_MS;
+			const quietRemainingMs = guestReplyQuietRemainingMs(
+				st,
+				st.activeTurnGuestAt,
+				quietMs
+			);
 			if (quietRemainingMs > 25) {
 				logStep(caseId, "turn.wait_guest_quiet", {
 					remainingMs: quietRemainingMs,
+					quietMs,
+					isReservationDetailPayload,
 					guestTypingUntil: Number(st.guestTypingUntil || 0),
 					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
 				});
