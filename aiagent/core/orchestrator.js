@@ -172,6 +172,11 @@ const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
 	1600,
 	{ min: 0, max: 5000 }
 );
+const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
+	"AI_RESERVATION_CHASE_QUIET_MS",
+	600,
+	{ min: 0, max: 5000 }
+);
 const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2200, {
 	min: 500,
 	max: 10000,
@@ -15018,11 +15023,15 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (userText) {
+			const isReservationDetailChasePayload =
+				isReservationDetailStep(st) &&
+				!severeAbusiveGuestText(userText) &&
+				reservationDetailChaseText(userText);
 			const isReservationDetailPayload =
 				isReservationDetailStep(st) &&
 				!severeAbusiveGuestText(userText) &&
 				(reservationDetailFieldPayloadText(userText) ||
-					reservationDetailChaseText(userText) ||
+					isReservationDetailChasePayload ||
 					(["reviewConfirm", "finalize"].includes(st.waitFor) &&
 						confirmsText(userText)));
 			const isPostBookingFastPayload =
@@ -15037,7 +15046,9 @@ async function planTurn(io, sc) {
 					selectedHotelRoomQuestionText(userText) ||
 					selectedHotelFactQuestionText(userText) ||
 					isPostBookingClosure(userText));
-			const quietMs = isReservationDetailPayload || isPostBookingFastPayload
+			const quietMs = isReservationDetailChasePayload
+				? AI_RESERVATION_CHASE_QUIET_MS
+				: isReservationDetailPayload || isPostBookingFastPayload
 				? AI_RESERVATION_DETAIL_QUIET_MS
 				: AI_GUEST_REPLY_QUIET_MS;
 			const quietRemainingMs = guestReplyQuietRemainingMs(
@@ -15050,6 +15061,7 @@ async function planTurn(io, sc) {
 					remainingMs: quietRemainingMs,
 					quietMs,
 					isReservationDetailPayload,
+					isReservationDetailChasePayload,
 					isPostBookingFastPayload,
 					guestTypingUntil: Number(st.guestTypingUntil || 0),
 					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
