@@ -212,3 +212,44 @@ For the next serious QA pass, use at least 20 total guest messages and cover:
   not changed during chatbot QA.
 - If future live tests still show 10+ second turns, tighten writer fallbacks or
   introduce streaming/early typing UX before changing the conversation logic.
+
+## French And Spanish Follow-Up
+
+After the main English/Arabic QA, the French and Spanish paths were checked for
+the same dynamic-chat assumptions.
+
+Confirmed from source:
+
+- The public widget offers Spanish and French as selectable chat languages.
+- Backend language detection and explicit language switching support Spanish
+  and French.
+- Deterministic hotel facts, room-list replies, date-change prompts, location
+  replies, final-review labels, and reservation-detail labels include Spanish
+  and French branches.
+- Number-word parsing already understands Spanish and French counts such as
+  `dos personas` and `deux personnes`.
+
+Extra hardening added:
+
+- Spanish/French companion-pair phrases now infer 2 guests:
+  - `para mi y mi amigo`
+  - `somos dos`
+  - `pour moi et mon ami`
+  - `nous sommes deux`
+- The guest-count likelihood helper now runs after multilingual number-word
+  normalization, so `dos personas` and `deux personnes` are treated correctly.
+- The casual-reply guard now catches Spanish/French accidental booking-field
+  prompts, so a casual greeting should not turn into a sudden request for
+  nationality, phone, dates, room type, or guest count.
+
+Parser smoke covered:
+
+- Spanish pair, Spanish `somos dos`, Spanish word count, Spanish numeric count.
+- French pair, French `nous sommes deux`, French word count, French numeric
+  count.
+- Spanish/French casual booking-field guard.
+
+Remaining note: English and Arabic received the full live 20+ message production
+QA. French and Spanish are now structurally supported and parser-smoked, but
+they should still get a future live end-to-end conversation test before calling
+them fully production-scored at 9+/10.

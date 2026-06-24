@@ -1240,11 +1240,18 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 function casualWrittenReplyAsksForBookingField(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
+	const latin = asciiize(value).toLowerCase().replace(/\s+/g, " ").trim();
 	return (
 		/\b(?:what\s+is|please\s+(?:send|share|provide|add)|send|share|provide|add|i\s+(?:still\s+)?need)\b.{0,100}\b(?:nationality|country|full\s+name|phone|mobile|email|e-mail|check[\s-]?in|check[\s-]?out|checkout|dates?|room\s+type|guests?|adults?|children)\b/i.test(
 			value
 		) ||
 		/\b(?:nationality|country)\s+or\s+country\s+name\b/i.test(value) ||
+		/\b(?:cual|que|por\s+favor|envia|enviame|comparte|proporciona|necesito|necesitamos|falta|indica|dime)\b.{0,120}\b(?:nacionalidad|pais|nombre\s+completo|telefono|movil|correo|email|fechas?|entrada|salida|tipo\s+de\s+habitacion|habitacion|huespedes?|adultos?|ninos?|personas?)\b/i.test(
+			latin
+		) ||
+		/\b(?:quel|quelle|quels|quelles|veuillez|envoyez|partagez|fournissez|besoin|faut|merci\s+de|indiquez)\b.{0,120}\b(?:nationalite|pays|nom\s+complet|telephone|mobile|email|courriel|dates?|arrivee|depart|type\s+de\s+chambre|chambre|voyageurs?|personnes?|adultes?|enfants?)\b/i.test(
+			latin
+		) ||
 		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u062a\u0627\u0631\u064a\u062e\s+\u0627\u0644\u0648\u0635\u0648\u0644|\u062a\u0627\u0631\u064a\u062e\s+\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0646\u0648\u0639\s+\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
 			value
 		)
@@ -9178,9 +9185,12 @@ const GUEST_COUNT_TERMS = [
 function likelyGuestCountText(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return false;
-	const lower = raw.toLowerCase();
+	const normalized = normalizeNumberWordsForParsing(raw);
+	const lower = normalized.toLowerCase();
+	const asciiLower = asciiize(normalized).toLowerCase().replace(/\s+/g, " ").trim();
 	const hasCount =
-		/[\d\u0660-\u0669\u06f0-\u06f9]/.test(raw) ||
+		/[\d\u0660-\u0669\u06f0-\u06f9]/.test(normalized) ||
+		numberFromWords(raw, { min: 0, max: 30 }) !== null ||
 		/\b(?:one|two|three|four|five|six|seven|eight|nine|ten|zero)\b/i.test(
 			lower
 		) ||
@@ -9189,8 +9199,8 @@ function likelyGuestCountText(text = "") {
 		);
 	if (!hasCount) return false;
 	return (
-		/\b(?:adult|adults|child|children|kid|kids|guest|guests|people|persons|individuals?|pax|traveller|traveler|travelers|beds?)\b/i.test(
-			lower
+		/\b(?:adult|adults|adultos?|adultes?|child|children|kid|kids|ninos?|enfants?|guest|guests|huespedes?|people|persons|personas?|personnes?|individuals?|pax|traveller|traveler|travelers|voyageurs?|beds?)\b/i.test(
+			asciiLower
 		) ||
 		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0648\u0644\u0627\u062f|\u0623\u0648\u0644\u0627\u062f|\u0636\u064a\u0648\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0641\u0631|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0639\u0627\u0626\u0644\u0629|\u0639\u0627\u0626\u0644\u0647)/i.test(
 			raw
@@ -9210,10 +9220,18 @@ function companionPairGuestCountText(text = "") {
 		/\b(?:for|room\s+for|reservation\s+for|booking\s+for)\s+(?:me|myself)\s+and\s+(?:my\s+)?(?:friend|wife|husband|brother|sister|mother|father)\b/i.test(
 			lower
 		) ||
+		/\b(?:yo|conmigo|para\s+mi|para\s+mi\s+mismo|para\s+mi\s+misma)\s+(?:y|con|[+])\s+(?:mi\s+)?(?:amigo|amiga|esposa|esposo|marido|mujer|hermano|hermana|madre|padre)\b/i.test(
+			lower
+		) ||
+		/\b(?:somos|seremos|seriamos)\s+(?:2|dos)\b/i.test(lower) ||
+		/\b(?:moi|pour\s+moi)\s+(?:et|avec|[+])\s+(?:mon|ma|mes)?\s*(?:ami|amie|epouse|femme|mari|frere|soeur|mere|pere)\b/i.test(
+			lower
+		) ||
+		/\b(?:nous\s+sommes|on\s+est|nous\s+serons)\s+(?:2|deux)\b/i.test(lower) ||
 		/(?:\u0627\u0646\u0627|\u0623\u0646\u0627|\u0644\u064a\u0627|\u0644\u064a|\u0644\u064a\u0647|\u0644\u0649)\s+(?:\u0648|[+])\s*(?:\u0635\u062f\u064a\u0642\u064a|\u0635\u062f\u064a\u0642\u0649|\u0635\u0627\u062d\u0628\u064a|\u0635\u0627\u062d\u0628\u0649|\u0632\u0648\u062c\u062a\u064a|\u0632\u0648\u062c\u062a\u0649|\u0632\u0648\u062c\u064a|\u0632\u0648\u062c\u0649|\u0627\u062e\u064a|\u0623\u062e\u064a|\u0627\u062e\u0649|\u0623\u062e\u0649|\u0627\u062e\u062a\u064a|\u0623\u062e\u062a\u064a|\u0627\u062e\u062a\u0649|\u0623\u062e\u062a\u0649)/i.test(
 			arabic
 		) ||
-		/(?:meandmyfriend|meandfriend|myselfandfriend|ana[ow]sadiqi|ana[ow]sahbi|lia[ow]sadiqi|lia[ow]sahbi)/i.test(
+		/(?:meandmyfriend|meandfriend|myselfandfriend|yoymiamig[oa]|paramiymiamig[oa]|somos2|somosdos|moietmonami|moietmonamie|pourmoietmonami|pourmoietmonamie|noussommes2|noussommesdeux|onest2|onestdeux|ana[ow]sadiqi|ana[ow]sahbi|lia[ow]sadiqi|lia[ow]sahbi)/i.test(
 			latinCompact
 		)
 	);
