@@ -1471,6 +1471,80 @@ function respectfulGuestName(sc = {}, st = {}) {
 	return respectfulGuestProfile(sc, st).address;
 }
 
+function escapeRegexText(value = "") {
+	return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function guestAddressCandidates(sc = {}, st = {}) {
+	const profile = respectfulGuestProfile(sc, st);
+	const sourceName = guestNameSource(sc, st);
+	const firstName = String(profile.firstName || firstNameForAddress(sourceName)).trim();
+	const candidates = [
+		profile.address,
+		firstName,
+		sourceName,
+		firstName ? `Mr. ${firstName}` : "",
+		firstName ? `Ms. ${firstName}` : "",
+		firstName ? `Mrs. ${firstName}` : "",
+		firstName ? `\u0623\u0633\u062a\u0627\u0630 ${firstName}` : "",
+		firstName ? `\u0623\u0633\u062a\u0627\u0630\u0629 ${firstName}` : "",
+		firstName ? `\u0627\u0644\u0633\u064a\u062f ${firstName}` : "",
+		firstName ? `\u0627\u0644\u0633\u064a\u062f\u0629 ${firstName}` : "",
+	]
+		.map((candidate) => String(candidate || "").trim())
+		.filter((candidate) => candidate.length > 1);
+	return [...new Set(candidates)].sort((a, b) => b.length - a.length);
+}
+
+function leadingGuestAddressMatch(text = "", sc = {}, st = {}) {
+	const candidates = guestAddressCandidates(sc, st);
+	if (!candidates.length) return null;
+	const source = candidates.map(escapeRegexText).join("|");
+	const match = String(text || "").match(
+		new RegExp(`^\\s*(${source})\\s*[,،]\\s*`, "iu")
+	);
+	return match || null;
+}
+
+function assistantAddressedGuestRecently(sc = {}, st = {}) {
+	const candidates = guestAddressCandidates(sc, st);
+	if (!candidates.length) return false;
+	const aiMessages = (sc.conversation || []).filter(isAiConversationMessage).slice(-5);
+	return aiMessages.some((message) => {
+		const early = String(message?.message || "").slice(0, 140).toLocaleLowerCase();
+		return candidates.some((candidate) =>
+			early.includes(candidate.toLocaleLowerCase())
+		);
+	});
+}
+
+function importantGuestAddressContext(text = "") {
+	const lower = String(text || "").toLowerCase();
+	return (
+		/\b(?:reservation is confirmed|booking is confirmed|confirmation number|everything is ready|complete reservation|complete booking|full name|nationality|phone number|email address|payment link|for your security|sorry|apolog|i found reservation|could not find a reservation|already closed|human|manager|escalat)\b/i.test(
+			lower
+		) ||
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u062a\u0645\s+\u062a\u0623\u0643\u064a\u062f|\u062a\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632\s+\u0645\u0624\u0643\u062f|\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0628\u0631\u064a\u062f\s+\u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a|\u0623\u0639\u062a\u0630\u0631|\u0627\u0639\u062a\u0630\u0631|\u0622\u0633\u0641|\u0627\u0633\u0641)/i.test(
+			text
+		)
+	);
+}
+
+function capitalizeLeadingLatin(text = "") {
+	return String(text || "").replace(
+		/^(\s*[*_`'"([]*)([a-z])/,
+		(_, prefix, letter) => `${prefix}${letter.toUpperCase()}`
+	);
+}
+
+function applyGuestAddressCadence(text = "", sc = {}, st = {}, { first = false } = {}) {
+	const match = leadingGuestAddressMatch(text, sc, st);
+	if (!match || first || importantGuestAddressContext(text)) return text;
+	if (!assistantAddressedGuestRecently(sc, st)) return text;
+	const stripped = String(text || "").slice(match[0].length).trimStart();
+	return capitalizeLeadingLatin(stripped);
+}
+
 function logStep(caseId, message, payload = {}) {
 	if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() !== "true") {
 		return;
@@ -7219,6 +7293,15 @@ async function humanSend(
 				expectedTurnUserText,
 			});
 			st.activeTurnHadReply = true;
+			return false;
+		}
+		text = applyGuestAddressCadence(text, latestCase, st, { first });
+		if (
+			st.lastBotText &&
+			st.lastBotText.trim() === String(text).trim() &&
+			(!expectedTurnUserText || st.lastBotTurnUserText === expectedTurnUserText)
+		) {
+			logStep(caseId, "dedupe.skip", { reason: "same_as_last_after_name_polish" });
 			return false;
 		}
 	} catch (error) {
