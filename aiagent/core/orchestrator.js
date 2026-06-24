@@ -8938,8 +8938,8 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		directFieldCaptured = true;
 	}
 	const nationalityHint = nationalityHintFromText(explicitNationalityText(fullText) || fullText);
-	if (AI_REQUIRE_NATIONALITY && nationalityHint && !st.slots.nationality) {
-		st.slots.nationality = nationalityHint;
+	if (AI_REQUIRE_NATIONALITY && nationalityHint) {
+		if (!st.slots.nationality) st.slots.nationality = nationalityHint;
 		directFieldCaptured = true;
 	}
 	const explicitCountFieldText =
