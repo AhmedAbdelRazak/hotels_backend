@@ -9815,7 +9815,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		);
 		const query = filters.length === 1 ? filters[0] : { $or: filters };
 		const notificationQueryLimit = Math.min(Math.max(limit * 4, limit), 50);
-		const [rows, total, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
+		const [rows, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
 			await Promise.all([
 			Reservations.find(query)
 				.select(PENDING_NOTIFICATION_RESERVATION_SELECT)
@@ -9823,10 +9823,6 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				.limit(notificationQueryLimit)
 				.lean()
 				.exec(),
-			boundedCountDocuments(Reservations, query, {
-				fallback: 0,
-				label: "pending_confirmation_notification_count",
-			}),
 			getAgentAccountNotificationFeed({
 				actor,
 				hotels,
@@ -9917,7 +9913,7 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 
 		return sendCached({
 			total:
-				Math.max(Number(total || 0), reservationNotifications.length) +
+				reservationNotifications.length +
 				Number(agentAccountFeed.total || 0) +
 				Number(walletClaimFeed.total || 0) +
 				Number(otaReviewFeed.total || 0),

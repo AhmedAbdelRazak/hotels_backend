@@ -1165,7 +1165,7 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	if (!raw || raw.length > 140) return "";
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	const asksHowAreYou =
-		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day)\b/i.test(
+		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day|how\s+are\s+you\s+doing|how\s+are\s+you\s+holding\s+up|how\s+are\s+things)\b/i.test(
 			raw
 		) ||
 		/(?:كيف\s+حالك|كيفك|اخبارك|أخبارك|ازيك|إزيك|عامل\s+ايه|عاملة\s+ايه)/i.test(
@@ -2209,6 +2209,7 @@ function hydrateKnownSlotsFromConversation(
 			isAiConversationMessage(message) &&
 			assistantMessageCanRecoverRoomType(message);
 		if (!guestMessage && !recoverableAssistantMessage) continue;
+		if (guestMessage && reservationIdentityOrContactPayloadText(messageText)) continue;
 		if (!likelyRoomTypeText(messageText)) continue;
 		const messageRoomKey = mapRoomToKey(messageText);
 		if (!messageRoomKey) continue;
@@ -2266,7 +2267,9 @@ function hydrateKnownSlotsFromConversation(
 			continue;
 		}
 		if (!isGuestConversationMessage(message)) continue;
-		if (likelyGuestCountText(text)) applyReservationGuestCountsFromText(st, text);
+		if (likelyGuestCountText(text) && !reservationIdentityOrContactPayloadText(text)) {
+			applyReservationGuestCountsFromText(st, text);
+		}
 		if (lastAsk === "name" && !st.slots.fullName) {
 			const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
 			if (candidate) {
@@ -8990,6 +8993,17 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	}
 }
 
+function reservationIdentityOrContactPayloadText(text = "") {
+	const value = String(text || "");
+	if (!value.trim()) return false;
+	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
+	if (explicitNameCandidateFromText(value)) return true;
+	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
+	return /\b(?:full\s*name|guest\s*name|passport\s*name|my\s+name|name\s+is|nationality|country|phone|mobile|whats\s*app|whatsapp|email|e-mail)\b/i.test(
+		value
+	);
+}
+
 function reservationDetailFieldPayloadText(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
@@ -11628,7 +11642,34 @@ async function sendReservationReview(
 	quote = null,
 	{ fast = false, targetReplyMs = AI_BOOKING_PROMPT_TARGET_MS } = {}
 ) {
-	const q = quote || st.quote?.data;
+	let q = quote || st.quote?.data;
+	if (
+		!q?.available &&
+		st.hotel &&
+		st.slots?.roomTypeKey &&
+		st.slots?.checkinISO &&
+		st.slots?.checkoutISO
+	) {
+		const rebuiltQuote = safePriceRoomForStay(
+			st.hotel,
+			{ roomType: st.slots.roomTypeKey },
+			st.slots.checkinISO,
+			st.slots.checkoutISO
+		);
+		if (rebuiltQuote?.available) {
+			q = rebuiltQuote;
+			st.quote = {
+				key: quoteKeyForSlots(st),
+				at: now(),
+				data: rebuiltQuote,
+			};
+			logStep(String(sc._id), "review.quote_rebuilt", {
+				roomTypeKey: st.slots.roomTypeKey,
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+			});
+		}
+	}
 	if (!q?.available) {
 		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
 		return true;
@@ -14162,25 +14203,33 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		return true;
 	}
 	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
-		return answerSelectedHotelRoomQuestion(
+		const handled = await answerSelectedHotelRoomQuestion(
 			io,
 			sc,
 			st,
 			userText,
 			mapRoomToKey(userText) || null
 		);
+		if (handled) st.waitFor = "post_booking_followup";
+		return handled;
 	}
 	if (st.hotel && selectedHotelFactQuestionText(userText)) {
-		return answerSelectedHotelFactQuestion(io, sc, st, userText);
+		const handled = await answerSelectedHotelFactQuestion(io, sc, st, userText);
+		if (handled) st.waitFor = "post_booking_followup";
+		return handled;
 	}
 	if (st.hotel && directHotelRelationshipQuestionText(userText)) {
-		return answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+		const handled = await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+		if (handled) st.waitFor = "post_booking_followup";
+		return handled;
 	}
 	if (
 		hotelContactDetailsQuestionText(userText) ||
 		hotelContactFollowupQuestionText(sc, userText)
 	) {
-		return answerHotelContactDetailsInquiry(io, sc, st, userText);
+		const handled = await answerHotelContactDetailsInquiry(io, sc, st, userText);
+		if (handled) st.waitFor = "post_booking_followup";
+		return handled;
 	}
 	if (isPostBookingClosure(userText)) {
 		const closeReply = await postBookingCloseReply(io, sc, st, userText);
@@ -14196,7 +14245,9 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		return true;
 	}
 	if (vagueHajjInquiryText(userText)) {
-		return answerVagueHajjInquiry(io, sc, st, userText);
+		const handled = await answerVagueHajjInquiry(io, sc, st, userText);
+		if (handled) st.waitFor = "post_booking_followup";
+		return handled;
 	}
 	if (botExperienceComplaintText(userText) && !isPostBookingConcreteRequest(userText)) {
 		await humanSend(io, sc, st, await postBookingCloseReply(io, sc, st, userText));
