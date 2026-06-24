@@ -3678,13 +3678,13 @@ function extractDateRange(text = "") {
 	if (!likelyStayDateText(text)) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}
-	const sameMonthRange = parseSameMonthDateRange(text);
-	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
-		return sameMonthRange;
-	}
 	const quick = quickDateRange(text);
 	if (quick?.checkinISO && quick?.checkoutISO) {
 		return quick;
+	}
+	const sameMonthRange = parseSameMonthDateRange(text);
+	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
+		return sameMonthRange;
 	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
@@ -10331,7 +10331,7 @@ async function shareKnownStayQuote(io, sc, st) {
 	quoteReply = ensureHijriGregorianDatesVisible(quoteReply, sc, st);
 	const sent = await humanSend(io, sc, st, quoteReply, {
 		quickReplies: quote?.available ? proceedQuickReplies(sc, st) : [],
-		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
+		fast: true,
 	});
 	if (!sent) return false;
 	st.reviewSent = false;

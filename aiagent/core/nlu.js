@@ -960,8 +960,26 @@ function escapeDateRegex(value = "") {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function hasNumberWordAliasText(value = "") {
+	const raw = String(value || "").toLowerCase();
+	return (
+		/\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|twentieth|thirtieth)\b/i.test(
+			raw
+		) ||
+		/\b(?:uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|veinte|treinta|un|une|deux|trois|quatre|cinq|sept|huit|neuf|dix|vingt|trente)\b/i.test(
+			raw
+		) ||
+		/(?:\u0648\u0627\u062d\u062f|\u0627\u062b\u0646|\u0627\u062a\u0646|\u062b\u0644\u0627\u062b|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u062e\u0645\u0633|\u0633\u062a|\u0633\u0628\u0639|\u062b\u0645\u0627\u0646|\u062a\u0633\u0639|\u0639\u0634\u0631)/i.test(
+			raw
+		)
+	);
+}
+
 function normalizeDateSearchText(value = "") {
-	return normalizeNumberWordsForParsing(value)
+	const normalized = hasNumberWordAliasText(value)
+		? normalizeNumberWordsForParsing(value)
+		: digitsToEnglish(value).toLowerCase();
+	return String(normalized || "")
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f]/g, "")
 		.replace(/\u00a0/g, " ")
@@ -1292,10 +1310,22 @@ function quickArabicGregorianMonthDateRange(text = "") {
 	return normalizeGregorianMonthRange(matches);
 }
 
+function likelyHijriDateText(text = "") {
+	const raw = String(text || "").toLowerCase();
+	return (
+		/[\u0600-\u06FF]/.test(raw) ||
+		/\b(?:hijri|ah|muharram|safar|rabi|jumada|rajab|shaaban|shaban|ramadan|ramadhan|shawwal|dhul|dhu\s+al)\b/i.test(
+			raw
+		)
+	);
+}
+
 function quickDateRange(text = "") {
-	const raw = normalizeNumberWordsForParsing(text);
-	const hijri = quickHijriDateRange(raw);
-	if (hijri.checkinISO && hijri.checkoutISO) return hijri;
+	const raw = normalizeDateSearchText(text);
+	if (likelyHijriDateText(text)) {
+		const hijri = quickHijriDateRange(raw);
+		if (hijri.checkinISO && hijri.checkoutISO) return hijri;
+	}
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
 	if (isoMatches?.length >= 2) {
 		return {
