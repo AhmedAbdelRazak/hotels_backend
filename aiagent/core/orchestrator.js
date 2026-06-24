@@ -2892,7 +2892,20 @@ function selectedHotelDistanceQuestionText(text = "") {
 		/(?:haram|masjidilharam|kaaba|kabah|kaba|hotel|funduq)/i.test(
 			latinCompact
 		);
-	return mentionsHaramOrHotel;
+	const travelModeFollowup =
+		/\b(?:walking|walk|on\s+foot)\b.{0,40}\b(?:car|drive|driving|time|minutes?|mins?)\b/i.test(
+			lower
+		) ||
+		/\b(?:car|drive|driving)\b.{0,40}\b(?:walking|walk|on\s+foot|time|minutes?|mins?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0634\u064a|\u0645\u0634\u064a\u0627).{0,40}(?:\u0633\u064a\u0627\u0631\u0647|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0647|\u0648\u0642\u062a|\u062f\u0642\u0627\u064a\u0642)|(?:\u0633\u064a\u0627\u0631\u0647|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0647).{0,40}(?:\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u0648\u0642\u062a|\u062f\u0642\u0627\u064a\u0642)/i.test(
+			arabic
+		) ||
+		/(?:walking|walk|onfoot).{0,40}(?:car|drive|driving|time|minutes|mins)|(?:car|drive|driving).{0,40}(?:walking|walk|onfoot|time|minutes|mins)/i.test(
+			latinCompact
+		);
+	return mentionsHaramOrHotel || travelModeFollowup;
 }
 
 function selectedHotelAddressQuestionText(text = "") {
