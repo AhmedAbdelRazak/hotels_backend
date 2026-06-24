@@ -55,7 +55,7 @@ function pickReasoningEffort() {
 	return String(
 		process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
 			process.env.OPENAI_REASONING_EFFORT ||
-			"medium"
+			"low"
 	)
 		.trim()
 		.toLowerCase();
@@ -112,7 +112,7 @@ async function chat(
 	const model = pickModel(kind);
 	const gpt5Style = usesCompletionTokens(model);
 	const tokenLimit = gpt5Style
-		? Math.max(max_tokens * 3, kind === "writer" ? 900 : 600)
+		? Math.max(max_tokens * 3, kind === "writer" ? 600 : 450)
 		: max_tokens;
 	const body = buildChatCompletionBody({
 		model,

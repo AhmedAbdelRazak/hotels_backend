@@ -118,36 +118,36 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 6200, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 5000, {
 	min: 500,
-	max: 15000,
+	max: 8000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 9800, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 7800, {
 		min: 500,
-		max: 15000,
+		max: 8000,
 	})
 );
 const AI_CASUAL_REPLY_TARGET_MIN_MS = intFromEnv(
 	"AI_CASUAL_REPLY_TARGET_MIN_MS",
-	6200,
-	{ min: 1500, max: 12000 }
+	5000,
+	{ min: 1500, max: 8000 }
 );
 const AI_CASUAL_REPLY_TARGET_MAX_MS = Math.max(
 	AI_CASUAL_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 9800, {
+	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 7800, {
 		min: 1500,
-		max: 12000,
+		max: 8000,
 	})
 );
-const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 8000, {
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 6500, {
 	min: 500,
-	max: 10000,
+	max: 8000,
 });
-const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 7600, {
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 5000, {
 	min: 500,
-	max: 10000,
+	max: 8000,
 });
 const AI_CONFIRMATION_DISPATCH_DELAY_MS = intFromEnv(
 	"AI_CONFIRMATION_DISPATCH_DELAY_MS",
@@ -160,28 +160,28 @@ const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 });
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
-	3000,
+	2000,
 	{ min: 0, max: 7000 }
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3000, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 2000, {
 		min: 0,
-		max: 9000,
+		max: 7000,
 	})
 );
 const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	"AI_PLANNING_TYPING_DELAY_MS",
-	3000,
+	2000,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2400, {
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
 	min: 0,
 	max: 5000,
 });
 const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
 	"AI_RESERVATION_DETAIL_QUIET_MS",
-	1200,
+	2000,
 	{ min: 0, max: 5000 }
 );
 const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
@@ -189,13 +189,13 @@ const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
 	0,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2200, {
+const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2000, {
 	min: 500,
 	max: 10000,
 });
-const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 300, {
+const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 3000, {
 	min: 0,
-	max: 2000,
+	max: 7000,
 });
 const QUOTE_NUDGE_PAUSE_MS = intFromEnv("AI_QUOTE_NUDGE_PAUSE_MS", 10 * 60 * 1000, {
 	min: 30000,
@@ -1222,7 +1222,39 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	return "";
 }
 
-async function sendDynamicCasualReply(
+async function waitForVisibleTypingWindow(
+	io,
+	caseId,
+	st,
+	{ startedAt, targetReplyMs, typingStartedAt }
+) {
+	let typingOn = true;
+	let visibleStartedAt = typingStartedAt || now();
+	while (!st.interrupt) {
+		if (Number(st.guestTypingUntil || 0) > now()) {
+			if (typingOn) {
+				emitTyping(io, caseId, st, false);
+				typingOn = false;
+			}
+			while (Number(st.guestTypingUntil || 0) > now() && !st.interrupt) {
+				await sleep(120);
+			}
+			if (st.interrupt) return false;
+			emitTyping(io, caseId, st, true);
+			typingOn = true;
+			visibleStartedAt = now();
+		}
+		const minimumSendAt = Math.max(
+			startedAt + targetReplyMs,
+			visibleStartedAt + AI_TYPING_MIN_VISIBLE_MS
+		);
+		if (now() >= minimumSendAt) return true;
+		await sleep(80);
+	}
+	return false;
+}
+
+async function sendDynamicWrittenReply(
 	io,
 	sc,
 	st,
@@ -1234,19 +1266,30 @@ async function sendDynamicCasualReply(
 	const caseId = String(sc?._id || sc?.id || "");
 	const startedAt =
 		Number(st?.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
-	const targetReplyMs = casualReplyTargetMs();
+	const requestedTargetMs = Number(options.targetReplyMs);
+	const targetReplyMs =
+		Number.isFinite(requestedTargetMs) && requestedTargetMs >= 0
+			? requestedTargetMs
+			: options.casual
+			? casualReplyTargetMs()
+			: Number(st?.activeTurnReplyTargetMs || 0) > 0
+			? Number(st.activeTurnReplyTargetMs)
+			: randomBetween(AI_REPLY_TARGET_MIN_MS, AI_REPLY_TARGET_MAX_MS);
 	const fallback =
-		options.fallbackText || fastEnglishSmalltalkText(sc, st, userText) || greetingText(sc, st);
+		options.fallbackText ||
+		fastEnglishSmalltalkText(sc, st, userText) ||
+		greetingText(sc, st);
 	let typingTimer = null;
 	let preTypingVisible = false;
 	let preTypingStartedAt = 0;
-	if (io && caseId && AI_PLANNING_TYPING_DELAY_MS >= 0) {
+	if (io && caseId && options.preTyping !== false && AI_PLANNING_TYPING_DELAY_MS >= 0) {
 		typingTimer = setTimeout(() => {
 			if (st.interrupt) return;
+			if (Number(st.guestTypingUntil || 0) > now()) return;
 			emitTyping(io, caseId, st, true);
 			preTypingVisible = true;
 			preTypingStartedAt = now();
-		}, Math.max(0, AI_PLANNING_TYPING_DELAY_MS));
+		}, planningTypingDelayMs(st));
 		if (typeof typingTimer.unref === "function") typingTimer.unref();
 	}
 	let msg = "";
@@ -1261,24 +1304,63 @@ async function sendDynamicCasualReply(
 		if (typingTimer) clearTimeout(typingTimer);
 	}
 	if (preTypingVisible) {
-		const minimumSendAt = Math.max(
-			startedAt + targetReplyMs,
-			preTypingStartedAt + 3000
-		);
-		while (!st.interrupt && now() < minimumSendAt) {
-			await sleep(80);
-		}
+		await waitForVisibleTypingWindow(io, caseId, st, {
+			startedAt,
+			targetReplyMs,
+			typingStartedAt: preTypingStartedAt,
+		});
 		emitTyping(io, caseId, st, false);
 		if (st.interrupt) return false;
 		return humanSend(io, sc, st, msg || fallback, {
 			first: Boolean(options.first),
 			fast: true,
+			scheduleIdle: options.scheduleIdle !== false,
+			quickReplies: options.quickReplies || [],
 		});
 	}
 	return humanSend(io, sc, st, msg || fallback, {
 		first: Boolean(options.first),
 		targetReplyMs,
+		scheduleIdle: options.scheduleIdle !== false,
+		quickReplies: options.quickReplies || [],
 	});
+}
+
+async function sendDynamicCasualReply(
+	io,
+	sc,
+	st,
+	userText,
+	instruction,
+	context = {},
+	options = {}
+) {
+	return sendDynamicWrittenReply(io, sc, st, userText, instruction, context, {
+		...options,
+		casual: true,
+		fallbackText:
+			options.fallbackText ||
+			fastEnglishSmalltalkText(sc, st, userText) ||
+			greetingText(sc, st),
+	});
+}
+
+async function sendDynamicEmotionalSupportReply(io, sc, st, userText = "") {
+	const fallbackText = emotionalSupportReplyText(sc, st, userText);
+	if (looksLikeSeriousSelfHarmText(userText)) {
+		return humanSend(io, sc, st, fallbackText, {
+			targetReplyMs: casualReplyTargetMs(),
+		});
+	}
+	return sendDynamicWrittenReply(
+		io,
+		sc,
+		st,
+		userText,
+		"The guest shared sadness, worry, stress, loneliness, or emotional heaviness. Reply like a warm but professional hotel CSR: acknowledge the feeling sincerely, include one short Islamic dua/prayer in the guest's active language, and offer either to listen briefly or continue helping with the stay step by step. Do not diagnose, lecture, overdo religion, or turn it into a script. Keep it to 2-3 concise sentences.",
+		{ latestUserMessage: userText, fallbackText },
+		{ casual: true, fallbackText }
+	);
 }
 
 async function answerLanguageSwitchRequest(io, sc, st, userText = "") {
@@ -5735,18 +5817,33 @@ async function answerSelectedHotelRoomQuestion(
 		});
 		return true;
 	}
+	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	if (selectedHotelRoomDetailsQuestionText(userText)) {
 		const selectedRoomTypeKey =
 			roomTypeKey || st.slots?.roomTypeKey || mapRoomToKey(userText) || null;
 		const detailRooms = selectedRoomTypeKey
 			? activeHotelRoomSummaries(st.hotel, selectedRoomTypeKey)
 			: activeHotelRoomSummaries(st.hotel).slice(0, 6);
-		const sent = await humanSend(
+		const fallbackText = roomDetailsSummaryText(
+			sc,
+			st,
+			detailRooms,
+			selectedRoomTypeKey
+		);
+		const sent = await sendDynamicWrittenReply(
 			io,
 			sc,
 			st,
-			roomDetailsSummaryText(sc, st, detailRooms, selectedRoomTypeKey),
-			{ fast: true }
+			userText,
+			`The guest asked for room details at "${hotelName}". Answer only from roomDetails and activeHotelFacts. Use the saved display names naturally, summarize the most useful details in concise hospitality wording, and do not invent amenities, views, sizes, beds, prices, or policies. If details are missing, say what is not currently shown and keep the next booking step helpful.`,
+			{
+				selectedHotel: hotelName,
+				requestedRoomTypeKey: selectedRoomTypeKey,
+				roomDetails: detailRooms,
+				fallbackText,
+				slots: st.slots,
+			},
+			{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 		);
 		if (sent) {
 			if (selectedRoomTypeKey && detailRooms.length) {
@@ -5781,7 +5878,6 @@ async function answerSelectedHotelRoomQuestion(
 			requestedGuestCount > 5 ? requestedGuestCount : 6
 		);
 	}
-	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
 	const matchingRooms = roomTypeKey
 		? activeHotelRoomSummaries(st.hotel, roomTypeKey)
 		: [];
@@ -5794,18 +5890,28 @@ async function answerSelectedHotelRoomQuestion(
 		);
 		if (recommendedRooms.length) {
 			st.slots.roomTypeKey = recommendedRoomTypeKey;
-			const sent = await humanSend(
+			const fallbackText = roomGuestCountRecommendationText(
+				sc,
+				st,
+				requestedGuestCount,
+				recommendedRoomTypeKey,
+				recommendedRooms
+			);
+			const sent = await sendDynamicWrittenReply(
 				io,
 				sc,
 				st,
-				roomGuestCountRecommendationText(
-					sc,
-					st,
-					requestedGuestCount,
+				userText,
+				`The guest gave a guest count for "${hotelName}". Recommend the matching active room type from provided recommendedRooms, explain briefly why it fits, then ask for both check-in and checkout dates if pricing is needed. Do not mention unavailable room types or other hotels.`,
+				{
+					selectedHotel: hotelName,
+					guestCount: requestedGuestCount,
 					recommendedRoomTypeKey,
-					recommendedRooms
-				),
-				{ fast: true }
+					recommendedRooms,
+					fallbackText,
+					slots: st.slots,
+				},
+				{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 			);
 			if (sent) {
 				st.waitFor = "dates";
@@ -5815,12 +5921,20 @@ async function answerSelectedHotelRoomQuestion(
 		}
 	}
 	if (!roomTypeKey && activeRooms.length) {
-		const sent = await humanSend(
+		const fallbackText = roomOptionsListText(sc, st, activeRooms);
+		const sent = await sendDynamicWrittenReply(
 			io,
 			sc,
 			st,
-			roomOptionsListText(sc, st, activeRooms),
-			{ fast: true }
+			userText,
+			`The guest asked what rooms are available at "${hotelName}". Reply with the active room types only. Use displayName/displayNameOther from activeRoomOptions naturally in the guest's language, preferably as a short bullet list, then ask which room type they prefer or ask for dates only if they want price. Do not invent unavailable rooms, prices, or other hotels.`,
+			{
+				selectedHotel: hotelName,
+				activeRoomOptions: activeRooms,
+				fallbackText,
+				slots: st.slots,
+			},
+			{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 		);
 		if (sent) {
 			st.waitFor = "room";
@@ -5840,12 +5954,21 @@ async function answerSelectedHotelRoomQuestion(
 	}
 	if (roomTypeKey && matchingRooms.length) {
 		st.slots.roomTypeKey = roomTypeKey;
-		const sent = await humanSend(
+		const fallbackText = roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms);
+		const sent = await sendDynamicWrittenReply(
 			io,
 			sc,
 			st,
-			roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms),
-			{ fast: true }
+			userText,
+			`The guest asked about a specific room type at "${hotelName}". Confirm the matching active room exists using matchingRooms, mention the fit/capacity if available, and ask for check-in and checkout dates together so availability and price can be checked. Keep it warm and sales-capable, but do not invent prices or other hotel options.`,
+			{
+				selectedHotel: hotelName,
+				requestedRoomTypeKey: roomTypeKey,
+				matchingRooms,
+				fallbackText,
+				slots: st.slots,
+			},
+			{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 		);
 		if (sent) {
 			st.waitFor = "dates";
@@ -5858,15 +5981,28 @@ async function answerSelectedHotelRoomQuestion(
 			? `The guest is asking whether the selected hotel has a room that fits their requested type/capacity. Answer only for "${hotelName}". Lead with the answer, not with a date question. Use a natural hospitality/sales tone: confirm that the matching room exists, mention why the provided matching room name fits the guest's capacity, and sound pleased to help. Mention only the matching room name(s) provided; do not list other hotels, compare hotels, link other hotels, or imply knowledge of other hotels under any circumstance. If dates are missing, ask for both arrival/check-in and departure/checkout dates together in the same sentence so availability and price can be checked. Never ask only for check-in.`
 			: `The guest is asking whether the selected hotel has the requested room type. Answer only for "${hotelName}". Say you do not currently see that room type listed as active for this hotel. Ask one helpful follow-up about another room type at this hotel or different dates at this hotel. Do not mention, recommend, link, compare, or imply knowledge of any other hotel.`
 		: `The guest is asking about rooms at the selected hotel. Answer only for "${hotelName}" using the provided active room options, then ask the single most useful next booking question. Never mention, recommend, link, compare, or imply knowledge of any other hotel, even if the guest asks for alternatives.`;
-	const reply = await write(io, sc, st, instruction, {
-		latestUserMessage: userText,
-		selectedHotel: hotelName,
-		requestedRoomTypeKey: roomTypeKey,
-		matchingRooms: matchingRooms.slice(0, 3),
-		activeRoomOptions: matchingRooms.length ? [] : activeRooms,
-		slots: st.slots,
-	});
-	const sent = await humanSend(io, sc, st, reply);
+	const fallbackText =
+		roomTypeKey && matchingRooms.length
+			? roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms)
+			: activeRooms.length
+			? roomOptionsListText(sc, st, activeRooms)
+			: roomDetailsSummaryText(sc, st, matchingRooms, roomTypeKey || "");
+	const sent = await sendDynamicWrittenReply(
+		io,
+		sc,
+		st,
+		userText,
+		instruction,
+		{
+			selectedHotel: hotelName,
+			requestedRoomTypeKey: roomTypeKey,
+			matchingRooms: matchingRooms.slice(0, 3),
+			activeRoomOptions: matchingRooms.length ? [] : activeRooms,
+			fallbackText,
+			slots: st.slots,
+		},
+		{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
+	);
 	if (sent) {
 		if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
 		st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
@@ -6747,7 +6883,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	let reply = "";
 	if (policyRow) {
 		reply = hotelPolicyAnswerText(sc, st, userText, policyRow);
-		if (!reply) {
+		if (!reply && process.env.AI_LEGACY_FACT_FALLBACK === "true") {
 			reply = await withSoftTimeout(
 				write(
 					io,
@@ -6768,7 +6904,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	} else {
 		reply = selectedHotelFactAnswerText(sc, st, userText);
 	}
-	if (!reply) {
+	if (!reply && process.env.AI_LEGACY_FACT_FALLBACK === "true") {
 		const lang = languageOf(sc, st);
 		const fallback = /arabic/i.test(lang)
 			? `${respectfulGuestName(sc, st)}، لا يظهر لدي هذا التفصيل مؤكدا في بيانات ${localizedHotelName(sc, st)} حاليا. ${hotelFactNextStepText(sc, st)}`
@@ -6789,9 +6925,28 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 			fallback
 		);
 	}
-	const sent = await humanSend(io, sc, st, reply, {
+	const factLang = languageOf(sc, st);
+	const fallbackText =
+		reply ||
+		selectedHotelFactAnswerText(sc, st, userText) ||
+		(/arabic/i.test(factLang)
+			? `${respectfulGuestName(sc, st)}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0647\u0630\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0627 \u0644\u0640 ${localizedHotelName(sc, st)} \u062d\u0627\u0644\u064a\u0627. ${hotelFactNextStepText(sc, st)}`
+			: `${respectfulGuestName(sc, st)}, I do not see that exact detail confirmed for ${localizedHotelName(sc, st)} right now. ${hotelFactNextStepText(sc, st)}`);
+	const instruction = policyRow
+		? "The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy and fallbackText only. Rewrite into polished professional reception wording in the active language, but keep every policy fact unchanged. Never say 'I checked', 'I found', 'document', 'record', 'hotel details say', or imply an admin/source document. Do not add a link. Do not invent exceptions, deadlines, prices, refunds, or legal wording. If the saved policy only partly answers, state exactly what is known and ask one relevant follow-up."
+		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, Nusuk status, policies, room facts, prices, contacts, or links.";
+	const sent = await sendDynamicWrittenReply(io, sc, st, userText, instruction, {
+		latestUserMessage: userText,
+		selectedHotel: localizedHotelName(sc, st),
+		selectedHotelPolicy: policyRow || null,
+		defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
+		selectedHotelFacts: buildActiveHotelFacts(sc, st),
+		fallbackText,
+		nextStep: nextPivot(st),
+	}, {
+		fallbackText,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 		scheduleIdle: policyRow ? false : true,
-		fast: true,
 	});
 	if (!sent) return false;
 	if (aiReservationReference(sc)) {
@@ -7739,27 +7894,39 @@ async function humanSend(
 			)
 	);
 	let typingVisible = false;
+	let typingVisibleStartedAt = 0;
+	const showTyping = () => {
+		if (typingVisible) return;
+		emitTyping(io, caseId, st, true);
+		typingVisible = true;
+		typingVisibleStartedAt = now();
+	};
+	const hideTyping = () => {
+		if (!typingVisible) return;
+		emitTyping(io, caseId, st, false);
+		typingVisible = false;
+		typingVisibleStartedAt = 0;
+	};
 	while (st.guestTypingUntil > now()) await sleep(300);
 	while (now() - waitStartedAt < waitMs) {
 		if (st.interrupt || st.sendingToken !== token) {
-			if (typingVisible) emitTyping(io, caseId, st, false);
+			hideTyping();
 			logStep(caseId, "human.cancelled", { stage: "target-wait", token });
 			return false;
 		}
 		while (st.guestTypingUntil > now()) await sleep(300);
 		if (!typingVisible && now() >= typingVisibleAfter) {
-			emitTyping(io, caseId, st, true);
-			typingVisible = true;
+			showTyping();
 		}
 		await sleep(120);
 	}
 	if (!typingVisible && now() >= typingVisibleAfter && AI_TYPING_MIN_VISIBLE_MS > 0) {
-		emitTyping(io, caseId, st, true);
-		typingVisible = true;
-		let visibleStartedAt = now();
-		while (now() - visibleStartedAt < AI_TYPING_MIN_VISIBLE_MS) {
+		showTyping();
+	}
+	if (typingVisible && AI_TYPING_MIN_VISIBLE_MS > 0) {
+		while (now() - typingVisibleStartedAt < AI_TYPING_MIN_VISIBLE_MS) {
 			if (st.interrupt || st.sendingToken !== token) {
-				emitTyping(io, caseId, st, false);
+				hideTyping();
 				logStep(caseId, "human.cancelled", {
 					stage: "min-typing-visible",
 					token,
@@ -7767,8 +7934,7 @@ async function humanSend(
 				return false;
 			}
 			if (st.guestTypingUntil > now()) {
-				emitTyping(io, caseId, st, false);
-				typingVisible = false;
+				hideTyping();
 				while (st.guestTypingUntil > now()) await sleep(120);
 				if (st.interrupt || st.sendingToken !== token) {
 					logStep(caseId, "human.cancelled", {
@@ -7777,14 +7943,12 @@ async function humanSend(
 					});
 					return false;
 				}
-				emitTyping(io, caseId, st, true);
-				typingVisible = true;
-				visibleStartedAt = now();
+				showTyping();
 			}
 			await sleep(60);
 		}
 	}
-	if (typingVisible) emitTyping(io, caseId, st, false);
+	hideTyping();
 	if (st.interrupt || st.sendingToken !== token) {
 		logStep(caseId, "human.cancelled", { stage: "post-type", token });
 		return false;
@@ -10580,7 +10744,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			{
 				kind: "writer",
 				temperature: 0.25,
-				max_tokens: 240,
+				max_tokens: 220,
 			}
 		);
 	} catch (error) {
@@ -10606,7 +10770,7 @@ async function write(io, sc, st, instruction, context = {}) {
 				{
 					kind: "writer",
 					temperature: 0,
-					max_tokens: 240,
+					max_tokens: 220,
 				}
 			);
 			if (rewritten && !languageMismatchLikely(rewritten, targetLanguage)) {
@@ -14807,9 +14971,7 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	});
 
 	if (looksLikeGuestDistressText(userText)) {
-		await humanSend(io, sc, st, emotionalSupportReplyText(sc, st, userText), {
-			targetReplyMs: casualReplyTargetMs(),
-		});
+		await sendDynamicEmotionalSupportReply(io, sc, st, userText);
 		thread.topic = "emotional_support";
 		thread.waitingForGuest = true;
 		return true;
@@ -15290,9 +15452,7 @@ async function planTurn(io, sc) {
 				waitFor: st.waitFor || "",
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
-			await humanSend(io, sc, st, emotionalSupportReplyText(sc, st, userText), {
-				targetReplyMs: casualReplyTargetMs(),
-			});
+			await sendDynamicEmotionalSupportReply(io, sc, st, userText);
 			return;
 		}
 		if (
