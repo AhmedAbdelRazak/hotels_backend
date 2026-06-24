@@ -129,6 +129,18 @@ const AI_REPLY_TARGET_MAX_MS = Math.max(
 		max: 15000,
 	})
 );
+const AI_CASUAL_REPLY_TARGET_MIN_MS = intFromEnv(
+	"AI_CASUAL_REPLY_TARGET_MIN_MS",
+	6200,
+	{ min: 1500, max: 12000 }
+);
+const AI_CASUAL_REPLY_TARGET_MAX_MS = Math.max(
+	AI_CASUAL_REPLY_TARGET_MIN_MS,
+	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 7600, {
+		min: 1500,
+		max: 12000,
+	})
+);
 const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4000, {
 	min: 500,
 	max: 8000,
@@ -263,6 +275,9 @@ const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 
 function randomBetween(a, b) {
 	return Math.floor(a + Math.random() * (b - a + 1));
+}
+function casualReplyTargetMs() {
+	return randomBetween(AI_CASUAL_REPLY_TARGET_MIN_MS, AI_CASUAL_REPLY_TARGET_MAX_MS);
 }
 function now() {
 	return Date.now();
@@ -9856,6 +9871,82 @@ function looksLikeClosureAck(s = "") {
 	return /(that'?s\s+good|good|great|nice|تمام|حلو|كويس|جميل)/i.test(t);
 }
 
+function looksLikeSeriousSelfHarmText(s = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(s);
+	return (
+		/\b(?:kill\s+myself|suicide|end\s+my\s+life|hurt\s+myself|harm\s+myself|i\s+do\s+not\s+want\s+to\s+live|i\s+don't\s+want\s+to\s+live)\b/i.test(
+			lower
+		) ||
+		/(?:انتحار|انتحر|اقتل نفسي|اموت نفسي|اذي نفسي|أذي نفسي|مش عايز اعيش|لا اريد ان اعيش|لا أريد أن أعيش)/i.test(
+			arabic
+		) ||
+		/(?:killmyself|suicide|endmylife|hurtmyself|harmmyself|dontwanttolive|donotwanttolive)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function looksLikeGuestDistressText(s = "") {
+	const raw = String(s || "").trim();
+	if (!raw || raw.length > 220) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		looksLikeSeriousSelfHarmText(raw) ||
+		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:so\s+|very\s+|really\s+)?(?:sad|upset|down|lonely|anxious|worried|stressed|depressed|heartbroken|not\s+okay)\b/i.test(
+			lower
+		) ||
+		/^(?:sad|upset|lonely|depressed|not\s+okay|i'm\s+sad|im\s+sad|i\s+am\s+sad)[.!?\s]*$/i.test(
+			lower
+		) ||
+		/(?:انا|اني|إني|انا\s+حاسس|انا\s+حاسه|انا\s+حاسة|انا\s+مش)\s+(?:حزين|حزينه|حزينة|زعلان|زعلانه|زعلانة|مضايق|مضايقه|مضايقة|متضايق|متضايقه|متضايقة|مكتئب|مكتئبه|مكتئبة|قلقان|قلقانه|قلقانة|مهموم|مهمومه|مهمومة|تعبان\s+نفسيا|تعبانه\s+نفسيا|نفسيتي\s+تعبانه|مش\s+كويس|مش\s+كويسه)/i.test(
+			arabic
+		) ||
+		/^(?:حزين|حزينه|زعلان|زعلانه|مضايق|مضايقه|متضايق|متضايقه|مكتئب|مكتئبه|قلقان|قلقانه|مهموم|مهمومه)$/i.test(
+			arabic
+		) ||
+		/(?:imsad|iamsad|ifeelsad|feelingsad|iamupset|imupset|feelingdown|iamlonely|imlonely|anahazin|anahazina|anazaalan|anazaalana|anazah2an|anamadaye2|nafseyatetaabana)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function emotionalSupportReplyText(sc = {}, st = {}, userText = "") {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const serious = looksLikeSeriousSelfHarmText(userText);
+	if (serious) {
+		if (/arabic/i.test(lang)) {
+			return `${name}، آسفة جدًا أنك تمر بهذا الألم. إذا كان هناك خطر عليك الآن أو قد تؤذي نفسك، اتصل بالطوارئ فورًا أو اطلب من شخص قريب يبقى معك. أسأل الله أن يحفظك ويشرح صدرك، وأنا معك هنا خطوة بخطوة.`;
+		}
+		if (/urdu/i.test(lang)) {
+			return `${name}, mujhe afsos hai ke aap itna dard mehsoos kar rahe hain. Agar abhi khatra ho ya aap khud ko nuqsan pahuncha sakte hain, please emergency help ko call karein ya kisi qareebi shakhs ko apne sath rakhein. Allah aap ki hifazat kare; main yahan aap ke sath hoon.`;
+		}
+		return `${name}, I am really sorry you are feeling this much pain. If you may hurt yourself or are in immediate danger, please call local emergency help now or ask someone nearby to stay with you. May Allah protect you and ease your heart; I am here with you step by step.`;
+	}
+	if (/arabic/i.test(lang)) {
+		return `${name}، آسفة أنك تشعر بهذا الحزن. أسأل الله أن يشرح صدرك ويبدل ضيقك سكينة وراحة. أنا معك هنا، وإذا تحب احكِ لي ما يضايقك، أو نكمل مساعدتك في الإقامة خطوة بخطوة.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, siento mucho que te sientas triste. Que Allah alivie tu corazon y te de tranquilidad. Estoy aqui contigo; si quieres, cuentame que paso, o seguimos con tu estancia paso a paso.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, je suis desolee que vous vous sentiez triste. Qu'Allah apaise votre coeur et vous donne de la tranquillite. Je suis ici avec vous; dites-moi ce qui se passe, ou je continue a vous aider pour votre sejour pas a pas.`;
+	}
+	if (/urdu/i.test(lang)) {
+		return `${name}, mujhe afsos hai ke aap udaas mehsoos kar rahe hain. Allah aap ke dil ko sukoon de aur pareshani ko asani mein badal de. Main yahan aap ke sath hoon; chahein to batayein kya hua, ya hum stay ki help step by step jari rakhte hain.`;
+	}
+	if (/hindi/i.test(lang)) {
+		return `${name}, mujhe afsos hai ki aap udaas mehsoos kar rahe hain. Allah aapke dil ko sukoon de aur pareshani ko asani mein badal de. Main yahin hoon; chahein to batayein kya hua, ya main stay mein step by step help karti hoon.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, saya ikut sedih mendengarnya. Semoga Allah menenangkan hati Anda dan mengganti rasa berat ini dengan ketenangan. Saya di sini bersama Anda; jika berkenan, ceritakan apa yang terjadi, atau saya bantu rencana menginap Anda pelan-pelan.`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, saya simpati mendengarnya. Semoga Allah lapangkan hati anda dan gantikan rasa berat ini dengan ketenangan. Saya di sini bersama anda; jika mahu, ceritakan apa yang berlaku, atau saya bantu urusan penginapan langkah demi langkah.`;
+	}
+	return `${name}, I am sorry you are feeling sad. May Allah ease your heart and replace this heaviness with peace. I am here with you; if it helps, tell me what happened, or I can keep helping with your stay step by step.`;
+}
+
 function compactLearningChat(chat = {}) {
 	const includeExamples =
 		String(process.env.AI_LEARNING_INCLUDE_EXAMPLE_TURNS || "")
@@ -14315,7 +14406,9 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	}
 	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
 	if (fastSmalltalk) {
-		await humanSend(io, sc, st, fastSmalltalk, { fast: true });
+		await humanSend(io, sc, st, fastSmalltalk, {
+			targetReplyMs: casualReplyTargetMs(),
+		});
 		st.waitFor = "post_booking_followup";
 		return true;
 	}
@@ -14650,10 +14743,21 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 		waitingForGuest: thread.waitingForGuest,
 	});
 
+	if (looksLikeGuestDistressText(userText)) {
+		await humanSend(io, sc, st, emotionalSupportReplyText(sc, st, userText), {
+			targetReplyMs: casualReplyTargetMs(),
+		});
+		thread.topic = "emotional_support";
+		thread.waitingForGuest = true;
+		return true;
+	}
+
 	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
 		const fastGreeting = fastEnglishSmalltalkText(sc, st, userText);
 		if (fastGreeting) {
-			await humanSend(io, sc, st, fastGreeting, { fast: true });
+			await humanSend(io, sc, st, fastGreeting, {
+				targetReplyMs: casualReplyTargetMs(),
+			});
 			thread.topic = null;
 			thread.waitingForGuest = false;
 			return true;
@@ -14680,7 +14784,13 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 				st,
 				"Say you’re doing well (natural phrasing), then ask “How about you?”. Keep it short; no booking question yet."
 			));
-			await humanSend(io, sc, st, msg, fastHowAreYou ? { fast: true } : {});
+			await humanSend(
+				io,
+				sc,
+				st,
+				msg,
+				fastHowAreYou ? { targetReplyMs: casualReplyTargetMs() } : {}
+			);
 			thread.topic = "howru";
 			thread.waitingForGuest = true;
 			logStep(caseId, "smalltalk.thread.update", {
@@ -15124,6 +15234,22 @@ async function planTurn(io, sc) {
 		}
 		if (
 			userText &&
+			looksLikeGuestDistressText(userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "emotional_support.reply", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, emotionalSupportReplyText(sc, st, userText), {
+				targetReplyMs: casualReplyTargetMs(),
+			});
+			return;
+		}
+		if (
+			userText &&
 			isReservationDetailStep(st) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
@@ -15172,7 +15298,9 @@ async function planTurn(io, sc) {
 				waitFor: st.waitFor || "",
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
-			await humanSend(io, sc, st, earlyFastSmalltalk, { fast: true });
+			await humanSend(io, sc, st, earlyFastSmalltalk, {
+				targetReplyMs: casualReplyTargetMs(),
+			});
 			return;
 		}
 		if (
@@ -15248,7 +15376,9 @@ async function planTurn(io, sc) {
 				waitFor: st.waitFor || "",
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
-			await humanSend(io, sc, st, fastSmalltalk, { fast: true });
+			await humanSend(io, sc, st, fastSmalltalk, {
+				targetReplyMs: casualReplyTargetMs(),
+			});
 			return;
 		}
 		if (
@@ -15372,7 +15502,10 @@ async function planTurn(io, sc) {
 								: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ initialInquiry }
 					  );
-				await humanSend(io, sc, st, greeting, { first: true, fast: true });
+				await humanSend(io, sc, st, greeting, {
+					first: true,
+					targetReplyMs: casualReplyTargetMs(),
+				});
 				st.waitFor = "clarify";
 				return;
 			}
@@ -15396,7 +15529,10 @@ async function planTurn(io, sc) {
 							"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
 							{ latestUserMessage: userText }
 					  );
-				await humanSend(io, sc, st, greeting, { first: true, fast: true });
+				await humanSend(io, sc, st, greeting, {
+					first: true,
+					targetReplyMs: casualReplyTargetMs(),
+				});
 				st.waitFor = "clarify";
 				return;
 			}
