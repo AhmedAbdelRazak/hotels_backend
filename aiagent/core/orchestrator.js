@@ -1228,18 +1228,56 @@ async function sendDynamicCasualReply(
 	st,
 	userText,
 	instruction,
-	context = {}
+	context = {},
+	options = {}
 ) {
+	const caseId = String(sc?._id || sc?.id || "");
+	const startedAt =
+		Number(st?.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
+	const targetReplyMs = casualReplyTargetMs();
 	const fallback =
-		fastEnglishSmalltalkText(sc, st, userText) || greetingText(sc, st);
-	const msg = await write(io, sc, st, instruction, {
-		latestUserMessage: userText,
-		currentWaitFor: st.waitFor || "",
-		pivot: nextPivot(st),
-		...context,
-	});
+		options.fallbackText || fastEnglishSmalltalkText(sc, st, userText) || greetingText(sc, st);
+	let typingTimer = null;
+	let preTypingVisible = false;
+	let preTypingStartedAt = 0;
+	if (io && caseId && AI_PLANNING_TYPING_DELAY_MS >= 0) {
+		typingTimer = setTimeout(() => {
+			if (st.interrupt) return;
+			emitTyping(io, caseId, st, true);
+			preTypingVisible = true;
+			preTypingStartedAt = now();
+		}, Math.max(0, AI_PLANNING_TYPING_DELAY_MS));
+		if (typeof typingTimer.unref === "function") typingTimer.unref();
+	}
+	let msg = "";
+	try {
+		msg = await write(io, sc, st, instruction, {
+			latestUserMessage: userText,
+			currentWaitFor: st.waitFor || "",
+			pivot: nextPivot(st),
+			...context,
+		});
+	} finally {
+		if (typingTimer) clearTimeout(typingTimer);
+	}
+	if (preTypingVisible) {
+		const minimumSendAt = Math.max(
+			startedAt + targetReplyMs,
+			preTypingStartedAt + 3000
+		);
+		while (!st.interrupt && now() < minimumSendAt) {
+			await sleep(80);
+		}
+		emitTyping(io, caseId, st, false);
+		if (st.interrupt) return false;
+		return humanSend(io, sc, st, msg || fallback, {
+			first: Boolean(options.first),
+			fast: true,
+		});
+	}
 	return humanSend(io, sc, st, msg || fallback, {
-		targetReplyMs: casualReplyTargetMs(),
+		first: Boolean(options.first),
+		targetReplyMs,
 	});
 }
 
@@ -15508,20 +15546,17 @@ async function planTurn(io, sc) {
 					);
 					if (handled) return;
 				}
-				const greeting =
-					(await write(
-						io,
-						sc,
-						st,
-						initialInquiry
-							? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-							: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-						{ initialInquiry }
-					)) || initialHotelGreetingText(sc, st);
-				await humanSend(io, sc, st, greeting, {
-					first: true,
-					targetReplyMs: casualReplyTargetMs(),
-				});
+				await sendDynamicCasualReply(
+					io,
+					sc,
+					st,
+					initialInquiry || "",
+					initialInquiry
+						? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+						: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+					{ initialInquiry },
+					{ first: true, fallbackText: initialHotelGreetingText(sc, st) }
+				);
 				st.waitFor = "clarify";
 				return;
 			}
@@ -15536,18 +15571,15 @@ async function planTurn(io, sc) {
 				(looksLikeFirstTurnGreetingSmalltalk(userText) &&
 					!hasConcreteFirstTurnBookingSignal(userText))
 			) {
-				const greeting =
-					(await write(
-						io,
-						sc,
-						st,
-						"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-						{ latestUserMessage: userText }
-					)) || initialHotelGreetingText(sc, st);
-				await humanSend(io, sc, st, greeting, {
-					first: true,
-					targetReplyMs: casualReplyTargetMs(),
-				});
+				await sendDynamicCasualReply(
+					io,
+					sc,
+					st,
+					userText,
+					"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+					{ latestUserMessage: userText },
+					{ first: true, fallbackText: initialHotelGreetingText(sc, st) }
+				);
 				st.waitFor = "clarify";
 				return;
 			}
