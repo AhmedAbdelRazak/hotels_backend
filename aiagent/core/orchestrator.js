@@ -8623,7 +8623,14 @@ function quoteConfirmationText(text = "", st = {}) {
 		/\b(?:confirm|proceed|continue|go ahead|book|reserve|finalize)\b.{0,40}\b(?:booking|reservation|quote|above|this)\b/i.test(
 			lower
 		) ||
-		/(?:confirmbooking|confirmreservation|proceedbooking|continuebooking|bookabove|reservethis|finalizethis)/i.test(
+		/\b(?:can|could|may)\s+(?:i|we)\s+(?:book|reserve)\b/i.test(lower) ||
+		/\b(?:i|we)\s+(?:want|would like|need)\s+to\s+(?:book|reserve)\b/i.test(
+			lower
+		) ||
+		/\b(?:book|reserve)\s+(?:a|one|the)\s+(?:room|double|triple|quad|suite)\b/i.test(
+			lower
+		) ||
+		/(?:confirmbooking|confirmreservation|proceedbooking|continuebooking|bookabove|bookaroom|bookone|bookoneroom|reservearoom|reserveone|reserveoneroom|canireserve|canwereserve|canibook|canwebook|iwanttoreserve|wewanttoreserve|iwanttobook|wewanttobook|iwouldliketoreserve|wewouldliketoreserve|iwouldliketobook|wewouldliketobook|reservethis|finalizethis)/i.test(
 			latinCompact
 		);
 	const repeatsQuotedTotal =
@@ -11126,13 +11133,19 @@ function latestGuestAcceptedProceedAction(sc = {}, userText = "") {
 function explicitProceedCommandText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	return (
-		/\b(?:proceed|continue|go ahead|book it|book this|book the room|reserve it|reserve this|reserve the room|make a reservation|make the reservation|create a reservation|start the reservation|finalize|complete booking|complete reservation|confirm booking|confirm reservation)\b/i.test(
+		/\b(?:proceed|continue|go ahead|book it|book this|book the room|book a room|book one|book one room|book the double|reserve it|reserve this|reserve the room|reserve a room|reserve one|reserve one room|reserve the double|make a reservation|make the reservation|create a reservation|start the reservation|finalize|complete booking|complete reservation|confirm booking|confirm reservation)\b/i.test(
+			lower
+		) ||
+		/\b(?:can|could|may)\s+(?:i|we)\s+(?:book|reserve)\b/i.test(
+			lower
+		) ||
+		/\b(?:i|we)\s+(?:want|would like|need)\s+to\s+(?:book|reserve)\b/i.test(
 			lower
 		) ||
 		/(?:\u0627\u062d\u062c\u0632|\u0627\u0643\u062f|\u0623\u0643\u062f|\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u062a\u0627\u0628\u0639|\u062b\u0628\u062a).{0,32}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0644\u063a\u0631\u0641\u0629|\u0627\u0644\u063a\u0631\u0641\u0647)/i.test(
 			arabic
 		) ||
-		/(?:goahead|bookit|bookthis|booktheroom|reserveit|reservethis|reservetheroom|makeareservation|makethereservation|createareservation|startthereservation|finalizethis|completebooking|completereservation|confirmbooking|confirmreservation|proceedbooking|continuebooking)/i.test(
+		/(?:goahead|bookit|bookthis|booktheroom|bookaroom|bookone|bookoneroom|reserveit|reservethis|reservetheroom|reservearoom|reserveone|reserveoneroom|canireserve|canwereserve|canibook|canwebook|iwanttoreserve|wewanttoreserve|iwanttobook|wewanttobook|iwouldliketoreserve|wewouldliketoreserve|iwouldliketobook|wewouldliketobook|makeareservation|makethereservation|createareservation|startthereservation|finalizethis|completebooking|completereservation|confirmbooking|confirmreservation|proceedbooking|continuebooking)/i.test(
 			latinCompact
 		)
 	);
