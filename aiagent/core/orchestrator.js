@@ -10358,7 +10358,7 @@ function looksLikeGuestDistressText(s = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	return (
 		looksLikeSeriousSelfHarmText(raw) ||
-		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:so\s+|very\s+|really\s+)?(?:sad|upset|down|lonely|anxious|worried|stressed|depressed|heartbroken|not\s+okay)\b/i.test(
+		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:(?:so|very|really|a\s+little|a\s+bit|kind\s+of|kinda|slightly|somewhat)\s+)?(?:sad|upset|down|lonely|anxious|worried|stressed|depressed|heartbroken|not\s+okay)\b/i.test(
 			lower
 		) ||
 		/^(?:sad|upset|lonely|depressed|not\s+okay|i'm\s+sad|im\s+sad|i\s+am\s+sad)[.!?\s]*$/i.test(
