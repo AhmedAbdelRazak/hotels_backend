@@ -2016,10 +2016,26 @@ function latestPhoneFromText(text = "") {
 		/[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+/g,
 		" "
 	);
-	const matches = withoutEmails.match(/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9 \t().-]{4,}/g);
+	const phonePattern =
+		/\+?[\d\u0660-\u0669\u06f0-\u06f9][\d\u0660-\u0669\u06f0-\u06f9 \t().-]{4,}/g;
+	const matches = [...withoutEmails.matchAll(phonePattern)];
 	if (!matches?.length) return "";
 	for (let i = matches.length - 1; i >= 0; i -= 1) {
-		const phone = cleanPhoneCandidate(matches[i]);
+		const match = matches[i];
+		const matchedText = match[0] || "";
+		const index = Number(match.index || 0);
+		const context = withoutEmails.slice(
+			Math.max(0, index - 35),
+			index + matchedText.length + 35
+		);
+		const before = withoutEmails.slice(Math.max(0, index - 18), index);
+		const phoneContext =
+			/^\s*\+/.test(matchedText) ||
+			/(?:\b(?:phone|mobile|whats\s*app|whatsapp|tel|telephone)\b|(?:\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633))\s*[:#-]?\s*$/i.test(
+				before
+			);
+		if (!phoneContext && looksLikeStayDateCandidate(context)) continue;
+		const phone = cleanPhoneCandidate(matchedText);
 		if (phone) return phone;
 	}
 	return "";
