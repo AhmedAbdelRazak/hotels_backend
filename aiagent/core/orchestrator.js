@@ -8877,8 +8877,18 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		st.slots.nationality = nationalityHint;
 		directFieldCaptured = true;
 	}
-	const guestCountCaptured = applyReservationGuestCountsFromText(st, fullText);
-	const numericCountCaptured = applyFocusedNumericCountAnswer(st, fullText);
+	const explicitCountFieldText =
+		/\b(?:adults?|children|kids?|guests?|people|persons?|pax)\b/i.test(fullText) ||
+		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0636\u064a\u0648\u0641|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0646\u0641\u0631)/i.test(
+			fullText
+		);
+	const shouldParseCounts = !directFieldCaptured || explicitCountFieldText;
+	const guestCountCaptured = shouldParseCounts
+		? applyReservationGuestCountsFromText(st, fullText)
+		: false;
+	const numericCountCaptured = shouldParseCounts
+		? applyFocusedNumericCountAnswer(st, fullText)
+		: false;
 	if (
 		!hasMandatoryReservationDetails(st) &&
 		!directFieldCaptured &&
