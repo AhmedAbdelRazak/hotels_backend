@@ -77,6 +77,35 @@ Related earlier fixes from the same stabilization thread:
 - The frontend send button and end-chat button should recover even if a request
   stalls or is aborted.
 
+## Same-Chat Reservation Memory Follow-Up
+
+Later live testing exposed a final-review memory regression in the Sara flow:
+
+- The guest sent mandatory details as:
+  `Ahmed Test / 9998881999 / US / For two individuals`.
+- The bot failed to preserve `US` as the nationality and later accepted
+  `I already told you` as the saved nationality.
+- When the guest asked `Do you remember the data I gave you for my reservation?`,
+  the bot repeated the final `Complete Reservation` prompt instead of reading
+  back the current reservation details.
+
+Expected behavior after the follow-up fix:
+
+- Standalone nationality aliases in multiline payloads, such as `US`, hydrate
+  and display as a valid nationality, for example `American`.
+- Complaint/chase text such as `I already told you` is never accepted as a
+  nationality during live capture or restart hydration.
+- Guest counts in multiline detail payloads, such as `For two individuals`, are
+  recovered after server restarts.
+- Same-chat memory questions such as `Do you remember the data I gave you?`,
+  `What is my nationality here?`, Spanish `Recuerdas los datos de mi reserva?`,
+  French `Vous vous souvenez des details de ma reservation ?`, and Arabic
+  already-provided wording receive a current booking summary before any next
+  action prompt.
+- The bot preserves the active reservation step after answering the memory
+  question and only shows final quick replies when the reservation is actually
+  ready for completion.
+
 ## Live Test Evidence
 
 All tests used temporary public support cases and exact cleanup markers. No
