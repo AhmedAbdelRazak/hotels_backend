@@ -10751,6 +10751,7 @@ async function answerFastBookingStateQuestion(io, sc, st, userText = "", caseId 
 		: currentQuoteSummaryText(sc, st, quote);
 	const sent = await humanSend(io, sc, st, reply, {
 		quickReplies: bookingSummaryQuickReplies(sc, st),
+		fast: true,
 	});
 	if (!sent) {
 		st.waitFor = previousWaitFor || st.waitFor;
@@ -11175,6 +11176,25 @@ async function handleProceedStageInput(
 		return false;
 	}
 	st.waitFor = "proceed";
+	const wantsQuoteRepeat = repeatPriceQuestionText(userText);
+	const wantsBookingDetails = reservationDetailsSummaryQuestionText(userText);
+	if (
+		(wantsQuoteRepeat || wantsBookingDetails) &&
+		!wantsDiscountQuestion(userText) &&
+		!wantsPaymentHelp(userText)
+	) {
+		const reply = wantsBookingDetails
+			? currentReservationSummaryText(sc, st, quote)
+			: currentQuoteSummaryText(sc, st, quote);
+		await humanSend(io, sc, st, reply, {
+			quickReplies: bookingSummaryQuickReplies(sc, st),
+			fast: true,
+		});
+		logStep(String(sc._id || ""), "proceed.fast_state_reply", {
+			kind: wantsBookingDetails ? "details" : "price",
+		});
+		return true;
+	}
 	if (directInfoRequest && !explicitProceedCommandText(userText)) return false;
 	if (acceptedProceed || quoteConfirmationText(userText, st)) {
 		resumeBookingNudge(st);
