@@ -118,22 +118,22 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3600, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3400, {
 	min: 500,
 	max: 15000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4800, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 4400, {
 		min: 500,
 		max: 15000,
 	})
 );
-const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4200, {
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4000, {
 	min: 500,
 	max: 8000,
 });
-const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3800, {
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3600, {
 	min: 500,
 	max: 8000,
 });
@@ -153,7 +153,7 @@ const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3900, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3600, {
 		min: 0,
 		max: 9000,
 	})
@@ -163,13 +163,13 @@ const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	3200,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2800, {
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2400, {
 	min: 0,
 	max: 5000,
 });
 const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
 	"AI_RESERVATION_DETAIL_QUIET_MS",
-	1800,
+	1600,
 	{ min: 0, max: 5000 }
 );
 const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2200, {
@@ -13139,6 +13139,55 @@ function postBookingLocalRecommendationText(sc = {}, st = {}) {
 	return `${name}, I do not have verified restaurant or shop names around ${hotelName} in the hotel record right now.${mapPart} On arrival, reception can point you to the closest reliable options.`;
 }
 
+function postBookingNusukAppointmentQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const mentionsNusuk =
+		/\b(?:nusuk|nusk)\b/i.test(lower) ||
+		/(?:\u0646\u0633\u0643)/i.test(arabic) ||
+		/(?:nusuk|nusk)/i.test(latinCompact);
+	if (!mentionsNusuk) return false;
+	return (
+		/\b(?:rawdah|rawda|appointment|appointments?|permit|permits?|required|need|needed|umrah|hajj|ziyarah|visit)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0631\u0648\u0636\u0629|\u0631\u0648\u0636\u0629|\u0645\u0648\u0639\u062f|\u0645\u0648\u0627\u0639\u064a\u062f|\u062a\u0635\u0631\u064a\u062d|\u062a\u0635\u0627\u0631\u064a\u062d|\u0645\u0637\u0644\u0648\u0628|\u0644\u0627\u0632\u0645|\u0627\u062d\u062a\u0627\u062c|\u0627\u0644\u0639\u0645\u0631\u0629|\u0639\u0645\u0631\u0629|\u0627\u0644\u062d\u062c|\u062d\u062c|\u0632\u064a\u0627\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:rawdah|rawda|appointment|permit|required|need|umrah|hajj|ziyarah|visit)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function postBookingNusukAppointmentText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const ref = aiReservationReference(sc);
+	const confirmation = ref?.confirmation_number || "";
+	if (/arabic/i.test(lang)) {
+		const booking = confirmation
+			? ` \u062d\u062c\u0632\u0643 \u0631\u0642\u0645 ${confirmation} \u0645\u0624\u0643\u062f.`
+			: "";
+		return `${name}\u060c \u0628\u0627\u0644\u0646\u0633\u0628\u0629 \u0644\u0646\u0633\u0643\u060c \u0627\u0644\u0623\u0641\u0636\u0644 \u0627\u0633\u062a\u062e\u062f\u0627\u0645 \u062a\u0637\u0628\u064a\u0642 Nusuk \u0627\u0644\u0631\u0633\u0645\u064a \u0644\u0645\u0648\u0627\u0639\u064a\u062f \u0627\u0644\u0631\u0648\u0636\u0629 \u0623\u0648 \u0627\u0644\u062a\u0635\u0627\u0631\u064a\u062d \u0627\u0644\u0631\u0633\u0645\u064a\u0629 \u0625\u0630\u0627 \u0643\u0627\u0646\u062a \u0645\u0637\u0644\u0648\u0628\u0629 \u0644\u0643. \u0627\u0644\u0641\u0646\u062f\u0642 \u0644\u0627 \u064a\u0635\u062f\u0631 \u0645\u0648\u0627\u0639\u064a\u062f Nusuk\u060c \u0644\u0643\u0646 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u0642\u062f\u0631 \u064a\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0627\u0644\u0625\u0631\u0634\u0627\u062f \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644.${booking}`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, for Nusuk appointments or official permits such as Rawdah, please use the official Nusuk app and follow the app availability. The hotel booking${confirmation ? ` ${confirmation}` : ""} is confirmed, but the hotel does not issue Nusuk appointments.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, pour les rendez-vous Nusuk ou les permis officiels comme Rawdah, utilisez l'application officielle Nusuk et suivez les disponibilites indiquees. La reservation${confirmation ? ` ${confirmation}` : ""} est confirmee, mais l'hotel ne delivre pas les rendez-vous Nusuk.`;
+	}
+	if (/urdu|hindi/i.test(lang)) {
+		return `${name}, Nusuk appointments ya official permits jaise Rawdah ke liye official Nusuk app use karein. Hotel booking${confirmation ? ` ${confirmation}` : ""} confirmed hai, lekin hotel Nusuk appointments issue nahi karta.`;
+	}
+	if (/indonesian/i.test(lang)) {
+		return `${name}, untuk janji temu Nusuk atau izin resmi seperti Rawdah, gunakan aplikasi resmi Nusuk dan ikuti ketersediaan di aplikasi. Reservasi hotel${confirmation ? ` ${confirmation}` : ""} sudah terkonfirmasi, tetapi hotel tidak menerbitkan janji temu Nusuk.`;
+	}
+	if (/malay|malaysia/i.test(lang)) {
+		return `${name}, untuk janji temu Nusuk atau permit rasmi seperti Rawdah, gunakan aplikasi rasmi Nusuk dan ikut ketersediaan dalam aplikasi. Tempahan hotel${confirmation ? ` ${confirmation}` : ""} sudah disahkan, tetapi hotel tidak mengeluarkan janji temu Nusuk.`;
+	}
+	return `${name}, for Nusuk appointments or official permits such as Rawdah, please use the official Nusuk app and follow the availability shown there. Your hotel booking${confirmation ? ` ${confirmation}` : ""} is confirmed, but the hotel does not issue Nusuk appointments.`;
+}
+
 function postBookingPaymentHelpText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	const name = respectfulGuestName(sc, st);
@@ -14170,6 +14219,12 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		);
 		if (handledDeliveryRequest) return true;
 	}
+	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
+	if (fastSmalltalk) {
+		await humanSend(io, sc, st, fastSmalltalk, { fast: true });
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
 	if (
 		cancellationRefundPolicyQuestionText(userText) ||
 		cancellationActionRequestText(userText)
@@ -14196,6 +14251,14 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	}
 	if (postBookingLocalRecommendationQuestionText(userText)) {
 		await humanSend(io, sc, st, postBookingLocalRecommendationText(sc, st), {
+			fast: true,
+			scheduleIdle: false,
+		});
+		st.waitFor = "post_booking_followup";
+		return true;
+	}
+	if (postBookingNusukAppointmentQuestionText(userText)) {
+		await humanSend(io, sc, st, postBookingNusukAppointmentText(sc, st), {
 			fast: true,
 			scheduleIdle: false,
 		});
@@ -14236,12 +14299,6 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
 		if (sent) schedulePostBookingAutoClose(io, sc, st);
 		st.waitFor = null;
-		return true;
-	}
-	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
-	if (fastSmalltalk) {
-		await humanSend(io, sc, st, fastSmalltalk, { fast: true });
-		st.waitFor = "post_booking_followup";
 		return true;
 	}
 	if (vagueHajjInquiryText(userText)) {
