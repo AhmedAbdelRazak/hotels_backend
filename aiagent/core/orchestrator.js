@@ -3005,6 +3005,36 @@ function selectedHotelRoomQuestionText(text = "") {
 	);
 }
 
+function generalRoomOptionsQuestionText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:what|which|list|show|tell|send|share)\b[^.!?\u061f\n]*(?:room|rooms|room\s+types|options)\b/i.test(
+			lower
+		) ||
+		/\b(?:what|which)\s+(?:kind|type|types)\s+of\s+rooms?\b/i.test(lower) ||
+		/\b(?:rooms?|room\s+types?|options)\b[^.!?\u061f\n]*(?:have|offer|available|there|provide)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u064a\u0647|\u0625\u064a\u0647|\u0627\u064a|\u0623\u064a|\u0645\u0627|\u0645\u0627\u0647\u064a|\u0634\u0648|\u0634\u0646\u0648)[^ØŸ\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641|\u0627\u0648\u0636|\u0623\u0648\u0636)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0646\u0648\u0627\u0639|\u0623\u0646\u0648\u0627\u0639|\u0646\u0648\u0639|\u0627\u0644\u0627\u0646\u0648\u0627\u0639)[^ØŸ\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+			arabic
+		) ||
+		/(?:\u0639\u0646\u062f\u0643\u0645|\u0639\u0646\u062f\u0643|\u0641\u064a\u0647|\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631)[^ØŸ\n]*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:\u0628\u062a\u0642\u062f\u0645|\u0628\u062a\u0642\u062f\u0645\u0648|\u062a\u0642\u062f\u0645|\u062a\u0648\u0641\u0631)[^ØŸ\n]*(?:\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:anwa3|anwaa|whatrooms|whichrooms|roomtypes?|typesofrooms?|typesrooms?)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function selectedHotelRoomDetailsQuestionText(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return false;
@@ -4843,6 +4873,45 @@ function wantsMakkahNearHaram(text = "") {
 	);
 }
 
+function sanitizedRoomDescription(value = "", roomTypeKey = "") {
+	let text = cleanHotelFactText(value);
+	if (!text) return "";
+	if (["doubleRooms", "tripleRooms", "quadRooms", "familyRooms"].includes(roomTypeKey)) {
+		text = text
+			.replace(
+				/\b(?:accommodates?|fits?|sleeps?)\s+(?:up\s+to\s+)?(?:one|two|three|four|five|six|seven|eight|nine|\d+)\s+(?:guests?|people|persons?)\s*(?:,|;|-|with|featuring)?\s*/gi,
+				""
+			)
+			.replace(
+				/\b(?:features?|featuring)\s+(?:one|two|three|four|five|six|seven|eight|nine|\d+)[-\s]*(?:cozy\s+|comfortable\s+)?beds?\s*(?:,|;|-|—)?\s*/gi,
+				""
+			)
+			.replace(
+				/\b(?:perfect|ideal|great)\s+for\s+(?:large\s+)?(?:families|groups)[^.!?]*(?:[.!?]|$)/gi,
+				""
+			);
+	}
+	return cleanHotelFactText(text);
+}
+
+function roomOptionCapacityNote(room = {}, lang = "English") {
+	if (room?.roomType === "individualBed") {
+		const beds = safePositiveRoomNumber(room.bedsCount);
+		if (/arabic/i.test(lang)) return beds ? `غرفة مشتركة بها ${beds} أسرة` : "غرفة مشتركة";
+		return beds ? `shared room with ${beds} beds` : "shared room";
+	}
+	return roomCapacityLabel(room?.roomType || "", lang);
+}
+
+function roomListFactsForOpenAi(options = [], lang = "English") {
+	return (Array.isArray(options) ? options : []).map((room) => ({
+		roomType: room.roomType,
+		displayName: room.displayName || roomOptionDisplayName(room, lang),
+		displayNameOther: room.displayNameOther || "",
+		capacityNote: roomOptionCapacityNote(room, lang),
+	}));
+}
+
 function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 	const rooms = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -4857,11 +4926,18 @@ function activeHotelRoomSummaries(hotel = {}, roomTypeKey = null) {
 			roomType: room.roomType,
 			displayName: room.displayName || room.roomType,
 			displayNameOther: room.displayName_OtherLanguage || "",
-			description: compactRoomFactText(room.description, 260),
-			descriptionOther: compactRoomFactText(
-				room.description_OtherLanguage,
+			description: compactRoomFactText(
+				sanitizedRoomDescription(room.description, room.roomType),
 				260
 			),
+			descriptionOther: compactRoomFactText(
+				sanitizedRoomDescription(
+					room.description_OtherLanguage,
+					room.roomType
+				),
+				260
+			),
+			capacityNote: roomOptionCapacityNote(room, "English"),
 			amenities: compactRoomFactList(room.amenities, 12),
 			views: compactRoomFactList(room.views, 6),
 			extraAmenities: compactRoomFactList(room.extraAmenities, 8),
@@ -5326,9 +5402,49 @@ function roomGuestCountRecommendationText(
 	return `${name}, for ${capacity}, I recommend ${roomNames} at ${hotelName}; it is the best fit for that guest count. Send me the check-in and check-out dates and I will check the exact availability and price for you.`;
 }
 
+function negatedGuestCountCorrectionText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const mentionsCount =
+		/\b(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i.test(
+			lower
+		) ||
+		/\b(?:people|persons?|guests?|adults?|pax|beds?)\s*(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\b/i.test(
+			lower
+		);
+	const challengesPriorClaim =
+		mentionsCount &&
+		/\b(?:doesn'?t\s+make\s+sense|does\s+not\s+make\s+sense|not\s+make\s+sense|wrong|incorrect|mistake|how\s+(?:can|is|come)|you\s+said|u\s+said|that'?s\s+not|that\s+is\s+not)\b/i.test(
+			lower
+		) &&
+		/\b(?:room|double|single|triple|quad|family|bed|beds|accommodat|fit|fits|guests?|people|said)\b/i.test(
+			lower
+		);
+	return (
+		challengesPriorClaim ||
+		/\b(?:i|we)\s+(?:never|didn'?t|did\s+not|do\s+not|don't)\s+(?:say|said|tell|mention|have|need|want|ask\s+for)[^.!?\n]{0,80}\b(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)?\b/i.test(
+			lower
+		) ||
+		/\b(?:i|we)\s+(?:am|are|'m|'re)?\s*not\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax)?\b/i.test(
+			lower
+		) ||
+		/\bnot\s+(?:[2-9]|two|three|four|five|six|seven|eight|nine|ten)\s*(?:people|persons?|guests?|adults?|pax|beds?)\b/i.test(
+			lower
+		) ||
+		/(?:neversaid|didntsay|didnotsay|dontsay|donotsay|notsix|not6|notfive|not5)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0645\u0627|\u0645\u0634|\u0644\u0645)\s*(?:\u0642\u0644\u062a|\u0627\u0642\u0648\u0644|\u0627\u0630\u0643\u0631|\u0630\u0643\u0631\u062a|\u0637\u0644\u0628\u062a)[^ØŸ\n]{0,80}(?:[2-9]|\u0662|\u0663|\u0664|\u0665|\u0666|\u0667|\u0668|\u0669|\u0627\u062b\u0646\u064a\u0646|\u062b\u0644\u0627\u062b\u0629|\u0627\u0631\u0628\u0639\u0629|\u0623\u0631\u0628\u0639\u0629|\u062e\u0645\u0633\u0629|\u0633\u062a\u0629)/i.test(
+			arabic
+		)
+	);
+}
+
 function requestedGuestCountFromText(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return null;
+	if (negatedGuestCountCorrectionText(raw)) return null;
 	const normalized = normalizeNumberWordsForParsing(raw);
 	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
 	const counts = [];
@@ -5797,6 +5913,8 @@ async function answerSelectedHotelRoomQuestion(
 	userText,
 	roomTypeKey = null
 ) {
+	const wantsGeneralRoomOptions = generalRoomOptionsQuestionText(userText);
+	if (wantsGeneralRoomOptions) roomTypeKey = null;
 	const previousWaitFor = st.waitFor || null;
 	const latestDates = extractDateRange(userText);
 	if (
@@ -5818,9 +5936,34 @@ async function answerSelectedHotelRoomQuestion(
 		return true;
 	}
 	const hotelName = toTitle(st.hotel?.hotelName || "the hotel");
+	if (negatedGuestCountCorrectionText(userText)) {
+		const activeRooms = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+		const fallbackText = `${respectfulGuestName(sc, st)}, you are right. I should not have assumed that guest count. The available room types at ${localizedHotelName(sc, st)} are:\n${roomOptionsBullets(activeRooms, languageOf(sc, st))}\n\nWhich room type would you prefer?`;
+		const sent = await sendDynamicWrittenReply(
+			io,
+			sc,
+			st,
+			userText,
+			`The guest corrected us because we wrongly assumed a guest count or repeated a capacity claim from a previous assistant message. Apologize clearly, say we should not assume that guest count, then answer helpfully by listing the active room types at "${hotelName}" from activeRoomOptions only. Do not repeat the disputed guest count. Do not mention a multi-room setup, extra beds, Saudi compliance, or dates until after the room list. Ask which room type they prefer.`,
+			{
+				selectedHotel: hotelName,
+				activeRoomOptions: roomListFactsForOpenAi(activeRooms, languageOf(sc, st)),
+				fallbackText,
+				slots: st.slots,
+			},
+			{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
+		);
+		if (sent) {
+			st.waitFor = "room";
+			stampAsk(st, "room");
+		}
+		return true;
+	}
 	if (selectedHotelRoomDetailsQuestionText(userText)) {
 		const selectedRoomTypeKey =
-			roomTypeKey || st.slots?.roomTypeKey || mapRoomToKey(userText) || null;
+			wantsGeneralRoomOptions
+				? null
+				: roomTypeKey || st.slots?.roomTypeKey || mapRoomToKey(userText) || null;
 		const detailRooms = selectedRoomTypeKey
 			? activeHotelRoomSummaries(st.hotel, selectedRoomTypeKey)
 			: activeHotelRoomSummaries(st.hotel).slice(0, 6);
@@ -5927,10 +6070,10 @@ async function answerSelectedHotelRoomQuestion(
 			sc,
 			st,
 			userText,
-			`The guest asked what rooms are available at "${hotelName}". Reply with the active room types only. Use displayName/displayNameOther from activeRoomOptions naturally in the guest's language, preferably as a short bullet list, then ask which room type they prefer or ask for dates only if they want price. Do not invent unavailable rooms, prices, or other hotels.`,
+			`The guest asked what rooms are available at "${hotelName}". You MUST list every active room option in activeRoomOptions exactly once, using the saved displayName/displayNameOther naturally in the guest's language. This is a room-list question, not a specific room recommendation. Do not focus on only one room. Do not mention room descriptions, amenities, prices, guest counts, or capacity unless capacityNote is supplied. Do not invent unavailable rooms, prices, or other hotels. After the list, ask which room type they prefer; ask for dates only if they ask for price.`,
 			{
 				selectedHotel: hotelName,
-				activeRoomOptions: activeRooms,
+				activeRoomOptions: roomListFactsForOpenAi(activeRooms, languageOf(sc, st)),
 				fallbackText,
 				slots: st.slots,
 			},
@@ -5997,7 +6140,9 @@ async function answerSelectedHotelRoomQuestion(
 			selectedHotel: hotelName,
 			requestedRoomTypeKey: roomTypeKey,
 			matchingRooms: matchingRooms.slice(0, 3),
-			activeRoomOptions: matchingRooms.length ? [] : activeRooms,
+			activeRoomOptions: matchingRooms.length
+				? []
+				: roomListFactsForOpenAi(activeRooms, languageOf(sc, st)),
 			fallbackText,
 			slots: st.slots,
 		},
