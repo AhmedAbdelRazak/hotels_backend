@@ -1237,6 +1237,26 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	return "";
 }
 
+function casualWrittenReplyAsksForBookingField(text = "") {
+	const value = String(text || "");
+	if (!value.trim()) return false;
+	return (
+		/\b(?:what\s+is|please\s+(?:send|share|provide|add)|send|share|provide|add|i\s+(?:still\s+)?need)\b.{0,100}\b(?:nationality|country|full\s+name|phone|mobile|email|e-mail|check[\s-]?in|check[\s-]?out|checkout|dates?|room\s+type|guests?|adults?|children)\b/i.test(
+			value
+		) ||
+		/\b(?:nationality|country)\s+or\s+country\s+name\b/i.test(value) ||
+		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u062a\u0627\u0631\u064a\u062e\s+\u0627\u0644\u0648\u0635\u0648\u0644|\u062a\u0627\u0631\u064a\u062e\s+\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0646\u0648\u0639\s+\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+			value
+		)
+	);
+}
+
+function guardedCasualWrittenReply(message = "", fallback = "", options = {}) {
+	if (!fallback || (!options.casual && !options.first)) return message || fallback;
+	if (casualWrittenReplyAsksForBookingField(message)) return fallback;
+	return message || fallback;
+}
+
 async function waitForVisibleTypingWindow(
 	io,
 	caseId,
@@ -1318,6 +1338,7 @@ async function sendDynamicWrittenReply(
 	} finally {
 		if (typingTimer) clearTimeout(typingTimer);
 	}
+	const finalMessage = guardedCasualWrittenReply(msg, fallback, options);
 	if (preTypingVisible) {
 		await waitForVisibleTypingWindow(io, caseId, st, {
 			startedAt,
@@ -1326,14 +1347,14 @@ async function sendDynamicWrittenReply(
 		});
 		emitTyping(io, caseId, st, false);
 		if (st.interrupt) return false;
-		return humanSend(io, sc, st, msg || fallback, {
+		return humanSend(io, sc, st, finalMessage, {
 			first: Boolean(options.first),
 			fast: true,
 			scheduleIdle: options.scheduleIdle !== false,
 			quickReplies: options.quickReplies || [],
 		});
 	}
-	return humanSend(io, sc, st, msg || fallback, {
+	return humanSend(io, sc, st, finalMessage, {
 		first: Boolean(options.first),
 		targetReplyMs,
 		scheduleIdle: options.scheduleIdle !== false,
