@@ -1222,6 +1222,27 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	return "";
 }
 
+async function sendDynamicCasualReply(
+	io,
+	sc,
+	st,
+	userText,
+	instruction,
+	context = {}
+) {
+	const fallback =
+		fastEnglishSmalltalkText(sc, st, userText) || greetingText(sc, st);
+	const msg = await write(io, sc, st, instruction, {
+		latestUserMessage: userText,
+		currentWaitFor: st.waitFor || "",
+		pivot: nextPivot(st),
+		...context,
+	});
+	return humanSend(io, sc, st, msg || fallback, {
+		targetReplyMs: casualReplyTargetMs(),
+	});
+}
+
 async function answerLanguageSwitchRequest(io, sc, st, userText = "") {
 	await humanSend(io, sc, st, languageSwitchAcknowledgementText(sc, st));
 	logStep(String(sc._id), "language.switch_ack", {
@@ -14406,9 +14427,13 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 	}
 	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
 	if (fastSmalltalk) {
-		await humanSend(io, sc, st, fastSmalltalk, {
-			targetReplyMs: casualReplyTargetMs(),
-		});
+		await sendDynamicCasualReply(
+			io,
+			sc,
+			st,
+			userText,
+			"The guest made a casual or social comment after completing a booking. Reply warmly in a professional reception voice, answer the social line naturally, and add one soft line that you remain available for any reservation, hotel, maps, Nusuk, or payment follow-up. Do not restart the booking flow."
+		);
 		st.waitFor = "post_booking_followup";
 		return true;
 	}
@@ -14753,23 +14778,14 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	}
 
 	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
-		const fastGreeting = fastEnglishSmalltalkText(sc, st, userText);
-		if (fastGreeting) {
-			await humanSend(io, sc, st, fastGreeting, {
-				targetReplyMs: casualReplyTargetMs(),
-			});
-			thread.topic = null;
-			thread.waitingForGuest = false;
-			return true;
-		}
-		const msg = await write(
+		await sendDynamicCasualReply(
 			io,
 			sc,
 			st,
+			userText,
 			"Reply warmly to the guest's greeting in the active language. Use a natural short hospitality tone and ask an open 'how can I help you?' style question. Do not ask for check-in/check-out dates, room type, phone, nationality, or any booking detail in this reply.",
 			{ latestUserMessage: userText, currentWaitFor: st.waitFor || "" }
 		);
-		await humanSend(io, sc, st, msg || greetingText(sc, st));
 		thread.topic = null;
 		thread.waitingForGuest = false;
 		return true;
@@ -14777,19 +14793,12 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 
 	if (subtype === "how_are_you") {
 		if (!thread.waitingForGuest || thread.topic !== "howru") {
-			const fastHowAreYou = fastEnglishSmalltalkText(sc, st, userText);
-			const msg = fastHowAreYou || (await write(
+			await sendDynamicCasualReply(
 				io,
 				sc,
 				st,
-				"Say you’re doing well (natural phrasing), then ask “How about you?”. Keep it short; no booking question yet."
-			));
-			await humanSend(
-				io,
-				sc,
-				st,
-				msg,
-				fastHowAreYou ? { targetReplyMs: casualReplyTargetMs() } : {}
+				userText,
+				"Say you're doing well in a natural professional CSR voice, then ask how the guest is doing. Keep it short; no booking question yet."
 			);
 			thread.topic = "howru";
 			thread.waitingForGuest = true;
@@ -15294,13 +15303,17 @@ async function planTurn(io, sc) {
 			!explicitlyExistingReservationIntent(userText) &&
 			!wantsPaymentHelp(userText)
 		) {
-			logStep(caseId, "smalltalk.fast_reply_early", {
+			logStep(caseId, "smalltalk.dynamic_reply_early", {
 				waitFor: st.waitFor || "",
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
-			await humanSend(io, sc, st, earlyFastSmalltalk, {
-				targetReplyMs: casualReplyTargetMs(),
-			});
+			await sendDynamicCasualReply(
+				io,
+				sc,
+				st,
+				userText,
+				"Reply to this casual guest message in a warm, professional hotel CSR voice. Keep it concise and human. If it is only a greeting, thanks, or how-are-you, answer that naturally and ask an open how-can-I-help question. Do not ask for check-in/check-out dates, room type, phone, nationality, or payment details in this reply unless the guest explicitly asked for booking help."
+			);
 			return;
 		}
 		if (
@@ -15372,13 +15385,17 @@ async function planTurn(io, sc) {
 			!explicitlyExistingReservationIntent(userText) &&
 			!wantsPaymentHelp(userText)
 		) {
-			logStep(caseId, "smalltalk.fast_reply", {
+			logStep(caseId, "smalltalk.dynamic_reply", {
 				waitFor: st.waitFor || "",
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
-			await humanSend(io, sc, st, fastSmalltalk, {
-				targetReplyMs: casualReplyTargetMs(),
-			});
+			await sendDynamicCasualReply(
+				io,
+				sc,
+				st,
+				userText,
+				"Reply to this casual guest message in a warm, professional hotel CSR voice. Keep it concise and human. If it is only a greeting, thanks, or how-are-you, answer that naturally and ask an open how-can-I-help question. Do not ask for check-in/check-out dates, room type, phone, nationality, or payment details in this reply unless the guest explicitly asked for booking help."
+			);
 			return;
 		}
 		if (
@@ -15491,17 +15508,16 @@ async function planTurn(io, sc) {
 					);
 					if (handled) return;
 				}
-				const greeting = st.hotel
-					? initialHotelGreetingText(sc, st)
-					: await write(
-							io,
-							sc,
-							st,
-							initialInquiry
-								? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-								: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-							{ initialInquiry }
-					  );
+				const greeting =
+					(await write(
+						io,
+						sc,
+						st,
+						initialInquiry
+							? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
+							: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+						{ initialInquiry }
+					)) || initialHotelGreetingText(sc, st);
 				await humanSend(io, sc, st, greeting, {
 					first: true,
 					targetReplyMs: casualReplyTargetMs(),
@@ -15520,15 +15536,14 @@ async function planTurn(io, sc) {
 				(looksLikeFirstTurnGreetingSmalltalk(userText) &&
 					!hasConcreteFirstTurnBookingSignal(userText))
 			) {
-				const greeting = st.hotel
-					? initialHotelGreetingText(sc, st)
-					: await write(
-							io,
-							sc,
-							st,
-							"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-							{ latestUserMessage: userText }
-					  );
+				const greeting =
+					(await write(
+						io,
+						sc,
+						st,
+						"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
+						{ latestUserMessage: userText }
+					)) || initialHotelGreetingText(sc, st);
 				await humanSend(io, sc, st, greeting, {
 					first: true,
 					targetReplyMs: casualReplyTargetMs(),
