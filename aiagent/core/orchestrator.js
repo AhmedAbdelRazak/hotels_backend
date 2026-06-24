@@ -12190,10 +12190,10 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	st.waitFor = "post_booking_followup";
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;
-	const finalSent = await humanSend(io, sc, st, finalText, {
+	st.allowPostBookingReentry = true;
+	await humanSend(io, sc, st, finalText, {
 		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
 	});
-	if (finalSent) st.allowPostBookingReentry = true;
 	const dispatchTimer = setTimeout(() => {
 		dispatchAiReservationConfirmation({
 			caseId,
