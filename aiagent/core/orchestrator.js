@@ -2067,6 +2067,16 @@ function hydrateKnownSlotsFromConversation(
 	{ protectLatestGuestDateChange = false } = {}
 ) {
 	const hydrationStartedAt = now();
+	let hydrationStageStartedAt = hydrationStartedAt;
+	const hydrationStages = [];
+	const markHydrationStage = (stage) => {
+		const stageNow = now();
+		hydrationStages.push({
+			stage,
+			elapsedMs: stageNow - hydrationStageStartedAt,
+		});
+		hydrationStageStartedAt = stageNow;
+	};
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	if (!conversation.length) {
 		return;
@@ -2095,33 +2105,36 @@ function hydrateKnownSlotsFromConversation(
 		const rawMessageText = String(message?.message || "").trim();
 		const messageText = rawMessageText || conversationEntryContextText(message);
 		if (!messageText || message?.isSystem) continue;
-		const messageDates = extractDateRange(messageText);
-		if (
-			messageDates.checkinISO &&
-			messageDates.checkoutISO &&
-			!needsExplicitPastDateClarification(messageText, messageDates)
-		) {
+		const guestMessage = isGuestConversationMessage(message);
+		if (guestMessage) {
+			const messageDates = extractDateRange(messageText);
 			if (
-				index === latestGuestIndex &&
-				shouldConfirmDateRangeChange(st, messageDates)
+				messageDates.checkinISO &&
+				messageDates.checkoutISO &&
+				!needsExplicitPastDateClarification(messageText, messageDates)
 			) {
-				protectedLatestGuestDateRange = messageDates;
-			} else {
-				latestConversationDateRange = messageDates;
-				if (isGuestConversationMessage(message)) {
+				if (
+					index === latestGuestIndex &&
+					shouldConfirmDateRangeChange(st, messageDates)
+				) {
+					protectedLatestGuestDateRange = messageDates;
+				} else {
+					latestConversationDateRange = messageDates;
 					latestGuestDateRange = messageDates;
 				}
 			}
 		}
-		if (!isGuestConversationMessage(message)) continue;
+		if (!guestMessage) continue;
 		if (messageText) guestMessages.push(messageText);
 	}
+	markHydrationStage("date_guest_loop");
 	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
 	if (latestGuestDateRange) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
 	} else if (latestConversationDateRange) {
 		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
 	}
+	markHydrationStage("date_merge");
 	if (protectedLatestGuestDateRange) {
 		logStep(String(sc._id || ""), "slots.latest_date_change_protected", {
 			current: currentDateRange(st),
@@ -2132,6 +2145,7 @@ function hydrateKnownSlotsFromConversation(
 			waitFor: st.waitFor || "",
 		});
 	}
+	markHydrationStage("date_protection");
 	let latestGuestRoomKey = null;
 	let latestAssistantQuotedRoomKey = null;
 	for (const message of conversation) {
@@ -2153,6 +2167,7 @@ function hydrateKnownSlotsFromConversation(
 			latestAssistantQuotedRoomKey = messageRoomKey;
 		}
 	}
+	markHydrationStage("room_loop");
 	const latestRoomKey = latestGuestRoomKey || latestAssistantQuotedRoomKey;
 	if (latestRoomKey && st.slots.roomTypeKey !== latestRoomKey) {
 		const previousRoomTypeKey = st.slots.roomTypeKey || null;
@@ -2174,6 +2189,7 @@ function hydrateKnownSlotsFromConversation(
 	if (phone && !st.slots.phone) st.slots.phone = phone;
 	const nationality = nationalityHintFromText(guestText);
 	if (nationality && !st.slots.nationality) st.slots.nationality = nationality;
+	markHydrationStage("guest_identity_extract");
 	for (const message of conversation) {
 		if (!isGuestConversationMessage(message)) continue;
 		const contact = String(message?.messageBy?.customerEmail || "");
@@ -2182,6 +2198,7 @@ function hydrateKnownSlotsFromConversation(
 		if (contactEmail && !st.slots.email) st.slots.email = contactEmail;
 		if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
 	}
+	markHydrationStage("contact_loop");
 	let lastAsk = "";
 	for (const message of conversation) {
 		const text = String(message?.message || "");
@@ -2220,10 +2237,12 @@ function hydrateKnownSlotsFromConversation(
 			if (value && value.length <= 40) st.slots.nationality = value;
 		}
 	}
+	markHydrationStage("detail_followup_loop");
 	st.hydratedConversationLength = conversation.length;
 	if (before !== JSON.stringify(st.slots || {})) {
 		logStep(String(sc._id || ""), "slots.hydrated", { slots: st.slots });
 	}
+	markHydrationStage("finalize");
 	const hydrationElapsedMs = now() - hydrationStartedAt;
 	if (hydrationElapsedMs >= 500) {
 		console.log("[aiagent] slow slots hydrate", {
@@ -2233,6 +2252,7 @@ function hydrateKnownSlotsFromConversation(
 			guestMessages: guestMessages.length,
 			waitFor: st.waitFor || null,
 			latestUserMessage: lastUserText(sc).slice(0, 160),
+			stages: hydrationStages,
 		});
 	}
 }
