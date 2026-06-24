@@ -3729,6 +3729,44 @@ function parseSameMonthDateRange(text = "") {
 	};
 }
 
+function parseMonthFirstDateRange(text = "") {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const monthToken =
+		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const rangeRegex = new RegExp(
+		`(?:\\b(?:from|arrival|check\\s*-?in|date|dates)\\b\\s*)?${monthToken}\\s+(\\d{1,2})(?:\\s*,?\\s*(20\\d{2}))?\\s*(?:\\b(?:to|until|till|through|thru|checkout|check\\s*-?out|departure)\\b|\\-|\\u2013|\\u2014)\\s*(?:${monthToken}\\s+)?(\\d{1,2})(?:\\s*,?\\s*(20\\d{2}))?`,
+		"i"
+	);
+	const match = normalized.match(rangeRegex);
+	if (!match) return null;
+	const startMonthText = match[1];
+	const startDay = match[2];
+	const startYear = match[3] || null;
+	const endMonthText = match[4] || startMonthText;
+	const endDay = match[5];
+	const endYear = match[6] || startYear || null;
+	const startMonth = monthNumberFromText(startMonthText);
+	const endMonth = monthNumberFromText(endMonthText) || startMonth;
+	if (!startMonth || !endMonth) return null;
+	const checkinISO = buildFutureIsoDateFromParts(startDay, startMonth, startYear || endYear);
+	let checkoutISO = buildFutureIsoDateFromParts(endDay, endMonth, endYear || startYear);
+	if (!checkinISO || !checkoutISO) return null;
+	if (checkoutISO <= checkinISO) {
+		const checkout = new Date(`${checkoutISO}T00:00:00Z`);
+		checkout.setUTCMonth(checkout.getUTCMonth() + 1);
+		checkoutISO = checkout.toISOString().slice(0, 10);
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: `${startMonthText} ${startDay}`,
+			checkout: `${endMonthText} ${endDay}`,
+			calendar: "gregorian",
+		},
+	};
+}
+
 function adjustCheckoutAfterCheckin(checkoutISO = "", checkinISO = "") {
 	if (!checkoutISO || !checkinISO || checkoutISO > checkinISO) return checkoutISO;
 	const checkout = new Date(`${checkoutISO}T00:00:00Z`);
@@ -3787,6 +3825,10 @@ function extractDateRange(text = "") {
 	const sameMonthRange = parseSameMonthDateRange(text);
 	if (sameMonthRange?.checkinISO && sameMonthRange?.checkoutISO) {
 		return sameMonthRange;
+	}
+	const monthFirstRange = parseMonthFirstDateRange(text);
+	if (monthFirstRange?.checkinISO && monthFirstRange?.checkoutISO) {
+		return monthFirstRange;
 	}
 	const raw = String(text || "");
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
