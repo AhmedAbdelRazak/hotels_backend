@@ -18,6 +18,9 @@ const {
 	dispatchReservationConfirmation,
 	reservationPublicLinks,
 } = require("../../services/reservationConfirmationDispatcher");
+const {
+	scheduleReservationConfirmedConversion,
+} = require("../../services/conversionTracking");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const AI_RESERVATION_ACTOR = {
@@ -1323,6 +1326,11 @@ async function createReservationForCase({
 		reservationId: String(saved._id),
 		confirmation: saved.confirmation_number,
 		total: saved.total_amount,
+	});
+	scheduleReservationConfirmedConversion(saved, {
+		source: "ai_chat",
+		caseId,
+		hotel,
 	});
 
 	return saved;

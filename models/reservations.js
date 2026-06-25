@@ -48,6 +48,10 @@ const reservationsSchema = new mongoose.Schema(
 			trim: true,
 			default: "",
 		},
+		analyticsDispatch: {
+			type: Object,
+			default: {},
+		},
 		customer_details: {
 			type: Object, //This is based on the mapping you did in the 3 files, whatever doesn't exist, then leave blank
 			trim: true,

@@ -65,6 +65,10 @@ const {
 const {
 	markReservationPendingConfirmation,
 } = require("../services/pendingConfirmationPolicy");
+const {
+	scheduleReservationConfirmedConversion,
+	schedulePaymentCapturedConversion,
+} = require("../services/conversionTracking");
 
 /* Email setup */
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -76,6 +80,34 @@ const buildInventoryUnavailableResponse = (inventoryValidation = {}) => ({
 	code: "inventory_unavailable",
 	inventory: inventoryValidation,
 });
+
+function analyticsContextFromRequest(req, source = "") {
+	return {
+		source,
+		clientUserAgent: String(req?.get?.("user-agent") || "").trim(),
+		eventSourceUrl: String(req?.get?.("referer") || req?.get?.("origin") || "").trim(),
+	};
+}
+
+function shouldTrackReservationConversion(reqBody = {}) {
+	const sentFrom = String(reqBody.sentFrom || "").toLowerCase();
+	const bookingSource = String(reqBody.booking_source || reqBody.bookingSource || "").toLowerCase();
+	const sourceWebsite = String(reqBody.sourceWebsite || "").toLowerCase();
+	return (
+		sentFrom === "client" ||
+		/online jannat booking|ai chat/.test(bookingSource) ||
+		/jannatbooking/.test(sourceWebsite)
+	);
+}
+
+function reservationConversionSource(reqBody = {}) {
+	return (
+		reqBody.analyticsContext?.source ||
+		reqBody.sourceWebsite ||
+		reqBody.booking_source ||
+		"reservation_created"
+	);
+}
 
 /* PayPal env/client */
 const IS_PROD = /prod/i.test(process.env.NODE_ENV);
@@ -1932,7 +1964,15 @@ async function buildAndSaveReservation({
 		};
 	}
 
-	return r.save();
+	const saved = await r.save();
+	if (shouldTrackReservationConversion(reqBody)) {
+		scheduleReservationConfirmedConversion(saved, {
+			...(reqBody.analyticsContext || {}),
+			source: reservationConversionSource(reqBody),
+			checkoutContext: reqBody.analyticsContext?.source || reqBody.sourceWebsite || "",
+		});
+	}
+	return saved;
 }
 
 async function reservePendingCaptureUSD({ reservationId, usdAmount }) {
@@ -2283,6 +2323,7 @@ exports.cancelPendingReservation = async (req, res) => {
 exports.createReservationAndProcess = async (req, res) => {
 	try {
 		const body = req.body || {};
+		body.analyticsContext = analyticsContextFromRequest(req, "checkout");
 		const {
 			sentFrom,
 			payment,
@@ -2985,6 +3026,15 @@ exports.createReservationAndProcess = async (req, res) => {
 					saved,
 					"[PP][checkout][capture]"
 				);
+				schedulePaymentCapturedConversion(saved, {
+					...(body.analyticsContext || {}),
+					source: "checkout_capture",
+					checkoutContext: "cart_checkout",
+					amountSar: paidSar,
+					amountUsd: capturedUsd,
+					captureId: cap.id,
+					paymentType: finalPayment,
+				});
 
 				return res.status(201).json({
 					message: "Reservation created successfully (captured).",
@@ -3232,6 +3282,7 @@ exports.createReservationAndProcess = async (req, res) => {
  *  - Unique invoice_id per capture; correct chargeCount; audit fields.
  */
 exports.mitChargeReservation = async (req, res) => {
+	const analyticsContext = analyticsContextFromRequest(req, "post_stay_capture");
 	try {
 		const { reservationId, usdAmount, cmid, sarAmount } = req.body || {};
 		const amt = Math.round(Number(usdAmount || 0) * 100) / 100;
@@ -3658,6 +3709,18 @@ exports.mitChargeReservation = async (req, res) => {
 				err?.message || err,
 			);
 		}
+		schedulePaymentCapturedConversion(updated, {
+			...analyticsContext,
+			source:
+				resultCapture?._via === "AUTH_CAPTURE"
+					? "authorization_capture"
+					: "mit_capture",
+			checkoutContext: "post_stay_capture",
+			amountSar: sarInc,
+			amountUsd: capturedUsd,
+			captureId: cap.id,
+			paymentType: fullyPaid ? "paid online" : "deposit paid",
+		});
 
 		return res.status(200).json({
 			message:
@@ -3930,6 +3993,7 @@ exports.webhook = async (req, res) => {
  */
 exports.linkPayReservation = async (req, res) => {
 	const logPrefix = "[PP][link-pay]";
+	const analyticsContext = analyticsContextFromRequest(req, "client_payment_link");
 	const DEFAULT_PP_MODE = String(
 		process.env.PAYPAL_DEFAULT_MODE || "capture",
 	).toLowerCase();
@@ -4718,6 +4782,15 @@ exports.linkPayReservation = async (req, res) => {
 			logPrefix,
 		);
 		scheduleLinkPaymentReceiptDispatch(updated, logPrefix);
+		schedulePaymentCapturedConversion(updated, {
+			...analyticsContext,
+			source: "client_payment_link_capture",
+			checkoutContext: "client_payment_link",
+			amountSar: toNumber2(sarAmount),
+			amountUsd: capAmount,
+			captureId: cap.id,
+			paymentType: fullyPaid ? "paid online" : "deposit paid",
+		});
 
 		return res.status(200).json({
 			message: "Payment captured and reservation updated.",
@@ -5867,6 +5940,10 @@ exports.verifyReservationAndCreate = async (req, res) => {
 				...reservationData,
 				paypal_details: undefined,
 				financeStatus: "not paid",
+				analyticsContext: analyticsContextFromRequest(
+					req,
+					"reservation_verification",
+				),
 			},
 			confirmationNumber,
 			paypalDetailsToPersist: reservationData.paypal_details, // normally undefined
