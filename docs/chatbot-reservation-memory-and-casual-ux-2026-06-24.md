@@ -282,3 +282,52 @@ Remaining note: English and Arabic received the full live 20+ message production
 QA. French and Spanish are now structurally supported and parser-smoked, but
 they should still get a future live end-to-end conversation test before calling
 them fully production-scored at 9+/10.
+
+## 2026-06-25 Follow-Up: Reservation Memory Gaps
+
+After reviewing the latest Ahmed/Sara and Arabic Ahmed/Hana/Aisha production
+chats, the biggest remaining problems were not tone; they were routing and
+state-memory edges:
+
+- Arabic distance wording such as `... للحرم` could be missed during final
+  review, so the bot repeated the final booking prompt instead of answering the
+  hotel fact.
+- Meal/food questions could fall through to the cancellation policy when the
+  hotel did not have a matching meal policy row.
+- A guest saying `اكد الحجز` or simply confirming after a side question could be
+  forced through another redundant final prompt if the previous bot message had
+  no quick-reply button.
+- First-turn requests with dates plus a clear guest count needed to infer the
+  matching room type and move toward quote/review instead of asking the guest to
+  repeat the room choice.
+- Arabic final reviews should display normalized nationalities in Arabic, for
+  example `مصري`, not English `Egyptian`.
+
+Hardening added:
+
+- Selected-hotel meals are now a first-class fact question, separate from
+  cancellation/refund policy.
+- Hotel-policy lookup no longer defaults to cancellation when the latest
+  policy-like question has no matching policy row.
+- Final-review state can answer direct selected-hotel fact questions while
+  preserving the reservation state.
+- Final reservation creation accepts clear typed confirmations in the final
+  state, including Arabic `اكد الحجز`, even after a side fact answer.
+- Direct reservation start now infers the active room type from clear guest
+  counts when the selected hotel has that matching active room.
+- Arabic nationality display was localized for current-memory replies and final
+  reservation review.
+
+Private smoke covered:
+
+- Arabic meal question does not answer cancellation/refund.
+- Arabic `restaurants nearby?` style questions remain local-area questions, not
+  in-hotel meal questions.
+- Arabic `ممكن اعرف المسافة قد ايه للحرم` is detected as a distance question.
+- Arabic final review shows `مصري` for Egyptian nationality.
+- Arabic final `نعم` and `اكد الحجز` are accepted in final-review state.
+- Arabic first-turn booking text with `٤ افراد` maps to 4 guests and
+  `quadRooms`.
+- English meal question does not answer cancellation/refund.
+- English `What rooms do you guys have?` stays a room-list question.
+- English `room for 2 individuals` maps to `doubleRooms`.
