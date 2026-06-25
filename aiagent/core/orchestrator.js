@@ -5129,6 +5129,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 	if (!hotel) return null;
 	const distances = hotel.distances || {};
 	const busDetails = cleanHotelFactText(hotel.busDetails);
+	const mealsDetails = cleanHotelFactText(hotel.mealsDetails);
 	const nusukDetails = cleanHotelFactText(hotel.isNusukText);
 	const hotelPolicies = activeHotelPolicyQA(hotel.hotelPolicyQA);
 	const mapsUrl = hotelGoogleMapsUrl(hotel);
@@ -5153,6 +5154,8 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		parkingLot: hotel.parkingLot === true,
 		hasBusService: hotel.hasBusService === true,
 		busDetails,
+		hasMealsService: hotel.hasMealsService === true,
+		mealsDetails,
 		isNusuk: hotel.isNusuk === true,
 		isNusukText: nusukDetails,
 		hotelPolicyQA: hotelPolicies,
@@ -6743,7 +6746,42 @@ function selectedHotelMealsAnswerText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st);
 	const next = hotelFactNextStepText(sc, st);
-	const source = hotelMealsSourceText(st.hotel || {});
+	const hotel = st.hotel || {};
+	const hasExplicitMealsSetting =
+		Object.prototype.hasOwnProperty.call(hotel, "hasMealsService") ||
+		typeof hotel.hasMealsService === "boolean" ||
+		Object.prototype.hasOwnProperty.call(hotel, "mealsDetails");
+	const hasMealsService = hotel.hasMealsService === true;
+	const mealsDetails = compactRoomFactText(cleanHotelFactText(hotel.mealsDetails), 220);
+	if (hasMealsService) {
+		if (/arabic/i.test(lang)) {
+			return mealsDetails
+				? `${name}\u060c \u0646\u0639\u0645\u060c ${hotelName} \u064a\u0648\u0641\u0631 \u0648\u062c\u0628\u0627\u062a \u0644\u0644\u0636\u064a\u0648\u0641. ${mealsDetails}. ${next}`
+				: `${name}\u060c \u0646\u0639\u0645\u060c ${hotelName} \u064a\u0648\u0641\u0631 \u0648\u062c\u0628\u0627\u062a \u0644\u0644\u0636\u064a\u0648\u0641\u060c \u0648\u0644\u0627 \u062a\u0648\u062c\u062f \u062a\u0641\u0627\u0635\u064a\u0644 \u0625\u0636\u0627\u0641\u064a\u0629 \u0645\u062d\u062f\u062f\u0629 \u062d\u0627\u0644\u064a\u0627. ${next}`;
+		}
+		if (/spanish/i.test(lang)) {
+			return mealsDetails
+				? `${name}, si, ${hotelName} ofrece comidas para los huespedes. ${mealsDetails}. ${next}`
+				: `${name}, si, ${hotelName} ofrece comidas para los huespedes, pero no hay mas detalles de comidas indicados ahora mismo. ${next}`;
+		}
+		if (/french/i.test(lang)) {
+			return mealsDetails
+				? `${name}, oui, ${hotelName} propose des repas aux clients. ${mealsDetails}. ${next}`
+				: `${name}, oui, ${hotelName} propose des repas aux clients, mais aucun detail supplementaire n'est indique pour le moment. ${next}`;
+		}
+		return mealsDetails
+			? `${name}, yes, ${hotelName} provides meals for guests. ${mealsDetails}. ${next}`
+			: `${name}, yes, ${hotelName} provides meals for guests, but no extra meal details are shown right now. ${next}`;
+	}
+	if (hasExplicitMealsSetting) {
+		if (/arabic/i.test(lang)) {
+			return `${name}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u062d\u0627\u0644\u064a\u0627 \u0623\u0646 ${hotelName} \u064a\u0648\u0641\u0631 \u0648\u062c\u0628\u0627\u062a \u062f\u0627\u062e\u0644 \u0627\u0644\u0641\u0646\u062f\u0642. ${next}`;
+		}
+		if (/spanish/i.test(lang)) return `${name}, no veo comidas dentro del hotel marcadas como disponibles para ${hotelName} ahora mismo. ${next}`;
+		if (/french/i.test(lang)) return `${name}, je ne vois pas de repas a l'hotel indiques comme proposes pour ${hotelName} pour le moment. ${next}`;
+		return `${name}, I do not see in-hotel meals marked as provided for ${hotelName} right now. ${next}`;
+	}
+	const source = hotelMealsSourceText(hotel);
 	const sourceBrief = compactRoomFactText(source, 220);
 	const hasMealMention =
 		/\b(?:breakfast|meal|meals|dining|restaurant|buffet)\b/i.test(source) ||
@@ -7228,7 +7266,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 			: `${respectfulGuestName(sc, st)}, I do not see that exact detail confirmed for ${localizedHotelName(sc, st)} right now. ${hotelFactNextStepText(sc, st)}`);
 	const instruction = policyRow
 		? "The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy and fallbackText only. Rewrite into polished professional reception wording in the active language, but keep every policy fact unchanged. Never say 'I checked', 'I found', 'document', 'record', 'hotel details say', or imply an admin/source document. Do not add a link. Do not invent exceptions, deadlines, prices, refunds, or legal wording. If the saved policy only partly answers, state exactly what is known and ask one relevant follow-up."
-		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, Nusuk status, policies, room facts, prices, contacts, or links.";
+		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links.";
 	const sent = await sendDynamicWrittenReply(io, sc, st, userText, instruction, {
 		latestUserMessage: userText,
 		selectedHotel: localizedHotelName(sc, st),
@@ -11129,7 +11167,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, hasMealsService, mealsDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, meals/breakfast/restaurant, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
 			: "",
 		activeHotelFacts?.googleMapsLocationUrl
 			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
@@ -11142,6 +11180,9 @@ async function write(io, sc, st, instruction, context = {}) {
 			: "",
 		activeHotelFacts
 			? `If the guest asks about bus/shuttle service to Al Haram, use only activeHotelFacts.hasBusService and activeHotelFacts.busDetails. If hasBusService is true, answer yes as hotel reception and rewrite/translate busDetails naturally as our guest bus information without inventing schedules, stations, timing, or destinations. If hasBusService is false or missing, say we do not currently offer a private bus service, mention walking minutes from activeHotelFacts.distances.walkingToElHaram when available, and say public buses are available close to the hotel and can drop guests at Al Haram.`
+			: "",
+		activeHotelFacts
+			? `If the guest asks about meals, breakfast, food, dining, buffet, or restaurant service inside the selected hotel, use only activeHotelFacts.hasMealsService and activeHotelFacts.mealsDetails before hotelPolicyQA or aboutHotel. If hasMealsService is true, answer yes and rewrite/translate mealsDetails naturally without inventing meal times, menus, inclusions, prices, or restaurant names. If hasMealsService is false or missing, say in-hotel meals are not currently shown as provided, then keep the next reservation step helpful. Do not turn a shared kitchen mention into a meal service.`
 			: "",
 		activeHotelFacts
 			? `If the guest asks whether the selected hotel is listed, registered, or available on Nusuk, use only activeHotelFacts.isNusuk and activeHotelFacts.isNusukText. If isNusuk is true, answer yes directly as hotel reception and translate/adapt isNusukText naturally when present. If isNusuk is false or missing, say we do not currently show the hotel as listed on Nusuk, then keep the guest comfortable and continue the reservation help.`
@@ -11312,6 +11353,14 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "selected_hotel_room_question",
 		};
 	}
+	if (broadGeneralSupportQuestionText(userText, st, lu) || genericOpenAiQuestionText(userText, st, lu)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : "platform",
+			reason: "generic_openai_question",
+		};
+	}
 	if (st.hotel && crossHotelRequestText(userText)) {
 		return {
 			action: "support_email",
@@ -11423,7 +11472,8 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"If currentSlots or waitFor show a new reservation is in progress, do not choose reservation_lookup merely because the guest says confirmation number; choose continue_booking unless the guest clearly says they already have an existing reservation.",
 		"If the guest asks about discounts, coupons, promos, offers, cheaper prices, or best price, choose discount_question. Do not choose human_escalation for a discount question.",
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
-		"Choose support_email when the guest asks a broad/general question that cannot be answered from the selected hotel facts, platform facts, database context, or learning examples, and it does not require a same-case human takeover. The support_email action name means unsupported-answer fallback: the customer-facing reply should professionally say the detail is not confirmed and then move back to the relevant hotel/reservation topic, not invent facts or send the guest away.",
+		"Choose general_answer when the guest asks a broad, general, or off-topic question that is not part of the booking planner. The writer will answer using verified context or safe general knowledge, and will avoid guessing live/current data.",
+		"Choose support_email only for a hard scope boundary or unsupported platform/hotel request that must not be answered from general knowledge. The customer-facing reply must not send the guest away or mention email unless the latest guest explicitly asks for email.",
 		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
 		"Do not choose human_escalation only because a normal question was repeated once or twice; keep answering safely and patiently. The deterministic three-repeat guard handles unresolved repeated questions.",
 		"Choose reservation_cancellation for cancellation/refund policy questions or cancellation requests so the deterministic policy handler can answer directly from verified hotel policy. Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
@@ -13013,7 +13063,8 @@ function proceedStageDirectInformationRequest(sc = {}, st = {}, userText = "", l
 			detectAmenityQuestion(text) ||
 			(st.hotel && directHotelRelationshipQuestionText(text)) ||
 			(st.hotel && crossHotelRequestText(text)) ||
-			broadGeneralSupportQuestionText(text, st, lu)
+			broadGeneralSupportQuestionText(text, st, lu) ||
+			genericOpenAiQuestionText(text, st, lu)
 	);
 }
 
@@ -14877,6 +14928,49 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 	);
 }
 
+function genericOpenAiQuestionText(text = "", st = {}, lu = {}) {
+	const normalized = String(text || "").trim();
+	if (!normalized) return false;
+	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	if (
+		wantsNewReservationIntent(normalized, lu) ||
+		wantsPriceButMissingDates(normalized, st) ||
+		wantsPaymentHelp(normalized) ||
+		wantsReservationHelp(normalized) ||
+		wantsDiscountQuestion(normalized) ||
+		humanHandoffReason(normalized) ||
+		confidentialCompanyDocumentQuestionText(normalized) ||
+		cancellationRefundPolicyQuestionText(normalized) ||
+		cancellationActionRequestText(normalized) ||
+		hotelContactDetailsQuestionText(normalized) ||
+		hotelContactFollowupQuestionText({}, normalized) ||
+		selectedHotelFactQuestionText(normalized) ||
+		selectedHotelRoomQuestionText(normalized) ||
+		Boolean(findAmenityMatch(normalized)) ||
+		looksLikeStayDateCandidate(normalized) ||
+		currentReservationMemoryRequestText(normalized)
+	) {
+		return false;
+	}
+	if (st.hotel && (directHotelRelationshipQuestionText(normalized) || crossHotelRequestText(normalized))) {
+		return false;
+	}
+	const asksQuestion =
+		/[?\u061f]/.test(normalized) ||
+		/^(can|could|do|does|did|is|are|am|was|were|will|would|should|what|how|where|when|who|whom|whose|which|why|tell me|i want to know|do you know|can you tell)\b/i.test(
+			lower
+		) ||
+		/(?:^|\s)(?:\u0647\u0644|\u0645\u062a\u0649|\u0645\u0627|\u0645\u0627\u0630\u0627|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0641\u064a\u0646|\u0643\u064a\u0641|\u0643\u0645|\u0645\u0646|\u0645\u064a\u0646|\u0627\u064a|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627)\b/.test(
+			arabic
+		) ||
+		/(?:whenis|whatis|whereis|whois|howmany|howmuch|whichis|doyouknow|canyoutell)/i.test(
+			latinCompact
+		);
+	if (!asksQuestion) return false;
+	return true;
+}
+
 function stripGeneralBookingPivot(text = "", fallback = "") {
 	const cleaned = String(text || "")
 		.replace(
@@ -14893,25 +14987,33 @@ function stripGeneralBookingPivot(text = "", fallback = "") {
 }
 
 async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = "") {
-	const reply = await write(
+	const previousWaitFor = st.waitFor || "";
+	const fallback = supportEmailFallbackText(sc, st);
+	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
 		st,
-		"The guest asked a broad/general support question. Answer only if the provided selected hotel facts, platform/database context, current chat transcript, or employee learning examples contain a verified safe answer to this exact question. If verified context is not present, apologize briefly, say you do not currently have confirmed details, then use unknownAnswerDraft or unknownAnswerNextStep to move back to the relevant hotel/reservation topic. Do not invent facts. Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, or booking details unless the guest explicitly asked to reserve in the latest message. Keep the follow-up as one natural helpful sales/support step.",
+		userText,
+		"The guest asked a general, off-topic, or unplanned question. Answer professionally and briefly in the guest's active language, while preserving the current reservation flow. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then warmly pivot back to the hotel/reservation help. Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, dates, or booking details unless the guest explicitly asks to reserve in the latest message.",
 		{
-			latestUserMessage: userText,
 			hotelName: localizedHotelName(sc, st),
 			reason,
-			unknownAnswerDraft: supportEmailFallbackText(sc, st),
+			unknownAnswerDraft: fallback,
 			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
+		},
+		{
+			fallbackText: fallback,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			scheduleIdle: false,
 		}
 	);
-	const fallback = supportEmailFallbackText(sc, st);
-	await humanSend(io, sc, st, stripUnsupportedEscalationText(reply, fallback));
-	st.waitFor =
-		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
-			? "post_booking_followup"
-			: "clarify";
+	if (!sent) return false;
+	if (sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber) {
+		st.waitFor = "post_booking_followup";
+	} else {
+		preserveBookingWaitStateForCase(sc, st, previousWaitFor);
+		if (!st.waitFor) st.waitFor = previousWaitFor || "clarify";
+	}
 	logStep(String(sc._id), "general_answer.reply", {
 		reason,
 		latestUserMessage: String(userText || "").slice(0, 160),
@@ -15028,6 +15130,7 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	if (vagueHajjInquiryText(text)) return "hajj_inquiry";
 	if (st.hotel && (lu?.amenity || findAmenityMatch(text))) return "amenity_question";
 	if (broadGeneralSupportQuestionText(text, st, lu)) return "general_support";
+	if (genericOpenAiQuestionText(text, st, lu)) return "general_support";
 	return "";
 }
 
@@ -15408,16 +15511,13 @@ async function handlePendingDateChangeChoice(io, sc, st, userText = "") {
 }
 
 async function answerSupportEmailInquiry(io, sc, st, userText = "", reason = "") {
-	await humanSend(io, sc, st, supportEmailFallbackText(sc, st));
-	st.waitFor =
-		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
-			? "post_booking_followup"
-			: "clarify";
-	logStep(String(sc._id), "support_email.reply", {
-		reason,
-		latestUserMessage: String(userText || "").slice(0, 160),
-	});
-	return true;
+	return answerGeneralContextQuestion(
+		io,
+		sc,
+		st,
+		userText,
+		reason || "support_email_dynamic_fallback"
+	);
 }
 
 async function handlePostBookingFollowup(io, sc, st, userText) {
@@ -15550,17 +15650,33 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		st.waitFor = "post_booking_followup";
 		return true;
 	}
+	if (genericOpenAiQuestionText(userText, st, {})) {
+		const handled = await answerGeneralContextQuestion(
+			io,
+			sc,
+			st,
+			userText,
+			"post_booking_generic_question"
+		);
+		if (handled) {
+			st.waitFor = "post_booking_followup";
+			return true;
+		}
+	}
 	if (!isPostBookingConcreteRequest(userText)) {
 		await humanSend(io, sc, st, postBookingClarifyText(sc, st));
 		st.waitFor = "post_booking_followup";
 		return true;
 	}
-	await humanSend(io, sc, st, postBookingUnsupportedText(sc, st), {
-		fast: true,
-		scheduleIdle: false,
-	});
+	const handledGeneric = await answerGeneralContextQuestion(
+		io,
+		sc,
+		st,
+		userText,
+		"post_booking_unhandled_request"
+	);
 	st.waitFor = "post_booking_followup";
-	return true;
+	return handledGeneric || true;
 }
 
 function nextReservationDetailStep(st = {}) {
@@ -17291,12 +17407,23 @@ async function planTurn(io, sc) {
 		}
 
 		if (broadGeneralSupportQuestionText(userText, st, decisionLu)) {
-			await answerSupportEmailInquiry(
+			await answerGeneralContextQuestion(
 				io,
 				sc,
 				st,
 				userText,
 				supportDecision.reason || "unsupported_general_question"
+			);
+			return;
+		}
+
+		if (genericOpenAiQuestionText(userText, st, decisionLu)) {
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "generic_unplanned_question"
 			);
 			return;
 		}

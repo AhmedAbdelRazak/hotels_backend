@@ -98,6 +98,11 @@ These guest questions and their close derivatives are expected to answer first:
     still the default `[0, 0]`.
 - "Do you guys have a bus?"
   - Answer from `hasBusService` and `busDetails`.
+- "Do you provide breakfast or meals?"
+  - Answer first from `hasMealsService` and `mealsDetails`.
+  - Do not infer a meal service from a shared kitchen or vague hotel description.
+  - Translate/adapt the saved details naturally in the guest language without
+    inventing menus, meal times, inclusions, prices, or restaurant names.
 - "Can I get a phone number to talk directly to the hotel?"
   - Answer the contact request with the approved reception/live-chat wording.
   - Do not expose internal hotel, owner, manager, account, or training-example
@@ -138,6 +143,13 @@ It is called:
 
 This layered placement protects against both deterministic and LLM planner
 misclassification.
+
+Unplanned general questions that are not part of the booking planner, such as
+"When is Egypt game?", route to the OpenAI writer instead of a stale canned
+fallback. The writer may answer stable general knowledge, but for live/current
+facts such as sports fixtures, news, weather, schedules, prices, exchange
+rates, and official travel rules, it must say the chat does not have live data
+and pivot back to hotel/reservation help.
 
 ## Patient Escalation Rule
 

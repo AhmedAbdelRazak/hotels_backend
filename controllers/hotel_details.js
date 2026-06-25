@@ -57,6 +57,8 @@ const HOTEL_DETAILS_SUMMARY_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"hasMealsService",
+	"mealsDetails",
 	"isNusuk",
 	"isNusukText",
 	"hotelPolicyQA",
@@ -144,6 +146,8 @@ const HOTEL_DETAILS_MANAGEMENT_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"hasMealsService",
+	"mealsDetails",
 	"isNusuk",
 	"isNusukText",
 	"hotelPolicyQA",
@@ -183,6 +187,8 @@ const HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT = [
 	"parkingLot",
 	"hasBusService",
 	"busDetails",
+	"hasMealsService",
+	"mealsDetails",
 	"isNusuk",
 	"isNusukText",
 	"hotelPolicyQA",
@@ -2843,6 +2849,13 @@ exports.updateHotelDetails = async (req, res) => {
 		if (Object.prototype.hasOwnProperty.call(updateData, "hasBusService")) {
 			updatedFields.hasBusService = toBoolean(updateData.hasBusService);
 			if (!updatedFields.hasBusService) updatedFields.busDetails = "";
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "mealsDetails")) {
+			updatedFields.mealsDetails = String(updateData.mealsDetails || "").trim();
+		}
+		if (Object.prototype.hasOwnProperty.call(updateData, "hasMealsService")) {
+			updatedFields.hasMealsService = toBoolean(updateData.hasMealsService);
+			if (!updatedFields.hasMealsService) updatedFields.mealsDetails = "";
 		}
 		if (Object.prototype.hasOwnProperty.call(updateData, "isNusukText")) {
 			updatedFields.isNusukText = String(updateData.isNusukText || "").trim();

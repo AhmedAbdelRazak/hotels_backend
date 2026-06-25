@@ -206,6 +206,15 @@ const hotel_detailsSchema = new mongoose.Schema(
 			trim: true,
 			default: "",
 		},
+		hasMealsService: {
+			type: Boolean,
+			default: false,
+		},
+		mealsDetails: {
+			type: String,
+			trim: true,
+			default: "",
+		},
 		isNusuk: {
 			type: Boolean,
 			default: false,
