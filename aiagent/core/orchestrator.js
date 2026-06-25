@@ -3282,8 +3282,8 @@ function selectedHotelPolicyQuestionText(text = "") {
 
 function selectedHotelFactQuestionText(text = "") {
 	return (
-		selectedHotelPolicyQuestionText(text) ||
 		selectedHotelMealsQuestionText(text) ||
+		selectedHotelPolicyQuestionText(text) ||
 		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
@@ -3327,7 +3327,7 @@ function selectedHotelCoordinatesQuestionText(text = "") {
 		/\b(?:coordinates?|coords?|gps|pin|exact\s+(?:map|location)|google\s*maps?\s+link)\b/i.test(
 			lower
 		) ||
-		/(?:\u0627\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u0625\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u062f\u0628\u0648\u0633|\u0628\u0646|\u0645\u0648\u0642\u0639\s+\u062f\u0642\u064a\u0642)/i.test(
+		/(?:\u0627\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u0625\u062d\u062f\u0627\u062b\u064a\u0627\u062a|\u062f\u0628\u0648\u0633|\u0645\u0648\u0642\u0639\s+\u062f\u0642\u064a\u0642)/i.test(
 			arabic
 		) ||
 		/(?:coordinates|coords|gps|pin|exactmap|exactlocation|googlemapslink)/i.test(
@@ -7209,7 +7209,8 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 
 async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	const previousWaitFor = st.waitFor || null;
-	const policyRow = selectedHotelPolicyQuestionText(userText)
+	const policyRow =
+		!selectedHotelMealsQuestionText(userText) && selectedHotelPolicyQuestionText(userText)
 		? bestHotelPolicyRow(st, userText)
 		: null;
 	let reply = "";
@@ -10616,12 +10617,19 @@ function looksLikeSeriousSelfHarmText(s = "") {
 	);
 }
 
+function arabicGuestDistressText(arabic = "") {
+	return /(?:^|\s)(?:(?:\u0648\u0627\u0644\u0644\u0647|\u0627\u0646\u0627|\u0627\u0646\u064a|\u0625\u0646\u064a|\u062d\u0627\u0633\u0633|\u062d\u0627\u0633\u0647|\u062d\u0627\u0633\u0629)\s+)?(?:\u062d\u0632\u064a\u0646|\u062d\u0632\u064a\u0646\u0647|\u062d\u0632\u064a\u0646\u0629|\u0632\u0639\u0644\u0627\u0646|\u0632\u0639\u0644\u0627\u0646\u0647|\u0632\u0639\u0644\u0627\u0646\u0629|\u0645\u0636\u0627\u064a\u0642|\u0645\u0636\u0627\u064a\u0642\u0647|\u0645\u0636\u0627\u064a\u0642\u0629|\u0645\u062a\u0636\u0627\u064a\u0642|\u0645\u062a\u0636\u0627\u064a\u0642\u0647|\u0645\u062a\u0636\u0627\u064a\u0642\u0629|\u0645\u0643\u062a\u0626\u0628|\u0645\u0643\u062a\u0626\u0628\u0647|\u0645\u0643\u062a\u0626\u0628\u0629|\u0642\u0644\u0642\u0627\u0646|\u0642\u0644\u0642\u0627\u0646\u0647|\u0642\u0644\u0642\u0627\u0646\u0629|\u0645\u0647\u0645\u0648\u0645|\u0645\u0647\u0645\u0648\u0645\u0647|\u0645\u0647\u0645\u0648\u0645\u0629|\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0647|\u062a\u0639\u0628\u0627\u0646\u0629)(?:\s|$)/i.test(
+		String(arabic || "")
+	);
+}
+
 function looksLikeGuestDistressText(s = "") {
 	const raw = String(s || "").trim();
 	if (!raw || raw.length > 220) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
 	return (
 		looksLikeSeriousSelfHarmText(raw) ||
+		arabicGuestDistressText(arabic) ||
 		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:(?:so|very|really|a\s+little|a\s+bit|kind\s+of|kinda|slightly|somewhat)\s+)?(?:sad|upset|down|lonely|anxious|worried|stressed|depressed|heartbroken|not\s+okay)\b/i.test(
 			lower
 		) ||
@@ -14961,10 +14969,10 @@ function genericOpenAiQuestionText(text = "", st = {}, lu = {}) {
 		/^(can|could|do|does|did|is|are|am|was|were|will|would|should|what|how|where|when|who|whom|whose|which|why|tell me|i want to know|do you know|can you tell)\b/i.test(
 			lower
 		) ||
-		/(?:^|\s)(?:\u0647\u0644|\u0645\u062a\u0649|\u0645\u0627|\u0645\u0627\u0630\u0627|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0641\u064a\u0646|\u0643\u064a\u0641|\u0643\u0645|\u0645\u0646|\u0645\u064a\u0646|\u0627\u064a|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627)\b/.test(
+		/(?:^|\s)(?:\u0647\u0644|\u0645\u062a\u0649|\u0627\u0645\u062a\u0649|\u0625\u0645\u062a\u0649|\u0645\u0627|\u0645\u0627\u0630\u0627|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0641\u064a\u0646|\u0643\u064a\u0641|\u0643\u0645|\u0645\u0646|\u0645\u064a\u0646|\u0627\u064a|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627)\b/.test(
 			arabic
 		) ||
-		/(?:whenis|whatis|whereis|whois|howmany|howmuch|whichis|doyouknow|canyoutell)/i.test(
+		/(?:whenis|whatis|whereis|whois|howmany|howmuch|whichis|doyouknow|canyoutell|emta|imta)/i.test(
 			latinCompact
 		);
 	if (!asksQuestion) return false;
