@@ -2404,44 +2404,10 @@ function hydrateKnownSlotsFromConversation(
 		});
 	}
 	markHydrationStage("date_protection");
-	let latestGuestRoomKey = null;
-	let latestAssistantQuotedRoomKey = null;
-	for (const message of conversation) {
-		const messageText =
-			String(message?.message || "").trim() || conversationEntryContextText(message);
-		if (!messageText || message?.isSystem) continue;
-		const guestMessage = isGuestConversationMessage(message);
-		const recoverableAssistantMessage =
-			!guestMessage &&
-			isAiConversationMessage(message) &&
-			assistantMessageCanRecoverRoomType(message);
-		if (!guestMessage && !recoverableAssistantMessage) continue;
-		if (guestMessage && reservationIdentityOrContactPayloadText(messageText)) continue;
-		if (!likelyRoomTypeText(messageText)) continue;
-		const messageRoomKey = mapRoomToKey(messageText);
-		if (!messageRoomKey) continue;
-		if (guestMessage) {
-			latestGuestRoomKey = messageRoomKey;
-		} else if (recoverableAssistantMessage) {
-			latestAssistantQuotedRoomKey = messageRoomKey;
-		}
-	}
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "slots.hydrate_room_signal",
+	});
 	markHydrationStage("room_loop");
-	const latestRoomKey = latestGuestRoomKey || latestAssistantQuotedRoomKey;
-	if (latestRoomKey && st.slots.roomTypeKey !== latestRoomKey) {
-		const previousRoomTypeKey = st.slots.roomTypeKey || null;
-		st.slots.roomTypeKey = latestRoomKey;
-		st.quote = null;
-		st.quoteSummarizedAt = 0;
-		st.reviewSent = false;
-		st.pendingRoomAlternative = null;
-		st.pendingRoomCombination = null;
-		logStep(String(sc._id || ""), "slots.room_changed_from_guest", {
-			previousRoomTypeKey,
-			roomTypeKey: latestRoomKey,
-			source: latestGuestRoomKey ? "guest" : "assistant_quote",
-		});
-	}
 	const email = latestEmailFromText(guestText);
 	if (email && !st.slots.email) st.slots.email = email;
 	const phone = latestPhoneFromText(guestText);
@@ -2629,12 +2595,177 @@ function assistantMessageCanRecoverRoomType(message = {}) {
 	return (
 		assistantMessageSuggestsProceed(message) ||
 		assistantMessageSuggestsReview(message) ||
+		roomSelectionSignalText(message?.message || "", { assistant: true }) ||
 		/total|night|nights|reservation|booking|quote/i.test(lower) ||
 		/(?:\u0627\u0644\u063a\u0631\u0641\u0647|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u062d\u062c\u0632)/i.test(
 			arabic
 		) ||
 		/(?:total|night|nights|reservation|booking|quote)/i.test(latinCompact)
 	);
+}
+
+function assistantRoomQuoteContextText(message = {}) {
+	const actions = quickReplyActions(message);
+	if (
+		actions.some((action) =>
+			["proceed", "confirm", "correction", "place_reservation"].includes(action)
+		)
+	) {
+		return true;
+	}
+	const raw = typeof message === "string" ? message : message?.message || "";
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		assistantMessageSuggestsProceed(message) ||
+		assistantMessageSuggestsReview(message) ||
+		/\b(?:total|night|nights|reservation|booking|quote|price|rate|availability|available|check[\s-]?in|check[\s-]?out|dates?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u062d\u062c\u0632|\u0633\u0639\u0631|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629)/i.test(
+			arabic
+		) ||
+		/(?:total|night|nights|reservation|booking|quote|price|rate|availability|available|checkin|checkout|dates)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function roomSelectionSignalText(text = "", { assistant = false } = {}) {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const hasRoomOrCapacity =
+		likelyRoomTypeText(raw) ||
+		Boolean(mapRoomToKey(raw)) ||
+		Boolean(requestedGuestCountFromText(raw));
+	const directChoice =
+		/\b(?:i|we)\s+(?:want|need|prefer|choose|chose|selected|will\s+take|would\s+take|would\s+like|go\s+with)\b/i.test(
+			lower
+		) ||
+		/\b(?:book|reserve|make\s+(?:a\s+)?reservation|take\s+(?:the|a)?|go\s+with)\b.{0,80}\b(?:room|double|triple|quad|family|quintuple|bed|guest|people|person|friend)\b/i.test(
+			lower
+		) ||
+		/(?:\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649|\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0646\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0627\u062e\u062a\u0627\u0631|\u0627\u062e\u062a\u064a\u0627\u0631|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u0644\u064a\u0627\s+\u0648|\u0644\u064a\s+\u0648|\u0627\u0646\u0627\s+\u0648|\u0623\u0646\u0627\s+\u0648)/i.test(
+			arabic
+		) ||
+		/(?:iwant|wewant|ineed|weneed|iprefer|weprefer|choose|chose|selected|bookroom|reserveroom|gowith|takearoom|meandmy|anawe|anawa|liyawe|leyawa)/i.test(
+			latinCompact
+		);
+	const recommendation =
+		/\b(?:recommend|recommended|suggest|suggested|best|better|right|suitable|ideal|fit|fits|works\s+best|most\s+comfortable)\b.{0,120}\b(?:room|double|triple|quad|family|quintuple|guest|people|beds?)\b/i.test(
+			lower
+		) ||
+		/\b(?:room|double|triple|quad|family|quintuple|guest|people|beds?)\b.{0,120}\b(?:recommend|recommended|suggest|suggested|best|better|right|suitable|ideal|fit|fits)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0631\u0634\u062d|\u0623\u0631\u0634\u062d|\u0627\u0646\u0635\u062d|\u0623\u0646\u0635\u062d|\u0627\u0646\u0633\u0628|\u0623\u0646\u0633\u0628|\u0645\u0646\u0627\u0633\u0628|\u0645\u0646\u0627\u0633\u0628\u0629|\u0627\u0641\u0636\u0644|\u0623\u0641\u0636\u0644|\u0627\u0644\u0627\u0641\u0636\u0644|\u0627\u0644\u0623\u0641\u0636\u0644|\u064a\u0646\u0627\u0633\u0628|\u062a\u0646\u0627\u0633\u0628|\u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631\s+\u0627\u0644\u0627\u0646\u0633\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\s+\u0627\u0644\u0627\u0646\u0633\u0628)/i.test(
+			arabic
+		) ||
+		/(?:recommend|recommended|suggest|suggested|bestfit|suitable|ideal|ansab|arshah|arshh|afdal)/i.test(
+			latinCompact
+		);
+	const priorReference =
+		/\b(?:didn'?t\s+you\s+say|did\s+you\s+not\s+say|you\s+(?:said|told|mentioned|recommended|suggested)|earlier|before|previously)\b.{0,120}\b(?:room|double|triple|quad|family|quintuple|bed)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0634|\u0647\u0648|\u0645\u0627|\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u0627\u0646\u062a\u0649|\u0627\u0646\u062a\u0647|\u0627\u0646\u062a\u064a\u061f)?\s*(?:\u0642\u0644\u062a|\u0642\u0648\u0644\u062a|\u0642\u0644\u062a\u064a|\u0642\u0648\u0644\u062a\u064a|\u0642\u0648\u0644\u062a\u0649|\u0630\u0643\u0631\u062a|\u0631\u0634\u062d\u062a).{0,100}(?:\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0645\u0632\u062f\u0648\u062c|\u062b\u0646\u0627\u0626|\u062f\u0628\u0644|\u062b\u0644\u0627\u062b|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644\u064a)/i.test(
+			arabic
+		) ||
+		/(?:yousaid|didntyousay|didyounotsay|youtold|yourecommended|earlier|before|previously|olt|olti|oulti|kontolti)/i.test(
+			latinCompact
+		);
+	return Boolean(hasRoomOrCapacity && (directChoice || recommendation || priorReference || assistant && recommendation));
+}
+
+function exploratoryRoomReferenceText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const asksMeaning =
+		/\b(?:what|whats|what's|meaning|mean|explain|details?)\b.{0,80}\b(?:double|triple|quad|quadruple|family|quintuple|room|suite)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u064a\u0647|\u0625\u064a\u0647|\u064a\u0639\u0646\u064a|\u0645\u0639\u0646\u0649|\u0627\u0634\u0631\u062d|\u0641\u0633\u0631|\u062a\u0641\u0627\u0635\u064a\u0644).{0,80}(?:\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0645\u0632\u062f\u0648\u062c|\u062b\u0646\u0627\u0626|\u062f\u0628\u0644|\u062b\u0644\u0627\u062b|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644\u064a|quintuple|double|triple)/i.test(
+			arabic
+		) ||
+		/(?:whatdoes|whatis|whats|meaningof|explain|details|ayh|eih|yani|ma3na).{0,80}(?:double|triple|quad|family|quintuple|room|ghorfa|oda)/i.test(
+			latinCompact
+		);
+	return asksMeaning || generalRoomOptionsQuestionText(raw);
+}
+
+function roomKeyFromConversationRoomSignal(
+	text = "",
+	{ assistant = false, quoteContext = false } = {}
+) {
+	const raw = String(text || "").trim();
+	if (!raw) return "";
+	if (reservationIdentityOrContactPayloadText(raw)) return "";
+	const selectionSignal = roomSelectionSignalText(raw, { assistant });
+	if (!selectionSignal && !quoteContext) return "";
+	if (!quoteContext && exploratoryRoomReferenceText(raw) && !selectionSignal) return "";
+	const requestedGuestCount = requestedGuestCountFromText(raw);
+	const recommendedRoomKey = recommendedRoomTypeKeyForGuestCount(requestedGuestCount);
+	if (selectionSignal && recommendedRoomKey) return recommendedRoomKey;
+	const roomTypeKey = mapRoomToKey(raw);
+	if (roomTypeKey) return roomTypeKey;
+	return selectionSignal ? recommendedRoomKey || "" : "";
+}
+
+function latestRoomSignalFromConversation(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let latestSignal = null;
+	for (let index = 0; index < conversation.length; index += 1) {
+		const message = conversation[index];
+		const messageText =
+			String(message?.message || "").trim() || conversationEntryContextText(message);
+		if (!messageText || message?.isSystem) continue;
+		const guestMessage = isGuestConversationMessage(message);
+		const assistantMessage = !guestMessage && isAiConversationMessage(message);
+		if (!guestMessage && !assistantMessage) continue;
+		const quoteContext = assistantMessage && assistantRoomQuoteContextText(message);
+		const roomTypeKey = roomKeyFromConversationRoomSignal(messageText, {
+			assistant: assistantMessage,
+			quoteContext,
+		});
+		if (!roomTypeKey) continue;
+		latestSignal = {
+			roomTypeKey,
+			index,
+			source: guestMessage
+				? "guest_room_signal"
+				: roomSelectionSignalText(messageText, { assistant: true })
+				? "assistant_room_recommendation"
+				: "assistant_quote",
+		};
+	}
+	return latestSignal;
+}
+
+function applyLatestRoomSignalFromConversation(
+	sc = {},
+	st = {},
+	{ source = "conversation_room_signal" } = {}
+) {
+	const signal = latestRoomSignalFromConversation(sc);
+	if (!signal?.roomTypeKey) return false;
+	st.slots = st.slots || {};
+	if (st.slots.roomTypeKey === signal.roomTypeKey) return false;
+	const previousRoomTypeKey = st.slots.roomTypeKey || null;
+	st.slots.roomTypeKey = signal.roomTypeKey;
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	st.pendingRoomAlternative = null;
+	st.pendingRoomCombination = null;
+	logStep(String(sc._id || ""), "slots.room_changed_from_conversation", {
+		previousRoomTypeKey,
+		roomTypeKey: signal.roomTypeKey,
+		source,
+		signalSource: signal.source,
+		signalIndex: signal.index,
+	});
+	return true;
 }
 
 function assistantBookingStageFromMessage(message = {}) {
@@ -11325,6 +11456,14 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "confidential_company_document_question",
 		};
 	}
+	if (liveCurrentGeneralQuestionText(userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: st.hotel ? "selected_hotel" : "platform",
+			reason: "live_current_general_question",
+		};
+	}
 	if (wantsPaymentHelp(userText)) {
 		return { action: "payment_help", roomTypeKey: null, reason: "payment_keyword" };
 	}
@@ -11561,6 +11700,9 @@ async function sendUnavailableRoomRecovery(io, sc, st, quote = {}) {
 }
 
 async function shareKnownStayQuote(io, sc, st) {
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "quote_guard_room_signal",
+	});
 	logStep(String(sc._id), "quote.start", {
 		roomTypeKey: st.slots.roomTypeKey,
 		checkinISO: st.slots.checkinISO,
@@ -12345,6 +12487,9 @@ function currentReservationMemoryReplyText(sc = {}, st = {}, quote = {}, userTex
 
 async function answerCurrentReservationMemoryQuestion(io, sc, st, userText = "", caseId = "") {
 	if (!currentReservationMemoryRequestText(userText)) return false;
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "memory_reply_room_signal",
+	});
 	const quote = ensureCurrentQuoteForSlots(st) || st.quote?.data || {};
 	const previousWaitFor = st.waitFor || "";
 	const reply = currentReservationMemoryReplyText(sc, st, quote, userText);
@@ -12604,6 +12749,9 @@ async function answerFastBookingStateQuestion(io, sc, st, userText = "", caseId 
 	const wantsDetails = currentReservationMemoryRequestText(userText);
 	if (!wantsPrice && !wantsDetails) return false;
 	if (wantsDiscountQuestion(userText) || wantsPaymentHelp(userText)) return false;
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "fast_state_room_signal",
+	});
 	const quote = ensureCurrentQuoteForSlots(st);
 	if (!quote?.available) return false;
 	const previousWaitFor = st.waitFor || null;
@@ -12933,7 +13081,17 @@ async function sendReservationReview(
 	quote = null,
 	{ fast = false, targetReplyMs = AI_BOOKING_PROMPT_TARGET_MS } = {}
 ) {
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "review_guard_room_signal",
+	});
 	let q = quote || st.quote?.data;
+	if (
+		q?.room?.roomType &&
+		st.slots?.roomTypeKey &&
+		q.room.roomType !== st.slots.roomTypeKey
+	) {
+		q = null;
+	}
 	if (
 		!q?.available &&
 		st.hotel &&
@@ -13086,6 +13244,9 @@ async function handleProceedStageInput(
 ) {
 	const acceptedProceed = latestGuestAcceptedProceedAction(sc, userText);
 	if (st.waitFor !== "proceed" && !acceptedProceed) return false;
+	applyLatestRoomSignalFromConversation(sc, st, {
+		source: "proceed_guard_room_signal",
+	});
 	const quote = ensureCurrentQuoteForSlots(st);
 	if (!quote) return false;
 	const directInfoRequest = proceedStageDirectInformationRequest(sc, st, userText, lu);
@@ -14939,6 +15100,7 @@ function broadGeneralSupportQuestionText(text = "", st = {}, lu = {}) {
 function genericOpenAiQuestionText(text = "", st = {}, lu = {}) {
 	const normalized = String(text || "").trim();
 	if (!normalized) return false;
+	if (liveCurrentGeneralQuestionText(normalized)) return true;
 	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
 	if (
@@ -14994,18 +15156,64 @@ function stripGeneralBookingPivot(text = "", fallback = "") {
 	return cleaned || String(fallback || "").trim();
 }
 
+function liveCurrentGeneralQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const asksQuestion =
+		/[?\u061f]/.test(raw) ||
+		/^(?:when|what|where|who|which|how|do\s+you\s+know|can\s+you\s+tell|tell\s+me)\b/i.test(
+			lower
+		) ||
+		/(?:^|\s)(?:\u0645\u062a\u0649|\u0627\u0645\u062a\u0649|\u0625\u0645\u062a\u0649|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0641\u064a\u0646|\u0645\u064a\u0646|\u0645\u0646|\u0643\u064a\u0641|\u0639\u0627\u0631\u0641|\u062a\u0639\u0631\u0641)\b/.test(
+			arabic
+		) ||
+		/(?:whenis|whatis|whereis|whois|doyouknow|canyoutell|emta|imta|eih|ayh)/i.test(
+			latinCompact
+		);
+	if (!asksQuestion) return false;
+	const liveOrCurrentSignal =
+		/\b(?:today|tomorrow|tonight|now|current|latest|next|schedule|fixture|game|match|kickoff|kick-off|score|sports?|football|soccer|news|weather|exchange\s*rate|currency\s*rate|stock|price\s+today|egypt\s+(?:game|match)|world\s*cup|afcon)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0646\u0647\u0627\u0631\u062f\u0647|\u0627\u0644\u064a\u0648\u0645|\u0628\u0643\u0631\u0647|\u0628\u0643\u0631\u0629|\u062f\u0644\u0648\u0642\u062a\u064a|\u062d\u0627\u0644\u064a|\u0627\u0644\u062d\u0627\u0644\u064a|\u0627\u0644\u062c\u0627\u064a|\u0627\u0644\u062c\u0627\u0649|\u0627\u0644\u0642\u0627\u062f\u0645|\u0645\u0627\u062a\u0634|\u0645\u0628\u0627\u0631\u0627\u0629|\u0645\u0628\u0627\u0631\u0627\u0647|\u0643\u0648\u0631\u0629|\u0643\u0631\u0629|\u0645\u0646\u062a\u062e\u0628|\u0627\u0644\u062f\u0648\u0631\u064a|\u0643\u0627\u0633|\u0643\u0623\u0633|\u0627\u0644\u0637\u0642\u0633|\u0627\u0644\u062c\u0648|\u0627\u062e\u0628\u0627\u0631|\u0623\u062e\u0628\u0627\u0631|\u0633\u0639\u0631\s+\u0627\u0644\u0635\u0631\u0641|\u0627\u0644\u0639\u0645\u0644\u0629)/i.test(
+			arabic
+		) ||
+		/(?:today|tomorrow|tonight|now|current|latest|next|schedule|fixture|game|match|kickoff|score|sport|football|soccer|news|weather|exchangerate|currencyrate|egyptmatch|egyptgame|matchegypt|matsh|matshegypt|mokabla|mobarah|kora|korah|montakhab)/i.test(
+			latinCompact
+		);
+	if (!liveOrCurrentSignal) return false;
+	if (
+		wantsNewReservationIntent(raw, {}) ||
+		wantsPaymentHelp(raw) ||
+		wantsReservationHelp(raw) ||
+		selectedHotelRoomQuestionText(raw) ||
+		hotelContactDetailsQuestionText(raw) ||
+		hotelContactFollowupQuestionText({}, raw)
+	) {
+		return false;
+	}
+	return true;
+}
+
 async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = "") {
 	const previousWaitFor = st.waitFor || "";
 	const fallback = supportEmailFallbackText(sc, st);
+	const liveCurrent = liveCurrentGeneralQuestionText(userText);
 	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
 		st,
 		userText,
-		"The guest asked a general, off-topic, or unplanned question. Answer professionally and briefly in the guest's active language, while preserving the current reservation flow. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then warmly pivot back to the hotel/reservation help. Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, dates, or booking details unless the guest explicitly asks to reserve in the latest message.",
+		`The guest asked a general, off-topic, or unplanned question. Answer professionally and briefly in the guest's active language, while preserving the current reservation flow. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then warmly pivot back to the hotel/reservation help. ${
+			liveCurrent
+				? "The latest message appears to need live/current data, so do not answer it with hotel address, distance, map, room, policy, or other hotel facts unless the guest explicitly asked for those facts."
+				: ""
+		} Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, dates, or booking details unless the guest explicitly asks to reserve in the latest message.`,
 		{
 			hotelName: localizedHotelName(sc, st),
 			reason,
+			liveCurrentQuestion: liveCurrent,
 			unknownAnswerDraft: fallback,
 			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 		},
@@ -15101,6 +15309,7 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 		return "confidential_company_document";
 	}
 	if (quoteConfirmationText(text, st)) return "";
+	if (liveCurrentGeneralQuestionText(text)) return "general_support";
 	if (st.hotel && selectedHotelPolicyQuestionText(text)) {
 		return "selected_hotel_fact";
 	}
@@ -17389,7 +17598,7 @@ async function planTurn(io, sc) {
 				await answerConfidentialCompanyDocumentInquiry(io, sc, st, userText);
 				return;
 			}
-			if (st.hotel && selectedHotelFactQuestionText(userText)) {
+			if (st.hotel && selectedHotelFactQuestionText(userText) && !liveCurrentGeneralQuestionText(userText)) {
 				await answerSelectedHotelFactQuestion(io, sc, st, userText);
 				return;
 			}
