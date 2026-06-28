@@ -3078,3 +3078,28 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     answer or duplicate-save guard.
   - Normal production turns should still target under 8 seconds; the 10 second
     wait notice is a rare safety net.
+
+2026-06-28 OpenAI-First Chatbot Engine
+- Reference:
+  - docs/chatbot-openai-first-engine-2026-06-28.md.
+- Files:
+  - aiagent/core/openaiFirstOrchestrator.js
+  - aiagent/core/orchestrator.js
+  - controllers/supportcase.js
+- Default engine:
+  - `AI_AGENT_ENGINE=openai_first` delegates guest turns to the compact
+    OpenAI-first engine.
+  - `AI_AGENT_ENGINE=legacy` or `AI_AGENT_USE_LEGACY=true` restores the
+    previous rule-heavy planner.
+- Runtime contract:
+  - Opening greetings are local and short. Guest replies are OpenAI-first with
+    compact hotel/reservation/conversation context.
+  - Large calendar/pricing arrays stay out of the first prompt; pricing is
+    computed by backend selectors and only compact price summaries are sent to
+    the guest-facing writer call.
+  - Reservation creation remains deterministic and requires the explicit
+    `confirm_reservation` quick-reply action.
+  - Optional email is supported through a `skip_email` quick reply.
+  - The new engine owns its own per-case scheduling, active-turn lock, typing
+    quiet window, and stale-answer check. Controller safety retries are
+    legacy-only to avoid duplicate/stacked AI turns.

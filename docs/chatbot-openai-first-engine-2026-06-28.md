@@ -48,6 +48,10 @@ AI_AGENT_ENGINE=legacy
 - Email is optional. The engine can show a `skip_email` quick reply.
 - Controller-level hard-coded quick trust replies are legacy-only so the
   default engine does not bypass OpenAI.
+- Controller-level safety retries are also legacy-only. The OpenAI-first engine
+  uses its own per-case timer map, active-turn lock, quiet window, and final
+  latest-message check, so the public route should not stack an older retry
+  loop beside it.
 - The legacy scheduler and socket planner remain available without changing
   route/controller imports.
 

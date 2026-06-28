@@ -1547,7 +1547,9 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				if (quickReplyCase) updatedCase = quickReplyCase;
 			} else {
 				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-				scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
+				if (isLegacyAiAgentEngine()) {
+					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
+				}
 			}
 		}
 
@@ -1766,7 +1768,9 @@ exports.createNewSupportCase = async (req, res) => {
 		req.io.emit("newChat", newCase);
 		if (aiEnabledForClient) {
 			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 25 });
-			scheduleAiSafetyRetryForCase(req.io, String(newCase._id));
+			if (isLegacyAiAgentEngine()) {
+				scheduleAiSafetyRetryForCase(req.io, String(newCase._id));
+			}
 		}
 
 		// Email is best-effort and must not hold the public chat open.
