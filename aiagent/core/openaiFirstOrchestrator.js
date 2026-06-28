@@ -1157,29 +1157,23 @@ async function composeReply(sc, hotel, agentName) {
 }
 
 async function draftGreeting(sc, hotel, agentName) {
-	const bundle = await contextBundle(sc, hotel);
-	const raw = await chat(
-		[
-			{
-				role: "system",
-				content: [
-					"You are opening a live hotel reception and reservation chat.",
-					"Write one short, friendly greeting in the likely guest language.",
-					"Include the agent name and hotel name. Mention reception and reservations. Ask how you can help.",
-					"Keep it warm and not long.",
-					`Agent name is ${agentName}.`,
-				].join("\n"),
-			},
-			{ role: "user", content: JSON.stringify(bundle) },
-		],
-		{
-			kind: OPENAI_FIRST_WRITER_KIND,
-			temperature: 0.5,
-			max_tokens: 120,
-			reasoning_effort: "low",
-		}
-	);
-	return cleanText(raw, 800);
+	const hotelName =
+		cleanText(hotel?.hotelName_OtherLanguage, 120) ||
+		cleanText(hotel?.hotelName, 120) ||
+		"Jannat Booking";
+	const lang = String(
+		sc.preferredLanguage || sc.preferredLanguageCode || languageOf(sc, {})
+	).toLowerCase();
+	if (lang.includes("arabic") || /\bar\b/.test(lang)) {
+		return `\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u064a\u0648\u0645\u061f`;
+	}
+	if (lang.includes("spanish") || /\bes\b/.test(lang)) {
+		return `Assalamu alaikum, soy ${agentName} de recepcion y reservas de ${hotelName}. Como puedo ayudarte hoy?`;
+	}
+	if (lang.includes("french") || /\bfr\b/.test(lang)) {
+		return `Assalamu alaikum, je suis ${agentName} de la reception et reservations de ${hotelName}. Comment puis-je vous aider aujourd'hui?`;
+	}
+	return `Assalamu alaikum, this is ${agentName} from ${hotelName} reception and reservations. How may I help you today?`;
 }
 
 async function runTurn(io, caseId) {

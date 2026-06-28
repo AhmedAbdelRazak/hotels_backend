@@ -22,18 +22,20 @@ AI_AGENT_ENGINE=legacy
 
 ## Flow
 
-1. The guest message waits for a short quiet window so replies do not overlap
+1. The opening greeting is a short local reception/reservations greeting so a
+   new chat does not spend heap on OpenAI before the guest asks a question.
+2. The guest message waits for a short quiet window so replies do not overlap
    with typing.
-2. The engine sends the recent conversation, compact hotel details, active
+3. The engine sends the recent conversation, compact hotel details, active
    room summaries, policy facts, distance/bus/Nusuk/meal facts, and any
    existing AI reservation context to OpenAI.
-3. Calendar pricing arrays are not included in the first call.
-4. OpenAI returns a strict JSON plan with the topic, language, whether pricing
+4. Calendar pricing arrays are not included in the first call.
+5. OpenAI returns a strict JSON plan with the topic, language, whether pricing
    is needed, dates/room hints if present, guest details, and the next action.
-5. If pricing is needed and dates are known, the backend computes pricing with
+6. If pricing is needed and dates are known, the backend computes pricing with
    `priceRoomForStay` / `listAvailableRoomsForStay`, then sends only the
    compact pricing summary back to OpenAI for the final guest-facing answer.
-6. Reservation creation remains deterministic and only happens after the guest
+7. Reservation creation remains deterministic and only happens after the guest
    presses the `confirm_reservation` quick-reply button on the final review.
 
 ## Guardrails
