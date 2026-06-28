@@ -2127,6 +2127,7 @@ async function runTurn(io, caseId) {
 		turnStartedAt = new Date();
 		const startedMs = now();
 		const latestGuestText = cleanText(latestGuest?.message, 1200);
+		const latestGuestRawText = String(latestGuest?.message || "").trim();
 		let targetReplyMs = needsGreeting
 			? randomBetween(1200, 2200)
 			: randomBetween(TARGET_REPLY_MIN_MS, TARGET_REPLY_MAX_MS);
@@ -2177,7 +2178,7 @@ async function runTurn(io, caseId) {
 		await appendAiMessage(io, fresh, response.text, {
 			language: response.language,
 			quickReplies: response.quickReplies || [],
-			requireLatestGuestText: needsGreeting ? "" : latestGuestText,
+			requireLatestGuestText: needsGreeting ? "" : latestGuestRawText,
 			turnStartedAt,
 		});
 		memoryTrace("turn:after_append", caseId);
@@ -2199,7 +2200,7 @@ async function runTurn(io, caseId) {
 						currentHotel ||
 						(fresh.hotelId ? await getHotelByIdForAiContext(fresh.hotelId) : null);
 					const latestGuest = latestGuestMessage(fresh);
-					const latestGuestText = cleanText(latestGuest?.message, 1200);
+					const latestGuestRawText = String(latestGuest?.message || "").trim();
 					const response = fallbackReply(fresh, hotel, agentName, error);
 					if (typingOn) {
 						emitTyping(io, caseId, agentName, false);
@@ -2208,7 +2209,7 @@ async function runTurn(io, caseId) {
 					await appendAiMessage(io, fresh, response.text, {
 						language: response.language,
 						quickReplies: response.quickReplies || [],
-						requireLatestGuestText: latestGuestText,
+						requireLatestGuestText: latestGuestRawText,
 						turnStartedAt,
 					});
 					memoryTrace("turn:after_fallback_append", caseId, {
