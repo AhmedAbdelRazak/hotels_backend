@@ -3538,6 +3538,7 @@ function selectedHotelRoomQuestionText(text = "") {
 	const normalized = String(text || "").toLowerCase();
 	if (!normalized.trim()) return false;
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	if (roomGuestCountReservationRequestText(text)) return true;
 	if (selectedHotelRoomDetailsQuestionText(text)) return true;
 	if (roomCapacityOrTypeInquiryText(text)) return true;
 	const mentionsRoom =
@@ -3582,6 +3583,34 @@ function selectedHotelRoomQuestionText(text = "") {
 			normalized
 		) ||
 		/عندكم|فيه|هل|متاح|ابغى|أبغى|عايز|عاوز|احتاج/.test(normalized)
+	);
+}
+
+function roomGuestCountReservationRequestText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const count = requestedGuestCountFromText(raw);
+	if (!count || count > 5) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const hasRoomTerm =
+		/\b(?:room|rooms|suite|suites|booking|reservation|stay)\b/i.test(lower) ||
+		/(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647|\u062d\u062c\u0632)/i.test(
+			arabic
+		) ||
+		/(?:room|rooms|suite|ghorfa|ghurfa|oda|odah|owda|awda|booking|reservation|stay)/i.test(
+			latinCompact
+		);
+	if (!hasRoomTerm) return false;
+	return (
+		/\b(?:want|need|looking\s+for|book|reserve|reservation|stay|room\s+for|for)\b/i.test(
+			lower
+		) ||
+		/(?:\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649|\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0628\u062f\u064a|\u0628\u062f\u0649|\u0645\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u0644\u0640|\u0644)/i.test(
+			arabic
+		) ||
+		/(?:want|need|lookingfor|book|reserve|roomfor|for|ayez|aiez|awz|awez|abgha|abga|ureed|biddi|bdy|mhtag)/i.test(
+			latinCompact
+		)
 	);
 }
 
@@ -4078,6 +4107,12 @@ function directHotelRelationshipQuestionText(text = "") {
 			arabic
 		) ||
 		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a).{0,80}(?:\u0645\u0628\u0627\u0634\u0631|\u0645\u0628\u0627\u0634\u0631\u0629|\u0631\u0633\u0645\u064a|\u0631\u0633\u0645\u064a\u0627|\u062a\u062a\u0639\u0627\u0645\u0644|\u062a\u0639\u0645\u0644|\u062a\u0634\u062a\u063a\u0644|\u0645\u062a\u0648\u0627\u0635\u0644)/i.test(
+			arabic
+		) ||
+		/(?:\u0634\u063a\u0627\u0644|\u0634\u063a\u0627\u0644\u0629|\u0634\u063a\u0627\u0644\u064a\u0646|\u0634\u063a\u0627\u0644\u0647).{0,80}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a).{0,80}(?:\u0634\u063a\u0627\u0644|\u0634\u063a\u0627\u0644\u0629|\u0634\u063a\u0627\u0644\u064a\u0646|\u0634\u063a\u0627\u0644\u0647)/i.test(
 			arabic
 		);
 	return english || spanish || arabicMatch;
@@ -6340,6 +6375,79 @@ async function answerLargeGroupRoomRecommendation(
 		hasDates,
 		combinationAvailable: Boolean(combinationQuote?.available),
 		waitFor: st.waitFor,
+	});
+	return true;
+}
+
+async function answerSmallGroupRoomCountRequest(
+	io,
+	sc,
+	st,
+	userText = "",
+	guestCount = null
+) {
+	if (!st.hotel || st.activeTurnHadReply) return false;
+	const count = guestCount || requestedGuestCountFromText(userText);
+	if (!count || count > 5 || !roomGuestCountReservationRequestText(userText)) {
+		return false;
+	}
+	const roomTypeKey = recommendedRoomTypeKeyForGuestCount(count);
+	if (!roomTypeKey) return false;
+	const recommendedRooms = activeHotelRoomSummaries(st.hotel, roomTypeKey);
+	if (!recommendedRooms.length) return false;
+	const latestDates = extractDateRange(userText);
+	if (needsExplicitPastDateClarification(userText, latestDates)) {
+		await askExplicitPastDateClarification(io, sc, st, userText, latestDates);
+		return true;
+	}
+	if (latestDates.checkinISO && latestDates.checkoutISO) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(
+			io,
+			sc,
+			st,
+			latestDates,
+			{ source: "small_group_room_count", userText }
+		);
+		if (dateMerge.prompted) return true;
+	}
+	st.slots.roomTypeKey = roomTypeKey;
+	if (!st.slots.adultsProvided) {
+		st.slots.adults = count;
+		st.slots.adultsProvided = true;
+		st.slots.children = 0;
+		st.slots.childrenProvided = true;
+	}
+	if (st.slots.checkinISO && st.slots.checkoutISO) {
+		logStep(String(sc._id), "small_group.direct_quote_from_count", {
+			guestCount: count,
+			roomTypeKey,
+			checkinISO: st.slots.checkinISO,
+			checkoutISO: st.slots.checkoutISO,
+		});
+		await shareKnownStayQuote(io, sc, st);
+		return true;
+	}
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		roomGuestCountRecommendationText(
+			sc,
+			st,
+			count,
+			roomTypeKey,
+			recommendedRooms
+		),
+		{ fast: true, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
+	);
+	if (sent) {
+		st.waitFor = "dates";
+		stampAsk(st, "dates");
+	}
+	logStep(String(sc._id), "small_group.recommendation", {
+		guestCount: count,
+		roomTypeKey,
+		waitFor: st.waitFor || "",
 	});
 	return true;
 }
@@ -10945,6 +11053,66 @@ function lastUserText(sc) {
 
 function lastGuestAction(sc = {}) {
 	return String(lastGuestMessage(sc)?.clientAction || "").trim();
+}
+
+function compactPingText(value = "") {
+	return String(value || "")
+		.toLowerCase()
+		.replace(/[\u0640\s؟?!.,،;:؛'"`~\-_/\\()[\]{}]+/g, "")
+		.replace(/[\u0622\u0623\u0625]/g, "\u0627")
+		.replace(/\u0629/g, "\u0647")
+		.trim();
+}
+
+function guestAgentPingOnlyText(text = "", st = {}) {
+	const raw = String(text || "").trim();
+	if (!raw || raw.length > 48) return false;
+	if (hasOperationalBookingSignal(raw) || wantsPaymentHelp(raw)) return false;
+	const compact = compactPingText(raw);
+	if (!compact) return false;
+	const stripped = compact
+		.replace(/^(?:\u064a\u0627|\u0627\u0647\u0644\u0627|\u0627\u0647\u0644\u064a\u0646|\u0627\u0644\u0648|hey|hi|hello)+/i, "")
+		.trim();
+	const names = new Set([
+		"aisha",
+		"aysha",
+		"ayesha",
+		"sara",
+		"sarah",
+		"nadia",
+		"yasmin",
+		"yasmine",
+		"amira",
+		"\u0639\u0627\u0626\u0634\u0647",
+		"\u0639\u0627\u064a\u0634\u0647",
+		"\u0627\u064a\u0634\u0647",
+		"\u0633\u0627\u0631\u0647",
+		"\u0633\u0627\u0631\u0627",
+		"\u0646\u0627\u062f\u064a\u0627",
+		"\u0646\u0627\u062f\u064a\u0647",
+		"\u064a\u0627\u0633\u0645\u064a\u0646",
+		"\u0627\u0645\u064a\u0631\u0647",
+	]);
+	const agent = compactPingText(st.agentName || "");
+	if (agent) names.add(agent);
+	return names.has(compact) || names.has(stripped);
+}
+
+function previousUnansweredDirectGuestTextForPing(sc = {}, st = {}, latestText = "") {
+	if (!guestAgentPingOnlyText(latestText, st)) return "";
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestIndex = latestGuestMessageIndex(sc);
+	if (latestIndex <= 0) return "";
+	for (let index = latestIndex - 1; index >= 0; index -= 1) {
+		const message = conversation[index];
+		if (!message?.isSystem && isAiConversationMessage(message)) break;
+		if (!isGuestConversationMessage(message)) continue;
+		const text = String(message.message || "").trim();
+		if (!text || isAutomatedSupportNoticeText(text)) continue;
+		if (guestAgentPingOnlyText(text, st)) continue;
+		if (directGuestRequestKind(sc, st, text, {})) return text;
+	}
+	return "";
 }
 
 function lastAssistantText(sc = {}) {
@@ -17259,6 +17427,45 @@ async function planTurn(io, sc) {
 			await humanSend(io, sc, st, immediateFastSmalltalk, { fast: true });
 			return;
 		}
+		if (userText && !severeAbusiveGuestText(userText)) {
+			const carriedQuestionText = previousUnansweredDirectGuestTextForPing(
+				sc,
+				st,
+				userText
+			);
+			if (carriedQuestionText) {
+				logStep(caseId, "direct_request.carried_from_ping", {
+					ping: String(userText || "").slice(0, 80),
+					carried: String(carriedQuestionText || "").slice(0, 160),
+				});
+				updateActiveLanguageFromText(sc, st, carriedQuestionText);
+				const handledCarriedQuestion = await tryAnswerDirectGuestRequest(
+					io,
+					sc,
+					st,
+					carriedQuestionText,
+					{}
+				);
+				if (handledCarriedQuestion) return;
+			}
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			roomGuestCountReservationRequestText(userText)
+		) {
+			const smallGroupHandled = await answerSmallGroupRoomCountRequest(
+				io,
+				sc,
+				st,
+				userText
+			);
+			if (smallGroupHandled) return;
+		}
 		if (
 			userText &&
 			st.hotel &&
@@ -17649,17 +17856,10 @@ async function planTurn(io, sc) {
 					);
 					if (handled) return;
 				}
-				await sendDynamicCasualReply(
-					io,
-					sc,
-					st,
-					initialInquiry || "",
-					initialInquiry
-						? "The guest has just opened chat. Use the initial inquiry details only as private context, start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. If the context suggests a reservation, gently confirm that they may want to reserve a room. Do not open by asking for check-in/check-out dates."
-						: "The guest has just opened chat but has not typed a message yet. Start with the approved readable Islamic greeting for the active language, greet them by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-					{ initialInquiry },
-					{ first: true, fallbackText: initialHotelGreetingText(sc, st) }
-				);
+				await humanSend(io, sc, st, initialHotelGreetingText(sc, st), {
+					first: true,
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
 				st.waitFor = "clarify";
 				return;
 			}
@@ -17674,15 +17874,10 @@ async function planTurn(io, sc) {
 				(looksLikeFirstTurnGreetingSmalltalk(userText) &&
 					!hasConcreteFirstTurnBookingSignal(userText))
 			) {
-				await sendDynamicCasualReply(
-					io,
-					sc,
-					st,
-					userText,
-					"Start with the approved readable Islamic greeting for the active language, greet the guest by first name, introduce yourself as the active assistant, using hotel reception and reservations wording when a hotel is selected, and ask how you can help today. Keep it one short line. Do not open by asking for check-in/check-out dates.",
-					{ latestUserMessage: userText },
-					{ first: true, fallbackText: initialHotelGreetingText(sc, st) }
-				);
+				await humanSend(io, sc, st, initialHotelGreetingText(sc, st), {
+					first: true,
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
 				st.waitFor = "clarify";
 				return;
 			}

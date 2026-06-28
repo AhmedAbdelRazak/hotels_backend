@@ -26,6 +26,11 @@
 - Latest explicit nationality corrections win over older text, including Arabic contrast phrases such as "I speak Egyptian dialect, but I am Jordanian".
 - Arabic count parsing now recognizes common shorthand and typo forms such as "فرد", "الاطفال فرد", and "الباغين فرد".
 
+- First greetings are deterministic and short: Islamic greeting, guest name, agent name, selected hotel reception/reservations, and one "how can I help" question. The LLM no longer expands the opening message.
+- Agent-name pings such as "Aisha?" now carry the immediately previous unanswered direct question when no assistant reply came between the two guest messages. This prevents the bot from forgetting "are you with the hotel?" and falling into reservation-detail collection.
+- Arabic hotel relationship detection now includes Egyptian forms such as "shaghala with the hotel" / "shaghal with the hotel".
+- Small room-count requests such as "room for two" / "عايز غرفة لفردين" run through a pre-detail fast lane. They recommend the matching room type, merge same-message dates if present, and otherwise ask for check-in and checkout dates instead of phone/name details.
+
 ## Verified Replay
 
 The Marwa/Hana transcript was replayed locally with exact production messages encoded safely as base64. Recovery now restores:
@@ -64,3 +69,4 @@ Both restore the same stay and guest details in under two seconds locally, inste
 - Greeting-only, thanks-only, and clear casual messages use the pre-hydration fast lane when they contain no booking, payment, handoff, or existing-reservation signal.
 - During `email_or_skip`, the bot captures only email/skip intent before moving to final review; required identity fields are protected from that optional step.
 - The public widget must send the quick-reply `clientAction`; the backend intentionally does not create reservations from typed final-confirmation text.
+- Room-count fast lane ownership is intentional: it runs before reservation-detail collection so a guest who says "I need a room for two" while the bot is waiting for contact details still gets a useful room/date answer, not a phone prompt.
