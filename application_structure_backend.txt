@@ -3102,10 +3102,10 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     identity, public presentation, room inventory, transportation/pilgrimage,
     and policies/rules.
   - Large calendar/pricing arrays stay out of the first prompt; pricing is
-    computed by backend selectors and only compact price summaries are sent to
-    the guest-facing writer call.
-  - The AI hotel cache keeps compact calendar rows only, and pricing selectors
-    map only requested stay dates to prevent live chat heap spikes.
+    computed from a compact date-limited quote summary and only compact price
+    summaries are sent to the guest-facing writer call.
+  - The AI hotel cache keeps compact calendar rows only, and live-chat pricing
+    maps only requested stay dates to prevent live chat heap spikes.
   - OpenAI-first uses a slim hotel loader for normal chat context, a
     date-limited pricing loader only for requested stay dates, and quote-time
     inventory validation against overlapping reservations before saying a room

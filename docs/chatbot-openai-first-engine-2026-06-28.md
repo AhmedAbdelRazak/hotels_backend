@@ -34,9 +34,10 @@ AI_AGENT_ENGINE=legacy
 4. Calendar pricing arrays are not included in the first call.
 5. OpenAI returns a strict JSON plan with the topic, language, whether pricing
    is needed, dates/room hints if present, guest details, and the next action.
-6. If pricing is needed and dates are known, the backend computes pricing with
-   `priceRoomForStay` / `listAvailableRoomsForStay`, then sends only the
-   compact pricing summary back to OpenAI for the final guest-facing answer.
+6. If pricing is needed and dates are known, the backend reloads only those
+   dates, computes a compact room quote summary inside the OpenAI-first engine,
+   then sends only that compact summary back to OpenAI for the final
+   guest-facing answer.
 7. Reservation creation remains deterministic and only happens after the guest
    presses the `confirm_reservation` quick-reply button on the final review.
 8. Response language is part of the structured context. The engine sends
@@ -60,6 +61,9 @@ AI_AGENT_ENGINE=legacy
   (`calendarDate`, `price`, `rootPrice`, `commissionRate`), and pricing helpers
   map only the requested stay dates. This keeps exact pricing while avoiding
   large temporary calendar maps during live chat turns.
+- Live pricing replies use a compact quote calculator that returns only room
+  identity, nights, currency, availability, and totals. It does not pass full
+  room/calendar objects to OpenAI.
 - OpenAI-first turns load hotel facts without full room calendars. When pricing
   is needed, the engine reloads only the requested stay dates and validates
   quote-time stock against overlapping reservations. A room is not offered as

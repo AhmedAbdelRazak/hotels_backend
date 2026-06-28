@@ -10,7 +10,7 @@ const {
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
-const { priceRoomForStay, listAvailableRoomsForStay } = require("./selectors");
+const { priceRoomForStay } = require("./selectors");
 const {
 	createReservationForCase,
 	dispatchAiReservationConfirmation,
@@ -801,6 +801,15 @@ function numberOrNull(value) {
 	return Number.isFinite(n) ? n : null;
 }
 
+function numberValue(value, fallback = 0) {
+	const n = Number(value);
+	return Number.isFinite(n) ? n : fallback;
+}
+
+function hasValue(value) {
+	return value !== null && value !== undefined && value !== "";
+}
+
 function validISODate(value = "") {
 	if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
 	const date = new Date(`${value}T00:00:00Z`);
@@ -821,6 +830,117 @@ function stayDateKeys(checkinISO = "", checkoutISO = "") {
 		cursor.setUTCDate(cursor.getUTCDate() + 1);
 	}
 	return dates;
+}
+
+function roomQuoteShape(room = {}) {
+	return {
+		_id: room._id,
+		roomType: room.roomType,
+		displayName: room.displayName,
+		displayName_OtherLanguage: room.displayName_OtherLanguage,
+		count: room.count,
+	};
+}
+
+function commissionRateForRoom(hotel = {}, room = {}) {
+	const hotelCommission = hasValue(hotel?.commission)
+		? numberValue(hotel.commission, 10)
+		: 10;
+	const fallback = hotelCommission >= 0 ? hotelCommission : 10;
+	const roomCommission = hasValue(room?.roomCommission)
+		? numberValue(room.roomCommission, fallback)
+		: fallback;
+	return roomCommission >= 0 ? roomCommission : fallback;
+}
+
+function pricingRateMapForDates(room = {}, dates = []) {
+	const targetDates = new Set(dates.map(dateOnlyText).filter(Boolean));
+	const rateMap = new Map();
+	if (!targetDates.size) return rateMap;
+	const pricingRates = Array.isArray(room.pricingRate) ? room.pricingRate : [];
+	for (const rate of pricingRates) {
+		const date = dateOnlyText(rate?.calendarDate);
+		if (!date || !targetDates.has(date) || rateMap.has(date)) continue;
+		rateMap.set(date, rate);
+		if (rateMap.size >= targetDates.size) break;
+	}
+	return rateMap;
+}
+
+function priceCompactRoomForStay(hotel = {}, room = {}, dates = []) {
+	if (!room) {
+		return {
+			available: false,
+			reason: "room_not_found",
+			currency: hotel?.currency || "SAR",
+			room: null,
+			nights: 0,
+			totals: null,
+		};
+	}
+	const nights = dates.length;
+	const currency = hotel?.currency || "SAR";
+	if (!nights) {
+		return {
+			available: false,
+			reason: "bad_dates",
+			currency,
+			room: roomQuoteShape(room),
+			nights: 0,
+			totals: null,
+		};
+	}
+
+	const basePrice = numberValue(room?.price?.basePrice, 0);
+	const defaultCost = numberValue(room?.defaultCost, 0);
+	const defaultCommission = commissionRateForRoom(hotel, room);
+	const rateMap = pricingRateMapForDates(room, dates);
+	let totalWithCommission = 0;
+	let hotelShouldGet = 0;
+
+	for (const date of dates) {
+		const rate = rateMap.get(date);
+		const dayPrice = rate ? numberValue(rate.price, basePrice) : basePrice;
+		const dayRoot = rate ? numberValue(rate.rootPrice, defaultCost) : defaultCost;
+		const dayCommission = rate
+			? numberValue(rate.commissionRate, defaultCommission)
+			: defaultCommission;
+
+		if (rate && (numberValue(rate.price, 0) === 0 || numberValue(rate.rootPrice, 0) === 0)) {
+			return {
+				available: false,
+				reason: "blocked",
+				currency,
+				room: roomQuoteShape(room),
+				nights,
+				totals: null,
+			};
+		}
+
+		totalWithCommission += dayPrice + dayRoot * (dayCommission / 100);
+		hotelShouldGet += dayRoot;
+	}
+
+	const total = Number(totalWithCommission.toFixed(2));
+	const hotelTotal = Number(hotelShouldGet.toFixed(2));
+	return {
+		available: true,
+		reason: null,
+		currency,
+		room: roomQuoteShape(room),
+		nights,
+		totals: {
+			totalPriceWithCommission: total,
+			hotelShouldGet: hotelTotal,
+			totalCommission: Number((total - hotelTotal).toFixed(2)),
+		},
+	};
+}
+
+function listCompactRoomsForStay(hotel = {}, checkinISO = "", checkoutISO = "") {
+	const dates = stayDateKeys(checkinISO, checkoutISO);
+	const rooms = (hotel?.roomCountDetails || []).filter((room) => room?.activeRoom === true);
+	return rooms.map((room) => priceCompactRoomForStay(hotel, room, dates));
 }
 
 function dateOnlyText(value = "") {
@@ -1006,7 +1126,7 @@ async function pricingSummaryForStay(hotel = {}, plan = {}, { caseId = "" } = {}
 		return { ok: false, reason: "bad_dates", rooms: [] };
 	}
 	memoryTrace("pricing:start", caseId);
-	const quotes = listAvailableRoomsForStay(hotel, plan.checkinISO, plan.checkoutISO);
+	const quotes = listCompactRoomsForStay(hotel, plan.checkinISO, plan.checkoutISO);
 	memoryTrace("pricing:after_quotes", caseId, {
 		quotes: Array.isArray(quotes) ? quotes.length : 0,
 	});
@@ -1015,12 +1135,7 @@ async function pricingSummaryForStay(hotel = {}, plan = {}, { caseId = "" } = {}
 		selectedRoom: cleanText(selectedRoom?.roomType || selectedRoom?.displayName, 120),
 	});
 	const selectedQuote = selectedRoom
-		? priceRoomForStay(
-				hotel,
-				{ roomType: selectedRoom.roomType },
-				plan.checkinISO,
-				plan.checkoutISO
-		  )
+		? quotes.find((quote) => summaryRoomMatchesQuote(selectedRoom, quote)) || null
 		: null;
 	memoryTrace("pricing:after_selected_quote", caseId, {
 		selectedAvailable: selectedQuote?.available,
