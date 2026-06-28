@@ -118,34 +118,34 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 4500, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3000, {
 	min: 500,
 	max: 8000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 7200, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 5000, {
 		min: 500,
 		max: 8000,
 	})
 );
 const AI_CASUAL_REPLY_TARGET_MIN_MS = intFromEnv(
 	"AI_CASUAL_REPLY_TARGET_MIN_MS",
-	4200,
+	3000,
 	{ min: 1500, max: 8000 }
 );
 const AI_CASUAL_REPLY_TARGET_MAX_MS = Math.max(
 	AI_CASUAL_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 7000, {
+	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 4500, {
 		min: 1500,
 		max: 8000,
 	})
 );
-const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 6000, {
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4000, {
 	min: 500,
 	max: 8000,
 });
-const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 4500, {
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3000, {
 	min: 500,
 	max: 8000,
 });
@@ -160,28 +160,28 @@ const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 });
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
-	2000,
+	900,
 	{ min: 0, max: 7000 }
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 2000, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 1400, {
 		min: 0,
 		max: 7000,
 	})
 );
 const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	"AI_PLANNING_TYPING_DELAY_MS",
-	2000,
+	900,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 900, {
 	min: 0,
 	max: 5000,
 });
 const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
 	"AI_RESERVATION_DETAIL_QUIET_MS",
-	2000,
+	700,
 	{ min: 0, max: 5000 }
 );
 const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
@@ -189,11 +189,11 @@ const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
 	0,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2000, {
+const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 1200, {
 	min: 500,
 	max: 10000,
 });
-const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 3000, {
+const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 800, {
 	min: 0,
 	max: 7000,
 });
@@ -272,6 +272,7 @@ const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 10000, {
 	min: 8000,
 	max: 30000,
 });
+const AI_DELAY_NOTICE_ENABLED = boolFromEnv("AI_DELAY_NOTICE_ENABLED", false);
 const AI_DELAY_NOTICE_COOLDOWN_MS = intFromEnv(
 	"AI_DELAY_NOTICE_COOLDOWN_MS",
 	5 * 60 * 1000,
@@ -2402,12 +2403,51 @@ function shouldTreatLatestAsNewBooking(text = "", st = {}, lu = {}) {
 	);
 }
 
+function conversationHydrationRevision(conversation = []) {
+	if (!Array.isArray(conversation) || !conversation.length) return "0";
+	const last = conversation[conversation.length - 1] || {};
+	const stableId =
+		String(last._id || last.id || last.clientTag || last.messageId || "").trim();
+	const text = String(last.message || "");
+	return [
+		conversation.length,
+		stableId,
+		messageTime(last) || 0,
+		text.length,
+	].join(":");
+}
+
 function looksLikeNameCandidate(text = "") {
 	const value = String(text || "").trim();
 	if (!value || value.length > 80) return false;
 	if (latestEmailFromText(value) || cleanPhoneCandidate(value)) return false;
 	if (/confirm|confirmation|book|reserve|price|date|room|\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u063a\u0631\u0641/i.test(value)) return false;
 	return /[A-Za-z\u0600-\u06FF]{2,}/.test(value);
+}
+
+function obviousReservationIdentityOrContactPayloadText(text = "") {
+	const value = String(text || "").trim();
+	if (!value) return false;
+	if (latestEmailFromText(value)) return true;
+	if (
+		/(?:\b(?:full\s*name|guest\s*name|passport\s*name|my\s+name|name\s+is|nationality|country|phone|mobile|whats\s*app|whatsapp|email|e-mail|adults?|children|kids?|guests?|people|persons?|pax)\b|(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u0628\u0644\u062f\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0636\u064a\u0648\u0641))/i.test(
+			value
+		)
+	) {
+		return true;
+	}
+	const lines = value
+		.split(/[\n\r;|]+/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	if (lines.length < 2) return false;
+	return lines.some((line) => {
+		const digitLine = digitsToEnglish(line);
+		const digits = digitLine.replace(/\D/g, "");
+		if (digits.length < 5 || digits.length > 18) return false;
+		const remainder = digitLine.replace(/[+\d\s().-]/g, "").trim();
+		return !remainder;
+	});
 }
 
 function hydrateKnownSlotsFromConversation(
@@ -2430,15 +2470,26 @@ function hydrateKnownSlotsFromConversation(
 	if (!conversation.length) {
 		return;
 	}
-	const needsSlotRecovery =
+	const revision = conversationHydrationRevision(conversation);
+	const needsStayRecovery =
 		!st.slots?.checkinISO ||
 		!st.slots?.checkoutISO ||
-		!st.slots?.roomTypeKey ||
+		!st.slots?.roomTypeKey;
+	const needsIdentityRecovery =
 		!st.slots?.phone ||
+		(st.waitFor === "email_or_skip" && !st.slots?.email && !st.slots?.emailSkipped) ||
 		(AI_REQUIRE_NATIONALITY && !hasUsableNationality(st.slots?.nationality)) ||
 		!st.slots?.adultsProvided ||
 		!hasUsableFullName(st.slots?.fullName || st.slots?.name || "");
+	const needsSlotRecovery = needsStayRecovery || needsIdentityRecovery;
 	if (st.hydratedConversationLength === conversation.length && !needsSlotRecovery) {
+		return;
+	}
+	if (
+		!needsStayRecovery &&
+		st.hydratedStayConversationRevision === revision &&
+		(!needsIdentityRecovery || st.hydratedIdentityConversationRevision === revision)
+	) {
 		return;
 	}
 	const before = JSON.stringify(st.slots || {});
@@ -2459,7 +2510,10 @@ function hydrateKnownSlotsFromConversation(
 		if (!messageText || message?.isSystem) continue;
 		const guestMessage = isGuestConversationMessage(message);
 		if (guestMessage) {
-			const messageDates = extractDateRange(messageText);
+			const messageDates =
+				needsStayRecovery || protectLatestGuestDateChange
+					? extractDateRange(messageText)
+					: { checkinISO: null, checkoutISO: null };
 			if (
 				messageDates.checkinISO &&
 				messageDates.checkoutISO &&
@@ -2481,6 +2535,10 @@ function hydrateKnownSlotsFromConversation(
 	}
 	markHydrationStage("date_guest_loop");
 	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
+	const latestAssistantBeforeGuest = lastAssistantMessageBeforeLatestGuest(sc);
+	const identityText = assistantMessageSuggestsReservationDetails(latestAssistantBeforeGuest)
+		? lastUserText(sc)
+		: guestText;
 	if (latestGuestDateRange) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
 	} else if (latestConversationDateRange) {
@@ -2498,72 +2556,90 @@ function hydrateKnownSlotsFromConversation(
 		});
 	}
 	markHydrationStage("date_protection");
-	applyLatestRoomSignalFromConversation(sc, st, {
-		source: "slots.hydrate_room_signal",
-	});
-	markHydrationStage("room_loop");
-	const email = latestEmailFromText(guestText);
-	if (email && !st.slots.email) st.slots.email = email;
-	const phone = latestPhoneFromText(guestText);
-	if (phone && !st.slots.phone) st.slots.phone = phone;
-	const nationalitySource = nationalityCandidateFromText(guestText);
-	const nationality = nationalityHintFromText(nationalitySource || guestText);
-	if (nationality && !hasUsableNationality(st.slots.nationality)) {
-		st.slots.nationality = nationality;
-	}
-	markHydrationStage("guest_identity_extract");
-	for (const message of conversation) {
-		if (!isGuestConversationMessage(message)) continue;
-		const contact = String(message?.messageBy?.customerEmail || "");
-		const contactEmail = latestEmailFromText(contact);
-		const contactPhone = cleanPhoneCandidate(contact);
-		if (contactEmail && !st.slots.email) st.slots.email = contactEmail;
-		if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
-	}
-	markHydrationStage("contact_loop");
-	let lastAsk = "";
-	for (const message of conversation) {
-		const text = String(message?.message || "");
-		if (isAiConversationMessage(message)) {
-			if (/full name|passport|guest name|name|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645/i.test(text)) {
-				lastAsk = "name";
-			} else if (/nationality|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a/i.test(text)) {
-				lastAsk = "nationality";
-			} else if (/phone|mobile|whatsapp|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633/i.test(text)) {
-				lastAsk = "phone";
-			} else if (/email|mail|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644/i.test(text)) {
-				lastAsk = "email";
-			}
-			continue;
+	if (needsStayRecovery) {
+		applyLatestRoomSignalFromConversation(sc, st, {
+			source: "slots.hydrate_room_signal",
+		});
+		if (
+			st.slots?.checkinISO &&
+			st.slots?.checkoutISO &&
+			st.slots?.roomTypeKey
+		) {
+			st.hydratedStayConversationRevision = revision;
 		}
-		if (!isGuestConversationMessage(message)) continue;
-		if (likelyGuestCountText(text)) {
-			applyReservationGuestCountsFromText(st, text);
-		}
-		if (lastAsk === "name" && !st.slots.fullName) {
-			const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
-			if (candidate) {
-				st.slots.fullName = candidate;
-				st.slots.name = candidate;
-			}
-		} else if (lastAsk === "phone" && !st.slots.phone) {
-			const candidate = latestPhoneFromText(text);
-			if (candidate) st.slots.phone = candidate;
-		} else if (lastAsk === "email" && !st.slots.email) {
-			const candidate = latestEmailFromText(text);
-			if (candidate) st.slots.email = candidate;
-			else if (emailSkipText(text)) {
-				st.slots.email = "";
-				st.slots.emailSkipped = true;
-			}
-		} else if (lastAsk === "nationality" && !hasUsableNationality(st.slots.nationality)) {
-			const value = nationalityCandidateFromText(text) || asciiize(text).trim();
-			const normalized = nationalityHintFromText(value) || value;
-			if (hasUsableNationality(normalized)) st.slots.nationality = normalized;
-		}
+		markHydrationStage("room_loop");
+	} else {
+		st.hydratedStayConversationRevision = revision;
+		markHydrationStage("room_loop_skipped");
 	}
-	markHydrationStage("detail_followup_loop");
+	if (needsIdentityRecovery && st.hydratedIdentityConversationRevision !== revision) {
+		const email = latestEmailFromText(identityText);
+		if (email && !st.slots.email) st.slots.email = email;
+		const phone = latestPhoneFromText(identityText);
+		if (phone && !st.slots.phone) st.slots.phone = phone;
+		const nationalitySource = nationalityCandidateFromText(identityText);
+		const nationality = nationalityHintFromText(nationalitySource || identityText);
+		if (nationality && !hasUsableNationality(st.slots.nationality)) {
+			st.slots.nationality = nationality;
+		}
+		markHydrationStage("guest_identity_extract");
+		for (const message of conversation) {
+			if (!isGuestConversationMessage(message)) continue;
+			const contact = String(message?.messageBy?.customerEmail || "");
+			const contactEmail = latestEmailFromText(contact);
+			const contactPhone = cleanPhoneCandidate(contact);
+			if (contactEmail && !st.slots.email) st.slots.email = contactEmail;
+			if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
+		}
+		markHydrationStage("contact_loop");
+		let lastAsk = "";
+		for (const message of conversation) {
+			const text = String(message?.message || "");
+			if (isAiConversationMessage(message)) {
+				if (/full name|passport|guest name|name|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645/i.test(text)) {
+					lastAsk = "name";
+				} else if (/nationality|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a/i.test(text)) {
+					lastAsk = "nationality";
+				} else if (/phone|mobile|whatsapp|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633/i.test(text)) {
+					lastAsk = "phone";
+				} else if (/email|mail|\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644/i.test(text)) {
+					lastAsk = "email";
+				}
+				continue;
+			}
+			if (!isGuestConversationMessage(message)) continue;
+			if (likelyGuestCountText(text)) {
+				applyReservationGuestCountsFromText(st, text);
+			}
+			if (lastAsk === "name" && !st.slots.fullName) {
+				const candidate = lineNameCandidateFromText(text) || cleanFullNameCandidate(text);
+				if (candidate) {
+					st.slots.fullName = candidate;
+					st.slots.name = candidate;
+				}
+			} else if (lastAsk === "phone" && !st.slots.phone) {
+				const candidate = latestPhoneFromText(text);
+				if (candidate) st.slots.phone = candidate;
+			} else if (lastAsk === "email" && !st.slots.email) {
+				const candidate = latestEmailFromText(text);
+				if (candidate) st.slots.email = candidate;
+				else if (emailSkipText(text)) {
+					st.slots.email = "";
+					st.slots.emailSkipped = true;
+				}
+			} else if (lastAsk === "nationality" && !hasUsableNationality(st.slots.nationality)) {
+				const value = nationalityCandidateFromText(text) || asciiize(text).trim();
+				const normalized = nationalityHintFromText(value) || value;
+				if (hasUsableNationality(normalized)) st.slots.nationality = normalized;
+			}
+		}
+		st.hydratedIdentityConversationRevision = revision;
+		markHydrationStage("detail_followup_loop");
+	} else {
+		markHydrationStage("guest_identity_skipped");
+	}
 	st.hydratedConversationLength = conversation.length;
+	st.hydratedConversationRevision = revision;
 	if (before !== JSON.stringify(st.slots || {})) {
 		logStep(String(sc._id || ""), "slots.hydrated", { slots: st.slots });
 	}
@@ -2846,7 +2922,15 @@ function roomKeyFromConversationRoomSignal(
 ) {
 	const raw = String(text || "").trim();
 	if (!raw) return "";
-	if (reservationIdentityOrContactPayloadText(raw)) return "";
+	if (assistant && quoteContext) {
+		const quoteRoomTypeKey = mapRoomToKey(raw);
+		if (quoteRoomTypeKey) return quoteRoomTypeKey;
+		const sectionRoomTypeKey = roomTypeKeysMentionedBySections(raw)[0] || "";
+		return sectionRoomTypeKey;
+	}
+	if (!(assistant && quoteContext) && reservationIdentityOrContactPayloadText(raw)) {
+		return "";
+	}
 	if (assistant && assistantRoomOptionsPromptText(raw)) return "";
 	const explicitRoomTypeKey = mapRoomToKey(raw);
 	const shortExplicitRoomChoice =
@@ -2869,9 +2953,7 @@ function roomKeyFromConversationRoomSignal(
 
 function latestRoomSignalFromConversation(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
-	let latestSignal = null;
-	let latestGuestSignal = null;
-	for (let index = 0; index < conversation.length; index += 1) {
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
 		const message = conversation[index];
 		const messageText =
 			String(message?.message || "").trim() || conversationEntryContextText(message);
@@ -2879,6 +2961,12 @@ function latestRoomSignalFromConversation(sc = {}) {
 		const guestMessage = isGuestConversationMessage(message);
 		const assistantMessage = !guestMessage && isAiConversationMessage(message);
 		if (!guestMessage && !assistantMessage) continue;
+		if (guestMessage && obviousReservationIdentityOrContactPayloadText(messageText)) {
+			continue;
+		}
+		if (assistantMessage && assistantMessageSuggestsReservationDetails(message)) {
+			continue;
+		}
 		const quoteContext = assistantMessage && assistantRoomQuoteContextText(message);
 		const roomTypeKey = roomKeyFromConversationRoomSignal(messageText, {
 			assistant: assistantMessage,
@@ -2897,15 +2985,22 @@ function latestRoomSignalFromConversation(sc = {}) {
 		if (
 			assistantMessage &&
 			signal.source === "assistant_quote" &&
-			latestGuestSignal &&
-			latestGuestSignal.roomTypeKey !== signal.roomTypeKey
+			conversation
+				.slice(index + 1)
+				.some((laterMessage) => {
+					if (!isGuestConversationMessage(laterMessage)) return false;
+					const laterText =
+						String(laterMessage?.message || "").trim() ||
+						conversationEntryContextText(laterMessage);
+					const laterRoomTypeKey = roomKeyFromConversationRoomSignal(laterText);
+					return laterRoomTypeKey && laterRoomTypeKey !== signal.roomTypeKey;
+				})
 		) {
 			continue;
 		}
-		latestSignal = signal;
-		if (guestMessage) latestGuestSignal = signal;
+		return signal;
 	}
-	return latestSignal;
+	return null;
 }
 
 function applyLatestRoomSignalFromConversation(
@@ -2965,6 +3060,19 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 		assistantHistory.find((assistant) => assistantBookingStageFromMessage(assistant)) ||
 			lastAssistant
 	);
+	if (
+		[
+			"proceed",
+			"reviewConfirm",
+			"reservation_details",
+			"email_or_skip",
+			"finalize",
+		].includes(stage) &&
+		st.hotel &&
+		quoteKeyForSlots(st)
+	) {
+		ensureCurrentQuoteForSlots(st);
+	}
 	const hasRecoverableBookingContext = Boolean(
 		st.reviewSent ||
 			st.quote ||
@@ -10116,6 +10224,7 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 function reservationIdentityOrContactPayloadText(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
+	if (obviousReservationIdentityOrContactPayloadText(value)) return true;
 	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
 	if (explicitNameCandidateFromText(value)) return true;
 	if (nationalityHintFromText(nationalityCandidateFromText(value) || value)) return true;
@@ -15316,6 +15425,51 @@ function genericOpenAiQuestionText(text = "", st = {}, lu = {}) {
 	return true;
 }
 
+function shouldUseDynamicUnplannedFallback(
+	text = "",
+	st = {},
+	lu = {},
+	supportDecision = {}
+) {
+	const normalized = String(text || "").trim();
+	if (!normalized) return false;
+	if (supportDecision?.action && supportDecision.action !== "other") return false;
+	if (looksLikeGreetingOnly(normalized) || lu?.intent === "smalltalk") return false;
+	if (severeAbusiveGuestText(normalized) || abusiveGuestText(normalized)) return false;
+	if (
+		wantsNewReservationIntent(normalized, lu) ||
+		wantsPriceButMissingDates(normalized, st) ||
+		wantsPaymentHelp(normalized) ||
+		wantsReservationHelp(normalized) ||
+		wantsHotelRecommendation(normalized) ||
+		wantsDiscountQuestion(normalized) ||
+		humanHandoffReason(normalized) ||
+		confidentialCompanyDocumentQuestionText(normalized) ||
+		cancellationRefundPolicyQuestionText(normalized) ||
+		cancellationActionRequestText(normalized) ||
+		hotelContactDetailsQuestionText(normalized) ||
+		hotelContactFollowupQuestionText({}, normalized) ||
+		selectedHotelFactQuestionText(normalized) ||
+		selectedHotelRoomQuestionText(normalized) ||
+		Boolean(findAmenityMatch(normalized)) ||
+		looksLikeStayDateCandidate(normalized) ||
+		reservationDetailFieldPayloadText(normalized) ||
+		currentReservationMemoryRequestText(normalized) ||
+		quickDateRange(normalized)?.checkinISO ||
+		mapRoomToKey(normalized)
+	) {
+		return false;
+	}
+	if (
+		(st.waitFor === "proceed" || st.waitFor === "room_alternative_confirm") &&
+		(confirmsText(normalized) || declinesText(normalized))
+	) {
+		return false;
+	}
+	if (reservationDetailWaitState(st.waitFor)) return false;
+	return true;
+}
+
 function stripGeneralBookingPivot(text = "", fallback = "") {
 	const cleaned = String(text || "")
 		.replace(
@@ -15380,7 +15534,7 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 		sc,
 		st,
 		userText,
-		`The guest asked a general, off-topic, or unplanned question. Answer professionally and briefly in the guest's active language, while preserving the current reservation flow. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then warmly pivot back to the hotel/reservation help. ${
+		`The guest asked a general, off-topic, unclear, or unplanned question. Study the full conversation transcript and answer the latest guest point directly in one or two polished professional sentences in the guest's active language. Preserve the current reservation flow without asking for details already supplied; do not use a canned/generic template, do not list a form, and do not add an unrelated booking prompt unless the latest message asks to reserve. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then gently return to hotel/reservation help only if natural. ${
 			liveCurrent
 				? "The latest message appears to need live/current data, so do not answer it with hotel address, distance, map, room, policy, or other hotel facts unless the guest explicitly asked for those facts."
 				: ""
@@ -16708,7 +16862,7 @@ async function planTurn(io, sc) {
 			});
 			return;
 		}
-		if (userText) {
+		if (userText && AI_DELAY_NOTICE_ENABLED) {
 			const delayNoticeInMs = Math.max(
 				250,
 				Number(st.activeTurnGuestAt || now()) + AI_DELAY_NOTICE_MS - now()
@@ -17839,6 +17993,17 @@ async function planTurn(io, sc) {
 			return;
 		}
 
+		if (shouldUseDynamicUnplannedFallback(userText, st, decisionLu, supportDecision)) {
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "dynamic_unplanned_fallback"
+			);
+			return;
+		}
+
 		if (shouldAskRoomPreferenceFirst(userText, st, decisionLu, supportDecision)) {
 			await askRoomPreferenceForReservation(io, sc, st);
 			return;
@@ -18111,6 +18276,16 @@ async function planTurn(io, sc) {
 			decisionLu
 		);
 		if (fallbackDirectRequestHandled) return;
+		if (shouldUseDynamicUnplannedFallback(userText, st, decisionLu, supportDecision)) {
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				supportDecision.reason || "dynamic_unplanned_fallback_late"
+			);
+			return;
+		}
 		if (wantsHotelRecommendation(userText)) {
 			if (st.hotel) {
 				if (crossHotelRequestText(userText)) {
@@ -19015,11 +19190,27 @@ async function planTurn(io, sc) {
 				);
 			});
 			if (recoveryUserText && !st.interrupt && !latestAiAfterGuest) {
+				const recoveryCase = latestCase || sc;
+				const dynamicRecovery = await withSoftTimeout(
+					write(
+						io,
+						recoveryCase,
+						st,
+						"The normal handler hit a recoverable internal issue. Do not mention technical details. Study the full conversation and answer the latest guest message directly in one or two professional sentences in the guest's active language, preserving any known booking context and never asking again for details already supplied.",
+						{
+							latestUserMessage: recoveryUserText,
+							recoveryMode: true,
+						}
+					),
+					4500,
+					""
+				);
 				await humanSend(
 					io,
-					latestCase || sc,
+					recoveryCase,
 					st,
-					technicalRecoveryText(latestCase || sc, st)
+					dynamicRecovery || technicalRecoveryText(recoveryCase, st),
+					{ targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 				);
 			}
 		} catch (recoveryError) {
