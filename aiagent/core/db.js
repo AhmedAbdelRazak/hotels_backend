@@ -16,6 +16,59 @@ const AI_SETTINGS_CACHE_TTL_MS = Number(
 const hotelContextCache = new Map();
 let janatAiSettingsCache = null;
 
+const HOTEL_AI_BASE_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelAddress",
+	"hotelCity",
+	"hotelState",
+	"hotelCountry",
+	"aboutHotel",
+	"aboutHotelArabic",
+	"distances",
+	"location",
+	"parkingLot",
+	"hasBusService",
+	"busDetails",
+	"hasMealsService",
+	"mealsDetails",
+	"isNusuk",
+	"isNusukText",
+	"hotelPolicyQA",
+	"currency",
+	"aiToRespond",
+	"activateHotel",
+	"xHotelProActive",
+	"belongsTo",
+];
+
+const ROOM_AI_CONTEXT_SELECT = [
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.displayName",
+	"roomCountDetails.displayName_OtherLanguage",
+	"roomCountDetails.description",
+	"roomCountDetails.description_OtherLanguage",
+	"roomCountDetails.amenities",
+	"roomCountDetails.views",
+	"roomCountDetails.extraAmenities",
+	"roomCountDetails.pricedExtras",
+	"roomCountDetails.price",
+	"roomCountDetails.monthly",
+	"roomCountDetails.offers",
+	"roomCountDetails.count",
+	"roomCountDetails.activeRoom",
+	"roomCountDetails.commisionIncluded",
+	"roomCountDetails.refundPolicyDays",
+	"roomCountDetails.roomSize",
+	"roomCountDetails.defaultCost",
+	"roomCountDetails.roomCommission",
+	"roomCountDetails.bedsCount",
+	"roomCountDetails.roomForGender",
+	"roomCountDetails.roomColor",
+];
+
 function compactPricingRateForAi(row = {}) {
 	const calendarDate = String(row?.calendarDate || row?.date || "").slice(0, 10);
 	if (!calendarDate) return null;
@@ -25,6 +78,20 @@ function compactPricingRateForAi(row = {}) {
 		rootPrice: row.rootPrice,
 		commissionRate: row.commissionRate,
 	};
+}
+
+function dateOnlyKey(value = "") {
+	return String(value || "").slice(0, 10);
+}
+
+function normalizeDateKeys(values = []) {
+	return [
+		...new Set(
+			(Array.isArray(values) ? values : [])
+				.map(dateOnlyKey)
+				.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value))
+		),
+	].slice(0, 90);
 }
 
 function safeId(id) {
@@ -351,6 +418,103 @@ async function getHotelById(id) {
 		}
 	}
 	return cloneCompactHotelForAi(compactHotel);
+}
+
+async function getHotelByIdForAiContext(id) {
+	const _id = safeId(id);
+	if (!_id) return null;
+	const cacheKey = `context:${String(_id)}`;
+	const cached = hotelContextCache.get(cacheKey);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cloneCompactHotelForAi(cached.hotel);
+	}
+	const hotel = await HotelDetails.findById(_id)
+		.select([...HOTEL_AI_BASE_SELECT, ...ROOM_AI_CONTEXT_SELECT].join(" "))
+		.lean()
+		.exec();
+	const compactHotel = compactHotelForAi(hotel);
+	if (compactHotel) {
+		hotelContextCache.set(cacheKey, {
+			hotel: compactHotel,
+			expiresAt: Date.now() + AI_HOTEL_CONTEXT_CACHE_TTL_MS,
+		});
+		if (hotelContextCache.size > 200) {
+			const firstKey = hotelContextCache.keys().next().value;
+			if (firstKey) hotelContextCache.delete(firstKey);
+		}
+	}
+	return cloneCompactHotelForAi(compactHotel);
+}
+
+async function getHotelByIdWithPricingDates(id, dateKeys = []) {
+	const _id = safeId(id);
+	const dates = normalizeDateKeys(dateKeys);
+	if (!_id) return null;
+	const hotel = await getHotelByIdForAiContext(_id);
+	if (!hotel || !dates.length) return hotel;
+
+	const [pricingDoc] = await HotelDetails.aggregate([
+		{ $match: { _id } },
+		{
+			$project: {
+				roomPricing: {
+					$map: {
+						input: { $ifNull: ["$roomCountDetails", []] },
+						as: "room",
+						in: {
+							_id: "$$room._id",
+							roomType: "$$room.roomType",
+							pricingRate: {
+								$filter: {
+									input: { $ifNull: ["$$room.pricingRate", []] },
+									as: "rate",
+									cond: {
+										$in: [
+											{
+												$substrBytes: [
+													{
+														$toString: {
+															$ifNull: ["$$rate.calendarDate", ""],
+														},
+													},
+													0,
+													10,
+												],
+											},
+											dates,
+										],
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	]).exec();
+
+	const byRoomId = new Map();
+	const byRoomType = new Map();
+	(pricingDoc?.roomPricing || []).forEach((room) => {
+		const compactRows = Array.isArray(room.pricingRate)
+			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
+			: [];
+		byRoomId.set(String(room._id || ""), compactRows);
+		if (room.roomType) byRoomType.set(String(room.roomType), compactRows);
+	});
+
+	return {
+		...hotel,
+		roomCountDetails: Array.isArray(hotel.roomCountDetails)
+			? hotel.roomCountDetails.map((room) => ({
+					...room,
+					pricingRate:
+						byRoomId.get(String(room._id || "")) ||
+						byRoomType.get(String(room.roomType || "")) ||
+						[],
+			  }))
+			: [],
+	};
 }
 
 async function getJanatAiSettings() {
@@ -748,6 +912,8 @@ module.exports = {
 	closeSupportCaseForAiIdle,
 	setCaseStatus,
 	getHotelById,
+	getHotelByIdForAiContext,
+	getHotelByIdWithPricingDates,
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,

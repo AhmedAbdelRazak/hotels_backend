@@ -3103,6 +3103,10 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
     the guest-facing writer call.
   - The AI hotel cache keeps compact calendar rows only, and pricing selectors
     map only requested stay dates to prevent live chat heap spikes.
+  - OpenAI-first uses a slim hotel loader for normal chat context, a
+    date-limited pricing loader only for requested stay dates, and quote-time
+    inventory validation against overlapping reservations before saying a room
+    is available.
   - Reservation creation remains deterministic and requires the explicit
     `confirm_reservation` quick-reply action.
   - Optional email is supported through a `skip_email` quick reply.

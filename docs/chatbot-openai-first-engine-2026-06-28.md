@@ -54,6 +54,10 @@ AI_AGENT_ENGINE=legacy
   (`calendarDate`, `price`, `rootPrice`, `commissionRate`), and pricing helpers
   map only the requested stay dates. This keeps exact pricing while avoiding
   large temporary calendar maps during live chat turns.
+- OpenAI-first turns load hotel facts without full room calendars. When pricing
+  is needed, the engine reloads only the requested stay dates and validates
+  quote-time stock against overlapping reservations. A room is not offered as
+  available if any requested night is calendar-blocked or lacks enough stock.
 - Email is optional. The engine can show a `skip_email` quick reply.
 - Controller-level hard-coded quick trust replies are legacy-only so the
   default engine does not bypass OpenAI.

@@ -4,7 +4,8 @@
 const {
 	getSupportCaseById,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
-	getHotelById,
+	getHotelByIdForAiContext,
+	getHotelByIdWithPricingDates,
 	getReservationByConfirmation,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
@@ -18,6 +19,10 @@ const {
 	activeHotelPolicyQA,
 	DEFAULT_CANCELLATION_REFUND_ANSWER,
 } = require("../../services/hotelPolicyQa");
+const {
+	shouldCountReservationForInventory,
+} = require("../../services/reservationStatus");
+const Reservations = require("../../models/reservations");
 
 const SUPPORT_EMAIL = "support@jannatbooking.com";
 const AI_USER_ID = "jannat-ai-support";
@@ -697,6 +702,27 @@ function validStayDates(checkinISO = "", checkoutISO = "") {
 	return validISODate(checkinISO) && validISODate(checkoutISO) && checkinISO < checkoutISO;
 }
 
+function stayDateKeys(checkinISO = "", checkoutISO = "") {
+	if (!validStayDates(checkinISO, checkoutISO)) return [];
+	const dates = [];
+	const cursor = new Date(`${checkinISO}T00:00:00Z`);
+	const end = new Date(`${checkoutISO}T00:00:00Z`);
+	while (cursor < end && dates.length < 90) {
+		dates.push(cursor.toISOString().slice(0, 10));
+		cursor.setUTCDate(cursor.getUTCDate() + 1);
+	}
+	return dates;
+}
+
+function dateOnlyText(value = "") {
+	if (!value) return "";
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+		return value.slice(0, 10);
+	}
+	const date = new Date(value);
+	return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "";
+}
+
 function roomToken(value = "") {
 	return String(value || "")
 		.toLowerCase()
@@ -744,7 +770,119 @@ function matchRoom(hotel = {}, hint = "", selectedRoomType = "") {
 	return rooms[0] || null;
 }
 
-function pricingSummaryForStay(hotel = {}, plan = {}) {
+function roomSelectionKey(room = {}) {
+	return roomToken(room.roomType || room.room_type || room.displayName || room.display_name);
+}
+
+function roomSelectionDisplayKey(room = {}) {
+	return roomToken(room.displayName || room.display_name || room.roomType || room.room_type);
+}
+
+function reservationRoomSelections(reservation = {}) {
+	const picked = Array.isArray(reservation.pickedRoomsType)
+		? reservation.pickedRoomsType
+		: Array.isArray(reservation.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: [];
+	return picked
+		.map((room) => ({
+			roomType: cleanText(room.room_type || room.roomType, 140),
+			displayName: cleanText(room.displayName || room.display_name, 180),
+			count: Math.max(1, Number(room.count || 1) || 1),
+		}))
+		.filter((room) => room.roomType || room.displayName);
+}
+
+function selectionMatchesRoom(selection = {}, room = {}) {
+	const targetType = roomSelectionKey(room);
+	const targetDisplay = roomSelectionDisplayKey(room);
+	const selectedType = roomSelectionKey(selection);
+	const selectedDisplay = roomSelectionDisplayKey(selection);
+	if (targetType && selectedType && targetType === selectedType) return true;
+	if (targetDisplay && selectedDisplay && targetDisplay === selectedDisplay) return true;
+	return false;
+}
+
+async function inventoryByRoomForStay(hotel = {}, plan = {}) {
+	const dates = stayDateKeys(plan.checkinISO, plan.checkoutISO);
+	const hotelId = idText(hotel?._id);
+	if (!hotelId || !dates.length) return new Map();
+	const startDate = new Date(`${dates[0]}T00:00:00.000Z`);
+	const endDate = new Date(`${dates[dates.length - 1]}T23:59:59.999Z`);
+	const reservations = await Reservations.find({
+		hotelId,
+		checkin_date: { $lt: endDate },
+		checkout_date: { $gt: startDate },
+	})
+		.select(
+			"_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing"
+		)
+		.maxTimeMS(2500)
+		.lean()
+		.exec()
+		.catch(() => []);
+
+	const requested = Math.max(1, Number(plan?.guestDetails?.rooms || 1) || 1);
+	const availabilityByRoom = new Map();
+	const activeRooms = (hotel.roomCountDetails || []).filter((room) => room?.activeRoom === true);
+
+	activeRooms.forEach((room) => {
+		const dayRows = dates.map((date) => {
+			let reserved = 0;
+			for (const reservation of reservations) {
+				if (!shouldCountReservationForInventory(reservation)) continue;
+				const checkin = dateOnlyText(reservation.checkin_date);
+				const checkout = dateOnlyText(reservation.checkout_date);
+				if (!checkin || !checkout || !(checkin <= date && date < checkout)) continue;
+				for (const selection of reservationRoomSelections(reservation)) {
+					if (selectionMatchesRoom(selection, room)) reserved += selection.count;
+				}
+			}
+			const capacity = Math.max(0, Number(room.count || 0) || 0);
+			const availableBefore = capacity - reserved;
+			return {
+				date,
+				capacity,
+				reserved,
+				requested,
+				availableBefore: Math.max(0, availableBefore),
+				availableBeforeRaw: availableBefore,
+				availableAfterRaw: availableBefore - requested,
+			};
+		});
+		const minAvailableBeforeRaw = dayRows.length
+			? Math.min(...dayRows.map((day) => day.availableBeforeRaw))
+			: 0;
+		const firstBlocked = dayRows.find((day) => day.requested > day.availableBeforeRaw);
+		availabilityByRoom.set(idText(room._id) || room.roomType || room.displayName, {
+			ok: !firstBlocked,
+			reason: firstBlocked ? "inventory_unavailable" : "",
+			message: firstBlocked
+				? `${room.displayName || room.roomType || "Selected room"} has ${Math.max(
+						0,
+						firstBlocked.availableBeforeRaw
+				  )} available room(s) on ${firstBlocked.date}, but ${requested} were requested.`
+				: "",
+			requested,
+			minAvailableBefore: Math.max(0, minAvailableBeforeRaw),
+			minAvailableBeforeRaw,
+			days: dayRows,
+		});
+	});
+
+	return availabilityByRoom;
+}
+
+function availabilityForRoom(availabilityByRoom = new Map(), room = {}) {
+	return (
+		availabilityByRoom.get(idText(room?._id)) ||
+		availabilityByRoom.get(room?.roomType || "") ||
+		availabilityByRoom.get(room?.displayName || "") ||
+		null
+	);
+}
+
+async function pricingSummaryForStay(hotel = {}, plan = {}) {
 	if (!validStayDates(plan.checkinISO, plan.checkoutISO)) {
 		return { ok: false, reason: "bad_dates", rooms: [] };
 	}
@@ -758,25 +896,39 @@ function pricingSummaryForStay(hotel = {}, plan = {}) {
 				plan.checkoutISO
 		  )
 		: null;
+	const inventoryByRoom = await inventoryByRoomForStay(hotel, plan);
 	const rooms = quotes
-		.map((quote) => ({
-			available: quote.available === true,
-			reason: quote.reason || "",
-			roomType: cleanText(quote.room?.roomType, 120),
-			roomId: idText(quote.room?._id),
-			displayName: cleanText(quote.room?.displayName, 180),
-			displayNameOtherLanguage: cleanText(quote.room?.displayName_OtherLanguage, 180),
-			count: Number(quote.room?.count || 0),
-			nights: quote.nights || 0,
-			currency: quote.currency || hotel.currency || "SAR",
-			total: quote.totals?.totalPriceWithCommission || null,
-			hotelShouldGet: quote.totals?.hotelShouldGet || null,
-			totalCommission: quote.totals?.totalCommission || null,
-		}))
+		.map((quote) => {
+			const inventory = availabilityForRoom(inventoryByRoom, quote.room);
+			const available = quote.available === true && (!inventory || inventory.ok);
+			return {
+				available,
+				reason: quote.reason || inventory?.reason || "",
+				inventoryMessage: inventory?.message || "",
+				roomType: cleanText(quote.room?.roomType, 120),
+				roomId: idText(quote.room?._id),
+				displayName: cleanText(quote.room?.displayName, 180),
+				displayNameOtherLanguage: cleanText(
+					quote.room?.displayName_OtherLanguage,
+					180
+				),
+				count: Number(quote.room?.count || 0),
+				minAvailableBefore: inventory?.minAvailableBefore,
+				requestedRooms: inventory?.requested,
+				nights: quote.nights || 0,
+				currency: quote.currency || hotel.currency || "SAR",
+				total: available ? quote.totals?.totalPriceWithCommission || null : null,
+				hotelShouldGet: available ? quote.totals?.hotelShouldGet || null : null,
+				totalCommission: available ? quote.totals?.totalCommission || null : null,
+			};
+		})
 		.sort((a, b) => {
 			if (a.available !== b.available) return a.available ? -1 : 1;
 			return Number(a.total || 999999) - Number(b.total || 999999);
 		});
+	const selectedInventory = availabilityForRoom(inventoryByRoom, selectedQuote?.room);
+	const selectedAvailable =
+		selectedQuote?.available === true && (!selectedInventory || selectedInventory.ok);
 	return {
 		ok: true,
 		checkinISO: plan.checkinISO,
@@ -784,19 +936,28 @@ function pricingSummaryForStay(hotel = {}, plan = {}) {
 		selectedRoomType: cleanText(selectedRoom?.roomType, 120),
 		selectedQuote: selectedQuote
 			? {
-					available: selectedQuote.available === true,
-					reason: selectedQuote.reason || "",
+					available: selectedAvailable,
+					reason: selectedQuote.reason || selectedInventory?.reason || "",
+					inventoryMessage: selectedInventory?.message || "",
 					roomType: cleanText(selectedQuote.room?.roomType, 120),
 					displayName: cleanText(selectedQuote.room?.displayName, 180),
 					displayNameOtherLanguage: cleanText(
 						selectedQuote.room?.displayName_OtherLanguage,
 						180
 					),
+					minAvailableBefore: selectedInventory?.minAvailableBefore,
+					requestedRooms: selectedInventory?.requested,
 					nights: selectedQuote.nights || 0,
 					currency: selectedQuote.currency || hotel.currency || "SAR",
-					total: selectedQuote.totals?.totalPriceWithCommission || null,
-					hotelShouldGet: selectedQuote.totals?.hotelShouldGet || null,
-					totalCommission: selectedQuote.totals?.totalCommission || null,
+					total: selectedAvailable
+						? selectedQuote.totals?.totalPriceWithCommission || null
+						: null,
+					hotelShouldGet: selectedAvailable
+						? selectedQuote.totals?.hotelShouldGet || null
+						: null,
+					totalCommission: selectedAvailable
+						? selectedQuote.totals?.totalCommission || null
+						: null,
 			  }
 			: null,
 		rooms: rooms.slice(0, 8),
@@ -1011,9 +1172,25 @@ async function composeReply(sc, hotel, agentName) {
 	const language = languageOf(sc, plan);
 	const latestAction = lastGuestAction(sc);
 	const slots = normalizeSlots(plan);
+	let pricingHotel = hotel;
+	if (
+		validStayDates(plan.checkinISO, plan.checkoutISO) &&
+		(plan.needsPricing ||
+			plan.wantsToBook ||
+			["quote_with_pricing", "send_review", "create_reservation_after_button"].includes(
+				plan.nextAction
+			) ||
+			["continue_booking", "confirm_reservation"].includes(latestAction))
+	) {
+		pricingHotel =
+			(await getHotelByIdWithPricingDates(
+				idText(hotel?._id || sc.hotelId),
+				stayDateKeys(plan.checkinISO, plan.checkoutISO)
+			).catch(() => null)) || hotel;
+	}
 	const pricing =
 		plan.needsPricing || validStayDates(plan.checkinISO, plan.checkoutISO)
-			? pricingSummaryForStay(hotel, plan)
+			? await pricingSummaryForStay(pricingHotel, plan)
 			: null;
 
 	if (latestAction === "correction") {
@@ -1042,7 +1219,7 @@ async function composeReply(sc, hotel, agentName) {
 			};
 		}
 		const missing = missingMandatoryDetails(slots);
-		const quote = quoteForCreate(hotel, plan);
+		const quote = quoteForCreate(pricingHotel, plan);
 		if (missing.length || !quote) {
 			const text =
 				plan.askForMissingDetailsReply ||
@@ -1052,7 +1229,7 @@ async function composeReply(sc, hotel, agentName) {
 		}
 		const reservation = await createReservationForCase({
 			caseId: idText(sc),
-			hotel,
+			hotel: pricingHotel,
 			slots: {
 				...slots,
 				roomTypeKey: quote.room?.roomType || slots.roomTypeKey,
@@ -1246,9 +1423,12 @@ async function runTurn(io, caseId) {
 	try {
 		const sc = await getSupportCaseById(caseId);
 		if (!sc) return false;
-		const policy = await ensureAIAllowed(sc.hotelId, sc);
+		const policy = await ensureAIAllowed(sc.hotelId, sc, {
+			includePricingRate: false,
+		});
 		if (!policy.allowed) return false;
-		const hotel = policy.hotel || (sc.hotelId ? await getHotelById(sc.hotelId) : null);
+		const hotel =
+			policy.hotel || (sc.hotelId ? await getHotelByIdForAiContext(sc.hotelId) : null);
 		agentName = agentNameForCase(sc);
 		const latestGuest = latestGuestMessage(sc);
 		const needsGreeting = !hasAiMessage(sc) && !latestGuest;
@@ -1353,7 +1533,9 @@ function wireOpenAiFirstSocket(io) {
 				socket.join(id);
 				const sc = await getSupportCaseById(id);
 				if (!sc) return;
-				const policy = await ensureAIAllowed(sc.hotelId, sc);
+				const policy = await ensureAIAllowed(sc.hotelId, sc, {
+					includePricingRate: false,
+				});
 				if (!policy.allowed) return;
 				if (!hasAiMessage(sc) || latestGuestNeedsAiReply(sc)) {
 					scheduleOpenAiFirstTurn(io, id, { delayMs: 75 });

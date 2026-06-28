@@ -1,17 +1,29 @@
 /** @format */
 // aiagent/core/policy.js
-const { getHotelById, getJanatAiSettings } = require("./db");
+const {
+	getHotelById,
+	getHotelByIdForAiContext,
+	getJanatAiSettings,
+} = require("./db");
 const {
 	isJannatBookingSupportCase,
 } = require("../../services/jannatBookingSupportScope");
 
-async function ensureAIAllowed(hotelId, supportCase = {}) {
+async function ensureAIAllowed(
+	hotelId,
+	supportCase = {},
+	{ includePricingRate = true } = {}
+) {
 	const force =
 		String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
 	const globallyEnabled =
 		force || String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
 	const janatAi = await getJanatAiSettings();
-	const hotel = hotelId ? await getHotelById(hotelId) : null;
+	const hotel = hotelId
+		? includePricingRate
+			? await getHotelById(hotelId)
+			: await getHotelByIdForAiContext(hotelId)
+		: null;
 	const isJannatSupport = isJannatBookingSupportCase(supportCase, hotel);
 	const isClientCase = supportCase?.openedBy === "client";
 	const isOpenCase = !supportCase?.caseStatus || supportCase.caseStatus === "open";
