@@ -6879,6 +6879,16 @@ function hotelBusDetailLine(details = "", lang = "English") {
 function hotelFactNextStepText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	const pivot = nextPivot(st);
+	if (aiReservationReference(sc) || st.waitFor === "post_booking_followup") {
+		if (/arabic/i.test(lang)) return "\u0647\u0644 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0623\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f";
+		if (/spanish/i.test(lang)) return "Puedo ayudarte con algo mas?";
+		if (/french/i.test(lang)) return "Puis-je vous aider avec autre chose ?";
+		if (/urdu/i.test(lang)) return "Kya main aap ki kisi aur cheez mein madad kar sakta/sakti hoon?";
+		if (/hindi/i.test(lang)) return "Kya main aapki kisi aur cheez mein madad kar sakta/sakti hoon?";
+		if (/indonesian/i.test(lang)) return "Apakah ada hal lain yang bisa saya bantu?";
+		if (/malay|malaysia/i.test(lang)) return "Ada apa-apa lagi yang boleh saya bantu?";
+		return "Can I help with anything else?";
+	}
 	if (pivot === "proceed" && bookingNudgePaused(st)) {
 		if (/arabic/i.test(lang)) return "\u0623\u0646\u0627 \u0647\u0646\u0627 \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0623\u062e\u0631\u0649.";
 		if (/spanish/i.test(lang)) return "Estoy aqui si necesitas cualquier otro detalle.";
@@ -7731,8 +7741,11 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		(/arabic/i.test(factLang)
 			? `${respectfulGuestName(sc, st)}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0647\u0630\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0627 \u0644\u0640 ${localizedHotelName(sc, st)} \u062d\u0627\u0644\u064a\u0627. ${hotelFactNextStepText(sc, st)}`
 			: `${respectfulGuestName(sc, st)}, I do not see that exact detail confirmed for ${localizedHotelName(sc, st)} right now. ${hotelFactNextStepText(sc, st)}`);
+	const postBookingFact = Boolean(aiReservationReference(sc) || st.waitFor === "post_booking_followup");
 	const instruction = policyRow
 		? "The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy and fallbackText only. Rewrite into polished professional reception wording in the active language, but keep every policy fact unchanged. Never say 'I checked', 'I found', 'document', 'record', 'hotel details say', or imply an admin/source document. Do not add a link. Do not invent exceptions, deadlines, prices, refunds, or legal wording. If the saved policy only partly answers, state exactly what is known and ask one relevant follow-up."
+		: postBookingFact
+		? "The guest asked a direct factual question about the selected hotel after the reservation was already created. Answer directly using selectedHotelFacts and fallbackText only, then add one short professional line asking whether they need anything else. Do not ask to continue, review, create, finalize, or confirm the reservation again. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links."
 		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links.";
 	const sent = await sendDynamicWrittenReply(io, sc, st, userText, instruction, {
 		latestUserMessage: userText,
@@ -7742,6 +7755,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		selectedHotelFacts: buildActiveHotelFacts(sc, st),
 		fallbackText,
 		nextStep: nextPivot(st),
+		postBookingFact,
 	}, {
 		fallbackText,
 		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
@@ -16340,6 +16354,7 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 function nextReservationDetailStep(st = {}) {
 	if (!hasMandatoryReservationDetails(st)) return "reservation_details";
 	ensureDefaultChildren(st);
+	if (!st.slots?.email && !st.slots?.emailSkipped) return "email_or_skip";
 	return "finalize";
 }
 
