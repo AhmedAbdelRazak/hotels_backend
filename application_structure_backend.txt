@@ -3097,6 +3097,11 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Runtime contract:
   - Opening greetings are local and short. Guest replies are OpenAI-first with
     compact hotel/reservation/conversation context.
+  - Obvious hotel-fact questions for active room types, shuttle/bus, Nusuk,
+    meals, parking, address/location, and walking/driving distance are answered
+    directly from the current hotel document before any OpenAI call. Price,
+    availability, booking, and date-sensitive turns still use the pricing and
+    OpenAI flow.
   - The OpenAI payload is ordered as `reservationDetails`, `hotelDetails`,
     `conversation`, then request metadata. Hotel details are grouped into
     identity, public presentation, room inventory, transportation/pilgrimage,
@@ -3116,3 +3121,6 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - The new engine owns its own per-case scheduling, active-turn lock, typing
     quiet window, and stale-answer check. Controller safety retries are
     legacy-only to avoid duplicate/stacked AI turns.
+  - OpenAI-first reply composition has a bounded deadline. If OpenAI or an
+    internal AI step stalls, the turn appends a hotel-aware fallback response so
+    public chats do not remain unanswered.

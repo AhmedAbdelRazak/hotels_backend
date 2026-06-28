@@ -26,21 +26,26 @@ AI_AGENT_ENGINE=legacy
    new chat does not spend heap on OpenAI before the guest asks a question.
 2. The guest message waits for a short quiet window so replies do not overlap
    with typing.
-3. The engine sends a structured OpenAI payload in this exact order:
+3. Obvious hotel-fact questions are answered directly from the current hotel
+   document before any OpenAI call. This covers active room types, shuttle/bus,
+   Nusuk, meals, parking, address/location, and walking/driving distance. Price,
+   availability, booking, and date-sensitive turns still go through the pricing
+   and OpenAI flow.
+4. The engine sends a structured OpenAI payload in this exact order:
    `reservationDetails`, `hotelDetails`, `conversation`, then request metadata.
    Reservation/update/cancellation/payment questions therefore see booking
    context first; hotel/room/Nusuk/bus/meal/distance/policy questions see the
    confirmed hotel facts next.
-4. Calendar pricing arrays are not included in the first call.
-5. OpenAI returns a strict JSON plan with the topic, language, whether pricing
+5. Calendar pricing arrays are not included in the first call.
+6. OpenAI returns a strict JSON plan with the topic, language, whether pricing
    is needed, dates/room hints if present, guest details, and the next action.
-6. If pricing is needed and dates are known, the backend reloads only those
+7. If pricing is needed and dates are known, the backend reloads only those
    dates, computes a compact room quote summary inside the OpenAI-first engine,
    then sends only that compact summary back to OpenAI for the final
    guest-facing answer.
-7. Reservation creation remains deterministic and only happens after the guest
+8. Reservation creation remains deterministic and only happens after the guest
    presses the `confirm_reservation` quick-reply button on the final review.
-8. Response language is part of the structured context. The engine sends
+9. Response language is part of the structured context. The engine sends
    `requestMetadata.languageSignals` with the support-case preferred language,
    the latest clear guest language, recent guest languages, and a reply hint.
    OpenAI should answer in the latest clear guest language; if the latest turn
@@ -83,6 +88,9 @@ AI_AGENT_ENGINE=legacy
   uses its own per-case timer map, active-turn lock, quiet window, and final
   latest-message check, so the public route should not stack an older retry
   loop beside it.
+- OpenAI-first reply composition has a hard bounded deadline. If OpenAI or any
+  internal AI step stalls, the turn appends a hotel-aware fallback reply instead
+  of leaving the guest with no answer.
 - The legacy scheduler and socket planner remain available without changing
   route/controller imports.
 
@@ -96,6 +104,7 @@ AI_OPENAI_FIRST_TYPING_HOLD_MS=2000
 AI_OPENAI_FIRST_TARGET_MIN_MS=3800
 AI_OPENAI_FIRST_TARGET_MAX_MS=6200
 AI_OPENAI_FIRST_MAX_TOTAL_MS=10000
+AI_OPENAI_FIRST_COMPOSE_TIMEOUT_MS=8500
 AI_OPENAI_FIRST_CONTEXT_TURNS=60
 AI_OPENAI_FIRST_WRITER_KIND=nlu
 ```

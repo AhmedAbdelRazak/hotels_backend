@@ -84,6 +84,10 @@ const MAX_TOTAL_WAIT_MS = intFromEnv("AI_OPENAI_FIRST_MAX_TOTAL_MS", 10000, {
 	min: 4000,
 	max: 15000,
 });
+const COMPOSE_DEADLINE_MS = intFromEnv("AI_OPENAI_FIRST_COMPOSE_TIMEOUT_MS", 8500, {
+	min: 2500,
+	max: 12000,
+});
 const MAX_CONVERSATION_TURNS = intFromEnv("AI_OPENAI_FIRST_CONTEXT_TURNS", 60, {
 	min: 12,
 	max: 120,
@@ -149,6 +153,18 @@ function memoryTrace(label, caseId = "", extra = {}) {
 
 function sleep(ms = 0) {
 	return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+}
+
+function withTimeout(promise, timeoutMs, label = "operation") {
+	let timer = null;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => {
+			reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+		}, Math.max(1, Number(timeoutMs) || 1));
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		if (timer) clearTimeout(timer);
+	});
 }
 
 function randomBetween(min, max) {
@@ -580,6 +596,253 @@ function buildHotelContext(hotel = null) {
 			hotelPolicyQA: activeHotelPolicyQA(hotel.hotelPolicyQA || []),
 			defaultCancellationPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
 		},
+	};
+}
+
+function latestGuestText(sc = {}, max = 1600) {
+	return cleanText(latestGuestMessage(sc)?.message || "", max);
+}
+
+function titleText(value = "") {
+	return cleanText(value, 180).replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+function replyIsArabic(sc = {}, language = "") {
+	const lang = String(language || languageOf(sc, {})).toLowerCase();
+	return lang.includes("arabic") || /\bar\b/.test(lang) || /[\u0600-\u06ff]/.test(latestGuestText(sc));
+}
+
+function hotelDisplayName(hotel = {}, arabic = false) {
+	if (arabic) {
+		return (
+			cleanText(hotel.hotelName_OtherLanguage, 160) ||
+			titleText(hotel.hotelName) ||
+			"\u0627\u0644\u0641\u0646\u062f\u0642"
+		);
+	}
+	return (
+		titleText(hotel.hotelName) ||
+		cleanText(hotel.hotelName_OtherLanguage, 160) ||
+		"the hotel"
+	);
+}
+
+function naturalJoin(items = [], { arabic = false } = {}) {
+	const list = items.map((item) => cleanText(item, 160)).filter(Boolean);
+	if (list.length <= 1) return list[0] || "";
+	if (list.length === 2) return list.join(arabic ? " \u0648 " : " and ");
+	const last = list[list.length - 1];
+	const head = list.slice(0, -1).join(arabic ? "\u060c " : ", ");
+	return `${head}${arabic ? "\u060c \u0648 " : ", and "}${last}`;
+}
+
+function activeHotelRooms(hotel = {}) {
+	return (hotel.roomCountDetails || [])
+		.filter((room) => room && room.activeRoom === true)
+		.map((room) => ({
+			roomType: cleanText(room.roomType, 120),
+			displayName: cleanText(room.displayName, 180),
+			displayNameOtherLanguage: cleanText(room.displayName_OtherLanguage, 180),
+			count: Math.max(0, Number(room.count || 0) || 0),
+		}));
+}
+
+function roomDisplayName(room = {}, arabic = false) {
+	if (arabic) {
+		return room.displayNameOtherLanguage || room.displayName || room.roomType;
+	}
+	return room.displayName || room.displayNameOtherLanguage || room.roomType;
+}
+
+function textHas(text = "", pattern) {
+	return pattern.test(String(text || "").toLowerCase());
+}
+
+function directBookingNote(hotel = {}, arabic = false) {
+	const name = `${hotel.hotelName || ""} ${hotel.hotelName_OtherLanguage || ""}`.toLowerCase();
+	if (!name.includes("ajyad") && !/[\u0623\u0627]\u062c\u064a\u0627\u062f/.test(name)) return "";
+	const walking = cleanText(hotel.distances?.walkingToElHaram, 60);
+	if (arabic) {
+		return walking
+			? ` ${hotelDisplayName(hotel, true)} \u0645\u0645\u064a\u0632 \u0641\u064a \u0623\u062c\u064a\u0627\u062f\u060c \u0648\u0627\u0644\u062d\u0631\u0645 \u0639\u0644\u0649 \u0628\u0639\u062f \u0646\u062d\u0648 ${walking} \u0645\u0634\u064a\u0627\u064b.`
+			: ` ${hotelDisplayName(hotel, true)} \u0645\u0645\u064a\u0632 \u0641\u064a \u0623\u062c\u064a\u0627\u062f \u0648\u0645\u0646\u0627\u0633\u0628 \u0644\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631.`;
+	}
+	return walking
+		? ` ${hotelDisplayName(hotel)} is a strong direct-booking choice in Ajyad, about ${walking} walking to Al Haram.`
+		: ` ${hotelDisplayName(hotel)} is a strong direct-booking choice in Ajyad.`;
+}
+
+function fastHotelFactReply(sc = {}, hotel = {}, agentName = "Aisha") {
+	if (!hotel) return null;
+	const text = latestGuestText(sc);
+	if (!text) return null;
+	const language = languageOf(sc, {});
+	const arabic = replyIsArabic(sc, language);
+	const hotelName = hotelDisplayName(hotel, arabic);
+	const priceLike = textHas(
+		text,
+		/\b(price|prices|cost|rate|rates|total|discount|cheap|expensive|book|booking|reserve|reservation|check[- ]?in|check[- ]?out|date|dates)\b|\u0628\u0643\u0627\u0645|\u0633\u0639\u0631|\u0627\u0633\u0639\u0627\u0631|\u0623\u0633\u0639\u0627\u0631|\u062d\u062c\u0632|\u0627\u062d\u062c\u0632|\u062a\u0627\u0631\u064a\u062e|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c/
+	);
+	const roomLike = textHas(
+		text,
+		/\b(room|rooms|suite|suites|bed|beds|type|types)\b|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0623\u0646\u0648\u0627\u0639|\u0627\u0646\u0648\u0627\u0639|\u0646\u0648\u0639/
+	);
+	if (roomLike && !priceLike) {
+		const rooms = activeHotelRooms(hotel);
+		if (!rooms.length) return null;
+		const roomNames = rooms.map((room) => roomDisplayName(room, arabic));
+		if (arabic) {
+			return {
+				text: `\u0644\u062f\u064a\u0646\u0627 \u0641\u064a ${hotelName}: ${naturalJoin(roomNames, {
+					arabic,
+				})}.${directBookingNote(hotel, true)} \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u062f\u0642\u0629.`,
+				language,
+				quickReplies: [],
+			};
+		}
+		return {
+			text: `At ${hotelName}, we have ${naturalJoin(roomNames)}.${directBookingNote(
+				hotel,
+				false
+			)} Send your check-in and check-out dates and I will check exact availability and price.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	const busLike = textHas(
+		text,
+		/\b(bus|shuttle|transport|transfer)\b|\u0628\u0627\u0635|\u062d\u0627\u0641\u0644|\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a/
+	);
+	if (busLike) {
+		const available = hotel.hasBusService === true;
+		const details = cleanText(hotel.busDetails, 320);
+		return {
+			text: arabic
+				? available
+					? `${hotelName} \u064a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u0644\u0644\u0636\u064a\u0648\u0641. ${details || "\u0633\u0646\u0633\u0627\u0639\u062f\u0643 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0639\u0646\u062f \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632."}`
+					: `${hotelName} \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0647 \u0628\u0627\u0635 \u0645\u0624\u0643\u062f \u062d\u0627\u0644\u064a\u0627\u064b\u060c \u0644\u0643\u0646 \u0633\u0646\u0633\u0627\u0639\u062f\u0643 \u0628\u0623\u0641\u0636\u0644 \u0637\u0631\u064a\u0642\u0629 \u0644\u0644\u0648\u0635\u0648\u0644.`
+				: available
+				? `${hotelName} provides a shuttle/bus service for guests. ${details || "We can share the exact details while arranging your stay."}`
+				: `${hotelName} does not currently show a confirmed shuttle service, but we can help you with the best transport option.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	const nusukLike = textHas(text, /\b(nusuk|permit|permits)\b|\u0646\u0633\u0643|\u062a\u0635\u0631\u064a\u062d/);
+	if (nusukLike) {
+		const available = hotel.isNusuk === true;
+		const details = cleanText(hotel.isNusukText, 320);
+		return {
+			text: arabic
+				? available
+					? `${hotelName}: \u0646\u0633\u0643 \u0645\u062a\u0627\u062d. ${details || "\u0646\u0633\u0627\u0639\u062f\u0643 \u0628\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0628\u0639\u062f \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632."}`
+					: `${hotelName}: \u0644\u0627 \u064a\u0638\u0647\u0631 \u0623\u0646 \u0646\u0633\u0643 \u0645\u062a\u0627\u062d \u062d\u0627\u0644\u064a\u0627\u064b.`
+				: available
+				? `${hotelName}: Nusuk is available. ${details || "We can help with the details after confirming the reservation."}`
+				: `${hotelName}: Nusuk is not currently shown as available.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	const mealLike = textHas(
+		text,
+		/\b(meal|meals|breakfast|food|restaurant)\b|\u0648\u062c\u0628|\u0641\u0637\u0648\u0631|\u0627\u0643\u0644|\u0623\u0643\u0644|\u0645\u0637\u0639\u0645/
+	);
+	if (mealLike) {
+		const available = hotel.hasMealsService === true;
+		const details = cleanText(hotel.mealsDetails, 320);
+		return {
+			text: arabic
+				? available
+					? `${hotelName} \u064a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0648\u062c\u0628\u0627\u062a. ${details}`
+					: `${hotelName} \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0647 \u0648\u062c\u0628\u0627\u062a \u0623\u0648 \u0625\u0641\u0637\u0627\u0631 \u0645\u0624\u0643\u062f \u062d\u0627\u0644\u064a\u0627\u064b.`
+				: available
+				? `${hotelName} provides meals. ${details}`
+				: `${hotelName} does not currently show confirmed meals or breakfast service.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	const parkingLike = textHas(text, /\b(parking|park|car)\b|\u0645\u0648\u0642\u0641|\u0645\u0648\u0627\u0642\u0641|\u0633\u064a\u0627\u0631/);
+	if (parkingLike) {
+		const available = hotel.parkingLot === true;
+		return {
+			text: arabic
+				? available
+					? `${hotelName} \u064a\u0648\u0641\u0631 \u0645\u0648\u0642\u0641 \u0633\u064a\u0627\u0631\u0627\u062a.`
+					: `${hotelName} \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0647 \u0645\u0648\u0642\u0641 \u0633\u064a\u0627\u0631\u0627\u062a \u0645\u0624\u0643\u062f \u062d\u0627\u0644\u064a\u0627\u064b.`
+				: available
+				? `${hotelName} has parking available.`
+				: `${hotelName} does not currently show confirmed parking.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	const distanceLike = textHas(
+		text,
+		/\b(distance|far|near|walk|walking|drive|driving|minutes|haram)\b|\u0627\u0644\u062d\u0631\u0645|\u0642\u0631\u064a\u0628|\u0628\u0639\u064a\u062f|\u0645\u0634\u064a|\u062f\u0642\u0627\u0626\u0642|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629|\u0627\u0644\u0645\u0633\u0627\u0641\u0629/
+	);
+	if (distanceLike) {
+		const walking = cleanText(hotel.distances?.walkingToElHaram, 60);
+		const driving = cleanText(hotel.distances?.drivingToElHaram, 60);
+		if (walking || driving) {
+			return {
+				text: arabic
+					? `${hotelName} \u064a\u0628\u0639\u062f \u062d\u0648\u0627\u0644\u064a ${walking || "\u063a\u064a\u0631 \u0645\u062d\u062f\u062f"} \u0645\u0634\u064a\u0627\u064b \u0648${driving || "\u063a\u064a\u0631 \u0645\u062d\u062f\u062f"} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u0639\u0646 \u0627\u0644\u062d\u0631\u0645.`
+					: `${hotelName} is about ${walking || "not specified"} walking and ${driving || "not specified"} driving from Al Haram.`,
+				language,
+				quickReplies: [],
+			};
+		}
+	}
+
+	const addressLike = textHas(text, /\b(address|location|where|map)\b|\u0639\u0646\u0648\u0627\u0646|\u0645\u0648\u0642\u0639|\u0648\u064a\u0646|\u0641\u064a\u0646|\u062e\u0631\u064a\u0637/);
+	if (addressLike && hotel.hotelAddress) {
+		return {
+			text: arabic
+				? `${hotelName} \u0639\u0646\u0648\u0627\u0646\u0647: ${cleanText(hotel.hotelAddress, 320)}.`
+				: `${hotelName} address is: ${cleanText(hotel.hotelAddress, 320)}.`,
+			language,
+			quickReplies: [],
+		};
+	}
+
+	return null;
+}
+
+function fallbackReply(sc = {}, hotel = {}, agentName = "Aisha", error = null) {
+	const fastReply = fastHotelFactReply(sc, hotel, agentName);
+	if (fastReply) return fastReply;
+	const language = languageOf(sc, {});
+	const arabic = replyIsArabic(sc, language);
+	const hotelName = hotelDisplayName(hotel, arabic);
+	const text = latestGuestText(sc);
+	const asksPrice = textHas(
+		text,
+		/\b(price|prices|cost|rate|rates|available|availability|book|booking|reserve|reservation)\b|\u0628\u0643\u0627\u0645|\u0633\u0639\u0631|\u0623\u0633\u0639\u0627\u0631|\u0627\u0633\u0639\u0627\u0631|\u0645\u062a\u0627\u062d|\u062a\u0648\u0641\u0631|\u062d\u062c\u0632/
+	);
+	const errorHint = cleanText(error?.message || error, 160);
+	if (arabic) {
+		return {
+			text: asksPrice
+				? `\u0623\u0646\u0627 \u0645\u0639\u0643. \u0644\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u062f\u0642\u0629 \u0641\u064a ${hotelName}\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629.`
+				: `\u0623\u0646\u0627 \u0645\u0639\u0643 \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0627\u0644\u063a\u0631\u0641\u060c \u0627\u0644\u0623\u0633\u0639\u0627\u0631\u060c \u0627\u0644\u062a\u0648\u0641\u0631\u060c \u0627\u0644\u0628\u0627\u0635\u060c \u0646\u0633\u0643\u060c \u0648\u0627\u0644\u062d\u062c\u0632. \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f\u0647\u061f`,
+			language,
+			quickReplies: [],
+		};
+	}
+	return {
+		text: asksPrice
+			? `I am with you. To check exact price and availability at ${hotelName}, please send the check-in date, checkout date, and room type.`
+			: `I am with you from ${hotelName} reception and reservations. I can help with rooms, prices, availability, shuttle, Nusuk, and booking. What would you like to check?`,
+		language,
+		quickReplies: [],
+		_errorHint: errorHint,
 	};
 }
 
@@ -1490,6 +1753,13 @@ async function callReservationCreateIssueWriterOpenAI({
 
 async function composeReply(sc, hotel, agentName) {
 	memoryTrace("compose:start", sc?._id);
+	const fastReply = fastHotelFactReply(sc, hotel, agentName);
+	if (fastReply) {
+		memoryTrace("compose:fast_fact", sc?._id, {
+			textLength: fastReply.text.length,
+		});
+		return fastReply;
+	}
 	const bundle = await contextBundle(sc, hotel);
 	memoryTrace("compose:after_context", sc?._id, {
 		conversationTurns: Array.isArray(bundle.conversation)
@@ -1816,6 +2086,8 @@ async function runTurn(io, caseId) {
 	activeTurns.set(caseId, { queued: false });
 	let typingOn = false;
 	let agentName = "Aisha";
+	let currentHotel = null;
+	let turnStartedAt = new Date();
 	try {
 		memoryTrace("turn:start", caseId);
 		const sc = await getSupportCaseById(caseId);
@@ -1836,6 +2108,7 @@ async function runTurn(io, caseId) {
 		if (!policy.allowed) return false;
 		const hotel =
 			policy.hotel || (sc.hotelId ? await getHotelByIdForAiContext(sc.hotelId) : null);
+		currentHotel = hotel;
 		agentName = agentNameForCase(sc);
 		const latestGuest = latestGuestMessage(sc);
 		const needsGreeting = !hasAiMessage(sc) && !latestGuest;
@@ -1851,7 +2124,7 @@ async function runTurn(io, caseId) {
 			}
 		}
 
-		const turnStartedAt = new Date();
+		turnStartedAt = new Date();
 		const startedMs = now();
 		const latestGuestText = cleanText(latestGuest?.message, 1200);
 		const targetReplyMs = needsGreeting
@@ -1866,7 +2139,11 @@ async function runTurn(io, caseId) {
 					language: languageOf(sc, {}),
 					quickReplies: [],
 			  }
-			: await composeReply(sc, hotel, agentName);
+			: await withTimeout(
+					composeReply(sc, hotel, agentName),
+					COMPOSE_DEADLINE_MS,
+					"OpenAI-first reply composition"
+			  );
 		memoryTrace("turn:after_response", caseId, {
 			textLength: response.text?.length || 0,
 			quickReplies: Array.isArray(response.quickReplies)
@@ -1907,6 +2184,42 @@ async function runTurn(io, caseId) {
 			caseId,
 			error: error?.message || error,
 		});
+		try {
+			const fresh = await getSupportCaseById(caseId);
+			if (fresh && latestGuestNeedsAiReply(fresh)) {
+				const policy = await ensureAIAllowed(fresh.hotelId, fresh, {
+					includePricingRate: false,
+				}).catch(() => ({ allowed: false, hotel: null }));
+				if (policy.allowed) {
+					const hotel =
+						policy.hotel ||
+						currentHotel ||
+						(fresh.hotelId ? await getHotelByIdForAiContext(fresh.hotelId) : null);
+					const latestGuest = latestGuestMessage(fresh);
+					const latestGuestText = cleanText(latestGuest?.message, 1200);
+					const response = fallbackReply(fresh, hotel, agentName, error);
+					if (typingOn) {
+						emitTyping(io, caseId, agentName, false);
+						typingOn = false;
+					}
+					await appendAiMessage(io, fresh, response.text, {
+						language: response.language,
+						quickReplies: response.quickReplies || [],
+						requireLatestGuestText: latestGuestText,
+						turnStartedAt,
+					});
+					memoryTrace("turn:after_fallback_append", caseId, {
+						textLength: response.text?.length || 0,
+					});
+					return true;
+				}
+			}
+		} catch (fallbackError) {
+			console.error("[aiagent:openai-first] fallback append failed:", {
+				caseId,
+				error: fallbackError?.message || fallbackError,
+			});
+		}
 		return false;
 	} finally {
 		if (typingOn) emitTyping(io, caseId, agentName, false);
