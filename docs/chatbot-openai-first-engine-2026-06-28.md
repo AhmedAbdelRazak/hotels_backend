@@ -60,10 +60,14 @@ AI_OPENAI_FIRST_TARGET_MIN_MS=3800
 AI_OPENAI_FIRST_TARGET_MAX_MS=6200
 AI_OPENAI_FIRST_MAX_TOTAL_MS=10000
 AI_OPENAI_FIRST_CONTEXT_TURNS=60
+AI_OPENAI_FIRST_WRITER_KIND=nlu
 ```
 
 OpenAI request timeout remains centralized in `aiagent/core/openai.js` through
 `OPENAI_CHATBOT_TIMEOUT_MS` / `OPENAI_TIMEOUT_MS` and is clamped to 1.5-6s.
+The OpenAI-first engine defaults guest-facing prose calls to the fast chatbot
+kind (`nlu`) for production latency and heap stability; set
+`AI_OPENAI_FIRST_WRITER_KIND=writer` only after measuring memory and latency.
 
 ## Verification
 

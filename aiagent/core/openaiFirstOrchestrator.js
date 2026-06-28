@@ -83,6 +83,8 @@ const MAX_CONVERSATION_TURNS = intFromEnv("AI_OPENAI_FIRST_CONTEXT_TURNS", 60, {
 	min: 12,
 	max: 120,
 });
+const OPENAI_FIRST_WRITER_KIND =
+	String(process.env.AI_OPENAI_FIRST_WRITER_KIND || "nlu").trim() || "nlu";
 const CONFIRMATION_DISPATCH_DELAY_MS = intFromEnv(
 	"AI_OPENAI_FIRST_CONFIRMATION_DISPATCH_DELAY_MS",
 	1000,
@@ -774,7 +776,12 @@ async function callPricingWriterOpenAI({ bundle, plan, pricing, missing, agentNa
 				}),
 			},
 		],
-		{ kind: "writer", temperature: 0.35, max_tokens: 520, reasoning_effort: "low" }
+		{
+			kind: OPENAI_FIRST_WRITER_KIND,
+			temperature: 0.35,
+			max_tokens: 420,
+			reasoning_effort: "low",
+		}
 	);
 	return cleanText(raw, 2400);
 }
@@ -804,7 +811,12 @@ async function callReviewWriterOpenAI({ bundle, plan, pricing, slots, agentName 
 				}),
 			},
 		],
-		{ kind: "writer", temperature: 0.25, max_tokens: 520, reasoning_effort: "low" }
+		{
+			kind: OPENAI_FIRST_WRITER_KIND,
+			temperature: 0.25,
+			max_tokens: 420,
+			reasoning_effort: "low",
+		}
 	);
 	return cleanText(raw, 2400);
 }
@@ -847,7 +859,12 @@ async function callReservationCreatedWriterOpenAI({
 				}),
 			},
 		],
-		{ kind: "writer", temperature: 0.3, max_tokens: 520, reasoning_effort: "low" }
+		{
+			kind: OPENAI_FIRST_WRITER_KIND,
+			temperature: 0.3,
+			max_tokens: 420,
+			reasoning_effort: "low",
+		}
 	);
 	return cleanText(raw, 2400);
 }
@@ -1155,7 +1172,12 @@ async function draftGreeting(sc, hotel, agentName) {
 			},
 			{ role: "user", content: JSON.stringify(bundle) },
 		],
-		{ kind: "writer", temperature: 0.5, max_tokens: 120, reasoning_effort: "low" }
+		{
+			kind: OPENAI_FIRST_WRITER_KIND,
+			temperature: 0.5,
+			max_tokens: 120,
+			reasoning_effort: "low",
+		}
 	);
 	return cleanText(raw, 800);
 }
