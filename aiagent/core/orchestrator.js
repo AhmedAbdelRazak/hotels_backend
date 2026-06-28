@@ -16734,8 +16734,11 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 async function answerDiscountQuestion(io, sc, st, userText = "") {
 	const discount = discountDisplayContext(st);
 	const activeHotelPositioning = hotelPositioningContext(sc, st);
+	const discountLang = languageOf(sc, st);
 	const zadAjyadValueText =
-		"Sir, Zad Ajyad is in Ajyad near Al Haram and direct hotel booking helps avoid third-party commission or fee layers. Depending on dates and availability, direct reservations can often be about 25-30% better value than third-party channels, while the displayed total remains the confirmed system price.";
+		/arabic/i.test(discountLang)
+			? "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0643\u0631\u064a\u0645\u060c \u0632\u0627\u062f \u0623\u062c\u064a\u0627\u062f \u0641\u064a \u0645\u0646\u0637\u0642\u0629 \u0623\u062c\u064a\u0627\u062f \u0642\u0631\u064a\u0628\u0627 \u0645\u0646 \u0627\u0644\u062d\u0631\u0645\u060c \u0648\u0627\u0644\u062d\u062c\u0632 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0639 \u0627\u0644\u0641\u0646\u062f\u0642 \u064a\u0633\u0627\u0639\u062f \u0639\u0644\u0649 \u062a\u062c\u0646\u0628 \u0639\u0645\u0648\u0644\u0627\u062a \u0648\u0631\u0633\u0648\u0645 \u0627\u0644\u0623\u0637\u0631\u0627\u0641 \u0627\u0644\u062e\u0627\u0631\u062c\u064a\u0629. \u062d\u0633\u0628 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0627\u0644\u062a\u0648\u0641\u0631\u060c \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631 \u064a\u0643\u0648\u0646 \u063a\u0627\u0644\u0628\u0627 \u0642\u064a\u0645\u062a\u0647 \u0623\u0641\u0636\u0644 \u0628\u062d\u0648\u0627\u0644\u064a 25-30% \u0645\u0642\u0627\u0631\u0646\u0629 \u0628\u0642\u0646\u0648\u0627\u062a \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u062e\u0627\u0631\u062c\u064a\u0629\u060c \u0645\u0639 \u0627\u0644\u0627\u0644\u062a\u0632\u0627\u0645 \u0628\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0638\u0627\u0647\u0631 \u0641\u064a \u0627\u0644\u0646\u0638\u0627\u0645."
+			: "Sir, Zad Ajyad is in Ajyad near Al Haram and direct hotel booking helps avoid third-party commission or fee layers. Depending on dates and availability, direct reservations can often be about 25-30% better value than third-party channels, while the displayed total remains the confirmed system price.";
 	const fallbackText = activeHotelPositioning
 		? zadAjyadValueText
 		: discount.displayedPerNight
