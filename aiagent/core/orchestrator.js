@@ -7809,29 +7809,13 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 			? `${respectfulGuestName(sc, st)}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0647\u0630\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0645\u0624\u0643\u062f\u0627 \u0644\u0640 ${localizedHotelName(sc, st)} \u062d\u0627\u0644\u064a\u0627. ${hotelFactNextStepText(sc, st)}`
 			: `${respectfulGuestName(sc, st)}, I do not see that exact detail confirmed for ${localizedHotelName(sc, st)} right now. ${hotelFactNextStepText(sc, st)}`);
 	const postBookingFact = Boolean(aiReservationReference(sc) || st.waitFor === "post_booking_followup");
-	const instruction = policyRow
-		? "The guest asked about the selected hotel's policy, terms, or house rules. Answer directly from selectedHotelPolicy and fallbackText only. Rewrite into polished professional reception wording in the active language, but keep every policy fact unchanged. Never say 'I checked', 'I found', 'document', 'record', 'hotel details say', or imply an admin/source document. Do not add a link. Do not invent exceptions, deadlines, prices, refunds, or legal wording. If the saved policy only partly answers, state exactly what is known and ask one relevant follow-up."
-		: postBookingFact
-		? "The guest asked a direct factual question about the selected hotel after the reservation was already created. Answer directly using selectedHotelFacts and fallbackText only, then add one short professional line asking whether they need anything else. Do not ask to continue, review, create, finalize, or confirm the reservation again. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links."
-		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links.";
-	const positioningInstruction = activeHotelPositioning
-		? " If activeHotelPositioning is supplied, answer the factual question first, then add at most one soft Zad Ajyad location/direct-booking value line only when it fits naturally. Do not exaggerate, compare unsupported hotels, or promise guaranteed savings."
-		: "";
-	const sent = await sendDynamicWrittenReply(io, sc, st, userText, `${instruction}${positioningInstruction}`, {
-		latestUserMessage: userText,
-		selectedHotel: localizedHotelName(sc, st),
-		selectedHotelPolicy: policyRow || null,
-		defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
-		selectedHotelFacts: buildActiveHotelFacts(sc, st),
-		activeHotelPositioning,
-		fallbackText,
-		nextStep: nextPivot(st),
-		postBookingFact,
-		responsePositioningInstruction: positioningInstruction,
-	}, {
-		fallbackText,
-		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	const sent = await humanSend(io, sc, st, fallbackText, {
+		quickReplies: postBookingFact
+			? []
+			: cancellationPolicyQuickReplies(sc, st, previousWaitFor),
+		fast: true,
 		scheduleIdle: policyRow ? false : true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 	});
 	if (!sent) return false;
 	if (aiReservationReference(sc)) {
@@ -16717,12 +16701,14 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				}
 				if (!st.finalReviewSentAt && st.quote?.data?.available) {
 					await sendReservationReview(io, sc, st, st.quote.data, {
+						fast: true,
 						targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 					});
 					return true;
 				}
 				await humanSend(io, sc, st, finalReservationPrompt(sc, st), {
 					quickReplies: finalReservationQuickReplies(sc, st),
+					fast: true,
 					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 				});
 				stampAsk(st, "finalize");
@@ -16765,6 +16751,7 @@ async function answerDiscountQuestion(io, sc, st, userText = "") {
 			: [];
 	await humanSend(io, sc, st, fallbackText, {
 		quickReplies,
+		fast: true,
 		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 	});
 }
@@ -17289,6 +17276,57 @@ async function planTurn(io, sc) {
 				caseId
 			);
 			if (directStayQuoteHandled) return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			wantsDiscountQuestion(userText)
+		) {
+			logStep(caseId, "discount.question", { source: "early_deterministic" });
+			await answerDiscountQuestion(io, sc, st, userText);
+			return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			selectedHotelFactQuestionText(userText) &&
+			(!explicitlyExistingReservationIntent(userText) ||
+				cancellationRefundPolicyQuestionText(userText))
+		) {
+			logStep(caseId, "selected_hotel.fact_early_deterministic", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
+		if (
+			userText &&
+			isReservationDetailStep(st) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			((st.waitFor === "email_or_skip" &&
+				(lastGuestAction(sc) === "skip_email" ||
+					emailSkipText(userText) ||
+					Boolean(latestEmailFromText(userText)))) ||
+				st.waitFor === "finalize")
+		) {
+			updateActiveLanguageFromText(sc, st, userText);
+			const handledReservationDetail = await handleReservationDetailStep(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledReservationDetail) return;
 		}
 		if (userText) {
 			hydrateKnownSlotsFromConversation(sc, st, {

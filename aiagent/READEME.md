@@ -90,6 +90,8 @@
   - Commission = `room.roomCommission || hotel.commission || 10`.
   - Discount/value objections use deterministic approved copy so guests get a
     fast answer and the active booking quick replies remain visible.
+  - Direct selected-hotel fact questions such as bus, distance, address, meals,
+    Nusuk, and policy answer from saved facts before broad slot hydration.
 - **Flow**:
   1. Understand and answer the guest's latest question first
   2. Room type/capacity if the guest asks about it first
