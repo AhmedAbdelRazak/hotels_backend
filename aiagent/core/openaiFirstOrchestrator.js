@@ -124,6 +124,29 @@ function now() {
 	return Date.now();
 }
 
+function openAiFirstMemoryDebugEnabled() {
+	return (
+		String(process.env.AI_OPENAI_FIRST_MEMORY_DEBUG || "")
+			.trim()
+			.toLowerCase() === "true"
+	);
+}
+
+function memoryTrace(label, caseId = "", extra = {}) {
+	if (!openAiFirstMemoryDebugEnabled()) return;
+	const usage = process.memoryUsage();
+	console.log("[aiagent:openai-first:mem]", {
+		label,
+		caseId: idText(caseId),
+		rssMB: Math.round(usage.rss / 1024 / 1024),
+		heapUsedMB: Math.round(usage.heapUsed / 1024 / 1024),
+		heapTotalMB: Math.round(usage.heapTotal / 1024 / 1024),
+		externalMB: Math.round(usage.external / 1024 / 1024),
+		arrayBuffersMB: Math.round((usage.arrayBuffers || 0) / 1024 / 1024),
+		...extra,
+	});
+}
+
 function sleep(ms = 0) {
 	return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
 }
@@ -1326,8 +1349,19 @@ async function callReservationCreateIssueWriterOpenAI({
 }
 
 async function composeReply(sc, hotel, agentName) {
+	memoryTrace("compose:start", sc?._id);
 	const bundle = await contextBundle(sc, hotel);
+	memoryTrace("compose:after_context", sc?._id, {
+		conversationTurns: Array.isArray(bundle.conversation)
+			? bundle.conversation.length
+			: 0,
+	});
 	const plan = await callPlanOpenAI(bundle, agentName);
+	memoryTrace("compose:after_plan", sc?._id, {
+		nextAction: plan.nextAction,
+		needsPricing: plan.needsPricing,
+		hasDates: validStayDates(plan.checkinISO, plan.checkoutISO),
+	});
 	const language = languageOf(sc, plan);
 	const latestAction = lastGuestAction(sc);
 	const slots = normalizeSlots(plan);
@@ -1341,16 +1375,37 @@ async function composeReply(sc, hotel, agentName) {
 			) ||
 			["continue_booking", "confirm_reservation"].includes(latestAction))
 	) {
+		memoryTrace("compose:before_pricing_hotel", sc?._id, {
+			dates: stayDateKeys(plan.checkinISO, plan.checkoutISO).length,
+		});
 		pricingHotel =
 			(await getHotelByIdWithPricingDates(
 				idText(hotel?._id || sc.hotelId),
 				stayDateKeys(plan.checkinISO, plan.checkoutISO)
 			).catch(() => null)) || hotel;
+		memoryTrace("compose:after_pricing_hotel", sc?._id, {
+			rooms: Array.isArray(pricingHotel?.roomCountDetails)
+				? pricingHotel.roomCountDetails.length
+				: 0,
+			pricingRows: Array.isArray(pricingHotel?.roomCountDetails)
+				? pricingHotel.roomCountDetails.reduce(
+						(sum, room) =>
+							sum + (Array.isArray(room?.pricingRate) ? room.pricingRate.length : 0),
+						0
+				  )
+				: 0,
+		});
 	}
 	const pricing =
 		plan.needsPricing || validStayDates(plan.checkinISO, plan.checkoutISO)
 			? await pricingSummaryForStay(pricingHotel, plan)
 			: null;
+	if (pricing) {
+		memoryTrace("compose:after_pricing_summary", sc?._id, {
+			rooms: Array.isArray(pricing.rooms) ? pricing.rooms.length : 0,
+			selectedAvailable: pricing.selectedQuote?.available,
+		});
+	}
 
 	if (latestAction === "correction") {
 		return {
@@ -1488,12 +1543,18 @@ async function composeReply(sc, hotel, agentName) {
 							].includes(item)
 				  )
 				: [];
+		memoryTrace("compose:before_pricing_writer", sc?._id, {
+			missing: missing.length,
+		});
 		const text = await callPricingWriterOpenAI({
 			bundle,
 			plan,
 			pricing,
 			missing,
 			agentName,
+		});
+		memoryTrace("compose:after_pricing_writer", sc?._id, {
+			textLength: text.length,
 		});
 		const anyAvailable = Boolean(
 			pricing?.selectedQuote?.available || pricing?.rooms?.some((room) => room.available)
@@ -1616,10 +1677,21 @@ async function runTurn(io, caseId) {
 	let typingOn = false;
 	let agentName = "Aisha";
 	try {
+		memoryTrace("turn:start", caseId);
 		const sc = await getSupportCaseById(caseId);
+		memoryTrace("turn:after_case", caseId, {
+			conversationTurns: Array.isArray(sc?.conversation) ? sc.conversation.length : 0,
+		});
 		if (!sc) return false;
 		const policy = await ensureAIAllowed(sc.hotelId, sc, {
 			includePricingRate: false,
+		});
+		memoryTrace("turn:after_policy", caseId, {
+			allowed: policy.allowed,
+			hasHotel: Boolean(policy.hotel),
+			rooms: Array.isArray(policy.hotel?.roomCountDetails)
+				? policy.hotel.roomCountDetails.length
+				: 0,
 		});
 		if (!policy.allowed) return false;
 		const hotel =
@@ -1655,6 +1727,12 @@ async function runTurn(io, caseId) {
 					quickReplies: [],
 			  }
 			: await composeReply(sc, hotel, agentName);
+		memoryTrace("turn:after_response", caseId, {
+			textLength: response.text?.length || 0,
+			quickReplies: Array.isArray(response.quickReplies)
+				? response.quickReplies.length
+				: 0,
+		});
 
 		const elapsed = now() - startedMs;
 		if (elapsed < targetReplyMs && elapsed < MAX_TOTAL_WAIT_MS) {
@@ -1682,6 +1760,7 @@ async function runTurn(io, caseId) {
 			requireLatestGuestText: needsGreeting ? "" : latestGuestText,
 			turnStartedAt,
 		});
+		memoryTrace("turn:after_append", caseId);
 		return true;
 	} catch (error) {
 		console.error("[aiagent:openai-first] turn failed:", {
