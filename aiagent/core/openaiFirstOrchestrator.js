@@ -912,26 +912,35 @@ function selectionMatchesRoom(selection = {}, room = {}) {
 	return false;
 }
 
-async function inventoryByRoomForStay(hotel = {}, plan = {}) {
+async function inventoryByRoomForStay(hotel = {}, plan = {}, { caseId = "" } = {}) {
 	const dates = stayDateKeys(plan.checkinISO, plan.checkoutISO);
 	const hotelId = idText(hotel?._id);
 	if (!hotelId || !dates.length) return new Map();
 	const startDate = new Date(`${dates[0]}T00:00:00.000Z`);
 	const endDate = new Date(`${dates[dates.length - 1]}T23:59:59.999Z`);
+	memoryTrace("inventory:before_query", caseId, { hotelId, dates: dates.length });
 	const reservations = await Reservations.find({
 		hotelId,
 		checkin_date: { $lt: endDate },
 		checkout_date: { $gt: startDate },
 	})
 		.select(RESERVATION_INVENTORY_SELECT)
+		.limit(1000)
 		.maxTimeMS(2500)
 		.lean()
 		.exec()
 		.catch(() => []);
+	memoryTrace("inventory:after_query", caseId, {
+		reservations: Array.isArray(reservations) ? reservations.length : 0,
+	});
 
 	const requested = Math.max(1, Number(plan?.guestDetails?.rooms || 1) || 1);
 	const availabilityByRoom = new Map();
 	const activeRooms = (hotel.roomCountDetails || []).filter((room) => room?.activeRoom === true);
+	memoryTrace("inventory:before_rows", caseId, {
+		activeRooms: activeRooms.length,
+		requested,
+	});
 
 	activeRooms.forEach((room) => {
 		const dayRows = dates.map((date) => {
@@ -977,6 +986,9 @@ async function inventoryByRoomForStay(hotel = {}, plan = {}) {
 		});
 	});
 
+	memoryTrace("inventory:after_rows", caseId, {
+		rooms: availabilityByRoom.size,
+	});
 	return availabilityByRoom;
 }
 
@@ -989,12 +1001,19 @@ function availabilityForRoom(availabilityByRoom = new Map(), room = {}) {
 	);
 }
 
-async function pricingSummaryForStay(hotel = {}, plan = {}) {
+async function pricingSummaryForStay(hotel = {}, plan = {}, { caseId = "" } = {}) {
 	if (!validStayDates(plan.checkinISO, plan.checkoutISO)) {
 		return { ok: false, reason: "bad_dates", rooms: [] };
 	}
+	memoryTrace("pricing:start", caseId);
 	const quotes = listAvailableRoomsForStay(hotel, plan.checkinISO, plan.checkoutISO);
+	memoryTrace("pricing:after_quotes", caseId, {
+		quotes: Array.isArray(quotes) ? quotes.length : 0,
+	});
 	const selectedRoom = matchRoom(hotel, plan.roomTypeHint, plan.selectedRoomType);
+	memoryTrace("pricing:after_match_room", caseId, {
+		selectedRoom: cleanText(selectedRoom?.roomType || selectedRoom?.displayName, 120),
+	});
 	const selectedQuote = selectedRoom
 		? priceRoomForStay(
 				hotel,
@@ -1003,7 +1022,13 @@ async function pricingSummaryForStay(hotel = {}, plan = {}) {
 				plan.checkoutISO
 		  )
 		: null;
-	const inventoryByRoom = await inventoryByRoomForStay(hotel, plan);
+	memoryTrace("pricing:after_selected_quote", caseId, {
+		selectedAvailable: selectedQuote?.available,
+	});
+	const inventoryByRoom = await inventoryByRoomForStay(hotel, plan, { caseId });
+	memoryTrace("pricing:after_inventory", caseId, {
+		inventoryRooms: inventoryByRoom.size,
+	});
 	const rooms = quotes
 		.map((quote) => {
 			const inventory = availabilityForRoom(inventoryByRoom, quote.room);
@@ -1398,7 +1423,7 @@ async function composeReply(sc, hotel, agentName) {
 	}
 	const pricing =
 		plan.needsPricing || validStayDates(plan.checkinISO, plan.checkoutISO)
-			? await pricingSummaryForStay(pricingHotel, plan)
+			? await pricingSummaryForStay(pricingHotel, plan, { caseId: idText(sc) })
 			: null;
 	if (pricing) {
 		memoryTrace("compose:after_pricing_summary", sc?._id, {
