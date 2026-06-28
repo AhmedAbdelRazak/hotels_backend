@@ -84,6 +84,13 @@ function normalizeUnicodeDigits(value) {
 		.replace(/[۰-۹]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0));
 }
 
+const DEFAULT_AJYAD_HOTEL_ID = "6a40b6a1a6efe70450536038";
+const OTA_AJYAD_DEFAULT_HOTEL_ID = String(
+	process.env.OTA_AJYAD_DEFAULT_HOTEL_ID ||
+		process.env.OTA_AJYAD_HOTEL_ID ||
+		DEFAULT_AJYAD_HOTEL_ID
+).trim();
+
 function normalizeWhitespace(value) {
 	return normalizeUnicodeDigits(value)
 		.replace(/^\uFEFF/, "")
@@ -111,6 +118,40 @@ function normalizeIntlComparable(value) {
 		.replace(/[^\p{L}\p{N}]+/gu, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function normalizeAjyadComparable(value = "") {
+	return normalizeIntlComparable(value)
+		.replace(/[أإآٱ]/g, "ا")
+		.replace(/ى/g, "ي")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function containsAjyadKeyword(value = "") {
+	const normalized = normalizeAjyadComparable(value);
+	return /\bajyad\b/i.test(normalized) || normalized.includes("اجياد");
+}
+
+function normalizedReservationContainsAjyad(normalized = {}) {
+	return [
+		normalized.hotelName,
+		...(Array.isArray(normalized.hotelNameAliases)
+			? normalized.hotelNameAliases
+			: []),
+		normalized.roomName,
+		normalized.airbnbListingTitle,
+		normalized.source?.subject,
+		normalized.source?.safeSnippet,
+	]
+		.filter(Boolean)
+		.some((value) => containsAjyadKeyword(value));
+}
+
+function configuredAjyadHotelId() {
+	return /^[a-f0-9]{24}$/i.test(OTA_AJYAD_DEFAULT_HOTEL_ID)
+		? OTA_AJYAD_DEFAULT_HOTEL_ID
+		: DEFAULT_AJYAD_HOTEL_ID;
 }
 
 function articleStrippedComparable(value) {
@@ -1331,8 +1372,6 @@ function mappingTargetToHotel(target = "") {
 
 function resolveConfiguredAirbnbHotelMapping(context = {}) {
 	const entries = parseAirbnbHotelMapEntries();
-	if (!entries.length) return {};
-
 	const candidates = [
 		context.listingId ? { type: "listing", value: context.listingId } : null,
 		context.listingTitle ? { type: "title", value: context.listingTitle } : null,
@@ -1348,36 +1387,67 @@ function resolveConfiguredAirbnbHotelMapping(context = {}) {
 		"room title",
 	]);
 
-	for (const entry of entries) {
-		const entryType = normalizeMappingKey(entry.type);
-		if (!allowedTypes.has(entryType)) continue;
-		const entrySource = normalizeMappingKey(entry.source);
-		if (!entrySource) continue;
-		const match = candidates.find((candidate) => {
-			if (
-				entryType &&
-				(entryType.includes("listing") || entryType === "airbnb listing") &&
-				candidate.type !== "listing"
-			) {
-				return false;
-			}
-			if (
-				entryType &&
-				(entryType.includes("title") || entryType.includes("room")) &&
-				candidate.type !== "title"
-			) {
-				return false;
-			}
-			const candidateValue = normalizeMappingKey(candidate.value);
-			return candidateValue === entrySource || candidateValue.includes(entrySource);
-		});
-		if (!match) continue;
+	const matchesEntryType = (entryType, candidateType) => {
+		if (
+			entryType &&
+			(entryType.includes("listing") || entryType === "airbnb listing")
+		) {
+			return candidateType === "listing";
+		}
+		if (entryType && (entryType.includes("title") || entryType.includes("room"))) {
+			return candidateType === "title";
+		}
+		return true;
+	};
+
+	const resolveEntryMatch = (matchStrength) => {
+		for (const entry of entries) {
+			const entryType = normalizeMappingKey(entry.type);
+			if (!allowedTypes.has(entryType)) continue;
+			const entrySource = normalizeMappingKey(entry.source);
+			if (!entrySource) continue;
+			const match = candidates.find((candidate) => {
+				if (!matchesEntryType(entryType, candidate.type)) return false;
+				const candidateValue = normalizeMappingKey(candidate.value);
+				if (!candidateValue) return false;
+				if (matchStrength === "exact") return candidateValue === entrySource;
+				return candidateValue.includes(entrySource);
+			});
+			if (!match) continue;
+			return {
+				...mappingTargetToHotel(entry.target),
+				matchedBy: entry.type || match.type,
+				matchedValue: match.value,
+				matchStrength,
+			};
+		}
+		return {};
+	};
+
+	if (entries.length) {
+		const exactMatch = resolveEntryMatch("exact");
+		if (exactMatch.hotelId || exactMatch.hotelName) return exactMatch;
+	}
+
+	const ajyadMatchedValue = [
+		context.listingTitle,
+		...(Array.isArray(context.hostLabels) ? context.hostLabels : []),
+	]
+		.filter(Boolean)
+		.find((value) => containsAjyadKeyword(value));
+	if (ajyadMatchedValue) {
 		return {
-			...mappingTargetToHotel(entry.target),
-			matchedBy: entry.type || match.type,
-			matchedValue: match.value,
+			hotelId: configuredAjyadHotelId(),
+			matchedBy: "ajyad keyword",
+			matchedValue: ajyadMatchedValue,
+			matchStrength: "keyword",
 		};
 	}
+
+	if (!entries.length) return {};
+
+	const fuzzyMatch = resolveEntryMatch("fuzzy");
+	if (fuzzyMatch.hotelId || fuzzyMatch.hotelName) return fuzzyMatch;
 	return {};
 }
 
@@ -1452,6 +1522,9 @@ function extractAirbnbFields(email = {}, text = "", provider = "") {
 		hotelId: hotelMapping.hotelId || "",
 		hotelName: hotelMapping.hotelName || "",
 		hotelNameAliases: hostLabels,
+		hotelIdMatchStrength: hotelMapping.matchStrength || "",
+		hotelIdMatchedBy: hotelMapping.matchedBy || "",
+		hotelIdMatchedValue: hotelMapping.matchedValue || "",
 		airbnbMapping: hotelMapping,
 	};
 }
@@ -2251,17 +2324,41 @@ function extractNormalizedReservation(email) {
 				"Reservation ID",
 				"Reservation number",
 				"Reservation No",
+				"Reservation #",
+				"Reservation code",
 				"Confirmation number",
 				"Confirmation #",
 				"Confirmation code",
 				"Booking ID",
 				"Booking number",
+				"Booking No",
+				"Booking #",
+				"Booking code",
+				"Reference ID",
+				"Reference number",
+				"Reference No",
+				"Reference #",
+				"Reference code",
+				"Ref ID",
+				"Ref number",
+				"Ref No",
+				"Ref #",
+				"Ref code",
+				"Voucher number",
+				"Voucher #",
 				"Itinerary number",
+				"Itinerary #",
+				"Trip number",
+				"Trip #",
 			]),
 			findFirstPattern(text, [
 				/\bReservation\s*(?:ID|No\.?|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bConfirmation\s*(?:Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 				/\bBooking\s*(?:ID|Number|#)\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\b(?:Reference|Ref)\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\bVoucher\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\bItinerary\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
+				/\bTrip\s*(?:ID|No\.?|Number|Code|#)?\s*[:#-]?\s*([A-Z0-9-]{5,})/i,
 			])
 		)
 	);
@@ -2519,10 +2616,14 @@ function extractNormalizedReservation(email) {
 		reservationId: normalizeConfirmation(reservationId),
 		confirmationNumber: normalizeConfirmation(reservationId),
 		hotelId,
+		hotelIdMatchStrength: airbnbFields.hotelIdMatchStrength || "",
+		hotelIdMatchedBy: airbnbFields.hotelIdMatchedBy || "",
+		hotelIdMatchedValue: airbnbFields.hotelIdMatchedValue || "",
 		hotelName,
 		hotelNameAliases: airbnbFields.hotelNameAliases || [],
 		airbnbListingId: airbnbFields.airbnbListingId || "",
 		airbnbListingTitle: airbnbFields.airbnbListingTitle || "",
+		airbnbMapping: airbnbFields.airbnbMapping || {},
 		roomName,
 		checkinDate,
 		checkoutDate,
@@ -3855,17 +3956,49 @@ function findHotelMentionedInSourceText(hotels = [], normalized = {}) {
 	return bestScore > 0 && ties === 1 ? best : null;
 }
 
+const OTA_HOTEL_RESOLUTION_SELECT =
+	"_id hotelName hotelName_OtherLanguage belongsTo roomCountDetails currency activateHotel xHotelProActive";
+
+function findExactHotelNameMatch(hotels = [], hotelNameCandidates = []) {
+	const candidateKeys = new Set(
+		hotelNameCandidates.map((candidate) => normalizeIntlComparable(candidate)).filter(Boolean)
+	);
+	if (!candidateKeys.size) return null;
+
+	let matched = null;
+	let ties = 0;
+	for (const hotel of hotels || []) {
+		const labels = expandHotelNameCandidates([
+			hotel.hotelName,
+			hotel.hotelName_OtherLanguage,
+		]);
+		const hasExactMatch = labels.some((label) =>
+			candidateKeys.has(normalizeIntlComparable(label))
+		);
+		if (!hasExactMatch) continue;
+		matched = hotel;
+		ties += 1;
+	}
+	return matched && ties === 1 ? matched : null;
+}
+
+async function loadConfiguredAjyadHotel() {
+	return HotelDetails.findById(configuredAjyadHotelId())
+		.select(OTA_HOTEL_RESOLUTION_SELECT)
+		.lean();
+}
+
 async function resolveHotel(normalized, existingReservation = null) {
 	if (existingReservation?.hotelId) {
 		return HotelDetails.findById(existingReservation.hotelId)
-			.select("_id hotelName hotelName_OtherLanguage belongsTo roomCountDetails currency")
+			.select(OTA_HOTEL_RESOLUTION_SELECT)
 			.lean();
 	}
 
 	const directHotelId = normalized.hotelId;
 	if (directHotelId) {
 		const direct = await HotelDetails.findById(directHotelId)
-			.select("_id hotelName hotelName_OtherLanguage belongsTo roomCountDetails currency")
+			.select(OTA_HOTEL_RESOLUTION_SELECT)
 			.lean();
 		if (direct) return direct;
 	}
@@ -3877,20 +4010,34 @@ async function resolveHotel(normalized, existingReservation = null) {
 			? normalized.hotelNameAliases
 			: []),
 	]);
-	const selectFields =
-		"_id hotelName hotelName_OtherLanguage belongsTo roomCountDetails currency";
 	const loadCandidateHotels = async () => {
-		const allowedIds = getOtaInboundAllowedHotelIds();
-		if (allowedIds.length) {
-			return HotelDetails.find({ _id: { $in: allowedIds } })
-				.select(selectFields)
-				.lean();
-		}
-		return HotelDetails.find({}).select(selectFields).lean();
+		return HotelDetails.find({}).select(OTA_HOTEL_RESOLUTION_SELECT).lean();
 	};
+
+	const allHotelsForExactOrKeyword = async () =>
+		HotelDetails.find({}).select(OTA_HOTEL_RESOLUTION_SELECT).lean();
+
 	if (!wanted || !hotelNameCandidates.length) {
-		const hotels = await loadCandidateHotels();
-		return findHotelMentionedInSourceText(hotels, normalized);
+		const hotels = await allHotelsForExactOrKeyword();
+		const exactMentioned = findHotelMentionedInSourceText(hotels, normalized);
+		if (exactMentioned) return exactMentioned;
+		if (normalizedReservationContainsAjyad(normalized)) {
+			const ajyadHotel = await loadConfiguredAjyadHotel();
+			if (ajyadHotel) return ajyadHotel;
+		}
+		const candidateHotels = await loadCandidateHotels();
+		return findHotelMentionedInSourceText(candidateHotels, normalized);
+	}
+
+	const hotelsForExactOrKeyword = await allHotelsForExactOrKeyword();
+	const exactHotel = findExactHotelNameMatch(
+		hotelsForExactOrKeyword,
+		hotelNameCandidates
+	);
+	if (exactHotel) return exactHotel;
+	if (normalizedReservationContainsAjyad(normalized)) {
+		const ajyadHotel = await loadConfiguredAjyadHotel();
+		if (ajyadHotel) return ajyadHotel;
 	}
 
 	const scoreHotels = (hotels = []) => {
@@ -3913,22 +4060,8 @@ async function resolveHotel(normalized, existingReservation = null) {
 		return { best, bestScore };
 	};
 
-	const allowedIds = getOtaInboundAllowedHotelIds();
-	if (allowedIds.length) {
-		const allowedHotels = await HotelDetails.find({ _id: { $in: allowedIds } })
-			.select(selectFields)
-			.lean();
-		const allowedMatch = scoreHotels(allowedHotels);
-		if (allowedMatch.bestScore >= 72) return allowedMatch.best;
-		const mentionedAllowedHotel = findHotelMentionedInSourceText(
-			allowedHotels,
-			normalized
-		);
-		if (mentionedAllowedHotel) return mentionedAllowedHotel;
-	}
-
 	const hotels = await HotelDetails.find({})
-		.select(selectFields)
+		.select(OTA_HOTEL_RESOLUTION_SELECT)
 		.lean();
 	const { best, bestScore } = scoreHotels(hotels);
 
@@ -4252,27 +4385,40 @@ function isHotelAllowedForOtaInbound(hotelId) {
 	return allowedIds.includes(normalizeId(hotelId));
 }
 
-function buildHotelNotAllowedResult(normalized, hotelId, warnings, errors) {
-	const allowedIds = getOtaInboundAllowedHotelIds();
-	return {
-		status: "needs_review",
-		actionTaken: "skipped",
-		skipReason: "hotel_not_allowed_for_ota_inbound",
-		automationComment:
-			"Resolved hotel is not included in OTA_INBOUND_EMAIL_HOTEL_IDS; email was saved for audit only and no reservation was connected.",
-		warnings,
-		errors: [
-			...errors,
-			`Resolved hotel is not included in OTA_INBOUND_EMAIL_HOTEL_IDS; no reservation was created or updated.`,
-		],
-		hotelId: null,
-		reservationId: null,
-		pmsConfirmationNumber: "",
-		matchedReservationBy: [],
-		disallowedHotelId: normalizeId(hotelId),
-		allowedHotelIds: allowedIds,
-		hotelName: normalized.hotelName || "",
-	};
+function isHotelActiveForOtaInbound(hotelDetails = {}) {
+	return hotelDetails?.activateHotel === true && hotelDetails?.xHotelProActive !== false;
+}
+
+function isAjyadKeywordHotelResolution(normalized = {}, hotelDetails = {}) {
+	return (
+		normalizeId(hotelDetails?._id) === normalizeId(configuredAjyadHotelId()) &&
+		normalizedReservationContainsAjyad(normalized)
+	);
+}
+
+function getManualOtaHotelAssignmentReason(normalized = {}, hotelDetails = {}) {
+	if (!hotelDetails?._id || isAjyadKeywordHotelResolution(normalized, hotelDetails)) {
+		return "";
+	}
+	if (!isHotelActiveForOtaInbound(hotelDetails)) {
+		return "resolved_hotel_inactive";
+	}
+	return "";
+}
+
+function withResolvedHotelManualAssignmentWarning(
+	warnings = [],
+	hotelDetails = {},
+	reason = ""
+) {
+	const reasonLabel =
+		reason === "resolved_hotel_inactive"
+			? "inactive"
+			: "unclear for automatic hotel assignment";
+	const message = `Resolved hotel "${
+		hotelDetails?.hotelName || normalizeId(hotelDetails?._id) || "unknown"
+	}" is ${reasonLabel}; saved to OTA review without a hotel assignment.`;
+	return warnings.includes(message) ? warnings : [...warnings, message];
 }
 
 function confirmationLookupValues(value) {
@@ -4533,15 +4679,13 @@ async function reconcileOtaReservation(inputNormalized) {
 	}
 
 	if (errors.some((error) => /missing sar exchange rate/i.test(error))) {
-		logReconcile("needs_review.missing_currency_rate", {
+		const currencyWarning =
+			"Missing SAR exchange rate; saved to OTA review with source amount metadata for manual pricing.";
+		if (!warnings.includes(currencyWarning)) warnings.push(currencyWarning);
+		logReconcile("continue.missing_currency_rate", {
 			confirmationNumber,
 			currency: normalized.currency || "",
 		});
-		return {
-			status: "needs_review",
-			warnings,
-			errors,
-		};
 	}
 
 	const existing = await findReservationByOtaConfirmation(confirmationNumber);
@@ -4556,20 +4700,6 @@ async function reconcileOtaReservation(inputNormalized) {
 		hotelId: existing?.hotelId ? String(existing.hotelId) : "",
 		matchedReservationBy,
 	});
-
-	if (existing?.hotelId && !isHotelAllowedForOtaInbound(existing.hotelId)) {
-		logReconcile("skipped.hotel_not_allowed_existing", {
-			confirmationNumber,
-			disallowedHotelId: normalizeId(existing.hotelId),
-			allowedHotelIds: getOtaInboundAllowedHotelIds(),
-		});
-		return buildHotelNotAllowedResult(
-			normalized,
-			existing.hotelId,
-			warnings,
-			errors
-		);
-	}
 
 	if (existing && intent === "new_reservation" && !isStatusIntent && !isUpdateIntent) {
 		logReconcile("duplicate_reservation.existing_new_booking", {
@@ -4615,14 +4745,15 @@ async function reconcileOtaReservation(inputNormalized) {
 					confirmationNumber,
 					statusToApply,
 				});
-				return {
-					status: "needs_review",
-					warnings,
-					errors: [
-						...errors,
-						"Status email did not match an existing reservation by confirmation number.",
+				return createUnmappedOtaReviewReservation({
+					normalized,
+					confirmationNumber,
+					warnings: [
+						...warnings,
+						"Status email did not match an existing reservation by confirmation number; saved to OTA review for manual handling.",
 					],
-				};
+					errors,
+				});
 			}
 		}
 		if (existing && !statusToApply) {
@@ -4682,31 +4813,33 @@ async function reconcileOtaReservation(inputNormalized) {
 			logReconcile("update.needs_review.no_exact_match", {
 				confirmationNumber,
 			});
-			return {
-				status: "needs_review",
-				warnings,
-				errors: [
-					...errors,
-					"Update email did not match an existing reservation by confirmation number.",
+			return createUnmappedOtaReviewReservation({
+				normalized,
+				confirmationNumber,
+				warnings: [
+					...warnings,
+					"Update email did not match an existing reservation by confirmation number; saved to OTA review for manual handling.",
 				],
-			};
+				errors,
+			});
 		}
 	}
 
 	const missing = missingForCreate;
 	if (!existing && !isUpdateIntent && missing.length) {
-		logReconcile("needs_review.missing_required_fields", {
+		logReconcile("create_unmapped.missing_non_identity_fields", {
 			confirmationNumber,
 			missing,
 		});
-		return {
-			status: "needs_review",
-			warnings,
-			errors: [
-				...errors,
-				`Missing required reservation field(s): ${missing.join(", ")}.`,
+		return createUnmappedOtaReviewReservation({
+			normalized,
+			confirmationNumber,
+			warnings: [
+				...warnings,
+				`Missing reservation field(s): ${missing.join(", ")}. Saved to OTA review for manual completion.`,
 			],
-		};
+			errors,
+		});
 	}
 
 	if (
@@ -4778,19 +4911,38 @@ async function reconcileOtaReservation(inputNormalized) {
 			errors,
 		});
 	}
-	if (!isHotelAllowedForOtaInbound(hotelDetails._id)) {
-		logReconcile("skipped.hotel_not_allowed", {
+	const manualHotelAssignmentReason = getManualOtaHotelAssignmentReason(
+		normalized,
+		hotelDetails
+	);
+	if (manualHotelAssignmentReason && existing) {
+		logReconcile("existing.resolved_hotel_manual_assignment.continue", {
 			confirmationNumber,
-			disallowedHotelId: normalizeId(hotelDetails._id),
+			reason: manualHotelAssignmentReason,
+			resolvedHotelId: normalizeId(hotelDetails._id),
 			hotelName: hotelDetails.hotelName || normalized.hotelName || "",
-			allowedHotelIds: getOtaInboundAllowedHotelIds(),
 		});
-		return buildHotelNotAllowedResult(
-			normalized,
-			hotelDetails._id,
+	}
+	if (manualHotelAssignmentReason && !existing) {
+		const manualWarnings = withResolvedHotelManualAssignmentWarning(
 			warnings,
-			errors
+			hotelDetails,
+			manualHotelAssignmentReason
 		);
+		logReconcile("create_unmapped.resolved_hotel_manual_assignment", {
+			confirmationNumber,
+			reason: manualHotelAssignmentReason,
+			resolvedHotelId: normalizeId(hotelDetails._id),
+			hotelName: hotelDetails.hotelName || normalized.hotelName || "",
+			activateHotel: hotelDetails.activateHotel,
+			xHotelProActive: hotelDetails.xHotelProActive,
+		});
+		return createUnmappedOtaReviewReservation({
+			normalized,
+			confirmationNumber,
+			warnings: manualWarnings,
+			errors,
+		});
 	}
 
 	const built = buildReservationDocument(normalized, hotelDetails);
@@ -4834,12 +4986,15 @@ async function reconcileOtaReservation(inputNormalized) {
 				matchedReservationBy,
 			};
 		}
-		return {
-			status: "needs_mapping",
-			warnings,
-			errors: [...errors, built.error],
-			hotelId: hotelDetails._id,
-		};
+		return createUnmappedOtaReviewReservation({
+			normalized,
+			confirmationNumber,
+			warnings: [
+				...warnings,
+				`${built.error} Saved to OTA review without a hotel assignment for manual completion.`,
+			],
+			errors,
+		});
 	}
 	(built.warnings || []).forEach((warning) => {
 		if (warning && !warnings.includes(warning)) warnings.push(warning);
@@ -4887,12 +5042,15 @@ async function reconcileOtaReservation(inputNormalized) {
 				matchedReservationBy,
 			};
 		}
-		return {
-			status: "needs_mapping",
-			warnings,
-			errors: [...errors, error.message || "Could not calculate reservation pricing."],
-			hotelId: hotelDetails._id,
-		};
+		return createUnmappedOtaReviewReservation({
+			normalized,
+			confirmationNumber,
+			warnings: [
+				...warnings,
+				`${error.message || "Could not calculate reservation pricing."} Saved to OTA review without a hotel assignment for manual completion.`,
+			],
+			errors,
+		});
 	}
 	if (existing) {
 		logReconcile("update.start", {

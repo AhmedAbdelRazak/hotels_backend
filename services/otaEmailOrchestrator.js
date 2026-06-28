@@ -456,7 +456,7 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 					{
 						role: "system",
 						content:
-							"Return strict JSON only. You are a very strict PMS reservation email classifier and extractor. Never invent a field. If a field is not clearly present, return an empty string. Extract guestNotes/comment only from explicit guest notes, comments, remarks, or special-request text in the email. Status changes must only be applied when a confirmation number is present. For hotel names, preserve the exact hotel text from the email and optionally return hotelNameAliases containing only spelling/transliteration variants that can be derived from that same text, such as removing generic brand/location words, el/al spelling, apostrophes, Arabizi digits, or extra OTA/location descriptors. Do not guess a PMS hotel that is not present in the email.",
+							"Return strict JSON only. You are a very strict PMS reservation email classifier and extractor. Never invent a field. If a field is not clearly present, return an empty string. The most important field is confirmationNumber: extract the searchable OTA reservation identity when it appears as confirmation number/code/#, reservation number/id/#, booking number/id/#, reference/ref number/id/#, voucher number/#, trip number/#, itinerary number/#, or close derivatives. Extract guestNotes/comment only from explicit guest notes, comments, remarks, or special-request text in the email. Status changes must only be applied when a confirmation number is present. For hotel names, preserve the exact hotel text from the email and optionally return hotelNameAliases containing only spelling/transliteration variants that can be derived from that same text, such as removing generic brand/location words, el/al spelling, apostrophes, Arabizi digits, or extra OTA/location descriptors. Do not guess a PMS hotel that is not present in the email.",
 					},
 					{
 						role: "user",
@@ -473,10 +473,6 @@ const askOpenAiForDecision = async (email, heuristic, emailContext) => {
 							allowedStatuses: [...ALLOWED_STATUSES],
 							requiredForNewReservation: [
 								"confirmationNumber",
-								"guestName",
-								"checkinDate",
-								"checkoutDate",
-								"hotelName",
 							],
 							email: {
 								envelopeFrom: emailContext.envelopeFrom || email.from || "",

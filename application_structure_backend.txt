@@ -1103,7 +1103,7 @@ Future TODO Backlog - Added 2026-05-26
 - Environment rollback:
   - Restored SENDGRID_API_KEY from the protected env backup.
   - Removed temporary OTA mailbox/Graph env values from local and production .env files.
-  - Kept OTA_INBOUND_EMAIL_HOTEL_IDS because it existed before the experiment and remains part of OTA safety scoping.
+  - Kept OTA_INBOUND_EMAIL_HOTEL_IDS because it existed before the experiment. As of 2026-06-28, inbound email saving no longer uses it as a hard gate.
 - Safety verification:
   - No database records were deleted.
   - Read-only checks during the failed mailbox test showed no new InboundEmail record and no reservation created by the failed home-server path.
@@ -1178,6 +1178,12 @@ Future TODO Backlog - Added 2026-05-26
 - Redacted Airbnb listing URLs such as [CARD-9735] are not treated as virtual-card details unless the email also includes explicit VCC/card labels.
 - `OTA_AIRBNB_EMAIL_HOTEL_MAP` supports explicit Airbnb email hotel mapping by listing id or listing title, for example `listing:1712336446581959735=68da202900a070e8123c27c4`. Do not map by Airbnb host greeting because one host/account can manage multiple PMS hotels. Unknown Airbnb listings remain saved as inbound audits and routed to review instead of creating a reservation against an uncertain hotel.
 - Arabic/Eastern Arabic digits are normalized for OTA parsing, and Arabic room labels such as "غرفة 3 افراد" can map to the correct semantic room type before the existing occupancy fallback runs.
+
+2026-06-28 OTA Inbound Hotel Assignment Safety
+- services/otaReservationMapper.js keeps exact Airbnb listing/title mappings as the highest-priority hotel signal, then applies an Ajyad keyword fallback (`ajyad` / `اجياد`) to Zad Ajyad (`6a40b6a1a6efe70450536038`) before fuzzy mapping.
+- The only hard save blocker for OTA inbound reservation/review creation is a missing searchable reservation identity. The mapper and orchestrator treat confirmation number/code/#, reservation number/id/#, booking number/id/#, reference/ref number/id/#, voucher number/#, trip number/#, and itinerary number/# style labels as confirmation candidates.
+- New OTA emails with unclear hotels or inactive resolved hotels are saved as OTA Platform Review reservations without a `hotelId`, preserving the original OTA hotel/room text for manual employee assignment before release.
+- `OTA_INBOUND_EMAIL_HOTEL_IDS` no longer blocks inbound email reservation/review creation. Existing reservations matched by OTA confirmation number continue through duplicate/status/update handling regardless of hotel scope.
 
 2026-05-28 Manual AI Chat Teaching For B2C Support
 - Storage model:
