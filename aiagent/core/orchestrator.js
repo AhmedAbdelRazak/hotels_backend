@@ -6126,11 +6126,19 @@ function requestedGuestCountFromText(text = "") {
 	if (companionPairGuestCountText(raw)) return 2;
 	const normalized = normalizeNumberWordsForParsing(raw);
 	const { lower, arabic, latinCompact } = normalizeControlText(normalized);
+	const { arabic: rawArabic } = normalizeControlText(raw);
 	const counts = [];
 	const addCount = (value) => {
 		const count = reservationDetailCount(value, { allowZero: false });
 		if (count !== null && count <= 30) counts.push(count);
 	};
+	if (
+		/(?:\u0644\s*)?(?:\u0641\u0631\u062f\u064a\u0646|\u0634\u062e\u0635\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0627\u062b\u0646\u064a\u0646|\u0627\u062b\u0646\u0627\u0646|\u0627\u062a\u0646\u064a\u0646|\u062a\u0646\u064a\u0646)(?=$|[^\u0600-\u06FF])/i.test(
+			rawArabic
+		)
+	) {
+		addCount(2);
+	}
 	addCount(standaloneGuestCountFromText(raw));
 	addCount(countNearTerms(normalized, GUEST_COUNT_TERMS, { allowZero: false }));
 	addCount(
@@ -17414,6 +17422,14 @@ async function planTurn(io, sc) {
 				delayNoticeTimer.unref();
 			}
 		}
+		const carriedQuestionBeforeQuiet =
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText)
+				? previousUnansweredDirectGuestTextForPing(sc, st, userText)
+				: "";
 		if (userText) {
 			const isReservationDetailChasePayload =
 				isReservationDetailStep(st) &&
@@ -17448,7 +17464,7 @@ async function planTurn(io, sc) {
 				st.activeTurnGuestAt,
 				quietMs
 			);
-			if (quietRemainingMs > 25) {
+			if (quietRemainingMs > 25 && !carriedQuestionBeforeQuiet) {
 				logStep(caseId, "turn.wait_guest_quiet", {
 					remainingMs: quietRemainingMs,
 					quietMs,
@@ -17488,11 +17504,9 @@ async function planTurn(io, sc) {
 			return;
 		}
 		if (userText && !severeAbusiveGuestText(userText)) {
-			const carriedQuestionText = previousUnansweredDirectGuestTextForPing(
-				sc,
-				st,
-				userText
-			);
+			const carriedQuestionText =
+				carriedQuestionBeforeQuiet ||
+				previousUnansweredDirectGuestTextForPing(sc, st, userText);
 			if (carriedQuestionText) {
 				logStep(caseId, "direct_request.carried_from_ping", {
 					ping: String(userText || "").slice(0, 80),
