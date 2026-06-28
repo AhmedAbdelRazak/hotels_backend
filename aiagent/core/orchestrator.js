@@ -4118,6 +4118,23 @@ function directHotelRelationshipQuestionText(text = "") {
 	return english || spanish || arabicMatch;
 }
 
+function looseHotelRelationshipQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:are|is|do|does)\b.{0,60}\b(?:you|your\s+team|this\s+chat)\b.{0,80}\b(?:hotel|reception|reservation|reservations)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u0627\u0646\u062a\u0648|\u062d\u0636\u0631\u062a\u0643).{0,50}(?:\u0634\u063a\u0627\u0644|\u0634\u063a\u0627\u0644\u0629|\u0634\u063a\u0627\u0644\u0647|\u062a\u0634\u062a\u063a\u0644|\u062a\u0639\u0645\u0644|\u0645\u0639).{0,80}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a|\u062d\u062c\u0648\u0632\u0627\u062a)/i.test(
+			arabic
+		) ||
+		/(?:enta|enty|inti|shaghala|shagala|shaghal|workwith|withhotel)/i.test(
+			latinCompact
+		) && /(?:hotel|fundok|reception|reservation|hgz|hagz)/i.test(latinCompact)
+	);
+}
+
 function confidentialCompanyDocumentQuestionText(text = "") {
 	const raw = String(text || "").trim();
 	if (!raw) return false;
@@ -11125,7 +11142,17 @@ function previousUnansweredDirectGuestTextForPing(sc = {}, st = {}, latestText =
 		const text = String(message.message || "").trim();
 		if (!text || isAutomatedSupportNoticeText(text)) continue;
 		if (guestAgentPingOnlyText(text, st)) continue;
-		if (directGuestRequestKind(sc, st, text, {})) return text;
+		if (
+			directGuestRequestKind(sc, st, text, {}) ||
+			looseHotelRelationshipQuestionText(text) ||
+			hotelContactDetailsQuestionText(text) ||
+			hotelContactFollowupQuestionText(sc, text) ||
+			(st.hotel &&
+				(selectedHotelFactQuestionText(text) ||
+					selectedHotelRoomQuestionText(text)))
+		) {
+			return text;
+		}
 	}
 	return "";
 }
@@ -16081,7 +16108,11 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 	}
 	if (wantsPaymentHelp(text)) return "payment_help";
 	if (wantsDiscountQuestion(text)) return "discount_question";
-	if (st.hotel && directHotelRelationshipQuestionText(text)) {
+	if (
+		st.hotel &&
+		(directHotelRelationshipQuestionText(text) ||
+			looseHotelRelationshipQuestionText(text))
+	) {
 		return "direct_hotel_relationship";
 	}
 	if (

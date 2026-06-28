@@ -29,6 +29,7 @@
 - First greetings are deterministic and short: Islamic greeting, guest name, agent name, selected hotel reception/reservations, and one "how can I help" question. The LLM no longer expands the opening message.
 - Agent-name pings such as "Aisha?" now carry the immediately previous unanswered direct question when no assistant reply came between the two guest messages. This prevents the bot from forgetting "are you with the hotel?" and falling into reservation-detail collection.
 - Standalone agent-name greetings/pings such as "hi Aisha" now receive a deterministic fast acknowledgement instead of entering slow planning.
+- The carry-forward path includes a looser hotel-relationship matcher for conversational Arabic such as "are you working with the hotel?" so that an immediate agent-name ping cannot swallow the real question.
 - Arabic hotel relationship detection now includes Egyptian forms such as "shaghala with the hotel" / "shaghal with the hotel".
 - Small room-count requests such as "room for two" / "عايز غرفة لفردين" run through a pre-detail fast lane. They recommend the matching room type, merge same-message dates if present, and otherwise ask for check-in and checkout dates instead of phone/name details.
 
