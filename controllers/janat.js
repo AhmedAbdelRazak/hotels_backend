@@ -158,6 +158,8 @@ const stripAgentRoomOverrides = (hotel = {}) => {
 const PUBLIC_HOTEL_CACHE_TTL_MS = 60 * 1000;
 const PUBLIC_HOTEL_CACHE_MAX_KEYS = 80;
 const publicHotelResponseCache = new Map();
+const MAKKAH_HARAM_COORDS = [39.8262, 21.4225]; // [lng, lat]
+const MADINAH_PROPHET_MOSQUE_COORDS = [39.6142, 24.4672]; // [lng, lat]
 const PUBLIC_CURRENCY_CODES = [
 	"USD",
 	"EUR",
@@ -276,6 +278,63 @@ const parseTimeToMinutes = (timeStr) => {
 	return totalMinutes;
 };
 
+const isUsablePublicDistanceValue = (value) => {
+	const text = String(value ?? "").trim();
+	if (!text || /^n\/?a$/i.test(text)) return false;
+	if (/^0+(\.0+)?\s*(min|mins|minute|minutes)?$/i.test(text)) return false;
+	return true;
+};
+
+const hasValidPublicCoordinates = (hotel = {}) => {
+	const coords = hotel?.location?.coordinates;
+	return (
+		Array.isArray(coords) &&
+		coords.length === 2 &&
+		Number.isFinite(Number(coords[0])) &&
+		Number.isFinite(Number(coords[1])) &&
+		!(Number(coords[0]) === 0 && Number(coords[1]) === 0)
+	);
+};
+
+const resolvePublicSacredDestination = (hotel = {}) => {
+	const destinationText = `${hotel?.hotelState || ""} ${hotel?.hotelCity || ""}`.toLowerCase();
+	return /madinah|madina|medina/.test(destinationText)
+		? MADINAH_PROPHET_MOSQUE_COORDS
+		: MAKKAH_HARAM_COORDS;
+};
+
+const approximatePublicDistances = (hotel = {}) => {
+	if (!hasValidPublicCoordinates(hotel)) return null;
+	const [lng, lat] = hotel.location.coordinates.map(Number);
+	const [destLng, destLat] = resolvePublicSacredDestination(hotel);
+	const meters = haversineMeters(lat, lng, destLat, destLng);
+	return {
+		walkingToElHaram: approxDurationText(meters, 4.5),
+		drivingToElHaram: approxDurationText(meters, 40),
+	};
+};
+
+const publicHotelDistances = (hotel = {}) => {
+	const current = hotel.distances || {};
+	if (
+		isUsablePublicDistanceValue(current.walkingToElHaram) &&
+		isUsablePublicDistanceValue(current.drivingToElHaram)
+	) {
+		return current;
+	}
+	const fallback = approximatePublicDistances(hotel);
+	if (!fallback) return current;
+	return {
+		...current,
+		walkingToElHaram: isUsablePublicDistanceValue(current.walkingToElHaram)
+			? current.walkingToElHaram
+			: fallback.walkingToElHaram,
+		drivingToElHaram: isUsablePublicDistanceValue(current.drivingToElHaram)
+			? current.drivingToElHaram
+			: fallback.drivingToElHaram,
+	};
+};
+
 const sortPublicHotels = (hotels = []) =>
 	[...hotels].sort((a, b) => {
 		if ((b.hotelRating || 0) !== (a.hotelRating || 0)) {
@@ -360,7 +419,7 @@ const compactPublicHotel = (
 	hotelState: hotel.hotelState,
 	hotelCity: hotel.hotelCity,
 	hotelAddress: hotel.hotelAddress,
-	distances: hotel.distances,
+	distances: publicHotelDistances(hotel),
 	hasBusService: hotel.hasBusService === true,
 	busDetails: hotel.busDetails || "",
 	hasMealsService: hotel.hasMealsService === true,
@@ -2219,8 +2278,6 @@ exports.getHotelDetailsById = async (req, res) => {
 
 exports.getHotelDistancesFromElHaram = async (req, res) => {
 	try {
-		const HARAM = [39.8262, 21.4225]; // [lng, lat]
-		const PROPHET = [39.6142, 24.4672]; // [lng, lat]
 		const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 
 		// Get hotels with valid GeoJSON points (both coords non-zero)
@@ -2244,7 +2301,9 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 				.toLowerCase()
 				.includes("madinah");
 
-			const [destLng, destLat] = isMadinah ? PROPHET : HARAM;
+			const [destLng, destLat] = isMadinah
+				? MADINAH_PROPHET_MOSQUE_COORDS
+				: MAKKAH_HARAM_COORDS;
 
 			const origin = `${lat},${lng}`; // DM API expects lat,lng
 			const dest = `${destLat},${destLng}`;
@@ -2270,10 +2329,11 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 				drivingText = await fetchMode("driving");
 			} catch (_) {}
 
-			// Optional: if both N/A, compute a rough fallback from straight-line distance
-			if (walkingText === "N/A" && drivingText === "N/A") {
-				const meters = haversineMeters(lat, lng, destLat, destLng);
+			const meters = haversineMeters(lat, lng, destLat, destLng);
+			if (!isUsablePublicDistanceValue(walkingText)) {
 				walkingText = approxDurationText(meters, 4.5); // 4.5 km/h
+			}
+			if (!isUsablePublicDistanceValue(drivingText)) {
 				drivingText = approxDurationText(meters, 40); // 40 km/h city avg
 			}
 

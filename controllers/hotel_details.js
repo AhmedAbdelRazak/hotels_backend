@@ -2684,22 +2684,81 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 	return updatedFields;
 };
 
+const MAKKAH_HARAM_COORDS = [39.8262, 21.4225]; // [lng, lat]
+const MADINAH_PROPHET_MOSQUE_COORDS = [39.6142, 24.4672]; // [lng, lat]
+
+const isUsableDistanceValue = (value) => {
+	const text = String(value ?? "").trim();
+	if (!text || /^n\/?a$/i.test(text)) return false;
+	if (/^0+(\.0+)?\s*(min|mins|minute|minutes)?$/i.test(text)) return false;
+	return true;
+};
+
+const hasUsableDistances = (distances = {}) =>
+	isUsableDistanceValue(distances?.walkingToElHaram) &&
+	isUsableDistanceValue(distances?.drivingToElHaram);
+
+const hasValidCoordinates = (coords = []) =>
+	Array.isArray(coords) &&
+	coords.length === 2 &&
+	Number.isFinite(Number(coords[0])) &&
+	Number.isFinite(Number(coords[1])) &&
+	!(Number(coords[0]) === 0 && Number(coords[1]) === 0);
+
+const resolveSacredDestination = (hotelState = "") => {
+	const state = String(hotelState || "").toLowerCase();
+	return /madinah|madina|medina/.test(state)
+		? MADINAH_PROPHET_MOSQUE_COORDS
+		: MAKKAH_HARAM_COORDS;
+};
+
+const haversineMeters = (lat1, lon1, lat2, lon2) => {
+	const toRad = (degrees) => (degrees * Math.PI) / 180;
+	const earthRadiusMeters = 6371000;
+	const dLat = toRad(lat2 - lat1);
+	const dLon = toRad(lon2 - lon1);
+	const a =
+		Math.sin(dLat / 2) ** 2 +
+		Math.cos(toRad(lat1)) *
+			Math.cos(toRad(lat2)) *
+			Math.sin(dLon / 2) ** 2;
+	return 2 * earthRadiusMeters * Math.asin(Math.sqrt(a));
+};
+
+const approxDurationText = (meters, kmph) => {
+	const minutes = Math.max(1, Math.round((meters / 1000 / kmph) * 60));
+	return `${minutes} min`;
+};
+
+const approximateDistances = (coords, hotelState = "") => {
+	if (!hasValidCoordinates(coords)) {
+		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+	}
+	const [lng, lat] = coords.map(Number);
+	const [destLng, destLat] = resolveSacredDestination(hotelState);
+	const meters = haversineMeters(lat, lng, destLat, destLng);
+	return {
+		walkingToElHaram: approxDurationText(meters, 4.5),
+		drivingToElHaram: approxDurationText(meters, 40),
+	};
+};
+
 /**
- * Distance calculation helper (unchanged except minor guards)
+ * Distance calculation helper.
  */
 const calcDistances = async (coords, hotelState = "") => {
-	const [lng, lat] = coords; // hotel stores [lng, lat]
-	const elHaram = [39.8262, 21.4225];
-	const prophetsMosque = [39.6142, 24.4672];
+	if (!hasValidCoordinates(coords)) {
+		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+	}
 
-	const dest = (hotelState || "").toLowerCase().includes("madinah")
-		? prophetsMosque
-		: elHaram;
+	const [lng, lat] = coords.map(Number); // hotel stores [lng, lat]
+	const dest = resolveSacredDestination(hotelState);
+	const fallback = approximateDistances(coords, hotelState);
 
 	const apiKey = process.env.GOOGLE_MAPS_API_KEY;
 	if (!apiKey) {
-		console.warn("GOOGLE_MAPS_API_KEY missing; skipping live distance call.");
-		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+		console.warn("GOOGLE_MAPS_API_KEY missing; using approximate distances.");
+		return fallback;
 	}
 
 	const makeURL = (mode) =>
@@ -2714,15 +2773,22 @@ const calcDistances = async (coords, hotelState = "") => {
 		const walkEl = walkResp.data?.rows?.[0]?.elements?.[0];
 		const driveEl = driveResp.data?.rows?.[0]?.elements?.[0];
 
+		const walkingToElHaram =
+			walkEl && walkEl.status === "OK" ? walkEl.duration.text : "N/A";
+		const drivingToElHaram =
+			driveEl && driveEl.status === "OK" ? driveEl.duration.text : "N/A";
+
 		return {
-			walkingToElHaram:
-				walkEl && walkEl.status === "OK" ? walkEl.duration.text : "N/A",
-			drivingToElHaram:
-				driveEl && driveEl.status === "OK" ? driveEl.duration.text : "N/A",
+			walkingToElHaram: isUsableDistanceValue(walkingToElHaram)
+				? walkingToElHaram
+				: fallback.walkingToElHaram,
+			drivingToElHaram: isUsableDistanceValue(drivingToElHaram)
+				? drivingToElHaram
+				: fallback.drivingToElHaram,
 		};
 	} catch (err) {
 		console.error("Distance API error:", err.message || err);
-		return { walkingToElHaram: "N/A", drivingToElHaram: "N/A" };
+		return fallback;
 	}
 };
 
@@ -2942,14 +3008,29 @@ exports.updateHotelDetails = async (req, res) => {
 			(!oldCoords ||
 				oldCoords[0] !== newCoords[0] ||
 				oldCoords[1] !== newCoords[1]);
+		const destinationChanged =
+			(Object.prototype.hasOwnProperty.call(updateData, "hotelState") &&
+				String(updateData.hotelState || "") !==
+					String(hotelDetails.hotelState || "")) ||
+			(Object.prototype.hasOwnProperty.call(updateData, "hotelCity") &&
+				String(updateData.hotelCity || "") !== String(hotelDetails.hotelCity || ""));
+		const nextCoords = hasValidCoordinates(newCoords) ? newCoords : oldCoords;
+		const nextDistanceBasis =
+			updatedFields.distances || hotelDetails.distances || {};
+		const shouldRecalculateDistances =
+			hasValidCoordinates(nextCoords) &&
+			(coordsChanged ||
+				destinationChanged ||
+				!hasUsableDistances(nextDistanceBasis));
 
-		if (coordsChanged) {
+		if (shouldRecalculateDistances) {
 			/* 3a. Compute fresh distances */
 			const distances = await calcDistances(
-				newCoords,
-				updateData.hotelState ||
-					updatedFields.hotelState ||
-					hotelDetails.hotelState
+				nextCoords,
+				[
+					updateData.hotelState || updatedFields.hotelState || hotelDetails.hotelState,
+					updateData.hotelCity || updatedFields.hotelCity || hotelDetails.hotelCity,
+				].join(" ")
 			);
 
 			/* 3b. Attach to update payload */
