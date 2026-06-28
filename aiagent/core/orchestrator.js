@@ -1,4 +1,5 @@
 // aiagent/core/orchestrator.js
+const { AsyncLocalStorage } = require("async_hooks");
 const {
 	getSupportCaseById,
 	updateSupportCaseAppend,
@@ -8665,6 +8666,13 @@ async function humanSend(
 		logStep(caseId, "human.cancelled", { stage: "pre-send", token });
 		return false;
 	}
+	if (!currentPlanStillOwnsTurn(caseId, st)) {
+		logStep(caseId, "human.cancelled", {
+			stage: "replaced-plan-pre-send",
+			token,
+		});
+		return false;
+	}
 
 	const turnStartedAt =
 		Number(st.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
@@ -8709,7 +8717,11 @@ async function humanSend(
 	};
 	while (st.guestTypingUntil > now()) await sleep(300);
 	while (now() - waitStartedAt < waitMs) {
-		if (st.interrupt || st.sendingToken !== token) {
+		if (
+			st.interrupt ||
+			st.sendingToken !== token ||
+			!currentPlanStillOwnsTurn(caseId, st)
+		) {
 			hideTyping();
 			logStep(caseId, "human.cancelled", { stage: "target-wait", token });
 			return false;
@@ -8725,7 +8737,11 @@ async function humanSend(
 	}
 	if (typingVisible && AI_TYPING_MIN_VISIBLE_MS > 0) {
 		while (now() - typingVisibleStartedAt < AI_TYPING_MIN_VISIBLE_MS) {
-			if (st.interrupt || st.sendingToken !== token) {
+			if (
+				st.interrupt ||
+				st.sendingToken !== token ||
+				!currentPlanStillOwnsTurn(caseId, st)
+			) {
 				hideTyping();
 				logStep(caseId, "human.cancelled", {
 					stage: "min-typing-visible",
@@ -8736,7 +8752,11 @@ async function humanSend(
 			if (st.guestTypingUntil > now()) {
 				hideTyping();
 				while (st.guestTypingUntil > now()) await sleep(120);
-				if (st.interrupt || st.sendingToken !== token) {
+				if (
+					st.interrupt ||
+					st.sendingToken !== token ||
+					!currentPlanStillOwnsTurn(caseId, st)
+				) {
 					logStep(caseId, "human.cancelled", {
 						stage: "min-typing-visible-after-guest",
 						token,
@@ -8749,7 +8769,11 @@ async function humanSend(
 		}
 	}
 	hideTyping();
-	if (st.interrupt || st.sendingToken !== token) {
+	if (
+		st.interrupt ||
+		st.sendingToken !== token ||
+		!currentPlanStillOwnsTurn(caseId, st)
+	) {
 		logStep(caseId, "human.cancelled", { stage: "post-type", token });
 		return false;
 	}
@@ -8766,6 +8790,13 @@ async function humanSend(
 	let sendGateCase = null;
 	const fastAtomicAppend = Boolean(fast && expectedTurnUserText);
 	if (fastAtomicAppend) {
+		if (!currentPlanStillOwnsTurn(caseId, st)) {
+			logStep(caseId, "human.cancelled", {
+				stage: "replaced-plan-before-fast-save",
+				token,
+			});
+			return false;
+		}
 		sendGateCase = sc;
 		text = applyGuestAddressCadence(text, sc, st, { first });
 		if (
@@ -8778,6 +8809,13 @@ async function humanSend(
 		}
 	} else {
 		try {
+			if (!currentPlanStillOwnsTurn(caseId, st)) {
+				logStep(caseId, "human.cancelled", {
+					stage: "replaced-plan-before-policy",
+					token,
+				});
+				return false;
+			}
 			const latestCase = await getSupportCaseById(caseId);
 			sendGateCase = latestCase;
 			const policy =
@@ -8834,6 +8872,13 @@ async function humanSend(
 				st.activeTurnHadReply = true;
 				return false;
 			}
+			if (!currentPlanStillOwnsTurn(caseId, st)) {
+				logStep(caseId, "human.cancelled", {
+					stage: "replaced-plan-after-policy",
+					token,
+				});
+				return false;
+			}
 			text = applyGuestAddressCadence(text, latestCase, st, { first });
 			if (
 				st.lastBotText &&
@@ -8865,6 +8910,13 @@ async function humanSend(
 	};
 	if (normalizedQuickReplies.length) {
 		messageData.quickReplies = normalizedQuickReplies;
+	}
+	if (!currentPlanStillOwnsTurn(caseId, st)) {
+		logStep(caseId, "human.cancelled", {
+			stage: "replaced-plan-before-save",
+			token,
+		});
+		return false;
 	}
 	const saved = await updateSupportCaseAppendIfNoRecentAiDuplicate(
 		caseId,
@@ -16741,6 +16793,17 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 const activePlanLocks = new Map();
 const activePlanLockAts = new Map();
 const pendingPlanRequests = new Map();
+const planTurnExecutionContext = new AsyncLocalStorage();
+
+function currentPlanStillOwnsTurn(caseId, st = {}) {
+	const context = planTurnExecutionContext.getStore();
+	if (!context || context.caseId !== String(caseId || "")) return true;
+	return Boolean(
+		st &&
+			st.turnOwner === context.planLock &&
+			activePlanLocks.get(context.caseId) === context.planLock
+	);
+}
 
 function markPendingPlanRequest(caseId, reason = "locked") {
 	const key = String(caseId || "");
@@ -16814,6 +16877,7 @@ async function planTurn(io, sc) {
 	const planLock = Symbol(caseId);
 	activePlanLocks.set(caseId, planLock);
 	activePlanLockAts.set(caseId, now());
+	return planTurnExecutionContext.run({ caseId, planLock }, async () => {
 	let st = null;
 	let queuedFollowupCase = null;
 	let queuedFollowupReason = "";
@@ -19383,6 +19447,7 @@ async function planTurn(io, sc) {
 			});
 		}
 	}
+	});
 }
 
 const scheduledTurns = new Map();

@@ -13,6 +13,7 @@
 - Unplanned/unclear fallback replies now go through OpenAI with the full chat transcript and are instructed to answer in one or two professional sentences.
 - Unanswered-turn recovery now force-releases stale in-flight AI turns after the stall window instead of deferring a few times and leaving the guest unanswered. This protects the customer chat from feeling frozen when a slow/interrupted turn never posts a reply.
 - When a guest reconnects to an open case, the socket join now schedules a reply if the latest guest message is still unanswered, instead of only scheduling first greetings.
+- Stale turn recovery is now fenced with per-turn ownership. If recovery replaces a slow planner run, the older run may finish its OpenAI/database work but it cannot send an outdated or duplicate assistant message to the guest.
 
 ## Verified Replay
 
@@ -37,6 +38,7 @@ Both restore the same stay and guest details in under two seconds locally, inste
 
 - `AI_DELAY_NOTICE_ENABLED` defaults to `false`.
 - `AI_TURN_STALL_RECOVERY_MS` defaults to 8000 ms. If the latest guest message still has no AI reply and the active turn is stale, recovery interrupts the stale state and reruns the turn from the latest database conversation.
+- All `humanSend` paths verify that the active planner still owns the turn before waiting, policy checks, and database append. This is the guard that prevents the mobile chat from receiving stale duplicate replies after recovery.
 - Current default reply targets:
   - General: 3000-5000 ms
   - Casual: 3000-4500 ms
