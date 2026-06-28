@@ -17431,6 +17431,37 @@ async function planTurn(io, sc) {
 			!wantsPaymentHelp(userText)
 				? previousUnansweredDirectGuestTextForPing(sc, st, userText)
 				: "";
+		if (carriedQuestionBeforeQuiet) {
+			logStep(caseId, "direct_request.carried_from_ping_pre_quiet", {
+				ping: String(userText || "").slice(0, 80),
+				carried: String(carriedQuestionBeforeQuiet || "").slice(0, 160),
+			});
+			updateActiveLanguageFromText(sc, st, carriedQuestionBeforeQuiet);
+			const handledCarriedQuestion = await tryAnswerDirectGuestRequest(
+				io,
+				sc,
+				st,
+				carriedQuestionBeforeQuiet,
+				{}
+			);
+			if (handledCarriedQuestion) return;
+		}
+		if (
+			userText &&
+			(st.hotel || sc.hotelId || sc.displayName2) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			(directHotelRelationshipQuestionText(userText) ||
+				looseHotelRelationshipQuestionText(userText))
+		) {
+			logStep(caseId, "hotel_direct_relationship.pre_quiet", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+			return;
+		}
 		if (userText) {
 			const isReservationDetailChasePayload =
 				isReservationDetailStep(st) &&
