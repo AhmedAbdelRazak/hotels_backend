@@ -17296,6 +17296,7 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			selectedHotelFactQuestionText(userText) &&
+			!(isReservationDetailStep(st) && reservationDetailFieldPayloadText(userText)) &&
 			(!explicitlyExistingReservationIntent(userText) ||
 				cancellationRefundPolicyQuestionText(userText))
 		) {
