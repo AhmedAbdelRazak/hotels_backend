@@ -1119,6 +1119,44 @@ const dateOnlyKey = (value) => {
 	return parsed.isValid() ? parsed.format("YYYY-MM-DD") : "";
 };
 
+const RESERVATION_INVENTORY_HOTEL_SELECT = [
+	"hotelName",
+	"roomCountDetails._id",
+	"roomCountDetails.roomType",
+	"roomCountDetails.room_type",
+	"roomCountDetails.displayName",
+	"roomCountDetails.display_name",
+	"roomCountDetails.count",
+	"roomCountDetails.agentInventory.agentId",
+	"roomCountDetails.agentInventory.stock",
+].join(" ");
+
+const RESERVATION_INVENTORY_RESERVATION_SELECT = [
+	"_id",
+	"checkin_date",
+	"checkout_date",
+	"reservation_status",
+	"state",
+	"pendingConfirmation.status",
+	"pendingConfirmation.inventoryBlocks",
+	"agentDecisionSnapshot.status",
+	"orderTakeId",
+	"createdByUserId",
+	"requestingUserId",
+	"orderTaker._id",
+	"createdBy._id",
+	"pickedRoomsType.room_type",
+	"pickedRoomsType.roomType",
+	"pickedRoomsType.displayName",
+	"pickedRoomsType.display_name",
+	"pickedRoomsType.count",
+	"pickedRoomsPricing.room_type",
+	"pickedRoomsPricing.roomType",
+	"pickedRoomsPricing.displayName",
+	"pickedRoomsPricing.display_name",
+	"pickedRoomsPricing.count",
+].join(" ");
+
 const buildStayDateKeys = (checkinDate, checkoutDate) => {
 	const startKey = dateOnlyKey(checkinDate);
 	const endKey = dateOnlyKey(checkoutDate);
@@ -1641,7 +1679,7 @@ const validateReservationInventoryForCreate = async (
 	if (!selections.length) return { allowed: true, issues: [], warnings: [] };
 
 	const hotel = await HotelDetails.findById(hotelId)
-		.select("hotelName roomCountDetails")
+		.select(RESERVATION_INVENTORY_HOTEL_SELECT)
 		.lean()
 		.exec();
 	const details = Array.isArray(hotel?.roomCountDetails)
@@ -1653,7 +1691,7 @@ const validateReservationInventoryForCreate = async (
 		checkin_date: { $lt: new Date(`${stayDates[stayDates.length - 1]}T23:59:59.999Z`) },
 		checkout_date: { $gt: new Date(`${stayDates[0]}T00:00:00.000Z`) },
 	})
-		.select("_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing orderTakeId createdByUserId requestingUserId orderTaker createdBy")
+		.select(RESERVATION_INVENTORY_RESERVATION_SELECT)
 		.maxTimeMS(AI_RESERVATION_INVENTORY_MAX_TIME_MS)
 		.lean()
 		.exec();

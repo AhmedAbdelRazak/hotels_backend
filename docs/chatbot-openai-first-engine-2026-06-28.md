@@ -39,6 +39,12 @@ AI_AGENT_ENGINE=legacy
    compact pricing summary back to OpenAI for the final guest-facing answer.
 7. Reservation creation remains deterministic and only happens after the guest
    presses the `confirm_reservation` quick-reply button on the final review.
+8. Response language is part of the structured context. The engine sends
+   `requestMetadata.languageSignals` with the support-case preferred language,
+   the latest clear guest language, recent guest languages, and a reply hint.
+   OpenAI should answer in the latest clear guest language; if the latest turn
+   is short or neutral, it should keep the preferred/current conversation
+   language.
 
 ## Guardrails
 
@@ -58,6 +64,14 @@ AI_AGENT_ENGINE=legacy
   is needed, the engine reloads only the requested stay dates and validates
   quote-time stock against overlapping reservations. A room is not offered as
   available if any requested night is calendar-blocked or lacks enough stock.
+- Quote-time stock checks and final AI reservation creation use slim MongoDB
+  projections for overlapping reservations: dates, status, pending-confirmation
+  inventory flag, and room type/count only. This avoids loading historical daily
+  pricing arrays into live chat memory.
+- Final reservation creation also checks the quote-time availability summary
+  before saving. If a room becomes unavailable between review and confirmation,
+  the AI sends a concise OpenAI-written recovery message instead of failing
+  silently or claiming the reservation was created.
 - Email is optional. The engine can show a `skip_email` quick reply.
 - Controller-level hard-coded quick trust replies are legacy-only so the
   default engine does not bypass OpenAI.
@@ -94,9 +108,15 @@ Local checks used for this change:
 
 ```bash
 node --check aiagent/core/openaiFirstOrchestrator.js
+node --check controllers/reservations.js
 node --check aiagent/core/orchestrator.js
 node --check controllers/supportcase.js
 node -e "const mod=require('./aiagent/core/openaiFirstOrchestrator'); console.log(Object.keys(mod).sort().join(','));"
 node -e "const mod=require('./aiagent/core/orchestrator'); console.log(Object.keys(mod).sort().join(','));"
 git diff --check
 ```
+
+Production-memory probe used during the 2026-06-28 hardening loaded Zad Ajyad
+hotel context and a five-night price window without writing data. The date-
+limited hotel payload stayed around 10KB and process RSS stayed flat around
+73MB before and after overlapping-reservation lookup.

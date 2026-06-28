@@ -95,6 +95,26 @@ const CONFIRMATION_DISPATCH_DELAY_MS = intFromEnv(
 	1000,
 	{ min: 0, max: 30000 }
 );
+const RESERVATION_INVENTORY_SELECT = [
+	"_id",
+	"checkin_date",
+	"checkout_date",
+	"reservation_status",
+	"state",
+	"pendingConfirmation.status",
+	"pendingConfirmation.inventoryBlocks",
+	"agentDecisionSnapshot.status",
+	"pickedRoomsType.room_type",
+	"pickedRoomsType.roomType",
+	"pickedRoomsType.displayName",
+	"pickedRoomsType.display_name",
+	"pickedRoomsType.count",
+	"pickedRoomsPricing.room_type",
+	"pickedRoomsPricing.roomType",
+	"pickedRoomsPricing.displayName",
+	"pickedRoomsPricing.display_name",
+	"pickedRoomsPricing.count",
+].join(" ");
 
 const scheduledTurns = new Map();
 const activeTurns = new Map();
@@ -248,10 +268,74 @@ function languageFromText(text = "", fallback = "English") {
 	return fallback;
 }
 
-function languageOf(sc = {}, plan = {}) {
+function clearLanguageFromText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return "";
+	if (/[\u0600-\u06FF]/.test(raw)) return "Arabic";
+	if (/[\u0900-\u097F]/.test(raw)) return "Hindi";
+	if (
+		/[Â¿Â¡Ã±Ã¡Ã©Ã­Ã³ÃºÃ¼]/i.test(raw) ||
+		/\b(hola|gracias|reserva|habitaci[oó]n)\b/i.test(raw)
+	) {
+		return "Spanish";
+	}
+	if (
+		/[Ã Ã¢Ã§Ã©Ã¨ÃªÃ«Ã®Ã¯Ã´Ã»Ã¹Ã¼Ã¿Å“]/i.test(raw) ||
+		/\b(bonjour|merci|reservation|chambre)\b/i.test(raw)
+	) {
+		return "French";
+	}
+	const letters = raw.match(/[a-z]/gi) || [];
+	if (
+		letters.length >= 4 &&
+		/\b(hi|hello|please|thanks|thank|room|rooms|price|book|booking|reservation|date|check|available|bus|nusuk|yes|no)\b/i.test(
+			raw
+		)
+	) {
+		return "English";
+	}
+	return "";
+}
+
+function preferredLanguageOf(sc = {}) {
+	const latest = latestGuestMessage(sc) || {};
 	return (
+		cleanText(sc.preferredLanguage, 40) ||
+		cleanText(sc.preferredLanguageCode, 20) ||
+		cleanText(latest.preferredLanguage, 40) ||
+		cleanText(latest.preferredLanguageCode, 20)
+	);
+}
+
+function languageSignals(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latest = latestGuestMessage(sc);
+	const latestGuestLanguage = clearLanguageFromText(latest?.message || "");
+	const recentGuestLanguages = conversation
+		.filter(isGuestEntry)
+		.slice(-8)
+		.map((entry) => clearLanguageFromText(entry.message || ""))
+		.filter(Boolean);
+	const preferredLanguage = preferredLanguageOf(sc);
+	const recentLanguage = recentGuestLanguages[recentGuestLanguages.length - 1] || "";
+	return {
+		preferredLanguage,
+		latestGuestLanguage,
+		recentGuestLanguages: [...new Set(recentGuestLanguages)].slice(-4),
+		replyLanguageHint:
+			latestGuestLanguage || preferredLanguage || recentLanguage || "English",
+		rule:
+			"Reply in the latest clear guest language. If the latest message is too short or language-neutral, keep the preferred/current conversation language.",
+	};
+}
+
+function languageOf(sc = {}, plan = {}) {
+	const signals = languageSignals(sc);
+	return (
+		signals.latestGuestLanguage ||
 		cleanText(plan.language, 40) ||
-		cleanText(latestGuestMessage(sc)?.preferredLanguage, 40) ||
+		signals.preferredLanguage ||
+		signals.replyLanguageHint ||
 		languageFromText(latestGuestMessage(sc)?.message || "", "English")
 	);
 }
@@ -567,6 +651,7 @@ async function contextBundle(sc = {}, hotel = null) {
 		conversation: await buildConversationContext(sc),
 		requestMetadata: {
 			todayISO: new Date().toISOString().slice(0, 10),
+			languageSignals: languageSignals(sc),
 			supportCase: {
 				id: idText(sc._id),
 				clientName: cleanText(sc.clientName || sc.displayName1, 120),
@@ -660,7 +745,8 @@ async function callPlanOpenAI(bundle, agentName) {
 				content: [
 					"You are the OpenAI-first brain for a live hotel reception and reservation chat.",
 					"Read the structured payload in this order: reservationDetails first, hotelDetails second, conversation third, then return strict JSON only.",
-					"Use the same language as the latest guest message. Be a professional CSR and a warm sales representative.",
+					"Use requestMetadata.languageSignals: reply in the latest clear guest language; if the latest message is short or language-neutral, keep the preferred/current conversation language.",
+					"Be a professional CSR and a warm sales representative.",
 					"If the latest guest asks about an existing reservation, updating a reservation, cancellation, payment, or confirmation status, prioritize reservationDetails before hotelDetails.",
 					"If reservationDetails.hasKnownReservation is false and the guest is asking about an existing booking, ask for the confirmation/booking/reference number naturally.",
 					"If the latest guest asks about the hotel, rooms, Nusuk, bus, meals, distance, policies, or casual hotel questions, use hotelDetails and answer directly.",
@@ -814,9 +900,7 @@ async function inventoryByRoomForStay(hotel = {}, plan = {}) {
 		checkin_date: { $lt: endDate },
 		checkout_date: { $gt: startDate },
 	})
-		.select(
-			"_id checkin_date checkout_date reservation_status state pendingConfirmation agentDecisionSnapshot pickedRoomsType pickedRoomsPricing"
-		)
+		.select(RESERVATION_INVENTORY_SELECT)
 		.maxTimeMS(2500)
 		.lean()
 		.exec()
@@ -971,7 +1055,8 @@ async function callPricingWriterOpenAI({ bundle, plan, pricing, missing, agentNa
 				role: "system",
 				content: [
 					"You are replying as a live hotel reception and reservation CSR.",
-					"Use the same language as the latest guest. Answer in one to three friendly sentences unless a compact price list is needed.",
+					"Use requestMetadata.languageSignals: reply in the latest clear guest language; if the latest message is short or language-neutral, keep the preferred/current conversation language.",
+					"Answer in one to three friendly sentences unless a compact price list is needed.",
 					"Use only the pricingSummary values. Never invent prices, taxes, discounts, or availability.",
 					"If selectedQuote is available, state the selected room, dates/nights, currency, and exact total.",
 					"If multiple rooms are shown and no room is selected, present the best options briefly.",
@@ -987,6 +1072,7 @@ async function callPricingWriterOpenAI({ bundle, plan, pricing, missing, agentNa
 					reservationDetails: bundle.reservationDetails,
 					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
+					requestMetadata: bundle.requestMetadata,
 					plan,
 					pricingSummary: pricing,
 					missingRequiredDetails: missing,
@@ -1010,7 +1096,8 @@ async function callReviewWriterOpenAI({ bundle, plan, pricing, slots, agentName 
 				role: "system",
 				content: [
 					"You are preparing the final reservation review before the guest presses the Confirm booking button.",
-					"Use the same language as the guest. Be concise and warm.",
+					"Use requestMetadata.languageSignals: reply in the latest clear guest language; if the latest message is short or language-neutral, keep the preferred/current conversation language.",
+					"Be concise and warm.",
 					"List only verified details: hotel, room, check-in, check-out, nights, guest name, phone, nationality, adults, children, rooms, email if provided, and total.",
 					"Make it explicit that the guest should press the Confirm booking button only if everything is correct.",
 					"Do not say the reservation is created yet.",
@@ -1023,6 +1110,7 @@ async function callReviewWriterOpenAI({ bundle, plan, pricing, slots, agentName 
 					reservationDetails: bundle.reservationDetails,
 					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
+					requestMetadata: bundle.requestMetadata,
 					plan,
 					pricingSummary: pricing,
 					normalizedReservationDetails: slots,
@@ -1053,7 +1141,8 @@ async function callReservationCreatedWriterOpenAI({
 				role: "system",
 				content: [
 					"You are a hotel reception and reservation CSR sending the final booking-created message.",
-					"Use the same language as the guest. Keep it professional, happy, and concise.",
+					"Use requestMetadata.languageSignals: reply in the latest clear guest language; if the latest message is short or language-neutral, keep the preferred/current conversation language.",
+					"Keep it professional, happy, and concise.",
 					"State the exact confirmation number, dates, total, and links if present.",
 					"Say the hotel team will review/confirm internally without making it sound alarming.",
 					`Agent name is ${agentName}.`,
@@ -1065,6 +1154,7 @@ async function callReservationCreatedWriterOpenAI({
 					reservationDetails: bundle.reservationDetails,
 					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
+					requestMetadata: bundle.requestMetadata,
 					plan,
 					reservation: {
 						id: idText(reservation?._id),
@@ -1154,7 +1244,20 @@ function reservationLinks(reservation) {
 	};
 }
 
-function quoteForCreate(hotel = {}, plan = {}) {
+function summaryRoomMatchesQuote(summary = {}, quote = {}) {
+	const room = quote?.room || {};
+	return (
+		(idText(summary.roomId) && idText(summary.roomId) === idText(room._id)) ||
+		(summary.roomType &&
+			roomSelectionKey(summary) &&
+			roomSelectionKey(summary) === roomSelectionKey(room)) ||
+		(summary.displayName &&
+			roomSelectionDisplayKey(summary) &&
+			roomSelectionDisplayKey(summary) === roomSelectionDisplayKey(room))
+	);
+}
+
+function quoteForCreate(hotel = {}, plan = {}, pricing = null) {
 	const room = matchRoom(hotel, plan.roomTypeHint, plan.selectedRoomType);
 	if (!room || !validStayDates(plan.checkinISO, plan.checkoutISO)) return null;
 	const quote = priceRoomForStay(
@@ -1163,7 +1266,63 @@ function quoteForCreate(hotel = {}, plan = {}) {
 		plan.checkinISO,
 		plan.checkoutISO
 	);
+	if (quote?.available && pricing?.selectedQuote) {
+		const selectedMatches =
+			summaryRoomMatchesQuote(pricing.selectedQuote, quote) ||
+			!pricing.selectedQuote.roomType;
+		if (selectedMatches && pricing.selectedQuote.available !== true) return null;
+	}
+	if (quote?.available && Array.isArray(pricing?.rooms)) {
+		const summary = pricing.rooms.find((candidate) =>
+			summaryRoomMatchesQuote(candidate, quote)
+		);
+		if (summary && summary.available !== true) return null;
+	}
 	return quote?.available ? quote : null;
+}
+
+async function callReservationCreateIssueWriterOpenAI({
+	bundle,
+	plan,
+	pricing,
+	error,
+	agentName,
+}) {
+	const raw = await chat(
+		[
+			{
+				role: "system",
+				content: [
+					"You are a hotel reception and reservation CSR.",
+					"Use requestMetadata.languageSignals: reply in the latest clear guest language; if the latest message is short or language-neutral, keep the preferred/current conversation language.",
+					"Keep it concise and reassuring.",
+					"The reservation could not be created because availability or reservation validation failed.",
+					"Do not say the reservation was created. Ask for another date range or another room type.",
+					"Use only the provided pricingSummary and error message; never invent availability.",
+					`Agent name is ${agentName}.`,
+				].join("\n"),
+			},
+			{
+				role: "user",
+				content: JSON.stringify({
+					reservationDetails: bundle.reservationDetails,
+					hotelDetails: bundle.hotelDetails,
+					conversation: bundle.conversation,
+					requestMetadata: bundle.requestMetadata,
+					plan,
+					pricingSummary: pricing,
+					errorMessage: cleanText(error?.message || error, 500),
+				}),
+			},
+		],
+		{
+			kind: OPENAI_FIRST_WRITER_KIND,
+			temperature: 0.25,
+			max_tokens: 260,
+			reasoning_effort: "low",
+		}
+	);
+	return cleanText(raw, 1600);
 }
 
 async function composeReply(sc, hotel, agentName) {
@@ -1219,7 +1378,26 @@ async function composeReply(sc, hotel, agentName) {
 			};
 		}
 		const missing = missingMandatoryDetails(slots);
-		const quote = quoteForCreate(pricingHotel, plan);
+		const quote = quoteForCreate(pricingHotel, plan, pricing);
+		if (!quote && !missing.length) {
+			const text = await callReservationCreateIssueWriterOpenAI({
+				bundle,
+				plan,
+				pricing,
+				error: new Error(
+					pricing?.selectedQuote?.inventoryMessage ||
+						pricing?.selectedQuote?.reason ||
+						"Selected room is not available for the full stay."
+				),
+				agentName,
+			}).catch(() => {
+				return (
+					plan.replyIfNoPricing ||
+					"The selected room is not available for the full stay. Please send another date range or another room type and I will check it right away."
+				);
+			});
+			return { text, language, quickReplies: [] };
+		}
 		if (missing.length || !quote) {
 			const text =
 				plan.askForMissingDetailsReply ||
@@ -1227,17 +1405,34 @@ async function composeReply(sc, hotel, agentName) {
 				`Please share the missing details before I create the reservation: ${missing.join(", ")}.`;
 			return { text, language, quickReplies: [] };
 		}
-		const reservation = await createReservationForCase({
-			caseId: idText(sc),
-			hotel: pricingHotel,
-			slots: {
-				...slots,
-				roomTypeKey: quote.room?.roomType || slots.roomTypeKey,
-				name: slots.fullName,
-			},
-			quoteData: quote,
-			room: quote.room,
-		});
+		let reservation = null;
+		try {
+			reservation = await createReservationForCase({
+				caseId: idText(sc),
+				hotel: pricingHotel,
+				slots: {
+					...slots,
+					roomTypeKey: quote.room?.roomType || slots.roomTypeKey,
+					name: slots.fullName,
+				},
+				quoteData: quote,
+				room: quote.room,
+			});
+		} catch (error) {
+			const text = await callReservationCreateIssueWriterOpenAI({
+				bundle,
+				plan,
+				pricing,
+				error,
+				agentName,
+			}).catch(() => {
+				return (
+					plan.replyIfNoPricing ||
+					"The selected option is no longer available for the full stay. Please send another date range or another room type and I will check it right away."
+				);
+			});
+			return { text, language, quickReplies: [] };
+		}
 		const links = reservationLinks(reservation);
 		const text = await callReservationCreatedWriterOpenAI({
 			bundle,
