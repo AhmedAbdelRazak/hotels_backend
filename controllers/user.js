@@ -1120,13 +1120,23 @@ exports.previewHotelStaffDashboard = async (req, res) => {
 			staffRoles.includes(10000) ||
 			staffDescriptions.includes("systemadmin") ||
 			staffDescriptions.includes("system admin");
+		const staffUserId = normalizeObjectIdString(staffUser._id);
+		const isSelectedHotelOwner =
+			staffRoles.includes(2000) && staffUserId === permission.ownerId;
 		const isScopedRootOwner =
-			staffRoles.includes(2000) && !String(staffUser.belongsToId || "");
+			staffRoles.includes(2000) &&
+			(!String(staffUser.belongsToId || "") ||
+				normalizeObjectIdString(staffUser.belongsToId) === staffUserId);
+		const hasSelectedHotelScope =
+			staffHotelIds.includes(permission.hotelId) || isSelectedHotelOwner;
+		const hasSelectedOwnerScope =
+			normalizeObjectIdString(staffUser.belongsToId) === permission.ownerId ||
+			isScopedSystemAdmin ||
+			isScopedRootOwner ||
+			isSelectedHotelOwner;
 		if (
-			!staffHotelIds.includes(permission.hotelId) ||
-			(String(staffUser.belongsToId || "") !== permission.ownerId &&
-				!isScopedSystemAdmin &&
-				!isScopedRootOwner) ||
+			!hasSelectedHotelScope ||
+			!hasSelectedOwnerScope ||
 			!staffRoles.some((role) => HOTEL_STAFF_ROLES.includes(role))
 		) {
 			return res.status(403).json({
@@ -1138,7 +1148,7 @@ exports.previewHotelStaffDashboard = async (req, res) => {
 			...staffUser,
 			hotelIdWork: permission.hotelId,
 			belongsToId:
-				isScopedSystemAdmin || isScopedRootOwner
+				isScopedSystemAdmin || isScopedRootOwner || isSelectedHotelOwner
 					? staffUser.belongsToId || ""
 					: permission.ownerId,
 		};
