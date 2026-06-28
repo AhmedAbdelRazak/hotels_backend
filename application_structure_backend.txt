@@ -3097,6 +3097,8 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Large calendar/pricing arrays stay out of the first prompt; pricing is
     computed by backend selectors and only compact price summaries are sent to
     the guest-facing writer call.
+  - The AI hotel cache keeps compact calendar rows only, and pricing selectors
+    map only requested stay dates to prevent live chat heap spikes.
   - Reservation creation remains deterministic and requires the explicit
     `confirm_reservation` quick-reply action.
   - Optional email is supported through a `skip_email` quick reply.

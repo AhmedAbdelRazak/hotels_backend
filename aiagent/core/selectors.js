@@ -28,6 +28,26 @@ function eachDate(checkinISO, checkoutISO) {
 	return list;
 }
 
+function calendarDateKey(value = "") {
+	return String(value || "").slice(0, 10);
+}
+
+function pricingRatesForDates(room = {}, dates = []) {
+	const targetDates = new Set(dates.map(calendarDateKey).filter(Boolean));
+	const rateMap = {};
+	if (!targetDates.size) return rateMap;
+	const pricingRates = Array.isArray(room.pricingRate) ? room.pricingRate : [];
+	let matchedDates = 0;
+	for (const rate of pricingRates) {
+		const key = calendarDateKey(rate?.calendarDate);
+		if (!key || !targetDates.has(key)) continue;
+		if (!rateMap[key]) matchedDates += 1;
+		rateMap[key] = rate;
+		if (matchedDates >= targetDates.size) break;
+	}
+	return rateMap;
+}
+
 /** Commission fallback: roomCommission > hotel.commission > 10 */
 function resolveCommissionRate(hotel, room) {
 	const h = hasCommissionValue(hotel?.commission)
@@ -146,11 +166,9 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 	const defaultCost = num(room?.defaultCost, 0); // rootPrice (hotel cost)
 	const commissionRate = resolveCommissionRate(hotel, room);
 
-	// map special calendar rows
-	const rateMap = {};
-	(room.pricingRate || []).forEach((r) => {
-		if (r && r.calendarDate) rateMap[r.calendarDate] = r;
-	});
+	// Map only the requested stay dates. Some hotels keep large calendar arrays,
+	// and the chatbot only needs exact rows for the guest's requested nights.
+	const rateMap = pricingRatesForDates(room, dates);
 
 	const pricingByDay = [];
 	const perNight = [];

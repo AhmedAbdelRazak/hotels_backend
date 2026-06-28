@@ -45,6 +45,10 @@ AI_AGENT_ENGINE=legacy
 - Backend owns availability math, room matching, reservation locks,
   confirmation numbers, duplicate prevention, Socket.IO events, and final
   reservation creation.
+- AI hotel context caches compact calendar pricing rows only
+  (`calendarDate`, `price`, `rootPrice`, `commissionRate`), and pricing helpers
+  map only the requested stay dates. This keeps exact pricing while avoiding
+  large temporary calendar maps during live chat turns.
 - Email is optional. The engine can show a `skip_email` quick reply.
 - Controller-level hard-coded quick trust replies are legacy-only so the
   default engine does not bypass OpenAI.

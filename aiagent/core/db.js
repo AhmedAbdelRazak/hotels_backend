@@ -16,6 +16,17 @@ const AI_SETTINGS_CACHE_TTL_MS = Number(
 const hotelContextCache = new Map();
 let janatAiSettingsCache = null;
 
+function compactPricingRateForAi(row = {}) {
+	const calendarDate = String(row?.calendarDate || row?.date || "").slice(0, 10);
+	if (!calendarDate) return null;
+	return {
+		calendarDate,
+		price: row.price,
+		rootPrice: row.rootPrice,
+		commissionRate: row.commissionRate,
+	};
+}
+
 function safeId(id) {
 	try {
 		const value = id && typeof id === "object" && id._id ? id._id : id;
@@ -229,7 +240,9 @@ function compactRoomForAi(room = {}) {
 		extraAmenities: room.extraAmenities,
 		pricedExtras: room.pricedExtras,
 		price: room.price,
-		pricingRate: room.pricingRate,
+		pricingRate: Array.isArray(room.pricingRate)
+			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
+			: [],
 		monthly: room.monthly,
 		offers: room.offers,
 		count: room.count,
