@@ -5211,6 +5211,21 @@ function initialHotelGreetingText(sc = {}, st = {}) {
 	return `${opening} ${name}, this is ${agentName} from ${hotelName} reception and reservations. How can I help you today?`;
 }
 
+function agentPingAcknowledgementText(sc = {}, st = {}) {
+	const hotelName = localizedHotelName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `\u0623\u0647\u0644\u0627\u064b \u0628\u0643\u060c \u0623\u0646\u0627 \u0645\u0639\u0643 \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName}. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643\u061f`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `Estoy aqui contigo desde recepcion y reservas de ${hotelName}. Como puedo ayudarte?`;
+	}
+	if (/french/i.test(lang)) {
+		return `Je suis bien la avec vous, reception et reservations de ${hotelName}. Comment puis-je vous aider ?`;
+	}
+	return `I am here with you from ${hotelName} reception and reservations. How can I help?`;
+}
+
 function hotelComplaintText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	return (
@@ -17448,6 +17463,24 @@ async function planTurn(io, sc) {
 				);
 				if (handledCarriedQuestion) return;
 			}
+		}
+		if (
+			userText &&
+			st.hotel &&
+			guestAgentPingOnlyText(userText, st) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "agent_ping.fast_ack", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, agentPingAcknowledgementText(sc, st), {
+				fast: true,
+			});
+			st.waitFor = "clarify";
+			return;
 		}
 		if (
 			userText &&
