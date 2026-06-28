@@ -2,6 +2,8 @@
 
 ## What Was Fixed
 
+- Zad Ajyad now has a dedicated private positioning context for the writer: answer the guest's question first, then softly position Ajyad location, Al Haram convenience when supported by saved distance facts, and direct-booking value only when natural.
+- Zad Ajyad price objections now route through the discount/value handler. The bot may explain that direct hotel booking avoids third-party commission layers and can often mean about 25-30% better value depending on dates and availability, but it must not invent a new total or guarantee an extra discount.
 - Booking context recovery now keeps an accepted quote sticky after restart/cold state.
 - The Marwa/Hana flow no longer falls back to asking for check-in/check-out dates after the guest already accepted a quoted stay.
 - Room recovery skips obvious reservation-detail payloads like name, phone, nationality, and guest count.
@@ -45,6 +47,8 @@ Both restore the same stay and guest details in under two seconds locally, inste
 
 ## Operational Notes
 
+- Unplanned guest questions should never receive a canned "generic" fallback. The dynamic writer receives the full chat context and must answer the latest question directly, then return to the booking flow only when it is natural and useful.
+- Zad Ajyad positioning is a sales guardrail, not a claim generator. Do not describe it as luxury, guaranteed cheapest, or the best hotel in Makkah unless verified source facts are added later.
 - `AI_DELAY_NOTICE_ENABLED` defaults to `false`.
 - `AI_TURN_STALL_RECOVERY_MS` defaults to 8000 ms. If the latest guest message still has no AI reply and the active turn is stale, recovery interrupts the stale state and reruns the turn from the latest database conversation.
 - All `humanSend` paths verify that the active planner still owns the turn before waiting, policy checks, and database append. This is the guard that prevents the mobile chat from receiving stale duplicate replies after recovery.

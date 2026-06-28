@@ -55,6 +55,7 @@ const {
 const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
 const LEGACY_AI_SUPPORT_EMAIL = "management@xhotelpro.com";
+const ZAD_AJYAD_HOTEL_ID = "6a40b6a1a6efe70450536038";
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
 	const parsed = parseInt(process.env[name] || "", 10);
@@ -3318,6 +3319,13 @@ function publicDiscountPercent() {
 
 function wantsDiscountQuestion(text = "") {
 	const normalized = String(text || "").toLowerCase();
+	if (
+		/(?:too\s+expensive|expensive|costly|high\s+price|price\s+is\s+high|\u063a\u0627\u0644\u064a|\u063a\u0627\u0644\u0649|\u063a\u0627\u0644\u064a\u0629|\u063a\u0627\u0644\u064a\u0647|\u0627\u0644\u0633\u0639\u0631\s+\u0639\u0627\u0644\u064a|\u0627\u0644\u0633\u0639\u0631\s+\u0639\u0627\u0644\u0649)/i.test(
+			normalized
+		)
+	) {
+		return true;
+	}
 	return /discount|discounts|promo|promotion|coupon|voucher|offer|offers|deal|deals|special rate|best price|lower price|cheaper|reduce price|make it less|خصم|خصومات|تخفيض|تخفيضات|عرض|عروض|كوبون|برومو|اقل سعر|أقل سعر|ارخص|أرخص|نزل السعر|ينفع خصم|descuento|oferta|promocion|promoción|remise|reduction|réduction|promo|offre/i.test(
 		normalized
 	);
@@ -3352,6 +3360,47 @@ function discountDisplayContext(st = {}) {
 		currency: quote?.currency || st.hotel?.currency || "SAR",
 		hasQuote: Boolean(quote?.available),
 	};
+}
+
+function isZadAjyadContext(sc = {}, st = {}) {
+	const hotel = st?.hotel || {};
+	const hotelId = idText(hotel._id || hotel.id || sc.hotelId);
+	if (hotelId === ZAD_AJYAD_HOTEL_ID) return true;
+	const compactName = asciiize(
+		String(hotel.hotelName || hotel.name || localizedHotelName(sc, st) || "")
+	)
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "");
+	return compactName.includes("zadajyad") || compactName.includes("zadalyad");
+}
+
+function hotelPositioningContext(sc = {}, st = {}) {
+	if (!isZadAjyadContext(sc, st)) return null;
+	const lang = languageOf(sc, st);
+	const hotel = st.hotel || {};
+	const walking = formatHotelDistanceValue(hotel.distances?.walkingToElHaram, lang);
+	const driving = formatHotelDistanceValue(hotel.distances?.drivingToElHaram, lang);
+	return {
+		hotel: "Zad Ajyad",
+		locationValue:
+			"Zad Ajyad should be positioned as a strong Ajyad-area value hotel near Al Haram, with practical quality and direct hotel reception support.",
+		directBookingValue:
+			"Direct reservations can be positioned as better value because there are no third-party commission/fee layers. When the guest asks about price, discount, value, or says it is expensive, explain professionally that direct booking often gives about 25-30% better value compared with third-party channels, depending on dates and availability. Do not guarantee a universal extra discount, and do not invent a new total.",
+		walkingToElHaram: walking,
+		drivingToElHaram: driving,
+		style:
+			"Answer the actual question first. Add one concise value/sales sentence only when natural. Avoid exaggerated claims such as best in Makkah, luxury, guaranteed cheapest, or exact savings on every date.",
+	};
+}
+
+function hotelPositioningInstruction(sc = {}, st = {}) {
+	if (!isZadAjyadContext(sc, st)) return "";
+	return [
+		`Zad Ajyad positioning rule: when the active hotel is Zad Ajyad, treat it as a key sales-focus property.`,
+		`Answer the guest's direct question first, then when natural add one concise sales/value line about its Ajyad location, walkable/near-Al-Haram convenience when supported by distance facts, and direct-booking value.`,
+		`For discount, expensive, best-price, or value objections, say direct hotel booking avoids third-party commission/fee layers and can often mean about 25-30% better value depending on dates and availability. Do not guarantee a universal discount, invent totals, or exaggerate quality.`,
+		`For unrelated questions such as Nusuk, bus, policy, or room facts, answer the fact directly and only add a soft Zad Ajyad value line if it fits naturally.`
+	].join(" ");
 }
 
 function looksLikeGreetingOnly(text = "") {
@@ -7695,6 +7744,7 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 
 async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 	const previousWaitFor = st.waitFor || null;
+	const activeHotelPositioning = hotelPositioningContext(sc, st);
 	const policyRow =
 		!selectedHotelMealsQuestionText(userText) && selectedHotelPolicyQuestionText(userText)
 		? bestHotelPolicyRow(st, userText)
@@ -7712,6 +7762,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 					{
 						latestUserMessage: userText,
 						selectedHotelPolicy: policyRow,
+						activeHotelPositioning,
 						defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
 						nextStep: nextPivot(st),
 					}
@@ -7737,6 +7788,7 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 				{
 					latestUserMessage: userText,
 					selectedHotelFacts: buildActiveHotelFacts(sc, st),
+					activeHotelPositioning,
 					nextStep: nextPivot(st),
 				}
 			),
@@ -7757,15 +7809,20 @@ async function answerSelectedHotelFactQuestion(io, sc, st, userText = "") {
 		: postBookingFact
 		? "The guest asked a direct factual question about the selected hotel after the reservation was already created. Answer directly using selectedHotelFacts and fallbackText only, then add one short professional line asking whether they need anything else. Do not ask to continue, review, create, finalize, or confirm the reservation again. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links."
 		: "The guest asked a direct factual question about the selected hotel. Answer directly using selectedHotelFacts and fallbackText only, then add one warm hospitality/sales sentence and one natural next booking step. Do not ask for dates before answering the fact. Do not mention Jannat Booking or any other hotel unless explicitly required by supplied context. Do not invent addresses, distances, bus schedules, meal service details, Nusuk status, policies, room facts, prices, contacts, or links.";
-	const sent = await sendDynamicWrittenReply(io, sc, st, userText, instruction, {
+	const positioningInstruction = activeHotelPositioning
+		? " If activeHotelPositioning is supplied, answer the factual question first, then add at most one soft Zad Ajyad location/direct-booking value line only when it fits naturally. Do not exaggerate, compare unsupported hotels, or promise guaranteed savings."
+		: "";
+	const sent = await sendDynamicWrittenReply(io, sc, st, userText, `${instruction}${positioningInstruction}`, {
 		latestUserMessage: userText,
 		selectedHotel: localizedHotelName(sc, st),
 		selectedHotelPolicy: policyRow || null,
 		defaultCancellationRefundPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
 		selectedHotelFacts: buildActiveHotelFacts(sc, st),
+		activeHotelPositioning,
 		fallbackText,
 		nextStep: nextPivot(st),
 		postBookingFact,
+		responsePositioningInstruction: positioningInstruction,
 	}, {
 		fallbackText,
 		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
@@ -11732,6 +11789,7 @@ async function write(io, sc, st, instruction, context = {}) {
 	const respectfulAddress = guestProfile.address;
 	const hotelName = st.hotel?.hotelName ? toTitle(st.hotel.hotelName) : "";
 	const activeHotelFacts = buildActiveHotelFacts(sc, st);
+	const activeHotelPositioning = hotelPositioningContext(sc, st);
 	const targetLanguage = languageOf(sc, st) || "English";
 	const targetLanguageCode = activeLanguageCodeOf(sc, st);
 	const targetLanguageText = targetLanguageCode
@@ -11765,6 +11823,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		hotelName
 			? `Speak as the hotel's own reception and reservations desk. The guest should feel they are speaking directly with reception, not a separate middleman.`
 			: `Represent Jannat Booking directly.`,
+		activeHotelPositioning ? hotelPositioningInstruction(sc, st) : "",
 		`The guest's active response language is ${targetLanguageText}. This may override the frontend preferred language when the latest guest message is clearly in another language.`,
 		`STRICT LANGUAGE RULE: Every customer-facing word in your final answer must be in ${targetLanguage}.`,
 		`For the first message in a new chat, start with a readable Islamic greeting before the guest name: Arabic "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", Urdu "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u06cc\u06a9\u0645", Hindi "\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941 \u0905\u0932\u0948\u0915\u0941\u092e", Indonesian/Malay "Assalamualaikum", and other Latin-script languages "Assalamu alaikum". Treat this as the approved platform salutation, then keep the rest of the reply in ${targetLanguage}. Do not use Arabizi numerals like "3" for ayn.`,
@@ -11849,6 +11908,7 @@ async function write(io, sc, st, instruction, context = {}) {
 			guestProfile,
 			respectfulAddress,
 			activeHotelFacts,
+			activeHotelPositioning,
 			alreadyIntroduced,
 			latestGuestLanguageStyle: languageStyle,
 			privatePreviousGuestChats: previousGuestContext,
@@ -15723,12 +15783,13 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 	const previousWaitFor = st.waitFor || "";
 	const fallback = supportEmailFallbackText(sc, st);
 	const liveCurrent = liveCurrentGeneralQuestionText(userText);
+	const activeHotelPositioning = hotelPositioningContext(sc, st);
 	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
 		st,
 		userText,
-		`The guest asked a general, off-topic, unclear, or unplanned question. Study the full conversation transcript and answer the latest guest point directly in one or two polished professional sentences in the guest's active language. Preserve the current reservation flow without asking for details already supplied; do not use a canned/generic template, do not list a form, and do not add an unrelated booking prompt unless the latest message asks to reserve. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then gently return to hotel/reservation help only if natural. ${
+		`The guest asked a general, off-topic, unclear, or unplanned question. Study the full conversation transcript and answer the latest guest point directly in one or two polished professional sentences in the guest's active language. Preserve the current reservation flow without asking for details already supplied; do not use a canned/generic template, do not list a form, and do not add an unrelated booking prompt unless the latest message asks to reserve. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If activeHotelPositioning is supplied, use it only after answering the latest question, as a soft contextual sales/value line when natural; for Zad Ajyad discount, expensive, best-price, or value objections, mention direct-booking value carefully without promising a guaranteed extra discount. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then gently return to hotel/reservation help only if natural. ${
 			liveCurrent
 				? "The latest message appears to need live/current data, so do not answer it with hotel address, distance, map, room, policy, or other hotel facts unless the guest explicitly asked for those facts."
 				: ""
@@ -15737,6 +15798,7 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 			hotelName: localizedHotelName(sc, st),
 			reason,
 			liveCurrentQuestion: liveCurrent,
+			activeHotelPositioning,
 			unknownAnswerDraft: fallback,
 			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 		},
@@ -16671,7 +16733,12 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 
 async function answerDiscountQuestion(io, sc, st, userText = "") {
 	const discount = discountDisplayContext(st);
-	const fallbackText = discount.displayedPerNight
+	const activeHotelPositioning = hotelPositioningContext(sc, st);
+	const zadAjyadValueText =
+		"Sir, Zad Ajyad is in Ajyad near Al Haram and direct hotel booking helps avoid third-party commission or fee layers. Depending on dates and availability, direct reservations can often be about 25-30% better value than third-party channels, while the displayed total remains the confirmed system price.";
+	const fallbackText = activeHotelPositioning
+		? zadAjyadValueText
+		: discount.displayedPerNight
 		? `Sir, our published prices already include a ${discount.discountPercent}% across-the-board discount and are among the best market rates. The displayed nightly rate of ${discount.displayedPerNight} ${cleanCurrency(
 				discount.currency
 		  )} is already after the discount; before discount it would be about ${
@@ -16682,10 +16749,13 @@ async function answerDiscountQuestion(io, sc, st, userText = "") {
 		io,
 		sc,
 		st,
-		"The guest asked about discounts or offers. Reply professionally without escalation. Say the published/displayed prices already include a 15% across-the-board discount and are among the best market rates. Do not present a new discounted total. Do not offer an extra manual discount. If useful, explain briefly that a displayed nightly price of 85 SAR means it is already after 15% from 100 SAR. Keep the normal booking flow unchanged and answer only because the guest asked.",
+		activeHotelPositioning
+			? "The guest asked about discount, price, value, or said the price is expensive for Zad Ajyad. Reply professionally without escalation. Answer the objection directly: explain that Zad Ajyad is an Ajyad-area hotel near/walkable to Al Haram when supported by activeHotelFacts, and that direct hotel booking avoids third-party commission/fee layers and can often mean about 25-30% better value compared with third-party channels depending on dates and availability. Do not present a new discounted total, do not offer an extra manual discount, and do not guarantee universal savings. Keep the normal booking flow unchanged and answer only because the guest asked."
+			: "The guest asked about discounts or offers. Reply professionally without escalation. Say the published/displayed prices already include a 15% across-the-board discount and are among the best market rates. Do not present a new discounted total. Do not offer an extra manual discount. If useful, explain briefly that a displayed nightly price of 85 SAR means it is already after 15% from 100 SAR. Keep the normal booking flow unchanged and answer only because the guest asked.",
 		{
 			latestUserMessage: userText,
 			discountPolicy: discount,
+			activeHotelPositioning,
 			fallbackText,
 		}
 	);
