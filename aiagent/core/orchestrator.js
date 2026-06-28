@@ -2065,6 +2065,7 @@ function reservationDetailWaitState(waitFor = "") {
 		"phone",
 		"email_or_skip",
 		"finalize",
+		"clarify",
 	].includes(waitFor);
 }
 
@@ -2530,6 +2531,7 @@ function hydrateKnownSlotsFromConversation(
 	const latestGuestIndex = protectLatestGuestDateChange
 		? latestGuestMessageIndex(sc)
 		: -1;
+	let latestGuestNationality = "";
 	for (let index = 0; index < conversation.length; index += 1) {
 		const message = conversation[index];
 		const rawMessageText = String(message?.message || "").trim();
@@ -2556,6 +2558,8 @@ function hydrateKnownSlotsFromConversation(
 					latestGuestDateRange = messageDates;
 				}
 			}
+			const messageNationality = latestNationalityHintFromText(messageText);
+			if (messageNationality) latestGuestNationality = messageNationality;
 		}
 		if (!guestMessage) continue;
 		if (messageText) guestMessages.push(messageText);
@@ -2605,8 +2609,11 @@ function hydrateKnownSlotsFromConversation(
 		const phone = latestPhoneFromText(identityText);
 		if (phone && !st.slots.phone) st.slots.phone = phone;
 		const nationalitySource = nationalityCandidateFromText(identityText);
-		const nationality = nationalityHintFromText(nationalitySource || identityText);
-		if (nationality && !hasUsableNationality(st.slots.nationality)) {
+		const nationality =
+			latestGuestNationality ||
+			latestNationalityHintFromText(nationalitySource || identityText) ||
+			nationalityHintFromText(nationalitySource || identityText);
+		if (nationality) {
 			st.slots.nationality = nationality;
 		}
 		markHydrationStage("guest_identity_extract");
@@ -2656,7 +2663,7 @@ function hydrateKnownSlotsFromConversation(
 				}
 			} else if (lastAsk === "nationality" && !hasUsableNationality(st.slots.nationality)) {
 				const value = nationalityCandidateFromText(text) || asciiize(text).trim();
-				const normalized = nationalityHintFromText(value) || value;
+				const normalized = latestNationalityHintFromText(value) || nationalityHintFromText(value) || value;
 				if (hasUsableNationality(normalized)) st.slots.nationality = normalized;
 			}
 		}
@@ -8946,6 +8953,7 @@ async function humanSend(
 			duplicateAfter: expectedTurnUserText ? turnStartedAt : null,
 			requireOpenClientAi: fastAtomicAppend,
 			requireLatestGuestText: fastAtomicAppend ? expectedTurnUserText : "",
+			requireNoAiAfter: fastAtomicAppend ? turnStartedAt : null,
 			skipDuplicateCheck: fastAtomicAppend,
 		}
 	);
@@ -9126,6 +9134,7 @@ function rejectsFullNameCandidate(value = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(value);
 	if (looksLikeStayDateCandidate(value)) return true;
 	if (!lower) return true;
+	if (emailSkipText(value)) return true;
 	if (/[?؟]/.test(lower)) return true;
 	if (
 		/\b(?:something|wrong|incorrect|problem|issue|mistake|error|fix|change|edit|modify|cancel|phone|mobile|whatsapp|hotel|reception|manager|support|reservation|booking|confirmation|confirm|price|rate|date|room|nationality|country|email|adult|child|children|guest|person|people|pax|skip|yes|no|thanks?|thank\s+you|please|pls|could|would|can|send|give|show|details|number|hurry|quick|quickly|faster|speed|urgent)\b/i.test(
@@ -9408,6 +9417,71 @@ function nationalityCandidateFromText(text = "") {
 		if (nationalityHintFromText(line) || directNationalityAlias(line)) return line;
 	}
 	return "";
+}
+
+function latestNationalityHintFromText(text = "") {
+	const raw = String(text || "").replace(/\s+/g, " ").trim();
+	if (!raw) return "";
+	const explicit = explicitNationalityText(raw);
+	if (explicit) return nationalityHintFromText(explicit) || directNationalityAlias(explicit);
+	const parts = raw
+		.split(/[\n\r;|.?!؟،]+/)
+		.flatMap((part) =>
+			String(part || "").split(
+				/\b(?:but|rather|instead)\b|(?:\u0644\u0643\u0646|\u0648\u0644\u0643\u0646|\u0628\u0633|\u0628\u0644)/i
+			)
+		)
+		.map((part) => part.trim())
+		.filter(Boolean);
+	for (let index = parts.length - 1; index >= 0; index -= 1) {
+		const part = parts[index];
+		const { lower, arabic } = normalizeControlText(part);
+		const dialectOnly =
+			/(?:dialect|accent)/i.test(lower) ||
+			/(?:\u0644\u0647\u062c\u0647|\u0644\u0647\u062c\u0629)/i.test(arabic);
+		const nationalityChallenge =
+			/\b(?:who\s+(?:said|told)\s+(?:you\s+)?(?:i\s+am|i'm|im)|why\s+did\s+you\s+say\s+i\s+am)\b/i.test(
+				lower
+			) ||
+			/(?:\u0645\u064a\u0646|\u0645\u0646).{0,12}(?:\u0642\u0627\u0644\u0643|\u0642\u0627\u0644\s+\u0644\u0643)|(?:\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627).{0,18}(?:\u0642\u0644\u062a|\u0642\u0648\u0644\u062a)/i.test(
+				arabic
+			);
+		if (nationalityChallenge) continue;
+		const explicitIdentity =
+			/\b(?:nationality|country|i\s*am|i'm|im)\b/i.test(lower) ||
+			/(?:\u062c\u0646\u0633\u064a|\u0628\u0644\u062f\u064a|\u0628\u0644\u062f\u0649|\u0627\u0646\u0627|\u0623\u0646\u0627|\u0627\u0646\u064a|\u0625\u0646\u064a)/i.test(
+				arabic
+			);
+		if (dialectOnly && !explicitIdentity) continue;
+		const personaParts = part
+			.split(/(?:\u0627\u0646\u0627|\u0623\u0646\u0627|\u0627\u0646\u064a|\u0625\u0646\u064a|\u0627\u0646\u0649|\u0625\u0646\u0649|\bi\s*am\b|\bi'm\b|\bim\b)/i)
+			.map((candidate) => candidate.trim())
+			.filter(Boolean);
+		for (let personaIndex = personaParts.length - 1; personaIndex >= 0; personaIndex -= 1) {
+			if (
+				/^(?:not|no)\b/i.test(personaParts[personaIndex]) ||
+				/^(?:\u0645\u0634|\u0645\u0648|\u0644\u0633\u062a|\u0644\u064a\u0633|\u0645\u0627\u0646\u064a|\u0645\u0628)\b/i.test(
+					normalizeControlText(personaParts[personaIndex]).arabic
+				)
+			) {
+				continue;
+			}
+			const hint =
+				nationalityHintFromText(personaParts[personaIndex]) ||
+				directNationalityAlias(personaParts[personaIndex]);
+			if (hint) return hint;
+		}
+		const negatedPart =
+			/\b(?:not|no)\b/i.test(lower) ||
+			/(?:\u0645\u0634|\u0645\u0648|\u0644\u0633\u062a|\u0644\u064a\u0633|\u0645\u0627\u0646\u064a|\u0645\u0628)/i.test(
+				arabic
+			);
+		if (negatedPart) continue;
+		const hint = nationalityHintFromText(part) || directNationalityAlias(part);
+		if (hint) return hint;
+	}
+	const candidate = nationalityCandidateFromText(raw);
+	return nationalityHintFromText(candidate || raw) || directNationalityAlias(candidate || raw);
 }
 
 async function normalizeNationalityFromText(text = "", language = "English") {
@@ -9762,30 +9836,7 @@ function finalReservationPrompt(sc = {}, st = {}) {
 
 function placeReservationActionSelected(sc = {}, userText = "", st = {}) {
 	if (lastGuestAction(sc) === "place_reservation") return true;
-	const { lower, arabic, latinCompact } = normalizeControlText(userText);
-	const explicitCompletionText =
-		/\b(?:complete|finalize|finalise|confirm|place|create|make|book)\s+(?:the\s+)?(?:reservation|booking)\b/i.test(
-			lower
-		) ||
-		/(?:\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621|\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u0627\u0639\u062a\u0645\u062f|\u0627\u0639\u062a\u0645\u0627\u062f|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632).{0,20}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632)/i.test(
-			arabic
-		) ||
-		/(?:completereservation|completebooking|finalizereservation|finalisereservation|confirmreservation|placereservation|createreservation|makereservation|booknow|completarreserva|confirmarreserva|finaliserlareservation|confirmerlareservation|selesaikanreservasi|lengkapkantempahan|buatreservasi|buattempahan)/i.test(
-			latinCompact
-		);
-	if (
-		st?.waitFor === "finalize" &&
-		reservationDetailContextReady(st) &&
-		hasMandatoryReservationDetails(st) &&
-		(explicitCompletionText || (st.finalReviewSentAt && confirmsText(userText)))
-	) {
-		return true;
-	}
-	const assistant = lastAssistantMessageBeforeLatestGuest(sc);
-	const assistantActions = quickReplyActions(assistant);
-	if (!assistantActions.includes("place_reservation")) return false;
-	if (confirmsText(userText)) return true;
-	return explicitCompletionText;
+	return false;
 }
 
 function emailQuickReplies(sc = {}, st = {}) {
@@ -9895,6 +9946,8 @@ const ADULT_COUNT_TERMS = [
 	"\\u092c\\u0921\\u093c\\u0947",
 	"\\u0628\\u0627\\u0644\\u063a",
 	"\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646|\\u0648\\u0646)?",
+	"(?:\\u0627\\u0644)?\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646|\\u0648\\u0646)?",
+	"(?:\\u0627\\u0644)?\\u0628\\u0627\\u063a\\u064a\\u0646",
 	"\\u0643\\u0628\\u0627\\u0631",
 	"\\u0631\\u0627\\u0634\\u062f(?:\\u064a\\u0646|\\u0648\\u0646)?",
 ];
@@ -9912,8 +9965,10 @@ const CHILD_COUNT_TERMS = [
 	"\\u092c\\u091a\\u094d\\u091a(?:\\u0947|\\u093e)?",
 	"\\u0628\\u0686(?:\\u06d2|\\u0647)?",
 	"[\\u0623\\u0627]\\u0637\\u0641\\u0627\\u0644",
+	"(?:\\u0627\\u0644)?[\\u0623\\u0627]\\u0637\\u0641\\u0627\\u0644",
 	"\\u0637\\u0641\\u0644(?:\\u064a\\u0646|\\u0627\\u0646)?",
 	"[\\u0623\\u0627]\\u0648\\u0644\\u0627\\u062f",
+	"(?:\\u0627\\u0644)?[\\u0623\\u0627]\\u0648\\u0644\\u0627\\u062f",
 	"\\u0635\\u063a\\u0627\\u0631",
 ];
 
@@ -10286,6 +10341,14 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		emailSkipCaptured = true;
 		directFieldCaptured = true;
 	}
+	if (emailSkipCaptured && st.waitFor === "email_or_skip") {
+		if (before !== JSON.stringify(st.slots || {})) {
+			logStep(caseId || String(sc._id || ""), "reservation_details.captured", {
+				slots: st.slots,
+			});
+		}
+		return;
+	}
 	const explicitName = explicitNameCandidateFromText(fullText);
 	const lineName =
 		!explicitName && st.waitFor !== "fullname" ? lineNameCandidateFromText(fullText) : "";
@@ -10296,9 +10359,11 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		directFieldCaptured = true;
 	}
 	const nationalitySource = nationalityCandidateFromText(fullText);
-	const nationalityHint = nationalityHintFromText(nationalitySource || fullText);
+	const nationalityHint =
+		latestNationalityHintFromText(nationalitySource || fullText) ||
+		nationalityHintFromText(nationalitySource || fullText);
 	if (AI_REQUIRE_NATIONALITY && nationalityHint) {
-		if (!st.slots.nationality) st.slots.nationality = nationalityHint;
+		st.slots.nationality = nationalityHint;
 		directFieldCaptured = true;
 	}
 	const explicitCountFieldText =
@@ -10329,7 +10394,7 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 		);
 	}
 	const hasExplicitNationalitySignal =
-		Boolean(nationalitySource) || Boolean(nationalityHintFromText(fullText));
+		Boolean(nationalitySource) || Boolean(latestNationalityHintFromText(fullText));
 	if (
 		AI_REQUIRE_NATIONALITY &&
 		!hasUsableNationality(st.slots.nationality) &&
@@ -10387,7 +10452,7 @@ function reservationDetailFieldPayloadText(text = "") {
 	if (!value.trim()) return false;
 	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
 	if (explicitNameCandidateFromText(value)) return true;
-	if (nationalityHintFromText(explicitNationalityText(value) || value)) return true;
+	if (latestNationalityHintFromText(explicitNationalityText(value) || value)) return true;
 	if (
 		selectedHotelRoomQuestionText(value) ||
 		selectedHotelFactQuestionText(value) ||
@@ -15103,7 +15168,7 @@ function isPostBookingClosure(text = "") {
 	) {
 		return true;
 	}
-	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627|\u0644\u0627|\u0644\u0627\s+\u0634\u0643\u0631\u0627|\u062e\u0644\u0627\u0635|\u062a\u0645\u0627\u0645\s+\u0634\u0643\u0631\u0627|\u0643\u062f\u0647\s+\u062a\u0645\u0627\u0645|\u0645\u0627\u0641\u064a\u0634|\u0645\u0634\s+\u0645\u062d\u062a\u0627\u062c|\u0628\u0633\s+\u0643\u062f\u0647|merci|non merci|gracias|no gracias)\.?$/i.test(
+	return /^(no|no thanks|nothing|that's all|that is all|all good|thanks|thank you|\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627|\u0644\u0627|\u0644\u0627\s+\u0634\u0643\u0631\u0627|\u062e\u0644\u0627\u0635|(?:\u0627\u0646\u0627|\u0623\u0646\u0627|\u0627\u0646\u064a|\u0625\u0646\u064a)\s+\u062a\u0645\u0627\u0645\s*(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627)?|\u062a\u0645\u0627\u0645\s*(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627)?|\u0643\u062f\u0647\s+\u062a\u0645\u0627\u0645|\u0645\u0627\u0641\u064a\u0634|\u0645\u0634\s+\u0645\u062d\u062a\u0627\u062c|\u0628\u0633\s+\u0643\u062f\u0647|merci|non merci|gracias|no gracias)\.?$/i.test(
 		normalized
 	);
 }
@@ -16222,6 +16287,13 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		);
 		if (handledDeliveryRequest) return true;
 	}
+	if (isPostBookingClosure(userText)) {
+		const closeReply = await postBookingCloseReply(io, sc, st, userText);
+		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
+		if (sent) schedulePostBookingAutoClose(io, sc, st);
+		st.waitFor = null;
+		return true;
+	}
 	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, userText);
 	if (fastSmalltalk) {
 		await sendDynamicCasualReply(
@@ -16302,13 +16374,6 @@ async function handlePostBookingFollowup(io, sc, st, userText) {
 		const handled = await answerHotelContactDetailsInquiry(io, sc, st, userText);
 		if (handled) st.waitFor = "post_booking_followup";
 		return handled;
-	}
-	if (isPostBookingClosure(userText)) {
-		const closeReply = await postBookingCloseReply(io, sc, st, userText);
-		const sent = await humanSend(io, sc, st, closeReply, { scheduleIdle: false });
-		if (sent) schedulePostBookingAutoClose(io, sc, st);
-		st.waitFor = null;
-		return true;
 	}
 	if (vagueHajjInquiryText(userText)) {
 		const handled = await answerVagueHajjInquiry(io, sc, st, userText);
@@ -16444,10 +16509,40 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	}
 	const chaseOnlyWithCompleteDetails =
 		guestHurryOrChaseText(userText) && hasMandatoryReservationDetails(st);
-	if (!chaseOnlyWithCompleteDetails) {
+	const slotsBeforeCapture = JSON.stringify(st.slots || {});
+	if (!chaseOnlyWithCompleteDetails && st.waitFor !== "email_or_skip") {
 		await captureReservationDetailsFromText(sc, st, userText, caseId);
 	}
+	const slotsChangedByLatest = slotsBeforeCapture !== JSON.stringify(st.slots || {});
 	for (let guard = 0; guard < 4; guard += 1) {
+		if (st.waitFor === "clarify") {
+			if (slotsChangedByLatest && hasMandatoryReservationDetails(st)) {
+				st.waitFor = "finalize";
+				st.reviewSent = false;
+				await sendReservationReview(io, sc, st, st.quote?.data, {
+					fast: true,
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
+				return true;
+			}
+			if (!hasMandatoryReservationDetails(st)) {
+				st.waitFor = "reservation_details";
+				await humanSend(io, sc, st, mandatoryDetailsPrompt(sc, st, { retry: true }), {
+					fast: true,
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
+				stampAsk(st, "reservation_details");
+				return true;
+			}
+			const ask = /arabic/i.test(languageOf(sc, st))
+				? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644\u0647\u061f"
+				: "Of course. Which detail should I correct?";
+			await humanSend(io, sc, st, ask, {
+				quickReplies: confirmationQuickReplies(sc, st),
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			return true;
+		}
 		if (st.waitFor === "reviewConfirm") {
 			if (guestAction === "correction" || correctionText(userText)) {
 				st.waitFor = "clarify";
@@ -16518,6 +16613,13 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				st.slots.email = "";
 				st.slots.emailSkipped = true;
 				logStep(caseId, "email.skipped", { source: "quick_reply" });
+				st.waitFor = "finalize";
+				continue;
+			}
+			if (emailSkipText(txt)) {
+				st.slots.email = "";
+				st.slots.emailSkipped = true;
+				logStep(caseId, "email.skipped", { source: "typed" });
 				st.waitFor = "finalize";
 				continue;
 			}

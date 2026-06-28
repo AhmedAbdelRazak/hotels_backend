@@ -66,6 +66,7 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 		duplicateAfter = null,
 		requireOpenClientAi = false,
 		requireLatestGuestText = "",
+		requireNoAiAfter = null,
 		skipDuplicateCheck = false,
 	} = {}
 ) {
@@ -116,6 +117,24 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	}
 	const text = String(message.message || "").trim();
 	const userId = String(message.messageBy?.userId || "").trim();
+	const norFilters = [];
+	const noAiAfterDate =
+		requireNoAiAfter instanceof Date
+			? requireNoAiAfter
+			: Number.isFinite(Number(requireNoAiAfter))
+			? new Date(Number(requireNoAiAfter))
+			: null;
+	if (noAiAfterDate && Number.isFinite(noAiAfterDate.getTime())) {
+		norFilters.push({
+			conversation: {
+				$elemMatch: {
+					isAi: true,
+					isSystem: { $ne: true },
+					date: { $gt: noAiAfterDate },
+				},
+			},
+		});
+	}
 	if (!skipDuplicateCheck && (message.isAi === true || message.isSystem === true) && text) {
 		const cutoff = new Date(Date.now() - Math.max(1000, Number(duplicateWindowMs) || 0));
 		const duplicateAfterDate =
@@ -135,8 +154,9 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 		if (message.isAi === true) duplicateMatch.isAi = true;
 		if (message.isSystem === true) duplicateMatch.isSystem = true;
 		if (userId) duplicateMatch["messageBy.userId"] = userId;
-		filter.$nor = [{ conversation: { $elemMatch: duplicateMatch } }];
+		norFilters.push({ conversation: { $elemMatch: duplicateMatch } });
 	}
+	if (norFilters.length) filter.$nor = norFilters;
 
 	const updatedCase = await SupportCase.findOneAndUpdate(filter, update, {
 		new: true,

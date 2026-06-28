@@ -17,6 +17,12 @@
 - After required reservation details are captured, the chatbot now asks once for an optional email address before final review. Guests can skip it, but captured emails can be used for confirmation delivery and future lead/marketing workflows.
 - Selected-hotel fact answers are now post-booking-aware. After a reservation is created, service questions such as bus/shuttle availability end with a general helpful follow-up instead of asking whether to continue a reservation that is already confirmed.
 - Arabic greeting-only messages with the full blessing, such as "alaykum assalam wa rahmatullah wa barakatuh" in Arabic script, now match the fast smalltalk classifier. They reply before slot hydration, room/date recovery, or OpenAI fallback, preventing simple greetings from stalling a live customer chat.
+- Fast reservation-detail replies now append atomically only when no AI reply has already been saved after the same latest guest message. This prevents duplicate prompts when recovery and an in-flight turn race each other.
+- Optional email skip text is isolated from identity parsing, so Arabic phrases like "skip please / I do not have email" cannot overwrite the captured guest name during final review.
+- Final reservation creation now requires the public quick-reply action `place_reservation`. Typed "yes", "confirm", or "complete reservation" re-shows the final action buttons instead of creating a booking.
+- Reservation corrections now re-run through slot capture and send a fresh final review before the guest can press the final booking button.
+- Latest explicit nationality corrections win over older text, including Arabic contrast phrases such as "I speak Egyptian dialect, but I am Jordanian".
+- Arabic count parsing now recognizes common shorthand and typo forms such as "فرد", "الاطفال فرد", and "الباغين فرد".
 
 ## Verified Replay
 
@@ -52,3 +58,5 @@ Both restore the same stay and guest details in under two seconds locally, inste
 - Deterministic handlers still own hard facts, inventory, reservation creation, payments, cancellation, and saved hotel facts.
 - Dynamic OpenAI fallback is used only when no specific deterministic handler owns the turn.
 - Greeting-only, thanks-only, and clear casual messages use the pre-hydration fast lane when they contain no booking, payment, handoff, or existing-reservation signal.
+- During `email_or_skip`, the bot captures only email/skip intent before moving to final review; required identity fields are protected from that optional step.
+- The public widget must send the quick-reply `clientAction`; the backend intentionally does not create reservations from typed final-confirmation text.
