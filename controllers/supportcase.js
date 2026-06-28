@@ -103,6 +103,155 @@ function scheduleAiSafetyRetryForCase(io, caseId, attempt = 1) {
 	if (typeof timer.unref === "function") timer.unref();
 }
 
+const compactPublicChatText = (value = "") =>
+	String(value || "")
+		.toLowerCase()
+		.replace(/[\u0640\s\u061f?!.,\u060c;:\u061b'"`~\-_/\\()[\]{}]+/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647")
+		.trim();
+
+const publicAgentPingOnlyText = (value = "") => {
+	const raw = String(value || "").trim();
+	if (!raw || raw.length > 48) return false;
+	const compact = compactPublicChatText(raw);
+	const stripped = compact
+		.replace(/^(?:\u064a\u0627|\u0627\u0647\u0644\u0627|\u0627\u0647\u0644\u064a\u0646|\u0627\u0644\u0648|hey|hi|hello)+/i, "")
+		.trim();
+	const names = new Set([
+		"aisha",
+		"aysha",
+		"ayesha",
+		"hana",
+		"sara",
+		"sarah",
+		"nadia",
+		"yasmin",
+		"yasmine",
+		"amira",
+		"\u0639\u0627\u0626\u0634\u0647",
+		"\u0639\u0627\u064a\u0634\u0647",
+		"\u0627\u064a\u0634\u0647",
+		"\u0633\u0627\u0631\u0647",
+		"\u0633\u0627\u0631\u0627",
+		"\u0646\u0627\u062f\u064a\u0627",
+		"\u0646\u0627\u062f\u064a\u0647",
+		"\u064a\u0627\u0633\u0645\u064a\u0646",
+		"\u0627\u0645\u064a\u0631\u0647",
+	]);
+	return names.has(compact) || names.has(stripped);
+};
+
+const publicHotelTrustQuestionText = (value = "") => {
+	const raw = String(value || "").trim();
+	if (!raw) return false;
+	const lower = raw.toLowerCase();
+	const arabic = lower
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647");
+	return (
+		/\b(?:are|r)\s+(?:you|u)\s+(?:with|from|part\s+of|working\s+with|official(?:ly)?\s+with)\s+(?:the\s+)?hotel\b/i.test(
+			lower
+		) ||
+		/\b(?:is\s+this|is\s+it)\s+(?:the\s+)?(?:hotel|reception|official)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u0627\u0646\u062a\u0649|\u0627\u0646\u062a\u0647).{0,24}(?:\u0634\u063a\u0627\u0644|\u0634\u063a\u0627\u0644\u0647|\u062a\u0627\u0628\u0639|\u062a\u0627\u0628\u0639\u0647|\u0645\u0639).{0,28}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642)/i.test(
+			arabic
+		) ||
+		/(?:\u0647\u0644\s+)?(?:\u062f\u064a|\u062f\u0647|\u0647\u0630\u0647|\u0647\u0630\u0627).{0,24}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0631\u0633\u0645\u064a)/i.test(
+			arabic
+		)
+	);
+};
+
+const lastAiPublicSenderName = (supportCase = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const lastAi = [...conversation]
+		.reverse()
+		.find((entry) => isAiSupportConversationEntry(entry));
+	const name = cleanChatDisplayName(lastAi?.messageBy?.customerName);
+	if (name && name !== "Jannat Booking") return name;
+	return cleanChatDisplayName(supportCase.aiResponderName) || "Jannat Booking";
+};
+
+const publicHotelTrustQuickReplyText = (supportCase = {}, latestEntry = {}) => {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	let trustText = publicHotelTrustQuestionText(latestText) ? latestText : "";
+	if (!trustText && publicAgentPingOnlyText(latestText)) {
+		for (let index = conversation.length - 2; index >= 0; index -= 1) {
+			const entry = conversation[index];
+			if (isAiSupportConversationEntry(entry)) break;
+			if (!isPublicGuestConversationEntry(entry)) continue;
+			const text = cleanText(entry.message, 8000);
+			if (!text || publicAgentPingOnlyText(text)) continue;
+			if (publicHotelTrustQuestionText(text)) {
+				trustText = text;
+			}
+			break;
+		}
+	}
+	if (!trustText) return "";
+	const hotelName =
+		cleanText(supportCase.displayName2, 120) ||
+		cleanText(supportCase.supporterName, 120) ||
+		cleanText(supportCase.inquiryAbout, 120) ||
+		"the hotel";
+	const lang = String(
+		latestEntry?.preferredLanguage ||
+			supportCase.preferredLanguage ||
+			supportCase.preferredLanguageCode ||
+			""
+	).toLowerCase();
+	const hasArabic = /[\u0600-\u06ff]/.test(latestText || trustText);
+	if (hasArabic || /arabic|ar\b/.test(lang)) {
+		return `\u0646\u0639\u0645\u060c \u0623\u0646\u062a \u062a\u062a\u062d\u062f\u062b \u0645\u0639 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotelName} \u0639\u0628\u0631 Jannat Booking\u060c \u0648\u0623\u0646\u0627 \u0647\u0646\u0627 \u0644\u0645\u0633\u0627\u0639\u062f\u062a\u0643.`;
+	}
+	return `Yes, you are chatting with ${hotelName} reception and reservations through Jannat Booking. I am here to help.`;
+};
+
+async function appendPublicAiQuickReply(io, supportCase = {}, message = "") {
+	const caseId = String(supportCase?._id || "");
+	const text = cleanText(message, 8000);
+	if (!caseId || !text) return null;
+	const aiEntry = {
+		messageBy: {
+			customerName: lastAiPublicSenderName(supportCase),
+			customerEmail: AI_SUPPORT_MESSAGE_EMAILS[0] || "support@jannatbooking.com",
+			userId: "ai-agent",
+		},
+		message: text,
+		date: new Date(),
+		isAi: true,
+		isSystem: false,
+		clientTag: `ai_quick_trust_${Date.now()}`,
+		seenByAdmin: false,
+		seenByHotel: false,
+		seenByCustomer: false,
+	};
+	const updated = await SupportCase.findByIdAndUpdate(
+		caseId,
+		{ $push: { conversation: aiEntry }, $set: { updatedAt: new Date() } },
+		{ new: true }
+	)
+		.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
+		.lean()
+		.exec();
+	if (updated && io) {
+		io.to(caseId).emit("receiveMessage", { ...aiEntry, caseId });
+		io.emit("supportCaseUpdated", updated);
+	}
+	return updated;
+}
+
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
 		.flatMap((value) => String(value || "").split(","))
@@ -1339,7 +1488,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
 			  };
 
-		const updatedCase = await SupportCase.findByIdAndUpdate(
+		let updatedCase = await SupportCase.findByIdAndUpdate(
 			req.params.id,
 			updateDoc,
 			{ new: true }
@@ -1371,8 +1520,21 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {
-			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-			scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
+			const quickTrustReply = publicHotelTrustQuickReplyText(
+				updatedCase,
+				safeConversation
+			);
+			if (quickTrustReply) {
+				const quickReplyCase = await appendPublicAiQuickReply(
+					req.io,
+					updatedCase,
+					quickTrustReply
+				);
+				if (quickReplyCase) updatedCase = quickReplyCase;
+			} else {
+				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+				scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
+			}
 		}
 
 		res.status(200).json(updatedCase);

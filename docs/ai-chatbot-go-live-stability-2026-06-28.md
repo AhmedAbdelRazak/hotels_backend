@@ -37,6 +37,7 @@
 - Agent-name pings that carry a previous direct guest question run before the normal short quiet window. A rapid sequence like "are you with the hotel?" then "Aisha?" now answers the real question immediately instead of waiting or drifting into booking-detail collection.
 - Arabic dual guest-count wording such as "lifardeen / lishakhseen / lideifeen" is preserved before number normalization, so "I need a room for two" in Arabic enters the deterministic room-count fast lane.
 - Hotel relationship/trust questions such as "are you working with the hotel?" now have a pre-quiet/pre-hydration deterministic answer. They should not wait for slot recovery, room scans, or OpenAI before reassuring the guest that they are speaking with reception/reservations for the selected hotel.
+- The public client update controller also has a narrow immediate trust-question reply. This protects the widget from planner-lock races for "are you with the hotel?" and for an agent-name ping immediately after that unanswered question.
 
 ## Verified Replay
 
@@ -81,3 +82,4 @@ Both restore the same stay and guest details in under two seconds locally, inste
 - Planner lock retries are queue-only for the same guest message. They interrupt only when the latest guest text differs from the active turn text, so real guest follow-ups still preempt stale work while safety retries cannot cancel themselves forever.
 - The room-count fast lane should be tested with both English and Arabic forms, including "room for two" and "عايز غرفة لفردين"; expected behavior is a double-room recommendation plus a date request, never phone/name collection.
 - Trust/relationship questions should be tested both alone and followed by an agent-name ping. Expected behavior is a direct reassurance about the selected hotel reception/reservations within the normal prompt target.
+- If the controller-level trust reply fires, the orchestrator is intentionally not scheduled for that same message. This avoids duplicate reassurance replies while preserving normal AI handling for every other message.
