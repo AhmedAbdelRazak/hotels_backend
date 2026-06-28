@@ -16759,21 +16759,14 @@ async function answerDiscountQuestion(io, sc, st, userText = "") {
 				discount.beforeDiscount
 		  } ${cleanCurrency(discount.currency)}. There is no extra manual discount.`
 		: `Sir, our published prices already include a ${discount.discountPercent}% across-the-board discount and are among the best market rates. The displayed price is already the discounted price, so there is no extra manual discount. For example, 85 SAR means it was 100 SAR before the discount.`;
-	const reply = await write(
-		io,
-		sc,
-		st,
-		activeHotelPositioning
-			? "The guest asked about discount, price, value, or said the price is expensive for Zad Ajyad. Reply professionally without escalation. Answer the objection directly: explain that Zad Ajyad is an Ajyad-area hotel near/walkable to Al Haram when supported by activeHotelFacts, and that direct hotel booking avoids third-party commission/fee layers and can often mean about 25-30% better value compared with third-party channels depending on dates and availability. Do not present a new discounted total, do not offer an extra manual discount, and do not guarantee universal savings. Keep the normal booking flow unchanged and answer only because the guest asked."
-			: "The guest asked about discounts or offers. Reply professionally without escalation. Say the published/displayed prices already include a 15% across-the-board discount and are among the best market rates. Do not present a new discounted total. Do not offer an extra manual discount. If useful, explain briefly that a displayed nightly price of 85 SAR means it is already after 15% from 100 SAR. Keep the normal booking flow unchanged and answer only because the guest asked.",
-		{
-			latestUserMessage: userText,
-			discountPolicy: discount,
-			activeHotelPositioning,
-			fallbackText,
-		}
-	);
-	await humanSend(io, sc, st, reply);
+	const quickReplies =
+		st.waitFor === "proceed" && st.quote?.data?.available
+			? proceedQuickReplies(sc, st)
+			: [];
+	await humanSend(io, sc, st, fallbackText, {
+		quickReplies,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
 }
 
 /* ------------------- SMALLTALK ------------------- */

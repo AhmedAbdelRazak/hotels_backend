@@ -88,6 +88,8 @@
   - Missing calendar day ⇒ `basePrice`.
   - `basePrice` blank/0 ⇒ `defaultCost`.
   - Commission = `room.roomCommission || hotel.commission || 10`.
+  - Discount/value objections use deterministic approved copy so guests get a
+    fast answer and the active booking quick replies remain visible.
 - **Flow**:
   1. Understand and answer the guest's latest question first
   2. Room type/capacity if the guest asks about it first
