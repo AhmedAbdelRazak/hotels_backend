@@ -1822,9 +1822,20 @@ async function humanPause() {
 
 function isAiConversationMessage(message = {}) {
 	const email = String(message?.messageBy?.customerEmail || "").toLowerCase();
+	const actor = String(
+		message?.sender ||
+			message?.role ||
+			message?.from ||
+			message?.messageBy?.role ||
+			message?.messageBy?.type ||
+			""
+	)
+		.trim()
+		.toLowerCase();
 	return (
 		message?.isAi === true ||
 		message?.isSystem === true ||
+		["ai", "assistant", "bot", "agent_ai", "aiagent", "system_ai"].includes(actor) ||
 		email === AI_SUPPORT_EMAIL ||
 		email === LEGACY_AI_SUPPORT_EMAIL
 	);
@@ -1838,9 +1849,20 @@ function hasAiAssistantReply(sc = {}) {
 }
 
 function isGuestConversationMessage(message = {}) {
+	const actor = String(
+		message?.sender ||
+			message?.role ||
+			message?.from ||
+			message?.messageBy?.role ||
+			message?.messageBy?.type ||
+			""
+	)
+		.trim()
+		.toLowerCase();
 	return (
 		message?.message &&
 		!message?.isSystem &&
+		!["admin", "csr", "employee", "hotel", "manager", "owner"].includes(actor) &&
 		!isAiConversationMessage(message)
 	);
 }
@@ -2698,7 +2720,13 @@ function quickReplyActions(message = {}) {
 
 function assistantMessageSuggestsProceed(message = {}) {
 	const actions = quickReplyActions(message);
-	if (actions.includes("proceed")) return true;
+	if (
+		actions.some((action) =>
+			["proceed", "proceed_to_booking", "continue", "continue_booking"].includes(action)
+		)
+	) {
+		return true;
+	}
 	const { lower, arabic, latinCompact } = normalizeControlText(message?.message || "");
 	return (
 		/would you like me to continue|shall i continue|continue to the review|continue with the reservation details|proceed to confirm|yes,\s*proceed|choose\s+["']?yes|if this works for you/i.test(
@@ -2760,7 +2788,15 @@ function assistantMessageCanRecoverRoomType(message = {}) {
 	const actions = quickReplyActions(message);
 	if (
 		actions.some((action) =>
-			["proceed", "confirm", "correction", "place_reservation"].includes(action)
+			[
+				"proceed",
+				"proceed_to_booking",
+				"continue",
+				"continue_booking",
+				"confirm",
+				"correction",
+				"place_reservation",
+			].includes(action)
 		)
 	) {
 		return true;
@@ -2782,7 +2818,15 @@ function assistantRoomQuoteContextText(message = {}) {
 	const actions = quickReplyActions(message);
 	if (
 		actions.some((action) =>
-			["proceed", "confirm", "correction", "place_reservation"].includes(action)
+			[
+				"proceed",
+				"proceed_to_booking",
+				"continue",
+				"continue_booking",
+				"confirm",
+				"correction",
+				"place_reservation",
+			].includes(action)
 		)
 	) {
 		return true;
