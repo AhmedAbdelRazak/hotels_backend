@@ -3094,6 +3094,10 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
 - Runtime contract:
   - Opening greetings are local and short. Guest replies are OpenAI-first with
     compact hotel/reservation/conversation context.
+  - The OpenAI payload is ordered as `reservationDetails`, `hotelDetails`,
+    `conversation`, then request metadata. Hotel details are grouped into
+    identity, public presentation, room inventory, transportation/pilgrimage,
+    and policies/rules.
   - Large calendar/pricing arrays stay out of the first prompt; pricing is
     computed by backend selectors and only compact price summaries are sent to
     the guest-facing writer call.

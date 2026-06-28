@@ -419,42 +419,71 @@ function buildHotelContext(hotel = null) {
 		.map(compactRoom)
 		.slice(0, 18);
 	return {
-		id: idText(hotel._id),
-		hotelName: cleanText(hotel.hotelName, 180),
-		hotelNameOtherLanguage: cleanText(hotel.hotelName_OtherLanguage, 180),
-		city: cleanText(hotel.hotelCity, 100),
-		state: cleanText(hotel.hotelState, 100),
-		country: cleanText(hotel.hotelCountry, 100),
-		address: cleanText(hotel.hotelAddress, 500),
-		aboutHotel: cleanText(hotel.aboutHotel, 1200),
-		aboutHotelArabic: cleanText(hotel.aboutHotelArabic, 1200),
-		distances: hotel.distances || {},
-		location: hotel.location || {},
-		parkingLot: hotel.parkingLot,
-		hasBusService: hotel.hasBusService,
-		busDetails: cleanText(hotel.busDetails, 900),
-		hasMealsService: hotel.hasMealsService,
-		mealsDetails: cleanText(hotel.mealsDetails, 900),
-		isNusuk: hotel.isNusuk,
-		isNusukText: cleanText(hotel.isNusukText, 900),
-		currency: hotel.currency || "SAR",
-		policies: activeHotelPolicyQA(hotel.hotelPolicyQA || []),
-		defaultCancellationPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
-		activeRooms,
+		identity: {
+			id: idText(hotel._id),
+			hotelName: cleanText(hotel.hotelName, 180),
+			hotelNameOtherLanguage: cleanText(hotel.hotelName_OtherLanguage, 180),
+			city: cleanText(hotel.hotelCity, 100),
+			state: cleanText(hotel.hotelState, 100),
+			country: cleanText(hotel.hotelCountry, 100),
+			address: cleanText(hotel.hotelAddress, 500),
+			currency: hotel.currency || "SAR",
+		},
+		publicPresentation: {
+			aboutHotel: cleanText(hotel.aboutHotel, 1200),
+			aboutHotelArabic: cleanText(hotel.aboutHotelArabic, 1200),
+			distances: hotel.distances || {},
+			location: hotel.location || {},
+			parkingLot: hotel.parkingLot,
+		},
+		roomInventorySummary: {
+			activeRoomTypeCount: activeRooms.length,
+			activeRoomTypes: activeRooms.map((room) => ({
+				id: room.id,
+				roomType: room.roomType,
+				displayName: room.displayName,
+				displayNameOtherLanguage: room.displayNameOtherLanguage,
+				count: room.count,
+				basePrice: room.basePrice,
+				defaultCost: room.defaultCost,
+				commissionRate: room.commissionRate,
+			})),
+			activeRooms,
+		},
+		transportationAndPilgrimage: {
+			nusuk: {
+				available: hotel.isNusuk,
+				comments: cleanText(hotel.isNusukText, 900),
+			},
+			busService: {
+				available: hotel.hasBusService,
+				comments: cleanText(hotel.busDetails, 900),
+			},
+			meals: {
+				available: hotel.hasMealsService,
+				comments: cleanText(hotel.mealsDetails, 900),
+			},
+		},
+		policiesAndRules: {
+			hotelPolicyQA: activeHotelPolicyQA(hotel.hotelPolicyQA || []),
+			defaultCancellationPolicy: DEFAULT_CANCELLATION_REFUND_ANSWER,
+		},
 	};
 }
 
-function compactReservation(reservation = null, sc = {}) {
+function compactReservationDetails(reservation = null, sc = {}, confirmationHint = "") {
 	const ai = sc.aiReservation || {};
-	if (!reservation && !Object.keys(ai).length) return null;
+	const aiReservation = {
+		status: cleanText(ai.status, 40),
+		confirmationNumber: cleanText(ai.confirmationNumber, 80),
+		reservationId: idText(ai.reservationId),
+		createdAt: ai.createdAt || null,
+		lastError: cleanText(ai.lastError, 180),
+	};
 	return {
-		aiReservation: {
-			status: cleanText(ai.status, 40),
-			confirmationNumber: cleanText(ai.confirmationNumber, 80),
-			reservationId: idText(ai.reservationId),
-			createdAt: ai.createdAt || null,
-			lastError: cleanText(ai.lastError, 180),
-		},
+		hasKnownReservation: Boolean(reservation),
+		confirmationHint: cleanText(confirmationHint || ai.confirmationNumber, 80),
+		aiReservation,
 		currentReservation: reservation
 			? {
 					id: idText(reservation._id),
@@ -482,6 +511,23 @@ function compactReservation(reservation = null, sc = {}) {
 	};
 }
 
+function latestReservationConfirmationHint(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let i = conversation.length - 1; i >= 0; i -= 1) {
+		const entry = conversation[i];
+		if (!isGuestEntry(entry)) continue;
+		const message = String(entry.message || "");
+		const labeled = message.match(
+			/(?:confirmation|booking|reservation|ref(?:erence)?|\u0631\u0642\u0645\s*\u0627\u0644\u062d\u062c\u0632|\u062a\u0623\u0643\u064a\u062f|\u062d\u062c\u0632)\s*(?:number|no\.?|#|:)?\s*([a-z0-9-]{5,30})/i
+		);
+		if (labeled) return labeled[1];
+		const longNumeric = message.match(/\b\d{8,14}\b/);
+		if (longNumeric) return longNumeric[0];
+		break;
+	}
+	return "";
+}
+
 async function buildConversationContext(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	return conversation
@@ -503,22 +549,27 @@ async function buildConversationContext(sc = {}) {
 }
 
 async function contextBundle(sc = {}, hotel = null) {
-	const confirmation = cleanText(sc.aiReservation?.confirmationNumber, 80);
+	const confirmation = cleanText(
+		sc.aiReservation?.confirmationNumber || latestReservationConfirmationHint(sc),
+		80
+	);
 	const reservation = confirmation
 		? await getReservationByConfirmation(confirmation).catch(() => null)
 		: null;
 	return {
-		todayISO: new Date().toISOString().slice(0, 10),
-		supportCase: {
-			id: idText(sc._id),
-			clientName: cleanText(sc.clientName || sc.displayName1, 120),
-			clientContactType: cleanText(sc.clientContactType, 40),
-			clientContact: cleanText(sc.clientContact, 120),
-			sourceUrl: cleanText(sc.sourceUrl, 400),
-		},
-		hotel: buildHotelContext(hotel),
-		reservation: compactReservation(reservation, sc),
+		reservationDetails: compactReservationDetails(reservation, sc, confirmation),
+		hotelDetails: buildHotelContext(hotel),
 		conversation: await buildConversationContext(sc),
+		requestMetadata: {
+			todayISO: new Date().toISOString().slice(0, 10),
+			supportCase: {
+				id: idText(sc._id),
+				clientName: cleanText(sc.clientName || sc.displayName1, 120),
+				clientContactType: cleanText(sc.clientContactType, 40),
+				clientContact: cleanText(sc.clientContact, 120),
+				sourceUrl: cleanText(sc.sourceUrl, 400),
+			},
+		},
 	};
 }
 
@@ -593,7 +644,9 @@ function normalizePlan(plan = {}, fallbackReply = "") {
 
 async function callPlanOpenAI(bundle, agentName) {
 	const hotelName =
-		bundle.hotel?.hotelNameOtherLanguage || bundle.hotel?.hotelName || "Jannat Booking";
+		bundle.hotelDetails?.identity?.hotelNameOtherLanguage ||
+		bundle.hotelDetails?.identity?.hotelName ||
+		"Jannat Booking";
 	const userPrompt = JSON.stringify(bundle);
 	const raw = await chat(
 		[
@@ -601,8 +654,11 @@ async function callPlanOpenAI(bundle, agentName) {
 				role: "system",
 				content: [
 					"You are the OpenAI-first brain for a live hotel reception and reservation chat.",
-					"Read the whole conversation, hotel facts, and reservation context, then return strict JSON only.",
+					"Read the structured payload in this order: reservationDetails first, hotelDetails second, conversation third, then return strict JSON only.",
 					"Use the same language as the latest guest message. Be a professional CSR and a warm sales representative.",
+					"If the latest guest asks about an existing reservation, updating a reservation, cancellation, payment, or confirmation status, prioritize reservationDetails before hotelDetails.",
+					"If reservationDetails.hasKnownReservation is false and the guest is asking about an existing booking, ask for the confirmation/booking/reference number naturally.",
+					"If the latest guest asks about the hotel, rooms, Nusuk, bus, meals, distance, policies, or casual hotel questions, use hotelDetails and answer directly.",
 					"Always answer the latest concrete question first. Do not pivot to phone, email, dates, or confirmation before answering, unless the answer truly requires that missing fact.",
 					"Never invent hotel facts, prices, availability, walking/driving minutes, Nusuk, bus service, meals, cancellation, or reservation details. Use only provided context.",
 					"If a price/availability answer is needed, set needsPricing=true. If dates are missing, set nextAction='ask_dates' and write askForDatesReply.",
@@ -767,8 +823,8 @@ async function callPricingWriterOpenAI({ bundle, plan, pricing, missing, agentNa
 			{
 				role: "user",
 				content: JSON.stringify({
-					hotel: bundle.hotel,
-					reservation: bundle.reservation,
+					reservationDetails: bundle.reservationDetails,
+					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
 					plan,
 					pricingSummary: pricing,
@@ -803,7 +859,8 @@ async function callReviewWriterOpenAI({ bundle, plan, pricing, slots, agentName 
 			{
 				role: "user",
 				content: JSON.stringify({
-					hotel: bundle.hotel,
+					reservationDetails: bundle.reservationDetails,
+					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
 					plan,
 					pricingSummary: pricing,
@@ -844,7 +901,8 @@ async function callReservationCreatedWriterOpenAI({
 			{
 				role: "user",
 				content: JSON.stringify({
-					hotel: bundle.hotel,
+					reservationDetails: bundle.reservationDetails,
+					hotelDetails: bundle.hotelDetails,
 					conversation: bundle.conversation,
 					plan,
 					reservation: {

@@ -26,9 +26,11 @@ AI_AGENT_ENGINE=legacy
    new chat does not spend heap on OpenAI before the guest asks a question.
 2. The guest message waits for a short quiet window so replies do not overlap
    with typing.
-3. The engine sends the recent conversation, compact hotel details, active
-   room summaries, policy facts, distance/bus/Nusuk/meal facts, and any
-   existing AI reservation context to OpenAI.
+3. The engine sends a structured OpenAI payload in this exact order:
+   `reservationDetails`, `hotelDetails`, `conversation`, then request metadata.
+   Reservation/update/cancellation/payment questions therefore see booking
+   context first; hotel/room/Nusuk/bus/meal/distance/policy questions see the
+   confirmed hotel facts next.
 4. Calendar pricing arrays are not included in the first call.
 5. OpenAI returns a strict JSON plan with the topic, language, whether pricing
    is needed, dates/room hints if present, guest details, and the next action.
@@ -45,6 +47,9 @@ AI_AGENT_ENGINE=legacy
 - Backend owns availability math, room matching, reservation locks,
   confirmation numbers, duplicate prevention, Socket.IO events, and final
   reservation creation.
+- Hotel details are grouped as identity, public presentation, room inventory
+  summary, transportation/pilgrimage facts, and policies/rules so OpenAI gets
+  the useful facts without a noisy admin document dump.
 - AI hotel context caches compact calendar pricing rows only
   (`calendarDate`, `price`, `rootPrice`, `commissionRate`), and pricing helpers
   map only the requested stay dates. This keeps exact pricing while avoiding
