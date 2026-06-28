@@ -33,6 +33,7 @@
 - Arabic hotel relationship detection now includes Egyptian forms such as "shaghala with the hotel" / "shaghal with the hotel".
 - Small room-count requests such as "room for two" / "عايز غرفة لفردين" run through a pre-detail fast lane. They recommend the matching room type, merge same-message dates if present, and otherwise ask for check-in and checkout dates instead of phone/name details.
 - Public client message updates schedule short safety retries. If the latest guest message still has no AI reply after the quiet window, the backend schedules the AI turn again without duplicating already-answered chats.
+- Safety retries and active-lock rechecks no longer interrupt an in-flight AI answer unless the database case has a genuinely newer guest message than the active turn. This prevents retry loops from repeatedly canceling the answer and leaving the public widget silent.
 
 ## Verified Replay
 
@@ -74,3 +75,4 @@ Both restore the same stay and guest details in under two seconds locally, inste
 - The public widget must send the quick-reply `clientAction`; the backend intentionally does not create reservations from typed final-confirmation text.
 - Room-count fast lane ownership is intentional: it runs before reservation-detail collection so a guest who says "I need a room for two" while the bot is waiting for contact details still gets a useful room/date answer, not a phone prompt.
 - `AI_CLIENT_REPLY_SAFETY_RETRY_MS` defaults to 1500 ms and is a controller-level backup for public chat message updates; it retries up to four times and only reschedules when the latest saved guest message has no later AI reply.
+- Planner lock retries are queue-only for the same guest message. They interrupt only when the latest guest text differs from the active turn text, so real guest follow-ups still preempt stale work while safety retries cannot cancel themselves forever.

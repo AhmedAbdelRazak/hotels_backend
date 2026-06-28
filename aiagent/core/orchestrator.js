@@ -17203,14 +17203,14 @@ function currentPlanStillOwnsTurn(caseId, st = {}) {
 	);
 }
 
-function markPendingPlanRequest(caseId, reason = "locked") {
+function markPendingPlanRequest(caseId, reason = "locked", { interrupt = true } = {}) {
 	const key = String(caseId || "");
 	if (!key) return;
 	pendingPlanRequests.set(key, { at: now(), reason });
 	const st = memo.get(key);
 	if (st?.turnInFlight) {
 		if (st.queue.length < 1) st.queue.push(now());
-		st.interrupt = true;
+		if (interrupt) st.interrupt = true;
 	}
 }
 
@@ -17263,10 +17263,17 @@ async function planTurn(io, sc) {
 				lockedState.interrupt = false;
 				lockedState.queue = [];
 			} else {
-				markPendingPlanRequest(caseId, "active_plan_lock");
+				const latestLockedText = lastUserText(sc);
+				const hasNewerGuestText =
+					Boolean(latestLockedText) &&
+					latestLockedText !== String(lockedState?.activeTurnUserText || "");
+				markPendingPlanRequest(caseId, "active_plan_lock", {
+					interrupt: hasNewerGuestText,
+				});
 				schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 				logStep(caseId, "turn.enqueue", {
 					reason: "active_plan_lock",
+					interrupt: hasNewerGuestText,
 				});
 				return;
 			}
@@ -17319,11 +17326,18 @@ async function planTurn(io, sc) {
 		st.policyAllowedAt = now();
 		st.policyHotelId = idText(sc.hotelId);
 		if (st.turnInFlight) {
+			const latestInFlightText = lastUserText(sc);
+			const hasNewerGuestText =
+				Boolean(latestInFlightText) &&
+				latestInFlightText !== String(st.activeTurnUserText || "");
 			logStep(caseId, "turn.enqueue", {
 				reason: "in_flight",
 				queued: st.queue.length + 1,
+				interrupt: hasNewerGuestText,
 			});
-			markPendingPlanRequest(caseId, "state_in_flight");
+			markPendingPlanRequest(caseId, "state_in_flight", {
+				interrupt: hasNewerGuestText,
+			});
 			schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 			return;
 		}
