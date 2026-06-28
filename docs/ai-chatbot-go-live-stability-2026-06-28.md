@@ -11,6 +11,8 @@
 - Repeated hydration inside one turn is cached by conversation revision so missing contact details do not reopen room/date scans.
 - Reply timing defaults were tightened toward 3-5 seconds, with shorter typing delays and no automatic 10-second delay notice unless explicitly enabled by env.
 - Unplanned/unclear fallback replies now go through OpenAI with the full chat transcript and are instructed to answer in one or two professional sentences.
+- Unanswered-turn recovery now force-releases stale in-flight AI turns after the stall window instead of deferring a few times and leaving the guest unanswered. This protects the customer chat from feeling frozen when a slow/interrupted turn never posts a reply.
+- When a guest reconnects to an open case, the socket join now schedules a reply if the latest guest message is still unanswered, instead of only scheduling first greetings.
 
 ## Verified Replay
 
@@ -34,6 +36,7 @@ Both restore the same stay and guest details in under two seconds locally, inste
 ## Operational Notes
 
 - `AI_DELAY_NOTICE_ENABLED` defaults to `false`.
+- `AI_TURN_STALL_RECOVERY_MS` defaults to 8000 ms. If the latest guest message still has no AI reply and the active turn is stale, recovery interrupts the stale state and reruns the turn from the latest database conversation.
 - Current default reply targets:
   - General: 3000-5000 ms
   - Casual: 3000-4500 ms

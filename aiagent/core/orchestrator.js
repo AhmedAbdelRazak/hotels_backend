@@ -257,8 +257,8 @@ const AI_POST_BOOKING_CLOSE_MS = intFromEnv(
 );
 const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	"AI_TURN_STALL_RECOVERY_MS",
-	15 * 1000,
-	{ min: 10 * 1000, max: 2 * 60 * 1000 }
+	8 * 1000,
+	{ min: 5 * 1000, max: 2 * 60 * 1000 }
 );
 const AI_TURN_LOCK_RETRY_MS = intFromEnv("AI_TURN_LOCK_RETRY_MS", 350, {
 	min: 100,
@@ -19435,11 +19435,35 @@ async function runUnansweredTurnRecovery(io, caseId) {
 	unansweredTurnRecoveryAttempts.set(caseId, attempts);
 	const activeState = memo.get(caseId);
 	if (activeState?.turnInFlight) {
-		logStep(caseId, "turn_recovery.defer", { attempts, reason: "turn_in_flight" });
-		if (attempts < 3) {
-			scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
+		const lockedAt = Number(activePlanLockAts.get(caseId) || 0);
+		const lockAgeMs = lockedAt ? now() - lockedAt : 0;
+		const shouldForceRelease =
+			lockAgeMs >= AI_TURN_STALL_RECOVERY_MS || attempts >= 2;
+		if (!shouldForceRelease) {
+			const retryDelayMs = lockedAt
+				? Math.max(1000, AI_TURN_STALL_RECOVERY_MS - lockAgeMs)
+				: AI_TURN_STALL_RECOVERY_MS;
+			logStep(caseId, "turn_recovery.defer", {
+				attempts,
+				reason: "turn_in_flight",
+				lockAgeMs,
+				retryDelayMs,
+			});
+			scheduleUnansweredTurnRecovery(io, caseId, retryDelayMs);
+			return false;
 		}
-		return false;
+		logStep(caseId, "turn_recovery.force_release", {
+			attempts,
+			lockAgeMs,
+			waitFor: activeState.waitFor || null,
+		});
+		activeState.interrupt = true;
+		activeState.turnInFlight = false;
+		activeState.turnOwner = null;
+		activeState.queue = [];
+		activeState.sendingToken = "";
+		activePlanLocks.delete(caseId);
+		activePlanLockAts.delete(caseId);
 	}
 	logStep(caseId, "turn_recovery.run", { attempts });
 	await planTurn(io, latestCase);
@@ -19502,6 +19526,11 @@ function wireSocket(io) {
 
 				if (!st.greeted && !st.greetScheduled) {
 					schedulePlanTurn(io, caseId, { delayMs: 75 });
+				} else if (latestGuestNeedsAiReply(sc) && !st.turnInFlight) {
+					schedulePlanTurn(io, caseId, { delayMs: 75 });
+					logStep(caseId, "join.schedule_unanswered_turn", {
+						waitFor: st.waitFor || null,
+					});
 				}
 			} catch (e) {
 				console.error("[aiagent] joinRoom error:", e?.message || e);
