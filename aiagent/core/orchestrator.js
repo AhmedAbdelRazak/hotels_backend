@@ -51,8 +51,14 @@ const {
 const {
 	waNotifyImmediateSupportEscalation,
 } = require("../../controllers/whatsappsender");
+const {
+	scheduleOpenAiFirstTurn,
+	wireOpenAiFirstSocket,
+	markOpenAiFirstGuestActivity,
+	DEFAULT_AGENT_POOL: OPENAI_FIRST_AGENT_POOL,
+} = require("./openaiFirstOrchestrator");
 
-const DEFAULT_AGENT_POOL = ["Hana", "Aisha", "Sara", "Amira", "Yasmin", "Nadia"];
+const DEFAULT_AGENT_POOL = OPENAI_FIRST_AGENT_POOL;
 const AI_SUPPORT_EMAIL = "support@jannatbooking.com";
 const LEGACY_AI_SUPPORT_EMAIL = "management@xhotelpro.com";
 const ZAD_AJYAD_HOTEL_ID = "6a40b6a1a6efe70450536038";
@@ -20174,7 +20180,7 @@ async function runUnansweredTurnRecovery(io, caseId) {
 	return true;
 }
 
-function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
+function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const caseId = idText(caseOrId);
 	if (!io || !caseId) return false;
 	const existing = scheduledTurns.get(caseId);
@@ -20200,7 +20206,7 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 }
 
 /* ------------------- socket wiring ------------------- */
-function wireSocket(io) {
+function wireLegacySocket(io) {
 	io.on("connection", (socket) => {
 		socket.on("joinRoom", async ({ caseId }) => {
 			try {
@@ -20237,6 +20243,7 @@ function wireSocket(io) {
 
 		socket.on("typing", ({ caseId }) => {
 			markGuestActivity(caseId, { typingHoldMs: AI_GUEST_TYPING_HOLD_MS });
+			markOpenAiFirstGuestActivity(caseId, { typingHoldMs: AI_GUEST_TYPING_HOLD_MS });
 		});
 
 		socket.on("sendMessage", async (message) => {
@@ -20262,6 +20269,31 @@ function wireSocket(io) {
 	});
 
 	console.log("[aiagent] socket-driven AI planner active.");
+}
+
+function useLegacyAiEngine() {
+	const engine = String(process.env.AI_AGENT_ENGINE || "openai_first")
+		.trim()
+		.toLowerCase();
+	const legacyFlag = String(process.env.AI_AGENT_USE_LEGACY || "")
+		.trim()
+		.toLowerCase();
+	return (
+		engine === "legacy" ||
+		engine === "classic" ||
+		legacyFlag === "true" ||
+		legacyFlag === "1"
+	);
+}
+
+function schedulePlanTurn(io, caseOrId, options = {}) {
+	if (!useLegacyAiEngine()) return scheduleOpenAiFirstTurn(io, caseOrId, options);
+	return scheduleLegacyPlanTurn(io, caseOrId, options);
+}
+
+function wireSocket(io) {
+	if (!useLegacyAiEngine()) return wireOpenAiFirstSocket(io);
+	return wireLegacySocket(io);
 }
 
 module.exports = { wireSocket, schedulePlanTurn };

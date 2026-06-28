@@ -30,6 +30,21 @@ const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 const isAiAgentEnabled = () =>
 	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
 
+const isLegacyAiAgentEngine = () => {
+	const engine = String(process.env.AI_AGENT_ENGINE || "openai_first")
+		.trim()
+		.toLowerCase();
+	const legacyFlag = String(process.env.AI_AGENT_USE_LEGACY || "")
+		.trim()
+		.toLowerCase();
+	return (
+		engine === "legacy" ||
+		engine === "classic" ||
+		legacyFlag === "true" ||
+		legacyFlag === "1"
+	);
+};
+
 function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
 	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
 		return;
@@ -1520,10 +1535,9 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {
-			const quickTrustReply = publicHotelTrustQuickReplyText(
-				updatedCase,
-				safeConversation
-			);
+			const quickTrustReply = isLegacyAiAgentEngine()
+				? publicHotelTrustQuickReplyText(updatedCase, safeConversation)
+				: "";
 			if (quickTrustReply) {
 				const quickReplyCase = await appendPublicAiQuickReply(
 					req.io,
