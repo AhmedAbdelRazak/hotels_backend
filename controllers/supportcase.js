@@ -37,6 +37,63 @@ function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
 	schedulePlanTurn(io, supportCaseOrId, { delayMs });
 }
 
+const AI_CLIENT_REPLY_SAFETY_RETRY_MS = Math.max(
+	500,
+	Number(process.env.AI_CLIENT_REPLY_SAFETY_RETRY_MS || 1500)
+);
+
+const isAiSupportConversationEntry = (entry = {}) => {
+	if (!entry || entry.isSystem) return false;
+	const contact = normalizeEmailOrPhone(entry.messageBy?.customerEmail);
+	return Boolean(entry.isAi || AI_SUPPORT_MESSAGE_EMAILS.includes(contact));
+};
+
+const isPublicGuestConversationEntry = (entry = {}) => {
+	if (!entry || entry.isSystem || isAiSupportConversationEntry(entry)) return false;
+	const contact = normalizeEmailOrPhone(entry.messageBy?.customerEmail);
+	return Boolean(contact && !isSystemSupportContact(contact));
+};
+
+const latestClientMessageNeedsAiReply = (supportCase = {}) => {
+	if (
+		!supportCase ||
+		supportCase.openedBy !== "client" ||
+		supportCase.caseStatus === "closed" ||
+		supportCase.aiToRespond === false
+	) {
+		return false;
+	}
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const entry = conversation[index];
+		if (isAiSupportConversationEntry(entry)) return false;
+		if (isPublicGuestConversationEntry(entry)) return true;
+	}
+	return false;
+};
+
+function scheduleAiSafetyRetryForCase(io, caseId) {
+	if (!isAiAgentEnabled() || !io || !ObjectId.isValid(normalizeId(caseId))) return;
+	const timer = setTimeout(async () => {
+		try {
+			const latestCase = await SupportCase.findById(caseId)
+				.select("_id openedBy caseStatus aiToRespond hotelId conversation")
+				.lean();
+			if (latestClientMessageNeedsAiReply(latestCase)) {
+				scheduleAiTurnForCase(io, latestCase._id, { delayMs: 25 });
+			}
+		} catch (error) {
+			console.error(
+				"[support-case] ai safety retry failed:",
+				error?.message || error
+			);
+		}
+	}, AI_CLIENT_REPLY_SAFETY_RETRY_MS);
+	if (typeof timer.unref === "function") timer.unref();
+}
+
 const configuredSuperAdminIds = () =>
 	[process.env.SUPER_ADMIN_ID, process.env.REACT_APP_SUPER_ADMIN_ID]
 		.flatMap((value) => String(value || "").split(","))
@@ -1306,6 +1363,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.caseStatus !== "closed"
 		) {
 			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+			scheduleAiSafetyRetryForCase(req.io, updatedCase._id);
 		}
 
 		res.status(200).json(updatedCase);
@@ -1523,6 +1581,7 @@ exports.createNewSupportCase = async (req, res) => {
 		req.io.emit("newChat", newCase);
 		if (aiEnabledForClient) {
 			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 25 });
+			scheduleAiSafetyRetryForCase(req.io, newCase._id);
 		}
 
 		// Email is best-effort and must not hold the public chat open.
