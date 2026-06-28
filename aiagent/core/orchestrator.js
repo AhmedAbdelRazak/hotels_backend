@@ -17279,6 +17279,24 @@ async function planTurn(io, sc) {
 		}
 		if (
 			userText &&
+			st.waitFor === "proceed" &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			(lastGuestAction(sc) === "proceed" || confirmsText(userText))
+		) {
+			const proceedHandled = await handleProceedStageInput(
+				io,
+				sc,
+				st,
+				userText,
+				{},
+				{ allowGeneric: false }
+			);
+			if (proceedHandled) return;
+		}
+		if (
+			userText &&
 			st.hotel &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
