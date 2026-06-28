@@ -486,7 +486,7 @@ const OVERALL_HOTEL_FULL_SELECT =
 const OVERALL_HOTEL_COMPACT_SELECT =
 	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity activateHotel xHotelProActive createdAt updatedAt";
 const OVERALL_HOTEL_SETTINGS_OPTIONS_SELECT =
-	"_id hotelName belongsTo roomCountDetails overallRoomsCount activateHotel xHotelProActive createdAt updatedAt";
+	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity overallRoomsCount hotelPhotos._id location aboutHotel aboutHotelArabic paymentSettings._id activateHotel xHotelProActive createdAt updatedAt roomCountDetails._id roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage roomCountDetails.description roomCountDetails.description_OtherLanguage roomCountDetails.count roomCountDetails.price roomCountDetails.defaultCost roomCountDetails.amenities roomCountDetails.views roomCountDetails.extraAmenities roomCountDetails.activeRoom roomCountDetails.bedsCount roomCountDetails.roomForGender roomCountDetails.roomColor roomCountDetails.roomCommission roomCountDetails.commisionIncluded";
 const OVERALL_HOTEL_COMPACT_SECTIONS = new Set([
 	"summary",
 	"executive",
@@ -560,6 +560,145 @@ const getCompactSummaryHotels = (hotelFilter = {}) =>
 			},
 		},
 	]);
+
+const getCalendarPricingGroupsForHotelIds = async (hotelIds = []) => {
+	const objectIds = uniqueValidIds(hotelIds).map((id) => ObjectId(id));
+	if (!objectIds.length) return [];
+	const groups = await HotelDetails.aggregate([
+		{ $match: { _id: { $in: objectIds } } },
+		{ $unwind: "$roomCountDetails" },
+		{
+			$unwind: {
+				path: "$roomCountDetails.pricingRate",
+				preserveNullAndEmptyArrays: false,
+			},
+		},
+		{
+			$addFields: {
+				rowDate: {
+					$substrBytes: [
+						{ $toString: "$roomCountDetails.pricingRate.calendarDate" },
+						0,
+						10,
+					],
+				},
+				rowStatus: {
+					$toLower: {
+						$ifNull: ["$roomCountDetails.pricingRate.status", ""],
+					},
+				},
+				rowColor: {
+					$toLower: {
+						$ifNull: ["$roomCountDetails.pricingRate.color", ""],
+					},
+				},
+				rowBlockedFlag: {
+					$eq: ["$roomCountDetails.pricingRate.blocked", true],
+				},
+				rowSellingPrice: {
+					$convert: {
+						input: {
+							$ifNull: [
+								"$roomCountDetails.pricingRate.sellingPrice",
+								"$roomCountDetails.pricingRate.price",
+							],
+						},
+						to: "double",
+						onError: 0,
+						onNull: 0,
+					},
+				},
+				rowCommissionPercent: {
+					$convert: {
+						input: "$roomCountDetails.pricingRate.commissionPercent",
+						to: "double",
+						onError: 0,
+						onNull: 0,
+					},
+				},
+			},
+		},
+		{ $match: { rowDate: { $ne: "" } } },
+		{
+			$addFields: {
+				rowBlocked: {
+					$or: [
+						"$rowBlockedFlag",
+						{ $eq: ["$rowStatus", "blocked"] },
+						{ $eq: ["$rowColor", "black"] },
+					],
+				},
+			},
+		},
+		{
+			$sort: {
+				hotelName: 1,
+				"roomCountDetails.displayName": 1,
+				rowDate: 1,
+			},
+		},
+		{
+			$group: {
+				_id: {
+					hotelId: "$_id",
+					roomId: "$roomCountDetails._id",
+				},
+				hotelName: { $first: "$hotelName" },
+				roomType: { $first: "$roomCountDetails.roomType" },
+				roomForGender: { $first: "$roomCountDetails.roomForGender" },
+				displayName: { $first: "$roomCountDetails.displayName" },
+				displayName_OtherLanguage: {
+					$first: "$roomCountDetails.displayName_OtherLanguage",
+				},
+				basePrice: { $first: "$roomCountDetails.price.basePrice" },
+				defaultCost: { $first: "$roomCountDetails.defaultCost" },
+				startDate: { $first: "$rowDate" },
+				endDate: { $last: "$rowDate" },
+				totalDays: { $sum: 1 },
+				openCount: { $sum: { $cond: ["$rowBlocked", 0, 1] } },
+				blockedCount: { $sum: { $cond: ["$rowBlocked", 1, 0] } },
+				firstPrice: { $first: "$rowSellingPrice" },
+				firstCommission: { $first: "$rowCommissionPercent" },
+				firstStatus: {
+					$first: { $cond: ["$rowBlocked", "blocked", "open"] },
+				},
+			},
+		},
+		{ $sort: { hotelName: 1, displayName: 1, startDate: 1 } },
+	]).exec();
+	return groups.map((group) => {
+		const hotelId = normalizeId(group?._id?.hotelId);
+		const roomId = normalizeId(group?._id?.roomId);
+		const roomDisplayName =
+			group.displayName || group.displayName_OtherLanguage || group.roomType || "";
+		return {
+			key: `${hotelId}::${roomId}`,
+			hotelId,
+			roomId,
+			roomKey: `${hotelId}::${roomId}`,
+			hotelName: group.hotelName || "Hotel",
+			roomType: group.roomType || "",
+			roomForGender: group.roomForGender || "",
+			roomTypeLabel: group.roomType || "",
+			roomDisplayName,
+			displayName: group.displayName || "",
+			displayName_OtherLanguage: group.displayName_OtherLanguage || "",
+			basePrice: Number(group.basePrice || 0),
+			defaultCost: Number(group.defaultCost || 0),
+			label: `${group.hotelName || "Hotel"} - ${group.roomType || ""}${
+				roomDisplayName ? ` - ${roomDisplayName}` : ""
+			}`,
+			startDate: group.startDate || "",
+			endDate: group.endDate || "",
+			totalDays: Number(group.totalDays || 0),
+			openCount: Number(group.openCount || 0),
+			blockedCount: Number(group.blockedCount || 0),
+			firstPrice: Number(group.firstPrice || 0),
+			firstCommission: Number(group.firstCommission || 0),
+			firstStatus: group.firstStatus || "open",
+		};
+	});
+};
 
 const getAccessibleOverallHotels = async (actor = {}, query = {}, section = "") => {
 	if (!actor?._id || actor.activeUser === false) return [];
@@ -6612,9 +6751,89 @@ exports.saveOverallRoomManagerRoom = async (req, res) => {
 	}
 };
 
-const serializeCalendarRoom = (room = {}) => {
-	const plain = roomToPlain(room);
+const serializeCompactCalendarRow = (row = {}) => ({
+	calendarDate: toCalendarDateKey(row?.calendarDate),
+	status: row?.status === "blocked" || row?.blocked === true ? "blocked" : "open",
+	blocked: row?.blocked === true || row?.status === "blocked",
+	sellingPrice: Number(row?.sellingPrice ?? row?.price ?? 0),
+	price: Number(row?.price ?? row?.sellingPrice ?? 0),
+	rootPrice: Number(row?.rootPrice || 0),
+	commissionPercent: Number(row?.commissionPercent || 0),
+	color: row?.color || "",
+	...(row?.agentId
+		? {
+				agentId: normalizeCalendarId(row.agentId),
+				agentName: row.agentName || "",
+				agentEmail: row.agentEmail || "",
+				companyName: row.companyName || "",
+		  }
+		: {}),
+	...(row?.priceVariantDataId
+		? { priceVariantDataId: normalizeCalendarId(row.priceVariantDataId) }
+		: {}),
+	...(row?.priceVariantItemId
+		? { priceVariantItemId: normalizeCalendarId(row.priceVariantItemId) }
+		: {}),
+	...(row?.priceVariantName ? { priceVariantName: row.priceVariantName } : {}),
+	...(row?.priceVariantNameOtherLanguage
+		? { priceVariantNameOtherLanguage: row.priceVariantNameOtherLanguage }
+		: {}),
+});
+
+const calendarPricingSummaryFromRows = (rows = []) => {
+	const normalizedRows = (Array.isArray(rows) ? rows : [])
+		.map(serializeCompactCalendarRow)
+		.filter((row) => row.calendarDate)
+		.sort((left, right) => left.calendarDate.localeCompare(right.calendarDate));
+	if (!normalizedRows.length) return null;
+	const openRows = normalizedRows.filter((row) => !row.blocked);
+	const representativeRow = openRows[0] || normalizedRows[0] || {};
 	return {
+		startDate: normalizedRows[0]?.calendarDate || "",
+		endDate: normalizedRows[normalizedRows.length - 1]?.calendarDate || "",
+		totalDays: normalizedRows.length,
+		openCount: openRows.length,
+		blockedCount: normalizedRows.length - openRows.length,
+		firstPrice: Number(representativeRow.sellingPrice || 0),
+		firstCommission: Number(representativeRow.commissionPercent || 0),
+		firstStatus: representativeRow.blocked ? "blocked" : "open",
+	};
+};
+
+const serializeCalendarPricingGroup = (hotel = {}, room = {}) => {
+	const plain = roomToPlain(room);
+	const summary = calendarPricingSummaryFromRows(plain.pricingRate);
+	if (!summary) return null;
+	const hotelId = normalizeId(hotel._id);
+	const roomId = normalizeId(plain._id);
+	const displayName =
+		plain.displayName || plain.displayName_OtherLanguage || plain.roomType || "";
+	const label = `${hotel.hotelName || "Hotel"} - ${plain.roomType || ""}${
+		displayName ? ` - ${displayName}` : ""
+	}`;
+	return {
+		key: `${hotelId}::${roomId}`,
+		hotelId,
+		roomId,
+		roomKey: `${hotelId}::${roomId}`,
+		hotelName: hotel.hotelName || "Hotel",
+		roomType: plain.roomType || "",
+		roomForGender: plain.roomForGender || "",
+		roomTypeLabel: plain.roomType || "",
+		roomDisplayName: displayName,
+		displayName: plain.displayName || "",
+		displayName_OtherLanguage: plain.displayName_OtherLanguage || "",
+		basePrice: Number(plain?.price?.basePrice || plain.basePrice || 0),
+		defaultCost: Number(plain.defaultCost || plain.rootPrice || 0),
+		label,
+		...summary,
+	};
+};
+
+const serializeCalendarRoom = (room = {}, options = {}) => {
+	const plain = roomToPlain(room);
+	const includePricingRows = options.includePricingRows === true;
+	const payload = {
 		_id: normalizeId(plain._id),
 		roomType: plain.roomType || "",
 		displayName: plain.displayName || plain.displayName_OtherLanguage || plain.roomType || "",
@@ -6625,23 +6844,22 @@ const serializeCalendarRoom = (room = {}) => {
 		roomColor: plain.roomColor || "",
 		basePrice: Number(plain?.price?.basePrice || plain.basePrice || 0),
 		defaultCost: Number(plain.defaultCost || plain.rootPrice || 0),
-		pricingRate: (Array.isArray(plain.pricingRate) ? plain.pricingRate : []).map(
-			(row) => ({
-				calendarDate: toCalendarDateKey(row?.calendarDate),
-				status: row?.status === "blocked" || row?.blocked === true ? "blocked" : "open",
-				blocked: row?.blocked === true || row?.status === "blocked",
-				sellingPrice: Number(row?.sellingPrice ?? row?.price ?? 0),
-				price: Number(row?.price ?? row?.sellingPrice ?? 0),
-				rootPrice: Number(row?.rootPrice || 0),
-				commissionPercent: Number(row?.commissionPercent || 0),
-				color: row?.color || "",
-			})
-		),
 		pricingDays: Array.isArray(plain.pricingRate) ? plain.pricingRate.length : 0,
 		agentPricingDays: Array.isArray(plain.agentPricingRate)
 			? plain.agentPricingRate.length
 			: 0,
 	};
+	if (includePricingRows) {
+		payload.pricingRate = (Array.isArray(plain.pricingRate)
+			? plain.pricingRate
+			: []
+		).map(serializeCompactCalendarRow);
+		payload.agentPricingRate = (Array.isArray(plain.agentPricingRate)
+			? plain.agentPricingRate
+			: []
+		).map(serializeCompactCalendarRow);
+	}
+	return payload;
 };
 
 const serializeCalendarHotel = (hotel = {}) => {
@@ -9165,18 +9383,71 @@ exports.overallCalendarPricingOptions = async (req, res) => {
 		const hotelMap = new Map(
 			context.hotels.map((hotel) => [normalizeId(hotel._id), hotel])
 		);
+		const pricingGroups = await getCalendarPricingGroupsForHotelIds(hotelIds);
 		return res.json({
 			hotels: context.hotels.map(serializeCalendarHotel),
 			agents: agents.map(serializeCalendarAgent),
 			priceVariantData: priceVariantData.map((item) =>
 				serializePriceVariant(item, hotelMap)
 			),
+			pricingGroups,
 		});
 	} catch (error) {
 		console.error("overallCalendarPricingOptions error:", error);
 		return res
 			.status(500)
 			.json({ error: "Could not load calendar pricing options" });
+	}
+};
+
+exports.overallCalendarPricingRoomRows = async (req, res) => {
+	try {
+		const context = await requireOverallSection(req, res, "settings-options");
+		if (!context) return;
+		const hotelId = normalizeId(req.query?.hotelId || req.params?.hotelId);
+		const roomId = normalizeId(req.query?.roomId || req.params?.roomId);
+		if (!ObjectId.isValid(hotelId) || !ObjectId.isValid(roomId)) {
+			return res
+				.status(400)
+				.json({ error: "Valid hotelId and roomId are required" });
+		}
+		const allowedHotelIds = new Set(
+			context.hotels.map((hotel) => normalizeId(hotel._id))
+		);
+		if (!allowedHotelIds.has(hotelId)) {
+			return res
+				.status(403)
+				.json({ error: "You cannot view pricing rows for this hotel" });
+		}
+		const hotel = await HotelDetails.findOne({
+			_id: ObjectId(hotelId),
+			"roomCountDetails._id": ObjectId(roomId),
+		})
+			.select({
+				_id: 1,
+				hotelName: 1,
+				belongsTo: 1,
+				"roomCountDetails.$": 1,
+			})
+			.populate("belongsTo", "_id name email phone")
+			.lean()
+			.exec();
+		const room = Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails[0]
+			: null;
+		if (!hotel || !room) {
+			return res.status(404).json({ error: "Room pricing rows were not found" });
+		}
+		const group = serializeCalendarPricingGroup(hotel, room);
+		return res.json({
+			hotelId,
+			roomId,
+			group,
+			room: serializeCalendarRoom(room, { includePricingRows: true }),
+		});
+	} catch (error) {
+		console.error("overallCalendarPricingRoomRows error:", error);
+		return res.status(500).json({ error: "Could not load room pricing rows" });
 	}
 };
 

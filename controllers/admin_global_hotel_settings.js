@@ -235,11 +235,16 @@ const serializeCalendarHotel = (hotel = {}) => {
 	};
 };
 
-const allHotelsQuery = () =>
+const ADMIN_GLOBAL_OVERVIEW_SELECT =
+	"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity overallRoomsCount roomCountDetails._id hotelPhotos._id location aboutHotel aboutHotelArabic paymentSettings._id activateHotel xHotelProActive createdAt updatedAt";
+const ADMIN_GLOBAL_ROOM_MANAGER_SELECT =
+	"_id hotelName belongsTo overallRoomsCount activateHotel xHotelProActive createdAt updatedAt roomCountDetails._id roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage roomCountDetails.description roomCountDetails.description_OtherLanguage roomCountDetails.count roomCountDetails.price roomCountDetails.defaultCost roomCountDetails.amenities roomCountDetails.views roomCountDetails.extraAmenities roomCountDetails.activeRoom roomCountDetails.bedsCount roomCountDetails.roomForGender roomCountDetails.roomColor roomCountDetails.roomCommission roomCountDetails.commisionIncluded";
+const ADMIN_GLOBAL_CALENDAR_SELECT =
+	"_id hotelName belongsTo overallRoomsCount createdAt updatedAt roomCountDetails._id roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage roomCountDetails.roomForGender roomCountDetails.count roomCountDetails.activeRoom roomCountDetails.roomColor";
+
+const allHotelsQuery = (select = ADMIN_GLOBAL_OVERVIEW_SELECT) =>
 	HotelDetails.find({})
-		.select(
-			"_id hotelName belongsTo hotelAddress hotelCountry hotelState hotelCity roomCountDetails overallRoomsCount hotelPhotos location aboutHotel aboutHotelArabic paymentSettings activateHotel xHotelProActive createdAt updatedAt"
-		)
+		.select(select)
 		.populate("belongsTo", "_id name email phone")
 		.sort({ hotelName: 1 })
 		.exec();
@@ -550,7 +555,7 @@ const mergeAgentCalendarRows = (
 
 exports.adminGlobalHotelSettingsOverview = async (_req, res) => {
 	try {
-		const hotels = await allHotelsQuery();
+		const hotels = await allHotelsQuery(ADMIN_GLOBAL_OVERVIEW_SELECT);
 		return res.json({
 			total: hotels.length,
 			hotels: hotels.map(serializeAdminSettingsHotel),
@@ -563,7 +568,7 @@ exports.adminGlobalHotelSettingsOverview = async (_req, res) => {
 
 exports.adminGlobalRoomManagerOptions = async (_req, res) => {
 	try {
-		const hotels = await allHotelsQuery();
+		const hotels = await allHotelsQuery(ADMIN_GLOBAL_ROOM_MANAGER_SELECT);
 		return res.json({
 			hotels: hotels.map(serializeAdminRoomHotel),
 		});
@@ -746,7 +751,7 @@ exports.saveAdminGlobalRoomManagerRoom = async (req, res) => {
 
 exports.adminGlobalCalendarPricingOptions = async (_req, res) => {
 	try {
-		const hotels = await allHotelsQuery();
+		const hotels = await allHotelsQuery(ADMIN_GLOBAL_CALENDAR_SELECT);
 		const hotelIds = hotels.map((hotel) => normalizeId(hotel._id));
 		const agents = hotelIds.length
 			? await User.find(buildCalendarAgentQuery(hotelIds))

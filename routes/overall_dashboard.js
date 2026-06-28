@@ -31,6 +31,7 @@ const {
 	overallRoomManagerOptions,
 	saveOverallRoomManagerRoom,
 	overallCalendarPricingOptions,
+	overallCalendarPricingRoomRows,
 	saveOverallCalendarPricing,
 	overallPriceVariantOptions,
 	saveOverallPriceVariant,
@@ -216,6 +217,13 @@ router.get(
 	requireSignin,
 	isAuth,
 	overallCalendarPricingOptions
+);
+
+router.get(
+	"/overall-dashboard/settings-calendar-pricing/:userId/room-rows",
+	requireSignin,
+	isAuth,
+	overallCalendarPricingRoomRows
 );
 
 router.post(

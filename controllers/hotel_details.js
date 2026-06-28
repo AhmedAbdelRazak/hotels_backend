@@ -126,6 +126,16 @@ const HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS = [
 	"roomCountDetails.monthly",
 ];
 
+const HOTEL_DETAILS_ROOM_WORKSPACE_COMPACT_FIELDS =
+	HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS.filter(
+		(field) =>
+			![
+				"roomCountDetails.pricingRate",
+				"roomCountDetails.offers",
+				"roomCountDetails.monthly",
+			].includes(field)
+	);
+
 const HOTEL_DETAILS_MANAGEMENT_SELECT = [
 	"_id",
 	"hotelName",
@@ -169,6 +179,53 @@ const HOTEL_DETAILS_MANAGEMENT_SELECT = [
 	"ownerPaymentMethods",
 	"belongsTo",
 	...HOTEL_DETAILS_ROOM_WORKSPACE_FIELDS,
+	"createdAt",
+	"updatedAt",
+].join(" ");
+
+const HOTEL_DETAILS_MANAGEMENT_COMPACT_SELECT = [
+	"_id",
+	"hotelName",
+	"hotelName_OtherLanguage",
+	"hotelCountry",
+	"hotelState",
+	"hotelCity",
+	"aboutHotel",
+	"aboutHotelArabic",
+	"phone",
+	"hotelAddress",
+	"hotelFloors",
+	"hotelRooms",
+	"overallRoomsCount",
+	"distances",
+	"hotelPhotos",
+	"hotelRating",
+	"parkingLot",
+	"hasBusService",
+	"busDetails",
+	"hasMealsService",
+	"mealsDetails",
+	"isNusuk",
+	"isNusukText",
+	"hotelPolicyQA",
+	"subscribed",
+	"acceptedTermsAndConditions",
+	"wholeSaleHotel",
+	"propertyType",
+	"pictures_testing",
+	"location_testing",
+	"rooms_pricing_testing",
+	"activateHotel",
+	"xHotelProActive",
+	"aiToRespond",
+	"currency",
+	"location",
+	"commission",
+	"guestPaymentAcceptance",
+	"paymentSettings",
+	"ownerPaymentMethods",
+	"belongsTo",
+	...HOTEL_DETAILS_ROOM_WORKSPACE_COMPACT_FIELDS,
 	"createdAt",
 	"updatedAt",
 ].join(" ");
@@ -222,6 +279,11 @@ const isHotelDetailsManagementRequest = (req = {}) => {
 	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
 	return ["management", "settings", "pms-management"].includes(view);
 };
+
+const includesPricingRowsRequest = (req = {}) =>
+	["1", "true", "yes", "full"].includes(
+		String(req.query?.includePricingRows || "").toLowerCase()
+	);
 
 const isHotelDetailsReservationWorkspaceRequest = (req = {}) => {
 	const view = String(req.query?.view || req.query?.payload || "").toLowerCase();
@@ -1235,7 +1297,13 @@ exports.hotelDetailsById = (req, res, next, id) => {
 		query.select(HOTEL_DETAILS_RESERVATION_DETAILS_SELECT).lean();
 	}
 	if (managementRequest) {
-		query.select(HOTEL_DETAILS_MANAGEMENT_SELECT).lean();
+		query
+			.select(
+				includesPricingRowsRequest(req)
+					? HOTEL_DETAILS_MANAGEMENT_SELECT
+					: HOTEL_DETAILS_MANAGEMENT_COMPACT_SELECT
+			)
+			.lean();
 	}
 	if (reservationWorkspaceRequest) {
 		query.select(HOTEL_DETAILS_RESERVATION_WORKSPACE_SELECT).lean();
