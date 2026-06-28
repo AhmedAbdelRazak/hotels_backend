@@ -2345,13 +2345,17 @@ function latestPhoneFromText(text = "") {
 			index + matchedText.length + 35
 		);
 		const before = withoutEmails.slice(Math.max(0, index - 18), index);
+		const compactMatchRemainder = digitsToEnglish(matchedText)
+			.replace(/[+\d\s().-]/g, "")
+			.trim();
+		const phone = cleanPhoneCandidate(matchedText);
+		const obviousPhoneToken = Boolean(phone && !compactMatchRemainder);
 		const phoneContext =
 			/^\s*\+/.test(matchedText) ||
 			/(?:\b(?:phone|mobile|whats\s*app|whatsapp|tel|telephone)\b|(?:\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0648\u0627\u062a\u0633))\s*[:#-]?\s*$/i.test(
 				before
 			);
-		if (!phoneContext && looksLikeStayDateCandidate(context)) continue;
-		const phone = cleanPhoneCandidate(matchedText);
+		if (!phoneContext && !obviousPhoneToken && looksLikeStayDateCandidate(context)) continue;
 		if (phone) return phone;
 	}
 	return "";
@@ -2928,11 +2932,23 @@ function roomKeyFromConversationRoomSignal(
 		const sectionRoomTypeKey = roomTypeKeysMentionedBySections(raw)[0] || "";
 		return sectionRoomTypeKey;
 	}
+	const explicitRoomTypeKey = mapRoomToKey(raw);
+	const earlySelectionSignal = explicitRoomTypeKey
+		? roomSelectionSignalText(raw, { assistant })
+		: false;
+	const earlyShortExplicitRoomChoice =
+		!assistant &&
+		Boolean(explicitRoomTypeKey) &&
+		raw.length <= 48 &&
+		!exploratoryRoomReferenceText(raw) &&
+		!generalRoomOptionsQuestionText(raw);
+	if (explicitRoomTypeKey && (earlyShortExplicitRoomChoice || earlySelectionSignal)) {
+		return explicitRoomTypeKey;
+	}
 	if (!(assistant && quoteContext) && reservationIdentityOrContactPayloadText(raw)) {
 		return "";
 	}
 	if (assistant && assistantRoomOptionsPromptText(raw)) return "";
-	const explicitRoomTypeKey = mapRoomToKey(raw);
 	const shortExplicitRoomChoice =
 		!assistant &&
 		Boolean(explicitRoomTypeKey) &&
@@ -2940,7 +2956,7 @@ function roomKeyFromConversationRoomSignal(
 		!exploratoryRoomReferenceText(raw) &&
 		!generalRoomOptionsQuestionText(raw);
 	if (shortExplicitRoomChoice) return explicitRoomTypeKey;
-	const selectionSignal = roomSelectionSignalText(raw, { assistant });
+	const selectionSignal = earlySelectionSignal || roomSelectionSignalText(raw, { assistant });
 	if (!selectionSignal && !quoteContext) return "";
 	if (!quoteContext && exploratoryRoomReferenceText(raw) && !selectionSignal) return "";
 	const requestedGuestCount = requestedGuestCountFromText(raw);
