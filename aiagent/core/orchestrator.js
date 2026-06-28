@@ -16070,6 +16070,7 @@ async function answerDirectHotelRelationshipInquiry(io, sc, st, userText = "") {
 	const previousWaitFor = st.waitFor || "";
 	await humanSend(io, sc, st, directHotelRelationshipReplyText(sc, st), {
 		scheduleIdle: false,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 	});
 	st.waitFor =
 		sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber
@@ -17522,6 +17523,22 @@ async function planTurn(io, sc) {
 				);
 				if (handledCarriedQuestion) return;
 			}
+		}
+		if (
+			userText &&
+			(st.hotel || sc.hotelId || sc.displayName2) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			(directHotelRelationshipQuestionText(userText) ||
+				looseHotelRelationshipQuestionText(userText))
+		) {
+			logStep(caseId, "hotel_direct_relationship.pre_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerDirectHotelRelationshipInquiry(io, sc, st, userText);
+			return;
 		}
 		if (
 			userText &&
