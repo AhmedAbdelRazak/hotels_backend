@@ -74,8 +74,13 @@ const latestClientMessageNeedsAiReply = (supportCase = {}) => {
 	return false;
 };
 
-function scheduleAiSafetyRetryForCase(io, caseId) {
+function scheduleAiSafetyRetryForCase(io, caseId, attempt = 1) {
 	if (!isAiAgentEnabled() || !io || !ObjectId.isValid(normalizeId(caseId))) return;
+	const safeAttempt = Math.max(1, Number(attempt) || 1);
+	const retryDelayMs =
+		safeAttempt === 1
+			? AI_CLIENT_REPLY_SAFETY_RETRY_MS
+			: Math.min(5000, AI_CLIENT_REPLY_SAFETY_RETRY_MS + safeAttempt * 1000);
 	const timer = setTimeout(async () => {
 		try {
 			const latestCase = await SupportCase.findById(caseId)
@@ -83,6 +88,9 @@ function scheduleAiSafetyRetryForCase(io, caseId) {
 				.lean();
 			if (latestClientMessageNeedsAiReply(latestCase)) {
 				scheduleAiTurnForCase(io, latestCase._id, { delayMs: 25 });
+				if (safeAttempt < 4) {
+					scheduleAiSafetyRetryForCase(io, latestCase._id, safeAttempt + 1);
+				}
 			}
 		} catch (error) {
 			console.error(
@@ -90,7 +98,7 @@ function scheduleAiSafetyRetryForCase(io, caseId) {
 				error?.message || error
 			);
 		}
-	}, AI_CLIENT_REPLY_SAFETY_RETRY_MS);
+	}, retryDelayMs);
 	if (typeof timer.unref === "function") timer.unref();
 }
 
