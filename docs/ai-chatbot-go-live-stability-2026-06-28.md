@@ -16,6 +16,7 @@
 - Stale turn recovery is now fenced with per-turn ownership. If recovery replaces a slow planner run, the older run may finish its OpenAI/database work but it cannot send an outdated or duplicate assistant message to the guest.
 - After required reservation details are captured, the chatbot now asks once for an optional email address before final review. Guests can skip it, but captured emails can be used for confirmation delivery and future lead/marketing workflows.
 - Selected-hotel fact answers are now post-booking-aware. After a reservation is created, service questions such as bus/shuttle availability end with a general helpful follow-up instead of asking whether to continue a reservation that is already confirmed.
+- Arabic greeting-only messages with the full blessing, such as "alaykum assalam wa rahmatullah wa barakatuh" in Arabic script, now match the fast smalltalk classifier. They reply before slot hydration, room/date recovery, or OpenAI fallback, preventing simple greetings from stalling a live customer chat.
 
 ## Verified Replay
 
@@ -50,3 +51,4 @@ Both restore the same stay and guest details in under two seconds locally, inste
   - Booking prompt/review: 3000 ms
 - Deterministic handlers still own hard facts, inventory, reservation creation, payments, cancellation, and saved hotel facts.
 - Dynamic OpenAI fallback is used only when no specific deterministic handler owns the turn.
+- Greeting-only, thanks-only, and clear casual messages use the pre-hydration fast lane when they contain no booking, payment, handoff, or existing-reservation signal.

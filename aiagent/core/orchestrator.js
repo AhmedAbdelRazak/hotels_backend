@@ -3353,6 +3353,9 @@ function looksLikeGreetingOnly(text = "") {
 	const stableGreeting = raw
 		.replace(/^[\s"'`]+|[\s"'`!?.\u061f\u060c,\u061b]+$/g, "")
 		.trim();
+	const arabicGreetingWithBlessing =
+		/^(?:(?:\u0648\s*)?\u0639\u0644\u064a\u0643\u0645\s+\u0627\u0644\u0633\u0644\u0627\u0645(?:\s+\u0648\u0631\u062d\u0645\u0629\s+\u0627\u0644\u0644\u0647(?:\s+\u0648\u0628\u0631\u0643\u0627\u062a\u0647)?)?|\u0627\u0644\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?(?:\s+\u0648\u0631\u062d\u0645\u0629\s+\u0627\u0644\u0644\u0647(?:\s+\u0648\u0628\u0631\u0643\u0627\u062a\u0647)?)?|\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?(?:\s+\u0648\u0631\u062d\u0645\u0629\s+\u0627\u0644\u0644\u0647(?:\s+\u0648\u0628\u0631\u0643\u0627\u062a\u0647)?)?)$/i;
+	if (arabicGreetingWithBlessing.test(stableGreeting)) return true;
 	if (
 		/^(?:\u0627\u0644\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0633\u0644\u0627\u0645(?:\s+\u0639\u0644\u064a\u0643\u0645)?|\u0648\u0639\u0644\u064a\u0643\u0645\s+\u0627\u0644\u0633\u0644\u0627\u0645|\u0645\u0631\u062d\u0628\u0627|\u0627\u0647\u0644\u0627|\u0623\u0647\u0644\u0627|\u0623\u0647\u0644\u064a\u0646|\u0647\u0644\u0627|\u0647\u0627\u0644\u0648|\u0627\u0644\u0648|\u0623\u0644\u0648|\u0647\u0627\u064a|\u0635\u0628\u0627\u062d\s+\u0627\u0644\u062e\u064a\u0631|\u0645\u0633\u0627\u0621\s+\u0627\u0644\u062e\u064a\u0631|\u06c1\u06cc\u0644\u0648|\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u06cc\u06a9\u0645|\u0928\u092e\u0938\u094d\u0924\u0947|\u0905\u0938\u094d\u0938\u0932\u093e\u092e\u0941\s+\u0905\u0932\u0948\u0915\u0941\u092e)$/i.test(
 			stableGreeting
@@ -17064,6 +17067,31 @@ async function planTurn(io, sc) {
 				deferredQuietDelayMs = quietRemainingMs + 35;
 				return;
 			}
+		}
+		if (
+			userText &&
+			String(userText || "").trim().length <= 140 &&
+			!severeAbusiveGuestText(userText) &&
+			!hasOperationalBookingSignal(userText)
+		) {
+			updateActiveLanguageFromText(sc, st, userText);
+		}
+		const immediateFastSmalltalk = st.hotel
+			? fastEnglishSmalltalkText(sc, st, userText)
+			: "";
+		if (
+			immediateFastSmalltalk &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			logStep(caseId, "smalltalk.fast_reply_before_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, immediateFastSmalltalk, { fast: true });
+			return;
 		}
 		if (userText) {
 			hydrateKnownSlotsFromConversation(sc, st, {
