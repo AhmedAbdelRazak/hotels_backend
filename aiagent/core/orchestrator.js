@@ -262,6 +262,11 @@ const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 	8 * 1000,
 	{ min: 5 * 1000, max: 2 * 60 * 1000 }
 );
+const AI_TURN_FORCE_RELEASE_MS = intFromEnv(
+	"AI_TURN_FORCE_RELEASE_MS",
+	Math.max(30 * 1000, AI_TURN_STALL_RECOVERY_MS * 3),
+	{ min: 15 * 1000, max: 2 * 60 * 1000 }
+);
 const AI_TURN_LOCK_RETRY_MS = intFromEnv("AI_TURN_LOCK_RETRY_MS", 350, {
 	min: 100,
 	max: 3000,
@@ -12296,7 +12301,13 @@ async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
 	) {
 		return false;
 	}
-	const roomTypeKey = mapRoomToKey(userText) || st.slots?.roomTypeKey || null;
+	let roomTypeKey = mapRoomToKey(userText) || st.slots?.roomTypeKey || null;
+	if (!roomTypeKey) {
+		applyLatestRoomSignalFromConversation(sc, st, {
+			source: "direct_quote_room_signal",
+		});
+		roomTypeKey = st.slots?.roomTypeKey || null;
+	}
 	if (!roomTypeKey) return false;
 	updateActiveLanguageFromText(sc, st, userText);
 	const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, dates, {
@@ -17268,6 +17279,24 @@ async function planTurn(io, sc) {
 			await humanSend(io, sc, st, immediateFastSmalltalk, { fast: true });
 			return;
 		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!selectedHotelFactQuestionText(userText) &&
+			!wantsDiscountQuestion(userText) &&
+			!hotelContactDetailsQuestionText(userText) &&
+			!hotelContactFollowupQuestionText(sc, userText)
+		) {
+			const directStayQuoteHandled = await tryShareDirectStayQuote(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (directStayQuoteHandled) return;
+		}
 		if (userText) {
 			hydrateKnownSlotsFromConversation(sc, st, {
 				protectLatestGuestDateChange: Boolean(userText),
@@ -19720,17 +19749,17 @@ async function runUnansweredTurnRecovery(io, caseId) {
 	if (activeState?.turnInFlight) {
 		const lockedAt = Number(activePlanLockAts.get(caseId) || 0);
 		const lockAgeMs = lockedAt ? now() - lockedAt : 0;
-		const shouldForceRelease =
-			lockAgeMs >= AI_TURN_STALL_RECOVERY_MS || attempts >= 2;
+		const shouldForceRelease = lockAgeMs >= AI_TURN_FORCE_RELEASE_MS;
 		if (!shouldForceRelease) {
 			const retryDelayMs = lockedAt
-				? Math.max(1000, AI_TURN_STALL_RECOVERY_MS - lockAgeMs)
+				? Math.max(1000, Math.min(AI_TURN_STALL_RECOVERY_MS, AI_TURN_FORCE_RELEASE_MS - lockAgeMs))
 				: AI_TURN_STALL_RECOVERY_MS;
 			logStep(caseId, "turn_recovery.defer", {
 				attempts,
 				reason: "turn_in_flight",
 				lockAgeMs,
 				retryDelayMs,
+				forceReleaseMs: AI_TURN_FORCE_RELEASE_MS,
 			});
 			scheduleUnansweredTurnRecovery(io, caseId, retryDelayMs);
 			return false;
@@ -19739,6 +19768,7 @@ async function runUnansweredTurnRecovery(io, caseId) {
 			attempts,
 			lockAgeMs,
 			waitFor: activeState.waitFor || null,
+			forceReleaseMs: AI_TURN_FORCE_RELEASE_MS,
 		});
 		activeState.interrupt = true;
 		activeState.turnInFlight = false;
