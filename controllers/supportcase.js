@@ -75,7 +75,8 @@ const latestClientMessageNeedsAiReply = (supportCase = {}) => {
 };
 
 function scheduleAiSafetyRetryForCase(io, caseId, attempt = 1) {
-	if (!isAiAgentEnabled() || !io || !ObjectId.isValid(normalizeId(caseId))) return;
+	const caseKey = String(caseId?._id || caseId || "").trim();
+	if (!isAiAgentEnabled() || !io || !ObjectId.isValid(caseKey)) return;
 	const safeAttempt = Math.max(1, Number(attempt) || 1);
 	const retryDelayMs =
 		safeAttempt === 1
@@ -83,7 +84,7 @@ function scheduleAiSafetyRetryForCase(io, caseId, attempt = 1) {
 			: Math.min(5000, AI_CLIENT_REPLY_SAFETY_RETRY_MS + safeAttempt * 1000);
 	const timer = setTimeout(async () => {
 		try {
-			const latestCase = await SupportCase.findById(caseId)
+			const latestCase = await SupportCase.findById(caseKey)
 				.select("_id openedBy caseStatus aiToRespond hotelId conversation")
 				.lean();
 			if (latestClientMessageNeedsAiReply(latestCase)) {
@@ -1371,7 +1372,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.caseStatus !== "closed"
 		) {
 			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-			scheduleAiSafetyRetryForCase(req.io, updatedCase._id);
+			scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 		}
 
 		res.status(200).json(updatedCase);
@@ -1589,7 +1590,7 @@ exports.createNewSupportCase = async (req, res) => {
 		req.io.emit("newChat", newCase);
 		if (aiEnabledForClient) {
 			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 25 });
-			scheduleAiSafetyRetryForCase(req.io, newCase._id);
+			scheduleAiSafetyRetryForCase(req.io, String(newCase._id));
 		}
 
 		// Email is best-effort and must not hold the public chat open.
