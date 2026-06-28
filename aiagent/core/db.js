@@ -86,18 +86,27 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 			$eq: [
 				{
 					$let: {
-						vars: { latest: { $arrayElemAt: ["$conversation", -1] } },
+						vars: {
+							latestGuest: {
+								$arrayElemAt: [
+									{
+										$filter: {
+											input: "$conversation",
+											as: "entry",
+											cond: {
+												$and: [
+													{ $ne: ["$$entry.isAi", true] },
+													{ $ne: ["$$entry.isSystem", true] },
+												],
+											},
+										},
+									},
+									-1,
+								],
+							},
+						},
 						in: {
-							$cond: [
-								{
-									$or: [
-										{ $eq: ["$$latest.isAi", true] },
-										{ $eq: ["$$latest.isSystem", true] },
-									],
-								},
-								"",
-								{ $trim: { input: "$$latest.message" } },
-							],
+							$trim: { input: { $ifNull: ["$$latestGuest.message", ""] } },
 						},
 					},
 				},

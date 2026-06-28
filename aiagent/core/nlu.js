@@ -120,7 +120,15 @@ ROOM_SYNONYMS.push(
 		terms: [
 			"\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a\u0629",
 			"\u062b\u0644\u0627\u062b\u064a\u0629",
+			"\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a",
+			"\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u0649",
+			"\u062b\u0644\u0627\u062b\u064a",
+			"\u062b\u0644\u0627\u062b\u0649",
+			"\u062b\u0644\u0627\u062b",
 			"\u062a\u0644\u0627\u062a\u0629",
+			"\u062a\u0644\u0627\u062a\u0647",
+			"\u062a\u0644\u0627\u062a\u064a",
+			"\u062a\u0644\u0627\u062a\u0649",
 			"\u062a\u0644\u062a",
 		],
 	},
@@ -148,6 +156,17 @@ function escapeRoomTerm(value = "") {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function normalizeArabicRoomText(value = "") {
+	return String(value || "")
+		.toLowerCase()
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/[\u0649\u06cc]/g, "\u064a")
+		.replace(/[\u0629\u06c1\u06be\u06d5]/g, "\u0647")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
 function roomTermMatches(text = "", term = "") {
 	const low = String(text || "").toLowerCase();
 	const raw = String(term || "").toLowerCase().trim();
@@ -156,7 +175,9 @@ function roomTermMatches(text = "", term = "") {
 		const pattern = escapeRoomTerm(raw).replace(/[\s-]+/g, "[\\s-]+");
 		return new RegExp(`(^|[^a-z0-9])${pattern}([^a-z0-9]|$)`).test(low);
 	}
-	return low.includes(raw);
+	const normalizedText = normalizeArabicRoomText(low);
+	const normalizedTerm = normalizeArabicRoomText(raw);
+	return low.includes(raw) || normalizedText.includes(normalizedTerm);
 }
 
 function capacityRoomKeyFromText(text = "") {

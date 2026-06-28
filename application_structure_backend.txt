@@ -3039,13 +3039,39 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - The internal `support_email` action still exists for state-machine
     stability, but customer-facing fallback text no longer sends the guest away
     to email for ordinary unsupported questions.
-  - Unsupported broad questions should be answered professionally as "I do not
-    currently have confirmed/verified details" and then pivot back to the
-    relevant selected-hotel or reservation topic, such as dates, room type,
-    availability, or reservation review.
+ - Unsupported broad questions should be answered professionally as "I do not
+   currently have confirmed/verified details" and then pivot back to the
+   relevant selected-hotel or reservation topic, such as dates, room type,
+   availability, or reservation review.
   - LLM-written broad unknown/Hajj fallback replies pass through a small
     sanitizer that removes support-email/contact-support sentences if they
     appear despite the prompt, falling back to the deterministic in-chat answer
     when needed.
   - This preserves the sales/reception tone while avoiding guesses, deflection,
     infinite loops, or unnecessary escalation.
+
+2026-06-28 Chatbot Room Signal And 10 Second Wait Notice
+- Reference:
+  - docs/chatbot-room-signal-and-10-second-wait-2026-06-28.md.
+- Files:
+  - aiagent/core/nlu.js
+  - aiagent/core/orchestrator.js
+  - aiagent/core/db.js
+- Marwa / Nadia root cause:
+  - Arabic triple-room variants such as "ثلاثى" were not all normalized to
+    tripleRooms.
+  - Assistant room-option lists could be misread as selected room state.
+  - Arabic "لا" decline detection was too broad and could match inside another
+    Arabic word.
+  - Long turns had typing/recovery, but no rare professional message at the
+    10 second threshold.
+- Current contract:
+  - Guest room choices and room price/availability questions update room memory
+    chronologically in Arabic and English.
+  - Assistant option-list prompts must not select a room by themselves.
+  - A conflicting later assistant quote must not override the latest explicit
+    guest room signal.
+  - Wait notices are system-marked AI messages and must not block the real final
+    answer or duplicate-save guard.
+  - Normal production turns should still target under 8 seconds; the 10 second
+    wait notice is a rare safety net.

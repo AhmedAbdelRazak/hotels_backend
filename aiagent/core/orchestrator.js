@@ -118,34 +118,34 @@ const HUMAN = {
 	betweenSendsMinMs: HUMAN_BETWEEN_SENDS_MIN_MS,
 	betweenSendsMaxMs: HUMAN_BETWEEN_SENDS_MAX_MS,
 };
-const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 5000, {
+const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 4500, {
 	min: 500,
 	max: 8000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 7800, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 7200, {
 		min: 500,
 		max: 8000,
 	})
 );
 const AI_CASUAL_REPLY_TARGET_MIN_MS = intFromEnv(
 	"AI_CASUAL_REPLY_TARGET_MIN_MS",
-	5000,
+	4200,
 	{ min: 1500, max: 8000 }
 );
 const AI_CASUAL_REPLY_TARGET_MAX_MS = Math.max(
 	AI_CASUAL_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 7800, {
+	intFromEnv("AI_CASUAL_REPLY_TARGET_MAX_MS", 7000, {
 		min: 1500,
 		max: 8000,
 	})
 );
-const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 6500, {
+const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 6000, {
 	min: 500,
 	max: 8000,
 });
-const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 5000, {
+const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 4500, {
 	min: 500,
 	max: 8000,
 });
@@ -268,6 +268,15 @@ const AI_TURN_SLOW_LOG_MS = intFromEnv("AI_TURN_SLOW_LOG_MS", 5000, {
 	min: 1000,
 	max: 60 * 1000,
 });
+const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 10000, {
+	min: 8000,
+	max: 30000,
+});
+const AI_DELAY_NOTICE_COOLDOWN_MS = intFromEnv(
+	"AI_DELAY_NOTICE_COOLDOWN_MS",
+	5 * 60 * 1000,
+	{ min: 60000, max: 30 * 60 * 1000 }
+);
 const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
 	false
@@ -1861,6 +1870,91 @@ function aiMessageClientTag(caseId, prefix = "ai") {
 		.slice(2, 10)}`;
 }
 
+function activeTurnKey(st = {}, userText = "") {
+	return `${Number(st.activeTurnGuestAt || 0)}|${String(userText || "").trim()}`;
+}
+
+function aiDelayNoticeText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return "\u0644\u062d\u0638\u0629 \u0645\u0646 \u0641\u0636\u0644\u0643\u060c \u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0628\u062f\u0642\u0629 \u062d\u062a\u0649 \u0623\u0639\u0637\u064a\u0643 \u0625\u062c\u0627\u0628\u0629 \u0635\u062d\u064a\u062d\u0629. \u0633\u0623\u0639\u0648\u062f \u0644\u0643 \u062e\u0644\u0627\u0644 \u0644\u062d\u0638\u0627\u062a.";
+	}
+	if (/spanish/i.test(lang)) {
+		return "Un momento, por favor. Estoy revisando los detalles con cuidado para darte una respuesta correcta. Vuelvo contigo en unos instantes.";
+	}
+	if (/french/i.test(lang)) {
+		return "Un instant, s'il vous plait. Je verifie les details avec soin pour vous donner une reponse correcte. Je reviens vers vous dans quelques instants.";
+	}
+	return "One moment please. I am reviewing the details carefully so I can give you the correct answer. I will be right with you.";
+}
+
+async function sendAiDelayNotice(io, sc, st, userText = "", caseId = "") {
+	const targetCaseId = caseId || String(sc?._id || sc?.id || "");
+	const latestUserText = String(userText || "").trim();
+	if (!io || !targetCaseId || !st || !latestUserText) return false;
+	if (st.activeTurnHadReply || st.interrupt) return false;
+	const turnKey = activeTurnKey(st, latestUserText);
+	if (st.delayNoticeTurnKey === turnKey) return false;
+	if (
+		Number(st.delayNoticeSentAt || 0) > 0 &&
+		now() - Number(st.delayNoticeSentAt || 0) < AI_DELAY_NOTICE_COOLDOWN_MS
+	) {
+		return false;
+	}
+	try {
+		const latestCase = (await getSupportCaseById(targetCaseId)) || sc;
+		if (
+			!latestCase ||
+			latestCase.openedBy !== "client" ||
+			latestCase.caseStatus === "closed" ||
+			latestCase.aiToRespond === false
+		) {
+			return false;
+		}
+		if (lastUserText(latestCase) !== latestUserText) return false;
+		if (hasAiAssistantReplyAfterLatestGuest(latestCase)) return false;
+		const text = aiDelayNoticeText(latestCase, st);
+		const messageData = {
+			messageBy: {
+				customerName: st.agentName || latestCase.aiResponderName || "Jannat Booking",
+				customerEmail: AI_SUPPORT_EMAIL,
+				userId: "jannat-ai-support",
+			},
+			message: text,
+			date: new Date(),
+			isAi: true,
+			isSystem: true,
+			clientAction: "ai_wait_notice",
+			clientTag: aiMessageClientTag(targetCaseId, "ai-wait"),
+		};
+		const saved = await updateSupportCaseAppendIfNoRecentAiDuplicate(
+			targetCaseId,
+			{
+				conversation: messageData,
+				aiRelated: true,
+			},
+			{
+				duplicateWindowMs: AI_MESSAGE_DEDUPE_WINDOW_MS,
+				requireLatestGuestText: latestUserText,
+			}
+		);
+		if (saved?.skipped) return false;
+		st.delayNoticeTurnKey = turnKey;
+		st.delayNoticeSentAt = now();
+		io.to(targetCaseId).emit("receiveMessage", { ...messageData, caseId: targetCaseId });
+		logStep(targetCaseId, "delay_notice.sent", {
+			waitFor: st.waitFor || "",
+			elapsedMs: now() - Number(st.activeTurnGuestAt || now()),
+		});
+		return true;
+	} catch (error) {
+		logStep(targetCaseId, "delay_notice.failed", {
+			message: error?.message || error,
+		});
+		return false;
+	}
+}
+
 function isAiQaSupportCase(sc = {}) {
 	const markerText = [
 		sc.sourceWebsite,
@@ -2630,6 +2724,41 @@ function assistantRoomQuoteContextText(message = {}) {
 	);
 }
 
+function roomTypeKeysMentionedBySections(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return [];
+	const sections = raw
+		.split(/[\n\r]+|[;,\u060c\u061b/]+|\s[-\u2013\u2014]\s/g)
+		.map((part) => part.trim())
+		.filter(Boolean);
+	const keys = new Set();
+	for (const section of sections) {
+		const key = mapRoomToKey(section);
+		if (key) keys.add(key);
+	}
+	return [...keys];
+}
+
+function assistantRoomOptionsPromptText(text = "") {
+	const raw = String(text || "");
+	if (!raw.trim()) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const mentionedKeys = roomTypeKeysMentionedBySections(raw);
+	if (mentionedKeys.length < 2) return false;
+	return (
+		generalRoomOptionsQuestionText(raw) ||
+		/\b(?:which|what)\s+(?:room|type|option)\s+(?:do\s+you\s+prefer|would\s+you\s+prefer|works\s+for\s+you)\b/i.test(
+			lower
+		) ||
+		/(?:\u0623\u064a|\u0627\u064a|\u0623\u064a\u0647|\u0627\u064a\u0647|which).{0,40}(?:\u0646\u0648\u0639|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u062e\u064a\u0627\u0631).{0,80}(?:\u062a\u0641\u0636\u0644|\u064a\u0646\u0627\u0633\u0628|\u062a\u062e\u062a\u0627\u0631)/i.test(
+			arabic
+		) ||
+		/(?:whichroom|whichoption|whatroom|prefer|choose|tfdl|takhtar|ynasb)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function roomSelectionSignalText(text = "", { assistant = false } = {}) {
 	const raw = String(text || "").trim();
 	if (!raw) return false;
@@ -2674,7 +2803,24 @@ function roomSelectionSignalText(text = "", { assistant = false } = {}) {
 		/(?:yousaid|didntyousay|didyounotsay|youtold|yourecommended|earlier|before|previously|olt|olti|oulti|kontolti)/i.test(
 			latinCompact
 		);
-	return Boolean(hasRoomOrCapacity && (directChoice || recommendation || priorReference || assistant && recommendation));
+	const priceOrAvailability =
+		/\b(?:price|prices|rate|rates|cost|how\s+much|quote|availability|available|check)\b/i.test(
+			lower
+		) ||
+		/(?:\u0633\u0639\u0631|\u0627\u0633\u0639\u0627\u0631|\u0627\u0644\u0633\u0639\u0631|\u0628\u0643\u0627\u0645|\u0643\u0627\u0645|\u062a\u0643\u0644\u0641\u0647|\u062a\u0643\u0644\u0641\u0629|\u0645\u062a\u0627\u062d|\u062a\u0648\u0641\u0631|\u0627\u0644\u062a\u0648\u0641\u0631)/i.test(
+			arabic
+		) ||
+		/(?:price|rate|cost|howmuch|quote|availability|available|bkam|bekam|kam|se3r|s3r|motah|tawafor)/i.test(
+			latinCompact
+		);
+	return Boolean(
+		hasRoomOrCapacity &&
+			(directChoice ||
+				recommendation ||
+				priorReference ||
+				priceOrAvailability ||
+				(assistant && recommendation))
+	);
 }
 
 function exploratoryRoomReferenceText(text = "") {
@@ -2701,13 +2847,22 @@ function roomKeyFromConversationRoomSignal(
 	const raw = String(text || "").trim();
 	if (!raw) return "";
 	if (reservationIdentityOrContactPayloadText(raw)) return "";
+	if (assistant && assistantRoomOptionsPromptText(raw)) return "";
+	const explicitRoomTypeKey = mapRoomToKey(raw);
+	const shortExplicitRoomChoice =
+		!assistant &&
+		Boolean(explicitRoomTypeKey) &&
+		raw.length <= 48 &&
+		!exploratoryRoomReferenceText(raw) &&
+		!generalRoomOptionsQuestionText(raw);
+	if (shortExplicitRoomChoice) return explicitRoomTypeKey;
 	const selectionSignal = roomSelectionSignalText(raw, { assistant });
 	if (!selectionSignal && !quoteContext) return "";
 	if (!quoteContext && exploratoryRoomReferenceText(raw) && !selectionSignal) return "";
 	const requestedGuestCount = requestedGuestCountFromText(raw);
 	const recommendedRoomKey = recommendedRoomTypeKeyForGuestCount(requestedGuestCount);
 	if (selectionSignal && recommendedRoomKey) return recommendedRoomKey;
-	const roomTypeKey = mapRoomToKey(raw);
+	const roomTypeKey = explicitRoomTypeKey;
 	if (roomTypeKey) return roomTypeKey;
 	return selectionSignal ? recommendedRoomKey || "" : "";
 }
@@ -2715,6 +2870,7 @@ function roomKeyFromConversationRoomSignal(
 function latestRoomSignalFromConversation(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	let latestSignal = null;
+	let latestGuestSignal = null;
 	for (let index = 0; index < conversation.length; index += 1) {
 		const message = conversation[index];
 		const messageText =
@@ -2729,7 +2885,7 @@ function latestRoomSignalFromConversation(sc = {}) {
 			quoteContext,
 		});
 		if (!roomTypeKey) continue;
-		latestSignal = {
+		const signal = {
 			roomTypeKey,
 			index,
 			source: guestMessage
@@ -2738,6 +2894,16 @@ function latestRoomSignalFromConversation(sc = {}) {
 				? "assistant_room_recommendation"
 				: "assistant_quote",
 		};
+		if (
+			assistantMessage &&
+			signal.source === "assistant_quote" &&
+			latestGuestSignal &&
+			latestGuestSignal.roomTypeKey !== signal.roomTypeKey
+		) {
+			continue;
+		}
+		latestSignal = signal;
+		if (guestMessage) latestGuestSignal = signal;
 	}
 	return latestSignal;
 }
@@ -8232,6 +8398,8 @@ function ensureState(sc, hotel) {
 			quoteSummarizedAt: 0,
 			bookingNudgePausedAt: 0,
 			progressSentAt: {},
+			delayNoticeSentAt: 0,
+			delayNoticeTurnKey: "",
 			hydratedConversationLength: 0,
 			pendingDateChange: null,
 			pendingRoomAlternative: null,
@@ -10119,12 +10287,19 @@ function quoteConfirmationText(text = "", st = {}) {
 }
 
 function declinesText(text = "") {
-	const raw = String(text || "");
-	if (/(?:\u0644\u0627|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627|\u0628\u0639\u062f\u064a\u0646)/i.test(raw)) {
-		return true;
-	}
-	return /\b(no|nope|not now|later|cancel|لا|مش دلوقتي|لاحقا|non|pas maintenant|no gracias)\b/i.test(
-		String(text || "")
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	const arabicDecline =
+		/(^|[\s\u060c,\u061b.!?\u061f])(?:\u0644\u0627|\u0644\u0627 \u0627\u0644\u0627\u0646|\u0644\u064a\u0633 \u0627\u0644\u0627\u0646|\u0645\u0634 \u0627\u0644\u0627\u0646|\u0645\u0634 \u062f\u0644\u0648\u0642\u062a\u064a|\u0644\u0627\u062d\u0642\u0627|\u0628\u0639\u062f\u064a\u0646)(?=$|[\s\u060c,\u061b.!?\u061f])/i.test(
+			arabic
+		);
+	return (
+		arabicDecline ||
+		/\b(no|nope|not now|later|cancel|non|pas maintenant|no gracias)\b/i.test(
+			lower
+		) ||
+		/(?:nope|notnow|later|cancel|nongracias|pasmaintenant)/i.test(
+			latinCompact
+		)
 	);
 }
 
@@ -16300,7 +16475,7 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 			? latestCase.conversation
 			: [];
 		const latestAiAfterGuest = conversation.some((message) => {
-			if (!isAiConversationMessage(message)) return false;
+			if (message?.isSystem || !isAiConversationMessage(message)) return false;
 			const messageAt = new Date(message.date || 0).getTime();
 			return (
 				Number.isFinite(messageAt) &&
@@ -16311,7 +16486,9 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 		const latestGuestIndex = latestGuestMessageIndex(latestCase);
 		if (
 			latestGuestIndex >= 0 &&
-			conversation.slice(latestGuestIndex + 1).some(isAiConversationMessage)
+			conversation
+				.slice(latestGuestIndex + 1)
+				.some((message) => !message?.isSystem && isAiConversationMessage(message))
 		) {
 			return false;
 		}
@@ -16428,6 +16605,7 @@ async function planTurn(io, sc) {
 	let queuedFollowupReason = "";
 	let planningTyping = false;
 	let planningTypingTimer = null;
+	let delayNoticeTimer = null;
 	let recoveryUserText = "";
 	let ownsTurn = false;
 	let deferredQuietDelayMs = null;
@@ -16529,6 +16707,22 @@ async function planTurn(io, sc) {
 				reason: "latest_guest_already_answered",
 			});
 			return;
+		}
+		if (userText) {
+			const delayNoticeInMs = Math.max(
+				250,
+				Number(st.activeTurnGuestAt || now()) + AI_DELAY_NOTICE_MS - now()
+			);
+			delayNoticeTimer = setTimeout(() => {
+				sendAiDelayNotice(io, sc, st, userText, caseId).catch((error) => {
+					logStep(caseId, "delay_notice.timer_failed", {
+						message: error?.message || error,
+					});
+				});
+			}, delayNoticeInMs);
+			if (typeof delayNoticeTimer.unref === "function") {
+				delayNoticeTimer.unref();
+			}
 		}
 		if (userText) {
 			const isReservationDetailChasePayload =
@@ -18222,7 +18416,7 @@ async function planTurn(io, sc) {
 				}
 				st.waitFor = "dates";
 				return;
-			} else if (/\b(no|nope|not now|later|cancel|لا)\b/i.test(userText)) {
+			} else if (declinesText(userText)) {
 				const msg = await write(
 					io,
 					sc,
@@ -18473,7 +18667,7 @@ async function planTurn(io, sc) {
 					fast: true,
 				});
 				return;
-			} else if (/\b(no|nope|not now|later|cancel|لا)\b/i.test(userText)) {
+			} else if (declinesText(userText)) {
 				const msg = await write(
 					io,
 					sc,
@@ -18813,7 +19007,7 @@ async function planTurn(io, sc) {
 				? latestCase.conversation
 				: [];
 			const latestAiAfterGuest = conversation.some((message) => {
-				if (!isAiConversationMessage(message)) return false;
+				if (message?.isSystem || !isAiConversationMessage(message)) return false;
 				const messageAt = new Date(message.date || 0).getTime();
 				return (
 					Number.isFinite(messageAt) &&
@@ -18847,6 +19041,9 @@ async function planTurn(io, sc) {
 		}
 		if (planningTypingTimer) {
 			clearTimeout(planningTypingTimer);
+		}
+		if (delayNoticeTimer) {
+			clearTimeout(delayNoticeTimer);
 		}
 		if (planningTyping) {
 			emitTyping(io, caseId, st2 || st, false);
