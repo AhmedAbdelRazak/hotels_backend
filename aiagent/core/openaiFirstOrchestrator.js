@@ -1758,7 +1758,7 @@ async function composeReply(sc, hotel, agentName) {
 		memoryTrace("compose:fast_fact", sc?._id, {
 			textLength: fastReply.text.length,
 		});
-		return fastReply;
+		return { ...fastReply, fast: true };
 	}
 	const bundle = await contextBundle(sc, hotel);
 	memoryTrace("compose:after_context", sc?._id, {
@@ -2127,7 +2127,7 @@ async function runTurn(io, caseId) {
 		turnStartedAt = new Date();
 		const startedMs = now();
 		const latestGuestText = cleanText(latestGuest?.message, 1200);
-		const targetReplyMs = needsGreeting
+		let targetReplyMs = needsGreeting
 			? randomBetween(1200, 2200)
 			: randomBetween(TARGET_REPLY_MIN_MS, TARGET_REPLY_MAX_MS);
 		emitTyping(io, caseId, agentName, true);
@@ -2144,6 +2144,9 @@ async function runTurn(io, caseId) {
 					COMPOSE_DEADLINE_MS,
 					"OpenAI-first reply composition"
 			  );
+		if (response.fast === true) {
+			targetReplyMs = Math.min(targetReplyMs, randomBetween(900, 1800));
+		}
 		memoryTrace("turn:after_response", caseId, {
 			textLength: response.text?.length || 0,
 			quickReplies: Array.isArray(response.quickReplies)
