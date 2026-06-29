@@ -2599,7 +2599,18 @@ function hydrateKnownSlotsFromConversation(
 	const guestMessages = [];
 	let latestGuestDateRange = null;
 	let latestConversationDateRange = null;
+	let latestGuestPartialDateRange = null;
+	let latestConversationPartialDateRange = null;
+	let latestConversationPartialDate = null;
 	let protectedLatestGuestDateRange = null;
+	const recoveredDateState = {
+		slots: {
+			checkinISO: st.slots?.checkinISO || null,
+			checkoutISO: st.slots?.checkoutISO || null,
+		},
+		dateRaw: { ...(st.dateRaw || {}) },
+		waitFor: st.waitFor || "dates",
+	};
 	const latestGuestIndex = protectLatestGuestDateChange
 		? latestGuestMessageIndex(sc)
 		: -1;
@@ -2624,6 +2635,8 @@ function hydrateKnownSlotsFromConversation(
 				messageDates.checkoutISO &&
 				!needsExplicitPastDateClarification(messageText, messageDates)
 			) {
+				mergeDateRangeIntoState(recoveredDateState, messageDates);
+				const recoveredRange = currentDateRange(recoveredDateState);
 				if (
 					index === latestGuestIndex &&
 					shouldConfirmDateRangeChange(st, messageDates)
@@ -2632,6 +2645,27 @@ function hydrateKnownSlotsFromConversation(
 				} else {
 					latestConversationDateRange = messageDates;
 					latestGuestDateRange = messageDates;
+					if (recoveredRange) {
+						latestConversationPartialDateRange = recoveredRange;
+						latestGuestPartialDateRange = recoveredRange;
+					}
+				}
+			} else if (shouldExtractDatesForMessage) {
+				const partialDate = extractSingleStayDate(messageText, recoveredDateState);
+				if (partialDate?.raw) {
+					applyPartialDateToState(recoveredDateState, partialDate);
+					latestConversationPartialDate = partialDate;
+					const recoveredRange = currentDateRange(recoveredDateState);
+					if (
+						recoveredRange &&
+						index === latestGuestIndex &&
+						shouldConfirmDateRangeChange(st, recoveredRange)
+					) {
+						protectedLatestGuestDateRange = recoveredRange;
+					} else if (recoveredRange) {
+						latestConversationPartialDateRange = recoveredRange;
+						latestGuestPartialDateRange = recoveredRange;
+					}
 				}
 			}
 			if (needsNationalityRecovery) {
@@ -2650,8 +2684,14 @@ function hydrateKnownSlotsFromConversation(
 		: guestText;
 	if (latestGuestDateRange) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
+	} else if (latestGuestPartialDateRange) {
+		mergeDateRangeIntoState(st, latestGuestPartialDateRange);
 	} else if (latestConversationDateRange) {
 		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
+	} else if (latestConversationPartialDateRange) {
+		mergeDateRangeIntoState(st, latestConversationPartialDateRange, { onlyIfMissing: true });
+	} else if (latestConversationPartialDate && !currentDateRange(st)) {
+		applyPartialDateToState(st, latestConversationPartialDate);
 	}
 	markHydrationStage("date_merge");
 	if (protectedLatestGuestDateRange) {
@@ -4036,17 +4076,39 @@ function selectedHotelPolicyQuestionText(text = "") {
 	);
 }
 
+function concreteStayDateMentionText(text = "") {
+	const range = extractDateRange(text);
+	if (range?.checkinISO || range?.checkoutISO) return true;
+	return Boolean(extractSingleStayDate(text, { waitFor: "dates" })?.raw);
+}
+
+function concreteStayDateProgressText(text = "") {
+	if (!concreteStayDateMentionText(text)) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return !(
+		/\b(?:time|hour|hours|early|late|policy|policies|rule|rules|allowed|allow)\b/i.test(
+			lower
+		) ||
+		/(?:\u0648\u0642\u062a|\u0633\u0627\u0639\u0629|\u0633\u0627\u0639\u0647|\u0645\u062a\u0649|\u0633\u064a\u0627\u0633\u0629|\u0633\u064a\u0627\u0633\u0647|\u0645\u0628\u0643\u0631|\u0645\u062a\u0623\u062e\u0631|\u0645\u062a\u0627\u062e\u0631)/i.test(
+			arabic
+		) ||
+		/(?:time|hour|early|late|policy|rules|allowed|waqt|saa|saah|mata|siyasah|mobaker|motakher)/i.test(
+			latinCompact
+		)
+	);
+}
+
 function selectedHotelFactQuestionText(text = "") {
-	return (
+	const nonDateFact =
 		selectedHotelMealsQuestionText(text) ||
-		selectedHotelPolicyQuestionText(text) ||
 		selectedHotelNusukQuestionText(text) ||
 		selectedHotelBusQuestionText(text) ||
 		selectedHotelDistanceQuestionText(text) ||
 		selectedHotelCoordinatesQuestionText(text) ||
 		selectedHotelAddressQuestionText(text) ||
-		selectedHotelLocalAreaQuestionText(text)
-	);
+		selectedHotelLocalAreaQuestionText(text);
+	if (concreteStayDateProgressText(text) && !nonDateFact) return false;
+	return nonDateFact || selectedHotelPolicyQuestionText(text);
 }
 
 function selectedHotelMealsQuestionText(text = "") {
@@ -4858,12 +4920,120 @@ function adjustCheckoutAfterCheckin(checkoutISO = "", checkinISO = "") {
 	return checkout.toISOString().slice(0, 10);
 }
 
+function normalizedShortStayYear(year = "") {
+	const raw = String(year || "").trim();
+	if (!raw) return null;
+	if (/^\d{2}$/.test(raw)) return String(2000 + Number(raw));
+	return raw;
+}
+
+function stayDateRoleFromText(text = "", st = {}, { inferFromState = true } = {}) {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const hasCheckout =
+		/\b(?:checkout|check\s*-?\s*out|departure|depart|leav(?:e|ing)|exit)\b/i.test(
+			normalized
+		) ||
+		/(?:\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u0627\u0644\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c)/i.test(
+			normalized
+		);
+	const hasCheckin =
+		/\b(?:arrival|arrive|check\s*-?\s*in|checkin|enter|entry)\b/i.test(
+			normalized
+		) ||
+		/(?:\u0648\u0635\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u0627\u0644\u062f\u062e\u0648\u0644)/i.test(
+			normalized
+		);
+	if (hasCheckout && !hasCheckin) return "checkout";
+	if (hasCheckin && !hasCheckout) return "checkin";
+	if (inferFromState && st?.slots?.checkinISO && !st?.slots?.checkoutISO) {
+		return "checkout";
+	}
+	return "checkin";
+}
+
+function numericStayDateCandidates(first = "", second = "", year = null) {
+	const left = Number(first);
+	const right = Number(second);
+	const normalizedYear = normalizedShortStayYear(year);
+	const candidates = [];
+	const pushCandidate = (day, month) => {
+		const iso = buildFutureIsoDateFromParts(day, month, normalizedYear);
+		if (iso && !candidates.includes(iso)) candidates.push(iso);
+	};
+	pushCandidate(left, right);
+	if (left <= 12 && right <= 31) pushCandidate(right, left);
+	return candidates;
+}
+
+function chooseNumericStayDateISO(first = "", second = "", year = null, role = "checkin", st = {}) {
+	const candidates = numericStayDateCandidates(first, second, year);
+	if (!candidates.length) return null;
+	const checkinISO = st?.slots?.checkinISO || "";
+	if (role === "checkout" && checkinISO) {
+		return candidates
+			.map((iso) => adjustCheckoutAfterCheckin(iso, checkinISO))
+			.filter(Boolean)
+			.sort((a, b) => {
+				const aTime = new Date(`${a}T00:00:00Z`).getTime();
+				const bTime = new Date(`${b}T00:00:00Z`).getTime();
+				return aTime - bTime;
+			})[0];
+	}
+	return candidates.sort((a, b) => {
+		const aTime = new Date(`${a}T00:00:00Z`).getTime();
+		const bTime = new Date(`${b}T00:00:00Z`).getTime();
+		return aTime - bTime;
+	})[0];
+}
+
+function extractSingleNumericStayDate(text = "", st = {}) {
+	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const explicitRole = stayDateRoleFromText(normalized, st, { inferFromState: false });
+	const hasExplicitDateRole =
+		explicitRole === "checkout" ||
+		/\b(?:arrival|arrive|check\s*-?\s*in|checkin|date|departure|checkout|check\s*-?\s*out)\b/i.test(
+			normalized
+		) ||
+		/(?:\u062a\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u0627\u0644\u062f\u062e\u0648\u0644|\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u0627\u0644\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c)/i.test(
+			normalized
+		);
+	const waitingForDate =
+		st?.waitFor === "dates" || Boolean(st?.slots?.checkinISO && !st?.slots?.checkoutISO);
+	if (!hasExplicitDateRole && !waitingForDate) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	const match = normalized.match(
+		/(?:\b(?:arrival|arrive|check\s*-?\s*in|checkin|date|departure|checkout|check\s*-?\s*out)\b|(?:\u062a\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u0627\u0644\u062f\u062e\u0648\u0644|\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u0627\u0644\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c))?\s*(\d{1,2})\s*[\/.-]\s*(\d{1,2})(?:\s*[\/.-]\s*((?:20)?\d{2}))?/
+	);
+	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
+	const role = stayDateRoleFromText(match[0] || normalized, st);
+	const iso = chooseNumericStayDateISO(match[1], match[2], match[3] || null, role, st);
+	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
+	const rawValue = match[3]
+		? `${match[1]}/${match[2]}/${match[3]}`
+		: `${match[1]}/${match[2]}`;
+	if (role === "checkout") {
+		return {
+			checkinISO: null,
+			checkoutISO: iso,
+			raw: { checkout: rawValue, calendar: "gregorian" },
+		};
+	}
+	return {
+		checkinISO: iso,
+		checkoutISO: null,
+		raw: { checkin: rawValue, calendar: "gregorian" },
+	};
+}
+
 function extractSingleStayDate(text = "", st = {}) {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const numericDate = extractSingleNumericStayDate(normalized, st);
+	if (numericDate?.raw) return numericDate;
 	const monthToken =
 		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
 	const singleDateRegex = new RegExp(
-		`(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631\\u0629)?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
+		`(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647))?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
 		"i"
 	);
 	const match = normalized.match(singleDateRegex);
@@ -4876,11 +5046,7 @@ function extractSingleStayDate(text = "", st = {}) {
 	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
 	const matchedText = String(match[0] || "");
 	const isCheckout =
-		/\b(?:checkout|check\s*-?out|departure)\b/i.test(matchedText) ||
-		/(?:\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629)/i.test(
-			matchedText
-		) ||
-		(Boolean(st?.slots?.checkinISO) && !st?.slots?.checkoutISO);
+		stayDateRoleFromText(matchedText, st) === "checkout";
 	if (isCheckout) {
 		return {
 			checkinISO: null,
@@ -6930,6 +7096,7 @@ async function handleDeterministicStayProgress(
 	const hasFreshCompleteDates = Boolean(
 		freshDates?.checkinISO && freshDates?.checkoutISO
 	);
+	let hasFreshPartialDate = false;
 	if (hasFreshCompleteDates) {
 		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, freshDates, {
 			source,
@@ -6942,6 +7109,26 @@ async function handleDeterministicStayProgress(
 				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 			});
 			return true;
+		}
+	} else {
+		const freshSingleDate = extractSingleStayDate(latestText, st);
+		if (freshSingleDate?.raw) {
+			hasFreshPartialDate = true;
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				freshSingleDate,
+				{ source: `${source}_single_date`, userText: latestText }
+			);
+			if (dateMerge.prompted) return true;
+			if (dateMerge.invalid) {
+				await askForMissingStayDates(io, sc, st, {
+					fast: true,
+					targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+				});
+				return true;
+			}
 		}
 	}
 
@@ -6962,7 +7149,17 @@ async function handleDeterministicStayProgress(
 	const bookingWait =
 		["dates", "room", "clarify", "intentConfirm"].includes(st.waitFor) ||
 		isNewReservationFlowActive(st);
-	if (!hasCompleteDates || !bookingWait) return false;
+	if (!hasCompleteDates) {
+		if (hasFreshPartialDate && bookingWait) {
+			await askForMissingStayDates(io, sc, st, {
+				fast: true,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			return true;
+		}
+		return false;
+	}
+	if (!bookingWait) return false;
 
 	if (!st.slots.roomTypeKey) {
 		const guestCountForRoomFit = requestedGuestCountFromText(latestText);
@@ -6988,6 +7185,7 @@ async function handleDeterministicStayProgress(
 		}
 		if (
 			hasFreshCompleteDates ||
+			hasFreshPartialDate ||
 			forceKnownDates ||
 			asksPriceOrAvailability ||
 			st.waitFor === "room"
@@ -7014,6 +7212,7 @@ async function handleDeterministicStayProgress(
 
 	if (
 		hasFreshCompleteDates ||
+		hasFreshPartialDate ||
 		forceKnownDates ||
 		asksPriceOrAvailability ||
 		st.waitFor === "dates"
