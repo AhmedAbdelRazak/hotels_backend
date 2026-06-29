@@ -109,3 +109,11 @@ Local production-like QA passed on 2026-06-28 with `AI_AGENT_ENGINE=legacy`, `AI
 - `language_switch_mid_flow`: switched to Arabic, answered in Arabic, and kept booking quick replies available.
 
 Go-live quality note: English and Arabic are the current production target and tested at 9+/10 for the Zad Ajyad booking flow. Spanish, French, Urdu, Hindi, Indonesian, and Malay use the same routing and deterministic guards, but should be treated as future polish at roughly 7.5-8.5/10 depending on how explicit the guest is.
+
+## Public Widget And Admin Monitor Follow-Up - 2026-06-29
+
+- Guest-closed public widget cases must set `caseStatus: "closed"`, `closedBy: "client"`, `aiToRespond: false`, and `aiHandoffReason: "client_closed_case"`.
+- The public SSR widget should stop client polling, typing emits, and socket listeners once `conversationEnded` is true. The rating UI may remain visible, but it should not continue live polling a closed case.
+- The admin customer-service history view should not render historical closed chats as live AI waits. Closed/history cases may show historical reply metrics, but the monitor status must be closed/paused and current waiting time should be blank.
+- Mobile chat links are rendered as visible link chips in the public SSR widget so reservation confirmation and payment links are obvious on phone screens.
+- The public SSR widget may show a short local "agent is typing" indicator after guest send. This is cosmetic only and must not create extra backend or OpenAI requests.
