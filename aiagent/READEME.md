@@ -17,6 +17,8 @@
 - `../docs/chatbot-admin-monitor-and-latency-2026-06-23.md` documents the
   admin support-case AI monitor, repeat-price/details fast paths, shorter
   chatbot timeouts, and the optional-email flow reduction.
+- `../docs/chatbot-multi-room-reservations-2026-06-29.md` documents multi-room
+  booking support, including different room types and repeated same-type rooms.
 
 ## Current Production Contract - 2026-06-06
 

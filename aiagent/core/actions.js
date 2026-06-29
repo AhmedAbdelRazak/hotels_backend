@@ -241,6 +241,43 @@ function buildPickedRoomsType({ room, dailyRows, count = 1 }) {
 	return Array.from({ length: Math.max(1, Number(count)) }, () => oneEntry());
 }
 
+function roomSelectionCount(value, fallback = 1) {
+	const number = Number(String(value ?? "").replace(/[^\d.-]/g, ""));
+	if (!Number.isFinite(number)) return fallback;
+	return Math.min(8, Math.max(1, Math.floor(number)));
+}
+
+function buildPickedRoomsTypeFromQuote({ quoteData = {}, room = null, count = 1 }) {
+	const quoteRooms = Array.isArray(quoteData.rooms) ? quoteData.rooms : [];
+	if (quoteRooms.length) {
+		return quoteRooms.flatMap((line = {}) => {
+			const lineQuote = line.quote || {};
+			const lineRoom = line.room || lineQuote.room || null;
+			const lineRows = Array.isArray(line.pricingByDay)
+				? line.pricingByDay
+				: Array.isArray(lineQuote.pricingByDay)
+				? lineQuote.pricingByDay
+				: [];
+			if (!lineRoom || !lineRows.length) return [];
+			return buildPickedRoomsType({
+				room: lineRoom,
+				dailyRows: lineRows,
+				count: roomSelectionCount(line.count, 1),
+			});
+		});
+	}
+	const dailyRows = Array.isArray(quoteData?.rows)
+		? quoteData.rows
+		: Array.isArray(quoteData?.pricingByDay)
+		? quoteData.pricingByDay
+		: [];
+	return buildPickedRoomsType({
+		room,
+		dailyRows,
+		count,
+	});
+}
+
 function sumPickedRooms(picked) {
 	let totalWith = 0;
 	let totalRoot = 0;
@@ -1026,6 +1063,19 @@ function aiReservationFingerprint({ caseId, hotel, slots, quoteData, room, guest
 		String(slots?.checkinISO || ""),
 		String(slots?.checkoutISO || ""),
 		String(slots?.roomTypeKey || room?.roomType || room?._id || ""),
+		String(
+			quoteData?.selectionKey ||
+				(Array.isArray(quoteData?.roomSelections)
+					? quoteData.roomSelections
+							.map((selection) =>
+								[
+									selection?.roomTypeKey || selection?.roomType || "",
+									selection?.count || 1,
+								].join(":")
+							)
+							.join("+")
+					: "")
+		),
 		String(guest?.name || slots?.fullName || slots?.name || ""),
 		String(guest?.phone || slots?.phone || ""),
 		String(guest?.nationality || slots?.nationality || ""),
@@ -1170,12 +1220,13 @@ async function createReservationForCase({
 	quoteData,
 	room,
 }) {
+	const hasRoomQuoteLines = Array.isArray(quoteData?.rooms) && quoteData.rooms.length > 0;
 	const dailyRows = Array.isArray(quoteData?.rows)
 		? quoteData.rows
 		: Array.isArray(quoteData?.pricingByDay)
 		? quoteData.pricingByDay
 		: [];
-	if (!dailyRows.length) {
+	if (!hasRoomQuoteLines && !dailyRows.length) {
 		throw new Error("AI reservation quote is missing daily pricing rows.");
 	}
 	const guest = validateRequiredGuestDetails(slots);
@@ -1218,12 +1269,20 @@ async function createReservationForCase({
 		() => uniqueConfirmation()
 	);
 
-	const pickedRoomsType = buildPickedRoomsType({
+	const pickedRoomsType = buildPickedRoomsTypeFromQuote({
+		quoteData,
 		room,
 		dailyRows,
 		count: guest.rooms,
 	});
+	if (!pickedRoomsType.length) {
+		throw new Error("AI reservation quote is missing room pricing rows.");
+	}
 	const totals = sumPickedRooms(pickedRoomsType);
+	const totalRooms = pickedRoomsType.reduce(
+		(total, row) => total + Math.max(1, Number(row.count || 1)),
+		0
+	);
 
 	const reservationPayload = {
 		hotelId: hotel._id,
@@ -1235,7 +1294,7 @@ async function createReservationForCase({
 		checkout_date: slots.checkoutISO,
 		days_of_residence: quoteData.nights,
 
-		total_rooms: guest.rooms,
+		total_rooms: totalRooms,
 		total_guests: guest.adults + guest.children,
 		adults: guest.adults,
 		children: guest.children,
@@ -1491,7 +1550,7 @@ async function pushReservationLinks(io, caseId, _st, payload = {}) {
 	);
 }
 
-module.exports = {
+const exportedActions = {
 	createReservationForCase,
 	updateReservationDatesForCase,
 	getReservationCancellationPolicyForCase,
@@ -1499,3 +1558,12 @@ module.exports = {
 	postReservationLinks,
 	pushReservationLinks,
 };
+if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
+	exportedActions.__test = {
+		buildPickedRoomsType,
+		buildPickedRoomsTypeFromQuote,
+		sumPickedRooms,
+	};
+}
+
+module.exports = exportedActions;

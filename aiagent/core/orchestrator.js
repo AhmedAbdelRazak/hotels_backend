@@ -729,6 +729,9 @@ function localizedHotelName(sc = {}, st = {}) {
 }
 
 function localizedRoomName(sc = {}, st = {}, quote = {}) {
+	if (quoteHasMultipleRoomLines(quote)) {
+		return localizedRoomSelectionSummary(sc, st, quote);
+	}
 	const lang = languageOf(sc, st);
 	const room = quote?.room || {};
 	const roomType = room.roomType || st.slots?.roomTypeKey || "";
@@ -749,6 +752,327 @@ function localizedRoomName(sc = {}, st = {}, quote = {}) {
 		room.roomType ||
 		roomTypeLabel(st.slots?.roomTypeKey)
 	);
+}
+
+const ROOM_TYPE_KEYS = [
+	"singleRooms",
+	"doubleRooms",
+	"tripleRooms",
+	"quadRooms",
+	"familyRooms",
+];
+
+const ROOM_SELECTION_DETECTORS = [
+	{
+		key: "singleRooms",
+		latin: /\b(?:single|individual|one\s+bed|1\s+bed|habitacion\s+individual|chambre\s+simple)\b/i,
+		arabic: /(?:\u0641\u0631\u062f\u064a|\u0641\u0631\u062f\u064a\u0629|\u0633\u0646\u062c\u0644)/i,
+	},
+	{
+		key: "doubleRooms",
+		latin: /\b(?:double|twin|standard|king|queen|doble|chambre\s+double)\b/i,
+		arabic: /(?:\u0645\u0632\u062f\u0648\u062c|\u0632\u0648\u062c\u064a|\u0632\u0648\u062c\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|\u062b\u0646\u0627\u0626\u064a\u0629|\u062f\u0628\u0644)/i,
+	},
+	{
+		key: "tripleRooms",
+		latin: /\b(?:triple|three\s+bed|3\s+bed|habitacion\s+triple|chambre\s+triple)\b/i,
+		arabic: /(?:\u062b\u0644\u0627\u062b|\u062b\u0644\u0627\u062b\u064a|\u062b\u0644\u0627\u062b\u064a\u0629|\u062a\u0644\u0627\u062a|\u062a\u0644\u0627\u062a\u064a|\u062a\u0644\u0627\u062a\u064a\u0629)/i,
+	},
+	{
+		key: "quadRooms",
+		latin: /\b(?:quad|quadruple|four\s+bed|4\s+bed|cuadruple|chambre\s+quadruple)\b/i,
+		arabic: /(?:\u0631\u0628\u0627\u0639|\u0631\u0628\u0627\u0639\u064a|\u0631\u0628\u0627\u0639\u064a\u0629)/i,
+	},
+	{
+		key: "familyRooms",
+		latin: /\b(?:family|quintuple|five\s+bed|5\s+bed|khomasy|khomasi|khamasy|khamasi)\b/i,
+		arabic: /(?:\u0639\u0627\u0626\u0644\u064a|\u0639\u0627\u0626\u0644\u064a\u0629|\u062e\u0645\u0627\u0633|\u062e\u0645\u0627\u0633\u064a|\u062e\u0645\u0627\u0633\u064a\u0629)/i,
+	},
+];
+
+function roomSelectionCount(value, fallback = 1) {
+	const number = Number(digitsToEnglish(String(value ?? "")).replace(/[^\d.-]/g, ""));
+	if (!Number.isFinite(number)) return fallback;
+	return Math.min(8, Math.max(1, Math.floor(number)));
+}
+
+function roomTypeDetectorIndex(text = "", key = "") {
+	const detector = ROOM_SELECTION_DETECTORS.find((item) => item.key === key);
+	if (!detector) return -1;
+	const value = String(text || "");
+	const latinMatch = value.match(detector.latin);
+	const arabicMatch = value.match(detector.arabic);
+	const indexes = [latinMatch?.index, arabicMatch?.index].filter((index) =>
+		Number.isFinite(index)
+	);
+	return indexes.length ? Math.min(...indexes) : -1;
+}
+
+function roomTypeKeyFromSelectionSegment(text = "") {
+	const direct = mapRoomToKey(text);
+	if (direct) return direct;
+	const detector = ROOM_SELECTION_DETECTORS.find(
+		(item) => item.latin.test(String(text || "")) || item.arabic.test(String(text || ""))
+	);
+	return detector?.key || "";
+}
+
+function splitRoomSelectionSections(text = "") {
+	return String(text || "")
+		.replace(/\r/g, "\n")
+		.replace(/\s+(?:and|plus|with|&|\+)\s+/gi, "\n")
+		.replace(
+			/\s+\u0648(?=(?:\u0627\u0644)?(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0645\u0632\u062f\u0648\u062c|\u0632\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626|\u062b\u0644\u0627\u062b|\u062a\u0644\u0627\u062a|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644))/g,
+			"\n"
+		)
+		.split(/[\n,;\u060c\u061b/]+/)
+		.map((part) => part.trim())
+		.filter(Boolean);
+}
+
+function roomCountFromSelectionSegment(segment = "", key = "") {
+	const raw = String(segment || "");
+	const normalized = digitsToEnglish(normalizeNumberWordsForParsing(raw)).toLowerCase();
+	const compact = normalized.replace(/\s+/g, " ");
+	const ar = digitsToEnglish(normalizeControlText(raw).arabic);
+	const xCount =
+		compact.match(/(?:\bx|times|\*)\s*([2-8])\b/i) ||
+		compact.match(/\b([2-8])\s*(?:x|times)\b/i);
+	if (xCount) return roomSelectionCount(xCount[1], 1);
+	const explicitRoomCount =
+		compact.match(/\b([2-8])\s*(?:rooms?|room)\b/i) ||
+		compact.match(/\b(?:rooms?|room)\s*(?:count|qty|quantity)?\s*[:#-]?\s*([2-8])\b/i);
+	if (explicitRoomCount) return roomSelectionCount(explicitRoomCount[1], 1);
+	const keyedEnglishCount =
+		compact.match(/\b([2-8])\s+(?:single|double|triple|quad|quadruple|family|quintuple)\s+rooms?\b/i) ||
+		compact.match(/\b(?:single|double|triple|quad|quadruple|family|quintuple)\s+rooms?\s+([2-8])\b/i);
+	if (keyedEnglishCount) return roomSelectionCount(keyedEnglishCount[1], 1);
+	const explicitArabicRoomCount =
+		ar.match(/([2-8])\s*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629)/) ||
+		ar.match(/(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629)\s*([2-8])/);
+	if (explicitArabicRoomCount) return roomSelectionCount(explicitArabicRoomCount[1], 1);
+	if (/(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u063a\u0631\u0641\u062a\u0627\u0646|\u0627\u0648\u0636\u062a\u064a\u0646|\u0627\u0648\u0636\u062a\u0627\u0646)/.test(ar)) {
+		return 2;
+	}
+	if (
+		key === "doubleRooms" &&
+		/(?:\u0645\u0632\u062f\u0648\u062c\u062a\u064a\u0646|\u0645\u0632\u062f\u0648\u062c\u062a\u0627\u0646|\u0632\u0648\u062c\u064a\u062a\u064a\u0646|\u062b\u0646\u0627\u0626\u064a\u062a\u064a\u0646)/.test(ar)
+	) {
+		return 2;
+	}
+	return 1;
+}
+
+function mergeRoomSelections(selections = []) {
+	const merged = new Map();
+	for (const selection of Array.isArray(selections) ? selections : []) {
+		const roomTypeKey = String(selection?.roomTypeKey || selection?.roomType || "").trim();
+		if (!ROOM_TYPE_KEYS.includes(roomTypeKey)) continue;
+		const count = roomSelectionCount(selection?.count, 1);
+		const current = merged.get(roomTypeKey) || { roomTypeKey, count: 0 };
+		current.count += count;
+		merged.set(roomTypeKey, current);
+	}
+	return [...merged.values()].map((selection) => ({
+		roomTypeKey: selection.roomTypeKey,
+		count: roomSelectionCount(selection.count, 1),
+	}));
+}
+
+function roomSelectionsOnlyKey(selections = []) {
+	return mergeRoomSelections(selections)
+		.map((selection) => `${selection.roomTypeKey}:${selection.count}`)
+		.join("+");
+}
+
+function extractRoomSelectionsFromText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return [];
+	const sections = splitRoomSelectionSections(raw);
+	const found = [];
+	const addSelection = (roomTypeKey, segment, index = 0) => {
+		if (!ROOM_TYPE_KEYS.includes(roomTypeKey)) return;
+		found.push({
+			roomTypeKey,
+			count: roomCountFromSelectionSegment(segment, roomTypeKey),
+			index: Number.isFinite(index) ? index : found.length,
+		});
+	};
+	for (const section of sections) {
+		const roomTypeKey = roomTypeKeyFromSelectionSegment(section);
+		if (!roomTypeKey) continue;
+		addSelection(roomTypeKey, section, raw.indexOf(section));
+	}
+	for (const detector of ROOM_SELECTION_DETECTORS) {
+		if (found.some((selection) => selection.roomTypeKey === detector.key)) {
+			continue;
+		}
+		const index = roomTypeDetectorIndex(raw, detector.key);
+		if (index >= 0) addSelection(detector.key, raw, index);
+	}
+	return mergeRoomSelections(found.sort((left, right) => left.index - right.index));
+}
+
+function roomSelectionCaptureAllowed(text = "", st = {}, selections = []) {
+	if (!selections.length) return false;
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const shortExplicit =
+		raw.length <= 96 &&
+		!/[?]/.test(raw) &&
+		!generalRoomOptionsQuestionText(raw) &&
+		!selectedHotelRoomQuestionText(raw);
+	const countedExplicit =
+		totalRoomCountFromSelections(selections) > 1 &&
+		raw.length <= 96 &&
+		!/[?]/.test(raw) &&
+		!generalRoomOptionsQuestionText(raw);
+	if (st.waitFor === "room" || st.waitFor === "dates") return true;
+	if (selections.length > 1 && shortExplicit) return true;
+	return Boolean(roomSelectionSignalText(raw) || shortExplicit || countedExplicit);
+}
+
+function latestTextHasBookableRoomSelection(text = "", st = {}) {
+	const selections = extractRoomSelectionsFromText(text);
+	return roomSelectionCaptureAllowed(text, st, selections);
+}
+
+function applyRoomSelections(st = {}, selections = [], { source = "" } = {}) {
+	const normalized = mergeRoomSelections(selections);
+	if (!normalized.length) return false;
+	const previousKey = roomSelectionsOnlyKey(st.slots?.roomSelections || []);
+	const nextKey = roomSelectionsOnlyKey(normalized);
+	if (previousKey === nextKey && st.slots?.roomTypeKey === normalized[0].roomTypeKey) {
+		return false;
+	}
+	st.slots = st.slots || {};
+	st.slots.roomSelections = normalized;
+	st.slots.roomTypeKey = normalized[0].roomTypeKey;
+	st.slots.rooms = normalized.reduce((total, selection) => total + selection.count, 0);
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	st.pendingRoomAlternative = null;
+	st.pendingRoomCombination = null;
+	if (source) st.slots.roomSelectionsSource = source;
+	return true;
+}
+
+function applyRoomSelectionsFromText(sc = {}, st = {}, text = "", { source = "" } = {}) {
+	const selections = extractRoomSelectionsFromText(text);
+	if (!roomSelectionCaptureAllowed(text, st, selections)) return false;
+	const changed = applyRoomSelections(st, selections, { source });
+	if (changed) {
+		logStep(String(sc._id || ""), "slots.room_selections_changed", {
+			source,
+			selections,
+		});
+	}
+	return changed;
+}
+
+function setSingleRoomSelection(st = {}, roomTypeKey = "", { count = 1, source = "" } = {}) {
+	if (!ROOM_TYPE_KEYS.includes(roomTypeKey)) return false;
+	return applyRoomSelections(st, [{ roomTypeKey, count }], { source });
+}
+
+function roomSelectionsFromSlots(st = {}) {
+	const slotSelections = mergeRoomSelections(st.slots?.roomSelections || []);
+	if (
+		slotSelections.length &&
+		(!st.slots?.roomTypeKey || slotSelections[0].roomTypeKey === st.slots.roomTypeKey)
+	) {
+		return slotSelections;
+	}
+	if (!st.slots?.roomTypeKey) return [];
+	return mergeRoomSelections([
+		{ roomTypeKey: st.slots.roomTypeKey, count: st.slots.rooms || 1 },
+	]);
+}
+
+function totalRoomCountFromSelections(selections = []) {
+	return mergeRoomSelections(selections).reduce(
+		(total, selection) => total + selection.count,
+		0
+	);
+}
+
+function quoteHasMultipleRoomLines(quote = {}) {
+	const lines = Array.isArray(quote.roomSelections) ? quote.roomSelections : [];
+	return lines.length > 1 || lines.some((line) => Number(line?.count || 1) > 1);
+}
+
+function localizedRoomLabelFromType(sc = {}, st = {}, roomTypeKey = "", room = {}) {
+	const lang = languageOf(sc, st);
+	const hotelRoom = Array.isArray(st.hotel?.roomCountDetails)
+		? st.hotel.roomCountDetails.find((item) => item?.roomType === roomTypeKey)
+		: null;
+	const other = String(
+		room?.displayName_OtherLanguage ||
+			room?.displayNameOther ||
+			hotelRoom?.displayName_OtherLanguage ||
+			hotelRoom?.displayNameOther ||
+			""
+	).trim();
+	if (/arabic/i.test(lang) && other && hasArabicScript(other)) return other;
+	return (
+		room?.displayName ||
+		hotelRoom?.displayName ||
+		room?.roomType ||
+		localizedRoomTypeLabel(roomTypeKey, lang)
+	);
+}
+
+function localizedRoomCountLabel(count = 1, lang = "English") {
+	const number = localizedNumber(count, lang);
+	if (/arabic/i.test(lang)) {
+		if (count === 1) return "\u063a\u0631\u0641\u0629 \u0648\u0627\u062d\u062f\u0629";
+		if (count === 2) return "\u063a\u0631\u0641\u062a\u0627\u0646";
+		return `${number} \u063a\u0631\u0641`;
+	}
+	return `${number} room${count === 1 ? "" : "s"}`;
+}
+
+function localizedRoomSelectionLines(sc = {}, st = {}, quote = {}) {
+	const lang = languageOf(sc, st);
+	const rooms = Array.isArray(quote.rooms) ? quote.rooms : [];
+	const selections = mergeRoomSelections(
+		Array.isArray(quote.roomSelections) && quote.roomSelections.length
+			? quote.roomSelections
+			: roomSelectionsFromSlots(st)
+	);
+	return selections.map((selection) => {
+		const lineQuote =
+			rooms.find((item) => item.roomTypeKey === selection.roomTypeKey) || {};
+		const label = localizedRoomLabelFromType(
+			sc,
+			st,
+			selection.roomTypeKey,
+			lineQuote.room || lineQuote.quote?.room || {}
+		);
+		const count = roomSelectionCount(selection.count, 1);
+		const total =
+			Number(lineQuote.totals?.totalPriceWithCommission || 0) * count ||
+			Number(lineQuote.quote?.totals?.totalPriceWithCommission || 0) * count ||
+			0;
+		const totalText = total ? localizedMoney(Number(total.toFixed(2)), quote.currency, lang) : "";
+		const prefix = /arabic/i.test(lang)
+			? quoteHasMultipleRoomLines(quote)
+				? `- ${localizedRoomCountLabel(count, lang)} \u0645\u0646 \u0646\u0648\u0639 ${label}`
+				: `${localizedRoomCountLabel(count, lang)} \u0645\u0646 \u0646\u0648\u0639 ${label}`
+			: quoteHasMultipleRoomLines(quote)
+			? `- ${localizedNumber(count, lang)} x ${label}`
+			: `${localizedNumber(count, lang)} x ${label}`;
+		return totalText ? `${prefix}: ${totalText}` : prefix;
+	});
+}
+
+function localizedRoomSelectionSummary(sc = {}, st = {}, quote = {}) {
+	const lines = localizedRoomSelectionLines(sc, st, quote);
+	if (!lines.length) return roomTypeLabel(st.slots?.roomTypeKey);
+	return lines
+		.map((line) => String(line || "").replace(/^- /, ""))
+		.join(" + ");
 }
 
 function localizedCurrencyLabel(currency = "SAR", lang = "English") {
@@ -2969,6 +3293,10 @@ function assistantRoomQuoteContextText(message = {}) {
 function roomTypeKeysMentionedBySections(text = "") {
 	const raw = String(text || "");
 	if (!raw.trim()) return [];
+	const selectionKeys = extractRoomSelectionsFromText(raw).map(
+		(selection) => selection.roomTypeKey
+	);
+	if (selectionKeys.length > 1) return [...new Set(selectionKeys)];
 	const sections = raw
 		.split(/[\n\r]+|[;,\u060c\u061b/]+|\s[-\u2013\u2014]\s/g)
 		.map((part) => part.trim())
@@ -3233,17 +3561,33 @@ function applyLatestRoomSignalFromConversation(
 	st = {},
 	{ source = "conversation_room_signal" } = {}
 ) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const message = conversation[index];
+		if (!isGuestConversationMessage(message) || message?.isSystem) continue;
+		const messageText =
+			String(message?.message || "").trim() || conversationEntryContextText(message);
+		if (!messageText || obviousReservationIdentityOrContactPayloadText(messageText)) {
+			continue;
+		}
+		const selections = extractRoomSelectionsFromText(messageText);
+		if (!roomSelectionCaptureAllowed(messageText, st, selections)) continue;
+		const changed = applyRoomSelections(st, selections, { source });
+		if (changed) {
+			logStep(String(sc._id || ""), "slots.room_selections_from_conversation", {
+				source,
+				signalIndex: index,
+				selections,
+			});
+		}
+		return changed;
+	}
 	const signal = latestRoomSignalFromConversation(sc, st);
 	if (!signal?.roomTypeKey) return false;
 	st.slots = st.slots || {};
 	if (st.slots.roomTypeKey === signal.roomTypeKey) return false;
 	const previousRoomTypeKey = st.slots.roomTypeKey || null;
-	st.slots.roomTypeKey = signal.roomTypeKey;
-	st.quote = null;
-	st.quoteSummarizedAt = 0;
-	st.reviewSent = false;
-	st.pendingRoomAlternative = null;
-	st.pendingRoomCombination = null;
+	setSingleRoomSelection(st, signal.roomTypeKey, { source });
 	logStep(String(sc._id || ""), "slots.room_changed_from_conversation", {
 		previousRoomTypeKey,
 		roomTypeKey: signal.roomTypeKey,
@@ -3344,12 +3688,7 @@ function recoverBookingStageFromConversation(sc = {}, st = {}) {
 	}
 	if (stage === "proceed" && st.hotel && quoteKeyForSlots(st)) {
 		if (!st.quote || st.quote.key !== quoteKeyForSlots(st)) {
-			const quote = safePriceRoomForStay(
-				st.hotel,
-				{ roomType: st.slots.roomTypeKey },
-				st.slots.checkinISO,
-				st.slots.checkoutISO
-			);
+			const quote = safePriceRoomSelectionForStay(st);
 			st.quote = { key: quoteKeyForSlots(st), at: now(), data: quote };
 		}
 		if (st.quote?.data?.available) {
@@ -6748,6 +7087,7 @@ async function answerLargeGroupRoomRecommendation(
 		st.slots.childrenProvided = true;
 	}
 	st.slots.roomTypeKey = null;
+	st.slots.roomSelections = [];
 	st.quote = null;
 	st.quoteSummarizedAt = 0;
 	const hasDates = Boolean(st.slots.checkinISO && st.slots.checkoutISO);
@@ -6832,7 +7172,7 @@ async function answerSmallGroupRoomCountRequest(
 		);
 		if (dateMerge.prompted) return true;
 	}
-	st.slots.roomTypeKey = roomTypeKey;
+	setSingleRoomSelection(st, roomTypeKey, { source: "small_group_room_count" });
 	if (!st.slots.adultsProvided) {
 		st.slots.adults = count;
 		st.slots.adultsProvided = true;
@@ -7134,12 +7474,13 @@ async function handleDeterministicStayProgress(
 
 	const explicitRoomTypeKey = mapRoomToKey(latestText);
 	if (explicitRoomTypeKey) {
-		if (st.slots.roomTypeKey !== explicitRoomTypeKey) {
-			st.slots.roomTypeKey = explicitRoomTypeKey;
-			st.quote = null;
-			st.quoteSummarizedAt = 0;
-			st.reviewSent = false;
-			clearPendingRoomAlternative(st);
+		const selections = extractRoomSelectionsFromText(latestText);
+		if (roomSelectionCaptureAllowed(latestText, st, selections)) {
+			applyRoomSelections(st, selections, { source: `${source}_explicit_rooms` });
+		} else if (st.slots.roomTypeKey !== explicitRoomTypeKey) {
+			setSingleRoomSelection(st, explicitRoomTypeKey, {
+				source: `${source}_explicit_room`,
+			});
 		}
 	}
 	applyReservationGuestCountsFromText(st, latestText);
@@ -7171,7 +7512,9 @@ async function handleDeterministicStayProgress(
 				recommendedRoomTypeKey
 			);
 			if (recommendedRooms.length) {
-				st.slots.roomTypeKey = recommendedRoomTypeKey;
+				setSingleRoomSelection(st, recommendedRoomTypeKey, {
+					source: "stay_progress_guest_count",
+				});
 				logStep(caseId || String(sc._id || ""), "room.inferred_from_stay_progress", {
 					source,
 					guestCount: guestCountForRoomFit,
@@ -7307,7 +7650,9 @@ async function answerSelectedHotelRoomQuestion(
 		);
 		if (sent) {
 			if (selectedRoomTypeKey && detailRooms.length) {
-				st.slots.roomTypeKey = selectedRoomTypeKey;
+				setSingleRoomSelection(st, selectedRoomTypeKey, {
+					source: "selected_room_details",
+				});
 			}
 			if (aiReservationReference(sc)) {
 				st.waitFor = "post_booking_followup";
@@ -7351,7 +7696,9 @@ async function answerSelectedHotelRoomQuestion(
 			recommendedRoomTypeKey
 		);
 		if (recommendedRooms.length) {
-			st.slots.roomTypeKey = recommendedRoomTypeKey;
+			setSingleRoomSelection(st, recommendedRoomTypeKey, {
+				source: "selected_hotel_guest_count",
+			});
 			if (st.slots.checkinISO && st.slots.checkoutISO) {
 				logStep(String(sc._id), "selected_hotel.room_fit_quote", {
 					guestCount: requestedGuestCount,
@@ -7404,12 +7751,12 @@ async function answerSelectedHotelRoomQuestion(
 		st.slots.checkinISO &&
 		st.slots.checkoutISO
 	) {
-		st.slots.roomTypeKey = roomTypeKey;
+		setSingleRoomSelection(st, roomTypeKey, { source: "selected_hotel_quote" });
 		await shareKnownStayQuote(io, sc, st, { skipRoomSignalGuard: true });
 		return true;
 	}
 	if (roomTypeKey && matchingRooms.length) {
-		st.slots.roomTypeKey = roomTypeKey;
+		setSingleRoomSelection(st, roomTypeKey, { source: "selected_hotel_room_fit" });
 		const fallbackText = roomFitSalesIntroText(sc, st, roomTypeKey, matchingRooms);
 		const sent = await humanSend(
 			io,
@@ -7454,7 +7801,7 @@ async function answerSelectedHotelRoomQuestion(
 		{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 	);
 	if (sent) {
-		if (roomTypeKey) st.slots.roomTypeKey = roomTypeKey;
+		if (roomTypeKey) setSingleRoomSelection(st, roomTypeKey, { source: "selected_hotel_dynamic" });
 		st.waitFor = roomTypeKey && matchingRooms.length ? "dates" : "room";
 		if (st.waitFor) stampAsk(st, st.waitFor);
 	}
@@ -8971,7 +9318,9 @@ async function buildJannatBookingHotelOptions({
 		.slice(0, 4);
 
 	st.platformHotelOptions = options;
-	st.slots.roomTypeKey = selectedRoomTypeKey;
+	setSingleRoomSelection(st, selectedRoomTypeKey, {
+		source: "platform_hotel_options",
+	});
 
 	const draftedReply = await write(
 		null,
@@ -9087,7 +9436,11 @@ async function connectJannatCaseToHotelSupport(
 	sc.hotelId = hotel._id || targetHotelId;
 	sc.supportScope = "hotel";
 	sc.aiResponderName = nextAgentName;
-	if (optionOrHotel?.roomTypeKey) st.slots.roomTypeKey = optionOrHotel.roomTypeKey;
+	if (optionOrHotel?.roomTypeKey) {
+		setSingleRoomSelection(st, optionOrHotel.roomTypeKey, {
+			source: "hotel_handoff_option",
+		});
+	}
 	if (optionOrHotel?.quote?.available) {
 		st.quote = {
 			key: quoteKeyForSlots(st),
@@ -9188,10 +9541,13 @@ async function handlePlatformHotelChoice(io, sc, st, userText) {
 		: [];
 	if (!options.length) {
 		if (!st.slots.roomTypeKey) {
-			st.slots.roomTypeKey =
+			setSingleRoomSelection(
+				st,
 				mapRoomToKey(conversationText(sc, { guestsOnly: true })) ||
-				mapRoomToKey(userText) ||
-				"doubleRooms";
+					mapRoomToKey(userText) ||
+					"doubleRooms",
+				{ source: "platform_choice_rebuild_default" }
+			);
 		}
 		const rebuilt = await buildJannatBookingHotelOptions({
 			text: userText,
@@ -13154,7 +13510,11 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "selected_hotel_fact_question",
 		};
 	}
-	if (st.hotel && selectedHotelRoomQuestionText(userText)) {
+	if (
+		st.hotel &&
+		selectedHotelRoomQuestionText(userText) &&
+		!latestTextHasBookableRoomSelection(userText, st)
+	) {
 		return {
 			action: "general_answer",
 			roomTypeKey:
@@ -13375,18 +13735,14 @@ async function shareKnownStayQuote(
 	}
 	logStep(String(sc._id), "quote.start", {
 		roomTypeKey: st.slots.roomTypeKey,
+		roomSelections: roomSelectionsFromSlots(st),
 		checkinISO: st.slots.checkinISO,
 		checkoutISO: st.slots.checkoutISO,
 		hasHotel: Boolean(st.hotel),
 	});
-	const quote = safePriceRoomForStay(
-		st.hotel,
-		{ roomType: st.slots.roomTypeKey },
-		st.slots.checkinISO,
-		st.slots.checkoutISO
-	);
+	const quote = safePriceRoomSelectionForStay(st);
 	st.quote = {
-		key: `${st.slots.roomTypeKey}|${st.slots.checkinISO}|${st.slots.checkoutISO}`,
+		key: quoteKeyForSlots(st),
 		at: now(),
 		data: quote,
 	};
@@ -13394,6 +13750,7 @@ async function shareKnownStayQuote(
 		available: quote.available,
 		reason: quote.reason || null,
 		roomTypeKey: st.slots.roomTypeKey,
+		roomSelections: quote.roomSelections || [],
 	});
 	if (!quote.available) {
 		return sendUnavailableRoomRecovery(io, sc, st, quote);
@@ -13429,6 +13786,9 @@ async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
 		return false;
 	}
 	const explicitUserRoomTypeKey = mapRoomToKey(userText);
+	applyRoomSelectionsFromText(sc, st, userText, {
+		source: "direct_quote_user_text",
+	});
 	let roomTypeKey = explicitUserRoomTypeKey || st.slots?.roomTypeKey || null;
 	if (!roomTypeKey) {
 		applyLatestRoomSignalFromConversation(sc, st, {
@@ -13445,11 +13805,7 @@ async function tryShareDirectStayQuote(io, sc, st, userText = "", caseId = "") {
 	if (dateMerge.prompted) return true;
 	const roomChanged = st.slots.roomTypeKey !== roomTypeKey;
 	if (roomChanged) {
-		st.slots.roomTypeKey = roomTypeKey;
-		st.quote = null;
-		st.quoteSummarizedAt = 0;
-		st.reviewSent = false;
-		clearPendingRoomAlternative(st);
+		setSingleRoomSelection(st, roomTypeKey, { source: "direct_quote_room_type" });
 	}
 	applyReservationGuestCountsFromText(st, userText);
 	logStep(caseId || String(sc._id || ""), "quote.direct_stay_request", {
@@ -13487,13 +13843,14 @@ async function tryStartDirectReservationFlow(io, sc, st, userText = "", caseId =
 		});
 		if (dateMerge.prompted) return true;
 	}
+	applyRoomSelectionsFromText(sc, st, userText, {
+		source: "direct_reservation_start_user_text",
+	});
 	const roomTypeKey = mapRoomToKey(userText);
 	if (roomTypeKey && st.slots.roomTypeKey !== roomTypeKey) {
-		st.slots.roomTypeKey = roomTypeKey;
-		st.quote = null;
-		st.quoteSummarizedAt = 0;
-		st.reviewSent = false;
-		clearPendingRoomAlternative(st);
+		setSingleRoomSelection(st, roomTypeKey, {
+			source: "direct_reservation_start_room_type",
+		});
 	}
 	applyReservationGuestCountsFromText(st, userText);
 	if (!st.slots.roomTypeKey) {
@@ -13503,11 +13860,9 @@ async function tryStartDirectReservationFlow(io, sc, st, userText = "", caseId =
 			inferredRoomTypeKey &&
 			activeHotelRoomSummaries(st.hotel, inferredRoomTypeKey).length
 		) {
-			st.slots.roomTypeKey = inferredRoomTypeKey;
-			st.quote = null;
-			st.quoteSummarizedAt = 0;
-			st.reviewSent = false;
-			clearPendingRoomAlternative(st);
+			setSingleRoomSelection(st, inferredRoomTypeKey, {
+				source: "direct_reservation_guest_count",
+			});
 			logStep(caseId || String(sc._id || ""), "reservation.direct_start_room_inferred", {
 				guestCount: requestedGuestCount,
 				roomTypeKey: inferredRoomTypeKey,
@@ -13547,7 +13902,9 @@ async function acceptPendingRoomAlternative(io, sc, st, pending = {}) {
 	const datesChanged =
 		pending.checkinISO !== st.slots?.checkinISO ||
 		pending.checkoutISO !== st.slots?.checkoutISO;
-	st.slots.roomTypeKey = pending.roomTypeKey;
+	setSingleRoomSelection(st, pending.roomTypeKey, {
+		source: "pending_alternative_accept",
+	});
 	st.slots.checkinISO = pending.checkinISO;
 	st.slots.checkoutISO = pending.checkoutISO;
 	if (datesChanged) {
@@ -13572,10 +13929,9 @@ async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
 	}
 	if (selectedRoomType && selectedRoomType !== pending.roomTypeKey) {
 		clearPendingRoomAlternative(st);
-		st.slots.roomTypeKey = selectedRoomType;
-		st.quote = null;
-		st.quoteSummarizedAt = 0;
-		st.reviewSent = false;
+		setSingleRoomSelection(st, selectedRoomType, {
+			source: "pending_alternative_replaced",
+		});
 		if (st.slots.checkinISO && st.slots.checkoutISO) {
 			return shareKnownStayQuote(io, sc, st, { skipRoomSignalGuard: true });
 		}
@@ -13629,11 +13985,17 @@ async function handlePendingRoomAlternativeChoice(io, sc, st, userText = "") {
 	return true;
 }
 
+function quoteSelectionKeyForSlots(st = {}) {
+	const selections = roomSelectionsFromSlots(st);
+	return roomSelectionsOnlyKey(selections);
+}
+
 function quoteKeyForSlots(st = {}) {
-	if (!st.slots?.roomTypeKey || !st.slots?.checkinISO || !st.slots?.checkoutISO) {
+	const selectionKey = quoteSelectionKeyForSlots(st);
+	if (!selectionKey || !st.slots?.checkinISO || !st.slots?.checkoutISO) {
 		return "";
 	}
-	return `${st.slots.roomTypeKey}|${st.slots.checkinISO}|${st.slots.checkoutISO}`;
+	return `${selectionKey}|${st.slots.checkinISO}|${st.slots.checkoutISO}`;
 }
 
 function activeQuoteMatchesSlots(st = {}) {
@@ -13645,24 +14007,147 @@ function ensureCurrentQuoteForSlots(st = {}) {
 	if (activeQuoteMatchesSlots(st)) return st.quote.data;
 	if (
 		!st.hotel ||
-		!st.slots?.roomTypeKey ||
+		!quoteSelectionKeyForSlots(st) ||
 		!st.slots?.checkinISO ||
 		!st.slots?.checkoutISO
 	) {
 		return null;
 	}
-	const quote = safePriceRoomForStay(
-		st.hotel,
-		{ roomType: st.slots.roomTypeKey },
-		st.slots.checkinISO,
-		st.slots.checkoutISO
-	);
+	const quote = safePriceRoomSelectionForStay(st);
 	st.quote = {
 		key: quoteKeyForSlots(st),
 		at: now(),
 		data: quote,
 	};
 	return quote;
+}
+
+function safePriceRoomSelectionForStay(st = {}) {
+	const selections = roomSelectionsFromSlots(st);
+	return safePriceRoomSelectionsForStay(
+		st.hotel,
+		selections,
+		st.slots?.checkinISO,
+		st.slots?.checkoutISO
+	);
+}
+
+function safePriceRoomSelectionsForStay(
+	hotel = {},
+	selections = [],
+	checkinISO = "",
+	checkoutISO = ""
+) {
+	const normalized = mergeRoomSelections(selections);
+	if (!normalized.length) {
+		return {
+			available: false,
+			reason: "room_not_found",
+			currency: hotel?.currency || "SAR",
+			room: null,
+			roomSelections: [],
+		};
+	}
+	const roomQuotes = [];
+	for (const selection of normalized) {
+		const quote = safePriceRoomForStay(
+			hotel,
+			{ roomType: selection.roomTypeKey },
+			checkinISO,
+			checkoutISO
+		);
+		const line = {
+			roomTypeKey: selection.roomTypeKey,
+			count: selection.count,
+			room: quote.room,
+			quote,
+			currency: quote.currency || hotel?.currency || "SAR",
+			nights: quote.nights || 0,
+			pricingByDay: quote.pricingByDay || [],
+			totals: quote.totals || null,
+			available: Boolean(quote.available),
+			reason: quote.reason || null,
+		};
+		roomQuotes.push(line);
+		if (!quote.available) {
+			return {
+				available: false,
+				reason: quote.reason || "pricing_unavailable",
+				currency: quote.currency || hotel?.currency || "SAR",
+				room: quote.room,
+				nights: quote.nights || 0,
+				roomSelections: normalized,
+				rooms: roomQuotes,
+				failedRoom: line,
+			};
+		}
+	}
+	const nights = roomQuotes[0]?.nights || 0;
+	const currency = roomQuotes[0]?.currency || hotel?.currency || "SAR";
+	const totals = roomQuotes.reduce(
+		(sum, line) => {
+			const count = roomSelectionCount(line.count, 1);
+			sum.totalPriceWithCommission +=
+				Number(line.totals?.totalPriceWithCommission || 0) * count;
+			sum.hotelShouldGet += Number(line.totals?.hotelShouldGet || 0) * count;
+			sum.totalCommission += Number(line.totals?.totalCommission || 0) * count;
+			return sum;
+		},
+		{ totalPriceWithCommission: 0, hotelShouldGet: 0, totalCommission: 0 }
+	);
+	const roundedTotals = {
+		totalPriceWithCommission: Number(totals.totalPriceWithCommission.toFixed(2)),
+		hotelShouldGet: Number(totals.hotelShouldGet.toFixed(2)),
+		totalCommission: Number(totals.totalCommission.toFixed(2)),
+	};
+	const pricingByDay = [];
+	for (let index = 0; index < nights; index += 1) {
+		const firstDay = roomQuotes[0]?.pricingByDay?.[index] || {};
+		const date = firstDay.date || "";
+		const dayTotals = roomQuotes.reduce(
+			(sum, line) => {
+				const row = line.pricingByDay?.[index] || {};
+				const count = roomSelectionCount(line.count, 1);
+				sum.price += Number(row.price || 0) * count;
+				sum.rootPrice += Number(row.rootPrice || 0) * count;
+				sum.totalPriceWithCommission +=
+					Number(row.totalPriceWithCommission || 0) * count;
+				sum.totalPriceWithoutCommission +=
+					Number(row.totalPriceWithoutCommission || 0) * count;
+				return sum;
+			},
+			{
+				price: 0,
+				rootPrice: 0,
+				totalPriceWithCommission: 0,
+				totalPriceWithoutCommission: 0,
+			}
+		);
+		pricingByDay.push({
+			date,
+			price: Number(dayTotals.price.toFixed(2)),
+			rootPrice: Number(dayTotals.rootPrice.toFixed(2)),
+			commissionRate: 0,
+			totalPriceWithCommission: Number(dayTotals.totalPriceWithCommission.toFixed(2)),
+			totalPriceWithoutCommission: Number(
+				dayTotals.totalPriceWithoutCommission.toFixed(2)
+			),
+		});
+	}
+	return {
+		available: true,
+		reason: null,
+		room: roomQuotes[0]?.room || null,
+		nights,
+		currency,
+		pricingByDay,
+		perNight: pricingByDay.map((row) => row.totalPriceWithCommission),
+		totals: roundedTotals,
+		roomSelections: normalized,
+		rooms: roomQuotes,
+		selectionKey: roomSelectionsOnlyKey(normalized),
+		totalRooms: totalRoomCountFromSelections(normalized),
+	};
 }
 
 function repeatPriceQuestionText(text = "") {
@@ -14269,6 +14754,31 @@ function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
 	const dateText = [dates.primary, dates.secondary].filter(Boolean).join(" (") +
 		(dates.secondary ? ")" : "");
 	const next = bookingNextActionText(sc, st);
+	if (quoteHasMultipleRoomLines(quote)) {
+		const roomLines = localizedRoomSelectionLines(sc, st, quote);
+		if (/arabic/i.test(lang)) {
+			return [
+				`${name}\u060c \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0641\u064a ${hotelName}:`,
+				...roomLines,
+				`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}`,
+				`\u0627\u0644\u0645\u062f\u0629: ${nightText}`,
+				`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0644\u0644\u062d\u062c\u0632 \u0643\u0627\u0645\u0644\u0627: ${totalText}`,
+				next,
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		return [
+			`${name}, here is the current availability and price at ${hotelName}:`,
+			...roomLines,
+			`Dates: ${dateText}`,
+			`Stay: ${nightText}`,
+			`Grand total: ${totalText}`,
+			next,
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
 	if (/arabic/i.test(lang)) {
 		const perNightText = perNight
 			? ` \u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${localizedMoney(perNight, quote.currency, lang)}.`
@@ -14595,6 +15105,7 @@ function buildReservationReviewPayload(st = {}, quote = {}) {
 		room: quote.room?.displayName || quote.room?.roomType || st.slots.roomTypeKey,
 		roomLocalized: localizedRoomName({}, st, quote),
 		roomsCount: st.slots.rooms || 1,
+		roomSelections: localizedRoomSelectionLines({}, st, quote),
 		currency: quote.currency,
 		nights: quote.nights,
 		totals: quote.totals,
@@ -14804,10 +15315,20 @@ function deterministicFinalReservationReview(sc = {}, st = {}, quote = {}) {
 	const prefix = /arabic/i.test(lang)
 		? `${respectfulGuestName(sc, st)}\u060c ${labels.title}`
 		: `${respectfulGuestName(sc, st)}, ${labels.title}`;
+	const roomLines = quoteHasMultipleRoomLines(quote)
+		? localizedRoomSelectionLines(sc, st, quote)
+		: [];
+	const perNightLabel = quoteHasMultipleRoomLines(quote)
+		? /arabic/i.test(lang)
+			? "\u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 \u0644\u0643\u0644 \u0627\u0644\u063a\u0631\u0641:"
+			: "Average per night for all rooms:"
+		: labels.perNight;
 	const lines = [
 		prefix,
 		`${labels.hotel} ${localizedHotelName(sc, st)}`,
-		`${labels.room} ${localizedRoomName(sc, st, quote)}`,
+		roomLines.length
+			? `${labels.room}\n${roomLines.join("\n")}`
+			: `${labels.room} ${localizedRoomName(sc, st, quote)}`,
 		`${labels.dates} ${dates.primary}`,
 		dates.secondary ? dates.secondary : "",
 		quote.nights ? `${labels.nights} ${localizedNightCount(quote.nights, lang)}` : "",
@@ -14816,7 +15337,7 @@ function deterministicFinalReservationReview(sc = {}, st = {}, quote = {}) {
 		nationality ? `${labels.nationality} ${nationality}` : "",
 		phone ? `${labels.phone} ${phone}` : "",
 		`${labels.email} ${email || labels.notProvided}`,
-		perNight ? `${labels.perNight} ${localizedMoney(perNight, quote.currency, lang)}` : "",
+		perNight ? `${perNightLabel} ${localizedMoney(perNight, quote.currency, lang)}` : "",
 		total ? `${labels.total} ${localizedMoney(total, quote.currency, lang)}` : "",
 		labels.cta,
 	];
@@ -14863,6 +15384,7 @@ async function sendReservationReview(
 	});
 	let q = quote || st.quote?.data;
 	if (
+		!quoteHasMultipleRoomLines(q) &&
 		q?.room?.roomType &&
 		st.slots?.roomTypeKey &&
 		q.room.roomType !== st.slots.roomTypeKey
@@ -14872,16 +15394,11 @@ async function sendReservationReview(
 	if (
 		!q?.available &&
 		st.hotel &&
-		st.slots?.roomTypeKey &&
+		quoteSelectionKeyForSlots(st) &&
 		st.slots?.checkinISO &&
 		st.slots?.checkoutISO
 	) {
-		const rebuiltQuote = safePriceRoomForStay(
-			st.hotel,
-			{ roomType: st.slots.roomTypeKey },
-			st.slots.checkinISO,
-			st.slots.checkoutISO
-		);
+		const rebuiltQuote = safePriceRoomSelectionForStay(st);
 		if (rebuiltQuote?.available) {
 			q = rebuiltQuote;
 			st.quote = {
@@ -14891,6 +15408,7 @@ async function sendReservationReview(
 			};
 			logStep(String(sc._id), "review.quote_rebuilt", {
 				roomTypeKey: st.slots.roomTypeKey,
+				roomSelections: rebuiltQuote.roomSelections || [],
 				checkinISO: st.slots.checkinISO,
 				checkoutISO: st.slots.checkoutISO,
 			});
@@ -16190,12 +16708,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
 	const quoteForCreate =
 		st.quote?.data ||
-		safePriceRoomForStay(
-			st.hotel,
-			{ roomType: st.slots.roomTypeKey },
-			st.slots.checkinISO,
-			st.slots.checkoutISO
-		);
+		safePriceRoomSelectionForStay(st);
 	if (!quoteForCreate?.available) {
 		await markAiReservationFinalizeFailed(
 			caseId,
@@ -18807,7 +19320,8 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
-			selectedHotelRoomQuestionText(userText)
+			selectedHotelRoomQuestionText(userText) &&
+			!latestTextHasBookableRoomSelection(userText, st)
 		) {
 			logStep(caseId, "selected_hotel.room_first_turn_fast", {
 				latestUserMessage: String(userText || "").slice(0, 160),
@@ -19282,6 +19796,7 @@ async function planTurn(io, sc) {
 			st.hotel &&
 			userText &&
 			selectedHotelRoomQuestionText(userText) &&
+			!latestTextHasBookableRoomSelection(userText, st) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
@@ -19363,6 +19878,7 @@ async function planTurn(io, sc) {
 		if (
 			st.hotel &&
 			selectedHotelRoomQuestionText(userText) &&
+			!latestTextHasBookableRoomSelection(userText, st) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
@@ -19421,6 +19937,9 @@ async function planTurn(io, sc) {
 			protectLatestGuestDateChange: Boolean(userText),
 		});
 		recoverBookingStageFromConversation(sc, st);
+		applyRoomSelectionsFromText(sc, st, userText, {
+			source: "latest_user_turn",
+		});
 		const protectReservationDetailLanguage = shouldProtectReservationDetailLanguage(
 			sc,
 			st,
@@ -20047,7 +20566,18 @@ async function planTurn(io, sc) {
 			);
 			return;
 		}
-		if (decisionLu.roomTypeKey) st.slots.roomTypeKey = decisionLu.roomTypeKey;
+		if (
+			decisionLu.roomTypeKey &&
+			!roomSelectionCaptureAllowed(
+				userText,
+				st,
+				extractRoomSelectionsFromText(userText)
+			)
+		) {
+			setSingleRoomSelection(st, decisionLu.roomTypeKey, {
+				source: "nlu_room_type",
+			});
+		}
 
 		if (
 			looksLikeReservationDateUpdate(userText, decisionLu) ||
@@ -20078,6 +20608,7 @@ async function planTurn(io, sc) {
 		if (
 			st.hotel &&
 			selectedHotelRoomQuestionText(userText) &&
+			!latestTextHasBookableRoomSelection(userText, st) &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText)
@@ -20191,8 +20722,17 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		if (supportDecision.roomTypeKey) {
-			st.slots.roomTypeKey = supportDecision.roomTypeKey;
+		if (
+			supportDecision.roomTypeKey &&
+			!roomSelectionCaptureAllowed(
+				userText,
+				st,
+				extractRoomSelectionsFromText(userText)
+			)
+		) {
+			setSingleRoomSelection(st, supportDecision.roomTypeKey, {
+				source: "support_decision_room_type",
+			});
 		}
 
 		if (supportDecision.action === "general_answer") {
@@ -20717,7 +21257,14 @@ async function planTurn(io, sc) {
 				return;
 			}
 		}
-		if (lu.roomTypeKey) st.slots.roomTypeKey = lu.roomTypeKey;
+		if (
+			lu.roomTypeKey &&
+			!roomSelectionCaptureAllowed(userText, st, extractRoomSelectionsFromText(userText))
+		) {
+			setSingleRoomSelection(st, lu.roomTypeKey, {
+				source: "nlu_reused_room_type",
+			});
+		}
 
 		// ===== Amenity interception (e.g., "does it have WiFi?")
 		const amenityKey = lu.amenity || findAmenityMatch(userText);
@@ -20925,7 +21472,9 @@ async function planTurn(io, sc) {
 					recommendedRoomTypeKey
 				);
 				if (recommendedRooms.length) {
-					st.slots.roomTypeKey = recommendedRoomTypeKey;
+					setSingleRoomSelection(st, recommendedRoomTypeKey, {
+						source: "fallback_guest_count",
+					});
 					logStep(caseId, "room.inferred_from_guest_count", {
 						guestCount: guestCountForRoomFit,
 						roomTypeKey: recommendedRoomTypeKey,
@@ -20998,19 +21547,15 @@ async function planTurn(io, sc) {
 		}
 
 		// pricing
-		const qKey = `${st.slots.roomTypeKey}|${st.slots.checkinISO}|${st.slots.checkoutISO}`;
+		const qKey = quoteKeyForSlots(st);
 		const reuse =
 			st.quote && st.quote.key === qKey && now() - st.quote.at < 120000;
 		let quote;
 		if (!reuse) {
-			quote = safePriceRoomForStay(
-				st.hotel,
-				{ roomType: st.slots.roomTypeKey },
-				st.slots.checkinISO,
-				st.slots.checkoutISO
-			);
+			quote = safePriceRoomSelectionForStay(st);
 			logStep(caseId, "pricing", {
 				roomType: st.slots.roomTypeKey,
+				roomSelections: quote.roomSelections || [],
 				available: quote.available,
 				reason: quote.reason || null,
 				nights: quote.nights || 0,
@@ -21049,13 +21594,15 @@ async function planTurn(io, sc) {
 				},
 				dateDisplay: stayDateDisplay(st),
 			};
-			let quoteMsg = await write(
-				io,
-				sc,
-				st,
-				"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: should I continue with the reservation details?",
-				display
-			);
+			let quoteMsg = quoteHasMultipleRoomLines(quote)
+				? currentQuoteSummaryText(sc, st, quote)
+				: await write(
+						io,
+						sc,
+						st,
+						"Share a concise availability & price summary (no upsell). If the guest provided Hijri dates, include the Hijri range and matching Gregorian range. Then ask a single yes/no: should I continue with the reservation details?",
+						display
+				  );
 			quoteMsg = ensureHijriGregorianDatesVisible(quoteMsg, sc, st);
 			const sent = await humanSend(io, sc, st, quoteMsg, {
 				quickReplies: proceedQuickReplies(sc, st),
@@ -21770,4 +22317,19 @@ function wireSocket(io) {
 	return wireLegacySocket(io);
 }
 
-module.exports = { wireSocket, schedulePlanTurn };
+const exportedOrchestrator = { wireSocket, schedulePlanTurn };
+if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
+	exportedOrchestrator.__test = {
+		extractRoomSelectionsFromText,
+		mergeRoomSelections,
+		applyRoomSelections,
+		applyRoomSelectionsFromText,
+		roomSelectionsFromSlots,
+		quoteKeyForSlots,
+		safePriceRoomSelectionsForStay,
+		currentQuoteSummaryText,
+		deterministicFinalReservationReview,
+	};
+}
+
+module.exports = exportedOrchestrator;
