@@ -117,3 +117,4 @@ Go-live quality note: English and Arabic are the current production target and t
 - The admin customer-service history view should not render historical closed chats as live AI waits. Closed/history cases may show historical reply metrics, but the monitor status must be closed/paused and current waiting time should be blank.
 - Mobile chat links are rendered as visible link chips in the public SSR widget so reservation confirmation and payment links are obvious on phone screens.
 - The public SSR widget may show a short local "agent is typing" indicator after guest send. This is cosmetic only and must not create extra backend or OpenAI requests.
+- Final Arabic and English reservation-created messages intentionally include a short warm note that the hotel is happy the guest booked, while preserving confirmation number, details link, payment link, and post-booking help prompt.

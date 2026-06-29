@@ -14794,7 +14794,7 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	if (/arabic/i.test(lang)) {
 		return [
 			`${name}\u060c \u062a\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0628\u0646\u062c\u0627\u062d. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: **${confirmation}**.`,
-			`\u0634\u0643\u0631\u0627 \u0644\u0627\u062e\u062a\u064a\u0627\u0631\u0643 **${hotelName}** \ud83c\udf38 ${arrivalDate ? `\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u064a\u0648\u0645 **${arrivalDate}**.` : "\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u0642\u0631\u064a\u0628\u0627."}`,
+			`\u0634\u0643\u0631\u0627 \u0644\u0627\u062e\u062a\u064a\u0627\u0631\u0643 **${hotelName}** \ud83c\udf38 \u0633\u0639\u062f\u0627\u0621 \u0628\u062d\u062c\u0632\u0643 \u0645\u0639\u0646\u0627\u060c ${arrivalDate ? `\u0648\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u064a\u0648\u0645 **${arrivalDate}**.` : "\u0648\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643 \u0642\u0631\u064a\u0628\u0627."}`,
 			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: **${totalDisplay}**.`,
 			`[\u0627\u0636\u063a\u0637 \u0647\u0646\u0627 \u0644\u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0645\u0632\u064a\u062f \u0645\u0646 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644](${links.reservationDetails})`,
 			`[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`,
@@ -14887,10 +14887,10 @@ function reservationCreatedMessage(sc, st, reservation, quoteData, links) {
 	}
 	return [
 		`${name}, your reservation is confirmed. Confirmation number: **${confirmation}**.`,
-		`Thank you for choosing **${hotelName}** \ud83c\udf38 ${
+		`Thank you for choosing **${hotelName}** \ud83c\udf38 We are delighted you booked with us, and ${
 			arrivalDate
-				? `We look forward to welcoming you on **${arrivalDate}**.`
-				: "We look forward to welcoming you soon."
+				? `we look forward to welcoming you on **${arrivalDate}**.`
+				: "we look forward to welcoming you soon."
 		}`,
 		`Total: **${totalDisplay}**.`,
 		`[Please click here to find more details](${links.reservationDetails})`,
