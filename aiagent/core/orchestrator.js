@@ -1544,7 +1544,7 @@ function localizedHowAreYouReplyText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، أنا بخير والحمد لله، شكرا لسؤالك. كيف أقدر أساعدك في ${hotelName} اليوم؟`;
+		return `${name}\u060c \u0623\u0646\u0627 \u0628\u062e\u064a\u0631 \u0648\u0627\u0644\u062d\u0645\u062f \u0644\u0644\u0647\u060c \u0634\u0643\u0631\u0627 \u0644\u0633\u0624\u0627\u0644\u0643. \u0643\u064a\u0641 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a ${hotelName} \u0627\u0644\u064a\u0648\u0645\u061f`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, estoy muy bien, gracias por preguntar. Como puedo ayudarte con ${hotelName} hoy?`;
@@ -1572,7 +1572,7 @@ function localizedThanksReplyText(sc = {}, st = {}) {
 	const name = respectfulGuestName(sc, st);
 	const hotelName = localizedHotelName(sc, st);
 	if (/arabic/i.test(lang)) {
-		return `${name}، العفو. أنا هنا إذا احتجت أي مساعدة بخصوص ${hotelName}.`;
+		return `${name}\u060c \u0627\u0644\u0639\u0641\u0648. \u0623\u0646\u0627 \u0647\u0646\u0627 \u0625\u0630\u0627 \u0627\u062d\u062a\u062c\u062a \u0623\u064a \u0645\u0633\u0627\u0639\u062f\u0629 \u0628\u062e\u0635\u0648\u0635 ${hotelName}.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return `${name}, con mucho gusto. Estoy aqui si necesitas ayuda con ${hotelName}.`;
@@ -1599,6 +1599,16 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	const raw = String(text || "").trim();
 	if (!raw || raw.length > 140) return "";
 	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const clearArabicHowAreYou =
+		/(?:\u0643\u064a\u0641\s+(?:\u062d\u0627\u0644\u0643|\u062d\u0627\u0644\u0643\u0645|\u0627\u062d\u0648\u0627\u0644\u0643)|\u0643\u064a\u0641\u0643|\u0627\u062e\u0628\u0627\u0631\u0643|\u0623\u062e\u0628\u0627\u0631\u0643|\u0627\u0632\u064a\u0643|\u0625\u0632\u064a\u0643|\u0627\u0646\u062a\s+(?:\u0639\u0627\u0645\u0644|\u0639\u0627\u0645\u0644\u0647)\s+(?:\u0627\u064a\u0647|\u0627\u064a)|(?:\u0639\u0627\u0645\u0644|\u0639\u0627\u0645\u0644\u0647)\s+(?:\u0627\u064a\u0647|\u0627\u064a))/i.test(
+			arabic
+		) &&
+		!/(?:\u0633\u0639\u0631|\u0623\u0633\u0639\u0627\u0631|\u0627\u0633\u0639\u0627\u0631|\u062d\u062c\u0632|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641|\u062a\u0627\u0631\u064a\u062e|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u062e\u0631\u064a\u0637\u0629|\u0645\u0648\u0642\u0639|\u0646\u0633\u0643|\u0628\u0627\u0635|\u062a\u0623\u0643\u064a\u062f|\u062f\u0641\u0639)/i.test(
+			arabic
+		);
+	if (clearArabicHowAreYou) {
+		return localizedHowAreYouReplyText(sc, st);
+	}
 	const asksHowAreYou =
 		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day|how\s+are\s+you\s+doing|how\s+are\s+you\s+holding\s+up|how\s+are\s+things)\b/i.test(
 			raw
@@ -19216,14 +19226,10 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	}
 
 	if (looksLikeGreetingOnly(userText) && !hasOperationalBookingSignal(userText)) {
-		await sendDynamicCasualReply(
-			io,
-			sc,
-			st,
-			userText,
-			"Reply warmly to the guest's greeting in the active language. Use a natural short hospitality tone and ask an open 'how can I help you?' style question. Do not ask for check-in/check-out dates, room type, phone, nationality, or any booking detail in this reply.",
-			{ latestUserMessage: userText, currentWaitFor: st.waitFor || "" }
-		);
+		await humanSend(io, sc, st, greetingText(sc, st), {
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
 		thread.topic = null;
 		thread.waitingForGuest = false;
 		return true;
@@ -19231,13 +19237,10 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 
 	if (subtype === "how_are_you") {
 		if (!thread.waitingForGuest || thread.topic !== "howru") {
-			await sendDynamicCasualReply(
-				io,
-				sc,
-				st,
-				userText,
-				"Say you're doing well in a natural professional CSR voice, then ask how the guest is doing. Keep it short; no booking question yet."
-			);
+			await humanSend(io, sc, st, localizedHowAreYouReplyText(sc, st), {
+				fast: true,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
 			thread.topic = "howru";
 			thread.waitingForGuest = true;
 			logStep(caseId, "smalltalk.thread.update", {
