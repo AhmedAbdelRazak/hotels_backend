@@ -5840,17 +5840,17 @@ function roomRecoveryDeclineText(sc = {}, st = {}) {
 }
 
 function simpleQuoteText({ sc, st, quote }) {
-	const name = firstNameForAddress(
-		st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest"
-	);
 	const lang = languageOf(sc, st);
+	const name = /arabic/i.test(lang)
+		? respectfulGuestName(sc, st)
+		: firstNameForAddress(st.slots?.name || st.slots?.fullName || sc.displayName1 || "Guest");
 	const hotelName = localizedHotelName(sc, st);
 	const roomName = localizedRoomName(sc, st, quote);
 	if (/arabic/i.test(lang)) {
 		if (!quote.available) {
-			return `\u0623\u0633\u062a\u0627\u0630 ${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${roomName} \u0641\u064a ${hotelName} \u0644\u0647\u0630\u0647 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u062e\u0631\u0649 \u0623\u0648 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631.`;
+			return `${name}\u060c \u0644\u0627 \u0623\u0631\u0649 \u062a\u0648\u0641\u0631\u0627 \u0628\u0633\u0639\u0631 \u0645\u0624\u0643\u062f \u0644\u0640 ${roomName} \u0641\u064a ${hotelName} \u0644\u0647\u0630\u0647 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u062e\u0631\u0649 \u0623\u0648 \u0646\u0648\u0639 \u063a\u0631\u0641\u0629 \u0622\u062e\u0631.`;
 		}
-		return `\u0623\u0633\u062a\u0627\u0630 ${name}\u060c ${roomName} \u0641\u064a ${hotelName} \u0628\u0625\u062c\u0645\u0627\u0644\u064a ${localizedMoney(
+		return `${name}\u060c ${roomName} \u0641\u064a ${hotelName} \u0628\u0625\u062c\u0645\u0627\u0644\u064a ${localizedMoney(
 			quote.totals.totalPriceWithCommission,
 			quote.currency,
 			"Arabic"
