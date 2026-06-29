@@ -13,6 +13,15 @@ const { schedulePlanTurn } = require("../aiagent/core/orchestrator");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+const supportCaseEmailNotificationsEnabled = () => {
+	const raw = String(
+		process.env.SUPPORT_CASE_EMAIL_NOTIFICATIONS_ENABLED ?? ""
+	)
+		.trim()
+		.toLowerCase();
+	return !["0", "false", "no", "off", "disabled"].includes(raw);
+};
+
 const twilio = require("twilio");
 
 const supportCaseEmail = twilio(
@@ -1814,27 +1823,29 @@ exports.createNewSupportCase = async (req, res) => {
 		}
 
 		// Email is best-effort and must not hold the public chat open.
-		setImmediate(async () => {
-			try {
-				const emailHtml = newSupportCaseEmail(newCase, hotelName);
-				await sgMail.send({
-					from: "noreply@jannatbooking.com",
-					to: [
-						"morazzakhamouda@gmail.com",
-						"xhoteleg@gmail.com",
-						"ahmed.abdelrazak@jannatbooking.com",
-						"support@jannatbooking.com",
-					],
-					subject: `New Support Case | ${hotelName}`,
-					html: emailHtml,
-				});
-			} catch (emailError) {
-				console.error(
-					"Support case email notification failed:",
-					emailError?.message || emailError
-				);
-			}
-		});
+		if (supportCaseEmailNotificationsEnabled()) {
+			setImmediate(async () => {
+				try {
+					const emailHtml = newSupportCaseEmail(newCase, hotelName);
+					await sgMail.send({
+						from: "noreply@jannatbooking.com",
+						to: [
+							"morazzakhamouda@gmail.com",
+							"xhoteleg@gmail.com",
+							"ahmed.abdelrazak@jannatbooking.com",
+							"support@jannatbooking.com",
+						],
+						subject: `New Support Case | ${hotelName}`,
+						html: emailHtml,
+					});
+				} catch (emailError) {
+					console.error(
+						"Support case email notification failed:",
+						emailError?.message || emailError
+					);
+				}
+			});
+		}
 
 		return res.status(201).json(newCase);
 	} catch (error) {
