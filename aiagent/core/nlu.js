@@ -388,6 +388,9 @@ const MONTHS = {
 	"\u064a\u0648\u0644\u064a\u0629": 7,
 	"\u0627\u063a\u0633\u0637\u0633": 8,
 	"\u0623\u063a\u0633\u0637\u0633": 8,
+	"\u063a\u0634\u062a": 8,
+	"\u0627\u0648\u062a": 8,
+	"\u0623\u0648\u062a": 8,
 	"\u0633\u0628\u062a\u0645\u0628\u0631": 9,
 	"\u0627\u0643\u062a\u0648\u0628\u0631": 10,
 	"\u0623\u0643\u062a\u0648\u0628\u0631": 10,
@@ -493,6 +496,8 @@ function normalizeArabicSearchText(value = "") {
 		.toLowerCase()
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f\u064b-\u065f\u0670]/g, "")
+		.replace(/([\u0600-\u06ff])(\d)/g, "$1 $2")
+		.replace(/(\d)([\u0600-\u06ff])/g, "$1 $2")
 		.replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/g, "$1")
 		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
 		.replace(/\u0649/g, "\u064a")
@@ -1446,12 +1451,12 @@ function quickDateRange(text = "") {
 	}
 	const numericRange = quickNumericGregorianDateRange(raw);
 	if (numericRange?.checkinISO && numericRange?.checkoutISO) return numericRange;
-	const monthRange = quickGregorianMonthDateRange(raw);
-	if (monthRange?.checkinISO && monthRange?.checkoutISO) return monthRange;
 	const arabicMonthRange = quickArabicGregorianMonthDateRange(raw);
 	if (arabicMonthRange?.checkinISO && arabicMonthRange?.checkoutISO) {
 		return arabicMonthRange;
 	}
+	const monthRange = quickGregorianMonthDateRange(raw);
+	if (monthRange?.checkinISO && monthRange?.checkoutISO) return monthRange;
 	const fuzzyMonthRange = quickFuzzyGregorianMonthDateRange(raw);
 	if (fuzzyMonthRange?.checkinISO && fuzzyMonthRange?.checkoutISO) {
 		return fuzzyMonthRange;

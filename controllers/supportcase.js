@@ -1217,7 +1217,6 @@ exports.updateSupportCase = async (req, res) => {
 			escalationAddressedNote,
 		} = req.body;
 
-		console.log(req.body, "req.body");
 		if (
 			!validateReadableTextFields(res, {
 				inquiryAbout,

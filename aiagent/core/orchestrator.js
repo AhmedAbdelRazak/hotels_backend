@@ -310,7 +310,7 @@ const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 10000, {
 	min: 8000,
 	max: 30000,
 });
-const AI_DELAY_NOTICE_ENABLED = boolFromEnv("AI_DELAY_NOTICE_ENABLED", false);
+const AI_DELAY_NOTICE_ENABLED = boolFromEnv("AI_DELAY_NOTICE_ENABLED", true);
 const AI_DELAY_NOTICE_COOLDOWN_MS = intFromEnv(
 	"AI_DELAY_NOTICE_COOLDOWN_MS",
 	5 * 60 * 1000,
@@ -4684,7 +4684,15 @@ function monthNumberFromText(value = "") {
 		["may", "\u0645\u0627\u064a\u0648"],
 		["jun", "june", "\u064a\u0648\u0646\u064a\u0648", "\u064a\u0648\u0646\u064a\u0647"],
 		["jul", "july", "\u064a\u0648\u0644\u064a\u0648", "\u064a\u0648\u0644\u064a\u0647"],
-		["aug", "august", "\u0627\u063a\u0633\u0637\u0633", "\u0627\u0648\u063a\u0633\u0637\u0633"],
+		[
+			"aug",
+			"august",
+			"\u0627\u063a\u0633\u0637\u0633",
+			"\u0627\u0648\u063a\u0633\u0637\u0633",
+			"\u063a\u0634\u062a",
+			"\u0627\u0648\u062a",
+			"\u0623\u0648\u062a",
+		],
 		["sep", "sept", "september", "\u0633\u0628\u062a\u0645\u0628\u0631"],
 		["oct", "october", "\u0627\u0643\u062a\u0648\u0628\u0631"],
 		["nov", "november", "\u0646\u0648\u0641\u0645\u0628\u0631"],
@@ -6873,6 +6881,155 @@ async function askRoomPreferenceForReservation(
 	st.waitFor = "room";
 	stampAsk(st, "room");
 	return true;
+}
+
+function priceOrAvailabilityRequestText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	if (repeatPriceQuestionText(raw)) return true;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:available|availability|vacancy|vacancies|any\s+rooms?|do\s+you\s+have|have\s+rooms?|is\s+there|are\s+there|can\s+you\s+check)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631|\u062a\u0648\u0641\u0631|\u0627\u0644\u062a\u0648\u0641\u0631|\u0641\u064a\u0647|\u0641\u064a\s+\u063a\u0631\u0641|\u0639\u0646\u062f\u0643\u0645)/i.test(
+			arabic
+		) ||
+		/(?:available|availability|vacancy|motah|mtah|metah|motawfer|motwfr|tawafor|feeh|fihghoraf|3andkom)/i.test(
+			latinCompact
+		)
+	);
+}
+
+async function handleDeterministicStayProgress(
+	io,
+	sc,
+	st,
+	userText = "",
+	caseId = "",
+	{ source = "stay_progress", forceKnownDates = false } = {}
+) {
+	const latestText = String(userText || "").trim();
+	if (
+		!latestText ||
+		!st?.hotel ||
+		st.waitFor === "post_booking_followup" ||
+		isReservationDetailStep(st) ||
+		severeAbusiveGuestText(latestText) ||
+		humanHandoffReason(latestText) ||
+		wantsPaymentHelp(latestText) ||
+		explicitlyExistingReservationIntent(latestText)
+	) {
+		return false;
+	}
+	const freshDates = extractDateRange(latestText);
+	if (needsExplicitPastDateClarification(latestText, freshDates)) {
+		await askExplicitPastDateClarification(io, sc, st, latestText, freshDates);
+		return true;
+	}
+	const hasFreshCompleteDates = Boolean(
+		freshDates?.checkinISO && freshDates?.checkoutISO
+	);
+	if (hasFreshCompleteDates) {
+		const dateMerge = await mergeDateRangeWithChangeGuard(io, sc, st, freshDates, {
+			source,
+			userText: latestText,
+		});
+		if (dateMerge.prompted) return true;
+		if (dateMerge.invalid) {
+			await askForMissingStayDates(io, sc, st, {
+				fast: true,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			return true;
+		}
+	}
+
+	const explicitRoomTypeKey = mapRoomToKey(latestText);
+	if (explicitRoomTypeKey) {
+		if (st.slots.roomTypeKey !== explicitRoomTypeKey) {
+			st.slots.roomTypeKey = explicitRoomTypeKey;
+			st.quote = null;
+			st.quoteSummarizedAt = 0;
+			st.reviewSent = false;
+			clearPendingRoomAlternative(st);
+		}
+	}
+	applyReservationGuestCountsFromText(st, latestText);
+
+	const hasCompleteDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	const asksPriceOrAvailability = priceOrAvailabilityRequestText(latestText);
+	const bookingWait =
+		["dates", "room", "clarify", "intentConfirm"].includes(st.waitFor) ||
+		isNewReservationFlowActive(st);
+	if (!hasCompleteDates || !bookingWait) return false;
+
+	if (!st.slots.roomTypeKey) {
+		const guestCountForRoomFit = requestedGuestCountFromText(latestText);
+		const recommendedRoomTypeKey =
+			recommendedRoomTypeKeyForGuestCount(guestCountForRoomFit);
+		if (recommendedRoomTypeKey) {
+			const recommendedRooms = activeHotelRoomSummaries(
+				st.hotel,
+				recommendedRoomTypeKey
+			);
+			if (recommendedRooms.length) {
+				st.slots.roomTypeKey = recommendedRoomTypeKey;
+				logStep(caseId || String(sc._id || ""), "room.inferred_from_stay_progress", {
+					source,
+					guestCount: guestCountForRoomFit,
+					roomTypeKey: recommendedRoomTypeKey,
+					checkinISO: st.slots.checkinISO,
+					checkoutISO: st.slots.checkoutISO,
+				});
+				await shareKnownStayQuote(io, sc, st);
+				return true;
+			}
+		}
+		if (
+			hasFreshCompleteDates ||
+			forceKnownDates ||
+			asksPriceOrAvailability ||
+			st.waitFor === "room"
+		) {
+			const options = activeHotelRoomSummaries(st.hotel).slice(0, 8);
+			const sent = await humanSend(io, sc, st, roomOptionsListText(sc, st, options), {
+				fast: true,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			if (sent) {
+				st.waitFor = "room";
+				stampAsk(st, "room");
+			}
+			logStep(caseId || String(sc._id || ""), "stay_progress.ask_room_after_dates", {
+				source,
+				hasFreshCompleteDates,
+				forceKnownDates,
+				asksPriceOrAvailability,
+			});
+			return true;
+		}
+		return false;
+	}
+
+	if (
+		hasFreshCompleteDates ||
+		forceKnownDates ||
+		asksPriceOrAvailability ||
+		st.waitFor === "dates"
+	) {
+		logStep(caseId || String(sc._id || ""), "stay_progress.quote", {
+			source,
+			roomTypeKey: st.slots.roomTypeKey,
+			checkinISO: st.slots.checkinISO,
+			checkoutISO: st.slots.checkoutISO,
+		});
+		await shareKnownStayQuote(io, sc, st, {
+			skipRoomSignalGuard: Boolean(explicitRoomTypeKey),
+		});
+		return true;
+	}
+	return false;
 }
 
 async function answerSelectedHotelRoomQuestion(
@@ -15669,6 +15826,21 @@ async function handleReservationCancellationRequest(
 	});
 }
 
+async function markAiReservationFinalizeFailed(caseId, error) {
+	const targetCaseId = String(caseId || "").trim();
+	if (!targetCaseId) return;
+	const message = String(error?.message || error || "Reservation finalization failed.").slice(
+		0,
+		240
+	);
+	await updateSupportCaseAppend(targetCaseId, {
+		"aiReservation.status": "failed",
+		"aiReservation.lockedAt": null,
+		"aiReservation.lastError": message,
+		"aiReservation.failedAt": new Date(),
+	}).catch(() => {});
+}
+
 async function finalizeReservationForGuest(io, sc, st, caseId) {
 	if (!st.hotel) {
 		if (Array.isArray(st.platformHotelOptions) && st.platformHotelOptions.length) {
@@ -15702,19 +15874,29 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 			st.slots.checkoutISO
 		);
 	if (!quoteForCreate?.available) {
+		await markAiReservationFinalizeFailed(
+			caseId,
+			quoteForCreate?.reason || "Selected room is no longer available."
+		);
 		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
 		return true;
 	}
-	const reservation = await createReservationForCase({
-		caseId,
-		hotel: st.hotel,
-		slots: {
-			...st.slots,
-			name: st.slots.fullName || st.slots.name,
-		},
-		quoteData: quoteForCreate,
-		room: quoteForCreate.room,
-	});
+	let reservation = null;
+	try {
+		reservation = await createReservationForCase({
+			caseId,
+			hotel: st.hotel,
+			slots: {
+				...st.slots,
+				name: st.slots.fullName || st.slots.name,
+			},
+			quoteData: quoteForCreate,
+			room: quoteForCreate.room,
+		});
+	} catch (error) {
+		await markAiReservationFinalizeFailed(caseId, error);
+		throw error;
+	}
 	sc.aiReservation = {
 		...(sc.aiReservation || {}),
 		status: "created",
@@ -17773,6 +17955,29 @@ async function handleSmalltalk(io, sc, st, lu, userText) {
 	return true;
 }
 
+function responsiveSilenceFallbackText(sc = {}, st = {}, userText = "", waitFor = "") {
+	const hasDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
+	if (st.hotel && hasDates && !st.slots?.roomTypeKey) {
+		return roomOptionsListText(sc, st, activeHotelRoomSummaries(st.hotel).slice(0, 8));
+	}
+	if (st.hotel && hasDates && st.slots?.roomTypeKey) {
+		const quote = ensureCurrentQuoteForSlots(st);
+		if (quote?.available) return currentQuoteSummaryText(sc, st, quote);
+		if (quote) return simpleQuoteText({ sc, st, quote });
+	}
+	if (!hasDates) return stayDateRequestText(sc, st);
+	if (!st.slots?.roomTypeKey || waitFor === "room") {
+		return roomPreferenceSalesText(sc, st);
+	}
+	if (reservationDetailWaitState(waitFor)) {
+		return activeBookingContinuationText(sc, st) || technicalRecoveryText(sc, st);
+	}
+	if (genericOpenAiQuestionText(userText, st, {}) || broadGeneralSupportQuestionText(userText, st, {})) {
+		return supportEmailFallbackText(sc, st);
+	}
+	return unsupportedAnswerNextStepText(sc, st) || technicalRecoveryText(sc, st);
+}
+
 async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", caseId = "") {
 	if (!io || !st || !String(userText || "").trim()) return false;
 	if (st.activeTurnHadReply || st.interrupt) return false;
@@ -17802,21 +18007,35 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 			return false;
 		}
 		const waitFor = st.waitFor || nextPivot(st);
-		const prompt = await write(
-			io,
+		const fallbackPrompt = responsiveSilenceFallbackText(
 			latestCase,
 			st,
-			"The guest's latest turn has not received a support reply yet. Review the conversation context and send one concise, professional follow-up in the guest's active language. Answer any direct question in latestUserMessage first using available hotel/reservation context. If there is no direct question, continue the current wait state by asking only for the missing item. Never ask for unrelated dates, room type, or confirmation if the guest asked a factual question. Do not mention delays or internal systems. Keep it short and natural.",
-			{
-				latestUserMessage: userText,
-				waitFor,
-				slots: st.slots,
-				quoteReady: activeQuoteMatchesSlots(st),
-				bookingNudgePaused: bookingNudgePaused(st),
-				selectedHotelFacts: st.hotel ? buildActiveHotelFacts(latestCase, st) : null,
-			}
+			userText,
+			waitFor
 		);
-		const sent = await humanSend(io, latestCase, st, prompt);
+		const prompt = await withSoftTimeout(
+			write(
+				io,
+				latestCase,
+				st,
+				"The guest's latest turn has not received a support reply yet. Review the conversation context and send one concise, professional follow-up in the guest's active language. Answer any direct question in latestUserMessage first using available hotel/reservation context. If there is no direct question, continue the current wait state by asking only for the missing item. Never ask for unrelated dates, room type, or confirmation if the guest asked a factual question. Do not mention delays or internal systems. Keep it short and natural.",
+				{
+					latestUserMessage: userText,
+					waitFor,
+					slots: st.slots,
+					quoteReady: activeQuoteMatchesSlots(st),
+					bookingNudgePaused: bookingNudgePaused(st),
+					selectedHotelFacts: st.hotel ? buildActiveHotelFacts(latestCase, st) : null,
+					fallbackText: fallbackPrompt,
+				}
+			),
+			3500,
+			""
+		);
+		const sent = await humanSend(io, latestCase, st, prompt || fallbackPrompt, {
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
 		if (sent) {
 			logStep(targetCaseId, "responsive_silence.followup", {
 				waitFor,
@@ -18289,6 +18508,15 @@ async function planTurn(io, sc) {
 			conversationContextRecovered = true;
 		};
 		recoverConversationContextOnce("pre_quiet");
+		const stayProgressHandledPreQuiet = await handleDeterministicStayProgress(
+			io,
+			sc,
+			st,
+			userText,
+			caseId,
+			{ source: "pre_quiet" }
+		);
+		if (stayProgressHandledPreQuiet) return;
 		if (
 			userText &&
 			st.hotel &&
@@ -19467,6 +19695,20 @@ async function planTurn(io, sc) {
 				return;
 			}
 		}
+		const stayProgressHandledAfterNlu = await handleDeterministicStayProgress(
+			io,
+			sc,
+			st,
+			userText,
+			caseId,
+			{
+				source: "post_nlu_dates",
+				forceKnownDates: Boolean(
+					decisionLu?.dates?.checkinISO && decisionLu?.dates?.checkoutISO
+				),
+			}
+		);
+		if (stayProgressHandledAfterNlu) return;
 		if (
 			st.hotel &&
 			st.pendingRoomCombination &&
