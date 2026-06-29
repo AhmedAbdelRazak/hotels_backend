@@ -1637,6 +1637,80 @@ function fastEnglishSmalltalkText(sc = {}, st = {}, text = "") {
 	return "";
 }
 
+function casualAgentAttentionOnlyText(sc = {}, st = {}, text = "") {
+	const raw = String(text || "").trim();
+	if (!raw || raw.length > 60) return false;
+	const { arabic, latinCompact } = normalizeControlText(raw);
+	const compactArabic = arabic
+		.replace(/[^\u0600-\u06ff]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (
+		/^(?:\u064a\u0627\s+)?(?:\u0647\u0646\u0627|\u0647\u0627\u0646\u0627|\u0639\u0627\u0626\u0634\u0647|\u0639\u0627\u064a\u0634\u0647|\u0627\u064a\u0634\u0647|\u0633\u0627\u0631\u0647|\u064a\u0627\u0633\u0645\u064a\u0646)$/i.test(
+			compactArabic
+		)
+	) {
+		return true;
+	}
+	const configuredName = normalizeControlText(
+		st?.agentName || sc?.aiResponderName || ""
+	).latinCompact;
+	const latinNames = new Set(
+		[
+			configuredName,
+			"hana",
+			"hanna",
+			"aisha",
+			"aysha",
+			"ayesha",
+			"yasim",
+			"yasin",
+			"yasmin",
+			"sara",
+		].filter(Boolean)
+	);
+	for (const name of latinNames) {
+		if (
+			latinCompact === name ||
+			latinCompact === `ya${name}` ||
+			latinCompact === `hey${name}` ||
+			latinCompact === `hi${name}`
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function casualAgentCheckInText(sc = {}, st = {}, text = "") {
+	const raw = String(text || "").trim();
+	if (!raw || raw.length > 180) return false;
+	if (
+		hasOperationalBookingSignal(raw) ||
+		wantsPaymentHelp(raw) ||
+		humanHandoffReason(raw) ||
+		correctionText(raw)
+	) {
+		return false;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const asksHowAreYou =
+		/\b(?:how\s+are\s+you|how\s+r\s+u|how\s+are\s+u|how'?s\s+it\s+going|how\s+is\s+your\s+day|how\s+are\s+you\s+doing|how\s+are\s+you\s+holding\s+up|how\s+are\s+things)\b/i.test(
+			lower
+		) ||
+		/(?:\u0643\u064a\u0641\s+(?:\u062d\u0627\u0644\u0643|\u062d\u0627\u0644\u0643\u0645|\u0627\u062d\u0648\u0627\u0644\u0643)|\u0643\u064a\u0641\u0643|\u0627\u062e\u0628\u0627\u0631\u0643|\u0627\u064a\u0647\s+\u0627\u062e\u0628\u0627\u0631\u0643|\u0627\u0632\u064a\u0643|\u0627\u0646\u062a\s+(?:\u0639\u0627\u0645\u0644|\u0639\u0627\u0645\u0644\u0647)\s+(?:\u0627\u064a\u0647|\u0627\u064a)|(?:\u0639\u0627\u0645\u0644|\u0639\u0627\u0645\u0644\u0647)\s+(?:\u0627\u064a\u0647|\u0627\u064a)|\u064a\u0648\u0645\u0643\s+(?:\u0639\u0627\u0645\u0644|\u0639\u0627\u0645\u0644\u0647)\s+(?:\u0627\u064a\u0647|\u0627\u064a))/i.test(
+			arabic
+		) ||
+		/(?:howareyou|howru|howsitgoing|howisyourday|keefak|kefak|keefhalak|akhbarak|ezayak|ezayek)/i.test(
+			latinCompact
+		);
+	return asksHowAreYou || casualAgentAttentionOnlyText(sc, st, raw);
+}
+
+function reservationDetailSmalltalkText(sc = {}, st = {}, text = "") {
+	return isReservationDetailStep(st) && casualAgentCheckInText(sc, st, text);
+}
+
 function casualWrittenReplyAsksForBookingField(text = "") {
 	const value = String(text || "");
 	if (!value.trim()) return false;
@@ -2950,6 +3024,10 @@ function hydrateKnownSlotsFromConversation(
 		const messageText = rawMessageText || conversationEntryContextText(message);
 		if (!messageText || message?.isSystem) continue;
 		const guestMessage = isGuestConversationMessage(message);
+		const humanMomentWithoutDetails = guestMessage
+			? Boolean(guestHumanMomentKind(sc, st, messageText)) &&
+			  !reservationDetailFieldPayloadText(messageText)
+			: false;
 		if (guestMessage) {
 			const shouldExtractDatesForMessage =
 				(needsStayRecovery ||
@@ -3003,13 +3081,17 @@ function hydrateKnownSlotsFromConversation(
 			}
 		}
 		if (!guestMessage) continue;
-		if (messageText) guestMessages.push(messageText);
+		if (messageText && !humanMomentWithoutDetails) guestMessages.push(messageText);
 	}
 	markHydrationStage("date_guest_loop");
 	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
 	const latestAssistantBeforeGuest = lastAssistantMessageBeforeLatestGuest(sc);
+	const latestGuestForIdentity = lastUserText(sc);
 	const identityText = assistantMessageSuggestsReservationDetails(latestAssistantBeforeGuest)
-		? lastUserText(sc)
+		? Boolean(guestHumanMomentKind(sc, st, latestGuestForIdentity)) &&
+		  !reservationDetailFieldPayloadText(latestGuestForIdentity)
+			? guestText
+			: latestGuestForIdentity
 		: guestText;
 	if (latestGuestDateRange) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
@@ -3081,6 +3163,12 @@ function hydrateKnownSlotsFromConversation(
 				continue;
 			}
 			if (!isGuestConversationMessage(message)) continue;
+			if (
+				guestHumanMomentKind(sc, st, text) &&
+				!reservationDetailFieldPayloadText(text)
+			) {
+				continue;
+			}
 			if (likelyGuestCountText(text)) {
 				applyReservationGuestCountsFromText(st, text);
 			}
@@ -11049,6 +11137,72 @@ function mandatoryDetailsPrompt(sc = {}, st = {}, { retry = false } = {}) {
 		: `${name}, perfect. I just need these details to prepare the reservation review:\n${rows}`;
 }
 
+function reservationDetailHumanMomentResumeText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const rows = reservationDetailPromptRows(sc, st, { retry: true });
+	if (st.waitFor === "email_or_skip") return optionalEmailPrompt(sc, st);
+	if (st.waitFor === "finalize") return finalReservationPrompt(sc, st);
+	if (st.waitFor === "reviewConfirm") {
+		return /arabic/i.test(lang)
+			? "\u0648\u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u0632\u060c \u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0623\u0639\u0644\u0627\u0647\u060c \u0648\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d \u0627\u062e\u062a\u0631 \u062a\u0623\u0643\u064a\u062f."
+			: "For the booking, please review the details above. If everything looks correct, choose Confirm.";
+	}
+	if (rows) {
+		if (/arabic/i.test(lang)) {
+			return `\u0648\u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u0632\u060c \u0633\u0623\u062c\u0639\u0644 \u0627\u0644\u0645\u0648\u0636\u0648\u0639 \u0628\u0633\u064a\u0637\u0627 \u0639\u0644\u064a\u0643. \u0628\u0642\u064a \u0641\u0642\u0637:\n${rows}\n\u0623\u0631\u0633\u0644\u0647\u0627 \u0639\u0646\u062f\u0645\u0627 \u062a\u0643\u0648\u0646 \u062c\u0627\u0647\u0632\u0627\u060c \u0648\u0633\u0623\u062c\u0647\u0632 \u0644\u0643 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629.`;
+		}
+		return `For the booking, I will keep this simple for you. I only still need:\n${rows}\nSend these whenever you are ready, and I will prepare the review.`;
+	}
+	return /arabic/i.test(lang)
+		? "\u0648\u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u062d\u062c\u0632\u060c \u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0629 \u062c\u0627\u0647\u0632\u0629 \u0639\u0646\u062f\u064a\u060c \u0648\u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0627\u0644\u062e\u0637\u0648\u0629 \u0627\u0644\u062a\u0627\u0644\u064a\u0629."
+		: "For the booking, I have the essential details ready and will continue the next step with you.";
+}
+
+function reservationDetailHumanMomentReplyText(sc = {}, st = {}, userText = "") {
+	const kind = guestHumanMomentKind(sc, st, userText);
+	if (kind === "serious_distress") return emotionalSupportReplyText(sc, st, userText);
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	let lead = "";
+	if (/arabic/i.test(lang)) {
+		if (kind === "distress") {
+			lead = `${name}\u060c \u0622\u0633\u0641\u0629 \u0623\u0646\u0643 \u062a\u0634\u0639\u0631 \u0628\u0647\u0630\u0627. \u0623\u0633\u0623\u0644 \u0627\u0644\u0644\u0647 \u0623\u0646 \u064a\u0634\u0631\u062d \u0635\u062f\u0631\u0643 \u0648\u064a\u0647\u0648\u0646 \u0639\u0644\u064a\u0643. \u0623\u0646\u0627 \u0645\u0639\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629.`;
+		} else if (kind === "fatigue") {
+			lead = `${name}\u060c \u0633\u0644\u0627\u0645\u062a\u0643. \u0623\u0633\u0623\u0644 \u0627\u0644\u0644\u0647 \u0623\u0646 \u064a\u0631\u064a\u062d\u0643 \u0648\u064a\u0647\u0648\u0646 \u0639\u0644\u064a\u0643. \u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0628\u0647\u062f\u0648\u0621 \u0648\u0628\u0623\u0628\u0633\u0637 \u0637\u0631\u064a\u0642\u0629.`;
+		} else if (kind === "positive") {
+			lead = `${name}\u060c \u0627\u0644\u062d\u0645\u062f \u0644\u0644\u0647\u060c \u0641\u0631\u062d\u062a \u0644\u0643. \u0623\u0633\u0623\u0644 \u0627\u0644\u0644\u0647 \u0623\u0646 \u064a\u062a\u0645\u0645 \u0644\u0643 \u0639\u0644\u0649 \u062e\u064a\u0631 \u0648\u064a\u062c\u0639\u0644 \u0631\u062d\u0644\u062a\u0643 \u0645\u064a\u0633\u0631\u0629.`;
+		} else if (kind === "ack") {
+			lead = `${name}\u060c \u062a\u0645\u0627\u0645\u060c \u062e\u0630 \u0648\u0642\u062a\u0643 \u0648\u0623\u0646\u0627 \u0645\u0639\u0643.`;
+		} else if (kind === "attention") {
+			lead = `${name}\u060c \u0623\u0646\u0627 \u0645\u0639\u0643 \u064a\u0627 \u0641\u0646\u062f\u0645.`;
+		} else {
+			lead = `${name}\u060c \u0627\u0644\u062d\u0645\u062f \u0644\u0644\u0647 \u0623\u0646\u0627 \u0628\u062e\u064a\u0631\u060c \u0648\u0634\u0643\u0631\u0627 \u0644\u0633\u0624\u0627\u0644\u0643. \u0623\u0646\u0627 \u0645\u0639\u0643.`;
+		}
+		return lead;
+	}
+	if (kind === "distress") {
+		lead = `${name}, I am sorry you are feeling this way. May Allah ease your heart and bring you comfort. I am here with you step by step.`;
+	} else if (kind === "fatigue") {
+		lead = `${name}, I am sorry you are exhausted. May Allah give you rest and make this easy for you. I will keep things simple and help you calmly.`;
+	} else if (kind === "positive") {
+		lead = `${name}, that makes me really happy to hear. May Allah keep that joy for you and make your trip easy and blessed.`;
+	} else if (kind === "ack") {
+		lead = `${name}, perfect, take your time. I am here with you.`;
+	} else if (kind === "attention") {
+		lead = `${name}, I am here with you.`;
+	} else {
+		lead = `${name}, I am doing well, thank you for asking. I am here with you.`;
+	}
+	return lead;
+}
+
+function reservationDetailHumanMomentQuickReplies(sc = {}, st = {}) {
+	if (st.waitFor === "finalize") return finalReservationQuickReplies(sc, st);
+	if (st.waitFor === "reviewConfirm") return confirmationQuickReplies(sc, st);
+	if (st.waitFor === "email_or_skip") return emailQuickReplies(sc, st);
+	return [];
+}
+
 function optionalEmailPrompt(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
 	if (/arabic/i.test(lang)) {
@@ -11749,6 +11903,15 @@ function applyReservationDetailsInference(st = {}, inferred = {}) {
 
 async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText = "", caseId = "") {
 	if (!st?.slots) return null;
+	if (
+		guestHumanMomentKind(sc, st, latestText) &&
+		!reservationDetailFieldPayloadText(latestText)
+	) {
+		logStep(caseId || String(sc._id || ""), "reservation_details.context_skip_casual", {
+			latestUserMessage: String(latestText || "").slice(0, 160),
+		});
+		return null;
+	}
 	const missing = missingMandatoryReservationFields(st);
 	const fieldFocus = missing.length === 1 ? missing[0] : st.waitFor || "";
 	const sys = [
@@ -11837,6 +12000,15 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	if (!st?.slots) return;
 	const before = JSON.stringify(st.slots || {});
 	const fullText = String(text || "");
+	if (
+		guestHumanMomentKind(sc, st, fullText) &&
+		!reservationDetailFieldPayloadText(fullText)
+	) {
+		logStep(caseId || String(sc._id || ""), "reservation_details.capture_skip_casual", {
+			latestUserMessage: fullText.slice(0, 160),
+		});
+		return;
+	}
 	const phone = latestPhoneFromText(fullText);
 	let directFieldCaptured = false;
 	if (phone) {
@@ -12851,6 +13023,81 @@ function looksLikeGuestDistressText(s = "") {
 	);
 }
 
+function looksLikeGuestFatigueText(s = "") {
+	const raw = String(s || "").trim();
+	if (!raw || raw.length > 220) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:(?:so|very|really|a\s+little|a\s+bit|kind\s+of|kinda|completely|totally)\s+)?(?:tired|exhausted|drained|worn\s+out|overwhelmed|not\s+feeling\s+well)\b/i.test(
+			lower
+		) ||
+		/\b(?:tired|exhausted|drained|overwhelmed|worn\s+out)\b/i.test(lower) ||
+		/(?:\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0647|\u062a\u0639\u0628\u0627\u0646\u0629|\u0645\u0631\u0647\u0642|\u0645\u0631\u0647\u0642\u0647|\u0645\u0631\u0647\u0642\u0629|\u0627\u0631\u0647\u0627\u0642|\u0645\u0634\s+\u0642\u0627\u062f\u0631|\u0645\u0634\s+\u0642\u0627\u062f\u0631\u0647|\u0645\u0634\s+\u0642\u0627\u062f\u0631\u0629|\u0645\u0634\s+\u062d\u0627\u0633\u0633\s+\u0643\u0648\u064a\u0633|\u0645\u0634\s+\u062d\u0627\u0633\u0647\s+\u0643\u0648\u064a\u0633)/i.test(
+			arabic
+		) ||
+		/(?:imtired|iamtired|ifeeltired|imexhausted|iamexhausted|feelingexhausted|overwhelmed|taaban|taabana|morgaq|morhaga)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function looksLikeGuestPositiveEmotionText(s = "") {
+	const raw = String(s || "").trim();
+	if (!raw || raw.length > 220) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/\b(?:i\s+am|i'm|im|i\s+feel|i'm\s+feeling|feeling|feel)\s+(?:(?:so|very|really|extremely|super)\s+)?(?:happy|excited|glad|relieved|grateful|thankful|blessed)\b/i.test(
+			lower
+		) ||
+		/\b(?:so\s+happy|very\s+happy|super\s+happy|excited|glad|relieved|grateful|thankful|blessed)\b/i.test(
+			lower
+		) ||
+		/(?:\u0641\u0631\u062d\u0627\u0646|\u0641\u0631\u062d\u0627\u0646\u0647|\u0641\u0631\u062d\u0627\u0646\u0629|\u0645\u0628\u0633\u0648\u0637|\u0645\u0628\u0633\u0648\u0637\u0647|\u0645\u0628\u0633\u0648\u0637\u0629|\u0633\u0639\u064a\u062f|\u0633\u0639\u064a\u062f\u0647|\u0633\u0639\u064a\u062f\u0629|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0647|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u0631\u062a\u0627\u062d|\u0645\u0631\u062a\u0627\u062d\u0647|\u0645\u0631\u062a\u0627\u062d\u0629|\u0627\u0644\u062d\u0645\u062f\s+\u0644\u0644\u0647\s+\u0645\u0628\u0633\u0648\u0637)/i.test(
+			arabic
+		) ||
+		/(?:imhappy|iamhappy|ifeelhappy|feelinghappy|imexcited|iamexcited|imrelieved|iamrelieved|grateful|thankful|mabsoot|mabsota|farhan|farhana|saeed|saeeda|motahames)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function looksLikeGuestAcknowledgementText(s = "") {
+	const raw = String(s || "").trim();
+	if (!raw || raw.length > 80) return false;
+	if (hasOperationalBookingSignal(raw) || reservationDetailFieldPayloadText(raw)) {
+		return false;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	return (
+		/^(?:ok|okay|perfect|great|sounds\s+good|good|nice|fine|alright|all\s+right|excellent|amazing|thank\s+you|thanks)[.!\s]*$/i.test(
+			lower
+		) ||
+		/^(?:\u062a\u0645\u0627\u0645|\u0645\u0645\u062a\u0627\u0632|\u0643\u0648\u064a\u0633|\u062d\u0644\u0648|\u062c\u0645\u064a\u0644|\u0645\u0627\u0634\u064a|\u0645\u0627\u0634\u0649|\u0634\u0643\u0631\u0627|\u0627\u0644\u062d\u0645\u062f\s+\u0644\u0644\u0647)(?:\s+\u062c\u062f\u0627)?[.! \u061f\u061b\u060c]*$/i.test(
+			arabic
+		) ||
+		/^(?:ok|okay|perfect|great|soundsgood|nice|fine|alright|excellent|amazing|tamam|mumtaz|momtaz|kwayes|kwis|mashi|shukran|alhamdulillah)$/i.test(
+			latinCompact
+		)
+	);
+}
+
+function guestHumanMomentKind(sc = {}, st = {}, text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return "";
+	if (looksLikeSeriousSelfHarmText(raw)) return "serious_distress";
+	if (looksLikeGuestFatigueText(raw)) return "fatigue";
+	if (looksLikeGuestDistressText(raw)) return "distress";
+	if (looksLikeGuestPositiveEmotionText(raw)) return "positive";
+	if (looksLikeGuestAcknowledgementText(raw)) return "ack";
+	if (casualAgentAttentionOnlyText(sc, st, raw)) return "attention";
+	if (casualAgentCheckInText(sc, st, raw)) return "check_in";
+	return "";
+}
+
+function reservationDetailHumanMomentText(sc = {}, st = {}, text = "") {
+	return isReservationDetailStep(st) && Boolean(guestHumanMomentKind(sc, st, text));
+}
+
 function emotionalSupportReplyText(sc = {}, st = {}, userText = "") {
 	const name = respectfulGuestName(sc, st);
 	const lang = languageOf(sc, st);
@@ -13688,8 +13935,9 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
-		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string }",
+		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string, keywords:string[], emotionalTone:null|'neutral'|'happy'|'sad'|'tired'|'worried'|'angry'|'grateful'|'casual' }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
+		"keywords must be short normalized routing clues from the latest guest message and conversation context, such as ['agent_check_in','sad','reservation_details','bus','distance','payment','two_rooms']. Include 1-6 keywords. emotionalTone must describe the latest guest's human tone when present.",
 		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks for EIN/tax ID/company/legal paperwork, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
@@ -13741,11 +13989,25 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 	}
 	try {
 		const parsed = JSON.parse(raw);
+		const keywords = Array.isArray(parsed.keywords)
+			? parsed.keywords
+					.map((keyword) =>
+						String(keyword || "")
+							.trim()
+							.toLowerCase()
+							.replace(/[^a-z0-9_\-\u0600-\u06ff]+/gi, "_")
+							.slice(0, 40)
+					)
+					.filter(Boolean)
+					.slice(0, 6)
+			: [];
 		return {
 			action: parsed.action || "other",
 			roomTypeKey: parsed.roomTypeKey || null,
 			scope: parsed.scope || null,
 			reason: parsed.reason || "",
+			keywords,
+			emotionalTone: parsed.emotionalTone || null,
 		};
 	} catch {
 		return fallbackSupportDecision(userText, st, lu);
@@ -17790,7 +18052,14 @@ function liveCurrentGeneralQuestionText(text = "") {
 	return true;
 }
 
-async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = "") {
+async function answerGeneralContextQuestion(
+	io,
+	sc,
+	st,
+	userText = "",
+	reason = "",
+	routeHints = {}
+) {
 	const previousWaitFor = st.waitFor || "";
 	const fallback = supportEmailFallbackText(sc, st);
 	const liveCurrent = liveCurrentGeneralQuestionText(userText);
@@ -17808,6 +18077,10 @@ async function answerGeneralContextQuestion(io, sc, st, userText = "", reason = 
 		{
 			hotelName: localizedHotelName(sc, st),
 			reason,
+			routeKeywords: Array.isArray(routeHints.keywords)
+				? routeHints.keywords.slice(0, 6)
+				: [],
+			emotionalTone: routeHints.emotionalTone || null,
 			liveCurrentQuestion: liveCurrent,
 			activeHotelPositioning,
 			unknownAnswerDraft: fallback,
@@ -18567,6 +18840,42 @@ async function handleReservationDetailPayloadFallback(io, sc, st, userText, case
 	return true;
 }
 
+async function answerReservationDetailHumanMoment(io, sc, st, userText, caseId) {
+	if (!reservationDetailHumanMomentText(sc, st, userText)) return false;
+	const kind = guestHumanMomentKind(sc, st, userText);
+	if (
+		kind !== "serious_distress" &&
+		reservationDetailFieldPayloadText(userText) &&
+		!casualAgentCheckInText(sc, st, userText)
+	) {
+		await captureReservationDetailsFromText(sc, st, userText, caseId);
+		if (hasMandatoryReservationDetails(st) && st.waitFor === "reservation_details") {
+			st.waitFor = "finalize";
+		}
+	}
+	const text = reservationDetailHumanMomentReplyText(sc, st, userText);
+	const sentLead = await humanSend(io, sc, st, text, {
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		scheduleIdle: false,
+	});
+	let sentResume = false;
+	if (sentLead) {
+		sentResume = await humanSend(io, sc, st, reservationDetailHumanMomentResumeText(sc, st), {
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS + 900,
+			quickReplies: reservationDetailHumanMomentQuickReplies(sc, st),
+		});
+	}
+	logStep(caseId || String(sc._id || ""), "reservation_details.human_moment_reply", {
+		kind,
+		waitFor: st.waitFor || "",
+		sentLead,
+		sentResume,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	return sentLead || sentResume;
+}
+
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
 	const guestAction = lastGuestAction(sc);
@@ -18579,6 +18888,14 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 		"reservation_detail_step"
 	);
 	if (handledReviewCorrection) return true;
+	const handledHumanMoment = await answerReservationDetailHumanMoment(
+		io,
+		sc,
+		st,
+		userText,
+		caseId
+	);
+	if (handledHumanMoment) return true;
 	if (currentReservationMemoryRequestText(userText)) {
 		return answerCurrentReservationMemoryQuestion(io, sc, st, userText, caseId);
 	}
@@ -19398,6 +19715,27 @@ async function planTurn(io, sc) {
 		}
 		if (
 			userText &&
+			isReservationDetailStep(st) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			reservationDetailHumanMomentText(sc, st, userText)
+		) {
+			logStep(caseId, "reservation_details.human_moment_pre_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			const handledHumanMoment = await answerReservationDetailHumanMoment(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledHumanMoment) return;
+		}
+		if (
+			userText &&
 			st.hotel &&
 			st.quote?.data?.available &&
 			(repeatPriceQuestionText(userText) ||
@@ -19575,6 +19913,14 @@ async function planTurn(io, sc) {
 				"pre_quiet"
 			);
 			if (handledReviewCorrection) return;
+			const handledHumanMoment = await answerReservationDetailHumanMoment(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledHumanMoment) return;
 			if (currentReservationMemoryRequestText(userText)) {
 				const handledReservationMemory = await answerCurrentReservationMemoryQuestion(
 					io,
@@ -20997,7 +21343,8 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText,
-				supportDecision.reason || "verified_general_answer"
+				supportDecision.reason || "verified_general_answer",
+				supportDecision
 			);
 			return;
 		}
@@ -21019,7 +21366,8 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText,
-				supportDecision.reason || "unsupported_general_question"
+				supportDecision.reason || "unsupported_general_question",
+				supportDecision
 			);
 			return;
 		}
@@ -21030,7 +21378,8 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText,
-				supportDecision.reason || "generic_unplanned_question"
+				supportDecision.reason || "generic_unplanned_question",
+				supportDecision
 			);
 			return;
 		}
@@ -21041,7 +21390,8 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText,
-				supportDecision.reason || "dynamic_unplanned_fallback"
+				supportDecision.reason || "dynamic_unplanned_fallback",
+				supportDecision
 			);
 			return;
 		}
@@ -21324,7 +21674,8 @@ async function planTurn(io, sc) {
 				sc,
 				st,
 				userText,
-				supportDecision.reason || "dynamic_unplanned_fallback_late"
+				supportDecision.reason || "dynamic_unplanned_fallback_late",
+				supportDecision
 			);
 			return;
 		}
@@ -22606,6 +22957,9 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		latestGuestSelectedReviewCorrection,
 		reviewCorrectionPromptText,
 		deterministicFinalReservationReview,
+		guestHumanMomentKind,
+		reservationDetailHumanMomentReplyText,
+		casualAgentCheckInText,
 	};
 }
 
