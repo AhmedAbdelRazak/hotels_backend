@@ -202,6 +202,34 @@ const supportCaseSchema = new Schema({
 		type: Date,
 		default: null,
 	},
+	aiRecoveryGuestKey: {
+		type: String,
+		default: "",
+	},
+	aiRecoveryAttemptCount: {
+		type: Number,
+		default: 0,
+	},
+	aiRecoveryLastAttemptAt: {
+		type: Date,
+		default: null,
+	},
+	aiRecoveryLastGuestAt: {
+		type: Date,
+		default: null,
+	},
+	aiRecoveryLastGuestText: {
+		type: String,
+		default: "",
+	},
+	aiRecoveryCapReachedAt: {
+		type: Date,
+		default: null,
+	},
+	aiRecoveryCapGuestKey: {
+		type: String,
+		default: "",
+	},
 	aiReservation: {
 		status: {
 			type: String,

@@ -35,6 +35,11 @@ const AI_TURN_RECOVERY_LIMIT = intFromEnv("AI_TURN_RECOVERY_LIMIT", 10, {
 	min: 1,
 	max: 25,
 });
+const AI_TURN_RECOVERY_MAX_ATTEMPTS_PER_GUEST = intFromEnv(
+	"AI_TURN_RECOVERY_MAX_ATTEMPTS_PER_GUEST",
+	2,
+	{ min: 1, max: 5 }
+);
 const AI_MAINTENANCE_CONVERSATION_TAIL = intFromEnv(
 	"AI_MAINTENANCE_CONVERSATION_TAIL",
 	40,
@@ -127,6 +132,26 @@ const latestGuestMessageAt = (supportCase = {}) => {
 	const latestGuestIndex = latestGuestMessageIndex(supportCase);
 	if (latestGuestIndex < 0) return 0;
 	return asTime(conversation[latestGuestIndex]?.date);
+};
+
+const latestGuestMessageForRecovery = (supportCase = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const latestGuestIndex = latestGuestMessageIndex(supportCase);
+	if (latestGuestIndex < 0) return null;
+	return conversation[latestGuestIndex] || null;
+};
+
+const compactRecoveryText = (text = "") =>
+	String(text || "").trim().replace(/\s+/g, " ").slice(0, 300);
+
+const latestGuestRecoveryKey = (supportCase = {}) => {
+	const latestGuest = latestGuestMessageForRecovery(supportCase);
+	if (!latestGuest?.message) return "";
+	const messageAt = asTime(latestGuest.date);
+	const text = compactRecoveryText(latestGuest.message);
+	return `${messageAt || 0}:${text}`;
 };
 
 const aiIdleCloseReady = (supportCase = {}, cutoff) => {
@@ -328,7 +353,12 @@ const recoverUnansweredAiSupportCases = async ({
 	const oldestRecoverableGuestAt = now.getTime() - AI_TURN_RECOVERY_LOOKBACK_MS;
 	const candidates = await SupportCase.find(
 		aiCaseFilter(cutoff),
-		supportCaseMaintenanceProjection({ aiRecoveryScheduledAt: 1 })
+		supportCaseMaintenanceProjection({
+			aiRecoveryScheduledAt: 1,
+			aiRecoveryGuestKey: 1,
+			aiRecoveryAttemptCount: 1,
+			aiRecoveryCapGuestKey: 1,
+		})
 	)
 		.sort({ updatedAt: 1, createdAt: 1, _id: 1 })
 		.limit(limit)
@@ -336,12 +366,61 @@ const recoverUnansweredAiSupportCases = async ({
 		.exec();
 
 	let scheduled = 0;
+	let capped = 0;
 	for (const supportCase of candidates) {
 		if (!latestGuestNeedsAiReply(supportCase)) continue;
 		const guestAt = latestGuestMessageAt(supportCase);
 		if (!guestAt || guestAt > cutoff.getTime()) continue;
 		if (guestAt < oldestRecoverableGuestAt) continue;
 		if (!hasAiActivity(supportCase)) continue;
+		const guestRecoveryKey = latestGuestRecoveryKey(supportCase);
+		if (!guestRecoveryKey) continue;
+		const sameGuestRecovery =
+			String(supportCase.aiRecoveryGuestKey || "") === guestRecoveryKey;
+		const recoveryAttempts = sameGuestRecovery
+			? Number(supportCase.aiRecoveryAttemptCount || 0)
+			: 0;
+		if (
+			sameGuestRecovery &&
+			recoveryAttempts >= AI_TURN_RECOVERY_MAX_ATTEMPTS_PER_GUEST
+		) {
+			capped += 1;
+			if (String(supportCase.aiRecoveryCapGuestKey || "") !== guestRecoveryKey) {
+				await SupportCase.updateOne(
+					{ _id: supportCase._id },
+					{
+						$set: {
+							aiRecoveryCapReachedAt: now,
+							aiRecoveryCapGuestKey: guestRecoveryKey,
+						},
+					}
+				).exec();
+			}
+			continue;
+		}
+		const latestGuest = latestGuestMessageForRecovery(supportCase);
+		const recoveryUpdate = sameGuestRecovery
+			? {
+					$set: {
+						aiRecoveryScheduledAt: now,
+						aiRecoveryLastAttemptAt: now,
+						aiRecoveryLastGuestAt: new Date(guestAt),
+						aiRecoveryLastGuestText: compactRecoveryText(latestGuest?.message),
+					},
+					$inc: { aiRecoveryAttemptCount: 1 },
+			  }
+			: {
+					$set: {
+						aiRecoveryScheduledAt: now,
+						aiRecoveryGuestKey: guestRecoveryKey,
+						aiRecoveryAttemptCount: 1,
+						aiRecoveryLastAttemptAt: now,
+						aiRecoveryLastGuestAt: new Date(guestAt),
+						aiRecoveryLastGuestText: compactRecoveryText(latestGuest?.message),
+						aiRecoveryCapReachedAt: null,
+						aiRecoveryCapGuestKey: "",
+					},
+			  };
 		const claimed = await SupportCase.updateOne(
 			{
 				_id: supportCase._id,
@@ -354,14 +433,14 @@ const recoverUnansweredAiSupportCases = async ({
 					{ aiRecoveryScheduledAt: { $lte: cutoff } },
 				],
 			},
-			{ $set: { aiRecoveryScheduledAt: now } }
+			recoveryUpdate
 		).exec();
 		if (!claimed?.modifiedCount) continue;
 		const didSchedule = scheduleAiTurn(io, supportCase._id, { delayMs: 150 });
 		if (didSchedule) scheduled += 1;
 	}
 
-	return { scheduled, cutoff };
+	return { scheduled, capped, cutoff };
 };
 
 const startSupportCaseMaintenanceJob = ({ getIo, getScheduleAiTurn } = {}) => {
@@ -378,9 +457,10 @@ const startSupportCaseMaintenanceJob = ({ getIo, getScheduleAiTurn } = {}) => {
 			await closeInactiveB2CClientSupportCases({
 				io,
 			});
-			if (recovered.scheduled || idleClosed.closed) {
+			if (recovered.scheduled || recovered.capped || idleClosed.closed) {
 				console.log("[support-case] ai maintenance", {
 					recovered: recovered.scheduled,
+					recoveryCapped: recovered.capped,
 					idleClosed: idleClosed.closed,
 				});
 			}
