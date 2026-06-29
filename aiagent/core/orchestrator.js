@@ -307,6 +307,16 @@ const AI_TURN_SLOW_LOG_MS = intFromEnv("AI_TURN_SLOW_LOG_MS", 5000, {
 	min: 1000,
 	max: 60 * 1000,
 });
+const AI_SLOT_HYDRATION_SYNC_BUDGET_MS = intFromEnv(
+	"AI_SLOT_HYDRATION_SYNC_BUDGET_MS",
+	450,
+	{ min: 100, max: 5000 }
+);
+const AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT = intFromEnv(
+	"AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT",
+	24,
+	{ min: 8, max: 100 }
+);
 const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 10000, {
 	min: 8000,
 	max: 30000,
@@ -428,6 +438,23 @@ function currentDateRange(st = {}) {
 		checkoutISO: st.slots.checkoutISO,
 		raw: st.dateRaw || null,
 	};
+}
+
+function stayNightsBetweenISO(checkinISO = "", checkoutISO = "") {
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(checkinISO) || !/^\d{4}-\d{2}-\d{2}$/.test(checkoutISO)) {
+		return 0;
+	}
+	const checkin = new Date(`${checkinISO}T00:00:00Z`).getTime();
+	const checkout = new Date(`${checkoutISO}T00:00:00Z`).getTime();
+	if (!Number.isFinite(checkin) || !Number.isFinite(checkout) || checkout <= checkin) {
+		return 0;
+	}
+	return Math.round((checkout - checkin) / (24 * 60 * 60 * 1000));
+}
+
+function saneRecoveredStayRange(dates = {}) {
+	const nights = stayNightsBetweenISO(dates?.checkinISO || "", dates?.checkoutISO || "");
+	return nights > 0 && nights <= 60;
 }
 
 function dateRangeConflictsWithState(st = {}, dates = {}) {
@@ -3068,7 +3095,26 @@ function hydrateKnownSlotsFromConversation(
 		});
 		hydrationStageStartedAt = stageNow;
 	};
-	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const hydrationBudgetExceeded = (stage) => {
+		if (now() - hydrationStartedAt < AI_SLOT_HYDRATION_SYNC_BUDGET_MS) {
+			return false;
+		}
+		markHydrationStage(`${stage}_budget_exceeded`);
+		st.hydratedConversationLength = conversation.length;
+		st.hydratedConversationRevision = revision;
+		logStep(String(sc._id || ""), "slots.hydrate_budget_exceeded", {
+			stage,
+			elapsedMs: now() - hydrationStartedAt,
+			conversationLength: conversation.length,
+			waitFor: st.waitFor || null,
+		});
+		return true;
+	};
+	const allConversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const conversation =
+		allConversation.length > AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT
+			? allConversation.slice(-AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT)
+			: allConversation;
 	if (!conversation.length) {
 		return;
 	}
@@ -3077,12 +3123,23 @@ function hydrateKnownSlotsFromConversation(
 		!st.slots?.checkinISO ||
 		!st.slots?.checkoutISO ||
 		!st.slots?.roomTypeKey;
+	const identityHydrationRelevant =
+		isReservationDetailStep(st) ||
+		[
+			"reservation_details",
+			"fullname",
+			"nationality",
+			"phone",
+			"email_or_skip",
+			"finalize",
+		].includes(st.waitFor || "");
 	const needsIdentityRecovery =
-		!st.slots?.phone ||
-		(st.waitFor === "email_or_skip" && !st.slots?.email && !st.slots?.emailSkipped) ||
-		(AI_REQUIRE_NATIONALITY && !hasUsableNationality(st.slots?.nationality)) ||
-		!st.slots?.adultsProvided ||
-		!hasUsableFullName(st.slots?.fullName || st.slots?.name || "");
+		identityHydrationRelevant &&
+		(!st.slots?.phone ||
+			(st.waitFor === "email_or_skip" && !st.slots?.email && !st.slots?.emailSkipped) ||
+			(AI_REQUIRE_NATIONALITY && !hasUsableNationality(st.slots?.nationality)) ||
+			!st.slots?.adultsProvided ||
+			!hasUsableFullName(st.slots?.fullName || st.slots?.name || ""));
 	const needsNationalityRecovery =
 		AI_REQUIRE_NATIONALITY && !hasUsableNationality(st.slots?.nationality);
 	const needsSlotRecovery = needsStayRecovery || needsIdentityRecovery;
@@ -3175,6 +3232,7 @@ function hydrateKnownSlotsFromConversation(
 			if (
 				messageDates.checkinISO &&
 				messageDates.checkoutISO &&
+				saneRecoveredStayRange(messageDates) &&
 				!needsExplicitPastDateClarification(messageText, messageDates)
 			) {
 				mergeDateRangeIntoState(recoveredDateState, messageDates);
@@ -3210,6 +3268,7 @@ function hydrateKnownSlotsFromConversation(
 					}
 				}
 			}
+			if (hydrationBudgetExceeded("date_guest_loop")) return;
 			if (needsNationalityRecovery) {
 				const messageNationality = latestNationalityHintFromText(messageText);
 				if (messageNationality) latestGuestNationality = messageNationality;
@@ -3217,6 +3276,7 @@ function hydrateKnownSlotsFromConversation(
 		}
 		if (!guestMessage) continue;
 		if (messageText && !humanMomentWithoutDetails) guestMessages.push(messageText);
+		if (hydrationBudgetExceeded("guest_message_collect")) return;
 	}
 	markHydrationStage("date_guest_loop");
 	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
@@ -3231,18 +3291,22 @@ function hydrateKnownSlotsFromConversation(
 			? guestText
 			: latestGuestForIdentity
 		: guestText;
-	if (latestGuestDateRange) {
+	if (latestGuestDateRange && saneRecoveredStayRange(latestGuestDateRange)) {
 		mergeDateRangeIntoState(st, latestGuestDateRange);
-	} else if (latestGuestPartialDateRange) {
+	} else if (latestGuestPartialDateRange && saneRecoveredStayRange(latestGuestPartialDateRange)) {
 		mergeDateRangeIntoState(st, latestGuestPartialDateRange);
-	} else if (latestConversationDateRange) {
+	} else if (latestConversationDateRange && saneRecoveredStayRange(latestConversationDateRange)) {
 		mergeDateRangeIntoState(st, latestConversationDateRange, { onlyIfMissing: true });
-	} else if (latestConversationPartialDateRange) {
+	} else if (
+		latestConversationPartialDateRange &&
+		saneRecoveredStayRange(latestConversationPartialDateRange)
+	) {
 		mergeDateRangeIntoState(st, latestConversationPartialDateRange, { onlyIfMissing: true });
 	} else if (latestConversationPartialDate && !currentDateRange(st)) {
 		applyPartialDateToState(st, latestConversationPartialDate);
 	}
 	markHydrationStage("date_merge");
+	if (hydrationBudgetExceeded("date_merge")) return;
 	if (protectedLatestGuestDateRange) {
 		logStep(String(sc._id || ""), "slots.latest_date_change_protected", {
 			current: currentDateRange(st),
@@ -3264,6 +3328,7 @@ function hydrateKnownSlotsFromConversation(
 		st.hydratedStayConversationRevision = revision;
 		markHydrationStage("room_loop_skipped");
 	}
+	if (hydrationBudgetExceeded("room_loop")) return;
 	if (needsIdentityRecovery && st.hydratedIdentityConversationRevision !== revision) {
 		const email = latestEmailFromText(identityText);
 		if (email && !st.slots.email) st.slots.email = email;
@@ -3278,11 +3343,13 @@ function hydrateKnownSlotsFromConversation(
 			st.slots.nationality = nationality;
 		}
 		markHydrationStage("guest_identity_extract");
+		if (hydrationBudgetExceeded("guest_identity_extract")) return;
 		for (const message of conversation) {
 			if (!isGuestConversationMessage(message)) continue;
 			const contact = String(message?.messageBy?.customerEmail || "");
 			const contactPhone = cleanPhoneCandidate(contact);
 			if (contactPhone && !st.slots.phone) st.slots.phone = contactPhone;
+			if (hydrationBudgetExceeded("contact_loop")) return;
 		}
 		markHydrationStage("contact_loop");
 		let lastAsk = "";
@@ -3330,6 +3397,7 @@ function hydrateKnownSlotsFromConversation(
 				const normalized = latestNationalityHintFromText(value) || nationalityHintFromText(value) || value;
 				if (hasUsableNationality(normalized)) st.slots.nationality = normalized;
 			}
+			if (hydrationBudgetExceeded("detail_followup_loop")) return;
 		}
 		st.hydratedIdentityConversationRevision = revision;
 		markHydrationStage("detail_followup_loop");

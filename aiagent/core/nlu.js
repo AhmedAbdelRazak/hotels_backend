@@ -520,7 +520,9 @@ function escapeRegex(value = "") {
 }
 
 function hijriLabelRegex(label = "") {
-	return normalizeHijriLabel(label)
+	const normalized = normalizeHijriLabel(label);
+	if (/^\d+$/.test(normalized)) return "";
+	return normalized
 		.split(/\s+/)
 		.map(escapeRegex)
 		.join("\\s+");
@@ -536,6 +538,7 @@ function hijriMonthFromText(value = "") {
 	const normalized = normalizeHijriLabel(value);
 	for (const entry of HIJRI_MONTHS) {
 		const label = normalizeHijriLabel(entry.label);
+		if (!label || /^\d+$/.test(label)) continue;
 		if (normalized === label || normalized.includes(label)) return entry.month;
 	}
 	return null;
@@ -577,6 +580,7 @@ function fuzzyHijriMonthFromText(value = "") {
 	let ambiguous = false;
 	for (const entry of HIJRI_MONTHS) {
 		const label = compactMonthToken(entry.label);
+		if (!label || /^\d+$/.test(label)) continue;
 		if (label.length < 3) continue;
 		const distance = editDistance(compact, label);
 		const maxLength = Math.max(compact.length, label.length);
@@ -1070,6 +1074,22 @@ function quickNumericGregorianDateRange(text = "") {
 	};
 }
 
+function numericSlashDateTokenCount(text = "") {
+	return (digitsToEnglish(String(text || "")).match(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-](?:(?:20)?\d{2}))?\b/g) || []).length;
+}
+
+function namedCalendarMonthText(text = "") {
+	const raw = repairMojibakeText(text).toLowerCase();
+	const normalizedArabic = normalizeArabicSearchText(raw);
+	const hasHijriMonth = HIJRI_MONTH_REGEX_PART
+		? new RegExp(HIJRI_MONTH_REGEX_PART, "i").test(normalizedArabic)
+		: false;
+	return (
+		hasHijriMonth ||
+		/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|muharram|safar|rabi|jumada|rajab|shaaban|shaban|ramadan|ramadhan|shawwal|dhul|dhu\s+al)\b/i.test(raw)
+	);
+}
+
 function escapeDateRegex(value = "") {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1427,11 +1447,17 @@ function quickArabicGregorianMonthDateRange(text = "") {
 
 function likelyHijriDateText(text = "") {
 	const raw = repairMojibakeText(text).toLowerCase();
+	const normalizedArabic = normalizeArabicSearchText(raw);
+	const hasHijriMonth = HIJRI_MONTH_REGEX_PART
+		? new RegExp(HIJRI_MONTH_REGEX_PART, "i").test(normalizedArabic)
+		: false;
 	return (
-		/[\u0600-\u06FF]/.test(raw) ||
+		hasHijriMonth ||
 		/\b(?:hijri|ah|muharram|safar|rabi|jumada|rajab|shaaban|shaban|ramadan|ramadhan|shawwal|dhul|dhu\s+al)\b/i.test(
 			raw
-		)
+		) ||
+		(/\b(?:1[34]\d{2}|15\d{2})\b/.test(raw) &&
+			/\b(?:ah|hijri)\b/i.test(raw))
 	);
 }
 
@@ -1451,6 +1477,9 @@ function quickDateRange(text = "") {
 	}
 	const numericRange = quickNumericGregorianDateRange(raw);
 	if (numericRange?.checkinISO && numericRange?.checkoutISO) return numericRange;
+	if (numericSlashDateTokenCount(raw) > 0 && !namedCalendarMonthText(raw)) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
 	const arabicMonthRange = quickArabicGregorianMonthDateRange(raw);
 	if (arabicMonthRange?.checkinISO && arabicMonthRange?.checkoutISO) {
 		return arabicMonthRange;
