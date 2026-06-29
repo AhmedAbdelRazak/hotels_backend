@@ -1655,9 +1655,16 @@ function casualAgentAttentionOnlyText(sc = {}, st = {}, text = "") {
 		.replace(/[^\u0600-\u06ff]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+	const compactArabicWithoutGreeting = compactArabic
+		.replace(
+			/^(?:\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u064a\u0643\u0645|\u0633\u0644\u0627\u0645|\u0627\u0647\u0644\u0627|\u0627\u0647\u0644\u064a\u0646|\u0645\u0631\u062d\u0628\u0627|\u0647\u0627\u064a|\u0627\u0644\u0648)\s+(?:\u064a\u0627\s+)?/i,
+			""
+		)
+		.trim();
 	if (
-		/^(?:\u064a\u0627\s+)?(?:\u0647\u0646\u0627|\u0647\u0627\u0646\u0627|\u0639\u0627\u0626\u0634\u0647|\u0639\u0627\u064a\u0634\u0647|\u0627\u064a\u0634\u0647|\u0633\u0627\u0631\u0647|\u064a\u0627\u0633\u0645\u064a\u0646)$/i.test(
-			compactArabic
+		/^(?:\u064a\u0627\s+)?(?:\u0647\u0646\u0627|\u0647\u0627\u0646\u0627|\u0639\u0627\u0626\u0634\u0647|\u0639\u0627\u064a\u0634\u0647|\u0627\u064a\u0634\u0647|\u0633\u0627\u0631\u0647|\u064a\u0627\u0633\u0645\u064a\u0646)$/i.test(compactArabic) ||
+		/^(?:\u0647\u0646\u0627|\u0647\u0627\u0646\u0627|\u0639\u0627\u0626\u0634\u0647|\u0639\u0627\u064a\u0634\u0647|\u0627\u064a\u0634\u0647|\u0633\u0627\u0631\u0647|\u064a\u0627\u0633\u0645\u064a\u0646)$/i.test(
+			compactArabicWithoutGreeting
 		)
 	) {
 		return true;
@@ -1690,6 +1697,22 @@ function casualAgentAttentionOnlyText(sc = {}, st = {}, text = "") {
 		}
 	}
 	return false;
+}
+
+function casualGreetingWithAgentNameText(sc = {}, st = {}, text = "") {
+	if (!casualAgentAttentionOnlyText(sc, st, text)) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:hi|hello|hey|good\s+morning|good\s+afternoon|good\s+evening)\b/i.test(
+			lower
+		) ||
+		/^(?:\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u064a\u0643\u0645|\u0633\u0644\u0627\u0645|\u0627\u0647\u0644\u0627|\u0627\u0647\u0644\u064a\u0646|\u0645\u0631\u062d\u0628\u0627|\u0647\u0627\u064a|\u0627\u0644\u0648)(?:\s|$)/i.test(
+			arabic
+		) ||
+		/^(?:hi|hello|hey|goodmorning|goodafternoon|goodevening)/i.test(
+			latinCompact
+		)
+	);
 }
 
 function casualAgentCheckInText(sc = {}, st = {}, text = "") {
@@ -2983,6 +3006,35 @@ function lightweightGuestMessageWithoutReservationPayloadText(sc = {}, st = {}, 
 			looksLikeGreetingOnly(value) ||
 			fastEnglishSmalltalkText(sc, st, value)
 	);
+}
+
+function preHydrateCasualTurnReplyText(sc = {}, st = {}, text = "") {
+	const value = String(text || "").trim();
+	if (!value || value.length > 220) return "";
+	if (
+		severeAbusiveGuestText(value) ||
+		humanHandoffReason(value) ||
+		wantsPaymentHelp(value) ||
+		explicitlyExistingReservationIntent(value) ||
+		reservationRecoveryCandidateText(value) ||
+		hasOperationalBookingSignal(value)
+	) {
+		return "";
+	}
+	const fastSmalltalk = fastEnglishSmalltalkText(sc, st, value);
+	if (fastSmalltalk) return fastSmalltalk;
+	const humanMomentKind = guestHumanMomentKind(sc, st, value);
+	if (!humanMomentKind) return "";
+	if (
+		humanMomentKind === "attention" &&
+		casualGreetingWithAgentNameText(sc, st, value)
+	) {
+		return greetingText(sc, st);
+	}
+	if (humanMomentKind === "serious_distress" || humanMomentKind === "distress") {
+		return emotionalSupportReplyText(sc, st, value);
+	}
+	return reservationDetailHumanMomentReplyText(sc, st, value);
 }
 
 function guestConversationHasReservationRecoveryCandidate(
@@ -19972,6 +20024,25 @@ async function planTurn(io, sc) {
 			});
 			conversationContextRecovered = true;
 		};
+		const preHydrateCarriedQuestion =
+			userText && !severeAbusiveGuestText(userText)
+				? previousUnansweredDirectGuestTextForPing(sc, st, userText)
+				: "";
+		const preHydrateCasualReply = preHydrateCarriedQuestion
+			? ""
+			: preHydrateCasualTurnReplyText(sc, st, userText);
+		if (preHydrateCasualReply) {
+			updateActiveLanguageFromText(sc, st, userText);
+			logStep(caseId, "smalltalk.fast_reply_pre_context_recovery", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await humanSend(io, sc, st, preHydrateCasualReply, {
+				fast: true,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			return;
+		}
 		recoverConversationContextOnce("pre_quiet");
 		if (
 			userText &&
@@ -23035,6 +23106,9 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		deterministicFinalReservationReview,
 		guestHumanMomentKind,
 		reservationDetailHumanMomentReplyText,
+		preHydrateCasualTurnReplyText,
+		casualAgentAttentionOnlyText,
+		casualGreetingWithAgentNameText,
 		casualAgentCheckInText,
 	};
 }
