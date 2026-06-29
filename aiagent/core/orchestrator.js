@@ -317,6 +317,10 @@ const AI_DELAY_NOTICE_COOLDOWN_MS = intFromEnv(
 	5 * 60 * 1000,
 	{ min: 60000, max: 30 * 60 * 1000 }
 );
+const AI_RESPONSIVE_SILENCE_DYNAMIC_WRITER = boolFromEnv(
+	"AI_RESPONSIVE_SILENCE_DYNAMIC_WRITER",
+	false
+);
 const AI_PREVIOUS_GUEST_CONTEXT_ENABLED = boolFromEnv(
 	"AI_PREVIOUS_GUEST_CONTEXT_ENABLED",
 	false
@@ -18885,25 +18889,28 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 			userText,
 			waitFor
 		);
-		const prompt = await withSoftTimeout(
-			write(
-				io,
-				latestCase,
-				st,
-				"The guest's latest turn has not received a support reply yet. Review the conversation context and send one concise, professional follow-up in the guest's active language. Answer any direct question in latestUserMessage first using available hotel/reservation context. If there is no direct question, continue the current wait state by asking only for the missing item. Never ask for unrelated dates, room type, or confirmation if the guest asked a factual question. Do not mention delays or internal systems. Keep it short and natural.",
-				{
-					latestUserMessage: userText,
-					waitFor,
-					slots: st.slots,
-					quoteReady: activeQuoteMatchesSlots(st),
-					bookingNudgePaused: bookingNudgePaused(st),
-					selectedHotelFacts: st.hotel ? buildActiveHotelFacts(latestCase, st) : null,
-					fallbackText: fallbackPrompt,
-				}
-			),
-			3500,
-			""
-		);
+		let prompt = "";
+		if (AI_RESPONSIVE_SILENCE_DYNAMIC_WRITER) {
+			prompt = await withSoftTimeout(
+				write(
+					io,
+					latestCase,
+					st,
+					"The guest's latest turn has not received a support reply yet. Review the conversation context and send one concise, professional follow-up in the guest's active language. Answer any direct question in latestUserMessage first using available hotel/reservation context. If there is no direct question, continue the current wait state by asking only for the missing item. Never ask for unrelated dates, room type, or confirmation if the guest asked a factual question. Do not mention delays or internal systems. Keep it short and natural.",
+					{
+						latestUserMessage: userText,
+						waitFor,
+						slots: st.slots,
+						quoteReady: activeQuoteMatchesSlots(st),
+						bookingNudgePaused: bookingNudgePaused(st),
+						selectedHotelFacts: st.hotel ? buildActiveHotelFacts(latestCase, st) : null,
+						fallbackText: fallbackPrompt,
+					}
+				),
+				3500,
+				""
+			);
+		}
 		const sent = await humanSend(io, latestCase, st, prompt || fallbackPrompt, {
 			fast: true,
 			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
@@ -18921,6 +18928,43 @@ async function maybeSendResponsiveSilenceFollowup(io, sc, st, userText = "", cas
 		});
 		return false;
 	}
+}
+
+async function sendBoundedUnansweredTurnFallback(
+	io,
+	latestCase,
+	st,
+	caseId,
+	reason = "turn_recovery_fallback"
+) {
+	if (!io || !latestCase || !st || !latestGuestNeedsAiReply(latestCase)) {
+		return false;
+	}
+	const latestGuest = lastGuestMessage(latestCase);
+	const userText = String(latestGuest?.message || lastUserText(latestCase) || "").trim();
+	if (!userText) return false;
+	st.activeTurnUserText = userText;
+	st.activeTurnGuestAt = latestGuest?.date
+		? new Date(latestGuest.date).getTime()
+		: now();
+	if (!Number.isFinite(st.activeTurnGuestAt)) st.activeTurnGuestAt = now();
+	st.activeTurnHadReply = false;
+	st.turnInFlight = false;
+	st.turnOwner = null;
+	st.allowPostBookingReentry = false;
+	st.interrupt = false;
+	st.queue = [];
+	st.sendingToken = "";
+	const waitFor = st.waitFor || nextPivot(st);
+	const fallbackText = responsiveSilenceFallbackText(latestCase, st, userText, waitFor);
+	const sent = await humanSend(io, latestCase, st, fallbackText, {
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
+	if (sent) {
+		logStep(caseId, "turn_recovery.fallback_sent", { reason, waitFor });
+	}
+	return sent;
 }
 
 /* ------------------- TURN PLANNER ------------------- */
@@ -22237,6 +22281,15 @@ async function runUnansweredTurnRecovery(io, caseId) {
 			waitFor: activeState.waitFor || null,
 			forceReleaseMs: AI_TURN_FORCE_RELEASE_MS,
 		});
+		const fallbackState = {
+			...activeState,
+			interrupt: false,
+			turnInFlight: false,
+			turnOwner: null,
+			allowPostBookingReentry: false,
+			queue: [],
+			sendingToken: "",
+		};
 		activeState.interrupt = true;
 		activeState.turnInFlight = false;
 		activeState.turnOwner = null;
@@ -22244,6 +22297,18 @@ async function runUnansweredTurnRecovery(io, caseId) {
 		activeState.sendingToken = "";
 		activePlanLocks.delete(caseId);
 		activePlanLockAts.delete(caseId);
+		memo.set(caseId, fallbackState);
+		const sentFallback = await sendBoundedUnansweredTurnFallback(
+			io,
+			latestCase,
+			fallbackState,
+			caseId,
+			"force_release"
+		);
+		if (sentFallback || !latestGuestNeedsAiReply(await getSupportCaseById(caseId))) {
+			unansweredTurnRecoveryAttempts.delete(caseId);
+			return sentFallback;
+		}
 	}
 	logStep(caseId, "turn_recovery.run", { attempts });
 	await planTurn(io, latestCase);
@@ -22272,7 +22337,9 @@ function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	}, Math.max(0, Number(delayMs) || 0));
 	if (typeof timer.unref === "function") timer.unref();
 	scheduledTurns.set(caseId, timer);
-	unansweredTurnRecoveryAttempts.set(caseId, 0);
+	if (!unansweredTurnRecoveryAttempts.has(caseId)) {
+		unansweredTurnRecoveryAttempts.set(caseId, 0);
+	}
 	scheduleUnansweredTurnRecovery(
 		io,
 		caseId,
