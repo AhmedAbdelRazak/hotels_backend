@@ -1245,9 +1245,7 @@ Future TODO Backlog - Added 2026-05-26
   - After final confirmation, st.waitFor="post_booking_followup". The AI waits for the guest's answer, closes warmly on no/thanks, asks for details on vague yes, or passes a concrete new request back into normal orchestration.
   - Nationality is required by default for AI-created reservations. Set AI_REQUIRE_NATIONALITY=false only if the business explicitly allows skipping it.
   - AI-created reservations must still use validateReservationInventoryForCreate, captureReservationAvailabilitySnapshot, and markReservationPendingConfirmation with clientVisibleStatus="confirmed" and inventoryBlocks=true.
-  - 2026-06-28 OpenAI-first live-chat hardening: aiagent/core/openaiFirstOrchestrator.js sends requestMetadata.languageSignals to every OpenAI planning/writer call. The bot should answer in the latest clearly detected guest language and fall back to the support-case preferred/current conversation language when the latest message is short or neutral.
-  - 2026-06-28 OpenAI-first pricing and inventory hardening: live quote checks load only the requested hotel pricing dates and use slim overlapping-reservation projections containing dates, statuses, pendingConfirmation inventory flags, and room type/count fields. Do not reintroduce full pickedRoomsPricing daily arrays or full roomCountDetails calendars into the chat turn path.
-  - 2026-06-28 OpenAI-first confirmation hardening: before createReservationForCase runs, the selected quote must still match the quote-time inventory summary. If validation fails, the bot must send a normal guest-facing recovery reply and ask for another date range or room type; it must not go silent or claim a reservation was created.
+  - 2026-06-28 legacy chatbot restoration: aiagent/core/orchestrator.js is again the only active B2C chatbot runtime. Keep hotel facts, pricing, inventory validation, booking-state memory, quick replies, and reservation creation in the legacy planner unless a future replacement is explicitly requested and fully re-tested.
   - 2026-06-08 chatbot reservation UX hardening:
     - Default human-style pacing is faster: think 120-350ms, greet think 300ms, type char 2-5ms, type clamp 450-1800ms, and between-sends 150-350ms unless environment overrides are set.
     - Review/confirmation detection accepts native Arabic confirmation words and common Arabizi/Franko spellings such as ta2keed, takeed, takid, and t2keed. "confirmation number" style existing-reservation references must not be treated as approval.
@@ -2344,10 +2342,7 @@ Future TODO Backlog - Added 2026-05-26
   - controllers/reservations.js is the main enforcement point for reservation updates, pending-confirmation reversion, notification refreshes, source immutability, history cutoff filters, availability validation, and AI reservation creation helpers.
   - controllers/janat.js owns /admin all-reservations list filters, distinct booking-source options, public client update source stripping, and customer_booking_source response projection.
   - services/otaReservationMapper.js stamps customer_details.booking_source for OTA-created reservations and only backfills it during OTA reconciliation when missing.
-  - aiagent/core/openaiFirstOrchestrator.js owns the default OpenAI-first B2C chatbot flow. It sends compact conversation/hotel/reservation context to OpenAI, excludes huge calendar pricing arrays from the first call, computes pricing server-side only when OpenAI says pricing is needed, and creates reservations only after the guest presses the confirm_reservation quick reply on the final review.
-  - The OpenAI-first opening greeting is a short local reception/reservations greeting to avoid spending heap before the guest asks a question; guest messages still go through OpenAI-first planning/writing.
-  - OpenAI-first guest-facing prose defaults to AI_OPENAI_FIRST_WRITER_KIND=nlu so live chat uses the fast chatbot model for latency and heap stability. Use AI_OPENAI_FIRST_WRITER_KIND=writer only after production memory/latency measurement.
-  - aiagent/core/orchestrator.js preserves the legacy rule-heavy socket-driven chatbot flow and now delegates schedulePlanTurn/wireSocket to the OpenAI-first engine by default. Set AI_AGENT_ENGINE=legacy or AI_AGENT_USE_LEGACY=true to restore the legacy planner.
+  - aiagent/core/orchestrator.js owns the active legacy B2C chatbot flow, including socket scheduling, direct-answer rules, room facts, pricing, inventory checks, booking state, quick replies, and AI reservation creation.
   - aiagent/core/actions.js rejects AI reservation creation unless full name, phone, nationality, adults count, and children count are valid, then validates inventory, saves reservation_status/state="Pending Confirmation", and stamps pendingConfirmation.clientVisibleStatus="confirmed" for guest-facing responses.
   - models/supportcase.js allows AI conversation turns to store quickReplies for audit/display.
 - Maintenance requirements:
@@ -3082,45 +3077,19 @@ Production Deployment Result - Zad/Jannat Shared AI Chat Hiccup Follow-up Fix - 
   - Normal production turns should still target under 8 seconds; the 10 second
     wait notice is a rare safety net.
 
-2026-06-28 OpenAI-First Chatbot Engine
-- Reference:
-  - docs/chatbot-openai-first-engine-2026-06-28.md.
+2026-06-28 Legacy Chatbot Engine Restored
 - Files:
-  - aiagent/core/openaiFirstOrchestrator.js
   - aiagent/core/orchestrator.js
   - controllers/supportcase.js
 - Default engine:
-  - `AI_AGENT_ENGINE=openai_first` delegates guest turns to the compact
-    OpenAI-first engine.
-  - `AI_AGENT_ENGINE=legacy` or `AI_AGENT_USE_LEGACY=true` restores the
-    previous rule-heavy planner.
+  - The rule-heavy legacy planner in aiagent/core/orchestrator.js is the active
+    B2C chatbot runtime again.
+  - Production should run with `AI_AGENT_ENGINE=legacy` and
+    `AI_AGENT_USE_LEGACY=true` for clarity.
 - Runtime contract:
-  - Opening greetings are local and short. Guest replies are OpenAI-first with
-    compact hotel/reservation/conversation context.
-  - Obvious hotel-fact questions for active room types, shuttle/bus, Nusuk,
-    meals, parking, address/location, and walking/driving distance are answered
-    directly from the current hotel document before any OpenAI call. Price,
-    availability, booking, and date-sensitive turns still use the pricing and
-    OpenAI flow.
-  - The OpenAI payload is ordered as `reservationDetails`, `hotelDetails`,
-    `conversation`, then request metadata. Hotel details are grouped into
-    identity, public presentation, room inventory, transportation/pilgrimage,
-    and policies/rules.
-  - Large calendar/pricing arrays stay out of the first prompt; pricing is
-    computed from a compact date-limited quote summary and only compact price
-    summaries are sent to the guest-facing writer call.
-  - The AI hotel cache keeps compact calendar rows only, and live-chat pricing
-    maps only requested stay dates to prevent live chat heap spikes.
-  - OpenAI-first uses a slim hotel loader for normal chat context, a
-    date-limited pricing loader only for requested stay dates, and quote-time
-    inventory validation against overlapping reservations before saying a room
-    is available.
-  - Reservation creation remains deterministic and requires the explicit
-    `confirm_reservation` quick-reply action.
-  - Optional email is supported through a `skip_email` quick reply.
-  - The new engine owns its own per-case scheduling, active-turn lock, typing
-    quiet window, and stale-answer check. Controller safety retries are
-    legacy-only to avoid duplicate/stacked AI turns.
-  - OpenAI-first reply composition has a bounded deadline. If OpenAI or an
-    internal AI step stalls, the turn appends a hotel-aware fallback response so
-    public chats do not remain unanswered.
+  - The legacy planner owns socket wiring, public support-case scheduling,
+    safety retry, queued turns, direct-answer rules, hotel facts, pricing,
+    availability, booking state, quick replies, and reservation creation.
+  - Reservation creation remains deterministic and requires the explicit final
+    confirmation quick reply.
+  - Optional email is supported through a localized skip quick reply.

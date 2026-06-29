@@ -107,13 +107,47 @@ function safeId(id) {
 async function getSupportCaseById(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
-	return SupportCase.findById(_id).lean().exec();
+	const supportCase = await SupportCase.findById(_id).lean().exec();
+	return normalizeSupportCaseQuickReplies(supportCase);
+}
+
+function normalizeQuickReplyAction(action = "") {
+	const value = String(action || "").trim().slice(0, 60);
+	if (["continue_booking", "proceed_to_booking", "continue"].includes(value)) {
+		return "proceed";
+	}
+	if (value === "confirm_reservation") return "place_reservation";
+	return value;
+}
+
+function normalizeConversationQuickReplies(conversation = {}) {
+	if (!conversation || typeof conversation !== "object") return conversation;
+	if (!Array.isArray(conversation.quickReplies)) return conversation;
+	return {
+		...conversation,
+		quickReplies: conversation.quickReplies.slice(0, 6).map((reply) => ({
+			...reply,
+			action: normalizeQuickReplyAction(reply?.action),
+		})),
+	};
+}
+
+function normalizeSupportCaseQuickReplies(supportCase) {
+	if (!supportCase || !Array.isArray(supportCase.conversation)) {
+		return supportCase;
+	}
+	return {
+		...supportCase,
+		conversation: supportCase.conversation.map(normalizeConversationQuickReplies),
+	};
 }
 
 function buildSupportCaseAppendUpdate(messageOrFields = {}) {
 	const update = {};
 	if (messageOrFields && messageOrFields.conversation) {
-		update.$push = { conversation: messageOrFields.conversation };
+		update.$push = {
+			conversation: normalizeConversationQuickReplies(messageOrFields.conversation),
+		};
 	}
 	const other = { ...messageOrFields };
 	delete other.conversation;
@@ -131,9 +165,10 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 
 	const update = buildSupportCaseAppendUpdate(messageOrFields);
 
-	return SupportCase.findByIdAndUpdate(_id, update, { new: true })
+	const supportCase = await SupportCase.findByIdAndUpdate(_id, update, { new: true })
 		.lean()
 		.exec();
+	return normalizeSupportCaseQuickReplies(supportCase);
 }
 
 async function updateSupportCaseAppendIfNoRecentAiDuplicate(
@@ -241,9 +276,16 @@ async function updateSupportCaseAppendIfNoRecentAiDuplicate(
 	})
 		.lean()
 		.exec();
-	if (updatedCase) return { updatedCase, skipped: false };
+	if (updatedCase) {
+		return {
+			updatedCase: normalizeSupportCaseQuickReplies(updatedCase),
+			skipped: false,
+		};
+	}
 	return {
-		updatedCase: await SupportCase.findById(_id).lean().exec(),
+		updatedCase: normalizeSupportCaseQuickReplies(
+			await SupportCase.findById(_id).lean().exec()
+		),
 		skipped: true,
 	};
 }

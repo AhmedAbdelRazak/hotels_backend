@@ -9,6 +9,18 @@ function firstNameOf(name = "") {
 	return s.split(/\s+/)[0];
 }
 
+function repairMojibakeText(value = "") {
+	const raw = String(value || "");
+	if (!/[ÃØÙ]/.test(raw)) return raw;
+	try {
+		const repaired = Buffer.from(raw, "latin1").toString("utf8");
+		if (/[\u0600-\u06FF]/.test(repaired)) return repaired;
+	} catch {
+		// Keep the original text if it was not latin1-mojibake.
+	}
+	return raw;
+}
+
 const ROOM_SYNONYMS = [
 	{
 		key: "doubleRooms",
@@ -18,6 +30,16 @@ const ROOM_SYNONYMS = [
 			"king",
 			"queen",
 			"twin",
+			"habitacion doble",
+			"habitacion estandar",
+			"habitación doble",
+			"habitación estándar",
+			"doble",
+			"chambre double",
+			"kamar double",
+			"kamar ganda",
+			"bilik double",
+			"bilik berkembar",
 			"\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629",
 			"\u0645\u0632\u062f\u0648\u062c\u0629",
 			"\u063a\u0631\u0641\u0629 \u0632\u0648\u062c\u064a\u0629",
@@ -40,6 +62,11 @@ const ROOM_SYNONYMS = [
 		key: "tripleRooms",
 		terms: [
 			"triple",
+			"habitacion triple",
+			"habitación triple",
+			"chambre triple",
+			"kamar triple",
+			"bilik triple",
 			"3 bed",
 			"3 beds",
 			"three bed",
@@ -61,6 +88,16 @@ const ROOM_SYNONYMS = [
 		key: "quadRooms",
 		terms: [
 			"quad",
+			"quadruple",
+			"habitacion cuadruple",
+			"habitacion cuádruple",
+			"habitación cuadruple",
+			"habitación cuádruple",
+			"cuadruple",
+			"cuádruple",
+			"chambre quadruple",
+			"kamar quadruple",
+			"bilik quadruple",
 			"4 bed",
 			"4 beds",
 			"four bed",
@@ -82,6 +119,16 @@ const ROOM_SYNONYMS = [
 		key: "familyRooms",
 		terms: [
 			"family",
+			"familiar",
+			"habitacion familiar",
+			"habitación familiar",
+			"habitacion quintuple",
+			"habitación quíntuple",
+			"habitacion quíntuple",
+			"habitación quintuple",
+			"chambre familiale",
+			"kamar keluarga",
+			"bilik keluarga",
 			"quintuple",
 			"quintuple room",
 			"quintible",
@@ -203,15 +250,52 @@ function capacityRoomKeyFromText(text = "") {
 	return null;
 }
 
-function mapRoomToKey(text = "") {
-	const low = String(text || "").toLowerCase();
-	const normalized = normalizeNumberWordsForParsing(text).toLowerCase();
-	for (const r of ROOM_SYNONYMS) {
-		if (r.terms.some((t) => roomTermMatches(low, t) || roomTermMatches(normalized, t))) {
-			return r.key;
-		}
+function capacityOnlyRoomTerm(term = "") {
+	const raw = String(term || "").toLowerCase().trim();
+	if (!raw) return false;
+	if (
+		/^(?:[2-5]|two|three|four|five)\s+(?:people|persons?|individuals?|guests?|adults?)$/.test(
+			raw
+		) ||
+		/^rooms?\s+for\s+(?:[2-5]|two|three|four|five)$/.test(raw)
+	) {
+		return true;
 	}
-	return capacityRoomKeyFromText(text);
+	const normalizedArabic = normalizeArabicRoomText(raw);
+	return /(?:^|\s)(?:ل?شخصين|شخصين|ل?فردين|فردين|ل?ضيفين|ضيفين|اشخاص|أشخاص|افراد|أفراد|ضيوف)(?:\s|$)/.test(
+		normalizedArabic
+	);
+}
+
+function mapRoomToKey(text = "") {
+	const original = String(text || "");
+	const repaired = repairMojibakeText(original);
+	const candidates = [...new Set([original, repaired])];
+	for (const candidate of candidates) {
+		const low = String(candidate || "").toLowerCase();
+		const normalized = normalizeNumberWordsForParsing(candidate).toLowerCase();
+		for (const r of ROOM_SYNONYMS) {
+			if (
+				r.terms.some(
+					(t) =>
+						!capacityOnlyRoomTerm(t) &&
+						(roomTermMatches(low, t) || roomTermMatches(normalized, t))
+				)
+			) {
+				return r.key;
+			}
+		}
+		for (const r of ROOM_SYNONYMS) {
+			if (
+				r.terms.some((t) => roomTermMatches(low, t) || roomTermMatches(normalized, t))
+			) {
+				return r.key;
+			}
+		}
+		const capacity = capacityRoomKeyFromText(candidate);
+		if (capacity) return capacity;
+	}
+	return null;
 }
 
 const MONTHS = {
@@ -1001,9 +1085,10 @@ function hasNumberWordAliasText(value = "") {
 }
 
 function normalizeDateSearchText(value = "") {
-	const normalized = hasNumberWordAliasText(value)
-		? normalizeNumberWordsForParsing(value)
-		: digitsToEnglish(value).toLowerCase();
+	const source = repairMojibakeText(value);
+	const normalized = hasNumberWordAliasText(source)
+		? normalizeNumberWordsForParsing(source)
+		: digitsToEnglish(source).toLowerCase();
 	return String(normalized || "")
 		.normalize("NFD")
 		.replace(/[\u0300-\u036f]/g, "")
@@ -1336,7 +1421,7 @@ function quickArabicGregorianMonthDateRange(text = "") {
 }
 
 function likelyHijriDateText(text = "") {
-	const raw = String(text || "").toLowerCase();
+	const raw = repairMojibakeText(text).toLowerCase();
 	return (
 		/[\u0600-\u06FF]/.test(raw) ||
 		/\b(?:hijri|ah|muharram|safar|rabi|jumada|rajab|shaaban|shaban|ramadan|ramadhan|shawwal|dhul|dhu\s+al)\b/i.test(

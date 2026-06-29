@@ -83,3 +83,28 @@ Both restore the same stay and guest details in under two seconds locally, inste
 - The room-count fast lane should be tested with both English and Arabic forms, including "room for two" and "عايز غرفة لفردين"; expected behavior is a double-room recommendation plus a date request, never phone/name collection.
 - Trust/relationship questions should be tested both alone and followed by an agent-name ping. Expected behavior is a direct reassurance about the selected hotel reception/reservations within the normal prompt target.
 - If the controller-level trust reply fires, the orchestrator is intentionally not scheduled for that same message. This avoids duplicate reassurance replies while preserving normal AI handling for every other message.
+
+## Final Go-Live Pass - Legacy Engine
+
+The OpenAI-first experiment was removed from the runtime path and the legacy orchestrator is the production engine again. The legacy flow now keeps the deterministic booking guardrails that worked best, with focused fixes for the latest go-live defects:
+
+- Final booking creation requires the public quick-reply action `place_reservation`; typed confirmation text only re-shows the final button.
+- Explicit room changes from the latest guest turn win over older assistant recommendations, so a later "make it triple" cannot be overwritten by a previous double-room quote.
+- Room recommendations by guest count still work, including cases such as "for me and my son" where a double room is the natural recommendation when available.
+- Booking memory questions such as "what room did we choose?" answer from the current slots and keep the active booking buttons visible.
+- Price reminders during reservation-detail collection no longer intercept labeled guest details when a guest name contains words such as "Price".
+- Optional-email prompts keep the skip-email quick reply visible after price or memory reminders.
+- Language-switch acknowledgements preserve the active booking quick replies, so moving from English to Arabic does not strand the guest.
+- Room type lists are formatted line-by-line in the customer-service monitoring UI for readability.
+- Saved Arabic hotel facts, including bus and policy details, are translated/adapted before being shown to English guests.
+
+Local production-like QA passed on 2026-06-28 with `AI_AGENT_ENGINE=legacy`, `AI_AGENT_USE_LEGACY=true`, `AI_AGENT_DEBUG=false`, and WhatsApp dry-run enabled:
+
+- `english_full_25_turn_stress`: 22 guest turns, 22 AI replies, 0 slow replies, reservation saved with correct name, phone, nationality, guests, hotel, and room context.
+- `arabic_full_memory_buttons`: 14 guest turns, 14 AI replies, 0 slow replies, reservation saved with correct Arabic guest name, phone, nationality, guests, and hotel.
+- `final_button_required`: reservation was not created until the actual quick-reply button was used.
+- `post_review_price_not_dates`: price reminder after review did not ask for dates again and preserved the final booking path.
+- `room_change_no_stale_quote`: later triple-room request replaced the earlier double quote and did not reuse stale room context.
+- `language_switch_mid_flow`: switched to Arabic, answered in Arabic, and kept booking quick replies available.
+
+Go-live quality note: English and Arabic are the current production target and tested at 9+/10 for the Zad Ajyad booking flow. Spanish, French, Urdu, Hindi, Indonesian, and Malay use the same routing and deterministic guards, but should be treated as future polish at roughly 7.5-8.5/10 depending on how explicit the guest is.

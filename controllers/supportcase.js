@@ -31,7 +31,7 @@ const isAiAgentEnabled = () =>
 	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
 
 const isLegacyAiAgentEngine = () => {
-	const engine = String(process.env.AI_AGENT_ENGINE || "openai_first")
+	const engine = String(process.env.AI_AGENT_ENGINE || "legacy")
 		.trim()
 		.toLowerCase();
 	const legacyFlag = String(process.env.AI_AGENT_USE_LEGACY || "")
@@ -260,11 +260,12 @@ async function appendPublicAiQuickReply(io, supportCase = {}, message = "") {
 		.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
 		.lean()
 		.exec();
-	if (updated && io) {
+	const normalizedUpdated = normalizeSupportCaseForResponse(updated);
+	if (normalizedUpdated && io) {
 		io.to(caseId).emit("receiveMessage", { ...aiEntry, caseId });
-		io.emit("supportCaseUpdated", updated);
+		io.emit("supportCaseUpdated", normalizedUpdated);
 	}
-	return updated;
+	return normalizedUpdated;
 }
 
 const configuredSuperAdminIds = () =>
@@ -388,6 +389,15 @@ const cleanText = (value = "", max = 8000) =>
 		.replace(/\u0000/g, "")
 		.trim()
 		.slice(0, max);
+
+const normalizeQuickReplyAction = (value = "") => {
+	const action = cleanText(value, 60);
+	if (["continue_booking", "proceed_to_booking", "continue"].includes(action)) {
+		return "proceed";
+	}
+	if (action === "confirm_reservation") return "place_reservation";
+	return action;
+};
 
 const LOCALIZED_DIGIT_RANGES = [
 	[0x0660, 0x0669],
@@ -779,7 +789,7 @@ const compactConversationEntryForList = (entry = {}) => ({
 		? entry.quickReplies.slice(0, 6).map((reply) => ({
 				label: cleanText(reply?.label, 80),
 				value: cleanText(reply?.value, 240),
-				action: cleanText(reply?.action, 60),
+				action: normalizeQuickReplyAction(reply?.action),
 		  }))
 		: [],
 });
@@ -834,6 +844,34 @@ const compactClientSupportCaseForList = (supportCase = {}, req = {}) => {
 
 const compactClientSupportCasesForList = (cases = [], req = {}) =>
 	cases.map((supportCase) => compactClientSupportCaseForList(supportCase, req));
+
+const normalizeFullConversationQuickReplies = (entry = {}) => {
+	if (!entry || typeof entry !== "object") return entry;
+	if (!Array.isArray(entry.quickReplies)) return entry;
+	return {
+		...entry,
+		quickReplies: entry.quickReplies.slice(0, 6).map((reply) => ({
+			...reply,
+			action: normalizeQuickReplyAction(reply?.action),
+		})),
+	};
+};
+
+const normalizeSupportCaseForResponse = (supportCase) => {
+	if (!supportCase) return supportCase;
+	const plain =
+		typeof supportCase.toObject === "function"
+			? supportCase.toObject()
+			: supportCase;
+	if (!Array.isArray(plain.conversation)) return plain;
+	return {
+		...plain,
+		conversation: plain.conversation.map(normalizeFullConversationQuickReplies),
+	};
+};
+
+const normalizeSupportCasesForResponse = (cases = []) =>
+	Array.isArray(cases) ? cases.map(normalizeSupportCaseForResponse) : cases;
 
 const isAiForceRespondEnabled = () =>
 	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
@@ -919,14 +957,10 @@ const isGeneratedInitialClientMessage = (value = "") => {
 
 const initialClientMessageFromRequest = ({
 	initialClientMessage,
-	inquiryDetails,
 } = {}) => {
 	const direct = cleanText(initialClientMessage, 8000);
 	if (direct) return isGeneratedInitialClientMessage(direct) ? "" : direct;
-	const fallback = cleanText(inquiryDetails, 8000)
-		.replace(/^(?:\s*\[[^\]]+\])+\s*/g, "")
-		.trim();
-	return isGeneratedInitialClientMessage(fallback) ? "" : fallback;
+	return "";
 };
 
 const buildPublicClientConversation = (conversation = {}, supportCase = {}) => {
@@ -1134,7 +1168,7 @@ exports.getSupportCases = async (req, res) => {
 				.populate("participants.user");
 		}
 
-		res.status(200).json(cases);
+		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1156,7 +1190,7 @@ exports.getSupportCaseById = async (req, res) => {
 			return res.status(403).json({ error: "Support case access denied" });
 		}
 
-		res.status(200).json(supportCase);
+		res.status(200).json(normalizeSupportCaseForResponse(supportCase));
 	} catch (error) {
 		console.error("Error fetching support case:", error);
 		res.status(400).json({ error: error.message });
@@ -1338,19 +1372,23 @@ exports.updateSupportCase = async (req, res) => {
 			return res.status(404).json({ error: "Support case not found" });
 		}
 
+		const normalizedUpdatedCase = normalizeSupportCaseForResponse(updatedCase);
+
 		if (caseStatus === "closed") {
-			req.io.emit("closeCase", { case: updatedCase, closedBy });
+			req.io.emit("closeCase", { case: normalizedUpdatedCase, closedBy });
 		} else if (safeConversation) {
-			req.io.emit("receiveMessage", updatedCase);
+			req.io.emit("receiveMessage", normalizedUpdatedCase);
 		}
-		req.io.to(String(updatedCase._id)).emit("supportCaseUpdated", updatedCase);
-		req.io.emit("supportCaseUpdated", updatedCase);
+		req.io
+			.to(String(normalizedUpdatedCase._id))
+			.emit("supportCaseUpdated", normalizedUpdatedCase);
+		req.io.emit("supportCaseUpdated", normalizedUpdatedCase);
 		const previousEscalationStatus = currentCase.escalationStatus || "none";
-		const nextEscalationStatus = updatedCase.escalationStatus || "none";
+		const nextEscalationStatus = normalizedUpdatedCase.escalationStatus || "none";
 		if (previousEscalationStatus !== nextEscalationStatus) {
 			const escalationPayload = {
-				case: updatedCase,
-				caseId: String(updatedCase._id),
+				case: normalizedUpdatedCase,
+				caseId: String(normalizedUpdatedCase._id),
 				escalationStatus: nextEscalationStatus,
 			};
 			if (nextEscalationStatus === "active") {
@@ -1361,16 +1399,19 @@ exports.updateSupportCase = async (req, res) => {
 			}
 			req.io.emit("supportCaseEscalationUpdated", escalationPayload);
 		}
-		if (currentCase.aiToRespond && updatedCase.aiToRespond === false) {
-			req.io.to(String(updatedCase._id)).emit("aiPaused", {
-				caseId: String(updatedCase._id),
-				reason: updatedCase.aiHandoffReason || "human_takeover",
+		if (currentCase.aiToRespond && normalizedUpdatedCase.aiToRespond === false) {
+			req.io.to(String(normalizedUpdatedCase._id)).emit("aiPaused", {
+				caseId: String(normalizedUpdatedCase._id),
+				reason: normalizedUpdatedCase.aiHandoffReason || "human_takeover",
 				agentName:
-					req.profile?.name || req.profile?.email || updatedCase.supporterName || "Jannat Booking",
+					req.profile?.name ||
+					req.profile?.email ||
+					normalizedUpdatedCase.supporterName ||
+					"Jannat Booking",
 			});
 		}
 
-		res.status(200).json(updatedCase);
+		res.status(200).json(normalizedUpdatedCase);
 	} catch (error) {
 		console.log(error, "error");
 		res.status(400).json({ error: error.message });
@@ -1391,7 +1432,7 @@ exports.getPublicClientSupportCaseById = async (req, res) => {
 			return res.status(404).json({ error: "Support case not found" });
 		}
 
-		res.status(200).json(supportCase);
+		res.status(200).json(normalizeSupportCaseForResponse(supportCase));
 	} catch (error) {
 		console.error("Error fetching public client support case:", error);
 		res.status(400).json({ error: error.message });
@@ -1553,7 +1594,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			}
 		}
 
-		res.status(200).json(updatedCase);
+		res.status(200).json(normalizeSupportCaseForResponse(updatedCase));
 	} catch (error) {
 		console.error("Error updating public client support case:", error);
 		res.status(400).json({ error: error.message });
@@ -1921,7 +1962,7 @@ exports.createContactSupportCase = async (req, res) => {
 exports.getUnassignedSupportCases = async (req, res) => {
 	try {
 		const cases = await SupportCase.find({ supporterId: null });
-		res.status(200).json(cases);
+		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1946,7 +1987,7 @@ exports.getOpenSupportCases = async (req, res) => {
 			.populate("supporterId")
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
-		res.status(200).json(cases);
+		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
@@ -1972,7 +2013,7 @@ exports.getOpenSupportCasesForHotel = async (req, res) => {
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
 		// Return the cases in the response
-		res.status(200).json(cases);
+		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		// Handle any errors that occur during the query
 		res.status(400).json({ error: error.message });
@@ -2024,7 +2065,7 @@ exports.getCloseSupportCases = async (req, res) => {
 			.populate("supporterId")
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
 
-		res.status(200).json(cases);
+		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
