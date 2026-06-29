@@ -2951,6 +2951,45 @@ function obviousReservationIdentityOrContactPayloadText(text = "") {
 	});
 }
 
+function reservationRecoveryCandidateText(text = "") {
+	const value = String(text || "").trim();
+	if (!value) return false;
+	if (reservationDetailFieldPayloadText(value)) return true;
+	if (obviousReservationIdentityOrContactPayloadText(value)) return true;
+	if (likelyDateExtractionCandidate(value)) return true;
+	if (latestPhoneFromText(value) || latestEmailFromText(value)) return true;
+	if (likelyGuestCountText(value)) return true;
+	if (roomSelectionSignalText(value)) return true;
+	if (roomKeyFromConversationRoomSignal(value)) return true;
+	return false;
+}
+
+function lightweightGuestMessageWithoutReservationPayloadText(sc = {}, st = {}, text = "") {
+	const value = String(text || "").trim();
+	if (!value) return false;
+	if (reservationRecoveryCandidateText(value)) return false;
+	return Boolean(
+		guestHumanMomentKind(sc, st, value) ||
+			looksLikeGreetingOnly(value) ||
+			fastEnglishSmalltalkText(sc, st, value)
+	);
+}
+
+function guestConversationHasReservationRecoveryCandidate(
+	conversation = [],
+	beforeIndex = Number.POSITIVE_INFINITY
+) {
+	if (!Array.isArray(conversation)) return false;
+	const limit = Number.isFinite(beforeIndex) ? beforeIndex : conversation.length;
+	for (let index = 0; index < conversation.length && index < limit; index += 1) {
+		const message = conversation[index];
+		if (!isGuestConversationMessage(message) || message?.isSystem) continue;
+		const text = String(message?.message || "").trim() || conversationEntryContextText(message);
+		if (reservationRecoveryCandidateText(text)) return true;
+	}
+	return false;
+}
+
 function hydrateKnownSlotsFromConversation(
 	sc = {},
 	st = {},
@@ -2995,6 +3034,41 @@ function hydrateKnownSlotsFromConversation(
 	) {
 		return;
 	}
+	const latestAnyGuestIndex = latestGuestMessageIndex(sc);
+	const latestAnyGuestMessage =
+		latestAnyGuestIndex >= 0 ? conversation[latestAnyGuestIndex] : null;
+	const latestAnyGuestText =
+		String(latestAnyGuestMessage?.message || "").trim() ||
+		conversationEntryContextText(latestAnyGuestMessage);
+	const lightweightLatestGuest =
+		latestAnyGuestIndex >= 0 &&
+		lightweightGuestMessageWithoutReservationPayloadText(
+			sc,
+			st,
+			latestAnyGuestText
+		);
+	if (lightweightLatestGuest) {
+		const previousHydratedThroughLatest =
+			Number(st.hydratedConversationLength || 0) >= latestAnyGuestIndex;
+		const previousHasRecoveryCandidate =
+			guestConversationHasReservationRecoveryCandidate(
+				conversation,
+				latestAnyGuestIndex
+			);
+		if (!previousHasRecoveryCandidate || previousHydratedThroughLatest) {
+			st.hydratedConversationLength = conversation.length;
+			st.hydratedConversationRevision = revision;
+			st.hydratedStayConversationRevision = revision;
+			st.hydratedIdentityConversationRevision = revision;
+			logStep(String(sc._id || ""), "slots.hydrate_skip_lightweight_latest", {
+				latestUserMessage: latestAnyGuestText.slice(0, 160),
+				needsStayRecovery,
+				needsIdentityRecovery,
+				previousHasRecoveryCandidate,
+			});
+			return;
+		}
+	}
 	const before = JSON.stringify(st.slots || {});
 	if (AI_REQUIRE_NATIONALITY && st.slots?.nationality && !hasUsableNationality(st.slots.nationality)) {
 		st.slots.nationality = null;
@@ -3025,8 +3099,7 @@ function hydrateKnownSlotsFromConversation(
 		if (!messageText || message?.isSystem) continue;
 		const guestMessage = isGuestConversationMessage(message);
 		const humanMomentWithoutDetails = guestMessage
-			? Boolean(guestHumanMomentKind(sc, st, messageText)) &&
-			  !reservationDetailFieldPayloadText(messageText)
+			? lightweightGuestMessageWithoutReservationPayloadText(sc, st, messageText)
 			: false;
 		if (guestMessage) {
 			const shouldExtractDatesForMessage =
@@ -3088,8 +3161,11 @@ function hydrateKnownSlotsFromConversation(
 	const latestAssistantBeforeGuest = lastAssistantMessageBeforeLatestGuest(sc);
 	const latestGuestForIdentity = lastUserText(sc);
 	const identityText = assistantMessageSuggestsReservationDetails(latestAssistantBeforeGuest)
-		? Boolean(guestHumanMomentKind(sc, st, latestGuestForIdentity)) &&
-		  !reservationDetailFieldPayloadText(latestGuestForIdentity)
+		? lightweightGuestMessageWithoutReservationPayloadText(
+				sc,
+				st,
+				latestGuestForIdentity
+		  )
 			? guestText
 			: latestGuestForIdentity
 		: guestText;
@@ -3164,8 +3240,7 @@ function hydrateKnownSlotsFromConversation(
 			}
 			if (!isGuestConversationMessage(message)) continue;
 			if (
-				guestHumanMomentKind(sc, st, text) &&
-				!reservationDetailFieldPayloadText(text)
+				lightweightGuestMessageWithoutReservationPayloadText(sc, st, text)
 			) {
 				continue;
 			}
@@ -11904,8 +11979,7 @@ function applyReservationDetailsInference(st = {}, inferred = {}) {
 async function inferReservationDetailsFromContext(sc = {}, st = {}, latestText = "", caseId = "") {
 	if (!st?.slots) return null;
 	if (
-		guestHumanMomentKind(sc, st, latestText) &&
-		!reservationDetailFieldPayloadText(latestText)
+		lightweightGuestMessageWithoutReservationPayloadText(sc, st, latestText)
 	) {
 		logStep(caseId || String(sc._id || ""), "reservation_details.context_skip_casual", {
 			latestUserMessage: String(latestText || "").slice(0, 160),
@@ -12001,8 +12075,7 @@ async function captureReservationDetailsFromText(sc = {}, st = {}, text = "", ca
 	const before = JSON.stringify(st.slots || {});
 	const fullText = String(text || "");
 	if (
-		guestHumanMomentKind(sc, st, fullText) &&
-		!reservationDetailFieldPayloadText(fullText)
+		lightweightGuestMessageWithoutReservationPayloadText(sc, st, fullText)
 	) {
 		logStep(caseId || String(sc._id || ""), "reservation_details.capture_skip_casual", {
 			latestUserMessage: fullText.slice(0, 160),
