@@ -4341,7 +4341,12 @@ function selectedHotelRoomQuestionText(text = "") {
 	if (selectedHotelRoomDetailsQuestionText(text)) return true;
 	if (roomCapacityOrTypeInquiryText(text)) return true;
 	if (multilingualRoomOptionsQuestionText(text)) return true;
+	const arabicRoomTermMention =
+		/(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0644\u063a\u0631\u0641|\u0623\u0648\u0636\u0629|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647|\u0633\u0631\u064a\u0631|\u0623\u0633\u0631\u0629|\u0627\u0633\u0631\u0629|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f)/i.test(
+			arabic
+		);
 	const mentionsRoom =
+		arabicRoomTermMention ||
 		/\b(room|rooms|bed|beds|suite|suites|people|persons|individuals|guests)\b/i.test(
 			normalized
 		) ||
@@ -4377,7 +4382,12 @@ function selectedHotelRoomQuestionText(text = "") {
 			normalized
 		);
 	if (!hasRoomTypeOrCapacity) return false;
+	const asksArabicRoomSelection =
+		/(?:\u0639\u0646\u062f\u0643\u0645|\u0639\u0646\u062f\u0643|\u0641\u064a\u0647|\u0647\u0644|\u0645\u062a\u0627\u062d|\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649|\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u062d\u062a\u0627\u062c|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632)/i.test(
+			arabic
+		);
 	return (
+		asksArabicRoomSelection ||
 		/[?]/.test(normalized) ||
 		/\b(do you|you guys|u guys|does the hotel|does your hotel|is there|are there|any|available|availability|have|has|looking for|need|want|book|reserve)\b/i.test(
 			normalized
@@ -19963,7 +19973,6 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
-			!isReservationDetailStep(st) &&
 			!reservationDetailFieldPayloadText(userText) &&
 			selectedHotelFactQuestionText(userText)
 		) {
@@ -19972,6 +19981,31 @@ async function planTurn(io, sc) {
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
 			await answerSelectedHotelFactQuestion(io, sc, st, userText);
+			return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			!reservationDetailFieldPayloadText(userText) &&
+			((generalRoomOptionsQuestionText(userText) &&
+				!extractRoomSelectionsFromText(userText).length) ||
+				selectedHotelRoomDetailsQuestionText(userText))
+		) {
+			logStep(caseId, "selected_hotel.room_catalog_pre_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerSelectedHotelRoomQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				mapRoomToKey(userText) || null
+			);
 			return;
 		}
 		if (
@@ -23110,6 +23144,13 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		casualAgentAttentionOnlyText,
 		casualGreetingWithAgentNameText,
 		casualAgentCheckInText,
+		generalRoomOptionsQuestionText,
+		selectedHotelRoomQuestionText,
+		selectedHotelDistanceQuestionText,
+		selectedHotelFactQuestionText,
+		selectedHotelFactAnswerText,
+		latestTextHasBookableRoomSelection,
+		roomSelectionSignalText,
 	};
 }
 
