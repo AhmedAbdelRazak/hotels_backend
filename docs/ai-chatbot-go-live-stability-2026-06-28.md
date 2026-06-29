@@ -97,6 +97,7 @@ The OpenAI-first experiment was removed from the runtime path and the legacy orc
 - Language-switch acknowledgements preserve the active booking quick replies, so moving from English to Arabic does not strand the guest.
 - Room type lists are formatted line-by-line in the customer-service monitoring UI for readability.
 - Saved Arabic hotel facts, including bus and policy details, are translated/adapted before being shown to English guests.
+- Arabic Gregorian month dates are parsed before Hijri fallback, so phrases such as "15 August 2026" in Arabic script stay Gregorian while explicit Hijri months such as Ramadan still use Hijri conversion.
 
 Local production-like QA passed on 2026-06-28 with `AI_AGENT_ENGINE=legacy`, `AI_AGENT_USE_LEGACY=true`, `AI_AGENT_DEBUG=false`, and WhatsApp dry-run enabled:
 

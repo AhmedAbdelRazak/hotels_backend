@@ -1432,10 +1432,6 @@ function likelyHijriDateText(text = "") {
 
 function quickDateRange(text = "") {
 	const raw = normalizeDateSearchText(text);
-	if (likelyHijriDateText(text)) {
-		const hijri = quickHijriDateRange(raw);
-		if (hijri.checkinISO && hijri.checkoutISO) return hijri;
-	}
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g);
 	if (isoMatches?.length >= 2) {
 		return {
@@ -1459,6 +1455,10 @@ function quickDateRange(text = "") {
 	const fuzzyMonthRange = quickFuzzyGregorianMonthDateRange(raw);
 	if (fuzzyMonthRange?.checkinISO && fuzzyMonthRange?.checkoutISO) {
 		return fuzzyMonthRange;
+	}
+	if (likelyHijriDateText(text)) {
+		const hijri = quickHijriDateRange(raw);
+		if (hijri.checkinISO && hijri.checkoutISO) return hijri;
 	}
 	return { checkinISO: null, checkoutISO: null, raw: null };
 }
