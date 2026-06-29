@@ -11017,35 +11017,36 @@ function reservationDetailPromptRows(sc = {}, st = {}, { retry = false } = {}) {
 
 function mandatoryDetailsPrompt(sc = {}, st = {}, { retry = false } = {}) {
 	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
 	const rows = reservationDetailPromptRows(sc, st, { retry });
 	if (/arabic/i.test(lang)) {
 		return retry
-			? `\u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0645\u0627 \u0632\u0644\u062a \u0623\u062d\u062a\u0627\u062c:\n${rows}`
-			: `\u062a\u0645\u0627\u0645. \u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0645\u0646 \u0641\u0636\u0644\u0643 \u0623\u0631\u0633\u0644:\n${rows}`;
+			? `${name}\u060c \u0648\u0635\u0644\u062a\u0646\u064a \u0628\u0639\u0636 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a. \u0628\u0642\u064a \u0641\u0642\u0637:\n${rows}\n\u0623\u0631\u0633\u0644\u0647\u0627 \u0648\u0633\u0623\u062c\u0647\u0632 \u0644\u0643 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632.`
+			: `${name}\u060c \u0645\u0645\u062a\u0627\u0632. \u0623\u062d\u062a\u0627\u062c \u0641\u0642\u0637 \u0647\u0630\u0647 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0644\u062a\u062c\u0647\u064a\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632:\n${rows}\n\u064a\u0645\u0643\u0646\u0643 \u0625\u0631\u0633\u0627\u0644\u0647\u0627 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062d\u062f\u0629.`;
 	}
 	if (/spanish/i.test(lang)) {
 		return retry
-			? `Para completar la reserva, todavia necesito:\n${rows}`
-			: `Perfecto. Para completar la reserva, enviame:\n${rows}`;
+			? `${name}, ya recibi algunos datos. Solo me falta:\n${rows}\nEnviamelos y preparo la revision antes de crear la reserva.`
+			: `${name}, perfecto. Solo necesito estos datos para preparar la revision de la reserva:\n${rows}`;
 	}
 	if (/french/i.test(lang)) {
 		return retry
-			? `Pour finaliser la reservation, il me manque encore :\n${rows}`
-			: `Parfait. Pour finaliser la reservation, envoyez:\n${rows}`;
+			? `${name}, j'ai bien recu certaines informations. Il me manque seulement :\n${rows}\nEnvoyez-les et je preparerai le recapitulatif avant de creer la reservation.`
+			: `${name}, parfait. Il me faut seulement ces informations pour preparer le recapitulatif de la reservation :\n${rows}`;
 	}
 	if (/urdu/i.test(lang)) {
 		return retry
-			? `To complete the reservation, I still need:\n${rows}`
-			: `Perfect. To complete the reservation, please send:\n${rows}`;
+			? `${name}, I received some details. I only still need:\n${rows}\nSend them and I will prepare the review before creating the reservation.`
+			: `${name}, perfect. I just need these details to prepare the reservation review:\n${rows}`;
 	}
 	if (/hindi/i.test(lang)) {
 		return retry
-			? `To complete the reservation, I still need:\n${rows}`
-			: `Perfect. To complete the reservation, please send:\n${rows}`;
+			? `${name}, I received some details. I only still need:\n${rows}\nSend them and I will prepare the review before creating the reservation.`
+			: `${name}, perfect. I just need these details to prepare the reservation review:\n${rows}`;
 	}
 	return retry
-		? `To complete the reservation, I still need:\n${rows}`
-		: `Perfect. To complete the reservation, please send:\n${rows}`;
+		? `${name}, I received some details. I only still need:\n${rows}\nSend them and I will prepare the review before creating the reservation.`
+		: `${name}, perfect. I just need these details to prepare the reservation review:\n${rows}`;
 }
 
 function optionalEmailPrompt(sc = {}, st = {}) {
@@ -11267,6 +11268,49 @@ function finalReservationPrompt(sc = {}, st = {}) {
 		return `${name}, semua butiran sudah sedia. Untuk melengkapkan tempahan dalam sistem, pilih Lengkapkan tempahan. Jika ada butiran perlu diperbetulkan, pilih Ada yang salah.`;
 	}
 	return `${name}, everything is ready. To complete the booking in the system, choose Complete Reservation. If anything needs fixing, choose There's Something Wrong.`;
+}
+
+function reviewCorrectionPromptText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}\u060c \u0623\u0643\u064a\u062f \u0648\u0644\u0627 \u064a\u0647\u0645\u0643. \u0642\u0644 \u0644\u064a \u0641\u0642\u0637 \u0645\u0627 \u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644\u0647 \u0641\u064a \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629: \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e\u060c \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629\u060c \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u060c \u0627\u0644\u0627\u0633\u0645\u060c \u0627\u0644\u0647\u0627\u062a\u0641\u060c \u0627\u0644\u062c\u0646\u0633\u064a\u0629\u060c \u0623\u0648 \u0627\u0644\u0633\u0639\u0631. \u0627\u0643\u062a\u0628 \u0627\u0644\u062a\u0635\u062d\u064a\u062d \u0648\u0633\u0623\u0639\u062f\u0644\u0647 \u0644\u0643 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, claro, no hay problema. Dime que debo corregir en la revision: fechas, tipo de habitacion, huespedes, nombre, telefono, nacionalidad o precio. Lo actualizo antes de crear la reserva.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, bien sur, aucun souci. Dites-moi ce qu'il faut corriger dans le recapitulatif : dates, type de chambre, voyageurs, nom, telephone, nationalite ou prix. Je le modifierai avant de creer la reservation.`;
+	}
+	return `${name}, of course, no problem. Tell me what I should fix in the review: dates, room type, guests, name, phone, nationality, or price. I will update it before creating the reservation.`;
+}
+
+function latestGuestSelectedReviewCorrection(sc = {}, userText = "") {
+	const action = lastGuestAction(sc).toLowerCase();
+	if (action !== "correction" && !correctionText(userText)) return false;
+	const previousAssistant = lastAssistantMessageBeforeLatestGuest(sc);
+	const actions = quickReplyActions(previousAssistant);
+	if (!actions.includes("correction")) return false;
+	return (
+		actions.includes("place_reservation") ||
+		actions.includes("confirm") ||
+		assistantMessageSuggestsReview(previousAssistant)
+	);
+}
+
+async function handleReviewCorrectionRequest(io, sc, st, caseId, userText, source) {
+	if (!latestGuestSelectedReviewCorrection(sc, userText)) return false;
+	st.waitFor = "clarify";
+	st.reviewSent = false;
+	logStep(caseId, "reservation.review_correction_prompt", {
+		source,
+		latestUserMessage: String(userText || "").slice(0, 160),
+	});
+	await humanSend(io, sc, st, reviewCorrectionPromptText(sc, st), {
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
+	return true;
 }
 
 function finalReservationButtonIntentText(text = "") {
@@ -14208,6 +14252,12 @@ function reservationDetailsSummaryQuestionText(text = "") {
 	const arabicBookingWords =
 		"(?:\\u062d\\u062c\\u0632(?:\\u064a|\\u0643|\\u0643\\u0645|\\u0646\\u0627)?|\\u0627\\u0644\\u062d\\u062c\\u0632|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0647|\\u0627\\u0644\\u0627\\u0642\\u0627\\u0645\\u0629|\\u0627\\u0644\\u0625\\u0642\\u0627\\u0645\\u0629)";
 	return (
+		/\b(?:where|show|send|repeat|display|can'?t\s+see|cannot\s+see|do\s+not\s+see|don't\s+see)\b.{0,80}\b(?:details|summary|recap|review|booking|reservation)\b/i.test(
+			lower
+		) ||
+		/\b(?:where\s+are|where'?s)\b.{0,50}\b(?:details|summary|recap|review)\b/i.test(
+			lower
+		) ||
 		/\b(?:booking|reservation|stay|quote)\s+(?:details|summary|recap)\b/i.test(
 			lower
 		) ||
@@ -14218,6 +14268,15 @@ function reservationDetailsSummaryQuestionText(text = "") {
 			`(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647).{0,30}${arabicBookingWords}|${arabicBookingWords}.{0,30}(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635)`,
 			"i"
 		).test(
+			arabic
+		) ||
+		/(?:\u0641\u064a\u0646|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0639\u064a\u0632|\u0628\u062f\u064a|\u0623\u0628\u064a).{0,40}(?:\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u0645\u0644\u062e\u0635|\u0645\u0644\u062e\u0635|\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0645\u0631\u0627\u062c\u0639\u0629)/i.test(
+			arabic
+		) ||
+		/(?:\u0645\u0634|\u0645\u0648|\u0645\u0627|\u0645\u0628)\s+(?:\u0634\u0627\u064a\u0641|\u0634\u0627\u064a\u0641\u0647|\u0628\u0634\u0648\u0641|\u0627\u0631\u0649|\u0623\u0631\u0649).{0,40}(?:\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u0645\u0644\u062e\u0635|\u0645\u0644\u062e\u0635|\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0645\u0631\u0627\u062c\u0639\u0629)/i.test(
+			arabic
+		) ||
+		/(?:\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u0645\u0644\u062e\u0635|\u0645\u0644\u062e\u0635|\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0645\u0631\u0627\u062c\u0639\u0629).{0,40}(?:\u0641\u064a\u0646|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0634\u0627\u064a\u0641|\u0627\u062a\u0645|\u0627\u0643\u0645\u0644)/i.test(
 			arabic
 		) ||
 		/(?:bookingdetails|reservationdetails|staydetails|bookingrecap|reservationsummary|tafaseelelhagz|tfaseelelhagz|molakhaselhagz)/i.test(
@@ -14645,7 +14704,12 @@ function currentReservationMemoryFieldLine(sc = {}, st = {}, quote = {}, field =
 		dates: dates.primary
 			? `${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}`
 			: "",
-		price: totalText && nights ? `${totalText} for ${nights}` : totalText,
+		price:
+			totalText && nights
+				? /arabic/i.test(lang)
+					? `${totalText} \u0644\u0645\u062f\u0629 ${nights}`
+					: `${totalText} for ${nights}`
+				: totalText,
 		fullName,
 		nationality,
 		phone,
@@ -14674,7 +14738,7 @@ function currentReservationMemoryIntro(sc = {}, st = {}, field = "", hasFieldVal
 	if (/arabic/i.test(lang)) {
 		if (field && hasFieldValue) return `${name}\u060c نعم، هذا هو التفصيل المحفوظ لدي الآن:`;
 		if (field) return `${name}\u060c أفهمك. لا أرى هذا التفصيل محفوظا بشكل واضح حتى الآن.`;
-		return `${name}\u060c نعم، هذه التفاصيل المحفوظة لدي في هذه المحادثة:`;
+		return `${name}\u060c \u0623\u0643\u064a\u062f\u060c \u0647\u0630\u0647 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u062d\u0641\u0648\u0638\u0629 \u0644\u062f\u064a \u0627\u0644\u0622\u0646:`;
 	}
 	if (/spanish/i.test(lang)) {
 		if (field && hasFieldValue) return `${name}, si, este es el dato que tengo guardado ahora:`;
@@ -14775,6 +14839,34 @@ async function answerCurrentReservationMemoryQuestion(io, sc, st, userText = "",
 	return true;
 }
 
+function firstQuoteIntroLine(sc = {}, st = {}, hotelName = "") {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const agentName = st.agentName || sc.aiResponderName || "Sara";
+	const hotel = hotelName || localizedHotelName(sc, st);
+	const latestGuestText = lastUserText(sc);
+	const control = normalizeControlText(latestGuestText);
+	const guestGreeted =
+		/(?:\u0627\u0644\u0633\u0644\u0627\u0645\s+\u0639\u0644\u064a\u0643\u0645|\u0633\u0644\u0627\u0645\s+\u0639\u0644\u064a\u0643\u0645|\u0633\u0644\u0627\u0645)/i.test(
+			control.arabic
+		) || /(?:assalamu|assalam|salaam|salam)/i.test(control.latinCompact);
+	const opening = guestGreeted
+		? /arabic/i.test(lang)
+			? "\u0648\u0639\u0644\u064a\u0643\u0645 \u0627\u0644\u0633\u0644\u0627\u0645"
+			: "Wa alaikum assalam"
+		: islamicGreetingForLanguage(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${opening} ${name}\u060c \u0645\u0639\u0643 ${agentName} \u0645\u0646 \u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u062d\u062c\u0648\u0632\u0627\u062a ${hotel}. \u0631\u0627\u062c\u0639\u062a \u0637\u0644\u0628\u0643\u060c \u0648\u0647\u0630\u0647 \u0627\u0644\u0646\u062a\u064a\u062c\u0629 \u0627\u0644\u062d\u0627\u0644\u064a\u0629:`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${opening} ${name}, soy ${agentName} de recepcion y reservas de ${hotel}. Ya revise tu solicitud; este es el resultado actual:`;
+	}
+	if (/french/i.test(lang)) {
+		return `${opening} ${name}, je suis ${agentName}, reception et reservations de ${hotel}. J'ai verifie votre demande; voici le resultat actuel :`;
+	}
+	return `${opening} ${name}, this is ${agentName} from ${hotel} reception and reservations. I checked your request; here is the current result:`;
+}
+
 function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
 	const lang = languageOf(sc, st);
 	const name = respectfulGuestName(sc, st);
@@ -14792,11 +14884,17 @@ function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
 	const dateText = [dates.primary, dates.secondary].filter(Boolean).join(" (") +
 		(dates.secondary ? ")" : "");
 	const next = bookingNextActionText(sc, st);
+	const firstQuoteIntro = !hasAiAssistantReply(sc)
+		? firstQuoteIntroLine(sc, st, hotelName)
+		: "";
+	const arabicLead = firstQuoteIntro ? "" : `${name}\u060c `;
+	const lead = firstQuoteIntro ? "" : `${name}, `;
 	if (quoteHasMultipleRoomLines(quote)) {
 		const roomLines = localizedRoomSelectionLines(sc, st, quote);
 		if (/arabic/i.test(lang)) {
 			return [
-				`${name}\u060c \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0641\u064a ${hotelName}:`,
+				firstQuoteIntro,
+				`${arabicLead}\u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0641\u064a ${hotelName}:`,
 				...roomLines,
 				`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateText}`,
 				`\u0627\u0644\u0645\u062f\u0629: ${nightText}`,
@@ -14807,7 +14905,8 @@ function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
 				.join("\n");
 		}
 		return [
-			`${name}, here is the current availability and price at ${hotelName}:`,
+			firstQuoteIntro,
+			`${lead}here is the current availability and price at ${hotelName}:`,
 			...roomLines,
 			`Dates: ${dateText}`,
 			`Stay: ${nightText}`,
@@ -14821,36 +14920,66 @@ function currentQuoteSummaryText(sc = {}, st = {}, quote = {}) {
 		const perNightText = perNight
 			? ` \u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${localizedMoney(perNight, quote.currency, lang)}.`
 			: "";
-		return `${name}\u060c \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0644\u0640 ${roomName} \u0641\u064a ${hotelName}: ${totalText} \u0625\u062c\u0645\u0627\u0644\u064a\u0627 \u0644\u0645\u062f\u0629 ${nightText} (${dateText}).${perNightText} ${next}`;
+		return [
+			firstQuoteIntro,
+			`${arabicLead}\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062d\u0627\u0644\u064a \u0644\u0640 ${roomName} \u0641\u064a ${hotelName}: ${totalText} \u0625\u062c\u0645\u0627\u0644\u064a\u0627 \u0644\u0645\u062f\u0629 ${nightText} (${dateText}).${perNightText} ${next}`,
+		]
+			.filter(Boolean)
+			.join("\n");
 	}
 	if (/spanish/i.test(lang)) {
 		const perNightText = perNight
 			? ` El promedio es ${localizedMoney(perNight, quote.currency, lang)} por noche.`
 			: "";
-		return `${name}, el precio actual de ${roomName} en ${hotelName} es ${totalText} en total por ${nightText} (${dateText}).${perNightText} ${next}`;
+		return [
+			firstQuoteIntro,
+			`${lead}el precio actual de ${roomName} en ${hotelName} es ${totalText} en total por ${nightText} (${dateText}).${perNightText} ${next}`,
+		]
+			.filter(Boolean)
+			.join("\n");
 	}
 	if (/french/i.test(lang)) {
 		const perNightText = perNight
 			? ` La moyenne est de ${localizedMoney(perNight, quote.currency, lang)} par nuit.`
 			: "";
-		return `${name}, le prix actuel pour ${roomName} a ${hotelName} est de ${totalText} au total pour ${nightText} (${dateText}).${perNightText} ${next}`;
+		return [
+			firstQuoteIntro,
+			`${lead}le prix actuel pour ${roomName} a ${hotelName} est de ${totalText} au total pour ${nightText} (${dateText}).${perNightText} ${next}`,
+		]
+			.filter(Boolean)
+			.join("\n");
 	}
 	if (/indonesian/i.test(lang)) {
 		const perNightText = perNight
 			? ` Rata-ratanya ${localizedMoney(perNight, quote.currency, lang)} per malam.`
 			: "";
-		return `${name}, harga saat ini untuk ${roomName} di ${hotelName} adalah total ${totalText} untuk ${nightText} (${dateText}).${perNightText} ${next}`;
+		return [
+			firstQuoteIntro,
+			`${lead}harga saat ini untuk ${roomName} di ${hotelName} adalah total ${totalText} untuk ${nightText} (${dateText}).${perNightText} ${next}`,
+		]
+			.filter(Boolean)
+			.join("\n");
 	}
 	if (/malay/i.test(lang)) {
 		const perNightText = perNight
 			? ` Puratanya ${localizedMoney(perNight, quote.currency, lang)} setiap malam.`
 			: "";
-		return `${name}, harga semasa untuk ${roomName} di ${hotelName} ialah jumlah ${totalText} untuk ${nightText} (${dateText}).${perNightText} ${next}`;
+		return [
+			firstQuoteIntro,
+			`${lead}harga semasa untuk ${roomName} di ${hotelName} ialah jumlah ${totalText} untuk ${nightText} (${dateText}).${perNightText} ${next}`,
+		]
+			.filter(Boolean)
+			.join("\n");
 	}
 	const perNightText = perNight
 		? ` The average is ${localizedMoney(perNight, quote.currency, lang)} per night.`
 		: "";
-	return `${name}, the current price for ${roomName} at ${hotelName} is ${totalText} total for ${nightText} (${dateText}).${perNightText} ${next}`;
+	return [
+		firstQuoteIntro,
+		`${lead}the current price for ${roomName} at ${hotelName} is ${totalText} total for ${nightText} (${dateText}).${perNightText} ${next}`,
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function currentReservationSummaryText(sc = {}, st = {}, quote = {}) {
@@ -18441,6 +18570,15 @@ async function handleReservationDetailPayloadFallback(io, sc, st, userText, case
 async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 	if (!isReservationDetailStep(st)) return false;
 	const guestAction = lastGuestAction(sc);
+	const handledReviewCorrection = await handleReviewCorrectionRequest(
+		io,
+		sc,
+		st,
+		caseId,
+		userText,
+		"reservation_detail_step"
+	);
+	if (handledReviewCorrection) return true;
 	if (currentReservationMemoryRequestText(userText)) {
 		return answerCurrentReservationMemoryQuestion(io, sc, st, userText, caseId);
 	}
@@ -18512,10 +18650,7 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 			if (guestAction === "correction" || correctionText(userText)) {
 				st.waitFor = "clarify";
 				st.reviewSent = false;
-				const ask = /arabic/i.test(languageOf(sc, st))
-					? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u0634\u064a\u0621 \u0627\u0644\u0630\u064a \u062a\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644\u0647\u061f"
-					: "Of course. What would you like me to correct?";
-				await humanSend(io, sc, st, ask);
+				await humanSend(io, sc, st, reviewCorrectionPromptText(sc, st));
 				return true;
 			}
 			if (!confirmsText(userText)) {
@@ -18601,10 +18736,7 @@ async function handleReservationDetailStep(io, sc, st, userText, caseId) {
 				if (guestAction === "correction" || correctionText(userText)) {
 					st.waitFor = "clarify";
 					st.reviewSent = false;
-					const ask = /arabic/i.test(languageOf(sc, st))
-						? "\u0628\u0643\u0644 \u0633\u0631\u0648\u0631\u060c \u0645\u0627 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0630\u064a \u0646\u062d\u062a\u0627\u062c \u062a\u0639\u062f\u064a\u0644\u0647 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u061f"
-						: "Of course. What should we fix before I create the reservation?";
-					await humanSend(io, sc, st, ask);
+					await humanSend(io, sc, st, reviewCorrectionPromptText(sc, st));
 					return true;
 				}
 				if (finalReservationButtonIntentText(userText)) {
@@ -19384,6 +19516,8 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
+			!currentReservationMemoryRequestText(userText) &&
+			!latestGuestSelectedReviewCorrection(sc, userText) &&
 			selectedHotelFactQuestionText(userText)
 		) {
 			logStep(caseId, "selected_hotel.fact_first_turn_fast", {
@@ -19425,6 +19559,33 @@ async function planTurn(io, sc) {
 			conversationContextRecovered = true;
 		};
 		recoverConversationContextOnce("pre_quiet");
+		if (
+			userText &&
+			isReservationDetailStep(st) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			const handledReviewCorrection = await handleReviewCorrectionRequest(
+				io,
+				sc,
+				st,
+				caseId,
+				userText,
+				"pre_quiet"
+			);
+			if (handledReviewCorrection) return;
+			if (currentReservationMemoryRequestText(userText)) {
+				const handledReservationMemory = await answerCurrentReservationMemoryQuestion(
+					io,
+					sc,
+					st,
+					userText,
+					caseId
+				);
+				if (handledReservationMemory) return;
+			}
+		}
 		const stayProgressHandledPreQuiet = await handleDeterministicStayProgress(
 			io,
 			sc,
@@ -19733,6 +19894,8 @@ async function planTurn(io, sc) {
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
+			!currentReservationMemoryRequestText(userText) &&
+			!latestGuestSelectedReviewCorrection(sc, userText) &&
 			selectedHotelFactQuestionText(userText) &&
 			!(isReservationDetailStep(st) && reservationDetailFieldPayloadText(userText)) &&
 			(!explicitlyExistingReservationIntent(userText) ||
@@ -19901,6 +20064,8 @@ async function planTurn(io, sc) {
 			selectedHotelFactQuestionText(userText) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
+			!currentReservationMemoryRequestText(userText) &&
+			!latestGuestSelectedReviewCorrection(sc, userText) &&
 			(!explicitlyExistingReservationIntent(userText) ||
 				cancellationRefundPolicyQuestionText(userText)) &&
 			!wantsPaymentHelp(userText)
@@ -19982,6 +20147,8 @@ async function planTurn(io, sc) {
 			selectedHotelFactQuestionText(userText) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
+			!currentReservationMemoryRequestText(userText) &&
+			!latestGuestSelectedReviewCorrection(sc, userText) &&
 			(!explicitlyExistingReservationIntent(userText) ||
 				cancellationRefundPolicyQuestionText(userText)) &&
 			!wantsPaymentHelp(userText)
@@ -20133,6 +20300,7 @@ async function planTurn(io, sc) {
 			selectedHotelFactQuestionText(userText) &&
 			!repeatPriceQuestionText(userText) &&
 			!currentReservationMemoryRequestText(userText) &&
+			!latestGuestSelectedReviewCorrection(sc, userText) &&
 			!bookingStayFieldQuestionText(userText) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
@@ -22432,6 +22600,11 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		quoteKeyForSlots,
 		safePriceRoomSelectionsForStay,
 		currentQuoteSummaryText,
+		currentReservationMemoryReplyText,
+		currentReservationMemoryRequestText,
+		reservationDetailsSummaryQuestionText,
+		latestGuestSelectedReviewCorrection,
+		reviewCorrectionPromptText,
 		deterministicFinalReservationReview,
 	};
 }
