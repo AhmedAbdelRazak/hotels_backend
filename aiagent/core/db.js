@@ -349,9 +349,9 @@ function compactRoomForAi(room = {}) {
 		extraAmenities: room.extraAmenities,
 		pricedExtras: room.pricedExtras,
 		price: room.price,
-		pricingRate: Array.isArray(room.pricingRate)
-			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
-			: [],
+		// Full pricing histories can be very large. Quote flows hydrate only the
+		// requested stay dates through getHotelByIdWithPricingDates.
+		pricingRate: [],
 		monthly: room.monthly,
 		offers: room.offers,
 		count: room.count,
@@ -417,35 +417,7 @@ async function getHotelById(id) {
 		return cloneCompactHotelForAi(cached.hotel);
 	}
 	const hotel = await HotelDetails.findById(_id)
-		.select(
-			[
-				"_id",
-				"hotelName",
-				"hotelName_OtherLanguage",
-				"hotelAddress",
-				"hotelCity",
-				"hotelState",
-				"hotelCountry",
-				"aboutHotel",
-				"aboutHotelArabic",
-				"distances",
-				"location",
-				"parkingLot",
-				"hasBusService",
-				"busDetails",
-				"hasMealsService",
-				"mealsDetails",
-				"isNusuk",
-				"isNusukText",
-				"hotelPolicyQA",
-				"currency",
-				"aiToRespond",
-				"activateHotel",
-				"xHotelProActive",
-				"belongsTo",
-				"roomCountDetails",
-			].join(" ")
-		)
+		.select([...HOTEL_AI_BASE_SELECT, ...ROOM_AI_CONTEXT_SELECT].join(" "))
 		.lean()
 		.exec();
 	const compactHotel = compactHotelForAi(hotel);
@@ -589,9 +561,7 @@ async function listActivePublicHotels() {
 			},
 		},
 	})
-		.select(
-			"_id hotelName hotelName_OtherLanguage hotelAddress hotelCity hotelState hotelCountry aboutHotel aboutHotelArabic distances location parkingLot hasBusService busDetails hasMealsService mealsDetails isNusuk isNusukText hotelPolicyQA roomCountDetails currency aiToRespond activateHotel xHotelProActive belongsTo"
-		)
+		.select([...HOTEL_AI_BASE_SELECT, ...ROOM_AI_CONTEXT_SELECT].join(" "))
 		.lean()
 		.exec();
 	return hotels.map(compactHotelForAi).filter(Boolean);

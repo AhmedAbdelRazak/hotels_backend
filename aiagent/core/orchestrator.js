@@ -6,6 +6,7 @@ const {
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 	closeSupportCaseForAiIdle,
 	getHotelById,
+	getHotelByIdWithPricingDates,
 	getReservationByConfirmation,
 	listActivePublicHotels,
 	listPreviousGuestSupportChats,
@@ -7091,6 +7092,9 @@ async function answerLargeGroupRoomRecommendation(
 	st.quote = null;
 	st.quoteSummarizedAt = 0;
 	const hasDates = Boolean(st.slots.checkinISO && st.slots.checkoutISO);
+	if (hasDates) {
+		await hydrateHotelPricingForCurrentStay(sc, st, "large_group_recommendation");
+	}
 	const combinationQuote =
 		hasDates && familyRooms.length && doubleRooms.length
 			? priceLargeGroupRoomCombination(
@@ -9267,55 +9271,60 @@ async function buildJannatBookingHotelOptions({
 			.join("\n")
 	);
 	const scopedHotels = makkahOnly ? hotels.filter(isMakkahHotel) : hotels;
-	const options = scopedHotels
-		.filter(
-			(hotel) =>
-				hotel.aiToRespond === true &&
-				!isJannatBookingSupportCase({ hotelId: hotel._id }, hotel)
-		)
-		.map((hotel) => {
-			const room = (hotel.roomCountDetails || []).find((item) =>
-				roomMatches(item, selectedRoomTypeKey)
-			);
-			if (!room) return null;
-			const quote = hasDates
-				? safePriceRoomForStay(
-						hotel,
-						{ roomType: selectedRoomTypeKey },
-						st.slots.checkinISO,
-						st.slots.checkoutISO
-				  )
-				: null;
-			if (hasDates && !quote?.available) return null;
-			const total = Number(quote?.totals?.totalPriceWithCommission || 0);
-			const distanceScore =
-				firstNumber(hotel.distances?.walkingToElHaram || "") ||
-				firstNumber(hotel.distances?.drivingToElHaram || "") ||
-				999;
-			const budgetScore =
-				budget && total
-					? total <= budget
-						? Math.max(0, budget - total) / 1000
-						: 100 + (total - budget) / 100
-					: 0;
-			return {
-				hotelId: idText(hotel._id),
-				hotelName: toTitle(hotel.hotelName),
-				roomTypeKey: selectedRoomTypeKey,
-				roomLabel: room.displayName || roomTypeLabel(selectedRoomTypeKey),
-				walking: hotel.distances?.walkingToElHaram || "",
-				driving: hotel.distances?.drivingToElHaram || "",
-				url: publicHotelUrl(hotel.hotelName),
-				quote,
-				total,
-				currency: cleanCurrency(quote?.currency || hotel.currency || "SAR"),
-				nights: quote?.nights || 0,
-				_score: budgetScore + distanceScore,
-			};
-		})
-		.filter(Boolean)
-		.sort((a, b) => a._score - b._score || a.total - b.total)
-		.slice(0, 4);
+	const dateKeys = hasDates ? safeStayDates(st.slots.checkinISO, st.slots.checkoutISO) : [];
+	const options = [];
+	for (const hotel of scopedHotels) {
+		if (
+			hotel.aiToRespond !== true ||
+			isJannatBookingSupportCase({ hotelId: hotel._id }, hotel)
+		) {
+			continue;
+		}
+		const hotelForPricing =
+			hasDates && dateKeys?.length
+				? (await getHotelByIdWithPricingDates(hotel._id, dateKeys)) || hotel
+				: hotel;
+		const room = (hotelForPricing.roomCountDetails || []).find((item) =>
+			roomMatches(item, selectedRoomTypeKey)
+		);
+		if (!room) continue;
+		const quote = hasDates
+			? safePriceRoomForStay(
+					hotelForPricing,
+					{ roomType: selectedRoomTypeKey },
+					st.slots.checkinISO,
+					st.slots.checkoutISO
+			  )
+			: null;
+		if (hasDates && !quote?.available) continue;
+		const total = Number(quote?.totals?.totalPriceWithCommission || 0);
+		const distanceScore =
+			firstNumber(hotelForPricing.distances?.walkingToElHaram || "") ||
+			firstNumber(hotelForPricing.distances?.drivingToElHaram || "") ||
+			999;
+		const budgetScore =
+			budget && total
+				? total <= budget
+					? Math.max(0, budget - total) / 1000
+					: 100 + (total - budget) / 100
+				: 0;
+		options.push({
+			hotelId: idText(hotelForPricing._id),
+			hotelName: toTitle(hotelForPricing.hotelName),
+			roomTypeKey: selectedRoomTypeKey,
+			roomLabel: room.displayName || roomTypeLabel(selectedRoomTypeKey),
+			walking: hotelForPricing.distances?.walkingToElHaram || "",
+			driving: hotelForPricing.distances?.drivingToElHaram || "",
+			url: publicHotelUrl(hotelForPricing.hotelName),
+			quote,
+			total,
+			currency: cleanCurrency(quote?.currency || hotelForPricing.currency || "SAR"),
+			nights: quote?.nights || 0,
+			_score: budgetScore + distanceScore,
+		});
+	}
+	options.sort((a, b) => a._score - b._score || a.total - b.total);
+	options.splice(4);
 
 	st.platformHotelOptions = options;
 	setSingleRoomSelection(st, selectedRoomTypeKey, {
@@ -13740,6 +13749,7 @@ async function shareKnownStayQuote(
 		checkoutISO: st.slots.checkoutISO,
 		hasHotel: Boolean(st.hotel),
 	});
+	await hydrateHotelPricingForCurrentStay(sc, st, "share_known_stay_quote");
 	const quote = safePriceRoomSelectionForStay(st);
 	st.quote = {
 		key: quoteKeyForSlots(st),
@@ -14030,6 +14040,30 @@ function safePriceRoomSelectionForStay(st = {}) {
 		st.slots?.checkinISO,
 		st.slots?.checkoutISO
 	);
+}
+
+async function hydrateHotelPricingForCurrentStay(sc = {}, st = {}, reason = "quote") {
+	if (
+		!st ||
+		!st.hotel ||
+		!st.slots?.checkinISO ||
+		!st.slots?.checkoutISO
+	) {
+		return st?.hotel || null;
+	}
+	const hotelId = idText(st.hotel?._id || st.hotel?.id || sc?.hotelId);
+	if (!hotelId) return st.hotel;
+	const dateKeys = safeStayDates(st.slots.checkinISO, st.slots.checkoutISO);
+	if (!dateKeys?.length) return st.hotel;
+	const hotelWithPricing = await getHotelByIdWithPricingDates(hotelId, dateKeys);
+	if (!hotelWithPricing) return st.hotel;
+	st.hotel = hotelWithPricing;
+	logStep(String(sc?._id || ""), "hotel.pricing_hydrated", {
+		reason,
+		hotelId,
+		dateCount: dateKeys.length,
+	});
+	return st.hotel;
 }
 
 function safePriceRoomSelectionsForStay(
@@ -15398,6 +15432,7 @@ async function sendReservationReview(
 		st.slots?.checkinISO &&
 		st.slots?.checkoutISO
 	) {
+		await hydrateHotelPricingForCurrentStay(sc, st, "reservation_review");
 		const rebuiltQuote = safePriceRoomSelectionForStay(st);
 		if (rebuiltQuote?.available) {
 			q = rebuiltQuote;
@@ -16706,6 +16741,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	}
 	if (!st.slots.email && !st.slots.emailSkipped) st.slots.emailSkipped = true;
 	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
+	await hydrateHotelPricingForCurrentStay(sc, st, "reservation_finalize");
 	const quoteForCreate =
 		st.quote?.data ||
 		safePriceRoomSelectionForStay(st);
@@ -21552,6 +21588,7 @@ async function planTurn(io, sc) {
 			st.quote && st.quote.key === qKey && now() - st.quote.at < 120000;
 		let quote;
 		if (!reuse) {
+			await hydrateHotelPricingForCurrentStay(sc, st, "main_pricing");
 			quote = safePriceRoomSelectionForStay(st);
 			logStep(caseId, "pricing", {
 				roomType: st.slots.roomTypeKey,
