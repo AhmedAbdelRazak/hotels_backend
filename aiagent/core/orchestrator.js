@@ -7423,9 +7423,114 @@ function hotelBusDetailLine(details = "", lang = "English") {
 	return "";
 }
 
+function joinHotelFactSentences(parts = []) {
+	return parts
+		.map((part) => String(part || "").trim())
+		.filter(Boolean)
+		.join(" ")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+}
+
+function hotelFactDistanceModeText(value = "", mode = "walking", lang = "English") {
+	if (!value) return "";
+	if (/arabic/i.test(lang)) {
+		return `${value} ${mode === "walking" ? "\u0645\u0634\u064a\u0627" : "\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629"}`;
+	}
+	if (/spanish/i.test(lang)) return `${value} ${mode === "walking" ? "caminando" : "en coche"}`;
+	if (/french/i.test(lang)) return `${value} ${mode === "walking" ? "a pied" : "en voiture"}`;
+	if (/urdu/i.test(lang)) return `${value} ${mode === "walking" ? "paidal" : "gaari se"}`;
+	if (/hindi/i.test(lang)) return `${value} ${mode === "walking" ? "paidal" : "gaadi se"}`;
+	if (/indonesian/i.test(lang)) return `${value} ${mode === "walking" ? "berjalan kaki" : "dengan mobil"}`;
+	if (/malay|malaysia/i.test(lang)) return `${value} ${mode === "walking" ? "berjalan kaki" : "dengan kereta"}`;
+	return `${value} ${mode === "walking" ? "on foot" : "by car"}`;
+}
+
+function hotelFactDistanceLineText(lang = "English", hotelName = "", walking = "", driving = "") {
+	const distance = localizedJoin(
+		[
+			hotelFactDistanceModeText(walking, "walking", lang),
+			hotelFactDistanceModeText(driving, "driving", lang),
+		],
+		lang
+	);
+	if (!distance) return "";
+	if (/arabic/i.test(lang)) {
+		return `${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${distance} \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`;
+	}
+	if (/spanish/i.test(lang)) return `${hotelName} esta a unos ${distance} de Al Haram, segun el trafico.`;
+	if (/french/i.test(lang)) return `${hotelName} se trouve a environ ${distance} d'Al Haram, selon la circulation.`;
+	if (/urdu/i.test(lang)) return `${hotelName} Al Haram se taqriban ${distance} hai, traffic ke hisaab se.`;
+	if (/hindi/i.test(lang)) return `${hotelName} Al Haram se lagbhag ${distance} hai, traffic ke hisaab se.`;
+	if (/indonesian/i.test(lang)) return `${hotelName} berjarak sekitar ${distance} dari Al Haram, tergantung lalu lintas.`;
+	if (/malay|malaysia/i.test(lang)) return `${hotelName} kira-kira ${distance} dari Al Haram, bergantung pada trafik.`;
+	return `${hotelName} is about ${distance} from Al Haram, depending on traffic.`;
+}
+
+function hotelFactPivotRank(pivot = "") {
+	switch (pivot) {
+		case "intentConfirm":
+			return 10;
+		case "finalize":
+		case "reviewConfirm":
+			return 6;
+		case "email_or_skip":
+			return 5;
+		case "reservation_details":
+		case "fullname":
+		case "nationality":
+		case "phone":
+			return 4;
+		case "proceed":
+			return 3;
+		case "room":
+			return 2;
+		case "dates":
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+function hotelFactConversationPivot(sc = {}) {
+	const assistantHistory = assistantMessagesBeforeLatestGuest(sc).reverse();
+	for (const assistant of assistantHistory.slice(0, 10)) {
+		const stage = assistantBookingStageFromMessage(assistant);
+		if (
+			[
+				"finalize",
+				"reviewConfirm",
+				"email_or_skip",
+				"reservation_details",
+				"proceed",
+			].includes(stage)
+		) {
+			return stage;
+		}
+		if (assistantRoomOptionsPromptText(assistant?.message || "")) return "room";
+	}
+	return "";
+}
+
+function strongestHotelFactPivot(sc = {}, st = {}) {
+	const statePivot = nextPivot(st);
+	const transcriptPivot = hotelFactConversationPivot(sc);
+	return hotelFactPivotRank(transcriptPivot) > hotelFactPivotRank(statePivot)
+		? transcriptPivot
+		: statePivot;
+}
+
+function hotelFactReservationDetailsPivot(pivot = "") {
+	return ["reservation_details", "fullname", "nationality", "phone"].includes(pivot);
+}
+
+function hotelFactFinalizePivot(pivot = "") {
+	return ["finalize", "reviewConfirm"].includes(pivot);
+}
+
 function hotelFactNextStepText(sc = {}, st = {}) {
 	const lang = languageOf(sc, st);
-	const pivot = nextPivot(st);
+	const pivot = strongestHotelFactPivot(sc, st);
 	if (aiReservationReference(sc) || st.waitFor === "post_booking_followup") {
 		if (/arabic/i.test(lang)) return "\u0647\u0644 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0623\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f";
 		if (/spanish/i.test(lang)) return "Puedo ayudarte con algo mas?";
@@ -7447,6 +7552,15 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		return "I am here if you need any other details.";
 	}
 	if (/arabic/i.test(lang)) {
+		if (hotelFactFinalizePivot(pivot)) {
+			return "\u0625\u0630\u0627 \u0643\u0644 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0635\u062d\u064a\u062d\u0629\u060c \u0623\u0643\u062f \u0644\u064a \u0648\u0633\u0623\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632.";
+		}
+		if (pivot === "email_or_skip") {
+			return "\u0623\u0631\u0633\u0644 \u0627\u0644\u0628\u0631\u064a\u062f \u0627\u0644\u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a \u0644\u0627\u0633\u062a\u0644\u0627\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639\u060c \u0623\u0648 \u0627\u0643\u062a\u0628 \u062a\u062e\u0637\u064a \u0625\u0630\u0627 \u0644\u0627 \u062a\u0631\u064a\u062f \u0625\u0636\u0627\u0641\u062a\u0647.";
+		}
+		if (hotelFactReservationDetailsPivot(pivot)) {
+			return "\u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644\u060c \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641\u060c \u0627\u0644\u062c\u0646\u0633\u064a\u0629\u060c \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u060c \u0648\u0633\u0623\u0643\u0645\u0644 \u0645\u0639\u0643 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632.";
+		}
 		if (pivot === "proceed") {
 			return "\u0648\u0625\u0630\u0627 \u0627\u0644\u0645\u0648\u0642\u0639 \u0645\u0646\u0627\u0633\u0628 \u0644\u0643\u060c \u0623\u062a\u0627\u0628\u0639 \u0625\u0644\u0649 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\u061f";
 		}
@@ -7494,6 +7608,9 @@ function hotelFactNextStepText(sc = {}, st = {}) {
 		if (pivot === "room") return "Jika lokasi ini sesuai, jenis bilik atau berapa tetamu yang anda perlukan?";
 		return "Ada butiran tempahan lain yang boleh saya bantu?";
 	}
+	if (hotelFactFinalizePivot(pivot)) return "If all reservation details look correct, confirm and I will complete the booking.";
+	if (pivot === "email_or_skip") return "Send me the email to receive the confirmation and payment link, or type skip if you do not want to add it.";
+	if (hotelFactReservationDetailsPivot(pivot)) return "Send me the reservation details: full name, phone number, nationality, and guest count, and I will continue the review.";
 	if (pivot === "proceed") return "If the location works for you, shall I continue with the reservation details?";
 	if (pivot === "dates") return "If the location works for you, send me the check-in and check-out dates and I will check the exact availability and price.";
 	if (pivot === "room") return "If the location works for you, which room type or guest count should I prepare for you?";
@@ -8140,8 +8257,15 @@ function selectedHotelFactAnswerText(sc = {}, st = {}, userText = "") {
 			: hotelNusukNoText(lang, name, next);
 	}
 	if (asksBus) {
+		const busNext =
+			hasBusService && asksDistance
+				? joinHotelFactSentences([
+						hotelFactDistanceLineText(lang, hotelName, walking, driving),
+						next,
+				  ])
+				: next;
 		return hasBusService
-			? hotelBusServiceYesText(lang, name, busDetails, next)
+			? hotelBusServiceYesText(lang, name, busDetails, busNext)
 			: hotelBusServiceNoText(lang, name, hotelName, walking, next);
 	}
 	if (asksLocalArea) {
