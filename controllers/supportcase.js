@@ -192,6 +192,83 @@ const publicHotelTrustQuestionText = (value = "") => {
 	);
 };
 
+const publicAvailabilityOnlyQuestionText = (value = "") => {
+	const raw = String(value || "").trim();
+	if (!raw || raw.length > 80) return false;
+	const lower = raw.toLowerCase();
+	const arabic = lower
+		.replace(/[\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647");
+	const asksAvailability =
+		/\b(?:available|availability|vacancy|vacancies|available\?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631|\u062a\u0648\u0641\u0631|\u0627\u0644\u062a\u0648\u0641\u0631)/i.test(
+			arabic
+		);
+	if (!asksAvailability) return false;
+	const namesRoom =
+		/\b(?:double|triple|quad|quadruple|family|room\s+for\s+\d)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0632\u062f\u0648\u062c|\u062b\u0646\u0627\u0626|\u062b\u0644\u0627\u062b|\u062a\u0644\u0627\u062a|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644|\u0641\u0631\u062f\u064a\u0646|\u0634\u062e\u0635\u064a\u0646)/i.test(
+			arabic
+		);
+	return !namesRoom;
+};
+
+const previousAiAskedRoomType = (supportCase = {}, latestEntry = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const latestTag = cleanText(latestEntry?.clientTag, 120);
+	let latestIndex = -1;
+	if (latestTag) {
+		latestIndex = conversation.findIndex(
+			(entry) => cleanText(entry?.clientTag, 120) === latestTag
+		);
+	}
+	if (latestIndex < 0) latestIndex = conversation.length;
+	for (let index = latestIndex - 1; index >= 0; index -= 1) {
+		const entry = conversation[index];
+		if (isPublicGuestConversationEntry(entry)) break;
+		if (!isAiSupportConversationEntry(entry)) continue;
+		const text = cleanText(entry.message, 2000);
+		return (
+			/(?:\u0623\u064a\s+\u0646\u0648\u0639\s+\u062a\u0641\u0636\u0644|\u0627\u0646\u0648\u0627\u0639\s+\u0627\u0644\u063a\u0631\u0641|\u0623\u0646\u0648\u0627\u0639\s+\u0627\u0644\u063a\u0631\u0641|\u0646\u0648\u0639\s+\u0627\u0644\u063a\u0631\u0641\u0629)/i.test(
+				text
+			) ||
+			/\b(?:which|what)\s+room\s+type\b/i.test(text) ||
+			/\broom\s+type\s+(?:do\s+you\s+prefer|would\s+you\s+like)\b/i.test(
+				text
+			)
+		);
+	}
+	return false;
+};
+
+const publicAvailabilityRoomChoiceReplyText = (
+	supportCase = {},
+	latestEntry = {}
+) => {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	if (!publicAvailabilityOnlyQuestionText(latestText)) return "";
+	if (!previousAiAskedRoomType(supportCase, latestEntry)) return "";
+	const lang = String(
+		latestEntry?.preferredLanguage ||
+			supportCase.preferredLanguage ||
+			supportCase.preferredLanguageCode ||
+			""
+	).toLowerCase();
+	const hasArabic = /[\u0600-\u06ff]/.test(latestText);
+	if (hasArabic || /arabic|ar\b/.test(lang)) {
+		return "\u0646\u0639\u0645\u060c \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0644\u0643. \u0645\u0646 \u0641\u0636\u0644\u0643 \u0627\u062e\u062a\u0631 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0645\u0646 \u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0633\u0627\u0628\u0642\u0629 \u062d\u062a\u0649 \u0623\u0639\u0637\u064a\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u062f\u0642\u0629.";
+	}
+	return "Yes, I can check availability for you. Please choose the room type from the options above so I can give you the exact price and availability.";
+};
+
 const lastAiPublicSenderName = (supportCase = {}) => {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
@@ -242,7 +319,12 @@ const publicHotelTrustQuickReplyText = (supportCase = {}, latestEntry = {}) => {
 	return `Yes, you are chatting with ${hotelName} reception and reservations through Jannat Booking. I am here to help.`;
 };
 
-async function appendPublicAiQuickReply(io, supportCase = {}, message = "") {
+async function appendPublicAiQuickReply(
+	io,
+	supportCase = {},
+	message = "",
+	{ clientAction = "", tagPrefix = "ai_quick" } = {}
+) {
 	const caseId = String(supportCase?._id || "");
 	const text = cleanText(message, 8000);
 	if (!caseId || !text) return null;
@@ -256,7 +338,8 @@ async function appendPublicAiQuickReply(io, supportCase = {}, message = "") {
 		date: new Date(),
 		isAi: true,
 		isSystem: false,
-		clientTag: `ai_quick_trust_${Date.now()}`,
+		clientTag: `${tagPrefix}_${Date.now()}`,
+		clientAction,
 		seenByAdmin: false,
 		seenByHotel: false,
 		seenByCustomer: false,
@@ -1584,19 +1667,33 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {
-			const quickTrustReply = isLegacyAiAgentEngine()
-				? publicHotelTrustQuickReplyText(updatedCase, safeConversation)
+			const legacyAiEngine = isLegacyAiAgentEngine();
+			const quickAvailabilityReply = legacyAiEngine
+				? publicAvailabilityRoomChoiceReplyText(updatedCase, safeConversation)
 				: "";
-			if (quickTrustReply) {
+			const quickTrustReply =
+				legacyAiEngine && !quickAvailabilityReply
+					? publicHotelTrustQuickReplyText(updatedCase, safeConversation)
+					: "";
+			if (quickAvailabilityReply || quickTrustReply) {
 				const quickReplyCase = await appendPublicAiQuickReply(
 					req.io,
 					updatedCase,
-					quickTrustReply
+					quickAvailabilityReply || quickTrustReply,
+					quickAvailabilityReply
+						? {
+								clientAction: "ai_room_choice_needed",
+								tagPrefix: "ai_quick_availability",
+						  }
+						: {
+								clientAction: "ai_trust_reply",
+								tagPrefix: "ai_quick_trust",
+						  }
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;
 			} else {
 				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-				if (isLegacyAiAgentEngine()) {
+				if (legacyAiEngine) {
 					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 				}
 			}
