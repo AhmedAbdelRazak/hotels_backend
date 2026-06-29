@@ -96,6 +96,15 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
+const AI_PLAN_MAX_CONCURRENT = intFromEnv("AI_PLAN_MAX_CONCURRENT", 1, {
+	min: 1,
+	max: 4,
+});
+const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
+	min: 10,
+	max: 1000,
+});
+
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
 	max: 5000,
@@ -22965,11 +22974,7 @@ async function planTurn(io, sc) {
 			});
 		}
 		if (queuedFollowupCase) {
-			setTimeout(() => {
-				planTurn(io, queuedFollowupCase).catch((error) => {
-					console.error("[aiagent] queued plan error:", error?.message || error);
-				});
-			}, 0);
+			schedulePlanTurn(io, idText(queuedFollowupCase), { delayMs: 0 });
 			logStep(caseId, "turn.schedule_followup", {
 				reason: queuedFollowupReason,
 			});
@@ -22979,8 +22984,96 @@ async function planTurn(io, sc) {
 }
 
 const scheduledTurns = new Map();
+const queuedPlanTurns = [];
+const queuedPlanCaseIds = new Set();
+let activePlanTurnCount = 0;
+let planQueueDrainScheduled = false;
 const unansweredTurnRecoveryTimers = new Map();
 const unansweredTurnRecoveryAttempts = new Map();
+
+function drainPlanTurnQueue() {
+	if (planQueueDrainScheduled) return;
+	planQueueDrainScheduled = true;
+	setImmediate(() => {
+		planQueueDrainScheduled = false;
+		while (
+			activePlanTurnCount < AI_PLAN_MAX_CONCURRENT &&
+			queuedPlanTurns.length
+		) {
+			const item = queuedPlanTurns.shift();
+			queuedPlanCaseIds.delete(item.caseId);
+			activePlanTurnCount += 1;
+			runQueuedPlanTurn(item)
+				.catch((error) => {
+					console.error("[aiagent] queued plan error:", error?.message || error);
+				})
+				.finally(() => {
+					activePlanTurnCount = Math.max(0, activePlanTurnCount - 1);
+					drainPlanTurnQueue();
+				});
+		}
+	});
+}
+
+function queuePlanTurnExecution(io, caseId, { reason = "scheduled" } = {}) {
+	const key = idText(caseId);
+	if (!io || !key) return false;
+	if (queuedPlanCaseIds.has(key)) {
+		logStep(key, "turn.global_queue.dedupe", {
+			reason,
+			active: activePlanTurnCount,
+			queued: queuedPlanTurns.length,
+		});
+		return true;
+	}
+	if (queuedPlanTurns.length >= AI_PLAN_QUEUE_MAX) {
+		console.error("[aiagent] plan queue full; dropping turn", {
+			caseId: key,
+			reason,
+			queued: queuedPlanTurns.length,
+		});
+		return false;
+	}
+	queuedPlanCaseIds.add(key);
+	queuedPlanTurns.push({
+		io,
+		caseId: key,
+		enqueuedAt: now(),
+		reason,
+	});
+	logStep(key, "turn.global_queue.enqueue", {
+		reason,
+		active: activePlanTurnCount,
+		queued: queuedPlanTurns.length,
+		maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+	});
+	drainPlanTurnQueue();
+	return true;
+}
+
+async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }) {
+	const latestCase = await getSupportCaseById(caseId);
+	if (!latestCase) {
+		logStep(caseId, "turn.global_queue.skip", { reason: "missing_case" });
+		return false;
+	}
+	if (latestCase.caseStatus === "closed" || latestCase.aiToRespond === false) {
+		logStep(caseId, "turn.global_queue.skip", {
+			reason: "inactive_case",
+			caseStatus: latestCase.caseStatus,
+			aiToRespond: latestCase.aiToRespond,
+		});
+		return false;
+	}
+	logStep(caseId, "turn.global_queue.start", {
+		reason,
+		waitMs: now() - Number(enqueuedAt || now()),
+		active: activePlanTurnCount,
+		queued: queuedPlanTurns.length,
+		maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+	});
+	return planTurn(io, latestCase);
+}
 
 function latestGuestNeedsAiReply(sc = {}) {
 	if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return false;
@@ -23081,12 +23174,9 @@ async function runUnansweredTurnRecovery(io, caseId) {
 		}
 	}
 	logStep(caseId, "turn_recovery.run", { attempts });
-	await planTurn(io, latestCase);
-	const afterCase = await getSupportCaseById(caseId);
-	if (attempts < 3 && latestGuestNeedsAiReply(afterCase)) {
+	queuePlanTurnExecution(io, caseId, { reason: "unanswered_turn_recovery" });
+	if (attempts < 3) {
 		scheduleUnansweredTurnRecovery(io, caseId, AI_TURN_STALL_RECOVERY_MS);
-	} else if (!latestGuestNeedsAiReply(afterCase)) {
-		unansweredTurnRecoveryAttempts.delete(caseId);
 	}
 	return true;
 }
@@ -23099,8 +23189,7 @@ function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const timer = setTimeout(async () => {
 		scheduledTurns.delete(caseId);
 		try {
-			const latestCase = await getSupportCaseById(caseId);
-			if (latestCase) await planTurn(io, latestCase);
+			queuePlanTurnExecution(io, caseId, { reason: "scheduled_turn" });
 		} catch (error) {
 			console.error("[aiagent] scheduled plan error:", error?.message || error);
 		}
