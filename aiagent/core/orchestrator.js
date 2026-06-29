@@ -15009,7 +15009,7 @@ function currentReservationSummaryText(sc = {}, st = {}, quote = {}) {
 	const next = bookingNextActionText(sc, st);
 	if (/arabic/i.test(lang)) {
 		return [
-			`${name}\u060c \u0645\u0644\u062e\u0635 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u062d\u0627\u0644\u064a:`,
+			`${name}\u060c \u0623\u0643\u064a\u062f\u060c \u0647\u0630\u0627 \u0645\u0644\u062e\u0635 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u062d\u0627\u0644\u064a:`,
 			`\u0627\u0644\u0641\u0646\u062f\u0642: ${hotelName}`,
 			`\u0627\u0644\u063a\u0631\u0641\u0629: ${roomName}`,
 			`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}`,
@@ -15024,7 +15024,7 @@ function currentReservationSummaryText(sc = {}, st = {}, quote = {}) {
 			.join("\n");
 	}
 	return [
-		`${name}, here is the current booking summary:`,
+		`${name}, of course, here is the current booking summary:`,
 		`Hotel: ${hotelName}`,
 		`Room: ${roomName}`,
 		`Dates: ${dates.primary}${dates.secondary ? ` (${dates.secondary})` : ""}`,
