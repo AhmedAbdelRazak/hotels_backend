@@ -4640,14 +4640,16 @@ function selectedHotelAddressQuestionText(text = "") {
 function selectedHotelBusQuestionText(text = "") {
 	const { lower, arabic, latinCompact } = normalizeControlText(text);
 	if (!lower.trim()) return false;
+	const standaloneBusWord =
+		/(?:^|[^\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\u0900-\u097fA-Za-z0-9])(?:\u0628\u0627\u0635|\u0628\u0627\u0635\u0627\u062a|\u062d\u0627\u0641\u0644\u0647|\u062d\u0627\u0641\u0644\u0629|\u062d\u0627\u0641\u0644\u0627\u062a|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0634\u0627\u062a\u0644|\u0628\u0633|\u0628\u0633\u06cc\u06ba|\u0628\u0633\u06cc\u06ba|\u092c\u0938|\u0628\u0627\u0633)(?=$|[^\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\u0900-\u097fA-Za-z0-9])/i.test(
+			arabic
+		);
 	const directBus =
 		hasSemanticSignal(text, "bus") ||
 		/\b(?:bus|buses|shuttle|coach|haram\s+bus|bus\s+to\s+haram)\b/i.test(
 			lower
 		) ||
-		/(?:\u0628\u0627\u0635|\u0628\u0627\u0635\u0627\u062a|\u062d\u0627\u0641\u0644\u0647|\u062d\u0627\u0641\u0644\u0627\u062a|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0634\u0627\u062a\u0644|\u0628\u0633|\u0628\u0633\u06cc\u06ba|\u092c\u0938|\u0628\u0627\u0633)/i.test(
-			arabic
-		) ||
+		standaloneBusWord ||
 		/(?:Ø¨Ø§Øµ|Ø¨Ø§ØµØ§Øª|Ø­Ø§ÙÙ„|Ø§ØªÙˆØ¨ÙŠØ³|Ø£ØªÙˆØ¨ÙŠØ³|Ø´Ø§ØªÙ„)/i.test(
 			lower
 		) ||
@@ -23219,6 +23221,8 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		selectedHotelFactAnswerText,
 		latestTextHasBookableRoomSelection,
 		roomSelectionSignalText,
+		selectedHotelBusQuestionText,
+		extractSingleStayDate,
 	};
 }
 

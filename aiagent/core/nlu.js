@@ -1708,6 +1708,7 @@ async function normalizeDatesLLM({
 		/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2}\b/.test(rawDateText);
 	const sys = [
 		"Convert input dates to Gregorian ISO (YYYY-MM-DD). Input may be Hijri or Gregorian, any language.",
+		"If only one of checkin_raw or checkout_raw is present, convert only that one and leave the missing side null. Never infer a missing check-in or checkout date.",
 		"IMPORTANT: If the month is missing for either date, DO NOT infer—return null and set reason:'month_missing'.",
 		"If year is missing but month exists, prefer the nearest FUTURE year.",
 		"If the guest supplied an explicit Gregorian year and that date is before todayISO, do not silently change the year; return the typed year and set reason:'past_explicit_year'.",
@@ -1737,6 +1738,8 @@ async function normalizeDatesLLM({
 		data = null;
 	}
 	if (!data) return { checkinISO: null, checkoutISO: null, reason: null };
+	if (!checkin) data.checkinISO = null;
+	if (!checkout) data.checkoutISO = null;
 
 	if (!data.reason && isPastISO(data.checkinISO)) {
 		if (hasExplicitGregorianYear) {
