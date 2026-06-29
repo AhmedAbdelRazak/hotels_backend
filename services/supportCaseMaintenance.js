@@ -28,8 +28,8 @@ const AI_TURN_STALL_RECOVERY_MS = intFromEnv(
 );
 const AI_TURN_RECOVERY_LOOKBACK_MS = intFromEnv(
 	"AI_TURN_RECOVERY_LOOKBACK_MS",
-	3 * ONE_MINUTE,
-	{ min: ONE_MINUTE, max: 15 * ONE_MINUTE }
+	15 * ONE_MINUTE,
+	{ min: ONE_MINUTE, max: 30 * ONE_MINUTE }
 );
 const AI_TURN_RECOVERY_LIMIT = intFromEnv("AI_TURN_RECOVERY_LIMIT", 10, {
 	min: 1,
