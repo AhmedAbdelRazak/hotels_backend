@@ -19627,6 +19627,16 @@ function liveCurrentGeneralQuestionText(text = "") {
 function fastCareAndUnclearBookingReplyText(sc = {}, st = {}, userText = "") {
 	if (!st.hotel) return "";
 	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	if (
+		quickDateRange(userText)?.checkinISO ||
+		looksLikeStayDateCandidate(userText) ||
+		/\b(?:price|availability|available|total|quote|rate|cost)\b/i.test(lower) ||
+		/(?:\u0633\u0639\u0631|\u0627\u0644\u0633\u0639\u0631|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0641\u0631|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0628\u0643\u0627\u0645|\u0643\u0627\u0645)/i.test(
+			arabic
+		)
+	) {
+		return "";
+	}
 	const hasArabic = /[\u0600-\u06FF]/.test(String(userText || ""));
 	const lang = languageOf(sc, st);
 	const replyArabic = /arabic/i.test(lang) || hasArabic;
@@ -23790,6 +23800,22 @@ async function planTurn(io, sc) {
 			logStep(caseId, "hotel_scope.boundary", { source: "deterministic" });
 			await humanSend(io, sc, st, selectedHotelSupportBoundaryReply(sc, st));
 			st.waitFor = "clarify";
+			return;
+		}
+		if (fastCareAndUnclearBookingReplyText(sc, st, userText)) {
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				"fast_care_unclear_booking_predecision",
+				{
+					action: "other",
+					scope: "selected_hotel",
+					routingStage: "reservation_start",
+					keywords: ["care", "unclear_booking"],
+				}
+			);
 			return;
 		}
 
