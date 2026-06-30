@@ -15,6 +15,7 @@ const {
 	prepareImmediateProceedAfterQuoteState,
 	buildImmediateReservationDetailsReply,
 	buildImmediateSkipEmailReviewReply,
+	finalizeImmediatePlaceReservation,
 } = require("../aiagent/core/orchestrator");
 const {
 	activeHotelPolicyQA,
@@ -2214,75 +2215,89 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.caseStatus !== "closed"
 		) {
 			const legacyAiEngine = isLegacyAiAgentEngine();
-			const immediateQuote = legacyAiEngine
-				? await buildImmediateKnownStayQuoteReply(updatedCase, safeConversation)
-				: null;
-			let proceedPrompt = "";
-			const proceedPromptCandidate =
-				legacyAiEngine && !immediateQuote?.message
-					? publicProceedAfterQuoteReplyText(updatedCase, safeConversation)
-					: "";
-			if (proceedPromptCandidate) {
-				const prepared = await prepareImmediateProceedAfterQuoteState(
-					updatedCase._id
-				);
-				if (prepared?.ok) {
-					proceedPrompt = proceedPromptCandidate;
-				} else {
-					console.warn(
-						"[supportcase] B2C proceed prompt skipped; state was not prepared",
+			const placeReservationHandled =
+				legacyAiEngine &&
+				normalizeQuickReplyAction(safeConversation?.clientAction).toLowerCase() ===
+					"place_reservation"
+					? await finalizeImmediatePlaceReservation(req.io, updatedCase._id)
+					: null;
+			if (placeReservationHandled?.ok) {
+				const finalizedCase = await SupportCase.findById(updatedCase._id)
+					.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
+					.lean()
+					.exec();
+				if (finalizedCase) updatedCase = finalizedCase;
+			} else {
+				const immediateQuote = legacyAiEngine
+					? await buildImmediateKnownStayQuoteReply(updatedCase, safeConversation)
+					: null;
+				let proceedPrompt = "";
+				const proceedPromptCandidate =
+					legacyAiEngine && !immediateQuote?.message
+						? publicProceedAfterQuoteReplyText(updatedCase, safeConversation)
+						: "";
+				if (proceedPromptCandidate) {
+					const prepared = await prepareImmediateProceedAfterQuoteState(
+						updatedCase._id
+					);
+					if (prepared?.ok) {
+						proceedPrompt = proceedPromptCandidate;
+					} else {
+						console.warn(
+							"[supportcase] B2C proceed prompt skipped; state was not prepared",
+							{
+								caseId: String(updatedCase._id),
+								reason: prepared?.reason || "unknown",
+							}
+						);
+					}
+				}
+				const maybeEmailSkip = publicMaybeEmailSkipText(safeConversation);
+				const maybeReservationDetails =
+					!maybeEmailSkip && publicMaybeReservationDetailsPayloadText(safeConversation);
+				const immediateReservationPayload =
+					legacyAiEngine &&
+					!immediateQuote?.message &&
+					!proceedPromptCandidate &&
+					(maybeEmailSkip || maybeReservationDetails)
+						? maybeEmailSkip
+							? await buildImmediateSkipEmailReviewReply(updatedCase._id)
+							: await buildImmediateReservationDetailsReply(updatedCase._id)
+						: null;
+				const quickReply =
+					immediateQuote?.message ||
+					proceedPrompt ||
+					immediateReservationPayload?.message ||
+					(legacyAiEngine && !proceedPromptCandidate
+						? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
+						: "");
+				if (quickReply) {
+					const quickReplyCase = await appendPublicAiQuickReply(
+						req.io,
+						updatedCase,
+						quickReply,
 						{
-							caseId: String(updatedCase._id),
-							reason: prepared?.reason || "unknown",
+							clientAction:
+								immediateQuote?.clientAction ||
+								immediateReservationPayload?.clientAction ||
+								"ai_immediate_reply",
+							tagPrefix: immediateQuote?.message
+								? "ai_quick_quote"
+								: immediateReservationPayload?.message
+								? "ai_quick_reservation_state"
+								: "ai_quick_immediate",
+							quickReplies:
+								immediateQuote?.quickReplies ||
+								immediateReservationPayload?.quickReplies ||
+								[],
 						}
 					);
-				}
-			}
-			const maybeEmailSkip = publicMaybeEmailSkipText(safeConversation);
-			const maybeReservationDetails =
-				!maybeEmailSkip && publicMaybeReservationDetailsPayloadText(safeConversation);
-			const immediateReservationPayload =
-				legacyAiEngine &&
-				!immediateQuote?.message &&
-				!proceedPromptCandidate &&
-				(maybeEmailSkip || maybeReservationDetails)
-					? maybeEmailSkip
-						? await buildImmediateSkipEmailReviewReply(updatedCase._id)
-						: await buildImmediateReservationDetailsReply(updatedCase._id)
-					: null;
-			const quickReply =
-				immediateQuote?.message ||
-				proceedPrompt ||
-				immediateReservationPayload?.message ||
-				(legacyAiEngine && !proceedPromptCandidate
-					? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
-					: "");
-			if (quickReply) {
-				const quickReplyCase = await appendPublicAiQuickReply(
-					req.io,
-					updatedCase,
-					quickReply,
-					{
-						clientAction:
-							immediateQuote?.clientAction ||
-							immediateReservationPayload?.clientAction ||
-							"ai_immediate_reply",
-						tagPrefix: immediateQuote?.message
-							? "ai_quick_quote"
-							: immediateReservationPayload?.message
-							? "ai_quick_reservation_state"
-							: "ai_quick_immediate",
-						quickReplies:
-							immediateQuote?.quickReplies ||
-							immediateReservationPayload?.quickReplies ||
-							[],
+					if (quickReplyCase) updatedCase = quickReplyCase;
+				} else {
+					scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+					if (legacyAiEngine) {
+						scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 					}
-				);
-				if (quickReplyCase) updatedCase = quickReplyCase;
-			} else {
-				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-				if (legacyAiEngine) {
-					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 				}
 			}
 		}

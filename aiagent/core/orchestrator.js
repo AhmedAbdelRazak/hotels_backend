@@ -21284,6 +21284,97 @@ async function buildImmediateSkipEmailReviewReply(caseOrId) {
 	}
 }
 
+async function finalizeImmediatePlaceReservation(io, caseOrId) {
+	const caseId = idText(caseOrId?._id || caseOrId);
+	if (!caseId) return { ok: false, reason: "missing_case_id" };
+	try {
+		const sc = await getSupportCaseById(caseId);
+		if (!sc) return { ok: false, reason: "case_not_found" };
+		if (sc.caseStatus === "closed" || sc.aiToRespond === false) {
+			return { ok: false, reason: "case_not_active" };
+		}
+		const latestGuest = lastGuestMessage(sc);
+		const action = String(latestGuest?.clientAction || "")
+			.trim()
+			.toLowerCase();
+		if (!["place_reservation", "confirm_reservation"].includes(action)) {
+			return { ok: false, reason: "latest_guest_not_place_reservation" };
+		}
+		const userText = String(latestGuest?.message || lastUserText(sc) || "").trim();
+		if (severeAbusiveGuestText(userText) || humanHandoffReason(userText)) {
+			return { ok: false, reason: "unsafe_or_handoff_text" };
+		}
+		const previousAi = lastAssistantMessageBeforeLatestGuest(sc);
+		const previousActions = quickReplyActions(previousAi);
+		const previousWasFinalReview = Boolean(
+			previousActions.includes("place_reservation") ||
+				previousActions.includes("confirm_reservation") ||
+				String(previousAi?.clientAction || "") === "ai_final_review" ||
+				assistantMessageSuggestsReview(previousAi)
+		);
+		if (!previousWasFinalReview) {
+			return { ok: false, reason: "previous_ai_not_final_review" };
+		}
+		const policy = await ensureAIAllowed(sc.hotelId, sc);
+		if (!policy.allowed) return { ok: false, reason: policy.reason || "ai_not_allowed" };
+		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
+		recoverBookingContextFromConversation(sc, st, {
+			protectLatestGuestDateChange: true,
+			reason: "controller_immediate_place_reservation",
+		});
+		const quote = ensureCurrentQuoteForSlots(st);
+		if (!quote?.available) {
+			return { ok: false, reason: "missing_available_quote" };
+		}
+		st.slots = st.slots || {};
+		if (st.slots?.adultsProvided) ensureDefaultChildren(st);
+		if (!st.slots.email) st.slots.emailSkipped = true;
+		st.waitFor = "finalize";
+		st.reviewSent = true;
+		st.finalReviewSentAt = st.finalReviewSentAt || now();
+		st.turnInFlight = false;
+		st.turnOwner = null;
+		st.interrupt = false;
+		st.queue = [];
+		st.quote = {
+			key: quoteKeyForSlots(st),
+			at: st.quote?.at || now(),
+			data: quote,
+		};
+		st.quoteSummarizedAt = st.quoteSummarizedAt || now();
+		st.progressSentAt = {
+			...(st.progressSentAt || {}),
+			finalizing: 0,
+		};
+		st.lastBotTurnUserText = "";
+		st.activeTurnHadReply = false;
+		st.activeTurnUserText = userText;
+		st.pendingDateChange = null;
+		st.pendingRoomAlternative = null;
+		st.pendingRoomCombination = null;
+		st.pendingReviewCorrection = null;
+		st.allowPostBookingReentry = false;
+		stampAsk(st, "finalize");
+		await persistAiStateSnapshot(caseId, sc, st);
+		const handled = await finalizeReservationForGuest(io, sc, st, caseId);
+		logStep(caseId, "reservation.controller_place_reservation_fast_path", {
+			handled: Boolean(handled),
+			waitFor: st.waitFor || "",
+			hasReservation: Boolean(st?.aiReservation?.reservationId),
+		});
+		return handled
+			? { ok: true, reason: "finalized" }
+			: { ok: false, reason: "finalize_not_handled" };
+	} catch (error) {
+		logStep(caseId, "reservation.controller_place_reservation_failed", {
+			message: error?.message || error,
+		});
+		await markAiReservationFinalizeFailed(caseId, error);
+		return { ok: false, reason: "finalize_failed" };
+	}
+}
+
 async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry = {}) {
 	const latestText = String(latestEntry?.message || "").trim();
 	if (
@@ -25475,6 +25566,7 @@ const exportedOrchestrator = {
 	prepareImmediateProceedAfterQuoteState,
 	buildImmediateReservationDetailsReply,
 	buildImmediateSkipEmailReviewReply,
+	finalizeImmediatePlaceReservation,
 	tryImmediateB2CFastPath: maybeSendPreWorkerFastPath,
 	__worker: {
 		planTurn,
