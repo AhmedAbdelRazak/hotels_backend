@@ -21135,10 +21135,12 @@ async function prepareImmediateProceedAfterQuoteState(caseOrId) {
 		if (!policy.allowed) return { ok: false, reason: policy.reason || "ai_not_allowed" };
 		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
-		recoverBookingContextFromConversation(sc, st, {
-			protectLatestGuestDateChange: true,
-			reason: "controller_immediate_proceed_state",
-		});
+		if (!activeQuoteMatchesSlots(st)) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "controller_immediate_proceed_state",
+			});
+		}
 		const quote = ensureCurrentQuoteForSlots(st);
 		if (!quote?.available) return { ok: false, reason: "missing_available_quote" };
 		resumeBookingNudge(st);
@@ -21375,10 +21377,12 @@ async function finalizeImmediatePlaceReservation(io, caseOrId) {
 		if (!policy.allowed) return { ok: false, reason: policy.reason || "ai_not_allowed" };
 		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
-		recoverBookingContextFromConversation(sc, st, {
-			protectLatestGuestDateChange: true,
-			reason: "controller_immediate_place_reservation",
-		});
+		if (!activeQuoteMatchesSlots(st) || !hasMandatoryReservationDetails(st)) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "controller_immediate_place_reservation",
+			});
+		}
 		const sanitizedFullName = cleanFullNameCandidate(
 			st.slots?.fullName || st.slots?.name || ""
 		);

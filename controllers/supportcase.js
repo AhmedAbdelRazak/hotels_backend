@@ -843,6 +843,13 @@ const publicAiReservationRef = (supportCase = {}) => {
 const publicPostBookingCloseText = (text = "") => {
 	const normalized = cleanText(text, 500).toLowerCase();
 	if (!normalized || /[?؟]/.test(normalized)) return false;
+	if (
+		/^(?:thanks|thank you|thx)[\s,]*(?:(?:that'?s|that is)\s+)?all(?:\s+(?:good|set|for now))?[\s.!]*$/i.test(
+			normalized
+		)
+	) {
+		return true;
+	}
 	return /^(?:no|nope|no thanks|no thank you|nothing|that's all|that is all|all good|thanks|thank you|bye|goodbye|see you|شكرا|شكرًا|لا|لا شكرا|خلاص|كده تمام|مافيش|مفيش|بس كده)(?:[\s.!،]*)$/i.test(
 		normalized
 	);
