@@ -30,6 +30,13 @@ const ROOM_SYNONYMS = [
 			"king",
 			"queen",
 			"twin",
+			"2 bed",
+			"2 beds",
+			"two bed",
+			"two beds",
+			"two single beds",
+			"room with 2 beds",
+			"room with two beds",
 			"habitacion doble",
 			"habitacion estandar",
 			"habitación doble",
@@ -48,6 +55,14 @@ const ROOM_SYNONYMS = [
 			"\u0632\u0648\u062c\u064a",
 			"\u062b\u0646\u0627\u0626\u064a\u0629",
 			"\u062f\u0628\u0644",
+			"\u062a\u0648\u064a\u0646",
+			"\u0633\u0631\u064a\u0631\u064a\u0646",
+			"\u0628\u0633\u0631\u064a\u0631\u064a\u0646",
+			"\u0633\u0631\u064a\u0631\u0627\u0646",
+			"\u0627\u0633\u0631\u062a\u064a\u0646",
+			"\u0628\u0627\u0633\u0631\u062a\u064a\u0646",
+			"\u063a\u0631\u0641\u0629 \u0628\u0633\u0631\u064a\u0631\u064a\u0646",
+			"\u0633\u0631\u064a\u0631\u064a\u0646 \u0645\u0646\u0641\u0635\u0644\u064a\u0646",
 			"غرفة مزدوجة",
 			"ثنائية",
 			"\u0634\u062e\u0635\u064a\u0646",
@@ -177,6 +192,14 @@ ROOM_SYNONYMS.push(
 			"\u062a\u0644\u0627\u062a\u064a",
 			"\u062a\u0644\u0627\u062a\u0649",
 			"\u062a\u0644\u062a",
+			"\u0033 \u0633\u0631\u064a\u0631",
+			"\u0663 \u0633\u0631\u064a\u0631",
+			"\u062b\u0644\u0627\u062b\u0629 \u0633\u0631\u064a\u0631",
+			"\u062b\u0644\u0627\u062b\u0647 \u0633\u0631\u064a\u0631",
+			"\u062a\u0644\u0627\u062a\u0629 \u0633\u0631\u064a\u0631",
+			"\u062a\u0644\u0627\u062a\u0647 \u0633\u0631\u064a\u0631",
+			"\u062b\u0644\u0627\u062b\u0629 \u0627\u0633\u0631\u0629",
+			"\u062b\u0644\u0627\u062b\u0647 \u0627\u0633\u0631\u0647",
 		],
 	},
 	{
@@ -184,6 +207,14 @@ ROOM_SYNONYMS.push(
 		terms: [
 			"\u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
 			"\u0631\u0628\u0627\u0639\u064a\u0629",
+			"\u0034 \u0633\u0631\u064a\u0631",
+			"\u0664 \u0633\u0631\u064a\u0631",
+			"\u0627\u0631\u0628\u0639\u0629 \u0633\u0631\u064a\u0631",
+			"\u0627\u0631\u0628\u0639\u0647 \u0633\u0631\u064a\u0631",
+			"\u0631\u0628\u0639\u0629 \u0633\u0631\u064a\u0631",
+			"\u0631\u0628\u0639\u0647 \u0633\u0631\u064a\u0631",
+			"\u0627\u0631\u0628\u0639\u0629 \u0627\u0633\u0631\u0629",
+			"\u0627\u0631\u0628\u0639\u0647 \u0627\u0633\u0631\u0647",
 		],
 	},
 	{
@@ -195,6 +226,12 @@ ROOM_SYNONYMS.push(
 			"\u062e\u0645\u0627\u0633\u064a\u0629",
 			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a",
 			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629",
+			"\u0035 \u0633\u0631\u064a\u0631",
+			"\u0665 \u0633\u0631\u064a\u0631",
+			"\u062e\u0645\u0633\u0629 \u0633\u0631\u064a\u0631",
+			"\u062e\u0645\u0633\u0647 \u0633\u0631\u064a\u0631",
+			"\u062e\u0645\u0633\u0629 \u0627\u0633\u0631\u0629",
+			"\u062e\u0645\u0633\u0647 \u0627\u0633\u0631\u0647",
 		],
 	}
 );
@@ -227,7 +264,39 @@ function roomTermMatches(text = "", term = "") {
 	return low.includes(raw) || normalizedText.includes(normalizedTerm);
 }
 
+function arabicBedCountRoomKeyFromText(text = "") {
+	const ar = normalizeArabicRoomText(
+		digitsToEnglish(normalizeNumberWordsForParsing(text))
+	);
+	if (!ar) return null;
+	const bedWords =
+		"(?:\\u0633\\u0631\\u064a\\u0631|\\u0627\\u0633\\u0631\\u0647|\\u0627\\u0633\\u0631|\\u0633\\u0631\\u0627\\u064a\\u0631)";
+	if (
+		/(?:^|[\s,\u060c;\u061b])(?:\u0628?\u0633\u0631\u064a\u0631\u064a\u0646|\u0633\u0631\u064a\u0631\u0627\u0646|\u0628?\u0627\u0633\u0631\u062a\u064a\u0646|\u0627\u0633\u0631\u062a\u0627\u0646)(?:$|[\s,\u060c;\u061b])/.test(
+			ar
+		)
+	) {
+		return "doubleRooms";
+	}
+	const keys = {
+		2: "doubleRooms",
+		3: "tripleRooms",
+		4: "quadRooms",
+		5: "familyRooms",
+	};
+	for (const count of [5, 4, 3, 2]) {
+		const pattern = new RegExp(
+			`(?:^|[^0-9])${count}\\s*${bedWords}|${bedWords}\\s*${count}(?:$|[^0-9])`,
+			"i"
+		);
+		if (pattern.test(ar)) return keys[count];
+	}
+	return null;
+}
+
 function capacityRoomKeyFromText(text = "") {
+	const arabicBedCount = arabicBedCountRoomKeyFromText(text);
+	if (arabicBedCount) return arabicBedCount;
 	const low = normalizeNumberWordsForParsing(text);
 	const roomWords =
 		"room|rooms|bed|beds|suite|suites|habitacion(?:es)?|chambre?s?|kamar|bilik|\\u063a\\u0631\\u0641(?:\\u0647|\\u0629)?|\\u0627\\u0648\\u0636\\u0647|\\u0627\\u0648\\u0636\\u0629|\\u0633\\u0631\\u064a\\u0631|\\u0627\\u0633\\u0631\\u0647|\\u0627\\u0633\\u0631\\u0629";
@@ -257,11 +326,22 @@ function capacityOnlyRoomTerm(term = "") {
 		/^(?:[2-5]|two|three|four|five)\s+(?:people|persons?|individuals?|guests?|adults?)$/.test(
 			raw
 		) ||
+		/^(?:[2-5]|two|three|four|five)\s+(?:single\s+)?beds?$/.test(raw) ||
+		/^(?:room\s+with\s+)?(?:[2-5]|two|three|four|five)\s+(?:single\s+)?beds?$/.test(
+			raw
+		) ||
 		/^rooms?\s+for\s+(?:[2-5]|two|three|four|five)$/.test(raw)
 	) {
 		return true;
 	}
 	const normalizedArabic = normalizeArabicRoomText(raw);
+	if (
+		/(?:^|\s)(?:\u0644?\u0634\u062e\u0635\u064a\u0646|\u0634\u062e\u0635\u064a\u0646|\u0644?\u0641\u0631\u062f\u064a\u0646|\u0641\u0631\u062f\u064a\u0646|\u0644?\u0636\u064a\u0641\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0628?\u0633\u0631\u064a\u0631\u064a\u0646|\u0633\u0631\u064a\u0631\u0627\u0646|\u0628?\u0627\u0633\u0631\u062a\u064a\u0646|\u0627\u0633\u0631\u062a\u0627\u0646|\u062b\u0644\u0627\u062b\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062a\u0644\u0627\u062a\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u0627?\u0631\u0628\u0639\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062e\u0645\u0633\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|[2-5]\s*(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)\s*[2-5])(?:\s|$)/.test(
+			normalizedArabic
+		)
+	) {
+		return true;
+	}
 	return /(?:^|\s)(?:ل?شخصين|شخصين|ل?فردين|فردين|ل?ضيفين|ضيفين|اشخاص|أشخاص|افراد|أفراد|ضيوف)(?:\s|$)/.test(
 		normalizedArabic
 	);

@@ -879,7 +879,11 @@ function roomTypeKeyFromSelectionSegment(text = "") {
 function splitRoomSelectionSections(text = "") {
 	return String(text || "")
 		.replace(/\r/g, "\n")
-		.replace(/\s+(?:and|plus|with|&|\+)\s+/gi, "\n")
+		.replace(/\s+(?:and|plus|&|\+)\s+/gi, "\n")
+		.replace(
+			/\s+with\s+(?=(?:single|double|twin|standard|king|queen|triple|quad|quadruple|family|quintuple)\b)/gi,
+			"\n"
+		)
 		.replace(
 			/\s+\u0648(?=(?:\u0627\u0644)?(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0645\u0632\u062f\u0648\u062c|\u0632\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626|\u062b\u0644\u0627\u062b|\u062a\u0644\u0627\u062a|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644))/g,
 			"\n"
