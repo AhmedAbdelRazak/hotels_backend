@@ -72,6 +72,11 @@ const controllerInitialQuickReplyEnabled = () =>
 		.trim()
 		.toLowerCase() === "true";
 
+const controllerInlineQuickReplyEnabled = () =>
+	String(process.env.AI_CONTROLLER_INLINE_QUICK_REPLY_ENABLED || "")
+		.trim()
+		.toLowerCase() === "true";
+
 function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
 	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
 		return;
@@ -2667,6 +2672,11 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					.lean()
 					.exec();
 				if (finalizedCase) updatedCase = finalizedCase;
+			} else if (!controllerInlineQuickReplyEnabled()) {
+				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+				if (legacyAiEngine) {
+					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
+				}
 			} else {
 				const immediateStandaloneFact =
 					legacyAiEngine &&

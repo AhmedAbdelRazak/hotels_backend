@@ -13186,6 +13186,14 @@ function standaloneGuestCountFromText(text = "") {
 		if (looksLikeStayDateCandidate(rawPart)) continue;
 		if (nameCandidateLooksLikeNationality(rawPart)) continue;
 		if (
+			/\b(?:duration|stay|night|nights|day|days)\b/i.test(rawPart) ||
+			/(?:\u0644\u0645\u062f\u0629|\u0645\u062f\u0647|\u0645\u062f\u0629|\u0644\u064a\u0644\u0629|\u0644\u064a\u0627\u0644[يى]|\u064a\u0648\u0645|\u0627\u064a\u0627\u0645|\u0623\u064a\u0627\u0645)/i.test(
+				rawPart
+			)
+		) {
+			continue;
+		}
+		if (
 			/\b(?:room|hotel|date|check\s*-?\s*in|check\s*-?\s*out|nationality|country|phone|email)\b/i.test(
 				rawPart
 			) ||
