@@ -319,6 +319,108 @@ const publicHotelTrustQuickReplyText = (supportCase = {}, latestEntry = {}) => {
 	return `Yes, you are chatting with ${hotelName} reception and reservations through Jannat Booking. I am here to help.`;
 };
 
+const publicSelectedHotelBroadStartReplyText = (
+	supportCase = {},
+	latestEntry = {}
+) => {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	if (!latestText) return "";
+	if (
+		publicHotelTrustQuestionText(latestText) ||
+		publicAvailabilityOnlyQuestionText(latestText)
+	) {
+		return "";
+	}
+	const lower = latestText.toLowerCase();
+	const hasArabic = /[\u0600-\u06ff]/.test(latestText);
+	const inquirySignal =
+		/\b(?:inquir(?:e|y|ing)|ask(?:ing)?\s+about|question\s+about|information|info|details?|interested|help\s+me)\b/i.test(
+			lower
+		) ||
+		/(?:استفسار|استفسر|سؤال|اسأل|اسال|معلومات|تفاصيل|أريد|اريد|ابغى|أبغى|حجز)/i.test(
+			latestText
+		);
+	const hotelSignal =
+		/\b(?:hotel|property|stay|room|rooms)\b/i.test(lower) ||
+		/(?:فندق|الفندق|اوتيل|أوتيل|غرفة|غرف)/i.test(latestText);
+	if (!inquirySignal || !hotelSignal) return "";
+	const hotelName =
+		cleanText(supportCase.displayName2, 120) ||
+		cleanText(supportCase.supporterName, 120) ||
+		"the hotel";
+	const lang = String(
+		latestEntry?.preferredLanguage ||
+			supportCase.preferredLanguage ||
+			supportCase.preferredLanguageCode ||
+			""
+	).toLowerCase();
+	if (hasArabic || /arabic|ar\b/.test(lang)) {
+		return `نعم، حياك الله. أقدر أساعدك بالحجز في ${hotelName} وأراجع السعر والتوفر لك بدقة. أرسل تاريخ الوصول والمغادرة، وعدد الضيوف أو نوع الغرفة المفضل، وأجهز لك أفضل خيار.`;
+	}
+	return `Yes, welcome. I can help you reserve at ${hotelName} and check the exact price and availability. Please send the check-in and checkout dates, plus the guest count or preferred room type, and I will prepare the best option for you.`;
+};
+
+const publicSelectedHotelRoomIntentReplyText = (
+	supportCase = {},
+	latestEntry = {}
+) => {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	if (!latestText) return "";
+	const lower = latestText.toLowerCase();
+	const hasArabic = /[\u0600-\u06ff]/.test(latestText);
+	const lang = String(
+		latestEntry?.preferredLanguage ||
+			supportCase.preferredLanguage ||
+			supportCase.preferredLanguageCode ||
+			""
+	).toLowerCase();
+	const isArabic = hasArabic || /arabic|ar\b/.test(lang);
+	const hotelName =
+		cleanText(supportCase.displayName2, 120) ||
+		cleanText(supportCase.supporterName, 120) ||
+		"the hotel";
+	const roomCountOnly =
+		/\b(?:2|two)\s+rooms?\b/i.test(lower) ||
+		/(?:غرفتين|غرفتان|٢\s*غرف|2\s*غرف)/i.test(latestText);
+	if (roomCountOnly) {
+		return isArabic
+			? `تمام، وصلني أنك تحتاج غرفتين في ${hotelName}. أرسل نوع كل غرفة تفضله، أو عدد الضيوف في كل غرفة، وأراجع لك السعر والتوفر بدقة.`
+			: `Got it, you need two rooms at ${hotelName}. Please send the type of each room, or the guest count for each room, and I will check the exact price and availability.`;
+	}
+	const roomType =
+		/(?:double|twin|two\s+beds?|2\s+beds?)/i.test(lower) ||
+		/(?:مزدوج|ثنائي|دبل|سريرين|سيريرين|شخصين|زوجية|زوجيه)/i.test(latestText)
+			? isArabic
+				? "غرفة مزدوجة"
+				: "double room"
+			: /(?:triple|three\s+beds?|3\s+beds?)/i.test(lower) ||
+			  /(?:ثلاث|ثلاثي|تلات|٣\s*أسرة|3\s*اسرة)/i.test(latestText)
+			? isArabic
+				? "غرفة ثلاثية"
+				: "triple room"
+			: /(?:quad|quadruple|four\s+beds?|4\s+beds?)/i.test(lower) ||
+			  /(?:رباع|أربع|اربع|٤\s*أسرة|4\s*اسرة)/i.test(latestText)
+			? isArabic
+				? "غرفة رباعية"
+				: "quad room"
+			: /(?:family|five\s+beds?|5\s+beds?)/i.test(lower) ||
+			  /(?:خماس|عائلي|عائلية|٥\s*أسرة|5\s*اسرة)/i.test(latestText)
+			? isArabic
+				? "غرفة خماسية عائلية"
+				: "family room"
+			: "";
+	if (!roomType) return "";
+	return isArabic
+		? `تمام، وصلني طلبك: ${roomType} في ${hotelName}. أرسل تاريخ الوصول والمغادرة، وسأراجع لك التوفر والسعر بدقة.`
+		: `Got it, I have your request for a ${roomType} at ${hotelName}. Send the check-in and checkout dates, and I will check the exact availability and price.`;
+};
+
+const publicImmediateB2CAiReplyText = (supportCase = {}, latestEntry = {}) =>
+	publicAvailabilityRoomChoiceReplyText(supportCase, latestEntry) ||
+	publicHotelTrustQuickReplyText(supportCase, latestEntry) ||
+	publicSelectedHotelRoomIntentReplyText(supportCase, latestEntry) ||
+	publicSelectedHotelBroadStartReplyText(supportCase, latestEntry);
+
 async function appendPublicAiQuickReply(
 	io,
 	supportCase = {},
@@ -1713,27 +1815,18 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.caseStatus !== "closed"
 		) {
 			const legacyAiEngine = isLegacyAiAgentEngine();
-			const quickAvailabilityReply = legacyAiEngine
-				? publicAvailabilityRoomChoiceReplyText(updatedCase, safeConversation)
+			const quickReply = legacyAiEngine
+				? publicImmediateB2CAiReplyText(updatedCase, safeConversation)
 				: "";
-			const quickTrustReply =
-				legacyAiEngine && !quickAvailabilityReply
-					? publicHotelTrustQuickReplyText(updatedCase, safeConversation)
-					: "";
-			if (quickAvailabilityReply || quickTrustReply) {
+			if (quickReply) {
 				const quickReplyCase = await appendPublicAiQuickReply(
 					req.io,
 					updatedCase,
-					quickAvailabilityReply || quickTrustReply,
-					quickAvailabilityReply
-						? {
-								clientAction: "ai_room_choice_needed",
-								tagPrefix: "ai_quick_availability",
-						  }
-						: {
-								clientAction: "ai_trust_reply",
-								tagPrefix: "ai_quick_trust",
-						  }
+					quickReply,
+					{
+						clientAction: "ai_immediate_reply",
+						tagPrefix: "ai_quick_immediate",
+					}
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;
 			} else {
@@ -1902,8 +1995,9 @@ exports.createNewSupportCase = async (req, res) => {
 			initialClientMessage,
 			inquiryDetails,
 		});
+		let createdWithImmediateAiReply = false;
 		if (openedBy === "client" && cleanInitialClientMessage) {
-			conversation.push({
+			const initialClientEntry = {
 				messageBy: {
 					customerName: cleanChatDisplayName(customerName) || "Guest",
 					customerEmail:
@@ -1919,7 +2013,43 @@ exports.createNewSupportCase = async (req, res) => {
 				clientTag: cleanText(initialClientTag, 120),
 				preferredLanguage: preferredLanguage || "English",
 				preferredLanguageCode: preferredLanguageCode || "en",
-			});
+			};
+			conversation.push(initialClientEntry);
+			if (aiEnabledForClient && isLegacyAiAgentEngine()) {
+				const immediateText = publicImmediateB2CAiReplyText(
+					{
+						displayName2,
+						supporterName,
+						preferredLanguage: preferredLanguage || "English",
+						preferredLanguageCode: preferredLanguageCode || "en",
+						aiResponderName,
+						conversation,
+					},
+					initialClientEntry
+				);
+				if (immediateText) {
+					conversation.push({
+						messageBy: {
+							customerName: aiResponderName || "Jannat Booking",
+							customerEmail: AI_SUPPORT_MESSAGE_EMAILS[0],
+							userId: "jannat-ai-support",
+						},
+						message: immediateText,
+						inquiryAbout,
+						inquiryDetails,
+						seenByAdmin: false,
+						seenByHotel: false,
+						seenByCustomer: false,
+						isAi: true,
+						isSystem: false,
+						clientTag: `ai_quick_initial_${Date.now()}`,
+						clientAction: "ai_immediate_reply",
+						preferredLanguage: preferredLanguage || "English",
+						preferredLanguageCode: preferredLanguageCode || "en",
+					});
+					createdWithImmediateAiReply = true;
+				}
+			}
 		}
 
 		// Build the support case doc
@@ -1957,7 +2087,7 @@ exports.createNewSupportCase = async (req, res) => {
 
 		// Emit Socket.IO event for new chat
 		req.io.emit("newChat", newCase);
-		if (aiEnabledForClient) {
+		if (aiEnabledForClient && !createdWithImmediateAiReply) {
 			scheduleAiTurnForCase(req.io, newCase._id, { delayMs: 25 });
 			if (isLegacyAiAgentEngine()) {
 				scheduleAiSafetyRetryForCase(req.io, String(newCase._id));
