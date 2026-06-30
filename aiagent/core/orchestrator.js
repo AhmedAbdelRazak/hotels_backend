@@ -22999,6 +22999,7 @@ async function planTurn(io, sc) {
 const scheduledTurns = new Map();
 const queuedPlanTurns = [];
 const queuedPlanCaseIds = new Set();
+const activePlanCaseIds = new Set();
 let activePlanTurnCount = 0;
 let planQueueDrainScheduled = false;
 const unansweredTurnRecoveryTimers = new Map();
@@ -23009,12 +23010,20 @@ function drainPlanTurnQueue() {
 	planQueueDrainScheduled = true;
 	setImmediate(() => {
 		planQueueDrainScheduled = false;
+		let inspected = 0;
 		while (
 			activePlanTurnCount < AI_PLAN_MAX_CONCURRENT &&
-			queuedPlanTurns.length
+			queuedPlanTurns.length &&
+			inspected < queuedPlanTurns.length
 		) {
 			const item = queuedPlanTurns.shift();
+			if (activePlanCaseIds.has(item.caseId)) {
+				queuedPlanTurns.push(item);
+				inspected += 1;
+				continue;
+			}
 			queuedPlanCaseIds.delete(item.caseId);
+			activePlanCaseIds.add(item.caseId);
 			activePlanTurnCount += 1;
 			runQueuedPlanTurn(item)
 				.catch((error) => {
@@ -23022,6 +23031,7 @@ function drainPlanTurnQueue() {
 				})
 				.finally(() => {
 					activePlanTurnCount = Math.max(0, activePlanTurnCount - 1);
+					activePlanCaseIds.delete(item.caseId);
 					drainPlanTurnQueue();
 				});
 		}
