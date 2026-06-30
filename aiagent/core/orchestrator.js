@@ -1,5 +1,7 @@
 // aiagent/core/orchestrator.js
 const { AsyncLocalStorage } = require("async_hooks");
+const { fork } = require("child_process");
+const path = require("path");
 const {
 	getSupportCaseById,
 	updateSupportCaseAppend,
@@ -104,6 +106,17 @@ const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
 	min: 10,
 	max: 1000,
 });
+const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", true);
+const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv(
+	"AI_PLAN_WORKER_TIMEOUT_MS",
+	60000,
+	{ min: 15000, max: 180000 }
+);
+const AI_PLAN_WORKER_OLD_SPACE_MB = intFromEnv(
+	"AI_PLAN_WORKER_OLD_SPACE_MB",
+	3072,
+	{ min: 512, max: 6144 }
+);
 
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
@@ -23051,6 +23064,108 @@ function queuePlanTurnExecution(io, caseId, { reason = "scheduled" } = {}) {
 	return true;
 }
 
+function workerPathForPlanTurn() {
+	return path.join(__dirname, "../worker/planTurnWorker.js");
+}
+
+function emitCaseUpdatesAfterWorker(io, caseId, updatedCase, initialConversationLength) {
+	if (!io || !updatedCase?._id) return;
+	const key = String(caseId || updatedCase._id || "");
+	const conversation = Array.isArray(updatedCase.conversation)
+		? updatedCase.conversation
+		: [];
+	const start = Math.max(0, Number(initialConversationLength) || 0);
+	const newMessages = conversation
+		.slice(start)
+		.filter((message) => message?.isAi || message?.isSystem || isAiConversationMessage(message));
+	for (const message of newMessages) {
+		io.to(key).emit("receiveMessage", { ...message, caseId: key });
+	}
+	io.to(key).emit("stopTyping", { caseId: key, isAi: true });
+	io.to(key).emit("supportCaseUpdated", updatedCase);
+	io.emit("supportCaseUpdated", updatedCase);
+}
+
+function runPlanTurnInWorker({
+	io,
+	caseId,
+	initialConversationLength = 0,
+	reason = "",
+} = {}) {
+	return new Promise((resolve, reject) => {
+		const key = idText(caseId);
+		if (!io || !key) {
+			resolve(false);
+			return;
+		}
+		const startedAt = now();
+		let timedOut = false;
+		let exited = false;
+		let forceKillTimer = null;
+		const worker = fork(workerPathForPlanTurn(), [key], {
+			cwd: path.join(__dirname, "../.."),
+			env: {
+				...process.env,
+				AI_AGENT_WORKER_PROCESS: "true",
+				AI_PLAN_USE_WORKER: "false",
+			},
+			execArgv: [`--max-old-space-size=${AI_PLAN_WORKER_OLD_SPACE_MB}`],
+			stdio: ["ignore", "inherit", "inherit", "ipc"],
+		});
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			console.error("[aiagent] worker timeout; terminating turn", {
+				caseId: key,
+				reason,
+				timeoutMs: AI_PLAN_WORKER_TIMEOUT_MS,
+			});
+			worker.kill("SIGTERM");
+			forceKillTimer = setTimeout(() => {
+				if (!exited) worker.kill("SIGKILL");
+			}, 5000);
+			if (typeof forceKillTimer.unref === "function") forceKillTimer.unref();
+		}, AI_PLAN_WORKER_TIMEOUT_MS);
+		if (typeof timeout.unref === "function") timeout.unref();
+
+		worker.once("error", (error) => {
+			clearTimeout(timeout);
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+			reject(error);
+		});
+
+		worker.once("exit", async (code, signal) => {
+			exited = true;
+			clearTimeout(timeout);
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+			const elapsedMs = now() - startedAt;
+			const success = code === 0 && !signal && !timedOut;
+			logStep(key, "turn.worker.exit", {
+				reason,
+				success,
+				code,
+				signal,
+				timedOut,
+				elapsedMs,
+				oldSpaceMb: AI_PLAN_WORKER_OLD_SPACE_MB,
+			});
+			try {
+				const updatedCase = await getSupportCaseById(key).catch(() => null);
+				if (updatedCase) {
+					emitCaseUpdatesAfterWorker(
+						io,
+						key,
+						updatedCase,
+						initialConversationLength
+					);
+				}
+			} catch (error) {
+				console.error("[aiagent] worker update emit failed:", error?.message || error);
+			}
+			resolve(success);
+		});
+	});
+}
+
 async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }) {
 	const latestCase = await getSupportCaseById(caseId);
 	if (!latestCase) {
@@ -23072,6 +23187,16 @@ async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }
 		queued: queuedPlanTurns.length,
 		maxConcurrent: AI_PLAN_MAX_CONCURRENT,
 	});
+	if (AI_PLAN_USE_WORKER) {
+		return runPlanTurnInWorker({
+			io,
+			caseId,
+			initialConversationLength: Array.isArray(latestCase.conversation)
+				? latestCase.conversation.length
+				: 0,
+			reason,
+		});
+	}
 	return planTurn(io, latestCase);
 }
 
@@ -23280,7 +23405,13 @@ function wireSocket(io) {
 	return wireLegacySocket(io);
 }
 
-const exportedOrchestrator = { wireSocket, schedulePlanTurn };
+const exportedOrchestrator = {
+	wireSocket,
+	schedulePlanTurn,
+	__worker: {
+		planTurn,
+	},
+};
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	exportedOrchestrator.__test = {
 		extractRoomSelectionsFromText,
