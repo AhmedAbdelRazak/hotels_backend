@@ -676,12 +676,20 @@ async function publicFastCareAndUnclearBookingReplyText(
 	const latinCompact = lower.replace(/[^a-z0-9]+/g, "");
 	const arabicIntent = normalizePublicArabicIntentText(latestText);
 	const factKind = publicHotelFactIntentKind(latestText);
+	const explicitUnclearBookingSignal =
+		/\b(?:not\s+sure\s+(?:about\s+)?dates?|dont\s+know\s+(?:the\s+)?dates?|don't\s+know\s+(?:the\s+)?dates?|no\s+dates?|without\s+dates?|what\s+do\s+you\s+need|what\s+should\s+i\s+send|walk\s+me\s+through|guide\s+me)\b/i.test(
+			lower
+		) ||
+		/(?:ma3ndi|maandi|m3ndi|3ndi|whatdoyouneed|whatshouldisend|dontknowdates|walkmethrough|guideme)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0645\u0627\s+\u0639\u0646\u062f\u064a|\u0645\u0627\s+\u0639\u0646\u062f\u0649|\u0628\u062f\u0648\u0646\s+\u062a\u0627\u0631\u064a\u062e|\u0645\u0634\s+\u0645\u062d\u062f\u062f|\u0645\u0627\s+\u062d\u062f\u062f|\u0648\u0634\s+\u062a\u062d\u062a\u0627\u062c|\u0648\u0634\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628|\u0627\u064a\u0647\s+\u0627\u0644\u0627\u0648\u0644|\u0627\u064a\u0647\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628)/i.test(
+			arabicIntent
+		);
 	if (
 		factKind &&
 		!["rooms", "family_capacity"].includes(factKind) &&
-		!/\b(?:not\s+sure|dont\s+know|don't\s+know|what\s+do\s+you\s+need|guide|walk\s+me\s+through)\b/i.test(
-			lower
-		)
+		!explicitUnclearBookingSignal
 	) {
 		return "";
 	}
