@@ -5,6 +5,8 @@ const {
 	getSupportCaseById,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 	updateSupportCaseAiStateSnapshot,
+	closeSupportCaseForAiIdle,
+	listOpenClientAiCasesForIdleSweep,
 	getHotelByIdWithPricingDates,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
@@ -45,6 +47,8 @@ const activeTimers = new Map();
 const activeTurns = new Set();
 const pendingReasons = new Map();
 const guestTypingUntilByCase = new Map();
+const guestActivityAtByCase = new Map();
+const idleCloseTimers = new Map();
 
 const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
 	min: 500,
@@ -57,6 +61,10 @@ const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 2000, {
 const AI_TURN_MAX_CONVERSATION = intFromEnv("AI_TURN_MAX_CONVERSATION", 36, {
 	min: 8,
 	max: 80,
+});
+const AI_IDLE_AUTO_CLOSE_MS = intFromEnv("AI_IDLE_AUTO_CLOSE_MS", 5 * 60 * 1000, {
+	min: 60 * 1000,
+	max: 30 * 60 * 1000,
 });
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
@@ -110,6 +118,11 @@ function hasAnyAiEntry(sc = {}) {
 	);
 }
 
+function latestConversationEntry(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	return conversation.length ? conversation[conversation.length - 1] : null;
+}
+
 function entryFingerprint(entry = {}) {
 	return [
 		String(entry?.date || ""),
@@ -122,6 +135,13 @@ function latestGuestStillCurrent(sc = {}, expected = null) {
 	if (!expected) return false;
 	const latest = latestGuestEntry(sc);
 	return Boolean(latest && entryFingerprint(latest) === entryFingerprint(expected));
+}
+
+function entryTime(entry = {}) {
+	const timestamp = entry?.date || entry?.createdAt || entry?.timestamp || 0;
+	const value =
+		timestamp instanceof Date ? timestamp.getTime() : new Date(timestamp).getTime();
+	return Number.isFinite(value) ? value : 0;
 }
 
 function roomTypeLabel(roomTypeKey = "", languageCode = "en") {
@@ -740,6 +760,122 @@ async function emitTyping(io, sc = {}, isTyping = true) {
 	io.to(caseId).emit(isTyping ? "typing" : "stopTyping", payload);
 }
 
+function clearIdleCloseTimer(caseId = "") {
+	const key = caseIdText(caseId);
+	const existing = idleCloseTimers.get(key);
+	if (existing) clearTimeout(existing);
+	idleCloseTimers.delete(key);
+}
+
+function emitClosedCase(io, updatedCase = {}, reason = "ai_idle_timeout") {
+	const caseId = caseIdText(updatedCase);
+	if (!io || !caseId) return;
+	const payload = {
+		case: updatedCase,
+		caseId,
+		caseStatus: "closed",
+		closedAt: updatedCase.closedAt || new Date(),
+		closedBy: updatedCase.closedBy || "csr",
+		reason,
+	};
+	io.emit("supportCaseUpdated", updatedCase);
+	io.to(caseId).emit("supportCaseUpdated", updatedCase);
+	io.emit("closeCase", payload);
+	io.to(caseId).emit("aiPaused", { caseId, reason });
+}
+
+function scheduleIdleClose(io, sc = {}, aiMessageDate = new Date()) {
+	const caseId = caseIdText(sc);
+	const aiMessageAt = entryTime({ date: aiMessageDate });
+	if (!io || !caseId || !aiMessageAt || AI_IDLE_AUTO_CLOSE_MS <= 0) return;
+	clearIdleCloseTimer(caseId);
+
+	const runAt = aiMessageAt + AI_IDLE_AUTO_CLOSE_MS;
+	const delay = Math.max(1000, runAt - now());
+	const timer = setTimeout(async () => {
+		idleCloseTimers.delete(caseId);
+		const latestGuestActivityAt = Number(guestActivityAtByCase.get(caseId) || 0);
+		if (latestGuestActivityAt > aiMessageAt) {
+			const waitMs = latestGuestActivityAt + AI_IDLE_AUTO_CLOSE_MS - now();
+			if (waitMs > 0) {
+				const rescheduleTimer = setTimeout(() => {
+					scheduleIdleClose(io, sc, aiMessageDate);
+				}, Math.max(1000, waitMs));
+				rescheduleTimer.unref?.();
+				idleCloseTimers.set(caseId, rescheduleTimer);
+				return;
+			}
+		}
+		if (activeTurns.has(caseId)) {
+			scheduleIdleClose(io, sc, new Date(aiMessageAt));
+			return;
+		}
+		const currentCase = await getSupportCaseById(caseId).catch(() => null);
+		const latestEntry = latestConversationEntry(currentCase || {});
+		if (
+			!currentCase ||
+			currentCase.caseStatus === "closed" ||
+			currentCase.aiToRespond === false ||
+			!latestEntry?.isAi ||
+			latestEntry?.isSystem ||
+			entryTime(latestEntry) !== aiMessageAt
+		) {
+			return;
+		}
+		const updated = await closeSupportCaseForAiIdle(caseId, {
+			now: new Date(),
+			reason: "ai_idle_timeout",
+			latestAiDate: new Date(aiMessageAt),
+		}).catch((error) => {
+			console.error("[aiagent] idle close failed:", error?.message || error);
+			return null;
+		});
+		if (updated) {
+			emitClosedCase(io, updated, "ai_idle_timeout");
+		}
+	}, delay);
+	timer.unref?.();
+	idleCloseTimers.set(caseId, timer);
+}
+
+async function recoverIdleCloseTimers(io) {
+	if (!io || AI_IDLE_AUTO_CLOSE_MS <= 0) return;
+	try {
+		const cases = await listOpenClientAiCasesForIdleSweep({ limit: 150 });
+		const nowMs = now();
+		let scheduled = 0;
+		let closed = 0;
+		for (const supportCase of cases) {
+			const latestEntry = latestConversationEntry(supportCase);
+			if (!latestEntry?.isAi || latestEntry?.isSystem) continue;
+			const latestAt = entryTime(latestEntry);
+			if (!latestAt) continue;
+			if (nowMs - latestAt >= AI_IDLE_AUTO_CLOSE_MS) {
+				const updated = await closeSupportCaseForAiIdle(caseIdText(supportCase), {
+					now: new Date(),
+					reason: "ai_idle_timeout",
+					latestAiDate: new Date(latestAt),
+				}).catch((error) => {
+					console.error("[aiagent] idle recovery close failed:", error?.message || error);
+					return null;
+				});
+				if (updated) {
+					closed += 1;
+					emitClosedCase(io, updated, "ai_idle_timeout");
+				}
+			} else {
+				scheduled += 1;
+				scheduleIdleClose(io, supportCase, new Date(latestAt));
+			}
+		}
+		if (closed || scheduled) {
+			console.log("[aiagent] idle close recovery", { closed, scheduled });
+		}
+	} catch (error) {
+		console.error("[aiagent] idle close recovery failed:", error?.message || error);
+	}
+}
+
 async function waitForGuestQuiet(caseId = "") {
 	const key = caseIdText(caseId);
 	for (let i = 0; i < 12; i += 1) {
@@ -838,6 +974,11 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 				reason: options.handoffReason || "human_review_needed",
 			});
 		}
+	}
+	if (updatedCase && !options.closeCase && !options.handoff) {
+		scheduleIdleClose(io, updatedCase, messageData.date);
+	} else if (options.closeCase || options.handoff) {
+		clearIdleCloseTimer(caseId);
 	}
 	return updatedCase;
 }
@@ -1217,6 +1358,7 @@ function wireSocket(io) {
 		socket.on("typing", (data = {}) => {
 			const caseId = caseIdText(data.caseId);
 			if (!caseId || data.isAi === true) return;
+			guestActivityAtByCase.set(caseId, now());
 			guestTypingUntilByCase.set(caseId, now() + AI_GUEST_REPLY_QUIET_MS);
 			const existing = activeTimers.get(caseId);
 			if (existing) {
@@ -1230,6 +1372,7 @@ function wireSocket(io) {
 		socket.on("stopTyping", (data = {}) => {
 			const caseId = caseIdText(data.caseId);
 			if (!caseId || data.isAi === true) return;
+			guestActivityAtByCase.set(caseId, now());
 			guestTypingUntilByCase.set(caseId, now() + Math.min(500, AI_GUEST_REPLY_QUIET_MS));
 		});
 		socket.on("ai:planNow", (data = {}) => {
@@ -1238,6 +1381,7 @@ function wireSocket(io) {
 		});
 	});
 	console.log("[aiagent] slim OpenAI-led orchestrator active.");
+	setTimeout(() => recoverIdleCloseTimers(io), 1500).unref?.();
 }
 
 async function buildImmediateKnownStayQuoteReply() {

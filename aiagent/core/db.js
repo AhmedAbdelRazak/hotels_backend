@@ -318,17 +318,40 @@ async function setCaseStatus(caseId, fields) {
 
 async function closeSupportCaseForAiIdle(
 	caseId,
-	{ now = new Date(), reason = "ai_idle_timeout" } = {}
+	{ now = new Date(), reason = "ai_idle_timeout", latestAiDate = null } = {}
 ) {
 	const _id = safeId(caseId);
 	if (!_id) return null;
+	const filter = {
+		_id,
+		openedBy: "client",
+		caseStatus: "open",
+		aiToRespond: true,
+	};
+	const expectedAiDate =
+		latestAiDate instanceof Date
+			? latestAiDate
+			: latestAiDate
+			? new Date(latestAiDate)
+			: null;
+	if (expectedAiDate && Number.isFinite(expectedAiDate.getTime())) {
+		filter.$expr = {
+			$let: {
+				vars: {
+					latestEntry: { $arrayElemAt: ["$conversation", -1] },
+				},
+				in: {
+					$and: [
+						{ $eq: ["$$latestEntry.isAi", true] },
+						{ $ne: ["$$latestEntry.isSystem", true] },
+						{ $eq: ["$$latestEntry.date", expectedAiDate] },
+					],
+				},
+			},
+		};
+	}
 	return SupportCase.findOneAndUpdate(
-		{
-			_id,
-			openedBy: "client",
-			caseStatus: "open",
-			aiToRespond: true,
-		},
+		filter,
 		{
 			$set: {
 				caseStatus: "closed",
@@ -347,6 +370,22 @@ async function closeSupportCaseForAiIdle(
 	)
 		.lean()
 		.exec();
+}
+
+async function listOpenClientAiCasesForIdleSweep({ limit = 100 } = {}) {
+	const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+	const cases = await SupportCase.find({
+		openedBy: "client",
+		caseStatus: "open",
+		aiToRespond: true,
+		conversation: { $exists: true, $ne: [] },
+	})
+		.select("_id openedBy caseStatus aiToRespond conversation updatedAt")
+		.sort({ updatedAt: -1, _id: -1 })
+		.limit(safeLimit)
+		.lean()
+		.exec();
+	return cases.map(normalizeSupportCaseQuickReplies);
 }
 
 function compactRoomForAi(room = {}) {
@@ -937,6 +976,7 @@ module.exports = {
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 	updateSupportCaseAiStateSnapshot,
 	closeSupportCaseForAiIdle,
+	listOpenClientAiCasesForIdleSweep,
 	setCaseStatus,
 	getHotelById,
 	getHotelByIdForAiContext,
