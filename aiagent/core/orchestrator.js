@@ -138,6 +138,18 @@ const AI_PLAN_LOAD_LIMIT_PERCENT = intFromEnv("AI_PLAN_LOAD_LIMIT_PERCENT", 95, 
 	min: 50,
 	max: 300,
 });
+const AI_PLAN_TEMP_THROTTLE_C = intFromEnv("AI_PLAN_TEMP_THROTTLE_C", 75, {
+	min: 40,
+	max: 105,
+});
+const AI_PLAN_TEMP_LIMIT_C = Math.max(
+	AI_PLAN_TEMP_THROTTLE_C,
+	intFromEnv("AI_PLAN_TEMP_LIMIT_C", 82, { min: 40, max: 105 })
+);
+const AI_PLAN_TEMP_CACHE_MS = intFromEnv("AI_PLAN_TEMP_CACHE_MS", 5000, {
+	min: 500,
+	max: 60000,
+});
 
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
@@ -402,6 +414,99 @@ function availableMemoryMb() {
 	}
 	return Math.floor(os.freemem() / (1024 * 1024));
 }
+
+function readTextFileTrimmed(filePath) {
+	try {
+		return fs.readFileSync(filePath, "utf8").trim();
+	} catch {
+		return "";
+	}
+}
+
+function normalizeTemperatureC(raw) {
+	const parsed = Number(String(raw || "").trim());
+	if (!Number.isFinite(parsed)) return null;
+	const celsius = parsed > 250 ? parsed / 1000 : parsed;
+	if (celsius < -20 || celsius > 130) return null;
+	return Number(celsius.toFixed(1));
+}
+
+function pushTemperatureReading(readings, filePath, label = "") {
+	const celsius = normalizeTemperatureC(readTextFileTrimmed(filePath));
+	if (celsius === null) return;
+	const sourceLabel = String(label || "").toLowerCase();
+	const isCpuLike = /package|cpu|core|tctl|tdie|k10temp|coretemp|x86_pkg_temp|acpitz/.test(
+		sourceLabel
+	);
+	const isNonCpu = /nvme|ssd|disk|wifi|battery|bat/.test(sourceLabel);
+	readings.push({
+		celsius,
+		source: `${filePath}${label ? `:${label}` : ""}`,
+		score: isCpuLike ? 2 : isNonCpu ? -1 : 0,
+	});
+}
+
+let temperatureCache = { at: 0, reading: { celsius: null, source: "" } };
+
+function readSystemTemperature() {
+	const cachedAt = Number(temperatureCache.at || 0);
+	if (cachedAt && now() - cachedAt < AI_PLAN_TEMP_CACHE_MS) {
+		return temperatureCache.reading;
+	}
+	const readings = [];
+	try {
+		for (const dir of fs.readdirSync("/sys/class/hwmon")) {
+			const root = path.join("/sys/class/hwmon", dir);
+			const chipName = readTextFileTrimmed(path.join(root, "name"));
+			for (const entry of fs.readdirSync(root)) {
+				if (!/^temp\d+_input$/.test(entry)) continue;
+				const base = entry.replace(/_input$/, "");
+				const label = [
+					chipName,
+					readTextFileTrimmed(path.join(root, `${base}_label`)),
+				]
+					.filter(Boolean)
+					.join(" ");
+				pushTemperatureReading(readings, path.join(root, entry), label);
+			}
+		}
+	} catch {
+		// Most local development machines do not expose Linux hwmon sensors.
+	}
+	try {
+		for (const dir of fs.readdirSync("/sys/class/thermal")) {
+			if (!/^thermal_zone\d+$/.test(dir)) continue;
+			const root = path.join("/sys/class/thermal", dir);
+			pushTemperatureReading(
+				readings,
+				path.join(root, "temp"),
+				readTextFileTrimmed(path.join(root, "type"))
+			);
+		}
+	} catch {
+		// Optional Linux thermal zones; safe to ignore when unavailable.
+	}
+	const preferred = readings.filter((reading) => reading.score > 0);
+	const candidates = preferred.length
+		? preferred
+		: readings.filter((reading) => reading.score >= 0);
+	const hottest = candidates.sort((a, b) => b.celsius - a.celsius)[0];
+	const reading = hottest
+		? { celsius: hottest.celsius, source: hottest.source }
+		: { celsius: null, source: "" };
+	temperatureCache = { at: now(), reading };
+	return reading;
+}
+
+function temperatureConcurrencyLimit(configured, celsius) {
+	if (!Number.isFinite(celsius)) return configured;
+	if (celsius >= AI_PLAN_TEMP_LIMIT_C) return 1;
+	if (celsius >= AI_PLAN_TEMP_THROTTLE_C) {
+		return Math.max(1, Math.ceil(configured / 2));
+	}
+	return configured;
+}
+
 function planConcurrencySnapshot() {
 	const configured = AI_PLAN_MAX_CONCURRENT;
 	const availableMb = availableMemoryMb();
@@ -417,7 +522,15 @@ function planConcurrencySnapshot() {
 		load1 > 0 && load1 >= cpuCount * loadLimitRatio
 			? Math.max(1, Math.floor(cpuCount * 0.6))
 			: configured;
-	const effective = Math.max(1, Math.min(configured, memoryLimit, loadLimit));
+	const temperature = readSystemTemperature();
+	const temperatureLimit = temperatureConcurrencyLimit(
+		configured,
+		temperature.celsius
+	);
+	const effective = Math.max(
+		1,
+		Math.min(configured, memoryLimit, loadLimit, temperatureLimit)
+	);
 	return {
 		configured,
 		effective,
@@ -426,6 +539,10 @@ function planConcurrencySnapshot() {
 		loadLimit,
 		load1: Number(load1.toFixed(2)),
 		cpuCount,
+		temperatureC: temperature.celsius,
+		temperatureLimit,
+		temperatureThrottleC: AI_PLAN_TEMP_THROTTLE_C,
+		temperatureLimitC: AI_PLAN_TEMP_LIMIT_C,
 	};
 }
 function toTitle(s = "") {
@@ -13228,6 +13345,7 @@ function previousUnansweredDirectGuestTextForPing(sc = {}, st = {}, latestText =
 			looseHotelRelationshipQuestionText(text) ||
 			hotelContactDetailsQuestionText(text) ||
 			hotelContactFollowupQuestionText(sc, text) ||
+			currentReservationMemoryRequestText(text) ||
 			(st.hotel &&
 				(selectedHotelFactQuestionText(text) ||
 					selectedHotelRoomQuestionText(text)))
@@ -15098,7 +15216,7 @@ function reservationDetailsSummaryQuestionText(text = "") {
 			lower
 		) ||
 		new RegExp(
-			`(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647).{0,30}${arabicBookingWords}|${arabicBookingWords}.{0,30}(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0645\\u0644\\u062e\\u0635)`,
+			`(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0628\\u064a\\u0627\\u0646\\u0627\\u062a|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647).{0,40}${arabicBookingWords}|${arabicBookingWords}.{0,40}(?:\\u062a\\u0641\\u0627\\u0635\\u064a\\u0644|\\u0628\\u064a\\u0627\\u0646\\u0627\\u062a|\\u0645\\u0644\\u062e\\u0635|\\u0645\\u0631\\u0627\\u062c\\u0639\\u0647)`,
 			"i"
 		).test(
 			arabic
@@ -15112,7 +15230,10 @@ function reservationDetailsSummaryQuestionText(text = "") {
 		/(?:\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u0645\u0644\u062e\u0635|\u0645\u0644\u062e\u0635|\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0645\u0631\u0627\u062c\u0639\u0629).{0,40}(?:\u0641\u064a\u0646|\u0627\u064a\u0646|\u0648\u064a\u0646|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0634\u0627\u064a\u0641|\u0627\u062a\u0645|\u0627\u0643\u0645\u0644)/i.test(
 			arabic
 		) ||
-		/(?:bookingdetails|reservationdetails|staydetails|bookingrecap|reservationsummary|tafaseelelhagz|tfaseelelhagz|molakhaselhagz)/i.test(
+		/(?:\u0628\u064a\u0627\u0646\u0627\u062a|\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a).{0,40}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643|\u0645\u0631\u0627\u062c\u0639\u0647|\u0645\u0631\u0629\s+\u0627\u062e\u0631\u0649|\u062a\u0627\u0646\u064a|\u062a\u0627\u0646\u0649)|(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u0643).{0,40}(?:\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a|\u0628\u064a\u0627\u0646\u0627\u062a)/i.test(
+			arabic
+		) ||
+		/(?:bookingdetails|reservationdetails|staydetails|bookingrecap|reservationsummary|tafaseelelhagz|tfaseelelhagz|molakhaselhagz|byanatelhagz|baynatelhagz)/i.test(
 			latinCompact
 		) ||
 		/\b(?:remember|recall)\b.{0,100}\b(?:data|details|info|information|reservation|booking|name|phone|nationality|country|dates?|room)\b/i.test(
@@ -15157,7 +15278,10 @@ function reservationDetailAlreadyProvidedComplaintText(text = "") {
 		/(?:\u0642\u0644\u062a|\u0642\u0648\u0644\u062a|\u0627\u0631\u0633\u0644\u062a|\u0623\u0631\u0633\u0644\u062a|\u0628\u0639\u062a|\u0630\u0643\u0631\u062a).{0,50}(?:\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u062c\u0646\u0633\u064a|\u0628\u064a\u0627\u0646\u0627\u062a|\u062a\u0641\u0627\u0635\u064a\u0644|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/i.test(
 			arabic
 		) ||
-		/(?:ialreadytold|alreadytoldyou|ialreadygave|ialreadysent|ialreadyshared|itoldyou|gaveyoualready|sentitalready|yatedije|yatedi|yateenvie|telodije|dejadit|dejadonne|dejaenvoye|jevoelaidejadit|jetelaidejadit)/i.test(
+		/(?:\u0639\u0637\u064a\u062a\u0643|\u0627\u0639\u0637\u064a\u062a\u0643|\u0623\u0639\u0637\u064a\u062a\u0643|\u0627\u062f\u064a\u062a\u0643|\u0623\u062f\u064a\u062a\u0643|\u062f\u064a\u062a\u0643|\u0628\u0639\u062a\u0644\u0643|\u0628\u0639\u062a\u0647\u0627|\u0628\u0639\u062a\u0647\u0627\u0644\u0643).{0,80}(?:\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a|\u0628\u064a\u0627\u0646\u0627\u062a|\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062a\u0641\u0627\u0635\u064a\u0644|\u0643\u0644\u0647\u0627|\u0643\u0644\s+\u062d\u0627\u062c\u0647)?/i.test(
+			arabic
+		) ||
+		/(?:ialreadytold|alreadytoldyou|ialreadygave|ialreadysent|ialreadyshared|itoldyou|gaveyoualready|sentitalready|yatedije|yatedi|yateenvie|telodije|dejadit|dejadonne|dejaenvoye|jevoelaidejadit|jetelaidejadit|adetak|ateetak|baatlak|b3tlk)/i.test(
 			latinCompact
 		)
 	);
@@ -15852,6 +15976,28 @@ async function answerCurrentReservationMemoryQuestion(io, sc, st, userText = "",
 	});
 	const quote = ensureCurrentQuoteForSlots(st) || st.quote?.data || {};
 	const previousWaitFor = st.waitFor || "";
+	const requestedField = requestedReservationMemoryField(userText);
+	const wantsFullReview =
+		!requestedField &&
+		hasMandatoryReservationDetails(st) &&
+		quote?.available &&
+		(st.waitFor === "finalize" ||
+			st.waitFor === "reviewConfirm" ||
+			st.reviewSent ||
+			reservationDetailAlreadyProvidedComplaintText(userText));
+	if (wantsFullReview) {
+		const sentReview = await sendReservationReview(io, sc, st, quote, {
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		if (sentReview) {
+			logStep(caseId || String(sc._id || ""), "booking.current_memory_review", {
+				previousWaitFor,
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+		}
+		return sentReview;
+	}
 	const reply = currentReservationMemoryReplyText(sc, st, quote, userText);
 	const sent = await humanSend(io, sc, st, reply, {
 		quickReplies: bookingSummaryQuickReplies(sc, st),
@@ -23745,7 +23891,9 @@ async function maybeSendWorkerFailureFallback(
 		},
 		message: text,
 		date: new Date(),
+		isAi: true,
 		isSystem: true,
+		clientAction: "ai_wait_notice",
 		clientTag: aiMessageClientTag(key, "worker-hold"),
 		preferredLanguage: st.language,
 		preferredLanguageCode: st.languageCode,
@@ -23790,6 +23938,7 @@ function runPlanTurnInWorker({
 		let timedOut = false;
 		let exited = false;
 		let forceKillTimer = null;
+		let activeNoticeTimer = null;
 		const worker = fork(workerPathForPlanTurn(), [key], {
 			cwd: path.join(__dirname, "../.."),
 			env: {
@@ -23800,6 +23949,25 @@ function runPlanTurnInWorker({
 			execArgv: [`--max-old-space-size=${AI_PLAN_WORKER_OLD_SPACE_MB}`],
 			stdio: ["ignore", "inherit", "inherit", "ipc"],
 		});
+		if (AI_DELAY_NOTICE_ENABLED && AI_DELAY_NOTICE_MS > 0) {
+			activeNoticeTimer = setTimeout(async () => {
+				if (exited || timedOut) return;
+				try {
+					const latestCase = await getSupportCaseById(key).catch(() => null);
+					if (!latestCase || !latestGuestNeedsAiReply(latestCase)) return;
+					await maybeSendWorkerFailureFallback(io, key, latestCase, {
+						reason: "worker_slow",
+					});
+				} catch (error) {
+					logStep(key, "turn.worker.slow_notice_failed", {
+						message: error?.message || error,
+					});
+				}
+			}, AI_DELAY_NOTICE_MS);
+			if (typeof activeNoticeTimer.unref === "function") {
+				activeNoticeTimer.unref();
+			}
+		}
 		const timeout = setTimeout(() => {
 			timedOut = true;
 			console.error("[aiagent] worker timeout; terminating turn", {
@@ -23817,6 +23985,7 @@ function runPlanTurnInWorker({
 
 		worker.once("error", (error) => {
 			clearTimeout(timeout);
+			if (activeNoticeTimer) clearTimeout(activeNoticeTimer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 			reject(error);
 		});
@@ -23824,6 +23993,7 @@ function runPlanTurnInWorker({
 		worker.once("exit", async (code, signal) => {
 			exited = true;
 			clearTimeout(timeout);
+			if (activeNoticeTimer) clearTimeout(activeNoticeTimer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 			const elapsedMs = now() - startedAt;
 			const success = code === 0 && !signal && !timedOut;
