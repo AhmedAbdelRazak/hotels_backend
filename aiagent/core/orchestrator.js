@@ -21099,6 +21099,37 @@ async function sendBoundedUnansweredTurnFallback(
 	applyRoomSelectionsFromText(latestCase, st, userText, {
 		source: `bounded_fallback_${reason}_latest_room`,
 	});
+	if (
+		st.hotel &&
+		!severeAbusiveGuestText(userText) &&
+		!humanHandoffReason(userText) &&
+		!wantsPaymentHelp(userText) &&
+		!explicitlyExistingReservationIntent(userText) &&
+		fastCareAndUnclearBookingReplyText(latestCase, st, userText)
+	) {
+		updateActiveLanguageFromText(latestCase, st, userText);
+		const handled = await answerGeneralContextQuestion(
+			io,
+			latestCase,
+			st,
+			userText,
+			`bounded_fallback_${reason}_fast_care_unclear_booking`,
+			{
+				action: "other",
+				scope: "selected_hotel",
+				routingStage: "reservation_start",
+				keywords: ["care", "unclear_booking"],
+			}
+		);
+		if (handled) {
+			await persistAiStateSnapshot(caseId, latestCase, st);
+			logStep(caseId, "turn_recovery.fast_care_unclear_booking_sent", {
+				reason,
+				waitFor: st.waitFor || "",
+			});
+			return true;
+		}
+	}
 	const directFallbackKind = directGuestRequestKind(latestCase, st, userText, {});
 	const canAnswerDirectFallback =
 		st.hotel &&
@@ -21199,6 +21230,37 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 			protectLatestGuestDateChange: true,
 			reason: "pre_worker_fast_path",
 		});
+		if (
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			fastCareAndUnclearBookingReplyText(latestCase, st, userText)
+		) {
+			updateActiveLanguageFromText(latestCase, st, userText);
+			const handled = await answerGeneralContextQuestion(
+				io,
+				latestCase,
+				st,
+				userText,
+				"pre_worker_fast_care_unclear_booking",
+				{
+					action: "other",
+					scope: "selected_hotel",
+					routingStage: "reservation_start",
+					keywords: ["care", "unclear_booking"],
+				}
+			);
+			if (handled) {
+				await persistAiStateSnapshot(key, latestCase, st);
+				logStep(key, "turn.pre_worker_fast_care_unclear_booking_sent", {
+					reason,
+					waitFor: st.waitFor || "",
+				});
+				return true;
+			}
+		}
 		const directKind = directGuestRequestKind(latestCase, st, userText, {});
 		const directFastPath =
 			st.hotel &&
