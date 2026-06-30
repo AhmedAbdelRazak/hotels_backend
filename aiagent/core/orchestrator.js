@@ -924,18 +924,6 @@ function scheduleIdleClose(io, sc = {}, aiMessageDate = new Date()) {
 			scheduleIdleClose(io, sc, new Date(aiMessageAt));
 			return;
 		}
-		const currentCase = await getSupportCaseById(caseId).catch(() => null);
-		const latestEntry = latestConversationEntry(currentCase || {});
-		if (
-			!currentCase ||
-			currentCase.caseStatus === "closed" ||
-			currentCase.aiToRespond === false ||
-			!latestEntry?.isAi ||
-			latestEntry?.isSystem ||
-			entryTime(latestEntry) !== aiMessageAt
-		) {
-			return;
-		}
 		const updated = await closeSupportCaseForAiIdle(caseId, {
 			now: new Date(),
 			reason: "ai_idle_timeout",
@@ -955,7 +943,7 @@ function scheduleIdleClose(io, sc = {}, aiMessageDate = new Date()) {
 async function recoverIdleCloseTimers(io) {
 	if (!io || AI_IDLE_AUTO_CLOSE_MS <= 0) return;
 	try {
-		const cases = await listOpenClientAiCasesForIdleSweep({ limit: 150 });
+		const cases = await listOpenClientAiCasesForIdleSweep({ limit: 75 });
 		const nowMs = now();
 		let scheduled = 0;
 		let closed = 0;

@@ -368,23 +368,37 @@ async function closeSupportCaseForAiIdle(
 		},
 		{ new: true }
 	)
+		.select(
+			"_id openedBy caseStatus aiToRespond hotelId updatedAt closedAt closedBy aiHandoffReason aiPausedAt displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiReservation escalationStatus escalationReason"
+		)
 		.lean()
 		.exec();
 }
 
 async function listOpenClientAiCasesForIdleSweep({ limit = 100 } = {}) {
-	const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
-	const cases = await SupportCase.find({
-		openedBy: "client",
-		caseStatus: "open",
-		aiToRespond: true,
-		conversation: { $exists: true, $ne: [] },
-	})
-		.select("_id openedBy caseStatus aiToRespond conversation updatedAt")
-		.sort({ updatedAt: -1, _id: -1 })
-		.limit(safeLimit)
-		.lean()
-		.exec();
+	const safeLimit = Math.max(1, Math.min(Number(limit) || 100, 100));
+	const cases = await SupportCase.aggregate([
+		{
+			$match: {
+				openedBy: "client",
+				caseStatus: "open",
+				aiToRespond: true,
+				conversation: { $exists: true, $ne: [] },
+			},
+		},
+		{ $sort: { updatedAt: -1, _id: -1 } },
+		{ $limit: safeLimit },
+		{
+			$project: {
+				_id: 1,
+				openedBy: 1,
+				caseStatus: 1,
+				aiToRespond: 1,
+				updatedAt: 1,
+				conversation: [{ $arrayElemAt: ["$conversation", -1] }],
+			},
+		},
+	]).exec();
 	return cases.map(normalizeSupportCaseQuickReplies);
 }
 
