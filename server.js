@@ -21,6 +21,69 @@ const {
 const app = express();
 const server = http.createServer(app);
 
+const splitEnvList = (value = "") =>
+	String(value || "")
+		.split(",")
+		.map((item) => item.trim())
+		.filter(Boolean);
+
+const configuredCorsOrigins = [
+	"https://xhotelpro.com",
+	"https://www.xhotelpro.com",
+	"https://jannatbooking.com",
+	"https://www.jannatbooking.com",
+	"https://zadhotels.com",
+	"https://www.zadhotels.com",
+	"http://localhost:3000",
+	"http://localhost:3001",
+	"http://localhost:5173",
+	...splitEnvList(process.env.CORS_ALLOWED_ORIGINS),
+	...splitEnvList(process.env.SOCKET_CORS_ALLOWED_ORIGINS),
+	process.env.CLIENT_URL,
+	process.env.CLIENT_URL_XHOTEL,
+	process.env.PUBLIC_CLIENT_URL,
+	process.env.FRONTEND_URL,
+	process.env.REACT_APP_MAIN_URL_JANNAT,
+]
+	.map((origin) => String(origin || "").replace(/\/+$/, "").toLowerCase())
+	.filter(Boolean);
+
+const configuredCorsHostSuffixes = [
+	".xhotelpro.com",
+	".jannatbooking.com",
+	".zadhotels.com",
+	...splitEnvList(process.env.CORS_ALLOWED_HOST_SUFFIXES),
+	...splitEnvList(process.env.SOCKET_CORS_ALLOWED_HOST_SUFFIXES),
+].map((suffix) => suffix.toLowerCase());
+
+const allowedCorsOrigins = new Set(configuredCorsOrigins);
+
+function isAllowedCorsOrigin(origin = "") {
+	if (!origin) return true;
+	try {
+		const parsed = new URL(origin);
+		const normalizedOrigin = parsed.origin.toLowerCase();
+		const hostname = parsed.hostname.toLowerCase();
+		return (
+			allowedCorsOrigins.has(normalizedOrigin) ||
+			configuredCorsHostSuffixes.some(
+				(suffix) => hostname.endsWith(suffix) || hostname === suffix.slice(1)
+			)
+		);
+	} catch {
+		return false;
+	}
+}
+
+function corsOrigin(origin, callback) {
+	callback(null, isAllowedCorsOrigin(origin));
+}
+
+const corsOptions = {
+	origin: corsOrigin,
+	credentials: true,
+};
+
 mongoose.set("strictQuery", false);
 mongoose
 	.connect(process.env.DATABASE, {
@@ -40,7 +103,7 @@ mongoose
 
 // Middlewares
 app.use(morgan("dev"));
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (_req, res) => res.send("Hello From PMS API"));
@@ -48,7 +111,7 @@ app.get("/", (_req, res) => res.send("Hello From PMS API"));
 // Socket.IO
 const io = socketIo(server, {
 	cors: {
-		origin: "*",
+		origin: corsOrigin,
 		methods: ["GET", "POST"],
 		allowedHeaders: ["Authorization"],
 		credentials: true,
@@ -95,26 +158,77 @@ server.listen(port, () => console.log(`Server is running on port ${port}`));
 /* ===== room-scoped relays + DB watcher for late-joiners ===== */
 const SupportCase = require("./models/supportcase");
 
+const SUPPORT_CASE_ROOM_CACHE_TTL_MS = 5 * 60 * 1000;
+const supportCaseRoomCache = new Map();
+
+const objectIdText = (value = "") => {
+	const text = String(value || "").trim();
+	if (!mongoose.Types.ObjectId.isValid(text)) return "";
+	return text;
+};
+
+async function supportCaseRoomExists(caseId = "") {
+	const cleanCaseId = objectIdText(caseId);
+	if (!cleanCaseId) return false;
+	const cached = supportCaseRoomCache.get(cleanCaseId);
+	if (cached && cached.expiresAt > Date.now()) return cached.exists;
+	const exists = Boolean(
+		await SupportCase.exists({ _id: cleanCaseId }).catch(() => null)
+	);
+	supportCaseRoomCache.set(cleanCaseId, {
+		exists,
+		expiresAt: Date.now() + SUPPORT_CASE_ROOM_CACHE_TTL_MS,
+	});
+	return exists;
+}
+
+async function joinSupportCaseRoom(socket, caseId = "") {
+	const cleanCaseId = objectIdText(caseId);
+	if (!cleanCaseId) return;
+	if (await supportCaseRoomExists(cleanCaseId)) {
+		socket.join(cleanCaseId);
+	}
+}
+
+function leaveSupportCaseRoom(socket, caseId = "") {
+	const cleanCaseId = objectIdText(caseId);
+	if (cleanCaseId) socket.leave(cleanCaseId);
+}
+
+function joinObjectScopedRoom(socket, prefix = "", id = "") {
+	const cleanId = objectIdText(id);
+	if (prefix && cleanId) socket.join(`${prefix}:${cleanId}`);
+}
+
+function leaveObjectScopedRoom(socket, prefix = "", id = "") {
+	const cleanId = objectIdText(id);
+	if (prefix && cleanId) socket.leave(`${prefix}:${cleanId}`);
+}
+
 io.on("connection", (socket) => {
-	socket.on("joinRoom", ({ caseId }) => caseId && socket.join(caseId));
-	socket.on("leaveRoom", ({ caseId }) => caseId && socket.leave(caseId));
+	socket.on("joinRoom", ({ caseId } = {}) => {
+		joinSupportCaseRoom(socket, caseId).catch((error) =>
+			console.error("[socket] joinRoom failed:", error?.message || error)
+		);
+	});
+	socket.on("leaveRoom", ({ caseId } = {}) => leaveSupportCaseRoom(socket, caseId));
 	socket.on("joinHousekeeping", ({ hotelId } = {}) => {
-		if (hotelId) socket.join(`housekeeping:${hotelId}`);
+		joinObjectScopedRoom(socket, "housekeeping", hotelId);
 	});
 	socket.on("leaveHousekeeping", ({ hotelId } = {}) => {
-		if (hotelId) socket.leave(`housekeeping:${hotelId}`);
+		leaveObjectScopedRoom(socket, "housekeeping", hotelId);
 	});
 	socket.on("joinHotelNotifications", ({ hotelId } = {}) => {
-		if (hotelId) socket.join(`hotel-notifications:${hotelId}`);
+		joinObjectScopedRoom(socket, "hotel-notifications", hotelId);
 	});
 	socket.on("leaveHotelNotifications", ({ hotelId } = {}) => {
-		if (hotelId) socket.leave(`hotel-notifications:${hotelId}`);
+		leaveObjectScopedRoom(socket, "hotel-notifications", hotelId);
 	});
 	socket.on("joinOwnerNotifications", ({ ownerId } = {}) => {
-		if (ownerId) socket.join(`owner-notifications:${ownerId}`);
+		joinObjectScopedRoom(socket, "owner-notifications", ownerId);
 	});
 	socket.on("leaveOwnerNotifications", ({ ownerId } = {}) => {
-		if (ownerId) socket.leave(`owner-notifications:${ownerId}`);
+		leaveObjectScopedRoom(socket, "owner-notifications", ownerId);
 	});
 	socket.on("joinPlatformNotifications", () => {
 		socket.join("platform-notifications");
@@ -123,22 +237,22 @@ io.on("connection", (socket) => {
 		socket.leave("platform-notifications");
 	});
 	socket.on("joinB2BChat", ({ chatId } = {}) => {
-		if (chatId) socket.join(`b2b-chat:${chatId}`);
+		joinObjectScopedRoom(socket, "b2b-chat", chatId);
 	});
 	socket.on("leaveB2BChat", ({ chatId } = {}) => {
-		if (chatId) socket.leave(`b2b-chat:${chatId}`);
+		leaveObjectScopedRoom(socket, "b2b-chat", chatId);
 	});
 	socket.on("joinB2BUser", ({ userId } = {}) => {
-		if (userId) socket.join(`b2b-user:${userId}`);
+		joinObjectScopedRoom(socket, "b2b-user", userId);
 	});
 	socket.on("leaveB2BUser", ({ userId } = {}) => {
-		if (userId) socket.leave(`b2b-user:${userId}`);
+		leaveObjectScopedRoom(socket, "b2b-user", userId);
 	});
 	socket.on("joinB2BHotel", ({ hotelId } = {}) => {
-		if (hotelId) socket.join(`b2b-hotel:${hotelId}`);
+		joinObjectScopedRoom(socket, "b2b-hotel", hotelId);
 	});
 	socket.on("leaveB2BHotel", ({ hotelId } = {}) => {
-		if (hotelId) socket.leave(`b2b-hotel:${hotelId}`);
+		leaveObjectScopedRoom(socket, "b2b-hotel", hotelId);
 	});
 	socket.on("joinB2BPlatform", () => {
 		socket.join("b2b-platform");
@@ -159,19 +273,25 @@ io.on("connection", (socket) => {
 		}
 	});
 
-	socket.on("typing", (data = {}) => {
-		const room = data?.caseId;
-		if (room) io.to(room).emit("typing", { ...data, isAi: false });
+	socket.on("typing", async (data = {}) => {
+		const room = objectIdText(data?.caseId);
+		if (room && (await supportCaseRoomExists(room))) {
+			io.to(room).emit("typing", { ...data, caseId: room, isAi: false });
+		}
 	});
-	socket.on("stopTyping", (data = {}) => {
-		const room = data?.caseId;
-		if (room) io.to(room).emit("stopTyping", { ...data, isAi: false });
+	socket.on("stopTyping", async (data = {}) => {
+		const room = objectIdText(data?.caseId);
+		if (room && (await supportCaseRoomExists(room))) {
+			io.to(room).emit("stopTyping", { ...data, caseId: room, isAi: false });
+		}
 	});
 
 	// Echo guest message to room immediately; AI will also reply to same room
-	socket.on("sendMessage", (message) => {
-		const room = message?.caseId;
-		if (room) io.to(room).emit("receiveMessage", message);
+	socket.on("sendMessage", async (message = {}) => {
+		const room = objectIdText(message?.caseId);
+		if (room && (await supportCaseRoomExists(room))) {
+			io.to(room).emit("receiveMessage", { ...message, caseId: room });
+		}
 	});
 });
 
