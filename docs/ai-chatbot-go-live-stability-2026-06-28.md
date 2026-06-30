@@ -132,6 +132,7 @@ Go-live quality note: English and Arabic are the current production target and t
 ## AI Turn Execution Stability - 2026-06-29
 
 - Worker mode remains the production default (`AI_PLAN_USE_WORKER=true`) because in-process planning can hold the public HTTP path during slow turns. The worker path keeps the server responsive while the global queue controls concurrency.
+- The queue runner now has a pre-worker fast path for clear casual turns and broad selected-hotel reservation-start inquiries. This prevents a first message like "I want to ask about Zad Ajyad" or "how are you?" from waiting on a heavy worker before the guest sees a real assistant answer.
 - If worker mode is enabled and a worker times out or exits unsuccessfully, the recovery path now attempts a bounded real assistant reply for the latest guest turn instead of only sending a "please wait" system notice.
 - The global AI plan queue and server health guards still apply; this change removes avoidable per-turn overhead without removing concurrency limits.
 - The worker parent now has an early recovery guard (`AI_PLAN_WORKER_EARLY_FALLBACK_MS`, default 5000 ms). If the latest guest turn still has no assistant reply by then, the parent rebuilds booking memory from the saved conversation and may send a bounded answer around the normal 8-second customer target.

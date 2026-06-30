@@ -20818,6 +20818,49 @@ async function sendBoundedUnansweredTurnFallback(
 	return sent;
 }
 
+async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
+	const key = idText(caseId);
+	if (!io || !key || !latestGuestNeedsAiReply(latestCase)) return false;
+	const latestGuest = lastGuestMessage(latestCase);
+	const userText = String(latestGuest?.message || lastUserText(latestCase) || "").trim();
+	if (!userText) return false;
+	try {
+		const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+		if (!policy.allowed) return false;
+		const policyHotel = policy.hotel || (await getHotelById(latestCase.hotelId));
+		const st = ensureState(latestCase, activeHotelContextForCase(latestCase, policyHotel));
+		const clearCasualTurn = Boolean(
+			preHydrateCasualTurnReplyText(latestCase, st, userText)
+		);
+		const selectedHotelStart = Boolean(
+			st.hotel && selectedHotelBroadInquiryText(userText, st)
+		);
+		if (!clearCasualTurn && !selectedHotelStart) return false;
+		const sent = await sendBoundedUnansweredTurnFallback(
+			io,
+			latestCase,
+			st,
+			key,
+			"pre_worker_fast_path",
+			{ allowGeneric: false }
+		);
+		if (sent) {
+			logStep(key, "turn.pre_worker_fast_path_sent", {
+				reason,
+				clearCasualTurn,
+				selectedHotelStart,
+			});
+		}
+		return sent;
+	} catch (error) {
+		logStep(key, "turn.pre_worker_fast_path_failed", {
+			reason,
+			message: error?.message || error,
+		});
+		return false;
+	}
+}
+
 /* ------------------- TURN PLANNER ------------------- */
 const activePlanLocks = new Map();
 const activePlanLockAts = new Map();
@@ -24689,6 +24732,9 @@ async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }
 		queued: queuedPlanTurns.length,
 		concurrency: planConcurrencySnapshot(),
 	});
+	if (await maybeSendPreWorkerFastPath(io, latestCase, caseId, reason)) {
+		return true;
+	}
 	if (AI_PLAN_USE_WORKER) {
 		return runPlanTurnInWorker({
 			io,
