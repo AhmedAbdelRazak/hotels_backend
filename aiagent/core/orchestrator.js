@@ -19694,7 +19694,7 @@ function fastCareAndUnclearBookingReplyText(sc = {}, st = {}, userText = "") {
 	}
 
 	if (careConcern) {
-		return `No worries at all. I can understand messy wording and guide you step by step like a real reception assistant. ${hotelName} can be a practical option, especially if you want clear guidance before bringing older family members.${englishDistance} Send the check-in date, checkout date, guest count, and preferred room type when ready, and I will check the exact option and price for you.`;
+		return `No worries at all. I can guide you step by step like a real reception assistant. ${hotelName} can be a practical option, especially if you want clear guidance before bringing older family members.${englishDistance} Send the check-in date, checkout date, guest count, and preferred room type when ready, and I will check the exact option and price for you.`;
 	}
 	return `Yes, I can still help even if the request is incomplete. To check ${hotelName} correctly, please send the check-in date, checkout date, number of guests, and preferred room type or budget.${englishDistance} Then I will give you the suitable available option and total price clearly.`;
 }
