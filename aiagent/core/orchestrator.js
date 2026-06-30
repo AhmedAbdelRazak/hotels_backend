@@ -147,6 +147,7 @@ function localizedAgentName(sc = {}) {
 		huda: "هدى",
 		khadija: "خديجة",
 		nadia: "نادية",
+		noor: "نور",
 		safiya: "صفية",
 		sara: "سارة",
 		mariam: "مريم",
@@ -441,6 +442,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null }) {
 	return [
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
+		`You own date understanding. Convert Arabic, typo-heavy, shorthand, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. For dates without a year, use the next future occurrence from today. If the year or range is genuinely unclear, ask one short natural confirmation question.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
@@ -1172,13 +1174,11 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		const languageCode = activeLanguageCode(sc, known);
 		const text = /^ar\b/i.test(languageCode)
-			? "أعتذر، حصل تأخير بسيط. سأحول المحادثة للفريق حتى يساعدوك بأدق طريقة."
-			: "I am sorry, there was a delay. I will pass this to the team so they can help accurately.";
+			? "أعتذر عن التأخير البسيط. وصلتني رسالتك، فقط أكد لي التواريخ بصيغة ميلادية واضحة أو اكتب السنة المقصودة، وسأراجع لك السعر والتوفر فورًا."
+			: "I am sorry for the small delay. I received your message; please confirm the exact Gregorian dates or the intended year, and I will check price and availability right away.";
 		return sendAiMessage(io, sc, text, {
 			latestGuest,
 			known,
-			handoff: true,
-			handoffReason: "ai_turn_failed",
 		});
 	} finally {
 		await emitTyping(io, sc, false);
