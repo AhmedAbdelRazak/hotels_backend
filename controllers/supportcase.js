@@ -1044,7 +1044,11 @@ async function appendPublicAiQuickReply(
 	};
 	const updated = await SupportCase.findByIdAndUpdate(
 		caseId,
-		{ $push: { conversation: aiEntry }, $set: { updatedAt: new Date() } },
+		{
+			$push: { conversation: aiEntry },
+			$set: { updatedAt: new Date(), aiToRespond: false },
+			$unset: { aiRecoveryScheduledAt: "" },
+		},
 		{ new: true }
 	)
 		.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
