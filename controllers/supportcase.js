@@ -13,6 +13,8 @@ const {
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
 	prepareImmediateProceedAfterQuoteState,
+	buildImmediateReservationDetailsReply,
+	buildImmediateSkipEmailReviewReply,
 } = require("../aiagent/core/orchestrator");
 const {
 	activeHotelPolicyQA,
@@ -2210,9 +2212,15 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					);
 				}
 			}
+			const immediateReservationPayload =
+				legacyAiEngine && !immediateQuote?.message && !proceedPromptCandidate
+					? (await buildImmediateSkipEmailReviewReply(updatedCase._id)) ||
+					  (await buildImmediateReservationDetailsReply(updatedCase._id))
+					: null;
 			const quickReply =
 				immediateQuote?.message ||
 				proceedPrompt ||
+				immediateReservationPayload?.message ||
 				(legacyAiEngine && !proceedPromptCandidate
 					? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
 					: "");
@@ -2223,11 +2231,18 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					quickReply,
 					{
 						clientAction:
-							immediateQuote?.clientAction || "ai_immediate_reply",
+							immediateQuote?.clientAction ||
+							immediateReservationPayload?.clientAction ||
+							"ai_immediate_reply",
 						tagPrefix: immediateQuote?.message
 							? "ai_quick_quote"
+							: immediateReservationPayload?.message
+							? "ai_quick_reservation_state"
 							: "ai_quick_immediate",
-						quickReplies: immediateQuote?.quickReplies || [],
+						quickReplies:
+							immediateQuote?.quickReplies ||
+							immediateReservationPayload?.quickReplies ||
+							[],
 					}
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;

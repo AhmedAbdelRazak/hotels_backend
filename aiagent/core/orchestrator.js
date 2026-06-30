@@ -21109,6 +21109,173 @@ async function prepareImmediateProceedAfterQuoteState(caseOrId) {
 	}
 }
 
+function finalReservationReviewPayload(sc = {}, st = {}, quote = null) {
+	const q = quote || ensureCurrentQuoteForSlots(st) || st.quote?.data;
+	if (!q?.available) return null;
+	st.waitFor = "finalize";
+	st.reviewSent = true;
+	st.finalReviewSentAt = now();
+	st.turnInFlight = false;
+	st.turnOwner = null;
+	st.interrupt = false;
+	st.queue = [];
+	stampAsk(st, "finalize");
+	const message =
+		deterministicFinalReservationReview(sc, st, q) ||
+		finalReservationPrompt(sc, st);
+	if (!message) return null;
+	return {
+		message,
+		quickReplies: finalReservationQuickReplies(sc, st),
+		clientAction: "ai_final_review",
+	};
+}
+
+async function buildImmediateReservationDetailsReply(caseOrId) {
+	const caseId = idText(caseOrId?._id || caseOrId);
+	if (!caseId) return null;
+	try {
+		const sc = await getSupportCaseById(caseId);
+		if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return null;
+		const latestGuest = lastGuestMessage(sc);
+		const userText = String(latestGuest?.message || "").trim();
+		if (!userText || severeAbusiveGuestText(userText) || humanHandoffReason(userText)) {
+			return null;
+		}
+		const policy = await ensureAIAllowed(sc.hotelId, sc);
+		if (!policy.allowed) return null;
+		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
+		recoverBookingContextFromConversation(sc, st, {
+			protectLatestGuestDateChange: true,
+			reason: "controller_immediate_reservation_details",
+		});
+		if (
+			!isReservationDetailStep(st) ||
+			st.waitFor === "email_or_skip" ||
+			!reservationDetailFieldPayloadText(userText)
+		) {
+			return null;
+		}
+		const quote = ensureCurrentQuoteForSlots(st);
+		if (!quote?.available) return null;
+		await captureReservationDetailsFromText(sc, st, userText, caseId);
+		let payload = null;
+		if (!hasMandatoryReservationDetails(st)) {
+			st.waitFor = "reservation_details";
+			st.reviewSent = false;
+			st.finalReviewSentAt = 0;
+			st.turnInFlight = false;
+			st.turnOwner = null;
+			st.interrupt = false;
+			st.queue = [];
+			stampAsk(st, "reservation_details");
+			payload = {
+				message: mandatoryDetailsPrompt(sc, st, { retry: true }),
+				quickReplies: [],
+				clientAction: "ai_immediate_reservation_details",
+			};
+		} else {
+			const next = nextReservationDetailStep(st);
+			if (next === "email_or_skip") {
+				st.waitFor = "email_or_skip";
+				st.reviewSent = false;
+				st.finalReviewSentAt = 0;
+				st.turnInFlight = false;
+				st.turnOwner = null;
+				st.interrupt = false;
+				st.queue = [];
+				stampAsk(st, "email_or_skip");
+				payload = {
+					message: optionalEmailPrompt(sc, st),
+					quickReplies: emailQuickReplies(sc, st),
+					clientAction: "ai_immediate_email_prompt",
+				};
+			} else {
+				payload = finalReservationReviewPayload(sc, st, quote);
+			}
+		}
+		if (!payload?.message) return null;
+		await persistAiStateSnapshot(caseId, sc, st);
+		logStep(caseId, "reservation_details.controller_fast_reply", {
+			waitFor: st.waitFor || "",
+			missing: missingMandatoryReservationFields(st),
+			clientAction: payload.clientAction,
+		});
+		return payload;
+	} catch (error) {
+		logStep(caseId, "reservation_details.controller_fast_reply_failed", {
+			message: error?.message || error,
+		});
+		return null;
+	}
+}
+
+async function buildImmediateSkipEmailReviewReply(caseOrId) {
+	const caseId = idText(caseOrId?._id || caseOrId);
+	if (!caseId) return null;
+	try {
+		const sc = await getSupportCaseById(caseId);
+		if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return null;
+		const latestGuest = lastGuestMessage(sc);
+		const userText = String(latestGuest?.message || "").trim();
+		const action = String(latestGuest?.clientAction || "").trim().toLowerCase();
+		const previousAi = lastAssistantMessageBeforeLatestGuest(sc);
+		const acceptedSkip =
+			action === "skip_email" ||
+			emailSkipText(userText);
+		if (!acceptedSkip || severeAbusiveGuestText(userText) || humanHandoffReason(userText)) {
+			return null;
+		}
+		const policy = await ensureAIAllowed(sc.hotelId, sc);
+		if (!policy.allowed) return null;
+		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
+		recoverBookingContextFromConversation(sc, st, {
+			protectLatestGuestDateChange: true,
+			reason: "controller_immediate_skip_email",
+		});
+		if (st.waitFor !== "email_or_skip" && !assistantMessageSuggestsEmailOrSkip(previousAi)) {
+			return null;
+		}
+		const quote = ensureCurrentQuoteForSlots(st);
+		if (!quote?.available) return null;
+		st.slots = st.slots || {};
+		st.slots.email = "";
+		st.slots.emailSkipped = true;
+		let payload = null;
+		if (!hasMandatoryReservationDetails(st)) {
+			st.waitFor = "reservation_details";
+			st.reviewSent = false;
+			st.finalReviewSentAt = 0;
+			st.turnInFlight = false;
+			st.turnOwner = null;
+			st.interrupt = false;
+			st.queue = [];
+			stampAsk(st, "reservation_details");
+			payload = {
+				message: mandatoryDetailsPrompt(sc, st, { retry: true }),
+				quickReplies: [],
+				clientAction: "ai_immediate_reservation_details",
+			};
+		} else {
+			payload = finalReservationReviewPayload(sc, st, quote);
+		}
+		if (!payload?.message) return null;
+		await persistAiStateSnapshot(caseId, sc, st);
+		logStep(caseId, "email.controller_skip_fast_reply", {
+			waitFor: st.waitFor || "",
+			clientAction: payload.clientAction,
+		});
+		return payload;
+	} catch (error) {
+		logStep(caseId, "email.controller_skip_fast_reply_failed", {
+			message: error?.message || error,
+		});
+		return null;
+	}
+}
+
 async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry = {}) {
 	const latestText = String(latestEntry?.message || "").trim();
 	if (
@@ -25298,6 +25465,8 @@ const exportedOrchestrator = {
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
 	prepareImmediateProceedAfterQuoteState,
+	buildImmediateReservationDetailsReply,
+	buildImmediateSkipEmailReviewReply,
 	tryImmediateB2CFastPath: maybeSendPreWorkerFastPath,
 	__worker: {
 		planTurn,
