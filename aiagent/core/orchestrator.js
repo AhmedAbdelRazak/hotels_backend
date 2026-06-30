@@ -23118,6 +23118,62 @@ function emitCaseUpdatesAfterWorker(io, caseId, updatedCase, initialConversation
 	io.emit("supportCaseUpdated", updatedCase);
 }
 
+function workerFallbackState(sc = {}) {
+	return {
+		language: preferredLanguageOf(sc) || "English",
+		languageCode: preferredLanguageCodeOf(sc) || "",
+		agentName: sc.aiResponderName || "Jannat Booking",
+	};
+}
+
+async function maybeSendWorkerFailureFallback(
+	io,
+	caseId,
+	latestCase,
+	{ reason = "worker_failed" } = {}
+) {
+	const key = idText(caseId);
+	if (!io || !key || !latestGuestNeedsAiReply(latestCase)) return null;
+	const st = workerFallbackState(latestCase);
+	const latestGuest = lastGuestMessage(latestCase);
+	const text = aiDelayNoticeText(latestCase, st);
+	const messageData = {
+		messageBy: {
+			customerName: st.agentName,
+			customerEmail: AI_SUPPORT_EMAIL,
+			userId: "jannat-system",
+		},
+		message: text,
+		date: new Date(),
+		isSystem: true,
+		clientTag: aiMessageClientTag(key, "worker-hold"),
+		preferredLanguage: st.language,
+		preferredLanguageCode: st.languageCode,
+	};
+	const saved = await updateSupportCaseAppendIfNoRecentAiDuplicate(
+		key,
+		{
+			conversation: messageData,
+			aiRelated: true,
+		},
+		{
+			duplicateWindowMs: Math.max(AI_MESSAGE_DEDUPE_WINDOW_MS, 10 * 60 * 1000),
+			requireOpenClientAi: true,
+			requireLatestGuestText: String(latestGuest?.message || "").trim(),
+			requireNoAiAfter: latestGuest?.date || null,
+		}
+	);
+	if (saved?.skipped) return saved.updatedCase || latestCase;
+	logStep(key, "turn.worker.fallback_sent", { reason });
+	io.to(key).emit("receiveMessage", { ...messageData, caseId: key });
+	io.to(key).emit("stopTyping", { caseId: key, isAi: true });
+	if (saved?.updatedCase) {
+		io.to(key).emit("supportCaseUpdated", saved.updatedCase);
+		io.emit("supportCaseUpdated", saved.updatedCase);
+	}
+	return saved?.updatedCase || (await getSupportCaseById(key).catch(() => null));
+}
+
 function runPlanTurnInWorker({
 	io,
 	caseId,
@@ -23181,7 +23237,13 @@ function runPlanTurnInWorker({
 				oldSpaceMb: AI_PLAN_WORKER_OLD_SPACE_MB,
 			});
 			try {
-				const updatedCase = await getSupportCaseById(key).catch(() => null);
+				let updatedCase = await getSupportCaseById(key).catch(() => null);
+				if (!success && updatedCase) {
+					updatedCase =
+						(await maybeSendWorkerFailureFallback(io, key, updatedCase, {
+							reason: timedOut ? "worker_timeout" : "worker_exit_failed",
+						})) || updatedCase;
+				}
 				if (updatedCase) {
 					emitCaseUpdatesAfterWorker(
 						io,
