@@ -860,13 +860,14 @@ const publicPostBookingCloseText = (text = "") => {
 			normalized
 		);
 	const arabicCloseNormalized = normalized
-		.replace(/[.!،,؛:]+/g, " ")
+		.replace(/[.!\u060c,\u061b:]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+	const arabicCloseFolded = normalizePublicArabicIntentText(arabicCloseNormalized);
 	if (
 		!hasArabicFollowupRequest &&
-		/^(?:(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627)\s+)?(?:(?:\u0643\u062f\u0647|\u0643\u0630\u0627)\s+\u062a\u0645\u0627\u0645|\u062a\u0645\u0627\u0645|\u062e\u0644\u0627\u0635|\u0628\u0633\s+\u0643\u062f\u0647|\u0645\u0627\u0641\u064a\u0634(?:\s+\u0623?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0641\u064a\u0634(?:\s+\u0623?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0627\s+\u0639\u0646\u062f\u064a\s+(?:\u0634\u064a|\u0634\u064a\u0621)\s+\u062b\u0627\u0646\u064a)(?:\s+(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627))?$/.test(
-			arabicCloseNormalized
+		/^(?:(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627)\s+)?(?:(?:\u0643\u062f\u0647|\u0643\u0630\u0627)\s+\u062a\u0645\u0627\u0645|\u062a\u0645\u0627\u0645|\u062e\u0644\u0627\u0635|\u0628\u0633\s+\u0643\u062f\u0647|\u0645\u0627\u0641\u064a\u0634(?:\s+\u0627?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0641\u064a\u0634(?:\s+\u0627?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0627\s+\u0639\u0646\u062f\u064a\s+(?:\u0634\u064a|\u0634\u064a\u0621)\s+\u062b\u0627\u0646\u064a)(?:\s+(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627))?$/.test(
+			arabicCloseFolded
 		)
 	) {
 		return true;
@@ -904,9 +905,13 @@ const publicPostBookingImmediateReplyPayload = (
 		ref.reservationId && ref.confirmation
 			? `${baseUrl}/client-payment/${ref.reservationId}/${ref.confirmation}`
 			: "";
+	const arabicIntent = normalizePublicArabicIntentText(text);
 	const asksLinkOrArrival =
 		/\b(?:link|url|details|payment|pay|arrival|arrive|reception|front desk|show|send|share)\b/i.test(
 			text
+		) ||
+		/(?:\u0631\u0627\u0628\u0637|\u0627\u0644\u062f\u0641\u0639|\u0627\u062f\u0641\u0639|\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0648\u0635\u0644\u062a|\u0627\u0648\u0635\u0644|\u0627\u0642\u0648\u0644\u0647\u0645|\u0642\u0648\u0644\u0647\u0645|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b)/i.test(
+			arabicIntent
 		) ||
 		/(?:رابط|الدفع|ادفع|تفاصيل|الاستقبال|الوصول|ارسلي|ارسل|ابعث|ابعت)/i.test(
 			text
@@ -914,6 +919,9 @@ const publicPostBookingImmediateReplyPayload = (
 	const asksConfirmation =
 		/\b(?:confirmation|confirm|reference|booking number|reservation number|number again|remind)\b/i.test(
 			text
+		) ||
+		/(?:\u0631\u0642\u0645\s+(?:\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632)|\u0627\u0644\u062a\u0627\u0643\u064a\u062f)/i.test(
+			arabicIntent
 		) ||
 		/(?:رقم\s+(?:التأكيد|التاكيد|الحجز)|التأكيد|التاكيد)/i.test(text);
 	if (publicPostBookingCloseText(text)) {
