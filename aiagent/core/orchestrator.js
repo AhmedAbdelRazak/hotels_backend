@@ -3374,6 +3374,7 @@ function hydrateKnownSlotsFromConversation(
 		!st.slots?.checkinISO ||
 		!st.slots?.checkoutISO ||
 		!st.slots?.roomTypeKey;
+	const needsRoomRecovery = !st.slots?.roomTypeKey;
 	const identityHydrationRelevant =
 		isReservationDetailStep(st) ||
 		[
@@ -3438,6 +3439,12 @@ function hydrateKnownSlotsFromConversation(
 			});
 			return;
 		}
+	}
+	if (needsStayRecovery && needsRoomRecovery) {
+		applyLatestRoomSignalFromConversation(sc, st, {
+			source: "slots.hydrate_room_signal_early",
+			includeAssistantFallback: false,
+		});
 	}
 	const before = JSON.stringify(st.slots || {});
 	if (AI_REQUIRE_NATIONALITY && st.slots?.nationality && !hasUsableNationality(st.slots.nationality)) {
@@ -4153,7 +4160,7 @@ function latestRoomSignalFromConversation(sc = {}, st = {}) {
 function applyLatestRoomSignalFromConversation(
 	sc = {},
 	st = {},
-	{ source = "conversation_room_signal" } = {}
+	{ source = "conversation_room_signal", includeAssistantFallback = true } = {}
 ) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let index = conversation.length - 1; index >= 0; index -= 1) {
@@ -4176,6 +4183,7 @@ function applyLatestRoomSignalFromConversation(
 		}
 		return changed;
 	}
+	if (!includeAssistantFallback) return false;
 	const signal = latestRoomSignalFromConversation(sc, st);
 	if (!signal?.roomTypeKey) return false;
 	st.slots = st.slots || {};
