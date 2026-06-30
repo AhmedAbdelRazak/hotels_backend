@@ -981,6 +981,25 @@ const normalizeSupportCaseForResponse = (supportCase) => {
 const normalizeSupportCasesForResponse = (cases = []) =>
 	Array.isArray(cases) ? cases.map(normalizeSupportCaseForResponse) : cases;
 
+const emitSupportCaseClosed = (
+	io,
+	supportCase,
+	{ closedBy = "", reason = "case_closed" } = {}
+) => {
+	if (!io || !supportCase) return;
+	const normalizedCase = normalizeSupportCaseForResponse(supportCase);
+	const caseId = normalizeId(normalizedCase?._id);
+	if (!caseId) return;
+	io.emit("closeCase", {
+		case: normalizedCase,
+		caseId,
+		caseStatus: "closed",
+		closedAt: normalizedCase.closedAt || new Date(),
+		closedBy: closedBy || normalizedCase.closedBy || "csr",
+		reason,
+	});
+};
+
 const isAiForceRespondEnabled = () =>
 	String(process.env.AI_FORCE_RESPOND || "").toLowerCase() === "true";
 
@@ -1351,6 +1370,7 @@ exports.updateSupportCase = async (req, res) => {
 			setFields.caseStatus = caseStatus;
 			if (caseStatus === "closed") {
 				setFields.closedAt = new Date();
+				setFields.closedBy = closedBy || "csr";
 				if (isClientSupportCase(currentCase)) {
 					setFields.aiToRespond = false;
 					setFields.aiPausedAt = new Date();
@@ -1363,9 +1383,12 @@ exports.updateSupportCase = async (req, res) => {
 					}
 				}
 			}
-			if (caseStatus === "open") setFields.closedAt = null;
+			if (caseStatus === "open") {
+				setFields.closedAt = null;
+				setFields.closedBy = null;
+			}
 		}
-		if (closedBy) setFields.closedBy = closedBy;
+		if (closedBy && caseStatus !== "open") setFields.closedBy = closedBy;
 		if (rating) setFields.rating = rating;
 		if (supporterName) setFields.supporterName = supporterName;
 		if (hotelId) setFields.hotelId = hotelId;
@@ -1482,7 +1505,10 @@ exports.updateSupportCase = async (req, res) => {
 		const normalizedUpdatedCase = normalizeSupportCaseForResponse(updatedCase);
 
 		if (caseStatus === "closed") {
-			req.io.emit("closeCase", { case: normalizedUpdatedCase, closedBy });
+			emitSupportCaseClosed(req.io, normalizedUpdatedCase, {
+				closedBy: normalizedUpdatedCase.closedBy || closedBy || "csr",
+				reason: "case_closed",
+			});
 		} else if (safeConversation) {
 			req.io.emit("receiveMessage", normalizedUpdatedCase);
 		}
@@ -1665,7 +1691,10 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		}
 
 		if (req.body.caseStatus === "closed") {
-			req.io.emit("closeCase", { case: updatedCase, closedBy: "client" });
+			emitSupportCaseClosed(req.io, updatedCase, {
+				closedBy: "client",
+				reason: "client_closed_case",
+			});
 		} else if (shouldAppendConversation) {
 			req.io.to(String(updatedCase._id)).emit("receiveMessage", {
 				...safeConversation,

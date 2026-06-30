@@ -228,6 +228,35 @@ const conversationAlreadyEmittedDirectly = (message = {}) =>
 				))
 	);
 
+const changedCaseStatus = (change = {}) => {
+	const updatedFields = change.updateDescription?.updatedFields || {};
+	if (!Object.prototype.hasOwnProperty.call(updatedFields, "caseStatus")) {
+		return "";
+	}
+	return String(updatedFields.caseStatus || "").toLowerCase();
+};
+
+const emitClosedCaseSnapshot = async (caseId) => {
+	if (!caseId) return false;
+	const supportCase = await SupportCase.findById(caseId).lean().exec();
+	if (!supportCase || supportCase.caseStatus !== "closed") return false;
+	const payload = {
+		case: supportCase,
+		caseId,
+		caseStatus: "closed",
+		closedAt: supportCase.closedAt || new Date(),
+		closedBy: supportCase.closedBy || "csr",
+		reason: supportCase.aiHandoffReason || "case_closed",
+	};
+	io.emit("supportCaseUpdated", supportCase);
+	io.emit("closeCase", payload);
+	io.to(caseId).emit("aiPaused", {
+		caseId,
+		reason: payload.reason,
+	});
+	return true;
+};
+
 // Re-broadcast last conversation line whenever a case is updated
 try {
 	if (typeof SupportCase.watch === "function") {
@@ -245,6 +274,10 @@ try {
 				return;
 			}
 			try {
+				if (changedCaseStatus(ch) === "closed") {
+					await emitClosedCaseSnapshot(caseId);
+					return;
+				}
 				const last = await latestConversationFromUpdate(ch, caseId);
 				if (!last || conversationAlreadyEmittedDirectly(last)) return;
 				io.to(caseId).emit("receiveMessage", { ...last, caseId });
