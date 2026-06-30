@@ -19624,6 +19624,71 @@ function liveCurrentGeneralQuestionText(text = "") {
 	return true;
 }
 
+function fastCareAndUnclearBookingReplyText(sc = {}, st = {}, userText = "") {
+	if (!st.hotel) return "";
+	const { lower, arabic, latinCompact } = normalizeControlText(userText);
+	const hasArabic = /[\u0600-\u06FF]/.test(String(userText || ""));
+	const lang = languageOf(sc, st);
+	const replyArabic = /arabic/i.test(lang) || hasArabic;
+	const hotelName = localizedHotelName(sc, st) || "the hotel";
+	const walking = formatHotelDistanceValue(
+		st.hotel?.distances?.walkingToElHaram,
+		lang
+	);
+	const driving = formatHotelDistanceValue(
+		st.hotel?.distances?.drivingToElHaram,
+		lang
+	);
+	const englishDistance =
+		walking || driving
+			? ` It is about ${[walking ? `${walking} on foot` : "", driving ? `${driving} by car` : ""]
+					.filter(Boolean)
+					.join(" and ")} from Al Haram, depending on traffic.`
+			: "";
+	const arabicDistance =
+		walking || driving
+			? ` ويبعد عن الحرم تقريباً ${[
+					walking ? `${walking} مشياً` : "",
+					driving ? `${driving} بالسيارة` : "",
+			  ]
+					.filter(Boolean)
+					.join(" و")} حسب الزحام.`
+			: "";
+	const unclearBooking =
+		/\b(?:book\s*(?:a\s*)?room|reserve|reservation|not\s+sure\s+dates?|no\s+dates?|without\s+dates?|dont\s+give\s+dates?|don't\s+give\s+dates?|what\s+should\s+happen|what\s+do\s+you\s+need|what\s+shuld|still\s+help|can\s+u\s+still\s+help|confused|lost|guide\s+me|qreeb|abgha)\b/i.test(
+			lower
+		) ||
+		/(?:bookroom|not.sure.dates|dontgivedates|withoutdates|whatdoyouneed|whatshouldhappen|canyoustillhelp|abgharoom|qreebharam|roomqreeb)/i.test(
+			latinCompact
+		) ||
+		/(?:ابغى|ابي|عايز|عاوز|احجز|حجز|غرفه|غرفة|قريب|الحرم|مدري|مش\s+عارف|مش\s+فاهم|مو\s+واضح|مش\s+واضح|كلامي\s+ملخبط|كلام\s+مكسر|ناقص|وش\s+تحتاج|وش\s+المطلوب|ايه\s+المطلوب|ابدأ|ابدا)/i.test(
+			arabic
+		);
+	const careConcern =
+		/\b(?:older\s+parents?|old\s+parents?|mother|father|mom|mum|dad|elderly|worried|worry|nervous|stress|stressed|care|taken\s+care|guide\s+me|like\s+a\s+person|online)\b/i.test(
+			lower
+		) ||
+		/(?:olderparents|oldparents|elderly|mother|father|worried|nervous|takencare|likeaperson|bookingonline|abgha)/i.test(
+			latinCompact
+		) ||
+		/(?:امي|أمي|والدتي|والدتى|ابوي|أبوي|والدي|والدى|كبير|كبيرة|كبار|متوتر|متوتره|متوترة|قلقان|خايف|خايفة|طمني|طمنيني|مهتم|اهتمام|اتبهدل|نتبهدل|اونلاين|أونلاين)/i.test(
+			arabic
+		);
+	if (!unclearBooking && !careConcern) return "";
+
+	if (replyArabic) {
+		if (careConcern) {
+			return `أكيد، لا تشيل هم. أنا أتعامل مع كلامك حتى لو كان غير مرتب، وأرشدك خطوة بخطوة. ${hotelName} خيار عملي إذا كان معك كبار بالعمر، ونوضح لك المسافة والتنقل قبل الحجز.${arabicDistance} أرسل لي تاريخ الوصول والمغادرة وعدد النزلاء ونوع الغرفة المناسب، وأنا أراجع المتاح والسعر لك من النظام.`;
+		}
+		return `أكيد، حتى لو الطلب غير واضح أقدر أساعدك خطوة بخطوة. لكي أراجع المتاح والسعر في ${hotelName} أحتاج تاريخ الوصول والمغادرة، عدد النزلاء، ونوع الغرفة أو الميزانية التقريبية.${arabicDistance} بعدها أعطيك الخيار الأنسب بوضوح.`;
+	}
+
+	if (careConcern) {
+		return `No worries at all. I can understand messy wording and guide you step by step like a real reception assistant. ${hotelName} can be a practical option, especially if you want clear guidance before bringing older family members.${englishDistance} Send the check-in date, checkout date, guest count, and preferred room type when ready, and I will check the exact option and price for you.`;
+	}
+	return `Yes, I can still help even if the request is incomplete. To check ${hotelName} correctly, please send the check-in date, checkout date, number of guests, and preferred room type or budget.${englishDistance} Then I will give you the suitable available option and total price clearly.`;
+}
+
 async function answerGeneralContextQuestion(
 	io,
 	sc,
@@ -19639,6 +19704,28 @@ async function answerGeneralContextQuestion(
 	const routingStage = String(routeHints?.routingStage || "")
 		.trim()
 		.toLowerCase();
+	const fastReply = fastCareAndUnclearBookingReplyText(sc, st, userText);
+	if (fastReply) {
+		const sentFast = await humanSend(io, sc, st, fastReply, {
+			scheduleIdle: false,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		if (!sentFast) return false;
+		if (sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber) {
+			st.waitFor = "post_booking_followup";
+		} else {
+			preserveBookingWaitStateForCase(sc, st, previousWaitFor);
+			if (st.hotel && (!st.slots?.checkinISO || !st.slots?.checkoutISO)) {
+				st.waitFor = "dates";
+			}
+			if (!st.waitFor) st.waitFor = previousWaitFor || "clarify";
+		}
+		logStep(String(sc._id), "general_answer.fast_care_unclear_booking", {
+			reason,
+			latestUserMessage: String(userText || "").slice(0, 160),
+		});
+		return true;
+	}
 	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
