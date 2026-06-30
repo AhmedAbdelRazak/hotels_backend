@@ -463,6 +463,32 @@ const publicHotelFactIntentKind = (value = "") => {
 		return "payment";
 	}
 	if (
+		/\b(?:check[-\s]?in|checkout|check[-\s]?out|arrival|departure)\b.{0,80}\b(?:expectations?|times?|policy|rules?|when|early|late)\b/i.test(
+			lower
+		) ||
+		/\b(?:expectations?|times?|policy|rules?|when|early|late)\b.{0,80}\b(?:check[-\s]?in|checkout|check[-\s]?out|arrival|departure)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0647|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u062a\u0634\u064a\u0643\s*\u0627\u0646|\u062a\u0634\u064a\u0643\s*\u0627\u0648\u062a).{0,60}(?:\u0645\u062a\u0649|\u0645\u0648\u0639\u062f|\u0648\u0642\u062a|\u0628\u062f\u0631\u064a|\u0645\u062a\u0627\u062e\u0631)/i.test(
+			arabicIntent
+		)
+	) {
+		return "checkin";
+	}
+	if (
+		/\b(?:change|modify|adjust|edit|amend|move|shift)\b.{0,80}\b(?:date|dates|stay|booking|reservation|chat|later)\b/i.test(
+			lower
+		) ||
+		/\b(?:date|dates|stay|booking|reservation)\b.{0,80}\b(?:change|modify|adjust|edit|amend|move|shift)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u063a\u064a\u0631|\u062a\u063a\u064a\u064a\u0631|\u0627\u0639\u062f\u0644|\u062a\u0639\u062f\u064a\u0644).{0,70}(?:\u0627\u0644\u062a\u0627\u0631\u064a\u062e|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0642\u0627\u0645\u0647|\u0627\u0644\u0627\u0642\u0627\u0645\u0629)/i.test(
+			arabicIntent
+		)
+	) {
+		return "date_change";
+	}
+	if (
 		/\b(?:cancel|cancellation|cancelation|refund|refundable|money\s+back)\b/i.test(
 			lower
 		) ||
@@ -490,6 +516,19 @@ const publicHotelFactIntentKind = (value = "") => {
 		)
 	) {
 		return "distance";
+	}
+	if (
+		/\b(?:family|quintuple|five\s+(?:adult|adults|people|guests)|5\s+(?:adult|adults|people|guests))\b.{0,80}\b(?:room|rooms|available|have|fit|sleep|suitable)\b/i.test(
+			lower
+		) ||
+		/\b(?:room|rooms|available|have|fit|sleep|suitable)\b.{0,80}\b(?:family|quintuple|five\s+(?:adult|adults|people|guests)|5\s+(?:adult|adults|people|guests))\b/i.test(
+			lower
+		) ||
+		/(?:\u063a\u0631\u0641\u0647|\u063a\u0631\u0641\u0629|\u062e\u0645\u0627\u0633\u064a|\u0639\u0627\u0626\u0644\u064a).{0,70}(?:\u062e\u0645\u0633\u0647|\u062e\u0645\u0633\u0629|\u0665|5|\u0628\u0627\u0644\u063a|\u0627\u0634\u062e\u0627\u0635|\u0636\u064a\u0648\u0641)/i.test(
+			arabicIntent
+		)
+	) {
+		return "family_capacity";
 	}
 	if (
 		/\b(?:what|which|show|list|available|options?)\b.{0,60}\b(?:room|rooms|room\s+types?)\b/i.test(
@@ -637,6 +676,21 @@ async function publicSelectedHotelFactReplyText(
 	const hotelName = publicHotelNameForReply(supportCase, hotel || {});
 	if (kind === "payment") {
 		return publicPaymentInfoReplyText(supportCase, hotel || {}, isArabic);
+	}
+	if (kind === "checkin") {
+		return isArabic
+			? `\u064a\u062a\u0645 \u0627\u0644\u062a\u0639\u0627\u0645\u0644 \u0645\u0639 \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 ${hotelName} \u0648\u0627\u0644\u062a\u0648\u0641\u0631. \u0628\u0639\u062f \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u060c \u0623\u0638\u0647\u0631 \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0623\u0648 \u0631\u0627\u0628\u0637 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0644\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u060c \u0648\u0623\u064a \u0648\u0635\u0648\u0644 \u0645\u0628\u0643\u0631 \u0623\u0648 \u0645\u063a\u0627\u062f\u0631\u0629 \u0645\u062a\u0623\u062e\u0631\u0629 \u064a\u0624\u0643\u062f\u0647\u0627 \u0627\u0644\u0641\u0646\u062f\u0642 \u062d\u0633\u0628 \u0627\u0644\u0625\u062a\u0627\u062d\u0629.`
+			: `Check-in and checkout are handled according to ${hotelName}'s policy and availability. After the reservation is created, show the confirmation number or details link at reception; early arrival or late checkout must be confirmed by the hotel based on availability.`;
+	}
+	if (kind === "date_change") {
+		return isArabic
+			? `\u0646\u0639\u0645\u060c \u064a\u0645\u0643\u0646\u0643 \u0637\u0644\u0628 \u062a\u063a\u064a\u064a\u0631 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629. \u0623\u064a \u062a\u0639\u062f\u064a\u0644 \u064a\u0639\u062a\u0645\u062f \u0639\u0644\u0649 \u062a\u0648\u0641\u0631 ${hotelName}\u060c \u0641\u0631\u0642 \u0627\u0644\u0633\u0639\u0631\u060c \u0648\u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0623\u0648 \u0627\u0644\u062a\u063a\u064a\u064a\u0631.`
+			: `Yes, you can ask to change dates from this chat. Any change depends on ${hotelName}'s availability, price differences, and the cancellation or change policy.`;
+	}
+	if (kind === "family_capacity") {
+		return isArabic
+			? `\u0646\u0639\u0645\u060c ${hotelName} \u064a\u062a\u0636\u0645\u0646 \u062e\u064a\u0627\u0631 \u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629 \u0639\u0627\u0626\u0644\u064a\u0629 \u0639\u0646\u062f \u0627\u0644\u062a\u0648\u0641\u0631. \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0644\u062e\u0645\u0633\u0629 \u0628\u0627\u0644\u063a\u064a\u0646 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631.`
+			: `Yes, ${hotelName} has a family quintuple room option for five adults when available. Send the check-in and checkout dates for five adults and I will check the exact price and availability.`;
 	}
 	if (!hotel && kind !== "rooms") return "";
 	if (kind === "rooms") {
@@ -884,7 +938,7 @@ const publicPostBookingCloseText = (text = "") => {
 	}
 	if (!normalized || /[?؟]/.test(normalized)) return false;
 	if (
-		/^(?:thanks|thank you|thx)[\s,]*(?:(?:that'?s|that is)\s+)?all(?:\s+(?:good|set|for now))?[\s.!]*$/i.test(
+		/^(?:thanks|thank you|thx)[\s,]*(?:(?:that'?s|that is)\s+)?all(?:\s+(?:good|set)(?:\s+now)?|\s+for\s+now)?[\s.!]*$/i.test(
 			normalized
 		)
 	) {
