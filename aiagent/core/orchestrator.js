@@ -139,6 +139,10 @@ const AI_PLAN_MEMORY_PER_ACTIVE_MB = intFromEnv(
 	512,
 	{ min: 128, max: 6144 }
 );
+const AI_PRE_WORKER_FAST_PATH_ENABLED = boolFromEnv(
+	"AI_PRE_WORKER_FAST_PATH_ENABLED",
+	false
+);
 const AI_PLAN_LOAD_LIMIT_PERCENT = intFromEnv("AI_PLAN_LOAD_LIMIT_PERCENT", 95, {
 	min: 50,
 	max: 300,
@@ -26341,7 +26345,10 @@ async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }
 		queued: queuedPlanTurns.length,
 		concurrency: planConcurrencySnapshot(),
 	});
-	if (await maybeSendPreWorkerFastPath(io, latestCase, caseId, reason)) {
+	if (
+		AI_PRE_WORKER_FAST_PATH_ENABLED &&
+		(await maybeSendPreWorkerFastPath(io, latestCase, caseId, reason))
+	) {
 		return true;
 	}
 	if (AI_PLAN_USE_WORKER) {
