@@ -91,6 +91,9 @@ const PENDING_NOTIFICATION_CACHE_TTL_MS = Number(
 const PENDING_NOTIFICATION_COUNT_MAX_TIME_MS = Number(
 	process.env.PENDING_NOTIFICATION_COUNT_MAX_TIME_MS || 800
 );
+const PENDING_NOTIFICATION_FIND_MAX_TIME_MS = Number(
+	process.env.PENDING_NOTIFICATION_FIND_MAX_TIME_MS || 3500
+);
 const AI_RESERVATION_INVENTORY_MAX_TIME_MS = Number(
 	process.env.AI_RESERVATION_INVENTORY_MAX_TIME_MS || 2500
 );
@@ -118,6 +121,7 @@ const RESERVATION_DETAILS_HOTEL_SELECT = [
 	"roomCountDetails.monthly",
 ].join(" ");
 const pendingNotificationFeedCache = new Map();
+const pendingNotificationFeedInflight = new Map();
 const INCOMPLETE_EXCLUDED_REGEX = new RegExp(
 	`${CANCELLED_REGEX.source}|${NO_SHOW_REGEX.source}|${CHECKED_OUT_REGEX.source}|house`,
 	"i"
@@ -155,6 +159,35 @@ const boundedCountDocuments = async (
 			message: error?.message || error,
 		});
 		return fallback;
+	}
+};
+
+const boundedPendingNotificationReservations = async (
+	query,
+	{
+		select = PENDING_NOTIFICATION_RESERVATION_SELECT,
+		sort = { updatedAt: -1, createdAt: -1 },
+		limit = 50,
+		label = "pending_notification_find",
+		maxTimeMS = PENDING_NOTIFICATION_FIND_MAX_TIME_MS,
+		populate = null,
+	} = {}
+) => {
+	try {
+		let request = Reservations.find(query)
+			.select(select)
+			.sort(sort)
+			.limit(limit)
+			.maxTimeMS(maxTimeMS)
+			.lean();
+		if (populate) request = request.populate(populate);
+		return await request.exec();
+	} catch (error) {
+		console.warn(`[reservations] ${label} exceeded latency budget`, {
+			maxTimeMS,
+			message: error?.message || error,
+		});
+		return [];
 	}
 };
 
@@ -9441,13 +9474,13 @@ const getOtaPlatformReviewNotificationFeed = async ({
 	}
 	const query = applyPlatformOtaScope(actor, buildPendingOtaReviewFilter());
 	const [rows, total] = await Promise.all([
-		Reservations.find(query)
-			.select(OTA_REVIEW_NOTIFICATION_SELECT)
-			.populate({ path: "hotelId", select: "_id hotelName belongsTo" })
-			.sort({ createdAt: -1 })
-			.limit(limit)
-			.lean()
-			.exec(),
+		boundedPendingNotificationReservations(query, {
+			select: OTA_REVIEW_NOTIFICATION_SELECT,
+			populate: { path: "hotelId", select: "_id hotelName belongsTo" },
+			sort: { createdAt: -1 },
+			limit,
+			label: "ota_platform_review_notification_find",
+		}),
 		boundedCountDocuments(Reservations, query, {
 			fallback: 0,
 			label: "ota_platform_review_notification_count",
@@ -9493,6 +9526,7 @@ const getOtaPlatformReviewNotificationFeed = async ({
 };
 
 exports.pendingConfirmationNotificationFeed = async (req, res) => {
+	let finishPendingNotificationInflight = null;
 	try {
 		const { userId } = req.params;
 		const hotelId = normalizeId(req.query?.hotelId);
@@ -9530,6 +9564,22 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		].join("|");
 		const cached = getShortCache(pendingNotificationFeedCache, cacheKey);
 		if (cached) return res.json(cached);
+		const inflight = pendingNotificationFeedInflight.get(cacheKey);
+		if (inflight) {
+			const payload = await inflight;
+			return res.json(payload);
+		}
+		let resolveInflight;
+		const inflightPromise = new Promise((resolve) => {
+			resolveInflight = resolve;
+		});
+		pendingNotificationFeedInflight.set(cacheKey, inflightPromise);
+		finishPendingNotificationInflight = (payload) => {
+			if (pendingNotificationFeedInflight.get(cacheKey) === inflightPromise) {
+				pendingNotificationFeedInflight.delete(cacheKey);
+			}
+			resolveInflight(payload);
+		};
 		const sendCached = (payload) => {
 			setShortCache(
 				pendingNotificationFeedCache,
@@ -9538,6 +9588,10 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				PENDING_NOTIFICATION_CACHE_TTL_MS,
 				PENDING_NOTIFICATION_CACHE_MAX
 			);
+			if (finishPendingNotificationInflight) {
+				finishPendingNotificationInflight(payload);
+				finishPendingNotificationInflight = null;
+			}
 			return res.json(payload);
 		};
 
@@ -9621,12 +9675,11 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 				],
 			};
 			const [rows, walletClaimFeed, agentAccountFeed] = await Promise.all([
-				Reservations.find(agentDecisionQuery)
-					.select(PENDING_NOTIFICATION_RESERVATION_SELECT)
-					.sort({ updatedAt: -1, createdAt: -1 })
-					.limit(Math.max(limit * 4, 50))
-					.lean()
-					.exec(),
+				boundedPendingNotificationReservations(agentDecisionQuery, {
+					sort: { updatedAt: -1, createdAt: -1 },
+					limit: Math.max(limit * 4, 50),
+					label: "agent_pending_notification_find",
+				}),
 				getAgentWalletClaimNotificationFeed({
 					actor,
 					hotels,
@@ -9855,12 +9908,11 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 		const notificationQueryLimit = Math.min(Math.max(limit * 4, limit), 50);
 		const [rows, agentAccountFeed, walletClaimFeed, otaReviewFeed] =
 			await Promise.all([
-			Reservations.find(query)
-				.select(PENDING_NOTIFICATION_RESERVATION_SELECT)
-				.sort({ updatedAt: -1, booked_at: -1, createdAt: -1 })
-				.limit(notificationQueryLimit)
-				.lean()
-				.exec(),
+			boundedPendingNotificationReservations(query, {
+				sort: { updatedAt: -1, booked_at: -1, createdAt: -1 },
+				limit: notificationQueryLimit,
+				label: "pending_confirmation_notification_find",
+			}),
 			getAgentAccountNotificationFeed({
 				actor,
 				hotels,
@@ -9958,6 +10010,13 @@ exports.pendingConfirmationNotificationFeed = async (req, res) => {
 			data: mergedNotifications,
 		});
 	} catch (error) {
+		if (finishPendingNotificationInflight) {
+			finishPendingNotificationInflight({
+				total: 0,
+				data: [],
+				error: "Notification feed temporarily unavailable.",
+			});
+		}
 		console.error("Error fetching pending confirmation notifications:", error);
 		return res.status(500).json({ error: "Server error: " + error.message });
 	}

@@ -67,6 +67,11 @@ const isLegacyAiAgentEngine = () => {
 	);
 };
 
+const controllerInitialQuickReplyEnabled = () =>
+	String(process.env.AI_CONTROLLER_INITIAL_QUICK_REPLY_ENABLED || "")
+		.trim()
+		.toLowerCase() === "true";
+
 function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
 	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
 		return;
@@ -2724,9 +2729,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					proceedPrompt ||
 					immediateReservationPayload?.message ||
 					immediatePostBookingPayload?.message ||
-					(legacyAiEngine && !proceedPromptCandidate
-						? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
-						: "");
+					"";
 				if (quickReply) {
 					const quickReplyCase = await appendPublicAiQuickReply(
 						req.io,
@@ -2951,6 +2954,8 @@ exports.createNewSupportCase = async (req, res) => {
 			inquiryDetails,
 		});
 		let createdWithImmediateAiReply = false;
+		const allowControllerInitialQuickReply =
+			controllerInitialQuickReplyEnabled();
 		if (openedBy === "client" && cleanInitialClientMessage) {
 			const initialClientEntry = {
 				messageBy: {
@@ -2970,7 +2975,11 @@ exports.createNewSupportCase = async (req, res) => {
 				preferredLanguageCode: preferredLanguageCode || "en",
 			};
 			conversation.push(initialClientEntry);
-			if (aiEnabledForClient && isLegacyAiAgentEngine()) {
+			if (
+				allowControllerInitialQuickReply &&
+				aiEnabledForClient &&
+				isLegacyAiAgentEngine()
+			) {
 				const immediateText = await publicImmediateB2CAiReplyText(
 					{
 						displayName2,
@@ -3011,6 +3020,7 @@ exports.createNewSupportCase = async (req, res) => {
 		if (
 			openedBy === "client" &&
 			aiEnabledForClient &&
+			allowControllerInitialQuickReply &&
 			isLegacyAiAgentEngine() &&
 			!createdWithImmediateAiReply &&
 			!isJannatSupportCase

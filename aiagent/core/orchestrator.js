@@ -8269,6 +8269,174 @@ async function askRoomPreferenceForReservation(
 	return true;
 }
 
+function openAiRoomTaxonomyForPrompt() {
+	return [
+		{
+			roomTypeKey: "doubleRooms",
+			name: "Double Room",
+			meaning:
+				"Room with two beds / twin beds, suitable for two individuals, and can also suit one person.",
+		},
+		{
+			roomTypeKey: "tripleRooms",
+			name: "Triple Room",
+			meaning: "Room suitable for three persons, normally with three beds.",
+		},
+		{
+			roomTypeKey: "quadRooms",
+			name: "Quadruple Room",
+			meaning: "Room suitable for four persons, normally with four beds.",
+		},
+		{
+			roomTypeKey: "familyRooms",
+			name: "Family / Quintuple Room",
+			meaning: "Room suitable for five persons, normally with five beds.",
+		},
+		{
+			roomTypeKey: "singleRooms",
+			name: "Single Room",
+			meaning: "Room suitable for one person when the hotel has this type active.",
+		},
+	];
+}
+
+function compactRoomsForOpenAiIntent(hotel = {}) {
+	return activeHotelRoomSummaries(hotel)
+		.slice(0, 8)
+		.map((room) => ({
+			roomTypeKey: room.roomTypeKey || room.roomType || "",
+			name: room.displayName || room.roomType || "",
+			nameArabic: room.displayName_OtherLanguage || "",
+			bedsCount: room.bedsCount ?? null,
+			basePrice: room.basePrice ?? room.price ?? null,
+		}))
+		.filter((room) => ROOM_TYPE_KEYS.includes(room.roomTypeKey));
+}
+
+async function inferStayIntentWithOpenAi(sc = {}, st = {}, latestText = "", caseId = "") {
+	const message = String(latestText || "").trim();
+	if (!message || !st?.hotel) return null;
+	const sys = [
+		"You are the semantic booking-intent reader for a hotel reception chat.",
+		"OpenAI is responsible for understanding typos, dialects, Arabizi, code-switching, and natural guest wording.",
+		"Do not write a customer-facing reply. Do not calculate prices. Do not ask questions.",
+		"Return compact JSON only.",
+		"Map the guest's intended room type using the room taxonomy and active hotel rooms.",
+		"For new reservations, remember that required booking details are full guest name, phone/WhatsApp number, nationality, adult count, and children count. Email is optional and comes last.",
+		"Also normalize the intended Gregorian/Melady stay dates when the guest wrote dates informally, such as Jul4th to 15th, ١٥ اغسطس الى ١٨ اغسطس, next Friday to Sunday, or mixed-language date text.",
+		"If the year is missing, choose the next future Gregorian/Melady occurrence that matches the guest wording and todayISO.",
+		"If the date range remains unclear after reading the full conversation, leave checkinISO/checkoutISO null and set needsDateClarification=true.",
+		"Double Room means a room with two beds / twin beds, suitable for two individuals, and can also suit one person.",
+		"Triple Room means suitable for 3 persons and normally has 3 beds.",
+		"Quadruple Room means suitable for 4 persons and normally has 4 beds.",
+		"Family/Quintuple Room means suitable for 5 persons and normally has 5 beds.",
+		"If the guest says two beds, twin beds, سريرين, فردين, شخصين, or equivalent, infer doubleRooms unless the conversation clearly says otherwise.",
+		"Example: \"السلام عليكم يا ناديا، كنت عايزة اوضة بسريرين من ١٥ اغسطس ل ١٨ اغسطس بكام\" means roomTypeKey doubleRooms, check-in August 15, checkout August 18, and a price/availability request.",
+		"If room intent is unclear, roomTypeKey must be null.",
+		"Use only the supplied current slots, todayISO, conversation, taxonomy, and compact active room facts. Never expect or require a full calendar.",
+		"JSON shape: { roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', checkinISO:null|string, checkoutISO:null|string, needsDateClarification:boolean, adults:null|number, adultsProvided:boolean, children:null|number, childrenProvided:boolean, readyForPrice:boolean, readyToReserve:boolean, confidence:number, reason:string }",
+	].join(" ");
+	const user = JSON.stringify(
+		{
+			latestGuestMessage: message,
+			language: languageOf(sc, st),
+			todayISO: todayISODate(),
+			currentWaitFor: st.waitFor || "",
+			currentSlots: {
+				checkinISO: st.slots?.checkinISO || null,
+				checkoutISO: st.slots?.checkoutISO || null,
+				roomTypeKey: st.slots?.roomTypeKey || null,
+				adults: st.slots?.adultsProvided ? st.slots.adults : null,
+				children: st.slots?.childrenProvided ? st.slots.children : null,
+			},
+			roomTaxonomy: openAiRoomTaxonomyForPrompt(),
+			activeRooms: compactRoomsForOpenAiIntent(st.hotel),
+			fullConversation: recentConversationLines(sc, st),
+		},
+		null,
+		2
+	);
+	try {
+		const raw = await withSoftTimeout(
+			chat(
+				[
+					{ role: "system", content: sys },
+					{ role: "user", content: user },
+				],
+				{ kind: "nlu", temperature: 0, max_tokens: 220, reasoning_effort: "none" }
+			),
+			3500,
+			""
+		);
+		const inferred = parseJsonObject(raw, null);
+		if (!inferred || typeof inferred !== "object") {
+			logStep(caseId || String(sc._id || ""), "stay_intent.openai_parse_failed", {
+				raw: String(raw || "").slice(0, 300),
+			});
+			return null;
+		}
+		const roomTypeKey = ROOM_TYPE_KEYS.includes(inferred.roomTypeKey)
+			? inferred.roomTypeKey
+			: null;
+		const confidence = Number(inferred.confidence ?? 0);
+		const normalized = {
+			...inferred,
+			roomTypeKey,
+			confidence: Number.isFinite(confidence) ? confidence : 0,
+		};
+		logStep(caseId || String(sc._id || ""), "stay_intent.openai", normalized);
+		return normalized;
+	} catch (error) {
+		logStep(caseId || String(sc._id || ""), "stay_intent.openai_failed", {
+			message: error?.message || error,
+		});
+		return null;
+	}
+}
+
+function applyOpenAiStayIntentToState(st = {}, intent = {}, source = "openai_stay_intent") {
+	if (!st?.slots || !intent || typeof intent !== "object") return false;
+	const before = JSON.stringify(st.slots || {});
+	const inferredCheckin = String(intent.checkinISO || "").slice(0, 10);
+	const inferredCheckout = String(intent.checkoutISO || "").slice(0, 10);
+	if (/^\d{4}-\d{2}-\d{2}$/.test(inferredCheckin)) {
+		st.slots.checkinISO = st.slots.checkinISO || inferredCheckin;
+	}
+	if (/^\d{4}-\d{2}-\d{2}$/.test(inferredCheckout)) {
+		st.slots.checkoutISO = st.slots.checkoutISO || inferredCheckout;
+	}
+	if (
+		/^\d{4}-\d{2}-\d{2}$/.test(inferredCheckin) ||
+		/^\d{4}-\d{2}-\d{2}$/.test(inferredCheckout)
+	) {
+		st.dateRaw = {
+			...(st.dateRaw || {}),
+			calendar: st.dateRaw?.calendar || "gregorian",
+			checkin: st.slots.checkinISO || st.dateRaw?.checkin || null,
+			checkout: st.slots.checkoutISO || st.dateRaw?.checkout || null,
+		};
+	}
+	if (
+		ROOM_TYPE_KEYS.includes(intent.roomTypeKey) &&
+		Number(intent.confidence ?? 0) >= 0.45
+	) {
+		setSingleRoomSelection(st, intent.roomTypeKey, { source });
+	}
+	const adults = reservationDetailCount(intent.adults, { allowZero: false });
+	if (intent.adultsProvided === true && adults !== null) {
+		st.slots.adults = adults;
+		st.slots.adultsProvided = true;
+	}
+	const children = reservationDetailCount(intent.children, { allowZero: true });
+	if (intent.childrenProvided === true && children !== null) {
+		st.slots.children = children;
+		st.slots.childrenProvided = true;
+	} else if (intent.adultsProvided === true && adults !== null) {
+		ensureDefaultChildren(st);
+	}
+	return before !== JSON.stringify(st.slots || {});
+}
+
 function priceOrAvailabilityRequestText(text = "") {
 	const raw = String(text || "").trim();
 	if (!raw) return false;
@@ -8307,6 +8475,26 @@ async function handleDeterministicStayProgress(
 		explicitlyExistingReservationIntent(latestText)
 	) {
 		return false;
+	}
+	const shouldAskOpenAiForStayIntent =
+		priceOrAvailabilityRequestText(latestText) ||
+		wantsNewReservationIntent(latestText, {}) ||
+		st.waitFor === "room" ||
+		st.waitFor === "dates";
+	if (shouldAskOpenAiForStayIntent) {
+		const openAiStayIntent = await inferStayIntentWithOpenAi(
+			sc,
+			st,
+			latestText,
+			caseId
+		);
+		if (openAiStayIntent) {
+			applyOpenAiStayIntentToState(
+				st,
+				openAiStayIntent,
+				`${source}_openai_intent_early`
+			);
+		}
 	}
 	const freshDates = extractDateRange(latestText);
 	if (needsExplicitPastDateClarification(latestText, freshDates)) {
@@ -8352,6 +8540,7 @@ async function handleDeterministicStayProgress(
 		}
 	}
 
+	const asksPriceOrAvailabilityEarly = priceOrAvailabilityRequestText(latestText);
 	const explicitRoomTypeKey = mapRoomToKey(latestText);
 	if (explicitRoomTypeKey) {
 		const selections = extractRoomSelectionsFromText(latestText);
@@ -8367,7 +8556,7 @@ async function handleDeterministicStayProgress(
 	rememberRequestedRoomCountFromText(sc, st, latestText, `${source}_latest_room_count`);
 
 	const hasCompleteDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
-	const asksPriceOrAvailability = priceOrAvailabilityRequestText(latestText);
+	const asksPriceOrAvailability = asksPriceOrAvailabilityEarly;
 	const bookingWait =
 		["dates", "room", "clarify", "intentConfirm"].includes(st.waitFor) ||
 		isNewReservationFlowActive(st);
@@ -14765,11 +14954,18 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Accuracy and answering the guest's exact question matter more than speed; it is acceptable to take a few extra seconds to use verified context and employee learning examples properly.`,
 		`Do not sound like a form, script, or checklist. Vary the wording naturally while keeping the facts accurate.`,
 		`If the guest asks a direct factual question, answer it first. Do not ask for dates, phone, email, or confirmation before answering the direct question unless answering is impossible without that missing fact.`,
+		`Action boundary: you are the human-sounding CSR/writer. The backend orchestrator is the only part allowed to create reservations, update reservations, calculate live prices, render final review buttons, send payment links, close cases, or escalate cases. If the guest is ready to reserve, ask naturally for missing details or say you will prepare the review; do not claim the reservation is created until tool/backend context says it is confirmed.`,
+		`New reservation memory: when the guest provides stay dates, room type, guest count, name, phone, nationality, or email, treat those as remembered current-booking details from Context JSON/current slots. Do not ask for a detail already supplied unless it is contradictory or unclear. For a new reservation, the required details are full guest name, phone/WhatsApp number, nationality, adult count, and children count. Email is optional and should be requested only after required details are present, with a natural option to skip.`,
+		`Example semantic memory: if the guest says "السلام عليكم يا ناديا، كنت عايزة اوضة بسريرين من ١٥ اغسطس ل ١٨ اغسطس بكام", understand this as a Double Room/two-bed room request with check-in 15 August and checkout 18 August in Gregorian/Melady date format. Keep that in the current booking context and move toward quote/reservation instead of asking what room type they prefer.`,
+		`Operational action cues for your wording: angry, abusive, disrespectful, unsafe, or trust-losing guest turns should be answered calmly and briefly so a human can take over; ready-to-book turns should move toward the final review; requests to see reservation details again should acknowledge that the review/details can be shown again. Do not expose these internal action names to the guest.`,
+		`Language switching rule: if the latest guest message clearly changes language or dialect, follow that latest language naturally. Stay close to the guest's style/dialect while correcting typos silently and professionally. Never tell the guest their text had typos or that you sanitized it.`,
+		`Compact-context rule: use only the hotel facts, current reservation state, quote, room candidates, and relevant requested date rows supplied in Context JSON. Never ask for, expect, mention, or reason over a full hotel calendar inside the model prompt.`,
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
 			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, hasMealsService, mealsDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, meals/breakfast/restaurant, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
 			: "",
+		`Room taxonomy: Double Room means a room with two beds/twin beds, suitable for two individuals and also possible for one person; Triple Room fits 3 persons/3 beds; Quadruple Room fits 4 persons/4 beds; Family or Quintuple Room fits 5 persons/5 beds. Use this taxonomy semantically across languages and dialects, not as a script to paste.`,
 		activeHotelFacts?.googleMapsLocationUrl
 			? `If the guest asks for the selected hotel's location, address, map, or to send the location, include this exact markdown link in the reply after the address/location answer: [Hotel location on Google Maps](${activeHotelFacts.googleMapsLocationUrl}). This URL uses the hotel's exact stored coordinates. Use activeHotelFacts.googleMapsDrivingDirectionsUrl only when the guest explicitly asks for a route or directions to Al Haram. Do not invent or rewrite map coordinates.`
 			: "",
@@ -15241,6 +15437,9 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Choose general_answer when selected hotel facts, platform facts, database context, or employee learning examples contain a verified safe answer to the latest broad/general question, and no booking flow step should be forced.",
 		"Choose general_answer when the guest asks a broad, general, or off-topic question that is not part of the booking planner. The writer will answer using verified context or safe general knowledge, and will avoid guessing live/current data.",
 		"Choose support_email only for a hard scope boundary or unsupported platform/hotel request that must not be answered from general knowledge. The customer-facing reply must not send the guest away or mention email unless the latest guest explicitly asks for email.",
+		"Internal action mapping: human_escalation means Escalate; continue_booking with all required details or review intent means Send Review & Button; continue_booking while a review is already active and the guest asks to see/check details again means Send Review Again. Return only the existing action enum, not these labels.",
+		"If the guest is angry, abusive, disrespectful, says the bot is not understanding, says they are upset with the experience, or trust appears to be failing, choose human_escalation unless the message is a simple correction that can be safely answered immediately.",
+		"If the guest asks to move forward, continue, book it, reserve it, confirm details, or review the booking, choose continue_booking and routingStage:'reservation_review' when the quote/reservation state is ready; if details are missing, keep continue_booking with routingStage:'reservation_details'.",
 		"Text inside parentheses in the guest message is meaningful and must be considered when choosing the action.",
 		"Do not choose human_escalation only because a normal question was repeated once or twice; keep answering safely and patiently. The deterministic three-repeat guard handles unresolved repeated questions.",
 		"Choose reservation_cancellation for cancellation/refund policy questions or cancellation requests so the deterministic policy handler can answer directly from verified hotel policy. Choose human_escalation only when the same support case must be taken over by a human specialist, such as complaints, abuse, safety issues, sensitive payment/reservation mutations, or anything that should not be handled by email-only guidance.",
@@ -19777,28 +19976,7 @@ async function answerGeneralContextQuestion(
 	const routingStage = String(routeHints?.routingStage || "")
 		.trim()
 		.toLowerCase();
-	const fastReply = fastCareAndUnclearBookingReplyText(sc, st, userText);
-	if (fastReply) {
-		const sentFast = await humanSend(io, sc, st, fastReply, {
-			scheduleIdle: false,
-			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
-		});
-		if (!sentFast) return false;
-		if (sc.aiReservation?.status === "created" || sc.aiReservation?.confirmationNumber) {
-			st.waitFor = "post_booking_followup";
-		} else {
-			preserveBookingWaitStateForCase(sc, st, previousWaitFor);
-			if (st.hotel && (!st.slots?.checkinISO || !st.slots?.checkoutISO)) {
-				st.waitFor = "dates";
-			}
-			if (!st.waitFor) st.waitFor = previousWaitFor || "clarify";
-		}
-		logStep(String(sc._id), "general_answer.fast_care_unclear_booking", {
-			reason,
-			latestUserMessage: String(userText || "").slice(0, 160),
-		});
-		return true;
-	}
+	const staticCareFallback = fastCareAndUnclearBookingReplyText(sc, st, userText);
 	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
@@ -19823,7 +20001,7 @@ async function answerGeneralContextQuestion(
 			unknownAnswerNextStep: unsupportedAnswerNextStepText(sc, st),
 		},
 		{
-			fallbackText: fallback,
+			fallbackText: staticCareFallback || fallback,
 			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
 			scheduleIdle: false,
 		}
@@ -22201,6 +22379,56 @@ async function planTurn(io, sc) {
 			);
 			if (handledEarlyQuote) return;
 		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			(priceOrAvailabilityRequestText(userText) ||
+				concreteStayDateProgressText(userText) ||
+				wantsNewReservationIntent(userText, {}))
+		) {
+			const clearRoomTypeKey = mapRoomToKey(userText);
+			const clearDates = extractDateRange(userText);
+			if (clearRoomTypeKey && clearDates?.checkinISO && clearDates?.checkoutISO) {
+				setSingleRoomSelection(st, clearRoomTypeKey, {
+					source: "pre_hydrate_clear_stay_room_type",
+				});
+				const dateMerge = await mergeDateRangeWithChangeGuard(
+					io,
+					sc,
+					st,
+					clearDates,
+					{ source: "pre_hydrate_clear_stay_dates", userText }
+				);
+				if (dateMerge.prompted) return;
+			} else {
+				const openAiStayIntent = await inferStayIntentWithOpenAi(
+					sc,
+					st,
+					userText,
+					caseId
+				);
+				if (openAiStayIntent) {
+					applyOpenAiStayIntentToState(
+						st,
+						openAiStayIntent,
+						"pre_hydrate_openai_intent"
+					);
+				}
+			}
+			if (st.slots?.roomTypeKey && st.slots?.checkinISO && st.slots?.checkoutISO) {
+				logStep(caseId, "quote.pre_hydrate_openai_intent", {
+					roomTypeKey: st.slots.roomTypeKey,
+					checkinISO: st.slots.checkinISO,
+					checkoutISO: st.slots.checkoutISO,
+				});
+				await shareKnownStayQuote(io, sc, st, { skipRoomSignalGuard: true });
+				return;
+			}
+		}
 		const earlySingleStayDate = userText ? extractSingleStayDate(userText, st) : null;
 		if (
 			userText &&
@@ -22550,6 +22778,35 @@ async function planTurn(io, sc) {
 			selectedHotelRoomQuestionText(userText) &&
 			!latestTextHasBookableRoomSelection(userText, st)
 		) {
+			const firstTurnRoomTypeKey = mapRoomToKey(userText);
+			const firstTurnDates = extractDateRange(userText);
+			if (
+				firstTurnRoomTypeKey &&
+				firstTurnDates?.checkinISO &&
+				firstTurnDates?.checkoutISO &&
+				(repeatPriceQuestionText(userText) ||
+					priceOrAvailabilityRequestText(userText) ||
+					wantsNewReservationIntent(userText, {}))
+			) {
+				setSingleRoomSelection(st, firstTurnRoomTypeKey, {
+					source: "selected_room_fast_quote_room_type",
+				});
+				const dateMerge = await mergeDateRangeWithChangeGuard(
+					io,
+					sc,
+					st,
+					firstTurnDates,
+					{ source: "selected_room_fast_quote_dates", userText }
+				);
+				if (dateMerge.prompted) return;
+				logStep(caseId, "selected_hotel.room_first_turn_quote", {
+					roomTypeKey: st.slots.roomTypeKey,
+					checkinISO: st.slots.checkinISO,
+					checkoutISO: st.slots.checkoutISO,
+				});
+				await shareKnownStayQuote(io, sc, st, { skipRoomSignalGuard: true });
+				return;
+			}
 			logStep(caseId, "selected_hotel.room_first_turn_fast", {
 				latestUserMessage: String(userText || "").slice(0, 160),
 			});
@@ -23563,6 +23820,12 @@ async function planTurn(io, sc) {
 			);
 			if (handled) return;
 		}
+		const preDirectRoomTypeKey = mapRoomToKey(userText);
+		if (st.hotel && preDirectRoomTypeKey) {
+			setSingleRoomSelection(st, preDirectRoomTypeKey, {
+				source: "pre_direct_room_type",
+			});
+		}
 		const quickTurnDates = extractDateRange(userText);
 		if (needsExplicitPastDateClarification(userText, quickTurnDates)) {
 			await askExplicitPastDateClarification(io, sc, st, userText, quickTurnDates);
@@ -23589,6 +23852,26 @@ async function planTurn(io, sc) {
 				waitFor: st.waitFor || "",
 				roomTypeKey: st.slots.roomTypeKey || null,
 			});
+		}
+		if (
+			st.hotel &&
+			st.slots?.roomTypeKey &&
+			st.slots?.checkinISO &&
+			st.slots?.checkoutISO &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			(priceOrAvailabilityRequestText(userText) ||
+				wantsNewReservationIntent(userText, {}) ||
+				concreteStayDateProgressText(userText))
+		) {
+			logStep(caseId, "quote.before_direct_request_guard", {
+				roomTypeKey: st.slots.roomTypeKey,
+				checkinISO: st.slots.checkinISO,
+				checkoutISO: st.slots.checkoutISO,
+			});
+			await shareKnownStayQuote(io, sc, st, { skipRoomSignalGuard: true });
+			return;
 		}
 		const directRequestHandled = await tryAnswerDirectGuestRequest(
 			io,
@@ -23724,8 +24007,13 @@ async function planTurn(io, sc) {
 			return;
 		}
 
-		// Legacy greeting branch is skipped after the first real customer turn.
-		if (!st.greeted && !st.greetScheduled) {
+		// Keep the first greeting warm, but do not bury a real first-turn request.
+		const firstTurnHasConcreteIntent =
+			hasConcreteFirstTurnBookingSignal(userText) ||
+			wantsNewReservationIntent(userText, {}) ||
+			selectedHotelBroadInquiryText(userText, st) ||
+			wantsPriceButMissingDates(userText, st);
+		if (!st.greeted && !st.greetScheduled && !firstTurnHasConcreteIntent) {
 			st.greetScheduled = true;
 			st.waitFor = "intentConfirm";
 			const greetOwner = st.hotel?.hotelName
