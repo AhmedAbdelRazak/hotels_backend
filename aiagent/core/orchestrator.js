@@ -25458,7 +25458,11 @@ function drainPlanTurnQueue() {
 function queuePlanTurnExecution(io, caseId, { reason = "scheduled" } = {}) {
 	const key = idText(caseId);
 	if (!io || !key) return false;
+	if (activePlanCaseIds.has(key)) {
+		scheduleActiveFastCareProbe(io, key, `active_${reason}`);
+	}
 	if (queuedPlanCaseIds.has(key)) {
+		scheduleActiveFastCareProbe(io, key, `queued_${reason}`);
 		logStep(key, "turn.global_queue.dedupe", {
 			reason,
 			active: activePlanTurnCount,
@@ -25897,6 +25901,69 @@ async function runUnansweredTurnRecovery(io, caseId) {
 	return true;
 }
 
+async function maybeSendActiveFastCareReply(io, caseId, reason = "") {
+	const key = idText(caseId);
+	if (!io || !key) return false;
+	const latestCase = await getSupportCaseById(key).catch(() => null);
+	if (!latestCase || !latestGuestNeedsAiReply(latestCase)) return false;
+	const latestGuest = lastGuestMessage(latestCase);
+	const userText = String(latestGuest?.message || lastUserText(latestCase) || "").trim();
+	if (!userText) return false;
+	const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+	if (!policy.allowed) return false;
+	const policyHotel = policy.hotel || (await getHotelById(latestCase.hotelId));
+	const st = ensureState(latestCase, activeHotelContextForCase(latestCase, policyHotel));
+	recoverBookingContextFromConversation(latestCase, st, {
+		protectLatestGuestDateChange: true,
+		reason: `active_fast_care_${reason}`,
+	});
+	if (
+		!st.hotel ||
+		severeAbusiveGuestText(userText) ||
+		humanHandoffReason(userText) ||
+		wantsPaymentHelp(userText) ||
+		explicitlyExistingReservationIntent(userText) ||
+		!fastCareAndUnclearBookingReplyText(latestCase, st, userText)
+	) {
+		return false;
+	}
+	updateActiveLanguageFromText(latestCase, st, userText);
+	const handled = await answerGeneralContextQuestion(
+		io,
+		latestCase,
+		st,
+		userText,
+		`active_fast_care_${reason}`,
+		{
+			action: "other",
+			scope: "selected_hotel",
+			routingStage: "reservation_start",
+			keywords: ["care", "unclear_booking"],
+		}
+	);
+	if (!handled) return false;
+	await persistAiStateSnapshot(key, latestCase, st);
+	logStep(key, "turn.active_fast_care_sent", {
+		reason,
+		waitFor: st.waitFor || "",
+	});
+	return true;
+}
+
+function scheduleActiveFastCareProbe(io, caseId, reason = "") {
+	const key = idText(caseId);
+	if (!io || !key) return;
+	const timer = setTimeout(() => {
+		maybeSendActiveFastCareReply(io, key, reason).catch((error) => {
+			logStep(key, "turn.active_fast_care_failed", {
+				reason,
+				message: error?.message || error,
+			});
+		});
+	}, 125);
+	if (typeof timer.unref === "function") timer.unref();
+}
+
 function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const caseId = idText(caseOrId);
 	if (!io || !caseId) return false;
@@ -25970,6 +26037,7 @@ function wireLegacySocket(io) {
 				markGuestActivity(caseId);
 				const st = memo.get(caseId);
 				if (st && st.turnInFlight) {
+					scheduleActiveFastCareProbe(io, caseId, "socket_in_flight");
 					if (st.queue.length < 1) st.queue.push(now());
 					st.interrupt = true;
 					logStep(caseId, "turn.enqueue", {
