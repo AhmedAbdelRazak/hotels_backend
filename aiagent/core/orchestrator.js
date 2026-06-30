@@ -20835,7 +20835,12 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 		const selectedHotelStart = Boolean(
 			st.hotel && selectedHotelBroadInquiryText(userText, st)
 		);
-		if (!clearCasualTurn && !selectedHotelStart) return false;
+		const selectedHotelBookingTurn = Boolean(
+			st.hotel && hasOperationalBookingSignal(userText)
+		);
+		if (!clearCasualTurn && !selectedHotelStart && !selectedHotelBookingTurn) {
+			return false;
+		}
 		const sent = await sendBoundedUnansweredTurnFallback(
 			io,
 			latestCase,
@@ -20849,6 +20854,7 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 				reason,
 				clearCasualTurn,
 				selectedHotelStart,
+				selectedHotelBookingTurn,
 			});
 		}
 		return sent;
