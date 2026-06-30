@@ -1100,6 +1100,48 @@ const assignedHotelIdsFromUser = (user = {}) =>
 		.map(normalizeId)
 		.filter((id, index, arr) => id && arr.indexOf(id) === index);
 
+const loadSupportCaseActor = async (req = {}) => {
+	if (req.profile) return req.profile;
+	const authId = normalizeId(req.auth?._id || req.auth?.id);
+	if (!authId || !ObjectId.isValid(authId)) return null;
+	const actor = await User.findById(authId)
+		.select(
+			"_id role roles roleDescription roleDescriptions activeUser accessTo hotelIdWork hotelIdsWork hotelsToSupport hotelIdsOwner belongsToId accountScope platformEmployee"
+		)
+		.lean()
+		.exec();
+	if (actor) req.profile = actor;
+	return actor;
+};
+
+const canAccessHotelSupportScope = async (req = {}, hotelId = "") => {
+	const normalizedHotelId = normalizeId(hotelId);
+	if (!ObjectId.isValid(normalizedHotelId)) return false;
+	const actor = await loadSupportCaseActor(req);
+	if (!actor || actor.activeUser === false) return false;
+	if (isConfiguredSuperAdmin(actor)) return true;
+	if (assignedHotelIdsFromUser(actor).includes(normalizedHotelId)) return true;
+	const hotel = await HotelDetails.findById(normalizedHotelId)
+		.select("_id belongsTo")
+		.lean()
+		.exec();
+	return normalizeId(hotel?.belongsTo) === normalizeId(actor._id);
+};
+
+const grantRequestHotelScope = (req = {}, hotelId = "") => {
+	const normalizedHotelId = normalizeId(hotelId);
+	if (!req.profile || !normalizedHotelId) return;
+	req.profile = {
+		...(req.profile.toObject ? req.profile.toObject() : req.profile),
+		hotelsToSupport: [
+			...(Array.isArray(req.profile.hotelsToSupport)
+				? req.profile.hotelsToSupport
+				: []),
+			normalizedHotelId,
+		],
+	};
+};
+
 const SUPPORT_CHAT_ROLES = [2000, 3000, 4000, 5000, 6000, 8000, 10000];
 const SUPPORT_CHAT_ROLE_KEYS = new Set([
 	"hotelmanager",
@@ -3087,6 +3129,89 @@ exports.getOpenSupportCasesForHotel = async (req, res) => {
 		res.status(200).json(normalizeSupportCasesForResponse(cases));
 	} catch (error) {
 		// Handle any errors that occur during the query
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.getOpenSupportCasesForHotelClients = async (req, res) => {
+	try {
+		const { hotelId } = req.params;
+		if (!mongoose.Types.ObjectId.isValid(hotelId)) {
+			return res.status(400).json({ error: "Invalid hotel ID" });
+		}
+		if (!(await canAccessHotelSupportScope(req, hotelId))) {
+			return res.status(403).json({ error: "Hotel support access denied" });
+		}
+		grantRequestHotelScope(req, hotelId);
+		const cases = await SupportCase.find({
+			caseStatus: "open",
+			openedBy: { $in: ["client"] },
+			hotelId: mongoose.Types.ObjectId(hotelId),
+		})
+			.sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+			.populate("supporterId")
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
+			.lean()
+			.exec();
+		const enrichedCases = await enrichClientSupportCases(cases, req);
+		res.status(200).json(compactClientSupportCasesForList(enrichedCases, req));
+	} catch (error) {
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.getSupportCaseForHotelById = async (req, res) => {
+	try {
+		const { hotelId, id } = req.params;
+		if (
+			!mongoose.Types.ObjectId.isValid(hotelId) ||
+			!mongoose.Types.ObjectId.isValid(id)
+		) {
+			return res.status(400).json({ error: "Invalid support case scope" });
+		}
+		if (!(await canAccessHotelSupportScope(req, hotelId))) {
+			return res.status(403).json({ error: "Hotel support access denied" });
+		}
+		const supportCase = await SupportCase.findOne({
+			_id: mongoose.Types.ObjectId(id),
+			hotelId: mongoose.Types.ObjectId(hotelId),
+		})
+			.populate("supporterId")
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
+		if (!supportCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+		res.status(200).json(normalizeSupportCaseForResponse(supportCase));
+	} catch (error) {
+		res.status(400).json({ error: error.message });
+	}
+};
+
+exports.updateSupportCaseForHotel = async (req, res) => {
+	try {
+		const { hotelId, id } = req.params;
+		if (
+			!mongoose.Types.ObjectId.isValid(hotelId) ||
+			!mongoose.Types.ObjectId.isValid(id)
+		) {
+			return res.status(400).json({ error: "Invalid support case scope" });
+		}
+		if (!(await canAccessHotelSupportScope(req, hotelId))) {
+			return res.status(403).json({ error: "Hotel support access denied" });
+		}
+		const currentCase = await SupportCase.findOne({
+			_id: mongoose.Types.ObjectId(id),
+			hotelId: mongoose.Types.ObjectId(hotelId),
+		})
+			.select("_id")
+			.lean()
+			.exec();
+		if (!currentCase) {
+			return res.status(404).json({ error: "Support case not found" });
+		}
+		grantRequestHotelScope(req, hotelId);
+		return exports.updateSupportCase(req, res);
+	} catch (error) {
 		res.status(400).json({ error: error.message });
 	}
 };

@@ -63,6 +63,25 @@ router.get(
 );
 
 router.get(
+	"/support-cases-hotels-clients/active/:hotelId",
+	requireSignin,
+	supportCaseController.getOpenSupportCasesForHotelClients
+);
+
+router.get(
+	"/support-cases-hotels/detail/:hotelId/:id",
+	requireSignin,
+	supportCaseController.getSupportCaseForHotelById
+);
+
+router.put(
+	"/support-cases-hotels/detail/:hotelId/:id",
+	requireSignin,
+	attachIo,
+	supportCaseController.updateSupportCaseForHotel
+);
+
+router.get(
 	"/support-cases/closed",
 	...customerServiceAccess,
 	supportCaseController.getCloseSupportCases
