@@ -380,6 +380,32 @@ const publicProceedAfterQuoteReplyText = (supportCase = {}, latestEntry = {}) =>
 	return "Great. Please send the booking details in one message: full name, nationality, phone number, and the number of adults and children if any.";
 };
 
+const publicMaybeEmailSkipText = (latestEntry = {}) => {
+	const action = normalizeQuickReplyAction(latestEntry?.clientAction).toLowerCase();
+	if (action === "skip_email") return true;
+	const text = cleanText(latestEntry?.message, 240).toLowerCase();
+	return /\b(?:skip|skip email|no email|without email|continue without email|omit|later|no thanks)\b/i.test(
+		text
+	) || /(?:\u062a\u062e\u0637\u064a|\u062a\u062e\u0637\u0649|\u0628\u062f\u0648\u0646\s+(?:\u0628\u0631\u064a\u062f|\u0627\u064a\u0645\u064a\u0644|\u0625\u064a\u0645\u064a\u0644))/i.test(
+		latestEntry?.message || ""
+	);
+};
+
+const publicMaybeReservationDetailsPayloadText = (latestEntry = {}) => {
+	const text = cleanText(latestEntry?.message, 1200);
+	if (!text) return false;
+	const lower = text.toLowerCase();
+	const hasFieldLabel =
+		/\b(?:full\s*name|guest\s*name|name|nationality|country|phone|mobile|whatsapp|adults?|children|kids?|guests?|people|persons?|pax)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/i.test(
+			text
+		);
+	const hasPhone = /\+?\d[\d\s().-]{6,}\d/.test(text);
+	return hasFieldLabel || hasPhone;
+};
+
 const publicHasArabicText = (supportCase = {}, latestEntry = {}) => {
 	const text = cleanText(latestEntry?.message, 8000);
 	const lang = String(
@@ -2212,10 +2238,17 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					);
 				}
 			}
+			const maybeEmailSkip = publicMaybeEmailSkipText(safeConversation);
+			const maybeReservationDetails =
+				!maybeEmailSkip && publicMaybeReservationDetailsPayloadText(safeConversation);
 			const immediateReservationPayload =
-				legacyAiEngine && !immediateQuote?.message && !proceedPromptCandidate
-					? (await buildImmediateSkipEmailReviewReply(updatedCase._id)) ||
-					  (await buildImmediateReservationDetailsReply(updatedCase._id))
+				legacyAiEngine &&
+				!immediateQuote?.message &&
+				!proceedPromptCandidate &&
+				(maybeEmailSkip || maybeReservationDetails)
+					? maybeEmailSkip
+						? await buildImmediateSkipEmailReviewReply(updatedCase._id)
+						: await buildImmediateReservationDetailsReply(updatedCase._id)
 					: null;
 			const quickReply =
 				immediateQuote?.message ||

@@ -21139,21 +21139,27 @@ async function buildImmediateReservationDetailsReply(caseOrId) {
 		if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return null;
 		const latestGuest = lastGuestMessage(sc);
 		const userText = String(latestGuest?.message || "").trim();
-		if (!userText || severeAbusiveGuestText(userText) || humanHandoffReason(userText)) {
+		if (
+			!userText ||
+			!reservationDetailFieldPayloadText(userText) ||
+			severeAbusiveGuestText(userText) ||
+			humanHandoffReason(userText)
+		) {
 			return null;
 		}
 		const policy = await ensureAIAllowed(sc.hotelId, sc);
 		if (!policy.allowed) return null;
 		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
-		recoverBookingContextFromConversation(sc, st, {
-			protectLatestGuestDateChange: true,
-			reason: "controller_immediate_reservation_details",
-		});
+		if (!reservationDetailContextReady(st) || !st.quote?.data?.available) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "controller_immediate_reservation_details",
+			});
+		}
 		if (
 			!isReservationDetailStep(st) ||
-			st.waitFor === "email_or_skip" ||
-			!reservationDetailFieldPayloadText(userText)
+			st.waitFor === "email_or_skip"
 		) {
 			return null;
 		}
@@ -21231,10 +21237,12 @@ async function buildImmediateSkipEmailReviewReply(caseOrId) {
 		if (!policy.allowed) return null;
 		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
 		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
-		recoverBookingContextFromConversation(sc, st, {
-			protectLatestGuestDateChange: true,
-			reason: "controller_immediate_skip_email",
-		});
+		if (!reservationDetailContextReady(st) || !st.quote?.data?.available) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "controller_immediate_skip_email",
+			});
+		}
 		if (st.waitFor !== "email_or_skip" && !assistantMessageSuggestsEmailOrSkip(previousAi)) {
 			return null;
 		}
