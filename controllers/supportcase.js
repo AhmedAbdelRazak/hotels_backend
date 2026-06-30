@@ -12,7 +12,12 @@ const {
 const {
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
+	tryImmediateB2CFastPath,
 } = require("../aiagent/core/orchestrator");
+const {
+	activeHotelPolicyQA,
+	DEFAULT_CANCELLATION_REFUND_ANSWER,
+} = require("../services/hotelPolicyQa");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -35,6 +40,8 @@ const supportCaseEmail = twilio(
 const normalizeId = (value) => String(value?._id || value?.id || value || "").trim();
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances hasBusService busDetails hasMealsService mealsDetails isNusuk isNusukText hotelPolicyQA";
+const PUBLIC_AI_HOTEL_FACT_SELECT =
+	"_id hotelName hotelName_OtherLanguage aiToRespond distances hasBusService busDetails isNusuk isNusukText hotelPolicyQA roomCountDetails.roomType roomCountDetails.displayName roomCountDetails.displayName_OtherLanguage roomCountDetails.activeRoom roomCountDetails.bedsCount roomCountDetails.price.basePrice";
 const PUBLIC_CLIENT_SUPPORT_CASE_SELECT =
 	"_id createdAt updatedAt closedAt rating closedBy supporterId ownerId hotelId targetUserId targetUserName targetUserRole caseStatus openedBy conversation displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiToRespond aiResponderName aiPausedAt aiHandoffReason aiReservation escalationStatus escalationReason";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
@@ -325,6 +332,290 @@ const publicHotelTrustQuickReplyText = (supportCase = {}, latestEntry = {}) => {
 	return `Yes, you are chatting with ${hotelName} reception and reservations through Jannat Booking. I am here to help.`;
 };
 
+const publicHasArabicText = (supportCase = {}, latestEntry = {}) => {
+	const text = cleanText(latestEntry?.message, 8000);
+	const lang = String(
+		latestEntry?.preferredLanguage ||
+			supportCase.preferredLanguage ||
+			supportCase.preferredLanguageCode ||
+			""
+	).toLowerCase();
+	return /[\u0600-\u06ff]/.test(text) || /arabic|\bar\b/.test(lang);
+};
+
+const publicHotelFactIntentKind = (value = "") => {
+	const raw = String(value || "").trim();
+	if (!raw) return "";
+	const lower = raw.toLowerCase();
+	const compact = compactPublicChatText(raw);
+	if (
+		/\bnusuk\b/i.test(lower) ||
+		/(?:\u0646\u0633\u0643)/i.test(raw)
+	) {
+		return "nusuk";
+	}
+	if (
+		/\b(?:bus|shuttle|transport|transfer|pickup|drop(?:\s*off)?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0628\u0627\u0635|\u062d\u0627\u0641\u0644|\u062d\u0627\u0641\u0644\u0629|\u0627\u062a\u0648\u0628\u064a\u0633|\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a)/i.test(
+			raw
+		)
+	) {
+		return "bus";
+	}
+	if (
+		/\b(?:payment|pay|paid|deposit|prepay|prepayment|payment\s*link|card|mada|invoice|partial|small\s+deposit)\b/i.test(
+			lower
+		) ||
+		/(?:\u062f\u0641\u0639|\u0627\u0644\u062f\u0641\u0639|\u0639\u0631\u0628\u0648\u0646|\u062f\u064a\u0628\u0648\u0632\u062a|\u0631\u0627\u0628\u0637|\u0628\u0637\u0627\u0642\u0629|\u0641\u0627\u062a\u0648\u0631\u0629|\u062c\u0632\u0626\u064a)/i.test(
+			raw
+		)
+	) {
+		return "payment";
+	}
+	if (
+		/\b(?:cancel|cancellation|cancelation|refund|refundable|money\s+back)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u0627|\u0643\u0627\u0646\u0633\u0644|\u0627\u0633\u062a\u0631\u062c\u0627\u0639|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0631\u062f\s+\u0627\u0644\u0645\u0628\u0644\u063a)/i.test(
+			raw
+		)
+	) {
+		return "cancellation";
+	}
+	if (
+		/\b(?:how\s+far|distance|far|near|close|walk|walking|minutes?)\b.{0,80}\b(?:haram|al\s*haram|kaaba|masjid)\b/i.test(
+			lower
+		) ||
+		/\b(?:haram|al\s*haram|kaaba|masjid)\b.{0,80}\b(?:how\s+far|distance|far|near|close|walk|walking|minutes?)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0644\u062d\u0631\u0645|\u0627\u0644\u0643\u0639\u0628\u0629|\u0627\u0644\u0645\u0633\u062c\u062f).{0,40}(?:\u0643\u0645|\u0628\u0639\u064a\u062f|\u0642\u0631\u064a\u0628|\u0645\u0634\u064a|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u064a\u0642)/i.test(
+			raw
+		) ||
+		/(?:\u0643\u0645|\u0628\u0639\u064a\u062f|\u0642\u0631\u064a\u0628|\u0645\u0634\u064a|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u064a\u0642).{0,40}(?:\u0627\u0644\u062d\u0631\u0645|\u0627\u0644\u0643\u0639\u0628\u0629|\u0627\u0644\u0645\u0633\u062c\u062f)/i.test(
+			raw
+		)
+	) {
+		return "distance";
+	}
+	if (
+		/\b(?:what|which|show|list|available|options?)\b.{0,60}\b(?:room|rooms|room\s+types?)\b/i.test(
+			lower
+		) ||
+		/\b(?:room|rooms)\b.{0,40}\b(?:types?|options?|available)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0646\u0648\u0627\u0639\u0627\u0644\u063a\u0631\u0641|\u0627\u0646\u0648\u0627\u0639\u063a\u0631\u0641|\u0627\u064a\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641\u0627\u0644\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u063a\u0631\u0641\u0627\u0644\u0645\u062a\u0648\u0641\u0631\u0647|\u0627\u064a\u0647\u0627\u0646\u0648\u0627\u0639\u0627\u0644\u063a\u0631\u0641)/i.test(
+			compact
+		)
+	) {
+		return "rooms";
+	}
+	return "";
+};
+
+const cleanPublicHotelFact = (value = "", max = 1200) =>
+	cleanText(value, max).replace(/\s+/g, " ").trim();
+
+const publicHotelNameForReply = (supportCase = {}, hotel = {}) =>
+	cleanChatDisplayName(
+		hotel?.hotelName ||
+			hotel?.hotelName_OtherLanguage ||
+			supportCase.displayName2 ||
+			supportCase.supporterName ||
+			supportCase.inquiryAbout ||
+			"the hotel"
+	);
+
+async function publicHotelFactDocForCase(supportCase = {}, providedHotel = null) {
+	const providedId = normalizeId(providedHotel?._id);
+	if (providedHotel && providedId) return providedHotel;
+	const hotelId = normalizeId(supportCase.hotelId || supportCase.hotel?._id);
+	if (!ObjectId.isValid(hotelId)) return null;
+	return HotelDetails.findById(hotelId)
+		.select(PUBLIC_AI_HOTEL_FACT_SELECT)
+		.lean()
+		.exec();
+}
+
+const publicMinuteText = (value = "", isArabic = false) => {
+	const text = cleanPublicHotelFact(value, 80);
+	if (!text) return "";
+	const normalized = normalizeLocalizedDigits(text);
+	const numberMatch = normalized.match(/\d+(?:\.\d+)?/);
+	if (!numberMatch) return text;
+	const amount = Number(numberMatch[0]);
+	if (!Number.isFinite(amount) || amount <= 0) return text;
+	if (/\bminute|minutes|min\b/i.test(text) || /(?:\u062f\u0642\u064a\u0642)/i.test(text)) {
+		return text;
+	}
+	if (isArabic) {
+		if (amount === 1) return "\u062f\u0642\u064a\u0642\u0629 \u0648\u0627\u062d\u062f\u0629";
+		if (amount === 2) return "\u062f\u0642\u064a\u0642\u062a\u064a\u0646";
+		if (amount >= 3 && amount <= 10) {
+			return `${numberMatch[0]} \u062f\u0642\u0627\u0626\u0642`;
+		}
+		return `${numberMatch[0]} \u062f\u0642\u064a\u0642\u0629`;
+	}
+	return amount === 1 ? "1 minute" : `${numberMatch[0]} minutes`;
+};
+
+const publicActiveRoomLabels = (hotel = {}, isArabic = false) => {
+	const rooms = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+	const labels = rooms
+		.filter((room) => room?.activeRoom)
+		.map((room) =>
+			cleanPublicHotelFact(
+				isArabic
+					? room.displayName_OtherLanguage || room.displayName || room.roomType
+					: room.displayName || room.displayName_OtherLanguage || room.roomType,
+				120
+			)
+		)
+		.filter(Boolean);
+	if (labels.length) return [...new Set(labels)].slice(0, 6);
+	return isArabic
+		? [
+				"\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629",
+				"\u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a\u0629",
+				"\u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
+				"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629 \u0639\u0627\u0626\u0644\u064a\u0629",
+		  ]
+		: [
+				"Double Room - Comfort & Relaxation",
+				"Triple Room - Premium Comfort",
+				"Quadruple Room - Comfort & Privacy",
+				"Family Quintuple Room",
+		  ];
+};
+
+const publicCancellationPolicyReplyText = (supportCase = {}, hotel = {}, isArabic = false) => {
+	const hotelName = publicHotelNameForReply(supportCase, hotel);
+	const cancellationRow = activeHotelPolicyQA(hotel.hotelPolicyQA).find(
+		(row) => row.key === "cancellation_refund"
+	);
+	const answer = cleanPublicHotelFact(cancellationRow?.answer, 1600);
+	const defaultAnswer = cleanPublicHotelFact(
+		DEFAULT_CANCELLATION_REFUND_ANSWER,
+		1600
+	);
+	const useDefault =
+		!answer || answer.toLowerCase() === defaultAnswer.toLowerCase();
+	if (isArabic || (answer && /[\u0600-\u06ff]/.test(answer))) {
+		if (!useDefault && /[\u0600-\u06ff]/.test(answer)) {
+			return `\u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 \u0648\u0634\u0631\u0648\u0637 ${hotelName}: ${answer}`;
+		}
+		return `\u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 \u0648\u0634\u0631\u0648\u0637 ${hotelName}:\n- \u0642\u0628\u0644 \u0627\u0644\u0648\u0635\u0648\u0644 \u0628\u0640 14 \u064a\u0648\u0645\u0627 \u0623\u0648 \u0623\u0643\u062b\u0631: \u0627\u0644\u0625\u0644\u063a\u0627\u0621 \u0645\u062c\u0627\u0646\u064a \u0645\u0639 \u0627\u0633\u062a\u0631\u062f\u0627\u062f \u0643\u0627\u0645\u0644.\n- \u0623\u0642\u0644 \u0645\u0646 14 \u064a\u0648\u0645\u0627 \u0648\u0623\u0643\u062b\u0631 \u0645\u0646 3 \u0623\u064a\u0627\u0645: \u064a\u062a\u0645 \u062e\u0635\u0645 \u0644\u064a\u0644\u0629 \u0648\u0627\u062d\u062f\u0629 \u0641\u0642\u0637 \u0648\u0627\u0633\u062a\u0631\u062f\u0627\u062f \u0627\u0644\u0628\u0627\u0642\u064a.\n- 3 \u0623\u064a\u0627\u0645 \u0623\u0648 \u0623\u0642\u0644 \u0642\u0628\u0644 \u0627\u0644\u0648\u0635\u0648\u0644: \u0627\u0644\u062d\u062c\u0632 \u063a\u064a\u0631 \u0642\u0627\u0628\u0644 \u0644\u0644\u0625\u0644\u063a\u0627\u0621 \u0623\u0648 \u0627\u0644\u0627\u0633\u062a\u0631\u062f\u0627\u062f.`;
+	}
+	if (!useDefault) {
+		return `Based on ${hotelName}'s terms and conditions: ${answer}`;
+	}
+	return `Based on ${hotelName}'s terms and conditions, the general cancellation and refund policy is:\n- 14 days or more before check-in: free cancellation with a full refund.\n- Less than 14 days and more than 3 days before check-in: cancellation can still be processed; the hotel keeps one night only and the remaining amount is refunded.\n- 3 days or less before check-in: the reservation is non-cancellable and non-refundable under the general policy.`;
+};
+
+const publicPaymentInfoReplyText = (supportCase = {}, hotel = {}, isArabic = false) => {
+	const hotelName = publicHotelNameForReply(supportCase, hotel);
+	const paymentRow = activeHotelPolicyQA(hotel.hotelPolicyQA).find(
+		(row) => row.key === "payment_deposit"
+	);
+	const answer = cleanPublicHotelFact(paymentRow?.answer, 1200);
+	if (isArabic || (answer && /[\u0600-\u06ff]/.test(answer))) {
+		if (answer && /[\u0600-\u06ff]/.test(answer)) {
+			return `\u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 ${hotelName}: ${answer}`;
+		}
+		return `\u0646\u0639\u0645\u060c \u0628\u0639\u062f \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u064a\u0638\u0647\u0631 \u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639 \u0648\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0639\u0646\u062f \u0627\u0644\u062a\u0648\u0641\u0631. \u0623\u064a \u0639\u0631\u0628\u0648\u0646 \u0623\u0648 \u062f\u0641\u0639 \u062c\u0632\u0626\u064a \u064a\u062a\u0628\u0639 \u0634\u0631\u0648\u0637 ${hotelName} \u0648\u0627\u0644\u0645\u062a\u0627\u062d \u0648\u0642\u062a \u0627\u0644\u062d\u062c\u0632. \u0644\u0627 \u062a\u0631\u0633\u0644 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0628\u0637\u0627\u0642\u0629 \u0641\u064a \u0627\u0644\u0634\u0627\u062a.`;
+	}
+	if (answer) return `Based on ${hotelName}'s payment/deposit terms: ${answer}`;
+	return `Yes. After the reservation is created, the chat can show the payment/details link when available. Any small deposit or partial payment depends on ${hotelName}'s terms and what is available at booking time. Please do not send card details in the chat.`;
+};
+
+async function publicSelectedHotelFactReplyText(
+	supportCase = {},
+	latestEntry = {},
+	{ hotel: providedHotel = null } = {}
+) {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	const kind = publicHotelFactIntentKind(latestText);
+	if (!kind) return "";
+	const isArabic = publicHasArabicText(supportCase, latestEntry);
+	const hotel = await publicHotelFactDocForCase(supportCase, providedHotel);
+	const hotelName = publicHotelNameForReply(supportCase, hotel || {});
+	if (kind === "payment") {
+		return publicPaymentInfoReplyText(supportCase, hotel || {}, isArabic);
+	}
+	if (!hotel && kind !== "rooms") return "";
+	if (kind === "rooms") {
+		const labels = publicActiveRoomLabels(hotel || {}, isArabic);
+		const bullets = labels.map((label) => `- ${label}`).join("\n");
+		return isArabic
+			? `\u0623\u0643\u064a\u062f\u060c \u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a ${hotelName} \u062a\u0634\u0645\u0644:\n${bullets}\n\u0623\u064a \u0646\u0648\u0639 \u062a\u0641\u0636\u0644 \u0644\u062a\u0648\u0627\u0631\u064a\u062e\u0643\u061f`
+			: `Of course. Available room options at ${hotelName} include:\n${bullets}\nWhich room type would you prefer for your dates?`;
+	}
+	if (kind === "distance") {
+		const walking = publicMinuteText(hotel.distances?.walkingToElHaram, isArabic);
+		const driving = publicMinuteText(hotel.distances?.drivingToElHaram, isArabic);
+		if (isArabic) {
+			if (walking || driving) {
+				const parts = [
+					walking ? `${walking} \u0645\u0634\u064a\u0627` : "",
+					driving ? `${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629` : "",
+				].filter(Boolean);
+				return `${hotelName} \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${parts.join(" \u0648")} \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`;
+			}
+			return `\u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0631\u0642\u0645 \u062f\u0642\u064a\u0642 \u0644\u0644\u0645\u0633\u0627\u0641\u0629 \u0644\u0640 ${hotelName} \u062d\u0627\u0644\u064a\u0627.`;
+		}
+		if (walking || driving) {
+			const parts = [
+				walking ? `${walking} on foot` : "",
+				driving ? `${driving} by car` : "",
+			].filter(Boolean);
+			return `${hotelName} is about ${parts.join(" and ")} from Al Haram, depending on traffic.`;
+		}
+		return `I do not see an exact distance confirmed for ${hotelName} right now.`;
+	}
+	if (kind === "bus") {
+		const details = cleanPublicHotelFact(hotel.busDetails, 800);
+		if (hotel.hasBusService === true) {
+			if (isArabic) {
+				return details
+					? `\u0646\u0639\u0645\u060c ${hotelName} \u064a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u062e\u0627\u0635\u0629 \u0644\u0644\u0636\u064a\u0648\u0641: ${details}`
+					: `\u0646\u0639\u0645\u060c ${hotelName} \u064a\u0648\u0641\u0631 \u062e\u062f\u0645\u0629 \u0628\u0627\u0635 \u062e\u0627\u0635\u0629 \u0644\u0644\u0636\u064a\u0648\u0641.`;
+			}
+			return details
+				? `Yes, ${hotelName} provides a private bus service for guests: ${details}`
+				: `Yes, ${hotelName} provides a private bus service for guests.`;
+		}
+		const walking = publicMinuteText(hotel.distances?.walkingToElHaram, isArabic);
+		return isArabic
+			? `${hotelName} \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a\u0647 \u0628\u0627\u0635 \u062e\u0627\u0635 \u062d\u0627\u0644\u064a\u0627.${walking ? ` \u0648\u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${walking} \u0645\u0634\u064a\u0627.` : ""}`
+			: `${hotelName} does not currently show a private bus service.${walking ? ` It is about ${walking} on foot from Al Haram.` : ""}`;
+	}
+	if (kind === "nusuk") {
+		const details = cleanPublicHotelFact(hotel.isNusukText, 900);
+		if (hotel.isNusuk === true) {
+			if (isArabic) {
+				return details
+					? `\u0646\u0639\u0645\u060c ${hotelName} \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0646\u0633\u0643. ${details}`
+					: `\u0646\u0639\u0645\u060c ${hotelName} \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0646\u0633\u0643.`;
+			}
+			return details
+				? `Yes, ${hotelName} is listed on Nusuk. ${details}`
+				: `Yes, ${hotelName} is listed on Nusuk.`;
+		}
+		return isArabic
+			? `\u062d\u0627\u0644\u064a\u0627 \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0623\u0646 ${hotelName} \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0646\u0633\u0643.`
+			: `At the moment I do not see ${hotelName} marked as listed on Nusuk.`;
+	}
+	if (kind === "cancellation") {
+		return publicCancellationPolicyReplyText(supportCase, hotel || {}, isArabic);
+	}
+	return "";
+}
+
 const publicSelectedHotelBroadStartReplyText = (
 	supportCase = {},
 	latestEntry = {}
@@ -421,11 +712,19 @@ const publicSelectedHotelRoomIntentReplyText = (
 		: `Got it, I have your request for a ${roomType} at ${hotelName}. Send the check-in and checkout dates, and I will check the exact availability and price.`;
 };
 
-const publicImmediateB2CAiReplyText = (supportCase = {}, latestEntry = {}) =>
-	publicAvailabilityRoomChoiceReplyText(supportCase, latestEntry) ||
-	publicHotelTrustQuickReplyText(supportCase, latestEntry) ||
-	publicSelectedHotelRoomIntentReplyText(supportCase, latestEntry) ||
-	publicSelectedHotelBroadStartReplyText(supportCase, latestEntry);
+async function publicImmediateB2CAiReplyText(
+	supportCase = {},
+	latestEntry = {},
+	options = {}
+) {
+	return (
+		publicAvailabilityRoomChoiceReplyText(supportCase, latestEntry) ||
+		publicHotelTrustQuickReplyText(supportCase, latestEntry) ||
+		(await publicSelectedHotelFactReplyText(supportCase, latestEntry, options)) ||
+		publicSelectedHotelRoomIntentReplyText(supportCase, latestEntry) ||
+		publicSelectedHotelBroadStartReplyText(supportCase, latestEntry)
+	);
+}
 
 async function appendPublicAiQuickReply(
 	io,
@@ -1828,7 +2127,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			const quickReply =
 				immediateQuote?.message ||
 				(legacyAiEngine
-					? publicImmediateB2CAiReplyText(updatedCase, safeConversation)
+					? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
 					: "");
 			if (quickReply) {
 				const quickReplyCase = await appendPublicAiQuickReply(
@@ -1846,8 +2145,25 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;
 			} else {
-				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-				if (legacyAiEngine) {
+				const handledFastPath =
+					legacyAiEngine &&
+					typeof tryImmediateB2CFastPath === "function" &&
+					(await tryImmediateB2CFastPath(
+						req.io,
+						updatedCase,
+						updatedCase._id,
+						"public_client_update"
+					));
+				if (handledFastPath) {
+					const refreshedCase = await SupportCase.findById(updatedCase._id)
+						.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
+						.lean()
+						.exec();
+					if (refreshedCase) updatedCase = refreshedCase;
+				} else {
+					scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+				}
+				if (legacyAiEngine && !handledFastPath) {
 					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 				}
 			}
@@ -1930,7 +2246,7 @@ exports.createNewSupportCase = async (req, res) => {
 		let hotelDoc = null;
 		if (hotelId && mongoose.Types.ObjectId.isValid(hotelId)) {
 			hotelDoc = await HotelDetails.findById(hotelId).select(
-				"hotelName aiToRespond"
+				PUBLIC_AI_HOTEL_FACT_SELECT
 			);
 			if (hotelDoc && hotelDoc.hotelName) {
 				hotelName = hotelDoc.hotelName;
@@ -2032,7 +2348,7 @@ exports.createNewSupportCase = async (req, res) => {
 			};
 			conversation.push(initialClientEntry);
 			if (aiEnabledForClient && isLegacyAiAgentEngine()) {
-				const immediateText = publicImmediateB2CAiReplyText(
+				const immediateText = await publicImmediateB2CAiReplyText(
 					{
 						displayName2,
 						supporterName,
@@ -2040,8 +2356,10 @@ exports.createNewSupportCase = async (req, res) => {
 						preferredLanguageCode: preferredLanguageCode || "en",
 						aiResponderName,
 						conversation,
+						hotelId,
 					},
-					initialClientEntry
+					initialClientEntry,
+					{ hotel: hotelDoc }
 				);
 				if (immediateText) {
 					conversation.push({

@@ -25207,6 +25207,7 @@ const exportedOrchestrator = {
 	wireSocket,
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
+	tryImmediateB2CFastPath: maybeSendPreWorkerFastPath,
 	__worker: {
 		planTurn,
 	},
