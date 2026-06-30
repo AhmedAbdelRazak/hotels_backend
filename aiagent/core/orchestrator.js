@@ -168,6 +168,7 @@ function localizedAgentName(sc = {}) {
 		khadija: "خديجة",
 		nadia: "نادية",
 		noor: "نور",
+		iman: "إيمان",
 		safiya: "صفية",
 		sara: "سارة",
 		mariam: "مريم",
@@ -197,6 +198,10 @@ function normalizeDigits(value = "") {
 
 function cleanString(value = "", max = 240) {
 	return normalizeDigits(value).replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function cleanDisplayString(value = "", max = 240) {
+	return String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 function cleanPhone(value = "") {
@@ -271,6 +276,10 @@ function mergeKnownFacts(current = {}, next = {}) {
 		const cleaned = cleanString(value, max);
 		if (cleaned) merged[key] = cleaned;
 	};
+	const setDisplayText = (key, value, max = 240) => {
+		const cleaned = cleanDisplayString(value, max);
+		if (cleaned) merged[key] = cleaned;
+	};
 	const setDate = (key, value) => {
 		const iso = validISODate(value);
 		if (iso) merged[key] = iso;
@@ -280,8 +289,41 @@ function mergeKnownFacts(current = {}, next = {}) {
 		if (n !== null && n >= min && n <= max) merged[key] = Math.floor(n);
 	};
 
-	setDate("checkinISO", source.checkinISO || source.checkin || reservation.checkinISO);
-	setDate("checkoutISO", source.checkoutISO || source.checkout || reservation.checkoutISO);
+	const previousCheckinISO = merged.checkinISO || "";
+	const previousCheckoutISO = merged.checkoutISO || "";
+	const sourceCheckinISO = source.checkinISO || source.checkin || reservation.checkinISO;
+	const sourceCheckoutISO = source.checkoutISO || source.checkout || reservation.checkoutISO;
+	setDate("checkinISO", sourceCheckinISO);
+	setDate("checkoutISO", sourceCheckoutISO);
+	const checkinChanged =
+		Boolean(sourceCheckinISO) &&
+		Boolean(merged.checkinISO) &&
+		merged.checkinISO !== previousCheckinISO;
+	const checkoutChanged =
+		Boolean(sourceCheckoutISO) &&
+		Boolean(merged.checkoutISO) &&
+		merged.checkoutISO !== previousCheckoutISO;
+
+	const sourceCheckinHijri =
+		source.checkinHijriText || source.checkinHijri || source.hijriCheckin;
+	const sourceCheckoutHijri =
+		source.checkoutHijriText || source.checkoutHijri || source.hijriCheckout;
+	const sourceDateRangeText =
+		source.dateRangeOriginalText ||
+		source.originalDateRangeText ||
+		source.dateRangeHijriText;
+	if (sourceCheckinHijri) setDisplayText("checkinHijriText", sourceCheckinHijri, 120);
+	else if (checkinChanged) delete merged.checkinHijriText;
+	if (sourceCheckoutHijri) setDisplayText("checkoutHijriText", sourceCheckoutHijri, 120);
+	else if (checkoutChanged) delete merged.checkoutHijriText;
+	if (sourceDateRangeText) {
+		setDisplayText("dateRangeOriginalText", sourceDateRangeText, 220);
+	} else if (checkinChanged || checkoutChanged) {
+		delete merged.dateRangeOriginalText;
+	}
+	if (source.dateCalendar) setText("dateCalendar", source.dateCalendar, 32);
+	else if (checkinChanged || checkoutChanged) delete merged.dateCalendar;
+
 	setText("roomTypeKey", source.roomTypeKey || reservation.roomTypeKey, 80);
 	if (!ROOM_TYPE_KEYS.includes(merged.roomTypeKey)) {
 		const mapped = mapRoomToKey(merged.roomTypeKey || "");
@@ -439,6 +481,10 @@ function responseSchemaPrompt() {
   "facts": {
     "checkinISO": "YYYY-MM-DD or empty",
     "checkoutISO": "YYYY-MM-DD or empty",
+    "checkinHijriText": "normalized Hijri check-in label if guest used Hijri, otherwise empty",
+    "checkoutHijriText": "normalized Hijri checkout label if guest used Hijri, otherwise empty",
+    "dateRangeOriginalText": "short original/normalized guest date range if Hijri or mixed-calendar, otherwise empty",
+    "dateCalendar": "hijri | gregorian | mixed | empty",
     "roomTypeKey": "one of the provided active roomTypeKey values or empty",
     "rooms": 1,
     "adults": 1,
@@ -463,6 +509,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null }) {
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. For dates without a year, use the next future occurrence from today. If the year or range is genuinely unclear, ask one short natural confirmation question.`,
+		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
@@ -671,6 +718,34 @@ function formatMoney(value, currency = "SAR", languageCode = "en") {
 		: `${amount} ${currency || "SAR"}`;
 }
 
+function hijriRangeText(known = {}) {
+	const checkinHijri = cleanDisplayString(known.checkinHijriText, 120);
+	const checkoutHijri = cleanDisplayString(known.checkoutHijriText, 120);
+	if (checkinHijri && checkoutHijri) return `${checkinHijri} - ${checkoutHijri}`;
+	return cleanDisplayString(known.dateRangeOriginalText, 220);
+}
+
+function reviewDateLines(known = {}, languageCode = "en") {
+	const ar = /^ar\b/i.test(languageCode);
+	const gregorianRange = `${formatDate(known.checkinISO, languageCode)} - ${formatDate(
+		known.checkoutISO,
+		languageCode
+	)}`;
+	const hijriRange = hijriRangeText(known);
+	if (!hijriRange) {
+		return [ar ? `التواريخ: ${gregorianRange}` : `Dates: ${gregorianRange}`];
+	}
+	return ar
+		? [
+				`التواريخ الهجرية: ${hijriRange}`,
+				`التواريخ الميلادية: ${gregorianRange}`,
+		  ]
+		: [
+				`Dates (Hijri): ${hijriRange}`,
+				`Dates (Gregorian): ${gregorianRange}`,
+		  ];
+}
+
 function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
@@ -688,7 +763,7 @@ function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 			`أستاذ/أستاذة ${guestDisplayName(sc)}، هذه مراجعة نهائية مختصرة قبل إنشاء الحجز:`,
 			`الفندق: ${hotelName}`,
 			`الغرفة: ${roomLabel}`,
-			`التواريخ: ${formatDate(known.checkinISO, languageCode)} - ${formatDate(known.checkoutISO, languageCode)}`,
+			...reviewDateLines(known, languageCode),
 			`عدد الليالي: ${formatNumber(nights, languageCode)}`,
 			`عدد الغرف: ${formatNumber(known.rooms || 1, languageCode)}`,
 			`الضيوف: ${formatNumber(known.adults || 1, languageCode)} بالغ${Number(known.children || 0) ? `، ${formatNumber(known.children, languageCode)} طفل` : ""}`,
@@ -704,7 +779,7 @@ function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 		`${guestDisplayName(sc)}, here is the final review before I create the booking:`,
 		`Hotel: ${hotelName}`,
 		`Room: ${roomLabel}`,
-		`Dates: ${formatDate(known.checkinISO, languageCode)} - ${formatDate(known.checkoutISO, languageCode)}`,
+		...reviewDateLines(known, languageCode),
 		`Nights: ${nights}`,
 		`Rooms: ${known.rooms || 1}`,
 		`Guests: ${known.adults || 1} adult${Number(known.children || 0) ? `, ${known.children} child` : ""}`,
@@ -714,6 +789,45 @@ function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 		`Email: ${known.email || "Not added"}`,
 		`Total: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
 		`If everything is correct, choose "Complete booking". If something needs fixing, choose "Something is wrong".`,
+	].join("\n");
+}
+
+function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const quote = asObject(result.quote);
+	const roomLabel =
+		quote.roomLabel ||
+		quote.room?.displayName ||
+		roomTypeLabel(known.roomTypeKey, languageCode);
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	if (!result.available || !quote.total) {
+		return ar
+			? `أستاذ ${guestDisplayName(sc)}، أعتذر لك، لا يظهر توفر مؤكد لهذا الخيار في ${hotelName} للتواريخ المطلوبة. تحب أراجع لك غرفة أو تواريخ أخرى؟`
+			: `${guestDisplayName(sc)}, I am sorry, this option does not show confirmed availability at ${hotelName} for those dates. Would you like me to check another room or dates?`;
+	}
+	const dateLines = reviewDateLines(known, languageCode);
+	if (ar) {
+		return [
+			`تمام أستاذ ${guestDisplayName(sc)}، متاح بإذن الله.`,
+			`الغرفة: ${roomLabel}`,
+			...dateLines,
+			`عدد الليالي: ${formatNumber(quote.nights || result.nights || 0, languageCode)}`,
+			`السعر: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} لليلة`,
+			`الإجمالي: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
+			`تحب أكمل لك الحجز؟`,
+		].join("\n");
+	}
+	return [
+		`Yes ${guestDisplayName(sc)}, this is available.`,
+		`Room: ${roomLabel}`,
+		...dateLines,
+		`Nights: ${quote.nights || result.nights || 0}`,
+		`Rate: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} per night`,
+		`Total: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
+		`Would you like me to continue the booking?`,
 	].join("\n");
 }
 
@@ -1045,16 +1159,27 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 	const nextKnown = { ...known };
 	if (result.available && result.quote) nextKnown.quote = result.quote;
 	await saveKnownFacts(caseIdText(sc), nextKnown);
-	const decision = await askOpenAI({
-		sc,
-		hotel,
-		known: nextKnown,
-		latestGuest,
-		toolResult: {
-			tool: "get_quote",
-			...result,
-		},
-	});
+	let decision = null;
+	try {
+		decision = await askOpenAI({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			toolResult: {
+				tool: "get_quote",
+				...result,
+			},
+		});
+	} catch (error) {
+		console.error("[aiagent] quote writer failed:", error?.message || error);
+		decision = normalizeDecision({
+			action: "reply",
+			reply: buildQuoteFallbackMessage(sc, nextKnown, result, hotel),
+			facts: {},
+			reason: "quote_writer_failed",
+		});
+	}
 	const reply =
 		decision.reply ||
 		(result.available
@@ -1314,9 +1439,28 @@ async function planTurn(io, supportCaseOrId) {
 		console.error("[aiagent] slim plan turn failed:", error?.stack || error);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		const languageCode = activeLanguageCode(sc, known);
+		if (known.checkinISO && known.checkoutISO && known.roomTypeKey) {
+			const quoteResult = await quoteTool(sc, known).catch((quoteError) => {
+				console.error("[aiagent] timeout fallback quote failed:", quoteError?.message || quoteError);
+				return null;
+			});
+			if (quoteResult) {
+				const nextKnown = { ...known };
+				if (quoteResult.available && quoteResult.quote) nextKnown.quote = quoteResult.quote;
+				await saveKnownFacts(key, nextKnown);
+				return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
+					latestGuest,
+					known: nextKnown,
+					clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
+					quickReplies: quoteResult.available
+						? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
+						: [],
+				});
+			}
+		}
 		const text = /^ar\b/i.test(languageCode)
-			? "أعتذر عن التأخير البسيط. وصلتني رسالتك، فقط أكد لي التواريخ بصيغة ميلادية واضحة أو اكتب السنة المقصودة، وسأراجع لك السعر والتوفر فورًا."
-			: "I am sorry for the small delay. I received your message; please confirm the exact Gregorian dates or the intended year, and I will check price and availability right away.";
+			? "أعتذر عن التأخير البسيط. وصلتني رسالتك وسأراجعها لك مرة أخرى فورًا. لو كنت كتبت التاريخ هجريًا، سأتعامل معه وأوضح لك الهجري والميلادي."
+			: "I am sorry for the small delay. I received your message and will review it again right away. If you used Hijri dates, I will handle them and show both Hijri and Gregorian.";
 		return sendAiMessage(io, sc, text, {
 			latestGuest,
 			known,
