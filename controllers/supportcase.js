@@ -546,6 +546,25 @@ const publicHotelFactIntentKind = (value = "") => {
 	return "";
 };
 
+const publicStandaloneFamilyCapacityQuestion = (value = "") => {
+	const raw = String(value || "").trim();
+	if (!raw || publicHotelFactIntentKind(raw) !== "family_capacity") return false;
+	const lower = raw.toLowerCase();
+	const arabicIntent = normalizePublicArabicIntentText(raw);
+	const looksLikeStayQuote =
+		/\b(?:check|quote|price|total|rate|rates|cost|sar|riyal|riyals|night|nights|from|until|to|between|date|dates|checkin|checkout|check-in|check-out)\b/i.test(
+			lower
+		) ||
+		/\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\b/i.test(
+			lower
+		) ||
+		/\b20\d{2}\b/.test(lower) ||
+		/(?:\u0627\u0644\u0633\u0639\u0631|\u0633\u0639\u0631|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0627\u062c\u0645\u0627\u0644\u064a|\u0631\u064a\u0627\u0644|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644|\u0645\u0646\s+\d|\u0627\u0644\u064a\s+\d|\u0627\u0644\u0649\s+\d|\u0625\u0644\u0649\s+\d|\u064a\u0646\u0627\u064a\u0631|\u0641\u0628\u0631\u0627\u064a\u0631|\u0645\u0627\u0631\u0633|\u0627\u0628\u0631\u064a\u0644|\u0623\u0628\u0631\u064a\u0644|\u0645\u0627\u064a\u0648|\u064a\u0648\u0646\u064a\u0648|\u064a\u0648\u0644\u064a\u0648|\u0627\u063a\u0633\u0637\u0633|\u0623\u063a\u0633\u0637\u0633|\u0633\u0628\u062a\u0645\u0628\u0631|\u0627\u0643\u062a\u0648\u0628\u0631|\u0623\u0643\u062a\u0648\u0628\u0631|\u0646\u0648\u0641\u0645\u0628\u0631|\u062f\u064a\u0633\u0645\u0628\u0631)/i.test(
+			arabicIntent
+		);
+	return !looksLikeStayQuote;
+};
+
 const cleanPublicHotelFact = (value = "", max = 1200) =>
 	cleanText(value, max).replace(/\s+/g, " ").trim();
 
@@ -2437,12 +2456,22 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					.exec();
 				if (finalizedCase) updatedCase = finalizedCase;
 			} else {
-				const immediateQuote = legacyAiEngine
+				const immediateStandaloneFact =
+					legacyAiEngine &&
+					publicStandaloneFamilyCapacityQuestion(safeConversation?.message)
+						? await publicSelectedHotelFactReplyText(
+								updatedCase,
+								safeConversation
+						  )
+						: "";
+				const immediateQuote = legacyAiEngine && !immediateStandaloneFact
 					? await buildImmediateKnownStayQuoteReply(updatedCase, safeConversation)
 					: null;
 				let proceedPrompt = "";
 				const proceedPromptCandidate =
-					legacyAiEngine && !immediateQuote?.message
+					legacyAiEngine &&
+					!immediateStandaloneFact &&
+					!immediateQuote?.message
 						? publicProceedAfterQuoteReplyText(updatedCase, safeConversation)
 						: "";
 				if (proceedPromptCandidate) {
@@ -2466,6 +2495,7 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 					!maybeEmailSkip && publicMaybeReservationDetailsPayloadText(safeConversation);
 				const immediateReservationPayload =
 					legacyAiEngine &&
+					!immediateStandaloneFact &&
 					!immediateQuote?.message &&
 					!proceedPromptCandidate &&
 					(maybeEmailSkip || maybeReservationDetails)
@@ -2475,12 +2505,14 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 						: null;
 				const immediatePostBookingPayload =
 					legacyAiEngine &&
+					!immediateStandaloneFact &&
 					!immediateQuote?.message &&
 					!proceedPromptCandidate &&
 					!immediateReservationPayload?.message
 						? publicPostBookingImmediateReplyPayload(updatedCase, safeConversation)
 						: null;
 				const quickReply =
+					immediateStandaloneFact ||
 					immediateQuote?.message ||
 					proceedPrompt ||
 					immediateReservationPayload?.message ||
