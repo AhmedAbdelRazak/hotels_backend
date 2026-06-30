@@ -21567,6 +21567,14 @@ async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry =
 	applyRoomSelectionsFromText(supportCase, st, latestText, {
 		source: "controller_immediate_quote_latest_room",
 	});
+	if (!st.slots?.roomTypeKey) {
+		const datedRoomSelections = extractRoomSelectionsFromText(latestText);
+		if (datedRoomSelections.length) {
+			applyRoomSelections(st, datedRoomSelections, {
+				source: "controller_immediate_quote_dated_room_question",
+			});
+		}
+	}
 	applyReservationGuestCountsFromText(st, latestText);
 	rememberRequestedRoomCountFromText(
 		supportCase,
