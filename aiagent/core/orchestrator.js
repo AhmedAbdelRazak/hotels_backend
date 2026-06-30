@@ -21611,6 +21611,96 @@ async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry =
 	};
 }
 
+async function debugImmediateKnownStayQuoteReply(supportCase = {}, latestEntry = {}) {
+	const trace = { stages: [] };
+	const latestText = String(latestEntry?.message || "").trim();
+	trace.latestText = latestText;
+	const guard = {
+		empty: !latestText,
+		severe: severeAbusiveGuestText(latestText),
+		handoff: humanHandoffReason(latestText),
+		payment: wantsPaymentHelp(latestText),
+		existing: explicitlyExistingReservationIntent(latestText),
+	};
+	trace.guard = guard;
+	if (Object.values(guard).some(Boolean)) return { ...trace, reason: "guard" };
+	const dates = extractDateRange(latestText);
+	trace.dates = dates;
+	if (
+		!dates?.checkinISO ||
+		!dates?.checkoutISO ||
+		needsExplicitPastDateClarification(latestText, dates)
+	) {
+		return { ...trace, reason: "dates" };
+	}
+	const hotelId = idText(supportCase?.hotelId);
+	trace.hotelId = hotelId;
+	if (!hotelId) return { ...trace, reason: "hotel_id" };
+	const dateKeys = safeStayDates(dates.checkinISO, dates.checkoutISO);
+	trace.dateKeys = dateKeys;
+	const hotel =
+		(await getHotelByIdWithPricingDates(hotelId, dateKeys)) ||
+		(await getHotelById(hotelId));
+	trace.hotelFound = Boolean(hotel);
+	trace.hotelActiveContext = Boolean(activeHotelContextForCase(supportCase, hotel));
+	if (!hotel) return { ...trace, reason: "hotel" };
+	const st = {
+		language: preferredLanguageOf(supportCase) || "English",
+		languageCode: preferredLanguageCodeOf(supportCase) || "",
+		agentName: supportCase.aiResponderName || "Jannat Booking",
+		hotel: activeHotelContextForCase(supportCase, hotel),
+		slots: {
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+		},
+		waitFor: "dates",
+	};
+	trace.initialSelections = extractRoomSelectionsFromText(latestText);
+	applyLatestRoomSignalFromConversation(supportCase, st, {
+		source: "debug_controller_immediate_quote_room_signal",
+		includeAssistantFallback: false,
+	});
+	trace.afterConversationRoomSignal = { ...(st.slots || {}) };
+	applyRoomSelectionsFromText(supportCase, st, latestText, {
+		source: "debug_controller_immediate_quote_latest_room",
+	});
+	trace.afterRoomSelectionsFromText = { ...(st.slots || {}) };
+	if (!st.slots?.roomTypeKey) {
+		const datedRoomSelections = extractRoomSelectionsFromText(latestText);
+		if (datedRoomSelections.length) {
+			applyRoomSelections(st, datedRoomSelections, {
+				source: "debug_controller_immediate_quote_dated_room_question",
+			});
+		}
+	}
+	trace.afterDatedRoomFallback = { ...(st.slots || {}) };
+	applyReservationGuestCountsFromText(st, latestText);
+	trace.afterGuests = { ...(st.slots || {}) };
+	rememberRequestedRoomCountFromText(
+		supportCase,
+		st,
+		latestText,
+		"debug_controller_immediate_quote_room_count"
+	);
+	trace.afterRoomCount = { ...(st.slots || {}) };
+	if (!st.hotel || !st.slots?.roomTypeKey) {
+		return { ...trace, reason: "room_type" };
+	}
+	const quote = safePriceRoomSelectionForStay(st);
+	trace.quote = {
+		available: Boolean(quote?.available),
+		reason: quote?.reason || null,
+		total: quote?.totals?.totalPriceWithCommission || null,
+		roomType: quote?.room?.roomType || null,
+	};
+	if (!quote?.available) return { ...trace, reason: "quote" };
+	const message =
+		currentQuoteSummaryText(supportCase, st, quote) ||
+		simpleQuoteText({ sc: supportCase, st, quote });
+	trace.message = String(message || "").slice(0, 500);
+	return { ...trace, reason: message ? "ok" : "message" };
+}
+
 /* ------------------- TURN PLANNER ------------------- */
 const activePlanLocks = new Map();
 const activePlanLockAts = new Map();
@@ -25728,6 +25818,7 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		roomSelectionsFromSlots,
 		quoteKeyForSlots,
 		safePriceRoomSelectionsForStay,
+		debugImmediateKnownStayQuoteReply,
 		currentQuoteSummaryText,
 		currentReservationMemoryReplyText,
 		currentReservationMemoryRequestText,
