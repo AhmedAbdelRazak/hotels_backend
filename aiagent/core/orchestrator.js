@@ -4463,7 +4463,7 @@ function looksLikeReservationCancellation(text = "") {
 		/(?:cancelar|cancelacion|cancelaci[oó]n|anular|annuler|annulation|remboursement|reembolso)/i.test(
 			lower
 		) ||
-		/(?:\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621|\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0627\u0644\u0644\u063a\u064a|\u0643\u0646\u0633\u0644|\u0627\u0633\u062a\u0631\u062f\u0627\u062f)/i.test(
+		/(?:\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621|(?:^|[^\u0600-\u06ff])\u0627\u0644\u063a\u064a(?=$|[^\u0600-\u06ff])|\u0623\u0644\u063a\u064a|\u0627\u0644\u0644\u063a\u064a|\u0643\u0646\u0633\u0644|\u0627\u0633\u062a\u0631\u062f\u0627\u062f)/i.test(
 			arabic
 		) ||
 		/(?:cancel|cancellation|refund|void|cancelar|anular|annuler|reembolso|remboursement|elgha|ilgha|alghi|kansel|cancelreservation|cancelbooking)/i.test(
@@ -18143,7 +18143,7 @@ function cancellationActionRequestText(text = "") {
 		/\b(?:cancel|void)\s+(?:my|the|this)?\s*(?:reservation|booking|room|stay)|\b(?:i want|i need|please|kindly)\s+to\s+cancel\b|\bplease\s+cancel\b/i.test(
 			lower
 		) ||
-		/(?:\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0639\u0627\u064a\u0632|\u0628\u062f\u064a|\u0645\u0645\u0643\u0646).{0,18}(?:\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|(?:\u0627\u0644\u063a\u064a|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a).{0,18}(?:\u0627\u0644)?\u062d\u062c\u0632/i.test(
+		/(?:\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0639\u0627\u064a\u0632|\u0628\u062f\u064a|\u0645\u0645\u0643\u0646).{0,18}(?:(?:^|[^\u0600-\u06ff])\u0627\u0644\u063a\u064a(?=$|[^\u0600-\u06ff])|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621)|(?:(?:^|[^\u0600-\u06ff])\u0627\u0644\u063a\u064a(?=$|[^\u0600-\u06ff])|\u0623\u0644\u063a\u064a|\u0625\u0644\u063a\u064a).{0,18}(?:\u0627\u0644)?\u062d\u062c\u0632/i.test(
 			arabic
 		) ||
 		/(?:cancelmybooking|cancelmyreservation|pleasecancel|iwanttocancel|ineedtocancel)/i.test(
