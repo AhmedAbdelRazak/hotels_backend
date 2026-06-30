@@ -253,40 +253,40 @@ const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 });
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
-	2200,
+	2000,
 	{ min: 0, max: 7000 }
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3000, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 2000, {
 		min: 0,
 		max: 7000,
 	})
 );
 const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	"AI_PLANNING_TYPING_DELAY_MS",
-	2400,
+	2000,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 900, {
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
 	min: 0,
 	max: 5000,
 });
 const AI_RESERVATION_DETAIL_QUIET_MS = intFromEnv(
 	"AI_RESERVATION_DETAIL_QUIET_MS",
-	700,
+	2000,
 	{ min: 0, max: 5000 }
 );
 const AI_RESERVATION_CHASE_QUIET_MS = intFromEnv(
 	"AI_RESERVATION_CHASE_QUIET_MS",
-	0,
+	2000,
 	{ min: 0, max: 5000 }
 );
-const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 1200, {
+const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 2000, {
 	min: 500,
 	max: 10000,
 });
-const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 3000, {
+const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 2000, {
 	min: 0,
 	max: 7000,
 });
@@ -7262,6 +7262,126 @@ function hotelGoogleMapsMarkdownLink(hotel = {}, lang = "English") {
 	return `[${label}](${url})`;
 }
 
+function monthStartUtc(date = new Date()) {
+	return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function addUtcMonths(date = new Date(), count = 0) {
+	return new Date(
+		Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + count, 1)
+	);
+}
+
+function isoDay(date = new Date()) {
+	return date.toISOString().slice(0, 10);
+}
+
+function compactMonthLabel(date = new Date()) {
+	const month = date.toLocaleString("en-US", {
+		month: "long",
+		timeZone: "UTC",
+	});
+	return `${month} ${date.getUTCFullYear()}`;
+}
+
+function monthDaysFrom(date = new Date(), notBefore = new Date()) {
+	const start =
+		date.getUTCFullYear() === notBefore.getUTCFullYear() &&
+		date.getUTCMonth() === notBefore.getUTCMonth()
+			? new Date(
+					Date.UTC(
+						notBefore.getUTCFullYear(),
+						notBefore.getUTCMonth(),
+						notBefore.getUTCDate()
+					)
+			  )
+			: monthStartUtc(date);
+	const end = new Date(
+		Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)
+	);
+	const days = [];
+	for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+		days.push(isoDay(d));
+	}
+	return days;
+}
+
+function pricingGuideMonthSummary(room = {}, monthDate = new Date(), now = new Date()) {
+	const days = monthDaysFrom(monthDate, now);
+	if (!days.length) return null;
+	const basePrice = safeNum(room?.price?.basePrice, 0);
+	const rates = new Map();
+	for (const rate of Array.isArray(room.pricingRate) ? room.pricingRate : []) {
+		if (!rate?.calendarDate) continue;
+		rates.set(String(rate.calendarDate).slice(0, 10), rate);
+	}
+	const priceCounts = new Map();
+	let blocked = 0;
+	let unpriced = 0;
+	for (const day of days) {
+		const rate = rates.get(day);
+		if (rate && (safeNum(rate.price, 0) <= 0 || safeNum(rate.rootPrice, 0) <= 0)) {
+			blocked += 1;
+			continue;
+		}
+		const price = rate ? safeNum(rate.price, basePrice) : basePrice;
+		if (!price || price <= 0) {
+			unpriced += 1;
+			continue;
+		}
+		const key = Number(price.toFixed(2));
+		priceCounts.set(key, (priceCounts.get(key) || 0) + 1);
+	}
+	if (blocked === days.length) return "blocked";
+	if (!priceCounts.size) {
+		return basePrice > 0
+			? `base rate ${Number(basePrice.toFixed(2))} SAR/night`
+			: "no reliable pricing guide";
+	}
+	const entries = [...priceCounts.entries()].sort((a, b) => b[1] - a[1]);
+	const modePrice = entries[0][0];
+	const pricedDays = entries.reduce((sum, [, count]) => sum + count, 0);
+	const prices = entries.map(([price]) => price).sort((a, b) => a - b);
+	const minPrice = prices[0];
+	const maxPrice = prices[prices.length - 1];
+	const hasExceptions = blocked > 0 || unpriced > 0 || entries.length > 1;
+	const blockedNote = blocked > 0 ? "; some dates may be unavailable" : "";
+	if (entries.length === 1 && !blocked && !unpriced) {
+		return `${modePrice} SAR/night`;
+	}
+	if (entries[0][1] / Math.max(1, pricedDays) >= 0.7) {
+		return `mostly ${modePrice} SAR/night${blockedNote}`;
+	}
+	const range =
+		minPrice === maxPrice
+			? `${modePrice} SAR/night`
+			: `${minPrice}-${maxPrice} SAR/night`;
+	return hasExceptions ? `${range}; usually ${modePrice}${blockedNote}` : range;
+}
+
+function compactHotelPricingGuide(hotel = {}, { months = 6 } = {}) {
+	const rooms = Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: [];
+	const activeRooms = rooms.filter((room) => room?.activeRoom).slice(0, 8);
+	if (!activeRooms.length) return [];
+	const now = new Date();
+	const monthDates = Array.from({ length: Math.max(1, months) }, (_, index) =>
+		addUtcMonths(now, index)
+	);
+	return activeRooms.map((room) => ({
+		roomType: room.roomType,
+		displayName: room.displayName || room.roomType,
+		displayNameOther: room.displayName_OtherLanguage || "",
+		basePrice: room.price?.basePrice || 0,
+		currency: hotel?.currency || "SAR",
+		months: monthDates.map((monthDate) => ({
+			month: compactMonthLabel(monthDate),
+			summary: pricingGuideMonthSummary(room, monthDate, now),
+		})),
+	}));
+}
+
 function buildActiveHotelFacts(sc = {}, st = {}) {
 	const hotel = st.hotel || null;
 	if (!hotel) return null;
@@ -7298,6 +7418,7 @@ function buildActiveHotelFacts(sc = {}, st = {}) {
 		isNusukText: nusukDetails,
 		hotelPolicyQA: hotelPolicies,
 		activeRooms: activeHotelRoomSummaries(hotel).slice(0, 8),
+		pricingGuide: compactHotelPricingGuide(hotel),
 	};
 }
 
@@ -14947,6 +15068,11 @@ async function write(io, sc, st, instruction, context = {}) {
 		`Training examples may be Arabic, Hindi, English, Spanish, French, Urdu, Indonesian, Malay, or another language. Use them only as private behavioral guidance; translate or adapt the lesson silently into ${targetLanguage}.`,
 		`Do not copy an employee learning example in its original language unless that original language is also ${targetLanguage}.`,
 		`Tone: concise, friendly, official, respectful, and human-like. One booking question at a time.`,
+		`Human CSR contract: act as a skilled hotel reception, reservations, and sales representative. Answer polite small talk naturally first, acknowledge feelings such as tiredness or worry with warmth, and then guide the guest back to the most helpful reservation step. If the guest asks a polite off-topic question, answer briefly when it can be answered safely from general knowledge or supplied context, then return to hotel help. For live/current off-topic facts, do not guess; ask for a verified lookup or explain briefly that you can best help with the hotel reservation here.`,
+		`Memory and flow contract: remember confirmed dates, room type, guest count, full name, phone, nationality, and optional email from Context JSON/current slots. Ask one clear next question whenever possible. Do not ask for a detail already supplied unless it is contradictory, unclear, or the guest changed it.`,
+		`Islamic hospitality contract: this is an Islamic-friendly hotel reservation platform. Use respectful, modest phrases naturally when appropriate, especially for Umrah/family guests, but do not overdo religious wording or lecture the guest.`,
+		`Escalation contract: if the guest is angry, insulting, threatening, asks for a manager, reports a serious complaint, or trust is failing, answer calmly and briefly so a human can take over. Do not argue, shame, or continue pushing the sale.`,
+		`Pricing guide contract: Context JSON may include activeHotelFacts.pricingGuide with compact monthly guidance from the current month onward. Use it only for general, non-final language such as "usually", "mostly", or "around". Never present pricingGuide as confirmed availability, never use it as a final total, and never claim a full month is unavailable unless the guide explicitly says that full month is blocked. When the guest gives exact dates, the backend orchestrator must calculate the final quote and availability before you state an exact price or total.`,
 		`Emoji rule: You may use at most one tasteful emoji only when it naturally matches a warm, excited, thankful, or reassuring moment. Do not use emojis in payment, cancellation, policy, error, confirmation-number, link-delivery, or identity/AI-disclosure replies, and never use them in every message.`,
 		`For every reply, first understand what the guest just asked or felt, then answer that directly before moving the booking forward.`,
 		`Strict direct-answer rule: if the latest guest message asks a concrete question or asks for something specific, answer that request first in the first sentence. Do not pivot to check-in/check-out dates, room type, phone, email, or confirmation until after the requested answer is complete.`,
@@ -14963,7 +15089,7 @@ async function write(io, sc, st, instruction, context = {}) {
 		`If the guest asks for a hotel phone, WhatsApp, reception, manager, or responsible person's contact, answer that exact question first without sharing a phone number. In active hotel context, do not mention Jannat Booking or any other hotel name in that contact answer. Never share phone numbers from hotel details, owner, manager, user, account records, or learning examples. Explain transparently that you work directly with the reception of the active hotel and that this live chat is the safest and most credible way to reserve because reception can check live availability and keep all details clear.`,
 		`Never reveal or claim access to company EINs, tax IDs, VAT numbers, registration papers, licenses, certificates, owner documents, partner paperwork, uploaded documents, or internal/legal documents. If the guest asks for these, say support/reception chat cannot provide confidential company paperwork; after a reservation and arrival at the hotel, the guest may ask the manager in person and management can review what can be shown through the proper official channel.`,
 		activeHotelFacts
-			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, hasMealsService, mealsDetails, isNusuk, isNusukText, hotelPolicyQA, and activeRooms there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, meals/breakfast/restaurant, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
+			? `Selected hotel facts are provided in Context JSON as activeHotelFacts. Treat address, city, country, aboutHotel, distances, parking, location, hasBusService, busDetails, hasMealsService, mealsDetails, isNusuk, isNusukText, hotelPolicyQA, activeRooms, and pricingGuide there as verified private source facts for "${hotelName}", not customer-facing copy to paste. activeRooms may include room names, descriptions, translated descriptions, amenities, views, extra amenities, room size, beds count, gender suitability, and base price from hotel settings. pricingGuide may include compact month-level guidance, but exact dates still require backend quote/availability. If the guest asks about location, distance from Al Haram, address, bus/shuttle to Al Haram, meals/breakfast/restaurant, Nusuk listing, hotel policy, terms, cancellation/refund, parking, hotel features, or rooms, answer directly from activeHotelFacts before moving the booking forward. For room descriptions and amenities, use only the listed room facts; translate/adapt them professionally, and if a detail is not listed, say it is not currently shown instead of inventing it. Summarize room descriptions in 1-2 short natural lines unless the guest explicitly asks for full details; do not paste the saved description verbatim or list every amenity unless the guest asks.`
 			: "",
 		`Room taxonomy: Double Room means a room with two beds/twin beds, suitable for two individuals and also possible for one person; Triple Room fits 3 persons/3 beds; Quadruple Room fits 4 persons/4 beds; Family or Quintuple Room fits 5 persons/5 beds. Use this taxonomy semantically across languages and dialects, not as a script to paste.`,
 		activeHotelFacts?.googleMapsLocationUrl
@@ -21470,6 +21596,28 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 		if (!policy.allowed) return false;
 		const policyHotel = policy.hotel || (await getHotelById(latestCase.hotelId));
 		const st = ensureState(latestCase, activeHotelContextForCase(latestCase, policyHotel));
+		const latestGuestAtRaw = latestGuest?.date
+			? new Date(latestGuest.date).getTime()
+			: now();
+		const latestGuestAt = Number.isFinite(latestGuestAtRaw)
+			? latestGuestAtRaw
+			: now();
+		markGuestActivity(key, { activityAt: latestGuestAt });
+		const quietRemainingMs = guestReplyQuietRemainingMs(
+			st,
+			latestGuestAt,
+			AI_GUEST_REPLY_QUIET_MS
+		);
+		if (quietRemainingMs > 25) {
+			logStep(key, "turn.pre_worker_wait_guest_quiet", {
+				reason,
+				remainingMs: quietRemainingMs,
+				quietMs: AI_GUEST_REPLY_QUIET_MS,
+				guestTypingUntil: Number(st.guestTypingUntil || 0),
+				latestGuestAgeMs: now() - latestGuestAt,
+			});
+			return false;
+		}
 		recoverBookingContextFromConversation(latestCase, st, {
 			protectLatestGuestDateChange: true,
 			reason: "pre_worker_fast_path",
@@ -22320,6 +22468,23 @@ async function planTurn(io, sc) {
 				reason: "latest_guest_already_answered",
 			});
 			return;
+		}
+		if (userText) {
+			const initialQuietRemainingMs = guestReplyQuietRemainingMs(
+				st,
+				st.activeTurnGuestAt,
+				AI_GUEST_REPLY_QUIET_MS
+			);
+			if (initialQuietRemainingMs > 25) {
+				logStep(caseId, "turn.wait_guest_quiet_global", {
+					remainingMs: initialQuietRemainingMs,
+					quietMs: AI_GUEST_REPLY_QUIET_MS,
+					guestTypingUntil: Number(st.guestTypingUntil || 0),
+					latestGuestAgeMs: now() - Number(st.activeTurnGuestAt || now()),
+				});
+				deferredQuietDelayMs = initialQuietRemainingMs + 35;
+				return;
+			}
 		}
 		const hasPriorRecoverableBookingStage = assistantMessagesBeforeLatestGuest(sc).some(
 			(message) => assistantBookingStageFromMessage(message)
@@ -26370,7 +26535,7 @@ function scheduleActiveFastCareProbe(io, caseId, reason = "", attempt = 1) {
 	activeFastCareProbeTimers.set(key, timer);
 }
 
-function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
+function schedulePlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 	const caseId = idText(caseOrId);
 	if (!io || !caseId) return false;
 	const existing = scheduledTurns.get(caseId);
@@ -26397,7 +26562,7 @@ function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
 }
 
 /* ------------------- socket wiring ------------------- */
-function wireLegacySocket(io) {
+function wireSocket(io) {
 	io.on("connection", (socket) => {
 		socket.on("joinRoom", async ({ caseId }) => {
 			try {
@@ -26460,14 +26625,6 @@ function wireLegacySocket(io) {
 	});
 
 	console.log("[aiagent] socket-driven AI planner active.");
-}
-
-function schedulePlanTurn(io, caseOrId, options = {}) {
-	return scheduleLegacyPlanTurn(io, caseOrId, options);
-}
-
-function wireSocket(io) {
-	return wireLegacySocket(io);
 }
 
 const exportedOrchestrator = {
