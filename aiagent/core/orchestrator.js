@@ -115,6 +115,11 @@ const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv(
 	30000,
 	{ min: 15000, max: 180000 }
 );
+const AI_PLAN_WORKER_EARLY_FALLBACK_MS = intFromEnv(
+	"AI_PLAN_WORKER_EARLY_FALLBACK_MS",
+	5000,
+	{ min: 0, max: 60000 }
+);
 const AI_PLAN_WORKER_OLD_SPACE_MB = intFromEnv(
 	"AI_PLAN_WORKER_OLD_SPACE_MB",
 	1536,
@@ -7425,6 +7430,23 @@ function roomPreferenceSalesText(sc = {}, st = {}) {
 	return options
 		? `${name}, of course. At ${hotelName}, I can help you choose the right room. We currently have:\n${options}\n\nWhich room type would you like to book?`
 		: `${name}, of course. I can help you choose the right room. Which room type or guest count should I prepare for you?`;
+}
+
+function selectedHotelReservationStartFallbackText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const options = roomOptionsBullets(activeHotelRoomSummaries(st.hotel).slice(0, 4), lang);
+	if (/arabic/i.test(lang)) {
+		const optionsLine = options
+			? `\n\n\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0639\u0627\u062f\u0629:\n${options}`
+			: "";
+		return `${name}\u060c \u062d\u064a\u0627\u0643 \u0627\u0644\u0644\u0647. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0627\u0644\u062d\u062c\u0632 \u0641\u064a ${hotelName} \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u062f\u0642\u0629.${optionsLine}\n\n\u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629\u060c \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0641\u0636\u0644\u060c \u0648\u0623\u062c\u0647\u0632 \u0644\u0643 \u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631.`;
+	}
+	const optionsLine = options
+		? `\n\nAvailable room options usually include:\n${options}`
+		: "";
+	return `${name}, welcome. I can help you reserve at ${hotelName} and check the exact availability and price for you.${optionsLine}\n\nPlease send the check-in and checkout dates, plus the guest count or preferred room type, and I will prepare the best available option.`;
 }
 
 function multiRoomTypePreferenceRequestText(sc = {}, st = {}, requestedRoomCount = 2) {
@@ -20708,7 +20730,8 @@ async function sendBoundedUnansweredTurnFallback(
 	latestCase,
 	st,
 	caseId,
-	reason = "turn_recovery_fallback"
+	reason = "turn_recovery_fallback",
+	{ allowGeneric = true } = {}
 ) {
 	if (!io || !latestCase || !st || !latestGuestNeedsAiReply(latestCase)) {
 		return false;
@@ -20728,6 +20751,61 @@ async function sendBoundedUnansweredTurnFallback(
 	st.interrupt = false;
 	st.queue = [];
 	st.sendingToken = "";
+	recoverBookingContextFromConversation(latestCase, st, {
+		protectLatestGuestDateChange: true,
+		reason: `bounded_fallback_${reason}`,
+	});
+	applyRoomSelectionsFromText(latestCase, st, userText, {
+		source: `bounded_fallback_${reason}_latest_room`,
+	});
+	const casualFallbackText = preHydrateCasualTurnReplyText(latestCase, st, userText);
+	if (casualFallbackText) {
+		const sent = await humanSend(io, latestCase, st, casualFallbackText, {
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		});
+		if (sent) {
+			logStep(caseId, "turn_recovery.casual_fallback_sent", { reason });
+		}
+		return sent;
+	}
+	const deterministicHandled = await handleDeterministicStayProgress(
+		io,
+		latestCase,
+		st,
+		userText,
+		caseId,
+		{ source: `bounded_fallback_${reason}`, forceKnownDates: true }
+	);
+	if (deterministicHandled) {
+		logStep(caseId, "turn_recovery.deterministic_fallback_sent", {
+			reason,
+			waitFor: st.waitFor || "",
+			roomTypeKey: st.slots?.roomTypeKey || null,
+			checkinISO: st.slots?.checkinISO || null,
+			checkoutISO: st.slots?.checkoutISO || null,
+		});
+		return true;
+	}
+	if (st.hotel && selectedHotelBroadInquiryText(userText, st)) {
+		const sent = await humanSend(
+			io,
+			latestCase,
+			st,
+			selectedHotelReservationStartFallbackText(latestCase, st),
+			{ fast: true, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
+		);
+		if (sent) {
+			st.waitFor = "dates";
+			stampAsk(st, "dates");
+			logStep(caseId, "turn_recovery.reservation_start_fallback_sent", {
+				reason,
+				hotelName: localizedHotelName(latestCase, st),
+			});
+		}
+		return sent;
+	}
+	if (!allowGeneric) return false;
 	const waitFor = st.waitFor || nextPivot(st);
 	const fallbackText = responsiveSilenceFallbackText(latestCase, st, userText, waitFor);
 	const sent = await humanSend(io, latestCase, st, fallbackText, {
@@ -24368,9 +24446,12 @@ async function maybeSendWorkerFailureFallback(
 	const key = idText(caseId);
 	if (!io || !key || !latestGuestNeedsAiReply(latestCase)) return null;
 	if (
-		["worker_timeout", "worker_exit_failed", "worker_failed"].includes(
-			String(reason || "")
-		)
+		[
+			"worker_timeout",
+			"worker_exit_failed",
+			"worker_failed",
+			"worker_slow_recovery",
+		].includes(String(reason || ""))
 	) {
 		try {
 			const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
@@ -24383,7 +24464,8 @@ async function maybeSendWorkerFailureFallback(
 				latestCase,
 				st,
 				key,
-				reason
+				reason,
+				{ allowGeneric: reason !== "worker_slow_recovery" }
 			);
 			if (sent) {
 				return await getSupportCaseById(key).catch(() => latestCase);
@@ -24452,8 +24534,10 @@ function runPlanTurnInWorker({
 		const startedAt = now();
 		let timedOut = false;
 		let exited = false;
+		let earlyRecovered = false;
 		let forceKillTimer = null;
 		let activeNoticeTimer = null;
+		let earlyFallbackTimer = null;
 		const worker = fork(workerPathForPlanTurn(), [key], {
 			cwd: path.join(__dirname, "../.."),
 			env: {
@@ -24483,6 +24567,42 @@ function runPlanTurnInWorker({
 				activeNoticeTimer.unref();
 			}
 		}
+		if (AI_PLAN_WORKER_EARLY_FALLBACK_MS > 0) {
+			earlyFallbackTimer = setTimeout(async () => {
+				if (exited || timedOut || earlyRecovered) return;
+				try {
+					const latestCase = await getSupportCaseById(key).catch(() => null);
+					if (!latestCase || !latestGuestNeedsAiReply(latestCase)) return;
+					const updatedCase = await maybeSendWorkerFailureFallback(
+						io,
+						key,
+						latestCase,
+						{ reason: "worker_slow_recovery" }
+					);
+					if (updatedCase && !latestGuestNeedsAiReply(updatedCase)) {
+						earlyRecovered = true;
+						logStep(key, "turn.worker.early_recovered", {
+							reason,
+							elapsedMs: now() - startedAt,
+						});
+						worker.kill("SIGTERM");
+						forceKillTimer = setTimeout(() => {
+							if (!exited) worker.kill("SIGKILL");
+						}, 5000);
+						if (typeof forceKillTimer.unref === "function") {
+							forceKillTimer.unref();
+						}
+					}
+				} catch (error) {
+					logStep(key, "turn.worker.early_recovery_failed", {
+						message: error?.message || error,
+					});
+				}
+			}, AI_PLAN_WORKER_EARLY_FALLBACK_MS);
+			if (typeof earlyFallbackTimer.unref === "function") {
+				earlyFallbackTimer.unref();
+			}
+		}
 		const timeout = setTimeout(() => {
 			timedOut = true;
 			console.error("[aiagent] worker timeout; terminating turn", {
@@ -24501,6 +24621,7 @@ function runPlanTurnInWorker({
 		worker.once("error", (error) => {
 			clearTimeout(timeout);
 			if (activeNoticeTimer) clearTimeout(activeNoticeTimer);
+			if (earlyFallbackTimer) clearTimeout(earlyFallbackTimer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 			reject(error);
 		});
@@ -24509,15 +24630,17 @@ function runPlanTurnInWorker({
 			exited = true;
 			clearTimeout(timeout);
 			if (activeNoticeTimer) clearTimeout(activeNoticeTimer);
+			if (earlyFallbackTimer) clearTimeout(earlyFallbackTimer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 			const elapsedMs = now() - startedAt;
-			const success = code === 0 && !signal && !timedOut;
+			const success = earlyRecovered || (code === 0 && !signal && !timedOut);
 			logStep(key, "turn.worker.exit", {
 				reason,
 				success,
 				code,
 				signal,
 				timedOut,
+				earlyRecovered,
 				elapsedMs,
 				oldSpaceMb: AI_PLAN_WORKER_OLD_SPACE_MB,
 			});
@@ -24830,6 +24953,8 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		latestTextHasBookableRoomSelection,
 		roomSelectionSignalText,
 		selectedHotelBusQuestionText,
+		selectedHotelBroadInquiryText,
+		selectedHotelReservationStartFallbackText,
 		extractSingleStayDate,
 		extractDateRange,
 		recoverBookingContextFromConversation,

@@ -247,6 +247,7 @@ function normalizeArabicRoomText(value = "") {
 		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
 		.replace(/[\u0649\u06cc]/g, "\u064a")
 		.replace(/[\u0629\u06c1\u06be\u06d5]/g, "\u0647")
+		.replace(/\u0633\u064a\u0631\u064a\u0631/g, "\u0633\u0631\u064a\u0631")
 		.replace(/\s+/g, " ")
 		.trim();
 }

@@ -134,6 +134,10 @@ Go-live quality note: English and Arabic are the current production target and t
 - Worker mode remains the production default (`AI_PLAN_USE_WORKER=true`) because in-process planning can hold the public HTTP path during slow turns. The worker path keeps the server responsive while the global queue controls concurrency.
 - If worker mode is enabled and a worker times out or exits unsuccessfully, the recovery path now attempts a bounded real assistant reply for the latest guest turn instead of only sending a "please wait" system notice.
 - The global AI plan queue and server health guards still apply; this change removes avoidable per-turn overhead without removing concurrency limits.
+- The worker parent now has an early recovery guard (`AI_PLAN_WORKER_EARLY_FALLBACK_MS`, default 5000 ms). If the latest guest turn still has no assistant reply by then, the parent rebuilds booking memory from the saved conversation and may send a bounded answer around the normal 8-second customer target.
+- Early recovery is selective: it may answer deterministic booking progress, clear casual/human-moment turns, or broad selected-hotel reservation-start inquiries. It does not send a generic low-quality answer for complex unknown questions; those stay with the worker/OpenAI path or the later timeout fallback.
+- Bounded worker fallback must recover conversation slots before answering. It should never ask again for dates or room type when the saved transcript already contains them.
+- Arabic typo-tolerant room parsing treats `بسيريرين` like `بسريرين`, so a guest asking for a room with two beds is routed to `doubleRooms`.
 
 ## Selected-Hotel Inquiry Routing - 2026-06-29
 
