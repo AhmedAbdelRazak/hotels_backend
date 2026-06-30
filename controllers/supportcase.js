@@ -820,6 +820,94 @@ async function publicImmediateB2CAiReplyText(
 	);
 }
 
+const publicReservationBaseUrl = () =>
+	String(
+		process.env.CLIENT_URL ||
+			process.env.REACT_APP_MAIN_URL_JANNAT ||
+			"https://jannatbooking.com"
+	).replace(/\/+$/, "");
+
+const publicAiReservationRef = (supportCase = {}) => {
+	const ai = supportCase.aiReservation || {};
+	const reservationId = normalizeId(
+		ai.reservationId || ai.reservation?._id || ai.reservation?.id
+	);
+	const confirmation = cleanText(
+		ai.confirmationNumber || ai.confirmation_number || "",
+		40
+	);
+	if (!reservationId && !confirmation) return null;
+	return { reservationId, confirmation };
+};
+
+const publicPostBookingCloseText = (text = "") => {
+	const normalized = cleanText(text, 500).toLowerCase();
+	if (!normalized || /[?؟]/.test(normalized)) return false;
+	return /^(?:no|nope|no thanks|no thank you|nothing|that's all|that is all|all good|thanks|thank you|bye|goodbye|see you|شكرا|شكرًا|لا|لا شكرا|خلاص|كده تمام|مافيش|مفيش|بس كده)(?:[\s.!،]*)$/i.test(
+		normalized
+	);
+};
+
+const publicPostBookingImmediateReplyPayload = (
+	supportCase = {},
+	latestEntry = {}
+) => {
+	const ref = publicAiReservationRef(supportCase);
+	if (!ref?.confirmation) return null;
+	const text = cleanText(latestEntry?.message, 8000);
+	if (!text) return null;
+	const hotelName =
+		cleanChatDisplayName(
+			supportCase.displayName2 ||
+				supportCase.targetUserName ||
+				supportCase.targetUserRole
+		) || "the hotel";
+	const baseUrl = publicReservationBaseUrl();
+	const detailsLink = `${baseUrl}/single-reservation/${ref.confirmation}`;
+	const paymentLink =
+		ref.reservationId && ref.confirmation
+			? `${baseUrl}/client-payment/${ref.reservationId}/${ref.confirmation}`
+			: "";
+	const asksLinkOrArrival =
+		/\b(?:link|url|details|payment|pay|arrival|arrive|reception|front desk|show|send|share)\b/i.test(
+			text
+		) ||
+		/(?:رابط|الدفع|ادفع|تفاصيل|الاستقبال|الوصول|ارسلي|ارسل|ابعث|ابعت)/i.test(
+			text
+		);
+	const asksConfirmation =
+		/\b(?:confirmation|confirm|reference|booking number|reservation number|number again|remind)\b/i.test(
+			text
+		) ||
+		/(?:رقم\s+(?:التأكيد|التاكيد|الحجز)|التأكيد|التاكيد)/i.test(text);
+	if (publicPostBookingCloseText(text)) {
+		return {
+			message: `You're very welcome. Your reservation ${ref.confirmation} at ${hotelName} is confirmed, and I will close this chat now.`,
+			clientAction: "ai_post_booking_close",
+			closeCase: true,
+		};
+	}
+	if (asksLinkOrArrival) {
+		return {
+			message: [
+				`Yes. Your reservation ${ref.confirmation} at ${hotelName} is confirmed.`,
+				`You can show this details link at reception if needed: ${detailsLink}`,
+				paymentLink ? `Payment/details link: ${paymentLink}` : "",
+			]
+				.filter(Boolean)
+				.join("\n"),
+			clientAction: "ai_post_booking_link",
+		};
+	}
+	if (asksConfirmation) {
+		return {
+			message: `Your confirmation number is **${ref.confirmation}**. Your reservation at ${hotelName} is confirmed.`,
+			clientAction: "ai_post_booking_confirmation",
+		};
+	}
+	return null;
+};
+
 async function appendPublicAiQuickReply(
 	io,
 	supportCase = {},
@@ -2264,10 +2352,18 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 							? await buildImmediateSkipEmailReviewReply(updatedCase._id)
 							: await buildImmediateReservationDetailsReply(updatedCase._id)
 						: null;
+				const immediatePostBookingPayload =
+					legacyAiEngine &&
+					!immediateQuote?.message &&
+					!proceedPromptCandidate &&
+					!immediateReservationPayload?.message
+						? publicPostBookingImmediateReplyPayload(updatedCase, safeConversation)
+						: null;
 				const quickReply =
 					immediateQuote?.message ||
 					proceedPrompt ||
 					immediateReservationPayload?.message ||
+					immediatePostBookingPayload?.message ||
 					(legacyAiEngine && !proceedPromptCandidate
 						? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
 						: "");
@@ -2280,11 +2376,14 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 							clientAction:
 								immediateQuote?.clientAction ||
 								immediateReservationPayload?.clientAction ||
+								immediatePostBookingPayload?.clientAction ||
 								"ai_immediate_reply",
 							tagPrefix: immediateQuote?.message
 								? "ai_quick_quote"
 								: immediateReservationPayload?.message
 								? "ai_quick_reservation_state"
+								: immediatePostBookingPayload?.message
+								? "ai_quick_post_booking"
 								: "ai_quick_immediate",
 							quickReplies:
 								immediateQuote?.quickReplies ||
@@ -2293,6 +2392,37 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 						}
 					);
 					if (quickReplyCase) updatedCase = quickReplyCase;
+					if (immediatePostBookingPayload?.closeCase) {
+						const closedCase = await SupportCase.findByIdAndUpdate(
+							updatedCase._id,
+							{
+								$set: {
+									caseStatus: "closed",
+									closedAt: new Date(),
+									closedBy: "ai",
+									aiToRespond: false,
+									aiPausedAt: new Date(),
+									aiHandoffReason: "post_booking_closed",
+								},
+								$unset: { aiRecoveryScheduledAt: "" },
+							},
+							{ new: true }
+						)
+							.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
+							.lean()
+							.exec();
+						if (closedCase) {
+							updatedCase = closedCase;
+							emitSupportCaseClosed(req.io, updatedCase, {
+								closedBy: "ai",
+								reason: "post_booking_closed",
+							});
+							req.io.to(String(updatedCase._id)).emit("aiPaused", {
+								caseId: String(updatedCase._id),
+								reason: "post_booking_closed",
+							});
+						}
+					}
 				} else {
 					scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
 					if (legacyAiEngine) {

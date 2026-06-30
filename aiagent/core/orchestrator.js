@@ -15591,6 +15591,24 @@ function ensureCurrentQuoteForSlots(st = {}) {
 	return quote;
 }
 
+function quoteHasCreatePricingRows(quote = {}) {
+	if (!quote?.available) return false;
+	if (Array.isArray(quote.pricingByDay) && quote.pricingByDay.length) return true;
+	if (Array.isArray(quote.rows) && quote.rows.length) return true;
+	if (
+		Array.isArray(quote.rooms) &&
+		quote.rooms.some(
+			(line = {}) =>
+				(Array.isArray(line.pricingByDay) && line.pricingByDay.length) ||
+				(Array.isArray(line.quote?.pricingByDay) && line.quote.pricingByDay.length) ||
+				(Array.isArray(line.quote?.rows) && line.quote.rows.length)
+		)
+	) {
+		return true;
+	}
+	return false;
+}
+
 function safePriceRoomSelectionForStay(st = {}) {
 	const selections = roomSelectionsFromSlots(st);
 	return safePriceRoomSelectionsForStay(
@@ -18617,14 +18635,21 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	}
 	if (!st.slots.email && !st.slots.emailSkipped) st.slots.emailSkipped = true;
 	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
-	await hydrateHotelPricingForCurrentStay(sc, st, "reservation_finalize");
 	const quoteForCreate =
+		activeQuoteMatchesSlots(st) && quoteHasCreatePricingRows(st.quote?.data)
+			? st.quote.data
+			: null;
+	if (!quoteForCreate) {
+		await hydrateHotelPricingForCurrentStay(sc, st, "reservation_finalize");
+	}
+	const finalQuoteForCreate =
+		quoteForCreate ||
 		st.quote?.data ||
 		safePriceRoomSelectionForStay(st);
-	if (!quoteForCreate?.available) {
+	if (!finalQuoteForCreate?.available) {
 		await markAiReservationFinalizeFailed(
 			caseId,
-			quoteForCreate?.reason || "Selected room is no longer available."
+			finalQuoteForCreate?.reason || "Selected room is no longer available."
 		);
 		await handoffToHuman(io, sc, st, "reservation_finalize_failed");
 		return true;
@@ -18638,8 +18663,8 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 				...st.slots,
 				name: st.slots.fullName || st.slots.name,
 			},
-			quoteData: quoteForCreate,
-			room: quoteForCreate.room,
+			quoteData: finalQuoteForCreate,
+			room: finalQuoteForCreate.room,
 		});
 	} catch (error) {
 		await markAiReservationFinalizeFailed(caseId, error);
@@ -18656,7 +18681,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		sc,
 		st,
 		reservation,
-		quoteForCreate,
+		finalQuoteForCreate,
 		links
 	);
 	st.waitFor = "post_booking_followup";
