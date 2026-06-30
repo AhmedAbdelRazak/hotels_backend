@@ -1104,6 +1104,43 @@ function roomCountFromSelectionSegment(segment = "", key = "") {
 	return 1;
 }
 
+function requestedRoomCountFromText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return null;
+	const normalized = digitsToEnglish(normalizeNumberWordsForParsing(raw)).toLowerCase();
+	const ar = digitsToEnglish(normalizeControlText(raw).arabic);
+	const explicit =
+		normalized.match(/\b([2-8])\s*(?:rooms?|room)\b/i) ||
+		normalized.match(/\b(?:rooms?|room)\s*(?:count|qty|quantity)?\s*[:#-]?\s*([2-8])\b/i) ||
+		ar.match(/([2-8])\s*(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629)/i) ||
+		ar.match(/(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629)\s*([2-8])/i);
+	if (explicit?.[1]) return roomSelectionCount(explicit[1], 1);
+	if (/(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u063a\u0631\u0641\u062a\u0627\u0646|\u0627\u0648\u0636\u062a\u064a\u0646|\u0627\u0648\u0636\u062a\u0627\u0646)/i.test(ar)) {
+		return 2;
+	}
+	return null;
+}
+
+function rememberRequestedRoomCountFromText(sc = {}, st = {}, text = "", source = "") {
+	const count = requestedRoomCountFromText(text);
+	if (!count || count < 2) return false;
+	st.slots = st.slots || {};
+	const selectionCount = totalRoomCountFromSelections(st.slots.roomSelections || []);
+	if (selectionCount > 0) return false;
+	if (Number(st.slots.rooms || 0) === count) return false;
+	st.slots.rooms = count;
+	st.slots.requestedRoomCount = count;
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
+	st.reviewSent = false;
+	logStep(String(sc._id || ""), "slots.requested_room_count", {
+		source,
+		count,
+		text: String(text || "").slice(0, 120),
+	});
+	return true;
+}
+
 function mergeRoomSelections(selections = []) {
 	const merged = new Map();
 	for (const selection of Array.isArray(selections) ? selections : []) {
@@ -3416,6 +3453,19 @@ function hydrateKnownSlotsFromConversation(
 		dateRaw: { ...(st.dateRaw || {}) },
 		waitFor: st.waitFor || "dates",
 	};
+	let dateLoopBudgetLogged = false;
+	const noteDateLoopBudget = (stage) => {
+		if (dateLoopBudgetLogged) return;
+		if (now() - hydrationStartedAt < AI_SLOT_HYDRATION_SYNC_BUDGET_MS) return;
+		dateLoopBudgetLogged = true;
+		markHydrationStage(`${stage}_budget_soft_continue`);
+		logStep(String(sc._id || ""), "slots.hydrate_budget_soft_continue", {
+			stage,
+			elapsedMs: now() - hydrationStartedAt,
+			conversationLength: conversation.length,
+			waitFor: st.waitFor || null,
+		});
+	};
 	const latestGuestIndex = protectLatestGuestDateChange
 		? latestGuestMessageIndex(sc)
 		: -1;
@@ -3477,15 +3527,23 @@ function hydrateKnownSlotsFromConversation(
 					}
 				}
 			}
-			if (hydrationBudgetExceeded("date_guest_loop")) return;
+			noteDateLoopBudget("date_guest_loop");
 			if (needsNationalityRecovery) {
 				const messageNationality = latestNationalityHintFromText(messageText);
 				if (messageNationality) latestGuestNationality = messageNationality;
 			}
+			if (needsStayRecovery) {
+				rememberRequestedRoomCountFromText(
+					sc,
+					st,
+					messageText,
+					"slots.hydrate_room_count"
+				);
+			}
 		}
 		if (!guestMessage) continue;
 		if (messageText && !humanMomentWithoutDetails) guestMessages.push(messageText);
-		if (hydrationBudgetExceeded("guest_message_collect")) return;
+		noteDateLoopBudget("guest_message_collect");
 	}
 	markHydrationStage("date_guest_loop");
 	const guestText = guestMessages.join("\n") || conversationText(sc, { guestsOnly: true });
@@ -3514,6 +3572,19 @@ function hydrateKnownSlotsFromConversation(
 	} else if (latestConversationPartialDate && !currentDateRange(st)) {
 		applyPartialDateToState(st, latestConversationPartialDate);
 	}
+	const recoveredGuestCountFromStay = needsStayRecovery
+		? requestedGuestCountFromText(guestText)
+		: null;
+	if (recoveredGuestCountFromStay && !st.slots.adultsProvided) {
+		st.slots.adults = recoveredGuestCountFromStay;
+		st.slots.adultsProvided = true;
+		st.slots.children = 0;
+		st.slots.childrenProvided = true;
+		logStep(String(sc._id || ""), "slots.guest_count_from_conversation", {
+			source: "slots.hydrate_guest_count_early",
+			guestCount: recoveredGuestCountFromStay,
+		});
+	}
 	markHydrationStage("date_merge");
 	if (hydrationBudgetExceeded("date_merge")) return;
 	if (protectedLatestGuestDateRange) {
@@ -3531,6 +3602,17 @@ function hydrateKnownSlotsFromConversation(
 		applyLatestRoomSignalFromConversation(sc, st, {
 			source: "slots.hydrate_room_signal",
 		});
+		const recoveredGuestCount = recoveredGuestCountFromStay;
+		if (recoveredGuestCount && !st.slots.adultsProvided) {
+			st.slots.adults = recoveredGuestCount;
+			st.slots.adultsProvided = true;
+			st.slots.children = 0;
+			st.slots.childrenProvided = true;
+			logStep(String(sc._id || ""), "slots.guest_count_from_conversation", {
+				source: "slots.hydrate_guest_count",
+				guestCount: recoveredGuestCount,
+			});
+		}
 		st.hydratedStayConversationRevision = revision;
 		markHydrationStage("room_loop");
 	} else {
@@ -5649,6 +5731,46 @@ function buildFutureIsoDateFromParts(day, month, year = null) {
 	return date.toISOString().slice(0, 10);
 }
 
+function parseNumericStayRange(text = "") {
+	const raw = digitsToEnglish(String(text || ""));
+	if (!raw.trim()) return { checkinISO: null, checkoutISO: null, raw: null };
+	const separator =
+		"(?:\\s*(?:to|until|through|thru|till|الى|الي|إلى|إلي|لغاية|لغايه|حتى|حتي|[-–—])\\s*)";
+	const datePart = "(\\d{1,2})\\s*[\\/.-]\\s*(\\d{1,2})(?:\\s*[\\/.-]\\s*((?:20)?\\d{2}))?";
+	const match = raw.match(new RegExp(`${datePart}${separator}${datePart}`, "i"));
+	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
+	const normalizeYear = (value) => {
+		if (!value) return null;
+		const year = Number(value);
+		if (!Number.isFinite(year)) return null;
+		return year < 100 ? 2000 + year : year;
+	};
+	const firstYear = normalizeYear(match[3]);
+	const secondYear = normalizeYear(match[6]);
+	const sharedYear = firstYear || secondYear || new Date().getFullYear();
+	const checkinISO = buildFutureIsoDateFromParts(match[1], match[2], sharedYear);
+	let checkoutISO = buildFutureIsoDateFromParts(
+		match[4],
+		match[5],
+		secondYear || sharedYear
+	);
+	if (!checkinISO || !checkoutISO) {
+		return { checkinISO: null, checkoutISO: null, raw: null };
+	}
+	if (checkoutISO <= checkinISO) {
+		checkoutISO = adjustCheckoutAfterCheckin(checkoutISO, checkinISO);
+	}
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: `${match[1]}/${match[2]}/${sharedYear}`,
+			checkout: `${match[4]}/${match[5]}/${secondYear || sharedYear}`,
+			calendar: "gregorian",
+		},
+	};
+}
+
 function likelyStayDateText(text = "") {
 	const raw = digitsToEnglish(String(text || "").toLowerCase());
 	if (!raw.trim()) return false;
@@ -5860,9 +5982,21 @@ function extractSingleNumericStayDate(text = "", st = {}) {
 	if (!hasExplicitDateRole && !waitingForDate) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}
-	const match = normalized.match(
-		/(?:\b(?:arrival|arrive|check\s*-?\s*in|checkin|date|departure|checkout|check\s*-?\s*out)\b|(?:\u062a\u0627\u0631\u064a\u062e|\u0648\u0635\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u062f\u062e\u0648\u0644|\u0627\u0644\u062f\u062e\u0648\u0644|\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u0627\u0644\u0645\u063a\u0627\u062f\u0631(?:\u0629|\u0647)|\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c))?\s*(\d{1,2})\s*[\/.-]\s*(\d{1,2})(?:\s*[\/.-]\s*((?:20)?\d{2}))?/
-	);
+	const dateRolePrefix =
+		"(?:\\b(?:arrival|arrive|check\\s*-?\\s*in|checkin|date|departure|checkout|check\\s*-?\\s*out)\\b|(?:\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c))?";
+	const match =
+		normalized.match(
+			new RegExp(
+				`${dateRolePrefix}\\s*(\\d{1,2})\\s*[\\/.-]\\s*(\\d{1,2})(?:\\s*[\\/.-]\\s*((?:20)?\\d{2}))?`
+			)
+		) ||
+		(hasExplicitDateRole
+			? normalized.match(
+					new RegExp(
+						`${dateRolePrefix}\\s*(\\d{1,2})\\s+(\\d{1,2})(?:\\s+((?:20)?\\d{2}))?`
+					)
+			  )
+			: null);
 	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
 	const role = stayDateRoleFromText(match[0] || normalized, st);
 	const iso = chooseNumericStayDateISO(match[1], match[2], match[3] || null, role, st);
@@ -5923,6 +6057,10 @@ function extractDateRange(text = "") {
 	const quick = quickDateRange(text);
 	if (quick?.checkinISO && quick?.checkoutISO) {
 		return quick;
+	}
+	const numericRange = parseNumericStayRange(text);
+	if (numericRange?.checkinISO && numericRange?.checkoutISO) {
+		return numericRange;
 	}
 	if (!likelyStayDateText(text)) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
@@ -7235,6 +7373,29 @@ function roomPreferenceSalesText(sc = {}, st = {}) {
 		: `${name}, of course. I can help you choose the right room. Which room type or guest count should I prepare for you?`;
 }
 
+function multiRoomTypePreferenceRequestText(sc = {}, st = {}, requestedRoomCount = 2) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	const hotelName = localizedHotelName(sc, st);
+	const roomCountText = localizedNumber(requestedRoomCount || 2, lang);
+	const guestCount = Number(st.slots?.adults || st.slots?.guestCount || 0);
+	const guestText = guestCount ? localizedNumber(guestCount, lang) : "";
+	const options = roomOptionsBullets(activeHotelRoomSummaries(st.hotel).slice(0, 6), lang);
+	if (/arabic/i.test(lang)) {
+		const roomPhrase =
+			Number(requestedRoomCount || 2) === 2
+				? "\u063a\u0631\u0641\u062a\u064a\u0646"
+				: `${roomCountText} \u063a\u0631\u0641`;
+		const guestLine = guestText ? ` ولعدد ${guestText} ضيوف` : "";
+		return options
+			? `${name}، وصلني أنك تحتاج ${roomPhrase}${guestLine} في ${hotelName}. حتى أعطيك سعرًا صحيحًا، اختر نوع كل غرفة من الخيارات المتاحة:\n${options}\n\nمثلاً: غرفة مزدوجة + غرفة مزدوجة، أو اكتب الأنواع التي تفضلها وسأراجع السعر فورًا.`
+			: `${name}، وصلني أنك تحتاج ${roomPhrase}${guestLine}. حتى أعطيك سعرًا صحيحًا، اكتب نوع كل غرفة تفضلها وسأراجع السعر فورًا.`;
+	}
+	return options
+		? `${name}, I have that you need ${roomCountText} rooms${guestText ? ` for ${guestText} guests` : ""} at ${hotelName}. To give the correct price, please choose each room type from the available options:\n${options}\n\nFor example: double room + double room, or type the two room types you prefer and I will check the price right away.`
+		: `${name}, I have that you need ${roomCountText} rooms${guestText ? ` for ${guestText} guests` : ""}. To give the correct price, please type each room type you prefer and I will check it right away.`;
+}
+
 function roomCapacityLabel(roomTypeKey = "", lang = "English") {
 	const isArabic = /arabic/i.test(lang);
 	const labels = {
@@ -7378,6 +7539,19 @@ function requestedGuestCountFromText(text = "") {
 		)
 	) {
 		addCount(2);
+	}
+	if (
+		/(?:\u0632\u0648\u062c|\u0632\u0648\u062c\u064a)\s*(?:\u0648|\+|,)?\s*(?:\u0632\u0648\u062c\u0629|\u0632\u0648\u062c\u0647|\u0632\u0648\u062c\u062a\u064a)[\s\S]{0,60}(?:\u0642\u0631\u064a\u0628|\u0627\u062e|\u0623\u062e|\u0631\u062c\u0644|\u0634\u062e\u0635)/i.test(
+			rawArabic
+		) ||
+		/\b(?:husband|wife|couple)\b[\s\S]{0,80}\b(?:relative|man|male|brother|person)\b/i.test(
+			lower
+		) ||
+		/(?:husbandandwife|couple).{0,80}(?:relative|man|male|brother|person)/i.test(
+			latinCompact
+		)
+	) {
+		addCount(3);
 	}
 	addCount(standaloneGuestCountFromText(raw));
 	addCount(countNearTerms(normalized, GUEST_COUNT_TERMS, { allowZero: false }));
@@ -7673,6 +7847,9 @@ async function answerSmallGroupRoomCountRequest(
 	if (!st.hotel || st.activeTurnHadReply) return false;
 	const count = guestCount || requestedGuestCountFromText(userText);
 	if (!count || count > 5 || !roomGuestCountReservationRequestText(userText)) {
+		return false;
+	}
+	if (Number(st.slots?.rooms || st.slots?.requestedRoomCount || 0) > 1) {
 		return false;
 	}
 	const roomTypeKey = recommendedRoomTypeKeyForGuestCount(count);
@@ -8006,6 +8183,7 @@ async function handleDeterministicStayProgress(
 		}
 	}
 	applyReservationGuestCountsFromText(st, latestText);
+	rememberRequestedRoomCountFromText(sc, st, latestText, `${source}_latest_room_count`);
 
 	const hasCompleteDates = Boolean(st.slots?.checkinISO && st.slots?.checkoutISO);
 	const asksPriceOrAvailability = priceOrAvailabilityRequestText(latestText);
@@ -8025,6 +8203,35 @@ async function handleDeterministicStayProgress(
 	if (!bookingWait) return false;
 
 	if (!st.slots.roomTypeKey) {
+		const requestedRoomCount = Number(st.slots?.rooms || st.slots?.requestedRoomCount || 0);
+		if (
+			requestedRoomCount > 1 &&
+			(hasFreshCompleteDates ||
+				hasFreshPartialDate ||
+				forceKnownDates ||
+				asksPriceOrAvailability ||
+				st.waitFor === "room")
+		) {
+			const sent = await humanSend(
+				io,
+				sc,
+				st,
+				multiRoomTypePreferenceRequestText(sc, st, requestedRoomCount),
+				{ fast: true, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
+			);
+			if (sent) {
+				st.waitFor = "room";
+				stampAsk(st, "room");
+			}
+			logStep(caseId || String(sc._id || ""), "stay_progress.ask_multi_room_types", {
+				source,
+				requestedRoomCount,
+				hasFreshCompleteDates,
+				forceKnownDates,
+				asksPriceOrAvailability,
+			});
+			return true;
+		}
 		const guestCountForRoomFit = requestedGuestCountFromText(latestText);
 		const recommendedRoomTypeKey =
 			recommendedRoomTypeKeyForGuestCount(guestCountForRoomFit);
@@ -20766,6 +20973,31 @@ async function planTurn(io, sc) {
 			st.hotel &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			priceOrAvailabilityRequestText(userText)
+		) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "pre_hydrate_price_memory_guard",
+			});
+			if (st.slots?.checkinISO && st.slots?.checkoutISO) {
+				const handledPriceMemory = await handleDeterministicStayProgress(
+					io,
+					sc,
+					st,
+					userText,
+					caseId,
+					{ source: "pre_hydrate_price_memory_guard", forceKnownDates: true }
+				);
+				if (handledPriceMemory) return;
+			}
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
 			(cancellationRefundPolicyQuestionText(userText) ||
 				cancellationActionRequestText(userText))
 		) {
@@ -24465,6 +24697,15 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		roomSelectionSignalText,
 		selectedHotelBusQuestionText,
 		extractSingleStayDate,
+		extractDateRange,
+		recoverBookingContextFromConversation,
+		requestedGuestCountFromText,
+		requestedRoomCountFromText,
+		multiRoomTypePreferenceRequestText,
+		reservationRecoveryCandidateText,
+		lightweightGuestMessageWithoutReservationPayloadText,
+		isGuestConversationMessage,
+		latestGuestMessageIndex,
 		fallbackSupportDecision,
 		localDecisionNeedsOpenAiRouter,
 		normalizeSupportDecisionPayload,

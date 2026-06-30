@@ -128,3 +128,11 @@ Go-live quality note: English and Arabic are the current production target and t
 - The router receives the full transcript, current slots, latest NLU, selected-hotel summary, previous guest context, employee learning examples, and the provisional local decision.
 - Router review is soft-timed by `AI_ROUTER_DECISION_SOFT_TIMEOUT_MS` with a default of 2800 ms. If OpenAI is slow, unavailable, or returns invalid JSON, the orchestrator falls back to the local decision so the guest is not left unanswered.
 - If OpenAI classifies the turn as `smalltalk`, the orchestrator now routes directly to the smalltalk handler even when deterministic NLU missed it. This protects messages like "how are you?", emotional comments, or chat-quality complaints from being pulled into date, phone, or reservation-detail collection.
+
+## Fragmented Arabic Booking Recovery - 2026-06-29
+
+- Fast slot recovery now understands fragmented Arabic booking turns such as `تاريخ الوصول 30 6`, `تاريخ المغادره 7/7/2026`, `غرفتين`, `لثلاث اشخاص`, and `نحن زوج وزوجة وقريب رجل`.
+- Numeric date ranges such as `30/6/2026 الى 7/7/2026` are parsed as Gregorian stay dates when the separator is clear.
+- The first hydration pass no longer abandons recovered dates/room counts before applying them when the latest message is a short price question.
+- A remembered two-room request wins over later guest-count inference, so `غرفتين` + `لثلاث اشخاص` does not collapse into one triple-room recommendation.
+- If dates and room count are known but exact room types are not, a price question now asks for the two room types from the active hotel options instead of asking for dates again.
