@@ -421,6 +421,16 @@ const publicHasArabicText = (supportCase = {}, latestEntry = {}) => {
 	return /[\u0600-\u06ff]/.test(text) || /arabic|\bar\b/.test(lang);
 };
 
+const publicHasArabicScript = (value = "") =>
+	/[\u0600-\u06ff]/.test(String(value || ""));
+
+const publicReplyShouldUseArabic = (supportCase = {}, latestEntry = {}) => {
+	const text = cleanText(latestEntry?.message, 8000);
+	if (publicHasArabicScript(text)) return true;
+	if (/[a-z]/i.test(text)) return false;
+	return publicHasArabicText(supportCase, latestEntry);
+};
+
 const normalizePublicArabicIntentText = (value = "") =>
 	String(value || "")
 		.replace(/[\u0625\u0623\u0622\u0671]/g, "\u0627")
@@ -611,6 +621,138 @@ const publicMinuteText = (value = "", isArabic = false) => {
 	return amount === 1 ? "1 minute" : `${numberMatch[0]} minutes`;
 };
 
+const publicKnownHotelFactDetailTranslation = (
+	details = "",
+	isArabic = false,
+	kind = ""
+) => {
+	const raw = cleanPublicHotelFact(details, 1200);
+	if (!raw || isArabic || !publicHasArabicScript(raw)) return "";
+	const hasPrivateBus =
+		/(?:\u0628\u0627\u0635|\u062d\u0627\u0641\u0644|\u062d\u0627\u0641\u0644\u0629|\u0646\u0642\u0644)/i.test(
+			raw
+		);
+	const hasShuhadaStop =
+		/(?:\u0645\u0648\u0642\u0641\s*\u0627\u0644\u0634\u0647\u062f\u0627\u0621|\u0627\u0644\u0634\u0647\u062f\u0627\u0621)/i.test(
+			raw
+	);
+	if (kind === "bus" && hasPrivateBus && hasShuhadaStop) {
+		return "It takes guests to the Al Shuhada stop, making access and transportation more comfortable.";
+	}
+	if (
+		kind === "nusuk" &&
+		/\u0646\u0633\u0643/i.test(raw) &&
+		/(?:\u0645\u062a\u0627\u062d|\u062d\u062c\u0632\u0643\u0645|\u0627\u062c\u0631\u0627\u0621\u0627\u062a|\u0625\u062c\u0631\u0627\u0621\u0627\u062a)/i.test(
+			raw
+		)
+	) {
+		return "You can use Nusuk for visit procedures according to the available official appointments.";
+	}
+	return "";
+};
+
+const publicHotelDetailForReply = (
+	details = "",
+	isArabic = false,
+	kind = "",
+	max = 900
+) => {
+	const raw = cleanPublicHotelFact(details, max);
+	if (!raw) return "";
+	if (isArabic) return raw;
+	const knownTranslation = publicKnownHotelFactDetailTranslation(raw, false, kind);
+	if (knownTranslation) return knownTranslation;
+	return publicHasArabicScript(raw) ? "" : raw;
+};
+
+async function publicFastCareAndUnclearBookingReplyText(
+	supportCase = {},
+	latestEntry = {},
+	{ hotel: providedHotel = null } = {}
+) {
+	const latestText = cleanText(latestEntry?.message, 8000);
+	if (!latestText) return "";
+	const lower = latestText.toLowerCase();
+	const latinCompact = lower.replace(/[^a-z0-9]+/g, "");
+	const arabicIntent = normalizePublicArabicIntentText(latestText);
+	const factKind = publicHotelFactIntentKind(latestText);
+	if (
+		factKind &&
+		!["rooms", "family_capacity"].includes(factKind) &&
+		!/\b(?:not\s+sure|dont\s+know|don't\s+know|what\s+do\s+you\s+need|guide|walk\s+me\s+through)\b/i.test(
+			lower
+		)
+	) {
+		return "";
+	}
+	if (
+		/\b(?:price|availability|available|total|quote|rate|rates|cost|sar|riyal|riyals|night|nights|january|february|march|april|may|june|july|august|september|october|november|december|20\d{2})\b/i.test(
+			lower
+		) ||
+		/(?:\u0633\u0639\u0631|\u0627\u0644\u0633\u0639\u0631|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0641\u0631|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0628\u0643\u0627\u0645|\u0643\u0627\u0645|\u0631\u064a\u0627\u0644|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644|20\d{2})/i.test(
+			arabicIntent
+		)
+	) {
+		return "";
+	}
+	const unclearBooking =
+		/\b(?:book\s*(?:a\s*)?room|reserve|reservation|not\s+sure\s+(?:about\s+)?dates?|dont\s+know\s+(?:the\s+)?dates?|don't\s+know\s+(?:the\s+)?dates?|no\s+dates?|without\s+dates?|what\s+do\s+you\s+need|what\s+should\s+i\s+send|what\s+should\s+happen|how\s+do\s+i\s+start|where\s+do\s+i\s+start|walk\s+me\s+through|guide\s+me|confused|lost)\b/i.test(
+			lower
+		) ||
+		/(?:abgha|abga|abi|aby|aiza|ayz|aayz|qreeb|qareeb|haram|ma3ndi|maandi|m3ndi|3ndi|bs|ehawelk|awal|whatdoyouneed|whatshouldisend|dontknowdates|walkmethrough|guideme)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649|\u0627\u0628\u064a|\u0623\u0628\u064a|\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u062d\u062c\u0632|\u063a\u0631\u0641\u0647|\u063a\u0631\u0641\u0629|\u0642\u0631\u064a\u0628|\u0627\u0644\u062d\u0631\u0645|\u0645\u0627\s+\u0639\u0646\u062f\u064a|\u0645\u0627\s+\u0639\u0646\u062f\u0649|\u0628\u062f\u0648\u0646\s+\u062a\u0627\u0631\u064a\u062e|\u0628\u0633\s+\u0645\u0627|\u0645\u062f\u0631\u064a|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0645\u062d\u062f\u062f|\u0645\u0648\s+\u0648\u0627\u0636\u062d|\u0648\u0634\s+\u062a\u062d\u062a\u0627\u062c|\u0648\u0634\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628|\u0627\u064a\u0647\s+\u0627\u0644\u0627\u0648\u0644|\u0627\u064a\u0647\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628|\u0627\u0628\u062f\u0623|\u0627\u0628\u062f\u0627)/i.test(
+			arabicIntent
+		);
+	const careConcern =
+		/\b(?:parents?|family\s+(?:members?|trip|booking|travel|visit)|travel(?:ing|ling)\s+with|mother|father|mom|mum|dad|elderly|senior|seniors|older|worried|worry|nervous|stress|stressed|comfortable|ok\s+for\s+them|care|safe|sure\s+before\s+i\s+book)\b/i.test(
+			lower
+		) ||
+		/(?:parents|family|mother|father|elderly|senior|older|worried|nervous|comfortable|okforthem|bookingonline|feelsure|tamn|tamen|khayef|khayfa|mama|ommi|ummi|ahli)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0645\u064a|\u0623\u0645\u064a|\u0648\u0627\u0644\u062f\u062a\u064a|\u0648\u0627\u0644\u062f\u062a\u0649|\u0627\u0628\u0648\u064a|\u0623\u0628\u0648\u064a|\u0648\u0627\u0644\u062f\u064a|\u0648\u0627\u0644\u062f\u0649|\u0627\u0647\u0644\u064a|\u0623\u0647\u0644\u064a|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u0629|\u0643\u0628\u0627\u0631|\u0645\u062a\u0648\u062a\u0631|\u0645\u0642\u0644\u0642|\u0642\u0644\u0642\u0627\u0646|\u062e\u0627\u064a\u0641|\u062e\u0627\u064a\u0641\u0629|\u0637\u0645\u0646\u064a|\u0637\u0645\u0646\u064a\u0646\u064a|\u0627\u0644\u0645\u0634\u0648\u0627\u0631|\u062a\u0639\u0628|\u064a\u062a\u0639\u0628|\u062a\u062a\u0639\u0628|\u064a\u062a\u0639\u0628\u0647\u0627|\u064a\u0646\u0627\u0633\u0628|\u0645\u0646\u0627\u0633\u0628)/i.test(
+			arabicIntent
+		);
+	if (!unclearBooking && !careConcern) return "";
+
+	const isArabic = publicReplyShouldUseArabic(supportCase, latestEntry);
+	const hotel = await publicHotelFactDocForCase(supportCase, providedHotel);
+	const hotelName = publicHotelNameForReply(supportCase, hotel || {});
+	const walking = publicMinuteText(hotel?.distances?.walkingToElHaram, isArabic);
+	const driving = publicMinuteText(hotel?.distances?.drivingToElHaram, isArabic);
+	const englishDistance =
+		walking || driving
+			? ` It is about ${[
+					walking ? `${walking} on foot` : "",
+					driving ? `${driving} by car` : "",
+			  ]
+					.filter(Boolean)
+					.join(" and ")} from Al Haram, depending on traffic.`
+			: "";
+	const arabicDistance =
+		walking || driving
+			? ` \u0648\u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645 \u062a\u0642\u0631\u064a\u0628\u0627 ${[
+					walking ? `${walking} \u0645\u0634\u064a\u0627` : "",
+					driving ? `${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629` : "",
+			  ]
+					.filter(Boolean)
+					.join(" \u0648")} \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`
+			: "";
+
+	if (isArabic) {
+		if (careConcern) {
+			return `\u0623\u0643\u064a\u062f\u060c \u0623\u0633\u0627\u0639\u062f\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629 \u0648\u0623\u0648\u0636\u062d \u0644\u0643 \u0627\u0644\u0645\u0633\u0627\u0641\u0629 \u0648\u0627\u0644\u062a\u0646\u0642\u0644 \u0642\u0628\u0644 \u0627\u0644\u062d\u062c\u0632. ${hotelName} \u064a\u0645\u0643\u0646 \u0623\u0646 \u064a\u0643\u0648\u0646 \u062e\u064a\u0627\u0631\u0627 \u0639\u0645\u0644\u064a\u0627 \u0644\u0644\u0639\u0627\u0626\u0644\u0629 \u0648\u0643\u0628\u0627\u0631 \u0627\u0644\u0639\u0645\u0631 \u0645\u0639 \u0627\u0644\u062a\u0623\u0643\u062f \u0645\u0646 \u0627\u0644\u063a\u0631\u0641\u0629 \u0648\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e.${arabicDistance} \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0648\u0639\u062f\u062f \u0627\u0644\u0646\u0632\u0644\u0627\u0621 \u0648\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0646\u0627\u0633\u0628\u060c \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0645\u062a\u0627\u062d \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u0648\u0636\u0648\u062d.`;
+		}
+		return `\u0623\u0643\u064a\u062f\u060c \u0623\u0633\u0627\u0639\u062f\u0643 \u062d\u062a\u0649 \u0644\u0648 \u0627\u0644\u0637\u0644\u0628 \u063a\u064a\u0631 \u0645\u0643\u062a\u0645\u0644. \u0644\u0623\u0631\u0627\u062c\u0639 ${hotelName} \u0628\u062f\u0642\u0629 \u0623\u062d\u062a\u0627\u062c \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644\u060c \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629\u060c \u0639\u062f\u062f \u0627\u0644\u0646\u0632\u0644\u0627\u0621\u060c \u0648\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0627\u0644\u0645\u064a\u0632\u0627\u0646\u064a\u0629 \u0627\u0644\u062a\u0642\u0631\u064a\u0628\u064a\u0629.${arabicDistance} \u0628\u0639\u062f\u0647\u0627 \u0623\u0639\u0637\u064a\u0643 \u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u0646\u0627\u0633\u0628 \u0648\u0627\u0644\u0633\u0639\u0631 \u0628\u0634\u0643\u0644 \u0648\u0627\u0636\u062d.`;
+	}
+	if (careConcern) {
+		return `No worries at all. I can help and guide you step by step before you book. ${hotelName} can be a practical option for older family members when we confirm the room, dates, and transport details first.${englishDistance} Send the check-in date, checkout date, guest count, and preferred room type when ready, and I will check the exact option and price for you.`;
+	}
+	return `Yes, I can help even if the request is not complete yet. To check ${hotelName} correctly, please send the check-in date, checkout date, guest count, and preferred room type or budget.${englishDistance} Then I will give you the suitable available option and total price clearly.`;
+}
+
 const publicActiveRoomLabels = (hotel = {}, isArabic = false) => {
 	const rooms = Array.isArray(hotel?.roomCountDetails)
 		? hotel.roomCountDetails
@@ -690,7 +832,7 @@ async function publicSelectedHotelFactReplyText(
 	const latestText = cleanText(latestEntry?.message, 8000);
 	const kind = publicHotelFactIntentKind(latestText);
 	if (!kind) return "";
-	const isArabic = publicHasArabicText(supportCase, latestEntry);
+	const isArabic = publicReplyShouldUseArabic(supportCase, latestEntry);
 	const hotel = await publicHotelFactDocForCase(supportCase, providedHotel);
 	const hotelName = publicHotelNameForReply(supportCase, hotel || {});
 	if (kind === "payment") {
@@ -742,7 +884,12 @@ async function publicSelectedHotelFactReplyText(
 		return `I do not see an exact distance confirmed for ${hotelName} right now.`;
 	}
 	if (kind === "bus") {
-		const details = cleanPublicHotelFact(hotel.busDetails, 800);
+		const details = publicHotelDetailForReply(
+			hotel.busDetails,
+			isArabic,
+			"bus",
+			800
+		);
 		if (hotel.hasBusService === true) {
 			if (isArabic) {
 				return details
@@ -759,7 +906,12 @@ async function publicSelectedHotelFactReplyText(
 			: `${hotelName} does not currently show a private bus service.${walking ? ` It is about ${walking} on foot from Al Haram.` : ""}`;
 	}
 	if (kind === "nusuk") {
-		const details = cleanPublicHotelFact(hotel.isNusukText, 900);
+		const details = publicHotelDetailForReply(
+			hotel.isNusukText,
+			isArabic,
+			"nusuk",
+			900
+		);
 		if (hotel.isNusuk === true) {
 			if (isArabic) {
 				return details
@@ -903,6 +1055,11 @@ async function publicImmediateB2CAiReplyText(
 		publicAvailabilityRoomChoiceReplyText(supportCase, latestEntry) ||
 		publicHotelTrustQuickReplyText(supportCase, latestEntry) ||
 		publicProceedAfterQuoteReplyText(supportCase, latestEntry) ||
+		(await publicFastCareAndUnclearBookingReplyText(
+			supportCase,
+			latestEntry,
+			options
+		)) ||
 		(await publicSelectedHotelFactReplyText(supportCase, latestEntry, options)) ||
 		publicSelectedHotelRoomIntentReplyText(supportCase, latestEntry) ||
 		publicSelectedHotelBroadStartReplyText(supportCase, latestEntry)
