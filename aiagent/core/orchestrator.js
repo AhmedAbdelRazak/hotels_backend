@@ -1,6 +1,8 @@
 // aiagent/core/orchestrator.js
 const { AsyncLocalStorage } = require("async_hooks");
 const { fork } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const {
 	getSupportCaseById,
@@ -101,7 +103,7 @@ function boolFromEnv(name, fallback = false) {
 
 const AI_PLAN_MAX_CONCURRENT = intFromEnv("AI_PLAN_MAX_CONCURRENT", 1, {
 	min: 1,
-	max: 4,
+	max: 15,
 });
 const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
 	min: 10,
@@ -110,17 +112,31 @@ const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
 const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", true);
 const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv(
 	"AI_PLAN_WORKER_TIMEOUT_MS",
-	60000,
+	30000,
 	{ min: 15000, max: 180000 }
 );
 const AI_PLAN_WORKER_OLD_SPACE_MB = intFromEnv(
 	"AI_PLAN_WORKER_OLD_SPACE_MB",
-	3072,
+	1536,
 	{ min: 512, max: 6144 }
 );
-const AI_PLAN_QUEUE_NOTICE_MS = intFromEnv("AI_PLAN_QUEUE_NOTICE_MS", 12000, {
+const AI_PLAN_QUEUE_NOTICE_MS = intFromEnv("AI_PLAN_QUEUE_NOTICE_MS", 22000, {
 	min: 3000,
 	max: 120000,
+});
+const AI_PLAN_MIN_AVAILABLE_MEMORY_MB = intFromEnv(
+	"AI_PLAN_MIN_AVAILABLE_MEMORY_MB",
+	2048,
+	{ min: 512, max: 16384 }
+);
+const AI_PLAN_MEMORY_PER_ACTIVE_MB = intFromEnv(
+	"AI_PLAN_MEMORY_PER_ACTIVE_MB",
+	512,
+	{ min: 128, max: 6144 }
+);
+const AI_PLAN_LOAD_LIMIT_PERCENT = intFromEnv("AI_PLAN_LOAD_LIMIT_PERCENT", 95, {
+	min: 50,
+	max: 300,
 });
 
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
@@ -176,15 +192,19 @@ const HUMAN = {
 };
 const AI_REPLY_TARGET_MIN_MS = intFromEnv("AI_REPLY_TARGET_MIN_MS", 3000, {
 	min: 500,
-	max: 8000,
+	max: 12000,
 });
 const AI_REPLY_TARGET_MAX_MS = Math.max(
 	AI_REPLY_TARGET_MIN_MS,
-	intFromEnv("AI_REPLY_TARGET_MAX_MS", 5000, {
+	intFromEnv("AI_REPLY_TARGET_MAX_MS", 8000, {
 		min: 500,
-		max: 8000,
+		max: 12000,
 	})
 );
+const AI_FAST_REPLY_TARGET_MS = intFromEnv("AI_FAST_REPLY_TARGET_MS", 5600, {
+	min: 0,
+	max: 12000,
+});
 const AI_CASUAL_REPLY_TARGET_MIN_MS = intFromEnv(
 	"AI_CASUAL_REPLY_TARGET_MIN_MS",
 	3000,
@@ -199,11 +219,11 @@ const AI_CASUAL_REPLY_TARGET_MAX_MS = Math.max(
 );
 const AI_BOOKING_QUOTE_TARGET_MS = intFromEnv("AI_BOOKING_QUOTE_TARGET_MS", 4000, {
 	min: 500,
-	max: 8000,
+	max: 12000,
 });
 const AI_BOOKING_PROMPT_TARGET_MS = intFromEnv("AI_BOOKING_PROMPT_TARGET_MS", 3000, {
 	min: 500,
-	max: 8000,
+	max: 12000,
 });
 const AI_CONFIRMATION_DISPATCH_DELAY_MS = intFromEnv(
 	"AI_CONFIRMATION_DISPATCH_DELAY_MS",
@@ -216,19 +236,19 @@ const AI_POLICY_MEMO_TTL_MS = intFromEnv("AI_POLICY_MEMO_TTL_MS", 30000, {
 });
 const AI_TYPING_INDICATOR_DELAY_MIN_MS = intFromEnv(
 	"AI_TYPING_INDICATOR_DELAY_MIN_MS",
-	900,
+	2200,
 	{ min: 0, max: 7000 }
 );
 const AI_TYPING_INDICATOR_DELAY_MAX_MS = Math.max(
 	AI_TYPING_INDICATOR_DELAY_MIN_MS,
-	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 1400, {
+	intFromEnv("AI_TYPING_INDICATOR_DELAY_MAX_MS", 3000, {
 		min: 0,
 		max: 7000,
 	})
 );
 const AI_PLANNING_TYPING_DELAY_MS = intFromEnv(
 	"AI_PLANNING_TYPING_DELAY_MS",
-	900,
+	2400,
 	{ min: 0, max: 5000 }
 );
 const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 900, {
@@ -249,7 +269,7 @@ const AI_GUEST_TYPING_HOLD_MS = intFromEnv("AI_GUEST_TYPING_HOLD_MS", 1200, {
 	min: 500,
 	max: 10000,
 });
-const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 800, {
+const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 3000, {
 	min: 0,
 	max: 7000,
 });
@@ -344,7 +364,7 @@ const AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT = intFromEnv(
 	24,
 	{ min: 8, max: 100 }
 );
-const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 10000, {
+const AI_DELAY_NOTICE_MS = intFromEnv("AI_DELAY_NOTICE_MS", 22000, {
 	min: 8000,
 	max: 30000,
 });
@@ -371,6 +391,42 @@ function casualReplyTargetMs() {
 }
 function now() {
 	return Date.now();
+}
+function availableMemoryMb() {
+	try {
+		const meminfo = fs.readFileSync("/proc/meminfo", "utf8");
+		const match = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB/im);
+		if (match) return Math.floor(Number(match[1]) / 1024);
+	} catch {
+		// Non-Linux local development falls back to os.freemem().
+	}
+	return Math.floor(os.freemem() / (1024 * 1024));
+}
+function planConcurrencySnapshot() {
+	const configured = AI_PLAN_MAX_CONCURRENT;
+	const availableMb = availableMemoryMb();
+	const memoryHeadroomMb = availableMb - AI_PLAN_MIN_AVAILABLE_MEMORY_MB;
+	const memoryLimit =
+		memoryHeadroomMb <= 0
+			? 1
+			: Math.max(1, Math.floor(memoryHeadroomMb / AI_PLAN_MEMORY_PER_ACTIVE_MB));
+	const cpuCount = Math.max(1, Array.isArray(os.cpus?.()) ? os.cpus().length : 1);
+	const load1 = Array.isArray(os.loadavg?.()) ? Number(os.loadavg()[0] || 0) : 0;
+	const loadLimitRatio = AI_PLAN_LOAD_LIMIT_PERCENT / 100;
+	const loadLimit =
+		load1 > 0 && load1 >= cpuCount * loadLimitRatio
+			? Math.max(1, Math.floor(cpuCount * 0.6))
+			: configured;
+	const effective = Math.max(1, Math.min(configured, memoryLimit, loadLimit));
+	return {
+		configured,
+		effective,
+		availableMb,
+		memoryLimit,
+		loadLimit,
+		load1: Number(load1.toFixed(2)),
+		cpuCount,
+	};
 }
 function toTitle(s = "") {
 	return String(s || "").replace(
@@ -10671,7 +10727,7 @@ async function humanSend(
 		Number(st.activeTurnGuestAt || 0) > 0 ? Number(st.activeTurnGuestAt) : now();
 	const requestedTargetMs = Number(targetReplyMs);
 	const targetElapsedMs = fast
-		? 0
+		? AI_FAST_REPLY_TARGET_MS
 		: Number.isFinite(requestedTargetMs) && requestedTargetMs >= 0
 		? requestedTargetMs
 		: Number(st.activeTurnReplyTargetMs || 0) > 0
@@ -23555,7 +23611,7 @@ function scheduleQueuedPlanNotice(item = {}) {
 				waitMs: now() - Number(item.enqueuedAt || now()),
 				active: activePlanTurnCount,
 				queued: queuedPlanTurns.length,
-				maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+				concurrency: planConcurrencySnapshot(),
 			});
 		} catch (error) {
 			logStep(item.caseId, "turn.global_queue.wait_notice_failed", {
@@ -23572,9 +23628,10 @@ function drainPlanTurnQueue() {
 	planQueueDrainScheduled = true;
 	setImmediate(() => {
 		planQueueDrainScheduled = false;
+		const concurrency = planConcurrencySnapshot();
 		let inspected = 0;
 		while (
-			activePlanTurnCount < AI_PLAN_MAX_CONCURRENT &&
+			activePlanTurnCount < concurrency.effective &&
 			queuedPlanTurns.length &&
 			inspected < queuedPlanTurns.length
 		) {
@@ -23633,7 +23690,7 @@ function queuePlanTurnExecution(io, caseId, { reason = "scheduled" } = {}) {
 		reason,
 		active: activePlanTurnCount,
 		queued: queuedPlanTurns.length,
-		maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+		concurrency: planConcurrencySnapshot(),
 	});
 	drainPlanTurnQueue();
 	return true;
@@ -23822,7 +23879,7 @@ async function runQueuedPlanTurn({ io, caseId, enqueuedAt = now(), reason = "" }
 		waitMs: now() - Number(enqueuedAt || now()),
 		active: activePlanTurnCount,
 		queued: queuedPlanTurns.length,
-		maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+		concurrency: planConcurrencySnapshot(),
 	});
 	if (AI_PLAN_USE_WORKER) {
 		return runPlanTurnInWorker({
@@ -24052,6 +24109,9 @@ const exportedOrchestrator = {
 if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	exportedOrchestrator.__test = {
 		extractRoomSelectionsFromText,
+		planConcurrencySnapshot,
+		activeHotelRoomSummaries,
+		roomFitSalesIntroText,
 		mergeRoomSelections,
 		applyRoomSelections,
 		applyRoomSelectionsFromText,
