@@ -2315,6 +2315,15 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		const shouldAppendConversation = Boolean(
 			safeConversation && !duplicateClientConversation
 		);
+		if (
+			shouldAppendConversation &&
+			currentCase.aiRelated === true &&
+			!currentCase.aiPausedAt &&
+			!currentCase.aiHandoffReason &&
+			req.body.caseStatus !== "closed"
+		) {
+			setFields.aiToRespond = true;
+		}
 		if (safeConversation?.preferredLanguage) {
 			setFields.preferredLanguage = safeConversation.preferredLanguage;
 		}
