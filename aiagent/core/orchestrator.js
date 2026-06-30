@@ -1062,6 +1062,7 @@ function roomTypeKeyFromSelectionSegment(text = "") {
 function splitRoomSelectionSections(text = "") {
 	return String(text || "")
 		.replace(/\r/g, "\n")
+		.replace(/(\d)\s*\/\s*(\d)/g, "$1-$2")
 		.replace(/\s+(?:and|plus|&|\+)\s+/gi, "\n")
 		.replace(
 			/\s+with\s+(?=(?:single|double|twin|standard|king|queen|triple|quad|quadruple|family|quintuple)\b)/gi,
@@ -1200,6 +1201,7 @@ function roomSelectionCaptureAllowed(text = "", st = {}, selections = []) {
 	if (!selections.length) return false;
 	const raw = String(text || "").trim();
 	if (!raw) return false;
+	if (generalRoomOptionsQuestionText(raw)) return false;
 	const shortExplicit =
 		raw.length <= 96 &&
 		!/[?]/.test(raw) &&
@@ -5207,6 +5209,58 @@ function wantsPaymentHelp(text = "") {
 	);
 }
 
+function selectedHotelPaymentInformationQuestionText(text = "") {
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const hasPaymentTerm =
+		/\b(?:payment|pay|paid|deposit|prepay|prepayment|payment\s*link|link|card|cash|mada|bank\s*transfer|invoice)\b/i.test(
+			lower
+		) ||
+		/(?:payment|pay|paid|deposit|prepay|prepayment|paymentlink|link|card|cash|mada|banktransfer|invoice)/i.test(
+			latinCompact
+		) ||
+		/(?:دفع|الدفع|عربون|رابط|بطاقة|كاش|نقد|فاتورة)/i.test(arabic);
+	if (!hasPaymentTerm) return false;
+	const failureOrExistingIssue =
+		/\b(?:failed|declined|not\s+going\s+through|problem|issue|error|cannot\s+pay|can't\s+pay|did\s+not\s+work|doesn'?t\s+work|chargeback|refund)\b/i.test(
+			lower
+		) ||
+		/(?:failed|declined|notgoingthrough|problem|issue|error|cannotpay|cantpay|doesntwork|refund|chargeback)/i.test(
+			latinCompact
+		) ||
+		/(?:فشل|مرفوض|مشكلة|مشكله|خطأ|ما\s+قدر|ما\s+نفع|استرداد|ريفند)/i.test(
+			arabic
+		);
+	if (failureOrExistingIssue) return false;
+	const asksInformation =
+		/\b(?:can|could|may|do|does|is|are|will|would|should|how|when|where|after|before|later|full|partial|small)\b/i.test(
+			lower
+		) ||
+		/(?:can|could|may|do|does|is|are|will|would|should|how|when|where|after|before|later|full|partial|small)/i.test(
+			latinCompact
+		) ||
+		/(?:ينفع|اقدر|أقدر|ممكن|هل|متى|كيف|كامل|جزء|لاحقا|بعد|قبل)/i.test(
+			arabic
+		);
+	return asksInformation;
+}
+
+function selectedHotelPaymentInformationReplyText(sc = {}, st = {}) {
+	const name = respectfulGuestName(sc, st);
+	const lang = languageOf(sc, st);
+	if (/arabic/i.test(lang)) {
+		return `${name}، نعم، بعد إنشاء الحجز يظهر رابط الدفع وتفاصيل الحجز في المحادثة. أي عربون أو دفع جزئي يتبع شروط الفندق والمتاح وقت الحجز، ولا ترسل بيانات البطاقة في الشات.`;
+	}
+	if (/spanish/i.test(lang)) {
+		return `${name}, yes. After the reservation is created, the chat can show the payment/details link. Any deposit or partial-payment option depends on the hotel's terms and what is available at booking time. Please do not send card details in the chat.`;
+	}
+	if (/french/i.test(lang)) {
+		return `${name}, oui. Une fois la reservation creee, le lien de paiement/details peut apparaitre dans le chat. Tout acompte ou paiement partiel depend des conditions de l'hotel et des options disponibles au moment de la reservation. Ne partagez pas les donnees de carte dans le chat.`;
+	}
+	return `${name}, yes. After the booking is created, the chat can show the payment/details link. Any small deposit or partial-payment option depends on the hotel's terms and what is available at booking time. Please do not send card details in the chat.`;
+}
+
 function wantsReservationHelp(text = "") {
 	const raw = String(text || "");
 	if (hasSemanticSignal(raw, ["reservation", "confirmation"])) return true;
@@ -5298,7 +5352,7 @@ function directHotelRelationshipQuestionText(text = "") {
 		hasSemanticSignal(raw, ["hotel", "reception", "reservation"]);
 	const english =
 		semanticDirect ||
-		/\b(?:are|do|does|is)\b.{0,80}\b(?:you|jannat|this\s+chat|your\s+team)\b.{0,80}\b(?:direct|directly|official|authorized|authorised|working\s+with|work\s+with|deal\s+with|connected\s+to)\b.{0,80}\b(?:hotel|reception|reservation|reservations|team)\b/i.test(
+		/\b(?:are|do|does|is)\b.{0,80}\b(?:you|jannat|this\s+chat|your\s+team)\b.{0,80}\b(?:direct|directly|official|authorized|authorised|working\s+with|work\s+with|deal\s+with|connected\s+(?:to|with))\b.{0,80}\b(?:hotel|reception|reservation|reservations|team)\b/i.test(
 			lower
 		) ||
 		/\b(?:directly\s+with|working\s+directly\s+with|officially\s+with|authorized\s+by|authorised\s+by)\s+(?:the\s+)?hotel\b/i.test(
@@ -8435,8 +8489,11 @@ async function answerSelectedHotelRoomQuestion(
 			{ fallbackText, targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS }
 		);
 		if (sent) {
-			st.waitFor = "room";
-			stampAsk(st, "room");
+			preserveBookingWaitStateForCase(sc, st, previousWaitFor);
+			if (!st.waitFor || st.waitFor === "clarify") {
+				st.waitFor = "room";
+				stampAsk(st, "room");
+			}
 		}
 		return true;
 	}
@@ -19654,6 +19711,20 @@ async function tryAnswerDirectGuestRequest(io, sc, st, userText = "", lu = {}) {
 			await redirectJannatReservationToHotelSupport(io, sc, st, userText, lu);
 			return true;
 		}
+		const previousWaitFor = st.waitFor || "";
+		if (
+			selectedHotelPaymentInformationQuestionText(userText) &&
+			!latestKnownConfirmation(sc, lu) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			await humanSend(io, sc, st, selectedHotelPaymentInformationReplyText(sc, st), {
+				fast: true,
+				scheduleIdle: false,
+				targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+			});
+			preserveBookingWaitStateForCase(sc, st, previousWaitFor);
+			return true;
+		}
 		const knownConfirmation = latestKnownConfirmation(sc, lu);
 		const reply = await write(
 			io,
@@ -20766,6 +20837,31 @@ async function sendBoundedUnansweredTurnFallback(
 	applyRoomSelectionsFromText(latestCase, st, userText, {
 		source: `bounded_fallback_${reason}_latest_room`,
 	});
+	const directFallbackKind = directGuestRequestKind(latestCase, st, userText, {});
+	const canAnswerDirectFallback =
+		st.hotel &&
+		directFallbackKind &&
+		directFallbackKind !== "general_support" &&
+		!severeAbusiveGuestText(userText) &&
+		!humanHandoffReason(userText);
+	if (canAnswerDirectFallback) {
+		const handled = await tryAnswerDirectGuestRequest(
+			io,
+			latestCase,
+			st,
+			userText,
+			{}
+		);
+		if (handled) {
+			await persistAiStateSnapshot(caseId, latestCase, st);
+			logStep(caseId, "turn_recovery.direct_fallback_sent", {
+				reason,
+				kind: directFallbackKind,
+				waitFor: st.waitFor || "",
+			});
+			return true;
+		}
+	}
 	const casualFallbackText = preHydrateCasualTurnReplyText(latestCase, st, userText);
 	if (casualFallbackText) {
 		const sent = await humanSend(io, latestCase, st, casualFallbackText, {
@@ -20837,6 +20933,54 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 		if (!policy.allowed) return false;
 		const policyHotel = policy.hotel || (await getHotelById(latestCase.hotelId));
 		const st = ensureState(latestCase, activeHotelContextForCase(latestCase, policyHotel));
+		recoverBookingContextFromConversation(latestCase, st, {
+			protectLatestGuestDateChange: true,
+			reason: "pre_worker_fast_path",
+		});
+		const directKind = directGuestRequestKind(latestCase, st, userText, {});
+		const directFastPath =
+			st.hotel &&
+			directKind &&
+			directKind !== "general_support" &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText);
+		if (directFastPath) {
+			updateActiveLanguageFromText(latestCase, st, userText);
+			const handled = await tryAnswerDirectGuestRequest(
+				io,
+				latestCase,
+				st,
+				userText,
+				{}
+			);
+			if (handled) {
+				await persistAiStateSnapshot(key, latestCase, st);
+				logStep(key, "turn.pre_worker_direct_fast_path_sent", {
+					reason,
+					kind: directKind,
+					waitFor: st.waitFor || "",
+				});
+				return true;
+			}
+		}
+		if (
+			st.hotel &&
+			st.quote?.data?.available &&
+			latestGuestAcceptedProceedAction(latestCase, userText) &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText)
+		) {
+			resumeBookingNudge(st);
+			await beginReservationDetailsAfterQuote(io, latestCase, st, key, {
+				fast: true,
+			});
+			await persistAiStateSnapshot(key, latestCase, st);
+			logStep(key, "turn.pre_worker_proceed_fast_path_sent", {
+				reason,
+				waitFor: st.waitFor || "",
+			});
+			return true;
+		}
 		const clearCasualTurn = Boolean(
 			preHydrateCasualTurnReplyText(latestCase, st, userText)
 		);
@@ -20901,18 +21045,29 @@ async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry =
 		(await getHotelByIdWithPricingDates(hotelId, dateKeys)) ||
 		(await getHotelById(hotelId));
 	if (!hotel) return null;
-	const st = {
-		language: preferredLanguageOf(supportCase) || "English",
-		languageCode: preferredLanguageCodeOf(supportCase) || "",
-		agentName: supportCase.aiResponderName || "Jannat Booking",
-		hotel: activeHotelContextForCase(supportCase, hotel),
-		slots: {
-			checkinISO: dates.checkinISO,
-			checkoutISO: dates.checkoutISO,
-		},
-		dateRaw: dates.raw || {},
-		waitFor: "dates",
-	};
+	const caseId = idText(supportCase?._id);
+	const st = caseId
+		? ensureState(supportCase, activeHotelContextForCase(supportCase, hotel))
+		: {
+				language: preferredLanguageOf(supportCase) || "English",
+				languageCode: preferredLanguageCodeOf(supportCase) || "",
+				agentName: supportCase.aiResponderName || "Jannat Booking",
+				hotel: activeHotelContextForCase(supportCase, hotel),
+				slots: {},
+				waitFor: "dates",
+		  };
+	st.hotel = activeHotelContextForCase(supportCase, hotel);
+	st.slots = st.slots || {};
+	st.slots.checkinISO = dates.checkinISO;
+	st.slots.checkoutISO = dates.checkoutISO;
+	st.dateRaw = dates.raw || {};
+	st.waitFor = "dates";
+	st.reviewSent = false;
+	st.pendingDateChange = null;
+	st.pendingRoomAlternative = null;
+	st.pendingRoomCombination = null;
+	st.quote = null;
+	st.quoteSummarizedAt = 0;
 	applyLatestRoomSignalFromConversation(supportCase, st, {
 		source: "controller_immediate_quote_room_signal",
 		includeAssistantFallback: false,
@@ -20936,6 +21091,14 @@ async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry =
 		data: quote,
 	};
 	st.waitFor = "proceed";
+	st.quoteSummarizedAt = now();
+	st.turnInFlight = false;
+	st.turnOwner = null;
+	st.interrupt = false;
+	st.queue = [];
+	if (caseId) {
+		await persistAiStateSnapshot(caseId, supportCase, st);
+	}
 	let message =
 		currentQuoteSummaryText(supportCase, st, quote) ||
 		simpleQuoteText({ sc: supportCase, st, quote });

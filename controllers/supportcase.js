@@ -183,6 +183,9 @@ const publicHotelTrustQuestionText = (value = "") => {
 		/\b(?:are|r)\s+(?:you|u)\s+(?:with|from|part\s+of|working\s+with|official(?:ly)?\s+with)\s+(?:the\s+)?hotel\b/i.test(
 			lower
 		) ||
+		/\b(?:are|r|is)\b.{0,80}\b(?:you|u|this\s+chat|jannat|your\s+team)\b.{0,80}\b(?:connected\s+(?:with|to)|direct(?:ly)?\s+with|official(?:ly)?\s+with|authorized\s+by|authorised\s+by)\b.{0,80}\b(?:hotel|reception|reservation|reservations)\b/i.test(
+			lower
+		) ||
 		/\b(?:is\s+this|is\s+it)\s+(?:the\s+)?(?:hotel|reception|official)\b/i.test(
 			lower
 		) ||
