@@ -1142,11 +1142,9 @@ async function findAiReservationForCase(caseId) {
 async function acquireAiReservationLock(caseId, fingerprint) {
 	const caseKey = cleanCaseId(caseId);
 	if (!caseKey) return { locked: false, existing: null };
-	const existing = await findAiReservationForCase(caseKey);
-	if (existing) return { locked: false, existing };
 	const lockedAt = new Date();
 	const staleBefore = new Date(lockedAt.getTime() - AI_RESERVATION_LOCK_TTL_MS);
-	const lock = await SupportCase.findOneAndUpdate(
+	const lock = await SupportCase.updateOne(
 		{
 			_id: caseKey,
 			$or: [
@@ -1170,14 +1168,14 @@ async function acquireAiReservationLock(caseId, fingerprint) {
 				"aiReservation.lastError": "",
 			},
 		},
-		{ new: true }
+		{}
 	)
-		.select("_id aiReservation")
 		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
-		.lean()
 		.exec()
 		.catch(() => null);
-	if (lock) return { locked: true, existing: null };
+	if (lock?.modifiedCount || lock?.matchedCount) {
+		return { locked: true, existing: null };
+	}
 	const racedExisting = await findAiReservationForCase(caseKey);
 	return { locked: false, existing: racedExisting || null };
 }
