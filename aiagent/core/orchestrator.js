@@ -18604,7 +18604,46 @@ async function markAiReservationFinalizeFailed(caseId, error) {
 	}).catch(() => {});
 }
 
-async function finalizeReservationForGuest(io, sc, st, caseId) {
+async function appendImmediateReservationConfirmation(io, sc, st, caseId, finalText) {
+	const targetCaseId = String(caseId || "").trim();
+	if (!targetCaseId || !finalText) return false;
+	const messageData = {
+		messageBy: {
+			customerName: st.agentName,
+			customerEmail: AI_SUPPORT_EMAIL,
+			userId: "jannat-ai-support",
+		},
+		message: finalText,
+		date: new Date(),
+		isAi: true,
+		clientAction: "ai_reservation_created",
+		clientTag: aiMessageClientTag(targetCaseId, "ai-final"),
+	};
+	const updatedCase = await updateSupportCaseAppend(targetCaseId, {
+		conversation: messageData,
+		aiRelated: true,
+	});
+	if (!updatedCase) return false;
+	if (io) {
+		io.to(targetCaseId).emit("receiveMessage", { ...messageData, caseId: targetCaseId });
+		io.to(targetCaseId).emit("supportCaseUpdated", updatedCase);
+		io.emit("supportCaseUpdated", updatedCase);
+		io.to(targetCaseId).emit("stopTyping", { caseId: targetCaseId, isAi: true });
+	}
+	st.lastBotText = finalText;
+	st.lastBotTurnUserText = st.activeTurnUserText || "";
+	st.activeTurnHadReply = true;
+	clearUnansweredTurnRecovery(targetCaseId);
+	return true;
+}
+
+async function finalizeReservationForGuest(
+	io,
+	sc,
+	st,
+	caseId,
+	{ instantConfirmation = false, sendProgress = true } = {}
+) {
 	if (!st.hotel) {
 		if (Array.isArray(st.platformHotelOptions) && st.platformHotelOptions.length) {
 			st.waitFor = "platform_hotel_choice";
@@ -18634,7 +18673,9 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		return true;
 	}
 	if (!st.slots.email && !st.slots.emailSkipped) st.slots.emailSkipped = true;
-	await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
+	if (sendProgress && !instantConfirmation) {
+		await sendProgressMessage(io, sc, st, "finalizing", { fast: true });
+	}
 	const quoteForCreate =
 		activeQuoteMatchesSlots(st) && quoteHasCreatePricingRows(st.quote?.data)
 			? st.quote.data
@@ -18688,10 +18729,12 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 	st.reviewSent = false;
 	st.quoteSummarizedAt = 0;
 	st.allowPostBookingReentry = true;
-	const finalMessageSent = await humanSend(io, sc, st, finalText, {
-		fast: true,
-		targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
-	});
+	const finalMessageSent = instantConfirmation
+		? await appendImmediateReservationConfirmation(io, sc, st, caseId, finalText)
+		: await humanSend(io, sc, st, finalText, {
+				fast: true,
+				targetReplyMs: AI_BOOKING_QUOTE_TARGET_MS,
+		  });
 	const latestAfterFinalSend = await getSupportCaseById(caseId).catch(() => null);
 	const finalConfirmationVisible = Array.isArray(
 		latestAfterFinalSend?.conversation
@@ -18732,6 +18775,7 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 			clearUnansweredTurnRecovery(caseId);
 		}
 	}
+	await persistAiStateSnapshot(caseId, sc, st).catch(() => {});
 	if (isAiQaSupportCase(sc)) {
 		logStep(caseId, "reservation.confirmation_dispatch_skipped", {
 			reason: "qa_support_case",
@@ -18976,6 +19020,18 @@ function isPostBookingClosure(text = "") {
 		/(?:\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0623\u0631\u0633\u0644|\u0623\u0628\u0639\u062a|\u0631\u0627\u0628\u0637|\u0627\u0644\u062f\u0641\u0639|\u062f\u0641\u0639|\u0627\u0644\u063a\u0627\u0621|\u0625\u0644\u063a\u0627\u0621|\u062a\u063a\u064a\u064a\u0631|\u063a\u064a\u0631|\u0639\u062f\u0644|\u0631\u0642\u0645|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0641\u064a\u0646|\u0627\u064a\u0646|\u0623\u064a\u0646|\u0645\u0648\u0642\u0639|\u0644\u0648\u0643\u064a\u0634\u0646|\u0627\u0644\u0628\u0627\u0635|\u0627\u0644\u062d\u0627\u0641\u0644\u0629|\u0646\u0633\u0643|\u0645\u0648\u0639\u062f|\u0645\u0637\u0639\u0645|\u0633\u0648\u0642|\u062d\u0631\u0645)/i.test(
 			normalized
 		);
+	const arabicCloseNormalized = normalized
+		.replace(/[.!،,؛:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (
+		!hasArabicFollowupRequest &&
+		/^(?:(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627)\s+)?(?:(?:\u0643\u062f\u0647|\u0643\u0630\u0627)\s+\u062a\u0645\u0627\u0645|\u062a\u0645\u0627\u0645|\u062e\u0644\u0627\u0635|\u0628\u0633\s+\u0643\u062f\u0647|\u0645\u0627\u0641\u064a\u0634(?:\s+\u0623?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0641\u064a\u0634(?:\s+\u0623?\u0633\u0626\u0644\u0647?\s+\u062a\u0627\u0646\u064a\u0647?)?|\u0645\u0627\s+\u0639\u0646\u062f\u064a\s+(?:\u0634\u064a|\u0634\u064a\u0621)\s+\u062b\u0627\u0646\u064a)(?:\s+(?:\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627))?$/.test(
+			arabicCloseNormalized
+		)
+	) {
+		return true;
+	}
 	if (
 		/[?؟]/.test(normalized) ||
 		/\b(?:how\s+are\s+you|can\s+you|could\s+you|please\s+(?:tell|send|share|repeat|remind)|tell\s+me|what|where|when|why|how\s+(?:far|much|many|do|can|is)|is\s+there|do\s+you|does\s+the|which|summarize|summary|recap|remind|repeat)\b/i.test(
@@ -21424,7 +21480,10 @@ async function finalizeImmediatePlaceReservation(io, caseOrId) {
 		st.allowPostBookingReentry = false;
 		stampAsk(st, "finalize");
 		await persistAiStateSnapshot(caseId, sc, st);
-		const handled = await finalizeReservationForGuest(io, sc, st, caseId);
+		const handled = await finalizeReservationForGuest(io, sc, st, caseId, {
+			instantConfirmation: true,
+			sendProgress: false,
+		});
 		logStep(caseId, "reservation.controller_place_reservation_fast_path", {
 			handled: Boolean(handled),
 			waitFor: st.waitFor || "",
