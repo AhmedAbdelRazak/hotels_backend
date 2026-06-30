@@ -12,7 +12,6 @@ const {
 const {
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
-	tryImmediateB2CFastPath,
 } = require("../aiagent/core/orchestrator");
 const {
 	activeHotelPolicyQA,
@@ -332,6 +331,52 @@ const publicHotelTrustQuickReplyText = (supportCase = {}, latestEntry = {}) => {
 	return `Yes, you are chatting with ${hotelName} reception and reservations through Jannat Booking. I am here to help.`;
 };
 
+const previousAiPublicEntry = (supportCase = {}, latestEntry = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const latestId = normalizeId(latestEntry?._id);
+	let latestIndex = latestId
+		? conversation.findIndex((entry) => normalizeId(entry?._id) === latestId)
+		: conversation.length;
+	if (latestIndex < 0) latestIndex = conversation.length;
+	for (let index = latestIndex - 1; index >= 0; index -= 1) {
+		const entry = conversation[index];
+		if (isAiSupportConversationEntry(entry)) return entry;
+	}
+	return null;
+};
+
+const publicProceedAfterQuoteReplyText = (supportCase = {}, latestEntry = {}) => {
+	const action = normalizeQuickReplyAction(latestEntry?.clientAction).toLowerCase();
+	const text = cleanText(latestEntry?.message, 240).toLowerCase();
+	const acceptedProceed =
+		["proceed", "continue_booking", "proceed_to_booking", "continue"].includes(
+			action
+		) ||
+		/\b(?:yes|ok|okay|sure|proceed|continue|go ahead|book it|reserve it)\b/i.test(
+			text
+		);
+	if (!acceptedProceed) return "";
+	const previousAi = previousAiPublicEntry(supportCase, latestEntry);
+	const actions = Array.isArray(previousAi?.quickReplies)
+		? previousAi.quickReplies.map((reply) =>
+				normalizeQuickReplyAction(reply?.action).toLowerCase()
+		  )
+		: [];
+	if (
+		previousAi?.clientAction !== "ai_immediate_quote" &&
+		!actions.includes("proceed")
+	) {
+		return "";
+	}
+	const isArabic = publicHasArabicText(supportCase, latestEntry);
+	if (isArabic) {
+		return "\u062a\u0645\u0627\u0645\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062d\u062f\u0629: \u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644\u060c \u0627\u0644\u062c\u0646\u0633\u064a\u0629\u060c \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641\u060c \u0648\u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646 \u0648\u0627\u0644\u0623\u0637\u0641\u0627\u0644 \u0625\u0646 \u0648\u062c\u062f\u0648\u0627.";
+	}
+	return "Great. Please send the booking details in one message: full name, nationality, phone number, and the number of adults and children if any.";
+};
+
 const publicHasArabicText = (supportCase = {}, latestEntry = {}) => {
 	const text = cleanText(latestEntry?.message, 8000);
 	const lang = String(
@@ -616,6 +661,24 @@ async function publicSelectedHotelFactReplyText(
 	return "";
 }
 
+function publicInitialSelectedHotelWelcomeText(
+	supportCase = {},
+	{ hotel = null } = {}
+) {
+	const isArabic = publicHasArabicText(supportCase, {
+		message: "",
+		preferredLanguage: supportCase.preferredLanguage,
+		preferredLanguageCode: supportCase.preferredLanguageCode,
+	});
+	const hotelName = publicHotelNameForReply(supportCase, hotel || {});
+	const labels = publicActiveRoomLabels(hotel || {}, isArabic);
+	const bullets = labels.map((label) => `- ${label}`).join("\n");
+	if (isArabic) {
+		return `\u0623\u0647\u0644\u0627 \u0628\u0643. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0627\u0644\u062d\u062c\u0632 \u0641\u064a ${hotelName} \u0648\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u062f\u0642\u0629.\n\n\u062e\u064a\u0627\u0631\u0627\u062a \u0627\u0644\u063a\u0631\u0641 \u062a\u0634\u0645\u0644:\n${bullets}\n\n\u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0641\u0636\u0644\u060c \u0648\u0623\u062c\u0647\u0632 \u0644\u0643 \u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631.`;
+	}
+	return `Welcome. I can help you reserve at ${hotelName} and check the exact availability and price for you.\n\nAvailable room options include:\n${bullets}\n\nPlease send the check-in and checkout dates, plus the guest count or preferred room type, and I will prepare the best available option.`;
+}
+
 const publicSelectedHotelBroadStartReplyText = (
 	supportCase = {},
 	latestEntry = {}
@@ -720,6 +783,7 @@ async function publicImmediateB2CAiReplyText(
 	return (
 		publicAvailabilityRoomChoiceReplyText(supportCase, latestEntry) ||
 		publicHotelTrustQuickReplyText(supportCase, latestEntry) ||
+		publicProceedAfterQuoteReplyText(supportCase, latestEntry) ||
 		(await publicSelectedHotelFactReplyText(supportCase, latestEntry, options)) ||
 		publicSelectedHotelRoomIntentReplyText(supportCase, latestEntry) ||
 		publicSelectedHotelBroadStartReplyText(supportCase, latestEntry)
@@ -2145,25 +2209,8 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;
 			} else {
-				const handledFastPath =
-					legacyAiEngine &&
-					typeof tryImmediateB2CFastPath === "function" &&
-					(await tryImmediateB2CFastPath(
-						req.io,
-						updatedCase,
-						updatedCase._id,
-						"public_client_update"
-					));
-				if (handledFastPath) {
-					const refreshedCase = await SupportCase.findById(updatedCase._id)
-						.select(PUBLIC_CLIENT_SUPPORT_CASE_SELECT)
-						.lean()
-						.exec();
-					if (refreshedCase) updatedCase = refreshedCase;
-				} else {
-					scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
-				}
-				if (legacyAiEngine && !handledFastPath) {
+				scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+				if (legacyAiEngine) {
 					scheduleAiSafetyRetryForCase(req.io, String(updatedCase._id));
 				}
 			}
@@ -2383,6 +2430,45 @@ exports.createNewSupportCase = async (req, res) => {
 					});
 					createdWithImmediateAiReply = true;
 				}
+			}
+		}
+		if (
+			openedBy === "client" &&
+			aiEnabledForClient &&
+			isLegacyAiAgentEngine() &&
+			!createdWithImmediateAiReply &&
+			!isJannatSupportCase
+		) {
+			const immediateWelcomeText = publicInitialSelectedHotelWelcomeText(
+				{
+					displayName2,
+					supporterName,
+					preferredLanguage: preferredLanguage || "English",
+					preferredLanguageCode: preferredLanguageCode || "en",
+				},
+				{ hotel: hotelDoc }
+			);
+			if (immediateWelcomeText) {
+				conversation.push({
+					messageBy: {
+						customerName: aiResponderName || "Jannat Booking",
+						customerEmail: AI_SUPPORT_MESSAGE_EMAILS[0],
+						userId: "jannat-ai-support",
+					},
+					message: immediateWelcomeText,
+					inquiryAbout,
+					inquiryDetails,
+					seenByAdmin: false,
+					seenByHotel: false,
+					seenByCustomer: false,
+					isAi: true,
+					isSystem: false,
+					clientTag: `ai_quick_initial_${Date.now()}`,
+					clientAction: "ai_immediate_reply",
+					preferredLanguage: preferredLanguage || "English",
+					preferredLanguageCode: preferredLanguageCode || "en",
+				});
+				createdWithImmediateAiReply = true;
 			}
 		}
 

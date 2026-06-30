@@ -1059,6 +1059,42 @@ function roomTypeKeyFromSelectionSegment(text = "") {
 	return detector?.key || "";
 }
 
+function explicitRoomTypeSelectionText(text = "") {
+	const raw = String(text || "");
+	if (!raw) return false;
+	const normalized = digitsToEnglish(normalizeControlText(raw).lower);
+	const arabic = normalizeControlText(raw).arabic;
+	return (
+		/\b(?:single|double|twin|standard|king|queen|triple|quad|quadruple|family|quintuple)\b/i.test(
+			normalized
+		) ||
+		/(?:\u0641\u0631\u062f\u064a|\u0645\u0632\u062f\u0648\u062c|\u0632\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626|\u062b\u0644\u0627\u062b|\u062a\u0644\u0627\u062a|\u0631\u0628\u0627\u0639|\u062e\u0645\u0627\u0633|\u0639\u0627\u0626\u0644)/i.test(
+			arabic
+		)
+	);
+}
+
+function guestCountOnlyRoomSelectionSegment(text = "") {
+	const raw = String(text || "");
+	if (!raw) return false;
+	if (explicitRoomTypeSelectionText(raw)) return false;
+	const normalized = digitsToEnglish(normalizeNumberWordsForParsing(raw)).toLowerCase();
+	const arabic = digitsToEnglish(normalizeControlText(raw).arabic);
+	const hasGuestCount =
+		/\b[1-9]\s*(?:adults?|guests?|people|persons?|individuals?|pax)\b/i.test(
+			normalized
+		) ||
+		/\b(?:adults?|guests?|people|persons?|individuals?|pax)\s*[1-9]\b/i.test(
+			normalized
+		) ||
+		/(?:[1-9]\s*(?:\u0628\u0627\u0644\u063a|\u0636\u064a\u0648\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f)|(?:\u0628\u0627\u0644\u063a|\u0636\u064a\u0648\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f)\s*[1-9])/i.test(
+			arabic
+		);
+	if (!hasGuestCount) return false;
+	return !/\b(?:rooms?|beds?)\b/i.test(normalized) &&
+		!/(?:\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0629|\u0623\u0633\u0631\u0629)/i.test(arabic);
+}
+
 function splitRoomSelectionSections(text = "") {
 	return String(text || "")
 		.replace(/\r/g, "\n")
@@ -1173,6 +1209,7 @@ function extractRoomSelectionsFromText(text = "") {
 	const raw = String(text || "").trim();
 	if (!raw) return [];
 	const sections = splitRoomSelectionSections(raw);
+	const hasExplicitRoomType = explicitRoomTypeSelectionText(raw);
 	const found = [];
 	const addSelection = (roomTypeKey, segment, index = 0) => {
 		if (!ROOM_TYPE_KEYS.includes(roomTypeKey)) return;
@@ -1183,9 +1220,15 @@ function extractRoomSelectionsFromText(text = "") {
 		});
 	};
 	for (const section of sections) {
+		if (hasExplicitRoomType && guestCountOnlyRoomSelectionSegment(section)) {
+			continue;
+		}
 		const roomTypeKey = roomTypeKeyFromSelectionSegment(section);
 		if (!roomTypeKey) continue;
 		addSelection(roomTypeKey, section, raw.indexOf(section));
+	}
+	if (hasExplicitRoomType && found.length) {
+		return mergeRoomSelections(found.sort((left, right) => left.index - right.index));
 	}
 	for (const detector of ROOM_SELECTION_DETECTORS) {
 		if (found.some((selection) => selection.roomTypeKey === detector.key)) {
