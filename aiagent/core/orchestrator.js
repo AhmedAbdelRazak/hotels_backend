@@ -21062,6 +21062,53 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 	}
 }
 
+async function prepareImmediateProceedAfterQuoteState(caseOrId) {
+	const caseId = idText(caseOrId?._id || caseOrId);
+	if (!caseId) return { ok: false, reason: "missing_case_id" };
+	try {
+		const sc = await getSupportCaseById(caseId);
+		if (!sc) return { ok: false, reason: "case_not_found" };
+		if (sc.caseStatus === "closed" || sc.aiToRespond === false) {
+			return { ok: false, reason: "case_not_active" };
+		}
+		const userText = String(lastGuestMessage(sc)?.message || lastUserText(sc) || "").trim();
+		if (!latestGuestAcceptedProceedAction(sc, userText)) {
+			return { ok: false, reason: "latest_guest_not_proceed" };
+		}
+		const policy = await ensureAIAllowed(sc.hotelId, sc);
+		if (!policy.allowed) return { ok: false, reason: policy.reason || "ai_not_allowed" };
+		const policyHotel = policy.hotel || (await getHotelById(sc.hotelId));
+		const st = ensureState(sc, activeHotelContextForCase(sc, policyHotel));
+		recoverBookingContextFromConversation(sc, st, {
+			protectLatestGuestDateChange: true,
+			reason: "controller_immediate_proceed_state",
+		});
+		const quote = ensureCurrentQuoteForSlots(st);
+		if (!quote?.available) return { ok: false, reason: "missing_available_quote" };
+		resumeBookingNudge(st);
+		st.reviewSent = false;
+		st.finalReviewSentAt = 0;
+		st.waitFor = nextReservationDetailStep(st);
+		st.turnInFlight = false;
+		st.turnOwner = null;
+		st.interrupt = false;
+		st.queue = [];
+		stampAsk(st, st.waitFor);
+		await persistAiStateSnapshot(caseId, sc, st);
+		const missing = missingMandatoryReservationFields(st);
+		logStep(caseId, "reservation_details.prepared_after_controller_prompt", {
+			waitFor: st.waitFor || "",
+			missing,
+		});
+		return { ok: true, waitFor: st.waitFor || "", missing };
+	} catch (error) {
+		logStep(caseId, "reservation_details.controller_prepare_failed", {
+			message: error?.message || error,
+		});
+		return { ok: false, reason: "prepare_failed" };
+	}
+}
+
 async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry = {}) {
 	const latestText = String(latestEntry?.message || "").trim();
 	if (
@@ -25250,6 +25297,7 @@ const exportedOrchestrator = {
 	wireSocket,
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
+	prepareImmediateProceedAfterQuoteState,
 	tryImmediateB2CFastPath: maybeSendPreWorkerFastPath,
 	__worker: {
 		planTurn,

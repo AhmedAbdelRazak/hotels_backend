@@ -12,6 +12,7 @@ const {
 const {
 	schedulePlanTurn,
 	buildImmediateKnownStayQuoteReply,
+	prepareImmediateProceedAfterQuoteState,
 } = require("../aiagent/core/orchestrator");
 const {
 	activeHotelPolicyQA,
@@ -2188,9 +2189,31 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			const immediateQuote = legacyAiEngine
 				? await buildImmediateKnownStayQuoteReply(updatedCase, safeConversation)
 				: null;
+			let proceedPrompt = "";
+			const proceedPromptCandidate =
+				legacyAiEngine && !immediateQuote?.message
+					? publicProceedAfterQuoteReplyText(updatedCase, safeConversation)
+					: "";
+			if (proceedPromptCandidate) {
+				const prepared = await prepareImmediateProceedAfterQuoteState(
+					updatedCase._id
+				);
+				if (prepared?.ok) {
+					proceedPrompt = proceedPromptCandidate;
+				} else {
+					console.warn(
+						"[supportcase] B2C proceed prompt skipped; state was not prepared",
+						{
+							caseId: String(updatedCase._id),
+							reason: prepared?.reason || "unknown",
+						}
+					);
+				}
+			}
 			const quickReply =
 				immediateQuote?.message ||
-				(legacyAiEngine
+				proceedPrompt ||
+				(legacyAiEngine && !proceedPromptCandidate
 					? await publicImmediateB2CAiReplyText(updatedCase, safeConversation)
 					: "");
 			if (quickReply) {
