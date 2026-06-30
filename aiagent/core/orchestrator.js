@@ -14929,6 +14929,16 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "hotel_contact_question",
 		};
 	}
+	if (st.hotel && fastCareAndUnclearBookingReplyText({}, st, userText)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: "selected_hotel",
+			reason: "fast_care_unclear_booking",
+			routingStage: "reservation_start",
+			keywords: ["care", "unclear_booking"],
+		};
+	}
 	if (st.hotel && selectedHotelFactQuestionText(userText)) {
 		return {
 			action: "general_answer",
@@ -19664,7 +19674,28 @@ function fastCareAndUnclearBookingReplyText(sc = {}, st = {}, userText = "") {
 					.filter(Boolean)
 					.join(" و")} حسب الزحام.`
 			: "";
+	const realisticUnclearBooking =
+		/\b(?:walk\s+me\s+through|what\s+do\s+you\s+need|what\s+should\s+i\s+send|not\s+sure\s+(?:about\s+)?dates?|dont\s+know\s+(?:the\s+)?dates?|don't\s+know\s+(?:the\s+)?dates?)\b/i.test(
+			lower
+		) ||
+		/(?:walkmethrough|whatdoyouneed|whatshouldisend|notsuredates|dontknowdates|abgharoom|qreebharam)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0628\u063a\u0649|\u0627\u0628\u064a|\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u062d\u062c\u0632|\u062d\u062c\u0632|\u063a\u0631\u0641\u0647|\u063a\u0631\u0641\u0629|\u0642\u0631\u064a\u0628|\u0627\u0644\u062d\u0631\u0645|\u0645\u062f\u0631\u064a|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0641\u0627\u0647\u0645|\u0645\u0648\s+\u0648\u0627\u0636\u062d|\u0645\u0634\s+\u0648\u0627\u0636\u062d|\u0648\u0634\s+\u062a\u062d\u062a\u0627\u062c|\u0648\u0634\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628|\u0627\u064a\u0647\s+\u0627\u0644\u0645\u0637\u0644\u0648\u0628|\u0627\u0628\u062f\u0623|\u0627\u0628\u062f\u0627|\u062a\u0648\u0627\u0631\u064a\u062e|\u062a\u0627\u0631\u064a\u062e)/i.test(
+			arabic
+		);
+	const realisticCareConcern =
+		/\b(?:parents?|family\s+(?:members?|trip|booking|travel|visit)|travel(?:ing|ling)\s+with|mother|father|mom|mum|dad|elderly|senior|seniors|worried|worry|nervous|comfortable|ok\s+for\s+them|walk\s+me\s+through)\b/i.test(
+			lower
+		) ||
+		/(?:parents|familymembers|familytrip|familybooking|familytravel|familyvisit|travelingwith|travellingwith|mother|father|elderly|senior|seniors|worried|nervous|comfortable|okforthem|walkmethrough)/i.test(
+			latinCompact
+		) ||
+		/(?:\u0627\u0645\u064a|\u0623\u0645\u064a|\u0648\u0627\u0644\u062f\u062a\u064a|\u0627\u0628\u0648\u064a|\u0623\u0628\u0648\u064a|\u0648\u0627\u0644\u062f\u064a|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u0629|\u0643\u0628\u0627\u0631|\u0645\u062a\u0648\u062a\u0631|\u0645\u0642\u0644\u0642|\u0642\u0644\u0642\u0627\u0646|\u062e\u0627\u064a\u0641|\u062e\u0627\u064a\u0641\u0629|\u0637\u0645\u0646\u064a|\u0645\u0647\u062a\u0645|\u0627\u0644\u0645\u0634\u0648\u0627\u0631|\u062a\u0639\u0628|\u062a\u062a\u0639\u0628|\u0627\u062a\u0628\u0647\u062f\u0644|\u0646\u062a\u0628\u0647\u062f\u0644|\u0627\u0648\u0646\u0644\u0627\u064a\u0646|\u0623\u0648\u0646\u0644\u0627\u064a\u0646)/i.test(
+			arabic
+		);
 	const unclearBooking =
+		realisticUnclearBooking ||
 		/\b(?:book\s*(?:a\s*)?room|reserve|reservation|not\s+sure\s+dates?|no\s+dates?|without\s+dates?|dont\s+give\s+dates?|don't\s+give\s+dates?|what\s+should\s+happen|what\s+do\s+you\s+need|what\s+shuld|still\s+help|can\s+u\s+still\s+help|confused|lost|guide\s+me|qreeb|abgha)\b/i.test(
 			lower
 		) ||
@@ -19675,6 +19706,7 @@ function fastCareAndUnclearBookingReplyText(sc = {}, st = {}, userText = "") {
 			arabic
 		);
 	const careConcern =
+		realisticCareConcern ||
 		/\b(?:older\s+parents?|old\s+parents?|mother|father|mom|mum|dad|elderly|worried|worry|nervous|stress|stressed|care|taken\s+care|guide\s+me|like\s+a\s+person|online)\b/i.test(
 			lower
 		) ||
@@ -19882,6 +19914,9 @@ function directGuestRequestKind(sc = {}, st = {}, userText = "", lu = {}) {
 		return "hotel_contact";
 	}
 	if (st.hotel && crossHotelRequestText(text)) return "hotel_scope_boundary";
+	if (st.hotel && fastCareAndUnclearBookingReplyText(sc, st, text)) {
+		return "general_support";
+	}
 	if (
 		st.hotel &&
 		selectedHotelFactQuestionText(text) &&
@@ -22168,6 +22203,34 @@ async function planTurn(io, sc) {
 		) {
 			logStep(caseId, "discount.question", { source: "pre_hydrate" });
 			await answerDiscountQuestion(io, sc, st, userText);
+			return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			fastCareAndUnclearBookingReplyText(sc, st, userText)
+		) {
+			logStep(caseId, "fast_care_unclear_booking.pre_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				"fast_care_unclear_booking_pre_hydrate",
+				{
+					action: "other",
+					scope: "selected_hotel",
+					routingStage: "reservation_start",
+					keywords: ["care", "unclear_booking"],
+				}
+			);
 			return;
 		}
 		if (
