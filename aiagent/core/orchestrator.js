@@ -11752,20 +11752,44 @@ function hasUsableFullName(value = "") {
 	return nameTokens.length >= 2 || letterCount >= 8;
 }
 
+function stripFullNameFieldPrefix(value = "") {
+	let cleaned = String(value || "").replace(/\s+/g, " ").trim();
+	for (let index = 0; index < 3; index += 1) {
+		const next = cleaned
+			.replace(
+				/^(?:full\s*name|guest\s*name|passport\s*name|name|nombre\s+completo|nombre\s+del\s+huesped|nombre\s+del\s+hu[e\u00e9]sped|nombre\s+en\s+pasaporte|nombre|nom\s+complet|nom\s+du\s+client|nom)\s*[:\uFF1A-]?\s+/i,
+				""
+			)
+			.replace(
+				/^(?:\u0648?\u0627\u0633\u0645\u064a|\u0648?\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645(?:\s+\u0627\u0644\u0643\u0627\u0645\u0644)?|\u0627\u0633\u0645)\s*[:\uFF1A-]?\s+/i,
+				""
+			)
+			.replace(/^[\s:.,;|()[\]{}-]+|[\s:.,;|()[\]{}-]+$/g, "")
+			.trim();
+		if (!next || next === cleaned) break;
+		cleaned = next;
+	}
+	return cleaned;
+}
+
 function cleanFullNameCandidate(value = "") {
-	const cleaned = digitsToEnglish(String(value || ""))
-		.replace(/[<>]/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+	const cleaned = stripFullNameFieldPrefix(
+		digitsToEnglish(String(value || ""))
+			.replace(/[<>]/g, " ")
+			.replace(/\s+/g, " ")
+			.trim()
+	);
 	return hasUsableFullName(cleaned) ? cleaned : "";
 }
 
 function cleanExplicitFullNameCandidate(value = "") {
-	const cleaned = digitsToEnglish(String(value || ""))
-		.replace(/[<>]/g, " ")
-		.replace(/\s+/g, " ")
-		.replace(/^[\s:.,;|()[\]{}-]+|[\s:.,;|()[\]{}-]+$/g, "")
-		.trim();
+	const cleaned = stripFullNameFieldPrefix(
+		digitsToEnglish(String(value || ""))
+			.replace(/[<>]/g, " ")
+			.replace(/\s+/g, " ")
+			.replace(/^[\s:.,;|()[\]{}-]+|[\s:.,;|()[\]{}-]+$/g, "")
+			.trim()
+	);
 	if (!cleaned || cleaned.length < 4 || cleaned.length > 90) return "";
 	if (latestEmailFromText(cleaned) || cleanPhoneCandidate(cleaned)) return "";
 	if (looksLikeStayDateCandidate(cleaned)) return "";
@@ -18578,6 +18602,13 @@ async function finalizeReservationForGuest(io, sc, st, caseId) {
 		await answerJannatBookingHotelOptions(io, sc, st, lastUserText(sc));
 		return true;
 	}
+	const sanitizedFullName = cleanFullNameCandidate(
+		st.slots?.fullName || st.slots?.name || ""
+	);
+	if (sanitizedFullName) {
+		st.slots.fullName = sanitizedFullName;
+		st.slots.name = sanitizedFullName;
+	}
 	if (st.slots?.adultsProvided) ensureDefaultChildren(st);
 	if (!hasMandatoryReservationDetails(st)) {
 		st.waitFor = "reservation_details";
@@ -21323,6 +21354,13 @@ async function finalizeImmediatePlaceReservation(io, caseOrId) {
 			protectLatestGuestDateChange: true,
 			reason: "controller_immediate_place_reservation",
 		});
+		const sanitizedFullName = cleanFullNameCandidate(
+			st.slots?.fullName || st.slots?.name || ""
+		);
+		if (sanitizedFullName) {
+			st.slots.fullName = sanitizedFullName;
+			st.slots.name = sanitizedFullName;
+		}
 		const quote = ensureCurrentQuoteForSlots(st);
 		if (!quote?.available) {
 			return { ok: false, reason: "missing_available_quote" };
@@ -25626,6 +25664,7 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		fallbackSupportDecision,
 		localDecisionNeedsOpenAiRouter,
 		normalizeSupportDecisionPayload,
+		cleanFullNameCandidate,
 	};
 }
 

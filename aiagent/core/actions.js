@@ -99,6 +99,26 @@ function compactArabic(value = "") {
 		.trim();
 }
 
+function stripGuestNameFieldPrefix(value = "") {
+	let cleaned = String(value || "").replace(/\s+/g, " ").trim();
+	for (let index = 0; index < 3; index += 1) {
+		const next = cleaned
+			.replace(
+				/^(?:full\s*name|guest\s*name|passport\s*name|name|nombre\s+completo|nombre\s+del\s+huesped|nombre\s+del\s+hu[e\u00e9]sped|nombre\s+en\s+pasaporte|nombre|nom\s+complet|nom\s+du\s+client|nom)\s*[:\uFF1A-]?\s+/i,
+				""
+			)
+			.replace(
+				/^(?:\u0648?\u0627\u0633\u0645\u064a|\u0648?\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645(?:\s+\u0627\u0644\u0643\u0627\u0645\u0644)?|\u0627\u0633\u0645)\s*[:\uFF1A-]?\s+/i,
+				""
+			)
+			.replace(/^[\s:.,;|()[\]{}-]+|[\s:.,;|()[\]{}-]+$/g, "")
+			.trim();
+		if (!next || next === cleaned) break;
+		cleaned = next;
+	}
+	return cleaned;
+}
+
 function rejectedAiGuestName(value = "") {
 	const name = cleanText(value, 120);
 	const lower = name.toLowerCase();
@@ -127,7 +147,7 @@ function rejectedAiGuestName(value = "") {
 }
 
 function usableFullName(value = "") {
-	const name = cleanText(value, 120);
+	const name = stripGuestNameFieldPrefix(cleanText(value, 120));
 	if (!name || name.length < 4) return "";
 	if (onlyDigits(name) || /^(?:guest|unknown|test|n\/a|na|null|none)$/i.test(name)) {
 		return "";
