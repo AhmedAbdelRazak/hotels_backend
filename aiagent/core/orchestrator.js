@@ -8837,6 +8837,32 @@ function hotelFactAddressLine(hotel = {}, lang = "English") {
 	return parts.join(/arabic/i.test(lang) ? "\u060c " : ", ");
 }
 
+function knownHotelFactDetailTranslation(details = "", lang = "English", kind = "") {
+	const raw = cleanHotelFactText(details);
+	if (!raw || /arabic/i.test(lang) || !hasArabicScript(raw)) return "";
+	const hasPrivateBus =
+		/(?:\u0628\u0627\u0635|\u062d\u0627\u0641\u0644|\u062d\u0627\u0641\u0644\u0629|\u0646\u0642\u0644)/i.test(
+			raw
+		);
+	const hasShuhadaStop =
+		/(?:\u0645\u0648\u0642\u0641\s*\u0627\u0644\u0634\u0647\u062f\u0627\u0621|\u0627\u0644\u0634\u0647\u062f\u0627\u0621)/i.test(
+			raw
+		);
+	if (kind === "bus" && hasPrivateBus && hasShuhadaStop) {
+		return "The hotel provides a private bus to take guests to the Al Shuhada stop, making access and transportation more comfortable";
+	}
+	if (
+		kind === "nusuk" &&
+		/\u0646\u0633\u0643/i.test(raw) &&
+		/(?:\u0645\u062a\u0627\u062d|\u062d\u062c\u0632\u0643\u0645|\u0625\u062c\u0631\u0627\u0621\u0627\u062a|\u0627\u062c\u0631\u0627\u0621\u0627\u062a)/i.test(
+			raw
+		)
+	) {
+		return "Nusuk is available for this hotel, so you can use it for your visit procedures according to the available official appointments";
+	}
+	return "";
+}
+
 function hotelBusDetailLine(details = "", lang = "English") {
 	const rawDetailText = cleanHotelFactText(details).replace(/[.!?\u061f\u06d4]+$/g, "");
 	if (!rawDetailText) return "";
@@ -8850,6 +8876,8 @@ function hotelBusDetailLine(details = "", lang = "English") {
 		.replace(/\b5\s+daily\s+prayers\b/gi, "five daily prayers")
 		.replace(/\s{2,}/g, " ")
 		.trim();
+	const knownTranslation = knownHotelFactDetailTranslation(rawDetailText, lang, "bus");
+	if (knownTranslation) return knownTranslation;
 	const knownGamaratPrayerBus =
 		/(?:gamarat|jamarat|jamaraat)/i.test(rawDetailText) &&
 		/(?:5|five).{0,24}(?:daily\s+)?prayers?/i.test(rawDetailText);
@@ -9147,7 +9175,10 @@ function hotelBusServiceNoText(lang, name, hotelName, walking, next) {
 }
 
 function hotelNusukYesText(lang, name, details, next) {
-	const detailText = String(details || "").replace(/[.!?\u061f\u06d4]+$/g, "");
+	const rawDetailText = cleanHotelFactText(details).replace(/[.!?\u061f\u06d4]+$/g, "");
+	const detailText =
+		knownHotelFactDetailTranslation(rawDetailText, lang, "nusuk") ||
+		(/arabic/i.test(lang) || !hasArabicScript(rawDetailText) ? rawDetailText : "");
 	if (/arabic/i.test(lang)) {
 		return detailText
 			? `${name}\u060c \u0646\u0639\u0645\u060c \u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062f\u0631\u062c \u0639\u0644\u0649 \u0645\u0646\u0635\u0629 \u0646\u0633\u0643. ${detailText}. ${next}`
@@ -25452,6 +25483,7 @@ let activePlanTurnCount = 0;
 let planQueueDrainScheduled = false;
 const unansweredTurnRecoveryTimers = new Map();
 const unansweredTurnRecoveryAttempts = new Map();
+const activeFastCareProbeTimers = new Map();
 
 function clearQueuedPlanNotice(item = {}) {
 	if (item.queueNoticeTimer) {
@@ -26019,18 +26051,35 @@ async function maybeSendActiveFastCareReply(io, caseId, reason = "") {
 	return true;
 }
 
-function scheduleActiveFastCareProbe(io, caseId, reason = "") {
+function scheduleActiveFastCareProbe(io, caseId, reason = "", attempt = 1) {
 	const key = idText(caseId);
 	if (!io || !key) return;
-	const timer = setTimeout(() => {
-		maybeSendActiveFastCareReply(io, key, reason).catch((error) => {
+	if (attempt <= 1 && activeFastCareProbeTimers.has(key)) return;
+	const delays = [125, 650, 1500, 3000];
+	const probeAttempt = Math.max(1, Number(attempt) || 1);
+	const delayMs = delays[Math.min(probeAttempt - 1, delays.length - 1)];
+	const timer = setTimeout(async () => {
+		if (activeFastCareProbeTimers.get(key) === timer) {
+			activeFastCareProbeTimers.delete(key);
+		}
+		try {
+			const sent = await maybeSendActiveFastCareReply(io, key, reason);
+			if (!sent && probeAttempt < delays.length) {
+				scheduleActiveFastCareProbe(io, key, reason, probeAttempt + 1);
+			}
+		} catch (error) {
 			logStep(key, "turn.active_fast_care_failed", {
 				reason,
+				attempt: probeAttempt,
 				message: error?.message || error,
 			});
-		});
-	}, 125);
+			if (probeAttempt < delays.length) {
+				scheduleActiveFastCareProbe(io, key, reason, probeAttempt + 1);
+			}
+		}
+	}, delayMs);
 	if (typeof timer.unref === "function") timer.unref();
+	activeFastCareProbeTimers.set(key, timer);
 }
 
 function scheduleLegacyPlanTurn(io, caseOrId, { delayMs = 75 } = {}) {
