@@ -22115,6 +22115,34 @@ async function planTurn(io, sc) {
 			!humanHandoffReason(userText) &&
 			!wantsPaymentHelp(userText) &&
 			!explicitlyExistingReservationIntent(userText) &&
+			fastCareAndUnclearBookingReplyText(sc, st, userText)
+		) {
+			logStep(caseId, "fast_care_unclear_booking_pre_hydrate", {
+				waitFor: st.waitFor || "",
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+			await answerGeneralContextQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				"fast_care_unclear_booking_pre_hydrate",
+				{
+					action: "other",
+					scope: "selected_hotel",
+					routingStage: "reservation_start",
+					keywords: ["care", "unclear_booking"],
+				}
+			);
+			return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
 			priceOrAvailabilityRequestText(userText) &&
 			concreteStayDateProgressText(userText)
 		) {
