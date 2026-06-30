@@ -230,6 +230,11 @@ const supportCaseSchema = new Schema({
 		type: String,
 		default: "",
 	},
+	aiStateSnapshot: {
+		type: Schema.Types.Mixed,
+		default: null,
+		select: false,
+	},
 	aiReservation: {
 		status: {
 			type: String,

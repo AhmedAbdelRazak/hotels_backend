@@ -6,6 +6,7 @@ const {
 	getSupportCaseById,
 	updateSupportCaseAppend,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
+	updateSupportCaseAiStateSnapshot,
 	closeSupportCaseForAiIdle,
 	getHotelById,
 	getHotelByIdWithPricingDates,
@@ -117,6 +118,10 @@ const AI_PLAN_WORKER_OLD_SPACE_MB = intFromEnv(
 	3072,
 	{ min: 512, max: 6144 }
 );
+const AI_PLAN_QUEUE_NOTICE_MS = intFromEnv("AI_PLAN_QUEUE_NOTICE_MS", 12000, {
+	min: 3000,
+	max: 120000,
+});
 
 const HUMAN_THINK_MIN_MS = intFromEnv("AI_HUMAN_THINK_MIN_MS", 900, {
 	min: 0,
@@ -10028,6 +10033,231 @@ function setAiIdleTimer(caseId, callback, delayMs) {
 	aiIdleTimers.set(key, timer);
 }
 
+const AI_STATE_SNAPSHOT_VERSION = 1;
+const AI_STATE_SNAPSHOT_TEXT_MAX = 240;
+
+function plainSnapshotClone(value) {
+	if (value === null || value === undefined) return value;
+	try {
+		return JSON.parse(JSON.stringify(value));
+	} catch {
+		return null;
+	}
+}
+
+function snapshotText(value = "", max = AI_STATE_SNAPSHOT_TEXT_MAX) {
+	return String(value || "").trim().slice(0, Math.max(1, Number(max) || max));
+}
+
+function snapshotDateOnly(value = "") {
+	const text = snapshotText(value, 16);
+	return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+function snapshotObject(value = {}) {
+	return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function compactAiStateSlots(slots = {}) {
+	const source = snapshotObject(slots);
+	const roomSelections = mergeRoomSelections(source.roomSelections || []);
+	const roomTypeKey =
+		ROOM_TYPE_KEYS.includes(source.roomTypeKey) ? source.roomTypeKey : "";
+	const roomsFromSelections = roomSelections.length
+		? totalRoomCountFromSelections(roomSelections)
+		: 0;
+	const rooms = roomsFromSelections || roomSelectionCount(source.rooms, 1);
+	const compact = {
+		checkinISO: snapshotDateOnly(source.checkinISO),
+		checkoutISO: snapshotDateOnly(source.checkoutISO),
+		roomTypeKey: roomSelections[0]?.roomTypeKey || roomTypeKey || null,
+		roomSelections,
+		roomSelectionsSource: snapshotText(source.roomSelectionsSource, 80),
+		name: snapshotText(source.name, 100),
+		fullName: snapshotText(source.fullName, 160),
+		nationality: snapshotText(source.nationality, 100),
+		phone: snapshotText(source.phone, 64),
+		email: snapshotText(source.email, 160),
+		emailSkipped: Boolean(source.emailSkipped),
+		adults: countProvided(source.adults) ? Number(source.adults) : 2,
+		children: countProvided(source.children) ? Number(source.children) : 0,
+		adultsProvided: Boolean(source.adultsProvided),
+		childrenProvided: Boolean(source.childrenProvided),
+		rooms,
+	};
+	if (!compact.roomSelections.length && compact.roomTypeKey) {
+		compact.roomSelections = mergeRoomSelections([
+			{ roomTypeKey: compact.roomTypeKey, count: compact.rooms || 1 },
+		]);
+	}
+	compact.rooms =
+		totalRoomCountFromSelections(compact.roomSelections) || compact.rooms || 1;
+	return compact;
+}
+
+function compactAiStateDictionary(value = {}, maxKeys = 40) {
+	const source = snapshotObject(value);
+	const out = {};
+	for (const key of Object.keys(source).slice(0, maxKeys)) {
+		const cleanKey = snapshotText(key, 80);
+		if (!cleanKey) continue;
+		const raw = source[key];
+		if (typeof raw === "boolean") out[cleanKey] = raw;
+		else if (typeof raw === "number" && Number.isFinite(raw)) out[cleanKey] = raw;
+		else if (typeof raw === "string") out[cleanKey] = snapshotText(raw, 160);
+		else if (raw && typeof raw === "object") out[cleanKey] = plainSnapshotClone(raw);
+	}
+	return out;
+}
+
+function hydrationConversationForSnapshot(conversation = []) {
+	const list = Array.isArray(conversation) ? conversation : [];
+	return list.length > AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT
+		? list.slice(-AI_SLOT_HYDRATION_RECENT_MESSAGE_LIMIT)
+		: list;
+}
+
+function buildAiStateSnapshot(sc = {}, st = {}) {
+	if (!st || typeof st !== "object") return null;
+	const conversation = hydrationConversationForSnapshot(sc.conversation || []);
+	return {
+		version: AI_STATE_SNAPSHOT_VERSION,
+		updatedAt: new Date(),
+		conversationLength: Math.max(
+			conversation.length,
+			Number(st.hydratedConversationLength || 0)
+		),
+		conversationRevision:
+			st.hydratedConversationRevision ||
+			conversationHydrationRevision(conversation),
+		hydratedConversationLength: Number(st.hydratedConversationLength || 0),
+		hydratedConversationRevision: snapshotText(
+			st.hydratedConversationRevision,
+			160
+		),
+		hydratedStayConversationRevision: snapshotText(
+			st.hydratedStayConversationRevision,
+			160
+		),
+		hydratedIdentityConversationRevision: snapshotText(
+			st.hydratedIdentityConversationRevision,
+			160
+		),
+		agentName: snapshotText(st.agentName, 80),
+		language: snapshotText(st.language || preferredLanguageOf(sc) || "English", 80),
+		languageCode: snapshotText(st.languageCode || preferredLanguageCodeOf(sc), 20),
+		languageOverrideAt: Number(st.languageOverrideAt || 0),
+		greeted: Boolean(st.greeted || hasAiAssistantReply(sc)),
+		greetScheduled: Boolean(st.greetScheduled || hasAiAssistantReply(sc)),
+		waitFor: snapshotText(st.waitFor, 60) || null,
+		lastBotText: snapshotText(st.lastBotText, 500),
+		lastBotTurnUserText: snapshotText(st.lastBotTurnUserText, 500),
+		lastAskAt: compactAiStateDictionary(st.lastAskAt, 60),
+		reviewSent: Boolean(st.reviewSent),
+		quoteSummarizedAt: Number(st.quoteSummarizedAt || 0),
+		bookingNudgePausedAt: Number(st.bookingNudgePausedAt || 0),
+		progressSentAt: compactAiStateDictionary(st.progressSentAt, 60),
+		pendingDateChange: plainSnapshotClone(st.pendingDateChange),
+		pendingRoomAlternative: plainSnapshotClone(st.pendingRoomAlternative),
+		pendingRoomCombination: plainSnapshotClone(st.pendingRoomCombination),
+		dateRaw: plainSnapshotClone(st.dateRaw || {}),
+		smalltalkThread: plainSnapshotClone(st.smalltalkThread || {}),
+		slots: compactAiStateSlots(st.slots || {}),
+	};
+}
+
+function applyAiStateSnapshot(st = {}, snapshot = null, sc = {}) {
+	if (
+		!st ||
+		!snapshot ||
+		typeof snapshot !== "object" ||
+		Number(snapshot.version || 0) !== AI_STATE_SNAPSHOT_VERSION
+	) {
+		return false;
+	}
+	const slots = compactAiStateSlots(snapshot.slots || {});
+	st.agentName = snapshotText(snapshot.agentName, 80) || st.agentName;
+	st.language = snapshotText(snapshot.language, 80) || st.language || "English";
+	st.languageCode =
+		snapshotText(snapshot.languageCode, 20) || st.languageCode || "";
+	st.languageOverrideAt = Number(snapshot.languageOverrideAt || 0) || 0;
+	st.greeted = Boolean(snapshot.greeted || st.greeted || hasAiAssistantReply(sc));
+	st.greetScheduled = Boolean(
+		snapshot.greetScheduled || st.greetScheduled || st.greeted
+	);
+	st.waitFor = snapshotText(snapshot.waitFor, 60) || st.waitFor || null;
+	st.lastBotText = snapshotText(snapshot.lastBotText, 500) || st.lastBotText || "";
+	st.lastBotTurnUserText =
+		snapshotText(snapshot.lastBotTurnUserText, 500) ||
+		st.lastBotTurnUserText ||
+		"";
+	st.lastAskAt = compactAiStateDictionary(snapshot.lastAskAt, 60);
+	st.reviewSent = Boolean(snapshot.reviewSent);
+	st.quoteSummarizedAt = Number(snapshot.quoteSummarizedAt || 0) || 0;
+	st.bookingNudgePausedAt = Number(snapshot.bookingNudgePausedAt || 0) || 0;
+	st.progressSentAt = compactAiStateDictionary(snapshot.progressSentAt, 60);
+	st.pendingDateChange = plainSnapshotClone(snapshot.pendingDateChange);
+	st.pendingRoomAlternative = plainSnapshotClone(snapshot.pendingRoomAlternative);
+	st.pendingRoomCombination = plainSnapshotClone(snapshot.pendingRoomCombination);
+	st.dateRaw = plainSnapshotClone(snapshot.dateRaw || {}) || st.dateRaw || {};
+	st.smalltalkThread =
+		plainSnapshotClone(snapshot.smalltalkThread || {}) ||
+		st.smalltalkThread ||
+		{ topic: null, waitingForGuest: false, lastAt: 0 };
+	st.hydratedConversationLength =
+		Number(snapshot.hydratedConversationLength || snapshot.conversationLength || 0) ||
+		0;
+	st.hydratedConversationRevision =
+		snapshotText(
+			snapshot.hydratedConversationRevision || snapshot.conversationRevision,
+			160
+		) || "";
+	st.hydratedStayConversationRevision = snapshotText(
+		snapshot.hydratedStayConversationRevision,
+		160
+	);
+	st.hydratedIdentityConversationRevision = snapshotText(
+		snapshot.hydratedIdentityConversationRevision,
+		160
+	);
+	st.slots = {
+		...(st.slots || {}),
+		...slots,
+	};
+	if (st.slots.roomSelections?.length) {
+		st.slots.roomSelections = mergeRoomSelections(st.slots.roomSelections);
+		st.slots.roomTypeKey =
+			st.slots.roomSelections[0]?.roomTypeKey || st.slots.roomTypeKey;
+		st.slots.rooms = totalRoomCountFromSelections(st.slots.roomSelections);
+	}
+	if (!st.slots.name && st.slots.fullName) {
+		st.slots.name = firstNameForAddress(st.slots.fullName);
+	}
+	st.quote = null;
+	return true;
+}
+
+async function persistAiStateSnapshot(caseId, sc = {}, st = {}) {
+	if (!caseId || !st) return false;
+	try {
+		const snapshot = buildAiStateSnapshot(sc, st);
+		if (!snapshot) return false;
+		await updateSupportCaseAiStateSnapshot(caseId, snapshot);
+		logStep(String(caseId), "state.snapshot_saved", {
+			waitFor: snapshot.waitFor || null,
+			roomTypeKey: snapshot.slots?.roomTypeKey || null,
+			roomSelections: snapshot.slots?.roomSelections || [],
+			hasDates: Boolean(snapshot.slots?.checkinISO && snapshot.slots?.checkoutISO),
+		});
+		return true;
+	} catch (error) {
+		logStep(String(caseId), "state.snapshot_save_failed", {
+			message: error?.message || error,
+		});
+		return false;
+	}
+}
+
 function markGuestActivity(caseId, { activityAt = now(), typingHoldMs = 0 } = {}) {
 	const st = memo.get(String(caseId || ""));
 	if (!st) return;
@@ -10323,6 +10553,15 @@ function ensureState(sc, hotel) {
 				rooms: 1,
 			},
 		};
+		if (applyAiStateSnapshot(st, sc.aiStateSnapshot, sc)) {
+			logStep(id, "state.snapshot_loaded", {
+				waitFor: st.waitFor || null,
+				language: st.language,
+				roomTypeKey: st.slots?.roomTypeKey || null,
+				roomSelections: st.slots?.roomSelections || [],
+				hasDates: Boolean(st.slots?.checkinISO && st.slots?.checkoutISO),
+			});
+		}
 		memo.set(id, st);
 	} else {
 		if (alreadyGreeted) {
@@ -10696,6 +10935,19 @@ async function humanSend(
 			st.activeTurnHadReply = true;
 		}
 		return false;
+	}
+	const savedConversation = Array.isArray(saved?.updatedCase?.conversation)
+		? saved.updatedCase.conversation
+		: [];
+	if (savedConversation.length) {
+		const hydrationConversation =
+			hydrationConversationForSnapshot(savedConversation);
+		const hydrationRevision =
+			conversationHydrationRevision(hydrationConversation);
+		st.hydratedConversationLength = hydrationConversation.length;
+		st.hydratedConversationRevision = hydrationRevision;
+		st.hydratedStayConversationRevision = hydrationRevision;
+		st.hydratedIdentityConversationRevision = hydrationRevision;
 	}
 	io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 
@@ -14922,6 +15174,179 @@ function bookingStateQuestionText(text = "") {
 		bookingStayFieldQuestionText(text) ||
 		confirmationNumberQuestionText(text)
 	);
+}
+
+function reservationCreationRequirementsQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:what|which|tell|show|send|explain)\b.{0,60}\b(?:need|needed|required|missing|data|details|info|information)\b.{0,90}\b(?:reservation|booking|book|reserve|create|complete|finali[sz]e)\b/i.test(
+			lower
+		) ||
+		/\b(?:need|needed|required|missing)\b.{0,80}\b(?:before|to|for)\b.{0,80}\b(?:create|make|complete|finali[sz]e|book|reserve|reservation|booking)\b/i.test(
+			lower
+		) ||
+		/\b(?:before|to|for)\b.{0,60}\b(?:create|make|complete|finali[sz]e|book|reserve)\b.{0,80}\b(?:what|which|need|needed|required|missing|data|details|info|information)\b/i.test(
+			lower
+		) ||
+		/(?:\u0645\u0637\u0644\u0648\u0628|\u062a\u062d\u062a\u0627\u062c|\u062a\u062d\u062a\u0627\u062c\u064a|\u0646\u0627\u0642\u0635|\u0627\u0644\u0646\u0627\u0642\u0635|\u0628\u064a\u0627\u0646\u0627\u062a|\u062a\u0641\u0627\u0635\u064a\u0644).{0,90}(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621|\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645)|(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0646\u0634\u0627\u0621|\u0625\u0646\u0634\u0627\u0621|\u0627\u062a\u0645\u0627\u0645|\u0625\u062a\u0645\u0627\u0645).{0,90}(?:\u0645\u0637\u0644\u0648\u0628|\u062a\u062d\u062a\u0627\u062c|\u0646\u0627\u0642\u0635|\u0628\u064a\u0627\u0646\u0627\u062a|\u062a\u0641\u0627\u0635\u064a\u0644)/i.test(
+			arabic
+		) ||
+		/(?:whatneeded|whatisneeded|requiredtocreate|beforecreatingreservation|beforebooking|missingforbooking|missingforreservation|maalmotlob|ehmatloub|ayhmatlob|na2eslel7agz|bayantelhagz)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function reservationCreationRequirementsReplyText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const labels = localizedReservationDetailLabels(sc, st);
+	const required = [
+		labels.fullName,
+		labels.phone,
+		AI_REQUIRE_NATIONALITY ? labels.nationality : "",
+		labels.adults,
+	]
+		.filter(Boolean)
+		.map((label) => String(label || "").replace(/:$/, ""));
+	const missing = localizedMissingLabels(sc, st)
+		.map((label) => String(label || "").replace(/:$/, ""))
+		.filter(Boolean);
+	const hasStay = Boolean(
+		st.slots?.checkinISO && st.slots?.checkoutISO && st.slots?.roomTypeKey
+	);
+	const roomLine = st.slots?.roomTypeKey
+		? localizedRoomSelectionSummary(sc, st, ensureCurrentQuoteForSlots(st) || {})
+		: "";
+	const dates = st.slots?.checkinISO && st.slots?.checkoutISO
+		? localizedStayDateLines(sc, st)
+		: null;
+	if (/arabic/i.test(lang)) {
+		return [
+			`${name}\u060c \u0623\u0643\u064a\u062f. \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0623\u062d\u062a\u0627\u062c: ${required.join("\u060c ")}.`,
+			hasStay
+				? `\u0627\u0644\u0625\u0642\u0627\u0645\u0629 \u0627\u0644\u0645\u062d\u0641\u0648\u0638\u0629 \u0644\u062f\u064a \u0627\u0644\u0622\u0646: ${roomLine} - ${dates.primary}${
+						dates.secondary ? ` (${dates.secondary})` : ""
+				  }.`
+				: "\u0628\u0639\u062f \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629\u060c \u0623\u062c\u0647\u0632 \u0644\u0643 \u0645\u0631\u0627\u062c\u0639\u0629 \u0648\u0627\u0636\u062d\u0629.",
+			missing.length
+				? `\u0627\u0644\u0645\u062a\u0628\u0642\u064a \u0627\u0644\u0622\u0646: ${missing.join("\u060c ")}.`
+				: "\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0636\u064a\u0641 \u0627\u0644\u0623\u0633\u0627\u0633\u064a\u0629 \u0645\u0643\u062a\u0645\u0644\u0629 \u0627\u0644\u0622\u0646.",
+			"\u0648\u0633\u0623\u0639\u0631\u0636 \u0644\u0643 \u0645\u0631\u0627\u062c\u0639\u0629 \u0646\u0647\u0627\u0626\u064a\u0629 \u0645\u0631\u062a\u0628\u0629 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632.",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	return [
+		`${name}, of course. Before creating the reservation I need: ${required.join(", ")}.`,
+		hasStay
+			? `The stay I have now is: ${roomLine} - ${dates.primary}${
+					dates.secondary ? ` (${dates.secondary})` : ""
+			  }.`
+			: "Once dates and room type are confirmed, I will prepare a clear review for you.",
+		missing.length
+			? `Still needed now: ${missing.join(", ")}.`
+			: "The basic guest details are complete now.",
+		"I will show you a final review before creating the reservation.",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+async function answerReservationCreationRequirementsQuestion(
+	io,
+	sc,
+	st,
+	userText = "",
+	caseId = ""
+) {
+	if (!reservationCreationRequirementsQuestionText(userText)) return false;
+	const previousWaitFor = st.waitFor || "";
+	const sent = await humanSend(
+		io,
+		sc,
+		st,
+		reservationCreationRequirementsReplyText(sc, st),
+		{
+			quickReplies: bookingSummaryQuickReplies(sc, st),
+			fast: true,
+			targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+		}
+	);
+	if (!sent) return false;
+	st.waitFor = previousWaitFor || st.waitFor || nextPivot(st);
+	logStep(caseId || String(sc._id || ""), "booking.requirements_reply", {
+		waitFor: st.waitFor || "",
+		missing: missingMandatoryReservationFields(st),
+	});
+	return true;
+}
+
+function multiRoomReviewQuestionText(text = "") {
+	const { lower, arabic, latinCompact } = normalizeControlText(text);
+	return (
+		/\b(?:same|different|multiple|two|2)\b.{0,80}\b(?:room|rooms|room\s+types?)\b.{0,100}\b(?:review|summary|display|show|appear|total|price)\b/i.test(
+			lower
+		) ||
+		/\b(?:review|summary|display|show|appear|total|price)\b.{0,100}\b(?:same|different|multiple|two|2)\b.{0,80}\b(?:room|rooms|room\s+types?)\b/i.test(
+			lower
+		) ||
+		/(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u063a\u0631\u0641\u062a\u0627\u0646|\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0646\u0641\u0633\s+\u0627\u0644\u0646\u0648\u0639|\u0645\u062e\u062a\u0644\u0641|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a).{0,100}(?:\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0627\u0644\u0645\u0644\u062e\u0635|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u064a\u0638\u0647\u0631|\u062a\u0639\u0631\u0636)|(?:\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0627\u0644\u0645\u0644\u062e\u0635|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u064a\u0638\u0647\u0631|\u062a\u0639\u0631\u0636).{0,100}(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0646\u0641\u0633\s+\u0627\u0644\u0646\u0648\u0639|\u0645\u062e\u062a\u0644\u0641|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a)/i.test(
+			arabic
+		) ||
+		/(?:tworooms|sametype|differentroomtypes|multiplerooms|roomtypessummary|reviewrooms|ghorftin|no3en|nafsalno3|mokhtalef)/i.test(
+			latinCompact
+		)
+	);
+}
+
+function multiRoomReviewReplyText(sc = {}, st = {}) {
+	const lang = languageOf(sc, st);
+	const name = respectfulGuestName(sc, st);
+	const quote = ensureCurrentQuoteForSlots(st) || {};
+	const selections = roomSelectionsFromSlots(st);
+	const currentLines = selections.length
+		? localizedRoomSelectionLines(sc, st, quote)
+		: [];
+	if (/arabic/i.test(lang)) {
+		return [
+			`${name}\u060c \u0646\u0639\u0645\u060c \u0623\u062d\u0633\u0628 \u0627\u0644\u063a\u0631\u0641 \u0628\u0634\u0643\u0644 \u0645\u0646\u0641\u0635\u0644 \u0648\u0648\u0627\u0636\u062d.`,
+			currentLines.length
+				? `\u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062d\u0641\u0648\u0638\u0629 \u0627\u0644\u0622\u0646:\n${currentLines.join("\n")}`
+				: "\u0625\u0630\u0627 \u0643\u0627\u0646\u062a \u063a\u0631\u0641\u062a\u064a\u0646 \u0645\u0646 \u0646\u0641\u0633 \u0627\u0644\u0646\u0648\u0639 \u0633\u0623\u0639\u0631\u0636\u0647\u0627 \u0643\u0643\u0645\u064a\u0629 \u0648\u0627\u062d\u062f\u0629\u060c \u0648\u0625\u0630\u0627 \u0643\u0627\u0646\u062a \u0623\u0646\u0648\u0627\u0639\u0627 \u0645\u062e\u062a\u0644\u0641\u0629 \u0633\u0623\u0641\u0635\u0644 \u0643\u0644 \u0646\u0648\u0639 \u0641\u064a \u0633\u0637\u0631 \u0645\u0633\u062a\u0642\u0644.",
+			"\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0633\u062a\u0639\u0631\u0636 \u0643\u0644 \u062e\u0637 \u063a\u0631\u0641\u0629 \u0645\u0639 \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u0643\u0627\u0645\u0644 \u0644\u0644\u062d\u062c\u0632.",
+			bookingNextActionText(sc, st),
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	return [
+		`${name}, yes, I track room lines separately and clearly.`,
+		currentLines.length
+			? `The rooms I have now:\n${currentLines.join("\n")}`
+			: "If two rooms are the same type, I will show them as one quantity line. If they are different room types, I will show each type on its own line.",
+		"The review will show each room line and the grand total for the whole reservation.",
+		bookingNextActionText(sc, st),
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+async function answerMultiRoomReviewQuestion(io, sc, st, userText = "", caseId = "") {
+	if (!multiRoomReviewQuestionText(userText)) return false;
+	const previousWaitFor = st.waitFor || "";
+	const sent = await humanSend(io, sc, st, multiRoomReviewReplyText(sc, st), {
+		quickReplies: bookingSummaryQuickReplies(sc, st),
+		fast: true,
+		targetReplyMs: AI_BOOKING_PROMPT_TARGET_MS,
+	});
+	if (!sent) return false;
+	st.waitFor = previousWaitFor || st.waitFor || nextPivot(st);
+	logStep(caseId || String(sc._id || ""), "booking.multi_room_review_reply", {
+		waitFor: st.waitFor || "",
+		roomSelections: roomSelectionsFromSlots(st),
+	});
+	return true;
 }
 
 function localizedNightCount(nights, lang = "English") {
@@ -20194,6 +20619,30 @@ async function planTurn(io, sc) {
 		recoverConversationContextOnce("pre_quiet");
 		if (
 			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText)
+		) {
+			const handledRequirements = await answerReservationCreationRequirementsQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledRequirements) return;
+			const handledMultiRoomReview = await answerMultiRoomReviewQuestion(
+				io,
+				sc,
+				st,
+				userText,
+				caseId
+			);
+			if (handledMultiRoomReview) return;
+		}
+		if (
+			userText &&
 			isReservationDetailStep(st) &&
 			!severeAbusiveGuestText(userText) &&
 			!humanHandoffReason(userText) &&
@@ -22998,6 +23447,9 @@ async function planTurn(io, sc) {
 				}
 			}
 		}
+		if (stillOwnsTurn && st2 && !st2.interrupt) {
+			await persistAiStateSnapshot(caseId, sc, st2);
+		}
 		if (activePlanLocks.get(caseId) === planLock) {
 			activePlanLocks.delete(caseId);
 			activePlanLockAts.delete(caseId);
@@ -23027,6 +23479,42 @@ let planQueueDrainScheduled = false;
 const unansweredTurnRecoveryTimers = new Map();
 const unansweredTurnRecoveryAttempts = new Map();
 
+function clearQueuedPlanNotice(item = {}) {
+	if (item.queueNoticeTimer) {
+		clearTimeout(item.queueNoticeTimer);
+		item.queueNoticeTimer = null;
+	}
+}
+
+function scheduleQueuedPlanNotice(item = {}) {
+	if (!item?.io || !item?.caseId || AI_PLAN_QUEUE_NOTICE_MS <= 0) return;
+	const timer = setTimeout(async () => {
+		try {
+			if (!queuedPlanCaseIds.has(item.caseId) || activePlanCaseIds.has(item.caseId)) {
+				return;
+			}
+			const latestCase = await getSupportCaseById(item.caseId);
+			if (!latestGuestNeedsAiReply(latestCase)) return;
+			await maybeSendWorkerFailureFallback(item.io, item.caseId, latestCase, {
+				reason: "queue_wait",
+			});
+			logStep(item.caseId, "turn.global_queue.wait_notice", {
+				reason: item.reason || "",
+				waitMs: now() - Number(item.enqueuedAt || now()),
+				active: activePlanTurnCount,
+				queued: queuedPlanTurns.length,
+				maxConcurrent: AI_PLAN_MAX_CONCURRENT,
+			});
+		} catch (error) {
+			logStep(item.caseId, "turn.global_queue.wait_notice_failed", {
+				message: error?.message || error,
+			});
+		}
+	}, AI_PLAN_QUEUE_NOTICE_MS);
+	if (typeof timer.unref === "function") timer.unref();
+	item.queueNoticeTimer = timer;
+}
+
 function drainPlanTurnQueue() {
 	if (planQueueDrainScheduled) return;
 	planQueueDrainScheduled = true;
@@ -23044,6 +23532,7 @@ function drainPlanTurnQueue() {
 				inspected += 1;
 				continue;
 			}
+			clearQueuedPlanNotice(item);
 			queuedPlanCaseIds.delete(item.caseId);
 			activePlanCaseIds.add(item.caseId);
 			activePlanTurnCount += 1;
@@ -23080,12 +23569,14 @@ function queuePlanTurnExecution(io, caseId, { reason = "scheduled" } = {}) {
 		return false;
 	}
 	queuedPlanCaseIds.add(key);
-	queuedPlanTurns.push({
+	const item = {
 		io,
 		caseId: key,
 		enqueuedAt: now(),
 		reason,
-	});
+	};
+	scheduleQueuedPlanNotice(item);
+	queuedPlanTurns.push(item);
 	logStep(key, "turn.global_queue.enqueue", {
 		reason,
 		active: activePlanTurnCount,
@@ -23519,6 +24010,12 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		currentReservationMemoryReplyText,
 		currentReservationMemoryRequestText,
 		reservationDetailsSummaryQuestionText,
+		reservationCreationRequirementsQuestionText,
+		reservationCreationRequirementsReplyText,
+		multiRoomReviewQuestionText,
+		multiRoomReviewReplyText,
+		buildAiStateSnapshot,
+		applyAiStateSnapshot,
 		latestGuestSelectedReviewCorrection,
 		reviewCorrectionPromptText,
 		deterministicFinalReservationReview,

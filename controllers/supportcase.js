@@ -970,6 +970,7 @@ const normalizeSupportCaseForResponse = (supportCase) => {
 		typeof supportCase.toObject === "function"
 			? supportCase.toObject()
 			: supportCase;
+	delete plain.aiStateSnapshot;
 	if (!Array.isArray(plain.conversation)) return plain;
 	return {
 		...plain,

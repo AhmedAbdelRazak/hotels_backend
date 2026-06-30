@@ -107,7 +107,10 @@ function safeId(id) {
 async function getSupportCaseById(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
-	const supportCase = await SupportCase.findById(_id).lean().exec();
+	const supportCase = await SupportCase.findById(_id)
+		.select("+aiStateSnapshot")
+		.lean()
+		.exec();
 	return normalizeSupportCaseQuickReplies(supportCase);
 }
 
@@ -169,6 +172,20 @@ async function updateSupportCaseAppend(caseId, messageOrFields) {
 		.lean()
 		.exec();
 	return normalizeSupportCaseQuickReplies(supportCase);
+}
+
+async function updateSupportCaseAiStateSnapshot(caseId, snapshot = null) {
+	const _id = safeId(caseId);
+	if (!_id) return false;
+	await SupportCase.updateOne(
+		{ _id },
+		{
+			$set: {
+				aiStateSnapshot: snapshot,
+			},
+		}
+	).exec();
+	return true;
 }
 
 async function updateSupportCaseAppendIfNoRecentAiDuplicate(
@@ -921,6 +938,7 @@ module.exports = {
 	getSupportCaseById,
 	updateSupportCaseAppend,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
+	updateSupportCaseAiStateSnapshot,
 	closeSupportCaseForAiIdle,
 	setCaseStatus,
 	getHotelById,
