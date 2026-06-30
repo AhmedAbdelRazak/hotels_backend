@@ -320,6 +320,11 @@ const AI_NLU_STEP_SOFT_TIMEOUT_MS = intFromEnv(
 	4000,
 	{ min: 1500, max: 20000 }
 );
+const AI_ROUTER_DECISION_SOFT_TIMEOUT_MS = intFromEnv(
+	"AI_ROUTER_DECISION_SOFT_TIMEOUT_MS",
+	2800,
+	{ min: 800, max: 8000 }
+);
 const AI_REQUIRE_NATIONALITY = boolFromEnv("AI_REQUIRE_NATIONALITY", true);
 const AI_INSTANT_PROGRESS_ENABLED = boolFromEnv(
 	"AI_INSTANT_PROGRESS_ENABLED",
@@ -14468,6 +14473,20 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "confidential_company_document_question",
 		};
 	}
+	if (
+		lu.intent === "smalltalk" ||
+		looksLikeGreetingOnly(userText) ||
+		fastEnglishSmalltalkText({}, st, userText) ||
+		(!hasOperationalBookingSignal(userText) &&
+			guestHumanMomentKind({}, st, userText))
+	) {
+		return {
+			action: "smalltalk",
+			roomTypeKey: null,
+			scope: null,
+			reason: "smalltalk_detected",
+		};
+	}
 	if (liveCurrentGeneralQuestionText(userText)) {
 		return {
 			action: "general_answer",
@@ -14508,10 +14527,13 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 		selectedHotelRoomQuestionText(userText) &&
 		!latestTextHasBookableRoomSelection(userText, st)
 	) {
+		const explicitRoomTypeKey = generalRoomOptionsQuestionText(userText)
+			? null
+			: mapRoomToKey(userText);
 		return {
 			action: "general_answer",
 			roomTypeKey:
-				lu.roomTypeKey || mapRoomToKey(userText) || st.slots?.roomTypeKey || null,
+				lu.roomTypeKey || explicitRoomTypeKey || st.slots?.roomTypeKey || null,
 			scope: "selected_hotel",
 			reason: "selected_hotel_room_question",
 		};
@@ -14593,12 +14615,119 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 	return { action: "other", roomTypeKey: lu.roomTypeKey || null, scope: st.hotel ? "selected_hotel" : null, reason: "fallback_decision" };
 }
 
+const OPENAI_ROUTER_ACTIONS = new Set([
+	"hotel_recommendation",
+	"ask_dates_for_price",
+	"discount_question",
+	"payment_help",
+	"reservation_update",
+	"reservation_cancellation",
+	"reservation_lookup",
+	"amenity_question",
+	"continue_booking",
+	"smalltalk",
+	"general_answer",
+	"support_email",
+	"human_escalation",
+	"other",
+]);
+
+const OPENAI_ROUTER_REVIEW_ACTIONS = new Set([
+	"other",
+	"continue_booking",
+	"ask_dates_for_price",
+	"reservation_lookup",
+	"hotel_recommendation",
+	"smalltalk",
+]);
+
+const OPENAI_ROUTER_STABLE_REASONS = new Set([
+	"discount_keyword",
+	"payment_keyword",
+	"reservation_cancellation",
+	"reservation_update",
+	"confidential_company_document_question",
+	"live_current_general_question",
+	"direct_hotel_relationship_question",
+	"hotel_contact_question",
+	"selected_hotel_fact_question",
+	"selected_hotel_room_question",
+	"generic_openai_question",
+	"hotel_scope_boundary",
+	"amenity_detected",
+]);
+
+function normalizeSupportDecisionPayload(parsed = {}, fallback = {}) {
+	const action = OPENAI_ROUTER_ACTIONS.has(String(parsed.action || ""))
+		? String(parsed.action)
+		: fallback.action || "other";
+	const roomTypeKey = [
+		"singleRooms",
+		"doubleRooms",
+		"tripleRooms",
+		"quadRooms",
+		"familyRooms",
+	].includes(String(parsed.roomTypeKey || ""))
+		? String(parsed.roomTypeKey)
+		: fallback.roomTypeKey || null;
+	const scope = ["selected_hotel", "alternative_hotels", "platform"].includes(
+		String(parsed.scope || "")
+	)
+		? String(parsed.scope)
+		: fallback.scope || null;
+	const keywords = Array.isArray(parsed.keywords)
+		? parsed.keywords
+				.map((keyword) =>
+					String(keyword || "")
+						.trim()
+						.toLowerCase()
+						.replace(/[^a-z0-9_\-\u0600-\u06ff]+/gi, "_")
+						.slice(0, 40)
+				)
+				.filter(Boolean)
+				.slice(0, 6)
+		: [];
+	const routingStage = String(parsed.routingStage || parsed.stage || "")
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9_\-]+/g, "_")
+		.slice(0, 40);
+	const confidence = Number(parsed.confidence);
+	return {
+		action,
+		roomTypeKey,
+		scope,
+		reason: String(parsed.reason || fallback.reason || "").slice(0, 160),
+		keywords,
+		emotionalTone: parsed.emotionalTone || fallback.emotionalTone || null,
+		routingStage: routingStage || fallback.routingStage || null,
+		confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null,
+	};
+}
+
+function localDecisionNeedsOpenAiRouter(userText = "", st = {}, lu = {}, decision = {}) {
+	const action = String(decision?.action || "other");
+	const reason = String(decision?.reason || "");
+	if (OPENAI_ROUTER_STABLE_REASONS.has(reason)) return false;
+	if (reason === "fallback_decision" || action === "other") return true;
+	if (lu?.reason === "nlu_soft_timeout" || lu?.intent === "unknown") return true;
+	if (!OPENAI_ROUTER_REVIEW_ACTIONS.has(action)) return false;
+	if (action === "smalltalk" && looksLikeGreetingOnly(userText)) return false;
+	if (
+		action === "continue_booking" &&
+		st.slots?.checkinISO &&
+		st.slots?.checkoutISO &&
+		st.slots?.roomTypeKey &&
+		priceOrAvailabilityRequestText(userText)
+	) {
+		return false;
+	}
+	return true;
+}
+
 async function decideSupportAction({ sc, st, userText, lu }) {
 	const localDecision = fallbackSupportDecision(userText, st, lu || {});
-	if (
-		localDecision.action !== "other" ||
-		localDecision.reason === "hotel_scope_boundary"
-	) {
+	if (!localDecisionNeedsOpenAiRouter(userText, st, lu || {}, localDecision)) {
 		logStep(String(sc._id), "orchestrator.local_decision", localDecision);
 		return localDecision;
 	}
@@ -14624,10 +14753,17 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Employee learning examples may be provided. Before choosing human_escalation, check whether those examples contain a reusable resolution or safe next step for this kind of question.",
 		"Return ONLY valid JSON with this shape:",
 		"{ action:'hotel_recommendation'|'ask_dates_for_price'|'discount_question'|'payment_help'|'reservation_update'|'reservation_cancellation'|'reservation_lookup'|'amenity_question'|'continue_booking'|'smalltalk'|'general_answer'|'support_email'|'human_escalation'|'other',",
-		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string, keywords:string[], emotionalTone:null|'neutral'|'happy'|'sad'|'tired'|'worried'|'angry'|'grateful'|'casual' }",
+		"roomTypeKey:null|'singleRooms'|'doubleRooms'|'tripleRooms'|'quadRooms'|'familyRooms', scope:null|'selected_hotel'|'alternative_hotels'|'platform', reason:string, keywords:string[], routingStage:null|'casual'|'hotel_fact'|'room_types'|'pricing'|'reservation_start'|'reservation_details'|'reservation_review'|'confirmation'|'payment'|'existing_reservation'|'handoff', emotionalTone:null|'neutral'|'happy'|'sad'|'tired'|'worried'|'angry'|'grateful'|'casual', confidence:number }",
 		"Use the guest's latest message, the full chat transcript, and current slots. Do not write the customer-facing reply.",
-		"keywords must be short normalized routing clues from the latest guest message and conversation context, such as ['agent_check_in','sad','reservation_details','bus','distance','payment','two_rooms']. Include 1-6 keywords. emotionalTone must describe the latest guest's human tone when present.",
+		"keywords must be short normalized routing clues from the latest guest message and conversation context, such as ['agent_check_in','sad','reservation_details','bus','distance','payment','two_rooms']. Include 1-6 keywords. routingStage tells the orchestrator where to move next; confidence is 0-1. emotionalTone must describe the latest guest's human tone when present.",
+		"The local deterministic decision is only provisional. If it appears to be a weak keyword match, override it with the route that best answers the guest's latest message.",
 		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks for EIN/tax ID/company/legal paperwork, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
+		"If the latest message is casual, emotional, a greeting, asks how the agent is, or complains about the chat quality, choose smalltalk or general_answer first; do not collect dates, room type, phone, nationality, or confirmation in that same route.",
+		"If the guest asks about room types/options/capacity at the selected hotel, route to general_answer with routingStage:'room_types' unless they also supplied dates and clearly asked for an exact price.",
+		"If the guest asks for price or availability and dates are missing, choose ask_dates_for_price with routingStage:'pricing'. If dates and room type are already known, choose continue_booking with routingStage:'pricing'.",
+		"If the guest supplied name/phone/nationality/adults/children after a quote or review, choose continue_booking with routingStage:'reservation_details'.",
+		"If the guest is correcting or asking about the current review, choose continue_booking with routingStage:'reservation_review'.",
+		"If the guest asks about an already-created or previous reservation, payment link, confirmation number, cancellation, refund, or update, route to the matching existing-reservation/payment/cancellation/update action instead of treating it as a new booking.",
 		"If an active hotel is present, this support case is strictly hotel-scoped. For rooms, amenities, availability, pricing, alternatives, or other-hotel questions, keep scope:'selected_hotel' and do not choose hotel_recommendation.",
 		"If an active hotel is present and the guest asks about other hotels, nearby alternatives, comparisons, or general platform options that are not answered by verified context or learning examples, choose support_email with scope:'selected_hotel' and reason:'hotel_scope_boundary'.",
 		"Choose hotel_recommendation only when there is no active hotel context.",
@@ -14654,6 +14790,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 			currentSlots: st.slots,
 			waitFor: st.waitFor,
 			nlu: lu || null,
+			localDecision,
 			hotel: hotelSummary,
 			privatePreviousGuestChats: previousGuestContext,
 			employeeLearningExamples: learningContext,
@@ -14663,43 +14800,40 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 	);
 	let raw = "";
 	try {
-		raw = await chat(
-			[
-				{ role: "system", content: sys },
-				{ role: "user", content: user },
-			],
-			{ kind: "nlu", temperature: 0, max_tokens: 180 }
+		raw = await withSoftTimeout(
+			chat(
+				[
+					{ role: "system", content: sys },
+					{ role: "user", content: user },
+				],
+				{ kind: "nlu", temperature: 0, max_tokens: 220 }
+			),
+			AI_ROUTER_DECISION_SOFT_TIMEOUT_MS,
+			""
 		);
 	} catch (error) {
 		logStep(String(sc._id), "orchestrator.decision_failed", {
 			message: error?.message || error,
 		});
-		return fallbackSupportDecision(userText, st, lu);
+		return localDecision;
+	}
+	if (!raw) {
+		logStep(String(sc._id), "orchestrator.decision_timeout", {
+			fallback: localDecision,
+		});
+		return localDecision;
 	}
 	try {
-		const parsed = JSON.parse(raw);
-		const keywords = Array.isArray(parsed.keywords)
-			? parsed.keywords
-					.map((keyword) =>
-						String(keyword || "")
-							.trim()
-							.toLowerCase()
-							.replace(/[^a-z0-9_\-\u0600-\u06ff]+/gi, "_")
-							.slice(0, 40)
-					)
-					.filter(Boolean)
-					.slice(0, 6)
-			: [];
-		return {
-			action: parsed.action || "other",
-			roomTypeKey: parsed.roomTypeKey || null,
-			scope: parsed.scope || null,
-			reason: parsed.reason || "",
-			keywords,
-			emotionalTone: parsed.emotionalTone || null,
-		};
-	} catch {
-		return fallbackSupportDecision(userText, st, lu);
+		const decision = normalizeSupportDecisionPayload(JSON.parse(raw), localDecision);
+		logStep(String(sc._id), "orchestrator.openai_router_decision", decision);
+		return decision;
+	} catch (error) {
+		logStep(String(sc._id), "orchestrator.decision_parse_failed", {
+			raw: String(raw || "").slice(0, 500),
+			message: error?.message || error,
+			fallback: localDecision,
+		});
+		return localDecision;
 	}
 }
 
@@ -22296,6 +22430,21 @@ async function planTurn(io, sc) {
 		}
 		logStep(caseId, "orchestrator.decision", supportDecision);
 
+		if (supportDecision.action === "smalltalk") {
+			await handleSmalltalk(
+				io,
+				sc,
+				st,
+				{
+					...decisionLu,
+					intent: "smalltalk",
+					smalltalkType: decisionLu.smalltalkType || "chitchat",
+				},
+				userText
+			);
+			return;
+		}
+
 		const largeGroupGuestCount = requestedGuestCountFromText(userText);
 		if (
 			st.hotel &&
@@ -24316,6 +24465,9 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		roomSelectionSignalText,
 		selectedHotelBusQuestionText,
 		extractSingleStayDate,
+		fallbackSupportDecision,
+		localDecisionNeedsOpenAiRouter,
+		normalizeSupportDecisionPayload,
 	};
 }
 

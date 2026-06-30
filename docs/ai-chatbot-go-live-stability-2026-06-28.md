@@ -118,3 +118,13 @@ Go-live quality note: English and Arabic are the current production target and t
 - Mobile chat links are rendered as visible link chips in the public SSR widget so reservation confirmation and payment links are obvious on phone screens.
 - The public SSR widget may show a short local "agent is typing" indicator after guest send. This is cosmetic only and must not create extra backend or OpenAI requests.
 - Final Arabic and English reservation-created messages intentionally include a short warm note that the hotel is happy the guest booked, while preserving confirmation number, details link, payment link, and post-booking help prompt.
+
+## OpenAI Router Review - 2026-06-29
+
+- The support orchestrator now asks OpenAI to review risky local routing decisions instead of waiting until the deterministic router returns only `other`.
+- Stable deterministic handlers still own fast factual/sensitive paths such as payments, discounts, reservation changes, cancellation, hotel contact, selected-hotel facts, selected-hotel room facts, amenities, and live/current general questions.
+- OpenAI router review is used for ambiguous or quality-sensitive paths: fallback, booking continuation, date/price routing, reservation lookup, hotel recommendation, and non-greeting smalltalk.
+- The OpenAI router returns `action`, `roomTypeKey`, `scope`, short normalized `keywords`, `emotionalTone`, `routingStage`, and `confidence`. `routingStage` lets the orchestrator move toward casual, room types, pricing, reservation details, review, confirmation, payment, existing reservation, or handoff without hard-coded one-off fixes.
+- The router receives the full transcript, current slots, latest NLU, selected-hotel summary, previous guest context, employee learning examples, and the provisional local decision.
+- Router review is soft-timed by `AI_ROUTER_DECISION_SOFT_TIMEOUT_MS` with a default of 2800 ms. If OpenAI is slow, unavailable, or returns invalid JSON, the orchestrator falls back to the local decision so the guest is not left unanswered.
+- If OpenAI classifies the turn as `smalltalk`, the orchestrator now routes directly to the smalltalk handler even when deterministic NLU missed it. This protects messages like "how are you?", emotional comments, or chat-quality complaints from being pulled into date, phone, or reservation-detail collection.
