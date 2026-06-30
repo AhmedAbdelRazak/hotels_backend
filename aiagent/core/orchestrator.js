@@ -20875,6 +20875,79 @@ async function maybeSendPreWorkerFastPath(io, latestCase, caseId, reason = "") {
 	}
 }
 
+async function buildImmediateKnownStayQuoteReply(supportCase = {}, latestEntry = {}) {
+	const latestText = String(latestEntry?.message || "").trim();
+	if (
+		!latestText ||
+		severeAbusiveGuestText(latestText) ||
+		humanHandoffReason(latestText) ||
+		wantsPaymentHelp(latestText) ||
+		explicitlyExistingReservationIntent(latestText)
+	) {
+		return null;
+	}
+	const dates = extractDateRange(latestText);
+	if (
+		!dates?.checkinISO ||
+		!dates?.checkoutISO ||
+		needsExplicitPastDateClarification(latestText, dates)
+	) {
+		return null;
+	}
+	const hotelId = idText(supportCase?.hotelId);
+	if (!hotelId) return null;
+	const dateKeys = safeStayDates(dates.checkinISO, dates.checkoutISO);
+	const hotel =
+		(await getHotelByIdWithPricingDates(hotelId, dateKeys)) ||
+		(await getHotelById(hotelId));
+	if (!hotel) return null;
+	const st = {
+		language: preferredLanguageOf(supportCase) || "English",
+		languageCode: preferredLanguageCodeOf(supportCase) || "",
+		agentName: supportCase.aiResponderName || "Jannat Booking",
+		hotel: activeHotelContextForCase(supportCase, hotel),
+		slots: {
+			checkinISO: dates.checkinISO,
+			checkoutISO: dates.checkoutISO,
+		},
+		dateRaw: dates.raw || {},
+		waitFor: "dates",
+	};
+	applyLatestRoomSignalFromConversation(supportCase, st, {
+		source: "controller_immediate_quote_room_signal",
+		includeAssistantFallback: false,
+	});
+	applyRoomSelectionsFromText(supportCase, st, latestText, {
+		source: "controller_immediate_quote_latest_room",
+	});
+	applyReservationGuestCountsFromText(st, latestText);
+	rememberRequestedRoomCountFromText(
+		supportCase,
+		st,
+		latestText,
+		"controller_immediate_quote_room_count"
+	);
+	if (!st.hotel || !st.slots?.roomTypeKey) return null;
+	const quote = safePriceRoomSelectionForStay(st);
+	if (!quote?.available) return null;
+	st.quote = {
+		key: quoteKeyForSlots(st),
+		at: now(),
+		data: quote,
+	};
+	st.waitFor = "proceed";
+	let message =
+		currentQuoteSummaryText(supportCase, st, quote) ||
+		simpleQuoteText({ sc: supportCase, st, quote });
+	message = ensureHijriGregorianDatesVisible(message, supportCase, st);
+	if (!message) return null;
+	return {
+		message,
+		quickReplies: proceedQuickReplies(supportCase, st),
+		clientAction: "ai_immediate_quote",
+	};
+}
+
 /* ------------------- TURN PLANNER ------------------- */
 const activePlanLocks = new Map();
 const activePlanLockAts = new Map();
@@ -24970,6 +25043,7 @@ function wireSocket(io) {
 const exportedOrchestrator = {
 	wireSocket,
 	schedulePlanTurn,
+	buildImmediateKnownStayQuoteReply,
 	__worker: {
 		planTurn,
 	},

@@ -9,7 +9,10 @@ const {
 	DEFAULT_JANNAT_SUPPORT_HOTEL_ID,
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
-const { schedulePlanTurn } = require("../aiagent/core/orchestrator");
+const {
+	schedulePlanTurn,
+	buildImmediateKnownStayQuoteReply,
+} = require("../aiagent/core/orchestrator");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -425,7 +428,7 @@ async function appendPublicAiQuickReply(
 	io,
 	supportCase = {},
 	message = "",
-	{ clientAction = "", tagPrefix = "ai_quick" } = {}
+	{ clientAction = "", tagPrefix = "ai_quick", quickReplies = [] } = {}
 ) {
 	const caseId = String(supportCase?._id || "");
 	const text = cleanText(message, 8000);
@@ -442,6 +445,7 @@ async function appendPublicAiQuickReply(
 		isSystem: false,
 		clientTag: `${tagPrefix}_${Date.now()}`,
 		clientAction,
+		quickReplies: Array.isArray(quickReplies) ? quickReplies.slice(0, 6) : [],
 		seenByAdmin: false,
 		seenByHotel: false,
 		seenByCustomer: false,
@@ -1815,17 +1819,26 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.caseStatus !== "closed"
 		) {
 			const legacyAiEngine = isLegacyAiAgentEngine();
-			const quickReply = legacyAiEngine
-				? publicImmediateB2CAiReplyText(updatedCase, safeConversation)
-				: "";
+			const immediateQuote = legacyAiEngine
+				? await buildImmediateKnownStayQuoteReply(updatedCase, safeConversation)
+				: null;
+			const quickReply =
+				immediateQuote?.message ||
+				(legacyAiEngine
+					? publicImmediateB2CAiReplyText(updatedCase, safeConversation)
+					: "");
 			if (quickReply) {
 				const quickReplyCase = await appendPublicAiQuickReply(
 					req.io,
 					updatedCase,
 					quickReply,
 					{
-						clientAction: "ai_immediate_reply",
-						tagPrefix: "ai_quick_immediate",
+						clientAction:
+							immediateQuote?.clientAction || "ai_immediate_reply",
+						tagPrefix: immediateQuote?.message
+							? "ai_quick_quote"
+							: "ai_quick_immediate",
+						quickReplies: immediateQuote?.quickReplies || [],
 					}
 				);
 				if (quickReplyCase) updatedCase = quickReplyCase;

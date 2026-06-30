@@ -156,3 +156,4 @@ Go-live quality note: English and Arabic are the current production target and t
 - A remembered two-room request wins over later guest-count inference, so `غرفتين` + `لثلاث اشخاص` does not collapse into one triple-room recommendation.
 - If dates and room count are known but exact room types are not, a price question now asks for the two room types from the active hotel options instead of asking for dates again.
 - Explicit guest room selections are recovered before expensive date hydration can hit the sync budget. This protects fragmented turns where the guest says the room type first, receives an immediate widget reply, and sends dates later; the bot should not ask for room type again.
+- Public chat updates now have a narrow immediate quote path for selected-hotel cases where the guest sends complete dates after an explicit saved room selection. The controller can append the quote with proceed buttons without waiting for the worker/OpenAI path.
