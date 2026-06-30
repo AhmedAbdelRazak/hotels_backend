@@ -15291,7 +15291,19 @@ function multiRoomReviewQuestionText(text = "") {
 		/\b(?:review|summary|display|show|appear|total|price)\b.{0,100}\b(?:same|different|multiple|two|2)\b.{0,80}\b(?:room|rooms|room\s+types?)\b/i.test(
 			lower
 		) ||
+		/\b(?:understand|recognize|recognise|handle|support|consider|account\s+for|know)\b.{0,100}\b(?:same|different|multiple|two|2|separate|line|lines)\b.{0,80}\b(?:room|rooms|room\s+types?)\b/i.test(
+			lower
+		) ||
+		/\b(?:same|different|multiple|two|2|separate|line|lines)\b.{0,80}\b(?:room|rooms|room\s+types?)\b.{0,100}\b(?:understand|recognize|recognise|handle|support|consider|account\s+for|know)\b/i.test(
+			lower
+		) ||
+		/\b(?:double|twin|triple|quad|quadruple)\b.{0,80}\b(?:and|plus|\+|with|line|lines)\b.{0,80}\b(?:double|twin|triple|quad|quadruple)\b.{0,100}\b(?:understand|recognize|recognise|handle|support|consider|account\s+for|know)\b/i.test(
+			lower
+		) ||
 		/(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u063a\u0631\u0641\u062a\u0627\u0646|\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0646\u0641\u0633\s+\u0627\u0644\u0646\u0648\u0639|\u0645\u062e\u062a\u0644\u0641|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a).{0,100}(?:\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0627\u0644\u0645\u0644\u062e\u0635|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u064a\u0638\u0647\u0631|\u062a\u0639\u0631\u0636)|(?:\u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629|\u0627\u0644\u0645\u0644\u062e\u0635|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u064a\u0638\u0647\u0631|\u062a\u0639\u0631\u0636).{0,100}(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0646\u0641\u0633\s+\u0627\u0644\u0646\u0648\u0639|\u0645\u062e\u062a\u0644\u0641|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a)/i.test(
+			arabic
+		) ||
+		/(?:\u062a\u0641\u0647\u0645|\u062a\u0641\u0647\u0645\u064a\u0646|\u064a\u0641\u0647\u0645|\u062a\u0639\u062a\u0628\u0631|\u062a\u0639\u062a\u0628\u0631\u064a\u0646|\u062a\u062d\u0633\u0628|\u062a\u062d\u0633\u0628\u064a\u0646|\u062a\u062a\u0639\u0627\u0645\u0644|\u062a\u0639\u0631\u0641|\u062a\u0639\u0631\u0641\u064a\u0646).{0,100}(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0633\u0637\u0631\u064a\u0646|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a)|(?:\u063a\u0631\u0641\u062a\u064a\u0646|\u0646\u0648\u0639\u064a\u0646|\u0633\u0637\u0631\u064a\u0646|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639\u064a|\u062b\u0644\u0627\u062b\u064a).{0,100}(?:\u062a\u0641\u0647\u0645|\u062a\u0641\u0647\u0645\u064a\u0646|\u064a\u0641\u0647\u0645|\u062a\u0639\u062a\u0628\u0631|\u062a\u0639\u062a\u0628\u0631\u064a\u0646|\u062a\u062d\u0633\u0628|\u062a\u062d\u0633\u0628\u064a\u0646|\u062a\u062a\u0639\u0627\u0645\u0644|\u062a\u0639\u0631\u0641|\u062a\u0639\u0631\u0641\u064a\u0646)/i.test(
 			arabic
 		) ||
 		/(?:tworooms|sametype|differentroomtypes|multiplerooms|roomtypessummary|reviewrooms|ghorftin|no3en|nafsalno3|mokhtalef)/i.test(
@@ -15335,6 +15347,18 @@ function multiRoomReviewReplyText(sc = {}, st = {}) {
 async function answerMultiRoomReviewQuestion(io, sc, st, userText = "", caseId = "") {
 	if (!multiRoomReviewQuestionText(userText)) return false;
 	const previousWaitFor = st.waitFor || "";
+	const explicitSelections = extractRoomSelectionsFromText(userText);
+	if (explicitSelections.length) {
+		const changed = applyRoomSelections(st, explicitSelections, {
+			source: "multi_room_review_question",
+		});
+		if (changed) {
+			logStep(caseId || String(sc._id || ""), "booking.multi_room_review_slots", {
+				roomSelections: roomSelectionsFromSlots(st),
+				latestUserMessage: String(userText || "").slice(0, 160),
+			});
+		}
+	}
 	const sent = await humanSend(io, sc, st, multiRoomReviewReplyText(sc, st), {
 		quickReplies: bookingSummaryQuickReplies(sc, st),
 		fast: true,
@@ -20372,6 +20396,30 @@ async function planTurn(io, sc) {
 			logStep(caseId, "discount.question", { source: "pre_hydrate" });
 			await answerDiscountQuestion(io, sc, st, userText);
 			return;
+		}
+		if (
+			userText &&
+			st.hotel &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText) &&
+			priceOrAvailabilityRequestText(userText) &&
+			concreteStayDateProgressText(userText)
+		) {
+			recoverBookingContextFromConversation(sc, st, {
+				protectLatestGuestDateChange: true,
+				reason: "pre_hydrate_price_date_guard",
+			});
+			const handledPriceDateProgress = await handleDeterministicStayProgress(
+				io,
+				sc,
+				st,
+				userText,
+				caseId,
+				{ source: "pre_hydrate_price_date_guard", forceKnownDates: true }
+			);
+			if (handledPriceDateProgress) return;
 		}
 		if (
 			userText &&
