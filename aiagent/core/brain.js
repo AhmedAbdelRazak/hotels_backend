@@ -10,8 +10,21 @@ const EN = [
 	"Amira",
 	"Sara",
 	"Layla",
-	"Mariam",
+	"Maryam",
 	"Nadia",
+	"Fatima",
+	"Khadija",
+	"Zainab",
+	"Safiya",
+	"Noor",
+	"Huda",
+	"Iman",
+	"Aya",
+	"Salma",
+	"Lina",
+	"Mona",
+	"Samira",
+	"Rania",
 ];
 const FR = ["Hana", "Yasmina", "Aïcha", "Leïla", "Meriem", "Nadia"];
 const ES = ["Hana", "Yasmin", "Aicha", "Laila", "Miriam", "Nadia"];

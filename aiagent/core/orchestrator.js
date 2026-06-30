@@ -10354,7 +10354,29 @@ function sanitizeAssistantVoiceText(text = "", sc = {}, st = {}) {
 	const agentName = String(st?.agentName || sc?.aiResponderName || "")
 		.trim()
 		.toLowerCase();
-	const femaleAgentNames = new Set(["hana", "aisha", "sara", "amira", "yasmin", "nadia"]);
+	const femaleAgentNames = new Set([
+		"hana",
+		"aisha",
+		"sara",
+		"amira",
+		"yasmin",
+		"nadia",
+		"fatima",
+		"khadija",
+		"maryam",
+		"zainab",
+		"safiya",
+		"noor",
+		"huda",
+		"iman",
+		"aya",
+		"layla",
+		"salma",
+		"lina",
+		"mona",
+		"samira",
+		"rania",
+	]);
 	const femaleAgent = !agentName || femaleAgentNames.has(agentName);
 	if (femaleAgent) {
 		out = out
