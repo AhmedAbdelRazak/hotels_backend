@@ -129,6 +129,19 @@ Go-live quality note: English and Arabic are the current production target and t
 - Router review is soft-timed by `AI_ROUTER_DECISION_SOFT_TIMEOUT_MS` with a default of 2800 ms. If OpenAI is slow, unavailable, or returns invalid JSON, the orchestrator falls back to the local decision so the guest is not left unanswered.
 - If OpenAI classifies the turn as `smalltalk`, the orchestrator now routes directly to the smalltalk handler even when deterministic NLU missed it. This protects messages like "how are you?", emotional comments, or chat-quality complaints from being pulled into date, phone, or reservation-detail collection.
 
+## AI Turn Execution Stability - 2026-06-29
+
+- The orchestrator now defaults to in-process turn planning (`AI_PLAN_USE_WORKER=false`) instead of spawning a fresh Node worker for every AI reply. Worker mode remains available by setting `AI_PLAN_USE_WORKER=true`, but the default avoids repeated process startup and Mongo connection overhead on live chats.
+- If worker mode is enabled and a worker times out or exits unsuccessfully, the recovery path now attempts a bounded real assistant reply for the latest guest turn instead of only sending a "please wait" system notice.
+- The global AI plan queue and server health guards still apply; this change removes avoidable per-turn overhead without removing concurrency limits.
+
+## Selected-Hotel Inquiry Routing - 2026-06-29
+
+- Broad selected-hotel inquiries such as "I want to ask about this hotel" are now treated as a reservation-start opportunity, not as cold generic support. The local fallback marks them as `general_answer` with `routingStage: reservation_start`, then OpenAI router review can still override if the message is actually about location, policy, rooms, payment, or another concrete topic.
+- The dynamic writer receives the `reservation_start` stage and should answer warmly as the selected hotel's reception, use verified hotel context and positioning naturally, then ask for arrival/departure dates plus room or guest preference in one friendly next step.
+- Generic OpenAI questions are no longer marked as a stable no-review route. OpenAI router review can classify ambiguous turns before the writer replies, while deterministic fact, payment, policy, contact, and room-list handlers remain protected.
+- Single labeled numeric dates now preserve their explicit role from the full message. For example, "arrival date 30 6" becomes check-in, and "departure date 7/7/2026" becomes checkout even if the regex match only captures the numeric date segment.
+
 ## Fragmented Arabic Booking Recovery - 2026-06-29
 
 - Fast slot recovery now understands fragmented Arabic booking turns such as `تاريخ الوصول 30 6`, `تاريخ المغادره 7/7/2026`, `غرفتين`, `لثلاث اشخاص`, and `نحن زوج وزوجة وقريب رجل`.

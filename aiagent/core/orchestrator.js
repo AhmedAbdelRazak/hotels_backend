@@ -109,7 +109,7 @@ const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
 	min: 10,
 	max: 1000,
 });
-const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", true);
+const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", false);
 const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv(
 	"AI_PLAN_WORKER_TIMEOUT_MS",
 	30000,
@@ -5629,6 +5629,47 @@ function roomCapacityOrTypeInquiryText(text = "") {
 	return (hasRoomWord || (hasOccupancyWord && hasCapacityOrType)) && (hasCapacityOrType || hasBookingIntent);
 }
 
+function selectedHotelBroadInquiryText(text = "", st = {}) {
+	if (!st?.hotel) return false;
+	const raw = String(text || "").trim();
+	if (!raw) return false;
+	if (
+		wantsPaymentHelp(raw) ||
+		wantsDiscountQuestion(raw) ||
+		humanHandoffReason(raw) ||
+		explicitlyExistingReservationIntent(raw) ||
+		wantsPriceButMissingDates(raw, st) ||
+		selectedHotelFactQuestionText(raw) ||
+		selectedHotelRoomQuestionText(raw) ||
+		hotelContactDetailsQuestionText(raw) ||
+		hotelContactFollowupQuestionText({}, raw) ||
+		liveCurrentGeneralQuestionText(raw) ||
+		Boolean(findAmenityMatch(raw)) ||
+		looksLikeStayDateCandidate(raw) ||
+		mapRoomToKey(raw)
+	) {
+		return false;
+	}
+	const { lower, arabic, latinCompact } = normalizeControlText(raw);
+	const inquirySignal =
+		/\b(?:inquir(?:e|y|ing)|ask(?:ing)?\s+about|question\s+about|know\s+more|learn\s+more|tell\s+me\s+about|information|info|details?|interested|help\s+me\s+with)\b/i.test(
+			lower
+		) ||
+		/(?:\u0627\u0633\u062a\u0641\u0633\u0627\u0631|\u0627\u0633\u062a\u0641\u0633\u0631|\u0633\u0624\u0627\u0644|\u0633\u0648\u0627\u0644|\u0627\u0633\u0623\u0644|\u0627\u0633\u0627\u0644|\u0623\u0633\u0623\u0644|\u0645\u0639\u0644\u0648\u0645\u0627\u062a|\u062a\u0641\u0627\u0635\u064a\u0644|\u0623\u0639\u0631\u0641|\u0627\u0639\u0631\u0641|\u0645\u0647\u062a\u0645|\u062d\u0627\u0628|\u0623\u0631\u064a\u062f|\u0627\u0631\u064a\u062f|\u0627\u0628\u063a\u0649|\u0623\u0628\u063a\u0649)/i.test(
+			arabic
+		) ||
+		/(?:inquiry|inquire|askabout|questionabout|knowmore|tellmeabout|information|details|interested|estefsar|astfsar|as2al|asaal|abgha|areed|urid|habba3raf)/i.test(
+			latinCompact
+		);
+	const hotelSignal =
+		/\b(?:hotel|property|stay|room|rooms)\b/i.test(lower) ||
+		/(?:\u0641\u0646\u062f\u0642|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0648\u062a\u064a\u0644|\u0623\u0648\u062a\u064a\u0644|\u0627\u0642\u0627\u0645\u0629|\u0625\u0642\u0627\u0645\u0629|\u0633\u0643\u0646|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641)/i.test(
+			arabic
+		) ||
+		/(?:hotel|fonduk|fndq|otel|room|rooms|stay)/i.test(latinCompact);
+	return Boolean(inquirySignal && (hotelSignal || st.hotel));
+}
+
 function wantsNewReservationIntent(text = "", lu = {}) {
 	if (lu?.intent === "reserve_room") return true;
 	const raw = String(text || "");
@@ -5907,7 +5948,7 @@ function normalizedShortStayYear(year = "") {
 	return raw;
 }
 
-function stayDateRoleFromText(text = "", st = {}, { inferFromState = true } = {}) {
+function explicitStayDateRoleFromText(text = "") {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
 	const hasCheckout =
 		/\b(?:checkout|check\s*-?\s*out|departure|depart|leav(?:e|ing)|exit)\b/i.test(
@@ -5925,6 +5966,12 @@ function stayDateRoleFromText(text = "", st = {}, { inferFromState = true } = {}
 		);
 	if (hasCheckout && !hasCheckin) return "checkout";
 	if (hasCheckin && !hasCheckout) return "checkin";
+	return "";
+}
+
+function stayDateRoleFromText(text = "", st = {}, { inferFromState = true } = {}) {
+	const explicitRole = explicitStayDateRoleFromText(text);
+	if (explicitRole) return explicitRole;
 	if (inferFromState && st?.slots?.checkinISO && !st?.slots?.checkoutISO) {
 		return "checkout";
 	}
@@ -5968,9 +6015,9 @@ function chooseNumericStayDateISO(first = "", second = "", year = null, role = "
 
 function extractSingleNumericStayDate(text = "", st = {}) {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
-	const explicitRole = stayDateRoleFromText(normalized, st, { inferFromState: false });
+	const explicitRole = explicitStayDateRoleFromText(normalized);
 	const hasExplicitDateRole =
-		explicitRole === "checkout" ||
+		Boolean(explicitRole) ||
 		/\b(?:arrival|arrive|check\s*-?\s*in|checkin|date|departure|checkout|check\s*-?\s*out)\b/i.test(
 			normalized
 		) ||
@@ -5982,8 +6029,9 @@ function extractSingleNumericStayDate(text = "", st = {}) {
 	if (!hasExplicitDateRole && !waitingForDate) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}
-	const dateRolePrefix =
-		"(?:\\b(?:arrival|arrive|check\\s*-?\\s*in|checkin|date|departure|checkout|check\\s*-?\\s*out)\\b|(?:\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c))?";
+	const dateRoleToken =
+		"(?:\\b(?:arrival|arrive|check\\s*-?\\s*in|checkin|date|dates|departure|checkout|check\\s*-?\\s*out)\\b|(?:\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c))";
+	const dateRolePrefix = `(?:${dateRoleToken}(?:\\s+${dateRoleToken}){0,3})?`;
 	const match =
 		normalized.match(
 			new RegExp(
@@ -5998,7 +6046,10 @@ function extractSingleNumericStayDate(text = "", st = {}) {
 			  )
 			: null);
 	if (!match) return { checkinISO: null, checkoutISO: null, raw: null };
-	const role = stayDateRoleFromText(match[0] || normalized, st);
+	const role =
+		explicitRole ||
+		explicitStayDateRoleFromText(match[0] || "") ||
+		stayDateRoleFromText(match[0] || normalized, st);
 	const iso = chooseNumericStayDateISO(match[1], match[2], match[3] || null, role, st);
 	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
 	const rawValue = match[3]
@@ -6020,12 +6071,15 @@ function extractSingleNumericStayDate(text = "", st = {}) {
 
 function extractSingleStayDate(text = "", st = {}) {
 	const normalized = digitsToEnglish(String(text || "").toLowerCase());
+	const explicitRole = explicitStayDateRoleFromText(normalized);
 	const numericDate = extractSingleNumericStayDate(normalized, st);
 	if (numericDate?.raw) return numericDate;
 	const monthToken =
 		"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[\u0600-\u06ff]+)";
+	const dateRoleToken =
+		"(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date|dates)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647))";
 	const singleDateRegex = new RegExp(
-		`(?:\\b(?:arrival|arrive|check\\s*-?in|checkout|check\\s*-?out|departure|date)\\b|\\u062a\\u0627\\u0631\\u064a\\u062e|\\u0627\\u0644\\u062f\\u062e\\u0648\\u0644|\\u0627\\u0644\\u0648\\u0635\\u0648\\u0644|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647)|\\u0645\\u063a\\u0627\\u062f\\u0631(?:\\u0629|\\u0647))?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
+		`(?:${dateRoleToken}(?:\\s+${dateRoleToken}){0,3})?\\s*(\\d{1,2})\\s+${monthToken}(?:\\s*,?\\s*(20\\d{2}))?`,
 		"i"
 	);
 	const match = normalized.match(singleDateRegex);
@@ -6038,7 +6092,7 @@ function extractSingleStayDate(text = "", st = {}) {
 	if (!iso) return { checkinISO: null, checkoutISO: null, raw: null };
 	const matchedText = String(match[0] || "");
 	const isCheckout =
-		stayDateRoleFromText(matchedText, st) === "checkout";
+		(explicitRole || explicitStayDateRoleFromText(matchedText) || stayDateRoleFromText(matchedText, st)) === "checkout";
 	if (isCheckout) {
 		return {
 			checkinISO: null,
@@ -14745,6 +14799,16 @@ function fallbackSupportDecision(userText = "", st = {}, lu = {}) {
 			reason: "selected_hotel_room_question",
 		};
 	}
+	if (st.hotel && selectedHotelBroadInquiryText(userText, st)) {
+		return {
+			action: "general_answer",
+			roomTypeKey: lu.roomTypeKey || st.slots?.roomTypeKey || null,
+			scope: "selected_hotel",
+			reason: "selected_hotel_broad_inquiry",
+			routingStage: "reservation_start",
+			keywords: ["selected_hotel", "inquiry", "reservation_start"],
+		};
+	}
 	if (broadGeneralSupportQuestionText(userText, st, lu) || genericOpenAiQuestionText(userText, st, lu)) {
 		return {
 			action: "general_answer",
@@ -14841,6 +14905,7 @@ const OPENAI_ROUTER_ACTIONS = new Set([
 
 const OPENAI_ROUTER_REVIEW_ACTIONS = new Set([
 	"other",
+	"general_answer",
 	"continue_booking",
 	"ask_dates_for_price",
 	"reservation_lookup",
@@ -14859,7 +14924,6 @@ const OPENAI_ROUTER_STABLE_REASONS = new Set([
 	"hotel_contact_question",
 	"selected_hotel_fact_question",
 	"selected_hotel_room_question",
-	"generic_openai_question",
 	"hotel_scope_boundary",
 	"amenity_detected",
 ]);
@@ -14967,6 +15031,7 @@ async function decideSupportAction({ sc, st, userText, lu }) {
 		"Direct request precedence is strict: if the latest message asks for phone/WhatsApp/contact, asks whether we work directly with the hotel, asks for EIN/tax ID/company/legal paperwork, asks location/address/distance/bus/amenity/room facts, asks a payment/discount question, or asks another concrete question, choose the action that answers that request first. Do not choose ask_dates_for_price or continue_booking for that turn unless the latest request itself is price/availability/new-booking and cannot be answered without dates.",
 		"If the latest message is casual, emotional, a greeting, asks how the agent is, or complains about the chat quality, choose smalltalk or general_answer first; do not collect dates, room type, phone, nationality, or confirmation in that same route.",
 		"If the guest asks about room types/options/capacity at the selected hotel, route to general_answer with routingStage:'room_types' unless they also supplied dates and clearly asked for an exact price.",
+		"If an active hotel is present and the latest message is a broad inquiry, interest, or request to know more about the selected hotel, and it is not asking a specific fact like location, bus, policy, phone, or room list, choose general_answer with scope:'selected_hotel' and routingStage:'reservation_start'. The writer should answer warmly and move the guest toward booking.",
 		"If the guest asks for price or availability and dates are missing, choose ask_dates_for_price with routingStage:'pricing'. If dates and room type are already known, choose continue_booking with routingStage:'pricing'.",
 		"If the guest supplied name/phone/nationality/adults/children after a quote or review, choose continue_booking with routingStage:'reservation_details'.",
 		"If the guest is correcting or asking about the current review, choose continue_booking with routingStage:'reservation_review'.",
@@ -19319,19 +19384,23 @@ async function answerGeneralContextQuestion(
 	const fallback = supportEmailFallbackText(sc, st);
 	const liveCurrent = liveCurrentGeneralQuestionText(userText);
 	const activeHotelPositioning = hotelPositioningContext(sc, st);
+	const routingStage = String(routeHints?.routingStage || "")
+		.trim()
+		.toLowerCase();
 	const sent = await sendDynamicWrittenReply(
 		io,
 		sc,
 		st,
 		userText,
-		`The guest asked a general, off-topic, unclear, or unplanned question. Study the full conversation transcript and answer the latest guest point directly in one or two polished professional sentences in the guest's active language. Preserve the current reservation flow without asking for details already supplied; do not use a canned/generic template, do not list a form, and do not add an unrelated booking prompt unless the latest message asks to reserve. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If activeHotelPositioning is supplied, use it only after answering the latest question, as a soft contextual sales/value line when natural; for Zad Ajyad discount, expensive, best-price, or value objections, mention direct-booking value carefully without promising a guaranteed extra discount. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then gently return to hotel/reservation help only if natural. ${
+		`The guest asked a general, off-topic, unclear, or unplanned question. Study the full conversation transcript and answer the latest guest point directly in one or two polished professional sentences in the guest's active language. Preserve the current reservation flow without asking for details already supplied; do not use a canned/generic template or list a form. If routeHints.routingStage is 'reservation_start' for a selected hotel, treat the latest message as a warm sales/reservation opening: answer as the selected hotel's reception, use verified hotel context and activeHotelPositioning naturally, then ask for arrival/departure dates and room or guest preference in one friendly next step. If the question is about the selected hotel or Jannat Booking, use verified context first and do not invent missing facts. If it is stable general knowledge, answer directly in a helpful CSR voice. If activeHotelPositioning is supplied, use it only after answering the latest question, as a soft contextual sales/value line when natural; for Zad Ajyad discount, expensive, best-price, or value objections, mention direct-booking value carefully without promising a guaranteed extra discount. If it needs live/current information such as sports fixtures, game times, news, weather, prices, exchange rates, schedules, official travel rules, or today's availability outside this system, do not guess or claim live lookup; say you do not have live/current data in this chat, recommend checking the official/latest source, then gently return to hotel/reservation help only if natural. ${
 			liveCurrent
 				? "The latest message appears to need live/current data, so do not answer it with hotel address, distance, map, room, policy, or other hotel facts unless the guest explicitly asked for those facts."
 				: ""
-		} Do not direct the guest to email or escalation. Do not ask for phone, email, confirmation number, dates, or booking details unless the guest explicitly asks to reserve in the latest message.`,
+		} Do not direct the guest to email or escalation. Do not ask for phone, email, or confirmation number unless needed for the current booking stage. Do not ask for dates or booking details unless routeHints.routingStage is 'reservation_start'/'pricing' or the guest is clearly moving toward a reservation.`,
 		{
 			hotelName: localizedHotelName(sc, st),
 			reason,
+			routingStage,
 			routeKeywords: Array.isArray(routeHints.keywords)
 				? routeHints.keywords.slice(0, 6)
 				: [],
@@ -19352,6 +19421,13 @@ async function answerGeneralContextQuestion(
 		st.waitFor = "post_booking_followup";
 	} else {
 		preserveBookingWaitStateForCase(sc, st, previousWaitFor);
+		if (
+			st.hotel &&
+			["reservation_start", "pricing"].includes(routingStage) &&
+			(!st.slots?.checkinISO || !st.slots?.checkoutISO)
+		) {
+			st.waitFor = "dates";
+		}
 		if (!st.waitFor) st.waitFor = previousWaitFor || "clarify";
 	}
 	logStep(String(sc._id), "general_answer.reply", {
@@ -20932,6 +21008,36 @@ async function planTurn(io, sc) {
 				caseId
 			);
 			if (handledEarlyQuote) return;
+		}
+		const earlySingleStayDate = userText ? extractSingleStayDate(userText, st) : null;
+		if (
+			userText &&
+			earlySingleStayDate?.raw &&
+			st.hotel &&
+			!earlyDirectDates?.checkinISO &&
+			!earlyDirectDates?.checkoutISO &&
+			!severeAbusiveGuestText(userText) &&
+			!humanHandoffReason(userText) &&
+			!wantsPaymentHelp(userText) &&
+			!explicitlyExistingReservationIntent(userText)
+		) {
+			updateActiveLanguageFromText(sc, st, userText);
+			const dateMerge = await mergePartialDateRangeWithChangeGuard(
+				io,
+				sc,
+				st,
+				earlySingleStayDate,
+				{ source: "early_single_stay_date", userText }
+			);
+			logStep(caseId, "dates.single_early", {
+				checkinISO: st.slots?.checkinISO || null,
+				checkoutISO: st.slots?.checkoutISO || null,
+				prompted: Boolean(dateMerge.prompted),
+				invalid: Boolean(dateMerge.invalid),
+			});
+			if (dateMerge.prompted) return;
+			await askForMissingStayDates(io, sc, st);
+			return;
 		}
 		if (
 			userText &&
@@ -24261,6 +24367,34 @@ async function maybeSendWorkerFailureFallback(
 ) {
 	const key = idText(caseId);
 	if (!io || !key || !latestGuestNeedsAiReply(latestCase)) return null;
+	if (
+		["worker_timeout", "worker_exit_failed", "worker_failed"].includes(
+			String(reason || "")
+		)
+	) {
+		try {
+			const policy = await ensureAIAllowed(latestCase.hotelId, latestCase);
+			const policyHotel = policy.allowed
+				? policy.hotel || (await getHotelById(latestCase.hotelId))
+				: null;
+			const st = ensureState(latestCase, activeHotelContextForCase(latestCase, policyHotel));
+			const sent = await sendBoundedUnansweredTurnFallback(
+				io,
+				latestCase,
+				st,
+				key,
+				reason
+			);
+			if (sent) {
+				return await getSupportCaseById(key).catch(() => latestCase);
+			}
+		} catch (error) {
+			logStep(key, "turn.worker.real_fallback_failed", {
+				reason,
+				message: error?.message || error,
+			});
+		}
+	}
 	const st = workerFallbackState(latestCase);
 	const latestGuest = lastGuestMessage(latestCase);
 	const text = aiDelayNoticeText(latestCase, st);
