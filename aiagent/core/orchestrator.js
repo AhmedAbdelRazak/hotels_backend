@@ -109,7 +109,7 @@ const AI_PLAN_QUEUE_MAX = intFromEnv("AI_PLAN_QUEUE_MAX", 200, {
 	min: 10,
 	max: 1000,
 });
-const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", false);
+const AI_PLAN_USE_WORKER = boolFromEnv("AI_PLAN_USE_WORKER", true);
 const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv(
 	"AI_PLAN_WORKER_TIMEOUT_MS",
 	30000,

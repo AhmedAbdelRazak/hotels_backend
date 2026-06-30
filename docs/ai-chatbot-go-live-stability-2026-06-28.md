@@ -131,7 +131,7 @@ Go-live quality note: English and Arabic are the current production target and t
 
 ## AI Turn Execution Stability - 2026-06-29
 
-- The orchestrator now defaults to in-process turn planning (`AI_PLAN_USE_WORKER=false`) instead of spawning a fresh Node worker for every AI reply. Worker mode remains available by setting `AI_PLAN_USE_WORKER=true`, but the default avoids repeated process startup and Mongo connection overhead on live chats.
+- Worker mode remains the production default (`AI_PLAN_USE_WORKER=true`) because in-process planning can hold the public HTTP path during slow turns. The worker path keeps the server responsive while the global queue controls concurrency.
 - If worker mode is enabled and a worker times out or exits unsuccessfully, the recovery path now attempts a bounded real assistant reply for the latest guest turn instead of only sending a "please wait" system notice.
 - The global AI plan queue and server health guards still apply; this change removes avoidable per-turn overhead without removing concurrency limits.
 
