@@ -21978,6 +21978,9 @@ async function planTurn(io, sc) {
 				markPendingPlanRequest(caseId, "active_plan_lock", {
 					interrupt: hasNewerGuestText,
 				});
+				if (hasNewerGuestText) {
+					scheduleActiveFastCareProbe(io, caseId, "active_plan_lock");
+				}
 				schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 				logStep(caseId, "turn.enqueue", {
 					reason: "active_plan_lock",
@@ -22046,6 +22049,9 @@ async function planTurn(io, sc) {
 			markPendingPlanRequest(caseId, "state_in_flight", {
 				interrupt: hasNewerGuestText,
 			});
+			if (hasNewerGuestText) {
+				scheduleActiveFastCareProbe(io, caseId, "state_in_flight");
+			}
 			schedulePlanTurn(io, caseId, { delayMs: AI_TURN_LOCK_RETRY_MS });
 			return;
 		}
