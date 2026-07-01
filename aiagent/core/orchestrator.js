@@ -173,6 +173,7 @@ function localizedAgentName(sc = {}) {
 	const languageCode = String(sc.preferredLanguageCode || "").toLowerCase();
 	if (!languageCode.startsWith("ar")) return name;
 	const map = {
+		mona: "\u0645\u0646\u0649",
 		amira: "أميرة",
 		huda: "هدى",
 		khadija: "خديجة",
@@ -506,7 +507,7 @@ function responseSchemaPrompt() {
     "confirmation": "",
     "languageCode": "ar/en/etc"
   },
-  "quickReplies": [{"label":"","value":"","action":""}],
+  "quickReplies": [],
   "reason": "short internal reason"
 }`;
 }
@@ -518,12 +519,13 @@ function systemPrompt({ sc, hotel, known, toolResult = null }) {
 	return [
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
-		`You own date understanding. Convert Arabic, typo-heavy, shorthand, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. For dates without a year, use the next future occurrence from today. If the year or range is genuinely unclear, ask one short natural confirmation question.`,
+		`You own date understanding. Convert Arabic, typo-heavy, shorthand, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
+		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
 		`If the guest is angry, disrespectful, asks for a human, or the situation is risky, action must be "escalate".`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and roomTypeKey are known, action must be "get_quote".`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review". Required: checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, adults. Email is optional.`,
@@ -595,16 +597,7 @@ function normalizeDecision(input = {}) {
 	const action = allowed.has(String(input.action || "").trim())
 		? String(input.action || "").trim()
 		: "reply";
-	const quickReplies = Array.isArray(input.quickReplies)
-		? input.quickReplies
-				.map((reply) => ({
-					label: cleanString(reply?.label, 80),
-					value: cleanString(reply?.value, 240),
-					action: cleanString(reply?.action, 60),
-				}))
-				.filter((reply) => reply.label && reply.value)
-				.slice(0, 4)
-		: [];
+	const quickReplies = [];
 	return {
 		action,
 		reply: String(input.reply || "").trim(),
