@@ -68,9 +68,13 @@ const AI_IDLE_AUTO_CLOSE_MS = intFromEnv("AI_IDLE_AUTO_CLOSE_MS", 5 * 60 * 1000,
 	min: 60 * 1000,
 	max: 30 * 60 * 1000,
 });
-const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv("AI_PLAN_WORKER_TIMEOUT_MS", 45000, {
+const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv("AI_PLAN_WORKER_TIMEOUT_MS", 12000, {
 	min: 10000,
 	max: 120000,
+});
+const AI_PLAN_WORKER_HEAP_MB = intFromEnv("AI_PLAN_WORKER_HEAP_MB", 384, {
+	min: 128,
+	max: 1024,
 });
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
@@ -1456,8 +1460,10 @@ function runPlanTurnWorker(caseId = "", reason = "scheduled") {
 				...process.env,
 				AI_AGENT_WORKER_PROCESS: "true",
 				AI_PLAN_USE_WORKER: "false",
+				OPENAI_CHATBOT_MAX_PROMPT_CHARS:
+					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "14000",
 			},
-			execArgv: ["--max-old-space-size=1024"],
+			execArgv: [`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`],
 			stdio: ["ignore", "ignore", "pipe", "ipc"],
 		});
 		const finish = (result) => {
