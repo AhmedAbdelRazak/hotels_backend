@@ -64,6 +64,8 @@ const ROOM_AI_CONTEXT_SELECT = [
 	"roomCountDetails.bedsCount",
 	"roomCountDetails.roomForGender",
 	"roomCountDetails.roomColor",
+	"roomCountDetails.offers",
+	"roomCountDetails.monthly",
 ];
 
 function compactPricingRateForAi(row = {}) {
@@ -75,6 +77,54 @@ function compactPricingRateForAi(row = {}) {
 		rootPrice: row.rootPrice,
 		commissionRate: row.commissionRate,
 	};
+}
+
+function isoDateOnly(value = "") {
+	const date = value instanceof Date ? value : new Date(value);
+	if (Number.isNaN(date.getTime())) return "";
+	return date.toISOString().slice(0, 10);
+}
+
+function compactOffersForAi(offers = []) {
+	const today = new Date();
+	today.setUTCHours(0, 0, 0, 0);
+	return (Array.isArray(offers) ? offers : [])
+		.map((offer) => ({
+			offerName: String(offer?.offerName || "").trim(),
+			offerFrom: isoDateOnly(offer?.offerFrom),
+			offerTo: isoDateOnly(offer?.offerTo),
+			offerPrice: Number.isFinite(Number(offer?.offerPrice))
+				? Number(offer.offerPrice)
+				: null,
+		}))
+		.filter((offer) => {
+			if (!offer.offerName && !offer.offerPrice) return false;
+			if (!offer.offerTo) return true;
+			return new Date(`${offer.offerTo}T23:59:59.999Z`) >= today;
+		})
+		.slice(0, 6);
+}
+
+function compactMonthlyForAi(monthly = []) {
+	const today = new Date();
+	today.setUTCHours(0, 0, 0, 0);
+	return (Array.isArray(monthly) ? monthly : [])
+		.map((month) => ({
+			monthName: String(month?.monthName || "").trim(),
+			monthFrom: isoDateOnly(month?.monthFrom),
+			monthTo: isoDateOnly(month?.monthTo),
+			monthFromHijri: String(month?.monthFromHijri || "").trim(),
+			monthToHijri: String(month?.monthToHijri || "").trim(),
+			monthPrice: Number.isFinite(Number(month?.monthPrice))
+				? Number(month.monthPrice)
+				: null,
+		}))
+		.filter((month) => {
+			if (!month.monthName && !month.monthPrice) return false;
+			if (!month.monthTo) return true;
+			return new Date(`${month.monthTo}T23:59:59.999Z`) >= today;
+		})
+		.slice(0, 6);
 }
 
 function dateOnlyKey(value = "") {
@@ -419,8 +469,8 @@ function compactRoomForAi(room = {}) {
 		// Full pricing histories can be very large. Quote flows hydrate only the
 		// requested stay dates through getHotelByIdWithPricingDates.
 		pricingRate: [],
-		monthly: [],
-		offers: [],
+		monthly: compactMonthlyForAi(room.monthly),
+		offers: compactOffersForAi(room.offers),
 		count: room.count,
 		activeRoom: room.activeRoom,
 		commisionIncluded: room.commisionIncluded,
