@@ -168,6 +168,41 @@ function roomTypeLabel(roomTypeKey = "", languageCode = "en") {
 	return labels[roomTypeKey] || roomTypeKey || (ar ? "غرفة" : "Room");
 }
 
+function roomCapacityForKey(roomTypeKey = "") {
+	const capacities = {
+		singleRooms: 1,
+		doubleRooms: 2,
+		tripleRooms: 3,
+		quadRooms: 4,
+		familyRooms: 5,
+		suite: 6,
+	};
+	return capacities[roomTypeKey] || 0;
+}
+
+function inferRoomTypeFromGuests(hotel = {}, known = {}) {
+	if (known.roomTypeKey) return "";
+	const adults = Number(known.adults || known.guests || 0);
+	const children = Number(known.children || 0);
+	const totalGuests = adults + Math.max(0, children);
+	if (!Number.isFinite(totalGuests) || totalGuests < 1) return "";
+	const activeRoomKeys = new Set(
+		(Array.isArray(hotel.roomCountDetails) ? hotel.roomCountDetails : [])
+			.filter((room) => room?.activeRoom !== false)
+			.map((room) => String(room?.roomType || ""))
+			.filter(Boolean)
+	);
+	const candidates = ROOM_TYPE_KEYS
+		.map((key) => ({ key, capacity: roomCapacityForKey(key) }))
+		.filter(
+			(item) =>
+				item.capacity >= totalGuests &&
+				(!activeRoomKeys.size || activeRoomKeys.has(item.key))
+		)
+		.sort((a, b) => a.capacity - b.capacity);
+	return candidates[0]?.key || "";
+}
+
 function localizedAgentName(sc = {}) {
 	const name = String(sc.aiResponderName || "Jannat Booking").trim();
 	const languageCode = String(sc.preferredLanguageCode || "").toLowerCase();
@@ -343,8 +378,14 @@ function peopleCountFromLine(value = "") {
 		/(?:for|ل|لعدد)?\s*(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i
 	);
 	const count = Number(match?.[1] || 0);
-	if (!Number.isFinite(count) || count < 1 || count > 30) return null;
-	return Math.floor(count);
+	if (Number.isFinite(count) && count >= 1 && count <= 30) return Math.floor(count);
+	let relationshipCount = 0;
+	if (/\b(myself|me)\b/i.test(text)) relationshipCount += 1;
+	const relationMatches = text.match(
+		/\b(mom|mother|mum|father|dad|sister|brother|wife|husband|son|daughter|friend|parent|parents|kid|child|children)\b/gi
+	);
+	relationshipCount += relationMatches ? relationMatches.length : 0;
+	return relationshipCount >= 1 && relationshipCount <= 30 ? relationshipCount : null;
 }
 
 function labeledFactFromAssistant(text = "", labels = []) {
@@ -1209,6 +1250,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest challenges an unavailable result or says to check again, do not escalate. If exact stay details are known, action must be "get_quote" so the server re-checks the calendar. If the guest changes only part of a previous stay, treat it as a fresh stay and ask only for the missing boundary instead of reusing old dates silently.`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and roomTypeKey are known, action must be "get_quote".`,
+		`If the guest count clearly fits one standard room type and the guest has not requested a larger room, choose the smallest suitable active room type for quoting instead of asking a preference question. Examples: 2 guests -> double, 3 guests -> triple, 4 guests -> quad, 5 guests -> family.`,
 		`If the known guest count appears larger than the selected room capacity, do not proceed to final review silently. Explain the capacity mismatch naturally, suggest a suitable room or additional room, and ask one clear confirmation question.`,
 		`Never send a customer-facing reply like "I will check now" or "I am checking availability/price" as action="reply". If you can identify the stay from the transcript, return action="get_quote" and put checkinISO, checkoutISO, roomTypeKey, adults, children, and rooms in facts. If one detail is missing, ask only for that detail without saying you are checking now.`,
 		`Required booking details are checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, and adults. Email is optional and must never be listed as a required item.`,
@@ -2239,6 +2281,10 @@ async function planTurn(io, supportCaseOrId) {
 		? applyLatestStayRevision(known, latestText, latestAction, previousAi)
 		: { known, deferToOpenAI: false, appliedQuickDates: false };
 	known = latestRevision.known;
+	if (!known.roomTypeKey) {
+		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
+		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
+	}
 	const shouldLetOpenAIHandleRevision =
 		latestGuest &&
 		(guestRequestsRevision(latestText, latestAction) ||
@@ -2476,7 +2522,13 @@ async function planTurn(io, supportCaseOrId) {
 }
 
 function shouldUsePlanWorker() {
-	return false;
+	if (String(process.env.AI_AGENT_WORKER_PROCESS || "").toLowerCase() === "true") {
+		return false;
+	}
+	const raw = String(process.env.AI_PLAN_USE_WORKER ?? "true")
+		.trim()
+		.toLowerCase();
+	return !["0", "false", "no", "off", "disabled"].includes(raw);
 }
 
 function runPlanTurnWorker(caseId = "", reason = "scheduled") {
