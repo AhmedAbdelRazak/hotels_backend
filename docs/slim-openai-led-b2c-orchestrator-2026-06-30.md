@@ -71,7 +71,31 @@ Production validation:
 Runtime safety state after deployment:
 
 - `AI_AGENT_ENABLED=true`
-- `AI_PLAN_USE_WORKER=false`
+- `AI_PLAN_USE_WORKER=false` during the first late stabilization pass; changed back to bounded worker mode in the required-field follow-up below.
 - `AI_TURN_STALL_RECOVERY_ENABLED=false`
 
-Keep the old worker and stall recovery disabled unless a separate load test proves they are needed and safe.
+Keep stall recovery disabled unless a separate load test proves it is needed and safe.
+
+## 2026-06-30 Required-Field Guardrail Follow-up
+
+Problem observed in live production case `6a4492e3d50e40ab7f0f25a7`:
+
+- After the guest gave nationality as a natural sentence (`I'm a US citizen`), OpenAI asked for a passport/ID number.
+- Passport, national ID, document number, DOB, and card/payment details are not part of the B2C booking plan.
+
+Fix:
+
+- `normalizeNationalityHint()` now recognizes sentence-style nationality answers such as `I'm a US citizen`.
+- The initial OpenAI system prompt explicitly says the only required booking fields are dates, room type, quote, full name, phone, nationality, and adult count; email is optional.
+- The prompt now explicitly forbids asking for passport number, ID number, national ID, document number, DOB, card number, or payment-card details.
+- A backend guard now scans every generated customer reply before sending. If a reply tries to ask for a forbidden document/payment field, the orchestrator replaces it with the correct next step:
+  - exact quote if quote inputs are known but quote is stale/missing;
+  - optional email message if required facts are complete and email has not been offered;
+  - official review if required facts are complete and email is already handled;
+  - a short allowed-fields-only request if something required is still missing.
+
+Operational note:
+
+- Scheduled AI turns should run through the bounded worker process when available (`AI_PLAN_USE_WORKER=true`, `AI_PLAN_WORKER_HEAP_MB=512`) so slow or stuck OpenAI turns cannot balloon the main `hotels-backend` memory.
+- The worker itself still sets `AI_AGENT_WORKER_PROCESS=true`, so it does not recursively spawn workers.
+- Keep `AI_TURN_STALL_RECOVERY_ENABLED=false`; the old stall recovery created risky extra turns under load.

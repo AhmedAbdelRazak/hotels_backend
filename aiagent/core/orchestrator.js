@@ -329,6 +329,21 @@ function stripChatMarkup(value = "") {
 function normalizeNationalityHint(value = "") {
 	const raw = stripChatMarkup(value).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
 	const key = raw.toLowerCase().replace(/\./g, "");
+	const sentenceMatches = [
+		{ pattern: /\b(?:us|u\s*s\s*a|usa|united states|american)\b/i, value: "US" },
+		{ pattern: /\b(?:uk|united kingdom|british)\b/i, value: "UK" },
+		{ pattern: /\b(?:ksa|saudi arabia|saudi)\b/i, value: "Saudi" },
+		{ pattern: /\b(?:uae|united arab emirates|emirati)\b/i, value: "UAE" },
+		{ pattern: /\b(?:egypt|egyptian)\b/i, value: "Egyptian" },
+		{ pattern: /\b(?:canada|canadian)\b/i, value: "Canadian" },
+		{ pattern: /\b(?:pakistan|pakistani)\b/i, value: "Pakistani" },
+		{ pattern: /\b(?:india|indian)\b/i, value: "Indian" },
+	];
+	const nationalityContext = /\b(?:citizen|national|nationality|passport|from|i am|i'm|im|my nationality)\b/i.test(raw);
+	if (nationalityContext) {
+		const match = sentenceMatches.find((item) => item.pattern.test(raw));
+		if (match) return match.value;
+	}
 	const mapped = {
 		us: "US",
 		usa: "US",
@@ -788,6 +803,63 @@ function buildNationalityNeededMessage(sc = {}, known = {}) {
 	return /^ar\b/i.test(activeLanguageCode(sc, known))
 		? `تمام أستاذ ${guestDisplayName(sc)}، بقي فقط الجنسية حتى أجهز مراجعة الحجز.`
 		: `Absolutely, ${guestDisplayName(sc)}. I only need the nationality now so I can prepare the booking review.`;
+}
+
+function replyRequestsForbiddenBookingField(reply = "") {
+	const text = normalizeDigits(String(reply || ""))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const forbidden =
+		/\b(passport|passport number|id number|identity number|identification number|national id|document number|document id)\b/i.test(text) ||
+		/(رقم الجواز|جواز السفر|الجواز|رقم الهوية|رقم هويتك|الهوية|بطاقة الهوية|الرقم القومي|رقم الإقامة|رقم الاقامة)/i.test(text);
+	if (!forbidden) return false;
+	if (/\b(do not|don't|dont|no need|not need|required is not|not required|never need|without)\b.{0,80}\b(passport|id number|identity|document)/i.test(text)) {
+		return false;
+	}
+	if (/(لا أحتاج|لا نحتاج|ليس مطلوب|غير مطلوب|بدون).{0,80}(جواز|هوية|إقامة|اقامة|الرقم القومي)/i.test(text)) {
+		return false;
+	}
+	return (
+		/\b(send|provide|share|need|required|please|kindly|give me|enter)\b/i.test(text) ||
+		/(أرسل|ارسل|ارسلي|من فضلك|يرجى|احتاج|أحتاج|نحتاج|اعطني|اكتب|اكتبي|زودني|زوّدني)/i.test(text)
+	);
+}
+
+function buildAllowedMissingBookingDetailsMessage(sc = {}, known = {}, missing = []) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const allowedMissing = (Array.isArray(missing) ? missing : requiredBookingMissing(known))
+		.filter((item) => item !== "quote");
+	const labels = ar
+		? {
+				checkinISO: "تاريخ الوصول",
+				checkoutISO: "تاريخ المغادرة",
+				roomTypeKey: "نوع الغرفة",
+				fullName: "الاسم الكامل",
+				phone: "رقم الهاتف",
+				nationality: "الجنسية",
+				adults: "عدد الضيوف",
+		  }
+		: {
+				checkinISO: "check-in date",
+				checkoutISO: "checkout date",
+				roomTypeKey: "room type",
+				fullName: "full guest name",
+				phone: "phone number",
+				nationality: "nationality",
+				adults: "number of guests",
+		  };
+	const readable = allowedMissing.map((item) => labels[item] || item).filter(Boolean);
+	if (!readable.length) {
+		return ar
+			? `تمام أستاذ ${guestDisplayName(sc)}، لا أحتاج جواز سفر أو رقم هوية لهذا الحجز. أراجع التفاصيل المسموحة الآن وأكمل معك.`
+			: `Thank you, ${guestDisplayName(sc)}. I do not need a passport or ID number for this booking. I will continue with the allowed booking details.`;
+	}
+	return ar
+		? `تمام أستاذ ${guestDisplayName(sc)}، لا أحتاج جواز سفر أو رقم هوية لهذا الحجز. فقط أحتاج ${readable.join("، ")} حتى أجهز مراجعة الحجز بشكل صحيح.`
+		: `Thank you, ${guestDisplayName(sc)}. I do not need a passport or ID number for this booking. I only need ${readable.join(", ")} so I can prepare the booking review correctly.`;
 }
 
 function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
@@ -1254,6 +1326,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the known guest count appears larger than the selected room capacity, do not proceed to final review silently. Explain the capacity mismatch naturally, suggest a suitable room or additional room, and ask one clear confirmation question.`,
 		`Never send a customer-facing reply like "I will check now" or "I am checking availability/price" as action="reply". If you can identify the stay from the transcript, return action="get_quote" and put checkinISO, checkoutISO, roomTypeKey, adults, children, and rooms in facts. If one detail is missing, ask only for that detail without saying you are checking now.`,
 		`Required booking details are checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, and adults. Email is optional and must never be listed as a required item.`,
+		`Never ask for passport number, ID number, national ID, document number, date of birth, card number, payment-card details, or any identity document for this B2C booking flow. Those fields are not part of the booking plan. If you already have the required details, return action="send_review"; if something is missing, ask only for the missing allowed booking detail.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
 		`If the required booking details and quote are known but email is missing and emailSkipped is not true, offer email once in a separate short optional message before the final review. Explain that email is only useful for receiving the receipt/confirmation/details, and that the guest can continue without email.`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, and email was already provided, skipped, or offered once in the transcript, action must be "send_review".`,
@@ -2432,6 +2505,33 @@ async function planTurn(io, supportCaseOrId) {
 			decision = repaired.decision;
 			known = repaired.known;
 			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+		}
+		if (replyRequestsForbiddenBookingField(decision.reply)) {
+			if (quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
+				await saveKnownFacts(key, known);
+				await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+				return handleQuote(io, sc, hotel, known, latestGuest);
+			}
+			const missing = requiredBookingMissing(known);
+			await saveKnownFacts(key, known);
+			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+			if (!missing.length) {
+				if (!cleanEmail(known.email) && !known.emailSkipped && !emailAlreadyOffered(sc)) {
+					return sendAiMessage(io, sc, buildOptionalEmailMessage(sc, known), {
+						latestGuest,
+						known,
+						clientAction: "optional_email",
+						quickReplies: emailSkipQuickReplies(activeLanguageCode(sc, known)),
+					});
+				}
+				return sendReview(io, sc, known, hotel, latestGuest);
+			}
+			return sendAiMessage(
+				io,
+				sc,
+				buildAllowedMissingBookingDetailsMessage(sc, known, missing),
+				{ latestGuest, known }
+			);
 		}
 		await saveKnownFacts(key, known);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
