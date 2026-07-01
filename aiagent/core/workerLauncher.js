@@ -21,6 +21,10 @@ function caseIdText(value = "") {
 	return String(value?._id || value || "").trim();
 }
 
+function shellSingleQuote(value = "") {
+	return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 async function loadCaseForWorkerLaunch(caseId = "") {
 	if (!caseId) return null;
 	return SupportCase.findById(caseId)
@@ -41,19 +45,31 @@ function emitAiTyping(io, supportCase = {}, isTyping = true) {
 }
 
 function spawnWorker(caseId = "") {
+	if (!/^[a-f\d]{24}$/i.test(caseId)) {
+		throw new Error("Invalid support case id for worker launch");
+	}
 	const workerPath = path.join(__dirname, "../worker/planTurnWorker.js");
+	const command = [
+		"cd",
+		shellSingleQuote(path.join(__dirname, "../..")),
+		"&&",
+		"env",
+		"AI_AGENT_WORKER_PROCESS=true",
+		"AI_PLAN_USE_WORKER=false",
+		`OPENAI_CHATBOT_MAX_PROMPT_CHARS=${shellSingleQuote(process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "8000")}`,
+		`AI_TURN_MAX_CONVERSATION=${shellSingleQuote(process.env.AI_TURN_MAX_CONVERSATION || "18")}`,
+		`AI_PLAN_WORKER_TIMEOUT_MS=${shellSingleQuote(String(AI_PLAN_WORKER_TIMEOUT_MS))}`,
+		"node",
+		`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`,
+		shellSingleQuote(workerPath),
+		shellSingleQuote(caseId),
+	].join(" ");
 	const child = spawn(
-		process.execPath,
-		[`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`, workerPath, caseId],
+		"/bin/bash",
+		["-lc", command],
 		{
 			cwd: path.join(__dirname, "../.."),
-			env: {
-				...process.env,
-				AI_AGENT_WORKER_PROCESS: "true",
-				AI_PLAN_USE_WORKER: "false",
-				OPENAI_CHATBOT_MAX_PROMPT_CHARS:
-					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "8000",
-			},
+			env: process.env,
 			stdio: ["ignore", "ignore", "ignore"],
 			detached: false,
 		}
