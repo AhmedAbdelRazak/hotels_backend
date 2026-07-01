@@ -1255,7 +1255,7 @@ async function handleUpdateReservation(io, sc = {}, hotel = {}, known = {}, late
 	return sendAiMessage(io, sc, decision.reply, { latestGuest, known });
 }
 
-async function finalizeImmediatePlaceReservation(io, caseOrId) {
+async function submitReservationForCase(io, caseOrId) {
 	const caseId = caseIdText(caseOrId);
 	const sc = await getSupportCaseById(caseId);
 	if (!sc) return { ok: false, reason: "case_not_found" };
@@ -1363,7 +1363,7 @@ async function planTurn(io, supportCaseOrId) {
 			});
 		} else if (latestAction === "place_reservation") {
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-			return finalizeImmediatePlaceReservation(io, key);
+			return submitReservationForCase(io, key);
 		} else {
 			decision = await askOpenAI({ sc, hotel, known, latestGuest });
 		}
@@ -1388,7 +1388,7 @@ async function planTurn(io, supportCaseOrId) {
 			return handleQuote(io, sc, hotel, known, latestGuest);
 		}
 		if (decision.action === "submit_reservation") {
-			return finalizeImmediatePlaceReservation(io, key);
+			return submitReservationForCase(io, key);
 		}
 		if (decision.action === "send_review" || decision.action === "send_review_again") {
 			return sendReview(io, sc, known, hotel, latestGuest);
@@ -1621,31 +1621,9 @@ function wireSocket(io) {
 	setTimeout(() => recoverIdleCloseTimers(io), 1500).unref?.();
 }
 
-async function buildImmediateKnownStayQuoteReply() {
-	return null;
-}
-
-async function prepareImmediateProceedAfterQuoteState() {
-	return { ok: false, reason: "slim_orchestrator_openai_led" };
-}
-
-async function buildImmediateReservationDetailsReply() {
-	return null;
-}
-
-async function buildImmediateSkipEmailReviewReply() {
-	return null;
-}
-
 const exportedOrchestrator = {
 	wireSocket,
 	schedulePlanTurn,
-	buildImmediateKnownStayQuoteReply,
-	prepareImmediateProceedAfterQuoteState,
-	buildImmediateReservationDetailsReply,
-	buildImmediateSkipEmailReviewReply,
-	finalizeImmediatePlaceReservation,
-	tryImmediateB2CFastPath: async () => null,
 	__worker: {
 		planTurn,
 	},
