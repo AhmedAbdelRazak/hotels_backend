@@ -1371,6 +1371,7 @@ function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
 		"\u0645\u062a\u0648\u0641\u0631",
 		"\u062d\u062c\u0632",
 		"\u0627\u062d\u062c\u0632",
+		"\u0623\u062d\u062c\u0632",
 		"\u0631\u064a\u0627\u0644",
 		"\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a",
 		"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
@@ -3999,7 +4000,8 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuest &&
 		!shouldLetOpenAIHandleRevision &&
 		!quoteInputsKnown(known) &&
-		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		(!latestGuestAsksHotelFactOnly(latestGuest) ||
+			guestAsksPriceAvailabilityOrBooking(latestText, latestAction)) &&
 		!["quote_ready", "review_reservation", "required_details_needed"].includes(
 			String(previousAi?.clientAction || "").toLowerCase()
 		) &&
@@ -4634,6 +4636,7 @@ const exportedOrchestrator = {
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		guestDeclinesFurtherHelp,
+		guestAsksPriceAvailabilityOrBooking,
 		guestRequestsBookingReviewStep,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
