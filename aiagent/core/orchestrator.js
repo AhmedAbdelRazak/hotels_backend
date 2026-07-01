@@ -3337,11 +3337,26 @@ function latestGuestRequestsReservationCancel(latestText = "", known = {}) {
 		.trim();
 	if (!text) return false;
 	const compact = text.replace(/\s+/g, "");
+	const tokens = text.split(/[^A-Za-z\u0600-\u06FF]+/u).filter(Boolean);
+	const arabicCancelWords = new Set([
+		"\u0627\u0644\u063a\u0627\u0621",
+		"\u0625\u0644\u063a\u0627\u0621",
+		"\u0623\u0644\u063a\u0627\u0621",
+		"\u0627\u0644\u063a\u064a",
+		"\u0625\u0644\u063a\u064a",
+		"\u0623\u0644\u063a\u064a",
+		"\u0627\u0644\u063a\u064a\u0647",
+		"\u0623\u0644\u063a\u064a\u0647",
+		"\u0627\u0644\u063a\u064a\u0647\u0627",
+		"\u0623\u0644\u063a\u064a\u0647\u0627",
+		"\u0645\u0644\u063a\u064a",
+		"\u0643\u0646\u0633\u0644",
+	]);
 	const cancelIntent =
-		/\b(cancel|cancelation|cancellation)\b/i.test(text) ||
-		/(?:\u0627\u0644\u063a|\u0625\u0644\u063a|\u0623\u0644\u063a|\u0644\u063a\u064a|\u0645\u0644\u063a\u064a|\u0643\u0646\u0633\u0644)/i.test(
-			compact
-		);
+		tokens.some((token) =>
+			/^(?:cancel|cancelation|cancellation|canceled|cancelled)$/i.test(token)
+		) ||
+		tokens.some((token) => arabicCancelWords.has(token));
 	if (!cancelIntent) return false;
 	const confirmation = confirmationNumberFromText(text) || cleanString(known.confirmation, 40);
 	if (confirmation) return true;
