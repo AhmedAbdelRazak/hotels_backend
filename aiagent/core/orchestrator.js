@@ -580,7 +580,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 			? `This is the beginning of a new guest chat. There is no guest request yet. Return action="reply" only, quickReplies=[], and a short warm opening greeting as ${agentName} from the reception/reservations team for this hotel. Ask how you can help today. Do not list rooms, prices, offers, policies, or ask for dates until the guest asks or sends booking details.`
 			: "",
 		firstGuestTurn
-			? `This is your first AI response in a new guest chat, and the guest may already have sent a request. Greet briefly in the guest's language as ${agentName} from this hotel's reception/reservations team, then respond to the guest's actual request in the same message. Do not ignore the request. If booking details are incomplete, acknowledge what is known and ask only the next needed question.`
+			? `This is your first AI response in a new guest chat, and the guest may already have sent one or more messages before you answered. Read the full transcript, not only the latest message. If the guest sent a booking request and then a greeting or follow-up, greet briefly in the guest's language as ${agentName} from this hotel's reception/reservations team, then respond to the actual booking/request details in the same message. Do not ignore earlier guest details. If booking details are incomplete, acknowledge what is known and ask only the next needed question.`
 			: "",
 		responseSchemaPrompt(),
 		`Hotel facts:\n${JSON.stringify(hotelFacts, null, 2)}`,
