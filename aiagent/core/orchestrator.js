@@ -1633,13 +1633,36 @@ function shouldForceQuote(decision = {}, known = {}, latestGuest = {}) {
 }
 
 async function quoteTool(sc = {}, known = {}) {
+	const caseId = caseIdText(sc);
 	const dates = eachNight(known.checkinISO, known.checkoutISO);
+	logTurnStage(caseId, "quote_dates_ready", {
+		nights: dates.length,
+		firstDate: dates[0] || "",
+		lastDate: dates[dates.length - 1] || "",
+	});
 	if (!dates.length) {
 		return { ok: false, code: "bad_dates", message: "Invalid date range." };
 	}
+	logTurnStage(caseId, "quote_hotel_fetch_start");
 	const hotel = await getHotelByIdWithPricingDates(sc.hotelId, dates);
+	logTurnStage(caseId, "quote_hotel_fetch_done", {
+		roomCount: Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails.length
+			: 0,
+		pricingRows: Array.isArray(hotel?.roomCountDetails)
+			? hotel.roomCountDetails.reduce(
+					(total, room) => total + (Array.isArray(room.pricingRate) ? room.pricingRate.length : 0),
+					0
+			  )
+			: 0,
+	});
 	const roomTypeKey = known.roomTypeKey || "";
+	logTurnStage(caseId, "quote_price_start", { roomTypeKey });
 	const quote = priceRoomForStay(hotel, { roomType: roomTypeKey }, known.checkinISO, known.checkoutISO);
+	logTurnStage(caseId, "quote_price_done", {
+		available: Boolean(quote?.available),
+		nights: quote?.nights || 0,
+	});
 	const rooms = Math.max(1, Number(known.rooms || 1) || 1);
 	if (!quote?.available) {
 		return {
