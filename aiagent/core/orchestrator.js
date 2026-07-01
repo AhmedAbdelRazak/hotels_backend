@@ -727,6 +727,15 @@ function quoteFactsFromAiMessage(entry = {}) {
 	return facts;
 }
 
+function latestQuoteFactsFromConversation(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const facts = quoteFactsFromAiMessage(conversation[index]);
+		if (facts.checkinISO || facts.checkoutISO || facts.roomTypeKey) return facts;
+	}
+	return {};
+}
+
 function guestConfirms(value = "", action = "") {
 	const cleanAction = cleanString(action, 80).toLowerCase();
 	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
@@ -1560,6 +1569,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Never ask for passport number, ID number, national ID, document number, date of birth, card number, payment-card details, or any identity document for this B2C booking flow. Those fields are not part of the booking plan. If you already have the required details, return action="send_review"; if something is missing, ask only for the missing allowed booking detail.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
 		`Email is optional and useful for sending booking details/receipt. After all required details are known, email may be offered once in a separate short message with a clear skip option. Never list email with required fields, never ask twice, and never block the booking if the guest skips it or continues without it.`,
+		`Do not proactively suggest special requests, extra beds, floor preferences, late-arrival notes, or similar optional add-ons while moving from quote to booking review. Only discuss them if the guest asks first. Keep the next step focused on the missing required booking details, optional email once, or the official review action.`,
 		`Do not delay the final review for special requests, notes, room preferences, passport/ID, or anything not listed as required. If the guest wants to continue after an exact quote, ask only missing required details; if none are missing and optional email was already provided, skipped, or offered once, return action="send_review".`,
 		`After an exact quote has been accepted, do not repeat the same quote as the next answer unless the guest asks to see the price again or changes dates/room/guest count.`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review".`,
@@ -2695,6 +2705,9 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuest && guestWantsToContinueBooking(latestText, latestAction);
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
 		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
+	}
+	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
+		known = mergeKnownFacts(known, latestQuoteFactsFromConversation(sc));
 	}
 	const wantsToContinueBooking =
 		latestGuestWantsToContinue &&

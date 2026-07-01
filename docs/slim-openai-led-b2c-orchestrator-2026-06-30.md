@@ -97,6 +97,12 @@ Fix:
 - One-off QA scripts may set `AI_SKIP_RESERVATION_CONFIRMATION_DISPATCH=true` in their own process to verify reservation creation without sending fake confirmation emails/WhatsApp notifications. Do not set this in production PM2.
 - Final review actions (`place_reservation` / guest confirmation after a review) are handled before quote/review reminder branches, so the final button cannot be swallowed by duplicate-review protection.
 
+Follow-up stabilization:
+
+- When a guest accepts an exact quote, the continue path now recovers quote facts from the latest quote/review message anywhere in the transcript, not only the immediately previous AI entry. This prevents the flow from losing dates/room type after a short assistant acknowledgement.
+- OpenAI prompt now explicitly says not to proactively suggest special requests, extra beds, floor preferences, late-arrival notes, or similar optional add-ons while moving from quote to booking review.
+- Email remains optional and can be offered once in a separate message with a skip button; it must not be mixed into the required-fields list or block the official review.
+
 ## 2026-07-01 Regional Gregorian Month Names
 
 The date parser and OpenAI prompt now recognize common regional Gregorian month names used by Arab guests:
