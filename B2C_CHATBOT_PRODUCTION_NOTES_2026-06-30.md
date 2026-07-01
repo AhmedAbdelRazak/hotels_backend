@@ -58,6 +58,12 @@
   - check-out Gregorian: `2026-09-08`
   - check-in Hijri: `18 Rabi al-Awwal 1448`
   - check-out Hijri: `25 Rabi al-Awwal 1448`
+- `6a4467f7b20693e523ba462f` showed that the SSR widget and backend do save a real initial guest message when the guest edits the chat text before opening the case.
+  - Initial guest message: "wanted a double room for me and my son"
+  - The default/generated widget message is filtered out and not treated as a real guest request.
+  - The no-response cause was operational: production had `AI_AGENT_ENABLED=false`, so the scheduler was not running.
+  - A forced single worker run answered the case in about 3.9 seconds and kept backend memory stable.
+  - The prompt was tightened so first AI replies identify as the hotel reception/reservations team, not generic Jannat Booking support.
 
 ## PMS And Server Health Notes
 
