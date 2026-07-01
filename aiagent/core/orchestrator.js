@@ -26,6 +26,9 @@ const {
 const {
 	reservationPublicLinks,
 } = require("../../services/reservationConfirmationDispatcher");
+const {
+	validateReservationInventoryForCreate,
+} = require("../../controllers/reservations");
 
 const SUPPORT_EMAILS = new Set([
 	"support@jannatbooking.com",
@@ -2549,6 +2552,48 @@ async function quoteTool(sc = {}, known = {}) {
 			pricingByDay: quote.pricingByDay || [],
 			oneRoomTotal: Number(quote.totals?.totalPriceWithCommission || 0),
 		});
+	}
+	const inventoryPayload = {
+		hotelId: hotel?._id || sc.hotelId,
+		hotelName: hotel?.hotelName || "",
+		checkin_date: known.checkinISO,
+		checkout_date: known.checkoutISO,
+		pickedRoomsType: quoteLines.map((line) => ({
+			room_type: line.room?.roomType || line.roomTypeKey,
+			displayName:
+				line.room?.displayName ||
+				line.room?.display_name ||
+				roomTypeLabel(line.roomTypeKey, known.languageCode),
+			count: line.count,
+		})),
+	};
+	const inventoryValidation = await validateReservationInventoryForCreate(
+		inventoryPayload,
+		{ allowOverbook: false }
+	).catch((error) => {
+		console.error("[aiagent] quote inventory validation failed:", error?.message || error);
+		return {
+			allowed: false,
+			message: "Selected room is no longer available.",
+			issues: [{ code: "inventory_validation_failed" }],
+		};
+	});
+	if (!inventoryValidation.allowed) {
+		logTurnStage(caseId, "quote_inventory_unavailable", {
+			code: inventoryValidation.issues?.[0]?.code || "inventory_unavailable",
+			message: String(inventoryValidation.message || "").slice(0, 160),
+		});
+		return {
+			ok: true,
+			available: false,
+			code: inventoryValidation.issues?.[0]?.code || "inventory_unavailable",
+			checkinISO: known.checkinISO,
+			checkoutISO: known.checkoutISO,
+			roomTypeKey: primary.roomTypeKey || "",
+			roomLabel: roomTypeLabel(primary.roomTypeKey || "", known.languageCode),
+			currency: quoteLines[0]?.quote?.currency || hotel?.currency || "SAR",
+			selectionKey,
+		};
 	}
 	logTurnStage(caseId, "quote_price_done", {
 		available: true,
