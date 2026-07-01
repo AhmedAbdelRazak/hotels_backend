@@ -680,7 +680,7 @@ function fuzzyHijriMonthFromText(value = "") {
 }
 
 function isDateConnectorToken(value = "") {
-	return /^(?:-|to|until|through|till|from|of|or|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
+	return /^(?:-|to|until|through|thru|though|throu|throughh|till|from|of|or|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
 		String(value || "").trim()
 	);
 }
@@ -817,7 +817,7 @@ function quickHijriDateRangeNoYear(text = "") {
 	}
 	const dayPart = "(\\d{1,2})(?:st|nd|rd|th)?";
 	const connector =
-		"(?:-|to|until|through|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
+		"(?:-|to|until|through|thru|though|throu|throughh|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
 	const sharedMonthNoYear = new RegExp(
 		`${dayPart}\\s+${connector}\\s+${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})`,
 		"i"
@@ -913,10 +913,10 @@ function quickHijriDateRange(text = "") {
 	}
 	const yearPart = "(1[34]\\d{2}|15\\d{2})";
 	const dayPart = "(\\d{1,2})(?:st|nd|rd|th)?";
-	const connector = "(?:-|to|until|through|till|from|الى|الي|حتى|ل)";
+	const connector = "(?:-|to|until|through|thru|though|throu|throughh|till|from|الى|الي|حتى|ل)";
 
 	const connectorUnicode =
-		"(?:-|to|until|through|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
+		"(?:-|to|until|through|thru|though|throu|throughh|till|from|\\u0627\\u0644\\u0649|\\u0627\\u0644\\u064a|\\u062d\\u062a\\u0649|\\u0644)";
 	const sharedMonth = new RegExp(
 		`${dayPart}\\s+${connectorUnicode}\\s+${dayPart}\\s+(${HIJRI_MONTH_REGEX_PART})\\s+${yearPart}`,
 		"i"
@@ -1129,7 +1129,7 @@ function quickNumericGregorianDateRange(text = "") {
 		pushMatch(match.index, match[0], match[1], match[2], match[3]);
 	}
 	const sharedYearRe =
-		/\b(\d{1,2})[\/.-](\d{1,2})\s*(?:-|\u2013|\u2014|to|until|till|through|\u0627\u0644\u0649|\u0625\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649)\s*(\d{1,2})[\/.-](\d{1,2})[\/.-]((?:20\d{2})|(?:\d{2}))\b/gi;
+		/\b(\d{1,2})[\/.-](\d{1,2})\s*(?:-|\u2013|\u2014|to|until|till|through|thru|though|throu|throughh|\u0627\u0644\u0649|\u0625\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649)\s*(\d{1,2})[\/.-](\d{1,2})[\/.-]((?:20\d{2})|(?:\d{2}))\b/gi;
 	while ((match = sharedYearRe.exec(raw))) {
 		pushMatch(match.index, match[0], match[1], match[2], match[5]);
 		pushMatch(match.index + match[0].lastIndexOf(match[3]), match[0], match[3], match[4], match[5]);
@@ -1258,7 +1258,7 @@ function gregorianMonthFromText(value = "", { fuzzy = false } = {}) {
 }
 
 function isGregorianDateParticle(value = "") {
-	return /^(?:from|to|until|through|till|of|de|du|del|al|au|le|el|la|a|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
+	return /^(?:from|to|until|through|thru|though|throu|throughh|till|of|de|du|del|al|au|le|el|la|a|\u0645\u0646|\u0627\u0644\u0649|\u0627\u0644\u064a|\u0627\u0644\u064a|\u062d\u062a\u0649|\u062d\u062a\u064a|\u0644)$/i.test(
 		normalizeGregorianMonthLabel(value)
 	);
 }

@@ -668,6 +668,73 @@ function guestDeclinesOptionalEmail(value = "", action = "") {
 	return /^(no|no thanks|no thank you|skip|without email|continue without email|not now|لا|لا شكرا|بدون بريد|من غير بريد|اتخطى|تخطى)$/i.test(text);
 }
 
+function guestRequestsRevision(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (cleanAction === "revise_reservation") return true;
+	const text = normalizeDigits(String(value || "")).toLowerCase();
+	return /\b(something is wrong|wrong|not correct|incorrect|change something|fix it|revise|modify|edit)\b/i.test(text) ||
+		/(غير صحيح|مش صحيح|فيه غلط|عدل|تعديل|غير|غيّر)/i.test(text);
+}
+
+function previousAiAskedForRevision(previousAi = {}) {
+	const text = normalizeDigits(String(previousAi?.message || "")).toLowerCase();
+	return /\b(what needs to be changed|what needs fixing|tell me what needs|dates, room type|date, room type)\b/i.test(text) ||
+		/(ما الذي يحتاج|ايه اللي محتاج|ماذا تريد تعديله|التواريخ|نوع الغرفة)/i.test(text);
+}
+
+function latestGuestMentionsDateish(value = "") {
+	const text = normalizeDigits(String(value || "")).toLowerCase();
+	if (!text.trim()) return false;
+	if (quickDateRange(text)?.checkinISO || quickDateRange(text)?.checkoutISO) return true;
+	return /\b(?:date|dates|stay|accommodation|accomodation|checkin|check-in|checkout|check-out|arrive|arrival|depart|departure|from|until|through|thru|though|aug|august|sep|sept|september|oct|october|nov|november|dec|december|jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july)\b/i.test(text) ||
+		/(تاريخ|تواريخ|وصول|مغادرة|اقامة|إقامة|من|الى|إلى|حتى|أغسطس|اغسطس|سبتمبر|اكتوبر|أكتوبر|نوفمبر|ديسمبر|يناير|فبراير|مارس|ابريل|أبريل|مايو|يونيو|يوليو)/i.test(text);
+}
+
+function quickDateFactsFromText(value = "") {
+	const dates = quickDateRange(value);
+	if (!dates?.checkinISO || !dates?.checkoutISO) return null;
+	const calendar = dates.raw?.calendar || "gregorian";
+	const facts = {
+		checkinISO: dates.checkinISO,
+		checkoutISO: dates.checkoutISO,
+		dateCalendar: calendar,
+	};
+	if (dates.raw?.checkinHijri) facts.checkinHijriText = dates.raw.checkinHijri;
+	if (dates.raw?.checkoutHijri) facts.checkoutHijriText = dates.raw.checkoutHijri;
+	if (["hijri", "mixed"].includes(String(calendar).toLowerCase())) {
+		facts.dateRangeOriginalText = [dates.raw?.checkin, dates.raw?.checkout]
+			.filter(Boolean)
+			.join(" - ");
+	}
+	return facts;
+}
+
+function applyLatestStayRevision(known = {}, latestText = "", latestAction = "", previousAi = {}) {
+	const quickFacts = quickDateFactsFromText(latestText);
+	if (quickFacts) {
+		return {
+			known: mergeKnownFacts(known, quickFacts),
+			deferToOpenAI: false,
+			appliedQuickDates: true,
+		};
+	}
+	const looksLikeRevision =
+		previousAiAskedForRevision(previousAi) ||
+		/\b(instead|rather|actually|change|modify|edit|move|make it|from)\b/i.test(latestText);
+	if (looksLikeRevision && latestGuestMentionsDateish(latestText)) {
+		const next = { ...known };
+		delete next.quote;
+		delete next.checkinISO;
+		delete next.checkoutISO;
+		delete next.checkinHijriText;
+		delete next.checkoutHijriText;
+		delete next.dateRangeOriginalText;
+		delete next.dateCalendar;
+		return { known: next, deferToOpenAI: true, appliedQuickDates: false };
+	}
+	return { known, deferToOpenAI: false, appliedQuickDates: false };
+}
+
 function buildOptionalEmailMessage(sc = {}, known = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
@@ -1135,6 +1202,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Use hotelName/hotelNameArabic as the hotel name. "Reception" and "reservations" describe your team role only; never append "Reception" to the hotel name or invent a new property name.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
 		`Before every reply, review the full conversation transcript and Known facts. Answer the latest unresolved guest question first, then continue the booking flow only if it feels natural. Do not repeat the same date/name/phone request if you already asked recently; acknowledge the current question and ask only one next question when needed.`,
+		`If the latest guest message corrects or changes earlier booking details, the latest message wins over Known facts. Return the corrected facts and action="get_quote" when exact stay details are now known; never reuse an older quote or older date range after a correction like "instead", "actually", "change", or "something is wrong".`,
 		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
@@ -2167,6 +2235,14 @@ async function planTurn(io, supportCaseOrId) {
 	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	const latestRevision = latestGuest
+		? applyLatestStayRevision(known, latestText, latestAction, previousAi)
+		: { known, deferToOpenAI: false, appliedQuickDates: false };
+	known = latestRevision.known;
+	const shouldLetOpenAIHandleRevision =
+		latestGuest &&
+		(guestRequestsRevision(latestText, latestAction) ||
+			latestRevision.deferToOpenAI);
 	if (latestGuest && previousAiAskedFor("nationality", previousAi) && !known.nationality) {
 		const nationality = normalizeNationalityHint(latestText);
 		if (nationality) known.nationality = nationality;
@@ -2186,6 +2262,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
+		!shouldLetOpenAIHandleRevision &&
 		quoteInputsKnown(known) &&
 		!quoteMatchesKnown(known) &&
 		!latestGuestAsksHotelFactOnly(latestGuest)
@@ -2194,7 +2271,7 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return handleQuote(io, sc, hotel, known, latestGuest);
 	}
-	if (latestGuest && quoteMatchesKnown(known)) {
+	if (latestGuest && quoteMatchesKnown(known) && !shouldLetOpenAIHandleRevision) {
 		const missing = requiredBookingMissing(known);
 		if (
 			missing.length === 1 &&
