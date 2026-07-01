@@ -506,6 +506,21 @@ function roomCountNearMatch(text = "", matcher) {
 	return 1;
 }
 
+function roomCountOnlyFromText(value = "") {
+	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!source) return null;
+	const roomNoun =
+		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
+	const match =
+		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		source.match(new RegExp(`${roomNoun}\\s*(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+	const count = Number(match?.[1] || 0);
+	if (!Number.isFinite(count) || count < 1 || count > MAX_AI_ROOM_COUNT) return null;
+	return normalizeRoomCount(count, 1);
+}
+
 function textMentionsRoomSelection(value = "") {
 	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -618,6 +633,19 @@ function eachNight(checkinISO = "", checkoutISO = "") {
 
 function nightsBetween(checkinISO = "", checkoutISO = "") {
 	return eachNight(checkinISO, checkoutISO).length;
+}
+
+function nightsCountFromText(value = "") {
+	const text = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	const match = text.match(
+		/(?:^|[^0-9])(\d{1,2})\s*(?:nights?|ليالي|ليالى|ليال|ليلة|ليله)(?:$|\s|[^\p{L}0-9])/iu
+	);
+	const nights = Number(match?.[1] || 0);
+	if (!Number.isFinite(nights) || nights < 1 || nights > 60) return null;
+	return Math.floor(nights);
 }
 
 function asObject(value) {
@@ -1637,6 +1665,11 @@ function arabicFirstNameFromLatinName(value = "") {
 		ehsan: "\u0625\u062d\u0633\u0627\u0646",
 		ihsan: "\u0625\u062d\u0633\u0627\u0646",
 		taha: "\u0637\u0647",
+		amira: "\u0623\u0645\u064a\u0631\u0629",
+		emira: "\u0623\u0645\u064a\u0631\u0629",
+		marwa: "\u0645\u0631\u0648\u0629",
+		mona: "\u0645\u0646\u0649",
+		muna: "\u0645\u0646\u0649",
 	};
 	return map[normalized] || "";
 }
@@ -1672,6 +1705,40 @@ function firstArabicNameForAddress(sc = {}, known = {}, latestText = "") {
 	const display = cleanDisplayString(guestDisplayName(sc), 80);
 	if (/[\u0600-\u06FF]/.test(display)) return firstArabicAddressToken(display);
 	return arabicFirstNameFromLatinName(display);
+}
+
+function arabicHonorificForName(value = "") {
+	const name = normalizeIntentSearchText(value).replace(/\s+/g, "");
+	const feminineNames = new Set([
+		"\u0645\u0631\u0648\u0629",
+		"\u0645\u0631\u0648\u0647",
+		"\u0641\u0627\u0637\u0645\u0629",
+		"\u0641\u0627\u0637\u0645\u0647",
+		"\u062e\u062f\u064a\u062c\u0629",
+		"\u062e\u062f\u064a\u062c\u0647",
+		"\u0645\u0631\u064a\u0645",
+		"\u0632\u064a\u0646\u0628",
+		"\u0644\u064a\u0644\u0649",
+		"\u0644\u064a\u0644\u064a",
+		"\u0646\u0648\u0631",
+		"\u0627\u064a\u0629",
+		"\u0633\u0645\u064a\u0631\u0629",
+		"\u0633\u0645\u064a\u0631\u0647",
+		"\u0631\u0627\u0646\u064a\u0627",
+		"\u0633\u0644\u0645\u0649",
+		"\u0633\u0644\u0645\u064a",
+		"\u0644\u064a\u0646\u0627",
+		"\u0623\u0645\u064a\u0631\u0629",
+		"\u0627\u0645\u064a\u0631\u0629",
+		"\u0645\u0646\u0649",
+	]);
+	return feminineNames.has(name) ? "\u0623\u0633\u062a\u0627\u0630\u0629" : "\u0623\u0633\u062a\u0627\u0630";
+}
+
+function arabicGuestAddress(sc = {}, known = {}, latestText = "") {
+	const name = firstArabicNameForAddress(sc, known, latestText);
+	if (!name) return "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0639\u0632\u064a\u0632";
+	return `${arabicHonorificForName(name)} ${name}`;
 }
 
 function arabicCancellationPolicySummary(policy = "") {
@@ -2399,12 +2466,14 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
 		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest challenges an unavailable result or says to check again, do not escalate. If exact stay details are known, action must be "get_quote" so the server re-checks the calendar. If the guest changes only part of a previous stay, treat it as a fresh stay and ask only for the missing boundary instead of reusing old dates silently.`,
+		`After an unavailable quote, never repeat the same apology if the guest says yes, asks "what dates are available", asks for alternatives, or gives a duration like "5 nights". Preserve the known room type/count, search or reason from nearby availability when the server provides it, and move the guest toward one clear next option.`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and either roomTypeKey or roomSelections are known, action must be "get_quote".`,
 		`For multi-room or group requests, preserve the exact number of rooms. Examples: "20 quadruple rooms" means facts.roomTypeKey="quadRooms", facts.rooms=20, and facts.roomSelections=[{"roomTypeKey":"quadRooms","count":20}]. "2 triple rooms and 1 double room" means two roomSelections. Never quote only one room when the guest requested multiple rooms.`,
 		`If the guest count clearly fits one standard room type and the guest has not requested a larger room, choose the smallest suitable active room type for quoting instead of asking a preference question. Examples: 2 guests -> double, 3 guests -> triple, 4 guests -> quad, 5 guests -> family.`,
 		`If the known guest count appears larger than the selected room capacity, do not proceed to final review silently. Explain the capacity mismatch naturally, suggest a suitable room or additional room, and ask one clear confirmation question.`,
 		`Never send a customer-facing reply like "I will check now" or "I am checking availability/price" as action="reply". If you can identify the stay from the transcript, return action="get_quote" and put checkinISO, checkoutISO, roomTypeKey, adults, children, and rooms in facts. If one detail is missing, ask only for that detail without saying you are checking now.`,
 		`Required booking details are checkinISO, checkoutISO, roomTypeKey or roomSelections, quote, confirmed fullName, confirmed phone, confirmed nationality, and adults. Email is optional and must never be listed as a required item.`,
+		`Phone numbers are not reservation confirmation numbers. Only fill facts.confirmation or use existing-reservation actions when the guest explicitly labels a value as a reservation/booking/confirmation/reference number, or is clearly asking about an existing reservation.`,
 		`Never ask for passport number, ID number, national ID, document number, date of birth, card number, payment-card details, or any identity document for this B2C booking flow. Those fields are not part of the booking plan. If you already have the required details, return action="send_review"; if something is missing, ask only for the missing allowed booking detail.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
 		`Email is optional and useful for sending booking details/receipt. After all required details are known, email may be offered once in a separate short message with a clear skip option. Never list email with required fields, never ask twice, and never block the booking if the guest skips it or continues without it.`,
@@ -2904,6 +2973,36 @@ async function quoteTool(sc = {}, known = {}) {
 		};
 	});
 	if (!inventoryValidation.allowed) {
+		const overbookIssue =
+			(Array.isArray(inventoryValidation.issues) ? inventoryValidation.issues : []).find(
+				(issue) => issue?.code === "inventory_overbook"
+			) || {};
+		const availableRooms = Math.max(
+			0,
+			Number(
+				Number.isFinite(Number(overbookIssue.available))
+					? overbookIssue.available
+					: inventoryValidation.availabilitySnapshot?.minAvailableBefore
+			) || 0
+		);
+		const requestedRooms = Math.max(
+			1,
+			Number(overbookIssue.requested || primary.count || known.rooms || 1) || 1
+		);
+		const partialNights = quoteLines[0]?.quote?.nights || dates.length || 1;
+		const partialTotal = Number((Number(quoteLines[0]?.oneRoomTotal || 0) * availableRooms).toFixed(2));
+		const partialQuote =
+			quoteLines.length === 1 && availableRooms > 0 && availableRooms < requestedRooms
+				? {
+						rooms: availableRooms,
+						nights: partialNights,
+						averagePerNight: partialNights
+							? Number((partialTotal / partialNights).toFixed(2))
+							: partialTotal,
+						total: partialTotal,
+						currency: quoteLines[0]?.quote?.currency || hotel?.currency || "SAR",
+				  }
+				: null;
 		logTurnStage(caseId, "quote_inventory_unavailable", {
 			code: inventoryValidation.issues?.[0]?.code || "inventory_unavailable",
 			message: String(inventoryValidation.message || "").slice(0, 160),
@@ -2918,6 +3017,16 @@ async function quoteTool(sc = {}, known = {}) {
 			roomLabel: roomTypeLabel(primary.roomTypeKey || "", known.languageCode),
 			currency: quoteLines[0]?.quote?.currency || hotel?.currency || "SAR",
 			selectionKey,
+			inventory: {
+				requested: requestedRooms,
+				available: availableRooms,
+				shortage: Math.max(0, requestedRooms - availableRooms),
+				capacity: Number(overbookIssue.capacity || 0) || null,
+				reserved: Number(overbookIssue.reserved || 0) || null,
+				date: overbookIssue.date || "",
+				message: inventoryValidation.message || "",
+			},
+			partialQuote,
 		};
 	}
 	logTurnStage(caseId, "quote_price_done", {
@@ -3012,6 +3121,242 @@ async function quoteTool(sc = {}, known = {}) {
 		available: true,
 		quote: quoteData,
 	};
+}
+
+function latestGuestRequestsAlternativeAvailability(
+	latestText = "",
+	latestAction = "",
+	previousAi = null
+) {
+	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_unavailable") {
+		return false;
+	}
+	if (quickDateRange(latestText)?.checkinISO) return false;
+	if (textMentionsRoomSelection(latestText) || roomCountOnlyFromText(latestText)) return false;
+	const text = normalizeIntentSearchText(latestText)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	const action = cleanString(latestAction, 80).toLowerCase();
+	if (["proceed", "continue_booking", "proceed_to_booking"].includes(action)) return true;
+	if (
+		/\b(?:available|availability|dates|other dates|another date|alternatives?|options?|when)\b/i.test(
+			text
+		)
+	) {
+		return true;
+	}
+	if (
+		/(?:\u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f|\u0645\u0648\u0627\u0639\u064a\u062f|\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u064a\u0647\u0627\u0644\u0645\u062a\u0627\u062d|\u0627\u064a\u0627\u0644\u0645\u062a\u0627\u062d|\u0627\u0644\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0647|\u0645\u062a\u0627\u062d\u0629|\u0627\u0645\u062a\u0649|\u0645\u062a\u0649)/iu.test(
+			compact
+		)
+	) {
+		return true;
+	}
+	return /^(?:yes|ok|okay|sure|go ahead|continue)$/i.test(text) ||
+		/^(?:\u0646\u0639\u0645|\u0627\u062c\u0644|\u0623\u062c\u0644|\u062a\u0645\u0627\u0645|\u0627\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0627\u0647|\u0623\u0647|\u0627\u0648\u0643|\u0623\u0648\u0643)$/iu.test(
+			compact
+		);
+}
+
+function quoteLinesForCandidate(hotel = {}, known = {}, checkinISO = "", checkoutISO = "") {
+	const selections = selectionsFromKnown(known);
+	const quoteLines = [];
+	for (const selection of selections) {
+		const roomTypeKey = selection.roomTypeKey || "";
+		const count = normalizeRoomCount(selection.count || known.rooms, 1);
+		const quote = priceRoomForStay(
+			hotel,
+			{ roomType: roomTypeKey },
+			checkinISO,
+			checkoutISO
+		);
+		if (!quote?.available) return null;
+		quoteLines.push({
+			roomTypeKey,
+			count,
+			quote,
+			room: quote.room,
+			oneRoomTotal: Number(quote.totals?.totalPriceWithCommission || 0),
+		});
+	}
+	return quoteLines.length ? quoteLines : null;
+}
+
+async function suggestAlternativeStays(sc = {}, known = {}, { maxOptions = 3 } = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const checkinISO = validISODate(known.checkinISO);
+	const checkoutISO = validISODate(known.checkoutISO);
+	const nights = nightsBetween(checkinISO, checkoutISO);
+	const selections = selectionsFromKnown(known);
+	if (!checkinISO || !checkoutISO || !nights || !selections.length) {
+		return { options: [], checkedDays: 0, validatedCandidates: 0 };
+	}
+	const todayISO = new Date().toISOString().slice(0, 10);
+	const searchDays = 45;
+	const candidates = [];
+	const dateKeys = [];
+	for (let offset = 1; offset <= searchDays; offset += 1) {
+		const start = addDaysISO(checkinISO, offset);
+		if (!start || start < todayISO) continue;
+		const end = addDaysISO(start, nights);
+		if (!end) continue;
+		candidates.push({ checkinISO: start, checkoutISO: end });
+		dateKeys.push(...eachNight(start, end));
+	}
+	const hotel = await getHotelByIdWithPricingDates(sc.hotelId, dateKeys);
+	const options = [];
+	let validatedCandidates = 0;
+	for (const candidate of candidates) {
+		const quoteLines = quoteLinesForCandidate(
+			hotel,
+			known,
+			candidate.checkinISO,
+			candidate.checkoutISO
+		);
+		if (!quoteLines) continue;
+		validatedCandidates += 1;
+		const inventoryPayload = {
+			hotelId: hotel?._id || sc.hotelId,
+			hotelName: hotel?.hotelName || "",
+			checkin_date: candidate.checkinISO,
+			checkout_date: candidate.checkoutISO,
+			pickedRoomsType: quoteLines.map((line) => ({
+				room_type: line.room?.roomType || line.roomTypeKey,
+				displayName:
+					line.room?.displayName ||
+					line.room?.display_name ||
+					roomTypeLabel(line.roomTypeKey, languageCode),
+				count: line.count,
+			})),
+		};
+		const inventoryValidation = await validateReservationInventoryForCreate(
+			inventoryPayload,
+			{ allowOverbook: false }
+		).catch(() => ({ allowed: false }));
+		if (!inventoryValidation.allowed) {
+			if (validatedCandidates >= 18 && !options.length) break;
+			continue;
+		}
+		const total = Number(
+			quoteLines
+				.reduce((sum, line) => sum + line.oneRoomTotal * line.count, 0)
+				.toFixed(2)
+		);
+		const rooms = quoteLines.reduce((sum, line) => sum + line.count, 0);
+		options.push({
+			checkinISO: candidate.checkinISO,
+			checkoutISO: candidate.checkoutISO,
+			nights,
+			rooms,
+			total,
+			averagePerNight: nights ? Number((total / nights).toFixed(2)) : total,
+			currency: (quoteLines[0]?.quote?.currency || hotel?.currency || "SAR").toUpperCase(),
+			roomLabel: quoteRoomLinesText(
+				{ rooms: quoteLines.map((line) => ({ ...line, count: line.count })) },
+				known.roomTypeKey,
+				languageCode
+			),
+		});
+		if (options.length >= maxOptions) break;
+		if (validatedCandidates >= 18 && !options.length) break;
+	}
+	return { options, checkedDays: searchDays, validatedCandidates };
+}
+
+function buildAlternativeAvailabilityMessage(sc = {}, known = {}, result = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const options = Array.isArray(result.options) ? result.options : [];
+	if (!options.length) {
+		return ar
+			? `${arabicGuestAddress(sc, known)}، راجعت لك مواعيد قريبة لنفس الاختيار خلال ${formatNumber(result.checkedDays || 45, languageCode)} يوم، ولا يظهر توفر مؤكد مباشر بنفس المدة الآن. أقدر أراجع لك مدة أقصر أو نوع غرفة آخر لو يناسبك.`
+			: `${guestDisplayName(sc)}, I checked nearby dates for the same selection over the next ${result.checkedDays || 45} days, and I do not see directly confirmable availability for the same stay length right now. I can check a shorter stay or another room type if that works for you.`;
+	}
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، راجعت لك أقرب مواعيد متاحة لنفس الاختيار:`,
+			...options.map((option, index) => {
+				const dateLine = `${formatDate(option.checkinISO, languageCode)} - ${formatDate(
+					option.checkoutISO,
+					languageCode
+				)}`;
+				return `${formatNumber(index + 1, languageCode)}. ${dateLine}، ${formatNumber(option.nights, languageCode)} ليال، الإجمالي ${formatMoney(option.total, option.currency, languageCode)}.`;
+			}),
+			`لو يناسبك أحد هذه المواعيد، اكتب لي رقم الخيار أو التاريخ الذي تفضله وأكمل لك الحجز عليه.`,
+		].join("\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, I checked the nearest available dates for the same selection:`,
+		...options.map((option, index) => {
+			const dateLine = `${formatDate(option.checkinISO, languageCode)} - ${formatDate(
+				option.checkoutISO,
+				languageCode
+			)}`;
+			return `${index + 1}. ${dateLine}, ${option.nights} nights, total ${formatMoney(option.total, option.currency, languageCode)}.`;
+		}),
+		`If one works for you, send the option number or preferred date and I will continue with it.`,
+	].join("\n");
+}
+
+function alternativeStayChoiceFromText(known = {}, latestText = "", previousAi = null) {
+	if (String(previousAi?.clientAction || "").toLowerCase() !== "alternative_dates_ready") {
+		return null;
+	}
+	const options = Array.isArray(known.alternativeStays) ? known.alternativeStays : [];
+	if (!options.length) return null;
+	const text = normalizeDigits(String(latestText || ""));
+	const compact = normalizeIntentSearchText(text).replace(/\s+/g, "");
+	const optionMatch =
+		text.match(/\b(?:option|choice|number|no\.?|#)\s*(\d{1,2})\b/i) ||
+		compact.match(/(?:الخيار|خيار|رقم)(\d{1,2})/iu) ||
+		(/^\d{1,2}$/.test(compact) ? compact.match(/^(\d{1,2})$/) : null);
+	if (optionMatch?.[1]) {
+		const index = Number(optionMatch[1]) - 1;
+		const option = options[index];
+		if (option?.checkinISO && option?.checkoutISO) {
+			return {
+				checkinISO: option.checkinISO,
+				checkoutISO: option.checkoutISO,
+				reason: "selected_alternative_option",
+			};
+		}
+	}
+	const nights = nightsCountFromText(text);
+	if (nights && options[0]?.checkinISO) {
+		return {
+			checkinISO: options[0].checkinISO,
+			checkoutISO: addDaysISO(options[0].checkinISO, nights),
+			reason: "alternative_start_plus_nights",
+		};
+	}
+	return null;
+}
+
+async function handleAlternativeAvailability(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	const result = await suggestAlternativeStays(sc, known).catch((error) => {
+		console.error("[aiagent] alternative availability failed:", error?.message || error);
+		return { options: [], checkedDays: 0, validatedCandidates: 0 };
+	});
+	known.alternativeStays = (Array.isArray(result.options) ? result.options : [])
+		.map((option) => ({
+			checkinISO: option.checkinISO,
+			checkoutISO: option.checkoutISO,
+			nights: option.nights,
+			rooms: option.rooms,
+			total: option.total,
+			currency: option.currency,
+		}))
+		.slice(0, 3);
+	await saveKnownFacts(caseIdText(sc), known);
+	return sendAiMessage(io, sc, buildAlternativeAvailabilityMessage(sc, known, result), {
+		latestGuest,
+		known,
+		clientAction: result.options?.length
+			? "alternative_dates_ready"
+			: "alternative_dates_unavailable",
+	});
 }
 
 function proceedQuickReplies(languageCode = "en") {
@@ -3227,22 +3572,70 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
 	const quote = asObject(result.quote);
-	const roomLabel = quoteRoomLinesText(quote, known.roomTypeKey, languageCode);
+	const quoteRoomLabel = quoteRoomLinesText(quote, known.roomTypeKey, languageCode);
+	const roomLabel =
+		!result.available && result.roomLabel
+			? cleanDisplayString(result.roomLabel, 160)
+			: quoteRoomLabel;
 	const totalRooms = quoteRoomCount(quote) || known.rooms || 1;
 	const hotelName = ar
 		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
 		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
-	const arGuestName = firstArabicNameForAddress(sc, known) || guestDisplayName(sc);
+	const inventory = asObject(result.inventory);
+	const partialQuote = asObject(result.partialQuote);
+	const requestedRooms = Math.max(0, Number(inventory.requested || 0) || 0);
+	const availableRooms = Math.max(0, Number(inventory.available || 0) || 0);
+	const shortageRooms = Math.max(
+		0,
+		Number(inventory.shortage || requestedRooms - availableRooms) || 0
+	);
+	if (
+		!result.available &&
+		result.code === "inventory_overbook" &&
+		availableRooms > 0 &&
+		requestedRooms > availableRooms
+	) {
+		const availableLabel = `${formatNumber(availableRooms, languageCode)} ${roomLabel}`;
+		const requestedLabel = `${formatNumber(requestedRooms, languageCode)} ${roomLabel}`;
+		const shortageLabel = `${formatNumber(shortageRooms, languageCode)} ${roomLabel}`;
+		if (ar) {
+			return [
+				`${arabicGuestAddress(sc, known)}، راجعت التوفر بدقة.`,
+				`المتاح المؤكد حاليًا: ${availableLabel} من أصل ${requestedLabel} للتواريخ المطلوبة.`,
+				`باقي ${shortageLabel} غير متاح للتأكيد المباشر الآن ضمن هذه الفترة.`,
+				partialQuote.total
+					? `لو يناسبك المتاح الحالي، يكون إجمالي الليلة للـ${formatNumber(
+							availableRooms,
+							languageCode
+					  )} غرفة ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}، والإجمالي ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}.`
+					: "",
+				`إذا يناسبك ${availableLabel} أكمل لك عليها، ولو تحتاجين ${requestedLabel} بالضبط أقدر أحول الطلب للاستقبال لمراجعة إمكانية توفير ${shortageLabel} إضافية.`,
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		return [
+			`${guestDisplayName(sc)}, I checked the availability carefully.`,
+			`Confirmed availability right now is ${availableRooms} of ${requestedRooms} ${roomLabel}.`,
+			`${shortageRooms} ${roomLabel} cannot be confirmed directly for the full date range right now.`,
+			partialQuote.total
+				? `For the available ${availableRooms}, the nightly total is ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}, and the total is ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}.`
+				: "",
+			`I can continue with ${availableRooms}, or I can pass the request to reception to review whether the extra ${shortageRooms} can be arranged.`,
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
 	if (!result.available || !quote.total) {
 		return ar
-			? `أستاذ ${arGuestName}، أعتذر لك، لا يظهر توفر مؤكد لهذا الخيار في ${hotelName} للتواريخ المطلوبة. تحب أراجع لك غرفة أو تواريخ أخرى؟`
+			? `${arabicGuestAddress(sc, known)}، أعتذر لك، لا يظهر توفر مؤكد لهذا الخيار في ${hotelName} للتواريخ المطلوبة. أقدر أراجع لك أقرب تواريخ متاحة أو غرفة أخرى؟`
 			: `${guestDisplayName(sc)}, I am sorry, this option does not show confirmed availability at ${hotelName} for those dates. Would you like me to check another room or dates?`;
 	}
 	const dateLines = reviewDateLines(known, languageCode);
 	if (ar) {
 		const roomLineLabel = Number(totalRooms || 1) > 1 ? "الغرف" : "الغرفة";
 		return [
-			`تمام أستاذ ${arGuestName}، متاح بإذن الله.`,
+			`تمام ${arabicGuestAddress(sc, known)}، متاح بإذن الله.`,
 			`${roomLineLabel}: ${roomLabel}`,
 			...dateLines,
 			`عدد الليالي: ${formatNumber(quote.nights || result.nights || 0, languageCode)}`,
@@ -3318,6 +3711,70 @@ function confirmationNumberFromText(value = "") {
 	return "";
 }
 
+function mentionsExplicitReservationIdentifier(value = "") {
+	const text = normalizeDigits(String(value || "")).toLowerCase();
+	const compact = normalizeIntentSearchText(value).replace(/\s+/g, "");
+	return (
+		/\b(?:confirmation|confirm(?:ation)?\s*(?:number|no|#)?|reservation\s*(?:number|no|#)?|booking\s*(?:number|no|#)?|reference\s*(?:number|no|#)?|ref\s*(?:number|no|#)?)\b/i.test(
+			text
+		) ||
+		/(?:\u0631\u0642\u0645|\u0643\u0648\u062f|\u0646\u0645\u0631\u0629|\u0646\u0645\u0631\u0647)(?:\u0627\u0644)?(?:\u062d\u062c\u0632|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(
+			compact
+		) ||
+		/(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)(?:\u0627\u0644)?\u062d\u062c\u0632/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestLooksLikeBookingIdentityAnswer(value = "") {
+	const lines = String(value || "")
+		.split(/\r?\n|\\n|[|]/)
+		.map((line) => cleanDisplayString(line, 240))
+		.filter(Boolean);
+	if (!lines.length) return false;
+	let matched = 0;
+	for (const line of lines) {
+		if (
+			phoneFromText(line) ||
+			simplePhoneFromLine(line) ||
+			nationalityFromText(line) ||
+			normalizeNationalityHint(line) ||
+			bookingNameFromLine(line)
+		) {
+			matched += 1;
+			continue;
+		}
+		if (/^[\p{L}\s-]{2,40}$/u.test(stripChatMarkup(line))) {
+			matched += 1;
+			continue;
+		}
+		return false;
+	}
+	return matched > 0;
+}
+
+function bookingIdentityCollectionContext(sc = {}, previousAi = null, known = {}) {
+	const action = cleanString(previousAi?.clientAction, 80).toLowerCase();
+	if (["required_details_needed", "review_reservation"].includes(action)) return true;
+	if (previousAiAskedForIdentityConfirmation(previousAi)) return true;
+	const text = normalizeDigits(String(previousAi?.message || "")).toLowerCase();
+	if (
+		/(?:full name|guest name|booking name|phone number|phone|mobile|nationality)/i.test(
+			text
+		) ||
+		/(?:\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a)/iu.test(
+			text
+		)
+	) {
+		return true;
+	}
+	const missing = requiredBookingMissing(known).filter((item) =>
+		["fullName", "phone", "nationality"].includes(item)
+	);
+	return quoteMatchesKnown(known) && missing.length > 0;
+}
+
 function conversationHasReservationLookupContext(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	return conversation.slice(-6).some((entry) => {
@@ -3328,7 +3785,12 @@ function conversationHasReservationLookupContext(sc = {}) {
 	});
 }
 
-function latestGuestRequestsReservationLookup(sc = {}, latestText = "", known = {}) {
+function latestGuestRequestsReservationLookup(
+	sc = {},
+	latestText = "",
+	known = {},
+	previousAi = null
+) {
 	const text = normalizeDigits(String(latestText || "")).toLowerCase();
 	if (!text.trim()) return false;
 	const explicitConfirmation = confirmationNumberFromText(text);
@@ -3342,7 +3804,18 @@ function latestGuestRequestsReservationLookup(sc = {}, latestText = "", known = 
 			text
 		);
 	if (explicitConfirmation) {
-		return lookupIntent || /^\s*\d{8,12}\s*$/.test(text) || conversationHasReservationLookupContext(sc);
+		if (
+			bookingIdentityCollectionContext(sc, previousAi, known) &&
+			latestGuestLooksLikeBookingIdentityAnswer(latestText) &&
+			!mentionsExplicitReservationIdentifier(latestText)
+		) {
+			return false;
+		}
+		return (
+			mentionsExplicitReservationIdentifier(latestText) ||
+			lookupIntent ||
+			(/^\s*\d{8,12}\s*$/.test(text) && conversationHasReservationLookupContext(sc))
+		);
 	}
 	return lookupIntent;
 }
@@ -4211,6 +4684,32 @@ async function planTurn(io, supportCaseOrId) {
 			known = mergeKnownFacts(known, previousQuoteFacts);
 		}
 	}
+	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
+	const latestRoomsOnly = latestGuest ? roomCountOnlyFromText(latestText) : null;
+	if (
+		latestRoomsOnly &&
+		!latestSelections.length &&
+		known.roomTypeKey &&
+		(guestAsksPriceAvailabilityOrBooking(latestText, latestAction) ||
+			["quote_unavailable", "quote_ready"].includes(previousAiAction))
+	) {
+		known = mergeKnownFacts(known, {
+			rooms: latestRoomsOnly,
+			roomSelections: [{ roomTypeKey: known.roomTypeKey, count: latestRoomsOnly }],
+		});
+	}
+	let appliedAlternativeStayChoice = false;
+	const alternativeChoice = latestGuest
+		? alternativeStayChoiceFromText(known, latestText, previousAi)
+		: null;
+	if (alternativeChoice?.checkinISO && alternativeChoice?.checkoutISO) {
+		known = mergeKnownFacts(known, {
+			checkinISO: alternativeChoice.checkinISO,
+			checkoutISO: alternativeChoice.checkoutISO,
+			dateCalendar: "gregorian",
+		});
+		appliedAlternativeStayChoice = true;
+	}
 	const latestRevision = latestGuest
 		? applyLatestStayRevision(known, latestText, latestAction, previousAi)
 		: { known, deferToOpenAI: false, appliedQuickDates: false };
@@ -4276,11 +4775,27 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return handleUpdateReservation(io, sc, hotel, known, latestGuest);
 	}
-	if (latestGuest && latestGuestRequestsReservationLookup(sc, latestText, known)) {
+	if (latestGuest && latestGuestRequestsReservationLookup(sc, latestText, known, previousAi)) {
 		const confirmation = confirmationNumberFromText(latestText);
 		if (confirmation) known.confirmation = confirmation;
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
+	if (appliedAlternativeStayChoice && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		logTurnStage(key, "alternative_choice_quote_start");
+		return handleQuote(io, sc, hotel, known, latestGuest);
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi) &&
+		quoteInputsKnown(known)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		logTurnStage(key, "alternative_availability_start");
+		return handleAlternativeAvailability(io, sc, hotel, known, latestGuest);
 	}
 	if (
 		latestGuest &&
@@ -4936,6 +5451,13 @@ const exportedOrchestrator = {
 		textMentionsSpecificRoomType,
 		selectionsFromKnown,
 		quoteRoomCount,
+		roomCountOnlyFromText,
+		nightsCountFromText,
+		mentionsExplicitReservationIdentifier,
+		latestGuestLooksLikeBookingIdentityAnswer,
+		bookingIdentityCollectionContext,
+		latestGuestRequestsAlternativeAvailability,
+		alternativeStayChoiceFromText,
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		latestGuestRequestsReservationCancel,
@@ -4950,8 +5472,10 @@ const exportedOrchestrator = {
 		buildReviewMessage,
 		buildStayClarificationMessage,
 		arabicFirstNameFromLatinName,
+		arabicGuestAddress,
 		compactPolicyQA,
 		localizedCancellationPolicyLine,
+		buildQuoteFallbackMessage,
 		warmBookingPrefix,
 		withWarmPrefix,
 		buildCancelReservationContactMessage,
