@@ -40,3 +40,38 @@ For the full production go-live story, operational issues, PM2/server health not
 ## Rollout Note
 
 This change removes the old scripted local brain from the runtime path. Production deployment should be followed by one supervised B2C case only, with PMS and server health visible, before any multi-chat testing.
+
+## 2026-06-30 Late Production Stabilization
+
+Deployed commits:
+
+- `92519de` - stabilized B2C booking handoff and support-case list performance.
+- `6bf086c` - made latest guest date corrections override older stored quotes/dates.
+
+Key fixes:
+
+- Support-case PMS list endpoints now load a recent conversation preview instead of full conversation arrays for every open/closed client case.
+- Prior-chat counts for PMS list rows now use normalized `clientContact` aggregation instead of scanning full matching conversations.
+- The booking turn now handles nationality, optional email, quote-ready, review, and skip-email paths deterministically before asking OpenAI again.
+- Gregorian date ranges are no longer shown as `Dates (Hijri)` unless the guest actually used Hijri/mixed-calendar input.
+- The date parser now accepts typo-heavy range connectors such as `though`, `thru`, `throu`, and `throughh`.
+- If the guest says the review is wrong or corrects dates with wording like `instead`, latest facts win and old quotes are discarded.
+- OpenAI prompt now explicitly says latest corrections override Known facts and old quotes must not be reused after a correction.
+
+Production validation:
+
+- Exact clone of stuck case `6a448b6c3bc6a559686597ee` was tested on a temporary support case and deleted afterward.
+- Test phrase: `I want the accomdation to be from 20 Aug though 26th instead please`.
+- Result: `quote_ready`, room `Quadruple Room - Comfort & Privacy`, dates `August 20, 2026 - August 26, 2026`, `6` nights, `600 SAR`.
+- Response time: about `3.0s` for the cloned production turn.
+- Adjacent check: `Something is wrong` alone did not repeat the old review/quote; it asked for details with no quick replies.
+- Cleanup check confirmed `0` Codex QA support cases remained.
+- Production health after deployment: `hotels-backend` online, root API responding, memory around `269 MB`, system memory available around `12 GB`.
+
+Runtime safety state after deployment:
+
+- `AI_AGENT_ENABLED=true`
+- `AI_PLAN_USE_WORKER=false`
+- `AI_TURN_STALL_RECOVERY_ENABLED=false`
+
+Keep the old worker and stall recovery disabled unless a separate load test proves they are needed and safe.
