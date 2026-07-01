@@ -79,6 +79,10 @@ function launchAiPlanWorker(io, supportCaseOrId, { delayMs = 75 } = {}) {
 		let child = null;
 		try {
 			child = spawnWorker(caseId);
+			console.log("[aiagent] detached worker launched", {
+				caseId,
+				pid: child.pid,
+			});
 		} catch (error) {
 			console.error("[aiagent] worker launch failed:", error?.message || error);
 			emitAiTyping(io, supportCase, false);
@@ -95,6 +99,11 @@ function launchAiPlanWorker(io, supportCaseOrId, { delayMs = 75 } = {}) {
 		cleanupTimer.unref?.();
 		child.once("exit", (code, signal) => {
 			clearTimeout(cleanupTimer);
+			console.log("[aiagent] detached worker exited", {
+				caseId,
+				code,
+				signal,
+			});
 			if (code !== 0 || signal) {
 				console.error("[aiagent] detached worker failed", {
 					caseId,
