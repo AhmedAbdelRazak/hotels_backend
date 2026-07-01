@@ -390,9 +390,9 @@ function nameHintFromLine(value = "") {
 function peopleCountFromLine(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const match = text.match(
-		/(?:for|ل|لعدد)?\s*(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i
+		/(?:for|لعدد|لـ|ل)\s*(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)\b|(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)\b/i
 	);
-	const count = Number(match?.[1] || 0);
+	const count = Number(match?.[1] || match?.[2] || 0);
 	if (Number.isFinite(count) && count >= 1 && count <= 30) return Math.floor(count);
 	let relationshipCount = 0;
 	if (/\b(myself|me)\b/i.test(text)) relationshipCount += 1;
@@ -400,6 +400,10 @@ function peopleCountFromLine(value = "") {
 		/\b(mom|mother|mum|father|dad|sister|brother|wife|husband|son|daughter|friend|parent|parents|kid|child|children)\b/gi
 	);
 	relationshipCount += relationMatches ? relationMatches.length : 0;
+	const arabicRelationMatches = text.match(
+		/(?:أنا|انا|امي|أمي|والدتي|والدي|ابني|ابنى|بنتي|زوجتي|زوجي|اختي|أختي|اخي|أخي|صاحبي|صاحبتي|طفلي|طفلتي)/gi
+	);
+	relationshipCount += arabicRelationMatches ? arabicRelationMatches.length : 0;
 	return relationshipCount >= 1 && relationshipCount <= 30 ? relationshipCount : null;
 }
 
