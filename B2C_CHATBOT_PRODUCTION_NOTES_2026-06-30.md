@@ -107,6 +107,20 @@
 - `AI_PLAN_WORKER_HEAP_MB=384`
 - `AI_IDLE_AUTO_CLOSE_MS=300000`
 
+## Legacy Env Cleanup
+
+- On 2026-06-30, unused legacy AI plan env lines were removed from production `.env` after verifying the slim OpenAI-led orchestrator does not read them.
+- Removed legacy/confusing keys:
+  - `AI_PLAN_MAX_CONCURRENT`
+  - `AI_PLAN_QUEUE_NOTICE_MS`
+  - `AI_PLAN_WORKER_OLD_SPACE_MB`
+  - `AI_PLAN_MIN_AVAILABLE_MEMORY_MB`
+  - `AI_PLAN_MEMORY_PER_ACTIVE_MB`
+  - `AI_PLAN_LOAD_LIMIT_PERCENT`
+  - malformed `nAI_PLAN_TEMP_*` line
+  - `AI_PLAN_WORKER_EARLY_FALLBACK_MS`
+- The current path still has per-case protection through the in-memory `activeTurns` set, so the same case cannot receive overlapping AI turns. Different support cases are not capped by those removed env lines.
+
 ## Cleanup Rule
 
 - Remove only Codex QA support cases with strict Codex markers, such as:
