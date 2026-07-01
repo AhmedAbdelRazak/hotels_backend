@@ -90,6 +90,9 @@ function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
 }
 
 function logTurnStage(caseId = "", stage = "", extra = {}) {
+	if (String(process.env.AI_AGENT_TRACE_TURNS || "").toLowerCase() !== "true") {
+		return;
+	}
 	if (!caseId || !stage) return;
 	console.log("[aiagent] turn stage", {
 		caseId,
