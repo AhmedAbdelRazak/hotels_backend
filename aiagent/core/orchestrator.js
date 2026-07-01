@@ -358,6 +358,12 @@ function stripChatMarkup(value = "") {
 
 function normalizeNationalityHint(value = "") {
 	const raw = stripChatMarkup(value).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
+	const rawWithoutLabel = raw
+		.replace(
+			/^(?:nationality|my nationality is|guest nationality|citizenship|الجنسية|جنسيتي|جنسيتى)\s*[:：,\-]?\s*/i,
+			""
+		)
+		.trim();
 	const key = raw.toLowerCase().replace(/\./g, "");
 	const sentenceMatches = [
 		{ pattern: /\b(?:us|u\s*s\s*a|usa|united states|american)\b/i, value: "US" },
@@ -369,10 +375,39 @@ function normalizeNationalityHint(value = "") {
 		{ pattern: /\b(?:pakistan|pakistani)\b/i, value: "Pakistani" },
 		{ pattern: /\b(?:india|indian)\b/i, value: "Indian" },
 	];
-	const nationalityContext = /\b(?:citizen|national|nationality|passport|from|i am|i'm|im|my nationality)\b/i.test(raw);
+	const arabicNationalityMatches = [
+		{ pattern: /^(?:\u0645\u0635\u0631\u064a|\u0645\u0635\u0631\u064a\u0629|\u0645\u0635\u0631\u0649|\u0645\u0635\u0631\u064a\u0647|\u0645\u0635\u0631)$/, value: "\u0645\u0635\u0631\u064a" },
+		{ pattern: /^(?:\u0633\u0639\u0648\u062f\u064a|\u0633\u0639\u0648\u062f\u064a\u0629|\u0633\u0639\u0648\u062f\u0649|\u0627\u0644\u0633\u0639\u0648\u062f\u064a\u0629)$/, value: "\u0633\u0639\u0648\u062f\u064a" },
+		{ pattern: /^(?:\u0625\u0645\u0627\u0631\u0627\u062a\u064a|\u0627\u0645\u0627\u0631\u0627\u062a\u064a|\u0625\u0645\u0627\u0631\u0627\u062a\u064a\u0629|\u0627\u0645\u0627\u0631\u0627\u062a\u064a\u0629|\u0627\u0644\u0625\u0645\u0627\u0631\u0627\u062a|\u0627\u0644\u0627\u0645\u0627\u0631\u0627\u062a)$/, value: "\u0625\u0645\u0627\u0631\u0627\u062a\u064a" },
+		{ pattern: /^(?:\u0643\u0648\u064a\u062a\u064a|\u0643\u0648\u064a\u062a\u064a\u0629|\u0627\u0644\u0643\u0648\u064a\u062a)$/, value: "\u0643\u0648\u064a\u062a\u064a" },
+		{ pattern: /^(?:\u0642\u0637\u0631\u064a|\u0642\u0637\u0631\u064a\u0629|\u0642\u0637\u0631)$/, value: "\u0642\u0637\u0631\u064a" },
+		{ pattern: /^(?:\u0628\u062d\u0631\u064a\u0646\u064a|\u0628\u062d\u0631\u064a\u0646\u064a\u0629|\u0627\u0644\u0628\u062d\u0631\u064a\u0646)$/, value: "\u0628\u062d\u0631\u064a\u0646\u064a" },
+		{ pattern: /^(?:\u0639\u0645\u0627\u0646\u064a|\u0639\u0645\u0627\u0646\u064a\u0629|\u0639\u0645\u0627\u0646)$/, value: "\u0639\u0645\u0627\u0646\u064a" },
+		{ pattern: /^(?:\u0623\u0631\u062f\u0646\u064a|\u0627\u0631\u062f\u0646\u064a|\u0623\u0631\u062f\u0646\u064a\u0629|\u0627\u0631\u062f\u0646\u064a\u0629|\u0627\u0644\u0623\u0631\u062f\u0646|\u0627\u0644\u0627\u0631\u062f\u0646)$/, value: "\u0623\u0631\u062f\u0646\u064a" },
+		{ pattern: /^(?:\u0641\u0644\u0633\u0637\u064a\u0646\u064a|\u0641\u0644\u0633\u0637\u064a\u0646\u064a\u0629|\u0641\u0644\u0633\u0637\u064a\u0646)$/, value: "\u0641\u0644\u0633\u0637\u064a\u0646\u064a" },
+		{ pattern: /^(?:\u0633\u0648\u0631\u064a|\u0633\u0648\u0631\u064a\u0629|\u0633\u0648\u0631\u064a\u0627)$/, value: "\u0633\u0648\u0631\u064a" },
+		{ pattern: /^(?:\u0644\u0628\u0646\u0627\u0646\u064a|\u0644\u0628\u0646\u0627\u0646\u064a\u0629|\u0644\u0628\u0646\u0627\u0646)$/, value: "\u0644\u0628\u0646\u0627\u0646\u064a" },
+		{ pattern: /^(?:\u0639\u0631\u0627\u0642\u064a|\u0639\u0631\u0627\u0642\u064a\u0629|\u0627\u0644\u0639\u0631\u0627\u0642)$/, value: "\u0639\u0631\u0627\u0642\u064a" },
+		{ pattern: /^(?:\u0633\u0648\u062f\u0627\u0646\u064a|\u0633\u0648\u062f\u0627\u0646\u064a\u0629|\u0627\u0644\u0633\u0648\u062f\u0627\u0646)$/, value: "\u0633\u0648\u062f\u0627\u0646\u064a" },
+		{ pattern: /^(?:\u064a\u0645\u0646\u064a|\u064a\u0645\u0646\u064a\u0629|\u0627\u0644\u064a\u0645\u0646)$/, value: "\u064a\u0645\u0646\u064a" },
+		{ pattern: /^(?:\u0645\u063a\u0631\u0628\u064a|\u0645\u063a\u0631\u0628\u064a\u0629|\u0627\u0644\u0645\u063a\u0631\u0628)$/, value: "\u0645\u063a\u0631\u0628\u064a" },
+		{ pattern: /^(?:\u062c\u0632\u0627\u0626\u0631\u064a|\u062c\u0632\u0627\u0626\u0631\u064a\u0629|\u0627\u0644\u062c\u0632\u0627\u0626\u0631)$/, value: "\u062c\u0632\u0627\u0626\u0631\u064a" },
+		{ pattern: /^(?:\u062a\u0648\u0646\u0633\u064a|\u062a\u0648\u0646\u0633\u064a\u0629|\u062a\u0648\u0646\u0633)$/, value: "\u062a\u0648\u0646\u0633\u064a" },
+	];
+	for (const candidate of [rawWithoutLabel, raw]) {
+		const exactArabic = arabicNationalityMatches.find((item) => item.pattern.test(candidate));
+		if (exactArabic) return exactArabic.value;
+	}
+	const nationalityContext =
+		/\b(?:citizen|national|nationality|passport|from|i am|i'm|im|my nationality)\b/i.test(raw) ||
+		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649)/.test(raw);
 	if (nationalityContext) {
 		const match = sentenceMatches.find((item) => item.pattern.test(raw));
 		if (match) return match.value;
+		const arabicMatch = arabicNationalityMatches.find((item) =>
+			item.pattern.test(rawWithoutLabel)
+		);
+		if (arabicMatch) return arabicMatch.value;
 	}
 	const mapped = {
 		us: "US",
