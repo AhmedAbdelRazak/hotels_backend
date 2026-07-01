@@ -2292,11 +2292,7 @@ async function submitReservationForCase(io, caseOrId) {
 	});
 	if (!allowed) return { ok: false, reason: reason || "ai_not_allowed" };
 	const latestGuest = latestGuestEntry(sc);
-	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
-	if (!known.roomTypeKey) {
-		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
-		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
-	}
+	let known = initialKnownFacts(sc);
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
 		if (quote.available && quote.quote) {
@@ -2752,20 +2748,7 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 	});
 	if (!allowed) return sc;
 	const latestGuest = latestGuestEntry(sc);
-	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
-	if (!known.languageCode && sc.preferredLanguageCode) {
-		known.languageCode = sc.preferredLanguageCode;
-	}
-	if (!known.languageName && sc.preferredLanguage) {
-		known.languageName = sc.preferredLanguage;
-	}
-	const latestText = String(latestGuest?.message || "");
-	const mappedRoom = mapRoomToKey(latestText);
-	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
-	if (!known.roomTypeKey) {
-		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
-		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
-	}
+	let known = initialKnownFacts(sc);
 	if (known.checkinISO && known.checkoutISO && known.roomTypeKey) {
 		const quoteResult = await quoteTool(sc, known).catch((error) => {
 			console.error("[aiagent] worker fallback quote failed:", error?.message || error);
@@ -2818,8 +2801,6 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 		activeTurns.add(caseId);
 		try {
 			if (shouldUsePlanWorker()) {
-				const beforeWorker = await getSupportCaseById(caseId).catch(() => null);
-				if (beforeWorker) await emitTyping(io, beforeWorker, true);
 				const result = await runPlanTurnWorker(caseId, reason);
 				if (!result.ok) {
 					console.error("[aiagent] worker turn failed", {
@@ -2830,19 +2811,11 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 						stderr: result.stderr,
 					});
 					await sendPlanWorkerFallback(io, caseId, result);
-				} else {
-					const updatedCase = await getSupportCaseById(caseId).catch(() => null);
-					if (updatedCase) {
-						io.to(caseId).emit("supportCaseUpdated", updatedCase);
-						io.emit("supportCaseUpdated", updatedCase);
-					}
 				}
 			} else {
 				await planTurn(io, caseId);
 			}
 		} finally {
-			const latestCase = await getSupportCaseById(caseId).catch(() => null);
-			if (latestCase) await emitTyping(io, latestCase, false);
 			activeTurns.delete(caseId);
 			pendingReasons.delete(caseId);
 		}
