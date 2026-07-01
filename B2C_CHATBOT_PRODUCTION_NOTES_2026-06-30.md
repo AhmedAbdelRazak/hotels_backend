@@ -79,6 +79,12 @@
   - The hotel facts included Safar offer guidance, Nusuk availability, bus details, and Haram distance.
   - The AI answered with "cannot confirm" style wording and repeatedly redirected to dates.
   - The prompt now requires the AI to review the full transcript and Known facts before every reply, answer the latest unresolved guest question first, avoid repeating the same request, and answer confidently when hotel facts explicitly include a service, offer, distance, or policy.
+- `6a44755fd911792efe6cfd47` showed a quote-promise loop:
+  - The guest supplied a double room, dates `2026-09-01` to `2026-09-11`, and two guests.
+  - OpenAI replied that it would check availability/price, but did not return structured `checkinISO`, `checkoutISO`, `adults`, or action `get_quote`.
+  - Direct quote verification showed the stay is available: 10 nights, total 860 SAR.
+  - The prompt now forbids customer-facing "I will check now" replies unless OpenAI returns `get_quote` with structured facts.
+  - The orchestrator now guards these replies: if a checking/quote promise is about to be sent without a tool action, it asks OpenAI for a structured correction first. If facts are still missing, it asks the guest for the one missing detail instead of sending fake progress.
 
 ## PMS And Server Health Notes
 

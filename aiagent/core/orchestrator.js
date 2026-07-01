@@ -407,6 +407,32 @@ function quoteMatchesKnown(known = {}) {
 	);
 }
 
+function quoteInputsKnown(known = {}) {
+	return Boolean(
+		validISODate(known.checkinISO) &&
+			validISODate(known.checkoutISO) &&
+			known.roomTypeKey
+	);
+}
+
+function replyPromisesQuoteCheck(reply = "") {
+	const text = normalizeDigits(String(reply || "")).toLowerCase();
+	if (!text.trim()) return false;
+	const checking =
+		/(check|checking|verify|review|look up|سأتحقق|اتحقق|أتحقق|اشيك|أشيك|اراجع|أراجع|هراجع|هشيك)/i.test(
+			text
+		);
+	const quoteTopic =
+		/(availability|available|price|rate|cost|quote|التوفر|متاح|متوفر|السعر|سعر|التكلفة|الاجمالي|الإجمالي)/i.test(
+			text
+		);
+	const asksForMissing =
+		/(send|provide|tell me|need|ارسل|أرسل|ابعت|ابعث|احتاج|أحتاج|لو ترسل|اذا ترسل|إذا ترسل)/i.test(
+			text
+		);
+	return checking && quoteTopic && !asksForMissing;
+}
+
 function requiredBookingMissing(known = {}) {
 	const missing = [];
 	if (!validISODate(known.checkinISO)) missing.push("checkinISO");
@@ -605,6 +631,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest challenges an unavailable result or says to check again, do not escalate. If exact stay details are known, action must be "get_quote" so the server re-checks the calendar. If the guest changes only part of a previous stay, treat it as a fresh stay and ask only for the missing boundary instead of reusing old dates silently.`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and roomTypeKey are known, action must be "get_quote".`,
+		`Never send a customer-facing reply like "I will check now" or "I am checking availability/price" as action="reply". If you can identify the stay from the transcript, return action="get_quote" and put checkinISO, checkoutISO, roomTypeKey, adults, children, and rooms in facts. If one detail is missing, ask only for that detail without saying you are checking now.`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review". Required: checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, adults. Email is optional.`,
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
 		`If the guest says the review is wrong, action must be "send_review_again" only if you can present corrected data; otherwise ask what to fix.`,
@@ -679,6 +706,65 @@ async function askOpenAI({
 	});
 }
 
+function buildQuoteGuardFallbackMessage(sc = {}, known = {}) {
+	const ar = /^ar\b/i.test(activeLanguageCode(sc, known));
+	const missing = [];
+	if (!validISODate(known.checkinISO) || !validISODate(known.checkoutISO)) {
+		missing.push(ar ? "تاريخ الوصول والمغادرة" : "check-in and checkout dates");
+	}
+	if (!known.roomTypeKey) missing.push(ar ? "نوع الغرفة" : "room type");
+	const details = missing.length ? missing.join(ar ? " و" : " and ") : ar ? "تفصيلة واحدة" : "one detail";
+	return ar
+		? `تمام أستاذ ${guestDisplayName(sc)}، قبل ما أراجع التوفر والسعر بدقة أحتاج فقط ${details}.`
+		: `Sure ${guestDisplayName(sc)}, before I check exact availability and price, I only need ${details}.`;
+}
+
+async function repairQuotePromiseDecision({
+	sc,
+	hotel,
+	known,
+	latestGuest,
+	decision,
+} = {}) {
+	if (!replyPromisesQuoteCheck(decision?.reply)) {
+		return { decision, known };
+	}
+	if (shouldForceQuote(decision, known, latestGuest)) {
+		return { decision, known };
+	}
+	const repairedDecision = await askOpenAI({
+		sc,
+		hotel,
+		known,
+		latestGuest,
+		toolResult: {
+			tool: "quote_guard",
+			ok: false,
+			code: "checking_reply_without_get_quote",
+			previousAction: decision.action,
+			previousReply: decision.reply,
+			instruction:
+				"If the transcript contains exact stay details, return action=get_quote and put the structured facts in facts. If details are missing, ask only for the missing detail. Do not say you are checking now unless action=get_quote.",
+		},
+	});
+	const nextKnown = mergeKnownFacts(known, repairedDecision.facts);
+	if (
+		replyPromisesQuoteCheck(repairedDecision.reply) &&
+		!shouldForceQuote(repairedDecision, nextKnown, latestGuest)
+	) {
+		return {
+			decision: normalizeDecision({
+				action: "reply",
+				reply: buildQuoteGuardFallbackMessage(sc, nextKnown),
+				facts: {},
+				reason: "quote_guard_missing_facts",
+			}),
+			known: nextKnown,
+		};
+	}
+	return { decision: repairedDecision, known: nextKnown };
+}
+
 function normalizeDecision(input = {}) {
 	const allowed = new Set([
 		"reply",
@@ -706,8 +792,9 @@ function normalizeDecision(input = {}) {
 
 function shouldForceQuote(decision = {}, known = {}, latestGuest = {}) {
 	if (decision.action === "get_quote") return true;
-	if (!known.checkinISO || !known.checkoutISO || !known.roomTypeKey) return false;
+	if (!quoteInputsKnown(known)) return false;
 	if (quoteMatchesKnown(known)) return false;
+	if (replyPromisesQuoteCheck(decision.reply)) return true;
 	const text = String(latestGuest?.message || "");
 	return /(price|rate|cost|availability|available|book|reserve|reservation|\bSAR\b|\bريال\b|سعر|بكام|كم|متاح|متوفر|احجز|حجز)/i.test(
 		text
@@ -1468,6 +1555,18 @@ async function planTurn(io, supportCaseOrId) {
 		}
 		known = mergeKnownFacts(known, decision.facts);
 		if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+		if (replyPromisesQuoteCheck(decision.reply) && !shouldForceQuote(decision, known, latestGuest)) {
+			const repaired = await repairQuotePromiseDecision({
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				decision,
+			});
+			decision = repaired.decision;
+			known = repaired.known;
+			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+		}
 		await saveKnownFacts(key, known);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 
