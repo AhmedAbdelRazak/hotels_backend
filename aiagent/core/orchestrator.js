@@ -708,6 +708,19 @@ function bookingNameFromLine(value = "") {
 	return "";
 }
 
+function latestGuestProvidesBookingIdentityDetails(value = "") {
+	const text = stripChatMarkup(value);
+	if (!text.trim()) return false;
+	return Boolean(
+		bookingNameFromLine(text) ||
+			phoneFromText(text) ||
+			nationalityFromText(text) ||
+			/(?:booking\s+name|guest\s+name|full\s+name|phone|mobile|nationality|\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a)/i.test(
+				text
+			)
+	);
+}
+
 function peopleCountFromLine(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const unicodeArabicGuestNoun =
@@ -873,13 +886,16 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
 			const peopleCount = peopleCountFromLine(line);
 			if (peopleCount) recovered.adults = peopleCount;
-			if (!recovered.phone) {
-				const phone = phoneFromText(line) || simplePhoneFromLine(line);
-				if (phone) {
-					recovered.phone = phone;
-					recovered.phoneConfirmed = true;
-					delete recovered.phoneNeedsConfirmation;
-				}
+			const phone = phoneFromText(line) || simplePhoneFromLine(line);
+			if (
+				phone &&
+				(!recovered.phone ||
+					recovered.phoneNeedsConfirmation ||
+					cleanPhone(recovered.phone) === phone)
+			) {
+				recovered.phone = phone;
+				recovered.phoneConfirmed = true;
+				delete recovered.phoneNeedsConfirmation;
 			}
 			if (!recovered.nationality) {
 				const nationality = nationalityFromText(line) || normalizeNationalityHint(line);
@@ -3595,7 +3611,10 @@ async function planTurn(io, supportCaseOrId) {
 		return submitReservationForCase(io, key);
 	}
 	const latestGuestWantsToContinue =
-		latestGuest && guestWantsToContinueBooking(latestText, latestAction);
+		latestGuest &&
+		(guestWantsToContinueBooking(latestText, latestAction) ||
+			(previousAi?.clientAction === "quote_ready" &&
+				latestGuestProvidesBookingIdentityDetails(latestText)));
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
 		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
 	}
