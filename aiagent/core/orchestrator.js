@@ -2221,6 +2221,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the latest guest message corrects or changes earlier booking details, the latest message wins over Known facts. Return the corrected facts and action="get_quote" when exact stay details are now known; never reuse an older quote or older date range after a correction like "instead", "actually", "change", or "something is wrong".`,
 		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
+		`If the guest's request is materially unclear or could change the reservation outcome, ask one concise clarification question before acting. Do not ask for clarification for easy typos, dialect wording, or details you can confidently infer from the transcript.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
 		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest challenges an unavailable result or says to check again, do not escalate. If exact stay details are known, action must be "get_quote" so the server re-checks the calendar. If the guest changes only part of a previous stay, treat it as a fresh stay and ask only for the missing boundary instead of reusing old dates silently.`,
@@ -2851,6 +2852,59 @@ function formatNumber(value, languageCode = "en") {
 	);
 }
 
+function arabicQuantityLabel(count = 1, one = "", two = "", plural = "") {
+	const normalized = Number(count || 0);
+	if (normalized === 1) return one;
+	if (normalized === 2) return two || plural || one;
+	return plural || one;
+}
+
+function arabicGuestCountText(adults = 1, children = 0, languageCode = "ar") {
+	const adultCount = Math.max(1, Number(adults || 1) || 1);
+	const childCount = Math.max(0, Number(children || 0) || 0);
+	const parts = [
+		`${formatNumber(adultCount, languageCode)} ${arabicQuantityLabel(
+			adultCount,
+			"\u0628\u0627\u0644\u063a",
+			"\u0628\u0627\u0644\u063a\u0627\u0646",
+			"\u0628\u0627\u0644\u063a\u064a\u0646"
+		)}`,
+	];
+	if (childCount > 0) {
+		parts.push(
+			`${formatNumber(childCount, languageCode)} ${arabicQuantityLabel(
+				childCount,
+				"\u0637\u0641\u0644",
+				"\u0637\u0641\u0644\u0627\u0646",
+				"\u0623\u0637\u0641\u0627\u0644"
+			)}`
+		);
+	}
+	return parts.join("\u060c ");
+}
+
+function englishGuestCountText(adults = 1, children = 0) {
+	const adultCount = Math.max(1, Number(adults || 1) || 1);
+	const childCount = Math.max(0, Number(children || 0) || 0);
+	const parts = [`${adultCount} adult${adultCount === 1 ? "" : "s"}`];
+	if (childCount > 0) {
+		parts.push(`${childCount} child${childCount === 1 ? "" : "ren"}`);
+	}
+	return parts.join(", ");
+}
+
+function arabicReviewAddress(sc = {}, known = {}) {
+	const rawProfileName = cleanDisplayString(sc.clientName || sc.displayName1, 120);
+	const extractedName = cleanDisplayString(guestDisplayName(sc), 80);
+	if (looksLikeOrganizationName(rawProfileName) && /[\u0600-\u06FF]/.test(extractedName)) {
+		return `\u0623\u0633\u062a\u0627\u0630 ${extractedName}`;
+	}
+	const name = cleanDisplayString(known.fullName || extractedName, 80);
+	return name
+		? `\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0639\u0632\u064a\u0632 ${name}`
+		: "\u0636\u064a\u0641\u0646\u0627 \u0627\u0644\u0639\u0632\u064a\u0632";
+}
+
 function formatMoney(value, currency = "SAR", languageCode = "en") {
 	const amount = formatNumber(value, languageCode);
 	return /^ar\b/i.test(languageCode)
@@ -2927,14 +2981,15 @@ function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
 		: hotel.hotelName || hotel.hotelName_OtherLanguage || "Hotel";
 	if (ar) {
+		const roomLineLabel = Number(totalRooms || 1) > 1 ? "الغرف" : "الغرفة";
 		return [
-			`أستاذ/أستاذة ${guestDisplayName(sc)}، هذه مراجعة نهائية مختصرة قبل إنشاء الحجز:`,
+			`${arabicReviewAddress(sc, known)}، هذه مراجعة نهائية مختصرة قبل إنشاء الحجز:`,
 			`الفندق: ${hotelName}`,
-			`الغرفة: ${roomLabel}`,
+			`${roomLineLabel}: ${roomLabel}`,
 			...reviewDateLines(known, languageCode),
 			`عدد الليالي: ${formatNumber(nights, languageCode)}`,
 			`عدد الغرف: ${formatNumber(totalRooms, languageCode)}`,
-			`الضيوف: ${formatNumber(known.adults || 1, languageCode)} بالغ${Number(known.children || 0) ? `، ${formatNumber(known.children, languageCode)} طفل` : ""}`,
+			`الضيوف: ${arabicGuestCountText(known.adults || 1, known.children || 0, languageCode)}`,
 			`اسم الضيف: ${known.fullName || guestDisplayName(sc)}`,
 			`الجنسية: ${known.nationality || "غير مضافة"}`,
 			`الهاتف: ${known.phone || "غير مضاف"}`,
@@ -2943,14 +2998,15 @@ function buildReviewMessage(sc = {}, known = {}, hotel = {}) {
 			`إذا كل شيء صحيح، اختر "إتمام الحجز". وإذا هناك تعديل، اختر "هناك شيء غير صحيح".`,
 		].join("\n");
 	}
+	const roomLineLabel = Number(totalRooms || 1) > 1 ? "Rooms" : "Room";
 	return [
 		`${guestDisplayName(sc)}, here is the final review before I create the booking:`,
 		`Hotel: ${hotelName}`,
-		`Room: ${roomLabel}`,
+		`${roomLineLabel}: ${roomLabel}`,
 		...reviewDateLines(known, languageCode),
 		`Nights: ${nights}`,
 		`Rooms: ${totalRooms}`,
-		`Guests: ${known.adults || 1} adult${Number(known.children || 0) ? `, ${known.children} child` : ""}`,
+		`Guests: ${englishGuestCountText(known.adults || 1, known.children || 0)}`,
 		`Guest name: ${known.fullName || guestDisplayName(sc)}`,
 		`Nationality: ${known.nationality || "Not added"}`,
 		`Phone: ${known.phone || "Not added"}`,
@@ -2965,6 +3021,7 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 	const ar = /^ar\b/i.test(languageCode);
 	const quote = asObject(result.quote);
 	const roomLabel = quoteRoomLinesText(quote, known.roomTypeKey, languageCode);
+	const totalRooms = quoteRoomCount(quote) || known.rooms || 1;
 	const hotelName = ar
 		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
 		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
@@ -2975,9 +3032,10 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 	}
 	const dateLines = reviewDateLines(known, languageCode);
 	if (ar) {
+		const roomLineLabel = Number(totalRooms || 1) > 1 ? "الغرف" : "الغرفة";
 		return [
 			`تمام أستاذ ${guestDisplayName(sc)}، متاح بإذن الله.`,
-			`الغرفة: ${roomLabel}`,
+			`${roomLineLabel}: ${roomLabel}`,
 			...dateLines,
 			`عدد الليالي: ${formatNumber(quote.nights || result.nights || 0, languageCode)}`,
 			`السعر: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} لليلة`,
@@ -2985,9 +3043,10 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			`تحب أكمل لك الحجز؟`,
 		].join("\n");
 	}
+	const roomLineLabel = Number(totalRooms || 1) > 1 ? "Rooms" : "Room";
 	return [
 		`Yes ${guestDisplayName(sc)}, this is available.`,
-		`Room: ${roomLabel}`,
+		`${roomLineLabel}: ${roomLabel}`,
 		...dateLines,
 		`Nights: ${quote.nights || result.nights || 0}`,
 		`Rate: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} per night`,
@@ -4526,6 +4585,10 @@ const exportedOrchestrator = {
 		guestRequestsBookingReviewStep,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
+		arabicGuestCountText,
+		englishGuestCountText,
+		arabicReviewAddress,
+		buildReviewMessage,
 		replyPromisesBookingReview,
 		parseJsonObject,
 	},
