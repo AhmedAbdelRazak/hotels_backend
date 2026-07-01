@@ -92,6 +92,8 @@
   - The prompt now says OpenAI must not write final booking reviews as normal replies. It should return `send_review`; the orchestrator sends the official review with buttons.
   - The official review now always includes the exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.
   - Optional email remains optional. If OpenAI asks for email, the orchestrator can attach a "continue without email" quick reply so the flow does not get stuck.
+  - A later live turn showed a guest can ask for the review and then send a short nudge such as "يا أميرة؟" before the delayed turn completes.
+  - Review requests now go directly to the orchestrator review action, and a short nudge immediately after an unanswered review request still produces the official review instead of a generic "I am here" reply.
 
 ## PMS And Server Health Notes
 
@@ -115,10 +117,12 @@
 - `OPENAI_CHATBOT_NLU_MODEL=gpt-5.4-mini`
 - `OPENAI_CHATBOT_TIMEOUT_MS=12000`
 - `OPENAI_CHATBOT_MAX_PROMPT_CHARS=14000`
-- `AI_PLAN_USE_WORKER=true`
+- `AI_PLAN_USE_WORKER=false`
 - `AI_PLAN_WORKER_TIMEOUT_MS=12000`
 - `AI_PLAN_WORKER_HEAP_MB=384`
 - `AI_IDLE_AUTO_CLOSE_MS=300000`
+
+Note: `AI_PLAN_USE_WORKER=false` is currently preferred for this slim OpenAI-led B2C flow. The worker subprocess path timed out during live review testing and briefly raised backend memory; direct turns stayed around 270 MB after restart.
 
 ## Legacy Env Cleanup
 

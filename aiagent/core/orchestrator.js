@@ -454,6 +454,51 @@ function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
 	return null;
 }
 
+function previousGuestEntryBeforeLatest(sc = {}, latestGuest = null) {
+	if (!latestGuest) return null;
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let guestIndex = -1;
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const entry = conversation[index];
+		if (
+			entry === latestGuest ||
+			(entry?.clientTag && entry.clientTag === latestGuest.clientTag) ||
+			(entry?.date &&
+				latestGuest.date &&
+				String(entry.date) === String(latestGuest.date) &&
+				String(entry.message || "") === String(latestGuest.message || ""))
+		) {
+			guestIndex = index;
+			break;
+		}
+	}
+	if (guestIndex <= 0) return null;
+	for (let index = guestIndex - 1; index >= 0; index -= 1) {
+		if (isGuestEntry(conversation[index])) return conversation[index];
+		if (isAiSupportEntry(conversation[index])) return null;
+	}
+	return null;
+}
+
+function guestRequestsBookingReview(value = "") {
+	const text = normalizeDigits(String(value || "")).toLowerCase();
+	return /(review|summary|recap|details|مراجعة|راجع|راجعي|تفاصيل|ملخص|الحجز بالكامل|تفاصيل الحجز|مراجعة الحجز)/i.test(
+		text
+	);
+}
+
+function guestAttentionNudge(value = "") {
+	const text = normalizeDigits(String(value || ""))
+		.toLowerCase()
+		.replace(/[.!?؟،,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return /^(يا\s+\S+|اميرة|أميرة|amira|hello|hi|are you there|فينك|موجودة|موجود|الو|ألو)$/i.test(
+		text
+	);
+}
+
 function replyPromisesQuoteCheck(reply = "") {
 	const text = normalizeDigits(String(reply || "")).toLowerCase();
 	if (!text.trim()) return false;
@@ -1608,8 +1653,10 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 		clientAction: "review_reservation",
 		quickReplies: reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
 	});
-	reviewKnown.reviewSentAt = new Date().toISOString();
-	await saveKnownFacts(caseIdText(sc), reviewKnown);
+	if (latestConversationEntry(updated)?.clientAction === "review_reservation") {
+		reviewKnown.reviewSentAt = new Date().toISOString();
+		await saveKnownFacts(caseIdText(sc), reviewKnown);
+	}
 	return updated;
 }
 
@@ -1817,6 +1864,14 @@ async function planTurn(io, supportCaseOrId) {
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 			return sendReview(io, sc, known, hotel, latestGuest);
 		}
+	}
+	const previousGuest = previousGuestEntryBeforeLatest(sc, latestGuest);
+	if (
+		guestRequestsBookingReview(latestText) ||
+		(guestAttentionNudge(latestText) && guestRequestsBookingReview(previousGuest?.message))
+	) {
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return sendReview(io, sc, known, hotel, latestGuest);
 	}
 	let decision = null;
 	try {
