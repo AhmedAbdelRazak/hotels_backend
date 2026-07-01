@@ -341,6 +341,7 @@ const latestConversationFromUpdate = async (change, caseId) => {
 const conversationAlreadyEmittedDirectly = (message = {}) =>
 	Boolean(
 		message.clientTag &&
+			!String(message.clientTag || "").startsWith("ai_worker_") &&
 			(message.isAi ||
 				message.isSystem ||
 				/jannat-(?:ai-support|system)/i.test(

@@ -1,6 +1,8 @@
 // aiagent/core/orchestrator.js
 // Slim B2C chat orchestrator: OpenAI leads the conversation, this file runs tools.
 
+const path = require("path");
+const { fork } = require("child_process");
 const {
 	getSupportCaseById,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
@@ -65,6 +67,10 @@ const AI_TURN_MAX_CONVERSATION = intFromEnv("AI_TURN_MAX_CONVERSATION", 36, {
 const AI_IDLE_AUTO_CLOSE_MS = intFromEnv("AI_IDLE_AUTO_CLOSE_MS", 5 * 60 * 1000, {
 	min: 60 * 1000,
 	max: 30 * 60 * 1000,
+});
+const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv("AI_PLAN_WORKER_TIMEOUT_MS", 45000, {
+	min: 10000,
+	max: 120000,
 });
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
@@ -992,6 +998,7 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 	const caseId = caseIdText(sc);
 	const message = String(text || "").trim();
 	if (!caseId || !message) return null;
+	const workerNoDirectEmit = Boolean(io?.__aiWorkerNoDirectEmit);
 	await waitForGuestQuiet(caseId);
 	const latestBeforeSend = await getSupportCaseById(caseId).catch(() => null);
 	if (
@@ -1016,7 +1023,9 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 		seenByCustomer: false,
 		isAi: true,
 		isSystem: false,
-		clientTag: `ai_slim_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+		clientTag: `${workerNoDirectEmit ? "ai_worker" : "ai_slim"}_${Date.now()}_${Math.random()
+			.toString(36)
+			.slice(2, 8)}`,
 		clientAction: options.clientAction || "ai_reply",
 		preferredLanguage: sc.preferredLanguage || "",
 		preferredLanguageCode: languageCode,
@@ -1053,7 +1062,7 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 		duplicateWindowMs: 30000,
 	});
 	const updatedCase = saved?.updatedCase || (await getSupportCaseById(caseId).catch(() => null));
-	if (io && updatedCase) {
+	if (io && updatedCase && !workerNoDirectEmit) {
 		io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 		io.to(caseId).emit("supportCaseUpdated", updatedCase);
 		io.emit("supportCaseUpdated", updatedCase);
@@ -1431,6 +1440,109 @@ async function planTurn(io, supportCaseOrId) {
 	}
 }
 
+function shouldUsePlanWorker() {
+	if (process.env.AI_AGENT_WORKER_PROCESS === "true") return false;
+	return String(process.env.AI_PLAN_USE_WORKER || "true").toLowerCase() !== "false";
+}
+
+function runPlanTurnWorker(caseId = "", reason = "scheduled") {
+	return new Promise((resolve) => {
+		const workerPath = path.join(__dirname, "../worker/planTurnWorker.js");
+		let settled = false;
+		let stderr = "";
+		const child = fork(workerPath, [caseId], {
+			cwd: path.join(__dirname, "../.."),
+			env: {
+				...process.env,
+				AI_AGENT_WORKER_PROCESS: "true",
+				AI_PLAN_USE_WORKER: "false",
+			},
+			execArgv: ["--max-old-space-size=1024"],
+			stdio: ["ignore", "ignore", "pipe", "ipc"],
+		});
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve(result);
+		};
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			finish({
+				ok: false,
+				reason: "worker_timeout",
+				stderr: stderr.slice(-2000),
+			});
+		}, AI_PLAN_WORKER_TIMEOUT_MS);
+		timer.unref?.();
+		child.stderr?.on("data", (chunk) => {
+			stderr += String(chunk || "");
+			if (stderr.length > 8000) stderr = stderr.slice(-8000);
+		});
+		child.on("error", (error) => {
+			finish({
+				ok: false,
+				reason: "worker_error",
+				error: error?.message || String(error),
+				stderr: stderr.slice(-2000),
+			});
+		});
+		child.on("exit", (code, signal) => {
+			finish({
+				ok: code === 0,
+				reason: code === 0 ? "worker_ok" : "worker_exit",
+				code,
+				signal,
+				stderr: stderr.slice(-2000),
+				scheduledReason: reason,
+			});
+		});
+	});
+}
+
+async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
+	const sc = await getSupportCaseById(caseId).catch(() => null);
+	if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) return sc;
+	const { allowed, hotel } = await ensureAIAllowed(sc.hotelId, sc, {
+		includePricingRate: false,
+	});
+	if (!allowed) return sc;
+	const latestGuest = latestGuestEntry(sc);
+	let known = initialKnownFacts(sc);
+	if (known.checkinISO && known.checkoutISO && known.roomTypeKey) {
+		const quoteResult = await quoteTool(sc, known).catch((error) => {
+			console.error("[aiagent] worker fallback quote failed:", error?.message || error);
+			return null;
+		});
+		if (quoteResult) {
+			const nextKnown = { ...known };
+			if (quoteResult.available && quoteResult.quote) nextKnown.quote = quoteResult.quote;
+			await saveKnownFacts(caseId, nextKnown);
+			return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
+				latestGuest,
+				known: nextKnown,
+				clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
+				quickReplies: quoteResult.available
+					? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
+					: [],
+			});
+		}
+	}
+	const ar = /^ar\b/i.test(activeLanguageCode(sc, known));
+	const text = ar
+		? "وصلتني رسالتك، وأعتذر عن التأخير البسيط. أعطني لحظة إضافية وسأكمل مساعدتك بأقرب رد واضح."
+		: "I received your message, and I am sorry for the small delay. Give me one more moment and I will continue helping you clearly.";
+	console.error("[aiagent] worker fallback sent", {
+		caseId,
+		reason: workerResult?.reason || "worker_failed",
+	});
+	return sendAiMessage(io, sc, text, {
+		latestGuest,
+		known,
+		clientAction: "worker_fallback",
+	});
+}
+
 function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } = {}) {
 	const caseId = caseIdText(caseOrId);
 	if (!caseId || !io) return;
@@ -1448,7 +1560,21 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 		}
 		activeTurns.add(caseId);
 		try {
-			await planTurn(io, caseId);
+			if (shouldUsePlanWorker()) {
+				const result = await runPlanTurnWorker(caseId, reason);
+				if (!result.ok) {
+					console.error("[aiagent] worker turn failed", {
+						caseId,
+						reason: result.reason,
+						code: result.code,
+						signal: result.signal,
+						stderr: result.stderr,
+					});
+					await sendPlanWorkerFallback(io, caseId, result);
+				}
+			} else {
+				await planTurn(io, caseId);
+			}
 		} finally {
 			activeTurns.delete(caseId);
 			pendingReasons.delete(caseId);
