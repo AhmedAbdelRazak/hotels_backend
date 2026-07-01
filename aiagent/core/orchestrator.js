@@ -65,6 +65,10 @@ const AI_TYPING_MIN_VISIBLE_MS = intFromEnv("AI_TYPING_MIN_VISIBLE_MS", 2000, {
 	min: 500,
 	max: 8000,
 });
+const AI_OUTRO_CLOSE_DELAY_MS = intFromEnv("AI_OUTRO_CLOSE_DELAY_MS", 4000, {
+	min: 1000,
+	max: 15000,
+});
 const AI_TURN_MAX_CONVERSATION = intFromEnv("AI_TURN_MAX_CONVERSATION", 36, {
 	min: 8,
 	max: 80,
@@ -721,6 +725,39 @@ function latestGuestProvidesBookingIdentityDetails(value = "") {
 	);
 }
 
+function latestGuestContinuesAfterQuote(previousAi = {}, latestText = "", latestAction = "") {
+	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_ready") {
+		return false;
+	}
+	const cleanAction = cleanString(latestAction, 80).toLowerCase();
+	if (["proceed", "continue_booking", "proceed_to_booking"].includes(cleanAction)) {
+		return true;
+	}
+	if (
+		guestConfirms(latestText, cleanAction) ||
+		guestWantsToContinueBooking(latestText, cleanAction) ||
+		latestGuestProvidesBookingIdentityDetails(latestText)
+	) {
+		return true;
+	}
+	const compact = normalizeIntentSearchText(latestText).replace(/\s+/g, "");
+	if (!compact) return false;
+	return [
+		"\u0646\u0639\u0645",
+		"\u0627\u064a\u0648\u0647",
+		"\u0627\u064a\u0648\u0627",
+		"\u0627\u0647",
+		"\u062a\u0627\u0628\u0639",
+		"\u062a\u0627\u0628\u0639\u064a",
+		"\u0643\u0645\u0644",
+		"\u0643\u0645\u0644\u064a",
+		"\u0627\u0643\u0645\u0644",
+		"\u0627\u0643\u0645\u0644\u064a",
+		"\u0627\u062d\u062c\u0632",
+		"\u0627\u062d\u062c\u0632\u064a",
+	].some((needle) => compact.includes(needle));
+}
+
 function peopleCountFromLine(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const unicodeArabicGuestNoun =
@@ -1124,6 +1161,12 @@ function quoteFactsFromAiMessage(entry = {}) {
 	}
 	const roomTypeKey = mapRoomToKey(text);
 	if (roomTypeKey) facts.roomTypeKey = roomTypeKey;
+	const roomSelections = extractRoomSelectionsFromText(text);
+	if (roomSelections.length) {
+		facts.roomSelections = roomSelections;
+		facts.rooms = roomSelectionsTotal(roomSelections);
+		if (roomSelections.length === 1) facts.roomTypeKey = roomSelections[0].roomTypeKey;
+	}
 	const peopleCount = peopleCountFromLine(text);
 	if (peopleCount) facts.adults = peopleCount;
 	return facts;
@@ -3303,12 +3346,40 @@ async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, r
 		(/^ar\b/i.test(languageCode)
 			? "سعدت بخدمتك. سأغلق المحادثة الآن، ويمكنك فتح محادثة جديدة في أي وقت تحتاج فيه مساعدة."
 			: "It was my pleasure helping you. I will close the chat now, and you can start a new one anytime you need help.");
-	return sendAiMessage(io, sc, text, {
+	const updatedAfterOutro = await sendAiMessage(io, sc, text, {
 		latestGuest,
 		known,
-		closeCase: true,
-		closeReason: "ai_guest_finished",
+		clientAction: "case_outro",
 	});
+	const caseId = caseIdText(updatedAfterOutro || sc);
+	if (!caseId || !updatedAfterOutro) return updatedAfterOutro;
+	await sleep(AI_OUTRO_CLOSE_DELAY_MS);
+	const latestCase = await getSupportCaseById(caseId).catch(() => null);
+	if (!latestCase || latestCase.caseStatus !== "open" || latestCase.aiToRespond === false) {
+		return latestCase || updatedAfterOutro;
+	}
+	const latestEntry = latestConversationEntry(latestCase);
+	if (
+		!isAiSupportEntry(latestEntry) ||
+		latestEntry?.isSystem ||
+		String(latestEntry?.clientAction || "") !== "case_outro"
+	) {
+		return latestCase;
+	}
+	const closed = await closeSupportCaseForAiIdle(caseId, {
+		now: new Date(),
+		reason: "ai_guest_finished",
+		latestAiDate: latestEntry.date,
+	}).catch((error) => {
+		console.error("[aiagent] outro close failed:", error?.message || error);
+		return null;
+	});
+	if (closed) {
+		clearIdleCloseTimer(caseId);
+		emitClosedCase(io, closed, "ai_guest_finished");
+		return closed;
+	}
+	return latestCase;
 }
 
 async function handleCancelReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
@@ -3537,6 +3608,22 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	if (
+		latestGuest &&
+		["quote_ready", "review_reservation"].includes(
+			String(previousAi?.clientAction || "").toLowerCase()
+		)
+	) {
+		const previousQuoteFacts = quoteFactsFromAiMessage(previousAi);
+		if (
+			previousQuoteFacts.checkinISO ||
+			previousQuoteFacts.checkoutISO ||
+			previousQuoteFacts.roomTypeKey ||
+			normalizeRoomSelections(previousQuoteFacts.roomSelections).length
+		) {
+			known = mergeKnownFacts(known, previousQuoteFacts);
+		}
+	}
 	const latestRevision = latestGuest
 		? applyLatestStayRevision(known, latestText, latestAction, previousAi)
 		: { known, deferToOpenAI: false, appliedQuickDates: false };
@@ -3613,8 +3700,7 @@ async function planTurn(io, supportCaseOrId) {
 	const latestGuestWantsToContinue =
 		latestGuest &&
 		(guestWantsToContinueBooking(latestText, latestAction) ||
-			(previousAi?.clientAction === "quote_ready" &&
-				latestGuestProvidesBookingIdentityDetails(latestText)));
+			latestGuestContinuesAfterQuote(previousAi, latestText, latestAction));
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
 		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
 	}
@@ -4205,6 +4291,8 @@ const exportedOrchestrator = {
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		guestRequestsBookingReviewStep,
+		latestGuestContinuesAfterQuote,
+		quoteFactsFromAiMessage,
 		replyPromisesBookingReview,
 		parseJsonObject,
 	},
