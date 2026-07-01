@@ -313,6 +313,13 @@ function normalizeDigits(value = "") {
 	return digitsToEnglish(String(value || ""));
 }
 
+function normalizeIntentSearchText(value = "") {
+	return normalizeDigits(value)
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f\u064b-\u065f\u0670]/g, "")
+		.toLowerCase();
+}
+
 function cleanString(value = "", max = 240) {
 	return normalizeDigits(value).replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -1120,8 +1127,7 @@ function guestConfirms(value = "", action = "") {
 	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
 		return true;
 	}
-	const text = normalizeDigits(String(value || ""))
-		.toLowerCase()
+	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?؟،,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -1138,8 +1144,7 @@ function guestConfirms(value = "", action = "") {
 function guestRequestsBookingReviewStep(value = "", action = "") {
 	const cleanAction = cleanString(action, 80).toLowerCase();
 	if (["proceed", "skip_email"].includes(cleanAction)) return true;
-	const text = normalizeDigits(String(value || ""))
-		.toLowerCase()
+	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?؟،,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -1155,8 +1160,7 @@ function guestWantsToContinueBooking(value = "", action = "") {
 	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
 		return true;
 	}
-	const text = normalizeDigits(String(value || ""))
-		.toLowerCase()
+	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?؟،,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -1204,8 +1208,7 @@ function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
 	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
 		return true;
 	}
-	const text = normalizeDigits(String(value || ""))
-		.toLowerCase()
+	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?؟،,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
