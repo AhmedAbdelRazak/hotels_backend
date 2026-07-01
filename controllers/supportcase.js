@@ -10,8 +10,8 @@ const {
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
 const {
-	launchAiPlanWorker,
-} = require("../aiagent/core/workerLauncher");
+	schedulePlanTurn,
+} = require("../aiagent/core/orchestrator");
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -49,10 +49,13 @@ const isAiAgentEnabled = () =>
 	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
 
 function scheduleAiTurnForCase(io, supportCaseOrId, { delayMs = 50 } = {}) {
-	if (!isAiAgentEnabled() || !io || typeof launchAiPlanWorker !== "function") {
+	if (!isAiAgentEnabled() || !io || typeof schedulePlanTurn !== "function") {
 		return;
 	}
-	launchAiPlanWorker(io, supportCaseOrId, { delayMs });
+	schedulePlanTurn(io, supportCaseOrId, {
+		delayMs,
+		reason: "public_client_message",
+	});
 }
 
 const configuredSuperAdminIds = () =>

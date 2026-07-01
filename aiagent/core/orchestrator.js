@@ -15,7 +15,6 @@ const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
 const { priceRoomForStay } = require("./selectors");
 const { mapRoomToKey, digitsToEnglish, quickDateRange } = require("./nlu");
-const { launchAiPlanWorker } = require("./workerLauncher");
 const {
 	createReservationForCase,
 	updateReservationDatesForCase,
@@ -52,6 +51,8 @@ const pendingReasons = new Map();
 const guestTypingUntilByCase = new Map();
 const guestActivityAtByCase = new Map();
 const idleCloseTimers = new Map();
+const queuedPlanTurns = [];
+let activePlanTurnCount = 0;
 
 const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
 	min: 500,
@@ -76,6 +77,10 @@ const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv("AI_PLAN_WORKER_TIMEOUT_MS", 12000,
 const AI_PLAN_WORKER_HEAP_MB = intFromEnv("AI_PLAN_WORKER_HEAP_MB", 384, {
 	min: 128,
 	max: 1024,
+});
+const AI_PLAN_MAX_ACTIVE_TURNS = intFromEnv("AI_PLAN_MAX_ACTIVE_TURNS", 2, {
+	min: 1,
+	max: 6,
 });
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
@@ -2815,6 +2820,57 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 	});
 }
 
+function enqueuePlanTurn(io, caseId = "", reason = "scheduled") {
+	queuedPlanTurns.push({ io, caseId, reason });
+	drainPlanTurnQueue();
+}
+
+function drainPlanTurnQueue() {
+	while (
+		activePlanTurnCount < AI_PLAN_MAX_ACTIVE_TURNS &&
+		queuedPlanTurns.length
+	) {
+		const job = queuedPlanTurns.shift();
+		runPlanTurnJob(job).catch((error) => {
+			console.error("[aiagent] queued turn runner failed:", error?.stack || error);
+		});
+	}
+}
+
+async function runPlanTurnJob({ io, caseId = "", reason = "scheduled" } = {}) {
+	activePlanTurnCount += 1;
+	const startedAt = now();
+	console.log("[aiagent] queued turn started", {
+		caseId,
+		reason,
+		active: activePlanTurnCount,
+		queued: queuedPlanTurns.length,
+	});
+	try {
+		await planTurn(io, caseId);
+	} catch (error) {
+		console.error("[aiagent] queued turn failed:", error?.stack || error);
+		await sendPlanWorkerFallback(io, caseId, {
+			reason: "queued_turn_failed",
+			error: error?.message || String(error),
+		}).catch((fallbackError) => {
+			console.error("[aiagent] queued turn fallback failed:", fallbackError?.message || fallbackError);
+		});
+	} finally {
+		activeTurns.delete(caseId);
+		pendingReasons.delete(caseId);
+		activePlanTurnCount = Math.max(0, activePlanTurnCount - 1);
+		console.log("[aiagent] queued turn completed", {
+			caseId,
+			reason,
+			elapsedMs: now() - startedAt,
+			active: activePlanTurnCount,
+			queued: queuedPlanTurns.length,
+		});
+		drainPlanTurnQueue();
+	}
+}
+
 function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } = {}) {
 	const caseId = caseIdText(caseOrId);
 	if (!caseId || !io) return;
@@ -2831,25 +2887,7 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 			return;
 		}
 		activeTurns.add(caseId);
-		let workerLaunched = false;
-		try {
-			if (shouldUsePlanWorker()) {
-				const beforeWorker = await getSupportCaseById(caseId).catch(() => null);
-				if (beforeWorker) await emitTyping(io, beforeWorker, true);
-				const child = launchPlanTurnWorker(io, caseId, reason);
-				workerLaunched = Boolean(child);
-				if (!child) {
-					await sendPlanWorkerFallback(io, caseId, { reason: "worker_launch_failed" });
-				}
-			} else {
-				await planTurn(io, caseId);
-			}
-		} finally {
-			if (!workerLaunched) {
-				activeTurns.delete(caseId);
-				pendingReasons.delete(caseId);
-			}
-		}
+		enqueuePlanTurn(io, caseId, reason);
 	}, delay);
 	activeTimers.set(caseId, timer);
 }
@@ -2879,7 +2917,12 @@ function wireSocket(io) {
 		});
 		socket.on("ai:planNow", (data = {}) => {
 			const caseId = caseIdText(data.caseId);
-			if (caseId) launchAiPlanWorker(io, caseId, { delayMs: 0 });
+			if (caseId) {
+				schedulePlanTurn(io, caseId, {
+					delayMs: 0,
+					reason: "socket_plan_now",
+				});
+			}
 		});
 	});
 	console.log("[aiagent] slim OpenAI-led orchestrator active.");
