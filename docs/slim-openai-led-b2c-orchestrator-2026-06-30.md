@@ -97,6 +97,14 @@ Fix:
 - One-off QA scripts may set `AI_SKIP_RESERVATION_CONFIRMATION_DISPATCH=true` in their own process to verify reservation creation without sending fake confirmation emails/WhatsApp notifications. Do not set this in production PM2.
 - Final review actions (`place_reservation` / guest confirmation after a review) are handled before quote/review reminder branches, so the final button cannot be swallowed by duplicate-review protection.
 
+## 2026-07-01 Regional Gregorian Month Names
+
+The date parser and OpenAI prompt now recognize common regional Gregorian month names used by Arab guests:
+
+- Maghreb/North Africa examples: `اوت/أوت` = August, `جانفي`, `فيفري`, `أفريل`, `ماي`, `جوان`, `جويلية`, `شتنبر`, `نونبر`, `دجنبر`.
+- Levant/Syriac examples: `آب` = August, `تموز`, `أيلول`, `تشرين الأول`, `تشرين الثاني`, `كانون الأول`, `كانون الثاني`.
+- If the model still cannot confidently convert a regional date phrase, it should ask one short confirmation question before quoting instead of freezing or guessing.
+
 Operational note:
 
 - Scheduled AI turns should run through the bounded worker process when available (`AI_PLAN_USE_WORKER=true`, `AI_PLAN_WORKER_HEAP_MB=512`) so slow or stuck OpenAI turns cannot balloon the main `hotels-backend` memory.
