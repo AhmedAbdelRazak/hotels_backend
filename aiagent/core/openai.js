@@ -3,6 +3,7 @@ const OpenAI = require("openai");
 const {
 	buildChatCompletionBody,
 	pickOpenAIModel,
+	pickReasoningEffort,
 	usesCompletionTokens,
 } = require("../../services/openaiModelConfig");
 
@@ -49,16 +50,6 @@ async function withDeadline(factory, timeoutMs) {
 
 function pickModel(kind = "nlu") {
 	return pickOpenAIModel(kind);
-}
-
-function pickReasoningEffort() {
-	return String(
-		process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
-			process.env.OPENAI_REASONING_EFFORT ||
-			"low"
-	)
-		.trim()
-		.toLowerCase();
 }
 
 function clipMiddle(text = "", maxChars = 0) {
@@ -119,7 +110,9 @@ async function chat(
 		messages: trimMessagesForOpenAI(messages),
 		temperature,
 		maxTokens: tokenLimit,
-		reasoning_effort: gpt5Style ? reasoning_effort || pickReasoningEffort() : "",
+		reasoning_effort: gpt5Style
+			? reasoning_effort || pickReasoningEffort(kind)
+			: "",
 	});
 	const res = await withDeadline(
 		(signal) =>
@@ -133,4 +126,4 @@ async function chat(
 	return res.choices?.[0]?.message?.content?.trim() || "";
 }
 
-module.exports = { chat };
+module.exports = { chat, pickReasoningEffort };

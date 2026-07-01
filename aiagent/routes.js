@@ -12,7 +12,10 @@ const {
 	priceRoomForStay,
 } = require("./core/selectors");
 const { pushReservationLinks } = require("./core/actions");
-const { pickOpenAIModel } = require("../services/openaiModelConfig");
+const {
+	pickOpenAIModel,
+	pickReasoningEffort,
+} = require("../services/openaiModelConfig");
 
 /**
  * GET /api/aiagent/health
@@ -34,10 +37,10 @@ function attachRoutes(app, io) {
 			analysisModel: pickOpenAIModel("analysis"),
 			nluModel: pickOpenAIModel("nlu"),
 			writerModel: pickOpenAIModel("writer"),
-			reasoningEffort:
-				process.env.OPENAI_CHATBOT_REASONING_EFFORT ||
-				process.env.OPENAI_REASONING_EFFORT ||
-				"low",
+			reasoningEffort: pickReasoningEffort("reasoning"),
+			writerReasoningEffort: pickReasoningEffort("writer"),
+			nluReasoningEffort: pickReasoningEffort("nlu"),
+			analysisReasoningEffort: pickReasoningEffort("analysis"),
 		});
 	});
 

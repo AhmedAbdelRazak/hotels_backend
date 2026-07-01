@@ -264,7 +264,7 @@ function buildPickedRoomsType({ room, dailyRows, count = 1 }) {
 function roomSelectionCount(value, fallback = 1) {
 	const number = Number(String(value ?? "").replace(/[^\d.-]/g, ""));
 	if (!Number.isFinite(number)) return fallback;
-	return Math.min(8, Math.max(1, Math.floor(number)));
+	return Math.min(50, Math.max(1, Math.floor(number)));
 }
 
 function buildPickedRoomsTypeFromQuote({ quoteData = {}, room = null, count = 1 }) {
@@ -1324,10 +1324,19 @@ async function createReservationForCase({
 		paid_amount: 0,
 		commissionPaid: 0,
 		booking_source: "AI Chat",
+		createdBy: AI_RESERVATION_ACTOR,
+		orderTaker: AI_RESERVATION_ACTOR,
+		orderTakenAt: new Date(),
 		aiSupportCaseId: caseKey,
 		aiReservationFingerprint: fingerprint,
 		pickedRoomsType,
 		pickedRoomsPricing: pickedRoomsType,
+		adminPricingVisibility: {
+			rootOnlyForHotelManagement: true,
+			source: "ai_chat_reservation_create",
+			appliedAt: new Date(),
+			appliedBy: AI_RESERVATION_ACTOR,
+		},
 
 		customer_details: {
 			name: guest.name,
@@ -1369,6 +1378,7 @@ async function createReservationForCase({
 			"ai_chat_reservation_create"
 		);
 		markReservationPendingConfirmation(reservationPayload, {
+			actor: AI_RESERVATION_ACTOR,
 			source: "ai_chat_reservation_create",
 			operationalStatus: true,
 			clientVisibleStatus: "confirmed",

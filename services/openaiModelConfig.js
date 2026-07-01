@@ -9,6 +9,14 @@ const KIND_DEFAULT_MODELS = {
 	default: DEFAULT_OPENAI_MODEL,
 };
 
+const DEFAULT_REASONING_EFFORTS = {
+	analysis: "medium",
+	reasoning: "medium",
+	nlu: "low",
+	writer: "low",
+	default: "medium",
+};
+
 const KIND_ENV_KEYS = {
 	analysis: [
 		"OPENAI_CHATBOT_ANALYSIS_MODEL",
@@ -50,6 +58,27 @@ const KIND_ENV_KEYS = {
 	],
 };
 
+const KIND_REASONING_ENV_KEYS = {
+	analysis: [
+		"OPENAI_CHATBOT_ANALYSIS_REASONING_EFFORT",
+		"OPENAI_CHATBOT_REASONING_EFFORT",
+		"OPENAI_REASONING_EFFORT",
+	],
+	reasoning: [
+		"OPENAI_CHATBOT_BOOKING_REASONING_EFFORT",
+		"OPENAI_CHATBOT_PLANNER_REASONING_EFFORT",
+		"OPENAI_CHATBOT_REASONING_EFFORT",
+		"OPENAI_REASONING_EFFORT",
+	],
+	nlu: ["OPENAI_CHATBOT_NLU_REASONING_EFFORT"],
+	writer: [
+		"OPENAI_CHATBOT_WRITER_REASONING_EFFORT",
+		"OPENAI_CHATBOT_REPLY_REASONING_EFFORT",
+		"OPENAI_CHATBOT_POLISH_REASONING_EFFORT",
+	],
+	default: ["OPENAI_CHATBOT_REASONING_EFFORT", "OPENAI_REASONING_EFFORT"],
+};
+
 function sanitizeModelName(value) {
 	if (!value) return "";
 	return String(value).split("#")[0].trim().split(/\s+/)[0] || "";
@@ -68,6 +97,29 @@ function pickOpenAIModel(kind = "default") {
 	);
 }
 
+function sanitizeReasoningEffort(value) {
+	const effort = String(value || "").trim().toLowerCase();
+	return [
+		"none",
+		"minimal",
+		"low",
+		"medium",
+		"high",
+		"xhigh",
+	].includes(effort)
+		? effort
+		: "";
+}
+
+function pickReasoningEffort(kind = "default") {
+	const envKeys = KIND_REASONING_ENV_KEYS[kind] || KIND_REASONING_ENV_KEYS.default;
+	for (const key of envKeys) {
+		const effort = sanitizeReasoningEffort(process.env[key]);
+		if (effort) return effort;
+	}
+	return DEFAULT_REASONING_EFFORTS[kind] || DEFAULT_REASONING_EFFORTS.default;
+}
+
 function usesCompletionTokens(model = "") {
 	return /^(gpt-5|o\d|o-|chat-latest$)/i.test(String(model || ""));
 }
@@ -83,19 +135,7 @@ function buildChatCompletionBody({
 	const resolvedModel = sanitizeModelName(model) || pickOpenAIModel();
 	const gpt5Style = usesCompletionTokens(resolvedModel);
 	const tokenLimit = Number(maxTokens);
-	const reasoningEffort = String(rest.reasoning_effort || "")
-		.trim()
-		.toLowerCase();
-	const allowedReasoningEffort = [
-		"none",
-		"minimal",
-		"low",
-		"medium",
-		"high",
-		"xhigh",
-	].includes(reasoningEffort)
-		? reasoningEffort
-		: "";
+	const allowedReasoningEffort = sanitizeReasoningEffort(rest.reasoning_effort);
 	delete rest.reasoning_effort;
 	return {
 		model: resolvedModel,
@@ -118,7 +158,9 @@ module.exports = {
 	DEFAULT_OPENAI_MODEL,
 	DEFAULT_OPENAI_FAST_MODEL,
 	pickOpenAIModel,
+	pickReasoningEffort,
 	sanitizeModelName,
+	sanitizeReasoningEffort,
 	usesCompletionTokens,
 	buildChatCompletionBody,
 };
