@@ -501,20 +501,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (/(full name|guest name|nationality|phone number|phone|complete your booking|booking review)/i.test(text)) {
 				collectingBookingDetails = true;
 			}
-			if (["quote_ready", "review_reservation"].includes(action)) {
-				const dates = quickDateRange(text);
-				if (dates?.checkinISO && dates?.checkoutISO) {
-					recovered.checkinISO = dates.checkinISO;
-					recovered.checkoutISO = dates.checkoutISO;
-					recovered.dateCalendar = dates.raw?.calendar || recovered.dateCalendar || "gregorian";
-				}
-				const roomTypeKey = mapRoomToKey(text);
-				if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
-				if (!recovered.adults) {
-					const peopleCount = peopleCountFromLine(text);
-					if (peopleCount) recovered.adults = peopleCount;
-				}
-			}
+			Object.assign(recovered, quoteFactsFromAiMessage(entry));
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (value) recovered.fullName = value;
@@ -719,6 +706,25 @@ function quoteInputsKnown(known = {}) {
 			validISODate(known.checkoutISO) &&
 			known.roomTypeKey
 	);
+}
+
+function quoteFactsFromAiMessage(entry = {}) {
+	const action = cleanString(entry?.clientAction, 80).toLowerCase();
+	if (!["quote_ready", "review_reservation"].includes(action)) return {};
+	const text = cleanDisplayString(entry?.message || "", 1500);
+	if (!text) return {};
+	const facts = {};
+	const dates = quickDateRange(text);
+	if (dates?.checkinISO && dates?.checkoutISO) {
+		facts.checkinISO = dates.checkinISO;
+		facts.checkoutISO = dates.checkoutISO;
+		facts.dateCalendar = dates.raw?.calendar || "gregorian";
+	}
+	const roomTypeKey = mapRoomToKey(text);
+	if (roomTypeKey) facts.roomTypeKey = roomTypeKey;
+	const peopleCount = peopleCountFromLine(text);
+	if (peopleCount) facts.adults = peopleCount;
+	return facts;
 }
 
 function guestConfirms(value = "", action = "") {
@@ -2685,9 +2691,13 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return submitReservationForCase(io, key);
 	}
+	const latestGuestWantsToContinue =
+		latestGuest && guestWantsToContinueBooking(latestText, latestAction);
+	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
+		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
+	}
 	const wantsToContinueBooking =
-		latestGuest &&
-		guestWantsToContinueBooking(latestText, latestAction) &&
+		latestGuestWantsToContinue &&
 		quoteInputsKnown(known) &&
 		!shouldLetOpenAIHandleRevision &&
 		!latestGuestAsksHotelFactOnly(latestGuest);
