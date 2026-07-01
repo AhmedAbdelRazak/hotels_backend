@@ -2,7 +2,7 @@
 // Slim B2C chat orchestrator: OpenAI leads the conversation, this file runs tools.
 
 const path = require("path");
-const { fork } = require("child_process");
+const { spawn } = require("child_process");
 const {
 	getSupportCaseById,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
@@ -1454,7 +1454,11 @@ function runPlanTurnWorker(caseId = "", reason = "scheduled") {
 		const workerPath = path.join(__dirname, "../worker/planTurnWorker.js");
 		let settled = false;
 		let stderr = "";
-		const child = fork(workerPath, [caseId], {
+		const child = spawn(process.execPath, [
+			`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`,
+			workerPath,
+			caseId,
+		], {
 			cwd: path.join(__dirname, "../.."),
 			env: {
 				...process.env,
@@ -1463,8 +1467,7 @@ function runPlanTurnWorker(caseId = "", reason = "scheduled") {
 				OPENAI_CHATBOT_MAX_PROMPT_CHARS:
 					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "14000",
 			},
-			execArgv: [`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`],
-			stdio: ["ignore", "ignore", "pipe", "ipc"],
+			stdio: ["ignore", "ignore", "pipe"],
 		});
 		const finish = (result) => {
 			if (settled) return;
