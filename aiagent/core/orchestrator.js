@@ -89,6 +89,15 @@ function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
 	return Math.min(max, Math.max(min, value));
 }
 
+function logTurnStage(caseId = "", stage = "", extra = {}) {
+	if (!caseId || !stage) return;
+	console.log("[aiagent] turn stage", {
+		caseId,
+		stage,
+		...extra,
+	});
+}
+
 function now() {
 	return Date.now();
 }
@@ -2178,7 +2187,18 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 }
 
 async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	const caseId = caseIdText(sc);
+	logTurnStage(caseId, "quote_tool_start", {
+		checkinISO: known.checkinISO || "",
+		checkoutISO: known.checkoutISO || "",
+		roomTypeKey: known.roomTypeKey || "",
+	});
 	const result = await quoteTool(sc, known);
+	logTurnStage(caseId, "quote_tool_done", {
+		available: Boolean(result?.available),
+		hasQuote: Boolean(result?.quote),
+		code: result?.code || "",
+	});
 	const nextKnown = { ...known };
 	if (result.available && result.quote) nextKnown.quote = result.quote;
 	else {
@@ -2356,16 +2376,33 @@ async function submitReservationForCase(io, caseOrId) {
 
 async function planTurn(io, supportCaseOrId) {
 	const caseId = caseIdText(supportCaseOrId);
+	logTurnStage(caseId, "start");
 	let sc = caseId ? await getSupportCaseById(caseId) : supportCaseOrId;
-	if (!sc) return null;
+	if (!sc) {
+		logTurnStage(caseId, "case_missing");
+		return null;
+	}
 	const key = caseIdText(sc);
+	logTurnStage(key, "quiet_wait_start");
 	await waitForGuestQuiet(key);
+	logTurnStage(key, "quiet_wait_done");
 	sc = (await getSupportCaseById(key)) || sc;
 	const latestGuest = latestGuestEntry(sc);
 	const noAiYet = !hasAnyAiEntry(sc);
-	if (!latestGuest && !noAiYet) return sc;
+	if (!latestGuest && !noAiYet) {
+		logTurnStage(key, "no_guest_turn");
+		return sc;
+	}
+	logTurnStage(key, "policy_start", {
+		messages: Array.isArray(sc.conversation) ? sc.conversation.length : 0,
+	});
 	const { allowed, hotel, reason } = await ensureAIAllowed(sc.hotelId, sc, {
 		includePricingRate: false,
+	});
+	logTurnStage(key, "policy_done", {
+		allowed,
+		reason: reason || "",
+		hotelLoaded: Boolean(hotel?._id || hotel?.hotelName),
 	});
 	if (!allowed) {
 		if (String(process.env.AI_AGENT_DEBUG || "").toLowerCase() === "true") {
@@ -2376,6 +2413,7 @@ async function planTurn(io, supportCaseOrId) {
 
 	const typingStartedAt = now();
 	await emitTyping(io, sc, true);
+	logTurnStage(key, "facts_start");
 	let known = initialKnownFacts(sc);
 	if (!known.languageCode && sc.preferredLanguageCode) {
 		known.languageCode = sc.preferredLanguageCode;
@@ -2397,6 +2435,12 @@ async function planTurn(io, supportCaseOrId) {
 		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
 		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
 	}
+	logTurnStage(key, "facts_done", {
+		hasCheckin: Boolean(known.checkinISO),
+		hasCheckout: Boolean(known.checkoutISO),
+		roomTypeKey: known.roomTypeKey || "",
+		hasQuote: Boolean(known.quote),
+	});
 	const shouldLetOpenAIHandleRevision =
 		latestGuest &&
 		(guestRequestsRevision(latestText, latestAction) ||
@@ -2436,6 +2480,7 @@ async function planTurn(io, supportCaseOrId) {
 	) {
 		await saveKnownFacts(key, known);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		logTurnStage(key, "quote_branch_start");
 		return handleQuote(io, sc, hotel, known, latestGuest);
 	}
 	if (latestGuest && quoteMatchesKnown(known) && !shouldLetOpenAIHandleRevision) {
@@ -2481,6 +2526,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	let decision = null;
 	try {
+		logTurnStage(key, "openai_branch_start");
 		if (!latestGuest && noAiYet) {
 			decision = await askOpenAI({
 				sc,
@@ -2510,6 +2556,10 @@ async function planTurn(io, supportCaseOrId) {
 				turnKind: noAiYet ? "new_chat_first_guest_message" : "chat",
 			});
 		}
+		logTurnStage(key, "openai_decision_done", {
+			action: decision?.action || "",
+			hasReply: Boolean(decision?.reply),
+		});
 		known = mergeKnownFacts(known, decision.facts);
 		if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		if (hotelFactReplyNeedsCorrection(decision, hotel, latestGuest)) {
