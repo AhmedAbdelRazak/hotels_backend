@@ -3697,10 +3697,15 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return submitReservationForCase(io, key);
 	}
+	const latestGuestContinuesQuote = latestGuestContinuesAfterQuote(
+		previousAi,
+		latestText,
+		latestAction
+	);
 	const latestGuestWantsToContinue =
 		latestGuest &&
 		(guestWantsToContinueBooking(latestText, latestAction) ||
-			latestGuestContinuesAfterQuote(previousAi, latestText, latestAction));
+			latestGuestContinuesQuote);
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
 		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
 	}
@@ -3710,7 +3715,7 @@ async function planTurn(io, supportCaseOrId) {
 	const wantsToContinueBooking =
 		latestGuestWantsToContinue &&
 		quoteInputsKnown(known) &&
-		!shouldLetOpenAIHandleRevision &&
+		(!shouldLetOpenAIHandleRevision || latestGuestContinuesQuote) &&
 		!latestGuestAsksHotelFactOnly(latestGuest);
 	if (wantsToContinueBooking) {
 		let bookingKnown = { ...known, quote: asObject(known.quote) };
