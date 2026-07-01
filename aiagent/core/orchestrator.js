@@ -251,6 +251,9 @@ function localizedAgentName(sc = {}) {
 		layla: "\u0644\u064a\u0644\u0649",
 		leila: "\u0644\u064a\u0644\u0649",
 		aya: "\u0622\u064a\u0629",
+		samira: "\u0633\u0645\u064a\u0631\u0629",
+		samera: "\u0633\u0645\u064a\u0631\u0629",
+		nour: "\u0646\u0648\u0631",
 	};
 	return map[name.toLowerCase()] || name;
 }
