@@ -4,6 +4,8 @@ Date: 2026-06-30
 
 The B2C AI chat runtime was simplified so OpenAI leads the customer-facing conversation and `aiagent/core/orchestrator.js` acts mainly as a dispatcher/tool runner.
 
+For the full production go-live story, operational issues, PM2/server health notes, Hijri handling, idle auto-close behavior, and future QA commands, see `docs/b2c-openai-chatbot-go-live-runbook-2026-06-30.md`.
+
 ## Runtime Contract
 
 - OpenAI receives compact hotel facts, known booking facts, recent transcript, and action rules.
