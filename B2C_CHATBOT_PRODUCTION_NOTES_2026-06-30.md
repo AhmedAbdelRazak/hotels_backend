@@ -64,13 +64,20 @@
   - The no-response cause was operational: production had `AI_AGENT_ENABLED=false`, so the scheduler was not running.
   - A forced single worker run answered the case in about 3.9 seconds and kept backend memory stable.
   - The prompt was tightened so first AI replies identify as the hotel reception/reservations team, not generic Jannat Booking support.
+  - The same live case also showed that mild frustration such as "impossible, check again" should not immediately escalate. The escalation rule was tightened so AI keeps helping unless there is clear abuse, threats, severe/repeated anger, a sensitive complaint, or an explicit human/manager request.
+- `6a4469c09cfa84dc6e6f942b` was a Codex-marked production API verification case for an Arabic initial message.
+  - It opened with the edited guest message, not the default widget text.
+  - The automatic AI scheduler replied in about 5.0 seconds.
+  - The reply identified as the hotel reception/reservations team for Zad Ajyad.
+  - The test case was deleted after verification.
 
 ## PMS And Server Health Notes
 
-- During production QA, the AI turn path caused backend memory to grow sharply after OpenAI/worker fallback attempts.
-- To protect PMS operations, production currently keeps `AI_AGENT_ENABLED=false`.
-- Backend, PMS, and SSR services should remain healthy with AI disabled.
-- Before re-enabling AI in production, run one controlled chat while watching:
+- During earlier production QA, the AI turn path caused backend memory to grow sharply after OpenAI/worker fallback attempts.
+- AI was temporarily kept off with `AI_AGENT_ENABLED=false` while investigating PMS safety.
+- After the worker path answered `6a4467f7b20693e523ba462f` in about 3.9 seconds with stable memory, production was re-enabled with `AI_AGENT_ENABLED=true`.
+- A fresh Codex-marked initial-message case also replied automatically in about 5.0 seconds and was deleted.
+- When making future AI changes, run one controlled chat while watching:
   - PM2 memory and CPU
   - `sensors`
   - PMS support-case/reservation pages
@@ -79,7 +86,7 @@
 
 ## Safe Production Environment Used
 
-- `AI_AGENT_ENABLED=false`
+- `AI_AGENT_ENABLED=true`
 - `OPENAI_CHATBOT_WRITER_MODEL=gpt-5.4-mini`
 - `OPENAI_CHATBOT_MODEL=gpt-5.4-mini`
 - `OPENAI_CHATBOT_ANALYSIS_MODEL=gpt-5.4-mini`

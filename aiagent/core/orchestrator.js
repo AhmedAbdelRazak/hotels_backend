@@ -569,7 +569,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
-		`If the guest is angry, disrespectful, asks for a human, or the situation is risky, action must be "escalate".`,
+		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and roomTypeKey are known, action must be "get_quote".`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review". Required: checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, adults. Email is optional.`,
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
