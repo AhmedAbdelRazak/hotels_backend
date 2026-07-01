@@ -103,6 +103,7 @@ Follow-up stabilization:
 - OpenAI prompt now explicitly says not to proactively suggest special requests, extra beds, floor preferences, late-arrival notes, or similar optional add-ons while moving from quote to booking review.
 - Email remains optional and can be offered once in a separate message with a skip button; it must not be mixed into the required-fields list or block the official review.
 - Arabic labeled nationality answers such as `الجنسية مصرية` are normalized during required-detail collection so the bot does not ask for nationality again after the guest already answered.
+- `clientContact` is no longer parsed as a phone fallback when it is explicitly an email or contains `@`; this prevents digits inside test/customer email addresses from accidentally satisfying the required phone field.
 
 ## 2026-07-01 Regional Gregorian Month Names
 

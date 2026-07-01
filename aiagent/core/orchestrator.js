@@ -521,7 +521,11 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		const phone = cleanPhone(sc.clientContact);
 		if (phone && phone.replace(/[^\d]/g, "").length >= 7) recovered.phone = phone;
 	}
-	if (!recovered.phone) {
+	if (
+		!recovered.phone &&
+		String(sc.clientContactType || "").toLowerCase() !== "email" &&
+		!String(sc.clientContact || "").includes("@")
+	) {
 		const phone = cleanPhone(sc.clientContact);
 		if (phone && phone.replace(/[^\d]/g, "").length >= 7) recovered.phone = phone;
 	}
