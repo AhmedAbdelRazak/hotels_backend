@@ -3909,7 +3909,8 @@ async function planTurn(io, supportCaseOrId) {
 		known = mergeKnownFacts(known, { roomSelections: latestSelections });
 	}
 	const mappedRoom = mapRoomToKey(latestText);
-	if (mappedRoom && !known.roomTypeKey) {
+	const mappedRoomIsSpecific = mappedRoom && textMentionsSpecificRoomType(latestText);
+	if (mappedRoomIsSpecific && !known.roomTypeKey) {
 		known = mergeKnownFacts(known, { roomTypeKey: mappedRoom });
 	}
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
@@ -4198,7 +4199,7 @@ async function planTurn(io, supportCaseOrId) {
 			mergeKnownFacts(known, decision.facts),
 			latestText
 		);
-		if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+		if (mappedRoomIsSpecific && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		if (hotelFactReplyNeedsCorrection(decision, hotel, latestGuest)) {
 			const beforeRepairKnown = known;
 			const repaired = await repairHotelFactDecision({
@@ -4214,7 +4215,7 @@ async function planTurn(io, supportCaseOrId) {
 				repaired.known,
 				latestText
 			);
-			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+			if (mappedRoomIsSpecific && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (replyPromisesQuoteCheck(decision.reply) && !shouldForceQuote(decision, known, latestGuest)) {
 			const beforeRepairKnown = known;
@@ -4231,7 +4232,7 @@ async function planTurn(io, supportCaseOrId) {
 				repaired.known,
 				latestText
 			);
-			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+			if (mappedRoomIsSpecific && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (
 			decision.action === "submit_reservation" ||
@@ -4254,7 +4255,7 @@ async function planTurn(io, supportCaseOrId) {
 				repaired.known,
 				latestText
 			);
-			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+			if (mappedRoomIsSpecific && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (replyRequestsForbiddenBookingField(decision.reply)) {
 			if (quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
@@ -4486,7 +4487,9 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 	}
 	const latestText = String(latestGuest?.message || "");
 	const mappedRoom = mapRoomToKey(latestText);
-	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+	if (mappedRoom && textMentionsSpecificRoomType(latestText) && !known.roomTypeKey) {
+		known.roomTypeKey = mappedRoom;
+	}
 	if (!known.roomTypeKey) {
 		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
 		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
