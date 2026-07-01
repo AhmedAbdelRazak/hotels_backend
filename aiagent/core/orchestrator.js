@@ -337,6 +337,16 @@ function nameHintFromLine(value = "") {
 	return text;
 }
 
+function peopleCountFromLine(value = "") {
+	const text = normalizeDigits(String(value || "")).toLowerCase();
+	const match = text.match(
+		/(?:for|ل|لعدد)?\s*(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i
+	);
+	const count = Number(match?.[1] || 0);
+	if (!Number.isFinite(count) || count < 1 || count > 30) return null;
+	return Math.floor(count);
+}
+
 function labeledFactFromAssistant(text = "", labels = []) {
 	const plain = stripChatMarkup(text);
 	for (const label of labels) {
@@ -409,6 +419,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		for (const line of lines) {
 			const roomTypeKey = mapRoomToKey(line);
 			if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
+			if (!recovered.adults) {
+				const peopleCount = peopleCountFromLine(line);
+				if (peopleCount) recovered.adults = peopleCount;
+			}
 			if (!recovered.phone) {
 				const phone = simplePhoneFromLine(line);
 				if (phone) {
@@ -1063,6 +1077,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Escalate only for clear disrespect/abuse, threats, sensitive complaints, repeated severe anger, or an explicit request for a human/manager. Do not escalate for mild frustration, doubt, or sales pushback such as "impossible", "check again", or "are you sure"; apologize briefly, re-check with tools when facts are known, and keep helping.`,
 		`If the guest challenges an unavailable result or says to check again, do not escalate. If exact stay details are known, action must be "get_quote" so the server re-checks the calendar. If the guest changes only part of a previous stay, treat it as a fresh stay and ask only for the missing boundary instead of reusing old dates silently.`,
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and roomTypeKey are known, action must be "get_quote".`,
+		`If the known guest count appears larger than the selected room capacity, do not proceed to final review silently. Explain the capacity mismatch naturally, suggest a suitable room or additional room, and ask one clear confirmation question.`,
 		`Never send a customer-facing reply like "I will check now" or "I am checking availability/price" as action="reply". If you can identify the stay from the transcript, return action="get_quote" and put checkinISO, checkoutISO, roomTypeKey, adults, children, and rooms in facts. If one detail is missing, ask only for that detail without saying you are checking now.`,
 		`Required booking details are checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, and adults. Email is optional and must never be listed as a required item.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
@@ -2266,8 +2281,7 @@ async function planTurn(io, supportCaseOrId) {
 }
 
 function shouldUsePlanWorker() {
-	if (process.env.AI_AGENT_WORKER_PROCESS === "true") return false;
-	return String(process.env.AI_PLAN_USE_WORKER || "true").toLowerCase() !== "false";
+	return false;
 }
 
 function runPlanTurnWorker(caseId = "", reason = "scheduled") {
