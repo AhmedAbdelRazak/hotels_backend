@@ -584,29 +584,78 @@ async function getHotelByIdWithPricingDates(id, dateKeys = []) {
 	const hotel = await getHotelByIdForAiContext(_id);
 	if (!hotel || !dates.length) return hotel;
 
-	const pricingDoc = await HotelDetails.findById(_id)
-		.select(
-			[
-				"roomCountDetails._id",
-				"roomCountDetails.roomType",
-				"roomCountDetails.pricingRate.calendarDate",
-				"roomCountDetails.pricingRate.date",
-				"roomCountDetails.pricingRate.price",
-				"roomCountDetails.pricingRate.rootPrice",
-				"roomCountDetails.pricingRate.commissionRate",
-			].join(" ")
-		)
-		.lean()
-		.exec();
-	const targetDates = new Set(dates);
+	const [pricingDoc] = await HotelDetails.aggregate([
+		{ $match: { _id } },
+		{
+			$project: {
+				roomCountDetails: {
+					$map: {
+						input: { $ifNull: ["$roomCountDetails", []] },
+						as: "room",
+						in: {
+							_id: "$$room._id",
+							roomType: "$$room.roomType",
+							pricingRate: {
+								$map: {
+									input: {
+										$filter: {
+											input: { $ifNull: ["$$room.pricingRate", []] },
+											as: "rate",
+											cond: {
+												$in: [
+													{
+														$substrBytes: [
+															{
+																$toString: {
+																	$ifNull: [
+																		"$$rate.calendarDate",
+																		{ $ifNull: ["$$rate.date", ""] },
+																	],
+																},
+															},
+															0,
+															10,
+														],
+													},
+													dates,
+												],
+											},
+										},
+									},
+									as: "rate",
+									in: {
+										calendarDate: {
+											$substrBytes: [
+												{
+													$toString: {
+														$ifNull: [
+															"$$rate.calendarDate",
+															{ $ifNull: ["$$rate.date", ""] },
+														],
+													},
+												},
+												0,
+												10,
+											],
+										},
+										price: "$$rate.price",
+										rootPrice: "$$rate.rootPrice",
+										commissionRate: "$$rate.commissionRate",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	]).exec();
 
 	const byRoomId = new Map();
 	const byRoomType = new Map();
 	(pricingDoc?.roomCountDetails || []).forEach((room) => {
 		const compactRows = Array.isArray(room.pricingRate)
-			? room.pricingRate
-					.map(compactPricingRateForAi)
-					.filter((row) => row && targetDates.has(row.calendarDate))
+			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
 			: [];
 		byRoomId.set(String(room._id || ""), compactRows);
 		if (room.roomType) byRoomType.set(String(room.roomType), compactRows);
