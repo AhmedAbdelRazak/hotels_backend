@@ -1147,37 +1147,10 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 	const nextKnown = { ...known };
 	if (result.available && result.quote) nextKnown.quote = result.quote;
 	await saveKnownFacts(caseIdText(sc), nextKnown);
-	let decision = null;
-	try {
-		decision = await askOpenAI({
-			sc,
-			hotel,
-			known: nextKnown,
-			latestGuest,
-			toolResult: {
-				tool: "get_quote",
-				...result,
-			},
-		});
-	} catch (error) {
-		console.error("[aiagent] quote writer failed:", error?.message || error);
-		decision = normalizeDecision({
-			action: "reply",
-			reply: buildQuoteFallbackMessage(sc, nextKnown, result, hotel),
-			facts: {},
-			reason: "quote_writer_failed",
-		});
-	}
-	const reply =
-		decision.reply ||
-		(result.available
-			? `The total is ${result.quote.total} ${result.quote.currency}. Would you like to continue?`
-			: "I am sorry, this option is not available for those dates. Would you like me to check another option?");
+	const reply = buildQuoteFallbackMessage(sc, nextKnown, result, hotel);
 	const quickReplies = result.available
-		? decision.quickReplies.length
-			? decision.quickReplies
-			: proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-		: decision.quickReplies;
+		? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
+		: [];
 	return sendAiMessage(io, sc, reply, {
 		latestGuest,
 		known: nextKnown,
