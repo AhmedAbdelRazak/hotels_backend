@@ -13,19 +13,34 @@ const hasCommissionValue = (value) =>
 	value !== null && value !== undefined && value !== "";
 
 function addDays(iso, days) {
-	const d = new Date(iso + "T00:00:00");
-	d.setDate(d.getDate() + days);
+	const d = new Date(`${iso}T00:00:00.000Z`);
+	if (Number.isNaN(d.getTime())) return "";
+	d.setUTCDate(d.getUTCDate() + Number(days || 0));
 	return d.toISOString().slice(0, 10);
 }
 
+function validISODate(value = "") {
+	if (value instanceof Date && !Number.isNaN(value.getTime())) {
+		return value.toISOString().slice(0, 10);
+	}
+	const text = String(value || "").slice(0, 10);
+	if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
+	const date = new Date(`${text}T00:00:00.000Z`);
+	if (Number.isNaN(date.getTime())) return "";
+	return date.toISOString().slice(0, 10);
+}
+
 function eachDate(checkinISO, checkoutISO) {
+	const start = validISODate(checkinISO);
+	const end = validISODate(checkoutISO);
+	if (!start || !end || start >= end) return [];
 	const list = [];
-	let cur = checkinISO;
-	while (cur < checkoutISO) {
+	let cur = start;
+	while (cur < end && list.length < 60) {
 		list.push(cur);
 		cur = addDays(cur, 1);
 	}
-	return list;
+	return cur === end ? list : [];
 }
 
 function calendarDateKey(value = "") {
