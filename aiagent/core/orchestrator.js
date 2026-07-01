@@ -15,6 +15,7 @@ const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
 const { priceRoomForStay } = require("./selectors");
 const { mapRoomToKey, digitsToEnglish, quickDateRange } = require("./nlu");
+const { launchAiPlanWorker } = require("./workerLauncher");
 const {
 	createReservationForCase,
 	updateReservationDatesForCase,
@@ -2878,7 +2879,7 @@ function wireSocket(io) {
 		});
 		socket.on("ai:planNow", (data = {}) => {
 			const caseId = caseIdText(data.caseId);
-			if (caseId) schedulePlanTurn(io, caseId, { delayMs: 0, reason: "socket_plan_now" });
+			if (caseId) launchAiPlanWorker(io, caseId, { delayMs: 0 });
 		});
 	});
 	console.log("[aiagent] slim OpenAI-led orchestrator active.");
