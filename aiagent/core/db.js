@@ -584,51 +584,29 @@ async function getHotelByIdWithPricingDates(id, dateKeys = []) {
 	const hotel = await getHotelByIdForAiContext(_id);
 	if (!hotel || !dates.length) return hotel;
 
-	const [pricingDoc] = await HotelDetails.aggregate([
-		{ $match: { _id } },
-		{
-			$project: {
-				roomPricing: {
-					$map: {
-						input: { $ifNull: ["$roomCountDetails", []] },
-						as: "room",
-						in: {
-							_id: "$$room._id",
-							roomType: "$$room.roomType",
-							pricingRate: {
-								$filter: {
-									input: { $ifNull: ["$$room.pricingRate", []] },
-									as: "rate",
-									cond: {
-										$in: [
-											{
-												$substrBytes: [
-													{
-														$toString: {
-															$ifNull: ["$$rate.calendarDate", ""],
-														},
-													},
-													0,
-													10,
-												],
-											},
-											dates,
-										],
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	]).exec();
+	const pricingDoc = await HotelDetails.findById(_id)
+		.select(
+			[
+				"roomCountDetails._id",
+				"roomCountDetails.roomType",
+				"roomCountDetails.pricingRate.calendarDate",
+				"roomCountDetails.pricingRate.date",
+				"roomCountDetails.pricingRate.price",
+				"roomCountDetails.pricingRate.rootPrice",
+				"roomCountDetails.pricingRate.commissionRate",
+			].join(" ")
+		)
+		.lean()
+		.exec();
+	const targetDates = new Set(dates);
 
 	const byRoomId = new Map();
 	const byRoomType = new Map();
-	(pricingDoc?.roomPricing || []).forEach((room) => {
+	(pricingDoc?.roomCountDetails || []).forEach((room) => {
 		const compactRows = Array.isArray(room.pricingRate)
-			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
+			? room.pricingRate
+					.map(compactPricingRateForAi)
+					.filter((row) => row && targetDates.has(row.calendarDate))
 			: [];
 		byRoomId.set(String(room._id || ""), compactRows);
 		if (room.roomType) byRoomType.set(String(room.roomType), compactRows);

@@ -119,12 +119,15 @@
 - `OPENAI_CHATBOT_NLU_MODEL=gpt-5.4-mini`
 - `OPENAI_CHATBOT_TIMEOUT_MS=12000`
 - `OPENAI_CHATBOT_MAX_PROMPT_CHARS=14000`
-- `AI_PLAN_USE_WORKER=false`
-- `AI_PLAN_WORKER_TIMEOUT_MS=12000`
-- `AI_PLAN_WORKER_HEAP_MB=384`
+- `AI_PLAN_USE_WORKER=true`
+- `AI_PLAN_WORKER_TIMEOUT_MS=30000`
+- `AI_PLAN_WORKER_HEAP_MB=512`
 - `AI_IDLE_AUTO_CLOSE_MS=300000`
 
-Note: `AI_PLAN_USE_WORKER=false` is currently preferred for this slim OpenAI-led B2C flow. The worker subprocess path timed out during live review testing and briefly raised backend memory; direct turns stayed around 270 MB after restart.
+2026-06-30 late note: keep AI planning isolated in the worker process. A live `اوت`
+date/price turn showed that in-process planning can make the PMS API sluggish.
+The pricing-date fetch was simplified to use a lean projected hotel read and
+filter requested date rows in JS instead of a nested Mongo aggregation.
 
 ## Legacy Env Cleanup
 
