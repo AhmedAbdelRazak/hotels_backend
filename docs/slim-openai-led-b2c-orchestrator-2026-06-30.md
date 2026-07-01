@@ -97,6 +97,18 @@ Fix:
 - One-off QA scripts may set `AI_SKIP_RESERVATION_CONFIRMATION_DISPATCH=true` in their own process to verify reservation creation without sending fake confirmation emails/WhatsApp notifications. Do not set this in production PM2.
 - Final review actions (`place_reservation` / guest confirmation after a review) are handled before quote/review reminder branches, so the final button cannot be swallowed by duplicate-review protection.
 
+## 2026-07-01 Fixed Offer/Package Prompt Context
+
+Room-level `offers` and `monthly` package rows are included in the compact hotel facts sent to OpenAI.
+
+Important behavior:
+
+- Offers/monthly packages are marked with `fixedDatePackage`, `packageType`, `checkinISO`, `checkoutISO`, and a short package rule.
+- Package date ranges are fixed and must not be changed by the AI. If a guest wants the package, OpenAI should use the exact package dates for `get_quote`.
+- If a guest asks for different dates, the AI should treat that as a normal stay quote instead of trying to alter package dates or reuse package pricing.
+- Package timestamps are converted to the hotel business date using `Asia/Riyadh` when the source value is a timestamp, avoiding UTC day-shift confusion for Saudi hotel packages.
+- Guest questions about offers/packages are treated as hotel-fact questions, so the agent can explain the available packages before continuing the reservation flow.
+
 Operational note:
 
 - Scheduled AI turns should run through the bounded worker process when available (`AI_PLAN_USE_WORKER=true`, `AI_PLAN_WORKER_HEAP_MB=512`) so slow or stuck OpenAI turns cannot balloon the main `hotels-backend` memory.

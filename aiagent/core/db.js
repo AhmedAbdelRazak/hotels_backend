@@ -80,23 +80,45 @@ function compactPricingRateForAi(row = {}) {
 }
 
 function isoDateOnly(value = "") {
+	if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+		return value.trim().slice(0, 10);
+	}
 	const date = value instanceof Date ? value : new Date(value);
 	if (Number.isNaN(date.getTime())) return "";
-	return date.toISOString().slice(0, 10);
+	const parts = new Intl.DateTimeFormat("en-US", {
+		timeZone: "Asia/Riyadh",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).formatToParts(date);
+	const partValue = (type) => parts.find((part) => part.type === type)?.value || "";
+	const year = partValue("year");
+	const month = partValue("month");
+	const day = partValue("day");
+	return year && month && day ? `${year}-${month}-${day}` : date.toISOString().slice(0, 10);
 }
 
 function compactOffersForAi(offers = []) {
 	const today = new Date();
 	today.setUTCHours(0, 0, 0, 0);
 	return (Array.isArray(offers) ? offers : [])
-		.map((offer) => ({
-			offerName: String(offer?.offerName || "").trim(),
-			offerFrom: isoDateOnly(offer?.offerFrom),
-			offerTo: isoDateOnly(offer?.offerTo),
-			offerPrice: Number.isFinite(Number(offer?.offerPrice))
-				? Number(offer.offerPrice)
-				: null,
-		}))
+		.map((offer) => {
+			const offerFrom = isoDateOnly(offer?.offerFrom);
+			const offerTo = isoDateOnly(offer?.offerTo);
+			return {
+				offerName: String(offer?.offerName || "").trim(),
+				offerFrom,
+				offerTo,
+				checkinISO: offerFrom,
+				checkoutISO: offerTo,
+				fixedDatePackage: Boolean(offerFrom && offerTo),
+				packageType: "fixed_date_offer",
+				packageRule: "Use this package only for the exact listed date range; do not change package dates. If the guest wants different dates, quote a normal stay.",
+				offerPrice: Number.isFinite(Number(offer?.offerPrice))
+					? Number(offer.offerPrice)
+					: null,
+			};
+		})
 		.filter((offer) => {
 			if (!offer.offerName && !offer.offerPrice) return false;
 			if (!offer.offerTo) return true;
@@ -109,16 +131,25 @@ function compactMonthlyForAi(monthly = []) {
 	const today = new Date();
 	today.setUTCHours(0, 0, 0, 0);
 	return (Array.isArray(monthly) ? monthly : [])
-		.map((month) => ({
-			monthName: String(month?.monthName || "").trim(),
-			monthFrom: isoDateOnly(month?.monthFrom),
-			monthTo: isoDateOnly(month?.monthTo),
-			monthFromHijri: String(month?.monthFromHijri || "").trim(),
-			monthToHijri: String(month?.monthToHijri || "").trim(),
-			monthPrice: Number.isFinite(Number(month?.monthPrice))
-				? Number(month.monthPrice)
-				: null,
-		}))
+		.map((month) => {
+			const monthFrom = isoDateOnly(month?.monthFrom);
+			const monthTo = isoDateOnly(month?.monthTo);
+			return {
+				monthName: String(month?.monthName || "").trim(),
+				monthFrom,
+				monthTo,
+				checkinISO: monthFrom,
+				checkoutISO: monthTo,
+				monthFromHijri: String(month?.monthFromHijri || "").trim(),
+				monthToHijri: String(month?.monthToHijri || "").trim(),
+				fixedDatePackage: Boolean(monthFrom && monthTo),
+				packageType: "fixed_monthly_package",
+				packageRule: "Use this package only for the exact listed date range; do not change package dates. If the guest wants different dates, quote a normal stay.",
+				monthPrice: Number.isFinite(Number(month?.monthPrice))
+					? Number(month.monthPrice)
+					: null,
+			};
+		})
 		.filter((month) => {
 			if (!month.monthName && !month.monthPrice) return false;
 			if (!month.monthTo) return true;
