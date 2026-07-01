@@ -88,6 +88,8 @@
   - The same case also showed that hotel-fact questions such as "is the hotel listed on Nusuk?" must override pending quote flow.
   - The prompt now says latest hotel-fact questions about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or hotel services must be answered from Hotel facts first.
   - A safety guard prevents `get_quote` from taking over fact-only questions. If OpenAI still tries, the orchestrator requests a corrected OpenAI reply and falls back to exact hotel facts only if needed.
+  - Production verification confirmed Zad Ajyad has `isNusuk=true` and `isNusukText="نسك متاح، وهذا ضمن حجزكم بالفعل. فقط يمكنكم الاستفادة منه وإتمام إجراءات الزيارة وفق المواعيد المتاحة."`.
+  - The hotel-fact guard now also catches normal OpenAI replies that contradict positive facts. For Nusuk, `isNusuk=true` must always be answered as yes/listed/available and must not be softened into "not confirmed" or "not direct from us."
   - The case then showed OpenAI could write a booking review as plain text, which meant no operational buttons appeared in the guest widget.
   - The prompt now says OpenAI must not write final booking reviews as normal replies. It should return `send_review`; the orchestrator sends the official review with buttons.
   - The official review now always includes the exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.

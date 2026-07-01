@@ -653,6 +653,27 @@ function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) 
 		: `${guestName}, based on ${hotelName}'s details, I can clarify the hotel services and then continue the booking step by step.`;
 }
 
+function latestGuestMentionsNusuk(latestGuest = {}) {
+	return /nusuk|نسك/i.test(normalizeDigits(String(latestGuest?.message || "")));
+}
+
+function replyContradictsPositiveFact(reply = "") {
+	const text = normalizeDigits(String(reply || "")).toLowerCase();
+	if (!text.trim()) return true;
+	return /(no|not listed|not available|not included|cannot confirm|can't confirm|do not have|don't have|ليس|ليست|لا يوجد|لا يظهر|غير مدرج|غير متاح|غير مؤكد|ما عندي|ليس لدينا|لا توجد|لا نستطيع)/i.test(
+		text
+	);
+}
+
+function hotelFactReplyNeedsCorrection(decision = {}, hotel = {}, latestGuest = {}) {
+	if (!latestGuestAsksHotelFactOnly(latestGuest)) return false;
+	if (decision?.action === "get_quote") return true;
+	if (latestGuestMentionsNusuk(latestGuest) && hotel?.isNusuk === true) {
+		return replyContradictsPositiveFact(decision?.reply);
+	}
+	return false;
+}
+
 function requiredBookingMissing(known = {}) {
 	const missing = [];
 	if (!validISODate(known.checkinISO)) missing.push("checkinISO");
@@ -994,7 +1015,7 @@ async function repairHotelFactDecision({
 	latestGuest,
 	decision,
 } = {}) {
-	if (!latestGuestAsksHotelFactOnly(latestGuest) || decision?.action !== "get_quote") {
+	if (!hotelFactReplyNeedsCorrection(decision, hotel, latestGuest)) {
 		return { decision, known };
 	}
 	const repairedDecision = await askOpenAI({
@@ -1009,10 +1030,10 @@ async function repairHotelFactDecision({
 			previousAction: decision.action,
 			previousReply: decision.reply,
 			instruction:
-				"The latest guest message asks about hotel facts/services/policies. Answer that latest question directly from Hotel facts as action=reply. Do not run get_quote in this turn unless the latest message explicitly asks for price/availability.",
+				"The latest guest message asks about hotel facts/services/policies. Answer that latest question directly from Hotel facts as action=reply. If Hotel facts say isNusuk=true, answer yes/listed/available on Nusuk and mention isNusukText. Do not contradict explicit Hotel facts. Do not run get_quote in this turn unless the latest message explicitly asks for price/availability.",
 		},
 	});
-	if (repairedDecision.action === "get_quote" || !String(repairedDecision.reply || "").trim()) {
+	if (hotelFactReplyNeedsCorrection(repairedDecision, hotel, latestGuest) || !String(repairedDecision.reply || "").trim()) {
 		return {
 			decision: normalizeDecision({
 				action: "reply",
@@ -1906,7 +1927,7 @@ async function planTurn(io, supportCaseOrId) {
 		}
 		known = mergeKnownFacts(known, decision.facts);
 		if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
-		if (latestGuestAsksHotelFactOnly(latestGuest) && decision.action === "get_quote") {
+		if (hotelFactReplyNeedsCorrection(decision, hotel, latestGuest)) {
 			const repaired = await repairHotelFactDecision({
 				sc,
 				hotel,
