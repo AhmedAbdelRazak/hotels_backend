@@ -490,6 +490,49 @@ function roomCountNearMatch(text = "", matcher) {
 	return 1;
 }
 
+function textMentionsRoomSelection(value = "") {
+	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	if (
+		/\b(?:rooms?|units?|suite|suites?|single|double|twin|triple|quad|quadruple|family|quintuple|beds?)\b/i.test(
+			text
+		)
+	) {
+		return true;
+	}
+	const compact = text.replace(/\s+/g, "");
+	return [
+		"\u063a\u0631\u0641",
+		"\u063a\u0631\u0641\u0629",
+		"\u063a\u0631\u0641\u0647",
+		"\u0627\u0648\u0636",
+		"\u0627\u0648\u0636\u0629",
+		"\u0627\u0648\u0636\u0647",
+		"\u062d\u062c\u0631\u0629",
+		"\u062d\u062c\u0631\u0647",
+		"\u0633\u0631\u064a\u0631",
+		"\u0627\u0633\u0631\u0629",
+		"\u0627\u0633\u0631\u0647",
+		"\u0641\u0631\u062f\u064a",
+		"\u0633\u0646\u062c\u0644",
+		"\u0645\u0632\u062f\u0648\u062c",
+		"\u062b\u0646\u0627\u0626\u064a",
+		"\u062f\u0628\u0644",
+		"\u062b\u0644\u0627\u062b\u064a",
+		"\u062b\u0644\u0627\u062b\u0649",
+		"\u062a\u0644\u0627\u062a\u064a",
+		"\u062a\u0644\u0627\u062a\u0649",
+		"\u0631\u0628\u0627\u0639\u064a",
+		"\u0631\u0628\u0627\u0639\u0649",
+		"\u0639\u0627\u0626\u0644\u064a",
+		"\u062e\u0645\u0627\u0633\u064a",
+		"\u062c\u0646\u0627\u062d",
+	].some((needle) => compact.includes(needle));
+}
+
 function extractRoomSelectionsFromText(value = "") {
 	const text = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")));
 	if (!text.trim()) return [];
@@ -910,7 +953,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			}
 		}
 		const roomSelections = extractRoomSelectionsFromText(rawEntryText);
-		if (roomSelections.length) {
+		if (roomSelections.length && textMentionsRoomSelection(rawEntryText)) {
 			recovered.roomSelections = roomSelections;
 			recovered.rooms = roomSelectionsTotal(roomSelections);
 			if (roomSelections.length === 1) {
@@ -1058,10 +1101,25 @@ function mergeKnownFacts(current = {}, next = {}) {
 			merged.roomTypeKey = sourceSelections[0].roomTypeKey;
 		}
 	}
-	setNumber("rooms", source.rooms ?? reservation.rooms, {
-		min: 1,
-		max: MAX_AI_ROOM_COUNT,
-	});
+	const sourceRoomCountValue = source.rooms ?? reservation.rooms;
+	const sourceRoomCountNumber = numberOrNull(sourceRoomCountValue);
+	const sourceRoomTypeSignal =
+		source.roomText ||
+		source.roomType ||
+		reservation.roomTypeKey ||
+		(source.roomTypeKey && source.roomTypeKey !== previousRoomTypeKey);
+	if (
+		sourceRoomCountNumber !== null &&
+		(!previousSelectionKey ||
+			sourceSelections.length ||
+			sourceRoomTypeSignal ||
+			(sourceRoomCountNumber > 1 && sourceRoomCountNumber !== previousRooms))
+	) {
+		setNumber("rooms", sourceRoomCountValue, {
+			min: 1,
+			max: MAX_AI_ROOM_COUNT,
+		});
+	}
 	const sourceAdults = source.adults ?? source.guests ?? guest.adults;
 	const sourceAdultsNumber = numberOrNull(sourceAdults);
 	if (!(sourceAdultsNumber === 1 && previousAdults > 1)) {
@@ -1150,6 +1208,24 @@ function quoteMatchesKnown(known = {}) {
 	);
 }
 
+function preserveRoomSelectionForNonRoomTurn(before = {}, after = {}, latestText = "") {
+	const selections = normalizeRoomSelections(before.roomSelections);
+	if (!selections.length || textMentionsRoomSelection(latestText)) return after;
+	const next = { ...after };
+	next.roomSelections = selections;
+	next.rooms = roomSelectionsTotal(selections);
+	if (selections.length === 1) {
+		next.roomTypeKey = selections[0].roomTypeKey;
+	} else if (before.roomTypeKey) {
+		next.roomTypeKey = before.roomTypeKey;
+	}
+	const previousQuote = asObject(before.quote);
+	if (quoteMatchesKnown({ ...next, quote: previousQuote })) {
+		next.quote = previousQuote;
+	}
+	return next;
+}
+
 function quoteInputsKnown(known = {}) {
 	return Boolean(
 		validISODate(known.checkinISO) &&
@@ -1173,7 +1249,7 @@ function quoteFactsFromAiMessage(entry = {}) {
 	const roomTypeKey = mapRoomToKey(text);
 	if (roomTypeKey) facts.roomTypeKey = roomTypeKey;
 	const roomSelections = extractRoomSelectionsFromText(text);
-	if (roomSelections.length) {
+	if (roomSelections.length && textMentionsRoomSelection(text)) {
 		facts.roomSelections = roomSelections;
 		facts.rooms = roomSelectionsTotal(roomSelections);
 		if (roomSelections.length === 1) facts.roomTypeKey = roomSelections[0].roomTypeKey;
@@ -1395,6 +1471,45 @@ function guestDeclinesOptionalEmail(value = "", action = "") {
 		.replace(/\s+/g, " ")
 		.trim();
 	return /^(no|no thanks|no thank you|skip|without email|continue without email|not now|لا|لا شكرا|بدون بريد|من غير بريد|اتخطى|تخطى)$/i.test(text);
+}
+
+function guestDeclinesFurtherHelp(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["close_case", "end_chat", "finish_chat", "done", "no_more_help"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	if (/\b(update|change|modify|edit|cancel|book|booking|reserve|reservation|question)\b/i.test(text)) {
+		return false;
+	}
+	const compact = text.replace(/\s+/g, "");
+	if (/(?:\u062d\u062c\u0632|\u0627\u062d\u062c\u0632|\u062a\u0639\u062f\u064a\u0644|\u0627\u0639\u062f\u0644|\u0627\u0644\u063a\u0627\u0621|\u0633\u0648\u0627\u0644|\u0627\u0633\u062a\u0641\u0633\u0627\u0631)/i.test(compact)) {
+		return false;
+	}
+	if (/\b(no thanks|no thank you|nothing else|no need|that is all|that's all|all good|i am good|thanks|thank you|bye|goodbye)\b/i.test(text)) {
+		return true;
+	}
+	return [
+		"\u0644\u0627\u0634\u0643\u0631",
+		"\u0645\u0627\u0627\u062d\u062a\u0627\u062c",
+		"\u0645\u0627\u062d\u062a\u0627\u062c",
+		"\u0645\u0634\u0645\u062d\u062a\u0627\u062c",
+		"\u0645\u0634\u0639\u0627\u064a\u0632",
+		"\u0645\u0627\u0628\u063a\u0649",
+		"\u0645\u0627\u0627\u0628\u063a\u0649",
+		"\u0645\u0627\u0627\u0628\u064a",
+		"\u0645\u0627\u0628\u064a",
+		"\u0643\u0641\u0627\u064a\u0629",
+		"\u062e\u0644\u0627\u0635",
+		"\u062a\u0645\u0627\u0645\u0634\u0643\u0631\u0627",
+		"\u064a\u0639\u0637\u064a\u0643\u0627\u0644\u0639\u0627\u0641\u064a",
+		"\u064a\u0639\u0637\u064a\u062c\u0627\u0644\u0639\u0627\u0641\u064a",
+		"\u0634\u0643\u0631\u0627",
+	].some((needle) => compact.includes(needle));
 }
 
 function guestRequestsRevision(value = "", action = "") {
@@ -2964,21 +3079,29 @@ function latestGuestRequestsReservationLookup(sc = {}, latestText = "", known = 
 }
 
 function latestGuestRequestsReservationDateUpdate(latestText = "", known = {}) {
-	const text = normalizeDigits(String(latestText || "")).toLowerCase();
+	const text = normalizeIntentSearchText(latestText)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 	if (!text.trim()) return false;
 	if (/\b(cancel|cancelation|cancellation)\b/i.test(text)) return false;
 	const confirmation = confirmationNumberFromText(text) || cleanString(known.confirmation, 40);
 	if (!confirmation) return false;
+	const compact = text.replace(/\s+/g, "");
 	const updateIntent =
 		/\b(update|change|modify|edit|move|reschedule|shift)\b/i.test(text) ||
-		/(?:\u062a\u0639\u062f\u064a\u0644|\u063a\u064a\u0631|\u062a\u063a\u064a\u064a\u0631|\u0627\u0646\u0642\u0644|\u0646\u0642\u0644)/i.test(
-			text
+		/(?:\u0627\u0639\u062f\u0644|\u062a\u0639\u062f\u064a\u0644|\u063a\u064a\u0631|\u062a\u063a\u064a\u064a\u0631|\u0627\u0646\u0642\u0644|\u0646\u0642\u0644|\u0646\u062e\u0644\u064a|\u062e\u0644\u064a|\u0628\u062f\u0644)/i.test(
+			compact
 		);
 	if (!updateIntent) return false;
 	return (
 		/(?:check.?in|check.?out|arrival|departure|date|dates|\d{4}-\d{2}-\d{2})/i.test(
 			text
-		) || Boolean(quickDateRange(text)?.checkinISO)
+		) ||
+		/(?:\u0648\u0635\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0645\u063a\u0627\u062f\u0631\u0647|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0647|\u062a\u0627\u0631\u064a\u062e|\u062a\u0648\u0627\u0631\u064a\u062e)/i.test(
+			compact
+		) ||
+		Boolean(quickDateRange(text)?.checkinISO)
 	);
 }
 
@@ -3671,7 +3794,7 @@ async function planTurn(io, supportCaseOrId) {
 	known = recoverKnownFactsFromConversation(sc, known);
 	const latestText = String(latestGuest?.message || "");
 	const latestSelections = latestGuest ? extractRoomSelectionsFromText(latestText) : [];
-	if (latestSelections.length) {
+	if (latestSelections.length && textMentionsRoomSelection(latestText)) {
 		known = mergeKnownFacts(known, { roomSelections: latestSelections });
 	}
 	const mappedRoom = mapRoomToKey(latestText);
@@ -3680,6 +3803,15 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	if (
+		latestGuest &&
+		String(previousAi?.clientAction || "").toLowerCase() === "reservation_confirmed" &&
+		guestDeclinesFurtherHelp(latestText, latestAction)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return closeCaseWithOutro(io, sc, known, latestGuest);
+	}
 	if (
 		latestGuest &&
 		["quote_ready", "review_reservation"].includes(
@@ -3929,9 +4061,14 @@ async function planTurn(io, supportCaseOrId) {
 			action: decision?.action || "",
 			hasReply: Boolean(decision?.reply),
 		});
-		known = mergeKnownFacts(known, decision.facts);
+		known = preserveRoomSelectionForNonRoomTurn(
+			known,
+			mergeKnownFacts(known, decision.facts),
+			latestText
+		);
 		if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		if (hotelFactReplyNeedsCorrection(decision, hotel, latestGuest)) {
+			const beforeRepairKnown = known;
 			const repaired = await repairHotelFactDecision({
 				sc,
 				hotel,
@@ -3940,10 +4077,15 @@ async function planTurn(io, supportCaseOrId) {
 				decision,
 			});
 			decision = repaired.decision;
-			known = repaired.known;
+			known = preserveRoomSelectionForNonRoomTurn(
+				beforeRepairKnown,
+				repaired.known,
+				latestText
+			);
 			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (replyPromisesQuoteCheck(decision.reply) && !shouldForceQuote(decision, known, latestGuest)) {
+			const beforeRepairKnown = known;
 			const repaired = await repairQuotePromiseDecision({
 				sc,
 				hotel,
@@ -3952,7 +4094,11 @@ async function planTurn(io, supportCaseOrId) {
 				decision,
 			});
 			decision = repaired.decision;
-			known = repaired.known;
+			known = preserveRoomSelectionForNonRoomTurn(
+				beforeRepairKnown,
+				repaired.known,
+				latestText
+			);
 			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (
@@ -3962,6 +4108,7 @@ async function planTurn(io, supportCaseOrId) {
 			replyPromisesBookingReview(decision.reply) ||
 			guestRequestsBookingReviewStep(latestText, latestAction)
 		) {
+			const beforeRepairKnown = known;
 			const repaired = await repairReviewDecision({
 				sc,
 				hotel,
@@ -3970,7 +4117,11 @@ async function planTurn(io, supportCaseOrId) {
 				decision,
 			});
 			decision = repaired.decision;
-			known = repaired.known;
+			known = preserveRoomSelectionForNonRoomTurn(
+				beforeRepairKnown,
+				repaired.known,
+				latestText
+			);
 			if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 		}
 		if (replyRequestsForbiddenBookingField(decision.reply)) {
@@ -4363,10 +4514,12 @@ const exportedOrchestrator = {
 		requiredBookingMissing,
 		quoteMatchesKnown,
 		extractRoomSelectionsFromText,
+		textMentionsRoomSelection,
 		selectionsFromKnown,
 		quoteRoomCount,
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
+		guestDeclinesFurtherHelp,
 		guestRequestsBookingReviewStep,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
