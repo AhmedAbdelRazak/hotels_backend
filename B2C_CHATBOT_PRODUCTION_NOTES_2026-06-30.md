@@ -103,6 +103,21 @@
   - Email is still useful but optional: it is offered once in a separate message with a "continue without email" button, then the official review proceeds.
   - The prompt now tells OpenAI to keep Arabic hotel wording around `الحجز`, `تفاصيل الحجز`, or `استفسارك` and avoid `الطلب` when it means a hotel reservation.
   - The prompt also tells OpenAI to keep replies shorter and avoid repeating the same full quote unless the guest asks for it or changes booking details.
+  - A later Codex smoke exposed one more edge: if the saved snapshot is incomplete, the next turn must recover check-in/check-out and room type from the official `quote_ready` message before handling "continue". The transcript recovery now treats `quote_ready` and `review_reservation` AI messages as authoritative booking facts, then refreshes the exact quote with the pricing tool.
+
+## Cleanup Incident Note
+
+- On 2026-06-30, a temporary Codex smoke cleanup script used `Reservations.deleteMany()` with fields that are not all in the Mongoose reservation schema.
+- Because Mongoose strict query behavior can strip unknown fields, the cleanup filter became too broad and deleted the reservations collection.
+- Recovery was immediate:
+  - current reservation count was verified as `0`
+  - latest critical backup `/home/ahmedadmin/backups/mongodb/critical/hotels-reservations-20260630-233001.archive.gz` was restored with `mongorestore`
+  - restored count was `17575` reservations, with `0` restore failures
+- Future cleanup rule:
+  - do not use application Mongoose models for broad cleanup filters unless every filter field exists in the schema
+  - prefer exact support case IDs collected from the test run
+  - delete reservations only by exact `aiSupportCaseId` or exact reservation `_id`
+  - never include fallback `$or` branches with unknown fields for production cleanup
 
 ## PMS And Server Health Notes
 

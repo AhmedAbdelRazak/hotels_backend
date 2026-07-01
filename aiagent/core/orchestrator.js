@@ -501,6 +501,20 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (/(full name|guest name|nationality|phone number|phone|complete your booking|booking review)/i.test(text)) {
 				collectingBookingDetails = true;
 			}
+			if (["quote_ready", "review_reservation"].includes(action)) {
+				const dates = quickDateRange(text);
+				if (dates?.checkinISO && dates?.checkoutISO) {
+					recovered.checkinISO = dates.checkinISO;
+					recovered.checkoutISO = dates.checkoutISO;
+					recovered.dateCalendar = dates.raw?.calendar || recovered.dateCalendar || "gregorian";
+				}
+				const roomTypeKey = mapRoomToKey(text);
+				if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
+				if (!recovered.adults) {
+					const peopleCount = peopleCountFromLine(text);
+					if (peopleCount) recovered.adults = peopleCount;
+				}
+			}
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (value) recovered.fullName = value;
