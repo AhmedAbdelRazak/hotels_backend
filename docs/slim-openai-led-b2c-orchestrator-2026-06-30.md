@@ -104,6 +104,7 @@ Follow-up stabilization:
 - Email remains optional and can be offered once in a separate message with a skip button; it must not be mixed into the required-fields list or block the official review.
 - Arabic labeled nationality answers such as `الجنسية مصرية` are normalized during required-detail collection so the bot does not ask for nationality again after the guest already answered.
 - `clientContact` is no longer parsed as a phone fallback when it is explicitly an email or contains `@`; this prevents digits inside test/customer email addresses from accidentally satisfying the required phone field.
+- Required-detail recovery now splits both real multiline messages and literal `\n` text before parsing labeled phone/nationality lines, so pasted details and single-message detail payloads hydrate consistently.
 
 ## 2026-07-01 Regional Gregorian Month Names
 

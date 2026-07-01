@@ -430,7 +430,10 @@ function normalizeNationalityHint(value = "") {
 }
 
 function simplePhoneFromLine(value = "") {
-	const raw = cleanDisplayString(value, 80);
+	const raw = cleanDisplayString(value, 80).replace(
+		/^(?:phone|phone number|mobile|mobile number|whatsapp|whats\s*app|\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0631\u0642\u0645 \u0627\u0644\u062c\u0648\u0627\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*[:：,\-]?\s*/i,
+		""
+	);
 	const phone = cleanPhone(raw);
 	if (!phone || phone.replace(/[^\d]/g, "").length < 7) return "";
 	const nonPhone = raw.replace(/[+\d\s().-]/g, "").trim();
@@ -533,7 +536,8 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 	let collectingBookingDetails = false;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (const entry of conversation) {
-		const text = cleanDisplayString(entry?.message || "", 1000);
+		const rawEntryText = String(entry?.message || "");
+		const text = cleanDisplayString(rawEntryText, 1000);
 		if (!text) continue;
 		const action = cleanString(entry.clientAction, 80).toLowerCase();
 		if (isAiSupportEntry(entry) && !entry.isSystem) {
@@ -576,9 +580,9 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 					.join(" - ");
 			}
 		}
-		const lines = text
-			.split(/\r?\n|[|]/)
-			.map((line) => line.trim())
+		const lines = rawEntryText
+			.split(/\r?\n|\\n|[|]/)
+			.map((line) => cleanDisplayString(line, 500))
 			.filter(Boolean);
 		for (const line of lines) {
 			const roomTypeKey = mapRoomToKey(line);
