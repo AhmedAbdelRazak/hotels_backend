@@ -2434,6 +2434,39 @@ function buildQuoteGuardFallbackMessage(sc = {}, known = {}) {
 		: `Sure ${guestDisplayName(sc)}, before I check exact availability and price, I only need ${details}.`;
 }
 
+function buildStayClarificationMessage(sc = {}, known = {}, latestText = "") {
+	const ar = /^ar\b/i.test(activeLanguageCode(sc, known));
+	const missing = [];
+	const hasRoomSelection =
+		known.roomTypeKey || normalizeRoomSelections(known.roomSelections).length;
+	if (!validISODate(known.checkinISO) || !validISODate(known.checkoutISO)) {
+		missing.push(ar ? "\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c" : "check-in and checkout dates");
+	}
+	if (!hasRoomSelection) {
+		missing.push(
+			ar
+				? textMentionsRoomSelection(latestText)
+					? "\u062a\u0623\u0643\u064a\u062f \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u063a\u0631\u0641"
+					: "\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641"
+				: textMentionsRoomSelection(latestText)
+				? "the room type or number of rooms"
+				: "the room type or number of guests"
+		);
+	}
+	if (!known.adults) {
+		missing.push(ar ? "\u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646 \u0648\u0627\u0644\u0623\u0637\u0641\u0627\u0644" : "the number of adults and children");
+	}
+	const joiner = ar ? "\u060c \u0648" : ", and ";
+	const details = missing.length
+		? missing.join(joiner)
+		: ar
+		? "\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0646\u0627\u0642\u0635\u0629"
+		: "the missing details";
+	return ar
+		? `\u0623\u0643\u064a\u062f\u060c \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u0643\u0644 \u0633\u0631\u0648\u0631. \u062d\u062a\u0649 \u0623\u0631\u0634\u062d \u0644\u0643 \u0627\u0644\u0623\u0646\u0633\u0628 \u0648\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0628\u062f\u0642\u0629\u060c \u0623\u0631\u0633\u0644 \u0644\u064a ${details}.`
+		: `Absolutely, I can help with that. To recommend the right option and check the exact price, please send me ${details}.`;
+}
+
 async function repairQuotePromiseDecision({
 	sc,
 	hotel,
@@ -3962,6 +3995,25 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return submitReservationForCase(io, key);
 	}
+	if (
+		latestGuest &&
+		!shouldLetOpenAIHandleRevision &&
+		!quoteInputsKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		!["quote_ready", "review_reservation", "required_details_needed"].includes(
+			String(previousAi?.clientAction || "").toLowerCase()
+		) &&
+		(guestAsksPriceAvailabilityOrBooking(latestText, latestAction) ||
+			textMentionsRoomSelection(latestText))
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return sendAiMessage(io, sc, buildStayClarificationMessage(sc, known, latestText), {
+			latestGuest,
+			known,
+			clientAction: "required_stay_details_needed",
+		});
+	}
 	const latestGuestContinuesQuote = latestGuestContinuesAfterQuote(
 		previousAi,
 		latestText,
@@ -4589,6 +4641,7 @@ const exportedOrchestrator = {
 		englishGuestCountText,
 		arabicReviewAddress,
 		buildReviewMessage,
+		buildStayClarificationMessage,
 		replyPromisesBookingReview,
 		parseJsonObject,
 	},
