@@ -278,6 +278,145 @@ function initialKnownFacts(sc = {}) {
 	};
 }
 
+function usefulProfileName(sc = {}) {
+	const name = cleanDisplayString(sc.clientName || sc.displayName1, 120);
+	if (!name || /^(guest|customer|client|visitor|unknown)$/i.test(name)) return "";
+	return name;
+}
+
+function stripChatMarkup(value = "") {
+	return cleanDisplayString(value, 240)
+		.replace(/[*_`]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function normalizeNationalityHint(value = "") {
+	const raw = stripChatMarkup(value).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
+	const key = raw.toLowerCase().replace(/\./g, "");
+	const mapped = {
+		us: "US",
+		usa: "US",
+		"u s": "US",
+		"u.s": "US",
+		"u.s.a": "US",
+		uk: "UK",
+		uae: "UAE",
+		ksa: "Saudi",
+	};
+	if (mapped[key]) return mapped[key];
+	if (/^(american|egyptian|saudi|emirati|kuwaiti|qatari|bahraini|omani|jordanian|pakistani|indian|british|canadian|moroccan|algerian|tunisian|iraqi|syrian|lebanese|palestinian|sudanese|yemeni|turkish|indonesian|malaysian)$/i.test(raw)) {
+		return raw;
+	}
+	if (/^(united states|united kingdom|saudi arabia|united arab emirates|egypt|pakistan|india|canada|morocco|algeria|tunisia|jordan|kuwait|qatar|bahrain|oman|iraq|syria|lebanon|palestine|sudan|yemen|turkey|indonesia|malaysia)$/i.test(raw)) {
+		return raw;
+	}
+	return "";
+}
+
+function simplePhoneFromLine(value = "") {
+	const raw = cleanDisplayString(value, 80);
+	const phone = cleanPhone(raw);
+	if (!phone || phone.replace(/[^\d]/g, "").length < 7) return "";
+	const nonPhone = raw.replace(/[+\d\s().-]/g, "").trim();
+	return nonPhone ? "" : phone;
+}
+
+function nameHintFromLine(value = "") {
+	let text = stripChatMarkup(value);
+	text = text
+		.replace(/^(ok|okay|sure|yes|yep|yeah|name is|my name is|i am|i'm)\b[\s,:-]*/i, "")
+		.trim();
+	if (!text || text.length < 2 || text.length > 80) return "";
+	if (simplePhoneFromLine(text) || normalizeNationalityHint(text)) return "";
+	if (/(check.?in|checkout|arriv|depart|august|september|booking|reservation|continue|thank|email|phone|nationality|room|hotel|price|total|\d{4}-\d{2}-\d{2})/i.test(text)) {
+		return "";
+	}
+	if (!/[A-Za-z]/.test(text) && !/[\u0600-\u06FF]/.test(text)) return "";
+	if (text.split(/\s+/).length > 5) return "";
+	return text;
+}
+
+function labeledFactFromAssistant(text = "", labels = []) {
+	const plain = stripChatMarkup(text);
+	for (const label of labels) {
+		const match = plain.match(new RegExp(`${label}\\s*:\\s*([^\\n|]+)`, "i"));
+		if (match?.[1]) return stripChatMarkup(match[1]).replace(/[\s.,;:-]+$/g, "");
+	}
+	return "";
+}
+
+function recoverKnownFactsFromConversation(sc = {}, known = {}) {
+	const recovered = {
+		...asObject(known),
+		quote: asObject(known.quote),
+	};
+	if (!recovered.fullName) {
+		const profileName = usefulProfileName(sc);
+		if (profileName) recovered.fullName = profileName;
+	}
+	if (!recovered.phone && String(sc.clientContactType || "").toLowerCase() === "phone") {
+		const phone = cleanPhone(sc.clientContact);
+		if (phone && phone.replace(/[^\d]/g, "").length >= 7) recovered.phone = phone;
+	}
+
+	let collectingBookingDetails = false;
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (const entry of conversation) {
+		const text = cleanDisplayString(entry?.message || "", 1000);
+		if (!text) continue;
+		const action = cleanString(entry.clientAction, 80).toLowerCase();
+		if (entry.isAi && !entry.isSystem) {
+			if (/(full name|guest name|nationality|phone number|phone|complete your booking|booking review)/i.test(text)) {
+				collectingBookingDetails = true;
+			}
+			if (!recovered.fullName) {
+				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
+				if (value) recovered.fullName = value;
+			}
+			if (!recovered.nationality) {
+				const value = normalizeNationalityHint(
+					labeledFactFromAssistant(text, ["nationality"])
+				);
+				if (value) recovered.nationality = value;
+			}
+			if (!recovered.phone) {
+				const value = simplePhoneFromLine(labeledFactFromAssistant(text, ["phone number", "phone"]));
+				if (value) recovered.phone = value;
+			}
+			continue;
+		}
+		if (!isGuestEntry(entry)) continue;
+		if (action === "skip_email") recovered.emailSkipped = true;
+		if (action === "proceed") collectingBookingDetails = true;
+		const lines = text
+			.split(/\r?\n|[|]/)
+			.map((line) => line.trim())
+			.filter(Boolean);
+		for (const line of lines) {
+			if (!recovered.phone) {
+				const phone = simplePhoneFromLine(line);
+				if (phone) {
+					recovered.phone = phone;
+					continue;
+				}
+			}
+			if (!recovered.nationality) {
+				const nationality = normalizeNationalityHint(line);
+				if (nationality) {
+					recovered.nationality = nationality;
+					continue;
+				}
+			}
+			if (collectingBookingDetails && !recovered.fullName) {
+				const name = nameHintFromLine(line);
+				if (name) recovered.fullName = name;
+			}
+		}
+	}
+	return recovered;
+}
+
 function mergeKnownFacts(current = {}, next = {}) {
 	const source = asObject(next);
 	const guest = asObject(source.guest);
@@ -426,7 +565,28 @@ function guestConfirms(value = "", action = "") {
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!text) return false;
-	return /^(yes|y|ok|okay|sure|correct|confirmed|confirm|continue|go ahead|complete|book it|تمام|تماما|نعم|ايوه|أيوه|ايوا|أيوا|اكيد|أكيد|موافق|صحيح|صح|استمر|استمري|كمل|كملي|كملها|توكل|تمام كده|اه|آه)$/i.test(text);
+	if (/^(yes|y|ok|okay|sure|correct|confirmed|confirm|continue|go ahead|complete|book it|تمام|تماما|نعم|ايوه|أيوه|ايوا|أيوا|اكيد|أكيد|موافق|صحيح|صح|استمر|استمري|كمل|كملي|كملها|توكل|تمام كده|اه|آه)$/i.test(text)) {
+		return true;
+	}
+	if (/\b(yes|ok|okay|sure|correct|continue|go ahead|complete|book it|proceed|finalize)\b/i.test(text)) {
+		return !/\b(no|not|wrong|change|cancel|don't|dont|stop)\b/i.test(text);
+	}
+	return false;
+}
+
+function guestRequestsBookingReviewStep(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["proceed", "skip_email"].includes(cleanAction)) return true;
+	const text = normalizeDigits(String(value || ""))
+		.toLowerCase()
+		.replace(/[.!?؟،,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	if (guestConfirms(text, cleanAction)) return true;
+	return /(did you confirm|confirm my reservation|continue sister|continue brother|next step|check the next step|finish the booking|finalize the booking|complete the booking|go ahead|proceed)/i.test(
+		text
+	);
 }
 
 function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
@@ -576,6 +736,20 @@ function replyConfirmsBookingWithoutAction(reply = "") {
 	return /(details confirmed|we will complete|complete the booking|تم تأكيد التفاصيل|تم اعتماد التفاصيل|نكمل إجراءات|نُكمل إجراءات|اكمل إجراءات|أكمل إجراءات|سيتم الاعتماد)/i.test(
 		text
 	);
+}
+
+function replyPromisesBookingReview(reply = "") {
+	const text = normalizeDigits(String(reply || "")).toLowerCase();
+	if (!text.trim()) return false;
+	const reviewIntent =
+		/(booking review|reservation review|final review|review now|next step|moving to the next step|prepare the booking review|preparing the booking review|prepared the details|i have everything needed|i have your details|continue with your booking|proceed with the booking|moving to the official review|check the next step)/i.test(
+			text
+		);
+	const bookingContext =
+		/(booking|reservation|review|details|stay|room|guest name|phone|nationality|confirm)/i.test(
+			text
+		);
+	return reviewIntent && bookingContext;
 }
 
 function latestGuestAsksHotelFactOnly(latestGuest = {}) {
@@ -1071,7 +1245,9 @@ async function repairReviewDecision({
 		(decision?.action === "reply" &&
 			(replyLooksLikeManualBookingReview(decision.reply) ||
 				replyConfirmsBookingWithoutAction(decision.reply) ||
-				(guestConfirms(latestGuest?.message, latestAction) &&
+				replyPromisesBookingReview(decision.reply) ||
+				((guestConfirms(latestGuest?.message, latestAction) ||
+					guestRequestsBookingReviewStep(latestGuest?.message, latestAction)) &&
 					!alreadyOfficialReview &&
 					quoteMatchesKnown(known) &&
 					!requiredBookingMissing(known).length)));
@@ -1877,6 +2053,7 @@ async function planTurn(io, supportCaseOrId) {
 	if (!known.languageName && sc.preferredLanguage) {
 		known.languageName = sc.preferredLanguage;
 	}
+	known = recoverKnownFactsFromConversation(sc, known);
 	const latestText = String(latestGuest?.message || "");
 	const mappedRoom = mapRoomToKey(latestText);
 	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
@@ -1958,7 +2135,9 @@ async function planTurn(io, supportCaseOrId) {
 		if (
 			decision.action === "submit_reservation" ||
 			replyLooksLikeManualBookingReview(decision.reply) ||
-			replyConfirmsBookingWithoutAction(decision.reply)
+			replyConfirmsBookingWithoutAction(decision.reply) ||
+			replyPromisesBookingReview(decision.reply) ||
+			guestRequestsBookingReviewStep(latestText, latestAction)
 		) {
 			const repaired = await repairReviewDecision({
 				sc,
@@ -2001,7 +2180,9 @@ async function planTurn(io, supportCaseOrId) {
 		if (
 			decision.action === "reply" &&
 			(replyLooksLikeManualBookingReview(decision.reply) ||
-				replyConfirmsBookingWithoutAction(decision.reply)) &&
+				replyConfirmsBookingWithoutAction(decision.reply) ||
+				replyPromisesBookingReview(decision.reply) ||
+				guestRequestsBookingReviewStep(latestText, latestAction)) &&
 			!requiredBookingMissing(known).length
 		) {
 			return sendReview(io, sc, known, hotel, latestGuest);
@@ -2245,8 +2426,11 @@ const exportedOrchestrator = {
 	},
 	__test: {
 		mergeKnownFacts,
+		recoverKnownFactsFromConversation,
 		requiredBookingMissing,
 		quoteMatchesKnown,
+		guestRequestsBookingReviewStep,
+		replyPromisesBookingReview,
 		parseJsonObject,
 	},
 };
