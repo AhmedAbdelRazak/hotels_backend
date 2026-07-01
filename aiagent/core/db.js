@@ -24,6 +24,7 @@ const HOTEL_AI_BASE_SELECT = [
 	"hotelCity",
 	"hotelState",
 	"hotelCountry",
+	"propertyType",
 	"aboutHotel",
 	"aboutHotelArabic",
 	"distances",
