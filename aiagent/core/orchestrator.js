@@ -2696,7 +2696,7 @@ function runPlanTurnWorker(caseId = "", reason = "scheduled") {
 				AI_AGENT_WORKER_PROCESS: "true",
 				AI_PLAN_USE_WORKER: "false",
 				OPENAI_CHATBOT_MAX_PROMPT_CHARS:
-					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "14000",
+					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "8000",
 			},
 			stdio: ["ignore", "ignore", "pipe"],
 		});
