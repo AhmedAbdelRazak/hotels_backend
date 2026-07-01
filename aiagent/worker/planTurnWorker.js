@@ -8,6 +8,16 @@ const mongoose = require("mongoose");
 const { getSupportCaseById } = require("../core/db");
 const { __worker } = require("../core/orchestrator");
 
+const WORKER_TIMEOUT_MS = Math.min(
+	120000,
+	Math.max(10000, parseInt(process.env.AI_PLAN_WORKER_TIMEOUT_MS || "30000", 10) || 30000)
+);
+const hardTimeout = setTimeout(() => {
+	console.error(`[aiagent-worker] timed out after ${WORKER_TIMEOUT_MS}ms`);
+	process.exit(2);
+}, WORKER_TIMEOUT_MS);
+hardTimeout.unref?.();
+
 const silentRoom = {
 	emit() {},
 };
@@ -46,6 +56,7 @@ async function main() {
 		throw new Error(`Support case not found: ${caseId}`);
 	}
 	await __worker.planTurn(silentIo, supportCase);
+	clearTimeout(hardTimeout);
 }
 
 main()

@@ -2680,12 +2680,11 @@ function shouldSkipReservationConfirmationDispatch() {
 	return ["1", "true", "yes", "on"].includes(raw);
 }
 
-function runPlanTurnWorker(caseId = "", reason = "scheduled") {
-	return new Promise((resolve) => {
-		const workerPath = path.join(__dirname, "../worker/planTurnWorker.js");
-		let settled = false;
-		let stderr = "";
-		const child = spawn(process.execPath, [
+function launchPlanTurnWorker(io, caseId = "", reason = "scheduled") {
+	const workerPath = path.join(__dirname, "../worker/planTurnWorker.js");
+	let child = null;
+	try {
+		child = spawn(process.execPath, [
 			`--max-old-space-size=${AI_PLAN_WORKER_HEAP_MB}`,
 			workerPath,
 			caseId,
@@ -2698,46 +2697,65 @@ function runPlanTurnWorker(caseId = "", reason = "scheduled") {
 				OPENAI_CHATBOT_MAX_PROMPT_CHARS:
 					process.env.OPENAI_CHATBOT_MAX_PROMPT_CHARS || "8000",
 			},
-			stdio: ["ignore", "ignore", "pipe"],
+			stdio: ["ignore", "ignore", "ignore"],
+			detached: false,
 		});
-		const finish = (result) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve(result);
-		};
-		const timer = setTimeout(() => {
+	} catch (error) {
+		console.error("[aiagent] worker launch failed", {
+			caseId,
+			reason,
+			error: error?.message || String(error),
+		});
+		return null;
+	}
+
+	const finish = async (result = {}) => {
+		activeTurns.delete(caseId);
+		pendingReasons.delete(caseId);
+		const latestCase = await getSupportCaseById(caseId).catch(() => null);
+		if (latestCase) await emitTyping(io, latestCase, false);
+		if (!result.ok) {
+			console.error("[aiagent] worker turn failed", {
+				caseId,
+				reason: result.reason,
+				code: result.code,
+				signal: result.signal,
+			});
+			await sendPlanWorkerFallback(io, caseId, result).catch((error) => {
+				console.error("[aiagent] worker fallback failed:", error?.message || error);
+			});
+		}
+	};
+
+	const timer = setTimeout(() => {
+		try {
 			child.kill("SIGKILL");
-			finish({
-				ok: false,
-				reason: "worker_timeout",
-				stderr: stderr.slice(-2000),
-			});
-		}, AI_PLAN_WORKER_TIMEOUT_MS);
-		timer.unref?.();
-		child.stderr?.on("data", (chunk) => {
-			stderr += String(chunk || "");
-			if (stderr.length > 8000) stderr = stderr.slice(-8000);
-		});
-		child.on("error", (error) => {
-			finish({
-				ok: false,
-				reason: "worker_error",
-				error: error?.message || String(error),
-				stderr: stderr.slice(-2000),
-			});
-		});
-		child.on("exit", (code, signal) => {
-			finish({
-				ok: code === 0,
-				reason: code === 0 ? "worker_ok" : "worker_exit",
-				code,
-				signal,
-				stderr: stderr.slice(-2000),
-				scheduledReason: reason,
-			});
+		} catch {
+			// Process may already be gone.
+		}
+		finish({ ok: false, reason: "worker_timeout" });
+	}, AI_PLAN_WORKER_TIMEOUT_MS + 1500);
+	timer.unref?.();
+	child.once("error", (error) => {
+		clearTimeout(timer);
+		finish({
+			ok: false,
+			reason: "worker_error",
+			error: error?.message || String(error),
 		});
 	});
+	child.once("exit", (code, signal) => {
+		clearTimeout(timer);
+		finish({
+			ok: code === 0,
+			reason: code === 0 ? "worker_ok" : "worker_exit",
+			code,
+			signal,
+			scheduledReason: reason,
+		});
+	});
+	child.unref?.();
+	return child;
 }
 
 async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
@@ -2748,7 +2766,20 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 	});
 	if (!allowed) return sc;
 	const latestGuest = latestGuestEntry(sc);
-	let known = initialKnownFacts(sc);
+	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
+	if (!known.languageCode && sc.preferredLanguageCode) {
+		known.languageCode = sc.preferredLanguageCode;
+	}
+	if (!known.languageName && sc.preferredLanguage) {
+		known.languageName = sc.preferredLanguage;
+	}
+	const latestText = String(latestGuest?.message || "");
+	const mappedRoom = mapRoomToKey(latestText);
+	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+	if (!known.roomTypeKey) {
+		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
+		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
+	}
 	if (known.checkinISO && known.checkoutISO && known.roomTypeKey) {
 		const quoteResult = await quoteTool(sc, known).catch((error) => {
 			console.error("[aiagent] worker fallback quote failed:", error?.message || error);
@@ -2799,25 +2830,24 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 			return;
 		}
 		activeTurns.add(caseId);
+		let workerLaunched = false;
 		try {
 			if (shouldUsePlanWorker()) {
-				const result = await runPlanTurnWorker(caseId, reason);
-				if (!result.ok) {
-					console.error("[aiagent] worker turn failed", {
-						caseId,
-						reason: result.reason,
-						code: result.code,
-						signal: result.signal,
-						stderr: result.stderr,
-					});
-					await sendPlanWorkerFallback(io, caseId, result);
+				const beforeWorker = await getSupportCaseById(caseId).catch(() => null);
+				if (beforeWorker) await emitTyping(io, beforeWorker, true);
+				const child = launchPlanTurnWorker(io, caseId, reason);
+				workerLaunched = Boolean(child);
+				if (!child) {
+					await sendPlanWorkerFallback(io, caseId, { reason: "worker_launch_failed" });
 				}
 			} else {
 				await planTurn(io, caseId);
 			}
 		} finally {
-			activeTurns.delete(caseId);
-			pendingReasons.delete(caseId);
+			if (!workerLaunched) {
+				activeTurns.delete(caseId);
+				pendingReasons.delete(caseId);
+			}
 		}
 	}, delay);
 	activeTimers.set(caseId, timer);
