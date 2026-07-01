@@ -14,7 +14,7 @@ const {
 const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
 const { priceRoomForStay } = require("./selectors");
-const { mapRoomToKey, digitsToEnglish } = require("./nlu");
+const { mapRoomToKey, digitsToEnglish, quickDateRange } = require("./nlu");
 const {
 	createReservationForCase,
 	updateReservationDatesForCase,
@@ -389,11 +389,26 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		if (!isGuestEntry(entry)) continue;
 		if (action === "skip_email") recovered.emailSkipped = true;
 		if (action === "proceed") collectingBookingDetails = true;
+		const dates = quickDateRange(text);
+		if (dates?.checkinISO && dates?.checkoutISO) {
+			recovered.checkinISO = dates.checkinISO;
+			recovered.checkoutISO = dates.checkoutISO;
+			recovered.dateCalendar = dates.raw?.calendar || "gregorian";
+			if (dates.raw?.checkinHijri) recovered.checkinHijriText = dates.raw.checkinHijri;
+			if (dates.raw?.checkoutHijri) recovered.checkoutHijriText = dates.raw.checkoutHijri;
+			if (dates.raw?.checkin || dates.raw?.checkout) {
+				recovered.dateRangeOriginalText = [dates.raw.checkin, dates.raw.checkout]
+					.filter(Boolean)
+					.join(" - ");
+			}
+		}
 		const lines = text
 			.split(/\r?\n|[|]/)
 			.map((line) => line.trim())
 			.filter(Boolean);
 		for (const line of lines) {
+			const roomTypeKey = mapRoomToKey(line);
+			if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
 			if (!recovered.phone) {
 				const phone = simplePhoneFromLine(line);
 				if (phone) {
@@ -667,7 +682,7 @@ function replyPromisesQuoteCheck(reply = "") {
 			text
 		);
 	const quoteTopic =
-		/(availability|available|price|rate|cost|quote|التوفر|متاح|متوفر|السعر|سعر|التكلفة|الاجمالي|الإجمالي)/i.test(
+		/(availability|available|price|rate|cost|quote|room|stay|dates|التوفر|متاح|متوفر|السعر|سعر|التكلفة|الغرفة|الاقامة|الإقامة|التواريخ|الاجمالي|الإجمالي)/i.test(
 			text
 		);
 	const asksForMissing =
@@ -1865,6 +1880,18 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 	const result = await quoteTool(sc, known);
 	const nextKnown = { ...known };
 	if (result.available && result.quote) nextKnown.quote = result.quote;
+	else {
+		nextKnown.quote = {
+			available: false,
+			roomTypeKey: result.roomTypeKey || known.roomTypeKey,
+			checkinISO: result.checkinISO || known.checkinISO,
+			checkoutISO: result.checkoutISO || known.checkoutISO,
+			rooms: Math.max(1, Number(known.rooms || 1) || 1),
+			currency: result.currency || "SAR",
+			code: result.code || "not_available",
+			roomLabel: result.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
+		};
+	}
 	await saveKnownFacts(caseIdText(sc), nextKnown);
 	const reply = buildQuoteFallbackMessage(sc, nextKnown, result, hotel);
 	const quickReplies = result.available
