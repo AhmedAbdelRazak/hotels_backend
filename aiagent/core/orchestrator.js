@@ -322,6 +322,18 @@ function asObject(value) {
 	return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function quoteHasContent(value = {}) {
+	const quote = asObject(value);
+	return Boolean(
+		Object.prototype.hasOwnProperty.call(quote, "available") ||
+			quote.roomTypeKey ||
+			quote.checkinISO ||
+			quote.checkoutISO ||
+			quote.total ||
+			quote.totals?.totalPriceWithCommission
+	);
+}
+
 function initialKnownFacts(sc = {}) {
 	const snapshot = asObject(sc.aiStateSnapshot);
 	const known = asObject(snapshot.known);
@@ -471,6 +483,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		if (profileName) recovered.fullName = profileName;
 	}
 	if (!recovered.phone && String(sc.clientContactType || "").toLowerCase() === "phone") {
+		const phone = cleanPhone(sc.clientContact);
+		if (phone && phone.replace(/[^\d]/g, "").length >= 7) recovered.phone = phone;
+	}
+	if (!recovered.phone) {
 		const phone = cleanPhone(sc.clientContact);
 		if (phone && phone.replace(/[^\d]/g, "").length >= 7) recovered.phone = phone;
 	}
@@ -726,6 +742,85 @@ function guestRequestsBookingReviewStep(value = "", action = "") {
 	);
 }
 
+function guestWantsToContinueBooking(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeDigits(String(value || ""))
+		.toLowerCase()
+		.replace(/[.!?؟،,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const negativeNeedles = [
+		"\u0644\u0627\u062a\u062d\u062c\u0632",
+		"\u0644\u0627\u062a\u0643\u0645\u0644",
+		"\u0645\u0634\u0639\u0627\u064a\u0632",
+		"\u0645\u0634\u0639\u0627\u064a\u0632\u0629",
+		"\u0644\u0627\u0627\u0631\u064a\u062f",
+		"\u0644\u0627\u0623\u0631\u064a\u062f",
+	];
+	if (negativeNeedles.some((needle) => compact.includes(needle))) return false;
+	if (/\b(yes|ok|okay|sure|continue|confirm|book|book it|go ahead|proceed|complete|finalize)\b/i.test(text)) {
+		return true;
+	}
+	const arabicNeedles = [
+		"\u0646\u0639\u0645",
+		"\u062a\u0627\u0628\u0639",
+		"\u062a\u0627\u0628\u0639\u064a",
+		"\u0627\u0643\u064a\u062f",
+		"\u0623\u0643\u064a\u062f",
+		"\u0627\u062d\u062c\u0632",
+		"\u0627\u062d\u062c\u0632\u064a",
+		"\u0627\u062d\u062c\u0632\u0649",
+		"\u0627\u0643\u062f\u064a",
+		"\u0627\u0643\u062f\u0649",
+		"\u0623\u0643\u062f\u064a",
+		"\u0623\u0643\u062f\u0649",
+		"\u062b\u0628\u062a",
+		"\u062b\u0628\u062a\u064a",
+		"\u0643\u0645\u0644",
+		"\u0643\u0645\u0644\u064a",
+		"\u0643\u0645\u0644\u0649",
+		"\u0627\u062a\u0645",
+		"\u0623\u062a\u0645",
+		"\u062a\u0645\u0627\u0645",
+	];
+	return arabicNeedles.some((needle) => compact.includes(needle));
+}
+
+function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["proceed", "place_reservation", "confirm_reservation"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeDigits(String(value || ""))
+		.toLowerCase()
+		.replace(/[.!?؟،,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	if (/\b(price|rate|cost|availability|available|book|booking|reserve|reservation|quote|total|sar)\b/i.test(text)) {
+		return true;
+	}
+	const compact = text.replace(/\s+/g, "");
+	const arabicNeedles = [
+		"\u0633\u0639\u0631",
+		"\u0628\u0643\u0627\u0645",
+		"\u0643\u0645",
+		"\u0645\u062a\u0627\u062d",
+		"\u0645\u062a\u0648\u0641\u0631",
+		"\u062d\u062c\u0632",
+		"\u0627\u062d\u062c\u0632",
+		"\u0631\u064a\u0627\u0644",
+		"\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a",
+		"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
+	];
+	return arabicNeedles.some((needle) => compact.includes(needle));
+}
+
 function emailAlreadyOffered(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	return conversation.some((entry) => {
@@ -844,13 +939,13 @@ function buildOptionalEmailMessage(sc = {}, known = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
 	return ar
-		? `تمام أستاذ ${guestDisplayName(sc)}، بقي البريد الإلكتروني اختياري فقط. إذا أرسلته أقدر أضيفه لاستلام تفاصيل الحجز/الإيصال، أو تقدر تتابع بدونه.`
-		: `Perfect, ${guestDisplayName(sc)}. Email is optional only. If you share it, I can add it for the booking details/receipt, or you can continue without email.`;
+		? `البريد الإلكتروني اختياري. لو تحب ترسله أضيفه لتفاصيل الحجز والإيصال، أو اضغط المتابعة بدون بريد.`
+		: `Email is optional. If you share it, I can add it for the booking details and receipt, or you can continue without email.`;
 }
 
 function buildNationalityNeededMessage(sc = {}, known = {}) {
 	return /^ar\b/i.test(activeLanguageCode(sc, known))
-		? `تمام أستاذ ${guestDisplayName(sc)}، بقي فقط الجنسية حتى أجهز مراجعة الحجز.`
+		? `تمام، بقي فقط الجنسية لتجهيز مراجعة الحجز.`
 		: `Absolutely, ${guestDisplayName(sc)}. I only need the nationality now so I can prepare the booking review.`;
 }
 
@@ -909,6 +1004,42 @@ function buildAllowedMissingBookingDetailsMessage(sc = {}, known = {}, missing =
 	return ar
 		? `تمام أستاذ ${guestDisplayName(sc)}، لا أحتاج جواز سفر أو رقم هوية لهذا الحجز. فقط أحتاج ${readable.join("، ")} حتى أجهز مراجعة الحجز بشكل صحيح.`
 		: `Thank you, ${guestDisplayName(sc)}. I do not need a passport or ID number for this booking. I only need ${readable.join(", ")} so I can prepare the booking review correctly.`;
+}
+
+function buildMandatoryDetailsMessage(sc = {}, known = {}, missing = []) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const requiredMissing = (Array.isArray(missing) ? missing : requiredBookingMissing(known))
+		.filter((item) => item !== "quote");
+	const labels = ar
+		? {
+				checkinISO: "\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644",
+				checkoutISO: "\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629",
+				roomTypeKey: "\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629",
+				fullName: "\u0627\u0633\u0645 \u0627\u0644\u062d\u062c\u0632",
+				phone: "\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641",
+				nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629",
+				adults: "\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641",
+		  }
+		: {
+				checkinISO: "check-in date",
+				checkoutISO: "checkout date",
+				roomTypeKey: "room type",
+				fullName: "booking name",
+				phone: "phone number",
+				nationality: "nationality",
+				adults: "number of guests",
+		  };
+	const readable = requiredMissing.map((item) => labels[item] || item).filter(Boolean);
+	if (!readable.length) {
+		return ar
+			? "\u062a\u0645\u0627\u0645\u060c \u0623\u062c\u0647\u0632 \u0644\u0643 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0622\u0646."
+			: "Perfect, I will prepare the booking review now.";
+	}
+	if (ar) {
+		return `\u062a\u0645\u0627\u0645\u060c \u0628\u0642\u064a \u0641\u0642\u0637 ${readable.join("\u060c ")} \u0644\u062a\u062c\u0647\u064a\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632.`;
+	}
+	return `Almost ready. I only need ${readable.join(", ")} to prepare the booking review.`;
 }
 
 function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
@@ -1036,6 +1167,35 @@ function operationalQuickRepliesForReply(decision = {}, known = {}, sc = {}) {
 		return emailSkipQuickReplies(activeLanguageCode(sc, known));
 	}
 	return [];
+}
+
+function shouldOfferOptionalEmail(sc = {}, known = {}) {
+	const facts = asObject(known);
+	if (cleanEmail(facts.email) || facts.emailSkipped) return false;
+	if (emailAlreadyOffered(sc)) return false;
+	return !requiredBookingMissing(facts).length;
+}
+
+function sendOptionalEmailOffer(io, sc = {}, known = {}, latestGuest = null) {
+	return sendAiMessage(io, sc, buildOptionalEmailMessage(sc, known), {
+		latestGuest,
+		known,
+		clientAction: "optional_email",
+		quickReplies: emailSkipQuickReplies(activeLanguageCode(sc, known)),
+	});
+}
+
+async function sendReviewMaybeOfferOptionalEmail(
+	io,
+	sc = {},
+	known = {},
+	hotel = {},
+	latestGuest = null
+) {
+	if (shouldOfferOptionalEmail(sc, known)) {
+		return sendOptionalEmailOffer(io, sc, known, latestGuest);
+	}
+	return sendReview(io, sc, known, hotel, latestGuest);
 }
 
 function replyLooksLikeManualBookingReview(reply = "") {
@@ -1361,6 +1521,8 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
+		`Keep replies concise: usually 2-5 short lines. Avoid repeating long greetings, the full quote, or the same next-step wording unless the guest asks for it.`,
+		`In Arabic hotel chats, prefer reservation wording like "\u0627\u0644\u062d\u062c\u0632", "\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632", or "\u0627\u0633\u062a\u0641\u0633\u0627\u0631\u0643". Avoid "\u0627\u0644\u0637\u0644\u0628" when you mean a hotel reservation.`,
 		`Use hotelName/hotelNameArabic as the hotel name. "Reception" and "reservations" describe your team role only; never append "Reception" to the hotel name or invent a new property name.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
 		`Before every reply, review the full conversation transcript and Known facts. Answer the latest unresolved guest question first, then continue the booking flow only if it feels natural. Do not repeat the same date/name/phone request if you already asked recently; acknowledge the current question and ask only one next question when needed.`,
@@ -1377,8 +1539,10 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Required booking details are checkinISO, checkoutISO, roomTypeKey, quote, fullName, phone, nationality, and adults. Email is optional and must never be listed as a required item.`,
 		`Never ask for passport number, ID number, national ID, document number, date of birth, card number, payment-card details, or any identity document for this B2C booking flow. Those fields are not part of the booking plan. If you already have the required details, return action="send_review"; if something is missing, ask only for the missing allowed booking detail.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
-		`If the required booking details and quote are known but email is missing and emailSkipped is not true, offer email once in a separate short optional message before the final review. Explain that email is only useful for receiving the receipt/confirmation/details, and that the guest can continue without email.`,
-		`If the guest wants to continue booking and all required booking details plus quote are known, and email was already provided, skipped, or offered once in the transcript, action must be "send_review".`,
+		`Email is optional and useful for sending booking details/receipt. After all required details are known, email may be offered once in a separate short message with a clear skip option. Never list email with required fields, never ask twice, and never block the booking if the guest skips it or continues without it.`,
+		`Do not delay the final review for special requests, notes, room preferences, passport/ID, or anything not listed as required. If the guest wants to continue after an exact quote, ask only missing required details; if none are missing and optional email was already provided, skipped, or offered once, return action="send_review".`,
+		`After an exact quote has been accepted, do not repeat the same quote as the next answer unless the guest asks to see the price again or changes dates/room/guest count.`,
+		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review".`,
 		`Do not write the final booking review yourself as a normal reply. When the guest asks to review details, says everything is correct, or confirms after you collected the required fields, return action="send_review" so the server sends the official review with buttons. The official review must include the exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.`,
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
 		`If the guest says the review is wrong, action must be "send_review_again" only if you can present corrected data; otherwise ask what to fix.`,
@@ -2141,10 +2305,20 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 
 async function saveKnownFacts(caseId = "", known = {}) {
 	if (!caseId) return;
+	const nextKnown = { ...asObject(known) };
+	if (!quoteHasContent(nextKnown.quote)) {
+		const currentCase = await getSupportCaseById(caseId).catch(() => null);
+		const previousQuote = currentCase?.aiStateSnapshot?.known?.quote;
+		if (quoteHasContent(previousQuote)) {
+			nextKnown.quote = previousQuote;
+		} else {
+			delete nextKnown.quote;
+		}
+	}
 	await updateSupportCaseAiStateSnapshot(caseId, {
 		version: 3,
 		updatedAt: new Date(),
-		known,
+		known: nextKnown,
 	}).catch((error) => {
 		console.error("[aiagent] save known facts failed:", error?.message || error);
 	});
@@ -2485,7 +2659,7 @@ async function planTurn(io, supportCaseOrId) {
 		await saveKnownFacts(key, known);
 		if (!requiredBookingMissing(known).length) {
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-			return sendReview(io, sc, known, hotel, latestGuest);
+			return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 		}
 	}
 	if (
@@ -2497,11 +2671,80 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return submitReservationForCase(io, key);
 	}
+	const wantsToContinueBooking =
+		latestGuest &&
+		guestWantsToContinueBooking(latestText, latestAction) &&
+		quoteInputsKnown(known) &&
+		!shouldLetOpenAIHandleRevision &&
+		!latestGuestAsksHotelFactOnly(latestGuest);
+	if (wantsToContinueBooking) {
+		let bookingKnown = { ...known, quote: asObject(known.quote) };
+		if (!quoteMatchesKnown(bookingKnown)) {
+			const quoteResult = await quoteTool(sc, bookingKnown).catch((error) => {
+				console.error("[aiagent] continue quote refresh failed:", error?.message || error);
+				return null;
+			});
+			if (!quoteResult) {
+				await saveKnownFacts(key, bookingKnown);
+				await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+				return sendAiMessage(
+					io,
+					sc,
+					/^ar\b/i.test(activeLanguageCode(sc, bookingKnown))
+						? "\u0623\u0639\u062a\u0630\u0631\u060c \u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u0633\u0639\u0631 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649 \u0644\u062d\u0638\u0627\u062a \u0642\u0628\u0644 \u062a\u062c\u0647\u064a\u0632 \u0627\u0644\u062d\u062c\u0632."
+						: "Sorry, I am rechecking the price one more time before preparing the booking.",
+					{ latestGuest, known: bookingKnown }
+				);
+			}
+			if (!quoteResult.available || !quoteResult.quote) {
+				const nextKnown = { ...bookingKnown };
+				nextKnown.quote = {
+					available: false,
+					roomTypeKey: quoteResult.roomTypeKey || bookingKnown.roomTypeKey,
+					checkinISO: quoteResult.checkinISO || bookingKnown.checkinISO,
+					checkoutISO: quoteResult.checkoutISO || bookingKnown.checkoutISO,
+					rooms: Math.max(1, Number(bookingKnown.rooms || 1) || 1),
+					currency: quoteResult.currency || "SAR",
+					code: quoteResult.code || "not_available",
+					roomLabel:
+						quoteResult.roomLabel ||
+						roomTypeLabel(bookingKnown.roomTypeKey, bookingKnown.languageCode),
+				};
+				await saveKnownFacts(key, nextKnown);
+				await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+				return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
+					latestGuest,
+					known: nextKnown,
+					clientAction: "quote_unavailable",
+				});
+			}
+			bookingKnown = { ...bookingKnown, quote: quoteResult.quote };
+		}
+		const missing = requiredBookingMissing(bookingKnown);
+		await saveKnownFacts(key, bookingKnown);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		if (missing.length) {
+			const text =
+				missing.length === 1 && missing[0] === "nationality"
+					? buildNationalityNeededMessage(sc, bookingKnown)
+					: buildMandatoryDetailsMessage(sc, bookingKnown, missing);
+			return sendAiMessage(io, sc, text, {
+				latestGuest,
+				known: bookingKnown,
+				clientAction: "required_details_needed",
+			});
+		}
+		if (shouldOfferOptionalEmail(sc, bookingKnown)) {
+			return sendOptionalEmailOffer(io, sc, bookingKnown, latestGuest);
+		}
+		return sendReview(io, sc, bookingKnown, hotel, latestGuest);
+	}
 	if (
 		latestGuest &&
 		!shouldLetOpenAIHandleRevision &&
 		quoteInputsKnown(known) &&
 		!quoteMatchesKnown(known) &&
+		guestAsksPriceAvailabilityOrBooking(latestText, latestAction) &&
 		!latestGuestAsksHotelFactOnly(latestGuest)
 	) {
 		await saveKnownFacts(key, known);
@@ -2524,22 +2767,10 @@ async function planTurn(io, supportCaseOrId) {
 		if (!missing.length) {
 			await saveKnownFacts(key, known);
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-			if (!cleanEmail(known.email) && !known.emailSkipped && !emailAlreadyOffered(sc)) {
-				return sendAiMessage(io, sc, buildOptionalEmailMessage(sc, known), {
-					latestGuest,
-					known,
-					clientAction: "optional_email",
-					quickReplies: emailSkipQuickReplies(activeLanguageCode(sc, known)),
-				});
+			if (shouldOfferOptionalEmail(sc, known)) {
+				return sendOptionalEmailOffer(io, sc, known, latestGuest);
 			}
-			if (
-				known.emailSkipped ||
-				cleanEmail(known.email) ||
-				emailAlreadyOffered(sc) ||
-				guestRequestsBookingReviewStep(latestText, latestAction)
-			) {
-				return sendReview(io, sc, known, hotel, latestGuest);
-			}
+			return sendReview(io, sc, known, hotel, latestGuest);
 		}
 	}
 	const previousGuest = previousGuestEntryBeforeLatest(sc, latestGuest);
@@ -2548,7 +2779,7 @@ async function planTurn(io, supportCaseOrId) {
 		(guestAttentionNudge(latestText) && guestRequestsBookingReview(previousGuest?.message))
 	) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-		return sendReview(io, sc, known, hotel, latestGuest);
+		return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 	}
 	let decision = null;
 	try {
@@ -2640,15 +2871,10 @@ async function planTurn(io, supportCaseOrId) {
 			await saveKnownFacts(key, known);
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 			if (!missing.length) {
-				if (!cleanEmail(known.email) && !known.emailSkipped && !emailAlreadyOffered(sc)) {
-					return sendAiMessage(io, sc, buildOptionalEmailMessage(sc, known), {
-						latestGuest,
-						known,
-						clientAction: "optional_email",
-						quickReplies: emailSkipQuickReplies(activeLanguageCode(sc, known)),
-					});
+				if (shouldOfferOptionalEmail(sc, known)) {
+					return sendOptionalEmailOffer(io, sc, known, latestGuest);
 				}
-				return sendReview(io, sc, known, hotel, latestGuest);
+				return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 			}
 			return sendAiMessage(
 				io,
@@ -2677,12 +2903,12 @@ async function planTurn(io, supportCaseOrId) {
 		}
 		if (decision.action === "submit_reservation") {
 			if (previousAi?.clientAction !== "review_reservation") {
-				return sendReview(io, sc, known, hotel, latestGuest);
+				return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 			}
 			return submitReservationForCase(io, key);
 		}
 		if (decision.action === "send_review" || decision.action === "send_review_again") {
-			return sendReview(io, sc, known, hotel, latestGuest);
+			return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 		}
 		if (
 			decision.action === "reply" &&
@@ -2692,7 +2918,7 @@ async function planTurn(io, supportCaseOrId) {
 				guestRequestsBookingReviewStep(latestText, latestAction)) &&
 			!requiredBookingMissing(known).length
 		) {
-			return sendReview(io, sc, known, hotel, latestGuest);
+			return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 		}
 		const reply = decision.reply || "";
 		if (!reply) {

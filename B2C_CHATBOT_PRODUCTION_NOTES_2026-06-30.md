@@ -96,6 +96,13 @@
   - Optional email remains optional. If OpenAI asks for email, the orchestrator can attach a "continue without email" quick reply so the flow does not get stuck.
   - A later live turn showed a guest can ask for the review and then send a short nudge such as "يا أميرة؟" before the delayed turn completes.
   - Review requests now go directly to the orchestrator review action, and a short nudge immediately after an unanswered review request still produces the official review instead of a generic "I am here" reply.
+- `6a44b1630973b9e6b812a27c` showed a continuation loop after a valid quote.
+  - The saved AI state could overwrite a valid quote with an empty `{}` quote object, so later "yes/continue/book it" messages looked like a fresh quote request.
+  - Quote state is now preserved unless the replacement quote has real content.
+  - After a quote is accepted, the orchestrator now asks only for missing mandatory booking fields.
+  - Email is still useful but optional: it is offered once in a separate message with a "continue without email" button, then the official review proceeds.
+  - The prompt now tells OpenAI to keep Arabic hotel wording around `الحجز`, `تفاصيل الحجز`, or `استفسارك` and avoid `الطلب` when it means a hotel reservation.
+  - The prompt also tells OpenAI to keep replies shorter and avoid repeating the same full quote unless the guest asks for it or changes booking details.
 
 ## PMS And Server Health Notes
 
