@@ -142,7 +142,7 @@ function latestGuestEntry(sc = {}) {
 
 function hasAnyAiEntry(sc = {}) {
 	return (Array.isArray(sc.conversation) ? sc.conversation : []).some(
-		(entry) => entry?.isAi && !entry?.isSystem
+		(entry) => isAiSupportEntry(entry) && !entry?.isSystem
 	);
 }
 
@@ -497,7 +497,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		const text = cleanDisplayString(entry?.message || "", 1000);
 		if (!text) continue;
 		const action = cleanString(entry.clientAction, 80).toLowerCase();
-		if (entry.isAi && !entry.isSystem) {
+		if (isAiSupportEntry(entry) && !entry.isSystem) {
 			if (/(full name|guest name|nationality|phone number|phone|complete your booking|booking review)/i.test(text)) {
 				collectingBookingDetails = true;
 			}
