@@ -2800,6 +2800,46 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 	});
 }
 
+async function tryFastQuoteTurn(io, caseId = "") {
+	const sc = await getSupportCaseById(caseId).catch(() => null);
+	if (!sc || sc.caseStatus === "closed" || sc.aiToRespond === false) {
+		return { handled: Boolean(sc), supportCase: sc };
+	}
+	const latestGuest = latestGuestEntry(sc);
+	if (!latestGuest) return { handled: false, supportCase: sc };
+	const { allowed, hotel } = await ensureAIAllowed(sc.hotelId, sc, {
+		includePricingRate: false,
+	});
+	if (!allowed) return { handled: true, supportCase: sc };
+	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
+	if (!known.languageCode && sc.preferredLanguageCode) {
+		known.languageCode = sc.preferredLanguageCode;
+	}
+	if (!known.languageName && sc.preferredLanguage) {
+		known.languageName = sc.preferredLanguage;
+	}
+	const latestText = String(latestGuest?.message || "");
+	const mappedRoom = mapRoomToKey(latestText);
+	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+	if (!known.roomTypeKey) {
+		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
+		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
+	}
+	if (
+		quoteInputsKnown(known) &&
+		!quoteMatchesKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		const typingStartedAt = now();
+		await emitTyping(io, sc, true);
+		await saveKnownFacts(caseId, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		const updated = await handleQuote(io, sc, hotel, known, latestGuest);
+		return { handled: true, supportCase: updated || sc };
+	}
+	return { handled: false, supportCase: sc };
+}
+
 function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } = {}) {
 	const caseId = caseIdText(caseOrId);
 	if (!caseId || !io) return;
@@ -2817,6 +2857,8 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 		}
 		activeTurns.add(caseId);
 		try {
+			const fastQuote = await tryFastQuoteTurn(io, caseId);
+			if (fastQuote.handled) return;
 			if (shouldUsePlanWorker()) {
 				const beforeWorker = await getSupportCaseById(caseId).catch(() => null);
 				if (beforeWorker) await emitTyping(io, beforeWorker, true);
