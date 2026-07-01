@@ -389,11 +389,38 @@ function nameHintFromLine(value = "") {
 
 function peopleCountFromLine(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
+	const guestNoun = "(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)";
 	const match = text.match(
-		/(?:for|لعدد|لـ|ل)\s*(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)\b|(\d{1,2})\s*(?:persons?|people|guests?|adults?|individuals?|pax|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)\b/i
+		new RegExp(`(?:for|لعدد|لـ|ل)\\s*(\\d{1,2})\\s*${guestNoun}\\b|(\\d{1,2})\\s*${guestNoun}\\b`, "i")
 	);
 	const count = Number(match?.[1] || match?.[2] || 0);
 	if (Number.isFinite(count) && count >= 1 && count <= 30) return Math.floor(count);
+	const wordCounts = {
+		one: 1,
+		two: 2,
+		three: 3,
+		four: 4,
+		five: 5,
+		six: 6,
+		seven: 7,
+		eight: 8,
+		nine: 9,
+		ten: 10,
+		eleven: 11,
+		twelve: 12,
+	};
+	const wordMatch = text.match(
+		new RegExp(`\\b(${Object.keys(wordCounts).join("|")})\\b\\s*${guestNoun}\\b`, "i")
+	);
+	if (wordMatch) return wordCounts[wordMatch[1].toLowerCase()];
+	const arabicGuestWordCounts = [
+		{ pattern: /(شخصين|ضيفين|نزيلين|فردين|اتنين|إثنين|اثنين|اثنان)/i, value: 2 },
+		{ pattern: /(ثلاثة|ثلاث|تلاتة|تلات|٣)\s*(اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i, value: 3 },
+		{ pattern: /(اربعة|أربعة|اربع|أربع|٤)\s*(اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i, value: 4 },
+		{ pattern: /(خمسة|خمس|٥)\s*(اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i, value: 5 },
+	];
+	const arabicMatch = arabicGuestWordCounts.find((item) => item.pattern.test(text));
+	if (arabicMatch) return arabicMatch.value;
 	let relationshipCount = 0;
 	if (/\b(myself|me)\b/i.test(text)) relationshipCount += 1;
 	const relationMatches = text.match(

@@ -86,7 +86,7 @@ Problem observed in live production case `6a4492e3d50e40ab7f0f25a7`:
 Fix:
 
 - `normalizeNationalityHint()` now recognizes sentence-style nationality answers such as `I'm a US citizen`.
-- `peopleCountFromLine()` now requires explicit guest-count words (`2 guests`, `3 adults`, `لعدد ٣ أشخاص`) or relationship words before setting adult count, so date numbers such as `August 12` are not accidentally saved as `adults=12`.
+- `peopleCountFromLine()` now requires explicit guest-count words (`2 guests`, `two guests`, `3 adults`, `لعدد ٣ أشخاص`) or relationship words before setting adult count, so date numbers such as `August 12` are not accidentally saved as `adults=12`.
 - The initial OpenAI system prompt explicitly says the only required booking fields are dates, room type, quote, full name, phone, nationality, and adult count; email is optional.
 - The prompt now explicitly forbids asking for passport number, ID number, national ID, document number, DOB, card number, or payment-card details.
 - A backend guard now scans every generated customer reply before sending. If a reply tries to ask for a forbidden document/payment field, the orchestrator replaces it with the correct next step:
