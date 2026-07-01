@@ -406,7 +406,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			recovered.dateCalendar = dates.raw?.calendar || "gregorian";
 			if (dates.raw?.checkinHijri) recovered.checkinHijriText = dates.raw.checkinHijri;
 			if (dates.raw?.checkoutHijri) recovered.checkoutHijriText = dates.raw.checkoutHijri;
-			if (dates.raw?.checkin || dates.raw?.checkout) {
+			if (
+				["hijri", "mixed"].includes(String(dates.raw?.calendar || "").toLowerCase()) &&
+				(dates.raw?.checkin || dates.raw?.checkout)
+			) {
 				recovered.dateRangeOriginalText = [dates.raw.checkin, dates.raw.checkout]
 					.filter(Boolean)
 					.join(" - ");
@@ -616,6 +619,67 @@ function guestRequestsBookingReviewStep(value = "", action = "") {
 	return /(did you confirm|confirm my reservation|continue sister|continue brother|next step|check the next step|finish the booking|finalize the booking|complete the booking|go ahead|proceed)/i.test(
 		text
 	);
+}
+
+function emailAlreadyOffered(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	return conversation.some((entry) => {
+		if (!isAiSupportEntry(entry)) return false;
+		if (String(entry.clientAction || "") === "optional_email") return true;
+		return replyAsksOptionalEmail(entry.message, {});
+	});
+}
+
+function previousAiAskedFor(field = "", previousAi = {}) {
+	const text = normalizeDigits(String(previousAi?.message || "")).toLowerCase();
+	const action = String(previousAi?.clientAction || "").toLowerCase();
+	if (!text.trim() && !action) return false;
+	if (field === "nationality") {
+		return (
+			action.includes("nationality") ||
+			/nationality/i.test(text) ||
+			text.includes("الجنسية") ||
+			text.includes("جنسيتك") ||
+			text.includes("جنسية")
+		);
+	}
+	if (field === "email") {
+		return (
+			action.includes("email") ||
+			/(email|e-mail)/i.test(text) ||
+			text.includes("البريد") ||
+			text.includes("الايميل") ||
+			text.includes("الإيميل") ||
+			text.includes("ايميل") ||
+			text.includes("إيميل")
+		);
+	}
+	return false;
+}
+
+function guestDeclinesOptionalEmail(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (cleanAction === "skip_email") return true;
+	const text = normalizeDigits(String(value || ""))
+		.toLowerCase()
+		.replace(/[.!?؟،,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return /^(no|no thanks|no thank you|skip|without email|continue without email|not now|لا|لا شكرا|بدون بريد|من غير بريد|اتخطى|تخطى)$/i.test(text);
+}
+
+function buildOptionalEmailMessage(sc = {}, known = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	return ar
+		? `تمام أستاذ ${guestDisplayName(sc)}، بقي البريد الإلكتروني اختياري فقط. إذا أرسلته أقدر أضيفه لاستلام تفاصيل الحجز/الإيصال، أو تقدر تتابع بدونه.`
+		: `Perfect, ${guestDisplayName(sc)}. Email is optional only. If you share it, I can add it for the booking details/receipt, or you can continue without email.`;
+}
+
+function buildNationalityNeededMessage(sc = {}, known = {}) {
+	return /^ar\b/i.test(activeLanguageCode(sc, known))
+		? `تمام أستاذ ${guestDisplayName(sc)}، بقي فقط الجنسية حتى أجهز مراجعة الحجز.`
+		: `Absolutely, ${guestDisplayName(sc)}. I only need the nationality now so I can prepare the booking review.`;
 }
 
 function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
@@ -1458,6 +1522,8 @@ function hijriRangeText(known = {}) {
 	const checkinHijri = cleanDisplayString(known.checkinHijriText, 120);
 	const checkoutHijri = cleanDisplayString(known.checkoutHijriText, 120);
 	if (checkinHijri && checkoutHijri) return `${checkinHijri} - ${checkoutHijri}`;
+	const calendar = String(known.dateCalendar || "").toLowerCase();
+	if (!["hijri", "mixed"].includes(calendar)) return "";
 	return cleanDisplayString(known.dateRangeOriginalText, 220);
 }
 
@@ -2101,12 +2167,64 @@ async function planTurn(io, supportCaseOrId) {
 	if (mappedRoom && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	if (latestGuest && previousAiAskedFor("nationality", previousAi) && !known.nationality) {
+		const nationality = normalizeNationalityHint(latestText);
+		if (nationality) known.nationality = nationality;
+	}
+	if (latestGuest && previousAiAskedFor("email", previousAi) && !known.email) {
+		const email = cleanEmail(latestText);
+		if (email) known.email = email;
+		else if (guestDeclinesOptionalEmail(latestText, latestAction)) known.emailSkipped = true;
+	}
 	if (latestAction === "skip_email") {
 		known.emailSkipped = true;
 		await saveKnownFacts(key, known);
 		if (!requiredBookingMissing(known).length) {
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 			return sendReview(io, sc, known, hotel, latestGuest);
+		}
+	}
+	if (
+		latestGuest &&
+		quoteInputsKnown(known) &&
+		!quoteMatchesKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return handleQuote(io, sc, hotel, known, latestGuest);
+	}
+	if (latestGuest && quoteMatchesKnown(known)) {
+		const missing = requiredBookingMissing(known);
+		if (
+			missing.length === 1 &&
+			missing[0] === "nationality" &&
+			(guestRequestsBookingReviewStep(latestText, latestAction) ||
+				previousAi?.clientAction === "quote_ready")
+		) {
+			await saveKnownFacts(key, known);
+			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+			return sendAiMessage(io, sc, buildNationalityNeededMessage(sc, known), { latestGuest, known });
+		}
+		if (!missing.length) {
+			await saveKnownFacts(key, known);
+			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+			if (!cleanEmail(known.email) && !known.emailSkipped && !emailAlreadyOffered(sc)) {
+				return sendAiMessage(io, sc, buildOptionalEmailMessage(sc, known), {
+					latestGuest,
+					known,
+					clientAction: "optional_email",
+					quickReplies: emailSkipQuickReplies(activeLanguageCode(sc, known)),
+				});
+			}
+			if (
+				known.emailSkipped ||
+				cleanEmail(known.email) ||
+				emailAlreadyOffered(sc) ||
+				guestRequestsBookingReviewStep(latestText, latestAction)
+			) {
+				return sendReview(io, sc, known, hotel, latestGuest);
+			}
 		}
 	}
 	const previousGuest = previousGuestEntryBeforeLatest(sc, latestGuest);

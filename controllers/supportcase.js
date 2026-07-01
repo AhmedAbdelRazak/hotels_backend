@@ -37,6 +37,13 @@ const SUPPORT_CASE_HOTEL_POPULATE =
 const PUBLIC_CLIENT_SUPPORT_CASE_SELECT =
 	"_id createdAt updatedAt closedAt rating closedBy supporterId ownerId hotelId targetUserId targetUserName targetUserRole caseStatus openedBy conversation displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiToRespond aiResponderName aiPausedAt aiHandoffReason aiReservation escalationStatus escalationReason";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
+const SUPPORT_CASE_LIST_SELECT = PUBLIC_CLIENT_SUPPORT_CASE_SELECT;
+
+const shapeClientSupportCaseListQuery = (query) =>
+	query.select(SUPPORT_CASE_LIST_SELECT).slice(
+		"conversation",
+		-SUPPORT_CASE_LIST_CONVERSATION_LIMIT
+	);
 
 const isAiAgentEnabled = () =>
 	String(process.env.AI_AGENT_ENABLED || "").toLowerCase() === "true";
@@ -436,45 +443,21 @@ const sameClientCaseCountMap = async (req, contacts = []) => {
 	const counts = new Map(normalizedContacts.map((contact) => [contact, 0]));
 	if (!normalizedContacts.length) return counts;
 
-	const rows = await SupportCase.find(
-		withSupportCaseScope(req, {
-			openedBy: "client",
-			$or: [
-				{ clientContact: { $in: normalizedContacts } },
-				{
-					conversation: {
-						$elemMatch: {
-							"messageBy.customerEmail": { $in: normalizedContacts },
-							isSystem: { $ne: true },
-							isAi: { $ne: true },
-							seenByCustomer: true,
-						},
-					},
-				},
-			],
-		})
-	)
-		.select(
-			"clientContact conversation.messageBy.customerEmail conversation.isSystem conversation.isAi conversation.seenByCustomer"
-		)
-		.lean()
-		.exec();
+	const rows = await SupportCase.aggregate([
+		{
+			$match: withSupportCaseScope(req, {
+				openedBy: "client",
+				clientContact: { $in: normalizedContacts },
+			}),
+		},
+		{ $group: { _id: "$clientContact", count: { $sum: 1 } } },
+	]);
 
-	const requestedContactSet = new Set(normalizedContacts);
-	rows.forEach((supportCase) => {
-		const matchedContacts = new Set();
-		const directContact = normalizeEmailOrPhone(supportCase.clientContact);
-		if (requestedContactSet.has(directContact)) matchedContacts.add(directContact);
-		(Array.isArray(supportCase.conversation) ? supportCase.conversation : []).forEach(
-			(entry) => {
-				if (entry?.isSystem || entry?.isAi || entry?.seenByCustomer !== true) return;
-				const contact = normalizeEmailOrPhone(entry?.messageBy?.customerEmail);
-				if (requestedContactSet.has(contact)) matchedContacts.add(contact);
-			}
-		);
-		matchedContacts.forEach((contact) => {
-			counts.set(contact, Number(counts.get(contact) || 0) + 1);
-		});
+	rows.forEach((row) => {
+		const contact = normalizeEmailOrPhone(row?._id);
+		if (contact && counts.has(contact)) {
+			counts.set(contact, Number(row.count || 0));
+		}
 	});
 	return counts;
 };
@@ -1890,12 +1873,11 @@ exports.getOpenSupportCasesForHotelClients = async (req, res) => {
 			return res.status(403).json({ error: "Hotel support access denied" });
 		}
 		grantRequestHotelScope(req, hotelId);
-		const cases = await SupportCase.find({
+		const cases = await shapeClientSupportCaseListQuery(SupportCase.find({
 			caseStatus: "open",
 			openedBy: { $in: ["client"] },
 			hotelId: mongoose.Types.ObjectId(hotelId),
-		})
-			.sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+		}).sort({ updatedAt: -1, createdAt: -1, _id: -1 }))
 			.populate("supporterId")
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
@@ -1965,10 +1947,10 @@ exports.updateSupportCaseForHotel = async (req, res) => {
 
 exports.getOpenSupportCasesClients = async (req, res) => {
 	try {
-		const cases = await SupportCase.find(withSupportCaseScope(req, {
+		const cases = await shapeClientSupportCaseListQuery(SupportCase.find(withSupportCaseScope(req, {
 			caseStatus: "open",
 			openedBy: { $in: ["client"] }, // Client-related cases only
-		}))
+		})))
 			.populate("supporterId")
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
@@ -1982,12 +1964,11 @@ exports.getOpenSupportCasesClients = async (req, res) => {
 
 exports.getEscalatedSupportCasesClients = async (req, res) => {
 	try {
-		const cases = await SupportCase.find(withSupportCaseScope(req, {
+		const cases = await shapeClientSupportCaseListQuery(SupportCase.find(withSupportCaseScope(req, {
 			caseStatus: "open",
 			openedBy: { $in: ["client"] },
 			escalationStatus: "active",
-		}))
-			.sort({ escalatedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+		})).sort({ escalatedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 }))
 			.populate("supporterId")
 			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
 			.lean()
@@ -2052,13 +2033,15 @@ exports.getCloseSupportCasesForHotelClients = async (req, res) => {
 		}
 
 		// Find open support cases for the specified hotel
-		const cases = await SupportCase.find({
+		const cases = await shapeClientSupportCaseListQuery(SupportCase.find({
 			caseStatus: "closed",
 			openedBy: { $in: ["client"] }, // Adjusting for case sensitivity
 			hotelId: mongoose.Types.ObjectId(hotelId), // Ensure hotelId is treated as ObjectId
-		})
+		}))
 			.populate("supporterId")
-			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE);
+			.populate("hotelId", SUPPORT_CASE_HOTEL_POPULATE)
+			.lean()
+			.exec();
 
 		// Return the cases in the response
 		const enrichedCases = await enrichClientSupportCases(cases, req);
@@ -2077,8 +2060,14 @@ exports.getCloseSupportCasesClients = async (req, res) => {
 			openedBy: { $in: ["client"] }, // Adjusting for case sensitivity
 		});
 		const [cases, total] = await Promise.all([
-			SupportCase.find(filter)
-				.sort({ closedAt: -1, updatedAt: -1, createdAt: -1, _id: -1 })
+			shapeClientSupportCaseListQuery(
+				SupportCase.find(filter).sort({
+					closedAt: -1,
+					updatedAt: -1,
+					createdAt: -1,
+					_id: -1,
+				})
+			)
 				.skip(skip)
 				.limit(limit)
 				.populate("supporterId")
