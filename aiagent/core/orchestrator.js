@@ -2414,6 +2414,15 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
+		(latestAction === "place_reservation" ||
+			(previousAi?.clientAction === "review_reservation" &&
+				guestConfirms(latestText, latestAction)))
+	) {
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return submitReservationForCase(io, key);
+	}
+	if (
+		latestGuest &&
 		!shouldLetOpenAIHandleRevision &&
 		quoteInputsKnown(known) &&
 		!quoteMatchesKnown(known) &&

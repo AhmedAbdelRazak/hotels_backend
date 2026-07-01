@@ -95,6 +95,7 @@ Fix:
   - official review if required facts are complete and email is already handled;
   - a short allowed-fields-only request if something required is still missing.
 - One-off QA scripts may set `AI_SKIP_RESERVATION_CONFIRMATION_DISPATCH=true` in their own process to verify reservation creation without sending fake confirmation emails/WhatsApp notifications. Do not set this in production PM2.
+- Final review actions (`place_reservation` / guest confirmation after a review) are handled before quote/review reminder branches, so the final button cannot be swallowed by duplicate-review protection.
 
 Operational note:
 
