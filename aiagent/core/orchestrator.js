@@ -533,6 +533,22 @@ function textMentionsRoomSelection(value = "") {
 	].some((needle) => compact.includes(needle));
 }
 
+function textMentionsSpecificRoomType(value = "") {
+	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	if (ROOM_SELECTION_PATTERNS.some((matcher) => matcher.pattern.test(text))) return true;
+	if (/\b(?:room\s+for\s+[2-5]|rooms\s+for\s+[2-5]|[2-5]\s+(?:beds?|people|persons?|guests?|adults?))\b/i.test(text)) {
+		return true;
+	}
+	const compact = text.replace(/\s+/g, "");
+	return /(?:\u0634\u062e\u0635\u064a\u0646|\u0641\u0631\u062f\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0633\u0631\u064a\u0631\u064a\u0646|\u0627\u0633\u0631\u062a\u064a\u0646|\u062b\u0644\u0627\u062b(?:\u0629|\u0647)?(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631)|\u062a\u0644\u0627\u062a(?:\u0629|\u0647)?(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631)|\u0627?\u0631\u0628\u0639(?:\u0629|\u0647)?(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631)|\u062e\u0645\u0633(?:\u0629|\u0647)?(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631)|[2-5](?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631|\u0627\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a\u064a\u0646))/.test(
+		compact
+	);
+}
+
 function extractRoomSelectionsFromText(value = "") {
 	const text = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")));
 	if (!text.trim()) return [];
@@ -546,7 +562,7 @@ function extractRoomSelectionsFromText(value = "") {
 	}
 	if (!selections.length) {
 		const key = mapRoomToKey(text);
-		if (key) {
+		if (key && textMentionsSpecificRoomType(text)) {
 			selections.push({ roomTypeKey: key, count: roomCountNearMatch(text, { pattern: /room|rooms|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629/i }) });
 		}
 	}
@@ -4631,6 +4647,7 @@ const exportedOrchestrator = {
 		quoteMatchesKnown,
 		extractRoomSelectionsFromText,
 		textMentionsRoomSelection,
+		textMentionsSpecificRoomType,
 		selectionsFromKnown,
 		quoteRoomCount,
 		latestGuestRequestsReservationLookup,
