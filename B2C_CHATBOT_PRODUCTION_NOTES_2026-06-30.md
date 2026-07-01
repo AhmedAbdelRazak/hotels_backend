@@ -70,6 +70,15 @@
   - The automatic AI scheduler replied in about 5.0 seconds.
   - The reply identified as the hotel reception/reservations team for Zad Ajyad.
   - The test case was deleted after verification.
+- `6a4467f7b20693e523ba462f` later showed a false unavailable response after the guest changed dates.
+  - Direct production pricing for Zad Ajyad double room from `2026-08-15` to `2026-08-21` returned available: 6 nights at 85 SAR/night, total 510 SAR.
+  - The risk was stale conversation memory: if a guest changes only part of a previous stay, old check-out dates or old quotes must not be reused.
+  - The orchestrator now clears stale `checkoutISO`, `quote`, Hijri date display text, and pending review state when the guest changes check-in, check-out, room type, room count, or guest counts.
+  - The prompt also tells OpenAI that "check again", "impossible", or similar sales pushback should trigger a re-check when facts are known, not immediate escalation.
+- `6a446a9e68269fb742c575b9` showed OpenAI being too cautious/redundant despite hotel facts being present.
+  - The hotel facts included Safar offer guidance, Nusuk availability, bus details, and Haram distance.
+  - The AI answered with "cannot confirm" style wording and repeatedly redirected to dates.
+  - The prompt now requires the AI to review the full transcript and Known facts before every reply, answer the latest unresolved guest question first, avoid repeating the same request, and answer confidently when hotel facts explicitly include a service, offer, distance, or policy.
 
 ## PMS And Server Health Notes
 
