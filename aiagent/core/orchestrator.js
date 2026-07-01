@@ -1554,9 +1554,23 @@ async function saveKnownFacts(caseId = "", known = {}) {
 }
 
 async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = null) {
-	const missing = requiredBookingMissing(known);
+	let reviewKnown = { ...known, quote: asObject(known.quote) };
+	if (!quoteMatchesKnown(reviewKnown) && quoteInputsKnown(reviewKnown)) {
+		const quoteResult = await quoteTool(sc, reviewKnown);
+		if (quoteResult.available && quoteResult.quote) {
+			reviewKnown = { ...reviewKnown, quote: quoteResult.quote };
+			await saveKnownFacts(caseIdText(sc), reviewKnown);
+		} else {
+			return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, reviewKnown, quoteResult, hotel), {
+				latestGuest,
+				known: reviewKnown,
+				clientAction: "quote_unavailable",
+			});
+		}
+	}
+	const missing = requiredBookingMissing(reviewKnown);
 	if (missing.length) {
-		const languageCode = activeLanguageCode(sc, known);
+		const languageCode = activeLanguageCode(sc, reviewKnown);
 		const ar = /^ar\b/i.test(languageCode);
 		const readable = missing
 			.filter((item) => item !== "quote")
@@ -1585,17 +1599,17 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 		const text = ar
 			? `تمام، بقي فقط ${readable.join("، ")} حتى أجهز مراجعة الحجز بشكل صحيح.`
 			: `Almost ready. I still need ${readable.join(", ")} so I can prepare the booking review correctly.`;
-		return sendAiMessage(io, sc, text, { latestGuest, known });
+		return sendAiMessage(io, sc, text, { latestGuest, known: reviewKnown });
 	}
-	const text = buildReviewMessage(sc, known, hotel);
+	const text = buildReviewMessage(sc, reviewKnown, hotel);
 	const updated = await sendAiMessage(io, sc, text, {
 		latestGuest,
-		known,
+		known: reviewKnown,
 		clientAction: "review_reservation",
-		quickReplies: reviewQuickReplies(activeLanguageCode(sc, known)),
+		quickReplies: reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
 	});
-	known.reviewSentAt = new Date().toISOString();
-	await saveKnownFacts(caseIdText(sc), known);
+	reviewKnown.reviewSentAt = new Date().toISOString();
+	await saveKnownFacts(caseIdText(sc), reviewKnown);
 	return updated;
 }
 
