@@ -2294,15 +2294,17 @@ async function submitReservationForCase(io, caseOrId) {
 			quoteData: quote,
 			room,
 		});
-		dispatchAiReservationConfirmation({
-			caseId,
-			reservation,
-			mode: "initial",
-			includeGuestEmail: Boolean(cleanEmail(known.email)),
-			guestEmail: cleanEmail(known.email),
-		}).catch((error) => {
-			console.error("[aiagent] confirmation dispatch failed:", error?.message || error);
-		});
+		if (!shouldSkipReservationConfirmationDispatch()) {
+			dispatchAiReservationConfirmation({
+				caseId,
+				reservation,
+				mode: "initial",
+				includeGuestEmail: Boolean(cleanEmail(known.email)),
+				guestEmail: cleanEmail(known.email),
+			}).catch((error) => {
+				console.error("[aiagent] confirmation dispatch failed:", error?.message || error);
+			});
+		}
 		known.reservationId = String(reservation._id || "");
 		known.confirmation = reservation.confirmation_number || known.confirmation || "";
 		await saveKnownFacts(caseId, known);
@@ -2633,6 +2635,13 @@ function shouldUsePlanWorker() {
 		.trim()
 		.toLowerCase();
 	return !["0", "false", "no", "off", "disabled"].includes(raw);
+}
+
+function shouldSkipReservationConfirmationDispatch() {
+	const raw = String(process.env.AI_SKIP_RESERVATION_CONFIRMATION_DISPATCH || "")
+		.trim()
+		.toLowerCase();
+	return ["1", "true", "yes", "on"].includes(raw);
 }
 
 function runPlanTurnWorker(caseId = "", reason = "scheduled") {
