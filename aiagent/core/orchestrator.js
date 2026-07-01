@@ -5458,6 +5458,8 @@ const exportedOrchestrator = {
 		bookingIdentityCollectionContext,
 		latestGuestRequestsAlternativeAvailability,
 		alternativeStayChoiceFromText,
+		suggestAlternativeStays,
+		buildAlternativeAvailabilityMessage,
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		latestGuestRequestsReservationCancel,
