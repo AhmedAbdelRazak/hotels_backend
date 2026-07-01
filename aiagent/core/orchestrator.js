@@ -20,7 +20,6 @@ const { normalizeNumberWordsForParsing } = require("./numberWords");
 const {
 	createReservationForCase,
 	updateReservationDatesForCase,
-	getReservationCancellationPolicyForCase,
 	dispatchAiReservationConfirmation,
 } = require("./actions");
 const {
@@ -50,6 +49,8 @@ const ROOM_TYPE_KEYS = [
 	"other",
 ];
 const MAX_AI_ROOM_COUNT = 50;
+const RESERVATION_CHANGE_CONTACT_PHONE = "+1 (909) 222-3374";
+const RESERVATION_CHANGE_CONTACT_WHATSAPP = "https://wa.me/19092223374";
 
 const activeTimers = new Map();
 const activeTurns = new Set();
@@ -1604,6 +1605,118 @@ function buildOptionalEmailMessage(sc = {}, known = {}) {
 		: `Email is optional. If you share it, I can add it for the booking details and receipt, or you can continue without email.`;
 }
 
+function arabicFirstNameFromLatinName(value = "") {
+	const first = cleanDisplayString(value, 80)
+		.split(/\s+/)
+		.find((token) => /^[A-Za-z][A-Za-z'-]{1,}$/.test(token));
+	if (!first) return "";
+	const normalized = first.toLowerCase().replace(/[^a-z]/g, "");
+	const map = {
+		ahmed: "\u0623\u062d\u0645\u062f",
+		ahmad: "\u0623\u062d\u0645\u062f",
+		mohamed: "\u0645\u062d\u0645\u062f",
+		mohammad: "\u0645\u062d\u0645\u062f",
+		muhammad: "\u0645\u062d\u0645\u062f",
+		mahmoud: "\u0645\u062d\u0645\u0648\u062f",
+		mahmood: "\u0645\u062d\u0645\u0648\u062f",
+		ehsan: "\u0625\u062d\u0633\u0627\u0646",
+		ihsan: "\u0625\u062d\u0633\u0627\u0646",
+		taha: "\u0637\u0647",
+	};
+	return map[normalized] || "";
+}
+
+function looksLikeArabicNonNameAddressToken(value = "") {
+	const token = normalizeIntentSearchText(value).replace(/\s+/g, "");
+	if (!token) return true;
+	return /^(?:\u0648\u0643\u0627\u0644\u0629|\u0648\u0643\u0627\u0644\u0647|\u0634\u0631\u0643\u0629|\u0634\u0631\u0643\u0647|\u0645\u0643\u062a\u0628|\u0645\u0624\u0633\u0633\u0629|\u0645\u0624\u0633\u0633\u0647|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u062a\u062d\u0645\u0633\u0647|\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0629|\u062a\u0639\u0628\u0627\u0646\u0647|\u0645\u0631\u0647\u0642|\u0645\u0631\u0647\u0642\u0629|\u0645\u0631\u0647\u0642\u0647|\u0645\u062d\u062a\u0627\u062c|\u0645\u062d\u062a\u0627\u062c\u0629|\u0645\u062d\u062a\u0627\u062c\u0647|\u0639\u0627\u064a\u0632|\u0639\u0627\u064a\u0632\u0629|\u0639\u0627\u064a\u0632\u0647|\u062d\u0632\u064a\u0646|\u0632\u0639\u0644\u0627\u0646|\u0645\u0628\u0633\u0648\u0637|\u0641\u0631\u062d\u0627\u0646|\u0636\u064a\u0641)$/i.test(
+		token
+	);
+}
+
+function firstArabicAddressToken(value = "") {
+	const addressable = addressableNameFromClientName(cleanDisplayString(value, 100));
+	const token = cleanDisplayString(addressable, 80)
+		.split(/\s+/)
+		.find((item) => /^[\u0621-\u064A]{2,}$/u.test(item));
+	if (!token || looksLikeArabicNonNameAddressToken(token)) return "";
+	return token;
+}
+
+function firstArabicNameForAddress(sc = {}, known = {}, latestText = "") {
+	const text = normalizeDigits(String(latestText || ""));
+	const direct = text.match(
+		/(?:\u0623\u0646\u0627|\u0627\u0646\u0627|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)\s+([^.!?\u061f\u060c,\n\r]{2,100})/u
+	);
+	const directToken = direct?.[1] ? firstArabicAddressToken(direct[1]) : "";
+	if (directToken) return directToken;
+	const knownName = cleanDisplayString(known.fullName, 80);
+	if (/[\u0600-\u06FF]/.test(knownName)) return firstArabicAddressToken(knownName);
+	const knownLatinName = arabicFirstNameFromLatinName(knownName);
+	if (knownLatinName) return knownLatinName;
+	const display = cleanDisplayString(guestDisplayName(sc), 80);
+	if (/[\u0600-\u06FF]/.test(display)) return firstArabicAddressToken(display);
+	return arabicFirstNameFromLatinName(display);
+}
+
+function warmBookingPrefix(sc = {}, known = {}, latestText = "") {
+	const text = normalizeIntentSearchText(latestText)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return "";
+	const ar = /^ar\b/i.test(activeLanguageCode(sc, known));
+	const compact = text.replace(/\s+/g, "");
+	const hasExcitement =
+		/\b(excited|so excited|thrilled|happy|can't wait|cannot wait)\b/i.test(text) ||
+		/(?:\u0645\u062a\u062d\u0645\u0633|\u062d\u0645\u0627\u0633|\u0645\u0628\u0633\u0648\u0637|\u0641\u0631\u062d\u0627\u0646)/i.test(compact);
+	const hasTired =
+		/\b(tired|exhausted|stressed|drained|overwhelmed)\b/i.test(text) ||
+		/(?:\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0647|\u0645\u0631\u0647\u0642|\u0645\u062c\u0647\u062f|\u0627\u0644\u062a\u062d\u0636\u064a\u0631\u0627\u062a|\u0634\u0648\u064a\u0629|\u0634\u0648\u064a)/i.test(
+			compact
+		);
+	const hasSad =
+		/\b(sad|upset|down|a bit sad)\b/i.test(text) ||
+		/(?:\u062d\u0632\u064a\u0646|\u0632\u0639\u0644\u0627\u0646|\u0645\u062a\u0636\u0627\u064a\u0642)/i.test(compact);
+	const hasGame =
+		/\b(game|match|football|soccer|won|score)\b/i.test(text) ||
+		/(?:\u0645\u0627\u062a\u0634|\u0645\u0628\u0627\u0631\u0627\u0629|\u0643\u0633\u0628\u062a|\u0641\u0627\u0632\u062a|\u0645\u0635\u0631)/i.test(
+			compact
+		);
+	if (!hasExcitement && !hasTired && !hasSad && !hasGame) return "";
+	if (ar) {
+		const name = firstArabicNameForAddress(sc, known, latestText);
+		const address = name ? ` \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 ${name}` : "";
+		const parts = [];
+		if (hasExcitement) {
+			parts.push(`\u062d\u0645\u0627\u0633\u0643 \u062c\u0645\u064a\u0644${address}\u060c \u0631\u0628\u0646\u0627 \u064a\u062a\u0645\u0645\u0647\u0627 \u0644\u0643 \u0639\u0644\u0649 \u062e\u064a\u0631`);
+		}
+		if (hasTired) {
+			parts.push("\u0648\u0631\u0628\u0646\u0627 \u064a\u0647\u0648\u0646 \u062a\u0639\u0628 \u0627\u0644\u062a\u062d\u0636\u064a\u0631\u0627\u062a");
+		}
+		if (hasSad) {
+			parts.push("\u0648\u0623\u0646\u0627 \u0645\u0639\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629");
+		}
+		if (hasGame) {
+			parts.push("\u0648\u0628\u062e\u0635\u0648\u0635 \u0627\u0644\u0645\u0627\u062a\u0634\u060c \u0645\u0627 \u0639\u0646\u062f\u064a \u062a\u062d\u062f\u064a\u062b \u0645\u0628\u0627\u0634\u0631 \u0627\u0644\u0622\u0646\u060c \u0628\u0633 \u0646\u062e\u0644\u064a \u062d\u062c\u0632\u0643 \u064a\u0645\u0634\u064a \u0628\u0633\u0644\u0627\u0633\u0629");
+		}
+		return `${parts.join("\u060c ")}.`;
+	}
+	const parts = [];
+	if (hasExcitement) parts.push("I love the excitement for your trip");
+	if (hasTired) parts.push("and I hope the preparation gets easier from here");
+	if (hasSad) parts.push("I am with you step by step");
+	if (hasGame) {
+		parts.push("I may not have live match updates right now, but I will keep your booking moving smoothly");
+	}
+	return `${parts.join(", ")}.`;
+}
+
+function withWarmPrefix(message = "", sc = {}, known = {}, latestText = "") {
+	const prefix = warmBookingPrefix(sc, known, latestText);
+	return prefix ? `${prefix}\n${message}` : message;
+}
+
 function buildNationalityNeededMessage(sc = {}, known = {}) {
 	return /^ar\b/i.test(activeLanguageCode(sc, known))
 		? `تمام، بقي فقط الجنسية لتجهيز مراجعة الحجز.`
@@ -2237,6 +2350,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Before every reply, review the full conversation transcript and Known facts. Answer the latest unresolved guest question first, then continue the booking flow only if it feels natural. Do not repeat the same date/name/phone request if you already asked recently; acknowledge the current question and ask only one next question when needed.`,
 		`If the latest guest message corrects or changes earlier booking details, the latest message wins over Known facts. Return the corrected facts and action="get_quote" when exact stay details are now known; never reuse an older quote or older date range after a correction like "instead", "actually", "change", or "something is wrong".`,
 		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
+		`If the guest asks to cancel a reservation or change its status to canceled, return action="cancel_reservation". Never tell the guest the reservation was canceled in chat; the official cancellation/status-change path is WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
 		`If the guest's request is materially unclear or could change the reservation outcome, ask one concise clarification question before acting. Do not ask for clarification for easy typos, dialect wording, or details you can confidently infer from the transcript.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Leave quickReplies empty unless the server has just provided an exact quote or booking review action.`,
@@ -3216,6 +3330,29 @@ function latestGuestRequestsReservationDateUpdate(latestText = "", known = {}) {
 	);
 }
 
+function latestGuestRequestsReservationCancel(latestText = "", known = {}) {
+	const text = normalizeIntentSearchText(latestText)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const cancelIntent =
+		/\b(cancel|cancelation|cancellation)\b/i.test(text) ||
+		/(?:\u0627\u0644\u063a|\u0625\u0644\u063a|\u0623\u0644\u063a|\u0644\u063a\u064a|\u0645\u0644\u063a\u064a|\u0643\u0646\u0633\u0644)/i.test(
+			compact
+		);
+	if (!cancelIntent) return false;
+	const confirmation = confirmationNumberFromText(text) || cleanString(known.confirmation, 40);
+	if (confirmation) return true;
+	return (
+		/\b(reservation|booking|confirmation|status)\b/i.test(text) ||
+		/(?:\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632|\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f|\u062d\u0627\u0644\u0629|\u062d\u0627\u0644\u0647|\u0631\u0642\u0645)/i.test(
+			compact
+		)
+	);
+}
+
 function buildReservationLookupMessage(sc = {}, known = {}, reservation = null) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
@@ -3688,29 +3825,44 @@ async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, r
 	return latestCase;
 }
 
-async function handleCancelReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
-	if (!known.confirmation) {
-		const decision = await askOpenAI({
-			sc,
-			hotel,
-			known,
-			latestGuest,
-			toolResult: { tool: "cancel_reservation", ok: false, code: "missing_confirmation" },
-		});
-		return sendAiMessage(io, sc, decision.reply, { latestGuest, known });
+function buildCancelReservationContactMessage(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const latestText = String(latestGuest?.message || "");
+	const confirmation = cleanDisplayString(known.confirmation, 40);
+	if (ar) {
+		const agentName = localizedAgentName(sc);
+		const name = firstArabicNameForAddress(sc, known, latestText);
+		const address = name ? ` \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 ${name}` : "";
+		const intro = `\u0623\u0643\u064a\u062f${address}\u060c \u0645\u0639\u0643 ${agentName}.`;
+		const body = `\u0644\u0625\u0644\u063a\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0623\u0648 \u062a\u063a\u064a\u064a\u0631 \u062d\u0627\u0644\u062a\u0647 \u0625\u0644\u0649 \u0645\u0644\u063a\u064a\u060c \u0641\u0636\u0644\u0627 \u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0646\u0627 \u0648\u0627\u062a\u0633\u0627\u0628 \u0623\u0648 \u0627\u062a\u0635\u0627\u0644 \u0639\u0644\u0649 ${RESERVATION_CHANGE_CONTACT_PHONE}.`;
+		const link = `\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`;
+		const ref = confirmation
+			? `\u0627\u0630\u0643\u0631 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 ${confirmation} \u0641\u064a \u0627\u0644\u0631\u0633\u0627\u0644\u0629 \u0648\u0633\u064a\u062a\u0645 \u0645\u0631\u0627\u062c\u0639\u062a\u0647 \u0645\u0639\u0643.`
+			: `\u0648\u0644\u0648 \u0645\u0639\u0643 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632\u060c \u0627\u0630\u0643\u0631\u0647 \u0641\u064a \u0631\u0633\u0627\u0644\u0629 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628 \u062d\u062a\u0649 \u062a\u0643\u0648\u0646 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0623\u0633\u0631\u0639.`;
+		return withWarmPrefix([intro, body, link, ref].join("\n"), sc, known, latestText);
 	}
-	const result = await getReservationCancellationPolicyForCase({
-		confirmation: known.confirmation,
-		hotel,
-	});
-	const decision = await askOpenAI({
+	const guestName = guestDisplayName(sc);
+	const intro = `Absolutely ${guestName}, this is ${localizedAgentName(sc)}.`;
+	const body = `To cancel a reservation or change its status to canceled, please WhatsApp or call us at ${RESERVATION_CHANGE_CONTACT_PHONE}.`;
+	const ref = confirmation
+		? `Mention reservation ${confirmation} so the team can review it with you.`
+		: `If you have the confirmation number, include it in the WhatsApp message so the team can review it faster.`;
+	return withWarmPrefix(
+		[intro, body, `WhatsApp: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`, ref].join("\n"),
 		sc,
-		hotel,
 		known,
+		latestText
+	);
+}
+
+async function handleCancelReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	const text = buildCancelReservationContactMessage(sc, known, latestGuest);
+	return sendAiMessage(io, sc, text, {
 		latestGuest,
-		toolResult: { tool: "cancel_reservation", ...result },
+		known,
+		clientAction: "reservation_cancel_contact",
 	});
-	return sendAiMessage(io, sc, decision.reply, { latestGuest, known });
 }
 
 function buildReservationUpdateFallbackMessage(sc = {}, known = {}, result = {}) {
@@ -3750,6 +3902,63 @@ function buildReservationUpdateFallbackMessage(sc = {}, known = {}, result = {})
 		: `I could not update reservation ${confirmation || ""} right now. Please recheck the details, or I can pass it to reception.`;
 }
 
+function buildReservationUpdateIntro(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const latestText = String(latestGuest?.message || "");
+	const prefix = warmBookingPrefix(sc, known, latestText);
+	if (ar) {
+		const agentName = localizedAgentName(sc);
+		const name = firstArabicNameForAddress(sc, known, latestText);
+		const address = name ? ` \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 ${name}` : "";
+		const intro = `\u0623\u0647\u0644\u0627${address}\u060c \u0645\u0639\u0643 ${agentName}. \u0648\u0644\u0627 \u064a\u0647\u0645\u0643\u060c \u0631\u0627\u062c\u0639\u062a \u0627\u0644\u062a\u0648\u0641\u0631 \u0644\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629.`;
+		return prefix ? `${prefix}\n${intro}` : intro;
+	}
+	const guestName = guestDisplayName(sc);
+	const intro = `Hi ${guestName}, this is ${localizedAgentName(sc)}. No problem, I checked availability for the new dates.`;
+	return prefix ? `${prefix}\n${intro}` : intro;
+}
+
+function buildFriendlyReservationUpdateMessage(sc = {}, known = {}, result = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const intro = buildReservationUpdateIntro(sc, known, latestGuest);
+	const confirmation = result.reservation?.confirmation_number || known.confirmation || "";
+	const checkinISO = result.checkinISO || known.checkinISO || "";
+	const checkoutISO = result.checkoutISO || known.checkoutISO || "";
+	if (result.ok) {
+		const total =
+			result.reservation?.total_amount || result.quote?.totals?.totalPriceWithCommission || 0;
+		return ar
+			? [
+					intro,
+					`\u062a\u0645 \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u062d\u062c\u0632 ${confirmation} \u0628\u0646\u062c\u0627\u062d.`,
+					`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062c\u062f\u064a\u062f\u0629: ${formatDate(checkinISO, languageCode)} - ${formatDate(checkoutISO, languageCode)}.`,
+					total ? `\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0627\u0644\u062c\u062f\u064a\u062f: ${formatMoney(total, "SAR", languageCode)}.` : "",
+					`\u0639\u0627\u062f \u0627\u0644\u062d\u062c\u0632 \u0625\u0644\u0649 \u0627\u0646\u062a\u0638\u0627\u0631 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0625\u062f\u0627\u0631\u0629 \u0628\u0639\u062f \u0641\u062d\u0635 \u0627\u0644\u062a\u0648\u0641\u0631.`,
+			  ]
+					.filter(Boolean)
+					.join("\n")
+			: [
+					intro,
+					`Reservation ${confirmation} has been updated successfully.`,
+					`New dates: ${formatDate(checkinISO, languageCode)} - ${formatDate(checkoutISO, languageCode)}.`,
+					total ? `New total: ${formatMoney(total, "SAR", languageCode)}.` : "",
+					`The reservation is pending management confirmation again after the availability check.`,
+			  ]
+					.filter(Boolean)
+					.join("\n");
+	}
+	if (result.code === "unavailable") {
+		return ar
+			? `${intro}\n\u0623\u0639\u062a\u0630\u0631\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u062a\u0648\u0641\u0631 \u0645\u0624\u0643\u062f \u0644\u0647\u0630\u0647 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0644\u0644\u062d\u062c\u0632 ${confirmation}. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u062e\u0631\u0649 \u0648\u0623\u0631\u0627\u062c\u0639\u0647\u0627 \u0644\u0643.`
+			: `${intro}\nI am sorry, reservation ${confirmation} cannot be moved to those dates because confirmed availability is not showing. Send another date range and I will check it.`;
+	}
+	return ar
+		? `${intro}\n\u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 \u062a\u062d\u062f\u064a\u062b \u0627\u0644\u062d\u062c\u0632 ${confirmation || ""} \u0627\u0644\u0622\u0646. \u0633\u0623\u062d\u062a\u0627\u062c \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0623\u0648 \u062a\u062d\u0648\u064a\u0644\u0647\u0627 \u0644\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.`
+		: `${intro}\nI could not update reservation ${confirmation || ""} right now. Please recheck the details, or I can pass it to reception.`;
+}
+
 async function handleUpdateReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
 	if (!known.confirmation || !known.checkinISO || !known.checkoutISO) {
 		const decision = await askOpenAI({
@@ -3771,7 +3980,7 @@ async function handleUpdateReservation(io, sc = {}, hotel = {}, known = {}, late
 		io,
 	});
 	if (result.ok) {
-		return sendAiMessage(io, sc, buildReservationUpdateFallbackMessage(sc, known, result), {
+		return sendAiMessage(io, sc, buildFriendlyReservationUpdateMessage(sc, known, result, latestGuest), {
 			latestGuest,
 			known,
 			clientAction: "reservation_update_success",
@@ -3785,7 +3994,7 @@ async function handleUpdateReservation(io, sc = {}, hotel = {}, known = {}, late
 		toolResult: { tool: "update_reservation", ...result },
 	}).catch((error) => {
 		console.warn("[aiagent] update reservation reply fallback:", error?.message || error);
-		return { reply: buildReservationUpdateFallbackMessage(sc, known, result) };
+		return { reply: buildFriendlyReservationUpdateMessage(sc, known, result, latestGuest) };
 	});
 	return sendAiMessage(io, sc, decision.reply, { latestGuest, known });
 }
@@ -3985,6 +4194,13 @@ async function planTurn(io, supportCaseOrId) {
 			return sendReviewMaybeOfferOptionalEmail(io, sc, known, hotel, latestGuest);
 		}
 	}
+	if (latestGuest && latestGuestRequestsReservationCancel(latestText, known)) {
+		const confirmation = confirmationNumberFromText(latestText);
+		if (confirmation) known.confirmation = confirmation;
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return handleCancelReservation(io, sc, hotel, known, latestGuest);
+	}
 	if (latestGuest && latestGuestRequestsReservationDateUpdate(latestText, known)) {
 		const confirmation = confirmationNumberFromText(latestText);
 		if (confirmation) known.confirmation = confirmation;
@@ -4104,7 +4320,7 @@ async function planTurn(io, supportCaseOrId) {
 				missing.length === 1 && missing[0] === "nationality"
 					? buildNationalityNeededMessage(sc, bookingKnown)
 					: buildMandatoryDetailsMessage(sc, bookingKnown, missing);
-			return sendAiMessage(io, sc, text, {
+			return sendAiMessage(io, sc, withWarmPrefix(text, sc, bookingKnown, latestText), {
 				latestGuest,
 				known: bookingKnown,
 				clientAction: "required_details_needed",
@@ -4139,7 +4355,12 @@ async function planTurn(io, supportCaseOrId) {
 		) {
 			await saveKnownFacts(key, known);
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-			return sendAiMessage(io, sc, buildNationalityNeededMessage(sc, known), { latestGuest, known });
+			return sendAiMessage(
+				io,
+				sc,
+				withWarmPrefix(buildNationalityNeededMessage(sc, known), sc, known, latestText),
+				{ latestGuest, known }
+			);
 		}
 		if (!missing.length) {
 			await saveKnownFacts(key, known);
@@ -4655,6 +4876,7 @@ const exportedOrchestrator = {
 		quoteRoomCount,
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
+		latestGuestRequestsReservationCancel,
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,
 		guestRequestsBookingReviewStep,
@@ -4665,6 +4887,11 @@ const exportedOrchestrator = {
 		arabicReviewAddress,
 		buildReviewMessage,
 		buildStayClarificationMessage,
+		arabicFirstNameFromLatinName,
+		warmBookingPrefix,
+		withWarmPrefix,
+		buildCancelReservationContactMessage,
+		buildFriendlyReservationUpdateMessage,
 		replyPromisesBookingReview,
 		parseJsonObject,
 	},
