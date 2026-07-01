@@ -428,7 +428,7 @@ function peopleCountFromLine(value = "") {
 	);
 	relationshipCount += relationMatches ? relationMatches.length : 0;
 	const arabicRelationMatches = text.match(
-		/(?:أنا|انا|امي|أمي|والدتي|والدي|ابني|ابنى|بنتي|زوجتي|زوجي|اختي|أختي|اخي|أخي|صاحبي|صاحبتي|طفلي|طفلتي)/gi
+		/(?:أنا|انا|امي|أمي|امى|أمى|ماما|والدتي|والدتى|والدي|والدى|بابا|ابني|ابنى|بنتي|بنتى|زوجتي|زوجتى|زوجي|زوجى|اختي|أختي|اختى|أختى|اخي|أخي|اخى|أخى|صاحبي|صاحبتي|صاحبتى|طفلي|طفلى|طفلتي|طفلتى)/gi
 	);
 	relationshipCount += arabicRelationMatches ? arabicRelationMatches.length : 0;
 	return relationshipCount >= 1 && relationshipCount <= 30 ? relationshipCount : null;

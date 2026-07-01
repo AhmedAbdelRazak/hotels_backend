@@ -104,6 +104,7 @@ The date parser and OpenAI prompt now recognize common regional Gregorian month 
 - Maghreb/North Africa examples: `اوت/أوت` = August, `جانفي`, `فيفري`, `أفريل`, `ماي`, `جوان`, `جويلية`, `شتنبر`, `نونبر`, `دجنبر`.
 - Levant/Syriac examples: `آب` = August, `تموز`, `أيلول`, `تشرين الأول`, `تشرين الثاني`, `كانون الأول`, `كانون الثاني`.
 - If the model still cannot confidently convert a regional date phrase, it should ask one short confirmation question before quoting instead of freezing or guessing.
+- Arabic relationship guest counts now include common spelling variants such as `امى`, `ابنى`, `والدتى`, and similar forms so a request like `ليا انا وابنى وامى` is understood as three guests.
 
 Operational note:
 
