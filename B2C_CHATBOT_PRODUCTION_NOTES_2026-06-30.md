@@ -85,6 +85,13 @@
   - Direct quote verification showed the stay is available: 10 nights, total 860 SAR.
   - The prompt now forbids customer-facing "I will check now" replies unless OpenAI returns `get_quote` with structured facts.
   - The orchestrator now guards these replies: if a checking/quote promise is about to be sent without a tool action, it asks OpenAI for a structured correction first. If facts are still missing, it asks the guest for the one missing detail instead of sending fake progress.
+  - The same case also showed that hotel-fact questions such as "is the hotel listed on Nusuk?" must override pending quote flow.
+  - The prompt now says latest hotel-fact questions about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or hotel services must be answered from Hotel facts first.
+  - A safety guard prevents `get_quote` from taking over fact-only questions. If OpenAI still tries, the orchestrator requests a corrected OpenAI reply and falls back to exact hotel facts only if needed.
+  - The case then showed OpenAI could write a booking review as plain text, which meant no operational buttons appeared in the guest widget.
+  - The prompt now says OpenAI must not write final booking reviews as normal replies. It should return `send_review`; the orchestrator sends the official review with buttons.
+  - The official review now always includes the exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.
+  - Optional email remains optional. If OpenAI asks for email, the orchestrator can attach a "continue without email" quick reply so the flow does not get stuck.
 
 ## PMS And Server Health Notes
 
