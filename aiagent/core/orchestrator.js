@@ -521,6 +521,21 @@ function roomCountOnlyFromText(value = "") {
 	return normalizeRoomCount(count, 1);
 }
 
+function preserveImplicitRoomCount(roomSelections = [], known = {}, latestText = "") {
+	const selections = normalizeRoomSelections(roomSelections);
+	if (!selections.length) return selections;
+	if (roomCountOnlyFromText(latestText)) return selections;
+	if (selections.length !== 1 || normalizeRoomCount(selections[0].count, 1) !== 1) {
+		return selections;
+	}
+	const previousRooms = Math.max(
+		normalizeRoomCount(known.rooms, 1),
+		roomSelectionsTotal(known.roomSelections)
+	);
+	if (previousRooms <= 1) return selections;
+	return [{ ...selections[0], count: previousRooms }];
+}
+
 function textMentionsRoomSelection(value = "") {
 	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -772,7 +787,7 @@ function nationalityFromText(value = "") {
 }
 
 function simplePhoneFromLine(value = "") {
-	const raw = cleanDisplayString(value, 80).replace(
+	const raw = normalizeDigits(cleanDisplayString(value, 80)).replace(
 		/^(?:phone|phone number|mobile|mobile number|whatsapp|whats\s*app|\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0631\u0642\u0645 \u0627\u0644\u062c\u0648\u0627\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*[:：,\-]?\s*/i,
 		""
 	);
@@ -783,7 +798,7 @@ function simplePhoneFromLine(value = "") {
 }
 
 function phoneFromText(value = "") {
-	const text = cleanDisplayString(value, 240);
+	const text = normalizeDigits(cleanDisplayString(value, 240));
 	const labeled = text.match(
 		/(?:phone|phone\s+number|mobile|mobile\s+number|whatsapp|whats\s*app|telephone|tel|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0645\u0648\u0628\u0627\u064a\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*(\+?\d[\d\s().-]{6,24})/i
 	);
@@ -1014,10 +1029,25 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		}
 		const roomSelections = extractRoomSelectionsFromText(rawEntryText);
 		if (roomSelections.length && textMentionsRoomSelection(rawEntryText)) {
-			recovered.roomSelections = roomSelections;
-			recovered.rooms = roomSelectionsTotal(roomSelections);
-			if (roomSelections.length === 1) {
-				recovered.roomTypeKey = roomSelections[0].roomTypeKey;
+			const adjustedSelections = preserveImplicitRoomCount(
+				roomSelections,
+				recovered,
+				rawEntryText
+			);
+			recovered.roomSelections = adjustedSelections;
+			recovered.rooms = roomSelectionsTotal(adjustedSelections);
+			if (adjustedSelections.length === 1) {
+				recovered.roomTypeKey = adjustedSelections[0].roomTypeKey;
+			}
+		} else {
+			const roomsOnly = roomCountOnlyFromText(rawEntryText);
+			if (roomsOnly) {
+				recovered.rooms = roomsOnly;
+				if (recovered.roomTypeKey) {
+					recovered.roomSelections = [
+						{ roomTypeKey: recovered.roomTypeKey, count: roomsOnly },
+					];
+				}
 			}
 		}
 		const lines = rawEntryText
@@ -1028,7 +1058,14 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			const roomTypeKey = mapRoomToKey(line);
 			if (roomTypeKey) recovered.roomTypeKey = roomTypeKey;
 			const peopleCount = peopleCountFromLine(line);
-			if (peopleCount) recovered.adults = peopleCount;
+			if (peopleCount) {
+				const rooms = roomSelectionsTotal(recovered.roomSelections) || normalizeRoomCount(recovered.rooms, 1);
+				const capacity = roomCapacityForKey(recovered.roomTypeKey);
+				recovered.adults =
+					rooms > 1 && capacity > 1 && peopleCount === capacity
+						? rooms * capacity
+						: peopleCount;
+			}
 			const phone = phoneFromText(line) || simplePhoneFromLine(line);
 			if (
 				phone &&
@@ -1520,6 +1557,24 @@ function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latest
 		next.nationalityConfirmed = true;
 		delete next.nationalityNeedsConfirmation;
 	}
+	return next;
+}
+
+function confirmGroupCapacityIfGuestConfirms(known = {}, latestText = "", latestAction = "", previousAi = {}) {
+	if (!guestConfirms(latestText, latestAction)) return known;
+	const rooms = roomSelectionsTotal(known.roomSelections) || normalizeRoomCount(known.rooms, 1);
+	const capacity = roomCapacityForKey(known.roomTypeKey);
+	const expectedGuests = rooms * capacity;
+	if (rooms <= 1 || capacity <= 1 || expectedGuests <= 1) return known;
+	const text = normalizeDigits(String(previousAi?.message || ""));
+	if (!text.includes(String(expectedGuests))) return known;
+	if (!/(?:هل\s+المقصود|المقصود|هل\s+أؤكد|هل\s+اكد|أؤكد|اكد|تأكيد|تاكيد|confirm|do you mean|is that)/iu.test(text)) return known;
+	if (!/(?:معتمر|معتمرين|بالغ|بالغين|ضيف|ضيوف|guest|guests|adult|adults|person|people)/iu.test(text)) {
+		return known;
+	}
+	const next = { ...known };
+	next.adults = expectedGuests;
+	if (next.children === undefined) next.children = 0;
 	return next;
 }
 
@@ -4650,7 +4705,9 @@ async function planTurn(io, supportCaseOrId) {
 	const latestText = String(latestGuest?.message || "");
 	const latestSelections = latestGuest ? extractRoomSelectionsFromText(latestText) : [];
 	if (latestSelections.length && textMentionsRoomSelection(latestText)) {
-		known = mergeKnownFacts(known, { roomSelections: latestSelections });
+		known = mergeKnownFacts(known, {
+			roomSelections: preserveImplicitRoomCount(latestSelections, known, latestText),
+		});
 	}
 	const mappedRoom = mapRoomToKey(latestText);
 	const mappedRoomIsSpecific = mappedRoom && textMentionsSpecificRoomType(latestText);
@@ -4686,17 +4743,20 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
 	const latestRoomsOnly = latestGuest ? roomCountOnlyFromText(latestText) : null;
+	let appliedRoomCountOnlyChange = false;
 	if (
 		latestRoomsOnly &&
 		!latestSelections.length &&
 		known.roomTypeKey &&
-		(guestAsksPriceAvailabilityOrBooking(latestText, latestAction) ||
-			["quote_unavailable", "quote_ready"].includes(previousAiAction))
+		(quoteInputsKnown(known) ||
+			guestAsksPriceAvailabilityOrBooking(latestText, latestAction) ||
+			["quote_unavailable", "quote_ready", "required_details_needed"].includes(previousAiAction))
 	) {
 		known = mergeKnownFacts(known, {
 			rooms: latestRoomsOnly,
 			roomSelections: [{ roomTypeKey: known.roomTypeKey, count: latestRoomsOnly }],
 		});
+		appliedRoomCountOnlyChange = true;
 	}
 	let appliedAlternativeStayChoice = false;
 	const alternativeChoice = latestGuest
@@ -4715,6 +4775,12 @@ async function planTurn(io, supportCaseOrId) {
 		: { known, deferToOpenAI: false, appliedQuickDates: false };
 	known = latestRevision.known;
 	known = confirmKnownIdentityIfGuestConfirms(
+		known,
+		latestText,
+		latestAction,
+		previousAi
+	);
+	known = confirmGroupCapacityIfGuestConfirms(
 		known,
 		latestText,
 		latestAction,
@@ -4780,6 +4846,12 @@ async function planTurn(io, supportCaseOrId) {
 		if (confirmation) known.confirmation = confirmation;
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
+	if (appliedRoomCountOnlyChange && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		logTurnStage(key, "room_count_correction_quote_start");
+		return handleQuote(io, sc, hotel, known, latestGuest);
 	}
 	if (appliedAlternativeStayChoice && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
 		await saveKnownFacts(key, known);
@@ -5456,6 +5528,7 @@ const exportedOrchestrator = {
 		mentionsExplicitReservationIdentifier,
 		latestGuestLooksLikeBookingIdentityAnswer,
 		bookingIdentityCollectionContext,
+		confirmGroupCapacityIfGuestConfirms,
 		latestGuestRequestsAlternativeAvailability,
 		alternativeStayChoiceFromText,
 		suggestAlternativeStays,
