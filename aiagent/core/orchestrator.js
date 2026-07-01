@@ -343,6 +343,18 @@ function normalizeIntentSearchText(value = "") {
 		.toLowerCase();
 }
 
+function compactNameForCompare(value = "") {
+	return normalizeIntentSearchText(value)
+		.replace(/[^\p{L}\d]+/gu, "")
+		.trim();
+}
+
+function sameBookingName(left = "", right = "") {
+	const a = compactNameForCompare(left);
+	const b = compactNameForCompare(right);
+	return Boolean(a && b && a === b);
+}
+
 function cleanString(value = "", max = 240) {
 	return normalizeDigits(value).replace(/\s+/g, " ").trim().slice(0, max);
 }
@@ -928,7 +940,7 @@ function peopleCountFromLine(value = "") {
 	const arabicMatch = arabicGuestWordCounts.find((item) => item.pattern.test(text));
 	if (arabicMatch) return arabicMatch.value;
 	let relationshipCount = 0;
-	if (/\b(myself|me)\b/i.test(text)) relationshipCount += 1;
+	const hasEnglishSelf = /\b(myself|me)\b/i.test(text);
 	const relationMatches = text.match(
 		/\b(mom|mother|mum|father|dad|sister|brother|wife|husband|son|daughter|friend|parent|parents|kid|child|children)\b/gi
 	);
@@ -937,6 +949,16 @@ function peopleCountFromLine(value = "") {
 		/(?:أنا|انا|امي|أمي|امى|أمى|ماما|والدتي|والدتى|والدي|والدى|بابا|ابني|ابنى|بنتي|بنتى|زوجتي|زوجتى|زوجي|زوجى|اختي|أختي|اختى|أختى|اخي|أخي|اخى|أخى|صاحبي|صاحبتي|صاحبتى|طفلي|طفلى|طفلتي|طفلتى)/gi
 	);
 	relationshipCount += arabicRelationMatches ? arabicRelationMatches.length : 0;
+	const selfOnlyArabicMatches = text.match(
+		/(?:^|[\s،,])(?:\u0623\u0646\u0627|\u0627\u0646\u0627)(?=$|[\s،,]|\u0648)/giu
+	);
+	const selfOnlyArabicCount = selfOnlyArabicMatches ? selfOnlyArabicMatches.length : 0;
+	if (selfOnlyArabicCount && relationshipCount <= selfOnlyArabicCount) {
+		relationshipCount = 0;
+	}
+	if (relationshipCount > 0 && hasEnglishSelf) {
+		relationshipCount += 1;
+	}
 	return relationshipCount >= 1 && relationshipCount <= 30 ? relationshipCount : null;
 }
 
@@ -991,7 +1013,15 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (/(full name|guest name|nationality|phone number|phone|complete your booking|booking review)/i.test(text)) {
 				collectingBookingDetails = true;
 			}
-			Object.assign(recovered, quoteFactsFromAiMessage(entry));
+			const aiFacts = quoteFactsFromAiMessage(entry);
+			if (
+				Number(recovered.adults || 0) > 1 &&
+				Number(aiFacts.adults || 0) > 0 &&
+				Number(aiFacts.adults || 0) < Number(recovered.adults || 0)
+			) {
+				delete aiFacts.adults;
+			}
+			Object.assign(recovered, aiFacts);
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (isPlausibleBookingName(value)) recovered.fullName = value;
@@ -1102,6 +1132,13 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 					recovered.fullNameConfirmed = true;
 					delete recovered.fullNameNeedsConfirmation;
 				}
+			} else if (
+				recovered.fullNameNeedsConfirmation &&
+				collectingBookingDetails &&
+				sameBookingName(recovered.fullName, nameHintFromLine(line))
+			) {
+				recovered.fullNameConfirmed = true;
+				delete recovered.fullNameNeedsConfirmation;
 			}
 		}
 	}
