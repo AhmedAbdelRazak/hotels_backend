@@ -942,10 +942,18 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 					delete recovered.nationalityNeedsConfirmation;
 				}
 			}
-			if (!recovered.fullName) {
-				const explicitBookingName = bookingNameFromLine(line);
-				const name =
-					explicitBookingName || (collectingBookingDetails ? nameHintFromLine(line) : "");
+			const explicitBookingName = bookingNameFromLine(line);
+			if (
+				explicitBookingName &&
+				(!recovered.fullName ||
+					recovered.fullNameNeedsConfirmation ||
+					!recovered.fullNameConfirmed)
+			) {
+				recovered.fullName = explicitBookingName;
+				recovered.fullNameConfirmed = true;
+				delete recovered.fullNameNeedsConfirmation;
+			} else if (!recovered.fullName) {
+				const name = collectingBookingDetails ? nameHintFromLine(line) : "";
 				if (name) {
 					recovered.fullName = name;
 					recovered.fullNameConfirmed = true;
@@ -1337,8 +1345,27 @@ function previousAiAskedForIdentityConfirmation(previousAi = {}) {
 	return hasConfirm && hasIdentity;
 }
 
+function guestConfirmsIdentityDetails(value = "", action = "") {
+	if (!guestConfirms(value, action)) return false;
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const hasIdentity = /\b(name|phone|mobile|nationality|details|data)\b/i.test(text) ||
+		/(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a)/i.test(text);
+	const hasCorrect = /\b(correct|right|accurate|yes)\b/i.test(text) ||
+		/(?:\u0635\u062d\u064a\u062d|\u0635\u062d|\u0645\u0636\u0628\u0648\u0637|\u0645\u0638\u0628\u0648\u0637|\u0646\u0639\u0645|\u0627\u064a\u0648\u0647|\u0627\u064a\u0648\u0627)/i.test(text);
+	return hasIdentity && hasCorrect;
+}
+
 function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latestAction = "", previousAi = {}) {
-	if (!previousAiAskedForIdentityConfirmation(previousAi)) return known;
+	if (
+		!previousAiAskedForIdentityConfirmation(previousAi) &&
+		!guestConfirmsIdentityDetails(latestText, latestAction)
+	) {
+		return known;
+	}
 	if (!guestConfirms(latestText, latestAction)) return known;
 	const next = { ...known };
 	if (next.fullName && next.fullNameNeedsConfirmation) {
