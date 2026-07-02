@@ -569,6 +569,14 @@ function cleanPhone(value = "") {
 	return normalizeDigits(value).replace(/[^\d+]/g, "").slice(0, 32);
 }
 
+function profilePhoneForBooking(sc = {}) {
+	const contactType = String(sc.clientContactType || "").toLowerCase();
+	const contact = String(sc.clientContact || "");
+	if (contactType === "email" || contact.includes("@")) return "";
+	const phone = cleanPhone(contact);
+	return phone && phone.replace(/[^\d]/g, "").length >= 7 ? phone : "";
+}
+
 function isShortAffirmativeToken(value = "") {
 	const compact = normalizeIntentSearchText(value)
 		.replace(/[^\p{L}\d]+/gu, "")
@@ -1889,20 +1897,9 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (!recovered.fullNameConfirmed) recovered.fullNameNeedsConfirmation = true;
 		}
 	}
-	if (!recovered.phone && String(sc.clientContactType || "").toLowerCase() === "phone") {
-		const phone = cleanPhone(sc.clientContact);
-		if (phone && phone.replace(/[^\d]/g, "").length >= 7) {
-			recovered.phone = phone;
-			if (!recovered.phoneConfirmed) recovered.phoneNeedsConfirmation = true;
-		}
-	}
-	if (
-		!recovered.phone &&
-		String(sc.clientContactType || "").toLowerCase() !== "email" &&
-		!String(sc.clientContact || "").includes("@")
-	) {
-		const phone = cleanPhone(sc.clientContact);
-		if (phone && phone.replace(/[^\d]/g, "").length >= 7) {
+	if (!recovered.phone) {
+		const phone = profilePhoneForBooking(sc);
+		if (phone) {
 			recovered.phone = phone;
 			if (!recovered.phoneConfirmed) recovered.phoneNeedsConfirmation = true;
 		}
@@ -1912,6 +1909,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 	let lastAiAskedEmail = false;
 	let lastAiAskedGuestCount = false;
 	let lastAiAskedBookingName = false;
+	let lastAiAskedPhone = false;
 	let lastAiAskedCheckinDate = false;
 	let lastAiAskedCheckoutDate = false;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
@@ -1951,6 +1949,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			lastAiAskedEmail = previousAiAskedFor("email", entry);
 			lastAiAskedGuestCount = previousAiAskedForGuestCount(entry);
 			lastAiAskedBookingName = previousAiAskedForBookingName(entry);
+			lastAiAskedPhone = previousAiAskedForPhone(entry);
 			lastAiAskedCheckinDate = previousAiAskedForCheckinDate(entry);
 			lastAiAskedCheckoutDate = previousAiAskedForCheckoutDate(entry);
 			continue;
@@ -1989,6 +1988,17 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered.fullName = profileName;
 				recovered.fullNameConfirmed = true;
 				delete recovered.fullNameNeedsConfirmation;
+			}
+		}
+		if (sameAsDisplayedPhoneIntent(rawEntryText)) {
+			const profilePhone = profilePhoneForBooking(sc);
+			const phone = profilePhone || cleanPhone(recovered.phone);
+			const shouldConfirmPhone =
+				lastAiAskedPhone || recovered.phoneNeedsConfirmation || !recovered.phone;
+			if (shouldConfirmPhone && phone && phone.replace(/[^\d]/g, "").length >= 7) {
+				recovered.phone = phone;
+				recovered.phoneConfirmed = true;
+				delete recovered.phoneNeedsConfirmation;
 			}
 		}
 		if (action === "proceed") collectingBookingDetails = true;
@@ -2823,8 +2833,8 @@ function guestRequestsConfirmationDelivery(value = "", action = "") {
 	if (!text) return false;
 	const compact = text.replace(/\s+/g, "");
 	const sendIntent =
-		/\b(?:send|resend|email|whatsapp|whats\s*app|deliver|share)\b/i.test(text) ||
-		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0627\u0644\u0627\u0631\u0633\u0627\u0644|\u0627\u0644\u0625\u0631\u0633\u0627\u0644|\u0625\u0631\u0633\u0627\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0628\u0639\u062a|\u0628\u0639\u062b|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0648\u062a\u0633|\u0627\u064a\u0645\u064a\u0644|\u0625\u064a\u0645\u064a\u0644|\u0627\u0644\u0627\u064a\u0645\u064a\u0644|\u0627\u0644\u0625\u064a\u0645\u064a\u0644)/iu.test(text);
+		/\b(?:send|resend|email|whatsapp|whats\s*app|deliver|share|can|could|may|possible|get|have)\b/i.test(text) ||
+		/(?:\u0645\u0645\u0643\u0646|\u064a\u0646\u0641\u0639|\u0627\u0642\u062f\u0631|\u0623\u0642\u062f\u0631|\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0639\u0627\u064a\u0632|\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0627\u0644\u0627\u0631\u0633\u0627\u0644|\u0627\u0644\u0625\u0631\u0633\u0627\u0644|\u0625\u0631\u0633\u0627\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0628\u0639\u062a|\u0628\u0639\u062b|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0648\u062a\u0633|\u0627\u064a\u0645\u064a\u0644|\u0625\u064a\u0645\u064a\u0644|\u0627\u0644\u0627\u064a\u0645\u064a\u0644|\u0627\u0644\u0625\u064a\u0645\u064a\u0644)/iu.test(text);
 	const confirmationContext =
 		/\b(?:confirmation|booking confirmation|reservation confirmation|confirmation number|booking number|reservation number)\b/i.test(text) ||
 		/(?:\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f\s+\u0627\u0644\u062d\u062c\u0632|\u062a\u0627\u0643\u064a\u062f\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0645\u0644\u062e\u0635\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0644\u062e\u0635\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f)/iu.test(text);
@@ -3374,6 +3384,75 @@ function sameAsDisplayedNameIntent(value = "") {
 	);
 }
 
+function previousAiAskedForPhone(previousAi = {}) {
+	const text = normalizeIntentSearchText(previousAi?.message || "")
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const action = String(previousAi?.clientAction || "").toLowerCase();
+	if (!text && !action) return false;
+	if (action.includes("required_details") || action.includes("phone")) return true;
+	const mentionsPhone =
+		/\b(phone|phone number|mobile|mobile number|whatsapp|contact number)\b/i.test(text) ||
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0631\u0642\u0645\u0643|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)/iu.test(
+			text
+		);
+	if (!mentionsPhone) return false;
+	const asksPhone =
+		/(?:send|provide|share|write|type|enter|confirm|verify|is this|is it).{0,60}(?:phone|phone number|mobile|whatsapp|contact number)/i.test(
+			text
+		) ||
+		/(?:phone|phone number|mobile|whatsapp|contact number).{0,50}(?:please|required|needed|missing|correct|right|confirm)/i.test(
+			text
+		) ||
+		/(?:\u0623\u0631\u0633\u0644|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0627\u0643\u062a\u0628|\u0623\u0643\u062a\u0628|\u0641\u0636\u0644\u0627|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0623\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0623\u0643\u062f|\u0627\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,70}(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0631\u0642\u0645\u0643|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)/iu.test(
+			text
+		) ||
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0631\u0642\u0645\u0643|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628).{0,50}(?:\u0645\u0637\u0644\u0648\u0628|\u0646\u0627\u0642\u0635|\u0641\u0642\u0637|\u0635\u062d\u064a\u062d|\u0623\u0643\u062f|\u0627\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(
+			text
+		);
+	const acknowledgesPhone =
+		/(?:received|saved|got|confirmed|noted).{0,50}(?:phone|phone number|mobile|whatsapp|contact number)/i.test(
+			text
+		) ||
+		/(?:\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0627\u0644\u0631\u0642\u0645|\u0631\u0642\u0645\u0643).{0,60}(?:\u062a\u0645|\u0648\u0635\u0644|\u0627\u0633\u062a\u0644\u0627\u0645|\u0627\u0633\u062a\u0644\u0645|\u062a\u0633\u062c\u064a\u0644|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(
+			text
+		) ||
+		/(?:\u062a\u0645|\u0648\u0635\u0644|\u0627\u0633\u062a\u0644\u0627\u0645|\u0627\u0633\u062a\u0644\u0645|\u062a\u0633\u062c\u064a\u0644|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,60}(?:\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0627\u0644\u0631\u0642\u0645|\u0631\u0642\u0645\u0643)/iu.test(
+			text
+		);
+	return asksPhone && !acknowledgesPhone;
+}
+
+function sameAsDisplayedPhoneIntent(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:same|profile|displayed|visible|shown|current|case|existing)\b.{0,45}\b(?:phone|number|mobile|whatsapp|contact)\b/i.test(
+			text
+		) ||
+		/\b(?:phone|number|mobile|whatsapp|contact)\b.{0,45}\b(?:same|profile|displayed|visible|shown|current|case|existing)\b/i.test(
+			text
+		) ||
+		/\b(?:use|take|keep|confirm|approve)\b.{0,35}\b(?:the\s+)?(?:same|current|existing)\b.{0,35}\b(?:phone|number|mobile|whatsapp|contact)\b/i.test(
+			text
+		) ||
+		/(?:\u0646\u0641\u0633|\u0647\u0648\u0646\u0641\u0633|\u0647\u064a\u0646\u0641\u0633|\u0647\u0649\u0646\u0641\u0633|\u0627\u0639\u062a\u0645\u062f|\u0627\u0639\u062a\u0645\u062f\u064a|\u062e\u0644\u064a\u0647).{0,30}(?:\u0631\u0642\u0645|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)/iu.test(
+			compact
+		) ||
+		/(?:\u0631\u0642\u0645|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628).{0,60}(?:\u0627\u0644\u0644\u064a|\u0627\u0644\u0644\u0649|\u0627\u0644\u0630\u064a|\u0627\u0644\u0645\u0648\u062c\u0648\u062f|\u0645\u0648\u062c\u0648\u062f|\u0627\u0644\u0638\u0627\u0647\u0631|\u0638\u0627\u0647\u0631|\u0628\u0627\u064a\u0646|\u0634\u0627\u064a\u0641|\u0634\u0627\u064a\u0641\u0627|\u0634\u0627\u064a\u0641\u0627\u0647|\u0639\u0646\u062f\u0643|\u0639\u0646\u062f\u0643\u0645|\u0645\u0639\u0627\u0643|\u0645\u0639\u0643)/iu.test(
+			compact
+		) ||
+		/(?:\u0627\u0644\u0644\u064a|\u0627\u0644\u0644\u0649|\u0627\u0644\u0630\u064a).{0,30}(?:\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u0639\u0646\u062f\u0643|\u0639\u0646\u062f\u0643\u0645).{0,35}(?:\u0634\u0627\u064a\u0641|\u0634\u0627\u064a\u0641\u0627|\u0634\u0627\u064a\u0641\u0627\u0647|\u0638\u0627\u0647\u0631|\u0628\u0627\u064a\u0646|\u0645\u0648\u062c\u0648\u062f|\u0645\u0639\u0627\u0643|\u0645\u0639\u0643)/iu.test(
+			compact
+		)
+	);
+}
+
 function applyDisplayedNameAnswer(sc = {}, known = {}, latestText = "", previousAi = {}) {
 	if (!sameAsDisplayedNameIntent(latestText)) return known;
 	if (bookingIdentityFactsFromText(latestText, { allowName: true }).fullName) return known;
@@ -3388,6 +3467,23 @@ function applyDisplayedNameAnswer(sc = {}, known = {}, latestText = "", previous
 	next.fullName = profileName;
 	next.fullNameConfirmed = true;
 	delete next.fullNameNeedsConfirmation;
+	return next;
+}
+
+function applyDisplayedPhoneAnswer(sc = {}, known = {}, latestText = "", previousAi = {}) {
+	if (!sameAsDisplayedPhoneIntent(latestText)) return known;
+	if (bookingIdentityFactsFromText(latestText).phone) return known;
+	const shouldApply =
+		previousAiAskedForPhone(previousAi) ||
+		known.phoneNeedsConfirmation ||
+		requiredBookingMissing(known).includes("phone");
+	if (!shouldApply) return known;
+	const phone = profilePhoneForBooking(sc) || cleanPhone(known.phone);
+	if (!phone || phone.replace(/[^\d]/g, "").length < 7) return known;
+	const next = { ...known };
+	next.phone = phone;
+	next.phoneConfirmed = true;
+	delete next.phoneNeedsConfirmation;
 	return next;
 }
 
@@ -4014,22 +4110,22 @@ function buildMandatoryDetailsMessage(sc = {}, known = {}, missing = []) {
 	if (known.fullNameNeedsConfirmation && known.fullName) {
 		confirmationItems.push(
 			ar
-				? `\u0627\u0633\u0645 \u0627\u0644\u062d\u062c\u0632: ${cleanDisplayString(known.fullName, 80)}`
-				: `booking name: ${cleanDisplayString(known.fullName, 80)}`
+				? `\u062a\u0623\u0643\u064a\u062f \u0627\u0633\u0645 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0648\u062c\u0648\u062f: ${cleanDisplayString(known.fullName, 80)}`
+				: `confirm existing booking name: ${cleanDisplayString(known.fullName, 80)}`
 		);
 	}
 	if (known.phoneNeedsConfirmation && known.phone) {
 		confirmationItems.push(
 			ar
-				? `\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641: ${cleanPhone(known.phone)}`
-				: `phone: ${cleanPhone(known.phone)}`
+				? `\u062a\u0623\u0643\u064a\u062f \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641 \u0627\u0644\u0645\u0648\u062c\u0648\u062f: ${cleanPhone(known.phone)}`
+				: `confirm existing phone: ${cleanPhone(known.phone)}`
 		);
 	}
 	if (known.nationalityNeedsConfirmation && known.nationality) {
 		confirmationItems.push(
 			ar
-				? `\u0627\u0644\u062c\u0646\u0633\u064a\u0629: ${cleanDisplayString(known.nationality, 60)}`
-				: `nationality: ${cleanDisplayString(known.nationality, 60)}`
+				? `\u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062c\u0646\u0633\u064a\u0629 \u0627\u0644\u0645\u0648\u062c\u0648\u062f\u0629: ${cleanDisplayString(known.nationality, 60)}`
+				: `confirm existing nationality: ${cleanDisplayString(known.nationality, 60)}`
 		);
 	}
 	if (confirmationItems.length) {
@@ -4043,17 +4139,23 @@ function buildMandatoryDetailsMessage(sc = {}, known = {}, missing = []) {
 			.map((item) => labels[item] || item)
 			.filter(Boolean);
 		const allRows = [...confirmationItems, ...stillMissing];
+		const confirmHint =
+			known.phoneNeedsConfirmation && known.phone
+				? ar
+					? `\u0644\u0648 \u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641 \u0635\u062d\u064a\u062d\u060c \u064a\u0643\u0641\u064a \u062a\u0642\u0648\u0644: \u0646\u0641\u0633 \u0627\u0644\u0631\u0642\u0645.`
+					: `If the phone is correct, you can simply say: same number.`
+				: "";
 		if (ar) {
 			return buildDetailRowsMessage(
-				`\u0642\u0628\u0644 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0646\u0647\u0627\u0626\u064a\u0629\u060c \u0623\u0643\u062f \u0644\u064a \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0648\u0623\u0631\u0633\u0644 \u0627\u0644\u0646\u0627\u0642\u0635:`,
+				`\u0642\u0628\u0644 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u0646\u0647\u0627\u0626\u064a\u0629\u060c \u0623\u0631\u0633\u0644 \u0627\u0644\u0646\u0627\u0642\u0635 \u0648\u0623\u0643\u062f \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u0648\u062c\u0648\u062f\u0629:`,
 				allRows,
-				""
+				confirmHint
 			);
 		}
 		return buildDetailRowsMessage(
-			`Before the final review, please confirm the details and send anything missing:`,
+			`Before the final review, please send what is missing and confirm the existing details:`,
 			allRows,
-			""
+			confirmHint
 		);
 	}
 	if (!readable.length) {
@@ -5095,6 +5197,26 @@ function buildValueObjectionFallbackReply(sc = {}, hotel = {}, known = {}, lates
 	]
 		.filter(Boolean)
 		.join("\n");
+}
+
+function buildPendingConfirmationNumberReply(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const latestText = String(latestGuest?.message || "");
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known, latestText)}\u060c \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 \u064a\u0635\u062f\u0631 \u0628\u0639\u062f \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0648\u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632 \u0631\u0633\u0645\u064a\u0627.`,
+			quoteMatchesKnown(known)
+				? "\u0625\u0630\u0627 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0635\u062d\u064a\u062d\u0629\u060c \u0623\u0643\u062f \u0644\u064a \u0648\u0623\u0643\u0645\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u060c \u0648\u0628\u0639\u062f\u0647\u0627 \u0623\u0631\u0633\u0644 \u0644\u0643 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 \u0645\u0628\u0627\u0634\u0631\u0629."
+				: "\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0623\u0648\u0644\u0627\u060c \u0648\u0628\u0639\u062f \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u064a\u0638\u0647\u0631 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632.",
+		].join("\n");
+	}
+	return [
+		`${shortGuestAddressName(sc, known, latestText)}, the booking number is issued after the review is confirmed and the reservation is officially created.`,
+		quoteMatchesKnown(known)
+			? "If the details are correct, confirm and I will create the reservation, then send you the booking number right away."
+			: "I will check the confirmed availability and price first; after confirmation, the booking number will be issued.",
+	].join("\n");
 }
 
 function priceGuidanceLine(sc = {}, known = {}, languageCode = "en") {
@@ -11381,17 +11503,11 @@ async function executeBrainFirstDecision({
 		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		!latestGuestRejectsQuoteOrSelection(latestText)
 	) {
-		const missing = requiredBookingMissing(nextKnown);
 		nextDecision = normalizeDecision({
 			...nextDecision,
-			action:
-				previousAiAction === "review_reservation" && !missing.length
-					? "submit_reservation"
-					: "send_review",
-			reply: "",
-			reason: missing.length
-				? "confirmation_delivery_request_needs_missing_details"
-				: "confirmation_delivery_request_needs_official_action",
+			action: "reply",
+			reply: buildPendingConfirmationNumberReply(sc, nextKnown, latestGuest),
+			reason: "confirmation_delivery_request_before_creation",
 		});
 	}
 	if (
@@ -11640,6 +11756,19 @@ async function executeBrainFirstDecision({
 		});
 		await emitTyping(io, sc, false);
 		return (await getSupportCaseById(key).catch(() => null)) || sc;
+	}
+	if (
+		(latestGuestRaisesBudgetConcern(latestText) ||
+			(latestGuest && latestGuestAsksOtherCloserHotel(latestGuest))) &&
+		!replyHasHotelValuePitch(reply)
+	) {
+		reply = buildValueObjectionFallbackReply(sc, hotel, nextKnown, latestGuest);
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action: "reply",
+			reply,
+			reason: nextDecision.reason || "value_objection_final_fallback",
+		});
 	}
 	reply = await polishCustomerReply({
 		sc,
@@ -11917,6 +12046,7 @@ async function planTurn(io, supportCaseOrId) {
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = mergeKnownFacts(known, explicitGuestCountFactsFromText(latestText));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
+		known = applyDisplayedPhoneAnswer(sc, known, latestText, previousAi);
 		if (
 			bookingIdentityCollectionContext(sc, previousAi, known) &&
 			!guestDeclinesOptionalEmail(latestText, latestAction)
@@ -11980,6 +12110,28 @@ async function planTurn(io, supportCaseOrId) {
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
 		}
+	}
+	if (
+		latestGuest &&
+		guestRequestsConfirmationDelivery(latestText, latestAction) &&
+		!knownHasReservationConfirmation(known) &&
+		!latestGuestRejectsQuoteOrSelection(latestText) &&
+		(quoteInputsKnown(known) ||
+			splitStayQuoteInputsKnown(known) ||
+			["quote_ready", "split_stay_quote_ready", "review_reservation"].includes(previousAiAction))
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return sendAiMessage(io, sc, buildPendingConfirmationNumberReply(sc, known, latestGuest), {
+			latestGuest,
+			known,
+			quickReplies: operationalQuickRepliesForReply(
+				{ action: "reply", reply: buildPendingConfirmationNumberReply(sc, known, latestGuest) },
+				known,
+				sc,
+				latestGuest
+			),
+		});
 	}
 	if (
 		latestGuest &&
@@ -12991,6 +13143,19 @@ async function planTurn(io, supportCaseOrId) {
 				{ latestGuest, known }
 			);
 		}
+		if (
+			(latestGuestRaisesBudgetConcern(latestText) ||
+				(latestGuest && latestGuestAsksOtherCloserHotel(latestGuest))) &&
+			!replyHasHotelValuePitch(reply)
+		) {
+			reply = buildValueObjectionFallbackReply(sc, hotel, known, latestGuest);
+			decision = normalizeDecision({
+				...decision,
+				action: "reply",
+				reply,
+				reason: decision.reason || "value_objection_final_fallback",
+			});
+		}
 		reply = await polishCustomerReply({
 			sc,
 			hotel,
@@ -13439,6 +13604,10 @@ const exportedOrchestrator = {
 		warmBookingPrefix,
 		withWarmPrefix,
 		buildMandatoryDetailsMessage,
+		profilePhoneForBooking,
+		previousAiAskedForPhone,
+		sameAsDisplayedPhoneIntent,
+		applyDisplayedPhoneAnswer,
 		buildCancelReservationContactMessage,
 		buildFriendlyReservationUpdateMessage,
 		buildHotelFactFallbackMessage,
