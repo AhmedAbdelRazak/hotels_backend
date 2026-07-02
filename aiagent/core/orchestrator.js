@@ -2383,14 +2383,45 @@ function bookingProcessReplyNeedsCorrection(decision = {}, known = {}, latestGue
 			reply
 		);
 	const knownRoomLabel = cleanDisplayString(known.quote?.roomLabel || "", 120);
+	const dateMentioned = (iso = "") => {
+		if (!validISODate(iso)) return false;
+		const normalizedIso = normalizeIntentSearchText(iso);
+		const formatted = normalizeIntentSearchText(
+			formatDate(iso, known.languageCode || "en")
+		)
+			.replace(/[.!?\u061f\u060c,]+/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+		const parts = iso.split("-");
+		const monthIndex = Number(parts[1]) - 1;
+		const day = Number(parts[2]);
+		const monthNames = [
+			"january",
+			"february",
+			"march",
+			"april",
+			"may",
+			"june",
+			"july",
+			"august",
+			"september",
+			"october",
+			"november",
+			"december",
+		];
+		const monthName = monthNames[monthIndex] || "";
+		const monthDayPattern =
+			monthName && day
+				? new RegExp(`\\b${monthName}\\s+${day}(?:st|nd|rd|th)?\\b`, "i")
+				: null;
+		return (
+			reply.includes(normalizedIso) ||
+			(Boolean(formatted) && reply.includes(formatted)) ||
+			Boolean(monthDayPattern?.test(reply))
+		);
+	};
 	const hasKnownDateReference =
-		!hasDates ||
-		reply.includes(String(known.checkinISO || "").toLowerCase()) ||
-		reply.includes(String(known.checkoutISO || "").toLowerCase()) ||
-		/(?:already|noted|have|got).{0,40}(?:date|dates|check\s*in|check\s*out|stay)/i.test(
-			reply
-		) ||
-		/(?:date|dates|check\s*in|check\s*out|stay).{0,40}(?:already|noted)/i.test(reply);
+		!hasDates || (dateMentioned(known.checkinISO) && dateMentioned(known.checkoutISO));
 	const hasKnownRoomReference =
 		!hasRoom ||
 		(knownRoomLabel && reply.includes(normalizeIntentSearchText(knownRoomLabel))) ||
@@ -8822,7 +8853,7 @@ async function executeBrainFirstDecision({
 			code: "booking_process_context_guard",
 			extra: { missing: requiredBookingMissing(nextKnown) },
 			instruction:
-				"The guest asked about the booking process/next step, but Known facts already include part of the stay. Do not restart with generic steps or ask again for known dates/room choices. Acknowledge the already-known dates, room/quote status, and then give the exact next action. If a valid quote is available and required fields are missing, ask only for the missing fields. If the selected/latest room is unavailable, offer to check alternatives or ask which available earlier quote they prefer. Keep it customer-facing and concise.",
+				"The guest asked about the booking process/next step, but Known facts already include part of the stay. Do not restart with generic steps or ask again for known dates/room choices. Explicitly show the known date range and room/quote status, then give the exact next action. If a valid quote is available and required fields are missing, ask only for the missing fields. If the selected/latest room is unavailable, offer to check alternatives or ask which available earlier quote they prefer. Keep it customer-facing and concise.",
 		});
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
