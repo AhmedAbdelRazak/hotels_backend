@@ -630,8 +630,19 @@ function normalizeArabicSearchText(value = "") {
 		.trim();
 }
 
+function protectHijriSafarMonth(value = "") {
+	return String(value || "").replace(
+		/(^|[^\p{L}\p{N}])\u0635\u0641\u0631(?=$|[^\p{L}\p{N}])/gu,
+		"$1safar"
+	);
+}
+
+function normalizeHijriSearchText(value = "") {
+	return normalizeArabicSearchText(protectHijriSafarMonth(value));
+}
+
 function normalizeHijriLabel(label = "") {
-	return normalizeArabicSearchText(label)
+	return normalizeHijriSearchText(label)
 		.replace(/\bal[-\s]*/g, "al ")
 		.replace(/[-_/]+/g, " ")
 		.replace(/\s+/g, " ")
@@ -728,7 +739,7 @@ function isDateConnectorToken(value = "") {
 }
 
 function looseHijriDayMonthMentions(raw = "") {
-	const text = normalizeArabicSearchText(raw);
+	const text = normalizeHijriSearchText(raw);
 	const found = [];
 	const dayRegex = /\d{1,2}/g;
 	let match = null;
@@ -849,7 +860,7 @@ function nextHijriYearForMonthDay(month, day, baseISO = todayISO()) {
 }
 
 function quickHijriDateRangeNoYear(text = "") {
-	const raw = normalizeArabicSearchText(text);
+	const raw = normalizeHijriSearchText(text);
 	if (
 		/\b(last|past|previous)\b|\u0641\u0627\u062a|\u0627\u0644\u0645\u0627\u0636\u064a|\u0627\u0644\u0644\u064a \u0641\u0627\u062a|\u0627\u0644\u0649 \u0641\u0627\u062a/.test(
 			raw
@@ -947,7 +958,7 @@ function quickHijriDateRange(text = "") {
 	if (!HIJRI_MONTH_REGEX_PART) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}
-	const raw = normalizeArabicSearchText(text);
+	const raw = normalizeHijriSearchText(text);
 	const hasExplicitHijriYear = /\b(?:1[34]\d{2}|15\d{2})\b/.test(raw);
 	if (!hasExplicitHijriYear) {
 		const noYear = quickHijriDateRangeNoYear(raw);
@@ -1625,7 +1636,7 @@ function quickArabicGregorianMonthDateRange(text = "") {
 
 function likelyHijriDateText(text = "") {
 	const raw = repairMojibakeText(text).toLowerCase();
-	const normalizedArabic = normalizeArabicSearchText(raw);
+	const normalizedArabic = normalizeHijriSearchText(raw);
 	const hasHijriMonth = HIJRI_MONTH_REGEX_PART
 		? new RegExp(HIJRI_MONTH_REGEX_PART, "i").test(normalizedArabic)
 		: false;
