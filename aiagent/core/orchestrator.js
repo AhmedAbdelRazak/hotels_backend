@@ -2607,6 +2607,44 @@ function guestConfirmsIdentityDetails(value = "", action = "") {
 	return hasIdentity && hasCorrect;
 }
 
+function reviewIdentityFactsFromAiMessage(entry = {}) {
+	const action = cleanString(entry?.clientAction, 80).toLowerCase();
+	if (action !== "review_reservation") return {};
+	const facts = {};
+	const lines = String(entry?.message || "")
+		.split(/\r?\n|\\n|[|]/)
+		.map((line) => cleanDisplayString(line, 500).replace(/^[-*\s]+/, "").trim())
+		.filter(Boolean);
+	const labelValue = (pattern) => {
+		for (const line of lines) {
+			const match = line.match(pattern);
+			const value = cleanDisplayString(match?.[1] || "", 160)
+				.replace(/^[\s:：,\-\u060C]+|[\s.,;:!\-\u060C]+$/g, "")
+				.trim();
+			if (value) return value;
+		}
+		return "";
+	};
+	const name = labelValue(
+		/^(?:guest\s+name|booking\s+name|full\s+name|name|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645)\s*[:：\-\u060C,]?\s*(.+)$/iu
+	);
+	if (isPlausibleBookingName(name)) facts.fullName = name;
+	const phoneValue = labelValue(
+		/^(?:phone|phone\s+number|mobile|mobile\s+number|whatsapp|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062c\u0648\u0627\u0644)\s*[:：\-\u060C,]?\s*(.+)$/iu
+	);
+	const phone = phoneFromIdentityText(phoneValue) || phoneFromText(phoneValue) || simplePhoneFromLine(phoneValue);
+	if (phone) facts.phone = phone;
+	const nationalityValue = labelValue(
+		/^(?:nationality|citizenship|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a)\s*[:：\-\u060C,]?\s*(.+)$/iu
+	);
+	const nationality =
+		nationalityFromIdentityText(nationalityValue) ||
+		nationalityFromText(nationalityValue) ||
+		normalizeNationalityHint(nationalityValue);
+	if (nationality) facts.nationality = nationality;
+	return facts;
+}
+
 function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latestAction = "", previousAi = {}) {
 	if (
 		!previousAiAskedForIdentityConfirmation(previousAi) &&
@@ -2635,17 +2673,32 @@ function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latest
 		next.nationalityConfirmed = true;
 		delete next.nationalityNeedsConfirmation;
 	}
+	const reviewAction =
+		cleanString(previousAi?.clientAction, 80).toLowerCase() === "review_reservation";
+	const reviewFacts = reviewAction ? reviewIdentityFactsFromAiMessage(previousAi) : {};
 	if (next.fullName && next.fullNameNeedsConfirmation) {
-		next.fullNameConfirmed = true;
-		delete next.fullNameNeedsConfirmation;
+		if (!reviewAction || (reviewFacts.fullName && sameBookingName(next.fullName, reviewFacts.fullName))) {
+			next.fullNameConfirmed = true;
+			delete next.fullNameNeedsConfirmation;
+		}
 	}
 	if (next.phone && next.phoneNeedsConfirmation) {
-		next.phoneConfirmed = true;
-		delete next.phoneNeedsConfirmation;
+		if (!reviewAction || (reviewFacts.phone && cleanPhone(reviewFacts.phone) === cleanPhone(next.phone))) {
+			next.phoneConfirmed = true;
+			delete next.phoneNeedsConfirmation;
+		}
 	}
 	if (next.nationality && next.nationalityNeedsConfirmation) {
-		next.nationalityConfirmed = true;
-		delete next.nationalityNeedsConfirmation;
+		const reviewNationality = normalizeNationalityHint(reviewFacts.nationality) || reviewFacts.nationality;
+		const nextNationality = normalizeNationalityHint(next.nationality) || next.nationality;
+		if (
+			!reviewAction ||
+			(reviewNationality &&
+				normalizeIntentSearchText(reviewNationality) === normalizeIntentSearchText(nextNationality))
+		) {
+			next.nationalityConfirmed = true;
+			delete next.nationalityNeedsConfirmation;
+		}
 	}
 	return next;
 }
@@ -3758,8 +3811,34 @@ function shortGuestContinuationText(value = "") {
 	);
 }
 
+function guestReactionOnlyText(value = "") {
+	const raw = String(value || "").trim();
+	const text = normalizeIntentSearchText(normalizeDigits(raw))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	if (!compact) return false;
+	if (/[?\u061f]/.test(raw)) return false;
+	if (
+		latestGuestMentionsDateish(text) ||
+		textMentionsRoomSelection(text) ||
+		guestAsksPriceAvailabilityOrBooking(text, "") ||
+		latestGuestAsksHotelFactOnly({ message: raw })
+	) {
+		return false;
+	}
+	if (/\b(?:thanks?|thank you|appreciate|great|nice|cool|awesome|perfect|excellent|excited|happy|love it|sounds good)\b/i.test(text)) {
+		return true;
+	}
+	return /(?:\u062d\u0644\u0648|\u062c\u0645\u064a\u0644|\u0631\u0627\u0626\u0639|\u0645\u0645\u062a\u0627\u0632|\u0634\u0643\u0631\u0627|\u0634\u0643\u0631\u064b\u0627|\u062a\u0633\u0644\u0645|\u0628\u0627\u0631\u0643\s+\u0627\u0644\u0644\u0647|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u062a\u062d\u0645\u0633\u0647|\u0641\u0631\u062d\u0627\u0646|\u0633\u0639\u064a\u062f|\u0645\u0628\u0633\u0648\u0637|\u0627\u0644\u062d\u0645\u062f\s*\u0644\u0644\u0647|\u0645\u0627\s*\u0634\u0627\u0621\s*\u0627\u0644\u0644\u0647)/iu.test(
+		text
+	);
+}
+
 function hotelFactContinuationQuestion(sc = {}, latestGuest = {}) {
 	const latestText = String(latestGuest?.message || "");
+	if (guestReactionOnlyText(latestText)) return "";
 	if (!shortGuestContinuationText(latestText)) return "";
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	let latestIndex = conversation.length - 1;
@@ -4944,7 +5023,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, airport distance, early check-in, late checkout, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
 		`If the guest combines location/service facts with prices, answer the fact first, then move price forward concretely. Do not say "prices are not confirmed" as a dead end; say exact pricing depends on check-in, checkout, guests, and rooms, and ask for those details or return get_quote if they are already known.`,
 		`If the guest asks "in Madinah/city?" or similar after a Makkah hotel location, treat it as city clarification. Say clearly that this hotel is in Makkah and no confirmed Madinah/Taif branch is shown, then offer to help with the Makkah stay. Do not resend the full map/address unless the guest explicitly asks for map/address again.`,
-		`If the latest guest message is short, emotional, or affirmative, such as "yes", "ok", "\u0627\u064a", "\u0627\u0647", "\u0646\u0639\u0645", an emoji, or a brief religious phrase, interpret it in the context of the immediately previous unresolved guest question. If that context was a hotel-fact question, answer the hotel fact as action="reply"; do not run get_quote just because stay facts are already known.`,
+		`If the latest guest message is a short affirmative such as "yes", "ok", "\u0627\u064a", "\u0627\u0647", or "\u0646\u0639\u0645", interpret it in the context of the immediately previous unresolved guest question. If the latest message is only appreciation, excitement, thanks, laughter, or small talk after a hotel-fact answer, do not repeat the hotel fact; acknowledge warmly and offer the next useful help, such as continuing the booking or asking whether they need anything else.`,
 		`If the guest asks to cancel a reservation or change its status to canceled, return action="cancel_reservation". Never tell the guest the reservation was canceled in chat; the official cancellation/status-change path is WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
 		`If the guest asks to find, view, or check an existing reservation and explicitly gives a reservation/booking/confirmation/reference number, return action="lookup_reservation". Do not use this action for a normal phone number unless the guest explicitly says it is the reservation/booking/confirmation/reference number.`,
 		`If Hotel facts say propertyType is hotel and rooms do not list apartments/units, never offer an apartment or say a two-bedroom apartment/unit is available. Explain briefly that this property provides hotel rooms, then offer the closest hotel-room setup if the guest mentioned room types such as double plus four-bed/quad.`,
@@ -10782,6 +10861,7 @@ const exportedOrchestrator = {
 		nationalityFromIdentityText,
 		bookingNameFromIdentityText,
 		confirmKnownIdentityIfGuestConfirms,
+		reviewIdentityFactsFromAiMessage,
 		confirmGroupCapacityIfGuestConfirms,
 		latestGuestRequestsAlternativeAvailability,
 		alternativeStayChoiceFromText,
