@@ -10322,7 +10322,7 @@ function sameDayReplyClaimsMinimumDateAvailable(reply = "", toolResult = {}) {
 	const compactNearby = compact.slice(Math.max(0, compact.indexOf(minDate) - 90), compact.indexOf(minDate) + minDate.length + 90);
 	return (
 		/\b(?:available|bookable|recommended|confirmed|can\s+book|reserve\s+from|arrange\s+from|search\s+from|check\s+from|look\s+from|start\s+from|begin\s+from)\b/i.test(nearby) ||
-		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u062d\u062c\u0632\u0644\u0647|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0623\u0631\u062a\u0628\u0644\u0643|\u0627\u0631\u062a\u0628\u0644\u0643|\u0645\u0624\u0643\u062f|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0623\u0642\u0631\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0627\u0642\u0631\u0628|\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646)/iu.test(compactNearby)
+		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u062d\u062c\u0632\u0644\u0647|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0623\u0631\u062a\u0628\u0644\u0643|\u0627\u0631\u062a\u0628\u0644\u0643|\u0645\u0624\u0643\u062f|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0623\u0642\u0631\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0627\u0642\u0631\u0628|\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646|\u0627\u0643\u0645\u0644\u0645\u0646|\u0623\u0643\u0645\u0644\u0645\u0646|\u0646\u0643\u0645\u0644\u0645\u0646)/iu.test(compactNearby)
 	);
 }
 
@@ -11135,20 +11135,10 @@ async function handleBrainAlternatives(
 	};
 	await saveKnownFacts(caseId, nextKnown);
 	const fallback = buildAlternativeAvailabilityMessage(sc, nextKnown, result);
-	return sendBrainToolReplyFromOpenAI({
-		io,
-		sc,
-		hotel,
-		known: nextKnown,
+	await waitForTypingMinimum(typingStartedAt);
+	return sendAiMessage(io, sc, fallback, {
 		latestGuest,
-		toolResult: {
-			tool: "check_alternatives",
-			ok: true,
-			checkedDays: result.checkedDays || 0,
-			options: nextKnown.alternativeStays,
-			instruction:
-				"Write only the alternatives/availability result for the known stay in 2 or 3 bullet points. Do not invent room combinations. If options are available, state the first available date plainly and invite the guest to choose a button. Do not answer older hotel-fact/location questions, and do not include Google Maps, address, or distance. If no options are available, say that clearly and offer to adjust the dates/room choice or continue with any previously available quote shown in the conversation.",
-		},
+		known: nextKnown,
 		clientAction: result.options?.length
 			? "alternative_dates_ready"
 			: "alternative_dates_unavailable",
@@ -11156,8 +11146,7 @@ async function handleBrainAlternatives(
 			nextKnown.alternativeStays,
 			activeLanguageCode(sc, nextKnown)
 		),
-		fallback,
-		typingStartedAt,
+		source: "server",
 	});
 }
 
