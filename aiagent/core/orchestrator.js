@@ -5963,30 +5963,73 @@ function conversationHasGuestCountSignal(sc = {}) {
 function sanitizeBrainFactsForLatestText(facts = {}, currentKnown = {}, latestText = "", decision = {}) {
 	void decision;
 	const next = { ...asObject(facts) };
-	const currentHasAdults = Number.isFinite(Number(currentKnown.adults)) && Number(currentKnown.adults) > 0;
 	const latestGuestCountEvidence =
 		latestTextHasExplicitGuestCount(latestText) ||
 		Boolean(peopleCountFromLine(latestText)) ||
+		Boolean(Object.keys(explicitGuestCountFactsFromText(latestText)).length) ||
 		Boolean(Object.keys(relationshipGuestFactsFromText(latestText, currentKnown)).length);
-	if (
-		next.adults !== undefined &&
-		!latestGuestCountEvidence &&
-		(!currentHasAdults ||
-			(Number.isFinite(Number(next.adults)) &&
-				Number.isFinite(Number(currentKnown.adults)) &&
-				Number(next.adults) !== Number(currentKnown.adults)))
-	) {
+	if (!latestGuestCountEvidence) {
 		delete next.adults;
-	}
-	if (
-		next.children !== undefined &&
-		!latestGuestCountEvidence &&
-		(currentKnown.children === undefined ||
-			(Number.isFinite(Number(next.children)) &&
-				Number.isFinite(Number(currentKnown.children)) &&
-				Number(next.children) !== Number(currentKnown.children)))
-	) {
 		delete next.children;
+		delete next.guests;
+		if (next.guest && typeof next.guest === "object" && !Array.isArray(next.guest)) {
+			next.guest = { ...next.guest };
+			delete next.guest.adults;
+			delete next.guest.children;
+			delete next.guest.guests;
+		}
+	}
+	const latestNamedRoomEvidence = textMentionsSpecificRoomType(latestText);
+	const latestRoomSelections = latestNamedRoomEvidence
+		? extractRoomSelectionsFromText(latestText)
+		: [];
+	const latestRoomCountValue = roomCountOnlyFromText(latestText) || roomCountCorrectionFromText(latestText);
+	const latestRoomCountEvidence = Boolean(latestRoomCountValue);
+	if (latestRoomSelections.length) {
+		next.roomSelections = latestRoomSelections;
+		next.rooms = roomSelectionsTotal(latestRoomSelections);
+		if (latestRoomSelections.length === 1) {
+			next.roomTypeKey = latestRoomSelections[0].roomTypeKey;
+		} else {
+			delete next.roomTypeKey;
+		}
+		if (next.reservation && typeof next.reservation === "object" && !Array.isArray(next.reservation)) {
+			next.reservation = {
+				...next.reservation,
+				roomSelections: latestRoomSelections,
+				rooms: roomSelectionsTotal(latestRoomSelections),
+			};
+			if (latestRoomSelections.length === 1) {
+				next.reservation.roomTypeKey = latestRoomSelections[0].roomTypeKey;
+			} else {
+				delete next.reservation.roomTypeKey;
+			}
+		}
+	}
+	if (!latestNamedRoomEvidence) {
+		delete next.roomTypeKey;
+		delete next.roomSelections;
+		delete next.roomsSelection;
+		delete next.roomText;
+		delete next.roomType;
+		if (next.reservation && typeof next.reservation === "object" && !Array.isArray(next.reservation)) {
+			next.reservation = { ...next.reservation };
+			delete next.reservation.roomTypeKey;
+			delete next.reservation.roomSelections;
+			delete next.reservation.roomsSelection;
+		}
+	}
+	if (!latestRoomCountEvidence && !latestNamedRoomEvidence) {
+		delete next.rooms;
+		if (next.reservation && typeof next.reservation === "object" && !Array.isArray(next.reservation)) {
+			next.reservation = { ...next.reservation };
+			delete next.reservation.rooms;
+		}
+	} else if (latestRoomCountEvidence && !latestNamedRoomEvidence) {
+		next.rooms = latestRoomCountValue;
+		if (next.reservation && typeof next.reservation === "object" && !Array.isArray(next.reservation)) {
+			next.reservation = { ...next.reservation, rooms: latestRoomCountValue };
+		}
 	}
 	return next;
 }
@@ -12692,9 +12735,18 @@ async function planTurn(io, supportCaseOrId) {
 			action: decision?.action || "",
 			hasReply: Boolean(decision?.reply),
 		});
+		decision = {
+			...decision,
+			facts: sanitizeBrainFactsForLatestText(
+				factsForMergeFromDecision(decision),
+				known,
+				latestText,
+				decision
+			),
+		};
 		known = preserveRoomSelectionForNonRoomTurn(
 			known,
-			mergeKnownFacts(known, factsForMergeFromDecision(decision)),
+			mergeKnownFacts(known, decision.facts),
 			latestText,
 			{ changedFields: decisionChangedFields(decision) }
 		);
@@ -13332,6 +13384,7 @@ const exportedOrchestrator = {
 		containsDateLikeSlashToken,
 		guestCountFactsFromAskedAnswer,
 		explicitGuestCountFactsFromText,
+		sanitizeBrainFactsForLatestText,
 		conversationHasGuestCountSignal,
 		replyPromisesReservationFinalization,
 		replyPromisesProgressWithoutAction,
