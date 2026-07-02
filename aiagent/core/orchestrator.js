@@ -3595,7 +3595,7 @@ function hotelFactReplyHasUnwantedLocationDump(reply = "", toolResult = {}) {
 function hotelFactReplyHasRawLocationNumbers(reply = "") {
 	const withoutUrls = String(reply || "").replace(/https?:\/\/\S+/gi, "");
 	return (
-		/(?:\d{4,}[\s،,؛:.-]+){1,}\d{4,}/.test(withoutUrls) ||
+		/(?:\d{4,}[\s،,؛:.\/|-]+){1,}\d{4,}/.test(withoutUrls) ||
 		/(?:\d{4,}\s*\|\s*){1,}\d{4,}/.test(withoutUrls)
 	);
 }
@@ -3620,6 +3620,17 @@ function hotelFactPriceGuidanceReplyNeedsCorrection(reply = "", toolResult = {})
 	if (!toolResult?.needsPriceGuidance) return false;
 	const text = normalizeIntentSearchText(normalizeDigits(String(reply || ""))).toLowerCase();
 	if (!text.trim()) return true;
+	const latestQuestion = normalizeIntentSearchText(
+		normalizeDigits(String(toolResult?.latestQuestion || toolResult?.contextQuestion || ""))
+	).toLowerCase();
+	if (
+		!/\d/.test(latestQuestion) &&
+		/(?:\d+\s*(?:guests?|rooms?|\u0636\u064a\u0648\u0641|\u0636\u064a\u0641|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629)|(?:\u0639\u062f\u062f\s+(?:\u0627\u0644)?\u063a\u0631\u0641\s*\d))/iu.test(
+			text
+		)
+	) {
+		return true;
+	}
 	if (
 		/(prices?\s+(?:are|is)\s+not\s+confirmed|not\s+confirmed|not\s+available|do\s+not\s+have\s+prices?|don't\s+have\s+prices?)/i.test(
 			text
@@ -4072,7 +4083,7 @@ async function sendHotelFactReplyFromOpenAI({
 			hotelFacts: compactHotelFacts(hotel),
 			suggestedAnswer: fallback,
 			instruction:
-				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
+				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
 		},
 		clientAction: "hotel_fact_answered",
 		quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
@@ -7423,7 +7434,7 @@ async function askCompactToolWriter({
 						? "Answer the city/branch clarification directly. Say the hotel is in Makkah and that no confirmed Madinah/Taif branch is shown. Do not include Google Maps/address unless the latest guest explicitly asked for map/address."
 						: "",
 					validation === "hotel_fact_price_guidance_unclear"
-						? "Give helpful price guidance. Do not say only that prices are not confirmed. Ask for check-in, checkout, guests, and rooms so the exact available price can be checked."
+						? "Give helpful price guidance. Do not say only that prices are not confirmed. Ask for check-in, checkout, guests, and rooms so the exact available price can be checked. Do not mention any specific guest count or room count unless the guest already gave it."
 						: "",
 					validation === "hotel_fact_map_missing"
 						? "Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl because the guest explicitly asked for location/map or combined location with prices."
@@ -7435,7 +7446,7 @@ async function askCompactToolWriter({
 						? "This is an explicit location request. Include the Google Maps link from Hotel facts."
 						: "",
 					toolResult?.needsPriceGuidance
-						? "The guest also asked about prices. Include the concrete next step for exact pricing: check-in, checkout, guests, and rooms."
+						? "The guest also asked about prices. Include the concrete next step for exact pricing: check-in, checkout, guests, and rooms. Do not infer or mention specific guest/room counts unless the guest provided them."
 						: "",
 					validation === "review_claimed_confirmed_before_submit"
 						? "This is only the official pre-submission review. Do not say the booking/reservation is confirmed, created, completed, or finalized. Ask the guest to confirm if the review is correct."
@@ -7656,7 +7667,7 @@ async function sendBrainToolReplyFromOpenAI({
 				: validation === "hotel_fact_branch_repeated_location"
 				? "Your previous hotel-fact reply was not sent because it repeated map/address details instead of answering the city/branch confusion. Return a corrected customer-facing reply from OpenAI only. Clarify that this hotel is in Makkah and not a confirmed Madinah/Taif branch, and do not include Google Maps/address unless the latest guest explicitly asked for map/address."
 				: validation === "hotel_fact_price_guidance_unclear"
-				? "Your previous hotel-fact reply was not sent because the price guidance was weak or missing. Return a corrected customer-facing reply from OpenAI only. Do not say only that prices are not confirmed. Say exact prices depend on check-in, checkout, guests, and rooms, then ask for those details naturally."
+				? "Your previous hotel-fact reply was not sent because the price guidance was weak, missing, or invented guest/room counts. Return a corrected customer-facing reply from OpenAI only. Do not say only that prices are not confirmed. Say exact prices depend on check-in, checkout, guests, and rooms, then ask for those details naturally. Do not mention any guest count or room count unless the guest already gave it."
 				: validation === "hotel_fact_map_missing"
 				? "Your previous hotel-fact reply was not sent because it omitted the required Google Maps link for an explicit location request. Return a corrected customer-facing reply from OpenAI only. Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl and keep the price next step if requested."
 				: validation === "reservation_confirmation_links_missing"
