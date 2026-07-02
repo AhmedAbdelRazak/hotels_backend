@@ -252,6 +252,15 @@ function replyStartsWithIslamicGreeting(value = "") {
 	);
 }
 
+function guestAsksAgentIdentity(value = "") {
+	const text = String(value || "").trim().toLowerCase();
+	return /(?:who\s+are\s+you|who\s+is\s+this|who\s+am\s+i\s+speaking\s+to|your\s+name|what\s+is\s+your\s+name)/i.test(
+		text
+	) || /(?:\u0645\u064a\u0646|\u0645\u0646)\s+(?:\u0645\u0639\u0627\u064a\u0627|\u0645\u0639\u064a|\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u062d\u0636\u0631\u062a\u0643)|\u0627\u0633\u0645\u0643|\u0627\u062a\u0643\u0644\u0645\s+\u0645\u0639\s+\u0645\u064a\u0646|\u0628\u062a\u0643\u0644\u0645\s+\u0645\u0639\s+\u0645\u064a\u0646/u.test(
+		text
+	);
+}
+
 function withFirstArabicIslamicGreeting(message = "") {
 	const text = String(message || "").trim();
 	if (!text || replyStartsWithIslamicGreeting(text)) return text;
@@ -485,10 +494,37 @@ function looksLikeActionOrConfirmationPhrase(value = "") {
 	);
 }
 
+function looksLikeNonBookingNamePhrase(value = "") {
+	const text = cleanDisplayString(value, 160).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
+	if (!text) return true;
+	const normalized = normalizeIntentSearchText(text);
+	const compact = normalized.replace(/\s+/g, "");
+	if (
+		/^(?:ok|okay|sure|yes|yeah|yep|no|not|same|profile|visible|shown|displayed|name|one|haha+|lol)$/i.test(
+			normalized
+		)
+	) {
+		return true;
+	}
+	if (
+		/^(?:\u0637\u0628|\u0637\u064a\u0628|\u062a\u0645\u0627\u0645|\u0627\u0643\u064a\u062f|\u0623\u0643\u064a\u062f|\u0627\u064a\u0648\u0647|\u0627\u064a\u0648\u0627|\u0646\u0639\u0645|\u0644\u0627|\u0645\u0634|\u0647\u0648|\u0647\u064a|\u0647\u0649|\u0646\u0641\u0633|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u0644\u064a|\u0627\u0644\u0644\u0649|\u0627\u0644\u064a|\u0627\u0644\u0649|\u0627\u0644\u0630\u064a|\u0634\u0627\u064a\u0641|\u0634\u0627\u064a\u0641\u0647|\u0634\u0627\u064a\u0641\u0627\u0647|\u0638\u0627\u0647\u0631|\u0628\u0627\u064a\u0646|\u0639\u0646\u062f\u0643|\u0639\u0646\u062f\u064a|\u0627\u0646\u062a|\u0627\u0646\u062a\u064a|\u0647+|\u0647\u0627+|هههه+)$/iu.test(
+			compact
+		)
+	) {
+		return true;
+	}
+	if (sameAsDisplayedNameIntent(text)) return true;
+	if (/\d{1,2}\s*(?:\u0633\u0646\u0629|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)(?:$|[\s.,;:!?])/iu.test(normalized)) {
+		return true;
+	}
+	return false;
+}
+
 function isPlausibleBookingName(value = "") {
 	const text = cleanDisplayString(value, 120).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
 	if (!text || text.length < 2 || text.length > 120) return false;
 	if (looksLikeActionOrConfirmationPhrase(text)) return false;
+	if (looksLikeNonBookingNamePhrase(text)) return false;
 	if (looksLikeOrganizationName(text)) return false;
 	if (text.includes("@")) return false;
 	if (cleanPhone(text).replace(/[^\d]/g, "").length >= 7) return false;
@@ -1095,7 +1131,9 @@ function bookingIdentityFactsFromText(value = "", { allowName = false } = {}) {
 			if (nationality) facts.nationality = nationality;
 		}
 		if (allowName && !facts.fullName && !hasExplicitReservationIdentifier) {
-			const name = bookingNameFromLine(line) || bookingNameFromIdentityText(line);
+			const name = sameAsDisplayedNameIntent(line)
+				? ""
+				: bookingNameFromLine(line) || bookingNameFromIdentityText(line);
 			if (name) facts.fullName = name;
 		}
 	}
@@ -1424,10 +1462,9 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				})
 			);
 		}
-		const explicitEntryName = bookingIdentityFactsFromText(rawEntryText, {
-			allowName: true,
-		}).fullName;
-		if (lastAiAskedBookingName && !explicitEntryName && sameAsDisplayedNameIntent(rawEntryText)) {
+		const entryUsesDisplayedNameForName =
+			lastAiAskedBookingName && sameAsDisplayedNameIntent(rawEntryText);
+		if (entryUsesDisplayedNameForName) {
 			const profileName = profileNameForBooking(sc);
 			if (isPlausibleBookingName(profileName)) {
 				recovered.fullName = profileName;
@@ -1537,8 +1574,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				}
 			}
 			const explicitBookingName =
-				bookingNameFromLine(line) ||
-				(collectingBookingDetails ? bookingNameFromIdentityText(line) : "");
+				entryUsesDisplayedNameForName
+					? ""
+					: bookingNameFromLine(line) ||
+					  (collectingBookingDetails ? bookingNameFromIdentityText(line) : "");
 			if (
 				explicitBookingName &&
 				(!recovered.fullName ||
@@ -1548,7 +1587,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered.fullName = explicitBookingName;
 				recovered.fullNameConfirmed = true;
 				delete recovered.fullNameNeedsConfirmation;
-			} else if (!recovered.fullName) {
+			} else if (!recovered.fullName && !entryUsesDisplayedNameForName) {
 				const name = collectingBookingDetails ? nameHintFromLine(line) : "";
 				if (name) {
 					recovered.fullName = name;
@@ -1950,6 +1989,36 @@ function latestQuoteFactsFromConversation(sc = {}) {
 		if (facts.checkinISO || facts.checkoutISO || facts.roomTypeKey) return facts;
 	}
 	return {};
+}
+
+function latestStayChangeConversationIndex(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const entry = conversation[index] || {};
+		if (entry.isAi || entry.isSystem) continue;
+		const text = String(entry.message || "");
+		if (
+			latestGuestMentionsDateish(text) ||
+			textMentionsRoomSelection(text) ||
+			Boolean(roomCountOnlyFromText(text)) ||
+			Boolean(roomCountCorrectionFromText(text)) ||
+			latestTextHasExplicitGuestCount(text)
+		) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+function matchingQuoteShownAfterLatestStayChange(sc = {}, known = {}) {
+	if (!quoteMatchesKnown(known)) return false;
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestStayChangeIndex = latestStayChangeConversationIndex(sc);
+	return conversation.some((entry, index) => {
+		if (index <= latestStayChangeIndex || !entry?.isAi) return false;
+		const action = cleanString(entry.clientAction, 80).toLowerCase();
+		return ["quote_ready", "review_reservation"].includes(action);
+	});
 }
 
 function guestConfirms(value = "", action = "") {
@@ -2888,6 +2957,9 @@ function operationalQuickRepliesForReply(decision = {}, known = {}, sc = {}) {
 	if (replyAsksOptionalEmail(decision.reply, known)) {
 		return emailSkipQuickReplies(activeLanguageCode(sc, known));
 	}
+	if (replyInvitesConfirmationAction(decision.reply) && !requiredBookingMissing(known).length) {
+		return reviewQuickReplies(activeLanguageCode(sc, known));
+	}
 	return [];
 }
 
@@ -3044,6 +3116,25 @@ function replyPromisesBookingReview(reply = "") {
 			text
 		);
 	return reviewIntent && bookingContext;
+}
+
+function replyInvitesConfirmationAction(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/(?:send|write|reply|press|tap|click).{0,40}(?:confirm|confirmation|complete booking|place reservation)/i.test(text) ||
+		/(?:confirm|confirmation).{0,50}(?:complete|place|create|finalize).{0,30}(?:booking|reservation)/i.test(text) ||
+		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0627\u0643\u062a\u0628|\u0623\u0643\u062a\u0628|\u0627\u0636\u063a\u0637|\u0625\u0636\u063a\u0637).{0,40}(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632)/iu.test(text) ||
+		/(?:\u0641\u0642\u0637|\u0628\u0633).{0,24}(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(text) ||
+		/(?:\u0627\u0630\u0627|\u0625\u0630\u0627|\u0644\u0648).{0,60}(?:\u0645\u0646\u0627\u0633\u0628|\u0635\u062d\u064a\u062d|\u062a\u0645\u0627\u0645).{0,60}(?:\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632)/iu.test(text) ||
+		/(?:\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,50}(?:\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0646\u0647\u0627\u0621|\u0627\u0644\u0625\u0646\u0647\u0627\u0621|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u062a\u0645|\u0623\u062a\u0645)/iu.test(text) ||
+		compact.includes("\u0627\u0631\u0633\u0644\u0644\u064a\u0641\u0642\u0637\u062a\u0623\u0643\u064a\u062f") ||
+		compact.includes("\u0627\u0631\u0633\u0644\u0644\u064a\u0641\u0642\u0637\u062a\u0627\u0643\u064a\u062f")
+	);
 }
 
 function replyPromisesReservationFinalization(reply = "") {
@@ -3710,10 +3801,13 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 	const openingTurn = turnKind === "new_chat_intro";
 	const firstCustomerFacingReply = !openingTurn && !hasAnyAiEntry(sc);
 	const firstGuestTurn = turnKind === "new_chat_first_guest_message" || firstCustomerFacingReply;
+	const identityRequiredNow = openingTurn || firstGuestTurn;
 	return [
 		`Return only one valid json object that follows the response schema. No markdown, no prose outside json.`,
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
-		`You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. On the first customer-facing AI reply in a hotel-scoped case, the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`,
+		identityRequiredNow
+			? `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. This is an opening/first AI reply, so the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`
+			: `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, but the opening identity has already happened. Do not reintroduce yourself with agent name, team role, or hotel name on normal follow-up replies. Mention your identity again only if the guest asks who is speaking or there is a real handoff/escalation.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
@@ -3727,7 +3821,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`No redundancy. Keep replies concise: usually 2-5 short lines. Avoid repeating long greetings, the full quote, the same apology, or the same next-step wording unless the guest asks for it. If you already asked for a detail and the guest responds with something else, acknowledge the response naturally before asking again or explaining why it is still needed.`,
 		`The orchestrator will not add scripted warmth or emotional prefixes for you. If the guest jokes, thanks you, greets you, or sounds stressed/excited, write the natural customer-facing response yourself in reply.`,
 		`Use clean formatting when helpful: short lines, simple bullets, and tasteful emojis that fit the guest's language and mood. Avoid emoji clutter and never let styling make dates, prices, names, phone numbers, policies, or booking instructions less clear.`,
-		`For the first CSR/reservations message in an Arabic chat, begin with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u0648\u0631\u062d\u0645\u0629 \u0627\u0644\u0644\u0647 \u0648\u0628\u0631\u0643\u0627\u062a\u0647" or "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", then immediately introduce yourself as ${agentName} from the reception/reservations team at the hotel. Do not start only with "\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b". Do not repeat the greeting on later replies unless the guest greets again.`,
+		`For the first CSR/reservations message in an Arabic chat only, begin with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u0648\u0631\u062d\u0645\u0629 \u0627\u0644\u0644\u0647 \u0648\u0628\u0631\u0643\u0627\u062a\u0647" or "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", then immediately introduce yourself as ${agentName} from the reception/reservations team at the hotel. Do not start only with "\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b". On later Arabic replies, do not say "\u0623\u0646\u0627 ${agentName}" or repeat the team/hotel identity unless the guest asks who is speaking. Do not repeat the greeting on later replies unless the guest greets again.`,
 		`In Arabic hotel chats, prefer reservation wording like "\u0627\u0644\u062d\u062c\u0632", "\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632", or "\u0627\u0633\u062a\u0641\u0633\u0627\u0631\u0643". Avoid "\u0627\u0644\u0637\u0644\u0628" when you mean a hotel reservation.`,
 		`Use hotelName/hotelNameArabic as the hotel name. "Reception" and "reservations" describe your team role only; never append "Reception" to the hotel name or invent a new property name.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
@@ -3903,6 +3997,8 @@ async function polishCustomerReply({
 	const hotelName = /^ar\b/i.test(languageCode)
 		? hotel?.hotelName_OtherLanguage || hotel?.hotelName || ""
 		: hotel?.hotelName || hotel?.hotelName_OtherLanguage || "";
+	const identityRepeatAllowed =
+		!hasAnyAiEntry(sc) || guestAsksAgentIdentity(latestGuest?.message || "");
 	const messages = [
 		{
 			role: "system",
@@ -3914,6 +4010,9 @@ async function polishCustomerReply({
 				"Make the reply feel like a warm human CSR/sales representative: acknowledge casual or emotional comments briefly, then return to the useful next booking step.",
 				"Keep it concise: usually 1-4 short lines.",
 				"Clean line breaks, bullets, and tasteful emojis are allowed when they improve warmth or readability. Do not overuse them.",
+				identityRepeatAllowed
+					? "Agent identity is allowed only if the original reply genuinely needs it."
+					: "This is not the opening turn. Do not add or keep a repeated self-introduction such as agent name plus team/hotel identity unless the guest explicitly asked who is speaking.",
 				'Return ONLY json: {"reply":"..."}',
 			].join("\n"),
 		},
@@ -3925,6 +4024,7 @@ async function polishCustomerReply({
 					hotelName,
 					guestAddressName: guestDisplayName(sc),
 					agentName: localizedAgentName(sc),
+					identityRepeatAllowed,
 					latestGuestMessage: String(latestGuest?.message || "").slice(0, 700),
 					action: decision?.action || "reply",
 					reason: decision?.reason || "",
@@ -6339,6 +6439,15 @@ function compactQuoteToolResult(result = {}, known = {}) {
 	};
 }
 
+function quoteReplyFormattingInstruction() {
+	return [
+		"Write the quote in the guest language with clean formatting.",
+		"Use separate short lines or simple bullets for room(s), dates, nights, total, and the next question.",
+		"Do not compress the quote into one paragraph.",
+		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
+	].join(" ");
+}
+
 function compactReservationForBrain(reservation = null) {
 	if (!reservation) return null;
 	return {
@@ -6385,6 +6494,8 @@ async function askCompactToolWriter({
 } = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const requiredVisibleNumbers = numericTokensForPolish(fallback).slice(0, 40);
+	const identityRepeatAllowed =
+		!hasAnyAiEntry(sc) || guestAsksAgentIdentity(latestGuest?.message || "");
 	const raw = await chat(
 		[
 			{
@@ -6395,6 +6506,9 @@ async function askCompactToolWriter({
 					"Use the guest language and dialect. Be concise, professional, warm, and naturally Muslim-friendly when it fits.",
 					"The orchestrator only executed a tool for you; you must write the reply. Do not mention tools, schemas, validation, or internal state.",
 					"Use toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details.",
+					identityRepeatAllowed
+						? "Agent identity is allowed only if the reply genuinely needs it."
+						: "This is not the opening turn. Do not introduce yourself again with agent name, team role, or hotel name unless the guest explicitly asked who is speaking.",
 					requiredVisibleNumbers.length
 						? "Include every requiredVisibleNumbers item exactly as shown."
 						: "",
@@ -6403,6 +6517,9 @@ async function askCompactToolWriter({
 						: "",
 					requirePolicy
 						? "The reply must include the required policy details from toolResult."
+						: "",
+					toolResult?.tool === "get_quote"
+						? "For quote tool results, use separate lines or simple bullets. Never compress room, dates, nights, total, and the next question into one paragraph."
 						: "",
 				]
 					.filter(Boolean)
@@ -6414,6 +6531,7 @@ async function askCompactToolWriter({
 					{
 						languageCode,
 						agentName: localizedAgentName(sc),
+						identityRepeatAllowed,
 						guestName: guestDisplayName(sc),
 						latestGuestMessage: latestGuest?.message || "",
 						known: compactKnownFactsForPrompt(known),
@@ -6443,6 +6561,48 @@ async function askCompactToolWriter({
 			reason: "compact_tool_writer",
 		}
 	);
+}
+
+async function sendKnownQuoteReplyFromOpenAI({
+	io,
+	sc,
+	hotel,
+	known,
+	latestGuest,
+	typingStartedAt = 0,
+} = {}) {
+	const quote = asObject(known.quote);
+	const quoteResult = {
+		available: quote.available !== false,
+		quote,
+		checkinISO: quote.checkinISO || known.checkinISO || "",
+		checkoutISO: quote.checkoutISO || known.checkoutISO || "",
+		roomTypeKey: quote.roomTypeKey || known.roomTypeKey || "",
+		currency: quote.currency || known.currency || "SAR",
+	};
+	const fallback = withWarmPrefix(
+		buildQuoteFallbackMessage(sc, known, quoteResult, hotel),
+		sc,
+		known,
+		latestGuest?.message || ""
+	);
+	return sendBrainToolReplyFromOpenAI({
+		io,
+		sc,
+		hotel,
+		known,
+		latestGuest,
+		toolResult: {
+			...compactQuoteToolResult(quoteResult, known),
+			instruction: quoteReplyFormattingInstruction(),
+		},
+		clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
+		quickReplies: quoteResult.available
+			? proceedQuickReplies(activeLanguageCode(sc, known))
+			: [],
+		fallback,
+		typingStartedAt,
+	});
 }
 
 async function sendBrainToolReply({
@@ -6737,7 +6897,10 @@ async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest
 		hotel,
 		known: nextKnown,
 		latestGuest,
-		toolResult: compactQuoteToolResult(result, nextKnown),
+		toolResult: {
+			...compactQuoteToolResult(result, nextKnown),
+			instruction: quoteReplyFormattingInstruction(),
+		},
 		clientAction: result.available ? "quote_ready" : "quote_unavailable",
 		quickReplies: result.available
 			? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
@@ -7056,7 +7219,10 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 				hotel,
 				known: nextKnown,
 				latestGuest,
-				toolResult: compactQuoteToolResult(quoteResult, nextKnown),
+				toolResult: {
+					...compactQuoteToolResult(quoteResult, nextKnown),
+					instruction: quoteReplyFormattingInstruction(),
+				},
 				clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
 				typingStartedAt,
 			});
@@ -7064,6 +7230,20 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 	}
 	const missing = requiredBookingMissing(reviewKnown);
 	await saveKnownFacts(caseId, reviewKnown);
+	if (
+		missing.length &&
+		quoteMatchesKnown(reviewKnown) &&
+		!matchingQuoteShownAfterLatestStayChange(sc, reviewKnown)
+	) {
+		return sendKnownQuoteReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: reviewKnown,
+			latestGuest,
+			typingStartedAt,
+		});
+	}
 	const updated = await sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
@@ -7077,8 +7257,8 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			missing,
 			review: missing.length ? null : compactReviewForBrain(reviewKnown, hotel),
 			instruction: missing.length
-				? "Ask only for the missing required booking details in the guest language. Do not ask for optional fields before required fields."
-				: "Write the final booking review in the guest language using these exact facts. Ask the guest to confirm before creating the reservation.",
+				? "Ask only for the missing required booking details in the guest language. Put each requested field on its own separate line. Do not ask for optional fields before required fields."
+				: "Write the final booking review in the guest language using these exact facts. Use separate lines or simple bullets for the main facts, keep the total on its own line, and ask the guest to confirm before creating the reservation.",
 		},
 		clientAction: missing.length ? "required_details_needed" : "review_reservation",
 		quickReplies: missing.length ? [] : reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
@@ -7106,7 +7286,10 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 				hotel,
 				known: submitKnown,
 				latestGuest,
-				toolResult: compactQuoteToolResult(quote, submitKnown),
+				toolResult: {
+					...compactQuoteToolResult(quote, submitKnown),
+					instruction: quoteReplyFormattingInstruction(),
+				},
 				clientAction: quote.available ? "quote_ready" : "quote_unavailable",
 				typingStartedAt,
 			});
@@ -7266,6 +7449,7 @@ async function executeBrainFirstDecision({
 			replyLooksLikeManualBookingReview(nextDecision.reply) ||
 			replyConfirmsBookingWithoutAction(nextDecision.reply) ||
 			replyPromisesBookingReview(nextDecision.reply) ||
+			replyInvitesConfirmationAction(nextDecision.reply) ||
 			replyPromisesReservationFinalization(nextDecision.reply))
 	) {
 		const repaired = await repairReviewDecision({
@@ -7433,6 +7617,30 @@ async function executeBrainFirstDecision({
 				reason: nextDecision.reason || "fresh_quote_required_after_blank_reply_repair",
 			});
 		}
+	}
+	if (
+		quoteMatchesKnown(nextKnown) &&
+		!matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
+		["reply", "send_review", "send_review_again"].includes(nextDecision.action) &&
+		requiredBookingMissing(nextKnown).some((field) =>
+			["fullName", "phone", "nationality", "adults"].includes(field)
+		)
+	) {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"quote_unshown_before_required_details_guard",
+			{ action: "get_quote", reason: "matching_quote_not_shown_after_stay_change" },
+			nextKnown
+		);
+		return sendKnownQuoteReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			typingStartedAt,
+		});
 	}
 	await saveKnownFacts(key, nextKnown);
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
@@ -8395,10 +8603,11 @@ async function planTurn(io, supportCaseOrId) {
 		}
 	if (
 		decision.action === "submit_reservation" ||
-		replyLooksLikeManualBookingReview(decision.reply) ||
-		replyConfirmsBookingWithoutAction(decision.reply) ||
-		replyPromisesBookingReview(decision.reply) ||
-		replyPromisesReservationFinalization(decision.reply) ||
+			replyLooksLikeManualBookingReview(decision.reply) ||
+			replyConfirmsBookingWithoutAction(decision.reply) ||
+			replyPromisesBookingReview(decision.reply) ||
+			replyInvitesConfirmationAction(decision.reply) ||
+			replyPromisesReservationFinalization(decision.reply) ||
 		guestRequestsBookingReviewStep(latestText, latestAction)
 	) {
 			const beforeRepairKnown = known;
@@ -8454,7 +8663,8 @@ async function planTurn(io, supportCaseOrId) {
 		}
 		if (
 			decision.action === "reply" &&
-			replyPromisesReservationFinalization(decision.reply)
+			(replyInvitesConfirmationAction(decision.reply) ||
+				replyPromisesReservationFinalization(decision.reply))
 		) {
 			const missing = requiredBookingMissing(known);
 			await saveKnownFacts(key, known);
@@ -8499,6 +8709,7 @@ async function planTurn(io, supportCaseOrId) {
 			(replyLooksLikeManualBookingReview(decision.reply) ||
 				replyConfirmsBookingWithoutAction(decision.reply) ||
 				replyPromisesBookingReview(decision.reply) ||
+				replyInvitesConfirmationAction(decision.reply) ||
 				guestRequestsBookingReviewStep(latestText, latestAction)) &&
 			!requiredBookingMissing(known).length
 		) {
@@ -8882,6 +9093,7 @@ const exportedOrchestrator = {
 		guestCountFactsFromAskedAnswer,
 		conversationHasGuestCountSignal,
 		replyPromisesReservationFinalization,
+		replyInvitesConfirmationAction,
 		roomOptionQuickReplies,
 		sameDateRoomChoiceFromText,
 		arabicGuestCountText,
