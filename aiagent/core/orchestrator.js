@@ -3594,7 +3594,10 @@ function hotelFactReplyHasUnwantedLocationDump(reply = "", toolResult = {}) {
 
 function hotelFactReplyHasRawLocationNumbers(reply = "") {
 	const withoutUrls = String(reply || "").replace(/https?:\/\/\S+/gi, "");
-	return /(?:\d{4,}[\s،,؛:.-]+){1,}\d{4,}/.test(withoutUrls);
+	return (
+		/(?:\d{4,}[\s،,؛:.-]+){1,}\d{4,}/.test(withoutUrls) ||
+		/(?:\d{4,}\s*\|\s*){1,}\d{4,}/.test(withoutUrls)
+	);
 }
 
 function hotelFactBranchReplyNeedsCorrection(reply = "", toolResult = {}) {
@@ -4034,7 +4037,10 @@ async function sendHotelFactReplyFromOpenAI({
 	factQuestion = "",
 	typingStartedAt = 0,
 } = {}) {
-	const cleanFactQuestion = cleanDisplayString(factQuestion, 500);
+	const latestDirectHotelFact = latestGuestAsksHotelFactOnly(latestGuest);
+	const cleanFactQuestion = latestDirectHotelFact
+		? ""
+		: cleanDisplayString(factQuestion, 500);
 	const fallbackGuest = cleanFactQuestion
 		? { ...(latestGuest || {}), message: cleanFactQuestion }
 		: latestGuest;
@@ -4063,6 +4069,7 @@ async function sendHotelFactReplyFromOpenAI({
 		clientAction: "hotel_fact_answered",
 		quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
 		fallback,
+		preserveFallbackNumbers: false,
 		typingStartedAt,
 	});
 }
