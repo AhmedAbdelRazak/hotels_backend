@@ -12510,6 +12510,16 @@ async function planTurn(io, supportCaseOrId) {
 					? Number(recoveredUnavailableKnown.children)
 					: Number(known.children || 0) || 0,
 			});
+			if (
+				unavailableQuoteBlocksRequestedDate(known) ||
+				latestGuestRequestsBroadAlternative(latestText, latestAction) ||
+				latestAction === "check_alternatives"
+			) {
+				await saveKnownFacts(key, known);
+				await waitForTypingMinimum(typingStartedAt);
+				logTurnStage(key, "unavailable_quote_recovered_to_alternatives");
+				return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
+			}
 		}
 	}
 	if (
