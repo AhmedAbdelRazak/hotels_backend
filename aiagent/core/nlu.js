@@ -1196,60 +1196,6 @@ function numericSlashDateTokenCount(text = "") {
 	return (digitsToEnglish(String(text || "")).match(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-](?:(?:20)?\d{2}))?\b/g) || []).length;
 }
 
-function addDaysToISO(iso = "", days = 0) {
-	const date = new Date(`${iso}T00:00:00.000Z`);
-	if (Number.isNaN(date.getTime())) return null;
-	date.setUTCDate(date.getUTCDate() + Number(days || 0));
-	return date.toISOString().slice(0, 10);
-}
-
-function numericGregorianSingleDateParts(left, right, year = "") {
-	const a = Number(left);
-	const b = Number(right);
-	if (!a || !b) return null;
-	let day = null;
-	let month = null;
-	if (a > 12 && b <= 12) {
-		day = a;
-		month = b;
-	} else if (b > 12 && a <= 12) {
-		month = a;
-		day = b;
-	} else {
-		return null;
-	}
-	const explicitYear = normalizeNumericGregorianYear(year);
-	const iso = explicitYear
-		? isoFromParts(explicitYear, month, day)
-		: inferFutureISO({ day, month });
-	return iso ? { iso, year: explicitYear || isoYear(iso), month, day } : null;
-}
-
-function quickNumericGregorianDatePlusDuration(text = "") {
-	const raw = digitsToEnglish(String(text || ""));
-	const dateMatch = raw.match(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-]((?:20\d{2})|(?:\d{2})))?\b/);
-	if (!dateMatch) return null;
-	const date = numericGregorianSingleDateParts(dateMatch[1], dateMatch[2], dateMatch[3]);
-	if (!date?.iso) return null;
-	const afterDate = raw.slice(dateMatch.index + dateMatch[0].length);
-	const durationMatch = afterDate.match(
-		/(?:\b(?:checkout|check\s*out|departure|depart|leave|leaving|after|for)\b|(?:\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c|\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0628\u0639\u062f|\u0644\u0645\u062f\u0629|\u0645\u062f\u0629))\s*(?:\bafter\b|\bfor\b|\u0628\u0639\u062f|\u0644\u0645\u062f\u0629|\u0645\u062f\u0629)?\s*(\d{1,2})\s*(?:nights?|days?|\u0644\u064a\u0644\u0629|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u0644\u064a\u0627\u0644\u0649|\u064a\u0648\u0645|\u0627\u064a\u0627\u0645|\u0623\u064a\u0627\u0645)/iu
-	);
-	const nights = Number(durationMatch?.[1] || 0);
-	if (!Number.isFinite(nights) || nights < 1 || nights > 60) return null;
-	const checkoutISO = addDaysToISO(date.iso, nights);
-	if (!checkoutISO || checkoutISO <= date.iso) return null;
-	return {
-		checkinISO: date.iso,
-		checkoutISO,
-		raw: {
-			checkin: dateMatch[0],
-			checkout: `${nights} nights`,
-			calendar: "gregorian",
-		},
-	};
-}
-
 function namedCalendarMonthText(text = "") {
 	const raw = repairMojibakeText(text).toLowerCase();
 	const normalizedArabic = normalizeArabicSearchText(raw);
@@ -1650,10 +1596,6 @@ function quickDateRange(text = "") {
 	}
 	const numericRange = quickNumericGregorianDateRange(raw);
 	if (numericRange?.checkinISO && numericRange?.checkoutISO) return numericRange;
-	const numericDateWithDuration = quickNumericGregorianDatePlusDuration(raw);
-	if (numericDateWithDuration?.checkinISO && numericDateWithDuration?.checkoutISO) {
-		return numericDateWithDuration;
-	}
 	if (numericSlashDateTokenCount(raw) > 0 && !namedCalendarMonthText(raw)) {
 		return { checkinISO: null, checkoutISO: null, raw: null };
 	}

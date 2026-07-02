@@ -486,22 +486,22 @@ const ROOM_SELECTION_PATTERNS = [
 	{
 		key: "doubleRooms",
 		pattern:
-			/(?:double|twin|standard|two\s+beds?|2\s*beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|2\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:double|twin|standard|two\s+beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a)/i,
 	},
 	{
 		key: "tripleRooms",
 		pattern:
-			/(?:triple|three\s+beds?|3\s*beds?|\u062b\u0644\u0627\u062b\u064a\u0629|\u062b\u0644\u0627\u062b\u064a|\u062b\u0644\u0627\u062b\u0649|\u062a\u0644\u0627\u062a\u064a|\u062a\u0644\u0627\u062a\u0649|3\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:triple|three\s+beds?|\u062b\u0644\u0627\u062b\u064a\u0629|\u062b\u0644\u0627\u062b\u064a|\u062b\u0644\u0627\u062b\u0649|\u062a\u0644\u0627\u062a\u064a|\u062a\u0644\u0627\u062a\u0649)/i,
 	},
 	{
 		key: "quadRooms",
 		pattern:
-			/(?:quadruple|quad|four\s+beds?|4\s*beds?|\u0631\u0628\u0627\u0639\u064a\u0629|\u0631\u0628\u0627\u0639\u064a|\u0631\u0628\u0627\u0639\u0649|4\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:quadruple|quad|four\s+beds?|\u0631\u0628\u0627\u0639\u064a\u0629|\u0631\u0628\u0627\u0639\u064a|\u0631\u0628\u0627\u0639\u0649)/i,
 	},
 	{
 		key: "familyRooms",
 		pattern:
-			/(?:family|quintuple|five\s+beds?|5\s*beds?|\u0639\u0627\u0626\u0644\u064a\u0629|\u0639\u0627\u0626\u0644\u064a|\u062e\u0645\u0627\u0633\u064a\u0629|\u062e\u0645\u0627\u0633\u064a|5\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:family|quintuple|five\s+beds?|\u0639\u0627\u0626\u0644\u064a\u0629|\u0639\u0627\u0626\u0644\u064a|\u062e\u0645\u0627\u0633\u064a\u0629|\u062e\u0645\u0627\u0633\u064a)/i,
 	},
 	{ key: "suite", pattern: /(?:suite|\u062c\u0646\u0627\u062d)/i },
 ];
@@ -627,10 +627,6 @@ function extractRoomSelectionsFromText(value = "") {
 			roomTypeKey: matcher.key,
 			count: roomCountNearMatch(text, matcher),
 		});
-	}
-	const capacityKey = mapRoomToKey(text);
-	if (capacityKey && !selections.some((item) => item.roomTypeKey === capacityKey)) {
-		selections.push({ roomTypeKey: capacityKey, count: 1 });
 	}
 	if (!selections.length) {
 		const key = mapRoomToKey(text);
@@ -2681,7 +2677,7 @@ function latestGuestAsksHotelFactOnly(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	if (!text.trim()) return false;
 	const hotelFactTopic =
-		/(nusuk|نسك|bus|shuttle|باص|اوتوبيس|أوتوبيس|حافلة|نقل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|قريب|الحرم|موقع|location|distance|address|map|maps|directions|خريطة|خريطه|خرائط|لوكيشن|عنوان|مشي|walking|parking|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant|branch|branches|فرع|فروع|المدينة|المدينه|الطائف)/i.test(
+		/(nusuk|نسك|bus|shuttle|باص|اوتوبيس|أوتوبيس|حافلة|نقل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|قريب|الحرم|موقع|location|distance|address|مشي|walking|parking|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant)/i.test(
 			text
 		);
 	if (!hotelFactTopic) return false;
@@ -2703,115 +2699,6 @@ function policyAnswerForTopic(hotel = {}, pattern) {
 		return pattern.test(haystack);
 	});
 	return cleanDisplayString(row?.answer || row?.a || row?.text || "", 700);
-}
-
-function hotelCoordinatesForMaps(hotel = {}) {
-	const coordinates = Array.isArray(hotel?.location?.coordinates)
-		? hotel.location.coordinates
-		: [];
-	const longitude = Number(coordinates[0]);
-	const latitude = Number(coordinates[1]);
-	if (
-		!Number.isFinite(latitude) ||
-		!Number.isFinite(longitude) ||
-		(latitude === 0 && longitude === 0)
-	) {
-		return null;
-	}
-	return { latitude, longitude };
-}
-
-function hotelGoogleMapsUrl(hotel = {}) {
-	const coordinates = hotelCoordinatesForMaps(hotel);
-	if (coordinates) {
-		return `https://www.google.com/maps/search/?api=1&query=${coordinates.latitude},${coordinates.longitude}`;
-	}
-	const address = cleanDisplayString(hotel?.hotelAddress, 240);
-	if (!address) return "";
-	return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
-}
-
-function latestGuestAsksMapOrLocation(latestGuest = {}) {
-	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
-	return /(map|maps|google\s*maps|directions?|location|address|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u0645\u0648\u0642\u0639|\u0644\u0648\u0643\u064a\u0634\u0646|\u0639\u0646\u0648\u0627\u0646|\u0648\u0635\u0641\s+\u0627\u0644\u0645\u0643\u0627\u0646|\u0648\u064a\u0646|\u0627\u064a\u0646|\u0641\u064a\u0646)/i.test(
-		text
-	);
-}
-
-function latestGuestAsksBranch(latestGuest = {}) {
-	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
-	return /(branch|branches|\u0641\u0631\u0639|\u0641\u0631\u0648\u0639|\u0627\u0644\u0645\u062f\u064a\u0646\u0629|\u0627\u0644\u0645\u062f\u064a\u0646\u0647|\u0627\u0644\u0637\u0627\u0626\u0641)/i.test(
-		text
-	);
-}
-
-function latestGuestRequestsApartmentUnit(value = "") {
-	const text = normalizeIntentSearchText(value).replace(/\s+/g, " ");
-	return /(apartment|apartments|flat|flats|unit|units|\u0634\u0642\u0629|\u0634\u0642\u0647|\u0634\u0642\u0642|\u0648\u062d\u062f\u0629|\u0648\u062d\u062f\u0647|\u0648\u062d\u062f\u0627\u062a)/i.test(
-		text
-	);
-}
-
-function hotelOffersApartmentUnits(hotel = {}) {
-	const propertyType = cleanDisplayString(
-		typeof hotel.propertyType === "string"
-			? hotel.propertyType
-			: hotel.propertyType?.name || hotel.propertyType?.type || "",
-		80
-	).toLowerCase();
-	if (/(apartment|flat|\u0634\u0642\u0629|\u0634\u0642\u0647|\u0634\u0642\u0642)/i.test(propertyType)) {
-		return true;
-	}
-	return (Array.isArray(hotel.roomCountDetails) ? hotel.roomCountDetails : []).some((room) => {
-		const text = [
-			room?.roomType,
-			room?.displayName,
-			room?.displayName_OtherLanguage,
-			room?.description,
-			room?.description_OtherLanguage,
-		]
-			.join(" ")
-			.toLowerCase();
-		return /(apartment|flat|\u0634\u0642\u0629|\u0634\u0642\u0647|\u0634\u0642\u0642)/i.test(text);
-	});
-}
-
-function buildNoApartmentClarificationMessage(sc = {}, hotel = {}, known = {}, latestText = "") {
-	const languageCode = activeLanguageCode(sc, known);
-	const ar = /^ar\b/i.test(languageCode);
-	const selections = normalizeRoomSelections(known.roomSelections);
-	const hotelName = ar
-		? hotel.hotelName_OtherLanguage || hotel.hotelName || "\u0627\u0644\u0641\u0646\u062f\u0642"
-		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
-	if (ar) {
-		const selectedLine = selections.length
-			? `\u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0628\u062f\u064a\u0644 \u0641\u0646\u062f\u0642\u064a \u0643\u063a\u0631\u0641 \u0645\u0646\u0641\u0635\u0644\u0629: ${selections
-					.map((item) => `${formatNumber(item.count, languageCode)} x ${roomTypeLabel(item.roomTypeKey, languageCode)}`)
-					.join(" + ")}.`
-			: "\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u063a\u0631\u0641 \u0641\u0646\u062f\u0642\u064a\u0629 \u0645\u0646\u0627\u0633\u0628\u0629 \u0628\u062f\u0644 \u0627\u0644\u0634\u0642\u0629.";
-		const next = validISODate(known.checkinISO) && validISODate(known.checkoutISO)
-			? "\u0647\u0644 \u064a\u0646\u0627\u0633\u0628\u0643 \u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u0623\u0633\u0627\u0633\u061f"
-			: "\u0641\u0636\u0644\u0627 \u0623\u0631\u0633\u0644 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c\u060c \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u0633\u0631\u0639\u0629.";
-		return [
-			`\u0623\u0641\u0647\u0645\u0643 ${arabicGuestAddress(sc, known)}.`,
-			`${hotelName} \u064a\u0648\u0641\u0631 \u063a\u0631\u0641\u0627 \u0641\u0646\u062f\u0642\u064a\u0629\u060c \u0648\u0644\u0627 \u064a\u0638\u0647\u0631 \u0639\u0646\u062f\u064a \u0623\u0646\u0647 \u064a\u0648\u0641\u0631 \u0634\u0642\u0642\u0627 \u0623\u0648 \u0648\u062d\u062f\u0627\u062a \u062f\u0627\u062e\u0644 \u0634\u0642\u0629.`,
-			selectedLine,
-			next,
-		].join("\n");
-	}
-	const selectedLine = selections.length
-		? `I can check the closest hotel-room setup instead: ${selections
-				.map((item) => `${item.count} x ${roomTypeLabel(item.roomTypeKey, languageCode)}`)
-				.join(" + ")}.`
-		: "I can help with suitable hotel rooms instead.";
-	return [
-		`I understand ${guestDisplayName(sc)}.`,
-		`${hotelName} offers hotel rooms, and I do not see apartments/units listed for this property.`,
-		selectedLine,
-		validISODate(known.checkinISO) && validISODate(known.checkoutISO)
-			? "Would you like me to check availability on that basis?"
-			: "Send me the check-in and checkout dates and I will check availability quickly.",
-	].join("\n");
 }
 
 function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) {
@@ -2850,40 +2737,13 @@ function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) 
 			? `أستاذ ${guestName}، سياسة ${hotelName}: ${policy || "سأراجع لك سياسة الإلغاء والاسترداد حسب تفاصيل الحجز قبل التأكيد."}`
 			: `${guestName}, ${hotelName}'s policy: ${policy || "I will review the cancellation/refund policy for your booking details before confirmation."}`;
 	}
-	if (latestGuestAsksBranch(latestGuest)) {
-		return ar
-			? `\u062d\u0627\u0644\u064a\u0627 ${arabicGuestAddress(sc, initialKnownFacts(sc))}\u060c \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0639\u0646\u062f\u064a \u0647\u064a \u0644\u0640 ${hotelName} \u0641\u064a \u0645\u0643\u0629 \u0641\u0642\u0637\u060c \u0648\u0644\u0627 \u064a\u0638\u0647\u0631 \u0641\u0631\u0639 \u0645\u0624\u0643\u062f \u0644\u0646\u0627 \u0641\u064a \u0627\u0644\u0645\u062f\u064a\u0646\u0629 \u0627\u0644\u0645\u0646\u0648\u0631\u0629 \u0623\u0648 \u0627\u0644\u0637\u0627\u0626\u0641. \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0628\u062d\u062c\u0632\u0643 \u0641\u064a \u0645\u0643\u0629 \u0628\u0625\u0630\u0646 \u0627\u0644\u0644\u0647.`
-			: `At the moment ${guestName}, the details I have are for ${hotelName} in Makkah only. I do not see a confirmed branch in Madinah or Taif. I can help with your Makkah stay.`;
-	}
-	if (/بعيد|قريب|الحرم|موقع|location|distance|address|مشي|walking|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|map|maps|directions|\u0644\u0648\u0643\u064a\u0634\u0646|\u0639\u0646\u0648\u0627\u0646/i.test(text)) {
+	if (/بعيد|قريب|الحرم|موقع|location|distance|address|مشي|walking/i.test(text)) {
 		const walking = cleanDisplayString(hotel.distances?.walkingToElHaram, 80);
 		const driving = cleanDisplayString(hotel.distances?.drivingToElHaram, 80);
-		const walkingText = localizedDurationMinutes(walking, "15", languageCode);
-		const drivingText = localizedDurationMinutes(driving, "2", languageCode);
 		const address = cleanDisplayString(hotel.hotelAddress, 240);
-		const mapsUrl = hotelGoogleMapsUrl(hotel);
-		const mapLine = mapsUrl
-			? ar
-				? `\u0631\u0627\u0628\u0637 \u062e\u0631\u0627\u0626\u0637 \u062c\u0648\u062c\u0644: ${mapsUrl}`
-				: `Google Maps: ${mapsUrl}`
-			: "";
 		return ar
-			? [
-					`\u0623\u0643\u064a\u062f ${arabicGuestAddress(sc, initialKnownFacts(sc))}\u060c \u0647\u0630\u0627 \u0645\u0648\u0642\u0639 ${hotelName}:`,
-					mapLine,
-					address ? `\u0627\u0644\u0639\u0646\u0648\u0627\u0646: ${address}.` : "",
-					`\u064a\u0628\u0639\u062f \u062d\u0648\u0627\u0644\u064a ${walkingText} \u0645\u0634\u064a\u0627 \u0639\u0646 \u0627\u0644\u062d\u0631\u0645\u060c \u0648${drivingText} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`,
-			  ]
-					.filter(Boolean)
-					.join("\n")
-			: [
-					`${guestName}, here is ${hotelName}'s location:`,
-					mapLine,
-					address ? `Address: ${address}.` : "",
-					`It is about ${walkingText} walking from Al Haram and ${drivingText} by car depending on traffic.`,
-			  ]
-					.filter(Boolean)
-					.join("\n");
+			? `أستاذ ${guestName}، ${hotelName} قريب من الحرم: حوالي ${walking || "15 دقيقة"} مشيا و${driving || "دقيقتين"} بالسيارة حسب الزحام. ${address ? `العنوان: ${address}.` : ""}`
+			: `${guestName}, ${hotelName} is near Al Haram: about ${walking || "15 minutes"} walking and ${driving || "2 minutes"} by car depending on traffic. ${address ? `Address: ${address}.` : ""}`;
 	}
 	return ar
 		? `أستاذ ${guestName}، حسب بيانات ${hotelName} أقدر أوضح لك تفاصيل الفندق والخدمات المتاحة، ثم نكمل الحجز خطوة بخطوة.`
@@ -2968,8 +2828,6 @@ function compactTextArray(values = [], maxItems = 8, maxChars = 80) {
 }
 
 function compactRoomOffers(room = {}) {
-	const today = new Date();
-	today.setUTCHours(0, 0, 0, 0);
 	return (Array.isArray(room.offers) ? room.offers : [])
 		.map((offer) => ({
 			name: cleanDisplayString(offer.offerName, 90),
@@ -2977,17 +2835,11 @@ function compactRoomOffers(room = {}) {
 			to: validISODate(offer.offerTo) || cleanString(offer.offerTo, 10),
 			pricePerNight: numberOrNull(offer.offerPrice),
 		}))
-		.filter((offer) => {
-			if (!offer.name && !offer.pricePerNight) return false;
-			if (!offer.to) return true;
-			return new Date(`${offer.to}T23:59:59.999Z`) >= today;
-		})
+		.filter((offer) => offer.name || offer.pricePerNight)
 		.slice(0, 6);
 }
 
 function compactRoomMonthlyOffers(room = {}) {
-	const today = new Date();
-	today.setUTCHours(0, 0, 0, 0);
 	return (Array.isArray(room.monthly) ? room.monthly : [])
 		.map((month) => ({
 			name: cleanDisplayString(month.monthName, 90),
@@ -2997,17 +2849,12 @@ function compactRoomMonthlyOffers(room = {}) {
 			toHijri: cleanDisplayString(month.monthToHijri, 32),
 			packagePrice: numberOrNull(month.monthPrice),
 		}))
-		.filter((month) => {
-			if (!month.name && !month.packagePrice) return false;
-			if (!month.to) return true;
-			return new Date(`${month.to}T23:59:59.999Z`) >= today;
-		})
+		.filter((month) => month.name || month.packagePrice)
 		.slice(0, 6);
 }
 
 function compactHotelFacts(hotel = {}) {
 	const source = asObject(hotel);
-	const coordinates = hotelCoordinatesForMaps(source);
 	const rooms = (Array.isArray(source.roomCountDetails) ? source.roomCountDetails : [])
 		.filter((room) => room && room.activeRoom !== false)
 		.slice(0, 12)
@@ -3028,10 +2875,6 @@ function compactHotelFacts(hotel = {}) {
 	return {
 		hotelName: source.hotelName || "",
 		hotelNameArabic: source.hotelName_OtherLanguage || "",
-		propertyType:
-			typeof source.propertyType === "string"
-				? source.propertyType
-				: source.propertyType?.name || source.propertyType?.type || "",
 		address: source.hotelAddress || "",
 		city: source.hotelCity || source.city || "",
 		state: source.hotelState || source.state || "",
@@ -3040,11 +2883,7 @@ function compactHotelFacts(hotel = {}) {
 		about: String(source.aboutHotel || "").slice(0, 600),
 		aboutArabic: String(source.aboutHotelArabic || "").slice(0, 600),
 		distances: source.distances || null,
-		location: {
-			geoJson: source.location || null,
-			coordinates,
-			googleMapsUrl: hotelGoogleMapsUrl(source),
-		},
+		location: source.location || null,
 		hasBusService: source.hasBusService,
 		busDetails: String(source.busDetails || "").slice(0, 500),
 		hasMealsService: source.hasMealsService,
@@ -3286,8 +3125,6 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
 		`If the guest asks to cancel a reservation or change its status to canceled, return action="cancel_reservation". Never tell the guest the reservation was canceled in chat; the official cancellation/status-change path is WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
 		`If the guest asks to find, view, or check an existing reservation and explicitly gives a reservation/booking/confirmation/reference number, return action="lookup_reservation". Do not use this action for a normal phone number unless the guest explicitly says it is the reservation/booking/confirmation/reference number.`,
-		`If Hotel facts say propertyType is hotel and rooms do not list apartments/units, never offer an apartment or say a two-bedroom apartment/unit is available. Explain briefly that this property provides hotel rooms, then offer the closest hotel-room setup if the guest mentioned room types such as double plus four-bed/quad.`,
-		`If the guest asks for a map, address, location, directions, or Google Maps, answer from Hotel facts and include Hotel facts.location.googleMapsUrl when present. If coordinates are present, treat them as authoritative for the map link.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
 		`If the guest's request is materially unclear or could change the reservation outcome, ask one concise clarification question before acting. Do not ask for clarification for easy typos, dialect wording, or details you can confidently infer from the transcript.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Quick replies are only appropriate when the server has just provided exact choices such as a quote, booking review, optional email skip, or same-date room options.`,
@@ -4516,22 +4353,6 @@ function formatNumber(value, languageCode = "en") {
 	return new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
 		Number(value || 0)
 	);
-}
-
-function localizedDurationMinutes(value = "", fallback = "", languageCode = "en") {
-	const raw = cleanDisplayString(value || fallback, 80);
-	const normalized = normalizeDigits(raw).toLowerCase();
-	const numeric = Number(normalized.replace(/[^\d.]/g, ""));
-	if (
-		Number.isFinite(numeric) &&
-		numeric > 0 &&
-		/^\s*[\d.,]+\s*(?:m|min|mins|minutes?|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u0626\u0642)?\s*$/.test(normalized)
-	) {
-		return /^ar\b/i.test(languageCode)
-			? `${formatNumber(numeric, languageCode)} \u062f\u0642\u064a\u0642\u0629`
-			: `${formatNumber(numeric, languageCode)} minute${numeric === 1 ? "" : "s"}`;
-	}
-	return raw || (/^ar\b/i.test(languageCode) ? "\u062f\u0642\u0627\u0626\u0642" : "minutes");
 }
 
 function arabicQuantityLabel(count = 1, one = "", two = "", plural = "") {
@@ -6655,37 +6476,6 @@ async function planTurn(io, supportCaseOrId) {
 			typingStartedAt,
 		});
 	}
-	if (
-		latestGuest &&
-		latestGuestRequestsApartmentUnit(latestText) &&
-		!hotelOffersApartmentUnits(hotel)
-	) {
-		await saveKnownFacts(key, known);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(
-			io,
-			sc,
-			buildNoApartmentClarificationMessage(sc, hotel, known, latestText),
-			{
-				latestGuest,
-				known,
-				clientAction: "hotel_rooms_only_clarification",
-			}
-		);
-	}
-	if (
-		latestGuest &&
-		(latestGuestAsksMapOrLocation(latestGuest) || latestGuestAsksBranch(latestGuest)) &&
-		latestGuestAsksHotelFactOnly(latestGuest)
-	) {
-		await saveKnownFacts(key, known);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, buildHotelFactFallbackMessage(sc, hotel, latestGuest), {
-			latestGuest,
-			known,
-			clientAction: "hotel_fact_answered",
-		});
-	}
 	if (latestGuest && latestGuestRequestsReservationCancel(latestText, known)) {
 		const confirmation = confirmationNumberFromText(latestText);
 		if (confirmation) known.confirmation = confirmation;
@@ -7615,7 +7405,6 @@ const exportedOrchestrator = {
 		guestRequestsBookingReviewStep,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
-		quoteTool,
 		relationshipGuestFactsFromText,
 		applyRelationshipGuestFacts,
 		sameAsDisplayedNameIntent,
@@ -7640,11 +7429,6 @@ const exportedOrchestrator = {
 		withWarmPrefix,
 		buildCancelReservationContactMessage,
 		buildFriendlyReservationUpdateMessage,
-		buildHotelFactFallbackMessage,
-		buildNoApartmentClarificationMessage,
-		hotelGoogleMapsUrl,
-		hotelOffersApartmentUnits,
-		latestGuestRequestsApartmentUnit,
 		replyPromisesBookingReview,
 		parseJsonObject,
 	},
