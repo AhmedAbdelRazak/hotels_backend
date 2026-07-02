@@ -2332,6 +2332,63 @@ function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
 	return arabicNeedles.some((needle) => compact.includes(needle));
 }
 
+function latestGuestAsksBookingProcess(latestGuest = {}) {
+	const text = normalizeIntentSearchText(latestGuest?.message || "")
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const directPriceOrAvailability =
+		/\b(?:price|prices|rate|rates|cost|availability|available|quote|total|sar)\b/i.test(
+			text
+		) ||
+		/(?:\u0633\u0639\u0631|\u0627\u0633\u0639\u0627\u0631|\u0623\u0633\u0639\u0627\u0631|\u0628\u0643\u0627\u0645|\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a)/iu.test(
+			compact
+		);
+	if (directPriceOrAvailability) return false;
+	const bookingTopic =
+		/\b(?:book|booking|reserve|reservation)\b/i.test(text) ||
+		/(?:\u062d\u062c\u0632|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632)/iu.test(compact);
+	const processTopic =
+		/\b(?:process|steps?|procedure|way|how\s+(?:do|can|to)|what(?:'s|s|\s+is)?)\b/i.test(
+			text
+		) ||
+		/(?:\u0637\u0631\u064a\u0642\u0629|\u062e\u0637\u0648\u0627\u062a|\u0627\u062c\u0631\u0627\u0621\u0627\u062a|\u0625\u062c\u0631\u0627\u0621\u0627\u062a|\u0643\u064a\u0641)/iu.test(
+			compact
+		) ||
+		/(?:process|procedure|kaise|kese|kya|steps?)/i.test(text);
+	return bookingTopic && processTopic;
+}
+
+function bookingProcessReplyNeedsCorrection(decision = {}, known = {}, latestGuest = {}) {
+	if (cleanString(decision?.action, 80).toLowerCase() !== "reply") return false;
+	if (!latestGuestAsksBookingProcess(latestGuest)) return false;
+	const reply = normalizeIntentSearchText(decision?.reply || "")
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!reply) return true;
+	const hasDates = validISODate(known.checkinISO) && validISODate(known.checkoutISO);
+	const hasRoom =
+		Boolean(known.roomTypeKey) || normalizeRoomSelections(known.roomSelections).length > 0;
+	const asksForKnownDates =
+		hasDates &&
+		/(?:share|send|provide|tell me|give me|need).{0,50}(?:check\s*in|check\s*out|dates?|arrival|departure)/i.test(
+			reply
+		);
+	const asksForKnownRoom =
+		hasRoom &&
+		/(?:choose|select|pick|send|provide|tell me|give me).{0,50}(?:room|room type|option)/i.test(
+			reply
+		);
+	const describesOnlyGenericSteps =
+		/(?:share|send|provide).{0,40}(?:check\s*in|check\s*out|dates?).{0,160}(?:choose|select|pick).{0,40}(?:room|room type|option)/i.test(
+			reply
+		);
+	return asksForKnownDates || asksForKnownRoom || describesOnlyGenericSteps;
+}
+
 function emailAlreadyOffered(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	return conversation.some((entry) => {
@@ -3070,21 +3127,7 @@ function buildMandatoryDetailsMessage(sc = {}, known = {}, missing = []) {
 function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
 	if (!latestGuest) return null;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
-	let guestIndex = -1;
-	for (let index = conversation.length - 1; index >= 0; index -= 1) {
-		const entry = conversation[index];
-		if (
-			entry === latestGuest ||
-			(entry?.clientTag && entry.clientTag === latestGuest.clientTag) ||
-			(entry?.date &&
-				latestGuest.date &&
-				String(entry.date) === String(latestGuest.date) &&
-				String(entry.message || "") === String(latestGuest.message || ""))
-		) {
-			guestIndex = index;
-			break;
-		}
-	}
+	const guestIndex = conversationIndexOfEntry(sc, latestGuest);
 	if (guestIndex <= 0) return null;
 	for (let index = guestIndex - 1; index >= 0; index -= 1) {
 		if (isAiSupportEntry(conversation[index])) return conversation[index];
@@ -3092,24 +3135,46 @@ function previousAiEntryBeforeLatestGuest(sc = {}, latestGuest = null) {
 	return null;
 }
 
-function previousGuestEntryBeforeLatest(sc = {}, latestGuest = null) {
-	if (!latestGuest) return null;
+function conversationIndexOfEntry(sc = {}, target = null) {
+	if (!target) return -1;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
-	let guestIndex = -1;
 	for (let index = conversation.length - 1; index >= 0; index -= 1) {
 		const entry = conversation[index];
 		if (
-			entry === latestGuest ||
-			(entry?.clientTag && entry.clientTag === latestGuest.clientTag) ||
+			entry === target ||
+			(entry?.clientTag && entry.clientTag === target.clientTag) ||
 			(entry?.date &&
-				latestGuest.date &&
-				String(entry.date) === String(latestGuest.date) &&
-				String(entry.message || "") === String(latestGuest.message || ""))
+				target.date &&
+				String(entry.date) === String(target.date) &&
+				String(entry.message || "") === String(target.message || ""))
 		) {
-			guestIndex = index;
-			break;
+			return index;
 		}
 	}
+	return -1;
+}
+
+function previousAiBeforeEntry(sc = {}, entry = null, allowedActions = []) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const startIndex = conversationIndexOfEntry(sc, entry);
+	const wanted = new Set(
+		(Array.isArray(allowedActions) ? allowedActions : [])
+			.map((action) => cleanString(action, 80).toLowerCase())
+			.filter(Boolean)
+	);
+	for (let index = startIndex - 1; index >= 0; index -= 1) {
+		const item = conversation[index];
+		if (!isAiSupportEntry(item)) continue;
+		const action = cleanString(item.clientAction, 80).toLowerCase();
+		if (!wanted.size || wanted.has(action)) return item;
+	}
+	return null;
+}
+
+function previousGuestEntryBeforeLatest(sc = {}, latestGuest = null) {
+	if (!latestGuest) return null;
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const guestIndex = conversationIndexOfEntry(sc, latestGuest);
 	if (guestIndex <= 0) return null;
 	for (let index = guestIndex - 1; index >= 0; index -= 1) {
 		if (isGuestEntry(conversation[index])) return conversation[index];
@@ -3561,6 +3626,42 @@ function latestGuestAsksHotelFactInContext(sc = {}, latestGuest = {}) {
 	);
 }
 
+function latestGuestShortAffirmative(value = "", action = "") {
+	const text = String(value || "");
+	if (!shortGuestContinuationText(text)) return false;
+	return (
+		guestConfirms(text, action) ||
+		guestWantsToContinueBooking(text, action) ||
+		/^(?:yes|yeah|yep|ok|okay|sure|please|go ahead|continue)$/i.test(
+			normalizeIntentSearchText(text).replace(/\s+/g, " ").trim()
+		)
+	);
+}
+
+function actionToResumeAfterHotelFactAffirmation(
+	sc = {},
+	latestGuest = {},
+	previousAi = {},
+	latestAction = ""
+) {
+	if (cleanString(previousAi?.clientAction, 80).toLowerCase() !== "hotel_fact_answered") {
+		return "";
+	}
+	if (!latestGuestShortAffirmative(latestGuest?.message || "", latestAction)) return "";
+	const priorAi = previousAiBeforeEntry(sc, previousAi, [
+		"quote_ready",
+		"quote_unavailable",
+		"required_details_needed",
+		"optional_email",
+	]);
+	const priorAction = cleanString(priorAi?.clientAction, 80).toLowerCase();
+	if (priorAction === "quote_unavailable") return "check_alternatives";
+	if (priorAction === "quote_ready") return "send_review";
+	if (priorAction === "required_details_needed") return "required_details_needed";
+	if (priorAction === "optional_email") return "optional_email";
+	return "";
+}
+
 function hotelFactQuestionAsksExplicitMapOrAddress(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	return /(map|maps|google\s*maps|directions?|location|address|adress|adres|where|kaha|kahan|kahaan|kidhar|pata|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u0644\u0648\u0643\u064a\u0634\u0646|\u0639\u0646\u0648\u0627\u0646|\u0645\u0648\u0642\u0639|\u0648\u0635\u0641\s+\u0627\u0644\u0645\u0643\u0627\u0646|\u0648\u064a\u0646|\u0627\u064a\u0646|\u0641\u064a\u0646|\u06a9\u06c1\u0627\u06ba|\u0627\u06cc\u0688\u0631\u06cc\u0633|\u067e\u062a\u06c1)/i.test(
@@ -3887,7 +3988,7 @@ function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) 
 	const languageCode = activeLanguageCode(sc, initialKnownFacts(sc));
 	const ar = /^ar\b/i.test(languageCode);
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
-	const guestName = guestDisplayName(sc);
+	const guestName = shortGuestAddressName(sc, initialKnownFacts(sc), latestGuest?.message || "");
 	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
 	const wantsPriceGuidance = latestGuestAsksPriceGuidance(latestGuest);
 	const withPriceGuidance = (message = "") =>
@@ -4447,6 +4548,7 @@ function orchestratorContractPrompt() {
 		'- Use action="lookup_reservation", "update_reservation", or "cancel_reservation" only for existing-reservation requests.',
 		'- Use action="escalate" only for human-needed cases, and "close_case" only when the guest is clearly finished.',
 		"- Required booking facts before official review: checkinISO, checkoutISO, roomTypeKey or roomSelections, a server quote, confirmed fullName, confirmed phone, confirmed nationality, and adults. Email is optional.",
+		"- If the guest asks for the booking process, next step, or how to book, do not restart with generic steps when Known facts already contain dates, room selection, quote, or unavailable quote context. Acknowledge what is already known, then state the exact next action or ask only for the missing required fields.",
 		"- The brain owns missing-field decisions. Put only genuinely needed field keys in memory.missingFields. If the guest already answered a field in the transcript or Known facts, do not ask again.",
 		"- The brain owns correction decisions. Put every field intentionally changed by the latest guest message in memory.changedFields and include the updated value in facts.",
 		"- When action requires a tool, include every known stay fact needed by that tool in facts, especially checkinISO, checkoutISO, roomTypeKey, rooms, roomSelections, adults, children, and languageCode.",
@@ -5213,6 +5315,7 @@ function decisionChangedStaySelection(decision = {}) {
 
 function shouldForceQuote(decision = {}, known = {}, latestGuest = {}) {
 	if (latestGuestAsksHotelFactOnly(latestGuest)) return false;
+	if (latestGuestAsksBookingProcess(latestGuest)) return false;
 	if (decision.action === "get_quote") return true;
 	if (!quoteInputsKnown(known)) return false;
 	if (quoteMatchesKnown(known)) return false;
@@ -5227,7 +5330,8 @@ function freshQuoteRequiredBeforeReply(known = {}, latestGuest = {}) {
 	return (
 		quoteInputsKnown(known) &&
 		!quoteMatchesKnown(known) &&
-		!latestGuestAsksHotelFactOnly(latestGuest)
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		!latestGuestAsksBookingProcess(latestGuest)
 	);
 }
 
@@ -8518,6 +8622,32 @@ async function executeBrainFirstDecision({
 		{ changedFields }
 	);
 	nextKnown = syncKnownFromQuote(nextKnown);
+	const hotelFactFollowUpAction = actionToResumeAfterHotelFactAffirmation(
+		sc,
+		latestGuest,
+		previousAi,
+		latestAction
+	);
+	if (hotelFactFollowUpAction === "check_alternatives") {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"resume_after_hotel_fact_to_alternatives",
+			{ action: "check_alternatives", reason: "guest_affirmed_prior_unavailable_quote" },
+			nextKnown
+		);
+		return handleBrainAlternatives(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (hotelFactFollowUpAction === "send_review" && quoteMatchesKnown(nextKnown)) {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"resume_after_hotel_fact_to_review",
+			{ action: "send_review", reason: "guest_affirmed_prior_quote" },
+			nextKnown
+		);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
 	if (
 		latestGuest &&
 		(contextualHotelFactQuestion || latestGuestAsksHotelFactOnly(latestGuest)) &&
@@ -8627,6 +8757,21 @@ async function executeBrainFirstDecision({
 			reply: "",
 			reason: nextDecision.reason || "progress_reply_requires_booking_action",
 		});
+	}
+	if (bookingProcessReplyNeedsCorrection(nextDecision, nextKnown, latestGuest)) {
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "booking_process_context_guard",
+			extra: { missing: requiredBookingMissing(nextKnown) },
+			instruction:
+				"The guest asked about the booking process/next step, but Known facts already include part of the stay. Do not restart with generic steps or ask again for known dates/room choices. Acknowledge the already-known dates, room/quote status, and then give the exact next action. If a valid quote is available and required fields are missing, ask only for the missing fields. If the selected/latest room is unavailable, offer to check alternatives or ask which available earlier quote they prefer. Keep it customer-facing and concise.",
+		});
+		nextDecision = repaired.decision;
+		nextKnown = syncKnownFromQuote(repaired.known);
 	}
 	if (replyRequestsForbiddenBookingField(nextDecision.reply)) {
 		const missing = requiredBookingMissing(nextKnown);
@@ -9306,6 +9451,32 @@ async function planTurn(io, supportCaseOrId) {
 	const contextualHotelFactQuestion = latestGuest
 		? hotelFactContinuationQuestion(sc, latestGuest)
 		: "";
+	const hotelFactFollowUpAction = actionToResumeAfterHotelFactAffirmation(
+		sc,
+		latestGuest,
+		previousAi,
+		latestAction
+	);
+	if (hotelFactFollowUpAction === "check_alternatives") {
+		await saveKnownFacts(key, known);
+		logOrchestratorDecision(
+			key,
+			"resume_after_hotel_fact_to_alternatives",
+			{ action: "check_alternatives", reason: "guest_affirmed_prior_unavailable_quote" },
+			known
+		);
+		return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (hotelFactFollowUpAction === "send_review" && quoteMatchesKnown(known)) {
+		await saveKnownFacts(key, known);
+		logOrchestratorDecision(
+			key,
+			"resume_after_hotel_fact_to_review",
+			{ action: "send_review", reason: "guest_affirmed_prior_quote" },
+			known
+		);
+		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
 	if (latestGuest && previousAiAskedFor("nationality", previousAi) && !known.nationality) {
 		const nationality = normalizeNationalityHint(latestText);
 		if (nationality) {
@@ -10396,11 +10567,14 @@ const exportedOrchestrator = {
 		guestDeclinesOptionalEmail,
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,
+		latestGuestAsksBookingProcess,
+		bookingProcessReplyNeedsCorrection,
 		guestRequestsBookingReviewStep,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		latestGuestAsksHotelFactOnly,
 		latestGuestAsksHotelFactInContext,
+		actionToResumeAfterHotelFactAffirmation,
 		latestGuestMentionsParking,
 		hotelFactContinuationQuestion,
 		hotelFactQuestionAsksExplicitMapOrAddress,
