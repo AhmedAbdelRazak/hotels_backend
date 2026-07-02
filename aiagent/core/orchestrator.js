@@ -4358,6 +4358,42 @@ function guestPressedOfficialReviewConfirmation(latestGuest = {}, previousAi = {
 	);
 }
 
+function guestConfirmedAfterLatestReview(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let latestReviewIndex = -1;
+	for (let index = 0; index < conversation.length; index += 1) {
+		const entry = conversation[index];
+		if (
+			isAiSupportEntry(entry) &&
+			String(entry.clientAction || "").toLowerCase() === "review_reservation"
+		) {
+			latestReviewIndex = index;
+		}
+	}
+	if (latestReviewIndex < 0) return false;
+	for (let index = latestReviewIndex + 1; index < conversation.length; index += 1) {
+		const entry = conversation[index];
+		if (
+			isAiSupportEntry(entry) &&
+			String(entry.clientAction || "").toLowerCase() === "reservation_confirmed"
+		) {
+			return false;
+		}
+		if (!isGuestEntry(entry)) continue;
+		const text = String(entry.message || "");
+		const action = cleanString(entry.clientAction, 80).toLowerCase();
+		if (latestGuestRejectsQuoteOrSelection(text)) return false;
+		if (
+			guestConfirms(text, action) ||
+			guestRequestsConfirmationDelivery(text, action) ||
+			["place_reservation", "confirm_reservation", "submit_reservation"].includes(action)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function replyPromisesBookingReview(reply = "") {
 	const text = normalizeDigits(String(reply || "")).toLowerCase();
 	if (!text.trim()) return false;
@@ -12156,6 +12192,18 @@ async function planTurn(io, supportCaseOrId) {
 		await waitForTypingMinimum(typingStartedAt);
 		return submitReservationForCase(io, key);
 	}
+	if (
+		latestGuest &&
+		guestConfirmedAfterLatestReview(sc) &&
+		!knownHasReservationConfirmation(known) &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
+		!requiredBookingMissing(known).length
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "review_confirmation_memory_submit");
+		return submitReservationForCase(io, key);
+	}
 	const latestGuestContinuesQuoteBeforeBrain = latestGuestContinuesAfterQuote(
 		previousAi,
 		latestText,
@@ -12336,6 +12384,18 @@ async function planTurn(io, supportCaseOrId) {
 				guestConfirms(latestText, latestAction)))
 	) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return submitReservationForCase(io, key);
+	}
+	if (
+		latestGuest &&
+		guestConfirmedAfterLatestReview(sc) &&
+		!knownHasReservationConfirmation(known) &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
+		!requiredBookingMissing(known).length
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		logTurnStage(key, "review_confirmation_memory_submit");
 		return submitReservationForCase(io, key);
 	}
 	if (
@@ -13110,6 +13170,7 @@ const exportedOrchestrator = {
 		guestRequestsBookingReviewStep,
 		guestRequestsConfirmationDelivery,
 		knownHasReservationConfirmation,
+		guestConfirmedAfterLatestReview,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		latestGuestAsksHotelFactOnly,
