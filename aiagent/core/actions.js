@@ -143,7 +143,45 @@ function rejectedAiGuestName(value = "") {
 		"\u0627\u0631\u062f\u0646\u0649",
 		"\u0623\u0631\u062f\u0646\u064a",
 		"\u0623\u0631\u062f\u0646\u0649",
+		"\u0647\u0646\u0627\u0643\u0634\u064a\u0621\u063a\u064a\u0631\u0635\u062d\u064a\u062d",
+		"\u0627\u0631\u064a\u062f\u062a\u0639\u062f\u064a\u0644\u0634\u064a\u0621",
+		"\u0623\u0631\u064a\u062f\u062a\u0639\u062f\u064a\u0644\u0634\u064a\u0621",
+		"\u0627\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
+		"\u0625\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
 	].includes(compact);
+}
+
+function looksLikeReservationActionName(value = "") {
+	const name = cleanText(value, 120);
+	const lower = name.toLowerCase();
+	const compact = compactArabic(name);
+	if (
+		/^(?:something\s+is\s+wrong|change\s+something|change\s+details|complete\s+booking|confirm|confirmed|continue|proceed|yes|ok|okay|correct)$/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	if (
+		/^(?:wrong|incorrect|mistake|not\s+correct|invalid|revise|edit|change)$/i.test(
+			lower
+		)
+	) {
+		return true;
+	}
+	return new Set([
+		"\u0647\u0646\u0627\u0643\u0634\u064a\u0621\u063a\u064a\u0631\u0635\u062d\u064a\u062d",
+		"\u0634\u064a\u0621\u063a\u064a\u0631\u0635\u062d\u064a\u062d",
+		"\u063a\u064a\u0631\u0635\u062d\u064a\u062d",
+		"\u0627\u0631\u064a\u062f\u062a\u0639\u062f\u064a\u0644\u0634\u064a\u0621",
+		"\u0623\u0631\u064a\u062f\u062a\u0639\u062f\u064a\u0644\u0634\u064a\u0621",
+		"\u062a\u0639\u062f\u064a\u0644\u0627\u0644\u0639\u0631\u0636",
+		"\u0627\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
+		"\u0625\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
+		"\u0646\u0639\u0645\u062a\u0627\u0628\u0639",
+		"\u0646\u0639\u0645",
+		"\u062a\u0645\u0627\u0645",
+	]).has(compact);
 }
 
 function usableFullName(value = "") {
@@ -152,6 +190,7 @@ function usableFullName(value = "") {
 	if (onlyDigits(name) || /^(?:guest|unknown|test|n\/a|na|null|none)$/i.test(name)) {
 		return "";
 	}
+	if (looksLikeReservationActionName(name)) return "";
 	if (rejectedAiGuestName(name)) return "";
 	if (
 		/(?:\u0644\u0627\s+\u0627\u0639\u0631\u0641|\u0644\u0627\s+\u0623\u0639\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641|\u0645\u0634\s+\u0639\u0627\u0631\u0641\u0647|\u0627\u0643\u062a\u0628\u0647\s+\u0628\u0627\u0644\u0627\u0646\u062c\u0644\u064a\u0632)/i.test(
@@ -165,6 +204,89 @@ function usableFullName(value = "") {
 		.filter((token) => /[A-Za-z\u0590-\u08FF\u0900-\u097F]{2,}/.test(token));
 	const letterCount = (name.match(/[A-Za-z\u0590-\u08FF\u0900-\u097F]/g) || []).length;
 	return tokens.length >= 2 || letterCount >= 8 ? name : "";
+}
+
+function roomCapacityForKey(roomTypeKey = "") {
+	const capacities = {
+		singleRooms: 1,
+		doubleRooms: 2,
+		tripleRooms: 3,
+		quadRooms: 4,
+		familyRooms: 5,
+		suite: 6,
+	};
+	return capacities[String(roomTypeKey || "")] || 0;
+}
+
+function roomGuestCapacity(room = {}, roomTypeKey = "") {
+	const direct = normalizedGuestCount(
+		room?.maxGuests ??
+			room?.maxOccupancy ??
+			room?.occupancy ??
+			room?.capacity ??
+			room?.roomCapacity ??
+			room?.bedsCount,
+		null
+	);
+	if (Number.isFinite(direct) && direct > 0 && direct <= 30) {
+		return Math.floor(direct);
+	}
+	return roomCapacityForKey(roomTypeKey || room?.roomType || room?.room_type);
+}
+
+function matchingHotelRoom(hotel = {}, roomTypeKey = "", displayName = "") {
+	const rooms = Array.isArray(hotel?.roomCountDetails) ? hotel.roomCountDetails : [];
+	const activeRooms = rooms.filter((item) => item && item.activeRoom !== false);
+	return (
+		activeRooms.find((item) => roomTypeKey && item.roomType === roomTypeKey) ||
+		activeRooms.find((item) => displayName && item.displayName === displayName) ||
+		null
+	);
+}
+
+function selectedRoomGuestCapacity({ hotel = {}, slots = {}, quoteData = {}, room = null } = {}) {
+	const quoteRooms = Array.isArray(quoteData?.rooms) ? quoteData.rooms : [];
+	if (quoteRooms.length) {
+		return quoteRooms.reduce((total, line = {}) => {
+			const lineQuote = line.quote || {};
+			const lineRoom = line.room || lineQuote.room || null;
+			const roomTypeKey =
+				line.roomTypeKey ||
+				lineRoom?.roomType ||
+				lineRoom?.room_type ||
+				lineQuote.roomTypeKey ||
+				lineQuote.roomType ||
+				"";
+			const displayName = lineRoom?.displayName || lineQuote.roomLabel || line.roomLabel || "";
+			const hotelRoom = lineRoom || matchingHotelRoom(hotel, roomTypeKey, displayName) || {};
+			const capacity = roomGuestCapacity(hotelRoom, roomTypeKey);
+			const count = roomSelectionCount(line.count ?? line.rooms ?? line.quantity, 1);
+			return capacity > 0 ? total + capacity * count : total;
+		}, 0);
+	}
+	const roomTypeKey =
+		slots.roomTypeKey ||
+		quoteData.roomTypeKey ||
+		room?.roomType ||
+		room?.room_type ||
+		"";
+	const hotelRoom =
+		room ||
+		matchingHotelRoom(hotel, roomTypeKey, quoteData.roomLabel || quoteData.displayName || "") ||
+		{};
+	const capacity = roomGuestCapacity(hotelRoom, roomTypeKey);
+	if (!capacity) return 0;
+	return capacity * roomSelectionCount(slots.rooms, 1);
+}
+
+function assertGuestCountFitsSelectedRooms({ hotel, slots, quoteData, room, guest }) {
+	const totalGuests = Number(guest?.adults || 0) + Number(guest?.children || 0);
+	const capacity = selectedRoomGuestCapacity({ hotel, slots, quoteData, room });
+	if (capacity > 0 && totalGuests > capacity) {
+		throw new Error(
+			`AI reservation guest count exceeds selected room capacity: ${totalGuests} guests for capacity ${capacity}.`
+		);
+	}
 }
 
 function normalizedGuestCount(value, fallback = null) {
@@ -1248,6 +1370,7 @@ async function createReservationForCase({
 		throw new Error("AI reservation quote is missing daily pricing rows.");
 	}
 	const guest = validateRequiredGuestDetails(slots);
+	assertGuestCountFitsSelectedRooms({ hotel, slots, quoteData, room, guest });
 	const caseKey = cleanCaseId(caseId);
 	const fingerprint = aiReservationFingerprint({
 		caseId: caseKey,
@@ -1612,6 +1735,10 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		buildPickedRoomsType,
 		buildPickedRoomsTypeFromQuote,
 		sumPickedRooms,
+		usableFullName,
+		looksLikeReservationActionName,
+		selectedRoomGuestCapacity,
+		assertGuestCountFitsSelectedRooms,
 	};
 }
 

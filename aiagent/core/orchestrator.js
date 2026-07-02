@@ -5054,7 +5054,11 @@ function requiredBookingMissing(known = {}) {
 		missing.push("roomTypeKey");
 	}
 	if (!quoteMatchesKnown(facts)) missing.push("quote");
-	if (!cleanString(facts.fullName) || facts.fullNameNeedsConfirmation) {
+	if (
+		!cleanString(facts.fullName) ||
+		!isPlausibleBookingName(facts.fullName) ||
+		facts.fullNameNeedsConfirmation
+	) {
 		missing.push("fullName");
 	}
 	if (!cleanPhone(facts.phone) || facts.phoneNeedsConfirmation) {
