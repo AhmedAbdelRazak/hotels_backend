@@ -499,6 +499,14 @@ function looksLikeNonBookingNamePhrase(value = "") {
 	if (!text) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
+	if (/\d/.test(normalizeDigits(text))) return true;
+	if (
+		/^(?:\u0646\u062d\u0646|\u0627\u062d\u0646\u0627|\u0625\u062d\u0646\u0627|\u0627\u0646\u0627|\u0623\u0646\u0627|\u0645\u0639\u0627\u0643|\u0645\u0639\u0627\u0643\u064a|\u0645\u0639\u0627\u0643\u0649|\u0645\u0639\u0643)$/iu.test(
+			compact
+		)
+	) {
+		return true;
+	}
 	if (
 		/^(?:ok|okay|sure|yes|yeah|yep|no|not|same|profile|visible|shown|displayed|name|one|haha+|lol)$/i.test(
 			normalized
@@ -2661,6 +2669,13 @@ function arabicFirstNameFromLatinName(value = "") {
 function looksLikeArabicNonNameAddressToken(value = "") {
 	const token = normalizeIntentSearchText(value).replace(/\s+/g, "");
 	if (!token) return true;
+	if (
+		/^(?:\u0646\u062d\u0646|\u0627\u062d\u0646\u0627|\u0625\u062d\u0646\u0627|\u0627\u0646\u0627|\u0623\u0646\u0627|\u0645\u0639\u0627\u0643|\u0645\u0639\u0627\u0643\u064a|\u0645\u0639\u0627\u0643\u0649|\u0645\u0639\u0643)$/iu.test(
+			token
+		)
+	) {
+		return true;
+	}
 	return /^(?:\u0648\u0643\u0627\u0644\u0629|\u0648\u0643\u0627\u0644\u0647|\u0634\u0631\u0643\u0629|\u0634\u0631\u0643\u0647|\u0645\u0643\u062a\u0628|\u0645\u0624\u0633\u0633\u0629|\u0645\u0624\u0633\u0633\u0647|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u062a\u062d\u0645\u0633\u0647|\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0629|\u062a\u0639\u0628\u0627\u0646\u0647|\u0645\u0631\u0647\u0642|\u0645\u0631\u0647\u0642\u0629|\u0645\u0631\u0647\u0642\u0647|\u0645\u062d\u062a\u0627\u062c|\u0645\u062d\u062a\u0627\u062c\u0629|\u0645\u062d\u062a\u0627\u062c\u0647|\u0639\u0627\u064a\u0632|\u0639\u0627\u064a\u0632\u0629|\u0639\u0627\u064a\u0632\u0647|\u062d\u0632\u064a\u0646|\u0632\u0639\u0644\u0627\u0646|\u0645\u0628\u0633\u0648\u0637|\u0641\u0631\u062d\u0627\u0646|\u0636\u064a\u0641)$/i.test(
 		token
 	);
@@ -3927,6 +3942,16 @@ function compactKnownFactsForPrompt(known = {}) {
 function latestTextHasExplicitGuestCount(text = "") {
 	const raw = String(text || "");
 	const normalized = normalizeDigits(raw).toLowerCase();
+	const arabicGuestNoun =
+		"(?:\\u0628\\u0627\\u0644\\u063a|\\u0628\\u0627\\u0644\\u063a\\u064a\\u0646|\\u0636\\u064a\\u0641|\\u0636\\u064a\\u0648\\u0641|\\u0634\\u062e\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0646\\u0632\\u064a\\u0644|\\u0646\\u0632\\u0644\\u0627\\u0621|\\u0645\\u0639\\u062a\\u0645\\u0631|\\u0645\\u0639\\u062a\\u0645\\u0631\\u064a\\u0646|\\u0637\\u0641\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0627\\u0641\\u0631\\u0627\\u062f)";
+	const arabicNumberedGuestCount = new RegExp(
+		`\\d{1,3}\\s*${arabicGuestNoun}(?:$|[^\\p{L}])`,
+		"iu"
+	);
+	const arabicGuestCountWord = new RegExp(
+		`(?:^|[^\\p{L}])${arabicGuestNoun}(?:$|[^\\p{L}])`,
+		"iu"
+	);
 	return (
 		/\b\d{1,3}\s*(?:adult|adults|guest|guests|person|people|pax|child|children|kid|kids)\b/i.test(
 			normalized
@@ -3934,12 +3959,8 @@ function latestTextHasExplicitGuestCount(text = "") {
 		/\b(?:adult|adults|guest|guests|person|people|pax|child|children|kid|kids)\b/i.test(
 			normalized
 		) ||
-		/\d{1,3}\s*(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641|\u0634\u062e\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0634\u062e\u0627\u0635|\u0646\u0632\u064a\u0644|\u0646\u0632\u0644\u0627\u0621|\u0645\u0639\u062a\u0645\u0631|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0637\u0641\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)/iu.test(
-			normalized
-		) ||
-		/(?:\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0636\u064a\u0641|\u0636\u064a\u0648\u0641|\u0634\u062e\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0634\u062e\u0627\u0635|\u0646\u0632\u064a\u0644|\u0646\u0632\u0644\u0627\u0621|\u0645\u0639\u062a\u0645\u0631|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0637\u0641\u0644|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)/iu.test(
-			normalized
-		)
+		arabicNumberedGuestCount.test(normalized) ||
+		arabicGuestCountWord.test(normalized)
 	);
 }
 
@@ -7132,6 +7153,14 @@ async function sendBrainToolReplyFromOpenAI({
 			tool: toolResult?.tool || "",
 		});
 	}
+	if (invalidReason && fallback) {
+		reply = fallback;
+		invalidReason = "";
+		console.warn("[aiagent] tool reply fallback used after validation", {
+			caseId,
+			tool: toolResult?.tool || "",
+		});
+	}
 	if (invalidReason) {
 		console.error("[aiagent] brain tool reply blocked: OpenAI reply required", {
 			caseId,
@@ -7552,10 +7581,17 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 	}
 	const missing = requiredBookingMissing(reviewKnown);
 	await saveKnownFacts(caseId, reviewKnown);
+	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	const latestContinuesShownQuote = latestGuestContinuesAfterQuote(
+		previousAi,
+		latestGuest?.message || "",
+		latestGuest?.clientAction || ""
+	);
 	if (
 		missing.length &&
 		quoteMatchesKnown(reviewKnown) &&
-		!matchingQuoteShownAfterLatestStayChange(sc, reviewKnown)
+		!matchingQuoteShownAfterLatestStayChange(sc, reviewKnown) &&
+		!latestContinuesShownQuote
 	) {
 		return sendKnownQuoteReplyFromOpenAI({
 			io,
@@ -7566,6 +7602,14 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			typingStartedAt,
 		});
 	}
+	const fallback = missing.length
+		? withWarmPrefix(
+				buildMandatoryDetailsMessage(sc, reviewKnown, missing),
+				sc,
+				reviewKnown,
+				latestGuest?.message || ""
+		  )
+		: buildReviewMessage(sc, reviewKnown, hotel);
 	const updated = await sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
@@ -7584,6 +7628,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 		},
 		clientAction: missing.length ? "required_details_needed" : "review_reservation",
 		quickReplies: missing.length ? [] : reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
+		fallback,
 		typingStartedAt,
 	});
 	if (latestConversationEntry(updated)?.clientAction === "review_reservation") {
@@ -7971,6 +8016,26 @@ async function executeBrainFirstDecision({
 				reason: nextDecision.reason || "fresh_quote_required_after_blank_reply_repair",
 			});
 		}
+	}
+	const latestContinuesShownQuote = latestGuestContinuesAfterQuote(
+		previousAi,
+		latestText,
+		latestAction
+	);
+	if (
+		latestContinuesShownQuote &&
+		quoteMatchesKnown(nextKnown) &&
+		!latestGuestRejectsQuoteOrSelection(latestText) &&
+		!latestClarifiesRequiredBookingDetail
+	) {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"continue_after_shown_quote_to_review",
+			{ action: "send_review", reason: "guest_continued_after_quote" },
+			nextKnown
+		);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (
 		quoteMatchesKnown(nextKnown) &&
@@ -9469,6 +9534,7 @@ const exportedOrchestrator = {
 		guestRequestsBookingReviewStep,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
+		matchingQuoteShownAfterLatestStayChange,
 		quoteFactsFromAiMessage,
 		roomCountFromAiReviewText,
 		shortGuestAddressName,
