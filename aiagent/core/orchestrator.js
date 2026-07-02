@@ -510,6 +510,20 @@ function looksLikeNonBookingNamePhrase(value = "") {
 	if (!text) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
+	if (guestDeclinesOptionalEmail(text, "")) return true;
+	if (
+		guestConfirms(text, "") ||
+		guestWantsToContinueBooking(text, "") ||
+		guestRequestsBookingReviewStep(text, "")
+	) {
+		return true;
+	}
+	if (/^(?:wrong|incorrect|mistake|bad|invalid|not correct)$/i.test(normalized)) {
+		return true;
+	}
+	if (/^(?:\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649|\u062e\u0637\u0623|\u062e\u0637\u0627|\u063a\u0644\u0637|\u063a\u0644\u0637\u0627\u0646|\u063a\u064a\u0631\u0635\u062d\u064a\u062d|\u0645\u0634\u0635\u062d\u064a\u062d)$/iu.test(compact)) {
+		return true;
+	}
 	if (/\d/.test(normalizeDigits(text))) return true;
 	if (
 		new Set([
@@ -1179,8 +1193,35 @@ function bookingNameFromIdentityText(value = "") {
 	return isPlausibleBookingName(candidate) ? candidate : "";
 }
 
+function identityCorrectionOnly(value = "") {
+	const text = normalizeDigits(stripChatMarkup(value));
+	const normalized = normalizeIntentSearchText(text)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!normalized) return false;
+	const compact = normalized.replace(/\s+/g, "");
+	const hasNameCue =
+		/\b(?:name|booking name|guest name|full name)\b/i.test(normalized) ||
+		/(?:\u0627\u0633\u0645\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\u062d\u062c\u0632|\u0627\u0633\u0645\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649|\u0627\u0633\u0645)/iu.test(
+			compact
+		);
+	const hasCorrectionCue =
+		/\b(?:wrong|incorrect|mistake|typo|invalid|not correct|needs? changing|change it|fix it)\b/i.test(
+			normalized
+		) ||
+		/(?:\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649|\u062e\u0637\u0623|\u062e\u0637\u0627|\u063a\u0644\u0637|\u063a\u0644\u0637\u0627\u0646|\u063a\u064a\u0631\u0635\u062d\u064a\u062d|\u0645\u0634\u0635\u062d\u064a\u062d|\u062a\u0639\u062f\u064a\u0644|\u0639\u062f\u0644)/iu.test(
+			compact
+		);
+	const hasValueConnector =
+		/[:=]|\b(?:is|as|to)\b/i.test(text) ||
+		/(?:\u0647\u0648|\u0647\u064a|\u0647\u0649|:|\u060c|,|-)/iu.test(text);
+	return hasNameCue && hasCorrectionCue && !hasValueConnector;
+}
+
 function bookingNameFromLine(value = "") {
 	const text = stripChatMarkup(value);
+	if (identityCorrectionOnly(text)) return "";
 	const patterns = [
 		/(?:use|put)\s+([A-Za-z][A-Za-z\s'.-]{1,80}?)\s+as\s+(?:the\s+)?(?:booking|guest|full)\s+name\b/i,
 		/(?:booking\s+name|guest\s+name|full\s+name|name)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z\s'.-]{1,80}?)(?=\s*(?:,|;|\.|\band\b|\bphone\b|\bmobile\b|\bnationality\b|$))/i,
@@ -1194,7 +1235,10 @@ function bookingNameFromLine(value = "") {
 	return "";
 }
 
-function bookingIdentityFactsFromText(value = "", { allowName = false } = {}) {
+function bookingIdentityFactsFromText(
+	value = "",
+	{ allowName = false, allowUnlabeledName = false } = {}
+) {
 	const facts = {};
 	const lines = String(value || "")
 		.split(/\r?\n|\\n|[|]/)
@@ -1202,6 +1246,7 @@ function bookingIdentityFactsFromText(value = "", { allowName = false } = {}) {
 		.filter(Boolean);
 	const source = lines.length ? lines : [cleanDisplayString(value, 500)].filter(Boolean);
 	for (const line of source) {
+		if (guestDeclinesOptionalEmail(line, "")) continue;
 		const hasExplicitReservationIdentifier = mentionsExplicitReservationIdentifier(line);
 		if (!facts.phone && !hasExplicitReservationIdentifier) {
 			const phone = phoneFromIdentityText(line) || phoneFromText(line) || simplePhoneFromLine(line);
@@ -1217,7 +1262,8 @@ function bookingIdentityFactsFromText(value = "", { allowName = false } = {}) {
 		if (allowName && !facts.fullName && !hasExplicitReservationIdentifier) {
 			const name = sameAsDisplayedNameIntent(line)
 				? ""
-				: bookingNameFromLine(line) || bookingNameFromIdentityText(line);
+				: bookingNameFromLine(line) ||
+				  (allowUnlabeledName ? bookingNameFromIdentityText(line) : "");
 			if (name) facts.fullName = name;
 		}
 	}
@@ -1230,9 +1276,9 @@ function bookingIdentityFactsFromText(value = "", { allowName = false } = {}) {
 function latestGuestProvidesBookingIdentityDetails(value = "") {
 	const text = stripChatMarkup(value);
 	if (!text.trim()) return false;
+	if (guestDeclinesOptionalEmail(text, "")) return false;
 	return Boolean(
 		bookingNameFromLine(text) ||
-			bookingNameFromIdentityText(text) ||
 			phoneFromIdentityText(text) ||
 			phoneFromText(text) ||
 			nationalityFromIdentityText(text) ||
@@ -1491,6 +1537,11 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		...asObject(known),
 		quote: asObject(known.quote),
 	};
+	if (recovered.fullName && !isPlausibleBookingName(recovered.fullName)) {
+		delete recovered.fullName;
+		delete recovered.fullNameConfirmed;
+		delete recovered.fullNameNeedsConfirmation;
+	}
 	if (!recovered.fullName) {
 		const profileName = usefulProfileName(sc);
 		if (profileName) {
@@ -1560,8 +1611,12 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			continue;
 		}
 		if (!isGuestEntry(entry)) continue;
-		if (action === "skip_email" || (lastAiAskedEmail && guestDeclinesOptionalEmail(text, action))) {
+		const entryDeclinesOptionalEmail =
+			action === "skip_email" || (lastAiAskedEmail && guestDeclinesOptionalEmail(text, action));
+		if (entryDeclinesOptionalEmail) {
 			recovered.emailSkipped = true;
+			lastAiAskedEmail = false;
+			continue;
 		}
 		if (lastAiAskedGuestCount) {
 			recovered = mergeKnownFacts(
@@ -1652,10 +1707,14 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			if (peopleCount) {
 				const rooms = roomSelectionsTotal(recovered.roomSelections) || normalizeRoomCount(recovered.rooms, 1);
 				const capacity = roomCapacityForKey(recovered.roomTypeKey);
-				recovered.adults =
+				const nextAdults =
 					rooms > 1 && capacity > 1 && peopleCount === capacity
 						? rooms * capacity
 						: peopleCount;
+				const currentAdults = Number(recovered.adults || 0) || 0;
+				if (latestTextHasExplicitGuestCount(line) || !currentAdults || nextAdults >= currentAdults) {
+					recovered.adults = nextAdults;
+				}
 			}
 			Object.assign(recovered, applyRelationshipGuestFacts(recovered, line));
 			const phone =
@@ -1687,7 +1746,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				entryUsesDisplayedNameForName
 					? ""
 					: bookingNameFromLine(line) ||
-					  (collectingBookingDetails ? bookingNameFromIdentityText(line) : "");
+					  (lastAiAskedBookingName ? bookingNameFromIdentityText(line) : "");
 			if (
 				explicitBookingName &&
 				(!recovered.fullName ||
@@ -1698,7 +1757,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered.fullNameConfirmed = true;
 				delete recovered.fullNameNeedsConfirmation;
 			} else if (!recovered.fullName && !entryUsesDisplayedNameForName) {
-				const name = collectingBookingDetails ? nameHintFromLine(line) : "";
+				const name = lastAiAskedBookingName ? nameHintFromLine(line) : "";
 				if (name) {
 					recovered.fullName = name;
 					recovered.fullNameConfirmed = true;
@@ -1706,7 +1765,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				}
 			} else if (
 				recovered.fullNameNeedsConfirmation &&
-				collectingBookingDetails &&
+				lastAiAskedBookingName &&
 				sameBookingName(recovered.fullName, nameHintFromLine(line))
 			) {
 				recovered.fullNameConfirmed = true;
@@ -2525,7 +2584,10 @@ function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latest
 	}
 	if (!guestConfirms(latestText, latestAction)) return known;
 	const next = { ...known };
-	const explicitIdentityFacts = bookingIdentityFactsFromText(latestText, { allowName: true });
+	const explicitIdentityFacts = bookingIdentityFactsFromText(latestText, {
+		allowName: true,
+		allowUnlabeledName: previousAiAskedForBookingName(previousAi),
+	});
 	if (explicitIdentityFacts.fullName) {
 		next.fullName = explicitIdentityFacts.fullName;
 		next.fullNameConfirmed = true;
@@ -9195,6 +9257,19 @@ async function runBrainFirstTurn({
 } = {}) {
 	const key = caseIdText(sc);
 	try {
+		const latestText = String(latestGuest?.message || "");
+		const latestAction = cleanString(latestGuest?.clientAction, 80).toLowerCase();
+		const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+		if (
+			latestGuest &&
+			(latestAction === "place_reservation" ||
+				(previousAi?.clientAction === "review_reservation" &&
+					guestConfirms(latestText, latestAction)))
+		) {
+			await saveKnownFacts(key, known);
+			await waitForTypingMinimum(typingStartedAt);
+			return submitReservationForCase(io, key);
+		}
 		if (latestGuest && latestGuestMentionsSplitCityItinerary(latestGuest?.message || "")) {
 			await saveKnownFacts(key, known);
 			logTurnStage(key, "split_city_itinerary_guard_pre_brain");
@@ -9392,8 +9467,14 @@ async function planTurn(io, supportCaseOrId) {
 	if (latestGuest) {
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
-		if (bookingIdentityCollectionContext(sc, previousAi, known)) {
-			const identityFacts = bookingIdentityFactsFromText(latestText, { allowName: true });
+		if (
+			bookingIdentityCollectionContext(sc, previousAi, known) &&
+			!guestDeclinesOptionalEmail(latestText, latestAction)
+		) {
+			const identityFacts = bookingIdentityFactsFromText(latestText, {
+				allowName: true,
+				allowUnlabeledName: previousAiAskedForBookingName(previousAi),
+			});
 			if (Object.keys(identityFacts).length) {
 				known = mergeKnownFacts(known, identityFacts);
 			}
