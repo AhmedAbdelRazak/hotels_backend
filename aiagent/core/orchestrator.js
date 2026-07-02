@@ -3249,7 +3249,7 @@ function latestGuestAsksHotelFactOnly(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	if (!text.trim()) return false;
 	const hotelFactTopic =
-		/(nusuk|نسك|bus|shuttle|باص|اوتوبيس|أوتوبيس|حافلة|نقل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|قريب|الحرم|موقع|location|distance|address|map|maps|directions|خريطة|خريطه|خرائط|لوكيشن|عنوان|مشي|walking|parking|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant|branch|branches|فرع|فروع|المدينة|المدينه|الطائف)/i.test(
+		/(nusuk|نسك|bus|shuttle|transport|transfer|باص|اتوبيس|أتوبيس|اوتوبيس|أوتوبيس|حافلة|نقل|توصيل|مواصلات|شاتل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|قريب|الحرم|موقع|location|distance|address|map|maps|directions|خريطة|خريطه|خرائط|لوكيشن|عنوان|مشي|walking|parking|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant|branch|branches|فرع|فروع|المدينة|المدينه|الطائف)/i.test(
 			text
 		);
 	if (!hotelFactTopic) return false;
@@ -3394,22 +3394,24 @@ function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) 
 		if (hotel.isNusuk === true) {
 			const details = cleanDisplayString(hotel.isNusukText, 500);
 			return ar
-				? `نعم أستاذ ${guestName}، ${hotelName} مدرج/متاح على نسك حسب بيانات الفندق. ${details || "يمكنكم الاستفادة من نسك وإتمام الإجراءات وفق المواعيد المتاحة."}`
+				? `نعم يا ${arabicGuestAddress(sc, initialKnownFacts(sc), latestGuest?.message || "")}، ${hotelName} مدرج/متاح على نسك حسب بيانات الفندق. ${details || "يمكنكم الاستفادة من نسك وإتمام الإجراءات وفق المواعيد المتاحة."}`
 				: `Yes ${guestName}, ${hotelName} is listed/available on Nusuk according to the hotel details. ${details || "You can use Nusuk according to the available appointment flow."}`;
 		}
 		return ar
-			? `أستاذ ${guestName}، لا يظهر عندي أن ${hotelName} مدرج على نسك ضمن بيانات الفندق الحالية.`
+			? `يا ${arabicGuestAddress(sc, initialKnownFacts(sc), latestGuest?.message || "")}، لا يظهر عندي أن ${hotelName} مدرج على نسك ضمن بيانات الفندق الحالية.`
 			: `${guestName}, I do not currently see ${hotelName} listed as available on Nusuk in the hotel details.`;
 	}
-	if (/bus|shuttle|باص|اوتوبيس|أوتوبيس|حافلة|نقل/i.test(text)) {
+	if (/bus|shuttle|transport|transfer|باص|اتوبيس|أتوبيس|اوتوبيس|أوتوبيس|حافلة|نقل|توصيل|مواصلات|شاتل/i.test(text)) {
 		if (hotel.hasBusService === true) {
 			const details = cleanDisplayString(hotel.busDetails, 500);
 			return ar
-				? `نعم أستاذ ${guestName}، ${hotelName} يوفر خدمة نقل/باص للضيوف. ${details}`
+				? details
+					? `نعم يا ${arabicGuestAddress(sc, initialKnownFacts(sc), latestGuest?.message || "")}، حسب بيانات ${hotelName}: ${details}`
+					: `نعم يا ${arabicGuestAddress(sc, initialKnownFacts(sc), latestGuest?.message || "")}، ${hotelName} يوفر خدمة نقل/باص للضيوف.`
 				: `Yes ${guestName}, ${hotelName} provides a bus/shuttle service for guests. ${details}`;
 		}
 		return ar
-			? `أستاذ ${guestName}، لا تظهر خدمة باص مؤكدة ضمن بيانات ${hotelName} الحالية.`
+			? `يا ${arabicGuestAddress(sc, initialKnownFacts(sc), latestGuest?.message || "")}، لا تظهر خدمة باص مؤكدة ضمن بيانات ${hotelName} الحالية.`
 			: `${guestName}, I do not see a confirmed bus service in the current details for ${hotelName}.`;
 	}
 	if (/refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة/i.test(text)) {
@@ -3463,7 +3465,7 @@ function latestGuestMentionsNusuk(latestGuest = {}) {
 }
 
 function latestGuestMentionsBus(latestGuest = {}) {
-	return /bus|shuttle|\u0628\u0627\u0635|\u0627\u0648\u062a\u0648\u0628\u064a\u0633|\u0623\u0648\u062a\u0648\u0628\u064a\u0633|\u062d\u0627\u0641\u0644\u0629|\u0646\u0642\u0644/i.test(
+	return /bus|shuttle|transport|transfer|\u0628\u0627\u0635|\u0627\u062a\u0648\u0628\u064a\u0633|\u0623\u062a\u0648\u0628\u064a\u0633|\u0627\u0648\u062a\u0648\u0628\u064a\u0633|\u0623\u0648\u062a\u0648\u0628\u064a\u0633|\u062d\u0627\u0641\u0644\u0629|\u0646\u0642\u0644|\u062a\u0648\u0635\u064a\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a|\u0634\u0627\u062a\u0644/i.test(
 		normalizeDigits(String(latestGuest?.message || ""))
 	);
 }
@@ -8290,6 +8292,23 @@ async function planTurn(io, supportCaseOrId) {
 	if (latestAction === "skip_email") {
 		known.emailSkipped = true;
 	}
+	if (
+		latestGuest &&
+		latestGuestAsksHotelFactOnly(latestGuest) &&
+		(latestGuestMentionsNusuk(latestGuest) ||
+			latestGuestMentionsBus(latestGuest) ||
+			latestGuestAsksMapOrLocation(latestGuest) ||
+			latestGuestAsksBranch(latestGuest))
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildHotelFactFallbackMessage(sc, hotel, latestGuest), {
+			latestGuest,
+			known,
+			clientAction: "hotel_fact_answered",
+			source: "hotel_facts",
+		});
+	}
 	if (shouldUseBrainFirstOrchestrator()) {
 		logTurnStage(key, "brain_first_handoff");
 		await saveKnownFacts(key, known);
@@ -9349,6 +9368,9 @@ const exportedOrchestrator = {
 		hotelGoogleMapsUrl,
 		hotelOffersApartmentUnits,
 		latestGuestRequestsApartmentUnit,
+		latestGuestAsksHotelFactOnly,
+		latestGuestMentionsBus,
+		latestGuestMentionsNusuk,
 		replyPromisesBookingReview,
 		parseJsonObject,
 		normalizeDecision,
