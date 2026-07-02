@@ -2382,11 +2382,34 @@ function bookingProcessReplyNeedsCorrection(decision = {}, known = {}, latestGue
 		/(?:choose|select|pick|send|provide|tell me|give me).{0,50}(?:room|room type|option)/i.test(
 			reply
 		);
+	const knownRoomLabel = cleanDisplayString(known.quote?.roomLabel || "", 120);
+	const hasKnownDateReference =
+		!hasDates ||
+		reply.includes(String(known.checkinISO || "").toLowerCase()) ||
+		reply.includes(String(known.checkoutISO || "").toLowerCase()) ||
+		/(?:already|noted|have|got).{0,40}(?:date|dates|check\s*in|check\s*out|stay)/i.test(
+			reply
+		) ||
+		/(?:date|dates|check\s*in|check\s*out|stay).{0,40}(?:already|noted)/i.test(reply);
+	const hasKnownRoomReference =
+		!hasRoom ||
+		(knownRoomLabel && reply.includes(normalizeIntentSearchText(knownRoomLabel))) ||
+		(Boolean(known.roomTypeKey) &&
+			reply.includes(normalizeIntentSearchText(roomTypeLabel(known.roomTypeKey, "en")))) ||
+		/(?:already|noted|have|got|selected|chosen|requested).{0,50}(?:room|suite|family|quintuple|triple|double|single|quad)/i.test(
+			reply
+		);
 	const describesOnlyGenericSteps =
 		/(?:share|send|provide).{0,40}(?:check\s*in|check\s*out|dates?).{0,160}(?:choose|select|pick).{0,40}(?:room|room type|option)/i.test(
 			reply
 		);
-	return asksForKnownDates || asksForKnownRoom || describesOnlyGenericSteps;
+	return (
+		asksForKnownDates ||
+		asksForKnownRoom ||
+		describesOnlyGenericSteps ||
+		(hasDates && !hasKnownDateReference) ||
+		(hasRoom && !hasKnownRoomReference)
+	);
 }
 
 function emailAlreadyOffered(sc = {}) {
