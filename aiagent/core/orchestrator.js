@@ -1288,6 +1288,14 @@ function asObject(value) {
 	return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
+function cloneKnownFacts(value = {}) {
+	try {
+		return JSON.parse(JSON.stringify(asObject(value)));
+	} catch {
+		return { ...asObject(value) };
+	}
+}
+
 function quoteHasContent(value = {}) {
 	const quote = asObject(value);
 	return Boolean(
@@ -11684,10 +11692,11 @@ async function runBrainFirstTurn({
 			});
 		}
 		logTurnStage(key, "brain_first_openai_start");
+		const knownForBrain = cloneKnownFacts(known);
 		const decision = await askOpenAI({
 			sc,
 			hotel,
-			known,
+			known: knownForBrain,
 			latestGuest,
 			turnKind: !latestGuest && noAiYet ? "new_chat_intro" : noAiYet ? "new_chat_first_guest_message" : "chat",
 		});
@@ -11695,12 +11704,12 @@ async function runBrainFirstTurn({
 			action: decision?.action || "",
 			hasReply: Boolean(decision?.reply),
 		});
-		logBrainDecision(key, decision, known);
+		logBrainDecision(key, decision, knownForBrain);
 		return executeBrainFirstDecision({
 			io,
 			sc,
 			hotel,
-			known,
+			known: knownForBrain,
 			latestGuest,
 			decision,
 			typingStartedAt,
@@ -12702,11 +12711,12 @@ async function planTurn(io, supportCaseOrId) {
 	let decision = null;
 	try {
 		logTurnStage(key, "openai_branch_start");
+		const knownForOpenAI = cloneKnownFacts(known);
 		if (!latestGuest && noAiYet) {
 			decision = await askOpenAI({
 				sc,
 				hotel,
-				known,
+				known: knownForOpenAI,
 				latestGuest: null,
 				turnKind: "new_chat_intro",
 			});
@@ -12726,7 +12736,7 @@ async function planTurn(io, supportCaseOrId) {
 			decision = await askOpenAI({
 				sc,
 				hotel,
-				known,
+				known: knownForOpenAI,
 				latestGuest,
 				turnKind: noAiYet ? "new_chat_first_guest_message" : "chat",
 			});
