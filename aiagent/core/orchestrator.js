@@ -3742,7 +3742,7 @@ function alternativeReplyDriftedToHotelFact(reply = "") {
 		/(?:\u0628\u062f\u064a\u0644|\u0628\u062f\u0627\u0626\u0644|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0641\u0631|\u062e\u064a\u0627\u0631|\u062e\u064a\u0627\u0631\u0627\u062a|\u063a\u0631\u0641)/iu.test(
 			text
 		);
-	return !alternativeContext || /google\.com\/maps|maps\/search/i.test(text);
+	return looksLikeLocationReply || !alternativeContext;
 }
 
 function hotelFactBranchReplyNeedsCorrection(reply = "", toolResult = {}) {
