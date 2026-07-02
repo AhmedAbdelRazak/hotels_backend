@@ -2168,6 +2168,16 @@ function mergeKnownFacts(current = {}, next = {}) {
 	const sourceCheckoutISO = source.checkoutISO || source.checkout || reservation.checkoutISO;
 	setDate("checkinISO", sourceCheckinISO);
 	setDate("checkoutISO", sourceCheckoutISO);
+	const existingSplitStayPeriods = normalizeSplitStayPeriods(merged.splitStayPeriods);
+	const sourceMatchesExistingSplitStayPeriod =
+		existingSplitStayPeriods.length >= 2 &&
+		validISODate(sourceCheckinISO) &&
+		validISODate(sourceCheckoutISO) &&
+		existingSplitStayPeriods.some(
+			(period) =>
+				period.checkinISO === validISODate(sourceCheckinISO) &&
+				period.checkoutISO === validISODate(sourceCheckoutISO)
+		);
 	const checkinChanged =
 		Boolean(sourceCheckinISO) &&
 		Boolean(merged.checkinISO) &&
@@ -2215,7 +2225,11 @@ function mergeKnownFacts(current = {}, next = {}) {
 		delete merged.checkinISO;
 		delete merged.checkoutISO;
 		delete merged.quote;
-	} else if (sourceCheckinISO || sourceCheckoutISO) {
+	} else if (sourceMatchesExistingSplitStayPeriod) {
+		delete merged.checkinISO;
+		delete merged.checkoutISO;
+		delete merged.quote;
+	} else if ((sourceCheckinISO || sourceCheckoutISO) && !sourceMatchesExistingSplitStayPeriod) {
 		delete merged.splitStayPeriods;
 		delete merged.splitStayTotal;
 		delete merged.splitStayQuoteAvailable;
