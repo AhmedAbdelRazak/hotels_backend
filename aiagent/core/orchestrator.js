@@ -7700,11 +7700,10 @@ function alternativeStayQuickReplies(options = [], languageCode = "en") {
 				option.checkoutISO,
 				languageCode
 			)}`;
-			const roomLabel = cleanDisplayString(option.roomLabel || "", 40);
 			return {
 				label: cleanDisplayString(
-					`${numberLabel}. ${roomLabel ? `${roomLabel} ` : ""}${dateLabel}`,
-					76
+					`${numberLabel}. ${dateLabel}`,
+					48
 				),
 				value: `Option ${index + 1}`,
 				action: "select_alternative_date",
@@ -9326,7 +9325,7 @@ function quoteReplyFormattingInstruction() {
 		"Do not add reference numbers, date references, IDs, or unexplained numeric lines.",
 		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
-		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type.",
+		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type, and do not show total/price as 0.",
 		"If toolResult.code is same_day_checkin_not_supported, toolResult.minCheckinISO is only the earliest date the chat can start checking; do not call it available or recommended unless an alternatives/availability tool result proves availability.",
 	].join(" ");
 }
@@ -10104,6 +10103,14 @@ function sameDayReplyClaimsMinimumDateAvailable(reply = "", toolResult = {}) {
 	);
 }
 
+function unavailableQuoteShowsZeroTotal(reply = "", toolResult = {}) {
+	if (toolResult?.tool !== "get_quote" || toolResult?.available) return false;
+	const text = normalizeDigits(String(reply || ""));
+	return /(?:total|الإجمالي|الاجمالي)[^\n]{0,60}(?:\b0(?:\.00)?\b|٠(?:[.,]٠٠)?)(?:\s*(?:sar|s\.?r\.?|ريال))?/iu.test(
+		text
+	);
+}
+
 function compactReservationForBrain(reservation = null) {
 	if (!reservation) return null;
 	const links = reservationPublicLinks(reservation);
@@ -10428,6 +10435,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous quote reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return a corrected customer-facing quote from OpenAI only. This is only a price/availability quote; do not say confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
 				: validation === "same_day_minimum_date_claimed_available"
 				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat, and toolResult.minCheckinISO is only the earliest date the chat can start checking from. Ask whether to search from that date or adjust dates. Do not claim it is available."
+				: validation === "unavailable_quote_zero_total"
+				? "Your previous unavailable quote reply was not sent because it showed total/price as 0. Return a corrected customer-facing reply from OpenAI only. For unavailable quotes, do not show any zero price or zero total. Explain the unavailable date/room reason from toolResult and offer alternatives or date/room adjustment."
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
 				: validation === "hotel_fact_location_dump"
@@ -10485,6 +10494,9 @@ async function sendBrainToolReplyFromOpenAI({
 			sameDayReplyClaimsMinimumDateAvailable(text, toolResult)
 		) {
 			return "same_day_minimum_date_claimed_available";
+		}
+		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
+			return "unavailable_quote_zero_total";
 		}
 		if (
 			toolResult?.tool === "check_alternatives" &&
