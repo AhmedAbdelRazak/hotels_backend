@@ -510,6 +510,13 @@ function looksLikeNonBookingNamePhrase(value = "") {
 	if (!text) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
+	const nationality = normalizeNationalityHint(text) || nationalityFromText(text);
+	if (
+		nationality &&
+		compact === normalizeIntentSearchText(nationality).replace(/\s+/g, "")
+	) {
+		return true;
+	}
 	if (guestDeclinesOptionalEmail(text, "")) return true;
 	if (
 		guestConfirms(text, "") ||
@@ -524,6 +531,16 @@ function looksLikeNonBookingNamePhrase(value = "") {
 	if (/^(?:\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649|\u062e\u0637\u0623|\u062e\u0637\u0627|\u063a\u0644\u0637|\u063a\u0644\u0637\u0627\u0646|\u063a\u064a\u0631\u0635\u062d\u064a\u062d|\u0645\u0634\u0635\u062d\u064a\u062d)$/iu.test(compact)) {
 		return true;
 	}
+	if (
+		/(?:^|\s)(?:\u0645\u0634|\u0645\u0648|\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|not)(?:\s|$)/iu.test(
+			normalized
+		) &&
+		/(?:\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645|\u0627\u0628\u0646|\u0627\u0628\u0646\u064a|\u0627\u0628\u0646\u0649|\u0628\u0646\u062a|\u0632\u0648\u062c|\u0627\u062e|\u0623\u062e|\u0627\u062e\u062a|\u0623\u062e\u062a)/iu.test(
+			normalized
+		)
+	) {
+		return true;
+	}
 	if (/\d/.test(normalizeDigits(text))) return true;
 	if (
 		new Set([
@@ -531,7 +548,20 @@ function looksLikeNonBookingNamePhrase(value = "") {
 			"\u0643\u062f\u0627",
 			"\u0643\u062f\u0647",
 			"\u0643\u0630\u0627",
+			"\u0645\u0627",
+			"\u0645\u0627\u0639\u0644\u064a\u0646\u0627",
+			"\u0645\u0627\u0634\u064a",
+			"\u0645\u0627\u0634\u0649",
 			"\u0627\u0644\u062d\u062c\u0632",
+			"\u0627\u0628\u0646",
+			"\u0627\u0628\u0646\u064a",
+			"\u0627\u0628\u0646\u0649",
+			"\u0627\u0628\u0646\u0643",
+			"\u0628\u0646\u062a",
+			"\u0628\u0646\u062a\u064a",
+			"\u0628\u0646\u062a\u0649",
+			"\u0645\u0634\u0627\u0628\u0646\u064a",
+			"\u0645\u0634\u0627\u0628\u0646\u0649",
 			"\u0627\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
 			"\u0625\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632",
 			"\u0627\u0631\u064a\u062f\u062a\u0639\u062f\u064a\u0644\u0634\u064a\u0621",
@@ -1210,7 +1240,7 @@ function identityCorrectionOnly(value = "") {
 		/\b(?:wrong|incorrect|mistake|typo|invalid|not correct|needs? changing|change it|fix it)\b/i.test(
 			normalized
 		) ||
-		/(?:\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649|\u062e\u0637\u0623|\u062e\u0637\u0627|\u063a\u0644\u0637|\u063a\u0644\u0637\u0627\u0646|\u063a\u064a\u0631\u0635\u062d\u064a\u062d|\u0645\u0634\u0635\u062d\u064a\u062d|\u062a\u0639\u062f\u064a\u0644|\u0639\u062f\u0644)/iu.test(
+		/(?:\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649|\u062e\u0637\u0623|\u062e\u0637\u0627|\u063a\u0644\u0637|\u063a\u0644\u0637\u0627\u0646|\u063a\u064a\u0631\u0635\u062d\u064a\u062d|\u0645\u0634\u0635\u062d\u064a\u062d|\u0645\u0634|\u0645\u0648|\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|\u062a\u0639\u062f\u064a\u0644|\u0639\u062f\u0644)/iu.test(
 			compact
 		);
 	const hasValueConnector =
@@ -2952,7 +2982,7 @@ function looksLikeArabicNonNameAddressToken(value = "") {
 	) {
 		return true;
 	}
-	return /^(?:\u0648\u0643\u0627\u0644\u0629|\u0648\u0643\u0627\u0644\u0647|\u0634\u0631\u0643\u0629|\u0634\u0631\u0643\u0647|\u0645\u0643\u062a\u0628|\u0645\u0624\u0633\u0633\u0629|\u0645\u0624\u0633\u0633\u0647|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u062a\u062d\u0645\u0633\u0647|\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0629|\u062a\u0639\u0628\u0627\u0646\u0647|\u0645\u0631\u0647\u0642|\u0645\u0631\u0647\u0642\u0629|\u0645\u0631\u0647\u0642\u0647|\u0645\u062d\u062a\u0627\u062c|\u0645\u062d\u062a\u0627\u062c\u0629|\u0645\u062d\u062a\u0627\u062c\u0647|\u0639\u0627\u064a\u0632|\u0639\u0627\u064a\u0632\u0629|\u0639\u0627\u064a\u0632\u0647|\u062d\u0632\u064a\u0646|\u0632\u0639\u0644\u0627\u0646|\u0645\u0628\u0633\u0648\u0637|\u0641\u0631\u062d\u0627\u0646|\u0636\u064a\u0641)$/i.test(
+	return /^(?:\u0648\u0643\u0627\u0644\u0629|\u0648\u0643\u0627\u0644\u0647|\u0634\u0631\u0643\u0629|\u0634\u0631\u0643\u0647|\u0645\u0643\u062a\u0628|\u0645\u0624\u0633\u0633\u0629|\u0645\u0624\u0633\u0633\u0647|\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645|\u0645\u0634|\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|\u0645\u0648|\u0645\u0627|\u0639\u0644\u064a\u0646\u0627|\u0639\u0644\u064a\u0643|\u0644\u064a\u0627|\u0627\u0628\u0646|\u0627\u0628\u0646\u064a|\u0627\u0628\u0646\u0649|\u0627\u0628\u0646\u0643|\u0627\u0628\u0646\u0647|\u0628\u0646\u062a|\u0628\u0646\u062a\u064a|\u0628\u0646\u062a\u0649|\u0628\u0646\u062a\u0643|\u0632\u0648\u062c|\u0632\u0648\u062c\u064a|\u0632\u0648\u062c\u062a\u064a|\u0632\u0648\u062c\u062a\u0649|\u0627\u062e|\u0623\u062e|\u0627\u062e\u064a|\u0627\u062e\u0649|\u0627\u062e\u062a|\u0623\u062e\u062a|\u0627\u062e\u062a\u064a|\u0627\u062e\u062a\u0649|\u0645\u062a\u062d\u0645\u0633|\u0645\u062a\u062d\u0645\u0633\u0629|\u0645\u062a\u062d\u0645\u0633\u0647|\u062a\u0639\u0628\u0627\u0646|\u062a\u0639\u0628\u0627\u0646\u0629|\u062a\u0639\u0628\u0627\u0646\u0647|\u0645\u0631\u0647\u0642|\u0645\u0631\u0647\u0642\u0629|\u0645\u0631\u0647\u0642\u0647|\u0645\u062d\u062a\u0627\u062c|\u0645\u062d\u062a\u0627\u062c\u0629|\u0645\u062d\u062a\u0627\u062c\u0647|\u0639\u0627\u064a\u0632|\u0639\u0627\u064a\u0632\u0629|\u0639\u0627\u064a\u0632\u0647|\u062d\u0632\u064a\u0646|\u0632\u0639\u0644\u0627\u0646|\u0645\u0628\u0633\u0648\u0637|\u0641\u0631\u062d\u0627\u0646|\u0636\u064a\u0641)$/i.test(
 		token
 	);
 }
@@ -2966,17 +2996,38 @@ function firstArabicAddressToken(value = "") {
 	return token;
 }
 
-function firstArabicNameForAddress(sc = {}, known = {}, latestText = "") {
-	const text = normalizeDigits(String(latestText || ""));
-	const direct = text.match(
-		/(?:\u0623\u0646\u0627|\u0627\u0646\u0627|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)\s+([^.!?\u061f\u060c,\n\r]{2,100})/u
+function explicitArabicNameForAddressFromText(value = "") {
+	const text = normalizeDigits(String(value || ""))
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return "";
+	if (
+		/(?:\u0645\u0634|\u0645\u0648|\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|\bnot\b).{0,30}(?:\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645|\u0627\u0628\u0646|\u0627\u0628\u0646\u064a|\u0627\u0628\u0646\u0649|\u0628\u0646\u062a|\u0632\u0648\u062c)|(?:\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649|\u0627\u0644\u0627\u0633\u0645).{0,30}(?:\u0645\u0634|\u0645\u0648|\u0644\u064a\u0633|\u0644\u064a\u0633\u062a|\bnot\b|\u063a\u0644\u0637|\u062e\u0627\u0637\u0626|\u062e\u0627\u0637\u0649)/iu.test(
+			text
+		)
+	) {
+		return "";
+	}
+	const labeled = bookingNameFromLine(text);
+	if (labeled) return firstArabicAddressToken(labeled);
+	const match = text.match(
+		/(?:^|[\s\u060C,])(?:\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*([^.!?\u061f\u060c,\n\r]{2,80})/iu
 	);
-	const directToken = direct?.[1] ? firstArabicAddressToken(direct[1]) : "";
+	if (!match?.[1]) return "";
+	const candidate = cleanDisplayString(match[1], 80);
+	if (!isPlausibleBookingName(candidate)) return "";
+	return firstArabicAddressToken(candidate);
+}
+
+function firstArabicNameForAddress(sc = {}, known = {}, latestText = "") {
+	const directToken = explicitArabicNameForAddressFromText(latestText);
 	if (directToken) return directToken;
 	const knownName = cleanDisplayString(known.fullName, 80);
-	if (/[\u0600-\u06FF]/.test(knownName)) return firstArabicAddressToken(knownName);
-	const knownLatinName = arabicFirstNameFromLatinName(knownName);
-	if (knownLatinName) return knownLatinName;
+	if (knownName && isPlausibleBookingName(knownName)) {
+		if (/[\u0600-\u06FF]/.test(knownName)) return firstArabicAddressToken(knownName);
+		const knownLatinName = arabicFirstNameFromLatinName(knownName);
+		if (knownLatinName) return knownLatinName;
+	}
 	const display = cleanDisplayString(guestDisplayName(sc), 80);
 	if (/[\u0600-\u06FF]/.test(display)) return firstArabicAddressToken(display);
 	return arabicFirstNameFromLatinName(display);
@@ -3021,7 +3072,7 @@ function shortGuestAddressName(sc = {}, known = {}, latestText = "") {
 	const languageCode = activeLanguageCode(sc, known);
 	const display = cleanDisplayString(guestDisplayName(sc), 100);
 	if (/^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(`${display} ${known?.fullName || ""}`)) {
-		return firstArabicNameForAddress(sc, known, latestText) || display.split(/\s+/)[0] || "";
+		return firstArabicNameForAddress(sc, known, latestText) || firstArabicAddressToken(display);
 	}
 	const addressable = addressableNameFromClientName(display) || display;
 	const token = addressable
@@ -4881,6 +4932,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`The orchestrator will not add scripted warmth or emotional prefixes for you. If the guest jokes, thanks you, greets you, or sounds stressed/excited, write the natural customer-facing response yourself in reply.`,
 		`Use clean formatting when helpful: short lines, simple bullets, and tasteful emojis that fit the guest's language and mood. Avoid emoji clutter and never let styling make dates, prices, names, phone numbers, policies, or booking instructions less clear.`,
 		`For the first CSR/reservations message in an Arabic chat only, begin with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u0648\u0631\u062d\u0645\u0629 \u0627\u0644\u0644\u0647 \u0648\u0628\u0631\u0643\u0627\u062a\u0647" or "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", then immediately introduce yourself as ${agentName} from the reception/reservations team at the hotel. Do not start only with "\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b". On later Arabic replies, do not say "\u0623\u0646\u0627 ${agentName}" or repeat the team/hotel identity unless the guest asks who is speaking. Do not repeat the greeting on later replies unless the guest greets again.`,
+		`Never invent a guest address name from ordinary latest-message words. In Arabic, do not address the guest as a relationship word, pronoun, correction word, or casual phrase such as "\u0627\u0628\u0646\u064a", "\u0627\u0633\u0645\u064a", "\u0645\u0634", "\u0645\u0627", or similar. If the guest corrected a wrong name or the name is not clearly known, apologize and continue neutrally, or use guestAddress/guestAddressName only when it is clearly supplied by Known facts or the support profile.`,
 		`In Arabic hotel chats, prefer reservation wording like "\u0627\u0644\u062d\u062c\u0632", "\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632", or "\u0627\u0633\u062a\u0641\u0633\u0627\u0631\u0643". Avoid "\u0627\u0644\u0637\u0644\u0628" when you mean a hotel reservation.`,
 		`Use the fullest hotelName/hotelNameArabic brand available in Hotel facts. If the Arabic hotel name is shorter than the official English brand, keep the brand clear naturally instead of dropping distinctive words. "Reception" and "reservations" describe your team role only; never append "Reception" to the hotel name or invent a new property name.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
