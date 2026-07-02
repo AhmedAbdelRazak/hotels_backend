@@ -2787,10 +2787,10 @@ function replyHasHotelValuePitch(reply = "") {
 	const compact = text.replace(/\s+/g, "");
 	if (!text) return false;
 	return (
-		/\b(?:haram|walk|walking|minute|near|close|location|clean|restaurant|amenit|parking|bus|nusuk|view|service|comfort|suitable|family)\b/i.test(
+		/\b(?:haram|walk|walking|minute|near|close|location|clean|restaurant|amenit|parking|bus|nusuk|view|service)\b/i.test(
 			text
 		) ||
-		/(?:\u0627\u0644\u062d\u0631\u0645|\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u0626\u0642|\u0642\u0631\u064a\u0628|\u0642\u0631\u064a\u0628\u0629|\u0645\u0648\u0642\u0639|\u0646\u0638\u064a\u0641|\u0646\u0638\u0627\u0641\u0629|\u0645\u0637\u0627\u0639\u0645|\u062e\u062f\u0645\u0627\u062a|\u0645\u0648\u0627\u0642\u0641|\u0628\u0627\u0635|\u0646\u0633\u0643|\u0625\u0637\u0644\u0627\u0644\u0629|\u0627\u0637\u0644\u0627\u0644\u0629|\u0645\u0646\u0627\u0633\u0628)/iu.test(
+		/(?:\u0627\u0644\u062d\u0631\u0645|\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u0626\u0642|\u0642\u0631\u064a\u0628|\u0642\u0631\u064a\u0628\u0629|\u0645\u0648\u0642\u0639|\u0646\u0638\u064a\u0641|\u0646\u0638\u0627\u0641\u0629|\u0645\u0637\u0627\u0639\u0645|\u062e\u062f\u0645\u0627\u062a|\u0645\u0648\u0627\u0642\u0641|\u0628\u0627\u0635|\u0646\u0633\u0643|\u0625\u0637\u0644\u0627\u0644\u0629|\u0627\u0637\u0644\u0627\u0644\u0629)/iu.test(
 			compact
 		)
 	);
@@ -10279,7 +10279,7 @@ async function executeBrainFirstDecision({
 			decision: nextDecision,
 			code: "value_objection_needs_sales_pitch",
 			instruction:
-				"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete value points from Hotel facts or Tool result, such as distance/location, room suitability, cleanliness, amenities, nearby services, views, policies, or offers when present. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+				"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result, such as distance to Al Haram, strategic location, cleanliness, amenities, nearby services/restaurants, transport, views, policies, or offers when present. Room count or stay length alone is not enough. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
 		});
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
@@ -11772,7 +11772,7 @@ async function planTurn(io, supportCaseOrId) {
 				decision,
 				code: "value_objection_needs_sales_pitch",
 				instruction:
-					"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete value points from Hotel facts or Tool result, such as distance/location, room suitability, cleanliness, amenities, nearby services, views, policies, or offers when present. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+					"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result, such as distance to Al Haram, strategic location, cleanliness, amenities, nearby services/restaurants, transport, views, policies, or offers when present. Room count or stay length alone is not enough. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
 			});
 			decision = repaired.decision;
 			known = preserveRoomSelectionForNonRoomTurn(
