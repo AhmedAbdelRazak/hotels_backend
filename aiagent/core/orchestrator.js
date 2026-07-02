@@ -3406,6 +3406,9 @@ function previousAiAskedForGuestCount(previousAi = {}) {
 function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	if (!previousAiAskedForGuestCount(previousAi)) return {};
 	if (containsDateLikeSlashToken(value)) return {};
+	if (!latestTextHasExplicitGuestCount(value) && latestGuestMentionsDateish(value)) {
+		return {};
+	}
 	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
 		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
 		.replace(/\s+/g, " ")
