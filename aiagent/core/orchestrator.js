@@ -11967,6 +11967,22 @@ async function planTurn(io, supportCaseOrId) {
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
 	if (
 		latestGuest &&
+		["quote_ready", "split_stay_quote_ready"].includes(previousAiAction) &&
+		latestGuestContinuesAfterQuote(previousAi, latestText, latestAction) &&
+		!latestGuestRejectsQuoteOrSelection(latestText)
+	) {
+		const previousQuoteFacts = quoteFactsFromAiMessage(previousAi);
+		if (Object.keys(previousQuoteFacts).length) {
+			known = mergeAssistantQuoteFacts(known, previousQuoteFacts);
+		}
+		if (quoteInputsKnown(known) || splitStayQuoteInputsKnown(known)) {
+			await saveKnownFacts(key, known);
+			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+		}
+	}
+	if (
+		latestGuest &&
 		["quote_ready", "quote_unavailable", "split_stay_quote_ready", "split_stay_quote_unavailable"].includes(previousAiAction) &&
 		guestDeclinesFurtherHelp(latestText, latestAction)
 	) {
