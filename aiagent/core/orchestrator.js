@@ -1047,6 +1047,7 @@ function normalizeNationalityHint(value = "") {
 		{ pattern: /\b(?:canada|canadian)\b/i, value: "Canadian" },
 		{ pattern: /\b(?:pakistan|pakistani)\b/i, value: "Pakistani" },
 		{ pattern: /\b(?:india|indian)\b/i, value: "Indian" },
+		{ pattern: /\b(?:afghanistan|afghan|afghani)\b/i, value: "Afghan" },
 	];
 	const arabicNationalityMatches = [
 		{ pattern: /^(?:\u0645\u0635\u0631\u064a|\u0645\u0635\u0631\u064a\u0629|\u0645\u0635\u0631\u0649|\u0645\u0635\u0631\u064a\u0647|\u0645\u0635\u0631)$/, value: "\u0645\u0635\u0631\u064a" },
@@ -1066,6 +1067,7 @@ function normalizeNationalityHint(value = "") {
 		{ pattern: /^(?:\u0645\u063a\u0631\u0628\u064a|\u0645\u063a\u0631\u0628\u064a\u0629|\u0627\u0644\u0645\u063a\u0631\u0628)$/, value: "\u0645\u063a\u0631\u0628\u064a" },
 		{ pattern: /^(?:\u062c\u0632\u0627\u0626\u0631\u064a|\u062c\u0632\u0627\u0626\u0631\u064a\u0629|\u0627\u0644\u062c\u0632\u0627\u0626\u0631)$/, value: "\u062c\u0632\u0627\u0626\u0631\u064a" },
 		{ pattern: /^(?:\u062a\u0648\u0646\u0633\u064a|\u062a\u0648\u0646\u0633\u064a\u0629|\u062a\u0648\u0646\u0633)$/, value: "\u062a\u0648\u0646\u0633\u064a" },
+		{ pattern: /^(?:\u0623\u0641\u063a\u0627\u0646\u064a|\u0627\u0641\u063a\u0627\u0646\u064a|\u0627\u0641\u063a\u0627\u0646\u0649|\u0623\u0641\u063a\u0627\u0646\u0649|\u0623\u0641\u063a\u0627\u0646\u064a\u0629|\u0627\u0641\u063a\u0627\u0646\u064a\u0629|\u0627\u0641\u063a\u0627\u0646\u064a\u0647|\u0623\u0641\u063a\u0627\u0646\u064a\u0647|\u0623\u0641\u063a\u0627\u0646\u0633\u062a\u0627\u0646|\u0627\u0641\u063a\u0627\u0646\u0633\u062a\u0627\u0646)$/, value: "\u0623\u0641\u063a\u0627\u0646\u064a" },
 	];
 	for (const candidate of [rawWithoutLabel, raw]) {
 		const exactArabic = arabicNationalityMatches.find((item) => item.pattern.test(candidate));
@@ -1093,10 +1095,10 @@ function normalizeNationalityHint(value = "") {
 		ksa: "Saudi",
 	};
 	if (mapped[key]) return mapped[key];
-	if (/^(american|egyptian|saudi|emirati|kuwaiti|qatari|bahraini|omani|jordanian|pakistani|indian|british|canadian|moroccan|algerian|tunisian|iraqi|syrian|lebanese|palestinian|sudanese|yemeni|turkish|indonesian|malaysian)$/i.test(raw)) {
+	if (/^(american|egyptian|saudi|emirati|kuwaiti|qatari|bahraini|omani|jordanian|pakistani|indian|british|canadian|moroccan|algerian|tunisian|iraqi|syrian|lebanese|palestinian|sudanese|yemeni|turkish|indonesian|malaysian|afghan|afghani)$/i.test(raw)) {
 		return raw;
 	}
-	if (/^(united states|united kingdom|saudi arabia|united arab emirates|egypt|pakistan|india|canada|morocco|algeria|tunisia|jordan|kuwait|qatar|bahrain|oman|iraq|syria|lebanon|palestine|sudan|yemen|turkey|indonesia|malaysia)$/i.test(raw)) {
+	if (/^(united states|united kingdom|saudi arabia|united arab emirates|egypt|pakistan|india|canada|morocco|algeria|tunisia|jordan|kuwait|qatar|bahrain|oman|iraq|syria|lebanon|palestine|sudan|yemen|turkey|indonesia|malaysia|afghanistan)$/i.test(raw)) {
 		return raw;
 	}
 	return "";
@@ -3045,7 +3047,7 @@ function firstArabicAddressToken(value = "") {
 	const token = cleanDisplayString(addressable, 80)
 		.split(/\s+/)
 		.find((item) => /^[\u0621-\u064A]{2,}$/u.test(item));
-	if (!token || looksLikeArabicNonNameAddressToken(token)) return "";
+	if (!token || normalizeNationalityHint(token) || looksLikeArabicNonNameAddressToken(token)) return "";
 	return token;
 }
 
