@@ -1100,6 +1100,28 @@ function latestGuestProvidesBookingIdentityDetails(value = "") {
 	);
 }
 
+function latestGuestAsksRequiredBookingDetailClarification(value = "") {
+	const text = normalizeIntentSearchText(stripChatMarkup(value))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const hasQuestionCue =
+		/\b(?:what|why|meaning|mean|means|explain|which|whose)\b/i.test(text) ||
+		/(?:\u064a\u0639\u0646\u064a|\u064a\u0639\u0646\u0649|\u0627\u064a\u0647|\u0627\u064a|\u0645\u0627\u0630\u0627|\u0645\u0627\u0645\u0639\u0646\u0649|\u0627\u0634|\u0634\u0648|\u0634\u0646\u0648|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627|\u0645\u064a\u0646|\u0627\u0646\u0647\u064a)/iu.test(
+			text
+		);
+	const hasRequiredFieldCue =
+		/\b(?:booking name|reservation name|guest name|full name|phone|mobile|nationality|adult|adults|children|guest count)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0633\u0645\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0631\u0642\u0645\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0645\u0648\u0628\u0627\u064a\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0647|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0644\u0636\u064a\u0648\u0641|\u0627\u0644\u0646\u0632\u0644\u0627\u0621)/iu.test(
+			compact
+		);
+	return hasQuestionCue && hasRequiredFieldCue;
+}
+
 function latestGuestContinuesAfterQuote(previousAi = {}, latestText = "", latestAction = "") {
 	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_ready") {
 		return false;
@@ -3654,6 +3676,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Never ask for passport number, ID number, national ID, document number, date of birth, card number, payment-card details, or any identity document for this B2C booking flow. Those fields are not part of the booking plan. If you already have the required details, return action="send_review"; if something is missing, ask only for the missing allowed booking detail.`,
 		`When collecting booking details, ask for required details first. Do not put email in the same required-fields bullet list with full name, phone, or nationality.`,
 		`When asking for more than one required detail, put each requested field on its own separate line. Do not compress name, phone, nationality, or guest count into one comma-separated sentence.`,
+		`If the guest asks what a required booking detail means, such as booking name, phone, nationality, adults, or children, answer that meaning first in their language and dialect, then ask only the still-missing required detail(s). Do not repeat the same missing-details list without explaining their question.`,
 		`Email is optional and useful for sending booking details/receipt. After all required details are known, email may be offered once in a separate short message with a clear skip option. Never list email with required fields, never ask twice, and never block the booking if the guest skips it or continues without it.`,
 		`Do not proactively suggest special requests, extra beds, floor preferences, late-arrival notes, or similar optional add-ons while moving from quote to booking review. Only discuss them if the guest asks first. Keep the next step focused on the missing required booking details, optional email once, or the official review action.`,
 		`Do not delay the final review for special requests, notes, room preferences, passport/ID, or anything not listed as required. If the guest wants to continue after an exact quote, ask only missing required details; if none are missing and optional email was already provided, skipped, or offered once, return action="send_review".`,
@@ -3724,6 +3747,7 @@ async function askOpenAI({
 		temperature: 0.35,
 		max_tokens: maxTokens,
 		reasoning_effort: reasoningEffort,
+		response_format: { type: "json_object" },
 	});
 	const parsed = parseJsonObject(text);
 	if (parsed) return normalizeDecision(parsed);
@@ -3831,6 +3855,7 @@ async function polishCustomerReply({
 			temperature: 0.25,
 			max_tokens: 260,
 			reasoning_effort: "low",
+			response_format: { type: "json_object" },
 		});
 		const parsed = parseJsonObject(raw);
 		const polished = cleanDisplayString(parsed?.reply || raw, 1200);
@@ -6612,6 +6637,8 @@ async function executeBrainFirstDecision({
 } = {}) {
 	const key = caseIdText(sc);
 	const latestText = String(latestGuest?.message || "");
+	const latestClarifiesRequiredBookingDetail =
+		latestGuestAsksRequiredBookingDetailClarification(latestText);
 	let nextDecision = normalizeDecision(decision);
 	let mergeFacts = factsForMergeFromDecision(nextDecision);
 	nextDecision = {
@@ -6655,11 +6682,12 @@ async function executeBrainFirstDecision({
 		nextKnown = syncKnownFromQuote(repaired.known);
 	}
 	if (
-		nextDecision.action === "submit_reservation" ||
-		replyLooksLikeManualBookingReview(nextDecision.reply) ||
-		replyConfirmsBookingWithoutAction(nextDecision.reply) ||
-		replyPromisesBookingReview(nextDecision.reply) ||
-		replyPromisesReservationFinalization(nextDecision.reply)
+		!latestClarifiesRequiredBookingDetail &&
+		(nextDecision.action === "submit_reservation" ||
+			replyLooksLikeManualBookingReview(nextDecision.reply) ||
+			replyConfirmsBookingWithoutAction(nextDecision.reply) ||
+			replyPromisesBookingReview(nextDecision.reply) ||
+			replyPromisesReservationFinalization(nextDecision.reply))
 	) {
 		const repaired = await repairReviewDecision({
 			sc,
@@ -6681,6 +6709,7 @@ async function executeBrainFirstDecision({
 		});
 	}
 	if (
+		!latestClarifiesRequiredBookingDetail &&
 		nextDecision.action === "reply" &&
 		replyAsksOptionalEmail(nextDecision.reply, nextKnown) &&
 		requiredBookingMissing(nextKnown).length
@@ -6693,6 +6722,7 @@ async function executeBrainFirstDecision({
 		});
 	}
 	if (
+		!latestClarifiesRequiredBookingDetail &&
 		nextDecision.action === "reply" &&
 		replyPromisesReservationFinalization(nextDecision.reply)
 	) {
@@ -6704,6 +6734,16 @@ async function executeBrainFirstDecision({
 			reason: missing.length
 				? "finalization_promise_missing_required_details_guard"
 				: "finalization_promise_requires_official_review",
+		});
+	}
+	if (
+		latestClarifiesRequiredBookingDetail &&
+		["submit_reservation", "send_review", "send_review_again"].includes(nextDecision.action)
+	) {
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action: "reply",
+			reason: "required_detail_clarification_requires_reply_guard",
 		});
 	}
 	const stayChangeSafeActions = new Set([
@@ -7125,6 +7165,10 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuest &&
 		(guestRequestsRevision(latestText, latestAction) ||
 			latestRevision.deferToOpenAI);
+	const latestClarifiesRequiredBookingDetail =
+		latestGuest &&
+		bookingIdentityCollectionContext(sc, previousAi, known) &&
+		latestGuestAsksRequiredBookingDetailClarification(latestText);
 	if (latestGuest && previousAiAskedFor("nationality", previousAi) && !known.nationality) {
 		const nationality = normalizeNationalityHint(latestText);
 		if (nationality) {
@@ -7277,7 +7321,8 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuestWantsToContinueBeforeBrain &&
 		quoteInputsKnown(known) &&
 		(!shouldLetOpenAIHandleRevision || latestGuestContinuesQuoteBeforeBrain) &&
-		!latestGuestAsksHotelFactOnly(latestGuest)
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		!latestClarifiesRequiredBookingDetail
 	) {
 		return sendBookingProgressFast({
 			io,
@@ -7314,6 +7359,7 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuest &&
 		quoteMatchesKnown(known) &&
 		!shouldLetOpenAIHandleRevision &&
+		!latestClarifiesRequiredBookingDetail &&
 		(guestRequestsBookingReviewStep(latestText, latestAction) ||
 			guestAttentionNudge(latestText) ||
 			previousAi?.clientAction === "quote_ready" ||
@@ -8099,6 +8145,7 @@ const exportedOrchestrator = {
 		nightsCountFromText,
 		mentionsExplicitReservationIdentifier,
 		latestGuestLooksLikeBookingIdentityAnswer,
+		latestGuestAsksRequiredBookingDetailClarification,
 		bookingIdentityCollectionContext,
 		bookingIdentityFactsFromText,
 		phoneFromIdentityText,

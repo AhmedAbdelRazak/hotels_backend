@@ -95,7 +95,13 @@ function trimMessagesForOpenAI(messages = []) {
 
 async function chat(
 	messages,
-	{ kind = "nlu", temperature = 0, max_tokens = 350, reasoning_effort = "" } = {}
+	{
+		kind = "nlu",
+		temperature = 0,
+		max_tokens = 350,
+		reasoning_effort = "",
+		response_format = null,
+	} = {}
 ) {
 	if (!client) {
 		throw new Error("OPENAI_API_KEY is not configured.");
@@ -110,6 +116,7 @@ async function chat(
 		messages: trimMessagesForOpenAI(messages),
 		temperature,
 		maxTokens: tokenLimit,
+		response_format,
 		reasoning_effort: gpt5Style
 			? reasoning_effort || pickReasoningEffort(kind)
 			: "",
