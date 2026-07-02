@@ -12439,6 +12439,40 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
+		previousAiAction === "required_details_needed" &&
+		!latestClarifiesRequiredBookingDetail &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
+		!requiredBookingMissing(known).length &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "required_details_complete_to_review");
+		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi, known) &&
+		quoteInputsKnown(known)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "alternative_availability_pre_brain_start");
+		return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsSameDateRoomOptions(latestText, latestAction, previousAi, known) &&
+		validISODate(known.checkinISO) &&
+		validISODate(known.checkoutISO)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "same_date_room_options_pre_brain_start");
+		return handleBrainRoomOptions(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
 		(latestGuestAsksHotelFactOnly(latestGuest) || contextualHotelFactQuestion) &&
 		(contextualHotelFactQuestion ||
 			latestGuestMentionsNusuk(latestGuest) ||
