@@ -10111,6 +10111,27 @@ function unavailableQuoteShowsZeroTotal(reply = "", toolResult = {}) {
 	);
 }
 
+function requiredDetailsReplyListsKnownPhoneAsMissing(reply = "", known = {}, toolResult = {}) {
+	if (toolResult?.tool !== "send_review" || toolResult?.code !== "missing_required_details") {
+		return false;
+	}
+	const phone = cleanPhone(known.phone);
+	if (!phone || !known.phoneNeedsConfirmation) return false;
+	const text = normalizeDigits(String(reply || ""));
+	const phoneIndex = text.indexOf(phone);
+	if (phoneIndex < 0) return false;
+	const nearby = text.slice(Math.max(0, phoneIndex - 40), phoneIndex + phone.length + 20);
+	const compactNearby = normalizeIntentSearchText(nearby).replace(/\s+/g, "");
+	const rawPhoneLabel =
+		/(?:phone|mobile|whatsapp|رقم\s*(?:الهاتف|الجوال)|الهاتف|الجوال)\s*[:：-]/iu.test(nearby) ||
+		/(?:رقمالهاتف|رقمالجوال|الهاتف|الجوال)[:：-]?/iu.test(compactNearby);
+	const confirmationContext =
+		/(?:confirm|confirmation|existing|current|shown|same number|تأكيد|الموجود|الظاهر|نفس\s+الرقم)/iu.test(
+			nearby
+		);
+	return rawPhoneLabel && !confirmationContext;
+}
+
 function compactReservationForBrain(reservation = null) {
 	if (!reservation) return null;
 	const links = reservationPublicLinks(reservation);
@@ -10437,6 +10458,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat, and toolResult.minCheckinISO is only the earliest date the chat can start checking from. Ask whether to search from that date or adjust dates. Do not claim it is available."
 				: validation === "unavailable_quote_zero_total"
 				? "Your previous unavailable quote reply was not sent because it showed total/price as 0. Return a corrected customer-facing reply from OpenAI only. For unavailable quotes, do not show any zero price or zero total. Explain the unavailable date/room reason from toolResult and offer alternatives or date/room adjustment."
+				: validation === "known_phone_listed_as_missing"
+				? "Your previous required-details reply was not sent because it listed a known phone number as a raw missing phone value. Return a corrected customer-facing reply from OpenAI only. If known.phone exists and only needs confirmation, say it is the existing/current phone and ask the guest to confirm it or say same number. Do not ask them to retype it as a missing phone field."
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
 				: validation === "hotel_fact_location_dump"
@@ -10497,6 +10520,9 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
 			return "unavailable_quote_zero_total";
+		}
+		if (requiredDetailsReplyListsKnownPhoneAsMissing(text, known, toolResult)) {
+			return "known_phone_listed_as_missing";
 		}
 		if (
 			toolResult?.tool === "check_alternatives" &&
@@ -11188,7 +11214,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			missing,
 			review: missing.length ? null : compactReviewForBrain(reviewKnown, hotel),
 			instruction: missing.length
-				? "Ask only for the missing required booking details in the guest language. Put each requested field on its own separate line. Do not ask for optional fields before required fields."
+				? "Ask only for the missing required booking details in the guest language. Put each requested field on its own separate line. Do not ask for optional fields before required fields. If known.phone is present but phone is in missing only because it needs confirmation, ask to confirm the existing phone; do not list it as a raw missing phone value."
 				: "Write the official pre-submission booking review in the guest language using these exact facts. This is not a confirmed booking yet: do not say confirmed, created, completed, finalized, or booked. Use separate lines or simple bullets with one main fact per line for name, phone, nationality, room(s), guests, dates, nights, total, and nightly average if present. Keep the total on its own line and ask the guest to confirm before creating the reservation.",
 		},
 		clientAction: missing.length ? "required_details_needed" : "review_reservation",
