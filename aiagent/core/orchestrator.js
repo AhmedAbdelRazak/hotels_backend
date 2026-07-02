@@ -245,6 +245,17 @@ function hasAnyAiEntry(sc = {}) {
 	);
 }
 
+function conversationHasAiAction(sc = {}, action = "") {
+	const wanted = String(action || "").trim().toLowerCase();
+	if (!wanted) return false;
+	return (Array.isArray(sc.conversation) ? sc.conversation : []).some(
+		(entry) =>
+			isAiSupportEntry(entry) &&
+			!entry?.isSystem &&
+			String(entry?.clientAction || "").trim().toLowerCase() === wanted
+	);
+}
+
 function replyStartsWithIslamicGreeting(value = "") {
 	const text = String(value || "").trim();
 	return /(?:\u0627\u0644)?\u0633\u0644\u0627\u0645\s+\u0639\u0644\u064a\u0643\u0645|\u0648\s*\u0639\u0644\u064a\u0643\u0645\s+(?:\u0627\u0644)?\u0633\u0644\u0627\u0645|assalamu\s+alaikum|assalamualaikum/i.test(
@@ -1111,6 +1122,23 @@ function nationalityFromIdentityText(value = "") {
 
 function bookingNameFromIdentityText(value = "") {
 	let text = normalizeDigits(stripChatMarkup(value));
+	const original = cleanDisplayString(value, 240);
+	const hasNameCue =
+		/\b(?:name|booking name|guest name|full name)\b/i.test(original) ||
+		/(?:\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/iu.test(
+			original
+		);
+	const hasOtherIdentityCue =
+		phoneFromIdentityText(original) ||
+		phoneFromText(original) ||
+		simplePhoneFromLine(original) ||
+		nationalityFromIdentityText(original) ||
+		nationalityFromText(original) ||
+		normalizeNationalityHint(original) ||
+		/\b(?:phone|mobile|whatsapp|nationality|citizenship)\b/i.test(original) ||
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629)/iu.test(
+			original
+		);
 	text = text
 		.replace(/\+?\d[\d\s().-]{6,24}/g, " ")
 		.replace(/\b(?:phone|mobile|whatsapp|nationality|citizenship|name|booking name|guest name|full name)\b/gi, " ")
@@ -1120,6 +1148,18 @@ function bookingNameFromIdentityText(value = "") {
 		.map((token) => token.trim())
 		.filter((token) => token && !normalizeNationalityHint(token));
 	const candidate = cleanDisplayString(tokens.join(" "), 80).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
+	if (!hasNameCue && hasOtherIdentityCue) return "";
+	const nationality =
+		nationalityFromIdentityText(original) ||
+		nationalityFromText(original) ||
+		normalizeNationalityHint(original);
+	if (
+		nationality &&
+		normalizeIntentSearchText(candidate).replace(/\s+/g, "") ===
+			normalizeIntentSearchText(nationality).replace(/\s+/g, "")
+	) {
+		return "";
+	}
 	return isPlausibleBookingName(candidate) ? candidate : "";
 }
 
@@ -3369,6 +3409,12 @@ function replyPromisesReservationFinalization(reply = "") {
 function latestGuestAsksHotelFactOnly(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	if (!text.trim()) return false;
+	if (
+		latestGuestAsksArrivalDeparturePolicy(latestGuest) ||
+		latestGuestAsksAirportDistance(latestGuest)
+	) {
+		return true;
+	}
 	const hotelFactTopic =
 		/(nusuk|نسك|bus|shuttle|transport|transfer|باص|اتوبيس|أتوبيس|اوتوبيس|أوتوبيس|حافلة|نقل|توصيل|مواصلات|شاتل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|يبعد|تبعد|قريب|المسافة|مسافة|بوابة|بوابه|الحرم|موقع|location|distance|address|map|maps|directions|خريطة|خريطه|خرائط|لوكيشن|عنوان|مشي|walking|parking|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant|branch|branches|فرع|فروع|المدينة|المدينه|الطائف)/i.test(
 			text
@@ -3432,6 +3478,33 @@ function latestGuestAsksBranch(latestGuest = {}) {
 	return /(branch|branches|\u0641\u0631\u0639|\u0641\u0631\u0648\u0639|\u0627\u0644\u0645\u062f\u064a\u0646\u0629|\u0627\u0644\u0645\u062f\u064a\u0646\u0647|\u0627\u0644\u0637\u0627\u0626\u0641)/i.test(
 		text
 	);
+}
+
+function latestGuestAsksArrivalDeparturePolicy(latestGuest = {}) {
+	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
+	if (!text.trim()) return false;
+	const compact = normalizeIntentSearchText(text).replace(/\s+/g, "");
+	return (
+		/\b(?:early\s+check[\s-]?in|late\s+check[\s-]?out|check[\s-]?in\s+before|check[\s-]?out\s+after|arrival\s+time|departure\s+time)\b/i.test(
+			text
+		) ||
+		/(?:\u062a\u0634\u064a\u0643\s*\u0627\u0646|\u062a\u0634\u064a\u0643\s*\u0627\u0648\u062a|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c).{0,50}(?:\u0642\u0628\u0644|\u0628\u0639\u062f|\u0627\u0644\u0633\u0627\u0639\u0629|\u0645\u0648\u0639\u062f|\u0645\u064a\u0639\u0627\u062f|12|\u0661\u0662|\u0638\u0647\u0631|\u0638\u0647\u0631\u0627)/iu.test(
+			text
+		) ||
+		compact.includes("\u062a\u0634\u064a\u0643\u0627\u0646\u0642\u0628\u064412") ||
+		compact.includes("\u062a\u0634\u064a\u0643\u0627\u0646\u0642\u0628\u0644\u0661\u0662")
+	);
+}
+
+function latestGuestAsksAirportDistance(latestGuest = {}) {
+	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
+	if (!text.trim()) return false;
+	const asksAirport = /\b(?:airport|jed|jeddah)\b/i.test(text) ||
+		/(?:\u0645\u0637\u0627\u0631|\u062c\u062f\u0629|\u062c\u062f\u0647|\u062c\u062f\u0651\u0629)/iu.test(text);
+	const asksDistance = /(distance|far|how\s+long|drive|taxi|\u0645\u0633\u0627\u0641\u0629|\u0627\u0644\u0645\u0633\u0627\u0641\u0629|\u0643\u0645|\u0648\u0642\u062a|\u0645\u062f\u0629|\u064a\u0628\u0639\u062f|\u0628\u0639\u064a\u062f|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629)/iu.test(
+		text
+	);
+	return asksAirport && asksDistance;
 }
 
 function latestGuestRequestsApartmentUnit(value = "") {
@@ -3584,6 +3657,96 @@ function buildHotelFactFallbackMessage(sc = {}, hotel = {}, latestGuest = null) 
 	return ar
 		? `أستاذ ${guestName}، حسب بيانات ${hotelName} أقدر أوضح لك تفاصيل الفندق والخدمات المتاحة، ثم نكمل الحجز خطوة بخطوة.`
 		: `${guestName}, based on ${hotelName}'s details, I can clarify the hotel services and then continue the booking step by step.`;
+}
+
+function buildHotelFactReplyMessage(sc = {}, hotel = {}, latestGuest = null) {
+	const known = initialKnownFacts(sc);
+	const languageCode = activeLanguageCode(sc, known);
+	const latestText = String(latestGuest?.message || "");
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	const guestName = guestDisplayName(sc);
+	const guestAddress = ar ? arabicGuestAddress(sc, known) : guestName;
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "\u0627\u0644\u0641\u0646\u062f\u0642"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	if (latestGuestAsksArrivalDeparturePolicy(latestGuest)) {
+		const policy = policyAnswerForTopic(
+			hotel,
+			/check.?in|check.?out|early|late|\u062a\u0634\u064a\u0643|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u0648\u0635\u0648\u0644|\u0645\u063a\u0627\u062f\u0631\u0629/iu
+		);
+		if (policy) {
+			return ar
+				? `\u0623\u0643\u064a\u062f ${guestAddress}\u060c \u062d\u0633\u0628 \u0633\u064a\u0627\u0633\u0629 ${hotelName}:\n${policy}`
+				: `Sure ${guestAddress}, according to ${hotelName}'s policy:\n${policy}`;
+		}
+		return ar
+			? [
+					`\u0623\u0643\u064a\u062f ${guestAddress}\u060c \u0627\u0644\u062a\u0634\u064a\u0643 \u0625\u0646 \u0642\u0628\u0644 12 \u0638\u0647\u0631\u0627 \u063a\u064a\u0631 \u0645\u0624\u0643\u062f \u0645\u0633\u0628\u0642\u0627.`,
+					`\u064a\u0643\u0648\u0646 \u062d\u0633\u0628 \u062a\u0648\u0641\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0648\u0645\u0648\u0627\u0641\u0642\u0629 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u064a\u0648\u0645 \u0627\u0644\u0648\u0635\u0648\u0644.`,
+					`\u0623\u0642\u062f\u0631 \u0623\u0636\u064a\u0641\u0647\u0627 \u0643\u0645\u0644\u0627\u062d\u0638\u0629 \u0639\u0644\u0649 \u0627\u0644\u062d\u062c\u0632 \u0625\u0646 \u0634\u0627\u0621 \u0627\u0644\u0644\u0647\u060c \u0648\u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0627\u0644\u0646\u0647\u0627\u0626\u064a \u064a\u0643\u0648\u0646 \u0645\u0646 \u0627\u0644\u0641\u0646\u062f\u0642.`,
+			  ].join("\n")
+			: [
+					`Sure ${guestAddress}, check-in before 12:00 is not guaranteed in advance.`,
+					"It depends on room availability and reception approval on arrival day.",
+					"I can note the request on the booking, insha'Allah, and the hotel confirms it finally.",
+			  ].join("\n");
+	}
+	if (latestGuestAsksAirportDistance(latestGuest)) {
+		const mapsUrl = hotelGoogleMapsUrl(hotel);
+		const coordinates = hotelCoordinatesForMaps(hotel);
+		const directionsUrl = coordinates
+			? `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(
+					"King Abdulaziz International Airport"
+			  )}&destination=${coordinates.latitude},${coordinates.longitude}&travelmode=driving`
+			: "";
+		return ar
+			? [
+					`\u0623\u0643\u064a\u062f ${guestAddress}\u060c \u0644\u0627 \u064a\u0648\u062c\u062f \u0639\u0646\u062f\u064a \u0642\u064a\u0627\u0633 \u062f\u0642\u064a\u0642 \u0645\u062e\u0632\u0646 \u0645\u0646 \u0645\u0637\u0627\u0631 \u062c\u062f\u0629 \u0625\u0644\u0649 ${hotelName}\u060c \u0648\u0627\u0644\u0648\u0642\u062a \u064a\u062a\u063a\u064a\u0631 \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`,
+					directionsUrl ? `\u0631\u0627\u0628\u0637 \u0627\u0644\u0637\u0631\u064a\u0642 \u0645\u0646 \u0645\u0637\u0627\u0631 \u062c\u062f\u0629: ${directionsUrl}` : "",
+					mapsUrl ? `\u0645\u0648\u0642\u0639 \u0627\u0644\u0641\u0646\u062f\u0642: ${mapsUrl}` : "",
+			  ]
+					.filter(Boolean)
+					.join("\n")
+			: [
+					`Sure ${guestAddress}, I do not have an exact stored distance from Jeddah airport to ${hotelName}; travel time depends on traffic.`,
+					directionsUrl ? `Directions from Jeddah airport: ${directionsUrl}` : "",
+					mapsUrl ? `Hotel location: ${mapsUrl}` : "",
+			  ]
+					.filter(Boolean)
+					.join("\n");
+	}
+	return buildHotelFactFallbackMessage(sc, hotel, latestGuest);
+}
+
+async function sendHotelFactReplyFromOpenAI({
+	io,
+	sc,
+	hotel,
+	known,
+	latestGuest,
+	typingStartedAt = 0,
+} = {}) {
+	const fallback = buildHotelFactReplyMessage(sc, hotel, latestGuest);
+	return sendBrainToolReplyFromOpenAI({
+		io,
+		sc,
+		hotel,
+		known,
+		latestGuest,
+		toolResult: {
+			tool: "hotel_fact",
+			ok: true,
+			code: "hotel_fact_answered",
+			latestQuestion: cleanDisplayString(latestGuest?.message || "", 500),
+			hotelFacts: compactHotelFacts(hotel),
+			suggestedAnswer: fallback,
+			instruction:
+				"Write the final customer-facing answer from OpenAI only. Answer the latest hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. Preserve any URLs exactly. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
+		},
+		clientAction: "hotel_fact_answered",
+		fallback,
+		typingStartedAt,
+	});
 }
 
 function latestGuestMentionsNusuk(latestGuest = {}) {
@@ -4069,7 +4232,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the latest guest message corrects or changes earlier booking details, the latest message wins over Known facts. Return the corrected facts and action="get_quote" when exact stay details are now known; never reuse an older quote or older date range after a correction.`,
 		`If the latest guest changes dates, room type, room count, or guest count after a quote, do not proceed to required booking details until a fresh quote has been shown for the corrected stay.`,
 		`If the latest guest changes only the number of rooms, preserve the known room type, dates, and guest count, update facts.rooms/roomSelections, and return action="get_quote" when the stay is otherwise known.`,
-		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
+		`Latest hotel-fact questions have priority over pending booking flow. If the latest guest message asks about Nusuk, bus/shuttle, cancellation/refund policy, distance/location, airport distance, early check-in, late checkout, amenities, meals, parking, Wi-Fi, or any hotel service/policy, answer that question directly from Hotel facts as action="reply" before continuing the quote or reservation flow.`,
 		`If the guest asks to cancel a reservation or change its status to canceled, return action="cancel_reservation". Never tell the guest the reservation was canceled in chat; the official cancellation/status-change path is WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
 		`If the guest asks to find, view, or check an existing reservation and explicitly gives a reservation/booking/confirmation/reference number, return action="lookup_reservation". Do not use this action for a normal phone number unless the guest explicitly says it is the reservation/booking/confirmation/reference number.`,
 		`If Hotel facts say propertyType is hotel and rooms do not list apartments/units, never offer an apartment or say a two-bedroom apartment/unit is available. Explain briefly that this property provides hotel rooms, then offer the closest hotel-room setup if the guest mentioned room types such as double plus four-bed/quad.`,
@@ -4109,6 +4272,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
 		`If the guest says the review is wrong, action must be "send_review_again" only if you can present corrected data; otherwise ask what to fix.`,
 		`For casual or emotional guest messages such as excitement, exhaustion, sadness, stress, jokes, thanks, laughter, or small talk, respond warmly and naturally first, then gently continue the stay flow with only the next useful question. Do not escalate mild emotions or casual chat.`,
+		`Avoid empty progress phrases like "I will continue" unless the same reply includes a concrete result, question, button, or next action. If the guest jokes or corrects you, acknowledge it lightly like a real CSR, then move to the exact next useful step.`,
 		`For polite off-topic messages, answer briefly only when the guest explicitly asks the off-topic question, then gently return to helping with the stay. Never infer an off-topic sports/news question from a nationality, country name, date typo, or ordinary booking detail. If live web/current data is required, say you may not have live updates.`,
 		`Use hotel facts to sell naturally: room capacity, public amenities, views, services, distance, policies, public base-pricing guidance, and any listed room offers/monthly packages. Keep it short and human, not a brochure. If an offer may apply, present it as guidance and request/get exact dates for a final quote.`,
 		`If Hotel facts explicitly say a service exists, answer confidently and briefly. Examples: hasBusService=true means yes, mention busDetails if present; isNusuk=true means yes, the hotel is listed/available on Nusuk and you should mention isNusukText if present; distances means give the exact walking/driving distance; policyQA contains only answered hotel policy rows, so answer cancellation/refund/policy questions from those rows; listed offers/monthlyPackages mean mention the public offer/package as guidance. Do not say "I cannot confirm" for facts that are present in Hotel facts.`,
@@ -6713,6 +6877,7 @@ function quoteReplyFormattingInstruction() {
 		"Use separate short lines or simple bullets for room(s), dates, nights, total, and the next question.",
 		"Do not compress the quote into one paragraph.",
 		"Do not add reference numbers, date references, IDs, or unexplained numeric lines.",
+		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
 	].join(" ");
 }
@@ -6804,10 +6969,13 @@ async function askCompactToolWriter({
 						? "The reply must include the required policy details from toolResult."
 						: "",
 					toolResult?.tool === "get_quote"
-						? "For quote tool results, use separate lines or simple bullets. Never compress room, dates, nights, total, and the next question into one paragraph."
+						? "For quote tool results, use separate lines or simple bullets. Never compress room, dates, nights, total, and the next question into one paragraph. Do not say the booking/reservation is confirmed, created, completed, finalized, or booked."
 						: "",
 					validation === "unexplained_quote_reference"
 						? "Remove any reference number, date reference, ID, or unexplained numeric line. Only include meaningful quote facts from toolResult."
+						: "",
+					validation === "quote_claimed_confirmed_before_submit"
+						? "This is only a price/availability quote. Do not say the booking/reservation is confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
 						: "",
 					validation === "vague_progress_instead_of_tool_result"
 						? "Do not send a vague progress update. Write the actual tool-result reply now, using the exact toolResult facts."
@@ -7022,6 +7190,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous tool-result reply was not sent because it changed or omitted required visible numbers. Return a corrected customer-facing reply from OpenAI only. Include every requiredVisibleNumbers item exactly as shown, and use the toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details."
 				: validation === "unexplained_quote_reference"
 				? "Your previous quote reply was not sent because it added a reference number, date reference, ID, or unexplained numeric line. Return a corrected customer-facing quote from OpenAI only. Include only meaningful quote facts from toolResult: room(s), dates, nights, total, nightly average if present, and the next question. Do not invent IDs or references."
+				: validation === "quote_claimed_confirmed_before_submit"
+				? "Your previous quote reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return a corrected customer-facing quote from OpenAI only. This is only a price/availability quote; do not say confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
 				: validation === "reservation_confirmation_links_missing"
@@ -7063,6 +7233,9 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (toolResult?.tool === "get_quote" && quoteReplyHasUnexplainedReference(text)) {
 			return "unexplained_quote_reference";
+		}
+		if (toolResult?.tool === "get_quote" && reviewReplyClaimsBookingConfirmed(text)) {
+			return "quote_claimed_confirmed_before_submit";
 		}
 		if (
 			["send_review", "submit_reservation"].includes(String(toolResult?.tool || "")) &&
@@ -8059,6 +8232,24 @@ async function executeBrainFirstDecision({
 		);
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
+	const latestRequestsProgressOnShownQuote =
+		latestGuest &&
+		quoteMatchesKnown(nextKnown) &&
+		matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		!latestGuestRejectsQuoteOrSelection(latestText) &&
+		!latestClarifiesRequiredBookingDetail &&
+		guestRequestsBookingReviewStep(latestText, latestAction);
+	if (latestRequestsProgressOnShownQuote) {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"shown_quote_progress_to_review",
+			{ action: "send_review", reason: "guest_requested_progress_after_shown_quote" },
+			nextKnown
+		);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
 	if (
 		quoteMatchesKnown(nextKnown) &&
 		!matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
@@ -8373,7 +8564,8 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		String(previousAi?.clientAction || "").toLowerCase() === "reservation_confirmed" &&
+		(String(previousAi?.clientAction || "").toLowerCase() === "reservation_confirmed" ||
+			conversationHasAiAction(sc, "reservation_confirmed")) &&
 		guestDeclinesFurtherHelp(latestText, latestAction)
 	) {
 		await saveKnownFacts(key, known);
@@ -8526,15 +8718,18 @@ async function planTurn(io, supportCaseOrId) {
 		(latestGuestMentionsNusuk(latestGuest) ||
 			latestGuestMentionsBus(latestGuest) ||
 			latestGuestAsksMapOrLocation(latestGuest) ||
-			latestGuestAsksBranch(latestGuest))
+			latestGuestAsksBranch(latestGuest) ||
+			latestGuestAsksArrivalDeparturePolicy(latestGuest) ||
+			latestGuestAsksAirportDistance(latestGuest))
 	) {
 		await saveKnownFacts(key, known);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, buildHotelFactFallbackMessage(sc, hotel, latestGuest), {
-			latestGuest,
+		return sendHotelFactReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
 			known,
-			clientAction: "hotel_fact_answered",
-			source: "hotel_facts",
+			latestGuest,
+			typingStartedAt,
 		});
 	}
 	if (shouldUseBrainFirstOrchestrator()) {
@@ -8582,15 +8777,20 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		(latestGuestAsksMapOrLocation(latestGuest) || latestGuestAsksBranch(latestGuest)) &&
+		(latestGuestAsksMapOrLocation(latestGuest) ||
+			latestGuestAsksBranch(latestGuest) ||
+			latestGuestAsksArrivalDeparturePolicy(latestGuest) ||
+			latestGuestAsksAirportDistance(latestGuest)) &&
 		latestGuestAsksHotelFactOnly(latestGuest)
 	) {
 		await saveKnownFacts(key, known);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, buildHotelFactFallbackMessage(sc, hotel, latestGuest), {
-			latestGuest,
+		return sendHotelFactReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
 			known,
-			clientAction: "hotel_fact_answered",
+			latestGuest,
+			typingStartedAt,
 		});
 	}
 	if (latestGuest && latestGuestRequestsReservationCancel(latestText, known)) {
@@ -9520,6 +9720,7 @@ const exportedOrchestrator = {
 	__test: {
 		mergeKnownFacts,
 		recoverKnownFactsFromConversation,
+		conversationHasAiAction,
 		requiredBookingMissing,
 		quoteMatchesKnown,
 		syncKnownFromQuote,
@@ -9556,6 +9757,9 @@ const exportedOrchestrator = {
 		guestRequestsBookingReviewStep,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
+		latestGuestAsksHotelFactOnly,
+		latestGuestAsksArrivalDeparturePolicy,
+		latestGuestAsksAirportDistance,
 		matchingQuoteShownAfterLatestStayChange,
 		quoteFactsFromAiMessage,
 		roomCountFromAiReviewText,
@@ -9590,6 +9794,7 @@ const exportedOrchestrator = {
 		arabicGuestAddress,
 		compactPolicyQA,
 		localizedCancellationPolicyLine,
+		buildHotelFactReplyMessage,
 		buildQuoteFallbackMessage,
 		warmBookingPrefix,
 		withWarmPrefix,
