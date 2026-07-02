@@ -2824,7 +2824,7 @@ function guestRequestsBookingReviewStep(value = "", action = "") {
 function guestRequestsConfirmationDelivery(value = "", action = "") {
 	const cleanAction = cleanString(action, 80).toLowerCase();
 	if (["place_reservation", "confirm_reservation", "submit_reservation"].includes(cleanAction)) {
-		return true;
+		return false;
 	}
 	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -11003,6 +11003,10 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 	}
 	const missing = requiredBookingMissing(reviewKnown);
 	await saveKnownFacts(caseId, reviewKnown);
+	if (!missing.length && shouldOfferOptionalEmail(sc, reviewKnown)) {
+		await waitForTypingMinimum(typingStartedAt);
+		return sendOptionalEmailOffer(io, sc, reviewKnown, latestGuest);
+	}
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	const latestContinuesShownQuote = latestGuestContinuesAfterQuote(
 		previousAi,
