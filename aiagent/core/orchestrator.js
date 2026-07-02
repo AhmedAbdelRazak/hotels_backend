@@ -1126,6 +1126,7 @@ function latestGuestContinuesAfterQuote(previousAi = {}, latestText = "", latest
 	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_ready") {
 		return false;
 	}
+	if (latestGuestRejectsQuoteOrSelection(latestText)) return false;
 	const cleanAction = cleanString(latestAction, 80).toLowerCase();
 	if (["proceed", "continue_booking", "proceed_to_booking"].includes(cleanAction)) {
 		return true;
@@ -2304,9 +2305,49 @@ function guestDeclinesFurtherHelp(value = "", action = "") {
 	].some((needle) => compact.includes(needle));
 }
 
+function latestGuestRejectsQuoteOrSelection(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const englishRejectsSelection =
+		/\b(?:wrong|incorrect|not correct|not right|not this|not that|not what i asked|i did not ask|i didn't ask|did not ask|didn't ask|i did not request|i didn't request|did not request|didn't request|i did not choose|i didn't choose|never asked)\b/i.test(text) ||
+		/\b(?:i asked for|i wanted|i requested).{0,60}\b(?:not|instead|another|different)\b/i.test(text);
+	const arabicNeedles = [
+		"\u0645\u0637\u0644\u0628\u062a\u0634",
+		"\u0645\u0627\u0637\u0644\u0628\u062a\u0634",
+		"\u0645\u0627\u0637\u0644\u0628\u062a",
+		"\u0645\u0637\u0644\u0628\u062a",
+		"\u0645\u0637\u0644\u0628\u062a\u0647\u0627\u0634",
+		"\u0645\u0627\u0642\u0644\u062a\u0634",
+		"\u0645\u0634\u062f\u0647",
+		"\u0645\u0634\u062f\u064a",
+		"\u0645\u0634\u062f\u0627",
+		"\u0645\u0634\u0643\u062f\u0647",
+		"\u0645\u0634\u0647\u064a\u062f\u064a",
+		"\u0645\u0634\u0627\u0644\u063a\u0631\u0641\u0647\u062f\u064a",
+		"\u0645\u0634\u0627\u0644\u063a\u0631\u0641\u0629\u062f\u064a",
+		"\u063a\u0644\u0637",
+		"\u063a\u064a\u0631\u0635\u062d\u064a\u062d",
+	];
+	const arabicRejectsSelection =
+		arabicNeedles.some((needle) => compact.includes(needle)) ||
+		/(?:\u0644\u0645|\u0644\u0627)\s+(?:\u0627\u0637\u0644\u0628|\u0623\u0637\u0644\u0628|\u0627\u062e\u062a\u0631|\u0623\u062e\u062a\u0631)/iu.test(text);
+	if (!englishRejectsSelection && !arabicRejectsSelection) return false;
+	return (
+		textMentionsRoomSelection(text) ||
+		latestGuestMentionsDateish(text) ||
+		/\b(?:room|rooms|date|dates|quote|price|booking|reservation|double|twin|triple|quad|family)\b/i.test(text) ||
+		/(?:\u063a\u0631\u0641|\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0645\u0632\u062f\u0648\u062c|\u062b\u0644\u0627\u062b\u064a|\u0631\u0628\u0627\u0639\u064a|\u0639\u0627\u0626\u0644)/iu.test(text)
+	);
+}
+
 function guestRequestsRevision(value = "", action = "") {
 	const cleanAction = cleanString(action, 80).toLowerCase();
 	if (cleanAction === "revise_reservation") return true;
+	if (latestGuestRejectsQuoteOrSelection(value)) return true;
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	return /\b(something is wrong|wrong|not correct|incorrect|change something|fix it|revise|modify|edit)\b/i.test(text) ||
 		/(غير صحيح|مش صحيح|فيه غلط|عدل|تعديل|غير|غيّر)/i.test(text);
@@ -7164,6 +7205,8 @@ async function planTurn(io, supportCaseOrId) {
 		roomTypeKey: known.roomTypeKey || "",
 		hasQuote: Boolean(known.quote),
 	});
+	const latestRejectsQuoteOrSelection =
+		latestGuest && latestGuestRejectsQuoteOrSelection(latestText);
 	const shouldLetOpenAIHandleRevision =
 		latestGuest &&
 		(guestRequestsRevision(latestText, latestAction) ||
@@ -7324,6 +7367,7 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuestWantsToContinueBeforeBrain &&
 		quoteInputsKnown(known) &&
 		(!shouldLetOpenAIHandleRevision || latestGuestContinuesQuoteBeforeBrain) &&
+		!latestRejectsQuoteOrSelection &&
 		!latestGuestAsksHotelFactOnly(latestGuest) &&
 		!latestClarifiesRequiredBookingDetail
 	) {
@@ -7362,10 +7406,11 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuest &&
 		quoteMatchesKnown(known) &&
 		!shouldLetOpenAIHandleRevision &&
+		!latestRejectsQuoteOrSelection &&
 		!latestClarifiesRequiredBookingDetail &&
 		(guestRequestsBookingReviewStep(latestText, latestAction) ||
 			guestAttentionNudge(latestText) ||
-			previousAi?.clientAction === "quote_ready" ||
+			latestGuestContinuesQuoteBeforeBrain ||
 			previousAiAction === "required_details_needed")
 	) {
 		return sendBookingProgressFast({
@@ -7500,6 +7545,7 @@ async function planTurn(io, supportCaseOrId) {
 		latestGuestWantsToContinue &&
 		quoteInputsKnown(known) &&
 		(!shouldLetOpenAIHandleRevision || latestGuestContinuesQuote) &&
+		!latestRejectsQuoteOrSelection &&
 		!latestGuestAsksHotelFactOnly(latestGuest);
 	if (wantsToContinueBooking) {
 		let bookingKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
@@ -7578,13 +7624,18 @@ async function planTurn(io, supportCaseOrId) {
 		logTurnStage(key, "quote_branch_start");
 		return handleQuote(io, sc, hotel, known, latestGuest);
 	}
-	if (latestGuest && quoteMatchesKnown(known) && !shouldLetOpenAIHandleRevision) {
+	if (
+		latestGuest &&
+		quoteMatchesKnown(known) &&
+		!shouldLetOpenAIHandleRevision &&
+		!latestRejectsQuoteOrSelection
+	) {
 		const missing = requiredBookingMissing(known);
 		if (
 			missing.length === 1 &&
 			missing[0] === "nationality" &&
 			(guestRequestsBookingReviewStep(latestText, latestAction) ||
-				previousAi?.clientAction === "quote_ready")
+				latestGuestContinuesQuote)
 		) {
 			await saveKnownFacts(key, known);
 			await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
@@ -8168,6 +8219,7 @@ const exportedOrchestrator = {
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,
 		guestRequestsBookingReviewStep,
+		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
 		quoteTool,
