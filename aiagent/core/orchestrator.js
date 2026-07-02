@@ -1967,6 +1967,23 @@ function quoteInputsKnown(known = {}) {
 	);
 }
 
+function roomCountFromAiReviewText(value = "") {
+	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		.replace(/[^\S\r\n]+/g, " ")
+		.trim();
+	if (!source) return null;
+	const dual = arabicDualRoomCountFromText(source);
+	if (dual) return dual;
+	const roomLabel =
+		"(?:rooms?|room\\s+count|number\\s+of\\s+rooms|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0623\\u0648\\u0636|\\u0627?\\u0644?\\u0623\\u0648\\u0636)";
+	const labeled =
+		source.match(new RegExp(`${roomLabel}\\s*[:：\\-]?\\s*(\\d{1,2})(?=\\s|$|[^\\p{L}0-9])`, "iu")) ||
+		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${roomLabel}(?=\\s|$|[^\\p{L}0-9])`, "iu"));
+	const count = Number(labeled?.[1] || 0);
+	if (!Number.isFinite(count) || count < 1 || count > MAX_AI_ROOM_COUNT) return null;
+	return normalizeRoomCount(count, 1);
+}
+
 function quoteFactsFromAiMessage(entry = {}) {
 	const action = cleanString(entry?.clientAction, 80).toLowerCase();
 	if (!["quote_ready", "review_reservation"].includes(action)) return {};
@@ -1982,13 +1999,19 @@ function quoteFactsFromAiMessage(entry = {}) {
 	const roomTypeKey = mapRoomToKey(text);
 	if (roomTypeKey) facts.roomTypeKey = roomTypeKey;
 	const roomSelections = extractRoomSelectionsFromText(text);
+	const explicitRoomCount = roomCountFromAiReviewText(text);
 	if (roomSelections.length && textMentionsRoomSelection(text)) {
-		facts.roomSelections = roomSelections;
-		facts.rooms = roomSelectionsTotal(roomSelections);
-		if (roomSelections.length === 1) facts.roomTypeKey = roomSelections[0].roomTypeKey;
+		const normalizedSelections =
+			explicitRoomCount && roomSelections.length === 1
+				? [{ ...roomSelections[0], count: explicitRoomCount }]
+				: roomSelections;
+		facts.roomSelections = normalizedSelections;
+		facts.rooms = roomSelectionsTotal(normalizedSelections);
+		if (normalizedSelections.length === 1) facts.roomTypeKey = normalizedSelections[0].roomTypeKey;
+	} else if (roomTypeKey && explicitRoomCount) {
+		facts.roomSelections = [{ roomTypeKey, count: explicitRoomCount }];
+		facts.rooms = explicitRoomCount;
 	}
-	const peopleCount = peopleCountFromLine(text);
-	if (peopleCount) facts.adults = peopleCount;
 	return facts;
 }
 
@@ -3109,8 +3132,52 @@ function replyLooksLikeManualBookingReview(reply = "") {
 function replyConfirmsBookingWithoutAction(reply = "") {
 	const text = normalizeDigits(String(reply || "")).toLowerCase();
 	if (!text.trim()) return false;
-	return /(details confirmed|we will complete|complete the booking|تم تأكيد التفاصيل|تم اعتماد التفاصيل|نكمل إجراءات|نُكمل إجراءات|اكمل إجراءات|أكمل إجراءات|سيتم الاعتماد)/i.test(
+	return /(details confirmed|booking confirmed|reservation confirmed|your booking is confirmed|your reservation is confirmed|we will complete|complete the booking|تم.{0,24}تأكيد الحجز|تم.{0,24}تاكيد الحجز|تم.{0,24}تثبيت الحجز|تم.{0,24}إتمام الحجز|تم.{0,24}اتمام الحجز|تم.{0,24}إنشاء الحجز|تم.{0,24}انشاء الحجز|تم تأكيد التفاصيل|تم اعتماد التفاصيل|الحجز مؤكد|حجزك مؤكد|نكمل إجراءات|نُكمل إجراءات|اكمل إجراءات|أكمل إجراءات|سيتم الاعتماد)/i.test(
 		text
+	);
+}
+
+function reviewReplyClaimsBookingConfirmed(reply = "") {
+	const text = normalizeDigits(String(reply || ""))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return (
+		/\b(?:booking|reservation)\s+(?:is\s+)?(?:confirmed|created|completed|finalized)\b/i.test(text) ||
+		/\b(?:your\s+)?(?:booking|reservation)\s+has\s+been\s+(?:confirmed|created|completed|finalized)\b/i.test(text) ||
+		/\b(?:i|we)\s+(?:confirmed|created|completed|finalized)\s+(?:the\s+)?(?:booking|reservation)\b/i.test(text) ||
+		/(?:\u062a\u0645|\u062a\u0645\u062a|\u062c\u0631\u0649).{0,24}(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u062a\u062b\u0628\u064a\u062a|\u0625\u062a\u0645\u0627\u0645|\u0627\u062a\u0645\u0627\u0645|\u0625\u0646\u0634\u0627\u0621|\u0627\u0646\u0634\u0627\u0621)\s*(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u0643)/iu.test(text) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632\u0643)\s*(?:\u0645\u0624\u0643\u062f|\u0627\u062a\u0623\u0643\u062f|\u062a\u0623\u0643\u062f|\u062a\u0645)/iu.test(text)
+	);
+}
+
+function reviewReplyNeedsCleanFormatting(reply = "") {
+	const text = String(reply || "").trim();
+	if (!text) return false;
+	const lines = text
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	const normalized = normalizeIntentSearchText(text);
+	const fieldLabels = normalized.match(
+		/(?:name|phone|nationality|room|rooms|guest|guests|adult|adults|check.?in|checkout|date|dates|night|nights|total|average|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u063a\u0631\u0641|\u0627\u0644\u063a\u0631\u0641\u0629|\u0627\u0644\u0646\u0632\u0644\u0627\u0621|\u0627\u0644\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0645\u0646|\u0625\u0644\u0649|\u0627\u0644\u0649|\u0627\u0644\u0644\u064a\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a)/giu
+	) || [];
+	const crowdedLine = lines.some((line) => {
+		const separators = (line.match(/\s+-\s+/g) || []).length;
+		const labels = normalizeIntentSearchText(line).match(
+			/(?:name|phone|nationality|room|guest|date|night|total|\u0627\u0644\u0627\u0633\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u0627\u0644\u063a\u0631\u0641|\u0627\u0644\u0646\u0632\u0644\u0627\u0621|\u0627\u0644\u0644\u064a\u0627\u0644\u064a|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a)/giu
+		) || [];
+		return separators >= 3 || labels.length >= 4;
+	});
+	return (fieldLabels.length >= 7 && lines.length < 6) || crowdedLine;
+}
+
+function guestPressedOfficialReviewConfirmation(latestGuest = {}, previousAi = {}) {
+	const action = cleanString(latestGuest?.clientAction, 80).toLowerCase();
+	return (
+		["place_reservation", "confirm_reservation", "submit_reservation"].includes(action) &&
+		String(previousAi?.clientAction || "").toLowerCase() === "review_reservation"
 	);
 }
 
@@ -3126,6 +3193,24 @@ function replyPromisesBookingReview(reply = "") {
 			text
 		);
 	return reviewIntent && bookingContext;
+}
+
+function replyPromisesProgressWithoutAction(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const progressPromise =
+		/\b(?:i\s*(?:will|'ll|am going to)\s+(?:continue|proceed|complete|finish|follow up)|continuing|moving forward|next steps?|same details|same booking details|i have everything needed)\b/i.test(text) ||
+		/(?:\u062c\u0627\u0631\u064a|\u062c\u0627\u0631\u0649|\u0633\u0623\u0643\u0645\u0644|\u0633\u0627\u0643\u0645\u0644|\u0647\u0643\u0645\u0644|\u0647\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u0623\u062a\u0645|\u0627\u062a\u0645).{0,80}(?:\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629|\u0627\u0644\u062e\u0637\u0648\u0627\u062a|\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644)|(?:\u0627\u0644\u062e\u0637\u0648\u0627\u062a\s+\u0627\u0644\u062a\u0627\u0644\u064a\u0629|\u0646\u0641\u0633\s+\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062c\u0627\u0631\u064a\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629|\u062c\u0627\u0631\u0649\s+\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629)/iu.test(text) ||
+		/(?:\u062c\u0627\u0631\u064a\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629|\u062c\u0627\u0631\u0649\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629|\u0646\u0641\u0633\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u062e\u0637\u0648\u0627\u062a\u0627\u0644\u062a\u0627\u0644\u064a\u0629)/iu.test(compact);
+	if (!progressPromise) return false;
+	const bookingContext =
+		/(booking|reservation|review|quote|room|rooms|dates?|guest|phone|nationality|confirm|complete|proceed)/i.test(text) ||
+		/(?:\u062d\u062c\u0632|\u0645\u0631\u0627\u062c\u0639\u0629|\u0639\u0631\u0636|\u0633\u0639\u0631|\u063a\u0631\u0641|\u062a\u0648\u0627\u0631\u064a\u062e|\u062a\u0641\u0627\u0635\u064a\u0644|\u0646\u0632\u0644\u0627\u0621|\u0636\u064a\u0648\u0641|\u0647\u0627\u062a\u0641|\u062c\u0646\u0633\u064a\u0629|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(text);
+	return bookingContext;
 }
 
 function replyInvitesConfirmationAction(reply = "") {
@@ -3830,6 +3915,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration. Expressions like "insha'Allah", "bi idhnillah", "alhamdulillah", or their Arabic equivalents are welcome when they fit the moment, but do not force them into every reply.`,
+		`In Arabic confirmations, prefer respectful address with the guest title and name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]" or "\u062a\u0645\u0627\u0645 \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name confirmations like "\u0623\u0643\u064a\u062f \u064a\u0627 [name]" when a title is natural, and avoid decorative emojis when respectful wording is enough.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
 		`Think of the orchestrator as your assistant and tool executor. If you need exact pricing, availability, room options, a reservation lookup, a date update, cancellation guidance, an official booking review, or final reservation submission, return the matching action and structured facts. The orchestrator will run the tool and bring the result back to you.`,
 		`If the answer is already available in Hotel facts, Known facts, Tool result, or the previous conversation, answer directly and naturally. Do not call a tool or ask again just because the user repeated themselves.`,
@@ -3837,6 +3923,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Use memory.changedFields to tell the orchestrator which facts you intentionally updated from the latest guest message. Use memory.missingFields to tell the orchestrator which guest details are still needed. Do not rely on the server to infer corrections from wording; you are the brain.`,
 		`When you change room count, room type, dates, or guest count, include the complete updated stay state you know. If the room type is already known and the guest only changes room count, preserve that room type and return roomSelections with the updated count.`,
 		`No redundancy. Keep replies concise: usually 2-5 short lines. Avoid repeating long greetings, the full quote, the same apology, or the same next-step wording unless the guest asks for it. If you already asked for a detail and the guest responds with something else, acknowledge the response naturally before asking again or explaining why it is still needed.`,
+		`Never send vague progress-only replies such as "I will continue", "I am following up", "next steps", or their Arabic equivalents unless you also return the concrete action needed now. If the guest has chosen to proceed and all required facts are known, use action="send_review" instead of a progress message.`,
 		`The orchestrator will not add scripted warmth or emotional prefixes for you. If the guest jokes, thanks you, greets you, or sounds stressed/excited, write the natural customer-facing response yourself in reply.`,
 		`Use clean formatting when helpful: short lines, simple bullets, and tasteful emojis that fit the guest's language and mood. Avoid emoji clutter and never let styling make dates, prices, names, phone numbers, policies, or booking instructions less clear.`,
 		`For the first CSR/reservations message in an Arabic chat only, begin with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u0648\u0631\u062d\u0645\u0629 \u0627\u0644\u0644\u0647 \u0648\u0628\u0631\u0643\u0627\u062a\u0647" or "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", then immediately introduce yourself as ${agentName} from the reception/reservations team at the hotel. Do not start only with "\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b". On later Arabic replies, do not say "\u0623\u0646\u0627 ${agentName}" or repeat the team/hotel identity unless the guest asks who is speaking. Do not repeat the greeting on later replies unless the guest greets again.`,
@@ -3884,6 +3971,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`After an exact quote has been accepted, do not repeat the same quote as the next answer unless the guest asks to see the price again or changes dates/room/guest count.`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review".`,
 		`Do not write the final booking review before the review tool/result. When the guest asks to review details, says everything is correct, or confirms after you collected the required fields, return action="send_review". After the tool result returns review facts, you must write the official review reply yourself with exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.`,
+		`The official review is not the completed reservation. Do not say the booking is confirmed, created, completed, finalized, or booked until the submit_reservation tool result says the reservation was created.`,
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
 		`If the guest says the review is wrong, action must be "send_review_again" only if you can present corrected data; otherwise ask what to fix.`,
 		`For casual or emotional guest messages such as excitement, exhaustion, sadness, stress, jokes, thanks, laughter, or small talk, respond warmly and naturally first, then gently continue the stay flow with only the next useful question. Do not escalate mild emotions or casual chat.`,
@@ -3990,9 +4078,30 @@ function shouldPolishDecisionReply(decision = {}, reply = "") {
 }
 
 function numericTokensForPolish(value = "") {
-	return (normalizeDigits(value).match(/\+?\d[\d\s.,:\/-]*/g) || [])
-		.map((token) => token.replace(/[^\d+]/g, ""))
-		.filter((token) => token.replace(/[^\d]/g, "").length);
+	const tokens = [];
+	const pushToken = (token = "") => {
+		const compact = String(token || "").replace(/[^\d+]/g, "");
+		if (!compact.replace(/[^\d]/g, "").length) return;
+		if (compact.startsWith("+")) {
+			tokens.push(compact);
+			return;
+		}
+		tokens.push(compact.replace(/^0+(?=\d)/, "") || "0");
+	};
+	let text = normalizeDigits(value);
+	text = text.replace(
+		/\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b|\b(\d{1,2})[-/](\d{1,2})[-/](\d{4})\b/g,
+		(match, y1, m1, d1, d2, m2, y2) => {
+			[y1, m1, d1, d2, m2, y2].filter(Boolean).forEach(pushToken);
+			return " ";
+		}
+	);
+	text = text.replace(/\+?\d(?:[\s().-]?\d){6,}/g, (match) => {
+		pushToken(match);
+		return " ";
+	});
+	(text.match(/\+?\d+(?:[.,]\d+)?/g) || []).forEach(pushToken);
+	return tokens;
 }
 
 function replyPreservesVisibleNumbers(original = "", polished = "") {
@@ -4026,6 +4135,8 @@ async function polishCustomerReply({
 				"Do not add new promises, policies, prices, room availability, or missing fields.",
 				"Keep the same language or dialect as the guest. Arabic dialect is welcome, but keep it professional and clear.",
 				"Make the reply feel like a warm human CSR/sales representative: acknowledge casual or emotional comments briefly, then return to the useful next booking step.",
+				'For Arabic confirmations, prefer respectful title plus name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name-only confirmations when a title is natural.',
+				"Do not turn a concrete next step into a vague progress update. If the original reply implies an action or review, keep the concrete next step visible.",
 				"Keep it concise: usually 1-4 short lines.",
 				"Clean line breaks, bullets, and tasteful emojis are allowed when they improve warmth or readability. Do not overuse them.",
 				identityRepeatAllowed
@@ -6462,8 +6573,21 @@ function quoteReplyFormattingInstruction() {
 		"Write the quote in the guest language with clean formatting.",
 		"Use separate short lines or simple bullets for room(s), dates, nights, total, and the next question.",
 		"Do not compress the quote into one paragraph.",
+		"Do not add reference numbers, date references, IDs, or unexplained numeric lines.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
 	].join(" ");
+}
+
+function quoteReplyHasUnexplainedReference(reply = "") {
+	const text = normalizeDigits(String(reply || ""));
+	if (!text.trim()) return false;
+	if (/(?:date\s*reference|reference\s*(?:date|number|id)?|ref(?:erence)?\s*[:#-]|\u0645\u0631\u062c\u0639\s*(?:\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u062a\u0627\u0631\u064a\u062e|\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645)?|\u0631\u0642\u0645\s*(?:\u0645\u0631\u062c\u0639\u064a|\u0627\u0644\u0645\u0631\u062c\u0639))/iu.test(text)) {
+		return true;
+	}
+	return text.split(/\r?\n/).some((line) => {
+		const clean = line.replace(/^[\s\-*•]+/, "").trim();
+		return /^\d{5,8}$/.test(clean);
+	});
 }
 
 function compactReservationForBrain(reservation = null) {
@@ -6522,6 +6646,7 @@ async function askCompactToolWriter({
 					'Return only one valid json object: {"reply":"..."}',
 					"You are the OpenAI brain writing the final customer-facing reply for a hotel live chat.",
 					"Use the guest language and dialect. Be concise, professional, warm, and naturally Muslim-friendly when it fits.",
+					'For Arabic confirmations, prefer respectful title plus name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name-only confirmations when a title is natural.',
 					"The orchestrator only executed a tool for you; you must write the reply. Do not mention tools, schemas, validation, or internal state.",
 					"Use toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details.",
 					identityRepeatAllowed
@@ -6538,6 +6663,18 @@ async function askCompactToolWriter({
 						: "",
 					toolResult?.tool === "get_quote"
 						? "For quote tool results, use separate lines or simple bullets. Never compress room, dates, nights, total, and the next question into one paragraph."
+						: "",
+					validation === "unexplained_quote_reference"
+						? "Remove any reference number, date reference, ID, or unexplained numeric line. Only include meaningful quote facts from toolResult."
+						: "",
+					validation === "vague_progress_instead_of_tool_result"
+						? "Do not send a vague progress update. Write the actual tool-result reply now, using the exact toolResult facts."
+						: "",
+					validation === "review_claimed_confirmed_before_submit"
+						? "This is only the official pre-submission review. Do not say the booking/reservation is confirmed, created, completed, or finalized. Ask the guest to confirm if the review is correct."
+						: "",
+					validation === "review_formatting_unclear"
+						? "Rewrite the review with each fact on its own line or bullet. Do not compress name, phone, nationality, room, dates, nights, guests, and total into one paragraph."
 						: "",
 				]
 					.filter(Boolean)
@@ -6738,6 +6875,14 @@ async function sendBrainToolReplyFromOpenAI({
 		const correctionInstruction =
 			validation === "visible_numbers_changed"
 				? "Your previous tool-result reply was not sent because it changed or omitted required visible numbers. Return a corrected customer-facing reply from OpenAI only. Include every requiredVisibleNumbers item exactly as shown, and use the toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details."
+				: validation === "unexplained_quote_reference"
+				? "Your previous quote reply was not sent because it added a reference number, date reference, ID, or unexplained numeric line. Return a corrected customer-facing quote from OpenAI only. Include only meaningful quote facts from toolResult: room(s), dates, nights, total, nightly average if present, and the next question. Do not invent IDs or references."
+				: validation === "vague_progress_instead_of_tool_result"
+				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
+				: validation === "review_claimed_confirmed_before_submit"
+				? "Your previous review reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return the official pre-submission review from OpenAI only. Use the exact review facts, do not say confirmed/created/completed/finalized, and ask the guest to confirm if everything is correct."
+				: validation === "review_formatting_unclear"
+				? "Your previous review reply was not sent because the booking facts were compressed or hard to read. Return the official pre-submission review from OpenAI only. Put each main fact on its own separate line or bullet: name, phone, nationality, room(s), guests, dates, nights, total, then the confirmation question. Do not say the booking is already confirmed."
 				: "Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.";
 		return askOpenAI({
 			sc,
@@ -6768,6 +6913,29 @@ async function sendBrainToolReplyFromOpenAI({
 			!replyPreservesVisibleNumbers(fallback, text)
 		) {
 			return "visible_numbers_changed";
+		}
+		if (toolResult?.tool === "get_quote" && quoteReplyHasUnexplainedReference(text)) {
+			return "unexplained_quote_reference";
+		}
+		if (
+			["send_review", "submit_reservation"].includes(String(toolResult?.tool || "")) &&
+			replyPromisesProgressWithoutAction(text)
+		) {
+			return "vague_progress_instead_of_tool_result";
+		}
+		if (
+			toolResult?.tool === "send_review" &&
+			toolResult?.code === "review_ready" &&
+			reviewReplyClaimsBookingConfirmed(text)
+		) {
+			return "review_claimed_confirmed_before_submit";
+		}
+		if (
+			toolResult?.tool === "send_review" &&
+			toolResult?.code === "review_ready" &&
+			reviewReplyNeedsCleanFormatting(text)
+		) {
+			return "review_formatting_unclear";
 		}
 		if (
 			requireContact &&
@@ -7276,7 +7444,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			review: missing.length ? null : compactReviewForBrain(reviewKnown, hotel),
 			instruction: missing.length
 				? "Ask only for the missing required booking details in the guest language. Put each requested field on its own separate line. Do not ask for optional fields before required fields."
-				: "Write the final booking review in the guest language using these exact facts. Use separate lines or simple bullets for the main facts, keep the total on its own line, and ask the guest to confirm before creating the reservation.",
+				: "Write the official pre-submission booking review in the guest language using these exact facts. This is not a confirmed booking yet: do not say confirmed, created, completed, finalized, or booked. Use separate lines or simple bullets with one main fact per line for name, phone, nationality, room(s), guests, dates, nights, total, and nightly average if present. Keep the total on its own line and ask the guest to confirm before creating the reservation.",
 		},
 		clientAction: missing.length ? "required_details_needed" : "review_reservation",
 		quickReplies: missing.length ? [] : reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
@@ -7417,9 +7585,23 @@ async function executeBrainFirstDecision({
 } = {}) {
 	const key = caseIdText(sc);
 	const latestText = String(latestGuest?.message || "");
+	const latestAction = cleanString(latestGuest?.clientAction, 80).toLowerCase();
+	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	const officialReviewConfirmation = guestPressedOfficialReviewConfirmation(
+		latestGuest,
+		previousAi
+	);
 	const latestClarifiesRequiredBookingDetail =
 		latestGuestAsksRequiredBookingDetailClarification(latestText);
 	let nextDecision = normalizeDecision(decision);
+	if (officialReviewConfirmation) {
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action: "submit_reservation",
+			reply: "",
+			reason: nextDecision.reason || "official_review_confirmation",
+		});
+	}
 	let mergeFacts = factsForMergeFromDecision(nextDecision);
 	nextDecision = {
 		...nextDecision,
@@ -7463,10 +7645,11 @@ async function executeBrainFirstDecision({
 	}
 	if (
 		!latestClarifiesRequiredBookingDetail &&
-		(nextDecision.action === "submit_reservation" ||
+		((nextDecision.action === "submit_reservation" && !officialReviewConfirmation) ||
 			replyLooksLikeManualBookingReview(nextDecision.reply) ||
 			replyConfirmsBookingWithoutAction(nextDecision.reply) ||
 			replyPromisesBookingReview(nextDecision.reply) ||
+			replyPromisesProgressWithoutAction(nextDecision.reply) ||
 			replyInvitesConfirmationAction(nextDecision.reply) ||
 			replyPromisesReservationFinalization(nextDecision.reply))
 	) {
@@ -7479,6 +7662,18 @@ async function executeBrainFirstDecision({
 		});
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
+	}
+	if (
+		nextDecision.action === "reply" &&
+		replyPromisesProgressWithoutAction(nextDecision.reply) &&
+		!requiredBookingMissing(nextKnown).length
+	) {
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action: "send_review",
+			reply: "",
+			reason: nextDecision.reason || "progress_reply_requires_booking_action",
+		});
 	}
 	if (replyRequestsForbiddenBookingField(nextDecision.reply)) {
 		const missing = requiredBookingMissing(nextKnown);
@@ -8624,6 +8819,7 @@ async function planTurn(io, supportCaseOrId) {
 			replyLooksLikeManualBookingReview(decision.reply) ||
 			replyConfirmsBookingWithoutAction(decision.reply) ||
 			replyPromisesBookingReview(decision.reply) ||
+			replyPromisesProgressWithoutAction(decision.reply) ||
 			replyInvitesConfirmationAction(decision.reply) ||
 			replyPromisesReservationFinalization(decision.reply) ||
 		guestRequestsBookingReviewStep(latestText, latestAction)
@@ -8643,6 +8839,18 @@ async function planTurn(io, supportCaseOrId) {
 				latestText
 			);
 			if (mappedRoomIsSpecific && !known.roomTypeKey) known.roomTypeKey = mappedRoom;
+		}
+		if (
+			decision.action === "reply" &&
+			replyPromisesProgressWithoutAction(decision.reply) &&
+			!requiredBookingMissing(known).length
+		) {
+			decision = normalizeDecision({
+				...decision,
+				action: "send_review",
+				reply: "",
+				reason: decision.reason || "progress_reply_requires_booking_action",
+			});
 		}
 		if (replyRequestsForbiddenBookingField(decision.reply)) {
 			if (quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
@@ -9102,6 +9310,9 @@ const exportedOrchestrator = {
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
+		roomCountFromAiReviewText,
+		numericTokensForPolish,
+		quoteReplyHasUnexplainedReference,
 		quoteTool,
 		relationshipGuestFactsFromText,
 		applyRelationshipGuestFacts,
@@ -9111,6 +9322,10 @@ const exportedOrchestrator = {
 		guestCountFactsFromAskedAnswer,
 		conversationHasGuestCountSignal,
 		replyPromisesReservationFinalization,
+		replyPromisesProgressWithoutAction,
+		reviewReplyClaimsBookingConfirmed,
+		reviewReplyNeedsCleanFormatting,
+		guestPressedOfficialReviewConfirmation,
 		replyInvitesConfirmationAction,
 		roomOptionQuickReplies,
 		sameDateRoomChoiceFromText,
