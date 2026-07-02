@@ -12,8 +12,6 @@ For the full production go-live story, operational issues, PM2/server health not
 - OpenAI returns JSON with a customer reply, extracted facts, quick replies, and one action.
 - The orchestrator executes only operational actions:
   - `get_quote`
-  - `check_alternatives`
-  - `check_room_options`
   - `send_review`
   - `submit_reservation`
   - `update_reservation`

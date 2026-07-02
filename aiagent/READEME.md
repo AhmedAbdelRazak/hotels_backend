@@ -19,9 +19,6 @@
   chatbot timeouts, and the optional-email flow reduction.
 - `../docs/chatbot-multi-room-reservations-2026-06-29.md` documents multi-room
   booking support, including different room types and repeated same-type rooms.
-- `../docs/chatbot-brain-first-tester-guide-2026-07-01.md` documents the
-  brain-first production contract, tester scenarios, supported structured
-  actions, nearby-date alternatives, and same-date room-option checks.
 
 ## Current Production Contract - 2026-06-06
 
