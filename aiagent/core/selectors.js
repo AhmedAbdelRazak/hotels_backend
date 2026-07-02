@@ -188,6 +188,8 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 	const pricingByDay = [];
 	const perNight = [];
 	let blocked = false;
+	let firstBlockedDate = "";
+	const blockedDates = [];
 
 	for (const d of dates) {
 		const r = rateMap[d];
@@ -199,6 +201,8 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 		// "Blocked": any day priced at 0 in either field
 		if (r && (num(r.price, 0) === 0 || num(r.rootPrice, 0) === 0)) {
 			blocked = true;
+			if (!firstBlockedDate) firstBlockedDate = d;
+			blockedDates.push(d);
 			break;
 		}
 
@@ -223,6 +227,8 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 			currency: hotel?.currency || "SAR",
 			room,
 			nights,
+			firstBlockedDate,
+			blockedDates: blockedDates.slice(0, 10),
 		};
 	}
 

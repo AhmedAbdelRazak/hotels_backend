@@ -832,7 +832,7 @@ const ROOM_SELECTION_PATTERNS = [
 	{
 		key: "doubleRooms",
 		pattern:
-			/(?:double|twin|standard|two\s+beds?|2\s*beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|2\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:double|twin|standard|two\s+beds?|2\s*beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u0645\u0632\u0648\u062c\u0629|\u0645\u0632\u0648\u062c\u0647|\u0645\u0632\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|2\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
 	},
 	{
 		key: "tripleRooms",
@@ -1031,6 +1031,7 @@ function textMentionsNamedRoomType(value = "") {
 		"\u0641\u0631\u062f\u064a",
 		"\u0633\u0646\u062c\u0644",
 		"\u0645\u0632\u062f\u0648\u062c",
+		"\u0645\u0632\u0648\u062c",
 		"\u062b\u0646\u0627\u0626\u064a",
 		"\u062f\u0628\u0644",
 		"\u062b\u0644\u0627\u062b\u064a",
@@ -1058,7 +1059,7 @@ function extractRoomSelectionsFromText(value = "") {
 			count: roomCountNearMatch(text, matcher),
 		});
 	}
-	const capacityKey = mapRoomToKey(text);
+	const capacityKey = textMentionsSpecificRoomType(text) ? mapRoomToKey(text) : "";
 	if (capacityKey && !selections.some((item) => item.roomTypeKey === capacityKey)) {
 		selections.push({ roomTypeKey: capacityKey, count: 1 });
 	}
@@ -2044,6 +2045,8 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			const roomTypeKey = mapRoomToKey(line);
 			if (
 				roomTypeKey &&
+				textMentionsSpecificRoomType(line) &&
+				normalizeRoomSelections(recovered.roomSelections).length <= 1 &&
 				!(lineRoomCountCorrection && recovered.roomTypeKey && !textMentionsNamedRoomType(line))
 			) {
 				recovered.roomTypeKey = roomTypeKey;
@@ -2241,6 +2244,8 @@ function mergeKnownFacts(current = {}, next = {}) {
 		merged.rooms = roomSelectionsTotal(sourceSelections);
 		if (sourceSelections.length === 1) {
 			merged.roomTypeKey = sourceSelections[0].roomTypeKey;
+		} else {
+			delete merged.roomTypeKey;
 		}
 	}
 	const sourceRoomCountValue = source.rooms ?? reservation.rooms;
@@ -5823,6 +5828,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 			? `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. This is an opening/first AI reply, so the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`
 			: `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, but the opening identity has already happened. Do not reintroduce yourself with agent name, team role, or hotel name on normal follow-up replies. Mention your identity again only if the guest asks who is speaking or there is a real handoff/escalation.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
+		`Same-day check-in cannot be booked through chat. If the guest asks for check-in today, explain that the earliest chat-checkable check-in is tomorrow and ask whether to search from tomorrow or adjust the dates.`,
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration. Expressions like "insha'Allah", "bi idhnillah", "alhamdulillah", or their Arabic equivalents are welcome when they fit the moment, but do not force them into every reply.`,
@@ -5833,6 +5839,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Always save useful guest facts in facts: dates, room type/count, guest count, name, phone, nationality, email, language, or confirmation number. Facts are the shared memory between you and the orchestrator.`,
 		`Use memory.changedFields to tell the orchestrator which facts you intentionally updated from the latest guest message. Use memory.missingFields to tell the orchestrator which guest details are still needed. Do not rely on the server to infer corrections from wording; you are the brain.`,
 		`When you change room count, room type, dates, or guest count, include the complete updated stay state you know. If the room type is already known and the guest only changes room count, preserve that room type and return roomSelections with the updated count.`,
+		`If the guest only gives a number of rooms, such as "2 rooms" or "٢ غرفة", save rooms only. Do not infer doubleRooms, adults, or roomSelections from room count alone; ask for the room type(s) and guest count if still missing.`,
 		`No redundancy. Keep replies concise: usually 2-5 short lines. Avoid repeating long greetings, the full quote, the same apology, or the same next-step wording unless the guest asks for it. If you already asked for a detail and the guest responds with something else, acknowledge the response naturally before asking again or explaining why it is still needed.`,
 		`Never send vague progress-only replies such as "I will continue", "I am following up", "next steps", or their Arabic equivalents unless you also return the concrete action needed now. If the guest has chosen to proceed and all required facts are known, use action="send_review" instead of a progress message.`,
 		`The orchestrator will not add scripted warmth or emotional prefixes for you. If the guest jokes, thanks you, greets you, or sounds stressed/excited, write the natural customer-facing response yourself in reply.`,
@@ -6451,6 +6458,28 @@ async function quoteTool(sc = {}, known = {}) {
 	if (!dates.length) {
 		return { ok: false, code: "bad_dates", message: "Invalid date range." };
 	}
+	const todayISO = new Date().toISOString().slice(0, 10);
+	if (validISODate(known.checkinISO) && known.checkinISO <= todayISO) {
+		const selections = selectionsFromKnown(known);
+		const roomLabel = quoteRoomLinesText(
+			{ rooms: selections.map((selection) => ({ ...selection })) },
+			known.roomTypeKey,
+			known.languageCode
+		);
+		return {
+			ok: true,
+			available: false,
+			code: "same_day_checkin_not_supported",
+			checkinISO: known.checkinISO,
+			checkoutISO: known.checkoutISO,
+			roomTypeKey: selections.length === 1 ? selections[0].roomTypeKey : known.roomTypeKey || "",
+			roomSelections: selections,
+			roomLabel,
+			currency: known.currency || "SAR",
+			minCheckinISO: addDaysISO(todayISO, 1),
+			selectionKey: roomSelectionKey(selections),
+		};
+	}
 	logTurnStage(caseId, "quote_hotel_fetch_start");
 	const hotel = await getHotelByIdWithPricingDates(sc.hotelId, dates);
 	logTurnStage(caseId, "quote_hotel_fetch_done", {
@@ -6478,6 +6507,7 @@ async function quoteTool(sc = {}, known = {}) {
 		selectionKey,
 	});
 	const quoteLines = [];
+	const unavailableLines = [];
 	for (const selection of selections.length ? selections : [primary]) {
 		const roomTypeKey = selection.roomTypeKey || "";
 		const count = normalizeRoomCount(selection.count || known.rooms, 1);
@@ -6501,17 +6531,17 @@ async function quoteTool(sc = {}, known = {}) {
 				roomTypeKey,
 				selectionKey,
 			});
-			return {
-				ok: true,
-				available: false,
-				code: quote?.reason || "not_available",
-				checkinISO: known.checkinISO,
-				checkoutISO: known.checkoutISO,
+			unavailableLines.push({
 				roomTypeKey,
+				count,
+				code: quote?.reason || "not_available",
 				roomLabel: roomTypeLabel(roomTypeKey, known.languageCode),
-				currency: quote?.currency || hotel?.currency || "SAR",
-				selectionKey,
-			};
+				firstUnavailableDate: quote?.firstBlockedDate || "",
+				unavailableDates: Array.isArray(quote?.blockedDates)
+					? quote.blockedDates.slice(0, 10)
+					: [],
+			});
+			continue;
 		}
 		quoteLines.push({
 			roomTypeKey,
@@ -6521,6 +6551,42 @@ async function quoteTool(sc = {}, known = {}) {
 			pricingByDay: quote.pricingByDay || [],
 			oneRoomTotal: Number(quote.totals?.totalPriceWithCommission || 0),
 		});
+	}
+	if (unavailableLines.length) {
+		const requestedSelections = selections.length
+			? selections
+			: [{ roomTypeKey: primary.roomTypeKey || "", count: normalizeRoomCount(primary.count || known.rooms, 1) }];
+		const roomLabel = quoteRoomLinesText(
+			{ rooms: requestedSelections.map((selection) => ({ ...selection })) },
+			known.roomTypeKey,
+			known.languageCode
+		);
+		return {
+			ok: true,
+			available: false,
+			code:
+				unavailableLines.find((line) => line.code === "blocked")?.code ||
+				unavailableLines[0]?.code ||
+				"not_available",
+			checkinISO: known.checkinISO,
+			checkoutISO: known.checkoutISO,
+			roomTypeKey:
+				requestedSelections.length === 1
+					? requestedSelections[0].roomTypeKey
+					: known.roomTypeKey || unavailableLines[0]?.roomTypeKey || "",
+			roomSelections: requestedSelections,
+			roomLabel,
+			currency:
+				quoteLines[0]?.quote?.currency ||
+				unavailableLines[0]?.currency ||
+				hotel?.currency ||
+				"SAR",
+			selectionKey,
+			unavailableSelections: unavailableLines,
+			firstUnavailableDate:
+				unavailableLines.find((line) => line.firstUnavailableDate)?.firstUnavailableDate ||
+				"",
+		};
 	}
 	const inventoryPayload = {
 		hotelId: hotel?._id || sc.hotelId,
@@ -6841,12 +6907,13 @@ async function suggestAlternativeStays(sc = {}, known = {}, { maxOptions = 3 } =
 		return { options: [], checkedDays: 0, validatedCandidates: 0 };
 	}
 	const todayISO = new Date().toISOString().slice(0, 10);
+	const minimumStartISO = addDaysISO(todayISO, 1);
 	const searchDays = 45;
 	const candidates = [];
 	const dateKeys = [];
 	for (let offset = 1; offset <= searchDays; offset += 1) {
 		const start = addDaysISO(checkinISO, offset);
-		if (!start || start < todayISO) continue;
+		if (!start || start < minimumStartISO) continue;
 		const end = addDaysISO(start, nights);
 		if (!end) continue;
 		candidates.push({ checkinISO: start, checkoutISO: end });
@@ -7687,6 +7754,19 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 		0,
 		Number(inventory.shortage || requestedRooms - availableRooms) || 0
 	);
+	const resultSelections = normalizeRoomSelections(result.roomSelections);
+	const requestedRoomLabel = resultSelections.length
+		? quoteRoomLinesText({ rooms: resultSelections }, known.roomTypeKey, languageCode)
+		: roomLabel;
+	if (result.code === "same_day_checkin_not_supported") {
+		const minDate = formatDate(
+			result.minCheckinISO || addDaysISO(new Date().toISOString().slice(0, 10), 1),
+			languageCode
+		);
+		return ar
+			? `${arabicGuestAddress(sc, known)}، الحجز عن طريق المحادثة لا يقبل تاريخ وصول اليوم. أقرب تاريخ وصول ممكن من خلال المحادثة هو ${minDate}. إذا يناسبك أبحث لك من هذا التاريخ أو أعدّل التواريخ.`
+			: `${guestDisplayName(sc)}, same-day check-in cannot be booked through chat. The earliest check-in I can check here is ${minDate}. I can search from that date or adjust the dates for you.`;
+	}
 	if (
 		!result.available &&
 		result.code === "inventory_overbook" &&
@@ -7725,6 +7805,51 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			.join("\n");
 	}
 	if (!result.available || !quote.total) {
+		const unavailableItems = Array.isArray(result.unavailableSelections)
+			? result.unavailableSelections
+					.map((item) => {
+						const label =
+							item.roomLabel || roomTypeLabel(item.roomTypeKey, languageCode);
+						const firstDate = validISODate(item.firstUnavailableDate);
+						return firstDate
+							? `${label} (${formatDate(firstDate, languageCode)})`
+							: label;
+					})
+					.filter(Boolean)
+			: [];
+		if (unavailableItems.length || resultSelections.length > 1 || result.firstUnavailableDate) {
+			const firstDate = validISODate(result.firstUnavailableDate);
+			const blockedHint = firstDate
+				? ar
+					? `أول تاريخ غير متاح داخل الفترة هو ${formatDate(firstDate, languageCode)}.`
+					: `The first unavailable date inside the range is ${formatDate(firstDate, languageCode)}.`
+				: "";
+			return ar
+				? [
+						`${arabicGuestAddress(sc, known)}، راجعت التوفر للفترة المطلوبة.`,
+						`الغرف المطلوبة: ${requestedRoomLabel}`,
+						`التواريخ: ${formatDate(known.checkinISO, languageCode)} - ${formatDate(known.checkoutISO, languageCode)}`,
+						unavailableItems.length
+							? `غير المتاح حاليًا: ${unavailableItems.join("، ")}.`
+							: `لا يظهر توفر مؤكد لهذه التركيبة كاملة في الفترة المطلوبة.`,
+						blockedHint,
+						`أقدر أبحث لك عن أقرب تواريخ بديلة أو نعدّل نوع الغرف.`,
+				  ]
+						.filter(Boolean)
+						.join("\n")
+				: [
+						`${guestDisplayName(sc)}, I checked the requested stay.`,
+						`Requested rooms: ${requestedRoomLabel}`,
+						`Dates: ${formatDate(known.checkinISO, languageCode)} - ${formatDate(known.checkoutISO, languageCode)}`,
+						unavailableItems.length
+							? `Currently unavailable: ${unavailableItems.join(", ")}.`
+							: `This full room combination is not showing confirmed availability for the requested dates.`,
+						blockedHint,
+						`I can check the closest alternative dates or adjust the room selection.`,
+				  ]
+						.filter(Boolean)
+						.join("\n");
+		}
 		return ar
 			? `${arabicGuestAddress(sc, known)}، أعتذر لك، لا يظهر توفر مؤكد لهذا الخيار في ${hotelName} للتواريخ المطلوبة. أقدر أراجع لك أقرب تواريخ متاحة أو غرفة أخرى؟`
 			: `${guestDisplayName(sc)}, I am sorry, this option does not show confirmed availability at ${hotelName} for those dates. Would you like me to check another room or dates?`;
@@ -8408,9 +8533,12 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 			checkinISO: result.checkinISO || known.checkinISO,
 			checkoutISO: result.checkoutISO || known.checkoutISO,
 			rooms: Math.max(1, Number(known.rooms || 1) || 1),
+			roomSelections: normalizeRoomSelections(result.roomSelections || known.roomSelections),
 			currency: result.currency || "SAR",
 			code: result.code || "not_available",
 			roomLabel: result.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
+			firstUnavailableDate: result.firstUnavailableDate || "",
+			minCheckinISO: result.minCheckinISO || "",
 		};
 	}
 	nextKnown = syncKnownFromQuote(nextKnown);
@@ -8669,6 +8797,19 @@ function compactQuoteToolResult(result = {}, known = {}) {
 	const quote = asObject(result.quote);
 	const inventory = asObject(result.inventory);
 	const partialQuote = asObject(result.partialQuote);
+	const resultSelections = normalizeRoomSelections(result.roomSelections);
+	const unavailableSelections = Array.isArray(result.unavailableSelections)
+		? result.unavailableSelections
+				.map((item) => ({
+					roomTypeKey: item.roomTypeKey || "",
+					count: normalizeRoomCount(item.count, 1),
+					roomLabel:
+						item.roomLabel || roomTypeLabel(item.roomTypeKey || "", known.languageCode),
+					code: String(item.code || ""),
+					firstUnavailableDate: validISODate(item.firstUnavailableDate),
+				}))
+				.filter((item) => item.roomTypeKey)
+		: [];
 	return {
 		tool: "get_quote",
 		ok: result.ok !== false,
@@ -8696,7 +8837,12 @@ function compactQuoteToolResult(result = {}, known = {}) {
 						roomTypeKey: selection.roomTypeKey || "",
 						count: normalizeRoomCount(selection.count, 1),
 				  }))
+				: resultSelections.length
+				? resultSelections
 				: normalizeRoomSelections(known.roomSelections),
+		unavailableSelections,
+		firstUnavailableDate: validISODate(result.firstUnavailableDate),
+		minCheckinISO: validISODate(result.minCheckinISO),
 		total:
 			Number(quote.total || quote.totals?.totalPriceWithCommission || 0) || 0,
 		averagePerNight: Number(quote.averagePerNight || 0) || 0,
@@ -8729,6 +8875,7 @@ function quoteReplyFormattingInstruction() {
 		"Do not add reference numbers, date references, IDs, or unexplained numeric lines.",
 		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
+		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type.",
 	].join(" ");
 }
 
