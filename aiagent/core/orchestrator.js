@@ -514,6 +514,16 @@ function looksLikeNonBookingNamePhrase(value = "") {
 		return true;
 	}
 	if (sameAsDisplayedNameIntent(text)) return true;
+	if (
+		/(?:\u0627\u0646\u0627|\u0623\u0646\u0627|\bme\b|\bmyself\b).{0,40}(?:\u0627\u0628\u0646\u064a|\u0627\u0628\u0646\u0649|\u0628\u0646\u062a\u064a|\u0628\u0646\u062a\u0649|\u0637\u0641\u0644\u064a|\u0637\u0641\u0644\u0649|\bson\b|\bdaughter\b|\bchild\b|\bkid\b)/iu.test(
+			normalized
+		) ||
+		/(?:\u064a\u0627\s+(?:\u0627\u064a\u0645\u0627\u0646|\u0625\u064a\u0645\u0627\u0646|\u0646\u0648\u0631|\u0635\u0641\u064a\u0629|\u0635\u0641\u064a\u0647|\u0632\u064a\u0646\u0628)|\bdear\s+(?:eman|iman|zainab|noor|safiya)\b)/iu.test(
+			normalized
+		)
+	) {
+		return true;
+	}
 	if (/\d{1,2}\s*(?:\u0633\u0646\u0629|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)(?:$|[\s.,;:!?])/iu.test(normalized)) {
 		return true;
 	}
@@ -3771,22 +3781,30 @@ function conversationHasGuestCountSignal(sc = {}) {
 }
 
 function sanitizeBrainFactsForLatestText(facts = {}, currentKnown = {}, latestText = "", decision = {}) {
+	void decision;
 	const next = { ...asObject(facts) };
-	const changedFields = new Set(decisionChangedFields(decision));
 	const currentHasAdults = Number.isFinite(Number(currentKnown.adults)) && Number(currentKnown.adults) > 0;
+	const latestGuestCountEvidence =
+		latestTextHasExplicitGuestCount(latestText) ||
+		Boolean(peopleCountFromLine(latestText)) ||
+		Boolean(Object.keys(relationshipGuestFactsFromText(latestText, currentKnown)).length);
 	if (
 		next.adults !== undefined &&
-		!currentHasAdults &&
-		!changedFields.has("adults") &&
-		!latestTextHasExplicitGuestCount(latestText)
+		!latestGuestCountEvidence &&
+		(!currentHasAdults ||
+			(Number.isFinite(Number(next.adults)) &&
+				Number.isFinite(Number(currentKnown.adults)) &&
+				Number(next.adults) !== Number(currentKnown.adults)))
 	) {
 		delete next.adults;
 	}
 	if (
 		next.children !== undefined &&
-		currentKnown.children === undefined &&
-		!changedFields.has("children") &&
-		!latestTextHasExplicitGuestCount(latestText)
+		!latestGuestCountEvidence &&
+		(currentKnown.children === undefined ||
+			(Number.isFinite(Number(next.children)) &&
+				Number.isFinite(Number(currentKnown.children)) &&
+				Number(next.children) !== Number(currentKnown.children)))
 	) {
 		delete next.children;
 	}
