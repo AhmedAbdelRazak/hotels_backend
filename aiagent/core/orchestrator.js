@@ -2191,6 +2191,21 @@ function mergeKnownFacts(current = {}, next = {}) {
 	const sourceSplitStayPeriods = normalizeSplitStayPeriods(source.splitStayPeriods);
 	if (sourceSplitStayPeriods.length >= 2) {
 		merged.splitStayPeriods = sourceSplitStayPeriods;
+		if (Number.isFinite(Number(source.splitStayTotal)) && Number(source.splitStayTotal) > 0) {
+			merged.splitStayTotal = Number(source.splitStayTotal);
+		} else {
+			const derivedTotal = sourceSplitStayPeriods.reduce(
+				(sum, period) => sum + Number(period.total || 0),
+				0
+			);
+			if (derivedTotal > 0) merged.splitStayTotal = derivedTotal;
+		}
+		if (source.splitStayQuoteAvailable !== undefined) {
+			merged.splitStayQuoteAvailable = Boolean(source.splitStayQuoteAvailable);
+		}
+		if (source.splitStayQuotedAt) {
+			merged.splitStayQuotedAt = cleanString(source.splitStayQuotedAt, 80);
+		}
 		delete merged.checkinISO;
 		delete merged.checkoutISO;
 		delete merged.quote;
@@ -2538,9 +2553,13 @@ function roomCountFromAiReviewText(value = "") {
 
 function quoteFactsFromAiMessage(entry = {}) {
 	const action = cleanString(entry?.clientAction, 80).toLowerCase();
-	if (!["quote_ready", "quote_unavailable", "review_reservation"].includes(action)) return {};
-	const text = cleanDisplayString(entry?.message || "", 1500);
+	const rawText = String(entry?.message || "");
+	const text = cleanDisplayString(rawText, 1500);
 	if (!text) return {};
+	if (["split_stay_quote_ready", "split_stay_quote_unavailable"].includes(action)) {
+		return splitStayQuoteFactsFromAiMessage(rawText, action);
+	}
+	if (!["quote_ready", "quote_unavailable", "review_reservation"].includes(action)) return {};
 	const facts = {};
 	const dates = quickDateRange(text);
 	if (dates?.checkinISO && dates?.checkoutISO) {
@@ -2567,11 +2586,86 @@ function quoteFactsFromAiMessage(entry = {}) {
 	return facts;
 }
 
+function moneyAmountNearText(value = "") {
+	const amounts = Array.from(
+		normalizeDigits(String(value || "")).matchAll(
+			/(\d{1,7}(?:[.,]\d{1,2})?)\s*(?:SAR|S\.?R\.?|\u0631\u064a\u0627\u0644(?:\s+\u0633\u0639\u0648\u062f\u064a)?)/giu
+		)
+	)
+		.map((match) => Number(String(match[1] || "").replace(",", ".")))
+		.filter((amount) => Number.isFinite(amount) && amount > 0);
+	return amounts.length ? amounts[amounts.length - 1] : 0;
+}
+
+function splitStayQuoteFactsFromAiMessage(value = "", action = "") {
+	const text = String(value || "")
+		.replace(/\r\n?/g, "\n")
+		.trim()
+		.slice(0, 2000);
+	const isoMatches = Array.from(text.matchAll(/\b20\d{2}-\d{2}-\d{2}\b/g));
+	if (isoMatches.length < 4) return {};
+	const periods = [];
+	for (let index = 0; index + 1 < isoMatches.length; index += 2) {
+		const checkinISO = validISODate(isoMatches[index][0]);
+		const checkoutISO = validISODate(isoMatches[index + 1][0]);
+		if (!checkinISO || !checkoutISO || checkoutISO <= checkinISO) continue;
+		const nextStart = isoMatches[index + 2]?.index ?? text.length;
+		const lineStart = Math.max(0, text.lastIndexOf("\n", isoMatches[index].index) + 1);
+		const lineEndRaw = text.indexOf("\n", isoMatches[index + 1].index);
+		const lineEnd = lineEndRaw >= 0 ? lineEndRaw : nextStart;
+		const lineSegment = text.slice(lineStart, lineEnd);
+		let total = moneyAmountNearText(lineSegment);
+		if (!total) {
+			let segmentEnd = nextStart;
+			const afterStart = text.slice(isoMatches[index].index, nextStart);
+			const totalOffset = afterStart.search(/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)/iu);
+			if (totalOffset > 0) segmentEnd = isoMatches[index].index + totalOffset;
+			const segment = text.slice(isoMatches[index].index, segmentEnd);
+			total = moneyAmountNearText(segment);
+		}
+		periods.push({
+			checkinISO,
+			checkoutISO,
+			nights: nightsBetween(checkinISO, checkoutISO),
+			total,
+			currency: "SAR",
+		});
+	}
+	if (periods.length < 2) return {};
+	const totalFromSummary =
+		moneyAmountNearText(
+			text.match(
+				/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)[^\n]*/iu
+			)?.[0] || ""
+		) || periods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const roomTypeKey = mapRoomToKey(text);
+	const rooms = roomCountFromAiReviewText(text) || 1;
+	const facts = {
+		splitStayPeriods: periods,
+		splitStayTotal: totalFromSummary,
+		splitStayQuoteAvailable: action === "split_stay_quote_ready",
+		splitStayQuotedAt: new Date().toISOString(),
+	};
+	if (roomTypeKey) {
+		facts.roomTypeKey = roomTypeKey;
+		facts.rooms = rooms;
+		facts.roomSelections = [{ roomTypeKey, count: rooms }];
+	}
+	return facts;
+}
+
 function latestQuoteFactsFromConversation(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let index = conversation.length - 1; index >= 0; index -= 1) {
 		const facts = quoteFactsFromAiMessage(conversation[index]);
-		if (facts.checkinISO || facts.checkoutISO || facts.roomTypeKey) return facts;
+		if (
+			facts.checkinISO ||
+			facts.checkoutISO ||
+			facts.roomTypeKey ||
+			normalizeSplitStayPeriods(facts.splitStayPeriods).length >= 2
+		) {
+			return facts;
+		}
 	}
 	return {};
 }
@@ -2604,12 +2698,13 @@ function latestStayChangeConversationIndex(sc = {}) {
 }
 
 function matchingQuoteShownAfterLatestStayChange(sc = {}, known = {}) {
-	if (!quoteMatchesKnown(known)) return false;
+	const hasMatchingQuote = quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known);
+	if (!hasMatchingQuote) return false;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	const latestGuest = latestGuestEntry(sc);
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	if (
-		["quote_ready", "review_reservation"].includes(
+		["quote_ready", "split_stay_quote_ready", "review_reservation"].includes(
 			cleanString(previousAi?.clientAction, 80).toLowerCase()
 		) &&
 		latestGuestContinuesAfterQuote(
@@ -2624,7 +2719,7 @@ function matchingQuoteShownAfterLatestStayChange(sc = {}, known = {}) {
 	return conversation.some((entry, index) => {
 		if (index <= latestStayChangeIndex || !entry?.isAi) return false;
 		const action = cleanString(entry.clientAction, 80).toLowerCase();
-		return ["quote_ready", "review_reservation"].includes(action);
+		return ["quote_ready", "split_stay_quote_ready", "review_reservation"].includes(action);
 	});
 }
 
@@ -5549,7 +5644,7 @@ function orchestratorContractPrompt() {
 		"- When action requires a tool, include every known stay fact needed by that tool in facts, especially checkinISO, checkoutISO, roomTypeKey, rooms, roomSelections, adults, children, and languageCode.",
 		"- If a multi-room request is known, facts.roomSelections must be the canonical state. facts.rooms must equal the total count across roomSelections.",
 		"- If only one room type is selected, facts.roomTypeKey should match that roomSelections item. If the guest only changes the count, preserve the known roomTypeKey in roomSelections.",
-		"- For one customer request with multiple separate same-hotel date ranges, use facts.splitStayPeriods instead of forcing one checkinISO/checkoutISO. The orchestrator will quote each period separately and will not create an unsafe merged reservation.",
+		"- For one customer request with multiple separate same-hotel date ranges, use facts.splitStayPeriods instead of forcing one checkinISO/checkoutISO. The orchestrator will quote each period separately and, after official review confirmation, create one normal reservation per period instead of an unsafe merged reservation.",
 		"- Hotel facts may include room offers, monthly packages, public base pricing, amenities, location, Nusuk, bus service, cancellation/policy QA, and room descriptions. Use those facts naturally for sales and guidance; use action=get_quote for exact final price/availability.",
 		"- Never invent exact prices, availability, confirmation numbers, reservation status, cancellation completion, or policy details that are not in Hotel facts, Known facts, or Tool result. Ask the orchestrator through action instead.",
 		"- If Tool result is present, treat it as authoritative. Use it to write the final reply unless the next official server action is send_review, submit_reservation, escalation, or clarification.",
@@ -5762,7 +5857,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the guest asks for a map, address, location, directions, or Google Maps, answer from Hotel facts and include Hotel facts.location.googleMapsUrl when present. If coordinates are present, treat them as authoritative for the map link.`,
 		`If the guest asks only how far/near the hotel is from Al Haram or asks walking/driving time, answer with the stored walking/driving distance only. Do not include Google Maps, address, raw coordinates, or extra numeric location data unless the guest explicitly asks for map, address, location, directions, or Google Maps.`,
 		`If the guest mixes multiple cities in one itinerary, such as Makkah then Madinah then Makkah, never merge the full itinerary into one continuous quote for this hotel. Use Hotel facts.city/state to identify what this property can serve, quote only the matching city stay when details are clear, and explain briefly that you can only arrange this hotel's city from the current case unless other hotel options are explicitly available.`,
-		`If the guest gives multiple separate date ranges for the same hotel, treat them as one customer request with separate stay periods. Return facts.splitStayPeriods with each checkinISO/checkoutISO pair, do not merge gaps into one continuous stay, and do not repeatedly ask whether it is one booking after the guest says it is one request. When room selection is known, use action="get_quote" so the orchestrator can quote each period separately. If exact final creation cannot be safely completed as a single platform reservation, explain that reception will complete the split-stay request safely instead of inventing a confirmation.`,
+		`If the guest gives multiple separate date ranges for the same hotel, treat them as one customer request with separate stay periods. Return facts.splitStayPeriods with each checkinISO/checkoutISO pair, do not merge gaps into one continuous stay, and do not repeatedly ask whether it is one booking after the guest says it is one request. When room selection is known, use action="get_quote" so the orchestrator can quote each period separately. After the official review is confirmed, the orchestrator creates one normal platform reservation per period; never describe it as one merged reservation and never invent a confirmation.`,
 		`Never ask again for details already present in Known facts or the transcript. If a date or detail is ambiguous, ask one clear confirmation question like a human CSR.`,
 		`Clarify only when the guest message is completely unclear, incoherent, or the missing/ambiguous detail would materially change the booking outcome. Do not ask clarification for easy typos, dialect wording, casual replies, or details you can confidently infer from the transcript.`,
 		`Do not create quick-reply buttons for anything the guest should type freely, including dates, year, name, phone, nationality, email, special requests, or open questions. Quick replies are only appropriate when the server has just provided exact choices such as a quote, booking review, optional email skip, or same-date room options.`,
@@ -8808,7 +8903,7 @@ async function handleBrainSplitStayQuote(
 			total,
 			currency,
 			instruction:
-				"This is one customer request with multiple separate stay periods at the same hotel. Do not merge the gaps into one continuous reservation. Quote each available period and the combined total from toolResult only. If all periods are available, ask whether to continue and mention the next step. If any period is unavailable, explain which period is unavailable and offer to check alternatives. Do not say the reservation is confirmed or created.",
+				"This is one customer request with multiple separate stay periods at the same hotel. Do not merge the gaps into one continuous reservation. Quote each available period and the combined total from toolResult only. If all periods are available, ask whether to continue and mention that the next step is a review before creating separate reservations, one per period. If any period is unavailable, explain which period is unavailable and offer to check alternatives. Do not say the reservation is confirmed or created.",
 		},
 		clientAction: allAvailable ? "split_stay_quote_ready" : "split_stay_quote_unavailable",
 		quickReplies: allAvailable
@@ -8819,7 +8914,486 @@ async function handleBrainSplitStayQuote(
 	});
 }
 
-async function sendBrainSplitStayManualCompletionReply({
+function splitStayReservationKey(caseId = "", index = 0) {
+	const key = cleanString(caseId, 80);
+	return key ? `${key}:split:${Number(index || 0) + 1}` : "";
+}
+
+function splitStayRoomSummary(known = {}, languageCode = "en") {
+	const selections = normalizeRoomSelections(known.roomSelections);
+	if (selections.length) {
+		return selections
+			.map(
+				(selection) =>
+					`${formatNumber(selection.count || 1, languageCode)} x ${roomTypeLabel(
+						selection.roomTypeKey,
+						languageCode
+					)}`
+			)
+			.join(", ");
+	}
+	return `${formatNumber(normalizeRoomCount(known.rooms, 1), languageCode)} x ${roomTypeLabel(
+		known.roomTypeKey,
+		languageCode
+	)}`;
+}
+
+function compactSplitStayReviewForBrain(known = {}, hotel = {}, sc = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const periods = normalizeSplitStayPeriods(known.splitStayPeriods);
+	return {
+		hotelName: hotel?.hotelName || hotel?.hotelName_OtherLanguage || "",
+		mode: "separate_reservations",
+		reservationCount: periods.length,
+		roomTypeKey: known.roomTypeKey || "",
+		roomSummary: splitStayRoomSummary(known, languageCode),
+		roomSelections: normalizeRoomSelections(known.roomSelections),
+		rooms: normalizeRoomCount(known.rooms, 1),
+		adults: Number(known.adults || 0) || 0,
+		children: Number(known.children || 0) || 0,
+		fullName: known.fullName || "",
+		phone: known.phone || "",
+		nationality: known.nationality || "",
+		email: cleanEmail(known.email),
+		reservations: periods.map((period, index) => ({
+			number: index + 1,
+			checkinISO: period.checkinISO,
+			checkoutISO: period.checkoutISO,
+			nights: Number(period.nights || nightsBetween(period.checkinISO, period.checkoutISO)),
+			total: Number(period.total || 0) || 0,
+			currency: period.currency || "SAR",
+		})),
+		total: Number(known.splitStayTotal || 0) || 0,
+		currency: periods.find((period) => period.currency)?.currency || "SAR",
+	};
+}
+
+function buildSplitStayReviewMessage(sc = {}, known = {}, hotel = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const periods = normalizeSplitStayPeriods(known.splitStayPeriods);
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	const roomSummary = splitStayRoomSummary(known, languageCode);
+	const total = Number(known.splitStayTotal || 0) || 0;
+	const currency = periods.find((period) => period.currency)?.currency || "SAR";
+	if (ar) {
+		return [
+			`${arabicReviewAddress(sc, known)}، هذه مراجعة نهائية قبل إنشاء الحجز:`,
+			`سيتم إنشاء ${formatNumber(periods.length, languageCode)} حجوزات منفصلة، حجز مستقل لكل فترة، حتى لا ندمج الفاصل بين الفترات.`,
+			`الفندق: ${hotelName}`,
+			`الغرفة: ${roomSummary}`,
+			`الضيوف: ${arabicGuestCountText(known.adults || 1, known.children || 0, languageCode)}`,
+			`اسم الضيف: ${known.fullName || guestDisplayName(sc)}`,
+			`الجنسية: ${known.nationality || "غير مضافة"}`,
+			`الهاتف: ${known.phone || "غير مضاف"}`,
+			...periods.map((period, index) => {
+				const nights =
+					Number(period.nights || 0) ||
+					nightsBetween(period.checkinISO, period.checkoutISO);
+				return `الحجز ${formatNumber(index + 1, languageCode)}: من ${formatDate(
+					period.checkinISO,
+					languageCode
+				)} إلى ${formatDate(period.checkoutISO, languageCode)}، ${formatNumber(
+					nights,
+					languageCode
+				)} ليال، الإجمالي ${formatMoney(period.total || 0, period.currency || currency, languageCode)}`;
+			}),
+			`الإجمالي لكل الحجوزات: ${formatMoney(total, currency, languageCode)}`,
+			`إذا كل شيء صحيح، اختر "إتمام الحجز". وإذا هناك تعديل، اختر "هناك شيء غير صحيح".`,
+		].join("\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, here is the final review before I create the booking:`,
+		`I will create ${periods.length} separate reservations, one for each stay period, so the gap is not merged into one reservation.`,
+		`Hotel: ${hotelName}`,
+		`Room: ${roomSummary}`,
+		`Guests: ${englishGuestCountText(known.adults || 1, known.children || 0)}`,
+		`Guest name: ${known.fullName || guestDisplayName(sc)}`,
+		`Nationality: ${known.nationality || "Not added"}`,
+		`Phone: ${known.phone || "Not added"}`,
+		...periods.map((period, index) => {
+			const nights =
+				Number(period.nights || 0) || nightsBetween(period.checkinISO, period.checkoutISO);
+			return `Reservation ${index + 1}: ${formatDate(
+				period.checkinISO,
+				languageCode
+			)} to ${formatDate(period.checkoutISO, languageCode)}, ${nights} nights, total ${formatMoney(
+				period.total || 0,
+				period.currency || currency,
+				languageCode
+			)}`;
+		}),
+		`Total for all reservations: ${formatMoney(total, currency, languageCode)}`,
+		`If everything is correct, choose "Complete booking". If something needs fixing, choose "Something is wrong".`,
+	].join("\n");
+}
+
+function buildSplitStayConfirmationMessage(sc = {}, known = {}, hotel = {}, reservations = []) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	const rows = reservations.map((reservation, index) => {
+		const links = reservationPublicLinks(reservation);
+		const total = reservation.total_amount || 0;
+		const checkinISO = validISODate(reservation.checkin_date);
+		const checkoutISO = validISODate(reservation.checkout_date);
+		if (ar) {
+			return [
+				`الحجز ${formatNumber(index + 1, languageCode)}:`,
+				`رقم التأكيد: ${reservation.confirmation_number || ""}`,
+				`الفترة: ${formatDate(checkinISO, languageCode)} إلى ${formatDate(
+					checkoutISO,
+					languageCode
+				)}`,
+				`الإجمالي: ${formatMoney(total, reservation.currency || "SAR", languageCode)}`,
+				links.reservationConfirmation ? `تفاصيل الحجز: ${links.reservationConfirmation}` : "",
+				links.payment ? `رابط الدفع: ${links.payment}` : "",
+			]
+				.filter(Boolean)
+				.join("\n");
+		}
+		return [
+			`Reservation ${index + 1}:`,
+			`Confirmation number: ${reservation.confirmation_number || ""}`,
+			`Dates: ${formatDate(checkinISO, languageCode)} to ${formatDate(
+				checkoutISO,
+				languageCode
+			)}`,
+			`Total: ${formatMoney(total, reservation.currency || "SAR", languageCode)}`,
+			links.reservationConfirmation ? `Details: ${links.reservationConfirmation}` : "",
+			links.payment ? `Payment link: ${links.payment}` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	});
+	if (ar) {
+		return [
+			`تم إنشاء الحجوزات بنجاح كحجوزات منفصلة في ${hotelName}.`,
+			...rows,
+			`هل أقدر أساعدك بأي شيء آخر؟`,
+		].join("\n\n");
+	}
+	return [
+		`The reservations have been created successfully as separate bookings at ${hotelName}.`,
+		...rows,
+		`Can I help you with anything else?`,
+	].join("\n\n");
+}
+
+function buildSplitStayPartialFailureMessage(
+	sc = {},
+	known = {},
+	hotel = {},
+	reservations = [],
+	error = null
+) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const created = reservations.map((reservation) => reservation.confirmation_number).filter(Boolean);
+	if (ar) {
+		return [
+			created.length
+				? `تم إنشاء بعض الحجوزات بالفعل: ${created.join(", ")}.`
+				: `${arabicReviewAddress(sc, known)}، لم أتمكن من إنشاء الحجوزات الآن بشكل آمن.`,
+			`سأحولها للفريق لمراجعة الفترات المنفصلة بدون دمجها في حجز واحد.`,
+		].join("\n");
+	}
+	return [
+		created.length
+			? `Some reservations were already created: ${created.join(", ")}.`
+			: `${guestDisplayName(sc)}, I could not safely create the reservations right now.`,
+		`I will pass this to the team so the separate stay periods are reviewed without merging them into one booking.`,
+	].join("\n");
+}
+
+function splitStayQuoteTotalsMatchKnown(known = {}, quotedPeriods = [], total = 0) {
+	const currentPeriods = normalizeSplitStayPeriods(known.splitStayPeriods);
+	const nextPeriods = normalizeSplitStayPeriods(quotedPeriods);
+	if (currentPeriods.length < 2 || currentPeriods.length !== nextPeriods.length) return false;
+	const moneyMatches = (a, b) => Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.01;
+	if (!moneyMatches(known.splitStayTotal, total)) return false;
+	return currentPeriods.every((period, index) => {
+		const next = nextPeriods[index] || {};
+		return (
+			period.checkinISO === next.checkinISO &&
+			period.checkoutISO === next.checkoutISO &&
+			moneyMatches(period.total, next.total)
+		);
+	});
+}
+
+async function quoteSplitStayPeriodsForKnown(sc = {}, known = {}, periods = []) {
+	const quoteResults = [];
+	for (const period of periods) {
+		const quoteKnown = {
+			...known,
+			checkinISO: period.checkinISO,
+			checkoutISO: period.checkoutISO,
+			quote: null,
+		};
+		delete quoteKnown.splitStayPeriods;
+		delete quoteKnown.splitStayTotal;
+		delete quoteKnown.splitStayQuoteAvailable;
+		delete quoteKnown.splitStayQuotedAt;
+		const result = await quoteTool(sc, quoteKnown).catch((error) => ({
+			ok: false,
+			available: false,
+			code: "quote_failed",
+			message: cleanDisplayString(error?.message || String(error), 260),
+			checkinISO: period.checkinISO,
+			checkoutISO: period.checkoutISO,
+		}));
+		quoteResults.push({
+			period,
+			result,
+			summary: compactQuoteToolResult(result, {
+				...quoteKnown,
+				quote: asObject(result.quote),
+			}),
+		});
+	}
+	const allAvailable = quoteResults.every((item) => item.result.available && item.result.quote);
+	const quotedPeriods = quoteResults.map((item) => {
+		const quote = asObject(item.result.quote);
+		return {
+			checkinISO: item.period.checkinISO,
+			checkoutISO: item.period.checkoutISO,
+			nights:
+				Number(quote.nights || 0) ||
+				nightsBetween(item.period.checkinISO, item.period.checkoutISO),
+			total: Number(quote.total || quote.totals?.totalPriceWithCommission || 0) || 0,
+			currency: quote.currency || item.result.currency || "SAR",
+		};
+	});
+	const total = quotedPeriods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const currency =
+		quotedPeriods.find((period) => period.currency)?.currency ||
+		quoteResults.find((item) => item.summary.currency)?.summary.currency ||
+		"SAR";
+	return {
+		quoteResults,
+		quotedPeriods,
+		allAvailable,
+		total,
+		currency,
+		ok: quoteResults.every((item) => item.result.ok !== false),
+	};
+}
+
+function splitStayQuoteToolResultFromResults({
+	known = {},
+	quoteResults = [],
+	quotedPeriods = [],
+	allAvailable = false,
+	total = 0,
+	currency = "SAR",
+	instruction = "",
+} = {}) {
+	return {
+		tool: "get_quote",
+		quoteMode: "split_stay",
+		ok: quoteResults.every((item) => item.result.ok !== false),
+		available: allAvailable,
+		code: allAvailable ? "split_stay_quote_ready" : "split_stay_quote_unavailable",
+		roomTypeKey: known.roomTypeKey || "",
+		rooms: normalizeRoomCount(known.rooms, 1),
+		roomSelections: normalizeRoomSelections(known.roomSelections),
+		splitStayPeriods: quotedPeriods.map((period, index) => ({
+			...period,
+			available: Boolean(quoteResults[index]?.result?.available),
+			code: quoteResults[index]?.result?.code || "",
+			roomLabel: quoteResults[index]?.summary?.roomLabel || "",
+			perNight: quoteResults[index]?.summary?.perNight || [],
+		})),
+		total,
+		currency,
+		instruction:
+			instruction ||
+			"This is one customer request with multiple separate stay periods at the same hotel. Quote each period separately and explain that continuing will lead to separate reservations for the separate periods. Do not merge the gaps into one reservation. Do not say the reservation is confirmed or created.",
+	};
+}
+
+async function handleBrainSplitStayReservationSubmit({
+	io,
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null,
+	typingStartedAt = 0,
+} = {}) {
+	const caseId = caseIdText(sc);
+	const nextKnown = {
+		...known,
+		splitStayPeriods: normalizeSplitStayPeriods(known.splitStayPeriods),
+	};
+	delete nextKnown.checkinISO;
+	delete nextKnown.checkoutISO;
+	delete nextKnown.quote;
+	const refreshed = await quoteSplitStayPeriodsForKnown(
+		sc,
+		nextKnown,
+		nextKnown.splitStayPeriods
+	);
+	if (
+		!refreshed.allAvailable ||
+		!splitStayQuoteTotalsMatchKnown(nextKnown, refreshed.quotedPeriods, refreshed.total)
+	) {
+		const refreshedKnown = {
+			...nextKnown,
+			splitStayPeriods: refreshed.quotedPeriods,
+			splitStayTotal: refreshed.total,
+			splitStayQuoteAvailable: refreshed.allAvailable,
+			splitStayQuotedAt: new Date().toISOString(),
+		};
+		await saveKnownFacts(caseId, refreshedKnown);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: refreshedKnown,
+			latestGuest,
+			toolResult: splitStayQuoteToolResultFromResults({
+				known: refreshedKnown,
+				...refreshed,
+				instruction: refreshed.allAvailable
+					? "The final availability/price check changed before reservation creation. Show the refreshed quote for each separate period and ask the guest to continue again before creating separate reservations."
+					: "The final availability check found that one or more separate periods is no longer available. Explain the unavailable period and offer alternatives.",
+			}),
+			clientAction: refreshed.allAvailable
+				? "split_stay_quote_ready"
+				: "split_stay_quote_unavailable",
+			quickReplies: refreshed.allAvailable
+				? splitStayQuickReplies(activeLanguageCode(sc, refreshedKnown))
+				: quoteUnavailableQuickReplies(activeLanguageCode(sc, refreshedKnown)),
+			typingStartedAt,
+			preserveFallbackNumbers: false,
+		});
+	}
+	const reservations = [];
+	try {
+		for (let index = 0; index < refreshed.quoteResults.length; index += 1) {
+			const item = refreshed.quoteResults[index];
+			const quote = asObject(item.result.quote);
+			let periodKnown = syncKnownFromQuote({
+				...nextKnown,
+				checkinISO: item.period.checkinISO,
+				checkoutISO: item.period.checkoutISO,
+				quote,
+			});
+			delete periodKnown.splitStayPeriods;
+			delete periodKnown.splitStayTotal;
+			delete periodKnown.splitStayQuoteAvailable;
+			delete periodKnown.splitStayQuotedAt;
+			const room =
+				quote.room ||
+				(hotel.roomCountDetails || []).find(
+					(roomDetails) => roomDetails.roomType === periodKnown.roomTypeKey
+				);
+			const reservation = await createReservationForCase({
+				caseId,
+				reservationCaseId: splitStayReservationKey(caseId, index),
+				useSupportCaseReservationLock: false,
+				markSupportCaseReservation: false,
+				hotel,
+				slots: {
+					...periodKnown,
+					children: Number.isFinite(Number(periodKnown.children))
+						? Number(periodKnown.children)
+						: 0,
+					rooms: Math.max(1, Number(periodKnown.rooms || nextKnown.rooms || 1) || 1),
+				},
+				quoteData: quote,
+				room,
+			});
+			reservations.push(reservation);
+			if (!shouldSkipReservationConfirmationDispatch()) {
+				dispatchAiReservationConfirmation({
+					caseId,
+					reservation,
+					mode: "initial",
+					includeGuestEmail: Boolean(cleanEmail(nextKnown.email)),
+					guestEmail: cleanEmail(nextKnown.email),
+				}).catch((error) => {
+					console.error("[aiagent] confirmation dispatch failed:", error?.message || error);
+				});
+			}
+		}
+		nextKnown.splitStayReservations = reservations.map(compactReservationForBrain);
+		nextKnown.splitStayConfirmations = reservations
+			.map((reservation) => reservation.confirmation_number)
+			.filter(Boolean);
+		nextKnown.reservationIds = reservations.map((reservation) => String(reservation._id || ""));
+		nextKnown.confirmation = nextKnown.splitStayConfirmations.join(", ");
+		await saveKnownFacts(caseId, nextKnown);
+		const fallback = buildSplitStayConfirmationMessage(sc, nextKnown, hotel, reservations);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			toolResult: {
+				tool: "submit_reservation",
+				ok: true,
+				code: "split_stay_reservations_created",
+				quoteMode: "split_stay",
+				mode: "separate_reservations",
+				reservations: reservations.map(compactReservationForBrain),
+				confirmations: nextKnown.splitStayConfirmations,
+				review: compactSplitStayReviewForBrain(nextKnown, hotel, sc),
+				instruction:
+					"Write the final reservation confirmation in the guest language. Explain that the separate stay periods were created as separate reservations. Include every confirmation number, every reservation details link, every payment link, and ask if anything else is needed.",
+			},
+			clientAction: "reservation_confirmed",
+			fallback,
+			typingStartedAt,
+		});
+	} catch (error) {
+		console.error("[aiagent] split-stay reservation finalize failed:", error?.message || error);
+		nextKnown.splitStayReservations = reservations.map(compactReservationForBrain);
+		nextKnown.splitStayConfirmations = reservations
+			.map((reservation) => reservation.confirmation_number)
+			.filter(Boolean);
+		await saveKnownFacts(caseId, nextKnown);
+		const fallback = buildSplitStayPartialFailureMessage(
+			sc,
+			nextKnown,
+			hotel,
+			reservations,
+			error
+		);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			toolResult: {
+				tool: "submit_reservation",
+				ok: false,
+				code: reservations.length
+					? "split_stay_partial_create_failed"
+					: "reservation_finalize_failed",
+				quoteMode: "split_stay",
+				mode: "separate_reservations",
+				reservations: reservations.map(compactReservationForBrain),
+				error: cleanDisplayString(error?.message || String(error), 240),
+				instruction:
+					"Apologize briefly and explain that the separate reservations need a team member to review them. If any reservation was created, include its confirmation number. Do not claim missing reservations were created.",
+			},
+			clientAction: "reservation_finalize_failed",
+			fallback,
+			typingStartedAt,
+			preserveFallbackNumbers: false,
+		});
+	}
+}
+
+async function sendBrainSplitStayReviewReply({
 	io,
 	sc = {},
 	hotel = {},
@@ -8840,6 +9414,43 @@ async function sendBrainSplitStayManualCompletionReply({
 		(field) => field !== "quote" || !splitStayQuoteMatchesKnown(nextKnown)
 	);
 	await saveKnownFacts(caseId, nextKnown);
+	if (missing.length) {
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			toolResult: {
+				tool,
+				quoteMode: "split_stay",
+				ok: false,
+				code: "split_stay_missing_required_details",
+				missing,
+				splitStayPeriods: nextKnown.splitStayPeriods,
+				splitStayTotal: Number(nextKnown.splitStayTotal || 0) || 0,
+				currency:
+					nextKnown.splitStayPeriods.find((period) => period.currency)?.currency ||
+					"SAR",
+				instruction:
+					"Ask only for the missing required booking details in the guest language. Keep the split stay periods separate and do not ask again for dates already in toolResult.",
+			},
+			clientAction: "required_details_needed",
+			typingStartedAt,
+			preserveFallbackNumbers: false,
+		});
+	}
+	if (tool === "submit_reservation") {
+		return handleBrainSplitStayReservationSubmit({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			typingStartedAt,
+		});
+	}
+	const fallback = buildSplitStayReviewMessage(sc, nextKnown, hotel);
 	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
@@ -8847,26 +9458,19 @@ async function sendBrainSplitStayManualCompletionReply({
 		known: nextKnown,
 		latestGuest,
 		toolResult: {
-			tool,
+			tool: "send_review",
 			quoteMode: "split_stay",
-			ok: false,
-			code: missing.length
-				? "split_stay_missing_required_details"
-				: "split_stay_manual_completion_required",
-			missing,
-			splitStayPeriods: nextKnown.splitStayPeriods,
-			splitStayTotal: Number(nextKnown.splitStayTotal || 0) || 0,
-			currency:
-				nextKnown.splitStayPeriods.find((period) => period.currency)?.currency || "SAR",
-			instruction: missing.length
-				? "Ask only for the missing required booking details in the guest language. Keep the split stay periods separate and do not ask again for dates already in toolResult."
-				: "Return action=\"escalate\" with a warm customer-facing reply. Explain that the details are ready, but because this is one request across separate stay periods, reception must complete it safely without merging the gap into one continuous reservation. Do not say the reservation is confirmed, created, completed, finalized, or booked.",
+			ok: true,
+			code: "review_ready",
+			mode: "separate_reservations",
+				review: compactSplitStayReviewForBrain(nextKnown, hotel, sc),
+			instruction:
+				"Write the official pre-submission booking review in the guest language. Explain clearly that the separate stay periods will be created as separate reservations, one reservation per period, not one merged reservation. Use separate lines or bullets for guest details, room, each period with its total, and the combined total. Do not say confirmed, created, completed, finalized, or booked yet. Ask the guest to confirm if everything is correct.",
 		},
-		clientAction: missing.length
-			? "required_details_needed"
-			: "split_stay_manual_completion_required",
+		clientAction: "review_reservation",
+		quickReplies: reviewQuickReplies(activeLanguageCode(sc, nextKnown)),
+		fallback,
 		typingStartedAt,
-		preserveFallbackNumbers: false,
 	});
 }
 
@@ -9311,6 +9915,29 @@ async function sendBrainToolReplyFromOpenAI({
 				cleanString(links.reservationConfirmation, 260),
 				cleanString(links.payment, 260),
 			].filter(Boolean);
+			if (requiredParts.some((item) => !text.includes(item))) {
+				return "reservation_confirmation_links_missing";
+			}
+		}
+		if (
+			toolResult?.tool === "submit_reservation" &&
+			toolResult?.ok === true &&
+			toolResult?.code === "split_stay_reservations_created"
+		) {
+			const requiredParts = (Array.isArray(toolResult.reservations)
+				? toolResult.reservations
+				: []
+			)
+				.flatMap((reservation) => {
+					const item = asObject(reservation);
+					const links = asObject(item.links);
+					return [
+						cleanString(item.confirmation, 80),
+						cleanString(links.reservationConfirmation, 260),
+						cleanString(links.payment, 260),
+					];
+				})
+				.filter(Boolean);
 			if (requiredParts.some((item) => !text.includes(item))) {
 				return "reservation_confirmation_links_missing";
 			}
@@ -9820,7 +10447,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 		if (!splitStayQuoteMatchesKnown(reviewKnown) && splitStayQuoteInputsKnown(reviewKnown)) {
 			return handleBrainSplitStayQuote(io, sc, hotel, reviewKnown, latestGuest, typingStartedAt);
 		}
-		return sendBrainSplitStayManualCompletionReply({
+		return sendBrainSplitStayReviewReply({
 			io,
 			sc,
 			hotel,
@@ -9935,7 +10562,7 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 		if (!splitStayQuoteMatchesKnown(submitKnown) && splitStayQuoteInputsKnown(submitKnown)) {
 			return handleBrainSplitStayQuote(io, sc, hotel, submitKnown, latestGuest, typingStartedAt);
 		}
-		return sendBrainSplitStayManualCompletionReply({
+		return sendBrainSplitStayReviewReply({
 			io,
 			sc,
 			hotel,
@@ -10452,7 +11079,7 @@ async function executeBrainFirstDecision({
 	);
 	if (
 		latestContinuesShownQuote &&
-		quoteMatchesKnown(nextKnown) &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		!latestGuestRejectsQuoteOrSelection(latestText) &&
 		!latestClarifiesRequiredBookingDetail
 	) {
@@ -10467,7 +11094,7 @@ async function executeBrainFirstDecision({
 	}
 	const latestRequestsProgressOnShownQuote =
 		latestGuest &&
-		quoteMatchesKnown(nextKnown) &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
 		!latestGuestAsksHotelFactOnly(latestGuest) &&
 		!latestGuestRejectsQuoteOrSelection(latestText) &&
@@ -10484,7 +11111,7 @@ async function executeBrainFirstDecision({
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (
-		quoteMatchesKnown(nextKnown) &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		!matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
 		["reply", "send_review", "send_review_again"].includes(nextDecision.action) &&
 		requiredBookingMissing(nextKnown).some((field) =>
@@ -10706,7 +11333,7 @@ async function submitReservationForCase(io, caseOrId) {
 			await handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, 0);
 			return { ok: false, reason: "split_stay_quote_required" };
 		}
-		await sendBrainSplitStayManualCompletionReply({
+		await sendBrainSplitStayReviewReply({
 			io,
 			sc,
 			hotel,
@@ -10714,7 +11341,7 @@ async function submitReservationForCase(io, caseOrId) {
 			latestGuest,
 			tool: "submit_reservation",
 		});
-		return { ok: false, reason: "split_stay_manual_completion_required" };
+		return { ok: false, reason: "split_stay_submit_handled" };
 	}
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);

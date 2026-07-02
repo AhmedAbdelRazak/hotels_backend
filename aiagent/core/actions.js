@@ -1,5 +1,6 @@
 // aiagent/core/actions.js
 const crypto = require("crypto");
+const mongoose = require("mongoose");
 const Reservations = require("../../models/reservations");
 const UncompleteReservations = require("../../models/Uncompleted");
 const HotelDetails = require("../../models/hotel_details");
@@ -1272,7 +1273,8 @@ function aiReservationFingerprint({ caseId, hotel, slots, quoteData, room, guest
 	return crypto.createHash("sha1").update(parts.join("|")).digest("hex");
 }
 
-async function findAiReservationForCase(caseId) {
+async function findAiReservationForCase(caseId, options = {}) {
+	const includeSupportCaseReservation = options.includeSupportCaseReservation !== false;
 	const caseKey = cleanCaseId(caseId);
 	if (!caseKey) return null;
 	const direct = await Reservations.findOne({ aiSupportCaseId: caseKey })
@@ -1282,6 +1284,9 @@ async function findAiReservationForCase(caseId) {
 		.exec()
 		.catch(() => null);
 	if (direct) return direct;
+	if (!includeSupportCaseReservation || !mongoose.Types.ObjectId.isValid(caseKey)) {
+		return null;
+	}
 	const sc = await SupportCase.findById(caseKey)
 		.select("aiReservation")
 		.maxTimeMS(AI_RESERVATION_QUERY_MAX_TIME_MS)
@@ -1355,7 +1360,7 @@ async function waitForAiReservationForCase(caseId, attempts = 8) {
 
 async function markAiReservationCreated(caseId, fingerprint, reservation) {
 	const caseKey = cleanCaseId(caseId);
-	if (!caseKey || !reservation?._id) return;
+	if (!caseKey || !reservation?._id || !mongoose.Types.ObjectId.isValid(caseKey)) return;
 	await SupportCase.updateOne(
 		{ _id: caseKey, "aiReservation.fingerprint": fingerprint },
 		{
@@ -1376,7 +1381,7 @@ async function markAiReservationCreated(caseId, fingerprint, reservation) {
 
 async function markAiReservationFailed(caseId, fingerprint, error) {
 	const caseKey = cleanCaseId(caseId);
-	if (!caseKey) return;
+	if (!caseKey || !mongoose.Types.ObjectId.isValid(caseKey)) return;
 	await SupportCase.updateOne(
 		{ _id: caseKey, "aiReservation.fingerprint": fingerprint },
 		{
@@ -1397,6 +1402,9 @@ async function markAiReservationFailed(caseId, fingerprint, error) {
 
 async function createReservationForCase({
 	caseId,
+	reservationCaseId = "",
+	useSupportCaseReservationLock = true,
+	markSupportCaseReservation = true,
 	hotel,
 	slots,
 	quoteData,
@@ -1414,20 +1422,50 @@ async function createReservationForCase({
 	const guest = validateRequiredGuestDetails(slots);
 	assertGuestCountFitsSelectedRooms({ hotel, slots, quoteData, room, guest });
 	const caseKey = cleanCaseId(caseId);
+	const reservationCaseKey = cleanCaseId(reservationCaseId || caseKey);
+	const lookupKey = reservationCaseKey || caseKey;
+	const usesDedicatedReservationKey = Boolean(
+		reservationCaseKey && caseKey && reservationCaseKey !== caseKey
+	);
+	const existing = await timedReservationCreateStep(
+		caseId,
+		"existing_lookup",
+		() =>
+			findAiReservationForCase(lookupKey, {
+				includeSupportCaseReservation: !usesDedicatedReservationKey,
+			}),
+		{ lookupKey: Boolean(lookupKey) }
+	);
+	if (existing) {
+		log(caseId, "reservation.existing_returned", {
+			reservationId: String(existing._id),
+			confirmation: existing.confirmation_number,
+			lookupKey,
+		});
+		return existing;
+	}
 	const fingerprint = aiReservationFingerprint({
-		caseId: caseKey,
+		caseId: lookupKey || caseKey,
 		hotel,
 		slots,
 		quoteData,
 		room,
 		guest,
 	});
-	const lock = await timedReservationCreateStep(
-		caseId,
-		"lock",
-		() => acquireAiReservationLock(caseKey, fingerprint),
-		{ caseKey: Boolean(caseKey) }
+	const shouldUseSupportCaseLock = Boolean(
+		caseKey &&
+			!usesDedicatedReservationKey &&
+			useSupportCaseReservationLock &&
+			mongoose.Types.ObjectId.isValid(caseKey)
 	);
+	const lock = shouldUseSupportCaseLock
+		? await timedReservationCreateStep(
+				caseId,
+				"lock",
+				() => acquireAiReservationLock(caseKey, fingerprint),
+				{ caseKey: Boolean(caseKey) }
+		  )
+		: { locked: false, existing: null };
 	if (lock.existing) {
 		log(caseId, "reservation.duplicate_returned", {
 			reservationId: String(lock.existing._id),
@@ -1435,14 +1473,14 @@ async function createReservationForCase({
 		});
 		return lock.existing;
 	}
-	if (caseKey && !lock.locked) {
-		const existing = await waitForAiReservationForCase(caseKey);
-		if (existing) {
+	if (shouldUseSupportCaseLock && !lock.locked) {
+		const racedExisting = await waitForAiReservationForCase(caseKey);
+		if (racedExisting) {
 			log(caseId, "reservation.race_existing_returned", {
-				reservationId: String(existing._id),
-				confirmation: existing.confirmation_number,
+				reservationId: String(racedExisting._id),
+				confirmation: racedExisting.confirmation_number,
 			});
-			return existing;
+			return racedExisting;
 		}
 		throw new Error("AI reservation creation is already in progress for this support case.");
 	}
@@ -1492,7 +1530,7 @@ async function createReservationForCase({
 		createdBy: AI_RESERVATION_ACTOR,
 		orderTaker: AI_RESERVATION_ACTOR,
 		orderTakenAt: new Date(),
-		aiSupportCaseId: caseKey,
+		aiSupportCaseId: lookupKey,
 		aiReservationFingerprint: fingerprint,
 		pickedRoomsType,
 		pickedRoomsPricing: pickedRoomsType,
@@ -1509,6 +1547,7 @@ async function createReservationForCase({
 			email: guest.email,
 			nationality: guest.nationality,
 			aiSupportCaseId: caseKey,
+			aiReservationCaseId: lookupKey,
 		},
 
 		confirmation_number,
@@ -1554,23 +1593,29 @@ async function createReservationForCase({
 			"reservation_insert",
 			() => Reservations.create(reservationPayload)
 		);
-		await timedReservationCreateStep(
-			caseId,
-			"support_case_mark_created",
-			() => markAiReservationCreated(caseKey, fingerprint, saved)
-		);
+		if (markSupportCaseReservation && shouldUseSupportCaseLock) {
+			await timedReservationCreateStep(
+				caseId,
+				"support_case_mark_created",
+				() => markAiReservationCreated(caseKey, fingerprint, saved)
+			);
+		}
 	} catch (error) {
-		if (error?.code === 11000 && caseKey) {
-			const existing = await findAiReservationForCase(caseKey);
-			if (existing) {
+		if (error?.code === 11000 && lookupKey) {
+			const duplicateExisting = await findAiReservationForCase(lookupKey, {
+				includeSupportCaseReservation: !usesDedicatedReservationKey,
+			});
+			if (duplicateExisting) {
 				log(caseId, "reservation.duplicate_key_existing_returned", {
-					reservationId: String(existing._id),
-					confirmation: existing.confirmation_number,
+					reservationId: String(duplicateExisting._id),
+					confirmation: duplicateExisting.confirmation_number,
 				});
-				return existing;
+				return duplicateExisting;
 			}
 		}
-		await markAiReservationFailed(caseKey, fingerprint, error);
+		if (markSupportCaseReservation && shouldUseSupportCaseLock) {
+			await markAiReservationFailed(caseKey, fingerprint, error);
+		}
 		throw error;
 	}
 
