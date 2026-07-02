@@ -3496,7 +3496,7 @@ function orchestratorContractPrompt() {
 	return [
 		"Brain/orchestrator contract:",
 		"- You are the brain and the source of truth for understanding the guest. The orchestrator does not interpret conversational meaning from your prose; it validates, saves structured facts, executes actions/tools, and returns tool results.",
-		'- The guest sees only "reply" and quick replies/buttons produced by the server. The orchestrator reads "action", "facts", "memory", and "reason".',
+		'- The guest sees only your "reply" text plus server-provided quick replies/buttons. The orchestrator must not write guest-facing wording for you.',
 		"- Customer-facing reply must be in the guest's language or dialect and must sound like a professional Muslim hotel CSR/sales representative.",
 		"- You own presentation quality. Use short paragraphs, clear line breaks, bullet points, and tasteful helpful emojis when they make the message easier or warmer for the guest. Do not overdo emojis, and keep official booking/review facts very clear.",
 		"- Structured JSON keys must stay exactly in English as shown in the schema. Never translate keys. Empty/unknown values should be omitted or empty, not guessed.",
@@ -3504,7 +3504,7 @@ function orchestratorContractPrompt() {
 		'- Use action="get_quote" when exact price or availability is needed and the stay can be identified from facts/conversation.',
 		'- Use action="check_room_options" when dates are known but the guest needs available room choices.',
 		'- Use action="check_alternatives" when the guest asks for nearby dates/options after an unavailable or challenged quote.',
-		'- Use action="send_review" only when all required booking facts are known and the server should send the official review.',
+		'- Use action="send_review" only when all required booking facts are known and the orchestrator should prepare review facts for you to write after the tool result.',
 		'- Use action="submit_reservation" only after the guest confirms the official server review or presses the reservation button.',
 		'- Use action="lookup_reservation", "update_reservation", or "cancel_reservation" only for existing-reservation requests.',
 		'- Use action="escalate" only for human-needed cases, and "close_case" only when the guest is clearly finished.',
@@ -3724,7 +3724,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Do not delay the final review for special requests, notes, room preferences, passport/ID, or anything not listed as required. If the guest wants to continue after an exact quote, ask only missing required details; if none are missing and optional email was already provided, skipped, or offered once, return action="send_review".`,
 		`After an exact quote has been accepted, do not repeat the same quote as the next answer unless the guest asks to see the price again or changes dates/room/guest count.`,
 		`If the guest wants to continue booking and all required booking details plus quote are known, action must be "send_review".`,
-		`Do not write the final booking review yourself as a normal reply. When the guest asks to review details, says everything is correct, or confirms after you collected the required fields, return action="send_review" so the server sends the official review with buttons. The official review must include the exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.`,
+		`Do not write the final booking review before the review tool/result. When the guest asks to review details, says everything is correct, or confirms after you collected the required fields, return action="send_review". After the tool result returns review facts, you must write the official review reply yourself with exact room display name/type, dates, nights, guest count, name, phone, nationality, email status, and total.`,
 		`If the guest confirms a review or quick-reply action is place_reservation, action must be "submit_reservation".`,
 		`If the guest says the review is wrong, action must be "send_review_again" only if you can present corrected data; otherwise ask what to fix.`,
 		`For casual or emotional guest messages such as excitement, exhaustion, sadness, stress, jokes, thanks, laughter, or small talk, respond warmly and naturally first, then gently continue the stay flow with only the next useful question. Do not escalate mild emotions or casual chat.`,
@@ -3795,6 +3795,12 @@ async function askOpenAI({
 	});
 	const parsed = parseJsonObject(text);
 	if (parsed) return normalizeDecision(parsed);
+	return normalizeDecision({
+		action: "reply",
+		reply: String(text || "").trim(),
+		facts: {},
+		reason: "non_json_model_output",
+	});
 	return normalizeDecision({
 		action: "reply",
 		reply:
@@ -3995,15 +4001,16 @@ async function repairQuotePromiseDecision({
 		replyPromisesQuoteCheck(repairedDecision.reply) &&
 		!shouldForceQuote(repairedDecision, nextKnown, latestGuest)
 	) {
-		return {
-			decision: normalizeDecision({
-				action: "reply",
-				reply: buildQuoteGuardFallbackMessage(sc, nextKnown),
-				facts: {},
-				reason: "quote_guard_missing_facts",
-			}),
+		return repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
 			known: nextKnown,
-		};
+			latestGuest,
+			decision: repairedDecision,
+			code: "quote_guard_missing_facts",
+			instruction:
+				"Do not say you are checking availability unless action=get_quote. Ask the guest only for the exact missing stay detail needed to check price and availability.",
+		});
 	}
 	return { decision: repairedDecision, known: nextKnown };
 }
@@ -4034,15 +4041,16 @@ async function repairHotelFactDecision({
 		},
 	});
 	if (hotelFactReplyNeedsCorrection(repairedDecision, hotel, latestGuest) || !String(repairedDecision.reply || "").trim()) {
-		return {
-			decision: normalizeDecision({
-				action: "reply",
-				reply: buildHotelFactFallbackMessage(sc, hotel, latestGuest),
-				facts: repairedDecision.facts || {},
-				reason: "hotel_fact_guard_fallback",
-			}),
+		return repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
 			known: mergeKnownFacts(known, factsForMergeFromDecision(repairedDecision)),
-		};
+			latestGuest,
+			decision: repairedDecision,
+			code: "hotel_fact_guard_reply_required",
+			instruction:
+				"Answer the latest hotel-fact question directly from Hotel facts as action=reply. The reply must be from OpenAI only and must not run booking, review, quote, or availability tools unless the latest guest explicitly asks for price or availability.",
+		});
 	}
 	return {
 		decision: repairedDecision,
@@ -4095,6 +4103,42 @@ async function repairReviewDecision({
 	return { decision: repairedDecision, known: nextKnown };
 }
 
+async function repairBrainDecisionWithInstruction({
+	sc,
+	hotel,
+	known,
+	latestGuest,
+	decision,
+	code = "reply_guard",
+	instruction = "",
+	extra = {},
+} = {}) {
+	try {
+		const repairedDecision = await askOpenAI({
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			toolResult: {
+				tool: "reply_guard",
+				ok: false,
+				code,
+				previousAction: decision?.action || "",
+				previousReply: decision?.reply || "",
+				...asObject(extra),
+				instruction:
+					instruction ||
+					"Return a corrected customer-facing reply from OpenAI only. Keep the guest language and do not invent facts.",
+			},
+		});
+		const nextKnown = mergeKnownFacts(known, factsForMergeFromDecision(repairedDecision));
+		return { decision: repairedDecision, known: nextKnown };
+	} catch (error) {
+		console.warn("[aiagent] brain guard repair failed:", error?.message || error);
+		return { decision, known };
+	}
+}
+
 function normalizeDecision(input = {}) {
 	const allowed = new Set([
 		"reply",
@@ -4117,7 +4161,15 @@ function normalizeDecision(input = {}) {
 	const rawMemory = asObject(input.memory || input.state || input.orchestrator);
 	return {
 		action,
-		reply: String(input.reply || "").trim(),
+		reply: String(
+			input.reply ||
+				input.message ||
+				input.customerReply ||
+				input.customerMessage ||
+				input.customer_message ||
+				input.text ||
+				""
+		).trim(),
 		facts: asObject(input.facts),
 		memory: {
 			changedFields: cleanFieldList(
@@ -5715,7 +5767,11 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 		return latestBeforeSend;
 	}
 	const languageCode = activeLanguageCode(sc, options.known || {});
-	if (!hasAnyAiEntry(latestBeforeSend || sc) && /^ar\b/i.test(languageCode)) {
+	if (
+		options.source !== "openai" &&
+		!hasAnyAiEntry(latestBeforeSend || sc) &&
+		/^ar\b/i.test(languageCode)
+	) {
 		message = withFirstArabicIslamicGreeting(message);
 	}
 	const messageData = {
@@ -5958,6 +6014,7 @@ async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, r
 		latestGuest,
 		known,
 		clientAction: "case_outro",
+		source: reply ? "openai" : "",
 	});
 	const caseId = caseIdText(updatedAfterOutro || sc);
 	if (!caseId || !updatedAfterOutro) return updatedAfterOutro;
@@ -6350,12 +6407,127 @@ async function sendBrainToolReply({
 	});
 }
 
+async function sendBrainToolReplyFromOpenAI({
+	io,
+	sc,
+	hotel,
+	known,
+	latestGuest,
+	toolResult,
+	clientAction = "ai_reply",
+	quickReplies = [],
+	fallback = "",
+	typingStartedAt = 0,
+	requireContact = false,
+	requirePolicy = false,
+	preserveFallbackNumbers = true,
+} = {}) {
+	const caseId = caseIdText(sc);
+	let decision = null;
+	let reply = "";
+	const askToolWriter = async (validation = "") =>
+		askOpenAI({
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			toolResult: validation
+				? {
+						...asObject(toolResult),
+						validation,
+						instruction:
+							"Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.",
+				  }
+				: toolResult,
+			turnKind: "tool_result",
+			kind: "writer",
+			maxTokens: 420,
+			reasoningEffort: "low",
+		});
+	const invalidReplyReason = (candidate = "") => {
+		const text = String(candidate || "").trim();
+		if (!text) return "missing_openai_reply";
+		if (
+			fallback &&
+			preserveFallbackNumbers &&
+			!replyPreservesVisibleNumbers(fallback, text)
+		) {
+			return "visible_numbers_changed";
+		}
+		if (
+			requireContact &&
+			(!text.includes(RESERVATION_CHANGE_CONTACT_PHONE) ||
+				!text.includes(RESERVATION_CHANGE_CONTACT_WHATSAPP))
+		) {
+			return "required_contact_missing";
+		}
+		if (
+			requirePolicy &&
+			toolResult?.policy &&
+			!/(14|Ù¡Ù¤|policy|refund|one\s+night|\u0633\u064a\u0627\u0633\u0629|\u0627\u0633\u062a\u0631\u062f\u0627\u062f|\u0644\u064a\u0644\u0629\s+\u0648\u0627\u062d\u062f\u0629)/i.test(text)
+		) {
+			return "required_policy_missing";
+		}
+		if (replyRequestsForbiddenBookingField(text)) {
+			return "forbidden_booking_field_requested";
+		}
+		return "";
+	};
+	try {
+		decision = await askToolWriter();
+		reply = decision?.reply || "";
+	} catch (error) {
+		console.warn("[aiagent] brain tool reply failed:", error?.message || error);
+	}
+	let invalidReason = invalidReplyReason(reply);
+	if (invalidReason) {
+		try {
+			decision = await askToolWriter(invalidReason);
+			reply = decision?.reply || "";
+			invalidReason = invalidReplyReason(reply);
+		} catch (error) {
+			console.warn("[aiagent] brain tool reply repair failed:", error?.message || error);
+		}
+	}
+	if (invalidReason) {
+		console.error("[aiagent] brain tool reply blocked: OpenAI reply required", {
+			caseId,
+			invalidReason,
+			tool: toolResult?.tool || "",
+		});
+		await emitTyping(io, sc, false);
+		return (await getSupportCaseById(caseId).catch(() => null)) || sc;
+	}
+	if (decision?.action === "escalate") {
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, reply, {
+			latestGuest,
+			known,
+			handoff: true,
+			handoffReason: decision.reason || "ai_escalated",
+			source: "openai",
+		});
+	}
+	if (decision?.action === "close_case") {
+		await waitForTypingMinimum(typingStartedAt);
+		return closeCaseWithOutro(io, sc, known, latestGuest, reply);
+	}
+	await waitForTypingMinimum(typingStartedAt);
+	return sendAiMessage(io, sc, reply, {
+		latestGuest,
+		known,
+		clientAction,
+		quickReplies,
+		source: "openai",
+	});
+}
+
 async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
 	if (!quoteInputsKnown(known)) {
 		const fallback = buildQuoteGuardFallbackMessage(sc, known);
 		await saveKnownFacts(caseId, known);
-		return sendBrainToolReply({
+		return sendBrainToolReplyFromOpenAI({
 			io,
 			sc,
 			hotel,
@@ -6398,7 +6570,7 @@ async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest
 		nextKnown,
 		latestGuest?.message || ""
 	);
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6426,7 +6598,7 @@ async function handleBrainAlternatives(
 	if (!quoteInputsKnown(known)) {
 		const fallback = buildStayClarificationMessage(sc, known, latestGuest?.message || "");
 		await saveKnownFacts(caseId, known);
-		return sendBrainToolReply({
+		return sendBrainToolReplyFromOpenAI({
 			io,
 			sc,
 			hotel,
@@ -6461,7 +6633,7 @@ async function handleBrainAlternatives(
 	};
 	await saveKnownFacts(caseId, nextKnown);
 	const fallback = buildAlternativeAvailabilityMessage(sc, nextKnown, result);
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6493,7 +6665,7 @@ async function handleBrainRoomOptions(
 	if (!validISODate(known.checkinISO) || !validISODate(known.checkoutISO)) {
 		const fallback = buildSameDateRoomOptionsMessage(sc, known, { options: [] });
 		await saveKnownFacts(caseId, known);
-		return sendBrainToolReply({
+		return sendBrainToolReplyFromOpenAI({
 			io,
 			sc,
 			hotel,
@@ -6533,7 +6705,7 @@ async function handleBrainRoomOptions(
 	};
 	await saveKnownFacts(caseId, nextKnown);
 	const fallback = buildSameDateRoomOptionsMessage(sc, nextKnown, result);
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6575,7 +6747,7 @@ async function handleBrainLookup(io, sc = {}, hotel = {}, known = {}, latestGues
 		: /^ar\b/i.test(activeLanguageCode(sc, known))
 		? "\u0623\u0643\u064a\u062f\u060c \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 \u0623\u0648 \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u0623\u0631\u0627\u062c\u0639\u0647 \u0644\u0643."
 		: "Sure, send me the reservation or confirmation number and I will check it for you.";
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6596,7 +6768,7 @@ async function handleBrainLookup(io, sc = {}, hotel = {}, known = {}, latestGues
 
 async function handleBrainCancel(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const fallback = buildCancelReservationContactMessage(sc, hotel, known, latestGuest);
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6626,7 +6798,7 @@ async function handleBrainUpdate(io, sc = {}, hotel = {}, known = {}, latestGues
 			/^ar\b/i.test(activeLanguageCode(sc, known))
 				? "\u0623\u0643\u064a\u062f\u060c \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629 \u0627\u0644\u062c\u062f\u064a\u062f\u064a\u0646\u060c \u0648\u0623\u0631\u0627\u062c\u0639 \u0627\u0644\u062a\u0648\u0641\u0631 \u0644\u0643."
 				: "Sure, send me the reservation number plus the new check-in and checkout dates, and I will check availability for you.";
-		return sendBrainToolReply({
+		return sendBrainToolReplyFromOpenAI({
 			io,
 			sc,
 			hotel,
@@ -6657,7 +6829,7 @@ async function handleBrainUpdate(io, sc = {}, hotel = {}, known = {}, latestGues
 		io,
 	});
 	const fallback = buildFriendlyReservationUpdateMessage(sc, known, result, latestGuest);
-	return sendBrainToolReply({
+	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
@@ -6668,6 +6840,208 @@ async function handleBrainUpdate(io, sc = {}, hotel = {}, known = {}, latestGues
 		fallback,
 		typingStartedAt,
 	});
+}
+
+function compactReviewForBrain(known = {}, hotel = {}) {
+	const quoteSummary = compactQuoteToolResult(
+		{ available: true, quote: asObject(known.quote) },
+		known
+	);
+	return {
+		hotelName: hotel?.hotelName || hotel?.hotelName_OtherLanguage || "",
+		checkinISO: known.checkinISO || "",
+		checkoutISO: known.checkoutISO || "",
+		dateCalendar: known.dateCalendar || "",
+		roomTypeKey: known.roomTypeKey || "",
+		rooms: normalizeRoomCount(known.rooms, 1),
+		roomSelections: normalizeRoomSelections(known.roomSelections),
+		adults: Number(known.adults || 0) || 0,
+		children: Number(known.children || 0) || 0,
+		fullName: known.fullName || "",
+		phone: known.phone || "",
+		nationality: known.nationality || "",
+		email: cleanEmail(known.email),
+		quote: quoteSummary.quote || quoteSummary,
+	};
+}
+
+async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
+	const caseId = caseIdText(sc);
+	let reviewKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	if (!quoteMatchesKnown(reviewKnown) && quoteInputsKnown(reviewKnown)) {
+		const quoteResult = await quoteTool(sc, reviewKnown);
+		if (quoteResult.available && quoteResult.quote) {
+			reviewKnown = syncKnownFromQuote({ ...reviewKnown, quote: quoteResult.quote });
+			await saveKnownFacts(caseId, reviewKnown);
+		} else {
+			let nextKnown = { ...reviewKnown };
+			nextKnown.quote = {
+				available: false,
+				roomTypeKey: quoteResult.roomTypeKey || reviewKnown.roomTypeKey,
+				checkinISO: quoteResult.checkinISO || reviewKnown.checkinISO,
+				checkoutISO: quoteResult.checkoutISO || reviewKnown.checkoutISO,
+				rooms: Math.max(1, Number(reviewKnown.rooms || 1) || 1),
+				currency: quoteResult.currency || "SAR",
+				code: quoteResult.code || "not_available",
+				roomLabel:
+					quoteResult.roomLabel ||
+					roomTypeLabel(reviewKnown.roomTypeKey, reviewKnown.languageCode),
+			};
+			nextKnown = syncKnownFromQuote(nextKnown);
+			await saveKnownFacts(caseId, nextKnown);
+			return sendBrainToolReplyFromOpenAI({
+				io,
+				sc,
+				hotel,
+				known: nextKnown,
+				latestGuest,
+				toolResult: compactQuoteToolResult(quoteResult, nextKnown),
+				clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
+				typingStartedAt,
+			});
+		}
+	}
+	const missing = requiredBookingMissing(reviewKnown);
+	await saveKnownFacts(caseId, reviewKnown);
+	const updated = await sendBrainToolReplyFromOpenAI({
+		io,
+		sc,
+		hotel,
+		known: reviewKnown,
+		latestGuest,
+		toolResult: {
+			tool: "send_review",
+			ok: !missing.length,
+			code: missing.length ? "missing_required_details" : "review_ready",
+			missing,
+			review: missing.length ? null : compactReviewForBrain(reviewKnown, hotel),
+			instruction: missing.length
+				? "Ask only for the missing required booking details in the guest language. Do not ask for optional fields before required fields."
+				: "Write the final booking review in the guest language using these exact facts. Ask the guest to confirm before creating the reservation.",
+		},
+		clientAction: missing.length ? "required_details_needed" : "review_reservation",
+		quickReplies: missing.length ? [] : reviewQuickReplies(activeLanguageCode(sc, reviewKnown)),
+		typingStartedAt,
+	});
+	if (latestConversationEntry(updated)?.clientAction === "review_reservation") {
+		reviewKnown.reviewSentAt = new Date().toISOString();
+		await saveKnownFacts(caseId, reviewKnown);
+	}
+	return updated;
+}
+
+async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
+	const caseId = caseIdText(sc);
+	let submitKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	if (!submitKnown.quote || !quoteMatchesKnown(submitKnown)) {
+		const quote = await quoteTool(sc, submitKnown);
+		if (quote.available && quote.quote) {
+			submitKnown = syncKnownFromQuote({ ...submitKnown, quote: quote.quote });
+			await saveKnownFacts(caseId, submitKnown);
+		} else {
+			return sendBrainToolReplyFromOpenAI({
+				io,
+				sc,
+				hotel,
+				known: submitKnown,
+				latestGuest,
+				toolResult: compactQuoteToolResult(quote, submitKnown),
+				clientAction: quote.available ? "quote_ready" : "quote_unavailable",
+				typingStartedAt,
+			});
+		}
+	}
+	const missing = requiredBookingMissing(submitKnown);
+	if (missing.length) {
+		await saveKnownFacts(caseId, submitKnown);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: submitKnown,
+			latestGuest,
+			toolResult: {
+				tool: "submit_reservation",
+				ok: false,
+				code: "missing_required_details",
+				missing,
+				instruction:
+					"Ask only for the missing required booking details before reservation creation.",
+			},
+			clientAction: "required_details_needed",
+			typingStartedAt,
+		});
+	}
+	try {
+		const quote = submitKnown.quote;
+		const room =
+			quote.room ||
+			(hotel.roomCountDetails || []).find((item) => item.roomType === submitKnown.roomTypeKey);
+		const reservation = await createReservationForCase({
+			caseId,
+			hotel,
+			slots: {
+				...submitKnown,
+				children: Number.isFinite(Number(submitKnown.children))
+					? Number(submitKnown.children)
+					: 0,
+				rooms: Math.max(1, Number(submitKnown.rooms || 1) || 1),
+			},
+			quoteData: quote,
+			room,
+		});
+		if (!shouldSkipReservationConfirmationDispatch()) {
+			dispatchAiReservationConfirmation({
+				caseId,
+				reservation,
+				mode: "initial",
+				includeGuestEmail: Boolean(cleanEmail(submitKnown.email)),
+				guestEmail: cleanEmail(submitKnown.email),
+			}).catch((error) => {
+				console.error("[aiagent] confirmation dispatch failed:", error?.message || error);
+			});
+		}
+		submitKnown.reservationId = String(reservation._id || "");
+		submitKnown.confirmation = reservation.confirmation_number || submitKnown.confirmation || "";
+		await saveKnownFacts(caseId, submitKnown);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: submitKnown,
+			latestGuest,
+			toolResult: {
+				tool: "submit_reservation",
+				ok: true,
+				code: "reservation_created",
+				reservation: compactReservationForBrain(reservation),
+				review: compactReviewForBrain(submitKnown, hotel),
+				instruction:
+					"Write the reservation confirmation in the guest language using the exact confirmation details. Be warm and concise.",
+			},
+			clientAction: "reservation_confirmed",
+			typingStartedAt,
+		});
+	} catch (error) {
+		console.error("[aiagent] reservation finalize failed:", error?.message || error);
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: submitKnown,
+			latestGuest,
+			toolResult: {
+				tool: "submit_reservation",
+				ok: false,
+				code: "reservation_finalize_failed",
+				error: cleanDisplayString(error?.message || "Reservation creation failed.", 260),
+				instruction:
+					"Apologize briefly and explain that the booking needs a team member to review it. Do not claim the reservation was created.",
+			},
+			clientAction: "reservation_finalize_failed",
+			typingStartedAt,
+		});
+	}
 }
 
 async function executeBrainFirstDecision({
@@ -6745,12 +7119,19 @@ async function executeBrainFirstDecision({
 	}
 	if (replyRequestsForbiddenBookingField(nextDecision.reply)) {
 		const missing = requiredBookingMissing(nextKnown);
-		nextDecision = normalizeDecision({
-			action: "reply",
-			reply: buildAllowedMissingBookingDetailsMessage(sc, nextKnown, missing),
-			facts: {},
-			reason: "forbidden_booking_field_guard",
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "forbidden_booking_field_guard",
+			extra: { missing },
+			instruction:
+				"Rewrite the reply from OpenAI only. Ask only for allowed booking fields: full name, phone, nationality, adult/child counts, dates, room selection, and optional email only after required fields are complete.",
 		});
+		nextDecision = repaired.decision;
+		nextKnown = syncKnownFromQuote(repaired.known);
 	}
 	if (
 		!latestClarifiesRequiredBookingDetail &&
@@ -6758,12 +7139,19 @@ async function executeBrainFirstDecision({
 		replyAsksOptionalEmail(nextDecision.reply, nextKnown) &&
 		requiredBookingMissing(nextKnown).length
 	) {
-		nextDecision = normalizeDecision({
-			action: "reply",
-			reply: buildMandatoryDetailsMessage(sc, nextKnown, requiredBookingMissing(nextKnown)),
-			facts: {},
-			reason: "optional_email_before_required_details_guard",
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "optional_email_before_required_details_guard",
+			extra: { missing: requiredBookingMissing(nextKnown) },
+			instruction:
+				"Required booking details are still missing. Rewrite the reply from OpenAI only and ask for the missing required details before mentioning optional email.",
 		});
+		nextDecision = repaired.decision;
+		nextKnown = syncKnownFromQuote(repaired.known);
 	}
 	if (
 		!latestClarifiesRequiredBookingDetail &&
@@ -6771,14 +7159,28 @@ async function executeBrainFirstDecision({
 		replyPromisesReservationFinalization(nextDecision.reply)
 	) {
 		const missing = requiredBookingMissing(nextKnown);
-		nextDecision = normalizeDecision({
-			action: missing.length ? "reply" : "send_review",
-			reply: missing.length ? buildMandatoryDetailsMessage(sc, nextKnown, missing) : "",
-			facts: {},
-			reason: missing.length
-				? "finalization_promise_missing_required_details_guard"
-				: "finalization_promise_requires_official_review",
-		});
+		if (missing.length) {
+			const repaired = await repairBrainDecisionWithInstruction({
+				sc,
+				hotel,
+				known: nextKnown,
+				latestGuest,
+				decision: nextDecision,
+				code: "finalization_promise_missing_required_details_guard",
+				extra: { missing },
+				instruction:
+					"The guest-facing reply must be from OpenAI only. Ask only for the missing required details before promising reservation finalization.",
+			});
+			nextDecision = repaired.decision;
+			nextKnown = syncKnownFromQuote(repaired.known);
+		} else {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "send_review",
+				reply: "",
+				reason: "finalization_promise_requires_official_review",
+			});
+		}
 	}
 	if (
 		latestClarifiesRequiredBookingDetail &&
@@ -6820,10 +7222,32 @@ async function executeBrainFirstDecision({
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
 	if (nextDecision.action === "escalate") {
 		await waitForTypingMinimum(typingStartedAt);
-		return handoffToHuman(io, sc, nextKnown, latestGuest, nextDecision.reason || "ai_escalated");
+		if (!nextDecision.reply) {
+			console.error("[aiagent] escalation blocked: OpenAI reply required", {
+				caseId: key,
+				reason: nextDecision.reason || "",
+			});
+			await emitTyping(io, sc, false);
+			return (await getSupportCaseById(key).catch(() => null)) || sc;
+		}
+		return sendAiMessage(io, sc, nextDecision.reply, {
+			latestGuest,
+			known: nextKnown,
+			handoff: true,
+			handoffReason: nextDecision.reason || "ai_escalated",
+			source: "openai",
+		});
 	}
 	if (nextDecision.action === "close_case") {
 		await waitForTypingMinimum(typingStartedAt);
+		if (!nextDecision.reply) {
+			console.error("[aiagent] close_case blocked: OpenAI reply required", {
+				caseId: key,
+				reason: nextDecision.reason || "",
+			});
+			await emitTyping(io, sc, false);
+			return (await getSupportCaseById(key).catch(() => null)) || sc;
+		}
 		return closeCaseWithOutro(io, sc, nextKnown, latestGuest, nextDecision.reply);
 	}
 	if (nextDecision.action === "cancel_reservation") {
@@ -6846,17 +7270,21 @@ async function executeBrainFirstDecision({
 	}
 	if (nextDecision.action === "submit_reservation") {
 		await waitForTypingMinimum(typingStartedAt);
-		return submitReservationForCase(io, key);
+		return handleBrainSubmitReservation(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (nextDecision.action === "send_review" || nextDecision.action === "send_review_again") {
 		await waitForTypingMinimum(typingStartedAt);
-		return sendReviewMaybeOfferOptionalEmail(io, sc, nextKnown, hotel, latestGuest);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	let reply = nextDecision.reply || "";
 	if (!reply) {
-		reply = /^ar\b/i.test(activeLanguageCode(sc, nextKnown))
-			? "\u062a\u0645\u0627\u0645\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0648\u0633\u0623\u0633\u0627\u0639\u062f\u0643 \u062e\u0637\u0648\u0629 \u0628\u062e\u0637\u0648\u0629."
-			: "Sure, send me the details and I will help step by step.";
+		console.error("[aiagent] brain decision blocked: OpenAI reply required", {
+			caseId: key,
+			action: nextDecision.action || "",
+			reason: nextDecision.reason || "",
+		});
+		await emitTyping(io, sc, false);
+		return (await getSupportCaseById(key).catch(() => null)) || sc;
 	}
 	reply = await polishCustomerReply({
 		sc,
@@ -6871,6 +7299,7 @@ async function executeBrainFirstDecision({
 		latestGuest,
 		known: nextKnown,
 		quickReplies: operationalQuickRepliesForReply(nextDecision, nextKnown, sc),
+		source: "openai",
 	});
 }
 
@@ -6909,15 +7338,8 @@ async function runBrainFirstTurn({
 		});
 	} catch (error) {
 		console.error("[aiagent] brain-first turn failed:", error?.stack || error);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(
-			io,
-			sc,
-			/^ar\b/i.test(activeLanguageCode(sc, known))
-				? "\u0623\u0639\u062a\u0630\u0631\u060c \u0627\u062d\u062a\u062c\u062a \u0644\u062d\u0638\u0629 \u0623\u0637\u0648\u0644 \u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644. \u0623\u0631\u0633\u0644 \u0644\u064a \u0622\u062e\u0631 \u0646\u0642\u0637\u0629 \u062a\u0631\u064a\u062f\u0647\u0627 \u0648\u0623\u0643\u0645\u0644 \u0645\u0639\u0643."
-				: "Sorry, I needed a little longer to review the details. Send me the latest point you need and I will continue with you.",
-			{ latestGuest, known }
-		);
+		await emitTyping(io, sc, false);
+		return (await getSupportCaseById(key).catch(() => null)) || sc;
 	}
 }
 
@@ -7230,6 +7652,19 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (latestAction === "skip_email") {
 		known.emailSkipped = true;
+	}
+	if (shouldUseBrainFirstOrchestrator()) {
+		logTurnStage(key, "brain_first_handoff");
+		await saveKnownFacts(key, known);
+		return runBrainFirstTurn({
+			io,
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			noAiYet,
+			typingStartedAt,
+		});
 	}
 	if (latestAction === "skip_email") {
 		known.emailSkipped = true;
