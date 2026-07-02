@@ -7271,6 +7271,34 @@ function latestGuestRequestsAlternativeAvailability(
 		);
 }
 
+function recoverUnavailableKnownForAlternatives(
+	sc = {},
+	known = {},
+	knownBeforeLatestGuestMerge = {},
+	previousAi = null
+) {
+	const previousFacts = quoteFactsFromAiMessage(previousAi);
+	const conversationFacts = latestQuoteFactsFromConversation(sc);
+	const bases = [knownBeforeLatestGuestMerge, known].filter(Boolean);
+	const candidates = [];
+	for (const base of bases) {
+		const baseFacts = asObject(base);
+		candidates.push(baseFacts);
+		if (Object.keys(previousFacts).length) {
+			candidates.push(syncKnownFromQuote(mergeAssistantQuoteFacts(baseFacts, previousFacts)));
+		}
+		if (Object.keys(conversationFacts).length) {
+			candidates.push(syncKnownFromQuote(mergeAssistantQuoteFacts(baseFacts, conversationFacts)));
+		}
+	}
+	for (const candidate of candidates) {
+		const recovered = syncKnownFromQuote(candidate);
+		if (!quoteInputsKnown(recovered)) continue;
+		if (unavailableQuoteBlocksRequestedDate(recovered)) return recovered;
+	}
+	return {};
+}
+
 function latestTextRequestsDateAlternatives(value = "") {
 	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -7671,7 +7699,7 @@ function buildAlternativeAvailabilityMessage(sc = {}, known = {}, result = {}) {
 					option.checkoutISO,
 					languageCode
 				)}`;
-				return `${formatNumber(index + 1, languageCode)}. ${dateLine}، ${formatNumber(option.nights, languageCode)} ليال، الإجمالي ${formatMoney(option.total, option.currency, languageCode)}.`;
+				return `${formatNumber(index + 1, languageCode)}. ${dateLine}، ${formatNightsLabel(option.nights, languageCode)}، الإجمالي ${formatMoney(option.total, option.currency, languageCode)}.`;
 			}),
 			`لو يناسبك أحد هذه المواعيد، اكتب لي رقم الخيار أو التاريخ الذي تفضله وأكمل لك الحجز عليه.`,
 		].join("\n");
@@ -7683,7 +7711,7 @@ function buildAlternativeAvailabilityMessage(sc = {}, known = {}, result = {}) {
 				option.checkoutISO,
 				languageCode
 			)}`;
-			return `${index + 1}. ${dateLine}, ${option.nights} nights, total ${formatMoney(option.total, option.currency, languageCode)}.`;
+			return `${index + 1}. ${dateLine}, ${formatNightsLabel(option.nights, languageCode)}, total ${formatMoney(option.total, option.currency, languageCode)}.`;
 		}),
 		`If one works for you, send the option number or preferred date and I will continue with it.`,
 	].join("\n");
@@ -8076,6 +8104,16 @@ function formatMoney(value, currency = "SAR", languageCode = "en") {
 		: `${amount} ${currency || "SAR"}`;
 }
 
+function formatNightsLabel(value = 0, languageCode = "en") {
+	const nights = Math.max(0, Number(value || 0) || 0);
+	if (/^ar\b/i.test(languageCode)) {
+		if (nights === 1) return "ليلة واحدة";
+		if (nights === 2) return "ليلتين";
+		return `${formatNumber(nights, languageCode)} ليال`;
+	}
+	return `${nights} night${nights === 1 ? "" : "s"}`;
+}
+
 function roomDisplayLabel(room = {}, roomTypeKey = "", languageCode = "en") {
 	const ar = /^ar\b/i.test(languageCode);
 	const english = cleanDisplayString(room.displayName, 160);
@@ -8210,9 +8248,27 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			result.minCheckinISO || addDaysISO(businessTodayISO(hotel), 1),
 			languageCode
 		);
+		const requestedDate = formatDate(
+			result.checkinISO || known.checkinISO,
+			languageCode
+		);
 		return ar
-			? `${arabicGuestAddress(sc, known)}، الحجز عن طريق المحادثة لا يقبل تاريخ وصول اليوم. أقرب تاريخ وصول ممكن من خلال المحادثة هو ${minDate}. إذا يناسبك أبحث لك من هذا التاريخ أو أعدّل التواريخ.`
-			: `${guestDisplayName(sc)}, same-day check-in cannot be booked through chat. The earliest check-in I can check here is ${minDate}. I can search from that date or adjust the dates for you.`;
+			? [
+					`${arabicGuestAddress(sc, known)}، تاريخ الوصول المطلوب ${requestedDate} غير متاح للحجز عبر المحادثة لأنه يقع في نفس يوم الفندق.`,
+					requestedRoomLabel ? `الغرف المطلوبة: ${requestedRoomLabel}.` : "",
+					`أقرب يوم يمكن للنظام بدء البحث منه هو ${minDate}، وهذا ليس تأكيد توفر لهذا التاريخ.`,
+					`اختر "تواريخ بديلة" وسأعرض لك أقرب تواريخ متاحة مؤكدة، أو اختر "أعدل التفاصيل".`,
+			  ]
+					.filter(Boolean)
+					.join("\n")
+			: [
+					`${guestDisplayName(sc)}, the requested check-in date ${requestedDate} is not bookable through chat because it is the hotel's same business day.`,
+					requestedRoomLabel ? `Requested room(s): ${requestedRoomLabel}.` : "",
+					`The earliest day the system can start checking from is ${minDate}; that is not a confirmed available date.`,
+					`Choose "Alternative dates" and I will show the nearest verified available dates, or choose "Change details".`,
+			  ]
+					.filter(Boolean)
+					.join("\n");
 	}
 	if (
 		!result.available &&
@@ -9326,7 +9382,7 @@ function quoteReplyFormattingInstruction() {
 		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
 		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type, and do not show total/price as 0.",
-		"If toolResult.code is same_day_checkin_not_supported, toolResult.minCheckinISO is only the earliest date the chat can start checking; do not call it available or recommended unless an alternatives/availability tool result proves availability.",
+		"If toolResult.code is same_day_checkin_not_supported, explicitly say the requested check-in is unavailable/not bookable through chat. toolResult.minCheckinISO is only the earliest date the chat can start checking; do not invite the guest to book/search from that date as the solution, and do not call it available or recommended unless an alternatives/availability tool result proves availability. Offer the Alternative dates button or changing details.",
 	].join(" ");
 }
 
@@ -10098,8 +10154,22 @@ function sameDayReplyClaimsMinimumDateAvailable(reply = "", toolResult = {}) {
 	const nearby = text.slice(Math.max(0, minIndex - 90), minIndex + minDate.length + 90);
 	const compactNearby = compact.slice(Math.max(0, compact.indexOf(minDate) - 90), compact.indexOf(minDate) + minDate.length + 90);
 	return (
-		/\b(?:available|bookable|recommended|confirmed|can\s+book|reserve\s+from|arrange\s+from)\b/i.test(nearby) ||
-		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u062d\u062c\u0632\u0644\u0647|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0623\u0631\u062a\u0628\u0644\u0643|\u0627\u0631\u062a\u0628\u0644\u0643|\u0645\u0624\u0643\u062f|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0623\u0642\u0631\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0627\u0642\u0631\u0628)/iu.test(compactNearby)
+		/\b(?:available|bookable|recommended|confirmed|can\s+book|reserve\s+from|arrange\s+from|search\s+from|check\s+from|look\s+from|start\s+from|begin\s+from)\b/i.test(nearby) ||
+		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u062d\u062c\u0632\u0644\u0647|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0623\u0631\u062a\u0628\u0644\u0643|\u0627\u0631\u062a\u0628\u0644\u0643|\u0645\u0624\u0643\u062f|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0623\u0642\u0631\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0627\u0642\u0631\u0628|\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646)/iu.test(compactNearby)
+	);
+}
+
+function sameDayReplyMissingUnavailableLanguage(reply = "", toolResult = {}) {
+	if (String(toolResult?.code || "") !== "same_day_checkin_not_supported") return false;
+	const text = normalizeIntentSearchText(reply);
+	const compact = text.replace(/\s+/g, "");
+	return !(
+		/\b(?:unavailable|not\s+available|not\s+bookable|cannot\s+be\s+booked|can't\s+be\s+booked|same-?day)\b/i.test(
+			text
+		) ||
+		/(?:\u063a\u064a\u0631\u0645\u062a\u0627\u062d|\u063a\u064a\u0631\u0645\u062a\u0627\u062d\u0629|\u063a\u064a\u0631\u0645\u062a\u0648\u0641\u0631|\u063a\u064a\u0631\u0645\u062a\u0648\u0641\u0631\u0629|\u0644\u0627\u064a\u0642\u0628\u0644|\u0644\u0627\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0644\u0627\u064a\u0645\u0643\u0646\u062d\u062c\u0632|\u0646\u0641\u0633\u064a\u0648\u0645|\u0627\u0644\u064a\u0648\u0645)/iu.test(
+			compact
+		)
 	);
 }
 
@@ -10517,6 +10587,12 @@ async function sendBrainToolReplyFromOpenAI({
 			sameDayReplyClaimsMinimumDateAvailable(text, toolResult)
 		) {
 			return "same_day_minimum_date_claimed_available";
+		}
+		if (
+			toolResult?.tool === "get_quote" &&
+			sameDayReplyMissingUnavailableLanguage(text, toolResult)
+		) {
+			return "same_day_unavailable_language_missing";
 		}
 		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
 			return "unavailable_quote_zero_total";
@@ -12503,23 +12579,24 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		String(previousAi?.clientAction || "").toLowerCase() === "quote_unavailable" &&
+		previousAiAction === "quote_unavailable" &&
 		(latestGuestRequestsBroadAlternative(latestText, latestAction) ||
-			unavailableQuoteBlocksRequestedDate(knownBeforeLatestGuestMerge) ||
+			latestGuestRequestsAlternativeAvailability(
+				latestText,
+				latestAction,
+				previousAi,
+				knownBeforeLatestGuestMerge
+			) ||
+			latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi, known) ||
 			latestAction === "check_alternatives") &&
 		!quickDateRange(latestText)?.checkinISO
 	) {
-		const baseUnavailableKnown = quoteInputsKnown(knownBeforeLatestGuestMerge)
-			? knownBeforeLatestGuestMerge
-			: known;
-		let recoveredUnavailableKnown = syncKnownFromQuote(
-			mergeAssistantQuoteFacts(baseUnavailableKnown, quoteFactsFromAiMessage(previousAi))
+		const recoveredUnavailableKnown = recoverUnavailableKnownForAlternatives(
+			sc,
+			known,
+			knownBeforeLatestGuestMerge,
+			previousAi
 		);
-		if (!quoteInputsKnown(recoveredUnavailableKnown)) {
-			recoveredUnavailableKnown = syncKnownFromQuote(
-				mergeAssistantQuoteFacts(recoveredUnavailableKnown, latestQuoteFactsFromConversation(sc))
-			);
-		}
 		if (quoteInputsKnown(recoveredUnavailableKnown)) {
 			known = mergeKnownFacts(known, {
 				checkinISO: recoveredUnavailableKnown.checkinISO,
@@ -12536,16 +12613,10 @@ async function planTurn(io, supportCaseOrId) {
 					? Number(recoveredUnavailableKnown.children)
 					: Number(known.children || 0) || 0,
 			});
-			if (
-				unavailableQuoteBlocksRequestedDate(known) ||
-				latestGuestRequestsBroadAlternative(latestText, latestAction) ||
-				latestAction === "check_alternatives"
-			) {
-				await saveKnownFacts(key, known);
-				await waitForTypingMinimum(typingStartedAt);
-				logTurnStage(key, "unavailable_quote_recovered_to_alternatives");
-				return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
-			}
+			await saveKnownFacts(key, known);
+			await waitForTypingMinimum(typingStartedAt);
+			logTurnStage(key, "unavailable_quote_recovered_to_alternatives");
+			return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
 		}
 	}
 	if (
