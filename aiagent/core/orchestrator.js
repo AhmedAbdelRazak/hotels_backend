@@ -1005,6 +1005,116 @@ function addDaysISO(iso = "", days = 0) {
 	return date.toISOString().slice(0, 10);
 }
 
+function isoDateParts(iso = "") {
+	const valid = validISODate(iso);
+	if (!valid) return null;
+	const [year, month, day] = valid.split("-").map((part) => Number(part));
+	if (!year || !month || !day) return null;
+	return { year, month, day };
+}
+
+function isoFromGregorianParts(year, month, day) {
+	const y = Number(year);
+	const m = Number(month);
+	const d = Number(day);
+	if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d)) return "";
+	if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return "";
+	const date = new Date(Date.UTC(y, m - 1, d));
+	if (
+		date.getUTCFullYear() !== y ||
+		date.getUTCMonth() + 1 !== m ||
+		date.getUTCDate() !== d
+	) {
+		return "";
+	}
+	return date.toISOString().slice(0, 10);
+}
+
+function normalizeTwoDigitYear(year = "") {
+	const value = String(year || "").trim();
+	if (!value) return 0;
+	const numeric = Number(value);
+	if (!Number.isInteger(numeric)) return 0;
+	if (numeric >= 2000 && numeric <= 2100) return numeric;
+	if (numeric >= 0 && numeric <= 99) return 2000 + numeric;
+	return 0;
+}
+
+function numericSlashDateTokens(value = "") {
+	const raw = digitsToEnglish(String(value || ""));
+	return Array.from(
+		raw.matchAll(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-]((?:20\d{2})|\d{2}))?\b/g)
+	);
+}
+
+function containsDateLikeSlashToken(value = "") {
+	return numericSlashDateTokens(value).some((match) => {
+		const a = Number(match[1]);
+		const b = Number(match[2]);
+		if (!Number.isInteger(a) || !Number.isInteger(b)) return false;
+		return (
+			(a >= 1 && a <= 31 && b >= 1 && b <= 12) ||
+			(a >= 1 && a <= 12 && b >= 1 && b <= 31)
+		);
+	});
+}
+
+function futureYearForMonthDay(month, day) {
+	const today = new Date();
+	const todayISO = today.toISOString().slice(0, 10);
+	let year = today.getUTCFullYear();
+	let iso = isoFromGregorianParts(year, month, day);
+	if (iso && iso < todayISO) {
+		year += 1;
+		iso = isoFromGregorianParts(year, month, day);
+	}
+	return iso;
+}
+
+function singleGregorianDateFromText(value = "", known = {}) {
+	const raw = digitsToEnglish(String(value || ""));
+	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g) || [];
+	if (isoMatches.length === 1) return validISODate(isoMatches[0]);
+	const matches = numericSlashDateTokens(raw);
+	if (matches.length !== 1) return "";
+	const match = matches[0];
+	const a = Number(match[1]);
+	const b = Number(match[2]);
+	const explicitYear = normalizeTwoDigitYear(match[3]);
+	if (!a || !b) return "";
+	let day = 0;
+	let month = 0;
+	const knownCheckinParts = isoDateParts(known.checkinISO);
+	const knownCheckoutParts = isoDateParts(known.checkoutISO);
+	const knownMonth = knownCheckinParts?.month || knownCheckoutParts?.month || 0;
+	if (a > 12 && b <= 12) {
+		day = a;
+		month = b;
+	} else if (b > 12 && a <= 12) {
+		month = a;
+		day = b;
+	} else if (knownMonth && b === knownMonth) {
+		day = a;
+		month = b;
+	} else if (knownMonth && a === knownMonth) {
+		month = a;
+		day = b;
+	} else {
+		return "";
+	}
+	const baseYear = explicitYear || knownCheckinParts?.year || knownCheckoutParts?.year || 0;
+	let iso = baseYear
+		? isoFromGregorianParts(baseYear, month, day)
+		: futureYearForMonthDay(month, day);
+	if (!iso) return "";
+	const knownCheckin = validISODate(known.checkinISO);
+	if (!explicitYear && knownCheckin && iso <= knownCheckin) {
+		const nextYearIso = isoFromGregorianParts((isoDateParts(iso)?.year || baseYear) + 1, month, day);
+		if (nextYearIso) iso = nextYearIso;
+	}
+	return iso;
+}
+
 function eachNight(checkinISO = "", checkoutISO = "") {
 	const start = validISODate(checkinISO);
 	const end = validISODate(checkoutISO);
@@ -1653,6 +1763,8 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 	let lastAiAskedEmail = false;
 	let lastAiAskedGuestCount = false;
 	let lastAiAskedBookingName = false;
+	let lastAiAskedCheckinDate = false;
+	let lastAiAskedCheckoutDate = false;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (const entry of conversation) {
 		const rawEntryText = String(entry?.message || "");
@@ -1672,6 +1784,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				delete aiFacts.adults;
 			}
 			recovered = mergeAssistantQuoteFacts(recovered, aiFacts);
+			recovered = mergeKnownFacts(recovered, assistantSingleBoundaryDateFacts(rawEntryText));
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (isPlausibleBookingName(value)) recovered.fullName = value;
@@ -1689,6 +1802,8 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			lastAiAskedEmail = previousAiAskedFor("email", entry);
 			lastAiAskedGuestCount = previousAiAskedForGuestCount(entry);
 			lastAiAskedBookingName = previousAiAskedForBookingName(entry);
+			lastAiAskedCheckinDate = previousAiAskedForCheckinDate(entry);
+			lastAiAskedCheckoutDate = previousAiAskedForCheckoutDate(entry);
 			continue;
 		}
 		if (!isGuestEntry(entry)) continue;
@@ -1698,6 +1813,15 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			recovered.emailSkipped = true;
 			lastAiAskedEmail = false;
 			continue;
+		}
+		const boundaryFacts = dateBoundaryFactsFromAskedAnswer(rawEntryText, recovered, {
+			askedCheckin: lastAiAskedCheckinDate,
+			askedCheckout: lastAiAskedCheckoutDate,
+		});
+		if (Object.keys(boundaryFacts).length) {
+			recovered = mergeKnownFacts(recovered, boundaryFacts);
+			if (boundaryFacts.checkinISO) lastAiAskedCheckinDate = false;
+			if (boundaryFacts.checkoutISO) lastAiAskedCheckoutDate = false;
 		}
 		if (lastAiAskedGuestCount) {
 			recovered = mergeKnownFacts(
@@ -2641,6 +2765,81 @@ function previousAiAskedFor(field = "", previousAi = {}) {
 	return false;
 }
 
+function previousAiAskedForCheckinDate(previousAi = {}) {
+	const text = normalizeIntentSearchText(previousAi?.message || "")
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return /\b(?:check\s*in|check-in|arrival|arrive)\b/i.test(text) ||
+		/(?:تاريخ\s*(?:الدخول|الوصول)|الدخول|الوصول|من\s+يوم|من\s+تاريخ)/iu.test(text);
+}
+
+function previousAiAskedForCheckoutDate(previousAi = {}) {
+	const text = normalizeIntentSearchText(previousAi?.message || "")
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return /\b(?:check\s*out|check-out|checkout|departure|depart|leave|leaving|until)\b/i.test(text) ||
+		/(?:تاريخ\s*(?:الخروج|المغادرة)|الخروج|المغادرة|الى\s+يوم|إلى\s+يوم|حتى)/iu.test(text);
+}
+
+function assistantSingleBoundaryDateFacts(value = "") {
+	const text = String(value || "");
+	const isoMatches = text.match(/\b20\d{2}-\d{2}-\d{2}\b/g) || [];
+	if (isoMatches.length !== 1) return {};
+	const iso = validISODate(isoMatches[0]);
+	if (!iso) return {};
+	const facts = { dateCalendar: "gregorian" };
+	const isoIndex = text.indexOf(isoMatches[0]);
+	const localText =
+		isoIndex >= 0
+			? text.slice(Math.max(0, isoIndex - 60), Math.min(text.length, isoIndex + iso.length + 40))
+			: text;
+	if (previousAiAskedForCheckinDate({ message: localText })) {
+		facts.checkinISO = iso;
+		return facts;
+	}
+	if (previousAiAskedForCheckoutDate({ message: localText })) {
+		facts.checkoutISO = iso;
+		return facts;
+	}
+	const asksCheckin = previousAiAskedForCheckinDate({ message: text });
+	const asksCheckout = previousAiAskedForCheckoutDate({ message: text });
+	if (asksCheckin && !asksCheckout) {
+		facts.checkinISO = iso;
+		return facts;
+	}
+	if (asksCheckout && !asksCheckin) {
+		facts.checkoutISO = iso;
+		return facts;
+	}
+	return {};
+}
+
+function dateBoundaryFactsFromAskedAnswer(value = "", known = {}, previousAi = {}) {
+	if (quickDateRange(value)?.checkinISO && quickDateRange(value)?.checkoutISO) return {};
+	const iso = singleGregorianDateFromText(value, known);
+	if (!iso) return {};
+	const askedCheckout =
+		Boolean(previousAi?.askedCheckout) || previousAiAskedForCheckoutDate(previousAi);
+	const askedCheckin =
+		Boolean(previousAi?.askedCheckin) || previousAiAskedForCheckinDate(previousAi);
+	const checkinISO = validISODate(known.checkinISO);
+	const checkoutISO = validISODate(known.checkoutISO);
+	if (askedCheckout && checkinISO && iso > checkinISO) {
+		return { checkoutISO: iso, dateCalendar: "gregorian" };
+	}
+	if (askedCheckin && !checkinISO) {
+		return { checkinISO: iso, dateCalendar: "gregorian" };
+	}
+	if (askedCheckin && checkoutISO && iso < checkoutISO) {
+		return { checkinISO: iso, dateCalendar: "gregorian" };
+	}
+	return {};
+}
+
 function previousAiAskedForIdentityConfirmation(previousAi = {}) {
 	const action = cleanString(previousAi?.clientAction, 80).toLowerCase();
 	if (action === "review_reservation") return true;
@@ -2817,15 +3016,14 @@ function previousAiAskedForGuestCount(previousAi = {}) {
 		.trim();
 	const action = String(previousAi?.clientAction || "").toLowerCase();
 	if (!text && !action) return false;
-	return (
-		action.includes("required_details") ||
-		/\b(number of guests|guest count|how many adults|adults and children|adults and kids)\b/i.test(text) ||
-		/(?:\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/iu.test(text)
-	);
+	if (action.includes("guest_count") || action.includes("adults_children")) return true;
+	return /\b(number of guests|guest count|how many adults|adults and children|adults and kids)\b/i.test(text) ||
+		/(?:\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/iu.test(text);
 }
 
 function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	if (!previousAiAskedForGuestCount(previousAi)) return {};
+	if (containsDateLikeSlashToken(value)) return {};
 	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
 		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
 		.replace(/\s+/g, " ")
@@ -2916,6 +3114,9 @@ function guestDeclinesFurtherHelp(value = "", action = "") {
 		return false;
 	}
 	if (/\b(no thanks|no thank you|nothing else|no need|that is all|that's all|all good|i am good|thanks|thank you|bye|goodbye)\b/i.test(text)) {
+		return true;
+	}
+	if (/\b(?:later|maybe later|not now)\b/i.test(text) || /(?:لاحق(?:ا|اً)?|بعدين|فيما\s+بعد)/iu.test(text)) {
 		return true;
 	}
 	return [
@@ -9842,6 +10043,10 @@ async function planTurn(io, supportCaseOrId) {
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	if (latestGuest) {
+		const dateBoundaryFacts = dateBoundaryFactsFromAskedAnswer(latestText, known, previousAi);
+		if (Object.keys(dateBoundaryFacts).length) {
+			known = mergeKnownFacts(known, dateBoundaryFacts);
+		}
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
 		if (
@@ -9891,6 +10096,15 @@ async function planTurn(io, supportCaseOrId) {
 		}
 	}
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
+	if (
+		latestGuest &&
+		["quote_ready", "quote_unavailable"].includes(previousAiAction) &&
+		guestDeclinesFurtherHelp(latestText, latestAction)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return closeCaseWithOutro(io, sc, known, latestGuest);
+	}
 	const latestRoomsOnly = latestGuest
 		? roomCountOnlyFromText(latestText) || latestRoomCountCorrection
 		: null;
@@ -11197,6 +11411,12 @@ const exportedOrchestrator = {
 		sameAsDisplayedNameIntent,
 		applyDisplayedNameAnswer,
 		previousAiAskedForGuestCount,
+		previousAiAskedForCheckinDate,
+		previousAiAskedForCheckoutDate,
+		dateBoundaryFactsFromAskedAnswer,
+		assistantSingleBoundaryDateFacts,
+		singleGregorianDateFromText,
+		containsDateLikeSlashToken,
 		guestCountFactsFromAskedAnswer,
 		conversationHasGuestCountSignal,
 		replyPromisesReservationFinalization,
