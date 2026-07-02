@@ -2763,6 +2763,39 @@ function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
 	return arabicNeedles.some((needle) => compact.includes(needle));
 }
 
+function latestGuestRaisesBudgetConcern(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:too much|a lot|expensive|costly|high price|price is high|over budget|my budget|cheaper|cheap|discount|lower price|best price)\b/i.test(
+			text
+		) ||
+		/(?:\u063a\u0627\u0644\u064a|\u063a\u0627\u0644\u064a\u0629|\u0643\u062a\u064a\u0631|\u0643\u062b\u064a\u0631|\u0627\u0631\u062e\u0635|\u0623\u0631\u062e\u0635|\u062a\u062e\u0641\u064a\u0636|\u062e\u0635\u0645|\u0645\u064a\u0632\u0627\u0646\u064a\u0629|\u0628\u0627\u0644\u063a|\u0639\u0627\u0644\u064a|\u0639\u0627\u0644\u064a\u0629)/iu.test(
+			compact
+		)
+	);
+}
+
+function replyHasHotelValuePitch(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	if (!text) return false;
+	return (
+		/\b(?:haram|walk|walking|minute|near|close|location|clean|restaurant|amenit|parking|bus|nusuk|view|service|comfort|suitable|family)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0644\u062d\u0631\u0645|\u0645\u0634\u064a|\u0645\u0634\u064a\u0627|\u062f\u0642\u064a\u0642\u0629|\u062f\u0642\u0627\u0626\u0642|\u0642\u0631\u064a\u0628|\u0642\u0631\u064a\u0628\u0629|\u0645\u0648\u0642\u0639|\u0646\u0638\u064a\u0641|\u0646\u0638\u0627\u0641\u0629|\u0645\u0637\u0627\u0639\u0645|\u062e\u062f\u0645\u0627\u062a|\u0645\u0648\u0627\u0642\u0641|\u0628\u0627\u0635|\u0646\u0633\u0643|\u0625\u0637\u0644\u0627\u0644\u0629|\u0627\u0637\u0644\u0627\u0644\u0629|\u0645\u0646\u0627\u0633\u0628)/iu.test(
+			compact
+		)
+	);
+}
+
 function latestGuestAsksBookingProcess(latestGuest = {}) {
 	const text = normalizeIntentSearchText(latestGuest?.message || "")
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -3970,13 +4003,21 @@ function emailSkipQuickReplies(languageCode = "en") {
 	];
 }
 
-function operationalQuickRepliesForReply(decision = {}, known = {}, sc = {}) {
+function operationalQuickRepliesForReply(decision = {}, known = {}, sc = {}, latestGuest = null) {
 	if (decision.action !== "reply") return [];
 	if (replyAsksOptionalEmail(decision.reply, known)) {
 		return emailSkipQuickReplies(activeLanguageCode(sc, known));
 	}
 	if (replyInvitesConfirmationAction(decision.reply) && !requiredBookingMissing(known).length) {
 		return reviewQuickReplies(activeLanguageCode(sc, known));
+	}
+	if (
+		latestGuest &&
+		(latestGuestRaisesBudgetConcern(latestGuest.message || "") ||
+			latestGuestAsksOtherCloserHotel(latestGuest)) &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))
+	) {
+		return valueObjectionQuickReplies(activeLanguageCode(sc, known));
 	}
 	return [];
 }
@@ -7290,6 +7331,21 @@ function splitStayQuickReplies(languageCode = "en") {
 	];
 }
 
+function valueObjectionQuickReplies(languageCode = "en") {
+	if (/^ar\b/i.test(languageCode)) {
+		return [
+			{ label: "نعم، تابع", value: "نعم، تابع", action: "proceed" },
+			{ label: "تواريخ بديلة", value: "أريد تواريخ بديلة", action: "check_alternatives" },
+			{ label: "تعديل التفاصيل", value: "أريد تعديل شيء", action: "revise_reservation" },
+		];
+	}
+	return [
+		{ label: "Continue", value: "Yes, continue", action: "proceed" },
+		{ label: "Alternative dates", value: "Check alternative dates", action: "check_alternatives" },
+		{ label: "Change details", value: "I want to change something", action: "revise_reservation" },
+	];
+}
+
 function quoteUnavailableQuickReplies(languageCode = "en") {
 	if (/^ar\b/i.test(languageCode)) {
 		return [
@@ -10209,6 +10265,25 @@ async function executeBrainFirstDecision({
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
 	}
+	if (
+		nextDecision.action === "reply" &&
+		(latestGuestRaisesBudgetConcern(latestText) ||
+			(latestGuest && latestGuestAsksOtherCloserHotel(latestGuest))) &&
+		!replyHasHotelValuePitch(nextDecision.reply)
+	) {
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "value_objection_needs_sales_pitch",
+			instruction:
+				"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete value points from Hotel facts or Tool result, such as distance/location, room suitability, cleanliness, amenities, nearby services, views, policies, or offers when present. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+		});
+		nextDecision = repaired.decision;
+		nextKnown = syncKnownFromQuote(repaired.known);
+	}
 	if (replyRequestsForbiddenBookingField(nextDecision.reply)) {
 		const missing = requiredBookingMissing(nextKnown);
 		const repaired = await repairBrainDecisionWithInstruction({
@@ -10533,7 +10608,7 @@ async function executeBrainFirstDecision({
 	return sendAiMessage(io, sc, reply, {
 		latestGuest,
 		known: nextKnown,
-		quickReplies: operationalQuickRepliesForReply(nextDecision, nextKnown, sc),
+		quickReplies: operationalQuickRepliesForReply(nextDecision, nextKnown, sc, latestGuest),
 		source: "openai",
 	});
 }
@@ -11682,6 +11757,30 @@ async function planTurn(io, supportCaseOrId) {
 				reason: decision.reason || "progress_reply_requires_booking_action",
 			});
 		}
+		if (
+			decision.action === "reply" &&
+			(latestGuestRaisesBudgetConcern(latestText) ||
+				(latestGuest && latestGuestAsksOtherCloserHotel(latestGuest))) &&
+			!replyHasHotelValuePitch(decision.reply)
+		) {
+			const beforeRepairKnown = known;
+			const repaired = await repairBrainDecisionWithInstruction({
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				decision,
+				code: "value_objection_needs_sales_pitch",
+				instruction:
+					"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete value points from Hotel facts or Tool result, such as distance/location, room suitability, cleanliness, amenities, nearby services, views, policies, or offers when present. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+			});
+			decision = repaired.decision;
+			known = preserveRoomSelectionForNonRoomTurn(
+				beforeRepairKnown,
+				repaired.known,
+				latestText
+			);
+		}
 		if (replyRequestsForbiddenBookingField(decision.reply)) {
 			if (quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
 				await saveKnownFacts(key, known);
@@ -11793,7 +11892,7 @@ async function planTurn(io, supportCaseOrId) {
 		return sendAiMessage(io, sc, reply, {
 			latestGuest,
 			known,
-			quickReplies: operationalQuickRepliesForReply(decision, known, sc),
+			quickReplies: operationalQuickRepliesForReply(decision, known, sc, latestGuest),
 		});
 	} catch (error) {
 		console.error("[aiagent] slim plan turn failed:", error?.stack || error);
@@ -12144,6 +12243,8 @@ const exportedOrchestrator = {
 		guestDeclinesOptionalEmail,
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,
+		latestGuestRaisesBudgetConcern,
+		replyHasHotelValuePitch,
 		latestGuestAsksBookingProcess,
 		bookingProcessReplyNeedsCorrection,
 		guestRequestsBookingReviewStep,
