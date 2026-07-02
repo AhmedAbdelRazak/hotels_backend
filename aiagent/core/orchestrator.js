@@ -595,6 +595,10 @@ function roomSelectionKey(selections = []) {
 		.join("+");
 }
 
+function normalizeRoomCountMarkers(value = "") {
+	return String(value || "").replace(/[×✕✖]/g, "x");
+}
+
 function quoteRoomCount(quote = {}) {
 	if (Array.isArray(quote.rooms)) {
 		return roomSelectionsTotal(quote.rooms);
@@ -647,7 +651,7 @@ function roomCountNearMatch(text = "", matcher) {
 	const rawDualRoomCount = arabicDualRoomCountFromText(text);
 	if (rawDualRoomCount) return rawDualRoomCount;
 	const normalized = normalizeNumberWordsForParsing(normalizeDigits(text));
-	const source = String(normalized || "").replace(/\s+/g, " ").trim();
+	const source = normalizeRoomCountMarkers(normalized).replace(/\s+/g, " ").trim();
 	if (!source || !matcher?.pattern) return 1;
 	const dualRoomCount = arabicDualRoomCountFromText(source);
 	if (dualRoomCount) return dualRoomCount;
@@ -681,7 +685,9 @@ function arabicDualRoomCountFromText(value = "") {
 function roomCountOnlyFromText(value = "") {
 	const rawDualRoomCount = arabicDualRoomCountFromText(value);
 	if (rawDualRoomCount) return rawDualRoomCount;
-	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	const source = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	)
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!source) return null;
@@ -700,7 +706,9 @@ function roomCountOnlyFromText(value = "") {
 function roomCountCorrectionFromText(value = "") {
 	const rawDualRoomCount = arabicDualRoomCountFromText(value);
 	if (rawDualRoomCount) return rawDualRoomCount;
-	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	const source = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
@@ -833,7 +841,9 @@ function textMentionsNamedRoomType(value = "") {
 }
 
 function extractRoomSelectionsFromText(value = "") {
-	const text = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")));
+	const text = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	);
 	if (!text.trim()) return [];
 	const selections = [];
 	for (const matcher of ROOM_SELECTION_PATTERNS) {
@@ -1377,6 +1387,32 @@ function applyRelationshipGuestFacts(known = {}, text = "") {
 	return next;
 }
 
+function assistantQuoteFactsForMerge(current = {}, facts = {}) {
+	const next = { ...asObject(facts) };
+	const currentSelections = normalizeRoomSelections(current.roomSelections);
+	const factSelections = normalizeRoomSelections(next.roomSelections);
+	const currentKey = roomSelectionKey(currentSelections);
+	const factKey = roomSelectionKey(factSelections);
+	if (currentKey && factKey && currentKey !== factKey) {
+		delete next.roomSelections;
+		delete next.rooms;
+		if (
+			next.roomTypeKey &&
+			current.roomTypeKey &&
+			String(next.roomTypeKey) !== String(current.roomTypeKey)
+		) {
+			delete next.roomTypeKey;
+		}
+	}
+	return next;
+}
+
+function mergeAssistantQuoteFacts(current = {}, facts = {}) {
+	const next = assistantQuoteFactsForMerge(current, facts);
+	if (!Object.keys(next).length) return current;
+	return mergeKnownFacts(current, next);
+}
+
 function labeledFactFromAssistant(text = "", labels = []) {
 	const plain = stripChatMarkup(text);
 	for (const label of labels) {
@@ -1439,7 +1475,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			) {
 				delete aiFacts.adults;
 			}
-			Object.assign(recovered, aiFacts);
+			recovered = mergeAssistantQuoteFacts(recovered, aiFacts);
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (isPlausibleBookingName(value)) recovered.fullName = value;
@@ -1907,6 +1943,33 @@ function quoteCanBePreservedForKnown(quote = {}, known = {}) {
 	);
 }
 
+function quoteConflictsWithKnownFacts(quote = {}, known = {}) {
+	const candidate = asObject(quote);
+	if (!quoteHasContent(candidate)) return false;
+	const knownCheckin = validISODate(known.checkinISO);
+	const knownCheckout = validISODate(known.checkoutISO);
+	if (knownCheckin && candidate.checkinISO && candidate.checkinISO !== knownCheckin) {
+		return true;
+	}
+	if (knownCheckout && candidate.checkoutISO && candidate.checkoutISO !== knownCheckout) {
+		return true;
+	}
+	const knownSelections = selectionsFromKnown(known);
+	const knownKey = roomSelectionKey(knownSelections);
+	const quoteKey = roomSelectionKey(quoteRoomSelections(candidate));
+	if (knownKey && quoteKey && knownKey !== quoteKey) return true;
+	const quoteCount = quoteRoomCount(candidate);
+	const knownCount = roomSelectionsTotal(knownSelections) || normalizeRoomCount(known.rooms, 1);
+	return Boolean(knownKey && quoteCount && quoteCount !== knownCount);
+}
+
+function dropConflictingQuoteFromKnown(known = {}) {
+	if (!quoteConflictsWithKnownFacts(known.quote, known)) return known;
+	const next = { ...asObject(known) };
+	delete next.quote;
+	return next;
+}
+
 function quoteMatchesKnown(known = {}) {
 	const facts = asObject(known);
 	const quote = asObject(facts.quote);
@@ -1968,14 +2031,16 @@ function quoteInputsKnown(known = {}) {
 }
 
 function roomCountFromAiReviewText(value = "") {
-	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	const source = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	)
 		.replace(/[^\S\r\n]+/g, " ")
 		.trim();
 	if (!source) return null;
 	const dual = arabicDualRoomCountFromText(source);
 	if (dual) return dual;
 	const roomLabel =
-		"(?:rooms?|room\\s+count|number\\s+of\\s+rooms|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0623\\u0648\\u0636|\\u0627?\\u0644?\\u0623\\u0648\\u0636)";
+		"(?:rooms?|room\\s+count|number\\s+of\\s+rooms|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0627?\\u0644?\\u063a\\u0631\\u0641(?:\\u0629|\\u0647)?|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0627?\\u0644?\\u0627\\u0648\\u0636(?:\\u0629|\\u0647)?|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0623\\u0648\\u0636|\\u0627?\\u0644?\\u0623\\u0648\\u0636(?:\\u0629|\\u0647)?)";
 	const labeled =
 		source.match(new RegExp(`${roomLabel}\\s*[:：\\-]?\\s*(\\d{1,2})(?=\\s|$|[^\\p{L}0-9])`, "iu")) ||
 		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${roomLabel}(?=\\s|$|[^\\p{L}0-9])`, "iu"));
@@ -2660,6 +2725,25 @@ function arabicGuestAddress(sc = {}, known = {}, latestText = "") {
 	return `${arabicHonorificForName(name)} ${name}`;
 }
 
+function shortGuestAddressName(sc = {}, known = {}, latestText = "") {
+	const languageCode = activeLanguageCode(sc, known);
+	const display = cleanDisplayString(guestDisplayName(sc), 100);
+	if (/^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(`${display} ${known?.fullName || ""}`)) {
+		return firstArabicNameForAddress(sc, known, latestText) || display.split(/\s+/)[0] || "";
+	}
+	const addressable = addressableNameFromClientName(display) || display;
+	const token = addressable
+		.split(/\s+/)
+		.find((item) => /^[\p{L}][\p{L}'-]{1,}$/u.test(item));
+	return token || addressable || "Guest";
+}
+
+function guestAddressForPrompt(sc = {}, known = {}, latestText = "") {
+	return /^ar\b/i.test(activeLanguageCode(sc, known))
+		? arabicGuestAddress(sc, known, latestText)
+		: shortGuestAddressName(sc, known, latestText);
+}
+
 function arabicCancellationPolicySummary(policy = "") {
 	const text = cleanDisplayString(policy, 700);
 	if (!text) return "";
@@ -2759,12 +2843,12 @@ function buildAllowedMissingBookingDetailsMessage(sc = {}, known = {}, missing =
 	const readable = allowedMissing.map((item) => labels[item] || item).filter(Boolean);
 	if (!readable.length) {
 		return ar
-			? `تمام أستاذ ${guestDisplayName(sc)}، لا أحتاج جواز سفر أو رقم هوية لهذا الحجز. أراجع التفاصيل المسموحة الآن وأكمل معك.`
+			? `تمام ${arabicGuestAddress(sc, known)}، لا أحتاج جواز سفر أو رقم هوية لهذا الحجز. أراجع التفاصيل المسموحة الآن وأكمل معك.`
 			: `Thank you, ${guestDisplayName(sc)}. I do not need a passport or ID number for this booking. I will continue with the allowed booking details.`;
 	}
 	if (ar) {
 		return buildDetailRowsMessage(
-			`\u062a\u0645\u0627\u0645 \u0623\u0633\u062a\u0627\u0630 ${guestDisplayName(sc)}\u060c \u0644\u0627 \u0623\u062d\u062a\u0627\u062c \u062c\u0648\u0627\u0632 \u0633\u0641\u0631 \u0623\u0648 \u0631\u0642\u0645 \u0647\u0648\u064a\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u062d\u062c\u0632. \u0641\u0642\u0637 \u0623\u062d\u062a\u0627\u062c:`,
+			`\u062a\u0645\u0627\u0645 ${arabicGuestAddress(sc, known)}\u060c \u0644\u0627 \u0623\u062d\u062a\u0627\u062c \u062c\u0648\u0627\u0632 \u0633\u0641\u0631 \u0623\u0648 \u0631\u0642\u0645 \u0647\u0648\u064a\u0629 \u0644\u0647\u0630\u0627 \u0627\u0644\u062d\u062c\u0632. \u0641\u0642\u0637 \u0623\u062d\u062a\u0627\u062c:`,
 			readable,
 			`\u062d\u062a\u0649 \u0623\u062c\u0647\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0628\u0634\u0643\u0644 \u0635\u062d\u064a\u062d.`
 		);
@@ -3053,7 +3137,7 @@ async function sendBookingProgressFast({
 	typingStartedAt = 0,
 } = {}) {
 	const key = caseIdText(sc);
-	let bookingKnown = syncKnownFromQuote(known);
+	let bookingKnown = syncKnownFromQuote(dropConflictingQuoteFromKnown(known));
 	if (!quoteMatchesKnown(bookingKnown) && quoteInputsKnown(bookingKnown)) {
 		const quoteResult = await quoteTool(sc, bookingKnown).catch((error) => {
 			console.error("[aiagent] fast booking quote refresh failed:", error?.message || error);
@@ -3917,7 +4001,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration. Expressions like "insha'Allah", "bi idhnillah", "alhamdulillah", or their Arabic equivalents are welcome when they fit the moment, but do not force them into every reply.`,
-		`In Arabic confirmations, prefer respectful address with the guest title and name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]" or "\u062a\u0645\u0627\u0645 \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name confirmations like "\u0623\u0643\u064a\u062f \u064a\u0627 [name]" when a title is natural, and avoid decorative emojis when respectful wording is enough.`,
+		`In Arabic confirmations, prefer respectful short address with the guest title and first/address name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [first name]" or "\u062a\u0645\u0627\u0645 \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [first name]". Use guestAddress or guestAddressName for normal address. Do not use the full profile/display name in greetings, for example say "\u0623\u0633\u062a\u0627\u0630 \u0623\u062d\u0645\u062f" not "\u0623\u0633\u062a\u0627\u0630 \u0623\u062d\u0645\u062f \u062a\u064a\u0633\u062a". Full names belong only in booking facts/reviews when they are the confirmed booking name. Avoid decorative emojis when respectful wording is enough.`,
 		`You are the conversation lead. The server only executes tools/actions. Do not sound scripted, do not say "typo", and do not expose internal rules.`,
 		`Think of the orchestrator as your assistant and tool executor. If you need exact pricing, availability, room options, a reservation lookup, a date update, cancellation guidance, an official booking review, or final reservation submission, return the matching action and structured facts. The orchestrator will run the tool and bring the result back to you.`,
 		`If the answer is already available in Hotel facts, Known facts, Tool result, or the previous conversation, answer directly and naturally. Do not call a tool or ask again just because the user repeated themselves.`,
@@ -4026,7 +4110,10 @@ async function askOpenAI({
 						"Return only one valid json object matching the required brain/orchestrator schema.",
 					latestGuestMessage: latestText,
 					latestGuestAction: latestGuest?.clientAction || "",
-					guestName: guestDisplayName(sc),
+					guestName: shortGuestAddressName(sc, known, latestText),
+					guestAddressName: shortGuestAddressName(sc, known, latestText),
+					guestAddress: guestAddressForPrompt(sc, known, latestText),
+					guestProfileName: guestDisplayName(sc),
 					agentName: localizedAgentName(sc),
 					conversation: conversationForPrompt(sc),
 				},
@@ -4137,7 +4224,7 @@ async function polishCustomerReply({
 				"Do not add new promises, policies, prices, room availability, or missing fields.",
 				"Keep the same language or dialect as the guest. Arabic dialect is welcome, but keep it professional and clear.",
 				"Make the reply feel like a warm human CSR/sales representative: acknowledge casual or emotional comments briefly, then return to the useful next booking step.",
-				'For Arabic confirmations, prefer respectful title plus name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name-only confirmations when a title is natural.',
+				'For Arabic confirmations, prefer respectful title plus short first/address name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [first name]". Use guestAddress or guestAddressName for normal address; do not use the full profile/display name in greetings.',
 				"Do not turn a concrete next step into a vague progress update. If the original reply implies an action or review, keep the concrete next step visible.",
 				"Keep it concise: usually 1-4 short lines.",
 				"Clean line breaks, bullets, and tasteful emojis are allowed when they improve warmth or readability. Do not overuse them.",
@@ -4153,7 +4240,9 @@ async function polishCustomerReply({
 				{
 					languageCode,
 					hotelName,
-					guestAddressName: guestDisplayName(sc),
+					guestAddressName: shortGuestAddressName(sc, known, latestGuest?.message || ""),
+					guestAddress: guestAddressForPrompt(sc, known, latestGuest?.message || ""),
+					guestProfileName: guestDisplayName(sc),
 					agentName: localizedAgentName(sc),
 					identityRepeatAllowed,
 					latestGuestMessage: String(latestGuest?.message || "").slice(0, 700),
@@ -4209,7 +4298,7 @@ function buildQuoteGuardFallbackMessage(sc = {}, known = {}) {
 	if (!known.roomTypeKey) missing.push(ar ? "نوع الغرفة" : "room type");
 	const details = missing.length ? missing.join(ar ? " و" : " and ") : ar ? "تفصيلة واحدة" : "one detail";
 	return ar
-		? `تمام أستاذ ${guestDisplayName(sc)}، قبل ما أراجع التوفر والسعر بدقة أحتاج فقط ${details}.`
+		? `تمام ${arabicGuestAddress(sc, known)}، قبل ما أراجع التوفر والسعر بدقة أحتاج فقط ${details}.`
 		: `Sure ${guestDisplayName(sc)}, before I check exact availability and price, I only need ${details}.`;
 }
 
@@ -6648,7 +6737,7 @@ async function askCompactToolWriter({
 					'Return only one valid json object: {"reply":"..."}',
 					"You are the OpenAI brain writing the final customer-facing reply for a hotel live chat.",
 					"Use the guest language and dialect. Be concise, professional, warm, and naturally Muslim-friendly when it fits.",
-					'For Arabic confirmations, prefer respectful title plus name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [name]". Avoid bare first-name-only confirmations when a title is natural.',
+					'For Arabic confirmations, prefer respectful title plus short first/address name when known, such as "\u0623\u0643\u064a\u062f \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 [first name]". Use guestAddress or guestAddressName for normal address; do not use the full profile/display name in greetings.',
 					"The orchestrator only executed a tool for you; you must write the reply. Do not mention tools, schemas, validation, or internal state.",
 					"Use toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details.",
 					identityRepeatAllowed
@@ -6689,7 +6778,10 @@ async function askCompactToolWriter({
 						languageCode,
 						agentName: localizedAgentName(sc),
 						identityRepeatAllowed,
-						guestName: guestDisplayName(sc),
+						guestName: shortGuestAddressName(sc, known, latestGuest?.message || ""),
+						guestAddressName: shortGuestAddressName(sc, known, latestGuest?.message || ""),
+						guestAddress: guestAddressForPrompt(sc, known, latestGuest?.message || ""),
+						guestProfileName: guestDisplayName(sc),
 						latestGuestMessage: latestGuest?.message || "",
 						known: compactKnownFactsForPrompt(known),
 						toolResult: asObject(toolResult),
@@ -7992,6 +8084,7 @@ async function submitReservationForCase(io, caseOrId) {
 	if (!allowed) return { ok: false, reason: reason || "ai_not_allowed" };
 	const latestGuest = latestGuestEntry(sc);
 	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
+	known = dropConflictingQuoteFromKnown(known);
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
 		if (quote.available && quote.quote) {
@@ -8173,7 +8266,7 @@ async function planTurn(io, supportCaseOrId) {
 				previousQuoteFacts.roomTypeKey ||
 				normalizeRoomSelections(previousQuoteFacts.roomSelections).length)
 		) {
-			known = mergeKnownFacts(known, previousQuoteFacts);
+			known = mergeAssistantQuoteFacts(known, previousQuoteFacts);
 		}
 	}
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
@@ -8259,6 +8352,7 @@ async function planTurn(io, supportCaseOrId) {
 	) {
 		delete known.quote;
 	}
+	known = dropConflictingQuoteFromKnown(known);
 	known = syncKnownFromQuote(known);
 	logTurnStage(key, "facts_done", {
 		hasCheckin: Boolean(known.checkinISO),
@@ -8449,10 +8543,10 @@ async function planTurn(io, supportCaseOrId) {
 		(guestWantsToContinueBooking(latestText, latestAction) ||
 			latestGuestContinuesQuoteBeforeBrain);
 	if (latestGuestWantsToContinueBeforeBrain && !quoteInputsKnown(known)) {
-		known = syncKnownFromQuote(mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi)));
+		known = syncKnownFromQuote(mergeAssistantQuoteFacts(known, quoteFactsFromAiMessage(previousAi)));
 	}
 	if (latestGuestWantsToContinueBeforeBrain && !quoteInputsKnown(known)) {
-		known = syncKnownFromQuote(mergeKnownFacts(known, latestQuoteFactsFromConversation(sc)));
+		known = syncKnownFromQuote(mergeAssistantQuoteFacts(known, latestQuoteFactsFromConversation(sc)));
 	}
 	if (
 		latestGuestWantsToContinueBeforeBrain &&
@@ -8627,10 +8721,10 @@ async function planTurn(io, supportCaseOrId) {
 		(guestWantsToContinueBooking(latestText, latestAction) ||
 			latestGuestContinuesQuote);
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
-		known = mergeKnownFacts(known, quoteFactsFromAiMessage(previousAi));
+		known = mergeAssistantQuoteFacts(known, quoteFactsFromAiMessage(previousAi));
 	}
 	if (latestGuestWantsToContinue && !quoteInputsKnown(known)) {
-		known = mergeKnownFacts(known, latestQuoteFactsFromConversation(sc));
+		known = mergeAssistantQuoteFacts(known, latestQuoteFactsFromConversation(sc));
 	}
 	const wantsToContinueBooking =
 		latestGuestWantsToContinue &&
@@ -9330,6 +9424,10 @@ const exportedOrchestrator = {
 		latestGuestContinuesAfterQuote,
 		quoteFactsFromAiMessage,
 		roomCountFromAiReviewText,
+		shortGuestAddressName,
+		guestAddressForPrompt,
+		quoteConflictsWithKnownFacts,
+		dropConflictingQuoteFromKnown,
 		numericTokensForPolish,
 		quoteReplyHasUnexplainedReference,
 		quoteTool,
