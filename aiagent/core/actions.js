@@ -1538,11 +1538,31 @@ async function postReservationLinks(io, sc, reservation) {
 
 	const link1 = `${publicBase}/single-reservation/${conf}`;
 	const link2 = `${publicBase}/client-payment/${rid}/${conf}`;
-
-	const messages = [
-		`Your reservation is confirmed. [Please click here to find more details](${link1})`,
-		`For serious confirmation, you may pay a small deposit here (optional):\n${link2}`,
-	];
+	const languageCode = String(sc.preferredLanguageCode || sc.languageCode || "").toLowerCase();
+	const recentText = Array.isArray(sc.conversation)
+		? sc.conversation
+				.slice(-6)
+				.map((entry) => entry?.message || "")
+				.join(" ")
+		: "";
+	const ar = /^ar\b/.test(languageCode) || /[\u0600-\u06FF]/.test(recentText);
+	const messages = ar
+		? [
+				[
+					`أكيد، هذه روابط الحجز:`,
+					`- تفاصيل الحجز/الإيصال: ${link1}`,
+					`- رابط الدفع: ${link2}`,
+					`رقم التأكيد: ${conf}`,
+				].join("\n"),
+		  ]
+		: [
+				[
+					`Your reservation links are ready:`,
+					`- Reservation details/receipt: ${link1}`,
+					`- Payment link: ${link2}`,
+					`Confirmation number: ${conf}`,
+				].join("\n"),
+		  ];
 
 	for (const text of messages) {
 		const messageData = {
@@ -1568,9 +1588,10 @@ async function pushReservationLinks(io, caseId, _st, payload = {}) {
 	const confirmation =
 		payload.confirmation || payload.confirmation_number || payload.conf || "";
 	if (!reservationId || !confirmation) return;
+	const sc = await SupportCase.findById(caseId).lean().exec().catch(() => null);
 	return postReservationLinks(
 		io,
-		{ _id: caseId },
+		sc || { _id: caseId },
 		{
 			_id: reservationId,
 			confirmation_number: confirmation,

@@ -6683,7 +6683,9 @@ function quoteReplyHasUnexplainedReference(reply = "") {
 
 function compactReservationForBrain(reservation = null) {
 	if (!reservation) return null;
+	const links = reservationPublicLinks(reservation);
 	return {
+		reservationId: String(reservation._id || reservation.id || ""),
 		confirmation: reservation.confirmation_number || "",
 		status: reservation.reservation_status || reservation.state || "",
 		checkinISO: validISODate(reservation.checkin_date),
@@ -6694,6 +6696,7 @@ function compactReservationForBrain(reservation = null) {
 		phone: reservation.customer_details?.phone || "",
 		totalRooms: Number(reservation.total_rooms || 0) || 0,
 		totalGuests: Number(reservation.total_guests || reservation.adults || 0) || 0,
+		links,
 	};
 }
 
@@ -6973,6 +6976,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous quote reply was not sent because it added a reference number, date reference, ID, or unexplained numeric line. Return a corrected customer-facing quote from OpenAI only. Include only meaningful quote facts from toolResult: room(s), dates, nights, total, nightly average if present, and the next question. Do not invent IDs or references."
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
+				: validation === "reservation_confirmation_links_missing"
+				? "Your previous reservation confirmation reply was not sent because it omitted required server confirmation details. Return the final reservation confirmation from OpenAI only. Include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL from toolResult. Do not say there is no payment link."
 				: validation === "review_claimed_confirmed_before_submit"
 				? "Your previous review reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return the official pre-submission review from OpenAI only. Use the exact review facts, do not say confirmed/created/completed/finalized, and ask the guest to confirm if everything is correct."
 				: validation === "review_formatting_unclear"
@@ -7016,6 +7021,25 @@ async function sendBrainToolReplyFromOpenAI({
 			replyPromisesProgressWithoutAction(text)
 		) {
 			return "vague_progress_instead_of_tool_result";
+		}
+		if (
+			toolResult?.tool === "submit_reservation" &&
+			toolResult?.ok === true &&
+			toolResult?.code === "reservation_created"
+		) {
+			const reservation = asObject(toolResult.reservation);
+			const links = {
+				...asObject(reservation.links),
+				...asObject(toolResult.links),
+			};
+			const requiredParts = [
+				cleanString(reservation.confirmation || toolResult.confirmation, 80),
+				cleanString(links.reservationConfirmation, 260),
+				cleanString(links.payment, 260),
+			].filter(Boolean);
+			if (requiredParts.some((item) => !text.includes(item))) {
+				return "reservation_confirmation_links_missing";
+			}
 		}
 		if (
 			toolResult?.tool === "send_review" &&
@@ -7089,6 +7113,19 @@ async function sendBrainToolReplyFromOpenAI({
 		} catch (error) {
 			console.warn("[aiagent] compact brain tool reply repair failed:", error?.message || error);
 		}
+	}
+	if (
+		invalidReason === "reservation_confirmation_links_missing" &&
+		fallback &&
+		toolResult?.tool === "submit_reservation" &&
+		toolResult?.ok === true
+	) {
+		reply = fallback;
+		invalidReason = "";
+		console.warn("[aiagent] reservation confirmation fallback used", {
+			caseId,
+			tool: toolResult?.tool || "",
+		});
 	}
 	if (invalidReason) {
 		console.error("[aiagent] brain tool reply blocked: OpenAI reply required", {
@@ -7628,6 +7665,8 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 		submitKnown.reservationId = String(reservation._id || "");
 		submitKnown.confirmation = reservation.confirmation_number || submitKnown.confirmation || "";
 		await saveKnownFacts(caseId, submitKnown);
+		const links = reservationPublicLinks(reservation);
+		const fallback = buildConfirmationMessage(sc, submitKnown, hotel, reservation);
 		return sendBrainToolReplyFromOpenAI({
 			io,
 			sc,
@@ -7639,11 +7678,14 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 				ok: true,
 				code: "reservation_created",
 				reservation: compactReservationForBrain(reservation),
+				confirmation: reservation.confirmation_number || "",
+				links,
 				review: compactReviewForBrain(submitKnown, hotel),
 				instruction:
-					"Write the reservation confirmation in the guest language using the exact confirmation details. Be warm and concise.",
+					"Write the reservation confirmation in the guest language using the exact confirmation details. Include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL. Be warm and concise.",
 			},
 			clientAction: "reservation_confirmed",
+			fallback,
 			typingStartedAt,
 		});
 	} catch (error) {
