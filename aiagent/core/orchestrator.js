@@ -2781,6 +2781,39 @@ function guestRequestsBookingReviewStep(value = "", action = "") {
 	);
 }
 
+function guestRequestsConfirmationDelivery(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["place_reservation", "confirm_reservation", "submit_reservation"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const sendIntent =
+		/\b(?:send|resend|email|whatsapp|whats\s*app|deliver|share)\b/i.test(text) ||
+		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0627\u0644\u0627\u0631\u0633\u0627\u0644|\u0627\u0644\u0625\u0631\u0633\u0627\u0644|\u0625\u0631\u0633\u0627\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0628\u0639\u062a|\u0628\u0639\u062b|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0648\u062a\u0633|\u0627\u064a\u0645\u064a\u0644|\u0625\u064a\u0645\u064a\u0644|\u0627\u0644\u0627\u064a\u0645\u064a\u0644|\u0627\u0644\u0625\u064a\u0645\u064a\u0644)/iu.test(text);
+	const confirmationContext =
+		/\b(?:confirmation|booking confirmation|reservation confirmation|confirmation number|booking number|reservation number)\b/i.test(text) ||
+		/(?:\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f\s+\u0627\u0644\u062d\u062c\u0632|\u062a\u0627\u0643\u064a\u062f\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0645\u0644\u062e\u0635\s+\u0627\u0644\u062d\u062c\u0632|\u0645\u0644\u062e\u0635\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f)/iu.test(text);
+	const terseSendAfterConfirmationContext =
+		sendIntent &&
+		/(?:\u0645\u0645\u0643\u0646\u0627\u0644\u0627\u0631\u0633\u0627\u0644|\u0645\u0645\u0643\u0646\u0627\u0644\u0625\u0631\u0633\u0627\u0644|\u0644\u0645\u064a\u062a\u0645\u0627\u0644\u0627\u0631\u0633\u0627\u0644|\u0644\u0645\u064a\u062a\u0645\u0627\u0644\u0625\u0631\u0633\u0627\u0644|\u0627\u0644\u0623\u0647\u0645\u0627\u0644\u0648\u062a\u0633|\u0627\u0644\u0627\u0647\u0645\u0627\u0644\u0648\u062a\u0633)/iu.test(compact);
+	return sendIntent && (confirmationContext || terseSendAfterConfirmationContext);
+}
+
+function knownHasReservationConfirmation(known = {}) {
+	const facts = asObject(known);
+	return Boolean(
+		cleanString(facts.confirmation, 120) ||
+			(Array.isArray(facts.splitStayConfirmations) && facts.splitStayConfirmations.length) ||
+			(Array.isArray(facts.reservationIds) && facts.reservationIds.length) ||
+			(Array.isArray(facts.splitStayReservations) && facts.splitStayReservations.length)
+	);
+}
+
 function guestWantsToContinueBooking(value = "", action = "") {
 	const cleanAction = cleanString(action, 80).toLowerCase();
 	if (["proceed", "place_reservation", "confirm_reservation", "split_stay_continue"].includes(cleanAction)) {
@@ -4371,7 +4404,7 @@ function replyPromisesReservationFinalization(reply = "") {
 	const finalizationIntent =
 		/(?:create|creating|complete|completing|confirm|confirming|finalize|finalizing|issue|send).{0,80}(?:booking|reservation|confirmation|booking number|reservation number)/i.test(text) ||
 		/(?:\u0627\u062b\u0628\u062a|\u062b\u0628\u062a|\u0627\u062b\u0628\u062a\u0647|\u0623\u062b\u0628\u062a|\u0647\u0633\u062c\u0644|\u0633\u0623\u0633\u062c\u0644|\u0627\u0633\u062c\u0644|\u0623\u0633\u062c\u0644|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u062a\u0645|\u0623\u062a\u0645|\u0647\u0627\u0643\u062f|\u0633\u0623\u0624\u0643\u062f|\u0627\u0624\u0643\u062f|\u0623\u0624\u0643\u062f).{0,80}(?:\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u062a\u0623\u0643\u064a\u062f)/iu.test(text) ||
-		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0647\u0627\u0628\u0639\u062a|\u0633\u0623\u0631\u0633\u0644).{0,60}(?:\u0631\u0642\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f)/iu.test(text);
+		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0647\u0627\u0628\u0639\u062a|\u0633\u0623\u0631\u0633\u0644|\u0633\u0623\u0639\u064a\u062f|\u0633\u0627\u0639\u064a\u062f|\u0623\u0639\u064a\u062f|\u0627\u0639\u064a\u062f|\u0625\u0639\u0627\u062f\u0629|\u0627\u0639\u0627\u062f\u0629).{0,80}(?:\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0645\u0644\u062e\u0635\s+\u0627\u0644\u062d\u062c\u0632)/iu.test(text);
 	return finalizationIntent && !replyLooksLikeManualBookingReview(reply);
 }
 
@@ -10861,6 +10894,7 @@ async function executeBrainFirstDecision({
 	const latestText = String(latestGuest?.message || "");
 	const latestAction = cleanString(latestGuest?.clientAction, 80).toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
 	const officialReviewConfirmation = guestPressedOfficialReviewConfirmation(
 		latestGuest,
 		previousAi
@@ -11134,6 +11168,27 @@ async function executeBrainFirstDecision({
 				reason: "finalization_promise_requires_official_review",
 			});
 		}
+	}
+	if (
+		!latestClarifiesRequiredBookingDetail &&
+		nextDecision.action === "reply" &&
+		guestRequestsConfirmationDelivery(latestText, latestAction) &&
+		!knownHasReservationConfirmation(nextKnown) &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
+		!latestGuestRejectsQuoteOrSelection(latestText)
+	) {
+		const missing = requiredBookingMissing(nextKnown);
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action:
+				previousAiAction === "review_reservation" && !missing.length
+					? "submit_reservation"
+					: "send_review",
+			reply: "",
+			reason: missing.length
+				? "confirmation_delivery_request_needs_missing_details"
+				: "confirmation_delivery_request_needs_official_action",
+		});
 	}
 	if (
 		latestClarifiesRequiredBookingDetail &&
@@ -13039,6 +13094,8 @@ const exportedOrchestrator = {
 		latestGuestAsksBookingProcess,
 		bookingProcessReplyNeedsCorrection,
 		guestRequestsBookingReviewStep,
+		guestRequestsConfirmationDelivery,
+		knownHasReservationConfirmation,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		latestGuestAsksHotelFactOnly,
