@@ -12558,6 +12558,22 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
+		latestGuestRaisesBudgetConcern(latestText) &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "value_objection_pre_brain_reply");
+		return sendAiMessage(io, sc, buildValueObjectionFallbackReply(sc, hotel, known, latestGuest), {
+			latestGuest,
+			known,
+			clientAction: "value_objection",
+			quickReplies: valueObjectionQuickReplies(activeLanguageCode(sc, known)),
+		});
+	}
+	if (
+		latestGuest &&
 		(latestGuestAsksHotelFactOnly(latestGuest) || contextualHotelFactQuestion) &&
 		(contextualHotelFactQuestion ||
 			latestGuestMentionsNusuk(latestGuest) ||
