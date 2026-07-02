@@ -1373,6 +1373,17 @@ function dateOnlyRangeFactsFromText(value = "", known = {}, sc = {}) {
 	return { checkinISO, checkoutISO, dateCalendar: "gregorian" };
 }
 
+function isoDateRangeFactsFromText(value = "") {
+	const matches = String(value || "").match(/\b20\d{2}-\d{2}-\d{2}\b/g) || [];
+	const dates = [];
+	for (const item of matches) {
+		const iso = validISODate(item);
+		if (iso && !dates.includes(iso)) dates.push(iso);
+	}
+	if (dates.length < 2 || dates[1] <= dates[0]) return null;
+	return { checkinISO: dates[0], checkoutISO: dates[1], dateCalendar: "gregorian" };
+}
+
 function eachNight(checkinISO = "", checkoutISO = "") {
 	const start = validISODate(checkinISO);
 	const end = validISODate(checkoutISO);
@@ -2731,6 +2742,11 @@ function quoteFactsFromAiMessage(entry = {}) {
 		facts.checkinISO = dates.checkinISO;
 		facts.checkoutISO = dates.checkoutISO;
 		facts.dateCalendar = dates.raw?.calendar || "gregorian";
+	} else {
+		const isoFacts = isoDateRangeFactsFromText(text);
+		if (isoFacts?.checkinISO && isoFacts?.checkoutISO) {
+			Object.assign(facts, isoFacts);
+		}
 	}
 	const roomTypeKey = mapRoomToKey(text);
 	if (roomTypeKey) facts.roomTypeKey = roomTypeKey;
