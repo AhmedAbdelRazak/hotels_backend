@@ -3555,6 +3555,11 @@ function hotelFactReplyHasUnwantedLocationDump(reply = "", toolResult = {}) {
 	);
 }
 
+function hotelFactReplyHasRawLocationNumbers(reply = "") {
+	const withoutUrls = String(reply || "").replace(/https?:\/\/\S+/gi, "");
+	return /(?:\d{4,}[\s،,؛:.-]+){1,}\d{4,}/.test(withoutUrls);
+}
+
 function latestGuestMentionsSplitCityItinerary(value = "") {
 	const text = normalizeIntentSearchText(normalizeDigits(String(value || ""))).toLowerCase();
 	if (!text.trim()) return false;
@@ -3966,7 +3971,7 @@ async function sendSplitCityItineraryReplyFromOpenAI({
 			latestQuestion: cleanDisplayString(latestGuest?.message || "", 800),
 			hotelFacts: compactHotelFacts(hotel),
 			instruction:
-				"Write the final customer-facing reply from OpenAI only. The guest gave a split-city itinerary that includes this hotel's city plus another city, for example Makkah then Madinah then back to Makkah. Do not give or imply one continuous quote. Explain naturally that the stays must be priced/handled separately. Offer to check the matching city stay for this hotel first and ask one clear next question if there is more than one matching segment. Use the guest language/dialect, including Roman Urdu if that is how the guest writes.",
+				"Write the final customer-facing reply from OpenAI only. The guest gave a split-city itinerary that includes this hotel's city plus another city, for example Makkah then Madinah then back to Makkah. Do not give or imply one continuous quote. Do not normalize shorthand like D11 or bare day numbers into full calendar dates unless month/year is clearly present in Known facts or the transcript; if dates are incomplete, ask briefly. Explain naturally that the stays must be priced/handled separately. Offer to check the matching city stay for this hotel first and ask one clear next question if there is more than one matching segment. Use the guest language/dialect, including Roman Urdu if that is how the guest writes.",
 		},
 		clientAction: "split_city_itinerary",
 		fallback,
@@ -7238,7 +7243,7 @@ async function askCompactToolWriter({
 						? "Do not send a vague progress update. Write the actual tool-result reply now, using the exact toolResult facts."
 						: "",
 					validation === "hotel_fact_location_dump"
-						? "The guest asked only for distance/proximity. Do not include maps, address, raw coordinates, or unexplained location numbers. Reply with the walking/driving distance only."
+						? "Do not include raw coordinates or unexplained location numbers. If the guest asked only for distance/proximity, reply with walking/driving distance only. If the guest asked for location/map, include address and/or the proper Google Maps URL, not bare coordinate dumps."
 						: "",
 					validation === "review_claimed_confirmed_before_submit"
 						? "This is only the official pre-submission review. Do not say the booking/reservation is confirmed, created, completed, or finalized. Ask the guest to confirm if the review is correct."
@@ -7455,7 +7460,7 @@ async function sendBrainToolReplyFromOpenAI({
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
 				: validation === "hotel_fact_location_dump"
-				? "Your previous hotel-fact reply was not sent because the guest asked only for distance/proximity but the reply included maps, address, raw coordinates, or unexplained location numbers. Return a corrected customer-facing reply from OpenAI only. Give only the walking/driving distance and keep it human."
+				? "Your previous hotel-fact reply was not sent because it included maps, address, raw coordinates, or unexplained location numbers when they were not appropriate. Return a corrected customer-facing reply from OpenAI only. If the guest asked only for distance/proximity, give only the walking/driving distance. Never append bare coordinates or raw numeric location data."
 				: validation === "reservation_confirmation_links_missing"
 				? "Your previous reservation confirmation reply was not sent because it omitted required server confirmation details. Return the final reservation confirmation from OpenAI only. Include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL from toolResult. Do not say there is no payment link."
 				: validation === "review_claimed_confirmed_before_submit"
@@ -7496,7 +7501,11 @@ async function sendBrainToolReplyFromOpenAI({
 		if (toolResult?.tool === "get_quote" && quoteReplyHasUnexplainedReference(text)) {
 			return "unexplained_quote_reference";
 		}
-		if (toolResult?.tool === "hotel_fact" && hotelFactReplyHasUnwantedLocationDump(text, toolResult)) {
+		if (
+			toolResult?.tool === "hotel_fact" &&
+			(hotelFactReplyHasUnwantedLocationDump(text, toolResult) ||
+				hotelFactReplyHasRawLocationNumbers(text))
+		) {
 			return "hotel_fact_location_dump";
 		}
 		if (toolResult?.tool === "get_quote" && reviewReplyClaimsBookingConfirmed(text)) {
@@ -7561,7 +7570,19 @@ async function sendBrainToolReplyFromOpenAI({
 		return "";
 	};
 	try {
-		decision = await askToolWriter();
+		if (["hotel_fact", "split_city_itinerary"].includes(String(toolResult?.tool || ""))) {
+			decision = await askCompactToolWriter({
+				sc,
+				known,
+				latestGuest,
+				toolResult,
+				fallback,
+				requireContact,
+				requirePolicy,
+			});
+		} else {
+			decision = await askToolWriter();
+		}
 		reply = decision?.reply || "";
 	} catch (error) {
 		console.warn("[aiagent] brain tool reply failed:", error?.message || error);
@@ -8717,6 +8738,18 @@ async function runBrainFirstTurn({
 } = {}) {
 	const key = caseIdText(sc);
 	try {
+		if (latestGuest && latestGuestMentionsSplitCityItinerary(latestGuest?.message || "")) {
+			await saveKnownFacts(key, known);
+			logTurnStage(key, "split_city_itinerary_guard_pre_brain");
+			return sendSplitCityItineraryReplyFromOpenAI({
+				io,
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				typingStartedAt,
+			});
+		}
 		logTurnStage(key, "brain_first_openai_start");
 		const decision = await askOpenAI({
 			sc,
@@ -10146,6 +10179,7 @@ const exportedOrchestrator = {
 		hotelFactQuestionAsksExplicitMapOrAddress,
 		hotelFactQuestionAsksDistanceOnly,
 		hotelFactReplyHasUnwantedLocationDump,
+		hotelFactReplyHasRawLocationNumbers,
 		latestGuestMentionsSplitCityItinerary,
 		latestGuestAsksArrivalDeparturePolicy,
 		latestGuestAsksAirportDistance,
