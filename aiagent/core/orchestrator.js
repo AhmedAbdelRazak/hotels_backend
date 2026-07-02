@@ -4440,6 +4440,64 @@ function selectedRoomSummaryForGuest(hotel = {}, known = {}, languageCode = "en"
 		.join(" + ");
 }
 
+function activeRoomPriceRange(hotel = {}) {
+	const prices = (Array.isArray(hotel.roomCountDetails) ? hotel.roomCountDetails : [])
+		.filter((room) => room && room.activeRoom !== false)
+		.map((room) => numberOrNull(room?.price?.basePrice))
+		.filter((price) => Number.isFinite(price) && price > 0);
+	if (!prices.length) return null;
+	return {
+		min: Math.min(...prices),
+		max: Math.max(...prices),
+		currency: hotel.currency || "SAR",
+	};
+}
+
+function hotelSalesPitchLinesForGuest(hotel = {}, known = {}, languageCode = "en") {
+	void known;
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
+	const walkingRaw = cleanDisplayString(hotel.distances?.walkingToElHaram, 80);
+	const drivingRaw = cleanDisplayString(hotel.distances?.drivingToElHaram, 80);
+	const walking = localizedDurationMinutes(walkingRaw, "15", languageCode);
+	const driving = localizedDurationMinutes(drivingRaw, "2", languageCode);
+	const lines = [];
+	if (walkingRaw || drivingRaw || hotel.distances) {
+		lines.push(
+			ar
+				? `\u0642\u0648\u0629 \u0627\u0644\u0645\u0648\u0642\u0639: ${hotelName} \u062e\u064a\u0627\u0631 \u0627\u0633\u062a\u0631\u0627\u062a\u064a\u062c\u064a \u0644\u0644\u0648\u0635\u0648\u0644 \u0644\u0644\u062d\u0631\u0645\u060c \u062d\u0648\u0627\u0644\u064a ${walking} \u0645\u0634\u064a\u0627 \u0648${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`
+				: `Location strength: ${hotelName} is a strategic option for Al Haram access, about ${walking} walking and ${driving} by car depending on traffic.`
+		);
+	}
+	const priceRange = activeRoomPriceRange(hotel);
+	if (priceRange) {
+		lines.push(
+			ar
+				? `\u0642\u064a\u0645\u0629 \u062c\u064a\u062f\u0629 \u0644\u0644\u0645\u0648\u0642\u0639: \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0645\u0624\u0643\u062f \u0644\u062a\u0648\u0627\u0631\u064a\u062e\u0643 \u0645\u0628\u0627\u0634\u0631\u0629 \u0642\u0628\u0644 \u0623\u064a \u062d\u062c\u0632.`
+				: "Value: I can check the confirmed live price for your dates before booking, so you can compare it fairly for this location."
+		);
+	}
+	if (hotel.hasBusService === true && cleanDisplayString(hotel.busDetails, 160)) {
+		lines.push(
+			ar
+				? `\u0627\u0644\u062e\u062f\u0645\u0629: \u064a\u0638\u0647\u0631 \u0636\u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u062a\u0641\u0627\u0635\u064a\u0644 \u0646\u0642\u0644 \u0645\u0641\u064a\u062f\u0629 \u0644\u0644\u0636\u064a\u0648\u0641.`
+				: "Service: the hotel facts include guest transport details, which can make the stay easier."
+		);
+	}
+	if (hotel.parkingLot === true) {
+		lines.push(
+			ar
+				? `\u0631\u0627\u062d\u0629 \u0625\u0636\u0627\u0641\u064a\u0629: \u062a\u0648\u062c\u062f \u0645\u0648\u0627\u0642\u0641 \u062d\u0633\u0628 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u0648\u062d\u0633\u0628 \u0627\u0644\u062a\u0648\u0641\u0631.`
+				: "Convenience: parking is listed in the hotel facts, subject to availability and hotel arrangement."
+		);
+	}
+	const about = cleanDisplayString(ar ? hotel.aboutHotelArabic : hotel.aboutHotel, 180);
+	if (!lines.length && about) {
+		lines.push(ar ? `\u0645\u064a\u0632\u0629 \u0627\u0644\u0641\u0646\u062f\u0642: ${about}` : `Hotel strength: ${about}`);
+	}
+	return lines.slice(0, 2);
+}
+
 function latestGuestAsksOtherCloserHotel(latestGuest = {}) {
 	const value =
 		latestGuest && typeof latestGuest === "object" && !Array.isArray(latestGuest)
@@ -4451,14 +4509,15 @@ function latestGuestAsksOtherCloserHotel(latestGuest = {}) {
 		.trim();
 	if (!text) return false;
 	const compact = text.replace(/\s+/g, "");
-	return (
+	const asksInEnglish =
 		/\b(?:other|another|different)\s+(?:closer|nearer|nearest)?\s*(?:hotel|property|option)s?\b/i.test(text) ||
 		/\b(?:closer|nearer|nearest)\s+(?:hotel|property|option)s?\b/i.test(text) ||
 		/\b(?:hotel|property|option)s?\s+(?:closer|nearer|nearest)\b/i.test(text) ||
-		/(?:\u0641\u0646\u062f\u0642(?:ا|\s+)?(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628)|(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628)\s+\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642\s+\u062b\u0627\u0646\u064a|\u0641\u0646\u062f\u0642\s+\u0622\u062e\u0631|\u0628\u062f\u064a\u0644\s+(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628))/iu.test(text) ||
 		compact === "closerhotel" ||
-		compact === "nearerhotel"
-	);
+		compact === "nearerhotel";
+	const asksInArabic =
+		/(?:\u0641\u0646\u062f\u0642(?:\u0627|\s+)?(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628)|(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628)\s+\u0641\u0646\u062f\u0642|\u0641\u0646\u062f\u0642\s+\u062b\u0627\u0646\u064a|\u0641\u0646\u062f\u0642\s+\u0622\u062e\u0631|\u0628\u062f\u064a\u0644\s+(?:\u0627\u0642\u0631\u0628|\u0623\u0642\u0631\u0628))/iu.test(text);
+	return asksInEnglish || asksInArabic;
 }
 
 function buildOtherCloserHotelMessage(sc = {}, hotel = {}, known = {}, latestGuest = null) {
@@ -4466,16 +4525,6 @@ function buildOtherCloserHotelMessage(sc = {}, hotel = {}, known = {}, latestGue
 	const latestText = String(latestGuest?.message || "");
 	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
 	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
-	const walking = localizedDurationMinutes(
-		cleanDisplayString(hotel.distances?.walkingToElHaram, 80),
-		"15",
-		languageCode
-	);
-	const driving = localizedDurationMinutes(
-		cleanDisplayString(hotel.distances?.drivingToElHaram, 80),
-		"2",
-		languageCode
-	);
 	const hasDates = validISODate(known.checkinISO) && validISODate(known.checkoutISO);
 	const dateLine = hasDates
 		? `${formatDate(known.checkinISO, languageCode)} - ${formatDate(
@@ -4484,27 +4533,38 @@ function buildOtherCloserHotelMessage(sc = {}, hotel = {}, known = {}, latestGue
 		  )}`
 		: "";
 	const roomSummary = selectedRoomSummaryForGuest(hotel, known, languageCode);
+	const pitchLines = hotelSalesPitchLinesForGuest(hotel, known, languageCode);
 	if (ar) {
+		const contextLine = [
+			hasDates ? `\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateLine}` : "",
+			roomSummary ? `\u0627\u0644\u062e\u064a\u0627\u0631 \u0627\u0644\u0645\u0646\u0627\u0633\u0628 \u0647\u0646\u0627: ${roomSummary}` : "",
+		]
+			.filter(Boolean)
+			.join("\u060c ");
 		const details = [
-			`\u0647\u0630\u0647 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u062e\u0627\u0635\u0629 \u0628\u0640 ${hotelName}\u060c \u0648\u0627\u0644\u0645\u0633\u0627\u0641\u0629 \u0627\u0644\u0645\u0633\u062c\u0644\u0629: \u062d\u0648\u0627\u0644\u064a ${walking} \u0645\u0634\u064a\u0627 \u0648${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`,
-			hasDates ? `\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u0633\u062c\u0644\u0629: ${dateLine}.` : "",
-			roomSummary ? `\u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u0623\u0646\u0633\u0628 \u0627\u0644\u0645\u0633\u062c\u0644 \u0647\u0646\u0627: ${roomSummary}.` : "",
+			...pitchLines,
+			contextLine ? `${contextLine}.` : "",
 		].filter(Boolean);
 		return [
-			`${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u062a\u0631\u064a\u062f \u0641\u0646\u062f\u0642\u0627 \u0623\u0642\u0631\u0628 \u0644\u0644\u062d\u0631\u0645.`,
+			`${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u062a\u0631\u064a\u062f \u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631 \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u062d\u0631\u0645.`,
 			...details.map((line) => `- ${line}`),
-			"\u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0647\u0630\u0627 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u0623\u0633\u0627\u0633\u060c \u0623\u0648 \u0623\u062d\u0648\u0644 \u0627\u0644\u0637\u0644\u0628 \u0644\u0644\u0641\u0631\u064a\u0642 \u0625\u0630\u0627 \u062a\u0631\u064a\u062f \u062e\u064a\u0627\u0631\u0627 \u0622\u062e\u0631 \u0623\u0642\u0631\u0628.",
+			`\u062a\u062d\u0628 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0641\u064a ${hotelName} \u0627\u0644\u0622\u0646\u061f`,
 		].join("\n");
 	}
+	const contextLine = [
+		hasDates ? `Dates: ${dateLine}` : "",
+		roomSummary ? `Suitable option here: ${roomSummary}` : "",
+	]
+		.filter(Boolean)
+		.join("; ");
 	const details = [
-		`This chat is for ${hotelName}; the saved distance is about ${walking} walking and ${driving} by car depending on traffic.`,
-		hasDates ? `Saved dates: ${dateLine}.` : "",
-		roomSummary ? `Suitable room request here: ${roomSummary}.` : "",
+		...pitchLines,
+		contextLine ? `${contextLine}.` : "",
 	].filter(Boolean);
 	return [
-		`${shortGuestAddressName(sc, known, latestText)}, I understand - you are looking for a hotel closer to Al Haram.`,
+		`${shortGuestAddressName(sc, known, latestText)}, I understand - you want the strongest nearby option for Al Haram.`,
 		...details.map((line) => `- ${line}`),
-		"I can check this hotel on that basis, or pass the chat to the team if you specifically need another closer hotel.",
+		`Would you like me to check availability and price for ${hotelName} now?`,
 	].join("\n");
 }
 
@@ -4530,8 +4590,20 @@ function hotelFactAnswerMode(latestGuest = {}) {
 }
 
 function hotelFactQuickReplies(sc = {}, known = {}, latestGuest = {}) {
-	if (!latestGuestAsksPriceGuidance(latestGuest)) return [];
 	const languageCode = activeLanguageCode(sc, known);
+	if (latestGuestAsksOtherCloserHotel(latestGuest)) {
+		if (/^ar\b/i.test(languageCode)) {
+			return [
+				{ label: "\u0631\u0627\u062c\u0639 \u0647\u0630\u0627 \u0627\u0644\u0641\u0646\u062f\u0642", value: "\u0631\u0627\u062c\u0639 \u0644\u064a \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0641\u064a \u0647\u0630\u0627 \u0627\u0644\u0641\u0646\u062f\u0642", action: "price_request" },
+				{ label: "\u0623\u0631\u064a\u062f \u0641\u0646\u062f\u0642\u0627 \u0623\u0642\u0631\u0628", value: "\u0623\u0631\u064a\u062f \u0641\u0646\u062f\u0642\u0627 \u0623\u0642\u0631\u0628", action: "closer_hotel_request" },
+			];
+		}
+		return [
+			{ label: "Check this hotel", value: "Please check availability and price for this hotel", action: "price_request" },
+			{ label: "Need closer hotel", value: "I need a closer hotel option", action: "closer_hotel_request" },
+		];
+	}
+	if (!latestGuestAsksPriceGuidance(latestGuest)) return [];
 	if (/^ar\b/i.test(languageCode)) {
 		return [
 			{ label: "\u0623\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631", value: "\u0623\u0631\u064a\u062f \u0645\u0639\u0631\u0641\u0629 \u0627\u0644\u0633\u0639\u0631", action: "price_request" },
@@ -4860,7 +4932,7 @@ async function sendHotelFactReplyFromOpenAI({
 			hotelFacts: compactHotelFacts(hotel),
 			suggestedAnswer: fallback,
 			instruction:
-				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, explain that this chat can verify the current hotel only, mention the current hotel distance and known suitable room/date context if suggestedAnswer includes it, and offer to check this hotel or pass the chat to the team for another closer hotel; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
+				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability/price now. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
 		},
 		clientAction: "hotel_fact_answered",
 		quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
@@ -8401,7 +8473,7 @@ async function askCompactToolWriter({
 						? "The guest also asked about prices. Include the concrete next step for exact pricing: check-in, checkout, guests, and rooms. Do not infer or mention specific guest/room counts unless the guest provided them."
 						: "",
 					toolResult?.answerMode === "other_closer_hotel"
-						? "The guest is asking for another/closer hotel. Explain that this chat can verify the current hotel only, mention the current hotel's distance and known date/room context when present, and offer to check this hotel or pass the chat to the team for a closer hotel. Do not invent or compare other hotels."
+						? "The guest is asking for another/closer hotel. Keep a positive sales tone from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known date/room context when present, and ask to check availability/price now. If the guest wants another closer hotel, offer team handoff. Do not invent or compare other hotels."
 						: "",
 					validation === "review_claimed_confirmed_before_submit"
 						? "This is only the official pre-submission review. Do not say the booking/reservation is confirmed, created, completed, or finalized. Ask the guest to confirm if the review is correct."
@@ -10421,6 +10493,11 @@ async function planTurn(io, supportCaseOrId) {
 			known
 		);
 		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (latestAction === "closer_hotel_request") {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return handoffToHuman(io, sc, known, latestGuest, "closer_hotel_requested");
 	}
 	if (latestGuest && previousAiAskedFor("nationality", previousAi) && !known.nationality) {
 		const nationality = normalizeNationalityHint(latestText);
