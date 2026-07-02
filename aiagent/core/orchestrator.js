@@ -2103,6 +2103,14 @@ function latestStayChangeConversationIndex(sc = {}) {
 		const entry = conversation[index] || {};
 		if (entry.isAi || entry.isSystem) continue;
 		const text = String(entry.message || "");
+		const action = cleanString(entry.clientAction, 80).toLowerCase();
+		if (
+			guestConfirms(text, action) ||
+			guestRequestsBookingReviewStep(text, action) ||
+			guestAttentionNudge(text)
+		) {
+			continue;
+		}
 		if (
 			latestGuestMentionsDateish(text) ||
 			textMentionsRoomSelection(text) ||
@@ -2119,6 +2127,20 @@ function latestStayChangeConversationIndex(sc = {}) {
 function matchingQuoteShownAfterLatestStayChange(sc = {}, known = {}) {
 	if (!quoteMatchesKnown(known)) return false;
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestGuest = latestGuestEntry(sc);
+	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	if (
+		["quote_ready", "review_reservation"].includes(
+			cleanString(previousAi?.clientAction, 80).toLowerCase()
+		) &&
+		latestGuestContinuesAfterQuote(
+			previousAi,
+			latestGuest?.message || "",
+			latestGuest?.clientAction || ""
+		)
+	) {
+		return true;
+	}
 	const latestStayChangeIndex = latestStayChangeConversationIndex(sc);
 	return conversation.some((entry, index) => {
 		if (index <= latestStayChangeIndex || !entry?.isAi) return false;
