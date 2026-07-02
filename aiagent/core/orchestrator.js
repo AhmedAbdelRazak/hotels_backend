@@ -480,7 +480,7 @@ function looksLikeActionOrConfirmationPhrase(value = "") {
 	) {
 		return true;
 	}
-	return /^(?:\u0646\u0639\u0645|\u062a\u0645\u0627\u0645|\u062d\u0633\u0646\u0627|\u062d\u0633\u0646\u064b\u0627|\u0627\u0648\u0643|\u0623\u0648\u0643|\u062a\u0627\u0628\u0639|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u0633\u062a\u0645\u0631|\u0625\u062a\u0645\u0627\u0645|\u0627\u062a\u0645\u0627\u0645|\u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f|\u0644\u0627 \u0628\u0631\u064a\u062f)(?:\b|[\s\u060C,.!;:-])/iu.test(
+	return /^(?:\u0646\u0639\u0645|\u062a\u0645\u0627\u0645|\u062d\u0633\u0646\u0627|\u062d\u0633\u0646\u064b\u0627|\u0627\u0648\u0643|\u0623\u0648\u0643|\u062a\u0627\u0628\u0639|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u0633\u062a\u0645\u0631|\u0625\u062a\u0645\u0627\u0645|\u0627\u062a\u0645\u0627\u0645|\u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f|\u0644\u0627 \u0628\u0631\u064a\u062f)(?:$|\b|[\s\u060C,.!;:-])/iu.test(
 		text
 	);
 }
@@ -598,9 +598,13 @@ const ROOM_SELECTION_PATTERNS = [
 ];
 
 function roomCountNearMatch(text = "", matcher) {
+	const rawDualRoomCount = arabicDualRoomCountFromText(text);
+	if (rawDualRoomCount) return rawDualRoomCount;
 	const normalized = normalizeNumberWordsForParsing(normalizeDigits(text));
 	const source = String(normalized || "").replace(/\s+/g, " ").trim();
 	if (!source || !matcher?.pattern) return 1;
+	const dualRoomCount = arabicDualRoomCountFromText(source);
+	if (dualRoomCount) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const patternSource = matcher.pattern.source;
@@ -619,11 +623,24 @@ function roomCountNearMatch(text = "", matcher) {
 	return 1;
 }
 
+function arabicDualRoomCountFromText(value = "") {
+	const compact = normalizeIntentSearchText(value).replace(/\s+/g, "");
+	return /(?:\u063a\u0631\u0641(?:\u062a\u064a\u0646|\u062a\u0627\u0646)|\u0627\u0648\u0636(?:\u062a\u064a\u0646|\u062a\u0627\u0646)|\u062d\u062c\u0631(?:\u062a\u064a\u0646|\u062a\u0627\u0646))/.test(
+		compact
+	)
+		? 2
+		: null;
+}
+
 function roomCountOnlyFromText(value = "") {
+	const rawDualRoomCount = arabicDualRoomCountFromText(value);
+	if (rawDualRoomCount) return rawDualRoomCount;
 	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!source) return null;
+	const dualRoomCount = arabicDualRoomCountFromText(source);
+	if (dualRoomCount) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const match =
@@ -635,11 +652,15 @@ function roomCountOnlyFromText(value = "") {
 }
 
 function roomCountCorrectionFromText(value = "") {
+	const rawDualRoomCount = arabicDualRoomCountFromText(value);
+	if (rawDualRoomCount) return rawDualRoomCount;
 	const source = normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!source) return null;
+	const dualRoomCount = arabicDualRoomCountFromText(source);
+	if (dualRoomCount) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const roomCountContext = new RegExp(
@@ -1403,7 +1424,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				})
 			);
 		}
-		if (lastAiAskedBookingName && sameAsDisplayedNameIntent(rawEntryText)) {
+		const explicitEntryName = bookingIdentityFactsFromText(rawEntryText, {
+			allowName: true,
+		}).fullName;
+		if (lastAiAskedBookingName && !explicitEntryName && sameAsDisplayedNameIntent(rawEntryText)) {
 			const profileName = profileNameForBooking(sc);
 			if (isPlausibleBookingName(profileName)) {
 				recovered.fullName = profileName;
@@ -2117,6 +2141,22 @@ function confirmKnownIdentityIfGuestConfirms(known = {}, latestText = "", latest
 	}
 	if (!guestConfirms(latestText, latestAction)) return known;
 	const next = { ...known };
+	const explicitIdentityFacts = bookingIdentityFactsFromText(latestText, { allowName: true });
+	if (explicitIdentityFacts.fullName) {
+		next.fullName = explicitIdentityFacts.fullName;
+		next.fullNameConfirmed = true;
+		delete next.fullNameNeedsConfirmation;
+	}
+	if (explicitIdentityFacts.phone) {
+		next.phone = explicitIdentityFacts.phone;
+		next.phoneConfirmed = true;
+		delete next.phoneNeedsConfirmation;
+	}
+	if (explicitIdentityFacts.nationality) {
+		next.nationality = explicitIdentityFacts.nationality;
+		next.nationalityConfirmed = true;
+		delete next.nationalityNeedsConfirmation;
+	}
 	if (next.fullName && next.fullNameNeedsConfirmation) {
 		next.fullNameConfirmed = true;
 		delete next.fullNameNeedsConfirmation;
@@ -2164,6 +2204,7 @@ function sameAsDisplayedNameIntent(value = "") {
 
 function applyDisplayedNameAnswer(sc = {}, known = {}, latestText = "", previousAi = {}) {
 	if (!sameAsDisplayedNameIntent(latestText)) return known;
+	if (bookingIdentityFactsFromText(latestText, { allowName: true }).fullName) return known;
 	const shouldApply =
 		previousAiAskedForBookingName(previousAi) ||
 		known.fullNameNeedsConfirmation ||
@@ -3706,6 +3747,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 			? `A tool has already run for this turn. Use Tool result as authoritative. Return action="reply" unless the Tool result specifically requires an official review, submit, escalation, or clarification. Do not ask to check again when the Tool result already contains the answer.`
 			: "",
 		`If the guest wants exact price/availability and checkinISO, checkoutISO, and either roomTypeKey or roomSelections are known, action must be "get_quote".`,
+		`If checkinISO, checkoutISO, and roomTypeKey/roomSelections are known but there is no authoritative matching server quote in Known facts, do not ask for name, phone, nationality, email, or booking confirmation yet. Return action="get_quote" with empty reply so the orchestrator can fetch the exact price/availability first.`,
 		`If checkinISO and checkoutISO are known but the guest asks for available rooms/options without choosing a specific room type, action must be "check_room_options".`,
 		`For multi-room or group requests, preserve the exact number of rooms. Examples: "20 quadruple rooms" means facts.roomTypeKey="quadRooms", facts.rooms=20, and facts.roomSelections=[{"roomTypeKey":"quadRooms","count":20}]. "2 triple rooms and 1 double room" means two roomSelections. Never quote only one room when the guest requested multiple rooms.`,
 		`Do not infer adults or children from room type alone. A double room request means roomTypeKey="doubleRooms", not automatically adults=2. Only return adults/children when the guest explicitly gives the guest count, relationship wording clearly gives the party count, or Known facts already contain it.`,
@@ -4219,6 +4261,14 @@ function shouldForceQuote(decision = {}, known = {}, latestGuest = {}) {
 	const text = String(latestGuest?.message || "");
 	return /(price|rate|cost|availability|available|book|reserve|reservation|\bSAR\b|\bريال\b|سعر|بكام|كم|متاح|متوفر|احجز|حجز)/i.test(
 		text
+	);
+}
+
+function freshQuoteRequiredBeforeReply(known = {}, latestGuest = {}) {
+	return (
+		quoteInputsKnown(known) &&
+		!quoteMatchesKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
 	);
 }
 
@@ -7217,6 +7267,61 @@ async function executeBrainFirstDecision({
 	}
 	if (nextDecision.action === "reply" && shouldForceQuote(nextDecision, nextKnown, latestGuest)) {
 		nextDecision = { ...nextDecision, action: "get_quote" };
+	}
+	if (nextDecision.action === "reply" && freshQuoteRequiredBeforeReply(nextKnown, latestGuest)) {
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "fresh_quote_required_before_reply",
+			extra: { missing: requiredBookingMissing(nextKnown) },
+			instruction:
+				"The stay can be identified, but there is no matching authoritative server quote yet. Return action=\"get_quote\" with empty reply and include the complete stay facts. Do not ask for name, phone, nationality, email, or booking confirmation before the quote.",
+		});
+		nextDecision = repaired.decision;
+		changedFields = decisionChangedFields(nextDecision);
+		nextKnown = syncKnownFromQuote(
+			preserveRoomSelectionForNonRoomTurn(nextKnown, repaired.known, latestText, {
+				changedFields,
+			})
+		);
+		if (nextDecision.action === "reply" && freshQuoteRequiredBeforeReply(nextKnown, latestGuest)) {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "get_quote",
+				reply: "",
+				reason: nextDecision.reason || "fresh_quote_required_before_reply",
+			});
+		}
+	}
+	if (nextDecision.action === "reply" && !nextDecision.reply) {
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "missing_customer_reply_for_reply_action",
+			instruction:
+				"The previous decision selected action=\"reply\" but did not include customer-facing text. Return a corrected JSON decision. If a tool is needed, choose the correct action with empty reply and complete facts; otherwise write the guest-facing reply in the guest language.",
+		});
+		nextDecision = repaired.decision;
+		changedFields = decisionChangedFields(nextDecision);
+		nextKnown = syncKnownFromQuote(
+			preserveRoomSelectionForNonRoomTurn(nextKnown, repaired.known, latestText, {
+				changedFields,
+			})
+		);
+		if (nextDecision.action === "reply" && freshQuoteRequiredBeforeReply(nextKnown, latestGuest)) {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "get_quote",
+				reply: "",
+				reason: nextDecision.reason || "fresh_quote_required_after_blank_reply_repair",
+			});
+		}
 	}
 	await saveKnownFacts(key, nextKnown);
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
