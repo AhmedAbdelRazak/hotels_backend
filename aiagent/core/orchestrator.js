@@ -10271,6 +10271,11 @@ async function executeBrainFirstDecision({
 			(latestGuest && latestGuestAsksOtherCloserHotel(latestGuest))) &&
 		!replyHasHotelValuePitch(nextDecision.reply)
 	) {
+		const valueFacts = hotelSalesPitchLinesForGuest(
+			hotel,
+			nextKnown,
+			activeLanguageCode(sc, nextKnown)
+		);
 		const repaired = await repairBrainDecisionWithInstruction({
 			sc,
 			hotel,
@@ -10279,7 +10284,7 @@ async function executeBrainFirstDecision({
 			decision: nextDecision,
 			code: "value_objection_needs_sales_pitch",
 			instruction:
-				"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result, such as distance to Al Haram, strategic location, cleanliness, amenities, nearby services/restaurants, transport, views, policies, or offers when present. Room count or stay length alone is not enough. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+				`The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result. Room count or stay length alone is not enough. If these valueFacts are present, include at least one naturally: ${JSON.stringify(valueFacts)}. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.`,
 		});
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
@@ -11764,6 +11769,11 @@ async function planTurn(io, supportCaseOrId) {
 			!replyHasHotelValuePitch(decision.reply)
 		) {
 			const beforeRepairKnown = known;
+			const valueFacts = hotelSalesPitchLinesForGuest(
+				hotel,
+				known,
+				activeLanguageCode(sc, known)
+			);
 			const repaired = await repairBrainDecisionWithInstruction({
 				sc,
 				hotel,
@@ -11772,7 +11782,7 @@ async function planTurn(io, supportCaseOrId) {
 				decision,
 				code: "value_objection_needs_sales_pitch",
 				instruction:
-					"The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result, such as distance to Al Haram, strategic location, cleanliness, amenities, nearby services/restaurants, transport, views, policies, or offers when present. Room count or stay length alone is not enough. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.",
+					`The guest is hesitating about value, price, budget, or closeness. Rewrite the customer-facing reply from OpenAI only. First acknowledge the concern, then include one or two concrete hotel/property value points from Hotel facts or Tool result. Room count or stay length alone is not enough. If these valueFacts are present, include at least one naturally: ${JSON.stringify(valueFacts)}. Then offer 2 or 3 concise next choices. Do not invent discounts, competitor hotels, or unverified facts.`,
 			});
 			decision = repaired.decision;
 			known = preserveRoomSelectionForNonRoomTurn(
