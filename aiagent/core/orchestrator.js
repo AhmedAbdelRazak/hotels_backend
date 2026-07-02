@@ -3635,6 +3635,14 @@ function hotelFactPriceGuidanceReplyNeedsCorrection(reply = "", toolResult = {})
 	);
 }
 
+function hotelFactMapReplyNeedsCorrection(reply = "", toolResult = {}) {
+	const mode = String(toolResult?.answerMode || "");
+	if (!["map_or_address", "location_and_price"].includes(mode)) return false;
+	const mapsUrl = cleanDisplayString(toolResult?.hotelFacts?.location?.googleMapsUrl, 260);
+	if (!mapsUrl) return false;
+	return !String(reply || "").includes(mapsUrl);
+}
+
 function latestGuestMentionsSplitCityItinerary(value = "") {
 	const text = normalizeIntentSearchText(normalizeDigits(String(value || ""))).toLowerCase();
 	if (!text.trim()) return false;
@@ -7417,8 +7425,14 @@ async function askCompactToolWriter({
 					validation === "hotel_fact_price_guidance_unclear"
 						? "Give helpful price guidance. Do not say only that prices are not confirmed. Ask for check-in, checkout, guests, and rooms so the exact available price can be checked."
 						: "",
+					validation === "hotel_fact_map_missing"
+						? "Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl because the guest explicitly asked for location/map or combined location with prices."
+						: "",
 					toolResult?.answerMode === "branch_city"
 						? "This is a city/branch clarification. Keep it short and do not repeat the full map/address unless explicitly requested."
+						: "",
+					["map_or_address", "location_and_price"].includes(String(toolResult?.answerMode || ""))
+						? "This is an explicit location request. Include the Google Maps link from Hotel facts."
 						: "",
 					toolResult?.needsPriceGuidance
 						? "The guest also asked about prices. Include the concrete next step for exact pricing: check-in, checkout, guests, and rooms."
@@ -7643,6 +7657,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous hotel-fact reply was not sent because it repeated map/address details instead of answering the city/branch confusion. Return a corrected customer-facing reply from OpenAI only. Clarify that this hotel is in Makkah and not a confirmed Madinah/Taif branch, and do not include Google Maps/address unless the latest guest explicitly asked for map/address."
 				: validation === "hotel_fact_price_guidance_unclear"
 				? "Your previous hotel-fact reply was not sent because the price guidance was weak or missing. Return a corrected customer-facing reply from OpenAI only. Do not say only that prices are not confirmed. Say exact prices depend on check-in, checkout, guests, and rooms, then ask for those details naturally."
+				: validation === "hotel_fact_map_missing"
+				? "Your previous hotel-fact reply was not sent because it omitted the required Google Maps link for an explicit location request. Return a corrected customer-facing reply from OpenAI only. Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl and keep the price next step if requested."
 				: validation === "reservation_confirmation_links_missing"
 				? "Your previous reservation confirmation reply was not sent because it omitted required server confirmation details. Return the final reservation confirmation from OpenAI only. Include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL from toolResult. Do not say there is no payment link."
 				: validation === "review_claimed_confirmed_before_submit"
@@ -7701,6 +7717,12 @@ async function sendBrainToolReplyFromOpenAI({
 			hotelFactPriceGuidanceReplyNeedsCorrection(text, toolResult)
 		) {
 			return "hotel_fact_price_guidance_unclear";
+		}
+		if (
+			toolResult?.tool === "hotel_fact" &&
+			hotelFactMapReplyNeedsCorrection(text, toolResult)
+		) {
+			return "hotel_fact_map_missing";
 		}
 		if (toolResult?.tool === "get_quote" && reviewReplyClaimsBookingConfirmed(text)) {
 			return "quote_claimed_confirmed_before_submit";
@@ -10376,6 +10398,7 @@ const exportedOrchestrator = {
 		hotelFactReplyHasRawLocationNumbers,
 		hotelFactBranchReplyNeedsCorrection,
 		hotelFactPriceGuidanceReplyNeedsCorrection,
+		hotelFactMapReplyNeedsCorrection,
 		hotelFactAnswerMode,
 		hotelFactQuickReplies,
 		latestGuestAsksPriceGuidance,
