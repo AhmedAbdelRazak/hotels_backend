@@ -3196,6 +3196,7 @@ function latestGuestMentionsDateish(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	if (!text.trim()) return false;
 	if (quickDateRange(text)?.checkinISO || quickDateRange(text)?.checkoutISO) return true;
+	if (containsDateLikeSlashToken(text)) return true;
 	return /\b(?:date|dates|stay|accommodation|accomodation|checkin|check-in|checkout|check-out|arrive|arrival|depart|departure|from|until|through|thru|though|aug|august|sep|sept|september|oct|october|nov|november|dec|december|jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july)\b/i.test(text) ||
 		/(تاريخ|تواريخ|وصول|مغادرة|اقامة|إقامة|من|الى|إلى|حتى|أغسطس|اغسطس|غشت|اوت|أوت|آب|اب|سبتمبر|شتنبر|اكتوبر|أكتوبر|نوفمبر|نونبر|ديسمبر|دجنبر|يناير|جانفي|فبراير|فيفري|مارس|ابريل|أبريل|افريل|أفريل|مايو|ماي|يونيو|جوان|يوليو|يوليوز|جويلية|تموز|ايلول|أيلول|تشرين|كانون|شباط|اذار|آذار|نيسان|ايار|أيار|حزيران)/i.test(text);
 }
@@ -10042,10 +10043,12 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	let appliedDateBoundaryChange = false;
 	if (latestGuest) {
 		const dateBoundaryFacts = dateBoundaryFactsFromAskedAnswer(latestText, known, previousAi);
 		if (Object.keys(dateBoundaryFacts).length) {
 			known = mergeKnownFacts(known, dateBoundaryFacts);
+			appliedDateBoundaryChange = true;
 		}
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
@@ -10200,6 +10203,7 @@ async function planTurn(io, supportCaseOrId) {
 			latestGuestMentionsDateish(latestText) ||
 			textMentionsRoomSelection(latestText) ||
 			appliedRoomCountOnlyChange ||
+			appliedDateBoundaryChange ||
 			appliedAlternativeStayChoice ||
 			appliedSameDateRoomChoice) &&
 		quoteHasContent(known.quote) &&
@@ -10413,6 +10417,12 @@ async function planTurn(io, supportCaseOrId) {
 		await saveKnownFacts(key, known);
 		await waitForTypingMinimum(typingStartedAt);
 		logTurnStage(key, "same_date_room_choice_quote_start");
+		return handleQuote(io, sc, hotel, known, latestGuest);
+	}
+	if (appliedDateBoundaryChange && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "date_boundary_quote_start");
 		return handleQuote(io, sc, hotel, known, latestGuest);
 	}
 	if (
@@ -11347,6 +11357,7 @@ const exportedOrchestrator = {
 		nightsCountFromText,
 		mentionsExplicitReservationIdentifier,
 		latestGuestLooksLikeBookingIdentityAnswer,
+		latestGuestMentionsDateish,
 		latestGuestAsksRequiredBookingDetailClarification,
 		bookingIdentityCollectionContext,
 		bookingIdentityFactsFromText,
