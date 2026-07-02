@@ -2552,6 +2552,8 @@ function previousAiAskedFor(field = "", previousAi = {}) {
 }
 
 function previousAiAskedForIdentityConfirmation(previousAi = {}) {
+	const action = cleanString(previousAi?.clientAction, 80).toLowerCase();
+	if (action === "review_reservation") return true;
 	const text = normalizeDigits(String(previousAi?.message || "")).toLowerCase();
 	if (!text.trim()) return false;
 	const hasConfirm = /\b(confirm|correct|right|accurate)\b/i.test(text) ||
@@ -9321,6 +9323,13 @@ async function submitReservationForCase(io, caseOrId) {
 	if (!allowed) return { ok: false, reason: reason || "ai_not_allowed" };
 	const latestGuest = latestGuestEntry(sc);
 	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
+	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	known = confirmKnownIdentityIfGuestConfirms(
+		known,
+		latestGuest?.message || "",
+		latestGuest?.clientAction || "",
+		previousAi
+	);
 	known = dropConflictingQuoteFromKnown(known);
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
@@ -10720,6 +10729,7 @@ const exportedOrchestrator = {
 		phoneFromIdentityText,
 		nationalityFromIdentityText,
 		bookingNameFromIdentityText,
+		confirmKnownIdentityIfGuestConfirms,
 		confirmGroupCapacityIfGuestConfirms,
 		latestGuestRequestsAlternativeAvailability,
 		alternativeStayChoiceFromText,
