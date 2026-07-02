@@ -262,19 +262,26 @@ function roomCapacityForKey(roomTypeKey = "") {
 }
 
 function roomGuestCapacity(room = {}, roomTypeKey = "") {
+	const typeCapacity = roomCapacityForKey(
+		roomTypeKey || room?.roomType || room?.room_type
+	);
 	const direct = normalizedGuestCount(
 		room?.maxGuests ??
 			room?.maxOccupancy ??
 			room?.occupancy ??
 			room?.capacity ??
-			room?.roomCapacity ??
-			room?.bedsCount,
+			room?.roomCapacity,
 		null
 	);
 	if (Number.isFinite(direct) && direct > 0 && direct <= 30) {
 		return Math.floor(direct);
 	}
-	return roomCapacityForKey(roomTypeKey || room?.roomType || room?.room_type);
+	if (typeCapacity) return typeCapacity;
+	const bedsCount = normalizedGuestCount(room?.bedsCount, null);
+	if (Number.isFinite(bedsCount) && bedsCount > 0 && bedsCount <= 30) {
+		return Math.floor(bedsCount);
+	}
+	return 0;
 }
 
 function matchingHotelRoom(hotel = {}, roomTypeKey = "", displayName = "") {
