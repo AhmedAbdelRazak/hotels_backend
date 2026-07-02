@@ -3701,6 +3701,27 @@ function hotelFactReplyHasRawLocationNumbers(reply = "") {
 	);
 }
 
+function alternativeReplyDriftedToHotelFact(reply = "") {
+	const text = String(reply || "");
+	const normalized = normalizeIntentSearchText(text);
+	const looksLikeLocationReply =
+		/google\.com\/maps|maps\/search|google maps|address\s*:|location\s*:|\bhere is\b.{0,40}\blocation\b|\blocated\b|walking from al haram|minutes walking|\bby car\b/i.test(
+			text
+		) ||
+		/(?:\u062e\u0631\u0627\u0626\u0637|\u0645\u0648\u0642\u0639|\u0627\u0644\u0639\u0646\u0648\u0627\u0646|\u0645\u0634\u064a\u0627|\u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629|\u0627\u0644\u062d\u0631\u0645)/iu.test(
+			text
+		);
+	if (!looksLikeLocationReply) return false;
+	const alternativeContext =
+		/\b(?:alternative|alternatives|available|availability|option|options|nearby dates|same dates|room options|not available|unavailable)\b/i.test(
+			normalized
+		) ||
+		/(?:\u0628\u062f\u064a\u0644|\u0628\u062f\u0627\u0626\u0644|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0641\u0631|\u062e\u064a\u0627\u0631|\u062e\u064a\u0627\u0631\u0627\u062a|\u063a\u0631\u0641)/iu.test(
+			text
+		);
+	return !alternativeContext || /google\.com\/maps|maps\/search/i.test(text);
+}
+
 function hotelFactBranchReplyNeedsCorrection(reply = "", toolResult = {}) {
 	if (String(toolResult?.answerMode || "") !== "branch_city") return false;
 	const text = String(reply || "");
@@ -7774,6 +7795,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous hotel-fact reply was not sent because the price guidance was weak, missing, or invented guest/room counts. Return a corrected customer-facing reply from OpenAI only. Do not say only that prices are not confirmed. Say exact prices depend on check-in, checkout, guests, and rooms, then ask for those details naturally. Do not mention any guest count or room count unless the guest already gave it."
 				: validation === "hotel_fact_map_missing"
 				? "Your previous hotel-fact reply was not sent because it omitted the required Google Maps link for an explicit location request. Return a corrected customer-facing reply from OpenAI only. Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl and keep the price next step if requested."
+				: validation === "alternative_reply_drifted_to_hotel_fact"
+				? "Your previous alternatives reply was not sent because it answered an older hotel location/fact question instead of the alternatives tool result. Return the customer-facing alternatives/availability result from OpenAI only. Do not include Google Maps, address, or distance. If toolResult.options is empty, say no suitable alternative is showing for the known stay and offer to adjust dates/room choice or use a previously available option if shown in the conversation."
 				: validation === "reservation_confirmation_links_missing"
 				? "Your previous reservation confirmation reply was not sent because it omitted required server confirmation details. Return the final reservation confirmation from OpenAI only. Include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL from toolResult. Do not say there is no payment link."
 				: validation === "review_claimed_confirmed_before_submit"
@@ -7813,6 +7836,12 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (toolResult?.tool === "get_quote" && quoteReplyHasUnexplainedReference(text)) {
 			return "unexplained_quote_reference";
+		}
+		if (
+			toolResult?.tool === "check_alternatives" &&
+			alternativeReplyDriftedToHotelFact(text)
+		) {
+			return "alternative_reply_drifted_to_hotel_fact";
 		}
 		if (
 			toolResult?.tool === "hotel_fact" &&
@@ -8131,6 +8160,8 @@ async function handleBrainAlternatives(
 			ok: true,
 			checkedDays: result.checkedDays || 0,
 			options: nextKnown.alternativeStays,
+			instruction:
+				"Write only the alternatives/availability result for the known stay. Do not answer older hotel-fact/location questions, and do not include Google Maps, address, or distance. If no options are available, say that clearly and offer to adjust the dates/room choice or continue with any previously available quote shown in the conversation.",
 		},
 		clientAction: result.options?.length
 			? "alternative_dates_ready"
@@ -10581,6 +10612,7 @@ const exportedOrchestrator = {
 		hotelFactQuestionAsksDistanceOnly,
 		hotelFactReplyHasUnwantedLocationDump,
 		hotelFactReplyHasRawLocationNumbers,
+		alternativeReplyDriftedToHotelFact,
 		hotelFactBranchReplyNeedsCorrection,
 		hotelFactPriceGuidanceReplyNeedsCorrection,
 		hotelFactMapReplyNeedsCorrection,
