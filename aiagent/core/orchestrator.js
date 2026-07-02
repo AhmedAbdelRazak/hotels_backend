@@ -8893,7 +8893,10 @@ function splitStayQuoteInputsKnown(known = {}) {
 function splitStayQuoteMatchesKnown(known = {}) {
 	const periods = normalizeSplitStayPeriods(known.splitStayPeriods);
 	if (periods.length < 2 || known.splitStayQuoteAvailable !== true) return false;
-	if (!Number.isFinite(Number(known.splitStayTotal)) || Number(known.splitStayTotal) <= 0) {
+	const total =
+		Number(known.splitStayTotal || 0) ||
+		periods.reduce((sum, period) => sum + (Number(period.total || 0) || 0), 0);
+	if (!Number.isFinite(total) || total <= 0) {
 		return false;
 	}
 	return periods.every(
