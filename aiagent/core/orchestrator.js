@@ -1100,6 +1100,34 @@ function addDaysISO(iso = "", days = 0) {
 	return date.toISOString().slice(0, 10);
 }
 
+function hotelBusinessTimezone(hotel = {}) {
+	const value = cleanString(
+		hotel.timezone || hotel.timeZone || hotel.hotelTimezone || process.env.HOTEL_BOOKING_TIMEZONE,
+		80
+	);
+	return value || "Asia/Riyadh";
+}
+
+function businessTodayISO(hotel = {}) {
+	const timeZone = hotelBusinessTimezone(hotel);
+	try {
+		const parts = new Intl.DateTimeFormat("en-CA", {
+			timeZone,
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		}).formatToParts(new Date());
+		const get = (type) => parts.find((part) => part.type === type)?.value || "";
+		const year = get("year");
+		const month = get("month");
+		const day = get("day");
+		if (year && month && day) return `${year}-${month}-${day}`;
+	} catch {
+		// Fall through to UTC if the configured timezone is invalid.
+	}
+	return new Date().toISOString().slice(0, 10);
+}
+
 function isoDateParts(iso = "") {
 	const valid = validISODate(iso);
 	if (!valid) return null;
@@ -6171,7 +6199,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 	const agentName = localizedAgentName(sc);
 	const hotelFacts = compactHotelFacts(hotel);
 	const knownFacts = compactKnownFactsForPrompt(known);
-	const today = new Date().toISOString().slice(0, 10);
+	const today = businessTodayISO(hotel);
 	const openingTurn = turnKind === "new_chat_intro";
 	const firstCustomerFacingReply = !openingTurn && !hasAnyAiEntry(sc);
 	const firstGuestTurn = turnKind === "new_chat_first_guest_message" || firstCustomerFacingReply;
@@ -6813,7 +6841,7 @@ async function quoteTool(sc = {}, known = {}) {
 	if (!dates.length) {
 		return { ok: false, code: "bad_dates", message: "Invalid date range." };
 	}
-	const todayISO = new Date().toISOString().slice(0, 10);
+	const todayISO = businessTodayISO();
 	if (validISODate(known.checkinISO) && known.checkinISO <= todayISO) {
 		const selections = selectionsFromKnown(known);
 		const roomLabel = quoteRoomLinesText(
@@ -6832,6 +6860,15 @@ async function quoteTool(sc = {}, known = {}) {
 			roomLabel,
 			currency: known.currency || "SAR",
 			minCheckinISO: addDaysISO(todayISO, 1),
+			firstUnavailableDate: known.checkinISO,
+			unavailableSelections: selections.map((selection) => ({
+				roomTypeKey: selection.roomTypeKey || "",
+				count: normalizeRoomCount(selection.count, 1),
+				code: "same_day_checkin_not_supported",
+				roomLabel: roomTypeLabel(selection.roomTypeKey || "", known.languageCode),
+				firstUnavailableDate: known.checkinISO,
+				unavailableDates: [known.checkinISO].filter(Boolean),
+			})),
 			selectionKey: roomSelectionKey(selections),
 		};
 	}
@@ -7138,15 +7175,63 @@ async function quoteTool(sc = {}, known = {}) {
 	};
 }
 
+function unavailableQuoteBlocksRequestedDate(known = {}) {
+	const facts = asObject(known);
+	const quote = asObject(facts.quote);
+	const code = String(quote.code || "").toLowerCase();
+	const checkinISO = validISODate(facts.checkinISO || quote.checkinISO);
+	if (code === "same_day_checkin_not_supported") return true;
+	if (checkinISO && checkinISO <= businessTodayISO()) return true;
+	const firstUnavailableDate = validISODate(quote.firstUnavailableDate);
+	if (checkinISO && firstUnavailableDate && firstUnavailableDate === checkinISO) return true;
+	const unavailableSelections = Array.isArray(quote.unavailableSelections)
+		? quote.unavailableSelections
+		: [];
+	return unavailableSelections.some(
+		(item) => checkinISO && validISODate(item?.firstUnavailableDate) === checkinISO
+	);
+}
+
+function latestGuestRequestsBroadAlternative(latestText = "", latestAction = "") {
+	const text = normalizeIntentSearchText(latestText)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	const action = cleanString(latestAction, 80).toLowerCase();
+	if (
+		[
+			"proceed",
+			"continue_booking",
+			"proceed_to_booking",
+			"check_alternatives",
+			"find_alternatives",
+		].includes(action)
+	) {
+		return true;
+	}
+	return (
+		/\b(?:available|availability|dates|other dates|another date|alternatives?|options?|another option|different option|other option|help me|budget|different room|room type|when)\b/i.test(
+			text
+		) ||
+		/(?:\u062e\u064a\u0627\u0631\u0627\u062e\u0631|\u062e\u064a\u0627\u0631\u0622\u062e\u0631|\u062e\u064a\u0627\u0631\u062a\u0627\u0646\u064a|\u062e\u064a\u0627\u0631\u062b\u0627\u0646\u064a|\u062e\u064a\u0627\u0631\u0645\u062e\u062a\u0644\u0641|\u0628\u062f\u064a\u0644|\u0628\u062f\u0627\u0626\u0644|\u0633\u0627\u0639\u062f\u064a\u0646\u064a|\u0633\u0627\u0639\u062f\u0646\u064a|\u0645\u064a\u0632\u0627\u0646\u064a\u0629\u0627\u062e\u0631\u0649|\u0645\u064a\u0632\u0627\u0646\u064a\u0629\u0623\u062e\u0631\u0649|\u0646\u0648\u0639\u063a\u0631\u0641\u0629\u0645\u062e\u062a\u0644\u0641|\u063a\u0631\u0641\u0629\u0645\u062e\u062a\u0644\u0641\u0629|\u0627\u0644\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u062a\u0648\u0627\u0631\u064a\u062e|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0645\u0648\u0627\u0639\u064a\u062f|\u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f|\u0627\u0645\u062a\u0649|\u0645\u062a\u0649)/iu.test(
+			compact
+		)
+	);
+}
+
 function latestGuestRequestsAlternativeAvailability(
 	latestText = "",
 	latestAction = "",
-	previousAi = null
+	previousAi = null,
+	known = {}
 ) {
 	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_unavailable") {
 		return false;
 	}
 	if (quickDateRange(latestText)?.checkinISO) return false;
+	const broadAlternative = latestGuestRequestsBroadAlternative(latestText, latestAction);
+	if (broadAlternative && unavailableQuoteBlocksRequestedDate(known)) return true;
 	if (textMentionsRoomSelection(latestText) || roomCountOnlyFromText(latestText)) return false;
 	const text = normalizeIntentSearchText(latestText)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -7154,6 +7239,7 @@ function latestGuestRequestsAlternativeAvailability(
 		.trim();
 	const compact = text.replace(/\s+/g, "");
 	const action = cleanString(latestAction, 80).toLowerCase();
+	if (broadAlternative) return true;
 	if (
 		[
 			"proceed",
@@ -7204,12 +7290,19 @@ function latestTextRequestsDateAlternatives(value = "") {
 function latestGuestRequestsSameDateRoomOptions(
 	latestText = "",
 	latestAction = "",
-	previousAi = null
+	previousAi = null,
+	known = {}
 ) {
 	if (String(previousAi?.clientAction || "").toLowerCase() !== "quote_unavailable") {
 		return false;
 	}
 	if (quickDateRange(latestText)?.checkinISO) return false;
+	if (
+		unavailableQuoteBlocksRequestedDate(known) &&
+		latestGuestRequestsBroadAlternative(latestText, latestAction)
+	) {
+		return false;
+	}
 	const action = cleanString(latestAction, 80).toLowerCase();
 	if (["room_options_request", "check_room_options"].includes(action)) return true;
 	if (action === "check_alternatives") return false;
@@ -7261,7 +7354,7 @@ async function suggestAlternativeStays(sc = {}, known = {}, { maxOptions = 3 } =
 	if (!checkinISO || !checkoutISO || !nights || !selections.length) {
 		return { options: [], checkedDays: 0, validatedCandidates: 0 };
 	}
-	const todayISO = new Date().toISOString().slice(0, 10);
+	const todayISO = businessTodayISO();
 	const minimumStartISO = addDaysISO(todayISO, 1);
 	const searchDays = 45;
 	const candidates = [];
@@ -8115,7 +8208,7 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 		: roomLabel;
 	if (result.code === "same_day_checkin_not_supported") {
 		const minDate = formatDate(
-			result.minCheckinISO || addDaysISO(new Date().toISOString().slice(0, 10), 1),
+			result.minCheckinISO || addDaysISO(businessTodayISO(hotel), 1),
 			languageCode
 		);
 		return ar
@@ -8894,6 +8987,9 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 			roomLabel: result.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
 			firstUnavailableDate: result.firstUnavailableDate || "",
 			minCheckinISO: result.minCheckinISO || "",
+			unavailableSelections: Array.isArray(result.unavailableSelections)
+				? result.unavailableSelections.slice(0, 5)
+				: [],
 		};
 	}
 	nextKnown = syncKnownFromQuote(nextKnown);
@@ -10625,9 +10721,15 @@ async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest
 			checkinISO: result.checkinISO || known.checkinISO,
 			checkoutISO: result.checkoutISO || known.checkoutISO,
 			rooms: Math.max(1, Number(known.rooms || 1) || 1),
+			roomSelections: normalizeRoomSelections(result.roomSelections || known.roomSelections),
 			currency: result.currency || "SAR",
 			code: result.code || "not_available",
 			roomLabel: result.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
+			firstUnavailableDate: result.firstUnavailableDate || "",
+			minCheckinISO: result.minCheckinISO || "",
+			unavailableSelections: Array.isArray(result.unavailableSelections)
+				? result.unavailableSelections.slice(0, 5)
+				: [],
 		};
 	}
 	nextKnown = syncKnownFromQuote(nextKnown);
@@ -12326,6 +12428,14 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (latestAction === "skip_email") {
 		known.emailSkipped = true;
+		await saveKnownFacts(key, known);
+		if (
+			!requiredBookingMissing(known).length &&
+			(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))
+		) {
+			await waitForTypingMinimum(typingStartedAt);
+			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+		}
 	}
 	if (
 		latestGuest &&
@@ -12492,7 +12602,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		latestGuestRequestsSameDateRoomOptions(latestText, latestAction, previousAi) &&
+		latestGuestRequestsSameDateRoomOptions(latestText, latestAction, previousAi, known) &&
 		validISODate(known.checkinISO) &&
 		validISODate(known.checkoutISO)
 	) {
@@ -12503,7 +12613,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi) &&
+		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi, known) &&
 		quoteInputsKnown(known)
 	) {
 		await saveKnownFacts(key, known);
@@ -12686,7 +12796,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		latestGuestRequestsSameDateRoomOptions(latestText, latestAction, previousAi) &&
+		latestGuestRequestsSameDateRoomOptions(latestText, latestAction, previousAi, known) &&
 		validISODate(known.checkinISO) &&
 		validISODate(known.checkoutISO)
 	) {
@@ -12697,7 +12807,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi) &&
+		latestGuestRequestsAlternativeAvailability(latestText, latestAction, previousAi, known) &&
 		quoteInputsKnown(known)
 	) {
 		await saveKnownFacts(key, known);

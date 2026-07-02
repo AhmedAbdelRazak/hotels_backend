@@ -1219,7 +1219,7 @@ function addDaysToISO(iso = "", days = 0) {
 	return date.toISOString().slice(0, 10);
 }
 
-function numericGregorianSingleDateParts(left, right, year = "") {
+function numericGregorianSingleDateParts(left, right, year = "", options = {}) {
 	const a = Number(left);
 	const b = Number(right);
 	if (!a || !b) return null;
@@ -1231,6 +1231,9 @@ function numericGregorianSingleDateParts(left, right, year = "") {
 	} else if (b > 12 && a <= 12) {
 		month = a;
 		day = b;
+	} else if (options.preferDayFirst) {
+		day = a;
+		month = b;
 	} else {
 		return null;
 	}
@@ -1241,18 +1244,39 @@ function numericGregorianSingleDateParts(left, right, year = "") {
 	return iso ? { iso, year: explicitYear || isoYear(iso), month, day } : null;
 }
 
+function durationNightsFromText(value = "") {
+	const source = digitsToEnglish(normalizeNumberWordsForParsing(String(value || "")))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	const durationPrefix =
+		"(?:\\b(?:checkout|check\\s*out|departure|depart|leave|leaving|after|for)\\b|(?:\\u062e\\u0631\\u0648\\u062c|\\u0627\\u0644\\u062e\\u0631\\u0648\\u062c|\\u0645\\u063a\\u0627\\u062f\\u0631\\u0629|\\u0627\\u0644\\u0645\\u063a\\u0627\\u062f\\u0631\\u0629|\\u0628\\u0639\\u062f|\\u0644\\u0645\\u062f\\u0629|\\u0645\\u062f\\u0629))?";
+	const unit =
+		"(?:nights?|days?|\\u0644\\u064a\\u0644\\u0629|\\u0644\\u064a\\u0644\\u0647|\\u0644\\u064a\\u0627\\u0644\\u064a|\\u0644\\u064a\\u0627\\u0644\\u0649|\\u064a\\u0648\\u0645|\\u0627\\u064a\\u0627\\u0645|\\u0623\\u064a\\u0627\\u0645)";
+	const beforeUnit = source.match(new RegExp(`${durationPrefix}\\s*(?:\\bafter\\b|\\bfor\\b|\\u0628\\u0639\\u062f|\\u0644\\u0645\\u062f\\u0629|\\u0645\\u062f\\u0629)?\\s*(\\d{1,2})\\s*${unit}`, "iu"));
+	const afterUnit = source.match(new RegExp(`${durationPrefix}\\s*(?:\\bafter\\b|\\bfor\\b|\\u0628\\u0639\\u062f|\\u0644\\u0645\\u062f\\u0629|\\u0645\\u062f\\u0629)?\\s*${unit}\\s*(\\d{1,2})`, "iu"));
+	const singleNight =
+		/\b(?:a|single)\s+night\b/i.test(source) ||
+		/(?:\u0644\u064a\u0644\u0629|\u0644\u064a\u0644\u0647)\s+(?:\u0648\u0627\u062d\u062f\u0629|\u0648\u0627\u062d\u062f\u0647|\u0648\u0627\u062d\u062f)\b/iu.test(
+			source
+		);
+	const nights = Number(beforeUnit?.[1] || afterUnit?.[1] || (singleNight ? 1 : 0));
+	if (!Number.isFinite(nights) || nights < 1 || nights > 60) return null;
+	return Math.floor(nights);
+}
+
 function quickNumericGregorianDatePlusDuration(text = "") {
-	const raw = digitsToEnglish(String(text || ""));
+	const raw = digitsToEnglish(normalizeNumberWordsForParsing(String(text || "")));
 	const dateMatch = raw.match(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-]((?:20\d{2})|(?:\d{2})))?\b/);
 	if (!dateMatch) return null;
-	const date = numericGregorianSingleDateParts(dateMatch[1], dateMatch[2], dateMatch[3]);
+	const date = numericGregorianSingleDateParts(dateMatch[1], dateMatch[2], dateMatch[3], {
+		preferDayFirst: /[\u0600-\u06FF]/.test(raw),
+	});
 	if (!date?.iso) return null;
 	const afterDate = raw.slice(dateMatch.index + dateMatch[0].length);
-	const durationMatch = afterDate.match(
-		/(?:\b(?:checkout|check\s*out|departure|depart|leave|leaving|after|for)\b|(?:\u062e\u0631\u0648\u062c|\u0627\u0644\u062e\u0631\u0648\u062c|\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0628\u0639\u062f|\u0644\u0645\u062f\u0629|\u0645\u062f\u0629))\s*(?:\bafter\b|\bfor\b|\u0628\u0639\u062f|\u0644\u0645\u062f\u0629|\u0645\u062f\u0629)?\s*(\d{1,2})\s*(?:nights?|days?|\u0644\u064a\u0644\u0629|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a|\u0644\u064a\u0627\u0644\u0649|\u064a\u0648\u0645|\u0627\u064a\u0627\u0645|\u0623\u064a\u0627\u0645)/iu
-	);
-	const nights = Number(durationMatch?.[1] || 0);
-	if (!Number.isFinite(nights) || nights < 1 || nights > 60) return null;
+	const textWithoutDate = `${raw.slice(0, dateMatch.index)} ${afterDate}`;
+	const nights = durationNightsFromText(afterDate) || durationNightsFromText(textWithoutDate);
+	if (!nights) return null;
 	const checkoutISO = addDaysToISO(date.iso, nights);
 	if (!checkoutISO || checkoutISO <= date.iso) return null;
 	return {
