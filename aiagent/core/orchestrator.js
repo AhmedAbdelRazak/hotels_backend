@@ -6373,6 +6373,78 @@ function compactUpdateToolResult(result = {}, known = {}) {
 	};
 }
 
+async function askCompactToolWriter({
+	sc,
+	known,
+	latestGuest,
+	toolResult,
+	fallback = "",
+	validation = "",
+	requireContact = false,
+	requirePolicy = false,
+} = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const requiredVisibleNumbers = numericTokensForPolish(fallback).slice(0, 40);
+	const raw = await chat(
+		[
+			{
+				role: "system",
+				content: [
+					'Return only one valid json object: {"reply":"..."}',
+					"You are the OpenAI brain writing the final customer-facing reply for a hotel live chat.",
+					"Use the guest language and dialect. Be concise, professional, warm, and naturally Muslim-friendly when it fits.",
+					"The orchestrator only executed a tool for you; you must write the reply. Do not mention tools, schemas, validation, or internal state.",
+					"Use toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details.",
+					requiredVisibleNumbers.length
+						? "Include every requiredVisibleNumbers item exactly as shown."
+						: "",
+					requireContact
+						? "The reply must include the required phone and WhatsApp contact from toolResult or known facts."
+						: "",
+					requirePolicy
+						? "The reply must include the required policy details from toolResult."
+						: "",
+				]
+					.filter(Boolean)
+					.join("\n"),
+			},
+			{
+				role: "user",
+				content: JSON.stringify(
+					{
+						languageCode,
+						agentName: localizedAgentName(sc),
+						guestName: guestDisplayName(sc),
+						latestGuestMessage: latestGuest?.message || "",
+						known: compactKnownFactsForPrompt(known),
+						toolResult: asObject(toolResult),
+						validation,
+						requiredVisibleNumbers,
+					},
+					null,
+					2
+				),
+			},
+		],
+		{
+			kind: "writer",
+			temperature: 0.2,
+			max_tokens: 320,
+			reasoning_effort: "low",
+			response_format: { type: "json_object" },
+		}
+	);
+	const parsed = parseJsonObject(raw);
+	return normalizeDecision(
+		parsed || {
+			action: "reply",
+			reply: String(raw || "").trim(),
+			facts: {},
+			reason: "compact_tool_writer",
+		}
+	);
+}
+
 async function sendBrainToolReply({
 	io,
 	sc,
@@ -6552,6 +6624,30 @@ async function sendBrainToolReplyFromOpenAI({
 			invalidReason = invalidReplyReason(reply);
 		} catch (error) {
 			console.warn("[aiagent] brain tool reply repair failed:", error?.message || error);
+		}
+	}
+	if (invalidReason) {
+		try {
+			decision = await askCompactToolWriter({
+				sc,
+				known,
+				latestGuest,
+				toolResult,
+				fallback,
+				validation: invalidReason,
+				requireContact,
+				requirePolicy,
+			});
+			reply = decision?.reply || "";
+			invalidReason = invalidReplyReason(reply);
+			if (!invalidReason) {
+				console.warn("[aiagent] compact brain tool reply repair used", {
+					caseId,
+					tool: toolResult?.tool || "",
+				});
+			}
+		} catch (error) {
+			console.warn("[aiagent] compact brain tool reply repair failed:", error?.message || error);
 		}
 	}
 	if (invalidReason) {
