@@ -832,7 +832,7 @@ const ROOM_SELECTION_PATTERNS = [
 	{
 		key: "doubleRooms",
 		pattern:
-			/(?:double|twin|standard|two\s+beds?|2\s*beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u0645\u0632\u0648\u062c\u0629|\u0645\u0632\u0648\u062c\u0647|\u0645\u0632\u0648\u062c|\u062f\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|2\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
+			/(?:double|twin|standard|two\s+beds?|2\s*beds?|\u0645\u0632\u062f\u0648\u062c\u0629|\u0645\u0632\u062f\u0648\u062c|\u0645\u0632\u0648\u062c\u0629|\u0645\u0632\u0648\u062c\u0647|\u0645\u0632\u0648\u062c|\u062f\u0628\u0644|\u062f\u0627\u0628\u0644|\u062b\u0646\u0627\u0626\u064a\u0629|\u062b\u0646\u0627\u0626\u064a|2\s*(?:\u0633\u0631\u064a\u0631|\u0633\u0631\u0627\u064a\u0631|\u0627\u0633\u0631\u0629|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631))/i,
 	},
 	{
 		key: "tripleRooms",
@@ -989,6 +989,7 @@ function textMentionsRoomSelection(value = "") {
 		"\u0645\u0632\u062f\u0648\u062c",
 		"\u062b\u0646\u0627\u0626\u064a",
 		"\u062f\u0628\u0644",
+		"\u062f\u0627\u0628\u0644",
 		"\u062b\u0644\u0627\u062b\u064a",
 		"\u062b\u0644\u0627\u062b\u0649",
 		"\u062a\u0644\u0627\u062a\u064a",
@@ -1034,6 +1035,7 @@ function textMentionsNamedRoomType(value = "") {
 		"\u0645\u0632\u0648\u062c",
 		"\u062b\u0646\u0627\u0626\u064a",
 		"\u062f\u0628\u0644",
+		"\u062f\u0627\u0628\u0644",
 		"\u062b\u0644\u0627\u062b\u064a",
 		"\u062b\u0644\u0627\u062b\u0649",
 		"\u062a\u0644\u0627\u062a\u064a",
@@ -1408,8 +1410,8 @@ function nationalityFromText(value = "") {
 }
 
 function simplePhoneFromLine(value = "") {
-	const raw = normalizeDigits(cleanDisplayString(value, 80)).replace(
-		/^(?:phone|phone number|mobile|mobile number|whatsapp|whats\s*app|\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0631\u0642\u0645 \u0627\u0644\u062c\u0648\u0627\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*[:：,\-]?\s*/i,
+	let raw = normalizeDigits(cleanDisplayString(value, 80)).replace(
+		/^(?:phone|phone number|mobile|mobile number|whatsapp|whats\s*app|\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0631\u0642\u0645 \u0627\u0644\u062c\u0648\u0627\u0644|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*[:\uFF1A,\-]?\s*/i,
 		""
 	);
 	const phone = cleanPhone(raw);
@@ -1421,10 +1423,11 @@ function simplePhoneFromLine(value = "") {
 function phoneFromText(value = "") {
 	const text = normalizeDigits(cleanDisplayString(value, 240));
 	const labeled = text.match(
-		/(?:phone|phone\s+number|mobile|mobile\s+number|whatsapp|whats\s*app|telephone|tel|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0645\u0648\u0628\u0627\u064a\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*(\+?\d[\d\s().-]{6,24})/i
+		/(?:phone|phone\s+number|mobile|mobile\s+number|whatsapp|whats\s*app|telephone|tel|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0645\u0648\u0628\u0627\u064a\u0644|\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*(\+?\d[\d\s().-]{6,24})/i
 	);
 	const loosePlus = !labeled ? text.match(/\+\d[\d\s().-]{6,24}/) : null;
-	const raw = labeled?.[1] || loosePlus?.[0] || "";
+	let raw = labeled?.[1] || loosePlus?.[0] || "";
+	raw = raw.replace(/^(?:\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645)\s*[:\uFF1A,\-]?\s*/i, "");
 	const phone = cleanPhone(raw);
 	return phone && phone.replace(/[^\d]/g, "").length >= 7 ? phone : "";
 }
@@ -1487,13 +1490,13 @@ function bookingNameFromIdentityText(value = "") {
 		nationalityFromText(original) ||
 		normalizeNationalityHint(original) ||
 		/\b(?:phone|mobile|whatsapp|nationality|citizenship)\b/i.test(original) ||
-		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629)/iu.test(
+		/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629)/iu.test(
 			original
 		);
 	text = text
 		.replace(/\+?\d[\d\s().-]{6,24}/g, " ")
 		.replace(/\b(?:phone|mobile|whatsapp|nationality|citizenship|name|booking name|guest name|full name)\b/gi, " ")
-		.replace(/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629|\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/giu, " ");
+		.replace(/(?:\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u062c\u0648\u0627\u0644|\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u0629|\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/giu, " ");
 	const tokens = text
 		.split(/[\s,;\u060C|]+/)
 		.map((token) => token.trim())
@@ -1543,6 +1546,7 @@ function identityCorrectionOnly(value = "") {
 function cleanBookingNameCandidate(value = "") {
 	return cleanDisplayString(value, 80)
 		.replace(/\s+(?:\u0639\u0644\u0649\s+\u0641\u0643\u0631\u0629|\u0639\u0644\u064a\s+\u0641\u0643\u0631\u0629|\u0628\u0627\u0644\u0645\u0646\u0627\u0633\u0628\u0629|by\s+the\s+way).*$/iu, "")
+		.replace(/(?:\s+|\u060C|,)+(?:\u0648|and)$/iu, "")
 		.replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "")
 		.trim();
 }
@@ -1553,7 +1557,7 @@ function bookingNameFromLine(value = "") {
 	const patterns = [
 		/(?:use|put)\s+([A-Za-z][A-Za-z\s'.-]{1,80}?)\s+as\s+(?:the\s+)?(?:booking|guest|full)\s+name\b/i,
 		/(?:booking\s+name|guest\s+name|full\s+name|name)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z\s'.-]{1,80}?)(?=\s*(?:,|;|\.|\band\b|\bphone\b|\bmobile\b|\bnationality\b|$))/i,
-		/(?:\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*([\u0600-\u06FF][\u0600-\u06FF\s'.-]{1,80}?)(?=\s*(?:\u060C|,|;|\.|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a|\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|$))/iu,
+		/(?:\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645\s+\u0627\u0644\u0643\u0627\u0645\u0644|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)\s*(?:[:\-\u060C,]|\u0647\u0648)?\s*([\u0600-\u06FF][\u0600-\u06FF\s'.-]{1,80}?)(?=\s*(?:\u060C|,|;|\.|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a|\u0631\u0642\u0645|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|$))/iu,
 	];
 	for (const pattern of patterns) {
 		const match = text.match(pattern);
@@ -1611,7 +1615,7 @@ function latestGuestProvidesBookingIdentityDetails(value = "") {
 			phoneFromText(text) ||
 			nationalityFromIdentityText(text) ||
 			nationalityFromText(text) ||
-			/(?:booking\s+name|guest\s+name|full\s+name|phone|mobile|nationality|\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a)/i.test(
+			/(?:booking\s+name|guest\s+name|full\s+name|phone|mobile|nationality|\u0627\u0633\u0645\s+(?:\u0635\u0627\u062d\u0628\s+)?\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0633\u0645|\u0631\u0642\u0645\s+\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\u064a|\u0631\u0642\u0645\u0649|\u0627\u0644\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a)/i.test(
 				text
 			)
 	);
@@ -1676,7 +1680,7 @@ function latestGuestContinuesAfterQuote(previousAi = {}, latestText = "", latest
 function peopleCountFromLine(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const unicodeArabicGuestNoun =
-		"(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0632\u0644\u0627\u0621|\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631|\u0632\u0648\u0627\u0631)";
+		"(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0632\u0644\u0627\u0621|\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631|\u0632\u0648\u0627\u0631)";
 	const unicodeArabicMatch =
 		text.match(
 			new RegExp(`(?:^|\\s)(?:\\u0644\\u0639\\u062f\\u062f|\\u0644\\u0640|\\u0644)?\\s*(\\d{1,3})\\s*${unicodeArabicGuestNoun}`, "iu")
@@ -1720,7 +1724,7 @@ function peopleCountFromLine(value = "") {
 		{ pattern: /(خمسة|خمس|٥)\s*(اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ)?/i, value: 5 },
 	];
 	const arabicExplicitGuestCountContext =
-		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0632\u0644\u0627\u0621|\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631|\u0632\u0648\u0627\u0631|\u0634\u062e\u0635\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0646\u0632\u064a\u0644\u064a\u0646|\u0641\u0631\u062f\u064a\u0646)/iu;
+		/(?:\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0646\u0632\u0644\u0627\u0621|\u0636\u064a\u0648\u0641|\u0628\u0627\u0644\u063a\u064a\u0646|\u0628\u0627\u0644\u063a|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631\u064a\u0646|\u0645\u0639\u062a\u0645\u0631|\u0632\u0648\u0627\u0631|\u0634\u062e\u0635\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0646\u0632\u064a\u0644\u064a\u0646|\u0641\u0631\u062f\u064a\u0646)/iu;
 	const arabicMatch = arabicGuestWordCounts.find((item) => item.pattern.test(text));
 	if (arabicMatch && arabicExplicitGuestCountContext.test(text)) {
 		return arabicMatch.value;
@@ -2052,6 +2056,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered.roomTypeKey = roomTypeKey;
 			}
 			const peopleCount = peopleCountFromLine(line);
+			const explicitGuestCount = explicitGuestCountFactsFromText(line);
+			if (Object.keys(explicitGuestCount).length) {
+				recovered = mergeKnownFacts(recovered, explicitGuestCount);
+			}
 			if (peopleCount) {
 				const rooms = roomSelectionsTotal(recovered.roomSelections) || normalizeRoomCount(recovered.rooms, 1);
 				const capacity = roomCapacityForKey(recovered.roomTypeKey);
@@ -3384,7 +3392,7 @@ function previousAiAskedForGuestCount(previousAi = {}) {
 	if (!text && !action) return false;
 	if (action.includes("guest_count") || action.includes("adults_children")) return true;
 	return /\b(number of guests|guest count|how many adults|adults and children|adults and kids)\b/i.test(text) ||
-		/(?:\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/iu.test(text);
+		/(?:\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a|\u0639\u062f\u062f\s+\u0627\u0644\u0643\u0628\u0627\u0631|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0643\u0628\u0627\u0631|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/iu.test(text);
 }
 
 function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
@@ -3398,8 +3406,8 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	const rosterFacts = guestRosterFactsFromAgeList(value);
 	if (Object.keys(rosterFacts).length) return rosterFacts;
 	const adultMatch =
-		text.match(/(?:^|\s)(\d{1,3})\s*(?:adults?|grownups?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?)(?:$|\s)/iu) ||
-		text.match(/(?:adults?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?)\s*(\d{1,3})/iu);
+		text.match(/(?:^|\s)(\d{1,3})\s*(?:adults?|grownups?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)(?:$|\s)/iu) ||
+		text.match(/(?:adults?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)\s*(\d{1,3})/iu);
 	const childMatch =
 		text.match(/(?:^|\s)(\d{1,2})\s*(?:children|child|kids?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)(?:$|\s)/iu) ||
 		text.match(/(?:children|child|kids?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)\s*(\d{1,2})/iu);
@@ -3426,6 +3434,35 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	}
 	if (!Number.isFinite(Number(facts.children))) facts.children = 0;
 	facts.adults = Math.floor(Number(facts.adults));
+	facts.children = Math.max(0, Math.min(20, Math.floor(Number(facts.children))));
+	return facts;
+}
+
+function explicitGuestCountFactsFromText(value = "") {
+	const rosterFacts = guestRosterFactsFromAgeList(value);
+	if (Object.keys(rosterFacts).length) return rosterFacts;
+	const text = normalizeNumberWordsForParsing(normalizeIntentSearchText(value))
+		.replace(/\+?\d[\d\s().-]{6,24}/g, " ")
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text || containsDateLikeSlashToken(text)) return {};
+	const adultLabel =
+		"(?:adults?|grownups?|\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646)?|\\u0643\\u0628\\u0627\\u0631|\\u0643\\u0628\\u064a\\u0631|\\u0643\\u0628\\u064a\\u0631\\u064a\\u0646)";
+	const childLabel =
+		"(?:children|child|kids?|\\u0637\\u0641\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644)";
+	const adultMatch =
+		text.match(new RegExp(`(?:^|\\s)(\\d{1,3})\\s*${adultLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		text.match(new RegExp(`${adultLabel}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+	const childMatch =
+		text.match(new RegExp(`(?:^|\\s)(\\d{1,2})\\s*${childLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		text.match(new RegExp(`${childLabel}\\s*(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+	const facts = {};
+	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
+	if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (!Number.isFinite(Number(facts.adults)) || Number(facts.adults) < 1) return {};
+	if (!Number.isFinite(Number(facts.children))) facts.children = 0;
+	facts.adults = Math.max(1, Math.min(200, Math.floor(Number(facts.adults))));
 	facts.children = Math.max(0, Math.min(20, Math.floor(Number(facts.children))));
 	return facts;
 }
@@ -4994,6 +5031,61 @@ function buildOtherCloserHotelMessage(sc = {}, hotel = {}, known = {}, latestGue
 	].join("\n");
 }
 
+function buildValueObjectionFallbackReply(sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const latestText = String(latestGuest?.message || "");
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	const pitchLines = hotelSalesPitchLinesForGuest(hotel, known, languageCode);
+	const quote = asObject(known.quote);
+	const hasQuoteTotal = quoteHasContent(quote) && Number(quote.total || 0) > 0;
+	const currency = quote.currency || hotel?.currency || "SAR";
+	const totalLine = hasQuoteTotal
+		? ar
+			? `\u0627\u0644\u0639\u0631\u0636 \u0627\u0644\u062d\u0627\u0644\u064a: \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a ${formatMoney(
+					quote.total,
+					currency,
+					languageCode
+			  )}${quote.averagePerNight ? `\u060c \u0648\u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${formatMoney(quote.averagePerNight, currency, languageCode)}` : ""}.`
+			: `Current quote: total ${formatMoney(quote.total, currency, languageCode)}${quote.averagePerNight ? `, average ${formatMoney(quote.averagePerNight, currency, languageCode)} per night` : ""}.`
+		: "";
+	if (ar) {
+		const intro = latestGuestAsksOtherCloserHotel(latestGuest)
+			? `${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u062a\u0631\u064a\u062f \u0623\u0642\u0648\u0649 \u062e\u064a\u0627\u0631 \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u062d\u0631\u0645.`
+			: `${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0645\u0647\u0645 \u0648\u0644\u0627\u0632\u0645 \u0646\u0642\u0627\u0631\u0646\u0647 \u0628\u0642\u064a\u0645\u0629 \u0627\u0644\u0645\u0648\u0642\u0639.`;
+		const choices = [
+			"- \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0628\u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631 \u0645\u062a\u0627\u062d",
+			"- \u0646\u0639\u062f\u0644 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0644\u062a\u0642\u0644\u064a\u0644 \u0627\u0644\u062a\u0643\u0644\u0641\u0629",
+			hasQuoteTotal ? "- \u0623\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632 \u0628\u0647\u0630\u0627 \u0627\u0644\u0639\u0631\u0636" : "",
+		].filter(Boolean);
+		return [
+			intro,
+			...pitchLines.map((line) => `- ${line}`),
+			totalLine ? `- ${totalLine}` : "",
+			"\u062a\u062d\u0628 \u0623\u0643\u0645\u0644 \u0644\u0643 \u0639\u0644\u0649 \u0623\u064a \u0627\u062e\u062a\u064a\u0627\u0631\u061f",
+			...choices.slice(0, 3),
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	const intro = latestGuestAsksOtherCloserHotel(latestGuest)
+		? `${shortGuestAddressName(sc, known, latestText)}, I understand - you want the strongest nearby option for Al Haram.`
+		: `${shortGuestAddressName(sc, known, latestText)}, I understand. The total matters, so let me show the value before we change anything.`;
+	const choices = [
+		"- Check the best available option for the same dates",
+		"- Adjust dates or room type to reduce the total",
+		hasQuoteTotal ? "- Continue with this booking option" : "",
+	].filter(Boolean);
+	return [
+		intro,
+		...pitchLines.map((line) => `- ${line}`),
+		totalLine ? `- ${totalLine}` : "",
+		"Which way would you like me to continue?",
+		...choices.slice(0, 3),
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
 function priceGuidanceLine(sc = {}, known = {}, languageCode = "en") {
 	void sc;
 	void known;
@@ -5832,9 +5924,9 @@ function compactKnownFactsForPrompt(known = {}) {
 
 function latestTextHasExplicitGuestCount(text = "") {
 	const raw = String(text || "");
-	const normalized = normalizeDigits(raw).toLowerCase();
+	const normalized = normalizeNumberWordsForParsing(normalizeDigits(raw)).toLowerCase();
 	const arabicGuestNoun =
-		"(?:\\u0628\\u0627\\u0644\\u063a|\\u0628\\u0627\\u0644\\u063a\\u064a\\u0646|\\u0636\\u064a\\u0641|\\u0636\\u064a\\u0648\\u0641|\\u0634\\u062e\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0646\\u0632\\u064a\\u0644|\\u0646\\u0632\\u0644\\u0627\\u0621|\\u0645\\u0639\\u062a\\u0645\\u0631|\\u0645\\u0639\\u062a\\u0645\\u0631\\u064a\\u0646|\\u0637\\u0641\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0627\\u0641\\u0631\\u0627\\u062f)";
+		"(?:\\u0628\\u0627\\u0644\\u063a|\\u0628\\u0627\\u0644\\u063a\\u064a\\u0646|\\u0643\\u0628\\u0627\\u0631|\\u0643\\u0628\\u064a\\u0631|\\u0643\\u0628\\u064a\\u0631\\u064a\\u0646|\\u0636\\u064a\\u0641|\\u0636\\u064a\\u0648\\u0641|\\u0634\\u062e\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0646\\u0632\\u064a\\u0644|\\u0646\\u0632\\u0644\\u0627\\u0621|\\u0645\\u0639\\u062a\\u0645\\u0631|\\u0645\\u0639\\u062a\\u0645\\u0631\\u064a\\u0646|\\u0637\\u0641\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0627\\u0641\\u0631\\u0627\\u062f)";
 	const arabicNumberedGuestCount = new RegExp(
 		`\\d{1,3}\\s*${arabicGuestNoun}(?:$|[^\\p{L}])`,
 		"iu"
@@ -11153,6 +11245,14 @@ async function executeBrainFirstDecision({
 		});
 		nextDecision = repaired.decision;
 		nextKnown = syncKnownFromQuote(repaired.known);
+		if (!replyHasHotelValuePitch(nextDecision.reply)) {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "reply",
+				reply: buildValueObjectionFallbackReply(sc, hotel, nextKnown, latestGuest),
+				reason: nextDecision.reason || "value_objection_static_fallback",
+			});
+		}
 	}
 	if (replyRequestsForbiddenBookingField(nextDecision.reply)) {
 		const missing = requiredBookingMissing(nextKnown);
@@ -11760,6 +11860,7 @@ async function planTurn(io, supportCaseOrId) {
 			appliedDateBoundaryChange = true;
 		}
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
+		known = mergeKnownFacts(known, explicitGuestCountFactsFromText(latestText));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
 		if (
 			bookingIdentityCollectionContext(sc, previousAi, known) &&
@@ -12700,6 +12801,14 @@ async function planTurn(io, supportCaseOrId) {
 				repaired.known,
 				latestText
 			);
+			if (!replyHasHotelValuePitch(decision.reply)) {
+				decision = normalizeDecision({
+					...decision,
+					action: "reply",
+					reply: buildValueObjectionFallbackReply(sc, hotel, known, latestGuest),
+					reason: decision.reason || "value_objection_static_fallback",
+				});
+			}
 		}
 		if (replyRequestsForbiddenBookingField(decision.reply)) {
 			if (quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
@@ -13222,6 +13331,7 @@ const exportedOrchestrator = {
 		splitStayReservationMissing,
 		containsDateLikeSlashToken,
 		guestCountFactsFromAskedAnswer,
+		explicitGuestCountFactsFromText,
 		conversationHasGuestCountSignal,
 		replyPromisesReservationFinalization,
 		replyPromisesProgressWithoutAction,
