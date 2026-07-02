@@ -93,6 +93,18 @@ function trimMessagesForOpenAI(messages = []) {
 	});
 }
 
+function ensureJsonTokenForResponseFormat(messages = [], response_format = null) {
+	if (!response_format || response_format.type !== "json_object") {
+		return Array.isArray(messages) ? messages : [];
+	}
+	const input = Array.isArray(messages) ? messages : [];
+	const hasLowercaseJson = input.some((message) =>
+		/\bjson\b/.test(String(message?.content || ""))
+	);
+	if (hasLowercaseJson) return input;
+	return [{ role: "system", content: "Return valid json only." }, ...input];
+}
+
 async function chat(
 	messages,
 	{
@@ -113,7 +125,9 @@ async function chat(
 		: max_tokens;
 	const body = buildChatCompletionBody({
 		model,
-		messages: trimMessagesForOpenAI(messages),
+		messages: trimMessagesForOpenAI(
+			ensureJsonTokenForResponseFormat(messages, response_format)
+		),
 		temperature,
 		maxTokens: tokenLimit,
 		response_format,

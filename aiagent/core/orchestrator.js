@@ -3504,7 +3504,7 @@ function parseJsonObject(text = "") {
 }
 
 function responseSchemaPrompt() {
-	return `Return ONLY valid JSON with this shape:
+	return `Return ONLY valid json with this shape:
 {
   "action": "reply" | "get_quote" | "check_alternatives" | "check_room_options" | "send_review" | "send_review_again" | "submit_reservation" | "update_reservation" | "lookup_reservation" | "cancel_reservation" | "escalate" | "close_case",
   "reply": "customer-facing text in the guest language, with helpful line breaks/bullets/tasteful emojis when appropriate; empty only when a tool must run first",
@@ -3544,7 +3544,7 @@ function orchestratorContractPrompt() {
 		'- The guest sees only your "reply" text plus server-provided quick replies/buttons. The orchestrator must not write guest-facing wording for you.',
 		"- Customer-facing reply must be in the guest's language or dialect and must sound like a professional Muslim hotel CSR/sales representative.",
 		"- You own presentation quality. Use short paragraphs, clear line breaks, bullet points, and tasteful helpful emojis when they make the message easier or warmer for the guest. Do not overdo emojis, and keep official booking/review facts very clear.",
-		"- Structured JSON keys must stay exactly in English as shown in the schema. Never translate keys. Empty/unknown values should be omitted or empty, not guessed.",
+		"- Structured json keys must stay exactly in English as shown in the schema. Never translate keys. Empty/unknown values should be omitted or empty, not guessed.",
 		'- Use action="reply" only when no tool/action is needed before answering.',
 		'- Use action="get_quote" when exact price or availability is needed and the stay can be identified from facts/conversation.',
 		'- Use action="check_room_options" when dates are known but the guest needs available room choices.',
@@ -3711,7 +3711,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 	const firstCustomerFacingReply = !openingTurn && !hasAnyAiEntry(sc);
 	const firstGuestTurn = turnKind === "new_chat_first_guest_message" || firstCustomerFacingReply;
 	return [
-		`Return only one valid JSON object that follows the response schema. No markdown, no prose outside JSON.`,
+		`Return only one valid json object that follows the response schema. No markdown, no prose outside json.`,
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
 		`You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. On the first customer-facing AI reply in a hotel-scoped case, the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
@@ -3821,7 +3821,7 @@ async function askOpenAI({
 						turnKind === "new_chat_intro" ||
 						turnKind === "new_chat_first_guest_message",
 					responseRequirement:
-						"Return only one valid JSON object matching the required brain/orchestrator schema.",
+						"Return only one valid json object matching the required brain/orchestrator schema.",
 					latestGuestMessage: latestText,
 					latestGuestAction: latestGuest?.clientAction || "",
 					guestName: guestDisplayName(sc),
@@ -3914,7 +3914,7 @@ async function polishCustomerReply({
 				"Make the reply feel like a warm human CSR/sales representative: acknowledge casual or emotional comments briefly, then return to the useful next booking step.",
 				"Keep it concise: usually 1-4 short lines.",
 				"Clean line breaks, bullets, and tasteful emojis are allowed when they improve warmth or readability. Do not overuse them.",
-				'Return ONLY JSON: {"reply":"..."}',
+				'Return ONLY json: {"reply":"..."}',
 			].join("\n"),
 		},
 		{
@@ -7320,7 +7320,7 @@ async function executeBrainFirstDecision({
 			decision: nextDecision,
 			code: "missing_customer_reply_for_reply_action",
 			instruction:
-				"The previous decision selected action=\"reply\" but did not include customer-facing text. Return a corrected JSON decision. If a tool is needed, choose the correct action with empty reply and complete facts; otherwise write the guest-facing reply in the guest language.",
+				"The previous decision selected action=\"reply\" but did not include customer-facing text. Return a corrected json decision. If a tool is needed, choose the correct action with empty reply and complete facts; otherwise write the guest-facing reply in the guest language.",
 		});
 		nextDecision = repaired.decision;
 		changedFields = decisionChangedFields(nextDecision);
