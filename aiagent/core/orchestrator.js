@@ -8660,8 +8660,8 @@ async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, r
 	const text =
 		reply ||
 		(/^ar\b/i.test(languageCode)
-			? "سعدت بخدمتك. سأغلق المحادثة الآن، ويمكنك فتح محادثة جديدة في أي وقت تحتاج فيه مساعدة."
-			: "It was my pleasure helping you. I will close the chat now, and you can start a new one anytime you need help.");
+			? "\u0639\u0644\u0649 \u0627\u0644\u0631\u062d\u0628 \u0648\u0627\u0644\u0633\u0639\u0629\u060c \u0633\u0639\u062f\u062a \u0628\u062e\u062f\u0645\u062a\u0643. \u0646\u062d\u0646 \u0641\u064a \u062e\u062f\u0645\u062a\u0643 \u0641\u064a \u0623\u064a \u0648\u0642\u062a\u060c \u0648\u0625\u0630\u0627 \u0623\u062d\u0628\u0628\u062a \u062a\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632 \u0644\u0627\u062d\u0642\u064b\u0627 \u0641\u0623\u0646\u0627 \u062a\u062d\u062a \u0623\u0645\u0631\u0643."
+			: "It was my pleasure helping you. We are here anytime, and if you would like to continue later I will be happy to help.");
 	const updatedAfterOutro = await sendAiMessage(io, sc, text, {
 		latestGuest,
 		known,
