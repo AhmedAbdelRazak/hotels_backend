@@ -1,4 +1,4 @@
-const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const DEFAULT_OPENAI_FAST_MODEL = "gpt-5.4-mini";
 
 const KIND_DEFAULT_MODELS = {
@@ -10,11 +10,11 @@ const KIND_DEFAULT_MODELS = {
 };
 
 const DEFAULT_REASONING_EFFORTS = {
-	analysis: "medium",
-	reasoning: "medium",
+	analysis: "low",
+	reasoning: "low",
 	nlu: "low",
 	writer: "low",
-	default: "medium",
+	default: "low",
 };
 
 const KIND_ENV_KEYS = {
