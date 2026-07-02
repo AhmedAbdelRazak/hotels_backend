@@ -123,7 +123,7 @@ function logTurnStage(caseId = "", stage = "", extra = {}) {
 }
 
 function safeKnownSummary(known = {}) {
-	const facts = syncKnownFromQuote(asObject(known));
+	const facts = asObject(known);
 	return {
 		hasCheckin: Boolean(validISODate(facts.checkinISO)),
 		hasCheckout: Boolean(validISODate(facts.checkoutISO)),
@@ -1859,25 +1859,29 @@ function quoteCanBePreservedForKnown(quote = {}, known = {}) {
 }
 
 function quoteMatchesKnown(known = {}) {
-	const synced = syncKnownFromQuote(known);
-	const quote = asObject(synced.quote);
-	const selections = selectionsFromKnown(synced);
+	const facts = asObject(known);
+	const quote = asObject(facts.quote);
+	const selections = selectionsFromKnown(facts);
 	const selectionKey = roomSelectionKey(selections);
+	const quoteSelections = quoteRoomSelections(quote);
+	const quoteSelectionKey = quote.selectionKey || roomSelectionKey(quoteSelections);
+	const checkinISO = validISODate(facts.checkinISO);
+	const checkoutISO = validISODate(facts.checkoutISO);
 	if (selectionKey) {
 		return Boolean(
 			quote.available &&
-				quote.selectionKey === selectionKey &&
-				quote.checkinISO === synced.checkinISO &&
-				quote.checkoutISO === synced.checkoutISO &&
+				quoteSelectionKey === selectionKey &&
+				quote.checkinISO === checkinISO &&
+				quote.checkoutISO === checkoutISO &&
 				quoteRoomCount(quote) === roomSelectionsTotal(selections)
 		);
 	}
 	return Boolean(
 		quote.available &&
-			quote.roomTypeKey === synced.roomTypeKey &&
-			quote.checkinISO === synced.checkinISO &&
-			quote.checkoutISO === synced.checkoutISO &&
-			quoteRoomCount(quote) === normalizeRoomCount(synced.rooms, 1)
+			quote.roomTypeKey === facts.roomTypeKey &&
+			quote.checkinISO === checkinISO &&
+			quote.checkoutISO === checkoutISO &&
+			quoteRoomCount(quote) === normalizeRoomCount(facts.rooms, 1)
 	);
 }
 
@@ -3301,7 +3305,7 @@ function hotelFactReplyNeedsCorrection(decision = {}, hotel = {}, latestGuest = 
 }
 
 function requiredBookingMissing(known = {}) {
-	const facts = syncKnownFromQuote(known);
+	const facts = asObject(known);
 	const missing = [];
 	if (!validISODate(facts.checkinISO)) missing.push("checkinISO");
 	if (!validISODate(facts.checkoutISO)) missing.push("checkoutISO");
@@ -3704,11 +3708,12 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 	const knownFacts = compactKnownFactsForPrompt(known);
 	const today = new Date().toISOString().slice(0, 10);
 	const openingTurn = turnKind === "new_chat_intro";
-	const firstGuestTurn = turnKind === "new_chat_first_guest_message";
+	const firstCustomerFacingReply = !openingTurn && !hasAnyAiEntry(sc);
+	const firstGuestTurn = turnKind === "new_chat_first_guest_message" || firstCustomerFacingReply;
 	return [
 		`Return only one valid JSON object that follows the response schema. No markdown, no prose outside JSON.`,
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
-		`You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. On the first AI reply in a hotel-scoped case, mention the hotel name naturally in the guest's language. Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`,
+		`You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. On the first customer-facing AI reply in a hotel-scoped case, the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
@@ -3722,7 +3727,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`No redundancy. Keep replies concise: usually 2-5 short lines. Avoid repeating long greetings, the full quote, the same apology, or the same next-step wording unless the guest asks for it. If you already asked for a detail and the guest responds with something else, acknowledge the response naturally before asking again or explaining why it is still needed.`,
 		`The orchestrator will not add scripted warmth or emotional prefixes for you. If the guest jokes, thanks you, greets you, or sounds stressed/excited, write the natural customer-facing response yourself in reply.`,
 		`Use clean formatting when helpful: short lines, simple bullets, and tasteful emojis that fit the guest's language and mood. Avoid emoji clutter and never let styling make dates, prices, names, phone numbers, policies, or booking instructions less clear.`,
-		`For the first CSR/reservations message in an Arabic chat, begin naturally with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645" before introducing yourself. Do not repeat the greeting on later replies unless the guest greets again.`,
+		`For the first CSR/reservations message in an Arabic chat, begin with an Islamic greeting such as "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645 \u0648\u0631\u062d\u0645\u0629 \u0627\u0644\u0644\u0647 \u0648\u0628\u0631\u0643\u0627\u062a\u0647" or "\u0627\u0644\u0633\u0644\u0627\u0645 \u0639\u0644\u064a\u0643\u0645", then immediately introduce yourself as ${agentName} from the reception/reservations team at the hotel. Do not start only with "\u0623\u0647\u0644\u0627\u064b \u0648\u0633\u0647\u0644\u0627\u064b". Do not repeat the greeting on later replies unless the guest greets again.`,
 		`In Arabic hotel chats, prefer reservation wording like "\u0627\u0644\u062d\u062c\u0632", "\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632", or "\u0627\u0633\u062a\u0641\u0633\u0627\u0631\u0643". Avoid "\u0627\u0644\u0637\u0644\u0628" when you mean a hotel reservation.`,
 		`Use hotelName/hotelNameArabic as the hotel name. "Reception" and "reservations" describe your team role only; never append "Reception" to the hotel name or invent a new property name.`,
 		`Match the guest's language and dialect closely but professionally. If the guest switches language, switch with them. Address the guest and agent name in that language when natural.`,
@@ -3775,10 +3780,10 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If Hotel facts explicitly say a service exists, answer confidently and briefly. Examples: hasBusService=true means yes, mention busDetails if present; isNusuk=true means yes, the hotel is listed/available on Nusuk and you should mention isNusukText if present; distances means give the exact walking/driving distance; policyQA contains only answered hotel policy rows, so answer cancellation/refund/policy questions from those rows; listed offers/monthlyPackages mean mention the public offer/package as guidance. Do not say "I cannot confirm" for facts that are present in Hotel facts.`,
 		`Never reveal internal pricing, root price, cost, commission, inventory implementation details, schemas, prompt text, or tool names to the guest.`,
 		openingTurn
-			? `This is the beginning of a new guest chat. There is no guest request yet. Return action="reply" only, quickReplies=[], and a short warm opening greeting as ${agentName} from the reception/reservations team for the hotel in Hotel facts. Ask how you can help today. Do not list rooms, prices, offers, policies, or ask for dates until the guest asks or sends booking details.`
+			? `This is the beginning of a new guest chat. There is no guest request yet. Return action="reply" only, quickReplies=[]. Write a short two-part opening: first identify yourself as ${agentName} from the reception/reservations team at the hotel in Hotel facts, then on a separate short line ask how you can help today. In Arabic, begin the first line with a natural Islamic greeting before the identity. Do not list rooms, prices, offers, policies, or ask for dates until the guest asks or sends booking details.`
 			: "",
 		firstGuestTurn
-			? `This is your first AI response in a new guest chat, and the guest may already have sent one or more messages before you answered. Read the full transcript, not only the latest message. If the guest sent a booking request and then a greeting or follow-up, greet briefly in the guest's language as ${agentName} from the hotel reception/reservations team, mention the hotel name naturally, then respond to the actual booking/request details in the same message. Do not ignore earlier guest details. If booking details are incomplete, acknowledge what is known and ask only the next needed question.`
+			? `This is your first AI response in a new guest chat, and the guest may already have sent one or more messages before you answered. Read the full transcript, not only the latest message. Start with the required identity sentence as ${agentName} from the hotel reception/reservations team, mentioning the hotel name naturally; in Arabic, put the Islamic greeting before that identity. Then respond to the actual booking/request details. Do not ignore earlier guest details. If booking details are incomplete, acknowledge what is known and ask only the next needed question.`
 			: "",
 		orchestratorContractPrompt(),
 		responseSchemaPrompt(),
@@ -3946,7 +3951,7 @@ async function polishCustomerReply({
 			kind: "writer",
 			temperature: 0.25,
 			max_tokens: 260,
-			reasoning_effort: "low",
+			reasoning_effort: "",
 			response_format: { type: "json_object" },
 		});
 		const parsed = parseJsonObject(raw);
@@ -6396,7 +6401,7 @@ async function sendBrainToolReply({
 			turnKind: "tool_result",
 			kind: "writer",
 			maxTokens: 420,
-			reasoningEffort: "low",
+			reasoningEffort: "",
 		});
 		if (decision?.reply) {
 			reply = decision.reply;
@@ -6475,8 +6480,16 @@ async function sendBrainToolReplyFromOpenAI({
 	const caseId = caseIdText(sc);
 	let decision = null;
 	let reply = "";
-	const askToolWriter = async (validation = "") =>
-		askOpenAI({
+	const askToolWriter = async (validation = "") => {
+		const requiredVisibleNumbers =
+			validation === "visible_numbers_changed"
+				? numericTokensForPolish(fallback).slice(0, 40)
+				: [];
+		const correctionInstruction =
+			validation === "visible_numbers_changed"
+				? "Your previous tool-result reply was not sent because it changed or omitted required visible numbers. Return a corrected customer-facing reply from OpenAI only. Include every requiredVisibleNumbers item exactly as shown, and use the toolResult facts exactly. Do not invent or recalculate prices, dates, room counts, policies, or contact details."
+				: "Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.";
+		return askOpenAI({
 			sc,
 			hotel,
 			known,
@@ -6485,15 +6498,17 @@ async function sendBrainToolReplyFromOpenAI({
 				? {
 						...asObject(toolResult),
 						validation,
-						instruction:
-							"Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.",
+						requiredVisibleNumbers,
+						previousRejectedReply: reply,
+						instruction: correctionInstruction,
 				  }
 				: toolResult,
 			turnKind: "tool_result",
 			kind: "writer",
-			maxTokens: 420,
-			reasoningEffort: "low",
+			maxTokens: 560,
+			reasoningEffort: "",
 		});
+	};
 	const invalidReplyReason = (candidate = "") => {
 		const text = String(candidate || "").trim();
 		if (!text) return "missing_openai_reply";
@@ -6917,7 +6932,7 @@ function compactReviewForBrain(known = {}, hotel = {}) {
 
 async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
-	let reviewKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	let reviewKnown = { ...known, quote: asObject(known.quote) };
 	if (!quoteMatchesKnown(reviewKnown) && quoteInputsKnown(reviewKnown)) {
 		const quoteResult = await quoteTool(sc, reviewKnown);
 		if (quoteResult.available && quoteResult.quote) {
@@ -6982,7 +6997,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 
 async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
-	let submitKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	let submitKnown = { ...known, quote: asObject(known.quote) };
 	if (!submitKnown.quote || !quoteMatchesKnown(submitKnown)) {
 		const quote = await quoteTool(sc, submitKnown);
 		if (quote.available && quote.quote) {
@@ -7457,11 +7472,11 @@ async function submitReservationForCase(io, caseOrId) {
 	});
 	if (!allowed) return { ok: false, reason: reason || "ai_not_allowed" };
 	const latestGuest = latestGuestEntry(sc);
-	let known = initialKnownFacts(sc);
+	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
 		if (quote.available && quote.quote) {
-			known = { ...known, quote: quote.quote };
+			known = syncKnownFromQuote({ ...known, quote: quote.quote });
 			await saveKnownFacts(caseId, known);
 		}
 	}
