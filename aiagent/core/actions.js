@@ -99,6 +99,37 @@ function compactArabic(value = "") {
 		.trim();
 }
 
+function isShortAffirmativeToken(value = "") {
+	const compact = compactArabic(value).toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]+/g, "");
+	if (!compact) return false;
+	return new Set([
+		"yes",
+		"y",
+		"ok",
+		"okay",
+		"sure",
+		"correct",
+		"confirm",
+		"confirmed",
+		"\u0646\u0639\u0645",
+		"\u062a\u0645\u0627\u0645",
+		"\u0627\u0643\u064a\u062f",
+		"\u0627\u064a",
+		"\u0623\u064a",
+		"\u0627\u064a\u0648\u0646",
+		"\u0623\u064a\u0648\u0646",
+		"\u0627\u064a\u0648\u0647",
+		"\u0623\u064a\u0648\u0647",
+		"\u0627\u064a\u0648\u0627",
+		"\u0623\u064a\u0648\u0627",
+		"\u0627\u064a\u0648\u0629",
+		"\u0623\u064a\u0648\u0629",
+		"\u0627\u0647",
+		"\u0623\u0647",
+		"\u0622\u0647",
+	]).has(compact);
+}
+
 function stripGuestNameFieldPrefix(value = "") {
 	let cleaned = String(value || "").replace(/\s+/g, " ").trim();
 	for (let index = 0; index < 3; index += 1) {
@@ -155,6 +186,7 @@ function looksLikeReservationActionName(value = "") {
 	const name = cleanText(value, 120);
 	const lower = name.toLowerCase();
 	const compact = compactArabic(name);
+	if (isShortAffirmativeToken(name)) return true;
 	if (
 		/^(?:something\s+is\s+wrong|change\s+something|change\s+details|complete\s+booking|confirm|confirmed|continue|proceed|yes|ok|okay|correct)$/i.test(
 			lower

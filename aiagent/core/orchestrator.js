@@ -569,7 +569,41 @@ function cleanPhone(value = "") {
 	return normalizeDigits(value).replace(/[^\d+]/g, "").slice(0, 32);
 }
 
+function isShortAffirmativeToken(value = "") {
+	const compact = normalizeIntentSearchText(value)
+		.replace(/[^\p{L}\d]+/gu, "")
+		.trim();
+	if (!compact) return false;
+	return new Set([
+		"yes",
+		"y",
+		"ok",
+		"okay",
+		"sure",
+		"correct",
+		"confirm",
+		"confirmed",
+		"\u0646\u0639\u0645",
+		"\u062a\u0645\u0627\u0645",
+		"\u0627\u0643\u064a\u062f",
+		"\u0627\u064a",
+		"\u0623\u064a",
+		"\u0627\u064a\u0648\u0646",
+		"\u0623\u064a\u0648\u0646",
+		"\u0627\u064a\u0648\u0647",
+		"\u0623\u064a\u0648\u0647",
+		"\u0627\u064a\u0648\u0627",
+		"\u0623\u064a\u0648\u0627",
+		"\u0627\u064a\u0648\u0629",
+		"\u0623\u064a\u0648\u0629",
+		"\u0627\u0647",
+		"\u0623\u0647",
+		"\u0622\u0647",
+	]).has(compact);
+}
+
 function looksLikeActionOrConfirmationPhrase(value = "") {
+	if (isShortAffirmativeToken(value)) return true;
 	const text = cleanDisplayString(value, 160)
 		.replace(/^[\s"'`*_]+|[\s"'`*_.!,;:؟،-]+$/g, "")
 		.toLowerCase();
@@ -589,6 +623,7 @@ function looksLikeActionOrConfirmationPhrase(value = "") {
 function looksLikeNonBookingNamePhrase(value = "") {
 	const text = cleanDisplayString(value, 160).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
 	if (!text) return true;
+	if (isShortAffirmativeToken(text)) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
 	const nationality = normalizeNationalityHint(text) || nationalityFromText(text);
@@ -2521,6 +2556,7 @@ function guestConfirms(value = "", action = "") {
 		.trim();
 	if (!text) return false;
 	const compact = text.replace(/\s+/g, "");
+	if (isShortAffirmativeToken(text)) return true;
 	if (
 		/(?:\u0625\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632|\u0623\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0627\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u064a\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u0649\u0627\u0644\u062d\u062c\u0632)/iu.test(
 			compact
@@ -3008,11 +3044,35 @@ function previousAiAskedForBookingName(previousAi = {}) {
 		.trim();
 	const action = String(previousAi?.clientAction || "").toLowerCase();
 	if (!text && !action) return false;
-	return (
-		action.includes("required_details") ||
+	if (action.includes("required_details")) return true;
+	const mentionsName =
 		/\b(full name|guest name|booking name|name)\b/i.test(text) ||
-		/(?:\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u0643|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/iu.test(text)
-	);
+		/(?:\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u0643|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/iu.test(text);
+	if (!mentionsName) return false;
+	const asksName =
+		/(?:send|provide|write|type|enter|what is|may i have).{0,60}(?:full name|guest name|booking name|name)/i.test(
+			text
+		) ||
+		/(?:full name|guest name|booking name|name).{0,40}(?:please|required|needed|missing)/i.test(
+			text
+		) ||
+		/(?:\u0623\u0631\u0633\u0644|\u0627\u0631\u0633\u0644|\u0627\u0628\u0639\u062a|\u0627\u0628\u0639\u062b|\u0627\u0643\u062a\u0628|\u0623\u0643\u062a\u0628|\u0641\u0636\u0644\u0627|\u0644\u0648\s+\u0633\u0645\u062d\u062a|\u0623\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c).{0,60}(?:\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u0643|\u0627\u0633\u0645\u064a|\u0627\u0633\u0645\u0649)/iu.test(
+			text
+		) ||
+		/(?:\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641|\u0627\u0644\u0627\u0633\u0645).{0,40}(?:\u0645\u0637\u0644\u0648\u0628|\u0646\u0627\u0642\u0635|\u0641\u0642\u0637|\u0627\u062d\u062a\u0627\u062c|\u0623\u062d\u062a\u0627\u062c)/iu.test(
+			text
+		);
+	const acknowledgesName =
+		/(?:received|saved|got|confirmed|noted).{0,40}(?:full name|guest name|booking name|name)/i.test(
+			text
+		) ||
+		/(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641).{0,50}(?:\u062a\u0645|\u0648\u0635\u0644|\u0627\u0633\u062a\u0644\u0627\u0645|\u0627\u0633\u062a\u0644\u0645|\u062a\u0633\u062c\u064a\u0644|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(
+			text
+		) ||
+		/(?:\u062a\u0645|\u0648\u0635\u0644|\u0627\u0633\u062a\u0644\u0627\u0645|\u0627\u0633\u062a\u0644\u0645|\u062a\u0633\u062c\u064a\u0644|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,50}(?:\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u0633\u0645\s+\u0627\u0644\u0636\u064a\u0641)/iu.test(
+			text
+		);
+	return asksName && !acknowledgesName;
 }
 
 function sameAsDisplayedNameIntent(value = "") {
