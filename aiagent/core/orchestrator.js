@@ -3624,6 +3624,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 	const openingTurn = turnKind === "new_chat_intro";
 	const firstGuestTurn = turnKind === "new_chat_first_guest_message";
 	return [
+		`Return only one valid JSON object that follows the response schema. No markdown, no prose outside JSON.`,
 		`You are ${agentName}, a human-like customer service and sales representative for hotel reservations on Jannat Booking.`,
 		`You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. On the first AI reply in a hotel-scoped case, mention the hotel name naturally in the guest's language. Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
@@ -3731,6 +3732,8 @@ async function askOpenAI({
 					isBeginningOfChat:
 						turnKind === "new_chat_intro" ||
 						turnKind === "new_chat_first_guest_message",
+					responseRequirement:
+						"Return only one valid JSON object matching the required brain/orchestrator schema.",
 					latestGuestMessage: latestText,
 					latestGuestAction: latestGuest?.clientAction || "",
 					guestName: guestDisplayName(sc),
