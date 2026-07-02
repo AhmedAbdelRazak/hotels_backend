@@ -9327,6 +9327,7 @@ function quoteReplyFormattingInstruction() {
 		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
 		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type.",
+		"If toolResult.code is same_day_checkin_not_supported, toolResult.minCheckinISO is only the earliest date the chat can start checking; do not call it available or recommended unless an alternatives/availability tool result proves availability.",
 	].join(" ");
 }
 
@@ -12435,6 +12436,24 @@ async function planTurn(io, supportCaseOrId) {
 		) {
 			await waitForTypingMinimum(typingStartedAt);
 			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+		}
+	}
+	if (
+		latestGuest &&
+		String(previousAi?.clientAction || "").toLowerCase() === "quote_unavailable" &&
+		latestGuestRequestsBroadAlternative(latestText, latestAction) &&
+		!quickDateRange(latestText)?.checkinISO
+	) {
+		let recoveredUnavailableKnown = syncKnownFromQuote(
+			mergeAssistantQuoteFacts(known, quoteFactsFromAiMessage(previousAi))
+		);
+		if (!quoteInputsKnown(recoveredUnavailableKnown)) {
+			recoveredUnavailableKnown = syncKnownFromQuote(
+				mergeAssistantQuoteFacts(recoveredUnavailableKnown, latestQuoteFactsFromConversation(sc))
+			);
+		}
+		if (quoteInputsKnown(recoveredUnavailableKnown)) {
+			known = recoveredUnavailableKnown;
 		}
 	}
 	if (
