@@ -10088,6 +10088,22 @@ function quoteReplyHasUnexplainedReference(reply = "") {
 	});
 }
 
+function sameDayReplyClaimsMinimumDateAvailable(reply = "", toolResult = {}) {
+	if (String(toolResult?.code || "") !== "same_day_checkin_not_supported") return false;
+	const minDate = validISODate(toolResult.minCheckinISO);
+	if (!minDate) return false;
+	const text = normalizeIntentSearchText(reply);
+	const compact = text.replace(/\s+/g, "");
+	if (!text.includes(minDate)) return false;
+	const minIndex = text.indexOf(minDate);
+	const nearby = text.slice(Math.max(0, minIndex - 90), minIndex + minDate.length + 90);
+	const compactNearby = compact.slice(Math.max(0, compact.indexOf(minDate) - 90), compact.indexOf(minDate) + minDate.length + 90);
+	return (
+		/\b(?:available|bookable|recommended|confirmed|can\s+book|reserve\s+from|arrange\s+from)\b/i.test(nearby) ||
+		/(?:\u0645\u062a\u0627\u062d|\u0645\u062a\u0627\u062d\u0629|\u0645\u062a\u0627\u062d\u0647|\u0627\u0644\u062d\u062c\u0632\u0644\u0647|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0623\u0631\u062a\u0628\u0644\u0643|\u0627\u0631\u062a\u0628\u0644\u0643|\u0645\u0624\u0643\u062f|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0623\u0642\u0631\u0628|\u0627\u0644\u062e\u064a\u0627\u0631\u0627\u0644\u0627\u0642\u0631\u0628)/iu.test(compactNearby)
+	);
+}
+
 function compactReservationForBrain(reservation = null) {
 	if (!reservation) return null;
 	const links = reservationPublicLinks(reservation);
@@ -10410,6 +10426,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous quote reply was not sent because it added a reference number, date reference, ID, or unexplained numeric line. Return a corrected customer-facing quote from OpenAI only. Include only meaningful quote facts from toolResult: room(s), dates, nights, total, nightly average if present, and the next question. Do not invent IDs or references."
 				: validation === "quote_claimed_confirmed_before_submit"
 				? "Your previous quote reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return a corrected customer-facing quote from OpenAI only. This is only a price/availability quote; do not say confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
+				: validation === "same_day_minimum_date_claimed_available"
+				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat, and toolResult.minCheckinISO is only the earliest date the chat can start checking from. Ask whether to search from that date or adjust dates. Do not claim it is available."
 				: validation === "vague_progress_instead_of_tool_result"
 				? "Your previous tool-result reply was not sent because it was a vague progress update. Return the actual customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not say you are continuing unless the reply also gives the concrete next step or result."
 				: validation === "hotel_fact_location_dump"
@@ -10461,6 +10479,12 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (toolResult?.tool === "get_quote" && quoteReplyHasUnexplainedReference(text)) {
 			return "unexplained_quote_reference";
+		}
+		if (
+			toolResult?.tool === "get_quote" &&
+			sameDayReplyClaimsMinimumDateAvailable(text, toolResult)
+		) {
+			return "same_day_minimum_date_claimed_available";
 		}
 		if (
 			toolResult?.tool === "check_alternatives" &&
@@ -12099,6 +12123,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	known = recoverKnownFactsFromConversation(sc, known);
 	const latestText = String(latestGuest?.message || "");
+	const knownBeforeLatestGuestMerge = cloneKnownFacts(known);
 	if (
 		latestGuest &&
 		!snapshotHadAdults &&
@@ -12441,11 +12466,16 @@ async function planTurn(io, supportCaseOrId) {
 	if (
 		latestGuest &&
 		String(previousAi?.clientAction || "").toLowerCase() === "quote_unavailable" &&
-		latestGuestRequestsBroadAlternative(latestText, latestAction) &&
+		(latestGuestRequestsBroadAlternative(latestText, latestAction) ||
+			unavailableQuoteBlocksRequestedDate(knownBeforeLatestGuestMerge) ||
+			latestAction === "check_alternatives") &&
 		!quickDateRange(latestText)?.checkinISO
 	) {
+		const baseUnavailableKnown = quoteInputsKnown(knownBeforeLatestGuestMerge)
+			? knownBeforeLatestGuestMerge
+			: known;
 		let recoveredUnavailableKnown = syncKnownFromQuote(
-			mergeAssistantQuoteFacts(known, quoteFactsFromAiMessage(previousAi))
+			mergeAssistantQuoteFacts(baseUnavailableKnown, quoteFactsFromAiMessage(previousAi))
 		);
 		if (!quoteInputsKnown(recoveredUnavailableKnown)) {
 			recoveredUnavailableKnown = syncKnownFromQuote(
@@ -12453,7 +12483,21 @@ async function planTurn(io, supportCaseOrId) {
 			);
 		}
 		if (quoteInputsKnown(recoveredUnavailableKnown)) {
-			known = recoveredUnavailableKnown;
+			known = mergeKnownFacts(known, {
+				checkinISO: recoveredUnavailableKnown.checkinISO,
+				checkoutISO: recoveredUnavailableKnown.checkoutISO,
+				dateCalendar: recoveredUnavailableKnown.dateCalendar || known.dateCalendar || "gregorian",
+				roomTypeKey: recoveredUnavailableKnown.roomTypeKey || known.roomTypeKey || "",
+				roomSelections:
+					normalizeRoomSelections(recoveredUnavailableKnown.roomSelections).length
+						? normalizeRoomSelections(recoveredUnavailableKnown.roomSelections)
+						: normalizeRoomSelections(known.roomSelections),
+				rooms: recoveredUnavailableKnown.rooms || known.rooms || 1,
+				adults: recoveredUnavailableKnown.adults || known.adults || 1,
+				children: Number.isFinite(Number(recoveredUnavailableKnown.children))
+					? Number(recoveredUnavailableKnown.children)
+					: Number(known.children || 0) || 0,
+			});
 		}
 	}
 	if (
