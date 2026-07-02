@@ -2121,6 +2121,9 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			}
 		}
 	}
+	if (normalizeRoomSelections(recovered.roomSelections).length > 1) {
+		delete recovered.roomTypeKey;
+	}
 	return recovered;
 }
 
@@ -2399,6 +2402,7 @@ function syncKnownFromQuote(known = {}) {
 		next.roomSelections = selections;
 		next.rooms = roomSelectionsTotal(selections);
 		if (selections.length === 1) next.roomTypeKey = selections[0].roomTypeKey;
+		else delete next.roomTypeKey;
 	} else {
 		const roomTypeKey =
 			(ROOM_TYPE_KEYS.includes(String(quote.roomTypeKey || ""))
