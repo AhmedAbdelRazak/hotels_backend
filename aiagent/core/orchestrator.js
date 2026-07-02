@@ -1290,6 +1290,89 @@ function singleGregorianDateFromText(value = "", known = {}) {
 	return iso;
 }
 
+function slashDateMatchToISOWithPreference(
+	match = [],
+	known = {},
+	{ preferDayMonth = false, hintMonth = 0, baseYear = 0 } = {}
+) {
+	const a = Number(match[1]);
+	const b = Number(match[2]);
+	const explicitYear = normalizeTwoDigitYear(match[3]);
+	if (!a || !b) return "";
+	let day = 0;
+	let month = 0;
+	if (a > 12 && b <= 12) {
+		day = a;
+		month = b;
+	} else if (b > 12 && a <= 12) {
+		month = a;
+		day = b;
+	} else if (hintMonth && b === hintMonth) {
+		day = a;
+		month = b;
+	} else if (hintMonth && a === hintMonth) {
+		month = a;
+		day = b;
+	} else if (preferDayMonth) {
+		day = a;
+		month = b;
+	} else {
+		month = a;
+		day = b;
+	}
+	if (!day || !month) return "";
+	const knownParts = isoDateParts(known.checkinISO) || isoDateParts(known.checkoutISO);
+	const year = explicitYear || baseYear || knownParts?.year || 0;
+	return year
+		? isoFromGregorianParts(year, month, day)
+		: futureYearForMonthDay(month, day);
+}
+
+function slashDateMatchMonthHint(match = []) {
+	const a = Number(match[1]);
+	const b = Number(match[2]);
+	if (a > 12 && b <= 12) return b;
+	if (b > 12 && a <= 12) return a;
+	return 0;
+}
+
+function dateOnlyRangeFactsFromText(value = "", known = {}, sc = {}) {
+	const raw = digitsToEnglish(String(value || ""));
+	const matches = numericSlashDateTokens(raw);
+	if (matches.length !== 2) return null;
+	const withoutDates = raw
+		.replace(/\b\d{1,2}\s*[\/.-]\s*\d{1,2}(?:\s*[\/.-]\s*(?:(?:20\d{2})|\d{2}))?\b/g, " ")
+		.replace(/[\s,،;؛|\\\/.\-–—]+/g, "")
+		.trim();
+	if (withoutDates) return null;
+	const languageCode = activeLanguageCode(sc, known);
+	const preferDayMonth = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(raw);
+	const checkinISO = slashDateMatchToISOWithPreference(matches[0], known, {
+		preferDayMonth,
+		hintMonth: slashDateMatchMonthHint(matches[1]),
+	});
+	if (!validISODate(checkinISO)) return null;
+	const checkinParts = isoDateParts(checkinISO);
+	let checkoutISO = slashDateMatchToISOWithPreference(
+		matches[1],
+		{ ...known, checkinISO },
+		{
+			preferDayMonth,
+			hintMonth: checkinParts?.month || 0,
+			baseYear: checkinParts?.year || 0,
+		}
+	);
+	if (!validISODate(checkoutISO)) return null;
+	if (checkoutISO <= checkinISO && !matches[1][3]) {
+		const checkoutParts = isoDateParts(checkoutISO);
+		checkoutISO = checkoutParts
+			? isoFromGregorianParts(checkoutParts.year + 1, checkoutParts.month, checkoutParts.day)
+			: checkoutISO;
+	}
+	if (!validISODate(checkoutISO) || checkoutISO <= checkinISO) return null;
+	return { checkinISO, checkoutISO, dateCalendar: "gregorian" };
+}
+
 function eachNight(checkinISO = "", checkoutISO = "") {
 	const start = validISODate(checkinISO);
 	const end = validISODate(checkoutISO);
@@ -2048,6 +2131,11 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered.dateRangeOriginalText = [dates.raw.checkin, dates.raw.checkout]
 					.filter(Boolean)
 					.join(" - ");
+			}
+		} else if (splitStayPeriods.length < 2) {
+			const dateOnlyFacts = dateOnlyRangeFactsFromText(rawEntryText, recovered, sc);
+			if (dateOnlyFacts?.checkinISO && dateOnlyFacts?.checkoutISO) {
+				recovered = mergeKnownFacts(recovered, dateOnlyFacts);
 			}
 		}
 		const roomCountCorrection = roomCountCorrectionFromText(rawEntryText);
@@ -4814,6 +4902,85 @@ function actionToResumeAfterHotelFactAffirmation(
 	if (priorAction === "required_details_needed") return "required_details_needed";
 	if (priorAction === "optional_email") return "optional_email";
 	return "";
+}
+
+function replyOffersConcreteNextHelp(reply = "") {
+	const text = normalizeIntentSearchText(reply);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:help|anything else|continue|book|booking|availability|available|price|rate)\b/i.test(
+			text
+		) ||
+		/(?:\u0623\u0633\u0627\u0639\u062f|\u0627\u0633\u0627\u0639\u062f|\u0623\u0642\u062f\u0631|\u0627\u0642\u062f\u0631|\u0634\u064a\u0621\u0622\u062e\u0631|\u0634\u064a\u0627\u062e\u0631|\u0627\u064a\u062d\u0627\u062c\u0629|\u0623\u064a\u062d\u0627\u062c\u0629|\u0627\u0644\u062d\u062c\u0632|\u062d\u062c\u0632|\u0627\u0644\u062a\u0648\u0641\u0631|\u062a\u0648\u0641\u0631|\u0627\u0644\u0623\u0633\u0639\u0627\u0631|\u0627\u0633\u0639\u0627\u0631)/iu.test(
+			compact
+		)
+	);
+}
+
+function appendHotelFactReactionHelpOffer(reply = "", sc = {}, known = {}) {
+	if (replyOffersConcreteNextHelp(reply)) return reply;
+	const ar = /^ar\b/i.test(activeLanguageCode(sc, known));
+	const suffix = ar
+		? "\u0647\u0644 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f"
+		: "Can I help with anything else?";
+	return `${String(reply || "").trim()}\n${suffix}`.trim();
+}
+
+function replyInvitesUncheckedMinimumDateSearch(reply = "", known = {}, hotel = {}) {
+	const checkinISO = validISODate(known.checkinISO);
+	if (!checkinISO || checkinISO > businessTodayISO(hotel)) return false;
+	const minDate = addDaysISO(businessTodayISO(hotel), 1);
+	const text = normalizeIntentSearchText(reply);
+	const compact = text.replace(/\s+/g, "");
+	if (!text.includes(minDate)) return false;
+	return (
+		/\b(?:search|check|look|start|begin)\s+(?:for\s+)?(?:from|on)\b/i.test(text) ||
+		/(?:\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646)/iu.test(
+			compact
+		)
+	);
+}
+
+function buildSameDayPendingStayMessage(sc = {}, known = {}, hotel = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const requestedDate = formatDate(known.checkinISO, languageCode);
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، تاريخ الوصول المطلوب ${requestedDate} غير متاح عبر المحادثة لأنه يقع في نفس يوم الفندق.`,
+			"أرسل نوع الغرفة وعدد النزلاء، وسأراجع لك التوفر أو أقرب تواريخ بديلة مؤكدة بدون افتراض توفر يوم معين.",
+		].join("\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, the requested check-in date ${requestedDate} is not bookable through chat because it is the hotel's same business day.`,
+		"Send the room type and guest count, and I will check verified availability or the nearest available alternative dates without assuming any unchecked date is available.",
+	].join("\n");
+}
+
+function applyCustomerReplySafetyGuards({
+	reply = "",
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null,
+	previousAi = null,
+} = {}) {
+	let next = String(reply || "").trim();
+	const latestText = String(latestGuest?.message || "");
+	const previousAiAction = cleanString(previousAi?.clientAction, 80).toLowerCase();
+	if (previousAiAction === "hotel_fact_answered" && guestReactionOnlyText(latestText)) {
+		next = appendHotelFactReactionHelpOffer(next, sc, known);
+	}
+	if (
+		latestGuest &&
+		!quoteInputsKnown(known) &&
+		validISODate(known.checkinISO) &&
+		known.checkinISO <= businessTodayISO(hotel) &&
+		replyInvitesUncheckedMinimumDateSearch(next, known, hotel)
+	) {
+		next = buildSameDayPendingStayMessage(sc, known, hotel);
+	}
+	return next;
 }
 
 function hotelFactQuestionAsksExplicitMapOrAddress(value = "") {
@@ -10173,6 +10340,20 @@ function sameDayReplyMissingUnavailableLanguage(reply = "", toolResult = {}) {
 	);
 }
 
+function sameDayReplyMissingHotelDayContext(reply = "", toolResult = {}) {
+	if (String(toolResult?.code || "") !== "same_day_checkin_not_supported") return false;
+	const text = normalizeIntentSearchText(reply);
+	const compact = text.replace(/\s+/g, "");
+	return !(
+		/\b(?:same-?day|today|hotel business day|hotel day|earliest|start checking|tomorrow)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0644\u064a\u0648\u0645|\u0646\u0641\u0633\u064a\u0648\u0645|\u064a\u0648\u0645\u0627\u0644\u0641\u0646\u062f\u0642|\u0623\u0642\u0631\u0628|\u0627\u0642\u0631\u0628|\u0628\u062f\u0621\u0627\u0644\u0628\u062d\u062b|\u064a\u0628\u062f\u0623\u0627\u0644\u0628\u062d\u062b|\u063a\u062f\u0627|\u063a\u062f\u0627\u064b|\u0628\u0643\u0631\u0629)/iu.test(
+			compact
+		)
+	);
+}
+
 function unavailableQuoteShowsZeroTotal(reply = "", toolResult = {}) {
 	if (toolResult?.tool !== "get_quote" || toolResult?.available) return false;
 	const text = normalizeDigits(String(reply || ""));
@@ -10593,6 +10774,12 @@ async function sendBrainToolReplyFromOpenAI({
 			sameDayReplyMissingUnavailableLanguage(text, toolResult)
 		) {
 			return "same_day_unavailable_language_missing";
+		}
+		if (
+			toolResult?.tool === "get_quote" &&
+			sameDayReplyMissingHotelDayContext(text, toolResult)
+		) {
+			return "same_day_hotel_day_context_missing";
 		}
 		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
 			return "unavailable_quote_zero_total";
@@ -12023,6 +12210,14 @@ async function executeBrainFirstDecision({
 		decision: nextDecision,
 		reply,
 	});
+	reply = applyCustomerReplySafetyGuards({
+		reply,
+		sc,
+		hotel,
+		known: nextKnown,
+		latestGuest,
+		previousAi,
+	});
 	await waitForTypingMinimum(typingStartedAt);
 	return sendAiMessage(io, sc, reply, {
 		latestGuest,
@@ -12282,7 +12477,15 @@ async function planTurn(io, supportCaseOrId) {
 			known = mergeKnownFacts(known, { splitStayPeriods });
 			appliedSplitStayChange = true;
 		}
+		const dateOnlyFacts = appliedSplitStayChange
+			? null
+			: dateOnlyRangeFactsFromText(latestText, known, sc);
+		if (dateOnlyFacts?.checkinISO && dateOnlyFacts?.checkoutISO) {
+			known = mergeKnownFacts(known, dateOnlyFacts);
+			appliedDateBoundaryChange = true;
+		}
 		const dateBoundaryFacts = appliedSplitStayChange
+			|| dateOnlyFacts?.checkinISO
 			? {}
 			: dateBoundaryFactsFromAskedAnswer(latestText, known, previousAi);
 		if (Object.keys(dateBoundaryFacts).length) {
@@ -13509,6 +13712,14 @@ async function planTurn(io, supportCaseOrId) {
 			latestGuest,
 			decision,
 			reply,
+		});
+		reply = applyCustomerReplySafetyGuards({
+			reply,
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			previousAi,
 		});
 		return sendAiMessage(io, sc, reply, {
 			latestGuest,
