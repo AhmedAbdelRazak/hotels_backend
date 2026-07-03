@@ -2804,7 +2804,18 @@ function quoteFactsFromAiMessage(entry = {}) {
 	if (!["quote_ready", "quote_unavailable", "review_reservation"].includes(action)) return {};
 	if (["quote_ready", "review_reservation"].includes(action)) {
 		const splitFacts = splitStayQuoteFactsFromAiMessage(rawText, "split_stay_quote_ready");
-		if (normalizeSplitStayPeriods(splitFacts.splitStayPeriods).length >= 2) {
+		const splitPeriods = normalizeSplitStayPeriods(splitFacts.splitStayPeriods);
+		if (splitPeriods.length >= 2) {
+			if (action === "review_reservation") {
+				return {
+					...splitFacts,
+					splitStayPeriods: splitPeriods.map((period) => ({
+						...period,
+						total: 0,
+					})),
+					splitStayTotal: 0,
+				};
+			}
 			return splitFacts;
 		}
 	}
@@ -10438,26 +10449,13 @@ async function sendBrainSplitStayReviewReply({
 		});
 	}
 	const fallback = buildSplitStayReviewMessage(sc, nextKnown, hotel);
-	return sendBrainToolReplyFromOpenAI({
-		io,
-		sc,
-		hotel,
-		known: nextKnown,
+	await waitForTypingMinimum(typingStartedAt);
+	return sendAiMessage(io, sc, fallback, {
 		latestGuest,
-		toolResult: {
-			tool: "send_review",
-			quoteMode: "split_stay",
-			ok: true,
-			code: "review_ready",
-			mode: "separate_reservations",
-				review: compactSplitStayReviewForBrain(nextKnown, hotel, sc),
-			instruction:
-				"Write the official pre-submission booking review in the guest language. Explain clearly that the separate stay periods will be created as separate reservations, one reservation per period, not one merged reservation. Use separate lines or bullets for guest details, room, each period with its total, and the combined total. Do not say confirmed, created, completed, finalized, or booked yet. Ask the guest to confirm if everything is correct.",
-		},
+		known: nextKnown,
 		clientAction: "review_reservation",
 		quickReplies: reviewQuickReplies(activeLanguageCode(sc, nextKnown)),
-		fallback,
-		typingStartedAt,
+		source: "server",
 	});
 }
 
