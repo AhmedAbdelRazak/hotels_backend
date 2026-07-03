@@ -1182,10 +1182,10 @@ function containsDateLikeSlashToken(value = "") {
 	});
 }
 
-function futureYearForMonthDay(month, day) {
-	const today = new Date();
-	const todayISO = today.toISOString().slice(0, 10);
-	let year = today.getUTCFullYear();
+function futureYearForMonthDay(month, day, baseISO = businessTodayISO()) {
+	const baseParts = isoDateParts(baseISO) || isoDateParts(new Date().toISOString().slice(0, 10));
+	const todayISO = validISODate(baseISO) || new Date().toISOString().slice(0, 10);
+	let year = baseParts?.year || new Date().getUTCFullYear();
 	let iso = isoFromGregorianParts(year, month, day);
 	if (iso && iso < todayISO) {
 		year += 1;
@@ -1268,6 +1268,29 @@ function normalizeSplitStayPeriods(periods = []) {
 			currency: cleanString(period?.currency || "SAR", 12) || "SAR",
 		}))
 		.filter((period) => period.checkinISO && period.checkoutISO && period.checkoutISO > period.checkinISO);
+}
+
+function mergeSplitStayPeriodsPreservingQuote(existingPeriods = [], sourcePeriods = []) {
+	const previousByRange = new Map(
+		normalizeSplitStayPeriods(existingPeriods).map((period) => [
+			`${period.checkinISO}|${period.checkoutISO}`,
+			period,
+		])
+	);
+	return normalizeSplitStayPeriods(sourcePeriods).map((period) => {
+		const previous = previousByRange.get(`${period.checkinISO}|${period.checkoutISO}`) || {};
+		const total = Number(period.total || 0) > 0 ? Number(period.total) : Number(previous.total || 0) || 0;
+		const nights =
+			Number(period.nights || 0) ||
+			Number(previous.nights || 0) ||
+			nightsBetween(period.checkinISO, period.checkoutISO);
+		return {
+			...period,
+			nights,
+			total,
+			currency: period.currency || previous.currency || "SAR",
+		};
+	});
 }
 
 function singleGregorianDateFromText(value = "", known = {}) {
@@ -2386,11 +2409,14 @@ function mergeKnownFacts(current = {}, next = {}) {
 		source.dateRangeHijriText;
 	const sourceSplitStayPeriods = normalizeSplitStayPeriods(source.splitStayPeriods);
 	if (sourceSplitStayPeriods.length >= 2) {
-		merged.splitStayPeriods = sourceSplitStayPeriods;
+		merged.splitStayPeriods = mergeSplitStayPeriodsPreservingQuote(
+			existingSplitStayPeriods,
+			sourceSplitStayPeriods
+		);
 		if (Number.isFinite(Number(source.splitStayTotal)) && Number(source.splitStayTotal) > 0) {
 			merged.splitStayTotal = Number(source.splitStayTotal);
 		} else {
-			const derivedTotal = sourceSplitStayPeriods.reduce(
+			const derivedTotal = merged.splitStayPeriods.reduce(
 				(sum, period) => sum + Number(period.total || 0),
 				0
 			);
@@ -7948,6 +7974,14 @@ async function suggestSameDateRoomOptions(sc = {}, known = {}, { maxOptions = 3 
 	if (!checkinISO || !checkoutISO || !nights) {
 		return { options: [], code: "missing_dates" };
 	}
+	const todayISO = businessTodayISO();
+	if (checkinISO <= todayISO) {
+		return {
+			options: [],
+			code: "same_day_checkin_not_supported",
+			minCheckinISO: addDaysISO(todayISO, 1),
+		};
+	}
 	const dates = eachNight(checkinISO, checkoutISO);
 	const hotel = await getHotelByIdWithPricingDates(sc.hotelId, dates);
 	return suggestRoomOptionsForStay(sc, hotel, known, checkinISO, checkoutISO, { maxOptions });
@@ -8080,6 +8114,12 @@ function buildSameDateRoomOptionsMessage(sc = {}, known = {}, result = {}) {
 		return ar
 			? "\u0623\u0643\u064a\u062f\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062a\u0627\u062d\u0629 \u0641\u064a \u0646\u0641\u0633 \u0627\u0644\u0645\u0648\u0639\u062f."
 			: "Sure, send me the check-in and checkout dates and I will check the available rooms for the same date range.";
+	}
+	if (validISODate(known.checkinISO) && known.checkinISO <= businessTodayISO()) {
+		const requestedDate = formatDate(known.checkinISO, languageCode);
+		return ar
+			? `${arabicGuestAddress(sc, known)}\u060c تاريخ الوصول المطلوب ${requestedDate} غير متاح للحجز عبر المحادثة لأنه يقع في نفس يوم الفندق. أقدر أبحث لك عن أقرب تواريخ بديلة مؤكدة أو نعدّل تفاصيل الغرفة.`
+			: `${guestDisplayName(sc)}, the requested check-in date ${requestedDate} is not bookable through chat because it is the hotel's same business day. I can check the nearest verified alternative dates or adjust the room details.`;
 	}
 	if (!options.length) {
 		return ar

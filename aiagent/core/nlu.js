@@ -844,6 +844,22 @@ function hijriToGregorianISO(year, month, day) {
 }
 
 function todayISO() {
+	const timeZone = process.env.HOTEL_BOOKING_TIMEZONE || process.env.TZ || "UTC";
+	try {
+		const parts = new Intl.DateTimeFormat("en-CA", {
+			timeZone,
+			year: "numeric",
+			month: "2-digit",
+			day: "2-digit",
+		}).formatToParts(new Date());
+		const get = (type) => parts.find((part) => part.type === type)?.value || "";
+		const year = get("year");
+		const month = get("month");
+		const day = get("day");
+		if (year && month && day) return `${year}-${month}-${day}`;
+	} catch {
+		// Fall through to UTC if the runtime timezone setting is invalid.
+	}
 	return new Date().toISOString().slice(0, 10);
 }
 
