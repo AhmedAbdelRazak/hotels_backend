@@ -1642,6 +1642,73 @@ function quickGregorianMonthDateRange(text = "") {
 	return normalizeGregorianMonthRange(ordered);
 }
 
+function quickSingleGregorianMonthDate(text = "", known = {}) {
+	const raw = normalizeDateSearchText(text);
+	const monthNames = Object.keys(MONTHS)
+		.sort((a, b) => b.length - a.length)
+		.map(escapeDateRegex)
+		.join("|");
+	const boundary = "[^A-Za-z0-9\\u0600-\\u06FF\\u0900-\\u097F]";
+	const matches = [];
+	const pushMatch = (index, day, monthName, year) => {
+		const normalizedMonth = normalizeDateSearchText(monthName).toLowerCase();
+		const month = MONTHS[normalizedMonth];
+		const dayNumber = Number(day);
+		if (!month || !dayNumber) return;
+		matches.push({
+			index,
+			day: dayNumber,
+			month,
+			year: year ? Number(year) : null,
+		});
+	};
+
+	const dayMonth = new RegExp(
+		`(^|${boundary})(?:from\\s+|du\\s+|de\\s+|del\\s+|al\\s+|au\\s+|le\\s+|el\\s+|\\u0645\\u0646\\s+|\\u0627\\u0644\\u0649\\s+|\\u0625\\u0644\\u0649\\s+|\\u0627\\u0644\\u064a\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+|de\\s+|du\\s+)?(${monthNames})(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
+		"gi"
+	);
+	let match = null;
+	while ((match = dayMonth.exec(raw))) {
+		pushMatch(match.index, match[2], match[3], match[4]);
+	}
+
+	const monthDay = new RegExp(
+		`(^|${boundary})(${monthNames})\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*,?\\s*(20\\d{2}))?(?=$|${boundary})`,
+		"gi"
+	);
+	while ((match = monthDay.exec(raw))) {
+		pushMatch(match.index, match[3], match[2], match[4]);
+	}
+
+	const ordered = matches
+		.sort((a, b) => a.index - b.index)
+		.filter((item, index, list) => {
+			const prev = list[index - 1];
+			return (
+				!prev ||
+				prev.index !== item.index ||
+				prev.day !== item.day ||
+				prev.month !== item.month
+			);
+		});
+	if (ordered.length !== 1) return null;
+	const item = ordered[0];
+	const knownCheckinISO = /^\d{4}-\d{2}-\d{2}$/.test(String(known.checkinISO || ""))
+		? String(known.checkinISO)
+		: "";
+	const knownCheckoutISO = /^\d{4}-\d{2}-\d{2}$/.test(String(known.checkoutISO || ""))
+		? String(known.checkoutISO)
+		: "";
+	const anchorYear = item.year ? null : isoYear(knownCheckinISO || knownCheckoutISO);
+	let iso = inferFutureISO(item, anchorYear);
+	if (!iso) return null;
+	if (!item.year && knownCheckinISO && iso <= knownCheckinISO) {
+		const nextYear = isoYear(iso) + 1;
+		iso = isoFromParts(nextYear, item.month, item.day);
+	}
+	return iso ? { iso, explicitYear: Boolean(item.year), raw: item } : null;
+}
+
 function quickArabicGregorianMonthDateRange(text = "") {
 	const raw = normalizeArabicSearchText(text);
 	if (!/[\u0600-\u06FF]/.test(raw)) return null;
@@ -2259,6 +2326,7 @@ module.exports = {
 	digitsToEnglish,
 	detectAmenityQuestion,
 	quickDateRange,
+	quickSingleGregorianMonthDate,
 	quickHijriDateRange,
 	hijriToGregorianISO,
 };

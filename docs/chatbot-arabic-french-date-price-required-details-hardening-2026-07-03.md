@@ -17,11 +17,14 @@ overwriting a better guest-derived state.
 
 ## Final Outcome Summary
 
-Final deployed backend commit:
+Final deployed backend commits:
 
 - `4ffb298` - `Harden chatbot date price recovery`
+- `c1b087f` - `Expand chatbot hardening documentation`
+- This follow-up commit - one-by-one messy booking detail recovery for labeled and
+  unlabeled standalone date messages
 
-Final production state after deployment:
+Final production state after the original runtime deployment:
 
 - GitHub `master` contains the patch.
 - Production backend `/home/ahmedadmin/Hotels/hotels_backend` is on `4ffb298`.
@@ -37,14 +40,20 @@ Final production state after deployment:
   - `Server is running on port 8080`
   - `MongoDB Atlas is connected`
 
-Final local validation:
+Original local validation:
 
 - `node --check aiagent\core\orchestrator.js`
 - `node --check aiagent\core\nlu.js`
 - `git diff --check`
 - Focused local regression harness: `PASS 35 chatbot regression checks`
 
-Final sync check:
+Follow-up local validation after one-by-one data hardening:
+
+- `node --check aiagent\core\orchestrator.js`
+- `node --check aiagent\core\nlu.js`
+- Focused local regression harness: `PASS 42 chatbot regression checks`
+
+Original sync check:
 
 - Local backend: `4ffb298`, clean working tree.
 - Production backend tracked tree: `4ffb298`, in sync with `origin/master`.
@@ -59,7 +68,9 @@ Backend repository:
 - Production path: `/home/ahmedadmin/Hotels/hotels_backend`
 - GitHub branch: `master`
 - Production PM2 app: `hotels-backend`
-- Production deployed commit after this pass: `4ffb298`
+- Production deployed runtime commit after the original pass: `4ffb298`
+- Latest documentation sync commit before the one-by-one data follow-up:
+  `c1b087f`
 - Files changed locally in this pass:
   - `aiagent/core/orchestrator.js`
   - `aiagent/core/nlu.js`
@@ -552,6 +563,79 @@ Why this is safe:
 - The hotel-fact adjustment is lexical and generic; it does not hardcode guest
   names, case IDs, hotel names, or fixed dates.
 
+### 2c. One-By-One Messy Booking Detail Recovery
+
+Files:
+
+- `aiagent/core/orchestrator.js`
+- `aiagent/core/nlu.js`
+
+New or changed helpers:
+
+- `quickSingleGregorianMonthDate`
+- `labeledDateBoundaryFactsFromText`
+- `standaloneSingleDateFromText`
+- `sequentialStandaloneDateFactsFromConversation`
+- `recoverKnownFactsFromConversation`
+
+Problem covered:
+
+- Some guests send booking details as separate messages instead of one organized
+  form.
+- Example:
+  - `checkin date: July 25th 2026`
+  - `checkout date: july 26th`
+  - `Ahmed Abdelrazak`
+  - `US`
+- Another common example:
+  - `15/8/2026`
+  - `20/8/2026`
+
+Expected behavior after this follow-up:
+
+- Labeled single month-name dates are recovered as their correct boundary:
+  - `checkin date: July 25th 2026` -> `checkinISO: 2026-07-25`
+  - `checkout date: july 26th` -> `checkoutISO: 2026-07-26`
+- Unlabeled standalone date messages are paired in chronological order when
+  safe:
+  - first standalone date: `15/8/2026`
+  - second later standalone date: `20/8/2026`
+  - recovered stay: `2026-08-15` to `2026-08-20`
+- Month-name standalone date messages also pair:
+  - `July 25th 2026`
+  - `July 26th`
+  - recovered stay: `2026-07-25` to `2026-07-26`
+- Once the recovery sees labeled booking dates, it treats following simple
+  identity lines in that same detail sequence as possible booking details:
+  - `Ahmed Abdelrazak` -> full name
+  - `US` -> nationality
+
+Safety boundaries:
+
+- The standalone date pairing is conservative.
+- It only uses short standalone date-like guest messages.
+- It ignores price/date sentences such as `I want price for 15/8/2026` so a
+  pricing question is not silently converted into a stay range.
+- Ambiguous non-Arabic slash dates still need context. For example, `5/8/2026`
+  without language/context is not guessed as month/day or day/month by this
+  follow-up.
+- Stronger facts still win:
+  - explicit labeled boundary
+  - prompted date answer
+  - full date range in one message
+  - quote/review/tool facts
+  - existing valid recovered range
+
+Why this is safe:
+
+- It mirrors how the brain would understand messy guest messages, but makes the
+  durable recovery layer able to rebuild the same state after restart or worker
+  fallback.
+- It does not create reservations.
+- It does not skip quote flow.
+- It only fills missing date/name/nationality facts; room type, quote, phone,
+  and guest count remain required when absent.
+
 ### 3. French Guest Count, Nationality, and Room Capacity
 
 Files:
@@ -741,6 +825,77 @@ Do not:
 - Change global date interpretation for every language without regression
   tests.
 
+### `quickSingleGregorianMonthDate`
+
+Purpose:
+
+- Parse one month-name Gregorian date such as `July 25th 2026` or `checkout
+  date: july 26th`.
+
+Must preserve:
+
+- Explicit year when provided.
+- Future-year inference when year is omitted.
+- Checkout year inheritance from known check-in when the checkout omits a year.
+
+Do not:
+
+- Treat multiple dates as a single date.
+- Use it as a quote substitute; it only returns a date fact.
+
+### `labeledDateBoundaryFactsFromText`
+
+Purpose:
+
+- Use guest labels such as `checkin date:` and `checkout date:` to set the
+  correct boundary.
+
+Must preserve:
+
+- Check-in labels set only `checkinISO`.
+- Checkout labels set only `checkoutISO`.
+- A full date range in one message should still be handled by the existing range
+  parser.
+
+Do not:
+
+- Let unlabeled dates use this path.
+
+### `standaloneSingleDateFromText`
+
+Purpose:
+
+- Identify a short guest message that is just one date and safe to use for
+  sequential pairing.
+
+Must preserve:
+
+- Ignore price, room, phone, nationality, and reservation-number messages.
+- Ignore long mixed-intent sentences.
+- Keep ambiguous dates conservative when language/context is missing.
+
+Do not:
+
+- Treat `I want price for 15/8/2026` as a standalone date.
+
+### `sequentialStandaloneDateFactsFromConversation`
+
+Purpose:
+
+- Recover a date range from separate standalone date messages.
+
+Must preserve:
+
+- Pair earlier standalone date as check-in and later standalone date as checkout.
+- Only fill missing date boundaries.
+- Use the latest safe chronological pair if the guest corrects themselves with
+  another standalone date.
+
+Do not:
+
+- Override an already complete valid range.
+- Invent room type, quote, phone, nationality, or guest count.
+
 ### `buildMandatoryDetailsMessage`
 
 Purpose:
@@ -863,7 +1018,8 @@ Result:
 Focused regression harness:
 
 - Local Node assertion harness requiring `./aiagent/core/orchestrator`.
-- Result: `PASS 35 chatbot regression checks`.
+- Result after the original runtime patch: `PASS 35 chatbot regression checks`.
+- Result after the one-by-one detail follow-up: `PASS 42 chatbot regression checks`.
 
 Warnings seen while requiring backend modules:
 
@@ -897,6 +1053,18 @@ New 2026-07-03 scenarios:
    - English bold rows
    - Arabic bold rows
    - current widget-compatible markdown format
+5. One-by-one messy detail recovery:
+   - labeled month-name check-in message
+   - labeled month-name checkout message
+   - unlabeled sequential slash dates:
+     - `15/8/2026`
+     - `20/8/2026`
+   - unlabeled sequential month-name dates:
+     - `July 25th 2026`
+     - `July 26th`
+   - simple following identity lines:
+     - full name
+     - nationality
 
 Previous documented scenario categories rechecked:
 
@@ -1088,6 +1256,27 @@ Date/state recovery:
 - Assistant stale echo:
   - assistant says only `2026-08-12` as arrival after a valid range exists
   - expected: do not overwrite complete range
+- Unlabeled sequential slash dates:
+  - message 1: `15/8/2026`
+  - message 2: `20/8/2026`
+  - expected range: `2026-08-15` to `2026-08-20`
+- Unlabeled sequential month-name dates:
+  - message 1: `July 25th 2026`
+  - message 2: `July 26th`
+  - expected range: `2026-07-25` to `2026-07-26`
+- Labeled one-by-one details:
+  - `checkin date: July 25th 2026`
+  - `checkout date: july 26th`
+  - `Ahmed Abdelrazak`
+  - `US`
+  - expected:
+    - `checkinISO: 2026-07-25`
+    - `checkoutISO: 2026-07-26`
+    - `fullName: Ahmed Abdelrazak`
+    - `nationality: US`
+- Mixed-intent date sentence:
+  - `I want price for 15/8/2026`
+  - expected: not treated as a standalone date-only boundary
 
 Arabic price routing:
 

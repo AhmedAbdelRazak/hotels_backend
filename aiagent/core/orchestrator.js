@@ -17,7 +17,12 @@ const {
 const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
 const { priceRoomForStay } = require("./selectors");
-const { mapRoomToKey, digitsToEnglish, quickDateRange } = require("./nlu");
+const {
+	mapRoomToKey,
+	digitsToEnglish,
+	quickDateRange,
+	quickSingleGregorianMonthDate,
+} = require("./nlu");
 const { normalizeNumberWordsForParsing } = require("./numberWords");
 const {
 	createReservationForCase,
@@ -1337,6 +1342,8 @@ function singleGregorianDateFromText(value = "", known = {}) {
 	const raw = digitsToEnglish(String(value || ""));
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g) || [];
 	if (isoMatches.length === 1) return validISODate(isoMatches[0]);
+	const monthDate = quickSingleGregorianMonthDate(raw, known);
+	if (monthDate?.iso) return validISODate(monthDate.iso);
 	const matches = numericSlashDateTokens(raw);
 	if (matches.length !== 1) return "";
 	const explicitYear = normalizeTwoDigitYear(matches[0][3]);
@@ -2317,6 +2324,12 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			lastAiAskedEmail = false;
 			continue;
 		}
+		const labeledBoundaryFacts = labeledDateBoundaryFactsFromText(rawEntryText, recovered);
+		if (Object.keys(labeledBoundaryFacts).length) {
+			recovered = mergeKnownFacts(recovered, labeledBoundaryFacts);
+			collectingBookingDetails = true;
+			if (labeledBoundaryFacts.checkinISO) lastAiAskedCheckinDate = false;
+		}
 		const boundaryFacts = dateBoundaryFactsFromAskedAnswer(rawEntryText, recovered, {
 			askedCheckin: lastAiAskedCheckinDate,
 			askedCheckout: lastAiAskedCheckoutDate,
@@ -2423,6 +2436,7 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 			.filter(Boolean);
 		for (const line of lines) {
 			const lineRoomCountCorrection = roomCountCorrectionFromText(line);
+			const lineLooksLikeDate = latestGuestMentionsDateish(line);
 			const roomTypeKey = mapRoomToKey(line);
 			if (
 				roomTypeKey &&
@@ -2479,7 +2493,12 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				entryUsesDisplayedNameForName
 					? ""
 					: bookingNameFromLine(line) ||
-					  (lastAiAskedBookingName ? bookingNameFromIdentityText(line) : "");
+					  ((lastAiAskedBookingName || collectingBookingDetails) &&
+					  !lineLooksLikeDate &&
+					  !textMentionsRoomSelection(line) &&
+					  !guestAsksPriceAvailabilityOrBooking(line, "")
+							? bookingNameFromIdentityText(line)
+							: "");
 			if (
 				explicitBookingName &&
 				(!recovered.fullName ||
@@ -2509,6 +2528,10 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 	if (normalizeRoomSelections(recovered.roomSelections).length > 1) {
 		delete recovered.roomTypeKey;
 	}
+	recovered = mergeKnownFacts(
+		recovered,
+		sequentialStandaloneDateFactsFromConversation(sc, recovered)
+	);
 	return recovered;
 }
 
@@ -3640,6 +3663,81 @@ function dateBoundaryFactsFromAskedAnswer(value = "", known = {}, previousAi = {
 		return { checkinISO: iso, dateCalendar: "gregorian" };
 	}
 	return {};
+}
+
+function labeledDateBoundaryFactsFromText(value = "", known = {}) {
+	if (quickDateRange(value)?.checkinISO && quickDateRange(value)?.checkoutISO) return {};
+	const iso = singleGregorianDateFromText(value, known);
+	if (!iso) return {};
+	const checkinLabel = previousAiAskedForCheckinDate({ message: value });
+	const checkoutLabel = previousAiAskedForCheckoutDate({ message: value });
+	if (checkinLabel && !checkoutLabel) {
+		return { checkinISO: iso, dateCalendar: "gregorian" };
+	}
+	if (checkoutLabel && !checkinLabel) {
+		return { checkoutISO: iso, dateCalendar: "gregorian" };
+	}
+	return {};
+}
+
+function standaloneSingleDateFromText(value = "", known = {}) {
+	const text = cleanDisplayString(value, 160);
+	if (!text || text.length > 90) return "";
+	if (quickDateRange(text)?.checkinISO && quickDateRange(text)?.checkoutISO) return "";
+	const iso = singleGregorianDateFromText(text, known);
+	if (!iso) return "";
+	if (labeledDateBoundaryFactsFromText(text, known).checkinISO) return iso;
+	if (labeledDateBoundaryFactsFromText(text, known).checkoutISO) return iso;
+	if (textMentionsRoomSelection(text)) return "";
+	if (guestAsksPriceAvailabilityOrBooking(text, "")) return "";
+	if (mentionsExplicitReservationIdentifier(text)) return "";
+	if (phoneFromIdentityText(text) || phoneFromText(text) || nationalityFromIdentityText(text)) {
+		return "";
+	}
+	const compact = normalizeIntentSearchText(text)
+		.replace(/[.!?\u061f\u060c,;:|/\\\-]+/g, "")
+		.replace(/\s+/g, "");
+	if (!compact) return iso;
+	if (/\d/.test(compact)) return iso;
+	return latestGuestMentionsDateish(text) ? iso : "";
+}
+
+function sequentialStandaloneDateFactsFromConversation(sc = {}, known = {}) {
+	const currentCheckinISO = validISODate(known.checkinISO);
+	const currentCheckoutISO = validISODate(known.checkoutISO);
+	if (currentCheckinISO && currentCheckoutISO) return {};
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const dates = [];
+	let rollingKnown = { ...asObject(known) };
+	for (const entry of conversation) {
+		if (!isGuestEntry(entry)) continue;
+		const iso = standaloneSingleDateFromText(entry.message || "", rollingKnown);
+		if (!iso) continue;
+		dates.push(iso);
+		if (!rollingKnown.checkinISO) {
+			rollingKnown.checkinISO = iso;
+		} else if (!rollingKnown.checkoutISO && iso > rollingKnown.checkinISO) {
+			rollingKnown.checkoutISO = iso;
+		}
+	}
+	if (!dates.length) return {};
+	if (currentCheckinISO && !currentCheckoutISO) {
+		const checkoutISO = dates.filter((iso) => iso > currentCheckinISO).pop();
+		return checkoutISO ? { checkoutISO, dateCalendar: "gregorian" } : {};
+	}
+	if (!currentCheckinISO && currentCheckoutISO) {
+		const checkinISO = dates.filter((iso) => iso < currentCheckoutISO).pop();
+		return checkinISO ? { checkinISO, dateCalendar: "gregorian" } : {};
+	}
+	let pair = null;
+	for (let start = 0; start < dates.length; start += 1) {
+		for (let end = start + 1; end < dates.length; end += 1) {
+			if (dates[end] > dates[start]) {
+				pair = { checkinISO: dates[start], checkoutISO: dates[end] };
+			}
+		}
+	}
+	return pair ? { ...pair, dateCalendar: "gregorian" } : {};
 }
 
 function previousAiAskedForIdentityConfirmation(previousAi = {}) {
@@ -15643,6 +15741,8 @@ const exportedOrchestrator = {
 		previousAiAskedForCheckoutDate,
 		dateBoundaryFactsFromAskedAnswer,
 		assistantSingleBoundaryDateFacts,
+		standaloneSingleDateFromText,
+		sequentialStandaloneDateFactsFromConversation,
 		singleGregorianDateFromText,
 		sameHotelSplitStayPeriodsFromText,
 		normalizeSplitStayPeriods,
