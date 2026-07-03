@@ -4553,6 +4553,16 @@ function emailSkipQuickReplies(languageCode = "en") {
 
 function operationalQuickRepliesForReply(decision = {}, known = {}, sc = {}, latestGuest = null) {
 	if (decision.action !== "reply") return [];
+	const previousAi = latestGuest ? previousAiBeforeEntry(sc, latestGuest) : null;
+	const previousAiAction = cleanString(previousAi?.clientAction, 80).toLowerCase();
+	if (
+		previousAiAction === "existing_reservation_warning" &&
+		!["duplicate_create_anyway", "duplicate_not_mine"].includes(
+			cleanString(latestGuest?.clientAction, 80).toLowerCase()
+		)
+	) {
+		return [];
+	}
 	if (replyAsksOptionalEmail(decision.reply, known)) {
 		return emailSkipQuickReplies(activeLanguageCode(sc, known));
 	}
@@ -5947,6 +5957,117 @@ function buildHotelFactReplyMessage(sc = {}, hotel = {}, latestGuest = null, kno
 	return buildHotelFactFallbackMessage(sc, hotel, latestGuest);
 }
 
+function serviceFactDetailsForReply(value = "", { allowArabic = true } = {}) {
+	const details = cleanDisplayString(value, 500);
+	if (!details) return "";
+	if (!allowArabic && /[\u0600-\u06FF]/.test(details)) return "";
+	const normalized = normalizeIntentSearchText(details)
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase();
+	const compact = normalized.replace(/\s+/g, "");
+	if (/^(?:yes|true|available|included|no|false|n\/?a|none|null)$/i.test(normalized)) {
+		return "";
+	}
+	if (/\b(?:not\s+available|not\s+confirmed|no\s+bus|no\s+shuttle|no\s+transport)\b/i.test(normalized)) {
+		return "";
+	}
+	if (
+		/(?:\u0644\u0627\u064a\u0648\u062c\u062f|\u0644\u0627\u062a\u0648\u062c\u062f|\u063a\u064a\u0631\u0645\u0624\u0643\u062f|\u063a\u064a\u0631\u0645\u062a\u0627\u062d|\u0644\u0627\u064a\u0638\u0647\u0631)/u.test(
+			compact
+		)
+	) {
+		return "";
+	}
+	return details;
+}
+
+function appendPostConfirmationFactHelp(reply = "", sc = {}, known = {}) {
+	if (!(knownHasReservationConfirmation(known) || conversationHasAiAction(sc, "reservation_confirmed"))) {
+		return reply;
+	}
+	const text = normalizeIntentSearchText(reply);
+	if (
+		/\b(?:anything else|can i help|need help|help you)\b/i.test(text) ||
+		/(?:\u0647\u0644\u0623\u0642\u062f\u0631\u0623\u0633\u0627\u0639\u062f\u0643|\u0623\u0633\u0627\u0639\u062f\u0643\u0641\u064a\u0634\u064a\u0621\u0622\u062e\u0631|\u0627\u0633\u0627\u0639\u062f\u0643\u0641\u064a\u0634\u064a\u0621\u0627\u062e\u0631)/u.test(
+			text.replace(/\s+/g, "")
+		)
+	) {
+		return reply;
+	}
+	const suffix = /^ar\b/i.test(activeLanguageCode(sc, known))
+		? "\u0647\u0644 \u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0641\u064a \u0634\u064a\u0621 \u0622\u062e\u0631\u061f"
+		: "Can I help with anything else?";
+	return `${String(reply || "").trim()}\n${suffix}`.trim();
+}
+
+function buildAuthoritativeHotelServiceFactReply(sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	if (!latestGuest) return "";
+	const latestText = String(latestGuest?.message || "");
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
+	const guestName = ar ? arabicGuestAddress(sc, known, latestText) : guestDisplayName(sc);
+	const allowRawDetails = ar;
+	if (latestGuestMentionsBus(latestGuest)) {
+		const details = serviceFactDetailsForReply(hotel.busDetails, {
+			allowArabic: allowRawDetails,
+		});
+		const hasService = hotel.hasBusService === true || Boolean(details);
+		if (hasService) {
+			const reply = ar
+				? [
+						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c \u064a\u0648\u062c\u062f \u062e\u062f\u0645\u0629 \u0646\u0642\u0644 \u062d\u0633\u0628 \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName}.`,
+						details ? `\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629: ${details}` : "",
+						"\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0648\u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f \u0627\u0644\u0646\u0647\u0627\u0626\u064a\u0629 \u062a\u0624\u0643\u062f \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.",
+				  ]
+						.filter(Boolean)
+						.join("\n")
+				: [
+						`Yes ${guestName}, ${hotelName} lists a shuttle/transport service in the hotel details.`,
+						details ? `Stored details: ${details}` : "",
+						"Reception can confirm the exact schedule and timing.",
+				  ]
+						.filter(Boolean)
+						.join("\n");
+			return appendPostConfirmationFactHelp(reply, sc, known);
+		}
+		const reply = ar
+			? `\u064a\u0627 ${guestName}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u062d\u0627\u0644\u064a\u0627 \u062e\u062f\u0645\u0629 \u0646\u0642\u0644 \u0645\u0624\u0643\u062f\u0629 \u0636\u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName}. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639\u0647\u0627 \u0644\u0643 \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.`
+			: `${guestName}, I do not currently see a confirmed shuttle/transport service in ${hotelName}'s hotel details. I can help verify it with reception.`;
+		return appendPostConfirmationFactHelp(reply, sc, known);
+	}
+	if (latestGuestMentionsNusuk(latestGuest)) {
+		const details = serviceFactDetailsForReply(hotel.isNusukText, {
+			allowArabic: allowRawDetails,
+		});
+		const hasNusuk = hotel.isNusuk === true || Boolean(details);
+		if (hasNusuk) {
+			const reply = ar
+				? [
+						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c \u064a\u0638\u0647\u0631 \u062d\u0633\u0628 \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName} \u0623\u0646\u0647 \u0645\u062f\u0631\u062c/\u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643.`,
+						details ? `\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629: ${details}` : "",
+						"\u0648\u062a\u0623\u0643\u064a\u062f \u0623\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0623\u0648 \u0645\u0648\u0627\u0639\u064a\u062f \u0646\u0647\u0627\u0626\u064a\u0629 \u064a\u0643\u0648\u0646 \u0645\u0646 \u0646\u0633\u0643 \u0623\u0648 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.",
+				  ]
+						.filter(Boolean)
+						.join("\n")
+				: [
+						`Yes ${guestName}, ${hotelName} is listed/available on Nusuk according to the hotel details.`,
+						details ? `Stored details: ${details}` : "",
+						"Final appointment or listing details are confirmed through Nusuk or reception.",
+				  ]
+						.filter(Boolean)
+						.join("\n");
+			return appendPostConfirmationFactHelp(reply, sc, known);
+		}
+		const reply = ar
+			? `\u064a\u0627 ${guestName}\u060c \u0644\u0627 \u064a\u0638\u0647\u0631 \u0644\u062f\u064a \u0623\u0646 ${hotelName} \u0645\u062f\u0631\u062c \u0623\u0648 \u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643 \u0636\u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u062d\u0627\u0644\u064a\u0629. \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.`
+			: `${guestName}, I do not currently see ${hotelName} listed/available on Nusuk in the hotel details. I can help verify it with reception.`;
+		return appendPostConfirmationFactHelp(reply, sc, known);
+	}
+	return "";
+}
+
 async function sendHotelFactReplyFromOpenAI({
 	io,
 	sc,
@@ -5963,6 +6084,21 @@ async function sendHotelFactReplyFromOpenAI({
 	const fallbackGuest = cleanFactQuestion
 		? { ...(latestGuest || {}), message: cleanFactQuestion }
 		: latestGuest;
+	const authoritativeReply = buildAuthoritativeHotelServiceFactReply(
+		sc,
+		hotel,
+		known,
+		fallbackGuest
+	);
+	if (authoritativeReply) {
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, authoritativeReply, {
+			latestGuest,
+			known,
+			clientAction: "hotel_fact_answered",
+			quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
+		});
+	}
 	const fallback = buildHotelFactReplyMessage(sc, hotel, fallbackGuest, known);
 	const answerMode = hotelFactAnswerMode(fallbackGuest);
 	const needsPriceGuidance = latestGuestAsksPriceGuidance(fallbackGuest);
@@ -10040,18 +10176,41 @@ async function handoffToHuman(io, sc = {}, known = {}, latestGuest = null, reaso
 	});
 }
 
-async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, reply = "") {
+function caseOutroImpliesPendingBooking(reply = "") {
+	const text = normalizeIntentSearchText(reply).toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:continue|finish|complete|resume)\s+(?:the\s+)?(?:booking|reservation)\s+later\b/i.test(text) ||
+		/\b(?:book|booking|reserve|reservation)\s+later\b/i.test(text) ||
+		/(?:\u062a\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0646\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0625\u0643\u0645\u0627\u0644\u0627\u0644\u062d\u062c\u0632|\u0627\u0643\u0645\u0627\u0644\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632\u0644\u0627\u062d\u0642)/u.test(compact)
+	);
+}
+
+function buildCaseOutroText(sc = {}, known = {}, hasConfirmedReservation = false) {
 	const languageCode = activeLanguageCode(sc, known);
+	if (hasConfirmedReservation) {
+		return /^ar\b/i.test(languageCode)
+			? "\u0639\u0644\u0649 \u0627\u0644\u0631\u062d\u0628 \u0648\u0627\u0644\u0633\u0639\u0629\u060c \u062d\u062c\u0632\u0643\u0645 \u0645\u0624\u0643\u062f \u0648\u0646\u062a\u0637\u0644\u0639 \u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644\u0643\u0645 \u0628\u0625\u0630\u0646 \u0627\u0644\u0644\u0647. \u0646\u062d\u0646 \u0641\u064a \u062e\u062f\u0645\u062a\u0643\u0645 \u0641\u064a \u0623\u064a \u0648\u0642\u062a."
+			: "You are very welcome. Your booking is confirmed, and we look forward to welcoming you. We are here anytime if you need anything else.";
+	}
+	return /^ar\b/i.test(languageCode)
+		? "\u0639\u0644\u0649 \u0627\u0644\u0631\u062d\u0628 \u0648\u0627\u0644\u0633\u0639\u0629\u060c \u0633\u0639\u062f\u062a \u0628\u062e\u062f\u0645\u062a\u0643. \u0646\u062d\u0646 \u0641\u064a \u062e\u062f\u0645\u062a\u0643 \u0641\u064a \u0623\u064a \u0648\u0642\u062a\u060c \u0648\u0625\u0630\u0627 \u0623\u062d\u0628\u0628\u062a \u062a\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632 \u0644\u0627\u062d\u0642\u064b\u0627 \u0641\u0623\u0646\u0627 \u062a\u062d\u062a \u0623\u0645\u0631\u0643."
+		: "It was my pleasure helping you. We are here anytime, and if you would like to continue later I will be happy to help.";
+}
+
+async function closeCaseWithOutro(io, sc = {}, known = {}, latestGuest = null, reply = "") {
+	const hasConfirmedReservation =
+		knownHasReservationConfirmation(known) || conversationHasAiAction(sc, "reservation_confirmed");
+	const suppliedReply = String(reply || "").trim();
 	const text =
-		reply ||
-		(/^ar\b/i.test(languageCode)
-			? "\u0639\u0644\u0649 \u0627\u0644\u0631\u062d\u0628 \u0648\u0627\u0644\u0633\u0639\u0629\u060c \u0633\u0639\u062f\u062a \u0628\u062e\u062f\u0645\u062a\u0643. \u0646\u062d\u0646 \u0641\u064a \u062e\u062f\u0645\u062a\u0643 \u0641\u064a \u0623\u064a \u0648\u0642\u062a\u060c \u0648\u0625\u0630\u0627 \u0623\u062d\u0628\u0628\u062a \u062a\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632 \u0644\u0627\u062d\u0642\u064b\u0627 \u0641\u0623\u0646\u0627 \u062a\u062d\u062a \u0623\u0645\u0631\u0643."
-			: "It was my pleasure helping you. We are here anytime, and if you would like to continue later I will be happy to help.");
+		suppliedReply && !(hasConfirmedReservation && caseOutroImpliesPendingBooking(suppliedReply))
+			? suppliedReply
+			: buildCaseOutroText(sc, known, hasConfirmedReservation);
 	const updatedAfterOutro = await sendAiMessage(io, sc, text, {
 		latestGuest,
 		known,
 		clientAction: "case_outro",
-		source: reply ? "openai" : "",
+		source: suppliedReply && text === suppliedReply ? "openai" : "",
 	});
 	const caseId = caseIdText(updatedAfterOutro || sc);
 	if (!caseId || !updatedAfterOutro) return updatedAfterOutro;
@@ -15197,6 +15356,7 @@ const exportedOrchestrator = {
 		compactPolicyQA,
 		localizedCancellationPolicyLine,
 		buildHotelFactReplyMessage,
+		buildAuthoritativeHotelServiceFactReply,
 		buildQuoteFallbackMessage,
 		buildSplitCityItineraryFallback,
 		warmBookingPrefix,
@@ -15207,6 +15367,8 @@ const exportedOrchestrator = {
 		sameAsDisplayedPhoneIntent,
 		applyDisplayedPhoneAnswer,
 		buildCancelReservationContactMessage,
+		buildCaseOutroText,
+		caseOutroImpliesPendingBooking,
 		buildFriendlyReservationUpdateMessage,
 		buildHotelFactFallbackMessage,
 		buildOtherCloserHotelMessage,

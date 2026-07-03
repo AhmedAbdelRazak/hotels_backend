@@ -912,3 +912,38 @@ QA note:
 - Production backend: pulled to `3c86bbb` and restarted.
 - Production SSR: pulled to `2f5d1f1`, built successfully, and restarted.
 - Local backend and SSR worktrees were clean before this documentation update.
+
+## Post-Monitoring Fact and Outro Hardening
+
+### Home Server Reboot Check
+
+- The home server was checked before any new chatbot edits.
+- The server had recently rebooted around `2026-07-02 20:14 PDT`.
+- The previous journal ended abruptly and the new boot reported an unclean journal shutdown, so this looked like a host/power/reset-level reboot rather than a PM2 app crash.
+- No OOM kill, thermal shutdown, watchdog panic, or graceful app-triggered restart was found in the saved logs around the reboot window.
+- Current health after reboot was good:
+  - PM2 apps online, including `hotels-backend` and `jannat-ssr`.
+  - RAM healthy with about `12Gi` available.
+  - Root disk around `9%` used.
+  - CPU package around `47C`, far below critical.
+  - NVMe around `43C`, far below critical.
+
+### Chatbot Adjustments
+
+- Bus/shuttle service questions now use an authoritative dynamic reply from hotel data when the guest explicitly asks about bus, shuttle, transfer, or transport.
+- If `hasBusService` is true, or usable `busDetails` exists, the reply confirms that transport exists according to hotel data and says final details/timings are confirmed with reception.
+- The bus/shuttle path no longer lets the writer contradict a positive hotel fact by saying the service is unconfirmed.
+- Nusuk questions now use the same authoritative dynamic pattern from `isNusuk` and `isNusukText`.
+- Post-confirmation service fact replies append a clean "anything else" help offer when the reservation has already been confirmed.
+- Confirmed-reservation closeout now says the booking is confirmed and the hotel looks forward to welcoming the guest.
+- The confirmed closeout guard rejects generated outros that imply the guest may "continue the booking later" after a reservation has already been confirmed.
+- Existing-reservation duplicate-warning follow-ups no longer attach generic review/confirmation buttons unless the guest explicitly chooses the new-booking or not-my-reservation path.
+
+### Local Validation
+
+- `node --check aiagent/core/orchestrator.js` passed.
+- Targeted deterministic probes passed:
+  - Arabic bus/shuttle question with positive hotel data returns a confident transport answer and reception timing note.
+  - Arabic Nusuk question with positive hotel data returns a confident Nusuk answer and reception/Nusuk confirmation note.
+  - Post-confirmation fact reply includes an "anything else" help offer.
+  - Confirmed-reservation outro contains "booking confirmed" meaning and does not include "continue the booking later" wording.
