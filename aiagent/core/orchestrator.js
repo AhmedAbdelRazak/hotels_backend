@@ -1000,7 +1000,7 @@ function textMentionsRoomSelection(value = "") {
 		.trim();
 	if (!text) return false;
 	if (
-		/\b(?:rooms?|units?|suite|suites?|single|double|twin|triple|quad|quadruple|family|quintuple|beds?)\b/i.test(
+		/\b(?:rooms?|units?|suite|suites?|single|double|twin|triple|quad|quadruple|family|quintuple|beds?|chambres?|personnes?|adultes?|hommes?|voyageurs?)\b/i.test(
 			text
 		)
 	) {
@@ -1044,7 +1044,7 @@ function textMentionsSpecificRoomType(value = "") {
 		.trim();
 	if (!text) return false;
 	if (ROOM_SELECTION_PATTERNS.some((matcher) => matcher.pattern.test(text))) return true;
-	if (/\b(?:room\s+for\s+[2-5]|rooms\s+for\s+[2-5]|[2-5]\s+(?:beds?|people|persons?|guests?|adults?))\b/i.test(text)) {
+	if (/\b(?:room\s+for\s+0?[2-5]|rooms\s+for\s+0?[2-5]|chambres?\s+(?:pour|de)\s+0?[2-5]|0?[2-5]\s+(?:beds?|people|persons?|guests?|adults?|personnes?|adultes?|hommes?|voyageurs?))\b/i.test(text)) {
 		return true;
 	}
 	const compact = text.replace(/\s+/g, "");
@@ -1341,6 +1341,11 @@ function singleGregorianDateFromText(value = "", known = {}) {
 	if (matches.length !== 1) return "";
 	const explicitYear = normalizeTwoDigitYear(matches[0][3]);
 	let iso = slashDateMatchToISO(matches[0], known);
+	if (!iso && /[\u0600-\u06FF]/.test(raw)) {
+		iso = slashDateMatchToISOWithPreference(matches[0], known, {
+			preferDayMonth: true,
+		});
+	}
 	if (!iso) return "";
 	const knownCheckin = validISODate(known.checkinISO);
 	if (!explicitYear && knownCheckin && iso <= knownCheckin) {
@@ -1563,6 +1568,7 @@ function normalizeNationalityHint(value = "") {
 		{ pattern: /\b(?:ksa|saudi arabia|saudi)\b/i, value: "Saudi" },
 		{ pattern: /\b(?:uae|united arab emirates|emirati)\b/i, value: "UAE" },
 		{ pattern: /\b(?:egypt|egyptian)\b/i, value: "Egyptian" },
+		{ pattern: /\b(?:algeria|algerian|alg[e\u00e9]rie|alg[e\u00e9]rien|alg[e\u00e9]rienne)\b/i, value: "Algerian" },
 		{ pattern: /\b(?:canada|canadian)\b/i, value: "Canadian" },
 		{ pattern: /\b(?:pakistan|pakistani)\b/i, value: "Pakistani" },
 		{ pattern: /\b(?:india|indian)\b/i, value: "Indian" },
@@ -1594,6 +1600,7 @@ function normalizeNationalityHint(value = "") {
 	}
 	const nationalityContext =
 		/\b(?:citizen|national|nationality|passport|from|i am|i'm|im|my nationality)\b/i.test(raw) ||
+		/\b(?:je\s+suis|nationalit[e\u00e9])\b/i.test(raw) ||
 		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649)/.test(raw);
 	if (nationalityContext) {
 		const match = sentenceMatches.find((item) => item.pattern.test(raw));
@@ -1921,6 +1928,21 @@ function peopleCountFromLine(value = "") {
 	) {
 		return Math.floor(unicodeArabicCount);
 	}
+	const frenchGuestMatch =
+		text.match(
+			/(?:^|\s)(\d{1,3})\s*(?:personnes?(?:\s+adultes?)?|adultes?|hommes?|voyageurs?)(?:$|\s|[^\p{L}0-9])/iu
+		) ||
+		text.match(
+			/(?:personnes?(?:\s+adultes?)?|adultes?|hommes?|voyageurs?)\s*(\d{1,3})(?:$|\s|[^\p{L}0-9])/iu
+		);
+	const frenchGuestCount = Number(frenchGuestMatch?.[1] || 0);
+	if (
+		Number.isFinite(frenchGuestCount) &&
+		frenchGuestCount >= 1 &&
+		frenchGuestCount <= 200
+	) {
+		return Math.floor(frenchGuestCount);
+	}
 	const guestNoun = "(?:persons?|people|guests?|adults?|individuals?|pax|pilgrims?|umrah\\s+guests?|اشخاص|أشخاص|افراد|أفراد|نزلاء|ضيوف|بالغين|بالغ|معتمرين|معتمر|زوار)";
 	const match = text.match(
 		new RegExp(`(?:for|لعدد|لـ|ل)\\s*(\\d{1,2})\\s*${guestNoun}\\b|(\\d{1,2})\\s*${guestNoun}\\b`, "i")
@@ -2092,6 +2114,120 @@ function labeledFactFromAssistant(text = "", labels = []) {
 	return "";
 }
 
+function mergeAssistantBoundaryFactsSafely(current = {}, facts = {}) {
+	const source = asObject(facts);
+	if (!Object.keys(source).length) return current;
+	const currentCheckinISO = validISODate(current.checkinISO);
+	const currentCheckoutISO = validISODate(current.checkoutISO);
+	const sourceCheckinISO = validISODate(source.checkinISO);
+	const sourceCheckoutISO = validISODate(source.checkoutISO);
+	if (
+		currentCheckinISO &&
+		currentCheckoutISO &&
+		sourceCheckinISO &&
+		!sourceCheckoutISO &&
+		sourceCheckinISO !== currentCheckinISO
+	) {
+		return current;
+	}
+	if (
+		currentCheckinISO &&
+		currentCheckoutISO &&
+		sourceCheckoutISO &&
+		!sourceCheckinISO &&
+		sourceCheckoutISO <= currentCheckinISO
+	) {
+		return current;
+	}
+	return mergeKnownFacts(current, source);
+}
+
+function assistantAcknowledgedStayFacts(entry = {}, current = {}) {
+	const action = cleanString(entry?.clientAction, 80).toLowerCase();
+	if (["quote_ready", "quote_unavailable", "review_reservation"].includes(action)) return {};
+	const text = cleanDisplayString(entry?.message || "", 1500);
+	if (!text) return {};
+	const isoFacts = isoDateRangeFactsFromText(text);
+	const hasIsoRange = Boolean(isoFacts?.checkinISO && isoFacts?.checkoutISO);
+	const normalized = normalizeIntentSearchText(text)
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = normalized.replace(/\s+/g, "");
+	const acknowledgesStay =
+		/\b(?:received|noted|registered|saved|current booking|for this booking|for your booking|i have|got)\b/i.test(
+			normalized
+		) ||
+		/(?:\u062a\u0645|\u0627\u0633\u062a\u0644\u0627\u0645|\u0627\u0633\u062a\u0644\u0645|\u062a\u0633\u062c\u064a\u0644|\u0639\u0646\u062f\u064a|\u0627\u0644\u062d\u062c\u0632\u0627\u0644\u062d\u0627\u0644\u064a|\u0644\u0644\u062d\u062c\u0632|\u0627\u0644\u063a\u0631\u0641\u0629\u0627\u0644\u0645\u0646\u0627\u0633\u0628\u0629)/iu.test(
+			compact
+		);
+	if (!acknowledgesStay && !hasIsoRange) return {};
+	const facts = {};
+	if (hasIsoRange) {
+		Object.assign(facts, isoFacts);
+	}
+	const roomSelections = extractRoomSelectionsFromText(text);
+	if (roomSelections.length && textMentionsRoomSelection(text) && (acknowledgesStay || hasIsoRange)) {
+		facts.roomSelections = roomSelections;
+		facts.rooms = roomSelectionsTotal(roomSelections);
+		if (roomSelections.length === 1) facts.roomTypeKey = roomSelections[0].roomTypeKey;
+	} else {
+		const roomTypeKey = mapRoomToKey(text);
+		if (roomTypeKey && textMentionsRoomSelection(text) && (acknowledgesStay || hasIsoRange)) {
+			facts.roomTypeKey = roomTypeKey;
+		}
+	}
+	const explicitGuestCount = explicitGuestCountFactsFromText(text);
+	if (Object.keys(explicitGuestCount).length && (acknowledgesStay || hasIsoRange)) {
+		Object.assign(facts, explicitGuestCount);
+	} else {
+		const peopleCount = peopleCountFromLine(text);
+		if (peopleCount && (acknowledgesStay || hasIsoRange)) {
+			facts.adults = peopleCount;
+			facts.children = 0;
+		}
+	}
+	return facts;
+}
+
+function mergeAssistantAcknowledgedStayFacts(current = {}, facts = {}) {
+	const source = { ...asObject(facts) };
+	if (!Object.keys(source).length) return current;
+	const currentCheckinISO = validISODate(current.checkinISO);
+	const currentCheckoutISO = validISODate(current.checkoutISO);
+	const sourceCheckinISO = validISODate(source.checkinISO);
+	const sourceCheckoutISO = validISODate(source.checkoutISO);
+	if (
+		currentCheckinISO &&
+		currentCheckoutISO &&
+		sourceCheckinISO &&
+		sourceCheckoutISO &&
+		(sourceCheckinISO !== currentCheckinISO || sourceCheckoutISO !== currentCheckoutISO)
+	) {
+		delete source.checkinISO;
+		delete source.checkoutISO;
+		delete source.dateCalendar;
+	}
+	if (
+		current.roomTypeKey &&
+		source.roomTypeKey &&
+		source.roomTypeKey !== current.roomTypeKey
+	) {
+		delete source.roomTypeKey;
+		delete source.roomSelections;
+		delete source.rooms;
+	}
+	if (
+		Number(current.adults || 0) > 1 &&
+		Number(source.adults || 0) > 0 &&
+		Number(source.adults || 0) < Number(current.adults || 0)
+	) {
+		delete source.adults;
+		delete source.children;
+	}
+	return mergeKnownFacts(current, source);
+}
+
 function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 	let recovered = {
 		...asObject(known),
@@ -2143,7 +2279,14 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				delete aiFacts.adults;
 			}
 			recovered = mergeAssistantQuoteFacts(recovered, aiFacts);
-			recovered = mergeKnownFacts(recovered, assistantSingleBoundaryDateFacts(rawEntryText));
+			recovered = mergeAssistantBoundaryFactsSafely(
+				recovered,
+				assistantSingleBoundaryDateFacts(rawEntryText)
+			);
+			recovered = mergeAssistantAcknowledgedStayFacts(
+				recovered,
+				assistantAcknowledgedStayFacts(entry, recovered)
+			);
 			if (!recovered.fullName) {
 				const value = labeledFactFromAssistant(text, ["guest name", "full name"]);
 				if (isPlausibleBookingName(value)) recovered.fullName = value;
@@ -2181,7 +2324,6 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 		if (Object.keys(boundaryFacts).length) {
 			recovered = mergeKnownFacts(recovered, boundaryFacts);
 			if (boundaryFacts.checkinISO) lastAiAskedCheckinDate = false;
-			if (boundaryFacts.checkoutISO) lastAiAskedCheckoutDate = false;
 		}
 		if (lastAiAskedGuestCount) {
 			recovered = mergeKnownFacts(
@@ -3183,8 +3325,53 @@ function guestAsksPriceAvailabilityOrBooking(value = "", action = "") {
 		"\u0631\u064a\u0627\u0644",
 		"\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a",
 		"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
+		"\u0627\u0644\u062d\u0633\u0627\u0628",
+		"\u0627\u0644\u0645\u0628\u0644\u063a",
+		"\u0645\u0628\u0644\u063a",
 	];
 	return arabicNeedles.some((needle) => compact.includes(needle));
+}
+
+function shortApproximateOnlyText(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/^(?:approx|approximately|roughly|estimate|estimated)$/i.test(text) ||
+		/^(?:\u062a\u0642\u0631\u064a\u0628\u064a|\u062a\u0642\u0631\u064a\u0628\u0627|\u062a\u0642\u0631\u064a\u0628\u064b\u0627|\u062a\u0642\u062f\u064a\u0631\u064a|\u062a\u0642\u062f\u064a\u0631\u064a\u0627|\u062a\u0642\u062f\u064a\u0631\u064b\u0627)$/.test(
+			compact
+		)
+	);
+}
+
+function shortApproximatePriceFollowup(value = "", previousGuest = {}, previousAi = {}) {
+	if (!shortApproximateOnlyText(value)) return false;
+	return (
+		latestGuestAsksPriceGuidance({ message: previousGuest?.message || "" }) ||
+		guestAsksPriceAvailabilityOrBooking(
+			previousGuest?.message || "",
+			previousGuest?.clientAction || ""
+		) ||
+		latestGuestAsksPriceGuidance({ message: previousAi?.message || "" }) ||
+		guestAsksPriceAvailabilityOrBooking(
+			previousAi?.message || "",
+			previousAi?.clientAction || ""
+		)
+	);
+}
+
+function latestGuestAsksPriceWithContext(latestGuest = {}, previousGuest = {}, previousAi = {}) {
+	return (
+		latestGuestAsksPriceGuidance(latestGuest) ||
+		guestAsksPriceAvailabilityOrBooking(
+			latestGuest?.message || "",
+			latestGuest?.clientAction || ""
+		) ||
+		shortApproximatePriceFollowup(latestGuest?.message || "", previousGuest, previousAi)
+	);
 }
 
 function latestGuestRaisesBudgetConcern(value = "") {
@@ -3760,11 +3947,11 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	const rosterFacts = guestRosterFactsFromAgeList(value);
 	if (Object.keys(rosterFacts).length) return rosterFacts;
 	const adultMatch =
-		text.match(/(?:^|\s)(\d{1,3})\s*(?:adults?|grownups?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)(?:$|\s)/iu) ||
-		text.match(/(?:adults?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)\s*(\d{1,3})/iu);
+		text.match(/(?:^|\s)(\d{1,3})\s*(?:adults?|grownups?|personnes?\s+adultes?|adultes?|hommes?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)(?:$|\s)/iu) ||
+		text.match(/(?:adults?|personnes?\s+adultes?|adultes?|hommes?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)\s*(\d{1,3})/iu);
 	const childMatch =
-		text.match(/(?:^|\s)(\d{1,2})\s*(?:children|child|kids?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)(?:$|\s)/iu) ||
-		text.match(/(?:children|child|kids?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)\s*(\d{1,2})/iu);
+		text.match(/(?:^|\s)(\d{1,2})\s*(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)(?:$|\s)/iu) ||
+		text.match(/(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)\s*(\d{1,2})/iu);
 	const hasAgeMarker =
 		/(\d{1,2})\s*(?:\u0633\u0646\u0629|\u0633\u0646\u0647|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)(?=$|[^\p{L}])/iu.test(
 			text
@@ -3802,9 +3989,9 @@ function explicitGuestCountFactsFromText(value = "") {
 		.trim();
 	if (!text || containsDateLikeSlashToken(text)) return {};
 	const adultLabel =
-		"(?:adults?|grownups?|\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646)?|\\u0643\\u0628\\u0627\\u0631|\\u0643\\u0628\\u064a\\u0631|\\u0643\\u0628\\u064a\\u0631\\u064a\\u0646)";
+		"(?:adults?|grownups?|personnes?\\s+adultes?|adultes?|hommes?|\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646)?|\\u0643\\u0628\\u0627\\u0631|\\u0643\\u0628\\u064a\\u0631|\\u0643\\u0628\\u064a\\u0631\\u064a\\u0646)";
 	const childLabel =
-		"(?:children|child|kids?|\\u0637\\u0641\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644)";
+		"(?:children|child|kids?|enfants?|\\u0637\\u0641\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644)";
 	const adultMatch =
 		text.match(new RegExp(`(?:^|\\s)(\\d{1,3})\\s*${adultLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
 		text.match(new RegExp(`${adultLabel}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
@@ -4247,9 +4434,7 @@ function withWarmPrefix(message = "", sc = {}, known = {}, latestText = "") {
 }
 
 function buildNationalityNeededMessage(sc = {}, known = {}) {
-	return /^ar\b/i.test(activeLanguageCode(sc, known))
-		? `تمام، بقي فقط الجنسية لتجهيز مراجعة الحجز.`
-		: `Absolutely, ${guestDisplayName(sc)}. I only need the nationality now so I can prepare the booking review.`;
+	return buildMandatoryDetailsMessage(sc, known, ["nationality"]);
 }
 
 function replyRequestsForbiddenBookingField(reply = "") {
@@ -4282,6 +4467,90 @@ function buildDetailRowsMessage(intro = "", rows = [], outro = "") {
 	]
 		.filter(Boolean)
 		.join("\n");
+}
+
+function bookingDetailLabels(languageCode = "en") {
+	const ar = /^ar\b/i.test(languageCode);
+	return ar
+		? {
+				checkinCheckout: "\u0627\u0644\u0648\u0635\u0648\u0644 \u0625\u0644\u0649 \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629",
+				roomTypeKey: "\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629",
+				fullName: "\u0627\u0644\u0627\u0633\u0645 \u0627\u0644\u0643\u0627\u0645\u0644",
+				phone: "\u0631\u0642\u0645 \u0627\u0644\u0647\u0627\u062a\u0641",
+				nationality: "\u0627\u0644\u062c\u0646\u0633\u064a\u0629",
+				adults: "\u0627\u0644\u0636\u064a\u0648\u0641",
+		  }
+		: {
+				checkinCheckout: "Checkin to Checkout",
+				roomTypeKey: "Room Type",
+				fullName: "Full Name",
+				phone: "Phone",
+				nationality: "Nationality",
+				adults: "Guests",
+		  };
+}
+
+function bookingDetailsMissingValue(languageCode = "en") {
+	return /^ar\b/i.test(languageCode) ? "\u0645\u0637\u0644\u0648\u0628" : "Needed";
+}
+
+function bookingRoomSummaryForDetails(known = {}, languageCode = "en") {
+	const selections = normalizeRoomSelections(known.roomSelections);
+	if (selections.length) {
+		return selections
+			.map((item) => {
+				const label = roomTypeLabel(item.roomTypeKey, languageCode);
+				const count = normalizeRoomCount(item.count, 1);
+				return count > 1 ? `${formatNumber(count, languageCode)} x ${label}` : label;
+			})
+			.join(/^ar\b/i.test(languageCode) ? "\u060c " : ", ");
+	}
+	return known.roomTypeKey ? roomTypeLabel(known.roomTypeKey, languageCode) : "";
+}
+
+function bookingDetailValueForField(field = "", known = {}, languageCode = "en") {
+	const ar = /^ar\b/i.test(languageCode);
+	if (field === "checkinCheckout") {
+		const checkinISO = validISODate(known.checkinISO);
+		const checkoutISO = validISODate(known.checkoutISO);
+		if (checkinISO && checkoutISO) {
+			return `${checkinISO} ${ar ? "\u0625\u0644\u0649" : "to"} ${checkoutISO}`;
+		}
+		return checkinISO || checkoutISO || "";
+	}
+	if (field === "roomTypeKey") return bookingRoomSummaryForDetails(known, languageCode);
+	if (field === "fullName") return cleanDisplayString(known.fullName, 80);
+	if (field === "phone") return cleanPhone(known.phone);
+	if (field === "nationality") return cleanDisplayString(known.nationality, 60);
+	if (field === "adults") {
+		const adults = Number(known.adults || 0) || 0;
+		if (!adults) return "";
+		const children = Math.max(0, Number(known.children || 0) || 0);
+		return ar
+			? arabicGuestCountText(adults, children, languageCode)
+			: englishGuestCountText(adults, children);
+	}
+	return "";
+}
+
+function bookingDetailRowsForMessage(known = {}, missing = [], languageCode = "en") {
+	const labels = bookingDetailLabels(languageCode);
+	const needed = bookingDetailsMissingValue(languageCode);
+	const missingSet = new Set(Array.isArray(missing) ? missing : []);
+	const isMissing = (field) => {
+		if (field === "checkinCheckout") {
+			return missingSet.has("checkinISO") || missingSet.has("checkoutISO");
+		}
+		return missingSet.has(field);
+	};
+	return ["fullName", "phone", "checkinCheckout", "roomTypeKey", "adults", "nationality"].map(
+		(field) => {
+			const value = isMissing(field)
+				? needed
+				: bookingDetailValueForField(field, known, languageCode) || needed;
+			return `**${labels[field]}:** ${value}`;
+		}
+	);
 }
 
 function buildAllowedMissingBookingDetailsMessage(sc = {}, known = {}, missing = []) {
@@ -4412,15 +4681,15 @@ function buildMandatoryDetailsMessage(sc = {}, known = {}, missing = []) {
 	}
 	if (ar) {
 		return buildDetailRowsMessage(
-			`\u062a\u0645\u0627\u0645\u060c \u0628\u0642\u064a \u0641\u0642\u0637:`,
-			readable,
-			`\u0644\u062a\u062c\u0647\u064a\u0632 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632.`
+			`\u062a\u0645\u0627\u0645\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0646\u0627\u0642\u0635\u0629:`,
+			bookingDetailRowsForMessage(known, requiredMissing, languageCode),
+			`\u0628\u0639\u062f\u0647\u0627 \u0623\u062c\u0647\u0632 \u0644\u0643 \u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632.`
 		);
 	}
 	return buildDetailRowsMessage(
-		`Almost ready. I only need:`,
-		readable,
-		`to prepare the booking review.`
+		`Almost ready. Please send the missing details below:`,
+		bookingDetailRowsForMessage(known, requiredMissing, languageCode),
+		`Then I can prepare the booking review.`
 	);
 }
 
@@ -4868,6 +5137,7 @@ function replyPromisesReservationFinalization(reply = "") {
 function latestGuestAsksHotelFactOnly(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	if (!text.trim()) return false;
+	if (shortApproximateOnlyText(text)) return false;
 	if (latestGuestAsksOtherCloserHotel(latestGuest)) return true;
 	if (
 		latestGuestAsksArrivalDeparturePolicy(latestGuest) ||
@@ -4879,7 +5149,11 @@ function latestGuestAsksHotelFactOnly(latestGuest = {}) {
 		/(nusuk|نسك|bus|shuttle|transport|transfer|باص|اتوبيس|أتوبيس|اوتوبيس|أوتوبيس|حافلة|نقل|توصيل|مواصلات|شاتل|refund|cancel|cancellation|policy|استرداد|الغاء|إلغاء|سياسة|بعيد|يبعد|تبعد|قريب|المسافة|مسافة|بوابة|بوابه|الحرم|موقع|location|distance|address|adress|adres|street|where|kaha|kahan|kahaan|kidhar|pata|map|maps|directions|خريطة|خريطه|خرائط|لوكيشن|عنوان|شارع|مشي|walking|parking|garage|موقف|مواقف|wifi|واي[\s-]?فاي|breakfast|فطور|افطار|إفطار|meal|وجبات|مطعم|restaurant|branch|branches|فرع|فروع|المدينة|المدينه|الطائف|\u06a9\u06c1\u0627\u06ba|\u0642\u0631\u06cc\u0628|\u0627\u06cc\u0688\u0631\u06cc\u0633|\u067e\u062a\u06c1)/i.test(
 			text
 		);
-	if (!hotelFactTopic) return false;
+	const englishLocationTopic =
+		/\b(?:how\s+far|far\s+from|close\s+to|near\s+(?:the\s+)?haram|al\s*haram|haram)\b/i.test(
+			text
+		);
+	if (!hotelFactTopic && !englishLocationTopic) return false;
 	const directQuoteRequest =
 		/(price|prices|rate|rates|cost|quote|\bsar\b|سعر|أسعار|اسعار|الأسعار|الاسعار|بكام|ريال|الإجمالي|الاجمالي|تاريخ|تواريخ|check[\s-]?in|check[\s-]?out|\d{4}-\d{2}-\d{2})/i.test(
 			text
@@ -4899,6 +5173,16 @@ function latestGuestAsksPriceGuidance(latestGuest = {}) {
 		return true;
 	}
 	const compact = normalizeIntentSearchText(text).replace(/\s+/g, "");
+	if (
+		/(?:\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u062d\u0633\u0627\u0628|\u0627\u0644\u0645\u0628\u0644\u063a).{0,20}(?:\u062a\u0642\u0631\u064a\u0628\u064a|\u062a\u0642\u0631\u064a\u0628\u0627|\u062a\u0642\u0631\u064a\u0628\u064b\u0627|\u062a\u0642\u062f\u064a\u0631\u064a)/iu.test(
+			text
+		) ||
+		/(?:\u062a\u0642\u0631\u064a\u0628\u064a|\u062a\u0642\u0631\u064a\u0628\u0627|\u062a\u0642\u0631\u064a\u0628\u064b\u0627|\u062a\u0642\u062f\u064a\u0631\u064a).{0,20}(?:\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u062d\u0633\u0627\u0628|\u0627\u0644\u0645\u0628\u0644\u063a)/iu.test(
+			text
+		)
+	) {
+		return true;
+	}
 	return [
 		"\u0633\u0639\u0631",
 		"\u0623\u0633\u0639\u0627\u0631",
@@ -4909,6 +5193,9 @@ function latestGuestAsksPriceGuidance(latestGuest = {}) {
 		"\u0627\u0644\u062a\u0643\u0644\u0641\u0629",
 		"\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a",
 		"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a",
+		"\u0627\u0644\u062d\u0633\u0627\u0628",
+		"\u0627\u0644\u0645\u0628\u0644\u063a",
+		"\u0645\u0628\u0644\u063a",
 	].some((needle) => compact.includes(needle));
 }
 
@@ -6610,9 +6897,13 @@ function latestTextHasExplicitGuestCount(text = "") {
 		/\b\d{1,3}\s*(?:adult|adults|guest|guests|person|people|pax|child|children|kid|kids)\b/i.test(
 			normalized
 		) ||
+		/\b\d{1,3}\s*(?:personnes?|adultes?|hommes?|voyageurs?|enfants?)\b/i.test(
+			normalized
+		) ||
 		/\b(?:adult|adults|guest|guests|person|people|pax|child|children|kid|kids)\b/i.test(
 			normalized
 		) ||
+		/\b(?:personnes?|adultes?|hommes?|voyageurs?|enfants?)\b/i.test(normalized) ||
 		arabicNumberedGuestCount.test(normalized) ||
 		arabicGuestCountWord.test(normalized)
 	);
@@ -7328,6 +7619,12 @@ function shouldForceQuote(decision = {}, known = {}, latestGuest = {}) {
 	if (quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) return false;
 	if (replyPromisesQuoteCheck(decision.reply)) return true;
 	const text = String(latestGuest?.message || "");
+	if (
+		latestGuestAsksPriceGuidance(latestGuest) ||
+		guestAsksPriceAvailabilityOrBooking(text, latestGuest?.clientAction || "")
+	) {
+		return true;
+	}
 	return /(price|rate|cost|availability|available|book|reserve|reservation|\bSAR\b|\bريال\b|سعر|بكام|كم|متاح|متوفر|احجز|حجز)/i.test(
 		text
 	);
@@ -13536,6 +13833,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	const latestAction = String(latestGuest?.clientAction || "").trim().toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	const previousGuest = previousGuestEntryBeforeLatest(sc, latestGuest);
 	let appliedDateBoundaryChange = false;
 	let appliedSplitStayChange = false;
 	let displayedPhoneConfirmedThisTurn = false;
@@ -13901,6 +14199,24 @@ async function planTurn(io, supportCaseOrId) {
 			await waitForTypingMinimum(typingStartedAt);
 			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
 		}
+	}
+	const latestPriceIntent =
+		latestGuest && latestGuestAsksPriceWithContext(latestGuest, previousGuest, previousAi);
+	if (
+		latestGuest &&
+		(latestPriceIntent || appliedDateBoundaryChange) &&
+		(quoteInputsKnown(known) || splitStayQuoteInputsKnown(known)) &&
+		!quoteMatchesKnown(known) &&
+		!splitStayQuoteMatchesKnown(known) &&
+		!latestGuestAsksBookingProcess(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(
+			key,
+			appliedDateBoundaryChange ? "date_boundary_pre_brain_quote_start" : "price_context_pre_brain_quote_start"
+		);
+		return handleBrainQuote(io, sc, hotel, known, latestGuest, typingStartedAt);
 	}
 	if (
 		latestGuest &&
@@ -14607,7 +14923,6 @@ async function planTurn(io, supportCaseOrId) {
 			return sendReview(io, sc, known, hotel, latestGuest);
 		}
 	}
-	const previousGuest = previousGuestEntryBeforeLatest(sc, latestGuest);
 	if (
 		guestRequestsBookingReview(latestText) ||
 		(guestAttentionNudge(latestText) && guestRequestsBookingReview(previousGuest?.message))
@@ -15275,6 +15590,8 @@ const exportedOrchestrator = {
 		guestDeclinesOptionalEmail,
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,
+		shortApproximatePriceFollowup,
+		latestGuestAsksPriceWithContext,
 		latestGuestRaisesBudgetConcern,
 		replyHasHotelValuePitch,
 		latestGuestAsksBookingProcess,
@@ -15362,6 +15679,7 @@ const exportedOrchestrator = {
 		warmBookingPrefix,
 		withWarmPrefix,
 		buildMandatoryDetailsMessage,
+		bookingDetailRowsForMessage,
 		profilePhoneForBooking,
 		previousAiAskedForPhone,
 		sameAsDisplayedPhoneIntent,

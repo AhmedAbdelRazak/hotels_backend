@@ -316,8 +316,9 @@ function capacityRoomKeyFromText(text = "") {
 		5: "familyRooms",
 	};
 	for (const count of [5, 4, 3, 2]) {
+		const countPattern = `0*${count}`;
 		const pattern = new RegExp(
-			`(?:\\b${count}\\b.{0,32}${contextWords}|${contextWords}.{0,32}\\b${count}\\b)`,
+			`(?:\\b${countPattern}\\b.{0,32}${contextWords}|${contextWords}.{0,32}\\b${countPattern}\\b)`,
 			"i"
 		);
 		if (pattern.test(low)) return keys[count];
