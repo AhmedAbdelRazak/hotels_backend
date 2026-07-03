@@ -775,3 +775,140 @@ Home server health after duplicate guard and regression QA:
 Some writer variance still appears in style, language mixing, and phrasing. The orchestrator now validates the risky parts that can damage bookings: dates, availability, totals, identity fields, final review, reservation creation, and required next steps.
 
 Future improvements should focus on deterministic formatting for quote/review/fact replies without changing the verified state and action flow.
+
+## 2026-07-02 Evening - Jannat Platform Support Handoff, SSR Support Widget, and Final QA
+
+### Scope Added
+
+- Added a separate Jannat platform-support AI layer under `aiagent/jannatSupport/`.
+- Kept the existing hotel-reception brain/orchestrator intact; Jannat Support now routes before the hotel reception layer only for virtual Jannat support hotels.
+- Virtual Jannat support hotel IDs:
+  - `674cf8997e3780f1f838d458`
+  - `66b6d8698ca02cb39522b85b`
+- Runtime hotel routing is env-driven:
+  - `JANNATSUPPORT_PRIORITY=6a40b6a1a6efe70450536038`
+  - `JANNATSUPPORT_HOTELS_FOR_MARKETING=6a40b6a1a6efe70450536038,68b74714fb50e159d48c714f,68992107e8d36376f71dd373`
+- Jannat Support now recommends the priority hotel first, saves the recommended hotel in the support-case snapshot, and transfers the same support case to the hotel only after the guest confirms.
+- The recommendation response uses 2-3 quick replies only:
+  - connect to reception
+  - show other options
+  - change details
+- On handoff, the support case changes from `supportScope: "jannat_booking"` to `supportScope: "hotel"`, updates `hotelId`, updates the responder name, saves the Jannat transfer snapshot, and schedules the normal hotel reception turn.
+- The hotel reception prompt now sees `knownFacts.jannatPlatformTransfer` and is instructed to introduce itself, acknowledge the Jannat handoff, confirm already-known stay facts, and not ask the guest to repeat details already passed.
+
+### SSR Changes
+
+- Added SSR support config in `jannatbooking_ssr/lib/supportConfig.js`.
+- SSR layout now passes `supportConfig` into `LazySupportWidget` and `SupportWidget`.
+- SSR support widget no longer relies only on one hardcoded Jannat support hotel ID; it reads the configured/default virtual support IDs.
+- Normal hotel picker filters virtual support hotels out of hotel options.
+- After transfer, the widget header can reflect the hotel/reception context from the support case instead of continuing to look like generic Jannat support.
+
+### Safety and Date Guard
+
+- Jannat Support now blocks same-day or past check-in details before recommending/transferring.
+- The guard uses the hotel business timezone defaulting to `Asia/Riyadh`.
+- The platform layer asks for future dates instead of passing invalid dates to reception.
+- Recommendation summaries now use readable room labels such as `Family Room` / `غرفة عائلية` instead of raw internal keys like `familyRooms`.
+
+### Duplicate Guard QA Export
+
+- Added one test-only export: `findExistingReservationDuplicateContext`.
+- This does not change runtime behavior.
+- Purpose: production QA can inspect the same duplicate context used by the guard without creating accidental reservations.
+
+### GitHub and Production Deploy
+
+Backend commits:
+
+- `804c85c` - `Add Jannat support hotel handoff`
+- `3c86bbb` - `Expose duplicate guard context for QA`
+
+SSR commit:
+
+- `2f5d1f1` - `Improve Jannat support widget handoff`
+
+Production actions:
+
+- Backend pulled to `3c86bbb`.
+- Backend checks run on production:
+  - `node --check aiagent/jannatSupport/config.js`
+  - `node --check aiagent/jannatSupport/brain.js`
+  - `node --check aiagent/jannatSupport/orchestrator.js`
+  - `node --check aiagent/core/orchestrator.js`
+  - `node --check controllers/supportcase.js`
+- Backend restarted with `pm2 restart hotels-backend --update-env`.
+- SSR pulled to `2f5d1f1`.
+- SSR production build passed with `npm run build`.
+- SSR restarted with `pm2 restart jannat-ssr --update-env`.
+
+### Validation
+
+Local validation:
+
+- Backend syntax checks passed.
+- Jannat support deterministic probe passed:
+  - 10 guests mapped dynamically to `2 x familyRooms`.
+  - same-day platform guard returned `same_day_or_past`.
+  - Arabic family room label returned correctly.
+- SSR `npm run build` passed locally.
+
+Production config validation:
+
+- Virtual IDs loaded correctly:
+  - `674cf8997e3780f1f838d458`
+  - `66b6d8698ca02cb39522b85b`
+- Priority hotel loaded as `6a40b6a1a6efe70450536038`.
+- Marketing hotel order loaded as:
+  - `6a40b6a1a6efe70450536038`
+  - `68b74714fb50e159d48c714f`
+  - `68992107e8d36376f71dd373`
+- Arabic Jannat Support responder name loaded as `دعم جنات بوكينج`.
+
+Final production QA marker:
+
+- `codexqa-final-1783046362355`
+
+Final production QA passed:
+
+- Jannat platform Arabic case created through the public support API.
+- Jannat Support recommended priority hotel `6a40b6a1a6efe70450536038`.
+- Recommendation stayed in `supportScope: "jannat_booking"` and included exactly 3 quick replies:
+  - `jannat_connect_reception`
+  - `jannat_show_options`
+  - `jannat_change_details`
+- Guest selected connect-to-reception.
+- Same case transferred to hotel `6a40b6a1a6efe70450536038`.
+- Hotel reception replied after handoff with `clientAction: "quote_ready"`.
+- Reception reply introduced itself as Zad Ajyad reception and acknowledged that the request had been transferred with details.
+- Same-day/past Arabic platform case returned `clientAction: "jannat_future_dates_required"` and remained `supportScope: "jannat_booking"`.
+- Duplicate context guard with one existing same-hotel reservation returned 1 match and generated the duplicate-warning message path.
+- Duplicate context guard with two existing same-hotel reservations returned 2 matches and generated the hard-cut message path including the WhatsApp contact link.
+- Cleanup confirmed:
+  - Temporary support cases deleted: `2`
+  - Temporary fixture reservations deleted: `2`
+
+QA note:
+
+- Earlier synthetic duplicate-worker attempts were cleaned up successfully. Those attempts intentionally seeded artificial support-case state and exposed that the identity safety layer refuses to finalize if a synthetic name looks unconfirmed or test-like. The final duplicate validation used a plausible guest name and the production duplicate-context helper to verify the real matching criteria: same hotel, name, phone, check-in, checkout, and room type.
+
+### Home Server Health After Deploy and QA
+
+- Load average: about `0.21, 0.28, 0.26`.
+- RAM: `15Gi` total, about `12Gi` available.
+- Swap: `0B` used.
+- Root disk: `466G` total, `38G` used, `9%`.
+- CPU package/core temperatures: about `34-43C`.
+- NVMe composite temperature: about `35.9C`.
+- PM2:
+  - `hotels-backend` online, about `224MB`.
+  - `jannat-ssr` online, about `76MB`.
+  - Other services remained online.
+
+### Current Final Status
+
+- Backend GitHub `master`: pushed through `3c86bbb`.
+- SSR GitHub `main`: pushed through `2f5d1f1`.
+- Production backend: pulled to `3c86bbb` and restarted.
+- Production SSR: pulled to `2f5d1f1`, built successfully, and restarted.
+- Local backend and SSR worktrees were clean before this documentation update.
