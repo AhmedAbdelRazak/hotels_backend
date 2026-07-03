@@ -2789,6 +2789,12 @@ function quoteFactsFromAiMessage(entry = {}) {
 		return splitStayQuoteFactsFromAiMessage(rawText, action);
 	}
 	if (!["quote_ready", "quote_unavailable", "review_reservation"].includes(action)) return {};
+	if (["quote_ready", "review_reservation"].includes(action)) {
+		const splitFacts = splitStayQuoteFactsFromAiMessage(rawText, "split_stay_quote_ready");
+		if (normalizeSplitStayPeriods(splitFacts.splitStayPeriods).length >= 2) {
+			return splitFacts;
+		}
+	}
 	const facts = {};
 	const dates = quickDateRange(text);
 	if (dates?.checkinISO && dates?.checkoutISO) {
