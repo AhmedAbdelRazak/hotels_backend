@@ -2426,13 +2426,18 @@ function mergeKnownFacts(current = {}, next = {}) {
 			existingSplitStayPeriods,
 			sourceSplitStayPeriods
 		);
-		if (Number.isFinite(Number(source.splitStayTotal)) && Number(source.splitStayTotal) > 0) {
+		const derivedTotal = merged.splitStayPeriods.reduce(
+			(sum, period) => sum + Number(period.total || 0),
+			0
+		);
+		const allPeriodsHaveTotals = merged.splitStayPeriods.every(
+			(period) => Number(period.total || 0) > 0
+		);
+		if (allPeriodsHaveTotals && derivedTotal > 0) {
+			merged.splitStayTotal = derivedTotal;
+		} else if (Number.isFinite(Number(source.splitStayTotal)) && Number(source.splitStayTotal) > 0) {
 			merged.splitStayTotal = Number(source.splitStayTotal);
 		} else {
-			const derivedTotal = merged.splitStayPeriods.reduce(
-				(sum, period) => sum + Number(period.total || 0),
-				0
-			);
 			if (derivedTotal > 0) merged.splitStayTotal = derivedTotal;
 		}
 		if (source.splitStayQuoteAvailable !== undefined) {
@@ -2850,14 +2855,18 @@ function quoteFactsFromAiMessage(entry = {}) {
 	return facts;
 }
 
-function moneyAmountNearText(value = "") {
-	const amounts = Array.from(
+function moneyAmountsNearText(value = "") {
+	return Array.from(
 		normalizeDigits(String(value || "")).matchAll(
 			/(\d{1,7}(?:[.,]\d{1,2})?)\s*(?:SAR|S\.?R\.?|\u0631\u064a\u0627\u0644(?:\s+\u0633\u0639\u0648\u062f\u064a)?)/giu
 		)
 	)
 		.map((match) => Number(String(match[1] || "").replace(",", ".")))
 		.filter((amount) => Number.isFinite(amount) && amount > 0);
+}
+
+function moneyAmountNearText(value = "") {
+	const amounts = moneyAmountsNearText(value);
 	return amounts.length ? amounts[amounts.length - 1] : 0;
 }
 
@@ -2874,12 +2883,8 @@ function splitStayQuoteFactsFromAiMessage(value = "", action = "") {
 		const checkoutISO = validISODate(isoMatches[index + 1][0]);
 		if (!checkinISO || !checkoutISO || checkoutISO <= checkinISO) continue;
 		const nextStart = isoMatches[index + 2]?.index ?? text.length;
-		let segmentEnd = nextStart;
-		const afterStart = text.slice(isoMatches[index].index, nextStart);
-		const totalOffset = afterStart.search(/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)/iu);
-		if (totalOffset > 0) segmentEnd = isoMatches[index].index + totalOffset;
-		const segment = text.slice(isoMatches[index].index, segmentEnd);
-		const total = moneyAmountNearText(segment);
+		const segment = text.slice(isoMatches[index].index, nextStart);
+		const total = moneyAmountsNearText(segment)[0] || 0;
 		periods.push({
 			checkinISO,
 			checkoutISO,
@@ -2889,12 +2894,19 @@ function splitStayQuoteFactsFromAiMessage(value = "", action = "") {
 		});
 	}
 	if (periods.length < 2) return {};
-	const totalFromSummary =
-		moneyAmountNearText(
-			text.match(
-				/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)[^\n]*/iu
-			)?.[0] || ""
-		) || periods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const periodTotal = periods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const allPeriodsHaveTotals = periods.every((period) => Number(period.total || 0) > 0);
+	const summaryTotals = Array.from(
+		text.matchAll(
+			/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)[^\n]*/giu
+		)
+	)
+		.map((match) => moneyAmountNearText(match[0]))
+		.filter((amount) => amount > 0);
+	const summaryTotal = summaryTotals.length ? summaryTotals[summaryTotals.length - 1] : 0;
+	const totalFromSummary = allPeriodsHaveTotals && periodTotal > 0
+		? periodTotal
+		: summaryTotal || periodTotal;
 	const roomTypeKey = mapRoomToKey(text);
 	const rooms = roomCountFromAiReviewText(text) || 1;
 	const facts = {
@@ -9932,6 +9944,11 @@ function splitStayRoomSummary(known = {}, languageCode = "en") {
 function compactSplitStayReviewForBrain(known = {}, hotel = {}, sc = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const periods = normalizeSplitStayPeriods(known.splitStayPeriods);
+	const periodTotal = periods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const total =
+		periods.every((period) => Number(period.total || 0) > 0) && periodTotal > 0
+			? periodTotal
+			: Number(known.splitStayTotal || 0) || periodTotal;
 	return {
 		hotelName: hotel?.hotelName || hotel?.hotelName_OtherLanguage || "",
 		mode: "separate_reservations",
@@ -9954,7 +9971,7 @@ function compactSplitStayReviewForBrain(known = {}, hotel = {}, sc = {}) {
 			total: Number(period.total || 0) || 0,
 			currency: period.currency || "SAR",
 		})),
-		total: Number(known.splitStayTotal || 0) || 0,
+		total,
 		currency: periods.find((period) => period.currency)?.currency || "SAR",
 	};
 }
@@ -9967,7 +9984,11 @@ function buildSplitStayReviewMessage(sc = {}, known = {}, hotel = {}) {
 		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
 		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
 	const roomSummary = splitStayRoomSummary(known, languageCode);
-	const total = Number(known.splitStayTotal || 0) || 0;
+	const periodTotal = periods.reduce((sum, period) => sum + Number(period.total || 0), 0);
+	const total =
+		periods.every((period) => Number(period.total || 0) > 0) && periodTotal > 0
+			? periodTotal
+			: Number(known.splitStayTotal || 0) || periodTotal;
 	const currency = periods.find((period) => period.currency)?.currency || "SAR";
 	if (ar) {
 		return [
@@ -10106,7 +10127,15 @@ function splitStayQuoteTotalsMatchKnown(known = {}, quotedPeriods = [], total = 
 	const nextPeriods = normalizeSplitStayPeriods(quotedPeriods);
 	if (currentPeriods.length < 2 || currentPeriods.length !== nextPeriods.length) return false;
 	const moneyMatches = (a, b) => Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.01;
-	if (!moneyMatches(known.splitStayTotal, total)) return false;
+	const currentPeriodTotal = currentPeriods.reduce(
+		(sum, period) => sum + Number(period.total || 0),
+		0
+	);
+	const currentTotal =
+		currentPeriods.every((period) => Number(period.total || 0) > 0) && currentPeriodTotal > 0
+			? currentPeriodTotal
+			: Number(known.splitStayTotal || 0) || currentPeriodTotal;
+	if (!moneyMatches(currentTotal, total)) return false;
 	return currentPeriods.every((period, index) => {
 		const next = nextPeriods[index] || {};
 		return (
