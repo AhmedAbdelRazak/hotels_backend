@@ -242,6 +242,13 @@ function isAiSupportEntry(entry = {}) {
 	return Boolean(entry.isAi || SUPPORT_EMAILS.has(contact) || SUPPORT_USER_IDS.has(userId));
 }
 
+function isTransparentJannatTransferEntry(entry = {}) {
+	return (
+		entry?.isSystem === true &&
+		String(entry?.clientAction || "").trim().toLowerCase() === "jannat_hotel_transfer"
+	);
+}
+
 function isGuestEntry(entry = {}) {
 	if (!entry || entry.isSystem || entry.isAi) return false;
 	const contact = normalizeIdentity(entry.messageBy?.customerEmail);
@@ -252,6 +259,7 @@ function isGuestEntry(entry = {}) {
 function latestGuestEntry(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		if (isTransparentJannatTransferEntry(conversation[index])) continue;
 		if (isGuestEntry(conversation[index])) return conversation[index];
 		if (isAiSupportEntry(conversation[index])) return null;
 	}
@@ -6394,6 +6402,8 @@ function compactKnownFactsForPrompt(known = {}) {
 		confirmation: facts.confirmation || "",
 		reservationId: facts.reservationId || "",
 		reviewSentAt: facts.reviewSentAt || "",
+		jannatPlatformTransfer: Boolean(facts.jannatPlatformTransfer),
+		jannatPlatformTransferAt: facts.jannatPlatformTransferAt || "",
 		alternativeStays: Array.isArray(facts.alternativeStays)
 			? facts.alternativeStays.slice(0, 3).map((option) => ({
 					checkinISO: option.checkinISO || "",
@@ -6662,6 +6672,9 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 			: "",
 		firstGuestTurn
 			? `This is your first AI response in a new guest chat, and the guest may already have sent one or more messages before you answered. Read the full transcript, not only the latest message. Start with the required identity sentence as ${agentName} from the hotel reception/reservations team, mentioning the hotel name naturally; in Arabic, put the Islamic greeting before that identity. Then respond to the actual booking/request details. Do not ignore earlier guest details. If booking details are incomplete, acknowledge what is known and ask only the next needed question.`
+			: "",
+		knownFacts.jannatPlatformTransfer
+			? `This case was just handed over from Jannat Booking platform support to this hotel reception. In your first hotel-reception reply after the handoff, warmly introduce yourself as the hotel reception/reservations representative, acknowledge that Jannat Support passed along the guest's earlier details, and confirm the important known stay facts before asking only the next necessary question or running the right action. Do not ask the guest to repeat details already shown in Known facts or the transcript.`
 			: "",
 		orchestratorContractPrompt(),
 		responseSchemaPrompt(),
@@ -13247,6 +13260,30 @@ async function submitReservationForCase(io, caseOrId) {
 	}
 }
 
+async function maybeHandleJannatSupportTurn(io, sc = {}) {
+	try {
+		const {
+			maybeHandleJannatSupportTurn: handleJannatSupportTurn,
+		} = require("../jannatSupport/orchestrator");
+		if (typeof handleJannatSupportTurn !== "function") {
+			return { handled: false, supportCase: sc };
+		}
+		return handleJannatSupportTurn({
+			io,
+			supportCase: sc,
+			scheduleHotelTurn: (caseId, options = {}) => {
+				schedulePlanTurn(io, caseId, {
+					delayMs: options.delayMs ?? 0,
+					reason: options.reason || "jannat_support_transfer_to_hotel",
+				});
+			},
+		});
+	} catch (error) {
+		console.error("[aiagent] Jannat support router failed:", error?.stack || error);
+		return { handled: false, supportCase: sc };
+	}
+}
+
 async function planTurn(io, supportCaseOrId) {
 	const caseId = caseIdText(supportCaseOrId);
 	logTurnStage(caseId, "start");
@@ -13260,6 +13297,11 @@ async function planTurn(io, supportCaseOrId) {
 	await waitForGuestQuiet(key);
 	logTurnStage(key, "quiet_wait_done");
 	sc = (await getSupportCaseById(key)) || sc;
+	const jannatSupportResult = await maybeHandleJannatSupportTurn(io, sc);
+	if (jannatSupportResult?.handled) {
+		logTurnStage(key, "jannat_support_handled");
+		return jannatSupportResult.supportCase || sc;
+	}
 	const latestGuest = latestGuestEntry(sc);
 	const noAiYet = !hasAnyAiEntry(sc);
 	if (!latestGuest && !noAiYet) {

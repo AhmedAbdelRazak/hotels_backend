@@ -1,4 +1,11 @@
-const DEFAULT_JANNAT_SUPPORT_HOTEL_ID = "674cf8997e3780f1f838d458";
+const {
+	DEFAULT_JANNAT_SUPPORT_VIRTUAL_HOTEL_IDS,
+	configuredVirtualHotelIds,
+	configuredPriorityHotelId,
+	configuredMarketingHotelIds,
+} = require("../aiagent/jannatSupport/config");
+
+const DEFAULT_JANNAT_SUPPORT_HOTEL_ID = DEFAULT_JANNAT_SUPPORT_VIRTUAL_HOTEL_IDS[0];
 
 const normalizeId = (value) =>
 	String(value?._id || value?.id || value || "")
@@ -6,15 +13,7 @@ const normalizeId = (value) =>
 		.toLowerCase();
 
 const configuredJannatSupportHotelIds = () =>
-	[
-		DEFAULT_JANNAT_SUPPORT_HOTEL_ID,
-		process.env.JANNAT_BOOKING_SUPPORT_HOTEL_ID,
-		process.env.REACT_APP_JANNAT_BOOKING_SUPPORT_HOTEL_ID,
-		process.env.JANNAT_SUPPORT_HOTEL_IDS,
-	]
-		.flatMap((value) => String(value || "").split(","))
-		.map(normalizeId)
-		.filter(Boolean);
+	configuredVirtualHotelIds();
 
 const isJannatSupportHotelId = (hotelId) =>
 	configuredJannatSupportHotelIds().includes(normalizeId(hotelId));
@@ -53,7 +52,10 @@ const isJannatBookingSupportCase = (supportCase = {}, hotel = null) => {
 
 module.exports = {
 	DEFAULT_JANNAT_SUPPORT_HOTEL_ID,
+	DEFAULT_JANNAT_SUPPORT_VIRTUAL_HOTEL_IDS,
 	configuredJannatSupportHotelIds,
+	configuredJannatPriorityHotelId: configuredPriorityHotelId,
+	configuredJannatMarketingHotelIds: configuredMarketingHotelIds,
 	isJannatSupportHotelId,
 	isJannatSupportHotelName,
 	isJannatBookingSupportCase,

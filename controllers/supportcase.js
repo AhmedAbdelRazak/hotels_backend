@@ -10,6 +10,9 @@ const {
 	isJannatBookingSupportCase,
 } = require("../services/jannatBookingSupportScope");
 const {
+	configuredJannatSupportName,
+} = require("../aiagent/jannatSupport/config");
+const {
 	schedulePlanTurn,
 } = require("../aiagent/core/orchestrator");
 
@@ -1538,13 +1541,15 @@ exports.createNewSupportCase = async (req, res) => {
 				Boolean(hotelDoc?.aiToRespond) ||
 				isAiForceRespondEnabled());
 		const aiResponderName = aiEnabledForClient
-			? await pickB2CAiResponderName({
-					customerName,
-					customerEmail: normalizedCustomerEmail || customerEmail,
-					hotelId,
-					hotelName,
-					preferredLanguage,
-			  })
+			? isJannatSupportCase
+				? configuredJannatSupportName(preferredLanguageCode)
+				: await pickB2CAiResponderName({
+						customerName,
+						customerEmail: normalizedCustomerEmail || customerEmail,
+						hotelId,
+						hotelName,
+						preferredLanguage,
+				  })
 			: "";
 
 		// First conversation entry
