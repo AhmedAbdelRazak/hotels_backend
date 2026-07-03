@@ -5268,6 +5268,13 @@ function hotelFactMapReplyNeedsCorrection(reply = "", toolResult = {}) {
 	return !String(reply || "").includes(mapsUrl);
 }
 
+function closerHotelReplyNeedsSalesClose(reply = "", toolResult = {}) {
+	if (toolResult?.tool !== "hotel_fact") return false;
+	if (String(toolResult?.answerMode || "") !== "other_closer_hotel") return false;
+	const text = normalizeIntentSearchText(reply);
+	return !/\b(?:book|reserve|continue)\b|check availability/i.test(text);
+}
+
 function latestGuestMentionsSplitCityItinerary(value = "") {
 	const text = normalizeIntentSearchText(normalizeDigits(String(value || ""))).toLowerCase();
 	if (!text.trim()) return false;
@@ -5949,7 +5956,7 @@ async function sendHotelFactReplyFromOpenAI({
 			hotelFacts: compactHotelFacts(hotel),
 			suggestedAnswer: fallback,
 			instruction:
-				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability/price now. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
+				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability and price now or continue with this hotel. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
 		},
 		clientAction: "hotel_fact_answered",
 		quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
@@ -10664,6 +10671,9 @@ async function askCompactToolWriter({
 					validation === "hotel_fact_map_missing"
 						? "Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl because the guest explicitly asked for location/map or combined location with prices."
 						: "",
+					validation === "hotel_fact_closer_sales_close_missing"
+						? "For closer-hotel questions, keep the current hotel's value pitch and explicitly ask whether to check availability and price, continue, book, or reserve this hotel."
+						: "",
 					toolResult?.answerMode === "branch_city"
 						? "This is a city/branch clarification. Keep it short and do not repeat the full map/address unless explicitly requested."
 						: "",
@@ -10904,6 +10914,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous hotel-fact reply was not sent because the price guidance was weak, missing, or invented guest/room counts. Return a corrected customer-facing reply from OpenAI only. Do not say only that prices are not confirmed. Say exact prices depend on check-in, checkout, guests, and rooms, then ask for those details naturally. Do not mention any guest count or room count unless the guest already gave it."
 				: validation === "hotel_fact_map_missing"
 				? "Your previous hotel-fact reply was not sent because it omitted the required Google Maps link for an explicit location request. Return a corrected customer-facing reply from OpenAI only. Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl and keep the price next step if requested."
+				: validation === "hotel_fact_closer_sales_close_missing"
+				? "Your previous closer-hotel reply was not sent because it did not clearly ask for the next sales step. Return a corrected customer-facing reply from OpenAI only. Keep the current hotel's fact-based value pitch, and include the exact phrase \"check availability and price\" or ask whether to continue, book, or reserve this hotel. Do not leave the guest hanging."
 				: validation === "alternative_reply_drifted_to_hotel_fact"
 				? "Your previous alternatives reply was not sent because it answered an older hotel location/fact question instead of the alternatives tool result. Return the customer-facing alternatives/availability result from OpenAI only. Do not include Google Maps, address, or distance. If toolResult.options is empty, say no suitable alternative is showing for the known stay and offer to adjust dates/room choice or use a previously available option if shown in the conversation."
 				: validation === "reservation_confirmation_links_missing"
@@ -11000,6 +11012,9 @@ async function sendBrainToolReplyFromOpenAI({
 			hotelFactMapReplyNeedsCorrection(text, toolResult)
 		) {
 			return "hotel_fact_map_missing";
+		}
+		if (closerHotelReplyNeedsSalesClose(text, toolResult)) {
+			return "hotel_fact_closer_sales_close_missing";
 		}
 		if (toolResult?.tool === "get_quote" && reviewReplyClaimsBookingConfirmed(text)) {
 			return "quote_claimed_confirmed_before_submit";
