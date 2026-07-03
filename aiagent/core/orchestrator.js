@@ -10544,6 +10544,18 @@ function sameDayReplyMissingHotelDayContext(reply = "", toolResult = {}) {
 	);
 }
 
+function quoteReplyClaimsFutureDatePast(reply = "", toolResult = {}, known = {}) {
+	if (toolResult?.tool !== "get_quote") return false;
+	const checkinISO = validISODate(toolResult?.checkinISO || known.checkinISO);
+	if (!checkinISO || checkinISO <= businessTodayISO()) return false;
+	const text = normalizeIntentSearchText(normalizeDigits(String(reply || ""))).toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:past|passed|already\s+passed|expired|old\s+dates?)\b/i.test(text) ||
+		/(?:\u0641\u0627\u062a|\u0641\u0627\u0626\u062a|\u0645\u0627\u0636\u064a|\u0645\u0627\u0636\u064a\u0629|\u0642\u062f\u064a\u0645\u0629|\u0633\u0628\u0642)/iu.test(compact)
+	);
+}
+
 function unavailableQuoteShowsZeroTotal(reply = "", toolResult = {}) {
 	if (toolResult?.tool !== "get_quote" || toolResult?.available) return false;
 	const text = normalizeDigits(String(reply || ""));
@@ -10655,6 +10667,9 @@ async function askCompactToolWriter({
 						: "",
 					validation === "quote_claimed_confirmed_before_submit"
 						? "This is only a price/availability quote. Do not say the booking/reservation is confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
+						: "",
+					validation === "future_quote_called_past"
+						? "The quote dates are future dates. Do not describe them as past, expired, old, or already passed."
 						: "",
 					validation === "vague_progress_instead_of_tool_result"
 						? "Do not send a vague progress update. Write the actual tool-result reply now, using the exact toolResult facts."
@@ -10900,6 +10915,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous quote reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return a corrected customer-facing quote from OpenAI only. This is only a price/availability quote; do not say confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
 				: validation === "same_day_minimum_date_claimed_available"
 				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat. Offer verified alternative dates or date/room adjustments. Do not present toolResult.minCheckinISO as available, recommended, or the solution unless an alternatives result proves availability."
+				: validation === "future_quote_called_past"
+				? "Your previous quote reply was not sent because it called a verified future check-in/date range past, expired, or already passed. Return a corrected quote from OpenAI only. Use the exact future dates and quote facts from toolResult, and do not say the dates are past."
 				: validation === "unavailable_quote_zero_total"
 				? "Your previous unavailable quote reply was not sent because it showed total/price as 0. Return a corrected customer-facing reply from OpenAI only. For unavailable quotes, do not show any zero price or zero total. Explain the unavailable date/room reason from toolResult and offer alternatives or date/room adjustment."
 				: validation === "known_phone_listed_as_missing"
@@ -10975,6 +10992,9 @@ async function sendBrainToolReplyFromOpenAI({
 			sameDayReplyMissingHotelDayContext(text, toolResult)
 		) {
 			return "same_day_hotel_day_context_missing";
+		}
+		if (quoteReplyClaimsFutureDatePast(text, toolResult, known)) {
+			return "future_quote_called_past";
 		}
 		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
 			return "unavailable_quote_zero_total";
