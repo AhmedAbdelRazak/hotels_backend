@@ -5001,10 +5001,16 @@ function replyInvitesUncheckedMinimumDateSearch(reply = "", known = {}, hotel = 
 	const minDate = addDaysISO(businessTodayISO(hotel), 1);
 	const text = normalizeIntentSearchText(reply);
 	const compact = text.replace(/\s+/g, "");
-	if (!text.includes(minDate)) return false;
+	const mentionsMinimumDate = minDate && text.includes(minDate);
+	const mentionsTomorrow =
+		/\b(?:tomorrow)\b/i.test(text) ||
+		/(?:\u063a\u062f\u0627|\u063a\u062f\u0627\u064b|\u0627\u0644\u063a\u062f|\u0628\u0643\u0631\u0629|\u0628\u0643\u0631\u0647)/u.test(
+			compact
+		);
+	if (!mentionsMinimumDate && !mentionsTomorrow) return false;
 	return (
-		/\b(?:search|check|look|start|begin)\s+(?:for\s+)?(?:from|on)\b/i.test(text) ||
-		/(?:\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646|[\u0623\u0627\u0633]?\u0631\u0627\u062c\u0639[\s\S]{0,40}\u0645\u0646|[\u0623\u0627\u0633]?\u062a\u062d\u0642\u0642[\s\S]{0,40}\u0645\u0646|[\u0623\u0627\u0633]?\u0634\u064a\u0643[\s\S]{0,40}\u0645\u0646)/iu.test(
+		/\b(?:book|booking|reserve|search|check|look|start|begin)\s+(?:for\s+)?(?:from|on)\b/i.test(text) ||
+		/(?:\u0627\u0644\u062d\u062c\u0632.{0,30}\u064a\u0628\u062f\u0623|\u064a\u0628\u062f\u0623.{0,30}\u0627\u0644\u062d\u062c\u0632|\u064a\u0628\u062f\u0623\u0645\u0646|\u062a\u0628\u062f\u0623\u0645\u0646|\u064a\u0645\u0643\u0646\u0627\u0644\u062d\u062c\u0632|\u0627\u0628\u062d\u062b\u0645\u0646|\u0623\u0628\u062d\u062b\u0645\u0646|\u0627\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0623\u0628\u062d\u062b\u0644\u0643\u0645\u0646|\u0646\u0628\u062f\u0623\u0645\u0646|\u0623\u0628\u062f\u0623\u0645\u0646|\u0627\u0628\u062f\u0623\u0645\u0646|[\u0623\u0627\u0633]?\u0631\u0627\u062c\u0639[\s\S]{0,40}\u0645\u0646|[\u0623\u0627\u0633]?\u062a\u062d\u0642\u0642[\s\S]{0,40}\u0645\u0646|[\u0623\u0627\u0633]?\u0634\u064a\u0643[\s\S]{0,40}\u0645\u0646)/iu.test(
 			compact
 		)
 	);
@@ -6508,7 +6514,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 			? `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, not as generic Jannat Booking support. This is an opening/first AI reply, so the first sentence must identify who is speaking by agent name, team role, and hotel name in the guest's language. A natural English shape is "This is ${agentName}, from the reservations and reception team at [hotel name]." Do not say you are from "Jannat Booking reservations" when the case is for a specific hotel.`
 			: `You are speaking as the reception/reservations representative for the specific hotel in Hotel facts, but the opening identity has already happened. Do not reintroduce yourself with agent name, team role, or hotel name on normal follow-up replies. Mention your identity again only if the guest asks who is speaking or there is a real handoff/escalation.`,
 		`Today is ${today}. All internal dates you return must be Gregorian/Melady ISO dates (YYYY-MM-DD), never Hijri.`,
-		`Same-day check-in cannot be booked through chat. If the guest asks for check-in today, explain that the earliest chat-checkable check-in is tomorrow and ask whether to search from tomorrow or adjust the dates.`,
+		`Same-day check-in cannot be booked through chat. If the guest asks for check-in today, explain that the requested date is not bookable through chat and offer verified alternative dates or date/room adjustments; do not present tomorrow as available or as the solution unless an alternatives tool result proves availability.`,
 		`You own date understanding. Convert Arabic, typo-heavy, shorthand, regional Gregorian month names, and Hijri month/date phrasing into Gregorian/Melady ISO dates when you can. Regional Gregorian examples include Maghreb/North African names like اوت/أوت=August, جانفي=January, فيفري=February, أفريل=April, ماي=May, جوان=June, جويلية=July, شتنبر=September, نونبر=November, دجنبر=December; and Levant/Syriac names like آب=August, تموز=July, أيلول=September, تشرين الأول=October, تشرين الثاني=November, كانون الأول=December, كانون الثاني=January. For dates without a year, use the next future occurrence from today. Never ask which year just because the year is omitted. For Hijri dates without a year, assume the current Hijri year if the stay is still upcoming; otherwise use the next future Hijri occurrence. If the date wording is still genuinely unclear after using these rules, ask one short confirmation question before quoting. If the guest explicitly gives dates that are already in the past, politely flag that and ask for the intended future dates.`,
 		`If the guest uses Hijri dates, keep the Gregorian ISO dates in checkinISO/checkoutISO and also return checkinHijriText, checkoutHijriText, dateRangeOriginalText, and dateCalendar="hijri". In Arabic quote/review replies for Hijri users, show both calendars: Hijri as the guest said it and Gregorian/Melady for hotel operations.`,
 		`The platform is Muslim-friendly; use warm Islamic manners naturally when appropriate, without exaggeration. Expressions like "insha'Allah", "bi idhnillah", "alhamdulillah", or their Arabic equivalents are welcome when they fit the moment, but do not force them into every reply.`,
@@ -8555,10 +8561,6 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 		? quoteRoomLinesText({ rooms: resultSelections }, known.roomTypeKey, languageCode)
 		: roomLabel;
 	if (result.code === "same_day_checkin_not_supported") {
-		const minDate = formatDate(
-			result.minCheckinISO || addDaysISO(businessTodayISO(hotel), 1),
-			languageCode
-		);
 		const requestedDate = formatDate(
 			result.checkinISO || known.checkinISO,
 			languageCode
@@ -8567,16 +8569,14 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			? [
 					`${arabicGuestAddress(sc, known)}، تاريخ الوصول المطلوب ${requestedDate} غير متاح للحجز عبر المحادثة لأنه يقع في نفس يوم الفندق.`,
 					requestedRoomLabel ? `الغرف المطلوبة: ${requestedRoomLabel}.` : "",
-					`أقرب يوم يمكن للنظام بدء البحث منه هو ${minDate}، وهذا ليس تأكيد توفر لهذا التاريخ.`,
-					`اختر "تواريخ بديلة" وسأعرض لك أقرب تواريخ متاحة مؤكدة، أو اختر "أعدل التفاصيل".`,
+					`اختر "تواريخ بديلة" وسأعرض لك أقرب تواريخ متاحة مؤكدة من التوفر، أو اختر "أعدل التفاصيل".`,
 			  ]
 					.filter(Boolean)
 					.join("\n")
 			: [
 					`${guestDisplayName(sc)}, the requested check-in date ${requestedDate} is not bookable through chat because it is the hotel's same business day.`,
 					requestedRoomLabel ? `Requested room(s): ${requestedRoomLabel}.` : "",
-					`The earliest day the system can start checking from is ${minDate}; that is not a confirmed available date.`,
-					`Choose "Alternative dates" and I will show the nearest verified available dates, or choose "Change details".`,
+					`Choose "Alternative dates" and I will show the nearest verified available dates from inventory, or choose "Change details".`,
 			  ]
 					.filter(Boolean)
 					.join("\n");
@@ -10850,7 +10850,7 @@ async function sendBrainToolReplyFromOpenAI({
 				: validation === "quote_claimed_confirmed_before_submit"
 				? "Your previous quote reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return a corrected customer-facing quote from OpenAI only. This is only a price/availability quote; do not say confirmed, created, completed, finalized, or booked. Ask whether the guest wants to continue or ask the next required booking detail."
 				: validation === "same_day_minimum_date_claimed_available"
-				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat, and toolResult.minCheckinISO is only the earliest date the chat can start checking from. Ask whether to search from that date or adjust dates. Do not claim it is available."
+				? "Your previous same-day check-in reply was not sent because it called toolResult.minCheckinISO available/bookable/recommended without an availability check. Return a corrected customer-facing reply from OpenAI only. Say same-day check-in cannot be booked through chat. Offer verified alternative dates or date/room adjustments. Do not present toolResult.minCheckinISO as available, recommended, or the solution unless an alternatives result proves availability."
 				: validation === "unavailable_quote_zero_total"
 				? "Your previous unavailable quote reply was not sent because it showed total/price as 0. Return a corrected customer-facing reply from OpenAI only. For unavailable quotes, do not show any zero price or zero total. Explain the unavailable date/room reason from toolResult and offer alternatives or date/room adjustment."
 				: validation === "known_phone_listed_as_missing"
