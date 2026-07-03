@@ -649,12 +649,124 @@ Notes:
 - GitHub still reports existing Dependabot vulnerabilities during push; this pass did not change dependencies.
 - Production has pre-existing untracked backup files; ignore them unless doing a backup audit.
 
+### Existing Reservation Duplicate Guard Addendum
+
+Implemented after the main QA sweep:
+
+- Added a deterministic same-hotel duplicate guard before review/submit.
+- The guard checks recent reservations from the last `31` days by creation/order/booked time.
+- The match requires the important booking facts to align:
+  - Same hotel.
+  - Same guest name after title cleanup such as `Dr` / `د/`.
+  - Same phone, allowing country-code suffix matches.
+  - Same check-in and checkout dates.
+  - Same room selection, including multi-room combinations and counts from `pickedRoomsType`.
+- Email is stored in snapshots when present but is not required and does not control duplicate detection.
+- The support case now stores a separate `aiExistingReservations` snapshot. This does not touch the `aiReservation` creation lock.
+
+Runtime behavior:
+
+- If one exact matching reservation exists:
+  - The bot sends the existing confirmation details and public links.
+  - The bot warns that creating another booking may duplicate the existing one.
+  - The guest must explicitly choose/answer that they want a new separate booking or that the found reservation is not theirs before the flow resumes.
+  - No duplicate reservation is created during the warning turn.
+- If two or more exact matching reservations exist:
+  - The bot sends the matching confirmation details and public links.
+  - The bot stops automatic booking creation for that case.
+  - The bot directs the guest to WhatsApp: `[+1 (909) 222-3374](https://wa.me/19092223374)`.
+  - `aiToRespond` is turned off, and the case is scheduled to close after about two minutes.
+
+Files changed:
+
+- `aiagent/core/db.js`
+- `aiagent/core/orchestrator.js`
+- `models/supportcase.js`
+- `controllers/supportcase.js`
+
+Local validation:
+
+- `node --check aiagent/core/orchestrator.js`
+- `node --check aiagent/core/db.js`
+- `node --check models/supportcase.js`
+- `node --check controllers/supportcase.js`
+- Focused helper assertions for:
+  - Arabic title stripping (`د/ صابر...` vs `صابر...`)
+  - phone suffix match
+  - same hotel/date/room/name/phone match
+  - hotel/date mismatch rejection
+  - mixed room selection matching
+  - one-duplicate acknowledgement wording such as `نعم كمل`
+
+Deployment:
+
+- Commit: `97fe88b` (`Guard duplicate AI reservations`)
+- GitHub `master`: pushed to `97fe88b`.
+- Production backend: pulled to `97fe88b`.
+- Production backend: restarted with `pm2 restart hotels-backend --update-env`.
+
+Production duplicate-guard validation:
+
+- Created temporary same-hotel fixture reservations and support cases with a unique Codex marker.
+- One existing matching reservation:
+  - AI response action: `existing_reservation_warning`
+  - Included existing reservation wording and a create-anyway quick reply.
+  - Saved `aiExistingReservations.status = warning`.
+  - Created no new reservation for the test support case.
+- Two existing matching reservations:
+  - AI response action: `existing_reservations_hard_cut`
+  - Included the WhatsApp contact link.
+  - Set `aiToRespond = false`.
+  - Saved `aiExistingReservations.status = hard_cut`.
+  - Created no new reservation for the test support case.
+- Cleanup confirmed:
+  - Test support cases deleted: `2`
+  - Test fixture reservations deleted: `3`
+
+Production regression QA after duplicate guard:
+
+- First full sweep had one transient writer wording failure in `scenarioMixedRoomsUnavailable`; the case cleaned up successfully.
+- Isolated `scenarioMixedRoomsUnavailable` rerun passed.
+- Second full sweep passed all `14` scenarios.
+- Second full sweep cleanup:
+  - Test reservations deleted: `5`
+  - Test support cases deleted: `14`
+- Scenarios re-covered:
+  - hotel fact reactions
+  - Arabic identity reservation
+  - profile phone optional email flow
+  - budget/value pitch
+  - closer-hotel pitch
+  - date vs guest-count confusion
+  - mixed double plus quad unavailable case
+  - split-stay separate reservations
+  - confirmation-number guard
+  - thank-you/later outro
+  - process after hotel-fact detour
+  - same hotel-day block
+  - ten people as two family/quintuple rooms
+  - Arabic one-night same-day alternatives
+
+Home server health after duplicate guard and regression QA:
+
+- Load average: about `0.47, 0.51, 0.43`
+- RAM: `15Gi` total, about `12Gi` available
+- Swap: `0B` used
+- Root disk: `466G` total, `38G` used, `9%`
+- CPU package/core temperatures: about `41-44C`
+- NVMe temperature: about `40.9C`
+- PM2:
+  - `hotels-backend` online
+  - backend memory about `202MB`
+  - frontend/SSR services online
+
 ### Current Final Status
 
-- GitHub `master`: pushed through `9228e5a`.
-- Production backend: pulled to `9228e5a`.
+- GitHub `master`: pushed through `97fe88b`.
+- Production backend: pulled to `97fe88b`.
 - Production backend: restarted with `pm2 restart hotels-backend --update-env`.
-- Full production QA sweep: passed.
+- Duplicate guard targeted production validation: passed.
+- Full production regression QA sweep after duplicate guard: passed on rerun.
 - No committed QA harness or broad cleanup scripts.
 - Temporary QA harness files were removed after the final sweep.
 
