@@ -2874,19 +2874,12 @@ function splitStayQuoteFactsFromAiMessage(value = "", action = "") {
 		const checkoutISO = validISODate(isoMatches[index + 1][0]);
 		if (!checkinISO || !checkoutISO || checkoutISO <= checkinISO) continue;
 		const nextStart = isoMatches[index + 2]?.index ?? text.length;
-		const lineStart = Math.max(0, text.lastIndexOf("\n", isoMatches[index].index) + 1);
-		const lineEndRaw = text.indexOf("\n", isoMatches[index + 1].index);
-		const lineEnd = lineEndRaw >= 0 ? lineEndRaw : nextStart;
-		const lineSegment = text.slice(lineStart, lineEnd);
-		let total = moneyAmountNearText(lineSegment);
-		if (!total) {
-			let segmentEnd = nextStart;
-			const afterStart = text.slice(isoMatches[index].index, nextStart);
-			const totalOffset = afterStart.search(/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)/iu);
-			if (totalOffset > 0) segmentEnd = isoMatches[index].index + totalOffset;
-			const segment = text.slice(isoMatches[index].index, segmentEnd);
-			total = moneyAmountNearText(segment);
-		}
+		let segmentEnd = nextStart;
+		const afterStart = text.slice(isoMatches[index].index, nextStart);
+		const totalOffset = afterStart.search(/(?:\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\btotal\b)/iu);
+		if (totalOffset > 0) segmentEnd = isoMatches[index].index + totalOffset;
+		const segment = text.slice(isoMatches[index].index, segmentEnd);
+		const total = moneyAmountNearText(segment);
 		periods.push({
 			checkinISO,
 			checkoutISO,
