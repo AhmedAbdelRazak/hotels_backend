@@ -1229,6 +1229,7 @@ function sameHotelSplitStayPeriodsFromText(value = "", known = {}) {
 	const raw = digitsToEnglish(String(value || ""));
 	const matches = numericSlashDateTokens(raw);
 	if (matches.length < 4) return [];
+	const preferDayMonth = /[\u0600-\u06FF]/.test(raw);
 	const periods = [];
 	for (let index = 0; index + 1 < matches.length; index += 2) {
 		const startMatch = matches[index];
@@ -1241,11 +1242,23 @@ function sameHotelSplitStayPeriodsFromText(value = "", known = {}) {
 		) {
 			return [];
 		}
-		const checkinISO = slashDateMatchToISO(startMatch, known);
-		const checkoutISO = slashDateMatchToISO(endMatch, {
-			...known,
-			checkinISO: checkinISO || known.checkinISO,
+		const checkinISO = slashDateMatchToISOWithPreference(startMatch, known, {
+			preferDayMonth,
+			hintMonth: slashDateMatchMonthHint(endMatch),
 		});
+		const checkinParts = isoDateParts(checkinISO);
+		const checkoutISO = slashDateMatchToISOWithPreference(
+			endMatch,
+			{
+				...known,
+				checkinISO: checkinISO || known.checkinISO,
+			},
+			{
+				preferDayMonth,
+				hintMonth: checkinParts?.month || slashDateMatchMonthHint(startMatch),
+				baseYear: checkinParts?.year || 0,
+			}
+		);
 		if (!validISODate(checkinISO) || !validISODate(checkoutISO)) return [];
 		if (checkoutISO <= checkinISO) return [];
 		periods.push({ checkinISO, checkoutISO });
