@@ -9,8 +9,10 @@ const {
 	updateSupportCaseAiStateSnapshot,
 	closeSupportCaseForAiIdle,
 	listOpenClientAiCasesForIdleSweep,
+	setCaseStatus,
 	getHotelByIdWithPricingDates,
 	getReservationByConfirmation,
+	listRecentHotelReservationsForExistingGuest,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
@@ -51,6 +53,7 @@ const ROOM_TYPE_KEYS = [
 const MAX_AI_ROOM_COUNT = 50;
 const RESERVATION_CHANGE_CONTACT_PHONE = "+1 (909) 222-3374";
 const RESERVATION_CHANGE_CONTACT_WHATSAPP = "https://wa.me/19092223374";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 const activeTimers = new Map();
 const activeTurns = new Set();
@@ -58,6 +61,7 @@ const pendingReasons = new Map();
 const guestTypingUntilByCase = new Map();
 const guestActivityAtByCase = new Map();
 const idleCloseTimers = new Map();
+const delayedCloseTimers = new Map();
 const queuedPlanTurns = [];
 let activePlanTurnCount = 0;
 
@@ -93,6 +97,21 @@ const AI_PLAN_MAX_ACTIVE_TURNS = intFromEnv("AI_PLAN_MAX_ACTIVE_TURNS", 2, {
 	min: 1,
 	max: 6,
 });
+const AI_EXISTING_RESERVATION_LOOKUP_DAYS = intFromEnv(
+	"AI_EXISTING_RESERVATION_LOOKUP_DAYS",
+	31,
+	{ min: 1, max: 120 }
+);
+const AI_EXISTING_RESERVATION_LOOKUP_LIMIT = intFromEnv(
+	"AI_EXISTING_RESERVATION_LOOKUP_LIMIT",
+	180,
+	{ min: 25, max: 300 }
+);
+const AI_EXISTING_RESERVATION_HARD_CLOSE_MS = intFromEnv(
+	"AI_EXISTING_RESERVATION_HARD_CLOSE_MS",
+	2 * 60 * 1000,
+	{ min: 30 * 1000, max: 10 * 60 * 1000 }
+);
 
 function intFromEnv(name, fallback, { min = 0, max = 60000 } = {}) {
 	const parsed = parseInt(process.env[name] || "", 10);
@@ -9043,6 +9062,523 @@ async function handleReservationLookup(io, sc = {}, hotel = {}, known = {}, late
 	});
 }
 
+function duplicateReservationLookupSinceDate() {
+	return new Date(Date.now() - Math.max(1, AI_EXISTING_RESERVATION_LOOKUP_DAYS) * DAY_MS);
+}
+
+function duplicateNameForCompare(value = "") {
+	let text = cleanDisplayString(value, 140);
+	for (let index = 0; index < 3; index += 1) {
+		const next = text
+			.replace(
+				/^(?:dr\.?|doctor|prof\.?|mr\.?|mrs\.?|ms\.?)\s*[/.-]?\s+/i,
+				""
+			)
+			.replace(
+				/^(?:د\.?|د\/|دكتور|الدكتور|أستاذ|استاذ|الأستاذ|استاذة|أستاذة|السيد|السيدة|الحاج)\s*[/.-]?\s*/iu,
+				""
+			)
+			.trim();
+		if (!next || next === text) break;
+		text = next;
+	}
+	const compact = compactNameForCompare(text);
+	if (!compact || compact.length < 6) return "";
+	if (/^(?:guest|customer|client|visitor|unknown|test)$/i.test(compact)) return "";
+	return compact;
+}
+
+function duplicatePhoneDigits(value = "") {
+	return cleanPhone(value).replace(/[^\d]/g, "");
+}
+
+function duplicatePhonesMatch(left = "", right = "") {
+	const a = duplicatePhoneDigits(left);
+	const b = duplicatePhoneDigits(right);
+	if (!a || !b || a.length < 7 || b.length < 7) return false;
+	if (a === b) return true;
+	return a.length >= 9 && b.length >= 9 && (a.endsWith(b) || b.endsWith(a));
+}
+
+function roomTypeKeyForDuplicate(value = "") {
+	const raw = String(value || "").trim();
+	if (!raw) return "";
+	if (ROOM_TYPE_KEYS.includes(raw)) return raw;
+	return mapRoomToKey(raw) || "";
+}
+
+function canonicalDuplicateRoomSelections(selections = [], fallbackRoomTypeKey = "", fallbackRooms = 1) {
+	const normalized = normalizeRoomSelections(selections);
+	const source = normalized.length
+		? normalized
+		: roomTypeKeyForDuplicate(fallbackRoomTypeKey)
+		? [
+				{
+					roomTypeKey: roomTypeKeyForDuplicate(fallbackRoomTypeKey),
+					count: normalizeRoomCount(fallbackRooms, 1),
+				},
+		  ]
+		: [];
+	const merged = new Map();
+	for (const item of source) {
+		const key = roomTypeKeyForDuplicate(item.roomTypeKey || item.roomType || item.type);
+		if (!key) continue;
+		merged.set(key, (merged.get(key) || 0) + normalizeRoomCount(item.count, 1));
+	}
+	return Array.from(merged.entries())
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([roomTypeKey, count]) => ({ roomTypeKey, count }));
+}
+
+function duplicateRoomSelectionKey(selections = []) {
+	return (Array.isArray(selections) ? selections : [])
+		.map((item) => `${item.roomTypeKey}:${normalizeRoomCount(item.count, 1)}`)
+		.join("+");
+}
+
+function duplicateKnownRoomSelections(known = {}) {
+	const quote = asObject(known.quote);
+	const quoteSelections = normalizeRoomSelections(quote.roomSelections);
+	if (quoteSelections.length) return canonicalDuplicateRoomSelections(quoteSelections);
+	const lineSelections = Array.isArray(quote.rooms)
+		? quote.rooms
+				.map((line) => ({
+					roomTypeKey: line?.roomTypeKey || line?.room?.roomType || line?.quote?.roomTypeKey || "",
+					count: line?.count || line?.rooms || 1,
+				}))
+				.filter((line) => line.roomTypeKey)
+		: [];
+	if (lineSelections.length) return canonicalDuplicateRoomSelections(lineSelections);
+	return canonicalDuplicateRoomSelections(
+		known.roomSelections,
+		known.roomTypeKey || quote.roomTypeKey,
+		known.rooms || quote.rooms || 1
+	);
+}
+
+function duplicateReservationRoomSelections(reservation = {}) {
+	const picked = Array.isArray(reservation.pickedRoomsType)
+		? reservation.pickedRoomsType
+		: Array.isArray(reservation.pickedRoomsPricing)
+		? reservation.pickedRoomsPricing
+		: [];
+	const selections = picked
+		.map((row) => ({
+			roomTypeKey: roomTypeKeyForDuplicate(
+				row?.room_type || row?.roomType || row?.roomTypeKey || row?.displayName
+			),
+			count: normalizeRoomCount(row?.count, 1),
+		}))
+		.filter((row) => row.roomTypeKey);
+	return canonicalDuplicateRoomSelections(selections);
+}
+
+function activeReservationForDuplicateCheck(reservation = {}) {
+	const status = normalizeIntentSearchText(
+		[
+			reservation.reservation_status,
+			reservation.state,
+			reservation.pendingConfirmation?.status,
+			reservation.pendingConfirmation?.operationalStatus,
+			reservation.pendingConfirmation?.clientVisibleStatus,
+		]
+			.filter(Boolean)
+			.join(" ")
+	);
+	if (!status) return true;
+	return !/(?:cancel|cancell|void|delete|deleted|failed|reject|rejected|expired|no\s*show|noshow|archiv|removed|ملغ|الغاء|إلغاء)/i.test(
+		status
+	);
+}
+
+function duplicateKnownVariants(sc = {}, known = {}, hotel = {}) {
+	const periods = normalizeSplitStayPeriods(known.splitStayPeriods);
+	const base = {
+		...known,
+		hotelId: String(hotel?._id || sc.hotelId || ""),
+	};
+	if (periods.length >= 2) {
+		return periods.map((period, index) => ({
+			label: `period_${index + 1}`,
+			known: {
+				...base,
+				checkinISO: period.checkinISO,
+				checkoutISO: period.checkoutISO,
+				quote: {},
+			},
+		}));
+	}
+	return [{ label: "single", known: base }];
+}
+
+function duplicateKeyForKnown(sc = {}, known = {}, hotel = {}) {
+	const checkinISO = validISODate(known.checkinISO);
+	const checkoutISO = validISODate(known.checkoutISO);
+	const hotelId = String(hotel?._id || sc.hotelId || known.hotelId || "").trim();
+	const name = duplicateNameForCompare(known.fullName || profileNameForBooking(sc));
+	const phone = duplicatePhoneDigits(known.phone || profilePhoneForBooking(sc));
+	const roomSelections = duplicateKnownRoomSelections(known);
+	const roomKey = duplicateRoomSelectionKey(roomSelections);
+	if (!hotelId || !checkinISO || !checkoutISO || !name || !phone || !roomKey) return "";
+	return [hotelId, checkinISO, checkoutISO, roomKey, name, phone].join("|");
+}
+
+function duplicateKeyForKnownSet(sc = {}, known = {}, hotel = {}) {
+	const keys = duplicateKnownVariants(sc, known, hotel)
+		.map((variant) => duplicateKeyForKnown(sc, variant.known, hotel))
+		.filter(Boolean);
+	if (!keys.length) return "";
+	return keys.sort().join("||");
+}
+
+function duplicateReservationMatchesKnown(reservation = {}, sc = {}, known = {}, hotel = {}) {
+	if (!activeReservationForDuplicateCheck(reservation)) return false;
+	const hotelId = String(hotel?._id || sc.hotelId || "").trim();
+	if (hotelId && String(reservation.hotelId || "").trim() !== hotelId) return false;
+	const checkinISO = validISODate(known.checkinISO);
+	const checkoutISO = validISODate(known.checkoutISO);
+	if (!checkinISO || !checkoutISO) return false;
+	if (validISODate(reservation.checkin_date) !== checkinISO) return false;
+	if (validISODate(reservation.checkout_date) !== checkoutISO) return false;
+	const expectedName = duplicateNameForCompare(known.fullName || profileNameForBooking(sc));
+	const reservationName = duplicateNameForCompare(reservation.customer_details?.name);
+	if (!expectedName || !reservationName || expectedName !== reservationName) return false;
+	if (!duplicatePhonesMatch(known.phone || profilePhoneForBooking(sc), reservation.customer_details?.phone)) {
+		return false;
+	}
+	const expectedRoomKey = duplicateRoomSelectionKey(duplicateKnownRoomSelections(known));
+	const reservationRoomKey = duplicateRoomSelectionKey(
+		duplicateReservationRoomSelections(reservation)
+	);
+	return Boolean(expectedRoomKey && reservationRoomKey && expectedRoomKey === reservationRoomKey);
+}
+
+function compactExistingReservationForCase(reservation = {}, match = {}) {
+	const links = reservationPublicLinks(reservation);
+	return {
+		reservationId: String(reservation._id || ""),
+		confirmationNumber: cleanDisplayString(reservation.confirmation_number || "", 40),
+		hotelId: String(reservation.hotelId || ""),
+		hotelName: cleanDisplayString(reservation.hotelName || "", 120),
+		customerName: cleanDisplayString(reservation.customer_details?.name || "", 120),
+		phone: cleanDisplayString(reservation.customer_details?.phone || "", 40),
+		email: cleanEmail(reservation.customer_details?.email || ""),
+		checkinISO: validISODate(reservation.checkin_date),
+		checkoutISO: validISODate(reservation.checkout_date),
+		roomSelectionKey: duplicateRoomSelectionKey(duplicateReservationRoomSelections(reservation)),
+		totalAmount: Number(reservation.total_amount || 0) || 0,
+		currency: reservation.currency || "SAR",
+		status: cleanDisplayString(reservation.reservation_status || reservation.state || "", 60),
+		links,
+		matchLabel: match.label || "",
+	};
+}
+
+function existingReservationSnapshotForCase({
+	status = "found",
+	hotelId = "",
+	matchKey = "",
+	matchReason = "",
+	matches = [],
+} = {}) {
+	return {
+		status,
+		lookupWindowDays: AI_EXISTING_RESERVATION_LOOKUP_DAYS,
+		matchedAt: new Date(),
+		hotelId: hotelId || null,
+		matchKey,
+		matchReason,
+		reservations: matches
+			.map((match) => compactExistingReservationForCase(match.reservation || match, match))
+			.slice(0, 6),
+	};
+}
+
+async function findExistingReservationDuplicateContext(sc = {}, hotel = {}, known = {}) {
+	if (knownHasReservationConfirmation(known)) {
+		return { complete: false, key: "", matches: [], reason: "current_case_already_confirmed" };
+	}
+	const variants = duplicateKnownVariants(sc, known, hotel)
+		.map((variant) => ({
+			...variant,
+			key: duplicateKeyForKnown(sc, variant.known, hotel),
+		}))
+		.filter((variant) => variant.key);
+	if (!variants.length) return { complete: false, key: "", matches: [], reason: "missing_key" };
+	if (variants.length !== duplicateKnownVariants(sc, known, hotel).length) {
+		return { complete: false, key: "", matches: [], reason: "missing_split_key" };
+	}
+	const hotelId = String(hotel?._id || sc.hotelId || "").trim();
+	const reservations = await listRecentHotelReservationsForExistingGuest({
+		hotelId,
+		since: duplicateReservationLookupSinceDate(),
+		limit: AI_EXISTING_RESERVATION_LOOKUP_LIMIT,
+	});
+	const byId = new Map();
+	for (const variant of variants) {
+		for (const reservation of reservations) {
+			if (!duplicateReservationMatchesKnown(reservation, sc, variant.known, hotel)) continue;
+			const id = String(reservation._id || "");
+			if (!id || byId.has(id)) continue;
+			byId.set(id, {
+				label: variant.label,
+				key: variant.key,
+				reservation,
+			});
+		}
+	}
+	return {
+		complete: true,
+		key: variants.map((variant) => variant.key).sort().join("||"),
+		matches: Array.from(byId.values()).sort(
+			(a, b) =>
+				new Date(b.reservation.createdAt || b.reservation.booked_at || 0) -
+				new Date(a.reservation.createdAt || a.reservation.booked_at || 0)
+		),
+		reason: "same_hotel_name_phone_dates_room",
+	};
+}
+
+function duplicateReservationAcknowledgedForKnown(known = {}, key = "") {
+	return Boolean(
+		key &&
+			cleanString(known.existingReservationDuplicateAcknowledgedKey, 500) === key
+	);
+}
+
+function guestAcknowledgesDuplicateReservationWarning(
+	value = "",
+	action = "",
+	previousAiAction = ""
+) {
+	if (String(previousAiAction || "").toLowerCase() !== "existing_reservation_warning") {
+		return false;
+	}
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["duplicate_create_anyway", "duplicate_not_mine"].includes(cleanAction)) return true;
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		guestConfirms(value, action) ||
+		/\b(?:new|separate|another)\s+(?:booking|reservation)\b/i.test(text) ||
+		/\b(?:not\s+mine|not\s+my\s+reservation|not\s+my\s+booking|create\s+anyway|book\s+anyway|continue\s+anyway)\b/i.test(
+			text
+		) ||
+		/(?:حجزجديد|حجزاخر|حجزآخر|ليسهذاحجزي|مشحجزي|ليسحجزي|اكملرغمذلك|كملرغمذلك|نعمكمل|تمامكمل|اكيدكمل|أكيدكمل|اكمل|أكمل|تابع|استمر)/iu.test(
+			compact
+		)
+	);
+}
+
+function applyDuplicateReservationAcknowledgement(sc = {}, known = {}, hotel = {}, latestGuest = null, previousAi = null) {
+	const key = duplicateKeyForKnownSet(sc, known, hotel);
+	if (
+		key &&
+		guestAcknowledgesDuplicateReservationWarning(
+			latestGuest?.message || "",
+			latestGuest?.clientAction || "",
+			previousAi?.clientAction || ""
+		)
+	) {
+		return {
+			...known,
+			existingReservationDuplicateAcknowledgedKey: key,
+			existingReservationDuplicateAcknowledgedAt: new Date().toISOString(),
+		};
+	}
+	return known;
+}
+
+function existingReservationDuplicateQuickReplies(languageCode = "en") {
+	if (/^ar\b/i.test(languageCode)) {
+		return [
+			{ label: "أريد حجزًا جديدًا", value: "أريد حجزًا جديدًا", action: "duplicate_create_anyway" },
+			{ label: "هذا ليس حجزي", value: "هذا ليس حجزي", action: "duplicate_not_mine" },
+			{ label: "أحتاج مساعدة", value: "أحتاج مساعدة", action: "need_help" },
+		];
+	}
+	return [
+		{ label: "New booking", value: "I want a new separate booking", action: "duplicate_create_anyway" },
+		{ label: "Not mine", value: "This is not my reservation", action: "duplicate_not_mine" },
+		{ label: "Need help", value: "I need help", action: "need_help" },
+	];
+}
+
+function existingReservationRowsForMessage(matches = [], languageCode = "en") {
+	return matches
+		.map((match, index) => {
+			const reservation = match.reservation || match;
+			const compact = compactExistingReservationForCase(reservation, match);
+			const dateLine =
+				compact.checkinISO && compact.checkoutISO
+					? `${formatDate(compact.checkinISO, languageCode)} - ${formatDate(
+							compact.checkoutISO,
+							languageCode
+					  )}`
+					: "";
+			const total = compact.totalAmount
+				? formatMoney(compact.totalAmount, compact.currency || "SAR", languageCode)
+				: "";
+			if (/^ar\b/i.test(languageCode)) {
+				return [
+					`الحجز ${formatNumber(index + 1, languageCode)}:`,
+					`رقم التأكيد: ${compact.confirmationNumber || ""}`,
+					dateLine ? `الفترة: ${dateLine}` : "",
+					total ? `الإجمالي: ${total}` : "",
+					compact.links.reservationConfirmation
+						? `رابط التفاصيل: ${compact.links.reservationConfirmation}`
+						: "",
+					compact.links.payment ? `رابط الدفع: ${compact.links.payment}` : "",
+				]
+					.filter(Boolean)
+					.join("\n");
+			}
+			return [
+				`Reservation ${index + 1}:`,
+				`Confirmation number: ${compact.confirmationNumber || ""}`,
+				dateLine ? `Dates: ${dateLine}` : "",
+				total ? `Total: ${total}` : "",
+				compact.links.reservationConfirmation
+					? `Details: ${compact.links.reservationConfirmation}`
+					: "",
+				compact.links.payment ? `Payment link: ${compact.links.payment}` : "",
+			]
+				.filter(Boolean)
+				.join("\n");
+		})
+		.join("\n\n");
+}
+
+function buildExistingReservationDuplicateWarningMessage(sc = {}, known = {}, hotel = {}, matches = []) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	const rows = existingReservationRowsForMessage(matches, languageCode);
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، وجدت حجزًا سابقًا بنفس بيانات الطلب في ${hotelName}: الاسم، رقم الجوال، التواريخ، ونوع الغرفة.`,
+			rows,
+			`حتى لا ننشئ حجزًا مكررًا بدون قصد، هل تريد حجزًا جديدًا منفصلًا رغم وجود هذا الحجز، أم أن هذا الحجز ليس لك؟`,
+		]
+			.filter(Boolean)
+			.join("\n\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, I found an existing reservation at ${hotelName} with the same name, phone, dates, and room type.`,
+		rows,
+		`To avoid creating an unintended duplicate, please confirm whether you want a new separate booking anyway, or whether this reservation is not yours.`,
+	]
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+function buildExistingReservationHardCutMessage(sc = {}, known = {}, hotel = {}, matches = []) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "الفندق"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	const rows = existingReservationRowsForMessage(matches, languageCode);
+	const whatsapp = `[${RESERVATION_CHANGE_CONTACT_PHONE}](${RESERVATION_CHANGE_CONTACT_WHATSAPP})`;
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، وجدت أكثر من حجز سابق بنفس بيانات الطلب في ${hotelName}.`,
+			rows,
+			`حرصًا على منع أي حجوزات مكررة، أوقفت إنشاء أي حجز جديد من المحادثة الآلية لهذا الطلب.`,
+			`للمراجعة أو التعديل، تواصل معنا عبر واتساب: ${whatsapp}.`,
+			`سيتم إغلاق هذه المحادثة بعد قليل، ونحن بخدمتك عبر واتساب.`,
+		]
+			.filter(Boolean)
+			.join("\n\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, I found more than one existing reservation at ${hotelName} with the same booking details.`,
+		rows,
+		`To prevent duplicate bookings, I have stopped automatic booking creation for this request.`,
+		`Please contact us on WhatsApp for review or changes: ${whatsapp}.`,
+		`This chat will close shortly, and we will help you there.`,
+	]
+		.filter(Boolean)
+		.join("\n\n");
+}
+
+async function handleExistingReservationDuplicateGuard({
+	io,
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null,
+	typingStartedAt = 0,
+	stage = "review",
+} = {}) {
+	if (!latestGuest || knownHasReservationConfirmation(known)) return null;
+	if (mentionsExplicitReservationIdentifier(latestGuest.message || "")) return null;
+	const context = await findExistingReservationDuplicateContext(sc, hotel, known);
+	if (!context.complete || !context.matches.length) return null;
+	const matchCount = context.matches.length;
+	const snapshot = existingReservationSnapshotForCase({
+		status: matchCount >= 2 ? "hard_cut" : "warning",
+		hotelId: hotel?._id || sc.hotelId || "",
+		matchKey: context.key,
+		matchReason: context.reason,
+		matches: context.matches,
+	});
+	if (matchCount >= 2) {
+		const nextKnown = {
+			...known,
+			existingReservationDuplicateKey: context.key,
+			existingReservationDuplicateMatchCount: matchCount,
+			existingReservationDuplicateHardCutAt: new Date().toISOString(),
+		};
+		await saveKnownFacts(caseIdText(sc), nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildExistingReservationHardCutMessage(sc, nextKnown, hotel, context.matches), {
+			latestGuest,
+			known: nextKnown,
+			clientAction: "existing_reservations_hard_cut",
+			keepAiEnabled: false,
+			closeCaseAfterMs: AI_EXISTING_RESERVATION_HARD_CLOSE_MS,
+			closeReason: "ai_existing_reservation_hard_cut",
+			caseFields: {
+				aiExistingReservations: snapshot,
+			},
+		});
+	}
+	if (duplicateReservationAcknowledgedForKnown(known, context.key)) {
+		return null;
+	}
+	const nextKnown = {
+		...known,
+		existingReservationDuplicateKey: context.key,
+		existingReservationDuplicateMatchCount: matchCount,
+		existingReservationDuplicateWarnedAt: new Date().toISOString(),
+		existingReservationDuplicateStage: stage,
+	};
+	await saveKnownFacts(caseIdText(sc), nextKnown);
+	await waitForTypingMinimum(typingStartedAt);
+	return sendAiMessage(
+		io,
+		sc,
+		buildExistingReservationDuplicateWarningMessage(sc, nextKnown, hotel, context.matches),
+		{
+			latestGuest,
+			known: nextKnown,
+			clientAction: "existing_reservation_warning",
+			quickReplies: existingReservationDuplicateQuickReplies(
+				activeLanguageCode(sc, nextKnown)
+			),
+			caseFields: {
+				aiExistingReservations: snapshot,
+			},
+		}
+	);
+}
+
 async function emitTyping(io, sc = {}, isTyping = true) {
 	const caseId = caseIdText(sc);
 	if (!io || !caseId) return;
@@ -9061,6 +9597,13 @@ function clearIdleCloseTimer(caseId = "") {
 	idleCloseTimers.delete(key);
 }
 
+function clearDelayedCloseTimer(caseId = "") {
+	const key = caseIdText(caseId);
+	const existing = delayedCloseTimers.get(key);
+	if (existing) clearTimeout(existing);
+	delayedCloseTimers.delete(key);
+}
+
 function emitClosedCase(io, updatedCase = {}, reason = "ai_idle_timeout") {
 	const caseId = caseIdText(updatedCase);
 	if (!io || !caseId) return;
@@ -9076,6 +9619,50 @@ function emitClosedCase(io, updatedCase = {}, reason = "ai_idle_timeout") {
 	io.to(caseId).emit("supportCaseUpdated", updatedCase);
 	io.emit("closeCase", payload);
 	io.to(caseId).emit("aiPaused", { caseId, reason });
+}
+
+function scheduleDelayedCaseClose(
+	io,
+	sc = {},
+	aiMessageDate = new Date(),
+	{ delayMs = AI_EXISTING_RESERVATION_HARD_CLOSE_MS, reason = "ai_existing_reservation_hard_cut" } = {}
+) {
+	const caseId = caseIdText(sc);
+	const aiMessageAt = entryTime({ date: aiMessageDate });
+	if (!caseId || !aiMessageAt || delayMs <= 0) return;
+	clearDelayedCloseTimer(caseId);
+	const timer = setTimeout(async () => {
+		delayedCloseTimers.delete(caseId);
+		const latest = await getSupportCaseById(caseId).catch(() => null);
+		if (!latest || latest.caseStatus !== "open") return;
+		const latestEntry = latestConversationEntry(latest);
+		const latestAt = entryTime(latestEntry);
+		const latestAction = String(latestEntry?.clientAction || "").toLowerCase();
+		const humanTakeoverAt = entryTime({ date: latest.humanTakeoverAt });
+		if (humanTakeoverAt && humanTakeoverAt > aiMessageAt) return;
+		if (
+			!latestEntry?.isAi ||
+			latestAt !== aiMessageAt ||
+			latestAction !== "existing_reservations_hard_cut"
+		) {
+			return;
+		}
+		const nowDate = new Date();
+		const updated = await setCaseStatus(caseId, {
+			caseStatus: "closed",
+			closedAt: nowDate,
+			closedBy: "csr",
+			aiToRespond: false,
+			aiPausedAt: nowDate,
+			aiHandoffReason: reason,
+		}).catch((error) => {
+			console.error("[aiagent] delayed close failed:", error?.message || error);
+			return null;
+		});
+		if (updated) emitClosedCase(io, updated, reason);
+	}, Math.max(1000, Number(delayMs) || 0));
+	timer.unref?.();
+	delayedCloseTimers.set(caseId, timer);
 }
 
 function scheduleIdleClose(io, sc = {}, aiMessageDate = new Date()) {
@@ -9221,6 +9808,10 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 		aiRelated: true,
 		aiToRespond: options.keepAiEnabled === false ? false : true,
 	};
+	const extraCaseFields = asObject(options.caseFields);
+	if (Object.keys(extraCaseFields).length) {
+		Object.assign(fields, extraCaseFields);
+	}
 	if (options.handoff) {
 		fields.aiToRespond = false;
 		fields.aiPausedAt = new Date();
@@ -9270,9 +9861,18 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 		}
 	}
 	if (updatedCase && !options.closeCase && !options.handoff) {
-		scheduleIdleClose(io, updatedCase, messageData.date);
+		if (options.closeCaseAfterMs) {
+			scheduleDelayedCaseClose(io, updatedCase, messageData.date, {
+				delayMs: options.closeCaseAfterMs,
+				reason: options.closeReason || "ai_delayed_close",
+			});
+		} else {
+			clearDelayedCloseTimer(caseId);
+			scheduleIdleClose(io, updatedCase, messageData.date);
+		}
 	} else if (options.closeCase || options.handoff) {
 		clearIdleCloseTimer(caseId);
+		clearDelayedCloseTimer(caseId);
 	}
 	return updatedCase;
 }
@@ -10300,6 +10900,16 @@ async function handleBrainSplitStayReservationSubmit({
 			preserveFallbackNumbers: false,
 		});
 	}
+	const duplicateGuard = await handleExistingReservationDuplicateGuard({
+		io,
+		sc,
+		hotel,
+		known: nextKnown,
+		latestGuest,
+		typingStartedAt,
+		stage: "split_submit_final",
+	});
+	if (duplicateGuard) return duplicateGuard;
 	const reservations = [];
 	try {
 		for (let index = 0; index < refreshed.quoteResults.length; index += 1) {
@@ -10467,6 +11077,16 @@ async function sendBrainSplitStayReviewReply({
 			preserveFallbackNumbers: false,
 		});
 	}
+	const duplicateGuard = await handleExistingReservationDuplicateGuard({
+		io,
+		sc,
+		hotel,
+		known: nextKnown,
+		latestGuest,
+		typingStartedAt,
+		stage: tool === "submit_reservation" ? "split_submit" : "split_review",
+	});
+	if (duplicateGuard) return duplicateGuard;
 	if (tool === "submit_reservation") {
 		return handleBrainSplitStayReservationSubmit({
 			io,
@@ -11637,6 +12257,18 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 		}
 	}
 	const missing = requiredBookingMissing(reviewKnown);
+	if (!missing.length) {
+		const duplicateGuard = await handleExistingReservationDuplicateGuard({
+			io,
+			sc,
+			hotel,
+			known: reviewKnown,
+			latestGuest,
+			typingStartedAt,
+			stage: "review",
+		});
+		if (duplicateGuard) return duplicateGuard;
+	}
 	await saveKnownFacts(caseId, reviewKnown);
 	if (!missing.length && shouldOfferOptionalEmail(sc, reviewKnown)) {
 		await waitForTypingMinimum(typingStartedAt);
@@ -11761,6 +12393,16 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 			typingStartedAt,
 		});
 	}
+	const duplicateGuard = await handleExistingReservationDuplicateGuard({
+		io,
+		sc,
+		hotel,
+		known: submitKnown,
+		latestGuest,
+		typingStartedAt,
+		stage: "submit",
+	});
+	if (duplicateGuard) return duplicateGuard;
 	try {
 		const quote = submitKnown.quote;
 		const room =
@@ -12545,6 +13187,23 @@ async function submitReservationForCase(io, caseOrId) {
 		await sendReview(io, sc, known, hotel, latestGuest);
 		return { ok: false, reason: `missing_${missing.join("_")}` };
 	}
+	const knownBeforeDuplicateAcknowledgement = known;
+	known = applyDuplicateReservationAcknowledgement(sc, known, hotel, latestGuest, previousAi);
+	if (known !== knownBeforeDuplicateAcknowledgement) {
+		await saveKnownFacts(caseId, known);
+	}
+	const duplicateGuard = await handleExistingReservationDuplicateGuard({
+		io,
+		sc,
+		hotel,
+		known,
+		latestGuest,
+		typingStartedAt: 0,
+		stage: "submit_endpoint",
+	});
+	if (duplicateGuard) {
+		return { ok: false, reason: "existing_reservation_duplicate_guard" };
+	}
 	try {
 		const quote = known.quote;
 		const room = quote.room || (hotel.roomCountDetails || []).find(
@@ -12958,6 +13617,22 @@ async function planTurn(io, supportCaseOrId) {
 		roomTypeKey: known.roomTypeKey || "",
 		hasQuote: Boolean(known.quote),
 	});
+	const knownBeforeDuplicateAcknowledgement = known;
+	known = applyDuplicateReservationAcknowledgement(sc, known, hotel, latestGuest, previousAi);
+	const appliedDuplicateReservationAcknowledgement =
+		known !== knownBeforeDuplicateAcknowledgement;
+	if (appliedDuplicateReservationAcknowledgement) {
+		await saveKnownFacts(key, known);
+	}
+	if (
+		latestGuest &&
+		appliedDuplicateReservationAcknowledgement &&
+		!requiredBookingMissing(known).length &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))
+	) {
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
 	const latestRejectsQuoteOrSelection =
 		latestGuest && latestGuestRejectsQuoteOrSelection(latestText);
 	const shouldLetOpenAIHandleRevision =
@@ -14361,6 +15036,18 @@ const exportedOrchestrator = {
 		roomCountCorrectionFromText,
 		nightsCountFromText,
 		mentionsExplicitReservationIdentifier,
+		duplicateNameForCompare,
+		duplicatePhoneDigits,
+		duplicatePhonesMatch,
+		duplicateKnownRoomSelections,
+		duplicateReservationRoomSelections,
+		duplicateKeyForKnown,
+		duplicateKeyForKnownSet,
+		duplicateReservationMatchesKnown,
+		guestAcknowledgesDuplicateReservationWarning,
+		applyDuplicateReservationAcknowledgement,
+		buildExistingReservationDuplicateWarningMessage,
+		buildExistingReservationHardCutMessage,
 		latestGuestLooksLikeBookingIdentityAnswer,
 		latestGuestMentionsDateish,
 		latestGuestAsksRequiredBookingDetailClarification,

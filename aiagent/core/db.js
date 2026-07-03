@@ -719,6 +719,39 @@ async function getReservationByConfirmation(cn) {
 		.exec();
 }
 
+async function listRecentHotelReservationsForExistingGuest({
+	hotelId,
+	since,
+	limit = 150,
+} = {}) {
+	const safeHotelId = safeId(hotelId);
+	const sinceDate =
+		since instanceof Date ? since : since ? new Date(since) : new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+	if (!safeHotelId || Number.isNaN(sinceDate.getTime())) return [];
+	const safeLimit = Math.max(1, Math.min(Number(limit) || 150, 300));
+	try {
+		return await Reservations.find({
+			hotelId: safeHotelId,
+			$or: [
+				{ createdAt: { $gte: sinceDate } },
+				{ booked_at: { $gte: sinceDate } },
+				{ orderTakenAt: { $gte: sinceDate } },
+			],
+		})
+			.select(
+				"_id hotelId hotelName confirmation_number customer_details checkin_date checkout_date days_of_residence total_amount currency reservation_status state total_rooms total_guests adults children pickedRoomsType pickedRoomsPricing pendingConfirmation createdAt updatedAt booked_at orderTakenAt aiSupportCaseId"
+			)
+			.sort({ createdAt: -1, booked_at: -1, orderTakenAt: -1, _id: -1 })
+			.limit(safeLimit)
+			.maxTimeMS(2500)
+			.lean()
+			.exec();
+	} catch (error) {
+		console.error("[aiagent] recent hotel reservation lookup failed:", error?.message || error);
+		return [];
+	}
+}
+
 const AI_SUPPORT_EMAILS = new Set([
 	"support@jannatbooking.com",
 	"management@xhotelpro.com",
@@ -1076,6 +1109,7 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
+	listRecentHotelReservationsForExistingGuest,
 	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
 };

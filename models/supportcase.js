@@ -301,6 +301,38 @@ const supportCaseSchema = new Schema({
 			},
 		},
 	},
+	aiExistingReservations: {
+		status: {
+			type: String,
+			enum: ["", "found", "warning", "hard_cut"],
+			default: "",
+		},
+		lookupWindowDays: {
+			type: Number,
+			default: 0,
+		},
+		matchedAt: {
+			type: Date,
+			default: null,
+		},
+		hotelId: {
+			type: Schema.Types.ObjectId,
+			ref: "HotelDetails",
+			default: null,
+		},
+		matchKey: {
+			type: String,
+			default: "",
+		},
+		matchReason: {
+			type: String,
+			default: "",
+		},
+		reservations: {
+			type: Array,
+			default: [],
+		},
+	},
 	escalationStatus: {
 		type: String,
 		enum: ["none", "active", "addressed"],

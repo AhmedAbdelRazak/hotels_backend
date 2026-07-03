@@ -35,7 +35,7 @@ const normalizeId = (value) => String(value?._id || value?.id || value || "").tr
 const SUPPORT_CASE_HOTEL_POPULATE =
 	"_id hotelName hotelName_OtherLanguage hotelCity city state country belongsTo aiToRespond distances hasBusService busDetails hasMealsService mealsDetails isNusuk isNusukText hotelPolicyQA";
 const PUBLIC_CLIENT_SUPPORT_CASE_SELECT =
-	"_id createdAt updatedAt closedAt rating closedBy supporterId ownerId hotelId targetUserId targetUserName targetUserRole caseStatus openedBy conversation displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiToRespond aiResponderName aiPausedAt aiHandoffReason aiReservation escalationStatus escalationReason";
+	"_id createdAt updatedAt closedAt rating closedBy supporterId ownerId hotelId targetUserId targetUserName targetUserRole caseStatus openedBy conversation displayName1 displayName2 supporterName clientName clientContact clientContactType preferredLanguage preferredLanguageCode supportScope sourceWebsite sourcePage sourceUrl aiRelated aiToRespond aiResponderName aiPausedAt aiHandoffReason aiReservation aiExistingReservations escalationStatus escalationReason";
 const SUPPORT_CASE_LIST_CONVERSATION_LIMIT = 60;
 const SUPPORT_CASE_LIST_SELECT = PUBLIC_CLIENT_SUPPORT_CASE_SELECT;
 
