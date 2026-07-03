@@ -12658,6 +12658,7 @@ async function planTurn(io, supportCaseOrId) {
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	let appliedDateBoundaryChange = false;
 	let appliedSplitStayChange = false;
+	let displayedPhoneConfirmedThisTurn = false;
 	if (latestGuest) {
 		const splitStayPeriods = sameHotelSplitStayPeriodsFromText(latestText, known);
 		if (splitStayPeriods.length >= 2) {
@@ -12682,7 +12683,19 @@ async function planTurn(io, supportCaseOrId) {
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = mergeKnownFacts(known, explicitGuestCountFactsFromText(latestText));
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
+		const phoneBeforeDisplayedAnswer = cleanPhone(known.phone);
+		const phoneNeededBeforeDisplayedAnswer =
+			Boolean(known.phoneNeedsConfirmation) ||
+			requiredBookingMissing(known).includes("phone");
 		known = applyDisplayedPhoneAnswer(sc, known, latestText, previousAi);
+		displayedPhoneConfirmedThisTurn =
+			sameAsDisplayedPhoneIntent(latestText) &&
+			phoneNeededBeforeDisplayedAnswer &&
+			Boolean(cleanPhone(known.phone)) &&
+			!known.phoneNeedsConfirmation &&
+			(Boolean(known.phoneConfirmed) ||
+				cleanPhone(known.phone) !== phoneBeforeDisplayedAnswer ||
+				cleanPhone(known.phone) === profilePhoneForBooking(sc));
 		if (
 			bookingIdentityCollectionContext(sc, previousAi, known) &&
 			!guestDeclinesOptionalEmail(latestText, latestAction)
@@ -12731,6 +12744,17 @@ async function planTurn(io, supportCaseOrId) {
 		}
 	}
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
+	if (
+		latestGuest &&
+		displayedPhoneConfirmedThisTurn &&
+		!guestDeclinesOptionalEmail(latestText, latestAction) &&
+		!requiredBookingMissing(known).length &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
 	if (
 		latestGuest &&
 		["quote_ready", "split_stay_quote_ready"].includes(previousAiAction) &&
