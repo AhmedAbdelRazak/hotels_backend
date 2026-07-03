@@ -486,3 +486,180 @@ Final status:
 - Production still has pre-existing untracked backup files; ignore them unless intentionally auditing server backups.
 - Frontend `jannatbooking_ssr` clean and aligned with `origin/main`.
 
+## Late Production QA And Live Hardening Continuation
+
+This section documents the later July 2 live-chat hardening pass after additional real and test cases were observed.
+
+Primary goals:
+
+- Keep the brain/orchestrator structure dynamic; do not hardcode July 15 or any single hotel scenario.
+- Stop current/same hotel-day requests from being treated as bookable or from being answered with vague "tomorrow" guidance.
+- Preserve mixed room requests such as one double room plus one quad room.
+- Treat split stays as separate reservations, one reservation per period, instead of forcing one merged reservation.
+- Prevent loops during split-stay review and confirmation.
+- Prevent reservation names from being polluted by confirmation/rejection text.
+- Use known profile phone data without repeatedly asking the guest to retype it.
+- Offer optional email only after required fields are complete.
+- Improve closer-hotel and price-objection sales handling with fact-based value and a clear next step.
+
+### Additional Commits
+
+Latest production sequence for this pass:
+
+- `bf5e32b` - Harden hotel-day date and split-stay state.
+- `438f585` - Avoid unchecked tomorrow same-day wording.
+- `ee64cad` - Preserve split stay reviews during recovery.
+- `9b65fa6` - Recover Arabic split stay slash dates.
+- `3646501` - Use deterministic split stay reviews.
+- `f5e1dd1` - Keep split stay period totals scoped.
+- `f44a577` - Derive split stay totals from periods.
+- `f5f238a` - Require closer hotel sales close.
+- `8a71127` - Route confirmed profile phone to optional email.
+- `9228e5a` - Guard future quote date wording.
+
+Final deployed backend commit for this continuation:
+
+- Local and GitHub `master`: `9228e5a`
+- Production `/home/ahmedadmin/Hotels/hotels_backend`: `9228e5a`
+
+### Dynamic Date And Availability Rules
+
+Implemented/verified behavior:
+
+- Hotel "today" is calculated dynamically using `HOTEL_BOOKING_TIMEZONE` / `TZ` with a UTC fallback, not the server UTC day by accident.
+- Same hotel-day check-in is blocked through chat.
+- The bot does not claim the next day/minimum date is available unless an actual availability search proves it.
+- Alternative dates are discovered from inventory search. The July 15 result for Zad Ajyad is not hardcoded.
+- Future quotes are guarded so the writer cannot call a verified future date range "past", "expired", or already passed.
+
+### Split-Stay Fixes
+
+Implemented/verified behavior:
+
+- Arabic slash dates in split stays now prefer day/month when the context indicates Arabic date usage.
+- Example recovered correctly: `5/9 to 10/9` and `15/9 to 20/9` become `2026-09-05 -> 2026-09-10` and `2026-09-15 -> 2026-09-20`.
+- The official split-stay review is now composed from verified server facts instead of letting the writer recalculate totals.
+- Split-stay quote recovery scopes money to each period and derives the combined total from the period totals when all period totals are known.
+- A bad combined total from old AI text can no longer force repeated re-quotes when the individual verified periods already match.
+- Confirming a split stay creates separate reservations with keys:
+  - `<caseId>:split:1`
+  - `<caseId>:split:2`
+
+Validated result:
+
+- Split stay created two separate reservations.
+- Each period had the correct dates, nights, name, phone, nationality, and total.
+- No loop after final review confirmation.
+
+### Identity, Phone, And Email Flow
+
+Implemented/verified behavior:
+
+- Short confirmations such as "same number you see" now confirm the profile phone when the bot was asking for phone confirmation.
+- After required fields are complete, the server routes directly to optional email or review instead of sending vague progress wording.
+- Optional email remains optional and is offered only after required fields are complete.
+- Confirmation phrases such as `مؤكد`, `ايون`, `تمام`, and rejection text like `هناك شيء غير صحيح` are guarded from becoming reservation names.
+
+Validated result:
+
+- Arabic profile-phone flow completed with:
+  - Name: `احمد عبده`
+  - Phone: `7771116666`
+  - Nationality: `مصري`
+  - Optional email skipped
+  - Reservation created successfully
+
+### Hotel Facts, Reactions, And Sales Handling
+
+Implemented/verified behavior:
+
+- Short reactions after hotel facts, such as `حلو ده` and `انا متحمس جدا`, no longer repeat the distance answer.
+- The bot acknowledges warmly and offers next help.
+- Closer-hotel requests now keep a fact-based value pitch for the current hotel and ask a clear next step, such as checking availability and price or handing off to the team.
+- For Zad Ajyad, the pitch uses dynamic hotel facts such as walking/driving distance, service details, markets/services nearby, and suitable room context when known.
+- The closer-hotel response is validated so it cannot leave the guest hanging without `check availability`, `continue`, `book`, or `reserve` wording.
+
+### Production QA Sweep
+
+Temporary QA harness:
+
+- Local only: `tmp_aiagent_prod_qa_sweep.js`
+- Production temp copy: `/home/ahmedadmin/Hotels/hotels_backend/tmp_aiagent_prod_qa_sweep.js`
+- These were not committed.
+
+Full production sweep result:
+
+- Command: `node tmp_aiagent_prod_qa_sweep.js`
+- Status: PASS
+- Scenarios run: 14
+- Test reservations created and cleaned up: 5
+- Test support cases cleaned up: 14
+
+Scenarios covered:
+
+1. Hotel fact short reactions.
+2. Arabic identity and double-room reservation.
+3. Known profile phone and optional email flow.
+4. Budget/value objection sales pitch.
+5. Closer-hotel sales pitch and next step.
+6. Date vs guest-count confusion (`26/7` stays checkout, not 26 adults).
+7. Mixed room unavailable case with double plus quad.
+8. Split-stay separate reservations.
+9. Confirmation-number guard before official creation.
+10. Thank-you/later outro.
+11. Booking process after hotel-fact detour.
+12. Same hotel-day block.
+13. Ten people recommendation as two family/quintuple rooms.
+14. Arabic one-night same-day request with dynamic alternatives.
+
+Additional targeted production batches before the final sweep:
+
+- High-risk batch passed:
+  - mixed rooms unavailable
+  - split-stay reservations
+  - same-day block
+  - Arabic one-night alternative dates
+- Regression batch passed:
+  - profile phone optional email
+  - closer-hotel pitch
+
+Syntax checks:
+
+- Local: `node --check aiagent/core/orchestrator.js`
+- Production: `node --check /home/ahmedadmin/Hotels/hotels_backend/aiagent/core/orchestrator.js`
+
+### Home Server Health After QA
+
+Final health check after deployment and full sweep:
+
+- Load average: about `0.36, 0.39, 0.44`
+- RAM: `15Gi` total, about `12Gi` available
+- Swap: `0B` used
+- Root disk: `466G` total, `38G` used, `9%`
+- CPU package/core temperatures: about `44-45C`
+- NVMe temperature: about `41.9C`
+- PM2:
+  - `hotels-backend` online
+  - frontend/SSR services online
+  - backend memory about `201MB` after QA
+
+Notes:
+
+- Backend restart count increased because of the controlled deploy/restart cycles.
+- GitHub still reports existing Dependabot vulnerabilities during push; this pass did not change dependencies.
+- Production has pre-existing untracked backup files; ignore them unless doing a backup audit.
+
+### Current Final Status
+
+- GitHub `master`: pushed through `9228e5a`.
+- Production backend: pulled to `9228e5a`.
+- Production backend: restarted with `pm2 restart hotels-backend --update-env`.
+- Full production QA sweep: passed.
+- No committed QA harness or broad cleanup scripts.
+- Temporary QA harness files were removed after the final sweep.
+
+### Future Notes
+
+Some writer variance still appears in style, language mixing, and phrasing. The orchestrator now validates the risky parts that can damage bookings: dates, availability, totals, identity fields, final review, reservation creation, and required next steps.
+
+Future improvements should focus on deterministic formatting for quote/review/fact replies without changing the verified state and action flow.
