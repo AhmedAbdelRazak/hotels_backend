@@ -1384,6 +1384,33 @@ function isoDateRangeFactsFromText(value = "") {
 	return { checkinISO: dates[0], checkoutISO: dates[1], dateCalendar: "gregorian" };
 }
 
+function latestStayDateFactsFromConversation(sc = {}, known = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const entry = conversation[index] || {};
+		if (!isGuestEntry(entry)) continue;
+		const text = String(entry.message || "");
+		const quickFacts = quickDateFactsFromText(text);
+		if (quickFacts?.checkinISO && quickFacts?.checkoutISO) return quickFacts;
+		const dateOnlyFacts = dateOnlyRangeFactsFromText(text, known, sc);
+		if (dateOnlyFacts?.checkinISO && dateOnlyFacts?.checkoutISO) return dateOnlyFacts;
+		const isoFacts = isoDateRangeFactsFromText(text);
+		if (isoFacts?.checkinISO && isoFacts?.checkoutISO) return isoFacts;
+	}
+	return null;
+}
+
+function latestSplitStayPeriodsFromConversation(sc = {}, known = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		const entry = conversation[index] || {};
+		if (!isGuestEntry(entry)) continue;
+		const periods = sameHotelSplitStayPeriodsFromText(entry.message || "", known);
+		if (periods.length >= 2) return periods;
+	}
+	return [];
+}
+
 function eachNight(checkinISO = "", checkoutISO = "") {
 	const start = validISODate(checkinISO);
 	const end = validISODate(checkoutISO);
@@ -4971,6 +4998,67 @@ function buildSameDayPendingStayMessage(sc = {}, known = {}, hotel = {}) {
 		`${guestDisplayName(sc)}, the requested check-in date ${requestedDate} is not bookable through chat because it is the hotel's same business day.`,
 		"Send the room type and guest count, and I will check verified availability or the nearest available alternative dates without assuming any unchecked date is available.",
 	].join("\n");
+}
+
+function requiredFieldLabel(field = "", languageCode = "en") {
+	const ar = /^ar\b/i.test(languageCode);
+	const key = String(field || "");
+	const labels = ar
+		? {
+				fullName: "الاسم الكامل",
+				phone: "رقم الجوال",
+				nationality: "الجنسية",
+				adults: "عدد النزلاء",
+		  }
+		: {
+				fullName: "full name",
+				phone: "phone number",
+				nationality: "nationality",
+				adults: "guest count",
+		  };
+	return labels[key] || key;
+}
+
+function buildBookingProcessContextReply(sc = {}, known = {}, hotel = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const quote = asObject(known.quote);
+	const roomLine = quoteRoomLinesText(quote, known.roomTypeKey, languageCode) ||
+		roomTypeLabel(known.roomTypeKey, languageCode);
+	const dates = validISODate(known.checkinISO) && validISODate(known.checkoutISO)
+		? `${formatDate(known.checkinISO, languageCode)} - ${formatDate(known.checkoutISO, languageCode)}`
+		: "";
+	const missing = requiredBookingMissing(known).filter((field) =>
+		["phone", "nationality", "fullName", "adults"].includes(field)
+	);
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، خطوات الحجز بسيطة:`,
+			roomLine ? `- الاختيار الحالي: ${roomLine}` : "",
+			dates ? `- التواريخ: ${dates}` : "",
+			"- أراجع التفاصيل المتبقية.",
+			"- أرسل لك مراجعة نهائية رسمية قبل إنشاء الحجز.",
+			"- بعد تأكيدك، يصدر رقم الحجز ورابط التفاصيل/الدفع.",
+			missing.length
+				? `المطلوب الآن فقط: ${missing.map((field) => requiredFieldLabel(field, languageCode)).join("، ")}.`
+				: "إذا التفاصيل صحيحة، أقدر أرسل لك المراجعة النهائية الآن.",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, the booking process is simple:`,
+		roomLine ? `- Current option: ${roomLine}` : "",
+		dates ? `- Dates: ${dates}` : "",
+		"- I collect the remaining required details.",
+		"- I send an official final review before creating the booking.",
+		"- After your confirmation, the booking number and details/payment links are issued.",
+		missing.length
+			? `What I still need: ${missing.map((field) => requiredFieldLabel(field, languageCode)).join(", ")}.`
+			: "If everything is correct, I can send the final review now.",
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function applyCustomerReplySafetyGuards({
@@ -12689,6 +12777,21 @@ async function planTurn(io, supportCaseOrId) {
 	known = activeRoomSelectionFilter.known;
 	const appliedActiveRoomSelectionFilter = activeRoomSelectionFilter.changed;
 	if (
+		normalizeSplitStayPeriods(known.splitStayPeriods).length < 2 &&
+		(!validISODate(known.checkinISO) || !validISODate(known.checkoutISO))
+	) {
+		const recoveredDateFacts = latestStayDateFactsFromConversation(sc, known);
+		if (recoveredDateFacts?.checkinISO && recoveredDateFacts?.checkoutISO) {
+			known = mergeKnownFacts(known, recoveredDateFacts);
+		}
+	}
+	if (normalizeSplitStayPeriods(known.splitStayPeriods).length < 2) {
+		const recoveredSplitStayPeriods = latestSplitStayPeriodsFromConversation(sc, known);
+		if (recoveredSplitStayPeriods.length >= 2) {
+			known = mergeKnownFacts(known, { splitStayPeriods: recoveredSplitStayPeriods });
+		}
+	}
+	if (
 		latestGuest &&
 		(latestRevision.appliedQuickDates ||
 			latestGuestMentionsDateish(latestText) ||
@@ -12784,6 +12887,56 @@ async function planTurn(io, supportCaseOrId) {
 			await waitForTypingMinimum(typingStartedAt);
 			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
 		}
+	}
+	if (
+		latestGuest &&
+		normalizeSplitStayPeriods(known.splitStayPeriods).length >= 2 &&
+		splitStayQuoteInputsKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		if (!splitStayQuoteMatchesKnown(known)) {
+			logTurnStage(key, "split_stay_pre_brain_quote");
+			return handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, typingStartedAt);
+		}
+		if (
+			guestConfirms(latestText, latestAction) ||
+			latestTextHasExplicitGuestCount(latestText) ||
+			bookingIdentityCollectionContext(sc, previousAi, known)
+		) {
+			logTurnStage(key, "split_stay_pre_brain_review");
+			return sendBrainSplitStayReviewReply({
+				io,
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				typingStartedAt,
+			});
+		}
+	}
+	if (
+		latestGuest &&
+		latestGuestAsksBookingProcess(latestGuest) &&
+		(quoteMatchesKnown(known) ||
+			splitStayQuoteMatchesKnown(known) ||
+			validISODate(known.checkinISO) ||
+			normalizeSplitStayPeriods(known.splitStayPeriods).length >= 2)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildBookingProcessContextReply(sc, known, hotel), {
+			latestGuest,
+			known,
+			clientAction: "ai_reply",
+			quickReplies: operationalQuickRepliesForReply(
+				{ action: "reply", reply: buildBookingProcessContextReply(sc, known, hotel) },
+				known,
+				sc,
+				latestGuest
+			),
+		});
 	}
 	if (
 		latestGuest &&
