@@ -12896,6 +12896,21 @@ async function planTurn(io, supportCaseOrId) {
 	) {
 		await saveKnownFacts(key, known);
 		await waitForTypingMinimum(typingStartedAt);
+		if (previousAiAction === "review_reservation" && guestConfirms(latestText, latestAction)) {
+			if (!splitStayQuoteMatchesKnown(known)) {
+				logTurnStage(key, "split_stay_confirm_quote_recheck");
+				return handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, typingStartedAt);
+			}
+			logTurnStage(key, "split_stay_confirm_submit");
+			return handleBrainSplitStayReservationSubmit({
+				io,
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				typingStartedAt,
+			});
+		}
 		if (!splitStayQuoteMatchesKnown(known)) {
 			logTurnStage(key, "split_stay_pre_brain_quote");
 			return handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, typingStartedAt);
