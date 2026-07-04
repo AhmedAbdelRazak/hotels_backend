@@ -420,18 +420,140 @@ function totalGuestsFromKnown(known = {}) {
 	return total > 0 ? Math.floor(total) : 0;
 }
 
+function activeRoomCapacityCandidates(hotel = {}) {
+	const activeRoomKeys = activeRoomTypeKeySet(hotel);
+	return ROOM_TYPE_KEYS
+		.map((key) => ({ key, capacity: roomCapacityForKey(key) }))
+		.filter(
+			(item) =>
+				item.capacity > 0 &&
+				(!activeRoomKeys.size || activeRoomKeys.has(item.key))
+		);
+}
+
+function roomSelectionsGuestCapacity(selections = []) {
+	return normalizeRoomSelections(selections).reduce(
+		(total, selection) =>
+			total +
+			normalizeRoomCount(selection.count, 1) * roomCapacityForKey(selection.roomTypeKey),
+		0
+	);
+}
+
+function sortedRoomPlanSelections(selections = []) {
+	return normalizeRoomSelections(selections).sort((a, b) => {
+		const capacityDelta =
+			roomCapacityForKey(b.roomTypeKey) - roomCapacityForKey(a.roomTypeKey);
+		return capacityDelta || roomTypeSortIndex(a.roomTypeKey) - roomTypeSortIndex(b.roomTypeKey);
+	});
+}
+
+function roomPlanScore(selections = [], totalGuests = 0) {
+	const normalized = normalizeRoomSelections(selections);
+	const roomCount = roomSelectionsTotal(normalized);
+	const capacity = roomSelectionsGuestCapacity(normalized);
+	const unused = Math.max(0, capacity - totalGuests);
+	const highestCapacity = normalized.reduce(
+		(max, selection) => Math.max(max, roomCapacityForKey(selection.roomTypeKey)),
+		0
+	);
+	const typeCount = normalized.length;
+	const typeOrder = normalized
+		.map((selection) => roomTypeSortIndex(selection.roomTypeKey))
+		.reduce((sum, index) => sum + index, 0);
+	return {
+		roomCount,
+		unused,
+		highestCapacity,
+		typeCount,
+		typeOrder,
+	};
+}
+
+function compareRoomPlanScores(a = {}, b = {}) {
+	return (
+		a.roomCount - b.roomCount ||
+		a.unused - b.unused ||
+		b.highestCapacity - a.highestCapacity ||
+		a.typeCount - b.typeCount ||
+		a.typeOrder - b.typeOrder
+	);
+}
+
+function bestRoomSelectionsForGuests(hotel = {}, totalGuests = 0) {
+	const guests = Math.max(0, Math.floor(Number(totalGuests || 0) || 0));
+	if (!guests) return [];
+	const candidates = activeRoomCapacityCandidates(hotel).sort(
+		(a, b) =>
+			b.capacity - a.capacity || roomTypeSortIndex(a.key) - roomTypeSortIndex(b.key)
+	);
+	if (!candidates.length) return [];
+	const maxCapacity = Math.max(...candidates.map((item) => item.capacity));
+	const minRooms = Math.max(1, Math.ceil(guests / maxCapacity));
+	const maxRooms = Math.min(MAX_AI_ROOM_COUNT, Math.max(minRooms, minRooms + 2));
+	let best = null;
+	const visit = (startIndex, roomsLeft, plan) => {
+		if (roomsLeft === 0) {
+			const selections = sortedRoomPlanSelections(plan);
+			const capacity = roomSelectionsGuestCapacity(selections);
+			if (capacity < guests) return;
+			const score = roomPlanScore(selections, guests);
+			if (!best || compareRoomPlanScores(score, best.score) < 0) {
+				best = { selections, score };
+			}
+			return;
+		}
+		for (let index = startIndex; index < candidates.length; index += 1) {
+			visit(index, roomsLeft - 1, [
+				...plan,
+				{ roomTypeKey: candidates[index].key, count: 1 },
+			]);
+		}
+	};
+	for (let roomCount = minRooms; roomCount <= maxRooms; roomCount += 1) {
+		visit(0, roomCount, []);
+		if (best?.score?.roomCount === roomCount) break;
+	}
+	return best?.selections || [];
+}
+
+function ensureRoomPlanForGuestCapacity(hotel = {}, known = {}) {
+	const totalGuests = totalGuestsFromKnown(known);
+	if (!totalGuests) return { known, changed: false };
+	const currentSelections = normalizeRoomSelections(selectionsFromKnown(known));
+	const currentCapacity = roomSelectionsGuestCapacity(currentSelections);
+	if (currentSelections.length && currentCapacity >= totalGuests) {
+		return { known, changed: false };
+	}
+	const plannedSelections = bestRoomSelectionsForGuests(hotel, totalGuests);
+	if (!plannedSelections.length) return { known, changed: false };
+	const plannedCapacity = roomSelectionsGuestCapacity(plannedSelections);
+	if (plannedCapacity < totalGuests) return { known, changed: false };
+	if (
+		currentSelections.length &&
+		roomSelectionKey(currentSelections) === roomSelectionKey(plannedSelections)
+	) {
+		return { known, changed: false };
+	}
+	const next = { ...asObject(known) };
+	next.roomSelections = plannedSelections;
+	next.rooms = roomSelectionsTotal(plannedSelections);
+	if (plannedSelections.length === 1) {
+		next.roomTypeKey = plannedSelections[0].roomTypeKey;
+	} else {
+		delete next.roomTypeKey;
+	}
+	delete next.quote;
+	delete next.reviewSentAt;
+	return { known: next, changed: true };
+}
+
 function inferRoomTypeFromGuests(hotel = {}, known = {}) {
 	if (known.roomTypeKey) return "";
 	const totalGuests = totalGuestsFromKnown(known);
 	if (!Number.isFinite(totalGuests) || totalGuests < 1) return "";
-	const activeRoomKeys = activeRoomTypeKeySet(hotel);
-	const candidates = ROOM_TYPE_KEYS
-		.map((key) => ({ key, capacity: roomCapacityForKey(key) }))
-		.filter(
-			(item) =>
-				item.capacity >= totalGuests &&
-				(!activeRoomKeys.size || activeRoomKeys.has(item.key))
-		)
+	const candidates = activeRoomCapacityCandidates(hotel)
+		.filter((item) => item.capacity >= totalGuests)
 		.sort((a, b) => a.capacity - b.capacity);
 	return candidates[0]?.key || "";
 }
@@ -440,30 +562,7 @@ function inferRoomSelectionsFromGuests(hotel = {}, known = {}) {
 	if (selectionsFromKnown(known).length) return [];
 	const totalGuests = totalGuestsFromKnown(known);
 	if (!Number.isFinite(totalGuests) || totalGuests < 1) return [];
-	const activeRoomKeys = activeRoomTypeKeySet(hotel);
-	const candidates = ROOM_TYPE_KEYS
-		.map((key) => ({ key, capacity: roomCapacityForKey(key) }))
-		.filter(
-			(item) =>
-				item.capacity > 0 &&
-				(!activeRoomKeys.size || activeRoomKeys.has(item.key))
-		)
-		.map((item) => {
-			const count = normalizeRoomCount(Math.ceil(totalGuests / item.capacity), 1);
-			return {
-				...item,
-				count,
-				unusedCapacity: Math.max(0, count * item.capacity - totalGuests),
-			};
-		})
-		.sort(
-			(a, b) =>
-				a.count - b.count ||
-				a.unusedCapacity - b.unusedCapacity ||
-				roomTypeSortIndex(a.key) - roomTypeSortIndex(b.key)
-		);
-	const selected = candidates[0];
-	return selected?.key ? [{ roomTypeKey: selected.key, count: selected.count }] : [];
+	return bestRoomSelectionsForGuests(hotel, totalGuests);
 }
 
 function localizedAgentName(sc = {}) {
@@ -506,6 +605,20 @@ function activeLanguageCode(sc = {}, known = {}) {
 		String(sc.preferredLanguageCode || "").trim() ||
 		"en"
 	);
+}
+
+function languageFactsFromGuestText(value = "") {
+	const text = String(value || "").toLowerCase();
+	if (!text.trim() || /[\u0600-\u06FF]/.test(text)) return {};
+	if (
+		/[çğıöşü]/i.test(text) ||
+		/\b(?:merhaba|selam|oda|odasi|odas\u0131|gece|g\u00fcn|fiyat|kahvalt|ekonomik|ucuz|uygun|yak\u0131n|yakin|temmuz|a\u011fustos|agustos|m\u0131|mi|var\s*m\u0131|var\s*mi|rezervasyon)\b/i.test(
+			text
+		)
+	) {
+		return { languageCode: "tr", languageName: "Turkish" };
+	}
+	return {};
 }
 
 function looksLikeOrganizationName(value = "") {
@@ -2915,6 +3028,9 @@ function quoteMatchesKnown(known = {}) {
 	const facts = asObject(known);
 	const quote = asObject(facts.quote);
 	const selections = selectionsFromKnown(facts);
+	const totalGuests = totalGuestsFromKnown(facts);
+	const selectedCapacity = roomSelectionsGuestCapacity(selections);
+	if (selectedCapacity > 0 && totalGuests > selectedCapacity) return false;
 	const selectionKey = roomSelectionKey(selections);
 	const quoteSelections = quoteRoomSelections(quote);
 	const quoteSelectionKey = quote.selectionKey || roomSelectionKey(quoteSelections);
@@ -3298,6 +3414,9 @@ function guestWantsToContinueBooking(value = "", action = "") {
 		"\u0627\u062d\u062c\u0632",
 		"\u0627\u062d\u062c\u0632\u064a",
 		"\u0627\u062d\u062c\u0632\u0649",
+		"\u0646\u062d\u062c\u0632",
+		"\u062d\u062c\u0632\u0646\u0627",
+		"\u062e\u0644\u064a\u0646\u0627\u0646\u062d\u062c\u0632",
 		"\u0627\u0643\u062f\u064a",
 		"\u0627\u0643\u062f\u0649",
 		"\u0623\u0643\u062f\u064a",
@@ -4061,6 +4180,27 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	const facts = {};
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
 	if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (!Number.isFinite(Number(facts.children))) {
+		const childContext =
+			text.match(
+				/(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644).{0,50}/iu
+			)?.[0] || "";
+		if (childContext) {
+			const childNumbers = (childContext.match(/\d{1,3}/g) || [])
+				.map((item) => Number(item))
+				.filter((item) => Number.isFinite(item) && item >= 0 && item <= 200);
+			if (childNumbers.length === 1) {
+				facts.children = childNumbers[0];
+			} else if (
+				childNumbers.length >= 2 &&
+				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}\d{1,2}/iu.test(
+					childContext
+				)
+			) {
+				facts.children = childNumbers[childNumbers.length - 1];
+			}
+		}
+	}
 	if (!facts.adults && numbers.length >= 2) {
 		facts.adults = numbers[0];
 		facts.children = Math.min(20, numbers[1]);
@@ -4099,6 +4239,24 @@ function explicitGuestCountFactsFromText(value = "") {
 	const facts = {};
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
 	if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (!Number.isFinite(Number(facts.children))) {
+		const childContext = text.match(new RegExp(`${childLabel}.{0,50}`, "iu"))?.[0] || "";
+		if (childContext) {
+			const childNumbers = (childContext.match(/\d{1,3}/g) || [])
+				.map((item) => Number(item))
+				.filter((item) => Number.isFinite(item) && item >= 0 && item <= 200);
+			if (childNumbers.length === 1) {
+				facts.children = childNumbers[0];
+			} else if (
+				childNumbers.length >= 2 &&
+				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}\d{1,2}/iu.test(
+					childContext
+				)
+			) {
+				facts.children = childNumbers[childNumbers.length - 1];
+			}
+		}
+	}
 	if (!Number.isFinite(Number(facts.adults)) || Number(facts.adults) < 1) return {};
 	if (!Number.isFinite(Number(facts.children))) facts.children = 0;
 	facts.adults = Math.max(1, Math.min(200, Math.floor(Number(facts.adults))));
@@ -5005,6 +5163,7 @@ async function sendBookingProgressFast({
 } = {}) {
 	const key = caseIdText(sc);
 	let bookingKnown = syncKnownFromQuote(dropConflictingQuoteFromKnown(known));
+	bookingKnown = ensureRoomPlanForGuestCapacity(hotel, bookingKnown).known;
 	if (!quoteMatchesKnown(bookingKnown) && quoteInputsKnown(bookingKnown)) {
 		const quoteResult = await quoteTool(sc, bookingKnown).catch((error) => {
 			console.error("[aiagent] fast booking quote refresh failed:", error?.message || error);
@@ -5413,8 +5572,13 @@ function actionToResumeAfterHotelFactAffirmation(
 	if (cleanString(previousAi?.clientAction, 80).toLowerCase() !== "hotel_fact_answered") {
 		return "";
 	}
-	if (!latestGuestShortAffirmative(latestGuest?.message || "", latestAction)) return "";
+	const latestText = latestGuest?.message || "";
+	const wantsToResumeBooking =
+		latestGuestShortAffirmative(latestText, latestAction) ||
+		guestWantsToContinueBooking(latestText, latestAction);
+	if (!wantsToResumeBooking) return "";
 	const priorAi = previousAiBeforeEntry(sc, previousAi, [
+		"review_reservation",
 		"quote_ready",
 		"split_stay_quote_ready",
 		"quote_unavailable",
@@ -5424,7 +5588,7 @@ function actionToResumeAfterHotelFactAffirmation(
 	]);
 	const priorAction = cleanString(priorAi?.clientAction, 80).toLowerCase();
 	if (["quote_unavailable", "split_stay_quote_unavailable"].includes(priorAction)) return "check_alternatives";
-	if (["quote_ready", "split_stay_quote_ready"].includes(priorAction)) return "send_review";
+	if (["quote_ready", "split_stay_quote_ready", "review_reservation"].includes(priorAction)) return "send_review";
 	if (priorAction === "required_details_needed") return "required_details_needed";
 	if (priorAction === "optional_email") return "optional_email";
 	return "";
@@ -6062,6 +6226,139 @@ function hotelFactQuickReplies(sc = {}, known = {}, latestGuest = {}) {
 	];
 }
 
+const BOOKING_CHECKPOINT_ACTIONS = [
+	"review_reservation",
+	"quote_ready",
+	"split_stay_quote_ready",
+	"quote_unavailable",
+	"split_stay_quote_unavailable",
+	"required_details_needed",
+	"optional_email",
+	"alternative_dates_ready",
+	"alternative_dates_unavailable",
+];
+
+function latestBookingCheckpointBeforeEntry(sc = {}, entry = null) {
+	return previousAiBeforeEntry(sc, entry, BOOKING_CHECKPOINT_ACTIONS);
+}
+
+function bookingCheckpointQuickReplies(action = "", sc = {}, known = {}, checkpoint = null) {
+	const cleanAction = cleanString(action || checkpoint?.clientAction, 80).toLowerCase();
+	const languageCode = activeLanguageCode(sc, known);
+	if (
+		cleanAction === "review_reservation" &&
+		!requiredBookingMissing(known).length &&
+		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))
+	) {
+		return reviewQuickReplies(languageCode);
+	}
+	if (["quote_ready", "split_stay_quote_ready"].includes(cleanAction)) {
+		return /^split_/i.test(cleanAction)
+			? splitStayQuickReplies(languageCode)
+			: proceedQuickReplies(languageCode);
+	}
+	if (cleanAction === "optional_email") return emailSkipQuickReplies(languageCode);
+	if (["quote_unavailable", "split_stay_quote_unavailable"].includes(cleanAction)) {
+		return quoteUnavailableQuickReplies(languageCode);
+	}
+	if (["alternative_dates_ready", "alternative_dates_unavailable"].includes(cleanAction)) {
+		return alternativeStayQuickReplies(known.alternativeStays, languageCode);
+	}
+	return [];
+}
+
+function bookingCheckpointRestoreMessage(sc = {}, hotel = {}, known = {}, checkpoint = null) {
+	const action = cleanString(checkpoint?.clientAction, 80).toLowerCase();
+	if (!action || knownHasReservationConfirmation(known)) return "";
+	const missing = requiredBookingMissing(known);
+	if (action === "review_reservation") {
+		if (!missing.length && (quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))) {
+			return buildReviewMessage(sc, known, hotel);
+		}
+		if (missing.length) return buildMandatoryDetailsMessage(sc, known, missing);
+	}
+	if (["quote_ready", "split_stay_quote_ready"].includes(action)) {
+		if (quoteMatchesKnown(known)) {
+			return buildQuoteFallbackMessage(
+				sc,
+				known,
+				{ available: true, quote: asObject(known.quote) },
+				hotel
+			);
+		}
+		const previousText = cleanDisplayString(checkpoint?.message, 2000);
+		if (previousText && !replyPromisesReservationFinalization(previousText)) return previousText;
+	}
+	if (action === "required_details_needed") {
+		if (!missing.length && (quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))) {
+			return buildReviewMessage(sc, known, hotel);
+		}
+		return buildMandatoryDetailsMessage(sc, known, missing);
+	}
+	if (action === "optional_email") {
+		if (!shouldOfferOptionalEmail(sc, known) && (quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known))) {
+			return buildReviewMessage(sc, known, hotel);
+		}
+		return buildOptionalEmailMessage(sc, known);
+	}
+	if (["quote_unavailable", "split_stay_quote_unavailable"].includes(action)) {
+		const quote = asObject(known.quote);
+		if (quoteHasContent(quote) || quote.available === false) {
+			return buildQuoteFallbackMessage(
+				sc,
+				known,
+				{
+					available: false,
+					code: quote.code || "not_available",
+					checkinISO: quote.checkinISO || known.checkinISO,
+					checkoutISO: quote.checkoutISO || known.checkoutISO,
+					roomTypeKey: quote.roomTypeKey || known.roomTypeKey,
+					roomSelections: normalizeRoomSelections(quote.roomSelections || known.roomSelections),
+					roomLabel: quote.roomLabel || "",
+					unavailableSelections: quote.unavailableSelections || [],
+					firstUnavailableDate: quote.firstUnavailableDate || "",
+					currency: quote.currency || known.currency || "SAR",
+				},
+				hotel
+			);
+		}
+	}
+	if (["alternative_dates_ready", "alternative_dates_unavailable"].includes(action)) {
+		const previousText = cleanDisplayString(checkpoint?.message, 2000);
+		if (previousText) return previousText;
+	}
+	return "";
+}
+
+function appendBookingCheckpointToHotelFactReply(
+	reply = "",
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null
+) {
+	const checkpoint = latestBookingCheckpointBeforeEntry(sc, latestGuest);
+	const checkpointText = bookingCheckpointRestoreMessage(sc, hotel, known, checkpoint);
+	if (!checkpointText) return String(reply || "").trim();
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(`${reply || ""} ${latestGuest?.message || ""}`);
+	const bridge = ar
+		? "\u0648\u0646\u0631\u062c\u0639 \u0644\u062e\u0637\u0648\u0629 \u0627\u0644\u062d\u062c\u0632 \u0646\u0641\u0633\u0647\u0627:"
+		: "Back to the same booking step:";
+	return [String(reply || "").trim(), bridge, checkpointText].filter(Boolean).join("\n\n");
+}
+
+function hotelFactQuickRepliesWithBookingCheckpoint(sc = {}, known = {}, latestGuest = {}) {
+	const checkpoint = latestBookingCheckpointBeforeEntry(sc, latestGuest);
+	const action = cleanString(checkpoint?.clientAction, 80).toLowerCase();
+	const checkpointReplies = bookingCheckpointQuickReplies(action, sc, known, checkpoint);
+	return checkpointReplies.length
+		? checkpointReplies
+		: hotelFactQuickReplies(sc, known, latestGuest);
+}
+
 function latestGuestAsksMapOrLocation(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	return /(map|maps|google\s*maps|directions?|location|address|adress|adres|distance|walking|where|kaha|kahan|kahaan|kidhar|pata|\u0628\u0639\u064a\u062f|\u064a\u0628\u0639\u062f|\u062a\u0628\u0639\u062f|\u0642\u0631\u064a\u0628|\u0627\u0644\u0645\u0633\u0627\u0641\u0629|\u0645\u0633\u0627\u0641\u0629|\u0628\u0648\u0627\u0628\u0629|\u0628\u0648\u0627\u0628\u0647|\u0627\u0644\u062d\u0631\u0645|\u0645\u0634\u064a|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u0645\u0648\u0642\u0639|\u0644\u0648\u0643\u064a\u0634\u0646|\u0639\u0646\u0648\u0627\u0646|\u0648\u0635\u0641\s+\u0627\u0644\u0645\u0643\u0627\u0646|\u0648\u064a\u0646|\u0627\u064a\u0646|\u0641\u064a\u0646|\u06a9\u06c1\u0627\u06ba|\u0642\u0631\u06cc\u0628|\u0627\u06cc\u0688\u0631\u06cc\u0633|\u067e\u062a\u06c1)/i.test(
@@ -6476,15 +6773,29 @@ async function sendHotelFactReplyFromOpenAI({
 		fallbackGuest
 	);
 	if (authoritativeReply) {
+		const reply = appendBookingCheckpointToHotelFactReply(
+			authoritativeReply,
+			sc,
+			hotel,
+			known,
+			latestGuest
+		);
 		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, authoritativeReply, {
+		return sendAiMessage(io, sc, reply, {
 			latestGuest,
 			known,
 			clientAction: "hotel_fact_answered",
-			quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
+			quickReplies: hotelFactQuickRepliesWithBookingCheckpoint(sc, known, latestGuest),
 		});
 	}
 	const fallback = buildHotelFactReplyMessage(sc, hotel, fallbackGuest, known);
+	const replySuffix = appendBookingCheckpointToHotelFactReply(
+		"",
+		sc,
+		hotel,
+		known,
+		latestGuest
+	);
 	const answerMode = hotelFactAnswerMode(fallbackGuest);
 	const needsPriceGuidance = latestGuestAsksPriceGuidance(fallbackGuest);
 	return sendBrainToolReplyFromOpenAI({
@@ -6507,9 +6818,10 @@ async function sendHotelFactReplyFromOpenAI({
 				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability and price now or continue with this hotel. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
 		},
 		clientAction: "hotel_fact_answered",
-		quickReplies: hotelFactQuickReplies(sc, known, fallbackGuest),
+		quickReplies: hotelFactQuickRepliesWithBookingCheckpoint(sc, known, latestGuest),
 		fallback,
 		preserveFallbackNumbers: false,
+		replySuffix,
 		typingStartedAt,
 	});
 }
@@ -6728,7 +7040,7 @@ function compactHotelFacts(hotel = {}) {
 			roomTypeKey: room.roomType || "",
 			displayName: room.displayName || room.roomType || "",
 			displayNameArabic: room.displayName_OtherLanguage || "",
-			bedsCount: room.bedsCount || null,
+			bedsCount: roomCapacityForKey(room.roomType) || room.bedsCount || null,
 			basePrice: room.price?.basePrice ?? null,
 			description: String(room.description || "").slice(0, 260),
 			descriptionArabic: String(room.description_OtherLanguage || "").slice(0, 260),
@@ -7793,8 +8105,32 @@ async function quoteTool(sc = {}, known = {}) {
 			  )
 			: 0,
 	});
+	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
 	const selections = selectionsFromKnown(known);
 	const selectionKey = roomSelectionKey(selections);
+	const totalGuests = totalGuestsFromKnown(known);
+	const selectedCapacity = roomSelectionsGuestCapacity(selections);
+	if (selectedCapacity > 0 && totalGuests > selectedCapacity) {
+		const roomLabel = quoteRoomLinesText(
+			{ rooms: selections.map((selection) => ({ ...selection })) },
+			known.roomTypeKey,
+			known.languageCode
+		);
+		return {
+			ok: true,
+			available: false,
+			code: "capacity_exceeded",
+			checkinISO: known.checkinISO,
+			checkoutISO: known.checkoutISO,
+			roomTypeKey: selections.length === 1 ? selections[0].roomTypeKey : known.roomTypeKey || "",
+			roomSelections: selections,
+			roomLabel,
+			currency: hotel?.currency || known.currency || "SAR",
+			selectionKey,
+			totalGuests,
+			selectedCapacity,
+		};
+	}
 	const primary = selections[0] || { roomTypeKey: known.roomTypeKey || "", count: 1 };
 	logTurnStage(caseId, "quote_price_start", {
 		roomTypeKey: primary.roomTypeKey || "",
@@ -8223,6 +8559,29 @@ function latestTextRequestsDateAlternatives(value = "") {
 	);
 }
 
+function latestGuestRequestsCheaperNearbyDates(value = "", action = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = text.replace(/\s+/g, "");
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (cleanAction === "check_alternatives") return true;
+	const asksCheaper =
+		/\b(?:cheaper|cheap|economical|economic|budget|lower price|less expensive|best price|affordable|ucuz|uygun|ekonomik|hesapli|hesapl\u0131)\b/i.test(
+			text
+		) ||
+		/(?:\u0623\u0631\u062e\u0635|\u0627\u0631\u062e\u0635|\u0627\u0642\u0644\u0633\u0639\u0631|\u0623\u0642\u0644\u0633\u0639\u0631|\u0627\u0642\u062a\u0635\u0627\u062f\u064a|\u0627\u0642\u062a\u0635\u0627\u062f\u064a\u0629|\u0645\u064a\u0632\u0627\u0646\u064a\u0629)/iu.test(
+			compact
+		);
+	const asksNearbyDates =
+		latestTextRequestsDateAlternatives(value) ||
+		/\b(?:near|nearby|around|close to|around these dates|similar dates|yak\u0131n|yakin|civar)\b/i.test(
+			text
+		);
+	return asksCheaper && asksNearbyDates;
+}
+
 function latestGuestRequestsSameDateRoomOptions(
 	latestText = "",
 	latestAction = "",
@@ -8512,7 +8871,7 @@ async function suggestRoomOptionsForStay(
 	for (const room of activeRooms) {
 		const roomTypeKey = String(room.roomType || "");
 		const requestedRooms = roomOptionRequestedRooms(roomTypeKey, known);
-		const roomCapacity = Number(room.bedsCount || roomCapacityForKey(roomTypeKey) || 0) || null;
+		const roomCapacity = Number(roomCapacityForKey(roomTypeKey) || room.bedsCount || 0) || null;
 		const quote = priceRoomForStay(
 			hotel,
 			{ roomType: roomTypeKey },
@@ -9165,6 +9524,32 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 	const requestedRoomLabel = resultSelections.length
 		? quoteRoomLinesText({ rooms: resultSelections }, known.roomTypeKey, languageCode)
 		: roomLabel;
+	if (result.code === "capacity_exceeded") {
+		const totalGuests = Number(result.totalGuests || totalGuestsFromKnown(known) || 0) || 0;
+		const selectedCapacity =
+			Number(result.selectedCapacity || roomSelectionsGuestCapacity(selectionsFromKnown(known)) || 0) || 0;
+		return ar
+			? [
+					`${arabicGuestAddress(sc, known)}\u060c \u0627\u0644\u062a\u0631\u062a\u064a\u0628 \u0627\u0644\u0645\u062d\u062f\u062f \u0644\u0644\u063a\u0631\u0641 \u0644\u0627 \u064a\u0643\u0641\u064a \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641.`,
+					requestedRoomLabel ? `\u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631 \u0627\u0644\u062d\u0627\u0644\u064a: ${requestedRoomLabel}.` : "",
+					totalGuests && selectedCapacity
+						? `\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 ${formatNumber(totalGuests, languageCode)} \u0648\u0627\u0644\u0633\u0639\u0629 \u0627\u0644\u0645\u0646\u0627\u0633\u0628\u0629 \u0644\u0644\u063a\u0631\u0641 \u0627\u0644\u0645\u062d\u062f\u062f\u0629 ${formatNumber(selectedCapacity, languageCode)}.`
+						: "",
+					`\u0623\u062d\u062a\u0627\u062c \u0623\u0639\u062f\u0644 \u062a\u0648\u0632\u064a\u0639 \u0627\u0644\u063a\u0631\u0641 \u0623\u0648 \u0623\u0636\u064a\u0641 \u063a\u0631\u0641\u0629 \u0645\u0646\u0627\u0633\u0628\u0629 \u0642\u0628\u0644 \u0623\u0646 \u0623\u0639\u0637\u064a\u0643 \u0633\u0639\u0631\u0627 \u0646\u0647\u0627\u0626\u064a\u0627.`,
+			  ]
+					.filter(Boolean)
+					.join("\n")
+			: [
+					`${guestDisplayName(sc)}, the selected room setup does not fit the guest count.`,
+					requestedRoomLabel ? `Current selection: ${requestedRoomLabel}.` : "",
+					totalGuests && selectedCapacity
+						? `Guests: ${totalGuests}; selected capacity: ${selectedCapacity}.`
+						: "",
+					`I need to adjust the room distribution or add a suitable room before giving a final price.`,
+			  ]
+					.filter(Boolean)
+					.join("\n");
+	}
 	if (result.code === "same_day_checkin_not_supported") {
 		const requestedDate = formatDate(
 			result.checkinISO || known.checkinISO,
@@ -10444,6 +10829,7 @@ async function saveKnownFacts(caseId = "", known = {}) {
 
 async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = null) {
 	let reviewKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	reviewKnown = ensureRoomPlanForGuestCapacity(hotel, reviewKnown).known;
 	if (!quoteMatchesKnown(reviewKnown) && quoteInputsKnown(reviewKnown)) {
 		const quoteResult = await quoteTool(sc, reviewKnown);
 		if (quoteResult.available && quoteResult.quote) {
@@ -10513,6 +10899,7 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
 	const caseId = caseIdText(sc);
 	known = filterInactiveRoomSelectionsForHotel(hotel, known).known;
+	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
 	logTurnStage(caseId, "quote_tool_start", {
 		checkinISO: known.checkinISO || "",
 		checkoutISO: known.checkoutISO || "",
@@ -12084,6 +12471,7 @@ async function sendBrainToolReplyFromOpenAI({
 	requireContact = false,
 	requirePolicy = false,
 	preserveFallbackNumbers = true,
+	replySuffix = "",
 } = {}) {
 	const caseId = caseIdText(sc);
 	let decision = null;
@@ -12403,6 +12791,10 @@ async function sendBrainToolReplyFromOpenAI({
 		await waitForTypingMinimum(typingStartedAt);
 		return closeCaseWithOutro(io, sc, known, latestGuest, reply);
 	}
+	const suffix = String(replySuffix || "").trim();
+	if (suffix && !reply.includes(suffix)) {
+		reply = [String(reply || "").trim(), suffix].filter(Boolean).join("\n\n");
+	}
 	await waitForTypingMinimum(typingStartedAt);
 	return sendAiMessage(io, sc, reply, {
 		latestGuest,
@@ -12416,6 +12808,7 @@ async function sendBrainToolReplyFromOpenAI({
 async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
 	known = filterInactiveRoomSelectionsForHotel(hotel, known).known;
+	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
 	if (normalizeSplitStayPeriods(known.splitStayPeriods).length >= 2) {
 		return handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, typingStartedAt);
 	}
@@ -13095,6 +13488,7 @@ async function executeBrainFirstDecision({
 	nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
 		fallbackKnown: known,
 	}).known;
+	nextKnown = ensureRoomPlanForGuestCapacity(hotel, nextKnown).known;
 	const hotelFactFollowUpAction = actionToResumeAfterHotelFactAffirmation(
 		sc,
 		latestGuest,
@@ -13120,6 +13514,23 @@ async function executeBrainFirstDecision({
 			nextKnown
 		);
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (hotelFactFollowUpAction === "required_details_needed") {
+		await saveKnownFacts(key, nextKnown);
+		return sendBookingProgressFast({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			latestText,
+			typingStartedAt,
+		});
+	}
+	if (hotelFactFollowUpAction === "optional_email") {
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendOptionalEmailOffer(io, sc, nextKnown, latestGuest);
 	}
 	if (
 		latestGuest &&
@@ -13719,6 +14130,7 @@ async function submitReservationForCase(io, caseOrId) {
 	if (!allowed) return { ok: false, reason: reason || "ai_not_allowed" };
 	const latestGuest = latestGuestEntry(sc);
 	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
+	known = mergeKnownFacts(known, languageFactsFromGuestText(latestGuest?.message || ""));
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	known = confirmKnownIdentityIfGuestConfirms(
 		known,
@@ -13727,6 +14139,7 @@ async function submitReservationForCase(io, caseOrId) {
 		previousAi
 	);
 	known = dropConflictingQuoteFromKnown(known);
+	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
 	if (normalizeSplitStayPeriods(known.splitStayPeriods).length >= 2) {
 		if (!splitStayQuoteMatchesKnown(known) && splitStayQuoteInputsKnown(known)) {
 			await handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, 0);
@@ -13894,6 +14307,9 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	known = recoverKnownFactsFromConversation(sc, known);
 	const latestText = String(latestGuest?.message || "");
+	if (latestGuest) {
+		known = mergeKnownFacts(known, languageFactsFromGuestText(latestText));
+	}
 	const knownBeforeLatestGuestMerge = cloneKnownFacts(known);
 	if (
 		latestGuest &&
@@ -14170,6 +14586,9 @@ async function planTurn(io, supportCaseOrId) {
 	const activeRoomSelectionFilter = filterInactiveRoomSelectionsForHotel(hotel, known);
 	known = activeRoomSelectionFilter.known;
 	const appliedActiveRoomSelectionFilter = activeRoomSelectionFilter.changed;
+	const capacityRoomPlan = ensureRoomPlanForGuestCapacity(hotel, known);
+	known = capacityRoomPlan.known;
+	const appliedCapacityRoomPlan = capacityRoomPlan.changed;
 	if (
 		normalizeSplitStayPeriods(known.splitStayPeriods).length < 2 &&
 		(!validISODate(known.checkinISO) || !validISODate(known.checkoutISO))
@@ -14195,7 +14614,8 @@ async function planTurn(io, supportCaseOrId) {
 			appliedDateBoundaryChange ||
 			appliedAlternativeStayChoice ||
 			appliedSameDateRoomChoice ||
-			appliedActiveRoomSelectionFilter) &&
+			appliedActiveRoomSelectionFilter ||
+			appliedCapacityRoomPlan) &&
 		quoteHasContent(known.quote) &&
 		!quoteCanBePreservedForKnown(known.quote, known)
 	) {
@@ -14268,6 +14688,23 @@ async function planTurn(io, supportCaseOrId) {
 			known
 		);
 		return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (hotelFactFollowUpAction === "required_details_needed") {
+		await saveKnownFacts(key, known);
+		return sendBookingProgressFast({
+			io,
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			latestText,
+			typingStartedAt,
+		});
+	}
+	if (hotelFactFollowUpAction === "optional_email") {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendOptionalEmailOffer(io, sc, known, latestGuest);
 	}
 	if (latestAction === "closer_hotel_request") {
 		await saveKnownFacts(key, known);
@@ -14456,6 +14893,17 @@ async function planTurn(io, supportCaseOrId) {
 		await waitForTypingMinimum(typingStartedAt);
 		logTurnStage(key, "same_date_room_options_pre_brain_start");
 		return handleBrainRoomOptions(io, sc, hotel, known, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsCheaperNearbyDates(latestText, latestAction) &&
+		quoteInputsKnown(known) &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		logTurnStage(key, "cheaper_nearby_dates_pre_brain_start");
+		return handleBrainAlternatives(io, sc, hotel, known, latestGuest, typingStartedAt);
 	}
 	if (
 		latestGuest &&
@@ -15473,6 +15921,7 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 		known.languageName = sc.preferredLanguage;
 	}
 	const latestText = String(latestGuest?.message || "");
+	known = mergeKnownFacts(known, languageFactsFromGuestText(latestText));
 	const mappedRoom = mapRoomToKey(latestText);
 	if (mappedRoom && textMentionsSpecificRoomType(latestText) && !known.roomTypeKey) {
 		known.roomTypeKey = mappedRoom;
@@ -15481,7 +15930,8 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 		const inferredRoomType = inferRoomTypeFromGuests(hotel, known);
 		if (inferredRoomType) known.roomTypeKey = inferredRoomType;
 	}
-	if (known.checkinISO && known.checkoutISO && known.roomTypeKey) {
+	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
+	if (quoteInputsKnown(known)) {
 		const quoteResult = await quoteTool(sc, known).catch((error) => {
 			console.error("[aiagent] worker fallback quote failed:", error?.message || error);
 			return null;
@@ -15645,6 +16095,9 @@ const exportedOrchestrator = {
 		selectionsFromKnown,
 		activeRoomTypeKeySet,
 		filterInactiveRoomSelectionsForHotel,
+		bestRoomSelectionsForGuests,
+		ensureRoomPlanForGuestCapacity,
+		roomSelectionsGuestCapacity,
 		quoteRoomCount,
 		roomCountOnlyFromText,
 		roomCountCorrectionFromText,
@@ -15691,6 +16144,8 @@ const exportedOrchestrator = {
 		shortApproximatePriceFollowup,
 		latestGuestAsksPriceWithContext,
 		latestGuestRaisesBudgetConcern,
+		latestGuestRequestsCheaperNearbyDates,
+		languageFactsFromGuestText,
 		replyHasHotelValuePitch,
 		latestGuestAsksBookingProcess,
 		bookingProcessReplyNeedsCorrection,
@@ -15716,6 +16171,10 @@ const exportedOrchestrator = {
 		hotelFactMapReplyNeedsCorrection,
 		hotelFactAnswerMode,
 		hotelFactQuickReplies,
+		hotelFactQuickRepliesWithBookingCheckpoint,
+		appendBookingCheckpointToHotelFactReply,
+		bookingCheckpointRestoreMessage,
+		compactHotelFacts,
 		latestGuestAsksPriceGuidance,
 		latestGuestAsksCompoundLocationAndPrice,
 		hotelDisplayNameForLanguage,

@@ -5,6 +5,7 @@
 	"main": "index.js",
 	"scripts": {
 		"start": "nodemon server.js",
+		"test:chatbot": "node scripts/chatbotRegressionChecks.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
 	},
