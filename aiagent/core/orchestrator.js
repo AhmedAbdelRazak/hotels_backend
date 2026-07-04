@@ -1488,7 +1488,11 @@ function singleGregorianDateFromText(value = "", known = {}) {
 	const raw = digitsToEnglish(String(value || ""));
 	const isoMatches = raw.match(/\b20\d{2}-\d{2}-\d{2}\b/g) || [];
 	if (isoMatches.length === 1) return validISODate(isoMatches[0]);
-	const monthDate = quickSingleGregorianMonthDate(raw, known);
+	const monthDate =
+		quickSingleGregorianMonthDate(raw, known) ||
+		(/[\u0600-\u06FF]/.test(raw)
+			? quickSingleGregorianMonthDate(normalizeArabicSingleGregorianDateText(raw), known)
+			: null);
 	if (monthDate?.iso) return validISODate(monthDate.iso);
 	const matches = numericSlashDateTokens(raw);
 	if (matches.length !== 1) return "";
@@ -1509,6 +1513,19 @@ function singleGregorianDateFromText(value = "", known = {}) {
 		if (nextYearIso) iso = nextYearIso;
 	}
 	return iso;
+}
+
+function normalizeArabicSingleGregorianDateText(value = "") {
+	return digitsToEnglish(normalizeNumberWordsForParsing(String(value || "")))
+		.toLowerCase()
+		.normalize("NFD")
+		.replace(/[\u0300-\u036f\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625\u0671]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647")
+		.replace(/[_,.;:()[\]{}]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function slashDateMatchToISOWithPreference(
@@ -1774,6 +1791,10 @@ function normalizeNationalityHint(value = "") {
 		ksa: "Saudi",
 	};
 	if (mapped[key]) return mapped[key];
+	if (/^alg[e\u00e9]rien(?:ne)?$/i.test(raw)) return "Algerian";
+	if (/^marocain(?:e)?$/i.test(raw)) return "Moroccan";
+	if (/^tunisien(?:ne)?$/i.test(raw)) return "Tunisian";
+	if (/^(?:egyptien(?:ne)?|[\u00e9e]gyptien(?:ne)?)$/i.test(raw)) return "Egyptian";
 	if (/^(american|egyptian|saudi|emirati|kuwaiti|qatari|bahraini|omani|jordanian|pakistani|indian|british|canadian|moroccan|algerian|tunisian|iraqi|syrian|lebanese|palestinian|sudanese|yemeni|turkish|indonesian|malaysian|afghan|afghani)$/i.test(raw)) {
 		return raw;
 	}
@@ -1787,6 +1808,7 @@ function nationalityFromText(value = "") {
 	const text = stripChatMarkup(value);
 	const patterns = [
 		/(?:nationality|citizenship)\s*(?:is|:|-)?\s*([A-Za-z][A-Za-z\s-]{1,40}?)(?=\s*(?:,|;|\.|\band\b|\bphone\b|\bmobile\b|$))/i,
+		/(?:nationalit[e\u00e9])\s*(?:est|is|:|-)?\s*([A-Za-z\u00c0-\u017F][A-Za-z\u00c0-\u017F\s-]{1,40}?)(?=\s*(?:,|;|\.|\bet\b|\band\b|\bt[ée]l\b|\bphone\b|\bmobile\b|$))/i,
 		/(?:\u0627\u0644\u062c\u0646\u0633\u064a\u0629|\u062c\u0646\u0633\u064a\u062a\u064a|\u062c\u0646\u0633\u064a\u062a\u0649|\u062c\u0646\u0633\u064a\u0629)\s*(?:[:\-\u060C,]|\u0647\u064a)?\s*([\u0600-\u06FF][\u0600-\u06FF\s-]{1,40}?)(?=\s*(?:\u060C|,|;|\.|\u0648?\u0631\u0642\u0645|\u0627\u0644\u0647\u0627\u062a\u0641|\u0647\u0627\u062a\u0641|$))/iu,
 	];
 	for (const pattern of patterns) {
@@ -3810,6 +3832,9 @@ function previousAiAskedForCheckinDate(previousAi = {}) {
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!text) return false;
+	if (/(?:\u062a\u0627\u0631\u064a\u062e\s*(?:\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644)|\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0645\u0646\s+(?:\u064a\u0648\u0645|\u062a\u0627\u0631\u064a\u062e))/iu.test(text)) {
+		return true;
+	}
 	return /\b(?:check\s*in|check-in|arrival|arrive)\b/i.test(text) ||
 		/(?:تاريخ\s*(?:الدخول|الوصول)|الدخول|الوصول|من\s+يوم|من\s+تاريخ)/iu.test(text);
 }
@@ -3820,6 +3845,9 @@ function previousAiAskedForCheckoutDate(previousAi = {}) {
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!text) return false;
+	if (/(?:\u062a\u0627\u0631\u064a\u062e\s*(?:\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629)|\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u0649\s+\u064a\u0648\u0645|\u0625\u0644\u0649\s+\u064a\u0648\u0645|\u062d\u062a\u0649|\u0644\u063a\u0627\u064a\u0629)/iu.test(text)) {
+		return true;
+	}
 	return /\b(?:check\s*out|check-out|checkout|departure|depart|leave|leaving|until)\b/i.test(text) ||
 		/(?:تاريخ\s*(?:الخروج|المغادرة)|الخروج|المغادرة|الى\s+يوم|إلى\s+يوم|حتى)/iu.test(text);
 }
@@ -4259,10 +4287,13 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	const rosterFacts = guestRosterFactsFromAgeList(value);
 	if (Object.keys(rosterFacts).length) return rosterFacts;
 	const adultMatch =
-		text.match(/(?:^|\s)(\d{1,3})\s*(?:adults?|grownups?|personnes?\s+adultes?|adultes?|hommes?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)(?:$|\s)/iu) ||
+		text.match(/(?:^|\s|\u0648)(\d{1,3})\s*(?:adults?|grownups?|personnes?\s+adultes?|adultes?|hommes?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)(?:$|\s)/iu) ||
 		text.match(/(?:adults?|personnes?\s+adultes?|adultes?|hommes?|\u0628\u0627\u0644\u063a(?:\u064a\u0646)?|\u0643\u0628\u0627\u0631|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u064a\u0646)\s*(\d{1,3})/iu);
+	const childUnderAgeTrailingMatch = text.match(
+		/(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644).{0,24}(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,12}\d{1,2}\s*(?:\u0633\u0646\u0629|\u0633\u0646\u0647|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)?\s+(\d{1,2})(?:$|\s|[^\p{L}0-9])/iu
+	);
 	const childMatch =
-		text.match(/(?:^|\s)(\d{1,2})\s*(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)(?:$|\s)/iu) ||
+		text.match(/(?:^|\s|\u0648)(\d{1,2})\s*(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)(?:$|\s)/iu) ||
 		text.match(/(?:children|child|kids?|enfants?|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)\s*(\d{1,2})/iu);
 	const hasAgeMarker =
 		/(\d{1,2})\s*(?:\u0633\u0646\u0629|\u0633\u0646\u0647|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)(?=$|[^\p{L}])/iu.test(
@@ -4274,7 +4305,8 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 		.filter((number) => Number.isFinite(number) && number >= 0 && number <= 200);
 	const facts = {};
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
-	if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (childUnderAgeTrailingMatch?.[1]) facts.children = Number(childUnderAgeTrailingMatch[1]);
+	else if (childMatch?.[1]) facts.children = Number(childMatch[1]);
 	if (!Number.isFinite(Number(facts.children))) {
 		const childContext =
 			text.match(
@@ -4288,9 +4320,13 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 				facts.children = childNumbers[0];
 			} else if (
 				childNumbers.length >= 2 &&
-				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}\d{1,2}/iu.test(
-					childContext
-				)
+				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}(\d{1,2})/iu.test(childContext)
+			) {
+				const ageNumber = Number(childContext.match(/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}(\d{1,2})/iu)?.[1]);
+				facts.children = childNumbers.find((number) => number !== ageNumber) || childNumbers[0];
+			} else if (
+				childNumbers.length >= 2 &&
+				/\d{1,2}\s*(?:\u0633\u0646\u0629|\u0633\u0646\u0647|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)/iu.test(childContext)
 			) {
 				facts.children = childNumbers[childNumbers.length - 1];
 			}
@@ -4326,14 +4362,18 @@ function explicitGuestCountFactsFromText(value = "") {
 	const childLabel =
 		"(?:children|child|kids?|enfants?|\\u0637\\u0641\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644)";
 	const adultMatch =
-		text.match(new RegExp(`(?:^|\\s)(\\d{1,3})\\s*${adultLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		text.match(new RegExp(`(?:^|\\s|\\u0648)(\\d{1,3})\\s*${adultLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
 		text.match(new RegExp(`${adultLabel}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+	const childUnderAgeTrailingMatch = text.match(
+		new RegExp(`${childLabel}.{0,24}(?:under|below|less\\s+than|younger\\s+than|moins\\s+de|moins\\s+que|\\u062a\\u062d\\u062a|\\u0623\\u0642\\u0644|\\u0627\\u0642\\u0644|\\u062f\\u0648\\u0646).{0,12}\\d{1,2}\\s*(?:\\u0633\\u0646\\u0629|\\u0633\\u0646\\u0647|\\u0633\\u0646\\u064a\\u0646|\\u0639\\u0627\\u0645|\\u0639\\u0627\\u0645\\u0627|years?|yrs?|y\\/?o)?\\s+(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu")
+	);
 	const childMatch =
-		text.match(new RegExp(`(?:^|\\s)(\\d{1,2})\\s*${childLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		text.match(new RegExp(`(?:^|\\s|\\u0648)(\\d{1,2})\\s*${childLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
 		text.match(new RegExp(`${childLabel}\\s*(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
 	const facts = {};
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
-	if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (childUnderAgeTrailingMatch?.[1]) facts.children = Number(childUnderAgeTrailingMatch[1]);
+	else if (childMatch?.[1]) facts.children = Number(childMatch[1]);
 	if (!Number.isFinite(Number(facts.children))) {
 		const childContext = text.match(new RegExp(`${childLabel}.{0,50}`, "iu"))?.[0] || "";
 		if (childContext) {
@@ -4344,9 +4384,13 @@ function explicitGuestCountFactsFromText(value = "") {
 				facts.children = childNumbers[0];
 			} else if (
 				childNumbers.length >= 2 &&
-				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}\d{1,2}/iu.test(
-					childContext
-				)
+				/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}(\d{1,2})/iu.test(childContext)
+			) {
+				const ageNumber = Number(childContext.match(/(?:under|below|less\s+than|younger\s+than|moins\s+de|moins\s+que|\u062a\u062d\u062a|\u0623\u0642\u0644|\u0627\u0642\u0644|\u062f\u0648\u0646).{0,18}(\d{1,2})/iu)?.[1]);
+				facts.children = childNumbers.find((number) => number !== ageNumber) || childNumbers[0];
+			} else if (
+				childNumbers.length >= 2 &&
+				/\d{1,2}\s*(?:\u0633\u0646\u0629|\u0633\u0646\u0647|\u0633\u0646\u064a\u0646|\u0639\u0627\u0645|\u0639\u0627\u0645\u0627|years?|yrs?|y\/?o)/iu.test(childContext)
 			) {
 				facts.children = childNumbers[childNumbers.length - 1];
 			}
@@ -7431,11 +7475,13 @@ function conversationHasGuestCountSignal(sc = {}) {
 function sanitizeBrainFactsForLatestText(facts = {}, currentKnown = {}, latestText = "", decision = {}) {
 	void decision;
 	const next = { ...asObject(facts) };
+	const explicitGuestCountFacts = explicitGuestCountFactsFromText(latestText);
+	const relationshipGuestFacts = relationshipGuestFactsFromText(latestText, currentKnown);
 	const latestGuestCountEvidence =
 		latestTextHasExplicitGuestCount(latestText) ||
 		Boolean(peopleCountFromLine(latestText)) ||
-		Boolean(Object.keys(explicitGuestCountFactsFromText(latestText)).length) ||
-		Boolean(Object.keys(relationshipGuestFactsFromText(latestText, currentKnown)).length);
+		Boolean(Object.keys(explicitGuestCountFacts).length) ||
+		Boolean(Object.keys(relationshipGuestFacts).length);
 	if (!latestGuestCountEvidence) {
 		delete next.adults;
 		delete next.children;
@@ -7445,6 +7491,13 @@ function sanitizeBrainFactsForLatestText(facts = {}, currentKnown = {}, latestTe
 			delete next.guest.adults;
 			delete next.guest.children;
 			delete next.guest.guests;
+		}
+	} else if (Object.keys(explicitGuestCountFacts).length) {
+		if (Number.isFinite(Number(explicitGuestCountFacts.adults))) {
+			next.adults = explicitGuestCountFacts.adults;
+		}
+		if (Number.isFinite(Number(explicitGuestCountFacts.children))) {
+			next.children = explicitGuestCountFacts.children;
 		}
 	}
 	const latestNamedRoomEvidence = textMentionsSpecificRoomType(latestText);

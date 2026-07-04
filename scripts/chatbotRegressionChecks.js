@@ -88,6 +88,49 @@ check("Arabic labeled children-under-age count is preserved", () => {
 	);
 });
 
+check("Arabic children-under-age with dates ignores the age as child count", () => {
+	const text =
+		"\u0646\u062d\u0646 \u0664 \u0643\u0628\u0627\u0631 \u0648\u0663 \u0623\u0637\u0641\u0627\u0644 \u062a\u062d\u062a \u0661\u0662 \u0633\u0646\u0629 \u0645\u0646 \u0662\u0665 \u0623\u063a\u0633\u0637\u0633 \u0625\u0644\u0649 \u0662\u0668 \u0623\u063a\u0633\u0637\u0633";
+	assert.deepStrictEqual(orchestrator.explicitGuestCountFactsFromText(text), {
+		adults: 4,
+		children: 3,
+	});
+	assert.deepStrictEqual(
+		orchestrator.sanitizeBrainFactsForLatestText({ adults: 4, children: 19 }, {}, text),
+		{ adults: 4, children: 3 }
+	);
+});
+
+check("Arabic checkout correction with Arabic month is parsed", () => {
+	const text =
+		"\u0644\u0627\u060c \u0642\u0635\u062f\u064a \u0627\u0644\u062e\u0631\u0648\u062c \u0661\u0662 \u0623\u063a\u0633\u0637\u0633";
+	assert.strictEqual(
+		orchestrator.standaloneSingleDateFromText(text, {
+			checkinISO: "2026-08-05",
+			checkoutISO: "2026-08-10",
+		}),
+		"2026-08-12"
+	);
+	assert.deepStrictEqual(
+		orchestrator.dateBoundaryFactsFromAskedAnswer(
+			text,
+			{ checkinISO: "2026-08-05", checkoutISO: "2026-08-10" },
+			{ message: "\u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c\u061f" }
+		),
+		{ checkoutISO: "2026-08-12", dateCalendar: "gregorian" }
+	);
+});
+
+check("French nationality with accent is captured", () => {
+	const text =
+		"Bonjour, je veux une chambre triple du 25 ao\u00fbt au 28 ao\u00fbt pour 3 adultes. Nationalit\u00e9 alg\u00e9rienne.";
+	assert.strictEqual(orchestrator.nationalityFromIdentityText(text), "Algerian");
+	assert.deepStrictEqual(orchestrator.bookingIdentityFactsFromText(text), {
+		nationality: "Algerian",
+		nationalityConfirmed: true,
+	});
+});
+
 check("Seven guests produce family plus double room plan", () => {
 	const selections = orchestrator.bestRoomSelectionsForGuests(hotel, 7);
 	const map = selectionMap(selections);
