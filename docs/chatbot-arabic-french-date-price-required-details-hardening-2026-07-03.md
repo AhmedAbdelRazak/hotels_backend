@@ -15,6 +15,139 @@ OpenAI remains the brain. The backend orchestrator should preserve known facts,
 route obvious tool turns, and prevent stale or destructive memory changes from
 overwriting a better guest-derived state.
 
+## 2026-07-03 8-Bed Planning, Side-Question, and Live QA Follow-Up
+
+This follow-up was triggered by production support case
+`6a4870ad03ee56c351e6130a`.
+
+Observed guest intent:
+
+- Arabic guest asked for a room/stay for himself and 6 friends, then asked if
+  rooms with 8 beds were available.
+- After check-in/check-out dates were supplied, the bot considered options that
+  did not exist at Zad Ajyad instead of planning real hotel room combinations.
+
+Important hotel rule confirmed during this pass:
+
+- Do not trust the raw `bedsCount` database value alone for Zad Ajyad capacity.
+  It was observed as `1` across active room types.
+- Capacity is derived from the canonical room type first:
+  - `doubleRooms` = 2 beds/guest capacity
+  - `tripleRooms` = 3 beds/guest capacity
+  - `quadRooms` = 4 beds/guest capacity
+  - `familyRooms` = 5 beds/guest capacity
+- Therefore an 8-bed request should plan `1 familyRooms + 1 tripleRooms`, not an
+  imaginary single 8-bed room.
+
+Production behavior hardened in this follow-up:
+
+- Requested bed count and relationship guest count are preserved through later
+  date turns. Example: "me and 6 friends" plus "8 beds" becomes 7 guests with an
+  8-bed target, then plans `familyRooms:1 + tripleRooms:1`.
+- Room planning remains generic and data-driven. The 8-bed case is not hard
+  coded; it falls out of the active room-capacity planner.
+- Arabic date turns like `15 August to 25 August`, Arabic checkout corrections,
+  Arabic children-under-age phrases, and French accented nationality continue to
+  be parsed deterministically before the model can overwrite them.
+- If the guest asks a hotel fact or service question during a booking step, the
+  bot answers that question first, then restores the latest booking checkpoint
+  and buttons.
+- Final-review side questions now restore the stored safe quick replies from the
+  checkpoint when strict quote regeneration is too conservative. This preserves
+  `place_reservation` / `revise_reservation` after questions such as "Do you
+  have a bus to Haram?"
+- If the brain-first OpenAI call times out, the orchestrator now falls back to a
+  deterministic route instead of silently returning no guest-facing answer:
+  hotel fact, quote, split-stay quote, final review, or required-details prompt,
+  depending on the known facts.
+
+Runtime commits from this follow-up:
+
+- `2d98893` - requested bed planning and initial 8-bed regression coverage.
+- `3477205` - Arabic/French parsing hardening for recent scenarios.
+- `38e983c` - keep hotel fact replies ahead of quote refresh.
+- `d68bcb8` - prioritize hotel fact side questions before quote refresh paths.
+- `bb66b37` - restore booking checkpoint buttons after hotel facts.
+- `6232ac6` - add brain-first timeout fallback so guests are not ignored on an
+  OpenAI timeout.
+
+Files touched by the runtime follow-up:
+
+- `aiagent/core/orchestrator.js`
+- `scripts/chatbotRegressionChecks.js`
+- This documentation file
+
+Validation performed:
+
+- Local `npm run test:chatbot`: `PASS 17 chatbot regression checks`.
+- Server `npm run test:chatbot`: `PASS 17 chatbot regression checks`.
+- Production deployed commit: `6232ac6`.
+- GitHub `origin/master`: `6232ac6` before this documentation-only update.
+- PM2 app: `hotels-backend`, status `online`, unstable restarts `0`.
+- Health endpoint:
+  - `http://127.0.0.1:8080/api/aiagent/health`
+  - returned `ok: true`, `openai: true`
+  - model family: `gpt-5.4-mini`
+  - reasoning effort: `low`
+
+Final live production QA sweep:
+
+- Runner marker: `codexqa-20260704-1783137487523`
+- Total scenarios: `22`
+- Passed: `22`
+- Failed: `0`
+- Created support cases: `22`
+- Real tracked test reservations created: `4`
+- Duplicate fixture reservations created: `4`
+- Average scenario time: `15049 ms`
+- Cleanup result: `supportCasesDeleted: 22`, `reservationsDeleted: 8`
+- Post-cleanup verification:
+  - marker support cases remaining: `0`
+  - marker fixture reservations remaining: `0`
+
+The final live QA scenarios were:
+
+1. Exact Arabic 8-bed support case plans `familyRooms:1 + tripleRooms:1`.
+2. 8-bed final-review bus question answers the bus question and keeps final
+   review buttons.
+3. Actual 8-bed reservation creation creates one reservation with two rooms:
+   `familyRooms:1 + tripleRooms:1`.
+4. July 2 unavailable quote detour resumes alternatives after a hotel-fact
+   answer.
+5. Booking-process question preserves known dates and room.
+6. Arabic rapid date correction keeps the latest intended dates.
+7. Arabic price follow-up with existing facts returns the quote path.
+8. French details parse adults, accented nationality, and triple room.
+9. Arabic children-under-12 count preserves children as children, not age as
+   count.
+10. Seven guests plan `familyRooms:1 + doubleRooms:1` and produce a guest-facing
+    reply.
+11. Ten guests plan `familyRooms:2` and produce a guest-facing reply.
+12. Explicit `1 double + 1 quad` selection is preserved and produces a
+    guest-facing reply.
+13. Same-day check-in is blocked politely.
+14. Guest asking for a confirmation number before creation does not get a fake
+    confirmation.
+15. Thank-you / no-more-help path uses a safe outro and does not imply a pending
+    booking.
+16. Short reaction after hotel fact does not repeat a long fact answer.
+17. Optional email skip proceeds to final review.
+18. Profile phone "same number" answer is accepted.
+19. One duplicate reservation warns before creating another.
+20. Duplicate-warning acknowledgement then creates a separate marked test
+    booking.
+21. Two duplicate reservations hard-cut automatic creation.
+22. Split-stay creates separate reservations and sends the outro.
+
+Cleanup caution for future work:
+
+- The live QA runner creates real marked support cases and real marked test
+  reservations. It must always delete by exact marker/case/reservation IDs only.
+- Do not delete broad production support cases or reservations during chatbot
+  testing.
+- Existing server `.env.backup-*` and `.bak-*` files are historical artifacts and
+  were intentionally left untouched.
+
 ## Final Outcome Summary
 
 Final deployed backend commits:
