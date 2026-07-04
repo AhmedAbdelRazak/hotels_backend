@@ -6498,6 +6498,11 @@ function hotelFactQuickRepliesWithBookingCheckpoint(sc = {}, known = {}, latestG
 		: hotelFactQuickReplies(sc, known, latestGuest);
 }
 
+function shouldAnswerHotelFactNow(latestGuest = null, contextualHotelFactQuestion = "") {
+	if (!latestGuest) return false;
+	return Boolean(contextualHotelFactQuestion || latestGuestAsksHotelFactOnly(latestGuest));
+}
+
 function latestGuestAsksMapOrLocation(latestGuest = {}) {
 	const text = normalizeDigits(String(latestGuest?.message || "")).toLowerCase();
 	return /(map|maps|google\s*maps|directions?|location|address|adress|adres|distance|walking|where|kaha|kahan|kahaan|kidhar|pata|\u0628\u0639\u064a\u062f|\u064a\u0628\u0639\u062f|\u062a\u0628\u0639\u062f|\u0642\u0631\u064a\u0628|\u0627\u0644\u0645\u0633\u0627\u0641\u0629|\u0645\u0633\u0627\u0641\u0629|\u0628\u0648\u0627\u0628\u0629|\u0628\u0648\u0627\u0628\u0647|\u0627\u0644\u062d\u0631\u0645|\u0645\u0634\u064a|\u062e\u0631\u064a\u0637\u0629|\u062e\u0631\u064a\u0637\u0647|\u062e\u0631\u0627\u0626\u0637|\u0645\u0648\u0642\u0639|\u0644\u0648\u0643\u064a\u0634\u0646|\u0639\u0646\u0648\u0627\u0646|\u0648\u0635\u0641\s+\u0627\u0644\u0645\u0643\u0627\u0646|\u0648\u064a\u0646|\u0627\u064a\u0646|\u0641\u064a\u0646|\u06a9\u06c1\u0627\u06ba|\u0642\u0631\u06cc\u0628|\u0627\u06cc\u0688\u0631\u06cc\u0633|\u067e\u062a\u06c1)/i.test(
@@ -14897,6 +14902,18 @@ async function planTurn(io, supportCaseOrId) {
 			return handleBrainReview(io, sc, hotel, known, latestGuest, typingStartedAt);
 		}
 	}
+	if (shouldAnswerHotelFactNow(latestGuest, contextualHotelFactQuestion)) {
+		await saveKnownFacts(key, known);
+		return sendHotelFactReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known,
+			latestGuest,
+			factQuestion: contextualHotelFactQuestion,
+			typingStartedAt,
+		});
+	}
 	const latestPriceIntent =
 		latestGuest && latestGuestAsksPriceWithContext(latestGuest, previousGuest, previousAi);
 	if (
@@ -15084,17 +15101,7 @@ async function planTurn(io, supportCaseOrId) {
 		});
 	}
 	if (
-		latestGuest &&
-		(latestGuestAsksHotelFactOnly(latestGuest) || contextualHotelFactQuestion) &&
-		(contextualHotelFactQuestion ||
-			latestGuestMentionsNusuk(latestGuest) ||
-			latestGuestMentionsBus(latestGuest) ||
-			latestGuestMentionsParking(latestGuest) ||
-			latestGuestAsksOtherCloserHotel(latestGuest) ||
-			latestGuestAsksMapOrLocation(latestGuest) ||
-			latestGuestAsksBranch(latestGuest) ||
-			latestGuestAsksArrivalDeparturePolicy(latestGuest) ||
-			latestGuestAsksAirportDistance(latestGuest))
+		shouldAnswerHotelFactNow(latestGuest, contextualHotelFactQuestion)
 	) {
 		await saveKnownFacts(key, known);
 		return sendHotelFactReplyFromOpenAI({
@@ -16336,6 +16343,7 @@ const exportedOrchestrator = {
 		hotelFactAnswerMode,
 		hotelFactQuickReplies,
 		hotelFactQuickRepliesWithBookingCheckpoint,
+		shouldAnswerHotelFactNow,
 		appendBookingCheckpointToHotelFactReply,
 		bookingCheckpointRestoreMessage,
 		compactHotelFacts,

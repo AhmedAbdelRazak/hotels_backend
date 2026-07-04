@@ -247,6 +247,7 @@ check("Hotel fact side question restores final review checkpoint and buttons", (
 		quickReplies.map((item) => item.action),
 		["place_reservation", "revise_reservation"]
 	);
+	assert.strictEqual(orchestrator.shouldAnswerHotelFactNow(busQuestion, ""), true);
 });
 
 check("Booking intent after hotel fact resumes final review", () => {
