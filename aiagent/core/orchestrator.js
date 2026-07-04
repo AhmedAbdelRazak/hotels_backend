@@ -14306,6 +14306,66 @@ async function runBrainFirstTurn({
 		});
 	} catch (error) {
 		console.error("[aiagent] brain-first turn failed:", error?.stack || error);
+		try {
+			let fallbackKnown = syncKnownFromQuote(known || {});
+			fallbackKnown = filterInactiveRoomSelectionsForHotel(hotel, fallbackKnown, {
+				fallbackKnown,
+			}).known;
+			fallbackKnown = ensureRoomPlanForGuestCapacity(hotel, fallbackKnown).known;
+			await saveKnownFacts(key, fallbackKnown);
+			const latestText = String(latestGuest?.message || "");
+			const contextualHotelFactQuestion = latestGuest
+				? hotelFactContinuationQuestion(sc, latestGuest)
+				: "";
+			if (shouldAnswerHotelFactNow(latestGuest, contextualHotelFactQuestion)) {
+				return sendHotelFactReplyFromOpenAI({
+					io,
+					sc,
+					hotel,
+					known: fallbackKnown,
+					latestGuest,
+					factQuestion: contextualHotelFactQuestion,
+					typingStartedAt,
+				});
+			}
+			if (
+				latestGuest &&
+				splitStayQuoteInputsKnown(fallbackKnown) &&
+				!splitStayQuoteMatchesKnown(fallbackKnown)
+			) {
+				await waitForTypingMinimum(typingStartedAt);
+				return handleBrainSplitStayQuote(io, sc, hotel, fallbackKnown, latestGuest, typingStartedAt);
+			}
+			if (
+				latestGuest &&
+				quoteInputsKnown(fallbackKnown) &&
+				!quoteMatchesKnown(fallbackKnown)
+			) {
+				await waitForTypingMinimum(typingStartedAt);
+				return handleBrainQuote(io, sc, hotel, fallbackKnown, latestGuest, typingStartedAt);
+			}
+			if (
+				latestGuest &&
+				!requiredBookingMissing(fallbackKnown).length &&
+				(quoteMatchesKnown(fallbackKnown) || splitStayQuoteMatchesKnown(fallbackKnown))
+			) {
+				await waitForTypingMinimum(typingStartedAt);
+				return handleBrainReview(io, sc, hotel, fallbackKnown, latestGuest, typingStartedAt);
+			}
+			if (latestGuest) {
+				return sendBookingProgressFast({
+					io,
+					sc,
+					hotel,
+					known: fallbackKnown,
+					latestGuest,
+					latestText,
+					typingStartedAt,
+				});
+			}
+		} catch (fallbackError) {
+			console.error("[aiagent] brain-first fallback failed:", fallbackError?.stack || fallbackError);
+		}
 		await emitTyping(io, sc, false);
 		return (await getSupportCaseById(key).catch(() => null)) || sc;
 	}
