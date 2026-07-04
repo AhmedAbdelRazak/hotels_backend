@@ -14059,6 +14059,7 @@ async function executeBrainFirstDecision({
 	if (
 		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		!matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
 		["reply", "send_review", "send_review_again"].includes(nextDecision.action) &&
 		requiredBookingMissing(nextKnown).some((field) =>
 			["fullName", "phone", "nationality", "adults"].includes(field)
