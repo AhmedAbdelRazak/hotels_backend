@@ -211,7 +211,13 @@ check("Quote cannot match if selected capacity is too small", () => {
 });
 
 check("Hotel fact side question restores final review checkpoint and buttons", () => {
-	const review = ai("Final review for 225 SAR", "review_reservation");
+	const review = {
+		...ai("Final review for 225 SAR", "review_reservation"),
+		quickReplies: [
+			{ label: "إتمام الحجز", value: "إتمام الحجز", action: "place_reservation" },
+			{ label: "هناك شيء غير صحيح", value: "هناك شيء غير صحيح", action: "revise_reservation" },
+		],
+	};
 	const busQuestion = guest("عندكم اوتوبيس يوصل للحرم");
 	const sc = {
 		preferredLanguageCode: "ar",
@@ -248,6 +254,18 @@ check("Hotel fact side question restores final review checkpoint and buttons", (
 		["place_reservation", "revise_reservation"]
 	);
 	assert.strictEqual(orchestrator.shouldAnswerHotelFactNow(busQuestion, ""), true);
+
+	const quoteMismatchedKnown = { ...known };
+	delete quoteMismatchedKnown.quote;
+	const storedCheckpointReplies = orchestrator.hotelFactQuickRepliesWithBookingCheckpoint(
+		sc,
+		quoteMismatchedKnown,
+		busQuestion
+	);
+	assert.deepStrictEqual(
+		storedCheckpointReplies.map((item) => item.action),
+		["place_reservation", "revise_reservation"]
+	);
 });
 
 check("Booking intent after hotel fact resumes final review", () => {

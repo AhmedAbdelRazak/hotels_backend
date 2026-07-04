@@ -6406,6 +6406,30 @@ function bookingCheckpointQuickReplies(action = "", sc = {}, known = {}, checkpo
 	return [];
 }
 
+function storedBookingCheckpointQuickReplies(checkpoint = null) {
+	const action = cleanString(checkpoint?.clientAction, 80).toLowerCase();
+	const allowedActionsByCheckpoint = {
+		review_reservation: ["place_reservation", "revise_reservation"],
+		quote_ready: ["proceed", "revise_reservation"],
+		split_stay_quote_ready: ["split_stay_continue", "revise_reservation"],
+		quote_unavailable: ["check_alternatives", "revise_reservation"],
+		split_stay_quote_unavailable: ["check_alternatives", "revise_reservation"],
+		required_details_needed: ["provide_details", "revise_reservation"],
+		optional_email: ["skip_email"],
+		alternative_dates_ready: ["select_alternative_stay", "revise_reservation"],
+		alternative_dates_unavailable: ["revise_reservation"],
+	};
+	const allowedActions = new Set(allowedActionsByCheckpoint[action] || []);
+	if (!allowedActions.size || !Array.isArray(checkpoint?.quickReplies)) return [];
+	return checkpoint.quickReplies
+		.map((reply) => ({
+			label: cleanDisplayString(reply?.label || reply?.value || "", 80),
+			value: cleanDisplayString(reply?.value || reply?.label || "", 120),
+			action: cleanString(reply?.action, 80).toLowerCase(),
+		}))
+		.filter((reply) => reply.label && reply.value && allowedActions.has(reply.action));
+}
+
 function bookingCheckpointRestoreMessage(sc = {}, hotel = {}, known = {}, checkpoint = null) {
 	const action = cleanString(checkpoint?.clientAction, 80).toLowerCase();
 	if (!action || knownHasReservationConfirmation(known)) return "";
@@ -6493,8 +6517,11 @@ function hotelFactQuickRepliesWithBookingCheckpoint(sc = {}, known = {}, latestG
 	const checkpoint = latestBookingCheckpointBeforeEntry(sc, latestGuest);
 	const action = cleanString(checkpoint?.clientAction, 80).toLowerCase();
 	const checkpointReplies = bookingCheckpointQuickReplies(action, sc, known, checkpoint);
+	const storedCheckpointReplies = storedBookingCheckpointQuickReplies(checkpoint);
 	return checkpointReplies.length
 		? checkpointReplies
+		: storedCheckpointReplies.length
+		? storedCheckpointReplies
 		: hotelFactQuickReplies(sc, known, latestGuest);
 }
 
