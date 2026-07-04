@@ -420,6 +420,15 @@ function totalGuestsFromKnown(known = {}) {
 	return total > 0 ? Math.floor(total) : 0;
 }
 
+function requestedBedsFromKnown(known = {}) {
+	const beds = Number(known.requestedBeds || known.bedCount || known.beds || 0);
+	return Number.isFinite(beds) && beds > 0 ? Math.floor(beds) : 0;
+}
+
+function capacityTargetFromKnown(known = {}) {
+	return Math.max(totalGuestsFromKnown(known), requestedBedsFromKnown(known));
+}
+
 function activeRoomCapacityCandidates(hotel = {}) {
 	const activeRoomKeys = activeRoomTypeKeySet(hotel);
 	return ROOM_TYPE_KEYS
@@ -518,17 +527,17 @@ function bestRoomSelectionsForGuests(hotel = {}, totalGuests = 0) {
 }
 
 function ensureRoomPlanForGuestCapacity(hotel = {}, known = {}) {
-	const totalGuests = totalGuestsFromKnown(known);
-	if (!totalGuests) return { known, changed: false };
+	const capacityTarget = capacityTargetFromKnown(known);
+	if (!capacityTarget) return { known, changed: false };
 	const currentSelections = normalizeRoomSelections(selectionsFromKnown(known));
 	const currentCapacity = roomSelectionsGuestCapacity(currentSelections);
-	if (currentSelections.length && currentCapacity >= totalGuests) {
+	if (currentSelections.length && currentCapacity >= capacityTarget) {
 		return { known, changed: false };
 	}
-	const plannedSelections = bestRoomSelectionsForGuests(hotel, totalGuests);
+	const plannedSelections = bestRoomSelectionsForGuests(hotel, capacityTarget);
 	if (!plannedSelections.length) return { known, changed: false };
 	const plannedCapacity = roomSelectionsGuestCapacity(plannedSelections);
-	if (plannedCapacity < totalGuests) return { known, changed: false };
+	if (plannedCapacity < capacityTarget) return { known, changed: false };
 	if (
 		currentSelections.length &&
 		roomSelectionKey(currentSelections) === roomSelectionKey(plannedSelections)
@@ -550,19 +559,19 @@ function ensureRoomPlanForGuestCapacity(hotel = {}, known = {}) {
 
 function inferRoomTypeFromGuests(hotel = {}, known = {}) {
 	if (known.roomTypeKey) return "";
-	const totalGuests = totalGuestsFromKnown(known);
-	if (!Number.isFinite(totalGuests) || totalGuests < 1) return "";
+	const capacityTarget = capacityTargetFromKnown(known);
+	if (!Number.isFinite(capacityTarget) || capacityTarget < 1) return "";
 	const candidates = activeRoomCapacityCandidates(hotel)
-		.filter((item) => item.capacity >= totalGuests)
+		.filter((item) => item.capacity >= capacityTarget)
 		.sort((a, b) => a.capacity - b.capacity);
 	return candidates[0]?.key || "";
 }
 
 function inferRoomSelectionsFromGuests(hotel = {}, known = {}) {
 	if (selectionsFromKnown(known).length) return [];
-	const totalGuests = totalGuestsFromKnown(known);
-	if (!Number.isFinite(totalGuests) || totalGuests < 1) return [];
-	return bestRoomSelectionsForGuests(hotel, totalGuests);
+	const capacityTarget = capacityTargetFromKnown(known);
+	if (!Number.isFinite(capacityTarget) || capacityTarget < 1) return [];
+	return bestRoomSelectionsForGuests(hotel, capacityTarget);
 }
 
 function localizedAgentName(sc = {}) {
@@ -1059,6 +1068,30 @@ function roomCountOnlyFromText(value = "") {
 	const count = Number(match?.[1] || 0);
 	if (!Number.isFinite(count) || count < 1 || count > MAX_AI_ROOM_COUNT) return null;
 	return normalizeRoomCount(count, 1);
+}
+
+function requestedBedCountFromText(value = "") {
+	const source = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+	)
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!source) return 0;
+	const bedNoun =
+		"(?:beds?|single\\s+beds?|\\u0633\\u0631\\u064a\\u0631|\\u0633\\u0631\\u0627\\u064a\\u0631|\\u0627\\u0633\\u0631\\u0629|\\u0623\\u0633\\u0631\\u0629|\\u0627\\u0633\\u0631\\u0647|\\u0623\\u0633\\u0631\\u0647)";
+	const patterns = [
+		new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${bedNoun}(?=$|\\s|[^\\p{L}0-9])`, "iu"),
+		new RegExp(`${bedNoun}\\s*(\\d{1,2})(?=$|\\s|[^\\p{L}0-9])`, "iu"),
+	];
+	for (const pattern of patterns) {
+		const match = source.match(pattern);
+		const count = Number(match?.[1] || 0);
+		if (Number.isFinite(count) && count >= 1 && count <= 30) {
+			return Math.floor(count);
+		}
+	}
+	return 0;
 }
 
 function roomCountCorrectionFromText(value = "") {
@@ -2122,7 +2155,47 @@ function peopleCountFromLine(value = "") {
 	return relationshipCount >= 1 && relationshipCount <= 30 ? relationshipCount : null;
 }
 
+function adultCompanionGuestFactsFromText(value = "", currentKnown = {}) {
+	const normalized = normalizeNumberWordsForParsing(
+		normalizeIntentSearchText(value)
+	)
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!normalized) return {};
+	const compact = normalized.replace(/\s+/g, "");
+	const hasSelf =
+		/(?:^|[\s,])(?:me|myself|i|\u0627\u0646\u0627|\u0623\u0646\u0627)(?:$|[\s,]|\u0648)/iu.test(
+			normalized
+		) ||
+		compact.includes("\u0644\u064a\u0627\u0627\u0646\u0627") ||
+		compact.includes("\u0644\u064a\u0627\u0623\u0646\u0627") ||
+		compact.includes("\u0627\u0646\u0627\u0648") ||
+		compact.includes("\u0623\u0646\u0627\u0648");
+	const companionLabel =
+		"(?:friends?|companions?|mates?|colleagues?|\\u0627?\\u0635\\u062d\\u0627\\u0628(?:\\u064a|\\u0649)?|\\u0623\\u0635\\u062d\\u0627\\u0628(?:\\u064a|\\u0649)?|\\u0635\\u062d\\u0627\\u0628(?:\\u064a|\\u0649)?|\\u0631\\u0641\\u0627\\u0642(?:\\u064a|\\u0649)?|\\u0627\\u0635\\u062f\\u0642\\u0627\\u0621|\\u0623\\u0635\\u062f\\u0642\\u0627\\u0621)";
+	const match =
+		normalized.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${companionLabel}(?=$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		normalized.match(new RegExp(`${companionLabel}\\s*(\\d{1,2})(?=$|\\s|[^\\p{L}0-9])`, "iu"));
+	const companionCount = Number(match?.[1] || 0);
+	if (!Number.isFinite(companionCount) || companionCount < 1 || companionCount > 30) {
+		return {};
+	}
+	const previousAdults = Number(currentKnown.adults || 0) || 0;
+	const previousChildren = Number.isFinite(Number(currentKnown.children))
+		? Number(currentKnown.children)
+		: 0;
+	const adults = Math.max(previousAdults, companionCount + (hasSelf ? 1 : 0));
+	if (adults < 1) return {};
+	return {
+		adults,
+		children: previousChildren,
+	};
+}
+
 function relationshipGuestFactsFromText(value = "", currentKnown = {}) {
+	const adultCompanionFacts = adultCompanionGuestFactsFromText(value, currentKnown);
+	if (Object.keys(adultCompanionFacts).length) return adultCompanionFacts;
 	const normalized = normalizeIntentSearchText(value)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
 		.replace(/\s+/g, " ")
@@ -2507,6 +2580,17 @@ function recoverKnownFactsFromConversation(sc = {}, known = {}) {
 				recovered = mergeKnownFacts(recovered, dateOnlyFacts);
 			}
 		}
+		const requestedBeds = requestedBedCountFromText(rawEntryText);
+		if (requestedBeds) {
+			recovered.requestedBeds = Math.max(
+				requestedBeds,
+				Number(recovered.requestedBeds || 0) || 0
+			);
+		}
+		const adultCompanionFacts = adultCompanionGuestFactsFromText(rawEntryText, recovered);
+		if (Object.keys(adultCompanionFacts).length) {
+			recovered = mergeKnownFacts(recovered, adultCompanionFacts);
+		}
 		const roomCountCorrection = roomCountCorrectionFromText(rawEntryText);
 		const roomSelections = extractRoomSelectionsFromText(rawEntryText);
 		if (roomSelections.length && textMentionsRoomSelection(rawEntryText)) {
@@ -2685,6 +2769,7 @@ function mergeKnownFacts(current = {}, next = {}) {
 	const previousSelectionKey = roomSelectionKey(merged.roomSelections);
 	const previousAdults = Number(merged.adults || 0) || 0;
 	const previousChildren = Number(merged.children || 0) || 0;
+	const previousRequestedBeds = requestedBedsFromKnown(merged);
 	const sourceCheckinISO = source.checkinISO || source.checkin || reservation.checkinISO;
 	const sourceCheckoutISO = source.checkoutISO || source.checkout || reservation.checkoutISO;
 	setDate("checkinISO", sourceCheckinISO);
@@ -2839,6 +2924,10 @@ function mergeKnownFacts(current = {}, next = {}) {
 		});
 	}
 	setNumber("children", source.children ?? guest.children, { min: 0, max: 20 });
+	setNumber("requestedBeds", source.requestedBeds ?? source.bedCount ?? source.beds, {
+		min: 1,
+		max: 30,
+	});
 	const sourceFullName = cleanBookingNameCandidate(
 		source.fullName || source.name || guest.fullName || guest.name
 	);
@@ -2882,6 +2971,7 @@ function mergeKnownFacts(current = {}, next = {}) {
 		roomSelectionKey(merged.roomSelections) !== previousSelectionKey;
 	const adultsChanged = (Number(merged.adults || 0) || 0) !== previousAdults;
 	const childrenChanged = (Number(merged.children || 0) || 0) !== previousChildren;
+	const requestedBedsChanged = requestedBedsFromKnown(merged) !== previousRequestedBeds;
 	const guestCountChanged = adultsChanged || childrenChanged;
 	const selectedCapacity = selectionsFromKnown(merged).reduce(
 		(total, selection) =>
@@ -2891,8 +2981,9 @@ function mergeKnownFacts(current = {}, next = {}) {
 	);
 	const totalGuests =
 		(Number(merged.adults || 0) || 0) + Math.max(0, Number(merged.children || 0) || 0);
+	const capacityTarget = Math.max(totalGuests, requestedBedsFromKnown(merged));
 	const guestCountExceedsSelectedCapacity =
-		selectedCapacity > 0 && totalGuests > selectedCapacity;
+		selectedCapacity > 0 && capacityTarget > selectedCapacity;
 	if (
 		checkinChanged ||
 		checkoutChanged ||
@@ -2900,7 +2991,7 @@ function mergeKnownFacts(current = {}, next = {}) {
 		roomTypeChanged ||
 		roomsChanged ||
 		roomSelectionsChanged ||
-		(guestCountChanged && guestCountExceedsSelectedCapacity)
+		((guestCountChanged || requestedBedsChanged) && guestCountExceedsSelectedCapacity)
 	) {
 		delete merged.quote;
 	}
@@ -2911,7 +3002,8 @@ function mergeKnownFacts(current = {}, next = {}) {
 		roomTypeChanged ||
 		roomsChanged ||
 		roomSelectionsChanged ||
-		guestCountChanged
+		guestCountChanged ||
+		requestedBedsChanged
 	) {
 		delete merged.reviewSentAt;
 	}
@@ -2978,6 +3070,9 @@ function quoteCanBePreservedForKnown(quote = {}, known = {}) {
 	const knownSelectionKey = roomSelectionKey(knownSelections);
 	const quoteSelections = quoteRoomSelections(candidate);
 	const quoteSelectionKey = roomSelectionKey(quoteSelections);
+	const selectedCapacity = roomSelectionsGuestCapacity(knownSelections);
+	const capacityTarget = capacityTargetFromKnown(known);
+	if (selectedCapacity > 0 && capacityTarget > selectedCapacity) return false;
 	if (knownSelectionKey || quoteSelectionKey) {
 		return Boolean(
 			knownSelectionKey &&
@@ -3028,9 +3123,9 @@ function quoteMatchesKnown(known = {}) {
 	const facts = asObject(known);
 	const quote = asObject(facts.quote);
 	const selections = selectionsFromKnown(facts);
-	const totalGuests = totalGuestsFromKnown(facts);
+	const capacityTarget = capacityTargetFromKnown(facts);
 	const selectedCapacity = roomSelectionsGuestCapacity(selections);
-	if (selectedCapacity > 0 && totalGuests > selectedCapacity) return false;
+	if (selectedCapacity > 0 && capacityTarget > selectedCapacity) return false;
 	const selectionKey = roomSelectionKey(selections);
 	const quoteSelections = quoteRoomSelections(quote);
 	const quoteSelectionKey = quote.selectionKey || roomSelectionKey(quoteSelections);
@@ -7217,6 +7312,7 @@ function compactKnownFactsForPrompt(known = {}) {
 		roomTypeKey: facts.roomTypeKey || "",
 		rooms: facts.rooms || "",
 		roomSelections: normalizeRoomSelections(facts.roomSelections),
+		requestedBeds: requestedBedsFromKnown(facts) || "",
 		splitStayPeriods: normalizeSplitStayPeriods(facts.splitStayPeriods),
 		splitStayTotal: Number(facts.splitStayTotal || 0) || 0,
 		adults: facts.adults || "",
@@ -7357,6 +7453,14 @@ function sanitizeBrainFactsForLatestText(facts = {}, currentKnown = {}, latestTe
 		: [];
 	const latestRoomCountValue = roomCountOnlyFromText(latestText) || roomCountCorrectionFromText(latestText);
 	const latestRoomCountEvidence = Boolean(latestRoomCountValue);
+	const latestRequestedBeds = requestedBedCountFromText(latestText);
+	if (latestRequestedBeds) {
+		next.requestedBeds = latestRequestedBeds;
+	} else {
+		delete next.requestedBeds;
+		delete next.bedCount;
+		delete next.beds;
+	}
 	if (latestRoomSelections.length) {
 		next.roomSelections = latestRoomSelections;
 		next.rooms = roomSelectionsTotal(latestRoomSelections);
@@ -7474,6 +7578,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If checkinISO, checkoutISO, and roomTypeKey/roomSelections are known but there is no authoritative matching server quote in Known facts, do not ask for name, phone, nationality, email, or booking confirmation yet. Return action="get_quote" with empty reply so the orchestrator can fetch the exact price/availability first.`,
 		`If checkinISO and checkoutISO are known but the guest asks for available rooms/options without choosing a specific room type, action must be "check_room_options".`,
 		`For multi-room or group requests, preserve the exact number of rooms. Examples: "20 quadruple rooms" means facts.roomTypeKey="quadRooms", facts.rooms=20, and facts.roomSelections=[{"roomTypeKey":"quadRooms","count":20}]. "2 triple rooms and 1 double room" means two roomSelections. Never quote only one room when the guest requested multiple rooms.`,
+		`If the guest asks for a bed count larger than one active room type can fit, such as "8 beds" or Arabic "8 beds/saraier", save facts.requestedBeds and choose a real active-room combination from Hotel facts. Do not offer an imaginary single 8-bed room when the hotel only has double/triple/quad/family rooms.`,
 		`Do not infer adults or children from room type alone. A double room request means roomTypeKey="doubleRooms", not automatically adults=2. Only return adults/children when the guest explicitly gives the guest count, relationship wording clearly gives the party count, or Known facts already contain it.`,
 		`Family relationship wording can be guest-count evidence. If the guest says "me and my son/daughter" or similar, count the companion as an adult by default and set children=0 unless the guest explicitly says children/kids. Do not ask anyone's age. If guest count is missing, ask only for "how many adults and children, if any". If the guest answers with one plain number like "2", treat it as adults=2 and children=0; if they answer "3 and 0", use adults=3 and children=0.`,
 		`If the guest count clearly fits one standard room type and the guest has not requested a larger room, choose the smallest suitable active room type for quoting instead of asking a preference question. Examples: 2 guests -> double, 3 guests -> triple, 4 guests -> quad, 5 guests -> family.`,
@@ -14374,6 +14479,9 @@ async function planTurn(io, supportCaseOrId) {
 		}
 		known = mergeKnownFacts(known, guestCountFactsFromAskedAnswer(latestText, previousAi));
 		known = mergeKnownFacts(known, explicitGuestCountFactsFromText(latestText));
+		known = mergeKnownFacts(known, relationshipGuestFactsFromText(latestText, known));
+		const requestedBeds = requestedBedCountFromText(latestText);
+		if (requestedBeds) known = mergeKnownFacts(known, { requestedBeds });
 		known = applyDisplayedNameAnswer(sc, known, latestText, previousAi);
 		const phoneBeforeDisplayedAnswer = cleanPhone(known.phone);
 		const phoneNeededBeforeDisplayedAnswer =
@@ -16098,6 +16206,8 @@ const exportedOrchestrator = {
 		bestRoomSelectionsForGuests,
 		ensureRoomPlanForGuestCapacity,
 		roomSelectionsGuestCapacity,
+		capacityTargetFromKnown,
+		requestedBedCountFromText,
 		quoteRoomCount,
 		roomCountOnlyFromText,
 		roomCountCorrectionFromText,

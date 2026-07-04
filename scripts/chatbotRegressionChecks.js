@@ -96,6 +96,35 @@ check("Seven guests produce family plus double room plan", () => {
 	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(selections), 7);
 });
 
+check("Eight requested beds produce family plus triple room plan", () => {
+	const selections = orchestrator.bestRoomSelectionsForGuests(hotel, 8);
+	const map = selectionMap(selections);
+	assert.strictEqual(map.get("familyRooms"), 1);
+	assert.strictEqual(map.get("tripleRooms"), 1);
+	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(selections), 8);
+});
+
+check("Arabic me and six friends with eight beds recovers target and plan", () => {
+	const firstGuest = guest("كنت عايز غرفة ليا انا و ٦ اصحابى هل متاح غرف ب٨ سراير");
+	const dateGuest = guest("تمام\nمن ١٥ اغسطس ل٢٥ اغسطس");
+	const sc = {
+		preferredLanguageCode: "ar",
+		conversation: [firstGuest, ai("ابعت تاريخ الدخول والخروج."), dateGuest],
+	};
+	let known = orchestrator.recoverKnownFactsFromConversation(sc, {});
+	known = orchestrator.ensureRoomPlanForGuestCapacity(hotel, known).known;
+	const map = selectionMap(known.roomSelections);
+	assert.strictEqual(known.adults, 7);
+	assert.strictEqual(known.children, 0);
+	assert.strictEqual(known.requestedBeds, 8);
+	assert.strictEqual(orchestrator.capacityTargetFromKnown(known), 8);
+	assert.strictEqual(known.checkinISO, "2026-08-15");
+	assert.strictEqual(known.checkoutISO, "2026-08-25");
+	assert.strictEqual(map.get("familyRooms"), 1);
+	assert.strictEqual(map.get("tripleRooms"), 1);
+	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(known.roomSelections), 8);
+});
+
 check("Invalid one-room family selection is replanned before quote/review", () => {
 	const known = {
 		checkinISO: "2026-07-20",
