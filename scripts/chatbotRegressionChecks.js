@@ -188,6 +188,80 @@ check("Booking intent after hotel fact resumes final review", () => {
 	);
 });
 
+check("July 2 quote unavailable detour resumes alternatives, not location", () => {
+	const unavailable = ai("Family Suite is not available for these dates.", "quote_unavailable");
+	const fact = ai("The hotel is close to Haram.", "hotel_fact_answered");
+	const continueGuest = guest("Yes");
+	const sc = { conversation: [unavailable, fact, continueGuest] };
+	assert.strictEqual(
+		orchestrator.actionToResumeAfterHotelFactAffirmation(sc, continueGuest, fact, ""),
+		"check_alternatives"
+	);
+});
+
+check("July 2 quote ready detour resumes review path", () => {
+	const quote = ai("Available quote for 1 Family Quintuple Room.", "quote_ready");
+	const fact = ai("The hotel is close to Haram.", "hotel_fact_answered");
+	const continueGuest = guest("OK");
+	const sc = { conversation: [quote, fact, continueGuest] };
+	assert.strictEqual(
+		orchestrator.actionToResumeAfterHotelFactAffirmation(sc, continueGuest, fact, ""),
+		"send_review"
+	);
+});
+
+check("July 2 booking process replies must show known dates and room", () => {
+	const latestGuest = guest("Whats the process of booking");
+	const known = {
+		languageCode: "en",
+		checkinISO: "2026-08-05",
+		checkoutISO: "2026-08-20",
+		roomTypeKey: "familyRooms",
+		quote: {
+			roomLabel: "Family Quintuple Room",
+		},
+	};
+	assert.strictEqual(orchestrator.latestGuestAsksBookingProcess(latestGuest), true);
+	assert.strictEqual(
+		orchestrator.bookingProcessReplyNeedsCorrection(
+			{
+				action: "reply",
+				reply: "Share your check-in and check-out dates, choose the room type, then I will send a quote.",
+			},
+			known,
+			latestGuest
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.bookingProcessReplyNeedsCorrection(
+			{
+				action: "reply",
+				reply:
+					"For your stay from 2026-08-05 to 2026-08-20, the available quoted option is 1 Family Quintuple Room. To continue, please send the remaining required details.",
+			},
+			known,
+			latestGuest
+		),
+		false
+	);
+});
+
+check("July 2 alternatives replies cannot drift back to location facts", () => {
+	assert.strictEqual(
+		orchestrator.alternativeReplyDriftedToHotelFact(
+			"Here is the hotel location on Google Maps. It is about 10 minutes walking from Al Haram."
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.alternativeReplyDriftedToHotelFact(
+			"I checked nearby dates and no alternatives are available for the current room choice. We can try different dates or another room type."
+		),
+		false
+	);
+});
+
 check("Turkish language and economical nearby dates are detected", () => {
 	assert.deepStrictEqual(
 		orchestrator.languageFactsFromGuestText("20 Temmuz'dan itibaren 10 gece fiyat nedir?"),
