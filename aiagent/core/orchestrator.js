@@ -59,6 +59,8 @@ const MAX_AI_ROOM_COUNT = 50;
 const RESERVATION_CHANGE_CONTACT_PHONE = "+1 (909) 222-3374";
 const RESERVATION_CHANGE_CONTACT_WHATSAPP = "https://wa.me/19092223374";
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DIRECT_BOOKING_DISCOUNT_RATE = 0.25;
+const DIRECT_BOOKING_DISCOUNT_FACTOR = 1 - DIRECT_BOOKING_DISCOUNT_RATE;
 
 const activeTimers = new Map();
 const activeTurns = new Set();
@@ -70,7 +72,7 @@ const delayedCloseTimers = new Map();
 const queuedPlanTurns = [];
 let activePlanTurnCount = 0;
 
-const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 2000, {
+const AI_GUEST_REPLY_QUIET_MS = intFromEnv("AI_GUEST_REPLY_QUIET_MS", 3000, {
 	min: 500,
 	max: 8000,
 });
@@ -94,11 +96,11 @@ const AI_PLAN_WORKER_TIMEOUT_MS = intFromEnv("AI_PLAN_WORKER_TIMEOUT_MS", 12000,
 	min: 10000,
 	max: 120000,
 });
-const AI_PLAN_WORKER_HEAP_MB = intFromEnv("AI_PLAN_WORKER_HEAP_MB", 384, {
+const AI_PLAN_WORKER_HEAP_MB = intFromEnv("AI_PLAN_WORKER_HEAP_MB", 512, {
 	min: 128,
 	max: 1024,
 });
-const AI_PLAN_MAX_ACTIVE_TURNS = intFromEnv("AI_PLAN_MAX_ACTIVE_TURNS", 2, {
+const AI_PLAN_MAX_ACTIVE_TURNS = intFromEnv("AI_PLAN_MAX_ACTIVE_TURNS", 1, {
 	min: 1,
 	max: 6,
 });
@@ -788,6 +790,16 @@ function looksLikeNonBookingNamePhrase(value = "") {
 	if (isShortAffirmativeToken(text)) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
+	if (
+		/(?:\?|هل|يوجد|عندكم|فيه|فندق|الحرم|اتوبيس|أتوبيس|باص|حافلة|مواصلات|موقف|مواقف|مطعم|مطاعم|خدمة|خدمات|موقع|خريطة|عنوان|مسافة|مشيا|مشي|سيارة|غرفة|غرف|سعر|اسعار|الإجمالي|الاجمالي|\b(?:bus|shuttle|transport|haram|parking|restaurant|service|map|location|address|distance|walk|walking|car|room|hotel|price|total)\b)/iu.test(
+			normalized
+		) &&
+		/(?:\?|هل|يوجد|عندكم|فيه|\b(?:do|does|is|are|can|where|how|what)\b)/iu.test(
+			normalized
+		)
+	) {
+		return true;
+	}
 	const nationality = normalizeNationalityHint(text) || nationalityFromText(text);
 	if (
 		nationality &&
@@ -1112,6 +1124,19 @@ function roomCountCorrectionFromText(value = "") {
 		`(?:number\\s+of\\s+${roomNoun}|${roomNoun}\\s+count|\\u0639\\u062f\\u062f\\s+(?:\\u0627\\u0644)?${roomNoun}|${roomNoun}\\s+(?:\\u0646\\u0641\\u0633\\u0647|\\u0646\\u0641\\u0633\\u0647\\u0627|same))`,
 		"iu"
 	);
+	const explicitSingleRoomCorrection = [
+		new RegExp(
+			`(?:^|\\s)1\\s+(?:[\\p{L}-]+\\s+){0,3}${roomNoun}(?=$|\\s|[^\\p{L}0-9])`,
+			"iu"
+		),
+		new RegExp(
+			`${roomNoun}(?:\\s+[\\p{L}-]+){0,3}\\s+1(?=$|\\s|[^\\p{L}0-9])`,
+			"iu"
+		),
+	];
+	if (explicitSingleRoomCorrection.some((pattern) => pattern.test(source))) {
+		return 1;
+	}
 	if (!roomCountContext.test(source)) return null;
 	const numberPatterns = [
 		/(?:want|need|make|change|update|become|set|عايز|عاوز|اريد|أريد|نريد|نبغى|ابغى|خليها|خلّيها|غيرها|غيّرها|عدل|عدّل)\s*(?:الى|إلى|to)?\s*(\d{1,2})/iu,
@@ -3650,6 +3675,23 @@ function latestGuestRaisesBudgetConcern(value = "") {
 	);
 }
 
+function latestGuestAsksDiscountExplanation(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:discount|deal|offer|commission|direct booking|direct price|reception price|why cheaper|after discount)\b/i.test(
+			text
+		) ||
+		/(?:\u062e\u0635\u0645|\u062a\u062e\u0641\u064a\u0636|\u0639\u0631\u0636|\u0639\u0645\u0648\u0644\u0629|\u0645\u0628\u0627\u0634\u0631|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0628\u0639\u062f\u0627\u0644\u062e\u0635\u0645|\u0644\u064a\u0647\u0627\u0631\u062e\u0635)/iu.test(
+			compact
+		)
+	);
+}
+
 function replyHasHotelValuePitch(reply = "") {
 	const text = normalizeIntentSearchText(reply)
 		.replace(/\s+/g, " ")
@@ -6136,11 +6178,24 @@ function hotelSalesPitchLinesForGuest(hotel = {}, known = {}, languageCode = "en
 	const walking = localizedDurationMinutes(walkingRaw, "15", languageCode);
 	const driving = localizedDurationMinutes(drivingRaw, "2", languageCode);
 	const lines = [];
+	const compactHotelName = normalizeIntentSearchText(hotelName).replace(/\s+/g, "");
+	const isZadAjyad =
+		/zad.*ajyad|ajyad.*zad/i.test(normalizeIntentSearchText(hotelName)) ||
+		/(?:\u0632\u0627\u062f.*\u0623?\u062c\u064a\u0627\u062f|\u0623?\u062c\u064a\u0627\u062f.*\u0632\u0627\u062f)/iu.test(
+			compactHotelName
+		);
 	if (walkingRaw || drivingRaw || hotel.distances) {
 		lines.push(
 			ar
 				? `\u0642\u0648\u0629 \u0627\u0644\u0645\u0648\u0642\u0639: ${hotelName} \u062e\u064a\u0627\u0631 \u0627\u0633\u062a\u0631\u0627\u062a\u064a\u062c\u064a \u0644\u0644\u0648\u0635\u0648\u0644 \u0644\u0644\u062d\u0631\u0645\u060c \u062d\u0648\u0627\u0644\u064a ${walking} \u0645\u0634\u064a\u0627 \u0648${driving} \u0628\u0627\u0644\u0633\u064a\u0627\u0631\u0629 \u062d\u0633\u0628 \u0627\u0644\u0632\u062d\u0627\u0645.`
 				: `Location strength: ${hotelName} is a strategic option for Al Haram access, about ${walking} walking and ${driving} by car depending on traffic.`
+		);
+	}
+	if (isZadAjyad) {
+		lines.push(
+			ar
+				? `\u0645\u064a\u0632\u0629 \u0623\u062c\u064a\u0627\u062f: \u0627\u0644\u0645\u0646\u0637\u0642\u0629 \u062d\u064a\u0648\u064a\u0629 \u0648\u062d\u0648\u0644\u0647\u0627 \u0645\u0637\u0627\u0639\u0645 \u0643\u062b\u064a\u0631\u0629\u060c \u0648\u0627\u0644\u0645\u0634\u064a \u0644\u0644\u062d\u0631\u0645 \u064a\u0646\u0627\u0633\u0628 \u0627\u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0642\u0627\u062f\u0631\u064a\u0646 \u0639\u0644\u0649 \u0627\u0644\u0645\u0634\u064a \u0628\u0631\u0627\u062d\u0629.`
+				: "Ajyad value: the area is lively with many restaurants nearby, and the walk to Al Haram suits guests who are comfortable walking."
 		);
 	}
 	const priceRange = activeRoomPriceRange(hotel);
@@ -6250,48 +6305,50 @@ function buildValueObjectionFallbackReply(sc = {}, hotel = {}, known = {}, lates
 	const quote = asObject(known.quote);
 	const hasQuoteTotal = quoteHasContent(quote) && Number(quote.total || 0) > 0;
 	const currency = quote.currency || hotel?.currency || "SAR";
+	const discountDisplay = hasQuoteTotal
+		? quoteDiscountDisplay({ ...quote, currency }, languageCode)
+		: null;
 	const totalLine = hasQuoteTotal
-		? ar
-			? `\u0627\u0644\u0639\u0631\u0636 \u0627\u0644\u062d\u0627\u0644\u064a: \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a ${formatMoney(
-					quote.total,
-					currency,
-					languageCode
-			  )}${quote.averagePerNight ? `\u060c \u0648\u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${formatMoney(quote.averagePerNight, currency, languageCode)}` : ""}.`
-			: `Current quote: total ${formatMoney(quote.total, currency, languageCode)}${quote.averagePerNight ? `, average ${formatMoney(quote.averagePerNight, currency, languageCode)} per night` : ""}.`
+		? discountDisplay?.displayTotalLine ||
+		  (ar
+				? `\u0627\u0644\u0639\u0631\u0636 \u0627\u0644\u062d\u0627\u0644\u064a: \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a ${formatMoney(
+						quote.total,
+						currency,
+						languageCode
+				  )}${quote.averagePerNight ? `\u060c \u0648\u0645\u062a\u0648\u0633\u0637 \u0627\u0644\u0644\u064a\u0644\u0629 ${formatMoney(quote.averagePerNight, currency, languageCode)}` : ""}.`
+				: `Current quote: total ${formatMoney(quote.total, currency, languageCode)}${quote.averagePerNight ? `, average ${formatMoney(quote.averagePerNight, currency, languageCode)} per night` : ""}.`)
 		: "";
+	const shouldExplainDiscount =
+		hasQuoteTotal &&
+		(latestGuestAsksDiscountExplanation(latestText) ||
+			latestGuestRaisesBudgetConcern(latestText));
 	if (ar) {
 		const intro = latestGuestAsksOtherCloserHotel(latestGuest)
 			? `${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u062a\u0631\u064a\u062f \u0623\u0642\u0648\u0649 \u062e\u064a\u0627\u0631 \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u062d\u0631\u0645.`
-			: `${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643\u060c \u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a \u0645\u0647\u0645 \u0648\u0644\u0627\u0632\u0645 \u0646\u0642\u0627\u0631\u0646\u0647 \u0628\u0642\u064a\u0645\u0629 \u0627\u0644\u0645\u0648\u0642\u0639.`;
-		const choices = [
-			"- \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0628\u0623\u0641\u0636\u0644 \u062e\u064a\u0627\u0631 \u0645\u062a\u0627\u062d",
-			"- \u0646\u0639\u062f\u0644 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0623\u0648 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0644\u062a\u0642\u0644\u064a\u0644 \u0627\u0644\u062a\u0643\u0644\u0641\u0629",
-			hasQuoteTotal ? "- \u0623\u0643\u0645\u0644 \u0627\u0644\u062d\u062c\u0632 \u0628\u0647\u0630\u0627 \u0627\u0644\u0639\u0631\u0636" : "",
-		].filter(Boolean);
+			: `${arabicGuestAddress(sc, known, latestText)}\u060c \u0623\u0641\u0647\u0645\u0643. \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0645\u0639\u0631\u0648\u0636 \u0647\u0648 \u0633\u0639\u0631 \u062d\u062c\u0632 \u0645\u0628\u0627\u0634\u0631 \u0645\u0646 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.`;
 		return [
 			intro,
-			...pitchLines.map((line) => `- ${line}`),
 			totalLine ? `- ${totalLine}` : "",
-			"\u062a\u062d\u0628 \u0623\u0643\u0645\u0644 \u0644\u0643 \u0639\u0644\u0649 \u0623\u064a \u0627\u062e\u062a\u064a\u0627\u0631\u061f",
-			...choices.slice(0, 3),
+			shouldExplainDiscount ? `- ${directBookingDiscountReason(languageCode)}` : "",
+			...pitchLines.map((line) => `- ${line}`),
+			hasQuoteTotal
+				? "\u0625\u0630\u0627 \u0645\u0646\u0627\u0633\u0628\u0643\u060c \u0623\u0643\u0645\u0644 \u0644\u0643 \u0639\u0644\u0649 \u0647\u0630\u0627 \u0627\u0644\u0639\u0631\u0636."
+				: "\u0623\u0631\u0633\u0644 \u0644\u064a \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0648\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0623\u0641\u0636\u0644 \u0633\u0639\u0631 \u0645\u062a\u0627\u062d.",
 		]
 			.filter(Boolean)
 			.join("\n");
 	}
 	const intro = latestGuestAsksOtherCloserHotel(latestGuest)
 		? `${shortGuestAddressName(sc, known, latestText)}, I understand - you want the strongest nearby option for Al Haram.`
-		: `${shortGuestAddressName(sc, known, latestText)}, I understand. The total matters, so let me show the value before we change anything.`;
-	const choices = [
-		"- Check the best available option for the same dates",
-		"- Adjust dates or room type to reduce the total",
-		hasQuoteTotal ? "- Continue with this booking option" : "",
-	].filter(Boolean);
+		: `${shortGuestAddressName(sc, known, latestText)}, I understand. This is the direct reception booking price.`;
 	return [
 		intro,
-		...pitchLines.map((line) => `- ${line}`),
 		totalLine ? `- ${totalLine}` : "",
-		"Which way would you like me to continue?",
-		...choices.slice(0, 3),
+		shouldExplainDiscount ? `- ${directBookingDiscountReason(languageCode)}` : "",
+		...pitchLines.map((line) => `- ${line}`),
+		hasQuoteTotal
+			? "- If this works for you, I can continue with this booking option."
+			: "- Send me the dates and guest count, and I will check the best live price.",
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -7689,7 +7746,7 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`Avoid empty progress phrases like "I will continue" unless the same reply includes a concrete result, question, button, or next action. If the guest jokes or corrects you, acknowledge it lightly like a real CSR, then move to the exact next useful step.`,
 		`For polite off-topic messages, answer briefly only when the guest explicitly asks the off-topic question, then gently return to helping with the stay. Never infer an off-topic sports/news question from a nationality, country name, date typo, or ordinary booking detail. If live web/current data is required, say you may not have live updates.`,
 		`Use hotel facts to sell naturally: room capacity, public amenities, views, services, distance, policies, public base-pricing guidance, and any listed room offers/monthly packages. Keep it short and human, not a brochure. If an offer may apply, present it as guidance and request/get exact dates for a final quote.`,
-		`If the guest says the price is high, too much, expensive, over budget, asks for cheaper, or seems hesitant after a quote, do not only apologize. Acknowledge the budget concern, then briefly show the value using this hotel's real facts such as distance, location, cleanliness, amenities, nearby services, views, offer/package details, or room suitability. Offer 2 or 3 clear next choices such as continue with this option, check cheaper/alternative dates, or adjust room/stay details. Do not invent a discount or competitor hotel.`,
+		`If the guest says the price is high, too much, expensive, over budget, asks for cheaper, or seems hesitant after a quote, do not only apologize. Acknowledge the budget concern, then briefly show the value using this hotel's real facts such as distance, location, cleanliness, amenities, nearby services, views, offer/package details, or room suitability. Use the direct-booking discount only when it is present in Tool result or Known facts; otherwise do not invent discounts or competitor hotels.`,
 		`If the guest asks for a closer hotel or another hotel and no alternative hotel inventory is available in Tool result/Hotel facts, do not leave them hanging. Position the current hotel honestly using its real location/distance/value facts, then ask whether they would like to continue with this hotel or adjust dates/room/budget. The pitch must change based on the actual hotel's strengths.`,
 		`If Hotel facts explicitly say a service exists, answer confidently and briefly. Examples: hasBusService=true means yes, mention busDetails if present; parkingLot=true means yes, parking is available subject to hotel availability/arrangement; isNusuk=true means yes, the hotel is listed/available on Nusuk and you should mention isNusukText if present; distances means give the exact walking/driving distance; policyQA contains only answered hotel policy rows, so answer cancellation/refund/policy questions from those rows; listed offers/monthlyPackages mean mention the public offer/package as guidance. Do not say "I cannot confirm" for facts that are present in Hotel facts.`,
 		`If the guest asks about something that is genuinely not in Hotel facts, Known facts, Tool result, or the transcript, it is acceptable to say you do not have that confirmed detail yet. Say it warmly and professionally, offer to verify with reception or continue with the booking details you can confirm, and keep the hotel/reservation path helpful. Never invent missing facts, and never claim not to know a fact that is present in Hotel facts.`,
@@ -9575,6 +9632,110 @@ function formatMoney(value, currency = "SAR", languageCode = "en") {
 		: `${amount} ${currency || "SAR"}`;
 }
 
+function escapePriceMarkup(value = "") {
+	return String(value || "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
+function originalAmountBeforeDirectDiscount(discountedValue = 0) {
+	const discounted = Number(discountedValue || 0);
+	if (!Number.isFinite(discounted) || discounted <= 0) return 0;
+	return Number((discounted / DIRECT_BOOKING_DISCOUNT_FACTOR).toFixed(2));
+}
+
+function directBookingDiscountText(languageCode = "en") {
+	const percent = formatNumber(DIRECT_BOOKING_DISCOUNT_RATE * 100, languageCode);
+	return /^ar\b/i.test(languageCode)
+		? `خصم ${percent}٪ للحجز المباشر`
+		: `${percent}% direct-booking discount`;
+}
+
+function directBookingDiscountReason(languageCode = "en") {
+	return /^ar\b/i.test(languageCode)
+		? "لأن الحجز مباشر مع الاستقبال بدون عمولة وسيط."
+		: "Because the booking is direct with reception, with no middleman commission.";
+}
+
+function discountedPriceInline(value = 0, currency = "SAR", languageCode = "en") {
+	const discounted = Number(value || 0);
+	if (!Number.isFinite(discounted) || discounted <= 0) {
+		return formatMoney(value, currency, languageCode);
+	}
+	const original = originalAmountBeforeDirectDiscount(discounted);
+	return [
+		`<s class="message-price-old">${escapePriceMarkup(
+			formatMoney(original, currency, languageCode)
+		)}</s>`,
+		`<strong class="message-price-new">${escapePriceMarkup(
+			formatMoney(discounted, currency, languageCode)
+		)}</strong>`,
+		`<span class="message-price-badge">${escapePriceMarkup(
+			directBookingDiscountText(languageCode)
+		)}</span>`,
+	].join(" ");
+}
+
+function discountedPriceLine(label = "", value = 0, currency = "SAR", languageCode = "en") {
+	return `${label}: ${discountedPriceInline(value, currency, languageCode)}`;
+}
+
+function quoteDiscountDisplay(quote = {}, languageCode = "en") {
+	const source = asObject(quote);
+	const total = Number(source.total || source.totals?.totalPriceWithCommission || 0) || 0;
+	const averagePerNight = Number(source.averagePerNight || 0) || 0;
+	const currency = source.currency || "SAR";
+	if (!total) return null;
+	const ar = /^ar\b/i.test(languageCode);
+	return {
+		ratePercent: DIRECT_BOOKING_DISCOUNT_RATE * 100,
+		factor: DIRECT_BOOKING_DISCOUNT_FACTOR,
+		originalTotal: originalAmountBeforeDirectDiscount(total),
+		originalAveragePerNight: averagePerNight
+			? originalAmountBeforeDirectDiscount(averagePerNight)
+			: 0,
+		finalTotal: total,
+		finalAveragePerNight: averagePerNight,
+		currency,
+		reason: directBookingDiscountReason(languageCode),
+		displayTotalLine: discountedPriceLine(
+			ar ? "الإجمالي" : "Total",
+			total,
+			currency,
+			languageCode
+		),
+		displayAveragePerNightLine: averagePerNight
+			? discountedPriceLine(
+					ar ? "السعر لليلة" : "Rate per night",
+					averagePerNight,
+					currency,
+					languageCode
+			  )
+			: "",
+		formatInstruction:
+			"Use the display lines exactly when showing quote prices. Keep the original price inside the <s class=\"message-price-old\"> tag and the discounted price inside <strong class=\"message-price-new\"> on the same row.",
+	};
+}
+
+function quoteReplyMissingDiscountFormat(reply = "", toolResult = {}) {
+	const discount = asObject(toolResult?.discount);
+	if (
+		toolResult?.tool !== "get_quote" ||
+		toolResult?.available !== true ||
+		!discount.displayTotalLine
+	) {
+		return false;
+	}
+	const text = String(reply || "");
+	return (
+		!/<s\b[^>]*class=["'][^"']*\bmessage-price-old\b/i.test(text) ||
+		!/<strong\b[^>]*class=["'][^"']*\bmessage-price-new\b/i.test(text) ||
+		!replyPreservesVisibleNumbers(discount.displayTotalLine, text)
+	);
+}
+
 function formatNightsLabel(value = 0, languageCode = "en") {
 	const nights = Math.max(0, Number(value || 0) || 0);
 	if (/^ar\b/i.test(languageCode)) {
@@ -9767,9 +9928,20 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 		availableRooms > 0 &&
 		requestedRooms > availableRooms
 	) {
+		const partialDiscountDisplay = quoteDiscountDisplay(partialQuote, languageCode);
 		const availableLabel = `${formatNumber(availableRooms, languageCode)} ${roomLabel}`;
 		const requestedLabel = `${formatNumber(requestedRooms, languageCode)} ${roomLabel}`;
 		const shortageLabel = `${formatNumber(shortageRooms, languageCode)} ${roomLabel}`;
+		const partialNightlyDisplay =
+			partialDiscountDisplay?.displayAveragePerNightLine ||
+			(ar
+				? `السعر لليلة: ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}`
+				: `Rate per night: ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}`);
+		const partialTotalDisplay =
+			partialDiscountDisplay?.displayTotalLine ||
+			(ar
+				? `الإجمالي: ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}`
+				: `Total: ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}`);
 		if (ar) {
 			return [
 				`${arabicGuestAddress(sc, known)}، راجعت التوفر بدقة.`,
@@ -9779,7 +9951,7 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 					? `لو يناسبك المتاح الحالي، يكون إجمالي الليلة للـ${formatNumber(
 							availableRooms,
 							languageCode
-					  )} غرفة ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}، والإجمالي ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}.`
+					  )} غرفة ${partialNightlyDisplay}، ${partialTotalDisplay}.`
 					: "",
 				`إذا يناسبك ${availableLabel} أكمل لك عليها، ولو تحتاجين ${requestedLabel} بالضبط أقدر أحول الطلب للاستقبال لمراجعة إمكانية توفير ${shortageLabel} إضافية.`,
 			]
@@ -9791,7 +9963,7 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			`Confirmed availability right now is ${availableRooms} of ${requestedRooms} ${roomLabel}.`,
 			`${shortageRooms} ${roomLabel} cannot be confirmed directly for the full date range right now.`,
 			partialQuote.total
-				? `For the available ${availableRooms}, the nightly total is ${formatMoney(partialQuote.averagePerNight || 0, partialQuote.currency || "SAR", languageCode)}, and the total is ${formatMoney(partialQuote.total || 0, partialQuote.currency || "SAR", languageCode)}.`
+				? `For the available ${availableRooms}, ${partialNightlyDisplay}, and ${partialTotalDisplay}.`
 				: "",
 			`I can continue with ${availableRooms}, or I can pass the request to reception to review whether the extra ${shortageRooms} can be arranged.`,
 		]
@@ -9849,6 +10021,7 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			: `${guestDisplayName(sc)}, I am sorry, this option does not show confirmed availability at ${hotelName} for those dates. Would you like me to check another room or dates?`;
 	}
 	const dateLines = reviewDateLines(known, languageCode);
+	const discountDisplay = quoteDiscountDisplay(quote, languageCode);
 	if (ar) {
 		const roomLineLabel = Number(totalRooms || 1) > 1 ? "الغرف" : "الغرفة";
 		return [
@@ -9856,8 +10029,10 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 			`${roomLineLabel}: ${roomLabel}`,
 			...dateLines,
 			`عدد الليالي: ${formatNumber(quote.nights || result.nights || 0, languageCode)}`,
-			`السعر: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} لليلة`,
-			`الإجمالي: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
+			discountDisplay?.displayAveragePerNightLine ||
+				`السعر: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} لليلة`,
+			discountDisplay?.displayTotalLine ||
+				`الإجمالي: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
 			`تحب أكمل لك الحجز؟`,
 		].join("\n");
 	}
@@ -9867,8 +10042,10 @@ function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {})
 		`${roomLineLabel}: ${roomLabel}`,
 		...dateLines,
 		`Nights: ${quote.nights || result.nights || 0}`,
-		`Rate: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} per night`,
-		`Total: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
+		discountDisplay?.displayAveragePerNightLine ||
+			`Rate: ${formatMoney(quote.averagePerNight || 0, quote.currency || "SAR", languageCode)} per night`,
+		discountDisplay?.displayTotalLine ||
+			`Total: ${formatMoney(quote.total || 0, quote.currency || "SAR", languageCode)}`,
 		`Would you like me to continue the booking?`,
 	].join("\n");
 }
@@ -11413,6 +11590,13 @@ function compactQuoteToolResult(result = {}, known = {}) {
 				}))
 				.filter((item) => item.roomTypeKey)
 		: [];
+	const total = Number(quote.total || quote.totals?.totalPriceWithCommission || 0) || 0;
+	const averagePerNight = Number(quote.averagePerNight || 0) || 0;
+	const currency = quote.currency || result.currency || known.currency || "SAR";
+	const discount = quoteDiscountDisplay(
+		{ total, averagePerNight, currency },
+		known.languageCode || "en"
+	);
 	return {
 		tool: "get_quote",
 		ok: result.ok !== false,
@@ -11446,10 +11630,10 @@ function compactQuoteToolResult(result = {}, known = {}) {
 		unavailableSelections,
 		firstUnavailableDate: validISODate(result.firstUnavailableDate),
 		minCheckinISO: validISODate(result.minCheckinISO),
-		total:
-			Number(quote.total || quote.totals?.totalPriceWithCommission || 0) || 0,
-		averagePerNight: Number(quote.averagePerNight || 0) || 0,
-		currency: quote.currency || result.currency || known.currency || "SAR",
+		total,
+		averagePerNight,
+		currency,
+		discount,
 		perNight: Array.isArray(quote.perNight) ? quote.perNight.slice(0, 20) : [],
 		inventory: Object.keys(inventory).length
 			? {
@@ -11477,6 +11661,8 @@ function quoteReplyFormattingInstruction() {
 		"Do not compress the quote into one paragraph.",
 		"Do not add reference numbers, date references, IDs, or unexplained numeric lines.",
 		"Do not say the booking or reservation is confirmed, created, completed, finalized, or booked from a quote.",
+		"For available quotes with toolResult.discount, show price lines using toolResult.discount.displayAveragePerNightLine and toolResult.discount.displayTotalLine exactly. Preserve the <s class=\"message-price-old\"> original price and <strong class=\"message-price-new\"> discounted price on the same row.",
+		"If the guest asks why there is a discount, explain briefly that direct booking through reception has no middleman commission.",
 		"If available, ask whether the guest wants to continue; do not ask for name, phone, nationality, or email before this quote has been shown.",
 		"If unavailable, mention every requested room selection from toolResult.roomSelections and any firstUnavailableDate; do not collapse a mixed-room request into one room type, and do not show total/price as 0.",
 		"If toolResult.code is same_day_checkin_not_supported, explicitly say the requested check-in is unavailable/not bookable through chat. toolResult.minCheckinISO is only the earliest date the chat can start checking; do not invite the guest to book/search from that date as the solution, and do not call it available or recommended unless an alternatives/availability tool result proves availability. Offer the Alternative dates button or changing details.",
@@ -12684,6 +12870,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous quote reply was not sent because it called a verified future check-in/date range past, expired, or already passed. Return a corrected quote from OpenAI only. Use the exact future dates and quote facts from toolResult, and do not say the dates are past."
 				: validation === "unavailable_quote_zero_total"
 				? "Your previous unavailable quote reply was not sent because it showed total/price as 0. Return a corrected customer-facing reply from OpenAI only. For unavailable quotes, do not show any zero price or zero total. Explain the unavailable date/room reason from toolResult and offer alternatives or date/room adjustment."
+				: validation === "quote_discount_format_missing"
+				? "Your previous available quote reply was not sent because it omitted the required direct-booking discount format. Return a corrected customer-facing quote from OpenAI only. Use toolResult.discount.displayAveragePerNightLine and toolResult.discount.displayTotalLine exactly when showing prices. Keep the original price inside <s class=\"message-price-old\"> and the discounted price inside <strong class=\"message-price-new\"> on the same row. Do not recalculate or invent prices."
 				: validation === "known_phone_listed_as_missing"
 				? "Your previous required-details reply was not sent because it listed a known phone number as a raw missing phone value. Return a corrected customer-facing reply from OpenAI only. If known.phone exists and only needs confirmation, say it is the existing/current phone and ask the guest to confirm it or say same number. Do not ask them to retype it as a missing phone field."
 				: validation === "vague_progress_instead_of_tool_result"
@@ -12763,6 +12951,9 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (unavailableQuoteShowsZeroTotal(text, toolResult)) {
 			return "unavailable_quote_zero_total";
+		}
+		if (quoteReplyMissingDiscountFormat(text, toolResult)) {
+			return "quote_discount_format_missing";
 		}
 		if (requiredDetailsReplyListsKnownPhoneAsMissing(text, known, toolResult)) {
 			return "known_phone_listed_as_missing";
@@ -16349,6 +16540,7 @@ const exportedOrchestrator = {
 		textMentionsRoomSelection,
 		textMentionsSpecificRoomType,
 		selectionsFromKnown,
+		roomSelectionsTotal,
 		activeRoomTypeKeySet,
 		filterInactiveRoomSelectionsForHotel,
 		bestRoomSelectionsForGuests,
@@ -16402,6 +16594,7 @@ const exportedOrchestrator = {
 		shortApproximatePriceFollowup,
 		latestGuestAsksPriceWithContext,
 		latestGuestRaisesBudgetConcern,
+		latestGuestAsksDiscountExplanation,
 		latestGuestRequestsCheaperNearbyDates,
 		languageFactsFromGuestText,
 		replyHasHotelValuePitch,
@@ -16493,6 +16686,10 @@ const exportedOrchestrator = {
 		buildHotelFactReplyMessage,
 		buildAuthoritativeHotelServiceFactReply,
 		buildQuoteFallbackMessage,
+		buildValueObjectionFallbackReply,
+		quoteDiscountDisplay,
+		quoteReplyMissingDiscountFormat,
+		originalAmountBeforeDirectDiscount,
 		buildSplitCityItineraryFallback,
 		warmBookingPrefix,
 		withWarmPrefix,
@@ -16521,6 +16718,11 @@ const exportedOrchestrator = {
 		decisionChangedFields,
 		factsForMergeFromDecision,
 		orchestratorContractPrompt,
+		runtimeTuning: {
+			guestReplyQuietMs: AI_GUEST_REPLY_QUIET_MS,
+			planWorkerHeapMb: AI_PLAN_WORKER_HEAP_MB,
+			planMaxActiveTurns: AI_PLAN_MAX_ACTIVE_TURNS,
+		},
 	},
 };
 

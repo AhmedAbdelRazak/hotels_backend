@@ -372,4 +372,114 @@ check("Room facts expose type capacity before unreliable bedsCount", () => {
 	assert.strictEqual(double.bedsCount, 2);
 });
 
+check("Direct-booking discount quote shows struck old price and green final price", () => {
+	assert.strictEqual(orchestrator.originalAmountBeforeDirectDiscount(75), 100);
+	const discount = orchestrator.quoteDiscountDisplay(
+		{ total: 75, averagePerNight: 75, currency: "SAR" },
+		"en"
+	);
+	assert(discount.displayTotalLine.includes('<s class="message-price-old">100 SAR</s>'));
+	assert(discount.displayTotalLine.includes('<strong class="message-price-new">75 SAR</strong>'));
+	assert(discount.displayTotalLine.includes("25% direct-booking discount"));
+
+	const reply = orchestrator.buildQuoteFallbackMessage(
+		{ preferredLanguageCode: "en", displayName1: "Ahmed" },
+		{
+			languageCode: "en",
+			checkinISO: "2026-08-25",
+			checkoutISO: "2026-08-28",
+			roomTypeKey: "tripleRooms",
+			rooms: 1,
+		},
+		{ available: true, quote: quoteForTriple() },
+		hotel
+	);
+	assert(reply.includes('<s class="message-price-old">300 SAR</s>'));
+	assert(reply.includes('<strong class="message-price-new">225 SAR</strong>'));
+});
+
+check("Available quote validator rejects missing discount markup", () => {
+	const toolResult = {
+		tool: "get_quote",
+		available: true,
+		discount: orchestrator.quoteDiscountDisplay(
+			{ total: 75, averagePerNight: 75, currency: "SAR" },
+			"en"
+		),
+	};
+	assert.strictEqual(orchestrator.quoteReplyMissingDiscountFormat("Total: 75 SAR", toolResult), true);
+	assert.strictEqual(
+		orchestrator.quoteReplyMissingDiscountFormat(toolResult.discount.displayTotalLine, toolResult),
+		false
+	);
+});
+
+check("Budget objection reply is concise and explains no-commission direct booking", () => {
+	const reply = orchestrator.buildValueObjectionFallbackReply(
+		{ preferredLanguageCode: "en", displayName1: "Ahmed" },
+		hotel,
+		{ languageCode: "en", quote: { ...quoteForTriple(), total: 75, averagePerNight: 75 } },
+		guest("Can I get a discount?")
+	);
+	assert(reply.includes('<s class="message-price-old">100 SAR</s>'));
+	assert(reply.includes("no middleman commission"));
+	assert(!reply.includes("Which way would you like me to continue?"));
+	assert(!reply.includes("Check the best available option"));
+});
+
+check("Triple-room correction can reduce ambiguous three-room request to one room", () => {
+	const text = "لا، غرفة ثلاثية واحدة فقط لثلاثة أشخاص";
+	assert.strictEqual(orchestrator.roomCountCorrectionFromText(text), 1);
+	const selections = orchestrator.extractRoomSelectionsFromText(text);
+	assert.strictEqual(selections[0]?.roomTypeKey, "tripleRooms");
+	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(selections), 3);
+});
+
+check("Combined identity and bus detour do not damage known quote or guest name", () => {
+	const known = {
+		languageCode: "ar",
+		checkinISO: "2026-07-17",
+		checkoutISO: "2026-07-29",
+		roomSelections: [
+			{ roomTypeKey: "quadRooms", count: 1 },
+			{ roomTypeKey: "doubleRooms", count: 1 },
+		],
+		rooms: 2,
+		adults: 6,
+		quote: {
+			available: true,
+			checkinISO: "2026-07-17",
+			checkoutISO: "2026-07-29",
+			roomSelections: [
+				{ roomTypeKey: "quadRooms", count: 1 },
+				{ roomTypeKey: "doubleRooms", count: 1 },
+			],
+			totalRooms: 2,
+			total: 1800,
+			currency: "SAR",
+		},
+	};
+	const identity = orchestrator.bookingIdentityFactsFromText(
+		"الاسم مرسي ربيع\nالجنسية مصري\nالهاتف 01012345678",
+		{ allowName: true }
+	);
+	const merged = orchestrator.mergeKnownFacts(known, identity);
+	assert.strictEqual(merged.quote.total, 1800);
+	assert.strictEqual(orchestrator.roomSelectionsTotal(merged.roomSelections), 2);
+	assert.strictEqual(merged.phone, "01012345678");
+	assert.strictEqual(merged.fullName, "مرسي ربيع");
+
+	const busFacts = orchestrator.bookingIdentityFactsFromText("قبل اي شي هل يوجد اتوبيس", {
+		allowName: true,
+		allowUnlabeledName: true,
+	});
+	assert.strictEqual(busFacts.fullName, undefined);
+	assert.strictEqual(
+		orchestrator.latestGuestMentionsBus({ message: "قبل اي شي هل يوجد اتوبيس" }),
+		true
+	);
+	assert.strictEqual(orchestrator.runtimeTuning.guestReplyQuietMs >= 3000, true);
+	assert.strictEqual(orchestrator.runtimeTuning.planMaxActiveTurns, 1);
+});
+
 console.log(`PASS ${checks} chatbot regression checks`);
