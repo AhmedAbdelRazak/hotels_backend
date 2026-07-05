@@ -2216,7 +2216,24 @@ const OTA_GUEST_NOTE_DIRECT_LABELS = OTA_GUEST_NOTE_LABELS.filter(
 );
 
 const OTA_GUEST_NOTE_STOP_LABEL_PATTERN =
-	/^(?:reservation|confirmation|booking|itinerary|hotel|property|room|check[-\s]?in|check[-\s]?out|arrival|departure|booked|status|guest name|guest email|guest phone|phone|email|nationality|country|adults?|children|guests?|payment|pricing|rate|tax|taxes|total|amount|currency|card|virtual card|expiration|activation|cancellation|policy|source|supplier)\b/i;
+	/^(?:reservation|confirmation|booking|itinerary|hotel|property|room|check[-\s]?in|check[-\s]?out|arrival|departure|booked|status|customer info|customer information|guest info|guest information|customer first name|customer last name|country of residence|guest name|guest email|guest phone|phone|email|nationality|country|adults?|children|guests?|payment|pricing|rate|tax|taxes|total|amount|currency|card|virtual card|expiration|activation|cancellation|policy|source|supplier|attention hotel staff|booked and payable by|agoda hotline)\b/i;
+
+function isOtaGuestNoteMetadataLine(value = "") {
+	const normalized = normalizeComparable(value);
+	if (!normalized) return false;
+	if (/^(customer|guest) (info|information)\b/.test(normalized)) return true;
+	if (
+		/^(customer|guest) (first name|last name|name|phone|email|country of residence|residence country|nationality)\b/.test(
+			normalized
+		)
+	) {
+		return true;
+	}
+	if (/^(name|phone|email|nationality|country of residence|residence country)\b/.test(normalized)) {
+		return true;
+	}
+	return false;
+}
 
 function cleanOtaGuestNote(value = "") {
 	const cleaned = cleanOtaDisplayValue(redactSensitive(value))
@@ -2233,6 +2250,7 @@ function cleanOtaGuestNote(value = "") {
 	if (/^(?:no\s+)?(?:special\s+)?(?:requests?|comments?|notes?)$/i.test(cleaned)) {
 		return "";
 	}
+	if (isOtaGuestNoteMetadataLine(cleaned)) return "";
 	if (isOtaHotelBoilerplateLine(cleaned)) return "";
 	if (
 		/(?:privacy policy|do not reply|terms of use|payment details|total guest payment|amount to charge|card number|validation code|cvv|cvc)/i.test(
