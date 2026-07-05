@@ -7454,7 +7454,7 @@ exports.updateReservation = async (req, res) => {
 		}
 		const populatedUpdatedReservation =
 			(await Reservations.findById(updatedReservation._id)
-				.populate("hotelId", RESERVATION_DETAILS_HOTEL_SELECT.join(" "))
+				.populate("hotelId", RESERVATION_DETAILS_HOTEL_SELECT)
 				.populate("belongsTo", "_id name email phone")
 				.exec()) || updatedReservation;
 
