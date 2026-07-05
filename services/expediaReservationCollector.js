@@ -850,22 +850,51 @@ const scorePropertyForHotel = (property = {}, hotel = {}) => {
 	return best;
 };
 
-const matchPropertiesToHotels = (properties = [], hotels = []) =>
-	hotels.map((hotel) => {
-		const ranked = properties
-			.map((property) => ({
-				property,
-				score: scorePropertyForHotel(property, hotel),
-			}))
-			.sort((left, right) => right.score - left.score);
-		const best = ranked[0];
+const EXPEDIA_PROPERTY_MATCH_THRESHOLD = Number(
+	process.env.OTA_EXPEDIA_PROPERTY_MATCH_THRESHOLD || 72
+);
+
+const matchPropertiesToHotels = (properties = [], hotels = []) => {
+	const rankedPairs = [];
+	const bestByHotel = new Map();
+
+	hotels.forEach((hotel, hotelIndex) => {
+		properties.forEach((property, propertyIndex) => {
+			const score = scorePropertyForHotel(property, hotel);
+			const pair = { hotelIndex, propertyIndex, hotel, property, score };
+			rankedPairs.push(pair);
+			const currentBest = bestByHotel.get(hotelIndex);
+			if (!currentBest || score > currentBest.score) {
+				bestByHotel.set(hotelIndex, pair);
+			}
+		});
+	});
+
+	rankedPairs.sort((left, right) => right.score - left.score);
+	const assignedHotelIndexes = new Set();
+	const assignedPropertyIndexes = new Set();
+	const assignedByHotel = new Map();
+
+	for (const pair of rankedPairs) {
+		if (pair.score < EXPEDIA_PROPERTY_MATCH_THRESHOLD) break;
+		if (assignedHotelIndexes.has(pair.hotelIndex)) continue;
+		if (assignedPropertyIndexes.has(pair.propertyIndex)) continue;
+		assignedHotelIndexes.add(pair.hotelIndex);
+		assignedPropertyIndexes.add(pair.propertyIndex);
+		assignedByHotel.set(pair.hotelIndex, pair);
+	}
+
+	return hotels.map((hotel, hotelIndex) => {
+		const assigned = assignedByHotel.get(hotelIndex);
+		const best = bestByHotel.get(hotelIndex);
 		return {
 			hotel,
-			property: best && best.score >= 72 ? best.property : null,
+			property: assigned ? assigned.property : null,
 			bestProperty: best ? best.property : null,
-			matchScore: best ? best.score : 0,
+			matchScore: assigned ? assigned.score : best ? best.score : 0,
 		};
 	});
+};
 
 const findReservationsLink = async (page) => {
 	const links = await page.evaluate(() =>
