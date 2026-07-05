@@ -3948,7 +3948,22 @@ async function recoverHotelUnavailableToJannatSupport({
 	);
 	const routed = updated || (await getSupportCaseById(caseId).catch(() => null)) || sc;
 	const jannatResult = await maybeHandleJannatSupportTurn(io, routed);
-	return jannatResult?.supportCase || routed;
+	const afterJannat = jannatResult?.supportCase || routed;
+	const hasJannatFollowup =
+		conversationHasClientAction(afterJannat, "jannat_hotel_recommendation") ||
+		conversationHasClientAction(afterJannat, "jannat_alternative_recommendation") ||
+		conversationHasClientAction(afterJannat, "jannat_platform_reply") ||
+		conversationHasClientAction(afterJannat, "jannat_no_available_alternative") ||
+		conversationHasClientAction(afterJannat, "jannat_no_target_hotel") ||
+		conversationHasClientAction(afterJannat, "jannat_no_hotel_configured");
+	if (!hasJannatFollowup) {
+		console.log("[aiagent] scheduling Jannat support recovery follow-up", { caseId });
+		schedulePlanTurn(io, caseId, {
+			delayMs: 0,
+			reason: "hotel_unavailable_recovery_jannat_followup",
+		});
+	}
+	return afterJannat;
 }
 
 function latestGuestAsksDiscountExplanation(value = "") {
