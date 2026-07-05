@@ -118,7 +118,7 @@ const hasStrongNewReservationSubject = (subject = "") => {
 	if (/(modified|modification|changed|updated|amended|amendment)/i.test(value)) {
 		return false;
 	}
-	return /(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking)/i.test(
+	return /(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed)/i.test(
 		value
 	);
 };
@@ -127,6 +127,35 @@ const hasReliableOtaConfirmation = (value = "") => {
 	const normalized = normalizeWhitespace(value).replace(/[^a-z0-9-]/gi, "");
 	if (normalized.length < 6) return false;
 	return /[a-z]/i.test(normalized) || /\d{6,}/.test(normalized);
+};
+
+const WEAK_CONFIRMATION_VALUES = new Set([
+	"booking",
+	"confirmation",
+	"confirmed",
+	"details",
+	"hotel",
+	"id",
+	"information",
+	"number",
+	"prepaid",
+	"property",
+	"reservation",
+	"status",
+]);
+
+const isWeakOtaConfirmationValue = (value = "") => {
+	const normalized = normalizeWhitespace(value)
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!normalized) return true;
+	if (!hasReliableOtaConfirmation(normalized)) return true;
+	if (/\d{5,}/.test(normalized)) return false;
+	return normalized
+		.split(" ")
+		.some((token) => WEAK_CONFIRMATION_VALUES.has(token));
 };
 
 const cleanResolvedFieldWarnings = (warnings = [], normalized = {}) => {
@@ -290,7 +319,7 @@ const buildEmailContext = (email = {}) => {
 		text: emailText,
 	});
 	const subjectHasStrongReservationSignal =
-		/(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|confirmation\s*(#|number)?|modified|modification|updated|cancelled|canceled|cancellation|cancelation|reservation status|booking status|no[-\s]?show)/i.test(
+		/(new reservation|new booking(?:\s+confirmed)?|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed|confirmation\s*(#|number)?|modified|modification|updated|cancelled|canceled|cancellation|cancelation|reservation status|booking status|no[-\s]?show)/i.test(
 			subjectForClassification
 		);
 	const subjectHasWeakReservationSignal =
@@ -602,8 +631,14 @@ const mergeAiDecision = ({ heuristic, aiResult, emailText, email, emailContext }
 	const confirmationNumber = normalizeConfirmation(
 		pickAiString(decision, "confirmationNumber")
 	);
+	const aiConfirmationCanReplace =
+		confirmationNumber &&
+		aiConfidence >= 0.8 &&
+		fieldAppearsInText(confirmationNumber, emailText) &&
+		(isWeakOtaConfirmationValue(merged.confirmationNumber) ||
+			!fieldAppearsInText(merged.confirmationNumber, emailText));
 	if (
-		!merged.confirmationNumber &&
+		(!merged.confirmationNumber || aiConfirmationCanReplace) &&
 		confirmationNumber &&
 		fieldAppearsInText(confirmationNumber, emailText)
 	) {

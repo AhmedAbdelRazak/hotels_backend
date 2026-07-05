@@ -31,6 +31,9 @@ const DEFAULT_OTA_INBOUND_EMAIL_DEDUCTION_RATE = clampDeductionRate(
 		process.env.OTA_EMAIL_DEFAULT_DEDUCTION_RATE,
 	0.2
 );
+const MIN_REAL_CALENDAR_ROOT_PRICE = Number(
+	process.env.OTA_MIN_REAL_CALENDAR_ROOT_PRICE || 0.01
+);
 
 const DEFAULT_SAR_EXCHANGE_RATES = {
 	SAR: 1,
@@ -130,6 +133,7 @@ function normalizeAjyadComparable(value = "") {
 
 function containsAjyadKeyword(value = "") {
 	const normalized = normalizeAjyadComparable(value);
+	if (/\bagyad\b/i.test(normalized)) return true;
 	return /\bajyad\b/i.test(normalized) || normalized.includes("اجياد");
 }
 
@@ -183,6 +187,13 @@ function comparableVariants(value) {
 }
 
 const EXPLICIT_HOTEL_ALIAS_GROUPS = [
+	[
+		"Zyd Agyad",
+		"Zyd Ajyad",
+		"Zad Agyad",
+		"Zad Ajyad",
+		"ZAD AJYAD",
+	],
 	[
 		"AlSukareya HOTEL",
 		"Al Sukareya Hotel",
@@ -1117,11 +1128,40 @@ function findFirstMoneyPatternOutsideVccLines(text, patterns) {
 	return "";
 }
 
+const GENERIC_CONFIRMATION_VALUES = new Set([
+	"booking",
+	"confirmation",
+	"confirmed",
+	"details",
+	"hotel",
+	"id",
+	"information",
+	"number",
+	"prepaid",
+	"property",
+	"reservation",
+	"status",
+]);
+
+function isWeakConfirmationCandidate(value = "") {
+	const normalized = normalizeComparable(value);
+	if (!normalized) return true;
+	if (GENERIC_CONFIRMATION_VALUES.has(normalized)) return true;
+	if (/\d{5,}/.test(normalized)) return false;
+	const tokens = normalized.split(" ").filter(Boolean);
+	return tokens.some((token) => GENERIC_CONFIRMATION_VALUES.has(token));
+}
+
 function cleanConfirmationCandidate(value) {
 	const candidate = normalizeWhitespace(value);
 	if (!candidate) return "";
-	const match = candidate.match(/\b([A-Z0-9][A-Z0-9-]{4,})\b/i);
-	return normalizeWhitespace(match?.[1] || candidate);
+	const matches = candidate.match(/\b([A-Z0-9][A-Z0-9-]{4,})\b/gi) || [];
+	for (const match of matches) {
+		const cleanedMatch = normalizeWhitespace(match);
+		if (!isWeakConfirmationCandidate(cleanedMatch)) return cleanedMatch;
+	}
+	const cleaned = normalizeWhitespace(candidate);
+	return isWeakConfirmationCandidate(cleaned) ? "" : cleaned;
 }
 
 function findDateValue(text, labels, patterns = []) {
@@ -1158,6 +1198,284 @@ function findNextLineAfterExactLabel(text = "", labels = [], lookahead = 5) {
 		}
 	}
 	return "";
+}
+
+function stripOtaMarkdownValue(value = "") {
+	return normalizeWhitespace(value)
+		.replace(/[*|]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function cleanAgodaValue(value = "") {
+	return cleanFieldValue(stripOtaMarkdownValue(value));
+}
+
+function parseAgodaOccupancy(value = "") {
+	const source = stripOtaMarkdownValue(value);
+	const adults = Number(source.match(/\b(\d+)\s+adults?\b/i)?.[1] || 0);
+	const children = Number(
+		source.match(/\b(\d+)\s+(?:children|child|kids?)\b/i)?.[1] || 0
+	);
+	return {
+		adults: Number.isFinite(adults) ? adults : 0,
+		children: Number.isFinite(children) ? children : 0,
+		totalGuests:
+			(Number.isFinite(adults) ? adults : 0) +
+			(Number.isFinite(children) ? children : 0),
+	};
+}
+
+function parseAgodaRoomLine(value = "") {
+	const source = stripOtaMarkdownValue(value);
+	if (!source || !/\badults?\b/i.test(source)) return {};
+	const match = source.match(
+		/^(.+?)\s+(\d+)\s+(\d+)\s+adults?(?:\s+(\d+)\s+(?:children|child|kids?))?(?:\s+\d+)?$/i
+	);
+	if (!match) return {};
+	const adults = Number(match[3] || 0);
+	const children = Number(match[4] || 0);
+	return {
+		roomName: cleanAgodaValue(match[1]),
+		roomCount: Math.max(1, Number(match[2] || 1)),
+		adults: Number.isFinite(adults) ? adults : 0,
+		children: Number.isFinite(children) ? children : 0,
+		totalGuests:
+			(Number.isFinite(adults) ? adults : 0) +
+			(Number.isFinite(children) ? children : 0),
+	};
+}
+
+function isAgodaRoomHeaderLine(value = "") {
+	return /(room\s+type|no\.?\s+of\s+rooms|occupancy|extra\s+bed)/i.test(value);
+}
+
+function extractAgodaRoomDetails(text = "") {
+	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
+	const headerIndex = lines.findIndex(
+		(line) =>
+			/room\s+type/i.test(line) &&
+			/no\.?\s+of\s+rooms/i.test(line) &&
+			/occupancy/i.test(line)
+	);
+	if (headerIndex >= 0) {
+		for (
+			let index = headerIndex + 1;
+			index < Math.min(lines.length, headerIndex + 8);
+			index += 1
+		) {
+			if (isAgodaRoomHeaderLine(lines[index])) continue;
+			const parsed = parseAgodaRoomLine(lines[index]);
+			if (parsed.roomName) return parsed;
+		}
+	}
+
+	const roomTypeIndex = lines.findIndex(
+		(line) => normalizeComparable(line) === "room type"
+	);
+	if (roomTypeIndex < 0) return {};
+	let roomName = "";
+	let roomCount = 0;
+	let occupancy = {};
+	for (
+		let index = roomTypeIndex + 1;
+		index < Math.min(lines.length, roomTypeIndex + 12);
+		index += 1
+	) {
+		const line = lines[index];
+		if (!line || isAgodaRoomHeaderLine(line)) continue;
+		if (/^(benefits|cancellation policy|room only|rate plan)/i.test(line)) break;
+		if (!roomName && !/^\d+$/.test(line) && !/\badults?\b/i.test(line)) {
+			roomName = cleanAgodaValue(line);
+			continue;
+		}
+		if (!roomCount && /^\d+$/.test(line)) {
+			roomCount = Number(line);
+			continue;
+		}
+		if (!occupancy.adults && /\badults?\b/i.test(line)) {
+			occupancy = parseAgodaOccupancy(line);
+		}
+	}
+	return {
+		roomName,
+		roomCount: roomCount || 0,
+		adults: occupancy.adults || 0,
+		children: occupancy.children || 0,
+		totalGuests: occupancy.totalGuests || 0,
+	};
+}
+
+function extractAgodaMoneyByLabel(text = "", label = "") {
+	const labelComparable = normalizeComparable(label);
+	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
+	for (let index = 0; index < lines.length; index += 1) {
+		const line = lines[index];
+		const lineComparable = normalizeComparable(line);
+		if (
+			lineComparable !== labelComparable &&
+			!lineComparable.startsWith(`${labelComparable} `)
+		) {
+			continue;
+		}
+		const sameLine = parseMoney(line);
+		if (sameLine.amount) return sameLine;
+		for (
+			let nextIndex = index + 1;
+			nextIndex < Math.min(lines.length, index + 5);
+			nextIndex += 1
+		) {
+			const parsed = parseMoney(lines[nextIndex]);
+			if (parsed.amount) return parsed;
+		}
+	}
+	return { amount: 0, currency: "" };
+}
+
+function nextAgodaValue(lines = [], startIndex = -1, skipPattern = null) {
+	if (startIndex < 0) return "";
+	for (
+		let index = startIndex + 1;
+		index < Math.min(lines.length, startIndex + 8);
+		index += 1
+	) {
+		const candidate = cleanAgodaValue(lines[index]);
+		if (!candidate) continue;
+		if (skipPattern && skipPattern.test(candidate)) continue;
+		return candidate;
+	}
+	return "";
+}
+
+function extractAgodaHotelName(text = "") {
+	const lines = normalizedLines(text).map(stripOtaMarkdownValue).filter(Boolean);
+	const bookingConfirmationIndex = lines.findIndex(
+		(line) => normalizeComparable(line) === "booking confirmation"
+	);
+	const fromBlock = nextAgodaValue(
+		lines,
+		bookingConfirmationIndex,
+		/^(prepaid|reservation information|\(?property id\b|city\b|marsha code\b)/i
+	);
+	if (fromBlock) return fromBlock;
+	return cleanAgodaValue(
+		findFirstPattern(text, [
+			/\bBooking confirmation\s*\n\s*\*?([^\n*(]{2,120})\*?/i,
+		])
+	);
+}
+
+function extractAgodaFields(email = {}, text = "", provider = "") {
+	const source = `${email.subject || ""}\n${text || ""}`;
+	if (provider !== "agoda" && !/\bagoda\b/i.test(source)) return {};
+
+	const confirmationNumber = cleanConfirmationCandidate(
+		firstNonEmpty(
+			findFirstPattern(source, [
+				/\bAgoda\s+Booking\s+ID\s+([A-Z0-9-]{5,})\b/i,
+				/\bBooking\s+ID\s*\n\s*([A-Z0-9-]{5,})\b/i,
+			]),
+			findNextLineAfterExactLabel(text, "Booking ID", 4)
+		)
+	);
+	const room = extractAgodaRoomDetails(text);
+	const hotelName = extractAgodaHotelName(text);
+	const referenceSellRate = extractAgodaMoneyByLabel(
+		text,
+		"Reference sell rate (incl. taxes & fees)"
+	);
+	const netRate = extractAgodaMoneyByLabel(text, "Net rate (incl. taxes & fees)");
+	const amountCurrency = referenceSellRate.currency || "SAR";
+	const payoutCurrency = netRate.currency || amountCurrency;
+	const amountConversion = getSarConversionMeta(referenceSellRate.amount, amountCurrency);
+	const payoutConversion = getSarConversionMeta(netRate.amount, payoutCurrency);
+	const firstName = findField(text, ["Customer First Name"]);
+	const lastName = findField(text, ["Customer Last Name"]);
+	const customerInfoName = findFirstPattern(text, [
+		/Customer\s+Info\s*-\s*Name\s*:\s*([^,\n]{2,120})/i,
+	]);
+	const guestName = cleanAgodaValue(
+		firstNonEmpty([firstName, lastName].filter(Boolean).join(" "), customerInfoName)
+	);
+	const guestPhone = cleanAgodaValue(
+		findFirstPattern(text, [
+			/Customer\s+Info\s*-\s*Name\s*:[^,\n]+,\s*Phone\s*:\s*([+\d\s().-]{6,})/i,
+		])
+	);
+	const nationality = cleanAgodaValue(
+		firstNonEmpty(findField(text, ["Country of Residence"]), findField(text, ["Country"]))
+	);
+	const aliases = Array.from(
+		new Set(
+			[hotelName, ...explicitHotelNameAliases(hotelName)]
+				.map((item) => normalizeWhitespace(item))
+				.filter(Boolean)
+		)
+	);
+	const paymentCollectionModel =
+		/\b(prepaid|booked and payable by\s+agoda)\b/i.test(source)
+			? "ota_collect"
+			: "unknown";
+
+	return {
+		confirmationNumber,
+		reservationId: confirmationNumber,
+		hotelName,
+		hotelNameAliases: aliases,
+		roomName: room.roomName || "",
+		roomCount: room.roomCount || 0,
+		adults: room.adults || 0,
+		children: room.children || 0,
+		totalGuests: room.totalGuests || 0,
+		guestName,
+		guestPhone,
+		nationality,
+		amount: referenceSellRate.amount || 0,
+		currency: amountCurrency,
+		totalAmountSar: amountConversion.totalAmountSar || 0,
+		sourceAmount: referenceSellRate.amount || 0,
+		sourceCurrency: amountCurrency,
+		exchangeRateToSar: amountConversion.exchangeRateToSar || 0,
+		exchangeRateSource: amountConversion.exchangeRateSource || "",
+		amountConvertedAt: amountConversion.convertedAt || "",
+		totalPayoutSar: payoutConversion.totalAmountSar || 0,
+		netAfterExpensesTotal: payoutConversion.totalAmountSar || 0,
+		paymentSummary:
+			referenceSellRate.amount || netRate.amount
+				? {
+						sourceCurrency: amountCurrency,
+						sourceTotalGuestPaymentAmount: referenceSellRate.amount || 0,
+						sourceTotalPayoutAmount: netRate.amount || 0,
+						totalGuestPaymentAmount: amountConversion.totalAmountSar || 0,
+						totalPayoutAmount: payoutConversion.totalAmountSar || 0,
+						currency: "SAR",
+						exchangeRateToSar: amountConversion.exchangeRateToSar || 0,
+						exchangeRateSource: amountConversion.exchangeRateSource || "",
+						amountConvertedAt: amountConversion.convertedAt || "",
+				  }
+				: {},
+		paymentCollectionModel,
+		paymentInstructions:
+			paymentCollectionModel === "ota_collect"
+				? "Agoda prepaid reservation; net rate is provided by Agoda."
+				: "",
+		sourcePresence: {
+			confirmationNumber: !!confirmationNumber,
+			reservationId: !!confirmationNumber,
+			hotelName: !!hotelName,
+			roomName: !!room.roomName,
+			roomCount: !!room.roomCount,
+			adults: !!room.adults,
+			children: room.children > 0,
+			totalGuests: !!room.totalGuests,
+			guestName: !!guestName,
+			guestPhone: !!guestPhone,
+			nationality: !!nationality,
+			amount: referenceSellRate.amount > 0,
+			paymentCollectionModel: paymentCollectionModel !== "unknown",
+			paymentInstructions: !!paymentCollectionModel && paymentCollectionModel !== "unknown",
+		},
+	};
 }
 
 function extractAirbnbConfirmationNumber(text = "") {
@@ -2025,7 +2343,13 @@ function resolveBookingSource({ provider = "", providerLabel = "", from = "", su
 
 function hasStrongNewReservationSignal(value = "") {
 	const subjectOnly = String(value || "").toLowerCase();
-	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking)/i.test(
+	if (/(cancelled|canceled|cancellation|cancelation|no[-\s]?show)/i.test(subjectOnly)) {
+		return false;
+	}
+	if (/(modified|modification|changed|updated|amended|amendment)/i.test(subjectOnly)) {
+		return false;
+	}
+	return /(new booking(?:\s+confirmed)?|new reservation|reservation confirmation|reservation confirmed|booking confirmation|confirmed reservation|booking confirmed|confirmed booking|booking\s+id\s+[a-z0-9-]{5,}\s+-\s+confirmed)/i.test(
 		subjectOnly
 	);
 }
@@ -2290,6 +2614,7 @@ function extractNormalizedReservation(email) {
 		text,
 	});
 	const airbnbFields = extractAirbnbFields(email, text, provider);
+	const agodaFields = extractAgodaFields(email, text, provider);
 	const tableStayDates = extractTableStayDates(text);
 	const tableOccupancy = extractTableOccupancy(text);
 	const providerLabel = PROVIDER_LABELS[provider] || provider;
@@ -2320,6 +2645,7 @@ function extractNormalizedReservation(email) {
 	const reservationId = cleanConfirmationCandidate(
 		firstNonEmpty(
 			airbnbFields.confirmationNumber,
+			agodaFields.confirmationNumber,
 			findField(text, [
 				"Reservation ID",
 				"Reservation number",
@@ -2369,13 +2695,14 @@ function extractNormalizedReservation(email) {
 	);
 	const hotelName = firstNonEmpty(
 		airbnbFields.hotelName,
+		agodaFields.hotelName,
 		provider === "airbnb" ? explicitHotelName : "",
 		provider === "airbnb" ? "" : extractProviderLogoHotelName(text, provider),
 		provider === "airbnb" ? "" : findHotelNameField(text),
 		provider === "airbnb" ? "" : explicitHotelName,
 		provider === "airbnb" ? "" : findStandaloneHotelName(text)
 	);
-	const hotelId = airbnbFields.hotelId || "";
+	const hotelId = airbnbFields.hotelId || agodaFields.hotelId || "";
 	const genericRoomName = cleanFieldValue(findField(text, [
 		"Room type name",
 		"Room name",
@@ -2387,9 +2714,10 @@ function extractNormalizedReservation(email) {
 	]));
 	const roomName = firstNonEmpty(
 		airbnbFields.roomName,
+		agodaFields.roomName,
 		/^<?https?:\/\//i.test(genericRoomName) ? "" : genericRoomName
 	);
-	const checkinDate = airbnbFields.checkinDate || tableStayDates.checkinDate || findDateValue(
+	const checkinDate = airbnbFields.checkinDate || agodaFields.checkinDate || tableStayDates.checkinDate || findDateValue(
 		text,
 		[
 			"Check-in date",
@@ -2408,7 +2736,7 @@ function extractNormalizedReservation(email) {
 			/\bCheck[-\s]?In\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
 		]
 	);
-	const checkoutDate = airbnbFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
+	const checkoutDate = airbnbFields.checkoutDate || agodaFields.checkoutDate || tableStayDates.checkoutDate || findDateValue(
 		text,
 		[
 			"Check-out date",
@@ -2450,13 +2778,22 @@ function extractNormalizedReservation(email) {
 			/(\$\s*[0-9][0-9,.]*)/,
 		])
 	);
-	const parsedMoney = airbnbFields.amount
+	const parsedMoney = agodaFields.amount
+		? { amount: agodaFields.amount, currency: agodaFields.currency || "SAR" }
+		: airbnbFields.amount
 		? { amount: airbnbFields.amount, currency: airbnbFields.currency || "SAR" }
 		: parseMoney(amountText);
 	const amountCurrency =
 		parsedMoney.currency ||
 		(/\$\s*\d/.test(amountText) ? "USD" : process.env.OTA_DEFAULT_CURRENCY || "SAR");
-	const conversion = airbnbFields.amount
+	const conversion = agodaFields.amount
+		? {
+				totalAmountSar: agodaFields.totalAmountSar || 0,
+				exchangeRateToSar: agodaFields.exchangeRateToSar || 0,
+				exchangeRateSource: agodaFields.exchangeRateSource || "",
+				convertedAt: agodaFields.amountConvertedAt || new Date().toISOString(),
+		  }
+		: airbnbFields.amount
 		? {
 				totalAmountSar: airbnbFields.totalAmountSar || 0,
 				exchangeRateToSar: airbnbFields.exchangeRateToSar || 0,
@@ -2483,15 +2820,24 @@ function extractNormalizedReservation(email) {
 		"Number of rooms",
 		"Rooms",
 	]);
-	const adults = airbnbFields.adults || tableOccupancy.adults || countNumber(adultsField);
-	const children = airbnbFields.children || tableOccupancy.children || countNumber(childrenField);
+	const adults =
+		airbnbFields.adults ||
+		agodaFields.adults ||
+		tableOccupancy.adults ||
+		countNumber(adultsField);
+	const children =
+		airbnbFields.children ||
+		agodaFields.children ||
+		tableOccupancy.children ||
+		countNumber(childrenField);
 	const totalGuests =
 		airbnbFields.totalGuests ||
+		agodaFields.totalGuests ||
 		countNumber(totalGuestsField) ||
 		tableOccupancy.totalGuests ||
 		adults + children ||
 		1;
-	const roomCount = countNumber(roomCountField) || 1;
+	const roomCount = airbnbFields.roomCount || agodaFields.roomCount || countNumber(roomCountField) || 1;
 	const guestEmailField = findField(text, [
 		"Guest email",
 		"Email",
@@ -2507,6 +2853,13 @@ function extractNormalizedReservation(email) {
 	const guestEmail =
 		provider === "airbnb" && /@(?:[\w.-]+\.)?airbnb\.com$/i.test(detectedGuestEmail)
 			? ""
+			: /^(?:no[-_.]?reply|noreply|do[-_.]?not[-_.]?reply)@/i.test(
+					detectedGuestEmail
+			  ) ||
+			  /@(agoda|booking|expedia|hotels|hotelrunner|trip)\./i.test(
+					detectedGuestEmail
+			  )
+			? ""
 			: detectedGuestEmail;
 	const guestNameField = findField(text, [
 		"Guest name",
@@ -2519,27 +2872,35 @@ function extractNormalizedReservation(email) {
 	]);
 	const guestName = firstNonEmpty(
 		airbnbFields.guestName,
+		agodaFields.guestName,
 		extractProviderGuestName(text),
 		guestNameField,
 		guestNamePattern
 	);
-	const nationality = findField(text, [
-		"Nationality",
-		"Guest nationality",
-		"Country",
-		"Guest country",
-		"Residence country",
-	]);
+	const nationality = firstNonEmpty(
+		agodaFields.nationality,
+		findField(text, [
+			"Nationality",
+			"Guest nationality",
+			"Country",
+			"Guest country",
+			"Residence country",
+		])
+	);
 	const guestNotes = firstNonEmpty(airbnbFields.guestNotes, findGuestNoteField(text));
-	const guestPhone = findField(text, [
-		"Guest phone",
-		"Phone",
-		"Telephone",
-		"Mobile",
-	]);
+	const guestPhone = firstNonEmpty(
+		agodaFields.guestPhone,
+		findField(text, [
+			"Guest phone",
+			"Phone",
+			"Telephone",
+			"Mobile",
+		])
+	);
 
 	const paymentInstructionField = firstNonEmpty(
 		airbnbFields.paymentInstructions,
+		agodaFields.paymentInstructions,
 		findField(text, [
 			"Payment instructions",
 			"Payment model",
@@ -2585,6 +2946,9 @@ function extractNormalizedReservation(email) {
 		airbnbFields.paymentCollectionModel &&
 		airbnbFields.paymentCollectionModel !== "unknown"
 			? airbnbFields.paymentCollectionModel
+			: agodaFields.paymentCollectionModel &&
+			  agodaFields.paymentCollectionModel !== "unknown"
+			? agodaFields.paymentCollectionModel
 			: detectPaymentCollectionModel(paymentText, {
 					cardLast4,
 			  });
@@ -2620,7 +2984,12 @@ function extractNormalizedReservation(email) {
 		hotelIdMatchedBy: airbnbFields.hotelIdMatchedBy || "",
 		hotelIdMatchedValue: airbnbFields.hotelIdMatchedValue || "",
 		hotelName,
-		hotelNameAliases: airbnbFields.hotelNameAliases || [],
+		hotelNameAliases: Array.from(
+			new Set([
+				...(airbnbFields.hotelNameAliases || []),
+				...(agodaFields.hotelNameAliases || []),
+			].filter(Boolean))
+		),
 		airbnbListingId: airbnbFields.airbnbListingId || "",
 		airbnbListingTitle: airbnbFields.airbnbListingTitle || "",
 		airbnbMapping: airbnbFields.airbnbMapping || {},
@@ -2631,12 +3000,17 @@ function extractNormalizedReservation(email) {
 		amount: parsedMoney.amount,
 		currency: amountCurrency,
 		totalAmountSar: conversion.totalAmountSar,
+		sourceAmount: agodaFields.sourceAmount || 0,
+		sourceCurrency: agodaFields.sourceCurrency || "",
 		exchangeRateToSar: conversion.exchangeRateToSar,
 		exchangeRateSource: conversion.exchangeRateSource,
 		amountConvertedAt: conversion.convertedAt,
-		totalPayoutSar: airbnbFields.totalPayoutSar || 0,
-		netAfterExpensesTotal: airbnbFields.netAfterExpensesTotal || 0,
-		paymentSummary: airbnbFields.paymentSummary || {},
+		totalPayoutSar: agodaFields.totalPayoutSar || airbnbFields.totalPayoutSar || 0,
+		netAfterExpensesTotal:
+			agodaFields.netAfterExpensesTotal || airbnbFields.netAfterExpensesTotal || 0,
+		paymentSummary: Object.keys(agodaFields.paymentSummary || {}).length
+			? agodaFields.paymentSummary
+			: airbnbFields.paymentSummary || {},
 		adults,
 		children,
 		totalGuests,
@@ -2665,19 +3039,25 @@ function extractNormalizedReservation(email) {
 			checkoutDate: !!checkoutDate || !!tableStayDates.checkoutDate,
 			bookedAt: !!parseDate(bookedAtField),
 			amount:
-				(!!amountText || !!airbnbFields.amount) &&
+				(!!amountText || !!airbnbFields.amount || !!agodaFields.amount) &&
 				Number(parsedMoney.amount || 0) > 0,
-			adults: !!adultsField || tableOccupancy.adults > 0,
-			children: !!childrenField || tableOccupancy.children > 0,
-			totalGuests: !!totalGuestsField || tableOccupancy.totalGuests > 0,
-			roomCount: !!roomCountField,
+			adults: !!adultsField || !!agodaFields.sourcePresence?.adults || tableOccupancy.adults > 0,
+			children:
+				!!childrenField ||
+				!!agodaFields.sourcePresence?.children ||
+				tableOccupancy.children > 0,
+			totalGuests:
+				!!totalGuestsField ||
+				!!agodaFields.sourcePresence?.totalGuests ||
+				tableOccupancy.totalGuests > 0,
+			roomCount: !!roomCountField || !!agodaFields.sourcePresence?.roomCount,
 			guestName: !!guestName,
 			guestEmail: !!guestEmail,
 			guestPhone: !!guestPhone,
 			nationality: !!nationality,
 			comment: !!guestNotes,
 			guestNotes: !!guestNotes,
-			paymentInstructions: !!paymentInstructionField,
+			paymentInstructions: !!paymentInstructionField || !!agodaFields.paymentInstructions,
 			paymentCollectionModel: paymentCollectionModel !== "unknown",
 			vccCardLast4: !!cardLast4,
 			vccAmountToCharge: !!amountToChargeField && /\d/.test(amountToChargeField),
@@ -2714,6 +3094,7 @@ function extractNormalizedReservation(email) {
 function mapArabicRoomType(roomNameRaw) {
 	const s = normalizeIntlComparable(roomNameRaw);
 	if (!s) return null;
+	if (!/[\u0600-\u06FF]/.test(String(roomNameRaw || ""))) return null;
 	if (/(مشترك|مشتركة|سرير|اسرة مشتركة|أسرّة مشتركة)/.test(s)) {
 		return "individualBed";
 	}
@@ -3003,7 +3384,7 @@ function resolveRootPriceForDate(roomDetails, ymd) {
 	);
 	if (pricingRate) {
 		const calendarRoot = n(pricingRate.rootPrice);
-		if (calendarRoot > 0) return calendarRoot;
+		if (calendarRoot >= MIN_REAL_CALENDAR_ROOT_PRICE) return calendarRoot;
 		const calendarPrice = n(pricingRate.price);
 		if (calendarPrice > 0) return calendarPrice;
 	}
@@ -3129,9 +3510,7 @@ function buildPickedRoomsType({ roomDetails, normalized }) {
 		};
 	});
 
-	const subTotalSar = round2(
-		Math.min(sumRootPriceAllRooms, sumTotalPriceAllRooms || totalAmountSar)
-	);
+	const subTotalSar = round2(sumRootPriceAllRooms);
 	const commissionAmountSar = defaultOtaReviewDeductionAmount(
 		subTotalSar,
 		defaultDeductionRate
