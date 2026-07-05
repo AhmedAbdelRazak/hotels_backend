@@ -3694,48 +3694,6 @@ function latestGuestSaysDatesAreFixed(value = "", action = "") {
 		/\b(?:dates?\s+(?:are\s+)?fixed|fixed dates?|not flexible|cannot change (?:the )?dates?|can't change (?:the )?dates?|same dates? only|dates? cannot be changed|dates? are not changeable)\b/i.test(
 			text
 		) ||
-		/(?:غيرقابل(?:ة)?للتغيير|غيرقابلةللتغيير|لايمكنتغيير|ماينفعشاغير|مينفعشاغير|مشهنغير|مشحغير|نفسالموعد|نفسالتاريخ|الموعدثابت|التواريخثابتة|التاريخثابت|غيرمرن)/iu.test(
-			compact
-		)
-	);
-}
-
-function latestGuestRequestsJannatLeadReview(value = "", action = "") {
-	const cleanAction = cleanString(action, 80).toLowerCase();
-	if (["jannat_lead_review", "human_review_same_dates", "review_same_dates"].includes(cleanAction)) {
-		return true;
-	}
-	const text = normalizeIntentSearchText(value)
-		.replace(/[.!?\u061f\u060c,]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!text) return false;
-	const compact = text.replace(/\s+/g, "");
-	return (
-		/\b(?:review same dates|check another hotel|another hotel same dates|team review|human review)\b/i.test(
-			text
-		) ||
-		/(?:راجعنفسالتواريخ|راجعوا نفس التواريخ|خيارآخرلنفسالتواريخ|فندقآخرلنفسالتواريخ|حولني للفريق|راجعمعالفريق)/iu.test(
-			compact
-		)
-	);
-}
-
-function latestGuestSaysDatesAreFixed(value = "", action = "") {
-	const cleanAction = cleanString(action, 80).toLowerCase();
-	if (["fixed_dates", "same_dates_only", "jannat_lead_review"].includes(cleanAction)) {
-		return true;
-	}
-	const text = normalizeIntentSearchText(value)
-		.replace(/[.!?\u061f\u060c,]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!text) return false;
-	const compact = text.replace(/\s+/g, "");
-	return (
-		/\b(?:dates?\s+(?:are\s+)?fixed|fixed dates?|not flexible|cannot change (?:the )?dates?|can't change (?:the )?dates?|same dates? only|dates? cannot be changed|dates? are not changeable)\b/i.test(
-			text
-		) ||
 		/(?:\u063a\u064a\u0631\u0642\u0627\u0628\u0644(?:\u0629)?\u0644\u0644\u062a\u063a\u064a\u064a\u0631|\u0644\u0627\u064a\u0645\u0643\u0646\u062a\u063a\u064a\u064a\u0631|\u0645\u0627\u064a\u0646\u0641\u0639\u0634\u0627\u063a\u064a\u0631|\u0645\u064a\u0646\u0641\u0639\u0634\u0627\u063a\u064a\u0631|\u0645\u0634\u0647\u0646\u063a\u064a\u0631|\u0645\u0634\u062d\u063a\u064a\u0631|\u0646\u0641\u0633\u0627\u0644\u0645\u0648\u0639\u062f|\u0646\u0641\u0633\u0627\u0644\u062a\u0627\u0631\u064a\u062e|\u0627\u0644\u0645\u0648\u0639\u062f\u062b\u0627\u0628\u062a|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e\u062b\u0627\u0628\u062a\u0629|\u062a\u0648\u0627\u0631\u064a\u062e\u064a\u062b\u0627\u0628\u062a\u0629|\u0627\u0644\u062a\u0627\u0631\u064a\u062e\u062b\u0627\u0628\u062a|\u063a\u064a\u0631\u0645\u0631\u0646)/iu.test(
 			compact
 		)
