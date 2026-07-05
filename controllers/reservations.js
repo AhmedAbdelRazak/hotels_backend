@@ -543,6 +543,8 @@ const TRACKED_RESERVATION_FIELDS = [
 	"days_of_residence",
 	"payment",
 	"booking_source",
+	"supplierData.supplierName",
+	"supplierData.suppliedBookingNo",
 	"comment",
 	"total_guests",
 	"adults",
@@ -584,6 +586,79 @@ const stripServerManagedReservationUpdateFields = (payload = {}) => {
 		}
 	});
 	return payload;
+};
+
+const safeSupplierDataKey = (key = "") => /^[A-Za-z0-9_]+$/.test(key);
+
+const normalizeSupplierDataUpdateFields = (payload = {}) => {
+	const normalized = { ...payload };
+	const setSupplierField = (field, value) => {
+		normalized[`supplierData.${field}`] =
+			field === "supplierName" || field === "suppliedBookingNo"
+				? String(value || "").trim()
+				: value;
+	};
+
+	const supplierBookingRootKeys = [
+		"suppliedBookingNo",
+		"supplierBookingNo",
+		"supplierBookingNumber",
+	];
+	for (const key of supplierBookingRootKeys) {
+		if (Object.prototype.hasOwnProperty.call(normalized, key)) {
+			setSupplierField("suppliedBookingNo", normalized[key]);
+			delete normalized[key];
+		}
+	}
+
+	const supplierNameRootKeys = ["supplierName", "suppliedBy"];
+	for (const key of supplierNameRootKeys) {
+		if (Object.prototype.hasOwnProperty.call(normalized, key)) {
+			setSupplierField("supplierName", normalized[key]);
+			delete normalized[key];
+		}
+	}
+
+	if (!Object.prototype.hasOwnProperty.call(normalized, "supplierData")) {
+		return normalized;
+	}
+
+	const supplierData = normalized.supplierData;
+	delete normalized.supplierData;
+	if (!supplierData || typeof supplierData !== "object" || Array.isArray(supplierData)) {
+		return normalized;
+	}
+
+	if (Object.prototype.hasOwnProperty.call(supplierData, "supplierName")) {
+		setSupplierField("supplierName", supplierData.supplierName);
+	}
+	if (Object.prototype.hasOwnProperty.call(supplierData, "suppliedBookingNo")) {
+		setSupplierField("suppliedBookingNo", supplierData.suppliedBookingNo);
+	} else if (Object.prototype.hasOwnProperty.call(supplierData, "supplierBookingNo")) {
+		setSupplierField("suppliedBookingNo", supplierData.supplierBookingNo);
+	} else if (
+		Object.prototype.hasOwnProperty.call(supplierData, "supplierBookingNumber")
+	) {
+		setSupplierField("suppliedBookingNo", supplierData.supplierBookingNumber);
+	}
+
+	Object.entries(supplierData).forEach(([key, value]) => {
+		if (
+			[
+				"supplierName",
+				"suppliedBookingNo",
+				"supplierBookingNo",
+				"supplierBookingNumber",
+			].includes(key)
+		) {
+			return;
+		}
+		if (safeSupplierDataKey(key)) {
+			setSupplierField(key, value);
+		}
+	});
+
+	return normalized;
 };
 
 const simplifyAuditValue = (value) => {
@@ -6629,6 +6704,8 @@ exports.updateReservation = async (req, res) => {
 		delete normalizedUpdateData.sendEmail;
 		delete normalizedUpdateData.hotel_name;
 		delete normalizedUpdateData.hotelName;
+		normalizedUpdateData =
+			normalizeSupplierDataUpdateFields(normalizedUpdateData);
 		const normalizeRoomIds = (value) => {
 			if (!Array.isArray(value)) return [];
 			return value
