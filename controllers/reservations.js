@@ -6549,6 +6549,10 @@ exports.updateReservation = async (req, res) => {
 	try {
 		const reservationId = req.params.reservationId;
 		const updateData = req.body || {};
+		const shouldSendUpdateEmail =
+			updateData.sendEmail === true || updateData.sendEmail === "true";
+		const updateEmailHotelNameHint =
+			updateData.hotel_name || updateData.hotelName || "";
 		const isAdminAllReservationsStatusUpdate =
 			updateData.adminAllReservationsStatusUpdate === true ||
 			updateData.adminAllReservationsStatusUpdate === "true";
@@ -6622,6 +6626,9 @@ exports.updateReservation = async (req, res) => {
 		delete normalizedUpdateData.updatedBy;
 		delete normalizedUpdateData.userId;
 		stripServerManagedReservationUpdateFields(normalizedUpdateData);
+		delete normalizedUpdateData.sendEmail;
+		delete normalizedUpdateData.hotel_name;
+		delete normalizedUpdateData.hotelName;
 		const normalizeRoomIds = (value) => {
 			if (!Array.isArray(value)) return [];
 			return value
@@ -7445,6 +7452,11 @@ exports.updateReservation = async (req, res) => {
 		if (!updatedReservation) {
 			return res.status(404).json({ error: "Failed to update reservation." });
 		}
+		const populatedUpdatedReservation =
+			(await Reservations.findById(updatedReservation._id)
+				.populate("hotelId", RESERVATION_DETAILS_HOTEL_SELECT.join(" "))
+				.populate("belongsTo", "_id name email phone")
+				.exec()) || updatedReservation;
 
 		await trackReservationStatusChange({
 			req,
@@ -7549,11 +7561,15 @@ exports.updateReservation = async (req, res) => {
 		}
 
 		// 🔟 Send update email if requested
-		if (req.body.sendEmail) {
+		if (shouldSendUpdateEmail) {
 			try {
+				const finalHotelName =
+					populatedUpdatedReservation?.hotelId?.hotelName ||
+					populatedUpdatedReservation?.hotelName ||
+					updateEmailHotelNameHint;
 				await sendEmailUpdate(
-					updatedReservation,
-					updateData.hotel_name || updateData.hotelName
+					populatedUpdatedReservation,
+					finalHotelName
 				);
 				console.log("[EMAIL] Update email sent successfully.");
 			} catch (error) {
@@ -7592,7 +7608,7 @@ exports.updateReservation = async (req, res) => {
 			message: "Reservation updated successfully",
 			adminCorrectionResubmitted,
 			reservation: sanitizeReservationAuditLogsForViewer(
-				updatedReservation,
+				populatedUpdatedReservation,
 				requestingActor
 			),
 		});
