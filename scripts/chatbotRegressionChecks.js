@@ -7,6 +7,8 @@ process.env.TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "test-token";
 process.env.TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "+10000000000";
 
 const orchestrator = require("../aiagent/core/orchestrator").__test;
+const jannatSupport = require("../aiagent/jannatSupport/orchestrator").__test;
+const jannatBrain = require("../aiagent/jannatSupport/brain").__test;
 
 const hotel = {
 	_id: "zad-ajyad-test",
@@ -480,6 +482,218 @@ check("Combined identity and bus detour do not damage known quote or guest name"
 	);
 	assert.strictEqual(orchestrator.runtimeTuning.guestReplyQuietMs >= 3000, true);
 	assert.strictEqual(orchestrator.runtimeTuning.planMaxActiveTurns, 1);
+});
+
+check("Jannat support collects missing pricing detail before handoff", () => {
+	const sc = {
+		preferredLanguageCode: "en",
+		conversation: [guest("I want the price from August 25 to August 28")],
+	};
+	const facts = {
+		languageCode: "en",
+		checkinISO: "2026-08-25",
+		checkoutISO: "2026-08-28",
+	};
+	assert.strictEqual(jannatSupport.guestLikelyWantsPricingOrBooking(sc), true);
+	assert.deepStrictEqual(jannatSupport.missingPricingFacts(facts), ["room_or_guests"]);
+	assert(
+		jannatSupport
+			.missingPricingDetailsMessage(sc, facts)
+			.includes("room type or number of guests")
+	);
+});
+
+check("Jannat support recommendation can show direct-booking discount quote", () => {
+	const facts = {
+		languageCode: "en",
+		checkinISO: "2026-08-25",
+		checkoutISO: "2026-08-28",
+		roomTypeKey: "tripleRooms",
+		roomSelections: [{ roomTypeKey: "tripleRooms", count: 1 }],
+		rooms: 1,
+		adults: 3,
+	};
+	const quote = jannatSupport.buildQuoteForFacts(hotel, facts);
+	assert.strictEqual(quote.available, true);
+	assert.strictEqual(quote.total, 225);
+	const reply = jannatSupport.recommendationMessage({
+		supportCase: { preferredLanguageCode: "en" },
+		hotel,
+		facts: { ...facts, quote },
+		availabilityChecked: true,
+		quote,
+	});
+	assert(reply.includes('<s class="message-price-old">300 SAR</s>'));
+	assert(reply.includes('<strong class="message-price-new">225 SAR</strong>'));
+	assert(reply.includes("25% direct-booking discount"));
+	assert(reply.includes("lively Ajyad area"));
+	assert(reply.includes("many restaurants"));
+	assert(reply.includes("Current offer"));
+
+	const backupHotel = {
+		...hotel,
+		_id: "zad-mashaer-test",
+		hotelName: "Zad Al Mashaer",
+	};
+	assert.strictEqual(
+		jannatSupport.chooseTargetHotel({
+			plan: { targetHotelId: "zad-ajyad-test" },
+			candidateHotels: [hotel, backupHotel],
+			facts: { ...facts, jannatUnavailableRecoveryFromHotelId: "zad-mashaer-test" },
+		})?._id,
+		"zad-ajyad-test"
+	);
+	assert.strictEqual(
+		jannatSupport.chooseTargetHotel({
+			plan: { targetHotelId: "zad-ajyad-test" },
+			candidateHotels: [hotel, backupHotel],
+			facts: { ...facts, jannatUnavailableRecoveryFromHotelId: "zad-ajyad-test" },
+		})?._id,
+		"zad-mashaer-test"
+	);
+});
+
+check("Jannat support infers recommended double room before handoff", () => {
+	const sc = {
+		preferredLanguageCode: "en",
+		conversation: [
+			guest("We arrive August 25 and leave August 28, two adults please."),
+		],
+	};
+	const facts = jannatBrain.normalizeFacts({}, sc);
+	assert.strictEqual(facts.checkinISO, "2026-08-25");
+	assert.strictEqual(facts.checkoutISO, "2026-08-28");
+	assert.strictEqual(facts.roomTypeKey, "doubleRooms");
+	assert.deepStrictEqual(facts.roomSelections, [{ roomTypeKey: "doubleRooms", count: 1 }]);
+	const quote = jannatSupport.buildQuoteForFacts(hotel, facts);
+	assert.strictEqual(quote.available, true);
+	assert.strictEqual(quote.total, 330);
+	const reply = jannatSupport.recommendationMessage({
+		supportCase: sc,
+		hotel,
+		facts: { ...facts, quote },
+		availabilityChecked: true,
+		quote,
+	});
+	assert(reply.includes("Double Room"));
+	assert(reply.includes('<s class="message-price-old">440 SAR</s>'));
+	assert(reply.includes('<strong class="message-price-new">330 SAR</strong>'));
+});
+
+check("Jannat-transferred unavailable fixed-date lead is preserved", () => {
+	const fixedDatesText =
+		"\u0627\u0644\u0645\u0648\u0639\u062f \u0628\u0627\u0644\u0646\u0633\u0628\u0629 \u0644\u064a \u063a\u064a\u0631 \u0642\u0627\u0628\u0644 \u0644\u0644\u062a\u063a\u064a\u064a\u0631";
+	const sc = {
+		preferredLanguageCode: "ar",
+		displayName1: "Mohamed Sherif Ghanem",
+		aiStateSnapshot: {
+			known: { jannatPlatformTransfer: true },
+			jannatSupport: { transferredAt: "2026-07-05T08:05:54.000Z" },
+		},
+		conversation: [
+			{ isSystem: true, clientAction: "jannat_hotel_transfer", message: "transfer" },
+			ai("Not available", "quote_unavailable"),
+			guest(fixedDatesText),
+		],
+	};
+	const known = {
+		languageCode: "ar",
+		jannatPlatformTransfer: true,
+		checkinISO: "2026-07-27",
+		checkoutISO: "2026-08-02",
+		roomTypeKey: "doubleRooms",
+		roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+		rooms: 1,
+		adults: 2,
+		quote: {
+			available: false,
+			checkinISO: "2026-07-27",
+			checkoutISO: "2026-08-02",
+			roomTypeKey: "doubleRooms",
+			firstUnavailableDate: "2026-07-27",
+		},
+	};
+	assert.strictEqual(orchestrator.latestGuestSaysDatesAreFixed(fixedDatesText), true);
+	assert.strictEqual(orchestrator.jannatTransferredLeadContext(sc, known), true);
+	assert.strictEqual(
+		orchestrator.shouldPreserveJannatUnavailableLead(
+			sc,
+			known,
+			fixedDatesText,
+			"",
+			"quote_unavailable"
+		),
+		true
+	);
+	const quickReplies = orchestrator.quoteUnavailableQuickRepliesForCase(sc, known);
+	assert.strictEqual(quickReplies[0].action, "jannat_lead_review");
+	const reply = orchestrator.buildJannatUnavailableLeadReviewMessage(sc, known, hotel, {
+		message: fixedDatesText,
+	});
+	assert(reply.includes("\u0644\u0646 \u0623\u063a\u0644\u0642 \u0627\u0644\u0637\u0644\u0628"));
+	assert(reply.includes("\u0641\u0631\u064a\u0642 \u062c\u0646\u0627\u062a \u0628\u0648\u0643\u064a\u0646\u062c"));
+});
+
+check("Normal hotel unavailable only recovers to Jannat when no rooms exist", () => {
+	const normalHotelCase = {
+		preferredLanguageCode: "ar",
+		supportScope: "hotel",
+		conversation: [ai("Not available", "quote_unavailable")],
+	};
+	const normalKnown = {
+		languageCode: "ar",
+		checkinISO: "2026-07-27",
+		checkoutISO: "2026-08-02",
+		roomTypeKey: "doubleRooms",
+		quote: {
+			available: false,
+			checkinISO: "2026-07-27",
+			checkoutISO: "2026-08-02",
+			roomTypeKey: "doubleRooms",
+			code: "blocked",
+		},
+	};
+	assert.strictEqual(
+		orchestrator.shouldPreserveJannatUnavailableLead(
+			normalHotelCase,
+			normalKnown,
+			"\u0627\u0648\u0643\u064a\u0647 \u0634\u0643\u0631\u0627",
+			"",
+			"quote_unavailable"
+		),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.shouldRecoverHotelUnavailableToJannat(normalHotelCase, normalKnown, {
+			available: false,
+			code: "blocked",
+			sameHotelHasAnyAvailability: true,
+		}),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.shouldRecoverHotelUnavailableToJannat(normalHotelCase, normalKnown, {
+			available: false,
+			code: "blocked",
+			sameHotelHasAnyAvailability: false,
+		}),
+		true
+	);
+	assert(
+		orchestrator
+			.buildHotelUnavailableJannatTransferMessage(normalHotelCase, normalKnown, hotel)
+			.includes("\u0641\u0631\u064a\u0642 \u062c\u0646\u0627\u062a \u0628\u0648\u0643\u064a\u0646\u062c")
+	);
+	assert.strictEqual(
+		orchestrator.shouldPreserveJannatUnavailableLead(
+			{ preferredLanguageCode: "ar", aiStateSnapshot: { known: { jannatPlatformTransfer: true } } },
+			{ languageCode: "ar", jannatPlatformTransfer: true },
+			"\u0627\u0648\u0643\u064a\u0647 \u0634\u0643\u0631\u0627",
+			"",
+			"quote_unavailable"
+		),
+		true
+	);
 });
 
 console.log(`PASS ${checks} chatbot regression checks`);

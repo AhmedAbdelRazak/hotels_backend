@@ -16,7 +16,7 @@ const {
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
 const { chat } = require("./openai");
-const { priceRoomForStay } = require("./selectors");
+const { priceRoomForStay, listAvailableRoomsForStay } = require("./selectors");
 const {
 	mapRoomToKey,
 	digitsToEnglish,
@@ -35,6 +35,10 @@ const {
 const {
 	validateReservationInventoryForCreate,
 } = require("../../controllers/reservations");
+const {
+	configuredJannatSupporterId,
+	configuredJannatSupportName,
+} = require("../jannatSupport/config");
 
 const SUPPORT_EMAILS = new Set([
 	"support@jannatbooking.com",
@@ -3675,6 +3679,320 @@ function latestGuestRaisesBudgetConcern(value = "") {
 	);
 }
 
+function latestGuestSaysDatesAreFixed(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["fixed_dates", "same_dates_only", "jannat_lead_review"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:dates?\s+(?:are\s+)?fixed|fixed dates?|not flexible|cannot change (?:the )?dates?|can't change (?:the )?dates?|same dates? only|dates? cannot be changed|dates? are not changeable)\b/i.test(
+			text
+		) ||
+		/(?:غيرقابل(?:ة)?للتغيير|غيرقابلةللتغيير|لايمكنتغيير|ماينفعشاغير|مينفعشاغير|مشهنغير|مشحغير|نفسالموعد|نفسالتاريخ|الموعدثابت|التواريخثابتة|التاريخثابت|غيرمرن)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestRequestsJannatLeadReview(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["jannat_lead_review", "human_review_same_dates", "review_same_dates"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:review same dates|check another hotel|another hotel same dates|team review|human review)\b/i.test(
+			text
+		) ||
+		/(?:راجعنفسالتواريخ|راجعوا نفس التواريخ|خيارآخرلنفسالتواريخ|فندقآخرلنفسالتواريخ|حولني للفريق|راجعمعالفريق)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestSaysDatesAreFixed(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["fixed_dates", "same_dates_only", "jannat_lead_review"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:dates?\s+(?:are\s+)?fixed|fixed dates?|not flexible|cannot change (?:the )?dates?|can't change (?:the )?dates?|same dates? only|dates? cannot be changed|dates? are not changeable)\b/i.test(
+			text
+		) ||
+		/(?:\u063a\u064a\u0631\u0642\u0627\u0628\u0644(?:\u0629)?\u0644\u0644\u062a\u063a\u064a\u064a\u0631|\u0644\u0627\u064a\u0645\u0643\u0646\u062a\u063a\u064a\u064a\u0631|\u0645\u0627\u064a\u0646\u0641\u0639\u0634\u0627\u063a\u064a\u0631|\u0645\u064a\u0646\u0641\u0639\u0634\u0627\u063a\u064a\u0631|\u0645\u0634\u0647\u0646\u063a\u064a\u0631|\u0645\u0634\u062d\u063a\u064a\u0631|\u0646\u0641\u0633\u0627\u0644\u0645\u0648\u0639\u062f|\u0646\u0641\u0633\u0627\u0644\u062a\u0627\u0631\u064a\u062e|\u0627\u0644\u0645\u0648\u0639\u062f\u062b\u0627\u0628\u062a|\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e\u062b\u0627\u0628\u062a\u0629|\u062a\u0648\u0627\u0631\u064a\u062e\u064a\u062b\u0627\u0628\u062a\u0629|\u0627\u0644\u062a\u0627\u0631\u064a\u062e\u062b\u0627\u0628\u062a|\u063a\u064a\u0631\u0645\u0631\u0646)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestRequestsJannatLeadReview(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["jannat_lead_review", "human_review_same_dates", "review_same_dates"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:review same dates|check another hotel|another hotel same dates|team review|human review)\b/i.test(
+			text
+		) ||
+		/(?:\u0631\u0627\u062c\u0639\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0631\u0627\u062c\u0639\u0648\u0627\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u062e\u064a\u0627\u0631\u0627\u062e\u0631\u0644\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u062e\u064a\u0627\u0631\u0622\u062e\u0631\u0644\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0641\u0646\u062f\u0642\u0627\u062e\u0631\u0644\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u0641\u0646\u062f\u0642\u0622\u062e\u0631\u0644\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e|\u062d\u0648\u0644\u0646\u064a\u0644\u0644\u0641\u0631\u064a\u0642|\u0631\u0627\u062c\u0639\u0645\u0639\u0627\u0644\u0641\u0631\u064a\u0642|\u0634\u0648\u0641\u0641\u0646\u062f\u0642\u062b\u0627\u0646\u064a|\u0641\u0646\u062f\u0642\u062b\u0627\u0646\u064a\u0644\u0646\u0641\u0633\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e)/iu.test(
+			compact
+		)
+	);
+}
+
+function conversationHasClientAction(sc = {}, action = "") {
+	const wanted = cleanString(action, 80).toLowerCase();
+	if (!wanted) return false;
+	return (Array.isArray(sc.conversation) ? sc.conversation : []).some(
+		(entry) => cleanString(entry?.clientAction, 80).toLowerCase() === wanted
+	);
+}
+
+function jannatTransferredLeadContext(sc = {}, known = {}) {
+	const snapshot = asObject(sc.aiStateSnapshot);
+	const snapshotKnown = asObject(snapshot.known);
+	const jannatSupport = asObject(snapshot.jannatSupport);
+	return Boolean(
+		known.jannatPlatformTransfer ||
+			known.jannatPlatformTransferAt ||
+			snapshotKnown.jannatPlatformTransfer ||
+			snapshotKnown.jannatPlatformTransferAt ||
+			jannatSupport.transferredAt ||
+			jannatSupport.toHotelId ||
+			conversationHasClientAction(sc, "jannat_hotel_transfer")
+	);
+}
+
+function unavailableQuoteAction(value = "") {
+	return ["quote_unavailable", "split_stay_quote_unavailable"].includes(
+		cleanString(value, 80).toLowerCase()
+	);
+}
+
+function shouldPreserveJannatUnavailableLead(
+	sc = {},
+	known = {},
+	latestText = "",
+	latestAction = "",
+	previousAiAction = ""
+) {
+	if (!unavailableQuoteAction(previousAiAction)) return false;
+	if (!jannatTransferredLeadContext(sc, known)) return false;
+	return (
+		latestGuestSaysDatesAreFixed(latestText, latestAction) ||
+		latestGuestRequestsJannatLeadReview(latestText, latestAction) ||
+		guestDeclinesFurtherHelp(latestText, latestAction)
+	);
+}
+
+function roomSelectionSummaryText(known = {}, languageCode = "en") {
+	const selections = normalizeRoomSelections(selectionsFromKnown(known));
+	if (selections.length) {
+		return selections
+			.map(
+				(selection) =>
+					`${formatNumber(normalizeRoomCount(selection.count, 1), languageCode)} x ${roomTypeLabel(
+						selection.roomTypeKey,
+						languageCode
+					)}`
+			)
+			.join(" + ");
+	}
+	if (known.roomTypeKey) {
+		return `${formatNumber(Math.max(1, Number(known.rooms || 1) || 1), languageCode)} x ${roomTypeLabel(
+			known.roomTypeKey,
+			languageCode
+		)}`;
+	}
+	return "";
+}
+
+function jannatLeadReviewDetailLines(known = {}, languageCode = "en") {
+	const ar = /^ar\b/i.test(languageCode);
+	const quote = asObject(known.quote);
+	const checkinISO = validISODate(known.checkinISO || quote.checkinISO);
+	const checkoutISO = validISODate(known.checkoutISO || quote.checkoutISO);
+	const nights = checkinISO && checkoutISO ? nightsBetween(checkinISO, checkoutISO) : 0;
+	const adults = Number(known.adults || 0) || 0;
+	const children = Number(known.children || 0) || 0;
+	const rooms = roomSelectionSummaryText(known, languageCode);
+	const lines = [];
+	if (checkinISO) lines.push(ar ? `الوصول: ${formatDate(checkinISO, languageCode)}` : `Check-in: ${formatDate(checkinISO, languageCode)}`);
+	if (checkoutISO) lines.push(ar ? `المغادرة: ${formatDate(checkoutISO, languageCode)}` : `Check-out: ${formatDate(checkoutISO, languageCode)}`);
+	if (nights) lines.push(ar ? `المدة: ${formatNumber(nights, languageCode)} ليالٍ` : `Nights: ${formatNumber(nights, languageCode)}`);
+	if (adults || children) {
+		if (ar) {
+			lines.push(
+				children
+					? `الضيوف: ${formatNumber(adults, languageCode)} بالغين + ${formatNumber(children, languageCode)} أطفال`
+					: `الضيوف: ${formatNumber(adults, languageCode)}`
+			);
+		} else {
+			lines.push(
+				children
+					? `Guests: ${formatNumber(adults, languageCode)} adults + ${formatNumber(children, languageCode)} children`
+					: `Guests: ${formatNumber(adults, languageCode)}`
+			);
+		}
+	}
+	if (rooms) lines.push(ar ? `الغرف: ${rooms}` : `Rooms: ${rooms}`);
+	return lines;
+}
+
+function buildJannatUnavailableLeadReviewMessage(sc = {}, known = {}, hotel = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
+	const details = jannatLeadReviewDetailLines(known, languageCode);
+	const detailBlock = details.length
+		? details.map((line) => `- ${line}`).join("\n")
+		: "";
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known, latestGuest?.message || "")}، أفهمك. بما أن الموعد غير قابل للتغيير ولا يظهر توفر مؤكد في ${hotelName} لهذه الفترة، لن أغلق الطلب.`,
+			"سأرفعه الآن لفريق جنات بوكينج لمراجعة أي خيار مناسب لنفس التواريخ والتواصل معك.",
+			detailBlock ? `التفاصيل المحفوظة:\n${detailBlock}` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
+	const guestName = shortGuestAddressName(sc, known, latestGuest?.message || "");
+	return [
+		`${guestName}, I understand. Since these dates are fixed and ${hotelName} is not showing confirmed availability for this stay, I will not close the request.`,
+		"I am passing it back to the Jannat Booking team now so they can review any suitable option for the same dates and follow up with you.",
+		detailBlock ? `Saved details:\n${detailBlock}` : "",
+	]
+		.filter(Boolean)
+		.join("\n");
+}
+
+function jannatLeadReviewCaseFields(sc = {}, known = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const supportId = configuredJannatSupporterId();
+	const supportName = configuredJannatSupportName(languageCode) || "Jannat Support";
+	return {
+		supporterId: supportId || sc.supporterId || null,
+		ownerId: supportId || sc.ownerId || null,
+		targetUserId: supportId || null,
+		targetUserName: supportName,
+		targetUserRole: "CustomerService",
+		supporterName: supportName,
+		displayName2: "Jannat Booking",
+		supportScope: "jannat_booking",
+		aiResponderName: supportName,
+	};
+}
+
+function markJannatUnavailableLeadReview(known = {}, hotel = {}) {
+	return {
+		...asObject(known),
+		jannatUnavailableLeadReview: true,
+		jannatUnavailableLeadReviewAt: new Date().toISOString(),
+		jannatUnavailableHotelId: cleanString(hotel?._id || "", 80),
+		jannatUnavailableHotelName: cleanDisplayString(hotel?.hotelName || "", 160),
+	};
+}
+
+function caseIsJannatSupportScope(sc = {}) {
+	return ["jannat_booking", "jannat-booking", "platform", "platform_support"].includes(
+		cleanString(sc.supportScope || "", 80).toLowerCase()
+	);
+}
+
+function shouldRecoverHotelUnavailableToJannat(sc = {}, known = {}, quoteResult = {}) {
+	if (!sc || caseIsJannatSupportScope(sc)) return false;
+	if (known.jannatUnavailableRecoveryTransfer) return false;
+	if (known.jannatUnavailableRecoveryTransferAt) return false;
+	if (quoteResult?.available === true) return false;
+	if (quoteResult?.sameHotelHasAnyAvailability !== false) return false;
+	return Boolean(quoteResult && (quoteResult.available === false || asObject(known.quote).available === false));
+}
+
+function buildHotelUnavailableJannatTransferMessage(sc = {}, known = {}, hotel = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
+	if (ar) {
+		return [
+			`${arabicGuestAddress(sc, known)}، راجعت التوفر في ${hotelName} للتفاصيل المطلوبة ولم يظهر توفر مؤكد لهذا الاختيار.`,
+			"سأحول الطلب الآن لفريق جنات بوكينج ليبحث لك عن أفضل خيار متاح لنفس التواريخ، وسيظهر الترشيح هنا مباشرة.",
+		].join("\n");
+	}
+	const guestName = shortGuestAddressName(sc, known);
+	return [
+		`${guestName}, I checked ${hotelName} for the requested details, and this selection is not showing confirmed availability.`,
+		"I am moving this to Jannat Booking support now so they can look for the best available option for the same dates. The recommendation will appear here directly.",
+	].join("\n");
+}
+
+function markHotelUnavailableRecoveryToJannat(known = {}, hotel = {}, quoteResult = {}) {
+	const result = asObject(quoteResult);
+	return {
+		...asObject(known),
+		jannatUnavailableRecoveryTransfer: true,
+		jannatUnavailableRecoveryTransferAt: new Date().toISOString(),
+		jannatUnavailableRecoveryFromHotelId: cleanString(hotel?._id || "", 80),
+		jannatUnavailableRecoveryFromHotelName: cleanDisplayString(hotel?.hotelName || "", 160),
+		jannatUnavailableRecoveryCode: cleanString(
+			result.code || result.reason || asObject(known.quote).code || "not_available",
+			80
+		),
+	};
+}
+
+async function recoverHotelUnavailableToJannatSupport({
+	io,
+	sc = {},
+	hotel = {},
+	known = {},
+	quoteResult = {},
+	latestGuest = null,
+	typingStartedAt = 0,
+} = {}) {
+	const caseId = caseIdText(sc);
+	if (!caseId) return sc;
+	const recoveryKnown = markHotelUnavailableRecoveryToJannat(known, hotel, quoteResult);
+	await saveKnownFacts(caseId, recoveryKnown);
+	await waitForTypingMinimum(typingStartedAt);
+	const updated = await sendAiMessage(
+		io,
+		sc,
+		buildHotelUnavailableJannatTransferMessage(sc, recoveryKnown, hotel),
+		{
+			latestGuest,
+			known: recoveryKnown,
+			clientAction: "hotel_jannat_support_transfer",
+			caseFields: jannatLeadReviewCaseFields(sc, recoveryKnown),
+		}
+	);
+	const routed = updated || (await getSupportCaseById(caseId).catch(() => null)) || sc;
+	const jannatResult = await maybeHandleJannatSupportTurn(io, routed);
+	return jannatResult?.supportCase || routed;
+}
+
 function latestGuestAsksDiscountExplanation(value = "") {
 	const text = normalizeIntentSearchText(value)
 		.replace(/[.!?\u061f\u060c,]+/g, " ")
@@ -5377,6 +5695,17 @@ async function sendBookingProgressFast({
 			};
 			bookingKnown = syncKnownFromQuote(bookingKnown);
 			await saveKnownFacts(key, bookingKnown);
+			if (shouldRecoverHotelUnavailableToJannat(sc, bookingKnown, quoteResult)) {
+				return recoverHotelUnavailableToJannatSupport({
+					io,
+					sc,
+					hotel,
+					known: bookingKnown,
+					quoteResult,
+					latestGuest,
+					typingStartedAt,
+				});
+			}
 			await waitForTypingMinimum(typingStartedAt);
 			return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, bookingKnown, quoteResult, hotel), {
 				latestGuest,
@@ -6455,7 +6784,7 @@ function bookingCheckpointQuickReplies(action = "", sc = {}, known = {}, checkpo
 	}
 	if (cleanAction === "optional_email") return emailSkipQuickReplies(languageCode);
 	if (["quote_unavailable", "split_stay_quote_unavailable"].includes(cleanAction)) {
-		return quoteUnavailableQuickReplies(languageCode);
+		return quoteUnavailableQuickRepliesForCase(sc, known);
 	}
 	if (["alternative_dates_ready", "alternative_dates_unavailable"].includes(cleanAction)) {
 		return alternativeStayQuickReplies(known.alternativeStays, languageCode);
@@ -8297,6 +8626,30 @@ function freshQuoteRequiredBeforeReply(known = {}, latestGuest = {}) {
 	);
 }
 
+function sameHotelAvailabilitySummary(hotel = {}, checkinISO = "", checkoutISO = "") {
+	const checkin = validISODate(checkinISO);
+	const checkout = validISODate(checkoutISO);
+	if (!hotel?._id || !checkin || !checkout || checkin >= checkout) {
+		return { checked: false, hasAnyAvailability: null, options: [] };
+	}
+	const options = listAvailableRoomsForStay(hotel, checkin, checkout)
+		.filter((option) => option?.available)
+		.map((option) => ({
+			roomTypeKey: option.room?.roomType || "",
+			roomLabel: option.room?.displayName || option.room?.displayName_OtherLanguage || "",
+			nights: option.nights || 0,
+			currency: option.currency || hotel.currency || "SAR",
+			total: Number(option.totals?.totalPriceWithCommission || 0) || 0,
+		}))
+		.filter((option) => option.roomTypeKey)
+		.slice(0, 5);
+	return {
+		checked: true,
+		hasAnyAvailability: options.length > 0,
+		options,
+	};
+}
+
 async function quoteTool(sc = {}, known = {}) {
 	const caseId = caseIdText(sc);
 	const dates = eachNight(known.checkinISO, known.checkoutISO);
@@ -8439,6 +8792,11 @@ async function quoteTool(sc = {}, known = {}) {
 		const requestedSelections = selections.length
 			? selections
 			: [{ roomTypeKey: primary.roomTypeKey || "", count: normalizeRoomCount(primary.count || known.rooms, 1) }];
+		const sameHotelAvailability = sameHotelAvailabilitySummary(
+			hotel,
+			known.checkinISO,
+			known.checkoutISO
+		);
 		const roomLabel = quoteRoomLinesText(
 			{ rooms: requestedSelections.map((selection) => ({ ...selection })) },
 			known.roomTypeKey,
@@ -8469,6 +8827,8 @@ async function quoteTool(sc = {}, known = {}) {
 			firstUnavailableDate:
 				unavailableLines.find((line) => line.firstUnavailableDate)?.firstUnavailableDate ||
 				"",
+			sameHotelHasAnyAvailability: sameHotelAvailability.hasAnyAvailability,
+			sameHotelAvailableRoomOptions: sameHotelAvailability.options,
 		};
 	}
 	const inventoryPayload = {
@@ -8540,6 +8900,11 @@ async function quoteTool(sc = {}, known = {}) {
 			requestedRooms,
 			availableRooms,
 		});
+		const sameHotelAvailability = sameHotelAvailabilitySummary(
+			hotel,
+			known.checkinISO,
+			known.checkoutISO
+		);
 		return {
 			ok: true,
 			available: false,
@@ -8560,6 +8925,8 @@ async function quoteTool(sc = {}, known = {}) {
 				message: inventoryValidation.message || "",
 			},
 			partialQuote,
+			sameHotelHasAnyAvailability: sameHotelAvailability.hasAnyAvailability,
+			sameHotelAvailableRoomOptions: sameHotelAvailability.options,
 		};
 	}
 	logTurnStage(caseId, "quote_price_done", {
@@ -9522,6 +9889,26 @@ function quoteUnavailableQuickReplies(languageCode = "en") {
 		{ label: "Alternative dates", value: "Find alternative dates", action: "check_alternatives" },
 		{ label: "Change details", value: "I want to change something", action: "revise_reservation" },
 	];
+}
+
+function jannatLeadReviewQuickReplies(languageCode = "en") {
+	if (/^ar\b/i.test(languageCode)) {
+		return [
+			{ label: "\u0631\u0627\u062c\u0639\u0648\u0627 \u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e", value: "\u0631\u062c\u0627\u0621\u064b \u0631\u0627\u062c\u0639\u0648\u0627 \u0646\u0641\u0633 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0645\u0639 \u0641\u0631\u064a\u0642 \u062c\u0646\u0627\u062a \u0628\u0648\u0643\u064a\u0646\u062c", action: "jannat_lead_review" },
+			{ label: "\u0623\u0639\u062f\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644", value: "\u0623\u0631\u064a\u062f \u062a\u0639\u062f\u064a\u0644 \u0634\u064a\u0621", action: "revise_reservation" },
+		];
+	}
+	return [
+		{ label: "Review same dates", value: "Please review the same dates with Jannat Booking", action: "jannat_lead_review" },
+		{ label: "Change details", value: "I want to change something", action: "revise_reservation" },
+	];
+}
+
+function quoteUnavailableQuickRepliesForCase(sc = {}, known = {}) {
+	const languageCode = activeLanguageCode(sc, known);
+	return jannatTransferredLeadContext(sc, known)
+		? jannatLeadReviewQuickReplies(languageCode)
+		: quoteUnavailableQuickReplies(languageCode);
 }
 
 function reviewQuickReplies(languageCode = "en") {
@@ -11203,6 +11590,29 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 			reviewKnown = syncKnownFromQuote({ ...reviewKnown, quote: quoteResult.quote });
 			await saveKnownFacts(caseIdText(sc), reviewKnown);
 		} else {
+			reviewKnown.quote = {
+				available: false,
+				roomTypeKey: quoteResult.roomTypeKey || reviewKnown.roomTypeKey,
+				checkinISO: quoteResult.checkinISO || reviewKnown.checkinISO,
+				checkoutISO: quoteResult.checkoutISO || reviewKnown.checkoutISO,
+				rooms: Math.max(1, Number(reviewKnown.rooms || 1) || 1),
+				roomSelections: normalizeRoomSelections(quoteResult.roomSelections || reviewKnown.roomSelections),
+				currency: quoteResult.currency || "SAR",
+				code: quoteResult.code || "not_available",
+				roomLabel: quoteResult.roomLabel || roomTypeLabel(reviewKnown.roomTypeKey, reviewKnown.languageCode),
+				firstUnavailableDate: quoteResult.firstUnavailableDate || "",
+			};
+			reviewKnown = syncKnownFromQuote(reviewKnown);
+			if (shouldRecoverHotelUnavailableToJannat(sc, reviewKnown, quoteResult)) {
+				return recoverHotelUnavailableToJannatSupport({
+					io,
+					sc,
+					hotel,
+					known: reviewKnown,
+					quoteResult,
+					latestGuest,
+				});
+			}
 			return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, reviewKnown, quoteResult, hotel), {
 				latestGuest,
 				known: reviewKnown,
@@ -11300,10 +11710,20 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 	}
 	nextKnown = syncKnownFromQuote(nextKnown);
 	await saveKnownFacts(caseIdText(sc), nextKnown);
+	if (!result.available && shouldRecoverHotelUnavailableToJannat(sc, nextKnown, result)) {
+		return recoverHotelUnavailableToJannatSupport({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			quoteResult: result,
+			latestGuest,
+		});
+	}
 	const reply = buildQuoteFallbackMessage(sc, nextKnown, result, hotel);
 	const quickReplies = result.available
 		? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-		: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown));
+		: quoteUnavailableQuickRepliesForCase(sc, nextKnown);
 	return sendAiMessage(io, sc, reply, {
 		latestGuest,
 		known: nextKnown,
@@ -11848,7 +12268,7 @@ async function handleBrainSplitStayQuote(
 		clientAction: allAvailable ? "split_stay_quote_ready" : "split_stay_quote_unavailable",
 		quickReplies: allAvailable
 			? splitStayQuickReplies(activeLanguageCode(sc, nextKnown))
-			: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown)),
+			: quoteUnavailableQuickRepliesForCase(sc, nextKnown),
 		typingStartedAt,
 		preserveFallbackNumbers: false,
 	});
@@ -12225,7 +12645,7 @@ async function handleBrainSplitStayReservationSubmit({
 				: "split_stay_quote_unavailable",
 			quickReplies: refreshed.allAvailable
 				? splitStayQuickReplies(activeLanguageCode(sc, refreshedKnown))
-				: quoteUnavailableQuickReplies(activeLanguageCode(sc, refreshedKnown)),
+				: quoteUnavailableQuickRepliesForCase(sc, refreshedKnown),
 			typingStartedAt,
 			preserveFallbackNumbers: false,
 		});
@@ -12738,7 +13158,7 @@ async function sendKnownQuoteReplyFromOpenAI({
 		clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
 		quickReplies: quoteResult.available
 			? proceedQuickReplies(activeLanguageCode(sc, known))
-			: quoteUnavailableQuickReplies(activeLanguageCode(sc, known)),
+			: quoteUnavailableQuickRepliesForCase(sc, known),
 		fallback,
 		typingStartedAt,
 	});
@@ -13239,6 +13659,17 @@ async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest
 	}
 	nextKnown = syncKnownFromQuote(nextKnown);
 	await saveKnownFacts(caseId, nextKnown);
+	if (!result.available && shouldRecoverHotelUnavailableToJannat(sc, nextKnown, result)) {
+		return recoverHotelUnavailableToJannatSupport({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			quoteResult: result,
+			latestGuest,
+			typingStartedAt,
+		});
+	}
 	const fallback = withWarmPrefix(
 		buildQuoteFallbackMessage(sc, nextKnown, result, hotel),
 		sc,
@@ -13258,7 +13689,7 @@ async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest
 		clientAction: result.available ? "quote_ready" : "quote_unavailable",
 		quickReplies: result.available
 			? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-			: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown)),
+			: quoteUnavailableQuickRepliesForCase(sc, nextKnown),
 		fallback,
 		typingStartedAt,
 	});
@@ -13579,6 +14010,17 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			};
 			nextKnown = syncKnownFromQuote(nextKnown);
 			await saveKnownFacts(caseId, nextKnown);
+			if (shouldRecoverHotelUnavailableToJannat(sc, nextKnown, quoteResult)) {
+				return recoverHotelUnavailableToJannatSupport({
+					io,
+					sc,
+					hotel,
+					known: nextKnown,
+					quoteResult,
+					latestGuest,
+					typingStartedAt,
+				});
+			}
 			return sendBrainToolReplyFromOpenAI({
 				io,
 				sc,
@@ -13592,7 +14034,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 				clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
 				quickReplies: quoteResult.available
 					? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-					: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown)),
+					: quoteUnavailableQuickRepliesForCase(sc, nextKnown),
 				typingStartedAt,
 			});
 		}
@@ -13708,7 +14150,7 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 				clientAction: quote.available ? "quote_ready" : "quote_unavailable",
 				quickReplies: quote.available
 					? proceedQuickReplies(activeLanguageCode(sc, submitKnown))
-					: quoteUnavailableQuickReplies(activeLanguageCode(sc, submitKnown)),
+					: quoteUnavailableQuickRepliesForCase(sc, submitKnown),
 				typingStartedAt,
 			});
 		}
@@ -14883,6 +15325,28 @@ async function planTurn(io, supportCaseOrId) {
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
 	if (
 		latestGuest &&
+		shouldPreserveJannatUnavailableLead(
+			sc,
+			known,
+			latestText,
+			latestAction,
+			previousAiAction
+		)
+	) {
+		const reviewKnown = markJannatUnavailableLeadReview(known, hotel);
+		await saveKnownFacts(key, reviewKnown);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return sendAiMessage(io, sc, buildJannatUnavailableLeadReviewMessage(sc, reviewKnown, hotel, latestGuest), {
+			latestGuest,
+			known: reviewKnown,
+			clientAction: "jannat_unavailable_lead_review",
+			handoff: true,
+			handoffReason: "jannat_unavailable_lead_review",
+			caseFields: jannatLeadReviewCaseFields(sc, reviewKnown),
+		});
+	}
+	if (
+		latestGuest &&
 		displayedPhoneConfirmedThisTurn &&
 		!guestDeclinesOptionalEmail(latestText, latestAction) &&
 		!requiredBookingMissing(known).length &&
@@ -15843,6 +16307,17 @@ async function planTurn(io, supportCaseOrId) {
 				};
 				nextKnown = syncKnownFromQuote(nextKnown);
 				await saveKnownFacts(key, nextKnown);
+				if (shouldRecoverHotelUnavailableToJannat(sc, nextKnown, quoteResult)) {
+					return recoverHotelUnavailableToJannatSupport({
+						io,
+						sc,
+						hotel,
+						known: nextKnown,
+						quoteResult,
+						latestGuest,
+						typingStartedAt,
+					});
+				}
 				await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 				return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
 					latestGuest,
@@ -16233,15 +16708,40 @@ async function planTurn(io, supportCaseOrId) {
 			if (quoteResult) {
 				let nextKnown = { ...known };
 				if (quoteResult.available && quoteResult.quote) nextKnown.quote = quoteResult.quote;
+				else {
+					nextKnown.quote = {
+						available: false,
+						roomTypeKey: quoteResult.roomTypeKey || known.roomTypeKey,
+						checkinISO: quoteResult.checkinISO || known.checkinISO,
+						checkoutISO: quoteResult.checkoutISO || known.checkoutISO,
+						rooms: Math.max(1, Number(known.rooms || 1) || 1),
+						roomSelections: normalizeRoomSelections(quoteResult.roomSelections || known.roomSelections),
+						currency: quoteResult.currency || "SAR",
+						code: quoteResult.code || "not_available",
+						roomLabel: quoteResult.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
+						firstUnavailableDate: quoteResult.firstUnavailableDate || "",
+					};
+				}
 				nextKnown = syncKnownFromQuote(nextKnown);
 				await saveKnownFacts(key, nextKnown);
+				if (!quoteResult.available && shouldRecoverHotelUnavailableToJannat(sc, nextKnown, quoteResult)) {
+					return recoverHotelUnavailableToJannatSupport({
+						io,
+						sc,
+						hotel,
+						known: nextKnown,
+						quoteResult,
+						latestGuest,
+						typingStartedAt,
+					});
+				}
 				return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
 					latestGuest,
 					known: nextKnown,
 					clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
 					quickReplies: quoteResult.available
 						? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-						: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown)),
+						: quoteUnavailableQuickRepliesForCase(sc, nextKnown),
 				});
 			}
 		}
@@ -16386,15 +16886,39 @@ async function sendPlanWorkerFallback(io, caseId = "", workerResult = {}) {
 		if (quoteResult) {
 			let nextKnown = { ...known };
 			if (quoteResult.available && quoteResult.quote) nextKnown.quote = quoteResult.quote;
+			else {
+				nextKnown.quote = {
+					available: false,
+					roomTypeKey: quoteResult.roomTypeKey || known.roomTypeKey,
+					checkinISO: quoteResult.checkinISO || known.checkinISO,
+					checkoutISO: quoteResult.checkoutISO || known.checkoutISO,
+					rooms: Math.max(1, Number(known.rooms || 1) || 1),
+					roomSelections: normalizeRoomSelections(quoteResult.roomSelections || known.roomSelections),
+					currency: quoteResult.currency || "SAR",
+					code: quoteResult.code || "not_available",
+					roomLabel: quoteResult.roomLabel || roomTypeLabel(known.roomTypeKey, known.languageCode),
+					firstUnavailableDate: quoteResult.firstUnavailableDate || "",
+				};
+			}
 			nextKnown = syncKnownFromQuote(nextKnown);
 			await saveKnownFacts(caseId, nextKnown);
+			if (!quoteResult.available && shouldRecoverHotelUnavailableToJannat(sc, nextKnown, quoteResult)) {
+				return recoverHotelUnavailableToJannatSupport({
+					io,
+					sc,
+					hotel,
+					known: nextKnown,
+					quoteResult,
+					latestGuest,
+				});
+			}
 			return sendAiMessage(io, sc, buildQuoteFallbackMessage(sc, nextKnown, quoteResult, hotel), {
 				latestGuest,
 				known: nextKnown,
 				clientAction: quoteResult.available ? "quote_ready" : "quote_unavailable",
 				quickReplies: quoteResult.available
 					? proceedQuickReplies(activeLanguageCode(sc, nextKnown))
-					: quoteUnavailableQuickReplies(activeLanguageCode(sc, nextKnown)),
+					: quoteUnavailableQuickRepliesForCase(sc, nextKnown),
 			});
 		}
 	}
@@ -16672,6 +17196,15 @@ const exportedOrchestrator = {
 		guestPressedOfficialReviewConfirmation,
 		replyInvitesConfirmationAction,
 		quoteUnavailableQuickReplies,
+		jannatLeadReviewQuickReplies,
+		quoteUnavailableQuickRepliesForCase,
+		latestGuestSaysDatesAreFixed,
+		latestGuestRequestsJannatLeadReview,
+		jannatTransferredLeadContext,
+		shouldPreserveJannatUnavailableLead,
+		buildJannatUnavailableLeadReviewMessage,
+		shouldRecoverHotelUnavailableToJannat,
+		buildHotelUnavailableJannatTransferMessage,
 		roomOptionQuickReplies,
 		sameDateRoomChoiceFromText,
 		arabicGuestCountText,

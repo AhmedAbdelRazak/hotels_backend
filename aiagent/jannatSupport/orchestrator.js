@@ -19,6 +19,8 @@ const {
 } = require("./config");
 
 const SUPPORT_EMAIL = "support@jannatbooking.com";
+const DIRECT_BOOKING_DISCOUNT_RATE = 0.25;
+const DIRECT_BOOKING_DISCOUNT_FACTOR = 1 - DIRECT_BOOKING_DISCOUNT_RATE;
 const cleanString = (value = "", max = 1000) =>
 	String(value || "")
 		.replace(/\u0000/g, "")
@@ -34,6 +36,76 @@ const languageCodeFromCase = (supportCase = {}, facts = {}) =>
 
 const isArabicCase = (supportCase = {}, facts = {}) =>
 	/^ar\b/i.test(languageCodeFromCase(supportCase, facts));
+
+function formatNumber(value, languageCode = "en") {
+	const locale = /^ar\b/i.test(languageCode) ? "ar-EG" : "en-US";
+	return new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
+		Number(value || 0)
+	);
+}
+
+function formatMoney(value = 0, currency = "SAR", languageCode = "en") {
+	const amount = formatNumber(value, languageCode);
+	return /^ar\b/i.test(languageCode)
+		? `${amount} \u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a`
+		: `${amount} ${currency || "SAR"}`;
+}
+
+function formatDate(iso = "", languageCode = "en") {
+	const date = new Date(`${validISODate(iso)}T00:00:00.000Z`);
+	if (Number.isNaN(date.getTime())) return iso;
+	const locale = /^ar\b/i.test(languageCode) ? "ar-EG" : "en-US";
+	return new Intl.DateTimeFormat(locale, {
+		day: "numeric",
+		month: "long",
+		year: "numeric",
+		timeZone: "UTC",
+	}).format(date);
+}
+
+function escapePriceMarkup(value = "") {
+	return String(value || "")
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
+
+function originalAmountBeforeDirectDiscount(discountedValue = 0) {
+	const discounted = Number(discountedValue || 0);
+	if (!Number.isFinite(discounted) || discounted <= 0) return 0;
+	return Number((discounted / DIRECT_BOOKING_DISCOUNT_FACTOR).toFixed(2));
+}
+
+function directBookingDiscountText(languageCode = "en") {
+	const percent = formatNumber(DIRECT_BOOKING_DISCOUNT_RATE * 100, languageCode);
+	return /^ar\b/i.test(languageCode)
+		? `\u062e\u0635\u0645 ${percent}\u066a \u0644\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631`
+		: `${percent}% direct-booking discount`;
+}
+
+function discountedPriceInline(value = 0, currency = "SAR", languageCode = "en") {
+	const discounted = Number(value || 0);
+	if (!Number.isFinite(discounted) || discounted <= 0) {
+		return formatMoney(value, currency, languageCode);
+	}
+	const original = originalAmountBeforeDirectDiscount(discounted);
+	return [
+		`<s class="message-price-old">${escapePriceMarkup(
+			formatMoney(original, currency, languageCode)
+		)}</s>`,
+		`<strong class="message-price-new">${escapePriceMarkup(
+			formatMoney(discounted, currency, languageCode)
+		)}</strong>`,
+		`<span class="message-price-badge">${escapePriceMarkup(
+			directBookingDiscountText(languageCode)
+		)}</span>`,
+	].join(" ");
+}
+
+function discountedPriceLine(label = "", value = 0, currency = "SAR", languageCode = "en") {
+	return `${label}: ${discountedPriceInline(value, currency, languageCode)}`;
+}
 
 function validISODate(value = "") {
 	const text = String(value || "").slice(0, 10);
@@ -180,15 +252,122 @@ function hotelHasRequestedAvailability(hotel = {}, facts = {}) {
 	});
 }
 
+function roomDisplayLabel(room = {}, roomTypeKey = "", ar = false) {
+	const english = cleanString(room.displayName, 160);
+	const localized = cleanString(room.displayName_OtherLanguage, 160);
+	if (ar) return localized || english || roomTypeLabel(roomTypeKey, ar);
+	return english || localized || roomTypeLabel(roomTypeKey, ar);
+}
+
+function quoteRoomLinesText(quote = {}, fallbackRoomTypeKey = "", ar = false) {
+	const lines = Array.isArray(quote.rooms) ? quote.rooms : [];
+	if (lines.length) {
+		return lines
+			.map((line) => {
+				const label = roomDisplayLabel(
+					line.room || line.quote?.room || {},
+					line.roomTypeKey || line.roomType || fallbackRoomTypeKey,
+					ar
+				);
+				return `${line.count || 1} x ${label}`;
+			})
+			.join(" + ");
+	}
+	return roomDisplayLabel(quote.room, fallbackRoomTypeKey, ar);
+}
+
+function buildQuoteForFacts(hotel = {}, facts = {}) {
+	if (!hotel?._id || !hasStayRange(facts)) return null;
+	const selections = requestedSelectionsFromFacts(facts);
+	if (!selections.length) return null;
+	const quoteLines = [];
+	const unavailableLines = [];
+	for (const selection of selections) {
+		const roomTypeKey = selection.roomTypeKey || "";
+		const count = Math.max(1, Number(selection.count || 1) || 1);
+		const quote = priceRoomForStay(
+			hotel,
+			{ roomType: roomTypeKey },
+			facts.checkinISO,
+			facts.checkoutISO
+		);
+		if (!quote?.available) {
+			unavailableLines.push({
+				roomTypeKey,
+				count,
+				code: quote?.reason || "not_available",
+				firstUnavailableDate: quote?.firstBlockedDate || "",
+			});
+			continue;
+		}
+		quoteLines.push({
+			roomTypeKey,
+			count,
+			quote,
+			room: quote.room,
+			oneRoomTotal: Number(quote.totals?.totalPriceWithCommission || 0),
+		});
+	}
+	if (unavailableLines.length) {
+		return {
+			available: false,
+			code: unavailableLines[0]?.code || "not_available",
+			checkinISO: facts.checkinISO,
+			checkoutISO: facts.checkoutISO,
+			roomSelections: selections,
+			roomTypeKey: selections.length === 1 ? selections[0].roomTypeKey : facts.roomTypeKey || "",
+			currency: hotel.currency || "SAR",
+			unavailableSelections: unavailableLines,
+			firstUnavailableDate:
+				unavailableLines.find((line) => line.firstUnavailableDate)?.firstUnavailableDate || "",
+		};
+	}
+	const rooms = quoteLines.reduce((total, line) => total + line.count, 0);
+	const total = Number(
+		quoteLines
+			.reduce((sum, line) => sum + line.oneRoomTotal * line.count, 0)
+			.toFixed(2)
+	);
+	const firstQuote = quoteLines[0]?.quote || {};
+	const nights = firstQuote.nights || eachStayDate(facts.checkinISO, facts.checkoutISO).length || 1;
+	return {
+		available: true,
+		checkinISO: facts.checkinISO,
+		checkoutISO: facts.checkoutISO,
+		roomTypeKey: quoteLines[0]?.roomTypeKey || facts.roomTypeKey || "",
+		roomSelections: selections,
+		roomLabel: quoteRoomLinesText({ rooms: quoteLines }, facts.roomTypeKey, false),
+		nights,
+		totalRooms: rooms,
+		roomCount: rooms,
+		rooms: quoteLines.map((line) => ({
+			roomTypeKey: line.roomTypeKey,
+			count: line.count,
+			room: line.room,
+			quote: line.quote,
+		})),
+		currency: (firstQuote.currency || hotel.currency || "SAR").toUpperCase(),
+		total,
+		averagePerNight: nights ? Number((total / nights).toFixed(2)) : total,
+		totals: {
+			totalPriceWithCommission: total,
+		},
+	};
+}
+
 function chooseTargetHotel({ plan = {}, candidateHotels = [], facts = {} } = {}) {
 	if (!candidateHotels.length) return null;
 	const byId = new Map(candidateHotels.map((hotel) => [normalizeId(hotel._id), hotel]));
 	const planned = byId.get(normalizeId(plan.targetHotelId));
-	const ordered = planned
+	let ordered = planned
 		? [planned, ...candidateHotels.filter((hotel) => normalizeId(hotel._id) !== normalizeId(planned._id))]
 		: candidateHotels;
+	const recoveryFromHotelId = normalizeId(facts.jannatUnavailableRecoveryFromHotelId);
+	if (recoveryFromHotelId && ordered.length > 1) {
+		ordered = ordered.filter((hotel) => normalizeId(hotel._id) !== recoveryFromHotelId);
+	}
 	if (hasStayRange(facts)) {
-		return ordered.find((hotel) => hotelHasRequestedAvailability(hotel, facts)) || ordered[0];
+		return ordered.find((hotel) => hotelHasRequestedAvailability(hotel, facts)) || null;
 	}
 	return planned || candidateHotels[0];
 }
@@ -233,6 +412,12 @@ function noHotelConfiguredMessage(supportCase = {}, facts = {}) {
 	return isArabicCase(supportCase, facts)
 		? "أعتذر، لا يظهر لدي فريق فندق متاح للتحويل الآن. سأبقي المحادثة مع دعم جنات بوكينج حتى يراجعها الفريق."
 		: "I am sorry, I do not see an available hotel team to transfer to right now. I will keep this with Jannat Booking support for team review.";
+}
+
+function noAlternativeHotelAvailableMessage(supportCase = {}, facts = {}) {
+	return isArabicCase(supportCase, facts)
+		? "أفهمك. راجعت الفنادق المتاحة لدينا لنفس التواريخ، ولا يظهر الآن خيار مؤكد مناسب للتحويل المباشر. سأبقي الطلب مع فريق جنات بوكينج لمراجعة أي إمكانية يدوية أو بديل مناسب والتواصل معك."
+		: "I understand. I checked the available Jannat Booking hotel options for the same dates, and I do not see a confirmed suitable hotel for direct transfer right now. I will keep this with Jannat Booking support so the team can review any manual possibility or suitable alternative and follow up with you.";
 }
 
 function invalidStayRangeMessage(supportCase = {}, facts = {}, hotel = {}) {
@@ -325,6 +510,51 @@ function guestWantsChangeDetails(entry = {}) {
 	return cleanString(entry.clientAction, 80).toLowerCase() === "jannat_change_details";
 }
 
+function guestLikelyWantsPricingOrBooking(supportCase = {}) {
+	const text = (Array.isArray(supportCase.conversation) ? supportCase.conversation : [])
+		.filter((entry) => !entry?.isAi && !entry?.isSystem)
+		.map((entry) => cleanString(entry.message, 800))
+		.join(" ")
+		.toLowerCase();
+	return /(?:book|booking|reserve|reservation|price|rate|cost|availability|available|check[ -]?in|checkout|room|night|dates?|\u062d\u062c\u0632|\u0627\u062d\u062c\u0632|\u0633\u0639\u0631|\u0628\u0643\u0627\u0645|\u0643\u0645|\u062a\u0643\u0644\u0641\u0629|\u0645\u062a\u0627\u062d|\u0645\u062a\u0648\u0641\u0631|\u062a\u0648\u0641\u0631|\u062f\u062e\u0648\u0644|\u062e\u0631\u0648\u062c|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641|\u0644\u064a\u0644\u0629|\u062a\u0627\u0631\u064a\u062e|\u062a\u0648\u0627\u0631\u064a\u062e)/iu.test(
+		text
+	);
+}
+
+function missingPricingFacts(facts = {}) {
+	const missing = [];
+	if (!validISODate(facts.checkinISO) || !validISODate(facts.checkoutISO)) {
+		missing.push("dates");
+	}
+	if (!requestedSelectionsFromFacts(facts).length) {
+		missing.push("room_or_guests");
+	}
+	return missing;
+}
+
+function missingPricingDetailsMessage(supportCase = {}, facts = {}) {
+	const ar = isArabicCase(supportCase, facts);
+	const missing = missingPricingFacts(facts);
+	const hasDates = !missing.includes("dates");
+	const hasRoom = !missing.includes("room_or_guests");
+	if (ar) {
+		if (hasDates && !hasRoom) {
+			return "\u062a\u0645\u0627\u0645\u060c \u0648\u0635\u0644\u062a \u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c. \u0623\u0631\u0633\u0644 \u0644\u064a \u0641\u0642\u0637 \u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u060c \u0648\u0633\u0623\u0639\u0631\u0636 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0645\u062a\u0627\u062d \u0645\u0628\u0627\u0634\u0631\u0629 \u0642\u0628\u0644 \u0627\u0644\u062a\u062d\u0648\u064a\u0644.";
+		}
+		if (!hasDates && hasRoom) {
+			return "\u062a\u0645\u0627\u0645\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u0641\u0642\u0637 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c\u060c \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u063a\u0631\u0641\u0629 \u0648\u0627\u0644\u0633\u0639\u0631 \u0642\u0628\u0644 \u0623\u0646 \u0623\u0648\u0635\u0644\u0643 \u0628\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.";
+		}
+		return "\u0623\u0643\u064a\u062f\u060c \u0642\u0628\u0644 \u0623\u0648\u0635\u0644\u0643 \u0628\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0646\u0648\u0639 \u0627\u0644\u063a\u0631\u0641\u0629 \u0623\u0648 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u060c \u0648\u0633\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0648\u0627\u0644\u062a\u0648\u0641\u0631 \u0628\u0623\u0642\u0644 \u0623\u0633\u0626\u0644\u0629 \u0645\u0645\u0643\u0646\u0629.";
+	}
+	if (hasDates && !hasRoom) {
+		return "Perfect, I have the check-in and check-out dates. Send me only the room type or number of guests, and I will show the available price before connecting you with reception.";
+	}
+	if (!hasDates && hasRoom) {
+		return "Perfect, send me only the check-in and check-out dates, and I will review the room and price before connecting you with reception.";
+	}
+	return "Of course. Before I connect you with reception, send me the check-in date, check-out date, and room type or number of guests so I can review the price and availability with fewer questions.";
+}
+
 function changeDetailsMessage(supportCase = {}, facts = {}) {
 	return isArabicCase(supportCase, facts)
 		? "أكيد، اكتب لي التواريخ أو عدد الضيوف أو نوع الغرفة الجديد، وسأراجع لك الترشيح مرة أخرى قبل تحويلك للاستقبال."
@@ -372,6 +602,12 @@ function recommendationQuickReplies(supportCase = {}, facts = {}) {
 
 function hotelStrengthLine(hotel = {}, ar = false) {
 	const name = hotelDisplayName(hotel, ar) || (ar ? "الفندق" : "the hotel");
+	const nameKey = `${hotel.hotelName || ""} ${hotel.hotelName_OtherLanguage || ""}`.toLowerCase();
+	if (/zad\s*ajyad|zad\s*agyad|ajyad|\u0623\u062c\u064a\u0627\u062f|\u0627\u062c\u064a\u0627\u062f/.test(nameKey)) {
+		return ar
+			? `${name} خيار قوي جدًا لأنه في منطقة أجياد الحيوية، حوله مطاعم وخدمات كثيرة، وقريب من الحرم بحوالي 15 دقيقة مشيًا للضيوف القادرين صحيًا، مع وصول سريع بالسيارة حسب الزحام.`
+			: `${name} is a very strong option in the lively Ajyad area, with many restaurants and services around it, and it is about a 15-minute walk to Al Haram for guests who are comfortably able to walk, with quick car access depending on traffic.`;
+	}
 	const walking = cleanString(hotel.distances?.walkingToElHaram, 80);
 	const driving = cleanString(hotel.distances?.drivingToElHaram, 80);
 	if (walking || driving || hotel.distances) {
@@ -427,6 +663,75 @@ function factSummaryLine(facts = {}, ar = false) {
 	return parts.join(ar ? "، " : ", ");
 }
 
+function recommendationQuoteLines(quote = null, facts = {}, ar = false) {
+	if (!quote) return [];
+	const languageCode = ar ? "ar" : "en";
+	if (!quote.available) {
+		const firstUnavailable = validISODate(quote.firstUnavailableDate);
+		if (ar) {
+			return [
+				"- \u0627\u0644\u062a\u0648\u0641\u0631: \u0644\u0627 \u064a\u0638\u0647\u0631 \u062a\u0648\u0641\u0631 \u0645\u0624\u0643\u062f \u0644\u0647\u0630\u0627 \u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631 \u062d\u0627\u0644\u064a\u064b\u0627.",
+				firstUnavailable
+					? `- \u0623\u0648\u0644 \u062a\u0627\u0631\u064a\u062e \u063a\u064a\u0631 \u0645\u062a\u0627\u062d: ${formatDate(firstUnavailable, languageCode)}`
+					: "",
+			].filter(Boolean);
+		}
+		return [
+			"- Availability: this selection is not showing confirmed availability right now.",
+			firstUnavailable
+				? `- First unavailable date: ${formatDate(firstUnavailable, languageCode)}`
+				: "",
+		].filter(Boolean);
+	}
+	const roomLine = quoteRoomLinesText(quote, quote.roomTypeKey || facts.roomTypeKey, ar);
+	const checkinISO = validISODate(quote.checkinISO || facts.checkinISO);
+	const checkoutISO = validISODate(quote.checkoutISO || facts.checkoutISO);
+	const lines = [];
+	if (roomLine) {
+		lines.push(ar ? `- \u0627\u0644\u063a\u0631\u0641: ${roomLine}` : `- Rooms: ${roomLine}`);
+	}
+	if (checkinISO && checkoutISO) {
+		lines.push(
+			ar
+				? `- \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${formatDate(checkinISO, languageCode)} - ${formatDate(checkoutISO, languageCode)}`
+				: `- Dates: ${formatDate(checkinISO, languageCode)} - ${formatDate(checkoutISO, languageCode)}`
+		);
+	}
+	if (quote.nights) {
+		lines.push(
+			ar
+				? `- \u0639\u062f\u062f \u0627\u0644\u0644\u064a\u0627\u0644\u064a: ${formatNumber(quote.nights, languageCode)}`
+				: `- Nights: ${formatNumber(quote.nights, languageCode)}`
+		);
+	}
+	if (quote.averagePerNight) {
+		lines.push(
+			`- ${discountedPriceLine(
+				ar ? "\u0627\u0644\u0633\u0639\u0631 \u0644\u0644\u064a\u0644\u0629" : "Rate per night",
+				quote.averagePerNight,
+				quote.currency || "SAR",
+				languageCode
+			)}`
+		);
+	}
+	if (quote.total) {
+		lines.push(
+			`- ${discountedPriceLine(
+				ar ? "\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a" : "Total",
+				quote.total,
+				quote.currency || "SAR",
+				languageCode
+			)}`
+		);
+	}
+	lines.push(
+		ar
+			? "- \u0627\u0644\u0639\u0631\u0636 \u0627\u0644\u062d\u0627\u0644\u064a: \u0627\u0644\u0633\u0639\u0631 \u064a\u0634\u0645\u0644 \u062e\u0635\u0645 25\u066a \u0644\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631 \u0639\u0628\u0631 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644."
+			: "- Current offer: this price includes the 25% direct-booking discount through reception."
+	);
+	return lines;
+}
+
 function recommendationMessage({
 	supportCase,
 	hotel,
@@ -434,13 +739,18 @@ function recommendationMessage({
 	isFallback = false,
 	availabilityChecked = false,
 	priorityUnavailable = false,
+	quote = null,
 } = {}) {
 	const ar = isArabicCase(supportCase, facts);
 	const name = hotelDisplayName(hotel, ar) || (ar ? "الفندق" : "the hotel");
 	const factsLine = factSummaryLine(facts, ar);
+	const quoteLines = recommendationQuoteLines(quote, facts, ar);
+	const recovery = Boolean(facts.jannatUnavailableRecoveryTransfer);
 	if (ar) {
 		const intro = priorityUnavailable
 			? "راجعت خيارنا الأول للتفاصيل التي ذكرتها، ويبدو أنه غير مناسب لهذه التواريخ/التفاصيل. البديل الأفضل الآن:"
+			: recovery
+			? "أهلًا بك، معك دعم جنات بوكينج. راجعنا التوفر لنفس التفاصيل، وترشيحنا الأفضل الآن:"
 			: "أرشح لك أولاً هذا الفندق عبر جنات بوكينج:";
 		const availability = availabilityChecked
 			? "راجعت التوفر حسب التفاصيل المتاحة قبل التحويل."
@@ -450,6 +760,7 @@ function recommendationMessage({
 			`- الفندق: ${name}`,
 			`- سبب الترشيح: ${hotelStrengthLine(hotel, ar)}`,
 			factsLine ? `- التفاصيل التي سأمررها: ${factsLine}` : "",
+			...quoteLines,
 			`${availability} هل تحب أوصلك باستقبال الفندق الآن؟`,
 		]
 			.filter(Boolean)
@@ -457,6 +768,8 @@ function recommendationMessage({
 	}
 	const intro = priorityUnavailable
 		? "I checked our first-choice hotel for the details you shared, and it does not look suitable for those dates/details. The best backup now is:"
+		: recovery
+		? "Jannat Booking support is with you now. I reviewed the same details for availability, and my best recommendation is:"
 		: "My first recommendation from Jannat Booking is:";
 	const availability = availabilityChecked
 		? "I checked availability against the details available before handing you over."
@@ -466,6 +779,7 @@ function recommendationMessage({
 		`- Hotel: ${name}`,
 		`- Why this one: ${hotelStrengthLine(hotel, ar)}`,
 		factsLine ? `- Details I will pass along: ${factsLine}` : "",
+		...quoteLines,
 		`${availability} Would you like me to connect you with reception now?`,
 	]
 		.filter(Boolean)
@@ -758,26 +1072,74 @@ async function maybeHandleJannatSupportTurn({
 		await emitTyping(io, updated || sc, false);
 		return { handled: true, supportCase: updated || sc };
 	}
+	if (guestLikelyWantsPricingOrBooking(sc) && missingPricingFacts(facts).length) {
+		const nextSnapshot = {
+			...(sc.aiStateSnapshot || {}),
+			version: 3,
+			updatedAt: new Date(),
+			known: facts,
+			jannatSupport: {
+				...(sc.aiStateSnapshot?.jannatSupport || {}),
+				lastPlanAt: new Date(),
+				action: "collect_pricing_details",
+				reason: "pricing_details_missing_before_handoff",
+				missing: missingPricingFacts(facts),
+			},
+		};
+		const updated = await appendJannatMessage(io, sc, missingPricingDetailsMessage(sc, facts), {
+			clientAction: "jannat_collect_pricing_details",
+			caseFields: { aiStateSnapshot: nextSnapshot },
+		});
+		await updateSupportCaseAiStateSnapshot(caseId, nextSnapshot).catch((error) => {
+			console.error("[jannatSupport] pricing detail snapshot save failed:", error?.message || error);
+		});
+		await emitTyping(io, updated || sc, false);
+		return { handled: true, supportCase: updated || sc };
+	}
 
 	const firstRecommendedHotel = chooseTargetHotel({ plan, candidateHotels: hotels, facts });
 	const wantsOtherOptions = latestGuest && guestRequestsOtherOptions(latestGuest);
+	const recoveryFromHotelId = normalizeId(facts.jannatUnavailableRecoveryFromHotelId);
 	const alternativeHotels = wantsOtherOptions
 		? hotels.filter(
 				(hotel) =>
 					normalizeId(hotel._id) !== normalizeId(firstRecommendedHotel?._id) &&
+					(!recoveryFromHotelId || normalizeId(hotel._id) !== recoveryFromHotelId) &&
 					hotelHasRequestedAvailability(hotel, facts)
 		  )
 		: [];
 	const targetHotel = alternativeHotels[0] || firstRecommendedHotel;
 	if (!targetHotel?._id) {
-		const updated = await appendJannatMessage(io, sc, noHotelConfiguredMessage(sc, facts), {
-			clientAction: "jannat_no_target_hotel",
-			keepAiEnabled: false,
-		});
+		const recovery = Boolean(facts.jannatUnavailableRecoveryTransfer);
+		const updated = await appendJannatMessage(
+			io,
+			sc,
+			recovery ? noAlternativeHotelAvailableMessage(sc, facts) : noHotelConfiguredMessage(sc, facts),
+			{
+				clientAction: recovery
+					? "jannat_no_available_alternative"
+					: "jannat_no_target_hotel",
+				keepAiEnabled: false,
+				caseFields: recovery
+					? {
+							aiPausedAt: new Date(),
+							aiHandoffReason: "jannat_no_available_alternative",
+							escalationStatus: "active",
+							escalationReason: "jannat_no_available_alternative",
+							escalationSource: "ai",
+							escalatedAt: new Date(),
+					  }
+					: {},
+			}
+		);
 		await emitTyping(io, updated || sc, false);
 		return { handled: true, supportCase: updated || sc };
 	}
 	const availabilityChecked = hasStayRange(facts);
+	const recommendationQuote = buildQuoteForFacts(targetHotel, facts);
+	const recommendationFacts = recommendationQuote
+		? { ...facts, quote: recommendationQuote }
+		: facts;
 	const priorityHotel = hotels[0] || null;
 	const priorityUnavailable =
 		Boolean(priorityHotel?._id) &&
@@ -788,7 +1150,7 @@ async function maybeHandleJannatSupportTurn({
 		...(sc.aiStateSnapshot || {}),
 		version: 3,
 		updatedAt: new Date(),
-		known: facts,
+		known: recommendationFacts,
 		jannatSupport: {
 			...(sc.aiStateSnapshot?.jannatSupport || {}),
 			lastPlanAt: new Date(),
@@ -808,9 +1170,10 @@ async function maybeHandleJannatSupportTurn({
 		recommendationMessage({
 			supportCase: sc,
 			hotel: targetHotel,
-			facts,
+			facts: recommendationFacts,
 			availabilityChecked,
 			priorityUnavailable,
+			quote: recommendationQuote,
 		}),
 		{
 			clientAction: wantsOtherOptions
@@ -834,6 +1197,12 @@ module.exports = {
 	__test: {
 		chooseTargetHotel,
 		hotelHasRequestedAvailability,
+		buildQuoteForFacts,
+		recommendationMessage,
+		recommendationQuoteLines,
+		guestLikelyWantsPricingOrBooking,
+		missingPricingFacts,
+		missingPricingDetailsMessage,
 		mergeKnownFacts,
 		requestedSelectionsFromFacts,
 		eachStayDate,
