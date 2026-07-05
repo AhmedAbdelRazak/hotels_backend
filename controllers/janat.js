@@ -46,6 +46,7 @@ const {
 } = require("../services/auditPrivacy");
 const {
 	ReservationPricingError,
+	summarizeRooms,
 	normalizeReservationStayPricing,
 } = require("../services/reservationPricing");
 const {
@@ -2603,8 +2604,17 @@ const roomCountValue = (room = {}) => {
 };
 
 const computeOtaHotelVisibleAmount = (reservation = {}) => {
-	const adminRoot = moneyNumber(reservation?.adminPricing?.rootTotal);
-	if (adminRoot > 0) return round2(adminRoot);
+	const adminPricing = reservation?.adminPricing || {};
+	if (hasExplicitMoneyField(adminPricing, "rootTotal")) {
+		return round2(adminPricing.rootTotal);
+	}
+	const pricingMode = String(adminPricing.mode || "").trim().toLowerCase();
+	const managedPricing =
+		!!reservation?.adminPricingVisibility?.rootOnlyForHotelManagement ||
+		/(ota|admin_three_price|platform)/i.test(pricingMode) ||
+		!!reservation?.supplierData?.otaCreatedFromEmail ||
+		!!reservation?.supplierData?.otaProvider ||
+		!!reservation?.otaPlatformReview;
 	const rooms = Array.isArray(reservation.pickedRoomsType)
 		? reservation.pickedRoomsType
 		: [];
@@ -2612,6 +2622,7 @@ const computeOtaHotelVisibleAmount = (reservation = {}) => {
 		? reservation.pickedRoomsPricing
 		: [];
 	const sourceRooms = roomsPricing.length ? roomsPricing : rooms;
+	let sawExplicitRoot = false;
 	const rootTotal = sourceRooms.reduce((reservationSum, room) => {
 		const count = roomCountValue(room);
 		const pricingByDay = Array.isArray(room?.pricingByDay)
@@ -2621,18 +2632,32 @@ const computeOtaHotelVisibleAmount = (reservation = {}) => {
 			return (
 				reservationSum +
 				pricingByDay.reduce((sum, day) => {
-					const root = moneyNumber(
-						day.rootPrice ?? day.totalPriceWithoutCommission ?? day.price
+					const hasRoot = hasExplicitMoneyField(day, "rootPrice");
+					const hasWithoutCommission = hasExplicitMoneyField(
+						day,
+						"totalPriceWithoutCommission"
 					);
+					if (hasRoot || hasWithoutCommission) {
+						sawExplicitRoot = true;
+					}
+					const root = hasRoot
+						? moneyNumber(day.rootPrice)
+						: hasWithoutCommission
+						? moneyNumber(day.totalPriceWithoutCommission)
+						: managedPricing
+						? 0
+						: moneyNumber(day.price);
 					return sum + root * count;
 				}, 0)
 			);
 		}
 		return reservationSum + moneyNumber(room.hotelShouldGet || room.subTotal) * count;
 	}, 0);
-	if (rootTotal > 0) return round2(rootTotal);
-	const subTotal = moneyNumber(reservation.sub_total);
-	if (subTotal > 0) return round2(subTotal);
+	if (rootTotal > 0 || sawExplicitRoot) return round2(rootTotal);
+	if (hasExplicitMoneyField(reservation, "sub_total")) {
+		return round2(reservation.sub_total);
+	}
+	if (managedPricing) return 0;
 	return round2(reservation.total_amount);
 };
 
@@ -2672,15 +2697,18 @@ const buildAdminOtaFinancialSummary = (reservation = {}, actor = {}) => {
 	if (!hasOtaManagedPricingSignal(reservation)) return null;
 
 	const adminPricing = reservation?.adminPricing || {};
+	const explicitMoneyOrNull = (source = {}, field) =>
+		hasExplicitMoneyField(source, field) ? round2(source[field]) : null;
 	const clientTotal =
-		explicitPositiveMoney(adminPricing, "clientTotal") ||
+		explicitMoneyOrNull(adminPricing, "clientTotal") ||
 		round2(reservation?.total_amount);
 	const hotelVisibleAmount =
-		explicitPositiveMoney(adminPricing, "rootTotal") ||
+		explicitMoneyOrNull(adminPricing, "rootTotal") ??
 		computeOtaHotelVisibleAmount(reservation);
-	const otaExpenseTotal = explicitPositiveMoney(adminPricing, "otaExpenseTotal");
+	const otaExpenseTotal =
+		explicitMoneyOrNull(adminPricing, "otaExpenseTotal") ?? 0;
 	const netAfterExpenses =
-		explicitPositiveMoney(adminPricing, "netAfterExpensesTotal") ||
+		explicitMoneyOrNull(adminPricing, "netAfterExpensesTotal") ??
 		(clientTotal > 0 && otaExpenseTotal > 0
 			? round2(clientTotal - otaExpenseTotal)
 			: hotelVisibleAmount);
@@ -2692,7 +2720,7 @@ const buildAdminOtaFinancialSummary = (reservation = {}, actor = {}) => {
 			? round2(paidFromBreakdown)
 			: round2(reservation?.paid_amount);
 	const platformProfit =
-		explicitPositiveMoney(adminPricing, "platformMarginTotal") ||
+		explicitMoneyOrNull(adminPricing, "platformMarginTotal") ??
 		round2(netAfterExpenses - hotelVisibleAmount);
 
 	const summary = {
@@ -5537,7 +5565,11 @@ exports.createNewReservationClient2 = async (req, res) => {
 			hotelId,
 			customerDetails,
 			pickedRoomsType,
+			pickedRoomsPricing,
 			total_amount,
+			sub_total,
+			adminPricing,
+			adminPricingVisibility,
 			commission,
 			total_rooms,
 			total_guests,
@@ -5776,6 +5808,85 @@ exports.createNewReservationClient2 = async (req, res) => {
 					customerDetails?.reservedById ||
 					"",
 			};
+			const pricingRooms =
+				Array.isArray(pickedRoomsPricing) && pickedRoomsPricing.length
+					? pickedRoomsPricing
+					: Array.isArray(pickedRoomsType)
+					? pickedRoomsType
+					: [];
+			const requestedAdminPricing =
+				adminPricing && typeof adminPricing === "object" && !Array.isArray(adminPricing)
+					? adminPricing
+					: {};
+			const requestedAdminPricingVisibility =
+				adminPricingVisibility &&
+				typeof adminPricingVisibility === "object" &&
+				!Array.isArray(adminPricingVisibility)
+					? adminPricingVisibility
+					: {};
+			const pricingTotals = summarizeRooms(pricingRooms);
+			const resolvedTotalAmount =
+				pricingTotals.total_amount > 0
+					? pricingTotals.total_amount
+					: round2(requestedAdminPricing.clientTotal || total_amount);
+			const requestedRootTotal = hasExplicitMoneyField(
+				requestedAdminPricing,
+				"rootTotal"
+			)
+				? requestedAdminPricing.rootTotal
+				: hasExplicitMoneyField(req.body || {}, "sub_total")
+				? sub_total
+				: null;
+			const resolvedSubTotal =
+				pricingTotals.sub_total > 0
+					? pricingTotals.sub_total
+					: requestedRootTotal !== null
+					? round2(requestedRootTotal)
+					: round2(resolvedTotalAmount - moneyNumber(commission));
+			const calculatedCommission = round2(
+				Math.max(resolvedTotalAmount - resolvedSubTotal, 0)
+			);
+			const requestedCommission =
+				hasExplicitMoneyField(requestedAdminPricing, "commissionAmount")
+					? requestedAdminPricing.commissionAmount
+					: hasExplicitMoneyField(req.body, "commission")
+					? req.body.commission
+					: null;
+			const commissionToSave =
+				requestedCommission !== null
+					? round2(Math.max(moneyNumber(requestedCommission), 0))
+					: calculatedCommission;
+			const pricingAdminTotals = pricingTotals.adminPricing || {};
+			const resolvedAdminPricing = {
+				mode:
+					requestedAdminPricing.mode ||
+					pricingAdminTotals.mode ||
+					"admin_three_price",
+				clientTotal: resolvedTotalAmount,
+				rootTotal: resolvedSubTotal,
+				netAfterExpensesTotal: round2(
+					pricingAdminTotals.netAfterExpensesTotal ||
+						requestedAdminPricing.netAfterExpensesTotal ||
+						resolvedTotalAmount
+				),
+				otaExpenseTotal: round2(
+					pricingAdminTotals.otaExpenseTotal ||
+						requestedAdminPricing.otaExpenseTotal ||
+						0
+				),
+				platformMarginTotal: round2(
+					pricingAdminTotals.platformMarginTotal ||
+						requestedAdminPricing.platformMarginTotal ||
+						0
+				),
+				commissionAmount: commissionToSave,
+			};
+			const orderTakerActorId =
+				orderTakeId && mongoose.Types.ObjectId.isValid(orderTakeId)
+					? orderTakeId
+					: createdByUserId && mongoose.Types.ObjectId.isValid(createdByUserId)
+					? createdByUserId
+					: null;
 
 			const reservationPayload = {
 				hotelId,
@@ -5789,14 +5900,26 @@ exports.createNewReservationClient2 = async (req, res) => {
 				total_guests,
 				adults,
 				children,
-				total_amount,
-				commission,
+				total_amount: resolvedTotalAmount,
+				sub_total: resolvedSubTotal,
+				commission: commissionToSave,
 				payment,
 				paid_amount,
 				commissionPaid,
 				booking_source: resolvedBookingSource,
 				hotelName: hotel_name,
-				pickedRoomsType,
+				pickedRoomsType: pricingRooms.length ? pricingRooms : pickedRoomsType,
+				pickedRoomsPricing: pricingRooms.length ? pricingRooms : pickedRoomsType,
+				adminPricing: resolvedAdminPricing,
+				adminPricingVisibility: {
+					...requestedAdminPricingVisibility,
+					rootOnlyForHotelManagement: true,
+					source:
+						requestedAdminPricingVisibility.source ||
+						"admin_reservation_create",
+					appliedAt: new Date(),
+					appliedBy: orderTakerActorId,
+				},
 				advancePayment,
 				createdByUserId:
 					createdByUserId && mongoose.Types.ObjectId.isValid(createdByUserId)
@@ -5833,7 +5956,9 @@ exports.createNewReservationClient2 = async (req, res) => {
 							confirmation_number: confirmationNumber,
 							hotelId,
 							booking_source: resolvedBookingSource,
-							total_amount,
+							total_amount: resolvedTotalAmount,
+							sub_total: resolvedSubTotal,
+							commission: commissionToSave,
 							reservation_status: "Pending Confirmation",
 							orderTakeId: orderTakeId || "",
 						},
