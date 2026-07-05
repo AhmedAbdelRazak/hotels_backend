@@ -9,6 +9,7 @@ const ObjectId = mongoose.Types.ObjectId;
 const {
 	isPendingConfirmationReservation,
 	buildPendingConfirmationExclusionFilter,
+	shouldCountReservationForInventory,
 } = require("../services/reservationStatus");
 const {
 	sanitizeReservationAuditLogsCollectionForViewer,
@@ -3432,7 +3433,6 @@ function buildReservationBaseQuery({
 		hotelId: new ObjectId(hotelId),
 		checkin_date: { $lt: endExclusive },
 		checkout_date: { $gt: start },
-		...buildPendingConfirmationExclusionFilter(),
 		...buildExcludePendingOtaReviewFilter(),
 	};
 
@@ -3466,7 +3466,6 @@ function buildDayBaseQuery({
 		hotelId: new ObjectId(hotelId),
 		checkin_date: { $lt: dayEnd },
 		checkout_date: { $gt: dayStart },
-		...buildPendingConfirmationExclusionFilter(),
 		...buildExcludePendingOtaReviewFilter(),
 	};
 
@@ -3839,7 +3838,13 @@ async function computeOccupancy({
 			!Array.isArray(reservation.pickedRoomsType)
 		)
 			continue;
-		if (isPendingConfirmationReservation(reservation)) continue;
+		if (
+			!shouldCountReservationForInventory(reservation, {
+				includeCancelled,
+				includeCompleted: true,
+			})
+		)
+			continue;
 
 		const pay = paymentMeta(reservation);
 		if (
@@ -4095,7 +4100,7 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 	try {
 		setNoCacheHeaders(res);
 
-		const hotelId = req.query.hotelId;
+		const hotelId = req.query.hotelId || req.query.invHotel;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
 			return res.status(400).json({
 				success: false,
@@ -4109,9 +4114,12 @@ exports.hotelOccupancyCalendar = async (req, res) => {
 			});
 		}
 
-		const customRange = parseCustomRange(req.query.start, req.query.end);
+		const customRange = parseCustomRange(
+			req.query.start || req.query.invStart,
+			req.query.end || req.query.invEnd
+		);
 		const { start, endExclusive, daysInMonth, label, year, monthIndex } =
-			customRange || parseMonthParam(req.query.month);
+			customRange || parseMonthParam(req.query.month || req.query.invMonth);
 
 		const displayMode =
 			(req.query.display === "roomType" && "roomType") || "displayName";
@@ -4163,7 +4171,7 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 	try {
 		setNoCacheHeaders(res);
 
-		const hotelId = req.query.hotelId;
+		const hotelId = req.query.hotelId || req.query.invHotel;
 		if (!hotelId || !ObjectId.isValid(hotelId)) {
 			return res.status(400).json({
 				success: false,
@@ -4177,9 +4185,12 @@ exports.hotelOccupancyWarnings = async (req, res) => {
 			});
 		}
 
-		const customRange = parseCustomRange(req.query.start, req.query.end);
+		const customRange = parseCustomRange(
+			req.query.start || req.query.invStart,
+			req.query.end || req.query.invEnd
+		);
 		const { start, endExclusive, daysInMonth, label, year, monthIndex } =
-			customRange || parseMonthParam(req.query.month);
+			customRange || parseMonthParam(req.query.month || req.query.invMonth);
 
 		const displayMode =
 			(req.query.display === "roomType" && "roomType") || "displayName";
@@ -4434,7 +4445,7 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		const reservations = await Reservations.find(baseQuery)
 			.select(
-				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType pickedRoomsPricing reservation_status total_amount sub_total adminPricing adminPricingVisibility payment payment_details paypal_details paid_amount_breakdown createdAt booking_source reservedBy room_numbers"
+				"confirmation_number customer_details hotelId checkin_date checkout_date pickedRoomsType pickedRoomsPricing reservation_status state pendingConfirmation agentDecisionSnapshot total_amount sub_total adminPricing adminPricingVisibility payment payment_details paypal_details paid_amount_breakdown createdAt booking_source reservedBy room_numbers"
 			)
 			.populate("hotelId", "hotelName")
 			.lean();
@@ -4452,6 +4463,13 @@ exports.hotelOccupancyDayReservations = async (req, res) => {
 
 		for (const reservation of hotelVisibleReservations) {
 			if (!reservation || !Array.isArray(reservation.pickedRoomsType)) continue;
+			if (
+				!shouldCountReservationForInventory(reservation, {
+					includeCancelled,
+					includeCompleted: true,
+				})
+			)
+				continue;
 
 			const pay = paymentMeta(reservation);
 				if (
