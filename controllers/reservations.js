@@ -593,10 +593,13 @@ const safeSupplierDataKey = (key = "") => /^[A-Za-z0-9_]+$/.test(key);
 const normalizeSupplierDataUpdateFields = (payload = {}) => {
 	const normalized = { ...payload };
 	const setSupplierField = (field, value) => {
-		normalized[`supplierData.${field}`] =
-			field === "supplierName" || field === "suppliedBookingNo"
-				? String(value || "").trim()
-				: value;
+		if (field === "supplierName" || field === "suppliedBookingNo") {
+			const text = String(value || "").trim();
+			if (!text) return;
+			normalized[`supplierData.${field}`] = text;
+			return;
+		}
+		normalized[`supplierData.${field}`] = value;
 	};
 
 	const supplierBookingRootKeys = [
