@@ -1,5 +1,6 @@
 const {
 	getSupportCaseById,
+	updateSupportCaseAppend,
 	updateSupportCaseAppendIfNoRecentAiDuplicate,
 	updateSupportCaseAiStateSnapshot,
 	getHotelByIdWithPricingDates,
@@ -811,6 +812,25 @@ function jannatMessageData(supportCase = {}, text = "", action = "jannat_support
 	};
 }
 
+function hasRecentSameJannatMessage(supportCase = {}, messageData = {}, windowMs = 30000) {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const cutoff = Date.now() - Math.max(1000, Number(windowMs) || 0);
+	const text = cleanString(messageData.message, 3000);
+	const action = cleanString(messageData.clientAction, 80);
+	const userId = cleanString(messageData.messageBy?.userId, 80);
+	return conversation.some((entry) => {
+		const dateMs = new Date(entry?.date || 0).getTime();
+		if (!Number.isFinite(dateMs) || dateMs < cutoff) return false;
+		return (
+			cleanString(entry?.message, 3000) === text &&
+			cleanString(entry?.clientAction, 80) === action &&
+			(!userId || cleanString(entry?.messageBy?.userId, 80) === userId)
+		);
+	});
+}
+
 async function appendJannatMessage(io, supportCase = {}, text = "", options = {}) {
 	const caseId = caseIdText(supportCase);
 	if (!caseId || !cleanString(text)) return supportCase;
@@ -832,7 +852,22 @@ async function appendJannatMessage(io, supportCase = {}, text = "", options = {}
 		requireOpenClientAi: true,
 		duplicateWindowMs: 30000,
 	});
-	const updatedCase = saved?.updatedCase || (await getSupportCaseById(caseId));
+	let updatedCase = saved?.updatedCase || (await getSupportCaseById(caseId));
+	if (saved?.skipped) {
+		const current = (await getSupportCaseById(caseId)) || updatedCase || supportCase;
+		const canRetry =
+			current?.openedBy === "client" &&
+			current?.caseStatus === "open" &&
+			current?.aiToRespond !== false &&
+			!hasRecentSameJannatMessage(current, messageData, 30000);
+		if (canRetry) {
+			console.log("[jannatSupport] retrying skipped message append", {
+				caseId,
+				clientAction: messageData.clientAction,
+			});
+			updatedCase = await updateSupportCaseAppend(caseId, fields);
+		}
+	}
 	if (io && updatedCase) {
 		io.to(caseId).emit("receiveMessage", { ...messageData, caseId });
 		io.to(caseId).emit("supportCaseUpdated", updatedCase);
