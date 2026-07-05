@@ -788,10 +788,74 @@ function looksLikeActionOrConfirmationPhrase(value = "") {
 	);
 }
 
+function normalizedSemanticPhrase(value = "") {
+	return normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,;:()[\]{}"'`*_+=/\\|-]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function looksLikeClarificationOrConfusionPhrase(value = "") {
+	const text = normalizedSemanticPhrase(value);
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const negation =
+		/\b(?:not|no|dont|do not|can't|cant|cannot|never|pas|non|ne|nicht|kein|no entiendo|no comprendo)\b/i.test(
+			text
+		) ||
+		/(?:^|\s)(?:\u0645\u0634|\u0645\u0648|\u0645\u0627|\u0644\u0627|\u0644\u0645|\u0645\u0628)(?:\s|$)/iu.test(
+			text
+		);
+	const understanding =
+		/\b(?:understand\w*|comprehend\w*|follow|clear|meaning|mean|confused|confusing|unclear|compren\w*|comprend\w*|compris|entiend\w*|entender|comprendo|capisc\w*|versteh\w*)\b/i.test(
+			text
+		) ||
+		/(?:\u0641\u0647\u0645|\u0641\u0627\u0647\u0645|\u0641\u0627\u0647\u0645\u0629|\u0648\u0627\u0636\u062d|\u0642\u0635\u062f|\u0645\u0639\u0646\u0649|\u064a\u0639\u0646\u064a)/iu.test(
+			text
+		);
+	if (negation && understanding) return true;
+	return (
+		/\b(?:what do you mean|what does that mean|meaning please|please clarify|can you clarify|i am confused|im confused|unclear)\b/i.test(
+			text
+		) ||
+		/(?:\u0645\u0627\u0630\u0627\s+\u062a\u0639\u0646\u064a|\u0648\u0634\s+\u062a\u0642\u0635\u062f|\u0627\u064a\u0634\s+\u062a\u0642\u0635\u062f|\u064a\u0639\u0646\u064a\s+\u0627\u064a\u0647|\u0642\u0635\u062f\u0643\s+\u0627\u064a\u0647|\u0648\u0636\u062d|\u0627\u0644\u0645\u0642\u0635\u0648\u062f)/iu.test(
+			compact
+		)
+	);
+}
+
+function looksLikeGuestCountClosurePhrase(value = "") {
+	const text = normalizeNumberWordsForParsing(normalizedSemanticPhrase(value));
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const hasClosure =
+		/\b(?:that|this|those|these|total|altogether|all|makes|equals|complete|done)\b/i.test(
+			text
+		) ||
+		/(?:^|\s)(?:\u0643\u062f\u0647|\u0643\u0630\u0627|\u0628\u0643\u062f\u0647|\u0628\u0643\u0630\u0627|\u0647\u0643\u0630\u0627)(?:\s|$)/iu.test(
+			text
+		);
+	const hasNumericValue =
+		/(?:^|[^0-9])\d{1,3}(?:$|[^0-9])/.test(text) ||
+		/(?:\u0627\u0644)?(?:\u0648\u0627\u062d\u062f|\u0627\u062b\u0646\u064a\u0646|\u0627\u062a\u0646\u064a\u0646|\u062b\u0644\u0627\u062b|\u0627\u0631\u0628\u0639|\u0623\u0631\u0628\u0639|\u062e\u0645\u0633|\u0633\u062a|\u0633\u0628\u0639|\u062b\u0645\u0627\u0646|\u062a\u0633\u0639|\u0639\u0634\u0631)/iu.test(
+			compact
+		);
+	const hasGuestMeaning =
+		/\b(?:guest|guests|person|people|adult|adults|child|children|kid|kids)\b/i.test(
+			text
+		) ||
+		/(?:\u0636\u064a\u0648\u0641|\u0636\u064a\u0641|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0627\u0641\u0631\u0627\u062f|\u0623\u0641\u0631\u0627\u062f|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0637\u0641\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644|\u0646\u0632\u0644\u0627\u0621)/iu.test(
+			text
+		);
+	return hasClosure && (hasGuestMeaning || hasNumericValue);
+}
+
 function looksLikeNonBookingNamePhrase(value = "") {
 	const text = cleanDisplayString(value, 160).replace(/^[\s:,-]+|[\s.,;:!-]+$/g, "");
 	if (!text) return true;
 	if (isShortAffirmativeToken(text)) return true;
+	if (looksLikeClarificationOrConfusionPhrase(text)) return true;
+	if (looksLikeGuestCountClosurePhrase(text)) return true;
 	const normalized = normalizeIntentSearchText(text);
 	const compact = normalized.replace(/\s+/g, "");
 	if (
@@ -2821,6 +2885,9 @@ function mergeKnownFacts(current = {}, next = {}) {
 	const previousAdults = Number(merged.adults || 0) || 0;
 	const previousChildren = Number(merged.children || 0) || 0;
 	const previousRequestedBeds = requestedBedsFromKnown(merged);
+	const previousFullName = cleanDisplayString(merged.fullName || "", 120);
+	const previousPhone = cleanPhone(merged.phone || "");
+	const previousNationality = cleanString(merged.nationality || "", 80);
 	const sourceCheckinISO = source.checkinISO || source.checkin || reservation.checkinISO;
 	const sourceCheckoutISO = source.checkoutISO || source.checkout || reservation.checkoutISO;
 	setDate("checkinISO", sourceCheckinISO);
@@ -3024,6 +3091,10 @@ function mergeKnownFacts(current = {}, next = {}) {
 	const childrenChanged = (Number(merged.children || 0) || 0) !== previousChildren;
 	const requestedBedsChanged = requestedBedsFromKnown(merged) !== previousRequestedBeds;
 	const guestCountChanged = adultsChanged || childrenChanged;
+	const identityChanged =
+		cleanDisplayString(merged.fullName || "", 120) !== previousFullName ||
+		cleanPhone(merged.phone || "") !== previousPhone ||
+		cleanString(merged.nationality || "", 80) !== previousNationality;
 	const selectedCapacity = selectionsFromKnown(merged).reduce(
 		(total, selection) =>
 			total +
@@ -3054,9 +3125,11 @@ function mergeKnownFacts(current = {}, next = {}) {
 		roomsChanged ||
 		roomSelectionsChanged ||
 		guestCountChanged ||
-		requestedBedsChanged
+		requestedBedsChanged ||
+		identityChanged
 	) {
 		delete merged.reviewSentAt;
+		delete merged.officialReviewSnapshot;
 	}
 	return merged;
 }
@@ -4606,6 +4679,34 @@ function previousAiAskedForGuestCount(previousAi = {}) {
 		/(?:\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0639\u062f\u062f\s+\u0627\u0644\u0628\u0627\u0644\u063a|\u0639\u062f\u062f\s+\u0627\u0644\u0643\u0628\u0627\u0631|\u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646|\u0627\u0644\u0643\u0628\u0627\u0631|\u0627\u0644\u0627\u0637\u0641\u0627\u0644|\u0627\u0644\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644|\u0623\u0637\u0641\u0627\u0644)/iu.test(text);
 }
 
+function unnumberedSingularGuestCountFactsFromText(value = "") {
+	const text = normalizeNumberWordsForParsing(normalizedSemanticPhrase(value));
+	if (!text || /\d/.test(text)) return {};
+	if (
+		/(?:^|\s)(?:no|not|without|none|zero|pas|non|kein|nicht|\u0645\u0634|\u0645\u0648|\u0645\u0627|\u0644\u0627|\u0628\u062f\u0648\u0646)(?:\s|$)/iu.test(
+			text
+		)
+	) {
+		return {};
+	}
+	const facts = {};
+	if (
+		/(?:^|\s|\u0648)(?:one\s+)?(?:child|kid|enfant|\u0637\u0641\u0644|\u0637\u0641\u0644\u0647|\u0637\u0641\u0644\u0629)(?:$|\s|[^\p{L}0-9])/iu.test(
+			text
+		)
+	) {
+		facts.children = 1;
+	}
+	if (
+		/(?:^|\s|\u0648)(?:one\s+)?(?:adult|grownup|adulte|\u0628\u0627\u0644\u063a|\u0643\u0628\u064a\u0631|\u0643\u0628\u064a\u0631\u0647|\u0643\u0628\u064a\u0631\u0629)(?:$|\s|[^\p{L}0-9])/iu.test(
+			text
+		)
+	) {
+		facts.adults = 1;
+	}
+	return facts;
+}
+
 function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 	if (!previousAiAskedForGuestCount(previousAi)) return {};
 	if (containsDateLikeSlashToken(value)) return {};
@@ -4637,9 +4738,16 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 		.map((match) => Number(match[1]))
 		.filter((number) => Number.isFinite(number) && number >= 0 && number <= 200);
 	const facts = {};
+	const singularFacts = unnumberedSingularGuestCountFactsFromText(value);
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
 	if (childUnderAgeTrailingMatch?.[1]) facts.children = Number(childUnderAgeTrailingMatch[1]);
 	else if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (!Number.isFinite(Number(facts.adults)) && singularFacts.adults) {
+		facts.adults = singularFacts.adults;
+	}
+	if (!Number.isFinite(Number(facts.children)) && singularFacts.children) {
+		facts.children = singularFacts.children;
+	}
 	if (!Number.isFinite(Number(facts.children))) {
 		const childContext =
 			text.match(
@@ -4673,6 +4781,9 @@ function guestCountFactsFromAskedAnswer(value = "", previousAi = {}) {
 		facts.children = 0;
 	}
 	if (!Number.isFinite(Number(facts.adults)) || Number(facts.adults) < 1) {
+		if (Number.isFinite(Number(facts.children)) && Number(facts.children) >= 0) {
+			return { children: Math.max(0, Math.min(20, Math.floor(Number(facts.children)))) };
+		}
 		return {};
 	}
 	if (!Number.isFinite(Number(facts.children))) facts.children = 0;
@@ -4704,9 +4815,16 @@ function explicitGuestCountFactsFromText(value = "") {
 		text.match(new RegExp(`(?:^|\\s|\\u0648)(\\d{1,2})\\s*${childLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
 		text.match(new RegExp(`${childLabel}\\s*(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
 	const facts = {};
+	const singularFacts = unnumberedSingularGuestCountFactsFromText(value);
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
 	if (childUnderAgeTrailingMatch?.[1]) facts.children = Number(childUnderAgeTrailingMatch[1]);
 	else if (childMatch?.[1]) facts.children = Number(childMatch[1]);
+	if (!Number.isFinite(Number(facts.adults)) && singularFacts.adults) {
+		facts.adults = singularFacts.adults;
+	}
+	if (!Number.isFinite(Number(facts.children)) && singularFacts.children) {
+		facts.children = singularFacts.children;
+	}
 	if (!Number.isFinite(Number(facts.children))) {
 		const childContext = text.match(new RegExp(`${childLabel}.{0,50}`, "iu"))?.[0] || "";
 		if (childContext) {
@@ -4729,7 +4847,12 @@ function explicitGuestCountFactsFromText(value = "") {
 			}
 		}
 	}
-	if (!Number.isFinite(Number(facts.adults)) || Number(facts.adults) < 1) return {};
+	if (!Number.isFinite(Number(facts.adults)) || Number(facts.adults) < 1) {
+		if (Number.isFinite(Number(facts.children)) && Number(facts.children) >= 0) {
+			return { children: Math.max(0, Math.min(20, Math.floor(Number(facts.children)))) };
+		}
+		return {};
+	}
 	if (!Number.isFinite(Number(facts.children))) facts.children = 0;
 	facts.adults = Math.max(1, Math.min(200, Math.floor(Number(facts.adults))));
 	facts.children = Math.max(0, Math.min(20, Math.floor(Number(facts.children))));
@@ -13945,6 +14068,94 @@ function compactReviewForBrain(known = {}, hotel = {}) {
 	};
 }
 
+function officialReviewSnapshotFromKnown(known = {}) {
+	const roomSelections = normalizeRoomSelections(known.roomSelections);
+	const snapshot = {
+		version: 1,
+		createdAt: new Date().toISOString(),
+		languageCode: cleanString(known.languageCode || "", 16),
+		checkinISO: validISODate(known.checkinISO) || "",
+		checkoutISO: validISODate(known.checkoutISO) || "",
+		roomTypeKey: cleanString(known.roomTypeKey || "", 80),
+		rooms: normalizeRoomCount(known.rooms, 1),
+		roomSelections,
+		adults: Number(known.adults || 0) || 0,
+		children: Number.isFinite(Number(known.children)) ? Number(known.children) : 0,
+		fullName: cleanDisplayString(known.fullName || "", 120),
+		phone: cleanPhone(known.phone || ""),
+		nationality: cleanDisplayString(known.nationality || "", 80),
+		email: cleanEmail(known.email || ""),
+	};
+	if (roomSelections.length) {
+		snapshot.rooms = roomSelectionsTotal(roomSelections);
+		if (roomSelections.length === 1) {
+			snapshot.roomTypeKey = roomSelections[0].roomTypeKey;
+		}
+	}
+	return snapshot;
+}
+
+function officialReviewSnapshotUsable(snapshot = {}) {
+	const review = asObject(snapshot);
+	const hasRoom =
+		Boolean(review.roomTypeKey && ROOM_TYPE_KEYS.includes(review.roomTypeKey)) ||
+		normalizeRoomSelections(review.roomSelections).length > 0;
+	return Boolean(
+		validISODate(review.checkinISO) &&
+			validISODate(review.checkoutISO) &&
+			review.checkoutISO > review.checkinISO &&
+			hasRoom &&
+			isPlausibleBookingName(review.fullName) &&
+			cleanPhone(review.phone).replace(/[^\d]/g, "").length >= 5 &&
+			cleanString(review.nationality, 80) &&
+			Number.isFinite(Number(review.adults)) &&
+			Number(review.adults) >= 1 &&
+			Number.isFinite(Number(review.children)) &&
+			Number(review.children) >= 0
+	);
+}
+
+function applyOfficialReviewSnapshotForSubmit(known = {}) {
+	const review = asObject(known.officialReviewSnapshot);
+	if (!officialReviewSnapshotUsable(review)) return known;
+	const next = {
+		...known,
+		checkinISO: review.checkinISO,
+		checkoutISO: review.checkoutISO,
+		fullName: cleanDisplayString(review.fullName, 120),
+		fullNameConfirmed: true,
+		phone: cleanPhone(review.phone),
+		phoneConfirmed: true,
+		nationality: cleanDisplayString(review.nationality, 80),
+		nationalityConfirmed: true,
+		adults: Math.max(1, Math.floor(Number(review.adults || 1))),
+		children: Math.max(0, Math.floor(Number(review.children || 0))),
+	};
+	delete next.fullNameNeedsConfirmation;
+	delete next.phoneNeedsConfirmation;
+	delete next.nationalityNeedsConfirmation;
+	const roomSelections = normalizeRoomSelections(review.roomSelections);
+	if (roomSelections.length) {
+		next.roomSelections = roomSelections;
+		next.rooms = roomSelectionsTotal(roomSelections);
+		if (roomSelections.length === 1) {
+			next.roomTypeKey = roomSelections[0].roomTypeKey;
+		} else {
+			delete next.roomTypeKey;
+		}
+	} else {
+		next.roomTypeKey = review.roomTypeKey;
+		next.rooms = normalizeRoomCount(review.rooms, 1);
+	}
+	if (review.email) {
+		next.email = cleanEmail(review.email);
+	}
+	if (next.quote && !quoteMatchesKnown(next)) {
+		delete next.quote;
+	}
+	return next;
+}
+
 async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
 	let reviewKnown = { ...known, quote: asObject(known.quote) };
@@ -14082,6 +14293,7 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 	});
 	if (latestConversationEntry(updated)?.clientAction === "review_reservation") {
 		reviewKnown.reviewSentAt = new Date().toISOString();
+		reviewKnown.officialReviewSnapshot = officialReviewSnapshotFromKnown(reviewKnown);
 		await saveKnownFacts(caseId, reviewKnown);
 	}
 	return updated;
@@ -14104,6 +14316,7 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 			tool: "submit_reservation",
 		});
 	}
+	submitKnown = applyOfficialReviewSnapshotForSubmit(submitKnown);
 	if (!submitKnown.quote || !quoteMatchesKnown(submitKnown)) {
 		const quote = await quoteTool(sc, submitKnown);
 		if (quote.available && quote.quote) {
@@ -14128,8 +14341,8 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 			});
 		}
 	}
-	const missing = requiredBookingMissing(submitKnown);
-	if (missing.length) {
+	const reviewedMissing = requiredBookingMissing(submitKnown);
+	if (reviewedMissing.length) {
 		await saveKnownFacts(caseId, submitKnown);
 		return sendBrainToolReplyFromOpenAI({
 			io,
@@ -14141,7 +14354,7 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 				tool: "submit_reservation",
 				ok: false,
 				code: "missing_required_details",
-				missing,
+				missing: reviewedMissing,
 				instruction:
 					"Ask only for the missing required booking details before reservation creation.",
 			},
@@ -15012,6 +15225,7 @@ async function submitReservationForCase(io, caseOrId) {
 		});
 		return { ok: false, reason: "split_stay_submit_handled" };
 	}
+	known = applyOfficialReviewSnapshotForSubmit(known);
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
 		if (quote.available && quote.quote) {
@@ -17071,6 +17285,8 @@ const exportedOrchestrator = {
 		phoneFromIdentityText,
 		nationalityFromIdentityText,
 		bookingNameFromIdentityText,
+		looksLikeClarificationOrConfusionPhrase,
+		looksLikeGuestCountClosurePhrase,
 		confirmKnownIdentityIfGuestConfirms,
 		reviewIdentityFactsFromAiMessage,
 		confirmGroupCapacityIfGuestConfirms,
@@ -17184,6 +17400,8 @@ const exportedOrchestrator = {
 		englishGuestCountText,
 		arabicReviewAddress,
 		buildReviewMessage,
+		officialReviewSnapshotFromKnown,
+		applyOfficialReviewSnapshotForSubmit,
 		buildStayClarificationMessage,
 		arabicFirstNameFromLatinName,
 		arabicGuestAddress,

@@ -5,10 +5,12 @@ process.env.WHATSAPP_DRY_RUN = "true";
 process.env.TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "AC00000000000000000000000000000000";
 process.env.TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "test-token";
 process.env.TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "+10000000000";
+process.env.AI_AGENT_TEST_EXPORTS = "true";
 
 const orchestrator = require("../aiagent/core/orchestrator").__test;
 const jannatSupport = require("../aiagent/jannatSupport/orchestrator").__test;
 const jannatBrain = require("../aiagent/jannatSupport/brain").__test;
+const reservationController = require("../controllers/reservations").__test;
 
 const hotel = {
 	_id: "zad-ajyad-test",
@@ -482,6 +484,134 @@ check("Combined identity and bus detour do not damage known quote or guest name"
 	);
 	assert.strictEqual(orchestrator.runtimeTuning.guestReplyQuietMs >= 3000, true);
 	assert.strictEqual(orchestrator.runtimeTuning.planMaxActiveTurns, 1);
+});
+
+check("Clarification and count-closure phrases cannot become booking names", () => {
+	const confusedArabic = "\u0645\u0648 \u0641\u0627\u0647\u0645";
+	const confusedEnglish = "I do not understand";
+	const confusedFrench = "je ne comprends pas";
+	const countClosure = "\u0643\u062f\u0647 \u0627\u0644\u0627\u0631\u0628\u0639\u0647";
+	assert.strictEqual(orchestrator.looksLikeClarificationOrConfusionPhrase(confusedArabic), true);
+	assert.strictEqual(orchestrator.looksLikeClarificationOrConfusionPhrase(confusedEnglish), true);
+	assert.strictEqual(orchestrator.looksLikeClarificationOrConfusionPhrase(confusedFrench), true);
+	assert.strictEqual(orchestrator.looksLikeGuestCountClosurePhrase(countClosure), true);
+	assert.strictEqual(
+		orchestrator.bookingIdentityFactsFromText(confusedArabic, {
+			allowName: true,
+			allowUnlabeledName: true,
+		}).fullName,
+		undefined
+	);
+	assert.strictEqual(
+		orchestrator.bookingIdentityFactsFromText(confusedFrench, {
+			allowName: true,
+			allowUnlabeledName: true,
+		}).fullName,
+		undefined
+	);
+	assert.strictEqual(
+		orchestrator.bookingIdentityFactsFromText(countClosure, {
+			allowName: true,
+			allowUnlabeledName: true,
+		}).fullName,
+		undefined
+	);
+});
+
+check("Separate adult and child messages preserve the reviewed party split", () => {
+	const previousAi = {
+		clientAction: "required_details_needed",
+		message:
+			"\u0643\u0645 \u0639\u062f\u062f \u0627\u0644\u0628\u0627\u0644\u063a\u064a\u0646 \u0648\u0643\u0645 \u0639\u062f\u062f \u0627\u0644\u0623\u0637\u0641\u0627\u0644\u061f",
+	};
+	const adultFacts = orchestrator.guestCountFactsFromAskedAnswer(
+		"\u0627\u0644\u0628\u0627\u0644\u0641\u064a\u0646 \u0663",
+		previousAi
+	);
+	const childFacts = orchestrator.guestCountFactsFromAskedAnswer("\u0648\u0637\u0641\u0644", previousAi);
+	let known = orchestrator.mergeKnownFacts(
+		{ languageCode: "ar", adults: 4, children: 0 },
+		adultFacts
+	);
+	known = orchestrator.mergeKnownFacts(known, childFacts);
+	assert.strictEqual(known.adults, 3);
+	assert.strictEqual(known.children, 1);
+	assert.strictEqual(
+		orchestrator.bookingIdentityFactsFromText("\u0643\u062f\u0647 \u0627\u0644\u0627\u0631\u0628\u0639\u0647", {
+			allowName: true,
+			allowUnlabeledName: true,
+		}).fullName,
+		undefined
+	);
+});
+
+check("Submit restores official review facts before reservation creation", () => {
+	const reviewed = {
+		languageCode: "ar",
+		checkinISO: "2026-07-20",
+		checkoutISO: "2026-07-25",
+		roomTypeKey: "quadRooms",
+		roomSelections: [{ roomTypeKey: "quadRooms", count: 1 }],
+		rooms: 1,
+		adults: 3,
+		children: 1,
+		fullName: "\u0645\u062d\u0645\u062f \u0627\u0628\u0631\u0627\u0647\u064a\u0645 \u0645\u062d\u0645\u062f \u063a\u0627\u0632\u0649",
+		fullNameConfirmed: true,
+		phone: "0530057894",
+		phoneConfirmed: true,
+		nationality: "\u0645\u0635\u0631\u064a",
+		nationalityConfirmed: true,
+		email: "mabokmel55@gmail.com",
+	};
+	const officialReviewSnapshot = orchestrator.officialReviewSnapshotFromKnown(reviewed);
+	const contaminated = {
+		...reviewed,
+		officialReviewSnapshot,
+		fullName: "\u0645\u0648 \u0641\u0627\u0647\u0645",
+		adults: 1,
+		children: 0,
+	};
+	const restored = orchestrator.applyOfficialReviewSnapshotForSubmit(contaminated);
+	assert.strictEqual(restored.fullName, reviewed.fullName);
+	assert.strictEqual(restored.adults, 3);
+	assert.strictEqual(restored.children, 1);
+	assert.strictEqual(restored.phone, "0530057894");
+});
+
+check("AI chat reservation update preserves reviewed multi-guest count by default", () => {
+	assert(reservationController?.protectAiReservationGuestCountUpdate);
+	const existing = {
+		aiSupportCaseId: "case-1",
+		aiReservationFingerprint: "fingerprint-1",
+		adults: 3,
+		children: 1,
+		total_guests: 4,
+	};
+	const protectedUpdate = reservationController.protectAiReservationGuestCountUpdate(
+		{ adults: 1, children: 0, total_guests: 1 },
+		existing
+	);
+	assert.deepStrictEqual(
+		{
+			adults: protectedUpdate.adults,
+			children: protectedUpdate.children,
+			total_guests: protectedUpdate.total_guests,
+		},
+		{ adults: 3, children: 1, total_guests: 4 }
+	);
+	const explicitUpdate = reservationController.protectAiReservationGuestCountUpdate(
+		{ adults: 1, children: 0, total_guests: 1 },
+		existing,
+		{ hasExplicitGuestCountUpdateIntent: true }
+	);
+	assert.deepStrictEqual(
+		{
+			adults: explicitUpdate.adults,
+			children: explicitUpdate.children,
+			total_guests: explicitUpdate.total_guests,
+		},
+		{ adults: 1, children: 0, total_guests: 1 }
+	);
 });
 
 check("Jannat support collects missing pricing detail before handoff", () => {

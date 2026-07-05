@@ -545,6 +545,8 @@ const TRACKED_RESERVATION_FIELDS = [
 	"booking_source",
 	"comment",
 	"total_guests",
+	"adults",
+	"children",
 	"total_rooms",
 	"pickedRoomsType",
 	"pickedRoomsPricing",
@@ -2289,6 +2291,70 @@ const sanitizeOrderTakerUpdate = (updates = {}) => {
 
 	return allowed;
 };
+
+const AI_GUEST_COUNT_UPDATE_INTENT_FIELDS = [
+	"__guestCountUpdateIntent",
+	"guestCountUpdateIntent",
+	"__occupancyUpdateIntent",
+	"occupancyUpdateIntent",
+];
+
+const isAiChatReservation = (reservation = {}) =>
+	Boolean(
+		reservation?.aiSupportCaseId ||
+			reservation?.aiReservationFingerprint ||
+			reservation?.customer_details?.aiSupportCaseId ||
+			reservation?.customer_details?.aiReservationCaseId
+	);
+
+const finiteGuestCount = (value, fallback = 0) => {
+	const number = Number(value);
+	return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : fallback;
+};
+
+const protectAiReservationGuestCountUpdate = (
+	updates = {},
+	reservation = {},
+	{ hasExplicitGuestCountUpdateIntent = false } = {}
+) => {
+	if (!isAiChatReservation(reservation)) return updates;
+	const hasGuestCountUpdate = ["total_guests", "adults", "children"].some((field) =>
+		Object.prototype.hasOwnProperty.call(updates, field)
+	);
+	if (!hasGuestCountUpdate) return updates;
+	const existingAdults = finiteGuestCount(reservation.adults, 0);
+	const existingChildren = finiteGuestCount(reservation.children, 0);
+	const existingTotal =
+		finiteGuestCount(reservation.total_guests, 0) ||
+		existingAdults + existingChildren;
+	if (existingTotal <= 1 || hasExplicitGuestCountUpdateIntent) return updates;
+	const nextAdults = Object.prototype.hasOwnProperty.call(updates, "adults")
+		? finiteGuestCount(updates.adults, existingAdults)
+		: existingAdults;
+	const nextChildren = Object.prototype.hasOwnProperty.call(updates, "children")
+		? finiteGuestCount(updates.children, existingChildren)
+		: existingChildren;
+	const nextTotal = Object.prototype.hasOwnProperty.call(updates, "total_guests")
+		? finiteGuestCount(updates.total_guests, nextAdults + nextChildren)
+		: nextAdults + nextChildren;
+	const looksLikeDefaultSingleGuest =
+		nextTotal <= 1 && nextAdults <= 1 && nextChildren === 0;
+	if (looksLikeDefaultSingleGuest && nextTotal < existingTotal) {
+		return {
+			...updates,
+			adults: existingAdults || existingTotal,
+			children: existingChildren,
+			total_guests: existingTotal,
+		};
+	}
+	return updates;
+};
+
+if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
+	exports.__test = {
+		protectAiReservationGuestCountUpdate,
+	};
+}
 
 const hasMeaningfulUpdatePayload = (updates = {}) =>
 	Object.values(updates || {}).some((value) => {
@@ -6518,6 +6584,14 @@ exports.updateReservation = async (req, res) => {
 		RESERVATION_DATE_UPDATE_INTENT_FIELDS.forEach((field) => {
 			delete normalizedUpdateData[field];
 		});
+		const hasExplicitGuestCountUpdateIntent =
+			AI_GUEST_COUNT_UPDATE_INTENT_FIELDS.some((field) => {
+				const value = normalizedUpdateData[field];
+				return value === true || value === "true";
+			});
+		AI_GUEST_COUNT_UPDATE_INTENT_FIELDS.forEach((field) => {
+			delete normalizedUpdateData[field];
+		});
 		const authenticatedActorId = normalizeId(req.auth?._id || "");
 		const payloadPreviewActorId = normalizeId(
 			previewAuditFromPayload?.previewActorId
@@ -7037,6 +7111,12 @@ exports.updateReservation = async (req, res) => {
 		}
 
 		// 5️⃣ Intelligent '_relocate' Increment if hotelId has changed
+		normalizedUpdateData = protectAiReservationGuestCountUpdate(
+			normalizedUpdateData,
+			existingReservation,
+			{ hasExplicitGuestCountUpdateIntent }
+		);
+
 		if (
 			normalizedUpdateData.hotelId &&
 			existingReservation.hotelId.toString() !==
