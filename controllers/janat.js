@@ -4720,6 +4720,25 @@ exports.paginatedReservationList = async (req, res) => {
 				}
 				return acc;
 			}, {});
+		const compactPrimitiveObject = (source = {}) => {
+			if (!source || typeof source !== "object" || Array.isArray(source)) {
+				return {};
+			}
+			return Object.entries(source).reduce((acc, [key, value]) => {
+				if (value === undefined) return acc;
+				if (
+					value === null ||
+					["string", "number", "boolean"].includes(typeof value)
+				) {
+					acc[key] = value;
+					return acc;
+				}
+				if (value instanceof Date) {
+					acc[key] = value;
+				}
+				return acc;
+			}, {});
+		};
 		const compactRoomSelection = (rooms = []) =>
 			(Array.isArray(rooms) ? rooms : []).map((room = {}) => ({
 				room_type: room.room_type || room.roomType || "",
@@ -4776,6 +4795,7 @@ exports.paginatedReservationList = async (req, res) => {
 				payment: reservation.payment || "",
 				payment_status: reservation.payment_status || "",
 				payment_status_hint: reservation.payment_status_hint || "",
+				supplierData: compactPrimitiveObject(reservation.supplierData),
 				checkin_date: reservation.checkin_date || null,
 				checkout_date: reservation.checkout_date || null,
 				booked_at: reservation.booked_at || null,
