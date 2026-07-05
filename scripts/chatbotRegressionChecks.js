@@ -580,6 +580,51 @@ check("Jannat support infers recommended double room before handoff", () => {
 	assert(reply.includes('<strong class="message-price-new">330 SAR</strong>'));
 });
 
+check("Jannat support canonicalizes LLM room aliases before availability checks", () => {
+	const sc = {
+		preferredLanguageCode: "ar",
+		aiStateSnapshot: {
+			known: {
+				checkinISO: "2026-07-27",
+				checkoutISO: "2026-08-02",
+				roomTypeKey: "doubleRooms",
+				roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+				adults: 2,
+				children: 0,
+				jannatUnavailableRecoveryFromHotelId: "zad-mashaer-test",
+			},
+		},
+		conversation: [
+			guest("\u0623\u0646\u0627 \u0648\u0632\u0648\u062c\u062a\u064a \u0646\u062d\u062a\u0627\u062c \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629"),
+		],
+	};
+	const facts = jannatBrain.normalizeFacts(
+		{
+			checkinISO: "2026-07-27",
+			checkoutISO: "2026-08-02",
+			roomTypeKey: "double_room",
+			roomSelections: [{ roomTypeKey: "double_room", count: 1 }],
+			adults: 2,
+			children: 0,
+		},
+		sc
+	);
+	assert.strictEqual(facts.roomTypeKey, "doubleRooms");
+	assert.deepStrictEqual(facts.roomSelections, [{ roomTypeKey: "doubleRooms", count: 1 }]);
+	assert.strictEqual(jannatSupport.hotelHasRequestedAvailability(hotel, facts), true);
+	assert.strictEqual(
+		jannatSupport.chooseTargetHotel({
+			plan: { targetHotelId: "zad-ajyad-test" },
+			candidateHotels: [
+				{ ...hotel, _id: "zad-ajyad-test" },
+				{ ...hotel, _id: "zad-mashaer-test" },
+			],
+			facts: { ...facts, jannatUnavailableRecoveryFromHotelId: "zad-mashaer-test" },
+		})?._id,
+		"zad-ajyad-test"
+	);
+});
+
 check("Jannat-transferred unavailable fixed-date lead is preserved", () => {
 	const fixedDatesText =
 		"\u0627\u0644\u0645\u0648\u0639\u062f \u0628\u0627\u0644\u0646\u0633\u0628\u0629 \u0644\u064a \u063a\u064a\u0631 \u0642\u0627\u0628\u0644 \u0644\u0644\u062a\u063a\u064a\u064a\u0631";

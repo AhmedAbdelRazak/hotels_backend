@@ -14,6 +14,56 @@ const normalizeId = (value) =>
 		.trim()
 		.toLowerCase();
 
+const ROOM_TYPE_KEYS = new Set([
+	"singleRooms",
+	"doubleRooms",
+	"tripleRooms",
+	"quadRooms",
+	"familyRooms",
+	"suite",
+]);
+
+const ROOM_TYPE_ALIASES = {
+	single: "singleRooms",
+	singleroom: "singleRooms",
+	singlerooms: "singleRooms",
+	double: "doubleRooms",
+	doubleroom: "doubleRooms",
+	doublerooms: "doubleRooms",
+	twin: "doubleRooms",
+	twinroom: "doubleRooms",
+	twinrooms: "doubleRooms",
+	standard: "doubleRooms",
+	standardroom: "doubleRooms",
+	triple: "tripleRooms",
+	tripleroom: "tripleRooms",
+	triplerooms: "tripleRooms",
+	quad: "quadRooms",
+	quadroom: "quadRooms",
+	quadrooms: "quadRooms",
+	quadruple: "quadRooms",
+	quadrupleroom: "quadRooms",
+	quadruplerooms: "quadRooms",
+	family: "familyRooms",
+	familyroom: "familyRooms",
+	familyrooms: "familyRooms",
+	quintuple: "familyRooms",
+	quintupleroom: "familyRooms",
+	quintuplerooms: "familyRooms",
+	suite: "suite",
+	suiteroom: "suite",
+	suites: "suite",
+};
+
+function canonicalRoomTypeKey(value = "") {
+	const raw = cleanString(value, 120);
+	if (!raw) return "";
+	if (ROOM_TYPE_KEYS.has(raw)) return raw;
+	const compact = raw.toLowerCase().replace(/[\s_-]+/g, "");
+	if (ROOM_TYPE_ALIASES[compact]) return ROOM_TYPE_ALIASES[compact];
+	return mapRoomToKey(raw) || "";
+}
+
 function parseJsonObject(text = "") {
 	const cleaned = String(text || "").trim();
 	if (!cleaned) return {};
@@ -140,7 +190,9 @@ function guestCountFacts(text = "") {
 function normalizeRoomSelections(value = []) {
 	return (Array.isArray(value) ? value : [])
 		.map((selection) => ({
-			roomTypeKey: cleanString(selection?.roomTypeKey, 40),
+			roomTypeKey: canonicalRoomTypeKey(
+				selection?.roomTypeKey || selection?.roomType || selection?.type
+			),
 			count: Math.max(1, Number(selection?.count || 1) || 1),
 		}))
 		.filter((selection) => selection.roomTypeKey)
@@ -180,6 +232,11 @@ function normalizeFacts(rawFacts = {}, supportCase = {}) {
 		...rawFacts,
 		...parsedGuestCounts,
 	};
+	const explicitRoomType = canonicalRoomTypeKey(
+		facts.roomTypeKey || facts.roomType || facts.roomText
+	);
+	if (explicitRoomType) facts.roomTypeKey = explicitRoomType;
+	else if (facts.roomTypeKey) delete facts.roomTypeKey;
 	if (quickDates?.checkinISO && quickDates?.checkoutISO) {
 		facts.checkinISO = facts.checkinISO || quickDates.checkinISO;
 		facts.checkoutISO = facts.checkoutISO || quickDates.checkoutISO;
