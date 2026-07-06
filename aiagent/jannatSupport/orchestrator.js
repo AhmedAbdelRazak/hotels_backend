@@ -618,11 +618,6 @@ function hotelStrengthLine(hotel = {}, ar = false) {
 			? `${name} موقعه استراتيجي للحرم: حوالي ${walkingText} مشيا و${drivingText} بالسيارة حسب الزحام.`
 			: `${name} is a strong Al Haram access option: about ${walkingText} walking and ${drivingText} by car depending on traffic.`;
 	}
-	if (hotel.hasMealsService === true) {
-		return ar
-			? `${name} خيار مريح لأن بيانات الفندق تعرض خدمة وجبات للضيوف.`
-			: `${name} is convenient because hotel facts include meal service for guests.`;
-	}
 	if (hotel.hasBusService === true) {
 		return ar
 			? `${name} خيار مريح لأن بيانات الفندق تعرض خدمة نقل للضيوف.`

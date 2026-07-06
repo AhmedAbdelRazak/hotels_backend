@@ -15,7 +15,7 @@ function intFromEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } =
 
 const OPENAI_TIMEOUT_MS = intFromEnv(
 	"OPENAI_CHATBOT_TIMEOUT_MS",
-	intFromEnv("OPENAI_TIMEOUT_MS", 12000, { min: 1500, max: 20000 }),
+	intFromEnv("OPENAI_TIMEOUT_MS", 20000, { min: 1500, max: 20000 }),
 	{ min: 1500, max: 20000 }
 );
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
