@@ -7336,6 +7336,76 @@ function appendPostConfirmationFactHelp(reply = "", sc = {}, known = {}) {
 	return `${String(reply || "").trim()}\n${suffix}`.trim();
 }
 
+function postHotelFactBookingBridge(sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	if (knownHasReservationConfirmation(known) || conversationHasAiAction(sc, "reservation_confirmed")) {
+		return "";
+	}
+	if (latestBookingCheckpointBeforeEntry(sc, latestGuest)) {
+		return "";
+	}
+	if (latestGuestAsksOtherCloserHotel(latestGuest)) {
+		return "";
+	}
+	const languageCode = activeLanguageCode(sc, known);
+	const latestText = String(latestGuest?.message || "");
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	const hasDates = validISODate(known.checkinISO) && validISODate(known.checkoutISO);
+	const hasGuestCount =
+		Number(known.adults || 0) > 0 ||
+		Number(known.children || 0) > 0 ||
+		Number(known.total_guests || known.guests || 0) > 0;
+	const hasRoomPlan =
+		normalizeRoomSelections(known.roomSelections).length > 0 ||
+		Boolean(cleanString(known.roomTypeKey || known.roomType, 80));
+	const hasQuote = quoteHasContent(known.quote);
+	if (hasQuote) return "";
+	const discountText = directBookingDiscountText(languageCode);
+	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
+	if (ar) {
+		if (hasDates && (hasGuestCount || hasRoomPlan)) {
+			return `إذا تحب، أراجع لك التوفر والسعر الآن، ومع الحجز المباشر عندنا ${discountText} حسب التوفر.`;
+		}
+		return `لو يناسبك ${hotelName}، أرسل لي تاريخ الدخول والخروج وعدد النزلاء، وأراجع لك السعر مع ${discountText} للحجز المباشر.`;
+	}
+	if (hasDates && (hasGuestCount || hasRoomPlan)) {
+		return `If you like, I can check availability and the live rate now, with our ${discountText} when booking directly with us.`;
+	}
+	return `If ${hotelName} works for you, send me the check-in, checkout, and guest count, and I will check the rate with our ${discountText}.`;
+}
+
+function hotelFactReplyAlreadyHasBookingBridge(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:check[\s-]?in|checkout|check[\s-]?out|guest count|guests?|availability|live rate|rate|price|direct booking|discount)\b/i.test(
+			text
+		) ||
+		/(?:تاريخالدخول|الدخولوالخروج|تاريخالخروج|عددالنزلاء|عددالضيوف|التوفروالسعر|السعر|الحجزالمباشر|خصم)/u.test(
+			compact
+		)
+	);
+}
+
+function hotelFactReplyHasRoboticSourceLabel(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase();
+	if (!text) return false;
+	return (
+		/\b(?:stored details|registered details|details recorded|final details|exact schedule and timing|hotel data says)\b/i.test(
+			text
+		) ||
+		/(?:التفاصيل المسجلة|البيانات المسجلة|التفاصيل والمواعيد النهائية|حسب بيانات الفندق|حسب بيانات)/u.test(
+			text
+		)
+	);
+}
+
 function buildAuthoritativeHotelServiceFactReply(sc = {}, hotel = {}, known = {}, latestGuest = null) {
 	if (!latestGuest) return "";
 	const latestText = String(latestGuest?.message || "");
@@ -7352,16 +7422,14 @@ function buildAuthoritativeHotelServiceFactReply(sc = {}, hotel = {}, known = {}
 		if (hasService) {
 			const reply = ar
 				? [
-						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c \u064a\u0648\u062c\u062f \u062e\u062f\u0645\u0629 \u0646\u0642\u0644 \u062d\u0633\u0628 \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName}.`,
-						details ? `\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629: ${details}` : "",
-						"\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0648\u0627\u0644\u0645\u0648\u0627\u0639\u064a\u062f \u0627\u0644\u0646\u0647\u0627\u0626\u064a\u0629 \u062a\u0624\u0643\u062f \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.",
+						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c \u064a\u0648\u062c\u062f \u062e\u062f\u0645\u0629 \u0646\u0642\u0644 \u0644\u0636\u064a\u0648\u0641 ${hotelName}.`,
+						details || "\u064a\u0648\u0641\u0631 \u0627\u0644\u0641\u0646\u062f\u0642 \u0628\u0627\u0635\u0627 \u0644\u062a\u0633\u0647\u064a\u0644 \u0627\u0644\u0648\u0635\u0648\u0644 \u0648\u0627\u0644\u062a\u0646\u0642\u0644.",
 				  ]
 						.filter(Boolean)
 						.join("\n")
 				: [
-						`Yes ${guestName}, ${hotelName} lists a shuttle/transport service in the hotel details.`,
-						details ? `Stored details: ${details}` : "",
-						"Reception can confirm the exact schedule and timing.",
+						`Yes ${guestName}, ${hotelName} offers guest transport/shuttle support.`,
+						details || "The hotel provides a bus service to make guest movement easier.",
 				  ]
 						.filter(Boolean)
 						.join("\n");
@@ -7380,16 +7448,14 @@ function buildAuthoritativeHotelServiceFactReply(sc = {}, hotel = {}, known = {}
 		if (hasNusuk) {
 			const reply = ar
 				? [
-						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c \u064a\u0638\u0647\u0631 \u062d\u0633\u0628 \u0628\u064a\u0627\u0646\u0627\u062a ${hotelName} \u0623\u0646\u0647 \u0645\u062f\u0631\u062c/\u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643.`,
-						details ? `\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0633\u062c\u0644\u0629: ${details}` : "",
-						"\u0648\u062a\u0623\u0643\u064a\u062f \u0623\u064a \u062a\u0641\u0627\u0635\u064a\u0644 \u0623\u0648 \u0645\u0648\u0627\u0639\u064a\u062f \u0646\u0647\u0627\u0626\u064a\u0629 \u064a\u0643\u0648\u0646 \u0645\u0646 \u0646\u0633\u0643 \u0623\u0648 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644.",
+						`\u0646\u0639\u0645 \u064a\u0627 ${guestName}\u060c ${hotelName} \u064a\u062a\u0648\u0641\u0631 \u0639\u0644\u0649 \u0646\u0633\u0643.`,
+						details ? `\u062a\u0642\u062f\u0631 \u062a\u0633\u062a\u0641\u064a\u062f \u0645\u0646\u0647 \u0628\u0647\u0630\u0647 \u0627\u0644\u0637\u0631\u064a\u0642\u0629: ${details}` : "",
 				  ]
 						.filter(Boolean)
 						.join("\n")
 				: [
-						`Yes ${guestName}, ${hotelName} is listed/available on Nusuk according to the hotel details.`,
-						details ? `Stored details: ${details}` : "",
-						"Final appointment or listing details are confirmed through Nusuk or reception.",
+						`Yes ${guestName}, ${hotelName} is available on Nusuk.`,
+						details ? `You can use it this way: ${details}` : "",
 				  ]
 						.filter(Boolean)
 						.join("\n");
@@ -7426,29 +7492,59 @@ async function sendHotelFactReplyFromOpenAI({
 		fallbackGuest
 	);
 	if (authoritativeReply) {
-		const reply = appendBookingCheckpointToHotelFactReply(
-			authoritativeReply,
+		const checkpointSuffix = appendBookingCheckpointToHotelFactReply(
+			"",
 			sc,
 			hotel,
 			known,
 			latestGuest
 		);
-		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, reply, {
-			latestGuest,
+		const postFactBookingBridge = checkpointSuffix
+			? ""
+			: postHotelFactBookingBridge(sc, hotel, known, latestGuest);
+		const replySuffix = checkpointSuffix || postFactBookingBridge;
+		const fallback = [String(authoritativeReply || "").trim(), replySuffix]
+			.filter(Boolean)
+			.join("\n\n");
+		return sendBrainToolReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
 			known,
+			latestGuest,
+			toolResult: {
+				tool: "hotel_fact",
+				ok: true,
+				code: "hotel_fact_answered",
+				latestQuestion: cleanDisplayString(latestGuest?.message || "", 500),
+				contextQuestion: cleanFactQuestion,
+				answerMode: hotelFactAnswerMode(fallbackGuest),
+				hotelFacts: compactHotelFacts(hotel),
+				suggestedAnswer: authoritativeReply,
+				postFactBookingBridge,
+				instruction:
+					"Write the final customer-facing answer from OpenAI only. Answer the service/fact question directly from Hotel facts and suggestedAnswer. Rewrite the suggestedAnswer in a warm, human reception style; do not use source labels like stored details, registered details, hotel data says, details recorded, or final timing/details confirmed. If toolResult.postFactBookingBridge is present, include that booking bridge exactly once at the end after the factual answer; it is allowed even when the guest only asked a hotel fact. Do not add any second call-to-action. Do not invent schedules, availability, prices, competitors, or guarantees. Keep it concise, friendly, and natural in the guest language.",
+			},
 			clientAction: "hotel_fact_answered",
 			quickReplies: hotelFactQuickRepliesWithBookingCheckpoint(sc, known, latestGuest),
+			fallback,
+			preserveFallbackNumbers: false,
+			replySuffix,
+			typingStartedAt,
 		});
 	}
 	const fallback = buildHotelFactReplyMessage(sc, hotel, fallbackGuest, known);
-	const replySuffix = appendBookingCheckpointToHotelFactReply(
+	const checkpointSuffix = appendBookingCheckpointToHotelFactReply(
 		"",
 		sc,
 		hotel,
 		known,
 		latestGuest
 	);
+	const postFactBookingBridge = checkpointSuffix
+		? ""
+		: postHotelFactBookingBridge(sc, hotel, known, latestGuest);
+	const replySuffix = checkpointSuffix || postFactBookingBridge;
 	const answerMode = hotelFactAnswerMode(fallbackGuest);
 	const needsPriceGuidance = latestGuestAsksPriceGuidance(fallbackGuest);
 	return sendBrainToolReplyFromOpenAI({
@@ -7467,8 +7563,9 @@ async function sendHotelFactReplyFromOpenAI({
 			needsPriceGuidance,
 			hotelFacts: compactHotelFacts(hotel),
 			suggestedAnswer: fallback,
+			postFactBookingBridge,
 			instruction:
-				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability and price now or continue with this hotel. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. Do not repeat a quote or discuss pricing/availability unless the latest guest explicitly asks for price or availability. Keep it warm, concise, and human.",
+				"Write the final customer-facing answer from OpenAI only. Answer the hotel fact/service/policy question directly from Hotel facts and suggestedAnswer. If contextQuestion is present, the latest guest message is only a short continuation of that context; answer contextQuestion naturally and acknowledge the latest mood briefly if useful. Keep the tone warm, human, and reception-like, not scripted. Do not use source labels like stored details, registered details, hotel data says, details recorded, or final timing/details confirmed. For answerMode=other_closer_hotel, keep the positive sales framing from suggestedAnswer: present the current hotel's strongest fact-based advantages, mention known suitable room/date context if present, and ask to check availability and price now or continue with this hotel. If the guest wants another closer hotel, offer team handoff; do not invent or compare other hotels. For answerMode=branch_city, clarify whether this hotel is in Makkah/Madinah/another city and do not resend the map/address unless the guest explicitly asked for map/address in this same message. For answerMode=location_and_price, answer the location first, then give exact-price next steps: prices depend on check-in, checkout, guests, and rooms; never say merely that prices are not confirmed, and never infer specific guest/room counts unless the guest provided them. For distance/proximity questions, give only the walking/driving distance unless the guest explicitly asks for map, address, location, or directions. Never append raw coordinates or unexplained numeric location data; include coordinates only inside a Google Maps URL when a map/location was explicitly requested. Preserve any URLs exactly when they are actually needed. If the requested detail is genuinely absent from Hotel facts and suggestedAnswer, say professionally that it is not confirmed yet, offer to verify with reception, and keep helping with the reservation. If toolResult.postFactBookingBridge is present, include that booking bridge exactly once at the end after the factual answer; it is allowed even when the guest only asked a hotel fact. Do not add a second call-to-action, and do not invent prices or availability.",
 		},
 		clientAction: "hotel_fact_answered",
 		quickReplies: hotelFactQuickRepliesWithBookingCheckpoint(sc, known, latestGuest),
@@ -13402,6 +13499,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous hotel-fact reply was not sent because it omitted the required Google Maps link for an explicit location request. Return a corrected customer-facing reply from OpenAI only. Include the exact Google Maps URL from toolResult.hotelFacts.location.googleMapsUrl and keep the price next step if requested."
 				: validation === "hotel_fact_closer_sales_close_missing"
 				? "Your previous closer-hotel reply was not sent because it did not clearly ask for the next sales step. Return a corrected customer-facing reply from OpenAI only. Keep the current hotel's fact-based value pitch, and include the exact phrase \"check availability and price\" or ask whether to continue, book, or reserve this hotel. Do not leave the guest hanging."
+				: validation === "hotel_fact_robotic_source_label"
+				? "Your previous hotel-fact reply was not sent because it sounded scripted by using source labels such as stored details, registered details, hotel data says, or final timing/details confirmed. Return a corrected customer-facing reply from OpenAI only. Answer the fact directly in a natural reception voice. If toolResult.postFactBookingBridge is present, include it exactly once at the end. Do not invent facts, schedules, prices, or availability."
 				: validation === "alternative_reply_drifted_to_hotel_fact"
 				? "Your previous alternatives reply was not sent because it answered an older hotel location/fact question instead of the alternatives tool result. Return the customer-facing alternatives/availability result from OpenAI only. Do not include Google Maps, address, or distance. If toolResult.options is empty, say no suitable alternative is showing for the known stay and offer to adjust dates/room choice or use a previously available option if shown in the conversation."
 				: validation === "reservation_confirmation_links_missing"
@@ -13504,6 +13603,12 @@ async function sendBrainToolReplyFromOpenAI({
 			hotelFactMapReplyNeedsCorrection(text, toolResult)
 		) {
 			return "hotel_fact_map_missing";
+		}
+		if (
+			toolResult?.tool === "hotel_fact" &&
+			hotelFactReplyHasRoboticSourceLabel(text)
+		) {
+			return "hotel_fact_robotic_source_label";
 		}
 		if (closerHotelReplyNeedsSalesClose(text, toolResult)) {
 			return "hotel_fact_closer_sales_close_missing";
@@ -13690,7 +13795,14 @@ async function sendBrainToolReplyFromOpenAI({
 	}
 	const suffix = String(replySuffix || "").trim();
 	if (suffix && !reply.includes(suffix)) {
-		reply = [String(reply || "").trim(), suffix].filter(Boolean).join("\n\n");
+		const hasEquivalentHotelFactBridge =
+			toolResult?.tool === "hotel_fact" &&
+			toolResult?.postFactBookingBridge &&
+			suffix === String(toolResult.postFactBookingBridge || "").trim() &&
+			hotelFactReplyAlreadyHasBookingBridge(reply);
+		if (!hasEquivalentHotelFactBridge) {
+			reply = [String(reply || "").trim(), suffix].filter(Boolean).join("\n\n");
+		}
 	}
 	await waitForTypingMinimum(typingStartedAt);
 	return sendAiMessage(io, sc, reply, {
@@ -17334,6 +17446,10 @@ const exportedOrchestrator = {
 		hotelFactPriceGuidanceReplyNeedsCorrection,
 		hotelFactMapReplyNeedsCorrection,
 		hotelFactAnswerMode,
+		postHotelFactBookingBridge,
+		hotelFactReplyAlreadyHasBookingBridge,
+		hotelFactReplyHasRoboticSourceLabel,
+		buildAuthoritativeHotelServiceFactReply,
 		hotelFactQuickReplies,
 		hotelFactQuickRepliesWithBookingCheckpoint,
 		shouldAnswerHotelFactNow,

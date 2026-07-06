@@ -272,6 +272,55 @@ check("Hotel fact side question restores final review checkpoint and buttons", (
 	);
 });
 
+check("Hotel fact service answer sounds human and avoids stored-detail labels", () => {
+	const latestGuest = guest("هل يوجد وسيله مواصلات من الفندق");
+	const sc = {
+		preferredLanguageCode: "ar",
+		conversation: [latestGuest],
+	};
+	const known = { languageCode: "ar" };
+	const reply = orchestrator.buildAuthoritativeHotelServiceFactReply(
+		sc,
+		hotel,
+		known,
+		latestGuest
+	);
+	assert(/نقل|باص/.test(reply));
+	assert.strictEqual(orchestrator.hotelFactReplyHasRoboticSourceLabel(reply), false);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyHasRoboticSourceLabel("التفاصيل المسجلة: test"),
+		true
+	);
+});
+
+check("Open hotel fact answer gets a light booking bridge", () => {
+	const latestGuest = guest("كم يبعد الفندق عن الحرم");
+	const sc = {
+		preferredLanguageCode: "ar",
+		conversation: [latestGuest],
+	};
+	const bridge = orchestrator.postHotelFactBookingBridge(
+		sc,
+		hotel,
+		{ languageCode: "ar" },
+		latestGuest
+	);
+	assert(/تاريخ الدخول|الدخول/.test(bridge));
+	assert(/الخروج/.test(bridge));
+	assert(/خصم/.test(bridge));
+	assert(/٢٥|25/.test(bridge));
+	assert.strictEqual(orchestrator.hotelFactReplyAlreadyHasBookingBridge(bridge), true);
+	assert.strictEqual(
+		orchestrator.postHotelFactBookingBridge(
+			sc,
+			hotel,
+			{ languageCode: "ar", confirmation: "1234567890" },
+			latestGuest
+		),
+		""
+	);
+});
+
 check("Booking intent after hotel fact resumes final review", () => {
 	const review = ai("Final review for 225 SAR", "review_reservation");
 	const fact = ai("نعم، يوجد باص.", "hotel_fact_answered");
