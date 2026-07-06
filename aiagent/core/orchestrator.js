@@ -321,6 +321,56 @@ function latestConversationEntry(sc = {}) {
 	return conversation.length ? conversation[conversation.length - 1] : null;
 }
 
+function replySimilarityText(value = "") {
+	return normalizeIntentSearchText(value)
+		.replace(/https?:\/\/\S+/g, " ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/[^\p{L}\d]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function replyTokenSet(value = "") {
+	return new Set(replySimilarityText(value).split(/\s+/).filter((token) => token.length > 2));
+}
+
+function replySimilarityScore(left = "", right = "") {
+	const a = replyTokenSet(left);
+	const b = replyTokenSet(right);
+	if (!a.size || !b.size) return 0;
+	let intersection = 0;
+	for (const token of a) {
+		if (b.has(token)) intersection += 1;
+	}
+	const union = a.size + b.size - intersection;
+	return union > 0 ? intersection / union : 0;
+}
+
+function recentAiReplyTexts(sc = {}, latestGuest = null, limit = 4) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let endIndex = latestGuest ? conversationIndexOfEntry(sc, latestGuest) : conversation.length;
+	if (endIndex < 0) endIndex = conversation.length;
+	const replies = [];
+	for (let index = endIndex - 1; index >= 0 && replies.length < limit; index -= 1) {
+		const entry = conversation[index] || {};
+		if (!isAiSupportEntry(entry) || entry.isSystem) continue;
+		const text = String(entry.message || "").trim();
+		if (text) replies.push(text);
+	}
+	return replies;
+}
+
+function replyTooSimilarToRecentAi(sc = {}, candidate = "", latestGuest = null) {
+	const text = replySimilarityText(candidate);
+	if (text.length < 40) return false;
+	return recentAiReplyTexts(sc, latestGuest).some((previous) => {
+		const previousText = replySimilarityText(previous);
+		if (!previousText || previousText.length < 40) return false;
+		if (previousText === text) return true;
+		return replySimilarityScore(previousText, text) >= 0.82;
+	});
+}
+
 function entryFingerprint(entry = {}) {
 	return [
 		String(entry?.date || ""),
@@ -3307,16 +3357,27 @@ function quoteInputsKnown(known = {}) {
 }
 
 function roomCountFromAiReviewText(value = "") {
-	const source = normalizeRoomCountMarkers(
+	let source = normalizeRoomCountMarkers(
 		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
 	)
 		.replace(/[^\S\r\n]+/g, " ")
 		.trim();
 	if (!source) return null;
-	const dual = arabicDualRoomCountFromText(source);
-	if (dual) return dual;
 	const roomLabel =
 		"(?:rooms?|room\\s+count|number\\s+of\\s+rooms|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u063a\\u0631\\u0641|\\u0627?\\u0644?\\u063a\\u0631\\u0641(?:\\u0629|\\u0647)?|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0627\\u0648\\u0636|\\u0627?\\u0644?\\u0627\\u0648\\u0636(?:\\u0629|\\u0647)?|\\u0639\\u062f\\u062f\\s+\\u0627?\\u0644?\\u0623\\u0648\\u0636|\\u0627?\\u0644?\\u0623\\u0648\\u0636(?:\\u0629|\\u0647)?)";
+	const guestLabel =
+		/(?:\bguests?\b|\badults?\b|\bchildren\b|\bpeople\b|\bpax\b|\u0639\u062f\u062f\s+(?:\u0627?\u0644?\u0636\u064a\u0648\u0641|\u0627?\u0644?\u0646\u0632\u0644\u0627\u0621|\u0627?\u0644?\u0627\u0634\u062e\u0627\u0635|\u0627?\u0644?\u0628\u0627\u0644\u063a\u064a\u0646|\u0627?\u0644?\u0627\u0637\u0641\u0627\u0644|\u0627?\u0644?\u0623\u0637\u0641\u0627\u0644)|\u0627?\u0644?\u0636\u064a\u0648\u0641|\u0627?\u0644?\u0646\u0632\u0644\u0627\u0621|\u0627?\u0644?\u0628\u0627\u0644\u063a\u064a\u0646|\u0627?\u0644?\u0627\u0637\u0641\u0627\u0644|\u0627?\u0644?\u0623\u0637\u0641\u0627\u0644)/iu;
+	const roomLabelRegex = new RegExp(roomLabel, "iu");
+	const reviewRoomCountSource = source
+		.split(/\r?\n|[.;]+/)
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.filter((line) => roomLabelRegex.test(line) && !guestLabel.test(line))
+		.join("\n");
+	if (!reviewRoomCountSource) return null;
+	const dual = arabicDualRoomCountFromText(reviewRoomCountSource);
+	if (dual) return dual;
+	source = reviewRoomCountSource;
 	const labeled =
 		source.match(new RegExp(`${roomLabel}\\s*[:：\\-]?\\s*(\\d{1,2})(?=\\s|$|[^\\p{L}0-9])`, "iu")) ||
 		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${roomLabel}(?=\\s|$|[^\\p{L}0-9])`, "iu"));
@@ -10685,6 +10746,45 @@ function confirmationNumberFromText(value = "") {
 	return "";
 }
 
+function latestGuestAsksSupportContactNumber(value = "") {
+	const raw = String(value || "");
+	const text = normalizeIntentSearchText(raw).toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	if (!text) return false;
+	if (/^\+?\d[\d\s().-]{6,24}$/.test(normalizeDigits(raw).trim())) return false;
+	const arabicAskEscaped =
+		/(?:\u0631\u0642\u0645\u0643\u0645|\u0631\u0642\u0645\u0643|\u0631\u0642\u0645\s*(?:\u0627\u0644)?(?:\u0648\u0627\u062a\u0633|\u0648\u0627\u062a\u0633\u0627\u0628|\u0648\u0627\u062a\u0633\s*\u0627\u0628|\u0647\u0627\u062a\u0641|\u062c\u0648\u0627\u0644|\u062a\u0648\u0627\u0635\u0644)|\u0648\u0627\u062a\u0633\u0627\u0628\u0643\u0645|\u0648\u0627\u062a\u0633\u0627\u0628\u0643|\u0648\u0627\u062a\u0633\u0643\u0645|\u0643\u064a\u0641\s*(?:\u0627\u062a\u0648\u0627\u0635\u0644|\u0623\u062a\u0648\u0627\u0635\u0644)|\u0627\u0631\u064a\u062f\s*\u0631\u0642\u0645|\u0639\u0627\u064a\u0632\s*\u0631\u0642\u0645|\u0645\u062d\u062a\u0627\u062c\s*\u0631\u0642\u0645|\u0627\u0628\u0639\u062a\s*(?:\u0644\u064a\s*)?(?:\u0627\u0644)?\u0631\u0642\u0645|\u0627\u0631\u0633\u0644\s*(?:\u0644\u064a\s*)?(?:\u0627\u0644)?\u0631\u0642\u0645|\u0645\u0645\u0643\u0646\s*(?:\u0627\u0644)?\u0631\u0642\u0645)/iu.test(
+			compact
+		);
+	const englishAsk =
+		/\b(?:whatsapp|whats\s*app|phone|mobile|contact\s*(?:number)?|call\s*(?:number)?|telephone|tel)\b/i.test(
+			text
+		) &&
+		/\b(?:what|which|send|give|share|provide|need|want|can|could|how|contact|call)\b/i.test(
+			text
+		);
+	return arabicAskEscaped || englishAsk;
+}
+
+function buildSupportContactNumberMessage(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	if (ar) {
+		return [
+			`\u0623\u0643\u064a\u062f\u060c \u0644\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0646\u0627 \u0639\u0644\u0649 \u0648\u0627\u062a\u0633\u0627\u0628 \u0644\u0623\u064a \u0627\u0633\u062a\u0641\u0633\u0627\u0631: ${RESERVATION_CHANGE_CONTACT_PHONE}`,
+			`\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+			"\u0648\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0641\u064a \u0627\u0644\u0634\u0627\u062a \u0623\u064a\u0636\u0627.",
+		].join("\n");
+	}
+	return [
+		`Sure, you can WhatsApp us for any inquiry at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
+		`WhatsApp link: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+		"I can also help you here in chat.",
+	].join("\n");
+}
+
 function mentionsExplicitReservationIdentifier(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const compact = normalizeIntentSearchText(value).replace(/\s+/g, "");
@@ -11861,6 +11961,7 @@ async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = nul
 	});
 	if (latestConversationEntry(updated)?.clientAction === "review_reservation") {
 		reviewKnown.reviewSentAt = new Date().toISOString();
+		reviewKnown.officialReviewSnapshot = officialReviewSnapshotFromKnown(reviewKnown);
 		await saveKnownFacts(caseIdText(sc), reviewKnown);
 	}
 	return updated;
@@ -13509,6 +13610,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous review reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return the official pre-submission review from OpenAI only. Use the exact review facts, do not say confirmed/created/completed/finalized, and ask the guest to confirm if everything is correct."
 				: validation === "review_formatting_unclear"
 				? "Your previous review reply was not sent because the booking facts were compressed or hard to read. Return the official pre-submission review from OpenAI only. Put each main fact on its own separate line or bullet: name, phone, nationality, room(s), guests, dates, nights, total, then the confirmation question. Do not say the booking is already confirmed."
+				: validation === "repetitive_reply"
+				? "Your previous reply was not sent because it was too similar to a recent assistant message in this same chat. Rewrite it in a fresh, human reception style while preserving the exact facts, prices, dates, room counts, confirmation numbers, links, and contact details from toolResult. Do not add extra questions; keep the same action and next step."
 				: "Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.";
 		return askOpenAI({
 			sc,
@@ -13677,6 +13780,14 @@ async function sendBrainToolReplyFromOpenAI({
 			reviewReplyNeedsCleanFormatting(text)
 		) {
 			return "review_formatting_unclear";
+		}
+		if (
+			!["reservation_created", "split_stay_reservations_created"].includes(
+				String(toolResult?.code || "")
+			) &&
+			replyTooSimilarToRecentAi(sc, text, latestGuest)
+		) {
+			return "repetitive_reply";
 		}
 		if (
 			requireContact &&
@@ -14610,6 +14721,27 @@ async function executeBrainFirstDecision({
 		fallbackKnown: known,
 	}).known;
 	nextKnown = ensureRoomPlanForGuestCapacity(hotel, nextKnown).known;
+	if (officialReviewConfirmation) {
+		nextKnown = applyOfficialReviewSnapshotForSubmit(nextKnown);
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"official_review_confirmation_submit",
+			{ action: "submit_reservation", reason: "official_review_confirmation" },
+			nextKnown
+		);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainSubmitReservation(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, nextKnown, latestGuest), {
+			latestGuest,
+			known: nextKnown,
+			clientAction: "support_contact_number",
+		});
+	}
 	const hotelFactFollowUpAction = actionToResumeAfterHotelFactAffirmation(
 		sc,
 		latestGuest,
@@ -16260,6 +16392,25 @@ async function planTurn(io, supportCaseOrId) {
 			typingStartedAt,
 		});
 	}
+	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest), {
+			latestGuest,
+			known,
+			clientAction: "support_contact_number",
+		});
+	}
+	if (
+		latestGuest &&
+		(latestAction === "place_reservation" ||
+			(previousAi?.clientAction === "review_reservation" &&
+				guestConfirms(latestText, latestAction)))
+	) {
+		await saveKnownFacts(key, applyOfficialReviewSnapshotForSubmit(known));
+		await waitForTypingMinimum(typingStartedAt);
+		return submitReservationForCase(io, key);
+	}
 	if (appliedRoomCountOnlyChange && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
 		await saveKnownFacts(key, known);
 		await waitForTypingMinimum(typingStartedAt);
@@ -16469,6 +16620,25 @@ async function planTurn(io, supportCaseOrId) {
 			latestGuest,
 			typingStartedAt,
 		});
+	}
+	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest), {
+			latestGuest,
+			known,
+			clientAction: "support_contact_number",
+		});
+	}
+	if (
+		latestGuest &&
+		(latestAction === "place_reservation" ||
+			(previousAi?.clientAction === "review_reservation" &&
+				guestConfirms(latestText, latestAction)))
+	) {
+		await saveKnownFacts(key, applyOfficialReviewSnapshotForSubmit(known));
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return submitReservationForCase(io, key);
 	}
 	if (appliedRoomCountOnlyChange && quoteInputsKnown(known) && !quoteMatchesKnown(known)) {
 		await saveKnownFacts(key, known);
@@ -17413,6 +17583,10 @@ const exportedOrchestrator = {
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		latestGuestRequestsReservationCancel,
+		latestGuestAsksSupportContactNumber,
+		buildSupportContactNumberMessage,
+		replyTooSimilarToRecentAi,
+		replySimilarityScore,
 		guestDeclinesOptionalEmail,
 		guestDeclinesFurtherHelp,
 		guestAsksPriceAvailabilityOrBooking,

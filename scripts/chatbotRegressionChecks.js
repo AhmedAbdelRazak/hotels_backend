@@ -489,6 +489,54 @@ check("Triple-room correction can reduce ambiguous three-room request to one roo
 	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(selections), 3);
 });
 
+check("Arabic review extraction does not treat guest count as double-room count", () => {
+	const review = ai(
+		[
+			"\u0627\u0644\u063a\u0631\u0641\u0629: \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629 \u0648\u0627\u062d\u062f\u0629",
+			"\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641: 2",
+			"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644: 2026-07-26",
+			"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c: 2026-07-30",
+			"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: 300 \u0631\u064a\u0627\u0644 \u0633\u0639\u0648\u062f\u064a",
+		].join("\n"),
+		"review_reservation"
+	);
+	const facts = orchestrator.quoteFactsFromAiMessage(review);
+	assert.strictEqual(facts.roomTypeKey, "doubleRooms");
+	assert.deepStrictEqual(facts.roomSelections, [{ roomTypeKey: "doubleRooms", count: 1 }]);
+	assert.strictEqual(facts.rooms, 1);
+});
+
+check("Support contact number is deterministic in Arabic and English", () => {
+	assert.strictEqual(orchestrator.latestGuestAsksSupportContactNumber("ممكن رقم الواتساب؟"), true);
+	assert.strictEqual(orchestrator.latestGuestAsksSupportContactNumber("What is your WhatsApp number?"), true);
+	assert.strictEqual(orchestrator.latestGuestAsksSupportContactNumber("01226500044"), false);
+	const reply = orchestrator.buildSupportContactNumberMessage(
+		{ preferredLanguageCode: "ar" },
+		{},
+		guest("ممكن رقم الواتساب؟")
+	);
+	assert(reply.includes("+1 (909) 222-3374"));
+	assert(reply.includes("https://wa.me/19092223374"));
+});
+
+check("Repeated AI wording is detected before sending robotic replies", () => {
+	const previous =
+		"نعم يا ضيفنا العزيز، يوجد خدمة نقل حسب بيانات فندق زاد أجياد. يوفر الفندق باصًا خاصًا لنقل الضيوف إلى موقف الشهداء.";
+	const candidate =
+		"نعم يا ضيفنا العزيز، يوجد خدمة نقل حسب بيانات فندق زاد أجياد. يوفر الفندق باصًا خاصًا لنقل الضيوف إلى موقف الشهداء.";
+	const fresh =
+		"نعم، يوجد باص للفندق يساعد الضيوف في الوصول إلى موقف الشهداء، وأقدر أراجع لك السعر والتوفر إذا أرسلت التواريخ.";
+	const sc = {
+		conversation: [
+			ai(previous, "hotel_fact_answered"),
+			guest("هل يوجد وسيلة مواصلات من الفندق؟"),
+		],
+	};
+	const latestGuest = sc.conversation[1];
+	assert.strictEqual(orchestrator.replyTooSimilarToRecentAi(sc, candidate, latestGuest), true);
+	assert.strictEqual(orchestrator.replyTooSimilarToRecentAi(sc, fresh, latestGuest), false);
+});
+
 check("Combined identity and bus detour do not damage known quote or guest name", () => {
 	const known = {
 		languageCode: "ar",
