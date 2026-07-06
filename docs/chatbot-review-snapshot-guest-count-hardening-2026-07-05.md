@@ -138,6 +138,66 @@ No real guest support cases or real reservations were targeted by this cleanup.
   - API health endpoint / app response
   - a small number of smoke chatbot flows, not a full heavy 29-scenario run on the live server unless needed.
 
+## Production Rollout Results
+
+Rollout commit:
+
+- Local commit: `96d660acb9a649e75632d20ec3d07508cfdd50dd`.
+- GitHub `origin/master`: `96d660acb9a649e75632d20ec3d07508cfdd50dd`.
+- Server checkout at `/home/ahmedadmin/Hotels/hotels_backend`: `96d660acb9a649e75632d20ec3d07508cfdd50dd`.
+
+Deployment steps:
+
+- Pushed `master` to GitHub.
+- Pulled on `ssh jannat` with `git pull --ff-only origin master`.
+- Ran server-side checks before restart:
+  - `node --check aiagent/core/orchestrator.js` passed.
+  - `node --check scripts/liveChatbotQa.js` passed.
+  - `npm run test:chatbot` passed with 54 chatbot regression checks.
+- Restarted only `hotels-backend` with `pm2 restart hotels-backend --update-env`.
+
+Production health after restart:
+
+- `/api/aiagent/health` on port `8080` returned `ok: true`, `openai: true`.
+- `/api/active-hotels` returned successfully.
+- `hotels-backend` was online in PM2 after restart.
+- Backend memory was about 262 MB during final PM2 check.
+- CPU was 0% during final PM2 check.
+- System RAM had about 12 GiB available.
+- Root disk usage was 9%.
+- CPU package temperature was about 31 C, safely below the 78 C limit.
+
+Production smoke tests after restart:
+
+- Scenario 14, marker `codexqa-prod-smoke-20260706-separated`.
+  - Tested the separate-message pattern after deploy.
+  - Passed in one turn, about 19.8 seconds.
+  - Auto-cleanup deleted 1 support case and 0 reservations.
+- Scenario 12, marker `codexqa-prod-smoke-20260706-8guests`.
+  - Tested 8 guests mapping to a real room combination.
+  - Passed in one turn, about 12.8 seconds.
+  - Auto-cleanup deleted 1 support case and 0 reservations.
+- Scenario 20, marker `codexqa-prod-smoke-20260706-jannat-ajyad`.
+  - Tested Jannat Booking recommending priority Zad Ajyad with sales framing.
+  - Passed in one turn, about 4.2 seconds.
+  - Auto-cleanup deleted 1 support case and 0 reservations.
+
+Production cleanup verification:
+
+- Remaining `codexqa-prod-smoke-*` cases: 0.
+- Remaining `https://xhotelpro.com/codex-live-qa/...` cases: 0.
+- Remaining `codexqa.*` reservation emails: 0.
+
+Log notes:
+
+- The backend out log showed clean startup after restart:
+  - AI orchestrator initialized.
+  - Socket DB watcher enabled.
+  - Server running on port `8080`.
+  - MongoDB Atlas connected.
+- Older error-log entries still include previous validation-repair lines and the earlier `RESERVATION_DETAILS_HOTEL_SELECT.join is not a function` reservation-update error. No new fatal startup error was observed after this rollout.
+- One production smoke quote used the compact repair path before sending the final accepted reply. This is the intended safety validator path, not a failed user response.
+
 ## Upcoming Tightening
 
 - Add one combined end-to-end live QA scenario for the exact full chain: hotel has no rooms, Jannat Support greets, recommends priority Ajyad, user clicks transfer, Ajyad continues. The current harness checks the hotel-unavailable component and the Jannat priority recommendation component, but a single chain assertion would make this easier to monitor.
