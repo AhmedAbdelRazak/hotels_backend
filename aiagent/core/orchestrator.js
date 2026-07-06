@@ -7365,7 +7365,7 @@ function postHotelFactBookingBridge(sc = {}, hotel = {}, known = {}, latestGuest
 		if (hasDates && (hasGuestCount || hasRoomPlan)) {
 			return `إذا تحب، أراجع لك التوفر والسعر الآن، ومع الحجز المباشر عندنا ${discountText} حسب التوفر.`;
 		}
-		return `لو يناسبك ${hotelName}، أرسل لي تاريخ الدخول والخروج وعدد النزلاء، وأراجع لك السعر مع ${discountText} للحجز المباشر.`;
+		return `لو يناسبك ${hotelName}، أرسل لي تاريخ الدخول والخروج وعدد النزلاء، وأراجع لك السعر مع ${discountText}.`;
 	}
 	if (hasDates && (hasGuestCount || hasRoomPlan)) {
 		return `If you like, I can check availability and the live rate now, with our ${discountText} when booking directly with us.`;

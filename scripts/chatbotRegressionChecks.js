@@ -309,6 +309,7 @@ check("Open hotel fact answer gets a light booking bridge", () => {
 	assert(/الخروج/.test(bridge));
 	assert(/خصم/.test(bridge));
 	assert(/٢٥|25/.test(bridge));
+	assert(!/للحجز المباشر للحجز المباشر/.test(bridge));
 	assert.strictEqual(orchestrator.hotelFactReplyAlreadyHasBookingBridge(bridge), true);
 	assert.strictEqual(
 		orchestrator.postHotelFactBookingBridge(
