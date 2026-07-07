@@ -1005,10 +1005,22 @@ async function runScenario(definition, number, ctx) {
 async function cleanup() {
 	const markerRegex = new RegExp(escapeRegExp(marker), "i");
 	const caseIds = [...new Set(runState.caseIds)];
+	const trackedReservationIds = [...runState.reservationIds];
+	const splitCaseRegex = caseIds.length
+		? new RegExp(`^(?:${caseIds.map(escapeRegExp).join("|")}):split:`)
+		: null;
 	const reservationQuery = {
 		$or: [
+			trackedReservationIds.length
+				? { _id: { $in: trackedReservationIds } }
+				: { _id: { $in: [] } },
 			caseIds.length ? { aiSupportCaseId: { $in: caseIds } } : { _id: { $in: [] } },
+			splitCaseRegex ? { aiSupportCaseId: splitCaseRegex } : { _id: { $in: [] } },
 			{ "customer_details.email": markerRegex },
+			caseIds.length
+				? { "customer_details.aiSupportCaseId": { $in: caseIds } }
+				: { _id: { $in: [] } },
+			splitCaseRegex ? { "customer_details.aiSupportCaseId": splitCaseRegex } : { _id: { $in: [] } },
 			{ comment: markerRegex },
 			{ booking_comment: markerRegex },
 			{ aiReservationFingerprint: markerRegex },

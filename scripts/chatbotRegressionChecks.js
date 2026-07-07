@@ -215,6 +215,151 @@ check("Quote cannot match if selected capacity is too small", () => {
 	assert.strictEqual(orchestrator.quoteMatchesKnown(known), false);
 });
 
+check("Quad Rooms 4 guest means one quad room for four adults", () => {
+	const text = "29 July to 5 August\nQuad Rooms 4 guest";
+	assert.strictEqual(orchestrator.roomCountOnlyFromText(text), null);
+	assert.deepStrictEqual(orchestrator.explicitGuestCountFactsFromText(text), {
+		adults: 4,
+		children: 0,
+	});
+	assert.deepStrictEqual(orchestrator.extractRoomSelectionsFromText(text), [
+		{ roomTypeKey: "quadRooms", count: 1 },
+	]);
+	const sanitized = orchestrator.sanitizeBrainFactsForLatestText(
+		{
+			roomTypeKey: "quadRooms",
+			rooms: 4,
+			adults: 4,
+			children: 4,
+		},
+		{},
+		text
+	);
+	assert.deepStrictEqual(sanitized.roomSelections, [
+		{ roomTypeKey: "quadRooms", count: 1 },
+	]);
+	assert.strictEqual(sanitized.rooms, 1);
+	assert.strictEqual(sanitized.adults, 4);
+	assert.strictEqual(sanitized.children, 0);
+});
+
+check("ISO dates before Quad Rooms do not become room counts", () => {
+	const text = "2026-07-19 to 2026-07-21\nQuad Rooms 4 guest";
+	assert.strictEqual(orchestrator.roomCountOnlyFromText(text), null);
+	assert.strictEqual(orchestrator.roomCountCorrectionFromText(text), null);
+	assert.deepStrictEqual(orchestrator.explicitGuestCountFactsFromText(text), {
+		adults: 4,
+		children: 0,
+	});
+	assert.deepStrictEqual(orchestrator.extractRoomSelectionsFromText(text), [
+		{ roomTypeKey: "quadRooms", count: 1 },
+	]);
+});
+
+check("Explicit one quad room with four beds is not replanned", () => {
+	const text = "No, I need only one room with 4 beds";
+	const sanitized = orchestrator.sanitizeBrainFactsForLatestText(
+		{
+			roomSelections: [{ roomTypeKey: "familyRooms", count: 1 }],
+			rooms: 2,
+			requestedBeds: 4,
+		},
+		{
+			roomSelections: [
+				{ roomTypeKey: "familyRooms", count: 1 },
+				{ roomTypeKey: "tripleRooms", count: 1 },
+			],
+			rooms: 2,
+			adults: 4,
+			children: 0,
+		},
+		text
+	);
+	const merged = orchestrator.mergeKnownFacts(
+		{
+			roomSelections: [
+				{ roomTypeKey: "familyRooms", count: 1 },
+				{ roomTypeKey: "tripleRooms", count: 1 },
+			],
+			rooms: 2,
+			adults: 4,
+			children: 0,
+		},
+		sanitized
+	);
+	const result = orchestrator.ensureRoomPlanForGuestCapacity(hotel, merged);
+	assert.deepStrictEqual(result.known.roomSelections, [
+		{ roomTypeKey: "quadRooms", count: 1 },
+	]);
+	assert.strictEqual(result.known.rooms, 1);
+	assert.strictEqual(result.known.requestedBeds, 4);
+	assert.strictEqual(result.changed, false);
+});
+
+check("Arabic suite composition is not parsed as two bookable rooms", () => {
+	const text =
+		"\u0627\u0644\u062c\u0646\u0627\u062d \u064a\u062d\u062a\u0648\u0649 \u0639\u0644\u0649 (\u063a\u0631\u0641\u062a\u064a\u0646 + 2 \u062d\u0645\u0627\u0645)";
+	assert.strictEqual(orchestrator.roomCountOnlyFromText(text), null);
+	assert.strictEqual(orchestrator.roomCountCorrectionFromText(text), null);
+	assert.deepStrictEqual(orchestrator.extractRoomSelectionsFromText(text), [
+		{ roomTypeKey: "suite", count: 1 },
+	]);
+});
+
+check("Arabic apartment request is caught by the hotel-room clarification guard", () => {
+	const text =
+		"\u0647\u0644 \u0645\u062a\u0627\u062d \u0634\u0642\u0647 \u063a\u0631\u0641\u062a\u064a\u0646 \u0648\u0635\u0627\u0644\u0647 \u0648\u0634\u0642\u062a\u064a\u0646 \u063a\u0631\u0641\u0647 \u0648\u0635\u0627\u0644\u0647\u061f";
+	assert.strictEqual(orchestrator.latestGuestRequestsApartmentUnit(text), true);
+	assert.strictEqual(
+		orchestrator.hotelOffersApartmentUnits({
+			propertyType: "hotel",
+			roomCountDetails: [{ roomType: "Suite" }],
+		}),
+		false
+	);
+	const reply = orchestrator.buildNoApartmentClarificationMessage(
+		{ preferredLanguageCode: "ar" },
+		{
+			hotelName: "Zad Ajyad",
+			hotelName_OtherLanguage: "\u0632\u0627\u062f \u0623\u062c\u064a\u0627\u062f",
+			propertyType: "hotel",
+			roomCountDetails: [{ roomType: "Suite" }],
+		},
+		{ languageCode: "ar" },
+		text
+	);
+	assert.match(reply, /\u064a\u0648\u0641\u0631 \u063a\u0631\u0641\u0627 \u0641\u0646\u062f\u0642\u064a\u0629/u);
+	assert.doesNotMatch(reply, /\u0634\u0642\u0629\s+\u0645\u062a\u0627\u062d/u);
+});
+
+check("Quote validation rejects hallucinated mixed room counts", () => {
+	const toolResult = {
+		tool: "get_quote",
+		available: true,
+		totalRooms: 1,
+		roomSelections: [{ roomTypeKey: "quadRooms", count: 1 }],
+		quote: {
+			available: true,
+			totalRooms: 1,
+			roomSelections: [{ roomTypeKey: "quadRooms", count: 1 }],
+		},
+	};
+	assert.strictEqual(
+		orchestrator.quoteReplyRoomCountConflictsWithTool(
+			"Rooms: 1 x Family Quintuple Room + 1 x Triple Room - Premium Comfort",
+			toolResult
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.quoteReplyRoomCountConflictsWithTool(
+			"Rooms: 1 x Quadruple Room\nDates: 2026-07-29 to 2026-08-05",
+			toolResult
+		),
+		false
+	);
+});
+
 check("Hotel fact side question restores final review checkpoint and buttons", () => {
 	const review = {
 		...ai("Final review for 225 SAR", "review_reservation"),

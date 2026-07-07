@@ -198,6 +198,58 @@ Log notes:
 - Older error-log entries still include previous validation-repair lines and the earlier `RESERVATION_DETAILS_HOTEL_SELECT.join is not a function` reservation-update error. No new fatal startup error was observed after this rollout.
 - One production smoke quote used the compact repair path before sending the final accepted reply. This is the intended safety validator path, not a failed user response.
 
+## July 7 Local Room-Fix Verification
+
+This local pass focused on the production-style room-selection issues seen around cases `6a4c91b2c0471ca04e37d170` and `6a4c946dc0471ca04e37dbcf`.
+
+Additional hardening added locally:
+
+- `Quad Rooms 4 guest` is now parsed as one quad room for four adults, not four rooms and not four children.
+- ISO date tokens are stripped from the room-count parsing surface, so dates such as `2026-07-19 to 2026-07-21` cannot become `19` or `21` rooms before `Quad Rooms`.
+- Arabic suite composition wording such as "suite contains two rooms plus bathrooms" is treated as one suite description, not two bookable rooms.
+- Apartment/unit requests are answered deterministically before the brain-first OpenAI path when the hotel does not list apartments, so the bot says the property provides hotel rooms and does not offer apartments/units.
+- Quote replies are rejected if OpenAI displays room selections that conflict with the server quote result.
+- The live QA cleanup now includes tracked reservation IDs and `caseId:split:*` reservation IDs, so split-stay test reservations are cleaned automatically.
+
+Static and regression checks after the local patch:
+
+- `node --check aiagent/core/orchestrator.js` passed.
+- `node --check scripts/chatbotRegressionChecks.js` passed.
+- `node --check scripts/liveChatbotQa.js` passed.
+- `npm run test:chatbot` passed with 60 chatbot regression checks.
+- `git diff --check -- aiagent/core/orchestrator.js scripts/chatbotRegressionChecks.js scripts/liveChatbotQa.js` passed. Windows line-ending warnings only.
+
+Live QA coverage in the local database:
+
+- A first full `scripts/liveChatbotQa.js --fast` run passed scenarios 1 through 9, then scenario 10 hit a local fixture inventory issue because scenario 9 had consumed the only available double-room slot for the shared date. Cleanup deleted 10 support cases and 1 test reservation, with 0 remaining.
+- Scenario 10 was rerun in isolation and passed. Cleanup deleted 1 support case and 1 test reservation.
+- Scenario 11 passed in the next batch. Scenario 12 initially hit a wording assertion even though the server-side quote plan was correct: `familyRooms:1+tripleRooms:1`. Scenario 12 was rerun in isolation and passed.
+- Scenarios 13 through 27 passed as a batch. This covered quote detours, burst messages, French quote, date correction, same-day blocking, unavailable alternatives, Jannat Booking recommendation, confirmation-number safety, relationship guest parsing, required-details clarification, and a full Shaimaa-style booking flow. Cleanup deleted 15 support cases and 1 test reservation.
+- Scenario 28 passed in isolation. Cleanup deleted 1 support case and 0 reservations.
+- Scenario 29 passed in isolation and created two split reservations. The first run exposed a cleanup gap: the old cleanup query missed `caseId:split:*` reservation IDs. The two exact leftover split reservations were manually deleted, then the harness cleanup was patched.
+- Scenario 29 was rerun after the cleanup patch and passed. Cleanup deleted 1 support case and 2 split reservations, with 0 remaining.
+
+Post-fix exact live smokes:
+
+- Exact quad smoke using `Quad Rooms 4 guest` with ISO dates produced `quadRooms:1`, one room for four guests, and a clean quote. It did not drift to family/triple/quintuple or a date-derived room count.
+- Exact Arabic apartment smoke asked for apartment-style units. The bot replied that Zad Ajyad provides hotel rooms and does not show apartments/units, then asked for dates to check suitable hotel-room availability.
+- Exact smoke cleanup deleted 2 support cases and 0 reservations, with 0 remaining.
+- Post-fix scenario 12 passed again after the parser change.
+- Post-fix scenario 26 passed again after the parser change.
+
+Cleanup verification after all July 7 local testing:
+
+- Remaining support cases for marker prefix `codexqa-live-local-20260707-roomfix`: 0.
+- Remaining marker reservations for marker prefix `codexqa-live-local-20260707-roomfix`: 0.
+- Remaining support cases for marker prefix `codexqa-live-local-20260707-roomfix-exact-smoke`: 0.
+- Remaining marker reservations for marker prefix `codexqa-live-local-20260707-roomfix-exact-smoke`: 0.
+- Remaining known split leftovers from the cleanup-gap run: 0.
+
+Notes:
+
+- Validator fallback and compact repair logs appeared on some scenarios, including same-day blocking, unavailable large-room requests, 8-guest quote wording, and split submit. These were intended safety paths and the final user-facing scenarios passed.
+- No production deploy was performed during this July 7 local verification pass.
+
 ## Upcoming Tightening
 
 - Add one combined end-to-end live QA scenario for the exact full chain: hotel has no rooms, Jannat Support greets, recommends priority Ajyad, user clicks transfer, Ajyad continues. The current harness checks the hotel-unavailable component and the Jannat priority recommendation component, but a single chain assertion would make this easier to monitor.

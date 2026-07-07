@@ -1109,6 +1109,12 @@ function normalizeRoomCountMarkers(value = "") {
 	return String(value || "").replace(/[×✕✖]/g, "x");
 }
 
+function stripDateTokensForRoomParsing(value = "") {
+	return String(value || "")
+		.replace(/\b\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}\b/g, " ")
+		.replace(/\b\d{1,2}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{2,4}\b/g, " ");
+}
+
 function quoteRoomCount(quote = {}) {
 	if (Array.isArray(quote.rooms)) {
 		return roomSelectionsTotal(quote.rooms);
@@ -1159,12 +1165,14 @@ const ROOM_SELECTION_PATTERNS = [
 
 function roomCountNearMatch(text = "", matcher) {
 	const rawDualRoomCount = arabicDualRoomCountFromText(text);
-	if (rawDualRoomCount) return rawDualRoomCount;
-	const normalized = normalizeNumberWordsForParsing(normalizeDigits(text));
+	if (rawDualRoomCount && !suiteCompositionText(text)) return rawDualRoomCount;
+	const normalized = stripDateTokensForRoomParsing(
+		normalizeNumberWordsForParsing(normalizeDigits(text))
+	);
 	const source = normalizeRoomCountMarkers(normalized).replace(/\s+/g, " ").trim();
 	if (!source || !matcher?.pattern) return 1;
 	const dualRoomCount = arabicDualRoomCountFromText(source);
-	if (dualRoomCount) return dualRoomCount;
+	if (dualRoomCount && !suiteCompositionText(source)) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const patternSource = matcher.pattern.source;
@@ -1192,19 +1200,51 @@ function arabicDualRoomCountFromText(value = "") {
 		: null;
 }
 
+function suiteCompositionText(value = "") {
+	const text = normalizeIntentSearchText(value)
+		.replace(/[.!?\u061f\u060c,;:()]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	const hasSuite =
+		/\bsuites?\b/i.test(text) ||
+		/(?:\u0627?\u0644?\u062c\u0646\u0627\u062d|\u0627?\u062c\u0646\u062d\u0629|\u0623\u062c\u0646\u062d\u0629|\u0633\u0648\u064a\u062a|\u0627\u0633\u0648\u064a\u062a)/iu.test(
+			compact
+		);
+	if (!hasSuite) return false;
+	return (
+		/\b(?:contains?|includes?|consists?|with)\b/i.test(text) ||
+		/(?:\u064a\u062d\u062a\u0648\u064a|\u064a\u062d\u062a\u0648\u0649|\u062a\u062d\u062a\u0648\u064a|\u062a\u062d\u062a\u0648\u0649|\u064a\u062a\u0643\u0648\u0646|\u062a\u062a\u0643\u0648\u0646|\u0645\u0643\u0648\u0646|\u0645\u0643\u0648\u0646\u0629|\u0639\u0628\u0627\u0631\u0629|\+|\u062d\u0645\u0627\u0645|\u062d\u0645\u0627\u0645\u064a\u0646)/iu.test(
+			text
+		)
+	);
+}
+
 function roomCountOnlyFromText(value = "") {
 	const rawDualRoomCount = arabicDualRoomCountFromText(value);
-	if (rawDualRoomCount) return rawDualRoomCount;
+	if (rawDualRoomCount && !suiteCompositionText(value)) return rawDualRoomCount;
 	const source = normalizeRoomCountMarkers(
-		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		stripDateTokensForRoomParsing(
+			normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		)
 	)
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!source) return null;
 	const dualRoomCount = arabicDualRoomCountFromText(source);
-	if (dualRoomCount) return dualRoomCount;
+	if (dualRoomCount && !suiteCompositionText(source)) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
+	const guestNoun =
+		"(?:guests?|persons?|people|adults?|pax|individuals?|pilgrims?|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0641\\u0631\\u0627\\u062f|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0646\\u0632\\u0644\\u0627\\u0621|\\u0636\\u064a\\u0648\\u0641|\\u0628\\u0627\\u0644\\u063a\\u064a\\u0646|\\u0628\\u0627\\u0644\\u063a|\\u0643\\u0628\\u0627\\u0631|\\u0645\\u0639\\u062a\\u0645\\u0631\\u064a\\u0646|\\u0645\\u0639\\u062a\\u0645\\u0631|\\u0632\\u0648\\u0627\\u0631)";
+	if (
+		new RegExp(`${roomNoun}\\s*\\d{1,3}\\s*${guestNoun}(?:$|\\s|[^\\p{L}0-9])`, "iu").test(
+			source
+		)
+	) {
+		return null;
+	}
 	const explicitCountBeforeRoom = new RegExp(
 		`(?:^|[^0-9])(\\d{1,2})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`,
 		"iu"
@@ -1223,7 +1263,9 @@ function roomCountOnlyFromText(value = "") {
 
 function requestedBedCountFromText(value = "") {
 	const source = normalizeRoomCountMarkers(
-		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		stripDateTokensForRoomParsing(
+			normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		)
 	)
 		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
 		.replace(/\s+/g, " ")
@@ -1247,7 +1289,7 @@ function requestedBedCountFromText(value = "") {
 
 function roomCountCorrectionFromText(value = "") {
 	const rawDualRoomCount = arabicDualRoomCountFromText(value);
-	if (rawDualRoomCount) return rawDualRoomCount;
+	if (rawDualRoomCount && !suiteCompositionText(value)) return rawDualRoomCount;
 	const source = normalizeRoomCountMarkers(
 		normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
 	)
@@ -1256,7 +1298,7 @@ function roomCountCorrectionFromText(value = "") {
 		.trim();
 	if (!source) return null;
 	const dualRoomCount = arabicDualRoomCountFromText(source);
-	if (dualRoomCount) return dualRoomCount;
+	if (dualRoomCount && !suiteCompositionText(source)) return dualRoomCount;
 	const roomNoun =
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const roomCountContext = new RegExp(
@@ -5048,9 +5090,14 @@ function explicitGuestCountFactsFromText(value = "") {
 		"(?:adults?|grownups?|personnes?\\s+adultes?|adultes?|hommes?|\\u0628\\u0627\\u0644\\u063a(?:\\u064a\\u0646)?|\\u0643\\u0628\\u0627\\u0631|\\u0643\\u0628\\u064a\\u0631|\\u0643\\u0628\\u064a\\u0631\\u064a\\u0646)";
 	const childLabel =
 		"(?:children|child|kids?|enfants?|\\u0637\\u0641\\u0644|\\u0627\\u0637\\u0641\\u0627\\u0644|\\u0623\\u0637\\u0641\\u0627\\u0644)";
+	const genericGuestLabel =
+		"(?:guests?|persons?|people|pax|individuals?|pilgrims?|umrah\\s+guests?|voyageurs?|\\u0627\\u0634\\u062e\\u0627\\u0635|\\u0623\\u0634\\u062e\\u0627\\u0635|\\u0627\\u0641\\u0631\\u0627\\u062f|\\u0623\\u0641\\u0631\\u0627\\u062f|\\u0646\\u0632\\u0644\\u0627\\u0621|\\u0636\\u064a\\u0648\\u0641|\\u0645\\u0639\\u062a\\u0645\\u0631\\u064a\\u0646|\\u0645\\u0639\\u062a\\u0645\\u0631|\\u0632\\u0648\\u0627\\u0631)";
 	const adultMatch =
 		text.match(new RegExp(`(?:^|\\s|\\u0648)(\\d{1,3})\\s*${adultLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
 		text.match(new RegExp(`${adultLabel}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+	const genericGuestMatch =
+		text.match(new RegExp(`(?:^|\\s|\\u0648)(\\d{1,3})\\s*${genericGuestLabel}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		text.match(new RegExp(`${genericGuestLabel}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
 	const childUnderAgeTrailingMatch = text.match(
 		new RegExp(`${childLabel}.{0,24}(?:under|below|less\\s+than|younger\\s+than|moins\\s+de|moins\\s+que|\\u062a\\u062d\\u062a|\\u0623\\u0642\\u0644|\\u0627\\u0642\\u0644|\\u062f\\u0648\\u0646).{0,12}\\d{1,2}\\s*(?:\\u0633\\u0646\\u0629|\\u0633\\u0646\\u0647|\\u0633\\u0646\\u064a\\u0646|\\u0639\\u0627\\u0645|\\u0639\\u0627\\u0645\\u0627|years?|yrs?|y\\/?o)?\\s+(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu")
 	);
@@ -5060,6 +5107,7 @@ function explicitGuestCountFactsFromText(value = "") {
 	const facts = {};
 	const singularFacts = unnumberedSingularGuestCountFactsFromText(value);
 	if (adultMatch?.[1]) facts.adults = Number(adultMatch[1]);
+	else if (genericGuestMatch?.[1]) facts.adults = Number(genericGuestMatch[1]);
 	if (childUnderAgeTrailingMatch?.[1]) facts.children = Number(childUnderAgeTrailingMatch[1]);
 	else if (childMatch?.[1]) facts.children = Number(childMatch[1]);
 	if (!Number.isFinite(Number(facts.adults)) && singularFacts.adults) {
@@ -10855,6 +10903,29 @@ function quoteReplyRoomCountConflictsWithTool(reply = "", toolResult = {}) {
 	if (toolResult?.tool !== "get_quote" || toolResult?.available !== true) return false;
 	const expected = Number(toolResult.totalRooms || quoteRoomCount(toolResult.quote) || 0) || 0;
 	if (!expected) return false;
+	const expectedSelections = normalizeRoomSelections(
+		toolResult.roomSelections || toolResult.quote?.roomSelections
+	);
+	if (expectedSelections.length) {
+		const roomishReply = String(reply || "")
+			.split(/\r?\n|[.;]+/)
+			.map((line) => line.trim())
+			.filter((line) =>
+				/(?:rooms?|room\s*\(s\)|suite|suites?|single|double|twin|triple|quad|quadruple|family|quintuple|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647|\u062c\u0646\u0627\u062d)/iu.test(
+					line
+				)
+			)
+			.join("\n");
+		const replySelections = normalizeRoomSelections(
+			extractRoomSelectionsFromText(roomishReply)
+		);
+		if (
+			replySelections.length &&
+			roomSelectionKey(replySelections) !== roomSelectionKey(expectedSelections)
+		) {
+			return true;
+		}
+	}
 	const text = normalizeDigits(String(reply || ""))
 		.replace(/[^\p{L}\p{N}\s:×x\-]/gu, " ")
 		.replace(/\s+/g, " ")
@@ -17461,6 +17532,24 @@ async function planTurn(io, supportCaseOrId) {
 			factQuestion: contextualHotelFactQuestion,
 			typingStartedAt,
 		});
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsApartmentUnit(latestText) &&
+		!hotelOffersApartmentUnits(hotel)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(
+			io,
+			sc,
+			buildNoApartmentClarificationMessage(sc, hotel, known, latestText),
+			{
+				latestGuest,
+				known,
+				clientAction: "hotel_rooms_only_clarification",
+			}
+		);
 	}
 	if (shouldUseBrainFirstOrchestrator()) {
 		logTurnStage(key, "brain_first_handoff");
