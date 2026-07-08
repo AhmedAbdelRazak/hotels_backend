@@ -577,3 +577,77 @@ Sync points:
 Future-us clue:
 
 - If a guest says an online Jannat Booking reservation is one day early, check the rendered public receipt/payment/dashboard page first before changing reservation data. The DB may already be correct while the display layer is shifting UTC-midnight hotel dates.
+
+### 2026-07-08 Confirmed Bus Fact Reply Addendum
+
+Follow-up case reviewed:
+
+- Support case: `6a4ed970a00e977f5b1a0f0d`.
+- Hotel: Zad Ajyad / `6a40b6a1a6efe70450536038`.
+- Guest completed a normal booking-style conversation for a double room:
+  - check-in: `2026-07-19`
+  - checkout: `2026-07-25`
+  - nights: `6`
+  - guests: `2 adults`
+  - quoted total: `450 SAR`
+- The pricing and review path was not the failure in this case.
+- The guest then asked whether the hotel has buses/transport to the Haram.
+
+Production hotel facts:
+
+- `hasBusService: true`
+- `busDetails: "يوفر الفندق باصًا خاصًا لنقل الضيوف إلى موقف الشهداء لتسهيل الوصول والتنقل بكل راحة."`
+- Distance facts were also present:
+  - walking to Haram: `15 min`
+  - driving to Haram: `2 min`
+
+Failure observed:
+
+- The brain answered vaguely instead of using the confirmed hotel fact:
+  - it said transport differs by daily operation and asked for stay date/time.
+  - after the guest objected, it said it could not confirm bus existence without checking the current hotel policy.
+- This was frustrating for the guest because the hotel profile already had a clear bus fact.
+- PM2 logs showed normal support-case API traffic and no backend crash or exception. This was a reply-quality/fact-grounding issue, not an infrastructure failure.
+
+Root cause:
+
+- Existing hotel-fact correction logic could catch some hard contradictions and overpromises, but it did not catch this softer Arabic deferral style:
+  - `لا أقدر أؤكد لك وجوده الآن...`
+  - `خدمة النقل تختلف حسب التشغيل اليومي...`
+- The first bad answer was not a direct "no bus" contradiction, so it slipped through even though confirmed `busDetails` existed.
+
+Fix applied:
+
+- `aiagent/core/orchestrator.js`
+  - Expanded Arabic deferral detection for known hotel facts, including `لا أقدر أؤكد`, `ما أقدر`, and `مش أقدر` styles.
+  - Added a narrow confirmed-bus-fact correction check.
+  - When `hasBusService`/`busDetails` confirm bus service and the guest asks about bus/transport, vague deferrals are rejected.
+  - When `busDetails` names a concrete stop such as `الشهداء`/Martyrs/Shuhada, the final answer must include that detail instead of giving a generic transport answer.
+
+Brain-first safety note:
+
+- This is not a legacy-orchestrator fallback and not a new external brain.
+- The brain still decides the response and owns the conversation.
+- The added check only rejects an unsafe/vague final answer when it fails to use already-known hotel facts, then asks the same brain path to repair the answer from those facts.
+- No pricing, availability, reservation creation, payment, or guest-detail extraction logic was changed.
+
+Validation:
+
+- Added regression: `Confirmed bus facts reject vague transport deferrals`.
+- The regression uses the exact failure pattern from this case and verifies:
+  - vague "daily operation / send date or time" transport answers are corrected.
+  - Arabic "I cannot confirm now" deferrals are corrected.
+  - a good answer that confirms the bus and mentions `الشهداء` passes.
+- Local `npm run test:chatbot` passed with `86` checks.
+- Production `npm run test:chatbot` passed with `86` checks.
+- Production `/api/aiagent/health` returned `ok=true`, OpenAI enabled, model `gpt-5.4-mini`, and all reasoning effort values at `medium`.
+- Production PM2 `hotels-backend` restarted and is online.
+
+Sync points:
+
+- Code hardening commit: `38e2ccb881c100f2e7ca377fc92c77000d3df407`
+- After the documentation addendum is committed, verify local VS Code workspace, GitHub `origin/master`, and production `/home/ahmedadmin/Hotels/hotels_backend` are all on the same final HEAD.
+
+Future-us clue:
+
+- If a hotel profile has confirmed service facts, especially bus, meals, location, or payment facts, the brain should answer from those facts confidently. For Zad Ajyad bus questions, the expected answer is not "send me your stay date/time"; it should confirm the hotel provides a bus/private transport to `موقف الشهداء` while avoiding guarantees about exact operating times unless those times are present in hotel facts.
