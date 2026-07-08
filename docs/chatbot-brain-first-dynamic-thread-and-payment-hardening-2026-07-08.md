@@ -509,3 +509,71 @@ Validation:
 - Local `npm run test:chatbot` passed with `84` checks.
 - Production `npm run test:chatbot` passed with `84` checks after PM2 restart.
 - Production focused live scenario 11 passed with marker `codex-prod-909-contact-s11-20260708`; cleanup reported `remainingCases=0` and `remainingReservations=0`.
+
+### 2026-07-08 Public Reservation Date Display + Existing-Reservation Support Addendum
+
+Follow-up case reviewed:
+
+- Contact-page case for confirmation `8602335422`.
+- Guest said the public reservation showed arrival/departure as `22` to `26`, while the requested stay was `23` to `27`.
+- Production DB reservation was correct:
+  - `booking_source`: `online jannat booking`
+  - hotel: `zad ajyad`
+  - check-in: `2026-07-23`
+  - checkout: `2026-07-27`
+  - stay dates: `2026-07-23`, `2026-07-24`, `2026-07-25`, `2026-07-26`
+  - status: `confirmed`
+  - pending confirmation is client-visible confirmed and inventory was blocked
+- No admin change log or reservation audit log entries showed a manual date mutation.
+
+Root cause:
+
+- The public SSR receipt and backend PDF receipt formatted hotel stay dates with `new Date(value).toLocaleDateString(...)` without forcing date-only/UTC display.
+- The API returned correct UTC-midnight dates such as `2026-07-23T00:00:00.000Z`, but the live SSR server rendered that as `Jul 22, 2026` in its local timezone.
+- The guest was therefore seeing a display bug, not a bad reservation record.
+
+Fixes applied:
+
+- `jannatbooking_ssr/app/single-reservation/[confirmation]/page.js`
+  - Guest receipt dates now render with `Intl.DateTimeFormat(..., { timeZone: "UTC" })`.
+  - Night count now compares UTC calendar days.
+- `jannatbooking_ssr/components/ClientPaymentLinkClient.js`
+  - Gregorian and Hijri payment-link reservation date display now uses UTC.
+- `jannatbooking_ssr/components/DashboardClient.js`
+  - Guest dashboard reservation date display now uses UTC.
+- `hotels_backend/controllers/assets.js`
+  - PDF receipt check-in/check-out display now uses UTC date-only formatting.
+- `hotels_backend/aiagent/jannatSupport/brain.js`
+  - The brain now receives contact-page `inquiryDetails`, including metadata such as `[Reservation Reference: ...]`.
+  - The prompt now tells the brain that existing reservation corrections, cancellations, payment/receipt issues, arrival coordination, and escalation are platform support issues, not new pricing/availability leads.
+  - This is intentionally brain-first: no new external mini-router was added to decide for the brain.
+
+Support-response finding:
+
+- The old support reply was wrong for this case. The brain summary understood the guest was asking to correct reservation dates, but the Jannat support flow still produced the generic pricing-detail question because the contact form topic was `room_availability`.
+- After this enhancement, the brain has the reservation-reference context and explicit instruction to reply as existing-reservation support instead of asking for room type/guest count.
+
+Validation:
+
+- Local `jannatbooking_ssr` `npm run build` passed.
+- Local `hotels_backend` `npm run test:chatbot` passed with `85` checks.
+- Production `jannatbooking_ssr` `npm run build` passed.
+- Production `hotels_backend` `npm run test:chatbot` passed with `85` checks.
+- Production `https://jannatbooking.com/single-reservation/8602335422?codexVerify=20260708` returned:
+  - contains `Jul 23, 2026`
+  - contains `Jul 27, 2026`
+  - does not contain `Jul 22, 2026`
+  - does not contain `Jul 26, 2026`
+- Production `/api/aiagent/health` returned `ok=true`, OpenAI enabled, and all reasoning effort values at `medium`.
+
+Sync points:
+
+- `jannatbooking_ssr` commit: `aeed7f379e1a220e95076f7d6fdbf15e555dd50c`
+- `hotels_backend` commit: `e44e7c9ac814230c37ce6e89528212eb85a4c8d5`
+- PM2 services restarted and online:
+  - `jannat-ssr`
+  - `hotels-backend`
+
+Future-us clue:
+
+- If a guest says an online Jannat Booking reservation is one day early, check the rendered public receipt/payment/dashboard page first before changing reservation data. The DB may already be correct while the display layer is shifting UTC-midnight hotel dates.
