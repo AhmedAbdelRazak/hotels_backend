@@ -8690,6 +8690,14 @@ async function sendHotelFactReplyFromOpenAI({
 				answerMode: hotelFactAnswerMode(fallbackGuest),
 				hotelFacts: compactHotelFacts(hotel),
 				suggestedAnswer: authoritativeReply,
+				arrivalCoordination: latestGuestAsksArrivalDeparturePolicy(fallbackGuest)
+					? {
+							contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+							whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+							guidance:
+								"Include this contact when the arrival/timing request needs live reception coordination or approval.",
+					  }
+					: null,
 				postFactBookingBridge,
 				bookingCheckpointWillBeAppended: Boolean(checkpointSuffix),
 				instruction:
@@ -8733,6 +8741,14 @@ async function sendHotelFactReplyFromOpenAI({
 			needsPriceGuidance,
 			hotelFacts: compactHotelFacts(hotel),
 			suggestedAnswer: fallback,
+			arrivalCoordination: latestGuestAsksArrivalDeparturePolicy(fallbackGuest)
+				? {
+						contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+						whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+						guidance:
+							"Include this contact when the arrival/timing request needs live reception coordination or approval.",
+				  }
+				: null,
 			postFactBookingBridge,
 			bookingCheckpointWillBeAppended: Boolean(checkpointSuffix),
 			instruction:
@@ -9488,8 +9504,21 @@ function compactHotelServiceFacts(source = {}) {
 		},
 		cancellationAndChanges: {
 			contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+			whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
 			guidance:
 				"Use policyQA for cancellation/refund policy answers when present. For official cancellation or reservation status changes, direct the guest to WhatsApp/phone support instead of claiming the booking was canceled in chat.",
+		},
+		humanSupportContact: {
+			contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+			whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+			guidance:
+				"When the guest asks for a human, manager, reception, escalation, or live operational coordination, include this phone and WhatsApp link in the reply.",
+		},
+		arrivalCoordination: {
+			contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+			whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+			guidance:
+				"For very early arrival, late arrival, parking-on-arrival, or operational timing questions, answer any known hotel policy first. If live coordination or reception approval is needed, include this phone and WhatsApp link.",
 		},
 		payment: {
 			payOnArrivalAccepted: true,
@@ -9818,6 +9847,8 @@ function orchestratorContractPrompt() {
 		'- Use action="submit_reservation" only after the guest confirms the official server review or presses the reservation button.',
 		'- Use action="lookup_reservation", "update_reservation", or "cancel_reservation" only for existing-reservation requests.',
 		'- Use action="escalate" only for human-needed cases, and "close_case" only when the guest is clearly finished.',
+		`- If you choose action="escalate", or the guest explicitly asks for a human, manager, reception, or escalation, your customer-facing reply must include WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} and WhatsApp link ${RESERVATION_CHANGE_CONTACT_WHATSAPP}. Say the team will help or review the issue; do not escalate with a contactless reply.`,
+		`- For arrival coordination such as very early arrival, late arrival, "I am going to the hotel at 4:00 AM", parking-on-arrival coordination, or any operational request that cannot be fully guaranteed from Hotel facts, answer the known policy first and include WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} plus ${RESERVATION_CHANGE_CONTACT_WHATSAPP} for live coordination. If a human decision is needed, use action="escalate".`,
 		"- Required booking facts before official review: checkinISO, checkoutISO, roomTypeKey or roomSelections, a server quote, confirmed fullName, confirmed phone, confirmed nationality, and adults. Email is optional.",
 		"- If the guest asks for the booking process, next step, or how to book, do not restart with generic steps when Known facts already contain dates, room selection, quote, or unavailable quote context. Acknowledge what is already known, then state the exact next action or ask only for the missing required fields.",
 		"- The brain owns missing-field decisions. Put only genuinely needed field keys in memory.missingFields. If the guest already answered a field in the transcript or Known facts, do not ask again.",
@@ -10435,6 +10466,8 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If the guest asks "in Madinah/city?" or similar after a Makkah hotel location, treat it as city clarification. Say clearly that this hotel is in Makkah and no confirmed Madinah/Taif branch is shown, then offer to help with the Makkah stay. Do not resend the full map/address unless the guest explicitly asks for map/address again.`,
 		`If the latest guest message is a short affirmative such as "yes", "ok", "\u0627\u064a", "\u0627\u0647", or "\u0646\u0639\u0645", interpret it in the context of the immediately previous unresolved guest question. If the latest message is only appreciation, excitement, thanks, laughter, or small talk after a hotel-fact answer, do not repeat the hotel fact; acknowledge warmly and offer the next useful help, such as continuing the booking or asking whether they need anything else.`,
 		`If the guest asks to cancel a reservation or change its status to canceled, return action="cancel_reservation". Never tell the guest the reservation was canceled in chat; the official cancellation/status-change path is WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
+		`If you choose action="escalate", or the guest explicitly asks for a human, manager, reception, or escalation, include the exact WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} and WhatsApp link ${RESERVATION_CHANGE_CONTACT_WHATSAPP} in your reply. Do not escalate with only "I will pass this to the team" and no contact details.`,
+		`For arrival coordination such as very early arrival, late arrival, "I am going to the hotel at 4:00 AM", parking-on-arrival coordination, or any operational request that cannot be fully guaranteed from Hotel facts, answer any known policy first and include ${RESERVATION_CHANGE_CONTACT_PHONE} plus ${RESERVATION_CHANGE_CONTACT_WHATSAPP} for live coordination. If a human decision is needed, use action="escalate".`,
 		`If the guest asks to find, view, or check an existing reservation and explicitly gives a reservation/booking/confirmation/reference number, return action="lookup_reservation". Do not use this action for a normal phone number unless the guest explicitly says it is the reservation/booking/confirmation/reference number.`,
 		`If Hotel facts say propertyType is hotel and rooms do not list apartments/units, never offer an apartment or say a two-bedroom apartment/unit is available. Explain briefly that this property provides hotel rooms, then offer the closest hotel-room setup if the guest mentioned room types such as double plus four-bed/quad.`,
 		`If the guest asks for a map, address, location, directions, or Google Maps, answer from Hotel facts and include Hotel facts.location.googleMapsUrl when present. If coordinates are present, treat them as authoritative for the map link.`,
@@ -13476,6 +13509,38 @@ function buildSupportContactNumberMessage(sc = {}, known = {}, latestGuest = nul
 	].join("\n");
 }
 
+function humanEscalationContactToolResult(reason = "", draftReply = "") {
+	return {
+		tool: "human_escalation_contact",
+		ok: true,
+		code: "human_contact_required",
+		reason: cleanDisplayString(reason, 160),
+		contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+		whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+		brainDraftReply: cleanDisplayString(draftReply, 1000),
+		instruction:
+			"The guest needs human/reception follow-up. Write the final customer-facing reply from OpenAI only. Be warm and professional, say the team will help or review the issue, and include the exact contactPhone and whatsapp link. Do not invent another contact method.",
+	};
+}
+
+function buildHumanEscalationContactMessage(sc = {}, known = {}, latestGuest = null, reason = "") {
+	const languageCode = activeLanguageCode(sc, known);
+	const latestText = String(latestGuest?.message || "");
+	const ar = /^ar\b/i.test(languageCode) || /[\u0600-\u06FF]/.test(latestText);
+	if (ar) {
+		return [
+			`\u0623\u0641\u0647\u0645\u0643 ${arabicGuestAddress(sc, known, latestText)}\u060c \u0633\u0623\u062d\u0648\u0644 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 \u0644\u0623\u062d\u062f \u0623\u0639\u0636\u0627\u0621 \u0627\u0644\u0641\u0631\u064a\u0642 \u0644\u0645\u0631\u0627\u062c\u0639\u062a\u0647\u0627 \u0645\u0639\u0643 \u0628\u062f\u0642\u0629.`,
+			`\u0644\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0627\u0644\u0623\u0633\u0631\u0639\u060c \u064a\u0645\u0643\u0646\u0643 \u0645\u0631\u0627\u0633\u0644\u062a\u0646\u0627 \u0648\u0627\u062a\u0633\u0627\u0628 \u0623\u0648 \u0627\u0644\u0627\u062a\u0635\u0627\u0644 \u0639\u0644\u0649: ${RESERVATION_CHANGE_CONTACT_PHONE}`,
+			`\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+		].join("\n");
+	}
+	return [
+		`${guestDisplayName(sc)}, I understand. I will pass this conversation to a team member so they can help you properly.`,
+		`For the fastest follow-up, please WhatsApp or call us at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
+		`WhatsApp link: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+	].join("\n");
+}
+
 function latestGuestAsksPayAtHotel(value = "") {
 	const raw = String(value || "");
 	const text = normalizeIntentSearchText(raw).toLowerCase();
@@ -14811,7 +14876,7 @@ async function handleQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = nu
 	});
 }
 
-async function handoffToHuman(io, sc = {}, known = {}, latestGuest = null, reason = "") {
+async function unusedHandoffToHumanBeforeContactPolicy(io, sc = {}, known = {}, latestGuest = null, reason = "") {
 	const languageCode = activeLanguageCode(sc, known);
 	const text = /^ar\b/i.test(languageCode)
 		? "أفهمك، سأحول المحادثة الآن لأحد أعضاء الفريق حتى يساعدك بشكل أدق."
@@ -14819,6 +14884,17 @@ async function handoffToHuman(io, sc = {}, known = {}, latestGuest = null, reaso
 	return sendAiMessage(io, sc, text, {
 		latestGuest,
 		known,
+		handoff: true,
+		handoffReason: reason || "ai_escalated",
+	});
+}
+
+async function handoffToHuman(io, sc = {}, known = {}, latestGuest = null, reason = "") {
+	const text = buildHumanEscalationContactMessage(sc, known, latestGuest, reason);
+	return sendAiMessage(io, sc, text, {
+		latestGuest,
+		known,
+		clientAction: "human_escalation_contact",
 		handoff: true,
 		handoffReason: reason || "ai_escalated",
 	});
@@ -16488,6 +16564,9 @@ async function askCompactToolWriter({
 					toolResult?.tool === "submit_reservation" && toolResult?.ok === true
 						? "This is the final reservation-created confirmation. Do not write a vague progress update. State that the reservation was created/confirmed, include every confirmation number, every reservation/details/receipt link, and every payment link from toolResult exactly. If payment links are present, politely recommend using them, even for a partial payment/deposit when available, while making clear online payment is recommended but not mandatory."
 						: "",
+					toolResult?.tool === "human_escalation_contact"
+						? "This is a human/reception follow-up reply. Say the team will help or review the issue, and include toolResult.contactPhone and toolResult.whatsapp exactly. If toolResult.brainDraftReply is useful, preserve its tone, but do not omit the contact details."
+						: "",
 					writerToolResult.requiredConfirmationLines?.length
 						? "toolResult.requiredConfirmationLines is mandatory. Copy every line from it exactly as plain text in the customer reply. Do not omit, paraphrase, shorten, or replace any confirmation number or URL."
 						: "",
@@ -16505,6 +16584,9 @@ async function askCompactToolWriter({
 						: "",
 					toolResult?.tool === "hotel_fact" && toolResult?.postFactBookingBridge
 						? "Include toolResult.postFactBookingBridge at most once, after the factual answer. Do not add a second call-to-action."
+						: "",
+					toolResult?.tool === "hotel_fact" && toolResult?.arrivalCoordination
+						? "For arrival/early check-in/late arrival coordination, answer the known policy first. If live reception coordination or approval is needed, include toolResult.arrivalCoordination.contactPhone and toolResult.arrivalCoordination.whatsapp exactly."
 						: "",
 					toolResult?.tool === "hotel_fact"
 						? "For location/map answers, put the Google Maps URL on its own line, the address on its own line, and distance/transport details on separate short lines."
@@ -16818,6 +16900,8 @@ async function sendBrainToolReplyFromOpenAI({
 	requirePolicy = false,
 	preserveFallbackNumbers = true,
 	replySuffix = "",
+	handoff = false,
+	handoffReason = "",
 } = {}) {
 	const caseId = caseIdText(sc);
 	let decision = null;
@@ -16920,6 +17004,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous reply was not sent because it used an emoji or decorative symbol. Return the same customer-facing answer in a professional reception style without emojis, icons, or decorative symbols. Preserve all facts, prices, dates, links, and buttons."
 				: validation === "repetitive_reply"
 				? "Your previous reply was not sent because it was too similar to a recent assistant message in this same chat. Rewrite it in a fresh, human reception style while preserving the exact facts, prices, dates, room counts, confirmation numbers, links, and contact details from toolResult. Do not add extra questions; keep the same action and next step."
+				: validation === "required_contact_missing"
+				? "Your previous reply was not sent because it omitted the required human-support contact. Return a corrected customer-facing reply from OpenAI only. Include toolResult.contactPhone and toolResult.whatsapp exactly, and keep the tone warm and professional."
 				: "Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.";
 		return askOpenAI({
 			sc,
@@ -17161,8 +17247,12 @@ async function sendBrainToolReplyFromOpenAI({
 		) {
 			return "repetitive_reply";
 		}
+		const replyMustIncludeContact =
+			requireContact ||
+			decision?.action === "escalate" ||
+			toolResult?.tool === "human_escalation_contact";
 		if (
-			requireContact &&
+			replyMustIncludeContact &&
 			(!text.includes(RESERVATION_CHANGE_CONTACT_PHONE) ||
 				!text.includes(RESERVATION_CHANGE_CONTACT_WHATSAPP))
 		) {
@@ -17289,6 +17379,7 @@ async function sendBrainToolReplyFromOpenAI({
 		return sendAiMessage(io, sc, reply, {
 			latestGuest,
 			known,
+			clientAction: "human_escalation_contact",
 			handoff: true,
 			handoffReason: decision.reason || "ai_escalated",
 			source: "openai",
@@ -17319,6 +17410,8 @@ async function sendBrainToolReplyFromOpenAI({
 		clientAction,
 		quickReplies,
 		source: "openai",
+		handoff,
+		handoffReason: handoff ? handoffReason || "ai_escalated" : undefined,
 	});
 }
 
@@ -17630,6 +17723,34 @@ async function handleBrainCancel(io, sc = {}, hotel = {}, known = {}, latestGues
 		typingStartedAt,
 		requireContact: true,
 		requirePolicy: true,
+	});
+}
+
+async function handleBrainEscalation(
+	io,
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null,
+	reason = "",
+	typingStartedAt = 0,
+	draftReply = ""
+) {
+	const fallback = buildHumanEscalationContactMessage(sc, known, latestGuest, reason);
+	return sendBrainToolReplyFromOpenAI({
+		io,
+		sc,
+		hotel,
+		known,
+		latestGuest,
+		toolResult: humanEscalationContactToolResult(reason || "ai_escalated", draftReply),
+		clientAction: "human_escalation_contact",
+		fallback,
+		typingStartedAt,
+		requireContact: true,
+		preserveFallbackNumbers: false,
+		handoff: true,
+		handoffReason: reason || "ai_escalated",
 	});
 }
 
@@ -18771,22 +18892,16 @@ async function executeBrainFirstDecision({
 	await saveKnownFacts(key, nextKnown);
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
 	if (nextDecision.action === "escalate") {
-		await waitForTypingMinimum(typingStartedAt);
-		if (!nextDecision.reply) {
-			console.error("[aiagent] escalation blocked: OpenAI reply required", {
-				caseId: key,
-				reason: nextDecision.reason || "",
-			});
-			await emitTyping(io, sc, false);
-			return (await getSupportCaseById(key).catch(() => null)) || sc;
-		}
-		return sendAiMessage(io, sc, nextDecision.reply, {
+		return handleBrainEscalation(
+			io,
+			sc,
+			hotel,
+			nextKnown,
 			latestGuest,
-			known: nextKnown,
-			handoff: true,
-			handoffReason: nextDecision.reason || "ai_escalated",
-			source: "openai",
-		});
+			nextDecision.reason || "ai_escalated",
+			typingStartedAt,
+			nextDecision.reply || ""
+		);
 	}
 	if (nextDecision.action === "close_case") {
 		await waitForTypingMinimum(typingStartedAt);
@@ -21494,6 +21609,8 @@ const exportedOrchestrator = {
 		latestGuestRequestsReservationCancel,
 		latestGuestAsksSupportContactNumber,
 		buildSupportContactNumberMessage,
+		humanEscalationContactToolResult,
+		buildHumanEscalationContactMessage,
 		latestGuestAsksRoomPhotos,
 		latestGuestAsksPayAtHotel,
 		buildPostConfirmationPayAtHotelMessage,

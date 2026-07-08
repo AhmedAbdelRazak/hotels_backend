@@ -1262,6 +1262,54 @@ check("Support contact number is deterministic in Arabic and English", () => {
 	assert(photosReply.includes("\u0635\u0648\u0631 \u0627\u0644\u063a\u0631\u0641"));
 });
 
+check("Brain escalation and arrival contract requires 909 WhatsApp contact", () => {
+	const prompt = orchestrator.orchestratorContractPrompt();
+	assert(prompt.includes('+1 (909) 222-3374'));
+	assert(prompt.includes("https://wa.me/19092223374"));
+	assert(prompt.includes('action="escalate"'));
+	assert(/arrival coordination/i.test(prompt));
+	assert(/4:00 AM/i.test(prompt));
+});
+
+check("Human escalation contact tool facts expose exact 909 phone and WhatsApp", () => {
+	const toolResult = orchestrator.humanEscalationContactToolResult(
+		"guest_requested_human",
+		"I will ask the team to help."
+	);
+	assert.strictEqual(toolResult.tool, "human_escalation_contact");
+	assert.strictEqual(toolResult.contactPhone, "+1 (909) 222-3374");
+	assert.strictEqual(toolResult.whatsapp, "https://wa.me/19092223374");
+	assert(toolResult.instruction.includes("OpenAI"));
+	assert(toolResult.instruction.includes("contactPhone"));
+	assert(toolResult.brainDraftReply.includes("team"));
+});
+
+check("Human escalation fallback wording includes 909 phone and WhatsApp", () => {
+	const english = orchestrator.buildHumanEscalationContactMessage(
+		{ preferredLanguageCode: "en", displayName1: "Aisha" },
+		{},
+		guest("Can I speak to a human?")
+	);
+	assert(english.includes("+1 (909) 222-3374"));
+	assert(english.includes("https://wa.me/19092223374"));
+	assert(/team member|team/i.test(english));
+	const arabic = orchestrator.buildHumanEscalationContactMessage(
+		{ preferredLanguageCode: "ar", displayName1: "Ahmed" },
+		{},
+		guest("\u0627\u062d\u062a\u0627\u062c \u0627\u0643\u0644\u0645 \u0645\u0648\u0638\u0641")
+	);
+	assert(arabic.includes("+1 (909) 222-3374"));
+	assert(arabic.includes("https://wa.me/19092223374"));
+});
+
+check("Hotel facts expose human support contact for arrival coordination", () => {
+	const facts = orchestrator.compactHotelFacts(hotel);
+	assert.strictEqual(facts.serviceFacts.humanSupportContact.contactPhone, "+1 (909) 222-3374");
+	assert.strictEqual(facts.serviceFacts.humanSupportContact.whatsapp, "https://wa.me/19092223374");
+	assert.strictEqual(facts.serviceFacts.arrivalCoordination.contactPhone, "+1 (909) 222-3374");
+	assert(/early arrival|late arrival|operational timing/i.test(facts.serviceFacts.arrivalCoordination.guidance));
+});
+
 check("Post-confirmation pay-at-hotel questions get a clear confirmation answer", () => {
 	assert.strictEqual(
 		orchestrator.latestGuestAsksPayAtHotel("\u064a\u0646\u0641\u0639 \u0627\u062f\u0641\u0639 \u0641\u064a \u0627\u0644\u0641\u0646\u062f\u0642\u061f"),

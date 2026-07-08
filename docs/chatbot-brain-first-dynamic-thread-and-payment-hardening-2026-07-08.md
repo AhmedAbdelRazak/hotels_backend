@@ -392,7 +392,7 @@ The harness also now globally checks:
 
 ### Validation Performed
 
-- `npm run test:chatbot` passed locally and in production with `80` regression checks after the final production hardening patches.
+- `npm run test:chatbot` passed locally and in production with `84` regression checks after the final production hardening patches and the 909 contact enhancement.
 - Targeted live scenarios passed after the fixes:
   - Scenario 1: Arabic distance answer with a natural sales bridge.
   - Scenario 9: official review confirmation reaches submit reservation after mojibake repair.
@@ -476,10 +476,34 @@ The production push surfaced two useful final lessons that were fixed without re
 Future-us clues:
 
 - Meaningful live suite count remains `34` back-and-forth cases.
-- Regression suite count is now `80`.
+- Regression suite count is now `84`.
 - Important production markers:
   - `codex-proddeploy-brainfirst-20260708-s10-payment-b`
   - `codex-proddeploy-brainfirst-20260708-s32-fixed`
   - `codex-proddeploy-brainfirst-20260708-s28to34-b`
   - `codex-proddeploy-brainfirst-20260708-s29-no-generic-number-check`
 - The next best confidence booster is still one uninterrupted production-connected `1-34` run using a fresh marker, after a quiet traffic window.
+
+### 2026-07-08 909 Contact Enhancement Addendum
+
+This follow-up keeps the same brain-first architecture while making human/reception contact handling clearer and safer.
+
+- The brain prompt now explicitly says that if the brain chooses `action="escalate"`, or the guest asks for a human, manager, reception, or escalation, the guest-facing reply must include:
+  - `+1 (909) 222-3374`
+  - `https://wa.me/19092223374`
+- The prompt also calls out arrival/operational coordination, including very early arrival such as "I am going to the hotel at 4:00 AM". The brain should answer any known hotel policy first, then include the 909 WhatsApp/call contact when live reception coordination or approval is needed.
+- The normal brain-first escalation path now runs through an OpenAI writer tool result named `human_escalation_contact`. The tool result gives the brain the exact phone/link and asks OpenAI to write the final customer-facing message.
+- The existing tool-reply validation now treats `required_contact_missing` as a repairable OpenAI-writing issue. If a brain-authored escalation/tool reply omits the required phone or WhatsApp link, the repair prompt asks OpenAI to rewrite it with the exact contact facts.
+- The older internal human-handoff helper is now also contact-complete, so rare operational handoff paths do not leave the guest without the 909 number.
+- Hotel facts now expose `serviceFacts.humanSupportContact` and `serviceFacts.arrivalCoordination`, both carrying the same 909 phone and WhatsApp link for the brain.
+
+Focused regression checks added:
+
+- Brain escalation and arrival contract requires 909 WhatsApp contact.
+- Human escalation contact tool facts expose exact 909 phone and WhatsApp.
+- Human escalation fallback wording includes 909 phone and WhatsApp.
+- Hotel facts expose human support contact for arrival coordination.
+
+Validation:
+
+- Local `npm run test:chatbot` passed with `84` checks.
