@@ -8969,10 +8969,35 @@ function replyDefersKnownHotelFact(reply = "") {
 		/\b(?:cannot|can't|unable to)\s+confirm\b|\bnot\s+(?:sure|confirmed|clear)\b/i.test(
 			text
 		) ||
-		/(?:\u0623\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0646\u062d\u062a\u0627\u062c|\u0644\u0627\u0632\u0645).{0,40}(?:\u0623?\u062a\u062d\u0642\u0642|\u0623?\u062a\u0623\u0643\u062f|\u0627\u062a\u0627\u0643\u062f|\u0623?\u0631\u0627\u062c\u0639|\u0623?\u0634\u064a\u0643)|(?:\u0633\u0623|\u0631\u0627\u062d|\u0647)?\s*(?:\u0623?\u062a\u062d\u0642\u0642|\u0623?\u062a\u0623\u0643\u062f|\u0623?\u0631\u0627\u062c\u0639|\u0623?\u0634\u064a\u0643).{0,40}(?:\u0645\u0646|\u0645\u0639)\s*(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0641\u0631\u064a\u0642)|(?:\u0644\u0627\s+\u0623?\u0633\u062a\u0637\u064a\u0639|\u0644\u0627\s+\u064a\u0645\u0643\u0646\u0646\u064a).{0,20}\u062a\u0623\u0643\u064a\u062f|\u063a\u064a\u0631\s+(?:\u0645\u0624\u0643\u062f|\u0648\u0627\u0636\u062d)/iu.test(
+		/(?:\u0623\u062d\u062a\u0627\u062c|\u0627\u062d\u062a\u0627\u062c|\u0646\u062d\u062a\u0627\u062c|\u0644\u0627\u0632\u0645).{0,40}(?:\u0623?\u062a\u062d\u0642\u0642|\u0623?\u062a\u0623\u0643\u062f|\u0627\u062a\u0627\u0643\u062f|\u0623?\u0631\u0627\u062c\u0639|\u0623?\u0634\u064a\u0643)|(?:\u0633\u0623|\u0631\u0627\u062d|\u0647)?\s*(?:\u0623?\u062a\u062d\u0642\u0642|\u0623?\u062a\u0623\u0643\u062f|\u0623?\u0631\u0627\u062c\u0639|\u0623?\u0634\u064a\u0643).{0,40}(?:\u0645\u0646|\u0645\u0639)\s*(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0641\u0631\u064a\u0642)|(?:\u0644\u0627\s+\u0623?\u0633\u062a\u0637\u064a\u0639|\u0644\u0627\s+\u064a\u0645\u0643\u0646\u0646\u064a|\u0644\u0627\s+\u0623?\u0642\u062f\u0631|\u0645\u0627\s+\u0623?\u0642\u062f\u0631|\u0645\u0634\s+\u0623?\u0642\u062f\u0631).{0,30}(?:\u0623?\u0624\u0643\u062f|\u0627\u0643\u062f|\u0623?\u062a\u0623\u0643\u062f|\u0627\u062a\u0623\u0643\u062f|\u0627\u062a\u0627\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)|\u063a\u064a\u0631\s+(?:\u0645\u0624\u0643\u062f|\u0648\u0627\u0636\u062d)/iu.test(
 			text
 		)
 	);
+}
+
+function replyOmitsConfirmedBusDetails(reply = "", hotel = {}) {
+	const details = serviceFactDetailsForReply(hotel?.busDetails, { allowArabic: true });
+	if (!(hotel?.hasBusService === true || details)) return false;
+	const text = normalizeDigits(String(reply || ""))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return true;
+	const confirmsService =
+		/\b(?:yes|provides|offers|available|bus|shuttle|transport|transfer)\b/i.test(text) ||
+		/(?:\u0646\u0639\u0645|\u064a\u0648\u062c\u062f|\u062a\u0648\u062c\u062f|\u064a\u062a\u0648\u0641\u0631|\u062a\u062a\u0648\u0641\u0631|\u064a\u0648\u0641\u0631|\u0628\u0627\u0635|\u0623?\u0648\u062a\u0648\u0628\u064a\u0633|\u062d\u0627\u0641\u0644|\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a|\u0634\u0627\u062a\u0644)/iu.test(text);
+	if (!confirmsService) return true;
+	const detailText = normalizeDigits(details)
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	if (
+		/(?:martyrs|shuhada|\u0627\u0644\u0634\u0647\u062f\u0627\u0621|\u0634\u0647\u062f\u0627\u0621)/iu.test(detailText) &&
+		!/(?:martyrs|shuhada|\u0627\u0644\u0634\u0647\u062f\u0627\u0621|\u0634\u0647\u062f\u0627\u0621)/iu.test(text)
+	) {
+		return true;
+	}
+	return false;
 }
 
 function replyStatesRoomOnlyNoMeals(reply = "") {
@@ -9177,6 +9202,7 @@ function hotelFactReplyNeedsCorrection(decision = {}, hotel = {}, latestGuest = 
 		return (
 			replyContradictsBusService(decision?.reply) ||
 			replyOverpromisesBusService(decision?.reply, hotel) ||
+			replyOmitsConfirmedBusDetails(decision?.reply, hotel) ||
 			replyDefersKnownHotelFact(decision?.reply)
 		);
 	}
@@ -21789,6 +21815,7 @@ const exportedOrchestrator = {
 		latestGuestMentionsNusuk,
 		replyPromisesHotelMeals,
 		replyOverpromisesBusService,
+		replyOmitsConfirmedBusDetails,
 		replyContradictsBusService,
 		replyContradictsNusukFact,
 		replyContradictsParkingFact,

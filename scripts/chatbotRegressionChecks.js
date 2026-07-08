@@ -515,6 +515,47 @@ check("Hotel fact service answer sounds human and avoids stored-detail labels", 
 	);
 });
 
+check("Confirmed bus facts reject vague transport deferrals", () => {
+	const latestGuest = guest("\u0639\u0646\u062f\u0643\u0645 \u0627\u0648\u062a\u0648\u0628\u064a\u0633 \u064a\u0648\u0635\u0644 \u0644\u0644\u062d\u0631\u0645");
+	const vagueReply =
+		"\u062e\u062f\u0645\u0629 \u0627\u0644\u0646\u0642\u0644 \u0625\u0644\u0649 \u0627\u0644\u062d\u0631\u0645 \u062a\u062e\u062a\u0644\u0641 \u062d\u0633\u0628 \u0627\u0644\u062a\u0634\u063a\u064a\u0644 \u0627\u0644\u064a\u0648\u0645\u064a. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0625\u0642\u0627\u0645\u062a\u0643 \u0648\u0623\u0648\u0636\u062d \u0644\u0643 \u0627\u0644\u0645\u062a\u0627\u062d.";
+	const cannotConfirmReply =
+		"\u0644\u0627 \u0623\u0642\u062f\u0631 \u0623\u0624\u0643\u062f \u0644\u0643 \u0648\u062c\u0648\u062f\u0647 \u0627\u0644\u0622\u0646 \u0645\u0646 \u063a\u064a\u0631 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u0633\u064a\u0627\u0633\u0629 \u0627\u0644\u0641\u0646\u062f\u0642 \u0627\u0644\u062d\u0627\u0644\u064a\u0629.";
+	assert.strictEqual(orchestrator.replyOmitsConfirmedBusDetails(vagueReply, hotel), true);
+	assert.strictEqual(orchestrator.replyDefersKnownHotelFact(cannotConfirmReply), true);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: vagueReply },
+			hotel,
+			latestGuest
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: cannotConfirmReply },
+			hotel,
+			latestGuest
+		),
+		true
+	);
+	const goodReply = orchestrator.buildAuthoritativeHotelServiceFactReply(
+		{ preferredLanguageCode: "ar", conversation: [latestGuest] },
+		hotel,
+		{ languageCode: "ar" },
+		latestGuest
+	);
+	assert(/[\u0627\u0644]*\u0634\u0647\u062f\u0627\u0621/.test(goodReply));
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: goodReply },
+			hotel,
+			latestGuest
+		),
+		false
+	);
+});
+
 check("Hotel fact replies cannot dump raw booking numbers", () => {
 	assert.strictEqual(
 		orchestrator.hotelFactReplyHasRawBookingNumberDump(
