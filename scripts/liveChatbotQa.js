@@ -431,6 +431,17 @@ async function reservationsForCase(caseId) {
 	}).lean();
 }
 
+async function cleanupReservationsForCase(caseId) {
+	const rows = await reservationsForCase(caseId);
+	const ids = rows.map((row) => row._id).filter(Boolean);
+	for (const id of ids) {
+		runState.reservationIds.add(String(id));
+	}
+	if (!ids.length) return 0;
+	await Reservations.deleteMany({ _id: { $in: ids } });
+	return ids.length;
+}
+
 async function assertReservationCreated(caseId, label = "") {
 	const rows = await reservationsForCase(caseId);
 	for (const row of rows) {
@@ -1000,6 +1011,14 @@ async function runScenario(definition, number, ctx) {
 		totalMs,
 	});
 	console.log(`SCENARIO ${number}/${totalScenarioCount} PASS ${definition.name} turns=${turnDurations.length} avgMs=${avgMs}`);
+	if (!keepData) {
+		const reservationsDeleted = await cleanupReservationsForCase(String(sc._id));
+		if (reservationsDeleted) {
+			console.log(
+				`SCENARIO ${number}/${totalScenarioCount} CLEANUP reservationsDeleted=${reservationsDeleted}`
+			);
+		}
+	}
 }
 
 async function cleanup() {

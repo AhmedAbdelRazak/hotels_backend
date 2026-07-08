@@ -11,7 +11,7 @@ const KIND_DEFAULT_MODELS = {
 
 const DEFAULT_REASONING_EFFORTS = {
 	analysis: "low",
-	reasoning: "low",
+	reasoning: "medium",
 	nlu: "low",
 	writer: "low",
 	default: "low",
