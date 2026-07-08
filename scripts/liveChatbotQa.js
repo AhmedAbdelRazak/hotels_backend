@@ -165,6 +165,24 @@ function assertNoRobotic(reply = "", label = "") {
 	assert(!hit, `${label || "reply"} contains robotic/source-label phrase: ${hit}`);
 }
 
+function assertNoProtocolLeak(reply = "", label = "") {
+	const text = String(reply || "").trim();
+	assert(
+		!/^\s*\{/.test(text) &&
+			!/"(?:action|reply|facts|memory|orchestrator)"\s*:/i.test(text) &&
+			!/\{\s*"action"\s*:\s*"reply"/i.test(text),
+		`${label || "reply"} leaked internal JSON/protocol text`
+	);
+}
+
+function assertNoPrematureIdentityRequest(reply = "", label = "") {
+	const text = String(reply || "");
+	assert(
+		!/(?:\bfull\s*name\b|\bname\b|\bphone\b|\bmobile\b|\bnationality\b|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u0643|\u0627\u0633\u0645|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062c\u0646\u0633\u064a\u0629)/iu.test(text),
+		`${label || "reply"} asked for identity details before an exact quote`
+	);
+}
+
 function assertNoFakeConfirmation(reply = "", label = "") {
 	const text = String(reply || "");
 	assert(
@@ -402,6 +420,7 @@ async function plan(caseId) {
 	const sc = await SupportCase.findById(caseId).lean();
 	const ai = latestAi(sc);
 	assert(ai?.message, `No AI reply for case ${caseId}`);
+	assertNoProtocolLeak(ai.message, `case ${caseId}`);
 	assertNoRobotic(ai.message, `case ${caseId}`);
 	assertNoRepeatedAi(sc, `case ${caseId}`);
 	return { sc, ai, durationMs };
@@ -873,7 +892,7 @@ function buildScenarios(ctx) {
 				{
 					message: "المتابعة بدون بريد",
 					expect: ({ ai }) => {
-						assertMatches(ai.message, /شيماء|Shaimaa|أستاذة/i, "review addressed the chat guest");
+						assertMatches(ai.message, /شيماء|Shaimaa|[أا]ستاذة/i, "review addressed the chat guest");
 						assertMatches(ai.message, /أحمد\s+كودكس|Ahmed\s+Codex/i, "review kept reservation guest name");
 						assert(!/يا\s+أستاذ\s+أحمد|ضيفنا العزيز\s+أحمد/i.test(ai.message), "review addressed reservation holder instead of chat guest");
 					},
@@ -904,7 +923,7 @@ function buildScenarios(ctx) {
 				{
 					message: "المتابعة بدون بريد",
 					expect: ({ ai }) => {
-						assertMatches(ai.message, /شيماء|Shaimaa|أستاذة/i, "review addressed initial chat guest");
+						assertMatches(ai.message, /شيماء|Shaimaa|[أا]ستاذة/i, "review addressed initial chat guest");
 						assertMatches(ai.message, /خالد\s+كودكس|Khaled\s+Codex/i, "review kept booking holder");
 						assert(!/يا\s+أستاذ\s+خالد|ضيفنا العزيز\s+خالد/i.test(ai.message), "review addressed booking holder instead of chat guest");
 					},
@@ -915,6 +934,7 @@ function buildScenarios(ctx) {
 			name: "Two separate reservations in one chat stay separated",
 			hotel: "ajyad",
 			languageCode: "ar",
+			clientName: "Salma Codex",
 			reservation: true,
 			steps: [
 				{
@@ -959,6 +979,100 @@ function buildScenarios(ctx) {
 				},
 			],
 		},
+		{
+			name: "Long Arabic quote stays plain customer text",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u063a\u0628 \u0641\u064a \u0625\u0642\u0627\u0645\u0629 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO} \u0644\u0634\u062e\u0635\u064a\u0646 \u0628\u0627\u0644\u063a\u064a\u0646\u060c \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629\u060c \u0648\u0623\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0646\u0647\u0627\u0626\u064a \u0644\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631`,
+					expect: ({ ai }) => {
+						assertNoProtocolLeak(ai.message, "long Arabic quote");
+						assertDiscountMarkup(ai.message, "long Arabic quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Child age phrase does not become seven children",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f \u062d\u062c\u0632 \u063a\u0631\u0641\u0629 \u062b\u0644\u0627\u062b\u064a\u0629 \u0645\u0646 ${triple.checkinISO} \u0625\u0644\u0649 ${triple.checkoutISO} \u0644\u0634\u062e\u0635 \u0628\u0627\u0644\u063a \u0648\u0637\u0641\u0644\u064a\u0646 7 \u0633\u0646\u0648\u0627\u062a`,
+					expect: ({ ai }) => {
+						assertNoProtocolLeak(ai.message, "child age quote");
+						assertDiscountMarkup(ai.message, "child age quote");
+						assert(
+							!/7\s*(?:children|kids)|\u0667\s*(?:\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)|7\s*(?:\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644)/iu.test(ai.message),
+							"child age quote treated age as child count"
+						);
+					},
+				},
+			],
+		},
+		{
+			name: "Three-room quote survives capacity wording",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f 3 \u063a\u0631\u0641 \u0639\u0627\u0626\u0644\u064a\u0629 \u0645\u0646 ${family.checkinISO} \u0625\u0644\u0649 ${family.checkoutISO} \u0644\u0640 6 \u0628\u0627\u0644\u063a\u064a\u0646`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "three-room quote");
+						assertMatches(ai.message, /3|\u0663|\u062b\u0644\u0627\u062b/i, "three-room count");
+						assertMatches(ai.message, /\u0639\u0627\u0626\u0644|family/i, "three-room family type");
+						assert(
+							!/(?:double|quad|quadruple|\u0645\u0632\u062f\u0648\u062c|\u062b\u0646\u0627\u0626|\u0631\u0628\u0627\u0639)/iu.test(ai.message),
+							"three-room quote changed family rooms to another room type"
+						);
+					},
+				},
+				{
+					message: "\u0627\u0644\u063a\u0631\u0641 \u062a\u0633\u0639 5 \u0627\u0634\u062e\u0627\u0635\u061f",
+					expect: ({ ai }) => {
+						assertNoProtocolLeak(ai.message, "capacity follow-up");
+						assert(
+							!/(?:<s\b|message-price-new|150\s*(?:SAR|\u0631\u064a\u0627\u0644)|400\s*(?:SAR|\u0631\u064a\u0627\u0644)|50\s*(?:SAR|\u0631\u064a\u0627\u0644)|\u063a\u0631\u0641\u0629\s+\u0648\u0627\u062d\u062f\u0629|\u063a\u0631\u0641\u0629\s+\u0639\u0627\u0626\u0644\u064a\u0629\s+\u0648\u0627\u062d\u062f\u0629|one\s+room|1\s+room)/iu.test(ai.message),
+							"capacity follow-up collapsed the multi-room quote or invented payment amounts"
+						);
+					},
+				},
+			],
+		},
+		{
+			name: "Quote is shown before identity details",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: "\u0643\u0645 \u064a\u0628\u0639\u062f \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0646 \u0627\u0644\u062d\u0631\u0645\u061f",
+					expect: ({ ai }) => assertMatches(ai.message, /15|\u0661\u0665|\u062d\u0631\u0645|haram/i, "distance before quote"),
+				},
+				{
+					message: `\u0623\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO} \u0644\u0634\u062e\u0635 \u0648\u0627\u062d\u062f \u0641\u064a \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "quote before identity");
+						assertNoPrematureIdentityRequest(ai.message, "quote before identity");
+					},
+				},
+			],
+		},
+		{
+			name: "Compound hotel facts stay consistent",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: "\u0627\u0644\u0645\u0648\u0642\u0639\u061f \u0648\u0647\u0644 \u064a\u0648\u062c\u062f \u0628\u0627\u0635\u061f \u0648\u0647\u0644 \u0641\u064a \u0641\u0637\u0648\u0631\u061f",
+					expect: ({ ai }) => {
+						assertMatches(ai.message, /\u062d\u0631\u0645|15|\u0661\u0665|maps|map|\u0645\u0648\u0642\u0639|\u0639\u0646\u0648\u0627\u0646/i, "compound location");
+						assertMatches(ai.message, /\u0628\u0627\u0635|\u0646\u0642\u0644|\u0645\u0648\u0627\u0635\u0644\u0627\u062a|bus|shuttle|transport/i, "compound bus");
+						assertNoMealPromise(ai.message, "compound meals");
+					},
+				},
+			],
+		},
 	];
 }
 
@@ -974,7 +1088,7 @@ async function runScenario(definition, number, ctx) {
 			});
 	let current = sc;
 	const turnDurations = [];
-	const totalScenarioCount = Number(ctx.totalScenarios || 0) || 28;
+	const totalScenarioCount = Number(ctx.totalScenarios || 0) || 34;
 	console.log(`SCENARIO ${number}/${totalScenarioCount} START ${definition.name} case=${sc._id}`);
 
 	for (const [index, step] of definition.steps.entries()) {

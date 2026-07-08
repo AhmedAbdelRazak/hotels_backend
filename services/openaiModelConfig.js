@@ -10,11 +10,20 @@ const KIND_DEFAULT_MODELS = {
 };
 
 const DEFAULT_REASONING_EFFORTS = {
-	analysis: "low",
+	analysis: "medium",
 	reasoning: "medium",
-	nlu: "low",
-	writer: "low",
-	default: "low",
+	nlu: "medium",
+	writer: "medium",
+	default: "medium",
+};
+
+const REASONING_EFFORT_RANK = {
+	none: 0,
+	minimal: 1,
+	low: 2,
+	medium: 3,
+	high: 4,
+	xhigh: 5,
 };
 
 const KIND_ENV_KEYS = {
@@ -111,13 +120,25 @@ function sanitizeReasoningEffort(value) {
 		: "";
 }
 
+function enforceMinimumReasoningEffort(kind = "default", effort = "") {
+	const sanitized = sanitizeReasoningEffort(effort);
+	if (!sanitized) return "";
+	if (REASONING_EFFORT_RANK[sanitized] < REASONING_EFFORT_RANK.medium) {
+		return "medium";
+	}
+	return sanitized;
+}
+
 function pickReasoningEffort(kind = "default") {
 	const envKeys = KIND_REASONING_ENV_KEYS[kind] || KIND_REASONING_ENV_KEYS.default;
 	for (const key of envKeys) {
 		const effort = sanitizeReasoningEffort(process.env[key]);
-		if (effort) return effort;
+		if (effort) return enforceMinimumReasoningEffort(kind, effort);
 	}
-	return DEFAULT_REASONING_EFFORTS[kind] || DEFAULT_REASONING_EFFORTS.default;
+	return enforceMinimumReasoningEffort(
+		kind,
+		DEFAULT_REASONING_EFFORTS[kind] || DEFAULT_REASONING_EFFORTS.default
+	);
 }
 
 function usesCompletionTokens(model = "") {
@@ -161,6 +182,7 @@ module.exports = {
 	pickReasoningEffort,
 	sanitizeModelName,
 	sanitizeReasoningEffort,
+	enforceMinimumReasoningEffort,
 	usesCompletionTokens,
 	buildChatCompletionBody,
 };

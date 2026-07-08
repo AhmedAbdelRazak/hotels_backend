@@ -23,8 +23,8 @@ function boolFromEnv(name, fallback = false) {
 
 const OPENAI_TIMEOUT_MS = intFromEnv(
 	"OPENAI_CHATBOT_TIMEOUT_MS",
-	intFromEnv("OPENAI_TIMEOUT_MS", 20000, { min: 1500, max: 20000 }),
-	{ min: 1500, max: 20000 }
+	intFromEnv("OPENAI_TIMEOUT_MS", 30000, { min: 1500, max: 60000 }),
+	{ min: 1500, max: 60000 }
 );
 const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
 const OPENAI_MAX_PROMPT_CHARS = intFromEnv(
@@ -176,6 +176,44 @@ function extractResponseText(res = {}) {
 	return parts.join("").trim();
 }
 
+function incompleteResponseReason(res = {}) {
+	return (
+		String(res?.incomplete_details?.reason || "").trim() ||
+		(res?.status === "incomplete" ? "incomplete" : "")
+	);
+}
+
+function isIncompleteResponse(res = {}) {
+	return res?.status === "incomplete" || Boolean(incompleteResponseReason(res));
+}
+
+class OpenAIIncompleteResponseError extends Error {
+	constructor(res = {}, previousResponseId = "", model = "", maxOutputTokens = 0) {
+		const reason = incompleteResponseReason(res) || "incomplete";
+		super(`OpenAI response incomplete: ${reason}`);
+		this.name = "OpenAIIncompleteResponseError";
+		this.code = "openai_response_incomplete";
+		this.incomplete = true;
+		this.reason = reason;
+		this.responseId = res?.id || "";
+		this.previousResponseId = previousResponseId || "";
+		this.model = model || "";
+		this.maxOutputTokens = Number(maxOutputTokens || 0) || 0;
+		this.partialTextLength = extractResponseText(res).length;
+		this.usage = res?.usage || null;
+	}
+}
+
+function isIncompleteOpenAIError(error = {}) {
+	return error?.incomplete === true || error?.code === "openai_response_incomplete";
+}
+
+function expandedOutputTokenLimit(value = 0) {
+	const base = Number(value || 0) || 0;
+	if (!base) return 0;
+	return Math.min(12000, Math.max(base + 2500, base * 3));
+}
+
 function buildResponsesBody({
 	model,
 	messages,
@@ -253,7 +291,17 @@ async function chat(
 			}),
 		OPENAI_TIMEOUT_MS
 	);
-	return res.choices?.[0]?.message?.content?.trim() || "";
+	const choice = res.choices?.[0] || {};
+	const text = choice?.message?.content?.trim() || "";
+	if (choice.finish_reason === "length") {
+		const error = new Error("OpenAI chat completion incomplete: length");
+		error.code = "openai_chat_completion_incomplete";
+		error.incomplete = true;
+		error.reason = "length";
+		error.partialTextLength = text.length;
+		throw error;
+	}
+	return text;
 }
 
 async function chatWithState(
@@ -293,12 +341,12 @@ async function chatWithState(
 	const tokenLimit = gpt5Style
 		? Math.max(max_tokens * 3, kind === "writer" ? 600 : 450)
 		: max_tokens;
-	const buildBody = (previousResponseId = "") =>
+	const buildBody = (previousResponseId = "", maxOutputTokens = tokenLimit) =>
 		buildResponsesBody({
 			model,
 			messages,
 			temperature,
-			maxTokens: tokenLimit,
+			maxTokens: maxOutputTokens,
 			response_format,
 			reasoning_effort: gpt5Style
 				? reasoning_effort || pickReasoningEffort(kind)
@@ -308,8 +356,8 @@ async function chatWithState(
 			prompt_cache_key,
 			safety_identifier,
 		});
-	const runResponses = async (previousResponseId = "") => {
-		const body = buildBody(previousResponseId);
+	const runResponses = async (previousResponseId = "", maxOutputTokens = tokenLimit) => {
+		const body = buildBody(previousResponseId, maxOutputTokens);
 		const res = await withDeadline(
 			(signal) =>
 				client.responses.create(body, {
@@ -319,6 +367,9 @@ async function chatWithState(
 				}),
 			OPENAI_TIMEOUT_MS
 		);
+		if (isIncompleteResponse(res)) {
+			throw new OpenAIIncompleteResponseError(res, previousResponseId, model, maxOutputTokens);
+		}
 		return {
 			text: extractResponseText(res),
 			responseId: res.id || "",
@@ -330,10 +381,30 @@ async function chatWithState(
 	try {
 		return await runResponses(previous_response_id);
 	} catch (error) {
+		if (isIncompleteOpenAIError(error)) {
+			const retryTokenLimit = expandedOutputTokenLimit(error.maxOutputTokens || tokenLimit);
+			if (retryTokenLimit && retryTokenLimit > tokenLimit) {
+				console.warn("[aiagent] responses incomplete retry:", {
+					reason: error.reason || error.message,
+					partialTextLength: error.partialTextLength || 0,
+					maxOutputTokens: error.maxOutputTokens || tokenLimit,
+					retryMaxOutputTokens: retryTokenLimit,
+					previousResponseId: previous_response_id ? "present" : "",
+				});
+				try {
+					return await runResponses(previous_response_id, retryTokenLimit);
+				} catch (retryError) {
+					console.warn(
+						"[aiagent] responses incomplete retry fallback:",
+						retryError?.message || retryError
+					);
+				}
+			}
+		}
 		if (previous_response_id) {
 			console.warn("[aiagent] responses continuation reset:", error?.message || error);
 			try {
-				return await runResponses("");
+				return await runResponses("", expandedOutputTokenLimit(tokenLimit) || tokenLimit);
 			} catch (retryError) {
 				console.warn("[aiagent] responses retry fallback:", retryError?.message || retryError);
 			}
@@ -344,7 +415,9 @@ async function chatWithState(
 			text: await chat(messages, {
 				kind,
 				temperature,
-				max_tokens,
+				max_tokens: gpt5Style
+					? Math.max(max_tokens, Math.ceil((expandedOutputTokenLimit(tokenLimit) || tokenLimit) / 3))
+					: Math.max(max_tokens, expandedOutputTokenLimit(tokenLimit) || tokenLimit),
 				reasoning_effort,
 				response_format,
 			}),
