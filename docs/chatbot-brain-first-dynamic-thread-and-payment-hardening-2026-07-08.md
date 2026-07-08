@@ -507,3 +507,5 @@ Focused regression checks added:
 Validation:
 
 - Local `npm run test:chatbot` passed with `84` checks.
+- Production `npm run test:chatbot` passed with `84` checks after PM2 restart.
+- Production focused live scenario 11 passed with marker `codex-prod-909-contact-s11-20260708`; cleanup reported `remainingCases=0` and `remainingReservations=0`.
