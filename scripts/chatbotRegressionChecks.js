@@ -1904,6 +1904,33 @@ check("Jannat support collects missing pricing detail before handoff", () => {
 	);
 });
 
+check("Jannat support brain sees contact-page reservation reference details", () => {
+	const sc = {
+		preferredLanguageCode: "ar",
+		sourceWebsite: "jannatbooking_ssr",
+		sourcePage: "contact_page",
+		sourceUrl: "https://jannatbooking.com/contact?lang=ar",
+		conversation: [
+			{
+				isAi: false,
+				isSystem: true,
+				message: "Jannat Booking support will be with you shortly.",
+				inquiryAbout: "room_availability",
+				inquiryDetails:
+					"[Source: Jannat Booking contact page]\n[Reservation Reference: 8602335422]\nThe guest says the reservation page shows 22 to 26 but requested 23 to 27.",
+				date: new Date(),
+				messageBy: { customerName: "Jannat Booking", customerEmail: supportEmail },
+			},
+			guest("Please correct the reservation dates from 22-26 to 23-27."),
+		],
+	};
+	const compact = jannatBrain.compactConversation(sc);
+	assert(compact[0].inquiryDetails.includes("Reservation Reference: 8602335422"));
+	assert.strictEqual(compact[0].inquiryAbout, "room_availability");
+	assert.strictEqual(compact[1].role, "guest");
+	assert(compact[1].message.includes("correct the reservation dates"));
+});
+
 check("Jannat support recommendation can show direct-booking discount quote", () => {
 	const facts = {
 		languageCode: "en",

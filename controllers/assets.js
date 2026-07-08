@@ -799,6 +799,18 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
 		return Number.isFinite(num) ? num : 0;
 	};
 
+	const formatStayDate = (value) => {
+		if (!value) return "N/A";
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return "N/A";
+		return new Intl.DateTimeFormat("en-US", {
+			timeZone: "UTC",
+			year: "numeric",
+			month: "numeric",
+			day: "numeric",
+		}).format(date);
+	};
+
 	const escapeHtml = (value) => {
 		if (value === null || value === undefined) return "";
 		return String(value)
@@ -1127,16 +1139,8 @@ const receiptPdfTemplate = (reservationData = {}, hotelInfo = {}) => {
             </thead>
             <tbody>
               <tr>
-                <td>${escapeHtml(
-									new Date(reservationData?.checkin_date).toLocaleDateString(
-										"en-US"
-									)
-								)}</td>
-                <td>${escapeHtml(
-									new Date(reservationData?.checkout_date).toLocaleDateString(
-										"en-US"
-									)
-								)}</td>
+                <td>${escapeHtml(formatStayDate(reservationData?.checkin_date))}</td>
+                <td>${escapeHtml(formatStayDate(reservationData?.checkout_date))}</td>
                 <td>${escapeHtml(reservationData?.reservation_status || "Confirmed")}</td>
                 <td>${escapeHtml(reservationData?.total_guests ?? "")}</td>
                 <td>${escapeHtml(reservationData?.booking_source || "Jannatbooking.com")}</td>

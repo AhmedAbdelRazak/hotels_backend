@@ -114,12 +114,18 @@ function compactConversation(supportCase = {}) {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
 		: [];
-	return conversation.slice(-MAX_CONTEXT_MESSAGES).map((entry) => ({
-		role: isGuestEntry(entry) ? "guest" : entry?.isSystem ? "system" : "support",
-		name: cleanString(entry?.messageBy?.customerName, 80),
-		message: cleanString(entry?.message, 1200),
-		action: cleanString(entry?.clientAction, 80),
-	}));
+	return conversation.slice(-MAX_CONTEXT_MESSAGES).map((entry) => {
+		const message = cleanString(entry?.message, 1200);
+		const details = cleanString(entry?.inquiryDetails, 1600);
+		return {
+			role: isGuestEntry(entry) ? "guest" : entry?.isSystem ? "system" : "support",
+			name: cleanString(entry?.messageBy?.customerName, 80),
+			message,
+			inquiryAbout: cleanString(entry?.inquiryAbout, 80),
+			inquiryDetails: details && details !== message ? details : "",
+			action: cleanString(entry?.clientAction, 80),
+		};
+	});
 }
 
 function latestGuestText(supportCase = {}) {
@@ -323,8 +329,10 @@ async function planJannatTurn({ supportCase, candidateHotels = [] } = {}) {
 				"Most booking, availability, pricing, room, hotel-location, distance, and hotel-service requests should become action=transfer_to_hotel once enough reusable stay facts are captured.",
 				"If the guest is asking to book, check price, or check availability but has not provided check-in/check-out dates and either room type or guest count, use action=platform_reply and ask only for the missing practical detail before transfer.",
 				"When check-in/check-out plus room type or guest count are known, use action=transfer_to_hotel so the orchestrator can show the recommended/required room pricing before the guest is connected to reception.",
+				"If the guest is asking about an existing reservation, confirmation/reference number, cancellation, date correction/change, payment/receipt issue, arrival-time coordination, escalation, or any already-booked stay support, use action=platform_reply. Acknowledge the exact issue, keep any reservation/reference number in facts.bookingNumber, and do not ask for room type or guest count unless they are clearly requesting a new quote.",
+				"For existing-reservation support, tell the guest professionally that Jannat Booking support will review/coordinate it, and include WhatsApp/contact +1 (909) 222-3374 when the guest needs urgent follow-up or escalation.",
 				"If the guest only greeted Jannat support and gave no request yet, action=platform_reply and ask one warm open question.",
-				"Preserve facts the guest already gave: checkinISO, checkoutISO, adults, children, roomTypeKey, roomSelections, budget, guestName, phone, nationality, questionSummary.",
+				"Preserve facts the guest already gave: checkinISO, checkoutISO, adults, children, roomTypeKey, roomSelections, budget, guestName, phone, nationality, bookingNumber, questionSummary.",
 				"For five guests, familyRooms is usually the best roomTypeKey; for ten guests, prefer two familyRooms if no specific room was requested.",
 				"Use languageCode for reply language.",
 				'JSON shape: {"action":"transfer_to_hotel|platform_reply","targetHotelId":"","facts":{},"reply":"","reason":""}',
@@ -340,7 +348,9 @@ async function planJannatTurn({ supportCase, candidateHotels = [] } = {}) {
 						displayName1: supportCase?.displayName1 || "",
 						clientName: supportCase?.clientName || "",
 						clientContact: supportCase?.clientContact || "",
+						sourceWebsite: supportCase?.sourceWebsite || "",
 						sourcePage: supportCase?.sourcePage || "",
+						sourceUrl: supportCase?.sourceUrl || "",
 					},
 					candidateHotels: candidateHotels.map((hotel, index) => ({
 						index,
@@ -393,5 +403,6 @@ module.exports = {
 		normalizeFacts,
 		hasHotelRoutingSignal,
 		isGreetingOnly,
+		compactConversation,
 	},
 };
