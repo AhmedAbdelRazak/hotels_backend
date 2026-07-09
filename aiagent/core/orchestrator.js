@@ -2572,11 +2572,12 @@ function latestGuestContinuesAfterQuote(previousAi = {}, latestText = "", latest
 	if (!["quote_ready", "split_stay_quote_ready"].includes(String(previousAi?.clientAction || "").toLowerCase())) {
 		return false;
 	}
+	const rawText = String(latestText || "");
+	if (latestGuestAsksHotelFactOnly({ message: rawText, clientAction: latestAction })) return false;
 	const cleanAction = cleanString(latestAction, 80).toLowerCase();
 	if (["proceed", "continue_booking", "proceed_to_booking", "split_stay_continue"].includes(cleanAction)) {
 		return true;
 	}
-	const rawText = String(latestText || "");
 	const simpleProceedText =
 		[
 			"\u0646\u0639\u0645",
@@ -6595,6 +6596,17 @@ function reviewReplyChangesPhone(reply = "", toolResult = {}) {
 	return !normalizeDigits(String(reply || "")).includes(phone);
 }
 
+function reviewReplyMissingBookingIdentity(reply = "", toolResult = {}) {
+	if (toolResult?.tool !== "send_review" || toolResult?.code !== "review_ready") return false;
+	const review = asObject(toolResult.review);
+	const normalized = normalizeIntentSearchTextRepaired(stripChatMarkup(String(reply || "")));
+	const fullName = normalizeIntentSearchTextRepaired(review.fullName || "");
+	if (fullName && !normalized.includes(fullName)) return true;
+	const nationality = normalizeIntentSearchTextRepaired(review.nationality || "");
+	if (nationality && !normalized.includes(nationality)) return true;
+	return false;
+}
+
 function reviewReplyHasMixedDateFormat(reply = "", toolResult = {}) {
 	if (toolResult?.tool !== "send_review" || toolResult?.code !== "review_ready") return false;
 	const text = normalizeDigits(String(reply || ""));
@@ -6814,7 +6826,7 @@ function replyInvitesConfirmationAction(reply = "") {
 		/(?:\u0627\u0631\u0633\u0644|\u0623\u0631\u0633\u0644|\u0627\u0643\u062a\u0628|\u0623\u0643\u062a\u0628|\u0627\u0636\u063a\u0637|\u0625\u0636\u063a\u0637).{0,40}(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632)/iu.test(text) ||
 		/(?:\u0641\u0642\u0637|\u0628\u0633).{0,24}(?:\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f)/iu.test(text) ||
 		/(?:\u0627\u0630\u0627|\u0625\u0630\u0627|\u0644\u0648).{0,60}(?:\u0645\u0646\u0627\u0633\u0628|\u0635\u062d\u064a\u062d|\u062a\u0645\u0627\u0645).{0,60}(?:\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0625\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\s+\u0627\u0644\u062d\u062c\u0632)/iu.test(text) ||
-		/(?:\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,50}(?:\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0646\u0647\u0627\u0621|\u0627\u0644\u0625\u0646\u0647\u0627\u0621|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u062a\u0645|\u0623\u062a\u0645)/iu.test(text) ||
+		/(?:\u0627\u0643\u062f|\u0623\u0643\u062f|\u062a\u0627\u0643\u062f|\u062a\u0623\u0643\u062f|\u062a\u0624\u0643\u062f|\u062a\u0648\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f).{0,70}(?:\u0627\u0644\u062d\u062c\u0632|\u0627\u0644\u0627\u0646\u0647\u0627\u0621|\u0627\u0644\u0625\u0646\u0647\u0627\u0621|\u0627\u0644\u0645\u0636\u064a|\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629|\u0625\u0635\u062f\u0627\u0631|\u0627\u0635\u062f\u0627\u0631|\u0627\u0643\u0645\u0644|\u0623\u0643\u0645\u0644|\u0627\u062a\u0645|\u0623\u062a\u0645)/iu.test(text) ||
 		compact.includes("\u0627\u0631\u0633\u0644\u0644\u064a\u0641\u0642\u0637\u062a\u0623\u0643\u064a\u062f") ||
 		compact.includes("\u0627\u0631\u0633\u0644\u0644\u064a\u0641\u0642\u0637\u062a\u0627\u0643\u064a\u062f")
 	);
@@ -9157,6 +9169,21 @@ function replyContradictsNusukFact(reply = "") {
 	);
 }
 
+function replyOmitsConfirmedNusukFact(reply = "", hotel = {}) {
+	const details = serviceFactDetailsForReply(hotel?.isNusukText, { allowArabic: true });
+	if (!(hotel?.isNusuk === true || details)) return false;
+	const text = normalizeDigits(String(reply || ""))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return true;
+	const mentionsNusuk = /nusuk|\u0646\u0633\u0643/i.test(text);
+	const confirmsAvailable =
+		/\b(?:yes|available|listed|bookable|shown)\b/i.test(text) ||
+		/(?:\u0646\u0639\u0645|\u0645\u062a\u0627\u062d|\u0645\u062f\u0631\u062c|\u0645\u0648\u062c\u0648\u062f|\u064a\u0638\u0647\u0631|\u0636\u0645\u0646|\u062d\u062c\u0632)/iu.test(text);
+	return !mentionsNusuk || !confirmsAvailable;
+}
+
 function replyContradictsParkingFact(reply = "") {
 	const text = normalizeDigits(String(reply || ""))
 		.toLowerCase()
@@ -9196,7 +9223,11 @@ function hotelFactReplyNeedsCorrection(decision = {}, hotel = {}, latestGuest = 
 	}
 	if (locationReplyNeedsKnownFactCorrection(decision?.reply, hotel, latestGuest)) return true;
 	if (latestGuestMentionsNusuk(latestGuest) && hotel?.isNusuk === true) {
-		return replyContradictsNusukFact(decision?.reply) || replyDefersKnownHotelFact(decision?.reply);
+		return (
+			replyContradictsNusukFact(decision?.reply) ||
+			replyOmitsConfirmedNusukFact(decision?.reply, hotel) ||
+			replyDefersKnownHotelFact(decision?.reply)
+		);
 	}
 	if (latestGuestMentionsBus(latestGuest) && hotel?.hasBusService === true) {
 		return (
@@ -13625,6 +13656,79 @@ function buildPostConfirmationPayAtHotelMessage(sc = {}, known = {}, latestGuest
 	].join("\n");
 }
 
+function replyContradictsPayAtHotelPolicy(reply = "") {
+	const text = normalizeIntentSearchTextRepaired(reply);
+	const compact = text.replace(/\s+/g, "");
+	if (!text) return false;
+	const payContext =
+		/\b(?:pay|payment|settle|cash|card)\b/i.test(text) ||
+		/(?:\u0627\u0644\u062f\u0641\u0639|\u062f\u0641\u0639|\u0627\u062f\u0641\u0639|\u0623\u062f\u0641\u0639|\u0627\u0633\u062f\u062f|\u0633\u062f\u0627\u062f|\u0627\u062d\u0627\u0633\u0628|\u0623\u062d\u0627\u0633\u0628|\u0643\u0627\u0634)/iu.test(text);
+	const arrivalContext =
+		/\b(?:hotel|arrival|arrive|front\s*desk|reception|check\s*in|check-in)\b/i.test(text) ||
+		/(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0648\u0635\u0648\u0644|\u0639\u0646\u062f\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u062a\u0633\u0643\u064a\u0646|\u0627\u0644\u0631\u064a\u0633\u0628\u0634\u0646)/iu.test(compact);
+	const cannotConfirm =
+		/\b(?:cannot|can't|cant|unable|not\s+able)\b.{0,90}\b(?:confirm|verify|guarantee)\b.{0,120}\b(?:pay|payment)\b/i.test(text) ||
+		/(?:\u0644\u0627|\u0645\u0627|\u0645\u0634)\s*(?:\u0623\u0633\u062a\u0637\u064a\u0639|\u0627\u0633\u062a\u0637\u064a\u0639|\u0623\u0642\u062f\u0631|\u0627\u0642\u062f\u0631|\u0646\u0633\u062a\u0637\u064a\u0639|\u064a\u0645\u0643\u0646\u0646\u064a)\s*(?:\u0623\u0646|\u0627\u0646)?\s*(?:\u0623\u0624\u0643\u062f|\u0627\u0624\u0643\u062f|\u062a\u0623\u0643\u064a\u062f)?/iu.test(text);
+	const impossible =
+		/\b(?:not\s+possible|not\s+available|not\s+accepted|must\s+pay\s+online|online\s+payment\s+is\s+required)\b/i.test(text) ||
+		/(?:\u0644\u0627|\u063a\u064a\u0631)\s*(?:\u064a\u0645\u0643\u0646|\u0645\u0645\u0643\u0646|\u0645\u062a\u0627\u062d|\u0645\u0633\u0645\u0648\u062d).{0,90}(?:\u0627\u0644\u062f\u0641\u0639|\u062f\u0641\u0639|\u0627\u0633\u062f\u062f|\u0633\u062f\u0627\u062f).{0,90}(?:\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644)/iu.test(text);
+	const onlineOnly =
+		/\b(?:only|currently)\b.{0,80}\b(?:payment\s+link|online\s+payment|pay\s+online)\b/i.test(text) ||
+		/(?:\u0627\u0644\u0645\u062a\u0627\u062d|\u0627\u0644\u0645\u062a\u0648\u0641\u0631).{0,80}(?:\u0631\u0627\u0628\u0637\s*\u0627\u0644\u062f\u0641\u0639|\u0627\u0644\u062f\u0641\u0639\s*(?:\u0639\u0628\u0631|\u0645\u0646\s*\u062e\u0644\u0627\u0644)\s*\u0631\u0627\u0628\u0637|\u0627\u0644\u062f\u0641\u0639\s*(?:\u0627\u0648\u0646\u0644\u0627\u064a\u0646|\u0623\u0648\u0646\u0644\u0627\u064a\u0646))/iu.test(text);
+	return (payContext && arrivalContext && (cannotConfirm || impossible)) || onlineOnly;
+}
+
+function replyAffirmsPayAtHotelPolicy(reply = "") {
+	const text = normalizeIntentSearchTextRepaired(reply);
+	if (!text) return false;
+	const english =
+		/\b(?:yes|you\s+can|can\s+pay|may\s+pay|pay\s+at\s+the\s+hotel|pay\s+on\s+arrival|payment\s+(?:is\s+)?(?:accepted|available))\b/i.test(text) &&
+		/\b(?:hotel|arrival|reception|front\s*desk|check\s*in|check-in)\b/i.test(text);
+	const arabic =
+		/(?:\u0646\u0639\u0645|\u064a\u0645\u0643\u0646|\u062a\u0642\u062f\u0631|\u062a\u0633\u062a\u0637\u064a\u0639|\u064a\u0646\u0641\u0639|\u0645\u0645\u0643\u0646|\u0645\u062a\u0627\u062d|\u0645\u0633\u0645\u0648\u062d).{0,90}(?:\u0627\u0644\u062f\u0641\u0639|\u062a\u062f\u0641\u0639|\u0627\u062f\u0641\u0639|\u0623\u062f\u0641\u0639|\u0627\u0644\u0633\u062f\u0627\u062f|\u062a\u062d\u0627\u0633\u0628|\u0643\u0627\u0634).{0,120}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0631\u064a\u0633\u0628\u0634\u0646)/iu.test(text) ||
+		/(?:\u0627\u0644\u062f\u0641\u0639|\u0627\u0644\u0633\u062f\u0627\u062f).{0,90}(?:\u0627\u0644\u0641\u0646\u062f\u0642|\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0631\u064a\u0633\u0628\u0634\u0646).{0,90}(?:\u0645\u062a\u0627\u062d|\u0645\u0645\u0643\u0646|\u0645\u0633\u0645\u0648\u062d|\u064a\u0645\u0643\u0646|\u064a\u0646\u0641\u0639)/iu.test(text);
+	return english || arabic;
+}
+
+function replyMentionsConfirmedPaymentContext(reply = "", context = {}) {
+	const text = normalizeIntentSearchTextRepaired(reply);
+	if (!text) return false;
+	const normalizedText = normalizeDigits(text);
+	const confirmation = normalizeDigits(cleanString(context.confirmation || "", 60)).replace(/\D/g, "");
+	if (confirmation && normalizedText.includes(confirmation)) return true;
+	return (
+		/\b(?:confirmation|reservation|booking|reference)\b.{0,80}\b(?:number|no\.?|#|reception|front\s*desk)\b/i.test(text) ||
+		/\b(?:reception|front\s*desk)\b.{0,80}\b(?:confirmation|reservation|booking|reference)\b/i.test(text) ||
+		/(?:\u0631\u0642\u0645\s*(?:\u0627\u0644)?(?:\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632)|(?:\u0627\u0644)?(?:\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632).{0,80}(?:\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0631\u064a\u0633\u0628\u0634\u0646)|(?:\u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0627\u0644\u0631\u064a\u0633\u0628\u0634\u0646).{0,80}(?:\u0627\u0644)?(?:\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062d\u062c\u0632))/iu.test(
+			text
+		)
+	);
+}
+
+function replyMentionsPaymentLinkDepositGuidance(reply = "") {
+	const text = normalizeIntentSearchTextRepaired(reply);
+	if (!text) return false;
+	return (
+		/\b(?:payment\s+link|pay\s+link|online\s+payment|deposit|partial\s+payment|pay\s+online)\b/i.test(text) ||
+		/(?:\u0631\u0627\u0628\u0637\s*\u0627\u0644\u062f\u0641\u0639|\u0631\u0627\u0628\u0637\s*\u0627\u0644\u0633\u062f\u0627\u062f|\u0627\u0644\u062f\u0641\u0639\s*(?:\u0627\u0648\u0646\u0644\u0627\u064a\u0646|\u0623\u0648\u0646\u0644\u0627\u064a\u0646)|\u0639\u0631\u0628\u0648\u0646|\u062f\u0641\u0639\s*(?:\u062c\u0632\u0621|\u062c\u0632\u0626\u064a|\u062c\u0632\u0626\u064a\u0627|\u062c\u0632\u0626\u064a\u064b\u0627)|\u062c\u062f\u064a\u0629\s*(?:\u0627\u0644)?\u062d\u0636\u0648\u0631|\u064a\u062b\u0628\u062a\s*(?:\u0627\u0644)?\u063a\u0631\u0641\u0629|\u064a\u0624\u0643\u062f\s*(?:\u0627\u0644)?\u062d\u0636\u0648\u0631)/iu.test(
+			text
+		)
+	);
+}
+
+function paymentAtHotelReplyNeedsCorrection(decision = {}, latestGuest = {}, context = {}) {
+	if (!latestGuestAsksPayAtHotel(latestGuest?.message || "")) return false;
+	const action = String(decision?.action || "").trim().toLowerCase();
+	if (["escalate", "close_case"].includes(action)) return false;
+	if (action !== "reply") return true;
+	const reply = cleanDisplayString(decision?.reply || "", 2200);
+	if (!reply) return true;
+	if (replyContradictsPayAtHotelPolicy(reply) || !replyAffirmsPayAtHotelPolicy(reply)) return true;
+	if (!replyMentionsPaymentLinkDepositGuidance(reply)) return true;
+	const confirmedContext = Boolean(context?.reservationAlreadyConfirmed || cleanString(context?.confirmation || "", 60));
+	return confirmedContext && !replyMentionsConfirmedPaymentContext(reply, context);
+}
+
 function mentionsExplicitReservationIdentifier(value = "") {
 	const text = normalizeDigits(String(value || "")).toLowerCase();
 	const compact = normalizeIntentSearchText(value).replace(/\s+/g, "");
@@ -16714,6 +16818,9 @@ async function askCompactToolWriter({
 					validation === "review_formatting_unclear"
 						? "Rewrite the review with each fact on its own line or bullet. Do not compress name, phone, nationality, room, dates, nights, guests, and total into one paragraph."
 						: "",
+					validation === "review_identity_missing"
+						? "Rewrite the official review and include the booking holder/fullName and nationality exactly from toolResult.review in the booking details."
+						: "",
 					validation === "review_addressed_booking_holder"
 						? "Open by addressing the chat guest using guestAddress, guestAddressName, or guestProfileName. The booking holder/fullName belongs only in the booking details. Do not greet or address the booking holder as the chat guest when they differ."
 						: "",
@@ -17022,6 +17129,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous review reply was not sent because the booking facts were compressed or hard to read. Return the official pre-submission review from OpenAI only. Put each main fact on its own separate line or bullet: name, phone, nationality, room(s), guests, dates, nights, total, then the confirmation question. Do not say the booking is already confirmed."
 				: validation === "review_phone_changed"
 				? "Your previous review reply was not sent because it changed or omitted the exact guest phone number. Return the official pre-submission review from OpenAI only. Use toolResult.review.phone exactly as provided, including any leading zero. Do not normalize, shorten, reformat, or add another phone version."
+				: validation === "review_identity_missing"
+				? "Your previous review reply was not sent because it omitted the booking holder name or nationality. Return the official pre-submission review from OpenAI only. Include toolResult.review.fullName exactly as the booking name/holder and toolResult.review.nationality exactly as the nationality. Keep the phone, room, dates, guests, nights, total/discount lines, and confirmation question."
 				: validation === "review_addressed_booking_holder"
 				? "Your previous official review was not sent because it did not address the chat guest/profile when the booking holder is a different person. Return the official pre-submission review from OpenAI only. Open by addressing the chat guest using guestAddress, guestAddressName, or guestProfileName from the user payload. List toolResult.review.fullName only as the booking holder/name inside the review details. Do not greet or address the booking holder as the chat guest unless they are clearly the same person."
 				: validation === "review_mixed_date_format"
@@ -17255,6 +17364,9 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (reviewReplyChangesPhone(text, toolResult)) {
 			return "review_phone_changed";
+		}
+		if (reviewReplyMissingBookingIdentity(text, toolResult)) {
+			return "review_identity_missing";
 		}
 		if (reviewReplyNeedsChatGuestAddress(text, sc, known, toolResult, latestGuest)) {
 			return "review_addressed_booking_holder";
@@ -18562,6 +18674,44 @@ async function executeBrainFirstDecision({
 			})
 		);
 	}
+	const paymentConfirmationForGuard =
+		cleanString(nextKnown.confirmation || "", 60) || latestReservationConfirmationFromConversation(sc);
+	if (
+		paymentAtHotelReplyNeedsCorrection(nextDecision, latestGuest, {
+			confirmation: paymentConfirmationForGuard,
+			reservationAlreadyConfirmed,
+		})
+	) {
+		const beforePaymentRepairKnown = nextKnown;
+		const confirmation = paymentConfirmationForGuard;
+		if (confirmation && !nextKnown.confirmation) {
+			nextKnown = { ...nextKnown, confirmation };
+		}
+		const repaired = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: nextDecision,
+			code: "payment_at_hotel_policy_guard",
+			extra: {
+				confirmation: nextKnown.confirmation || confirmation || "",
+				reservationAlreadyConfirmed,
+			},
+			instruction:
+				"The guest asked whether payment at the hotel/reception/on arrival is possible. Hotel facts.paymentPolicy/serviceFacts.payment are authoritative: return action=reply and answer yes naturally. If reservationAlreadyConfirmed=true or confirmation is present, mention the confirmation number/reception. Professionally recommend using the payment link, even for a partial payment/deposit when the link allows it, because it better secures the room and shows seriousness. Make clear online payment is recommended but not mandatory, and if the guest does not pay online now the confirmed reservation remains valid and the hotel may contact them only to confirm arrival. Do not say you cannot confirm pay-on-arrival, do not say only the payment link is available, do not run a quote/review/booking action, and do not ask for card details.",
+		});
+		nextDecision = normalizeDecision(repaired.decision);
+		changedFields = decisionChangedFields(nextDecision);
+		nextKnown = syncKnownFromQuote(
+			preserveRoomSelectionForNonRoomTurn(
+				beforePaymentRepairKnown,
+				repaired.known,
+				latestText,
+				{ changedFields }
+			)
+		);
+	}
 	if (replyPromisesQuoteCheck(nextDecision.reply) && !shouldForceQuote(nextDecision, nextKnown, latestGuest)) {
 		const repaired = await repairQuotePromiseDecision({
 			sc,
@@ -18833,6 +18983,7 @@ async function executeBrainFirstDecision({
 	if (
 		latestContinuesShownQuote &&
 		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
 		!latestGuestRejectsQuoteOrSelection(latestText) &&
 		!latestClarifiesRequiredBookingDetail
 	) {
@@ -19018,6 +19169,59 @@ async function executeBrainFirstDecision({
 		known: nextKnown,
 		latestGuest,
 	});
+	const finalPaymentConfirmationForGuard =
+		cleanString(nextKnown.confirmation || "", 60) || latestReservationConfirmationFromConversation(sc);
+	if (
+		paymentAtHotelReplyNeedsCorrection(
+			{ ...nextDecision, action: "reply", reply },
+			latestGuest,
+			{
+				confirmation: finalPaymentConfirmationForGuard,
+				reservationAlreadyConfirmed,
+			}
+		)
+	) {
+		const confirmation = finalPaymentConfirmationForGuard;
+		if (confirmation && !nextKnown.confirmation) {
+			nextKnown = { ...nextKnown, confirmation };
+		}
+		const repairedPayment = await repairBrainDecisionWithInstruction({
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			decision: { ...nextDecision, action: "reply", reply },
+			code: "payment_at_hotel_final_reply_guard",
+			extra: {
+				confirmation: nextKnown.confirmation || confirmation || "",
+				reservationAlreadyConfirmed,
+			},
+			instruction:
+				"The final customer-facing payment reply contradicted the authoritative payment policy. Return action=reply only in the guest language. Say yes: the guest can pay at the hotel/reception/on arrival. If confirmation is present, mention the confirmation number/reception. Recommend the payment link, even for a partial payment/deposit when available, because it better secures the room and shows seriousness. Also say online payment is not mandatory and the confirmed reservation remains valid if they do not pay online now. Do not say pay-on-arrival cannot be confirmed, do not say only the payment link is available, and do not ask for card details.",
+		});
+		nextDecision = normalizeDecision(repairedPayment.decision);
+		nextKnown = syncKnownFromQuote(
+			preserveRoomSelectionForNonRoomTurn(nextKnown, repairedPayment.known, latestText, {
+				changedFields: decisionChangedFields(nextDecision),
+			})
+		);
+		reply = cleanDisplayString(nextDecision.reply || reply, 1800);
+		reply = applyCustomerReplySafetyGuards({
+			reply,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			previousAi,
+		});
+		reply = sanitizeCustomerReplyHotelName({
+			reply,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+		});
+	}
 	if (
 		latestGuestMentionsMealsOrBreakfast(latestGuest) &&
 		!effectiveHotelHasMealsService(hotel) &&
@@ -21640,6 +21844,9 @@ const exportedOrchestrator = {
 		latestGuestAsksRoomPhotos,
 		latestGuestAsksPayAtHotel,
 		buildPostConfirmationPayAtHotelMessage,
+		replyContradictsPayAtHotelPolicy,
+		replyAffirmsPayAtHotelPolicy,
+		paymentAtHotelReplyNeedsCorrection,
 		replyTooSimilarToRecentAi,
 		replySimilarityScore,
 		guestDeclinesOptionalEmail,
@@ -21752,6 +21959,7 @@ const exportedOrchestrator = {
 		reviewReplyHasOfficialToolFacts,
 		reviewReplyClaimsBookingConfirmed,
 		reviewReplyNeedsCleanFormatting,
+		reviewReplyMissingBookingIdentity,
 		reviewReplyNeedsChatGuestAddress,
 		replyContainsEmoji,
 		stripReplyEmoji,
@@ -21818,6 +22026,7 @@ const exportedOrchestrator = {
 		replyOmitsConfirmedBusDetails,
 		replyContradictsBusService,
 		replyContradictsNusukFact,
+		replyOmitsConfirmedNusukFact,
 		replyContradictsParkingFact,
 		replyDefersKnownHotelFact,
 		replyStatesRoomOnlyNoMeals,

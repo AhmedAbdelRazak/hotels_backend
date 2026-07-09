@@ -556,6 +556,33 @@ check("Confirmed bus facts reject vague transport deferrals", () => {
 	);
 });
 
+check("Confirmed Nusuk fact cannot be omitted from a compound service answer", () => {
+	const latestGuest = guest(
+		"\u0628\u0639\u062f \u0627\u0644\u062d\u062c\u0632\u060c \u0639\u0646\u062f\u0643\u0645 \u0628\u0627\u0635\u061f \u0648\u0646\u0633\u0643\u061f \u0648\u0627\u0644\u0644\u0648\u0643\u064a\u0634\u0646\u061f"
+	);
+	const nusukHotel = {
+		...hotel,
+		isNusuk: true,
+		isNusukText: "\u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643.",
+		distances: { walkingToElHaram: "15 minutes walking" },
+		hotelAddress: "Ajyad, Makkah",
+	};
+	const omitted =
+		"\u0646\u0639\u0645\u060c \u064a\u0648\u062c\u062f \u0628\u0627\u0635 \u0644\u0645\u0648\u0642\u0641 \u0627\u0644\u0634\u0647\u062f\u0627\u0621. \u0627\u0644\u0645\u0648\u0642\u0639 \u0642\u0631\u064a\u0628 \u0645\u0646 \u0627\u0644\u062d\u0631\u0645.";
+	assert.strictEqual(orchestrator.replyOmitsConfirmedNusukFact(omitted, nusukHotel), true);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: omitted },
+			nusukHotel,
+			latestGuest
+		),
+		true
+	);
+	const answered =
+		"\u0646\u0639\u0645\u060c \u064a\u0648\u062c\u062f \u0628\u0627\u0635 \u0644\u0645\u0648\u0642\u0641 \u0627\u0644\u0634\u0647\u062f\u0627\u0621\u060c \u0648\u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643. \u0627\u0644\u0645\u0648\u0642\u0639 \u064a\u0628\u0639\u062f 15 \u062f\u0642\u064a\u0642\u0629 \u0645\u0634\u064a.";
+	assert.strictEqual(orchestrator.replyOmitsConfirmedNusukFact(answered, nusukHotel), false);
+});
+
 check("Hotel fact replies cannot dump raw booking numbers", () => {
 	assert.strictEqual(
 		orchestrator.hotelFactReplyHasRawBookingNumberDump(
@@ -1003,6 +1030,13 @@ check("Date correction after quote is not treated as continuing old quote", () =
 	);
 });
 
+check("Hotel fact question before continuing a quote is not swallowed as continue", () => {
+	const previousQuote = ai("Quote ready", "quote_ready");
+	const latest = "\u0642\u0628\u0644 \u0645\u0627 \u0623\u0643\u0645\u0644\u060c \u0647\u0644 \u0639\u0646\u062f\u0643\u0645 \u0623\u062a\u0648\u0628\u064a\u0633 \u0644\u0644\u062d\u0631\u0645\u061f";
+	assert.strictEqual(orchestrator.latestGuestAsksHotelFactOnly(guest(latest)), true);
+	assert.strictEqual(orchestrator.latestGuestContinuesAfterQuote(previousQuote, latest, ""), false);
+});
+
 check("Budget objection reply is concise and explains no-commission direct booking", () => {
 	const reply = orchestrator.buildValueObjectionFallbackReply(
 		{ preferredLanguageCode: "en", displayName1: "Ahmed" },
@@ -1356,6 +1390,42 @@ check("Post-confirmation pay-at-hotel questions get a clear confirmation answer"
 		orchestrator.latestGuestAsksPayAtHotel("\u064a\u0646\u0641\u0639 \u0627\u062f\u0641\u0639 \u0641\u064a \u0627\u0644\u0641\u0646\u062f\u0642\u061f"),
 		true
 	);
+	const liveQuestion = "\u0647\u0644 \u064a\u0645\u0643\u0646 \u0627\u0644\u062f\u0641\u0639 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644";
+	const liveBadReply =
+		"\u0623\u0633\u062a\u0627\u0630 \u0623\u062d\u0645\u062f\u060c \u0627\u0644\u0645\u062a\u0627\u062d \u0644\u064a \u062d\u0627\u0644\u064a\u0627 \u0647\u0648 \u0627\u0644\u062f\u0641\u0639 \u0639\u0628\u0631 \u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639 \u0627\u0644\u062e\u0627\u0635 \u0628\u0627\u0644\u062d\u062c\u0632. \u0644\u0627 \u0623\u0633\u062a\u0637\u064a\u0639 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062f\u0641\u0639 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644 \u0645\u0646 \u062f\u0627\u062e\u0644 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629.";
+	assert.strictEqual(orchestrator.latestGuestAsksPayAtHotel(liveQuestion), true);
+	assert.strictEqual(orchestrator.replyContradictsPayAtHotelPolicy(liveBadReply), true);
+	assert.strictEqual(
+		orchestrator.paymentAtHotelReplyNeedsCorrection(
+			{ action: "reply", reply: liveBadReply },
+			guest(liveQuestion)
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.paymentAtHotelReplyNeedsCorrection({ action: "get_quote", reply: "" }, guest(liveQuestion)),
+		true
+	);
+	const tooLightConfirmedReply =
+		"\u0646\u0639\u0645\u060c \u064a\u0645\u0643\u0646 \u0627\u0644\u062f\u0641\u0639 \u0641\u064a \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644. \u0646\u0646\u0635\u062d \u0628\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639 \u0625\u0630\u0627 \u0643\u0627\u0646 \u0623\u0646\u0633\u0628 \u0644\u0643.";
+	assert.strictEqual(
+		orchestrator.paymentAtHotelReplyNeedsCorrection(
+			{ action: "reply", reply: tooLightConfirmedReply },
+			guest(liveQuestion),
+			{ confirmation: "2544466389", reservationAlreadyConfirmed: true }
+		),
+		true
+	);
+	const tooLightNoPaymentLink =
+		"\u0646\u0639\u0645\u060c \u064a\u0645\u0643\u0646 \u0627\u0644\u062f\u0641\u0639 \u0641\u064a \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644. \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f: 2544466389. \u0627\u0644\u062d\u062c\u0632 \u064a\u0638\u0644 \u0642\u0627\u0626\u0645\u0627.";
+	assert.strictEqual(
+		orchestrator.paymentAtHotelReplyNeedsCorrection(
+			{ action: "reply", reply: tooLightNoPaymentLink },
+			guest(liveQuestion),
+			{ confirmation: "2544466389", reservationAlreadyConfirmed: true }
+		),
+		true
+	);
 	const reply = orchestrator.buildPostConfirmationPayAtHotelMessage(
 		{
 			clientName: "Shaimaa Elsherif",
@@ -1377,6 +1447,14 @@ check("Post-confirmation pay-at-hotel questions get a clear confirmation answer"
 	assert(reply.includes("\u062c\u062f\u064a\u0629 \u0627\u0644\u062d\u0636\u0648\u0631"));
 	assert(reply.includes("\u0627\u0644\u062d\u062c\u0632 \u064a\u0638\u0644 \u0642\u0627\u0626\u0645"));
 	assert(!/\u063a\u0627\u0644\u0628(?:\u0627|\u064b)/u.test(reply));
+	assert.strictEqual(
+		orchestrator.paymentAtHotelReplyNeedsCorrection(
+			{ action: "reply", reply },
+			guest(liveQuestion),
+			{ confirmation: "2544466389", reservationAlreadyConfirmed: true }
+		),
+		false
+	);
 });
 
 check("Repeated AI wording is detected before sending robotic replies", () => {
@@ -1605,12 +1683,27 @@ check("Official review with tool facts is not blocked as vague progress", () => 
 	].join("\n");
 	assert.strictEqual(orchestrator.replyPromisesProgressWithoutAction(reply), true);
 	assert.strictEqual(orchestrator.reviewReplyHasOfficialToolFacts(reply, toolResult), true);
+	assert.strictEqual(orchestrator.reviewReplyMissingBookingIdentity(reply, toolResult), false);
 	assert.strictEqual(
 		orchestrator.reviewReplyHasOfficialToolFacts(
 			"I will continue with the same booking details now.",
 			toolResult
 		),
 		false
+	);
+	assert.strictEqual(
+		orchestrator.reviewReplyMissingBookingIdentity(
+			[
+				"Here is the official booking review:",
+				"Phone: 0551000099",
+				"Nationality: Egyptian",
+				"Dates: 2026-07-18 to 2026-07-20",
+				"Guests: 2 adults",
+				"Total: 150 SAR",
+			].join("\n"),
+			toolResult
+		),
+		true
 	);
 });
 
@@ -1634,6 +1727,15 @@ check("Conditional review wording is not treated as already confirmed", () => {
 	assert.strictEqual(
 		orchestrator.reviewReplyClaimsBookingConfirmed(
 			"\u062a\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632"
+		),
+		true
+	);
+});
+
+check("Arabic issue-booking confirmation invite is treated as official review handoff", () => {
+	assert.strictEqual(
+		orchestrator.replyInvitesConfirmationAction(
+			"\u062a\u0645\u0627\u0645 \u064a\u0627 \u0623\u0633\u062a\u0627\u0630 \u064a\u0627\u0633\u0631\u060c \u062a\u0645 \u0627\u0633\u062a\u0644\u0627\u0645 \u0627\u0644\u0627\u0633\u0645 \u0648\u0627\u0644\u062c\u0648\u0627\u0644 \u0648\u0627\u0644\u062c\u0646\u0633\u064a\u0629. \u0647\u0644 \u062a\u0624\u0643\u062f \u0627\u0644\u0645\u0636\u064a \u0641\u064a \u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u062c\u0632\u061f"
 		),
 		true
 	);

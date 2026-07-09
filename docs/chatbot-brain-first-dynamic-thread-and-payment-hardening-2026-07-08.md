@@ -651,3 +651,109 @@ Sync points:
 Future-us clue:
 
 - If a hotel profile has confirmed service facts, especially bus, meals, location, or payment facts, the brain should answer from those facts confidently. For Zad Ajyad bus questions, the expected answer is not "send me your stay date/time"; it should confirm the hotel provides a bus/private transport to `موقف الشهداء` while avoiding guarantees about exact operating times unless those times are present in hotel facts.
+
+### 2026-07-09 Brain-First Payment, Review, and Compound-Fact Addendum
+
+Context:
+
+- Follow-up live-style QA focused on the new brain-first structure after the payment-at-hotel conversation and the bus/Nusuk/location detours.
+- The architecture rule remains: the first point of contact is the OpenAI brain, the brain decides the action, and the server only executes tools, validates authoritative facts, sends messages, and asks the same brain path to repair unsafe or incomplete replies.
+- No return to the legacy orchestrator was made.
+- No external mini-brain was added for room counts, dates, adults/children, payment, bus, Nusuk, or location.
+
+Main findings:
+
+1. Payment-at-hotel answer after a confirmed booking could be too restrictive.
+   - The problematic answer said the only available option was the payment link and that the chatbot could not confirm payment on arrival.
+   - Correct policy: payment at hotel/reception/on arrival is possible; paying online or paying a deposit through the payment link is recommended because it better secures the room and shows seriousness; online payment is not mandatory; if the reservation is already confirmed, not paying online immediately does not cancel it, but the hotel may contact the guest to confirm arrival.
+
+2. Official review replies could occasionally omit required identity facts.
+   - The official pre-submission review is the last checkpoint before reservation creation.
+   - The brain-written review is now validated against `toolResult.review.fullName` and `toolResult.review.nationality`. If either is missing, the reply is rejected and rewritten by the brain from the authoritative review facts.
+
+3. A normal reply could invite the guest to confirm issuing the booking before the official review.
+   - Example wording caught during QA: `هل تؤكد المضي في إصدار الحجز؟`
+   - The existing confirmation-invitation detector now catches Arabic variants such as `تؤكد`, `تأكد`, `توكيد`, `المضي`, and `إصدار الحجز`.
+   - When all booking facts and the quote are complete, this routes to `send_review` instead of sending a normal text reply.
+
+4. Hotel-fact detours containing "continue" words could be swallowed by the quote continuation path.
+   - Example: `قبل ما أكمل، هل عندكم أتوبيس للحرم؟`
+   - `latestGuestContinuesAfterQuote` now refuses to treat a message as simple continuation when the latest message is actually a hotel fact/service question.
+
+5. Compound service questions could answer bus/location but omit Nusuk.
+   - Scenario 38 caught a post-confirmation question asking about bus, Nusuk, and location together.
+   - The hotel-fact validation already rejected contradictions for Nusuk; it now also rejects omission when the guest asked about Nusuk and the hotel facts say `isNusuk=true` or provide Nusuk details.
+
+6. QA cleanup needed stronger database safety.
+   - During manual cleanup, a custom query used the wrong reservation field name (`supportCaseId`) against Mongoose.
+   - Because Mongoose `strictQuery` can strip unknown query fields, the query matched far more than intended on the production-connected Mongo tunnel.
+   - This deleted `17657` documents from `hotels.reservations`.
+   - Immediate recovery was performed from `/home/ahmedadmin/backups/mongodb/critical/hotels-reservations-20260708-200001.archive.gz` using `mongorestore --gzip --archive=... --nsInclude=hotels.reservations --drop`.
+   - Restore result: `17657 document(s) restored successfully`, `0` failed.
+   - Verification after restore: reservation count returned to `17657`; support cases with `reservation_confirmed` since `2026-07-09T03:00:00Z` were `0`, so there was no evidence of a real guest reservation lost during the short window.
+   - A post-restore backup was created at `/home/ahmedadmin/backups/mongodb/manual-restore/codex-reservations-restore-20260708-2005/hotels-reservations-post-restore.archive.gz`.
+   - Future-us rule: never run cleanup/deletion queries using uncertain field names, and never allow Mongoose to strip unknown cleanup fields silently.
+
+Code enhancements:
+
+- `aiagent/core/orchestrator.js`
+  - Added payment-at-hotel policy validation:
+    - `replyContradictsPayAtHotelPolicy`
+    - `replyAffirmsPayAtHotelPolicy`
+    - `replyMentionsConfirmedPaymentContext`
+    - `replyMentionsPaymentLinkDepositGuidance`
+    - `paymentAtHotelReplyNeedsCorrection`
+  - Added official-review identity validation:
+    - `reviewReplyMissingBookingIdentity`
+    - repair reason: `review_identity_missing`
+  - Expanded Arabic confirmation-invitation detection so pseudo-review wording routes to official review.
+  - Hardened hotel-fact detour handling so a fact question is not misclassified as "continue after quote".
+  - Added confirmed-Nusuk omission validation:
+    - `replyOmitsConfirmedNusukFact`
+
+- `scripts/chatbotRegressionChecks.js`
+  - Added/updated regression coverage for payment-at-hotel, official review identity, Arabic issue-booking handoff, continuation-versus-hotel-fact intent, and compound Nusuk omission.
+
+- `scripts/liveChatbotQa.js`
+  - Added live QA scenarios after the original 34 back-and-forth scenarios:
+    - Scenario 35: `Live payment-at-arrival wording after confirmed booking is answered yes`
+    - Scenario 36: `Bus Nusuk and location detours preserve review on request`
+    - Scenario 37: `Initial compound bus Nusuk location answer then booking continues`
+    - Scenario 38: `Post-confirmation service facts stay factual and do not reopen booking`
+  - Total active back-and-forth live QA scenarios in the script are now `38`.
+  - Scenario 36 review-name assertion accepts both Arabic spelling forms `منى كودكس` and `مني كودكس`; this is QA tolerance only, not product logic.
+
+Validation completed before this addendum:
+
+- Static checks passed:
+  - `node --check aiagent/core/orchestrator.js`
+  - `node --check scripts/chatbotRegressionChecks.js`
+  - `node --check scripts/liveChatbotQa.js`
+- Regression suite passed locally:
+  - `npm run test:chatbot`
+  - `89` checks.
+- Live QA targeted checks:
+  - Scenario 35 passed in the 35-38 run.
+  - Scenario 38 passed isolated after the compound Nusuk omission fix.
+  - The 35-38 combined run then stopped on scenario 36 because the QA expected only `منى كودكس`, while the brain can naturally render `مني كودكس`; the assertion was corrected to accept both forms.
+  - Per the user's instruction to stop broad testing and proceed to documentation/deploy, the full 1-38 live suite was not rerun after this final QA-tolerance change.
+
+Brain-first note:
+
+- These changes are narrow fact/action validators and same-brain repair prompts.
+- The customer-facing payment, review, bus, Nusuk, and location language is still generated by the OpenAI brain.
+- The server does not introduce a new hard-coded room/adult/child/date/payment interpreter as the main decision maker.
+- The server's role is to protect authoritative facts and prevent impossible states:
+  - no raw protocol JSON in guest messages;
+  - no official review missing booking identity;
+  - no confirmed hotel fact being contradicted or omitted;
+  - no payment policy contradiction;
+  - no reservation submission before the official review checkpoint.
+
+Future-us clues:
+
+- If a guest asks `هل يمكن الدفع عند الوصول` after reservation confirmation, expected answer is yes, with a professional nudge toward the payment link/deposit and reassurance that the confirmed reservation remains valid if the guest does not pay online immediately.
+- If the brain says "only payment link" or "I cannot confirm payment at arrival", treat it as a policy contradiction.
+- If a guest asks multiple service facts in one message (`bus + Nusuk + location`), the final reply must answer all requested facts, not just one or two.
+- If the brain asks the guest to confirm "issuing" or "creating" the booking after all required details are present, the correct next action is official review, not a normal text reply.
+- If a QA cleanup script touches reservations, it must use known schema fields, disable strict query stripping, print counts before deletion, and refuse broad deletes.

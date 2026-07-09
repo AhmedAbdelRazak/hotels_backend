@@ -19,6 +19,7 @@ if (fastMode) {
 require("dotenv").config();
 
 const mongoose = require("mongoose");
+mongoose.set("strictQuery", false);
 const SupportCase = require("../models/supportcase");
 const Reservations = require("../models/reservations");
 const Hotel = require("../models/hotel_details");
@@ -190,6 +191,35 @@ function assertNoFakeConfirmation(reply = "", label = "") {
 			!/رقم\s*(?:التأكيد|الحجز)\s*[:#-]?\s*\d{6,}/u.test(text),
 		`${label || "reply"} appears to invent a confirmation number`
 	);
+}
+
+function assertPayAtHotelAccepted(reply = "", latestQuestion = "", label = "") {
+	assert(
+		!testApi.replyContradictsPayAtHotelPolicy ||
+			!testApi.replyContradictsPayAtHotelPolicy(reply),
+		`${label || "payment reply"} contradicted pay-at-hotel policy`
+	);
+	assert(
+		!testApi.paymentAtHotelReplyNeedsCorrection ||
+			!testApi.paymentAtHotelReplyNeedsCorrection(
+				{ action: "reply", reply },
+				{ message: latestQuestion || "هل يمكن الدفع عند الوصول" }
+			),
+		`${label || "payment reply"} still needs pay-at-hotel correction`
+	);
+	assertMatches(reply, /نعم|يمكن|ينفع|تقدر|فندق|وصول|استقبال|hotel|arrival|reception|pay/i, label || "payment reply");
+}
+
+function assertConfirmedBusReply(reply = "", label = "") {
+	assertMatches(reply, /باص|اتوبيس|أتوبيس|نقل|مواصلات|bus|shuttle|transport/i, label || "bus reply");
+	assertMatches(reply, /الشهداء|شهداء|Martyrs|Shuhada/i, label || "bus stop");
+	assert(!/لا\s+أستطيع\s+تأكيد|لا\s+اقدر\s+اؤكد|لا\s+أقدر\s+أؤكد|cannot\s+confirm|can't\s+confirm/i.test(reply), `${label || "bus reply"} deferred a confirmed bus fact`);
+}
+
+function assertNusukAvailable(reply = "", label = "") {
+	assertMatches(reply, /نسك|nusuk/i, label || "Nusuk reply");
+	assertMatches(reply, /متاح|available|yes|نعم|ضمن|حجز/i, label || "Nusuk availability");
+	assert(!/لا\s+أستطيع\s+تأكيد|cannot\s+confirm|can't\s+confirm/i.test(reply), `${label || "Nusuk reply"} deferred a confirmed Nusuk fact`);
 }
 
 function assertIncludesAny(reply = "", values = [], label = "") {
@@ -452,6 +482,11 @@ async function reservationsForCase(caseId) {
 
 async function cleanupReservationsForCase(caseId) {
 	const rows = await reservationsForCase(caseId);
+	if (rows.length > 20) {
+		throw new Error(
+			`Refusing per-case reservation cleanup for ${caseId}: matched ${rows.length} rows`
+		);
+	}
 	const ids = rows.map((row) => row._id).filter(Boolean);
 	for (const id of ids) {
 		runState.reservationIds.add(String(id));
@@ -1073,6 +1108,140 @@ function buildScenarios(ctx) {
 				},
 			],
 		},
+		{
+			name: "Live payment-at-arrival wording after confirmed booking is answered yes",
+			hotel: "ajyad",
+			languageCode: "ar",
+			reservation: true,
+			steps: [
+				{
+					message: `\u0627\u062d\u062a\u0627\u062c \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0644\u0640 4 \u0646\u0632\u0644\u0627\u0621 \u0645\u0646 ${quad.checkinISO} \u0625\u0644\u0649 ${quad.checkoutISO}`,
+					expect: ({ ai }) => assertDiscountMarkup(ai.message, "live payment quote"),
+				},
+				{ message: "\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639" },
+				{
+					message: `\u0627\u0644\u0627\u0633\u0645 \u0645\u062d\u0645\u062f \u0627\u0644\u0633\u064a\u062f \u0641\u0647\u0645\u0649 \u0648\u0627\u0644\u062c\u0648\u0627\u0644 ${scenarioPhone(35)} \u0648\u0627\u0644\u062c\u0646\u0633\u064a\u0629 \u0623\u0641\u063a\u0627\u0646\u064a`,
+					expect: ({ ai }) =>
+						assertMatches(ai.message, /email|\u0628\u0631\u064a\u062f|\u0627\u062e\u062a\u064a\u0627\u0631\u064a|\u0645\u062d\u0645\u062f\s+\u0627\u0644\u0633\u064a\u062f|review|\u0645\u0631\u0627\u062c\u0639\u0629|\u0625\u062a\u0645\u0627\u0645|\u0627\u0644\u062d\u062c\u0632/i, "live payment optional email or review"),
+				},
+				{ message: "\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f \u0625\u0644\u0643\u062a\u0631\u0648\u0646\u064a" },
+				{
+					message: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /\u062a\u0623\u0643\u064a\u062f|confirmation|\d{8,}/i, "live payment confirmation");
+						await assertReservationCreated(caseId, "live payment final submit");
+					},
+				},
+				{
+					message: "\u0647\u0644 \u064a\u0645\u0643\u0646 \u0627\u0644\u062f\u0641\u0639 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644",
+					expect: ({ ai }) => {
+						assertPayAtHotelAccepted(ai.message, "\u0647\u0644 \u064a\u0645\u0643\u0646 \u0627\u0644\u062f\u0641\u0639 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644", "live exact pay-at-arrival");
+						assertMatches(ai.message, /\d{8,}|\u0631\u0642\u0645\s+\u0627\u0644\u062a\u0623\u0643\u064a\u062f|confirmation/i, "live exact payment confirmation number");
+						assertMatches(ai.message, /\u0631\u0627\u0628\u0637\s+\u0627\u0644\u062f\u0641\u0639|payment\s+link|\u0639\u0631\u0628\u0648\u0646|deposit/i, "live exact payment link/deposit guidance");
+					},
+				},
+			],
+		},
+		{
+			name: "Bus Nusuk and location detours preserve review on request",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO}`,
+					expect: ({ ai }) => assertDiscountMarkup(ai.message, "detour review quote"),
+				},
+				{
+					message: "\u0642\u0628\u0644 \u0645\u0627 \u0623\u0643\u0645\u0644\u060c \u0647\u0644 \u0639\u0646\u062f\u0643\u0645 \u0623\u062a\u0648\u0628\u064a\u0633 \u0644\u0644\u062d\u0631\u0645\u061f",
+					expect: ({ ai }) => assertConfirmedBusReply(ai.message, "detour bus"),
+				},
+				{
+					message: "\u0648\u0646\u0633\u0643 \u0645\u062a\u0627\u062d\u061f",
+					expect: ({ ai }) => assertNusukAvailable(ai.message, "detour Nusuk"),
+				},
+				{
+					message: "\u0637\u064a\u0628 \u0627\u0644\u0645\u0648\u0642\u0639 \u0641\u064a\u0646 \u0648\u0643\u0645 \u064a\u0628\u0639\u062f \u0639\u0646 \u0627\u0644\u062d\u0631\u0645\u061f",
+					expect: ({ ai }) => assertMatches(ai.message, /15|\u0661\u0665|2|\u0662|map|maps|\u0645\u0648\u0642\u0639|\u062d\u0631\u0645|\u0639\u0646\u0648\u0627\u0646/i, "detour location"),
+				},
+				{ message: "\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639" },
+				{
+					message: `\u0627\u0644\u0627\u0633\u0645 \u0645\u0646\u0649 \u0643\u0648\u062f\u0643\u0633 \u0648\u0627\u0644\u062c\u0648\u0627\u0644 ${scenarioPhone(36)} \u0648\u0627\u0644\u062c\u0646\u0633\u064a\u0629 \u0645\u0635\u0631\u064a`,
+					expect: ({ ai }) =>
+						assertMatches(ai.message, /email|\u0628\u0631\u064a\u062f|\u0627\u062e\u062a\u064a\u0627\u0631\u064a|\u0645\u0646\u0649\s+\u0643\u0648\u062f\u0643\u0633|review|\u0645\u0631\u0627\u062c\u0639\u0629|\u0625\u062a\u0645\u0627\u0645|\u0627\u0644\u062d\u062c\u0632/i, "detour optional email or review"),
+				},
+				{
+					message: "\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f",
+					expect: ({ ai }) => {
+						assertMatches(ai.message, /\u0645\u0646[\u0649\u064a]\s+\u0643\u0648\u062f\u0643\u0633|Mona\s+Codex/i, "detour review name");
+						assertDateRangeMention(ai.message, stay.checkinISO, stay.checkoutISO, "detour first review dates");
+						assertMatches(ai.message, /\u0625\u062a\u0645\u0627\u0645|\u0623\u0643\u0645\u0644|\u0623\u0624\u0643\u062f|\u0635\u062d\u064a\u062d|\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a|confirm|complete|correct/i, "detour review confirmation ask");
+					},
+				},
+				{
+					message: "\u0645\u0645\u0643\u0646 \u0623\u0634\u0648\u0641 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0643\u0627\u0645\u0644\u0629 \u0645\u0631\u0629 \u062b\u0627\u0646\u064a\u0629 \u0642\u0628\u0644 \u0645\u0627 \u0623\u0623\u0643\u062f\u061f",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /\u0645\u0646[\u0649\u064a]\s+\u0643\u0648\u062f\u0643\u0633|Mona\s+Codex/i, "repeat review name");
+						assertDateRangeMention(ai.message, stay.checkinISO, stay.checkoutISO, "repeat review dates");
+						assertDiscountMarkup(ai.message, "repeat review");
+						const rows = await reservationsForCase(caseId);
+						assert(rows.length === 0, "repeat review request created reservation before confirmation");
+					},
+				},
+			],
+		},
+		{
+			name: "Initial compound bus Nusuk location answer then booking continues",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: "\u0627\u0644\u0645\u0648\u0642\u0639 \u0641\u064a\u0646\u061f \u0648\u0647\u0644 \u0639\u0646\u062f\u0643\u0645 \u0628\u0627\u0635 \u0644\u0644\u062d\u0631\u0645\u061f \u0648\u0646\u0633\u0643 \u0645\u062a\u0627\u062d\u061f",
+					expect: ({ ai }) => {
+						assertMatches(ai.message, /15|\u0661\u0665|2|\u0662|map|maps|\u0645\u0648\u0642\u0639|\u062d\u0631\u0645|\u0639\u0646\u0648\u0627\u0646/i, "initial compound location");
+						assertConfirmedBusReply(ai.message, "initial compound bus");
+						assertNusukAvailable(ai.message, "initial compound Nusuk");
+					},
+				},
+				{
+					message: `\u0645\u0645\u062a\u0627\u0632\u060c \u0623\u0631\u064a\u062f \u0627\u0644\u0633\u0639\u0631 \u0644\u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO}`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "compound then quote");
+						assertNoPrematureIdentityRequest(ai.message, "compound then quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Post-confirmation service facts stay factual and do not reopen booking",
+			hotel: "ajyad",
+			languageCode: "ar",
+			reservation: true,
+			steps: [
+				{
+					message: `\u0627\u062d\u062c\u0632 \u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO}`,
+					expect: ({ ai }) => assertDiscountMarkup(ai.message, "post-confirmation facts quote"),
+				},
+				{ message: "\u0646\u0639\u0645 \u062a\u0627\u0628\u0639" },
+				{ message: `\u0627\u0644\u0627\u0633\u0645 \u064a\u0627\u0633\u0631 \u0643\u0648\u062f\u0643\u0633 \u0648\u0627\u0644\u062c\u0648\u0627\u0644 ${scenarioPhone(38)} \u0648\u0627\u0644\u062c\u0646\u0633\u064a\u0629 \u0645\u0635\u0631\u064a` },
+				{ message: "\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f" },
+				{
+					message: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /\u062a\u0623\u0643\u064a\u062f|confirmation|\d{8,}/i, "post-confirmation facts confirmation");
+						await assertReservationCreated(caseId, "post-confirmation facts submit");
+					},
+				},
+				{
+					message: "\u0628\u0639\u062f \u0627\u0644\u062d\u062c\u0632\u060c \u0639\u0646\u062f\u0643\u0645 \u0628\u0627\u0635\u061f \u0648\u0646\u0633\u0643\u061f \u0648\u0627\u0644\u0644\u0648\u0643\u064a\u0634\u0646\u061f",
+					expect: ({ ai }) => {
+						assertConfirmedBusReply(ai.message, "post-confirmation facts bus");
+						assertNusukAvailable(ai.message, "post-confirmation facts Nusuk");
+						assertMatches(ai.message, /15|\u0661\u0665|2|\u0662|map|maps|\u0645\u0648\u0642\u0639|\u062d\u0631\u0645|\u0639\u0646\u0648\u0627\u0646/i, "post-confirmation facts location");
+						assert(!/\u0623\u0631\u0633\u0644\s+\u0644\u064a\s+\u062a\u0627\u0631\u064a\u062e|\u0623\u062d\u062a\u0627\u062c.*\u062a\u0627\u0631\u064a\u062e|send.*date|check.?in/i.test(ai.message), "post-confirmation service fact reopened booking details");
+					},
+				},
+			],
+		},
 	];
 }
 
@@ -1160,6 +1329,12 @@ async function cleanup() {
 		],
 	};
 	const reservations = await Reservations.find(reservationQuery).select("_id confirmation_number aiSupportCaseId").lean();
+	const cleanupSafetyLimit = Math.max(100, caseIds.length * 5 + trackedReservationIds.length + 20);
+	if (reservations.length > cleanupSafetyLimit) {
+		throw new Error(
+			`Refusing marker cleanup for ${marker}: matched ${reservations.length} reservations, limit ${cleanupSafetyLimit}`
+		);
+	}
 	const reservationIds = reservations.map((row) => row._id);
 	if (reservationIds.length) {
 		await Reservations.deleteMany({ _id: { $in: reservationIds } });
