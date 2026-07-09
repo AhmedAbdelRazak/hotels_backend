@@ -2133,6 +2133,75 @@ function isoDateRangeFactsFromText(value = "") {
 	return { checkinISO: dates[0], checkoutISO: dates[1], dateCalendar: "gregorian" };
 }
 
+function previousAiLooksLikePriceCollection(entry = {}) {
+	const action = String(entry?.clientAction || "").toLowerCase();
+	if (
+		[
+			"quote_ready",
+			"quote_unavailable",
+			"get_quote",
+			"available_quote",
+			"same_date_room_options_ready",
+		].includes(action)
+	) {
+		return true;
+	}
+	if (aiMessageLooksLikeDisplayedQuote(entry)) return true;
+	const text = normalizeIntentSearchText(entry?.message || "").toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:price|rate|quote|total|discount|availability|available)\b/i.test(text) ||
+		/(?:\u0633\u0639\u0631|\u0627\u0644\u0633\u0639\u0631|\u062e\u0635\u0645|\u0645\u062a\u0627\u062d|\u0627\u0644\u062a\u0648\u0641\u0631|\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a)/u.test(
+			compact
+		)
+	);
+}
+
+function latestGuestSuppliesCheckoutBoundary(value = "", known = {}, previousAi = {}) {
+	if (!latestGuestMentionsDateish(value)) return false;
+	if (quickDateFactsFromText(value)?.checkoutISO) return true;
+	if (dateOnlyRangeFactsFromText(value, known)?.checkoutISO) return true;
+	if (labeledDateBoundaryFactsFromText(value, known)?.checkoutISO) return true;
+	const priorCustomerFacingAi =
+		previousAi && isAiSupportEntry(previousAi) && !previousAi.isSystem ? previousAi : {};
+	if (dateBoundaryFactsFromAskedAnswer(value, known, priorCustomerFacingAi)?.checkoutISO) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(value).toLowerCase();
+	return /(?:\b(?:to|until|till|through|thru|checkout|check\s*out|departure|depart|leave|leaving)\b|\u0627\u0644\u0649|\u0625\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u0644\u063a\u0627\u064a\u0629|\u0644\u063a\u0627\u064a\u0647|\u0627\u0644\u062e\u0631\u0648\u062c|\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0647|\u0645\u063a\u0627\u062f\u0631\u0629|\u0645\u063a\u0627\u062f\u0631\u0647)/i.test(text);
+}
+
+function dateFactsFromBrainAcknowledgedReply(
+	reply = "",
+	latestText = "",
+	previousAi = {},
+	known = {}
+) {
+	if (!String(reply || "").trim() || !latestGuestMentionsDateish(latestText)) return null;
+	const priorCustomerFacingAi =
+		previousAi && isAiSupportEntry(previousAi) && !previousAi.isSystem ? previousAi : null;
+	if (!priorCustomerFacingAi) return null;
+	if (
+		!previousAiLooksLikePriceCollection(priorCustomerFacingAi) &&
+		!previousAiAskedForCheckinDate(priorCustomerFacingAi) &&
+		!previousAiAskedForCheckoutDate(priorCustomerFacingAi)
+	) {
+		return null;
+	}
+	if (!latestGuestSuppliesCheckoutBoundary(latestText, known, priorCustomerFacingAi)) return null;
+	const isoFacts = isoDateRangeFactsFromText(reply);
+	if (isoFacts?.checkinISO && isoFacts?.checkoutISO) return isoFacts;
+	const quickFacts = quickDateRange(reply);
+	if (quickFacts?.checkinISO && quickFacts?.checkoutISO) {
+		return {
+			checkinISO: quickFacts.checkinISO,
+			checkoutISO: quickFacts.checkoutISO,
+			dateCalendar: quickFacts.raw?.calendar || "gregorian",
+		};
+	}
+	return null;
+}
+
 function latestStayDateFactsFromConversation(sc = {}, known = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	for (let index = conversation.length - 1; index >= 0; index -= 1) {
@@ -2217,10 +2286,10 @@ function quoteHasContent(value = {}) {
 function initialKnownFacts(sc = {}) {
 	const snapshot = asObject(sc.aiStateSnapshot);
 	const known = asObject(snapshot.known);
-	return {
+	return applySelectedSameDateRoomOptionLock({
 		...known,
 		quote: asObject(known.quote),
-	};
+	});
 }
 
 function usefulProfileName(sc = {}) {
@@ -3502,7 +3571,13 @@ function mergeKnownFacts(current = {}, next = {}) {
 		delete merged.phoneNeedsConfirmation;
 	}
 	const email = cleanEmail(source.email || guest.email);
-	if (email) merged.email = email;
+	if (email) {
+		merged.email = email;
+		delete merged.emailSkipped;
+	} else if (source.emailSkipped || guest.emailSkipped) {
+		merged.emailSkipped = true;
+		delete merged.email;
+	}
 	const sourceNationality = source.nationality || guest.nationality;
 	const normalizedNationality =
 		nationalityFromText(sourceNationality) ||
@@ -4035,6 +4110,26 @@ function guestConfirms(value = "", action = "") {
 		return !/\b(no|not|wrong|change|cancel|don't|dont|stop)\b/i.test(text);
 	}
 	return false;
+}
+
+function guestExplicitlyRequestsBookingSubmit(value = "", action = "") {
+	const cleanAction = cleanString(action, 80).toLowerCase();
+	if (["place_reservation", "confirm_reservation", "submit_reservation"].includes(cleanAction)) {
+		return true;
+	}
+	const text = normalizeIntentSearchText(repairMojibakeText(value))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:complete|finalize|place|submit|confirm|create)\b.{0,50}\b(?:booking|reservation)\b/i.test(text) ||
+		/\bbook\s+it\b/i.test(text) ||
+		/(?:\u0625\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632|\u0627\u062a\u0645\u0627\u0645\u0627\u0644\u062d\u062c\u0632|\u0623\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0627\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u064a\u0627\u0644\u062d\u062c\u0632|\u0643\u0645\u0644\u0649\u0627\u0644\u062d\u062c\u0632|\u0623\u0643\u062f\u0627\u0644\u062d\u062c\u0632|\u0627\u0643\u062f\u0627\u0644\u062d\u062c\u0632|\u0627\u0639\u062a\u0645\u062f\u0627\u0644\u062d\u062c\u0632|\u062b\u0628\u062a\u0627\u0644\u062d\u062c\u0632)/iu.test(
+			compact
+		)
+	);
 }
 
 function guestRequestsBookingReviewStep(value = "", action = "") {
@@ -6535,6 +6630,38 @@ function replyLooksLikeManualBookingReview(reply = "") {
 	return reviewWords && detailWords;
 }
 
+function arabicReplyLooksLikeManualBookingReview(reply = "") {
+	const text = normalizeDigits(repairMojibakeText(String(reply || ""))).toLowerCase();
+	if (!text.trim()) return false;
+	const hasReviewContext =
+		/\u0645\u0631\u0627\u062c\u0639\u0629|\u062a\u0641\u0627\u0635\u064a\u0644\s+(?:\u0627\u0644)?\u062d\u062c\u0632|\u0642\u0628\u0644.{0,30}(?:\u0625\u062a\u0645\u0627\u0645|\u0627\u062a\u0645\u0627\u0645|\u0625\u0646\u0634\u0627\u0621|\u0627\u0646\u0634\u0627\u0621)\s*(?:\u0627\u0644)?\u062d\u062c\u0632/u.test(
+			text
+		);
+	const detailPatterns = [
+		/\u0627\u0644\u0627?\u0633\u0645|\u0627\u0633\u0645\s+(?:\u0627\u0644)?(?:\u0636\u064a\u0641|\u0627\u0644\u0646\u0632\u064a\u0644|\u0635\u0627\u062d\u0628\s+\u0627\u0644\u062d\u062c\u0632)/u,
+		/\u0627\u0644\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641|\u0631\u0642\u0645\s+(?:\u0627\u0644)?(?:\u062c\u0648\u0627\u0644|\u0627\u0644\u0647\u0627\u062a\u0641)/u,
+		/\u0627\u0644\u062c\u0646\u0633\u064a\u0629/u,
+		/\u0627\u0644\u0648\u0635\u0648\u0644|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|\u062a\u0627\u0631\u064a\u062e/u,
+		/\u0627\u0644\u063a\u0631\u0641\u0629|\u0627\u0644\u063a\u0631\u0641|\u0645\u0632\u062f\u0648\u062c|\u062b\u0644\u0627\u062b\u064a|\u0631\u0628\u0627\u0639\u064a|\u0639\u0627\u0626\u0644/u,
+		/\u0627\u0644\u0636\u064a\u0648\u0641|\u0627\u0644\u0646\u0632\u0644\u0627\u0621|\u0628\u0627\u0644\u063a|\u0623\u0637\u0641\u0627\u0644|\u0627\u0637\u0641\u0627\u0644/u,
+		/\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a|\u0627\u0644\u0627\u062c\u0645\u0627\u0644\u064a|\u0631\u064a\u0627\u0644|sar/u,
+	];
+	const detailHits = detailPatterns.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0);
+	return hasReviewContext && detailHits >= 3;
+}
+
+function previousAiLooksLikeOfficialReviewForSubmit(sc = {}, latestGuest = null, previousAi = null) {
+	const entry = previousAi || previousAiEntryBeforeLatestGuest(sc, latestGuest);
+	if (!entry || !isAiSupportEntry(entry)) return false;
+	const action = cleanString(entry.clientAction, 80).toLowerCase();
+	if (action === "review_reservation") return true;
+	const message = String(entry.message || "");
+	return (
+		(replyLooksLikeManualBookingReview(message) || arabicReplyLooksLikeManualBookingReview(message)) &&
+		replyInvitesConfirmationAction(message)
+	);
+}
+
 function replyConfirmsBookingWithoutAction(reply = "") {
 	const text = normalizeDigits(String(reply || "")).toLowerCase();
 	if (!text.trim()) return false;
@@ -7026,7 +7153,12 @@ function hotelFactBurstQuestion(sc = {}, latestGuest = {}) {
 }
 
 function hotelFactQuestionForCurrentTurn(sc = {}, latestGuest = {}) {
-	return hotelFactBurstQuestion(sc, latestGuest) || hotelFactContinuationQuestion(sc, latestGuest);
+	const burstQuestion = hotelFactBurstQuestion(sc, latestGuest);
+	if (burstQuestion) return burstQuestion;
+	if (latestGuestAsksHotelFactOnly(latestGuest)) {
+		return cleanDisplayString(latestGuest?.message || "", 900);
+	}
+	return hotelFactContinuationQuestion(sc, latestGuest);
 }
 
 function latestGuestAsksHotelFactInContext(sc = {}, latestGuest = {}) {
@@ -8309,6 +8441,12 @@ function postHotelFactBookingBridge(sc = {}, hotel = {}, known = {}, latestGuest
 	const hotelName = hotelDisplayNameForLanguage(hotel, languageCode);
 	if (ar) {
 		if (hasDates && (hasGuestCount || hasRoomPlan)) {
+			return `\u0625\u0630\u0627 \u062a\u062d\u0628\u060c \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u062a\u0648\u0641\u0631 \u0648\u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u0622\u0646\u060c \u0648\u0645\u0639 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631 \u0639\u0646\u062f\u0646\u0627 ${discountText} \u062d\u0633\u0628 \u0627\u0644\u062a\u0648\u0641\u0631.`;
+		}
+		return `\u0644\u0648 \u064a\u0646\u0627\u0633\u0628\u0643 ${hotelName}\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0639\u062f\u062f \u0627\u0644\u0646\u0632\u0644\u0627\u0621 \u0648\u0639\u062f\u062f \u0627\u0644\u063a\u0631\u0641\u060c \u0648\u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u0627\u0644\u0633\u0639\u0631 \u0645\u0639 ${discountText}.`;
+	}
+	if (ar) {
+		if (hasDates && (hasGuestCount || hasRoomPlan)) {
 			return `إذا تحب، أراجع لك التوفر والسعر الآن، ومع الحجز المباشر عندنا ${discountText} حسب التوفر.`;
 		}
 		return `لو يناسبك ${hotelName}، أرسل لي تاريخ الدخول والخروج وعدد النزلاء، وأراجع لك السعر مع ${discountText}.`;
@@ -8358,6 +8496,26 @@ function hotelFactReplyAlreadyHasBookingBridge(reply = "") {
 			text
 		) ||
 		/(?:تاريخالدخول|الدخولوالخروج|تاريخالخروج|عددالنزلاء|عددالضيوف|التوفروالسعر|السعر|الحجزالمباشر|خصم)/u.test(
+			compact
+		)
+	);
+}
+
+function hotelFactReplyHasConcreteBookingBridge(reply = "") {
+	const text = normalizeIntentSearchText(reply)
+		.replace(/\s+/g, " ")
+		.trim()
+		.toLowerCase();
+	if (!text) return false;
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:check[\s-]?in|checkout|check[\s-]?out|availability|live rate|rate|price|direct booking|discount)\b/i.test(
+			text
+		) ||
+		/(?:\u062a\u0627\u0631\u064a\u062e\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u062f\u062e\u0648\u0644\u0648\u0627\u0644\u062e\u0631\u0648\u062c|\u062a\u0627\u0631\u064a\u062e\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u062a\u0648\u0641\u0631\u0648\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u062a\u0648\u0641\u0631|\u0627\u0644\u0633\u0639\u0631|\u0627\u0644\u062d\u062c\u0632\u0627\u0644\u0645\u0628\u0627\u0634\u0631|\u062e\u0635\u0645)/u.test(
+			compact
+		) ||
+		/(?:ØªØ§Ø±ÙŠØ®Ø§Ù„Ø¯Ø®ÙˆÙ„|Ø§Ù„Ø¯Ø®ÙˆÙ„ÙˆØ§Ù„Ø®Ø±ÙˆØ¬|ØªØ§Ø±ÙŠØ®Ø§Ù„Ø®Ø±ÙˆØ¬|Ø§Ù„ØªÙˆÙØ±ÙˆØ§Ù„Ø³Ø¹Ø±|Ø§Ù„ØªÙˆÙØ±|Ø§Ù„Ø³Ø¹Ø±|Ø§Ù„Ø­Ø¬Ø²Ø§Ù„Ù…Ø¨Ø§Ø´Ø±|Ø®ØµÙ…)/u.test(
 			compact
 		)
 	);
@@ -9028,6 +9186,30 @@ function replyStatesRoomOnlyNoMeals(reply = "") {
 	);
 }
 
+function replyMentionsNearbyFoodAlternative(reply = "") {
+	const text = normalizeDigits(String(reply || ""))
+		.toLowerCase()
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return (
+		/\b(?:nearby|around|close\s+to|outside|surrounding|area).{0,100}(?:restaurant|restaurants|food|services)\b/i.test(text) ||
+		/\b(?:restaurant|restaurants|food|services).{0,100}(?:nearby|around|close\s+to|outside|surrounding|area)\b/i.test(text) ||
+		/(?:\u062d\u0648\u0644|\u0642\u0631\u064a\u0628|\u0642\u0631\u064a\u0628\u0629|\u0628\u0627\u0644\u0642\u0631\u0628|\u0627\u0644\u0645\u0646\u0637\u0642\u0629).{0,100}(?:\u0645\u0637\u0639\u0645|\u0645\u0637\u0627\u0639\u0645|\u062e\u062f\u0645\u0627\u062a|\u0627\u0643\u0644|\u0623\u0643\u0644)/u.test(text) ||
+		/(?:\u0645\u0637\u0639\u0645|\u0645\u0637\u0627\u0639\u0645|\u062e\u062f\u0645\u0627\u062a|\u0627\u0643\u0644|\u0623\u0643\u0644).{0,100}(?:\u062d\u0648\u0644|\u0642\u0631\u064a\u0628|\u0642\u0631\u064a\u0628\u0629|\u0628\u0627\u0644\u0642\u0631\u0628|\u0627\u0644\u0645\u0646\u0637\u0642\u0629)/u.test(text)
+	);
+}
+
+function appendNearbyFoodAlternative(reply = "", latestGuest = {}) {
+	const base = cleanDisplayString(reply, 1800);
+	if (replyMentionsNearbyFoodAlternative(base)) return base;
+	const ar = /[\u0600-\u06FF]/.test(`${latestGuest?.message || ""} ${base}`);
+	const sentence = ar
+		? "\u0648\u062a\u0648\u062c\u062f \u0645\u0637\u0627\u0639\u0645 \u0648\u062e\u062f\u0645\u0627\u062a \u0642\u0631\u064a\u0628\u0629 \u062d\u0648\u0644 \u0627\u0644\u0641\u0646\u062f\u0642 \u0644\u062a\u0633\u0647\u064a\u0644 \u062a\u0631\u062a\u064a\u0628 \u0627\u0644\u0648\u062c\u0628\u0627\u062a."
+		: "Nearby restaurants and services around the hotel make meals easy to arrange.";
+	return [base, sentence].filter(Boolean).join("\n\n");
+}
+
 function hotelFactGuardConstraints(hotel = {}, latestGuest = {}) {
 	const wantsLocation = latestGuestAsksMapOrLocation(latestGuest);
 	const wantsBus = latestGuestMentionsBus(latestGuest);
@@ -9241,7 +9423,8 @@ function hotelFactReplyNeedsCorrection(decision = {}, hotel = {}, latestGuest = 
 		return (
 			replyPromisesHotelMeals(decision?.reply) ||
 			replyDefersKnownHotelFact(decision?.reply) ||
-			!replyStatesRoomOnlyNoMeals(decision?.reply)
+			!replyStatesRoomOnlyNoMeals(decision?.reply) ||
+			!replyMentionsNearbyFoodAlternative(decision?.reply)
 		);
 	}
 	if (latestGuestMentionsParking(latestGuest) && hotel?.parkingLot === true) {
@@ -9914,6 +10097,8 @@ function orchestratorContractPrompt() {
 		"- When action requires a tool, include every known stay fact needed by that tool in facts, especially checkinISO, checkoutISO, roomTypeKey, rooms, roomSelections, adults, children, and languageCode.",
 		"- If a multi-room request is known, facts.roomSelections must be the canonical state. facts.rooms must equal the total count across roomSelections.",
 		"- If only one room type is selected, facts.roomTypeKey should match that roomSelections item. If the guest only changes the count, preserve the known roomTypeKey in roomSelections.",
+		"- Respect a clear room request. If the guest asks for 2 double rooms, quote and continue with 2 double rooms; do not suggest or compare a quad/family alternative unless the guest explicitly asks to compare, says they are unsure, asks what is better/cheaper, or the requested setup cannot reasonably fit the party/availability. When the guest explicitly compares options, give a helpful sales comparison without forcing a change, then continue with the option they choose.",
+		"- If the guest's selected room setup is unsuitable for the party, explain it professionally and suggest a suitable room plan from active hotel rooms. Example: 5 guests cannot fit in one double room, so suggest a family/five-bed room or another suitable combination when available, with exact quote only after the server quote.",
 		"- For one customer request with multiple separate same-hotel date ranges, use facts.splitStayPeriods instead of forcing one checkinISO/checkoutISO. The orchestrator will quote each period separately and, after official review confirmation, create one normal reservation per period instead of an unsafe merged reservation.",
 		"- In split-stay requests, facts.rooms and facts.roomSelections are the room mix for each separate stay period, not the sum across all periods. Example: one double room from date A-B and one double room from date C-D means splitStayPeriods has two periods, rooms=1, and roomSelections=[{roomTypeKey:\"doubleRooms\",count:1}].",
 		"- Hotel facts may include room offers, monthly packages, public base pricing, directBookingOffer, amenities, serviceFacts, propertyRules, location, Nusuk, bus service, cancellation/policy QA, and room descriptions. Use those facts naturally for sales and guidance; use action=get_quote for exact final price/availability.",
@@ -9928,6 +10113,7 @@ function orchestratorContractPrompt() {
 function compactKnownFactsForPrompt(known = {}) {
 	const facts = syncKnownFromQuote(asObject(known));
 	const quote = asObject(facts.quote);
+	const selectedSameDateRoomOption = selectedSameDateRoomOptionFromKnown(facts);
 	const compact = {
 		languageCode: facts.languageCode || "",
 		languageName: facts.languageName || "",
@@ -9961,6 +10147,18 @@ function compactKnownFactsForPrompt(known = {}) {
 		reviewSentAt: facts.reviewSentAt || "",
 		jannatPlatformTransfer: Boolean(facts.jannatPlatformTransfer),
 		jannatPlatformTransferAt: facts.jannatPlatformTransferAt || "",
+		sameDateRoomSelectionLocked: Boolean(selectedSameDateRoomOption),
+		sameDateRoomSelectedOption: selectedSameDateRoomOption
+			? {
+					roomTypeKey: selectedSameDateRoomOption.roomTypeKey || "",
+					roomLabel: selectedSameDateRoomOption.roomLabel || "",
+					requestedRooms: Number(selectedSameDateRoomOption.requestedRooms || 0) || 0,
+					quotedRooms: Number(selectedSameDateRoomOption.quotedRooms || 0) || 0,
+					checkinISO: selectedSameDateRoomOption.checkinISO || "",
+					checkoutISO: selectedSameDateRoomOption.checkoutISO || "",
+					roomSelections: normalizeRoomSelections(selectedSameDateRoomOption.roomSelections),
+			  }
+			: null,
 		alternativeStays: Array.isArray(facts.alternativeStays)
 			? facts.alternativeStays.slice(0, 3).map((option) => ({
 					checkinISO: option.checkinISO || "",
@@ -9974,7 +10172,9 @@ function compactKnownFactsForPrompt(known = {}) {
 					currency: option.currency || "SAR",
 			  }))
 			: [],
-		sameDateRoomOptions: Array.isArray(facts.sameDateRoomOptions)
+		sameDateRoomOptions: selectedSameDateRoomOption
+			? []
+			: Array.isArray(facts.sameDateRoomOptions)
 			? facts.sameDateRoomOptions.slice(0, 3).map((option) => ({
 					roomTypeKey: option.roomTypeKey || "",
 					roomLabel: option.roomLabel || "",
@@ -12460,18 +12660,152 @@ function sameDateRoomChoiceFromText(
 		const option = options[Number(optionMatch[1]) - 1];
 		if (option?.roomTypeKey) return option;
 	}
-	if (action === "select_room_option") {
-		const normalizedText = normalizeIntentSearchText(text);
-		return (
-			options.find((option) => {
-				const label = normalizeIntentSearchText(
-					option.roomLabel || roomTypeLabel(option.roomTypeKey, activeLanguageCode({}, known))
-				);
-				return label && normalizedText.includes(label);
-			}) || null
-		);
+	const normalizedText = normalizeIntentSearchText(text);
+	const normalizedRoomText = normalizeNumberWordsForParsing(normalizedText)
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	const selections = extractRoomSelectionsFromText(text);
+	const matchingSelection = selections.find((selection) => selection?.roomTypeKey);
+	const roomTypeCounts = options.reduce((counts, option) => {
+		if (option?.roomTypeKey) counts[option.roomTypeKey] = (counts[option.roomTypeKey] || 0) + 1;
+		return counts;
+	}, {});
+	const labelMatch = (option = {}) => {
+		const roomTypeKey = option.roomTypeKey || "";
+		const explicitSelection = selections.find((selection) => selection.roomTypeKey === roomTypeKey);
+		if (explicitSelection) {
+			const selectedCount = normalizeRoomCount(explicitSelection.count, 0);
+			const optionCount = normalizeRoomCount(
+				option.quotedRooms || option.requestedRooms || known.rooms || 1,
+				1
+			);
+			return (
+				roomTypeCounts[roomTypeKey] === 1 ||
+				!selectedCount ||
+				selectedCount === optionCount ||
+				selectedCount === normalizeRoomCount(option.requestedRooms, optionCount)
+			);
+		}
+		const matcher = ROOM_SELECTION_PATTERNS.find((item) => item.key === roomTypeKey);
+		if (matcher?.pattern?.test(normalizedRoomText) && roomTypeCounts[roomTypeKey] === 1) {
+			return true;
+		}
+		const candidates = [
+			option.roomLabel,
+			roomTypeLabel(roomTypeKey, "en"),
+			roomTypeLabel(roomTypeKey, "ar"),
+			roomTypeKey,
+		]
+			.map((candidate) => normalizeIntentSearchText(candidate || "").replace(/\s+/g, " ").trim())
+			.filter(Boolean);
+		return candidates.some((candidate) => {
+			const compactCandidate = candidate.replace(/\s+/g, "");
+			const compactText = normalizedText.replace(/\s+/g, "");
+			return (
+				(candidate.length >= 4 && normalizedText.includes(candidate)) ||
+				(normalizedText.length >= 4 &&
+					textMentionsRoomSelection(text) &&
+					candidate.includes(normalizedText)) ||
+				(compactCandidate.length >= 4 && compactText.includes(compactCandidate))
+			);
+		});
+	};
+	if (matchingSelection || action === "select_room_option" || textMentionsRoomSelection(text)) {
+		return options.find((option) => labelMatch(option)) || null;
 	}
 	return null;
+}
+
+function mergeSameDateRoomChoiceIntoKnown(known = {}, choice = {}) {
+	if (!choice?.roomTypeKey) return known;
+	const selectedRooms = normalizeRoomCount(
+		choice.quotedRooms || choice.requestedRooms || known.rooms || 1,
+		1
+	);
+	const roomSelections = normalizeRoomSelections(choice.roomSelections).length
+		? normalizeRoomSelections(choice.roomSelections)
+		: [{ roomTypeKey: choice.roomTypeKey, count: selectedRooms }];
+	const selectedOption = {
+		roomTypeKey: choice.roomTypeKey,
+		roomLabel: cleanDisplayString(
+			choice.roomLabel || roomTypeLabel(choice.roomTypeKey, known.languageCode),
+			120
+		),
+		requestedRooms: normalizeRoomCount(choice.requestedRooms || selectedRooms, selectedRooms),
+		quotedRooms: selectedRooms,
+		checkinISO: validISODate(choice.checkinISO || known.checkinISO) || "",
+		checkoutISO: validISODate(choice.checkoutISO || known.checkoutISO) || "",
+		nights: Number(choice.nights || 0) || 0,
+		total: Number(choice.total || 0) || 0,
+		currency: cleanString(choice.currency || known.currency || "SAR", 12) || "SAR",
+		roomSelections,
+	};
+	const merged = mergeKnownFacts(dropConflictingQuoteFromKnown(known), {
+		roomTypeKey: choice.roomTypeKey,
+		rooms: selectedRooms,
+		roomSelections,
+		checkinISO: choice.checkinISO || known.checkinISO || "",
+		checkoutISO: choice.checkoutISO || known.checkoutISO || "",
+		dateCalendar: "gregorian",
+	});
+	return applySelectedSameDateRoomOptionLock({
+		...merged,
+		sameDateRoomSelectedOption: selectedOption,
+		sameDateRoomSelectionLocked: true,
+	});
+}
+
+function selectedSameDateRoomOptionFromKnown(known = {}) {
+	if (!known?.sameDateRoomSelectionLocked) return null;
+	const option = asObject(known.sameDateRoomSelectedOption);
+	const roomTypeKey = option.roomTypeKey || known.roomTypeKey || "";
+	if (!ROOM_TYPE_KEYS.includes(roomTypeKey)) return null;
+	const selectedRooms = normalizeRoomCount(
+		option.quotedRooms || option.requestedRooms || known.rooms || 1,
+		1
+	);
+	const roomSelections = normalizeRoomSelections(option.roomSelections).length
+		? normalizeRoomSelections(option.roomSelections)
+		: [{ roomTypeKey, count: selectedRooms }];
+	return {
+		...option,
+		roomTypeKey,
+		quotedRooms: selectedRooms,
+		requestedRooms: normalizeRoomCount(option.requestedRooms || selectedRooms, selectedRooms),
+		roomSelections,
+		checkinISO: validISODate(option.checkinISO || known.checkinISO) || "",
+		checkoutISO: validISODate(option.checkoutISO || known.checkoutISO) || "",
+	};
+}
+
+function applySelectedSameDateRoomOptionLock(known = {}) {
+	const option = selectedSameDateRoomOptionFromKnown(known);
+	if (!option) return known;
+	const roomSelections = normalizeRoomSelections(option.roomSelections);
+	const next = {
+		...asObject(known),
+		sameDateRoomSelectionLocked: true,
+		sameDateRoomSelectedOption: option,
+		roomSelections,
+		rooms: roomSelectionsTotal(roomSelections),
+		checkinISO: option.checkinISO || known.checkinISO || "",
+		checkoutISO: option.checkoutISO || known.checkoutISO || "",
+	};
+	if (roomSelections.length === 1) next.roomTypeKey = roomSelections[0].roomTypeKey;
+	else delete next.roomTypeKey;
+	if (quoteHasContent(next.quote) && !quoteMatchesKnown(next)) delete next.quote;
+	if (Array.isArray(next.sameDateRoomOptions)) {
+		next.sameDateRoomOptions = next.sameDateRoomOptions.slice(0, 3);
+	}
+	return next;
+}
+
+function clearSelectedSameDateRoomOptionLock(known = {}) {
+	const next = { ...asObject(known) };
+	delete next.sameDateRoomSelectionLocked;
+	delete next.sameDateRoomSelectedOption;
+	return next;
 }
 
 function alternativeStayChoiceFromText(known = {}, latestText = "", previousAi = null) {
@@ -12739,12 +13073,18 @@ function originalAmountBeforeDirectDiscount(discountedValue = 0) {
 
 function directBookingDiscountText(languageCode = "en") {
 	const percent = formatNumber(DIRECT_BOOKING_DISCOUNT_RATE * 100, languageCode);
+	if (/^ar\b/i.test(languageCode)) {
+		return `\u062e\u0635\u0645 ${percent}\u066a \u0644\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631`;
+	}
 	return /^ar\b/i.test(languageCode)
 		? `خصم ${percent}٪ للحجز المباشر`
 		: `${percent}% direct-booking discount`;
 }
 
 function directBookingDiscountReason(languageCode = "en") {
+	if (/^ar\b/i.test(languageCode)) {
+		return "\u0644\u0623\u0646 \u0627\u0644\u062d\u062c\u0632 \u0645\u0628\u0627\u0634\u0631 \u0645\u0639 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0628\u062f\u0648\u0646 \u0639\u0645\u0648\u0644\u0629 \u0648\u0633\u064a\u0637.";
+	}
 	return /^ar\b/i.test(languageCode)
 		? "لأن الحجز مباشر مع الاستقبال بدون عمولة وسيط."
 		: "Because the booking is direct with reception, with no middleman commission.";
@@ -13029,6 +13369,24 @@ function reviewReplyMissingDiscountFormat(reply = "", toolResult = {}) {
 	);
 }
 
+function reviewReplyMissingConfirmationAsk(reply = "", toolResult = {}) {
+	if (toolResult?.tool !== "send_review" || toolResult?.code !== "review_ready") return false;
+	const text = normalizeIntentSearchText(reply)
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return true;
+	const compact = text.replace(/\s+/g, "");
+	return !(
+		/\b(?:confirm|complete|correct|continue|go\s+ahead|place\s+reservation|create\s+(?:the\s+)?booking)\b/i.test(
+			text
+		) ||
+		/(?:\u0625\u062a\u0645\u0627\u0645|\u0627\u062a\u0645\u0627\u0645|\u0623\u0643\u0645\u0644|\u0627\u0643\u0645\u0644|\u0623\u0624\u0643\u062f|\u0627\u0624\u0643\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0635\u062d\u064a\u062d|\u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a)/iu.test(
+			compact
+		)
+	);
+}
+
 function formatNightsLabel(value = 0, languageCode = "en") {
 	const nights = Math.max(0, Number(value || 0) || 0);
 	if (/^ar\b/i.test(languageCode)) {
@@ -13065,6 +13423,239 @@ function quoteRoomLinesText(quote = {}, fallbackRoomTypeKey = "", languageCode =
 			.join(" + ");
 	}
 	return roomDisplayLabel(quote.room, fallbackRoomTypeKey, languageCode);
+}
+
+function roomComparisonTextAsksBoth(value = "") {
+	const text = normalizeIntentSearchText(value).toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:both|compare|comparison|options?|either)\b/i.test(text) ||
+		/(?:\u0643\u0644\u0627\u0647\u0645\u0627|\u0627\u0644\u0627\u062b\u0646\u064a\u0646|\u0627\u0644\u0625\u062b\u0646\u064a\u0646|\u0627\u0644\u062e\u064a\u0627\u0631\u064a\u0646|\u0645\u0642\u0627\u0631\u0646\u0629|\u0627\u0644\u0627\u062e\u062a\u064a\u0627\u0631\u064a\u0646)/u.test(
+			compact
+		)
+	);
+}
+
+function roomComparisonTextHasAlternativeConnector(value = "") {
+	const text = normalizeIntentSearchText(value).toLowerCase();
+	return (
+		/\b(?:or|either)\b/i.test(text) ||
+		/(?:\u0623\u0648|\u0627\u0648|\u0623\u0645|\u0627\u0645)/u.test(text)
+	);
+}
+
+function previousAiAskedRoomComparisonChoice(entry = {}) {
+	const text = normalizeIntentSearchText(entry?.message || "").toLowerCase();
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:which|prefer|choose).{0,80}\b(?:option|room)\b/i.test(text) ||
+		/(?:\u0623\u064a\u0647\u0645\u0627|\u0623\u064a\u0647\u0645|\u0627\u064a\u0647\u0645\u0627|\u0627\u064a\u0647\u0645|\u062a\u0641\u0636\u0644|\u0627\u062e\u062a\u0631|\u062a\u062e\u062a\u0627\u0631)/u.test(
+			compact
+		)
+	);
+}
+
+function roomComparisonAlternativeSegments(value = "") {
+	const text = normalizeRoomCountMarkers(
+		normalizeNumberWordsForParsing(normalizeDigits(repairMojibakeText(String(value || ""))))
+	)
+		.replace(/\r/g, "\n")
+		.replace(/[\u060c\u061b;,]+/g, "\n");
+	return text
+		.split(/\n+|\s+(?:or|either|\u0623\u0648|\u0627\u0648|\u0623\u0645|\u0627\u0645)\s+/iu)
+		.map((part) => part.trim())
+		.filter(Boolean);
+}
+
+function uniqueRoomComparisonOptions(options = []) {
+	const seen = new Set();
+	const unique = [];
+	for (const option of Array.isArray(options) ? options : []) {
+		const selections = normalizeRoomSelections(option);
+		const key = roomSelectionKey(selections);
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		unique.push(selections);
+	}
+	return unique;
+}
+
+function roomPriceComparisonOptionsFromText(value = "", known = {}, previousAi = {}) {
+	const hasAlternativeConnector = roomComparisonTextHasAlternativeConnector(value);
+	const asksBoth = roomComparisonTextAsksBoth(value);
+	if (known?.sameDateRoomSelectionLocked && !hasAlternativeConnector && !asksBoth) {
+		return [];
+	}
+	const latestHasPriceIntent = guestAsksPriceAvailabilityOrBooking(value, "");
+	const priorPriceContext = previousAiLooksLikePriceCollection(previousAi);
+	const options = [];
+	if (hasAlternativeConnector) {
+		for (const segment of roomComparisonAlternativeSegments(value)) {
+			const selections = extractRoomSelectionsFromText(segment);
+			if (selections.length) options.push(selections);
+		}
+	}
+	const unique = uniqueRoomComparisonOptions(options);
+	if (
+		unique.length >= 2 &&
+		(asksBoth || latestHasPriceIntent || priorPriceContext || quoteMatchesKnown(known))
+	) {
+		return unique.slice(0, 3);
+	}
+	const knownSelections = normalizeRoomSelections(known.roomSelections);
+	if (
+		asksBoth &&
+		knownSelections.length >= 2 &&
+		(previousAiAskedRoomComparisonChoice(previousAi) ||
+			priorPriceContext ||
+			Array.isArray(known.sameDateRoomOptions))
+	) {
+		return knownSelections.map((selection) => [selection]).slice(0, 3);
+	}
+	return [];
+}
+
+function comparisonOptionKnown(known = {}, selections = []) {
+	const normalized = normalizeRoomSelections(selections);
+	const next = { ...dropConflictingQuoteFromKnown(known) };
+	delete next.quote;
+	next.roomSelections = normalized;
+	next.rooms = roomSelectionsTotal(normalized);
+	if (normalized.length === 1) next.roomTypeKey = normalized[0].roomTypeKey;
+	else delete next.roomTypeKey;
+	return syncKnownFromQuote(next);
+}
+
+function sameDateOptionFromComparisonQuote(optionKnown = {}, result = {}, languageCode = "en") {
+	const quote = asObject(result.quote);
+	const selections = selectionsFromKnown(optionKnown);
+	const requestedRooms = roomSelectionsTotal(selections) || normalizeRoomCount(optionKnown.rooms, 1);
+	const roomTypeKey =
+		quote.roomTypeKey ||
+		optionKnown.roomTypeKey ||
+		(selections.length === 1 ? selections[0].roomTypeKey : "");
+	const roomLabel = quoteRoomLinesText(
+		quoteHasContent(quote) ? quote : { rooms: selections },
+		roomTypeKey,
+		languageCode
+	);
+	return {
+		roomTypeKey,
+		roomLabel,
+		requestedRooms,
+		availableRooms: result.available ? requestedRooms : 0,
+		requestedRoomsAvailable: Boolean(result.available),
+		quotedRooms: quoteRoomCount(quote) || requestedRooms,
+		checkinISO: result.checkinISO || optionKnown.checkinISO || "",
+		checkoutISO: result.checkoutISO || optionKnown.checkoutISO || "",
+		nights: Number(quote.nights || nightsBetween(optionKnown.checkinISO, optionKnown.checkoutISO) || 0) || 0,
+		total: Number(quote.total || 0) || 0,
+		currency: quote.currency || result.currency || optionKnown.currency || "SAR",
+		roomSelections: selections,
+	};
+}
+
+function buildRoomComparisonQuoteMessage(sc = {}, known = {}, items = [], hotel = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar = /^ar\b/i.test(languageCode);
+	const dateLines = reviewDateLines(known, languageCode);
+	const availableItems = items.filter((item) => item?.result?.available && quoteHasContent(item.result.quote));
+	const hotelName = ar
+		? hotel.hotelName_OtherLanguage || hotel.hotelName || "\u0627\u0644\u0641\u0646\u062f\u0642"
+		: hotel.hotelName || hotel.hotelName_OtherLanguage || "the hotel";
+	const lines = [];
+	if (ar) {
+		lines.push(
+			`${arabicGuestAddress(sc, known, latestGuest?.message || "")}\u060c \u0642\u0627\u0631\u0646\u062a \u0644\u0643 \u0627\u0644\u062e\u064a\u0627\u0631\u064a\u0646 \u0641\u064a ${hotelName} \u062d\u0633\u0628 \u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u0637\u0644\u0648\u0628\u0629 \u0645\u0639 \u062e\u0635\u0645 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0645\u0628\u0627\u0634\u0631:`
+		);
+		lines.push(...dateLines);
+		items.forEach((item, index) => {
+			const option = sameDateOptionFromComparisonQuote(item.known, item.result, languageCode);
+			const quote = asObject(item.result.quote);
+			const label = option.roomLabel || quoteRoomLinesText({ rooms: item.selections }, item.known.roomTypeKey, languageCode);
+			const discount = quoteDiscountDisplay(quote, languageCode);
+			lines.push(`${formatNumber(index + 1, languageCode)}. \u0627\u0644\u062e\u064a\u0627\u0631: ${label}`);
+			if (item.result.available && quoteHasContent(quote)) {
+				if (discount?.displayAveragePerNightLine) lines.push(discount.displayAveragePerNightLine);
+				if (discount?.displayTotalLine) lines.push(discount.displayTotalLine);
+			} else {
+				lines.push(
+					"\u0647\u0630\u0627 \u0627\u0644\u062e\u064a\u0627\u0631 \u0644\u0627 \u064a\u0638\u0647\u0631 \u062a\u0648\u0641\u0631\u0627 \u0645\u0624\u0643\u062f\u0627 \u0644\u0646\u0641\u0633 \u0627\u0644\u0641\u062a\u0631\u0629 \u0627\u0644\u0622\u0646."
+				);
+			}
+		});
+		lines.push(
+			availableItems.length
+				? "\u0627\u062e\u062a\u0631 \u0627\u0644\u0623\u0646\u0633\u0628 \u0644\u0643\u060c \u0648\u0623\u0643\u0645\u0644 \u0644\u0643 \u0627\u0644\u062d\u062c\u0632 \u0645\u0628\u0627\u0634\u0631\u0629."
+				: "\u0644\u0648 \u062a\u062d\u0628\u060c \u0623\u0642\u062f\u0631 \u0623\u0631\u0627\u062c\u0639 \u0644\u0643 \u062a\u0648\u0627\u0631\u064a\u062e \u0623\u0648 \u062a\u0631\u062a\u064a\u0628 \u063a\u0631\u0641 \u0628\u062f\u064a\u0644."
+		);
+		return lines.filter(Boolean).join("\n");
+	}
+	lines.push(
+		`${guestDisplayName(sc)}, I checked both options at ${hotelName} for the requested dates with the direct-booking discount:`
+	);
+	lines.push(...dateLines);
+	items.forEach((item, index) => {
+		const option = sameDateOptionFromComparisonQuote(item.known, item.result, languageCode);
+		const quote = asObject(item.result.quote);
+		const label = option.roomLabel || quoteRoomLinesText({ rooms: item.selections }, item.known.roomTypeKey, languageCode);
+		const discount = quoteDiscountDisplay(quote, languageCode);
+		lines.push(`${index + 1}. Option: ${label}`);
+		if (item.result.available && quoteHasContent(quote)) {
+			if (discount?.displayAveragePerNightLine) lines.push(discount.displayAveragePerNightLine);
+			if (discount?.displayTotalLine) lines.push(discount.displayTotalLine);
+		} else {
+			lines.push("This option is not showing confirmed availability for the same dates right now.");
+		}
+	});
+	lines.push(
+		availableItems.length
+			? "Choose the option that works best and I will continue the booking for you."
+			: "I can check alternative dates or a different room setup if you like."
+	);
+	return lines.filter(Boolean).join("\n");
+}
+
+async function handleBrainRoomComparisonQuote(
+	io,
+	sc = {},
+	hotel = {},
+	known = {},
+	latestGuest = null,
+	options = [],
+	typingStartedAt = 0
+) {
+	const caseId = caseIdText(sc);
+	const languageCode = activeLanguageCode(sc, known);
+	const items = [];
+	for (const selections of uniqueRoomComparisonOptions(options).slice(0, 3)) {
+		let optionKnown = comparisonOptionKnown(known, selections);
+		optionKnown = filterInactiveRoomSelectionsForHotel(hotel, optionKnown, {
+			fallbackKnown: known,
+		}).known;
+		const result = await quoteTool(sc, optionKnown);
+		items.push({ selections: normalizeRoomSelections(selections), known: optionKnown, result });
+	}
+	const sameDateRoomOptions = items
+		.map((item) => sameDateOptionFromComparisonQuote(item.known, item.result, languageCode))
+		.filter((option) => option.roomTypeKey)
+		.slice(0, 3);
+	const nextKnown = {
+		...dropConflictingQuoteFromKnown(known),
+		sameDateRoomOptions,
+	};
+	delete nextKnown.quote;
+	await saveKnownFacts(caseId, nextKnown);
+	const reply = buildRoomComparisonQuoteMessage(sc, nextKnown, items, hotel, latestGuest);
+	await waitForTypingMinimum(typingStartedAt);
+	return sendAiMessage(io, sc, reply, {
+		latestGuest,
+		known: nextKnown,
+		clientAction: sameDateRoomOptions.length
+			? "same_date_room_options_ready"
+			: "same_date_room_options_unavailable",
+		quickReplies: roomOptionQuickReplies(sameDateRoomOptions, languageCode),
+	});
 }
 
 function hijriRangeText(known = {}) {
@@ -14667,12 +15258,13 @@ async function recoverIdleCloseTimers(io) {
 
 async function waitForGuestQuiet(caseId = "") {
 	const key = caseIdText(caseId);
-	for (let i = 0; i < 12; i += 1) {
+	for (let i = 0; i < 20; i += 1) {
 		const until = Number(guestTypingUntilByCase.get(key) || 0);
 		const remaining = until - now();
-		if (remaining <= 0) return;
+		if (remaining <= 0) return true;
 		await sleep(Math.min(remaining, 800));
 	}
+	return Number(guestTypingUntilByCase.get(key) || 0) <= now();
 }
 
 async function sendAiMessage(io, sc = {}, text = "", options = {}) {
@@ -14692,12 +15284,27 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 	}
 	if (!caseId || !message) return null;
 	const workerNoDirectEmit = Boolean(io?.__aiWorkerNoDirectEmit);
-	await waitForGuestQuiet(caseId);
+	const quiet = await waitForGuestQuiet(caseId);
+	if (!quiet) {
+		if (io && !workerNoDirectEmit) {
+			schedulePlanTurn(io, caseId, {
+				delayMs: AI_GUEST_REPLY_QUIET_MS,
+				reason: "guest_still_typing_before_send",
+			});
+		}
+		return await getSupportCaseById(caseId).catch(() => sc);
+	}
 	const latestBeforeSend = await getSupportCaseById(caseId).catch(() => null);
 	if (
 		options.latestGuest &&
 		(!latestBeforeSend || !latestGuestStillCurrent(latestBeforeSend, options.latestGuest))
 	) {
+		if (io && !workerNoDirectEmit) {
+			schedulePlanTurn(io, caseId, {
+				delayMs: AI_GUEST_REPLY_QUIET_MS,
+				reason: "new_guest_message_before_send",
+			});
+		}
 		return latestBeforeSend;
 	}
 	const languageCode = activeLanguageCode(sc, options.known || {});
@@ -14811,7 +15418,7 @@ async function sendAiMessage(io, sc = {}, text = "", options = {}) {
 
 async function saveKnownFacts(caseId = "", known = {}) {
 	if (!caseId) return;
-	const nextKnown = { ...asObject(known) };
+	const nextKnown = applySelectedSameDateRoomOptionLock({ ...asObject(known) });
 	const currentCase = await getSupportCaseById(caseId).catch(() => null);
 	const previousSnapshot = asObject(currentCase?.aiStateSnapshot);
 	if (!quoteHasContent(nextKnown.quote)) {
@@ -14833,7 +15440,9 @@ async function saveKnownFacts(caseId = "", known = {}) {
 }
 
 async function sendReview(io, sc = {}, known = {}, hotel = {}, latestGuest = null) {
-	let reviewKnown = syncKnownFromQuote({ ...known, quote: asObject(known.quote) });
+	let reviewKnown = applySelectedSameDateRoomOptionLock(
+		syncKnownFromQuote({ ...known, quote: asObject(known.quote) })
+	);
 	reviewKnown = ensureRoomPlanForGuestCapacity(hotel, reviewKnown).known;
 	if (!quoteMatchesKnown(reviewKnown) && quoteInputsKnown(reviewKnown)) {
 		const quoteResult = await quoteTool(sc, reviewKnown);
@@ -17135,6 +17744,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous official review was not sent because it did not address the chat guest/profile when the booking holder is a different person. Return the official pre-submission review from OpenAI only. Open by addressing the chat guest using guestAddress, guestAddressName, or guestProfileName from the user payload. List toolResult.review.fullName only as the booking holder/name inside the review details. Do not greet or address the booking holder as the chat guest unless they are clearly the same person."
 				: validation === "review_mixed_date_format"
 				? "Your previous review reply was not sent because it used a mixed or confusing date format. Return the official pre-submission review from OpenAI only. Use the exact clean dates from toolResult.review.checkinISO and toolResult.review.checkoutISO, or a clear localized date format. Do not combine day/month/year out of order and do not mix slash dates with ISO dates."
+				: validation === "review_confirmation_step_missing"
+				? "Your previous official review reply was not sent because it did not clearly ask the guest to confirm or complete the booking. Return the official pre-submission review from OpenAI only. Include the exact review facts and end by asking the guest to confirm if everything is correct before creating the reservation. Do not say the booking is already confirmed."
 				: validation === "emoji_used"
 				? "Your previous reply was not sent because it used an emoji or decorative symbol. Return the same customer-facing answer in a professional reception style without emojis, icons, or decorative symbols. Preserve all facts, prices, dates, links, and buttons."
 				: validation === "repetitive_reply"
@@ -17374,6 +17985,9 @@ async function sendBrainToolReplyFromOpenAI({
 		if (reviewReplyHasMixedDateFormat(text, toolResult)) {
 			return "review_mixed_date_format";
 		}
+		if (reviewReplyMissingConfirmationAsk(text, toolResult)) {
+			return "review_confirmation_step_missing";
+		}
 		if (reviewReplyMissingDiscountFormat(text, toolResult)) {
 			return "review_discount_format_missing";
 		}
@@ -17529,11 +18143,13 @@ async function sendBrainToolReplyFromOpenAI({
 	}
 	const suffix = String(replySuffix || "").trim();
 	if (suffix && !reply.includes(suffix)) {
+		const hotelFactBridgeSuffix =
+			toolResult?.tool === "hotel_fact" &&
+			toolResult?.postFactBookingBridge &&
+			suffix === String(toolResult.postFactBookingBridge || "").trim();
 		const hasEquivalentHotelFactBridge =
 			toolResult?.tool === "hotel_fact" &&
-			((toolResult?.postFactBookingBridge &&
-				suffix === String(toolResult.postFactBookingBridge || "").trim() &&
-				hotelFactReplyAlreadyHasBookingBridge(reply)) ||
+			((hotelFactBridgeSuffix && hotelFactReplyHasConcreteBookingBridge(reply)) ||
 				(toolResult?.bookingCheckpointWillBeAppended &&
 					hotelFactReplyAlreadyHasBookingCheckpoint(reply, known)));
 		if (!hasEquivalentHotelFactBridge) {
@@ -17555,6 +18171,7 @@ async function sendBrainToolReplyFromOpenAI({
 
 async function handleBrainQuote(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
+	known = applySelectedSameDateRoomOptionLock(known);
 	const latestText = String(latestGuest?.message || "");
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	if (
@@ -18055,7 +18672,10 @@ function applyOfficialReviewSnapshotForSubmit(known = {}) {
 
 async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
-	let reviewKnown = { ...known, quote: asObject(known.quote) };
+	let reviewKnown = applySelectedSameDateRoomOptionLock({
+		...known,
+		quote: asObject(known.quote),
+	});
 	if (normalizeSplitStayPeriods(reviewKnown.splitStayPeriods).length >= 2) {
 		if (!splitStayQuoteMatchesKnown(reviewKnown) && splitStayQuoteInputsKnown(reviewKnown)) {
 			return handleBrainSplitStayQuote(io, sc, hotel, reviewKnown, latestGuest, typingStartedAt);
@@ -18229,7 +18849,10 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 
 async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
 	const caseId = caseIdText(sc);
-	let submitKnown = { ...known, quote: asObject(known.quote) };
+	let submitKnown = applySelectedSameDateRoomOptionLock({
+		...known,
+		quote: asObject(known.quote),
+	});
 	if (normalizeSplitStayPeriods(submitKnown.splitStayPeriods).length >= 2) {
 		if (!splitStayQuoteMatchesKnown(submitKnown) && splitStayQuoteInputsKnown(submitKnown)) {
 			return handleBrainSplitStayQuote(io, sc, hotel, submitKnown, latestGuest, typingStartedAt);
@@ -18244,7 +18867,9 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 			tool: "submit_reservation",
 		});
 	}
-	submitKnown = applyOfficialReviewSnapshotForSubmit(submitKnown);
+	submitKnown = applySelectedSameDateRoomOptionLock(
+		applyOfficialReviewSnapshotForSubmit(submitKnown)
+	);
 	if (!submitKnown.quote || !quoteMatchesKnown(submitKnown)) {
 		const quote = await quoteTool(sc, submitKnown);
 		if (quote.available && quote.quote) {
@@ -18404,6 +19029,7 @@ async function executeBrainFirstDecision({
 	const contextualHotelFactQuestion = latestGuest
 		? hotelFactQuestionForCurrentTurn(sc, latestGuest)
 		: "";
+	known = applySelectedSameDateRoomOptionLock(known);
 	let nextDecision = normalizeDecision(decision);
 	if (officialReviewConfirmation) {
 		nextDecision = normalizeDecision({
@@ -18485,11 +19111,13 @@ async function executeBrainFirstDecision({
 		latestText,
 		{ changedFields }
 	);
-	nextKnown = syncKnownFromQuote(nextKnown);
+	nextKnown = applySelectedSameDateRoomOptionLock(syncKnownFromQuote(nextKnown));
 	nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
 		fallbackKnown: known,
 	}).known;
-	nextKnown = ensureRoomPlanForGuestCapacity(hotel, nextKnown).known;
+	nextKnown = applySelectedSameDateRoomOptionLock(
+		ensureRoomPlanForGuestCapacity(hotel, nextKnown).known
+	);
 	const latestFactsHint = latestMessageFactsHintForPrompt({
 		sc,
 		hotel,
@@ -18501,7 +19129,9 @@ async function executeBrainFirstDecision({
 			nextKnown,
 			latestHintFactsForMerge(latestFactsHint, nextDecision.facts, latestText)
 		);
-		nextKnown = ensureRoomPlanForGuestCapacity(hotel, nextKnown).known;
+		nextKnown = applySelectedSameDateRoomOptionLock(
+			ensureRoomPlanForGuestCapacity(hotel, nextKnown).known
+		);
 	}
 	if (
 		latestFactsHint.recommendedAction === "get_quote" &&
@@ -18516,6 +19146,84 @@ async function executeBrainFirstDecision({
 			});
 		}
 	}
+	const acknowledgedDateFacts = dateFactsFromBrainAcknowledgedReply(
+		nextDecision.reply,
+		latestText,
+		previousAi,
+		nextKnown
+	);
+	if (
+		acknowledgedDateFacts?.checkinISO &&
+		acknowledgedDateFacts?.checkoutISO &&
+		!latestGuestAsksHotelFactOnly(latestGuest)
+	) {
+		nextKnown = mergeKnownFacts(dropConflictingQuoteFromKnown(nextKnown), acknowledgedDateFacts);
+		nextKnown = syncKnownFromQuote(nextKnown);
+		if (quoteInputsKnown(nextKnown) && !quoteMatchesKnown(nextKnown)) {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "get_quote",
+				reply: "",
+				reason: nextDecision.reason || "brain_acknowledged_dates_require_quote",
+			});
+		}
+	}
+	const roomComparisonOptions = latestGuestAsksHotelFactOnly(latestGuest)
+		? []
+		: roomPriceComparisonOptionsFromText(latestText, nextKnown, previousAi);
+	if (
+		roomComparisonOptions.length >= 2 &&
+		validISODate(nextKnown.checkinISO) &&
+		validISODate(nextKnown.checkoutISO)
+	) {
+		const comparisonKnown = clearSelectedSameDateRoomOptionLock(
+			dropConflictingQuoteFromKnown(nextKnown)
+		);
+		await saveKnownFacts(key, comparisonKnown);
+		logOrchestratorDecision(
+			key,
+			"room_comparison_quote",
+			{ action: "room_comparison_quote", reason: "on_demand_room_price_comparison" },
+			comparisonKnown
+		);
+		return handleBrainRoomComparisonQuote(
+			io,
+			sc,
+			hotel,
+			comparisonKnown,
+			latestGuest,
+			roomComparisonOptions,
+			typingStartedAt
+		);
+	}
+	const sameDateRoomChoice = latestGuest && !latestGuestAsksHotelFactOnly(latestGuest)
+		? sameDateRoomChoiceFromText(nextKnown, latestText, latestAction, previousAi)
+		: null;
+	if (sameDateRoomChoice?.roomTypeKey) {
+		nextKnown = syncKnownFromQuote(
+			ensureRoomPlanForGuestCapacity(
+				hotel,
+				mergeSameDateRoomChoiceIntoKnown(nextKnown, sameDateRoomChoice)
+			).known
+		);
+		nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
+			fallbackKnown: known,
+		}).known;
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"same_date_room_option_selected",
+			{
+				action: "get_quote",
+				reason:
+					latestAction === "select_room_option"
+						? "same_date_room_option_button"
+						: "same_date_room_option_text",
+			},
+			nextKnown
+		);
+		return handleBrainQuote(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
 	if (officialReviewConfirmation) {
 		nextKnown = applyOfficialReviewSnapshotForSubmit(nextKnown);
 		await saveKnownFacts(key, nextKnown);
@@ -18523,6 +19231,27 @@ async function executeBrainFirstDecision({
 			key,
 			"official_review_confirmation_submit",
 			{ action: "submit_reservation", reason: "official_review_confirmation" },
+			nextKnown
+		);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainSubmitReservation(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
+		!officialReviewConfirmation &&
+		guestExplicitlyRequestsBookingSubmit(latestText, latestAction) &&
+		previousAiLooksLikeOfficialReviewForSubmit(sc, latestGuest, previousAi) &&
+		!knownHasCreatedReservation(nextKnown) &&
+		!conversationHasAiAction(sc, "reservation_confirmed") &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
+		!requiredBookingMissing(nextKnown).length
+	) {
+		nextKnown = applyOfficialReviewSnapshotForSubmit(nextKnown);
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"explicit_review_completion_submit",
+			{ action: "submit_reservation", reason: "explicit_review_completion_after_complete_review" },
 			nextKnown
 		);
 		await waitForTypingMinimum(typingStartedAt);
@@ -19015,6 +19744,22 @@ async function executeBrainFirstDecision({
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (
+		latestGuest &&
+		guestRequestsBookingReview(latestText) &&
+		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		!latestGuestRejectsQuoteOrSelection(latestText)
+	) {
+		await saveKnownFacts(key, nextKnown);
+		logOrchestratorDecision(
+			key,
+			"explicit_review_repeat_request",
+			{ action: "send_review", reason: "guest_requested_booking_review_details" },
+			nextKnown
+		);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (
 		(quoteMatchesKnown(nextKnown) || splitStayQuoteMatchesKnown(nextKnown)) &&
 		!matchingQuoteShownAfterLatestStayChange(sc, nextKnown) &&
 		!latestGuestAsksHotelFactOnly(latestGuest) &&
@@ -19341,7 +20086,7 @@ async function executeBrainFirstDecision({
 	const hotelFactBridge = directHotelFactReply
 		? postHotelFactBookingBridge(sc, hotel, nextKnown, latestGuest)
 		: "";
-	if (hotelFactBridge && !hotelFactReplyAlreadyHasBookingBridge(reply)) {
+	if (hotelFactBridge && !hotelFactReplyHasConcreteBookingBridge(reply)) {
 		const repairedBridge = await repairBrainDecisionWithInstruction({
 			sc,
 			hotel,
@@ -19375,6 +20120,19 @@ async function executeBrainFirstDecision({
 			known: nextKnown,
 			latestGuest,
 		});
+		if (!hotelFactReplyHasConcreteBookingBridge(reply)) {
+			reply = [String(reply || "").trim(), hotelFactBridge]
+				.filter(Boolean)
+				.join("\n\n");
+		}
+	}
+	if (
+		latestGuestMentionsMealsOrBreakfast(latestGuest) &&
+		!effectiveHotelHasMealsService(hotel) &&
+		replyStatesRoomOnlyNoMeals(reply) &&
+		!replyMentionsNearbyFoodAlternative(reply)
+	) {
+		reply = appendNearbyFoodAlternative(reply, latestGuest);
 	}
 	await waitForTypingMinimum(typingStartedAt);
 	return sendAiMessage(io, sc, reply, {
@@ -19522,6 +20280,7 @@ async function submitReservationForCase(io, caseOrId) {
 	const latestGuest = latestGuestEntry(sc);
 	let known = recoverKnownFactsFromConversation(sc, initialKnownFacts(sc));
 	known = mergeKnownFacts(known, languageFactsFromGuestText(latestGuest?.message || ""));
+	known = applySelectedSameDateRoomOptionLock(known);
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	known = confirmKnownIdentityIfGuestConfirms(
 		known,
@@ -19530,7 +20289,9 @@ async function submitReservationForCase(io, caseOrId) {
 		previousAi
 	);
 	known = dropConflictingQuoteFromKnown(known);
-	known = ensureRoomPlanForGuestCapacity(hotel, known).known;
+	known = applySelectedSameDateRoomOptionLock(
+		ensureRoomPlanForGuestCapacity(hotel, known).known
+	);
 	if (normalizeSplitStayPeriods(known.splitStayPeriods).length >= 2) {
 		if (!splitStayQuoteMatchesKnown(known) && splitStayQuoteInputsKnown(known)) {
 			await handleBrainSplitStayQuote(io, sc, hotel, known, latestGuest, 0);
@@ -19546,11 +20307,11 @@ async function submitReservationForCase(io, caseOrId) {
 		});
 		return { ok: false, reason: "split_stay_submit_handled" };
 	}
-	known = applyOfficialReviewSnapshotForSubmit(known);
+	known = applySelectedSameDateRoomOptionLock(applyOfficialReviewSnapshotForSubmit(known));
 	if (!known.quote || !quoteMatchesKnown(known)) {
 		const quote = await quoteTool(sc, known);
 		if (quote.available && quote.quote) {
-			known = syncKnownFromQuote({ ...known, quote: quote.quote });
+			known = applySelectedSameDateRoomOptionLock(syncKnownFromQuote({ ...known, quote: quote.quote }));
 			await saveKnownFacts(caseId, known);
 		}
 	}
@@ -20009,18 +20770,7 @@ async function planTurn(io, supportCaseOrId) {
 		? sameDateRoomChoiceFromText(known, latestText, latestAction, previousAi)
 		: null;
 	if (sameDateRoomChoice?.roomTypeKey) {
-		const selectedRooms = normalizeRoomCount(
-			sameDateRoomChoice.quotedRooms || sameDateRoomChoice.requestedRooms || known.rooms || 1,
-			1
-		);
-		known = mergeKnownFacts(known, {
-			roomTypeKey: sameDateRoomChoice.roomTypeKey,
-			rooms: selectedRooms,
-			roomSelections: [{ roomTypeKey: sameDateRoomChoice.roomTypeKey, count: selectedRooms }],
-			checkinISO: sameDateRoomChoice.checkinISO || known.checkinISO || "",
-			checkoutISO: sameDateRoomChoice.checkoutISO || known.checkoutISO || "",
-			dateCalendar: "gregorian",
-		});
+		known = mergeSameDateRoomChoiceIntoKnown(known, sameDateRoomChoice);
 		appliedSameDateRoomChoice = true;
 	}
 	const latestRevision = latestGuest
@@ -20220,6 +20970,28 @@ async function planTurn(io, supportCaseOrId) {
 			factQuestion: contextualHotelFactQuestion,
 			typingStartedAt,
 		});
+	}
+	const preBrainRoomComparisonOptions = latestGuestAsksHotelFactOnly(latestGuest)
+		? []
+		: roomPriceComparisonOptionsFromText(latestText, known, previousAi);
+	if (
+		latestGuest &&
+		preBrainRoomComparisonOptions.length >= 2 &&
+		validISODate(known.checkinISO) &&
+		validISODate(known.checkoutISO)
+	) {
+		const comparisonKnown = dropConflictingQuoteFromKnown(known);
+		await saveKnownFacts(key, comparisonKnown);
+		logTurnStage(key, "room_comparison_pre_brain_quote_start");
+		return handleBrainRoomComparisonQuote(
+			io,
+			sc,
+			hotel,
+			comparisonKnown,
+			latestGuest,
+			preBrainRoomComparisonOptions,
+			typingStartedAt
+		);
 	}
 	const latestPriceIntent =
 		latestGuest && latestGuestAsksPriceWithContext(latestGuest, previousGuest, previousAi);
@@ -21722,6 +22494,15 @@ function schedulePlanTurn(io, caseOrId, { delayMs = 75, reason = "scheduled" } =
 	const delay = Math.max(Number(delayMs) || 0, AI_GUEST_REPLY_QUIET_MS, quietDelay);
 	const timer = setTimeout(async () => {
 		activeTimers.delete(caseId);
+		const quietUntilAtFire = Number(guestTypingUntilByCase.get(caseId) || 0);
+		const quietRemaining = quietUntilAtFire - now();
+		if (quietRemaining > 0) {
+			schedulePlanTurn(io, caseId, {
+				delayMs: quietRemaining,
+				reason: "guest_typing_still_active",
+			});
+			return;
+		}
 		if (activeTurns.has(caseId)) {
 			schedulePlanTurn(io, caseId, { delayMs: 750, reason: "turn_already_active" });
 			return;
@@ -21754,6 +22535,14 @@ function wireSocket(io) {
 			if (!caseId || data.isAi === true) return;
 			guestActivityAtByCase.set(caseId, now());
 			guestTypingUntilByCase.set(caseId, now() + Math.min(500, AI_GUEST_REPLY_QUIET_MS));
+			const existing = activeTimers.get(caseId);
+			if (existing) {
+				clearTimeout(existing);
+				schedulePlanTurn(io, caseId, {
+					delayMs: Math.min(500, AI_GUEST_REPLY_QUIET_MS),
+					reason: "guest_stop_typing_debounce",
+				});
+			}
 		});
 		socket.on("ai:planNow", (data = {}) => {
 			const caseId = caseIdText(data.caseId);
@@ -21781,6 +22570,7 @@ const exportedOrchestrator = {
 		conversationHasAiAction,
 		requiredBookingMissing,
 		quoteMatchesKnown,
+		quoteInputsKnown,
 		syncKnownFromQuote,
 		quoteCanBePreservedForKnown,
 		extractRoomSelectionsFromText,
@@ -21871,6 +22661,7 @@ const exportedOrchestrator = {
 		latestGuestAsksHotelFactOnly,
 		latestGuestAsksOtherCloserHotel,
 		latestGuestAsksHotelFactInContext,
+		hotelFactQuestionForCurrentTurn,
 		actionToResumeAfterHotelFactAffirmation,
 		latestGuestMentionsParking,
 		hotelFactContinuationQuestion,
@@ -21885,6 +22676,7 @@ const exportedOrchestrator = {
 		hotelFactAnswerMode,
 		postHotelFactBookingBridge,
 		hotelFactReplyAlreadyHasBookingBridge,
+		hotelFactReplyHasConcreteBookingBridge,
 		latestGuestLooksLikeHotelFactForBridge,
 		hotelFactReplyHasRoboticSourceLabel,
 		hotelFactReplyHasRawBookingNumberDump,
@@ -21961,6 +22753,8 @@ const exportedOrchestrator = {
 		reviewReplyNeedsCleanFormatting,
 		reviewReplyMissingBookingIdentity,
 		reviewReplyNeedsChatGuestAddress,
+		reviewReplyMissingConfirmationAsk,
+		shouldOfferOptionalEmail,
 		replyContainsEmoji,
 		stripReplyEmoji,
 		guestPressedOfficialReviewConfirmation,
@@ -21978,6 +22772,10 @@ const exportedOrchestrator = {
 		buildHotelUnavailableJannatTransferMessage,
 		roomOptionQuickReplies,
 		sameDateRoomChoiceFromText,
+		applySelectedSameDateRoomOptionLock,
+		guestExplicitlyRequestsBookingSubmit,
+		arabicReplyLooksLikeManualBookingReview,
+		previousAiLooksLikeOfficialReviewForSubmit,
 		arabicGuestCountText,
 		englishGuestCountText,
 		arabicReviewAddress,
@@ -21992,6 +22790,11 @@ const exportedOrchestrator = {
 		buildHotelFactReplyMessage,
 		buildAuthoritativeHotelServiceFactReply,
 		buildQuoteFallbackMessage,
+		dateFactsFromBrainAcknowledgedReply,
+		latestGuestSuppliesCheckoutBoundary,
+		previousAiLooksLikePriceCollection,
+		roomPriceComparisonOptionsFromText,
+		buildRoomComparisonQuoteMessage,
 		buildValueObjectionFallbackReply,
 		quoteDiscountDisplay,
 		quoteReplyMissingDiscountFormat,
@@ -22022,6 +22825,7 @@ const exportedOrchestrator = {
 		latestGuestMentionsMealsOrBreakfast,
 		latestGuestMentionsNusuk,
 		replyPromisesHotelMeals,
+		replyMentionsNearbyFoodAlternative,
 		replyOverpromisesBusService,
 		replyOmitsConfirmedBusDetails,
 		replyContradictsBusService,

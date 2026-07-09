@@ -623,7 +623,7 @@ const reservationsSchema = new mongoose.Schema(
 		// commission, and manual reservation edits for auditability.
 		reservationAuditLog: { type: Array, default: [] },
 	},
-	{ timestamps: true },
+	{ timestamps: true, strictQuery: false },
 );
 
 reservationsSchema.index({ reservation_id: 1 }, { sparse: true });

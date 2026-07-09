@@ -388,6 +388,7 @@ const supportCaseSchema = new Schema({
 		default: "",
 	},
 });
+supportCaseSchema.set("strictQuery", false);
 
 supportCaseSchema.index({ openedBy: 1, caseStatus: 1, updatedAt: 1 });
 supportCaseSchema.index({ "aiReservation.reservationId": 1 });

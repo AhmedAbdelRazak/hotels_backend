@@ -1229,6 +1229,114 @@ function numericSlashDateTokenCount(text = "") {
 	return (digitsToEnglish(String(text || "")).match(/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-](?:(?:20)?\d{2}))?\b/g) || []).length;
 }
 
+function numericSlashDateRangeTokens(text = "") {
+	const raw = digitsToEnglish(String(text || ""));
+	return Array.from(
+		raw.matchAll(/\b(\d{1,2})\s*[\/.-]\s*(\d{1,2})(?:\s*[\/.-]\s*((?:20\d{2})|\d{2}))?\b/g)
+	);
+}
+
+function numericSlashMatchToISO(match = [], { preferDayMonth = false, hintMonth = 0, baseYear = 0 } = {}) {
+	const a = Number(match[1]);
+	const b = Number(match[2]);
+	const explicitYear = normalizeNumericGregorianYear(match[3]);
+	if (!a || !b) return null;
+	let day = 0;
+	let month = 0;
+	if (a > 12 && b <= 12) {
+		day = a;
+		month = b;
+	} else if (b > 12 && a <= 12) {
+		month = a;
+		day = b;
+	} else if (hintMonth && b === hintMonth) {
+		day = a;
+		month = b;
+	} else if (hintMonth && a === hintMonth) {
+		month = a;
+		day = b;
+	} else if (preferDayMonth) {
+		day = a;
+		month = b;
+	} else {
+		return null;
+	}
+	const year = explicitYear || Number(baseYear || 0);
+	return year ? isoFromParts(year, month, day) : inferFutureISO({ day, month });
+}
+
+function numericSlashMatchMonthHint(match = []) {
+	const a = Number(match[1]);
+	const b = Number(match[2]);
+	if (a > 12 && b <= 12) return b;
+	if (b > 12 && a <= 12) return a;
+	return 0;
+}
+
+function hasNumericSlashDateRangeContext(raw = "", firstMatch = [], secondMatch = []) {
+	const before = normalizeArabicSearchText(raw.slice(Math.max(0, firstMatch.index - 40), firstMatch.index));
+	const between = normalizeArabicSearchText(
+		raw.slice(firstMatch.index + firstMatch[0].length, secondMatch.index)
+	);
+	const after = normalizeArabicSearchText(
+		raw.slice(secondMatch.index + secondMatch[0].length, secondMatch.index + secondMatch[0].length + 40)
+	);
+	const rangeConnector =
+		/(?:-|(?:^|\s)(?:to|until|till|through|thru|checkout|check\s*out|departure|leaving|leave)(?=$|\s)|\u0627\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u0644\u063a\u0627\u064a\u0647|\u0644\u063a\u0627\u064a\u0629|\u0627\u0644\u062e\u0631\u0648\u062c|\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0647|\u0645\u063a\u0627\u062f\u0631\u0647)/i;
+	const startContext =
+		/(?:^|\s)(?:from|checkin|check\s*in|arrival|arrive)(?=$|\s)|\u0645\u0646|\u0627\u0644\u062f\u062e\u0648\u0644|\u062f\u062e\u0648\u0644|\u0627\u0644\u0648\u0635\u0648\u0644|\u0648\u0635\u0648\u0644/i;
+	const bookingContext =
+		/(?:^|\s)(?:room|rooms|guest|guests|person|persons|people|adult|adults|child|children|price|rate|book|reserve|reservation|stay|night|nights)(?=$|\s)|\u063a\u0631\u0641|\u063a\u0631\u0641\u0647|\u0636\u064a\u0648\u0641|\u0646\u0632\u0644\u0627\u0621|\u0627\u0634\u062e\u0627\u0635|\u0628\u0627\u0644\u063a|\u0627\u0637\u0641\u0627\u0644|\u0633\u0639\u0631|\u062d\u062c\u0632|\u0627\u0642\u0627\u0645\u0647|\u0644\u064a\u0644\u0647|\u0644\u064a\u0627\u0644\u064a/i;
+	return (
+		rangeConnector.test(between) ||
+		(startContext.test(before) && rangeConnector.test(between)) ||
+		(rangeConnector.test(between) && bookingContext.test(`${before} ${after}`))
+	);
+}
+
+function quickNumericSlashDayMonthRange(text = "") {
+	const raw = normalizeDateSearchText(text);
+	const matches = numericSlashDateRangeTokens(raw);
+	if (matches.length !== 2) return null;
+	const [firstMatch, secondMatch] = matches;
+	if (!hasNumericSlashDateRangeContext(raw, firstMatch, secondMatch)) return null;
+	const preferDayMonth = /[\u0600-\u06FF]/.test(raw);
+	const checkinISO = numericSlashMatchToISO(firstMatch, {
+		preferDayMonth,
+		hintMonth: numericSlashMatchMonthHint(secondMatch),
+	});
+	if (!checkinISO) return null;
+	const checkinYear = Number(checkinISO.slice(0, 4));
+	const checkinMonth = Number(checkinISO.slice(5, 7));
+	let checkoutISO = numericSlashMatchToISO(secondMatch, {
+		preferDayMonth,
+		hintMonth: checkinMonth || numericSlashMatchMonthHint(firstMatch),
+		baseYear: checkinYear || 0,
+	});
+	if (!checkoutISO && numericSlashMatchMonthHint(firstMatch)) {
+		checkoutISO = numericSlashMatchToISO(secondMatch, {
+			preferDayMonth: true,
+			hintMonth: numericSlashMatchMonthHint(firstMatch),
+			baseYear: checkinYear || 0,
+		});
+	}
+	if (!checkoutISO) return null;
+	if (checkoutISO <= checkinISO && !secondMatch[3]) {
+		const year = Number(checkoutISO.slice(0, 4)) + 1;
+		checkoutISO = isoFromParts(year, Number(checkoutISO.slice(5, 7)), Number(checkoutISO.slice(8, 10)));
+	}
+	if (!checkoutISO || checkoutISO <= checkinISO) return null;
+	return {
+		checkinISO,
+		checkoutISO,
+		raw: {
+			checkin: firstMatch[0],
+			checkout: secondMatch[0],
+			calendar: "gregorian",
+		},
+	};
+}
+
 function addDaysToISO(iso = "", days = 0) {
 	const date = new Date(`${iso}T00:00:00.000Z`);
 	if (Number.isNaN(date.getTime())) return null;
@@ -1734,12 +1842,43 @@ function quickArabicGregorianMonthDateRange(text = "") {
 		if (!month || !day) continue;
 		matches.push({
 			index: match.index,
+			end: match.index + match[0].length,
 			day,
 			month,
 			year: match[3] ? Number(match[3]) : null,
 		});
 	}
-	return normalizeGregorianMonthRange(matches);
+	const ordered = matches
+		.sort((a, b) => a.index - b.index)
+		.filter((item, index, list) => {
+			const prev = list[index - 1];
+			return (
+				!prev ||
+				prev.index !== item.index ||
+				prev.day !== item.day ||
+				prev.month !== item.month
+			);
+		});
+	if (ordered.length === 1) {
+		const first = ordered[0];
+		const tail = raw.slice(first.end);
+		const checkout = tail.match(
+			/(?:^|\s)(?:\u0648\s*)?(?:\u0627\u0644\u062e\u0631\u0648\u062c|\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0647|\u0645\u063a\u0627\u062f\u0631\u0647|\u0627\u0644\u0649|\u0627\u0644\u064a|\u062d\u062a\u0649|\u0644\u063a\u0627\u064a\u0647|\u0644\u063a\u0627\u064a\u0629|checkout|check\s*out|departure|leaving|leave|to|until|till)\s+(\d{1,2})(?=$|\D)/i
+		);
+		const day = Number(checkout?.[1] || 0);
+		if (day > first.day && day >= 1 && day <= 31) {
+			return normalizeGregorianMonthRange([
+				first,
+				{
+					index: first.end + checkout.index,
+					day,
+					month: first.month,
+					year: first.year || null,
+				},
+			]);
+		}
+	}
+	return normalizeGregorianMonthRange(ordered);
 }
 
 function likelyHijriDateText(text = "") {
@@ -1777,6 +1916,10 @@ function quickDateRange(text = "") {
 	const numericDateWithDuration = quickNumericGregorianDatePlusDuration(raw);
 	if (numericDateWithDuration?.checkinISO && numericDateWithDuration?.checkoutISO) {
 		return numericDateWithDuration;
+	}
+	const numericSlashDayMonthRange = quickNumericSlashDayMonthRange(raw);
+	if (numericSlashDayMonthRange?.checkinISO && numericSlashDayMonthRange?.checkoutISO) {
+		return numericSlashDayMonthRange;
 	}
 	if (numericSlashDateTokenCount(raw) > 0 && !namedCalendarMonthText(raw)) {
 		return { checkinISO: null, checkoutISO: null, raw: null };

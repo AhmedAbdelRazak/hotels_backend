@@ -12,6 +12,7 @@ const jannatSupport = require("../aiagent/jannatSupport/orchestrator").__test;
 const jannatBrain = require("../aiagent/jannatSupport/brain").__test;
 const reservationController = require("../controllers/reservations").__test;
 const modelConfig = require("../services/openaiModelConfig");
+const nlu = require("../aiagent/core/nlu");
 
 const hotel = {
 	_id: "zad-ajyad-test",
@@ -181,6 +182,283 @@ check("Arabic checkout correction with Arabic month is parsed", () => {
 		),
 		{ checkoutISO: "2026-08-12", dateCalendar: "gregorian" }
 	);
+});
+
+check("Arabic Levant month date range keeps checkout day-only and guest count", () => {
+	const text =
+		"\u0627\u0644\u062f\u062e\u0648\u0644 \u064a\u0648\u0645 \u0661\u0663 \u062a\u0645\u0648\u0632 2027 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0662\u0660 \u0627\u0631\u0628\u0639\u0629 \u0646\u0632\u0644\u0627\u0621";
+	assert.deepStrictEqual(nlu.quickDateRange(text), {
+		checkinISO: "2027-07-13",
+		checkoutISO: "2027-07-20",
+		raw: {
+			checkin: "2027-07-13",
+			checkout: "2027-07-20",
+			calendar: "gregorian",
+		},
+	});
+	const known = orchestrator.recoverKnownFactsFromConversation(
+		{
+			preferredLanguageCode: "ar",
+			conversation: [guest(text)],
+		},
+		{}
+	);
+	assert.strictEqual(known.checkinISO, "2027-07-13");
+	assert.strictEqual(known.checkoutISO, "2027-07-20");
+	assert.strictEqual(known.adults, 4);
+});
+
+check("Arabic slash date range with extra booking facts is parsed for quoting", () => {
+	const text =
+		"\u0627\u0631\u064a\u062f \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629 \u0645\u0646 15/12 \u0627\u0644\u0649 20/12 \u0627\u0631\u0628\u0639\u0629 \u0627\u0634\u062e\u0627\u0635";
+	const dates = nlu.quickDateRange(text);
+	assert.strictEqual(dates.checkinISO?.slice(5), "12-15");
+	assert.strictEqual(dates.checkoutISO?.slice(5), "12-20");
+	assert.strictEqual(dates.raw?.calendar, "gregorian");
+	const known = orchestrator.recoverKnownFactsFromConversation(
+		{
+			preferredLanguageCode: "ar",
+			conversation: [guest(text)],
+		},
+		{}
+	);
+	assert.strictEqual(known.checkinISO?.slice(5), "12-15");
+	assert.strictEqual(known.checkoutISO?.slice(5), "12-20");
+	assert.strictEqual(known.roomTypeKey, "doubleRooms");
+	assert.strictEqual(known.rooms, 1);
+	assert.strictEqual(known.adults, 4);
+});
+
+check("Arabic checkout-only follow-up completes separate-message stay", () => {
+	const aiCheckoutAsk =
+		"\u062a\u0645\u0627\u0645\u060c \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c \u0641\u0642\u0637.";
+	assert.strictEqual(
+		orchestrator.previousAiAskedForCheckoutDate({
+			isAi: true,
+			clientAction: "ai_reply",
+			message: aiCheckoutAsk,
+		}),
+		true
+	);
+	assert.deepStrictEqual(
+		orchestrator.dateBoundaryFactsFromAskedAnswer(
+			"21/7",
+			{ checkinISO: "2026-07-19" },
+			{ isAi: true, clientAction: "ai_reply", message: aiCheckoutAsk }
+		),
+		{ checkoutISO: "2026-07-21", dateCalendar: "gregorian" }
+	);
+	const known = orchestrator.recoverKnownFactsFromConversation(
+		{
+			preferredLanguageCode: "ar",
+			conversation: [
+				guest(
+					"\u0623\u0631\u064a\u062f \u0633\u0639\u0631 \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0644\u0623\u0631\u0628\u0639\u0629 \u0623\u0634\u062e\u0627\u0635 \u0627\u0644\u062f\u062e\u0648\u0644 19/7"
+				),
+				ai(aiCheckoutAsk),
+				guest("21/7"),
+			],
+		},
+		{}
+	);
+	assert.strictEqual(known.checkinISO, "2026-07-19");
+	assert.strictEqual(known.checkoutISO, "2026-07-21");
+	assert.strictEqual(known.roomTypeKey, "quadRooms");
+	assert.strictEqual(known.rooms, 1);
+	assert.strictEqual(known.adults, 4);
+});
+
+check("Brain acknowledged dates after price context are enough to quote", () => {
+	const previousAi = ai(
+		"\u0623\u0643\u064a\u062f. \u062d\u062a\u0649 \u0623\u0639\u0637\u064a\u0643 \u0633\u0639\u0631 \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u0645\u0632\u062f\u0648\u062c\u0629 \u0628\u062f\u0642\u0629\u060c \u0623\u062d\u062a\u0627\u062c \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c\u060c \u0648\u0643\u0645 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u061f"
+	);
+	const latestText =
+		"\u0623\u0633\u0628\u0648\u0639 \u0645\u0646 \u0627\u0648\u0644 \u0623\u063a\u0633\u0637\u0633 \u062d\u062a\u0649 \u062e\u0645\u0633\u0629";
+	const badReply =
+		"\u0623\u0641\u0647\u0645 \u0623\u0646 \u0627\u0644\u0645\u0642\u0635\u0648\u062f \u0645\u0646 2026-08-01 \u0625\u0644\u0649 2026-08-05. \u0643\u0645 \u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641\u061f";
+	const facts = orchestrator.dateFactsFromBrainAcknowledgedReply(
+		badReply,
+		latestText,
+		previousAi
+	);
+	assert.deepStrictEqual(facts, {
+		checkinISO: "2026-08-01",
+		checkoutISO: "2026-08-05",
+		dateCalendar: "gregorian",
+	});
+	const known = orchestrator.mergeKnownFacts(
+		{
+			languageCode: "ar",
+			roomTypeKey: "doubleRooms",
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+			rooms: 1,
+		},
+		facts
+	);
+	assert.strictEqual(orchestrator.quoteInputsKnown(known), true);
+	assert.strictEqual(orchestrator.requiredBookingMissing(known).includes("adults"), true);
+});
+
+check("Brain acknowledged checkin-only text cannot trigger premature quote", () => {
+	const previousAi = ai(
+		"\u0623\u0643\u064a\u062f. \u0623\u062d\u062a\u0627\u062c \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c \u0644\u0625\u0639\u0637\u0627\u0626\u0643 \u0627\u0644\u0633\u0639\u0631."
+	);
+	const latestText =
+		"\u0623\u0631\u064a\u062f \u0633\u0639\u0631 \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0644\u0623\u0631\u0628\u0639\u0629 \u0623\u0634\u062e\u0627\u0635 \u0627\u0644\u062f\u062e\u0648\u0644 19/7";
+	const reply =
+		"\u062a\u0645\u0627\u0645\u060c \u0641\u0647\u0645\u062a \u0623\u0646 \u0627\u0644\u062f\u062e\u0648\u0644 2026-07-19. \u0623\u0631\u0633\u0644 \u0644\u064a \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c \u0644\u0623\u0639\u0637\u064a\u0643 \u0627\u0644\u0633\u0639\u0631 \u0627\u0644\u062f\u0642\u064a\u0642.";
+	assert.strictEqual(
+		orchestrator.latestGuestSuppliesCheckoutBoundary(latestText, {}, previousAi),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.dateFactsFromBrainAcknowledgedReply(reply, latestText, previousAi, {
+			languageCode: "ar",
+			roomTypeKey: "quadRooms",
+			roomSelections: [{ roomTypeKey: "quadRooms", count: 1 }],
+			rooms: 1,
+			adults: 4,
+		}),
+		null
+	);
+	const systemHandoff = ai(
+		"QA scenario Arabic separate checkout follow-up quotes after bot asks"
+	);
+	systemHandoff.isSystem = true;
+	assert.strictEqual(
+		orchestrator.latestGuestSuppliesCheckoutBoundary(latestText, {}, systemHandoff),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.dateFactsFromBrainAcknowledgedReply(
+			"\u062a\u0645\u0627\u0645\u060c \u0641\u0647\u0645\u062a \u0623\u0646 \u0627\u0644\u062f\u062e\u0648\u0644 2026-07-19 \u0648\u0627\u0644\u062e\u0631\u0648\u062c 2026-07-21.",
+			latestText,
+			systemHandoff,
+			{}
+		),
+		null
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestSuppliesCheckoutBoundary(
+			"21/7",
+			{ languageCode: "ar", checkinISO: "2026-07-19" },
+			ai("\u0645\u0627 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c\u061f")
+		),
+		true
+	);
+});
+
+check("On-demand Arabic room comparison splits alternatives for pricing", () => {
+	const text =
+		"\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 4\n\u0646\u062d\u062a\u0627\u062c \u0625\u0644\u0649 \u063a\u0631\u0641\u062a\u064a\u0646 \u0645\u0632\u062f\u0648\u062c\u0629\n\u0623\u0648 \u063a\u0631\u0641\u0629 \u0648\u0627\u062d\u062f\u0629 \u0631\u0628\u0627\u0639\u064a\u0629";
+	const options = orchestrator.roomPriceComparisonOptionsFromText(
+		text,
+		{
+			languageCode: "ar",
+			checkinISO: "2026-08-01",
+			checkoutISO: "2026-08-05",
+			roomSelections: [
+				{ roomTypeKey: "doubleRooms", count: 2 },
+				{ roomTypeKey: "quadRooms", count: 1 },
+			],
+			adults: 4,
+		},
+		ai("\u0627\u0644\u0633\u0639\u0631 \u0645\u062a\u0627\u062d\u060c \u0647\u0644 \u062a\u0641\u0636\u0644 \u062e\u064a\u0627\u0631\u0627 \u0645\u0639\u064a\u0646\u0627\u061f", "quote_ready")
+	);
+	assert.deepStrictEqual(options, [
+		[{ roomTypeKey: "doubleRooms", count: 2 }],
+		[{ roomTypeKey: "quadRooms", count: 1 }],
+	]);
+});
+
+check("Same-date room comparison accepts quick-reply and typed room choices", () => {
+	const known = {
+		languageCode: "ar",
+		checkinISO: "2026-08-01",
+		checkoutISO: "2026-08-05",
+		sameDateRoomOptions: [
+			{
+				roomTypeKey: "doubleRooms",
+				roomLabel: "2 x Double Room",
+				requestedRooms: 2,
+				quotedRooms: 2,
+				checkinISO: "2026-08-01",
+				checkoutISO: "2026-08-05",
+			},
+			{
+				roomTypeKey: "quadRooms",
+				roomLabel: "1 x Quadruple Room",
+				requestedRooms: 1,
+				quotedRooms: 1,
+				checkinISO: "2026-08-01",
+				checkoutISO: "2026-08-05",
+			},
+		],
+	};
+	const previous = ai("\u0627\u062e\u062a\u0631 \u0627\u0644\u0623\u0646\u0633\u0628 \u0644\u0643.", "same_date_room_options_ready");
+	const replies = orchestrator.roomOptionQuickReplies(known.sameDateRoomOptions, "ar");
+	assert.strictEqual(replies.length, 2);
+	assert.strictEqual(replies[0].action, "select_room_option");
+	assert.strictEqual(
+		orchestrator.sameDateRoomChoiceFromText(
+			known,
+			replies[0].value,
+			"select_room_option",
+			previous
+		)?.roomTypeKey,
+		"doubleRooms"
+	);
+	assert.strictEqual(
+		orchestrator.sameDateRoomChoiceFromText(
+			known,
+			"\u0627\u062e\u062a\u0627\u0631 \u063a\u0631\u0641\u062a\u064a\u0646 \u0645\u0632\u062f\u0648\u062c\u0629",
+			"",
+			previous
+		)?.roomTypeKey,
+		"doubleRooms"
+	);
+	assert.strictEqual(
+		orchestrator.sameDateRoomChoiceFromText(known, "Double Room", "", previous)
+			?.roomTypeKey,
+		"doubleRooms"
+	);
+	assert.strictEqual(
+		orchestrator.sameDateRoomChoiceFromText(
+			known,
+			"\u0627\u062e\u062a\u0627\u0631 \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
+			"",
+			previous
+		)?.roomTypeKey,
+		"quadRooms"
+	);
+});
+
+check("Selected same-date room option locks the final reservation room mix", () => {
+	const locked = orchestrator.applySelectedSameDateRoomOptionLock({
+		languageCode: "ar",
+		checkinISO: "2026-08-01",
+		checkoutISO: "2026-08-05",
+		roomSelections: [
+			{ roomTypeKey: "doubleRooms", count: 2 },
+			{ roomTypeKey: "quadRooms", count: 1 },
+		],
+		rooms: 3,
+		sameDateRoomSelectionLocked: true,
+		sameDateRoomSelectedOption: {
+			roomTypeKey: "doubleRooms",
+			roomLabel: "2 x Double Room",
+			requestedRooms: 2,
+			quotedRooms: 2,
+			checkinISO: "2026-08-01",
+			checkoutISO: "2026-08-05",
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 2 }],
+		},
+	});
+	assert.strictEqual(locked.roomTypeKey, "doubleRooms");
+	assert.strictEqual(locked.rooms, 2);
+	assert.deepStrictEqual(locked.roomSelections, [
+		{ roomTypeKey: "doubleRooms", count: 2 },
+	]);
 });
 
 check("Human staff messages are prompt context, not guest turns", () => {
@@ -515,6 +793,35 @@ check("Hotel fact service answer sounds human and avoids stored-detail labels", 
 	);
 });
 
+check("Short Nusuk follow-up answers latest fact instead of repeating bus", () => {
+	const busQuestion = guest("\u0647\u0644 \u0639\u0646\u062f\u0643\u0645 \u0623\u062a\u0648\u0628\u064a\u0633 \u0644\u0644\u062d\u0631\u0645\u061f");
+	const latestGuest = guest("\u0648\u0646\u0633\u0643 \u0645\u062a\u0627\u062d\u061f");
+	const sc = {
+		preferredLanguageCode: "ar",
+		conversation: [
+			busQuestion,
+			ai("\u0646\u0639\u0645\u060c \u064a\u0648\u062c\u062f \u0628\u0627\u0635.", "hotel_fact_answered"),
+			latestGuest,
+		],
+	};
+	assert.strictEqual(
+		orchestrator.hotelFactQuestionForCurrentTurn(sc, latestGuest),
+		"\u0648\u0646\u0633\u0643 \u0645\u062a\u0627\u062d\u061f"
+	);
+	const reply = orchestrator.buildAuthoritativeHotelServiceFactReply(
+		sc,
+		{
+			...hotel,
+			isNusuk: true,
+			isNusukText: "\u0645\u062a\u0627\u062d \u0636\u0645\u0646 \u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u0641\u0646\u062f\u0642.",
+		},
+		{ languageCode: "ar" },
+		latestGuest
+	);
+	assert.match(reply, /\u0646\u0633\u0643|Nusuk/i);
+	assert.doesNotMatch(reply, /\u0645\u0648\u0642\u0641\s+\u0627\u0644\u0634\u0647\u062f\u0627\u0621/u);
+});
+
 check("Confirmed bus facts reject vague transport deferrals", () => {
 	const latestGuest = guest("\u0639\u0646\u062f\u0643\u0645 \u0627\u0648\u062a\u0648\u0628\u064a\u0633 \u064a\u0648\u0635\u0644 \u0644\u0644\u062d\u0631\u0645");
 	const vagueReply =
@@ -616,6 +923,27 @@ check("Meal questions stay room-only and point to nearby restaurants", () => {
 	assert(/room-only|not included|not provided/i.test(reply));
 	assert(/restaurant|nearby/i.test(reply));
 	assert.strictEqual(orchestrator.replyPromisesHotelMeals(reply), false);
+	assert.strictEqual(orchestrator.replyMentionsNearbyFoodAlternative(reply), true);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: "The stay is room-only, and breakfast/meals are not included or provided by the hotel." },
+			hotel,
+			latestGuest
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{
+				action: "reply",
+				reply:
+					"The stay is room-only, and breakfast/meals are not included or provided by the hotel. Nearby restaurants and services around the hotel make meals easy to arrange.",
+			},
+			hotel,
+			latestGuest
+		),
+		false
+	);
 	assert.strictEqual(
 		orchestrator.replyPromisesHotelMeals("Breakfast is included and meal service is available."),
 		true
@@ -966,6 +1294,36 @@ check("Official review and hotel-fact checkpoint preserve discount markup", () =
 		false
 	);
 	assert.strictEqual(orchestrator.hotelFactReplyAlreadyHasBookingCheckpoint(review, known), true);
+});
+
+check("Official review must ask guest to confirm before booking creation", () => {
+	const toolResult = {
+		tool: "send_review",
+		code: "review_ready",
+		review: {
+			fullName: "Mona Codex",
+			phone: "8888888836",
+			nationality: "Egyptian",
+			checkinISO: "2026-08-25",
+			checkoutISO: "2026-08-28",
+			quote: {
+				discount: orchestrator.quoteDiscountDisplay(
+					{ total: 225, averagePerNight: 75, currency: "SAR" },
+					"ar"
+				),
+			},
+		},
+	};
+	const passive =
+		"\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632:\n\u0627\u0644\u0627\u0633\u0645: Mona Codex\n\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: <s class=\"message-price-old\">300 SAR</s> <strong class=\"message-price-new\">225 SAR</strong>";
+	assert.strictEqual(orchestrator.reviewReplyMissingConfirmationAsk(passive, toolResult), true);
+	assert.strictEqual(
+		orchestrator.reviewReplyMissingConfirmationAsk(
+			`${passive}\n\u0625\u0630\u0627 \u0643\u0644 \u0634\u064a\u0621 \u0635\u062d\u064a\u062d\u060c \u0623\u0643\u062f \u0644\u064a \u0644\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632.`,
+			toolResult
+		),
+		false
+	);
 });
 
 check("Quote identity validator rejects room label as hotel name", () => {
@@ -1707,6 +2065,45 @@ check("Official review with tool facts is not blocked as vague progress", () => 
 	);
 });
 
+check("Arabic optional email skip is persisted before official review", () => {
+	const skipText = "\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f";
+	const known = {
+		languageCode: "ar",
+		checkinISO: "2026-07-19",
+		checkoutISO: "2026-07-21",
+		roomTypeKey: "doubleRooms",
+		roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+		rooms: 1,
+		adults: 2,
+		children: 0,
+		fullName: "\u0645\u0646\u0649 \u0643\u0648\u062f\u0643\u0633",
+		phone: "0557380036",
+		nationality: "\u0645\u0635\u0631\u064a",
+		quote: {
+			available: true,
+			checkinISO: "2026-07-19",
+			checkoutISO: "2026-07-21",
+			roomTypeKey: "doubleRooms",
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+			totalRooms: 1,
+			nights: 2,
+			total: 150,
+			currency: "SAR",
+		},
+	};
+	assert.strictEqual(orchestrator.guestDeclinesOptionalEmail(skipText, ""), true);
+	const facts = orchestrator.sanitizeBrainFactsForLatestText(
+		{ emailSkipped: true, email: "" },
+		known,
+		skipText
+	);
+	const merged = orchestrator.mergeKnownFacts(known, facts);
+	assert.strictEqual(merged.emailSkipped, true);
+	assert.strictEqual(merged.email || "", "");
+	assert.strictEqual(orchestrator.requiredBookingMissing(merged).length, 0);
+	assert.strictEqual(orchestrator.shouldOfferOptionalEmail({}, merged), false);
+});
+
 check("Conditional review wording is not treated as already confirmed", () => {
 	assert.strictEqual(
 		orchestrator.reviewReplyClaimsBookingConfirmed(
@@ -1934,6 +2331,8 @@ check("Arabic free-text official review confirmation triggers submit intent", ()
 	const mojibakeSubmitText = Buffer.from(submitText, "utf8").toString("latin1");
 	assert.strictEqual(orchestrator.repairMojibakeText(mojibakeSubmitText), submitText);
 	assert.strictEqual(orchestrator.guestConfirms(mojibakeSubmitText, ""), true);
+	assert.strictEqual(orchestrator.guestExplicitlyRequestsBookingSubmit(submitText, ""), true);
+	assert.strictEqual(orchestrator.guestExplicitlyRequestsBookingSubmit("\u0646\u0639\u0645 \u062a\u0627\u0628\u0639", ""), false);
 	assert.strictEqual(
 		orchestrator.guestPressedOfficialReviewConfirmation(
 			guest(submitText),
@@ -1963,6 +2362,35 @@ check("Arabic free-text official review confirmation triggers submit intent", ()
 		orchestrator.guestPressedOfficialReviewConfirmation(
 			guest(submitText),
 			ai("quote", "quote_ready")
+		),
+		false
+	);
+	const untaggedArabicReview = [
+		"\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u0642\u0628\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632:",
+		"\u0627\u0644\u0627\u0633\u0645: \u062e\u0627\u0644\u062f \u0643\u0648\u062f\u0643\u0633",
+		"\u0627\u0644\u062c\u0648\u0627\u0644: 0551234567",
+		"\u0627\u0644\u062c\u0646\u0633\u064a\u0629: \u0645\u0635\u0631\u064a",
+		"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0648\u0635\u0648\u0644: 2026-07-19",
+		"\u062a\u0627\u0631\u064a\u062e \u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629: 2026-07-21",
+		"\u0627\u0644\u063a\u0631\u0641\u0629: \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629",
+		"\u0627\u0644\u0636\u064a\u0648\u0641: 2",
+		"\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: 150 \u0631\u064a\u0627\u0644",
+		"\u0625\u0630\u0627 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644 \u0635\u062d\u064a\u062d\u0629\u060c \u0623\u0631\u0633\u0644 \u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632.",
+	].join("\n");
+	assert.strictEqual(orchestrator.arabicReplyLooksLikeManualBookingReview(untaggedArabicReview), true);
+	assert.strictEqual(
+		orchestrator.previousAiLooksLikeOfficialReviewForSubmit(
+			{ conversation: [ai(untaggedArabicReview, "reply"), guest(submitText)] },
+			guest(submitText),
+			ai(untaggedArabicReview, "reply")
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.previousAiLooksLikeOfficialReviewForSubmit(
+			{ conversation: [ai("\u0627\u0644\u0633\u0639\u0631 150 \u0631\u064a\u0627\u0644", "quote_ready"), guest(submitText)] },
+			guest(submitText),
+			ai("\u0627\u0644\u0633\u0639\u0631 150 \u0631\u064a\u0627\u0644", "quote_ready")
 		),
 		false
 	);

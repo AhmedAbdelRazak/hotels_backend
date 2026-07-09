@@ -108,6 +108,38 @@ function businessTodayISO() {
 	}).format(new Date());
 }
 
+function isoDay(iso = "") {
+	return Number(String(iso || "").slice(8, 10)) || 0;
+}
+
+function isoMonth(iso = "") {
+	return Number(String(iso || "").slice(5, 7)) || 0;
+}
+
+function slashDayMonth(iso = "") {
+	const day = isoDay(iso);
+	const month = isoMonth(iso);
+	return day && month ? `${day}/${month}` : iso;
+}
+
+function levantMonthName(iso = "") {
+	const names = [
+		"\u0643\u0627\u0646\u0648\u0646 \u0627\u0644\u062b\u0627\u0646\u064a",
+		"\u0634\u0628\u0627\u0637",
+		"\u0622\u0630\u0627\u0631",
+		"\u0646\u064a\u0633\u0627\u0646",
+		"\u0623\u064a\u0627\u0631",
+		"\u062d\u0632\u064a\u0631\u0627\u0646",
+		"\u062a\u0645\u0648\u0632",
+		"\u0622\u0628",
+		"\u0623\u064a\u0644\u0648\u0644",
+		"\u062a\u0634\u0631\u064a\u0646 \u0627\u0644\u0623\u0648\u0644",
+		"\u062a\u0634\u0631\u064a\u0646 \u0627\u0644\u062b\u0627\u0646\u064a",
+		"\u0643\u0627\u0646\u0648\u0646 \u0627\u0644\u0623\u0648\u0644",
+	];
+	return names[isoMonth(iso) - 1] || names[6];
+}
+
 function markerPhoneSeed() {
 	let hash = 0;
 	for (const char of marker) {
@@ -181,6 +213,14 @@ function assertNoPrematureIdentityRequest(reply = "", label = "") {
 	assert(
 		!/(?:\bfull\s*name\b|\bname\b|\bphone\b|\bmobile\b|\bnationality\b|\u0627\u0644\u0627\u0633\u0645|\u0627\u0633\u0645\u0643|\u0627\u0633\u0645|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062c\u0646\u0633\u064a\u0629)/iu.test(text),
 		`${label || "reply"} asked for identity details before an exact quote`
+	);
+}
+
+function assertNoGuestCountQuestion(reply = "", label = "") {
+	const text = String(reply || "");
+	assert(
+		!/(?:\bhow\s+many\s+(?:guests|adults|children)\b|\bguest\s*count\b|\u0643\u0645\s+\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641|\u0643\u0645\s+\u0628\u0627\u0644\u063a|\u0643\u0645\s+\u0637\u0641\u0644|\u0639\u062f\u062f\s+\u0627\u0644\u0636\u064a\u0648\u0641\s*[:\u061f?])/iu.test(text),
+		`${label || "reply"} asked for guest count before pricing`
 	);
 }
 
@@ -344,6 +384,69 @@ async function findAvailableStay(hotel, roomTypeKey = "doubleRooms", nights = 2,
 		}
 	}
 	throw new Error(`Could not find available ${roomTypeKey} stay for ${hotel.hotelName}`);
+}
+
+async function findAvailableComparisonStay(hotel, nights = 2) {
+	const start = addDaysISO(businessTodayISO(), 10);
+	for (let offset = 0; offset < 130; offset += 2) {
+		const checkinISO = addDaysISO(start, offset);
+		const checkoutISO = addDaysISO(checkinISO, nights);
+		const baseCase = { _id: "live-qa-preflight", hotelId: hotel._id };
+		const doubleQuote = await testApi.quoteTool(baseCase, {
+			checkinISO,
+			checkoutISO,
+			roomTypeKey: "doubleRooms",
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 2 }],
+			rooms: 2,
+			adults: 4,
+			children: 0,
+			languageCode: "en",
+		});
+		if (!doubleQuote?.available) continue;
+		const quadQuote = await testApi.quoteTool(baseCase, {
+			checkinISO,
+			checkoutISO,
+			roomTypeKey: "quadRooms",
+			roomSelections: [{ roomTypeKey: "quadRooms", count: 1 }],
+			rooms: 1,
+			adults: 4,
+			children: 0,
+			languageCode: "en",
+		});
+		if (quadQuote?.available) {
+			return { checkinISO, checkoutISO, nights, doubleQuote, quadQuote };
+		}
+	}
+	throw new Error(`Could not find available double-vs-quad comparison stay for ${hotel.hotelName}`);
+}
+
+async function findAvailableSplitStay(hotel, roomTypeKey = "doubleRooms", nights = 2, count = 1) {
+	const first = await findAvailableStay(hotel, roomTypeKey, nights, count);
+	const start = addDaysISO(first.checkoutISO, 2);
+	for (let offset = 0; offset < 130; offset += 2) {
+		const checkinISO = addDaysISO(start, offset);
+		const checkoutISO = addDaysISO(checkinISO, nights);
+		const quote = await testApi.quoteTool(
+			{ _id: "live-qa-preflight", hotelId: hotel._id },
+			{
+				checkinISO,
+				checkoutISO,
+				roomTypeKey,
+				roomSelections: [{ roomTypeKey, count }],
+				rooms: count,
+				adults: Math.max(count, 1),
+				children: 0,
+				languageCode: "en",
+			}
+		);
+		if (quote?.available) {
+			return {
+				first,
+				second: { checkinISO, checkoutISO, roomTypeKey, count, nights, quote },
+			};
+		}
+	}
+	throw new Error(`Could not find two available ${roomTypeKey} split stays for ${hotel.hotelName}`);
 }
 
 async function createCase({
@@ -510,13 +613,19 @@ function buildScenarios(ctx) {
 	const triple = ctx.stays.triple;
 	const quad = ctx.stays.quad;
 	const family = ctx.stays.family;
+	const comparison = ctx.stays.comparison;
+	const splitFirst = ctx.stays.split?.first || stay;
+	const splitSecond = ctx.stays.split?.second || {
+		checkinISO: addDaysISO(stay.checkoutISO, 2),
+		checkoutISO: addDaysISO(stay.checkoutISO, 4),
+	};
 	const changed = {
 		checkinISO: addDaysISO(stay.checkinISO, 2),
 		checkoutISO: addDaysISO(stay.checkoutISO, 2),
 	};
-	const splitSecond = {
-		checkinISO: addDaysISO(stay.checkoutISO, 2),
-		checkoutISO: addDaysISO(stay.checkoutISO, 4),
+	const ahmedComparisonStay = {
+		checkinISO: comparison.checkinISO,
+		checkoutISO: comparison.checkoutISO,
 	};
 	const today = businessTodayISO();
 	const tomorrow = addDaysISO(today, 1);
@@ -767,7 +876,7 @@ function buildScenarios(ctx) {
 					message: `لا، عدل الدخول إلى ${changed.checkinISO} والخروج إلى ${changed.checkoutISO}`,
 					expect: ({ ai }) => {
 						assertDiscountMarkup(ai.message, "corrected quote");
-						assert(ai.message.includes(changed.checkinISO) || ai.message.includes(changed.checkoutISO), "corrected quote does not show new dates");
+						assertDateRangeMention(ai.message, changed.checkinISO, changed.checkoutISO, "corrected quote dates");
 					},
 				},
 			],
@@ -973,13 +1082,13 @@ function buildScenarios(ctx) {
 			reservation: true,
 			steps: [
 				{
-					message: `\u0623\u0631\u064a\u062f \u062d\u062c\u0632\u064a\u0646 \u0645\u0646\u0641\u0635\u0644\u064a\u0646 \u0641\u064a \u0646\u0641\u0633 \u0627\u0644\u0641\u0646\u062f\u0642: \u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${stay.checkinISO} \u0625\u0644\u0649 ${stay.checkoutISO}\u060c \u0648\u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${splitSecond.checkinISO} \u0625\u0644\u0649 ${splitSecond.checkoutISO}`,
+					message: `\u0623\u0631\u064a\u062f \u062d\u062c\u0632\u064a\u0646 \u0645\u0646\u0641\u0635\u0644\u064a\u0646 \u0641\u064a \u0646\u0641\u0633 \u0627\u0644\u0641\u0646\u062f\u0642: \u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${splitFirst.checkinISO} \u0625\u0644\u0649 ${splitFirst.checkoutISO}\u060c \u0648\u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635\u064a\u0646 \u0645\u0646 ${splitSecond.checkinISO} \u0625\u0644\u0649 ${splitSecond.checkoutISO}`,
 					expect: ({ ai }) => {
 						assert(
 							String(ai.clientAction || "").toLowerCase() === "split_stay_quote_ready",
 							"split stay did not produce a split quote"
 						);
-						assertDateRangeMention(ai.message, stay.checkinISO, stay.checkoutISO, "split quote first period");
+						assertDateRangeMention(ai.message, splitFirst.checkinISO, splitFirst.checkoutISO, "split quote first period");
 						assertDateRangeMention(ai.message, splitSecond.checkinISO, splitSecond.checkoutISO, "split quote second period");
 						assertMatches(ai.message, /separate|period|reservation|\u0645\u0646\u0641\u0635\u0644|\u0641\u062a\u0631\u0629|\u062d\u062c\u0632/i, "split quote separation language");
 						assertDiscountMarkup(ai.message, "split quote");
@@ -1242,6 +1351,245 @@ function buildScenarios(ctx) {
 				},
 			],
 		},
+		{
+			name: "Arabic Levant month checkout day-only quote",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0645\u0646 ${isoDay(quad.checkinISO)} ${levantMonthName(quad.checkinISO)} \u0648\u0627\u0644\u062e\u0631\u0648\u062c ${isoDay(quad.checkoutISO)} \u0623\u0631\u0628\u0639\u0629 \u0646\u0632\u0644\u0627\u0621`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "Arabic Levant day-only quote");
+						assertDateRangeMention(
+							ai.message,
+							quad.checkinISO,
+							quad.checkoutISO,
+							"Arabic Levant day-only quote dates"
+						);
+						assertNoPrematureIdentityRequest(ai.message, "Arabic Levant day-only quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Arabic slash range with extra booking facts quotes",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f \u0633\u0639\u0631 \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0645\u0646 ${slashDayMonth(quad.checkinISO)} \u0627\u0644\u0649 ${slashDayMonth(quad.checkoutISO)} \u0623\u0631\u0628\u0639\u0629 \u0623\u0634\u062e\u0627\u0635`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "Arabic slash extra-facts quote");
+						assertDateRangeMention(
+							ai.message,
+							quad.checkinISO,
+							quad.checkoutISO,
+							"Arabic slash extra-facts quote dates"
+						);
+						assertNoPrematureIdentityRequest(ai.message, "Arabic slash extra-facts quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Arabic burst slash messages wait and quote all facts",
+			hotel: "ajyad",
+			languageCode: "ar",
+			burst: true,
+			steps: [
+				{
+					burst: [
+						"\u0643\u0645 \u0627\u0644\u0633\u0639\u0631\u061f",
+						"\u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
+						`\u0645\u0646 ${slashDayMonth(quad.checkinISO)} \u0627\u0644\u0649 ${slashDayMonth(quad.checkoutISO)}`,
+						"\u0623\u0631\u0628\u0639\u0629 \u0623\u0634\u062e\u0627\u0635",
+					],
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "Arabic burst slash quote");
+						assertDateRangeMention(
+							ai.message,
+							quad.checkinISO,
+							quad.checkoutISO,
+							"Arabic burst slash quote dates"
+						);
+						assertNoPrematureIdentityRequest(ai.message, "Arabic burst slash quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Arabic separate checkout follow-up quotes after bot asks",
+			hotel: "ajyad",
+			languageCode: "ar",
+			steps: [
+				{
+					message: `\u0623\u0631\u064a\u062f \u0633\u0639\u0631 \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629 \u0644\u0623\u0631\u0628\u0639\u0629 \u0623\u0634\u062e\u0627\u0635 \u0627\u0644\u062f\u062e\u0648\u0644 ${slashDayMonth(quad.checkinISO)}`,
+					expect: ({ ai }) => {
+						assert(
+							!/<s\b[^>]*message-price-old/i.test(ai.message),
+							"checkin-only turn should not quote before checkout is known"
+						);
+						assertMatches(
+							ai.message,
+							/\u0627\u0644\u062e\u0631\u0648\u062c|\u0627\u0644\u0645\u063a\u0627\u062f\u0631\u0629|checkout|check.?out|departure/i,
+							"checkin-only checkout request"
+						);
+					},
+				},
+				{
+					message: slashDayMonth(quad.checkoutISO),
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "separate checkout follow-up quote");
+						assertDateRangeMention(
+							ai.message,
+							quad.checkinISO,
+							quad.checkoutISO,
+							"separate checkout follow-up quote dates"
+						);
+						assertNoPrematureIdentityRequest(ai.message, "separate checkout follow-up quote");
+					},
+				},
+			],
+		},
+		{
+			name: "Arabic Ahmed price follow-up and on-demand room comparison",
+			hotel: "ajyad",
+			languageCode: "ar",
+			clientName: "\u0627\u062d\u0645\u062f \u0627\u0644\u062d\u062f\u0627\u062f",
+			reservation: true,
+			steps: [
+				{
+					message: "\u0643\u0645 \u0633\u0639\u0631 \u063a\u0631\u0641 \u0645\u0632\u062f\u0648\u062c\u0629",
+					expect: ({ ai }) => {
+						assertMatches(
+							ai.message,
+							/\u062a\u0627\u0631\u064a\u062e|\u0627\u0644\u062f\u062e\u0648\u0644|\u0627\u0644\u062e\u0631\u0648\u062c|date|check/i,
+							"Ahmed initial price detail request"
+						);
+					},
+				},
+				{
+					message:
+						`\u0645\u0646 ${slashDayMonth(ahmedComparisonStay.checkinISO)} \u0627\u0644\u0649 ${slashDayMonth(ahmedComparisonStay.checkoutISO)}`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "Ahmed date-only price quote");
+						assertDateRangeMention(
+							ai.message,
+							ahmedComparisonStay.checkinISO,
+							ahmedComparisonStay.checkoutISO,
+							"Ahmed date-only quote dates"
+						);
+						assertNoGuestCountQuestion(ai.message, "Ahmed date-only quote");
+					},
+				},
+				{
+					message:
+						"\u0639\u062f\u062f \u0627\u0644\u0636\u064a\u0648\u0641 4\n\u0646\u062d\u062a\u0627\u062c \u0625\u0644\u0649 \u063a\u0631\u0641\u062a\u064a\u0646 \u0645\u0632\u062f\u0648\u062c\u0629\n\u0623\u0648 \u063a\u0631\u0641\u0629 \u0648\u0627\u062d\u062f\u0629 \u0631\u0628\u0627\u0639\u064a\u0629",
+					expect: ({ ai }) => {
+						const priceCount = (String(ai.message || "").match(/message-price-new/g) || []).length;
+						assert(priceCount >= 2, "Ahmed room comparison did not show two priced options");
+						assertMatches(ai.message, /double|quad|\u0645\u0632\u062f\u0648\u062c|\u0631\u0628\u0627\u0639/i, "Ahmed comparison room labels");
+						assertDateRangeMention(
+							ai.message,
+							ahmedComparisonStay.checkinISO,
+							ahmedComparisonStay.checkoutISO,
+							"Ahmed comparison dates"
+						);
+						assert(
+							!/(?:\u0623\u064a\u0647\u0645\u0627|\u0627\u064a\u0647\u0645\u0627|\u062a\u0641\u0636\u0644).{0,60}\u061f/u.test(
+								ai.message
+							),
+							"Ahmed comparison asked which option instead of pricing both"
+						);
+						const replies = Array.isArray(ai.quickReplies) ? ai.quickReplies : [];
+						assert(replies.length >= 2, "Ahmed comparison did not send room-choice quick replies");
+						assert(
+							replies.every((reply) => String(reply.action || "") === "select_room_option"),
+							"Ahmed comparison quick replies do not select a room option"
+						);
+						const replyText = replies
+							.map((reply) => `${reply.label || ""} ${reply.value || ""}`)
+							.join(" ");
+						assertMatches(replyText, /double|\u0645\u0632\u062f\u0648\u062c/i, "Ahmed double quick reply");
+						assertMatches(replyText, /quad|\u0631\u0628\u0627\u0639/i, "Ahmed quad quick reply");
+					},
+				},
+				{
+					message:
+						"\u0623\u062e\u062a\u0627\u0631 \u063a\u0631\u0641\u062a\u064a\u0646 \u0645\u0632\u062f\u0648\u062c\u0629",
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "Ahmed typed double choice quote");
+						assertDateRangeMention(
+							ai.message,
+							ahmedComparisonStay.checkinISO,
+							ahmedComparisonStay.checkoutISO,
+							"Ahmed typed double choice quote dates"
+						);
+						assertMatches(
+							ai.message,
+							/double|\u0645\u0632\u062f\u0648\u062c/i,
+							"Ahmed typed double choice room label"
+						);
+					},
+				},
+				{
+					message: "\u0646\u0639\u0645 \u062a\u0627\u0628\u0639",
+					expect: ({ ai }) => {
+						assertMatches(
+							ai.message,
+							/\u0627\u0633\u0645|\u062c\u0648\u0627\u0644|\u062c\u0646\u0633\u064a\u0629|name|phone|nationality/i,
+							"Ahmed comparison details request"
+						);
+					},
+				},
+				{
+					message: `\u0627\u0644\u0627\u0633\u0645 \u0623\u062d\u0645\u062f \u0627\u0644\u062d\u062f\u0627\u062f \u0648\u0627\u0644\u062c\u0648\u0627\u0644 ${scenarioPhone(43)} \u0648\u0627\u0644\u062c\u0646\u0633\u064a\u0629 \u0645\u0635\u0631\u064a`,
+					expect: ({ ai }) => {
+						assertMatches(
+							ai.message,
+							/\u0628\u0631\u064a\u062f|email|\u0645\u0631\u0627\u062c\u0639\u0629|review|\u0625\u062a\u0645\u0627\u0645|\u0627\u0644\u062d\u062c\u0632/i,
+							"Ahmed comparison identity response"
+						);
+					},
+				},
+				{
+					message: "\u0627\u0644\u0645\u062a\u0627\u0628\u0639\u0629 \u0628\u062f\u0648\u0646 \u0628\u0631\u064a\u062f",
+					expect: ({ ai }) => {
+						assertMatches(
+							ai.message,
+							/\u0645\u0631\u0627\u062c\u0639\u0629|\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632|\u062a\u0623\u0643\u064a\u062f|\u0628\u064a\u0627\u0646\u0627\u062a \u0627\u0644\u062d\u062c\u0632|review|complete/i,
+							"Ahmed comparison official review"
+						);
+						assertMatches(ai.message, /double|\u0645\u0632\u062f\u0648\u062c/i, "Ahmed comparison review room");
+						assert(
+							!/quad|\u0631\u0628\u0627\u0639/i.test(String(ai.message || "")),
+							"Ahmed comparison review leaked the unchosen quad option"
+						);
+					},
+				},
+				{
+					message: "\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /\u062a\u0623\u0643\u064a\u062f|confirmation|\d{8,}/i, "Ahmed comparison final confirmation");
+						const rows = await assertReservationCreated(caseId, "Ahmed comparison selected double submit");
+						const reservation = rows[0] || {};
+						assert(
+							Number(reservation.total_rooms || 0) === 2,
+							"Ahmed comparison reservation did not keep exactly 2 selected double rooms"
+						);
+						const pickedRooms = Array.isArray(reservation.pickedRoomsPricing)
+							? reservation.pickedRoomsPricing
+							: [];
+						const pickedText = JSON.stringify(pickedRooms);
+						assertMatches(pickedText, /double|doubleRooms|\u0645\u0632\u062f\u0648\u062c/i, "Ahmed comparison reservation picked double room");
+						assert(
+							!/quad|quadRooms|\u0631\u0628\u0627\u0639/i.test(pickedText),
+							"Ahmed comparison reservation included the unchosen quad room"
+						);
+					},
+				},
+			],
+		},
 	];
 }
 
@@ -1370,6 +1718,8 @@ async function main() {
 		triple: await findAvailableStay(hotels.ajyad, "tripleRooms", 2, 1),
 		quad: await findAvailableStay(hotels.ajyad, "quadRooms", 2, 1),
 		family: await findAvailableStay(hotels.ajyad, "familyRooms", 2, 1),
+		comparison: await findAvailableComparisonStay(hotels.ajyad, 2),
+		split: await findAvailableSplitStay(hotels.ajyad, "doubleRooms", 2, 1),
 	};
 	const ctx = { hotels, stays, marker };
 	const scenarios = buildScenarios(ctx);
@@ -1391,7 +1741,7 @@ async function main() {
 		`LIVE_QA_START marker=${marker} selected=${selected.length} range=${requestedFrom}-${requestedTo} fast=${fastMode} dispatchSkipped=true`
 	);
 	console.log(
-		`LIVE_QA_STAYS double=${stays.double.checkinISO}->${stays.double.checkoutISO} triple=${stays.triple.checkinISO}->${stays.triple.checkoutISO} quad=${stays.quad.checkinISO}->${stays.quad.checkoutISO} family=${stays.family.checkinISO}->${stays.family.checkoutISO}`
+		`LIVE_QA_STAYS double=${stays.double.checkinISO}->${stays.double.checkoutISO} triple=${stays.triple.checkinISO}->${stays.triple.checkoutISO} quad=${stays.quad.checkinISO}->${stays.quad.checkoutISO} family=${stays.family.checkinISO}->${stays.family.checkoutISO} comparison=${stays.comparison.checkinISO}->${stays.comparison.checkoutISO} split=${stays.split.first.checkinISO}->${stays.split.first.checkoutISO}+${stays.split.second.checkinISO}->${stays.split.second.checkoutISO}`
 	);
 
 	for (const { definition, number } of selected) {
