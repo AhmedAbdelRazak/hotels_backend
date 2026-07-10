@@ -13,6 +13,7 @@ const {
 	setCaseStatus,
 	getHotelByIdWithPricingDates,
 	getReservationByConfirmation,
+	listHotelReservationsByExactStay,
 	listRecentHotelReservationsForExistingGuest,
 } = require("./db");
 const { ensureAIAllowed } = require("./policy");
@@ -63,6 +64,8 @@ const ROOM_TYPE_KEYS = [
 const MAX_AI_ROOM_COUNT = 50;
 const RESERVATION_CHANGE_CONTACT_PHONE = "+1 (909) 222-3374";
 const RESERVATION_CHANGE_CONTACT_WHATSAPP = "https://wa.me/19092223374";
+const PAID_GUEST_RECEPTION_PHONE = "+966541981804";
+const PAID_GUEST_RECEPTION_PHONE_DIGITS = "966541981804";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DIRECT_BOOKING_DISCOUNT_RATE = 0.25;
 const DIRECT_BOOKING_DISCOUNT_FACTOR = 1 - DIRECT_BOOKING_DISCOUNT_RATE;
@@ -4845,6 +4848,40 @@ function emailAlreadyOffered(sc = {}) {
 	});
 }
 
+function conversationHasGuestSkippedOptionalEmail(sc = {}) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	let lastAiAskedEmail = false;
+	for (const entry of conversation) {
+		if (isAiSupportEntry(entry)) {
+			lastAiAskedEmail =
+				String(entry.clientAction || "").toLowerCase() === "optional_email" ||
+				replyAsksOptionalEmail(entry.message, entry.knownFacts || {});
+			continue;
+		}
+		if (!isGuestEntry(entry)) continue;
+		const action = cleanString(entry.clientAction, 80).toLowerCase();
+		if (action === "skip_email" || (lastAiAskedEmail && guestDeclinesOptionalEmail(entry.message, action))) {
+			return true;
+		}
+		lastAiAskedEmail = false;
+	}
+	return false;
+}
+
+function clearUntrustedEmailSkipped(known = {}, sc = {}, latestText = "", latestAction = "") {
+	const facts = asObject(known);
+	if (!facts.emailSkipped) return facts;
+	if (guestDeclinesOptionalEmail(latestText, latestAction)) return facts;
+	if (conversationHasGuestSkippedOptionalEmail(sc)) return facts;
+	const next = { ...facts };
+	delete next.emailSkipped;
+	if (next.guest && typeof next.guest === "object" && !Array.isArray(next.guest)) {
+		next.guest = { ...next.guest };
+		delete next.guest.emailSkipped;
+	}
+	return next;
+}
+
 function previousAiAskedFor(field = "", previousAi = {}) {
 	const text = normalizeDigits(String(previousAi?.message || "")).toLowerCase();
 	const normalized = normalizeIntentSearchText(previousAi?.message || "");
@@ -7362,6 +7399,9 @@ function applyCustomerReplySafetyGuards({
 	}
 	if (replyContainsEmoji(next)) {
 		next = stripReplyEmoji(next);
+	}
+	if (replyContainsPaidGuestReceptionPhone(next)) {
+		next = buildSupportContactNumberMessage(sc, known, latestGuest, hotel);
 	}
 	return next;
 }
@@ -10089,6 +10129,8 @@ function orchestratorContractPrompt() {
 		'- Use action="escalate" only for human-needed cases, and "close_case" only when the guest is clearly finished.',
 		`- If you choose action="escalate", or the guest explicitly asks for a human, manager, reception, or escalation, your customer-facing reply must include WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} and WhatsApp link ${RESERVATION_CHANGE_CONTACT_WHATSAPP}. Say the team will help or review the issue; do not escalate with a contactless reply.`,
 		`- For arrival coordination such as very early arrival, late arrival, "I am going to the hotel at 4:00 AM", parking-on-arrival coordination, or any operational request that cannot be fully guaranteed from Hotel facts, answer the known policy first and include WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} plus ${RESERVATION_CHANGE_CONTACT_WHATSAPP} for live coordination. If a human decision is needed, use action="escalate".`,
+		'- Existing-reservation service mode is separate from new booking. If the guest already booked/paid, asks to confirm a deposit/payment, asks remaining balance, or asks about an existing reservation, use lookup_reservation when a confirmation number is present. If no confirmation number is present, ask for confirmation number, or exact reservation name plus check-in and checkout dates.',
+		`- Restricted reception number policy: only ${RESERVATION_CHANGE_CONTACT_PHONE} and ${RESERVATION_CHANGE_CONTACT_WHATSAPP} are public contacts. Never provide a Saudi reception/front-desk phone unless a lookup_reservation tool result explicitly says paidReceptionContact.allowed=true and supplies paidReceptionContact.contactPhone.`,
 		"- Required booking facts before official review: checkinISO, checkoutISO, roomTypeKey or roomSelections, a server quote, confirmed fullName, confirmed phone, confirmed nationality, and adults. Email is optional.",
 		"- If the guest asks for the booking process, next step, or how to book, do not restart with generic steps when Known facts already contain dates, room selection, quote, or unavailable quote context. Acknowledge what is already known, then state the exact next action or ask only for the missing required fields.",
 		"- The brain owns missing-field decisions. Put only genuinely needed field keys in memory.missingFields. If the guest already answered a field in the transcript or Known facts, do not ask again.",
@@ -10726,6 +10768,8 @@ function systemPrompt({ sc, hotel, known, toolResult = null, turnKind = "chat" }
 		`If you choose action="escalate", or the guest explicitly asks for a human, manager, reception, or escalation, include the exact WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} and WhatsApp link ${RESERVATION_CHANGE_CONTACT_WHATSAPP} in your reply. Do not escalate with only "I will pass this to the team" and no contact details.`,
 		`For arrival coordination such as very early arrival, late arrival, "I am going to the hotel at 4:00 AM", parking-on-arrival coordination, or any operational request that cannot be fully guaranteed from Hotel facts, answer any known policy first and include ${RESERVATION_CHANGE_CONTACT_PHONE} plus ${RESERVATION_CHANGE_CONTACT_WHATSAPP} for live coordination. If a human decision is needed, use action="escalate".`,
 		`If the guest asks to find, view, or check an existing reservation and explicitly gives a reservation/booking/confirmation/reference number, return action="lookup_reservation". Do not use this action for a normal phone number unless the guest explicitly says it is the reservation/booking/confirmation/reference number.`,
+		`Existing-reservation service mode: if the guest says they already booked, already paid, paid a deposit, wants to confirm payment, asks remaining balance, or asks service questions for an existing booking, prefer action="lookup_reservation" when a confirmation number is present. If no confirmation number is present, ask for the confirmation number; if they do not have it, ask for the exact reservation name plus check-in and checkout dates. Do not ask for room type, guest count, nationality, or new-booking details for an already-booked/payment-check request.`,
+		`Restricted reception number policy: ${RESERVATION_CHANGE_CONTACT_PHONE} and ${RESERVATION_CHANGE_CONTACT_WHATSAPP} are the public administration WhatsApp/call contacts and may be shared. Do not provide any Saudi reception/front-desk number from memory or the transcript. If a paid existing guest insists on the Saudi reception number after the administration WhatsApp was already provided, return action="lookup_reservation" so the backend can verify the paid reservation and provide the restricted number only if allowed.`,
 		`If Hotel facts say propertyType is hotel and rooms do not list apartments/units, never offer an apartment or say a two-bedroom apartment/unit is available. Explain briefly that this property provides hotel rooms, then offer the closest hotel-room setup if the guest mentioned room types such as double plus four-bed/quad.`,
 		`If the guest asks for a map, address, location, directions, or Google Maps, answer from Hotel facts and include Hotel facts.location.googleMapsUrl when present. If coordinates are present, treat them as authoritative for the map link.`,
 		`If the guest asks only how far/near the hotel is from Al Haram or asks walking/driving time, answer with the stored walking/driving distance only. Do not include Google Maps, address, raw coordinates, or extra numeric location data unless the guest explicitly asks for map, address, location, directions, or Google Maps.`,
@@ -14133,16 +14177,28 @@ function latestGuestAsksRoomPhotos(value = "") {
 	);
 }
 
-function buildSupportContactNumberMessage(sc = {}, known = {}, latestGuest = null) {
+function buildSupportContactNumberMessage(sc = {}, known = {}, latestGuest = null, hotel = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const wantsPhotos = latestGuestAsksRoomPhotos(latestGuest?.message || "");
 	const ar =
 		/^ar\b/i.test(languageCode) ||
 		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	const extraLines = [];
+	if (latestGuestMentionsBus(latestGuest)) {
+		const busDetails = serviceFactDetailsForReply(hotel?.busDetails, { allowArabic: ar });
+		if (hotel?.hasBusService === true || busDetails) {
+			extraLines.push(
+				ar
+					? `\u0648\u0628\u0627\u0644\u0646\u0633\u0628\u0629 \u0644\u0644\u0628\u0627\u0635 \u0623\u0648 \u0627\u0644\u0645\u0648\u0627\u0635\u0644\u0627\u062a: ${busDetails || "\u0627\u0644\u0641\u0646\u062f\u0642 \u064a\u0648\u0641\u0631 \u062f\u0639\u0645 \u0646\u0642\u0644 \u0644\u0644\u0636\u064a\u0648\u0641 \u062d\u0633\u0628 \u062a\u0646\u0633\u064a\u0642 \u0627\u0644\u0641\u0646\u062f\u0642."}`
+					: `For bus/transport: ${busDetails || "the hotel provides guest transport support according to hotel coordination."}`
+			);
+		}
+	}
 	if (ar) {
 		return [
 			`\u0623\u0643\u064a\u062f\u060c \u0644\u0644\u062a\u0648\u0627\u0635\u0644 \u0645\u0639\u0646\u0627 \u0639\u0644\u0649 \u0648\u0627\u062a\u0633\u0627\u0628 \u0644\u0623\u064a \u0627\u0633\u062a\u0641\u0633\u0627\u0631: ${RESERVATION_CHANGE_CONTACT_PHONE}`,
 			`\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+			...extraLines,
 			wantsPhotos
 				? "\u0648\u0644\u0635\u0648\u0631 \u0627\u0644\u063a\u0631\u0641\u060c \u064a\u0645\u0643\u0646\u0643 \u0625\u0631\u0633\u0627\u0644 \u0627\u0633\u0645 \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0644\u0649 \u0648\u0627\u062a\u0633\u0627\u0628 \u0648\u0633\u0646\u0631\u0633\u0644 \u0644\u0643 \u0627\u0644\u0635\u0648\u0631 \u0627\u0644\u0645\u062a\u0627\u062d\u0629\u060c \u0648\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0623\u064a\u0636\u0627."
 				: "\u0648\u0623\u0642\u062f\u0631 \u0623\u0633\u0627\u0639\u062f\u0643 \u0647\u0646\u0627 \u0641\u064a \u0627\u0644\u0634\u0627\u062a \u0623\u064a\u0636\u0627.",
@@ -14151,6 +14207,7 @@ function buildSupportContactNumberMessage(sc = {}, known = {}, latestGuest = nul
 	return [
 		`Sure, you can WhatsApp us for any inquiry at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
 		`WhatsApp link: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+		...extraLines,
 		wantsPhotos
 			? "For room photos, send us the hotel name on WhatsApp and we will share the available photos. I can also help you here in chat."
 			: "I can also help you here in chat.",
@@ -14397,6 +14454,13 @@ function conversationHasReservationLookupContext(sc = {}) {
 	});
 }
 
+function previousAiAskedForReservationConfirmation(previousAi = null) {
+	if (!previousAi || !isAiSupportEntry(previousAi)) return false;
+	const action = cleanString(previousAi.clientAction, 80).toLowerCase();
+	if (["reservation_lookup_not_found", "reservation_lookup_found"].includes(action)) return true;
+	return mentionsExplicitReservationIdentifier(previousAi.message || "");
+}
+
 function latestGuestRequestsReservationLookup(
 	sc = {},
 	latestText = "",
@@ -14416,6 +14480,9 @@ function latestGuestRequestsReservationLookup(
 			text
 		);
 	if (explicitConfirmation) {
+		if (/^\s*\d{8,12}\s*$/.test(text) && previousAiAskedForReservationConfirmation(previousAi)) {
+			return true;
+		}
 		if (
 			bookingIdentityCollectionContext(sc, previousAi, known) &&
 			latestGuestLooksLikeBookingIdentityAnswer(latestText) &&
@@ -14505,11 +14572,389 @@ function latestGuestRequestsReservationCancel(latestText = "", known = {}) {
 	);
 }
 
-function buildReservationLookupMessage(sc = {}, known = {}, reservation = null) {
+function toReservationMoney(value = 0) {
+	const number = Number(value);
+	if (!Number.isFinite(number)) return 0;
+	return Math.max(0, Math.round(number * 100) / 100);
+}
+
+function reservationNotCapturedPaymentStatus(reservation = {}) {
+	const payment = normalizeIntentSearchText(reservation.payment || "")
+		.replace(/[^\p{L}\d]+/gu, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return (
+		payment === "credit debit" ||
+		payment === "not captured" ||
+		payment === "paypal pending review"
+	);
+}
+
+function reservationBreakdownPaidFallback(reservation = {}) {
+	const breakdown = asObject(reservation.paid_amount_breakdown);
+	return Object.entries(breakdown).reduce((total, [key, value]) => {
+		if (!/^paid_/i.test(key)) return total;
+		return total + toReservationMoney(value);
+	}, 0);
+}
+
+function reservationPendingReviewAmountSar(reservation = {}) {
+	const captures = Array.isArray(reservation?.paypal_details?.pending_review_captures)
+		? reservation.paypal_details.pending_review_captures
+		: [];
+	const captureSar = captures.reduce((total, capture) => {
+		const status = normalizeIntentSearchText(
+			capture?.capture_status || capture?.status || ""
+		);
+		if (status && !/pending|review/.test(status)) return total;
+		return total + toReservationMoney(capture?.amount_sar);
+	}, 0);
+	if (captureSar > 0) return toReservationMoney(captureSar);
+	if (
+		toReservationMoney(reservation?.paypal_details?.pending_total_usd) > 0 ||
+		reservation?.payment_details?.paypalReviewPending
+	) {
+		return toReservationMoney(reservation?.payment_details?.triggeredAmountSAR);
+	}
+	return 0;
+}
+
+function reservationPaymentSummary(reservation = {}) {
+	const total = toReservationMoney(reservation.total_amount);
+	const rawPaid = toReservationMoney(reservation.paid_amount);
+	const onlinePaid = reservationNotCapturedPaymentStatus(reservation) ? 0 : rawPaid;
+	const fallbackPaid = onlinePaid > 0 ? 0 : reservationBreakdownPaidFallback(reservation);
+	const onsitePaid = toReservationMoney(reservation?.payment_details?.onsite_paid_amount);
+	const confirmedPaid = toReservationMoney(onlinePaid + fallbackPaid + onsitePaid);
+	const pendingReview = reservationPendingReviewAmountSar(reservation);
+	const remaining = total > 0 ? toReservationMoney(Math.max(0, total - confirmedPaid)) : 0;
+	return {
+		total,
+		confirmedPaid,
+		pendingReview,
+		remaining,
+		currency: reservation.currency || "SAR",
+		hasConfirmedPayment: confirmedPaid > 0,
+		fullyPaid: total > 0 && confirmedPaid >= total,
+	};
+}
+
+function latestGuestAsksReservationPayment(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:paid|payment|deposit|remaining|balance|due|checkout|check\s*out|receipt|invoice|pay|paypal)\b/i.test(
+			text
+		) ||
+		/(?:\u062f\u0641\u0639|\u062f\u0641\u0639\u062a|\u0627\u0644\u062f\u0641\u0639|\u0639\u0631\u0628\u0648\u0646|\u0628\u0627\u0642\u064a|\u0628\u0627\u0642\u0649|\u0627\u0644\u0628\u0627\u0642\u064a|\u0627\u0644\u0628\u0627\u0642\u0649|\u0645\u062a\u0628\u0642\u064a|\u0645\u062a\u0628\u0642\u0649|\u0641\u0627\u062a\u0648\u0631\u0629|\u0627\u064a\u0635\u0627\u0644|\u0625\u064a\u0635\u0627\u0644|\u0628\u0627\u064a\u0628\u0627\u0644)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestIsBareReservationConfirmation(value = "") {
+	const text = normalizeDigits(String(value || "")).trim();
+	return /^\d{8,12}$/.test(text) && Boolean(confirmationNumberFromText(text));
+}
+
+function recentGuestAskedReservationPaymentBeforeLatest(sc = {}, latestGuest = null) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestTime = latestGuest?.date ? new Date(latestGuest.date).getTime() : 0;
+	let skippedLatest = !latestGuest;
+	let inspected = 0;
+	for (let index = conversation.length - 1; index >= 0 && inspected < 8; index -= 1) {
+		const entry = conversation[index];
+		if (!skippedLatest && isGuestEntry(entry)) {
+			const sameMessage = String(entry.message || "") === String(latestGuest?.message || "");
+			const entryTime = entry.date ? new Date(entry.date).getTime() : 0;
+			if (sameMessage && (!latestTime || !entryTime || Math.abs(entryTime - latestTime) < 2000)) {
+				skippedLatest = true;
+				continue;
+			}
+		}
+		inspected += 1;
+		if (isAiSupportEntry(entry) && String(entry.clientAction || "") === "reservation_lookup_found") {
+			break;
+		}
+		if (isGuestEntry(entry) && latestGuestAsksReservationPayment(entry.message || "")) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function reservationLookupTurnAsksPayment(sc = {}, latestGuest = null) {
+	const latestText = String(latestGuest?.message || "");
+	if (latestGuestAsksReservationPayment(latestText)) return true;
+	return (
+		latestGuestIsBareReservationConfirmation(latestText) &&
+		recentGuestAskedReservationPaymentBeforeLatest(sc, latestGuest)
+	);
+}
+
+function latestGuestAsksRemainingBalance(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:remaining|balance|due|left|owed|rest)\b/i.test(text) ||
+		/(?:\u0628\u0627\u0642\u064a|\u0628\u0627\u0642\u0649|\u0627\u0644\u0628\u0627\u0642\u064a|\u0627\u0644\u0628\u0627\u0642\u0649|\u0645\u062a\u0628\u0642\u064a|\u0645\u062a\u0628\u0642\u0649)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestAsksPaymentLink(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:payment\s*link|pay\s*online|checkout\s*link|link\s*to\s*pay)\b/i.test(
+			text
+		) ||
+		/(?:\u0631\u0627\u0628\u0637\u0627\u0644\u062f\u0641\u0639|\u0631\u0627\u0628\u0637\s*\u0627\u0644\u062f\u0641\u0639|\u0627\u062f\u0641\u0639\s*\u0627\u0648\u0646\u0644\u0627\u064a\u0646|\u0627\u062f\u0641\u0639\s*\u0627\u0648\u0646\s*\u0644\u0627\u064a\u0646)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestClaimsExistingReservationPayment(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:already\s+paid|i\s+paid|paid\s+(?:a\s+)?deposit|made\s+(?:a\s+)?payment|deposit\s+for\s+(?:my\s+)?(?:booking|reservation))\b/i.test(
+			text
+		) ||
+		/(?:\u062f\u0641\u0639\u062a|\u0633\u062f\u062f\u062a|\u062d\u0648\u0644\u062a|\u0639\u0631\u0628\u0648\u0646|\u062f\u0641\u0639\u062a\u0639\u0631\u0628\u0648\u0646|\u0639\u0631\u0628\u0648\u0646\u062d\u062c\u0632)/iu.test(
+			compact
+		)
+	);
+}
+
+function latestGuestRequestsExistingReservationService(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		latestGuestClaimsExistingReservationPayment(value) ||
+		/\b(?:existing|already\s+(?:booked|reserved|paid)|my\s+(?:reservation|booking)|reservation\s+(?:number|confirmation|details|status)|booking\s+(?:number|confirmation|details|status)|confirmation|confirmed|booked|extend|extension|change\s+(?:my\s+)?(?:date|stay|reservation|booking)|modify\s+(?:my\s+)?(?:date|stay|reservation|booking))\b/i.test(
+			text
+		) ||
+		/(?:\u062d\u062c\u0632\u064a|\u062d\u062c\u0632\u062a|\u062d\u062c\u0632\u0646\u0627|\u0631\u0642\u0645\u0627\u0644\u062d\u062c\u0632|\u0631\u0642\u0645\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0645\u0624\u0643\u062f|\u0645\u0648\u0643\u062f|\u062a\u0645\u062f\u064a\u062f|\u062a\u063a\u064a\u064a\u0631\u0627\u0644\u062a\u0627\u0631\u064a\u062e|\u062a\u063a\u064a\u064a\u0631\u0627\u0644\u062d\u062c\u0632|\u062a\u0639\u062f\u064a\u0644\u0627\u0644\u062d\u062c\u0632|\u062a\u0639\u062f\u064a\u0644\u0627\u0644\u062a\u0627\u0631\u064a\u062e)/iu.test(
+			compact
+		)
+	);
+}
+
+function buildMissingReservationConfirmationMessage(sc = {}, known = {}, latestGuest = null, reason = "") {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	if (ar) {
+		if (reason === "multiple_matches") {
+			return "\u0622\u0633\u0641\u064a\u0646\u060c \u0648\u062c\u062f\u0646\u0627 \u0623\u0643\u062b\u0631 \u0645\u0646 \u062d\u062c\u0632 \u0642\u0631\u064a\u0628 \u0645\u0646 \u0647\u0630\u0647 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a. \u0644\u062d\u0645\u0627\u064a\u0629 \u062e\u0635\u0648\u0635\u064a\u062a\u0643 \u0648\u0625\u0631\u062c\u0627\u0639 \u0627\u0644\u0633\u062c\u0644 \u0627\u0644\u0635\u062d\u064a\u062d\u060c \u0641\u0636\u0644\u0627 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632.";
+		}
+		if (reason === "no_match") {
+			return "\u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 \u062a\u062d\u062f\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0628\u0627\u0644\u0627\u0633\u0645 \u0648\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e \u0641\u0642\u0637. \u0641\u0636\u0644\u0627 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632 \u0644\u0623\u0631\u0627\u062c\u0639\u0647 \u0644\u0643 \u0628\u062f\u0642\u0629.";
+		}
+		return "\u0623\u0643\u064a\u062f\u060c \u0641\u0636\u0644\u0627 \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u062a\u0623\u0643\u064a\u062f \u0627\u0644\u062d\u062c\u0632. \u0648\u0625\u0630\u0627 \u0644\u064a\u0633 \u0645\u0639\u0643 \u0627\u0644\u0631\u0642\u0645\u060c \u0623\u0631\u0633\u0644 \u0627\u0633\u0645 \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u062f\u0642\u064a\u0642 \u0645\u0639 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062f\u062e\u0648\u0644 \u0648\u0627\u0644\u062e\u0631\u0648\u062c \u0648\u0633\u0623\u062d\u0627\u0648\u0644 \u0645\u0637\u0627\u0628\u0642\u0629 \u0627\u0644\u062d\u062c\u0632.";
+	}
+	if (reason === "multiple_matches") {
+		return "I found more than one reservation close to those details. To protect the guest record and return the correct booking, please send the confirmation number.";
+	}
+	if (reason === "no_match") {
+		return "I could not identify one exact reservation from the name and dates alone. Please send the confirmation number so I can check it accurately.";
+	}
+	return "Sure. Please send the reservation confirmation number. If you do not have it, send the exact reservation name plus check-in and checkout dates, and I will try to match the booking safely.";
+}
+
+function reservationLookupIdentity(sc = {}, known = {}, latestText = "") {
+	return cleanDisplayString(
+		known.fullName ||
+			known.name ||
+			bookingNameFromIdentityText(latestText) ||
+			profileNameForBooking(sc),
+		140
+	);
+}
+
+function reservationServiceDateRange(known = {}, latestText = "") {
+	const latestDates = quickDateRange(latestText);
+	return {
+		checkinISO: validISODate(latestDates?.checkinISO) || validISODate(known.checkinISO),
+		checkoutISO:
+			validISODate(latestDates?.checkoutISO) || validISODate(known.checkoutISO),
+	};
+}
+
+function reservationServiceNameMatches(inputName = "", reservationName = "") {
+	const input = duplicateNameForCompare(inputName);
+	const stored = duplicateNameForCompare(reservationName);
+	if (!input || !stored) return false;
+	return input === stored || stored.includes(input) || input.includes(stored);
+}
+
+async function findReservationServiceMatches(sc = {}, hotel = {}, known = {}, latestGuest = null) {
+	const latestText = String(latestGuest?.message || "");
+	const name = reservationLookupIdentity(sc, known, latestText);
+	const { checkinISO, checkoutISO } = reservationServiceDateRange(known, latestText);
+	const hotelId = String(hotel?._id || sc.hotelId || "").trim();
+	if (!hotelId || !name || !checkinISO || !checkoutISO) {
+		return { status: "missing_details", name, checkinISO, checkoutISO, matches: [] };
+	}
+	const candidates = await listHotelReservationsByExactStay({
+		hotelId,
+		checkinISO,
+		checkoutISO,
+		limit: 25,
+	});
+	const matches = candidates.filter((reservation) =>
+		reservationServiceNameMatches(name, reservation?.customer_details?.name || "")
+	);
+	return {
+		status:
+			matches.length === 1
+				? "one_match"
+				: matches.length > 1
+				? "multiple_matches"
+				: "no_match",
+		name,
+		checkinISO,
+		checkoutISO,
+		matches,
+	};
+}
+
+function replyContainsPaidGuestReceptionPhone(value = "") {
+	const digits = normalizeDigits(value).replace(/[^\d]/g, "");
+	return (
+		digits.includes(PAID_GUEST_RECEPTION_PHONE_DIGITS) ||
+		digits.includes(PAID_GUEST_RECEPTION_PHONE_DIGITS.replace(/^966/, "0"))
+	);
+}
+
+function previousAiSharedAdminContact(sc = {}, latestGuest = null) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const latestIndex = latestGuest
+		? conversation.findIndex((entry) => entry === latestGuest)
+		: conversation.length;
+	const end = latestIndex >= 0 ? latestIndex : conversation.length;
+	return conversation
+		.slice(Math.max(0, end - 8), end)
+		.some((entry) => {
+			if (!entry?.isAi) return false;
+			const message = String(entry.message || "");
+			return (
+				message.includes(RESERVATION_CHANGE_CONTACT_PHONE) ||
+				message.includes(RESERVATION_CHANGE_CONTACT_WHATSAPP)
+			);
+		});
+}
+
+function latestGuestInsistsOnPaidReceptionPhone(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	const receptionSignal =
+		/\b(?:reception|front\s*desk|arrival|hotel\s*number|direct\s*number|saudi\s*number)\b/i.test(
+			text
+		) ||
+		/(?:\u0631\u064a\u0633\u064a\u0628\u0634\u0646|\u0627\u0633\u062a\u0642\u0628\u0627\u0644|\u0648\u0635\u0648\u0644|\u0627\u0644\u0641\u0646\u062f\u0642|\u0631\u0642\u0645\u0633\u0639\u0648\u062f\u064a|\u0633\u0639\u0648\u062f\u064a)/iu.test(
+			compact
+		);
+	const asksContact =
+		latestGuestAsksSupportContactNumber(value) ||
+		(receptionSignal &&
+			(/\b(?:number|phone|mobile|contact)\b/i.test(text) ||
+				/(?:\u0631\u0642\u0645|\u062c\u0648\u0627\u0644|\u0647\u0627\u062a\u0641|\u062a\u0648\u0627\u0635\u0644)/iu.test(
+					compact
+				)));
+	const insistSignal =
+		/\b(?:direct|specific|reception|front\s*desk|insist|must|need\s+the\s+hotel|not\s+whatsapp)\b/i.test(
+			text
+		) ||
+		/(?:\u0636\u0631\u0648\u0631\u064a|\u0644\u0627|\u0645\u0634|\u0627\u0644\u0633\u0639\u0648\u062f\u064a|\u0627\u0644\u0631\u064a\u0633\u064a\u0628\u0634\u0646|\u0646\u0641\u0633\u0647|\u0645\u0628\u0627\u0634\u0631)/iu.test(
+			compact
+		);
+	return asksContact && receptionSignal && insistSignal;
+}
+
+function paidReceptionPhoneAllowed({
+	reservation = null,
+	sc = {},
+	latestGuest = null,
+} = {}) {
+	if (!reservation) return false;
+	const payment = reservationPaymentSummary(reservation);
+	return (
+		payment.hasConfirmedPayment &&
+		latestGuestInsistsOnPaidReceptionPhone(latestGuest?.message || "") &&
+		previousAiSharedAdminContact(sc, latestGuest)
+	);
+}
+
+function compactReservationPaymentSummary(reservation = {}) {
+	const payment = reservationPaymentSummary(reservation);
+	return {
+		total: payment.total,
+		confirmedPaid: payment.confirmedPaid,
+		pendingReview: payment.pendingReview,
+		remaining: payment.remaining,
+		currency: payment.currency,
+		hasConfirmedPayment: payment.hasConfirmedPayment,
+		fullyPaid: payment.fullyPaid,
+	};
+}
+
+function reservationLookupToolResult(reservation = null, extra = {}) {
+	const paymentSummary = reservation ? compactReservationPaymentSummary(reservation) : null;
+	const paidReceptionContactAllowed = Boolean(extra.paidReceptionContactAllowed);
+	const paymentRequested = Boolean(extra.paymentRequested);
+	return {
+		tool: "lookup_reservation",
+		ok: Boolean(reservation),
+		code: extra.code || (reservation ? "found" : "not_found"),
+		confirmation:
+			reservation?.confirmation_number || cleanDisplayString(extra.confirmation || "", 40),
+		reservation: compactReservationForBrain(reservation),
+		paymentSummary,
+		paymentRequested,
+		...(extra.lookupBy ? { lookupBy: extra.lookupBy } : {}),
+		...(extra.lookupName ? { lookupName: extra.lookupName } : {}),
+		...(extra.checkinISO ? { checkinISO: extra.checkinISO } : {}),
+		...(extra.checkoutISO ? { checkoutISO: extra.checkoutISO } : {}),
+		paidReceptionContact: {
+			allowed: paidReceptionContactAllowed,
+			contactPhone: paidReceptionContactAllowed ? PAID_GUEST_RECEPTION_PHONE : "",
+			rule:
+				"Only include contactPhone when allowed=true. Otherwise use the administration WhatsApp contact only.",
+		},
+		adminContact: {
+			contactPhone: RESERVATION_CHANGE_CONTACT_PHONE,
+			whatsapp: RESERVATION_CHANGE_CONTACT_WHATSAPP,
+		},
+		instruction: paymentRequested
+			? "The guest asked about a paid deposit/payment in this lookup context. Answer only from paymentSummary: confirmedPaid is captured/confirmed, pendingReview is only mentioned if greater than 0, and remaining is the amount left. Do not mention double payment or pending review when pendingReview is 0."
+			: "Answer only the guest's current reservation question from the reservation facts. Do not volunteer payment details unless paymentRequested=true or the latest message asks about payment/balance.",
+	};
+}
+
+function buildReservationLookupMessage(
+	sc = {},
+	known = {},
+	reservation = null,
+	latestGuest = null,
+	{ missingReason = "" } = {}
+) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
 	const confirmation = cleanString(known.confirmation, 40);
 	if (!reservation) {
+		if (missingReason) {
+			return buildMissingReservationConfirmationMessage(
+				sc,
+				known,
+				latestGuest,
+				missingReason
+			);
+		}
 		return ar
 			? `لم أجد حجزا برقم التأكيد ${confirmation || ""} في النظام الحالي. فضلا راجع الرقم، أو ارسل نص التأكيد وسأحولها للاستقبال للتأكد.`
 			: `I could not find a reservation with confirmation number ${confirmation || ""} in the current system. Please recheck the number, or send the confirmation text and I will pass it to reception to verify.`;
@@ -14525,6 +14970,91 @@ function buildReservationLookupMessage(sc = {}, known = {}, reservation = null) 
 		reservation.checkout_date,
 		languageCode
 	)}`;
+	const latestText = String(latestGuest?.message || "");
+	const asksPayment = reservationLookupTurnAsksPayment(sc, latestGuest);
+	const asksRemaining = latestGuestAsksRemainingBalance(latestText);
+	const asksPaymentLink = latestGuestAsksPaymentLink(latestText);
+	const asksRestrictedReception = latestGuestInsistsOnPaidReceptionPhone(latestText);
+	const payment = reservationPaymentSummary(reservation);
+	const paidReceptionAllowed = paidReceptionPhoneAllowed({ reservation, sc, latestGuest });
+	const paymentLines = [];
+	if (asksPayment || asksRemaining) {
+		paymentLines.push(
+			ar
+				? `\u0627\u0644\u0645\u062f\u0641\u0648\u0639 \u0627\u0644\u0645\u0624\u0643\u062f: ${formatMoney(
+						payment.confirmedPaid,
+						currency,
+						languageCode
+				  )}`
+				: `Confirmed paid: ${formatMoney(payment.confirmedPaid, currency, languageCode)}`
+		);
+		if (payment.pendingReview > 0) {
+			paymentLines.push(
+				ar
+					? `\u064a\u0648\u062c\u062f \u0645\u0628\u0644\u063a ${formatMoney(
+							payment.pendingReview,
+							currency,
+							languageCode
+					  )} \u0642\u064a\u062f \u0645\u0631\u0627\u062c\u0639\u0629 \u0628\u0627\u064a\u0628\u0627\u0644\u060c \u0648\u0644\u0646 \u0646\u0639\u062a\u0628\u0631\u0647 \u0645\u062f\u0641\u0648\u0639\u0627 \u0645\u0624\u0643\u062f\u0627 \u0625\u0644\u0627 \u0628\u0639\u062f \u0627\u0643\u062a\u0645\u0627\u0644\u0647.`
+					: `${formatMoney(
+							payment.pendingReview,
+							currency,
+							languageCode
+					  )} is still under PayPal review, so it is not counted as confirmed paid until PayPal completes it.`
+			);
+		}
+		paymentLines.push(
+			ar
+				? `\u0627\u0644\u0645\u062a\u0628\u0642\u064a: ${formatMoney(
+						payment.remaining,
+						currency,
+						languageCode
+				  )}`
+				: `Remaining balance: ${formatMoney(payment.remaining, currency, languageCode)}`
+		);
+	}
+	const contactLines = [];
+	if (asksRestrictedReception) {
+		if (paidReceptionAllowed) {
+			contactLines.push(
+				ar
+					? `\u0631\u0642\u0645 \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0644\u0644\u0636\u064a\u0648\u0641 \u0627\u0644\u0645\u0624\u0643\u062f\u064a\u0646: ${PAID_GUEST_RECEPTION_PHONE}`
+					: `Reception number for confirmed paid guests: ${PAID_GUEST_RECEPTION_PHONE}`
+			);
+		} else {
+			contactLines.push(
+				ar
+					? `\u0644\u0644\u062a\u0646\u0633\u064a\u0642 \u0627\u0644\u0623\u0633\u0631\u0639\u060c \u0641\u0636\u0644\u0627 \u062a\u0648\u0627\u0635\u0644 \u0648\u0627\u062a\u0633\u0627\u0628 \u0645\u0639 \u0627\u0644\u0625\u062f\u0627\u0631\u0629 \u0639\u0644\u0649 ${RESERVATION_CHANGE_CONTACT_PHONE} \u0648\u0633\u064a\u0633\u0627\u0639\u062f\u0648\u0646\u0643 \u0641\u064a \u0627\u0644\u0627\u0633\u062a\u0642\u0628\u0627\u0644 \u0648\u0643\u0644 \u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644.`
+					: `For the fastest coordination, please WhatsApp the administration team at ${RESERVATION_CHANGE_CONTACT_PHONE}. They will help with reception and all arrival details.`
+			);
+			contactLines.push(
+				ar
+					? `\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`
+					: `WhatsApp link: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`
+			);
+		}
+	}
+	if (asksRestrictedReception) {
+		return contactLines.join("\n");
+	}
+	if (ar) {
+		return [
+			`\u0648\u062c\u062f\u062a \u0627\u0644\u062d\u062c\u0632 \u0631\u0642\u0645 ${reservation.confirmation_number || confirmation}.`,
+			`\u0627\u0644\u062d\u0627\u0644\u0629: ${status || "\u063a\u064a\u0631 \u0645\u062d\u062f\u062f\u0629"}`,
+			`\u0627\u0644\u062a\u0648\u0627\u0631\u064a\u062e: ${dateLine}`,
+			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${formatMoney(total, currency, languageCode)}`,
+			...paymentLines,
+			...contactLines,
+			links.reservationConfirmation && !asksPayment
+				? `[\u0631\u0627\u0628\u0637 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632](${links.reservationConfirmation})`
+				: "",
+			links.payment && asksPaymentLink
+				? `[\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639](${links.payment})`
+				: "",
+		]
+			.filter(Boolean)
+			.join("\n");
+	}
 	if (ar) {
 		return [
 			`وجدت الحجز رقم ${reservation.confirmation_number || confirmation}.`,
@@ -14543,22 +15073,39 @@ function buildReservationLookupMessage(sc = {}, known = {}, reservation = null) 
 		`Status: ${status || "Not specified"}`,
 		`Dates: ${dateLine}`,
 		`Total: ${formatMoney(total, currency, languageCode)}`,
-		links.reservationConfirmation ? `[Reservation details](${links.reservationConfirmation})` : "",
-		links.payment ? `[Payment link](${links.payment})` : "",
-		`If you want to update the dates, send the new check-in and checkout dates.`,
+		...paymentLines,
+		...contactLines,
+		links.reservationConfirmation && !asksPayment
+			? `[Reservation details](${links.reservationConfirmation})`
+			: "",
+		links.payment && asksPaymentLink ? `[Payment link](${links.payment})` : "",
 	]
 		.filter(Boolean)
 		.join("\n");
 }
 
 async function handleReservationLookup(io, sc = {}, hotel = {}, known = {}, latestGuest = null) {
-	const confirmation =
+	let confirmation =
 		confirmationNumberFromText(latestGuest?.message || "") ||
 		cleanString(known.confirmation, 40);
 	const nextKnown = { ...known, confirmation };
 	let reservation = null;
+	let missingReason = "";
 	if (confirmation) {
 		reservation = await getReservationByConfirmation(confirmation).catch(() => null);
+	} else if (latestGuestRequestsExistingReservationService(latestGuest?.message || "")) {
+		const serviceMatches = await findReservationServiceMatches(sc, hotel, nextKnown, latestGuest);
+		if (serviceMatches.status === "one_match") {
+			reservation = serviceMatches.matches[0];
+			confirmation = cleanString(reservation?.confirmation_number || "", 40);
+			nextKnown.confirmation = confirmation;
+		} else if (serviceMatches.status === "multiple_matches") {
+			missingReason = "multiple_matches";
+		} else if (serviceMatches.status === "no_match") {
+			missingReason = "no_match";
+		} else {
+			missingReason = "missing_details";
+		}
 	}
 	const activeHotelId = String(hotel?._id || "");
 	const reservationHotelId = String(reservation?.hotelId || "");
@@ -14566,7 +15113,7 @@ async function handleReservationLookup(io, sc = {}, hotel = {}, known = {}, late
 		reservation = null;
 	}
 	await saveKnownFacts(caseIdText(sc), nextKnown);
-	return sendAiMessage(io, sc, buildReservationLookupMessage(sc, nextKnown, reservation), {
+	return sendAiMessage(io, sc, buildReservationLookupMessage(sc, nextKnown, reservation, latestGuest, { missingReason }), {
 		latestGuest,
 		known: nextKnown,
 		clientAction: reservation ? "reservation_lookup_found" : "reservation_lookup_not_found",
@@ -17207,6 +17754,7 @@ function compactReservationForBrain(reservation = null) {
 		phone: reservation.customer_details?.phone || "",
 		totalRooms: Number(reservation.total_rooms || 0) || 0,
 		totalGuests: Number(reservation.total_guests || reservation.adults || 0) || 0,
+		paymentSummary: compactReservationPaymentSummary(reservation),
 		links,
 	};
 }
@@ -17752,6 +18300,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous reply was not sent because it was too similar to a recent assistant message in this same chat. Rewrite it in a fresh, human reception style while preserving the exact facts, prices, dates, room counts, confirmation numbers, links, and contact details from toolResult. Do not add extra questions; keep the same action and next step."
 				: validation === "required_contact_missing"
 				? "Your previous reply was not sent because it omitted the required human-support contact. Return a corrected customer-facing reply from OpenAI only. Include toolResult.contactPhone and toolResult.whatsapp exactly, and keep the tone warm and professional."
+				: validation === "restricted_reception_phone_not_allowed"
+				? "Your previous reply included a restricted Saudi reception/front-desk phone number without authorization. Return a corrected customer-facing reply from OpenAI only. Do not include that restricted number. Use toolResult.adminContact.contactPhone and toolResult.adminContact.whatsapp, and say the administration WhatsApp team will help with reception and arrival details."
 				: "Your previous tool-result reply was not sent because it failed validation. Return a corrected customer-facing reply from OpenAI only, using the toolResult facts exactly. Do not invent prices, dates, rooms, policies, or contact details.";
 		return askOpenAI({
 			sc,
@@ -18009,6 +18559,12 @@ async function sendBrainToolReplyFromOpenAI({
 				!text.includes(RESERVATION_CHANGE_CONTACT_WHATSAPP))
 		) {
 			return "required_contact_missing";
+		}
+		if (
+			replyContainsPaidGuestReceptionPhone(text) &&
+			!toolResult?.paidReceptionContact?.allowed
+		) {
+			return "restricted_reception_phone_not_allowed";
 		}
 		if (
 			requirePolicy &&
@@ -18421,8 +18977,14 @@ async function handleBrainRoomOptions(
 }
 
 async function handleBrainLookup(io, sc = {}, hotel = {}, known = {}, latestGuest = null, typingStartedAt = 0) {
-	const confirmation = cleanDisplayString(known.confirmation, 40);
+	let confirmation =
+		confirmationNumberFromText(latestGuest?.message || "") ||
+		cleanDisplayString(known.confirmation, 40);
+	let nextKnown = { ...known, confirmation };
 	let reservation = null;
+	let code = "missing_confirmation";
+	let lookupBy = confirmation ? "confirmation" : "";
+	let serviceMatches = null;
 	if (confirmation) {
 		reservation = await getReservationByConfirmation(confirmation).catch(() => null);
 		const activeHotelId = String(hotel?._id || sc.hotelId || "");
@@ -18430,25 +18992,74 @@ async function handleBrainLookup(io, sc = {}, hotel = {}, known = {}, latestGues
 		if (reservation && activeHotelId && reservationHotelId && activeHotelId !== reservationHotelId) {
 			reservation = null;
 		}
+		code = reservation ? "found" : "not_found";
+	} else {
+		serviceMatches = await findReservationServiceMatches(sc, hotel, nextKnown, latestGuest);
+		if (serviceMatches.status === "one_match") {
+			reservation = serviceMatches.matches[0];
+			confirmation = cleanDisplayString(reservation?.confirmation_number || "", 40);
+			nextKnown = { ...nextKnown, confirmation };
+			lookupBy = "name_dates";
+			code = "found_by_name_dates";
+		} else {
+			code =
+				serviceMatches.status === "multiple_matches"
+					? "multiple_matches_missing_confirmation"
+					: serviceMatches.status === "no_match"
+					? "no_match_missing_confirmation"
+					: "missing_confirmation";
+		}
 	}
-	const fallback = confirmation
-		? buildReservationLookupMessage(sc, known, reservation)
-		: /^ar\b/i.test(activeLanguageCode(sc, known))
-		? "\u0623\u0643\u064a\u062f\u060c \u0623\u0631\u0633\u0644 \u0631\u0642\u0645 \u0627\u0644\u062d\u062c\u0632 \u0623\u0648 \u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f \u0648\u0623\u0631\u0627\u062c\u0639\u0647 \u0644\u0643."
-		: "Sure, send me the reservation or confirmation number and I will check it for you.";
+	const missingReason =
+		code === "multiple_matches_missing_confirmation"
+			? "multiple_matches"
+			: code === "no_match_missing_confirmation"
+			? "no_match"
+			: !confirmation && !reservation
+			? "missing_details"
+			: "";
+	await saveKnownFacts(caseIdText(sc), nextKnown);
+	const fallback = buildReservationLookupMessage(sc, nextKnown, reservation, latestGuest, {
+		missingReason,
+	});
+	const paidReceptionContactAllowed = paidReceptionPhoneAllowed({
+		reservation,
+		sc,
+		latestGuest,
+	});
+	const paymentRequested = reservationLookupTurnAsksPayment(sc, latestGuest);
+	if (latestGuestInsistsOnPaidReceptionPhone(latestGuest?.message || "")) {
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, fallback, {
+			latestGuest,
+			known: nextKnown,
+			clientAction: reservation ? "reservation_lookup_found" : "reservation_lookup_not_found",
+		});
+	}
+	if (reservation && paymentRequested) {
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, fallback, {
+			latestGuest,
+			known: nextKnown,
+			clientAction: "reservation_lookup_found",
+		});
+	}
 	return sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
 		hotel,
-		known,
+		known: nextKnown,
 		latestGuest,
-		toolResult: {
-			tool: "lookup_reservation",
-			ok: Boolean(confirmation),
-			code: confirmation ? (reservation ? "found" : "not_found") : "missing_confirmation",
+		toolResult: reservationLookupToolResult(reservation, {
+			code,
 			confirmation,
-			reservation: compactReservationForBrain(reservation),
-		},
+			lookupBy,
+			lookupName: serviceMatches?.name || "",
+			checkinISO: serviceMatches?.checkinISO || "",
+			checkoutISO: serviceMatches?.checkoutISO || "",
+			paidReceptionContactAllowed,
+			paymentRequested,
+		}),
 		clientAction: reservation ? "reservation_lookup_found" : "reservation_lookup_not_found",
 		fallback,
 		typingStartedAt,
@@ -18740,6 +19351,12 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			});
 		}
 	}
+	reviewKnown = clearUntrustedEmailSkipped(
+		reviewKnown,
+		sc,
+		latestGuest?.message || "",
+		latestGuest?.clientAction || ""
+	);
 	const missing = requiredBookingMissing(reviewKnown);
 	if (!missing.length) {
 		const duplicateGuard = await handleExistingReservationDuplicateGuard({
@@ -18779,14 +19396,6 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 			typingStartedAt,
 		});
 	}
-	const fallback = missing.length
-		? withWarmPrefix(
-				buildMandatoryDetailsMessage(sc, reviewKnown, missing),
-				sc,
-				reviewKnown,
-				latestGuest?.message || ""
-		  )
-		: buildReviewMessage(sc, reviewKnown, hotel);
 	const reviewChatKnown = { ...reviewKnown, fullName: "" };
 	const reviewChatGuestProfile = guestDisplayName(sc);
 	const reviewChatGuestAddressName = shortGuestAddressName(
@@ -18810,6 +19419,29 @@ async function handleBrainReview(io, sc = {}, hotel = {}, known = {}, latestGues
 	const reviewChatDiffersFromBooking =
 		Boolean(reviewBookingName && reviewChatGuestNames.length) &&
 		!reviewChatGuestNames.some((item) => sameBookingName(item, reviewBookingName));
+	const repeatReviewRequested =
+		!missing.length &&
+		previousAi?.clientAction === "review_reservation" &&
+		guestRequestsBookingReview(latestGuest?.message || "");
+	const baseReviewFallback = missing.length ? "" : buildReviewMessage(sc, reviewKnown, hotel);
+	const repeatedReviewFallback = repeatReviewRequested
+		? [
+				/^ar\b/i.test(activeLanguageCode(sc, reviewKnown))
+					? "\u0623\u0643\u064a\u062f\u060c \u0647\u0630\u0647 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632 \u0643\u0627\u0645\u0644\u0629 \u0645\u0631\u0629 \u062b\u0627\u0646\u064a\u0629 \u0642\u0628\u0644 \u0627\u0644\u062a\u0623\u0643\u064a\u062f:"
+					: "Sure, here are the full booking details again before confirmation:",
+				baseReviewFallback,
+		  ]
+				.filter(Boolean)
+				.join("\n")
+		: baseReviewFallback;
+	const fallback = missing.length
+		? withWarmPrefix(
+				buildMandatoryDetailsMessage(sc, reviewKnown, missing),
+				sc,
+				reviewKnown,
+				latestGuest?.message || ""
+		  )
+		: repeatedReviewFallback;
 	const updated = await sendBrainToolReplyFromOpenAI({
 		io,
 		sc,
@@ -19118,6 +19750,45 @@ async function executeBrainFirstDecision({
 	nextKnown = applySelectedSameDateRoomOptionLock(
 		ensureRoomPlanForGuestCapacity(hotel, nextKnown).known
 	);
+	const splitStayPeriodsForDecision = normalizeSplitStayPeriods(nextKnown.splitStayPeriods);
+	if (
+		splitStayPeriodsForDecision.length >= 2 &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		["get_quote", "reply", "send_review", "send_review_again"].includes(nextDecision.action)
+	) {
+		if (!splitStayQuoteMatchesKnown(nextKnown) && splitStayQuoteInputsKnown(nextKnown)) {
+			await saveKnownFacts(key, nextKnown);
+			return handleBrainSplitStayQuote(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+		}
+		if (splitStayQuoteMatchesKnown(nextKnown) && nextDecision.action === "get_quote") {
+			nextDecision = normalizeDecision({
+				...nextDecision,
+				action: "send_review",
+				reply: "",
+				reason: nextDecision.reason || "split_stay_quote_already_ready_continue_flow",
+			});
+		}
+	}
+	if (
+		latestGuest &&
+		normalizeSplitStayPeriods(nextKnown.splitStayPeriods).length < 2 &&
+		!latestGuestAsksHotelFactOnly(latestGuest) &&
+		(validISODate(known.checkinISO) || previousAiAskedForCheckoutDate(previousAi))
+	) {
+		const boundaryFacts = dateBoundaryFactsFromAskedAnswer(latestText, nextKnown, previousAi);
+		if (Object.keys(boundaryFacts).length) {
+			nextKnown = mergeKnownFacts(nextKnown, boundaryFacts);
+			nextKnown = applySelectedSameDateRoomOptionLock(syncKnownFromQuote(nextKnown));
+			if (quoteInputsKnown(nextKnown) && !quoteMatchesKnown(nextKnown)) {
+				nextDecision = normalizeDecision({
+					...nextDecision,
+					action: "get_quote",
+					reply: "",
+					reason: nextDecision.reason || "date_boundary_answer_requires_quote",
+				});
+			}
+		}
+	}
 	const latestFactsHint = latestMessageFactsHintForPrompt({
 		sc,
 		hotel,
@@ -19224,6 +19895,63 @@ async function executeBrainFirstDecision({
 		);
 		return handleBrainQuote(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
+	nextKnown = clearUntrustedEmailSkipped(nextKnown, sc, latestText, latestAction);
+	if (
+		latestGuest &&
+		latestGuestAsksHotelFactOnly(latestGuest) &&
+		(nextDecision.action !== "reply" ||
+			!cleanDisplayString(nextDecision.reply, 2000) ||
+			hotelFactReplyNeedsCorrection(nextDecision, hotel, latestGuest))
+	) {
+		await saveKnownFacts(key, nextKnown);
+		return sendHotelFactReplyFromOpenAI({
+			io,
+			sc,
+			hotel,
+			known: nextKnown,
+			latestGuest,
+			factQuestion: contextualHotelFactQuestion || latestText,
+			typingStartedAt,
+		});
+	}
+	const earlyPaymentConfirmation =
+		cleanString(nextKnown.confirmation || "", 60) || latestReservationConfirmationFromConversation(sc);
+	if (
+		latestGuest &&
+		latestGuestAsksPayAtHotel(latestText) &&
+		!latestGuestAsksRemainingBalance(latestText) &&
+		(knownHasCreatedReservation(nextKnown) ||
+			conversationHasAiAction(sc, "reservation_confirmed") ||
+			earlyPaymentConfirmation)
+	) {
+		if (earlyPaymentConfirmation && !nextKnown.confirmation) {
+			nextKnown = { ...nextKnown, confirmation: earlyPaymentConfirmation };
+		}
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildPostConfirmationPayAtHotelMessage(sc, nextKnown, latestGuest), {
+			latestGuest,
+			known: nextKnown,
+			clientAction: "payment_at_hotel_policy",
+		});
+	}
+	if (latestGuest && latestGuestRequestsReservationLookup(sc, latestText, nextKnown, previousAi)) {
+		const confirmation = confirmationNumberFromText(latestText);
+		if (confirmation) nextKnown = { ...nextKnown, confirmation };
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainLookup(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
+	if (
+		latestGuest &&
+		latestGuestRequestsExistingReservationService(latestText) &&
+		!guestExplicitlyRequestsBookingSubmit(latestText, latestAction) &&
+		!knownHasCreatedReservation(nextKnown)
+	) {
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainLookup(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
 	if (officialReviewConfirmation) {
 		nextKnown = applyOfficialReviewSnapshotForSubmit(nextKnown);
 		await saveKnownFacts(key, nextKnown);
@@ -19257,10 +19985,19 @@ async function executeBrainFirstDecision({
 		await waitForTypingMinimum(typingStartedAt);
 		return handleBrainSubmitReservation(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
+	if (
+		latestGuest &&
+		latestGuestInsistsOnPaidReceptionPhone(latestText) &&
+		cleanString(nextKnown.confirmation, 40)
+	) {
+		await saveKnownFacts(key, nextKnown);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleBrainLookup(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+	}
 	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
 		await saveKnownFacts(key, nextKnown);
 		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, nextKnown, latestGuest), {
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, nextKnown, latestGuest, hotel), {
 			latestGuest,
 			known: nextKnown,
 			clientAction: "support_contact_number",
@@ -19723,6 +20460,10 @@ async function executeBrainFirstDecision({
 			{ action: "send_review", reason: "guest_continued_after_quote" },
 			nextKnown
 		);
+		if (shouldOfferOptionalEmail(sc, nextKnown)) {
+			await waitForTypingMinimum(typingStartedAt);
+			return sendOptionalEmailOffer(io, sc, nextKnown, latestGuest);
+		}
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	const latestRequestsProgressOnShownQuote =
@@ -19741,6 +20482,10 @@ async function executeBrainFirstDecision({
 			{ action: "send_review", reason: "guest_requested_progress_after_shown_quote" },
 			nextKnown
 		);
+		if (shouldOfferOptionalEmail(sc, nextKnown)) {
+			await waitForTypingMinimum(typingStartedAt);
+			return sendOptionalEmailOffer(io, sc, nextKnown, latestGuest);
+		}
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (
@@ -19757,6 +20502,10 @@ async function executeBrainFirstDecision({
 			{ action: "send_review", reason: "guest_requested_booking_review_details" },
 			nextKnown
 		);
+		if (shouldOfferOptionalEmail(sc, nextKnown)) {
+			await waitForTypingMinimum(typingStartedAt);
+			return sendOptionalEmailOffer(io, sc, nextKnown, latestGuest);
+		}
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (
@@ -19811,6 +20560,7 @@ async function executeBrainFirstDecision({
 	nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
 		fallbackKnown: known,
 	}).known;
+	nextKnown = clearUntrustedEmailSkipped(nextKnown, sc, latestText, latestAction);
 	await saveKnownFacts(key, nextKnown);
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
 	if (nextDecision.action === "escalate") {
@@ -21309,6 +22059,16 @@ async function planTurn(io, supportCaseOrId) {
 		await waitForTypingMinimum(typingStartedAt);
 		return handleReservationLookup(io, sc, hotel, known, latestGuest);
 	}
+	if (
+		latestGuest &&
+		latestGuestRequestsExistingReservationService(latestText) &&
+		!guestExplicitlyRequestsBookingSubmit(latestText, latestAction) &&
+		!knownHasCreatedReservation(known)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
 	if (latestGuest && latestGuestMentionsSplitCityItinerary(latestText)) {
 		await saveKnownFacts(key, known);
 		await waitForTypingMinimum(typingStartedAt);
@@ -21322,10 +22082,19 @@ async function planTurn(io, supportCaseOrId) {
 			typingStartedAt,
 		});
 	}
+	if (
+		latestGuest &&
+		latestGuestInsistsOnPaidReceptionPhone(latestText) &&
+		cleanString(known.confirmation, 40)
+	) {
+		await saveKnownFacts(key, known);
+		await waitForTypingMinimum(typingStartedAt);
+		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
 	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
 		await saveKnownFacts(key, known);
 		await waitForTypingMinimum(typingStartedAt);
-		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest), {
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest, hotel), {
 			latestGuest,
 			known,
 			clientAction: "support_contact_number",
@@ -21567,6 +22336,16 @@ async function planTurn(io, supportCaseOrId) {
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
 		return handleReservationLookup(io, sc, hotel, known, latestGuest);
 	}
+	if (
+		latestGuest &&
+		latestGuestRequestsExistingReservationService(latestText) &&
+		!guestExplicitlyRequestsBookingSubmit(latestText, latestAction) &&
+		!knownHasCreatedReservation(known)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
 	if (latestGuest && latestGuestMentionsSplitCityItinerary(latestText)) {
 		await saveKnownFacts(key, known);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
@@ -21580,10 +22359,19 @@ async function planTurn(io, supportCaseOrId) {
 			typingStartedAt,
 		});
 	}
+	if (
+		latestGuest &&
+		latestGuestInsistsOnPaidReceptionPhone(latestText) &&
+		cleanString(known.confirmation, 40)
+	) {
+		await saveKnownFacts(key, known);
+		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
+		return handleReservationLookup(io, sc, hotel, known, latestGuest);
+	}
 	if (latestGuest && latestGuestAsksSupportContactNumber(latestText)) {
 		await saveKnownFacts(key, known);
 		await sleep(Math.max(0, AI_TYPING_MIN_VISIBLE_MS - (now() - typingStartedAt)));
-		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest), {
+		return sendAiMessage(io, sc, buildSupportContactNumberMessage(sc, known, latestGuest, hotel), {
 			latestGuest,
 			known,
 			clientAction: "support_contact_number",
@@ -21925,6 +22713,7 @@ async function planTurn(io, supportCaseOrId) {
 			{ changedFields: decisionChangedFields(decision) }
 		);
 		known = syncKnownFromQuote(known);
+		known = clearUntrustedEmailSkipped(known, sc, latestText, latestAction);
 		if (
 			latestGuest &&
 			latestGuestRaisesBudgetConcern(latestText) &&
@@ -22627,6 +23416,25 @@ const exportedOrchestrator = {
 		latestGuestRequestsReservationLookup,
 		latestGuestRequestsReservationDateUpdate,
 		latestGuestRequestsReservationCancel,
+		latestGuestRequestsExistingReservationService,
+		latestGuestAsksReservationPayment,
+		latestGuestAsksRemainingBalance,
+		latestGuestInsistsOnPaidReceptionPhone,
+		reservationPaymentSummary,
+		reservationPendingReviewAmountSar,
+		buildMissingReservationConfirmationMessage,
+		buildReservationLookupMessage,
+		replyContainsPaidGuestReceptionPhone,
+		previousAiSharedAdminContact,
+		paidReceptionPhoneAllowed,
+		compactReservationPaymentSummary,
+		reservationLookupToolResult,
+		latestGuestIsBareReservationConfirmation,
+		recentGuestAskedReservationPaymentBeforeLatest,
+		reservationLookupTurnAsksPayment,
+		latestGuestClaimsExistingReservationPayment,
+		latestGuestRequestsExistingReservationService,
+		previousAiAskedForReservationConfirmation,
 		latestGuestAsksSupportContactNumber,
 		buildSupportContactNumberMessage,
 		humanEscalationContactToolResult,
@@ -22755,6 +23563,8 @@ const exportedOrchestrator = {
 		reviewReplyNeedsChatGuestAddress,
 		reviewReplyMissingConfirmationAsk,
 		shouldOfferOptionalEmail,
+		conversationHasGuestSkippedOptionalEmail,
+		clearUntrustedEmailSkipped,
 		replyContainsEmoji,
 		stripReplyEmoji,
 		guestPressedOfficialReviewConfirmation,

@@ -1693,6 +1693,269 @@ check("Support contact number is deterministic in Arabic and English", () => {
 	);
 	assert(photosReply.includes("+1 (909) 222-3374"));
 	assert(photosReply.includes("\u0635\u0648\u0631 \u0627\u0644\u063a\u0631\u0641"));
+	const busReply = orchestrator.buildSupportContactNumberMessage(
+		{ preferredLanguageCode: "en" },
+		{},
+		guest("What is the WhatsApp number and bus stop?"),
+		{ ...hotel, busDetails: "Bus stop: Martyrs parking." }
+	);
+	assert(busReply.includes("+1 (909) 222-3374"));
+	assert(busReply.includes("Martyrs parking"));
+	assert(!busReply.includes("+966541981804"));
+});
+
+check("Brain-invented email skip cannot bypass optional email offer", () => {
+	const completeKnown = {
+		languageCode: "ar",
+		checkinISO: "2026-08-25",
+		checkoutISO: "2026-08-28",
+		roomTypeKey: "tripleRooms",
+		rooms: 1,
+		roomSelections: [{ roomTypeKey: "tripleRooms", count: 1 }],
+		adults: 2,
+		children: 0,
+		fullName: "Ahmed Codex",
+		phone: "966500000008",
+		nationality: "Egyptian",
+		quote: quoteForTriple(),
+		emailSkipped: true,
+	};
+	const sc = {
+		preferredLanguageCode: "ar",
+		conversation: [ai("Quote is ready.", "quote_ready"), guest("Continue")],
+	};
+	const cleaned = orchestrator.clearUntrustedEmailSkipped(
+		completeKnown,
+		sc,
+		"name Ahmed Codex phone 966500000008 nationality Egyptian",
+		""
+	);
+	assert.strictEqual(cleaned.emailSkipped, undefined);
+	assert.strictEqual(orchestrator.shouldOfferOptionalEmail(sc, cleaned), true);
+
+	const skippedSc = {
+		preferredLanguageCode: "ar",
+		conversation: [
+			ai("Email is optional. Continue without email?", "optional_email"),
+			guest("continue without email", "skip_email"),
+		],
+	};
+	const trusted = orchestrator.clearUntrustedEmailSkipped(
+		completeKnown,
+		skippedSc,
+		"continue without email",
+		"skip_email"
+	);
+	assert.strictEqual(trusted.emailSkipped, true);
+	assert.strictEqual(orchestrator.shouldOfferOptionalEmail(skippedSc, trusted), false);
+});
+
+check("Existing reservation lookup reports confirmed payment without inventing pending review", () => {
+	const reservation = {
+		_id: "6a5030efefd4fdbb5d061a8c",
+		confirmation_number: "8940361462",
+		reservation_status: "confirmed",
+		checkin_date: "2026-07-27T00:00:00.000Z",
+		checkout_date: "2026-08-03T00:00:00.000Z",
+		total_amount: 525,
+		paid_amount: 78.75,
+		currency: "SAR",
+		payment: "paypal",
+		payment_details: {},
+		paypal_details: {},
+	};
+	const summary = orchestrator.reservationPaymentSummary(reservation);
+	assert.strictEqual(summary.confirmedPaid, 78.75);
+	assert.strictEqual(summary.pendingReview, 0);
+	assert.strictEqual(summary.remaining, 446.25);
+	const reply = orchestrator.buildReservationLookupMessage(
+		{ preferredLanguageCode: "en" },
+		{ confirmation: "8940361462", languageCode: "en" },
+		reservation,
+		guest("How much is remaining to pay at the hotel?")
+	);
+	assert(reply.includes("Confirmed paid: 78.75 SAR"));
+	assert(reply.includes("Remaining balance: 446.25 SAR"));
+	assert(!/pending|review/i.test(reply));
+	assert(!reply.includes("/client-payment/"));
+});
+
+check("Bare confirmation inherits prior deposit question for reservation payment lookup", () => {
+	const latest = guest("8940361462");
+	const sc = {
+		conversation: [
+			guest("I paid a deposit for my reservation"),
+			ai("Please send the confirmation number.", "reservation_lookup_not_found"),
+			latest,
+		],
+	};
+	assert.strictEqual(orchestrator.latestGuestIsBareReservationConfirmation(latest.message), true);
+	assert.strictEqual(orchestrator.reservationLookupTurnAsksPayment(sc, latest), true);
+	const tool = orchestrator.reservationLookupToolResult(
+		{
+			confirmation_number: "8940361462",
+			total_amount: 525,
+			paid_amount: 78.75,
+			currency: "SAR",
+			payment: "paypal",
+		},
+		{ paymentRequested: true }
+	);
+	assert.strictEqual(tool.paymentRequested, true);
+	assert.strictEqual(tool.paymentSummary.confirmedPaid, 78.75);
+	assert.strictEqual(tool.paymentSummary.pendingReview, 0);
+	assert.strictEqual(tool.paymentSummary.remaining, 446.25);
+	assert.match(tool.instruction, /Do not mention double payment or pending review/);
+});
+
+check("Bare number after reservation-confirmation ask is lookup, not booking phone", () => {
+	const previousAi = ai("Please send the reservation confirmation number.", "reservation_lookup_not_found");
+	const sc = {
+		conversation: [
+			guest("I paid a deposit for my reservation"),
+			previousAi,
+			guest("8940361462"),
+		],
+	};
+	assert.strictEqual(orchestrator.previousAiAskedForReservationConfirmation(previousAi), true);
+	assert.strictEqual(
+		orchestrator.latestGuestRequestsReservationLookup(
+			sc,
+			"8940361462",
+			{},
+			previousAi
+		),
+		true
+	);
+});
+
+check("Existing reservation service mode is not triggered by ordinary booking intent", () => {
+	assert.strictEqual(
+		orchestrator.latestGuestRequestsExistingReservationService("I want to book a double room"),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestRequestsExistingReservationService(
+			"\u0627\u0631\u064a\u062f \u062d\u062c\u0632 \u063a\u0631\u0641\u0629 \u0645\u0632\u062f\u0648\u062c\u0629"
+		),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestRequestsExistingReservationService("I already paid a deposit for my reservation"),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestRequestsExistingReservationService(
+			"\u062f\u0641\u0639\u062a \u0639\u0631\u0628\u0648\u0646 \u062d\u062c\u0632"
+		),
+		true
+	);
+});
+
+check("PayPal pending review is separated from confirmed paid amount", () => {
+	const reservation = {
+		total_amount: 525,
+		paid_amount: 78.75,
+		currency: "SAR",
+		payment: "paypal",
+		paypal_details: {
+			pending_total_usd: 21,
+			pending_review_captures: [{ capture_status: "PENDING", amount_sar: 78.75 }],
+		},
+		payment_details: {
+			paypalReviewPending: true,
+			triggeredAmountSAR: 78.75,
+		},
+	};
+	const summary = orchestrator.reservationPaymentSummary(reservation);
+	assert.strictEqual(summary.confirmedPaid, 78.75);
+	assert.strictEqual(summary.pendingReview, 78.75);
+	assert.strictEqual(summary.remaining, 446.25);
+});
+
+check("Existing reservation without confirmation asks safe lookup details only", () => {
+	const reply = orchestrator.buildReservationLookupMessage(
+		{ preferredLanguageCode: "en" },
+		{ languageCode: "en" },
+		null,
+		guest("I already paid a deposit"),
+		{ missingReason: "missing_details" }
+	);
+	assert(/confirmation number/i.test(reply));
+	assert(/exact reservation name/i.test(reply));
+	assert(/check-in and checkout dates/i.test(reply));
+	assert(!/room type|nationality|adult|guest count/i.test(reply));
+	const ambiguous = orchestrator.buildMissingReservationConfirmationMessage(
+		{ preferredLanguageCode: "en" },
+		{},
+		guest("My name is Mohamed Gaber and dates are July 27 to August 3"),
+		"multiple_matches"
+	);
+	assert(/more than one reservation/i.test(ambiguous));
+	assert(/confirmation number/i.test(ambiguous));
+});
+
+check("Saudi reception number is gated to paid guests after 909 administration contact", () => {
+	const reservation = {
+		confirmation_number: "8940361462",
+		total_amount: 525,
+		paid_amount: 78.75,
+		payment: "paypal",
+		payment_details: {},
+		paypal_details: {},
+	};
+	const latest = guest("No, I need the Saudi reception number please");
+	const noPriorContact = { preferredLanguageCode: "en", conversation: [latest] };
+	assert.strictEqual(orchestrator.latestGuestInsistsOnPaidReceptionPhone(latest.message), true);
+	assert.strictEqual(
+		orchestrator.paidReceptionPhoneAllowed({
+			reservation,
+			sc: noPriorContact,
+			latestGuest: latest,
+		}),
+		false
+	);
+	const firstReply = orchestrator.buildReservationLookupMessage(
+		noPriorContact,
+		{ confirmation: "8940361462", languageCode: "en" },
+		reservation,
+		latest
+	);
+	assert(firstReply.includes("+1 (909) 222-3374"));
+	assert(!orchestrator.replyContainsPaidGuestReceptionPhone(firstReply));
+	const priorAdmin = ai("Please WhatsApp administration at +1 (909) 222-3374\nhttps://wa.me/19092223374");
+	const withPriorContact = {
+		preferredLanguageCode: "en",
+		conversation: [priorAdmin, latest],
+	};
+	assert.strictEqual(orchestrator.previousAiSharedAdminContact(withPriorContact, latest), true);
+	assert.strictEqual(
+		orchestrator.paidReceptionPhoneAllowed({
+			reservation,
+			sc: withPriorContact,
+			latestGuest: latest,
+		}),
+		true
+	);
+	const allowedReply = orchestrator.buildReservationLookupMessage(
+		withPriorContact,
+		{ confirmation: "8940361462", languageCode: "en" },
+		reservation,
+		latest
+	);
+	assert(allowedReply.includes("+966541981804"));
+	assert(orchestrator.replyContainsPaidGuestReceptionPhone(allowedReply));
+	assert(!allowedReply.includes("525"));
+	assert(!allowedReply.includes("8940361462"));
+	assert(!allowedReply.includes("3001"));
+	const unpaidReply = orchestrator.buildReservationLookupMessage(
+		withPriorContact,
+		{ confirmation: "8940361462", languageCode: "en" },
+		{ ...reservation, paid_amount: 0 },
+		latest
+	);
+	assert(unpaidReply.includes("+1 (909) 222-3374"));
+	assert(!orchestrator.replyContainsPaidGuestReceptionPhone(unpaidReply));
 });
 
 check("Brain escalation and arrival contract requires 909 WhatsApp contact", () => {

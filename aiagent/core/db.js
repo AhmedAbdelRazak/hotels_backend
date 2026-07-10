@@ -719,6 +719,51 @@ async function getReservationByConfirmation(cn) {
 		.exec();
 }
 
+async function listHotelReservationsByExactStay({
+	hotelId,
+	checkinISO,
+	checkoutISO,
+	limit = 20,
+} = {}) {
+	const safeHotelId = safeId(hotelId);
+	if (
+		!safeHotelId ||
+		!/^\d{4}-\d{2}-\d{2}$/.test(String(checkinISO || "")) ||
+		!/^\d{4}-\d{2}-\d{2}$/.test(String(checkoutISO || ""))
+	) {
+		return [];
+	}
+	const checkinStart = new Date(`${checkinISO}T00:00:00.000Z`);
+	const checkinEnd = new Date(`${checkinISO}T23:59:59.999Z`);
+	const checkoutStart = new Date(`${checkoutISO}T00:00:00.000Z`);
+	const checkoutEnd = new Date(`${checkoutISO}T23:59:59.999Z`);
+	if (
+		Number.isNaN(checkinStart.getTime()) ||
+		Number.isNaN(checkoutStart.getTime())
+	) {
+		return [];
+	}
+	const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 50));
+	try {
+		return await Reservations.find({
+			hotelId: safeHotelId,
+			checkin_date: { $gte: checkinStart, $lte: checkinEnd },
+			checkout_date: { $gte: checkoutStart, $lte: checkoutEnd },
+		})
+			.select(
+				"_id hotelId hotelName confirmation_number customer_details checkin_date checkout_date days_of_residence total_amount currency payment payment_details paypal_details paid_amount paid_amount_breakdown reservation_status state total_rooms total_guests adults children pickedRoomsType pickedRoomsPricing pendingConfirmation createdAt updatedAt booked_at orderTakenAt aiSupportCaseId"
+			)
+			.sort({ createdAt: -1, booked_at: -1, orderTakenAt: -1, _id: -1 })
+			.limit(safeLimit)
+			.maxTimeMS(2500)
+			.lean()
+			.exec();
+	} catch (error) {
+		console.error("[aiagent] exact-stay reservation lookup failed:", error?.message || error);
+		return [];
+	}
+}
+
 async function listRecentHotelReservationsForExistingGuest({
 	hotelId,
 	since,
@@ -739,7 +784,7 @@ async function listRecentHotelReservationsForExistingGuest({
 			],
 		})
 			.select(
-				"_id hotelId hotelName confirmation_number customer_details checkin_date checkout_date days_of_residence total_amount currency reservation_status state total_rooms total_guests adults children pickedRoomsType pickedRoomsPricing pendingConfirmation createdAt updatedAt booked_at orderTakenAt aiSupportCaseId"
+				"_id hotelId hotelName confirmation_number customer_details checkin_date checkout_date days_of_residence total_amount currency payment payment_details paypal_details paid_amount paid_amount_breakdown reservation_status state total_rooms total_guests adults children pickedRoomsType pickedRoomsPricing pendingConfirmation createdAt updatedAt booked_at orderTakenAt aiSupportCaseId"
 			)
 			.sort({ createdAt: -1, booked_at: -1, orderTakenAt: -1, _id: -1 })
 			.limit(safeLimit)
@@ -1109,6 +1154,7 @@ module.exports = {
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,
+	listHotelReservationsByExactStay,
 	listRecentHotelReservationsForExistingGuest,
 	listPreviousGuestSupportChats,
 	listRelevantTrainingChats,
