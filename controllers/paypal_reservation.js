@@ -166,6 +166,13 @@ const getConfiguredWebhookIds = () => {
 const toCCY = (n) => Number(n || 0).toFixed(2);
 const toNum2 = (n) => Math.round(Number(n || 0) * 100) / 100; // exact cents
 const PAYPAL_USD_TOLERANCE = 0.05;
+const PAYPAL_PENDING_REVIEW_CODE = "PAYPAL_CAPTURE_PENDING_REVIEW";
+const PAYPAL_PENDING_REVIEW_STATUSES = new Set(["PENDING"]);
+const PAYPAL_PENDING_REVIEW_RESERVATION_STATUS = "paypal_pending_review";
+const PAYPAL_ACTIVE_PENDING_STATUSES = [
+	"pending_payment",
+	PAYPAL_PENDING_REVIEW_RESERVATION_STATUS,
+];
 const safeClone = (o) => JSON.parse(JSON.stringify(o));
 const almostEq = (a, b) => Math.abs(toNum2(a) - toNum2(b)) < 1e-9;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -566,7 +573,7 @@ async function generateUniqueConfirmationNumberAcross() {
 		if (existsInReservations) continue;
 		const existsInPending = await UncompleteReservations.exists({
 			confirmation_number: randomNumber,
-			reservation_status: "pending_payment",
+			reservation_status: { $in: PAYPAL_ACTIVE_PENDING_STATUSES },
 		});
 		if (existsInPending) continue;
 		return randomNumber;
@@ -1444,8 +1451,56 @@ function extractFirstCaptureFromOrderPayload(payload) {
 	return null;
 }
 
+function paypalCaptureStatus(capture) {
+	return String(capture?.status || "").toUpperCase() || "UNKNOWN";
+}
+
+function paypalCaptureStatusReason(capture) {
+	return (
+		capture?.status_details?.reason ||
+		capture?.status_detail?.reason ||
+		capture?.processor_response?.response_code ||
+		null
+	);
+}
+
+function isPayPalCapturePendingReview(capture) {
+	return PAYPAL_PENDING_REVIEW_STATUSES.has(paypalCaptureStatus(capture));
+}
+
+function buildPayPalPendingReviewPayload(capture, context = {}) {
+	const status = paypalCaptureStatus(capture);
+	const amountValue = capture?.amount?.value || context?.amount || null;
+	const currency = capture?.amount?.currency_code || context?.currency || "USD";
+	const captureId = capture?.id || null;
+	const reason = paypalCaptureStatusReason(capture);
+	const amountText = amountValue ? ` for ${amountValue} ${currency}` : "";
+
+	return {
+		message:
+			`PayPal is reviewing this payment${amountText}. Jannat Booking has not marked the reservation as paid yet. Please do not retry or submit another payment. We will confirm once PayPal completes or declines the review.`,
+		code: PAYPAL_PENDING_REVIEW_CODE,
+		paypalPendingReview: true,
+		pendingReview: true,
+		retryAllowed: false,
+		captureStatus: status,
+		captureStatusReason: reason,
+		captureId,
+		orderId: context.orderId || context.order_id || null,
+		invoiceId: context.invoiceId || context.invoice_id || null,
+		confirmation_number: context.confirmationNumber || context.confirmation_number || null,
+		pendingReservationId: context.pendingReservationId || null,
+		amount: amountValue,
+		currency,
+		details: capture || null,
+	};
+}
+
 function buildCaptureNotCompletedPayload(capture, context = {}) {
-	const status = String(capture?.status || "").toUpperCase() || "UNKNOWN";
+	if (isPayPalCapturePendingReview(capture)) {
+		return buildPayPalPendingReviewPayload(capture, context);
+	}
+	const status = paypalCaptureStatus(capture);
 	const processorResponse = capture?.processor_response || {};
 	const processorResponseCode =
 		processorResponse?.response_code ||
@@ -2031,6 +2086,465 @@ async function finalizePendingCaptureUSD({
 	).populate("hotelId");
 }
 
+function clonePaypalPayload(payload) {
+	try {
+		return JSON.parse(JSON.stringify(payload || null));
+	} catch {
+		return null;
+	}
+}
+
+function buildPendingReviewCaptureRecord({
+	capture,
+	orderPayload,
+	amountUsd,
+	amountSar,
+	invoiceId,
+	cmid,
+	via,
+}) {
+	return {
+		order_id: orderPayload?.id || null,
+		capture_id: capture?.id || null,
+		capture_status: paypalCaptureStatus(capture),
+		capture_status_reason: paypalCaptureStatusReason(capture),
+		amount: capture?.amount?.value || toCCY(amountUsd),
+		currency: capture?.amount?.currency_code || "USD",
+		amount_sar:
+			typeof amountSar === "undefined" ? undefined : toNum2(amountSar),
+		seller_protection: capture?.seller_protection?.status || "UNKNOWN",
+		network_transaction_reference:
+			capture?.network_transaction_reference || null,
+		cmid: cmid || null,
+		invoice_id: invoiceId || null,
+		raw: clonePaypalPayload(orderPayload),
+		created_at: new Date(capture?.create_time || Date.now()),
+		via,
+	};
+}
+
+async function markCheckoutPendingReview({
+	pendingReservation,
+	pendingReservationId,
+	confirmationNumber,
+	body,
+	capture,
+	orderPayload,
+	expectedUsdAmount,
+	expectedSarAmount,
+	reservationLimitUsd,
+	finalPayment,
+	meta,
+	pp,
+}) {
+	const targetId = pendingReservation?._id || pendingReservationId;
+	if (!targetId) return null;
+	const pendingUsd = toNum2(capture?.amount?.value || expectedUsdAmount);
+	const pendingSar = toNum2(expectedSarAmount || body?.paid_amount || 0);
+	const captureRecord = buildPendingReviewCaptureRecord({
+		capture,
+		orderPayload,
+		amountUsd: pendingUsd,
+		amountSar: pendingSar,
+		invoiceId: meta?.invoice_id || pp?.invoice_id || null,
+		cmid: pp?.cmid || null,
+		via: "CHECKOUT_CAPTURE_PENDING_REVIEW",
+	});
+	const now = new Date();
+	return UncompleteReservations.findOneAndUpdate(
+		{
+			_id: targetId,
+			reservation_status: { $in: PAYPAL_ACTIVE_PENDING_STATUSES },
+		},
+		{
+			$set: {
+				confirmation_number: confirmationNumber,
+				payment: "paypal pending review",
+				paid_amount: pendingSar,
+				commission: toNum2(body?.commission || 0),
+				commissionPaid: false,
+				rootCause: "paypal_pending_review",
+				reservation_status: PAYPAL_PENDING_REVIEW_RESERVATION_STATUS,
+				state: PAYPAL_PENDING_REVIEW_RESERVATION_STATUS,
+				"paypal_details.bounds": {
+					base: "USD",
+					limit_usd: toNum2(reservationLimitUsd || pendingUsd),
+				},
+				"paypal_details.captured_total_usd": 0,
+				"paypal_details.pending_total_usd": pendingUsd,
+				"paypal_details.initial": captureRecord,
+				"payment_details.captured": false,
+				"payment_details.paypalReviewPending": true,
+				"payment_details.pendingCaptureTransactionId": capture?.id || null,
+				"payment_details.pendingCaptureStatus": paypalCaptureStatus(capture),
+				"payment_details.pendingCaptureReason":
+					paypalCaptureStatusReason(capture),
+				"payment_details.triggeredAmountUSD": pendingUsd,
+				"payment_details.triggeredAmountSAR": pendingSar,
+				"payment_details.intendedPayment": finalPayment,
+				"payment_details.lastChargeVia": "CHECKOUT_CAPTURE_PENDING_REVIEW",
+				"payment_details.lastChargeAt": now,
+				"payment_details.chargeCount": 0,
+			},
+		},
+		{ new: true },
+	);
+}
+
+async function recordReservationPendingReviewCapture({
+	reservationId,
+	capture,
+	orderPayload,
+	usdAmount,
+	sarAmount,
+	invoiceId,
+	cmid,
+	via,
+}) {
+	const pendingUsd = toNum2(capture?.amount?.value || usdAmount);
+	const captureRecord = buildPendingReviewCaptureRecord({
+		capture,
+		orderPayload,
+		amountUsd: pendingUsd,
+		amountSar: sarAmount,
+		invoiceId,
+		cmid,
+		via,
+	});
+	return Reservations.findByIdAndUpdate(
+		reservationId,
+		{
+			$set: {
+				"payment_details.paypalReviewPending": true,
+				"payment_details.pendingCaptureTransactionId": capture?.id || null,
+				"payment_details.pendingCaptureStatus": paypalCaptureStatus(capture),
+				"payment_details.pendingCaptureReason":
+					paypalCaptureStatusReason(capture),
+				"payment_details.triggeredAmountUSD": pendingUsd,
+				"payment_details.triggeredAmountSAR":
+					typeof sarAmount === "undefined" ? undefined : toNum2(sarAmount),
+				"payment_details.lastChargeVia": via,
+				"payment_details.lastChargeAt": new Date(),
+			},
+			$push: {
+				"paypal_details.pending_review_captures": captureRecord,
+			},
+		},
+		{ new: true },
+	).populate("hotelId");
+}
+
+function reqBodyFromPendingReviewReservation(pendingDoc, paymentLabel) {
+	const doc =
+		typeof pendingDoc?.toObject === "function"
+			? pendingDoc.toObject()
+			: { ...(pendingDoc || {}) };
+	return {
+		sentFrom: "client",
+		userId: doc.userId || null,
+		hotelId: doc.hotelId,
+		hotelName: doc.hotelName,
+		belongsTo: doc.belongsTo,
+		customerDetails: doc.customer_details || {},
+		total_rooms: doc.total_rooms,
+		total_guests: doc.total_guests,
+		adults: doc.adults,
+		children: doc.children,
+		total_amount: doc.total_amount,
+		payment: paymentLabel,
+		payment_method: "PayPal",
+		paid_amount:
+			doc.payment_details?.triggeredAmountSAR || doc.paid_amount || 0,
+		commission: doc.commission || 0,
+		commissionPaid: true,
+		checkin_date: doc.checkin_date,
+		checkout_date: doc.checkout_date,
+		days_of_residence: doc.days_of_residence,
+		booking_source: doc.booking_source || "Online Jannat Booking",
+		sourceWebsite: "jannatbooking_ssr",
+		pickedRoomsType: Array.isArray(doc.pickedRoomsType)
+			? doc.pickedRoomsType
+			: [],
+		convertedAmounts: doc.convertedAmounts || {},
+		guestAgreedOnTermsAndConditions:
+			!!doc.guestAgreedOnTermsAndConditions,
+		pendingConfirmationSource: "paypal_pending_review_webhook",
+	};
+}
+
+async function reconcileCheckoutPendingReviewCapture(resource = {}) {
+	const captureId = resource?.id || null;
+	const confirmationNumber = resource?.custom_id || null;
+	if (!captureId && !confirmationNumber) return null;
+
+	const pendingDoc = await UncompleteReservations.findOne({
+		reservation_status: PAYPAL_PENDING_REVIEW_RESERVATION_STATUS,
+		$or: [
+			...(captureId
+				? [{ "paypal_details.initial.capture_id": captureId }]
+				: []),
+			...(confirmationNumber
+				? [{ confirmation_number: String(confirmationNumber) }]
+				: []),
+		],
+	});
+	if (!pendingDoc?.confirmation_number) return null;
+
+	const existingReservation = await Reservations.findOne({
+		confirmation_number: pendingDoc.confirmation_number,
+	});
+	if (existingReservation) {
+		await UncompleteReservations.findByIdAndUpdate(pendingDoc._id, {
+			$set: {
+				reservation_status: "paypal_pending_review_resolved_existing",
+				state: "paypal_pending_review_resolved_existing",
+				"payment_details.paypalReviewPending": false,
+				"payment_details.resolvedReservationId": existingReservation._id,
+				"payment_details.resolvedAt": new Date(),
+			},
+		});
+		return { status: "existing", reservation: existingReservation };
+	}
+
+	const capturedUsd = toNum2(
+		resource?.amount?.value ||
+			pendingDoc?.paypal_details?.pending_total_usd ||
+			pendingDoc?.payment_details?.triggeredAmountUSD,
+	);
+	const capturedSar = toNum2(
+		pendingDoc?.payment_details?.triggeredAmountSAR ||
+			pendingDoc?.paid_amount ||
+			0,
+	);
+	const limitUsd = toNum2(
+		pendingDoc?.paypal_details?.bounds?.limit_usd || capturedUsd,
+	);
+	const paymentLabel =
+		pendingDoc?.payment_details?.intendedPayment ||
+		(capturedUsd >= limitUsd - 1e-9 ? "paid online" : "deposit paid");
+	const captureRecord = {
+		...(pendingDoc.paypal_details?.initial || {}),
+		capture_id: captureId || pendingDoc.paypal_details?.initial?.capture_id,
+		capture_status: "COMPLETED",
+		capture_status_reason: null,
+		amount: resource?.amount?.value || toCCY(capturedUsd),
+		currency: resource?.amount?.currency_code || "USD",
+		raw: {
+			pending: pendingDoc.paypal_details?.initial?.raw || null,
+			webhook_resource: clonePaypalPayload(resource),
+		},
+		completed_at: new Date(resource?.update_time || Date.now()),
+	};
+	const paypalDetails = {
+		...(pendingDoc.paypal_details || {}),
+		bounds: {
+			base: "USD",
+			limit_usd: limitUsd,
+		},
+		captured_total_usd: capturedUsd,
+		pending_total_usd: 0,
+		initial: captureRecord,
+	};
+
+	const saved = await buildAndSaveReservation({
+		reqBody: reqBodyFromPendingReviewReservation(pendingDoc, paymentLabel),
+		confirmationNumber: pendingDoc.confirmation_number,
+		paypalDetailsToPersist: paypalDetails,
+		paymentDetailsPatch: {
+			captured: true,
+			triggeredAmountUSD: capturedUsd,
+			triggeredAmountSAR: capturedSar,
+			finalCaptureTransactionId: captureId,
+			lastChargeVia: "PAYPAL_WEBHOOK_CAPTURE",
+			lastChargeAt: new Date(resource?.update_time || Date.now()),
+			chargeCount: 1,
+		},
+	});
+
+	await UncompleteReservations.findByIdAndDelete(pendingDoc._id);
+	try {
+		await sendEmailWithInvoice(
+			{
+				...saved.toObject(),
+				hotelName: saved.hotelName || pendingDoc.hotelName,
+			},
+			saved.customer_details?.email,
+			saved.belongsTo,
+		);
+	} catch (err) {
+		console.error("[PP][webhook] invoice send failed", err?.message || err);
+	}
+	try {
+		await waSendReservationConfirmation(saved);
+	} catch (_) {}
+	try {
+		await waNotifyNewReservation(saved);
+	} catch (_) {}
+
+	return { status: "created", reservation: saved };
+}
+
+async function reconcileLinkPendingReviewCapture(resource = {}) {
+	const captureId = resource?.id || null;
+	if (!captureId) return null;
+
+	const reservation = await Reservations.findOne({
+		"paypal_details.pending_review_captures.capture_id": captureId,
+	});
+	if (!reservation) return null;
+
+	const pendingEntry =
+		(reservation.paypal_details?.pending_review_captures || []).find(
+			(entry) => entry?.capture_id === captureId,
+		) || {};
+	const capturedUsd = toNum2(
+		resource?.amount?.value || pendingEntry.amount || 0,
+	);
+	if (!(capturedUsd > 0)) return null;
+
+	const captureDoc = {
+		...pendingEntry,
+		capture_status: "COMPLETED",
+		capture_status_reason: null,
+		amount: resource?.amount?.value || pendingEntry.amount,
+		currency: resource?.amount?.currency_code || pendingEntry.currency || "USD",
+		raw: {
+			pending: pendingEntry.raw || null,
+			webhook_resource: clonePaypalPayload(resource),
+		},
+		created_at: new Date(resource?.update_time || Date.now()),
+		via: "PAYPAL_WEBHOOK_LINK_CAPTURE",
+	};
+
+	let updated = await finalizePendingCaptureUSD({
+		reservationId: reservation._id,
+		usdAmount: capturedUsd,
+		success: true,
+		captureDoc,
+	});
+
+	const sarInc = toNum2(pendingEntry.amount_sar || 0);
+	const capturedTotal = toNum2(updated?.paypal_details?.captured_total_usd || 0);
+	const limitUsd = toNum2(updated?.paypal_details?.bounds?.limit_usd || 0);
+	const fullyPaid = limitUsd > 0 && capturedTotal >= limitUsd - 1e-9;
+	const setAfter = {
+		"payment_details.captured": true,
+		"payment_details.paypalReviewPending": false,
+		"payment_details.triggeredAmountUSD": capturedUsd,
+		"payment_details.finalCaptureTransactionId": captureId,
+		"payment_details.lastChargeVia": "PAYPAL_WEBHOOK_LINK_CAPTURE",
+		"payment_details.lastChargeAt": new Date(resource?.update_time || Date.now()),
+		payment: fullyPaid ? "paid online" : "deposit paid",
+		commissionPaid: true,
+		financeStatus: fullyPaid ? "paid" : "authorized",
+	};
+	if (sarInc > 0) {
+		setAfter["payment_details.triggeredAmountSAR"] = sarInc;
+	}
+	updated = await Reservations.findByIdAndUpdate(
+		reservation._id,
+		{
+			...(sarInc > 0
+				? {
+						$inc: {
+							paid_amount: sarInc,
+							"paid_amount_breakdown.paid_online_via_link": sarInc,
+						},
+				  }
+				: {}),
+			$set: setAfter,
+			$pull: {
+				"paypal_details.pending_review_captures": { capture_id: captureId },
+			},
+			$unset: {
+				"payment_details.pendingCaptureTransactionId": "",
+				"payment_details.pendingCaptureStatus": "",
+				"payment_details.pendingCaptureReason": "",
+			},
+		},
+		{ new: true },
+	).populate("hotelId");
+
+	scheduleLinkPaymentReceiptDispatch(updated, "[PP][webhook]");
+	schedulePaymentCapturedConversion(updated, {
+		source: "paypal_webhook_capture",
+		checkoutContext: "paypal_pending_review",
+		amountSar: sarInc,
+		amountUsd: capturedUsd,
+		captureId,
+		paymentType: fullyPaid ? "paid online" : "deposit paid",
+	});
+
+	return { status: "updated", reservation: updated };
+}
+
+async function releasePendingReviewCapture(resource = {}, eventType = "") {
+	const captureId = resource?.id || null;
+	const confirmationNumber = resource?.custom_id || null;
+	if (!captureId && !confirmationNumber) return null;
+
+	const pendingDoc = await UncompleteReservations.findOne({
+		reservation_status: PAYPAL_PENDING_REVIEW_RESERVATION_STATUS,
+		$or: [
+			...(captureId
+				? [{ "paypal_details.initial.capture_id": captureId }]
+				: []),
+			...(confirmationNumber
+				? [{ confirmation_number: String(confirmationNumber) }]
+				: []),
+		],
+	});
+	if (pendingDoc) {
+		await UncompleteReservations.findByIdAndUpdate(pendingDoc._id, {
+			$set: {
+				reservation_status: "paypal_pending_review_released",
+				state: "paypal_pending_review_released",
+				"paypal_details.pending_total_usd": 0,
+				"payment_details.paypalReviewPending": false,
+				"payment_details.pendingReviewReleasedAt": new Date(),
+				"payment_details.pendingReviewReleaseEvent": eventType,
+			},
+		});
+		return { status: "released_checkout_pending", id: pendingDoc._id };
+	}
+
+	if (!captureId) return null;
+	const reservation = await Reservations.findOne({
+		"paypal_details.pending_review_captures.capture_id": captureId,
+	});
+	if (!reservation) return null;
+	const pendingEntry =
+		(reservation.paypal_details?.pending_review_captures || []).find(
+			(entry) => entry?.capture_id === captureId,
+		) || {};
+	const pendingUsd = toNum2(
+		resource?.amount?.value || pendingEntry.amount || 0,
+	);
+	if (pendingUsd > 0) {
+		await finalizePendingCaptureUSD({
+			reservationId: reservation._id,
+			usdAmount: pendingUsd,
+			success: false,
+		});
+	}
+	await Reservations.findByIdAndUpdate(reservation._id, {
+		$set: {
+			"payment_details.paypalReviewPending": false,
+			"payment_details.pendingReviewReleasedAt": new Date(),
+			"payment_details.pendingReviewReleaseEvent": eventType,
+		},
+		$pull: {
+			"paypal_details.pending_review_captures": { capture_id: captureId },
+		},
+		$unset: {
+			"payment_details.pendingCaptureTransactionId": "",
+			"payment_details.pendingCaptureStatus": "",
+			"payment_details.pendingCaptureReason": "",
+		},
+	});
+	return { status: "released_link_pending", id: reservation._id };
+}
+
 /* ─────────────── 5) Controllers ─────────────── */
 
 /** 1) Client token for JS SDK Card Fields (cache 8h) */
@@ -2194,8 +2708,31 @@ exports.preparePendingReservation = async (req, res) => {
 			"customer_details.email": normalizedEmail,
 			"customer_details.phone": normalizedPhone,
 			hotelId,
-			reservation_status: "pending_payment",
+			reservation_status: { $in: PAYPAL_ACTIVE_PENDING_STATUSES },
 		}).sort({ createdAt: -1 });
+
+		if (
+			existingPending?.reservation_status ===
+			PAYPAL_PENDING_REVIEW_RESERVATION_STATUS
+		) {
+			return res.status(409).json({
+				...buildPayPalPendingReviewPayload(
+					existingPending?.paypal_details?.initial,
+					{
+						amount:
+							existingPending?.paypal_details?.pending_total_usd ||
+							existingPending?.payment_details?.triggeredAmountUSD,
+						currency: "USD",
+						orderId: existingPending?.paypal_details?.initial?.order_id,
+						invoiceId: existingPending?.paypal_details?.initial?.invoice_id,
+						confirmationNumber: existingPending.confirmation_number,
+						pendingReservationId: existingPending._id,
+					},
+				),
+				message:
+					"PayPal is still reviewing your previous payment attempt. Please do not submit another payment. Jannat Booking will confirm the reservation once PayPal completes or declines the review.",
+			});
+		}
 
 		const reuseWindowMs = 15 * 60 * 1000;
 		if (
@@ -2728,12 +3265,36 @@ exports.createReservationAndProcess = async (req, res) => {
 			if (pendingReservationId) {
 				pendingReservation = await UncompleteReservations.findOne({
 					_id: pendingReservationId,
-					reservation_status: "pending_payment",
+					reservation_status: { $in: PAYPAL_ACTIVE_PENDING_STATUSES },
 				});
 				if (!pendingReservation?.confirmation_number) {
 					return await fail(400, {
 						message:
 							"Pending reservation not found or expired. Please try again.",
+					});
+				}
+				if (
+					pendingReservation.reservation_status ===
+					PAYPAL_PENDING_REVIEW_RESERVATION_STATUS
+				) {
+					return res.status(409).json({
+						...buildPayPalPendingReviewPayload(
+							pendingReservation?.paypal_details?.initial,
+							{
+								amount:
+									pendingReservation?.paypal_details?.pending_total_usd ||
+									pendingReservation?.payment_details?.triggeredAmountUSD,
+								currency: "USD",
+								orderId:
+									pendingReservation?.paypal_details?.initial?.order_id,
+								invoiceId:
+									pendingReservation?.paypal_details?.initial?.invoice_id,
+								confirmationNumber: pendingReservation.confirmation_number,
+								pendingReservationId: pendingReservation._id,
+							},
+						),
+						message:
+							"PayPal is still reviewing this payment. Please do not retry payment until the review is completed.",
 					});
 				}
 				if (
@@ -2901,7 +3462,50 @@ exports.createReservationAndProcess = async (req, res) => {
 				}
 
 				const cap = extractFirstCaptureFromOrderPayload(capResult) || {};
+				const finalPayment = decidePaymentLabel({
+					option,
+					expectedUsdAmount: pp.expectedUsdAmount || expectedUsdAmount,
+					convertedAmounts: body?.convertedAmounts || {},
+				});
 				if (String(cap?.status || "").toUpperCase() !== "COMPLETED") {
+					if (isPayPalCapturePendingReview(cap)) {
+						const preserved = await markCheckoutPendingReview({
+							pendingReservation,
+							pendingReservationId,
+							confirmationNumber,
+							body,
+							capture: cap,
+							orderPayload: capResult,
+							expectedUsdAmount,
+							expectedSarAmount,
+							reservationLimitUsd,
+							finalPayment,
+							meta,
+							pp,
+						});
+						const payload = buildPayPalPendingReviewPayload(cap, {
+							amount: expectedUsdAmount,
+							currency: "USD",
+							orderId: capResult?.id || pp.order_id,
+							invoiceId: meta?.invoice_id || pp.invoice_id,
+							confirmationNumber,
+							pendingReservationId:
+								preserved?._id || pendingReservation?._id || pendingReservationId,
+						});
+						console.warn("[PP][checkout] capture pending review", {
+							orderId: payload.orderId,
+							captureId: payload.captureId,
+							confirmationNumber,
+							pendingReservationId: payload.pendingReservationId,
+							reason: payload.captureStatusReason,
+						});
+						return res.status(202).json({
+							...payload,
+							message:
+								"PayPal is reviewing this payment. Please do not retry or submit another payment. Jannat Booking will confirm the reservation once PayPal completes or declines the review.",
+							pendingReservationPreserved: !!preserved,
+						});
+					}
 					const payload = buildCaptureNotCompletedPayload(cap, {
 						amount: expectedUsdAmount,
 						currency: "USD",
@@ -2922,13 +3526,6 @@ exports.createReservationAndProcess = async (req, res) => {
 
 				const capturedUsd = toNum2(cap?.amount?.value || expectedUsdAmount);
 				const limitUsd = toNum2(reservationLimitUsd || capturedUsd);
-
-				// Normalize label from option/amounts
-				const finalPayment = decidePaymentLabel({
-					option,
-					expectedUsdAmount: pp.expectedUsdAmount || expectedUsdAmount,
-					convertedAmounts: body?.convertedAmounts || {},
-				});
 
 				const paidSar = toNum2(
 					Number(body?.paid_amount ?? 0) || Number(body?.sarAmount ?? 0),
@@ -3968,7 +4565,37 @@ exports.webhook = async (req, res) => {
 			const orderId = resource?.supplementary_data?.related_ids?.order_id;
 			const captureId = resource?.id;
 			console.log("Webhook CAPTURE completed:", { orderId, captureId });
-			// optional: reconcile to ledger here
+			const checkoutResult =
+				await reconcileCheckoutPendingReviewCapture(resource);
+			const linkResult =
+				checkoutResult || (await reconcileLinkPendingReviewCapture(resource));
+			if (linkResult) {
+				console.log("[PayPal] pending-review capture reconciled", {
+					status: linkResult.status,
+					reservationId: String(linkResult.reservation?._id || ""),
+					confirmationNumber:
+						linkResult.reservation?.confirmation_number || resource?.custom_id,
+					captureId,
+				});
+			}
+		}
+		if (
+			[
+				"PAYMENT.CAPTURE.DENIED",
+				"PAYMENT.CAPTURE.DECLINED",
+				"PAYMENT.CAPTURE.REFUNDED",
+				"PAYMENT.CAPTURE.REVERSED",
+			].includes(type)
+		) {
+			const released = await releasePendingReviewCapture(resource, type);
+			if (released) {
+				console.log("[PayPal] pending-review capture released", {
+					type,
+					status: released.status,
+					id: String(released.id || ""),
+					captureId: resource?.id || null,
+				});
+			}
 		}
 		if (type === "VAULT.PAYMENT-TOKEN.CREATED") {
 			console.log("Webhook vault token created:", resource?.id);
@@ -4518,6 +5145,43 @@ exports.linkPayReservation = async (req, res) => {
 			reservation?.paypal_details?.pending_total_usd || 0,
 		);
 		const newCapture = toNumber2(usdAmount);
+		const hasPendingReviewCapture =
+			pendingSoFar > 0 &&
+			Array.isArray(reservation?.paypal_details?.pending_review_captures) &&
+			reservation.paypal_details.pending_review_captures.some((entry) =>
+				PAYPAL_PENDING_REVIEW_STATUSES.has(
+					String(entry?.capture_status || "").toUpperCase(),
+				),
+			);
+
+		if (hasPendingReviewCapture) {
+			const lastPending =
+				reservation.paypal_details.pending_review_captures[
+					reservation.paypal_details.pending_review_captures.length - 1
+				] || {};
+			return res.status(409).json({
+				...buildPayPalPendingReviewPayload(
+					{
+						id: lastPending.capture_id,
+						status: lastPending.capture_status || "PENDING",
+						status_details: { reason: lastPending.capture_status_reason },
+						amount: {
+							value: lastPending.amount || pendingSoFar.toFixed(2),
+							currency_code: lastPending.currency || "USD",
+						},
+					},
+					{
+						orderId: lastPending.order_id,
+						invoiceId: lastPending.invoice_id,
+						confirmationNumber: reservation.confirmation_number,
+						amount: pendingSoFar,
+						currency: "USD",
+					},
+				),
+				message:
+					"PayPal is still reviewing a previous payment for this reservation. Please do not submit another payment until the review is completed.",
+			});
+		}
 
 		if (capturedSoFar + pendingSoFar + newCapture > limit + 1e-9) {
 			const remaining = (limit - capturedSoFar - pendingSoFar).toFixed(2);
@@ -4651,6 +5315,32 @@ exports.linkPayReservation = async (req, res) => {
 				captureId: cap?.id || null,
 				processorResponse: cap?.processor_response || null,
 			});
+			if (isPayPalCapturePendingReview(cap)) {
+				const updatedPending = await recordReservationPendingReviewCapture({
+					reservationId: reservation._id,
+					capture: cap,
+					orderPayload: capResult,
+					usdAmount: newCapture,
+					sarAmount: sarAmountNumber,
+					invoiceId: uniqueInvoiceId,
+					cmid: pp.cmid || null,
+					via: "LINK_CAPTURE_PENDING_REVIEW",
+				});
+				return res.status(202).json({
+					...buildPayPalPendingReviewPayload(cap, {
+						amount: newCapture,
+						currency: "USD",
+						orderId: capResult?.id || pp.order_id,
+						invoiceId: uniqueInvoiceId,
+						confirmationNumber: reservation.confirmation_number,
+					}),
+					message:
+						"PayPal is reviewing this payment. Please do not retry or submit another payment. Jannat Booking will update the reservation once PayPal completes or declines the review.",
+					reservation: buildPaymentLinkReservationPayload(
+						updatedPending || reservation,
+					),
+				});
+			}
 			await finalizePendingCaptureUSD({
 				reservationId: reservation._id,
 				usdAmount: newCapture,

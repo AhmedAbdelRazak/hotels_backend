@@ -120,6 +120,14 @@ const uncompletedReservationsSchema = new mongoose.Schema(
 			type: Object,
 			default: {},
 		},
+		paypal_details: {
+			type: Object,
+			default: {},
+		},
+		payment_details: {
+			type: Object,
+			default: {},
+		},
 
 		checkin_date: {
 			type: Date,
@@ -181,6 +189,27 @@ const uncompletedReservationsSchema = new mongoose.Schema(
 		},
 	},
 	{ timestamps: true }
+);
+
+uncompletedReservationsSchema.index(
+	{ confirmation_number: 1 },
+	{
+		partialFilterExpression: { confirmation_number: { $type: "string", $gt: "" } },
+		name: "uncompleted_confirmation_number",
+	}
+);
+uncompletedReservationsSchema.index(
+	{ "paypal_details.initial.capture_id": 1 },
+	{
+		partialFilterExpression: {
+			"paypal_details.initial.capture_id": { $type: "string", $gt: "" },
+		},
+		name: "uncompleted_paypal_capture_id",
+	}
+);
+uncompletedReservationsSchema.index(
+	{ hotelId: 1, "customer_details.email": 1, "customer_details.phone": 1, reservation_status: 1, createdAt: -1 },
+	{ name: "uncompleted_guest_hotel_payment_status" }
 );
 
 module.exports = mongoose.model(
