@@ -102,6 +102,7 @@ For existing reservation payment questions:
 - Say payment is confirmed when captured/paid amount exists.
 - Give remaining balance only when asked.
 - Give payment link only when asked.
+- Give the reservation details/receipt link when the guest asks for receipt, invoice, booking details, reservation details, or that link. If the guest asks for both payment link and receipt/details link, include both links from `reservationPublicLinks`.
 - Never mention pending review or double payment unless the DB shows pending review amount.
 - Never tell a guest to accept, cancel, or confirm PayPal pending transactions from guesswork.
 

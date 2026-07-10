@@ -1780,6 +1780,40 @@ check("Existing reservation lookup reports confirmed payment without inventing p
 	assert(!reply.includes("/client-payment/"));
 });
 
+check("Existing reservation lookup can provide payment and receipt links on request", () => {
+	const reservation = {
+		_id: "6a5030efefd4fdbb5d061a8c",
+		confirmation_number: "8940361462",
+		reservation_status: "confirmed",
+		checkin_date: "2026-07-27T00:00:00.000Z",
+		checkout_date: "2026-08-03T00:00:00.000Z",
+		total_amount: 525,
+		paid_amount: 78.75,
+		currency: "SAR",
+		payment: "paypal",
+		payment_details: {},
+		paypal_details: {},
+	};
+	const english = orchestrator.buildReservationLookupMessage(
+		{ preferredLanguageCode: "en" },
+		{ confirmation: "8940361462", languageCode: "en" },
+		reservation,
+		guest("Please send me the payment link and receipt link")
+	);
+	assert(english.includes("/client-payment/6a5030efefd4fdbb5d061a8c/8940361462"));
+	assert(english.includes("/single-reservation/8940361462"));
+	const arabic = orchestrator.buildReservationLookupMessage(
+		{ preferredLanguageCode: "ar" },
+		{ confirmation: "8940361462", languageCode: "ar" },
+		reservation,
+		guest(
+			"\u0627\u0631\u0633\u0644 \u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639 \u0648\u0631\u0627\u0628\u0637 \u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629"
+		)
+	);
+	assert(arabic.includes("/client-payment/6a5030efefd4fdbb5d061a8c/8940361462"));
+	assert(arabic.includes("/single-reservation/8940361462"));
+});
+
 check("Bare confirmation inherits prior deposit question for reservation payment lookup", () => {
 	const latest = guest("8940361462");
 	const sc = {

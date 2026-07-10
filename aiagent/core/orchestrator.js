@@ -14716,6 +14716,19 @@ function latestGuestAsksPaymentLink(value = "") {
 	);
 }
 
+function latestGuestAsksReservationReceiptLink(value = "") {
+	const text = normalizeIntentSearchText(value);
+	const compact = text.replace(/\s+/g, "");
+	return (
+		/\b(?:receipt|invoice|reservation\s*(?:details|link)|booking\s*(?:details|link)|confirmation\s*(?:details|link)|details\s*link)\b/i.test(
+			text
+		) ||
+		/(?:\u0631\u0627\u0628\u0637(?:\u0627\u0644)?(?:\u062a\u0641\u0627\u0635\u064a\u0644|\u0627\u0644\u062a\u0641\u0627\u0635\u064a\u0644|\u062d\u062c\u0632|\u0627\u0644\u062d\u062c\u0632|\u062a\u0623\u0643\u064a\u062f|\u062a\u0627\u0643\u064a\u062f|\u0627\u0644\u062a\u0623\u0643\u064a\u062f|\u0627\u0644\u062a\u0627\u0643\u064a\u062f|\u0641\u0627\u062a\u0648\u0631\u0629|\u0641\u0627\u062a\u0648\u0631\u0647|\u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0629|\u0627\u0644\u0641\u0627\u062a\u0648\u0631\u0647|\u0625\u064a\u0635\u0627\u0644|\u0627\u064a\u0635\u0627\u0644|\u0627\u0644\u0625\u064a\u0635\u0627\u0644|\u0627\u0644\u0627\u064a\u0635\u0627\u0644)|\u062a\u0641\u0627\u0635\u064a\u0644\u0627\u0644\u062d\u062c\u0632|\u0641\u0627\u062a\u0648\u0631\u0629|\u0641\u0627\u062a\u0648\u0631\u0647|\u0625\u064a\u0635\u0627\u0644|\u0627\u064a\u0635\u0627\u0644)/iu.test(
+			compact
+		)
+	);
+}
+
 function latestGuestClaimsExistingReservationPayment(value = "") {
 	const text = normalizeIntentSearchText(value);
 	const compact = text.replace(/\s+/g, "");
@@ -14974,9 +14987,12 @@ function buildReservationLookupMessage(
 	const asksPayment = reservationLookupTurnAsksPayment(sc, latestGuest);
 	const asksRemaining = latestGuestAsksRemainingBalance(latestText);
 	const asksPaymentLink = latestGuestAsksPaymentLink(latestText);
+	const asksReceiptLink = latestGuestAsksReservationReceiptLink(latestText);
 	const asksRestrictedReception = latestGuestInsistsOnPaidReceptionPhone(latestText);
 	const payment = reservationPaymentSummary(reservation);
 	const paidReceptionAllowed = paidReceptionPhoneAllowed({ reservation, sc, latestGuest });
+	const includeReservationDetailsLink =
+		links.reservationConfirmation && (!asksPayment || asksReceiptLink);
 	const paymentLines = [];
 	if (asksPayment || asksRemaining) {
 		paymentLines.push(
@@ -15045,7 +15061,7 @@ function buildReservationLookupMessage(
 			`\u0627\u0644\u0625\u062c\u0645\u0627\u0644\u064a: ${formatMoney(total, currency, languageCode)}`,
 			...paymentLines,
 			...contactLines,
-			links.reservationConfirmation && !asksPayment
+			includeReservationDetailsLink
 				? `[\u0631\u0627\u0628\u0637 \u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u062d\u062c\u0632](${links.reservationConfirmation})`
 				: "",
 			links.payment && asksPaymentLink
@@ -15075,7 +15091,7 @@ function buildReservationLookupMessage(
 		`Total: ${formatMoney(total, currency, languageCode)}`,
 		...paymentLines,
 		...contactLines,
-		links.reservationConfirmation && !asksPayment
+		includeReservationDetailsLink
 			? `[Reservation details](${links.reservationConfirmation})`
 			: "",
 		links.payment && asksPaymentLink ? `[Payment link](${links.payment})` : "",
@@ -23419,6 +23435,7 @@ const exportedOrchestrator = {
 		latestGuestRequestsExistingReservationService,
 		latestGuestAsksReservationPayment,
 		latestGuestAsksRemainingBalance,
+		latestGuestAsksReservationReceiptLink,
 		latestGuestInsistsOnPaidReceptionPhone,
 		reservationPaymentSummary,
 		reservationPendingReviewAmountSar,
