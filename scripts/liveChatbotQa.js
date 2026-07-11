@@ -684,6 +684,65 @@ async function findAvailableComparisonStay(hotel, nights = 2) {
 	throw new Error(`Could not find available double-vs-quad comparison stay for ${hotel.hotelName}`);
 }
 
+async function findAvailablePhysicalOverflowStay(hotel, nights = 2) {
+	const start = addDaysISO(businessTodayISO(), 10);
+	const configuredDoubleUnits = (Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: []
+	)
+		.filter(
+			(room) =>
+				testApi.roomIsSellable?.(room) !== false &&
+				String(testApi.canonicalRoomTypeKey?.(room) || room?.roomType || "") === "doubleRooms"
+		)
+		.reduce((total, room) => total + Math.max(0, Number(room.count || 0) || 0), 0);
+	assert(configuredDoubleUnits > 0 && configuredDoubleUnits < 10, "Ajyad must expose fewer than 10 physical double rooms for overflow QA");
+	for (let offset = 0; offset < 130; offset += 2) {
+		const checkinISO = addDaysISO(start, offset);
+		const checkoutISO = addDaysISO(checkinISO, nights);
+		const result = await testApi.quoteTool(
+			{ _id: "live-qa-preflight", hotelId: hotel._id },
+			{
+				checkinISO,
+				checkoutISO,
+				roomTypeKey: "doubleRooms",
+				roomSelections: [{ roomTypeKey: "doubleRooms", count: 10 }],
+				rooms: 10,
+				adults: 20,
+				children: 0,
+				languageCode: "en",
+			}
+		);
+		const quote = result?.quote || {};
+		const lines = Array.isArray(quote.roomLines) ? quote.roomLines : [];
+		const totalRooms = lines.reduce(
+			(total, line) => total + Math.max(0, Number(line?.count || 0) || 0),
+			0
+		);
+		const quotedDoubleUnits = lines
+			.filter((line) => line.roomTypeKey === "doubleRooms")
+			.reduce((total, line) => total + Number(line.count || 0), 0);
+		if (
+			result?.available &&
+			quote.roomPlanAdjusted === true &&
+			quote.roomPlanRequiresGuestConfirmation === true &&
+			totalRooms === 10 &&
+			quotedDoubleUnits === configuredDoubleUnits &&
+			lines.length >= 2
+		) {
+			return {
+				checkinISO,
+				checkoutISO,
+				nights,
+				result,
+				expectedLines: lines,
+				configuredDoubleUnits,
+			};
+		}
+	}
+	throw new Error(`Could not find a 10-double physical-overflow stay for ${hotel.hotelName}`);
+}
+
 async function findAvailableSplitStay(hotel, roomTypeKey = "doubleRooms", nights = 2, count = 1) {
 	const first = await findAvailableStay(hotel, roomTypeKey, nights, count);
 	const start = addDaysISO(first.checkoutISO, 2);
@@ -972,6 +1031,40 @@ async function plan(caseId, beforeAiIdentities) {
 	const sc = await SupportCase.findById(caseId).lean();
 	assert(sc, `Support case ${caseId} disappeared during planning`);
 	const newAiEntries = newAiEntriesSince(sc, beforeAiIdentities);
+	if (!newAiEntries.length) {
+		const diagnostic = await SupportCase.findById(caseId)
+			.select("+aiStateSnapshot")
+			.lean();
+		const known = diagnostic?.aiStateSnapshot?.known || {};
+		const reviewedQuote = testApi.reviewedQuoteForSubmit
+			? testApi.reviewedQuoteForSubmit(known)
+			: {};
+		console.error(
+			"LIVE_QA_NO_REPLY_STATE",
+			JSON.stringify({
+				caseId,
+				conversationTail: (diagnostic?.conversation || []).slice(-6).map((entry) => ({
+					isAi: Boolean(entry?.isAi),
+					isSystem: Boolean(entry?.isSystem),
+					clientAction: String(entry?.clientAction || ""),
+					ownedMarker: String(entry?.clientTag || "") === marker,
+				})),
+				known: {
+					hasQuote: Boolean(known?.quote?.available),
+					roomSelections: (known?.roomSelections || []).map((selection) => ({
+						roomId: String(selection?.roomId || ""),
+						roomTypeKey: String(selection?.roomTypeKey || ""),
+						count: Number(selection?.count || 0) || 0,
+					})),
+					officialReviewVersion:
+						Number(known?.officialReviewSnapshot?.version || 0) || 0,
+					reviewedQuoteUsable: testApi.reviewedQuoteSnapshotUsable
+						? testApi.reviewedQuoteSnapshotUsable(reviewedQuote)
+						: false,
+				},
+			}, null, 2)
+		);
+	}
 	assert(
 		newAiEntries.length > 0,
 		`No new AI conversation entry was created for the latest guest turn in case ${caseId}`
@@ -1099,6 +1192,7 @@ function buildScenarios(ctx) {
 	const quad = ctx.stays.quad;
 	const family = ctx.stays.family;
 	const comparison = ctx.stays.comparison;
+	const physicalOverflow = ctx.stays.physicalOverflow;
 	const splitFirst = ctx.stays.split?.first || stay;
 	const splitSecond = ctx.stays.split?.second || {
 		checkinISO: addDaysISO(stay.checkoutISO, 2),
@@ -2075,6 +2169,113 @@ function buildScenarios(ctx) {
 				},
 			],
 		},
+		{
+			name: "Ten doubles use exact physical mixed allocation only after approval",
+			hotel: "ajyad",
+			languageCode: "en",
+			clientName: "Omar Codex",
+			reservation: true,
+			steps: [
+				{
+					message: `I need 10 double rooms for 20 adults from ${physicalOverflow.checkinISO} to ${physicalOverflow.checkoutISO}. Please give me the exact total price.`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "ten-double mixed quote");
+						assertMatches(ai.message, /original request|requested/i, "ten-double original request");
+						assertMatches(ai.message, /recommended mix|recommend/i, "ten-double recommended mix");
+						assertMatches(ai.message, /agree|approval|confirm/i, "ten-double approval gate");
+						for (const line of physicalOverflow.expectedLines) {
+							const labelPattern =
+								line.roomTypeKey === "doubleRooms"
+									? "double"
+									: line.roomTypeKey === "tripleRooms"
+									? "triple"
+									: line.roomTypeKey === "quadRooms"
+									? "quad(?:ruple)?"
+									: line.roomTypeKey === "familyRooms"
+									? "family|quintuple|six[ -]?bed"
+									: "suite|room";
+							const count = Number(line.count || 0);
+							assertMatches(
+								ai.message,
+								new RegExp(`(?:${count}\\s*(?:x\\s*)?[^\\n]{0,45}(?:${labelPattern})|(?:${labelPattern})[^\\n]{0,45}\\b${count}\\b)`, "i"),
+								`ten-double expected ${line.roomTypeKey} count`
+							);
+						}
+					},
+				},
+				{
+					message: "Yes, I agree to the exact recommended room mix.",
+					expect: ({ ai }) =>
+						assertMatches(ai.message, /full name|name|phone|nationality/i, "ten-double identity request"),
+				},
+				{
+					message: "Does the double room have parking?",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /parking/i, "ten-double room fact detour");
+						const rows = await reservationsForCase(caseId);
+						assert(rows.length === 0, "room fact question created the ten-room reservation");
+					},
+				},
+				{
+					message: `The booking name is Omar Codex, phone ${scenarioPhone(44)}, nationality Egyptian, 20 adults and no children.`,
+					expect: ({ ai }) =>
+						assertMatches(ai.message, /email|optional|review|complete booking/i, "ten-double identity response"),
+				},
+				{
+					message: "Continue without email",
+					expect: ({ ai }) => {
+						assertMatches(ai.message, /review|complete booking|confirm/i, "ten-double official review");
+						assertDiscountMarkup(ai.message, "ten-double official review price");
+						assertDateRangeMention(
+							ai.message,
+							physicalOverflow.checkinISO,
+							physicalOverflow.checkoutISO,
+							"ten-double official review dates"
+						);
+					},
+				},
+				{
+					message: "Yes, complete it. Can I pay at the hotel on arrival?",
+					expect: async ({ ai, caseId }) => {
+						assertPayAtHotelAccepted(ai.message, "pay at the hotel", "ten-double prebooking payment");
+						assertMatches(ai.message, /not created|have not created|not booked/i, "ten-double no-create payment answer");
+						const rows = await reservationsForCase(caseId);
+						assert(rows.length === 0, "compound payment question created the ten-room reservation");
+					},
+				},
+				{
+					message: "Complete booking",
+					expect: async ({ ai, caseId }) => {
+						assertMatches(ai.message, /confirmation|confirmed|\d{8,}/i, "ten-double final confirmation");
+						const rows = await assertReservationCreated(caseId, "ten-double exact mixed submit");
+						assert(rows.length === 1, "ten-double flow created more than one reservation");
+						const reservation = rows[0] || {};
+						assert(
+							Number(reservation.total_rooms || 0) === 10,
+							"ten-double reservation total_rooms changed"
+						);
+						const picked = Array.isArray(reservation.pickedRoomsPricing)
+							? reservation.pickedRoomsPricing
+							: [];
+						assert(picked.length === 10, "ten-double picked room rows changed");
+						for (const line of physicalOverflow.expectedLines) {
+							const exactCount = picked.filter(
+								(row) => String(row.hotelRoomConfigId || "") === String(line.roomId || "")
+							).length;
+							assert(
+								exactCount === Number(line.count || 0),
+								`ten-double stored exact room count changed for ${line.roomId}`
+							);
+						}
+						const expectedTotal = Number(physicalOverflow.result?.quote?.total || 0);
+						assert(
+							Math.abs(Number(reservation.total_amount || 0) - expectedTotal) < 0.01,
+							`ten-double stored total ${reservation.total_amount} differs from exact quote ${expectedTotal}`
+						);
+					},
+				},
+			],
+		},
 	];
 }
 
@@ -2430,6 +2631,7 @@ async function main() {
 		quad: await findAvailableStay(hotels.ajyad, "quadRooms", 2, 1),
 		family: await findAvailableStay(hotels.ajyad, "familyRooms", 2, 1),
 		comparison: await findAvailableComparisonStay(hotels.ajyad, 2),
+		physicalOverflow: await findAvailablePhysicalOverflowStay(hotels.ajyad, 2),
 		split: await findAvailableSplitStay(hotels.ajyad, "doubleRooms", 2, 1),
 	};
 	const ctx = { hotels, stays, marker };
@@ -2452,7 +2654,7 @@ async function main() {
 		`LIVE_QA_START marker=${marker} selected=${selected.length} range=${requestedFrom}-${requestedTo} fast=${fastMode} dispatchSkipped=true`
 	);
 	console.log(
-		`LIVE_QA_STAYS double=${stays.double.checkinISO}->${stays.double.checkoutISO} triple=${stays.triple.checkinISO}->${stays.triple.checkoutISO} quad=${stays.quad.checkinISO}->${stays.quad.checkoutISO} family=${stays.family.checkinISO}->${stays.family.checkoutISO} comparison=${stays.comparison.checkinISO}->${stays.comparison.checkoutISO} split=${stays.split.first.checkinISO}->${stays.split.first.checkoutISO}+${stays.split.second.checkinISO}->${stays.split.second.checkoutISO}`
+		`LIVE_QA_STAYS double=${stays.double.checkinISO}->${stays.double.checkoutISO} triple=${stays.triple.checkinISO}->${stays.triple.checkoutISO} quad=${stays.quad.checkinISO}->${stays.quad.checkoutISO} family=${stays.family.checkinISO}->${stays.family.checkoutISO} comparison=${stays.comparison.checkinISO}->${stays.comparison.checkoutISO} physicalOverflow=${stays.physicalOverflow.checkinISO}->${stays.physicalOverflow.checkoutISO} split=${stays.split.first.checkinISO}->${stays.split.first.checkoutISO}+${stays.split.second.checkinISO}->${stays.split.second.checkoutISO}`
 	);
 
 	for (const { definition, number } of selected) {

@@ -881,6 +881,114 @@ check("Ten double rooms cap at five and fill the remainder with five triples", (
 		ai("Recommended mix", "quote_ready")
 	);
 	assert.strictEqual(orchestrator.adjustedRoomPlanConfirmationPending(confirmed), false);
+	const driftedIdentityTurn = {
+		...confirmed,
+		roomSelections: [{ roomTypeKey: "familyRooms", count: 4 }],
+		rooms: 4,
+		roomTypeKey: "familyRooms",
+		adults: 20,
+		children: 0,
+		fullName: "Omar Codex",
+		phone: "+966500000044",
+		nationality: "Egyptian",
+	};
+	delete driftedIdentityTurn.quote;
+	const lockedIdentityTurn = orchestrator.preserveConfirmedAdjustedRoomPlan(
+		confirmed,
+		driftedIdentityTurn,
+		"The booking name is Omar Codex, phone +966500000044, nationality Egyptian, 20 adults and no children.",
+		{ changedFields: ["fullName", "phone", "nationality", "adults", "children"] }
+	);
+	assert.deepStrictEqual(
+		lockedIdentityTurn.roomSelections.map((item) => [item.roomId, item.count]),
+		plan.roomSelections.map((item) => [item.roomId, item.count])
+	);
+	assert.strictEqual(lockedIdentityTurn.rooms, 10);
+	assert.strictEqual(orchestrator.quoteMatchesKnown(lockedIdentityTurn), true);
+	const lockedRoomFactQuestion = orchestrator.preserveConfirmedAdjustedRoomPlan(
+		confirmed,
+		driftedIdentityTurn,
+		"Does the double room have parking?",
+		{ changedFields: ["roomSelections", "rooms", "roomTypeKey"] }
+	);
+	assert.deepStrictEqual(
+		lockedRoomFactQuestion.roomSelections.map((item) => [item.roomId, item.count]),
+		plan.roomSelections.map((item) => [item.roomId, item.count])
+	);
+	assert.strictEqual(lockedRoomFactQuestion.rooms, 10);
+	assert.strictEqual(lockedRoomFactQuestion.roomPlanConfirmedKey, confirmed.roomPlanConfirmedKey);
+	assert.strictEqual(orchestrator.quoteMatchesKnown(lockedRoomFactQuestion), true);
+	const explicitRoomChange = orchestrator.preserveConfirmedAdjustedRoomPlan(
+		confirmed,
+		driftedIdentityTurn,
+		"Change it to 4 family rooms",
+		{ changedFields: ["roomSelections", "rooms", "roomTypeKey"] }
+	);
+	assert.deepStrictEqual(explicitRoomChange.roomSelections, [
+		{ roomTypeKey: "familyRooms", count: 4 },
+	]);
+	assert.strictEqual(explicitRoomChange.roomPlanConfirmedKey, undefined);
+	const largeInventoryHotel = {
+		...inventoryHotel,
+		roomCountDetails: [
+			{ ...inventoryHotel.roomCountDetails[0], count: 5 },
+			{ ...inventoryHotel.roomCountDetails[1], count: 55 },
+		],
+	};
+	const parsedLargeRequest = orchestrator.extractRoomSelectionsFromText("I need 60 double rooms");
+	assert.deepStrictEqual(
+		parsedLargeRequest.map((item) => [item.roomTypeKey, item.count]),
+		[["doubleRooms", 60]]
+	);
+	const largePlan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		largeInventoryHotel,
+		parsedLargeRequest,
+		{ checkinISO: "2026-08-20", checkoutISO: "2026-08-22" }
+	);
+	assert.strictEqual(largePlan.unfilledRooms, 0);
+	assert.strictEqual(orchestrator.roomSelectionsTotal(largePlan.roomSelections), 60);
+	assert.deepStrictEqual(
+		largePlan.roomSelections.map((item) => [item.roomId, item.count]),
+		[
+			["five-doubles", 5],
+			["five-triples", 55],
+		]
+	);
+	assert.strictEqual(orchestrator.roomCountRequestLimitExceeded("I need 60 double rooms"), false);
+	assert.strictEqual(orchestrator.roomCountRequestLimitExceeded("I need 201 double rooms"), true);
+	assert.strictEqual(orchestrator.roomCountRequestLimitExceeded("201"), true);
+	assert.strictEqual(
+		orchestrator.roomCountRequestLimitExceeded("I need 150 double rooms and 75 triple rooms"),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.knownRoomCountRequestLimitExceeded({
+			rooms: 201,
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 201 }],
+		}),
+		true
+	);
+	assert.strictEqual(actions.roomSelectionCount(60), 60);
+	assert.throws(() => actions.roomSelectionCount(201), /supported maximum/i);
+	assert.throws(
+		() =>
+			actions.validateRequiredGuestDetails({
+				fullName: "Large Group Guest",
+				phone: "+966500000001",
+				nationality: "Saudi",
+				adults: 200,
+				children: 0,
+				rooms: 201,
+			}),
+		/supported maximum/i
+	);
+	const limitReply = orchestrator.buildRoomCountLimitMessage(
+		{ preferredLanguageCode: "en" },
+		{ languageCode: "en" },
+		guest("I need 201 double rooms")
+	);
+	assert(/have not reduced the requested count/i.test(limitReply));
+	assert(limitReply.includes("+1 (909) 222-3374"));
 });
 
 check("Exact family variant overflow uses the next same-category physical configuration", () => {
@@ -927,6 +1035,28 @@ check("Exact family variant overflow uses the next same-category physical config
 			["family-five-exact", 2],
 			["family-six-overflow", 2],
 		]
+	);
+	const reversePlan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		inventoryHotel,
+		[
+			{
+				roomId: "family-six-overflow",
+				roomTypeKey: "familyRooms",
+				roomDisplayName: "Spacious Six-Bed Room",
+				count: 5,
+			},
+		],
+		{ checkinISO: "2026-08-20", checkoutISO: "2026-08-22" }
+	);
+	assert.strictEqual(reversePlan.adjusted, true);
+	assert.strictEqual(reversePlan.unfilledRooms, 2);
+	assert.deepStrictEqual(
+		reversePlan.roomSelections.map((item) => [item.roomId, item.count]),
+		[["family-six-overflow", 3]]
+	);
+	assert(
+		!reversePlan.roomSelections.some((item) => item.roomId === "family-five-exact"),
+		"six-bed overflow was downgraded to a lower-capacity quintuple room"
 	);
 });
 
@@ -2867,6 +2997,10 @@ check("Brain escalation and arrival contract requires 909 WhatsApp contact", () 
 	assert(prompt.includes('action="escalate"'));
 	assert(/arrival coordination/i.test(prompt));
 	assert(/4:00 AM/i.test(prompt));
+	assert(/confirmation that also contains a question, hesitation/i.test(prompt));
+	const priority = orchestrator.priorityBrainRules({});
+	assert(/unresolved question, hesitation, wait\/later request/i.test(priority));
+	assert(/must not create the reservation/i.test(priority));
 });
 
 check("Human escalation contact tool facts expose exact 909 phone and WhatsApp", () => {
@@ -2970,6 +3104,15 @@ check("Post-confirmation pay-at-hotel questions get a clear confirmation answer"
 	assert(reply.includes("\u062c\u062f\u064a\u0629 \u0627\u0644\u062d\u0636\u0648\u0631"));
 	assert(reply.includes("\u0627\u0644\u062d\u062c\u0632 \u064a\u0638\u0644 \u0642\u0627\u0626\u0645"));
 	assert(!/\u063a\u0627\u0644\u0628(?:\u0627|\u064b)/u.test(reply));
+	const preBookingReply = orchestrator.buildPreBookingPayAtHotelMessage(
+		{ clientName: "Shaimaa Elsherif", preferredLanguageCode: "en" },
+		{ languageCode: "en" },
+		guest("Yes, complete it. Can I pay at the hotel?")
+	);
+	assert(/pay at the hotel on arrival/i.test(preBookingReply));
+	assert(/online payment is not mandatory/i.test(preBookingReply));
+	assert(/not created the reservation yet/i.test(preBookingReply));
+	assert(!/confirmation number/i.test(preBookingReply));
 	assert.strictEqual(
 		orchestrator.paymentAtHotelReplyNeedsCorrection(
 			{ action: "reply", reply },
@@ -3511,6 +3654,57 @@ check("Submit preserves the exact reviewed PMS room and complete price fingerpri
 		officialReviewSnapshot.reviewedQuote.roomSelections[0].roomId,
 		"exact-double-room"
 	);
+	assert.strictEqual(
+		orchestrator.officialReviewCheckpointUsable({
+			...reviewed,
+			officialReviewSnapshot,
+		}),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.officialReviewCheckpointUsable({
+			...reviewed,
+			officialReviewSnapshot: {
+				...officialReviewSnapshot,
+				reviewedQuote: {
+					...officialReviewSnapshot.reviewedQuote,
+					total: 999,
+				},
+			},
+		}),
+		true,
+		"a self-consistent stored price can be reviewed, but final refresh must still compare it"
+	);
+	assert.strictEqual(
+		orchestrator.officialReviewCheckpointUsable({
+			...reviewed,
+			officialReviewSnapshot: { version: 1 },
+		}),
+		false
+	);
+	const forcedSubmitDecision = orchestrator.forceOfficialReviewSubmitDecision({
+		action: "submit_reservation",
+		facts: {
+			roomSelections: [{ roomTypeKey: "doubleRooms", count: 3 }],
+			adults: 3,
+			fullName: "\u0645\u0644\u062e\u0635 \u0627\u0644\u062d\u062c\u0632",
+		},
+		memory: {
+			changedFields: ["roomSelections", "adults", "fullName"],
+			missingFields: [],
+		},
+	});
+	assert.deepStrictEqual(forcedSubmitDecision.facts, {});
+	assert.deepStrictEqual(forcedSubmitDecision.memory.changedFields, []);
+	const checkpointAfterBrainMerge = orchestrator.mergeKnownFacts(
+		{ ...reviewed, officialReviewSnapshot },
+		forcedSubmitDecision.facts
+	);
+	assert.strictEqual(
+		checkpointAfterBrainMerge.officialReviewSnapshot.reviewedQuote.roomSelections[0].roomId,
+		"exact-double-room",
+		"confirmation-turn model facts must not erase or mutate the official review checkpoint"
+	);
 
 	const restored = orchestrator.applyOfficialReviewSnapshotForSubmit({
 		...reviewed,
@@ -3588,6 +3782,51 @@ check("Submit preserves the exact reviewed PMS room and complete price fingerpri
 		{},
 		"a legacy review without a server quote must require another review"
 	);
+	const staleConfirmationConversation = {
+		conversation: [
+			ai("Official review", "review_reservation"),
+			guest("Yes, complete"),
+			ai("The price changed; please continue after the new quote.", "quote_ready"),
+			guest("Continue"),
+		],
+	};
+	assert.strictEqual(
+		orchestrator.guestConfirmedAfterLatestReview(staleConfirmationConversation),
+		true,
+		"fixture must reproduce the historical confirmation-memory signal"
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestConfirmsAfterOfficialReview(
+			staleConfirmationConversation,
+			staleConfirmationConversation.conversation.at(-1)
+		),
+		true,
+		"the current continue message is itself a confirmation signal"
+	);
+	const unrelatedAfterOldConfirmation = {
+		conversation: [
+			...staleConfirmationConversation.conversation.slice(0, -1),
+			guest("Does the hotel have a bus?"),
+		],
+	};
+	assert.strictEqual(
+		orchestrator.guestConfirmedAfterLatestReview(unrelatedAfterOldConfirmation),
+		true,
+		"fixture must retain the old broad memory behavior"
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestConfirmsAfterOfficialReview(
+			unrelatedAfterOldConfirmation,
+			unrelatedAfterOldConfirmation.conversation.at(-1)
+		),
+		false,
+		"an unrelated latest question must never reuse an older confirmation"
+	);
+	assert.strictEqual(
+		orchestrator.officialReviewCheckpointUsable({ quote: unchangedFreshQuote }),
+		false,
+		"a fresh quote without a renewed version-2 review cannot reuse old consent"
+	);
 });
 
 check("Reservation confirmations expose exact lines for the brain to copy", () => {
@@ -3629,6 +3868,134 @@ check("Arabic free-text official review confirmation triggers submit intent", ()
 	assert.strictEqual(orchestrator.guestConfirms(mojibakeSubmitText, ""), true);
 	assert.strictEqual(orchestrator.guestExplicitlyRequestsBookingSubmit(submitText, ""), true);
 	assert.strictEqual(orchestrator.guestExplicitlyRequestsBookingSubmit("\u0646\u0639\u0645 \u062a\u0627\u0628\u0639", ""), false);
+	assert.strictEqual(
+		orchestrator.confirmationTurnContainsReviewedBookingFacts(submitText),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.confirmationTurnContainsReviewedBookingFacts(
+			"\u0646\u0639\u0645\u060c \u0648\u0644\u0643\u0646 \u0627\u0644\u062c\u0648\u0627\u0644 0530000099"
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.confirmationTurnContainsReviewedBookingFacts(
+			"Yes, complete it, but use 2 double rooms for 4 adults"
+		),
+		true
+	);
+	for (const correction of [
+		"Yes, but no children",
+		"Yes, but it is only me",
+		"Yes, but me and my wife",
+		"Yes, but check-in is July 28, 2026",
+		"Yes, but checkout is July 30",
+		"move arrival to 28/07/2026",
+		"phone is +966541234567\nyes, complete",
+	]) {
+		assert.strictEqual(
+			orchestrator.confirmationTurnContainsReviewedBookingFacts(correction, {
+				checkinISO: "2026-07-21",
+				checkoutISO: "2026-07-23",
+				adults: 2,
+				children: 0,
+			}),
+			true,
+			`review correction was misclassified as a pure confirmation: ${correction}`
+		);
+	}
+	for (const question of [
+		"Yes, complete it. Does the hotel have parking?",
+		"Yes, book it, but is breakfast included?",
+		"Yes, complete the booking. How far is the Haram?",
+		"Yes, complete it. What is the cancellation policy?",
+		"Yes, go ahead. Can I pay at the hotel?",
+	]) {
+		const latest = guest(question);
+		assert.strictEqual(
+			orchestrator.confirmationTurnHasUnresolvedQuestion(
+				{ conversation: [ai("Review", "review_reservation"), latest] },
+				latest
+			),
+			true,
+			`compound confirmation question was treated as pure consent: ${question}`
+		);
+	}
+	for (const requestedChange of [
+		"Yes, but can you use phone +966541234567?",
+		"Yes, but can you make it 2 triple rooms?",
+		"Yes, but could you make it 4 adults?",
+		"Yes, but can checkout be July 30, 2026?",
+	]) {
+		assert.strictEqual(
+			orchestrator.confirmationQuestionRequestsReviewedBookingChange(requestedChange, {
+				checkinISO: "2026-07-21",
+				checkoutISO: "2026-07-23",
+				phone: "+966500000000",
+				roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+				adults: 2,
+				children: 0,
+			}),
+			true,
+			`explicit review correction question was treated as an ordinary side question: ${requestedChange}`
+		);
+	}
+	for (const factQuestion of [
+		"Yes, complete it. Does the double room have parking?",
+		"Yes, complete it. What time is check-in?",
+		"Yes, book it, but is breakfast included?",
+	]) {
+		assert.strictEqual(
+			orchestrator.confirmationQuestionRequestsReviewedBookingChange(factQuestion, {
+				roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+				adults: 2,
+				children: 0,
+			}),
+			false,
+			`hotel fact question was incorrectly treated as a reviewed booking change: ${factQuestion}`
+		);
+	}
+	for (const pureConfirmation of [
+		"Yes, that is correct",
+		"Yes, everything is correct, complete it",
+		"Yes, all details are correct",
+		"Yes, I will proceed",
+		"Yes, you can book it",
+		"Yes, please do book it",
+		"Yes, this is fine, go ahead",
+	]) {
+		const latest = guest(pureConfirmation);
+		assert.strictEqual(
+			orchestrator.confirmationTurnHasUnresolvedQuestion(
+				{ conversation: [ai("Review", "review_reservation"), latest] },
+				latest
+			),
+			false,
+			`pure confirmation was misclassified as a side question: ${pureConfirmation}`
+		);
+	}
+	for (const deferred of [
+		"Yes, but wait",
+		"Yes, hold on",
+		"Yes, but let me think",
+		"Yes, maybe later",
+		"Okay, give me a moment",
+		"\u0646\u0639\u0645\u060c \u0644\u0643\u0646 \u0627\u0633\u062a\u0646\u0649 \u0644\u062d\u0638\u0629",
+	]) {
+		assert.strictEqual(
+			orchestrator.confirmationTurnDefersBooking(deferred),
+			true,
+			`hesitation was treated as immediate consent: ${deferred}`
+		);
+	}
+	const deferredReply = orchestrator.buildReviewedBookingDeferredMessage(
+		{ clientName: "Gamal", preferredLanguageCode: "en" },
+		{ languageCode: "en" },
+		guest("Yes, but wait")
+	);
+	assert(/not created the reservation/i.test(deferredReply));
+	assert(/reviewed details remain ready/i.test(deferredReply));
+	assert(/Complete booking/i.test(deferredReply));
 	assert.strictEqual(
 		orchestrator.guestPressedOfficialReviewConfirmation(
 			guest(submitText),

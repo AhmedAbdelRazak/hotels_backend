@@ -46,6 +46,7 @@ const {
 	configuredJannatSupporterId,
 	configuredJannatSupportName,
 } = require("../jannatSupport/config");
+const { MAX_AI_ROOM_COUNT } = require("./limits");
 
 const SUPPORT_EMAILS = new Set([
 	"support@jannatbooking.com",
@@ -67,7 +68,6 @@ const ROOM_TYPE_KEYS = [
 	"individualBed",
 	"other",
 ];
-const MAX_AI_ROOM_COUNT = 50;
 const RESERVATION_CHANGE_CONTACT_PHONE = "+1 (909) 222-3374";
 const RESERVATION_CHANGE_CONTACT_WHATSAPP = "https://wa.me/19092223374";
 const PAID_GUEST_RECEPTION_PHONE = "+966541981804";
@@ -1038,7 +1038,7 @@ function fitRoomSelectionsToPhysicalInventory(hotel = {}, requestedSelections = 
 	for (const selection of requested) {
 		const requestedCount = normalizeRoomCount(selection.count, 1);
 		const requestedType = selection.roomTypeKey;
-		const requestedCapacity = Math.max(
+		let requestedCapacity = Math.max(
 			roomSelectionCapacity(selection),
 			requestedCount === 1 ? capacityTargetFromKnown(known) : 0
 		);
@@ -1049,12 +1049,19 @@ function fitRoomSelectionsToPhysicalInventory(hotel = {}, requestedSelections = 
 		const resolvedType = preferredRoom
 			? canonicalRoomTypeKey(preferredRoom)
 			: requestedType;
+		requestedCapacity = Math.max(
+			requestedCapacity,
+			preferredRoom ? roomCapacity(preferredRoom) : 0
+		);
 		if (requestedType === "singleRooms" && resolvedType === "doubleRooms") {
 			singleMappedToDouble = true;
 		}
 		const sameType = candidates.filter((candidate) => {
 			if (hasStayDates && !candidate.openForStay) return false;
-			return candidate.roomTypeKey === resolvedType;
+			return (
+				candidate.roomTypeKey === resolvedType &&
+				candidate.capacity >= requestedCapacity
+			);
 		});
 		const preferredId = cleanString(preferredRoom?._id, 80);
 		const orderedSameType = [...sameType].sort((left, right) => {
@@ -1073,6 +1080,7 @@ function fitRoomSelectionsToPhysicalInventory(hotel = {}, requestedSelections = 
 				(candidate) =>
 					candidate.openForStay &&
 					candidate.roomTypeKey !== "individualBed" &&
+					candidate.capacity >= requestedCapacity &&
 					roomTypeSortIndex(candidate.roomTypeKey) > startIndex
 			);
 			remaining = allocateFrom(nextTypes, remaining);
@@ -1758,8 +1766,8 @@ function explicitNamedRoomSelectionsFromText(value = "") {
 	const selections = [];
 	for (const [roomTypeKey, typePattern] of Object.entries(typePatterns)) {
 		const patterns = [
-			new RegExp(`(?:^|[^0-9/\\-])(\\d{1,2})(?![0-9/\\-])\\s*(?:x\\s*)?${roomNoun}\\s+(?:.{0,12}\\s+)?${typePattern}(?=$|\\s|[^\\p{L}0-9])`, "iu"),
-			new RegExp(`(?:^|[^0-9/\\-])(\\d{1,2})(?![0-9/\\-])\\s*(?:x\\s*)?${typePattern}\\s+(?:.{0,12}\\s+)?${roomNoun}(?=$|\\s|[^\\p{L}0-9])`, "iu"),
+			new RegExp(`(?:^|[^0-9/\\-])(\\d{1,3})(?![0-9/\\-])\\s*(?:x\\s*)?${roomNoun}\\s+(?:.{0,12}\\s+)?${typePattern}(?=$|\\s|[^\\p{L}0-9])`, "iu"),
+			new RegExp(`(?:^|[^0-9/\\-])(\\d{1,3})(?![0-9/\\-])\\s*(?:x\\s*)?${typePattern}\\s+(?:.{0,12}\\s+)?${roomNoun}(?=$|\\s|[^\\p{L}0-9])`, "iu"),
 		];
 		for (const pattern of patterns) {
 			let matched = false;
@@ -1792,15 +1800,15 @@ function roomCountNearMatch(text = "", matcher) {
 		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
 	const patternSource = matcher.pattern.source;
 	const before = source.match(
-		new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*(?:x\\s*)?(?:${roomNoun}\\s+)?${patternSource}`, "i")
+		new RegExp(`(?:^|[^0-9])(\\d{1,3})\\s*(?:x\\s*)?(?:${roomNoun}\\s+)?${patternSource}`, "i")
 	);
 	if (before?.[1]) return normalizeRoomCount(before[1], 1);
 	const beforeNoun = source.match(
-		new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${roomNoun}.{0,32}${patternSource}`, "i")
+		new RegExp(`(?:^|[^0-9])(\\d{1,3})\\s*${roomNoun}.{0,32}${patternSource}`, "i")
 	);
 	if (beforeNoun?.[1]) return normalizeRoomCount(beforeNoun[1], 1);
 	const after = source.match(
-		new RegExp(`${patternSource}.{0,32}(?:^|[^0-9])(\\d{1,2})\\s*${roomNoun}`, "i")
+		new RegExp(`${patternSource}.{0,32}(?:^|[^0-9])(\\d{1,3})\\s*${roomNoun}`, "i")
 	);
 	if (after?.[1]) return normalizeRoomCount(after[1], 1);
 	return 1;
@@ -1870,7 +1878,7 @@ function roomCountOnlyFromText(value = "") {
 		return null;
 	}
 	const explicitCountBeforeRoom = new RegExp(
-		`(?:^|[^0-9])(\\d{1,2})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`,
+		`(?:^|[^0-9])(\\d{1,3})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`,
 		"iu"
 	).test(source);
 	const rawForPeople = normalizeIntentSearchText(value).replace(/\s+/g, " ").trim();
@@ -1878,11 +1886,53 @@ function roomCountOnlyFromText(value = "") {
 		/(?:room|unit|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647).{0,32}(?:for|pour|para|\u0644\s*)\s*(?:\d{1,2}\s*)?(?:people|persons|guests|adults|\u0634\u062e\u0635|\u0634\u062e\u0635\u064a\u0646|\u0634\u062e\u0635\u0627\u0646|\u0627\u0634\u062e\u0627\u0635|\u0623\u0634\u062e\u0627\u0635|\u0636\u064a\u0648\u0641|\u0646\u0632\u0644\u0627\u0621|\u0628\u0627\u0644\u063a|\u0628\u0627\u0644\u063a\u064a\u0646|\u0641\u0631\u062f|\u0641\u0631\u062f\u064a\u0646|\u0646\u0632\u064a\u0644|\u0646\u0632\u064a\u0644\u064a\u0646|\u0636\u064a\u0641|\u0636\u064a\u0641\u064a\u0646)/iu.test(rawForPeople);
 	if (!explicitCountBeforeRoom && roomForPeopleOnly) return null;
 	const match =
-		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
-		source.match(new RegExp(`${roomNoun}\\s*(\\d{1,2})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
+		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,3})\\s*(?:x\\s*)?${roomNoun}(?:$|\\s|[^\\p{L}0-9])`, "iu")) ||
+		source.match(new RegExp(`${roomNoun}\\s*(\\d{1,3})(?:$|\\s|[^\\p{L}0-9])`, "iu"));
 	const count = Number(match?.[1] || 0);
 	if (!Number.isFinite(count) || count < 1 || count > MAX_AI_ROOM_COUNT) return null;
 	return normalizeRoomCount(count, 1);
+}
+
+function roomCountRequestLimitExceeded(value = "") {
+	const source = normalizeRoomCountMarkers(
+		stripDateTokensForRoomParsing(
+			normalizeNumberWordsForParsing(normalizeDigits(String(value || "")))
+		)
+	)
+		.replace(/[.!?\u061f\u060c,;:]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!source) return false;
+	if (/^\d{1,3}$/.test(source) && Number(source) > MAX_AI_ROOM_COUNT) return true;
+	const roomNoun =
+		"(?:rooms?|room|units?|unit|\\u063a\\u0631\\u0641|\\u063a\\u0631\\u0641\\u0629|\\u063a\\u0631\\u0641\\u0647|\\u0627\\u0648\\u0636|\\u0627\\u0648\\u0636\\u0629|\\u0627\\u0648\\u0636\\u0647)";
+	const typeLabel =
+		"(?:single|double|twin|triple|quad|quadruple|family|quintuple|sextuple|suite|\\u0641\\u0631\\u062f\\u064a(?:\\u0629)?|\\u0645\\u0632\\u062f\\u0648\\u062c(?:\\u0629)?|\\u062b\\u0644\\u0627\\u062b\\u064a(?:\\u0629)?|\\u0631\\u0628\\u0627\\u0639\\u064a(?:\\u0629)?|\\u0639\\u0627\\u0626\\u0644\\u064a(?:\\u0629)?|\\u062e\\u0645\\u0627\\u0633\\u064a(?:\\u0629)?|\\u0633\\u062f\\u0627\\u0633\\u064a(?:\\u0629)?)";
+	const pattern = new RegExp(
+		`(?:^|[^0-9/\\-])(\\d{1,4})(?![0-9/\\-])\\s*(?:x\\s*)?(?:${typeLabel}\\s+)?${roomNoun}|(?:${typeLabel}\\s+)?${roomNoun}\\s*(?:[:x-]\\s*)?(\\d{1,4})(?![0-9/\\-])`,
+		"giu"
+	);
+	const counts = Array.from(source.matchAll(pattern))
+		.map((match) => Number(match[1] || match[2] || 0))
+		.filter((count) => Number.isFinite(count) && count > 0);
+	if (counts.some((count) => count > MAX_AI_ROOM_COUNT)) return true;
+	const explicitSelections = explicitNamedRoomSelectionsFromText(source);
+	const explicitTotal = roomSelectionsTotal(explicitSelections);
+	if (explicitTotal > MAX_AI_ROOM_COUNT) return true;
+	return counts.length > 1 && counts.reduce((total, count) => total + count, 0) > MAX_AI_ROOM_COUNT;
+}
+
+function knownRoomCountRequestLimitExceeded(known = {}) {
+	const selections = Array.isArray(known?.roomSelections) ? known.roomSelections : [];
+	const rawCounts = selections
+		.map((selection) => Number(selection?.count ?? selection?.rooms ?? selection?.quantity ?? 0))
+		.filter((count) => Number.isFinite(count) && count > 0);
+	if (rawCounts.some((count) => count > MAX_AI_ROOM_COUNT)) return true;
+	if (rawCounts.reduce((total, count) => total + Math.floor(count), 0) > MAX_AI_ROOM_COUNT) {
+		return true;
+	}
+	const rooms = Number(known?.rooms || 0);
+	return Number.isFinite(rooms) && rooms > MAX_AI_ROOM_COUNT;
 }
 
 function requestedBedCountFromText(value = "") {
@@ -1945,10 +1995,10 @@ function roomCountCorrectionFromText(value = "") {
 	}
 	if (!roomCountContext.test(source)) return null;
 	const numberPatterns = [
-		/(?:want|need|make|change|update|become|set|عايز|عاوز|اريد|أريد|نريد|نبغى|ابغى|خليها|خلّيها|غيرها|غيّرها|عدل|عدّل)\s*(?:الى|إلى|to)?\s*(\d{1,2})/iu,
-		/(\d{1,2})\s*(?:rooms?|room|units?|unit|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)/iu,
-		/(?:rooms?|room|units?|unit|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)\s*(\d{1,2})/iu,
-		/(\d{1,2})(?:\s|$)/u,
+		/(?:want|need|make|change|update|become|set|عايز|عاوز|اريد|أريد|نريد|نبغى|ابغى|خليها|خلّيها|غيرها|غيّرها|عدل|عدّل)\s*(?:الى|إلى|to)?\s*(\d{1,3})/iu,
+		/(\d{1,3})\s*(?:rooms?|room|units?|unit|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)/iu,
+		/(?:rooms?|room|units?|unit|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)\s*(\d{1,3})/iu,
+		/(\d{1,3})(?:\s|$)/u,
 	];
 	for (const pattern of numberPatterns) {
 		const match = source.match(pattern);
@@ -4407,6 +4457,112 @@ function preserveRoomSelectionForNonRoomTurn(before = {}, after = {}, latestText
 	return next;
 }
 
+function latestTurnExplicitlyChangesRoomPlan(
+	latestText = "",
+	latestAction = "",
+	changedFields = [],
+	known = {}
+) {
+	const text = String(latestText || "").trim();
+	const action = cleanString(latestAction, 80).toLowerCase();
+	if (["select_room_option", "revise_reservation"].includes(action)) return true;
+	if (!text) return false;
+	const unresolvedQuestion = Boolean(
+		/[?\u061f]/u.test(text) ||
+		/^\s*(?:(?:yes|okay|ok|but|and)\b[\s,]*)*(?:does|do|is|are|can|could|would|will|what|which|how|where|when|why)\b/i.test(
+			text
+		) ||
+		/^\s*(?:(?:\u0646\u0639\u0645|\u0637\u064a\u0628|\u0644\u0643\u0646|\u0648)\s*)*(?:\u0647\u0644|\u0645\u0627\u0630\u0627|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0643\u064a\u0641|\u0641\u064a\u0646|\u0623\u064a\u0646|\u0645\u062a\u0649|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627)/u.test(
+			text
+		)
+	);
+	if (
+		unresolvedQuestion &&
+		!confirmationQuestionRequestsReviewedBookingChange(text, known)
+	) {
+		return false;
+	}
+	if (
+		roomCountOnlyFromText(text) ||
+		roomCountCorrectionFromText(text) ||
+		requestedBedCountFromText(text)
+	) {
+		return true;
+	}
+	const selections = extractRoomSelectionsFromText(text);
+	if (!selections.length) return false;
+	const changed = new Set(cleanFieldList(changedFields));
+	const brainMarkedRoomChange =
+		changed.has("rooms") || changed.has("roomSelections") || changed.has("roomTypeKey");
+	const changeCue =
+		/\b(?:want|need|book|choose|select|change|update|modify|switch|replace|use|make|move|set|instead)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0631\u064a\u062f|\u0623\u0631\u064a\u062f|\u0639\u0627\u064a\u0632|\u0639\u0627\u0648\u0632|\u0627\u062d\u062c\u0632|\u0623\u062d\u062c\u0632|\u0627\u062e\u062a\u0627\u0631|\u0623\u062e\u062a\u0627\u0631|\u063a\u064a\u0631|\u0623\u063a\u064a\u0631|\u0639\u062f\u0644|\u0628\u062f\u0644|\u062e\u0644\u064a)/iu.test(
+			text
+		);
+	return brainMarkedRoomChange || changeCue || !unresolvedQuestion;
+}
+
+function preserveConfirmedAdjustedRoomPlan(
+	before = {},
+	after = {},
+	latestText = "",
+	options = {}
+) {
+	const quote = asObject(before.quote);
+	const confirmationKey = cleanString(before.roomPlanConfirmationKey, 80);
+	const confirmedKey = cleanString(before.roomPlanConfirmedKey, 80);
+	const lockActive = Boolean(
+		confirmationKey &&
+			confirmedKey === confirmationKey &&
+			(quote.roomPlanAdjusted || quote.roomPlanRequiresGuestConfirmation)
+	);
+	if (!lockActive) return after;
+	if (
+		latestTurnExplicitlyChangesRoomPlan(
+			latestText,
+			options.latestAction,
+			options.changedFields,
+			before
+		)
+	) {
+		const unlocked = { ...after };
+		delete unlocked.roomPlanConfirmationKey;
+		delete unlocked.roomPlanConfirmedKey;
+		delete unlocked.roomPlanConfirmedAt;
+		delete unlocked.reviewSentAt;
+		delete unlocked.officialReviewSnapshot;
+		return unlocked;
+	}
+	const beforeCheckin = validISODate(before.checkinISO);
+	const beforeCheckout = validISODate(before.checkoutISO);
+	if (
+		validISODate(after.checkinISO) !== beforeCheckin ||
+		validISODate(after.checkoutISO) !== beforeCheckout
+	) {
+		return after;
+	}
+	const lockedSelections = quoteRoomSelections(quote);
+	if (!lockedSelections.length) return after;
+	const lockedCapacity = roomSelectionsGuestCapacity(lockedSelections);
+	if (lockedCapacity > 0 && capacityTargetFromKnown(after) > lockedCapacity) {
+		return after;
+	}
+	const next = {
+		...after,
+		roomSelections: lockedSelections,
+		rooms: roomSelectionsTotal(lockedSelections),
+		roomPlanConfirmationKey: confirmationKey,
+		roomPlanConfirmedKey: confirmedKey,
+		roomPlanConfirmedAt: before.roomPlanConfirmedAt,
+	};
+	if (lockedSelections.length === 1) next.roomTypeKey = lockedSelections[0].roomTypeKey;
+	else delete next.roomTypeKey;
+	if (quoteCanBePreservedForKnown(quote, next)) next.quote = quote;
+	return next;
+}
+
 function quoteMateriallyChanged(previous = {}, current = {}) {
 	const before = asObject(previous);
 	const after = asObject(current);
@@ -4519,8 +4675,8 @@ function roomCountFromAiReviewText(value = "") {
 	if (dual) return dual;
 	source = reviewRoomCountSource;
 	const labeled =
-		source.match(new RegExp(`${roomLabel}\\s*[:：\\-]?\\s*(\\d{1,2})(?=\\s|$|[^\\p{L}0-9])`, "iu")) ||
-		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,2})\\s*${roomLabel}(?=\\s|$|[^\\p{L}0-9])`, "iu"));
+		source.match(new RegExp(`${roomLabel}\\s*[:：\\-]?\\s*(\\d{1,3})(?=\\s|$|[^\\p{L}0-9])`, "iu")) ||
+		source.match(new RegExp(`(?:^|[^0-9])(\\d{1,3})\\s*${roomLabel}(?=\\s|$|[^\\p{L}0-9])`, "iu"));
 	const count = Number(labeled?.[1] || 0);
 	if (!Number.isFinite(count) || count < 1 || count > MAX_AI_ROOM_COUNT) return null;
 	return normalizeRoomCount(count, 1);
@@ -7514,6 +7670,123 @@ function guestPressedOfficialReviewConfirmation(latestGuest = {}, previousAi = {
 	return guestConfirms(text, action);
 }
 
+function confirmationTurnContainsReviewedBookingFacts(value = "", known = {}) {
+	const text = String(value || "").trim();
+	if (!text) return false;
+	const dates = quickDateRange(text);
+	const relationshipFacts = relationshipGuestFactsFromText(text, known);
+	const selfOnlyGuestCorrection =
+		/\b(?:only|just)\s+(?:me|myself)\b|\b(?:it\s+is|it'?s)\s+(?:only|just)\s+me\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0646\u0627\s*(?:\u0641\u0642\u0637|\u0644\u0648\u062d\u062f\u064a|\u0644\u0648\u062d\u062f\u0649)|\u0644\u0648\u062d\u062f\u064a\s*\u0641\u0642\u0637|\u0644\u0648\u062d\u062f\u0649\s*\u0641\u0642\u0637)/iu.test(
+			text
+		);
+	return Boolean(
+		latestGuestProvidesBookingIdentityDetails(text) ||
+			emailFromText(text) ||
+			dates?.checkinISO ||
+			dates?.checkoutISO ||
+			singleGregorianDateFromText(text, known) ||
+			standaloneSingleDateFromText(text, known) ||
+			latestGuestMentionsDateish(text) ||
+			textMentionsRoomSelection(text) ||
+			roomCountOnlyFromText(text) ||
+			requestedBedCountFromText(text) ||
+			latestTextHasExplicitGuestCount(text) ||
+			peopleCountFromLine(text) ||
+			Object.keys(relationshipFacts).length ||
+			selfOnlyGuestCorrection ||
+			Object.keys(explicitGuestCountFactsFromText(text)).length
+	);
+}
+
+function confirmationQuestionRequestsReviewedBookingChange(value = "", known = {}) {
+	const text = String(value || "").trim();
+	if (!text || roomCapacityStatementOnly(text)) return false;
+	const normalized = normalizeIntentSearchTextRepaired(text)
+		.replace(/\s+/g, " ")
+		.trim();
+	const compact = normalized.replace(/\s+/g, "");
+	const changeCue =
+		/\b(?:change|update|modify|revise|switch|replace|use|make|move|set|put|correct|book|instead)\b/i.test(
+			normalized
+		) ||
+		/\b(?:can|could|would)\s+(?:you|we|(?:the\s+)?(?:check[ -]?in|checkout|phone|name|nationality|room|rooms|guest|guests|adult|adults|child|children))\b/i.test(
+			normalized
+		) ||
+		/(?:\u063a\u064a\u0631|\u0623\u063a\u064a\u0631|\u0627\u063a\u064a\u0631|\u0639\u062f\u0644|\u0623\u0639\u062f\u0644|\u0627\u0639\u062f\u0644|\u0628\u062f\u0644|\u0623\u0628\u062f\u0644|\u0627\u0628\u062f\u0644|\u062e\u0644\u064a|\u0627\u062e\u0644\u064a|\u062d\u0637|\u0627\u0633\u062a\u062e\u062f\u0645|\u0645\u0645\u0643\u0646\u062a\u062e\u0644\u064a|\u064a\u0646\u0641\u0639\u062a\u062e\u0644\u064a|\u0628\u062f\u0644\u0627\u0644\u0649|\u0628\u062f\u0644\u0645\u0646)/iu.test(
+			compact
+		);
+	if (!changeCue) return false;
+	const dates = quickDateRange(text);
+	const identityFacts = bookingIdentityFactsFromText(text, {
+		allowName: true,
+		allowUnlabeledName: false,
+	});
+	const relationshipFacts = relationshipGuestFactsFromText(text, known);
+	const selfOnlyGuestCorrection =
+		/\b(?:only|just)\s+(?:me|myself)\b|\b(?:it\s+is|it'?s)\s+(?:only|just)\s+me\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0646\u0627\s*(?:\u0641\u0642\u0637|\u0644\u0648\u062d\u062f\u064a|\u0644\u0648\u062d\u062f\u0649)|\u0644\u0648\u062d\u062f\u064a\s*\u0641\u0642\u0637|\u0644\u0648\u062d\u062f\u0649\s*\u0641\u0642\u0637)/iu.test(
+			text
+		);
+	return Boolean(
+		Object.keys(identityFacts).length ||
+			emailFromText(text) ||
+			dates?.checkinISO ||
+			dates?.checkoutISO ||
+			singleGregorianDateFromText(text, known) ||
+			standaloneSingleDateFromText(text, known) ||
+			extractRoomSelectionsFromText(text).length ||
+			roomCountOnlyFromText(text) ||
+			requestedBedCountFromText(text) ||
+			latestTextHasExplicitGuestCount(text) ||
+			peopleCountFromLine(text) ||
+			Object.keys(relationshipFacts).length ||
+			selfOnlyGuestCorrection ||
+			Object.keys(explicitGuestCountFactsFromText(text)).length
+	);
+}
+
+function confirmationTurnHasUnresolvedQuestion(sc = {}, latestGuest = null) {
+	if (!latestGuest) return false;
+	const text = String(latestGuest.message || "").trim();
+	if (!text) return false;
+	return Boolean(
+		/[?\u061f]/u.test(text) ||
+			latestGuestAsksHotelFactOrService(latestGuest) ||
+			hotelFactQuestionForCurrentTurn(sc, latestGuest) ||
+			latestGuestAsksPayAtHotel(text) ||
+			/\b(?:what|how|where|when|why)\b/i.test(
+				text
+			) ||
+			/(?:^|\b(?:but|and)\b|[.!])\s*(?:does|do|is|are|can|could|would|will)\b/i.test(
+				text
+			) ||
+			/(?:\u0647\u0644|\u0645\u0627\u0630\u0627|\u0627\u064a\u0647|\u0625\u064a\u0647|\u0643\u064a\u0641|\u0641\u064a\u0646|\u0623\u064a\u0646|\u0645\u062a\u0649|\u0644\u064a\u0647|\u0644\u0645\u0627\u0630\u0627)/u.test(
+				text
+			)
+	);
+}
+
+function confirmationTurnDefersBooking(value = "") {
+	const text = normalizeIntentSearchText(repairMojibakeText(value))
+		.replace(/[.!?\u061f\u060c,]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!text) return false;
+	return (
+		/\b(?:wait|hold on|give me (?:a )?(?:moment|minute)|one (?:moment|minute)|let me think|maybe later|not now|later)\b/i.test(
+			text
+		) ||
+		/(?:\u0627\u0646\u062a\u0638\u0631|\u0627\u0633\u062a\u0646\u0649|\u0627\u0633\u062a\u0646\u064a|\u0627\u0635\u0628\u0631|\u0644\u062d\u0638\u0629|\u062f\u0642\u064a\u0642\u0629|\u062e\u0644\u064a\u0646\u064a\u0627\u0641\u0643\u0631|\u062f\u0639\u0646\u064a\u0627\u0641\u0643\u0631|\u0628\u0639\u062f\u064a\u0646|\u0644\u0627\u062d\u0642\u0627|\u0645\u0634\u062f\u0644\u0648\u0642\u062a\u064a|\u0645\u0648\u0627\u0644\u0627\u0646|\u0644\u064a\u0633\u0627\u0644\u0627\u0646)/iu.test(
+			text.replace(/\s+/g, "")
+		)
+	);
+}
+
 function guestConfirmedAfterLatestReview(sc = {}) {
 	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
 	let latestReviewIndex = -1;
@@ -9166,6 +9439,18 @@ function recentHotelFactReplyHadBookingBridge(sc = {}, latestGuest = null) {
 	return false;
 }
 
+function latestGuestConfirmsAfterOfficialReview(sc = {}, latestGuest = null) {
+	if (!latestGuest || !conversationHasAiAction(sc, "review_reservation")) return false;
+	const text = String(latestGuest.message || "");
+	const action = cleanString(latestGuest.clientAction, 80).toLowerCase();
+	if (latestGuestRejectsQuoteOrSelection(text)) return false;
+	return Boolean(
+		guestConfirms(text, action) ||
+			guestExplicitlyRequestsBookingSubmit(text, action) ||
+			guestRequestsConfirmationDelivery(text, action)
+	);
+}
+
 function hotelFactReplyAlreadyHasBookingBridge(reply = "") {
 	const text = normalizeIntentSearchText(reply)
 		.replace(/\s+/g, " ")
@@ -10780,6 +11065,7 @@ function orchestratorContractPrompt() {
 		'- Use action="check_alternatives" when the guest asks for nearby dates/options after an unavailable or challenged quote.',
 		'- Use action="send_review" only when all required booking facts are known and the orchestrator should prepare review facts for you to write after the tool result.',
 		'- Use action="submit_reservation" only after the guest confirms the official server review or presses the reservation button.',
+		'- A confirmation that also contains a question, hesitation, wait request, or "yes, but" condition is not final submission consent. Answer the question or acknowledge the pause with action="reply" and do not submit. Require a later pure explicit confirmation before creating the reservation.',
 		'- Use action="lookup_reservation", "update_reservation", or "cancel_reservation" only for existing-reservation requests.',
 		'- Use action="escalate" only for human-needed cases, and "close_case" only when the guest is clearly finished.',
 		`- If you choose action="escalate", or the guest explicitly asks for a human, manager, reception, or escalation, your customer-facing reply must include WhatsApp/call contact ${RESERVATION_CHANGE_CONTACT_PHONE} and WhatsApp link ${RESERVATION_CHANGE_CONTACT_WHATSAPP}. Say the team will help or review the issue; do not escalate with a contactless reply.`,
@@ -11369,9 +11655,11 @@ function priorityBrainRules({
 		"Match the guest's language/dialect, stay concise and professional, use natural fact-based sales framing, and never use emojis or invent facts.",
 		"Exact price rule: use get_quote for final pricing. Each occupied night's positive PMS guest calendar price is exact; a missing in-horizon row uses that exact room's positive basePrice with nothing added. Never add root price, cost, margin, or commission. Cross-month totals are summed night by night. A vector monthly average is guidance only.",
 		"Inventory rule: ignore existing/historical reservation occupancy, but strictly enforce explicit blocked nights, the 2027-04-15 pricing horizon, active/sellable status, verified capacity, and each exact roomId's physical totalSellableUnits. Never quote or book zero-count, zero-base, inactive, unknown-capacity, or outside-horizon inventory.",
+		`Large-request safety: chat can process at most ${MAX_AI_ROOM_COUNT} total rooms in one request. Never truncate a larger requested count. Use reply/escalation and provide the public administration contact for a larger group.`,
 		"Keep exact roomIds distinct. For six guests choose an actual verified six-person/six-bed configuration when it is the smallest fit, even if its broad PMS type is familyRooms. One guest may use a double when no single exists. If requested units exceed one exact configuration, keep its physical units, propose the next suitable configuration(s), state requested versus recommended mixes, and require explicit guest agreement before review or creation.",
 		"File search may answer current hotel facts/descriptions/monthly guidance only from this hotel's ready vector. Tool result and deterministic get_quote override retrieval for exact price, room mix, blocked dates, reservation status, and final actions.",
 		"Booking gate: exact quote first. Required facts are dates, exact room selection, quote, confirmed full name, confirmed phone, confirmed nationality, adults, and children (zero is valid); email is optional. Use send_review only when required facts are complete. The review is not a booking. Use submit_reservation only after the guest explicitly confirms the official review. If final revalidation changes price, dates, blocks, capacity, physical mix, or roomId, show a new quote/review and require confirmation again.",
+		"A confirmation turn containing any unresolved question, hesitation, wait/later request, or yes-but condition must use reply and must not create the reservation. Answer or acknowledge it first, preserve the reviewed facts unchanged, and wait for a later pure explicit confirmation.",
 		"Existing-reservation mode is separate. Use lookup/update/cancel actions only for an existing booking. Ask for its confirmation number; if unavailable, ask exact reservation name plus check-in and checkout. Never treat a phone number as a confirmation number and never invent a reservation number/status.",
 		"Payment rule: pay at hotel/on arrival is allowed. Recommend the payment link, including an available partial payment, because completed payment fully secures the reserved spot; online payment is recommended, not mandatory. A confirmed unpaid reservation remains valid and the hotel may contact the guest to confirm arrival. Never invent a deposit or request card data.",
 		`Public administration contact when contact/escalation/arrival coordination is appropriate: ${RESERVATION_CHANGE_CONTACT_PHONE} and ${RESERVATION_CHANGE_CONTACT_WHATSAPP}. Never reveal a Saudi reception/front-desk number unless a lookup_reservation tool result verifies a paid booking and explicitly allows/provides it.`,
@@ -12324,6 +12612,18 @@ function sameHotelAvailabilitySummary(hotel = {}, checkinISO = "", checkoutISO =
 
 async function quoteTool(sc = {}, known = {}) {
 	const caseId = caseIdText(sc);
+	if (knownRoomCountRequestLimitExceeded(known)) {
+		return {
+			ok: true,
+			available: false,
+			code: "room_count_limit_exceeded",
+			maxRooms: MAX_AI_ROOM_COUNT,
+			requestedRoomSelections: Array.isArray(known.roomSelections)
+				? known.roomSelections
+				: [],
+			currency: known.currency || "SAR",
+		};
+	}
 	const dates = eachNight(known.checkinISO, known.checkoutISO);
 	logTurnStage(caseId, "quote_dates_ready", {
 		nights: dates.length,
@@ -14105,7 +14405,7 @@ function quoteReplyRoomCountConflictsWithTool(reply = "", toolResult = {}) {
 	if (!text) return false;
 	const roomCountMatches = Array.from(
 		text.matchAll(
-			/(?:^|[\s:])0?(\d{1,2})\s*(?:[x×]\s*)?(?:rooms?|units?|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)(?=$|[\s:])/giu
+			/(?:^|[\s:])0?(\d{1,3})\s*(?:[x×]\s*)?(?:rooms?|units?|\u063a\u0631\u0641|\u063a\u0631\u0641\u0629|\u063a\u0631\u0641\u0647|\u0627\u0648\u0636\u0629|\u0627\u0648\u0636\u0647)(?=$|[\s:])/giu
 		)
 	);
 	return roomCountMatches.some((match) => {
@@ -14698,6 +14998,9 @@ function buildRepeatedReviewMessage(sc = {}, known = {}, hotel = {}) {
 function buildQuoteFallbackMessage(sc = {}, known = {}, result = {}, hotel = {}) {
 	const languageCode = activeLanguageCode(sc, known);
 	const ar = /^ar\b/i.test(languageCode);
+	if (result.code === "room_count_limit_exceeded") {
+		return buildRoomCountLimitMessage(sc, known, null);
+	}
 	const quote = asObject(result.quote);
 	const quoteRoomLabel = quoteRoomLinesText(quote, known.roomTypeKey, languageCode);
 	const roomLabel =
@@ -15188,6 +15491,74 @@ function buildPostConfirmationPayAtHotelMessage(sc = {}, known = {}, latestGuest
 		`Yes, you can pay at the hotel on arrival.${confirmationText}`,
 		"Please show the confirmation number at reception. The payment link in the confirmation message is also available if you prefer to pay online.",
 		"We recommend using the payment link, even for a partial payment/deposit when available, because it best secures the room and confirms arrival seriousness. If you do not pay online now, your confirmed reservation remains valid, and the hotel may contact you only to confirm arrival.",
+	].join("\n");
+}
+
+function buildReviewedBookingPendingSuffix(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	return ar
+		? "\u0644\u0645 \u0623\u0646\u0634\u0626 \u0627\u0644\u062d\u062c\u0632 \u0628\u0639\u062f\u060c \u0648\u062a\u0641\u0627\u0635\u064a\u0644 \u0627\u0644\u0645\u0631\u0627\u062c\u0639\u0629 \u0645\u0627 \u0632\u0627\u0644\u062a \u062c\u0627\u0647\u0632\u0629 \u0643\u0645\u0627 \u0647\u064a. \u0639\u0646\u062f\u0645\u0627 \u062a\u0643\u0648\u0646 \u0645\u0633\u062a\u0639\u062f\u0627\u064b\u060c \u0627\u0643\u062a\u0628 \"\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632\" \u0644\u0623\u0639\u064a\u062f \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u0627\u0644\u0633\u0639\u0631 \u0648\u062a\u0648\u0632\u064a\u0639 \u0627\u0644\u063a\u0631\u0641 \u062b\u0645 \u0623\u0646\u0634\u0626\u0647."
+		: 'I have not created the reservation yet, and the reviewed details remain ready as shown. When you are ready, say "Complete booking" so I can revalidate the exact price and room mix before creating it.';
+}
+
+function buildReviewedBookingDeferredMessage(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	const opening = ar
+		? `\u0644\u0627 \u0645\u0634\u0643\u0644\u0629 \u064a\u0627 ${arabicGuestAddress(sc, known, latestGuest?.message || "")}\u060c \u062e\u0630 \u0648\u0642\u062a\u0643.`
+		: `${guestDisplayName(sc)}, no problem—take your time.`;
+	return [opening, buildReviewedBookingPendingSuffix(sc, known, latestGuest)].join("\n");
+}
+
+function buildPreBookingPayAtHotelMessage(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	const policy = ar
+		? [
+				"\u0646\u0639\u0645\u060c \u064a\u0645\u0643\u0646\u0643 \u0627\u0644\u062f\u0641\u0639 \u0641\u064a \u0627\u0644\u0641\u0646\u062f\u0642 \u0639\u0646\u062f \u0627\u0644\u0648\u0635\u0648\u0644\u060c \u0648\u0627\u0644\u062f\u0641\u0639 \u0623\u0648\u0646\u0644\u0627\u064a\u0646 \u0644\u064a\u0633 \u0625\u0644\u0632\u0627\u0645\u064a\u0627\u064b.",
+				"\u0648\u0646\u0646\u0635\u062d \u0628\u0631\u0627\u0628\u0637 \u0627\u0644\u062f\u0641\u0639\u060c \u062d\u062a\u0649 \u0644\u062f\u0641\u0639 \u062c\u0632\u0621 \u0625\u0630\u0627 \u0643\u0627\u0646 \u0645\u062a\u0627\u062d\u0627\u064b\u060c \u0644\u0623\u0646 \u0627\u0644\u062f\u0641\u0639 \u064a\u062b\u0628\u062a \u0627\u0644\u063a\u0631\u0641\u0629 \u0628\u0634\u0643\u0644 \u0623\u0641\u0636\u0644.",
+		  ].join("\n")
+		: [
+				"Yes, you can pay at the hotel on arrival; online payment is not mandatory.",
+				"We still recommend the payment link, including a partial payment when available, because completed payment secures the room more firmly.",
+		  ].join("\n");
+	return [policy, buildReviewedBookingPendingSuffix(sc, known, latestGuest)].join("\n");
+}
+
+function buildReviewedBookingQuestionFallback(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	const answer = ar
+		? "\u0623\u0631\u064a\u062f \u0623\u0646 \u0623\u062c\u064a\u0628 \u0639\u0646 \u0633\u0624\u0627\u0644\u0643 \u0642\u0628\u0644 \u0625\u0646\u0634\u0627\u0621 \u0627\u0644\u062d\u062c\u0632\u060c \u0644\u0643\u0646\u0646\u064a \u0644\u0645 \u0623\u062a\u0645\u0643\u0646 \u0645\u0646 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u0627\u0644\u062a\u0641\u0635\u064a\u0644 \u0627\u0644\u0645\u0637\u0644\u0648\u0628 \u0628\u0623\u0645\u0627\u0646. \u0641\u0636\u0644\u0627\u064b \u0623\u0639\u062f \u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0633\u0624\u0627\u0644 \u0648\u0633\u0623\u062c\u064a\u0628\u0643 \u0639\u0644\u064a\u0647 \u0645\u0628\u0627\u0634\u0631\u0629."
+		: "I want to answer your question before creating the reservation, but I could not verify that detail safely. Please repeat the question and I will answer it directly.";
+	return [answer, buildReviewedBookingPendingSuffix(sc, known, latestGuest)].join("\n");
+}
+
+function buildRoomCountLimitMessage(sc = {}, known = {}, latestGuest = null) {
+	const languageCode = activeLanguageCode(sc, known);
+	const ar =
+		/^ar\b/i.test(languageCode) ||
+		/[\u0600-\u06FF]/.test(String(latestGuest?.message || ""));
+	if (ar) {
+		return [
+			`\u0637\u0644\u0628\u0643 \u0623\u0643\u0628\u0631 \u0645\u0646 \u062d\u062f \u0627\u0644\u062d\u062c\u0632 \u0627\u0644\u0622\u0645\u0646 \u0639\u0628\u0631 \u0627\u0644\u0645\u062d\u0627\u062f\u062b\u0629 (${formatNumber(MAX_AI_ROOM_COUNT, languageCode)} \u063a\u0631\u0641\u0629). \u0644\u0645 \u0623\u062e\u0641\u0636 \u0627\u0644\u0639\u062f\u062f \u0648\u0644\u0645 \u0623\u0646\u0634\u0626 \u062d\u062c\u0632\u0627\u064b.`,
+			`\u0644\u062a\u0631\u062a\u064a\u0628 \u0647\u0630\u0627 \u0627\u0644\u0637\u0644\u0628 \u0627\u0644\u0643\u0628\u064a\u0631 \u0628\u062f\u0642\u0629\u060c \u062a\u0648\u0627\u0635\u0644 \u0645\u0639 \u0641\u0631\u064a\u0642 \u0627\u0644\u062d\u062c\u0648\u0632\u0627\u062a \u0648\u0627\u062a\u0633\u0627\u0628 \u0623\u0648 \u0627\u062a\u0635\u0644 \u0639\u0644\u0649 ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
+			`\u0631\u0627\u0628\u0637 \u0627\u0644\u0648\u0627\u062a\u0633\u0627\u0628: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
+		].join("\n");
+	}
+	return [
+		`Your request exceeds the safe chat-booking limit of ${MAX_AI_ROOM_COUNT} rooms. I have not reduced the requested count and have not created a reservation.`,
+		`Please arrange this large request with our reservations team by WhatsApp or phone at ${RESERVATION_CHANGE_CONTACT_PHONE}.`,
+		`WhatsApp: ${RESERVATION_CHANGE_CONTACT_WHATSAPP}`,
 	].join("\n");
 }
 
@@ -19295,6 +19666,8 @@ async function sendBrainToolReplyFromOpenAI({
 				? "Your previous reservation confirmation reply was not sent because it omitted required server confirmation details. Return the final reservation confirmation from OpenAI only. If toolResult.requiredConfirmationLines exists, copy every line exactly as plain text. Otherwise include the exact confirmation number, exact reservation details/receipt URL, and exact payment URL from toolResult. Do not say there is no payment link."
 				: validation === "review_claimed_confirmed_before_submit"
 				? "Your previous review reply was not sent because it claimed the booking/reservation was already confirmed before final submission. Return the official pre-submission review from OpenAI only. Use the exact review facts, do not say confirmed/created/completed/finalized, and ask the guest to confirm if everything is correct."
+				: validation === "official_review_question_claimed_created"
+				? "Your previous answer was not sent because it claimed the reservation was already booked, created, or confirmed. Return action=reply only. Answer the guest's question from toolResult and Known facts, state that the reservation has not been created, do not change reviewed facts, and do not claim any booking action occurred."
 				: validation === "review_formatting_unclear"
 				? "Your previous review reply was not sent because the booking facts were compressed or hard to read. Return the official pre-submission review from OpenAI only. Put each main fact on its own separate line or bullet: name, phone, nationality, room(s), guests, dates, nights, total, then the confirmation question. Do not say the booking is already confirmed."
 				: validation === "review_phone_changed"
@@ -19469,6 +19842,12 @@ async function sendBrainToolReplyFromOpenAI({
 		}
 		if (toolResult?.tool === "get_quote" && reviewReplyClaimsBookingConfirmed(text)) {
 			return "quote_claimed_confirmed_before_submit";
+		}
+		if (
+			toolResult?.tool === "official_review_question" &&
+			reviewReplyClaimsBookingConfirmed(text)
+		) {
+			return "official_review_question_claimed_created";
 		}
 		if (quoteReplyUsesPrematureReviewLanguage(text, toolResult)) {
 			return "quote_premature_review_language";
@@ -20308,6 +20687,41 @@ function reviewedQuoteForSubmit(known = {}) {
 	return asObject(known.quote);
 }
 
+function officialReviewCheckpointUsable(known = {}) {
+	const review = asObject(known.officialReviewSnapshot);
+	const reviewedQuote = asObject(review.reviewedQuote);
+	const reviewSelections = normalizeRoomSelections(review.roomSelections);
+	const quoteSelections = quoteRoomSelections(reviewedQuote);
+	return Boolean(
+		Number(review.version || 0) >= 2 &&
+			officialReviewSnapshotUsable(review) &&
+			reviewedQuoteSnapshotUsable(reviewedQuote) &&
+			reviewedQuote.checkinISO === review.checkinISO &&
+			reviewedQuote.checkoutISO === review.checkoutISO &&
+			roomSelectionKey(quoteSelections) === roomSelectionKey(reviewSelections) &&
+			quoteRoomCount(reviewedQuote) === roomSelectionsTotal(reviewSelections)
+	);
+}
+
+function forceOfficialReviewSubmitDecision(decision = {}) {
+	const normalized = normalizeDecision(decision);
+	return normalizeDecision({
+		...normalized,
+		action: "submit_reservation",
+		reply: "",
+		// The official review is an immutable server checkpoint. A confirmation
+		// turn cannot also mutate its dates, identity, room mix, or quote through
+		// model-extracted facts; a real correction must go through a new review.
+		facts: {},
+		memory: {
+			...decisionMemory(normalized),
+			changedFields: [],
+			missingFields: [],
+		},
+		reason: normalized.reason || "official_review_confirmation",
+	});
+}
+
 function officialReviewSnapshotUsable(snapshot = {}) {
 	const review = asObject(snapshot);
 	const hasRoom =
@@ -20669,6 +21083,12 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 	submitKnown = applySelectedSameDateRoomOptionLock(
 		applyOfficialReviewSnapshotForSubmit(submitKnown)
 	);
+	if (!officialReviewCheckpointUsable(submitKnown)) {
+		delete submitKnown.reviewSentAt;
+		delete submitKnown.officialReviewSnapshot;
+		await saveKnownFacts(caseId, submitKnown);
+		return handleBrainReview(io, sc, hotel, submitKnown, latestGuest, typingStartedAt);
+	}
 	const reviewedQuote = reviewedQuoteForSubmit(submitKnown);
 	const refreshedQuoteResult = await quoteTool(sc, submitKnown);
 	if (!refreshedQuoteResult.available || !refreshedQuoteResult.quote) {
@@ -20868,14 +21288,56 @@ async function executeBrainFirstDecision({
 	const latestAction = cleanString(latestGuest?.clientAction, 80).toLowerCase();
 	const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
 	const previousAiAction = String(previousAi?.clientAction || "").toLowerCase();
-	const officialReviewConfirmation = guestPressedOfficialReviewConfirmation(
+	const officialReviewConfirmationIntent = guestPressedOfficialReviewConfirmation(
 		latestGuest,
 		previousAi
 	) ||
 		(Boolean(latestGuest) &&
 			!knownHasCreatedReservation(known) &&
 			!conversationHasAiAction(sc, "reservation_confirmed") &&
-			guestConfirmedAfterLatestReview(sc));
+			latestGuestConfirmsAfterOfficialReview(sc, latestGuest));
+	const officialReviewRawSideQuestionTurn = Boolean(
+		officialReviewConfirmationIntent &&
+			confirmationTurnHasUnresolvedQuestion(sc, latestGuest)
+	);
+	const officialReviewDeferredTurn = Boolean(
+		officialReviewConfirmationIntent && confirmationTurnDefersBooking(latestText)
+	);
+	const confirmationBurstText =
+		latestGuestBurstMessages(sc, latestGuest)
+			.map((entry) => cleanDisplayString(entry?.message, 700))
+			.filter(Boolean)
+			.join("\n") || latestText;
+	const officialReviewQuestionCorrectionTurn = Boolean(
+		officialReviewRawSideQuestionTurn &&
+			!officialReviewDeferredTurn &&
+			confirmationQuestionRequestsReviewedBookingChange(confirmationBurstText, known)
+	);
+	const officialReviewSideQuestionTurn = Boolean(
+		officialReviewRawSideQuestionTurn && !officialReviewQuestionCorrectionTurn
+	);
+	const officialReviewConfirmationSignal = Boolean(
+		officialReviewConfirmationIntent &&
+			!officialReviewSideQuestionTurn &&
+			!officialReviewDeferredTurn
+	);
+	const officialReviewCheckpointAtTurnStart = officialReviewCheckpointUsable(known);
+	const officialReviewCorrectionTurn = Boolean(
+		officialReviewConfirmationSignal &&
+			officialReviewCheckpointAtTurnStart &&
+			confirmationTurnContainsReviewedBookingFacts(confirmationBurstText, known)
+	);
+	const officialReviewConfirmation = Boolean(
+		officialReviewConfirmationSignal &&
+			officialReviewCheckpointAtTurnStart &&
+			!officialReviewCorrectionTurn
+	);
+	const officialReviewRequiresRenewedReview = Boolean(
+		officialReviewConfirmationSignal && !officialReviewCheckpointAtTurnStart
+	);
+	const officialReviewSnapshotAtTurnStart = officialReviewConfirmation
+		? cloneKnownFacts(known.officialReviewSnapshot)
+		: {};
 	const latestClarifiesRequiredBookingDetail =
 		latestGuestAsksRequiredBookingDetailClarification(latestText);
 	const contextualHotelFactQuestion = latestGuest
@@ -20883,12 +21345,46 @@ async function executeBrainFirstDecision({
 		: "";
 	known = applySelectedSameDateRoomOptionLock(known);
 	let nextDecision = normalizeDecision(decision);
-	if (officialReviewConfirmation) {
+	if (knownRoomCountRequestLimitExceeded(asObject(nextDecision.facts))) {
+		const limitKnown = { ...known };
+		delete limitKnown.reviewSentAt;
+		delete limitKnown.officialReviewSnapshot;
+		await saveKnownFacts(key, limitKnown);
+		logTurnStage(key, "room_count_limit_exceeded_raw_brain_facts", {
+			maxRooms: MAX_AI_ROOM_COUNT,
+		});
+		await waitForTypingMinimum(typingStartedAt);
+		return sendAiMessage(io, sc, buildRoomCountLimitMessage(sc, limitKnown, latestGuest), {
+			latestGuest,
+			known: limitKnown,
+			clientAction: "room_count_limit_exceeded",
+			handoff: true,
+			handoffReason: "room_count_limit_exceeded",
+		});
+	}
+	if (officialReviewSideQuestionTurn || officialReviewDeferredTurn) {
 		nextDecision = normalizeDecision({
 			...nextDecision,
-			action: "submit_reservation",
+			action: "reply",
+			facts: {},
+			memory: {
+				...decisionMemory(nextDecision),
+				changedFields: [],
+			},
+			reason: officialReviewSideQuestionTurn
+				? "answer_compound_question_before_booking_submit"
+				: "guest_deferred_booking_submit",
+		});
+	} else if (officialReviewConfirmation) {
+		nextDecision = forceOfficialReviewSubmitDecision(nextDecision);
+	} else if (officialReviewCorrectionTurn || officialReviewRequiresRenewedReview) {
+		nextDecision = normalizeDecision({
+			...nextDecision,
+			action: "send_review",
 			reply: "",
-			reason: nextDecision.reason || "official_review_confirmation",
+			reason: officialReviewCorrectionTurn
+				? "official_review_confirmation_included_updated_facts"
+				: "official_review_checkpoint_requires_renewed_review",
 		});
 	}
 	if (
@@ -20963,6 +21459,10 @@ async function executeBrainFirstDecision({
 		latestText,
 		{ changedFields }
 	);
+	nextKnown = preserveConfirmedAdjustedRoomPlan(known, nextKnown, latestText, {
+		latestAction,
+		changedFields,
+	});
 	nextKnown = applySelectedSameDateRoomOptionLock(syncKnownFromQuote(nextKnown));
 	nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
 		fallbackKnown: known,
@@ -21173,8 +21673,19 @@ async function executeBrainFirstDecision({
 		return handleBrainLookup(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (officialReviewConfirmation) {
+		if (Object.keys(officialReviewSnapshotAtTurnStart).length) {
+			nextKnown.officialReviewSnapshot = officialReviewSnapshotAtTurnStart;
+			if (known.reviewSentAt) nextKnown.reviewSentAt = known.reviewSentAt;
+		}
 		nextKnown = applyOfficialReviewSnapshotForSubmit(nextKnown);
 		await saveKnownFacts(key, nextKnown);
+		const reviewedBaseline = reviewedQuoteForSubmit(nextKnown);
+		logTurnStage(key, "official_review_submit_baseline", {
+			snapshotVersion: Number(nextKnown.officialReviewSnapshot?.version || 0) || 0,
+			snapshotUsable: reviewedQuoteSnapshotUsable(reviewedBaseline),
+			currentQuotePresent: quoteHasContent(nextKnown.quote),
+			selectionKey: roomSelectionKey(quoteRoomSelections(reviewedBaseline)),
+		});
 		logOrchestratorDecision(
 			key,
 			"official_review_confirmation_submit",
@@ -21187,6 +21698,10 @@ async function executeBrainFirstDecision({
 	if (
 		latestGuest &&
 		!officialReviewConfirmation &&
+		!officialReviewCorrectionTurn &&
+		!officialReviewRequiresRenewedReview &&
+		!officialReviewSideQuestionTurn &&
+		!officialReviewDeferredTurn &&
 		guestExplicitlyRequestsBookingSubmit(latestText, latestAction) &&
 		previousAiLooksLikeOfficialReviewForSubmit(sc, latestGuest, previousAi) &&
 		!knownHasCreatedReservation(nextKnown) &&
@@ -21580,6 +22095,10 @@ async function executeBrainFirstDecision({
 			reason: "required_detail_clarification_requires_reply_guard",
 		});
 	}
+	nextKnown = preserveConfirmedAdjustedRoomPlan(known, nextKnown, latestText, {
+		latestAction,
+		changedFields,
+	});
 	const stayChangeSafeActions = new Set([
 		"get_quote",
 		"check_alternatives",
@@ -21780,6 +22299,10 @@ async function executeBrainFirstDecision({
 	nextKnown = filterInactiveRoomSelectionsForHotel(hotel, nextKnown, {
 		fallbackKnown: known,
 	}).known;
+	nextKnown = preserveConfirmedAdjustedRoomPlan(known, nextKnown, latestText, {
+		latestAction,
+		changedFields,
+	});
 	nextKnown = clearUntrustedEmailSkipped(nextKnown, sc, latestText, latestAction);
 	await saveKnownFacts(key, nextKnown);
 	logOrchestratorDecision(key, "execute_brain_decision", nextDecision, nextKnown);
@@ -21827,7 +22350,7 @@ async function executeBrainFirstDecision({
 	}
 	if (nextDecision.action === "submit_reservation") {
 		await waitForTypingMinimum(typingStartedAt);
-		return handleBrainSubmitReservation(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
+		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	if (nextDecision.action === "send_review" || nextDecision.action === "send_review_again") {
 		await saveKnownFacts(key, nextKnown);
@@ -21839,6 +22362,13 @@ async function executeBrainFirstDecision({
 		return handleBrainReview(io, sc, hotel, nextKnown, latestGuest, typingStartedAt);
 	}
 	let reply = nextDecision.reply || "";
+	if (!reply) {
+		if (officialReviewDeferredTurn) {
+			reply = buildReviewedBookingDeferredMessage(sc, nextKnown, latestGuest);
+		} else if (officialReviewSideQuestionTurn) {
+			reply = buildReviewedBookingQuestionFallback(sc, nextKnown, latestGuest);
+		}
+	}
 	if (!reply) {
 		console.error("[aiagent] brain decision blocked: OpenAI reply required", {
 			caseId: key,
@@ -22126,16 +22656,159 @@ async function runBrainFirstTurn({
 	try {
 		const latestText = String(latestGuest?.message || "");
 		const latestAction = cleanString(latestGuest?.clientAction, 80).toLowerCase();
-		const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
-		if (
-			latestGuest &&
-			(latestAction === "place_reservation" ||
-				(previousAi?.clientAction === "review_reservation" &&
-					guestConfirms(latestText, latestAction)))
-		) {
-			await saveKnownFacts(key, known);
+		if (latestGuest && roomCountRequestLimitExceeded(latestText)) {
+			const limitKnown = { ...known };
+			delete limitKnown.reviewSentAt;
+			delete limitKnown.officialReviewSnapshot;
+			await saveKnownFacts(key, limitKnown);
+			logTurnStage(key, "room_count_limit_exceeded_pre_brain", {
+				maxRooms: MAX_AI_ROOM_COUNT,
+			});
 			await waitForTypingMinimum(typingStartedAt);
-			return submitReservationForCase(io, key);
+			return sendAiMessage(io, sc, buildRoomCountLimitMessage(sc, limitKnown, latestGuest), {
+				latestGuest,
+				known: limitKnown,
+				clientAction: "room_count_limit_exceeded",
+				handoff: true,
+				handoffReason: "room_count_limit_exceeded",
+			});
+		}
+		const previousAi = previousAiEntryBeforeLatestGuest(sc, latestGuest);
+		const officialReviewConfirmationIntent = Boolean(
+			latestGuest &&
+				(guestPressedOfficialReviewConfirmation(latestGuest, previousAi) ||
+					(!knownHasCreatedReservation(known) &&
+						!conversationHasAiAction(sc, "reservation_confirmed") &&
+						latestGuestConfirmsAfterOfficialReview(sc, latestGuest)))
+		);
+		const officialReviewRawSideQuestionTurn = Boolean(
+			officialReviewConfirmationIntent &&
+				confirmationTurnHasUnresolvedQuestion(sc, latestGuest)
+		);
+		const officialReviewDeferredTurn = Boolean(
+			officialReviewConfirmationIntent && confirmationTurnDefersBooking(latestText)
+		);
+		const confirmationBurstText =
+			latestGuestBurstMessages(sc, latestGuest)
+				.map((entry) => cleanDisplayString(entry?.message, 700))
+				.filter(Boolean)
+				.join("\n") || latestText;
+		const officialReviewQuestionCorrectionTurn = Boolean(
+			officialReviewRawSideQuestionTurn &&
+				!officialReviewDeferredTurn &&
+				confirmationQuestionRequestsReviewedBookingChange(confirmationBurstText, known)
+		);
+		const officialReviewSideQuestionTurn = Boolean(
+			officialReviewRawSideQuestionTurn && !officialReviewQuestionCorrectionTurn
+		);
+		const officialReviewConfirmationSignal = Boolean(
+			officialReviewConfirmationIntent &&
+				!officialReviewSideQuestionTurn &&
+				!officialReviewDeferredTurn
+		);
+		const officialReviewCorrectionTurn = Boolean(
+			officialReviewConfirmationSignal &&
+				confirmationTurnContainsReviewedBookingFacts(confirmationBurstText, known)
+		);
+		if (officialReviewDeferredTurn) {
+			await saveKnownFacts(key, known);
+			logTurnStage(key, "official_review_confirmation_deferred_pre_brain");
+			await waitForTypingMinimum(typingStartedAt);
+			return sendAiMessage(
+				io,
+				sc,
+				buildReviewedBookingDeferredMessage(sc, known, latestGuest),
+				{
+					latestGuest,
+					known,
+					clientAction: "booking_deferred",
+					quickReplies: reviewQuickReplies(activeLanguageCode(sc, known)),
+				}
+			);
+		}
+		if (officialReviewSideQuestionTurn && latestGuestAsksPayAtHotel(latestText)) {
+			await saveKnownFacts(key, known);
+			logTurnStage(key, "official_review_payment_question_pre_brain");
+			await waitForTypingMinimum(typingStartedAt);
+			return sendAiMessage(io, sc, buildPreBookingPayAtHotelMessage(sc, known, latestGuest), {
+				latestGuest,
+				known,
+				clientAction: "prebooking_payment_policy",
+				quickReplies: reviewQuickReplies(activeLanguageCode(sc, known)),
+			});
+		}
+		if (officialReviewSideQuestionTurn) {
+			const authoritativeAnswer =
+				buildAuthoritativeHotelServiceFactReply(sc, hotel, known, latestGuest) ||
+				(latestGuestAsksHotelFactOrService(latestGuest)
+					? buildHotelFactReplyMessage(sc, hotel, latestGuest, known)
+					: "");
+			const pendingSuffix = buildReviewedBookingPendingSuffix(sc, known, latestGuest);
+			const fallback = authoritativeAnswer
+				? [authoritativeAnswer, pendingSuffix].filter(Boolean).join("\n\n")
+				: buildReviewedBookingQuestionFallback(sc, known, latestGuest);
+			await saveKnownFacts(key, known);
+			logTurnStage(key, "official_review_question_pre_brain", {
+				authoritativeHotelFact: Boolean(authoritativeAnswer),
+			});
+			return sendBrainToolReplyFromOpenAI({
+				io,
+				sc,
+				hotel,
+				known,
+				latestGuest,
+				toolResult: {
+					tool: "official_review_question",
+					ok: true,
+					code: "question_before_booking_submit",
+					bookingState: "not_created",
+					latestQuestion: cleanDisplayString(latestText, 700),
+					hotelFacts: compactHotelFacts(hotel),
+					suggestedAnswer: authoritativeAnswer,
+					instruction:
+						"Answer every question in the latest guest message directly in the guest language using Hotel facts and Known facts only. The reservation has not been created. Do not submit it, do not change any reviewed booking fact, and do not restate the full official review. If a requested fact is unavailable, say that clearly instead of guessing. The server will append the exact pending-booking sentence, so do not add another booking call-to-action.",
+				},
+				clientAction: "review_question_answered",
+				quickReplies: reviewQuickReplies(activeLanguageCode(sc, known)),
+				fallback,
+				replySuffix: pendingSuffix,
+				preserveFallbackNumbers: true,
+				typingStartedAt,
+			});
+		}
+		if (officialReviewConfirmationSignal && !officialReviewCorrectionTurn) {
+			if (officialReviewCheckpointUsable(known)) {
+				logTurnStage(key, "official_review_confirmation_pre_brain_submit", {
+					snapshotVersion: Number(known.officialReviewSnapshot?.version || 0) || 0,
+					selectionKey: roomSelectionKey(
+						quoteRoomSelections(known.officialReviewSnapshot?.reviewedQuote)
+					),
+				});
+				await saveKnownFacts(key, known);
+				await waitForTypingMinimum(typingStartedAt);
+				return handleBrainSubmitReservation(
+					io,
+					sc,
+					hotel,
+					known,
+					latestGuest,
+					typingStartedAt
+				);
+			}
+			const renewedReviewKnown = { ...known };
+			delete renewedReviewKnown.reviewSentAt;
+			delete renewedReviewKnown.officialReviewSnapshot;
+			await saveKnownFacts(key, renewedReviewKnown);
+			logTurnStage(key, "official_review_confirmation_pre_brain_renew_review");
+			await waitForTypingMinimum(typingStartedAt);
+			return handleBrainReview(
+				io,
+				sc,
+				hotel,
+				renewedReviewKnown,
+				latestGuest,
+				typingStartedAt
+			);
 		}
 		if (latestGuest && latestGuestMentionsSplitCityItinerary(latestGuest?.message || "")) {
 			await saveKnownFacts(key, known);
@@ -22280,6 +22953,13 @@ async function submitReservationForCase(io, caseOrId) {
 		return { ok: false, reason: "split_stay_submit_handled" };
 	}
 	known = applySelectedSameDateRoomOptionLock(applyOfficialReviewSnapshotForSubmit(known));
+	if (!officialReviewCheckpointUsable(known)) {
+		delete known.reviewSentAt;
+		delete known.officialReviewSnapshot;
+		await saveKnownFacts(caseId, known);
+		await handleBrainReview(io, sc, hotel, known, latestGuest, 0);
+		return { ok: false, reason: "official_review_required" };
+	}
 	const reviewedQuote = reviewedQuoteForSubmit(known);
 	const refreshedQuoteResult = await quoteTool(sc, known);
 	if (!refreshedQuoteResult.available || !refreshedQuoteResult.quote) {
@@ -23468,7 +24148,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		guestConfirmedAfterLatestReview(sc) &&
+		latestGuestConfirmsAfterOfficialReview(sc, latestGuest) &&
 		!knownHasCreatedReservation(known) &&
 		!conversationHasAiAction(sc, "reservation_confirmed") &&
 		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
@@ -23729,7 +24409,7 @@ async function planTurn(io, supportCaseOrId) {
 	}
 	if (
 		latestGuest &&
-		guestConfirmedAfterLatestReview(sc) &&
+		latestGuestConfirmsAfterOfficialReview(sc, latestGuest) &&
 		!knownHasCreatedReservation(known) &&
 		!conversationHasAiAction(sc, "reservation_confirmed") &&
 		(quoteMatchesKnown(known) || splitStayQuoteMatchesKnown(known)) &&
@@ -24670,6 +25350,8 @@ const exportedOrchestrator = {
 		requestedBedCountFromText,
 		quoteRoomCount,
 		roomCountOnlyFromText,
+		roomCountRequestLimitExceeded,
+		knownRoomCountRequestLimitExceeded,
 		roomCountCorrectionFromText,
 		nightsCountFromText,
 		mentionsExplicitReservationIdentifier,
@@ -24737,6 +25419,11 @@ const exportedOrchestrator = {
 		latestGuestAsksRoomPhotos,
 		latestGuestAsksPayAtHotel,
 		buildPostConfirmationPayAtHotelMessage,
+		buildReviewedBookingPendingSuffix,
+		buildReviewedBookingDeferredMessage,
+		buildPreBookingPayAtHotelMessage,
+		buildReviewedBookingQuestionFallback,
+		buildRoomCountLimitMessage,
 		replyContradictsPayAtHotelPolicy,
 		replyAffirmsPayAtHotelPolicy,
 		paymentAtHotelReplyNeedsCorrection,
@@ -24759,6 +25446,7 @@ const exportedOrchestrator = {
 		guestRequestsConfirmationDelivery,
 		knownHasReservationConfirmation,
 		guestConfirmedAfterLatestReview,
+		latestGuestConfirmsAfterOfficialReview,
 		latestGuestRejectsQuoteOrSelection,
 		latestGuestContinuesAfterQuote,
 		latestGuestAsksHotelFactOnly,
@@ -24785,6 +25473,8 @@ const exportedOrchestrator = {
 		hotelFactReplyHasRawBookingNumberDump,
 		buildAuthoritativeHotelServiceFactReply,
 		restoreStaySelectionForNonStayTurn,
+		latestTurnExplicitlyChangesRoomPlan,
+		preserveConfirmedAdjustedRoomPlan,
 		hotelFactQuickReplies,
 		hotelFactQuickRepliesWithBookingCheckpoint,
 		shouldAnswerHotelFactNow,
@@ -24868,6 +25558,10 @@ const exportedOrchestrator = {
 		replyContainsEmoji,
 		stripReplyEmoji,
 		guestPressedOfficialReviewConfirmation,
+		confirmationTurnContainsReviewedBookingFacts,
+		confirmationQuestionRequestsReviewedBookingChange,
+		confirmationTurnHasUnresolvedQuestion,
+		confirmationTurnDefersBooking,
 		knownHasCreatedReservation,
 		replyInvitesConfirmationAction,
 		quoteUnavailableQuickReplies,
@@ -24898,6 +25592,8 @@ const exportedOrchestrator = {
 		reviewedQuoteSnapshotFromKnown,
 		reviewedQuoteSnapshotUsable,
 		reviewedQuoteForSubmit,
+		officialReviewCheckpointUsable,
+		forceOfficialReviewSubmitDecision,
 		buildStayClarificationMessage,
 		arabicFirstNameFromLatinName,
 		arabicGuestAddress,

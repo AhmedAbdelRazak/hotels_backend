@@ -23,6 +23,7 @@ const {
 const {
 	markReservationPendingConfirmation,
 } = require("../../services/pendingConfirmationPolicy");
+const { MAX_AI_ROOM_COUNT } = require("./limits");
 const {
 	dispatchReservationConfirmation,
 	reservationPublicLinks,
@@ -443,6 +444,10 @@ function validateRequiredGuestDetails(slots = {}) {
 	if (missing.length) {
 		throw new Error(`AI reservation is missing required guest details: ${missing.join(", ")}.`);
 	}
+	const rooms = Math.max(1, Math.floor(normalizedGuestCount(slots.rooms, 1)));
+	if (rooms > MAX_AI_ROOM_COUNT) {
+		throw new Error(`AI reservation room count exceeds the supported maximum (${MAX_AI_ROOM_COUNT}).`);
+	}
 	return {
 		name,
 		phone,
@@ -450,7 +455,7 @@ function validateRequiredGuestDetails(slots = {}) {
 		nationality: asciiize(nationality).trim() || nationality,
 		adults,
 		children,
-		rooms: Math.max(1, normalizedGuestCount(slots.rooms, 1)),
+		rooms,
 	};
 }
 
@@ -514,18 +519,29 @@ function buildPickedRoomsType({ room, dailyRows, count = 1 }) {
 	});
 
 	// Flatten one object per room count
-	return Array.from({ length: Math.max(1, Number(count)) }, () => oneEntry());
+	return Array.from({ length: roomSelectionCount(count, 1) }, () => oneEntry());
 }
 
 function roomSelectionCount(value, fallback = 1) {
 	const number = Number(String(value ?? "").replace(/[^\d.-]/g, ""));
 	if (!Number.isFinite(number)) return fallback;
-	return Math.min(50, Math.max(1, Math.floor(number)));
+	const count = Math.max(1, Math.floor(number));
+	if (count > MAX_AI_ROOM_COUNT) {
+		throw new Error(`AI reservation room selection exceeds the supported maximum (${MAX_AI_ROOM_COUNT}).`);
+	}
+	return count;
 }
 
 function buildPickedRoomsTypeFromQuote({ quoteData = {}, room = null, count = 1 }) {
 	const quoteRooms = Array.isArray(quoteData.rooms) ? quoteData.rooms : [];
 	if (quoteRooms.length) {
+		const requestedTotal = quoteRooms.reduce(
+			(total, line = {}) => total + roomSelectionCount(line.count, 1),
+			0
+		);
+		if (requestedTotal > MAX_AI_ROOM_COUNT) {
+			throw new Error(`AI reservation room selections exceed the supported maximum (${MAX_AI_ROOM_COUNT}).`);
+		}
 		return quoteRooms.flatMap((line = {}) => {
 			const lineQuote = line.quote || {};
 			const lineRoom = line.room || lineQuote.room || null;
@@ -2559,6 +2575,8 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 	exportedActions.__test = {
 		buildPickedRoomsType,
 		buildPickedRoomsTypeFromQuote,
+		roomSelectionCount,
+		validateRequiredGuestDetails,
 		sumPickedRooms,
 		usableFullName,
 		looksLikeReservationActionName,
