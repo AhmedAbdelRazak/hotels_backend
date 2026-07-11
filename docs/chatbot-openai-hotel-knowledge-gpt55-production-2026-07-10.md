@@ -253,6 +253,13 @@ These small canaries show no immediate latency regression, but the production
 10-scenario run is the acceptance gate for the requested 20–40 second guest-turn
 range.
 
+Official implementation references used for this change:
+
+- GPT-5.5 model: <https://developers.openai.com/api/docs/models/gpt-5.5>
+- Reasoning guidance: <https://developers.openai.com/api/docs/guides/reasoning>
+- File search: <https://developers.openai.com/api/docs/guides/tools-file-search>
+- Prompt caching: <https://developers.openai.com/api/docs/guides/prompt-caching>
+
 ## Preserved conversation and policy rules
 
 - Planner/brain-first orchestration remains in place.
@@ -272,10 +279,39 @@ range.
   confirmation numbers, reservation details links, and payment links remain
   protected.
 
+## Final consent and large-inventory hardening
+
+The final production pass added deterministic protection around the exact quote
+and physical room plan:
+
+- An official review stores a version-2 checkpoint containing exact stay dates,
+  stable room IDs and counts, nights, total rooms, grand total, average price,
+  currency, per-night prices, and room-line prices.
+- Reservation submission is allowed only after the latest guest turn gives pure
+  consent to that usable checkpoint. An older consent message cannot be reused.
+- A confirmation combined with a question, correction, deferral, or payment
+  question does not create a reservation. The question is answered and the
+  guest must confirm again afterward.
+- An arbitrary model-produced `submit_reservation` action cannot bypass the
+  official review/checkpoint gate. Missing, malformed, legacy, or changed
+  checkpoints fail closed and return to review.
+- The exact guest-approved overflow mix remains locked across identity, email,
+  payment, and hotel-fact turns. A question such as "Does the double room have
+  parking?" cannot let model-proposed room fields replace that mix. Only a
+  deterministic explicit room-change request unlocks it and requires a fresh
+  quote/approval.
+- Chat can safely process up to 200 total rooms in one request. A larger request
+  is never silently truncated; it receives an explicit no-booking response and
+  administration handoff. The create action independently enforces the same
+  limit.
+- Reservation serialization preserves one picked-room row per physical unit and
+  validates the aggregate room count. This removes the old 50-room truncation
+  risk while retaining a bounded safety ceiling.
+
 ## Validation before deployment
 
 - Changed/untracked JavaScript syntax: 28/28 passed.
-- Chatbot deterministic regression: 132/132 passed.
+- Chatbot deterministic regression: 134/134 passed.
 - Hotel vector/sync safety suite: 24/24 passed.
 - OpenAI Responses/file-search integration checks: passed.
 - Live-QA cleanup/redundancy offline safety self-test: passed.
@@ -298,14 +334,112 @@ marker regex or `deleteMany`.
 
 ## Deployment evidence
 
-To be completed after the guarded production rollout:
+The guarded rollout completed successfully. Runtime validation finished on
+2026-07-11 UTC (2026-07-10 America/Los_Angeles).
 
-- Git commit and remote branch:
-- Backend production HEAD:
-- Production model/effort health response:
-- Eleven ready vector/file IDs and versions:
-- Scenarios 34–43 results and measured guest-turn latency:
-- Final PM2/HTTP/log/data-cleanup verification:
+### Git and runtime release
+
+- Branch: `master`.
+- Initial hotel-vector/GPT-5.5 release: `a1e084e3bb728c2059957100683557fb2060a911`.
+- Non-redundant review response hardening:
+  `d31f473a05a0d4f2542c12217f839d02a114d321`.
+- Exact reviewed-quote submission preservation:
+  `5f0f38d5bc4f0352a13f6baade583f6d279cc8ad`.
+- Final consent/physical-inventory release:
+  `4b0ea4e898e2a32fb4b743b8934adb69fec4862c`.
+- Local `master`, GitHub `origin/master`, and the production backend were all
+  verified at the final runtime release SHA before this documentation-only
+  synchronization.
+
+The production health endpoint returned `ok=true`, `openai=true`, GPT-5.5 for
+planner/reasoning/analysis/NLU/writer, `medium` planner reasoning, `low` writer,
+NLU and analysis reasoning, Responses enabled, continuation disabled, and
+current-hotel-only ready-knowledge retrieval with a maximum of three results.
+Both the loopback and public HTTPS health endpoints passed.
+
+### Eleven ready OpenAI hotel documents
+
+All rows use schema version 3, status `ready`, and coverage through
+`2027-04-15`. The verified coverage start was `2026-07-11` UTC. The OpenAI
+vector-store file ID equals the uploaded file ID shown below.
+
+| Hotel | Knowledge version | Vector store ID | File ID | Saved filename |
+| --- | ---: | --- | --- | --- |
+| zad ajyad | 4 | `vs_6a51b73c58808191800e10d5dc6d0aea` | `file-A7r3RBsV367F3zQYHT3Vwu` | `zad-ajyad-6a40b6a1a6efe70450536038-knowledge-v4.json` |
+| zad al sad | 1 | `vs_6a51b6e87ddc8191895d8f728f393c01` | `file-Wd96M1pSd1RfsYVYgkSiYN` | `zad-al-sad-68b74714fb50e159d48c714f-knowledge-v1.json` |
+| zad al safa | 1 | `vs_6a51b72fa9908191a7a0d537ccd620c1` | `file-3SQTkUBoYmJsyWCfo5rLat` | `zad-al-safa-68da202900a070e8123c27c4-knowledge-v1.json` |
+| zad al qimma | 1 | `vs_6a51b6f1c79481919ed737a7c8bdb986` | `file-CreGD3EiLGEcGJJPLM2q47` | `zad-al-qimma-68b7dfc8fb50e159d48c9086-knowledge-v1.json` |
+| taaj alzahabiya | 1 | `vs_6a51b6dac50881919bde6d99c0349147` | `file-D6pNwTpRLM4vZjNqdDzwZg` | `taaj-alzahabiya-68992107e8d36376f71dd373-knowledge-v1.json` |
+| zad al majd | 1 | `vs_6a51b6fcacd48191914c5bc9ea5ca8f7` | `file-SkkfDxcYj1cVRZEgomPN8g` | `zad-al-majd-68b7fe14fb50e159d48c9fc9-knowledge-v1.json` |
+| zad al rehab | 1 | `vs_6a51b70723dc8191a8f96eea08bf8d3c` | `file-4JvmccGxixAVjJ7jtmdbpA` | `zad-al-rehab-68bca932d0ce3198b51d0ba9-knowledge-v1.json` |
+| zad al hayah | 1 | `vs_6a51b6d0c0e88191b5c5132b2927d02f` | `file-NaHGSV7meyyz27TpQkLBxg` | `zad-al-hayah-66fa9542fda59d440898b0e9-knowledge-v1.json` |
+| wardat al kheir | 1 | `vs_6a51b7118f3c81919a618c60867ff370` | `file-9LgiwCqSsutkQ3bWR3E5vj` | `wardat-al-kheir-68bd161619587184618ae1a0-knowledge-v1.json` |
+| durrah al hijaz hotel | 1 | `vs_6a51b72517bc81919660ca8f78eb4f7a` | `file-1pUspksLxz4gwzZ5Gphnnt` | `durrah-al-hijaz-hotel-68d8131500a070e8123beacf-knowledge-v1.json` |
+| zad al mashaer | 1 | `vs_6a51b71a9e4c8191b367ab55eb749580` | `file-GDhVz44w1QNae8V2JbDcX1` | `zad-al-mashaer-68bfe73b6d4d4b05e156835d-knowledge-v1.json` |
+
+### Live production QA
+
+Scenario 44 separately tested the new physical-overflow and consent contract:
+
+- Request: ten double rooms for 20 adults, 2026-07-21 through 2026-07-23.
+- Exact proposed/stored mix: four doubles (`6a40df5f1a6d1850eb25c183`),
+  four triples (`6a40e0981a6d1850eb25c27c`), and two quads
+  (`6a40e45a1a6d1850eb25c58b`).
+- Exact two-night total: SAR 1,500.
+- The guest approved the changed mix; a parking question preserved the exact
+  mix; a pay-at-hotel confirmation question did not create a reservation; the
+  later pure confirmation created exactly one reservation with ten matching
+  picked-room rows.
+- Result: 7/7 turns passed, planner-processing average 32,077 ms per turn.
+
+The requested normal-timing production sweep produced:
+
+| Scenario | Turns | Planner average ms/turn | Result |
+| ---: | ---: | ---: | --- |
+| 34 | 1 | 12,380 | PASS |
+| 35 | 6 | 21,838 | PASS |
+| 36 | 8 | 37,472 | PASS |
+| 37 | 2 | 22,099 | PASS |
+| 38 | 6 | 24,637 | PASS |
+| 39 | 1 | 40,968 | PASS |
+| 40 | 1 | 40,192 | PASS |
+| 41 | 1 | 41,976 | PASS |
+| 42 | 2 | 33,053 | PASS |
+| 43 | 8 | 27,066 | PASS |
+
+Scenarios 34-43 passed 10/10 over 36 guest turns. Their weighted average was
+28,916 ms per turn. Including scenario 44, the final production acceptance set
+passed 11/11 scenarios over 43 turns with a weighted average of 29,430 ms per
+turn. These weighted values use the runner's raw `totalMs`, not multiplication
+of the displayed rounded scenario averages. They measure planner processing and
+exclude the runner's deliberate 3.15-second guest quiet window plus normal
+queue/worker-launch overhead. Adding the known quiet window gives approximately
+32.1 seconds for scenarios 34-43 and 32.6 seconds for the combined set, before
+small queue/launch overhead. The measured processing and quiet-window estimate
+meet the requested 20-40 second whole-chat average, while real guest-visible
+latency can vary with queue load. Three isolated one-turn Arabic planner calls
+measured 40.2-42.0 seconds; they are recorded rather than hidden.
+
+### Production safety and cleanup verification
+
+- Pre-restart guard: zero recent open client cases, zero unanswered guest turns,
+  and zero reservations in `creating` state.
+- Only `hotels-backend` restarted: PID `22388` became `25892`.
+- `hotel-openai-sync` remained PID `24362`, `hotels-frontend` remained PID
+  `1168`, and `jannat-ssr` remained PID `1182`.
+- The vector-worker error log remained empty. The backend error log timestamp
+  remained earlier than the deployment restart, proving no new backend error-log
+  entry during the rollout or QA.
+- Scenario 44 immediately deleted its one exact reservation and then its exact
+  support case. Scenarios 35, 38, and 43 likewise deleted their exact test
+  reservations before final case cleanup.
+- Scenario-44 final cleanup: `remainingCases=0`, `remainingReservations=0`.
+- Scenario-34-43 final cleanup: 10 exact cases deleted,
+  `remainingCases=0`, `remainingReservations=0`.
+- An independent read-only query after both runs found zero cases for either UUID
+  marker and zero reservations related to all 11 exact test case IDs.
+- No `deleteMany`, broad marker regex, production-history cleanup, frontend
+  restart, PMS restart, or vector-worker restart was used.
 
 ## Rollback
 
