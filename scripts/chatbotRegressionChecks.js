@@ -1248,6 +1248,14 @@ check("Final refresh detects any price or physical room-mix change", () => {
 		true
 	);
 	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(base, { ...base, currency: "USD" }),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(base, { ...base, available: false }),
+		true
+	);
+	assert.strictEqual(
 		orchestrator.quoteMateriallyChanged(base, {
 			...base,
 			roomSelections: [
@@ -3449,6 +3457,137 @@ check("Submit restores official review facts before reservation creation", () =>
 	assert.strictEqual(restored.adults, 3);
 	assert.strictEqual(restored.children, 1);
 	assert.strictEqual(restored.phone, "0530057894");
+});
+
+check("Submit preserves the exact reviewed PMS room and complete price fingerprint", () => {
+	const exactQuote = {
+		available: true,
+		checkinISO: "2026-07-20",
+		checkoutISO: "2026-07-22",
+		roomTypeKey: "doubleRooms",
+		// This reproduces the former live state: a broad public selection plus the
+		// exact priced configuration in roomLines.
+		roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+		selectionKey: "type:doubleRooms:1",
+		roomLines: [
+			{
+				roomId: "exact-double-room",
+				roomTypeKey: "doubleRooms",
+				count: 1,
+				perRoomStayTotal: 150,
+				lineTotal: 150,
+				perNightPerRoom: [75, 75],
+			},
+		],
+		totalRooms: 1,
+		nights: 2,
+		perNight: [75, 75],
+		averagePerNight: 75,
+		total: 150,
+		currency: "SAR",
+	};
+	const reviewed = orchestrator.syncKnownFromQuote({
+		languageCode: "ar",
+		quote: exactQuote,
+		fullName: "\u064a\u0627\u0633\u0631 \u0643\u0648\u062f\u0643\u0633",
+		fullNameConfirmed: true,
+		phone: "0530000038",
+		phoneConfirmed: true,
+		nationality: "\u0645\u0635\u0631\u064a",
+		nationalityConfirmed: true,
+		adults: 2,
+		children: 0,
+	});
+	assert.strictEqual(reviewed.roomSelections[0].roomId, "exact-double-room");
+	assert.strictEqual(orchestrator.quoteMatchesKnown(reviewed), true);
+
+	const officialReviewSnapshot = orchestrator.officialReviewSnapshotFromKnown(reviewed);
+	assert.strictEqual(officialReviewSnapshot.version, 2);
+	assert.strictEqual(
+		officialReviewSnapshot.roomSelections[0].roomId,
+		"exact-double-room"
+	);
+	assert.strictEqual(
+		officialReviewSnapshot.reviewedQuote.roomSelections[0].roomId,
+		"exact-double-room"
+	);
+
+	const restored = orchestrator.applyOfficialReviewSnapshotForSubmit({
+		...reviewed,
+		officialReviewSnapshot,
+		roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }],
+		quote: {},
+	});
+	assert.strictEqual(restored.roomSelections[0].roomId, "exact-double-room");
+	const recoveredAtSubmit = orchestrator.recoverKnownFactsFromConversation(
+		{
+			preferredLanguageCode: "ar",
+			conversation: [
+				ai("\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632 \u062c\u0627\u0647\u0632\u0629.", "review_reservation"),
+				guest("\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632"),
+			],
+		},
+		{
+			...restored,
+			quote: {},
+		}
+	);
+	const recoveredReview = orchestrator.applyOfficialReviewSnapshotForSubmit(recoveredAtSubmit);
+	assert.strictEqual(recoveredReview.roomSelections[0].roomId, "exact-double-room");
+	assert.strictEqual(
+		recoveredReview.officialReviewSnapshot.reviewedQuote.roomSelections[0].roomId,
+		"exact-double-room"
+	);
+	const reviewedQuote = orchestrator.reviewedQuoteForSubmit(restored);
+	const unchangedFreshQuote = {
+		...exactQuote,
+		roomSelections: officialReviewSnapshot.roomSelections,
+		selectionKey: "id:exact-double-room:1",
+	};
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(reviewedQuote, unchangedFreshQuote),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(reviewedQuote, {
+			...unchangedFreshQuote,
+			perNight: [74, 76],
+		}),
+		true,
+		"a nightly price redistribution must require a fresh review even when the total is unchanged"
+	);
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(reviewedQuote, {
+			...unchangedFreshQuote,
+			roomSelections: [
+				{ roomId: "different-double-room", roomTypeKey: "doubleRooms", count: 1 },
+			],
+			roomLines: [
+				{
+					...unchangedFreshQuote.roomLines[0],
+					roomId: "different-double-room",
+				},
+			],
+		}),
+		true,
+		"a different physical room configuration must require a fresh review"
+	);
+	assert.deepStrictEqual(
+		orchestrator.reviewedQuoteForSubmit({
+			officialReviewSnapshot: { version: 2, reviewedQuote: { available: true } },
+			quote: unchangedFreshQuote,
+		}),
+		{},
+		"a malformed version-2 review fingerprint must fail closed instead of using mutable state"
+	);
+	assert.deepStrictEqual(
+		orchestrator.reviewedQuoteForSubmit({
+			officialReviewSnapshot: { version: 1 },
+			quote: {},
+		}),
+		{},
+		"a legacy review without a server quote must require another review"
+	);
 });
 
 check("Reservation confirmations expose exact lines for the brain to copy", () => {

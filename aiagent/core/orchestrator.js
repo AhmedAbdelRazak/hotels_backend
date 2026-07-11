@@ -4157,16 +4157,41 @@ function mergeKnownFacts(current = {}, next = {}) {
 
 function quoteRoomSelections(quote = {}) {
 	const source = asObject(quote);
-	for (const candidate of [
+	const candidates = [
 		source.roomSelections,
 		source.roomLines,
 		source.roomsBreakdown,
 		source.rooms,
-	]) {
-		const selections = normalizeRoomSelections(candidate);
-		if (selections.length) return selections;
-	}
-	return [];
+	]
+		.map((candidate) => normalizeRoomSelections(candidate))
+		.filter((candidate) => candidate.length);
+	if (!candidates.length) return [];
+	const primary = candidates[0];
+	const expectedRooms =
+		Math.max(0, Number(source.totalRooms || source.roomCount || 0) || 0) ||
+		roomSelectionsTotal(primary);
+	const typeCountKey = (selections = []) => {
+		const totals = new Map();
+		for (const selection of normalizeRoomSelections(selections)) {
+			totals.set(
+				selection.roomTypeKey,
+				Number(totals.get(selection.roomTypeKey) || 0) +
+					normalizeRoomCount(selection.count, 1)
+			);
+		}
+		return [...totals.entries()]
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, count]) => `${key}:${count}`)
+			.join("+");
+	};
+	const primaryTypeCountKey = typeCountKey(primary);
+	const exact = candidates.find(
+		(selections) =>
+			selections.every((selection) => cleanString(selection.roomId, 80)) &&
+			roomSelectionsTotal(selections) === expectedRooms &&
+			typeCountKey(selections) === primaryTypeCountKey
+	);
+	return exact || primary;
 }
 
 function syncKnownFromQuote(known = {}) {
@@ -4336,7 +4361,7 @@ function quoteMatchesKnown(known = {}) {
 	if (selectedCapacity > 0 && capacityTarget > selectedCapacity) return false;
 	const selectionKey = roomSelectionKey(selections);
 	const quoteSelections = quoteRoomSelections(quote);
-	const quoteSelectionKey = quote.selectionKey || roomSelectionKey(quoteSelections);
+	const quoteSelectionKey = roomSelectionKey(quoteSelections) || quote.selectionKey;
 	const checkinISO = validISODate(facts.checkinISO);
 	const checkoutISO = validISODate(facts.checkoutISO);
 	if (selectionKey) {
@@ -4386,6 +4411,7 @@ function quoteMateriallyChanged(previous = {}, current = {}) {
 	const before = asObject(previous);
 	const after = asObject(current);
 	if (!quoteHasContent(before) || !quoteHasContent(after)) return true;
+	if (before.available !== true || after.available !== true) return true;
 	if (before.checkinISO !== after.checkinISO || before.checkoutISO !== after.checkoutISO) {
 		return true;
 	}
@@ -4399,6 +4425,36 @@ function quoteMateriallyChanged(previous = {}, current = {}) {
 		if (Math.abs(Number(before[field] || 0) - Number(after[field] || 0)) > 0.001) {
 			return true;
 		}
+	}
+	if (
+		cleanString(before.currency || "SAR", 12).toUpperCase() !==
+		cleanString(after.currency || "SAR", 12).toUpperCase()
+	) {
+		return true;
+	}
+	const pricingShape = (quote = {}) => ({
+		perNight: Array.isArray(quote.perNight)
+			? quote.perNight.map((value) => Number(value || 0))
+			: [],
+		roomLines: (Array.isArray(quote.roomLines) ? quote.roomLines : [])
+			.map((line) => ({
+				roomId: cleanString(line?.roomId, 80),
+				roomTypeKey: cleanString(line?.roomTypeKey, 40),
+				count: normalizeRoomCount(line?.count, 1),
+				perRoomStayTotal: Number(line?.perRoomStayTotal || 0),
+				lineTotal: Number(line?.lineTotal || 0),
+				perNightPerRoom: Array.isArray(line?.perNightPerRoom)
+					? line.perNightPerRoom.map((value) => Number(value || 0))
+					: [],
+			}))
+			.sort((left, right) =>
+				`${left.roomId}|${left.roomTypeKey}`.localeCompare(
+					`${right.roomId}|${right.roomTypeKey}`
+				)
+			),
+	});
+	if (JSON.stringify(pricingShape(before)) !== JSON.stringify(pricingShape(after))) {
+		return true;
 	}
 	return false;
 }
@@ -12340,17 +12396,19 @@ async function quoteTool(sc = {}, known = {}) {
 			currency: hotel?.currency || known.currency || "SAR",
 		};
 	}
-	if (physicalRoomPlan.adjusted) {
-		known = {
-			...known,
-			roomSelections: physicalRoomPlan.roomSelections,
-			rooms: roomSelectionsTotal(physicalRoomPlan.roomSelections),
-		};
-		if (physicalRoomPlan.roomSelections.length === 1) {
-			known.roomTypeKey = physicalRoomPlan.roomSelections[0].roomTypeKey;
-		} else {
-			delete known.roomTypeKey;
-		}
+	// Always carry the exact physical PMS room IDs into the priced quote. Merely
+	// enriching a broad room-type request with its exact room ID is not a guest-
+	// visible adjustment, so `physicalRoomPlan.adjusted` still exclusively controls
+	// whether approval of a replacement mix is required.
+	known = {
+		...known,
+		roomSelections: physicalRoomPlan.roomSelections,
+		rooms: roomSelectionsTotal(physicalRoomPlan.roomSelections),
+	};
+	if (physicalRoomPlan.roomSelections.length === 1) {
+		known.roomTypeKey = physicalRoomPlan.roomSelections[0].roomTypeKey;
+	} else {
+		delete known.roomTypeKey;
 	}
 	const selections = selectionsFromKnown(known);
 	const selectionKey = roomSelectionKey(selections);
@@ -20152,10 +20210,71 @@ function compactReviewForBrain(known = {}, hotel = {}) {
 	};
 }
 
+function reviewedQuoteSnapshotFromKnown(known = {}) {
+	const quote = asObject(known.quote);
+	if (!quote.available || !quoteMatchesKnown(known)) return null;
+	const roomSelections = quoteRoomSelections(quote);
+	const checkinISO = validISODate(quote.checkinISO || known.checkinISO);
+	const checkoutISO = validISODate(quote.checkoutISO || known.checkoutISO);
+	if (!roomSelections.length || !checkinISO || !checkoutISO || checkoutISO <= checkinISO) {
+		return null;
+	}
+	return {
+		available: true,
+		checkinISO,
+		checkoutISO,
+		roomTypeKey:
+			roomSelections.length === 1
+				? roomSelections[0].roomTypeKey
+				: cleanString(quote.roomTypeKey, 80),
+		roomSelections,
+		selectionKey: roomSelectionKey(roomSelections),
+		nights: Number(quote.nights || 0) || 0,
+		totalRooms: quoteRoomCount(quote),
+		total: Number(quote.total || quote.totals?.totalPriceWithCommission || 0) || 0,
+		averagePerNight: Number(quote.averagePerNight || 0) || 0,
+		currency: cleanString(quote.currency || "SAR", 12).toUpperCase() || "SAR",
+		perNight: Array.isArray(quote.perNight)
+			? quote.perNight.map((value) => Number(value || 0))
+			: [],
+		roomLines: (Array.isArray(quote.roomLines) ? quote.roomLines : []).map((line) => ({
+			roomId: cleanString(line?.roomId, 80),
+			roomTypeKey: cleanString(line?.roomTypeKey, 40),
+			count: normalizeRoomCount(line?.count, 1),
+			perRoomStayTotal: Number(line?.perRoomStayTotal || 0),
+			lineTotal: Number(line?.lineTotal || 0),
+			perNightPerRoom: Array.isArray(line?.perNightPerRoom)
+				? line.perNightPerRoom.map((value) => Number(value || 0))
+				: [],
+		})),
+	};
+}
+
+function reviewedQuoteSnapshotUsable(value = {}) {
+	const quote = asObject(value);
+	const roomSelections = quoteRoomSelections(quote);
+	return Boolean(
+		quote.available === true &&
+			validISODate(quote.checkinISO) &&
+			validISODate(quote.checkoutISO) &&
+			quote.checkoutISO > quote.checkinISO &&
+			roomSelections.length &&
+			roomSelections.every((selection) => cleanString(selection.roomId, 80)) &&
+			quoteRoomCount(quote) === roomSelectionsTotal(roomSelections) &&
+			Number(quote.nights || 0) > 0 &&
+			Number(quote.total || 0) > 0 &&
+			Number(quote.averagePerNight || 0) > 0 &&
+			cleanString(quote.currency, 12)
+	);
+}
+
 function officialReviewSnapshotFromKnown(known = {}) {
-	const roomSelections = normalizeRoomSelections(known.roomSelections);
+	const reviewedQuote = reviewedQuoteSnapshotFromKnown(known);
+	const roomSelections = reviewedQuote?.roomSelections?.length
+		? normalizeRoomSelections(reviewedQuote.roomSelections)
+		: normalizeRoomSelections(known.roomSelections);
 	const snapshot = {
-		version: 1,
+		version: 2,
 		createdAt: new Date().toISOString(),
 		languageCode: cleanString(known.languageCode || "", 16),
 		checkinISO: validISODate(known.checkinISO) || "",
@@ -20170,6 +20289,7 @@ function officialReviewSnapshotFromKnown(known = {}) {
 		nationality: cleanDisplayString(known.nationality || "", 80),
 		email: cleanEmail(known.email || ""),
 	};
+	if (reviewedQuote) snapshot.reviewedQuote = reviewedQuote;
 	if (roomSelections.length) {
 		snapshot.rooms = roomSelectionsTotal(roomSelections);
 		if (roomSelections.length === 1) {
@@ -20177,6 +20297,15 @@ function officialReviewSnapshotFromKnown(known = {}) {
 		}
 	}
 	return snapshot;
+}
+
+function reviewedQuoteForSubmit(known = {}) {
+	const review = asObject(known.officialReviewSnapshot);
+	const reviewedQuote = asObject(review.reviewedQuote);
+	if (Number(review.version || 0) >= 2) {
+		return reviewedQuoteSnapshotUsable(reviewedQuote) ? reviewedQuote : {};
+	}
+	return asObject(known.quote);
 }
 
 function officialReviewSnapshotUsable(snapshot = {}) {
@@ -20540,7 +20669,7 @@ async function handleBrainSubmitReservation(io, sc = {}, hotel = {}, known = {},
 	submitKnown = applySelectedSameDateRoomOptionLock(
 		applyOfficialReviewSnapshotForSubmit(submitKnown)
 	);
-	const reviewedQuote = asObject(submitKnown.quote);
+	const reviewedQuote = reviewedQuoteForSubmit(submitKnown);
 	const refreshedQuoteResult = await quoteTool(sc, submitKnown);
 	if (!refreshedQuoteResult.available || !refreshedQuoteResult.quote) {
 		return sendBrainToolReplyFromOpenAI({
@@ -22151,7 +22280,7 @@ async function submitReservationForCase(io, caseOrId) {
 		return { ok: false, reason: "split_stay_submit_handled" };
 	}
 	known = applySelectedSameDateRoomOptionLock(applyOfficialReviewSnapshotForSubmit(known));
-	const reviewedQuote = asObject(known.quote);
+	const reviewedQuote = reviewedQuoteForSubmit(known);
 	const refreshedQuoteResult = await quoteTool(sc, known);
 	if (!refreshedQuoteResult.available || !refreshedQuoteResult.quote) {
 		await sendBrainToolReplyFromOpenAI({
@@ -24766,6 +24895,9 @@ const exportedOrchestrator = {
 		repliesSubstantiallyRepeatForGuard,
 		officialReviewSnapshotFromKnown,
 		applyOfficialReviewSnapshotForSubmit,
+		reviewedQuoteSnapshotFromKnown,
+		reviewedQuoteSnapshotUsable,
+		reviewedQuoteForSubmit,
 		buildStayClarificationMessage,
 		arabicFirstNameFromLatinName,
 		arabicGuestAddress,
