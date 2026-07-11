@@ -6,7 +6,11 @@ const {
 	getHotelByIdWithPricingDates,
 	getJanatAiSettings,
 } = require("../core/db");
-const { priceRoomForStay, listAvailableRoomsForStay } = require("../core/selectors");
+const {
+	priceRoomForStay,
+	listAvailableRoomsForStay,
+	roomSellableInventory,
+} = require("../core/selectors");
 const {
 	isJannatBookingSupportCase,
 } = require("../../services/jannatBookingSupportScope");
@@ -243,13 +247,21 @@ function hotelHasRequestedAvailability(hotel = {}, facts = {}) {
 		);
 	}
 	return selections.every((selection) => {
+		const requestedCapacity = Math.max(
+			0,
+			Number(facts.adults || 0) + Number(facts.children || 0),
+			Number(facts.requestedBeds || 0)
+		);
 		const quote = priceRoomForStay(
 			hotel,
-			{ roomType: selection.roomTypeKey },
+			{ roomType: selection.roomTypeKey, requestedCapacity },
 			facts.checkinISO,
 			facts.checkoutISO
 		);
-		return Boolean(quote?.available);
+		return Boolean(
+			quote?.available &&
+			Number(selection.count || 1) <= roomSellableInventory(quote.room)
+		);
 	});
 }
 
@@ -286,17 +298,27 @@ function buildQuoteForFacts(hotel = {}, facts = {}) {
 	for (const selection of selections) {
 		const roomTypeKey = selection.roomTypeKey || "";
 		const count = Math.max(1, Number(selection.count || 1) || 1);
+		const requestedCapacity = Math.max(
+			0,
+			Number(facts.adults || 0) + Number(facts.children || 0),
+			Number(facts.requestedBeds || 0)
+		);
 		const quote = priceRoomForStay(
 			hotel,
-			{ roomType: roomTypeKey },
+			{ roomType: roomTypeKey, requestedCapacity },
 			facts.checkinISO,
 			facts.checkoutISO
 		);
-		if (!quote?.available) {
+		const configuredUnits = roomSellableInventory(quote?.room || {});
+		if (!quote?.available || count > configuredUnits) {
 			unavailableLines.push({
 				roomTypeKey,
 				count,
-				code: quote?.reason || "not_available",
+				code:
+					count > configuredUnits
+						? "physical_room_inventory_insufficient"
+						: quote?.reason || "not_available",
+				configuredUnits,
 				firstUnavailableDate: quote?.firstBlockedDate || "",
 			});
 			continue;

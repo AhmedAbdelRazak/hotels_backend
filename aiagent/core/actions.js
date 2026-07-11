@@ -3,15 +3,23 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const Reservations = require("../../models/reservations");
 const UncompleteReservations = require("../../models/Uncompleted");
-const HotelDetails = require("../../models/hotel_details");
 const SupportCase = require("../../models/supportcase");
 const {
 	validateReservationInventoryForCreate,
 	captureReservationAvailabilitySnapshot,
 } = require("../../controllers/reservations");
-const { updateSupportCaseAppend } = require("./db");
+const {
+	updateSupportCaseAppend,
+	getHotelByIdWithPricingDates,
+} = require("./db");
 const { asciiize, digitsToEnglish } = require("./nlu");
-const { priceRoomForStay } = require("./selectors");
+const {
+	priceRoomForStay,
+	resolveRoomForStay,
+	roomCapacity,
+	roomSellableInventory,
+	roomIsSellable,
+} = require("./selectors");
 const {
 	markReservationPendingConfirmation,
 } = require("../../services/pendingConfirmationPolicy");
@@ -262,6 +270,8 @@ function roomCapacityForKey(roomTypeKey = "") {
 }
 
 function roomGuestCapacity(room = {}, roomTypeKey = "") {
+	const verifiedCapacity = roomCapacity(room);
+	if (verifiedCapacity > 0) return verifiedCapacity;
 	const typeCapacity = roomCapacityForKey(
 		roomTypeKey || room?.roomType || room?.room_type
 	);
@@ -284,12 +294,20 @@ function roomGuestCapacity(room = {}, roomTypeKey = "") {
 	return 0;
 }
 
-function matchingHotelRoom(hotel = {}, roomTypeKey = "", displayName = "") {
+function matchingHotelRoom(
+	hotel = {},
+	roomTypeKey = "",
+	displayName = "",
+	roomId = ""
+) {
 	const rooms = Array.isArray(hotel?.roomCountDetails) ? hotel.roomCountDetails : [];
 	const activeRooms = rooms.filter((item) => item && item.activeRoom !== false);
 	return (
-		activeRooms.find((item) => roomTypeKey && item.roomType === roomTypeKey) ||
+		activeRooms.find(
+			(item) => roomId && String(item._id || "") === String(roomId)
+		) ||
 		activeRooms.find((item) => displayName && item.displayName === displayName) ||
+		activeRooms.find((item) => roomTypeKey && item.roomType === roomTypeKey) ||
 		null
 	);
 }
@@ -308,7 +326,15 @@ function selectedRoomGuestCapacity({ hotel = {}, slots = {}, quoteData = {}, roo
 				lineQuote.roomType ||
 				"";
 			const displayName = lineRoom?.displayName || lineQuote.roomLabel || line.roomLabel || "";
-			const hotelRoom = lineRoom || matchingHotelRoom(hotel, roomTypeKey, displayName) || {};
+			const hotelRoom =
+				lineRoom ||
+				matchingHotelRoom(
+					hotel,
+					roomTypeKey,
+					displayName,
+					line.roomId || lineQuote.roomId
+				) ||
+				{};
 			const capacity = roomGuestCapacity(hotelRoom, roomTypeKey);
 			const count = roomSelectionCount(line.count ?? line.rooms ?? line.quantity, 1);
 			return capacity > 0 ? total + capacity * count : total;
@@ -336,6 +362,63 @@ function assertGuestCountFitsSelectedRooms({ hotel, slots, quoteData, room, gues
 		throw new Error(
 			`AI reservation guest count exceeds selected room capacity: ${totalGuests} guests for capacity ${capacity}.`
 		);
+	}
+}
+
+function assertQuoteWithinPhysicalInventory({ hotel = {}, slots = {}, quoteData = {}, room = null } = {}) {
+	const quoteRooms = Array.isArray(quoteData?.rooms) ? quoteData.rooms : [];
+	const lines = quoteRooms.length
+		? quoteRooms
+		: [
+				{
+					room,
+					roomId: room?._id,
+					roomTypeKey: room?.roomType || slots.roomTypeKey,
+					count: slots.rooms || 1,
+				},
+		  ];
+	const usedByRoomId = new Map();
+	for (const line of lines) {
+		const lineQuote = line?.quote || {};
+		const embeddedRoom = line?.room || lineQuote.room || null;
+		const resolvedRoom =
+			embeddedRoom ||
+			resolveRoomForStay(hotel, {
+				roomId: line?.roomId || lineQuote.roomId,
+				displayName:
+					line?.roomDisplayName ||
+					line?.roomLabel ||
+					lineQuote.roomDisplayName ||
+					lineQuote.roomLabel,
+				roomType:
+					line?.roomTypeKey ||
+					line?.roomType ||
+					lineQuote.roomTypeKey ||
+					lineQuote.roomType,
+			});
+		if (!resolvedRoom) {
+			throw new Error("AI reservation room configuration is no longer active.");
+		}
+		const roomId = String(resolvedRoom._id || "").trim();
+		if (!roomId) {
+			throw new Error("AI reservation room configuration has no stable room ID.");
+		}
+		const configuredUnits = roomSellableInventory(resolvedRoom);
+		if (configuredUnits < 1) {
+			throw new Error("AI reservation room configuration has no physical sellable units.");
+		}
+		if (roomCapacity(resolvedRoom) < 1) {
+			throw new Error("AI reservation room capacity requires management verification.");
+		}
+		const nextUsed =
+			Number(usedByRoomId.get(roomId) || 0) +
+			roomSelectionCount(line?.count ?? line?.rooms ?? line?.quantity, 1);
+		if (nextUsed > configuredUnits) {
+			throw new Error(
+				`AI reservation exceeds physical room inventory for ${resolvedRoom.displayName || resolvedRoom.roomType}: requested ${nextUsed}, configured ${configuredUnits}.`
+			);
+		}
+		usedByRoomId.set(roomId, nextUsed);
 	}
 }
 
@@ -420,6 +503,7 @@ function buildPickedRoomsType({ room, dailyRows, count = 1 }) {
 	const chosenAvg = nights > 0 ? totalWith / nights : 0;
 
 	const oneEntry = () => ({
+		hotelRoomConfigId: String(room._id || "").trim(),
 		room_type: String(room.roomType || room._id || "unknown").trim(),
 		displayName: String(room.displayName || room.roomType || "").trim(),
 		chosenPrice: Number(chosenAvg.toFixed(2)).toFixed(2),
@@ -512,6 +596,304 @@ function nightsBetweenISO(checkinISO, checkoutISO) {
 	const end = Date.parse(`${checkoutISO}T00:00:00.000Z`);
 	if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
 	return Math.round((end - start) / DAY_MS);
+}
+
+function reservationUpdatePricingDateKeys(checkinISO, checkoutISO) {
+	const nights = nightsBetweenISO(checkinISO, checkoutISO);
+	if (!nights || nights > 90) return [];
+	return Array.from({ length: nights }, (_unused, index) =>
+		addDaysISO(checkinISO, index)
+	).filter(Boolean);
+}
+
+function moneyValue(value) {
+	if (value === null || value === undefined || value === "") return null;
+	const number = Number(value);
+	return Number.isFinite(number) ? Number(number.toFixed(2)) : null;
+}
+
+function quoteChangedBeforeInsertError(reason = "quote_changed", details = {}) {
+	const error = new Error(
+		"The hotel room, availability, or price changed during final verification. A fresh quote and review are required before creating the reservation."
+	);
+	error.code = "AI_RESERVATION_REQUOTE_REQUIRED";
+	error.reason = reason;
+	error.details = details;
+	return error;
+}
+
+function quotedRoomId(line = {}, fallbackRoom = null) {
+	const lineQuote = line?.quote || {};
+	return String(
+		line?.roomId ||
+			line?.hotelRoomConfigId ||
+			line?.room?._id ||
+			lineQuote?.roomId ||
+			lineQuote?.room?._id ||
+			fallbackRoom?._id ||
+			""
+	).trim();
+}
+
+function quotedPricingRows(line = {}, quoteData = {}) {
+	const lineQuote = line?.quote || {};
+	if (Array.isArray(line?.pricingByDay)) return line.pricingByDay;
+	if (Array.isArray(lineQuote?.pricingByDay)) return lineQuote.pricingByDay;
+	if (Array.isArray(quoteData?.rows)) return quoteData.rows;
+	if (Array.isArray(quoteData?.pricingByDay)) return quoteData.pricingByDay;
+	return [];
+}
+
+function quoteLinesForFinalVerification({ quoteData = {}, room = null, slots = {} } = {}) {
+	if (Array.isArray(quoteData?.rooms) && quoteData.rooms.length) {
+		return quoteData.rooms;
+	}
+	return [
+		{
+			roomId: quoteData?.room?._id || room?._id,
+			room: quoteData?.room || room,
+			roomTypeKey: quoteData?.roomTypeKey || room?.roomType || slots?.roomTypeKey,
+			count: quoteData?.totalRooms || quoteData?.roomCount || slots?.rooms || 1,
+			pricingByDay: quoteData?.rows || quoteData?.pricingByDay || [],
+			quote: quoteData,
+		},
+	];
+}
+
+function assertFinalQuoteMoneyEqual(actual, expected, reason, details = {}) {
+	const actualMoney = moneyValue(actual);
+	const expectedMoney = moneyValue(expected);
+	if (
+		actualMoney === null ||
+		expectedMoney === null ||
+		actualMoney !== expectedMoney
+	) {
+		throw quoteChangedBeforeInsertError(reason, {
+			...details,
+			expected: expectedMoney,
+			actual: actualMoney,
+		});
+	}
+}
+
+async function revalidateQuoteImmediatelyBeforeInsert({
+	hotel = {},
+	slots = {},
+	quoteData = {},
+	room = null,
+	loadHotel = getHotelByIdWithPricingDates,
+} = {}) {
+	const hotelId = normalizeId(hotel?._id);
+	const dateKeys = reservationUpdatePricingDateKeys(
+		slots.checkinISO,
+		slots.checkoutISO
+	);
+	if (!hotelId || !dateKeys.length) {
+		throw quoteChangedBeforeInsertError("invalid_hotel_or_dates", {
+			hotelId,
+			checkinISO: slots.checkinISO || "",
+			checkoutISO: slots.checkoutISO || "",
+		});
+	}
+	const freshHotel = await loadHotel(hotelId, dateKeys);
+	if (!freshHotel || normalizeId(freshHotel._id) !== hotelId) {
+		throw quoteChangedBeforeInsertError("fresh_hotel_missing_or_mismatched", {
+			hotelId,
+		});
+	}
+	const freshRooms = Array.isArray(freshHotel.roomCountDetails)
+		? freshHotel.roomCountDetails
+		: [];
+	const quoteLines = quoteLinesForFinalVerification({ quoteData, room, slots });
+	if (!quoteLines.length) {
+		throw quoteChangedBeforeInsertError("quote_room_lines_missing");
+	}
+
+	const usedByRoomId = new Map();
+	let totalRooms = 0;
+	let totalGuestPrice = 0;
+	let totalHotelShouldGet = 0;
+	for (let lineIndex = 0; lineIndex < quoteLines.length; lineIndex += 1) {
+		const line = quoteLines[lineIndex] || {};
+		const roomId = quotedRoomId(line, room);
+		if (!roomId) {
+			throw quoteChangedBeforeInsertError("quote_room_id_missing", { lineIndex });
+		}
+		const expectedRoom = line?.room || line?.quote?.room || (lineIndex === 0 ? room : null);
+		if (!expectedRoom || String(expectedRoom._id || "").trim() !== roomId) {
+			throw quoteChangedBeforeInsertError("quote_room_snapshot_missing_or_mismatched", {
+				lineIndex,
+				roomId,
+			});
+		}
+		const freshRoom = freshRooms.find(
+			(candidate) => String(candidate?._id || "").trim() === roomId
+		);
+		if (!freshRoom || !roomIsSellable(freshRoom)) {
+			throw quoteChangedBeforeInsertError("room_no_longer_sellable", {
+				lineIndex,
+				roomId,
+			});
+		}
+		if (!roomIsSellable(expectedRoom)) {
+			throw quoteChangedBeforeInsertError("reviewed_room_snapshot_not_sellable", {
+				lineIndex,
+				roomId,
+			});
+		}
+
+		const expectedInventory = roomSellableInventory(expectedRoom);
+		const freshInventory = roomSellableInventory(freshRoom);
+		if (freshInventory !== expectedInventory) {
+			throw quoteChangedBeforeInsertError("physical_inventory_changed", {
+				lineIndex,
+				roomId,
+				expectedInventory,
+				freshInventory,
+			});
+		}
+		const expectedCapacity = roomCapacity(expectedRoom);
+		const freshCapacity = roomCapacity(freshRoom);
+		if (freshCapacity !== expectedCapacity) {
+			throw quoteChangedBeforeInsertError("room_capacity_changed", {
+				lineIndex,
+				roomId,
+				expectedCapacity,
+				freshCapacity,
+			});
+		}
+		assertFinalQuoteMoneyEqual(
+			freshRoom?.price?.basePrice,
+			expectedRoom?.price?.basePrice,
+			"room_base_price_changed",
+			{ lineIndex, roomId }
+		);
+
+		const count = roomSelectionCount(
+			line?.count ?? line?.rooms ?? line?.quantity,
+			1
+		);
+		const nextUsed = Number(usedByRoomId.get(roomId) || 0) + count;
+		if (nextUsed > freshInventory) {
+			throw quoteChangedBeforeInsertError("physical_inventory_exceeded", {
+				lineIndex,
+				roomId,
+				requested: nextUsed,
+				available: freshInventory,
+			});
+		}
+		usedByRoomId.set(roomId, nextUsed);
+		totalRooms += count;
+
+		const freshQuote = priceRoomForStay(
+			freshHotel,
+			{ roomId, roomType: freshRoom.roomType, displayName: freshRoom.displayName },
+			slots.checkinISO,
+			slots.checkoutISO
+		);
+		if (!freshQuote?.available) {
+			throw quoteChangedBeforeInsertError("room_became_unavailable", {
+				lineIndex,
+				roomId,
+				reason: freshQuote?.reason || "not_available",
+				firstBlockedDate: freshQuote?.firstBlockedDate || "",
+			});
+		}
+		const expectedRows = quotedPricingRows(line, quoteData);
+		const freshRows = Array.isArray(freshQuote.pricingByDay)
+			? freshQuote.pricingByDay
+			: [];
+		if (expectedRows.length !== dateKeys.length || freshRows.length !== dateKeys.length) {
+			throw quoteChangedBeforeInsertError("nightly_pricing_length_changed", {
+				lineIndex,
+				roomId,
+				expectedRows: expectedRows.length,
+				freshRows: freshRows.length,
+				nights: dateKeys.length,
+			});
+		}
+		for (let nightIndex = 0; nightIndex < dateKeys.length; nightIndex += 1) {
+			const expectedRow = expectedRows[nightIndex] || {};
+			const freshRow = freshRows[nightIndex] || {};
+			const date = dateKeys[nightIndex];
+			if (String(expectedRow.date || "") !== date || String(freshRow.date || "") !== date) {
+				throw quoteChangedBeforeInsertError("nightly_pricing_date_changed", {
+					lineIndex,
+					nightIndex,
+					roomId,
+					date,
+				});
+			}
+			for (const field of [
+				"price",
+				"rootPrice",
+				"commissionRate",
+				"totalPriceWithCommission",
+				"totalPriceWithoutCommission",
+			]) {
+				assertFinalQuoteMoneyEqual(
+					freshRow[field],
+					expectedRow[field],
+					"nightly_pricing_changed",
+					{ lineIndex, nightIndex, roomId, date, field }
+				);
+			}
+		}
+
+		const freshOneRoomTotal = moneyValue(
+			freshQuote?.totals?.totalPriceWithCommission
+		);
+		const freshOneRoomRoot = moneyValue(freshQuote?.totals?.hotelShouldGet);
+		if (freshOneRoomTotal === null || freshOneRoomRoot === null) {
+			throw quoteChangedBeforeInsertError("fresh_quote_totals_missing", {
+				lineIndex,
+				roomId,
+			});
+		}
+		totalGuestPrice += freshOneRoomTotal * count;
+		totalHotelShouldGet += freshOneRoomRoot * count;
+	}
+
+	const quotedRoomCount = Number(
+		quoteData?.totalRooms ?? quoteData?.roomCount ?? totalRooms
+	);
+	if (!Number.isFinite(quotedRoomCount) || quotedRoomCount !== totalRooms) {
+		throw quoteChangedBeforeInsertError("quoted_room_count_changed", {
+			expected: quotedRoomCount,
+			actual: totalRooms,
+		});
+	}
+	const freshTotal = moneyValue(totalGuestPrice);
+	const freshHotelShouldGet = moneyValue(totalHotelShouldGet);
+	const freshCommission = moneyValue(totalGuestPrice - totalHotelShouldGet);
+	assertFinalQuoteMoneyEqual(
+		freshTotal,
+		quoteData?.total ?? quoteData?.totals?.totalPriceWithCommission,
+		"quote_total_changed"
+	);
+	if (quoteData?.totals && Object.prototype.hasOwnProperty.call(quoteData.totals, "hotelShouldGet")) {
+		assertFinalQuoteMoneyEqual(
+			freshHotelShouldGet,
+			quoteData.totals.hotelShouldGet,
+			"quote_hotel_settlement_changed"
+		);
+	}
+	if (quoteData?.totals && Object.prototype.hasOwnProperty.call(quoteData.totals, "totalCommission")) {
+		assertFinalQuoteMoneyEqual(
+			freshCommission,
+			quoteData.totals.totalCommission,
+			"quote_commission_changed"
+		);
+	}
+
+	return {
+		freshHotel,
+		dateKeys,
+		totalRooms,
+		total: freshTotal,
+		hotelShouldGet: freshHotelShouldGet,
+		commission: freshCommission,
+	};
 }
 
 function roomToken(value = "") {
@@ -730,41 +1112,74 @@ function reservationRoomSelection(reservation = {}) {
 		? reservation.pickedRoomsPricing
 		: [];
 	const rows = picked.filter(
-		(row) => row?.room_type || row?.roomType || row?.displayName || row?.display_name
+		(row) =>
+			row?.hotelRoomConfigId ||
+			row?.roomId ||
+			row?.room_type ||
+			row?.roomType ||
+			row?.displayName ||
+			row?.display_name
 	);
 	if (!rows.length) {
 		return { supported: false, reason: "missing_room_selection" };
 	}
-	const uniqueRoomKeys = new Set(
-		rows
-			.map((row) => roomToken(row.room_type || row.roomType || row.displayName || row.display_name))
-			.filter(Boolean)
-	);
-	if (uniqueRoomKeys.size > 1) {
-		return { supported: false, reason: "multiple_room_types" };
+	const grouped = new Map();
+	for (const row of rows) {
+		const roomId = String(row.hotelRoomConfigId || row.roomId || "").trim();
+		const roomType = String(row.room_type || row.roomType || "").trim();
+		const displayName = String(row.displayName || row.display_name || "").trim();
+		const legacyKey = `${roomToken(roomType)}|${roomToken(displayName)}`;
+		const key = roomId ? `id:${roomId}` : `legacy:${legacyKey}`;
+		const existing = grouped.get(key) || {
+			roomId,
+			hotelRoomConfigId: roomId,
+			roomType,
+			displayName,
+			count: 0,
+		};
+		existing.count += roomSelectionCount(row.count, 1);
+		grouped.set(key, existing);
 	}
-	const first = rows[0] || {};
-	const count = rows.reduce(
-		(total, row) => total + Math.max(1, Number(row.count || 1)),
-		0
-	);
+	if (grouped.size > 1) {
+		return { supported: false, reason: "multiple_room_configurations" };
+	}
+	const selection = Array.from(grouped.values())[0] || {};
 	return {
 		supported: true,
-		roomType: String(first.room_type || first.roomType || "").trim(),
-		displayName: String(first.displayName || first.display_name || "").trim(),
-		count: Math.max(1, count || Number(reservation.total_rooms || 1) || 1),
+		roomId: selection.roomId || "",
+		hotelRoomConfigId: selection.hotelRoomConfigId || "",
+		roomType: selection.roomType || "",
+		displayName: selection.displayName || "",
+		count: Math.max(
+			1,
+			Number(selection.count || 0) || Number(reservation.total_rooms || 1) || 1
+		),
 	};
 }
 
 function findHotelRoomForSelection(hotel = {}, selection = {}, roomTypeOverride = "") {
+	const selectionRoomType = String(selection.roomType || "").trim();
+	const explicitOverride = String(roomTypeOverride || "").trim();
+	const overrideChangesRoomType = Boolean(
+		explicitOverride &&
+			roomToken(explicitOverride) !== roomToken(selectionRoomType)
+	);
+	const rawRoomType = explicitOverride || selectionRoomType;
+	const rawDisplay = overrideChangesRoomType
+		? ""
+		: String(selection.displayName || "").trim();
+	const stableRoomId = overrideChangesRoomType
+		? ""
+		: selection.roomId || selection.hotelRoomConfigId || selection._id;
+	const resolved = resolveRoomForStay(hotel, {
+		roomId: stableRoomId,
+		roomType: rawRoomType,
+		displayName: rawDisplay,
+		requestedCapacity: selection.capacityGuests,
+	});
+	if (resolved) return resolved;
 	const rooms = Array.isArray(hotel.roomCountDetails) ? hotel.roomCountDetails : [];
 	const activeRooms = rooms.filter((room) => room?.activeRoom !== false);
-	const rawRoomType = String(roomTypeOverride || selection.roomType || "").trim();
-	const rawDisplay = String(selection.displayName || "").trim();
-	const exact =
-		activeRooms.find((room) => rawRoomType && room.roomType === rawRoomType) ||
-		activeRooms.find((room) => rawDisplay && room.displayName === rawDisplay);
-	if (exact) return exact;
 	const typeToken = roomToken(rawRoomType);
 	const displayToken = roomToken(rawDisplay);
 	return (
@@ -823,10 +1238,19 @@ async function buildReservationUpdateCandidate({
 			message: "The reservation room type could not be matched to active hotel inventory.",
 		};
 	}
+	const configuredUnits = roomSellableInventory(room);
+	if (configuredUnits < 1 || Number(selection.count || 1) > configuredUnits) {
+		return {
+			allowed: false,
+			code: "physical_room_inventory_insufficient",
+			message: `The requested room count exceeds the configured physical inventory (${configuredUnits}).`,
+			room,
+		};
+	}
 
 	const quote = priceRoomForStay(
 		hotel,
-		{ roomType: room.roomType },
+		{ roomId: room._id, roomType: room.roomType, displayName: room.displayName },
 		checkinISO,
 		checkoutISO
 	);
@@ -860,7 +1284,7 @@ async function buildReservationUpdateCandidate({
 		pickedRoomsPricing: pickedRoomsType,
 	};
 	const inventoryValidation = await validateReservationInventoryForCreate(payload, {
-		allowOverbook: false,
+		allowOverbook: true,
 		excludeReservationId: reservation._id,
 	});
 	if (!inventoryValidation.allowed) {
@@ -886,6 +1310,244 @@ async function buildReservationUpdateCandidate({
 		nights,
 		inventoryValidation,
 		payload,
+	};
+}
+
+function reservationUpdateCandidateChange(reviewed = {}, refreshed = {}, selection = {}) {
+	if (!reviewed?.allowed || !refreshed?.allowed) {
+		return { changed: true, reason: "candidate_no_longer_allowed" };
+	}
+	const reviewedRoom = reviewed.room || {};
+	const refreshedRoom = refreshed.room || {};
+	const reviewedRoomId = String(reviewedRoom._id || "").trim();
+	const refreshedRoomId = String(refreshedRoom._id || "").trim();
+	if (!reviewedRoomId || reviewedRoomId !== refreshedRoomId) {
+		return {
+			changed: true,
+			reason: "room_configuration_changed",
+			reviewedRoomId,
+			refreshedRoomId,
+		};
+	}
+	if (!roomIsSellable(reviewedRoom) || !roomIsSellable(refreshedRoom)) {
+		return { changed: true, reason: "room_sellability_changed", roomId: reviewedRoomId };
+	}
+	for (const [reason, reviewedValue, refreshedValue] of [
+		[
+			"physical_inventory_changed",
+			roomSellableInventory(reviewedRoom),
+			roomSellableInventory(refreshedRoom),
+		],
+		[
+			"room_capacity_changed",
+			roomCapacity(reviewedRoom),
+			roomCapacity(refreshedRoom),
+		],
+		["room_type_changed", String(reviewedRoom.roomType || ""), String(refreshedRoom.roomType || "")],
+		[
+			"room_display_name_changed",
+			String(reviewedRoom.displayName || ""),
+			String(refreshedRoom.displayName || ""),
+		],
+		[
+			"room_bed_configuration_changed",
+			Number(reviewedRoom.bedsCount || 0),
+			Number(refreshedRoom.bedsCount || 0),
+		],
+		[
+			"room_gender_configuration_changed",
+			String(reviewedRoom.roomForGender || ""),
+			String(refreshedRoom.roomForGender || ""),
+		],
+	]) {
+		if (reviewedValue !== refreshedValue) {
+			return {
+				changed: true,
+				reason,
+				roomId: reviewedRoomId,
+				reviewedValue,
+				refreshedValue,
+			};
+		}
+	}
+	if (
+		moneyValue(reviewedRoom?.price?.basePrice) !==
+		moneyValue(refreshedRoom?.price?.basePrice)
+	) {
+		return { changed: true, reason: "room_base_price_changed", roomId: reviewedRoomId };
+	}
+
+	const expectedCount = roomSelectionCount(selection.count, 1);
+	const pickedRoomSummary = (candidate = {}) => {
+		const rows = Array.isArray(candidate.pickedRoomsType)
+			? candidate.pickedRoomsType
+			: [];
+		return {
+			count: rows.reduce(
+				(total, row) => total + roomSelectionCount(row?.count, 1),
+				0
+			),
+			roomIds: [
+				...new Set(
+					rows
+						.map((row) => String(row?.hotelRoomConfigId || "").trim())
+						.filter(Boolean)
+				),
+			],
+		};
+	};
+	const reviewedPicked = pickedRoomSummary(reviewed);
+	const refreshedPicked = pickedRoomSummary(refreshed);
+	if (
+		reviewedPicked.count !== expectedCount ||
+		refreshedPicked.count !== expectedCount ||
+		reviewedPicked.roomIds.length !== 1 ||
+		refreshedPicked.roomIds.length !== 1 ||
+		reviewedPicked.roomIds[0] !== reviewedRoomId ||
+		refreshedPicked.roomIds[0] !== refreshedRoomId
+	) {
+		return {
+			changed: true,
+			reason: "room_count_or_identity_changed",
+			expectedCount,
+			reviewedPicked,
+			refreshedPicked,
+		};
+	}
+
+	const reviewedQuote = reviewed.quote || {};
+	const refreshedQuote = refreshed.quote || {};
+	if (!reviewedQuote.available || !refreshedQuote.available) {
+		return { changed: true, reason: "quote_became_unavailable" };
+	}
+	if (Number(reviewed.nights || 0) !== Number(refreshed.nights || 0)) {
+		return { changed: true, reason: "stay_nights_changed" };
+	}
+	const reviewedRows = Array.isArray(reviewedQuote.pricingByDay)
+		? reviewedQuote.pricingByDay
+		: [];
+	const refreshedRows = Array.isArray(refreshedQuote.pricingByDay)
+		? refreshedQuote.pricingByDay
+		: [];
+	if (!reviewedRows.length || reviewedRows.length !== refreshedRows.length) {
+		return { changed: true, reason: "nightly_pricing_length_changed" };
+	}
+	for (let index = 0; index < reviewedRows.length; index += 1) {
+		const reviewedRow = reviewedRows[index] || {};
+		const refreshedRow = refreshedRows[index] || {};
+		if (String(reviewedRow.date || "") !== String(refreshedRow.date || "")) {
+			return { changed: true, reason: "nightly_pricing_date_changed", index };
+		}
+		for (const field of [
+			"price",
+			"rootPrice",
+			"commissionRate",
+			"totalPriceWithCommission",
+			"totalPriceWithoutCommission",
+		]) {
+			if (moneyValue(reviewedRow[field]) !== moneyValue(refreshedRow[field])) {
+				return {
+					changed: true,
+					reason: "nightly_pricing_changed",
+					index,
+					field,
+				};
+			}
+		}
+	}
+	for (const [reason, reviewedValue, refreshedValue] of [
+		[
+			"update_total_changed",
+			reviewed?.totals?.total_amount,
+			refreshed?.totals?.total_amount,
+		],
+		[
+			"update_commission_changed",
+			reviewed?.totals?.commission,
+			refreshed?.totals?.commission,
+		],
+		[
+			"update_hotel_settlement_changed",
+			reviewedQuote?.totals?.hotelShouldGet,
+			refreshedQuote?.totals?.hotelShouldGet,
+		],
+	]) {
+		if (moneyValue(reviewedValue) !== moneyValue(refreshedValue)) {
+			return { changed: true, reason };
+		}
+	}
+	return { changed: false, reason: "" };
+}
+
+async function revalidateReservationUpdateImmediatelyBeforeMutation({
+	reservation = {},
+	selection = {},
+	reviewedCandidate = {},
+	hotelId = "",
+	pricingDateKeys = [],
+	checkinISO = "",
+	checkoutISO = "",
+	roomTypeOverride = "",
+	loadHotel = getHotelByIdWithPricingDates,
+	buildCandidate = buildReservationUpdateCandidate,
+} = {}) {
+	const expectedHotelId = normalizeId(hotelId || reservation.hotelId);
+	const freshHotel = expectedHotelId
+		? await loadHotel(expectedHotelId, pricingDateKeys)
+		: null;
+	if (
+		!freshHotel ||
+		normalizeId(freshHotel._id) !== expectedHotelId ||
+		!Array.isArray(freshHotel.roomCountDetails)
+	) {
+		return {
+			ok: false,
+			code: "unavailable",
+			requiresRequote: true,
+			reason: "fresh_hotel_inventory_missing",
+			message: "The hotel inventory changed before the update could be saved.",
+		};
+	}
+	const refreshedCandidate = await buildCandidate({
+		reservation,
+		hotel: freshHotel,
+		selection,
+		checkinISO,
+		checkoutISO,
+		roomTypeOverride,
+	});
+	if (!refreshedCandidate?.allowed) {
+		return {
+			ok: false,
+			code: "unavailable",
+			requiresRequote: true,
+			reason: refreshedCandidate?.code || "candidate_no_longer_available",
+			message:
+				refreshedCandidate?.message ||
+				"The selected room or dates are no longer available for this update.",
+			candidate: refreshedCandidate,
+		};
+	}
+	const comparison = reservationUpdateCandidateChange(
+		reviewedCandidate,
+		refreshedCandidate,
+		selection
+	);
+	if (comparison.changed) {
+		return {
+			ok: false,
+			code: "requote_required",
+			requiresRequote: true,
+			reason: comparison.reason,
+			message:
+				"The room configuration or price changed during final verification. Please review a fresh quote before updating the reservation.",
+			candidate: refreshedCandidate,
+		};
+	}
+	return {
+		ok: true,
+		freshHotel,
+		candidate: refreshedCandidate,
 	};
 }
 
@@ -1034,12 +1696,25 @@ async function updateReservationDatesForCase({
 	if (!reservation) return { ok: false, code: "not_found" };
 
 	const reservationHotelId = normalizeId(reservation.hotelId);
-	let activeHotel = hotel;
+	const suppliedHotelId = normalizeId(hotel?._id);
 	if (
-		(!activeHotel || !Array.isArray(activeHotel.roomCountDetails)) &&
-		reservationHotelId
+		reservationHotelId &&
+		suppliedHotelId &&
+		reservationHotelId !== suppliedHotelId
 	) {
-		activeHotel = await HotelDetails.findById(reservationHotelId).lean().exec();
+		return { ok: false, code: "hotel_mismatch", reservation };
+	}
+	const hydrationHotelId = reservationHotelId || suppliedHotelId;
+	const pricingDateKeys = reservationUpdatePricingDateKeys(checkinISO, checkoutISO);
+	if (!pricingDateKeys.length) {
+		return { ok: false, code: "bad_dates", reservation };
+	}
+	let activeHotel = null;
+	if (hydrationHotelId && pricingDateKeys.length) {
+		activeHotel = await getHotelByIdWithPricingDates(
+			hydrationHotelId,
+			pricingDateKeys
+		);
 	}
 	const activeHotelId = normalizeId(activeHotel?._id);
 	if (activeHotelId && reservationHotelId && activeHotelId !== reservationHotelId) {
@@ -1205,6 +1880,29 @@ async function updateReservationDatesForCase({
 			quote: candidate.quote,
 			checkinISO,
 			checkoutISO,
+		};
+	}
+	const finalUpdateVerification = await revalidateReservationUpdateImmediatelyBeforeMutation({
+		reservation,
+		selection,
+		reviewedCandidate: candidate,
+		hotelId: hydrationHotelId,
+		pricingDateKeys,
+		checkinISO,
+		checkoutISO,
+		roomTypeOverride,
+	});
+	if (!finalUpdateVerification.ok) {
+		return {
+			ok: false,
+			code: finalUpdateVerification.code,
+			requiresRequote: true,
+			reason: finalUpdateVerification.reason,
+			message: finalUpdateVerification.message,
+			reservation,
+			selection,
+			requested: { checkinISO, checkoutISO },
+			quote: finalUpdateVerification.candidate?.quote || candidate.quote,
 		};
 	}
 
@@ -1427,6 +2125,7 @@ async function createReservationForCase({
 		throw new Error("AI reservation quote is missing daily pricing rows.");
 	}
 	const guest = validateRequiredGuestDetails(slots);
+	assertQuoteWithinPhysicalInventory({ hotel, slots, quoteData, room });
 	assertGuestCountFitsSelectedRooms({ hotel, slots, quoteData, room, guest });
 	const caseKey = cleanCaseId(caseId);
 	const reservationCaseKey = cleanCaseId(reservationCaseId || caseKey);
@@ -1568,7 +2267,7 @@ async function createReservationForCase({
 			"inventory_validation",
 			() =>
 				validateReservationInventoryForCreate(reservationPayload, {
-					allowOverbook: false,
+					allowOverbook: true,
 				}),
 			{
 				hotelId: String(hotel?._id || ""),
@@ -1595,6 +2294,38 @@ async function createReservationForCase({
 			clientVisibleStatus: "confirmed",
 			inventoryBlocks: true,
 		});
+		const finalQuoteVerification = await timedReservationCreateStep(
+			caseId,
+			"final_quote_verification",
+			() =>
+				revalidateQuoteImmediatelyBeforeInsert({
+					hotel,
+					slots,
+					quoteData,
+					room,
+				}),
+			{
+				hotelId: String(hotel?._id || ""),
+				checkin: slots.checkinISO,
+				checkout: slots.checkoutISO,
+			}
+		);
+		assertFinalQuoteMoneyEqual(
+			finalQuoteVerification.total,
+			reservationPayload.total_amount,
+			"reservation_payload_total_changed"
+		);
+		assertFinalQuoteMoneyEqual(
+			finalQuoteVerification.commission,
+			reservationPayload.commission,
+			"reservation_payload_commission_changed"
+		);
+		if (Number(reservationPayload.total_rooms || 0) !== finalQuoteVerification.totalRooms) {
+			throw quoteChangedBeforeInsertError("reservation_payload_room_count_changed", {
+				expected: finalQuoteVerification.totalRooms,
+				actual: Number(reservationPayload.total_rooms || 0),
+			});
+		}
 		saved = await timedReservationCreateStep(
 			caseId,
 			"reservation_insert",
@@ -1833,6 +2564,13 @@ if (String(process.env.AI_AGENT_TEST_EXPORTS || "").toLowerCase() === "true") {
 		looksLikeReservationActionName,
 		selectedRoomGuestCapacity,
 		assertGuestCountFitsSelectedRooms,
+		reservationRoomSelection,
+		findHotelRoomForSelection,
+		reservationUpdatePricingDateKeys,
+		revalidateQuoteImmediatelyBeforeInsert,
+		quoteChangedBeforeInsertError,
+		reservationUpdateCandidateChange,
+		revalidateReservationUpdateImmediatelyBeforeMutation,
 	};
 }
 

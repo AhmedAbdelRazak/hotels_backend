@@ -7,6 +7,9 @@ const User = require("../models/user");
 const axios = require("axios");
 const jwt = require("jsonwebtoken");
 const CustomerList = require("../models/customerlist");
+const {
+	requestHotelOpenAiKnowledgeSyncSafely,
+} = require("../services/hotelOpenAiKnowledgeSyncTrigger");
 
 require("dotenv").config();
 const fetch = require("node-fetch");
@@ -2354,6 +2357,16 @@ exports.getHotelDistancesFromElHaram = async (req, res) => {
 
 		if (ops.length) {
 			await HotelDetails.bulkWrite(ops);
+			ops.forEach((operation) =>
+				requestHotelOpenAiKnowledgeSyncSafely({
+					hotelId: operation?.updateOne?.filter?._id,
+					reason: "janat_distance_bulk_write",
+					paths: [
+						"distances.walkingToElHaram",
+						"distances.drivingToElHaram",
+					],
+				})
+			);
 		}
 
 		res.status(200).json({

@@ -12,7 +12,10 @@ const jannatSupport = require("../aiagent/jannatSupport/orchestrator").__test;
 const jannatBrain = require("../aiagent/jannatSupport/brain").__test;
 const reservationController = require("../controllers/reservations").__test;
 const modelConfig = require("../services/openaiModelConfig");
+const openaiCore = require("../aiagent/core/openai");
 const nlu = require("../aiagent/core/nlu");
+const selectors = require("../aiagent/core/selectors");
+const actions = require("../aiagent/core/actions").__test;
 
 const hotel = {
 	_id: "zad-ajyad-test",
@@ -23,10 +26,10 @@ const hotel = {
 	hasMealsService: false,
 	busDetails: "يوفر الفندق باصًا خاصًا لنقل الضيوف إلى موقف الشهداء.",
 	roomCountDetails: [
-		{ roomType: "doubleRooms", activeRoom: true, displayName: "Double Room", bedsCount: 1, price: { basePrice: 110 } },
-		{ roomType: "tripleRooms", activeRoom: true, displayName: "Triple Room - Premium Comfort", bedsCount: 1, price: { basePrice: 75 } },
-		{ roomType: "quadRooms", activeRoom: true, displayName: "Quadruple Room", bedsCount: 1, price: { basePrice: 120 } },
-		{ roomType: "familyRooms", activeRoom: true, displayName: "Family Quintuple Room", bedsCount: 1, price: { basePrice: 140 } },
+		{ _id: "double-test", roomType: "doubleRooms", activeRoom: true, displayName: "Double Room", bedsCount: 1, count: 20, price: { basePrice: 110 } },
+		{ _id: "triple-test", roomType: "tripleRooms", activeRoom: true, displayName: "Triple Room - Premium Comfort", bedsCount: 1, count: 20, price: { basePrice: 75 } },
+		{ _id: "quad-test", roomType: "quadRooms", activeRoom: true, displayName: "Quadruple Room", bedsCount: 1, count: 20, price: { basePrice: 120 } },
+		{ _id: "family-five-test", roomType: "familyRooms", activeRoom: true, displayName: "Family Quintuple Room", bedsCount: 1, count: 20, price: { basePrice: 140 } },
 	],
 };
 
@@ -108,6 +111,37 @@ check("Chatbot brain reasoning is never demoted below medium", () => {
 	else process.env.OPENAI_CHATBOT_WRITER_REASONING_EFFORT = previousWriter;
 	if (previousAnalysis === undefined) delete process.env.OPENAI_CHATBOT_ANALYSIS_REASONING_EFFORT;
 	else process.env.OPENAI_CHATBOT_ANALYSIS_REASONING_EFFORT = previousAnalysis;
+});
+
+check("Priority booking and contact rules survive the real prompt cap", () => {
+	const fullPrompt = orchestrator.systemPrompt({
+		sc: {
+			_id: "prompt-cap-case",
+			preferredLanguageCode: "en",
+			conversation: [guest("I need a room")],
+		},
+		hotel,
+		known: { languageCode: "en" },
+		turnKind: "new_chat_first_guest_message",
+	});
+	assert(fullPrompt.length > 28000, "fixture did not exercise prompt trimming");
+	const [trimmed] = openaiCore.trimMessagesForOpenAI([
+		{ role: "system", content: fullPrompt },
+		{ role: "user", content: "latest guest turn".repeat(2000) },
+	]);
+	for (const required of [
+		"PRIORITY CONTRACT",
+		"do not repeat an adjacent assistant answer",
+		"positive PMS guest calendar price is exact",
+		"physical totalSellableUnits",
+		"Use submit_reservation only after",
+		"completed payment fully secures",
+		"+1 (909) 222-3374",
+		"https://wa.me/19092223374",
+		"Never reveal a Saudi reception/front-desk number",
+	]) {
+		assert(trimmed.content.includes(required), `trimmed prompt lost: ${required}`);
+	}
 });
 
 check("Protocol JSON is never treated as raw customer-facing text", () => {
@@ -504,6 +538,725 @@ check("Eight requested beds produce family plus triple room plan", () => {
 	assert.strictEqual(map.get("familyRooms"), 1);
 	assert.strictEqual(map.get("tripleRooms"), 1);
 	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(selections), 8);
+});
+
+check("Exact calendar prices cross months and missing nights use basePrice only", () => {
+	const pricingHotel = {
+		currency: "SAR",
+		openaiKnowledge: {
+			coverageFrom: "2026-07-10",
+			coverageThrough: "2027-04-15",
+		},
+		roomCountDetails: [
+			{
+				_id: "pricing-double",
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				activeRoom: true,
+				count: 5,
+				bedsCount: 1,
+				price: { basePrice: 100 },
+				defaultCost: 67,
+				roomCommission: 50,
+				pricingRate: [
+					{
+						calendarDate: "2026-07-31",
+						price: 75,
+						rootPrice: 0,
+						commissionRate: 90,
+					},
+				],
+			},
+		],
+	};
+	const quote = selectors.priceRoomForStay(
+		pricingHotel,
+		{ roomId: "pricing-double" },
+		"2026-07-31",
+		"2026-08-02"
+	);
+	assert.strictEqual(quote.available, true);
+	assert.deepStrictEqual(quote.perNight, [75, 100]);
+	assert.strictEqual(quote.totals.totalPriceWithCommission, 175);
+	assert.strictEqual(quote.totals.hotelShouldGet, 134);
+	assert.strictEqual(quote.totals.totalCommission, 41);
+});
+
+check("Mixed quote summary preserves exact per-room averages and totals", () => {
+	const summary = orchestrator.compactQuoteToolResult(
+		{
+			ok: true,
+			available: true,
+			quote: {
+				available: true,
+				checkinISO: "2026-07-31",
+				checkoutISO: "2026-08-02",
+				nights: 2,
+				totalRooms: 2,
+				total: 390,
+				averagePerNight: 195,
+				currency: "SAR",
+				roomSelections: [
+					{ roomId: "mixed-double", roomTypeKey: "doubleRooms", count: 1 },
+					{ roomId: "mixed-triple", roomTypeKey: "tripleRooms", count: 1 },
+				],
+				roomLines: [
+					{
+						roomTypeKey: "doubleRooms",
+						roomLabel: "Double Room",
+						count: 1,
+						capacityGuests: 2,
+						totalRooms: 5,
+						perRoomAverageNightly: 87.5,
+						perRoomStayTotal: 175,
+						lineTotal: 175,
+						perNightPerRoom: [75, 100],
+					},
+					{
+						roomTypeKey: "tripleRooms",
+						roomLabel: "Triple Room",
+						count: 1,
+						capacityGuests: 3,
+						totalRooms: 5,
+						perRoomAverageNightly: 107.5,
+						perRoomStayTotal: 215,
+						lineTotal: 215,
+						perNightPerRoom: [95, 120],
+					},
+				],
+			},
+		},
+		{ languageCode: "en", rooms: 2 }
+	);
+	assert.strictEqual(summary.roomLines.length, 2);
+	assert.deepStrictEqual(
+		summary.roomLines.map((line) => [line.roomLabel, line.perRoomStayTotal, line.lineTotal]),
+		[
+			["Double Room", 175, 175],
+			["Triple Room", 215, 215],
+		]
+	);
+});
+
+check("Split-stay final refresh compares exact room mix even when totals match", () => {
+	const periodA = { checkinISO: "2026-08-01", checkoutISO: "2026-08-03" };
+	const periodB = { checkinISO: "2026-08-10", checkoutISO: "2026-08-12" };
+	const makeQuote = (period, roomId, roomTypeKey) => ({
+		available: true,
+		...period,
+		nights: 2,
+		total: 200,
+		currency: "SAR",
+		selectionKey: `id:${roomId}:1`,
+		roomSelections: [{ roomId, roomTypeKey, count: 1 }],
+		roomLines: [
+			{
+				roomId,
+				roomTypeKey,
+				count: 1,
+				perRoomStayTotal: 200,
+				lineTotal: 200,
+				perNightPerRoom: [100, 100],
+			},
+		],
+		perNight: [100, 100],
+	});
+	const quoteA = makeQuote(periodA, "split-double", "doubleRooms");
+	const quoteB = makeQuote(periodB, "split-double", "doubleRooms");
+	const known = {
+		splitStayTotal: 400,
+		splitStayPeriods: [
+			{
+				...periodA,
+				total: 200,
+				quoteFingerprint: orchestrator.splitStayPeriodQuoteFingerprint(quoteA, periodA),
+			},
+			{
+				...periodB,
+				total: 200,
+				quoteFingerprint: orchestrator.splitStayPeriodQuoteFingerprint(quoteB, periodB),
+			},
+		],
+	};
+	const unchanged = known.splitStayPeriods.map((period, index) => ({
+		...period,
+		quoteFingerprint: orchestrator.splitStayPeriodQuoteFingerprint(
+			index === 0 ? quoteA : quoteB,
+			period
+		),
+	}));
+	assert.strictEqual(
+		orchestrator.splitStayQuoteTotalsMatchKnown(known, unchanged, 400),
+		true
+	);
+	const changedQuoteB = makeQuote(periodB, "split-triple", "tripleRooms");
+	const changed = [
+		unchanged[0],
+		{
+			...unchanged[1],
+			quoteFingerprint: orchestrator.splitStayPeriodQuoteFingerprint(
+				changedQuoteB,
+				periodB
+			),
+		},
+	];
+	assert.strictEqual(
+		orchestrator.splitStayQuoteTotalsMatchKnown(known, changed, 400),
+		false
+	);
+});
+
+check("Explicit blackout blocks while root price zero alone never blocks", () => {
+	const room = {
+		_id: "blackout-double",
+		roomType: "doubleRooms",
+		displayName: "Double Room",
+		activeRoom: true,
+		count: 5,
+		price: { basePrice: 100 },
+		pricingRate: [
+			{ calendarDate: "2026-08-10", price: 100, rootPrice: 0 },
+			{ calendarDate: "2026-08-11", price: 100, status: "blocked" },
+		],
+	};
+	const hotelWithBlackout = {
+		currency: "SAR",
+		openaiKnowledge: { coverageThrough: "2027-04-15" },
+		roomCountDetails: [room],
+	};
+	assert.strictEqual(
+		selectors.priceRoomForStay(
+			hotelWithBlackout,
+			{ roomId: room._id },
+			"2026-08-10",
+			"2026-08-11"
+		).available,
+		true
+	);
+	const blocked = selectors.priceRoomForStay(
+		hotelWithBlackout,
+		{ roomId: room._id },
+		"2026-08-11",
+		"2026-08-12"
+	);
+	assert.strictEqual(blocked.available, false);
+	assert.strictEqual(blocked.firstBlockedDate, "2026-08-11");
+});
+
+check("Published pricing horizon is a strict quote boundary", () => {
+	const outside = selectors.priceRoomForStay(
+		{
+			currency: "SAR",
+			openaiKnowledge: { coverageThrough: "2027-04-15" },
+			roomCountDetails: [
+				{
+					_id: "horizon-double",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 5,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		{ roomId: "horizon-double" },
+		"2027-04-15",
+		"2027-04-17"
+	);
+	assert.strictEqual(outside.available, false);
+	assert.strictEqual(outside.reason, "outside_pricing_coverage");
+	assert.strictEqual(outside.firstBlockedDate, "2027-04-16");
+	const withoutVectorMetadata = selectors.priceRoomForStay(
+		{
+			currency: "SAR",
+			roomCountDetails: [
+				{
+					_id: "horizon-no-vector",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 5,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		{ roomId: "horizon-no-vector" },
+		"2027-04-16",
+		"2027-04-17"
+	);
+	assert.strictEqual(withoutVectorMetadata.available, false);
+	assert.strictEqual(withoutVectorMetadata.reason, "outside_pricing_coverage");
+});
+
+check("Six guests select the exact six-bed family configuration by roomId", () => {
+	const capacityHotel = {
+		roomCountDetails: [
+			{
+				_id: "family-five",
+				roomType: "familyRooms",
+				displayName: "Family Quintuple Room",
+				description: "Accommodates up to 5 guests.",
+				activeRoom: true,
+				count: 10,
+				price: { basePrice: 100 },
+			},
+			{
+				_id: "family-six",
+				roomType: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				description: "Accommodates up to 6 guests with six beds.",
+				activeRoom: true,
+				count: 35,
+				price: { basePrice: 100 },
+			},
+		],
+	};
+	const plan = orchestrator.bestRoomSelectionsForGuests(capacityHotel, 6);
+	assert.strictEqual(plan.length, 1);
+	assert.strictEqual(plan[0].roomId, "family-six");
+	assert.strictEqual(plan[0].capacityGuests, 6);
+	assert.strictEqual(plan[0].count, 1);
+});
+
+check("Ten double rooms cap at five and fill the remainder with five triples", () => {
+	const inventoryHotel = {
+		currency: "SAR",
+		openaiKnowledge: { coverageThrough: "2027-04-15" },
+		roomCountDetails: [
+			{
+				_id: "five-doubles",
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				activeRoom: true,
+				count: 5,
+				price: { basePrice: 100 },
+			},
+			{
+				_id: "five-triples",
+				roomType: "tripleRooms",
+				displayName: "Triple Room",
+				activeRoom: true,
+				count: 5,
+				price: { basePrice: 120 },
+			},
+		],
+	};
+	const plan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		inventoryHotel,
+		[{ roomTypeKey: "doubleRooms", count: 10 }],
+		{
+			checkinISO: "2026-08-20",
+			checkoutISO: "2026-08-22",
+		}
+	);
+	assert.strictEqual(plan.adjusted, true);
+	assert.strictEqual(plan.unfilledRooms, 0);
+	assert.deepStrictEqual(
+		plan.roomSelections.map((item) => [item.roomId, item.count]),
+		[
+			["five-doubles", 5],
+			["five-triples", 5],
+		]
+	);
+	const known = orchestrator.syncKnownFromQuote({
+		quote: {
+			available: true,
+			checkinISO: "2026-08-20",
+			checkoutISO: "2026-08-22",
+			roomPlanAdjusted: true,
+			roomPlanRequiresGuestConfirmation: true,
+			requestedRoomSelections: plan.requestedRoomSelections,
+			recommendedRoomSelections: plan.roomSelections,
+			roomSelections: plan.roomSelections,
+			rooms: plan.roomSelections,
+			totalRooms: 10,
+			nights: 2,
+			total: 2200,
+		},
+	});
+	assert.strictEqual(orchestrator.adjustedRoomPlanConfirmationPending(known), true);
+	const confirmed = orchestrator.applyAdjustedRoomPlanGuestConfirmation(
+		known,
+		guest("Yes, I agree"),
+		ai("Recommended mix", "quote_ready")
+	);
+	assert.strictEqual(orchestrator.adjustedRoomPlanConfirmationPending(confirmed), false);
+});
+
+check("Exact family variant overflow uses the next same-category physical configuration", () => {
+	const inventoryHotel = {
+		currency: "SAR",
+		openaiKnowledge: { coverageThrough: "2027-04-15" },
+		roomCountDetails: [
+			{
+				_id: "family-five-exact",
+				roomType: "familyRooms",
+				displayName: "Family Quintuple Room",
+				activeRoom: true,
+				count: 2,
+				price: { basePrice: 140 },
+			},
+			{
+				_id: "family-six-overflow",
+				roomType: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				activeRoom: true,
+				count: 3,
+				price: { basePrice: 100 },
+			},
+		],
+	};
+	const plan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		inventoryHotel,
+		[
+			{
+				roomId: "family-five-exact",
+				roomTypeKey: "familyRooms",
+				roomDisplayName: "Family Quintuple Room",
+				capacityGuests: 5,
+				count: 4,
+			},
+		],
+		{ checkinISO: "2026-08-20", checkoutISO: "2026-08-22" }
+	);
+	assert.strictEqual(plan.adjusted, true);
+	assert.strictEqual(plan.unfilledRooms, 0);
+	assert.deepStrictEqual(
+		plan.roomSelections.map((item) => [item.roomId, item.count]),
+		[
+			["family-five-exact", 2],
+			["family-six-overflow", 2],
+		]
+	);
+});
+
+check("Inactive zero-count zero-base and unknown-capacity rooms fail closed", () => {
+	const baseRoom = {
+		_id: "unsellable-room",
+		roomType: "doubleRooms",
+		displayName: "Double Room",
+		activeRoom: true,
+		count: 1,
+		price: { basePrice: 100 },
+	};
+	const quote = (room) =>
+		selectors.priceRoomForStay(
+			{
+				currency: "SAR",
+				openaiKnowledge: { coverageThrough: "2027-04-15" },
+				roomCountDetails: [room],
+			},
+			{ roomId: room._id },
+			"2026-08-20",
+			"2026-08-22"
+		);
+	assert.strictEqual(quote({ ...baseRoom, activeRoom: false }).available, false);
+	assert.strictEqual(quote({ ...baseRoom, count: 0 }).available, false);
+	assert.strictEqual(
+		quote({
+			...baseRoom,
+			price: { basePrice: 0 },
+			pricingRate: [{ calendarDate: "2026-08-20", price: 200 }],
+		}).available,
+		false
+	);
+	assert.strictEqual(
+		quote({
+			...baseRoom,
+			roomType: "other",
+			displayName: "Generic Room",
+			description: "Contact management for capacity.",
+		}).available,
+		false
+	);
+});
+
+check("No sellable physical candidates reports the full requested shortage", () => {
+	const plan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		{
+			roomCountDetails: [
+				{
+					_id: "zero-double",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 0,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		[{ roomTypeKey: "doubleRooms", count: 3 }],
+		{}
+	);
+	assert.strictEqual(plan.adjusted, true);
+	assert.strictEqual(plan.unfilledRooms, 3);
+	assert.deepStrictEqual(plan.roomSelections, []);
+});
+
+check("Adding the exact roomId to a normal type request is not a changed room plan", () => {
+	const plan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		{
+			roomCountDetails: [
+				{
+					_id: "normal-double",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 5,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		[{ roomTypeKey: "doubleRooms", count: 1 }],
+		{}
+	);
+	assert.strictEqual(plan.adjusted, false);
+	assert.strictEqual(plan.roomSelections[0].roomId, "normal-double");
+});
+
+check("Large group planner searches beyond minRooms plus two", () => {
+	const plan = orchestrator.bestRoomSelectionsForGuests(
+		{
+			roomCountDetails: [
+				{
+					_id: "one-six-bed",
+					roomType: "familyRooms",
+					displayName: "Spacious Six-Bed Room",
+					activeRoom: true,
+					count: 1,
+					price: { basePrice: 100 },
+				},
+				{
+					_id: "many-doubles",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 20,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		20
+	);
+	assert.strictEqual(orchestrator.roomSelectionsGuestCapacity(plan), 20);
+	assert.strictEqual(
+		plan.reduce((total, item) => total + item.count, 0),
+		8
+	);
+});
+
+check("Single occupancy maps to a real double room when no single exists", () => {
+	const plan = orchestrator.fitRoomSelectionsToPhysicalInventory(
+		{
+			roomCountDetails: [
+				{
+					_id: "single-use-double",
+					roomType: "doubleRooms",
+					displayName: "Double Room",
+					activeRoom: true,
+					count: 4,
+					price: { basePrice: 100 },
+				},
+			],
+		},
+		[{ roomTypeKey: "singleRooms", count: 1 }],
+		{}
+	);
+	assert.strictEqual(plan.singleMappedToDouble, true);
+	assert.strictEqual(plan.roomSelections[0].roomTypeKey, "doubleRooms");
+	assert.strictEqual(plan.roomSelections[0].roomId, "single-use-double");
+});
+
+check("Six-bed wording maps to family category for exact configuration resolution", () => {
+	assert.strictEqual(nlu.mapRoomToKey("I need a six-bed room"), "familyRooms");
+	assert.strictEqual(nlu.mapRoomToKey("room for 6"), "familyRooms");
+});
+
+check("Legacy PMS room type aliases use the display capacity and stable roomId", () => {
+	const legacyTriple = {
+		_id: "legacy-twin-triple",
+		roomType: "twinRooms",
+		displayName: "Triple Room - Comfort",
+		activeRoom: true,
+		count: 8,
+		price: { basePrice: 75 },
+	};
+	assert.strictEqual(selectors.canonicalRoomTypeKey(legacyTriple), "tripleRooms");
+	assert.strictEqual(
+		selectors.resolveRoomForStay(
+			{ roomCountDetails: [legacyTriple] },
+			{ roomType: "tripleRooms" }
+		)?._id,
+		"legacy-twin-triple"
+	);
+});
+
+check("Reservation updates hydrate every requested stay night", () => {
+	assert.deepStrictEqual(
+		actions.reservationUpdatePricingDateKeys("2026-07-31", "2026-08-03"),
+		["2026-07-31", "2026-08-01", "2026-08-02"]
+	);
+});
+
+check("Reservation update selection preserves one stable hotel room configuration", () => {
+	const selection = actions.reservationRoomSelection({
+		pickedRoomsType: [
+			{
+				hotelRoomConfigId: "family-six",
+				room_type: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				count: 1,
+			},
+			{
+				hotelRoomConfigId: "family-six",
+				room_type: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				count: 1,
+			},
+		],
+	});
+	assert.strictEqual(selection.supported, true);
+	assert.strictEqual(selection.roomId, "family-six");
+	assert.strictEqual(selection.hotelRoomConfigId, "family-six");
+	assert.strictEqual(selection.count, 2);
+});
+
+check("Reservation update rejects distinct configurations sharing one room type", () => {
+	const selection = actions.reservationRoomSelection({
+		pickedRoomsType: [
+			{
+				hotelRoomConfigId: "family-five",
+				room_type: "familyRooms",
+				displayName: "Family Quintuple Room",
+			},
+			{
+				hotelRoomConfigId: "family-six",
+				room_type: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+			},
+		],
+	});
+	assert.strictEqual(selection.supported, false);
+	assert.strictEqual(selection.reason, "multiple_room_configurations");
+});
+
+check("Reservation room override outranks the old room ID and display name", () => {
+	const updateHotel = {
+		roomCountDetails: [
+			{
+				_id: "double-config",
+				roomType: "doubleRooms",
+				displayName: "Double Room",
+				activeRoom: true,
+				count: 1,
+				price: { basePrice: 100 },
+			},
+			{
+				_id: "triple-config",
+				roomType: "tripleRooms",
+				displayName: "Triple Room",
+				activeRoom: true,
+				count: 1,
+				price: { basePrice: 100 },
+			},
+		],
+	};
+	const overridden = actions.findHotelRoomForSelection(
+		updateHotel,
+		{
+			roomId: "double-config",
+			roomType: "doubleRooms",
+			displayName: "Double Room",
+		},
+		"tripleRooms"
+	);
+	assert.strictEqual(overridden?._id, "triple-config");
+});
+
+check("Reservation update keeps stable room ID when the type is unchanged", () => {
+	const updateHotel = {
+		roomCountDetails: [
+			{
+				_id: "family-five",
+				roomType: "familyRooms",
+				displayName: "Family Quintuple Room",
+				activeRoom: true,
+				count: 1,
+				price: { basePrice: 100 },
+			},
+			{
+				_id: "family-six",
+				roomType: "familyRooms",
+				displayName: "Spacious Six-Bed Room",
+				activeRoom: true,
+				count: 1,
+				price: { basePrice: 100 },
+			},
+		],
+	};
+	const preserved = actions.findHotelRoomForSelection(
+		updateHotel,
+		{
+			roomId: "family-six",
+			roomType: "familyRooms",
+			displayName: "Spacious Six-Bed Room",
+		},
+		"familyRooms"
+	);
+	assert.strictEqual(preserved?._id, "family-six");
+});
+
+check("Reservation update requote wording never claims a stale update succeeded", () => {
+	const message = orchestrator.buildFriendlyReservationUpdateMessage(
+		{ preferredLanguageCode: "en", clientName: "Ahmed" },
+		{
+			languageCode: "en",
+			confirmation: "1234567890",
+			checkinISO: "2026-08-20",
+			checkoutISO: "2026-08-22",
+		},
+		{
+			ok: false,
+			code: "requote_required",
+			requiresRequote: true,
+			quote: { totals: { totalPriceWithCommission: 450 } },
+		},
+		guest("Yes, change it")
+	);
+	assert(/was not updated/i.test(message));
+	assert(/450\s*SAR/i.test(message));
+	assert(!/updated successfully/i.test(message));
+});
+
+check("Final refresh detects any price or physical room-mix change", () => {
+	const base = {
+		available: true,
+		checkinISO: "2026-08-20",
+		checkoutISO: "2026-08-22",
+		roomSelections: [
+			{ roomId: "five-doubles", roomTypeKey: "doubleRooms", count: 5 },
+			{ roomId: "five-triples", roomTypeKey: "tripleRooms", count: 5 },
+		],
+		totalRooms: 10,
+		nights: 2,
+		averagePerNight: 1100,
+		total: 2200,
+	};
+	assert.strictEqual(orchestrator.quoteMateriallyChanged(base, { ...base }), false);
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(base, { ...base, total: 2300 }),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.quoteMateriallyChanged(base, {
+			...base,
+			roomSelections: [
+				{ roomId: "five-doubles", roomTypeKey: "doubleRooms", count: 4 },
+				{ roomId: "five-triples", roomTypeKey: "tripleRooms", count: 6 },
+			],
+		}),
+		true
+	);
 });
 
 check("Arabic me and six friends with eight beds recovers target and plan", () => {

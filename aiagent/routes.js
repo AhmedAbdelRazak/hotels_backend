@@ -3,25 +3,29 @@ const express = require("express");
 const { ensureAIAllowed } = require("./core/policy");
 const {
 	getSupportCaseById,
-	getHotelById,
+	getHotelByIdWithPricingDates,
 	getReservationByConfirmation,
 } = require("./core/db");
 const { getOrCreateCaseState, clearCase } = require("./core/state");
 const {
 	listAvailableRoomsForStay,
 	priceRoomForStay,
+	canonicalRoomTypeKey,
+	eachDate,
+	roomSellableInventory,
 } = require("./core/selectors");
 const { pushReservationLinks } = require("./core/actions");
 const {
-	pickOpenAIModel,
-	pickReasoningEffort,
+	pickChatbotOpenAIModel,
+	pickChatbotReasoningEffort,
 } = require("../services/openaiModelConfig");
+const { getChatbotOpenAIRuntimeConfig } = require("./core/openai");
 
 /**
  * GET /api/aiagent/health
  * GET /api/aiagent/state/:caseId
  * POST /api/aiagent/clear/:caseId
- * GET /api/aiagent/preview-quote?caseId&checkin&checkout&roomType&displayName
+	 * GET /api/aiagent/preview-quote?caseId&checkin&checkout&roomType&displayName&roomId&rooms
  * GET /api/aiagent/reservation-by-confirmation/:cn
  * POST /api/aiagent/send-links/:caseId   {reservationId, confirmation}
  * POST /api/aiagent/mock-create/:caseId
@@ -30,17 +34,23 @@ function attachRoutes(app, io) {
 	const router = express.Router();
 
 	router.get("/health", async (_req, res) => {
+		const runtime = getChatbotOpenAIRuntimeConfig();
 		return res.json({
 			ok: true,
 			openai: !!process.env.OPENAI_API_KEY,
-			model: pickOpenAIModel("default"),
-			analysisModel: pickOpenAIModel("analysis"),
-			nluModel: pickOpenAIModel("nlu"),
-			writerModel: pickOpenAIModel("writer"),
-			reasoningEffort: pickReasoningEffort("reasoning"),
-			writerReasoningEffort: pickReasoningEffort("writer"),
-			nluReasoningEffort: pickReasoningEffort("nlu"),
-			analysisReasoningEffort: pickReasoningEffort("analysis"),
+			model: pickChatbotOpenAIModel("default"),
+			reasoningModel: pickChatbotOpenAIModel("reasoning"),
+			analysisModel: pickChatbotOpenAIModel("analysis"),
+			nluModel: pickChatbotOpenAIModel("nlu"),
+			writerModel: pickChatbotOpenAIModel("writer"),
+			reasoningEffort: pickChatbotReasoningEffort("reasoning"),
+			writerReasoningEffort: pickChatbotReasoningEffort("writer"),
+			nluReasoningEffort: pickChatbotReasoningEffort("nlu"),
+			analysisReasoningEffort: pickChatbotReasoningEffort("analysis"),
+			responsesEnabled: runtime.responsesEnabled,
+			responseContinuationEnabled: runtime.responseContinuationEnabled,
+			retrieval: runtime.fileSearch,
+			outputTokens: runtime.outputTokens,
 		});
 	});
 
@@ -95,25 +105,41 @@ function attachRoutes(app, io) {
 
 	router.get("/preview-quote", async (req, res) => {
 		try {
-			const { caseId, checkin, checkout, roomType, displayName } = req.query;
-			if (!caseId || !checkin || !checkout || !roomType) {
+			const { caseId, checkin, checkout, roomType, displayName, roomId } = req.query;
+			if (!caseId || !checkin || !checkout || (!roomType && !roomId)) {
 				return res.status(400).json({ ok: false, error: "missing_params" });
 			}
+			const dates = eachDate(checkin, checkout);
+			if (!dates.length) {
+				return res.status(400).json({ ok: false, error: "bad_dates" });
+			}
+			const requestedRooms = Math.max(
+				1,
+				Math.floor(Number(req.query.rooms || 1) || 1)
+			);
 			const sc = await getSupportCaseById(caseId);
 			if (!sc)
 				return res.status(404).json({ ok: false, error: "case_not_found" });
 
-			const hotel = await getHotelById(sc.hotelId);
+			const hotel = await getHotelByIdWithPricingDates(sc.hotelId, dates);
 			if (!hotel)
 				return res.status(404).json({ ok: false, error: "hotel_not_found" });
 
 			const rooms = listAvailableRoomsForStay(hotel, checkin, checkout);
+			const roomIdText = String(roomId || "").trim();
+			const requestedType = String(roomType || "").trim();
 			const chosen =
+				(roomIdText
+					? rooms.find((r) => String(r.room?._id || "") === roomIdText)
+					: null) ||
 				rooms.find(
 					(r) =>
-						r.room?.roomType === roomType &&
+						(!requestedType || canonicalRoomTypeKey(r.room) === requestedType) &&
 						(displayName ? r.room?.displayName === displayName : true)
-				) || rooms.find((r) => r.room?.roomType === roomType);
+				) ||
+				rooms.find(
+					(r) => !requestedType || canonicalRoomTypeKey(r.room) === requestedType
+				);
 
 			if (!chosen)
 				return res.json({
@@ -134,13 +160,34 @@ function attachRoutes(app, io) {
 					available: false,
 					reason: chosen.reason || "not_available",
 				});
+			const physicalRooms = roomSellableInventory(chosen.room);
+			if (requestedRooms > physicalRooms) {
+				return res.json({
+					ok: true,
+					available: false,
+					reason: "physical_inventory_exceeded",
+					requestedRooms,
+					physicalRooms,
+				});
+			}
 
 			const quote = priceRoomForStay(hotel, chosen.room, checkin, checkout);
-			const totalWithCommission =
+			if (!quote.available) {
+				return res.json({
+					ok: true,
+					available: false,
+					reason: quote.reason || "not_available",
+					date: quote.firstBlockedDate || undefined,
+				});
+			}
+			const unitTotal =
 				quote.totals?.totalPriceWithCommission || quote.totalWithCommission || 0;
-			const totalRoot = quote.totals?.hotelShouldGet || quote.totalRoot || 0;
-			const commission =
+			const unitRoot = quote.totals?.hotelShouldGet || quote.totalRoot || 0;
+			const unitCommission =
 				quote.totals?.totalCommission || quote.commission || 0;
+			const totalWithCommission = Number((unitTotal * requestedRooms).toFixed(2));
+			const totalRoot = Number((unitRoot * requestedRooms).toFixed(2));
+			const commission = Number((unitCommission * requestedRooms).toFixed(2));
 			const zero =
 				Array.isArray(quote.perNight) &&
 				quote.perNight.some((v) => !v || Number(v) <= 0);
@@ -158,10 +205,15 @@ function attachRoutes(app, io) {
 				nights: quote.nights,
 				currency: (hotel.currency || "sar").toUpperCase(),
 				room: {
-					roomType: chosen.room.roomType,
+					roomId: String(chosen.room._id || ""),
+					roomType: canonicalRoomTypeKey(chosen.room),
+					sourcePmsRoomType: chosen.room.roomType,
 					displayName: chosen.room.displayName || chosen.room.roomType,
+					physicalRooms,
 				},
+				rooms: requestedRooms,
 				perNight: quote.perNight,
+				unitTotalWithCommission: Number(unitTotal.toFixed(2)),
 				totalWithCommission,
 				totalRoot,
 				commission,

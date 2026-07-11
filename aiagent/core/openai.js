@@ -1,17 +1,19 @@
 // aiagent/core/openai.js
+const crypto = require("crypto");
 const OpenAI = require("openai");
 const {
 	buildChatCompletionBody,
-	pickOpenAIModel,
-	pickReasoningEffort,
+	pickChatbotOpenAIModel,
+	pickChatbotReasoningEffort,
 	sanitizeModelName,
 	sanitizeReasoningEffort,
 	usesCompletionTokens,
 } = require("../../services/openaiModelConfig");
+const { getReadyHotelOpenAiKnowledge } = require("./db");
 
 function intFromEnv(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
 	const value = parseInt(process.env[name] || "", 10);
-	const resolved = Number.isFinite(value) && value > 0 ? value : fallback;
+	const resolved = Number.isFinite(value) && value >= min ? value : fallback;
 	return Math.min(max, Math.max(min, resolved));
 }
 
@@ -26,7 +28,11 @@ const OPENAI_TIMEOUT_MS = intFromEnv(
 	intFromEnv("OPENAI_TIMEOUT_MS", 30000, { min: 1500, max: 60000 }),
 	{ min: 1500, max: 60000 }
 );
-const OPENAI_MAX_RETRIES = intFromEnv("OPENAI_MAX_RETRIES", 0);
+const OPENAI_MAX_RETRIES = intFromEnv(
+	"OPENAI_CHATBOT_MAX_RETRIES",
+	intFromEnv("OPENAI_MAX_RETRIES", 0, { min: 0, max: 3 }),
+	{ min: 0, max: 3 }
+);
 const OPENAI_MAX_PROMPT_CHARS = intFromEnv(
 	"OPENAI_CHATBOT_MAX_PROMPT_CHARS",
 	28000
@@ -34,6 +40,40 @@ const OPENAI_MAX_PROMPT_CHARS = intFromEnv(
 const OPENAI_RESPONSES_ENABLED = boolFromEnv(
 	"OPENAI_CHATBOT_RESPONSES_ENABLED",
 	true
+);
+const OPENAI_FILE_SEARCH_ENABLED = boolFromEnv(
+	"OPENAI_CHATBOT_FILE_SEARCH_ENABLED",
+	true
+);
+const OPENAI_FILE_SEARCH_MAX_RESULTS = intFromEnv(
+	"OPENAI_CHATBOT_FILE_SEARCH_MAX_RESULTS",
+	3,
+	{ min: 1, max: 50 }
+);
+const OPENAI_OUTPUT_TOKEN_MULTIPLIER = intFromEnv(
+	"OPENAI_CHATBOT_OUTPUT_TOKEN_MULTIPLIER",
+	6,
+	{ min: 3, max: 12 }
+);
+const OPENAI_MAX_OUTPUT_TOKENS = intFromEnv(
+	"OPENAI_CHATBOT_MAX_OUTPUT_TOKENS",
+	12000,
+	{ min: 2000, max: 32000 }
+);
+const OPENAI_REASONING_MIN_OUTPUT_TOKENS = intFromEnv(
+	"OPENAI_CHATBOT_REASONING_MIN_OUTPUT_TOKENS",
+	4000,
+	{ min: 1000, max: OPENAI_MAX_OUTPUT_TOKENS }
+);
+const OPENAI_WRITER_MIN_OUTPUT_TOKENS = intFromEnv(
+	"OPENAI_CHATBOT_WRITER_MIN_OUTPUT_TOKENS",
+	1800,
+	{ min: 600, max: OPENAI_MAX_OUTPUT_TOKENS }
+);
+const OPENAI_SUPPORT_MIN_OUTPUT_TOKENS = intFromEnv(
+	"OPENAI_CHATBOT_SUPPORT_MIN_OUTPUT_TOKENS",
+	1200,
+	{ min: 450, max: OPENAI_MAX_OUTPUT_TOKENS }
 );
 
 const client = process.env.OPENAI_API_KEY
@@ -61,7 +101,125 @@ async function withDeadline(factory, timeoutMs) {
 }
 
 function pickModel(kind = "nlu") {
-	return pickOpenAIModel(kind);
+	return pickChatbotOpenAIModel(kind);
+}
+
+function minimumOutputTokensForKind(kind = "nlu") {
+	if (["reasoning", "default"].includes(kind)) {
+		return OPENAI_REASONING_MIN_OUTPUT_TOKENS;
+	}
+	if (kind === "writer") return OPENAI_WRITER_MIN_OUTPUT_TOKENS;
+	return OPENAI_SUPPORT_MIN_OUTPUT_TOKENS;
+}
+
+function initialOutputTokenLimit(kind = "nlu", requestedTokens = 0, model = "") {
+	const requested = Math.max(1, Number(requestedTokens || 0) || 1);
+	if (!usesCompletionTokens(model)) return requested;
+	return Math.min(
+		OPENAI_MAX_OUTPUT_TOKENS,
+		Math.max(
+			minimumOutputTokensForKind(kind),
+			requested * OPENAI_OUTPUT_TOKEN_MULTIPLIER
+		)
+	);
+}
+
+function fileSearchToolForVectorStore(
+	vectorStoreId = "",
+	maxResults = OPENAI_FILE_SEARCH_MAX_RESULTS
+) {
+	const id = String(vectorStoreId || "").trim();
+	if (!/^vs_[A-Za-z0-9_-]+$/.test(id)) return null;
+	const resultLimit = Math.max(1, Math.min(Number(maxResults) || 3, 50));
+	return {
+		type: "file_search",
+		vector_store_ids: [id],
+		max_num_results: resultLimit,
+	};
+}
+
+function responseUsedFileSearch(response = {}) {
+	return (Array.isArray(response?.output) ? response.output : []).some(
+		(item) => item?.type === "file_search_call"
+	);
+}
+
+function responsesThreadContextKey({
+	model = "",
+	vectorStoreId = "",
+	factPackHash = "",
+} = {}) {
+	return crypto
+		.createHash("sha256")
+		.update(
+			JSON.stringify({
+				model: sanitizeModelName(model),
+				vectorStoreId: String(vectorStoreId || "").trim(),
+				factPackHash: String(factPackHash || "").trim(),
+			})
+		)
+		.digest("hex");
+}
+
+function resolveResponsesThreadContinuation({
+	previousResponseId = "",
+	previousContextKey = "",
+	currentContextKey = "",
+	resetThread = false,
+} = {}) {
+	const responseId = String(previousResponseId || "").trim();
+	const priorKey = String(previousContextKey || "").trim();
+	const currentKey = String(currentContextKey || "").trim();
+	const contextChanged = Boolean(priorKey && currentKey && priorKey !== currentKey);
+	const reset = Boolean(responseId && (resetThread || contextChanged));
+	return {
+		previousResponseId: reset ? "" : responseId,
+		threadReset: reset,
+		contextChanged,
+	};
+}
+
+async function resolveCurrentHotelFileSearchContext(metadata = {}) {
+	if (!OPENAI_FILE_SEARCH_ENABLED) return null;
+	const hotelId = String(metadata?.hotelId || "").trim();
+	if (!hotelId) return null;
+	try {
+		const knowledge = await getReadyHotelOpenAiKnowledge(hotelId);
+		if (!knowledge || knowledge.hotelId !== hotelId) return null;
+		return knowledge;
+	} catch (error) {
+		console.warn(
+			"[aiagent] hotel file-search context unavailable:",
+			error?.message || error
+		);
+		return null;
+	}
+}
+
+function getChatbotOpenAIRuntimeConfig() {
+	return {
+		responsesEnabled: OPENAI_RESPONSES_ENABLED,
+		responseContinuationEnabled: boolFromEnv(
+			"AI_OPENAI_RESPONSE_CONTINUATION",
+			false
+		),
+		timeoutMs: OPENAI_TIMEOUT_MS,
+		maxRetries: OPENAI_MAX_RETRIES,
+		fileSearch: {
+			enabled: OPENAI_FILE_SEARCH_ENABLED && OPENAI_RESPONSES_ENABLED,
+			api: "responses",
+			currentHotelOnly: true,
+			readyKnowledgeOnly: true,
+			maxResults: OPENAI_FILE_SEARCH_MAX_RESULTS,
+		},
+		outputTokens: {
+			multiplier: OPENAI_OUTPUT_TOKEN_MULTIPLIER,
+			maximum: OPENAI_MAX_OUTPUT_TOKENS,
+			reasoningMinimum: OPENAI_REASONING_MIN_OUTPUT_TOKENS,
+			writerMinimum: OPENAI_WRITER_MIN_OUTPUT_TOKENS,
+			supportMinimum: OPENAI_SUPPORT_MIN_OUTPUT_TOKENS,
+		},
+	};
 }
 
 function clipMiddle(text = "", maxChars = 0) {
@@ -211,7 +369,10 @@ function isIncompleteOpenAIError(error = {}) {
 function expandedOutputTokenLimit(value = 0) {
 	const base = Number(value || 0) || 0;
 	if (!base) return 0;
-	return Math.min(12000, Math.max(base + 2500, base * 3));
+	return Math.min(
+		OPENAI_MAX_OUTPUT_TOKENS,
+		Math.max(base + 2500, base * 3)
+	);
 }
 
 function buildResponsesBody({
@@ -225,13 +386,19 @@ function buildResponsesBody({
 	metadata = {},
 	prompt_cache_key = "",
 	safety_identifier = "",
+	file_search_vector_store_id = "",
+	file_search_max_results = OPENAI_FILE_SEARCH_MAX_RESULTS,
 }) {
-	const resolvedModel = sanitizeModelName(model) || pickOpenAIModel();
+	const resolvedModel = sanitizeModelName(model) || pickModel("default");
 	const gpt5Style = usesCompletionTokens(resolvedModel);
 	const tokenLimit = Number(maxTokens);
 	const allowedReasoningEffort = sanitizeReasoningEffort(reasoning_effort);
 	const { instructions, input } = splitMessagesForResponses(messages, response_format);
 	const text = responseTextConfig(response_format);
+	const fileSearchTool = fileSearchToolForVectorStore(
+		file_search_vector_store_id,
+		file_search_max_results
+	);
 	return {
 		model: resolvedModel,
 		instructions,
@@ -242,6 +409,7 @@ function buildResponsesBody({
 		...(metadata && Object.keys(metadata).length ? { metadata } : {}),
 		...(prompt_cache_key ? { prompt_cache_key } : {}),
 		...(safety_identifier ? { safety_identifier } : {}),
+		...(fileSearchTool ? { tools: [fileSearchTool] } : {}),
 		...(gpt5Style && allowedReasoningEffort
 			? { reasoning: { effort: allowedReasoningEffort } }
 			: {}),
@@ -252,7 +420,7 @@ function buildResponsesBody({
 	};
 }
 
-async function chat(
+async function runChatCompletion(
 	messages,
 	{
 		kind = "nlu",
@@ -260,16 +428,18 @@ async function chat(
 		max_tokens = 350,
 		reasoning_effort = "",
 		response_format = null,
+		max_output_tokens = 0,
 	} = {}
 ) {
 	if (!client) {
 		throw new Error("OPENAI_API_KEY is not configured.");
 	}
+	const startedAt = Date.now();
 	const model = pickModel(kind);
 	const gpt5Style = usesCompletionTokens(model);
-	const tokenLimit = gpt5Style
-		? Math.max(max_tokens * 3, kind === "writer" ? 600 : 450)
-		: max_tokens;
+	const tokenLimit = Number(max_output_tokens) > 0
+		? Math.min(OPENAI_MAX_OUTPUT_TOKENS, Number(max_output_tokens))
+		: initialOutputTokenLimit(kind, max_tokens, model);
 	const body = buildChatCompletionBody({
 		model,
 		messages: trimMessagesForOpenAI(
@@ -279,7 +449,7 @@ async function chat(
 		maxTokens: tokenLimit,
 		response_format,
 		reasoning_effort: gpt5Style
-			? reasoning_effort || pickReasoningEffort(kind)
+			? reasoning_effort || pickChatbotReasoningEffort(kind)
 			: "",
 	});
 	const res = await withDeadline(
@@ -299,9 +469,26 @@ async function chat(
 		error.incomplete = true;
 		error.reason = "length";
 		error.partialTextLength = text.length;
+		error.model = res?.model || model;
+		error.usage = res?.usage || null;
 		throw error;
 	}
-	return text;
+	return {
+		text,
+		responseId: "",
+		previousResponseId: "",
+		api: "chat_completions",
+		model: res?.model || model,
+		latencyMs: Date.now() - startedAt,
+		usage: res?.usage || null,
+		fileSearchUsed: false,
+		fileSearchConfigured: false,
+	};
+}
+
+async function chat(messages, options = {}) {
+	const result = await runChatCompletion(messages, options);
+	return result.text;
 }
 
 async function chatWithState(
@@ -317,30 +504,49 @@ async function chatWithState(
 		prompt_cache_key = "",
 		safety_identifier = "",
 		use_responses = OPENAI_RESPONSES_ENABLED,
+		previous_response_context_key = "",
+		reset_thread = false,
 	} = {}
 ) {
+	const overallStartedAt = Date.now();
 	if (!client) {
 		throw new Error("OPENAI_API_KEY is not configured.");
 	}
+	const finish = (result = {}) => ({
+		...result,
+		model: result.model || pickModel(kind),
+		latencyMs: Date.now() - overallStartedAt,
+		usage: result.usage || null,
+		fileSearchUsed: Boolean(result.fileSearchUsed),
+	});
 	if (!use_responses || !client.responses?.create) {
-		return {
-			text: await chat(messages, {
+		return finish(
+			await runChatCompletion(messages, {
 				kind,
 				temperature,
 				max_tokens,
 				reasoning_effort,
 				response_format,
-			}),
-			responseId: "",
-			previousResponseId: "",
-			api: "chat_completions",
-		};
+			})
+		);
 	}
 	const model = pickModel(kind);
 	const gpt5Style = usesCompletionTokens(model);
-	const tokenLimit = gpt5Style
-		? Math.max(max_tokens * 3, kind === "writer" ? 600 : 450)
-		: max_tokens;
+	const tokenLimit = initialOutputTokenLimit(kind, max_tokens, model);
+	const fileSearchContext = await resolveCurrentHotelFileSearchContext(metadata);
+	const vectorStoreId = fileSearchContext?.vectorStoreId || "";
+	const threadContextKey = responsesThreadContextKey({
+		model,
+		vectorStoreId,
+		factPackHash: metadata?.factPackHash,
+	});
+	const continuation = resolveResponsesThreadContinuation({
+		previousResponseId: previous_response_id,
+		previousContextKey: previous_response_context_key,
+		currentContextKey: threadContextKey,
+		resetThread: reset_thread,
+	});
+	const effectivePreviousResponseId = continuation.previousResponseId;
 	const buildBody = (previousResponseId = "", maxOutputTokens = tokenLimit) =>
 		buildResponsesBody({
 			model,
@@ -349,14 +555,20 @@ async function chatWithState(
 			maxTokens: maxOutputTokens,
 			response_format,
 			reasoning_effort: gpt5Style
-				? reasoning_effort || pickReasoningEffort(kind)
+				? reasoning_effort || pickChatbotReasoningEffort(kind)
 				: "",
 			previous_response_id: previousResponseId,
 			metadata,
 			prompt_cache_key,
 			safety_identifier,
+			file_search_vector_store_id: vectorStoreId,
+			file_search_max_results: OPENAI_FILE_SEARCH_MAX_RESULTS,
 		});
-	const runResponses = async (previousResponseId = "", maxOutputTokens = tokenLimit) => {
+	const runResponses = async (
+		previousResponseId = "",
+		maxOutputTokens = tokenLimit,
+		threadReset = continuation.threadReset
+	) => {
 		const body = buildBody(previousResponseId, maxOutputTokens);
 		const res = await withDeadline(
 			(signal) =>
@@ -375,11 +587,17 @@ async function chatWithState(
 			responseId: res.id || "",
 			previousResponseId,
 			api: "responses",
-			model,
+			model: res?.model || model,
+			usage: res?.usage || null,
+			fileSearchUsed: responseUsedFileSearch(res),
+			fileSearchConfigured: Boolean(vectorStoreId),
+			threadContextKey,
+			threadReset: Boolean(threadReset),
+			knowledgeVersion: fileSearchContext?.knowledgeVersion || 0,
 		};
 	};
 	try {
-		return await runResponses(previous_response_id);
+		return finish(await runResponses(effectivePreviousResponseId));
 	} catch (error) {
 		if (isIncompleteOpenAIError(error)) {
 			const retryTokenLimit = expandedOutputTokenLimit(error.maxOutputTokens || tokenLimit);
@@ -389,10 +607,12 @@ async function chatWithState(
 					partialTextLength: error.partialTextLength || 0,
 					maxOutputTokens: error.maxOutputTokens || tokenLimit,
 					retryMaxOutputTokens: retryTokenLimit,
-					previousResponseId: previous_response_id ? "present" : "",
+					previousResponseId: effectivePreviousResponseId ? "present" : "",
 				});
 				try {
-					return await runResponses(previous_response_id, retryTokenLimit);
+					return finish(
+						await runResponses(effectivePreviousResponseId, retryTokenLimit)
+					);
 				} catch (retryError) {
 					console.warn(
 						"[aiagent] responses incomplete retry fallback:",
@@ -401,31 +621,53 @@ async function chatWithState(
 				}
 			}
 		}
-		if (previous_response_id) {
+		if (effectivePreviousResponseId) {
 			console.warn("[aiagent] responses continuation reset:", error?.message || error);
 			try {
-				return await runResponses("", expandedOutputTokenLimit(tokenLimit) || tokenLimit);
+				return finish(
+					await runResponses(
+						"",
+						expandedOutputTokenLimit(tokenLimit) || tokenLimit,
+						true
+					)
+				);
 			} catch (retryError) {
 				console.warn("[aiagent] responses retry fallback:", retryError?.message || retryError);
 			}
 		} else {
 			console.warn("[aiagent] responses fallback:", error?.message || error);
 		}
-		return {
-			text: await chat(messages, {
+		const fallback = await runChatCompletion(messages, {
 				kind,
 				temperature,
-				max_tokens: gpt5Style
-					? Math.max(max_tokens, Math.ceil((expandedOutputTokenLimit(tokenLimit) || tokenLimit) / 3))
-					: Math.max(max_tokens, expandedOutputTokenLimit(tokenLimit) || tokenLimit),
+				max_tokens,
+				max_output_tokens:
+					expandedOutputTokenLimit(tokenLimit) || tokenLimit,
 				reasoning_effort,
 				response_format,
-			}),
-			responseId: "",
-			previousResponseId: previous_response_id || "",
+			});
+		return finish({
+			...fallback,
+			previousResponseId: effectivePreviousResponseId,
 			api: "chat_completions_fallback",
-		};
+			fileSearchUsed: false,
+			fileSearchConfigured: false,
+			threadContextKey,
+			threadReset: continuation.threadReset,
+		});
 	}
 }
 
-module.exports = { chat, chatWithState, pickReasoningEffort };
+module.exports = {
+	chat,
+	chatWithState,
+	pickReasoningEffort: pickChatbotReasoningEffort,
+	buildResponsesBody,
+	fileSearchToolForVectorStore,
+	responseUsedFileSearch,
+	responsesThreadContextKey,
+	resolveResponsesThreadContinuation,
+	trimMessagesForOpenAI,
+	initialOutputTokenLimit,
+	getChatbotOpenAIRuntimeConfig,
+};

@@ -1,6 +1,11 @@
 /** @format */
 // aiagent/core/brain.js
-const { listAvailableRoomsForStay, priceRoomForStay } = require("./selectors");
+const {
+	listAvailableRoomsForStay,
+	priceRoomForStay,
+	canonicalRoomTypeKey,
+	roomSellableInventory,
+} = require("./selectors");
 
 // identity
 const EN = [
@@ -87,10 +92,14 @@ function computeQuote(hotel, ctx) {
 	);
 	const chosen = avail.find(
 		(r) =>
-			String(r.room?.roomType || "").toLowerCase() ===
+			String(canonicalRoomTypeKey(r.room || {})).toLowerCase() ===
 			String(ctx.roomType || "").toLowerCase()
 	);
 	if (!chosen) return { available: false, reason: "no_match" };
+	const requestedRooms = Math.max(1, Number(ctx.rooms || 1) || 1);
+	if (requestedRooms > roomSellableInventory(chosen.room)) {
+		return { available: false, reason: "physical_room_inventory_insufficient" };
+	}
 	if (chosen.blocked)
 		return { available: false, reason: "blocked", date: chosen.blockedOn };
 
@@ -102,10 +111,13 @@ function computeQuote(hotel, ctx) {
 	);
 	const badNight =
 		Array.isArray(q.perNight) && q.perNight.some((v) => !v || Number(v) <= 0);
+	const totalWithCommission = Number(
+		(Number(q.totals?.totalPriceWithCommission || 0) * requestedRooms).toFixed(2)
+	);
 	if (
 		badNight ||
-		!q.totalWithCommission ||
-		Number(q.totalWithCommission) <= 0
+		!totalWithCommission ||
+		totalWithCommission <= 0
 	) {
 		return { available: false, reason: "zero_price" };
 	}
@@ -117,10 +129,15 @@ function computeQuote(hotel, ctx) {
 			roomType: chosen.room.roomType,
 			displayName: chosen.room.displayName || chosen.room.roomType,
 		},
+		rooms: requestedRooms,
 		perNight: q.perNight,
-		totalWithCommission: q.totalWithCommission,
-		totalRoot: q.totalRoot,
-		commission: q.commission,
+		totalWithCommission,
+		totalRoot: Number(
+			(Number(q.totals?.hotelShouldGet || 0) * requestedRooms).toFixed(2)
+		),
+		commission: Number(
+			(Number(q.totals?.totalCommission || 0) * requestedRooms).toFixed(2)
+		),
 	};
 }
 

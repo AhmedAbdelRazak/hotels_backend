@@ -1,5 +1,7 @@
 /** @format */
 
+const crypto = require("crypto");
+
 const argv = process.argv.slice(2);
 const fastMode = argv.includes("--fast") || process.env.LIVE_CHATBOT_QA_FAST === "true";
 
@@ -30,6 +32,11 @@ const SUPPORT_EMAIL = "support@jannatbooking.com";
 const CONTACT_NUMBER = "+1 (909) 222-3374";
 const DEFAULT_AJYAD_ID = "6a40b6a1a6efe70450536038";
 const QUIET_WAIT_MS = fastMode ? 650 : 3150;
+const QA_SOURCE_WEBSITE = "codex-live-qa";
+const QA_MARKER_PREFIX = /^codex(?:qa)?[-_.:]/i;
+const QA_MARKER_ALLOWED = /^[a-z0-9._:-]+$/i;
+const QA_MARKER_UUID_V4_SUFFIX =
+	/(?:^|[-_.:])[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const args = Object.fromEntries(
 	argv
@@ -40,10 +47,27 @@ const args = Object.fromEntries(
 		})
 );
 
-const marker =
+function assertSafeRunMarker(value = "") {
+	const candidate = String(value || "").trim();
+	if (
+		candidate.length < 48 ||
+		candidate.length > 96 ||
+		!QA_MARKER_PREFIX.test(candidate) ||
+		!QA_MARKER_ALLOWED.test(candidate) ||
+		!QA_MARKER_UUID_V4_SUFFIX.test(candidate)
+	) {
+		throw new Error(
+			"Unsafe live-QA marker. Use a 48-96 character codex/codexqa marker ending in a random UUID v4."
+		);
+	}
+	return candidate;
+}
+
+const marker = assertSafeRunMarker(
 	args.marker ||
-	process.env.LIVE_CHATBOT_QA_MARKER ||
-	`codexqa-live-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Date.now()}`;
+		process.env.LIVE_CHATBOT_QA_MARKER ||
+		`codexqa-live-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${crypto.randomUUID()}`
+);
 const requestedScenario = args.scenario || "";
 const requestedScenarioNumber = /^\d+$/.test(requestedScenario)
 	? Number(requestedScenario)
@@ -63,9 +87,9 @@ const silentIo = {
 };
 
 const runState = {
-	caseIds: [],
+	caseOwnership: new Map(),
 	scenarioResults: [],
-	reservationIds: new Set(),
+	reservationOwnership: new Map(),
 };
 
 function sleep(ms) {
@@ -82,6 +106,207 @@ function cleanText(value = "") {
 
 function normalizeForCheck(value = "") {
 	return cleanText(value).toLowerCase();
+}
+
+const SEMANTIC_STOPWORDS = new Set(
+	[
+		"the",
+		"and",
+		"for",
+		"with",
+		"your",
+		"you",
+		"our",
+		"this",
+		"that",
+		"from",
+		"have",
+		"has",
+		"are",
+		"was",
+		"were",
+		"will",
+		"would",
+		"can",
+		"could",
+		"please",
+		"here",
+		"there",
+		"pour",
+		"avec",
+		"votre",
+		"vous",
+		"nous",
+		"cette",
+		"cela",
+		"peut",
+		"etre",
+		"من",
+		"في",
+		"على",
+		"الى",
+		"هذا",
+		"هذه",
+		"ذلك",
+		"تلك",
+		"لك",
+		"مع",
+		"يمكن",
+		"يرجى",
+		"تم",
+	].map((token) => normalizeSemanticToken(token))
+);
+
+const REQUIRED_FACT_LABEL_TOKENS = new Set(
+	[
+		"sar",
+		"usd",
+		"riyal",
+		"reservation",
+		"booking",
+		"confirmation",
+		"reference",
+		"number",
+		"payment",
+		"details",
+		"receipt",
+		"link",
+		"حجز",
+		"الحجز",
+		"تاكيد",
+		"التاكيد",
+		"رقم",
+		"مرجع",
+		"الدفع",
+		"دفع",
+		"رابط",
+		"التفاصيل",
+		"ريال",
+	].map((token) => normalizeSemanticToken(token))
+);
+
+const REQUIRED_STRUCTURED_TRANSITIONS = new Set([
+	"quote_ready->review_reservation",
+	"split_stay_quote_ready->review_reservation",
+	"review_reservation->reservation_confirmed",
+	"reservation_lookup_not_found->reservation_lookup_found",
+]);
+
+function normalizeSemanticToken(value = "") {
+	return String(value || "")
+		.normalize("NFKD")
+		.toLowerCase()
+		.replace(/[\u0300-\u036f\u064b-\u065f\u0670]/g, "")
+		.replace(/[\u0622\u0623\u0625]/g, "\u0627")
+		.replace(/\u0649/g, "\u064a")
+		.replace(/\u0629/g, "\u0647")
+		.trim();
+}
+
+function exactReplyText(value = "") {
+	return normalizeSemanticToken(
+		String(value || "")
+			.replace(/<[^>]+>/g, " ")
+			.replace(/&(?:nbsp|amp|lt|gt|quot|#39);/gi, " ")
+			.replace(/[^\p{L}\p{N}]+/gu, " ")
+			.replace(/\s+/g, " ")
+	);
+}
+
+function semanticReplyTokens(value = "") {
+	const withoutFacts = String(value || "")
+		.replace(/https?:\/\/\S+/gi, " ")
+		.replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, " ")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/[\p{N}\u0660-\u0669\u06f0-\u06f9]+(?:[.,:/-][\p{N}\u0660-\u0669\u06f0-\u06f9]+)*/gu, " ");
+	const words = withoutFacts.match(/\p{L}[\p{L}\p{M}]*/gu) || [];
+	return [
+		...new Set(
+			words
+				.map((word) => normalizeSemanticToken(word))
+				.filter(
+					(word) =>
+						word.length > 2 &&
+						!SEMANTIC_STOPWORDS.has(word) &&
+						!REQUIRED_FACT_LABEL_TOKENS.has(word)
+				)
+		),
+	];
+}
+
+function requiredFactSignature(value = "") {
+	const text = String(value || "");
+	const facts = [
+		...(text.match(/https?:\/\/\S+/gi) || []).map((item) =>
+			item.replace(/[),.;!?]+$/g, "").toLowerCase()
+		),
+		...(text.match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi) || []).map((item) =>
+			item.toLowerCase()
+		),
+		...(text.match(/[\p{N}\u0660-\u0669\u06f0-\u06f9]+(?:[.,:/-][\p{N}\u0660-\u0669\u06f0-\u06f9]+)*/gu) || []),
+	];
+	return [...new Set(facts)].sort().join("|");
+}
+
+function semanticReplyComparison(left = "", right = "") {
+	const leftTokens = new Set(semanticReplyTokens(left));
+	const rightTokens = new Set(semanticReplyTokens(right));
+	let intersection = 0;
+	for (const token of leftTokens) {
+		if (rightTokens.has(token)) intersection += 1;
+	}
+	const union = leftTokens.size + rightTokens.size - intersection;
+	const smaller = Math.min(leftTokens.size, rightTokens.size);
+	return {
+		leftSize: leftTokens.size,
+		rightSize: rightTokens.size,
+		intersection,
+		jaccard: union ? intersection / union : 0,
+		containment: smaller ? intersection / smaller : 0,
+	};
+}
+
+function entryAction(entry = {}) {
+	return String(entry?.clientAction || "").trim().toLowerCase();
+}
+
+function repliesSubstantiallyRepeat(previous = {}, current = {}) {
+	const previousText = cleanText(previous?.message);
+	const currentText = cleanText(current?.message);
+	if (!previousText || !currentText) return { repeated: false };
+	if (exactReplyText(previousText) === exactReplyText(currentText)) {
+		return { repeated: true, reason: "exact", comparison: semanticReplyComparison(previousText, currentText) };
+	}
+
+	const comparison = semanticReplyComparison(previousText, currentText);
+	const sameMeaningfulTokenSet =
+		comparison.leftSize >= 2 &&
+		comparison.leftSize === comparison.rightSize &&
+		comparison.intersection === comparison.leftSize;
+	const enoughMeaningfulOverlap =
+		sameMeaningfulTokenSet ||
+		(comparison.intersection >= 3 && comparison.jaccard >= 0.7) ||
+		(comparison.intersection >= 5 && comparison.jaccard >= 0.65);
+	if (!enoughMeaningfulOverlap) {
+		return { repeated: false, comparison };
+	}
+
+	const previousAction = entryAction(previous);
+	const currentAction = entryAction(current);
+	const previousFacts = requiredFactSignature(previousText);
+	const currentFacts = requiredFactSignature(currentText);
+	if (
+		REQUIRED_STRUCTURED_TRANSITIONS.has(`${previousAction}->${currentAction}`) &&
+		previousFacts &&
+		currentFacts
+	) {
+		return {
+			repeated: false,
+			reason: "required_structured_transition",
+			comparison,
+		};
+	}
+	return { repeated: true, reason: "semantic", comparison };
 }
 
 function normalizeDigitsForCheck(value = "") {
@@ -161,12 +386,47 @@ function caseTopic(number, slug) {
 }
 
 function aiMessages(sc = {}) {
+	// Jannat-support replies are intentionally both isAi=true and isSystem=true.
+	// The initial handoff entry isSystem=true but isAi=false, so isAi is the
+	// authoritative customer-facing assistant signal for this harness.
 	return (sc.conversation || []).filter((entry) => entry.isAi === true);
 }
 
 function latestAi(sc = {}) {
 	const messages = aiMessages(sc);
 	return messages[messages.length - 1] || null;
+}
+
+function conversationEntryIdentity(entry = {}) {
+	const id = String(entry?._id || "").trim();
+	if (id) return `id:${id}`;
+	return [
+		"fallback",
+		String(entry?.date || entry?.createdAt || ""),
+		String(entry?.clientTag || ""),
+		String(entry?.clientAction || ""),
+		cleanText(entry?.message),
+	].join("|");
+}
+
+function aiEntryIdentitySet(sc = {}) {
+	return new Set(aiMessages(sc).map(conversationEntryIdentity));
+}
+
+function newAiEntriesSince(sc = {}, beforeIdentities = new Set()) {
+	const baseline =
+		beforeIdentities instanceof Set ? beforeIdentities : new Set(beforeIdentities || []);
+	return aiMessages(sc).filter(
+		(entry) => !baseline.has(conversationEntryIdentity(entry))
+	);
+}
+
+function lastConversationIndex(sc = {}, predicate = () => false) {
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	for (let index = conversation.length - 1; index >= 0; index -= 1) {
+		if (predicate(conversation[index])) return index;
+	}
+	return -1;
 }
 
 function latestGuest(sc = {}) {
@@ -329,12 +589,16 @@ function assertNoMealPromise(reply = "", label = "") {
 
 function assertNoRepeatedAi(sc = {}, label = "") {
 	const messages = aiMessages(sc)
-		.map((entry) => cleanText(entry.message))
-		.filter(Boolean)
-		.slice(-4);
+		.filter((entry) => cleanText(entry.message))
+		.slice(-6);
 	for (let i = 1; i < messages.length; i += 1) {
-		if (messages[i] && messages[i - 1] && messages[i] === messages[i - 1]) {
-			throw new Error(`${label || "case"} repeated the same AI reply`);
+		const result = repliesSubstantiallyRepeat(messages[i - 1], messages[i]);
+		if (result.repeated) {
+			const score = result.comparison?.jaccard;
+			const scoreLabel = Number.isFinite(score) ? ` (jaccard=${score.toFixed(2)})` : "";
+			throw new Error(
+				`${label || "case"} repeated a substantially similar AI reply [${result.reason || "semantic"}]${scoreLabel}`
+			);
 		}
 	}
 }
@@ -449,6 +713,131 @@ async function findAvailableSplitStay(hotel, roomTypeKey = "doubleRooms", nights
 	throw new Error(`Could not find two available ${roomTypeKey} split stays for ${hotel.hotelName}`);
 }
 
+function trackedCaseOwnership(caseId = "") {
+	const key = String(caseId || "");
+	const ownership = runState.caseOwnership.get(key);
+	assert(ownership, `Refusing QA operation for untracked support case ${key || "(missing)"}`);
+	assert(
+		ownership.marker === marker,
+		`Refusing QA operation for support case ${key}: marker ownership changed`
+	);
+	return ownership;
+}
+
+function supportCaseOwnershipFilter(ownership = {}) {
+	return {
+		_id: ownership.caseId,
+		sourceWebsite: ownership.sourceWebsite,
+		sourcePage: ownership.sourcePage,
+		sourceUrl: ownership.sourceUrl,
+		clientContact: ownership.clientContact,
+		conversation: {
+			$elemMatch: {
+				isSystem: true,
+				clientTag: marker,
+				"messageBy.customerEmail": SUPPORT_EMAIL,
+			},
+		},
+	};
+}
+
+function assertOwnedSupportCaseDocument(document = {}, ownership = {}) {
+	const id = String(document?._id || "");
+	assert(id && id === ownership.caseId, `Support case ownership mismatch for ${ownership.caseId}`);
+	assert(
+		ownership.marker === marker &&
+			document.sourceWebsite === ownership.sourceWebsite &&
+			document.sourcePage === ownership.sourcePage &&
+			document.sourceUrl === ownership.sourceUrl &&
+			String(document.clientContact || "").toLowerCase() === ownership.clientContact,
+		`Refusing cleanup for support case ${ownership.caseId}: exact QA ownership was not proven`
+	);
+	const hasExactMarkerEntry = (document.conversation || []).some(
+		(entry) =>
+			entry.isSystem === true &&
+			entry.clientTag === marker &&
+			String(entry?.messageBy?.customerEmail || "").toLowerCase() === SUPPORT_EMAIL
+	);
+	assert(
+		hasExactMarkerEntry,
+		`Refusing cleanup for support case ${ownership.caseId}: exact marker entry is missing`
+	);
+	return true;
+}
+
+async function loadOwnedSupportCase(caseId = "") {
+	const ownership = trackedCaseOwnership(caseId);
+	const document = await SupportCase.findById(ownership.caseId).lean();
+	assert(
+		document,
+		`Refusing QA ownership proof for support case ${ownership.caseId}: document is missing`
+	);
+	assertOwnedSupportCaseDocument(document, ownership);
+	return { document, ownership };
+}
+
+function reservationCaseRelationship(document = {}, caseId = "") {
+	const key = String(caseId || "");
+	const direct = String(document.aiSupportCaseId || "");
+	const customer = String(document?.customer_details?.aiSupportCaseId || "");
+	return {
+		direct,
+		customer,
+		matches:
+			direct === key ||
+			direct.startsWith(`${key}:split:`) ||
+			customer === key,
+	};
+}
+
+function assertOwnedReservationDocument(document = {}, ownership = {}) {
+	const id = String(document?._id || "");
+	assert(id && id === ownership.reservationId, `Reservation ownership mismatch for ${ownership.reservationId}`);
+	const caseOwnership = trackedCaseOwnership(ownership.caseId);
+	assert(
+		caseOwnership.marker === marker && ownership.marker === marker,
+		`Refusing cleanup for reservation ${id}: exact run marker was not proven`
+	);
+	const relationship = reservationCaseRelationship(document, ownership.caseId);
+	assert(
+		relationship.matches &&
+			relationship.direct === ownership.aiSupportCaseId &&
+			relationship.customer === ownership.customerSupportCaseId,
+		`Refusing cleanup for reservation ${id}: support-case relationship changed`
+	);
+	assert(
+		String(document.booking_source || "").trim().toLowerCase() === "ai chat" &&
+			String(document?.createdBy?.role || "").trim().toLowerCase() === "aiagent" &&
+			String(document?.createdBy?.email || "").trim().toLowerCase() === SUPPORT_EMAIL,
+		`Refusing cleanup for reservation ${id}: AI QA creator ownership was not proven`
+	);
+	return true;
+}
+
+function registerReservationOwnership(document = {}, caseId = "") {
+	const relationship = reservationCaseRelationship(document, caseId);
+	const ownership = {
+		reservationId: String(document?._id || ""),
+		caseId: String(caseId || ""),
+		marker,
+		aiSupportCaseId: relationship.direct,
+		customerSupportCaseId: relationship.customer,
+	};
+	assertOwnedReservationDocument(document, ownership);
+	const prior = runState.reservationOwnership.get(ownership.reservationId);
+	if (prior) {
+		assert(
+			prior.caseId === ownership.caseId &&
+				prior.aiSupportCaseId === ownership.aiSupportCaseId &&
+				prior.customerSupportCaseId === ownership.customerSupportCaseId,
+			`Refusing to re-track reservation ${ownership.reservationId}: ownership changed`
+		);
+		return prior;
+	}
+	runState.reservationOwnership.set(ownership.reservationId, ownership);
+	return ownership;
+}
+
 async function createCase({
 	number,
 	slug,
@@ -459,6 +848,7 @@ async function createCase({
 }) {
 	const topic = caseTopic(number, slug);
 	const email = guestEmail(number);
+	const sourceUrl = `https://xhotelpro.com/codex-live-qa/${marker}/${number}`;
 	const displayName =
 		String(clientName || "").trim() || `Codex QA ${String(number).padStart(2, "0")}`;
 	const doc = await SupportCase.create({
@@ -477,9 +867,9 @@ async function createCase({
 			: "English",
 		preferredLanguageCode: languageCode,
 		supportScope,
-		sourceWebsite: "codex-live-qa",
+		sourceWebsite: QA_SOURCE_WEBSITE,
 		sourcePage: topic,
-		sourceUrl: `https://xhotelpro.com/codex-live-qa/${marker}/${number}`,
+		sourceUrl,
 		clientName: displayName,
 		clientContact: email,
 		clientContactType: "email",
@@ -510,11 +900,23 @@ async function createCase({
 			},
 		],
 	});
-	runState.caseIds.push(String(doc._id));
-	return doc.toObject();
+	const document = doc.toObject();
+	const ownership = {
+		caseId: String(doc._id),
+		marker,
+		number,
+		sourceWebsite: QA_SOURCE_WEBSITE,
+		sourcePage: topic,
+		sourceUrl,
+		clientContact: email,
+	};
+	assertOwnedSupportCaseDocument(document, ownership);
+	runState.caseOwnership.set(ownership.caseId, ownership);
+	return document;
 }
 
 async function appendGuest(caseId, number, message) {
+	const { ownership } = await loadOwnedSupportCase(caseId);
 	const entry = {
 		messageBy: {
 			customerName: `Codex QA ${String(number).padStart(2, "0")}`,
@@ -532,44 +934,93 @@ async function appendGuest(caseId, number, message) {
 		isSystem: false,
 		clientTag: marker,
 	};
-	await SupportCase.findByIdAndUpdate(caseId, {
-		$push: { conversation: entry },
-		$set: {
-			updatedAt: new Date(),
-			aiToRespond: true,
-			aiPausedAt: null,
-			aiHandoffReason: "",
-			caseStatus: "open",
+	const updated = await SupportCase.findOneAndUpdate(
+		supportCaseOwnershipFilter(ownership),
+		{
+			$push: { conversation: entry },
+			$set: {
+				updatedAt: new Date(),
+				aiToRespond: true,
+				aiPausedAt: null,
+				aiHandoffReason: "",
+				caseStatus: "open",
+			},
 		},
-	});
+		{ new: true }
+	).select("_id");
+	assert(
+		updated?._id,
+		`Refusing to append guest turn for ${caseId}: exact QA ownership changed`
+	);
 	return entry;
 }
 
-async function plan(caseId) {
+async function captureAiBaseline(caseId) {
+	const { document } = await loadOwnedSupportCase(caseId);
+	return aiEntryIdentitySet(document);
+}
+
+async function plan(caseId, beforeAiIdentities) {
+	assert(
+		beforeAiIdentities instanceof Set,
+		`Missing pre-turn AI baseline for case ${caseId}`
+	);
 	await sleep(QUIET_WAIT_MS);
 	const startedAt = Date.now();
 	await orchestrator.__worker.planTurn(silentIo, caseId);
 	const durationMs = Date.now() - startedAt;
 	const sc = await SupportCase.findById(caseId).lean();
+	assert(sc, `Support case ${caseId} disappeared during planning`);
+	const newAiEntries = newAiEntriesSince(sc, beforeAiIdentities);
+	assert(
+		newAiEntries.length > 0,
+		`No new AI conversation entry was created for the latest guest turn in case ${caseId}`
+	);
 	const ai = latestAi(sc);
 	assert(ai?.message, `No AI reply for case ${caseId}`);
+	assert(
+		newAiEntries.some(
+			(entry) => conversationEntryIdentity(entry) === conversationEntryIdentity(ai)
+		),
+		`Latest AI reply for case ${caseId} is stale and predates the latest guest turn`
+	);
+	const aiIdentity = conversationEntryIdentity(ai);
+	const latestGuestEntry = latestGuest(sc);
+	const latestGuestIdentity = conversationEntryIdentity(latestGuestEntry);
+	const aiIndex = lastConversationIndex(
+		sc,
+		(entry) => conversationEntryIdentity(entry) === aiIdentity
+	);
+	const guestIndex = lastConversationIndex(
+		sc,
+		(entry) => conversationEntryIdentity(entry) === latestGuestIdentity
+	);
+	assert(
+		latestGuestEntry && guestIndex >= 0 && aiIndex > guestIndex,
+		`Latest AI reply for case ${caseId} was not appended after the latest guest turn`
+	);
 	assertNoProtocolLeak(ai.message, `case ${caseId}`);
 	assertNoRobotic(ai.message, `case ${caseId}`);
 	assertNoRepeatedAi(sc, `case ${caseId}`);
-	return { sc, ai, durationMs };
+	return { sc, ai, durationMs, newAiEntryCount: newAiEntries.length };
 }
 
 async function sendTurn(caseId, number, message) {
+	const beforeAiIdentities = await captureAiBaseline(caseId);
 	await appendGuest(caseId, number, message);
-	return plan(caseId);
+	return plan(caseId, beforeAiIdentities);
 }
 
 async function sendBurst(caseId, number, messages, delayMs = 800) {
+	// A burst models several messages typed during one quiet-window turn. The
+	// release invariant is one fresh assistant answer after the final message,
+	// not one answer per message inside the intentional burst.
+	const beforeAiIdentities = await captureAiBaseline(caseId);
 	for (const message of messages) {
 		await appendGuest(caseId, number, message);
 		if (delayMs > 0) await sleep(delayMs);
 	}
-	return plan(caseId);
+	return plan(caseId, beforeAiIdentities);
 }
 
 async function reservationsForCase(caseId) {
@@ -583,27 +1034,61 @@ async function reservationsForCase(caseId) {
 	}).lean();
 }
 
-async function cleanupReservationsForCase(caseId) {
+async function trackReservationsForCase(caseId) {
+	await loadOwnedSupportCase(caseId);
 	const rows = await reservationsForCase(caseId);
 	if (rows.length > 20) {
 		throw new Error(
-			`Refusing per-case reservation cleanup for ${caseId}: matched ${rows.length} rows`
+			`Refusing reservation ownership discovery for ${caseId}: matched ${rows.length} rows`
 		);
 	}
-	const ids = rows.map((row) => row._id).filter(Boolean);
-	for (const id of ids) {
-		runState.reservationIds.add(String(id));
+	for (const row of rows) {
+		registerReservationOwnership(row, caseId);
 	}
-	if (!ids.length) return 0;
-	await Reservations.deleteMany({ _id: { $in: ids } });
-	return ids.length;
+	return rows;
+}
+
+function reservationOwnershipFilter(ownership = {}) {
+	const filter = {
+		_id: ownership.reservationId,
+		booking_source: "ai chat",
+		"createdBy.role": "aiagent",
+		"createdBy.email": SUPPORT_EMAIL,
+	};
+	if (ownership.aiSupportCaseId) {
+		filter.aiSupportCaseId = ownership.aiSupportCaseId;
+	}
+	if (ownership.customerSupportCaseId) {
+		filter["customer_details.aiSupportCaseId"] = ownership.customerSupportCaseId;
+	}
+	return filter;
+}
+
+async function deleteTrackedReservation(ownership = {}) {
+	await loadOwnedSupportCase(ownership.caseId);
+	const document = await Reservations.findById(ownership.reservationId).lean();
+	if (!document) return 0;
+	assertOwnedReservationDocument(document, ownership);
+	const deleted = await Reservations.deleteOne(reservationOwnershipFilter(ownership));
+	assert(
+		Number(deleted.deletedCount || 0) === 1,
+		`Refusing ambiguous cleanup result for reservation ${ownership.reservationId}`
+	);
+	return 1;
+}
+
+async function cleanupReservationsForCase(caseId) {
+	await trackReservationsForCase(caseId);
+	let deleted = 0;
+	for (const ownership of runState.reservationOwnership.values()) {
+		if (ownership.caseId !== String(caseId || "")) continue;
+		deleted += await deleteTrackedReservation(ownership);
+	}
+	return deleted;
 }
 
 async function assertReservationCreated(caseId, label = "") {
-	const rows = await reservationsForCase(caseId);
-	for (const row of rows) {
-		runState.reservationIds.add(String(row._id));
-	}
+	const rows = await trackReservationsForCase(caseId);
 	assert(rows.length > 0, `${label || "scenario"} did not create a reservation`);
 	return rows;
 }
@@ -1652,52 +2137,278 @@ async function runScenario(definition, number, ctx) {
 	}
 }
 
+async function deleteTrackedSupportCase(ownership = {}) {
+	const document = await SupportCase.findById(ownership.caseId).lean();
+	if (!document) return 0;
+	assertOwnedSupportCaseDocument(document, ownership);
+	const deleted = await SupportCase.deleteOne(supportCaseOwnershipFilter(ownership));
+	assert(
+		Number(deleted.deletedCount || 0) === 1,
+		`Refusing ambiguous cleanup result for support case ${ownership.caseId}`
+	);
+	return 1;
+}
+
 async function cleanup() {
-	const markerRegex = new RegExp(escapeRegExp(marker), "i");
-	const caseIds = [...new Set(runState.caseIds)];
-	const trackedReservationIds = [...runState.reservationIds];
-	const splitCaseRegex = caseIds.length
-		? new RegExp(`^(?:${caseIds.map(escapeRegExp).join("|")}):split:`)
-		: null;
-	const reservationQuery = {
-		$or: [
-			trackedReservationIds.length
-				? { _id: { $in: trackedReservationIds } }
-				: { _id: { $in: [] } },
-			caseIds.length ? { aiSupportCaseId: { $in: caseIds } } : { _id: { $in: [] } },
-			splitCaseRegex ? { aiSupportCaseId: splitCaseRegex } : { _id: { $in: [] } },
-			{ "customer_details.email": markerRegex },
-			caseIds.length
-				? { "customer_details.aiSupportCaseId": { $in: caseIds } }
-				: { _id: { $in: [] } },
-			splitCaseRegex ? { "customer_details.aiSupportCaseId": splitCaseRegex } : { _id: { $in: [] } },
-			{ comment: markerRegex },
-			{ booking_comment: markerRegex },
-			{ aiReservationFingerprint: markerRegex },
+	const caseOwnerships = [...runState.caseOwnership.values()];
+
+	// Prove every current-run relationship before the first final-cleanup delete.
+	for (const ownership of caseOwnerships) {
+		await loadOwnedSupportCase(ownership.caseId);
+		await trackReservationsForCase(ownership.caseId);
+	}
+	for (const ownership of runState.reservationOwnership.values()) {
+		const document = await Reservations.findById(ownership.reservationId).lean();
+		if (document) assertOwnedReservationDocument(document, ownership);
+	}
+
+	let reservationsDeleted = 0;
+	for (const ownership of runState.reservationOwnership.values()) {
+		reservationsDeleted += await deleteTrackedReservation(ownership);
+	}
+
+	let casesDeleted = 0;
+	for (const ownership of caseOwnerships) {
+		casesDeleted += await deleteTrackedSupportCase(ownership);
+	}
+
+	const caseIds = caseOwnerships.map((item) => item.caseId);
+	const reservationIds = [...runState.reservationOwnership.keys()];
+	const remainingCases = caseIds.length
+		? await SupportCase.countDocuments({ _id: { $in: caseIds } })
+		: 0;
+	const remainingReservations = reservationIds.length
+		? await Reservations.countDocuments({ _id: { $in: reservationIds } })
+		: 0;
+	const untrackedExactMarkerCases = await SupportCase.countDocuments({
+		"conversation.clientTag": marker,
+	});
+	assert(
+		untrackedExactMarkerCases === 0,
+		`Cleanup left ${untrackedExactMarkerCases} exact-marker support case(s); refusing any untracked deletion`
+	);
+	console.log(
+		`CLEANUP marker=${marker} casesDeleted=${casesDeleted} reservationsDeleted=${reservationsDeleted} remainingCases=${remainingCases} remainingReservations=${remainingReservations}`
+	);
+	return {
+		casesDeleted,
+		reservationsDeleted,
+		remainingCases,
+		remainingReservations,
+		untrackedExactMarkerCases,
+	};
+}
+
+function assertThrows(fn, label = "") {
+	let threw = false;
+	try {
+		fn();
+	} catch (_error) {
+		threw = true;
+	}
+	assert(threw, `${label || "operation"} was expected to throw`);
+}
+
+function runSelfTests() {
+	const safeMarker = `codexqa-self-test-${crypto.randomUUID()}`;
+	assertSafeRunMarker(safeMarker);
+	assertThrows(
+		() => assertSafeRunMarker("codex-prod"),
+		"generic marker safety check"
+	);
+
+	const before = {
+		conversation: [{ _id: "ai-1", isAi: true, message: "First answer" }],
+	};
+	const after = {
+		conversation: [
+			...before.conversation,
+			{ _id: "ai-2", isAi: true, message: "Second answer" },
 		],
 	};
-	const reservations = await Reservations.find(reservationQuery).select("_id confirmation_number aiSupportCaseId").lean();
-	const cleanupSafetyLimit = Math.max(100, caseIds.length * 5 + trackedReservationIds.length + 20);
-	if (reservations.length > cleanupSafetyLimit) {
-		throw new Error(
-			`Refusing marker cleanup for ${marker}: matched ${reservations.length} reservations, limit ${cleanupSafetyLimit}`
-		);
-	}
-	const reservationIds = reservations.map((row) => row._id);
-	if (reservationIds.length) {
-		await Reservations.deleteMany({ _id: { $in: reservationIds } });
-	}
-	if (caseIds.length) {
-		await SupportCase.deleteMany({ _id: { $in: caseIds } });
-	}
-	const remainingCases = await SupportCase.countDocuments({
-		$or: [{ _id: { $in: caseIds } }, { sourcePage: markerRegex }, { "conversation.clientTag": marker }],
-	});
-	const remainingReservations = await Reservations.countDocuments(reservationQuery);
-	console.log(
-		`CLEANUP marker=${marker} casesDeleted=${caseIds.length} reservationsDeleted=${reservationIds.length} remainingCases=${remainingCases} remainingReservations=${remainingReservations}`
+	assert(
+		newAiEntriesSince(after, aiEntryIdentitySet(before)).length === 1,
+		"new AI entry detection failed"
 	);
-	return { casesDeleted: caseIds.length, reservationsDeleted: reservationIds.length, remainingCases, remainingReservations };
+	assert(
+		newAiEntriesSince(before, aiEntryIdentitySet(before)).length === 0,
+		"stale AI entry detection failed"
+	);
+	const jannatAfter = {
+		conversation: [
+			...before.conversation,
+			{
+				_id: "ai-jannat-2",
+				isAi: true,
+				isSystem: true,
+				message: "Jannat support answer",
+			},
+		],
+	};
+	assert(
+		newAiEntriesSince(jannatAfter, aiEntryIdentitySet(before)).length === 1,
+		"Jannat isAi+isSystem reply was not treated as a new assistant answer"
+	);
+
+	const repeated = repliesSubstantiallyRepeat(
+		{
+			clientAction: "ai_reply",
+			message:
+				"Your room is available for the requested dates. The total price is 825 SAR. Would you like to continue with the booking?",
+		},
+		{
+			clientAction: "ai_reply",
+			message:
+				"The room is available for the requested dates, with a total price of 825 SAR. Would you like to continue with the booking?",
+		}
+	);
+	assert(repeated.repeated, "semantic repetition was not detected");
+	const distinct = repliesSubstantiallyRepeat(
+		{ clientAction: "hotel_fact_answered", message: "The bus goes to Martyrs parking." },
+		{
+			clientAction: "payment_at_hotel_policy",
+			message: "You may pay at reception, and online payment is recommended.",
+		}
+	);
+	assert(!distinct.repeated, "distinct adjacent answers were treated as redundant");
+	const shortPunctuationRepeat = repliesSubstantiallyRepeat(
+		{ clientAction: "ai_reply", message: "Yes, you may pay at the hotel." },
+		{ clientAction: "ai_reply", message: "Yes — you may pay at the hotel! 🌷" }
+	);
+	assert(
+		shortPunctuationRepeat.repeated,
+		"short punctuation/emoji repetition was not detected"
+	);
+	const progressiveFollowup = repliesSubstantiallyRepeat(
+		{
+			clientAction: "quote_ready",
+			message: "The double room remains available for your selected stay.",
+		},
+		{
+			clientAction: "required_details_needed",
+			message:
+				"The double room remains available for your selected stay. To prepare the booking, please send the guest name, nationality, mobile contact, adult count, and child count.",
+		}
+	);
+	assert(
+		!progressiveFollowup.repeated,
+		"a genuinely progressive follow-up was treated as redundant"
+	);
+	const requiredTransition = repliesSubstantiallyRepeat(
+		{
+			clientAction: "quote_ready",
+			message:
+				"The selected double room remains available for the requested stay. Please review the guest information carefully. Total 825 SAR for 11 nights.",
+		},
+		{
+			clientAction: "review_reservation",
+			message:
+				"Official review: the selected double room remains available for the requested stay. Please review the guest information carefully and confirm. Total 825 SAR for 11 nights.",
+		}
+	);
+	assert(
+		!requiredTransition.repeated &&
+			requiredTransition.reason === "required_structured_transition",
+		"required quote-to-review facts were treated as redundant"
+	);
+	const changedConfirmation = repliesSubstantiallyRepeat(
+		{
+			clientAction: "reservation_confirmed",
+			message:
+				"Your selected room is now confirmed for the requested stay. Keep these official details for reception. Confirmation number 8940361462. Details https://example.com/a",
+		},
+		{
+			clientAction: "reservation_confirmed",
+			message:
+				"Your selected room is now confirmed for the requested stay. Keep these official details for reception. Confirmation number 8940361463. Details https://example.com/b",
+		}
+	);
+	assert(
+		changedConfirmation.repeated,
+		"changed confirmation facts incorrectly excused repeated surrounding prose"
+	);
+
+	const testCaseId = "507f1f77bcf86cd799439011";
+	const caseOwnership = {
+		caseId: testCaseId,
+		marker,
+		sourceWebsite: QA_SOURCE_WEBSITE,
+		sourcePage: `${marker} scenario 99 self-test`,
+		sourceUrl: `https://xhotelpro.com/codex-live-qa/${marker}/99`,
+		clientContact: `codexqa.${marker}.99@example.com`.toLowerCase(),
+	};
+	const caseDocument = {
+		_id: testCaseId,
+		sourceWebsite: caseOwnership.sourceWebsite,
+		sourcePage: caseOwnership.sourcePage,
+		sourceUrl: caseOwnership.sourceUrl,
+		clientContact: caseOwnership.clientContact,
+		conversation: [
+			{
+				isSystem: true,
+				clientTag: marker,
+				messageBy: { customerEmail: SUPPORT_EMAIL },
+			},
+		],
+	};
+	assertOwnedSupportCaseDocument(caseDocument, caseOwnership);
+	assertThrows(
+		() =>
+			assertOwnedSupportCaseDocument(
+				{ ...caseDocument, sourceWebsite: "production-site" },
+				caseOwnership
+			),
+		"support-case source ownership safety check"
+	);
+	const caseDeleteFilter = supportCaseOwnershipFilter(caseOwnership);
+	assert(
+		String(caseDeleteFilter._id) === testCaseId &&
+			caseDeleteFilter.sourcePage === caseOwnership.sourcePage &&
+			caseDeleteFilter.conversation?.$elemMatch?.clientTag === marker &&
+			!JSON.stringify(caseDeleteFilter).includes("$regex"),
+		"support-case cleanup filter is not exact-ID/exact-marker scoped"
+	);
+	runState.caseOwnership.set(testCaseId, caseOwnership);
+	const reservationDocument = {
+		_id: "507f191e810c19729de860ea",
+		aiSupportCaseId: `${testCaseId}:split:1`,
+		booking_source: "ai chat",
+		createdBy: { role: "aiagent", email: SUPPORT_EMAIL },
+		customer_details: { aiSupportCaseId: testCaseId },
+	};
+	const reservationOwnership = {
+		reservationId: String(reservationDocument._id),
+		caseId: testCaseId,
+		marker,
+		aiSupportCaseId: reservationDocument.aiSupportCaseId,
+		customerSupportCaseId: testCaseId,
+	};
+	assertOwnedReservationDocument(reservationDocument, reservationOwnership);
+	const reservationDeleteFilter = reservationOwnershipFilter(reservationOwnership);
+	assert(
+		String(reservationDeleteFilter._id) === reservationOwnership.reservationId &&
+			reservationDeleteFilter.aiSupportCaseId === reservationOwnership.aiSupportCaseId &&
+			!JSON.stringify(reservationDeleteFilter).includes("$regex"),
+		"reservation cleanup filter is not exact-ID/exact-owner scoped"
+	);
+	assertThrows(
+		() =>
+			assertOwnedReservationDocument(
+				{ ...reservationDocument, booking_source: "direct" },
+				reservationOwnership
+			),
+		"reservation ownership safety check"
+	);
+	assertThrows(
+		() =>
+			assertOwnedReservationDocument(
+				{ ...reservationDocument, aiSupportCaseId: "unrelated-case" },
+				reservationOwnership
+			),
+		"reservation case-relationship safety check"
+	);
+	runState.caseOwnership.delete(testCaseId);
+	console.log("PASS liveChatbotQa safety self-test");
 }
 
 async function main() {
@@ -1758,22 +2469,52 @@ async function main() {
 	console.log(JSON.stringify({ marker, results: runState.scenarioResults }, null, 2));
 }
 
-main()
-	.catch((error) => {
+async function runLiveQa() {
+	try {
+		await main();
+	} catch (error) {
 		console.error(`LIVE_QA_FAIL marker=${marker}`, error?.stack || error);
 		process.exitCode = 1;
-	})
-	.finally(async () => {
+	} finally {
+		if (mongoose.connection.readyState === 1) {
+			try {
+				if (!keepData) await cleanup();
+				else console.log(`CLEANUP_SKIPPED marker=${marker}`);
+			} catch (error) {
+				console.error(`LIVE_QA_CLEANUP_FAIL marker=${marker}`, error?.stack || error);
+				process.exitCode = 1;
+			}
+			try {
+				await mongoose.disconnect();
+			} catch {
+				// Let process exit release the connection.
+			}
+		}
+	}
+}
+
+if (require.main === module) {
+	if (argv.includes("--self-test")) {
 		try {
-			if (!keepData) await cleanup();
-			else console.log(`CLEANUP_SKIPPED marker=${marker}`);
+			runSelfTests();
 		} catch (error) {
-			console.error(`LIVE_QA_CLEANUP_FAIL marker=${marker}`, error?.stack || error);
+			console.error("LIVE_QA_SELF_TEST_FAIL", error?.stack || error);
 			process.exitCode = 1;
 		}
-		try {
-			await mongoose.disconnect();
-		} catch {
-			// Let process exit release the connection.
-		}
-	});
+	} else {
+		runLiveQa();
+	}
+}
+
+module.exports = {
+	__test: {
+		assertOwnedReservationDocument,
+		assertOwnedSupportCaseDocument,
+		assertSafeRunMarker,
+		aiEntryIdentitySet,
+		newAiEntriesSince,
+		repliesSubstantiallyRepeat,
+		runSelfTests,
+		semanticReplyComparison,
+	},
+};

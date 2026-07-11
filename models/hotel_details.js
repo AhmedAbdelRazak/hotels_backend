@@ -42,6 +42,45 @@ const WalletSchema = new mongoose.Schema(
 	{ _id: false }
 );
 
+const OpenAiKnowledgeFileSchema = new mongoose.Schema(
+	{
+		documentKey: { type: String, default: "" },
+		fileId: { type: String, default: "" },
+		vectorStoreFileId: { type: String, default: "" },
+		filename: { type: String, default: "" },
+		sha256: { type: String, default: "" },
+		status: { type: String, default: "" },
+	},
+	{ _id: false }
+);
+
+const OpenAiKnowledgeSchema = new mongoose.Schema(
+	{
+		provider: { type: String, default: "openai" },
+		autoSyncEnabled: { type: Boolean, default: false },
+		vectorStoreId: { type: String, default: "" },
+		vectorStoreName: { type: String, default: "" },
+		files: { type: [OpenAiKnowledgeFileSchema], default: [] },
+		sourceSha256: { type: String, default: "" },
+		documentSha256: { type: String, default: "" },
+		schemaVersion: { type: Number, default: 1 },
+		knowledgeVersion: { type: Number, default: 1 },
+		status: {
+			type: String,
+			enum: ["pending", "indexing", "ready", "failed", "retired", "expired"],
+			default: "pending",
+		},
+		coverageFrom: { type: String, default: "" },
+		coverageThrough: { type: String, default: "" },
+		sourceUpdatedAt: { type: Date },
+		generatedAt: { type: Date },
+		indexedAt: { type: Date },
+		syncedAt: { type: Date },
+		lastError: { type: String, default: "" },
+	},
+	{ _id: false }
+);
+
 const hotel_detailsSchema = new mongoose.Schema(
 	{
 		hotelName: {
@@ -316,6 +355,13 @@ const hotel_detailsSchema = new mongoose.Schema(
 			type: Boolean,
 			default: false,
 		},
+		// Internal OpenAI retrieval resources for this hotel. Never expose through
+		// public hotel payloads; services that need it must explicitly select it.
+		openaiKnowledge: {
+			type: OpenAiKnowledgeSchema,
+			select: false,
+			default: undefined,
+		},
 		currency: {
 			type: String, //Blank
 			trim: true,
@@ -425,4 +471,104 @@ const hotel_detailsSchema = new mongoose.Schema(
 	{ timestamps: true }
 );
 
-module.exports = mongoose.model("HotelDetails", hotel_detailsSchema);
+const hotelKnowledgeUpdatePaths = (update = {}) => {
+	if (Array.isArray(update)) return [];
+	const paths = [];
+	Object.entries(update || {}).forEach(([key, value]) => {
+		if (key.startsWith("$") && value && typeof value === "object") {
+			paths.push(...Object.keys(value));
+			return;
+		}
+		paths.push(key);
+	});
+	return [...new Set(paths.filter(Boolean))];
+};
+
+const hotelKnowledgeMetadataOnly = (paths = []) =>
+	paths.length > 0 &&
+	paths.every(
+		(path) =>
+			path === "updatedAt" ||
+			path === "__v" ||
+			path === "openaiKnowledge" ||
+			path.startsWith("openaiKnowledge.")
+	);
+
+const exactHotelIdsFromFilter = (filter = {}, result = null) => {
+	const values = [];
+	const rawId = filter?._id;
+	if (rawId && typeof rawId === "object" && Array.isArray(rawId.$in)) {
+		values.push(...rawId.$in);
+	} else if (rawId) {
+		values.push(rawId);
+	}
+	if (result?._id) values.push(result._id);
+	return [
+		...new Set(
+			values
+				.map((value) => String(value || "").trim())
+				.filter((value) => mongoose.isValidObjectId(value))
+		),
+	];
+};
+
+const safelyNotifyHotelKnowledgeUpdate = ({ hotelIds, reason, paths }) => {
+	try {
+		const {
+			requestHotelOpenAiKnowledgeSyncSafely,
+			requestManagedHotelOpenAiKnowledgeReconciliationSafely,
+		} = require("../services/hotelOpenAiKnowledgeSyncTrigger");
+		if (hotelIds.length) {
+			hotelIds.forEach((hotelId) =>
+				requestHotelOpenAiKnowledgeSyncSafely({ hotelId, reason, paths })
+			);
+		return;
+		}
+		requestManagedHotelOpenAiKnowledgeReconciliationSafely({ reason, paths });
+	} catch (error) {
+		// This notification occurs only after Mongo committed the hotel update. It
+		// must never turn a successful PMS write into an HTTP failure.
+		console.error(
+			"[hotel-openai-sync] post-commit notifier failed safely:",
+			error?.message || error
+		);
+	}
+};
+
+hotel_detailsSchema.post("save", function notifyKnowledgeAfterSave(document) {
+	const paths = typeof document?.modifiedPaths === "function" ? document.modifiedPaths() : [];
+	if (hotelKnowledgeMetadataOnly(paths)) return;
+	safelyNotifyHotelKnowledgeUpdate({
+		hotelIds: exactHotelIdsFromFilter({}, document),
+		reason: "mongoose_post_save",
+		paths,
+	});
+});
+
+const notifyKnowledgeAfterQueryUpdate = function notifyKnowledgeAfterQueryUpdate(result) {
+	if (this.getOptions?.().skipHotelOpenAiKnowledgeSync === true) return;
+	const paths = hotelKnowledgeUpdatePaths(this.getUpdate?.() || {});
+	if (hotelKnowledgeMetadataOnly(paths)) return;
+	safelyNotifyHotelKnowledgeUpdate({
+		hotelIds: exactHotelIdsFromFilter(this.getFilter?.() || {}, result),
+		reason: `mongoose_post_${this.op || "update"}`,
+		paths,
+	});
+};
+
+hotel_detailsSchema.post("findOneAndUpdate", notifyKnowledgeAfterQueryUpdate);
+hotel_detailsSchema.post("updateOne", notifyKnowledgeAfterQueryUpdate);
+hotel_detailsSchema.post("updateMany", notifyKnowledgeAfterQueryUpdate);
+hotel_detailsSchema.post("replaceOne", notifyKnowledgeAfterQueryUpdate);
+
+const HotelDetails = mongoose.model("HotelDetails", hotel_detailsSchema);
+Object.defineProperty(HotelDetails, "__knowledgeSyncTest", {
+	value: {
+		exactHotelIdsFromFilter,
+		hotelKnowledgeMetadataOnly,
+		hotelKnowledgeUpdatePaths,
+	},
+	enumerable: false,
+});
+
+module.exports = HotelDetails;

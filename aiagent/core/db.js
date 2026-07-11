@@ -42,6 +42,8 @@ const HOTEL_AI_BASE_SELECT = [
 	"activateHotel",
 	"xHotelProActive",
 	"belongsTo",
+	"updatedAt",
+	"+openaiKnowledge",
 ];
 
 const ROOM_AI_CONTEXT_SELECT = [
@@ -77,6 +79,18 @@ function compactPricingRateForAi(row = {}) {
 		price: row.price,
 		rootPrice: row.rootPrice,
 		commissionRate: row.commissionRate,
+		color: row.color,
+		backgroundColor: row.backgroundColor,
+		status: row.status,
+		state: row.state,
+		availability: row.availability,
+		type: row.type,
+		blocked: row.blocked,
+		isBlocked: row.isBlocked,
+		restricted: row.restricted,
+		isRestricted: row.isRestricted,
+		calendarBlocked: row.calendarBlocked,
+		unavailable: row.unavailable,
 	};
 }
 
@@ -487,8 +501,18 @@ function compactRoomForAi(room = {}) {
 
 function compactHotelForAi(hotel = null) {
 	if (!hotel) return null;
+	const knowledge = hotel.openaiKnowledge
+		? {
+				provider: String(hotel.openaiKnowledge.provider || ""),
+				status: String(hotel.openaiKnowledge.status || ""),
+				knowledgeVersion: Number(hotel.openaiKnowledge.knowledgeVersion || 0) || 0,
+				coverageFrom: String(hotel.openaiKnowledge.coverageFrom || ""),
+				coverageThrough: String(hotel.openaiKnowledge.coverageThrough || ""),
+		  }
+		: undefined;
 	return {
 		...hotel,
+		openaiKnowledge: knowledge,
 		roomCountDetails: Array.isArray(hotel.roomCountDetails)
 			? hotel.roomCountDetails.map(compactRoomForAi)
 			: [],
@@ -526,6 +550,64 @@ function cloneCompactHotelForAi(hotel = null) {
 	};
 }
 
+function normalizeReadyHotelOpenAiKnowledge(hotel = null) {
+	if (!hotel?._id) return null;
+	const knowledge = hotel.openaiKnowledge;
+	const provider = String(knowledge?.provider || "").trim().toLowerCase();
+	const status = String(knowledge?.status || "").trim().toLowerCase();
+	const vectorStoreId = String(knowledge?.vectorStoreId || "").trim();
+	if (
+		provider !== "openai" ||
+		status !== "ready" ||
+		!/^vs_[A-Za-z0-9_-]+$/.test(vectorStoreId)
+	) {
+		return null;
+	}
+
+	// A hotel update queues a replacement vector asynchronously. Do not expose
+	// the previous ready pointer in the gap before that replacement is published.
+	const hotelUpdatedAt = hotel.updatedAt
+		? new Date(hotel.updatedAt).getTime()
+		: NaN;
+	const sourceUpdatedAt = knowledge.sourceUpdatedAt
+		? new Date(knowledge.sourceUpdatedAt).getTime()
+		: NaN;
+	if (
+		Number.isFinite(hotelUpdatedAt) &&
+		(!Number.isFinite(sourceUpdatedAt) || sourceUpdatedAt !== hotelUpdatedAt)
+	) {
+		return null;
+	}
+
+	return {
+		hotelId: String(hotel._id),
+		provider,
+		status,
+		vectorStoreId,
+		knowledgeVersion: Number(knowledge.knowledgeVersion || 0) || 0,
+		sourceSha256: String(knowledge.sourceSha256 || "").trim(),
+		documentSha256: String(knowledge.documentSha256 || "").trim(),
+		coverageFrom: String(knowledge.coverageFrom || "").trim(),
+		coverageThrough: String(knowledge.coverageThrough || "").trim(),
+	};
+}
+
+async function getReadyHotelOpenAiKnowledge(id) {
+	const _id = safeId(id);
+	if (!_id) return null;
+	const hotel = await HotelDetails.findOne({
+		_id,
+		activateHotel: true,
+		xHotelProActive: { $ne: false },
+		"openaiKnowledge.provider": "openai",
+		"openaiKnowledge.status": "ready",
+	})
+		.select("_id updatedAt +openaiKnowledge")
+		.lean()
+		.exec();
+	return normalizeReadyHotelOpenAiKnowledge(hotel);
+}
+
 async function getHotelById(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
@@ -555,26 +637,14 @@ async function getHotelById(id) {
 async function getHotelByIdForAiContext(id) {
 	const _id = safeId(id);
 	if (!_id) return null;
-	const cacheKey = `context:${String(_id)}`;
-	const cached = hotelContextCache.get(cacheKey);
-	if (cached && cached.expiresAt > Date.now()) {
-		return cloneCompactHotelForAi(cached.hotel);
-	}
+	// Hotel facts shown to guests must reflect a committed PMS edit immediately.
+	// Exact quote reads already bypass this cache; keep the prompt/fact path just
+	// as fresh so it cannot disagree with a newly synchronized knowledge vector.
 	const hotel = await HotelDetails.findById(_id)
 		.select([...HOTEL_AI_BASE_SELECT, ...ROOM_AI_CONTEXT_SELECT].join(" "))
 		.lean()
 		.exec();
 	const compactHotel = compactHotelForAi(hotel);
-	if (compactHotel) {
-		hotelContextCache.set(cacheKey, {
-			hotel: compactHotel,
-			expiresAt: Date.now() + AI_HOTEL_CONTEXT_CACHE_TTL_MS,
-		});
-		if (hotelContextCache.size > 200) {
-			const firstKey = hotelContextCache.keys().next().value;
-			if (firstKey) hotelContextCache.delete(firstKey);
-		}
-	}
 	return cloneCompactHotelForAi(compactHotel);
 }
 
@@ -582,66 +652,88 @@ async function getHotelByIdWithPricingDates(id, dateKeys = []) {
 	const _id = safeId(id);
 	const dates = normalizeDateKeys(dateKeys);
 	if (!_id) return null;
-	const hotel = await getHotelByIdForAiContext(_id);
-	if (!hotel || !dates.length) return hotel;
+	const maxSnapshotAttempts = 2;
+	for (let attempt = 1; attempt <= maxSnapshotAttempts; attempt += 1) {
+		// Exact quote/finalization paths intentionally bypass the hotel-facts cache
+		// so a PMS price, blackout, capacity, or physical-count edit is immediate.
+		const freshHotel = await HotelDetails.findById(_id)
+			.select([...HOTEL_AI_BASE_SELECT, ...ROOM_AI_CONTEXT_SELECT].join(" "))
+			.lean()
+			.exec();
+		const hotel = compactHotelForAi(freshHotel);
+		if (!hotel || !dates.length) return hotel;
 
-	const [pricingDoc] = await HotelDetails.aggregate([
-		{ $match: { _id } },
-		{
-			$project: {
-				roomCountDetails: {
-					$map: {
-						input: { $ifNull: ["$roomCountDetails", []] },
-						as: "room",
-						in: {
-							_id: "$$room._id",
-							roomType: "$$room.roomType",
-							pricingRate: {
-								$map: {
-									input: {
-										$filter: {
-											input: { $ifNull: ["$$room.pricingRate", []] },
-											as: "rate",
-											cond: {
-												$in: [
-													{
-														$substrBytes: [
-															{
-																$toString: {
-																	$ifNull: [
-																		"$$rate.calendarDate",
-																		{ $ifNull: ["$$rate.date", ""] },
-																	],
+		const [pricingDoc] = await HotelDetails.aggregate([
+			{ $match: { _id } },
+			{
+				$project: {
+					updatedAt: 1,
+					roomCountDetails: {
+						$map: {
+							input: { $ifNull: ["$roomCountDetails", []] },
+							as: "room",
+							in: {
+								_id: "$$room._id",
+								roomType: "$$room.roomType",
+								pricingRate: {
+									$map: {
+										input: {
+											$filter: {
+												input: { $ifNull: ["$$room.pricingRate", []] },
+												as: "rate",
+												cond: {
+													$in: [
+														{
+															$substrBytes: [
+																{
+																	$toString: {
+																		$ifNull: [
+																			"$$rate.calendarDate",
+																			{ $ifNull: ["$$rate.date", ""] },
+																		],
+																	},
 																},
-															},
-															0,
-															10,
-														],
-													},
-													dates,
-												],
+																0,
+																10,
+															],
+														},
+														dates,
+													],
+												},
 											},
 										},
-									},
-									as: "rate",
-									in: {
-										calendarDate: {
-											$substrBytes: [
-												{
-													$toString: {
-														$ifNull: [
-															"$$rate.calendarDate",
-															{ $ifNull: ["$$rate.date", ""] },
-														],
+										as: "rate",
+										in: {
+											calendarDate: {
+												$substrBytes: [
+													{
+														$toString: {
+															$ifNull: [
+																"$$rate.calendarDate",
+																{ $ifNull: ["$$rate.date", ""] },
+															],
+														},
 													},
-												},
-												0,
-												10,
-											],
+													0,
+													10,
+												],
+											},
+											price: "$$rate.price",
+											rootPrice: "$$rate.rootPrice",
+											commissionRate: "$$rate.commissionRate",
+											color: "$$rate.color",
+											backgroundColor: "$$rate.backgroundColor",
+											status: "$$rate.status",
+											state: "$$rate.state",
+											availability: "$$rate.availability",
+											type: "$$rate.type",
+											blocked: "$$rate.blocked",
+											isBlocked: "$$rate.isBlocked",
+											restricted: "$$rate.restricted",
+											isRestricted: "$$rate.isRestricted",
+											calendarBlocked: "$$rate.calendarBlocked",
+											unavailable: "$$rate.unavailable",
 										},
-										price: "$$rate.price",
-										rootPrice: "$$rate.rootPrice",
-										commissionRate: "$$rate.commissionRate",
 									},
 								},
 							},
@@ -649,31 +741,45 @@ async function getHotelByIdWithPricingDates(id, dateKeys = []) {
 					},
 				},
 			},
-		},
-	]).exec();
+		]).exec();
 
-	const byRoomId = new Map();
-	const byRoomType = new Map();
-	(pricingDoc?.roomCountDetails || []).forEach((room) => {
-		const compactRows = Array.isArray(room.pricingRate)
-			? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
-			: [];
-		byRoomId.set(String(room._id || ""), compactRows);
-		if (room.roomType) byRoomType.set(String(room.roomType), compactRows);
-	});
+		const hotelUpdatedAt = new Date(hotel.updatedAt || 0).getTime();
+		const pricingUpdatedAt = new Date(pricingDoc?.updatedAt || 0).getTime();
+		const snapshotsMatch =
+			Number.isFinite(hotelUpdatedAt) &&
+			hotelUpdatedAt > 0 &&
+			Number.isFinite(pricingUpdatedAt) &&
+			pricingUpdatedAt > 0 &&
+			hotelUpdatedAt === pricingUpdatedAt;
+		if (!snapshotsMatch) {
+			if (attempt < maxSnapshotAttempts) continue;
+			const error = new Error(
+				"Hotel pricing changed while the quote was being loaded. Please retry."
+			);
+			error.code = "hotel_pricing_snapshot_changed";
+			throw error;
+		}
 
-	return {
-		...hotel,
-		roomCountDetails: Array.isArray(hotel.roomCountDetails)
-			? hotel.roomCountDetails.map((room) => ({
-					...room,
-					pricingRate:
-						byRoomId.get(String(room._id || "")) ||
-						byRoomType.get(String(room.roomType || "")) ||
-						[],
-			  }))
-			: [],
-	};
+		const byRoomId = new Map();
+		(pricingDoc?.roomCountDetails || []).forEach((room) => {
+			const compactRows = Array.isArray(room.pricingRate)
+				? room.pricingRate.map(compactPricingRateForAi).filter(Boolean)
+				: [];
+			byRoomId.set(String(room._id || ""), compactRows);
+		});
+
+		return {
+			...hotel,
+			roomCountDetails: Array.isArray(hotel.roomCountDetails)
+				? hotel.roomCountDetails.map((room) => ({
+						...room,
+						pricingRate:
+							byRoomId.get(String(room._id || "")) || [],
+				  }))
+				: [],
+		};
+	}
+	return null;
 }
 
 async function getJanatAiSettings() {
@@ -1151,6 +1257,8 @@ module.exports = {
 	getHotelById,
 	getHotelByIdForAiContext,
 	getHotelByIdWithPricingDates,
+	getReadyHotelOpenAiKnowledge,
+	normalizeReadyHotelOpenAiKnowledge,
 	getJanatAiSettings,
 	listActivePublicHotels,
 	getReservationByConfirmation,

@@ -2,15 +2,128 @@
 // Pricing + availability helpers used by the orchestrator.
 // Returns nightly rows shaped exactly like your FE's transformPickedRooms() expects.
 
+const {
+	isCalendarRowBlocked,
+	normalizeRoomCapacity,
+} = require("../../services/hotelOpenAiKnowledge");
+
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_PRICING_COVERAGE_THROUGH = "2027-04-15";
 
 const num = (v, f = 0) => {
 	const n = parseFloat(v);
 	return Number.isFinite(n) ? n : f;
 };
 
-const hasCommissionValue = (value) =>
-	value !== null && value !== undefined && value !== "";
+const cleanText = (value) => String(value || "").trim();
+
+const roomIdText = (value = {}) =>
+	cleanText(value?.roomId || value?._id || value?.id || "");
+
+const roomDisplayText = (value = {}) =>
+	cleanText(value?.displayName || value?.roomDisplayName || value?.display_name || "");
+
+function roomCapacity(room = {}) {
+	const normalized = normalizeRoomCapacity(room);
+	return normalized.eligibleForCapacityRecommendation
+		? Number(normalized.maxGuests || 0) || 0
+		: 0;
+}
+
+function roomSellableInventory(room = {}) {
+	const configuredRooms = Math.max(0, Math.floor(Number(room?.count || 0) || 0));
+	if (cleanText(room.roomType) !== "individualBed") return configuredRooms;
+	const normalized = normalizeRoomCapacity(room);
+	const bedsPerSharedRoom = Math.max(
+		0,
+		Math.floor(Number(normalized.sharedRoomBedCount || 0) || 0)
+	);
+	return configuredRooms * bedsPerSharedRoom;
+}
+
+function roomIsSellable(room = {}) {
+	const basePrice = Number(room?.price?.basePrice);
+	return Boolean(
+		room?.activeRoom === true &&
+		roomSellableInventory(room) > 0 &&
+		roomCapacity(room) > 0 &&
+		Number.isFinite(basePrice) &&
+		basePrice > 0
+	);
+}
+
+function canonicalRoomTypeKey(room = {}) {
+	const raw = cleanText(room.roomType);
+	if (
+		[
+			"singleRooms",
+			"doubleRooms",
+			"tripleRooms",
+			"quadRooms",
+			"familyRooms",
+			"suite",
+			"individualBed",
+			"other",
+		].includes(raw)
+	) {
+		return raw;
+	}
+	const capacity = roomCapacity(room);
+	if (capacity === 1) return "singleRooms";
+	if (capacity === 2) return "doubleRooms";
+	if (capacity === 3) return "tripleRooms";
+	if (capacity === 4) return "quadRooms";
+	if (capacity >= 5) return "familyRooms";
+	return raw;
+}
+
+function resolveRoomForStay(hotel = {}, reference = {}) {
+	const activeRooms = (Array.isArray(hotel?.roomCountDetails)
+		? hotel.roomCountDetails
+		: []
+	).filter(roomIsSellable);
+	const requestedId = roomIdText(reference);
+	if (requestedId) {
+		const exactId = activeRooms.find((room) => roomIdText(room) === requestedId);
+		if (exactId) return exactId;
+	}
+	const requestedDisplay = roomDisplayText(reference).toLowerCase();
+	if (requestedDisplay) {
+		const exactDisplay = activeRooms.find(
+			(room) => roomDisplayText(room).toLowerCase() === requestedDisplay
+		);
+		if (exactDisplay) return exactDisplay;
+	}
+	let requestedType = cleanText(reference?.roomTypeKey || reference?.roomType);
+	if (
+		requestedType === "singleRooms" &&
+		!activeRooms.some((room) => canonicalRoomTypeKey(room) === "singleRooms") &&
+		activeRooms.some((room) => canonicalRoomTypeKey(room) === "doubleRooms")
+	) {
+		requestedType = "doubleRooms";
+	}
+	const candidates = requestedType
+		? activeRooms.filter((room) => canonicalRoomTypeKey(room) === requestedType)
+		: [];
+	if (!candidates.length) return null;
+	if (candidates.length === 1) return candidates[0];
+	const requestedCapacity = Math.max(
+		0,
+		Number(reference?.requestedCapacity || 0) || 0,
+		Number(reference?.requestedGuests || 0) || 0,
+		Number(reference?.requestedBeds || 0) || 0
+	);
+	return [...candidates]
+		.sort((left, right) => {
+			const leftCapacity = roomCapacity(left);
+			const rightCapacity = roomCapacity(right);
+			const leftFits = requestedCapacity > 0 && leftCapacity >= requestedCapacity;
+			const rightFits = requestedCapacity > 0 && rightCapacity >= requestedCapacity;
+			if (leftFits !== rightFits) return leftFits ? -1 : 1;
+			if (leftCapacity !== rightCapacity) return leftCapacity - rightCapacity;
+			return roomDisplayText(left).localeCompare(roomDisplayText(right));
+		})[0];
+}
 
 function addDays(iso, days) {
 	const d = new Date(`${iso}T00:00:00.000Z`);
@@ -61,18 +174,6 @@ function pricingRatesForDates(room = {}, dates = []) {
 		if (matchedDates >= targetDates.size) break;
 	}
 	return rateMap;
-}
-
-/** Commission fallback: roomCommission > hotel.commission > 10 */
-function resolveCommissionRate(hotel, room) {
-	const h = hasCommissionValue(hotel?.commission)
-		? num(hotel.commission, 10)
-		: 10;
-	const fallback = h >= 0 ? h : 10;
-	const r = hasCommissionValue(room?.roomCommission)
-		? num(room.roomCommission, fallback)
-		: fallback;
-	return r >= 0 ? r : fallback;
 }
 
 /** Quick amenity check on a room object with robust fallbacks */
@@ -150,10 +251,8 @@ function hotelHasAmenity(hotel, key) {
  *   totals: { totalPriceWithCommission, hotelShouldGet, totalCommission }
  * }
  */
-function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
-	const room = (hotel?.roomCountDetails || []).find(
-		(r) => r.roomType === roomType
-	);
+function priceRoomForStay(hotel, roomReference = {}, checkinISO, checkoutISO) {
+	const room = resolveRoomForStay(hotel, roomReference);
 	if (!room) {
 		return {
 			available: false,
@@ -174,12 +273,51 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 	}
 
 	const dates = eachDate(checkinISO, checkoutISO);
-	const nights = Math.max(1, dates.length);
+	if (!dates.length) {
+		return {
+			available: false,
+			reason: "bad_dates",
+			currency: hotel?.currency || "SAR",
+			room,
+		};
+	}
+	const nights = dates.length;
+	const coverageFrom = cleanText(hotel?.openaiKnowledge?.coverageFrom).slice(0, 10);
+	const coverageThrough = cleanText(
+		hotel?.openaiKnowledge?.coverageThrough ||
+			process.env.HOTEL_OPENAI_KNOWLEDGE_HORIZON_END ||
+			DEFAULT_PRICING_COVERAGE_THROUGH
+	).slice(0, 10);
+	if (
+		(/^20\d{2}-\d{2}-\d{2}$/.test(coverageFrom) && dates[0] < coverageFrom) ||
+		(/^20\d{2}-\d{2}-\d{2}$/.test(coverageThrough) &&
+			dates[dates.length - 1] > coverageThrough)
+	) {
+		return {
+			available: false,
+			reason: "outside_pricing_coverage",
+			firstBlockedDate:
+				dates.find(
+					(date) =>
+						(coverageFrom && date < coverageFrom) ||
+						(coverageThrough && date > coverageThrough)
+				) || dates[0],
+			currency: hotel?.currency || "SAR",
+			room,
+		};
+	}
 
 	// baselines
-	const basePrice = num(room?.price?.basePrice, 0); // no‑commission portion (what FE stores in totalPriceWithoutCommission)
-	const defaultCost = num(room?.defaultCost, 0); // rootPrice (hotel cost)
-	const commissionRate = resolveCommissionRate(hotel, room);
+	const basePrice = num(room?.price?.basePrice, 0); // exact guest fallback price
+	const defaultCost = num(room?.defaultCost, 0); // internal settlement value only
+	if (!(basePrice > 0)) {
+		return {
+			available: false,
+			reason: "invalid_base_price",
+			currency: hotel?.currency || "SAR",
+			room,
+		};
+	}
 
 	// Map only the requested stay dates. Some hotels keep large calendar arrays,
 	// and the chatbot only needs exact rows for the guest's requested nights.
@@ -194,19 +332,32 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 	for (const d of dates) {
 		const r = rateMap[d];
 
-		const dayPrice = r ? num(r.price, basePrice) : basePrice;
-		const dayRoot = r ? num(r.rootPrice, defaultCost) : defaultCost;
-		const dayComm = r ? num(r.commissionRate, commissionRate) : commissionRate;
+		const calendarPrice = r ? Number(r.price) : NaN;
+		const dayPrice =
+			Number.isFinite(calendarPrice) && calendarPrice > 0
+				? calendarPrice
+				: basePrice;
+		const calendarRoot = r ? Number(r.rootPrice) : NaN;
+		const dayRoot =
+			Number.isFinite(calendarRoot) && calendarRoot > 0
+				? calendarRoot
+				: defaultCost > 0
+				? defaultCost
+				: dayPrice;
+		const dayComm = r ? num(r.commissionRate, 0) : 0;
 
-		// "Blocked": any day priced at 0 in either field
-		if (r && (num(r.price, 0) === 0 || num(r.rootPrice, 0) === 0)) {
+		// Calendar status/black/zero guest price are explicit blocks. Internal
+		// root/cost values never make a guest-facing date unavailable.
+		if (r && isCalendarRowBlocked(r)) {
 			blocked = true;
 			if (!firstBlockedDate) firstBlockedDate = d;
 			blockedDates.push(d);
 			break;
 		}
 
-		const final = dayPrice + dayRoot * (dayComm / 100);
+		// Public chatbot rule: the calendar guest price is final. If a calendar
+		// row is missing, use basePrice exactly. Never add root price or commission.
+		const final = dayPrice;
 
 		pricingByDay.push({
 			date: d,
@@ -260,11 +411,11 @@ function priceRoomForStay(hotel, { roomType }, checkinISO, checkoutISO) {
 
 /** List best 1 quote per active room for the same stay (used for alternatives) */
 function listAvailableRoomsForStay(hotel, checkinISO, checkoutISO) {
-	const rooms = (hotel?.roomCountDetails || []).filter((r) => r.activeRoom);
+	const rooms = (hotel?.roomCountDetails || []).filter(roomIsSellable);
 	return rooms.map((r) => {
 		const q = priceRoomForStay(
 			hotel,
-			{ roomType: r.roomType },
+			{ roomId: roomIdText(r), roomType: r.roomType, displayName: r.displayName },
 			checkinISO,
 			checkoutISO
 		);
@@ -299,6 +450,12 @@ function findAmenityMatch(text = "") {
 module.exports = {
 	priceRoomForStay,
 	listAvailableRoomsForStay,
+	resolveRoomForStay,
+	roomCapacity,
+	roomSellableInventory,
+	roomIsSellable,
+	canonicalRoomTypeKey,
+	eachDate,
 	roomHasAmenity,
 	hotelHasAmenity,
 	findAmenityMatch,

@@ -154,6 +154,8 @@ const ROOM_SYNONYMS = [
 			"quintible",
 			"quantible",
 			"quintiple",
+			"sextuple",
+			"sextuple room",
 			"5omasy",
 			"5omasi",
 			"khomasy",
@@ -168,6 +170,10 @@ const ROOM_SYNONYMS = [
 			"5 beds",
 			"five bed",
 			"five beds",
+			"6 bed",
+			"6 beds",
+			"six bed",
+			"six beds",
 			"5 people",
 			"five people",
 			"5 persons",
@@ -176,6 +182,10 @@ const ROOM_SYNONYMS = [
 			"rooms for 5",
 			"room for five",
 			"rooms for five",
+			"room for 6",
+			"rooms for 6",
+			"room for six",
+			"rooms for six",
 			"خماسية",
 		],
 	},
@@ -233,6 +243,12 @@ ROOM_SYNONYMS.push(
 			"\u063a\u0631\u0641\u0629 \u062e\u0645\u0627\u0633\u064a\u0629",
 			"\u0035 \u0633\u0631\u064a\u0631",
 			"\u0665 \u0633\u0631\u064a\u0631",
+			"\u0036 \u0633\u0631\u064a\u0631",
+			"\u0666 \u0633\u0631\u064a\u0631",
+			"\u0633\u062a\u0629 \u0633\u0631\u064a\u0631",
+			"\u0633\u062a\u0647 \u0633\u0631\u064a\u0631",
+			"\u0633\u062f\u0627\u0633\u064a",
+			"\u0633\u062f\u0627\u0633\u064a\u0629",
 			"\u062e\u0645\u0633\u0629 \u0633\u0631\u064a\u0631",
 			"\u062e\u0645\u0633\u0647 \u0633\u0631\u064a\u0631",
 			"\u062e\u0645\u0633\u0629 \u0627\u0633\u0631\u0629",
@@ -289,8 +305,9 @@ function arabicBedCountRoomKeyFromText(text = "") {
 		3: "tripleRooms",
 		4: "quadRooms",
 		5: "familyRooms",
+		6: "familyRooms",
 	};
-	for (const count of [5, 4, 3, 2]) {
+	for (const count of [6, 5, 4, 3, 2]) {
 		const pattern = new RegExp(
 			`(?:^|[^0-9])${count}\\s*${bedWords}|${bedWords}\\s*${count}(?:$|[^0-9])`,
 			"i"
@@ -314,8 +331,9 @@ function capacityRoomKeyFromText(text = "") {
 		3: "tripleRooms",
 		4: "quadRooms",
 		5: "familyRooms",
+		6: "familyRooms",
 	};
-	for (const count of [5, 4, 3, 2]) {
+	for (const count of [6, 5, 4, 3, 2]) {
 		const countPattern = `0*${count}`;
 		const pattern = new RegExp(
 			`(?:\\b${countPattern}\\b.{0,32}${contextWords}|${contextWords}.{0,32}\\b${countPattern}\\b)`,
@@ -330,20 +348,20 @@ function capacityOnlyRoomTerm(term = "") {
 	const raw = String(term || "").toLowerCase().trim();
 	if (!raw) return false;
 	if (
-		/^(?:[2-5]|two|three|four|five)\s+(?:people|persons?|individuals?|guests?|adults?)$/.test(
+		/^(?:[2-6]|two|three|four|five|six)\s+(?:people|persons?|individuals?|guests?|adults?)$/.test(
 			raw
 		) ||
-		/^(?:[2-5]|two|three|four|five)\s+(?:single\s+)?beds?$/.test(raw) ||
-		/^(?:room\s+with\s+)?(?:[2-5]|two|three|four|five)\s+(?:single\s+)?beds?$/.test(
+		/^(?:[2-6]|two|three|four|five|six)\s+(?:single\s+)?beds?$/.test(raw) ||
+		/^(?:room\s+with\s+)?(?:[2-6]|two|three|four|five|six)\s+(?:single\s+)?beds?$/.test(
 			raw
 		) ||
-		/^rooms?\s+for\s+(?:[2-5]|two|three|four|five)$/.test(raw)
+		/^rooms?\s+for\s+(?:[2-6]|two|three|four|five|six)$/.test(raw)
 	) {
 		return true;
 	}
 	const normalizedArabic = normalizeArabicRoomText(raw);
 	if (
-		/(?:^|\s)(?:\u0644?\u0634\u062e\u0635\u064a\u0646|\u0634\u062e\u0635\u064a\u0646|\u0644?\u0641\u0631\u062f\u064a\u0646|\u0641\u0631\u062f\u064a\u0646|\u0644?\u0636\u064a\u0641\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0628?\u0633\u0631\u064a\u0631\u064a\u0646|\u0633\u0631\u064a\u0631\u0627\u0646|\u0628?\u0627\u0633\u0631\u062a\u064a\u0646|\u0627\u0633\u0631\u062a\u0627\u0646|\u062b\u0644\u0627\u062b\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062a\u0644\u0627\u062a\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u0627?\u0631\u0628\u0639\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062e\u0645\u0633\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|[2-5]\s*(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)\s*[2-5])(?:\s|$)/.test(
+		/(?:^|\s)(?:\u0644?\u0634\u062e\u0635\u064a\u0646|\u0634\u062e\u0635\u064a\u0646|\u0644?\u0641\u0631\u062f\u064a\u0646|\u0641\u0631\u062f\u064a\u0646|\u0644?\u0636\u064a\u0641\u064a\u0646|\u0636\u064a\u0641\u064a\u0646|\u0628?\u0633\u0631\u064a\u0631\u064a\u0646|\u0633\u0631\u064a\u0631\u0627\u0646|\u0628?\u0627\u0633\u0631\u062a\u064a\u0646|\u0627\u0633\u0631\u062a\u0627\u0646|\u062b\u0644\u0627\u062b\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062a\u0644\u0627\u062a\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u0627?\u0631\u0628\u0639\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u062e\u0645\u0633\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|\u0633\u062a\u0647?\s+(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|[2-6]\s*(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)|(?:\u0633\u0631\u064a\u0631|\u0627\u0633\u0631\u0647|\u0627\u0633\u0631)\s*[2-6])(?:\s|$)/.test(
 			normalizedArabic
 		)
 	) {

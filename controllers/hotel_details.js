@@ -2674,7 +2674,9 @@ const constructUpdatedFields = (hotelDetails, updateData, fromPage) => {
 		if (
 			key !== "roomCountDetails" &&
 			key !== "paymentSettings" &&
-			key !== "hotelPolicyQA"
+			key !== "hotelPolicyQA" &&
+			key !== "openaiKnowledge" &&
+			!key.startsWith("openaiKnowledge.")
 		) {
 			updatedFields[key] = updateData[key];
 			console.log(`Updated field ${key}: ${updateData[key]}`);
