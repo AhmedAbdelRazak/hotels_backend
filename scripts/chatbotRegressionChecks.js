@@ -2049,6 +2049,113 @@ check("Official review and hotel-fact checkpoint preserve discount markup", () =
 	assert.strictEqual(orchestrator.hotelFactReplyAlreadyHasBookingCheckpoint(review, known), true);
 });
 
+check("Repeated official review keeps every fact without repeating the prior prose", () => {
+	const known = {
+		languageCode: "en",
+		checkinISO: "2026-08-25",
+		checkoutISO: "2026-08-28",
+		roomTypeKey: "tripleRooms",
+		roomSelections: [{ roomTypeKey: "tripleRooms", count: 1 }],
+		rooms: 1,
+		adults: 3,
+		children: 0,
+		fullName: "Ahmed Codex",
+		phone: "0551000099",
+		nationality: "Egyptian",
+		quote: quoteForTriple(),
+	};
+	const sc = { preferredLanguageCode: "en", displayName1: "Ahmed", conversation: [] };
+	const firstReview = orchestrator.buildReviewMessage(sc, known, hotel);
+	const repeatedReview = orchestrator.buildRepeatedReviewMessage(sc, known, hotel);
+	const previous = ai(firstReview, "review_reservation");
+	const latest = guest("Please show me all booking details once more.");
+	sc.conversation = [previous, latest];
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(
+			sc,
+			firstReview,
+			latest,
+			"review_reservation"
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(
+			sc,
+			repeatedReview,
+			latest,
+			"review_reservation"
+		),
+		false
+	);
+	assert(repeatedReview.includes("Ahmed Codex"));
+	assert(repeatedReview.includes("0551000099"));
+	assert(repeatedReview.includes("Egyptian"));
+	assert(repeatedReview.includes('<s class="message-price-old">300 SAR</s>'));
+	assert(repeatedReview.includes('<strong class="message-price-new">225 SAR</strong>'));
+	assert(/complete booking/i.test(repeatedReview));
+	const quoteLike = firstReview.replace(
+		"here is the final review before I create the booking",
+		"here is the available quote before the booking review"
+	);
+	const transitionGuest = guest("Yes, continue to review.");
+	const transitionSc = {
+		...sc,
+		conversation: [ai(quoteLike, "quote_ready"), transitionGuest],
+	};
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(
+			transitionSc,
+			firstReview,
+			transitionGuest,
+			"review_reservation"
+		),
+		false
+	);
+
+	const arabicKnown = { ...known, languageCode: "ar", fullName: "منى كودكس", nationality: "مصرية" };
+	const arabicSc = {
+		preferredLanguageCode: "ar",
+		clientName: "منى",
+		conversation: [],
+	};
+	const arabicFirst = orchestrator.buildReviewMessage(arabicSc, arabicKnown, hotel);
+	const arabicRepeated = orchestrator.buildRepeatedReviewMessage(arabicSc, arabicKnown, hotel);
+	const arabicPrevious = ai(arabicFirst, "review_reservation");
+	const arabicLatest = guest("ممكن أشوف تفاصيل الحجز كاملة مرة ثانية؟");
+	arabicSc.conversation = [arabicPrevious, arabicLatest];
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(
+			arabicSc,
+			arabicRepeated,
+			arabicLatest,
+			"review_reservation"
+		),
+		false
+	);
+	assert(arabicRepeated.includes("منى كودكس"));
+	assert(arabicRepeated.includes("0551000099"));
+	assert(arabicRepeated.includes("مصرية"));
+	assert(/<s\b[^>]*message-price-old/i.test(arabicRepeated));
+	assert(/<strong\b[^>]*message-price-new/i.test(arabicRepeated));
+	const arabicDiscount = orchestrator.quoteDiscountDisplay(arabicKnown.quote, "ar");
+	assert(arabicRepeated.includes(arabicDiscount.displayAveragePerNightLine));
+	assert(arabicRepeated.includes(arabicDiscount.displayTotalLine));
+	assert.strictEqual(
+		orchestrator.reviewReplyMissingDiscountFormat(arabicRepeated, {
+			tool: "send_review",
+			code: "review_ready",
+			review: {
+				quote: {
+					discount: arabicDiscount,
+				},
+			},
+		}),
+		false
+	);
+	assert(arabicRepeated.includes("إتمام الحجز"));
+});
+
 check("Official review must ask guest to confirm before booking creation", () => {
 	const toolResult = {
 		tool: "send_review",
