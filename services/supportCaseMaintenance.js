@@ -90,6 +90,11 @@ const isAiConversationMessage = (message = {}) => {
 const isGuestConversationMessage = (message = {}) =>
 	Boolean(message?.message) && !isAiConversationMessage(message);
 
+const isCustomerFacingAiConversationMessage = (message = {}) =>
+	Boolean(message?.message) &&
+	message?.isSystem !== true &&
+	isAiConversationMessage(message);
+
 const latestGuestMessageIndex = (supportCase = {}) => {
 	const conversation = Array.isArray(supportCase.conversation)
 		? supportCase.conversation
@@ -106,7 +111,14 @@ const hasAiReplyAfterIndex = (supportCase = {}, index = -1) => {
 		: [];
 	return conversation
 		.slice(Math.max(0, index + 1))
-		.some((message) => !message?.isSystem && isAiConversationMessage(message));
+		.some(isCustomerFacingAiConversationMessage);
+};
+
+const hasCustomerFacingAiReply = (supportCase = {}) => {
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	return conversation.some(isCustomerFacingAiConversationMessage);
 };
 
 const hasAiActivity = (supportCase = {}) => {
@@ -154,11 +166,55 @@ const latestGuestRecoveryKey = (supportCase = {}) => {
 	return `${messageAt || 0}:${text}`;
 };
 
+const pendingAiTurnForRecovery = (supportCase = {}) => {
+	if (!supportCase || supportCase.caseStatus === "closed") return null;
+	if (supportCase.aiToRespond === false) return null;
+
+	if (latestGuestNeedsAiReply(supportCase)) {
+		const latestGuest = latestGuestMessageForRecovery(supportCase);
+		const turnAt = latestGuestMessageAt(supportCase);
+		const recoveryKey = latestGuestRecoveryKey(supportCase);
+		if (!latestGuest || !turnAt || !recoveryKey) return null;
+		return {
+			kind: "guest",
+			turnAt,
+			recoveryKey,
+			guestAt: turnAt,
+			guestText: compactRecoveryText(latestGuest.message),
+		};
+	}
+
+	// The public widget can intentionally open a chat with only its generated
+	// system hold message. The orchestrator then writes the first, proactive AI
+	// introduction. That timer is in memory, so a process restart before the
+	// reply is persisted must be recoverable even though no guest row exists.
+	if (latestGuestMessageIndex(supportCase) >= 0 || hasCustomerFacingAiReply(supportCase)) {
+		return null;
+	}
+	const conversation = Array.isArray(supportCase.conversation)
+		? supportCase.conversation
+		: [];
+	const turnAt =
+		asTime(supportCase.createdAt) ||
+		asTime(conversation[0]?.date) ||
+		asTime(supportCase.updatedAt);
+	if (!turnAt) return null;
+	return {
+		kind: "intro",
+		turnAt,
+		recoveryKey: `intro:${turnAt}`,
+		guestAt: null,
+		guestText: "",
+	};
+};
+
 const aiIdleCloseReady = (supportCase = {}, cutoff) => {
 	if (!hasAiActivity(supportCase)) return false;
 	if (latestActivityAt(supportCase) > cutoff) return false;
 	const latestGuestIndex = latestGuestMessageIndex(supportCase);
-	if (latestGuestIndex < 0) return true;
+	// An AI-designated system row is not an answer. Intro-only chats must remain
+	// open until recovery persists a real customer-facing AI reply.
+	if (latestGuestIndex < 0) return hasCustomerFacingAiReply(supportCase);
 	return hasAiReplyAfterIndex(supportCase, latestGuestIndex);
 };
 
@@ -342,6 +398,8 @@ const recoverUnansweredAiSupportCases = async ({
 	limit = AI_TURN_RECOVERY_LIMIT,
 	io = null,
 	scheduleAiTurn = null,
+	onlyUnclaimed = false,
+	claimBefore = null,
 } = {}) => {
 	if (!AI_TURN_STALL_RECOVERY_ENABLED) {
 		return { scheduled: 0, cutoff: new Date(now.getTime() - staleMs) };
@@ -350,7 +408,7 @@ const recoverUnansweredAiSupportCases = async ({
 		return { scheduled: 0, cutoff: new Date(now.getTime() - staleMs) };
 	}
 	const cutoff = new Date(now.getTime() - staleMs);
-	const oldestRecoverableGuestAt = now.getTime() - AI_TURN_RECOVERY_LOOKBACK_MS;
+	const oldestRecoverableTurnAt = now.getTime() - AI_TURN_RECOVERY_LOOKBACK_MS;
 	const candidates = await SupportCase.find(
 		aiCaseFilter(cutoff),
 		supportCaseMaintenanceProjection({
@@ -367,14 +425,21 @@ const recoverUnansweredAiSupportCases = async ({
 
 	let scheduled = 0;
 	let capped = 0;
+	const claimBeforeTime = asTime(claimBefore);
 	for (const supportCase of candidates) {
-		if (!latestGuestNeedsAiReply(supportCase)) continue;
-		const guestAt = latestGuestMessageAt(supportCase);
-		if (!guestAt || guestAt > cutoff.getTime()) continue;
-		if (guestAt < oldestRecoverableGuestAt) continue;
+		if (
+			onlyUnclaimed &&
+			supportCase.aiRecoveryScheduledAt &&
+			(!claimBeforeTime || asTime(supportCase.aiRecoveryScheduledAt) >= claimBeforeTime)
+		) {
+			continue;
+		}
+		const pendingTurn = pendingAiTurnForRecovery(supportCase);
+		if (!pendingTurn) continue;
+		const { turnAt, recoveryKey: guestRecoveryKey } = pendingTurn;
+		if (!turnAt || turnAt > cutoff.getTime()) continue;
+		if (turnAt < oldestRecoverableTurnAt) continue;
 		if (!hasAiActivity(supportCase)) continue;
-		const guestRecoveryKey = latestGuestRecoveryKey(supportCase);
-		if (!guestRecoveryKey) continue;
 		const sameGuestRecovery =
 			String(supportCase.aiRecoveryGuestKey || "") === guestRecoveryKey;
 		const recoveryAttempts = sameGuestRecovery
@@ -398,14 +463,15 @@ const recoverUnansweredAiSupportCases = async ({
 			}
 			continue;
 		}
-		const latestGuest = latestGuestMessageForRecovery(supportCase);
 		const recoveryUpdate = sameGuestRecovery
 			? {
 					$set: {
 						aiRecoveryScheduledAt: now,
 						aiRecoveryLastAttemptAt: now,
-						aiRecoveryLastGuestAt: new Date(guestAt),
-						aiRecoveryLastGuestText: compactRecoveryText(latestGuest?.message),
+						aiRecoveryLastGuestAt: pendingTurn.guestAt
+							? new Date(pendingTurn.guestAt)
+							: null,
+						aiRecoveryLastGuestText: pendingTurn.guestText,
 					},
 					$inc: { aiRecoveryAttemptCount: 1 },
 			  }
@@ -415,8 +481,10 @@ const recoverUnansweredAiSupportCases = async ({
 						aiRecoveryGuestKey: guestRecoveryKey,
 						aiRecoveryAttemptCount: 1,
 						aiRecoveryLastAttemptAt: now,
-						aiRecoveryLastGuestAt: new Date(guestAt),
-						aiRecoveryLastGuestText: compactRecoveryText(latestGuest?.message),
+						aiRecoveryLastGuestAt: pendingTurn.guestAt
+							? new Date(pendingTurn.guestAt)
+							: null,
+						aiRecoveryLastGuestText: pendingTurn.guestText,
 						aiRecoveryCapReachedAt: null,
 						aiRecoveryCapGuestKey: "",
 					},
@@ -427,24 +495,37 @@ const recoverUnansweredAiSupportCases = async ({
 				caseStatus: "open",
 				openedBy: "client",
 				aiToRespond: true,
-				$or: [
-					{ aiRecoveryScheduledAt: { $exists: false } },
-					{ aiRecoveryScheduledAt: null },
-					{ aiRecoveryScheduledAt: { $lte: cutoff } },
-				],
+				$or: onlyUnclaimed
+					? [
+							{ aiRecoveryScheduledAt: { $exists: false } },
+							{ aiRecoveryScheduledAt: null },
+							...(claimBeforeTime
+								? [{ aiRecoveryScheduledAt: { $lt: new Date(claimBeforeTime) } }]
+								: []),
+					  ]
+					: [
+							{ aiRecoveryScheduledAt: { $exists: false } },
+							{ aiRecoveryScheduledAt: null },
+							{ aiRecoveryScheduledAt: { $lte: cutoff } },
+					  ],
 			},
 			recoveryUpdate
 		).exec();
 		if (!claimed?.modifiedCount) continue;
 		const didSchedule = scheduleAiTurn(io, supportCase._id, { delayMs: 150 });
-		if (didSchedule) scheduled += 1;
+		if (didSchedule !== false) scheduled += 1;
 	}
 
 	return { scheduled, capped, cutoff };
 };
 
 const startSupportCaseMaintenanceJob = ({ getIo, getScheduleAiTurn } = {}) => {
-	const run = async () => {
+	const jobStartedAt = new Date();
+	const run = async ({
+		recoveryOnly = false,
+		onlyUnclaimedRecovery = false,
+		claimBefore = null,
+	} = {}) => {
 		try {
 			const io = typeof getIo === "function" ? getIo() : null;
 			const scheduleAiTurn =
@@ -452,11 +533,17 @@ const startSupportCaseMaintenanceJob = ({ getIo, getScheduleAiTurn } = {}) => {
 			const recovered = await recoverUnansweredAiSupportCases({
 				io,
 				scheduleAiTurn,
+				onlyUnclaimed: onlyUnclaimedRecovery,
+				claimBefore,
 			});
-			const idleClosed = await closeIdleAiSupportCases({ io });
-			await closeInactiveB2CClientSupportCases({
-				io,
-			});
+			const idleClosed = recoveryOnly
+				? { closed: 0 }
+				: await closeIdleAiSupportCases({ io });
+			if (!recoveryOnly) {
+				await closeInactiveB2CClientSupportCases({
+					io,
+				});
+			}
 			if (recovered.scheduled || recovered.capped || idleClosed.closed) {
 				console.log("[support-case] ai maintenance", {
 					recovered: recovered.scheduled,
@@ -470,6 +557,20 @@ const startSupportCaseMaintenanceJob = ({ getIo, getScheduleAiTurn } = {}) => {
 	};
 
 	run();
+	// The immediate sweep can see a chat that is not stale yet. One targeted
+	// first-attempt sweep closes that startup timing gap instead of making the
+	// guest wait for the regular one-minute interval. Already-claimed turns are
+	// excluded so a healthy in-flight reply does not consume another attempt.
+	const startupRecoveryTimer = setTimeout(
+		() =>
+			run({
+				recoveryOnly: true,
+				onlyUnclaimedRecovery: true,
+				claimBefore: jobStartedAt,
+			}),
+		AI_TURN_STALL_RECOVERY_MS + 250
+	);
+	if (typeof startupRecoveryTimer.unref === "function") startupRecoveryTimer.unref();
 	const timer = setInterval(run, ONE_MINUTE);
 	if (typeof timer.unref === "function") timer.unref();
 	return timer;
@@ -480,4 +581,10 @@ module.exports = {
 	closeIdleAiSupportCases,
 	recoverUnansweredAiSupportCases,
 	startSupportCaseMaintenanceJob,
+	__test: {
+		aiIdleCloseReady,
+		hasCustomerFacingAiReply,
+		latestGuestNeedsAiReply,
+		pendingAiTurnForRecovery,
+	},
 };

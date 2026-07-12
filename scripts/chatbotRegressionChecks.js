@@ -16,6 +16,7 @@ const openaiCore = require("../aiagent/core/openai");
 const nlu = require("../aiagent/core/nlu");
 const selectors = require("../aiagent/core/selectors");
 const actions = require("../aiagent/core/actions").__test;
+const supportCaseMaintenance = require("../services/supportCaseMaintenance").__test;
 
 const hotel = {
 	_id: "zad-ajyad-test",
@@ -122,6 +123,109 @@ check("Chatbot OpenAI runtime has one bounded attempt per stage", () => {
 		openaiCore.normalizeOpenAiMetadata({ fileSearchAllowed: false, version: 2 }),
 		{ fileSearchAllowed: "false", version: "2" }
 	);
+});
+
+check("Restart recovery preserves a system-only chat until its first AI introduction", () => {
+	const createdAt = new Date("2026-07-12T16:00:03.413Z");
+	const cutoff = new Date("2026-07-12T16:05:00.000Z");
+	const supportCase = {
+		_id: "intro-restart-case",
+		caseStatus: "open",
+		openedBy: "client",
+		aiToRespond: true,
+		aiRelated: true,
+		aiResponderName: "Iman",
+		createdAt,
+		updatedAt: createdAt,
+		conversation: [
+			{
+				isSystem: true,
+				message: "A representative will be with you shortly.",
+				date: createdAt,
+				messageBy: { customerEmail: supportEmail },
+			},
+		],
+	};
+	const pending = supportCaseMaintenance.pendingAiTurnForRecovery(supportCase);
+	assert.strictEqual(pending.kind, "intro");
+	assert.strictEqual(pending.turnAt, createdAt.getTime());
+	assert.strictEqual(pending.recoveryKey, `intro:${createdAt.getTime()}`);
+	assert.strictEqual(pending.guestAt, null);
+	assert.strictEqual(supportCaseMaintenance.hasCustomerFacingAiReply(supportCase), false);
+	assert.strictEqual(supportCaseMaintenance.aiIdleCloseReady(supportCase, cutoff), false);
+});
+
+check("An answered proactive introduction can still close normally after idle timeout", () => {
+	const createdAt = new Date("2026-07-12T16:00:03.413Z");
+	const repliedAt = new Date("2026-07-12T16:00:20.000Z");
+	const cutoff = new Date("2026-07-12T16:05:20.000Z");
+	const supportCase = {
+		caseStatus: "open",
+		aiToRespond: true,
+		aiRelated: true,
+		createdAt,
+		updatedAt: repliedAt,
+		conversation: [
+			{
+				isSystem: true,
+				message: "A representative will be with you shortly.",
+				date: createdAt,
+				messageBy: { customerEmail: supportEmail },
+			},
+			{
+				isAi: true,
+				isSystem: false,
+				message: "This is Iman from the reservations team. How may I help?",
+				date: repliedAt,
+				messageBy: { customerEmail: supportEmail },
+			},
+		],
+	};
+	assert.strictEqual(supportCaseMaintenance.hasCustomerFacingAiReply(supportCase), true);
+	assert.strictEqual(supportCaseMaintenance.pendingAiTurnForRecovery(supportCase), null);
+	assert.strictEqual(supportCaseMaintenance.aiIdleCloseReady(supportCase, cutoff), true);
+});
+
+check("Existing unanswered guest recovery keys and idle guards remain intact", () => {
+	const createdAt = new Date("2026-07-12T16:00:03.413Z");
+	const guestAt = new Date("2026-07-12T16:01:00.000Z");
+	const replyAt = new Date("2026-07-12T16:01:20.000Z");
+	const cutoff = new Date("2026-07-12T16:06:20.000Z");
+	const base = {
+		caseStatus: "open",
+		aiToRespond: true,
+		aiRelated: true,
+		createdAt,
+		updatedAt: guestAt,
+		conversation: [
+			{
+				isSystem: true,
+				message: "A representative will be with you shortly.",
+				date: createdAt,
+				messageBy: { customerEmail: supportEmail },
+			},
+			guest("I need a room for three people"),
+		],
+	};
+	base.conversation[1].date = guestAt;
+	const pending = supportCaseMaintenance.pendingAiTurnForRecovery(base);
+	assert.strictEqual(pending.kind, "guest");
+	assert.strictEqual(
+		pending.recoveryKey,
+		`${guestAt.getTime()}:I need a room for three people`
+	);
+	assert.strictEqual(supportCaseMaintenance.latestGuestNeedsAiReply(base), true);
+	assert.strictEqual(supportCaseMaintenance.aiIdleCloseReady(base, cutoff), false);
+
+	const answered = {
+		...base,
+		updatedAt: replyAt,
+		conversation: [...base.conversation, ai("A triple room will suit you well.")],
+	};
+	answered.conversation[2].date = replyAt;
+	assert.strictEqual(supportCaseMaintenance.latestGuestNeedsAiReply(answered), false);
+	assert.strictEqual(supportCaseMaintenance.pendingAiTurnForRecovery(answered), null);
+	assert.strictEqual(supportCaseMaintenance.aiIdleCloseReady(answered, cutoff), true);
 });
 
 check("Priority booking and contact rules survive the real prompt cap", () => {

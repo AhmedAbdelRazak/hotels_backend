@@ -26322,7 +26322,7 @@ function schedulePlanTurn(
 	{ delayMs = 75, reason = "scheduled", skipMinimumQuiet = false } = {}
 ) {
 	const caseId = caseIdText(caseOrId);
-	if (!caseId || !io) return;
+	if (!caseId || !io) return false;
 	emitReservationProcessingAtSchedule(io, caseOrId).catch((error) => {
 		console.error("[aiagent] queued reservation progress failed:", error?.message || error);
 	});
@@ -26359,6 +26359,7 @@ function schedulePlanTurn(
 		enqueuePlanTurn(io, caseId, reason);
 	}, delay);
 	activeTimers.set(caseId, timer);
+	return true;
 }
 
 function wireSocket(io) {
