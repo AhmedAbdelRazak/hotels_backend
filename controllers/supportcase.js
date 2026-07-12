@@ -1296,7 +1296,9 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 		const currentCase = await SupportCase.findOne({
 			_id: req.params.id,
 			openedBy: "client",
-		}).lean();
+		})
+			.select("+aiStateSnapshot")
+			.lean();
 
 		if (!currentCase) {
 			return res.status(404).json({ error: "Support case not found" });
@@ -1440,7 +1442,17 @@ exports.updatePublicClientSupportCase = async (req, res) => {
 			updatedCase.aiToRespond !== false &&
 			updatedCase.caseStatus !== "closed"
 		) {
-			scheduleAiTurnForCase(req.io, updatedCase._id, { delayMs: 50 });
+			// The schedule-time reservation progress check needs the updated
+			// conversation and the already-loaded review snapshot. Supplying both
+			// avoids another MongoDB round trip before the guest sees the wait status.
+			scheduleAiTurnForCase(
+				req.io,
+				{
+					...updatedCase,
+					aiStateSnapshot: currentCase.aiStateSnapshot,
+				},
+				{ delayMs: 50 }
+			);
 		}
 
 		res.status(200).json(normalizeSupportCaseForResponse(updatedCase));

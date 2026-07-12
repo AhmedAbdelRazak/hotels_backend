@@ -113,6 +113,17 @@ check("Chatbot brain reasoning is never demoted below medium", () => {
 	else process.env.OPENAI_CHATBOT_ANALYSIS_REASONING_EFFORT = previousAnalysis;
 });
 
+check("Chatbot OpenAI runtime has one bounded attempt per stage", () => {
+	const runtime = openaiCore.getChatbotOpenAIRuntimeConfig();
+	assert(runtime.timeoutMs <= 24000);
+	assert.strictEqual(runtime.maxRetries, 0);
+	assert.strictEqual(runtime.sequentialFallbacksEnabled, false);
+	assert.deepStrictEqual(
+		openaiCore.normalizeOpenAiMetadata({ fileSearchAllowed: false, version: 2 }),
+		{ fileSearchAllowed: "false", version: "2" }
+	);
+});
+
 check("Priority booking and contact rules survive the real prompt cap", () => {
 	const fullPrompt = orchestrator.systemPrompt({
 		sc: {
@@ -196,6 +207,516 @@ check("Arabic children-under-age with dates ignores the age as child count", () 
 		orchestrator.sanitizeBrainFactsForLatestText({ adults: 4 }, {}, text),
 		{ adults: 4, children: 3 }
 	);
+});
+
+check("Khalifa guest burst keeps the price out of the child count", () => {
+	const messages = [
+		guest("\u0646\u0639\u0645\u060c \u062a\u0627\u0628\u0639"),
+		guest("\u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644"),
+		guest("\u064a\u0639\u0646\u064a \u0627\u0644\u0644\u064a\u0644\u062a\u064a\u0646 \u0628\u0640 150 \u0631\u064a\u0627\u0644"),
+	];
+	assert.deepStrictEqual(
+		orchestrator.guestCountFactsFromBurstMessages(messages, {
+			adults: 1,
+			children: 0,
+		}),
+		{ adults: 2, children: 1 }
+	);
+	const known = {
+		languageCode: "ar",
+		checkinISO: "2026-07-21",
+		checkoutISO: "2026-07-23",
+		roomTypeKey: "doubleRooms",
+		rooms: 1,
+		roomSelections: [{ roomId: "double-test", roomTypeKey: "doubleRooms", count: 1 }],
+		adults: 1,
+		children: 0,
+	};
+	const hint = orchestrator.latestMessageFactsHintForPrompt({
+		sc: {
+			_id: "khalifa-regression",
+			preferredLanguageCode: "ar",
+			conversation: messages,
+		},
+		hotel,
+		known,
+		latestGuest: messages[messages.length - 1],
+	});
+	assert.strictEqual(hint.facts.adults, 2);
+	assert.strictEqual(hint.facts.children, 1);
+	assert.strictEqual(hint.facts.rooms, 1);
+	assert.strictEqual(hint.facts.roomTypeKey, "tripleRooms");
+	assert.strictEqual(hint.facts.roomSelections.length, 1);
+	assert.strictEqual(hint.facts.roomSelections[0].roomId, "triple-test");
+});
+
+check("Trusted guest transcript heals old corrupted roster and inferred room plan", () => {
+	const conversation = [
+		guest("\u0643\u0645 \u0633\u0639\u0631 \u063a\u0631\u0641\u0629 \u0644\u0634\u062e\u0635 \u0648\u0627\u062d\u062f"),
+		ai("old quote", "quote_ready"),
+		guest("\u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644"),
+		guest("\u064a\u0639\u0646\u064a \u0627\u0644\u0644\u064a\u0644\u062a\u064a\u0646 \u0628\u0640 150 \u0631\u064a\u0627\u0644"),
+		ai("wrong options", "same_date_room_options_ready"),
+		guest("\u063a\u0631\u0641\u0629 \u0648\u0627\u062d\u062f\u0629"),
+	];
+	const corrupted = {
+		adults: 1,
+		children: 20,
+		rooms: 4,
+		roomTypeKey: "familyRooms",
+		roomSelections: [{ roomTypeKey: "familyRooms", count: 4 }],
+		quote: { available: true, total: 600 },
+	};
+	const healed = orchestrator.healKnownGuestRosterFromConversation(
+		hotel,
+		{ conversation },
+		corrupted
+	);
+	assert.strictEqual(healed.changed, true);
+	assert.strictEqual(healed.known.adults, 2);
+	assert.strictEqual(healed.known.children, 1);
+	assert.strictEqual(healed.known.rooms, 1);
+	assert.strictEqual(healed.known.roomTypeKey, "tripleRooms");
+	assert.strictEqual(healed.known.roomSelections.length, 1);
+	assert.strictEqual(healed.known.roomSelections[0].roomTypeKey, "tripleRooms");
+	assert.strictEqual(healed.known.quote, undefined);
+});
+
+check("Guest-selected larger room survives a smaller updated party", () => {
+	const latest = guest("\u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644");
+	const known = {
+		checkinISO: "2026-07-21",
+		checkoutISO: "2026-07-23",
+		adults: 1,
+		children: 20,
+		rooms: 1,
+		roomTypeKey: "quadRooms",
+		roomSelections: [{ roomId: "quad-test", roomTypeKey: "quadRooms", count: 1 }],
+	};
+	const healed = orchestrator.healKnownGuestRosterFromConversation(
+		hotel,
+		{
+			conversation: [
+				guest("\u0623\u0631\u064a\u062f \u063a\u0631\u0641\u0629 \u0631\u0628\u0627\u0639\u064a\u0629"),
+				latest,
+			],
+		},
+		known
+	);
+	assert.strictEqual(healed.known.adults, 2);
+	assert.strictEqual(healed.known.children, 1);
+	assert.strictEqual(healed.known.roomTypeKey, "quadRooms");
+	assert.strictEqual(healed.known.roomSelections[0].roomId, "quad-test");
+	const hint = orchestrator.latestMessageFactsHintForPrompt({
+		sc: { preferredLanguageCode: "ar", conversation: [latest] },
+		hotel,
+		known: healed.known,
+		latestGuest: latest,
+	});
+	assert(!hint.facts.roomTypeKey);
+});
+
+check("Room-capacity questions never overwrite a trusted booking party", () => {
+	const current = {
+		adults: 2,
+		children: 1,
+		rooms: 1,
+		roomTypeKey: "tripleRooms",
+		roomSelections: [{ roomId: "triple-test", roomTypeKey: "tripleRooms", count: 1 }],
+		quote: quoteForTriple(),
+	};
+	const healed = orchestrator.healKnownGuestRosterFromConversation(
+		hotel,
+		{
+			conversation: [
+				guest("\u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644"),
+				guest("Does the six-bed room fit 6 people?"),
+			],
+		},
+		current
+	);
+	assert.strictEqual(healed.changed, false);
+	assert.strictEqual(healed.known.adults, 2);
+	assert.strictEqual(healed.known.children, 1);
+	assert.strictEqual(healed.known.roomTypeKey, "tripleRooms");
+	assert.strictEqual(healed.known.quote.total, 225);
+});
+
+check("Common English and Arabic capacity questions never become booking party counts", () => {
+	const current = {
+		adults: 2,
+		children: 1,
+		rooms: 1,
+		roomTypeKey: "tripleRooms",
+		roomSelections: [{ roomId: "triple-test", roomTypeKey: "tripleRooms", count: 1 }],
+		quote: quoteForTriple(),
+	};
+	const questions = [
+		"Is one triple room enough for 3 people?",
+		"Can 3 people stay in a triple room?",
+		"\u0647\u0644 \u062a\u0643\u0641\u064a \u0627\u0644\u063a\u0631\u0641\u0629 \u0627\u0644\u062b\u0644\u0627\u062b\u064a\u0629 \u0644\u062b\u0644\u0627\u062b\u0629 \u0623\u0634\u062e\u0627\u0635\u061f",
+	];
+	for (const question of questions) {
+		assert.deepStrictEqual(orchestrator.guestCountFactsFromBurstMessages([question], current), {});
+		const latest = guest(question);
+		const hint = orchestrator.latestMessageFactsHintForPrompt({
+			sc: { conversation: [latest], preferredLanguageCode: "en" },
+			hotel,
+			known: current,
+			latestGuest: latest,
+		});
+		assert.deepStrictEqual(hint.facts, {});
+		const healed = orchestrator.healKnownGuestRosterFromConversation(
+			hotel,
+			{ conversation: [guest("wife and a child"), latest] },
+			current
+		);
+		assert.strictEqual(healed.known.adults, 2);
+		assert.strictEqual(healed.known.children, 1);
+		assert.strictEqual(healed.known.roomTypeKey, "tripleRooms");
+	}
+});
+
+check("Arabic dual children and young son ages preserve the exact party", () => {
+	const dual = "\u0623\u0646\u0627 \u0648\u0632\u0648\u062c\u062a\u064a \u0648\u0637\u0641\u0644\u064a\u0646";
+	assert.deepStrictEqual(orchestrator.explicitGuestCountFactsFromText(dual), { children: 2 });
+	assert.deepStrictEqual(orchestrator.relationshipGuestFactsFromText(dual, {}), {
+		adults: 2,
+		children: 2,
+	});
+	assert.deepStrictEqual(orchestrator.guestCountFactsFromBurstMessages([dual], {}), {
+		adults: 2,
+		children: 2,
+	});
+	for (const text of [
+		"my wife and my son, he is 5 years old",
+		"me, my wife, and my 5-year-old son",
+		"my wife and my son aged 7",
+		"\u0623\u0646\u0627 \u0648\u0632\u0648\u062c\u062a\u064a \u0648\u0627\u0628\u0646\u064a \u0639\u0645\u0631\u0647 5 \u0633\u0646\u0648\u0627\u062a",
+	]) {
+		assert.deepStrictEqual(orchestrator.relationshipGuestFactsFromText(text, {}), {
+			adults: 2,
+			children: 1,
+		});
+	}
+});
+
+check("Unnumbered plural children remain unresolved instead of being guessed", () => {
+	for (const text of [
+		"my wife and children",
+		"me, my wife and kids",
+		"I am coming with my children",
+		"\u0623\u0646\u0627 \u0648\u0632\u0648\u062c\u062a\u064a \u0648\u0627\u0644\u0623\u0637\u0641\u0627\u0644",
+	]) {
+		const burst = orchestrator.guestCountFactsFromBurstMessages([text], {});
+		assert.strictEqual(burst.children, undefined);
+		assert.strictEqual(burst.childrenCountUnclear, true);
+	}
+	const latest = guest("my wife and children");
+	const hint = orchestrator.latestMessageFactsHintForPrompt({
+		sc: { conversation: [latest], preferredLanguageCode: "en" },
+		hotel,
+		known: {
+			checkinISO: "2026-08-25",
+			checkoutISO: "2026-08-28",
+			roomTypeKey: "doubleRooms",
+			rooms: 1,
+		},
+		latestGuest: latest,
+	});
+	assert.notStrictEqual(hint.facts.children, 0);
+	assert.strictEqual(hint.facts.childrenCountUnclear, true);
+	assert.strictEqual(hint.canQuote, false);
+	assert(hint.missingForQuote.includes("children"));
+});
+
+check("Transcript healing reconciles explicit one room even when party counts already match", () => {
+	const current = {
+		adults: 2,
+		children: 1,
+		rooms: 4,
+		roomTypeKey: "familyRooms",
+		roomSelections: [{ roomId: "family-five-test", roomTypeKey: "familyRooms", count: 4 }],
+		quote: { ...quoteForTriple(), roomTypeKey: "familyRooms", rooms: 4, totalRooms: 4 },
+	};
+	const healed = orchestrator.healKnownGuestRosterFromConversation(
+		hotel,
+		{ conversation: [guest("wife and a child"), guest("one room")] },
+		current
+	);
+	assert.strictEqual(healed.changed, true);
+	assert.strictEqual(healed.known.adults, 2);
+	assert.strictEqual(healed.known.children, 1);
+	assert.strictEqual(healed.known.rooms, 1);
+	assert.strictEqual(healed.known.roomTypeKey, "tripleRooms");
+	assert.strictEqual(healed.known.quote, undefined);
+});
+
+check("Room amenity questions never rewrite the confirmed room plan", () => {
+	const current = {
+		adults: 2,
+		children: 1,
+		rooms: 1,
+		roomTypeKey: "tripleRooms",
+		roomSelections: [{ roomId: "triple-test", roomTypeKey: "tripleRooms", count: 1 }],
+		quote: quoteForTriple(),
+	};
+	const healed = orchestrator.healKnownGuestRosterFromConversation(
+		hotel,
+		{
+			conversation: [
+				guest("wife and a child"),
+				ai("The triple room total is SAR 225.", "quote_ready"),
+				guest("Does the double room have parking?"),
+			],
+		},
+		current
+	);
+	assert.strictEqual(healed.changed, false);
+	assert.strictEqual(healed.known.roomTypeKey, "tripleRooms");
+	assert.strictEqual(healed.known.rooms, 1);
+	assert.strictEqual(healed.known.quote.total, 225);
+});
+
+check("Spouse and child roster replaces corrupted model guest counts", () => {
+	const text = "\u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644";
+	assert.deepStrictEqual(
+		orchestrator.sanitizeBrainFactsForLatestText(
+			{ adults: 1, children: 20 },
+			{ adults: 1, children: 20 },
+			text
+		),
+		{ adults: 2, children: 1 }
+	);
+	assert.deepStrictEqual(
+		orchestrator.relationshipGuestFactsFromText(text, { adults: 1, children: 0 }),
+		{ adults: 2, children: 1 }
+	);
+	assert.deepStrictEqual(
+		orchestrator.relationshipGuestFactsFromText(
+			"\u0623\u0646\u0627 \u0648\u0632\u0648\u062c\u062a\u064a\u060c \u0627\u0644\u0632\u0648\u062c\u0629 \u0648\u0637\u0641\u0644",
+			{ adults: 1, children: 0 }
+		),
+		{ adults: 2, children: 1 }
+	);
+	assert.deepStrictEqual(
+		orchestrator.relationshipGuestFactsFromText(
+			"\u0632\u0648\u062c\u062a\u064a \u0648\u0637\u0641\u0644\u060c \u0627\u0644\u0637\u0641\u0644 \u0639\u0645\u0631\u0647 5 \u0633\u0646\u0648\u0627\u062a",
+			{ adults: 1, children: 0 }
+		),
+		{ adults: 2, children: 1 }
+	);
+	assert.deepStrictEqual(
+		orchestrator.relationshipGuestFactsFromText(
+			"my wife, my son and my daughter",
+			{ adults: 1, children: 0 }
+		),
+		{ adults: 4, children: 0 }
+	);
+});
+
+check("Room choices require explicit comparison intent", () => {
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices(
+			"\u064a\u0639\u0646\u064a \u0627\u0644\u0644\u064a\u0644\u062a\u064a\u0646 \u0628\u0640 150 \u0631\u064a\u0627\u0644"
+		),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices("\u063a\u0631\u0641\u0629 \u0648\u0627\u062d\u062f\u0629"),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices(
+			"\u0642\u0627\u0631\u0646 \u0644\u064a \u0628\u064a\u0646 \u063a\u0631\u0641\u0629 \u062f\u0628\u0644 \u0623\u0648 \u0631\u0628\u0627\u0639\u064a\u0629"
+		),
+		true
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices(
+			"\u0644\u0627 \u0623\u0631\u064a\u062f \u062e\u064a\u0627\u0631\u0627\u062a\u060c \u0627\u0639\u0637\u0646\u064a \u0627\u0644\u0623\u0646\u0633\u0628"
+		),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices(
+			"I don't want room options, just sell me the best fit"
+		),
+		false
+	);
+	assert.strictEqual(
+		orchestrator.latestGuestExplicitlyRequestsRoomChoices(
+			"No, show me room options"
+		),
+		true
+	);
+});
+
+check("Customer room options never expose hotel stock and stop at two choices", () => {
+	const redacted = orchestrator.redactInternalStockForCustomer({
+		availableRooms: 35,
+		inventory: { available: 35, requested: 1 },
+		rooms: [
+			{ roomId: "private-room-id", physicalRoomCount: 35, totalSellableUnits: 35, count: 1 },
+		],
+		roomSelections: [
+			{ roomId: "private-room-id", roomTypeKey: "doubleRooms", count: 1, totalRooms: 35 },
+		],
+		quote: { totalRooms: 1, total: 150 },
+	});
+	const serialized = JSON.stringify(redacted);
+	assert(!serialized.includes("availableRooms"));
+	assert(!serialized.includes("physicalRoomCount"));
+	assert(!serialized.includes("totalSellableUnits"));
+	assert(!serialized.includes("inventory"));
+	assert(!serialized.includes("private-room-id"));
+	assert(!serialized.includes('"roomSelections":[{"roomTypeKey":"doubleRooms","count":1,"totalRooms"'));
+	assert(serialized.includes('"totalRooms":1'));
+	assert(orchestrator.replyDisclosesInternalStock("35 rooms available"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0627\u0644\u0645\u062a\u0648\u0641\u0631 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("We have 35 double rooms"));
+	assert(orchestrator.replyDisclosesInternalStock("The hotel has 35 double rooms"));
+	assert(orchestrator.replyDisclosesInternalStock("35 double rooms available"));
+	assert(orchestrator.replyDisclosesInternalStock("35 Double Rooms are currently available"));
+	assert(orchestrator.replyDisclosesInternalStock("Available: 35 double rooms"));
+	assert(orchestrator.replyDisclosesInternalStock("Remaining: 35 double rooms"));
+	assert(orchestrator.replyDisclosesInternalStock("We currently have a total of 35 double rooms"));
+	assert(orchestrator.replyDisclosesInternalStock("The hotel offers 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("We offer 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("Our capacity is 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("The hotel offers thirty-five double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("The property consists of 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("The hotel comprises 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("Our inventory includes 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("Our configured inventory is 35."));
+	assert(orchestrator.replyDisclosesInternalStock("There are 35 doubles at the property."));
+	assert(orchestrator.replyDisclosesInternalStock("We can offer up to 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("We have around 35 double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("The hotel has thirty-five rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("We have thirty five double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("There are thirty-five double rooms."));
+	assert(orchestrator.replyDisclosesInternalStock("Available: 35 doubles"));
+	assert(orchestrator.replyDisclosesInternalStock("35 doubles are available"));
+	assert(orchestrator.replyDisclosesInternalStock("Thirty-five doubles are available"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0644\u062f\u064a\u0646\u0627 35 \u063a\u0631\u0641\u0629 \u062f\u0628\u0644"));
+	assert(orchestrator.replyDisclosesInternalStock("\u064a\u0648\u062c\u062f \u0644\u062f\u064a\u0646\u0627 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0639\u062f\u062f \u0627\u0644\u063a\u0631\u0641 35"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0627\u0644\u0641\u0646\u062f\u0642 \u0628\u0647 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0627\u0644\u0641\u0646\u062f\u0642 \u0641\u064a\u0647 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0644\u062f\u064a\u0646\u0627 \u062d\u0648\u0627\u0644\u064a 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0645\u062a\u0627\u062d 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0645\u062a\u0628\u0642\u064a 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u064a\u0648\u062c\u062f \u0628\u0627\u0644\u0641\u0646\u062f\u0642 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u064a\u0648\u0641\u0631 \u0627\u0644\u0641\u0646\u062f\u0642 35 \u063a\u0631\u0641\u0629 \u062f\u0628\u0644"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0627\u0644\u0641\u0646\u062f\u0642 \u064a\u0648\u0641\u0631 35 \u063a\u0631\u0641\u0629 \u062f\u0628\u0644"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0633\u0639\u0629 \u0627\u0644\u0641\u0646\u062f\u0642 35 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("\u0644\u062f\u064a\u0646\u0627 \u062e\u0645\u0633 \u0648\u062b\u0644\u0627\u062b\u0648\u0646 \u063a\u0631\u0641\u0629"));
+	assert(orchestrator.replyDisclosesInternalStock("L'h\u00f4tel dispose de 35 chambres."));
+	assert(orchestrator.replyDisclosesInternalStock("El hotel tiene 35 habitaciones."));
+	assert(orchestrator.replyDisclosesInternalStock("Hay 35 habitaciones dobles disponibles."));
+	assert(!orchestrator.replyDisclosesInternalStock("There are 2 rooms in your confirmed reservation."));
+	assert(!orchestrator.replyDisclosesInternalStock("We have 2 rooms booked for you."));
+	assert(!orchestrator.replyDisclosesInternalStock("Nous avons 2 chambres r\u00e9serv\u00e9es pour vous."));
+	assert(!orchestrator.replyDisclosesInternalStock("Tenemos 2 habitaciones reservadas para usted."));
+	assert(!orchestrator.replyDisclosesInternalStock("I can offer 5 double rooms + 5 triple rooms."));
+	assert.strictEqual(
+		orchestrator.replyDisclosesInternalStock(
+			"\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\n\u0639\u062f\u062f \u0627\u0644\u063a\u0631\u0641: 1\n\u0627\u0633\u0645 \u0627\u0644\u0636\u064a\u0641: \u0645\u0646\u0649 \u0643\u0648\u062f\u0643\u0633",
+			{
+				known: { rooms: 1, roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }] },
+				clientAction: "review_reservation",
+			}
+		),
+		false
+	);
+	assert(
+		orchestrator.replyDisclosesInternalStock(
+			"\u0645\u0631\u0627\u062c\u0639\u0629 \u0627\u0644\u062d\u062c\u0632\n\u0639\u062f\u062f \u0627\u0644\u063a\u0631\u0641: 35",
+			{
+				known: { rooms: 1, roomSelections: [{ roomTypeKey: "doubleRooms", count: 1 }] },
+				clientAction: "review_reservation",
+			}
+		)
+	);
+	const message = orchestrator.buildSameDateRoomOptionsMessage(
+		{ preferredLanguageCode: "en", clientName: "Khalifa" },
+		{ languageCode: "en", checkinISO: "2026-07-21", checkoutISO: "2026-07-23" },
+		{
+			options: [
+				{ roomTypeKey: "tripleRooms", roomLabel: "Triple Room", requestedRooms: 1, quotedRooms: 1, availableRooms: 4, total: 150, currency: "SAR" },
+				{ roomTypeKey: "quadRooms", roomLabel: "Quad Room", requestedRooms: 1, quotedRooms: 1, availableRooms: 25, total: 180, currency: "SAR" },
+				{ roomTypeKey: "familyRooms", roomLabel: "Six-Bed Room", requestedRooms: 1, quotedRooms: 1, availableRooms: 35, total: 200, currency: "SAR" },
+			],
+		}
+	);
+	assert(message.includes("Triple Room"));
+	assert(message.includes("Quad Room"));
+	assert(!message.includes("Six-Bed Room"));
+	assert(!message.includes("35"));
+	assert(!/rooms? available/i.test(message));
+});
+
+check("Repetition recovery never cycles back to an already-used fallback", () => {
+	const base = { preferredLanguageCode: "en", clientName: "Khalifa", conversation: [] };
+	const latest = guest("Please answer the same point again");
+	const prior = [0, 1, 2].map((variant) =>
+		ai(
+			orchestrator.nonRepeatedCustomerReplyRecovery(
+				base,
+				{},
+				latest,
+				"ai_reply",
+				variant
+			),
+			"ai_reply"
+		)
+	);
+	const firstCase = { ...base, conversation: [...prior, latest] };
+	const first = orchestrator.selectNonRepeatedCustomerReplyRecovery(
+		firstCase,
+		{},
+		latest,
+		"ai_reply"
+	);
+	assert(!prior.some((entry) => entry.message === first));
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(firstCase, first, latest, "ai_reply"),
+		false
+	);
+	const latestAgain = guest("Please answer the same point again");
+	const secondCase = {
+		...base,
+		conversation: [...prior, latest, ai(first, "ai_reply"), latestAgain],
+	};
+	const second = orchestrator.selectNonRepeatedCustomerReplyRecovery(
+		secondCase,
+		{},
+		latestAgain,
+		"ai_reply"
+	);
+	assert.notStrictEqual(second, first);
+	assert.strictEqual(
+		orchestrator.replyTooSimilarToRecentAi(secondCase, second, latestAgain, "ai_reply"),
+		false
+	);
+});
+
+check("Blocked protocol replies use the validated critical fallback with public links", () => {
+	const fallback = [
+		"Your booking is confirmed. Confirmation number: 12345678.",
+		"[View reservation details](https://jannatbooking.com/reservations/12345678)",
+		"[Payment link](https://jannatbooking.com/pay/12345678)",
+	].join("\n");
+	const safe = orchestrator.safeProtocolBlockedCustomerReply(
+		{ preferredLanguageCode: "en", clientName: "Khalifa" },
+		{ confirmation: "12345678", quote: { total: 150, currency: "SAR" } },
+		guest("Confirm reservation"),
+		"reservation_confirmed",
+		fallback
+	);
+	assert.strictEqual(safe, fallback);
+	assert(safe.includes("View reservation details"));
+	assert(safe.includes("Payment link"));
 });
 
 check("Arabic checkout correction with Arabic month is parsed", () => {
@@ -1779,6 +2300,16 @@ check("Confirmed Nusuk fact cannot be omitted from a compound service answer", (
 	const answered =
 		"\u0646\u0639\u0645\u060c \u064a\u0648\u062c\u062f \u0628\u0627\u0635 \u0644\u0645\u0648\u0642\u0641 \u0627\u0644\u0634\u0647\u062f\u0627\u0621\u060c \u0648\u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643. \u0627\u0644\u0645\u0648\u0642\u0639 \u064a\u0628\u0639\u062f 15 \u062f\u0642\u064a\u0642\u0629 \u0645\u0634\u064a.";
 	assert.strictEqual(orchestrator.replyOmitsConfirmedNusukFact(answered, nusukHotel), false);
+	const nusukAnsweredButBusDetailOmitted =
+		"\u0646\u0639\u0645\u060c \u064a\u0648\u062c\u062f \u0628\u0627\u0635\u060c \u0648\u0627\u0644\u0641\u0646\u062f\u0642 \u0645\u062a\u0627\u062d \u0639\u0644\u0649 \u0646\u0633\u0643. \u0627\u0644\u0645\u0648\u0642\u0639 \u064a\u0628\u0639\u062f 15 \u062f\u0642\u064a\u0642\u0629 \u0645\u0634\u064a.";
+	assert.strictEqual(
+		orchestrator.hotelFactReplyNeedsCorrection(
+			{ action: "reply", reply: nusukAnsweredButBusDetailOmitted },
+			nusukHotel,
+			latestGuest
+		),
+		true
+	);
 });
 
 check("Hotel fact replies cannot dump raw booking numbers", () => {
@@ -2125,6 +2656,14 @@ check("Official review and hotel-fact checkpoint preserve discount markup", () =
 		{ preferredLanguageCode: "en", displayName1: "Ahmed" },
 		known,
 		hotel
+	);
+	assert.strictEqual(
+		orchestrator.replyDisclosesInternalStock(review, {
+			known,
+			clientAction: "review_reservation",
+			toolResult: { tool: "send_review" },
+		}),
+		false
 	);
 	assert(review.includes('<s class="message-price-old">300 SAR</s>'));
 	assert(review.includes('<strong class="message-price-new">225 SAR</strong>'));
@@ -3123,6 +3662,106 @@ check("Post-confirmation pay-at-hotel questions get a clear confirmation answer"
 	);
 });
 
+check("Reservation processing status is transient wording and never claims completion", () => {
+	const arabic = orchestrator.reservationProcessingStatusText(
+		{ preferredLanguageCode: "ar" },
+		{ languageCode: "ar" }
+	);
+	const english = orchestrator.reservationProcessingStatusText(
+		{ preferredLanguageCode: "en" },
+		{ languageCode: "en" }
+	);
+	assert(/\u062f\u0642\u064a\u0642\u0629/u.test(arabic));
+	assert(/\u0631\u0642\u0645 \u0627\u0644\u062a\u0623\u0643\u064a\u062f/u.test(arabic));
+	assert(/up to one minute/i.test(english));
+	assert(/confirmation number/i.test(english));
+	assert(!/reservation (?:is|was) (?:confirmed|created|complete)/i.test(english));
+});
+
+check("Reservation processing acknowledgements do not interrupt final creation", () => {
+	const confirmation = guest("\u0625\u062a\u0645\u0627\u0645 \u0627\u0644\u062d\u062c\u0632");
+	confirmation.clientTag = "confirmation-turn";
+	confirmation.date = new Date("2026-07-11T12:00:00.000Z");
+	const acknowledgement = guest("\u062a\u0645\u0627\u0645\u060c \u062e\u0630 \u0648\u0642\u062a\u0643");
+	acknowledgement.clientTag = "wait-ack";
+	acknowledgement.date = new Date("2026-07-11T12:00:04.000Z");
+	assert(orchestrator.guestAcknowledgesReservationProcessing("Take your time"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("Ok"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("No problem"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("That's fine"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("Take all the time you need"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("Go ahead"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("Please continue"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("I am here"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("\u0644\u0627 \u0645\u0634\u0643\u0644\u0629\u060c \u062a\u0627\u0628\u0639"));
+	assert(orchestrator.guestAcknowledgesReservationProcessing("\u062a\u0645\u0627\u0645\u060c \u062e\u0630 \u0648\u0642\u062a\u0643"));
+	assert(!orchestrator.guestAcknowledgesReservationProcessing("Ok, change the checkout date"));
+	assert(!orchestrator.guestAcknowledgesReservationProcessing("Go ahead and change the checkout date"));
+	assert(!orchestrator.guestAcknowledgesReservationProcessing("Please continue with two rooms"));
+	assert(
+		orchestrator.onlyReservationProcessingAcknowledgementsAfter(
+			{ conversation: [ai("review", "review_reservation"), confirmation, acknowledgement] },
+			confirmation
+		)
+	);
+	const correction = guest("\u0644\u0627\u060c \u063a\u064a\u0631 \u062a\u0627\u0631\u064a\u062e \u0627\u0644\u062e\u0631\u0648\u062c");
+	correction.clientTag = "correction";
+	correction.date = new Date("2026-07-11T12:00:05.000Z");
+	assert(
+		!orchestrator.onlyReservationProcessingAcknowledgementsAfter(
+			{ conversation: [confirmation, acknowledgement, correction] },
+			confirmation
+		)
+	);
+});
+
+check("Reservation progress is recognized before queueing and planner concurrency is bounded above one", () => {
+	assert(orchestrator.runtimeTuning.planMaxActiveTurns >= 2);
+	assert(orchestrator.runtimeTuning.planMaxActiveTurns <= 6);
+	const review = ai(
+		"Official review complete. Confirm to create the reservation.",
+		"review_reservation"
+	);
+	const confirm = guest("Complete booking", "place_reservation");
+	const sc = {
+		preferredLanguageCode: "en",
+		conversation: [review, confirm],
+		aiStateSnapshot: {
+			known: {
+				...quoteForTriple(),
+				quote: quoteForTriple(),
+				fullName: "Ahmed Test",
+				phone: "+201001234567",
+				nationality: "Egyptian",
+			},
+		},
+	};
+	assert(orchestrator.reservationProcessingScheduleContext(sc));
+	const sideQuestion = guest(
+		"Complete booking. Can I pay at the hotel?",
+		"place_reservation"
+	);
+	assert.strictEqual(
+		orchestrator.reservationProcessingScheduleContext({ ...sc, conversation: [review, sideQuestion] }),
+		null
+	);
+});
+
+check("Large first-turn room requests retain medium planner reasoning", () => {
+	assert.strictEqual(
+		orchestrator.plannerReasoningEffortForTurn(
+			{},
+			{},
+			guest("I need 10 double rooms for 20 adults")
+		),
+		"medium"
+	);
+	assert.strictEqual(
+		orchestrator.plannerReasoningEffortForTurn({}, {}, guest("Hello, how far is the hotel?")),
+		"low"
+	);
+});
+
 check("Repeated AI wording is detected before sending robotic replies", () => {
 	const previous =
 		"نعم يا ضيفنا العزيز، يوجد خدمة نقل حسب بيانات فندق زاد أجياد. يوفر الفندق باصًا خاصًا لنقل الضيوف إلى موقف الشهداء.";
@@ -3194,7 +3833,7 @@ check("Combined identity and bus detour do not damage known quote or guest name"
 		true
 	);
 	assert.strictEqual(orchestrator.runtimeTuning.guestReplyQuietMs >= 3000, true);
-	assert.strictEqual(orchestrator.runtimeTuning.planMaxActiveTurns, 1);
+	assert.strictEqual(orchestrator.runtimeTuning.planMaxActiveTurns >= 2, true);
 });
 
 check("Guest address keeps titles and smart gendered Arabic address", () => {

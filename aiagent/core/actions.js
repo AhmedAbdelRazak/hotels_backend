@@ -2130,6 +2130,7 @@ async function createReservationForCase({
 	slots,
 	quoteData,
 	room,
+	beforeInsertGuard = null,
 }) {
 	const hasRoomQuoteLines = Array.isArray(quoteData?.rooms) && quoteData.rooms.length > 0;
 	const dailyRows = Array.isArray(quoteData?.rows)
@@ -2341,6 +2342,15 @@ async function createReservationForCase({
 				expected: finalQuoteVerification.totalRooms,
 				actual: Number(reservationPayload.total_rooms || 0),
 			});
+		}
+		if (typeof beforeInsertGuard === "function") {
+			await timedReservationCreateStep(caseId, "guest_revision_guard", () =>
+				beforeInsertGuard({
+					caseId: caseKey,
+					reservationCaseId: lookupKey,
+					fingerprint,
+				})
+			);
 		}
 		saved = await timedReservationCreateStep(
 			caseId,

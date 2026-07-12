@@ -32,6 +32,26 @@ const SUPPORT_EMAIL = "support@jannatbooking.com";
 const CONTACT_NUMBER = "+1 (909) 222-3374";
 const DEFAULT_AJYAD_ID = "6a40b6a1a6efe70450536038";
 const QUIET_WAIT_MS = fastMode ? 650 : 3150;
+// This is a release safety boundary, not a tuning knob. A caller cannot raise it
+// through an environment variable and accidentally certify a >60-second turn.
+const MAX_TURN_WALL_MS = 60000;
+const TARGET_AVERAGE_TURN_MS = 30000;
+const MAX_AVERAGE_TURN_MS = 40000;
+const PRODUCTION_RELEASE_MODE =
+	argv.includes("--production-release") ||
+	process.env.LIVE_CHATBOT_QA_PRODUCTION_RELEASE === "true";
+const PRODUCTION_RELEASE_SCENARIOS = Object.freeze([
+	[9, "Final review confirmation creates reservation"],
+	[14, "Burst messages are processed in one turn after quiet wait"],
+	[24, "Ambiguous 03 triple room request becomes one triple for 3 guests"],
+	[25, "Single guest upgrades to exact spouse-child triple without stock leak"],
+	[36, "Bus Nusuk and location detours preserve review on request"],
+	[38, "Post-confirmation service facts stay factual and do not reopen booking"],
+	[39, "Arabic Levant month checkout day-only quote"],
+	[41, "Arabic burst slash messages wait and quote all facts"],
+	[43, "Arabic Ahmed price follow-up and on-demand room comparison"],
+	[44, "Ten doubles use exact physical mixed allocation only after approval"],
+]);
 const QA_SOURCE_WEBSITE = "codex-live-qa";
 const QA_MARKER_PREFIX = /^codex(?:qa)?[-_.:]/i;
 const QA_MARKER_ALLOWED = /^[a-z0-9._:-]+$/i;
@@ -76,20 +96,38 @@ const requestedFrom = Number(args.from || 1);
 const requestedTo = args.to ? Number(args.to) : Number.MAX_SAFE_INTEGER;
 const keepData = argv.includes("--keep");
 
-const silentRoom = { emit() {} };
-const silentIo = {
-	__aiWorkerNoDirectEmit: true,
-	to() {
-		return silentRoom;
-	},
-	emit() {},
-	on() {},
-};
-
 const runState = {
 	caseOwnership: new Map(),
+	inFlightPlans: new Set(),
 	scenarioResults: [],
 	reservationOwnership: new Map(),
+	socketEvents: [],
+	turnWallDurations: [],
+};
+
+function captureSocketEvent(roomId = "", event = "", payload = {}) {
+	runState.socketEvents.push({
+		sequence: runState.socketEvents.length,
+		roomId: String(roomId || ""),
+		event: String(event || ""),
+		payload: payload && typeof payload === "object" ? { ...payload } : payload,
+		at: Date.now(),
+	});
+}
+
+const silentIo = {
+	__aiWorkerNoDirectEmit: true,
+	to(roomId) {
+		return {
+			emit(event, payload) {
+				captureSocketEvent(roomId, event, payload);
+			},
+		};
+	},
+	emit(event, payload) {
+		captureSocketEvent("", event, payload);
+	},
+	on() {},
 };
 
 function sleep(ms) {
@@ -191,6 +229,13 @@ const REQUIRED_STRUCTURED_TRANSITIONS = new Set([
 	"review_reservation->reservation_confirmed",
 	"reservation_lookup_not_found->reservation_lookup_found",
 ]);
+const FACTUAL_UPDATE_REPEAT_ACTIONS = new Set([
+	"quote_ready",
+	"split_stay_quote_ready",
+	"review_reservation",
+	"reservation_update_success",
+	"reservation_lookup_found",
+]);
 
 function normalizeSemanticToken(value = "") {
 	return String(value || "")
@@ -277,6 +322,19 @@ function repliesSubstantiallyRepeat(previous = {}, current = {}) {
 	if (exactReplyText(previousText) === exactReplyText(currentText)) {
 		return { repeated: true, reason: "exact", comparison: semanticReplyComparison(previousText, currentText) };
 	}
+	const previousAction = entryAction(previous);
+	const currentAction = entryAction(current);
+	const previousFacts = requiredFactSignature(previousText);
+	const currentFacts = requiredFactSignature(currentText);
+	if (
+		previousFacts &&
+		currentFacts &&
+		previousFacts !== currentFacts &&
+		(FACTUAL_UPDATE_REPEAT_ACTIONS.has(previousAction) ||
+			FACTUAL_UPDATE_REPEAT_ACTIONS.has(currentAction))
+	) {
+		return { repeated: false, reason: "changed_authoritative_facts" };
+	}
 
 	const comparison = semanticReplyComparison(previousText, currentText);
 	const sameMeaningfulTokenSet =
@@ -291,10 +349,6 @@ function repliesSubstantiallyRepeat(previous = {}, current = {}) {
 		return { repeated: false, comparison };
 	}
 
-	const previousAction = entryAction(previous);
-	const currentAction = entryAction(current);
-	const previousFacts = requiredFactSignature(previousText);
-	const currentFacts = requiredFactSignature(currentText);
 	if (
 		REQUIRED_STRUCTURED_TRANSITIONS.has(`${previousAction}->${currentAction}`) &&
 		previousFacts &&
@@ -578,6 +632,20 @@ function assertDateRangeMention(reply = "", checkinISO = "", checkoutISO = "", l
 	);
 }
 
+function assertAmountMention(reply = "", amount = 0, label = "") {
+	const numeric = Number(amount);
+	assert(Number.isFinite(numeric) && numeric > 0, `${label || "price"} has no expected amount`);
+	const normalized = normalizeDigitsForCheck(reply).replace(/,/g, "");
+	const rounded = Math.round(numeric * 100) / 100;
+	const amountPattern = Number.isInteger(rounded)
+		? `${rounded}(?:\\.0{1,2})?`
+		: escapeRegExp(rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, ""));
+	assert(
+		new RegExp(`(?:^|[^0-9])${amountPattern}(?=[^0-9]|$)`).test(normalized),
+		`${label || "reply"} did not state the exact ${rounded} SAR total`
+	);
+}
+
 function assertNoMealPromise(reply = "", label = "") {
 	const text = String(reply || "");
 	assert(
@@ -587,19 +655,105 @@ function assertNoMealPromise(reply = "", label = "") {
 	assertMatches(text, /restaurant|restaurants|مطاعم|مطعم|nearby|قريب|حول/i, label || "meal reply");
 }
 
+function guestExplicitlyRequestedReviewRestatement(sc = {}, previous = {}, current = {}) {
+	if (
+		entryAction(previous) !== "review_reservation" ||
+		entryAction(current) !== "review_reservation"
+	) {
+		return false;
+	}
+	const conversation = Array.isArray(sc.conversation) ? sc.conversation : [];
+	const previousIdentity = conversationEntryIdentity(previous);
+	const currentIdentity = conversationEntryIdentity(current);
+	const previousIndex = conversation.findIndex(
+		(entry) => conversationEntryIdentity(entry) === previousIdentity
+	);
+	const currentIndex = lastConversationIndex(
+		sc,
+		(entry) => conversationEntryIdentity(entry) === currentIdentity
+	);
+	if (previousIndex < 0 || currentIndex <= previousIndex) return false;
+	const guestText = conversation
+		.slice(previousIndex + 1, currentIndex)
+		.filter((entry) => entry?.isAi !== true && entry?.isSystem !== true)
+		.map((entry) => cleanText(entry?.message))
+		.join(" ");
+	return /(?:مرة\s+(?:ثانية|أخرى)|أشوف\s+تفاصيل|اعرض\s+التفاصيل|راجع\s+مرة|again|repeat|show\s+(?:me\s+)?(?:the\s+)?(?:full\s+)?details|review\s+again)/iu.test(
+		guestText
+	);
+}
+
 function assertNoRepeatedAi(sc = {}, label = "") {
 	const messages = aiMessages(sc)
 		.filter((entry) => cleanText(entry.message))
-		.slice(-6);
+		.slice(-8);
 	for (let i = 1; i < messages.length; i += 1) {
-		const result = repliesSubstantiallyRepeat(messages[i - 1], messages[i]);
-		if (result.repeated) {
-			const score = result.comparison?.jaccard;
-			const scoreLabel = Number.isFinite(score) ? ` (jaccard=${score.toFixed(2)})` : "";
-			throw new Error(
-				`${label || "case"} repeated a substantially similar AI reply [${result.reason || "semantic"}]${scoreLabel}`
-			);
+		for (let previousIndex = 0; previousIndex < i; previousIndex += 1) {
+			const result = repliesSubstantiallyRepeat(messages[previousIndex], messages[i]);
+			if (result.repeated) {
+				if (
+					guestExplicitlyRequestedReviewRestatement(
+						sc,
+						messages[previousIndex],
+						messages[i]
+					)
+				) {
+					continue;
+				}
+				const score = result.comparison?.jaccard;
+				const scoreLabel = Number.isFinite(score)
+					? ` (jaccard=${score.toFixed(2)})`
+					: "";
+				throw new Error(
+					`${label || "case"} repeated a substantially similar AI reply across recent turns ${previousIndex + 1}->${i + 1} [${result.reason || "semantic"}]${scoreLabel}`
+				);
+			}
 		}
+	}
+}
+
+function assertNoStockDisclosure(reply = "", label = "", context = {}) {
+	assert(
+		typeof testApi.replyDisclosesInternalStock === "function",
+		"Missing stock-privacy validator export"
+	);
+	assert(
+		!testApi.replyDisclosesInternalStock(String(reply || ""), context),
+		`${label || "reply"} disclosed private configured/remaining hotel stock`
+	);
+}
+
+function customerFacingTextFragments(value, seen = new Set()) {
+	if (typeof value === "string" || typeof value === "number") {
+		return [String(value)];
+	}
+	if (!value || typeof value !== "object" || seen.has(value)) return [];
+	seen.add(value);
+	if (Array.isArray(value)) {
+		return value.flatMap((entry) => customerFacingTextFragments(entry, seen));
+	}
+	return Object.values(value).flatMap((entry) =>
+		customerFacingTextFragments(entry, seen)
+	);
+}
+
+function assertAiEntryStockSafe(entry = {}, label = "", context = {}) {
+	const entryContext = {
+		...context,
+		clientAction: String(entry.clientAction || context.clientAction || ""),
+	};
+	assertNoStockDisclosure(
+		entry.message,
+		`${label || "AI entry"} message`,
+		entryContext
+	);
+	const quickReplies = Array.isArray(entry.quickReplies) ? entry.quickReplies : [];
+	for (const [index, quickReply] of quickReplies.entries()) {
+		assertNoStockDisclosure(
+			customerFacingTextFragments(quickReply).join(" "),
+			`${label || "AI entry"} quickReplies[${index}]`,
+			entryContext
+		);
 	}
 }
 
@@ -974,7 +1128,7 @@ async function createCase({
 	return document;
 }
 
-async function appendGuest(caseId, number, message) {
+async function appendGuest(caseId, number, message, options = {}) {
 	const { ownership } = await loadOwnedSupportCase(caseId);
 	const entry = {
 		messageBy: {
@@ -993,7 +1147,7 @@ async function appendGuest(caseId, number, message) {
 		isSystem: false,
 		clientTag: marker,
 	};
-	const updated = await SupportCase.findOneAndUpdate(
+	const updateQuery = SupportCase.findOneAndUpdate(
 		supportCaseOwnershipFilter(ownership),
 		{
 			$push: { conversation: entry },
@@ -1006,12 +1160,15 @@ async function appendGuest(caseId, number, message) {
 			},
 		},
 		{ new: true }
-	).select("_id");
+	);
+	const updated = options.includeCase
+		? await updateQuery.select("+aiStateSnapshot").lean()
+		: await updateQuery.select("_id");
 	assert(
 		updated?._id,
 		`Refusing to append guest turn for ${caseId}: exact QA ownership changed`
 	);
-	return entry;
+	return options.includeCase ? { entry, supportCase: updated } : entry;
 }
 
 async function captureAiBaseline(caseId) {
@@ -1019,89 +1176,206 @@ async function captureAiBaseline(caseId) {
 	return aiEntryIdentitySet(document);
 }
 
-async function plan(caseId, beforeAiIdentities) {
+function turnTimeoutError(caseId, wallStartedAt) {
+	const elapsedMs = Math.max(0, Date.now() - Number(wallStartedAt || Date.now()));
+	const error = new Error(
+		`case ${caseId} exceeded the non-configurable ${MAX_TURN_WALL_MS}ms guest-turn watchdog (elapsed ${elapsedMs}ms)`
+	);
+	error.code = "LIVE_QA_TURN_TIMEOUT";
+	return error;
+}
+
+async function plan(caseId, beforeAiIdentities, turnContext = {}) {
 	assert(
 		beforeAiIdentities instanceof Set,
 		`Missing pre-turn AI baseline for case ${caseId}`
 	);
-	await sleep(QUIET_WAIT_MS);
-	const startedAt = Date.now();
-	await orchestrator.__worker.planTurn(silentIo, caseId);
-	const durationMs = Date.now() - startedAt;
-	const sc = await SupportCase.findById(caseId).lean();
-	assert(sc, `Support case ${caseId} disappeared during planning`);
-	const newAiEntries = newAiEntriesSince(sc, beforeAiIdentities);
-	if (!newAiEntries.length) {
-		const diagnostic = await SupportCase.findById(caseId)
-			.select("+aiStateSnapshot")
-			.lean();
-		const known = diagnostic?.aiStateSnapshot?.known || {};
-		const reviewedQuote = testApi.reviewedQuoteForSubmit
-			? testApi.reviewedQuoteForSubmit(known)
-			: {};
-		console.error(
-			"LIVE_QA_NO_REPLY_STATE",
-			JSON.stringify({
-				caseId,
-				conversationTail: (diagnostic?.conversation || []).slice(-6).map((entry) => ({
-					isAi: Boolean(entry?.isAi),
-					isSystem: Boolean(entry?.isSystem),
-					clientAction: String(entry?.clientAction || ""),
-					ownedMarker: String(entry?.clientTag || "") === marker,
-				})),
-				known: {
-					hasQuote: Boolean(known?.quote?.available),
-					roomSelections: (known?.roomSelections || []).map((selection) => ({
-						roomId: String(selection?.roomId || ""),
-						roomTypeKey: String(selection?.roomTypeKey || ""),
-						count: Number(selection?.count || 0) || 0,
+	const wallStartedAt = Number(turnContext.wallStartedAt || Date.now());
+	const socketEventStart = Number.isInteger(turnContext.socketEventStart)
+		? turnContext.socketEventStart
+		: runState.socketEvents.length;
+	const work = (async () => {
+		await sleep(QUIET_WAIT_MS);
+		const startedAt = Date.now();
+		await orchestrator.__worker.planTurn(silentIo, caseId);
+		const durationMs = Date.now() - startedAt;
+		const sc = await SupportCase.findById(caseId).select("+aiStateSnapshot").lean();
+		assert(sc, `Support case ${caseId} disappeared during planning`);
+		const newAiEntries = newAiEntriesSince(sc, beforeAiIdentities);
+		if (!newAiEntries.length) {
+			const diagnostic = await SupportCase.findById(caseId)
+				.select("+aiStateSnapshot")
+				.lean();
+			const known = diagnostic?.aiStateSnapshot?.known || {};
+			const reviewedQuote = testApi.reviewedQuoteForSubmit
+				? testApi.reviewedQuoteForSubmit(known)
+				: {};
+			console.error(
+				"LIVE_QA_NO_REPLY_STATE",
+				JSON.stringify({
+					caseId,
+					conversationTail: (diagnostic?.conversation || []).slice(-6).map((entry) => ({
+						isAi: Boolean(entry?.isAi),
+						isSystem: Boolean(entry?.isSystem),
+						clientAction: String(entry?.clientAction || ""),
+						ownedMarker: String(entry?.clientTag || "") === marker,
 					})),
-					officialReviewVersion:
-						Number(known?.officialReviewSnapshot?.version || 0) || 0,
-					reviewedQuoteUsable: testApi.reviewedQuoteSnapshotUsable
-						? testApi.reviewedQuoteSnapshotUsable(reviewedQuote)
-						: false,
-				},
-			}, null, 2)
+					known: {
+						hasQuote: Boolean(known?.quote?.available),
+						roomSelections: (known?.roomSelections || []).map((selection) => ({
+							roomId: String(selection?.roomId || ""),
+							roomTypeKey: String(selection?.roomTypeKey || ""),
+							count: Number(selection?.count || 0) || 0,
+						})),
+						officialReviewVersion:
+							Number(known?.officialReviewSnapshot?.version || 0) || 0,
+						reviewedQuoteUsable: testApi.reviewedQuoteSnapshotUsable
+							? testApi.reviewedQuoteSnapshotUsable(reviewedQuote)
+							: false,
+					},
+				}, null, 2)
+			);
+		}
+		assert(
+			newAiEntries.length > 0,
+			`No new AI conversation entry was created for the latest guest turn in case ${caseId}`
 		);
+		for (const [index, entry] of newAiEntries.entries()) {
+			assertAiEntryStockSafe(entry, `case ${caseId} new AI entry ${index + 1}`, {
+				known: sc?.aiStateSnapshot?.known || {},
+			});
+		}
+		const ai = latestAi(sc);
+		assert(ai?.message, `No AI reply for case ${caseId}`);
+		assert(
+			newAiEntries.some(
+				(entry) => conversationEntryIdentity(entry) === conversationEntryIdentity(ai)
+			),
+			`Latest AI reply for case ${caseId} is stale and predates the latest guest turn`
+		);
+		const aiIdentity = conversationEntryIdentity(ai);
+		const latestGuestEntry = latestGuest(sc);
+		const latestGuestIdentity = conversationEntryIdentity(latestGuestEntry);
+		const aiIndex = lastConversationIndex(
+			sc,
+			(entry) => conversationEntryIdentity(entry) === aiIdentity
+		);
+		const guestIndex = lastConversationIndex(
+			sc,
+			(entry) => conversationEntryIdentity(entry) === latestGuestIdentity
+		);
+		assert(
+			latestGuestEntry && guestIndex >= 0 && aiIndex > guestIndex,
+			`Latest AI reply for case ${caseId} was not appended after the latest guest turn`
+		);
+		assertNoProtocolLeak(ai.message, `case ${caseId}`);
+		assertNoRobotic(ai.message, `case ${caseId}`);
+		assertNoRepeatedAi(sc, `case ${caseId}`);
+		const wallDurationMs = Date.now() - wallStartedAt;
+		assert(
+			wallDurationMs <= MAX_TURN_WALL_MS,
+			`case ${caseId} took ${wallDurationMs}ms from guest turn to reply; hard limit is ${MAX_TURN_WALL_MS}ms`
+		);
+		const socketEvents = runState.socketEvents.slice(socketEventStart).map((entry) => ({
+			...entry,
+			offsetMs: Math.max(0, Number(entry.at || 0) - wallStartedAt),
+		}));
+		return {
+			sc,
+			ai,
+			durationMs,
+			wallDurationMs,
+			wallStartedAt,
+			wallCompletedAt: Date.now(),
+			socketEvents,
+			newAiEntries,
+			newAiEntryCount: newAiEntries.length,
+		};
+	})();
+
+	runState.inFlightPlans.add(work);
+	work.then(
+		() => runState.inFlightPlans.delete(work),
+		() => runState.inFlightPlans.delete(work)
+	);
+	let watchdog;
+	const remainingMs = Math.max(1, MAX_TURN_WALL_MS - (Date.now() - wallStartedAt));
+	const deadline = new Promise((_, reject) => {
+		watchdog = setTimeout(
+			() => reject(turnTimeoutError(caseId, wallStartedAt)),
+			remainingMs
+		);
+	});
+	try {
+		return await Promise.race([work, deadline]);
+	} finally {
+		clearTimeout(watchdog);
 	}
-	assert(
-		newAiEntries.length > 0,
-		`No new AI conversation entry was created for the latest guest turn in case ${caseId}`
-	);
-	const ai = latestAi(sc);
-	assert(ai?.message, `No AI reply for case ${caseId}`);
-	assert(
-		newAiEntries.some(
-			(entry) => conversationEntryIdentity(entry) === conversationEntryIdentity(ai)
-		),
-		`Latest AI reply for case ${caseId} is stale and predates the latest guest turn`
-	);
-	const aiIdentity = conversationEntryIdentity(ai);
-	const latestGuestEntry = latestGuest(sc);
-	const latestGuestIdentity = conversationEntryIdentity(latestGuestEntry);
-	const aiIndex = lastConversationIndex(
-		sc,
-		(entry) => conversationEntryIdentity(entry) === aiIdentity
-	);
-	const guestIndex = lastConversationIndex(
-		sc,
-		(entry) => conversationEntryIdentity(entry) === latestGuestIdentity
-	);
-	assert(
-		latestGuestEntry && guestIndex >= 0 && aiIndex > guestIndex,
-		`Latest AI reply for case ${caseId} was not appended after the latest guest turn`
-	);
-	assertNoProtocolLeak(ai.message, `case ${caseId}`);
-	assertNoRobotic(ai.message, `case ${caseId}`);
-	assertNoRepeatedAi(sc, `case ${caseId}`);
-	return { sc, ai, durationMs, newAiEntryCount: newAiEntries.length };
 }
 
 async function sendTurn(caseId, number, message) {
 	const beforeAiIdentities = await captureAiBaseline(caseId);
+	const turnContext = {
+		wallStartedAt: Date.now(),
+		socketEventStart: runState.socketEvents.length,
+	};
 	await appendGuest(caseId, number, message);
-	return plan(caseId, beforeAiIdentities);
+	return plan(caseId, beforeAiIdentities, turnContext);
+}
+
+async function sendTurnWithDuringPlanMessages(
+	caseId,
+	number,
+	message,
+	messages = [],
+	delayMs = 4000
+) {
+	const beforeAiIdentities = await captureAiBaseline(caseId);
+	const turnContext = {
+		wallStartedAt: Date.now(),
+		socketEventStart: runState.socketEvents.length,
+	};
+	const appended = await appendGuest(caseId, number, message, { includeCase: true });
+	const primaryGuestEntry = appended.entry;
+	await orchestrator.__test.emitReservationProcessingAtSchedule(
+		silentIo,
+		appended.supportCase
+	);
+	let planningSettled = false;
+	const planning = plan(caseId, beforeAiIdentities, turnContext);
+	planning.then(
+		() => {
+			planningSettled = true;
+		},
+		() => {
+			planningSettled = true;
+		}
+	);
+	await sleep(Math.max(0, Number(delayMs || 0)));
+	const duringPlan = {
+		attemptedAt: Date.now(),
+		injected: false,
+		injectedWhilePlanning: false,
+		entries: [],
+		skippedReason: "",
+		primaryGuestEntry,
+	};
+	if (planningSettled) {
+		duringPlan.skippedReason = "plan_completed_before_injection";
+	} else {
+		const { document: injectionCheckpoint } = await loadOwnedSupportCase(caseId);
+		if (newAiEntriesSince(injectionCheckpoint, beforeAiIdentities).length > 0) {
+			duringPlan.skippedReason = "reply_persisted_before_injection";
+		} else {
+			duringPlan.injectedWhilePlanning = true;
+			for (const duringMessage of messages) {
+				duringPlan.entries.push(await appendGuest(caseId, number, duringMessage));
+			}
+			duringPlan.injected = duringPlan.entries.length > 0;
+		}
+	}
+	const result = await planning;
+	return { ...result, duringPlan };
 }
 
 async function sendBurst(caseId, number, messages, delayMs = 800) {
@@ -1109,11 +1383,15 @@ async function sendBurst(caseId, number, messages, delayMs = 800) {
 	// release invariant is one fresh assistant answer after the final message,
 	// not one answer per message inside the intentional burst.
 	const beforeAiIdentities = await captureAiBaseline(caseId);
+	const turnContext = {
+		wallStartedAt: Date.now(),
+		socketEventStart: runState.socketEvents.length,
+	};
 	for (const message of messages) {
 		await appendGuest(caseId, number, message);
 		if (delayMs > 0) await sleep(delayMs);
 	}
-	return plan(caseId, beforeAiIdentities);
+	return plan(caseId, beforeAiIdentities, turnContext);
 }
 
 async function reservationsForCase(caseId) {
@@ -1125,6 +1403,61 @@ async function reservationsForCase(caseId) {
 			{ "customer_details.aiSupportCaseId": key },
 		],
 	}).lean();
+}
+
+function runReservationRelationshipFilter(caseIds = []) {
+	const ids = [...new Set((caseIds || []).map((value) => String(value || "")).filter(Boolean))];
+	const prefixes = ids.map((value) => escapeRegExp(value)).join("|");
+	const relationships = [];
+	if (ids.length) {
+		relationships.push(
+			{ aiSupportCaseId: { $in: ids } },
+			{ "customer_details.aiSupportCaseId": { $in: ids } }
+		);
+		if (prefixes) {
+			relationships.push({
+				aiSupportCaseId: { $regex: `^(?:${prefixes}):split:` },
+			});
+		}
+	}
+	// The random UUID marker is also embedded in every harness email. This is a
+	// final tripwire for a malformed/late reservation that somehow lost its case
+	// relationship; it will fail cleanup safely instead of being left unnoticed.
+	relationships.push(
+		{ "customer_details.email": { $regex: escapeRegExp(marker), $options: "i" } },
+		{ aiReservationFingerprint: { $regex: escapeRegExp(marker), $options: "i" } }
+	);
+	return { $or: relationships };
+}
+
+async function reservationsForRun(caseIds = []) {
+	return Reservations.find(runReservationRelationshipFilter(caseIds)).lean();
+}
+
+function relatedTrackedCaseId(document = {}, caseIds = []) {
+	return (caseIds || []).find(
+		(caseId) => reservationCaseRelationship(document, caseId).matches
+	);
+}
+
+async function trackReservationsForRun(caseIds = []) {
+	const rows = await reservationsForRun(caseIds);
+	assert(rows.length <= 250, `Refusing run reservation discovery: matched ${rows.length} rows`);
+	for (const row of rows) {
+		const caseId = relatedTrackedCaseId(row, caseIds);
+		assert(
+			caseId,
+			`Marker-linked reservation ${row?._id || "(missing id)"} lost its exact QA support-case relationship`
+		);
+		registerReservationOwnership(row, caseId);
+	}
+	return rows;
+}
+
+async function waitForInFlightPlans() {
+	while (runState.inFlightPlans.size) {
+		await Promise.allSettled([...runState.inFlightPlans]);
+	}
 }
 
 async function trackReservationsForCase(caseId) {
@@ -1354,8 +1687,93 @@ function buildScenarios(ctx) {
 				{ message: "المتابعة بدون بريد" },
 				{
 					message: "إتمام الحجز",
-					expect: async ({ ai, caseId }) => {
+					duringPlanMessages: ["تمام، خذ وقتك"],
+					duringPlanDelayMs: 4000,
+					expect: async ({ ai, caseId, sc: finalCase, socketEvents, duringPlan }) => {
 						assertMatches(ai.message, /تأكيد|confirmed|confirmation|رقم|تم/i, "confirmation reply");
+						const progress = (Array.isArray(socketEvents) ? socketEvents : []).find(
+							(entry) =>
+								entry.event === "typing" &&
+								entry.payload?.progressKey === "reservation_confirmation" &&
+								String(entry.payload?.statusText || "").trim()
+						);
+						assert(progress, "final submit did not emit transient reservation progress");
+						assert(
+							String(progress.roomId || "") === String(caseId) &&
+								String(progress.payload?.caseId || "") === String(caseId),
+							"reservation progress was emitted to the wrong support case/room"
+						);
+						assert(
+							progress.payload?.isAi === true,
+							"reservation progress was not identified as an AI status"
+						);
+						assert(
+							Number(progress.offsetMs || 0) <= 5000,
+							`reservation progress arrived after ${progress.offsetMs}ms instead of within 5 seconds`
+						);
+						assert(
+							!/(?:تم\s+(?:تأكيد|الحجز)|confirmed|created|completed\s+successfully)/i.test(
+								String(progress.payload.statusText || "")
+							),
+							"transient progress claimed the reservation was already completed"
+						);
+						const conversation = Array.isArray(finalCase?.conversation)
+							? finalCase.conversation
+							: [];
+						const submitIndex = conversation.findIndex(
+							(entry) => entry?.isAi !== true && cleanText(entry?.message) === "إتمام الحجز"
+						);
+						const finalAiIndex = lastConversationIndex(
+							finalCase,
+							(entry) => conversationEntryIdentity(entry) === conversationEntryIdentity(ai)
+						);
+						assert(
+							submitIndex >= 0 && finalAiIndex > submitIndex,
+							"reservation progress/final reply ordering lost the submit turn"
+						);
+						const submitAt = new Date(conversation[submitIndex]?.date || 0).getTime();
+						const finalAiAt = new Date(ai?.date || 0).getTime();
+						assert(
+							Number(progress.at || 0) >= submitAt - 1000 &&
+								Number(progress.at || 0) <= finalAiAt + 1000,
+							"reservation progress was not emitted between submit and final confirmation"
+						);
+						assert(duringPlan, "missing in-flight acknowledgement diagnostic");
+						const acknowledgementText = "تمام، خذ وقتك";
+						const acknowledgementIndices = conversation
+							.map((entry, index) => ({ entry, index }))
+							.filter(
+								({ entry }) =>
+									entry?.isAi !== true && cleanText(entry?.message) === acknowledgementText
+							)
+							.map(({ index }) => index);
+						if (duringPlan.injected) {
+							assert(
+								duringPlan.injectedWhilePlanning === true && duringPlan.entries.length === 1,
+								"acknowledgement was not proven to be injected while reservation work was in flight"
+							);
+							assert(
+								acknowledgementIndices.length === 1 &&
+									acknowledgementIndices[0] > submitIndex &&
+									acknowledgementIndices[0] < finalAiIndex,
+								"in-flight acknowledgement was not safely ordered before the final confirmation"
+							);
+						} else {
+							assert(
+								[
+									"plan_completed_before_injection",
+									"reply_persisted_before_injection",
+								].includes(duringPlan.skippedReason) &&
+									acknowledgementIndices.length === 0,
+								"fast completion did not safely skip the no-longer-in-flight acknowledgement"
+							);
+						}
+						assert(
+							!(aiMessages(await SupportCase.findById(caseId).lean()) || []).some(
+								(entry) => String(entry.message || "") === String(progress.payload.statusText || "")
+							),
+							"transient reservation progress was persisted as a chat message"
+						);
 						await assertReservationCreated(caseId, "final submit");
 					},
 				},
@@ -1574,13 +1992,63 @@ function buildScenarios(ctx) {
 			],
 		},
 		{
-			name: "Relationship wording captures adults/children naturally",
+			name: "Single guest upgrades to exact spouse-child triple without stock leak",
 			hotel: "ajyad",
 			languageCode: "ar",
 			steps: [
 				{
-					message: `أنا وزوجتي وطفل ونريد غرفة من ${triple.checkinISO} إلى ${triple.checkoutISO}`,
-					expect: ({ ai }) => assertMatches(ai.message, /طفل|أطفال|بالغ|بالغين|غرفة|سعر|خصم|children|adult/i, "relationship guest reply"),
+					message: `أريد غرفة لشخص واحد من ${triple.checkinISO} إلى ${triple.checkoutISO}`,
+					expect: ({ ai }) => {
+						assertDiscountMarkup(ai.message, "single-occupancy quote");
+						assertMatches(ai.message, /دبل|مزدوج|double/i, "single guest double-room sale");
+						assert(
+							!/(?:ثلاثي|رباعي|خماسي|سداسي|triple|quad|quintuple|six[ -]?bed)/i.test(
+								String(ai.message || "")
+							),
+							"single guest was overloaded with unrelated room choices"
+						);
+					},
+				},
+				{
+					burst: ["نعم، تابع", "الزوجة وطفل", "يعني الليلتين بـ 150 ريال؟"],
+					expect: async ({ ai, caseId }) => {
+						assertDiscountMarkup(ai.message, "spouse-child corrected quote");
+						assertMatches(ai.message, /ثلاثي|triple/i, "spouse-child triple-room sale");
+						assert(
+							!/(?:رباعي|خماسي|سداسي|quad|quintuple|six[ -]?bed)/i.test(
+								String(ai.message || "")
+							),
+							"spouse-child reply offered an unnecessary room list"
+						);
+						const roomChoiceReplies = (Array.isArray(ai.quickReplies) ? ai.quickReplies : []).filter(
+							(reply) => String(reply.action || "") === "select_room_option"
+						);
+						assert(roomChoiceReplies.length === 0, "spouse-child reply forced a room-choice tray");
+						const diagnostic = await SupportCase.findById(caseId)
+							.select("+aiStateSnapshot")
+							.lean();
+						const known = diagnostic?.aiStateSnapshot?.known || {};
+						const selections = Array.isArray(known.roomSelections) ? known.roomSelections : [];
+						const expectedTripleTotal = Number(
+							triple.quote?.quote?.total || triple.quote?.total || 0
+						);
+						assert(expectedTripleTotal > 0, "Khalifa expected triple total was not hydrated");
+						const savedQuoteTotal = Number(known.quote?.total || 0);
+						assert(Number(known.adults || 0) === 2, `expected 2 adults, got ${known.adults}`);
+						assert(Number(known.children || 0) === 1, `expected 1 child, got ${known.children}`);
+						assert(Number(known.rooms || 0) === 1, `expected 1 room, got ${known.rooms}`);
+						assert(
+							Math.abs(savedQuoteTotal - expectedTripleTotal) < 0.01,
+							`Khalifa correction saved ${savedQuoteTotal} SAR instead of exact one-triple total ${expectedTripleTotal} SAR`
+						);
+						assertAmountMention(ai.message, expectedTripleTotal, "Khalifa corrected quote");
+						assert(
+							selections.length === 1 &&
+								String(selections[0]?.roomTypeKey || "") === "tripleRooms" &&
+								Number(selections[0]?.count || 0) === 1,
+							`expected one triple-room selection, got ${JSON.stringify(selections)}`
+						);
+					},
 				},
 			],
 		},
@@ -1688,7 +2156,7 @@ function buildScenarios(ctx) {
 					expect: async ({ ai, caseId }) => {
 						assertMatches(ai.message, /confirmation|\u0631\u0642\u0645|\u062a\u0623\u0643\u064a\u062f|separate|\u0645\u0646\u0641\u0635\u0644/i, "split final confirmation");
 						const rows = await reservationsForCase(caseId);
-						for (const row of rows) runState.reservationIds.add(String(row._id));
+						for (const row of rows) registerReservationOwnership(row, caseId);
 						assert(rows.length >= 2, `split stay created ${rows.length} reservation(s), expected at least 2`);
 						const rowISO = (value) => {
 							const date = new Date(value);
@@ -2290,16 +2758,27 @@ async function runScenario(definition, number, ctx) {
 				clientName: definition.clientName || "",
 			});
 	let current = sc;
+	const workerDurations = [];
 	const turnDurations = [];
 	const totalScenarioCount = Number(ctx.totalScenarios || 0) || 34;
 	console.log(`SCENARIO ${number}/${totalScenarioCount} START ${definition.name} case=${sc._id}`);
 
 	for (const [index, step] of definition.steps.entries()) {
-		const result = step.burst
+		const result = step.duringPlanMessages
+			? await sendTurnWithDuringPlanMessages(
+					String(sc._id),
+					number,
+					step.message,
+					step.duringPlanMessages,
+					step.duringPlanDelayMs
+			  )
+			: step.burst
 			? await sendBurst(String(sc._id), number, step.burst)
 			: await sendTurn(String(sc._id), number, step.message);
 		current = result.sc;
-		turnDurations.push(result.durationMs);
+		workerDurations.push(result.durationMs);
+		turnDurations.push(result.wallDurationMs);
+		runState.turnWallDurations.push(result.wallDurationMs);
 		if (typeof step.expect === "function") {
 			await step.expect({
 				...result,
@@ -2319,6 +2798,8 @@ async function runScenario(definition, number, ctx) {
 
 	const totalMs = turnDurations.reduce((sum, value) => sum + value, 0);
 	const avgMs = Math.round(totalMs / Math.max(1, turnDurations.length));
+	const workerTotalMs = workerDurations.reduce((sum, value) => sum + value, 0);
+	const workerAvgMs = Math.round(workerTotalMs / Math.max(1, workerDurations.length));
 	runState.scenarioResults.push({
 		number,
 		name: definition.name,
@@ -2326,8 +2807,9 @@ async function runScenario(definition, number, ctx) {
 		turns: turnDurations.length,
 		avgMs,
 		totalMs,
+		workerAvgMs,
+		workerTotalMs,
 	});
-	console.log(`SCENARIO ${number}/${totalScenarioCount} PASS ${definition.name} turns=${turnDurations.length} avgMs=${avgMs}`);
 	if (!keepData) {
 		const reservationsDeleted = await cleanupReservationsForCase(String(sc._id));
 		if (reservationsDeleted) {
@@ -2336,6 +2818,9 @@ async function runScenario(definition, number, ctx) {
 			);
 		}
 	}
+	console.log(
+		`SCENARIO ${number}/${totalScenarioCount} COMPLETE ${definition.name} turns=${turnDurations.length} wallAvgMs=${avgMs} workerAvgMs=${workerAvgMs}`
+	);
 }
 
 async function deleteTrackedSupportCase(ownership = {}) {
@@ -2350,22 +2835,76 @@ async function deleteTrackedSupportCase(ownership = {}) {
 	return 1;
 }
 
+async function freezeOwnedSupportCaseForCleanup(ownership = {}) {
+	const result = await SupportCase.updateOne(supportCaseOwnershipFilter(ownership), {
+		$set: { aiToRespond: false },
+	});
+	assert(
+		Number(result.matchedCount || result.n || 0) === 1,
+		`Refusing cleanup freeze for support case ${ownership.caseId}: exact ownership changed`
+	);
+}
+
+async function waitForReservationCreationToSettle(caseIds = [], timeoutMs = 30000) {
+	if (!caseIds.length) return;
+	const deadline = Date.now() + timeoutMs;
+	while (true) {
+		const creating = await SupportCase.countDocuments({
+			_id: { $in: caseIds },
+			"aiReservation.status": "creating",
+		});
+		if (!creating) return;
+		assert(
+			Date.now() < deadline,
+			`Cleanup timed out waiting for ${creating} in-flight QA reservation creation(s)`
+		);
+		await sleep(500);
+	}
+}
+
 async function cleanup() {
 	const caseOwnerships = [...runState.caseOwnership.values()];
+	const caseIds = caseOwnerships.map((item) => item.caseId);
+
+	// A 60-second watchdog can reject before an underlying network operation has
+	// unwound. Never race cleanup against that work. Freeze each exactly-owned QA
+	// case so no new worker can start, then wait for a reservation already inside
+	// the create transaction before discovering late rows.
+	await waitForInFlightPlans();
 
 	// Prove every current-run relationship before the first final-cleanup delete.
+	let hadPendingWorkerState = false;
 	for (const ownership of caseOwnerships) {
-		await loadOwnedSupportCase(ownership.caseId);
-		await trackReservationsForCase(ownership.caseId);
+		const { document } = await loadOwnedSupportCase(ownership.caseId);
+		hadPendingWorkerState =
+			hadPendingWorkerState ||
+			document.aiToRespond === true ||
+			String(document?.aiReservation?.status || "") === "creating";
+		await freezeOwnedSupportCaseForCleanup(ownership);
 	}
+	await waitForReservationCreationToSettle(caseIds);
+	if (caseIds.length) {
+		await sleep(
+			hadPendingWorkerState
+				? 30000
+				: Math.max(1000, QUIET_WAIT_MS + 500)
+		);
+	}
+	await trackReservationsForRun(caseIds);
 	for (const ownership of runState.reservationOwnership.values()) {
 		const document = await Reservations.findById(ownership.reservationId).lean();
 		if (document) assertOwnedReservationDocument(document, ownership);
 	}
 
 	let reservationsDeleted = 0;
-	for (const ownership of runState.reservationOwnership.values()) {
-		reservationsDeleted += await deleteTrackedReservation(ownership);
+	// Re-scan after deletion so reservations committed late are registered and
+	// removed only through the exact case/creator ownership filters.
+	for (let pass = 0; pass < 3; pass += 1) {
+		await trackReservationsForRun(caseIds);
+		for (const ownership of runState.reservationOwnership.values()) {
+			reservationsDeleted += await deleteTrackedReservation(ownership);
+		}
+		if (pass < 2) await sleep(750);
 	}
 
 	let casesDeleted = 0;
@@ -2373,29 +2912,37 @@ async function cleanup() {
 		casesDeleted += await deleteTrackedSupportCase(ownership);
 	}
 
-	const caseIds = caseOwnerships.map((item) => item.caseId);
 	const reservationIds = [...runState.reservationOwnership.keys()];
 	const remainingCases = caseIds.length
 		? await SupportCase.countDocuments({ _id: { $in: caseIds } })
 		: 0;
-	const remainingReservations = reservationIds.length
+	const remainingTrackedReservations = reservationIds.length
 		? await Reservations.countDocuments({ _id: { $in: reservationIds } })
 		: 0;
+	const remainingRunReservations = await Reservations.countDocuments(
+		runReservationRelationshipFilter(caseIds)
+	);
 	const untrackedExactMarkerCases = await SupportCase.countDocuments({
 		"conversation.clientTag": marker,
 	});
+	assert(remainingCases === 0, `Cleanup left ${remainingCases} tracked support case(s)`);
+	assert(
+		remainingTrackedReservations === 0 && remainingRunReservations === 0,
+		`Cleanup left ${remainingTrackedReservations} tracked and ${remainingRunReservations} case/marker-linked reservation(s)`
+	);
 	assert(
 		untrackedExactMarkerCases === 0,
 		`Cleanup left ${untrackedExactMarkerCases} exact-marker support case(s); refusing any untracked deletion`
 	);
 	console.log(
-		`CLEANUP marker=${marker} casesDeleted=${casesDeleted} reservationsDeleted=${reservationsDeleted} remainingCases=${remainingCases} remainingReservations=${remainingReservations}`
+		`CLEANUP marker=${marker} casesDeleted=${casesDeleted} reservationsDeleted=${reservationsDeleted} remainingCases=${remainingCases} remainingReservations=${remainingRunReservations}`
 	);
 	return {
 		casesDeleted,
 		reservationsDeleted,
 		remainingCases,
-		remainingReservations,
+		remainingReservations: remainingRunReservations,
+		remainingTrackedReservations,
 		untrackedExactMarkerCases,
 	};
 }
@@ -2411,6 +2958,12 @@ function assertThrows(fn, label = "") {
 }
 
 function runSelfTests() {
+	assert(MAX_TURN_WALL_MS === 60000, "turn watchdog ceiling is not fixed at 60 seconds");
+	assert(
+		PRODUCTION_RELEASE_SCENARIOS.length === 10 &&
+			new Set(PRODUCTION_RELEASE_SCENARIOS.map(([number]) => number)).size === 10,
+		"production-release scenario set is not the canonical unique 10"
+	);
 	const safeMarker = `codexqa-self-test-${crypto.randomUUID()}`;
 	assertSafeRunMarker(safeMarker);
 	assertThrows(
@@ -2480,6 +3033,51 @@ function runSelfTests() {
 		shortPunctuationRepeat.repeated,
 		"short punctuation/emoji repetition was not detected"
 	);
+	assertThrows(
+		() =>
+			assertNoRepeatedAi({
+				conversation: [
+					{
+						isAi: true,
+						clientAction: "ai_reply",
+						message: "Your room total is 825 SAR. Would you like to continue?",
+					},
+					{
+						isAi: true,
+						clientAction: "hotel_fact_answered",
+						message: "The hotel bus goes to Martyrs parking.",
+					},
+					{
+						isAi: true,
+						clientAction: "ai_reply",
+						message: "The total for your room is 825 SAR. Would you like to continue?",
+					},
+				],
+			}),
+		"non-adjacent semantic repetition check"
+	);
+	assertNoRepeatedAi({
+		conversation: [
+			{
+				_id: "review-1",
+				isAi: true,
+				clientAction: "review_reservation",
+				message: "Official review: one double room, total 825 SAR. Please confirm.",
+			},
+			{
+				_id: "guest-repeat-review",
+				isAi: false,
+				isSystem: false,
+				message: "Please show me the full details again before I confirm.",
+			},
+			{
+				_id: "review-2",
+				isAi: true,
+				clientAction: "review_reservation",
+				message: "Official review: one double room, total 825 SAR. Please confirm.",
+			},
+		],
+	});
 	const progressiveFollowup = repliesSubstantiallyRepeat(
 		{
 			clientAction: "quote_ready",
@@ -2592,6 +3190,14 @@ function runSelfTests() {
 			!JSON.stringify(reservationDeleteFilter).includes("$regex"),
 		"reservation cleanup filter is not exact-ID/exact-owner scoped"
 	);
+	const runRelationshipFilterText = JSON.stringify(
+		runReservationRelationshipFilter([testCaseId])
+	);
+	assert(
+		runRelationshipFilterText.includes(testCaseId) &&
+			runRelationshipFilterText.includes(escapeRegExp(marker)),
+		"late-reservation cleanup filter does not cover exact case IDs and run marker"
+	);
 	assertThrows(
 		() =>
 			assertOwnedReservationDocument(
@@ -2609,7 +3215,7 @@ function runSelfTests() {
 		"reservation case-relationship safety check"
 	);
 	runState.caseOwnership.delete(testCaseId);
-	console.log("PASS liveChatbotQa safety self-test");
+	console.log("LIVE_QA_SELF_TEST_OK");
 }
 
 async function main() {
@@ -2637,21 +3243,40 @@ async function main() {
 	const ctx = { hotels, stays, marker };
 	const scenarios = buildScenarios(ctx);
 	ctx.totalScenarios = scenarios.length;
-	const selected = scenarios
-		.map((definition, index) => ({ definition, number: index + 1 }))
-		.filter(({ definition, number }) => {
-			if (requestedScenario) {
-				const needle = requestedScenario.toLowerCase();
-				if (Number.isFinite(requestedScenarioNumber)) return number === requestedScenarioNumber;
-				return definition.name.toLowerCase().includes(needle);
-			}
-			return number >= requestedFrom && number <= requestedTo;
+	let selected;
+	if (PRODUCTION_RELEASE_MODE) {
+		assert(!fastMode, "Production-release QA cannot use --fast");
+		assert(!keepData, "Production-release QA cannot use --keep because cleanup proof is mandatory");
+		assert(
+			!requestedScenario && args.from === undefined && args.to === undefined,
+			"Production-release QA always runs the canonical 10; remove --scenario/--from/--to"
+		);
+		selected = PRODUCTION_RELEASE_SCENARIOS.map(([number, expectedName]) => {
+			const definition = scenarios[number - 1];
+			assert(
+				definition?.name === expectedName,
+				`Canonical release scenario ${number} changed: expected "${expectedName}", got "${definition?.name || "missing"}"`
+			);
+			return { definition, number };
 		});
+		assert(selected.length === 10, "Production-release QA must select exactly 10 scenarios");
+	} else {
+		selected = scenarios
+			.map((definition, index) => ({ definition, number: index + 1 }))
+			.filter(({ definition, number }) => {
+				if (requestedScenario) {
+					const needle = requestedScenario.toLowerCase();
+					if (Number.isFinite(requestedScenarioNumber)) return number === requestedScenarioNumber;
+					return definition.name.toLowerCase().includes(needle);
+				}
+				return number >= requestedFrom && number <= requestedTo;
+			});
+	}
 
 	assert(selected.length > 0, "No scenarios selected");
 
 	console.log(
-		`LIVE_QA_START marker=${marker} selected=${selected.length} range=${requestedFrom}-${requestedTo} fast=${fastMode} dispatchSkipped=true`
+		`LIVE_QA_START marker=${marker} selected=${selected.length} range=${requestedFrom}-${requestedTo} fast=${fastMode} productionRelease=${PRODUCTION_RELEASE_MODE} dispatchSkipped=true`
 	);
 	console.log(
 		`LIVE_QA_STAYS double=${stays.double.checkinISO}->${stays.double.checkoutISO} triple=${stays.triple.checkinISO}->${stays.triple.checkoutISO} quad=${stays.quad.checkinISO}->${stays.quad.checkoutISO} family=${stays.family.checkinISO}->${stays.family.checkoutISO} comparison=${stays.comparison.checkinISO}->${stays.comparison.checkoutISO} physicalOverflow=${stays.physicalOverflow.checkinISO}->${stays.physicalOverflow.checkoutISO} split=${stays.split.first.checkinISO}->${stays.split.first.checkoutISO}+${stays.split.second.checkinISO}->${stays.split.second.checkoutISO}`
@@ -2661,29 +3286,54 @@ async function main() {
 		await runScenario(definition, number, ctx);
 	}
 
-	const avgScenarioMs = Math.round(
-		runState.scenarioResults.reduce((sum, item) => sum + item.totalMs, 0) /
-			Math.max(1, runState.scenarioResults.length)
+	const orderedTurnDurations = [...runState.turnWallDurations].sort((a, b) => a - b);
+	const averageTurnMs = Math.round(
+		orderedTurnDurations.reduce((sum, value) => sum + value, 0) /
+			Math.max(1, orderedTurnDurations.length)
+	);
+	const p95Index = Math.max(0, Math.ceil(orderedTurnDurations.length * 0.95) - 1);
+	const p95TurnMs = Number(orderedTurnDurations[p95Index] || 0);
+	const maxTurnMs = Number(orderedTurnDurations[orderedTurnDurations.length - 1] || 0);
+	assert(
+		averageTurnMs <= MAX_AVERAGE_TURN_MS,
+		`user-perceived average ${averageTurnMs}ms exceeded release ceiling ${MAX_AVERAGE_TURN_MS}ms`
 	);
 	console.log(
-		`LIVE_QA_PASS marker=${marker} scenarios=${runState.scenarioResults.length} avgScenarioMs=${avgScenarioMs}`
+		`LIVE_QA_COMPLETE marker=${marker} scenarios=${runState.scenarioResults.length} turns=${orderedTurnDurations.length} cleanupPending=${!keepData}`
 	);
-	console.log(JSON.stringify({ marker, results: runState.scenarioResults }, null, 2));
+	return {
+		marker,
+		productionRelease: PRODUCTION_RELEASE_MODE,
+		latency: {
+			averageTurnMs,
+			targetAverageTurnMs: TARGET_AVERAGE_TURN_MS,
+			maximumAllowedAverageTurnMs: MAX_AVERAGE_TURN_MS,
+			maximumTurnWallMs: MAX_TURN_WALL_MS,
+			p95TurnMs,
+			maxTurnMs,
+		},
+		results: runState.scenarioResults,
+	};
 }
 
 async function runLiveQa() {
+	let summary = null;
+	let cleanupResult = null;
+	let failed = false;
 	try {
-		await main();
+		summary = await main();
 	} catch (error) {
 		console.error(`LIVE_QA_FAIL marker=${marker}`, error?.stack || error);
+		failed = true;
 		process.exitCode = 1;
 	} finally {
 		if (mongoose.connection.readyState === 1) {
 			try {
-				if (!keepData) await cleanup();
+				if (!keepData) cleanupResult = await cleanup();
 				else console.log(`CLEANUP_SKIPPED marker=${marker}`);
 			} catch (error) {
 				console.error(`LIVE_QA_CLEANUP_FAIL marker=${marker}`, error?.stack || error);
+				failed = true;
 				process.exitCode = 1;
 			}
 			try {
@@ -2692,6 +3342,16 @@ async function runLiveQa() {
 				// Let process exit release the connection.
 			}
 		}
+	}
+	if (!failed && summary && cleanupResult) {
+		console.log(
+			`LIVE_QA_PASS marker=${marker} scenarios=${summary.results.length} turns=${runState.turnWallDurations.length} averageTurnMs=${summary.latency.averageTurnMs} targetMs=${TARGET_AVERAGE_TURN_MS} p95TurnMs=${summary.latency.p95TurnMs} maxTurnMs=${summary.latency.maxTurnMs} cleanupVerified=true`
+		);
+		console.log(JSON.stringify({ ...summary, cleanup: cleanupResult }, null, 2));
+	} else if (!failed && summary && keepData) {
+		console.log(
+			`LIVE_QA_COMPLETE_CLEANUP_SKIPPED marker=${marker} scenarios=${summary.results.length}`
+		);
 	}
 }
 
@@ -2710,11 +3370,14 @@ if (require.main === module) {
 
 module.exports = {
 	__test: {
+		assertAiEntryStockSafe,
+		assertNoRepeatedAi,
 		assertOwnedReservationDocument,
 		assertOwnedSupportCaseDocument,
 		assertSafeRunMarker,
 		aiEntryIdentitySet,
 		newAiEntriesSince,
+		runReservationRelationshipFilter,
 		repliesSubstantiallyRepeat,
 		runSelfTests,
 		semanticReplyComparison,

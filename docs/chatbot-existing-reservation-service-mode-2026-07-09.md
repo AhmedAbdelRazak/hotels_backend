@@ -4,6 +4,12 @@
 
 This document records the 2026-07-09 hardening pass for already-created reservations, payment reassurance, restricted reception contact handling, and the final follow-up fixes made while protecting the existing 43 live chatbot scenarios.
 
+For the later sales-first room recommendation, stock-privacy, harmless
+reservation-acknowledgement, progress UI, and latency release, continue with
+`chatbot-sales-privacy-ack-latency-release-2026-07-11.md`. The existing-
+reservation payment and restricted-contact contracts in this document remain
+active and are regression-tested by that release.
+
 Read this before changing:
 
 - `aiagent/core/orchestrator.js`

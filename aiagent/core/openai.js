@@ -23,16 +23,23 @@ function boolFromEnv(name, fallback = false) {
 	return ["1", "true", "yes", "on", "enabled"].includes(raw);
 }
 
+function normalizeOpenAiMetadata(metadata = {}) {
+	return Object.fromEntries(
+		Object.entries(metadata && typeof metadata === "object" ? metadata : {})
+			.slice(0, 16)
+			.filter(([key, value]) => String(key || "").trim() && value !== undefined && value !== null)
+			.map(([key, value]) => [String(key).slice(0, 64), String(value).slice(0, 512)])
+	);
+}
+
 const OPENAI_TIMEOUT_MS = intFromEnv(
 	"OPENAI_CHATBOT_TIMEOUT_MS",
-	intFromEnv("OPENAI_TIMEOUT_MS", 30000, { min: 1500, max: 60000 }),
-	{ min: 1500, max: 60000 }
+	intFromEnv("OPENAI_TIMEOUT_MS", 22000, { min: 1500, max: 24000 }),
+	{ min: 1500, max: 24000 }
 );
-const OPENAI_MAX_RETRIES = intFromEnv(
-	"OPENAI_CHATBOT_MAX_RETRIES",
-	intFromEnv("OPENAI_MAX_RETRIES", 0, { min: 0, max: 3 }),
-	{ min: 0, max: 3 }
-);
+// The orchestrator owns the deterministic fallback. SDK retries would make one
+// guest turn wait through another full network deadline.
+const OPENAI_MAX_RETRIES = 0;
 const OPENAI_MAX_PROMPT_CHARS = intFromEnv(
 	"OPENAI_CHATBOT_MAX_PROMPT_CHARS",
 	28000
@@ -44,6 +51,10 @@ const OPENAI_RESPONSES_ENABLED = boolFromEnv(
 const OPENAI_FILE_SEARCH_ENABLED = boolFromEnv(
 	"OPENAI_CHATBOT_FILE_SEARCH_ENABLED",
 	true
+);
+const OPENAI_SEQUENTIAL_FALLBACKS_ENABLED = boolFromEnv(
+	"OPENAI_CHATBOT_SEQUENTIAL_FALLBACKS_ENABLED",
+	false
 );
 const OPENAI_FILE_SEARCH_MAX_RESULTS = intFromEnv(
 	"OPENAI_CHATBOT_FILE_SEARCH_MAX_RESULTS",
@@ -181,6 +192,12 @@ function resolveResponsesThreadContinuation({
 
 async function resolveCurrentHotelFileSearchContext(metadata = {}) {
 	if (!OPENAI_FILE_SEARCH_ENABLED) return null;
+	if (
+		metadata?.fileSearchAllowed === false ||
+		String(metadata?.fileSearchAllowed || "").toLowerCase() === "false"
+	) {
+		return null;
+	}
 	const hotelId = String(metadata?.hotelId || "").trim();
 	if (!hotelId) return null;
 	try {
@@ -205,6 +222,7 @@ function getChatbotOpenAIRuntimeConfig() {
 		),
 		timeoutMs: OPENAI_TIMEOUT_MS,
 		maxRetries: OPENAI_MAX_RETRIES,
+		sequentialFallbacksEnabled: OPENAI_SEQUENTIAL_FALLBACKS_ENABLED,
 		fileSearch: {
 			enabled: OPENAI_FILE_SEARCH_ENABLED && OPENAI_RESPONSES_ENABLED,
 			api: "responses",
@@ -243,7 +261,9 @@ function trimMessagesForOpenAI(messages = []) {
 	);
 	if (total <= maxChars) return input;
 
-	const systemBudget = Math.floor(maxChars * 0.45);
+	// Keep the stable policy/hotel prefix intact enough for prompt caching and
+	// leave the dynamic transcript in the smaller user-message budget.
+	const systemBudget = Math.floor(maxChars * 0.65);
 	const otherBudget = Math.max(1200, maxChars - systemBudget);
 	const systemMessages = input.filter((message) => message?.role === "system");
 	const nonSystemMessages = input.filter((message) => message?.role !== "system");
@@ -547,6 +567,7 @@ async function chatWithState(
 		resetThread: reset_thread,
 	});
 	const effectivePreviousResponseId = continuation.previousResponseId;
+	const apiMetadata = normalizeOpenAiMetadata(metadata);
 	const buildBody = (previousResponseId = "", maxOutputTokens = tokenLimit) =>
 		buildResponsesBody({
 			model,
@@ -558,7 +579,7 @@ async function chatWithState(
 				? reasoning_effort || pickChatbotReasoningEffort(kind)
 				: "",
 			previous_response_id: previousResponseId,
-			metadata,
+			metadata: apiMetadata,
 			prompt_cache_key,
 			safety_identifier,
 			file_search_vector_store_id: vectorStoreId,
@@ -599,6 +620,14 @@ async function chatWithState(
 	try {
 		return finish(await runResponses(effectivePreviousResponseId));
 	} catch (error) {
+		if (!OPENAI_SEQUENTIAL_FALLBACKS_ENABLED) {
+			console.warn("[aiagent] responses failed without sequential retry:", {
+				message: error?.message || String(error),
+				incomplete: isIncompleteOpenAIError(error),
+				previousResponseId: effectivePreviousResponseId ? "present" : "",
+			});
+			throw error;
+		}
 		if (isIncompleteOpenAIError(error)) {
 			const retryTokenLimit = expandedOutputTokenLimit(error.maxOutputTokens || tokenLimit);
 			if (retryTokenLimit && retryTokenLimit > tokenLimit) {
@@ -670,4 +699,5 @@ module.exports = {
 	trimMessagesForOpenAI,
 	initialOutputTokenLimit,
 	getChatbotOpenAIRuntimeConfig,
+	normalizeOpenAiMetadata,
 };
