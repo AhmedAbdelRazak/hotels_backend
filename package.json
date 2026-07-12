@@ -11,6 +11,7 @@
 		"ai:hotel-vector:worker": "node workers/hotelOpenAiKnowledgeSyncWorker.js",
 		"ai:hotel-vector:worker:once": "node workers/hotelOpenAiKnowledgeSyncWorker.js --once",
 		"test:ai-hotel-vector": "node scripts/aiKnowledge/hotelOpenAiSyncChecks.js",
+		"test:hotel-reviews": "node --test scripts/hotelReviewRegressionChecks.test.js",
 		"expedia:properties:dry-run": "node scripts/expedia/dryRunProperties.js",
 		"expedia:properties:self-test": "node scripts/expedia/dryRunProperties.js --self-test"
 	},

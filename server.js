@@ -17,6 +17,9 @@ const {
 const {
 	startSupportCaseMaintenanceJob,
 } = require("./services/supportCaseMaintenance");
+const {
+	hotelReviewJsonParser,
+} = require("./services/hotelReviewJsonParser");
 
 const app = express();
 const server = http.createServer(app);
@@ -104,6 +107,14 @@ mongoose
 // Middlewares
 app.use(morgan("dev"));
 app.use(cors(corsOptions));
+
+// Review submissions and moderation payloads are intentionally tiny. Parse
+// these paths before the legacy 50 MB parser so oversized public input is
+// rejected without changing any existing PMS upload/request behavior.
+app.use(
+	["/api/hotel-reviews", "/api/admin/hotel-reviews"],
+	hotelReviewJsonParser
+);
 app.use(express.json({ limit: "50mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.get("/", (_req, res) => res.send("Hello From PMS API"));
