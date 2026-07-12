@@ -329,3 +329,31 @@ SSR and restarting only the affected chatbot processes. Do not use `git reset
 --hard`, do not clean production untracked files, and do not delete broad test
 data. The existing HotelDetails/vector metadata and PMS data require no rollback
 for this release because their schema and processes are unchanged.
+
+## Completed production rollout
+
+The guarded production rollout completed on 2026-07-12 UTC (2026-07-11
+America/Los_Angeles).
+
+- Backend implementation commit: `58ca7db54185c2b33442ba826ff2a6040d9c39cd`.
+- SSR implementation commit: `4ed52d1a38f789a5eb7a8354202b347d3a217fe8`.
+- GitHub and production were verified at the same implementation SHAs before
+  process restart.
+- The SSR production build passed on the server and both `/` and
+  `/our-hotels?lang=en` returned HTTP 200.
+- The backend changed-file syntax checks and all 153 chatbot regressions passed
+  on the production host before restart.
+- Four active-chat guard reads were clear. The two immediate pre-restart reads
+  each reported zero recent unanswered AI cases and zero reservations in
+  `creating` state.
+- Only `jannat-ssr` and `hotels-backend` were restarted. `hotels-frontend` kept
+  PID 1177 and `hotel-openai-sync` kept PID 13753 throughout the rollout.
+- Loopback and public chatbot health returned `ok=true`, OpenAI enabled, GPT-5.5
+  for planner/reasoning/analysis/NLU/writer, medium planner reasoning, low
+  support/writer reasoning, Responses enabled, and current-hotel-only ready
+  retrieval capped at three results.
+- Jannat Booking and the PMS homepage returned HTTP 200 after deployment.
+- A final read-only residue audit reported zero `codex-live-qa` support cases and
+  zero QA-marker reservations.
+- Production untracked environment files and historical backups were preserved;
+  no broad delete, reset, or cleanup command was used.
