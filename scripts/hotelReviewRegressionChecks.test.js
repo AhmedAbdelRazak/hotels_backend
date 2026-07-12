@@ -141,6 +141,50 @@ test("summary serialization exposes real-review state and a complete breakdown",
 	assert.equal(review.serializeSummary(null).hasRealRating, false);
 });
 
+test("summary freshness and repair guards reject stale or concurrently changed rows", () => {
+	const id = new mongoose.Types.ObjectId();
+	const updatedAt = new Date("2026-07-12T12:00:00.000Z");
+	const summary = {
+		_id: id,
+		updatedAt,
+		ratingCount: 2,
+		ratingSum: 9,
+		breakdown: { oneStar: 0, twoStar: 0, threeStar: 0, fourStar: 1, fiveStar: 1 },
+	};
+	assert.equal(
+		review.summaryIsFreshForSource(summary, {
+			latestReview: { updatedAt },
+			activeCount: 2,
+		}),
+		true
+	);
+	assert.equal(
+		review.summaryIsFreshForSource(summary, {
+			latestReview: { updatedAt: new Date("2026-07-12T12:00:01.000Z") },
+			activeCount: 2,
+		}),
+		false
+	);
+	assert.equal(
+		review.summaryIsFreshForSource(summary, {
+			latestReview: { updatedAt },
+			activeCount: 3,
+		}),
+		false
+	);
+	assert.deepEqual(review.buildSummaryCompareAndSwapFilter(summary), {
+		_id: id,
+		updatedAt,
+		ratingCount: 2,
+		ratingSum: 9,
+		"breakdown.oneStar": 0,
+		"breakdown.twoStar": 0,
+		"breakdown.threeStar": 0,
+		"breakdown.fourStar": 1,
+		"breakdown.fiveStar": 1,
+	});
+});
+
 test("public review serialization is minimal and includes only a verification badge", () => {
 	const publicReview = review.serializePublicReview({
 		_id: new mongoose.Types.ObjectId(),
@@ -421,6 +465,51 @@ test("summary deltas touch only count, sum, and the selected star bucket", () =>
 			"breakdown.fourStar": -1,
 		},
 	});
+});
+
+test("materialized review summaries must balance every star bucket", () => {
+	assert.equal(
+		review.summaryHasValidInvariants({
+			ratingCount: 3,
+			ratingSum: 13,
+			breakdown: {
+				oneStar: 0,
+				twoStar: 0,
+				threeStar: 1,
+				fourStar: 0,
+				fiveStar: 2,
+			},
+		}),
+		true
+	);
+	assert.equal(
+		review.summaryHasValidInvariants({
+			ratingCount: 3,
+			ratingSum: 14,
+			breakdown: {
+				oneStar: 0,
+				twoStar: 0,
+				threeStar: 1,
+				fourStar: 0,
+				fiveStar: 2,
+			},
+		}),
+		false
+	);
+	assert.equal(
+		review.summaryHasValidInvariants({
+			ratingCount: 2,
+			ratingSum: 10,
+			breakdown: {
+				oneStar: 0,
+				twoStar: 0,
+				threeStar: 0,
+				fourStar: 0,
+				fiveStar: 1,
+			},
+		}),
+		false
+	);
 });
 
 test("standalone fallback is limited to explicit unsupported-transaction errors", () => {

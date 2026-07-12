@@ -447,6 +447,74 @@ const getHotelReviewSummary = (hotelId, session = null) => {
 	return query.exec();
 };
 
+const summaryHasValidInvariants = (summary = null) => {
+	if (!summary) return false;
+	const ratingCount = Number(summary.ratingCount);
+	const ratingSum = Number(summary.ratingSum);
+	const breakdown = summary.breakdown || {};
+	const buckets = [
+		Number(breakdown.oneStar),
+		Number(breakdown.twoStar),
+		Number(breakdown.threeStar),
+		Number(breakdown.fourStar),
+		Number(breakdown.fiveStar),
+	];
+	if (
+		!Number.isInteger(ratingCount) ||
+		ratingCount < 0 ||
+		!Number.isInteger(ratingSum) ||
+		ratingSum < 0 ||
+		buckets.some((count) => !Number.isInteger(count) || count < 0)
+	) {
+		return false;
+	}
+	const bucketCount = buckets.reduce((total, count) => total + count, 0);
+	const bucketSum = buckets.reduce(
+		(total, count, index) => total + count * (index + 1),
+		0
+	);
+	return bucketCount === ratingCount && bucketSum === ratingSum;
+};
+
+const reviewSummarySourceState = async (hotelId) => {
+	const [latestReview, activeCount] = await Promise.all([
+		HotelReview.findOne({ hotelId })
+			.select("updatedAt")
+			.sort({ updatedAt: -1, _id: -1 })
+			.lean()
+			.exec(),
+		HotelReview.countDocuments({ hotelId, status: "active" }).exec(),
+	]);
+	return { latestReview, activeCount };
+};
+
+const summaryIsFreshForSource = (summary, { latestReview, activeCount } = {}) => {
+	if (!summaryHasValidInvariants(summary)) return false;
+	const summaryUpdatedAt = new Date(summary.updatedAt || 0).getTime();
+	const sourceUpdatedAt = new Date(latestReview?.updatedAt || 0).getTime();
+	return (
+		Number.isFinite(summaryUpdatedAt) &&
+		summaryUpdatedAt >= sourceUpdatedAt &&
+		Number(summary.ratingCount) === Number(activeCount)
+	);
+};
+
+const buildSummaryCompareAndSwapFilter = (summary) => {
+	const breakdown = summary?.breakdown || {};
+	const filter = {
+		_id: summary?._id,
+		ratingCount: Number(summary?.ratingCount || 0),
+		ratingSum: Number(summary?.ratingSum || 0),
+		"breakdown.oneStar": Number(breakdown.oneStar || 0),
+		"breakdown.twoStar": Number(breakdown.twoStar || 0),
+		"breakdown.threeStar": Number(breakdown.threeStar || 0),
+		"breakdown.fourStar": Number(breakdown.fourStar || 0),
+		"breakdown.fiveStar": Number(breakdown.fiveStar || 0),
+	};
+	if (summary?.updatedAt) filter.updatedAt = summary.updatedAt;
+	return filter;
+};
+
 const aggregateHotelReviewSummary = async (hotelId, session = null) => {
 	const pipeline = [
 		{ $match: { hotelId: mongoose.Types.ObjectId(stringId(hotelId)), status: "active" } },
@@ -471,7 +539,15 @@ const aggregateHotelReviewSummary = async (hotelId, session = null) => {
 
 const ensureHotelReviewSummary = async (hotelId, session = null) => {
 	const existing = await getHotelReviewSummary(hotelId, session);
-	if (existing) return existing;
+	// Transactional callers deliberately trust their session-local summary. A
+	// submission creates its review before applying the summary delta, so a
+	// freshness rebuild inside that transaction would count the new rating twice.
+	if (existing && session) return existing;
+	if (existing) {
+		const sourceState = await reviewSummarySourceState(hotelId);
+		if (summaryIsFreshForSource(existing, sourceState)) return existing;
+		return repairHotelReviewSummary(hotelId);
+	}
 
 	const values = await aggregateHotelReviewSummary(hotelId, session);
 
@@ -539,6 +615,40 @@ const rebuildHotelReviewSummary = async (hotelId, session = null) => {
 		).exec();
 	}
 };
+
+const repairHotelReviewSummary = async (hotelId) =>
+	withHotelReviewFallbackMutex(hotelId, async () => {
+		// Standalone writes use this same per-hotel boundary. Replica-set writes are
+		// transactional, while the compare-and-swap below prevents a repair based on
+		// an older aggregate from replacing a newer committed summary.
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const current = await getHotelReviewSummary(hotelId);
+			if (!current) return rebuildHotelReviewSummary(hotelId);
+
+			const sourceState = await reviewSummarySourceState(hotelId);
+			if (summaryIsFreshForSource(current, sourceState)) return current;
+
+			const values = await aggregateHotelReviewSummary(hotelId);
+			const repaired = await HotelReviewSummary.findOneAndUpdate(
+				buildSummaryCompareAndSwapFilter(current),
+				{
+					$set: {
+						ratingCount: values.ratingCount,
+						ratingSum: values.ratingSum,
+						breakdown: values.breakdown,
+					},
+				},
+				{ new: true, lean: true, runValidators: true }
+			).exec();
+			if (repaired) return repaired;
+		}
+
+		throw new HotelReviewHttpError(
+			503,
+			"The hotel rating is being updated. Please try again.",
+			"SUMMARY_CONFLICT"
+		);
+	});
 
 const invalidateHotelReviewSummary = async (hotelId) => {
 	await HotelReviewSummary.deleteOne({ hotelId }).exec();
@@ -1906,6 +2016,7 @@ Object.defineProperty(module.exports, "__test", {
 	value: {
 		HotelReviewHttpError,
 		buildHotelSlugRegex,
+		buildSummaryCompareAndSwapFilter,
 		buildPublicDisplayName,
 		buildReviewReservationContext,
 		buildReviewInvitationUrl,
@@ -1936,6 +2047,8 @@ Object.defineProperty(module.exports, "__test", {
 		serializeSummary,
 		splitFullName,
 		summaryDeltaUpdate,
+		summaryHasValidInvariants,
+		summaryIsFreshForSource,
 		validateReviewPayload,
 		withHotelReviewFallbackMutex,
 	},

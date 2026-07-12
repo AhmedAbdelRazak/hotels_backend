@@ -200,6 +200,10 @@ hotelReviewSchema.index(
 	{ name: "hotel_review_summary_reconciliation" }
 );
 hotelReviewSchema.index(
+	{ hotelId: 1, updatedAt: -1 },
+	{ name: "hotel_review_latest_mutation" }
+);
+hotelReviewSchema.index(
 	{ hotelId: 1, reservationId: 1 },
 	{
 		unique: true,

@@ -10,6 +10,10 @@ const CustomerList = require("../models/customerlist");
 const {
 	requestHotelOpenAiKnowledgeSyncSafely,
 } = require("../services/hotelOpenAiKnowledgeSyncTrigger");
+const {
+	guestReviewSummaryForHotel,
+	loadActiveGuestReviewSummaryMap,
+} = require("../services/jannatGuestReviewSummary");
 
 require("dotenv").config();
 const fetch = require("node-fetch");
@@ -414,7 +418,13 @@ const isPublicRoomVisible = (room = {}, roomType = "all") => {
 
 const compactPublicHotel = (
 	hotel = {},
-	{ includePricingRate = false, startDate, endDate, roomType = "all" } = {},
+	{
+		includePricingRate = false,
+		startDate,
+		endDate,
+		roomType = "all",
+		guestReviewSummary,
+	} = {},
 ) => ({
 	_id: hotel._id,
 	hotelName: hotel.hotelName,
@@ -433,6 +443,7 @@ const compactPublicHotel = (
 	hotelPolicyQA: hotel.hotelPolicyQA || [],
 	hotelPhotos: compactArray(hotel.hotelPhotos, 8),
 	hotelRating: hotel.hotelRating,
+	guestReviewSummary,
 	location: hotel.location,
 	commission: hotel.commission,
 	belongsTo: hotel.belongsTo,
@@ -664,10 +675,20 @@ exports.listOfAllActiveHotels = async (req, res) => {
 				.select(PUBLIC_HOTEL_LIST_SELECT)
 				.lean()
 				.exec();
+			const guestReviewSummaries = await loadActiveGuestReviewSummaryMap(
+				activeHotels.map((hotel) => hotel._id),
+			);
 
 			return sortPublicHotels(
 				activeHotels
-					.map((hotel) => compactPublicHotel(hotel))
+					.map((hotel) =>
+						compactPublicHotel(hotel, {
+							guestReviewSummary: guestReviewSummaryForHotel(
+								guestReviewSummaries,
+								hotel._id,
+							),
+						}),
+					)
 					.filter((hotel) => hotel.roomCountDetails.length > 0),
 			);
 		});
@@ -814,8 +835,21 @@ exports.listOfAllActiveHotelsMonthlyAndOffers = async (req, res) => {
 				return { ...hotel, roomCountDetails: trimmedRooms };
 			})
 			.filter((h) => (h.roomCountDetails || []).length > 0);
+		const guestReviewSummaries = await loadActiveGuestReviewSummaryMap(
+			filtered.map((hotel) => hotel._id),
+		);
 
-		return res.status(200).json(filtered.map(stripAgentRoomOverrides));
+		return res.status(200).json(
+			filtered.map((hotel) =>
+				stripAgentRoomOverrides({
+					...hotel,
+					guestReviewSummary: guestReviewSummaryForHotel(
+						guestReviewSummaries,
+						hotel._id,
+					),
+				}),
+			),
+		);
 	} catch (err) {
 		console.error("Error fetching hotels with monthly/offers:", err);
 		return res.status(500).json({
@@ -953,10 +987,20 @@ exports.getListOfHotels = async (req, res) => {
 				.select(PUBLIC_HOTEL_LIST_SELECT)
 				.lean()
 				.exec();
+			const guestReviewSummaries = await loadActiveGuestReviewSummaryMap(
+				hotels.map((hotel) => hotel._id),
+			);
 
 			const publicHotels = sortPublicHotels(
 				hotels
-					.map((hotel) => compactPublicHotel(hotel))
+					.map((hotel) =>
+						compactPublicHotel(hotel, {
+							guestReviewSummary: guestReviewSummaryForHotel(
+								guestReviewSummaries,
+								hotel._id,
+							),
+						}),
+					)
 					.filter((hotel) => hotel.roomCountDetails.length > 0),
 			);
 
@@ -1259,6 +1303,9 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 				},
 				{ $match: { "roomCountDetails.0": { $exists: true } } },
 			]).exec();
+			const guestReviewSummaries = await loadActiveGuestReviewSummaryMap(
+				hotels.map((hotel) => hotel._id),
+			);
 
 			const publicHotels = sortPublicHotels(
 				hotels
@@ -1268,6 +1315,10 @@ exports.gettingRoomListFromQuery = async (req, res) => {
 							startDate,
 							endDate,
 							roomType,
+							guestReviewSummary: guestReviewSummaryForHotel(
+								guestReviewSummaries,
+								hotel._id,
+							),
 						}),
 					)
 					.filter((hotel) => hotel.roomCountDetails.length > 0),
